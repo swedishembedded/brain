@@ -4,15 +4,53 @@ version = "0.1.0"
 edition = "2021"
 description = "Inference + generation for the tiny sparse-MoE Transformer, as a raw-WGSL wgpu compute pipeline. fp32 only; runs on any compute including old sm_61 (Pascal)."
 
+# Native CLI binary -- unchanged. Builds exactly as before.
 [[bin]]
 name = "moe"
 path = "src/main.rs"
 
+# Library target, required by wasm-bindgen for the WebGPU inference build. On
+# native this lib compiles to (almost) nothing (see src/lib.rs) and the `moe`
+# binary does not depend on it, so the native build/test surface is unchanged.
+[lib]
+name = "tiny_sparse_moe_wgsl"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Native-Vulkan (ash) execution path that can run matmul on NVIDIA tensor cores
+# via VK_KHR_cooperative_matrix, with a scalar fallback. OFF by default; the
+# default build is pure wgpu/WGSL and is unaffected. See README_VULKAN.md.
+vulkan-coopmat = ["dep:ash", "dep:naga"]
+# Browser WebGPU inference build. Enable with the wasm32 target:
+#   cargo build --target wasm32-unknown-unknown --features webgpu
+webgpu = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:console_error_panic_hook"]
+
 [dependencies]
-wgpu = "29"
-pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Optional, only pulled in by `--features vulkan-coopmat`. `naga` is pinned to
+# the same major as the `naga` that wgpu 29 already uses, so it adds no new
+# transitive build cost on the default path.
+ash = { version = "0.38", optional = true }
+naga = { version = "29", optional = true, features = ["wgsl-in", "spv-out"] }
+
+# Native GPU stack: full wgpu (desktop backends) + a blocking executor.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = "29"
+pollster = "0.4"
+
+# Browser GPU stack: wgpu's WebGPU backend only (no desktop backends), plus the
+# wasm-bindgen glue. All optional / feature-gated so native is untouched.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "29", default-features = false, features = ["webgpu", "wgsl"] }
+# Used by the always-on wasm runtime (gpu.rs: async readback + console logging).
+futures-channel = "0.3"
+web-sys = { version = "0.3", features = ["console"] }
+# Used only by the wasm-bindgen entry point (src/web.rs), gated to the feature.
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
 
 [profile.release]
 opt-level = 3

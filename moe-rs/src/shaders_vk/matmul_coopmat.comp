@@ -1,0 +1,81 @@
+#version 460
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+// Tile-based matmul on NVIDIA tensor cores via VK_KHR_cooperative_matrix.
+//
+//   out = x @ W^T        (matches PyTorch nn.Linear, no bias)
+//     x   : [M, K] row-major  (fp16 storage)
+//     W   : [N, K] row-major  (fp16 storage, W[n,k] = weight row n)
+//     out : [M, N] row-major  (fp32 storage)
+//     out[m, n] = sum_k x[m, k] * W[n, k]
+//
+// This mirrors src/shaders/matmul.wgsl semantically (out = x @ W^T) but computes
+// it with cooperative (tensor-core) fragments: f16 x f16 -> f32 accumulate.
+//
+// IMPORTANT: this requires VK_KHR_cooperative_matrix + a hardware-supported
+// M/N/K shape (queried at runtime). The tile size below (16x16x16) is the most
+// broadly supported NVIDIA shape (sm_70+ / Turing+ with f16). It is NOT
+// available on Pascal sm_61 -- the runtime falls back to the scalar matmul
+// (matmul.wgsl, compiled via naga) there. Validate on NVIDIA hardware.
+//
+// === i8 -> i32 variant (documented, not enabled) ===
+// To run integer tensor cores, change the storage element types to int8_t
+// (require GL_EXT_shader_explicit_arithmetic_types_int8), declare the A/B
+// cooperative matrices over `int8_t` and the accumulator/result over `int32_t`,
+// and pick a queried i8xi8->i32 shape (commonly 16x16x32 on NVIDIA). The host
+// side selects the integer SPIR-V and an i8 input layout; the dispatch/tiling
+// loop here is otherwise identical.
+
+#extension GL_KHR_cooperative_matrix          : require
+#extension GL_KHR_memory_scope_semantics      : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// One subgroup per workgroup computes one TILE_M x TILE_N output tile.
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+const uint TILE_M = 16;
+const uint TILE_N = 16;
+const uint TILE_K = 16;
+
+// Push-constant-free: dimensions come through a uniform block to mirror the
+// WGSL Params{m,k,n} convention used everywhere else in this crate.
+layout(set = 0, binding = 0, std140) uniform Params {
+    uint m;
+    uint k;
+    uint n;
+} p;
+
+layout(set = 0, binding = 1, std430) readonly  buffer XBuf { float16_t x[]; };
+layout(set = 0, binding = 2, std430) readonly  buffer WBuf { float16_t w[]; };
+layout(set = 0, binding = 3, std430) writeonly buffer OBuf { float     o[]; };
+
+void main() {
+    // Tile coordinates: workgroup (gx, gy) owns output rows [tileRow, +TILE_M)
+    // and cols [tileCol, +TILE_N).
+    uint tileRow = gl_WorkGroupID.x * TILE_M;
+    uint tileCol = gl_WorkGroupID.y * TILE_N;
+
+    // Accumulator fragment (fp32), zero-initialised.
+    coopmat<float, gl_ScopeSubgroup, TILE_M, TILE_N, gl_MatrixUseAccumulator> acc =
+        coopmat<float, gl_ScopeSubgroup, TILE_M, TILE_N, gl_MatrixUseAccumulator>(0.0);
+
+    // K is contracted in TILE_K chunks. We assume M,N,K are tile-multiples; the
+    // host pads buffers up to multiples of the tile (documented in vulkan/mod.rs).
+    for (uint k0 = 0; k0 < p.k; k0 += TILE_K) {
+        // A = x tile  [TILE_M, TILE_K], row-major, stride = p.k.
+        coopmat<float16_t, gl_ScopeSubgroup, TILE_M, TILE_K, gl_MatrixUseA> a;
+        coopMatLoad(a, x, tileRow * p.k + k0, p.k, gl_CooperativeMatrixLayoutRowMajor);
+
+        // out = x @ W^T, so the B operand is W^T: B[k, n] = W[n, k]. W is stored
+        // [N, K] row-major; reading it as a TILE_K x TILE_N column-major tile
+        // starting at (tileCol, k0) yields exactly W^T without a transpose pass.
+        coopmat<float16_t, gl_ScopeSubgroup, TILE_K, TILE_N, gl_MatrixUseB> b;
+        coopMatLoad(b, w, tileCol * p.k + k0, p.k, gl_CooperativeMatrixLayoutColumnMajor);
+
+        acc = coopMatMulAdd(a, b, acc);
+    }
+
+    // Store the fp32 accumulator tile to out[tileRow.., tileCol..], row-major.
+    coopMatStore(acc, o, tileRow * p.n + tileCol, p.n, gl_CooperativeMatrixLayoutRowMajor);
+}

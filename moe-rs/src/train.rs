@@ -198,6 +198,19 @@ pub struct Trainer {
     d_h: wgpu::Buffer,
     d_expert_out: wgpu::Buffer,
     inv: wgpu::Buffer,
+
+    // Cached dispatch graphs. The forward/backward/AdamW step lists are
+    // structurally identical on every iteration, so we build them once and
+    // reuse them. This avoids allocating a fresh `params` uniform buffer and a
+    // fresh bind group per dispatch (~210/step), which otherwise exhausts the
+    // GPU memory aperture after a few thousand steps and triggers a device
+    // reset. The bind groups keep their referenced buffers alive; only the
+    // *contents* of `tokens`/`targets` (set_batch) and the AdamW uniforms (per
+    // step) change in place via `write_buffer`.
+    fwd_steps: Vec<Step>,
+    bwd_steps: Vec<Step>,
+    adamw_steps: Vec<Step>,
+    adamw_uniforms: Vec<wgpu::Buffer>,
 }
 
 fn f(x: f32) -> u32 {
@@ -334,7 +347,7 @@ impl Trainer {
             });
         }
 
-        Trainer {
+        let mut trainer = Trainer {
             cfg: c,
             b,
             t,
@@ -371,7 +384,24 @@ impl Trainer {
             pipelines,
             device,
             queue,
-        }
+            fwd_steps: Vec::new(),
+            bwd_steps: Vec::new(),
+            adamw_steps: Vec::new(),
+            adamw_uniforms: Vec::new(),
+        };
+        trainer.build_graphs();
+        trainer
+    }
+
+    /// Build the forward, backward, and AdamW dispatch graphs once. Called from
+    /// `new` after all buffers exist; the cached step lists are then reused on
+    /// every training iteration.
+    fn build_graphs(&mut self) {
+        self.fwd_steps = self.build_forward();
+        self.bwd_steps = self.build_backward();
+        let (steps, unis) = self.build_adamw();
+        self.adamw_steps = steps;
+        self.adamw_uniforms = unis;
     }
 
     fn uniform(&self, data: &[u32]) -> wgpu::Buffer {
@@ -386,8 +416,21 @@ impl Trainer {
         })
     }
 
-    fn step(&self, kind: usize, bufs: &[&wgpu::Buffer], params: &[u32], threads: u32) -> Step {
-        let ubuf = self.uniform(params);
+    /// A writable uniform buffer sized for `len` u32s (16-byte aligned), updated
+    /// later via `write_buffer`. Used for AdamW, whose params change every step.
+    fn uniform_dynamic(&self, len: usize) -> wgpu::Buffer {
+        let size = (((len * 4) + 15) / 16 * 16).max(16) as u64;
+        self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("params"),
+            size,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    /// Build a dispatch around an already-allocated uniform buffer. The bind
+    /// group keeps `ubuf` (and `bufs`) alive for as long as the `Step` lives.
+    fn step_buf(&self, kind: usize, ubuf: &wgpu::Buffer, bufs: &[&wgpu::Buffer], threads: u32) -> Step {
         let mut entries = vec![wgpu::BindGroupEntry {
             binding: 0,
             resource: ubuf.as_entire_binding(),
@@ -405,6 +448,10 @@ impl Trainer {
             entries: &entries,
         });
         (kind, bg, ((threads + 63) / 64).max(1))
+    }
+
+    fn step(&self, kind: usize, bufs: &[&wgpu::Buffer], params: &[u32], threads: u32) -> Step {
+        self.step_buf(kind, &self.uniform(params), bufs, threads)
     }
 
     fn submit(&self, clears: &[&wgpu::Buffer], steps: &[Step]) {
@@ -462,8 +509,19 @@ impl Trainer {
         self.queue.write_buffer(&self.targets, 0, bytemuck::cast_slice(y));
     }
 
-    /// Forward pass; caches all activations. Returns mean cross-entropy.
+    /// Run the (cached) forward pass and return mean cross-entropy. The
+    /// `read` also polls the device, which is what lets wgpu reclaim the
+    /// transient staging buffers this step allocated.
     pub fn forward(&self) -> f32 {
+        let n = self.b * self.t;
+        self.submit(&[], &self.fwd_steps);
+        let losses = self.read(&self.ce_buf, n as usize);
+        losses.iter().sum::<f32>() / n as f32
+    }
+
+    /// Build the forward dispatch graph; caches all activations. Buffers and
+    /// uniform contents are identical every step, so this is built once.
+    fn build_forward(&self) -> Vec<Step> {
         let c = &self.cfg;
         let n = self.b * self.t;
         let d = c.d_model;
@@ -510,13 +568,18 @@ impl Trainer {
         s.push(self.step(MATMUL, &[&self.xn_final, self.w("token_emb.weight"), &self.logits], &[n, d, c.vocab], n * c.vocab));
         s.push(self.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, c.vocab], n));
 
-        self.submit(&[], &s);
-        let losses = self.read(&self.ce_buf, n as usize);
-        losses.iter().sum::<f32>() / n as f32
+        s
     }
 
-    /// Backward pass: zero grads, then accumulate every parameter gradient.
+    /// Run the (cached) backward pass: zero grads, then accumulate every
+    /// parameter gradient in a single pass.
     pub fn backward(&self) {
+        let clears: Vec<&wgpu::Buffer> = self.params.iter().map(|(name, _)| self.g(name)).collect();
+        self.submit(&clears, &self.bwd_steps);
+    }
+
+    /// Build the backward dispatch graph (constant across steps).
+    fn build_backward(&self) -> Vec<Step> {
         let c = &self.cfg;
         let n = self.b * self.t;
         let d = c.d_model;
@@ -593,25 +656,39 @@ impl Trainer {
         // embedding backward (accumulates onto grad_emb which holds lm_head grad)
         s.push(self.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("token_emb.weight")], &[n, d, c.vocab], c.vocab * d));
 
-        // zero every weight grad, then run the whole backward in one pass
-        let clears: Vec<&wgpu::Buffer> = self.params.iter().map(|(name, _)| self.g(name)).collect();
-        self.submit(&clears, &s);
+        s
+    }
+
+    /// Build the AdamW dispatch graph and its per-parameter uniform buffers.
+    /// The bind groups are constant, but the uniform *contents* (lr, bias
+    /// corrections) change every step, so each param gets a persistent writable
+    /// uniform buffer updated in `adamw_step` via `write_buffer`.
+    fn build_adamw(&self) -> (Vec<Step>, Vec<wgpu::Buffer>) {
+        let mut steps = Vec::new();
+        let mut unis = Vec::new();
+        for (name, numel) in &self.params {
+            let ubuf = self.uniform_dynamic(9);
+            let st = self.step_buf(
+                ADAMW,
+                &ubuf,
+                &[self.w(name), self.g(name), &self.adam_m[name], &self.adam_v[name]],
+                *numel as u32,
+            );
+            steps.push(st);
+            unis.push(ubuf);
+        }
+        (steps, unis)
     }
 
     /// One AdamW step. `t` is the (1-based) step index for bias correction.
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, beta1: f32, beta2: f32, eps: f32) {
         let bc1 = 1.0 - beta1.powi(t as i32);
         let bc2 = 1.0 - beta2.powi(t as i32);
-        let mut s: Vec<Step> = Vec::new();
-        for (name, numel) in &self.params {
-            s.push(self.step(
-                ADAMW,
-                &[self.w(name), self.g(name), &self.adam_m[name], &self.adam_v[name]],
-                &[*numel as u32, 0, f(lr), f(beta1), f(beta2), f(eps), f(wd), f(bc1), f(bc2)],
-                *numel as u32,
-            ));
+        for (i, (_, numel)) in self.params.iter().enumerate() {
+            let data = [*numel as u32, 0, f(lr), f(beta1), f(beta2), f(eps), f(wd), f(bc1), f(bc2)];
+            self.queue.write_buffer(&self.adamw_uniforms[i], 0, bytemuck::cast_slice(&data));
         }
-        self.submit(&[], &s);
+        self.submit(&[], &self.adamw_steps);
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
@@ -895,5 +972,37 @@ fn save_weights(trainer: &Trainer, cfg: &Config, path: &str) {
     f.write_all(&hbytes).unwrap();
     for v in &blob {
         f.write_all(&v.to_le_bytes()).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corpus_is_deterministic_and_follows_rule() {
+        let (a, ta) = corpus_and_table(2000, 64, 123);
+        let (b, tb) = corpus_and_table(2000, 64, 123);
+        assert_eq!(a, b);
+        assert_eq!(ta, tb);
+        // substitution table is a permutation of 0..vocab
+        let mut sorted = ta.clone();
+        sorted.sort();
+        assert_eq!(sorted, (0..64).collect::<Vec<_>>());
+        // the generating rule holds away from the periodic reset
+        for i in 2..a.len() {
+            if i % 257 != 0 {
+                assert_eq!(a[i], (a[i - 2] + ta[a[i - 1] as usize]) % 64);
+            }
+        }
+    }
+
+    #[test]
+    fn orbit_is_reset_free_rule() {
+        let (_c, table) = corpus_and_table(500, 32, 7);
+        let o = orbit(&table, 32, 100, 5, 9);
+        for i in 2..o.len() {
+            assert_eq!(o[i], (o[i - 2] + table[o[i - 1] as usize]) % 32);
+        }
     }
 }

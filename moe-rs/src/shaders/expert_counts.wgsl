@@ -16,8 +16,11 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> fe:   array<f32>;
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let e = gid.x;
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(num_workgroups) nwg: vec3<u32>) {
+    // 2D-grid safe linear thread index (identity for 1D dispatch).
+    let gidx = gid.y * (nwg.x * 64u) + gid.x;
+    let e = gidx;
     if (e >= p.n_experts) { return; }
     var count = 0.0;
     for (var n: u32 = 0u; n < p.n_rows; n = n + 1u) {

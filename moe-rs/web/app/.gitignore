@@ -1,0 +1,15 @@
+# dependencies
+node_modules
+
+# next.js
+/.next/
+/out/
+
+# generated wasm-bindgen package (staged by `make web/wasm`)
+/public/pkg/
+
+# misc
+*.local
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
