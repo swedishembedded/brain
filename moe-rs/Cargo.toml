@@ -1,0 +1,19 @@
+[package]
+name = "tiny-sparse-moe-wgsl"
+version = "0.1.0"
+edition = "2021"
+description = "Inference + generation for the tiny sparse-MoE Transformer, as a raw-WGSL wgpu compute pipeline. fp32 only; runs on any compute including old sm_61 (Pascal)."
+
+[[bin]]
+name = "moe"
+path = "src/main.rs"
+
+[dependencies]
+wgpu = "29"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true

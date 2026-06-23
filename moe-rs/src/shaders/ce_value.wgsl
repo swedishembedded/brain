@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+// Per-position cross-entropy loss (for logging). out[n] = logsumexp - logit[target].
+// The host sums these and divides by n_rows to get the mean CE.
+
+struct Params {
+    n_rows: u32,
+    vocab: u32,
+};
+
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read>       logits:  array<f32>;
+@group(0) @binding(2) var<storage, read>       targets: array<u32>;
+@group(0) @binding(3) var<storage, read_write> out:     array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let n = gid.x;
+    if (n >= p.n_rows) { return; }
+    let base = n * p.vocab;
+    var mx = -3.4e38;
+    for (var c: u32 = 0u; c < p.vocab; c = c + 1u) { mx = max(mx, logits[base + c]); }
+    var sum = 0.0;
+    for (var c: u32 = 0u; c < p.vocab; c = c + 1u) { sum = sum + exp(logits[base + c] - mx); }
+    out[n] = (mx + log(sum)) - logits[base + targets[n]];
+}
