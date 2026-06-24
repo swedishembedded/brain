@@ -141,21 +141,35 @@ fn gen(args: &[String]) {
         }
         i += 1;
     }
-    if weights.is_empty() || data_dir.is_empty() {
-        eprintln!("usage: brain gpt gen --weights F --data <dir> [--prompt ... --max-new N --temp X --top-k K]");
+    if weights.is_empty() {
+        eprintln!("usage: brain gpt gen --weights F [--data <dir>] [--prompt ... --max-new N --temp X --top-k K]");
         return;
     }
 
-    // char tokenizer from the dataset's meta.json (BPE generation not wired here).
-    let meta_path = Path::new(&data_dir).join("meta.json");
-    let meta = match std::fs::read_to_string(&meta_path).ok().and_then(|s| Meta::from_json(&s).ok()) {
-        Some(m) => m,
+    // The char tokenizer comes from the checkpoint itself (vocab embedded at
+    // train time) — inference needs no dataset. `--data` is only a fallback for
+    // older checkpoints that predate embedded vocab.
+    let itos = match gpt::model::Gpt::load_itos(&weights) {
+        Some(itos) => itos,
         None => {
-            eprintln!("gen requires a char-level dataset with meta.json at {}", meta_path.display());
-            return;
+            if data_dir.is_empty() {
+                eprintln!(
+                    "this checkpoint has no embedded vocab (trained before vocab embedding, \
+                     or a BPE model); pass --data <dir> with its meta.json"
+                );
+                return;
+            }
+            let meta_path = Path::new(&data_dir).join("meta.json");
+            match std::fs::read_to_string(&meta_path).ok().and_then(|s| Meta::from_json(&s).ok()) {
+                Some(m) => m.itos,
+                None => {
+                    eprintln!("gen needs a char vocab: none embedded and no meta.json at {}", meta_path.display());
+                    return;
+                }
+            }
         }
     };
-    let tok = CharTokenizer::from_itos(meta.itos.clone());
+    let tok = CharTokenizer::from_itos(itos);
 
     // Build the model sized for block_size; seed prompt (default = newline).
     let model = Gpt::load(&weights, 1, model_block(&weights));

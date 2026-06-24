@@ -79,6 +79,9 @@ struct Loaded {
     val: TokenDataset,
     vocab: u32,
     batch_cfg: BatchConfig,
+    /// Char-tokenizer vocab (when the dataset has `meta.json`), embedded into the
+    /// checkpoint so inference (`gpt gen`) needs no dataset reference.
+    itos: Option<Vec<char>>,
 }
 
 fn load(dir: &Path, opts: &TrainOpts) -> std::io::Result<Loaded> {
@@ -87,17 +90,17 @@ fn load(dir: &Path, opts: &TrainOpts) -> std::io::Result<Loaded> {
 
     // Vocab + mask/newline ids come from meta.json (char datasets). BPE has no
     // meta; vocab is GPT-2's 50257 and masking/alignment are unsupported there.
-    let (vocab, mask_id, newline_id) = match std::fs::read_to_string(dir.join("meta.json")) {
+    let (vocab, mask_id, newline_id, itos) = match std::fs::read_to_string(dir.join("meta.json")) {
         Ok(s) => {
             let meta = Meta::from_json(&s).map_err(std::io::Error::other)?;
             let stoi = meta.stoi();
             let mask_id = opts.mask_before.and_then(|c| stoi.get(&c).copied());
             let newline_id = stoi.get(&'\n').copied();
-            (meta.vocab_size as u32, mask_id, newline_id)
+            (meta.vocab_size as u32, mask_id, newline_id, Some(meta.itos))
         }
         Err(_) => {
             let maxid = train_tok.iter().chain(val_tok.iter()).copied().max().unwrap_or(0);
-            (maxid as u32 + 1, None, None)
+            (maxid as u32 + 1, None, None, None)
         }
     };
 
@@ -114,6 +117,7 @@ fn load(dir: &Path, opts: &TrainOpts) -> std::io::Result<Loaded> {
         val: TokenDataset::new(val_tok, &batch_cfg),
         vocab,
         batch_cfg,
+        itos,
     })
 }
 
@@ -193,7 +197,7 @@ pub fn train(dir: &Path, mut cfg: GptConfig, opts: &TrainOpts, out: Option<&Path
             // (checkpoint::save renames a temp over the target).
             let saved = match out {
                 Some(p) => {
-                    model.save(p.to_str().expect("utf-8 path"));
+                    model.save_with_itos(p.to_str().expect("utf-8 path"), loaded.itos.as_deref());
                     format!("  saved -> {}", p.display())
                 }
                 None => String::new(),
@@ -203,7 +207,7 @@ pub fn train(dir: &Path, mut cfg: GptConfig, opts: &TrainOpts, out: Option<&Path
     }
 
     if let Some(p) = out {
-        model.save(p.to_str().expect("utf-8 path"));
+        model.save_with_itos(p.to_str().expect("utf-8 path"), loaded.itos.as_deref());
         println!("saved checkpoint -> {}", p.display());
     }
     Ok((initial, last_train))

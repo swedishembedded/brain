@@ -498,13 +498,37 @@ impl Gpt {
     }
 
     pub fn save(&self, path: &str) {
+        self.save_with_itos(path, None);
+    }
+
+    /// Save the checkpoint, optionally embedding the char-tokenizer vocab (`itos`)
+    /// in the manifest so inference can reconstruct the tokenizer without the
+    /// original dataset. `gpt gen` reads it back via [`Gpt::load_itos`].
+    pub fn save_with_itos(&self, path: &str, itos: Option<&[char]>) {
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = self
             .ps
             .params
             .iter()
             .map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name)))
             .collect();
-        checkpoint::save(path, self.cfg.to_json(), &tensors);
+        let mut config = self.cfg.to_json();
+        if let Some(itos) = itos {
+            let arr: Vec<Value> = itos.iter().map(|c| Value::from(c.to_string())).collect();
+            config["itos"] = Value::Array(arr);
+        }
+        checkpoint::save(path, config, &tensors);
+    }
+
+    /// The embedded char-tokenizer vocab from a checkpoint, if it was trained on
+    /// a char-level dataset (else `None`, e.g. BPE checkpoints).
+    pub fn load_itos(path: &str) -> Option<Vec<char>> {
+        let c = checkpoint::load(path);
+        let arr = c.header["config"].get("itos")?.as_array()?;
+        Some(
+            arr.iter()
+                .filter_map(|v| v.as_str().and_then(|s| s.chars().next()))
+                .collect(),
+        )
     }
 }
 
