@@ -47,6 +47,7 @@ brain-federated = { path = "crates/federated" }
 brain-eval = { path = "crates/eval" }
 brain-gradcheck = { path = "crates/gradcheck" }
 brain-vulkan = { path = "crates/vulkan" }
+brain-wgsl-cpu = { path = "crates/wgsl-cpu" }
 
 # Third-party. fp32-only, core-compute-only GPU stack — see crates/kernels.
 bytemuck = { version = "1", features = ["derive"] }

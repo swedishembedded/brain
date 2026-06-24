@@ -1,0 +1,24 @@
+[package]
+name = "brain-wgsl-cpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Compile brain's WGSL compute kernels to native CPU code via naga IR -> Cranelift JIT."
+
+[lib]
+name = "wgsl_cpu"
+path = "src/lib.rs"
+
+[dependencies]
+# Reuse the exact same naga front-end the wgpu/vulkan paths use to parse WGSL.
+naga.workspace = true
+
+# Cranelift JIT: translate naga IR -> Cranelift IR -> native code at startup.
+cranelift-codegen = "0.130"
+cranelift-frontend = "0.130"
+cranelift-jit = "0.130"
+cranelift-module = "0.130"
+cranelift-native = "0.130"
+
+[dev-dependencies]
+brain-kernels.workspace = true
