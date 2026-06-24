@@ -91,9 +91,25 @@ name = "brain-autodiff"
 version = "0.1.0"
 
 [[package]]
+name = "brain-autoencoder"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-bench"
 version = "0.1.0"
 dependencies = [
+ "brain-autoencoder",
  "brain-checkpoint",
  "brain-data",
  "brain-eval",
@@ -186,6 +202,7 @@ dependencies = [
 name = "brain-gradcheck"
 version = "0.1.0"
 dependencies = [
+ "brain-autoencoder",
  "brain-data",
  "brain-gpt",
  "brain-gpu-core",

@@ -110,6 +110,10 @@ pub const MATMUL_DW: &str = include_str!("../wgsl/matmul_dw.wgsl");
 pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
 /// `wgsl/matmul.wgsl`
 pub const MATMUL: &str = include_str!("../wgsl/matmul.wgsl");
+/// `wgsl/mse_grad.wgsl`
+pub const MSE_GRAD: &str = include_str!("../wgsl/mse_grad.wgsl");
+/// `wgsl/mse_value.wgsl`
+pub const MSE_VALUE: &str = include_str!("../wgsl/mse_value.wgsl");
 /// `wgsl/pos_add.wgsl`
 pub const POS_ADD: &str = include_str!("../wgsl/pos_add.wgsl");
 /// `wgsl/pos_bwd.wgsl`
@@ -199,6 +203,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_dw", MATMUL_DW),
     ("matmul_dx", MATMUL_DX),
     ("matmul", MATMUL),
+    ("mse_grad", MSE_GRAD),
+    ("mse_value", MSE_VALUE),
     ("pos_add", POS_ADD),
     ("pos_bwd", POS_BWD),
     ("rms_inv", RMS_INV),
@@ -236,7 +242,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_kernels_present_and_nonempty() {
-        assert_eq!(ALL.len(), 68);
+        assert_eq!(ALL.len(), 70);
         for (n, s) in ALL { assert!(!s.trim().is_empty(), "empty kernel {n}"); }
     }
     #[test]

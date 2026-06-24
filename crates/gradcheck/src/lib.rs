@@ -269,6 +269,24 @@ pub fn check_seq2seq(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Build a tiny bottleneck autoencoder, set a fixed float batch, and
+/// gradient-check it. This is the correctness gate for the `Regression` head
+/// (ADR §6, PR-10): it validates the new `mse_value`/`mse_grad` loss kernels and
+/// the encoder→bottleneck→decoder matmul/GELU/bias backprop, all through the
+/// blanket `CheckModel for model::Model`. The objective is mean-squared
+/// reconstruction error, so unlike the token-head models there is no masking —
+/// every output element contributes. Returns the report.
+pub fn check_autoencoder(seed: u64) -> Report {
+    use autoencoder::{Autoencoder, AutoencoderConfig};
+    let cfg = AutoencoderConfig { in_dim: 12, hidden: 16, z_dim: 4 };
+    let init = autoencoder::init_weights(&cfg, seed);
+    // b=2 items; reconstruct each item against itself (inputs == targets).
+    let model = Autoencoder::new(cfg.clone(), 2, &init);
+    let x: Vec<f32> = (0..(2 * cfg.in_dim)).map(|i| ((i * 7 % 13) as f32 - 6.0) * 0.13).collect();
+    model.set_batch(&x, &x);
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +348,23 @@ mod tests {
             return;
         }
         let report = check_seq2seq(7);
+        report.print();
+        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn autoencoder_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_autoencoder(7);
         report.print();
         // fp32 directional FD on a software GPU: combined abs+rel tolerance.
         let (atol, rtol) = (4e-3, 8e-2);

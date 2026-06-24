@@ -119,10 +119,9 @@ pub fn registry() -> Vec<Box<dyn Benchmark>> {
         Box::new(parity::Parity::default()),
         Box::new(mod_add::ModAdd::default()),
         Box::new(dyck::Dyck::default()),
-        // mad_compress is intentionally NOT registered: it cannot be expressed
-        // via the next-token `DecoderLm` seam (autoencoder bottleneck +
-        // non-next-token objective + separate decoder head). See `mad_compress`
-        // module docs; it needs a separate autoencoder model trait.
+        // Non-LM objective: a bottleneck autoencoder with an MSE Regression head
+        // (ADR §6 / PR-10) — sequence -> single compressed `z` -> reconstruction.
+        Box::new(mad_compress::MadCompress::default()),
     ]
 }
 
