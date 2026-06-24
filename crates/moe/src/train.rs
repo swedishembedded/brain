@@ -952,7 +952,15 @@ pub fn train(args: TrainArgs) {
     assert!(args.t <= cfg.block_size, "T must be <= block_size");
 
     let corpus = make_corpus(20_000, cfg.vocab, 123);
-    let init = init_weights(&cfg, args.seed);
+    // Resume from the existing checkpoint if one is already at `out`; otherwise
+    // start from a fresh random init. (Weights are warm-started; AdamW moments
+    // restart at zero — they are not persisted in the checkpoint.)
+    let init = if std::path::Path::new(&args.out).exists() {
+        println!("resuming from existing checkpoint {}", args.out);
+        checkpoint::load(&args.out).by_role("")
+    } else {
+        init_weights(&cfg, args.seed)
+    };
     let trainer = Trainer::new(cfg.clone(), args.b, args.t, &init);
 
     let mut rng = args.seed.max(1) ^ 0x9E3779B97F4A7C15;
@@ -977,6 +985,53 @@ pub fn train(args: TrainArgs) {
 
     save_weights(&trainer, &cfg, &args.out);
     println!("saved {}", args.out);
+}
+
+/// Arguments for training a single expert with a frozen backbone.
+pub struct ExpertTrainArgs {
+    pub base_weights: String,
+    pub expert: u32,
+    pub out: String,
+    pub steps: u32,
+    pub b: u32,
+    pub t: u32,
+    pub lr: f32,
+    pub seed: u64,
+}
+
+/// Train one expert against an immutable shared backbone, starting from `base`.
+/// Writes a full updated `.weights` to `out`; the backbone and every other
+/// expert are left bit-for-bit unchanged. This is the federated worker step:
+/// load the common base, train your expert, return its shard.
+pub fn train_expert(args: ExpertTrainArgs) {
+    let c = checkpoint::load(&args.base_weights);
+    let cfg = cfg_from_json(&c.header["config"]);
+    assert!(args.t <= cfg.block_size, "T must be <= block_size");
+    assert!(args.expert < cfg.n_experts, "expert {} >= n_experts {}", args.expert, cfg.n_experts);
+    let init = c.by_role("");
+    let trainer = Trainer::new(cfg.clone(), args.b, args.t, &init);
+
+    let (corpus, _table) = corpus_and_table(20_000, cfg.vocab, 123);
+    let mut rng = args.seed.max(1) ^ 0x9E3779B97F4A7C15;
+    let tt = args.t as usize;
+    for step in 1..=args.steps {
+        let (mut xs, mut ys) = (Vec::new(), Vec::new());
+        for _ in 0..args.b {
+            let start = (xorshift(&mut rng) as usize) % (corpus.len() - tt - 1);
+            xs.extend_from_slice(&corpus[start..start + tt]);
+            ys.extend_from_slice(&corpus[start + 1..start + 1 + tt]);
+        }
+        trainer.set_batch(&xs, &ys);
+        let loss = trainer.forward();
+        trainer.backward();
+        trainer.freeze_grads_except_expert(args.expert); // freeze the shared backbone
+        trainer.adamw_step(step, args.lr, 0.0, 0.9, 0.95, 1e-8); // wd=0 keeps frozen params fixed
+        if step == 1 || step % 50 == 0 || step == args.steps {
+            println!("expert {} | step {:5} | loss {:.4}", args.expert, step, loss);
+        }
+    }
+    trainer.save(&args.out);
+    println!("saved expert-{} checkpoint {}", args.expert, args.out);
 }
 
 fn save_weights(trainer: &Trainer, cfg: &Config, path: &str) {

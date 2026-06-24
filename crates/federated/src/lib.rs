@@ -14,4 +14,4 @@
 pub mod sha256;
 pub mod shard;
 
-pub use shard::{assemble, expert_id, merge_to_full, split, verify, Manifest};
+pub use shard::{assemble, expert_id, merge_to_full, split, split_filtered, verify, Manifest};

@@ -91,8 +91,16 @@ fn tensors_named<'a>(c: &'a Container, want: impl Fn(&str) -> bool) -> Vec<(Stri
         .collect()
 }
 
-/// Split a full MoE `.weights` checkpoint into a shard directory.
+/// Split a full MoE `.weights` checkpoint into a shard directory (all experts).
 pub fn split(base_weights: &str, out_dir: &Path) -> io::Result<Manifest> {
+    split_filtered(base_weights, out_dir, None)
+}
+
+/// Like [`split`], but only write the experts in `keep` (plus `shared.weights`).
+/// `keep = None` writes every expert; `Some(&[E])` produces a single-expert
+/// **overlay** directory ready to pass to [`assemble`] — this is what a
+/// federated worker returns after training one expert.
+pub fn split_filtered(base_weights: &str, out_dir: &Path, keep: Option<&[u32]>) -> io::Result<Manifest> {
     let c = checkpoint::load(base_weights);
     let config = c.header["config"].clone();
     fs::create_dir_all(out_dir.join("experts"))?;
@@ -102,8 +110,13 @@ pub fn split(base_weights: &str, out_dir: &Path) -> io::Result<Manifest> {
     let shared_path = out_dir.join("shared.weights");
     checkpoint::save(shared_path.to_str().unwrap(), config.clone(), &shared);
 
-    // per-expert shards.
-    let mut expert_ids: Vec<u32> = c.tensors.iter().filter_map(|t| expert_id(&t.name)).collect();
+    // per-expert shards (optionally filtered to `keep`).
+    let mut expert_ids: Vec<u32> = c
+        .tensors
+        .iter()
+        .filter_map(|t| expert_id(&t.name))
+        .filter(|e| keep.is_none_or(|k| k.contains(e)))
+        .collect();
     expert_ids.sort_unstable();
     expert_ids.dedup();
 

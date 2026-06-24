@@ -128,11 +128,31 @@ fn targets_to_u32(y: &[i32]) -> Vec<u32> {
 /// the dataset and `opts`. Returns `(initial_train_loss, final_train_loss)`.
 pub fn train(dir: &Path, mut cfg: GptConfig, opts: &TrainOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
     let loaded = load(dir, opts)?;
-    cfg.vocab = loaded.vocab;
-    cfg.block_size = opts.block_size;
-    let cfg = cfg.with_ff_default();
 
-    let init = init_weights(&cfg, opts.seed);
+    // Resume from the existing checkpoint if `out` already exists, so repeated
+    // `train` runs continue rather than restart from scratch. The checkpoint's
+    // architecture wins (and must match the dataset/--block in use). Otherwise
+    // start from a fresh random init. (Weights resume; AdamW moments restart.)
+    let resume = out.map(|p| p.exists()).unwrap_or(false);
+    let (cfg, init) = if resume {
+        let p = out.unwrap();
+        println!("resuming from existing checkpoint {}", p.display());
+        let c = checkpoint::load(p.to_str().expect("utf-8 path"));
+        let rcfg = GptConfig::from_json(&c.header["config"]);
+        assert_eq!(
+            rcfg.block_size, opts.block_size,
+            "checkpoint block_size {} != --block {} — resume with the same --block",
+            rcfg.block_size, opts.block_size
+        );
+        assert_eq!(rcfg.vocab, loaded.vocab, "checkpoint vocab != dataset vocab — wrong dataset for this checkpoint");
+        (rcfg, c.by_role(""))
+    } else {
+        cfg.vocab = loaded.vocab;
+        cfg.block_size = opts.block_size;
+        let cfg = cfg.with_ff_default();
+        let init = init_weights(&cfg, opts.seed);
+        (cfg, init)
+    };
     let model = Gpt::new(cfg, opts.batch_size, opts.block_size, &init);
     let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
 

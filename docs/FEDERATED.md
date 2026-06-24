@@ -24,7 +24,7 @@ head).
   manifest.json                # base-config SHA-256 + per-file SHA-256 + expert list
 ```
 
-## Implemented (`crates/federated`, CLI `brain federated`)
+## Implemented (`crates/federated` + `crates/moe`, CLI `brain federated`)
 
 - `split <base.weights> <dir>` — vertical split into shared + per-expert shards
   with a hash-verified manifest.
@@ -34,9 +34,34 @@ head).
 - `assemble <base_dir> [overlay_dir ...] --out <full.weights>` — overlay expert
   (or shared) shards onto a base, **last-wins** per expert id, verifying all
   overlays share the base config hash.
-- Dependency-free SHA-256; split→assemble is provably an identity (test).
+- **`train-expert --base <B> --expert E --out <dir>`** — train one expert against
+  a frozen shared backbone (`Trainer::freeze_grads_except_expert` + AdamW with
+  `wd=0`, leaving the backbone and every other expert **bit-for-bit unchanged**)
+  and write an overlay shard dir ready for `assemble`. This is the on-GPU "train
+  experts separately" worker step — run it one expert at a time, in separate
+  sessions, only needing the common base.
+- Dependency-free SHA-256; split→assemble is provably an identity (test); the
+  train-scope freeze is verified by a test (backbone + non-target expert
+  unchanged, target expert moves).
 
 `make federated-demo` runs train→split→verify→merge on a real MoE checkpoint.
+
+### Train experts separately, then assemble
+
+```bash
+brain train --steps 2000 --out base.weights              # common base (resumes if it exists)
+brain federated split base.weights out/base              # base shard set
+brain federated train-expert --base base.weights --expert 0 --out out/exp0 --steps 500
+brain federated train-expert --base base.weights --expert 1 --out out/exp1 --steps 500
+brain federated assemble out/base out/exp0 out/exp1 --out out/final.weights
+```
+
+Each `train-expert` runs independently and only needs `base.weights`, so you can
+train one shard at a time on a small machine (control per-step memory with
+`--batch`/`--block`). Note: the whole model is still GPU-resident during a
+worker run — true memory sharding (CPU offload / layer-expert shards from
+`federated-moe.md`) is not yet implemented; what you get today is independent,
+sequential, auditable per-expert training.
 
 ## The full lifecycle (target)
 
