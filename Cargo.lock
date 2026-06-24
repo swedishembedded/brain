@@ -189,6 +189,7 @@ dependencies = [
  "brain-data",
  "brain-gpt",
  "brain-model",
+ "brain-moe",
 ]
 
 [[package]]
@@ -213,8 +214,12 @@ name = "brain-moe"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
  "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
  "bytemuck",
  "serde_json",
 ]

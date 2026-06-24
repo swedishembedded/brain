@@ -12,7 +12,11 @@ path = "src/lib.rs"
 # Training writes checkpoints / reads files and blocks on GPU readback — native only.
 [dependencies]
 brain-gpu-core.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
+brain-data.workspace = true
 bytemuck.workspace = true
 serde_json.workspace = true

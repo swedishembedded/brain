@@ -25,6 +25,8 @@
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use optim::Optim;
+use paramstore::ParamStore;
 
 // ---- kernel indices (order matches `PIPELINES`) ----
 const EMBED: usize = 0;
@@ -58,6 +60,10 @@ const ATTN_BWD_DQ: usize = 27;
 const ATTN_BWD_DK: usize = 28;
 const EMB_BWD: usize = 29;
 const ADAMW: usize = 30;
+const GRADNORM_SQ: usize = 31;
+const GRAD_SCALE: usize = 32;
+const CLIP_COEF: usize = 33;
+const GRAD_SCALE_BUF: usize = 34;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -91,7 +97,19 @@ const PIPELINES: &[(&str, &str)] = &[
     ("attn_bwd_dk", kernels::ATTN_BWD_DK),
     ("emb_bwd", kernels::EMB_BWD),
     ("adamw", kernels::ADAMW),
+    ("gradnorm_sq", kernels::GRADNORM_SQ),
+    ("grad_scale", kernels::GRAD_SCALE),
+    ("clip_coef", kernels::CLIP_COEF),
+    ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
 ];
+
+/// MoE's fixed AdamW betas/eps (the established values matched against the
+/// PyTorch reference). The unified trait [`model::Model::adamw_step`] does not
+/// thread per-call betas, so the trait path uses these; the inherent
+/// [`Trainer::adamw_step`] still accepts explicit betas for the validate path.
+const MOE_BETA1: f32 = 0.9;
+const MOE_BETA2: f32 = 0.95;
+const MOE_EPS: f32 = 1e-8;
 
 #[derive(Clone)]
 pub struct Config {
@@ -158,11 +176,10 @@ pub struct Trainer {
     b: u32,
     t: u32,
 
-    weights: HashMap<String, DeviceBuffer>,
-    grads: HashMap<String, DeviceBuffer>,
-    adam_m: HashMap<String, DeviceBuffer>,
-    adam_v: HashMap<String, DeviceBuffer>,
-    params: Vec<(String, usize)>,
+    // Parameter storage + optimizer are shared with the GPT/PID models (ADR §7),
+    // which gives MoE the unified clip + grad-accum AdamW path for free.
+    ps: ParamStore,
+    opt: Optim,
 
     tokens: DeviceBuffer,
     targets: DeviceBuffer,
@@ -195,18 +212,16 @@ pub struct Trainer {
     d_expert_out: DeviceBuffer,
     inv: DeviceBuffer,
 
-    // Cached dispatch graphs. The forward/backward/AdamW step lists are
-    // structurally identical on every iteration, so we build them once and
-    // reuse them. This avoids allocating a fresh `params` uniform buffer and a
-    // fresh bind group per dispatch (~210/step), which otherwise exhausts the
-    // GPU memory aperture after a few thousand steps and triggers a device
-    // reset. The bind groups keep their referenced buffers alive; only the
-    // *contents* of `tokens`/`targets` (set_batch) and the AdamW uniforms (per
-    // step) change in place via `write_buffer`.
+    // Cached forward/backward dispatch graphs. They are structurally identical
+    // on every iteration, so we build them once and reuse them. This avoids
+    // allocating a fresh `params` uniform buffer and a fresh bind group per
+    // dispatch (~210/step), which otherwise exhausts the GPU memory aperture
+    // after a few thousand steps and triggers a device reset. The bind groups
+    // keep their referenced buffers alive; only the *contents* of
+    // `tokens`/`targets` (set_batch) change in place via `write_buffer`. The
+    // AdamW graph is cached inside the shared `Optim`.
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
-    adamw_steps: Vec<Step>,
-    adamw_uniforms: Vec<DeviceBuffer>,
 }
 
 impl Trainer {
@@ -217,27 +232,10 @@ impl Trainer {
         let gpu = Gpu::new(PIPELINES);
 
         let c = cfg.clone();
-        let params = param_list(&c);
-
-        // weights / grads / adam state (grads zeroed each step; adam state zeroed
-        // here since wgpu storage buffers are created uninitialised).
-        let mut weights = HashMap::new();
-        let mut grads = HashMap::new();
-        let mut adam_m = HashMap::new();
-        let mut adam_v = HashMap::new();
-        for (name, numel) in &params {
-            let data = init.get(name).unwrap_or_else(|| panic!("missing init weight {name}"));
-            assert_eq!(data.len(), *numel, "size mismatch for {name}");
-            weights.insert(name.clone(), gpu.storage_init(name, data));
-            grads.insert(name.clone(), gpu.storage(*numel as u64));
-            adam_m.insert(name.clone(), gpu.storage(*numel as u64));
-            adam_v.insert(name.clone(), gpu.storage(*numel as u64));
-        }
-        for (name, numel) in &params {
-            let z = vec![0u32; *numel];
-            gpu.write(&adam_m[name], &z);
-            gpu.write(&adam_v[name], &z);
-        }
+        // Parameter weights/grads/Adam-moment buffers (all zero-initialised) live
+        // in the shared ParamStore; the shared Optim drives the AdamW + clip path.
+        let ps = ParamStore::new(&gpu, param_list(&c), init);
+        let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         let n = (b * t) as u64;
         let d = c.d_model as u64;
@@ -279,11 +277,8 @@ impl Trainer {
             cfg: c,
             b,
             t,
-            params,
-            weights,
-            grads,
-            adam_m,
-            adam_v,
+            ps,
+            opt,
             tokens,
             targets,
             res,
@@ -312,8 +307,6 @@ impl Trainer {
             gpu,
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
-            adamw_steps: Vec::new(),
-            adamw_uniforms: Vec::new(),
         };
         trainer.build_graphs();
         trainer
@@ -325,16 +318,13 @@ impl Trainer {
     fn build_graphs(&mut self) {
         self.fwd_steps = self.build_forward();
         self.bwd_steps = self.build_backward();
-        let (steps, unis) = self.build_adamw();
-        self.adamw_steps = steps;
-        self.adamw_uniforms = unis;
     }
 
     fn w(&self, name: &str) -> &DeviceBuffer {
-        self.weights.get(name).unwrap_or_else(|| panic!("no weight {name}"))
+        self.ps.w(name)
     }
     fn g(&self, name: &str) -> &DeviceBuffer {
-        self.grads.get(name).unwrap()
+        self.ps.g(name)
     }
 
     pub fn set_batch(&self, x: &[u32], y: &[u32]) {
@@ -404,11 +394,12 @@ impl Trainer {
         s
     }
 
-    /// Run the (cached) backward pass: zero grads, then accumulate every
-    /// parameter gradient in a single pass.
+    /// Run the (cached) backward pass: accumulate every parameter gradient
+    /// (does NOT zero them — the caller zeroes once per effective batch via
+    /// [`Self::zero_grads`], matching the GPT/PID grad-accum contract that the
+    /// generic trainer relies on).
     pub fn backward(&self) {
-        let clears: Vec<&DeviceBuffer> = self.params.iter().map(|(name, _)| self.g(name)).collect();
-        self.gpu.submit(&clears, &self.bwd_steps);
+        self.gpu.submit(&[], &self.bwd_steps);
     }
 
     /// Build the backward dispatch graph (constant across steps).
@@ -492,55 +483,47 @@ impl Trainer {
         s
     }
 
-    /// Build the AdamW dispatch graph and its per-parameter uniform buffers.
-    /// The bind groups are constant, but the uniform *contents* (lr, bias
-    /// corrections) change every step, so each param gets a persistent writable
-    /// uniform buffer updated in `adamw_step` via `write_buffer`.
-    fn build_adamw(&self) -> (Vec<Step>, Vec<DeviceBuffer>) {
-        let mut steps = Vec::new();
-        let mut unis = Vec::new();
-        for (name, numel) in &self.params {
-            let ubuf = self.gpu.uniform_dynamic(9);
-            let st = self.gpu.step_buf(
-                ADAMW,
-                &ubuf,
-                &[self.w(name), self.g(name), &self.adam_m[name], &self.adam_v[name]],
-                *numel as u32,
-            );
-            steps.push(st);
-            unis.push(ubuf);
-        }
-        (steps, unis)
+    /// One AdamW step with MoE's fixed betas/eps and no grad clipping — the
+    /// signature the existing CLI / federated / validate callers use. `t` is the
+    /// (1-based) step index for bias correction. Delegates to the shared
+    /// optimizer so the dispatch graph is cached across steps.
+    pub fn adamw_step_betas(&self, t: u32, lr: f32, wd: f32, beta1: f32, beta2: f32, eps: f32) {
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, beta1, beta2, eps, None, 1.0);
     }
 
-    /// One AdamW step. `t` is the (1-based) step index for bias correction.
-    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, beta1: f32, beta2: f32, eps: f32) {
-        let bc1 = 1.0 - beta1.powi(t as i32);
-        let bc2 = 1.0 - beta2.powi(t as i32);
-        for (i, (_, numel)) in self.params.iter().enumerate() {
-            let data = [*numel as u32, 0, f(lr), f(beta1), f(beta2), f(eps), f(wd), f(bc1), f(bc2)];
-            self.gpu.write(&self.adamw_uniforms[i], bytemuck::cast_slice(&data));
-        }
-        self.gpu.submit(&[], &self.adamw_steps);
+    /// One AdamW step matching the unified [`model::Model`] signature (optional
+    /// global-norm clip + grad-accum scale), using MoE's fixed betas/eps.
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, MOE_BETA1, MOE_BETA2, MOE_EPS, clip, extra_scale);
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
-        let numel = self.params.iter().find(|(n, _)| n == name).unwrap().1;
-        self.gpu.read(self.w(name), numel)
+        self.ps.read_weight(&self.gpu, name)
     }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
-        let numel = self.params.iter().find(|(n, _)| n == name).unwrap().1;
-        self.gpu.read(self.g(name), numel)
+        self.ps.read_grad(&self.gpu, name)
+    }
+
+    /// Write a parameter's weights from host data (required by gradcheck via the
+    /// `Model` trait, and by any host-driven weight surgery).
+    pub fn write_weight(&self, name: &str, data: &[f32]) {
+        self.gpu.write(self.w(name), bytemuck::cast_slice(data));
     }
 
     /// Names of all trainable parameters.
     pub fn param_names(&self) -> Vec<String> {
-        self.params.iter().map(|(n, _)| n.clone()).collect()
+        self.ps.params.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    /// Zero every parameter's gradient (call once per effective batch, before the
+    /// accumulating backward passes).
+    pub fn zero_grads(&self) {
+        self.ps.zero_grads(&self.gpu);
     }
 
     /// Zero one parameter's gradient buffer (host-driven).
     pub fn zero_grad(&self, name: &str) {
-        let numel = self.params.iter().find(|(n, _)| n == name).unwrap().1;
+        let numel = self.ps.numel(name);
         self.gpu.write(self.g(name), &vec![0u32; numel]);
     }
 
@@ -559,9 +542,120 @@ impl Trainer {
         }
     }
 
+    /// Block until submitted device work completes (memory-aperture hygiene),
+    /// matching the GPT/PID hot-loop discipline.
+    pub fn poll_wait(&self) {
+        self.gpu.poll_wait();
+    }
+
     /// Save the current weights (incl. the tied `lm_head`) to a checkpoint.
     pub fn save(&self, path: &str) {
         save_weights(self, &self.cfg, path);
+    }
+}
+
+// ---- the architecture-agnostic Model seam (ADR 0001 §4) ----
+//
+// MoE's `Config` already carries the layout; `ModelConfig` exposes it uniformly.
+// `Trainer` already exposes the forward/backward/param surface as inherent
+// methods, so the `Model` impl is a thin adapter. With `write_weight`/`zero_grads`
+// added and `adamw_step` unified to `(t,lr,wd,clip,extra_scale)`, MoE is now
+// gradient-checked by construction (ADR §8) and trainable by the generic `fit`.
+
+impl model::ModelConfig for Config {
+    fn param_list(&self) -> Vec<(String, usize)> {
+        param_list(self)
+    }
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "model": "moe",
+            "vocab_size": self.vocab, "block_size": self.block_size, "n_layers": self.n_layers,
+            "d_model": self.d_model, "n_heads": self.n_heads, "n_experts": self.n_experts,
+            "top_k": self.top_k, "d_ff": self.d_ff,
+            "aux_loss_coef": self.aux_coef, "z_loss_coef": self.z_coef
+        })
+    }
+    fn from_json(v: &serde_json::Value) -> Self {
+        cfg_from_json(v)
+    }
+    fn vocab(&self) -> u32 {
+        self.vocab
+    }
+    fn block_size(&self) -> u32 {
+        self.block_size
+    }
+    fn finalize_for_dataset(mut self, vocab: u32, block_size: u32) -> Self {
+        self.vocab = vocab;
+        self.block_size = block_size;
+        self
+    }
+}
+
+impl model::Model for Trainer {
+    type Config = Config;
+
+    fn new(cfg: Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
+        Trainer::new(cfg, b, t, init)
+    }
+
+    fn init_weights(cfg: &Config, seed: u64) -> HashMap<String, Vec<f32>> {
+        init_weights(cfg, seed)
+    }
+
+    fn config(&self) -> &Config {
+        &self.cfg
+    }
+
+    fn set_batch(&self, batch: model::Batch) {
+        match batch {
+            model::Batch::Lm { tokens, targets } => Trainer::set_batch(self, tokens, targets),
+            _ => panic!("moe::Trainer only supports Batch::Lm"),
+        }
+    }
+
+    fn forward(&self) -> f32 {
+        Trainer::forward(self)
+    }
+    fn backward(&self) {
+        Trainer::backward(self)
+    }
+    fn zero_grads(&self) {
+        Trainer::zero_grads(self)
+    }
+
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
+        Trainer::adamw_step(self, t, lr, wd, clip, extra_scale)
+    }
+
+    fn poll_wait(&self) {
+        Trainer::poll_wait(self)
+    }
+
+    fn param_names(&self) -> Vec<String> {
+        Trainer::param_names(self)
+    }
+    fn read_weight(&self, name: &str) -> Vec<f32> {
+        Trainer::read_weight(self, name)
+    }
+    fn write_weight(&self, name: &str, data: &[f32]) {
+        Trainer::write_weight(self, name, data)
+    }
+    fn read_grad(&self, name: &str) -> Vec<f32> {
+        Trainer::read_grad(self, name)
+    }
+
+    /// MoE inference (per-position logits) lives in the standalone `Engine`
+    /// (`moe::model`), not the `Trainer`; the generic trainer/gradcheck never
+    /// call this, so the `Model` seam reports "no in-trainer token head".
+    fn logits_all(&self, _tokens: &[u32]) -> Option<Vec<f32>> {
+        None
+    }
+
+    fn save(&self, path: &str) {
+        Trainer::save(self, path)
+    }
+    fn config_json(&self) -> serde_json::Value {
+        model::ModelConfig::to_json(&self.cfg)
     }
 }
 
@@ -665,12 +759,13 @@ pub fn validate(path: &str) {
     let moe = json["losses"]["moe"].as_f64().unwrap() as f32;
     println!("loss: rust_ce={:.6}  py_ce(total-moe)={:.6}  (py total={:.6})", ce, total - moe, total);
 
+    trainer.zero_grads();
     trainer.backward();
     println!("\n== gradient check (Rust vs PyTorch autograd) ==");
     let mut g_mae = 0.0f32;
     let mut g_mre = 0.0f32;
     let mut worst = String::new();
-    for (name, _) in trainer.params.iter() {
+    for (name, _) in trainer.ps.params.iter() {
         let r = trainer.read_grad(name);
         let p = &grad[name];
         let (mae, mre) = max_err(&r, p);
@@ -680,11 +775,11 @@ pub fn validate(path: &str) {
     println!("max abs grad error = {:.3e} (worst: {})", g_mae, worst);
     println!("max rel grad error = {:.3e}", g_mre);
 
-    trainer.adamw_step(1, lr, wd, beta1, beta2, eps);
+    trainer.adamw_step_betas(1, lr, wd, beta1, beta2, eps);
     println!("\n== weight check after one AdamW step ==");
     let mut w_mae = 0.0f32;
     let mut w_mre = 0.0f32;
-    for (name, _) in trainer.params.iter() {
+    for (name, _) in trainer.ps.params.iter() {
         let r = trainer.read_weight(name);
         let (mae, mre) = max_err(&r, &updated[name]);
         w_mae = w_mae.max(mae);
@@ -779,44 +874,44 @@ pub struct TrainArgs {
 
 pub fn train(args: TrainArgs) {
     let cfg = Config {
-        vocab: 64, block_size: 64, n_layers: 2, d_model: 64, n_heads: 4,
+        vocab: 64, block_size: args.t, n_layers: 2, d_model: 64, n_heads: 4,
         n_experts: 4, top_k: 2, d_ff: 128, aux_coef: 0.01, z_coef: 1e-4,
     };
-    assert!(args.t <= cfg.block_size, "T must be <= block_size");
+    assert!(args.t <= 64, "T must be <= 64 (the toy corpus window)");
 
+    // Materialise the synthetic corpus as a token dataset on disk, then drive the
+    // architecture-agnostic generic trainer (ADR §3/§4) over MoE. The training
+    // loop (LR schedule, grad-accum, eval/checkpoint, resume) is shared with the
+    // GPT/PID models; only the corpus generation stays MoE-specific. There is no
+    // meta.json, so `fit` infers vocab from the data (= 64, matching `cfg.vocab`).
     let corpus = make_corpus(20_000, cfg.vocab, 123);
-    // Resume from the existing checkpoint if one is already at `out`; otherwise
-    // start from a fresh random init. (Weights are warm-started; AdamW moments
-    // restart at zero — they are not persisted in the checkpoint.)
-    let init = if std::path::Path::new(&args.out).exists() {
-        println!("resuming from existing checkpoint {}", args.out);
-        checkpoint::load(&args.out).by_role("")
-    } else {
-        init_weights(&cfg, args.seed)
+    let dir = std::env::temp_dir().join(format!("brain_moe_train_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let n_val = corpus.len() / 10;
+    let split = corpus.len() - n_val;
+    let toks16: Vec<u16> = corpus.iter().map(|&v| v as u16).collect();
+    data::binio::write_u16_bin(&dir.join("train.bin"), &toks16[..split]).expect("write train.bin");
+    data::binio::write_u16_bin(&dir.join("val.bin"), &toks16[split..]).expect("write val.bin");
+
+    let opts = model::FitOpts {
+        steps: args.steps,
+        batch_size: args.b,
+        block_size: args.t,
+        lr: args.lr,
+        min_lr: args.lr,
+        warmup: 0,
+        decay_iters: args.steps,
+        weight_decay: args.wd,
+        grad_clip: 0.0,
+        grad_accum: 1,
+        eval_interval: 50,
+        eval_batches: 10,
+        seed: args.seed,
+        ..Default::default()
     };
-    let trainer = Trainer::new(cfg.clone(), args.b, args.t, &init);
-
-    let mut rng = args.seed.max(1) ^ 0x9E3779B97F4A7C15;
-    let tt = args.t as usize;
-    for step in 1..=args.steps {
-        // sample B random windows
-        let mut xs = Vec::with_capacity((args.b * args.t) as usize);
-        let mut ys = Vec::with_capacity((args.b * args.t) as usize);
-        for _ in 0..args.b {
-            let start = (xorshift(&mut rng) as usize) % (corpus.len() - tt - 1);
-            xs.extend_from_slice(&corpus[start..start + tt]);
-            ys.extend_from_slice(&corpus[start + 1..start + 1 + tt]);
-        }
-        trainer.set_batch(&xs, &ys);
-        let loss = trainer.forward();
-        trainer.backward();
-        trainer.adamw_step(step, args.lr, args.wd, 0.9, 0.95, 1e-8);
-        if step == 1 || step % 50 == 0 || step == args.steps {
-            println!("step {:5} | loss {:.4}", step, loss);
-        }
-    }
-
-    save_weights(&trainer, &cfg, &args.out);
+    let out = std::path::Path::new(&args.out);
+    let _ = model::train::fit::<Trainer>(&dir, cfg, &opts, Some(out));
+    let _ = std::fs::remove_dir_all(&dir);
     println!("saved {}", args.out);
 }
 
@@ -856,9 +951,10 @@ pub fn train_expert(args: ExpertTrainArgs) {
         }
         trainer.set_batch(&xs, &ys);
         let loss = trainer.forward();
+        trainer.zero_grads();
         trainer.backward();
         trainer.freeze_grads_except_expert(args.expert); // freeze the shared backbone
-        trainer.adamw_step(step, args.lr, 0.0, 0.9, 0.95, 1e-8); // wd=0 keeps frozen params fixed
+        trainer.adamw_step_betas(step, args.lr, 0.0, 0.9, 0.95, 1e-8); // wd=0 keeps frozen params fixed
         if step == 1 || step % 50 == 0 || step == args.steps {
             println!("expert {} | step {:5} | loss {:.4}", args.expert, step, loss);
         }
@@ -878,7 +974,7 @@ fn save_weights(trainer: &Trainer, cfg: &Config, path: &str) {
         blob.extend_from_slice(data);
     };
     let d = cfg.d_model as u64;
-    for (name, _) in trainer.params.iter() {
+    for (name, _) in trainer.ps.params.iter() {
         let data = trainer.read_weight(name);
         add(name, vec![data.len() as u64], &data, &mut tensors, &mut blob);
     }
@@ -972,9 +1068,10 @@ mod tests {
             }
             tr.set_batch(&xs, &ys);
             tr.forward();
+            tr.zero_grads();
             tr.backward();
             tr.freeze_grads_except_expert(1); // freeze everything but expert 1
-            tr.adamw_step(step, 1e-2, 0.0, 0.9, 0.95, 1e-8); // wd=0 -> frozen params fixed
+            tr.adamw_step_betas(step, 1e-2, 0.0, 0.9, 0.95, 1e-8); // wd=0 -> frozen params fixed
         }
 
         let backbone1 = tr.read_weight("token_emb.weight");

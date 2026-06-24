@@ -163,6 +163,45 @@ pub fn check_gpt(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Build a tiny sparse-MoE Trainer, set a fixed batch, and gradient-check it
+/// (validates RMSNorm/RoPE/router/SwiGLU/aux+z-loss backprop). Now that MoE
+/// implements `model::Model`, the blanket `CheckModel` impl makes it checkable —
+/// closing the TESTING.md gap where only GPT was gradient-checked. Returns the
+/// report.
+pub fn check_moe(seed: u64) -> Report {
+    use moe::train::{Config, Trainer};
+    // aux_coef/z_coef = 0: the FD check differentiates the model's scalar
+    // `forward()`, which is the cross-entropy only (the load-balancing aux loss
+    // and router z-loss are folded into the router gradient, not the returned
+    // scalar — matching `validate`'s CE-only comparison vs the PyTorch
+    // reference). Zeroing them makes the analytic router grad consistent with the
+    // CE-only FD; the aux/z terms are gated separately by `train::validate`.
+    let cfg = Config {
+        vocab: 23,
+        block_size: 12,
+        n_layers: 2,
+        d_model: 16,
+        n_heads: 2,
+        n_experts: 3,
+        // top_k == n_experts: every expert is always selected, so the renormalised
+        // gate is a smooth softmax over all experts with no hard top-k selection
+        // boundary. That removes the discontinuity FD cannot see (perturbing the
+        // router weight could otherwise flip *which* experts are in the top-k,
+        // making the central difference ill-conditioned) while still exercising
+        // the full router matmul + softmax + gate backprop.
+        top_k: 3,
+        d_ff: 32,
+        aux_coef: 0.0,
+        z_coef: 0.0,
+    };
+    let init = <Trainer as model::Model>::init_weights(&cfg, seed);
+    let model = Trainer::new(cfg, 2, 6, &init);
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
+    model.set_batch(&x, &y);
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +212,23 @@ mod tests {
             return;
         }
         let report = check_gpt(7);
+        report.print();
+        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn moe_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_moe(7);
         report.print();
         // fp32 directional FD on a software GPU: combined abs+rel tolerance.
         let (atol, rtol) = (4e-3, 8e-2);
