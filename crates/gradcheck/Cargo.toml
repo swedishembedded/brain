@@ -1,0 +1,14 @@
+[package]
+name = "brain-gradcheck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Numerical (finite-difference) gradient checker — the backprop correctness gate, replacing the PyTorch oracle."
+
+[lib]
+name = "gradcheck"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpt.workspace = true
+brain-data.workspace = true
