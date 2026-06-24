@@ -23,6 +23,10 @@ brain — train and evaluate neural nets from scratch on the GPU (Rust + WGSL).
 USAGE: brain <command> [options]
 The model is selected by the command.
 
+Add --device cpu (or set BRAIN_DEVICE=cpu) to run any command on the native CPU
+backend (WGSL kernels JIT-compiled to native code across all cores, no GPU);
+--device gpu (the default) uses wgpu. Both are built into the same binary.
+
 DATA
   brain data gen <name> [--out DIR --n N --seed S]
       names: calculator | reverser | wordcalc | timeseries | shakespeare_char | gpt
@@ -31,7 +35,8 @@ GPT (dense baseline)
   brain gpt train <data_dir> [--out F --steps N --batch B --block T
                               --layers L --d-model D --heads H --lr X --mask = --align]
   brain gpt eval  --weights F --data <dir> [--batches N --samples M]
-  brain gpt gen   --weights F --data <dir> [--prompt \"...\" --max-new N --temp X --top-k K]
+  brain gpt gen   --weights F [--data <dir>] [--prompt \"...\" --max-new N --temp X --top-k K]
+                              (vocab is read from the checkpoint; --data only for old ones)
 
 SPARSE MoE
   brain train [--steps N --batch-size B --block-size T --lr X --out F]
@@ -63,8 +68,36 @@ EXAMPLES
 Or drive everything via the Makefile:  make data/calculator train/gpt/calculator eval/gpt/calculator
 ";
 
+/// Extract a global `--device cpu|gpu` flag from anywhere in the args and select
+/// the compute backend, returning the remaining args. `BRAIN_DEVICE=cpu` does the
+/// same without a flag. Both backends are compiled into every build; this only
+/// chooses which one each model instantiates at runtime.
+fn select_backend(argv: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(argv.len());
+    let mut i = 0;
+    while i < argv.len() {
+        if argv[i] == "--device" {
+            match argv.get(i + 1).map(|s| s.as_str()) {
+                Some("cpu") => gpu_core::set_default_backend(gpu_core::Backend::Cpu),
+                Some("gpu") | Some("wgpu") => {
+                    gpu_core::set_default_backend(gpu_core::Backend::Wgpu)
+                }
+                other => {
+                    eprintln!("brain: --device expects cpu|gpu (got {other:?})");
+                    std::process::exit(2);
+                }
+            }
+            i += 2;
+        } else {
+            out.push(argv[i].clone());
+            i += 1;
+        }
+    }
+    out
+}
+
 fn main() {
-    let argv: Vec<String> = std::env::args().collect();
+    let argv = select_backend(std::env::args().collect());
     match argv.get(1).map(|s| s.as_str()) {
         Some("data") => data_cli::run_data(&argv[2..]),
         Some("gpt") => gpt_cli::run_gpt(&argv[2..]),

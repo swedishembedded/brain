@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use wgpu::util::DeviceExt;
+use gpu_core::{DeviceBuffer, Gpu, Step};
 
 use crate::train;
 
@@ -89,119 +89,58 @@ const K_SCALE_ADD: usize = 7;
 const K_ADD: usize = 8;
 
 struct Engine {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    pipelines: Vec<wgpu::ComputePipeline>,
-    weights: HashMap<String, wgpu::Buffer>,
+    gpu: Gpu,
+    weights: HashMap<String, DeviceBuffer>,
     cfg: Config,
 
-    tokens: wgpu::Buffer,
-    x: wgpu::Buffer,
-    xn: wgpu::Buffer,
-    qkv: wgpu::Buffer,
-    attn_out: wgpu::Buffer,
-    proj_out: wgpu::Buffer,
-    router_logits: wgpu::Buffer,
-    gate: wgpu::Buffer,
-    gate_pre: wgpu::Buffer,
-    up: wgpu::Buffer,
-    h: wgpu::Buffer,
-    expert_out: wgpu::Buffer,
-    moe_acc: wgpu::Buffer,
-    logits: wgpu::Buffer,
-    staging: wgpu::Buffer,
+    tokens: DeviceBuffer,
+    x: DeviceBuffer,
+    xn: DeviceBuffer,
+    qkv: DeviceBuffer,
+    attn_out: DeviceBuffer,
+    proj_out: DeviceBuffer,
+    router_logits: DeviceBuffer,
+    gate: DeviceBuffer,
+    gate_pre: DeviceBuffer,
+    up: DeviceBuffer,
+    h: DeviceBuffer,
+    expert_out: DeviceBuffer,
+    moe_acc: DeviceBuffer,
+    logits: DeviceBuffer,
 }
 
-fn make_pipeline(device: &wgpu::Device, label: &str, src: &str) -> wgpu::ComputePipeline {
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(label),
-        source: wgpu::ShaderSource::Wgsl(src.into()),
-    });
-    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some(label),
-        layout: None,
-        module: &module,
-        entry_point: Some("main"),
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
-        cache: None,
-    })
-}
+const ENGINE_PIPELINES: &[(&str, &str)] = &[
+    ("embed", kernels::EMBED),
+    ("matmul", kernels::MATMUL),
+    ("rmsnorm", kernels::RMSNORM),
+    ("rope", kernels::ROPE),
+    ("attention", kernels::ATTENTION),
+    ("router_gate", kernels::ROUTER_GATE),
+    ("silu_mul", kernels::SILU_MUL),
+    ("scale_add", kernels::SCALE_ADD),
+    ("add", kernels::ADD),
+];
 
 impl Engine {
     fn new(w: Weights) -> Engine {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .expect("no suitable GPU adapter found");
-
-        let info = adapter.get_info();
-        eprintln!("adapter: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
-
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("moe-device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            trace: wgpu::Trace::Off,
-        }))
-        .expect("request_device failed");
-
-        let pipelines = vec![
-            make_pipeline(&device, "embed", kernels::EMBED),
-            make_pipeline(&device, "matmul", kernels::MATMUL),
-            make_pipeline(&device, "rmsnorm", kernels::RMSNORM),
-            make_pipeline(&device, "rope", kernels::ROPE),
-            make_pipeline(&device, "attention", kernels::ATTENTION),
-            make_pipeline(&device, "router_gate", kernels::ROUTER_GATE),
-            make_pipeline(&device, "silu_mul", kernels::SILU_MUL),
-            make_pipeline(&device, "scale_add", kernels::SCALE_ADD),
-            make_pipeline(&device, "add", kernels::ADD),
-        ];
+        // Shared accelerator (wgpu or native CPU) — same plumbing as the trainer,
+        // GPT, and PID models. No bespoke device init here anymore.
+        let gpu = Gpu::new(ENGINE_PIPELINES);
 
         let mut weights = HashMap::new();
         for (name, data) in &w.tensors {
-            let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(name),
-                contents: bytemuck::cast_slice(data),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-            weights.insert(name.clone(), buf);
+            weights.insert(name.clone(), gpu.storage_init(name, data));
         }
 
         let c = &w.cfg;
         let bs = c.block_size as u64;
-        let storage = |n: u64| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: n * 4,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_DST
-                    | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            })
-        };
+        let storage = |n: u64| gpu.storage(n);
 
-        let tokens = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("tokens"),
-            size: bs * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("staging"),
-            size: (c.vocab_size as u64) * 4,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let tokens = gpu.storage(bs);
 
         let d = c.d_model as u64;
         let ff = c.d_ff as u64;
-        Engine {
-            pipelines,
+        let engine = Engine {
             weights,
             tokens,
             x: storage(bs * d),
@@ -217,54 +156,13 @@ impl Engine {
             expert_out: storage(bs * d),
             moe_acc: storage(bs * d),
             logits: storage(bs * c.vocab_size as u64),
-            staging,
             cfg: w.cfg,
-            device,
-            queue,
-        }
+            gpu,
+        };
+        engine
     }
 
-    fn uniform(&self, data: &[u32]) -> wgpu::Buffer {
-        let mut bytes: Vec<u8> = bytemuck::cast_slice(data).to_vec();
-        while bytes.len() % 16 != 0 {
-            bytes.push(0);
-        }
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("params"),
-            contents: &bytes,
-            usage: wgpu::BufferUsages::UNIFORM,
-        })
-    }
-
-    fn step(
-        &self,
-        kind: usize,
-        buffers: &[&wgpu::Buffer],
-        params: &[u32],
-        threads: u32,
-    ) -> (usize, wgpu::BindGroup, u32) {
-        let ubuf = self.uniform(params);
-        let mut entries = vec![wgpu::BindGroupEntry {
-            binding: 0,
-            resource: ubuf.as_entire_binding(),
-        }];
-        for (i, b) in buffers.iter().enumerate() {
-            entries.push(wgpu::BindGroupEntry {
-                binding: (i + 1) as u32,
-                resource: b.as_entire_binding(),
-            });
-        }
-        let layout = self.pipelines[kind].get_bind_group_layout(0);
-        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &layout,
-            entries: &entries,
-        });
-        let groups = ((threads + 63) / 64).max(1);
-        (kind, bg, groups)
-    }
-
-    fn w(&self, name: &str) -> &wgpu::Buffer {
+    fn w(&self, name: &str) -> &DeviceBuffer {
         self.weights
             .get(name)
             .unwrap_or_else(|| panic!("missing weight tensor: {name}"))
@@ -278,12 +176,11 @@ impl Engine {
         let ff = c.d_ff;
         let e = c.n_experts;
 
-        self.queue
-            .write_buffer(&self.tokens, 0, bytemuck::cast_slice(tokens));
+        self.gpu.write(&self.tokens, bytemuck::cast_slice(tokens));
 
-        let mut steps: Vec<(usize, wgpu::BindGroup, u32)> = Vec::new();
+        let mut steps: Vec<Step> = Vec::new();
 
-        steps.push(self.step(
+        steps.push(self.gpu.step(
             K_EMBED,
             &[&self.tokens, self.w("token_emb.weight"), &self.x],
             &[d, t],
@@ -292,58 +189,58 @@ impl Engine {
 
         for l in 0..c.n_layers {
             let p = |s: &str| format!("blocks.{l}.{s}");
-            steps.push(self.step(
+            steps.push(self.gpu.step(
                 K_RMSNORM,
                 &[&self.x, self.w(&p("norm1.weight")), &self.xn],
                 &[d, t],
                 t,
             ));
-            steps.push(self.step(
+            steps.push(self.gpu.step(
                 K_MATMUL,
                 &[&self.xn, self.w(&p("attn.qkv.weight")), &self.qkv],
                 &[t, d, 3 * d],
                 t * 3 * d,
             ));
             let half = c.head_dim() / 2;
-            steps.push(self.step(
+            steps.push(self.gpu.step(
                 K_ROPE,
                 &[&self.qkv],
                 &[t, c.n_heads, c.head_dim(), 3 * d, 0],
                 t * c.n_heads * half,
             ));
-            steps.push(self.step(
+            steps.push(self.gpu.step(
                 K_ROPE,
                 &[&self.qkv],
                 &[t, c.n_heads, c.head_dim(), 3 * d, d],
                 t * c.n_heads * half,
             ));
-            steps.push(self.step(
+            steps.push(self.gpu.step(
                 K_ATTENTION,
                 &[&self.qkv, &self.attn_out],
                 &[t, c.n_heads, c.head_dim(), 3 * d, 0, d, 2 * d, d],
                 t * c.n_heads,
             ));
-            steps.push(self.step(
+            steps.push(self.gpu.step(
                 K_MATMUL,
                 &[&self.attn_out, self.w(&p("attn.out.weight")), &self.proj_out],
                 &[t, d, d],
                 t * d,
             ));
-            steps.push(self.step(K_ADD, &[&self.proj_out, &self.x], &[t * d], t * d));
+            steps.push(self.gpu.step(K_ADD, &[&self.proj_out, &self.x], &[t * d], t * d));
 
-            steps.push(self.step(
+            steps.push(self.gpu.step(
                 K_RMSNORM,
                 &[&self.x, self.w(&p("norm2.weight")), &self.xn],
                 &[d, t],
                 t,
             ));
-            steps.push(self.step(
+            steps.push(self.gpu.step(
                 K_MATMUL,
                 &[&self.xn, self.w(&p("moe.router.weight")), &self.router_logits],
                 &[t, d, e],
                 t * e,
             ));
-            steps.push(self.step(
+            steps.push(self.gpu.step(
                 K_ROUTER,
                 &[&self.router_logits, &self.gate],
                 &[t, e, c.top_k],
@@ -351,80 +248,61 @@ impl Engine {
             ));
             for ei in 0..e {
                 let ep = |s: &str| format!("blocks.{l}.moe.experts.{ei}.{s}");
-                steps.push(self.step(
+                steps.push(self.gpu.step(
                     K_MATMUL,
                     &[&self.xn, self.w(&ep("w_gate.weight")), &self.gate_pre],
                     &[t, d, ff],
                     t * ff,
                 ));
-                steps.push(self.step(
+                steps.push(self.gpu.step(
                     K_MATMUL,
                     &[&self.xn, self.w(&ep("w_up.weight")), &self.up],
                     &[t, d, ff],
                     t * ff,
                 ));
-                steps.push(self.step(
+                steps.push(self.gpu.step(
                     K_SILU,
                     &[&self.gate_pre, &self.up, &self.h],
                     &[t * ff],
                     t * ff,
                 ));
-                steps.push(self.step(
+                steps.push(self.gpu.step(
                     K_MATMUL,
                     &[&self.h, self.w(&ep("w_down.weight")), &self.expert_out],
                     &[t, ff, d],
                     t * d,
                 ));
                 let accumulate = if ei == 0 { 0 } else { 1 };
-                steps.push(self.step(
+                steps.push(self.gpu.step(
                     K_SCALE_ADD,
                     &[&self.gate, &self.expert_out, &self.moe_acc],
                     &[t, d, e, ei, accumulate],
                     t * d,
                 ));
             }
-            steps.push(self.step(K_ADD, &[&self.moe_acc, &self.x], &[t * d], t * d));
+            steps.push(self.gpu.step(K_ADD, &[&self.moe_acc, &self.x], &[t * d], t * d));
         }
 
-        steps.push(self.step(
+        steps.push(self.gpu.step(
             K_RMSNORM,
             &[&self.x, self.w("norm.weight"), &self.xn],
             &[d, t],
             t,
         ));
-        steps.push(self.step(
+        steps.push(self.gpu.step(
             K_MATMUL,
             &[&self.xn, self.w("lm_head.weight"), &self.logits],
             &[t, d, c.vocab_size],
             t * c.vocab_size,
         ));
 
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("forward") });
-        {
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("forward"),
-                timestamp_writes: None,
-            });
-            for (kind, bg, groups) in &steps {
-                pass.set_pipeline(&self.pipelines[*kind]);
-                pass.set_bind_group(0, bg, &[]);
-                pass.dispatch_workgroups(*groups, 1, 1);
-            }
-        }
-        let last = (t - 1) as u64 * c.vocab_size as u64 * 4;
-        enc.copy_buffer_to_buffer(&self.logits, last, &self.staging, 0, c.vocab_size as u64 * 4);
-        self.queue.submit(Some(enc.finish()));
+        self.gpu.submit(&[], &steps);
 
-        let slice = self.staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        rx.recv().unwrap().unwrap();
-        let out = bytemuck::cast_slice::<u8, f32>(&slice.get_mapped_range()).to_vec();
-        self.staging.unmap();
-        out
+        // Read the full logits and return the last position's row (gpu_core reads
+        // from offset 0; the slice is tiny for the toy vocab).
+        let vocab = c.vocab_size as usize;
+        let all = self.gpu.read(&self.logits, t as usize * vocab);
+        all[(t as usize - 1) * vocab..].to_vec()
     }
 }
 

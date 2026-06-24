@@ -15,6 +15,7 @@ path = "src/main.rs"
 vulkan-coopmat = ["dep:brain-vulkan"]
 
 [dependencies]
+brain-gpu-core.workspace = true
 brain-moe.workspace = true
 brain-gpt.workspace = true
 brain-pid.workspace = true

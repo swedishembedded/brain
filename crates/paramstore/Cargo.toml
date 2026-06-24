@@ -9,9 +9,6 @@ description = "Model-agnostic param/grad/Adam buffer storage with grad-clip plum
 name = "paramstore"
 path = "src/lib.rs"
 
-[features]
-cpu-backend = ["brain-gpu-core/cpu-backend"]
-
 [dependencies]
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true

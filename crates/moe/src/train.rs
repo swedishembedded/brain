@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 
-use wgpu::util::DeviceExt;
+use gpu_core::{f, DeviceBuffer, Gpu, Step};
 
 // ---- kernel indices (order matches `PIPELINES`) ----
 const EMBED: usize = 0;
@@ -113,8 +113,6 @@ impl Config {
     }
 }
 
-type Step = (usize, wgpu::BindGroup, u32);
-
 /// Names + element counts of the unique (trainable) parameters.
 fn param_list(c: &Config) -> Vec<(String, usize)> {
     let d = c.d_model as usize;
@@ -138,66 +136,64 @@ fn param_list(c: &Config) -> Vec<(String, usize)> {
 }
 
 struct LayerBufs {
-    xn1: wgpu::Buffer,
-    qkv: wgpu::Buffer,
-    probs: wgpu::Buffer,
-    attn_out: wgpu::Buffer,
-    xmid: wgpu::Buffer,
-    xn2: wgpu::Buffer,
-    router_logits: wgpu::Buffer,
-    router_probs: wgpu::Buffer,
-    gate: wgpu::Buffer,
-    gate_pre: Vec<wgpu::Buffer>,
-    up: Vec<wgpu::Buffer>,
-    h: Vec<wgpu::Buffer>,
-    expert_out: Vec<wgpu::Buffer>,
-    dxmid: wgpu::Buffer,
+    xn1: DeviceBuffer,
+    qkv: DeviceBuffer,
+    probs: DeviceBuffer,
+    attn_out: DeviceBuffer,
+    xmid: DeviceBuffer,
+    xn2: DeviceBuffer,
+    router_logits: DeviceBuffer,
+    router_probs: DeviceBuffer,
+    gate: DeviceBuffer,
+    gate_pre: Vec<DeviceBuffer>,
+    up: Vec<DeviceBuffer>,
+    h: Vec<DeviceBuffer>,
+    expert_out: Vec<DeviceBuffer>,
+    dxmid: DeviceBuffer,
 }
 
 pub struct Trainer {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    pipelines: Vec<wgpu::ComputePipeline>,
+    gpu: Gpu,
     cfg: Config,
     b: u32,
     t: u32,
 
-    weights: HashMap<String, wgpu::Buffer>,
-    grads: HashMap<String, wgpu::Buffer>,
-    adam_m: HashMap<String, wgpu::Buffer>,
-    adam_v: HashMap<String, wgpu::Buffer>,
+    weights: HashMap<String, DeviceBuffer>,
+    grads: HashMap<String, DeviceBuffer>,
+    adam_m: HashMap<String, DeviceBuffer>,
+    adam_v: HashMap<String, DeviceBuffer>,
     params: Vec<(String, usize)>,
 
-    tokens: wgpu::Buffer,
-    targets: wgpu::Buffer,
+    tokens: DeviceBuffer,
+    targets: DeviceBuffer,
 
-    res: Vec<wgpu::Buffer>,  // residual stream, len n_layers+1 (res[0]=emb out, res[L]=x_final)
-    dres: Vec<wgpu::Buffer>, // its gradient
+    res: Vec<DeviceBuffer>,  // residual stream, len n_layers+1 (res[0]=emb out, res[L]=x_final)
+    dres: Vec<DeviceBuffer>, // its gradient
     layers: Vec<LayerBufs>,
-    xn_final: wgpu::Buffer,
-    logits: wgpu::Buffer,
+    xn_final: DeviceBuffer,
+    logits: DeviceBuffer,
 
     // forward temporaries
-    scores: wgpu::Buffer,
-    proj: wgpu::Buffer,
-    moe_acc: wgpu::Buffer,
-    ce_buf: wgpu::Buffer,
-    fe: wgpu::Buffer,
+    scores: DeviceBuffer,
+    proj: DeviceBuffer,
+    moe_acc: DeviceBuffer,
+    ce_buf: DeviceBuffer,
+    fe: DeviceBuffer,
 
     // backward temporaries
-    d_logits: wgpu::Buffer,
-    d_xn: wgpu::Buffer,
-    d_tmp: wgpu::Buffer,
-    d_qkv: wgpu::Buffer,
-    d_attn_out: wgpu::Buffer,
-    d_scores: wgpu::Buffer,
-    d_gate: wgpu::Buffer,
-    d_router_logits: wgpu::Buffer,
-    d_gate_pre: wgpu::Buffer,
-    d_up: wgpu::Buffer,
-    d_h: wgpu::Buffer,
-    d_expert_out: wgpu::Buffer,
-    inv: wgpu::Buffer,
+    d_logits: DeviceBuffer,
+    d_xn: DeviceBuffer,
+    d_tmp: DeviceBuffer,
+    d_qkv: DeviceBuffer,
+    d_attn_out: DeviceBuffer,
+    d_scores: DeviceBuffer,
+    d_gate: DeviceBuffer,
+    d_router_logits: DeviceBuffer,
+    d_gate_pre: DeviceBuffer,
+    d_up: DeviceBuffer,
+    d_h: DeviceBuffer,
+    d_expert_out: DeviceBuffer,
+    inv: DeviceBuffer,
 
     // Cached dispatch graphs. The forward/backward/AdamW step lists are
     // structurally identical on every iteration, so we build them once and
@@ -210,69 +206,21 @@ pub struct Trainer {
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
     adamw_steps: Vec<Step>,
-    adamw_uniforms: Vec<wgpu::Buffer>,
-}
-
-fn f(x: f32) -> u32 {
-    x.to_bits()
+    adamw_uniforms: Vec<DeviceBuffer>,
 }
 
 impl Trainer {
-    fn storage(device: &wgpu::Device, n: u64) -> wgpu::Buffer {
-        device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: (n * 4).max(4),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        })
-    }
-
     pub fn new(cfg: Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Trainer {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .expect("no suitable GPU adapter found");
-        eprintln!("adapter: {} ({:?})", adapter.get_info().name, adapter.get_info().backend);
-
-        let mut limits = wgpu::Limits::downlevel_defaults();
-        limits.max_storage_buffers_per_shader_stage = 8;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("trainer"),
-            required_features: wgpu::Features::empty(),
-            required_limits: limits,
-            memory_hints: wgpu::MemoryHints::Performance,
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            trace: wgpu::Trace::Off,
-        }))
-        .expect("request_device failed");
-
-        let pipelines = PIPELINES
-            .iter()
-            .map(|(name, src)| {
-                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(name),
-                    source: wgpu::ShaderSource::Wgsl((*src).into()),
-                });
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(name),
-                    layout: None,
-                    module: &module,
-                    entry_point: Some("main"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    cache: None,
-                })
-            })
-            .collect();
+        // One shared accelerator (wgpu or native CPU, chosen at runtime). All the
+        // device-init + dispatch plumbing that used to live here now lives in
+        // `gpu_core`, shared with the GPT and PID models.
+        let gpu = Gpu::new(PIPELINES);
 
         let c = cfg.clone();
         let params = param_list(&c);
 
-        // weights / grads / adam state
+        // weights / grads / adam state (grads zeroed each step; adam state zeroed
+        // here since wgpu storage buffers are created uninitialised).
         let mut weights = HashMap::new();
         let mut grads = HashMap::new();
         let mut adam_m = HashMap::new();
@@ -280,25 +228,15 @@ impl Trainer {
         for (name, numel) in &params {
             let data = init.get(name).unwrap_or_else(|| panic!("missing init weight {name}"));
             assert_eq!(data.len(), *numel, "size mismatch for {name}");
-            weights.insert(
-                name.clone(),
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(name),
-                    contents: bytemuck::cast_slice(data),
-                    usage: wgpu::BufferUsages::STORAGE
-                        | wgpu::BufferUsages::COPY_DST
-                        | wgpu::BufferUsages::COPY_SRC,
-                }),
-            );
-            grads.insert(name.clone(), Self::storage(&device, *numel as u64));
-            adam_m.insert(name.clone(), Self::storage(&device, *numel as u64));
-            adam_v.insert(name.clone(), Self::storage(&device, *numel as u64));
+            weights.insert(name.clone(), gpu.storage_init(name, data));
+            grads.insert(name.clone(), gpu.storage(*numel as u64));
+            adam_m.insert(name.clone(), gpu.storage(*numel as u64));
+            adam_v.insert(name.clone(), gpu.storage(*numel as u64));
         }
-        // zero adam state
-        for name in weights.keys() {
-            let z = vec![0u8; (params.iter().find(|(n, _)| n == name).unwrap().1) * 4];
-            queue.write_buffer(&adam_m[name], 0, &z);
-            queue.write_buffer(&adam_v[name], 0, &z);
+        for (name, numel) in &params {
+            let z = vec![0u32; *numel];
+            gpu.write(&adam_m[name], &z);
+            gpu.write(&adam_v[name], &z);
         }
 
         let n = (b * t) as u64;
@@ -307,20 +245,10 @@ impl Trainer {
         let e = c.n_experts as u64;
         let bht2 = (b * c.n_heads * t * t) as u64;
 
-        let tokens = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("tokens"),
-            size: n * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let targets = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("targets"),
-            size: n * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let tokens = gpu.storage(n);
+        let targets = gpu.storage(n);
 
-        let st = |x: u64| Self::storage(&device, x);
+        let st = |x: u64| gpu.storage(x);
         let mut res = Vec::new();
         let mut dres = Vec::new();
         for _ in 0..=c.n_layers {
@@ -381,9 +309,7 @@ impl Trainer {
             d_h: st(n * ff),
             d_expert_out: st(n * d),
             inv: st(n),
-            pipelines,
-            device,
-            queue,
+            gpu,
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
             adamw_steps: Vec::new(),
@@ -404,109 +330,16 @@ impl Trainer {
         self.adamw_uniforms = unis;
     }
 
-    fn uniform(&self, data: &[u32]) -> wgpu::Buffer {
-        let mut bytes: Vec<u8> = bytemuck::cast_slice(data).to_vec();
-        while bytes.len() % 16 != 0 {
-            bytes.push(0);
-        }
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("params"),
-            contents: &bytes,
-            usage: wgpu::BufferUsages::UNIFORM,
-        })
-    }
-
-    /// A writable uniform buffer sized for `len` u32s (16-byte aligned), updated
-    /// later via `write_buffer`. Used for AdamW, whose params change every step.
-    fn uniform_dynamic(&self, len: usize) -> wgpu::Buffer {
-        let size = (((len * 4) + 15) / 16 * 16).max(16) as u64;
-        self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("params"),
-            size,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        })
-    }
-
-    /// Build a dispatch around an already-allocated uniform buffer. The bind
-    /// group keeps `ubuf` (and `bufs`) alive for as long as the `Step` lives.
-    fn step_buf(&self, kind: usize, ubuf: &wgpu::Buffer, bufs: &[&wgpu::Buffer], threads: u32) -> Step {
-        let mut entries = vec![wgpu::BindGroupEntry {
-            binding: 0,
-            resource: ubuf.as_entire_binding(),
-        }];
-        for (i, b) in bufs.iter().enumerate() {
-            entries.push(wgpu::BindGroupEntry {
-                binding: (i + 1) as u32,
-                resource: b.as_entire_binding(),
-            });
-        }
-        let layout = self.pipelines[kind].get_bind_group_layout(0);
-        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &layout,
-            entries: &entries,
-        });
-        (kind, bg, ((threads + 63) / 64).max(1))
-    }
-
-    fn step(&self, kind: usize, bufs: &[&wgpu::Buffer], params: &[u32], threads: u32) -> Step {
-        self.step_buf(kind, &self.uniform(params), bufs, threads)
-    }
-
-    fn submit(&self, clears: &[&wgpu::Buffer], steps: &[Step]) {
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        for c in clears {
-            enc.clear_buffer(c, 0, None);
-        }
-        {
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: None,
-                timestamp_writes: None,
-            });
-            for (kind, bg, groups) in steps {
-                pass.set_pipeline(&self.pipelines[*kind]);
-                pass.set_bind_group(0, bg, &[]);
-                pass.dispatch_workgroups(*groups, 1, 1);
-            }
-        }
-        self.queue.submit(Some(enc.finish()));
-    }
-
-    fn w(&self, name: &str) -> &wgpu::Buffer {
+    fn w(&self, name: &str) -> &DeviceBuffer {
         self.weights.get(name).unwrap_or_else(|| panic!("no weight {name}"))
     }
-    fn g(&self, name: &str) -> &wgpu::Buffer {
+    fn g(&self, name: &str) -> &DeviceBuffer {
         self.grads.get(name).unwrap()
     }
 
-    fn read(&self, buf: &wgpu::Buffer, n: usize) -> Vec<f32> {
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: (n * 4) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        enc.copy_buffer_to_buffer(buf, 0, &staging, 0, (n * 4) as u64);
-        self.queue.submit(Some(enc.finish()));
-        let slice = staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        rx.recv().unwrap().unwrap();
-        let out = bytemuck::cast_slice::<u8, f32>(&slice.get_mapped_range()).to_vec();
-        staging.unmap();
-        out
-    }
-
     pub fn set_batch(&self, x: &[u32], y: &[u32]) {
-        self.queue.write_buffer(&self.tokens, 0, bytemuck::cast_slice(x));
-        self.queue.write_buffer(&self.targets, 0, bytemuck::cast_slice(y));
+        self.gpu.write(&self.tokens, bytemuck::cast_slice(x));
+        self.gpu.write(&self.targets, bytemuck::cast_slice(y));
     }
 
     /// Run the (cached) forward pass and return mean cross-entropy. The
@@ -514,8 +347,8 @@ impl Trainer {
     /// transient staging buffers this step allocated.
     pub fn forward(&self) -> f32 {
         let n = self.b * self.t;
-        self.submit(&[], &self.fwd_steps);
-        let losses = self.read(&self.ce_buf, n as usize);
+        self.gpu.submit(&[], &self.fwd_steps);
+        let losses = self.gpu.read(&self.ce_buf, n as usize);
         losses.iter().sum::<f32>() / n as f32
     }
 
@@ -532,41 +365,41 @@ impl Trainer {
         let mut s: Vec<Step> = Vec::new();
 
         // embedding -> res[0]
-        s.push(self.step(EMBED, &[&self.tokens, self.w("token_emb.weight"), &self.res[0]], &[d, n], n * d));
+        s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("token_emb.weight"), &self.res[0]], &[d, n], n * d));
 
         for l in 0..c.n_layers as usize {
             let lb = &self.layers[l];
             let pn = |name: &str| format!("blocks.{l}.{name}");
             // attention
-            s.push(self.step(RMSNORM, &[&self.res[l], self.w(&pn("norm1.weight")), &lb.xn1], &[d, n], n));
-            s.push(self.step(MATMUL, &[&lb.xn1, self.w(&pn("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], n * 3 * d));
-            s.push(self.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, 0, self.t], n * c.n_heads * half));
-            s.push(self.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, d, self.t], n * c.n_heads * half));
-            s.push(self.step(ATTN_SCORES, &[&lb.qkv, &self.scores], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * self.t));
-            s.push(self.step(ATTN_SOFTMAX, &[&self.scores, &lb.probs], &[self.b, c.n_heads, self.t], self.b * c.n_heads * self.t));
-            s.push(self.step(ATTN_APPLY, &[&lb.probs, &lb.qkv, &lb.attn_out], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t * hd));
-            s.push(self.step(MATMUL, &[&lb.attn_out, self.w(&pn("attn.out.weight")), &self.proj], &[n, d, d], n * d));
-            s.push(self.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
+            s.push(self.gpu.step(RMSNORM, &[&self.res[l], self.w(&pn("norm1.weight")), &lb.xn1], &[d, n], n));
+            s.push(self.gpu.step(MATMUL, &[&lb.xn1, self.w(&pn("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], n * 3 * d));
+            s.push(self.gpu.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, 0, self.t], n * c.n_heads * half));
+            s.push(self.gpu.step(ROPE, &[&lb.qkv], &[n, c.n_heads, hd, 3 * d, d, self.t], n * c.n_heads * half));
+            s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &self.scores], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * self.t));
+            s.push(self.gpu.step(ATTN_SOFTMAX, &[&self.scores, &lb.probs], &[self.b, c.n_heads, self.t], self.b * c.n_heads * self.t));
+            s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.qkv, &lb.attn_out], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t * hd));
+            s.push(self.gpu.step(MATMUL, &[&lb.attn_out, self.w(&pn("attn.out.weight")), &self.proj], &[n, d, d], n * d));
+            s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
             // moe
-            s.push(self.step(RMSNORM, &[&lb.xmid, self.w(&pn("norm2.weight")), &lb.xn2], &[d, n], n));
-            s.push(self.step(MATMUL, &[&lb.xn2, self.w(&pn("moe.router.weight")), &lb.router_logits], &[n, d, e], n * e));
-            s.push(self.step(ROUTER, &[&lb.router_logits, &lb.gate, &lb.router_probs], &[n, e, c.top_k], n));
+            s.push(self.gpu.step(RMSNORM, &[&lb.xmid, self.w(&pn("norm2.weight")), &lb.xn2], &[d, n], n));
+            s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&pn("moe.router.weight")), &lb.router_logits], &[n, d, e], n * e));
+            s.push(self.gpu.step(ROUTER, &[&lb.router_logits, &lb.gate, &lb.router_probs], &[n, e, c.top_k], n));
             for ei in 0..e as usize {
                 let ep = |name: &str| format!("blocks.{l}.moe.experts.{ei}.{name}");
-                s.push(self.step(MATMUL, &[&lb.xn2, self.w(&ep("w_gate.weight")), &lb.gate_pre[ei]], &[n, d, ff], n * ff));
-                s.push(self.step(MATMUL, &[&lb.xn2, self.w(&ep("w_up.weight")), &lb.up[ei]], &[n, d, ff], n * ff));
-                s.push(self.step(SILU, &[&lb.gate_pre[ei], &lb.up[ei], &lb.h[ei]], &[n * ff], n * ff));
-                s.push(self.step(MATMUL, &[&lb.h[ei], self.w(&ep("w_down.weight")), &lb.expert_out[ei]], &[n, ff, d], n * d));
+                s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&ep("w_gate.weight")), &lb.gate_pre[ei]], &[n, d, ff], n * ff));
+                s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&ep("w_up.weight")), &lb.up[ei]], &[n, d, ff], n * ff));
+                s.push(self.gpu.step(SILU, &[&lb.gate_pre[ei], &lb.up[ei], &lb.h[ei]], &[n * ff], n * ff));
+                s.push(self.gpu.step(MATMUL, &[&lb.h[ei], self.w(&ep("w_down.weight")), &lb.expert_out[ei]], &[n, ff, d], n * d));
                 let acc = if ei == 0 { 0 } else { 1 };
-                s.push(self.step(SCALE_ADD, &[&lb.gate, &lb.expert_out[ei], &self.moe_acc], &[n, d, e, ei as u32, acc], n * d));
+                s.push(self.gpu.step(SCALE_ADD, &[&lb.gate, &lb.expert_out[ei], &self.moe_acc], &[n, d, e, ei as u32, acc], n * d));
             }
-            s.push(self.step(ADD2, &[&lb.xmid, &self.moe_acc, &self.res[l + 1]], &[n * d], n * d));
+            s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.moe_acc, &self.res[l + 1]], &[n * d], n * d));
         }
 
         // final norm + tied lm_head
-        s.push(self.step(RMSNORM, &[&self.res[c.n_layers as usize], self.w("norm.weight"), &self.xn_final], &[d, n], n));
-        s.push(self.step(MATMUL, &[&self.xn_final, self.w("token_emb.weight"), &self.logits], &[n, d, c.vocab], n * c.vocab));
-        s.push(self.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, c.vocab], n));
+        s.push(self.gpu.step(RMSNORM, &[&self.res[c.n_layers as usize], self.w("norm.weight"), &self.xn_final], &[d, n], n));
+        s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w("token_emb.weight"), &self.logits], &[n, d, c.vocab], n * c.vocab));
+        s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, c.vocab], n));
 
         s
     }
@@ -574,8 +407,8 @@ impl Trainer {
     /// Run the (cached) backward pass: zero grads, then accumulate every
     /// parameter gradient in a single pass.
     pub fn backward(&self) {
-        let clears: Vec<&wgpu::Buffer> = self.params.iter().map(|(name, _)| self.g(name)).collect();
-        self.submit(&clears, &self.bwd_steps);
+        let clears: Vec<&DeviceBuffer> = self.params.iter().map(|(name, _)| self.g(name)).collect();
+        self.gpu.submit(&clears, &self.bwd_steps);
     }
 
     /// Build the backward dispatch graph (constant across steps).
@@ -591,14 +424,14 @@ impl Trainer {
         let mut s: Vec<Step> = Vec::new();
 
         // ---- output: cross-entropy grad, lm_head, final norm ----
-        s.push(self.step(CE_GRAD, &[&self.logits, &self.targets, &self.d_logits], &[n, c.vocab], n * c.vocab));
+        s.push(self.gpu.step(CE_GRAD, &[&self.logits, &self.targets, &self.d_logits], &[n, c.vocab], n * c.vocab));
         // lm_head dW (tied -> grad_emb) and dX -> d_xn (=d_xn_final)
-        s.push(self.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, self.g("token_emb.weight")], &[n, d, c.vocab], c.vocab * d));
-        s.push(self.step(MATMUL_DX, &[&self.d_logits, self.w("token_emb.weight"), &self.d_xn], &[n, d, c.vocab, 0], n * d));
+        s.push(self.gpu.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, self.g("token_emb.weight")], &[n, d, c.vocab], c.vocab * d));
+        s.push(self.gpu.step(MATMUL_DX, &[&self.d_logits, self.w("token_emb.weight"), &self.d_xn], &[n, d, c.vocab, 0], n * d));
         // final norm backward -> dres[L]
-        s.push(self.step(RMS_INV, &[&self.res[n_layers], &self.inv], &[d, n], n));
-        s.push(self.step(RMSNORM_DW, &[&self.d_xn, &self.res[n_layers], &self.inv, self.g("norm.weight")], &[d, n], d));
-        s.push(self.step(RMSNORM_DX, &[&self.res[n_layers], self.w("norm.weight"), &self.d_xn, &self.dres[n_layers]], &[d, n], n));
+        s.push(self.gpu.step(RMS_INV, &[&self.res[n_layers], &self.inv], &[d, n], n));
+        s.push(self.gpu.step(RMSNORM_DW, &[&self.d_xn, &self.res[n_layers], &self.inv, self.g("norm.weight")], &[d, n], d));
+        s.push(self.gpu.step(RMSNORM_DX, &[&self.res[n_layers], self.w("norm.weight"), &self.d_xn, &self.dres[n_layers]], &[d, n], n));
 
         for l in (0..n_layers).rev() {
             let lb = &self.layers[l];
@@ -607,54 +440,54 @@ impl Trainer {
             // ===== MoE backward (d_moe_acc = dres[l+1]) =====
             // Phase A: per-expert gate gradient
             for ei in 0..e as usize {
-                s.push(self.step(SCALE_ADD_DGATE, &[&lb.expert_out[ei], &self.dres[l + 1], &self.d_gate], &[n, d, e, ei as u32], n));
+                s.push(self.gpu.step(SCALE_ADD_DGATE, &[&lb.expert_out[ei], &self.dres[l + 1], &self.d_gate], &[n, d, e, ei as u32], n));
             }
             // Phase B: router gradient -> d_xn (init), grad_Wrouter
-            s.push(self.step(EXPERT_COUNTS, &[&lb.gate, &self.fe], &[n, e, c.top_k], e));
-            s.push(self.step(ROUTER_BWD, &[&lb.router_logits, &lb.gate, &self.d_gate, &self.fe, &self.d_router_logits], &[n, e, c.top_k, 0, f(c.aux_coef), f(c.z_coef)], n));
-            s.push(self.step(MATMUL_DW, &[&self.d_router_logits, &lb.xn2, self.g(&pn("moe.router.weight"))], &[n, d, e], e * d));
-            s.push(self.step(MATMUL_DX, &[&self.d_router_logits, self.w(&pn("moe.router.weight")), &self.d_xn], &[n, d, e, 0], n * d));
+            s.push(self.gpu.step(EXPERT_COUNTS, &[&lb.gate, &self.fe], &[n, e, c.top_k], e));
+            s.push(self.gpu.step(ROUTER_BWD, &[&lb.router_logits, &lb.gate, &self.d_gate, &self.fe, &self.d_router_logits], &[n, e, c.top_k, 0, f(c.aux_coef), f(c.z_coef)], n));
+            s.push(self.gpu.step(MATMUL_DW, &[&self.d_router_logits, &lb.xn2, self.g(&pn("moe.router.weight"))], &[n, d, e], e * d));
+            s.push(self.gpu.step(MATMUL_DX, &[&self.d_router_logits, self.w(&pn("moe.router.weight")), &self.d_xn], &[n, d, e, 0], n * d));
             // Phase C: per-expert SwiGLU backward, accumulate into d_xn
             for ei in 0..e as usize {
                 let ep = |name: &str| format!("blocks.{l}.moe.experts.{ei}.{name}");
-                s.push(self.step(SCALE_ADD_DEXP, &[&lb.gate, &self.dres[l + 1], &self.d_expert_out], &[n, d, e, ei as u32], n * d));
-                s.push(self.step(MATMUL_DW, &[&self.d_expert_out, &lb.h[ei], self.g(&ep("w_down.weight"))], &[n, ff, d], d * ff));
-                s.push(self.step(MATMUL_DX, &[&self.d_expert_out, self.w(&ep("w_down.weight")), &self.d_h], &[n, ff, d, 0], n * ff));
-                s.push(self.step(SILU_DA, &[&lb.gate_pre[ei], &lb.up[ei], &self.d_h, &self.d_gate_pre], &[n * ff], n * ff));
-                s.push(self.step(SILU_DB, &[&lb.gate_pre[ei], &self.d_h, &self.d_up], &[n * ff], n * ff));
-                s.push(self.step(MATMUL_DW, &[&self.d_up, &lb.xn2, self.g(&ep("w_up.weight"))], &[n, d, ff], ff * d));
-                s.push(self.step(MATMUL_DX, &[&self.d_up, self.w(&ep("w_up.weight")), &self.d_xn], &[n, d, ff, 1], n * d));
-                s.push(self.step(MATMUL_DW, &[&self.d_gate_pre, &lb.xn2, self.g(&ep("w_gate.weight"))], &[n, d, ff], ff * d));
-                s.push(self.step(MATMUL_DX, &[&self.d_gate_pre, self.w(&ep("w_gate.weight")), &self.d_xn], &[n, d, ff, 1], n * d));
+                s.push(self.gpu.step(SCALE_ADD_DEXP, &[&lb.gate, &self.dres[l + 1], &self.d_expert_out], &[n, d, e, ei as u32], n * d));
+                s.push(self.gpu.step(MATMUL_DW, &[&self.d_expert_out, &lb.h[ei], self.g(&ep("w_down.weight"))], &[n, ff, d], d * ff));
+                s.push(self.gpu.step(MATMUL_DX, &[&self.d_expert_out, self.w(&ep("w_down.weight")), &self.d_h], &[n, ff, d, 0], n * ff));
+                s.push(self.gpu.step(SILU_DA, &[&lb.gate_pre[ei], &lb.up[ei], &self.d_h, &self.d_gate_pre], &[n * ff], n * ff));
+                s.push(self.gpu.step(SILU_DB, &[&lb.gate_pre[ei], &self.d_h, &self.d_up], &[n * ff], n * ff));
+                s.push(self.gpu.step(MATMUL_DW, &[&self.d_up, &lb.xn2, self.g(&ep("w_up.weight"))], &[n, d, ff], ff * d));
+                s.push(self.gpu.step(MATMUL_DX, &[&self.d_up, self.w(&ep("w_up.weight")), &self.d_xn], &[n, d, ff, 1], n * d));
+                s.push(self.gpu.step(MATMUL_DW, &[&self.d_gate_pre, &lb.xn2, self.g(&ep("w_gate.weight"))], &[n, d, ff], ff * d));
+                s.push(self.gpu.step(MATMUL_DX, &[&self.d_gate_pre, self.w(&ep("w_gate.weight")), &self.d_xn], &[n, d, ff, 1], n * d));
             }
             // norm2 backward -> d_tmp ; dxmid = dres[l+1] + d_tmp
-            s.push(self.step(RMS_INV, &[&lb.xmid, &self.inv], &[d, n], n));
-            s.push(self.step(RMSNORM_DW, &[&self.d_xn, &lb.xmid, &self.inv, self.g(&pn("norm2.weight"))], &[d, n], d));
-            s.push(self.step(RMSNORM_DX, &[&lb.xmid, self.w(&pn("norm2.weight")), &self.d_xn, &self.d_tmp], &[d, n], n));
-            s.push(self.step(ADD2, &[&self.dres[l + 1], &self.d_tmp, &lb.dxmid], &[n * d], n * d));
+            s.push(self.gpu.step(RMS_INV, &[&lb.xmid, &self.inv], &[d, n], n));
+            s.push(self.gpu.step(RMSNORM_DW, &[&self.d_xn, &lb.xmid, &self.inv, self.g(&pn("norm2.weight"))], &[d, n], d));
+            s.push(self.gpu.step(RMSNORM_DX, &[&lb.xmid, self.w(&pn("norm2.weight")), &self.d_xn, &self.d_tmp], &[d, n], n));
+            s.push(self.gpu.step(ADD2, &[&self.dres[l + 1], &self.d_tmp, &lb.dxmid], &[n * d], n * d));
 
             // ===== attention backward (d_proj = dxmid) =====
-            s.push(self.step(MATMUL_DW, &[&lb.dxmid, &lb.attn_out, self.g(&pn("attn.out.weight"))], &[n, d, d], d * d));
-            s.push(self.step(MATMUL_DX, &[&lb.dxmid, self.w(&pn("attn.out.weight")), &self.d_attn_out], &[n, d, d, 0], n * d));
-            s.push(self.step(ATTN_BWD_DSCORES, &[&self.d_attn_out, &lb.qkv, &lb.probs, &self.d_scores], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t));
-            s.push(self.step(ATTN_BWD_DV, &[&lb.probs, &self.d_attn_out, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t * hd));
-            s.push(self.step(ATTN_BWD_DQ, &[&self.d_scores, &lb.qkv, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * hd));
-            s.push(self.step(ATTN_BWD_DK, &[&self.d_scores, &lb.qkv, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * hd));
+            s.push(self.gpu.step(MATMUL_DW, &[&lb.dxmid, &lb.attn_out, self.g(&pn("attn.out.weight"))], &[n, d, d], d * d));
+            s.push(self.gpu.step(MATMUL_DX, &[&lb.dxmid, self.w(&pn("attn.out.weight")), &self.d_attn_out], &[n, d, d, 0], n * d));
+            s.push(self.gpu.step(ATTN_BWD_DSCORES, &[&self.d_attn_out, &lb.qkv, &lb.probs, &self.d_scores], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t));
+            s.push(self.gpu.step(ATTN_BWD_DV, &[&lb.probs, &self.d_attn_out, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t * hd));
+            s.push(self.gpu.step(ATTN_BWD_DQ, &[&self.d_scores, &lb.qkv, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * hd));
+            s.push(self.gpu.step(ATTN_BWD_DK, &[&self.d_scores, &lb.qkv, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * hd));
             // rope backward on q and k regions of d_qkv
-            s.push(self.step(ROPE_BWD, &[&self.d_qkv], &[n, c.n_heads, hd, 3 * d, 0, self.t], n * c.n_heads * half));
-            s.push(self.step(ROPE_BWD, &[&self.d_qkv], &[n, c.n_heads, hd, 3 * d, d, self.t], n * c.n_heads * half));
+            s.push(self.gpu.step(ROPE_BWD, &[&self.d_qkv], &[n, c.n_heads, hd, 3 * d, 0, self.t], n * c.n_heads * half));
+            s.push(self.gpu.step(ROPE_BWD, &[&self.d_qkv], &[n, c.n_heads, hd, 3 * d, d, self.t], n * c.n_heads * half));
             // qkv matmul backward -> grad_Wqkv, d_xn (=d_xn1)
-            s.push(self.step(MATMUL_DW, &[&self.d_qkv, &lb.xn1, self.g(&pn("attn.qkv.weight"))], &[n, d, 3 * d], 3 * d * d));
-            s.push(self.step(MATMUL_DX, &[&self.d_qkv, self.w(&pn("attn.qkv.weight")), &self.d_xn], &[n, d, 3 * d, 0], n * d));
+            s.push(self.gpu.step(MATMUL_DW, &[&self.d_qkv, &lb.xn1, self.g(&pn("attn.qkv.weight"))], &[n, d, 3 * d], 3 * d * d));
+            s.push(self.gpu.step(MATMUL_DX, &[&self.d_qkv, self.w(&pn("attn.qkv.weight")), &self.d_xn], &[n, d, 3 * d, 0], n * d));
             // norm1 backward -> d_tmp ; dres[l] = dxmid + d_tmp
-            s.push(self.step(RMS_INV, &[&self.res[l], &self.inv], &[d, n], n));
-            s.push(self.step(RMSNORM_DW, &[&self.d_xn, &self.res[l], &self.inv, self.g(&pn("norm1.weight"))], &[d, n], d));
-            s.push(self.step(RMSNORM_DX, &[&self.res[l], self.w(&pn("norm1.weight")), &self.d_xn, &self.d_tmp], &[d, n], n));
-            s.push(self.step(ADD2, &[&lb.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
+            s.push(self.gpu.step(RMS_INV, &[&self.res[l], &self.inv], &[d, n], n));
+            s.push(self.gpu.step(RMSNORM_DW, &[&self.d_xn, &self.res[l], &self.inv, self.g(&pn("norm1.weight"))], &[d, n], d));
+            s.push(self.gpu.step(RMSNORM_DX, &[&self.res[l], self.w(&pn("norm1.weight")), &self.d_xn, &self.d_tmp], &[d, n], n));
+            s.push(self.gpu.step(ADD2, &[&lb.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
         }
 
         // embedding backward (accumulates onto grad_emb which holds lm_head grad)
-        s.push(self.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("token_emb.weight")], &[n, d, c.vocab], c.vocab * d));
+        s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("token_emb.weight")], &[n, d, c.vocab], c.vocab * d));
 
         s
     }
@@ -663,12 +496,12 @@ impl Trainer {
     /// The bind groups are constant, but the uniform *contents* (lr, bias
     /// corrections) change every step, so each param gets a persistent writable
     /// uniform buffer updated in `adamw_step` via `write_buffer`.
-    fn build_adamw(&self) -> (Vec<Step>, Vec<wgpu::Buffer>) {
+    fn build_adamw(&self) -> (Vec<Step>, Vec<DeviceBuffer>) {
         let mut steps = Vec::new();
         let mut unis = Vec::new();
         for (name, numel) in &self.params {
-            let ubuf = self.uniform_dynamic(9);
-            let st = self.step_buf(
+            let ubuf = self.gpu.uniform_dynamic(9);
+            let st = self.gpu.step_buf(
                 ADAMW,
                 &ubuf,
                 &[self.w(name), self.g(name), &self.adam_m[name], &self.adam_v[name]],
@@ -686,18 +519,18 @@ impl Trainer {
         let bc2 = 1.0 - beta2.powi(t as i32);
         for (i, (_, numel)) in self.params.iter().enumerate() {
             let data = [*numel as u32, 0, f(lr), f(beta1), f(beta2), f(eps), f(wd), f(bc1), f(bc2)];
-            self.queue.write_buffer(&self.adamw_uniforms[i], 0, bytemuck::cast_slice(&data));
+            self.gpu.write(&self.adamw_uniforms[i], bytemuck::cast_slice(&data));
         }
-        self.submit(&[], &self.adamw_steps);
+        self.gpu.submit(&[], &self.adamw_steps);
     }
 
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         let numel = self.params.iter().find(|(n, _)| n == name).unwrap().1;
-        self.read(self.w(name), numel)
+        self.gpu.read(self.w(name), numel)
     }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
         let numel = self.params.iter().find(|(n, _)| n == name).unwrap().1;
-        self.read(self.g(name), numel)
+        self.gpu.read(self.g(name), numel)
     }
 
     /// Names of all trainable parameters.
@@ -708,7 +541,7 @@ impl Trainer {
     /// Zero one parameter's gradient buffer (host-driven).
     pub fn zero_grad(&self, name: &str) {
         let numel = self.params.iter().find(|(n, _)| n == name).unwrap().1;
-        self.queue.write_buffer(self.g(name), 0, &vec![0u8; numel * 4]);
+        self.gpu.write(self.g(name), &vec![0u32; numel]);
     }
 
     /// Federated train-scope: freeze the shared backbone by zeroing the

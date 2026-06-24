@@ -182,16 +182,16 @@ impl PidConfig {
 }
 
 struct Layer {
-    ln1_out: wgpu::Buffer,
-    qkv: wgpu::Buffer,
-    scores: wgpu::Buffer,
-    probs: wgpu::Buffer,
-    attn_ctx: wgpu::Buffer,
-    xmid: wgpu::Buffer,
-    ln2_out: wgpu::Buffer,
-    val: wgpu::Buffer,
-    gate: wgpu::Buffer,
-    ffn_h: wgpu::Buffer,
+    ln1_out: gpu_core::DeviceBuffer,
+    qkv: gpu_core::DeviceBuffer,
+    scores: gpu_core::DeviceBuffer,
+    probs: gpu_core::DeviceBuffer,
+    attn_ctx: gpu_core::DeviceBuffer,
+    xmid: gpu_core::DeviceBuffer,
+    ln2_out: gpu_core::DeviceBuffer,
+    val: gpu_core::DeviceBuffer,
+    gate: gpu_core::DeviceBuffer,
+    ffn_h: gpu_core::DeviceBuffer,
 }
 
 pub struct Pid {
@@ -203,31 +203,31 @@ pub struct Pid {
     t: u32,
     count: Cell<f32>,
 
-    tokens: wgpu::Buffer,
-    targets: wgpu::Buffer,
-    res: Vec<wgpu::Buffer>, // n_layers+1 residual stream
+    tokens: gpu_core::DeviceBuffer,
+    targets: gpu_core::DeviceBuffer,
+    res: Vec<gpu_core::DeviceBuffer>, // n_layers+1 residual stream
     layers: Vec<Layer>,
-    proj: wgpu::Buffer,
-    ffn_out: wgpu::Buffer,
-    xn_final: wgpu::Buffer,
-    logits: wgpu::Buffer,
-    ce_buf: wgpu::Buffer,
+    proj: gpu_core::DeviceBuffer,
+    ffn_out: gpu_core::DeviceBuffer,
+    xn_final: gpu_core::DeviceBuffer,
+    logits: gpu_core::DeviceBuffer,
+    ce_buf: gpu_core::DeviceBuffer,
 
     // backward temporaries
-    dres: Vec<wgpu::Buffer>,
-    d_logits: wgpu::Buffer,
-    d_xn: wgpu::Buffer,
-    d_branch: wgpu::Buffer,
-    d_tmp: wgpu::Buffer,
-    dxmid: wgpu::Buffer,
-    d_attn_ctx: wgpu::Buffer,
-    d_scores: wgpu::Buffer,
-    d_qkv: wgpu::Buffer,
-    d_ffn_h: wgpu::Buffer,
-    d_gate: wgpu::Buffer,
-    d_val: wgpu::Buffer,
-    ln_mean: wgpu::Buffer,
-    ln_inv: wgpu::Buffer,
+    dres: Vec<gpu_core::DeviceBuffer>,
+    d_logits: gpu_core::DeviceBuffer,
+    d_xn: gpu_core::DeviceBuffer,
+    d_branch: gpu_core::DeviceBuffer,
+    d_tmp: gpu_core::DeviceBuffer,
+    dxmid: gpu_core::DeviceBuffer,
+    d_attn_ctx: gpu_core::DeviceBuffer,
+    d_scores: gpu_core::DeviceBuffer,
+    d_qkv: gpu_core::DeviceBuffer,
+    d_ffn_h: gpu_core::DeviceBuffer,
+    d_gate: gpu_core::DeviceBuffer,
+    d_val: gpu_core::DeviceBuffer,
+    ln_mean: gpu_core::DeviceBuffer,
+    ln_inv: gpu_core::DeviceBuffer,
 
     // Cached training dispatch graphs, built once and reused every step. The
     // forward graph is fully constant; the backward graph is constant except
@@ -238,7 +238,7 @@ pub struct Pid {
     // and triggering a device reset (surfaced as `Buffer 'params' is invalid`).
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
-    ce_grad_uni: wgpu::Buffer,
+    ce_grad_uni: gpu_core::DeviceBuffer,
 }
 
 impl Pid {
@@ -351,7 +351,7 @@ impl Pid {
         self.count.set(c.max(1) as f32);
     }
 
-    fn w(&self, name: &str) -> &wgpu::Buffer {
+    fn w(&self, name: &str) -> &gpu_core::DeviceBuffer {
         self.ps.w(name)
     }
 

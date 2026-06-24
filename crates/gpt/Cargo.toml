@@ -9,13 +9,6 @@ description = "Dense GPT decoder Transformer (nanogpt parity): forward + backpro
 name = "gpt"
 path = "src/lib.rs"
 
-[features]
-cpu-backend = [
-    "brain-gpu-core/cpu-backend",
-    "brain-paramstore/cpu-backend",
-    "brain-optim/cpu-backend",
-]
-
 [dependencies]
 brain-gpu-core.workspace = true
 brain-paramstore.workspace = true

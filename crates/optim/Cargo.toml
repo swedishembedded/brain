@@ -9,9 +9,6 @@ description = "AdamW optimizer + optional global grad-norm clipping, as WGSL dis
 name = "optim"
 path = "src/lib.rs"
 
-[features]
-cpu-backend = ["brain-gpu-core/cpu-backend", "brain-paramstore/cpu-backend"]
-
 [dependencies]
 brain-gpu-core.workspace = true
 brain-paramstore.workspace = true

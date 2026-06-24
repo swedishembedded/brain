@@ -106,6 +106,7 @@ dependencies = [
  "brain-eval",
  "brain-federated",
  "brain-gpt",
+ "brain-gpu-core",
  "brain-gradcheck",
  "brain-moe",
  "brain-pid",
@@ -184,11 +185,10 @@ name = "brain-moe"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-gpu-core",
  "brain-kernels",
  "bytemuck",
- "pollster",
  "serde_json",
- "wgpu",
 ]
 
 [[package]]

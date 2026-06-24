@@ -9,23 +9,18 @@ description = "GPU plumbing: device init, pipeline cache, dispatch, buffers, blo
 name = "gpu_core"
 path = "src/lib.rs"
 
-[features]
-# Native CPU backend: compile the WGSL kernels to native code (Cranelift JIT)
-# and run them across CPU cores, instead of the default wgpu backend.
-cpu-backend = ["dep:brain-wgsl-cpu", "dep:rayon"]
-
 [dependencies]
 brain-kernels.workspace = true
 bytemuck.workspace = true
 
-# CPU backend (only compiled with the `cpu-backend` feature).
-brain-wgsl-cpu = { workspace = true, optional = true }
-rayon = { version = "1", optional = true }
-
-# Native GPU stack: full wgpu (desktop backends) + a blocking executor.
+# Native GPU stack: full wgpu (desktop backends) + a blocking executor, plus the
+# native CPU backend (WGSL->Cranelift JIT + rayon). Both are compiled in and the
+# active one is chosen at runtime. wasm keeps only the wgpu/WebGPU backend.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wgpu = "29"
 pollster = "0.4"
+brain-wgsl-cpu.workspace = true
+rayon = "1"
 
 # Browser GPU stack: wgpu's WebGPU backend only, plus async-readback glue.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

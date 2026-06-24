@@ -22,6 +22,18 @@
 /// backend reproduces the same tiling so the kernels' index math is identical.
 pub const MAX_GROUPS_PER_DIM: u32 = 65535;
 
+/// Workgroup grid for `threads` invocations at `@workgroup_size(64)`: 1D until
+/// the count exceeds the per-dimension limit, then tiled into Y. Shared by both
+/// backends so the kernels' `gid.y*(nwg.x*64)+gid.x` reconstruction is identical.
+pub(crate) fn grid(threads: u32) -> (u32, u32) {
+    let groups = threads.div_ceil(64).max(1);
+    if groups <= MAX_GROUPS_PER_DIM {
+        (groups, 1)
+    } else {
+        (MAX_GROUPS_PER_DIM, groups.div_ceil(MAX_GROUPS_PER_DIM))
+    }
+}
+
 /// Pack an f32 into the u32 uniform stream (kernels read it back with bitcast).
 pub fn f(x: f32) -> u32 {
     x.to_bits()
@@ -51,20 +63,219 @@ impl std::ops::BitOr for BufUsage {
     }
 }
 
-#[cfg(feature = "cpu-backend")]
+// Both backends are compiled into every native build; the active one is chosen
+// at runtime per `Gpu` instance. On wasm only the wgpu/WebGPU backend exists
+// (Cranelift can't JIT there), so the CPU variant is cfg'd out.
+#[cfg(not(target_arch = "wasm32"))]
 mod cpu_backend;
-#[cfg(feature = "cpu-backend")]
-pub use cpu_backend::{CpuBackend as Gpu, CpuBuffer as DeviceBuffer, Step};
 
-// The wgpu backend is the default; the CPU backend replaces it wholesale.
-#[cfg(not(feature = "cpu-backend"))]
+/// Native builds carry both backends and pick one at runtime via this enum. On
+/// wasm only the wgpu/WebGPU backend exists, so `Gpu`/`DeviceBuffer`/`Step` are
+/// plain aliases to it (see the wasm `pub use` below) — no enum, no duplication.
+#[cfg(not(target_arch = "wasm32"))]
+mod native_accel {
+use super::{cpu_backend, wgpu_backend, BufUsage};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// Which compute backend a `Gpu` uses.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Backend {
+    Wgpu,
+    Cpu,
+}
+
+static DEFAULT_BACKEND: AtomicU8 = AtomicU8::new(0); // 0=unset, 1=Wgpu, 2=Cpu
+
+/// Set the process-wide default backend that `Gpu::new` builds. The CLI sets
+/// this from its `--device` flag. When unset, `BRAIN_DEVICE=cpu` selects the CPU
+/// backend; otherwise the default is wgpu (preserving prior behaviour).
+pub fn set_default_backend(b: Backend) {
+    DEFAULT_BACKEND.store(match b { Backend::Wgpu => 1, Backend::Cpu => 2 }, Ordering::Relaxed);
+}
+
+fn resolve_backend() -> Backend {
+    match DEFAULT_BACKEND.load(Ordering::Relaxed) {
+        1 => Backend::Wgpu,
+        2 => Backend::Cpu,
+        _ => {
+            #[cfg(not(target_arch = "wasm32"))]
+            if std::env::var("BRAIN_DEVICE").map(|v| v.eq_ignore_ascii_case("cpu")).unwrap_or(false)
+            {
+                return Backend::Cpu;
+            }
+            Backend::Wgpu
+        }
+    }
+}
+
+/// A recorded dispatch, tagged by the backend that built it.
+pub enum Step {
+    Wgpu(wgpu_backend::Step),
+    #[cfg(not(target_arch = "wasm32"))]
+    Cpu(cpu_backend::Step),
+}
+
+/// A device buffer on whichever backend created it. Model code holds these and
+/// passes `&DeviceBuffer` to the dispatch methods without knowing the backend.
+pub enum DeviceBuffer {
+    Wgpu(wgpu::Buffer),
+    #[cfg(not(target_arch = "wasm32"))]
+    Cpu(cpu_backend::CpuBuffer),
+}
+
+impl DeviceBuffer {
+    #[inline]
+    fn wgpu(&self) -> &wgpu::Buffer {
+        match self {
+            DeviceBuffer::Wgpu(b) => b,
+            #[cfg(not(target_arch = "wasm32"))]
+            _ => panic!("DeviceBuffer/backend mismatch (cpu buffer on wgpu backend)"),
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    fn cpu(&self) -> &cpu_backend::CpuBuffer {
+        match self {
+            DeviceBuffer::Cpu(b) => b,
+            _ => panic!("DeviceBuffer/backend mismatch (wgpu buffer on cpu backend)"),
+        }
+    }
+}
+
+/// The compute device: a runtime choice between the wgpu and the native CPU
+/// backend. Both are compiled in; a given instance uses exactly one.
+pub enum Gpu {
+    Wgpu(wgpu_backend::Gpu),
+    #[cfg(not(target_arch = "wasm32"))]
+    Cpu(cpu_backend::CpuBackend),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Gpu {
+    /// Build the default backend (see [`set_default_backend`] / `BRAIN_DEVICE`).
+    pub fn new(kernels: &[(&str, &str)]) -> Gpu {
+        match resolve_backend() {
+            Backend::Wgpu => Gpu::Wgpu(wgpu_backend::Gpu::new(kernels)),
+            Backend::Cpu => Gpu::Cpu(cpu_backend::CpuBackend::new(kernels)),
+        }
+    }
+    /// Build on the native CPU backend regardless of the default selection.
+    pub fn new_cpu(kernels: &[(&str, &str)]) -> Gpu {
+        Gpu::Cpu(cpu_backend::CpuBackend::new(kernels))
+    }
+    /// Build on the wgpu backend regardless of the default selection.
+    pub fn new_wgpu(kernels: &[(&str, &str)]) -> Gpu {
+        Gpu::Wgpu(wgpu_backend::Gpu::new(kernels))
+    }
+
+    pub fn storage(&self, n: u64) -> DeviceBuffer {
+        match self {
+            Gpu::Wgpu(g) => DeviceBuffer::Wgpu(g.storage(n)),
+            Gpu::Cpu(c) => DeviceBuffer::Cpu(c.storage(n)),
+        }
+    }
+    pub fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer {
+        match self {
+            Gpu::Wgpu(g) => DeviceBuffer::Wgpu(g.storage_init(name, data)),
+            Gpu::Cpu(c) => DeviceBuffer::Cpu(c.storage_init(name, data)),
+        }
+    }
+    pub fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> DeviceBuffer {
+        match self {
+            Gpu::Wgpu(g) => DeviceBuffer::Wgpu(g.buffer(label, size, usage)),
+            Gpu::Cpu(c) => DeviceBuffer::Cpu(c.buffer(label, size, usage)),
+        }
+    }
+    pub fn uniform_dynamic(&self, len: usize) -> DeviceBuffer {
+        match self {
+            Gpu::Wgpu(g) => DeviceBuffer::Wgpu(g.uniform_dynamic(len)),
+            Gpu::Cpu(c) => DeviceBuffer::Cpu(c.uniform_dynamic(len)),
+        }
+    }
+    pub fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
+        match self {
+            Gpu::Wgpu(g) => g.write(buf.wgpu(), data),
+            Gpu::Cpu(c) => c.write(buf.cpu(), data),
+        }
+    }
+    pub fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
+        match self {
+            Gpu::Wgpu(g) => g.read(buf.wgpu(), n),
+            Gpu::Cpu(c) => c.read(buf.cpu(), n),
+        }
+    }
+    pub fn poll_wait(&self) {
+        match self {
+            Gpu::Wgpu(g) => g.poll_wait(),
+            Gpu::Cpu(c) => c.poll_wait(),
+        }
+    }
+    pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
+        match self {
+            Gpu::Wgpu(g) => {
+                let bs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| b.wgpu()).collect();
+                Step::Wgpu(g.step(kind, &bs, params, threads))
+            }
+            Gpu::Cpu(c) => {
+                let bs: Vec<&cpu_backend::CpuBuffer> = bufs.iter().map(|b| b.cpu()).collect();
+                Step::Cpu(c.step(kind, &bs, params, threads))
+            }
+        }
+    }
+    pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
+        match self {
+            Gpu::Wgpu(g) => {
+                let bs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| b.wgpu()).collect();
+                Step::Wgpu(g.step_buf(kind, ubuf.wgpu(), &bs, threads))
+            }
+            Gpu::Cpu(c) => {
+                let bs: Vec<&cpu_backend::CpuBuffer> = bufs.iter().map(|b| b.cpu()).collect();
+                Step::Cpu(c.step_buf(kind, ubuf.cpu(), &bs, threads))
+            }
+        }
+    }
+    pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
+        match self {
+            Gpu::Wgpu(g) => {
+                let cs: Vec<&wgpu::Buffer> = clears.iter().map(|b| b.wgpu()).collect();
+                let ss: Vec<wgpu_backend::Step> = steps
+                    .iter()
+                    .map(|s| match s {
+                        Step::Wgpu(t) => t.clone(),
+                        _ => panic!("Step/backend mismatch"),
+                    })
+                    .collect();
+                g.submit(&cs, &ss);
+            }
+            Gpu::Cpu(c) => {
+                let cs: Vec<&cpu_backend::CpuBuffer> = clears.iter().map(|b| b.cpu()).collect();
+                let ss: Vec<cpu_backend::Step> = steps
+                    .iter()
+                    .map(|s| match s {
+                        Step::Cpu(t) => t.clone(),
+                        _ => panic!("Step/backend mismatch"),
+                    })
+                    .collect();
+                c.submit(&cs, &ss);
+            }
+        }
+    }
+}
+} // mod native_accel
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use native_accel::{set_default_backend, Backend, DeviceBuffer, Gpu, Step};
+
+// On wasm there is only the wgpu/WebGPU backend, so the public types are direct
+// aliases to it — model code that uses `gpu_core::{Gpu, DeviceBuffer, Step}`
+// compiles unchanged against either target.
+#[cfg(target_arch = "wasm32")]
 pub use wgpu::Buffer as DeviceBuffer;
-#[cfg(not(feature = "cpu-backend"))]
+#[cfg(target_arch = "wasm32")]
 pub use wgpu_backend::{Gpu, Step};
 
-#[cfg(not(feature = "cpu-backend"))]
 mod wgpu_backend {
-use super::{BufUsage, MAX_GROUPS_PER_DIM};
+use super::BufUsage;
 use wgpu::util::DeviceExt;
 
 /// A recorded dispatch: (pipeline index, bind group, grid_x, grid_y).
@@ -270,15 +481,8 @@ impl Gpu {
             layout: &layout,
             entries: &entries,
         });
-        let groups = ((threads + 63) / 64).max(1);
-        if groups <= MAX_GROUPS_PER_DIM {
-            (kind, bg, groups, 1)
-        } else {
-            // tile into a 2D grid; grid_x must stay a multiple of nothing special,
-            // but using the full MAX width keeps the shader's `nwg.x * 64` stride exact.
-            let gy = (groups + MAX_GROUPS_PER_DIM - 1) / MAX_GROUPS_PER_DIM;
-            (kind, bg, MAX_GROUPS_PER_DIM, gy)
-        }
+        let (gx, gy) = super::grid(threads);
+        (kind, bg, gx, gy)
     }
 
     /// Build one dispatch with a fresh single-use uniform buffer. Convenient for
@@ -400,14 +604,10 @@ mod tests {
 
     #[test]
     fn dispatch_storage_and_readback() {
-        // Exercises the whole plumbing: device init, storage_init, step, submit, read.
-        // The CPU backend needs no GPU, so it always runs; the wgpu backend skips
-        // on headless CI via MOE_SKIP_GPU_TESTS.
-        #[cfg(not(feature = "cpu-backend"))]
-        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
-            return;
-        }
-        let gpu = Gpu::new(&[("add2", kernels::ADD2)]);
+        // Exercises the whole plumbing: storage_init, step, submit, read. Uses the
+        // CPU backend so it runs on headless CI with no GPU (both backends share
+        // this dispatch contract, so it covers the wgpu path's plumbing too).
+        let gpu = Gpu::new_cpu(&[("add2", kernels::ADD2)]);
         let a = gpu.storage_init("a", &[1.0, 2.0, 3.0, 4.0]);
         let b = gpu.storage_init("b", &[10.0, 20.0, 30.0, 40.0]);
         let out = gpu.storage(4);

@@ -11,7 +11,7 @@
 //! *within* each step across a rayon pool. Each invocation owns a disjoint output
 //! element, so the workers never alias their writes.
 
-use crate::{BufUsage, MAX_GROUPS_PER_DIM};
+use crate::BufUsage;
 use rayon::prelude::*;
 use std::cell::UnsafeCell;
 use std::sync::Arc;
@@ -59,6 +59,7 @@ pub struct CpuBackend {
 
 /// Bind group for one dispatch: the uniform stream plus the storage buffers in
 /// binding order (binding 1..). Holds `Arc` clones so the buffers outlive the step.
+#[derive(Clone)]
 pub struct BindGroup {
     uniform: CpuBuffer,
     bufs: Vec<CpuBuffer>,
@@ -110,13 +111,8 @@ impl CpuBackend {
             uniform: ubuf.clone(),
             bufs: bufs.iter().map(|b| (*b).clone()).collect(),
         };
-        let groups = threads.div_ceil(64).max(1);
-        if groups <= MAX_GROUPS_PER_DIM {
-            (kind, bg, groups, 1)
-        } else {
-            let gy = groups.div_ceil(MAX_GROUPS_PER_DIM);
-            (kind, bg, MAX_GROUPS_PER_DIM, gy)
-        }
+        let (gx, gy) = crate::grid(threads);
+        (kind, bg, gx, gy)
     }
 
     pub fn step(&self, kind: usize, bufs: &[&CpuBuffer], params: &[u32], threads: u32) -> Step {
