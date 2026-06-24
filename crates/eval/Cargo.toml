@@ -1,0 +1,16 @@
+[package]
+name = "brain-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Unified evaluation: validation perplexity + task exact-match, for apples-to-apples model comparison."
+
+[lib]
+name = "eval"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpt.workspace = true
+brain-data.workspace = true
+brain-checkpoint.workspace = true
+serde_json.workspace = true
