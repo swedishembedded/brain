@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-data.workspace = true
+brain-model.workspace = true
 brain-gpt.workspace = true
 brain-eval.workspace = true
 brain-checkpoint.workspace = true

@@ -25,7 +25,8 @@ use std::path::Path;
 
 use data::tokenizer::{CharTokenizer, Tokenizer};
 use gpt::model::Gpt;
-use gpt::{train, GptConfig, TrainOpts};
+use gpt::GptConfig;
+use model::{FitOpts, Model, ModelConfig};
 
 /// Architecture-independent training spec a benchmark hands to a [`DecoderLm`].
 ///
@@ -138,7 +139,10 @@ impl DecoderLm for GptDecoder {
             n_heads: cfg.n_heads,
             d_ff: cfg.d_model * 4,
         };
-        let opts = TrainOpts {
+        // Route through the architecture-agnostic generic trainer (ADR §2.4): the
+        // `TrainConfig` -> `FitOpts` mapping below is the same hyperparameters the
+        // GPT-specific `gpt::train` used, so the benchmark behavior is unchanged.
+        let opts = FitOpts {
             steps: cfg.steps,
             batch_size: cfg.batch_size,
             block_size,
@@ -152,28 +156,30 @@ impl DecoderLm for GptDecoder {
             align_to_lines: cfg.align_to_lines,
             ..Default::default()
         };
-        train(dir, gcfg, &opts, Some(weights_out))
+        model::train::fit::<Gpt>(dir, gcfg, &opts, Some(weights_out))
     }
 
     fn load_scorer(&self, weights: &Path, block_size: u32) -> Box<dyn Scorer> {
-        Box::new(GptScorer {
+        Box::new(ModelScorer {
             model: Gpt::load(weights.to_str().expect("utf-8 path"), 1, block_size),
         })
     }
 }
 
-/// A trained GPT, exposed as a [`Scorer`].
-struct GptScorer {
-    model: Gpt,
+/// A trained [`Model`] with a token head, exposed as a [`Scorer`] (ADR §2.4).
+/// One blanket adapter replaces the former per-model `GptScorer`: swapping the
+/// architecture a benchmark scores is choosing a different `M: Model` here.
+struct ModelScorer<M: Model> {
+    model: M,
 }
 
-impl Scorer for GptScorer {
+impl<M: Model> Scorer for ModelScorer<M> {
     fn vocab(&self) -> usize {
-        self.model.cfg.vocab as usize
+        self.model.config().vocab() as usize
     }
 
     fn logits_all(&self, tokens: &[u32]) -> Vec<f32> {
-        self.model.logits_all(tokens)
+        Model::logits_all(&self.model, tokens).expect("token head")
     }
 }
 

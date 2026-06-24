@@ -119,28 +119,34 @@ pub fn directional_check<M: CheckModel>(m: &M, eps: f32, n_dirs: usize, seed: u6
     Report { checks }
 }
 
-// ---- CheckModel for the GPT model (validates GELU/MLP/causal-attn backprop) ----
-impl CheckModel for gpt::Gpt {
+// ---- CheckModel for ANY architecture-agnostic Model (ADR §8) ----
+//
+// The `model::Model` trait already exposes exactly the parameter-access +
+// forward/backward surface the checker needs, so one blanket impl gradient-checks
+// every model (GPT, MoE, PID, and future seq2seq/autoencoder) by construction —
+// closing the TESTING.md gap where only GPT was checked. `loss()` is the model's
+// scalar `forward()` (the objective `backward()` differentiates).
+impl<M: model::Model> CheckModel for M {
     fn param_names(&self) -> Vec<String> {
-        self.ps.params.iter().map(|(n, _)| n.clone()).collect()
+        model::Model::param_names(self)
     }
     fn read_weight(&self, name: &str) -> Vec<f32> {
-        gpt::Gpt::read_weight(self, name)
+        model::Model::read_weight(self, name)
     }
     fn write_weight(&self, name: &str, data: &[f32]) {
-        gpt::Gpt::write_weight(self, name, data);
+        model::Model::write_weight(self, name, data);
     }
     fn read_grad(&self, name: &str) -> Vec<f32> {
-        gpt::Gpt::read_grad(self, name)
+        model::Model::read_grad(self, name)
     }
     fn loss(&self) -> f32 {
-        self.forward()
+        model::Model::forward(self)
     }
     fn zero_grads(&self) {
-        gpt::Gpt::zero_grads(self);
+        model::Model::zero_grads(self);
     }
     fn backward(&self) {
-        gpt::Gpt::backward(self);
+        model::Model::backward(self);
     }
 }
 

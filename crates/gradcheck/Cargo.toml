@@ -10,5 +10,6 @@ name = "gradcheck"
 path = "src/lib.rs"
 
 [dependencies]
+brain-model.workspace = true
 brain-gpt.workspace = true
 brain-data.workspace = true

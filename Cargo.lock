@@ -98,6 +98,7 @@ dependencies = [
  "brain-data",
  "brain-eval",
  "brain-gpt",
+ "brain-model",
  "serde_json",
 ]
 
@@ -187,6 +188,7 @@ version = "0.1.0"
 dependencies = [
  "brain-data",
  "brain-gpt",
+ "brain-model",
 ]
 
 [[package]]
