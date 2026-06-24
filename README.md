@@ -1,19 +1,38 @@
-# tiny-sparse-moe
+# brain
 
-A tiny but complete **sparse Mixture-of-Experts (MoE) decoder-only Transformer**
-for 64-token sequence modeling, in two implementations that are validated
-against each other:
+A small, dependency-light framework for **training and evaluating neural
+networks from scratch on the GPU** — **pure Rust + raw WGSL**, fp32-only so the
+same kernels run on old desktop GPUs and in the browser via WebGPU. It is a
+self-contained Cargo workspace (`crates/`); there is no Python in the build or
+test path (the former PyTorch oracle is replaced by an in-repo finite-difference
+gradient checker).
 
-- **`tiny_sparse_moe.py`** — the reference model (PyTorch): train / eval /
-  generate / export, with every moving part of a real MoE LLM.
-- **`moe-rs/`** — a from-scratch **Rust + raw-WGSL** engine: inference *and*
-  full GPU training (forward + backprop + AdamW as hand-written compute
-  kernels). See [`moe-rs/README.md`](moe-rs/README.md) (inference) and
-  [`moe-rs/TRAINING.md`](moe-rs/TRAINING.md) (training + the gradient check
-  against PyTorch autograd).
+Models that share one engine: a **GPT decoder** (nanogpt parity, the dense
+baseline), a **sparse MoE** Transformer (with **federated/sharded** expert
+training), and the **PID** control Transformer (the WebGPU demo).
 
-This document explains **the task, what the model actually learns, how to
-measure that honestly, and how the MoE architecture maps onto the problem.**
+- Architecture & crate graph: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- Federated MoE pipeline: [`docs/FEDERATED.md`](docs/FEDERATED.md)
+- Testing strategy & the gradient-check gate: [`docs/TESTING.md`](docs/TESTING.md)
+- Engine internals (inference / training / vulkan / web): `docs/engine-*.md`
+
+### Quick start
+
+```bash
+make release
+make data/calculator                 # generate a dataset (also: reverser wordcalc
+                                      #   timeseries shakespeare_char gpt)
+make train/gpt/calculator            # train the GPT baseline -> out/gpt-calculator.weights
+make eval/gpt/calculator             # validation perplexity + task exact-match
+make gradcheck                       # backprop correctness gate (finite differences)
+make federated-demo                  # MoE train -> split -> verify -> merge round-trip
+make test                            # full cargo test suite
+make web/dev                         # WebGPU browser demo (crates/web)
+```
+
+The rest of this document explains the **MoE toy task** specifically — what the
+model learns, how to measure it honestly, and how the architecture maps onto the
+problem. (Paths below written as `moe-rs/` now live under `crates/`.)
 
 ---
 

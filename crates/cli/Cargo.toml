@@ -1,0 +1,26 @@
+[package]
+name = "brain-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The `brain` native CLI: dispatches MoE/GPT/PID/federated training, eval, and generation."
+
+[[bin]]
+name = "brain"
+path = "src/main.rs"
+
+[features]
+# Optional native-Vulkan cooperative-matrix matmul path (ash + naga). OFF by
+# default — the default build stays pure wgpu/WGSL.
+vulkan-coopmat = ["dep:brain-vulkan"]
+
+[dependencies]
+brain-moe.workspace = true
+brain-gpt.workspace = true
+brain-pid.workspace = true
+brain-data.workspace = true
+brain-federated.workspace = true
+brain-gradcheck.workspace = true
+brain-eval.workspace = true
+brain-checkpoint.workspace = true
+brain-vulkan = { workspace = true, optional = true }
