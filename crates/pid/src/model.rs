@@ -271,8 +271,8 @@ impl Pid {
         let bht2 = (b * cfg.n_heads * t * t) as u64;
         let st = |x: u64| gpu.storage(x);
 
-        let tokens = gpu.buffer("tokens", n * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
-        let targets = gpu.buffer("targets", n * 4, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
+        let tokens = gpu.buffer("tokens", n * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST);
+        let targets = gpu.buffer("targets", n * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST);
         let ce_grad_uni = gpu.uniform_dynamic(4); // [n, u, IGNORE, count]; count refreshed per batch
 
         let mut res = Vec::new();

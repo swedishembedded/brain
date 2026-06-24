@@ -23,11 +23,11 @@ struct Graph {
     has_scale: bool,
     steps: Vec<Step>,
     // writable uniforms, in dispatch order within each group:
-    clip_uni: Option<wgpu::Buffer>, // clip-coef stage (clip path)
-    scale_unis: Vec<wgpu::Buffer>,  // per-param grad_scale (no-clip path)
-    adamw_unis: Vec<wgpu::Buffer>,  // per-param AdamW
+    clip_uni: Option<gpu_core::DeviceBuffer>, // clip-coef stage (clip path)
+    scale_unis: Vec<gpu_core::DeviceBuffer>,  // per-param grad_scale (no-clip path)
+    adamw_unis: Vec<gpu_core::DeviceBuffer>,  // per-param AdamW
     // constant uniforms kept alive for the lifetime of their bind groups:
-    _const_unis: Vec<wgpu::Buffer>,
+    _const_unis: Vec<gpu_core::DeviceBuffer>,
 }
 
 pub struct Optim {
@@ -178,7 +178,7 @@ mod tests {
         init.insert("p".to_string(), vec![1.0f32; 4]);
         let ps = ParamStore::new(&gpu, vec![("p".to_string(), 4)], &init);
         // grad = 2.0 everywhere => global L2 norm = sqrt(16) = 4 > 1 => clipped by 1/4.
-        gpu.queue.write_buffer(ps.g("p"), 0, bytemuck::cast_slice(&[2.0f32; 4]));
+        gpu.write(ps.g("p"), bytemuck::cast_slice(&[2.0f32; 4]));
 
         opt.step(&gpu, &ps, 1, 0.1, 0.0, 0.9, 0.999, 1e-8, Some(1.0), 1.0);
         let w = ps.read_weight(&gpu, "p");

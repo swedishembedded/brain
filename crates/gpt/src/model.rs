@@ -185,15 +185,15 @@ impl GptConfig {
 }
 
 struct Layer {
-    ln1_out: wgpu::Buffer,
-    qkv: wgpu::Buffer,
-    scores: wgpu::Buffer,
-    probs: wgpu::Buffer,
-    attn_ctx: wgpu::Buffer,
-    xmid: wgpu::Buffer,
-    ln2_out: wgpu::Buffer,
-    fc: wgpu::Buffer,   // c_fc pre-activation
-    gelu: wgpu::Buffer, // GELU(fc)
+    ln1_out: gpu_core::DeviceBuffer,
+    qkv: gpu_core::DeviceBuffer,
+    scores: gpu_core::DeviceBuffer,
+    probs: gpu_core::DeviceBuffer,
+    attn_ctx: gpu_core::DeviceBuffer,
+    xmid: gpu_core::DeviceBuffer,
+    ln2_out: gpu_core::DeviceBuffer,
+    fc: gpu_core::DeviceBuffer,   // c_fc pre-activation
+    gelu: gpu_core::DeviceBuffer, // GELU(fc)
 }
 
 pub struct Gpt {
@@ -205,34 +205,34 @@ pub struct Gpt {
     t: u32,
     count: Cell<f32>,
 
-    tokens: wgpu::Buffer,
-    targets: wgpu::Buffer,
-    res: Vec<wgpu::Buffer>,
+    tokens: gpu_core::DeviceBuffer,
+    targets: gpu_core::DeviceBuffer,
+    res: Vec<gpu_core::DeviceBuffer>,
     layers: Vec<Layer>,
-    proj: wgpu::Buffer,
-    ffn_out: wgpu::Buffer,
-    xn_final: wgpu::Buffer,
-    logits: wgpu::Buffer,
-    ce_buf: wgpu::Buffer,
+    proj: gpu_core::DeviceBuffer,
+    ffn_out: gpu_core::DeviceBuffer,
+    xn_final: gpu_core::DeviceBuffer,
+    logits: gpu_core::DeviceBuffer,
+    ce_buf: gpu_core::DeviceBuffer,
 
     // backward temporaries
-    dres: Vec<wgpu::Buffer>,
-    d_logits: wgpu::Buffer,
-    d_xn: wgpu::Buffer,
-    d_branch: wgpu::Buffer,
-    d_tmp: wgpu::Buffer,
-    dxmid: wgpu::Buffer,
-    d_attn_ctx: wgpu::Buffer,
-    d_scores: wgpu::Buffer,
-    d_qkv: wgpu::Buffer,
-    d_gelu: wgpu::Buffer,
-    d_fc: wgpu::Buffer,
-    ln_mean: wgpu::Buffer,
-    ln_inv: wgpu::Buffer,
+    dres: Vec<gpu_core::DeviceBuffer>,
+    d_logits: gpu_core::DeviceBuffer,
+    d_xn: gpu_core::DeviceBuffer,
+    d_branch: gpu_core::DeviceBuffer,
+    d_tmp: gpu_core::DeviceBuffer,
+    dxmid: gpu_core::DeviceBuffer,
+    d_attn_ctx: gpu_core::DeviceBuffer,
+    d_scores: gpu_core::DeviceBuffer,
+    d_qkv: gpu_core::DeviceBuffer,
+    d_gelu: gpu_core::DeviceBuffer,
+    d_fc: gpu_core::DeviceBuffer,
+    ln_mean: gpu_core::DeviceBuffer,
+    ln_inv: gpu_core::DeviceBuffer,
 
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
-    ce_grad_uni: wgpu::Buffer,
+    ce_grad_uni: gpu_core::DeviceBuffer,
 }
 
 impl Gpt {
@@ -259,12 +259,12 @@ impl Gpt {
         let tokens = gpu.buffer(
             "tokens",
             n * 4,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST,
         );
         let targets = gpu.buffer(
             "targets",
             n * 4,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST,
         );
         let ce_grad_uni = gpu.uniform_dynamic(4); // [n, vocab, IGNORE, count]
 
@@ -335,7 +335,7 @@ impl Gpt {
         self.count.set(c.max(1) as f32);
     }
 
-    fn w(&self, name: &str) -> &wgpu::Buffer {
+    fn w(&self, name: &str) -> &gpu_core::DeviceBuffer {
         self.ps.w(name)
     }
 

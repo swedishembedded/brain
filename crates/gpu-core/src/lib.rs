@@ -9,6 +9,62 @@
 //! here removes the device-init + dispatch duplication that used to live in both
 //! the inference `Engine` and the training `Trainer`.
 
+//! ## Backends
+//!
+//! By default this crate is the wgpu backend (`Gpu`). With the `cpu-backend`
+//! feature it instead compiles the WGSL kernels to native code via
+//! `brain-wgsl-cpu` and runs them across CPU cores — same `Gpu` API, same
+//! `Step`/`DeviceBuffer` names, so model code is backend-agnostic. The neutral
+//! `DeviceBuffer` alias and `BufUsage` type are what let the rest of the
+//! workspace avoid naming `wgpu::*` directly.
+
+/// Max workgroups per grid dimension (downlevel/Vulkan guarantee). The CPU
+/// backend reproduces the same tiling so the kernels' index math is identical.
+pub const MAX_GROUPS_PER_DIM: u32 = 65535;
+
+/// Pack an f32 into the u32 uniform stream (kernels read it back with bitcast).
+pub fn f(x: f32) -> u32 {
+    x.to_bits()
+}
+
+/// Backend-neutral buffer usage flags. Mirrors the subset of
+/// `wgpu::BufferUsages` the kernels need; the wgpu backend maps it back to
+/// `wgpu::BufferUsages`, the CPU backend ignores it (all allocations are plain
+/// host memory).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct BufUsage(pub u32);
+
+impl BufUsage {
+    pub const STORAGE: BufUsage = BufUsage(1);
+    pub const COPY_DST: BufUsage = BufUsage(2);
+    pub const COPY_SRC: BufUsage = BufUsage(4);
+    pub const UNIFORM: BufUsage = BufUsage(8);
+    pub fn contains(self, other: BufUsage) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
+impl std::ops::BitOr for BufUsage {
+    type Output = BufUsage;
+    fn bitor(self, rhs: BufUsage) -> BufUsage {
+        BufUsage(self.0 | rhs.0)
+    }
+}
+
+#[cfg(feature = "cpu-backend")]
+mod cpu_backend;
+#[cfg(feature = "cpu-backend")]
+pub use cpu_backend::{CpuBackend as Gpu, CpuBuffer as DeviceBuffer, Step};
+
+// The wgpu backend is the default; the CPU backend replaces it wholesale.
+#[cfg(not(feature = "cpu-backend"))]
+pub use wgpu::Buffer as DeviceBuffer;
+#[cfg(not(feature = "cpu-backend"))]
+pub use wgpu_backend::{Gpu, Step};
+
+#[cfg(not(feature = "cpu-backend"))]
+mod wgpu_backend {
+use super::{BufUsage, MAX_GROUPS_PER_DIM};
 use wgpu::util::DeviceExt;
 
 /// A recorded dispatch: (pipeline index, bind group, grid_x, grid_y).
@@ -16,14 +72,6 @@ use wgpu::util::DeviceExt;
 /// dimension limit, then it tiles into Y; shaders reconstruct the linear thread
 /// index from `num_workgroups`, so the split is transparent.
 pub type Step = (usize, wgpu::BindGroup, u32, u32);
-
-/// Max workgroups per grid dimension (downlevel/Vulkan guarantee).
-const MAX_GROUPS_PER_DIM: u32 = 65535;
-
-/// Pack an f32 into the u32 uniform stream (kernels read it back with bitcast).
-pub fn f(x: f32) -> u32 {
-    x.to_bits()
-}
 
 /// Log the selected adapter. Native prints to stderr; wasm has no stderr, so it
 /// goes to the browser console.
@@ -153,11 +201,24 @@ impl Gpu {
         })
     }
 
-    pub fn buffer(&self, label: &str, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+    pub fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> wgpu::Buffer {
+        let mut u = wgpu::BufferUsages::empty();
+        if usage.contains(BufUsage::STORAGE) {
+            u |= wgpu::BufferUsages::STORAGE;
+        }
+        if usage.contains(BufUsage::COPY_DST) {
+            u |= wgpu::BufferUsages::COPY_DST;
+        }
+        if usage.contains(BufUsage::COPY_SRC) {
+            u |= wgpu::BufferUsages::COPY_SRC;
+        }
+        if usage.contains(BufUsage::UNIFORM) {
+            u |= wgpu::BufferUsages::UNIFORM;
+        }
         self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size,
-            usage,
+            usage: u,
             mapped_at_creation: false,
         })
     }
@@ -324,6 +385,7 @@ impl Gpu {
         staging
     }
 }
+} // mod wgpu_backend
 
 #[cfg(test)]
 mod tests {
@@ -339,6 +401,9 @@ mod tests {
     #[test]
     fn dispatch_storage_and_readback() {
         // Exercises the whole plumbing: device init, storage_init, step, submit, read.
+        // The CPU backend needs no GPU, so it always runs; the wgpu backend skips
+        // on headless CI via MOE_SKIP_GPU_TESTS.
+        #[cfg(not(feature = "cpu-backend"))]
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
             return;
         }

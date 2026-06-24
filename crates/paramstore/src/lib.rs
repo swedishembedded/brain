@@ -12,12 +12,12 @@ use gpu_core::Gpu;
 
 pub struct ParamStore {
     pub params: Vec<(String, usize)>,
-    pub weight: HashMap<String, wgpu::Buffer>,
-    pub grad: HashMap<String, wgpu::Buffer>,
-    pub adam_m: HashMap<String, wgpu::Buffer>,
-    pub adam_v: HashMap<String, wgpu::Buffer>,
-    pub norms: wgpu::Buffer,     // [n_params] sum-of-squares scratch for grad clipping
-    pub clip_coef: wgpu::Buffer, // [1] device-resident clip coefficient
+    pub weight: HashMap<String, gpu_core::DeviceBuffer>,
+    pub grad: HashMap<String, gpu_core::DeviceBuffer>,
+    pub adam_m: HashMap<String, gpu_core::DeviceBuffer>,
+    pub adam_v: HashMap<String, gpu_core::DeviceBuffer>,
+    pub norms: gpu_core::DeviceBuffer,     // [n_params] sum-of-squares scratch for grad clipping
+    pub clip_coef: gpu_core::DeviceBuffer, // [1] device-resident clip coefficient
 }
 
 impl ParamStore {
@@ -42,10 +42,10 @@ impl ParamStore {
         ParamStore { params, weight, grad, adam_m, adam_v, norms, clip_coef }
     }
 
-    pub fn w(&self, name: &str) -> &wgpu::Buffer {
+    pub fn w(&self, name: &str) -> &gpu_core::DeviceBuffer {
         self.weight.get(name).unwrap_or_else(|| panic!("no weight {name}"))
     }
-    pub fn g(&self, name: &str) -> &wgpu::Buffer {
+    pub fn g(&self, name: &str) -> &gpu_core::DeviceBuffer {
         self.grad.get(name).unwrap()
     }
     pub fn numel(&self, name: &str) -> usize {
@@ -55,7 +55,7 @@ impl ParamStore {
     /// Zero every gradient buffer (call once per effective batch, before the
     /// accumulating backward passes).
     pub fn zero_grads(&self, gpu: &Gpu) {
-        let clears: Vec<&wgpu::Buffer> = self.params.iter().map(|(n, _)| self.g(n)).collect();
+        let clears: Vec<&gpu_core::DeviceBuffer> = self.params.iter().map(|(n, _)| self.g(n)).collect();
         gpu.submit(&clears, &[]);
     }
 
@@ -86,7 +86,7 @@ mod tests {
         assert_eq!(ps.numel("w"), 3);
         // grads start zero; write then zero again
         assert_eq!(ps.read_grad(&gpu, "w"), vec![0.0, 0.0, 0.0]);
-        gpu.queue.write_buffer(ps.g("w"), 0, bytemuck::cast_slice(&[9.0f32, 9.0, 9.0]));
+        gpu.write(ps.g("w"), bytemuck::cast_slice(&[9.0f32, 9.0, 9.0]));
         assert_eq!(ps.read_grad(&gpu, "w"), vec![9.0, 9.0, 9.0]);
         ps.zero_grads(&gpu);
         assert_eq!(ps.read_grad(&gpu, "w"), vec![0.0, 0.0, 0.0]);
