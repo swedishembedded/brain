@@ -1,0 +1,17 @@
+[package]
+name = "brain-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Model-agnostic architecture-evaluation benchmark suite (registry + runner + reference benchmarks like MQAR)."
+
+[lib]
+name = "bench"
+path = "src/lib.rs"
+
+[dependencies]
+brain-data.workspace = true
+brain-gpt.workspace = true
+brain-eval.workspace = true
+brain-checkpoint.workspace = true
+serde_json.workspace = true

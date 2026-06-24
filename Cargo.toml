@@ -19,6 +19,7 @@ default-members = [
     "crates/pid",
     "crates/federated",
     "crates/eval",
+    "crates/bench",
     "crates/gradcheck",
     "crates/cli",
     "crates/web",
@@ -45,6 +46,7 @@ brain-timeseries = { path = "crates/timeseries" }
 brain-pid = { path = "crates/pid" }
 brain-federated = { path = "crates/federated" }
 brain-eval = { path = "crates/eval" }
+brain-bench = { path = "crates/bench" }
 brain-gradcheck = { path = "crates/gradcheck" }
 brain-vulkan = { path = "crates/vulkan" }
 brain-wgsl-cpu = { path = "crates/wgsl-cpu" }

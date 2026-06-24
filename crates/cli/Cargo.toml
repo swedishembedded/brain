@@ -23,5 +23,6 @@ brain-data.workspace = true
 brain-federated.workspace = true
 brain-gradcheck.workspace = true
 brain-eval.workspace = true
+brain-bench.workspace = true
 brain-checkpoint.workspace = true
 brain-vulkan = { workspace = true, optional = true }

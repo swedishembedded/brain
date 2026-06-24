@@ -82,6 +82,46 @@ make web/dev                         # WebGPU demo (delegates to crates/web)
 BRAIN_DEVICE=cpu make test            # run the whole suite on CPU, no GPU needed
 ```
 
+## Benchmark suite (`crates/bench`)
+
+`brain-bench` (lib `bench`) is a **model-agnostic** architecture-evaluation
+layer: each benchmark owns its *dataset* and its *scoring*, the harness owns
+running it. Use it to answer "does this architecture actually learn task X?"
+the same way across many tasks. The pattern is built to be copied — sibling
+work adds MAD, formal-language, and scaling-sweep benchmarks alongside the
+reference MQAR.
+
+**Run** (no usable GPU here — always select CPU):
+
+```bash
+BRAIN_DEVICE=cpu make bench          # run every registered benchmark, one table
+BRAIN_DEVICE=cpu make bench/mqar     # run a single benchmark
+./target/release/brain bench [--device cpu] [<name>] [--seed S]
+```
+
+The runner prints one comparison table: `benchmark | score | (fields) |
+threshold | pass/fail`. `make bench/char` keeps the legacy GPT-on-char-datasets
+sweep.
+
+**Add a benchmark:**
+
+1. New module `crates/bench/src/<name>.rs` with a type implementing the
+   `Benchmark` trait (`name`/`description`/`prepare`/`evaluate`/`threshold`).
+   `prepare` writes brain's `train.bin`/`val.bin`/`meta.json` token layout;
+   `evaluate` trains (today via `gpt::train`, behind a `// TODO(model-trait)`
+   seam) and returns `Metrics` (CE nats/bits, bits-per-byte, exact-match,
+   associative-recall, distinct-n, repetition-rate — all in `metrics.rs`).
+2. Register it in `bench::registry()` (`crates/bench/src/lib.rs`). The generic
+   `make bench/%` rule and `brain bench <name>` then pick it up with no further
+   wiring.
+3. Add a learnability test in `crates/bench/tests/`, gated by
+   `MOE_SKIP_GPU_TESTS`, asserting the score clears a **measured** threshold.
+
+The reference benchmark is **MQAR** (multi-query associative recall): per
+sequence, several `key→value` bindings then queried keys whose bound values the
+model must recall in-context; loss is masked to the answer region and windows
+are line-aligned. See `crates/bench/README.md` for the full design.
+
 ## Conventions & invariants
 
 - **WGSL is the source of truth.** Kernels live only in `crates/kernels/wgsl/`,

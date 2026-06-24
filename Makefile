@@ -34,7 +34,7 @@ LR     ?= 3e-3
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release test gradcheck bench clean federated-demo \
+.PHONY: help build release test gradcheck bench bench/char clean federated-demo \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt web/dev web/build
 
@@ -47,7 +47,9 @@ help:
 	@echo "                               timeseries|shakespeare_char|gpt) into $(DATA)/<name>"
 	@echo "  make train/gpt/<name>        train GPT on a dataset -> $(OUT)/gpt-<name>.weights"
 	@echo "  make eval/gpt/<name>         perplexity + exact-match for a trained GPT"
-	@echo "  make bench                   train+eval GPT on the shared char datasets"
+	@echo "  make bench                   run the architecture-evaluation benchmark suite (all)"
+	@echo "  make bench/<name>            run one benchmark (e.g. bench/mqar)"
+	@echo "  make bench/char              train+eval GPT on the shared char datasets (legacy)"
 	@echo "  make federated-demo          MoE train -> split -> verify -> merge round-trip"
 	@echo "  make web/dev | web/build     WebGPU browser demo (crates/web)"
 
@@ -97,11 +99,23 @@ train/gpt/%: release
 eval/gpt/%: release
 	$(BRAIN) gpt eval --weights $(OUT)/gpt-$*.weights --data $(DATA)/$*
 
-# ---- shared benchmark -----------------------------------------------------
+# ---- architecture-evaluation benchmark suite ------------------------------
+# `make bench` runs every registered benchmark (crates/bench) and prints one
+# comparison table (benchmark | score | threshold | pass/fail). `make bench/<name>`
+# runs a single benchmark, e.g. `make bench/mqar` (multi-query associative recall).
+# Add new benchmarks by registering them in crates/bench/src/lib.rs::registry —
+# the generic `bench/%` rule runs any registered name with no Makefile change.
+bench: release
+	$(BRAIN) bench --seed $(SEED)
+
+bench/%: release
+	$(BRAIN) bench $* --seed $(SEED)
+
+# ---- shared GPT char-dataset benchmark (legacy) ---------------------------
 # Train + eval the GPT baseline on the same char datasets, fixed seed/splits,
 # so results are comparable. (MoE-on-char-data + federated rows are a documented
 # follow-up — the MoE engine currently trains on its own 64-symbol rule task.)
-bench: release
+bench/char: release
 	@for d in calculator reverser; do \
 		echo "=== dataset: $$d ==="; \
 		$(MAKE) data/$$d N=$(N) SEED=$(SEED); \

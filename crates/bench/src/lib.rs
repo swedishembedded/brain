@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! brain's architecture-evaluation **benchmark suite** — a reusable,
+//! model-agnostic layer for asking "does this architecture actually learn task
+//! X?" the same way across benchmarks.
+//!
+//! A [`Benchmark`] owns its **dataset** (how to synthesize/write it) and its
+//! **scoring** (what a good model looks like on it). The harness owns *running*:
+//! every benchmark trains a model on its generated data and returns [`Metrics`]
+//! whose headline `score` is checked against the benchmark's `threshold`.
+//!
+//! Benchmarks are model-agnostic at the **data / metric** level: a benchmark
+//! never names "GPT" in its dataset or its scoring. Training + scoring go through
+//! the [`model::DecoderLm`] trait (an architecture that can be trained as a
+//! causal next-token decoder and queried for per-position logits). The default
+//! architecture is [`model::GptDecoder`]; dropping in a MoE/PID decoder is a new
+//! `DecoderLm` impl, with no benchmark changes — that is what makes the suite an
+//! *architecture* evaluation rather than a GPT-only one.
+//!
+//! ## Adding a benchmark
+//! 1. Add a module under `crates/bench/src/` implementing [`Benchmark`].
+//! 2. Register it in [`registry`].
+//! 3. (optional) Add a `make bench/<name>` shortcut — the generic
+//!    `bench/%` rule already runs any registered name.
+//!
+//! ## Running
+//! - [`run_all`] runs every registered benchmark and prints one comparison table.
+//! - [`run_one`] runs a single benchmark by name.
+
+use std::path::Path;
+
+pub mod metrics;
+pub mod model;
+pub mod mqar;
+
+pub use metrics::Metrics;
+pub use model::{DecoderLm, GptDecoder, Scorer, TrainConfig};
+
+/// A benchmark: owns its dataset and its scoring, model-agnostic at this level.
+///
+/// Implementors are cheap value types holding their config. The harness calls
+/// [`prepare`](Benchmark::prepare) once to write the dataset, then
+/// [`evaluate`](Benchmark::evaluate) to train + score a model on it.
+pub trait Benchmark {
+    /// Stable identifier used on the CLI, in `make bench/<name>`, and as the
+    /// table row label. Lowercase, no spaces.
+    fn name(&self) -> &str;
+
+    /// One-line human description for the table header / help.
+    fn description(&self) -> &str;
+
+    /// Generate and write this benchmark's dataset under `dir` (created if
+    /// absent), deterministically from `seed`. After this returns, `dir` holds
+    /// whatever [`evaluate`](Benchmark::evaluate) needs (e.g. brain's
+    /// `train.bin`/`val.bin`/`meta.json` token-dataset layout).
+    fn prepare(&self, dir: &Path, seed: u64) -> std::io::Result<()>;
+
+    /// Train a model on the dataset in `dir` and return its [`Metrics`]. The
+    /// headline `Metrics::score` is what [`threshold`](Benchmark::threshold)
+    /// gates.
+    fn evaluate(&self, dir: &Path, seed: u64) -> std::io::Result<Metrics>;
+
+    /// Pass/fail bar for `Metrics::score` (higher is better unless a benchmark
+    /// documents otherwise). Calibrated against measured CPU-backend runs.
+    fn threshold(&self) -> f32;
+
+    /// Names of the extra [`Metrics`] fields worth printing in the table, in
+    /// column order. The headline `score` is always shown first.
+    fn report_fields(&self) -> Vec<&str> {
+        Vec::new()
+    }
+}
+
+/// One benchmark's outcome: its metrics and whether it cleared its threshold.
+pub struct Outcome {
+    pub name: String,
+    pub metrics: Metrics,
+    pub threshold: f32,
+    pub passed: bool,
+}
+
+/// All registered benchmarks. Sibling agents add new ones here (MAD, formal
+/// languages, scaling sweeps, …) by pushing another boxed [`Benchmark`].
+pub fn registry() -> Vec<Box<dyn Benchmark>> {
+    vec![Box::new(mqar::Mqar::default())]
+}
+
+/// Look up a benchmark by [`Benchmark::name`].
+pub fn get(name: &str) -> Option<Box<dyn Benchmark>> {
+    registry().into_iter().find(|b| b.name() == name)
+}
+
+/// Prepare + evaluate one benchmark, returning its [`Outcome`].
+fn run(bench: &dyn Benchmark, seed: u64) -> std::io::Result<Outcome> {
+    let dir = std::env::temp_dir().join(format!("brain_bench_{}_{}", bench.name(), std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    bench.prepare(&dir, seed)?;
+    let metrics = bench.evaluate(&dir, seed)?;
+    let _ = std::fs::remove_dir_all(&dir);
+    let threshold = bench.threshold();
+    Ok(Outcome {
+        name: bench.name().to_string(),
+        metrics: metrics.clone(),
+        threshold,
+        passed: metrics.score >= threshold,
+    })
+}
+
+/// Run a single benchmark by name, printing a one-row table. Returns whether it
+/// passed (`Err` if the name is unknown).
+pub fn run_one(name: &str, seed: u64) -> std::io::Result<bool> {
+    let Some(bench) = get(name) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("unknown benchmark '{name}'; known: {}", known_names().join(", ")),
+        ));
+    };
+    let outcome = run(bench.as_ref(), seed)?;
+    print_table(std::slice::from_ref(&outcome), &[bench.as_ref()]);
+    Ok(outcome.passed)
+}
+
+/// Run every registered benchmark, printing one comparison table. Returns
+/// whether **all** passed.
+pub fn run_all(seed: u64) -> std::io::Result<bool> {
+    let benches = registry();
+    let mut outcomes = Vec::new();
+    for b in &benches {
+        outcomes.push(run(b.as_ref(), seed)?);
+    }
+    let refs: Vec<&dyn Benchmark> = benches.iter().map(|b| b.as_ref()).collect();
+    print_table(&outcomes, &refs);
+    Ok(outcomes.iter().all(|o| o.passed))
+}
+
+/// The names of all registered benchmarks.
+pub fn known_names() -> Vec<String> {
+    registry().iter().map(|b| b.name().to_string()).collect()
+}
+
+/// Print the `benchmark | metric(s) | threshold | pass/fail` comparison table.
+fn print_table(outcomes: &[Outcome], benches: &[&dyn Benchmark]) {
+    // Union of report fields across the shown benchmarks, in first-seen order.
+    let mut field_cols: Vec<String> = Vec::new();
+    for b in benches {
+        for f in b.report_fields() {
+            if !field_cols.iter().any(|c| c == f) {
+                field_cols.push(f.to_string());
+            }
+        }
+    }
+
+    let mut header = format!("{:<14} {:>10}", "benchmark", "score");
+    for f in &field_cols {
+        header.push_str(&format!(" {f:>12}"));
+    }
+    header.push_str(&format!(" {:>10} {:>6}", "threshold", "result"));
+    println!("\n{header}");
+    println!("{}", "-".repeat(header.len()));
+
+    for o in outcomes {
+        let mut row = format!("{:<14} {:>10.4}", o.name, o.metrics.score);
+        for f in &field_cols {
+            match o.metrics.get(f) {
+                Some(v) => row.push_str(&format!(" {v:>12.4}")),
+                None => row.push_str(&format!(" {:>12}", "-")),
+            }
+        }
+        row.push_str(&format!(" {:>10.4} {:>6}", o.threshold, if o.passed { "PASS" } else { "FAIL" }));
+        println!("{row}");
+    }
+    println!();
+}

@@ -50,6 +50,10 @@ FEDERATED MoE (train experts separately, then assemble)
   brain federated merge     <dir> --out <full.weights>
   brain federated assemble  <base_dir> [overlay_dir ...] --out <full.weights>
 
+BENCHMARK SUITE (architecture evaluation)
+  brain bench [<name>] [--seed S]          # run all benchmarks, or one by name
+      names: mqar                          # prints a benchmark|score|threshold|pass table
+
 OTHER
   brain gradcheck                          # finite-difference backprop check (GPT)
   brain pid <validate|stream|train|rollout|profile> ...
@@ -96,6 +100,42 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
     out
 }
 
+/// `brain bench [<name>] [--seed S]` — run the architecture-evaluation suite.
+/// With no name, runs every registered benchmark and prints one comparison
+/// table; with a name, runs just that benchmark. Exits non-zero on any failure.
+fn run_bench(args: &[String]) {
+    let mut name: Option<&str> = None;
+    let mut seed = 1337u64;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--seed" => {
+                i += 1;
+                seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(seed);
+            }
+            other if !other.starts_with("--") => name = Some(other),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+
+    let result = match name {
+        Some(n) => bench::run_one(n, seed),
+        None => bench::run_all(seed),
+    };
+    match result {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("brain bench: one or more benchmarks FAILED their threshold");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("brain bench: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn main() {
     let argv = select_backend(std::env::args().collect());
     match argv.get(1).map(|s| s.as_str()) {
@@ -113,6 +153,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("bench") => run_bench(&argv[2..]),
         Some("pid") => pid_cli::run_pid(&argv[2..]),
         Some("validate") => {
             let path = argv
