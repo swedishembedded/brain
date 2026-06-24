@@ -39,6 +39,7 @@ pub mod mad_selective_copy;
 pub mod metrics;
 pub mod model;
 pub mod mqar;
+pub mod toolcall;
 
 pub use metrics::Metrics;
 pub use model::{DecoderLm, GptDecoder, Scorer, TrainConfig};
@@ -91,6 +92,7 @@ pub struct Outcome {
 pub fn registry() -> Vec<Box<dyn Benchmark>> {
     vec![
         Box::new(mqar::Mqar::default()),
+        Box::new(toolcall::Toolcall::default()),
         Box::new(mad_recall::MadRecall::default()),
         Box::new(mad_fuzzy_recall::MadFuzzyRecall::default()),
         Box::new(mad_noisy_recall::MadNoisyRecall::default()),

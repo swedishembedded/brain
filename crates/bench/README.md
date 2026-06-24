@@ -17,7 +17,8 @@ scaling sweeps, …) by copying the MQAR pattern.
 | `Metrics` | `src/metrics.rs` | CE (nats/bits), bits-per-byte, exact-match, associative-recall, distinct-n, repetition-rate |
 | registry + runner | `src/lib.rs` | `registry()`, `run_all()`, `run_one()`, comparison table |
 | MQAR (reference) | `src/mqar.rs` | multi-query associative recall |
-| integration test | `tests/mqar.rs` | learnability guard, gated by `MOE_SKIP_GPU_TESTS` |
+| Tool-calling | `src/toolcall.rs` | map a user intent to one structured tool call (id + args) |
+| integration tests | `tests/*.rs` | learnability guards, gated by `MOE_SKIP_GPU_TESTS` |
 
 ## Running
 
@@ -103,3 +104,48 @@ d_model-64 / 4-head GPT. **Measured recall on the CPU backend is ~0.77**, clear
 of the `0.55` threshold; runtime is a few minutes on CPU. Difficulty scales with
 `n_pairs` (keys to disambiguate): a same-budget `n_pairs=3` run drops to ~0.41,
 so 2 is the calibrated sweet spot.
+
+## Tool-calling (`toolcall`)
+
+The pattern for training **tool-calling** models. Each example maps one
+natural-language-shaped *user intent* to exactly one structured **tool call** (a
+tool id plus its ordered argument values), laid out as a single masked line:
+
+```
+VERB_k  F0 v0  F1 v1 ... Fm vm   =   TOOL_k  a0 a1 ... a(p-1)   NL
+└──────────── user intent (prompt) ──────────┘   └─ tool call (assistant) ─┘
+```
+
+- `VERB_k` selects the tool (`TOOL_k`). Each tool has a **fixed named
+  signature**: `arg_j` of `TOOL_k` always comes from the same field-name token.
+  The intent lists those `p` labelled `name value` fields **plus `d` distractor
+  fields** (disjoint name pool) the call must ignore, all **shuffled** — so the
+  model routes by field *name*, not position.
+- The assistant span after `=` is `TOOL_k` then the `p` argument values **in the
+  tool's canonical order**, then `NL`. Producing it is verb→tool routing plus, per
+  arg, an induction-head copy of the matching field's value past the distractors —
+  the shape of real function-call argument filling.
+- **Tokens:** `NL`, `SEP` (`=`), then disjoint id ranges for verbs, tool ids,
+  per-tool argument field names, distractor field names, and argument values.
+  Written as a char dataset (PUA chars) so the existing loader is reused.
+- **Masking (the key tool-calling pattern):** loss masked up to & including
+  `SEP`, per line, line-aligned (`mask_before='='`, `mask_per_line`,
+  `align_to_lines`) — **train only on the assistant/tool-call span, never on the
+  prompt**.
+- **Scoring:** exact-match of the whole predicted call — from the prompt the model
+  greedily decodes `p+1` tokens (tool id + args); a call is correct **only if the
+  tool id and every argument value match**. Chance is
+  `(1/n_tools)*(1/arg_values)^p`.
+
+Default config (`Toolcall::default`): `n_tools=4`, `args_per_tool=2`,
+`n_distractors=2`, `arg_values=12`, 8000 sequences, 800 steps, 2-layer /
+d_model-64 / 4-head GPT. **Chance ≈ 0.0017; measured exact-match = 1.00 across
+seeds** (train_ce ≈ 0.29), clear of the `0.85` threshold, in ~1-2 min on CPU. An
+earlier variant that re-randomized field→slot mapping *per example* was
+unlearnable (≈ chance), confirming the metric tracks genuine name-routing.
+
+**Generalizes to** multi-call traces (mask each prompt/result region, supervise
+each call span), JSON function-call schemas (`{"name":..,"arguments":{..}}` with
+parse-then-compare scoring), and typed/free-form multi-token argument values —
+all reuse the same "mask the prompt, train+score only the call" recipe. See the
+`toolcall` module doc for details.

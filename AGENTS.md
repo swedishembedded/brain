@@ -120,7 +120,11 @@ sweep.
 The reference benchmark is **MQAR** (multi-query associative recall): per
 sequence, several `key→value` bindings then queried keys whose bound values the
 model must recall in-context; loss is masked to the answer region and windows
-are line-aligned. See `crates/bench/README.md` for the full design.
+are line-aligned. Registered benchmarks: **mqar**, **toolcall** (tool-calling:
+map a user intent to one structured tool call `TOOL_k args…`, masking the prompt
+and training/scoring exact-match only on the assistant tool-call span), plus the
+**mad_\*** family (recall, fuzzy/noisy recall, selective-copy, memorize). See
+`crates/bench/README.md` for the full design.
 
 ## Conventions & invariants
 
