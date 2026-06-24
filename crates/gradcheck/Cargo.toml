@@ -9,6 +9,9 @@ description = "Numerical (finite-difference) gradient checker — the backprop c
 name = "gradcheck"
 path = "src/lib.rs"
 
+[features]
+cpu-backend = ["brain-gpt/cpu-backend"]
+
 [dependencies]
 brain-gpt.workspace = true
 brain-data.workspace = true
