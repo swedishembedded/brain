@@ -532,6 +532,104 @@ impl Gpt {
     }
 }
 
+// ---- the architecture-agnostic Model seam (ADR 0001 §2.2/§2.3) ----
+//
+// GPT is the reference implementation: it already exposes nearly the whole
+// surface as inherent methods, so these impls are thin adapters. `set_batch`
+// maps `Batch::Lm` onto the inherent two-slice upload; `logits_all` wraps the
+// always-present token head in `Some`.
+
+impl model::ModelConfig for GptConfig {
+    fn param_list(&self) -> Vec<(String, usize)> {
+        GptConfig::param_list(self)
+    }
+    fn to_json(&self) -> Value {
+        GptConfig::to_json(self)
+    }
+    fn from_json(v: &Value) -> Self {
+        GptConfig::from_json(v)
+    }
+    fn vocab(&self) -> u32 {
+        self.vocab
+    }
+    fn block_size(&self) -> u32 {
+        self.block_size
+    }
+    fn finalize_for_dataset(mut self, vocab: u32, block_size: u32) -> Self {
+        self.vocab = vocab;
+        self.block_size = block_size;
+        self.with_ff_default()
+    }
+}
+
+impl model::Model for Gpt {
+    type Config = GptConfig;
+
+    fn new(cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
+        Gpt::new(cfg, b, t, init)
+    }
+
+    fn init_weights(cfg: &GptConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+        crate::init::init_weights(cfg, seed)
+    }
+
+    fn config(&self) -> &GptConfig {
+        &self.cfg
+    }
+
+    fn set_batch(&self, batch: model::Batch) {
+        match batch {
+            model::Batch::Lm { tokens, targets } => Gpt::set_batch(self, tokens, targets),
+            _ => panic!("gpt::Gpt only supports Batch::Lm"),
+        }
+    }
+
+    fn forward(&self) -> f32 {
+        Gpt::forward(self)
+    }
+    fn backward(&self) {
+        Gpt::backward(self)
+    }
+    fn zero_grads(&self) {
+        Gpt::zero_grads(self)
+    }
+
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
+        Gpt::adamw_step(self, t, lr, wd, clip, extra_scale)
+    }
+
+    fn poll_wait(&self) {
+        Gpt::poll_wait(self)
+    }
+
+    fn param_names(&self) -> Vec<String> {
+        self.ps.params.iter().map(|(n, _)| n.clone()).collect()
+    }
+    fn read_weight(&self, name: &str) -> Vec<f32> {
+        Gpt::read_weight(self, name)
+    }
+    fn write_weight(&self, name: &str, data: &[f32]) {
+        Gpt::write_weight(self, name, data)
+    }
+    fn read_grad(&self, name: &str) -> Vec<f32> {
+        Gpt::read_grad(self, name)
+    }
+
+    fn logits_all(&self, tokens: &[u32]) -> Option<Vec<f32>> {
+        Some(Gpt::logits_all(self, tokens))
+    }
+
+    fn save(&self, path: &str) {
+        Gpt::save(self, path)
+    }
+    fn save_with_itos(&self, path: &str, itos: Option<&[char]>) {
+        Gpt::save_with_itos(self, path, itos)
+    }
+    fn config_json(&self) -> Value {
+        self.cfg.to_json()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

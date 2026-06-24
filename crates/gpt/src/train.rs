@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! GPT training loop: ties [`crate::model::Gpt`] to the `data` crate
-//! (`TokenDataset` + masking/alignment), with AdamW, cosine-with-warmup LR,
-//! gradient accumulation, periodic eval, and checkpointing — a port of
-//! nanogpt's trainer for brain's WGSL engine.
+//! GPT training entry point. The training loop itself now lives in the
+//! architecture-agnostic `model` crate (ADR 0001 §3); this is a thin wrapper
+//! that delegates to [`model::train::fit`] over [`crate::model::Gpt`], keeping
+//! `gpt::train::train`'s signature and behavior identical for existing callers
+//! (the CLI and `crates/bench`).
 
 use std::path::Path;
 
-use data::binio::{self, Meta};
-use data::loader::{BatchConfig, TokenDataset};
-use data::rng::Rng;
-
-use crate::init::init_weights;
-use crate::model::{Gpt, GptConfig, IGNORE};
+use crate::model::GptConfig;
 
 /// Training hyperparameters (CLI-facing). This is now `model::FitOpts` — the
 /// architecture-agnostic training-loop options moved to the `model` crate
@@ -24,144 +20,16 @@ pub type TrainOpts = model::FitOpts;
 /// `model::train::cosine_lr` and re-exported here for source compatibility.
 pub use model::cosine_lr;
 
-/// A loaded char/BPE dataset: train/val token splits + optional vocab metadata.
-struct Loaded {
-    train: TokenDataset,
-    val: TokenDataset,
-    vocab: u32,
-    batch_cfg: BatchConfig,
-    /// Char-tokenizer vocab (when the dataset has `meta.json`), embedded into the
-    /// checkpoint so inference (`gpt gen`) needs no dataset reference.
-    itos: Option<Vec<char>>,
-}
-
-fn load(dir: &Path, opts: &TrainOpts) -> std::io::Result<Loaded> {
-    let train_tok = binio::read_u16_bin(&dir.join("train.bin"))?;
-    let val_tok = binio::read_u16_bin(&dir.join("val.bin"))?;
-
-    // Vocab + mask/newline ids come from meta.json (char datasets). BPE has no
-    // meta; vocab is GPT-2's 50257 and masking/alignment are unsupported there.
-    let (vocab, mask_id, newline_id, itos) = match std::fs::read_to_string(dir.join("meta.json")) {
-        Ok(s) => {
-            let meta = Meta::from_json(&s).map_err(std::io::Error::other)?;
-            let stoi = meta.stoi();
-            let mask_id = opts.mask_before.and_then(|c| stoi.get(&c).copied());
-            let newline_id = stoi.get(&'\n').copied();
-            (meta.vocab_size as u32, mask_id, newline_id, Some(meta.itos))
-        }
-        Err(_) => {
-            let maxid = train_tok.iter().chain(val_tok.iter()).copied().max().unwrap_or(0);
-            (maxid as u32 + 1, None, None, None)
-        }
-    };
-
-    let batch_cfg = BatchConfig {
-        batch_size: opts.batch_size as usize,
-        block_size: opts.block_size as usize,
-        mask_before_token: mask_id,
-        mask_per_line: opts.mask_per_line,
-        align_to_lines: opts.align_to_lines,
-        newline_token: newline_id,
-    };
-    Ok(Loaded {
-        train: TokenDataset::new(train_tok, &batch_cfg),
-        val: TokenDataset::new(val_tok, &batch_cfg),
-        vocab,
-        batch_cfg,
-        itos,
-    })
-}
-
-/// i32 targets from the loader (`-1` = ignore) reinterpreted as the model's
-/// `u32` IGNORE sentinel.
-fn targets_to_u32(y: &[i32]) -> Vec<u32> {
-    y.iter().map(|&v| if v < 0 { IGNORE } else { v as u32 }).collect()
-}
-
 /// Train a GPT on the dataset in `dir`, writing the final checkpoint to `out`.
 /// `cfg` carries the architecture; its `vocab`/`block_size` are overridden from
 /// the dataset and `opts`. Returns `(initial_train_loss, final_train_loss)`.
-pub fn train(dir: &Path, mut cfg: GptConfig, opts: &TrainOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
-    let loaded = load(dir, opts)?;
-
-    // Resume from the existing checkpoint if `out` already exists, so repeated
-    // `train` runs continue rather than restart from scratch. The checkpoint's
-    // architecture wins (and must match the dataset/--block in use). Otherwise
-    // start from a fresh random init. (Weights resume; AdamW moments restart.)
-    let resume = out.map(|p| p.exists()).unwrap_or(false);
-    let (cfg, init) = if resume {
-        let p = out.unwrap();
-        println!("resuming from existing checkpoint {}", p.display());
-        let c = checkpoint::load(p.to_str().expect("utf-8 path"));
-        let rcfg = GptConfig::from_json(&c.header["config"]);
-        assert_eq!(
-            rcfg.block_size, opts.block_size,
-            "checkpoint block_size {} != --block {} — resume with the same --block",
-            rcfg.block_size, opts.block_size
-        );
-        assert_eq!(rcfg.vocab, loaded.vocab, "checkpoint vocab != dataset vocab — wrong dataset for this checkpoint");
-        (rcfg, c.by_role(""))
-    } else {
-        cfg.vocab = loaded.vocab;
-        cfg.block_size = opts.block_size;
-        let cfg = cfg.with_ff_default();
-        let init = init_weights(&cfg, opts.seed);
-        (cfg, init)
-    };
-    let model = Gpt::new(cfg, opts.batch_size, opts.block_size, &init);
-    let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
-
-    let sample_loss = |model: &Gpt, ds: &TokenDataset, rng: &mut Rng, batches: u32| -> f32 {
-        let mut total = 0.0;
-        for _ in 0..batches.max(1) {
-            let (x, y) = ds.get_batch(&loaded.batch_cfg, rng);
-            model.set_batch(&x, &targets_to_u32(&y));
-            total += model.forward();
-        }
-        total / batches.max(1) as f32
-    };
-
-    let initial = sample_loss(&model, &loaded.train, &mut rng.clone(), 5);
-    let mut last_train = initial;
-
-    for step in 0..opts.steps {
-        let lr = cosine_lr(step, opts);
-        model.zero_grads();
-        let mut step_loss = 0.0;
-        for _ in 0..opts.grad_accum.max(1) {
-            let (x, y) = loaded.train.get_batch(&loaded.batch_cfg, &mut rng);
-            model.set_batch(&x, &targets_to_u32(&y));
-            step_loss += model.forward();
-            model.backward();
-        }
-        // average grads over accumulation steps
-        let scale = 1.0 / opts.grad_accum.max(1) as f32;
-        let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
-        model.adamw_step(step + 1, lr, opts.weight_decay, clip, scale);
-        model.poll_wait();
-        last_train = step_loss / opts.grad_accum.max(1) as f32;
-
-        if opts.eval_interval > 0 && (step + 1) % opts.eval_interval == 0 {
-            let eval_loss = sample_loss(&model, &loaded.val, &mut rng.clone(), opts.eval_batches);
-            // Checkpoint at every eval point so long runs are resumable and a
-            // crash loses at most `eval_interval` steps. The write is atomic
-            // (checkpoint::save renames a temp over the target).
-            let saved = match out {
-                Some(p) => {
-                    model.save_with_itos(p.to_str().expect("utf-8 path"), loaded.itos.as_deref());
-                    format!("  saved -> {}", p.display())
-                }
-                None => String::new(),
-            };
-            println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}{saved}", step + 1, lr, last_train, eval_loss);
-        }
-    }
-
-    if let Some(p) = out {
-        model.save_with_itos(p.to_str().expect("utf-8 path"), loaded.itos.as_deref());
-        println!("saved checkpoint -> {}", p.display());
-    }
-    Ok((initial, last_train))
+///
+/// This delegates to the generic [`model::train::fit`] over [`Gpt`] — the loop
+/// body (cosine LR, warmup, grad-accum, grad-clip, periodic eval, resumable
+/// atomic checkpointing) is shared with every other `Model` and is no longer
+/// duplicated here.
+pub fn train(dir: &Path, cfg: GptConfig, opts: &TrainOpts, out: Option<&Path>) -> std::io::Result<(f32, f32)> {
+    model::train::fit::<crate::model::Gpt>(dir, cfg, opts, out)
 }
 
 #[cfg(test)]
