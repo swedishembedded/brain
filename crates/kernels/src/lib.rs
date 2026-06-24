@@ -22,34 +22,48 @@ pub const ATTENTION: &str = include_str!("../wgsl/attention.wgsl");
 pub const ATTN_APPLY: &str = include_str!("../wgsl/attn_apply.wgsl");
 /// `wgsl/attn_apply_bidir.wgsl`
 pub const ATTN_APPLY_BIDIR: &str = include_str!("../wgsl/attn_apply_bidir.wgsl");
+/// `wgsl/attn_apply_cross.wgsl`
+pub const ATTN_APPLY_CROSS: &str = include_str!("../wgsl/attn_apply_cross.wgsl");
 /// `wgsl/attn_bwd_dk.wgsl`
 pub const ATTN_BWD_DK: &str = include_str!("../wgsl/attn_bwd_dk.wgsl");
 /// `wgsl/attn_bwd_dk_bidir.wgsl`
 pub const ATTN_BWD_DK_BIDIR: &str = include_str!("../wgsl/attn_bwd_dk_bidir.wgsl");
+/// `wgsl/attn_bwd_dk_cross.wgsl`
+pub const ATTN_BWD_DK_CROSS: &str = include_str!("../wgsl/attn_bwd_dk_cross.wgsl");
 /// `wgsl/attn_bwd_dq.wgsl`
 pub const ATTN_BWD_DQ: &str = include_str!("../wgsl/attn_bwd_dq.wgsl");
 /// `wgsl/attn_bwd_dq_bidir.wgsl`
 pub const ATTN_BWD_DQ_BIDIR: &str = include_str!("../wgsl/attn_bwd_dq_bidir.wgsl");
+/// `wgsl/attn_bwd_dq_cross.wgsl`
+pub const ATTN_BWD_DQ_CROSS: &str = include_str!("../wgsl/attn_bwd_dq_cross.wgsl");
 /// `wgsl/attn_bwd_dscores.wgsl`
 pub const ATTN_BWD_DSCORES: &str = include_str!("../wgsl/attn_bwd_dscores.wgsl");
 /// `wgsl/attn_bwd_dscores_bidir.wgsl`
 pub const ATTN_BWD_DSCORES_BIDIR: &str = include_str!("../wgsl/attn_bwd_dscores_bidir.wgsl");
+/// `wgsl/attn_bwd_dscores_cross.wgsl`
+pub const ATTN_BWD_DSCORES_CROSS: &str = include_str!("../wgsl/attn_bwd_dscores_cross.wgsl");
 /// `wgsl/attn_bwd_dv.wgsl`
 pub const ATTN_BWD_DV: &str = include_str!("../wgsl/attn_bwd_dv.wgsl");
 /// `wgsl/attn_bwd_dv_bidir.wgsl`
 pub const ATTN_BWD_DV_BIDIR: &str = include_str!("../wgsl/attn_bwd_dv_bidir.wgsl");
+/// `wgsl/attn_bwd_dv_cross.wgsl`
+pub const ATTN_BWD_DV_CROSS: &str = include_str!("../wgsl/attn_bwd_dv_cross.wgsl");
 /// `wgsl/attn_scores_masked.wgsl`
 pub const ATTN_SCORES_MASKED: &str = include_str!("../wgsl/attn_scores_masked.wgsl");
 /// `wgsl/attn_scores.wgsl`
 pub const ATTN_SCORES: &str = include_str!("../wgsl/attn_scores.wgsl");
 /// `wgsl/attn_scores_bidir.wgsl`
 pub const ATTN_SCORES_BIDIR: &str = include_str!("../wgsl/attn_scores_bidir.wgsl");
+/// `wgsl/attn_scores_cross.wgsl`
+pub const ATTN_SCORES_CROSS: &str = include_str!("../wgsl/attn_scores_cross.wgsl");
 /// `wgsl/attn_softmax_masked.wgsl`
 pub const ATTN_SOFTMAX_MASKED: &str = include_str!("../wgsl/attn_softmax_masked.wgsl");
 /// `wgsl/attn_softmax.wgsl`
 pub const ATTN_SOFTMAX: &str = include_str!("../wgsl/attn_softmax.wgsl");
 /// `wgsl/attn_softmax_bidir.wgsl`
 pub const ATTN_SOFTMAX_BIDIR: &str = include_str!("../wgsl/attn_softmax_bidir.wgsl");
+/// `wgsl/attn_softmax_cross.wgsl`
+pub const ATTN_SOFTMAX_CROSS: &str = include_str!("../wgsl/attn_softmax_cross.wgsl");
 /// `wgsl/bias_add.wgsl`
 pub const BIAS_ADD: &str = include_str!("../wgsl/bias_add.wgsl");
 /// `wgsl/bias_grad.wgsl`
@@ -141,20 +155,27 @@ pub const ALL: &[(&str, &str)] = &[
     ("attention", ATTENTION),
     ("attn_apply", ATTN_APPLY),
     ("attn_apply_bidir", ATTN_APPLY_BIDIR),
+    ("attn_apply_cross", ATTN_APPLY_CROSS),
     ("attn_bwd_dk", ATTN_BWD_DK),
     ("attn_bwd_dk_bidir", ATTN_BWD_DK_BIDIR),
+    ("attn_bwd_dk_cross", ATTN_BWD_DK_CROSS),
     ("attn_bwd_dq", ATTN_BWD_DQ),
     ("attn_bwd_dq_bidir", ATTN_BWD_DQ_BIDIR),
+    ("attn_bwd_dq_cross", ATTN_BWD_DQ_CROSS),
     ("attn_bwd_dscores", ATTN_BWD_DSCORES),
     ("attn_bwd_dscores_bidir", ATTN_BWD_DSCORES_BIDIR),
+    ("attn_bwd_dscores_cross", ATTN_BWD_DSCORES_CROSS),
     ("attn_bwd_dv", ATTN_BWD_DV),
     ("attn_bwd_dv_bidir", ATTN_BWD_DV_BIDIR),
+    ("attn_bwd_dv_cross", ATTN_BWD_DV_CROSS),
     ("attn_scores_masked", ATTN_SCORES_MASKED),
     ("attn_scores", ATTN_SCORES),
     ("attn_scores_bidir", ATTN_SCORES_BIDIR),
+    ("attn_scores_cross", ATTN_SCORES_CROSS),
     ("attn_softmax_masked", ATTN_SOFTMAX_MASKED),
     ("attn_softmax", ATTN_SOFTMAX),
     ("attn_softmax_bidir", ATTN_SOFTMAX_BIDIR),
+    ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
     ("bias_add", BIAS_ADD),
     ("bias_grad", BIAS_GRAD),
     ("ce_grad_masked", CE_GRAD_MASKED),
@@ -215,7 +236,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_kernels_present_and_nonempty() {
-        assert_eq!(ALL.len(), 61);
+        assert_eq!(ALL.len(), 68);
         for (n, s) in ALL { assert!(!s.trim().is_empty(), "empty kernel {n}"); }
     }
     #[test]
