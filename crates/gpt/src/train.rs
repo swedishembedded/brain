@@ -15,63 +15,14 @@ use data::rng::Rng;
 use crate::init::init_weights;
 use crate::model::{Gpt, GptConfig, IGNORE};
 
-/// Training hyperparameters (CLI-facing).
-#[derive(Clone, Debug)]
-pub struct TrainOpts {
-    pub steps: u32,
-    pub batch_size: u32,
-    pub block_size: u32,
-    pub lr: f32,
-    pub min_lr: f32,
-    pub warmup: u32,
-    pub decay_iters: u32,
-    pub weight_decay: f32,
-    pub grad_clip: f32,
-    pub grad_accum: u32,
-    pub eval_interval: u32,
-    pub eval_batches: u32,
-    pub seed: u64,
-    /// Mask loss up to & including this char (e.g. `'='` for calculator).
-    pub mask_before: Option<char>,
-    pub mask_per_line: bool,
-    pub align_to_lines: bool,
-}
+/// Training hyperparameters (CLI-facing). This is now `model::FitOpts` — the
+/// architecture-agnostic training-loop options moved to the `model` crate
+/// (ADR §3); kept as `TrainOpts` here for source compatibility.
+pub type TrainOpts = model::FitOpts;
 
-impl Default for TrainOpts {
-    fn default() -> Self {
-        TrainOpts {
-            steps: 2000,
-            batch_size: 32,
-            block_size: 64,
-            lr: 3e-4,
-            min_lr: 3e-5,
-            warmup: 100,
-            decay_iters: 2000,
-            weight_decay: 0.1,
-            grad_clip: 1.0,
-            grad_accum: 1,
-            eval_interval: 250,
-            eval_batches: 20,
-            seed: 1337,
-            mask_before: None,
-            mask_per_line: false,
-            align_to_lines: false,
-        }
-    }
-}
-
-/// Cosine LR schedule with linear warmup (nanogpt's `get_lr`).
-pub fn cosine_lr(it: u32, opts: &TrainOpts) -> f32 {
-    if it < opts.warmup {
-        return opts.lr * (it + 1) as f32 / opts.warmup.max(1) as f32;
-    }
-    if it >= opts.decay_iters {
-        return opts.min_lr;
-    }
-    let ratio = (it - opts.warmup) as f32 / (opts.decay_iters - opts.warmup).max(1) as f32;
-    let coeff = 0.5 * (1.0 + (std::f32::consts::PI * ratio).cos());
-    opts.min_lr + coeff * (opts.lr - opts.min_lr)
-}
+/// Cosine LR schedule with linear warmup (nanogpt's `get_lr`). Moved to
+/// `model::train::cosine_lr` and re-exported here for source compatibility.
+pub use model::cosine_lr;
 
 /// A loaded char/BPE dataset: train/val token splits + optional vocab metadata.
 struct Loaded {
