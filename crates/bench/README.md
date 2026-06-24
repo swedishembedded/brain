@@ -18,6 +18,10 @@ scaling sweeps, …) by copying the MQAR pattern.
 | registry + runner | `src/lib.rs` | `registry()`, `run_all()`, `run_one()`, comparison table |
 | MQAR (reference) | `src/mqar.rs` | multi-query associative recall |
 | Tool-calling | `src/toolcall.rs` | map a user intent to one structured tool call (id + args) |
+| MAD family | `src/mad_*.rs` | recall / fuzzy-recall / noisy-recall / selective-copy / memorize |
+| parity | `src/parity.rs` | running-parity state tracking over random bits |
+| mod_add | `src/mod_add.rs` | modular addition `a+b=c (mod p)` — the grokking task |
+| dyck | `src/dyck.rs` | Dyck-k balanced brackets — hierarchical state |
 | integration tests | `tests/*.rs` | learnability guards, gated by `MOE_SKIP_GPU_TESTS` |
 
 ## Running
@@ -149,3 +153,38 @@ each call span), JSON function-call schemas (`{"name":..,"arguments":{..}}` with
 parse-then-compare scoring), and typed/free-form multi-token argument values —
 all reuse the same "mask the prompt, train+score only the call" recipe. See the
 `toolcall` module doc for details.
+## Formal-language / algorithmic benchmarks
+
+State-tracking / hierarchical-structure probes — the tasks a transformer is
+known to struggle with. Each writes the same char-dataset layout, masks to its
+answer region, and scores next-token accuracy on held-out sequences. All numbers
+are measured on the CPU (Cranelift JIT) backend.
+
+| benchmark | structure tested | layout | chance | measured | threshold |
+|---|---|---|---|---|---|
+| `parity` | single-bit running state | `bits = running_parity NL` | 0.500 | ~1.00 | 0.80 |
+| `mod_add` | group structure / generalization | `a + b = c NL` | 1/p | 0.64–0.72 | 0.25 |
+| `dyck` | hierarchical stack / nesting | `( [ ] ) … NL` | 1/k | ~0.99 | 0.70 |
+
+- **parity** — a string of random bits followed by the cumulative XOR at every
+  position. Carrying one bit of state along the answer region is the textbook
+  non-`AC0` regular language a fixed-depth transformer cannot represent exactly;
+  `n_bits` is the state-chain-length difficulty knob. Masked up to `=`, scored at
+  every parity position (chance 0.5). Default `n_bits=8`, 6000 seqs, 800 steps,
+  d_model-64 → **~1.0**.
+- **mod_add** — the classic *grokking* task: `a+b=c (mod p)` over a small prime,
+  trained on a random partition of the `p²` fact table and scored on the held-out
+  facts, so the metric is true **generalization** not memorization. We do not
+  chase full grokking (test-acc→1.0 needs tens of thousands of steps + weight
+  decay, far over the CPU budget); the calibrated config reaches clearly
+  above-chance test accuracy in a few thousand steps. Difficulty knobs:
+  shrink `train_frac` and crank `steps`/weight-decay for the
+  memorize-then-generalize curve. The full d_model-128 width is load-bearing —
+  d_model-96 stays stuck memorizing at chance test accuracy. Default `p=23`,
+  `train_frac=0.8`, 3000 steps → **0.64–0.72** test accuracy (chance ≈0.043).
+- **dyck** — well-formed Dyck-`k` words (balanced brackets), scored on predicting
+  the correct **close bracket** (determined by the stack top) at every closer —
+  the canonical context-free / hierarchical-state probe. `k` (bracket types) and
+  `max_depth` (stack depth) are the difficulty knobs. Whole word supervised
+  next-token (no `=` mask), line-aligned. Default `k=3`, `max_depth=4`, length 24,
+  6000 words, 1000 steps, d_model-96 → **~0.99** (chance 1/3).

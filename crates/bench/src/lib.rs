@@ -37,8 +37,11 @@ pub mod mad_noisy_recall;
 pub mod mad_recall;
 pub mod mad_selective_copy;
 pub mod metrics;
+pub mod mod_add;
 pub mod model;
 pub mod mqar;
+pub mod dyck;
+pub mod parity;
 pub mod toolcall;
 
 pub use metrics::Metrics;
@@ -98,6 +101,10 @@ pub fn registry() -> Vec<Box<dyn Benchmark>> {
         Box::new(mad_noisy_recall::MadNoisyRecall::default()),
         Box::new(mad_selective_copy::MadSelectiveCopy::default()),
         Box::new(mad_memorize::MadMemorize::default()),
+        // Formal-language / algorithmic state-tracking benchmarks.
+        Box::new(parity::Parity::default()),
+        Box::new(mod_add::ModAdd::default()),
+        Box::new(dyck::Dyck::default()),
         // mad_compress is intentionally NOT registered: it cannot be expressed
         // via the next-token `DecoderLm` seam (autoencoder bottleneck +
         // non-next-token objective + separate decoder head). See `mad_compress`

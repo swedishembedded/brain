@@ -126,6 +126,12 @@ and training/scoring exact-match only on the assistant tool-call span), plus the
 **mad_\*** family (recall, fuzzy/noisy recall, selective-copy, memorize). See
 `crates/bench/README.md` for the full design.
 
+Registered benchmarks: `mqar`, the MAD family (`mad_recall`, `mad_fuzzy_recall`,
+`mad_noisy_recall`, `mad_selective_copy`, `mad_memorize`), and the
+formal-language / algorithmic state-tracking probes `parity` (running-parity bit
+state), `mod_add` (`a+b=c (mod p)`, the grokking task), and `dyck` (Dyck-k
+balanced brackets, hierarchical state).
+
 ## Conventions & invariants
 
 - **WGSL is the source of truth.** Kernels live only in `crates/kernels/wgsl/`,
