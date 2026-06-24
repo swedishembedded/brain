@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 pub mod train;
 
-pub use train::{cosine_lr, FitOpts};
+pub use train::{cosine_lr, fit, generate, FitOpts, IGNORE};
 
 /// What a batch looks like for a given model. Decoder-LM and seq2seq differ in
 /// whether there is a separate source sequence; this enum keeps `set_batch`
@@ -57,6 +57,14 @@ pub trait ModelConfig: Clone {
         Self: Sized;
     fn vocab(&self) -> u32;
     fn block_size(&self) -> u32;
+
+    /// Override `vocab`/`block_size` from the dataset + run options and apply any
+    /// derived defaults (e.g. GPT's `4*d_model` feed-forward width). The generic
+    /// trainer calls this on a fresh (non-resume) start, replacing the per-model
+    /// `cfg.vocab = …; cfg.block_size = …; cfg.with_ff_default()` lines.
+    fn finalize_for_dataset(self, vocab: u32, block_size: u32) -> Self
+    where
+        Self: Sized;
 }
 
 /// The primary model seam (ADR §2.2): the union of the forward/backward/param/
@@ -69,6 +77,13 @@ pub trait Model {
     /// Build from a config + initial weights, sized for batch `b` × seq `t`
     /// (and, for seq2seq, `t_kv` = encoder length via the config).
     fn new(cfg: Self::Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self
+    where
+        Self: Sized;
+
+    /// Architecture-specific fresh weight initialization, deterministic for a
+    /// fixed `seed`. The generic trainer needs this to construct a model from a
+    /// bare config (this is the model's own `init_weights`, e.g. `gpt::init`).
+    fn init_weights(cfg: &Self::Config, seed: u64) -> HashMap<String, Vec<f32>>
     where
         Self: Sized;
 
@@ -104,5 +119,14 @@ pub trait Model {
 
     // ---- persistence ----
     fn save(&self, path: &str);
+
+    /// Save the checkpoint, optionally embedding a char-tokenizer vocab (`itos`)
+    /// in the manifest so inference needs no dataset reference. The generic
+    /// trainer calls this so char-dataset checkpoints stay self-describing.
+    /// Default ignores `itos` (token-id models with no char vocab).
+    fn save_with_itos(&self, path: &str, _itos: Option<&[char]>) {
+        self.save(path);
+    }
+
     fn config_json(&self) -> serde_json::Value;
 }
