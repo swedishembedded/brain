@@ -188,6 +188,8 @@ version = "0.1.0"
 dependencies = [
  "brain-data",
  "brain-gpt",
+ "brain-gpu-core",
+ "brain-kernels",
  "brain-model",
  "brain-moe",
  "brain-pid",

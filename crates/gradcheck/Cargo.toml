@@ -15,3 +15,7 @@ brain-gpt.workspace = true
 brain-moe.workspace = true
 brain-pid.workspace = true
 brain-data.workspace = true
+
+[dev-dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
