@@ -13,4 +13,5 @@ path = "src/lib.rs"
 brain-model.workspace = true
 brain-gpt.workspace = true
 brain-moe.workspace = true
+brain-pid.workspace = true
 brain-data.workspace = true

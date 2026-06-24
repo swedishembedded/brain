@@ -533,6 +533,12 @@ impl Pid {
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
         self.ps.read_weight(&self.gpu, name)
     }
+    /// Overwrite a parameter's weights from host data (required by gradcheck via
+    /// the `Model` trait, and by any host-driven weight surgery).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn write_weight(&self, name: &str, data: &[f32]) {
+        self.gpu.write(self.w(name), bytemuck::cast_slice(data));
+    }
     /// Logits for the current batch (n_rows = b*t), shape [n_rows, u_bins].
     #[cfg(not(target_arch = "wasm32"))]
     pub fn read_logits(&self) -> Vec<f32> {
@@ -623,6 +629,106 @@ impl Pid {
             .map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name)))
             .collect();
         checkpoint::save(path, self.cfg.to_json(), &tensors);
+    }
+}
+
+// ---- the architecture-agnostic Model seam (ADR 0001 §4) ----
+//
+// PID already exposes nearly the whole surface as inherent methods, so these
+// impls are thin adapters: `set_batch` maps `Batch::Lm` onto the inherent
+// two-slice upload (`ys` already carries IGNORE at non-DECIDE positions), the
+// trait `forward()` is PID's existing `forward_submit()+loss()` wrapper, and
+// `logits_all` wraps the always-present u_head in `Some`. With `write_weight`
+// added, PID is now gradient-checked by construction (ADR §8). The wasm
+// inference path (`new_async`/`logits_*_async`) is untouched — the `Model`
+// trait is native-only because its methods read back from the device.
+
+impl model::ModelConfig for PidConfig {
+    fn param_list(&self) -> Vec<(String, usize)> {
+        PidConfig::param_list(self)
+    }
+    fn to_json(&self) -> Value {
+        PidConfig::to_json(self)
+    }
+    fn from_json(v: &Value) -> Self {
+        PidConfig::from_json(v)
+    }
+    fn vocab(&self) -> u32 {
+        self.vocab
+    }
+    fn block_size(&self) -> u32 {
+        self.block_size
+    }
+    fn finalize_for_dataset(mut self, vocab: u32, block_size: u32) -> Self {
+        self.vocab = vocab;
+        self.block_size = block_size;
+        self
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl model::Model for Pid {
+    type Config = PidConfig;
+
+    fn new(cfg: PidConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
+        Pid::new(cfg, b, t, init)
+    }
+
+    fn init_weights(cfg: &PidConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+        crate::data::init_weights(cfg, seed)
+    }
+
+    fn config(&self) -> &PidConfig {
+        &self.cfg
+    }
+
+    fn set_batch(&self, batch: model::Batch) {
+        match batch {
+            model::Batch::Lm { tokens, targets } => Pid::set_batch(self, tokens, targets),
+            _ => panic!("pid::Pid only supports Batch::Lm"),
+        }
+    }
+
+    fn forward(&self) -> f32 {
+        Pid::forward(self)
+    }
+    fn backward(&self) {
+        Pid::backward(self)
+    }
+    fn zero_grads(&self) {
+        Pid::zero_grads(self)
+    }
+
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
+        Pid::adamw_step(self, t, lr, wd, clip, extra_scale)
+    }
+
+    fn poll_wait(&self) {
+        Pid::poll_wait(self)
+    }
+
+    fn param_names(&self) -> Vec<String> {
+        self.ps.params.iter().map(|(n, _)| n.clone()).collect()
+    }
+    fn read_weight(&self, name: &str) -> Vec<f32> {
+        Pid::read_weight(self, name)
+    }
+    fn write_weight(&self, name: &str, data: &[f32]) {
+        Pid::write_weight(self, name, data)
+    }
+    fn read_grad(&self, name: &str) -> Vec<f32> {
+        Pid::read_grad(self, name)
+    }
+
+    fn logits_all(&self, tokens: &[u32]) -> Option<Vec<f32>> {
+        Some(Pid::logits_all(self, tokens))
+    }
+
+    fn save(&self, path: &str) {
+        Pid::save(self, path)
+    }
+    fn config_json(&self) -> Value {
+        self.cfg.to_json()
     }
 }
 

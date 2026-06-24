@@ -202,6 +202,37 @@ pub fn check_moe(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Build a tiny PID event/effect transformer, set a fixed (partially masked)
+/// batch, and gradient-check it (validates LayerNorm-with-bias, biased linears,
+/// SwiGLU, key-padding causal attention, and the separate u_head backprop). PID
+/// is masked CE over the u_bins label space, so the fixed targets label a few
+/// positions and IGNORE the rest. Now that PID implements `model::Model`, the
+/// blanket `CheckModel` impl makes it checkable — closing the TESTING.md gap.
+pub fn check_pid(seed: u64) -> Report {
+    use pid::{Pid, PidConfig, IGNORE};
+    let cfg = PidConfig {
+        vocab: 20,
+        block_size: 8,
+        n_layers: 1,
+        d_model: 16,
+        n_heads: 2,
+        d_ff: 32,
+        u_bins: 8,
+    };
+    let init = pid::data::init_weights(&cfg, seed);
+    let model = Pid::new(cfg, 2, 6, &init);
+    // 2 sequences x 6 positions; label a few positions (rest IGNORE), no PAD so
+    // every position is a valid attention key.
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 20).collect();
+    let mut y = vec![IGNORE; 12];
+    y[2] = 3;
+    y[5] = 1;
+    y[8] = 6;
+    y[11] = 0;
+    model.set_batch(&x, &y);
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +260,23 @@ mod tests {
             return;
         }
         let report = check_moe(7);
+        report.print();
+        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pid_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_pid(7);
         report.print();
         // fp32 directional FD on a software GPU: combined abs+rel tolerance.
         let (atol, rtol) = (4e-3, 8e-2);

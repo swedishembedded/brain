@@ -17,7 +17,9 @@ use std::collections::HashMap;
 
 pub mod train;
 
-pub use train::{cosine_lr, fit, generate, FitOpts, IGNORE};
+pub use train::{cosine_lr, generate, FitOpts, IGNORE};
+#[cfg(not(target_arch = "wasm32"))]
+pub use train::fit;
 
 /// What a batch looks like for a given model. Decoder-LM and seq2seq differ in
 /// whether there is a separate source sequence; this enum keeps `set_batch`

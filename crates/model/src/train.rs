@@ -7,13 +7,17 @@
 //! resumable atomic checkpointing); [`generate`] is `gpt::sample::generate`
 //! lifted to any token-head model.
 
-use std::path::Path;
-
-use data::binio::{self, Meta};
-use data::loader::{BatchConfig, TokenDataset};
 use data::rng::Rng;
 
-use crate::{Batch, Model, ModelConfig};
+use crate::{Model, ModelConfig};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::Batch;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use data::binio::{self, Meta};
+#[cfg(not(target_arch = "wasm32"))]
+use data::loader::{BatchConfig, TokenDataset};
 
 /// Cross-entropy ignore index (masked target positions). The data loader emits
 /// `-1` as `i32`; reinterpreted as `u32` that is exactly this value. Mirrors
@@ -82,6 +86,7 @@ pub fn cosine_lr(it: u32, opts: &FitOpts) -> f32 {
 }
 
 /// A loaded char/BPE dataset: train/val token splits + optional vocab metadata.
+#[cfg(not(target_arch = "wasm32"))]
 struct Loaded {
     train: TokenDataset,
     val: TokenDataset,
@@ -92,6 +97,7 @@ struct Loaded {
     itos: Option<Vec<char>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
     let train_tok = binio::read_u16_bin(&dir.join("train.bin"))?;
     let val_tok = binio::read_u16_bin(&dir.join("val.bin"))?;
@@ -131,6 +137,7 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
 
 /// i32 targets from the loader (`-1` = ignore) reinterpreted as the model's
 /// `u32` IGNORE sentinel.
+#[cfg(not(target_arch = "wasm32"))]
 fn targets_to_u32(y: &[i32]) -> Vec<u32> {
     y.iter().map(|&v| if v < 0 { IGNORE } else { v as u32 }).collect()
 }
@@ -142,6 +149,10 @@ fn targets_to_u32(y: &[i32]) -> Vec<u32> {
 ///
 /// This is `gpt::train::train` lifted to `M: Model` — same control flow, same
 /// resume/eval/checkpoint semantics, no GPT-specific code.
+///
+/// Native-only: it reads token `.bin` datasets and writes checkpoints, neither
+/// of which exists on the wasm32 inference build.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn fit<M: Model>(
     dir: &Path,
     cfg: M::Config,
