@@ -699,6 +699,46 @@ impl Trainer {
         let numel = self.params.iter().find(|(n, _)| n == name).unwrap().1;
         self.read(self.g(name), numel)
     }
+
+    /// Names of all trainable parameters.
+    pub fn param_names(&self) -> Vec<String> {
+        self.params.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    /// Zero one parameter's gradient buffer (host-driven).
+    pub fn zero_grad(&self, name: &str) {
+        let numel = self.params.iter().find(|(n, _)| n == name).unwrap().1;
+        self.queue.write_buffer(self.g(name), 0, &vec![0u8; numel * 4]);
+    }
+
+    /// Federated train-scope: freeze the shared backbone by zeroing the
+    /// gradients of every parameter that is **not** part of expert `e` (call
+    /// after [`Self::backward`]). Combined with `adamw_step(.., wd = 0.0, ..)`
+    /// this leaves all non-expert weights exactly unchanged — AdamW with a zero
+    /// gradient and no weight decay is a no-op — so a worker can train expert
+    /// `e` against an immutable shared backbone, then return only its shard.
+    pub fn freeze_grads_except_expert(&self, e: u32) {
+        let names = self.param_names();
+        for name in &names {
+            if expert_id_of(name) != Some(e) {
+                self.zero_grad(name);
+            }
+        }
+    }
+
+    /// Save the current weights (incl. the tied `lm_head`) to a checkpoint.
+    pub fn save(&self, path: &str) {
+        save_weights(self, &self.cfg, path);
+    }
+}
+
+/// Expert id `<E>` if `name` is `blocks.<L>.moe.experts.<E>.…` (the vertical
+/// expert-shard key), else `None`. Matches `brain-federated`'s parser.
+fn expert_id_of(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("blocks.")?;
+    let (_l, rest) = rest.split_once('.')?;
+    let rest = rest.strip_prefix("moe.experts.")?;
+    rest.split_once('.')?.0.parse().ok()
 }
 
 // ===========================================================================
@@ -1004,5 +1044,57 @@ mod tests {
         for i in 2..o.len() {
             assert_eq!(o[i], (o[i - 2] + table[o[i - 1] as usize]) % 32);
         }
+    }
+
+    #[test]
+    fn expert_id_of_parses_vertical_shard_key() {
+        assert_eq!(expert_id_of("blocks.3.moe.experts.2.w_down.weight"), Some(2));
+        assert_eq!(expert_id_of("blocks.0.moe.router.weight"), None);
+        assert_eq!(expert_id_of("token_emb.weight"), None);
+    }
+
+    /// Federated train-scope: training expert 1 with a frozen backbone leaves
+    /// the backbone and every other expert bit-for-bit unchanged, while expert
+    /// 1's weights move. This is the "train experts separately" guarantee.
+    #[test]
+    fn train_scope_freezes_backbone_and_trains_one_expert() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let cfg = Config {
+            vocab: 64, block_size: 16, n_layers: 1, d_model: 32, n_heads: 4,
+            n_experts: 3, top_k: 2, d_ff: 64, aux_coef: 0.01, z_coef: 1e-4,
+        };
+        let init = init_weights(&cfg, 5);
+        let tr = Trainer::new(cfg.clone(), 2, 8, &init);
+        let (corpus, _table) = corpus_and_table(4000, cfg.vocab, 7);
+
+        let backbone0 = tr.read_weight("token_emb.weight");
+        let e0_before = tr.read_weight("blocks.0.moe.experts.0.w_gate.weight");
+        let e1_before = tr.read_weight("blocks.0.moe.experts.1.w_gate.weight");
+
+        let mut rng = 99u64;
+        let tt = 8usize;
+        for step in 1..=30 {
+            let (mut xs, mut ys) = (Vec::new(), Vec::new());
+            for _ in 0..2 {
+                let start = (xorshift(&mut rng) as usize) % (corpus.len() - tt - 1);
+                xs.extend_from_slice(&corpus[start..start + tt]);
+                ys.extend_from_slice(&corpus[start + 1..start + 1 + tt]);
+            }
+            tr.set_batch(&xs, &ys);
+            tr.forward();
+            tr.backward();
+            tr.freeze_grads_except_expert(1); // freeze everything but expert 1
+            tr.adamw_step(step, 1e-2, 0.0, 0.9, 0.95, 1e-8); // wd=0 -> frozen params fixed
+        }
+
+        let backbone1 = tr.read_weight("token_emb.weight");
+        let e0_after = tr.read_weight("blocks.0.moe.experts.0.w_gate.weight");
+        let e1_after = tr.read_weight("blocks.0.moe.experts.1.w_gate.weight");
+
+        assert_eq!(backbone0, backbone1, "backbone moved under train-scope");
+        assert_eq!(e0_before, e0_after, "non-target expert 0 moved");
+        assert!(e1_before != e1_after, "target expert 1 did not train");
     }
 }
