@@ -80,6 +80,16 @@ pub trait Benchmark {
     fn report_fields(&self) -> Vec<&str> {
         Vec::new()
     }
+
+    /// If `true`, this is a *diagnostic* benchmark: its score is reported (and
+    /// compared against `threshold` as a reference line) but it does **not**
+    /// gate the suite — failing it never makes `brain bench` exit non-zero.
+    /// Use for tasks whose single-run result is inherently high-variance or
+    /// budget-bound (e.g. a grokking/generalization probe), where a hard
+    /// pass/fail bar would be flaky rather than meaningful.
+    fn informational(&self) -> bool {
+        false
+    }
 }
 
 /// One benchmark's outcome: its metrics and whether it cleared its threshold.
@@ -88,6 +98,9 @@ pub struct Outcome {
     pub metrics: Metrics,
     pub threshold: f32,
     pub passed: bool,
+    /// Diagnostic-only benchmark (see [`Benchmark::informational`]): reported
+    /// but not counted toward the suite's pass/fail.
+    pub informational: bool,
 }
 
 /// All registered benchmarks. Sibling agents add new ones here (MAD, formal
@@ -131,6 +144,7 @@ fn run(bench: &dyn Benchmark, seed: u64) -> std::io::Result<Outcome> {
         metrics: metrics.clone(),
         threshold,
         passed: metrics.score >= threshold,
+        informational: bench.informational(),
     })
 }
 
@@ -144,8 +158,9 @@ pub fn run_one(name: &str, seed: u64) -> std::io::Result<bool> {
         ));
     };
     let outcome = run(bench.as_ref(), seed)?;
+    let ok = outcome.passed || outcome.informational;
     print_table(std::slice::from_ref(&outcome), &[bench.as_ref()]);
-    Ok(outcome.passed)
+    Ok(ok)
 }
 
 /// Run every registered benchmark, printing one comparison table. Returns
@@ -158,7 +173,8 @@ pub fn run_all(seed: u64) -> std::io::Result<bool> {
     }
     let refs: Vec<&dyn Benchmark> = benches.iter().map(|b| b.as_ref()).collect();
     print_table(&outcomes, &refs);
-    Ok(outcomes.iter().all(|o| o.passed))
+    // Informational (diagnostic) benchmarks are reported but never gate the suite.
+    Ok(outcomes.iter().all(|o| o.informational || o.passed))
 }
 
 /// The names of all registered benchmarks.
@@ -194,7 +210,14 @@ fn print_table(outcomes: &[Outcome], benches: &[&dyn Benchmark]) {
                 None => row.push_str(&format!(" {:>12}", "-")),
             }
         }
-        row.push_str(&format!(" {:>10.4} {:>6}", o.threshold, if o.passed { "PASS" } else { "FAIL" }));
+        let result = if o.informational {
+            "INFO"
+        } else if o.passed {
+            "PASS"
+        } else {
+            "FAIL"
+        };
+        row.push_str(&format!(" {:>10.4} {:>6}", o.threshold, result));
         println!("{row}");
     }
     println!();
