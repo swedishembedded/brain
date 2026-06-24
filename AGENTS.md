@@ -26,7 +26,8 @@ them, keeping the gradient-check discipline.
 | Crate | Responsibility |
 |---|---|
 | `kernels` | all WGSL kernels (the source of truth) as consts + `src()` |
-| `gpu-core` | device init, dispatch, buffers, readback |
+| `gpu-core` | the accelerator seam: one `Gpu`/`DeviceBuffer`/`Step` API over **two backends** — wgpu and the native CPU backend — chosen at runtime |
+| `wgsl-cpu` | the CPU backend's compiler: WGSL → naga IR → **Cranelift JIT** → native code run across cores with rayon |
 | `paramstore` / `optim` | param/grad/Adam buffers; AdamW + grad clip |
 | `checkpoint` | `.weights` container + manifest/SHA-256 |
 | `data` | char + GPT-2 **BPE** tokenizers, dataset generators, loaders (masking/alignment), normalization |
@@ -56,8 +57,14 @@ them, keeping the gradient-check discipline.
 
 ## Essential commands
 
+**Always build through the Makefile, never `cargo` directly:** use `make build`
+for the debug build and `make release` for the optimized build (and `make test`
+for the suite). They wrap cargo with the project's expected flags/targets; calling
+`cargo build`/`cargo build --release` by hand is not supported.
+
 ```bash
-make release && make test            # build + full suite (MOE_SKIP_GPU_TESTS=1 to skip GPU)
+make build                           # debug build (wraps cargo build)
+make release && make test            # optimized build + full suite (MOE_SKIP_GPU_TESTS=1 to skip GPU)
 make gradcheck                       # backprop correctness gate
 make data/<name>                     # calculator|reverser|wordcalc|timeseries|shakespeare_char|gpt
 make train/gpt/<name>                # train GPT -> out/gpt-<name>.weights
@@ -68,6 +75,11 @@ make web/dev                         # WebGPU demo (delegates to crates/web)
 
 # direct binary
 ./target/release/brain {data|gpt|federated|gradcheck|pid|train|eval|generate} …
+
+# CPU-only (no GPU): add --device cpu to any command, or set BRAIN_DEVICE=cpu.
+# Same WGSL kernels, JIT-compiled to native code across all cores.
+./target/release/brain gpt train data/calculator --device cpu --out out/gpt.weights
+BRAIN_DEVICE=cpu make test            # run the whole suite on CPU, no GPU needed
 ```
 
 ## Conventions & invariants
@@ -78,8 +90,15 @@ make web/dev                         # WebGPU demo (delegates to crates/web)
 - **fp32 only, core compute only** — single bind group, ≤4 storage buffers/kernel,
   `@workgroup_size(64)`, no atomics/subgroups/f16. This is what keeps it portable
   to old GPUs and WebGPU.
-- **Default build is pure wgpu.** `crates/vulkan` (coopmat) is excluded from
-  `default-members`; the `web` crate is empty off wasm32.
+- **Two backends, one build, one API.** `gpu-core` exposes a single
+  `Gpu`/`DeviceBuffer`/`Step` surface; every model (gpt/moe/pid) is written once
+  against it. The accelerator is the *only* thing abstracted — there is no
+  per-backend model code. Both backends compile into every native build and are
+  selected at runtime (`--device cpu|gpu` / `BRAIN_DEVICE`); wgpu is the default.
+  The CPU backend reuses the **same WGSL** via the `wgsl-cpu` Cranelift JIT, so
+  WGSL stays the single source of truth. On wasm only the wgpu/WebGPU backend
+  exists. `crates/vulkan` (coopmat) is excluded from `default-members`; the `web`
+  crate is empty off wasm32.
 - **Backprop is gated by `gradcheck`** (finite differences) — run it after any
   fwd/bwd math change. SSA-style forward (each stage writes a fresh buffer that
   doubles as the backprop activation cache) — preserve it when adding stages.
