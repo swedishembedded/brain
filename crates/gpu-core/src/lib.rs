@@ -97,6 +97,20 @@ impl Gpu {
             .await
             .expect("request_device failed");
 
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let l = device.limits();
+            let mib = |b: u64| b / (1024 * 1024);
+            eprintln!(
+                "limits: max_buffer_size {} MiB, max_storage_buffer_binding_size {} MiB \
+                 (adapter caps: {} / {} MiB)",
+                mib(l.max_buffer_size),
+                mib(l.max_storage_buffer_binding_size as u64),
+                mib(adapter_limits.max_buffer_size),
+                mib(adapter_limits.max_storage_buffer_binding_size as u64),
+            );
+        }
+
         let pipelines = kernels
             .iter()
             .map(|(name, src)| {
