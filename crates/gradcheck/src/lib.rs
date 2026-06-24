@@ -233,6 +233,42 @@ pub fn check_pid(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Build a tiny encoder-decoder Transformer, set a fixed seq2seq batch, and
+/// gradient-check it. This is the correctness gate for the new architecture: it
+/// validates the bidirectional encoder self-attention, the causal decoder
+/// self-attention, the decoder->encoder cross-attention (whose backward splits
+/// grads across the decoder-Q buffer and the encoder-memory K/V buffer), the
+/// shared src/tgt embedding accumulation, and the masked-CE token head — all
+/// through the blanket `CheckModel for model::Model`. Returns the report.
+pub fn check_seq2seq(seed: u64) -> Report {
+    use seq2seq::{Seq2Seq, Seq2SeqConfig, IGNORE};
+    let cfg = Seq2SeqConfig {
+        vocab: 23,
+        block_size: 6,     // decoder (target) length
+        src_block_size: 5, // encoder (source) length — exercises T_dec != T_enc
+        n_enc: 2,
+        n_dec: 2,
+        d_model: 16,
+        n_heads: 2,
+        d_ff: 32,
+    };
+    let init = seq2seq::init_weights(&cfg, seed);
+    // b=2 sequences; encoder length 5, decoder length 6.
+    let model = Seq2Seq::new(cfg, 2, 6, &init);
+    let src: Vec<u32> = (0..10).map(|i| (i * 7 + 1) % 23).collect(); // 2 x 5
+    let tgt: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect(); // 2 x 6
+    // Label a few decoder positions (rest IGNORE) to also exercise masking.
+    let mut labels = vec![IGNORE; 12];
+    labels[1] = 3;
+    labels[3] = 7;
+    labels[5] = 0;
+    labels[7] = 11;
+    labels[9] = 2;
+    labels[11] = 5;
+    model.set_batch(&src, &tgt, &labels);
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +313,23 @@ mod tests {
             return;
         }
         let report = check_pid(7);
+        report.print();
+        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn seq2seq_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_seq2seq(7);
         report.print();
         // fp32 directional FD on a software GPU: combined abs+rel tolerance.
         let (atol, rtol) = (4e-3, 8e-2);

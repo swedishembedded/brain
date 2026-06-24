@@ -193,6 +193,7 @@ dependencies = [
  "brain-model",
  "brain-moe",
  "brain-pid",
+ "brain-seq2seq",
 ]
 
 [[package]]
@@ -264,6 +265,21 @@ dependencies = [
  "pollster",
  "serde_json",
  "wgpu",
+]
+
+[[package]]
+name = "brain-seq2seq"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
+ "serde_json",
 ]
 
 [[package]]

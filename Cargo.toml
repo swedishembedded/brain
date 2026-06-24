@@ -16,6 +16,7 @@ default-members = [
     "crates/model",
     "crates/moe",
     "crates/gpt",
+    "crates/seq2seq",
     "crates/timeseries",
     "crates/pid",
     "crates/federated",
@@ -44,6 +45,7 @@ brain-data = { path = "crates/data" }
 brain-model = { path = "crates/model" }
 brain-moe = { path = "crates/moe" }
 brain-gpt = { path = "crates/gpt" }
+brain-seq2seq = { path = "crates/seq2seq" }
 brain-timeseries = { path = "crates/timeseries" }
 brain-pid = { path = "crates/pid" }
 brain-federated = { path = "crates/federated" }
