@@ -1,0 +1,13 @@
+[package]
+name = "brain-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tokenizers (char + GPT-2 BPE), dataset generators, token/float loaders, masking/alignment, normalization."
+
+[lib]
+name = "data"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true
