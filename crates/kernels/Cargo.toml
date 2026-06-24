@@ -1,0 +1,12 @@
+[package]
+name = "brain-kernels"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Raw WGSL compute kernels (fp32, core-compute-only) — single source of truth for brain's GPU engine."
+
+[lib]
+name = "kernels"
+path = "src/lib.rs"
+
+[dependencies]

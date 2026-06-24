@@ -1,0 +1,11 @@
+[package]
+name = "brain-timeseries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "timeseries"
+path = "src/lib.rs"
+
+[dependencies]

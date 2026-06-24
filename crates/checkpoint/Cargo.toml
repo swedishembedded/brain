@@ -1,0 +1,13 @@
+[package]
+name = "brain-checkpoint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Weight container + manifest (SHA-256) + expert-shard I/O. Portable (no fs on wasm)."
+
+[lib]
+name = "checkpoint"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true

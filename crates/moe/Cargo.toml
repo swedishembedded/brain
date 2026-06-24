@@ -1,0 +1,18 @@
+[package]
+name = "brain-moe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sparse Mixture-of-Experts Transformer: inference (model) + training/backprop (train)."
+
+[lib]
+name = "moe"
+path = "src/lib.rs"
+
+# Training writes checkpoints / reads files and blocks on GPU readback — native only.
+[dependencies]
+brain-kernels.workspace = true
+bytemuck.workspace = true
+serde_json.workspace = true
+wgpu = "29"
+pollster = "0.4"

@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# The Vulkan cooperative-matrix path pulls in ash + naga and is an *optional*
+# acceleration backend. Keep the default `cargo build` pure-wgpu (the core
+# invariant) by excluding it from the default set; build it explicitly with
+# `cargo build -p brain-vulkan` or via the cli's `vulkan-coopmat` feature.
+default-members = [
+    "crates/gpu-core",
+    "crates/kernels",
+    "crates/checkpoint",
+    "crates/paramstore",
+    "crates/optim",
+    "crates/autodiff",
+    "crates/data",
+    "crates/moe",
+    "crates/gpt",
+    "crates/timeseries",
+    "crates/pid",
+    "crates/federated",
+    "crates/eval",
+    "crates/gradcheck",
+    "crates/cli",
+    "crates/web",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/swedishembedded/brain"
+
+[workspace.dependencies]
+# Internal crates (path deps; short lib names used in `use` statements).
+brain-gpu-core = { path = "crates/gpu-core" }
+brain-kernels = { path = "crates/kernels" }
+brain-checkpoint = { path = "crates/checkpoint" }
+brain-paramstore = { path = "crates/paramstore" }
+brain-optim = { path = "crates/optim" }
+brain-autodiff = { path = "crates/autodiff" }
+brain-data = { path = "crates/data" }
+brain-moe = { path = "crates/moe" }
+brain-gpt = { path = "crates/gpt" }
+brain-timeseries = { path = "crates/timeseries" }
+brain-pid = { path = "crates/pid" }
+brain-federated = { path = "crates/federated" }
+brain-eval = { path = "crates/eval" }
+brain-gradcheck = { path = "crates/gradcheck" }
+brain-vulkan = { path = "crates/vulkan" }
+
+# Third-party. fp32-only, core-compute-only GPU stack — see crates/kernels.
+bytemuck = { version = "1", features = ["derive"] }
+serde_json = "1"
+ash = { version = "0.38" }
+naga = { version = "29", features = ["wgsl-in", "spv-out"] }
+
+[profile.release]
+opt-level = 3
+lto = true

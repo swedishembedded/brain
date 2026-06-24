@@ -1,0 +1,22 @@
+[package]
+name = "brain-paramstore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Model-agnostic param/grad/Adam buffer storage with grad-clip plumbing."
+
+[lib]
+name = "paramstore"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+bytemuck.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = "29"
+pollster = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "29", default-features = false, features = ["webgpu", "wgsl"] }

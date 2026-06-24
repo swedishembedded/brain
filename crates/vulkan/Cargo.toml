@@ -1,0 +1,17 @@
+[package]
+name = "brain-vulkan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Optional native-Vulkan (ash) execution path: VK_KHR_cooperative_matrix matmul with a naga-compiled WGSL scalar fallback."
+build = "build.rs"
+
+[lib]
+name = "vulkan"
+path = "src/lib.rs"
+
+[dependencies]
+brain-kernels.workspace = true
+bytemuck.workspace = true
+ash.workspace = true
+naga.workspace = true

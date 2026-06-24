@@ -1,0 +1,26 @@
+[package]
+name = "brain-pid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PID event/effect control Transformer (LayerNorm, learned positions, biased linears) + plant/oracle data. Drives the WebGPU demo."
+
+[lib]
+name = "pid"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-checkpoint.workspace = true
+brain-kernels.workspace = true
+bytemuck.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = "29"
+pollster = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "29", default-features = false, features = ["webgpu", "wgsl"] }
