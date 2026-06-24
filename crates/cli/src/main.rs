@@ -2,28 +2,66 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The `brain` native CLI — one binary over every model in the workspace.
+//! The model is chosen by the subcommand (no global "model type" flag).
 //!
-//!   * `moe`  — sparse-MoE Transformer (RMSNorm/RoPE/top-k experts): the
-//!     `brain-moe` crate (`model` inference, `train` training + parity).
-//!   * `pid`  — event/effect control Transformer: the `brain-pid` crate
-//!     (`model` + `data`). Drives the WebGPU demo.
+//!   * `gpt`        — dense GPT decoder baseline (nanogpt parity).
+//!   * `generate`/`train`/`eval`/`validate` — the sparse-MoE Transformer.
+//!   * `federated`  — sharded-MoE shard split/assemble.
+//!   * `data`       — dataset generation; `gradcheck` — backprop correctness gate.
+//!   * `pid`        — event/effect control Transformer (the WebGPU demo).
 //!
-//! Shared infrastructure lives in dedicated crates: `gpu_core` (device +
-//! dispatch), `checkpoint` (weights I/O), `paramstore` (weight/grad/Adam
-//! buffers), `optim` (AdamW + grad clip), `kernels` (WGSL source of truth).
-//!
-//! Subcommands:
-//!   brain [--weights F --prompt ... --max-new N]   # MoE inference (default)
-//!   brain train|eval|validate [...]                # MoE training / eval / parity
-//!   brain pid validate <ref.bin>                   # PID single-step parity gate
-//!   brain pid stream   <stream.bin>                # PID fixed-data multi-step check
-//!   brain pid train [--steps --effective-batch --mem-budget --seq-len ...]
-//!   brain pid rollout --weights F                  # closed-loop generalization report
+//! Run `brain help` for the full usage with examples.
 
 mod data_cli;
 mod federated_cli;
 mod gpt_cli;
 mod pid_cli;
+
+const HELP: &str = "\
+brain — train and evaluate neural nets from scratch on the GPU (Rust + WGSL).
+
+USAGE: brain <command> [options]
+The model is selected by the command.
+
+DATA
+  brain data gen <name> [--out DIR --n N --seed S]
+      names: calculator | reverser | wordcalc | timeseries | shakespeare_char | gpt
+
+GPT (dense baseline)
+  brain gpt train <data_dir> [--out F --steps N --batch B --block T
+                              --layers L --d-model D --heads H --lr X --mask = --align]
+  brain gpt eval  --weights F --data <dir> [--batches N --samples M]
+  brain gpt gen   --weights F --data <dir> [--prompt \"...\" --max-new N --temp X --top-k K]
+
+SPARSE MoE
+  brain train [--steps N --batch-size B --block-size T --lr X --out F]
+  brain generate --weights F [--prompt 1,2,3,4 --max-new N --temperature X --top-k K]
+  brain eval     --weights F [--samples N]
+  brain validate [ref.bin]                # gradient parity gate (if a ref file exists)
+
+FEDERATED MoE (train experts separately, then assemble)
+  brain federated split    <base.weights> <out_dir>
+  brain federated verify   <dir>
+  brain federated merge     <dir> --out <full.weights>
+  brain federated assemble  <base_dir> [overlay_dir ...] --out <full.weights>
+
+OTHER
+  brain gradcheck                          # finite-difference backprop check (GPT)
+  brain pid <validate|stream|train|rollout|profile> ...
+  brain help
+
+EXAMPLES
+  brain data gen calculator --out data/calculator --n 100000
+  brain gpt train data/calculator --out out/gpt.weights --steps 2000 --mask =
+  brain gpt eval  --weights out/gpt.weights --data data/calculator
+  brain gpt gen   --weights out/gpt.weights --data data/calculator --prompt \"12+7=\" --max-new 8
+  brain train --steps 2000 --out moe.weights
+  brain generate --weights moe.weights --prompt 1,2,3,4 --max-new 64
+  brain federated split moe.weights out/shards && brain federated verify out/shards
+  brain gradcheck
+
+Or drive everything via the Makefile:  make data/calculator train/gpt/calculator eval/gpt/calculator
+";
 
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
@@ -52,6 +90,12 @@ fn main() {
         }
         Some("train") => moe::run_train(&argv[2..]),
         Some("eval") => moe::run_eval(&argv[2..]),
-        _ => moe::run_generate(),
+        Some("generate") => moe::run_generate(),
+        Some("help") | Some("-h") | Some("--help") | None => print!("{HELP}"),
+        Some(other) => {
+            eprintln!("brain: unknown command '{other}'\n");
+            print!("{HELP}");
+            std::process::exit(2);
+        }
     }
 }

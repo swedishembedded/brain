@@ -34,7 +34,18 @@ struct Weights {
 }
 
 fn load_weights(path: &str) -> Weights {
-    let bytes = std::fs::read(path).expect("cannot read weights file");
+    let bytes = std::fs::read(path).unwrap_or_else(|e| {
+        eprintln!(
+            "error: cannot read MoE weights '{path}': {e}\n\
+             \n\
+             Specify a checkpoint with --weights <file>, or train one first:\n\
+             \x20 brain train --steps 2000 --out moe.weights\n\
+             \x20 brain generate --weights moe.weights --prompt 1,2,3,4 --max-new 64\n\
+             \n\
+             (Run `brain help` for all commands.)"
+        );
+        std::process::exit(1);
+    });
     let json_len = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
     let header = std::str::from_utf8(&bytes[8..8 + json_len]).expect("bad header utf8");
     let json: serde_json::Value = serde_json::from_str(header).expect("bad header json");

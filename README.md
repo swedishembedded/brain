@@ -30,6 +30,39 @@ make test                            # full cargo test suite
 make web/dev                         # WebGPU browser demo (crates/web)
 ```
 
+### Using the `brain` CLI
+
+The model is chosen by the **subcommand** — there is no global model-type flag.
+Run `brain help` for the full list with examples. Highlights:
+
+```bash
+# datasets
+brain data gen calculator --out data/calculator --n 100000      # also: reverser
+                                                                #   wordcalc timeseries
+                                                                #   shakespeare_char gpt
+
+# GPT (dense baseline)
+brain gpt train data/calculator --out out/gpt.weights --steps 2000 --mask =
+brain gpt eval  --weights out/gpt.weights --data data/calculator      # perplexity + exact-match
+brain gpt gen   --weights out/gpt.weights --data data/calculator --prompt "12+7=" --max-new 8
+
+# sparse MoE
+brain train --steps 2000 --out moe.weights
+brain generate --weights moe.weights --prompt 1,2,3,4 --max-new 64
+
+# federated MoE: split a checkpoint into expert shards, verify, reassemble
+brain federated split moe.weights out/shards
+brain federated verify out/shards
+brain federated merge  out/shards --out out/moe-reassembled.weights
+
+# correctness gate
+brain gradcheck
+```
+
+Commands that read a checkpoint take `--weights <file>`; if it's missing, the
+CLI tells you how to train one. The Makefile wraps these: e.g. `make
+data/calculator && make train/gpt/calculator && make eval/gpt/calculator`.
+
 The rest of this document explains the **MoE toy task** specifically — what the
 model learns, how to measure it honestly, and how the architecture maps onto the
 problem. (Paths below written as `moe-rs/` now live under `crates/`.)
