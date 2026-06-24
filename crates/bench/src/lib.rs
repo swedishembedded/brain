@@ -30,6 +30,12 @@
 
 use std::path::Path;
 
+pub mod mad_compress;
+pub mod mad_fuzzy_recall;
+pub mod mad_memorize;
+pub mod mad_noisy_recall;
+pub mod mad_recall;
+pub mod mad_selective_copy;
 pub mod metrics;
 pub mod model;
 pub mod mqar;
@@ -83,7 +89,18 @@ pub struct Outcome {
 /// All registered benchmarks. Sibling agents add new ones here (MAD, formal
 /// languages, scaling sweeps, …) by pushing another boxed [`Benchmark`].
 pub fn registry() -> Vec<Box<dyn Benchmark>> {
-    vec![Box::new(mqar::Mqar::default())]
+    vec![
+        Box::new(mqar::Mqar::default()),
+        Box::new(mad_recall::MadRecall::default()),
+        Box::new(mad_fuzzy_recall::MadFuzzyRecall::default()),
+        Box::new(mad_noisy_recall::MadNoisyRecall::default()),
+        Box::new(mad_selective_copy::MadSelectiveCopy::default()),
+        Box::new(mad_memorize::MadMemorize::default()),
+        // mad_compress is intentionally NOT registered: it cannot be expressed
+        // via the next-token `DecoderLm` seam (autoencoder bottleneck +
+        // non-next-token objective + separate decoder head). See `mad_compress`
+        // module docs; it needs a separate autoencoder model trait.
+    ]
 }
 
 /// Look up a benchmark by [`Benchmark::name`].
