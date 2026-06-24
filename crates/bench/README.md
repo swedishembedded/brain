@@ -22,6 +22,7 @@ scaling sweeps, …) by copying the MQAR pattern.
 | parity | `src/parity.rs` | running-parity state tracking over random bits |
 | mod_add | `src/mod_add.rs` | modular addition `a+b=c (mod p)` — the grokking task |
 | dyck | `src/dyck.rs` | Dyck-k balanced brackets — hierarchical state |
+| scaling sweep | `src/scaling.rs` | multi-size scaling-law sweep + power-law fit (separate entry point, **not** a registry `Benchmark`) |
 | integration tests | `tests/*.rs` | learnability guards, gated by `MOE_SKIP_GPU_TESTS` |
 
 ## Running
@@ -191,3 +192,52 @@ are measured on the CPU (Cranelift JIT) backend.
   `max_depth` (stack depth) are the difficulty knobs. Whole word supervised
   next-token (no `=` mask), line-aligned. Default `k=3`, `max_depth=4`, length 24,
   6000 words, 1000 steps, d_model-96 → **~0.99** (chance 1/3).
+
+## Scaling-law sweep (`src/scaling.rs`)
+
+A **separate entry point** from the `Benchmark` registry. A benchmark answers
+"does architecture X learn task T?"; the scaling sweep instead asks "how does
+loss on task T improve as the model grows?". It
+
+1. synthesizes one fixed task (it reuses MQAR's dataset — recall improves clearly
+   with capacity),
+2. trains a GPT (via the architecture-agnostic `model::train::fit`) at a grid of
+   increasing sizes (n_layers / d_model),
+3. records per size: **parameter count**, a **training-FLOPs proxy**
+   (`≈ 6 · params · tokens`, the Kaplan/Chinchilla compute estimate), and the
+   **final training loss**, then
+4. fits a Chinchilla-style power law `L(N) ≈ E + A · N^(−α)` and reports the
+   fitted exponent **α**, the fit **R²**, and the per-size table.
+
+```bash
+BRAIN_DEVICE=cpu make bench/scaling          # or: brain bench scaling --device cpu
+```
+
+```
+size               params          flops   final_loss
+-----------------------------------------------------
+L1xD32                XXXX      X.XXXe10       X.XXXX
+L2xD64               XXXXX      X.XXXe11       X.XXXX
+L3xD96              XXXXXX      X.XXXe11       X.XXXX
+
+fitted power law  L(N) ≈ E + A·N^(−α)
+  α (exponent) = X.XXXX
+  ...
+  R² (fit)     = X.XXXX
+```
+
+The fit fixes the irreducible floor `E` by a coarse grid search and, for each
+candidate `E`, fits the remaining two parameters by ordinary least squares in
+log–log space (`log(L − E) = log A − α·log N`), keeping the `E` with the best R².
+This is robust with only a few points; the same `run` / `fit_power_law` code
+generalizes to larger grids and per-task / per-capability loss slices.
+
+The default grid is `[(1,32,2), (2,64,4), (3,96,6)]` × 400 steps — ≈5 min on the
+CPU backend. `tests/scaling.rs` (gated by `MOE_SKIP_GPU_TESTS`) is the *capacity
+helps* guard: it asserts final loss is **monotonically non-increasing** with
+model size (bigger ≤ smaller + a small fp32/single-run tolerance) and that a
+finite power law was fitted.
+
+This sweep is the **foundation** the later per-capability predictive-scaling /
+eval-harness work builds on: a reproducible "train a grid of sizes, fit `L(N)`"
+loop whose output is a single extrapolatable exponent.

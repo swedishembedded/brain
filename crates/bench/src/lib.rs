@@ -42,6 +42,7 @@ pub mod model;
 pub mod mqar;
 pub mod dyck;
 pub mod parity;
+pub mod scaling;
 pub mod toolcall;
 
 pub use metrics::Metrics;

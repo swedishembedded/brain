@@ -49,6 +49,7 @@ help:
 	@echo "  make eval/gpt/<name>         perplexity + exact-match for a trained GPT"
 	@echo "  make bench                   run the architecture-evaluation benchmark suite (all)"
 	@echo "  make bench/<name>            run one benchmark (e.g. bench/mqar)"
+	@echo "  make bench/scaling           scaling-law sweep: fit L(N)=E+A*N^-alpha across sizes"
 	@echo "  make bench/char              train+eval GPT on the shared char datasets (legacy)"
 	@echo "  make federated-demo          MoE train -> split -> verify -> merge round-trip"
 	@echo "  make web/dev | web/build     WebGPU browser demo (crates/web)"
@@ -107,6 +108,14 @@ eval/gpt/%: release
 # the generic `bench/%` rule runs any registered name with no Makefile change.
 bench: release
 	$(BRAIN) bench --seed $(SEED)
+
+# `make bench/scaling` runs the multi-scale scaling-law sweep (a separate entry
+# point, not a registry benchmark): it trains the MQAR task at several model
+# sizes and fits L(N) = E + A*N^-alpha, printing the size|params|flops|loss table
+# plus the fitted exponent alpha and fit R^2. Foundation for the later
+# per-capability predictive-scaling / eval-harness work. ~5 min on the CPU backend.
+bench/scaling: release
+	$(BRAIN) bench scaling --seed $(SEED)
 
 bench/%: release
 	$(BRAIN) bench $* --seed $(SEED)

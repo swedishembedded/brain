@@ -53,6 +53,9 @@ FEDERATED MoE (train experts separately, then assemble)
 BENCHMARK SUITE (architecture evaluation)
   brain bench [<name>] [--seed S]          # run all benchmarks, or one by name
       names: mqar                          # prints a benchmark|score|threshold|pass table
+  brain bench scaling [--seed S]           # multi-size scaling-law sweep: trains the MQAR
+                                           # task at several sizes, fits L(N)=E+A*N^-alpha,
+                                           # prints the size|params|flops|loss table + alpha,R2
 
 OTHER
   brain gradcheck                          # finite-difference backprop check (GPT)
@@ -119,6 +122,13 @@ fn run_bench(args: &[String]) {
         i += 1;
     }
 
+    // `scaling` is a separate entry point (a multi-size sweep + power-law fit),
+    // not a registry Benchmark — route it here before the registry lookup.
+    if name == Some("scaling") {
+        run_scaling(seed);
+        return;
+    }
+
     let result = match name {
         Some(n) => bench::run_one(n, seed),
         None => bench::run_all(seed),
@@ -131,6 +141,27 @@ fn run_bench(args: &[String]) {
         }
         Err(e) => {
             eprintln!("brain bench: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// `brain bench scaling [--seed S]` — the multi-scale scaling-law sweep: train
+/// the MQAR task at several model sizes, then fit `L(N) ≈ E + A·N^(−α)` and print
+/// the per-size table + fitted exponent. The foundation the later per-capability
+/// predictive-scaling work builds on.
+fn run_scaling(seed: u64) {
+    let dir = std::env::temp_dir().join(format!("brain_scaling_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let sweep = bench::scaling::Sweep { seed, ..Default::default() };
+    match bench::scaling::run(&sweep, &dir) {
+        Ok(result) => {
+            result.print();
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            eprintln!("brain bench scaling: {e}");
             std::process::exit(2);
         }
     }
