@@ -76,6 +76,15 @@ impl Gpu {
         // the storage-buffer count to 8 (LayerNorm-dgamma and attention use up to 5).
         let mut limits = wgpu::Limits::downlevel_defaults();
         limits.max_storage_buffers_per_shader_stage = 8;
+        // Raise the buffer/binding SIZE caps to whatever this adapter actually
+        // supports. The downlevel defaults cap at 256MB buffer / 128MB binding,
+        // which on a big-VRAM card (e.g. 24GB P40) needlessly rejects large
+        // batches even with plenty of free memory. Requesting the adapter's own
+        // reported maxima is always valid, and on WebGPU it stays whatever the
+        // browser allows.
+        let adapter_limits = adapter.limits();
+        limits.max_buffer_size = adapter_limits.max_buffer_size;
+        limits.max_storage_buffer_binding_size = adapter_limits.max_storage_buffer_binding_size;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("moe-rs-device"),

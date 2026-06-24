@@ -95,6 +95,15 @@ pub fn save(path: &str, config: Value, tensors: &[(String, Vec<u64>, Vec<f32>)])
     let header = serde_json::json!({ "config": config, "tensors": entries });
     let hbytes = serde_json::to_vec(&header).unwrap();
 
+    // Create the parent directory if needed so `--out some/dir/x.weights` works
+    // without a manual mkdir.
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .unwrap_or_else(|e| panic!("cannot create directory {}: {e}", parent.display()));
+        }
+    }
+
     let tmp = format!("{path}.tmp");
     {
         let mut file = std::io::BufWriter::new(
