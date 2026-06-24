@@ -187,8 +187,18 @@ pub fn train(dir: &Path, mut cfg: GptConfig, opts: &TrainOpts, out: Option<&Path
         last_train = step_loss / opts.grad_accum.max(1) as f32;
 
         if opts.eval_interval > 0 && (step + 1) % opts.eval_interval == 0 {
-            let vl = sample_loss(&model, &loaded.val, &mut rng.clone(), opts.eval_batches);
-            println!("step {:>6}  lr {:.2e}  train {:.4}  val {:.4}", step + 1, lr, last_train, vl);
+            let eval_loss = sample_loss(&model, &loaded.val, &mut rng.clone(), opts.eval_batches);
+            // Checkpoint at every eval point so long runs are resumable and a
+            // crash loses at most `eval_interval` steps. The write is atomic
+            // (checkpoint::save renames a temp over the target).
+            let saved = match out {
+                Some(p) => {
+                    model.save(p.to_str().expect("utf-8 path"));
+                    format!("  saved -> {}", p.display())
+                }
+                None => String::new(),
+            };
+            println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}{saved}", step + 1, lr, last_train, eval_loss);
         }
     }
 

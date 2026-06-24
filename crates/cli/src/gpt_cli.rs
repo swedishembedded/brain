@@ -89,6 +89,7 @@ fn train(args: &[String]) {
             "--block" => o.block_size = val(args, &mut i, "--block").parse().unwrap_or(o.block_size),
             "--lr" => o.lr = val(args, &mut i, "--lr").parse().unwrap_or(o.lr),
             "--warmup" => o.warmup = val(args, &mut i, "--warmup").parse().unwrap_or(o.warmup),
+            "--eval-interval" => o.eval_interval = val(args, &mut i, "--eval-interval").parse().unwrap_or(o.eval_interval),
             "--grad-accum" => o.grad_accum = val(args, &mut i, "--grad-accum").parse().unwrap_or(o.grad_accum),
             "--layers" => cfg.n_layers = val(args, &mut i, "--layers").parse().unwrap_or(cfg.n_layers),
             "--d-model" => cfg.d_model = val(args, &mut i, "--d-model").parse().unwrap_or(cfg.d_model),
