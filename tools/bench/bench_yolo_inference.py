@@ -17,15 +17,15 @@ Prereqs (dev machine): `pip install ultralytics`, an exported brain weights file
       --brain-weights scratchpad/yolov8n.brain.weights \
       --brain-bin ./target/release/brain
 
-Device selection (each side picks its device independently):
-  --device cpu|gpu          set both sides at once
-  --torch-device cpu|cuda|0 Ultralytics/torch device (default cpu)
-  --brain-device cpu|gpu    brain backend: cpu = native Cranelift-JIT+AVX2,
-                            gpu = wgpu/WebGPU running the WGSL kernels (default cpu)
-Note: brain's device is driven by the BRAIN_DEVICE the bench passes to the
-engine subprocess via --brain-device — NOT by a BRAIN_DEVICE you set in your
-own shell (the client sets it explicitly). The brain CPU fast paths
-(Cranelift JIT + AVX2 fast-conv/fast-ops) apply only to --brain-device cpu.
+Device selection — one knob drives BOTH sides for an apples-to-apples compare:
+  DEVICE=cpu|gpu (env)      set torch AND brain at once, e.g. `DEVICE=gpu python3 ...`
+  --device cpu|gpu          same, as a flag (overrides the env)
+  --torch-device cpu|cuda|0 override just the Ultralytics/torch device
+  --brain-device cpu|gpu    override just the brain backend: cpu = native
+                            Cranelift-JIT+AVX2, gpu = wgpu/WebGPU on the WGSL kernels
+Precedence: per-side flag > --device > DEVICE env > cpu. The brain CPU fast
+paths (Cranelift JIT + AVX2 fast-conv/fast-ops) apply only on the cpu backend;
+the printed "engine adapter:" line is ground truth for which backend ran.
 """
 from __future__ import annotations
 import argparse, os, resource, statistics, sys, time
@@ -132,12 +132,14 @@ def main():
     # torch side, "gpu" is a friendly alias for CUDA device 0.
     def torch_dev(d):
         return "0" if str(d).lower() == "gpu" else d
-    torch_device = torch_dev(a.torch_device or a.device or "cpu")
-    # brain device precedence: --brain-device > --device > the shell BRAIN_DEVICE
-    # env (so `BRAIN_DEVICE=gpu python3 bench.py` actually runs brain on wgpu) >
-    # cpu. The env is the engine's own selector, so honouring it here matches the
-    # mental model of setting BRAIN_DEVICE for the run.
-    brain_device = a.brain_device or a.device or os.environ.get("BRAIN_DEVICE") or "cpu"
+    # One DEVICE env (cpu|gpu) drives BOTH sides so the comparison is apples to
+    # apples (`DEVICE=gpu python3 bench.py` runs torch on CUDA and brain on wgpu;
+    # `DEVICE=cpu` runs both on CPU). Per-side --torch-device/--brain-device, or
+    # --device, still override. This DEVICE selector is bench-only; the engine
+    # subprocess is told its backend via the device the client forwards.
+    device_env = os.environ.get("DEVICE")
+    torch_device = torch_dev(a.torch_device or a.device or device_env or "cpu")
+    brain_device = a.brain_device or a.device or device_env or "cpu"
 
     # Honest labels: name the backend each side actually used. brain's CPU path
     # is the native Cranelift-JIT + AVX2 fast-conv backend; otherwise wgpu/WebGPU.
