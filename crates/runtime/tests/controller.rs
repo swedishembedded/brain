@@ -199,6 +199,33 @@ fn camera_frame_with_req_id_echoes_it_on_object_detected() {
 }
 
 #[test]
+fn successive_camera_frames_each_emit_a_detection() {
+    // Regression: after a detection the controller must return to Idle so a
+    // SECOND frame is handled too (multiple in-flight requests over one stream).
+    let mut ctrl = controller_with("x");
+    let px = vec![1u8, 2, 3, 4, 5, 6];
+    let frame = |id: &str| {
+        events::encode_envelope(&Envelope::with_id(
+            Some(id.into()),
+            Event::CameraFrame {
+                format: "rgb8".into(),
+                w: 2,
+                h: 1,
+                data: Some(base64::encode(&px)),
+                path: None,
+            },
+        ))
+    };
+    for id in ["f1", "f2", "f3"] {
+        let out = ctrl.feed_line(&frame(id));
+        let det: Vec<&Envelope> =
+            out.iter().filter(|e| matches!(e.event, Event::ObjectDetected { .. })).collect();
+        assert_eq!(det.len(), 1, "frame {id} should emit one detection: {out:?}");
+        assert_eq!(det[0].req_id.as_deref(), Some(id), "frame {id} req_id echo");
+    }
+}
+
+#[test]
 fn successive_requests_get_correctly_tagged_responses() {
     let mut ctrl = controller_with("ab");
     let first = ctrl.feed_line(r#"{"req_id":"r1","event":"user_text","text":"q"}"#);

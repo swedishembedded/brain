@@ -465,7 +465,10 @@ impl Brain {
                 let dets = det.detect(&rgb, w, h);
                 let labels = det.labels().to_vec();
                 self.emit(Event::ObjectDetected { dets, labels });
-                self.pending_tick = true; // completion → Idle
+                // Completion → return to Idle so the next frame is handled. (A
+                // `Tick` is a no-op in `Detecting`; `GoIdle` is what transitions,
+                // matching the chat-EOS / error completion paths.)
+                self.want_idle = true;
             }
             (Some(Err(e)), _) => {
                 self.emit(Event::Error { message: format!("frame decode: {e}") });
