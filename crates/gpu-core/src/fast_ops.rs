@@ -101,19 +101,24 @@ pub fn bn_eval(params: &[u32], x: &[f32], mv: &[f32], gb: &[f32], out: &mut [f32
     // Per-channel collapse to an affine: out = x*scale + bias.
     let scale: Vec<f32> = (0..c).map(|ci| gb[2 * ci] / (mv[2 * ci + 1] + 1e-5).sqrt()).collect();
     let bias: Vec<f32> = (0..c).map(|ci| gb[2 * ci + 1] - mv[2 * ci] * scale[ci]).collect();
-    // Parallelise over (n,c) planes; each plane is a contiguous HW run.
-    out.par_chunks_mut(hw).enumerate().take(n * c).for_each(|(plane, o)| {
-        let ci = plane % c;
-        let s = scale[ci];
-        let b = bias[ci];
-        let xi = &x[plane * hw..plane * hw + hw];
-        #[cfg(target_arch = "x86_64")]
-        if crate::fast_conv::avx2_available() {
-            unsafe { affine_avx2(xi, s, b, o) };
-            return;
-        }
-        for (oo, &v) in o.iter_mut().zip(xi) {
-            *oo = v * s + b;
+    // Coarse parallelism: ~threads*4 tasks, each handling many (n,c) planes, so
+    // rayon scheduling cost stays negligible vs the per-plane affine.
+    let planes = n * c;
+    let group = planes.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
+    out.par_chunks_mut(hw * group).enumerate().for_each(|(gi, chunk)| {
+        for (k, o) in chunk.chunks_mut(hw).enumerate() {
+            let plane = gi * group + k;
+            let ci = plane % c;
+            let (s, b) = (scale[ci], bias[ci]);
+            let xi = &x[plane * hw..plane * hw + o.len()];
+            #[cfg(target_arch = "x86_64")]
+            if crate::fast_conv::avx2_available() {
+                unsafe { affine_avx2(xi, s, b, o) };
+                continue;
+            }
+            for (oo, &v) in o.iter_mut().zip(xi) {
+                *oo = v * s + b;
+            }
         }
     });
 }
@@ -143,16 +148,16 @@ pub fn concat2(params: &[u32], a: &[f32], b: &[f32], y: &mut [f32]) {
         (params[0] as usize, params[1] as usize, params[2] as usize, params[3] as usize, params[4] as usize);
     let hw = h * w;
     let ctot = ca + cb;
-    // Parallelise over output channel planes (handles n=1 inference well).
-    y.par_chunks_mut(hw).enumerate().take(n * ctot).for_each(|(plane, o)| {
-        let nn = plane / ctot;
-        let cc = plane % ctot;
-        if cc < ca {
-            let src = (nn * ca + cc) * hw;
-            o.copy_from_slice(&a[src..src + hw]);
-        } else {
-            let src = (nn * cb + (cc - ca)) * hw;
-            o.copy_from_slice(&b[src..src + hw]);
+    // Coarse parallelism: group many planes per task (per-plane tasks would be
+    // dominated by rayon scheduling for a plain memcpy).
+    let planes = n * ctot;
+    let group = planes.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
+    y.par_chunks_mut(hw * group).enumerate().for_each(|(gi, chunk)| {
+        for (k, o) in chunk.chunks_mut(hw).enumerate() {
+            let plane = gi * group + k;
+            let (nn, cc) = (plane / ctot, plane % ctot);
+            let src = if cc < ca { (nn * ca + cc) * hw } else { (nn * cb + (cc - ca)) * hw };
+            o.copy_from_slice(&(if cc < ca { a } else { b })[src..src + o.len()]);
         }
     });
 }
@@ -164,11 +169,15 @@ pub fn concat_split(params: &[u32], dy: &[f32], da: &mut [f32]) {
         params[3] as usize, params[4] as usize, params[5] as usize,
     );
     let hw = h * w;
-    da.par_chunks_mut(hw).enumerate().take(n * csrc).for_each(|(plane, o)| {
-        let nn = plane / csrc;
-        let cc = plane % csrc;
-        let src = ((nn * ctot) + (cc + c_off)) * hw;
-        o.copy_from_slice(&dy[src..src + hw]);
+    let planes = n * csrc;
+    let group = planes.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
+    da.par_chunks_mut(hw * group).enumerate().for_each(|(gi, chunk)| {
+        for (k, o) in chunk.chunks_mut(hw).enumerate() {
+            let plane = gi * group + k;
+            let (nn, cc) = (plane / csrc, plane % csrc);
+            let src = ((nn * ctot) + (cc + c_off)) * hw;
+            o.copy_from_slice(&dy[src..src + o.len()]);
+        }
     });
 }
 
@@ -176,17 +185,19 @@ pub fn concat_split(params: &[u32], dy: &[f32], da: &mut [f32]) {
 pub fn upsample2(params: &[u32], x: &[f32], y: &mut [f32]) {
     let (n, c, h, w) = (params[0] as usize, params[1] as usize, params[2] as usize, params[3] as usize);
     let (oh, ow) = (h * 2, w * 2);
-    // Parallelise over output planes; within a plane, each input row expands to
-    // two output rows, each input col duplicated.
-    y.par_chunks_mut(oh * ow).enumerate().take(n * c).for_each(|(plane, o)| {
-        let nc = plane; // (n*C + c) flattened; plane index maps to same input plane
-        let xc = &x[nc * h * w..nc * h * w + h * w];
-        for ho in 0..oh {
-            let hi = ho / 2;
-            let orow = &mut o[ho * ow..ho * ow + ow];
-            let xrow = &xc[hi * w..hi * w + w];
-            for wo in 0..ow {
-                orow[wo] = xrow[wo / 2];
+    let planes = n * c;
+    let group = planes.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
+    y.par_chunks_mut(oh * ow * group).enumerate().for_each(|(gi, chunk)| {
+        for (k, o) in chunk.chunks_mut(oh * ow).enumerate() {
+            let nc = gi * group + k; // (n*C + c) flattened
+            let xc = &x[nc * h * w..nc * h * w + h * w];
+            for ho in 0..oh {
+                let hi = ho / 2;
+                let orow = &mut o[ho * ow..ho * ow + ow];
+                let xrow = &xc[hi * w..hi * w + w];
+                for wo in 0..ow {
+                    orow[wo] = xrow[wo / 2];
+                }
             }
         }
     });
