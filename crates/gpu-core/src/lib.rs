@@ -312,6 +312,30 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub pipelines: Vec<wgpu::ComputePipeline>,
+    /// `BRAIN_PROFILE` op counters: (uniform buffers, bind groups, submits,
+    /// dispatches, readbacks) — surfaces per-frame GPU resource churn / sync.
+    stats: Option<std::sync::atomic::AtomicU64>,
+    stats_bg: std::sync::atomic::AtomicU64,
+    stats_submit: std::sync::atomic::AtomicU64,
+    stats_dispatch: std::sync::atomic::AtomicU64,
+    stats_read: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Gpu {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if let Some(uni) = &self.stats {
+            eprintln!(
+                "=== GPU op counts (BRAIN_PROFILE) === uniforms={} bind_groups={} submits={} dispatches={} readbacks={}",
+                uni.load(Relaxed),
+                self.stats_bg.load(Relaxed),
+                self.stats_submit.load(Relaxed),
+                self.stats_dispatch.load(Relaxed),
+                self.stats_read.load(Relaxed),
+            );
+        }
+    }
 }
 
 impl Gpu {
@@ -399,7 +423,22 @@ impl Gpu {
             })
             .collect();
 
-        Gpu { device, queue, pipelines }
+        use std::sync::atomic::AtomicU64;
+        let stats = if std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false) {
+            Some(AtomicU64::new(0))
+        } else {
+            None
+        };
+        Gpu {
+            device,
+            queue,
+            pipelines,
+            stats,
+            stats_bg: AtomicU64::new(0),
+            stats_submit: AtomicU64::new(0),
+            stats_dispatch: AtomicU64::new(0),
+            stats_read: AtomicU64::new(0),
+        }
     }
 
     pub fn storage(&self, n: u64) -> wgpu::Buffer {
@@ -446,6 +485,9 @@ impl Gpu {
     }
 
     fn uniform(&self, data: &[u32]) -> wgpu::Buffer {
+        if let Some(s) = &self.stats {
+            s.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut bytes: Vec<u8> = bytemuck::cast_slice(data).to_vec();
         while bytes.len() % 16 != 0 {
             bytes.push(0);
@@ -492,6 +534,9 @@ impl Gpu {
             layout: &layout,
             entries: &entries,
         });
+        if self.stats.is_some() {
+            self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let (gx, gy) = super::grid(threads);
         (kind, bg, gx, gy)
     }
@@ -524,6 +569,11 @@ impl Gpu {
             }
         }
         self.queue.submit(Some(enc.finish()));
+        if self.stats.is_some() {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.stats_submit.fetch_add(1, Relaxed);
+            self.stats_dispatch.fetch_add(steps.len() as u64, Relaxed);
+        }
     }
 
     pub fn write(&self, buf: &wgpu::Buffer, data: &[u32]) {
@@ -550,6 +600,9 @@ impl Gpu {
     /// recv, which is impossible in a browser. Wasm uses `read_async`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn read(&self, buf: &wgpu::Buffer, n: usize) -> Vec<f32> {
+        if self.stats.is_some() {
+            self.stats_read.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let staging = self.read_staging(buf, n);
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
