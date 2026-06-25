@@ -86,10 +86,31 @@ pub fn conv2d_act(p: &ConvParams, x: &[f32], w: &[f32], sb: &[f32], y: &mut [f32
     conv2d_impl(p, x, w, y, Some(sb));
 }
 
+/// True iff Winograd F(2×2,3×3) applies: a 3×3 stride-1 pad-1 conv (the dominant
+/// yolov8 backbone/neck shape). Other shapes use the GEMM path.
+#[inline]
+fn winograd_applicable(p: &ConvParams) -> bool {
+    p.k == 3 && p.stride == 1 && p.pad == 1 && p.n >= 1 && p.ho >= 1 && p.wo >= 1
+}
+
 fn conv2d_impl(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32], sb: Option<&[f32]>) {
     debug_assert_eq!(x.len(), p.x_len());
     debug_assert_eq!(w.len(), p.w_len());
     debug_assert_eq!(y.len(), p.y_len());
+
+    // Winograd F(2,3) for 3×3 s1 p1 exists and is validated, but as implemented
+    // (scalar transforms, 16 coord-parallel GEMMs) it is SLOWER than the tuned
+    // AVX2 GEMM below — the transform + materialization overhead and weaker
+    // parallelization eat the 2.25× multiply saving. So it is OPT-IN
+    // (BRAIN_WINOGRAD=1) scaffolding for the Phase-7 work (vectorized fused
+    // transforms, column-parallel transform-domain GEMM) rather than the default.
+    if winograd_applicable(p)
+        && avx2_available()
+        && std::env::var("BRAIN_WINOGRAD").map(|v| v != "0").unwrap_or(false)
+    {
+        winograd::conv2d_f23(p, x, w, sb, y);
+        return;
+    }
 
     let kg = p.cin * p.k * p.k;
     let psz = p.ho * p.wo; // spatial positions per (n, co)
@@ -329,6 +350,225 @@ unsafe fn gemm_cols_avx2(
     }
 }
 
+/// Winograd F(2×2, 3×3) convolution. For a 3×3 stride-1 pad-1 conv it produces a
+/// 2×2 output tile from a 4×4 input tile with 16 element-wise products instead of
+/// 36 direct multiplies (2.25× fewer), doing the per-channel reduction as 16
+/// GEMMs in the transform domain (reusing the AVX2 microkernel). Matches the
+/// direct conv up to Winograd's (looser) fp conditioning.
+mod winograd {
+    use super::*;
+
+    // F(2,3) transform matrices.
+    // Input:  V = Bᵀ d B          (B = Btᵀ)
+    // Weight: U = G g Gᵀ
+    // Output: Y = Aᵀ M A          (A = Atᵀ)
+    const BT: [[f32; 4]; 4] = [
+        [1.0, 0.0, -1.0, 0.0],
+        [0.0, 1.0, 1.0, 0.0],
+        [0.0, -1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0, -1.0],
+    ];
+    const G: [[f32; 3]; 4] = [
+        [1.0, 0.0, 0.0],
+        [0.5, 0.5, 0.5],
+        [0.5, -0.5, 0.5],
+        [0.0, 0.0, 1.0],
+    ];
+    const AT: [[f32; 4]; 2] = [[1.0, 1.0, 1.0, 0.0], [0.0, 1.0, -1.0, -1.0]];
+
+    /// U[4×4] = G g Gᵀ for a 3×3 filter `g` (row-major 9).
+    fn weight_transform(g: &[f32], u: &mut [f32; 16]) {
+        // t = G g  (4×3)
+        let mut t = [[0.0f32; 3]; 4];
+        for (i, ti) in t.iter_mut().enumerate() {
+            for (k, tik) in ti.iter_mut().enumerate() {
+                *tik = G[i][0] * g[k] + G[i][1] * g[3 + k] + G[i][2] * g[6 + k];
+            }
+        }
+        // U = t Gᵀ  (4×4): U[i][j] = Σ_k t[i][k] G[j][k]
+        for i in 0..4 {
+            for j in 0..4 {
+                u[i * 4 + j] = t[i][0] * G[j][0] + t[i][1] * G[j][1] + t[i][2] * G[j][2];
+            }
+        }
+    }
+
+    /// V[4×4] = Bᵀ d B for a 4×4 input tile `d`.
+    fn input_transform(d: &[f32; 16], v: &mut [f32; 16]) {
+        // t = Bᵀ d (4×4): t[i][j] = Σ_k BT[i][k] d[k][j]
+        let mut t = [[0.0f32; 4]; 4];
+        for i in 0..4 {
+            for j in 0..4 {
+                let mut s = 0.0;
+                for k in 0..4 {
+                    s += BT[i][k] * d[k * 4 + j];
+                }
+                t[i][j] = s;
+            }
+        }
+        // V = t B = t Btᵀ: V[i][j] = Σ_k t[i][k] BT[j][k]
+        for i in 0..4 {
+            for j in 0..4 {
+                let mut s = 0.0;
+                for k in 0..4 {
+                    s += t[i][k] * BT[j][k];
+                }
+                v[i * 4 + j] = s;
+            }
+        }
+    }
+
+    /// Y[2×2] = Aᵀ M A for a 4×4 transform-domain tile `m`.
+    fn output_transform(m: &[f32; 16], y: &mut [f32; 4]) {
+        // t = Aᵀ M (2×4): t[i][j] = Σ_k AT[i][k] m[k][j]
+        let mut t = [[0.0f32; 4]; 2];
+        for i in 0..2 {
+            for j in 0..4 {
+                let mut s = 0.0;
+                for k in 0..4 {
+                    s += AT[i][k] * m[k * 4 + j];
+                }
+                t[i][j] = s;
+            }
+        }
+        // Y = t A = t Atᵀ (2×2): Y[i][j] = Σ_k t[i][k] AT[j][k]
+        for i in 0..2 {
+            for j in 0..2 {
+                let mut s = 0.0;
+                for k in 0..4 {
+                    s += t[i][k] * AT[j][k];
+                }
+                y[i * 2 + j] = s;
+            }
+        }
+    }
+
+    pub fn conv2d_f23(p: &ConvParams, x: &[f32], w: &[f32], sb: Option<&[f32]>, y: &mut [f32]) {
+        let (cin, cout) = (p.cin, p.cout);
+        let (h, wd, ho, wo) = (p.h, p.w, p.ho, p.wo);
+        let (tth, ttw) = (ho.div_ceil(2), wo.div_ceil(2)); // output tile grid
+        let nt = tth * ttw; // tiles per image
+        if nt == 0 {
+            y.iter_mut().for_each(|v| *v = 0.0);
+            return;
+        }
+
+        // 1. Weight transform U[16][Cout][Cin]  (parallel over Cout).
+        let mut u = vec![0.0f32; 16 * cout * cin];
+        {
+            let uptr = SendMutPtr(u.as_mut_ptr());
+            (0..cout).into_par_iter().for_each(|co| {
+                let uptr = uptr;
+                let mut uf = [0.0f32; 16];
+                for ci in 0..cin {
+                    let g = &w[(co * cin + ci) * 9..(co * cin + ci) * 9 + 9];
+                    weight_transform(g, &mut uf);
+                    for (t, &uv) in uf.iter().enumerate() {
+                        // U[t][co][ci]
+                        unsafe { *uptr.0.add((t * cout + co) * cin + ci) = uv; }
+                    }
+                }
+            });
+        }
+
+        for n in 0..p.n {
+            let x_img = &x[n * cin * h * wd..(n + 1) * cin * h * wd];
+            // 2. Input transform V[16][Cin][nt]  (parallel over Cin).
+            let mut v = vec![0.0f32; 16 * cin * nt];
+            {
+                let vptr = SendMutPtr(v.as_mut_ptr());
+                (0..cin).into_par_iter().for_each(|ci| {
+                    let vptr = vptr;
+                    let xc = &x_img[ci * h * wd..(ci + 1) * h * wd];
+                    let mut d = [0.0f32; 16];
+                    let mut vf = [0.0f32; 16];
+                    for tyi in 0..tth {
+                        for txi in 0..ttw {
+                            // 4×4 input patch at (2*ty-1, 2*tx-1) (pad=1).
+                            let h0 = (2 * tyi) as isize - 1;
+                            let w0 = (2 * txi) as isize - 1;
+                            for r in 0..4 {
+                                let hr = h0 + r as isize;
+                                for c in 0..4 {
+                                    let wc = w0 + c as isize;
+                                    d[r * 4 + c] = if hr >= 0 && (hr as usize) < h && wc >= 0 && (wc as usize) < wd {
+                                        xc[hr as usize * wd + wc as usize]
+                                    } else {
+                                        0.0
+                                    };
+                                }
+                            }
+                            input_transform(&d, &mut vf);
+                            let tile = tyi * ttw + txi;
+                            for (t, &vv) in vf.iter().enumerate() {
+                                unsafe { *vptr.0.add((t * cin + ci) * nt + tile) = vv; }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // 3. 16 transform-domain GEMMs: M[t] = U[t]·V[t] -> [Cout][nt]
+            //    (parallel over the 16 coords; each GEMM uses the AVX2 microkernel).
+            let mut m = vec![0.0f32; 16 * cout * nt];
+            {
+                let mptr = SendMutPtr(m.as_mut_ptr());
+                (0..16usize).into_par_iter().for_each(|t| {
+                    let mptr = mptr;
+                    let a = &u[t * cout * cin..(t + 1) * cout * cin];
+                    let b = &v[t * cin * nt..(t + 1) * cin * nt];
+                    unsafe {
+                        let c = mptr.0.add(t * cout * nt);
+                        #[cfg(target_arch = "x86_64")]
+                        gemm_cols_avx2(cout, cin, a.as_ptr(), b.as_ptr(), nt, c, nt, nt);
+                        #[cfg(not(target_arch = "x86_64"))]
+                        gemm_cols_scalar(cout, cin, a.as_ptr(), b.as_ptr(), nt, c, nt, nt);
+                    }
+                });
+            }
+
+            // 4. Output transform + scatter (+ optional fused affine/SiLU),
+            //    parallel over Cout.
+            let y_img = &mut y[n * cout * ho * wo..(n + 1) * cout * ho * wo];
+            let yptr = SendMutPtr(y_img.as_mut_ptr());
+            (0..cout).into_par_iter().for_each(|co| {
+                let yptr = yptr;
+                let (scale, bias) = match sb {
+                    Some(sb) => (sb[2 * co], sb[2 * co + 1]),
+                    None => (1.0, 0.0),
+                };
+                let fused = sb.is_some();
+                let mut mf = [0.0f32; 16];
+                let mut yf = [0.0f32; 4];
+                for tyi in 0..tth {
+                    for txi in 0..ttw {
+                        let tile = tyi * ttw + txi;
+                        for t in 0..16 {
+                            mf[t] = m[(t * cout + co) * nt + tile];
+                        }
+                        output_transform(&mf, &mut yf);
+                        // scatter 2×2, clipping to (ho,wo); apply epilogue.
+                        for dr in 0..2 {
+                            let oy = 2 * tyi + dr;
+                            if oy >= ho { continue; }
+                            for dc in 0..2 {
+                                let ox = 2 * txi + dc;
+                                if ox >= wo { continue; }
+                                let mut z = yf[dr * 2 + dc];
+                                if fused {
+                                    z = z * scale + bias;
+                                    z /= 1.0 + (-z).exp();
+                                }
+                                unsafe { *yptr.0.add((co * ho + oy) * wo + ox) = z; }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +654,25 @@ mod tests {
     fn conv_stem_shape() {
         // yolov8 stem: 3->16, 3x3 s2 p1, on a small spatial proxy.
         check(cp(1, 3, 32, 32, 16, 3, 2, 1));
+    }
+
+    #[test]
+    fn winograd_matches_scalar() {
+        // Winograd F(2,3) applies to 3x3 s1 p1; validate vs the direct conv
+        // (looser tol — Winograd has weaker fp conditioning than direct).
+        for p in [cp(1, 8, 12, 12, 16, 3, 1, 1), cp(1, 3, 9, 11, 7, 3, 1, 1), cp(2, 5, 16, 14, 9, 3, 1, 1)] {
+            let mut s = 21u32 ^ p.cout as u32;
+            let x: Vec<f32> = (0..p.x_len()).map(|_| lcg(&mut s)).collect();
+            let w: Vec<f32> = (0..p.w_len()).map(|_| lcg(&mut s)).collect();
+            let mut y = vec![0.0f32; p.y_len()];
+            winograd::conv2d_f23(&p, &x, &w, None, &mut y);
+            let yref = conv_ref(&p, &x, &w);
+            let mut maxerr = 0.0f32;
+            for (a, b) in y.iter().zip(yref.iter()) {
+                maxerr = maxerr.max((a - b).abs() / (b.abs() + 1e-2));
+            }
+            assert!(maxerr < 5e-3, "winograd rel err {maxerr} for {p:?}");
+        }
     }
 
     #[test]
