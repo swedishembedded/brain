@@ -24,6 +24,7 @@ default-members = [
     "crates/eval",
     "crates/bench",
     "crates/gradcheck",
+    "crates/events",
     "crates/cli",
     "crates/web",
 ]
@@ -54,6 +55,7 @@ brain-federated = { path = "crates/federated" }
 brain-eval = { path = "crates/eval" }
 brain-bench = { path = "crates/bench" }
 brain-gradcheck = { path = "crates/gradcheck" }
+brain-events = { path = "crates/events" }
 brain-vulkan = { path = "crates/vulkan" }
 brain-wgsl-cpu = { path = "crates/wgsl-cpu" }
 

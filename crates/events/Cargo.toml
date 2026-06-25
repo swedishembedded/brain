@@ -1,0 +1,13 @@
+[package]
+name = "brain-events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JSONL event protocol between the brain runtime and its host (text/camera/detection events) — codec skeleton (P0)."
+
+[lib]
+name = "events"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true
