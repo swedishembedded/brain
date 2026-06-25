@@ -65,6 +65,9 @@ pub struct Branch {
     // head-bias plumbing (see module docs). C*H*W elements.
     bcast: DeviceBuffer,  // broadcast bias bcast[c*HW+p] = bias[c]
     dbcast: DeviceBuffer, // bias_grad output before the host spatial-reduce
+    /// Whether `bcast` holds the current (constant in eval) broadcast bias, so
+    /// inference packs it once instead of a host readback+write every frame.
+    bcast_ready: std::cell::Cell<bool>,
 }
 
 impl Branch {
@@ -86,6 +89,7 @@ impl Branch {
             d_c0: ctx.act(mid_n),
             bcast: ctx.act(chw),
             dbcast: ctx.act(chw),
+            bcast_ready: std::cell::Cell::new(false),
         }
     }
 
@@ -98,6 +102,10 @@ impl Branch {
     pub fn set_eval(&self, eval: bool) {
         self.c0.set_eval(eval);
         self.c1.set_eval(eval);
+        // Re-entering train mode means the bias can change again: recompute bcast.
+        if !eval {
+            self.bcast_ready.set(false);
+        }
     }
 
     /// Propagate the BN running-stat update toggle to the two Convs (the final
@@ -145,7 +153,16 @@ impl Branch {
         let s = ctx.step(CONV2D, &[self.c1.out(), w, &self.logits], &self.conv1x1_params(), self.out_shape.numel());
         ctx.gpu.submit(&[], &[s]);
         // Add the per-channel bias via the [M,N] bias_add on the [N, C*HW] view.
-        let (m, n) = self.pack_bcast(ctx, ps);
+        // In eval the bias is constant, so pack the broadcast buffer once (skip the
+        // per-frame host readback+write); in train it can change, so always repack.
+        if !(self.c0.is_eval() && self.bcast_ready.get()) {
+            self.pack_bcast(ctx, ps);
+            if self.c0.is_eval() {
+                self.bcast_ready.set(true);
+            }
+        }
+        let m = self.out_shape.n;
+        let n = self.out_c * self.out_shape.h * self.out_shape.w;
         let sb = ctx.step(BIAS_ADD, &[&self.logits, &self.bcast], &[m, n], m * n);
         ctx.gpu.submit(&[], &[sb]);
     }

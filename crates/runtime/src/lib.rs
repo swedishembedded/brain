@@ -142,6 +142,12 @@ impl YoloDetect {
     /// Wrap an already-built model (used by tests with a random-weight tiny YOLO).
     pub fn from_model(model: yolo::Yolo) -> YoloDetect {
         let labels = (0..model.cfg.nc).map(|c| c.to_string()).collect();
+        // Inference is eval-only: pin eval mode so the per-Conv BatchNorm-eval
+        // collapse (`sb`) is computed ONCE and reused, instead of being
+        // invalidated by detect_batch's eval->train flip every frame. That flip
+        // otherwise re-runs pack_sb (4 host readbacks per Conv block, each a full
+        // GPU sync) every frame — ~200 syncs/frame, the dominant GPU cost.
+        model.set_eval(true);
         YoloDetect { model, labels, conf: 0.25, iou: 0.45 }
     }
 
