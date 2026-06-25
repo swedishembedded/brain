@@ -1,0 +1,12 @@
+[package]
+name = "brain-hfsm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generic hierarchical state machine (HSM) substrate: RTC dispatch + state nesting (skeleton — P0)."
+
+[lib]
+name = "hfsm"
+path = "src/lib.rs"
+
+[dependencies]
