@@ -3,7 +3,8 @@
 
 //! The full tiny YOLOv8 detector model (P3): backbone -> PAN-FPN neck ->
 //! 3-scale decoupled head, wired into the architecture-agnostic
-//! [`model::Model`] seam. CPU backend only ([`Gpu::new_cpu`]).
+//! [`model::Model`] seam. The compute backend is selected at runtime via
+//! [`Gpu::new`] (honouring `--device` / `BRAIN_DEVICE`): native CPU-JIT or wgpu.
 //!
 //! ## Graph
 //! ```text
@@ -262,7 +263,15 @@ impl Yolo {
     }
 
     pub fn new(cfg: YoloConfig, b: u32, _t: u32, init: &HashMap<String, Vec<f32>>) -> Yolo {
-        let gpu = Gpu::new_cpu(PIPELINES);
+        // Honour an EXPLICIT backend choice (`brain ... --device cpu|gpu`) so
+        // `--device gpu` actually runs the WGSL kernels on the wgpu/GPU backend,
+        // while still defaulting to the native CPU-JIT when nothing was selected
+        // (preserving the `cargo test` / tooling convention that yolo is CPU).
+        let gpu = if gpu_core::backend_selected() {
+            Gpu::new(PIPELINES)
+        } else {
+            Gpu::new_cpu(PIPELINES)
+        };
         let ps = ParamStore::new(&gpu, ModelConfigParamList::param_list(&cfg), init);
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 

@@ -97,6 +97,13 @@ pub fn set_default_backend(b: Backend) {
     DEFAULT_BACKEND.store(match b { Backend::Wgpu => 1, Backend::Cpu => 2 }, Ordering::Relaxed);
 }
 
+/// True iff a backend was explicitly selected via [`set_default_backend`] (i.e.
+/// the CLI saw a `--device` flag). Lets callers that historically defaulted to
+/// CPU (yolo) opt into the selected backend only when one was actually chosen.
+pub fn backend_selected() -> bool {
+    DEFAULT_BACKEND.load(Ordering::Relaxed) != 0
+}
+
 fn resolve_backend() -> Backend {
     match DEFAULT_BACKEND.load(Ordering::Relaxed) {
         1 => Backend::Wgpu,
@@ -268,7 +275,7 @@ impl Gpu {
 } // mod native_accel
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native_accel::{set_default_backend, Backend, DeviceBuffer, Gpu, Step};
+pub use native_accel::{backend_selected, set_default_backend, Backend, DeviceBuffer, Gpu, Step};
 
 // On wasm there is only the wgpu/WebGPU backend, so the public types are direct
 // aliases to it — model code that uses `gpu_core::{Gpu, DeviceBuffer, Step}`

@@ -116,7 +116,11 @@ def bench_brain(image_path, weights, brain_bin, n, conf, device):
     # `device` is forwarded verbatim as BRAIN_DEVICE for the engine subprocess:
     # "cpu" -> native Cranelift-JIT + AVX2 fast-conv backend; anything else
     # (e.g. "gpu") -> the wgpu/WebGPU backend running the WGSL kernels.
-    client = BrainClient(yolo=weights, conf=conf, brain_bin=brain_bin, device=device)
+    # Pass the backend explicitly as `--device` (cpu|gpu) so the engine actually
+    # builds that backend (the yolo model only switches off an explicit
+    # selection); `device=` also sets BRAIN_DEVICE for good measure.
+    client = BrainClient(yolo=weights, conf=conf, brain_bin=brain_bin, device=device,
+                         extra_args=["--device", device])
     client.__enter__()              # spawns `brain run --yolo`, waits for ready (model loaded)
     load = time.perf_counter() - t0
     pid = client._proc.pid
