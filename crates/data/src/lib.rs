@@ -22,6 +22,7 @@ pub mod tokenizer;
 // Dataset generators (one module per source), ported 1:1 from
 // `scratchpad/reference/nanogpt/data_generators/*.py`.
 pub mod gen_calculator;
+pub mod gen_detect;
 pub mod gen_reverser;
 pub mod gen_timeseries;
 pub mod gen_wordcalc;

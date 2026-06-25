@@ -100,6 +100,68 @@ pub fn read_f32_bin(path: &Path) -> io::Result<Vec<f32>> {
         .collect())
 }
 
+/// A normalized ground-truth box for object detection: class id + center-xywh in
+/// `[0,1]` of image size. Mirrors `yolo::GtBox` (minus the per-batch `img`
+/// index, which the loader assigns when batching).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DetectBox {
+    pub class: u32,
+    pub cx: f32,
+    pub cy: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// Write per-image detection boxes to `boxes.bin`. Layout, per image in order:
+/// `[u32 num]` then `num × (u32 class, f32 cx, f32 cy, f32 w, f32 h)`, all raw
+/// little-endian. `boxes[i]` is image `i`'s box list (may be empty).
+pub fn write_detect_boxes(path: &Path, boxes: &[Vec<DetectBox>]) -> io::Result<()> {
+    let mut bytes = Vec::new();
+    for img in boxes {
+        bytes.extend_from_slice(&(img.len() as u32).to_le_bytes());
+        for b in img {
+            bytes.extend_from_slice(&b.class.to_le_bytes());
+            bytes.extend_from_slice(&b.cx.to_le_bytes());
+            bytes.extend_from_slice(&b.cy.to_le_bytes());
+            bytes.extend_from_slice(&b.w.to_le_bytes());
+            bytes.extend_from_slice(&b.h.to_le_bytes());
+        }
+    }
+    fs::write(path, bytes)
+}
+
+/// Read `n` images' detection boxes back from `boxes.bin` (inverse of
+/// [`write_detect_boxes`]). `n` comes from `meta.json`.
+pub fn read_detect_boxes(path: &Path, n: usize) -> io::Result<Vec<Vec<DetectBox>>> {
+    let bytes = fs::read(path)?;
+    let mut off = 0usize;
+    let rd_u32 = |b: &[u8], o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+    let rd_f32 = |b: &[u8], o: usize| f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let num = rd_u32(&bytes, off) as usize;
+        off += 4;
+        let mut v = Vec::with_capacity(num);
+        for _ in 0..num {
+            let class = rd_u32(&bytes, off);
+            let cx = rd_f32(&bytes, off + 4);
+            let cy = rd_f32(&bytes, off + 8);
+            let w = rd_f32(&bytes, off + 12);
+            let h = rd_f32(&bytes, off + 16);
+            off += 20;
+            v.push(DetectBox { class, cx, cy, w, h });
+        }
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// Read the raw `images.f32` blob (`N×3×H×W` CHW f32, normalized `[0,1]`).
+/// A thin alias over [`read_f32_bin`] documenting the detection layout.
+pub fn read_detect_images(path: &Path) -> io::Result<Vec<f32>> {
+    read_f32_bin(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +176,24 @@ mod tests {
         assert_eq!(back.vocab_size, 4);
         assert_eq!(back.itos, m.itos);
         assert_eq!(back.stoi()[&'='], 1);
+    }
+
+    #[test]
+    fn detect_boxes_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("brain_binio_boxes_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let p = dir.join("boxes.bin");
+        let boxes = vec![
+            vec![
+                DetectBox { class: 0, cx: 0.5, cy: 0.25, w: 0.1, h: 0.2 },
+                DetectBox { class: 3, cx: 0.75, cy: 0.6, w: 0.3, h: 0.4 },
+            ],
+            vec![], // an empty (background) image
+            vec![DetectBox { class: 1, cx: 0.125, cy: 0.875, w: 0.05, h: 0.05 }],
+        ];
+        write_detect_boxes(&p, &boxes).unwrap();
+        let back = read_detect_boxes(&p, boxes.len()).unwrap();
+        assert_eq!(back, boxes);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

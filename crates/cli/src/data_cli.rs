@@ -28,7 +28,7 @@ fn gen(args: &[String]) {
     };
     let Some(ds) = Dataset::from_name(name) else {
         eprintln!(
-            "unknown dataset {name:?}; expected one of: shakespeare_char calculator reverser wordcalc gpt timeseries"
+            "unknown dataset {name:?}; expected one of: shakespeare_char calculator reverser wordcalc gpt timeseries detect localization classification scale multi_object background"
         );
         return;
     };
@@ -37,6 +37,8 @@ fn gen(args: &[String]) {
     let mut out: PathBuf = PathBuf::from("data").join(ds.name());
     let mut n: usize = match ds {
         Dataset::Timeseries => 200_000,
+        // Image datasets are far heavier per example; default to a small corpus.
+        Dataset::Detect { .. } => 256,
         _ => 100_000,
     };
     let mut seed: u64 = 1337;

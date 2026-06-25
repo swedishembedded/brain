@@ -28,6 +28,14 @@ pub enum Dataset {
     Gpt,
     /// Synthetic 3-phase signal, float-valued.
     Timeseries,
+    /// Synthetic object-detection scenes (RGB shapes + exact boxes). Carries the
+    /// generator preset + image geometry + class count.
+    Detect {
+        preset: crate::gen_detect::Preset,
+        h: u32,
+        w: u32,
+        nc: u32,
+    },
 }
 
 impl Dataset {
@@ -40,7 +48,16 @@ impl Dataset {
             "wordcalc" => Dataset::Wordcalc,
             "gpt" => Dataset::Gpt,
             "timeseries" => Dataset::Timeseries,
-            _ => return None,
+            // `detect` (and per-preset names) map to a default tiny-config scene:
+            // 128px, 3 classes, multi-object — the geometry the tiny YOLO uses.
+            "detect" => Dataset::Detect { preset: crate::gen_detect::Preset::MultiObject, h: 128, w: 128, nc: 3 },
+            other => {
+                if let Some(preset) = crate::gen_detect::Preset::from_name(other) {
+                    Dataset::Detect { preset, h: 128, w: 128, nc: 3 }
+                } else {
+                    return None;
+                }
+            }
         })
     }
 
@@ -53,6 +70,7 @@ impl Dataset {
             Dataset::Wordcalc => "wordcalc",
             Dataset::Gpt => "gpt",
             Dataset::Timeseries => "timeseries",
+            Dataset::Detect { preset, .. } => preset.name(),
         }
     }
 }
@@ -89,6 +107,9 @@ pub fn prepare(ds: Dataset, dir: &Path, n_examples: usize, seed: u64) -> io::Res
             write_bpe_dataset(&text, dir)
         }
         Dataset::Timeseries => write_timeseries_dataset(dir, n_examples.max(1), seed),
+        Dataset::Detect { preset, h, w, nc } => {
+            crate::gen_detect::write_dataset(dir, preset, n_examples.max(1), w, h, nc, seed)
+        }
     }
 }
 
