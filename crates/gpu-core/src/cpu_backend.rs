@@ -14,7 +14,7 @@
 use crate::BufUsage;
 use rayon::prelude::*;
 use std::cell::UnsafeCell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use wgsl_cpu::Jit;
 
 /// A recorded dispatch: (kernel index, bind group, grid_x, grid_y).
@@ -55,6 +55,11 @@ impl CpuBuffer {
 pub struct CpuBackend {
     jit: Jit,
     threads: usize,
+    /// Kernel names in index order (mirrors the registry passed to `new`), used
+    /// for the optional `BRAIN_PROFILE=1` per-kernel timing breakdown.
+    names: Vec<String>,
+    /// Per-kernel accumulated wall time + call count for `BRAIN_PROFILE`.
+    profile: Option<Mutex<Vec<(std::time::Duration, u64)>>>,
 }
 
 /// Bind group for one dispatch: the uniform stream plus the storage buffers in
@@ -70,7 +75,13 @@ impl CpuBackend {
         let jit = Jit::new(kernels).expect("WGSL->CPU JIT compilation failed");
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         eprintln!("adapter: brain-wgsl-cpu (Cranelift JIT, {threads} threads)");
-        CpuBackend { jit, threads }
+        let names: Vec<String> = kernels.iter().map(|(n, _)| n.to_string()).collect();
+        let profile = if std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false) {
+            Some(Mutex::new(vec![(std::time::Duration::ZERO, 0u64); names.len()]))
+        } else {
+            None
+        };
+        CpuBackend { jit, threads, names, profile }
     }
 
     pub fn storage(&self, n: u64) -> CpuBuffer {
@@ -131,7 +142,37 @@ impl CpuBackend {
             let total = (*gx as u64) * (*gy as u64) * 64;
             let uniform = bg.uniform.base_ptr() as *const u32;
             let bufs: Vec<*mut u8> = bg.bufs.iter().map(|b| b.base_ptr()).collect();
-            self.dispatch(*kind, total, *gx, *gy, uniform, &bufs);
+            if let Some(prof) = &self.profile {
+                let t = std::time::Instant::now();
+                self.dispatch(*kind, total, *gx, *gy, uniform, &bufs);
+                let dt = t.elapsed();
+                let mut g = prof.lock().unwrap();
+                g[*kind].0 += dt;
+                g[*kind].1 += 1;
+            } else {
+                self.dispatch(*kind, total, *gx, *gy, uniform, &bufs);
+            }
+        }
+    }
+
+    /// Print the accumulated per-kernel timing breakdown (only if `BRAIN_PROFILE`
+    /// was set). Sorted by total time descending.
+    pub fn dump_profile(&self) {
+        let Some(prof) = &self.profile else { return };
+        let g = prof.lock().unwrap();
+        let mut rows: Vec<(usize, std::time::Duration, u64)> =
+            g.iter().enumerate().map(|(i, (d, c))| (i, *d, *c)).filter(|r| r.2 > 0).collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1));
+        let total: std::time::Duration = g.iter().map(|(d, _)| *d).sum();
+        eprintln!("=== BRAIN_PROFILE (CPU backend, total {:.1} ms) ===", total.as_secs_f64() * 1e3);
+        for (i, d, c) in rows {
+            eprintln!(
+                "  {:<16} {:8.1} ms  {:5} calls  ({:4.1}%)",
+                self.names[i],
+                d.as_secs_f64() * 1e3,
+                c,
+                d.as_secs_f64() / total.as_secs_f64().max(1e-9) * 100.0,
+            );
         }
     }
 
@@ -165,6 +206,12 @@ impl CpuBackend {
             // sub-ranges never alias; `bufs` outlives this scoped parallel loop.
             unsafe { jit.run(kind, s, e, gx, gy, uni.0, bufs_ptr.0) };
         });
+    }
+}
+
+impl Drop for CpuBackend {
+    fn drop(&mut self) {
+        self.dump_profile();
     }
 }
 
