@@ -186,16 +186,27 @@ pub fn concat2(params: &[u32], a: &[f32], b: &[f32], y: &mut [f32]) {
         (params[0] as usize, params[1] as usize, params[2] as usize, params[3] as usize, params[4] as usize);
     let hw = h * w;
     let ctot = ca + cb;
-    // Coarse parallelism: group many planes per task (per-plane tasks would be
-    // dominated by rayon scheduling for a plain memcpy).
-    let planes = n * ctot;
-    let group = planes.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
-    y.par_chunks_mut(hw * group).enumerate().for_each(|(gi, chunk)| {
-        for (k, o) in chunk.chunks_mut(hw).enumerate() {
-            let plane = gi * group + k;
-            let (nn, cc) = (plane / ctot, plane % ctot);
-            let src = if cc < ca { (nn * ca + cc) * hw } else { (nn * cb + (cc - ca)) * hw };
-            o.copy_from_slice(&(if cc < ca { a } else { b })[src..src + o.len()]);
+    let (a_n, b_n, per_n) = (ca * hw, cb * hw, ctot * hw);
+    // Segmented parallel copy: each (n, source) run is contiguous in both src and
+    // dst, so it copies as one bulk memcpy. Coarse flat chunks across threads.
+    let total = n * per_n;
+    let chunk = total.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
+    y.par_chunks_mut(chunk).enumerate().for_each(|(ci, out)| {
+        let base = ci * chunk;
+        let mut o = 0usize;
+        while o < out.len() {
+            let g = base + o;
+            let (nn, local) = (g / per_n, g % per_n);
+            if local < a_n {
+                let cnt = (a_n - local).min(out.len() - o);
+                out[o..o + cnt].copy_from_slice(&a[nn * a_n + local..nn * a_n + local + cnt]);
+                o += cnt;
+            } else {
+                let bl = local - a_n;
+                let cnt = (b_n - bl).min(out.len() - o);
+                out[o..o + cnt].copy_from_slice(&b[nn * b_n + bl..nn * b_n + bl + cnt]);
+                o += cnt;
+            }
         }
     });
 }
@@ -207,14 +218,20 @@ pub fn concat_split(params: &[u32], dy: &[f32], da: &mut [f32]) {
         params[3] as usize, params[4] as usize, params[5] as usize,
     );
     let hw = h * w;
-    let planes = n * csrc;
-    let group = planes.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
-    da.par_chunks_mut(hw * group).enumerate().for_each(|(gi, chunk)| {
-        for (k, o) in chunk.chunks_mut(hw).enumerate() {
-            let plane = gi * group + k;
-            let (nn, cc) = (plane / csrc, plane % csrc);
-            let src = ((nn * ctot) + (cc + c_off)) * hw;
-            o.copy_from_slice(&dy[src..src + o.len()]);
+    // Per n, da[n] = dy[n][c_off*hw .. (c_off+csrc)*hw] is one contiguous run.
+    let (src_n, dst_n) = (ctot * hw, csrc * hw);
+    let total = n * dst_n;
+    let chunk = total.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
+    da.par_chunks_mut(chunk).enumerate().for_each(|(ci, out)| {
+        let base = ci * chunk;
+        let mut o = 0usize;
+        while o < out.len() {
+            let g = base + o;
+            let (nn, local) = (g / dst_n, g % dst_n);
+            let cnt = (dst_n - local).min(out.len() - o);
+            let src = nn * src_n + c_off * hw + local;
+            out[o..o + cnt].copy_from_slice(&dy[src..src + cnt]);
+            o += cnt;
         }
     });
 }
