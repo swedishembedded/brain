@@ -60,6 +60,9 @@ pub struct CpuBackend {
     names: Vec<String>,
     /// Per-kernel accumulated wall time + call count for `BRAIN_PROFILE`.
     profile: Option<Mutex<Vec<(std::time::Duration, u64)>>>,
+    /// Index of the `conv2d` kernel, if registered, for the native fast path.
+    /// `None` disables it (also via `BRAIN_NO_FASTCONV=1`).
+    conv2d_idx: Option<usize>,
 }
 
 /// Bind group for one dispatch: the uniform stream plus the storage buffers in
@@ -81,7 +84,13 @@ impl CpuBackend {
         } else {
             None
         };
-        CpuBackend { jit, threads, names, profile }
+        let fastconv_off = std::env::var("BRAIN_NO_FASTCONV").map(|v| v != "0").unwrap_or(false);
+        let conv2d_idx = if fastconv_off || !crate::fast_conv::avx2_available() {
+            None
+        } else {
+            names.iter().position(|n| n == "conv2d")
+        };
+        CpuBackend { jit, threads, names, profile, conv2d_idx }
     }
 
     pub fn storage(&self, n: u64) -> CpuBuffer {
@@ -186,6 +195,22 @@ impl CpuBackend {
         bufs: &[*mut u8],
     ) {
         if total == 0 {
+            return;
+        }
+        // Native GEMM fast path for conv2d (the inference hot spot). Computes the
+        // same bias-free NCHW convolution as `conv2d.wgsl`, validated against the
+        // scalar reference; falls through to the JIT for every other kernel.
+        if Some(kind) == self.conv2d_idx && bufs.len() >= 3 {
+            // SAFETY: `uniform` is the 10-u32 conv param stream and bufs[0..3] are
+            // the x/w/y storage bases the model bound, each sized to its tensor.
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 10);
+                let p = crate::fast_conv::ConvParams::from_u32(pu);
+                let x = std::slice::from_raw_parts(bufs[0] as *const f32, p.x_len());
+                let w = std::slice::from_raw_parts(bufs[1] as *const f32, p.w_len());
+                let y = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, p.y_len());
+                crate::fast_conv::conv2d(&p, x, w, y);
+            }
             return;
         }
         // ~8 chunks per thread for load balance on divergent kernels (e.g. the

@@ -68,6 +68,8 @@ impl std::ops::BitOr for BufUsage {
 // (Cranelift can't JIT there), so the CPU variant is cfg'd out.
 #[cfg(not(target_arch = "wasm32"))]
 mod cpu_backend;
+#[cfg(not(target_arch = "wasm32"))]
+mod fast_conv;
 
 /// Native builds carry both backends and pick one at runtime via this enum. On
 /// wasm only the wgpu/WebGPU backend exists, so `Gpu`/`DeviceBuffer`/`Step` are
