@@ -74,6 +74,19 @@ pub fn avx2_available() -> bool {
 /// fp reassociation). Uses the AVX2 GEMM path when available, else a portable
 /// scalar GEMM with the same tiling.
 pub fn conv2d(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32]) {
+    conv2d_impl(p, x, w, y, None);
+}
+
+/// Fused conv -> per-channel affine -> SiLU (matches `conv_act.wgsl`). `sb` is
+/// `[2*Cout]` with `sb[2c]=scale[c]`, `sb[2c+1]=bias[c]`; the epilogue
+/// `y = silu(conv*scale + bias)` is applied panel-hot right after each GEMM
+/// panel, so no separate bn_eval/silu memory passes are needed.
+pub fn conv2d_act(p: &ConvParams, x: &[f32], w: &[f32], sb: &[f32], y: &mut [f32]) {
+    debug_assert_eq!(sb.len(), 2 * p.cout);
+    conv2d_impl(p, x, w, y, Some(sb));
+}
+
+fn conv2d_impl(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32], sb: Option<&[f32]>) {
     debug_assert_eq!(x.len(), p.x_len());
     debug_assert_eq!(w.len(), p.w_len());
     debug_assert_eq!(y.len(), p.y_len());
@@ -132,6 +145,15 @@ pub fn conv2d(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32]) {
                         gemm_cols_scalar(p.cout, kg, w.as_ptr(), b_base, bstride, c_base, psz, pw);
                     } else {
                         gemm_cols_scalar(p.cout, kg, w.as_ptr(), b_base, bstride, c_base, psz, pw);
+                    }
+                    // Fused epilogue: apply per-channel affine + SiLU to this
+                    // panel's freshly-written output columns (still cache-hot),
+                    // so bn_eval+silu need no separate memory passes.
+                    if let Some(sb) = sb {
+                        for co in 0..p.cout {
+                            let row = std::slice::from_raw_parts_mut(c_base.add(co * psz), pw);
+                            crate::fast_ops::affine_silu_inplace(row, sb[2 * co], sb[2 * co + 1]);
+                        }
                     }
                 }
                 pp += pw;
@@ -392,6 +414,30 @@ mod tests {
     fn conv_stem_shape() {
         // yolov8 stem: 3->16, 3x3 s2 p1, on a small spatial proxy.
         check(cp(1, 3, 32, 32, 16, 3, 2, 1));
+    }
+
+    #[test]
+    fn conv_act_matches_conv_then_affine_silu() {
+        for p in [cp(1, 8, 12, 12, 16, 3, 1, 1), cp(1, 13, 7, 5, 6, 1, 1, 0), cp(1, 6, 16, 16, 10, 3, 2, 1)] {
+            let mut s = 7u32 ^ p.cout as u32;
+            let x: Vec<f32> = (0..p.x_len()).map(|_| lcg(&mut s)).collect();
+            let w: Vec<f32> = (0..p.w_len()).map(|_| lcg(&mut s)).collect();
+            let sb: Vec<f32> = (0..2 * p.cout).map(|_| lcg(&mut s)).collect();
+            let mut y = vec![0.0f32; p.y_len()];
+            conv2d_act(&p, &x, &w, &sb, &mut y);
+            // Reference: conv, then per-channel affine, then SiLU.
+            let yc = conv_ref(&p, &x, &w);
+            let psz = p.ho * p.wo;
+            let mut maxerr = 0.0f32;
+            for co in 0..p.cout {
+                for j in 0..psz {
+                    let z = yc[co * psz + j] * sb[2 * co] + sb[2 * co + 1];
+                    let r = z / (1.0 + (-z).exp());
+                    maxerr = maxerr.max((y[co * psz + j] - r).abs() / (r.abs() + 1e-3));
+                }
+            }
+            assert!(maxerr < 2e-3, "fused conv_act rel err {maxerr} for {p:?}");
+        }
     }
 
     /// Contention-robust conv throughput probe: times each representative

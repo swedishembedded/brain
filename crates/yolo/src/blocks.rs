@@ -46,8 +46,8 @@ use paramstore::ParamStore;
 
 use crate::net::{Ctx, Shape};
 use crate::net::{
-    ADD2, BN_DBETA, BN_DGAMMA, BN_DSTATS, BN_DX, BN_EVAL, BN_RUNNING, BN_STATS, BN_TRAIN, CONCAT2,
-    CONCAT_SPLIT, CONV2D, CONV2D_DW, CONV2D_DX, MAXPOOL5, MAXPOOL5_DX, SILU, SILU_BWD,
+    ADD2, BN_DBETA, BN_DGAMMA, BN_DSTATS, BN_DX, BN_RUNNING, BN_STATS, BN_TRAIN, CONCAT2,
+    CONCAT_SPLIT, CONV2D, CONV2D_DW, CONV2D_DX, CONV_ACT, MAXPOOL5, MAXPOOL5_DX, SILU, SILU_BWD,
 };
 
 /// Interleave two per-channel vectors into a `[2C]` packed buffer.
@@ -90,6 +90,11 @@ pub struct Conv {
     var: DeviceBuffer,      // batch var  [C]
     mv: DeviceBuffer,       // packed mean|var [2C]
     gb: DeviceBuffer,       // packed gamma|beta [2C]
+    sb: DeviceBuffer,       // packed scale|bias [2C] = BN-eval collapsed (fused conv_act)
+    /// Whether `sb` holds the current BN-eval collapse. Computed lazily on the
+    /// first eval-mode forward and reused across frames (constant in inference);
+    /// invalidated when the block re-enters train mode.
+    sb_ready: std::cell::Cell<bool>,
     mvg: DeviceBuffer,      // packed mean|var|gamma [3C]
     bn_out: DeviceBuffer,   // post-BN pre-SiLU [out]
     act: DeviceBuffer,      // SiLU output (block output) [out]
@@ -133,6 +138,8 @@ impl Conv {
             var: ctx.act(c),
             mv: ctx.act(2 * c),
             gb: ctx.act(2 * c),
+            sb: ctx.act(2 * c),
+            sb_ready: std::cell::Cell::new(false),
             mvg: ctx.act(3 * c),
             bn_out: ctx.act(on),
             act: ctx.act(on),
@@ -150,6 +157,11 @@ impl Conv {
     /// stats). Inference-only concern: it changes which BN kernel `forward`
     /// dispatches, never the graph or any buffer.
     pub fn set_eval(&self, eval: bool) {
+        // Re-entering train mode invalidates the cached BN-eval collapse so the
+        // next eval recomputes it from the (now updated) running stats / affine.
+        if !eval {
+            self.sb_ready.set(false);
+        }
         self.train.set(!eval);
     }
 
@@ -213,37 +225,63 @@ impl Conv {
         let p = |s: &str| format!("{}.{s}", self.prefix);
         let on = self.out_shape.numel();
         let c = self.out_shape.c;
-        self.pack_gb(ctx, ps);
 
-        // conv2d (bias-free): [x, w, y]
-        let s_conv = ctx.step(CONV2D, &[x_in, ps.w(&p("conv.weight")), &self.conv_out], &self.conv_params(), on);
-
-        if self.train.get() {
-            // conv -> bn_stats, then host-pack mv/mvg, then bn_train -> silu.
-            let s_stats = ctx.step(BN_STATS, &[&self.conv_out, &self.mean, &self.var], &self.nchw(), c);
-            let mut pre = vec![s_conv, s_stats];
-            if self.update_running.get() {
-                pre.push(ctx.step(
-                    BN_RUNNING,
-                    &[&self.mean, &self.var, ps.w(&p("bn.run_mean")), ps.w(&p("bn.run_var"))],
-                    &[c, f(self.momentum)],
-                    c,
-                ));
+        if !self.train.get() {
+            // Inference: one fused conv -> BN(eval) -> SiLU dispatch. The BN-eval
+            // transform is collapsed per channel into `sb` once (constant across
+            // frames), so there is no per-frame host stat packing nor separate
+            // bn_eval/silu passes.
+            if !self.sb_ready.get() {
+                self.pack_sb(ctx, ps);
+                self.sb_ready.set(true);
             }
-            ctx.gpu.submit(&[], &pre);
-            self.pack_stats_host(ctx, ps);
-            let s_train = ctx.step(BN_TRAIN, &[&self.conv_out, &self.mv, &self.gb, &self.bn_out], &self.nchw(), on);
-            let s_silu = ctx.step(SILU, &[&self.bn_out, &self.act], &[on], on);
-            ctx.gpu.submit(&[], &[s_train, s_silu]);
-        } else {
-            // eval: pack running stats into mv, then bn_eval -> silu in one submit.
-            let rm = ctx.gpu.read(ps.w(&p("bn.run_mean")), c as usize);
-            let rv = ctx.gpu.read(ps.w(&p("bn.run_var")), c as usize);
-            ctx.gpu.write(&self.mv, bytemuck::cast_slice(&pack2(&rm, &rv)));
-            let s_eval = ctx.step(BN_EVAL, &[&self.conv_out, &self.mv, &self.gb, &self.bn_out], &self.nchw(), on);
-            let s_silu = ctx.step(SILU, &[&self.bn_out, &self.act], &[on], on);
-            ctx.gpu.submit(&[], &[s_conv, s_eval, s_silu]);
+            let s = ctx.step(
+                CONV_ACT,
+                &[x_in, ps.w(&p("conv.weight")), &self.sb, &self.act],
+                &self.conv_params(),
+                on,
+            );
+            ctx.gpu.submit(&[], &[s]);
+            return;
         }
+
+        // Train mode: conv -> bn_stats, host-pack mv/mvg, then bn_train -> silu.
+        self.pack_gb(ctx, ps);
+        let s_conv = ctx.step(CONV2D, &[x_in, ps.w(&p("conv.weight")), &self.conv_out], &self.conv_params(), on);
+        let s_stats = ctx.step(BN_STATS, &[&self.conv_out, &self.mean, &self.var], &self.nchw(), c);
+        let mut pre = vec![s_conv, s_stats];
+        if self.update_running.get() {
+            pre.push(ctx.step(
+                BN_RUNNING,
+                &[&self.mean, &self.var, ps.w(&p("bn.run_mean")), ps.w(&p("bn.run_var"))],
+                &[c, f(self.momentum)],
+                c,
+            ));
+        }
+        ctx.gpu.submit(&[], &pre);
+        self.pack_stats_host(ctx, ps);
+        let s_train = ctx.step(BN_TRAIN, &[&self.conv_out, &self.mv, &self.gb, &self.bn_out], &self.nchw(), on);
+        let s_silu = ctx.step(SILU, &[&self.bn_out, &self.act], &[on], on);
+        ctx.gpu.submit(&[], &[s_train, s_silu]);
+    }
+
+    /// Collapse the BN-eval transform into per-channel `scale|bias` packed in
+    /// `sb` (`sb[2c]=gamma/sqrt(run_var+eps)`, `sb[2c+1]=beta-run_mean*scale`),
+    /// the constant the fused `conv_act` kernel consumes. Eps matches bn_eval.
+    fn pack_sb(&self, ctx: &Ctx, ps: &ParamStore) {
+        let c = self.out_shape.c as usize;
+        let p = |s: &str| format!("{}.{s}", self.prefix);
+        let gamma = ctx.gpu.read(ps.w(&p("bn.gamma")), c);
+        let beta = ctx.gpu.read(ps.w(&p("bn.beta")), c);
+        let rmean = ctx.gpu.read(ps.w(&p("bn.run_mean")), c);
+        let rvar = ctx.gpu.read(ps.w(&p("bn.run_var")), c);
+        let mut sb = Vec::with_capacity(2 * c);
+        for i in 0..c {
+            let scale = gamma[i] / (rvar[i] + 1e-5).sqrt();
+            sb.push(scale);
+            sb.push(beta[i] - rmean[i] * scale);
+        }
+        ctx.gpu.write(&self.sb, bytemuck::cast_slice(&sb));
     }
 
     /// Interleave the freshly-computed batch mean/var into `mv` and mean|var|gamma

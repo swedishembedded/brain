@@ -52,10 +52,48 @@ unsafe fn silu_avx2(x: &[f32], out: &mut [f32]) {
     }
 }
 
+/// Apply `out = silu(out*s + b)` in place over a slice (the fused conv epilogue:
+/// BatchNorm-eval affine collapsed to `(s,b)` per channel, then SiLU). Scalar
+/// fallback; AVX2 variant below.
+pub(crate) fn affine_silu_inplace(buf: &mut [f32], s: f32, b: f32) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::fast_conv::avx2_available() {
+        unsafe { affine_silu_avx2(buf, s, b) };
+        return;
+    }
+    for v in buf.iter_mut() {
+        let z = *v * s + b;
+        *v = z / (1.0 + (-z).exp());
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn affine_silu_avx2(buf: &mut [f32], s: f32, b: f32) {
+    use std::arch::x86_64::*;
+    let n = buf.len();
+    let sv = _mm256_set1_ps(s);
+    let bv = _mm256_set1_ps(b);
+    let one = _mm256_set1_ps(1.0);
+    let neg = _mm256_set1_ps(-1.0);
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let v = _mm256_loadu_ps(buf.as_ptr().add(i));
+        let z = _mm256_fmadd_ps(v, sv, bv);
+        let e = exp256_ps(_mm256_mul_ps(z, neg));
+        _mm256_storeu_ps(buf.as_mut_ptr().add(i), _mm256_div_ps(z, _mm256_add_ps(one, e)));
+        i += 8;
+    }
+    for j in i..n {
+        let z = *buf.get_unchecked(j) * s + b;
+        *buf.get_unchecked_mut(j) = z / (1.0 + (-z).exp());
+    }
+}
+
 /// Vectorised single-precision `exp` (Cephes minimax, ~1 ULP). x86_64/AVX2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn exp256_ps(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+pub(crate) unsafe fn exp256_ps(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let hi = _mm256_set1_ps(88.3762626647949);
     let lo = _mm256_set1_ps(-88.3762626647949);

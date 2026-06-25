@@ -70,6 +70,7 @@ pub struct CpuBackend {
 #[derive(Default)]
 struct FastIdx {
     conv2d: Option<usize>,
+    conv_act: Option<usize>,
     silu: Option<usize>,
     bn_eval: Option<usize>,
     concat2: Option<usize>,
@@ -103,6 +104,7 @@ impl CpuBackend {
             let find = |k: &str| names.iter().position(|n| n == k);
             FastIdx {
                 conv2d: find("conv2d"),
+                conv_act: find("conv_act"),
                 silu: find("silu"),
                 bn_eval: find("bn_eval"),
                 concat2: find("concat2"),
@@ -231,6 +233,18 @@ impl CpuBackend {
                 let w = std::slice::from_raw_parts(bufs[1] as *const f32, p.w_len());
                 let y = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, p.y_len());
                 crate::fast_conv::conv2d(&p, x, w, y);
+            }
+            return;
+        }
+        if Some(kind) == f.conv_act && bufs.len() >= 4 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 10);
+                let p = crate::fast_conv::ConvParams::from_u32(pu);
+                let x = std::slice::from_raw_parts(bufs[0] as *const f32, p.x_len());
+                let w = std::slice::from_raw_parts(bufs[1] as *const f32, p.w_len());
+                let sb = std::slice::from_raw_parts(bufs[2] as *const f32, 2 * p.cout);
+                let y = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, p.y_len());
+                crate::fast_conv::conv2d_act(&p, x, w, sb, y);
             }
             return;
         }
