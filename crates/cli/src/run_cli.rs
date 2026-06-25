@@ -111,8 +111,10 @@ pub fn run_serve(args: &[String]) {
         if line.trim().is_empty() {
             continue;
         }
-        for ev in ctrl.feed_line(&line) {
-            if writeln!(out, "{}", events::encode_line(&ev)).is_err() {
+        for env in ctrl.feed_line(&line) {
+            // Encode with the envelope so a `req_id` (if the request carried one)
+            // is echoed onto every emitted line for client-side demuxing.
+            if writeln!(out, "{}", events::encode_envelope(&env)).is_err() {
                 return; // stdout closed
             }
             let _ = out.flush();

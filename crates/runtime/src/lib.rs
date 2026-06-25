@@ -30,7 +30,7 @@
 //!   * **LCA-correct entry/exit** — `Chatting::on_exit` frees the pump exactly
 //!     once, guaranteed by the engine's exit-chain on any outbound transition.
 
-use events::Event;
+use events::{Envelope, Event};
 use hfsm::{Disp, Hsm, Machine};
 
 pub mod pump;
@@ -321,7 +321,7 @@ struct Brain {
     cfg: GenConfig,
     pump: Option<StreamPump>,
     seq: u32,
-    out: Vec<Event>,
+    out: Vec<Envelope>,
     /// Prompt stashed by the controller before entering `Chatting` (entry actions
     /// see no event).
     pending_prompt: Option<String>,
@@ -331,11 +331,18 @@ struct Brain {
     pending_tick: bool,
     /// Set when the current operational substate has finished and wants `Idle`.
     want_idle: bool,
+    /// Correlation id of the request being handled this turn. Echoed onto every
+    /// event emitted while it is `Some`. Dispatch is synchronous run-to-completion,
+    /// so this is well-defined for the whole turn (all streaming chunks + the
+    /// terminal `done`, or the single `object_detected`).
+    active_req_id: Option<String>,
 }
 
 impl Brain {
+    /// Emit one event, stamped with the active request's `req_id` (if any).
     fn emit(&mut self, ev: Event) {
-        self.out.push(ev);
+        let req_id = self.active_req_id.clone();
+        self.out.push(Envelope { req_id, event: ev });
     }
 }
 
@@ -500,6 +507,7 @@ impl Controller {
             pending_frame: None,
             pending_tick: false,
             want_idle: false,
+            active_req_id: None,
         };
         let mut hsm = Hsm::new(brain, St::Idle);
         // Enter the initial Idle chain (Root→Operational→Idle).
@@ -507,22 +515,34 @@ impl Controller {
         Controller { hsm }
     }
 
-    /// Feed one JSONL protocol line; return every event emitted during that turn.
+    /// Feed one JSONL protocol line; return every event emitted during that turn,
+    /// each wrapped in an [`Envelope`] carrying the request's `req_id` (if the line
+    /// supplied one). Lines without a `req_id` yield envelopes with `req_id: None`,
+    /// i.e. identical behavior to before this field existed.
     ///
-    /// Decodes the line, posts it (and any reminder follow-ups) to the HSM, runs
-    /// to completion, and drains the emit sink.
-    pub fn feed_line(&mut self, line: &str) -> Vec<Event> {
-        match events::decode_line(line) {
-            Ok(ev) => self.feed_event(ev),
+    /// Decodes the envelope, sets the active `req_id`, posts the event (and any
+    /// reminder follow-ups) to the HSM, runs to completion, and drains the sink.
+    /// A decode error surfaces an `error` event (no `req_id`) without faulting.
+    pub fn feed_line(&mut self, line: &str) -> Vec<Envelope> {
+        match events::decode_envelope(line) {
+            Ok(env) => self.feed_event_with_id(env.req_id, env.event),
             Err(e) => {
-                // Surface a protocol error without faulting the machine.
-                vec![Event::Error { message: format!("decode: {e}") }]
+                // Surface a protocol error without faulting the machine. The line
+                // failed to parse, so we have no req_id to echo.
+                vec![Envelope::bare(Event::Error { message: format!("decode: {e}") })]
             }
         }
     }
 
-    /// Post an already-decoded [`Event`] and run to completion.
-    pub fn feed_event(&mut self, ev: Event) -> Vec<Event> {
+    /// Post an already-decoded [`Event`] (no correlation id) and run to completion.
+    pub fn feed_event(&mut self, ev: Event) -> Vec<Envelope> {
+        self.feed_event_with_id(None, ev)
+    }
+
+    /// Post an already-decoded [`Event`] tagged with `req_id` and run to
+    /// completion. Every emitted event for this turn carries `req_id`.
+    pub fn feed_event_with_id(&mut self, req_id: Option<String>, ev: Event) -> Vec<Envelope> {
+        self.hsm.machine_mut().active_req_id = req_id;
         // Stash payloads the entry actions need (they see no event).
         match &ev {
             Event::UserText { text } => {
@@ -535,7 +555,11 @@ impl Controller {
         }
         self.hsm.post(Ev::External(ev));
         self.pump_until_settled();
-        std::mem::take(&mut self.hsm.machine_mut().out)
+        let out = std::mem::take(&mut self.hsm.machine_mut().out);
+        // The turn is over; clear the active id so any later untagged emit can't
+        // accidentally inherit it.
+        self.hsm.machine_mut().active_req_id = None;
+        out
     }
 
     /// Bridge the machine's self-post flags (`pending_tick`, `want_idle`) into the
@@ -572,6 +596,9 @@ mod tests {
     fn empty_decode_error_is_surfaced() {
         let mut ctrl = Controller::new(Registry::new());
         let out = ctrl.feed_line("garbage");
-        assert!(matches!(out.as_slice(), [Event::Error { .. }]));
+        assert!(matches!(
+            out.as_slice(),
+            [Envelope { req_id: None, event: Event::Error { .. } }]
+        ));
     }
 }

@@ -38,7 +38,8 @@ fn real_tiny_yolo_emits_object_detected() {
         data: Some(base64::encode(&px)),
         path: None,
     };
-    let out = ctrl.feed_line(&events::encode_line(&frame));
+    let env_out = ctrl.feed_line(&events::encode_line(&frame));
+    let out: Vec<Event> = env_out.iter().map(|e| e.event.clone()).collect();
 
     let detected: Vec<&Event> =
         out.iter().filter(|e| matches!(e, Event::ObjectDetected { .. })).collect();

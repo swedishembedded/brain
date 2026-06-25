@@ -49,9 +49,68 @@ pub enum Event {
     Log { message: String },
 }
 
+/// A protocol line: one [`Event`] plus an OPTIONAL request-correlation id.
+///
+/// A client may stamp a request with a `req_id`; the runtime echoes that same
+/// `req_id` on EVERY event emitted while handling that request, so multiple
+/// in-flight requests over one stdio stream can be demultiplexed. Lines without
+/// a `req_id` behave exactly as before (`req_id == None`), keeping the wire
+/// format fully back-compatible.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Envelope {
+    /// Optional request-correlation id, serialized as a top-level `"req_id"`
+    /// field only when `Some`.
+    pub req_id: Option<String>,
+    /// The wrapped protocol event.
+    pub event: Event,
+}
+
+impl Envelope {
+    /// An envelope with no correlation id (the back-compat default).
+    pub fn bare(event: Event) -> Envelope {
+        Envelope { req_id: None, event }
+    }
+
+    /// An envelope tagged with the given `req_id`.
+    pub fn with_id(req_id: Option<String>, event: Event) -> Envelope {
+        Envelope { req_id, event }
+    }
+}
+
+/// Encode one [`Envelope`] as a single JSONL line. The event's own fields are
+/// emitted exactly as [`encode_line`] would; a top-level `"req_id"` is added
+/// only when `req_id` is `Some`.
+pub fn encode_envelope(env: &Envelope) -> String {
+    let mut v = event_to_value(&env.event);
+    if let Some(id) = &env.req_id {
+        // `v` is always a JSON object (every event encodes to one).
+        if let Value::Object(map) = &mut v {
+            map.insert("req_id".to_string(), json!(id));
+        }
+    }
+    v.to_string()
+}
+
+/// Decode one JSONL line into an [`Envelope`]: the inner [`Event`] plus an
+/// optional top-level `req_id` (a non-string or absent `req_id` ⇒ `None`).
+/// Returns `Err` on malformed input or an unknown `"event"` tag.
+pub fn decode_envelope(line: &str) -> Result<Envelope, String> {
+    let v: Value = serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
+    let req_id = v["req_id"].as_str().map(|s| s.to_string());
+    let event = decode_event_value(&v)?;
+    Ok(Envelope { req_id, event })
+}
+
 /// Encode one event as a single JSONL line (no trailing newline).
+///
+/// Back-compat shim over [`encode_envelope`] with no `req_id`.
 pub fn encode_line(ev: &Event) -> String {
-    let v: Value = match ev {
+    encode_envelope(&Envelope::bare(ev.clone()))
+}
+
+/// Serialize one [`Event`] to its `serde_json::Value` (always a JSON object).
+fn event_to_value(ev: &Event) -> Value {
+    match ev {
         Event::UserText { text } => json!({ "event": "user_text", "text": text }),
         Event::BrainTextChunk { text, seq, done } => {
             json!({ "event": "brain_text_chunk", "text": text, "seq": seq, "done": done })
@@ -68,14 +127,19 @@ pub fn encode_line(ev: &Event) -> String {
         Event::Ready => json!({ "event": "ready" }),
         Event::Error { message } => json!({ "event": "error", "message": message }),
         Event::Log { message } => json!({ "event": "log", "message": message }),
-    };
-    v.to_string()
+    }
 }
 
-/// Decode one JSONL line into an [`Event`]. Returns `Err` with a human-readable
-/// message on malformed input or an unknown `"event"` tag (never panics).
+/// Decode one JSONL line into an [`Event`], ignoring any `req_id`. Returns `Err`
+/// with a human-readable message on malformed input or an unknown `"event"` tag
+/// (never panics).
 pub fn decode_line(line: &str) -> Result<Event, String> {
     let v: Value = serde_json::from_str(line.trim()).map_err(|e| e.to_string())?;
+    decode_event_value(&v)
+}
+
+/// Decode the inner [`Event`] from an already-parsed protocol object.
+fn decode_event_value(v: &Value) -> Result<Event, String> {
     let tag = v["event"].as_str().ok_or_else(|| "missing \"event\" tag".to_string())?;
     let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
     let u = |k: &str| v[k].as_u64().unwrap_or_default() as u32;
@@ -396,6 +460,51 @@ mod tests {
         assert!(decode_line(r#"{"event":"nope"}"#).is_err());
         assert!(decode_line(r#"{"no_event":1}"#).is_err());
         assert!(decode_line("not json at all").is_err());
+        // unknown tag still errors cleanly through the envelope path too.
+        assert!(decode_envelope(r#"{"req_id":"x","event":"nope"}"#).is_err());
+    }
+
+    #[test]
+    fn envelope_roundtrip_with_and_without_req_id() {
+        for ev in all_variants() {
+            // No req_id: round-trips and matches the bare encode_line bytes.
+            let bare = Envelope::bare(ev.clone());
+            let line = encode_envelope(&bare);
+            assert!(!line.contains("req_id"), "bare envelope must omit req_id: {line}");
+            assert_eq!(line, encode_line(&ev), "bare envelope must match encode_line");
+            assert_eq!(decode_envelope(&line).unwrap(), bare);
+
+            // With req_id: round-trips and the inner event is unchanged.
+            let tagged = Envelope::with_id(Some("abc".into()), ev.clone());
+            let tline = encode_envelope(&tagged);
+            let back = decode_envelope(&tline).unwrap();
+            assert_eq!(back, tagged, "tagged roundtrip mismatch");
+            assert_eq!(back.req_id.as_deref(), Some("abc"));
+            assert_eq!(back.event, ev);
+        }
+    }
+
+    #[test]
+    fn decode_envelope_reads_optional_req_id() {
+        let with = decode_envelope(r#"{"req_id":"r1","event":"user_text","text":"hi"}"#).unwrap();
+        assert_eq!(with.req_id.as_deref(), Some("r1"));
+        assert_eq!(with.event, Event::UserText { text: "hi".into() });
+
+        let without = decode_envelope(r#"{"event":"user_text","text":"hi"}"#).unwrap();
+        assert_eq!(without.req_id, None);
+        assert_eq!(without.event, Event::UserText { text: "hi".into() });
+    }
+
+    #[test]
+    fn golden_envelope_bytes_with_req_id() {
+        let env = Envelope::with_id(
+            Some("r1".into()),
+            Event::BrainTextChunk { text: "a".into(), seq: 0, done: true },
+        );
+        assert_eq!(
+            encode_envelope(&env),
+            r#"{"done":true,"event":"brain_text_chunk","req_id":"r1","seq":0,"text":"a"}"#
+        );
     }
 
     #[test]
