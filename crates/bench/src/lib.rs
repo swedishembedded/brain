@@ -44,6 +44,7 @@ pub mod mad_selective_copy;
 pub mod metrics;
 pub mod mod_add;
 pub mod model;
+pub mod moe_decoder;
 pub mod mqar;
 pub mod dyck;
 pub mod parity;
@@ -52,6 +53,7 @@ pub mod toolcall;
 
 pub use metrics::Metrics;
 pub use model::{DecoderLm, GptDecoder, Scorer, TrainConfig};
+pub use moe_decoder::MoeDecoder;
 
 pub use arch::{arch_registry, get_arch, Arch};
 pub use axes::{axes, axis_of};

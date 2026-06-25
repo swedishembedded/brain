@@ -59,7 +59,7 @@ BENCHMARK SUITE (architecture evaluation)
   brain bench eval --arch <name> [--seed S --out F --smoke]
                                            # run the WHOLE battery against one architecture,
                                            # aggregate per capability axis, write
-                                           # results/<arch>-<seed>.json  (archs: gpt, gpt-small, gpt-wide)
+                                           # results/<arch>-<seed>.json  (archs: gpt, gpt-small, gpt-wide, moe)
                                            # + prints a 'top tuning recommendations' footer (advisor)
   brain bench scale --arch <name> [--seed S --out F]
                                            # PREDICTIVE per-capability scaling: sweep model SIZE,

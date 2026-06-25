@@ -22,9 +22,11 @@
 //!     the renormalised gate). With capacity dropping disabled this is exactly
 //!     what the Python reference computes.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use model::IGNORE;
 use optim::Optim;
 use paramstore::ParamStore;
 
@@ -77,8 +79,14 @@ const PIPELINES: &[(&str, &str)] = &[
     ("silu_mul", kernels::SILU_MUL),
     ("scale_add", kernels::SCALE_ADD),
     ("add2", kernels::ADD2),
-    ("ce_grad", kernels::CE_GRAD),
-    ("ce_value", kernels::CE_VALUE),
+    // Masked cross-entropy (ignore_index = IGNORE), so masked-label datasets
+    // (e.g. the benchmark battery's answer-masking recipe) work: an IGNORE
+    // target must NOT index `logits[base + target]` (an unmasked CE would read
+    // out of bounds for the 0xFFFF_FFFF sentinel). Mirrors GPT/PID. With no
+    // masking (count == n) these are numerically identical to the unmasked CE,
+    // so the PyTorch-parity validate + gradcheck paths are unchanged.
+    ("ce_grad", kernels::CE_GRAD_MASKED),
+    ("ce_value", kernels::CE_VALUE_MASKED),
     ("matmul_dx", kernels::MATMUL_DX),
     ("matmul_dw", kernels::MATMUL_DW),
     ("rms_inv", kernels::RMS_INV),
@@ -184,6 +192,13 @@ pub struct Trainer {
     tokens: DeviceBuffer,
     targets: DeviceBuffer,
 
+    /// Count of non-IGNORE target rows in the current batch (the masked-CE mean
+    /// divisor + backward grad scale). Set by [`set_batch`](Self::set_batch).
+    count: Cell<f32>,
+    /// Dynamic uniform for the masked CE-grad step: `[n, vocab, IGNORE, count]`,
+    /// rewritten per batch (the count varies with the masking) before backward.
+    ce_grad_uni: DeviceBuffer,
+
     res: Vec<DeviceBuffer>,  // residual stream, len n_layers+1 (res[0]=emb out, res[L]=x_final)
     dres: Vec<DeviceBuffer>, // its gradient
     layers: Vec<LayerBufs>,
@@ -245,6 +260,7 @@ impl Trainer {
 
         let tokens = gpu.storage(n);
         let targets = gpu.storage(n);
+        let ce_grad_uni = gpu.uniform_dynamic(4); // [n, vocab, IGNORE, count]
 
         let st = |x: u64| gpu.storage(x);
         let mut res = Vec::new();
@@ -281,6 +297,8 @@ impl Trainer {
             opt,
             tokens,
             targets,
+            count: Cell::new(1.0),
+            ce_grad_uni,
             res,
             dres,
             layers,
@@ -330,6 +348,11 @@ impl Trainer {
     pub fn set_batch(&self, x: &[u32], y: &[u32]) {
         self.gpu.write(&self.tokens, bytemuck::cast_slice(x));
         self.gpu.write(&self.targets, bytemuck::cast_slice(y));
+        // Masked-CE divisor = number of non-IGNORE target rows (mean over scored
+        // positions, matching F.cross_entropy(ignore_index=...)). `.max(1)` guards
+        // an all-masked batch.
+        let c = y.iter().filter(|&&v| v != IGNORE).count();
+        self.count.set(c.max(1) as f32);
     }
 
     /// Run the (cached) forward pass and return mean cross-entropy. The
@@ -339,7 +362,8 @@ impl Trainer {
         let n = self.b * self.t;
         self.gpu.submit(&[], &self.fwd_steps);
         let losses = self.gpu.read(&self.ce_buf, n as usize);
-        losses.iter().sum::<f32>() / n as f32
+        // Masked CE writes 0 for IGNORE rows; mean over the non-ignored count.
+        losses.iter().sum::<f32>() / self.count.get()
     }
 
     /// Build the forward dispatch graph; caches all activations. Buffers and
@@ -389,7 +413,7 @@ impl Trainer {
         // final norm + tied lm_head
         s.push(self.gpu.step(RMSNORM, &[&self.res[c.n_layers as usize], self.w("norm.weight"), &self.xn_final], &[d, n], n));
         s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w("token_emb.weight"), &self.logits], &[n, d, c.vocab], n * c.vocab));
-        s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, c.vocab], n));
+        s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, c.vocab, IGNORE], n));
 
         s
     }
@@ -399,6 +423,10 @@ impl Trainer {
     /// [`Self::zero_grads`], matching the GPT/PID grad-accum contract that the
     /// generic trainer relies on).
     pub fn backward(&self) {
+        // Masked CE-grad: zero for IGNORE rows, normalised by the non-ignored
+        // count (rewritten per batch since the masking varies).
+        let n = self.b * self.t;
+        self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab, IGNORE, f(self.count.get())]);
         self.gpu.submit(&[], &self.bwd_steps);
     }
 
@@ -415,7 +443,9 @@ impl Trainer {
         let mut s: Vec<Step> = Vec::new();
 
         // ---- output: cross-entropy grad, lm_head, final norm ----
-        s.push(self.gpu.step(CE_GRAD, &[&self.logits, &self.targets, &self.d_logits], &[n, c.vocab], n * c.vocab));
+        // Masked CE-grad reads its `[n, vocab, IGNORE, count]` from the dynamic
+        // uniform (written per batch in `backward`), since `count` varies.
+        s.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * c.vocab));
         // lm_head dW (tied -> grad_emb) and dX -> d_xn (=d_xn_final)
         s.push(self.gpu.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, self.g("token_emb.weight")], &[n, d, c.vocab], c.vocab * d));
         s.push(self.gpu.step(MATMUL_DX, &[&self.d_logits, self.w("token_emb.weight"), &self.d_xn], &[n, d, c.vocab, 0], n * d));

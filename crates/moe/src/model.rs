@@ -11,15 +11,15 @@ use gpu_core::{DeviceBuffer, Gpu, Step};
 
 use crate::train;
 
-struct Config {
-    vocab_size: u32,
-    block_size: u32,
-    n_layers: u32,
-    d_model: u32,
-    n_heads: u32,
-    n_experts: u32,
-    top_k: u32,
-    d_ff: u32,
+pub struct Config {
+    pub vocab_size: u32,
+    pub block_size: u32,
+    pub n_layers: u32,
+    pub d_model: u32,
+    pub n_heads: u32,
+    pub n_experts: u32,
+    pub top_k: u32,
+    pub d_ff: u32,
 }
 
 impl Config {
@@ -88,7 +88,7 @@ const K_SILU: usize = 6;
 const K_SCALE_ADD: usize = 7;
 const K_ADD: usize = 8;
 
-struct Engine {
+pub struct Engine {
     gpu: Gpu,
     weights: HashMap<String, DeviceBuffer>,
     cfg: Config,
@@ -122,6 +122,24 @@ const ENGINE_PIPELINES: &[(&str, &str)] = &[
 ];
 
 impl Engine {
+    /// Load an inference [`Engine`] from a checkpoint written by the trainer
+    /// (`Trainer::save` / the generic `fit`) or the inference weight format. The
+    /// two share the `[u64 LE json_len][json header][f32 blob]` container, with a
+    /// tied `lm_head.weight`, so a `fit`-saved MoE checkpoint loads here directly.
+    pub fn load(path: &str) -> Engine {
+        Engine::new(load_weights(path))
+    }
+
+    /// Vocabulary size (logits row width) this engine was built for.
+    pub fn vocab_size(&self) -> u32 {
+        self.cfg.vocab_size
+    }
+
+    /// The model config (layout) this engine was built from.
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
     fn new(w: Weights) -> Engine {
         // Shared accelerator (wgpu or native CPU) — same plumbing as the trainer,
         // GPT, and PID models. No bespoke device init here anymore.
@@ -168,7 +186,31 @@ impl Engine {
             .unwrap_or_else(|| panic!("missing weight tensor: {name}"))
     }
 
+    /// Per-position logits for one sequence, flattened row-major as
+    /// `[len * vocab]` (`logits[t*vocab + i]` is token `i`'s score at position
+    /// `t`). This is the full forward output the [`forward`](Self::forward)
+    /// last-row convenience is sliced from; benchmark scoring needs every row.
+    pub fn logits_all(&self, tokens: &[u32]) -> Vec<f32> {
+        let t = tokens.len();
+        let vocab = self.cfg.vocab_size as usize;
+        let all = self.forward_full(tokens);
+        debug_assert_eq!(all.len(), t * vocab);
+        all
+    }
+
+    /// Logits for the **last** position only (`[vocab]`). The generate/eval path
+    /// only needs the next-token distribution; behavior is unchanged.
     fn forward(&self, tokens: &[u32]) -> Vec<f32> {
+        let vocab = self.cfg.vocab_size as usize;
+        let t = tokens.len();
+        let all = self.forward_full(tokens);
+        all[(t - 1) * vocab..].to_vec()
+    }
+
+    /// Run the forward pass and return logits for **all** positions, row-major
+    /// `[len * vocab]`. The shared core of [`forward`](Self::forward) (last row)
+    /// and [`logits_all`](Self::logits_all) (every row).
+    fn forward_full(&self, tokens: &[u32]) -> Vec<f32> {
         let c = &self.cfg;
         let t = tokens.len() as u32;
         assert!(t >= 1 && t <= c.block_size, "sequence length out of range");
@@ -298,11 +340,9 @@ impl Engine {
 
         self.gpu.submit(&[], &steps);
 
-        // Read the full logits and return the last position's row (gpu_core reads
-        // from offset 0; the slice is tiny for the toy vocab).
+        // Read the full logits buffer (gpu_core reads from offset 0).
         let vocab = c.vocab_size as usize;
-        let all = self.gpu.read(&self.logits, t as usize * vocab);
-        all[(t as usize - 1) * vocab..].to_vec()
+        self.gpu.read(&self.logits, t as usize * vocab)
     }
 }
 

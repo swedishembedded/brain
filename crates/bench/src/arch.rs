@@ -85,6 +85,25 @@ impl Arch {
     pub fn param_count(&self, vocab: u32, block_size: u32) -> u64 {
         let n_layers = self.size.n_layers.unwrap_or(2);
         let d_model = self.size.d_model.unwrap_or(64);
+        // MoE's parameter layout differs from dense GPT (per-expert FFNs + a
+        // router), so count it from the MoE config's own param list rather than
+        // GptConfig::param_list (which would undercount the experts).
+        if self.name == "moe" {
+            let n_heads = self.size.n_heads.unwrap_or(4);
+            let mcfg = moe::train::Config {
+                vocab,
+                block_size,
+                n_layers,
+                d_model,
+                n_heads,
+                n_experts: 4,
+                top_k: 2,
+                d_ff: d_model * 2,
+                aux_coef: 0.01,
+                z_coef: 1e-4,
+            };
+            return model::ModelConfig::param_list(&mcfg).iter().map(|(_, n)| *n as u64).sum();
+        }
         let cfg = GptConfig {
             vocab,
             block_size,
@@ -122,6 +141,12 @@ pub fn arch_registry() -> Vec<Arch> {
             description: "GPT, fixed wide shape (2 layers / d_model 96)",
             size: Size::fixed(2, 96, 4),
             factory: || Box::new(ScaledGpt(Size::fixed(2, 96, 4))),
+        },
+        Arch {
+            name: "moe",
+            description: "sparse Mixture-of-Experts decoder (4 experts, top-2; size per benchmark)",
+            size: Size::default(),
+            factory: || Box::new(crate::MoeDecoder),
         },
     ]
 }

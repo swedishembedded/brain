@@ -115,6 +115,7 @@ dependencies = [
  "brain-eval",
  "brain-gpt",
  "brain-model",
+ "brain-moe",
  "serde_json",
 ]
 
