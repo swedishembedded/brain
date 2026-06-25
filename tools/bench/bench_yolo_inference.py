@@ -28,7 +28,7 @@ own shell (the client sets it explicitly). The brain CPU fast paths
 (Cranelift JIT + AVX2 fast-conv/fast-ops) apply only to --brain-device cpu.
 """
 from __future__ import annotations
-import argparse, resource, statistics, sys, time
+import argparse, os, resource, statistics, sys, time
 from PIL import Image
 
 
@@ -69,7 +69,18 @@ def bench_ultralytics(image_path, pt, n, device):
 
 def bench_brain(image_path, weights, brain_bin, n, conf, device):
     sys.path.insert(0, "brain-py")
+    from brain_py import client as _client_mod
     from brain_py.client import BrainClient
+    # Surface the engine's own "adapter:" stderr line so the user can SEE which
+    # backend actually ran (native CPU-JIT vs the wgpu GPU adapter), instead of
+    # trusting the requested device. The client otherwise swallows stderr.
+    adapter: dict = {"line": None}
+    def _drain(self):
+        for raw in self._proc.stderr:
+            s = raw.decode(errors="replace") if isinstance(raw, bytes) else raw
+            if adapter["line"] is None and "adapter:" in s:
+                adapter["line"] = s.strip()
+    _client_mod.BrainClient._drain_stderr = _drain
     im = Image.open(image_path).convert("RGB")
     t0 = time.perf_counter()
     # `device` is forwarded verbatim as BRAIN_DEVICE for the engine subprocess:
@@ -88,7 +99,7 @@ def bench_brain(image_path, weights, brain_bin, n, conf, device):
     rss = _vmhwm_kb(pid)            # KB (brain engine subprocess only)
     out = sorted(((d.cls, d.conf) for d in dets), key=lambda d: -d[1])
     client.__exit__(None, None, None)
-    return load, lat, rss, out
+    return load, lat, rss, out, adapter["line"]
 
 
 def _row(name, load, lat, rss_kb, extra=""):
@@ -122,7 +133,11 @@ def main():
     def torch_dev(d):
         return "0" if str(d).lower() == "gpu" else d
     torch_device = torch_dev(a.torch_device or a.device or "cpu")
-    brain_device = a.brain_device or a.device or "cpu"
+    # brain device precedence: --brain-device > --device > the shell BRAIN_DEVICE
+    # env (so `BRAIN_DEVICE=gpu python3 bench.py` actually runs brain on wgpu) >
+    # cpu. The env is the engine's own selector, so honouring it here matches the
+    # mental model of setting BRAIN_DEVICE for the run.
+    brain_device = a.brain_device or a.device or os.environ.get("BRAIN_DEVICE") or "cpu"
 
     # Honest labels: name the backend each side actually used. brain's CPU path
     # is the native Cranelift-JIT + AVX2 fast-conv backend; otherwise wgpu/WebGPU.
@@ -134,9 +149,11 @@ def main():
     print(_row(f"Ultralytics (torch {ul_par})", ul_load, ul_lat, ul_rss))
     print(f"   dets: {ul_dets[:4]}\n")
 
-    br_load, br_lat, br_rss, br_dets = bench_brain(a.image, a.brain_weights, a.brain_bin,
-                                                   a.n_brain, a.conf, brain_device)
+    br_load, br_lat, br_rss, br_dets, br_adapter = bench_brain(
+        a.image, a.brain_weights, a.brain_bin, a.n_brain, a.conf, brain_device)
     print(_row(f"brain ({brain_backend})", br_load, br_lat, br_rss, "(engine subprocess)"))
+    # The engine's own adapter line is ground truth for which backend ran.
+    print(f"   engine adapter: {br_adapter or '(none reported)'}")
     print(f"   dets: {br_dets[:4]}\n")
 
     sx = statistics.median(br_lat) / statistics.median(ul_lat)
