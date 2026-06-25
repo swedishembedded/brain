@@ -20,6 +20,12 @@ them, keeping the gradient-check discipline.
    **federated/sharded** expert training (`crates/federated`).
 3. **PID event/effect Transformer** (`crates/pid`) — LayerNorm, learned
    positions, biased linears; backs the WebGPU demo (`crates/web`).
+4. **YOLOv8-style detector** (`crates/yolo`) — from-scratch anchor-free object
+   detector: CSP backbone → PAN-FPN neck → decoupled DFL head, with the
+   assigner + BCE/CIoU/DFL detection loss and NMS box decode. Trains on the
+   synthetic detection dataset and runs `detect` (boxes in pixel coords); CPU
+   backend only. Byte-compatible with canonical `yolov8n` for weight import.
+   Train/eval/detect/fine-tune via `brain yolo …`.
 
 ## Workspace layout (`crates/`)
 
@@ -33,9 +39,13 @@ them, keeping the gradient-check discipline.
 | `data` | char + GPT-2 **BPE** tokenizers, dataset generators, loaders (masking/alignment), normalization |
 | `gpt` | GPT model + training loop + sampling |
 | `moe` / `pid` | the MoE and PID models (fwd/bwd) |
+| `yolo` | YOLOv8-style detector: backbone/neck/head, DFL decode, assigner + detection loss, NMS, `detect` inference, canonical `yolov8n` weight import |
 | `federated` | vertical expert split/assemble, hash-verified manifests |
-| `eval` | perplexity + task exact-match (same-input model comparison) |
+| `eval` | perplexity + task exact-match (LM) and detection metrics (mAP@0.5/precision/recall) |
 | `gradcheck` | finite-difference backprop correctness gate |
+| `events` | JSONL event protocol (`user_text`/`camera_frame`/`brain_text_chunk`/`object_detected`) + base64/PPM frame decode |
+| `hfsm` | generic hierarchical state-machine engine (RTC dispatch, LCA entry/exit) |
+| `runtime` | event-driven HSM controller wiring loaded models to the event protocol (`InferModel`/`DetectModel` seams) |
 | `cli` | the `brain` binary (aggregates everything) |
 | `web` | wasm32/WebGPU PID demo; optional `vulkan` (coopmat) is non-default |
 
@@ -50,9 +60,14 @@ them, keeping the gradient-check discipline.
 | Engine internals | `docs/engine-README.md`, `engine-TRAINING.md`, `engine-README_VULKAN.md`, `engine-README_WEB.md` |
 | Add/adjust a WGSL kernel | `crates/kernels/wgsl/*.wgsl` (regenerate the const list if you add files) |
 | GPT model / training / sampling | `crates/gpt/src/{model,train,sample,init}.rs` |
+| YOLO model / loss / inference | `crates/yolo/src/{model,head,blocks,loss,assign,infer,nms,config}.rs` |
+| YOLO train / eval / detect / fine-tune (CLI) | `crates/cli/src/yolo_cli.rs` |
+| Detection metrics (mAP/precision/recall) | `crates/eval/src/detection.rs` |
+| Synthetic detection dataset (RGB shapes + GT boxes) | `crates/data/src/gen_detect.rs` |
+| Event/HFSM controller (`brain run`): `camera_frame`→`object_detected`, `user_text`→`brain_text_chunk` | `crates/runtime/src/{lib,pump}.rs`, `crates/cli/src/run_cli.rs`, `crates/events/src/lib.rs` |
 | Datasets & tokenizers | `crates/data/src/{prepare,gen_*,tokenizer,bpe,loader,binio,rng}.rs` |
 | Federated shard/assemble | `crates/federated/src/{shard,sha256}.rs` |
-| CLI subcommands | `crates/cli/src/{main,gpt_cli,data_cli,federated_cli,pid_cli}.rs` |
+| CLI subcommands | `crates/cli/src/{main,gpt_cli,yolo_cli,data_cli,federated_cli,pid_cli,run_cli}.rs` |
 | Porting source-of-truth (read-only) | `scratchpad/reference/{nanogpt,sharded_moe_example,pytorch}/` |
 
 ## Essential commands
@@ -69,12 +84,23 @@ make gradcheck                       # backprop correctness gate
 make data/<name>                     # calculator|reverser|wordcalc|timeseries|shakespeare_char|gpt
 make train/gpt/<name>                # train GPT -> out/gpt-<name>.weights
 make eval/gpt/<name>                 # perplexity + exact-match
+make data/detect                     # synthetic object-detection dataset -> data/detect
+make train/yolo                      # train tiny YOLO -> out/yolo.weights
+make eval/yolo                       # mAP@0.5 + precision/recall
+make detect/yolo                     # run detection on a sample image (JSON boxes)
 make bench                           # GPT baseline on shared char datasets
 make federated-demo                  # MoE train -> split -> verify -> merge
 make web/dev                         # WebGPU demo (delegates to crates/web)
 
 # direct binary
-./target/release/brain {data|gpt|federated|gradcheck|pid|train|eval|generate} …
+./target/release/brain {data|gpt|yolo|federated|gradcheck|pid|train|eval|generate} …
+
+# event/stdio controller: an HFSM (crates/runtime) reads JSONL events on stdin
+# and emits JSONL on stdout — user_text -> brain_text_chunk (streamed, one token
+# per tick) and camera_frame -> object_detected. --gpt/--yolo load real models
+# (or BRAIN_GPT/BRAIN_YOLO); with neither, fake echo/detector models keep the
+# loop usable. printf '{"event":"camera_frame","format":"rgb8","w":128,"h":128,
+# "data":"…"}\n' | brain run --yolo out/yolo.weights
 
 # CPU-only (no GPU): add --device cpu to any command, or set BRAIN_DEVICE=cpu.
 # Same WGSL kernels, JIT-compiled to native code across all cores.

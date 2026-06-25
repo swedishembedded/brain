@@ -33,11 +33,21 @@ BLOCK  ?= 64
 BATCH  ?= 32
 LR     ?= 3e-3
 
+# YOLO detector (CPU-friendly tiny config; geometry matches the synthetic
+# `detect` dataset, so the dataset's 128px images upload without letterboxing).
+YOLO_N     ?= 64
+YOLO_STEPS ?= 150
+YOLO_BATCH ?= 4
+YOLO_LR    ?= 3e-3
+YOLO_CONF  ?= 0.1
+YOLO_IOU   ?= 0.45
+
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
 .PHONY: help build release test gradcheck bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo \
         data/calculator data/reverser data/wordcalc data/timeseries \
-        data/shakespeare_char data/gpt web/dev web/build
+        data/shakespeare_char data/gpt data/detect \
+        train/yolo eval/yolo detect/yolo web/dev web/build
 
 help:
 	@echo "brain targets:"
@@ -48,6 +58,10 @@ help:
 	@echo "                               timeseries|shakespeare_char|gpt) into $(DATA)/<name>"
 	@echo "  make train/gpt/<name>        train GPT on a dataset -> $(OUT)/gpt-<name>.weights"
 	@echo "  make eval/gpt/<name>         perplexity + exact-match for a trained GPT"
+	@echo "  make data/detect             synthetic object-detection dataset -> $(DATA)/detect"
+	@echo "  make train/yolo              train tiny YOLO on it -> $(OUT)/yolo.weights"
+	@echo "  make eval/yolo               mAP@0.5 + precision/recall for the trained YOLO"
+	@echo "  make detect/yolo             run detection on a sample image (JSON boxes)"
 	@echo "  make bench                   run the architecture-evaluation benchmark suite (all)"
 	@echo "  make bench/<name>            run one benchmark (e.g. bench/mqar)"
 	@echo "  make bench/scaling           scaling-law sweep: fit L(N)=E+A*N^-alpha across sizes"
@@ -105,6 +119,28 @@ train/gpt/%: release
 # ---- eval (pattern: eval/gpt/<dataset>) -----------------------------------
 eval/gpt/%: release
 	$(BRAIN) gpt eval --weights $(OUT)/gpt-$*.weights --data $(DATA)/$*
+
+# ---- YOLO detector (synthetic detection dataset) --------------------------
+# `make data/detect` generates a synthetic object-detection dataset (RGB shapes
+# + exact GT boxes) at the tiny YOLO's native 128px geometry. `train/yolo`
+# trains the tiny detector on it; `eval/yolo` reports mAP@0.5/precision/recall;
+# `detect/yolo` runs inference on a sample image (dataset image 0) and prints the
+# boxes as JSON lines. All CPU-friendly (the YOLO model runs on the CPU backend).
+data/detect: release
+	$(BRAIN) data gen detect --out $(DATA)/detect --n $(YOLO_N) --seed $(SEED)
+
+train/yolo: release
+	@mkdir -p $(OUT)
+	$(BRAIN) yolo train $(DATA)/detect --out $(OUT)/yolo.weights \
+		--steps $(YOLO_STEPS) --batch $(YOLO_BATCH) --lr $(YOLO_LR) --seed $(SEED)
+
+eval/yolo: release
+	$(BRAIN) yolo eval --weights $(OUT)/yolo.weights --data $(DATA)/detect \
+		--conf $(YOLO_CONF) --iou $(YOLO_IOU)
+
+detect/yolo: release
+	$(BRAIN) yolo detect --weights $(OUT)/yolo.weights --image $(DATA)/detect \
+		--conf $(YOLO_CONF) --iou $(YOLO_IOU)
 
 # ---- architecture-evaluation benchmark suite ------------------------------
 # `make bench` runs every registered benchmark (crates/bench) and prints one
