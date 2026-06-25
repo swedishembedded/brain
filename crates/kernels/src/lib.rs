@@ -64,10 +64,30 @@ pub const ATTN_SOFTMAX: &str = include_str!("../wgsl/attn_softmax.wgsl");
 pub const ATTN_SOFTMAX_BIDIR: &str = include_str!("../wgsl/attn_softmax_bidir.wgsl");
 /// `wgsl/attn_softmax_cross.wgsl`
 pub const ATTN_SOFTMAX_CROSS: &str = include_str!("../wgsl/attn_softmax_cross.wgsl");
+/// `wgsl/bce_logits.wgsl`
+pub const BCE_LOGITS: &str = include_str!("../wgsl/bce_logits.wgsl");
+/// `wgsl/bce_logits_grad.wgsl`
+pub const BCE_LOGITS_GRAD: &str = include_str!("../wgsl/bce_logits_grad.wgsl");
 /// `wgsl/bias_add.wgsl`
 pub const BIAS_ADD: &str = include_str!("../wgsl/bias_add.wgsl");
 /// `wgsl/bias_grad.wgsl`
 pub const BIAS_GRAD: &str = include_str!("../wgsl/bias_grad.wgsl");
+/// `wgsl/bn_dbeta.wgsl`
+pub const BN_DBETA: &str = include_str!("../wgsl/bn_dbeta.wgsl");
+/// `wgsl/bn_dgamma.wgsl`
+pub const BN_DGAMMA: &str = include_str!("../wgsl/bn_dgamma.wgsl");
+/// `wgsl/bn_dstats.wgsl`
+pub const BN_DSTATS: &str = include_str!("../wgsl/bn_dstats.wgsl");
+/// `wgsl/bn_dx.wgsl`
+pub const BN_DX: &str = include_str!("../wgsl/bn_dx.wgsl");
+/// `wgsl/bn_eval.wgsl`
+pub const BN_EVAL: &str = include_str!("../wgsl/bn_eval.wgsl");
+/// `wgsl/bn_running.wgsl`
+pub const BN_RUNNING: &str = include_str!("../wgsl/bn_running.wgsl");
+/// `wgsl/bn_stats.wgsl`
+pub const BN_STATS: &str = include_str!("../wgsl/bn_stats.wgsl");
+/// `wgsl/bn_train.wgsl`
+pub const BN_TRAIN: &str = include_str!("../wgsl/bn_train.wgsl");
 /// `wgsl/ce_grad_masked.wgsl`
 pub const CE_GRAD_MASKED: &str = include_str!("../wgsl/ce_grad_masked.wgsl");
 /// `wgsl/ce_grad.wgsl`
@@ -76,8 +96,30 @@ pub const CE_GRAD: &str = include_str!("../wgsl/ce_grad.wgsl");
 pub const CE_VALUE_MASKED: &str = include_str!("../wgsl/ce_value_masked.wgsl");
 /// `wgsl/ce_value.wgsl`
 pub const CE_VALUE: &str = include_str!("../wgsl/ce_value.wgsl");
+/// `wgsl/ciou.wgsl`
+pub const CIOU: &str = include_str!("../wgsl/ciou.wgsl");
+/// `wgsl/ciou_grad.wgsl`
+pub const CIOU_GRAD: &str = include_str!("../wgsl/ciou_grad.wgsl");
 /// `wgsl/clip_coef.wgsl`
 pub const CLIP_COEF: &str = include_str!("../wgsl/clip_coef.wgsl");
+/// `wgsl/concat2.wgsl`
+pub const CONCAT2: &str = include_str!("../wgsl/concat2.wgsl");
+/// `wgsl/concat_split.wgsl`
+pub const CONCAT_SPLIT: &str = include_str!("../wgsl/concat_split.wgsl");
+/// `wgsl/conv2d.wgsl`
+pub const CONV2D: &str = include_str!("../wgsl/conv2d.wgsl");
+/// `wgsl/conv2d_dw.wgsl`
+pub const CONV2D_DW: &str = include_str!("../wgsl/conv2d_dw.wgsl");
+/// `wgsl/conv2d_dx.wgsl`
+pub const CONV2D_DX: &str = include_str!("../wgsl/conv2d_dx.wgsl");
+/// `wgsl/dfl_decode.wgsl`
+pub const DFL_DECODE: &str = include_str!("../wgsl/dfl_decode.wgsl");
+/// `wgsl/dfl_grad.wgsl`
+pub const DFL_GRAD: &str = include_str!("../wgsl/dfl_grad.wgsl");
+/// `wgsl/dfl_loss.wgsl`
+pub const DFL_LOSS: &str = include_str!("../wgsl/dfl_loss.wgsl");
+/// `wgsl/dfl_loss_grad.wgsl`
+pub const DFL_LOSS_GRAD: &str = include_str!("../wgsl/dfl_loss_grad.wgsl");
 /// `wgsl/emb_bwd.wgsl`
 pub const EMB_BWD: &str = include_str!("../wgsl/emb_bwd.wgsl");
 /// `wgsl/embed.wgsl`
@@ -110,6 +152,10 @@ pub const MATMUL_DW: &str = include_str!("../wgsl/matmul_dw.wgsl");
 pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
 /// `wgsl/matmul.wgsl`
 pub const MATMUL: &str = include_str!("../wgsl/matmul.wgsl");
+/// `wgsl/maxpool5.wgsl`
+pub const MAXPOOL5: &str = include_str!("../wgsl/maxpool5.wgsl");
+/// `wgsl/maxpool5_dx.wgsl`
+pub const MAXPOOL5_DX: &str = include_str!("../wgsl/maxpool5_dx.wgsl");
 /// `wgsl/mse_grad.wgsl`
 pub const MSE_GRAD: &str = include_str!("../wgsl/mse_grad.wgsl");
 /// `wgsl/mse_value.wgsl`
@@ -144,12 +190,20 @@ pub const SCALE_ADD_DEXP: &str = include_str!("../wgsl/scale_add_dexp.wgsl");
 pub const SCALE_ADD_DGATE: &str = include_str!("../wgsl/scale_add_dgate.wgsl");
 /// `wgsl/scale_add.wgsl`
 pub const SCALE_ADD: &str = include_str!("../wgsl/scale_add.wgsl");
+/// `wgsl/silu.wgsl`
+pub const SILU: &str = include_str!("../wgsl/silu.wgsl");
+/// `wgsl/silu_bwd.wgsl`
+pub const SILU_BWD: &str = include_str!("../wgsl/silu_bwd.wgsl");
 /// `wgsl/silu_bwd_da.wgsl`
 pub const SILU_BWD_DA: &str = include_str!("../wgsl/silu_bwd_da.wgsl");
 /// `wgsl/silu_bwd_db.wgsl`
 pub const SILU_BWD_DB: &str = include_str!("../wgsl/silu_bwd_db.wgsl");
 /// `wgsl/silu_mul.wgsl`
 pub const SILU_MUL: &str = include_str!("../wgsl/silu_mul.wgsl");
+/// `wgsl/upsample2.wgsl`
+pub const UPSAMPLE2: &str = include_str!("../wgsl/upsample2.wgsl");
+/// `wgsl/upsample2_dx.wgsl`
+pub const UPSAMPLE2_DX: &str = include_str!("../wgsl/upsample2_dx.wgsl");
 
 /// All kernels as `(name, source)` pairs, sorted by name.
 pub const ALL: &[(&str, &str)] = &[
@@ -180,13 +234,34 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_softmax", ATTN_SOFTMAX),
     ("attn_softmax_bidir", ATTN_SOFTMAX_BIDIR),
     ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
+    ("bce_logits", BCE_LOGITS),
+    ("bce_logits_grad", BCE_LOGITS_GRAD),
     ("bias_add", BIAS_ADD),
     ("bias_grad", BIAS_GRAD),
+    ("bn_dbeta", BN_DBETA),
+    ("bn_dgamma", BN_DGAMMA),
+    ("bn_dstats", BN_DSTATS),
+    ("bn_dx", BN_DX),
+    ("bn_eval", BN_EVAL),
+    ("bn_running", BN_RUNNING),
+    ("bn_stats", BN_STATS),
+    ("bn_train", BN_TRAIN),
     ("ce_grad_masked", CE_GRAD_MASKED),
     ("ce_grad", CE_GRAD),
     ("ce_value_masked", CE_VALUE_MASKED),
     ("ce_value", CE_VALUE),
+    ("ciou", CIOU),
+    ("ciou_grad", CIOU_GRAD),
     ("clip_coef", CLIP_COEF),
+    ("concat2", CONCAT2),
+    ("concat_split", CONCAT_SPLIT),
+    ("conv2d", CONV2D),
+    ("conv2d_dw", CONV2D_DW),
+    ("conv2d_dx", CONV2D_DX),
+    ("dfl_decode", DFL_DECODE),
+    ("dfl_grad", DFL_GRAD),
+    ("dfl_loss", DFL_LOSS),
+    ("dfl_loss_grad", DFL_LOSS_GRAD),
     ("emb_bwd", EMB_BWD),
     ("embed", EMBED),
     ("expert_counts", EXPERT_COUNTS),
@@ -203,6 +278,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_dw", MATMUL_DW),
     ("matmul_dx", MATMUL_DX),
     ("matmul", MATMUL),
+    ("maxpool5", MAXPOOL5),
+    ("maxpool5_dx", MAXPOOL5_DX),
     ("mse_grad", MSE_GRAD),
     ("mse_value", MSE_VALUE),
     ("pos_add", POS_ADD),
@@ -220,9 +297,13 @@ pub const ALL: &[(&str, &str)] = &[
     ("scale_add_dexp", SCALE_ADD_DEXP),
     ("scale_add_dgate", SCALE_ADD_DGATE),
     ("scale_add", SCALE_ADD),
+    ("silu", SILU),
+    ("silu_bwd", SILU_BWD),
     ("silu_bwd_da", SILU_BWD_DA),
     ("silu_bwd_db", SILU_BWD_DB),
     ("silu_mul", SILU_MUL),
+    ("upsample2", UPSAMPLE2),
+    ("upsample2_dx", UPSAMPLE2_DX),
 ];
 
 /// Look up a kernel's WGSL source by file stem (e.g. `"matmul"`).
@@ -242,7 +323,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_kernels_present_and_nonempty() {
-        assert_eq!(ALL.len(), 70);
+        assert_eq!(ALL.len(), 97);
         for (n, s) in ALL { assert!(!s.trim().is_empty(), "empty kernel {n}"); }
     }
     #[test]
