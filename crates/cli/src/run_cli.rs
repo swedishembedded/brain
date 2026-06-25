@@ -14,6 +14,9 @@
 //!   * `--yolo <path>` (or env `BRAIN_YOLO`) — load a YOLO checkpoint as the
 //!     object detector. With none, a `FakeDetectModel` returns a fixed box so the
 //!     loop runs without a trained detector.
+//!   * `--conf <f32>` (or env `BRAIN_CONF`) — detection confidence threshold for
+//!     the YOLO detector (default 0.25). Lower it so a lightly-trained tiny model's
+//!     low-confidence boxes still surface. No effect on the fake detector.
 //!   * `--max-new N`, `--temp X`, `--top-k K`, `--seed S` — generation config.
 
 use std::io::{BufRead, Write};
@@ -27,6 +30,11 @@ pub fn run_serve(args: &[String]) {
     let mut gpt_path = std::env::var("BRAIN_GPT").ok();
     let mut yolo_path = std::env::var("BRAIN_YOLO").ok();
     let mut cfg = GenConfig { max_new: 256, temperature: 0.0, top_k: 0, eos: None, seed: 0 };
+    // Optional detection confidence threshold for the YOLO detector. A tiny model
+    // trained for only a few hundred steps emits low-confidence boxes that the
+    // default 0.25 filter would drop, so the demo can lower it (also `BRAIN_CONF`).
+    let mut conf: Option<f32> =
+        std::env::var("BRAIN_CONF").ok().and_then(|s| s.parse().ok());
 
     let mut i = 0;
     while i < args.len() {
@@ -56,6 +64,10 @@ pub fn run_serve(args: &[String]) {
                 i += 1;
                 cfg.seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(cfg.seed);
             }
+            "--conf" => {
+                i += 1;
+                conf = args.get(i).and_then(|s| s.parse().ok()).or(conf);
+            }
             other => eprintln!("brain run: ignoring unknown flag {other:?}"),
         }
         i += 1;
@@ -81,7 +93,13 @@ pub fn run_serve(args: &[String]) {
     let detect: Box<dyn DetectModel> = match &yolo_path {
         Some(path) => {
             eprintln!("brain run: loading YOLO checkpoint {path}");
-            Box::new(YoloDetect::load(path))
+            let mut det = YoloDetect::load(path);
+            if let Some(c) = conf {
+                eprintln!("brain run: detection confidence threshold {c}");
+                // Keep the default IoU (0.45); only override the confidence gate.
+                det = det.with_thresholds(c, 0.45);
+            }
+            Box::new(det)
         }
         None => {
             eprintln!("brain run: no --yolo checkpoint; using fake detector");

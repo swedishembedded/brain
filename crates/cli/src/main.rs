@@ -82,7 +82,7 @@ BENCHMARK SUITE (architecture evaluation)
   brain bench compare <a.json> <b.json> ...# side-by-side leaderboard across results artifacts
 
 EVENT/STDIO CONTROLLER
-  brain run [--gpt <ckpt>] [--yolo <ckpt>] [--max-new N --temp X --top-k K --seed S]
+  brain run [--gpt <ckpt>] [--yolo <ckpt>] [--conf X] [--max-new N --temp X --top-k K --seed S]
       Event-driven HFSM controller: read JSONL events on stdin, emit JSONL events
       on stdout (text streaming + object detection). With no --gpt (or BRAIN_GPT),
       a fake echo model runs; with no --yolo (or BRAIN_YOLO), a fake detector runs,
