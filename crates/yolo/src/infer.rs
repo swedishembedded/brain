@@ -84,6 +84,8 @@ impl Yolo {
         let size = self.cfg.input;
         let n = images.len();
         assert_eq!(n, self.batch() as usize, "detect_batch expects exactly model batch images");
+        let prof = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
+        let t_start = std::time::Instant::now();
 
         // 1. letterbox each image into the model's CHW input; stack to [N,3,H,W].
         let chw_len = (3 * size * size) as usize;
@@ -97,6 +99,8 @@ impl Yolo {
             lbs.push(lb);
         }
 
+        let t_pre = std::time::Instant::now();
+
         // 2. eval-mode BN forward.
         let was_eval = self.is_eval();
         self.set_eval(true);
@@ -105,6 +109,7 @@ impl Yolo {
         if !was_eval {
             self.set_eval(false);
         }
+        let t_fwd = std::time::Instant::now();
 
         // 3-6. decode + score + NMS + un-letterbox, per image.
         let (cls, boxl) = self.raw_logits();
@@ -152,6 +157,16 @@ impl Yolo {
                 })
                 .collect();
             out.push(mapped);
+        }
+        if prof {
+            let t_end = std::time::Instant::now();
+            eprintln!(
+                "[detect] preprocess {:.1} ms | forward {:.1} ms | postprocess {:.1} ms | total {:.1} ms",
+                (t_pre - t_start).as_secs_f64() * 1e3,
+                (t_fwd - t_pre).as_secs_f64() * 1e3,
+                (t_end - t_fwd).as_secs_f64() * 1e3,
+                (t_end - t_start).as_secs_f64() * 1e3,
+            );
         }
         out
     }
