@@ -104,6 +104,8 @@ pub const CIOU_GRAD: &str = include_str!("../wgsl/ciou_grad.wgsl");
 pub const CLIP_COEF: &str = include_str!("../wgsl/clip_coef.wgsl");
 /// `wgsl/concat2.wgsl`
 pub const CONCAT2: &str = include_str!("../wgsl/concat2.wgsl");
+/// `wgsl/chan_place.wgsl`
+pub const CHAN_PLACE: &str = include_str!("../wgsl/chan_place.wgsl");
 /// `wgsl/concat_split.wgsl`
 pub const CONCAT_SPLIT: &str = include_str!("../wgsl/concat_split.wgsl");
 /// `wgsl/conv2d.wgsl`
@@ -255,6 +257,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("ciou", CIOU),
     ("ciou_grad", CIOU_GRAD),
     ("clip_coef", CLIP_COEF),
+    ("chan_place", CHAN_PLACE),
     ("concat2", CONCAT2),
     ("concat_split", CONCAT_SPLIT),
     ("conv2d", CONV2D),

@@ -236,6 +236,44 @@ pub fn concat_split(params: &[u32], dy: &[f32], da: &mut [f32]) {
     });
 }
 
+/// `chan_place`: write `src[N,Csrc,H,W]` into channels `[c_off, c_off+Csrc)` of
+/// `dst[N,Ctot,H,W]`. Per n, one contiguous bulk memcpy (inverse of concat_split).
+pub fn chan_place(params: &[u32], src: &[f32], dst: &mut [f32]) {
+    let (n, ctot, csrc, c_off, h, w) = (
+        params[0] as usize, params[1] as usize, params[2] as usize,
+        params[3] as usize, params[4] as usize, params[5] as usize,
+    );
+    let hw = h * w;
+    let (src_n, dst_n) = (csrc * hw, ctot * hw);
+    // Each n's source block is a contiguous run; place it at the channel offset.
+    // Parallelise over n (and split large copies via coarse flat chunks of src).
+    let total = n * src_n;
+    let chunk = total.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
+    // SAFETY: the destination slices written by distinct flat chunks are disjoint
+    // (each maps to a distinct (n, channel-range, position) of dst).
+    let dptr = SendMutPtr(dst.as_mut_ptr());
+    src.par_chunks(chunk).enumerate().for_each(|(ci, sin)| {
+        let dptr = dptr;
+        let base = ci * chunk;
+        let mut o = 0usize;
+        while o < sin.len() {
+            let g = base + o;
+            let (nn, local) = (g / src_n, g % src_n);
+            let cnt = (src_n - local).min(sin.len() - o);
+            let dst_off = nn * dst_n + c_off * hw + local;
+            unsafe {
+                std::ptr::copy_nonoverlapping(sin.as_ptr().add(o), dptr.0.add(dst_off), cnt);
+            }
+            o += cnt;
+        }
+    });
+}
+
+#[derive(Clone, Copy)]
+struct SendMutPtr(*mut f32);
+unsafe impl Send for SendMutPtr {}
+unsafe impl Sync for SendMutPtr {}
+
 /// `upsample2`: nearest-neighbour x2, `y[n,c,ho,wo] = x[n,c,ho/2,wo/2]`.
 pub fn upsample2(params: &[u32], x: &[f32], y: &mut [f32]) {
     let (n, c, h, w) = (params[0] as usize, params[1] as usize, params[2] as usize, params[3] as usize);
@@ -321,6 +359,23 @@ mod tests {
             };
             assert_eq!(y[idx], exp);
             let _ = hw;
+        }
+    }
+
+    #[test]
+    fn chan_place_matches_scalar() {
+        let (n, ctot, csrc, c_off, h, w) = (2, 11, 3, 5, 4, 6);
+        let mut s = 9u32;
+        let src: Vec<f32> = (0..n * csrc * h * w).map(|_| lcg(&mut s)).collect();
+        let mut dst = vec![-1.0f32; n * ctot * h * w];
+        chan_place(&[n as u32, ctot as u32, csrc as u32, c_off as u32, h as u32, w as u32], &src, &mut dst);
+        let hw = h * w;
+        for idx in 0..src.len() {
+            let cc = (idx / hw) % csrc;
+            let nn = idx / (csrc * hw);
+            let pos = idx % hw;
+            let di = (nn * ctot + (c_off + cc)) * hw + pos;
+            assert_eq!(dst[di], src[idx], "chan_place idx {idx}");
         }
     }
 

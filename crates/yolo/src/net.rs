@@ -70,6 +70,8 @@ pub const BIAS_ADD: usize = 33;
 pub const BIAS_GRAD: usize = 34;
 // ---- fused conv->BN(eval)->SiLU for inference (appended; keeps prior indices) ----
 pub const CONV_ACT: usize = 35;
+// ---- single-pass channel-concat placement (replaces the O(n^2) concat fold) ----
+pub const CHAN_PLACE: usize = 36;
 
 /// Kernel registry passed to [`Gpu::new`] / [`Gpu::new_cpu`]. The position of
 /// each entry is its kernel index (the `const`s above).
@@ -113,6 +115,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("bias_grad", kernels::BIAS_GRAD),
     // ---- fused conv->BN(eval)->SiLU (index 35) ----
     ("conv_act", kernels::CONV_ACT),
+    // ---- single-pass channel-concat placement (index 36) ----
+    ("chan_place", kernels::CHAN_PLACE),
 ];
 
 /// An NCHW feature-map shape. Carried alongside buffers so blocks can compute

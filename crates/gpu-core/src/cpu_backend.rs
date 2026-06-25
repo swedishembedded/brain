@@ -75,6 +75,7 @@ struct FastIdx {
     bn_eval: Option<usize>,
     concat2: Option<usize>,
     concat_split: Option<usize>,
+    chan_place: Option<usize>,
     upsample2: Option<usize>,
 }
 
@@ -109,6 +110,7 @@ impl CpuBackend {
                 bn_eval: find("bn_eval"),
                 concat2: find("concat2"),
                 concat_split: find("concat_split"),
+                chan_place: find("chan_place"),
                 upsample2: find("upsample2"),
             }
         };
@@ -293,6 +295,19 @@ impl CpuBackend {
                 let dy = std::slice::from_raw_parts(bufs[0] as *const f32, n * ctot * hw);
                 let da = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, n * csrc * hw);
                 crate::fast_ops::concat_split(pu, dy, da);
+            }
+            return;
+        }
+        if Some(kind) == f.chan_place && bufs.len() >= 2 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 6);
+                let (n, ctot, csrc, _off, h, w) = (
+                    pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize, pu[5] as usize,
+                );
+                let hw = h * w;
+                let src = std::slice::from_raw_parts(bufs[0] as *const f32, n * csrc * hw);
+                let dst = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, n * ctot * hw);
+                crate::fast_ops::chan_place(pu, src, dst);
             }
             return;
         }

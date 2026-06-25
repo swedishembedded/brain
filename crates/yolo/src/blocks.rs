@@ -46,7 +46,7 @@ use paramstore::ParamStore;
 
 use crate::net::{Ctx, Shape};
 use crate::net::{
-    ADD2, BN_DBETA, BN_DGAMMA, BN_DSTATS, BN_DX, BN_RUNNING, BN_STATS, BN_TRAIN, CONCAT2,
+    ADD2, BN_DBETA, BN_DGAMMA, BN_DSTATS, BN_DX, BN_RUNNING, BN_STATS, BN_TRAIN, CHAN_PLACE, CONCAT2,
     CONCAT_SPLIT, CONV2D, CONV2D_DW, CONV2D_DX, CONV_ACT, MAXPOOL5, MAXPOOL5_DX, SILU, SILU_BWD,
 };
 
@@ -564,21 +564,22 @@ impl C2f {
             prev = b.out();
         }
 
-        // concat [y0, y1, b1..bn] along C via a left-fold of concat2.
+        // concat [y0, y1, b1..bn] along C in a SINGLE pass: each chunk (c
+        // channels) is placed once into its slice of `concat`, instead of a
+        // left-fold of concat2 that re-copies the growing prefix (O(n^2) data
+        // movement). The placements write disjoint channel ranges, so they share
+        // one submit.
         let chunks = self.chunks();
-        let mut acc_c = self.c; // running channel count
-        let mut steps = Vec::new();
-        let mut acc_buf: &DeviceBuffer = &self.y0;
-        for (i, chunk) in chunks.iter().enumerate().skip(1) {
-            let dst = if i == chunks.len() - 1 { &self.concat } else { &self.cat_tmp[i - 1] };
-            // concat2 ABI: [N, Ca, Cb, H, W], bufs [a, b, y]
-            let params = [self.sh.n, acc_c, self.c, self.sh.h, self.sh.w];
-            let threads = (acc_c + self.c) * self.sh.h * self.sh.w * self.sh.n;
-            steps.push(ctx.step(CONCAT2, &[acc_buf, chunk, dst], &params, threads));
-            ctx.gpu.submit(&[], &[steps.pop().unwrap()]); // sequential dependency
-            acc_buf = dst;
-            acc_c += self.c;
+        let cat_c = chunks.len() as u32 * self.c;
+        let mut steps = Vec::with_capacity(chunks.len());
+        let chunk_n = self.sh.numel();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let c_off = i as u32 * self.c;
+            // chan_place ABI: [N, Ctot, Csrc, c_off, H, W], bufs [src, dst]
+            let params = [self.sh.n, cat_c, self.c, c_off, self.sh.h, self.sh.w];
+            steps.push(ctx.step(CHAN_PLACE, &[chunk, &self.concat], &params, chunk_n));
         }
+        ctx.gpu.submit(&[], &steps);
 
         // final 1x1 conv -> C_out.
         self.cv2.forward(ctx, ps, &self.concat);
