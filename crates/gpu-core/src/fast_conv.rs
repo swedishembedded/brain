@@ -88,97 +88,56 @@ pub fn conv2d(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32]) {
     // A 1×1, stride-1, no-pad conv needs no im2col: B aliases x directly.
     let one_by_one = p.k == 1 && p.stride == 1 && p.pad == 0;
 
-    for n in 0..p.n {
-        let y_img = &mut y[n * p.cout * psz..(n + 1) * p.cout * psz];
-        if one_by_one {
-            // B = x[n] viewed as [Cin, H*W] == [Kg, P].
-            let b = &x[n * p.cin * p.h * p.w..(n + 1) * p.cin * p.h * p.w];
-            gemm(p.cout, kg, psz, w, b, y_img);
-        } else {
-            let mut b = vec![0.0f32; kg * psz];
-            im2col(p, &x[n * p.cin * p.h * p.w..(n + 1) * p.cin * p.h * p.w], &mut b);
-            gemm(p.cout, kg, psz, w, &b, y_img);
-        }
-    }
-}
-
-/// Build the im2col matrix `B[Kg, P]` for image `x` ([Cin,H,W]).
-/// `B[(ci*K+kh)*K+kw, ho*Wo+wo] = x[ci, ho*stride-pad+kh, wo*stride-pad+kw]` or 0.
-fn im2col(p: &ConvParams, x: &[f32], b: &mut [f32]) {
-    let psz = p.ho * p.wo;
-    // Parallelise over Kg rows; each row is written disjointly.
-    b.par_chunks_mut(psz).enumerate().for_each(|(kg_idx, row)| {
-        let kw = kg_idx % p.k;
-        let t = kg_idx / p.k;
-        let kh = t % p.k;
-        let ci = t / p.k;
-        let xc = &x[ci * p.h * p.w..(ci + 1) * p.h * p.w];
-        for ho in 0..p.ho {
-            let hi = ho * p.stride + kh;
-            // hi - pad in bounds?
-            if hi < p.pad || hi - p.pad >= p.h {
-                continue;
-            }
-            let hi = hi - p.pad;
-            let row_off = ho * p.wo;
-            let x_row = &xc[hi * p.w..(hi + 1) * p.w];
-            for wo in 0..p.wo {
-                let wi = wo * p.stride + kw;
-                if wi < p.pad || wi - p.pad >= p.w {
-                    continue;
-                }
-                row[row_off + wo] = x_row[wi - p.pad];
-            }
-        }
-    });
-}
-
-/// `C[M,P] = A[M,Kg] · B[Kg,P]`, all row-major. Parallel over P column ranges so
-/// both channel-heavy (large M) and spatial-heavy (large P) layers scale; within
-/// each thread's band, `B` is walked in L2-sized column panels so a panel stays
-/// resident across the whole output-channel loop (instead of re-streaming the
-/// full `[Kg,P]` im2col once per channel tile).
-fn gemm(m: usize, kg: usize, psz: usize, a: &[f32], b: &[f32], c: &mut [f32]) {
-    // Column-range chunks aligned to NR=16, ~4 per thread for load balance.
-    let threads = rayon::current_num_threads().max(1);
-    let nr = 16usize;
-    let ntiles = psz.div_ceil(nr);
-    let tiles_per_chunk = ntiles.div_ceil(threads * 4).max(1);
-    let chunk_cols = (tiles_per_chunk * nr).max(nr);
-
-    // B-panel width: keep the resident `[Kg, nc]` panel near ~192 KiB (L2-ish),
-    // rounded to NR and at least one tile.
-    let nc = {
-        let budget_floats = (192 * 1024) / 4; // ~192 KiB of f32
-        let cols = (budget_floats / kg.max(1)) / nr * nr;
-        cols.clamp(nr, chunk_cols.max(nr))
-    };
-
     let use_avx2 = avx2_available();
-    // SAFETY: each chunk owns a disjoint [pa,pb) column band of every C row, so
-    // the raw-pointer writes from concurrent chunks never alias.
-    let cptr = SendMutPtr(c.as_mut_ptr());
-    let starts: Vec<usize> = (0..psz).step_by(chunk_cols).collect();
-    starts.par_iter().for_each(|&pa| {
-        let cptr = cptr;
-        let pb = (pa + chunk_cols).min(psz);
-        unsafe {
-            let c = std::slice::from_raw_parts_mut(cptr.0, m * psz);
+    // P-panel width: keep the resident im2col panel `[Kg, nc]` near ~192 KiB
+    // (L2-ish), rounded to the NR=16 microkernel tile, ≥1 tile.
+    let nc = {
+        let budget_floats = (192 * 1024) / 4;
+        ((budget_floats / kg.max(1)) / 16 * 16).clamp(16, psz.max(16))
+    };
+    // Thread-parallel column bands (~4 per thread), each subdivided into nc
+    // panels so the panel stays cache-resident across the channel loop.
+    let threads = rayon::current_num_threads().max(1);
+    let band = (psz.div_ceil(threads * 4)).max(1).div_ceil(16) * 16;
+
+    for n in 0..p.n {
+        let x_img = &x[n * p.cin * p.h * p.w..(n + 1) * p.cin * p.h * p.w];
+        let y_img = &mut y[n * p.cout * psz..(n + 1) * p.cout * psz];
+        let cptr = SendMutPtr(y_img.as_mut_ptr());
+        let starts: Vec<usize> = (0..psz).step_by(band).collect();
+        starts.par_iter().for_each(|&pa| {
+            let cptr = cptr;
+            let pb = (pa + band).min(psz);
+            // Reusable per-band im2col scratch (general conv only).
+            let mut bpanel: Vec<f32> = if one_by_one { Vec::new() } else { vec![0.0f32; kg * nc] };
+            let mut coords: Vec<(usize, usize)> = if one_by_one { Vec::new() } else { vec![(0, 0); nc] };
+            let cbase = cptr.0;
             let mut pp = pa;
             while pp < pb {
-                let pe = (pp + nc).min(pb);
-                if use_avx2 {
-                    #[cfg(target_arch = "x86_64")]
-                    gemm_band_avx2(m, kg, psz, a, b, c, pp, pe);
-                    #[cfg(not(target_arch = "x86_64"))]
-                    gemm_band_scalar(m, kg, psz, a, b, c, pp, pe);
-                } else {
-                    gemm_band_scalar(m, kg, psz, a, b, c, pp, pe);
+                let pw = (pp + nc).min(pb) - pp;
+                // SAFETY: this band owns the disjoint C columns [pa,pb) of every
+                // row; bpanel is band-local; pointers stay in bounds.
+                unsafe {
+                    let (b_base, bstride) = if one_by_one {
+                        (x_img.as_ptr().add(pp), psz)
+                    } else {
+                        build_im2col_panel(p, x_img, pp, pw, &mut bpanel, &mut coords);
+                        (bpanel.as_ptr(), pw)
+                    };
+                    let c_base = cbase.add(pp);
+                    if use_avx2 {
+                        #[cfg(target_arch = "x86_64")]
+                        gemm_cols_avx2(p.cout, kg, w.as_ptr(), b_base, bstride, c_base, psz, pw);
+                        #[cfg(not(target_arch = "x86_64"))]
+                        gemm_cols_scalar(p.cout, kg, w.as_ptr(), b_base, bstride, c_base, psz, pw);
+                    } else {
+                        gemm_cols_scalar(p.cout, kg, w.as_ptr(), b_base, bstride, c_base, psz, pw);
+                    }
                 }
-                pp = pe;
+                pp += pw;
             }
-        }
-    });
+        });
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -186,51 +145,87 @@ struct SendMutPtr(*mut f32);
 unsafe impl Send for SendMutPtr {}
 unsafe impl Sync for SendMutPtr {}
 
-/// Scalar GEMM over column band `[pa,pb)` — the portable reference path.
-/// # Safety: `c` must be the full `[M*P]` output; the caller guarantees disjoint
-/// bands across threads.
-unsafe fn gemm_band_scalar(
-    m: usize, kg: usize, psz: usize, a: &[f32], b: &[f32], c: &mut [f32], pa: usize, pb: usize,
+/// Build the im2col panel for output columns `[pp0, pp0+pw)` into
+/// `bpanel[kg*pw + j]` (`j` = local column). Out-of-bounds taps are zeroed.
+/// `coords` is scratch for the `(ho,wo)` of each panel column (computed once,
+/// reused across the Kg rows — avoids a div per cell).
+unsafe fn build_im2col_panel(
+    p: &ConvParams, x: &[f32], pp0: usize, pw: usize, bpanel: &mut [f32], coords: &mut [(usize, usize)],
 ) {
-    for co in 0..m {
-        let arow = &a[co * kg..co * kg + kg];
-        let crow = c.as_mut_ptr().add(co * psz);
-        for p in pa..pb {
-            let mut acc = 0.0f32;
-            for (kgi, &av) in arow.iter().enumerate() {
-                acc += av * *b.get_unchecked(kgi * psz + p);
-            }
-            *crow.add(p) = acc;
+    // Roll (ho,wo) across the panel without a per-column division.
+    let mut ho = pp0 / p.wo;
+    let mut wo = pp0 - ho * p.wo;
+    for c in coords.iter_mut().take(pw) {
+        *c = (ho, wo);
+        wo += 1;
+        if wo == p.wo {
+            wo = 0;
+            ho += 1;
+        }
+    }
+    let hw = p.h * p.w;
+    let xptr = x.as_ptr();
+    for kgi in 0..p.k * p.k * p.cin {
+        let kw = kgi % p.k;
+        let t = kgi / p.k;
+        let kh = t % p.k;
+        let ci = t / p.k;
+        let xc = xptr.add(ci * hw);
+        let row = bpanel.as_mut_ptr().add(kgi * pw);
+        for (j, &(ho, wo)) in coords.iter().enumerate().take(pw) {
+            let hib = ho * p.stride + kh;
+            let wib = wo * p.stride + kw;
+            let v = if hib >= p.pad && hib - p.pad < p.h && wib >= p.pad && wib - p.pad < p.w {
+                *xc.add((hib - p.pad) * p.w + (wib - p.pad))
+            } else {
+                0.0
+            };
+            *row.add(j) = v;
         }
     }
 }
 
-/// AVX2+FMA GEMM over column band `[pa,pb)`. Computes a `4×16` register tile.
-/// # Safety: requires avx2+fma; `c` is the full `[M*P]` output with disjoint
-/// bands across threads.
+/// `C[co, j] = Σ_kg A[co,kg]·B[kg,j]` for `co∈0..m`, `j∈0..ncols`. `B` rows have
+/// stride `bstride`, `C` rows stride `cstride`; `a`/`b_base`/`c_base` are bases.
+/// Scalar reference path. # Safety: caller guarantees disjoint C columns.
+unsafe fn gemm_cols_scalar(
+    m: usize, kg: usize, a: *const f32, b_base: *const f32, bstride: usize,
+    c_base: *mut f32, cstride: usize, ncols: usize,
+) {
+    for co in 0..m {
+        let arow = a.add(co * kg);
+        let crow = c_base.add(co * cstride);
+        for j in 0..ncols {
+            let mut acc = 0.0f32;
+            for kgi in 0..kg {
+                acc += *arow.add(kgi) * *b_base.add(kgi * bstride + j);
+            }
+            *crow.add(j) = acc;
+        }
+    }
+}
+
+/// AVX2+FMA variant of [`gemm_cols_scalar`]: a `4×16` register tile over
+/// (channel, column). # Safety: requires avx2+fma; disjoint C columns per call.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn gemm_band_avx2(
-    m: usize, kg: usize, psz: usize, a: &[f32], b: &[f32], c: &mut [f32], pa: usize, pb: usize,
+unsafe fn gemm_cols_avx2(
+    m: usize, kg: usize, a: *const f32, b_base: *const f32, bstride: usize,
+    c_base: *mut f32, cstride: usize, ncols: usize,
 ) {
     use std::arch::x86_64::*;
-    let aptr = a.as_ptr();
-    let bptr = b.as_ptr();
-    let cptr = c.as_mut_ptr();
-
     let mut co = 0usize;
     while co + 4 <= m {
-        let a0 = aptr.add(co * kg);
-        let a1 = aptr.add((co + 1) * kg);
-        let a2 = aptr.add((co + 2) * kg);
-        let a3 = aptr.add((co + 3) * kg);
-        let c0 = cptr.add(co * psz);
-        let c1 = cptr.add((co + 1) * psz);
-        let c2 = cptr.add((co + 2) * psz);
-        let c3 = cptr.add((co + 3) * psz);
-
-        let mut p = pa;
-        while p + 16 <= pb {
+        let a0 = a.add(co * kg);
+        let a1 = a.add((co + 1) * kg);
+        let a2 = a.add((co + 2) * kg);
+        let a3 = a.add((co + 3) * kg);
+        let c0 = c_base.add(co * cstride);
+        let c1 = c_base.add((co + 1) * cstride);
+        let c2 = c_base.add((co + 2) * cstride);
+        let c3 = c_base.add((co + 3) * cstride);
+        let mut j = 0usize;
+        while j + 16 <= ncols {
             let mut acc00 = _mm256_setzero_ps();
             let mut acc01 = _mm256_setzero_ps();
             let mut acc10 = _mm256_setzero_ps();
@@ -239,7 +234,7 @@ unsafe fn gemm_band_avx2(
             let mut acc21 = _mm256_setzero_ps();
             let mut acc30 = _mm256_setzero_ps();
             let mut acc31 = _mm256_setzero_ps();
-            let mut bp = bptr.add(p);
+            let mut bp = b_base.add(j);
             for kgi in 0..kg {
                 let b0 = _mm256_loadu_ps(bp);
                 let b1 = _mm256_loadu_ps(bp.add(8));
@@ -255,60 +250,58 @@ unsafe fn gemm_band_avx2(
                 let v3 = _mm256_set1_ps(*a3.add(kgi));
                 acc30 = _mm256_fmadd_ps(v3, b0, acc30);
                 acc31 = _mm256_fmadd_ps(v3, b1, acc31);
-                bp = bp.add(psz);
+                bp = bp.add(bstride);
             }
-            _mm256_storeu_ps(c0.add(p), acc00);
-            _mm256_storeu_ps(c0.add(p + 8), acc01);
-            _mm256_storeu_ps(c1.add(p), acc10);
-            _mm256_storeu_ps(c1.add(p + 8), acc11);
-            _mm256_storeu_ps(c2.add(p), acc20);
-            _mm256_storeu_ps(c2.add(p + 8), acc21);
-            _mm256_storeu_ps(c3.add(p), acc30);
-            _mm256_storeu_ps(c3.add(p + 8), acc31);
-            p += 16;
+            _mm256_storeu_ps(c0.add(j), acc00);
+            _mm256_storeu_ps(c0.add(j + 8), acc01);
+            _mm256_storeu_ps(c1.add(j), acc10);
+            _mm256_storeu_ps(c1.add(j + 8), acc11);
+            _mm256_storeu_ps(c2.add(j), acc20);
+            _mm256_storeu_ps(c2.add(j + 8), acc21);
+            _mm256_storeu_ps(c3.add(j), acc30);
+            _mm256_storeu_ps(c3.add(j + 8), acc31);
+            j += 16;
         }
-        // Column remainder (<16): scalar, still correct.
-        for pp in p..pb {
+        for jj in j..ncols {
             let (mut s0, mut s1, mut s2, mut s3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
             for kgi in 0..kg {
-                let bv = *bptr.add(kgi * psz + pp);
+                let bv = *b_base.add(kgi * bstride + jj);
                 s0 += *a0.add(kgi) * bv;
                 s1 += *a1.add(kgi) * bv;
                 s2 += *a2.add(kgi) * bv;
                 s3 += *a3.add(kgi) * bv;
             }
-            *c0.add(pp) = s0;
-            *c1.add(pp) = s1;
-            *c2.add(pp) = s2;
-            *c3.add(pp) = s3;
+            *c0.add(jj) = s0;
+            *c1.add(jj) = s1;
+            *c2.add(jj) = s2;
+            *c3.add(jj) = s3;
         }
         co += 4;
     }
-    // Channel remainder (<4 rows): one row at a time, vectorised over P.
     while co < m {
-        let a0 = aptr.add(co * kg);
-        let c0 = cptr.add(co * psz);
-        let mut p = pa;
-        while p + 16 <= pb {
+        let a0 = a.add(co * kg);
+        let c0 = c_base.add(co * cstride);
+        let mut j = 0usize;
+        while j + 16 <= ncols {
             let mut acc0 = _mm256_setzero_ps();
             let mut acc1 = _mm256_setzero_ps();
-            let mut bp = bptr.add(p);
+            let mut bp = b_base.add(j);
             for kgi in 0..kg {
                 let v0 = _mm256_set1_ps(*a0.add(kgi));
                 acc0 = _mm256_fmadd_ps(v0, _mm256_loadu_ps(bp), acc0);
                 acc1 = _mm256_fmadd_ps(v0, _mm256_loadu_ps(bp.add(8)), acc1);
-                bp = bp.add(psz);
+                bp = bp.add(bstride);
             }
-            _mm256_storeu_ps(c0.add(p), acc0);
-            _mm256_storeu_ps(c0.add(p + 8), acc1);
-            p += 16;
+            _mm256_storeu_ps(c0.add(j), acc0);
+            _mm256_storeu_ps(c0.add(j + 8), acc1);
+            j += 16;
         }
-        for pp in p..pb {
+        for jj in j..ncols {
             let mut s0 = 0.0f32;
             for kgi in 0..kg {
-                s0 += *a0.add(kgi) * *bptr.add(kgi * psz + pp);
+                s0 += *a0.add(kgi) * *b_base.add(kgi * bstride + jj);
             }
-            *c0.add(pp) = s0;
+            *c0.add(jj) = s0;
         }
         co += 1;
     }
