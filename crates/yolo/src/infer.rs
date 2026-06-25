@@ -124,17 +124,21 @@ impl Yolo {
         for img in 0..n {
             let mut dets: Vec<Detection> = Vec::new();
             for i in 0..a {
-                // best class + score for this anchor.
+                // Best class for this anchor. SiLU/sigmoid is monotonic, so the
+                // argmax over the raw logits is the argmax over the scores —
+                // compute sigmoid only once (for the winner) instead of nc times
+                // per anchor (this loop runs over every anchor × class).
                 let cbase = (img * a + i) * nc;
                 let mut best_c = 0usize;
-                let mut best_s = 0.0f32;
-                for c in 0..nc {
-                    let s = sigmoid(cls[cbase + c]);
-                    if s > best_s {
-                        best_s = s;
+                let mut best_l = cls[cbase];
+                for c in 1..nc {
+                    let l = cls[cbase + c];
+                    if l > best_l {
+                        best_l = l;
                         best_c = c;
                     }
                 }
+                let best_s = sigmoid(best_l);
                 if best_s < conf_thresh {
                     continue;
                 }
