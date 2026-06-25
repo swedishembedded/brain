@@ -18,3 +18,9 @@ scratchpad/
 # Python caches (reference scripts live under scratchpad/reference only).
 __pycache__/
 *.pyc
+
+# Architecture-eval results artifacts (`brain bench eval` writes here). Run
+# outputs are not committed; the dir is kept via results/.gitkeep and an example
+# artifact is shown in crates/bench/README.md.
+/results/*.json
+!/results/.gitkeep

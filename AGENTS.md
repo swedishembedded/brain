@@ -132,6 +132,39 @@ formal-language / algorithmic state-tracking probes `parity` (running-parity bit
 state), `mod_add` (`a+b=c (mod p)`, the grokking task), and `dyck` (Dyck-k
 balanced brackets, hierarchical state).
 
+### Evaluating a new architecture (turn-key harness)
+
+The whole battery is architecture-agnostic via the `DecoderLm` seam, so the same
+benchmarks score *any* architecture and the results are directly comparable. The
+3-step recipe:
+
+1. **Implement `DecoderLm`** for the model (`train_decoder` + `load_scorer`, plus
+   a `Scorer`). No benchmark changes — `GptDecoder` is the reference impl.
+2. **Add one line to `arch_registry()`** in `crates/bench/src/arch.rs` (name +
+   `Size` descriptor + a `factory`). Registered today: `gpt`, `gpt-small`,
+   `gpt-wide`.
+3. **Run + compare**:
+   ```bash
+   BRAIN_DEVICE=cpu make bench/eval ARCH=<name>   # whole battery -> results/<arch>-<seed>.json
+   BRAIN_DEVICE=cpu make bench/compare            # leaderboard over all results/*.json
+   ```
+   (direct: `brain bench eval --arch <name> [--seed S --out F --smoke]`;
+   `brain bench compare a.json b.json …`).
+
+**Capability axes** (`crates/bench/src/axes.rs`) group benchmarks into a small
+profile — `recall` (mqar + mad recall/fuzzy/noisy), `copying` (selective-copy,
+toolcall), `memory` (memorize), `state_tracking` (parity, dyck), `compression`
+(mad_compress), `arithmetic` (mod_add, *informational*) — each scored as the mean
+of its benchmarks. `eval` writes a JSON artifact (arch, size, param count, commit,
+seed, timestamp, per-benchmark `{score, threshold, passed, informational,
+metrics}`, per-axis aggregates, gating pass-rate); `compare` diffs ≥2 of them
+side-by-side. `results/` is git-ignored. This is the foundation the next
+predictive-scaling + tuning-advisor layer builds on.
+
+> Non-GPT caveat: `mad_compress` is a bottleneck autoencoder (MSE head), not a
+> next-token decoder, so it ignores the supplied `DecoderLm` — its `compression`
+> score does not yet reflect a candidate architecture.
+
 ## Conventions & invariants
 
 - **WGSL is the source of truth.** Kernels live only in `crates/kernels/wgsl/`,

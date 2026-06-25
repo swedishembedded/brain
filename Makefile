@@ -23,6 +23,7 @@ OUT    ?= out
 SEED   ?= 1337
 STEPS  ?= 1000
 N      ?= 100000
+ARCH   ?= gpt
 
 # model size (GPT)
 LAYERS ?= 4
@@ -34,7 +35,7 @@ LR     ?= 3e-3
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release test gradcheck bench bench/char clean federated-demo \
+.PHONY: help build release test gradcheck bench bench/char bench/eval bench/compare clean federated-demo \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt web/dev web/build
 
@@ -50,6 +51,9 @@ help:
 	@echo "  make bench                   run the architecture-evaluation benchmark suite (all)"
 	@echo "  make bench/<name>            run one benchmark (e.g. bench/mqar)"
 	@echo "  make bench/scaling           scaling-law sweep: fit L(N)=E+A*N^-alpha across sizes"
+	@echo "  make bench/eval ARCH=<name>  run the WHOLE battery vs one architecture (gpt|gpt-small|"
+	@echo "                               gpt-wide), aggregate per axis -> results/<arch>-<seed>.json"
+	@echo "  make bench/compare           side-by-side leaderboard of every results/*.json"
 	@echo "  make bench/char              train+eval GPT on the shared char datasets (legacy)"
 	@echo "  make federated-demo          MoE train -> split -> verify -> merge round-trip"
 	@echo "  make web/dev | web/build     WebGPU browser demo (crates/web)"
@@ -117,6 +121,25 @@ bench: release
 bench/scaling: release
 	$(BRAIN) bench scaling --seed $(SEED)
 
+# `make bench/eval ARCH=<name>` runs the turn-key architecture-eval harness: the
+# WHOLE registered battery against one architecture, aggregated per capability
+# axis, writing a structured artifact to results/<arch>-<seed>.json. Add a new
+# architecture in crates/bench/src/arch.rs::arch_registry, then ARCH=<name> here.
+bench/eval: release
+	$(BRAIN) bench eval --arch $(ARCH) --seed $(SEED)
+
+# `make bench/compare` prints a side-by-side leaderboard (overall pass-rate +
+# per-axis + per-benchmark scores, columns = architectures) over every artifact
+# under results/, so a new architecture is diffed against priors at a glance.
+bench/compare: release
+	@set -e; files="$$(ls results/*.json 2>/dev/null || true)"; \
+	if [ -z "$$files" ]; then \
+		echo "no results/*.json yet — run 'make bench/eval ARCH=<name>' first"; exit 2; \
+	fi; \
+	$(BRAIN) bench compare $$files
+
+# Generic single-benchmark rule (`make bench/mqar`, …). The explicit bench/eval,
+# bench/compare, bench/scaling, bench/char targets above take precedence.
 bench/%: release
 	$(BRAIN) bench $* --seed $(SEED)
 

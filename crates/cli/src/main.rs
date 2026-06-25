@@ -56,6 +56,11 @@ BENCHMARK SUITE (architecture evaluation)
   brain bench scaling [--seed S]           # multi-size scaling-law sweep: trains the MQAR
                                            # task at several sizes, fits L(N)=E+A*N^-alpha,
                                            # prints the size|params|flops|loss table + alpha,R2
+  brain bench eval --arch <name> [--seed S --out F --smoke]
+                                           # run the WHOLE battery against one architecture,
+                                           # aggregate per capability axis, write
+                                           # results/<arch>-<seed>.json  (archs: gpt, gpt-small, gpt-wide)
+  brain bench compare <a.json> <b.json> ...# side-by-side leaderboard across results artifacts
 
 OTHER
   brain gradcheck                          # finite-difference backprop check (GPT)
@@ -107,6 +112,15 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
 /// With no name, runs every registered benchmark and prints one comparison
 /// table; with a name, runs just that benchmark. Exits non-zero on any failure.
 fn run_bench(args: &[String]) {
+    // The turn-key architecture-eval harness and the leaderboard compare are
+    // sub-subcommands with their own flag grammar; route them before the
+    // single-benchmark flag parse below.
+    match args.first().map(|s| s.as_str()) {
+        Some("eval") => return run_bench_eval(&args[1..]),
+        Some("compare") => return run_bench_compare(&args[1..]),
+        _ => {}
+    }
+
     let mut name: Option<&str> = None;
     let mut seed = 1337u64;
     let mut i = 0;
@@ -164,6 +178,80 @@ fn run_scaling(seed: u64) {
             eprintln!("brain bench scaling: {e}");
             std::process::exit(2);
         }
+    }
+}
+
+/// `brain bench eval --arch <name> [--seed S] [--out <path>] [--smoke]` — the
+/// turn-key architecture-eval harness: run EVERY registered benchmark against the
+/// named architecture, aggregate per capability axis, write a results artifact
+/// under `results/<arch>-<seed>.json` (or `--out`), and print the table + axes.
+fn run_bench_eval(args: &[String]) {
+    let mut arch = "gpt".to_string();
+    let mut seed = 1337u64;
+    let mut out: Option<String> = None;
+    let mut smoke = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--arch" => {
+                i += 1;
+                arch = args.get(i).cloned().unwrap_or(arch);
+            }
+            "--seed" => {
+                i += 1;
+                seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(seed);
+            }
+            "--out" => {
+                i += 1;
+                out = args.get(i).cloned();
+            }
+            "--smoke" => smoke = true,
+            other => eprintln!("brain bench eval: ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+
+    let report = match bench::eval::run(&arch, seed, smoke) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("brain bench eval: {e}");
+            std::process::exit(2);
+        }
+    };
+    bench::eval::print_report(&report);
+
+    let path = out
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| bench::eval::default_out_path(&arch, seed));
+    if let Err(e) = bench::eval::write_artifact(&report, &path) {
+        eprintln!("brain bench eval: writing {}: {e}", path.display());
+        std::process::exit(2);
+    }
+    println!("wrote results artifact: {}", path.display());
+
+    // Exit non-zero if a gating benchmark failed (informational ones excluded),
+    // matching `brain bench`'s pass/fail contract.
+    if report.gating_passed < report.gating_total {
+        eprintln!(
+            "brain bench eval: {}/{} gating benchmarks passed",
+            report.gating_passed, report.gating_total
+        );
+        std::process::exit(1);
+    }
+}
+
+/// `brain bench compare <results.json> <results.json> ...` — load ≥2 artifacts
+/// and print a side-by-side leaderboard (overall pass-rate + per-axis +
+/// per-benchmark scores, columns = architectures).
+fn run_bench_compare(args: &[String]) {
+    let paths: Vec<std::path::PathBuf> = args
+        .iter()
+        .filter(|a| !a.starts_with("--"))
+        .map(std::path::PathBuf::from)
+        .collect();
+    if let Err(e) = bench::eval::compare(&paths) {
+        eprintln!("brain bench compare: {e}");
+        std::process::exit(2);
     }
 }
 

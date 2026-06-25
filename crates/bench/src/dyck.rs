@@ -51,7 +51,7 @@ use data::binio::{self, Meta};
 use data::rng::Rng;
 
 use crate::metrics::{associative_recall, Metrics};
-use crate::model::{argmax, DecoderLm, GptDecoder, TrainConfig};
+use crate::model::{argmax, DecoderLm, TrainConfig};
 use crate::Benchmark;
 
 /// Token id of the newline / end-of-sequence marker (maps to `'\n'`).
@@ -222,9 +222,6 @@ impl Benchmark for Dyck {
         Ok(())
     }
 
-    fn evaluate(&self, dir: &Path, seed: u64) -> std::io::Result<Metrics> {
-        self.evaluate_with(&GptDecoder, dir, seed)
-    }
 
     fn threshold(&self) -> f32 {
         // Far above 1/k chance (≈0.333) yet below the measured ~0.85+ floor across
@@ -235,12 +232,9 @@ impl Benchmark for Dyck {
     fn report_fields(&self) -> Vec<&str> {
         vec!["chance", "train_ce"]
     }
-}
-
-impl Dyck {
     /// Train + score with a specific architecture (any [`DecoderLm`]).
     /// [`Benchmark::evaluate`] calls this with the GPT baseline.
-    pub fn evaluate_with(&self, lm: &dyn DecoderLm, dir: &Path, seed: u64) -> std::io::Result<Metrics> {
+    fn evaluate_with(&self, lm: &dyn DecoderLm, dir: &Path, seed: u64) -> std::io::Result<Metrics> {
         // ---- TRAIN (architecture-agnostic via DecoderLm) ---------------------
         // The whole balanced word is supervised next-token (no `=` mask); windows
         // are line-aligned so each is exactly one word.

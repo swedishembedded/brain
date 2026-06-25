@@ -56,6 +56,34 @@ impl Metrics {
     pub fn get(&self, name: &str) -> Option<f32> {
         self.fields.get(name).copied()
     }
+
+    /// Serialize to a JSON object `{ "score": …, "fields": { … } }`. Field order
+    /// within `fields` is sorted for stable, diffable artifacts. Used by the
+    /// architecture-eval harness when writing results under `results/`.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut fields: Vec<(&String, &f32)> = self.fields.iter().collect();
+        fields.sort_by(|a, b| a.0.cmp(b.0));
+        let obj: serde_json::Map<String, serde_json::Value> = fields
+            .into_iter()
+            .map(|(k, v)| (k.clone(), serde_json::json!(*v)))
+            .collect();
+        serde_json::json!({ "score": self.score, "fields": obj })
+    }
+
+    /// Reconstruct from a JSON object produced by [`Metrics::to_json`]. Missing /
+    /// malformed fields are skipped; a missing `score` defaults to `0.0`.
+    pub fn from_json(v: &serde_json::Value) -> Self {
+        let score = v.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0) as f32;
+        let mut fields = HashMap::new();
+        if let Some(obj) = v.get("fields").and_then(|f| f.as_object()) {
+            for (k, val) in obj {
+                if let Some(x) = val.as_f64() {
+                    fields.insert(k.clone(), x as f32);
+                }
+            }
+        }
+        Metrics { score, fields }
+    }
 }
 
 /// Mean cross-entropy in **nats** from a total nats sum and token count.

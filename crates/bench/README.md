@@ -24,6 +24,130 @@ scaling sweeps, …) by copying the MQAR pattern.
 | dyck | `src/dyck.rs` | Dyck-k balanced brackets — hierarchical state |
 | scaling sweep | `src/scaling.rs` | multi-size scaling-law sweep + power-law fit (separate entry point, **not** a registry `Benchmark`) |
 | integration tests | `tests/*.rs` | learnability guards, gated by `MOE_SKIP_GPU_TESTS` |
+| architecture registry | `src/arch.rs` | named architectures (`gpt`, `gpt-small`, `gpt-wide`) + size descriptors |
+| capability axes | `src/axes.rs` | benchmark → axis map (`recall`/`copying`/`memory`/…) |
+| eval harness | `src/eval.rs` | run the whole battery vs one arch, aggregate per axis, write/compare artifacts |
+
+## Evaluating a new architecture (the turn-key harness)
+
+The benchmark battery is **architecture-agnostic**: every benchmark trains and
+scores through the [`DecoderLm`](src/model.rs) seam, so the *same* battery runs
+against any architecture and the results are directly comparable. The harness
+makes this turn-key.
+
+### The 3-step recipe
+
+1. **Implement `DecoderLm`** for your model — one `train_decoder` + one
+   `load_scorer` (and a `Scorer`). Nothing in any benchmark changes. The dense
+   GPT baseline (`model::GptDecoder`) is the reference impl.
+2. **Add one line to `arch_registry()`** in `src/arch.rs`: a name, a one-line
+   description, a `Size` descriptor (depth/width/heads — drives the artifact's
+   param count), and a `factory: || Box::new(MyArch::new())`.
+3. **Run it**:
+
+   ```bash
+   BRAIN_DEVICE=cpu make bench/eval ARCH=<name>     # whole battery vs your arch
+   BRAIN_DEVICE=cpu make bench/compare              # leaderboard of all results/*.json
+   ```
+
+   or directly:
+
+   ```bash
+   ./target/release/brain bench eval --arch <name> [--seed S] [--out F] [--smoke]
+   ./target/release/brain bench compare results/<a>.json results/<b>.json ...
+   ```
+
+Today three architectures are registered so `compare` is demonstrable
+immediately: `gpt` (size per benchmark), `gpt-small` (fixed 1-layer / d_model 32),
+`gpt-wide` (fixed 2-layer / d_model 96). A fixed-size variant is a `DecoderLm`
+(`arch::ScaledGpt`) that overrides the depth/width the benchmark requests.
+
+### Capability axes
+
+Each benchmark probes a *capability*; several share one. An axis score is the
+**mean of its benchmarks' headline scores**, so architectures are compared on a
+small interpretable profile rather than a dozen raw numbers (`axes.rs`):
+
+| axis | benchmarks |
+|---|---|
+| `recall` | `mqar`, `mad_recall`, `mad_fuzzy_recall`, `mad_noisy_recall` |
+| `copying` | `mad_selective_copy`, `toolcall` |
+| `memory` | `mad_memorize` |
+| `state_tracking` | `parity`, `dyck` |
+| `compression` | `mad_compress` (a bottleneck autoencoder — see note) |
+| `arithmetic` | `mod_add` *(informational; never gates)* |
+
+> **Note (non-LM benchmark):** `mad_compress` trains its own bottleneck
+> autoencoder (MSE head), not a causal next-token decoder, so it **ignores** the
+> supplied `DecoderLm`. Its `compression`-axis score reflects the autoencoder,
+> not the candidate architecture — a known limitation a future arch-aware
+> compression objective can address.
+
+### The results artifact
+
+`eval` writes a structured, diffable JSON artifact to `results/<arch>-<seed>.json`
+(`results/` is git-ignored; the dir is kept via `results/.gitkeep`). Schema:
+
+| field | meaning |
+|---|---|
+| `arch` | architecture name |
+| `size` | size label, e.g. `L2xD96xH4` or `(bench-default)` |
+| `param_count` | total trainable params at a representative shape… |
+| `param_count_basis` | …the `vocab=…,block_size=…` that count was computed at |
+| `commit` | `git rev-parse --short HEAD`, or `"unknown"` |
+| `seed` | run seed |
+| `smoke` | whether the fast reduced-budget battery was used |
+| `timestamp` | ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`) from `SystemTime` |
+| `benchmarks[]` | per benchmark: `name`, `axis`, `score`, `threshold`, `passed`, `informational`, and full `metrics` (`score` + named `fields`) |
+| `axis_scores` | axis → mean score (only axes with ≥1 benchmark) |
+| `gating` | `{passed, total, pass_rate}` over non-informational benchmarks |
+
+Example (abridged — a real `make bench/eval ARCH=gpt SEED=1234` run, the
+calibrated battery, committed as `results/gpt-1234.json`):
+
+```json
+{
+  "arch": "gpt",
+  "size": "(bench-default)",
+  "param_count": 110336,
+  "param_count_basis": "vocab=64,block_size=32",
+  "commit": "c2829fb",
+  "seed": 1234,
+  "smoke": false,
+  "timestamp": "2026-06-25T00:26:00Z",
+  "benchmarks": [
+    { "name": "mqar", "axis": "recall", "score": 0.7775, "threshold": 0.55,
+      "passed": true, "informational": false,
+      "metrics": { "score": 0.7775, "fields": { "chance": 0.125, "train_ce": 0.59 } } }
+  ],
+  "axis_scores": { "recall": 0.6244, "copying": 0.94, "memory": 1.0,
+    "state_tracking": 0.9958, "compression": 0.9458, "arithmetic": 0.7931 },
+  "gating": { "passed": 10, "total": 10, "pass_rate": 1.0 }
+}
+```
+
+The full `gpt` battery passes **10/10** gating benchmarks at this seed (mod_add is
+informational). See the committed `results/gpt-1234.json` for the complete file.
+
+### The compare leaderboard
+
+`compare` loads ≥2 artifacts and prints a side-by-side table — columns are
+architectures (`arch@commit`), rows are seed/params/commit, overall gating
+pass-rate, then per-axis and per-benchmark scores — so a new architecture is
+diffed against every prior at a glance:
+
+```
+metric                       gpt@c2829fb gpt-small@c2829fb
+----------------------------------------------------------
+params                            110336             17888
+gating pass-rate                  0.5000            0.1000
+axis:recall                       0.3563            0.1437
+axis:memory                       0.9500            0.4250
+...
+```
+
+This harness is the **foundation** the next layer (predictive-scaling +
+tuning-advisor) builds on: it reasons per-axis, over comparable artifacts.
 
 ## Running
 
@@ -52,21 +176,28 @@ mqar               0.77XX        0.1250       0.5XXX     0.5500   PASS
 pub trait Benchmark {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    fn prepare(&self, dir: &Path, seed: u64) -> std::io::Result<()>;
-    fn evaluate(&self, dir: &Path, seed: u64) -> std::io::Result<Metrics>;
+    fn prepare(&self, dir: &Path, seed: u64) -> io::Result<()>;
+    /// Architecture-agnostic core: train + score with ANY `DecoderLm`.
+    fn evaluate_with(&self, lm: &dyn DecoderLm, dir: &Path, seed: u64) -> io::Result<Metrics>;
+    /// Defaults to `self.evaluate_with(&GptDecoder, dir, seed)`.
+    fn evaluate(&self, dir: &Path, seed: u64) -> io::Result<Metrics> { /* GPT baseline */ }
     fn threshold(&self) -> f32;
     fn report_fields(&self) -> Vec<&str> { Vec::new() }
+    fn informational(&self) -> bool { false }
 }
 ```
 
 - `prepare` synthesizes the dataset into `dir` (brain's `train.bin`/`val.bin`/
-  `meta.json` token layout, so `gpt::train` loads it unchanged).
-- `evaluate` trains a model on `dir` and returns `Metrics`; the headline
-  `Metrics::score` is what `threshold()` gates.
+  `meta.json` token layout, so the loader reads it unchanged).
+- **`evaluate_with`** is the architecture-agnostic core: it trains the supplied
+  `DecoderLm` on `dir` and returns `Metrics`; the headline `Metrics::score` is
+  what `threshold()` gates. `evaluate` is just this with the GPT baseline, so the
+  single-arch runner (`run_all`/`run_one`) is unchanged while the eval harness
+  drives the whole battery through `evaluate_with` against any registered
+  architecture.
 - Keep the benchmark **model-agnostic**: its dataset and scoring must not name a
-  particular model. Only `evaluate`'s body calls `gpt::train` today, behind the
-  `// TODO(model-trait)` seam — when a `Model` trait lands, only that body
-  changes.
+  particular model — only the `DecoderLm` seam is. (The `mad_compress`
+  autoencoder is the documented exception: it ignores `lm`.)
 
 ## Adding a benchmark
 

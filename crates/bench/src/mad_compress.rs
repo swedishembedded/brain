@@ -176,7 +176,18 @@ impl Benchmark for MadCompress {
         Ok(())
     }
 
-    fn evaluate(&self, dir: &Path, seed: u64) -> std::io::Result<Metrics> {
+    /// Non-LM objective: this benchmark trains its own bottleneck
+    /// [`autoencoder::Autoencoder`] (a `Regression`/MSE head), so it **ignores**
+    /// the supplied `lm` — a causal next-token decoder cannot express the
+    /// compress-then-reconstruct objective (ADR §6). It is therefore reported in
+    /// the eval battery but its score reflects the autoencoder, not `lm`'s
+    /// architecture; see the `compression` capability axis note.
+    fn evaluate_with(
+        &self,
+        _lm: &dyn crate::DecoderLm,
+        dir: &Path,
+        seed: u64,
+    ) -> std::io::Result<Metrics> {
         let codebook = self.codebook(seed);
         let train = binio::read_u16_bin(&dir.join("train.bin"))?;
         let val = binio::read_u16_bin(&dir.join("val.bin"))?;

@@ -30,6 +30,9 @@
 
 use std::path::Path;
 
+pub mod arch;
+pub mod axes;
+pub mod eval;
 pub mod mad_compress;
 pub mod mad_fuzzy_recall;
 pub mod mad_memorize;
@@ -47,6 +50,9 @@ pub mod toolcall;
 
 pub use metrics::Metrics;
 pub use model::{DecoderLm, GptDecoder, Scorer, TrainConfig};
+
+pub use arch::{arch_registry, get_arch, Arch};
+pub use axes::{axes, axis_of};
 
 /// A benchmark: owns its dataset and its scoring, model-agnostic at this level.
 ///
@@ -70,7 +76,30 @@ pub trait Benchmark {
     /// Train a model on the dataset in `dir` and return its [`Metrics`]. The
     /// headline `Metrics::score` is what [`threshold`](Benchmark::threshold)
     /// gates.
-    fn evaluate(&self, dir: &Path, seed: u64) -> std::io::Result<Metrics>;
+    ///
+    /// This defaults to scoring the **GPT baseline** ([`model::GptDecoder`]). It
+    /// is the entry point the single-arch runner (`run_all`/`run_one`) uses, so
+    /// existing behavior is unchanged. To score a *different* architecture, the
+    /// eval harness calls [`evaluate_with`](Benchmark::evaluate_with) directly.
+    fn evaluate(&self, dir: &Path, seed: u64) -> std::io::Result<Metrics> {
+        self.evaluate_with(&GptDecoder, dir, seed)
+    }
+
+    /// Train + score this benchmark with a **specific architecture** (any
+    /// [`DecoderLm`]) and return its [`Metrics`]. This is the architecture-agnostic
+    /// core: [`evaluate`](Benchmark::evaluate) is just this with the GPT baseline,
+    /// and the architecture-eval harness ([`arch`]) drives the whole battery
+    /// through here with a registered [`arch::Arch`]'s decoder.
+    ///
+    /// Benchmarks whose objective is *not* a causal next-token decoder (e.g. the
+    /// [`mad_compress`] autoencoder) ignore `lm` and train their own model; that
+    /// is documented per benchmark.
+    fn evaluate_with(
+        &self,
+        lm: &dyn DecoderLm,
+        dir: &Path,
+        seed: u64,
+    ) -> std::io::Result<Metrics>;
 
     /// Pass/fail bar for `Metrics::score` (higher is better unless a benchmark
     /// documents otherwise). Calibrated against measured CPU-backend runs.
@@ -122,6 +151,32 @@ pub fn registry() -> Vec<Box<dyn Benchmark>> {
         // Non-LM objective: a bottleneck autoencoder with an MSE Regression head
         // (ADR §6 / PR-10) — sequence -> single compressed `z` -> reconstruction.
         Box::new(mad_compress::MadCompress::default()),
+    ]
+}
+
+/// A **smoke** registry: the same benchmarks as [`registry`] but with their step
+/// budgets (and corpus / eval sizes) slashed so the whole battery runs in a
+/// couple of minutes on the CPU backend. Scores from a smoke run are *not*
+/// meaningful as architecture quality — it exists purely so the eval harness +
+/// artifact path can be exercised end-to-end in a fast integration test (see
+/// `tests/eval.rs`). Selected via `brain bench eval --smoke`.
+pub fn registry_smoke() -> Vec<Box<dyn Benchmark>> {
+    // Tiny but still > chance-shaped: a handful of steps over a small corpus.
+    const STEPS: u32 = 30;
+    const SEQS: usize = 600;
+    const EVALS: usize = 40;
+    vec![
+        Box::new(mqar::Mqar { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
+        Box::new(toolcall::Toolcall { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
+        Box::new(mad_recall::MadRecall { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
+        Box::new(mad_fuzzy_recall::MadFuzzyRecall { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
+        Box::new(mad_noisy_recall::MadNoisyRecall { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
+        Box::new(mad_selective_copy::MadSelectiveCopy { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
+        Box::new(mad_memorize::MadMemorize { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
+        Box::new(parity::Parity { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
+        Box::new(mod_add::ModAdd { steps: STEPS, ..Default::default() }),
+        Box::new(dyck::Dyck { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
+        Box::new(mad_compress::MadCompress { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
     ]
 }
 

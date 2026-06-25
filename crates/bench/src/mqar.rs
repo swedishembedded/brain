@@ -41,7 +41,7 @@ use data::binio::{self, Meta};
 use data::rng::Rng;
 
 use crate::metrics::{associative_recall, Metrics};
-use crate::model::{argmax, DecoderLm, GptDecoder, TrainConfig};
+use crate::model::{argmax, DecoderLm, TrainConfig};
 use crate::Benchmark;
 
 /// Token id of the newline / end-of-sequence marker (maps to `'\n'`).
@@ -209,10 +209,6 @@ impl Benchmark for Mqar {
         Ok(())
     }
 
-    fn evaluate(&self, dir: &Path, seed: u64) -> std::io::Result<Metrics> {
-        self.evaluate_with(&GptDecoder, dir, seed)
-    }
-
     fn threshold(&self) -> f32 {
         // Far above chance (0.125) yet below the measured ~0.77, with margin for
         // fp32 / single-run noise on the software CPU backend.
@@ -222,14 +218,12 @@ impl Benchmark for Mqar {
     fn report_fields(&self) -> Vec<&str> {
         vec!["chance", "train_ce"]
     }
-}
 
-impl Mqar {
     /// Train + score this benchmark with a specific architecture (any
     /// [`DecoderLm`]). [`Benchmark::evaluate`] calls this with the GPT baseline;
     /// scoring an alternative architecture is just passing a different
     /// `DecoderLm` — no other change. This is the architecture-agnostic core.
-    pub fn evaluate_with(&self, lm: &dyn DecoderLm, dir: &Path, seed: u64) -> std::io::Result<Metrics> {
+    fn evaluate_with(&self, lm: &dyn DecoderLm, dir: &Path, seed: u64) -> std::io::Result<Metrics> {
         // ---- TRAIN (architecture-agnostic via DecoderLm) ---------------------
         let block = self.block_size();
         let train_cfg = TrainConfig {
