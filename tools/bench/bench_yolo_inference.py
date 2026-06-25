@@ -16,6 +16,16 @@ Prereqs (dev machine): `pip install ultralytics`, an exported brain weights file
       --pt scratchpad/yolov8n.pt \
       --brain-weights scratchpad/yolov8n.brain.weights \
       --brain-bin ./target/release/brain
+
+Device selection (each side picks its device independently):
+  --device cpu|gpu          set both sides at once
+  --torch-device cpu|cuda|0 Ultralytics/torch device (default cpu)
+  --brain-device cpu|gpu    brain backend: cpu = native Cranelift-JIT+AVX2,
+                            gpu = wgpu/WebGPU running the WGSL kernels (default cpu)
+Note: brain's device is driven by the BRAIN_DEVICE the bench passes to the
+engine subprocess via --brain-device — NOT by a BRAIN_DEVICE you set in your
+own shell (the client sets it explicitly). The brain CPU fast paths
+(Cranelift JIT + AVX2 fast-conv/fast-ops) apply only to --brain-device cpu.
 """
 from __future__ import annotations
 import argparse, resource, statistics, sys, time
@@ -32,7 +42,7 @@ def _vmhwm_kb(pid: int) -> int:
     return -1
 
 
-def bench_ultralytics(image_path, pt, n):
+def bench_ultralytics(image_path, pt, n, device):
     from ultralytics import YOLO
     import torch
     t0 = time.perf_counter()
@@ -40,26 +50,32 @@ def bench_ultralytics(image_path, pt, n):
     im = Image.open(image_path).convert("RGB")
     # warm-up (first calls pay graph/alloc init)
     for _ in range(2):
-        m.predict(im, imgsz=640, device="cpu", verbose=False)
+        m.predict(im, imgsz=640, device=device, verbose=False)
     load = time.perf_counter() - t0
     lat = []
     for _ in range(n):
         t = time.perf_counter()
-        r = m.predict(im, imgsz=640, device="cpu", verbose=False)
+        r = m.predict(im, imgsz=640, device=device, verbose=False)
         lat.append((time.perf_counter() - t) * 1e3)
     res = r[0].boxes
     dets = sorted(((int(c), float(s)) for c, s in zip(res.cls.tolist(), res.conf.tolist())),
                   key=lambda d: -d[1])
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # KB (whole py+torch process)
-    return load, lat, rss, dets, torch.get_num_threads()
+    # On CPU torch parallelises over get_num_threads(); on CUDA that's not the
+    # relevant knob, so report the device string instead.
+    par = str(torch.get_num_threads()) if str(device) == "cpu" else str(device)
+    return load, lat, rss, dets, par
 
 
-def bench_brain(image_path, weights, brain_bin, n, conf):
+def bench_brain(image_path, weights, brain_bin, n, conf, device):
     sys.path.insert(0, "brain-py")
     from brain_py.client import BrainClient
     im = Image.open(image_path).convert("RGB")
     t0 = time.perf_counter()
-    client = BrainClient(yolo=weights, conf=conf, brain_bin=brain_bin)
+    # `device` is forwarded verbatim as BRAIN_DEVICE for the engine subprocess:
+    # "cpu" -> native Cranelift-JIT + AVX2 fast-conv backend; anything else
+    # (e.g. "gpu") -> the wgpu/WebGPU backend running the WGSL kernels.
+    client = BrainClient(yolo=weights, conf=conf, brain_bin=brain_bin, device=device)
     client.__enter__()              # spawns `brain run --yolo`, waits for ready (model loaded)
     load = time.perf_counter() - t0
     pid = client._proc.pid
@@ -91,21 +107,42 @@ def main():
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--n-ultra", type=int, default=20)
     ap.add_argument("--n-brain", type=int, default=5)
+    # Per-side device selection (each engine picks its device independently).
+    # --device sets both at once; the per-side flags override it.
+    ap.add_argument("--device", default=None,
+                    help="convenience: set both sides (cpu|gpu). Per-side flags override.")
+    ap.add_argument("--torch-device", default=None,
+                    help='Ultralytics/torch device: "cpu", "cuda"/"0", ... (default cpu)')
+    ap.add_argument("--brain-device", default=None,
+                    help='brain BRAIN_DEVICE: "cpu" (Cranelift-JIT+AVX2) or "gpu"/wgpu (default cpu)')
     a = ap.parse_args()
 
-    print(f"image={a.image}  imgsz=640  device=cpu\n")
+    # Resolve devices: explicit per-side flag > --device > default "cpu". For the
+    # torch side, "gpu" is a friendly alias for CUDA device 0.
+    def torch_dev(d):
+        return "0" if str(d).lower() == "gpu" else d
+    torch_device = torch_dev(a.torch_device or a.device or "cpu")
+    brain_device = a.brain_device or a.device or "cpu"
 
-    ul_load, ul_lat, ul_rss, ul_dets, ul_thr = bench_ultralytics(a.image, a.pt, a.n_ultra)
-    print(_row(f"Ultralytics (torch x{ul_thr})", ul_load, ul_lat, ul_rss))
+    # Honest labels: name the backend each side actually used. brain's CPU path
+    # is the native Cranelift-JIT + AVX2 fast-conv backend; otherwise wgpu/WebGPU.
+    brain_backend = "native CPU-JIT+AVX2" if str(brain_device).lower() == "cpu" else "wgpu/WebGPU GPU"
+
+    print(f"image={a.image}  imgsz=640  torch_device={torch_device}  brain_device={brain_device}\n")
+
+    ul_load, ul_lat, ul_rss, ul_dets, ul_par = bench_ultralytics(a.image, a.pt, a.n_ultra, torch_device)
+    print(_row(f"Ultralytics (torch {ul_par})", ul_load, ul_lat, ul_rss))
     print(f"   dets: {ul_dets[:4]}\n")
 
     br_load, br_lat, br_rss, br_dets = bench_brain(a.image, a.brain_weights, a.brain_bin,
-                                                   a.n_brain, a.conf)
-    print(_row("brain (WGSL CPU-JIT)", br_load, br_lat, br_rss, "(engine subprocess)"))
+                                                   a.n_brain, a.conf, brain_device)
+    print(_row(f"brain ({brain_backend})", br_load, br_lat, br_rss, "(engine subprocess)"))
     print(f"   dets: {br_dets[:4]}\n")
 
     sx = statistics.median(br_lat) / statistics.median(ul_lat)
-    print(f"==> brain is {sx:.1f}x the latency of Ultralytics; "
+    rel = "faster than" if sx < 1 else "the latency of"
+    factor = (1 / sx) if sx < 1 else sx
+    print(f"==> brain is {factor:.1f}x {rel} Ultralytics; "
           f"RSS {br_rss/ul_rss:.2f}x ({br_rss/1024:.0f} vs {ul_rss/1024:.0f} MiB).")
 
 
