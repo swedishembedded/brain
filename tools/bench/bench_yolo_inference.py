@@ -42,15 +42,45 @@ def _vmhwm_kb(pid: int) -> int:
     return -1
 
 
+def _resolve_torch_device(requested):
+    """Resolve a requested torch device, falling back when a GPU isn't usable:
+    cuda (if available) -> vulkan (if built) -> mps (Apple) -> cpu. Returns
+    (effective_device, note) where note explains any fallback."""
+    import torch
+    d = str(requested).lower()
+    if d == "cpu":
+        return "cpu", None
+    want_cuda = d in ("gpu", "cuda", "0") or d.startswith("cuda")
+    if want_cuda and torch.cuda.is_available():
+        return ("0" if d == "gpu" else requested), None
+    # GPU requested but CUDA not available — try the alternatives in order.
+    if getattr(torch, "is_vulkan_available", lambda: False)():
+        return "vulkan", f"torch: CUDA unavailable, trying Vulkan (requested {requested})"
+    mps = getattr(getattr(torch.backends, "mps", None), "is_available", lambda: False)()
+    if mps:
+        return "mps", f"torch: CUDA unavailable, using MPS (requested {requested})"
+    return "cpu", f"torch: no CUDA/Vulkan/MPS available, falling back to CPU (requested {requested})"
+
+
 def bench_ultralytics(image_path, pt, n, device):
     from ultralytics import YOLO
     import torch
+    device, note = _resolve_torch_device(device)
+    if note:
+        print(f"   [{note}]")
     t0 = time.perf_counter()
     m = YOLO(pt)
     im = Image.open(image_path).convert("RGB")
-    # warm-up (first calls pay graph/alloc init)
-    for _ in range(2):
-        m.predict(im, imgsz=640, device=device, verbose=False)
+    # warm-up (first calls pay graph/alloc init). If the chosen accelerator
+    # can't actually run the model (e.g. Vulkan op coverage), fall back to CPU.
+    try:
+        for _ in range(2):
+            m.predict(im, imgsz=640, device=device, verbose=False)
+    except Exception as e:  # noqa: BLE001 - bench robustness over a clean device
+        print(f"   [torch: device {device!r} failed ({type(e).__name__}); using CPU]")
+        device = "cpu"
+        for _ in range(2):
+            m.predict(im, imgsz=640, device=device, verbose=False)
     load = time.perf_counter() - t0
     lat = []
     for _ in range(n):
