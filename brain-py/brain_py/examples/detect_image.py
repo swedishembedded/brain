@@ -22,7 +22,18 @@ from PIL import Image
 
 from ..annotate import annotate
 from ..client import BrainClient
+from ..coco import COCO_NAMES
 from .make_test_image import make_test_image
+
+
+def _load_names(spec):
+    """Resolve --names into a class-id -> name list, or None to keep numeric ids."""
+    if not spec:
+        return None
+    if spec.lower() == "coco":
+        return COCO_NAMES
+    with open(spec, "r", encoding="utf-8") as fh:
+        return [ln.strip() for ln in fh if ln.strip()]
 
 
 def main() -> int:
@@ -34,8 +45,16 @@ def main() -> int:
     ap.add_argument("--out", default="annotated.png", help="output annotated PNG")
     ap.add_argument("--conf", type=float, default=0.25,
                     help="detection confidence threshold (passed to brain run --conf)")
+    ap.add_argument("--names", help="class names: 'coco' for the built-in COCO-80 "
+                    "list, or a path to a newline-separated names file. Default: "
+                    "numeric class ids.")
+    ap.add_argument("--timeout", type=float, default=300.0,
+                    help="seconds to wait for a detection (real yolov8n at 640px on "
+                    "the CPU JIT takes ~10s/frame; raise for slower hosts).")
     ap.add_argument("--brain-bin", help="path to the brain executable")
     args = ap.parse_args()
+
+    names = _load_names(args.names)
 
     if args.image:
         image = Image.open(args.image)
@@ -45,7 +64,13 @@ def main() -> int:
         print(f"generated synthetic gen_detect image ({image.size[0]}x{image.size[1]})")
 
     with BrainClient(yolo=args.weights, conf=args.conf, brain_bin=args.brain_bin) as client:
-        dets = client.detect(image, conf=args.conf)
+        dets = client.detect(image, conf=args.conf, timeout=args.timeout)
+
+    # Relabel with human-readable class names when provided.
+    if names is not None:
+        for d in dets:
+            if 0 <= int(d.cls) < len(names):
+                d.label = names[int(d.cls)]
 
     print(f"{len(dets)} detection(s):")
     for d in dets:
