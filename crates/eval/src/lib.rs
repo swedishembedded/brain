@@ -12,6 +12,8 @@
 //!   held-out tail and check exact string equality. This is the honest
 //!   "did it actually learn the rule" number, not perplexity.
 
+pub mod detection;
+
 use std::path::Path;
 
 use data::binio::Meta;
