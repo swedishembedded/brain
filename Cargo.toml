@@ -27,6 +27,7 @@ default-members = [
     "crates/events",
     "crates/hfsm",
     "crates/yolo",
+    "crates/runtime",
     "crates/cli",
     "crates/web",
 ]
@@ -60,6 +61,7 @@ brain-gradcheck = { path = "crates/gradcheck" }
 brain-events = { path = "crates/events" }
 brain-hfsm = { path = "crates/hfsm" }
 brain-yolo = { path = "crates/yolo" }
+brain-runtime = { path = "crates/runtime" }
 brain-vulkan = { path = "crates/vulkan" }
 brain-wgsl-cpu = { path = "crates/wgsl-cpu" }
 

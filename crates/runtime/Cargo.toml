@@ -1,0 +1,28 @@
+[package]
+name = "brain-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Brain runtime: event-driven HSM controller wiring inference/detection models to the JSONL event protocol."
+
+[lib]
+name = "runtime"
+path = "src/lib.rs"
+
+[dependencies]
+# Minimal deps: the JSONL codec, the generic HSM engine, the GPT model + its
+# checkpoint loader. A real YOLO `DetectModel` adapter (brain-yolo) wires in
+# later behind the object-safe trait; tests use `FakeDetectModel`.
+brain-events.workspace = true
+brain-hfsm.workspace = true
+brain-gpt.workspace = true
+brain-yolo.workspace = true
+brain-checkpoint.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# Integration tests drive the controller with a real tiny GPT, a real tiny YOLO,
+# and the codec helpers (base64/PPM) for synthetic frames.
+brain-gpt.workspace = true
+brain-yolo.workspace = true
+brain-events.workspace = true
