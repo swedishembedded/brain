@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+"""Head-to-head inference benchmark: brain (from-scratch WGSL on the CPU JIT)
+vs the default Python/Ultralytics YOLOv8n, on the SAME image + 640px + CPU.
+
+Measures, end-to-end (image -> boxes): model load time, warm per-image latency
+(median over N), throughput (img/s), and peak RSS.
+
+Prereqs (dev machine): `pip install ultralytics`, an exported brain weights file
+(tools/yolo_export/export_yolov8.py), and `cargo build --release`.
+
+  python3 tools/bench/bench_yolo_inference.py \
+      --image scratchpad/dog.png \
+      --pt scratchpad/yolov8n.pt \
+      --brain-weights scratchpad/yolov8n.brain.weights \
+      --brain-bin ./target/release/brain
+"""
+from __future__ import annotations
+import argparse, resource, statistics, sys, time
+from PIL import Image
+
+
+def _vmhwm_kb(pid: int) -> int:
+    try:
+        for line in open(f"/proc/{pid}/status"):
+            if line.startswith("VmHWM"):
+                return int(line.split()[1])
+    except OSError:
+        pass
+    return -1
+
+
+def bench_ultralytics(image_path, pt, n):
+    from ultralytics import YOLO
+    import torch
+    t0 = time.perf_counter()
+    m = YOLO(pt)
+    im = Image.open(image_path).convert("RGB")
+    # warm-up (first calls pay graph/alloc init)
+    for _ in range(2):
+        m.predict(im, imgsz=640, device="cpu", verbose=False)
+    load = time.perf_counter() - t0
+    lat = []
+    for _ in range(n):
+        t = time.perf_counter()
+        r = m.predict(im, imgsz=640, device="cpu", verbose=False)
+        lat.append((time.perf_counter() - t) * 1e3)
+    res = r[0].boxes
+    dets = sorted(((int(c), float(s)) for c, s in zip(res.cls.tolist(), res.conf.tolist())),
+                  key=lambda d: -d[1])
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # KB (whole py+torch process)
+    return load, lat, rss, dets, torch.get_num_threads()
+
+
+def bench_brain(image_path, weights, brain_bin, n, conf):
+    sys.path.insert(0, "brain-py")
+    from brain_py.client import BrainClient
+    im = Image.open(image_path).convert("RGB")
+    t0 = time.perf_counter()
+    client = BrainClient(yolo=weights, conf=conf, brain_bin=brain_bin)
+    client.__enter__()              # spawns `brain run --yolo`, waits for ready (model loaded)
+    load = time.perf_counter() - t0
+    pid = client._proc.pid
+    client.detect(im, timeout=300)  # warm-up
+    lat, dets = [], []
+    for _ in range(n):
+        t = time.perf_counter()
+        dets = client.detect(im, timeout=300)
+        lat.append((time.perf_counter() - t) * 1e3)
+    rss = _vmhwm_kb(pid)            # KB (brain engine subprocess only)
+    out = sorted(((d.cls, d.conf) for d in dets), key=lambda d: -d[1])
+    client.__exit__(None, None, None)
+    return load, lat, rss, out
+
+
+def _row(name, load, lat, rss_kb, extra=""):
+    med = statistics.median(lat)
+    return (f"{name:<22} load {load:6.2f}s | latency med {med:8.1f} ms "
+            f"(min {min(lat):8.1f}, max {max(lat):8.1f}) | "
+            f"{1000/med:7.2f} img/s | peak RSS {rss_kb/1024:7.1f} MiB {extra}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--image", default="scratchpad/dog.png")
+    ap.add_argument("--pt", default="scratchpad/yolov8n.pt")
+    ap.add_argument("--brain-weights", default="scratchpad/yolov8n.brain.weights")
+    ap.add_argument("--brain-bin", default="./target/release/brain")
+    ap.add_argument("--conf", type=float, default=0.25)
+    ap.add_argument("--n-ultra", type=int, default=20)
+    ap.add_argument("--n-brain", type=int, default=5)
+    a = ap.parse_args()
+
+    print(f"image={a.image}  imgsz=640  device=cpu\n")
+
+    ul_load, ul_lat, ul_rss, ul_dets, ul_thr = bench_ultralytics(a.image, a.pt, a.n_ultra)
+    print(_row(f"Ultralytics (torch x{ul_thr})", ul_load, ul_lat, ul_rss))
+    print(f"   dets: {ul_dets[:4]}\n")
+
+    br_load, br_lat, br_rss, br_dets = bench_brain(a.image, a.brain_weights, a.brain_bin,
+                                                   a.n_brain, a.conf)
+    print(_row("brain (WGSL CPU-JIT)", br_load, br_lat, br_rss, "(engine subprocess)"))
+    print(f"   dets: {br_dets[:4]}\n")
+
+    sx = statistics.median(br_lat) / statistics.median(ul_lat)
+    print(f"==> brain is {sx:.1f}x the latency of Ultralytics; "
+          f"RSS {br_rss/ul_rss:.2f}x ({br_rss/1024:.0f} vs {ul_rss/1024:.0f} MiB).")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
