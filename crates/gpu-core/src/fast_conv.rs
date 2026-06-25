@@ -134,7 +134,10 @@ fn im2col(p: &ConvParams, x: &[f32], b: &mut [f32]) {
 }
 
 /// `C[M,P] = A[M,Kg] · B[Kg,P]`, all row-major. Parallel over P column ranges so
-/// both channel-heavy (large M) and spatial-heavy (large P) layers scale.
+/// both channel-heavy (large M) and spatial-heavy (large P) layers scale; within
+/// each thread's band, `B` is walked in L2-sized column panels so a panel stays
+/// resident across the whole output-channel loop (instead of re-streaming the
+/// full `[Kg,P]` im2col once per channel tile).
 fn gemm(m: usize, kg: usize, psz: usize, a: &[f32], b: &[f32], c: &mut [f32]) {
     // Column-range chunks aligned to NR=16, ~4 per thread for load balance.
     let threads = rayon::current_num_threads().max(1);
@@ -142,6 +145,14 @@ fn gemm(m: usize, kg: usize, psz: usize, a: &[f32], b: &[f32], c: &mut [f32]) {
     let ntiles = psz.div_ceil(nr);
     let tiles_per_chunk = ntiles.div_ceil(threads * 4).max(1);
     let chunk_cols = (tiles_per_chunk * nr).max(nr);
+
+    // B-panel width: keep the resident `[Kg, nc]` panel near ~192 KiB (L2-ish),
+    // rounded to NR and at least one tile.
+    let nc = {
+        let budget_floats = (192 * 1024) / 4; // ~192 KiB of f32
+        let cols = (budget_floats / kg.max(1)) / nr * nr;
+        cols.clamp(nr, chunk_cols.max(nr))
+    };
 
     let use_avx2 = avx2_available();
     // SAFETY: each chunk owns a disjoint [pa,pb) column band of every C row, so
@@ -153,13 +164,18 @@ fn gemm(m: usize, kg: usize, psz: usize, a: &[f32], b: &[f32], c: &mut [f32]) {
         let pb = (pa + chunk_cols).min(psz);
         unsafe {
             let c = std::slice::from_raw_parts_mut(cptr.0, m * psz);
-            if use_avx2 {
-                #[cfg(target_arch = "x86_64")]
-                gemm_band_avx2(m, kg, psz, a, b, c, pa, pb);
-                #[cfg(not(target_arch = "x86_64"))]
-                gemm_band_scalar(m, kg, psz, a, b, c, pa, pb);
-            } else {
-                gemm_band_scalar(m, kg, psz, a, b, c, pa, pb);
+            let mut pp = pa;
+            while pp < pb {
+                let pe = (pp + nc).min(pb);
+                if use_avx2 {
+                    #[cfg(target_arch = "x86_64")]
+                    gemm_band_avx2(m, kg, psz, a, b, c, pp, pe);
+                    #[cfg(not(target_arch = "x86_64"))]
+                    gemm_band_scalar(m, kg, psz, a, b, c, pp, pe);
+                } else {
+                    gemm_band_scalar(m, kg, psz, a, b, c, pp, pe);
+                }
+                pp = pe;
             }
         }
     });
@@ -383,5 +399,51 @@ mod tests {
     fn conv_stem_shape() {
         // yolov8 stem: 3->16, 3x3 s2 p1, on a small spatial proxy.
         check(cp(1, 3, 32, 32, 16, 3, 2, 1));
+    }
+
+    /// Contention-robust conv throughput probe: times each representative
+    /// yolov8n@640 layer `N` times and reports the *minimum* wall time (the
+    /// least-contended sample) + GFLOP/s. Ignored by default; run with:
+    ///   cargo test --release -p brain-gpu-core -- --ignored --nocapture bench_conv_gflops
+    #[test]
+    #[ignore]
+    fn bench_conv_gflops() {
+        use std::time::Instant;
+        // (label, cin,h,w,cout,k,stride,pad) — the heavy yolov8n@640 conv layers.
+        let shapes = [
+            ("stem 3->16 3x3 s2 @640", 3, 640, 640, 16, 3, 2, 1),
+            ("16->32 3x3 s2 @320", 16, 320, 320, 32, 3, 2, 1),
+            ("32->32 3x3 s1 @160", 32, 160, 160, 32, 3, 1, 1),
+            ("64->64 3x3 s1 @80", 64, 80, 80, 64, 3, 1, 1),
+            ("128->128 3x3 s1 @40", 128, 40, 40, 128, 3, 1, 1),
+            ("1x1 128->128 @80", 128, 80, 80, 128, 1, 1, 0),
+            ("1x1 256->256 @20", 256, 20, 20, 256, 1, 1, 0),
+        ];
+        let n = 30;
+        let mut total_flop = 0.0f64;
+        let mut total_min = 0.0f64;
+        println!("\n=== conv microbench (min of {n}, threads={}) ===", rayon::current_num_threads());
+        for (label, cin, h, w, cout, k, stride, pad) in shapes {
+            let p = cp(1, cin, h, w, cout, k, stride, pad);
+            let mut s = 999u32;
+            let x: Vec<f32> = (0..p.x_len()).map(|_| lcg(&mut s)).collect();
+            let wt: Vec<f32> = (0..p.w_len()).map(|_| lcg(&mut s)).collect();
+            let mut y = vec![0.0f32; p.y_len()];
+            // warm
+            conv2d(&p, &x, &wt, &mut y);
+            let mut best = f64::INFINITY;
+            for _ in 0..n {
+                let t = Instant::now();
+                conv2d(&p, &x, &wt, &mut y);
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            let flop = 2.0 * (p.cout * p.cin * p.k * p.k * p.ho * p.wo) as f64;
+            let gflops = flop / best / 1e9;
+            total_flop += flop;
+            total_min += best;
+            println!("  {label:<26} {:7.2} ms  {gflops:7.1} GFLOP/s", best * 1e3);
+        }
+        println!("  {:<26} {:7.2} ms  {:7.1} GFLOP/s (aggregate)", "TOTAL",
+                 total_min * 1e3, total_flop / total_min / 1e9);
     }
 }
