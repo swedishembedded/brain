@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! `brain run` / `brain serve` — the event-driven stdio controller loop.
+//!
+//! Reads JSONL [`events::Event`] lines from stdin (a blocking read is the idle
+//! wait), feeds each to a [`runtime::Controller`], and writes every emitted event
+//! back as a JSONL line to stdout (flushed per line). Diagnostics go to stderr.
+//!
+//! Flags:
+//!   * `--gpt <path>` (or env `BRAIN_GPT`) — load a GPT checkpoint as the text
+//!     model. With none, a fake echo model is used so the loop is testable
+//!     without a trained model.
+//!   * `--yolo <path>` (or env `BRAIN_YOLO`) — load a YOLO checkpoint as the
+//!     object detector. With none, a `FakeDetectModel` returns a fixed box so the
+//!     loop runs without a trained detector.
+//!   * `--max-new N`, `--temp X`, `--top-k K`, `--seed S` — generation config.
+
+use std::io::{BufRead, Write};
+
+use runtime::{
+    Controller, DetectModel, FakeDetectModel, FakeInferModel, GenConfig, GptInfer, Registry,
+    YoloDetect,
+};
+
+pub fn run_serve(args: &[String]) {
+    let mut gpt_path = std::env::var("BRAIN_GPT").ok();
+    let mut yolo_path = std::env::var("BRAIN_YOLO").ok();
+    let mut cfg = GenConfig { max_new: 256, temperature: 0.0, top_k: 0, eos: None, seed: 0 };
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--gpt" => {
+                i += 1;
+                gpt_path = args.get(i).cloned();
+            }
+            "--yolo" => {
+                i += 1;
+                yolo_path = args.get(i).cloned();
+            }
+            "--max-new" => {
+                i += 1;
+                cfg.max_new = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(cfg.max_new);
+            }
+            "--temp" | "--temperature" => {
+                i += 1;
+                cfg.temperature =
+                    args.get(i).and_then(|s| s.parse().ok()).unwrap_or(cfg.temperature);
+            }
+            "--top-k" => {
+                i += 1;
+                cfg.top_k = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(cfg.top_k);
+            }
+            "--seed" => {
+                i += 1;
+                cfg.seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(cfg.seed);
+            }
+            other => eprintln!("brain run: ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+
+    // Build the registry: a real GPT if a checkpoint was given, else a fake echo
+    // model so the loop runs end-to-end without a trained model.
+    let infer: Box<dyn runtime::InferModel> = match &gpt_path {
+        Some(path) => {
+            eprintln!("brain run: loading GPT checkpoint {path}");
+            // Char models embed itos; the pump uses it for the EOS-less stop at
+            // max_new. We leave eos as configured (None unless the user sets one).
+            Box::new(GptInfer::load(path))
+        }
+        None => {
+            eprintln!("brain run: no --gpt checkpoint; using fake echo model");
+            // The fake echoes a fixed greeting and terminates at its EOS sentinel.
+            cfg.eos = Some(256);
+            Box::new(FakeInferModel::echoing("hello from brain"))
+        }
+    };
+    // A real YOLO if a checkpoint was given, else the fixed-box fake detector.
+    let detect: Box<dyn DetectModel> = match &yolo_path {
+        Some(path) => {
+            eprintln!("brain run: loading YOLO checkpoint {path}");
+            Box::new(YoloDetect::load(path))
+        }
+        None => {
+            eprintln!("brain run: no --yolo checkpoint; using fake detector");
+            Box::new(FakeDetectModel::default())
+        }
+    };
+
+    let mut ctrl = Controller::with_config(Registry::with_models(infer, detect), cfg);
+
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    // Announce readiness.
+    let _ = writeln!(out, "{}", events::encode_line(&events::Event::Ready));
+    let _ = out.flush();
+
+    // Blocking line read = idle wait. EOF (None) ends the loop.
+    for line in stdin.lock().lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("brain run: stdin error: {e}");
+                break;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        for ev in ctrl.feed_line(&line) {
+            if writeln!(out, "{}", events::encode_line(&ev)).is_err() {
+                return; // stdout closed
+            }
+            let _ = out.flush();
+        }
+    }
+}

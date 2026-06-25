@@ -19,10 +19,14 @@ brain-gpu-core.workspace = true
 brain-moe.workspace = true
 brain-gpt.workspace = true
 brain-pid.workspace = true
+brain-yolo.workspace = true
+brain-model.workspace = true
 brain-data.workspace = true
 brain-federated.workspace = true
 brain-gradcheck.workspace = true
 brain-eval.workspace = true
 brain-bench.workspace = true
 brain-checkpoint.workspace = true
+brain-events.workspace = true
+brain-runtime.workspace = true
 brain-vulkan = { workspace = true, optional = true }

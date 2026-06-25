@@ -16,6 +16,8 @@ mod data_cli;
 mod federated_cli;
 mod gpt_cli;
 mod pid_cli;
+mod run_cli;
+mod yolo_cli;
 
 const HELP: &str = "\
 brain — train and evaluate neural nets from scratch on the GPU (Rust + WGSL).
@@ -37,6 +39,15 @@ GPT (dense baseline)
   brain gpt eval  --weights F --data <dir> [--batches N --samples M]
   brain gpt gen   --weights F [--data <dir>] [--prompt \"...\" --max-new N --temp X --top-k K]
                               (vocab is read from the checkpoint; --data only for old ones)
+
+YOLO (from-scratch anchor-free object detector)
+  brain yolo train <data_dir> --out F [--steps N --batch B --lr X --nc C
+                                       --input S --seed S]
+  brain yolo eval  --weights F --data <dir> [--conf X --iou X]   # mAP/precision/recall
+  brain yolo detect --weights F --image <P6.ppm | dataset_dir> [--conf X --iou X]
+                                                                # prints [x1,y1,x2,y2,conf,class] JSON lines
+  brain yolo fine-tune <data_dir> --weights <pretrained> --out F [--freeze-backbone ...]
+      Trains the tiny YOLOv8 graph on a `data gen detect` dataset (CPU backend).
 
 SPARSE MoE
   brain train [--steps N --batch-size B --block-size T --lr X --out F]
@@ -69,6 +80,14 @@ BENCHMARK SUITE (architecture evaluation)
                                            # RANKED tuning recommendations: what to tune to improve
                                            # in the best capability direction (headroom x size-slope)
   brain bench compare <a.json> <b.json> ...# side-by-side leaderboard across results artifacts
+
+EVENT/STDIO CONTROLLER
+  brain run [--gpt <ckpt>] [--yolo <ckpt>] [--max-new N --temp X --top-k K --seed S]
+      Event-driven HFSM controller: read JSONL events on stdin, emit JSONL events
+      on stdout (text streaming + object detection). With no --gpt (or BRAIN_GPT),
+      a fake echo model runs; with no --yolo (or BRAIN_YOLO), a fake detector runs,
+      so the loop is usable without a trained checkpoint.
+      Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain run
 
 OTHER
   brain gradcheck                          # finite-difference backprop check (GPT)
@@ -359,6 +378,7 @@ fn main() {
     match argv.get(1).map(|s| s.as_str()) {
         Some("data") => data_cli::run_data(&argv[2..]),
         Some("gpt") => gpt_cli::run_gpt(&argv[2..]),
+        Some("yolo") => yolo_cli::run_yolo(&argv[2..]),
         Some("federated") => federated_cli::run_federated(&argv[2..]),
         Some("gradcheck") => {
             let report = gradcheck::check_gpt(1);
@@ -372,6 +392,7 @@ fn main() {
             }
         }
         Some("bench") => run_bench(&argv[2..]),
+        Some("run") | Some("serve") => run_cli::run_serve(&argv[2..]),
         Some("pid") => pid_cli::run_pid(&argv[2..]),
         Some("validate") => {
             let path = argv
