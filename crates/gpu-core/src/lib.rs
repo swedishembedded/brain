@@ -70,6 +70,8 @@ impl std::ops::BitOr for BufUsage {
 mod cpu_backend;
 #[cfg(not(target_arch = "wasm32"))]
 mod fast_conv;
+#[cfg(not(target_arch = "wasm32"))]
+mod fast_ops;
 
 /// Native builds carry both backends and pick one at runtime via this enum. On
 /// wasm only the wgpu/WebGPU backend exists, so `Gpu`/`DeviceBuffer`/`Step` are

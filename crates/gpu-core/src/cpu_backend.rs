@@ -60,9 +60,21 @@ pub struct CpuBackend {
     names: Vec<String>,
     /// Per-kernel accumulated wall time + call count for `BRAIN_PROFILE`.
     profile: Option<Mutex<Vec<(std::time::Duration, u64)>>>,
-    /// Index of the `conv2d` kernel, if registered, for the native fast path.
-    /// `None` disables it (also via `BRAIN_NO_FASTCONV=1`).
-    conv2d_idx: Option<usize>,
+    /// Native fast-path kernel indices, resolved by name once at construction.
+    /// All `None` (and the fast path off) under `BRAIN_NO_FASTCONV=1` / non-AVX2.
+    fast: FastIdx,
+}
+
+/// Indices of the kernels that have a native CPU fast path (see `fast_conv` /
+/// `fast_ops`). `None` if the kernel isn't registered for this model.
+#[derive(Default)]
+struct FastIdx {
+    conv2d: Option<usize>,
+    silu: Option<usize>,
+    bn_eval: Option<usize>,
+    concat2: Option<usize>,
+    concat_split: Option<usize>,
+    upsample2: Option<usize>,
 }
 
 /// Bind group for one dispatch: the uniform stream plus the storage buffers in
@@ -84,13 +96,21 @@ impl CpuBackend {
         } else {
             None
         };
-        let fastconv_off = std::env::var("BRAIN_NO_FASTCONV").map(|v| v != "0").unwrap_or(false);
-        let conv2d_idx = if fastconv_off || !crate::fast_conv::avx2_available() {
-            None
+        let fast_off = std::env::var("BRAIN_NO_FASTCONV").map(|v| v != "0").unwrap_or(false);
+        let fast = if fast_off || !crate::fast_conv::avx2_available() {
+            FastIdx::default()
         } else {
-            names.iter().position(|n| n == "conv2d")
+            let find = |k: &str| names.iter().position(|n| n == k);
+            FastIdx {
+                conv2d: find("conv2d"),
+                silu: find("silu"),
+                bn_eval: find("bn_eval"),
+                concat2: find("concat2"),
+                concat_split: find("concat_split"),
+                upsample2: find("upsample2"),
+            }
         };
-        CpuBackend { jit, threads, names, profile, conv2d_idx }
+        CpuBackend { jit, threads, names, profile, fast }
     }
 
     pub fn storage(&self, n: u64) -> CpuBuffer {
@@ -197,12 +217,13 @@ impl CpuBackend {
         if total == 0 {
             return;
         }
-        // Native GEMM fast path for conv2d (the inference hot spot). Computes the
-        // same bias-free NCHW convolution as `conv2d.wgsl`, validated against the
-        // scalar reference; falls through to the JIT for every other kernel.
-        if Some(kind) == self.conv2d_idx && bufs.len() >= 3 {
-            // SAFETY: `uniform` is the 10-u32 conv param stream and bufs[0..3] are
-            // the x/w/y storage bases the model bound, each sized to its tensor.
+        // Native fast paths: same math as the WGSL kernels (validated against the
+        // scalar reference), but structured loops / bulk copies / AVX2 instead of
+        // the one-invocation-per-element JIT loop. Anything else falls through to
+        // the JIT below. All `unsafe` here reconstructs slices from the bound
+        // storage bases, each sized to its tensor by the model.
+        let f = &self.fast;
+        if Some(kind) == f.conv2d && bufs.len() >= 3 {
             unsafe {
                 let pu = std::slice::from_raw_parts(uniform, 10);
                 let p = crate::fast_conv::ConvParams::from_u32(pu);
@@ -210,6 +231,65 @@ impl CpuBackend {
                 let w = std::slice::from_raw_parts(bufs[1] as *const f32, p.w_len());
                 let y = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, p.y_len());
                 crate::fast_conv::conv2d(&p, x, w, y);
+            }
+            return;
+        }
+        if Some(kind) == f.silu && bufs.len() >= 2 {
+            unsafe {
+                let total = *uniform as usize;
+                let x = std::slice::from_raw_parts(bufs[0] as *const f32, total);
+                let out = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, total);
+                crate::fast_ops::silu(x, out);
+            }
+            return;
+        }
+        if Some(kind) == f.bn_eval && bufs.len() >= 5 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 4);
+                let (n, c, h, w) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize);
+                let len = n * c * h * w;
+                let x = std::slice::from_raw_parts(bufs[0] as *const f32, len);
+                let mv = std::slice::from_raw_parts(bufs[1] as *const f32, 2 * c);
+                let gb = std::slice::from_raw_parts(bufs[2] as *const f32, 2 * c);
+                let out = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, len);
+                crate::fast_ops::bn_eval(pu, x, mv, gb, out);
+            }
+            return;
+        }
+        if Some(kind) == f.concat2 && bufs.len() >= 4 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 5);
+                let (n, ca, cb, h, w) =
+                    (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
+                let hw = h * w;
+                let a = std::slice::from_raw_parts(bufs[0] as *const f32, n * ca * hw);
+                let b = std::slice::from_raw_parts(bufs[1] as *const f32, n * cb * hw);
+                let y = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, n * (ca + cb) * hw);
+                crate::fast_ops::concat2(pu, a, b, y);
+            }
+            return;
+        }
+        if Some(kind) == f.concat_split && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 6);
+                let (n, ctot, csrc, _off, h, w) = (
+                    pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize, pu[5] as usize,
+                );
+                let hw = h * w;
+                let dy = std::slice::from_raw_parts(bufs[0] as *const f32, n * ctot * hw);
+                let da = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, n * csrc * hw);
+                crate::fast_ops::concat_split(pu, dy, da);
+            }
+            return;
+        }
+        if Some(kind) == f.upsample2 && bufs.len() >= 2 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 4);
+                let (n, c, h, w) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize);
+                let hw = h * w;
+                let x = std::slice::from_raw_parts(bufs[0] as *const f32, n * c * hw);
+                let y = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, n * c * 4 * hw);
+                crate::fast_ops::upsample2(pu, x, y);
             }
             return;
         }
