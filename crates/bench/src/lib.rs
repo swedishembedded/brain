@@ -30,8 +30,10 @@
 
 use std::path::Path;
 
+pub mod advisor;
 pub mod arch;
 pub mod axes;
+pub mod capscale;
 pub mod eval;
 pub mod mad_compress;
 pub mod mad_fuzzy_recall;

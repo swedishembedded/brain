@@ -1,0 +1,189 @@
+{
+  "arch": "gpt",
+  "axes": [
+    {
+      "axis": "recall",
+      "bench": "mqar",
+      "fit": {
+        "a": 129.82162995935025,
+        "beta": 0.8461320794836158,
+        "ceil": 0.5926666388511658,
+        "r2": 0.4564672714142882
+      },
+      "informational": false,
+      "labels": [
+        "L1xD32xH2",
+        "L2xD64xH4",
+        "L3xD96xH6"
+      ],
+      "params": [
+        17888,
+        110336,
+        351072
+      ],
+      "predicted_2x": 0.5911994084782681,
+      "predicted_4x": 0.5918504565508366,
+      "scores": [
+        0.574999988079071,
+        0.5583333373069763,
+        0.5916666388511658
+      ],
+      "slope_per_doubling": 0.0038807458881252197,
+      "verdict": "flat"
+    },
+    {
+      "axis": "copying",
+      "bench": "mad_selective_copy",
+      "fit": {
+        "a": 2.7588718835243418,
+        "beta": 0.17809607236747715,
+        "ceil": 0.973624340201181,
+        "r2": 0.8512708433020096
+      },
+      "informational": false,
+      "labels": [
+        "L1xD32xH2",
+        "L2xD64xH4",
+        "L3xD96xH6"
+      ],
+      "params": [
+        17888,
+        110336,
+        351072
+      ],
+      "predicted_2x": 0.7227212608187028,
+      "predicted_4x": 0.7518589690621289,
+      "scores": [
+        0.46666666865348816,
+        0.6666666865348816,
+        0.6666666865348816
+      ],
+      "slope_per_doubling": 0.046568999232749785,
+      "verdict": "improving"
+    },
+    {
+      "axis": "memory",
+      "bench": "mad_memorize",
+      "fit": {
+        "a": 1.0000000000000007e-9,
+        "beta": -0.0,
+        "ceil": 1.0,
+        "r2": 1.0
+      },
+      "informational": false,
+      "labels": [
+        "L1xD32xH2",
+        "L2xD64xH4",
+        "L3xD96xH6"
+      ],
+      "params": [
+        17888,
+        110336,
+        351072
+      ],
+      "predicted_2x": 0.999999999,
+      "predicted_4x": 0.999999999,
+      "scores": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "slope_per_doubling": 0.0,
+      "verdict": "saturating"
+    },
+    {
+      "axis": "state_tracking",
+      "bench": "parity",
+      "fit": {
+        "a": 13.272337119822282,
+        "beta": 0.4175883531864664,
+        "ceil": 0.8142380952380952,
+        "r2": 0.9999920210490106
+      },
+      "informational": false,
+      "labels": [
+        "L1xD32xH2",
+        "L2xD64xH4",
+        "L3xD96xH6"
+      ],
+      "params": [
+        17888,
+        110336,
+        351072
+      ],
+      "predicted_2x": 0.7662041874500579,
+      "predicted_4x": 0.778276305301893,
+      "scores": [
+        0.5916666388511658,
+        0.7104166746139526,
+        0.75
+      ],
+      "slope_per_doubling": 0.036867127573115714,
+      "verdict": "improving"
+    },
+    {
+      "axis": "compression",
+      "bench": "mad_compress",
+      "fit": {
+        "a": 0.001000000000000001,
+        "beta": -0.0,
+        "ceil": 0.3648888895511627,
+        "r2": 1.0
+      },
+      "informational": false,
+      "labels": [
+        "L1xD32xH2",
+        "L2xD64xH4",
+        "L3xD96xH6"
+      ],
+      "params": [
+        17888,
+        110336,
+        351072
+      ],
+      "predicted_2x": 0.3638888895511627,
+      "predicted_4x": 0.3638888895511627,
+      "scores": [
+        0.3638888895511627,
+        0.3638888895511627,
+        0.3638888895511627
+      ],
+      "slope_per_doubling": 0.0,
+      "verdict": "flat"
+    },
+    {
+      "axis": "arithmetic",
+      "bench": "mod_add",
+      "fit": {
+        "a": 0.001000000000000001,
+        "beta": -0.0,
+        "ceil": 0.03548275849223137,
+        "r2": 1.0
+      },
+      "informational": true,
+      "labels": [
+        "L1xD32xH2",
+        "L2xD64xH4",
+        "L3xD96xH6"
+      ],
+      "params": [
+        17888,
+        110336,
+        351072
+      ],
+      "predicted_2x": 0.03448275849223137,
+      "predicted_4x": 0.03448275849223137,
+      "scores": [
+        0.03448275849223137,
+        0.03448275849223137,
+        0.03448275849223137
+      ],
+      "slope_per_doubling": 0.0,
+      "verdict": "flat"
+    }
+  ],
+  "commit": "845ba69",
+  "knob": "size",
+  "max_params": 351072,
+  "seed": 1234
+}

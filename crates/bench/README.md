@@ -149,6 +149,123 @@ axis:memory                       0.9500            0.4250
 This harness is the **foundation** the next layer (predictive-scaling +
 tuning-advisor) builds on: it reasons per-axis, over comparable artifacts.
 
+### Predictive per-capability scaling (`brain bench scale`)
+
+`eval` tells you *where an architecture stands today*. `scale` answers the
+forward-looking question: **how will each capability improve as we grow the
+model?** — so when you design a new architecture you can predict its per-axis
+returns to capacity *before* paying for the bigger run (`src/capscale.rs`).
+
+It sweeps one architecture across a small **SIZE grid** (3 points, increasing
+params via `ScaledGpt`: `L1xD32xH2 → L2xD64xH4 → L3xD96xH6`), and for **each
+capability axis** trains+scores *one representative benchmark* (the cheapest
+informative one — `mqar` for recall, `mad_selective_copy` for copying,
+`mad_memorize` for memory, `parity` for state_tracking, `mad_compress` for
+compression, `mod_add` for arithmetic) at every size. Per axis it then fits a
+**saturating trend** — scores rise toward a ceiling, so we fit the *gap to a
+ceiling* as a power law `score(N) ≈ ceil − A·N^(−β)` (the same OLS-in-log-space
+machinery as the loss-side `scaling::fit_power_law`, reused via
+`scaling::ols`) — and records:
+
+- the **local slope** `Δscore per doubling of N` (how much the axis *responds*
+  to capacity — the advisor's lever),
+- the saturating-fit exponent **β** and fit **R²**,
+- the **extrapolated predicted score at 2× and 4×** the largest grid `N`,
+- a coarse **verdict** ∈ {`improving`, `saturating`, `flat`}.
+
+```bash
+BRAIN_DEVICE=cpu make bench/scale ARCH=gpt              # or:
+./target/release/brain bench scale --arch gpt --seed 1234
+```
+
+writes `results/scale-<arch>-<seed>.json` and prints:
+
+```
+axis           bench                        scores@sizes   slope   beta  pred@2x  pred@4x     verdict
+-----------------------------------------------------------------------------------------------------
+recall         mqar                    0.575/0.558/0.592   0.004   0.85    0.591    0.592        flat
+copying        mad_selective_copy      0.467/0.667/0.667   0.047   0.18    0.723    0.752   improving
+memory         mad_memorize            1.000/1.000/1.000   0.000  -0.00    1.000    1.000  saturating
+state_tracking parity                  0.592/0.710/0.750   0.037   0.42    0.766    0.778   improving
+compression    mad_compress            0.364/0.364/0.364   0.000  -0.00    0.364    0.364        flat
+arithmetic     mod_add*                0.034/0.034/0.034   0.000  -0.00    0.034    0.034        flat
+```
+
+**Reading the curves.** `scores@sizes` is the per-size measured score (small →
+large); `slope` is the gain per doubling of params; `pred@2x/@4x` is the score
+the fit extrapolates at 2×/4× the largest grid size. **`improving`** = still
+climbing, capacity helps; **`saturating`** = near its ceiling, little to gain;
+**`flat`** = barely moves with size, so the axis is **architecture-bound**
+(changing the *mechanism* helps, not more params).
+
+> **Budget & caveats.** The grid is a *smoke* budget (3 sizes × 6 axes = 18 short
+> runs, ~a few minutes on the CPU backend), so the absolute scores are coarser
+> than a full `eval` — the deliverable is the **shape** of each curve and its
+> extrapolation, not a leaderboard number. `mad_compress` trains its own
+> autoencoder (it ignores the swept arch), so its curve reflects budget, not
+> capacity, and `mod_add` is a high-variance grokking diagnostic (`*`); both are
+> reported for completeness but read them with that in mind.
+
+#### The experts knob (future MoE) — how it slots in
+
+The sweep dimension is a generic `Knob` enum. Today only `Knob::Size` is wired
+(the GPT family's depth/width). A future **Mixture-of-Experts** `DecoderLm` will
+want the *same* machinery on a **number-of-experts** axis (train at experts ∈
+{2,4,8}, fit `score(experts)`). Because the fit + extrapolation + advisor reason
+purely over `(N, score)` points, activating it is just:
+
+1. register the MoE arch in `arch_registry()`, and
+2. fill the `// TODO(experts)` branch in `capscale::grid_for` to return one
+   `DecoderLm` factory per expert count.
+
+No change to `fit_saturating`, the predictions, or the advisor. The MoE *scoring*
+itself is deliberately **not** implemented here (no MoE arch is registered yet).
+
+### Tuning advisor (`brain bench advise`)
+
+The advisor turns an `eval` artifact (and, if present, a `scale` artifact) into a
+**ranked, concrete** list of *what to tune to improve in the best capability
+direction* (`src/advisor.rs`) — the breakdown the harness exists to produce.
+`brain bench eval` also prints the **top-3** of this list as a footer, so the eval
+output itself carries the tuning recommendations.
+
+```bash
+./target/release/brain bench advise results/gpt-1234.json results/scale-gpt-1234.json
+BRAIN_DEVICE=cpu make bench/advise ARCH=gpt            # finds both artifacts
+```
+
+**Heuristics** (each documented in `advisor.rs`):
+
+1. **Rank lever = headroom × responsiveness.** `headroom = 1 − score` (gated axes
+   only) × the capscale **size-slope** → the highest *expected-gain* lever first.
+   Without a scale artifact a neutral responsiveness prior is used and the rec
+   notes that size-vs-mechanism is unknown.
+2. **Signal → action** (per weak axis):
+   - low score + **rising** size-slope ⇒ *increase model size / depth* (capacity-bound);
+   - low score + **flat** size-slope ⇒ *change the MECHANISM* (attention /
+     positional / memory) — **architecture-bound, not capacity-bound**;
+   - low eval score but **low `train_ce`** (train fits, eval lags) ⇒ *more data /
+     regularization / steps* (generalization gap, not capacity);
+   - score ≈ ceiling ⇒ *deprioritize* (saturated).
+3. **Compute-efficiency.** Each rec carries **score-per-million-params** so the
+   advice weighs cost.
+
+```
+[1] axis=copying        current=0.940  pred-if-size-doubled=0.723  → increase model size / depth (more capacity)
+      rationale: score 0.940 with a rising size-slope (0.047/doubling, verdict=improving) → capacity-bound; bigger N is predicted to raise this axis [score/Mparam=8.519; lever=0.003]
+[2] axis=recall         current=0.624  pred-if-size-doubled=0.591  → change the MECHANISM (attention / positional / memory) — not size
+      rationale: score 0.624 with a FLAT size-slope (0.004/doubling, verdict=flat) → architecture-bound, not capacity-bound: more params won't move it [score/Mparam=5.659; lever=0.001]
+```
+
+**Reading it.** Each line is `[priority] axis, current score, predicted-if-size-
+doubled, → concrete action`, then a `rationale` naming the signals (slope,
+verdict, `train_ce`, score/Mparam, lever). In the worked `gpt` run above the
+standout is **recall**: it has the lowest gated score *and* a flat size-slope, so
+the advisor says more params won't help — **change the attention/recall mechanism**.
+That is exactly the "improve in the best capability direction" breakdown: it
+separates *capacity-bound* axes (buy more params) from *architecture-bound* ones
+(redesign the mechanism).
+
 ## Running
 
 There is **no usable GPU** in CI here; always select the CPU backend.
@@ -160,6 +277,10 @@ BRAIN_DEVICE=cpu cargo test -p brain-bench   # unit + integration tests
 
 # direct binary
 ./target/release/brain bench [--device cpu] [<name>] [--seed S]
+
+# predictive scaling + tuning advisor
+BRAIN_DEVICE=cpu make bench/scale ARCH=gpt    # per-capability size sweep -> scale-<arch>-<seed>.json
+BRAIN_DEVICE=cpu make bench/advise ARCH=gpt   # ranked tuning recommendations
 ```
 
 The runner prints one comparison table:

@@ -165,6 +165,35 @@ predictive-scaling + tuning-advisor layer builds on.
 > next-token decoder, so it ignores the supplied `DecoderLm` — its `compression`
 > score does not yet reflect a candidate architecture.
 
+### Predictive per-capability scaling + tuning advisor
+
+`eval` says where an arch stands; **`scale`** predicts how each capability
+improves as the model grows, and **`advise`** says what to tune.
+
+- **`brain bench scale --arch <name>`** (`crates/bench/src/capscale.rs`): sweeps a
+  small SIZE grid (`L1xD32xH2 → L2xD64xH4 → L3xD96xH6`, increasing params via
+  `ScaledGpt`) and, per capability axis, trains+scores *one representative
+  benchmark* (cheapest informative: mqar/mad_selective_copy/mad_memorize/parity/
+  mad_compress/mod_add) at each size. Fits a **saturating trend**
+  `score(N) ≈ ceil − A·N^(−β)` (gap-to-ceiling power law, reuses `scaling::ols`),
+  records the **slope per doubling**, **β**, **R²**, **predicted score@2x/@4x**,
+  and a **verdict** ∈ {improving, saturating, flat}. Writes
+  `results/scale-<arch>-<seed>.json`. Smoke budget (~few min CPU); the *shape* of
+  the curve + extrapolation is the deliverable, not absolute scores.
+- **Experts knob (future MoE):** the sweep dimension is a generic `Knob` enum.
+  Only `Knob::Size` is wired; a MoE arch sweeps `Knob::Experts` the same way —
+  register the arch + fill the `// TODO(experts)` branch in `capscale::grid_for`;
+  the fit/advisor are dimension-agnostic and need no change. MoE *scoring* is not
+  implemented yet (no MoE arch registered).
+- **`brain bench advise <eval.json> [<scale.json>]`** (`crates/bench/src/advisor.rs`):
+  ranked, concrete recommendations. Lever = **headroom (1−score, gated axes) ×
+  size-slope**; per-axis signal → action (rising slope → *increase size*; flat
+  slope → *change the mechanism* = architecture-bound; low `train_ce` + low eval →
+  *more data/reg/steps*; ≈ceiling → *deprioritize*); each rec carries
+  score-per-Mparam (compute-efficiency). **`brain bench eval` prints the top-3 as
+  a footer**, so the eval output itself carries the tuning breakdown.
+  `make bench/scale ARCH=<name>` + `make bench/advise ARCH=<name>`.
+
 ## Conventions & invariants
 
 - **WGSL is the source of truth.** Kernels live only in `crates/kernels/wgsl/`,

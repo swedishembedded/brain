@@ -35,7 +35,7 @@ LR     ?= 3e-3
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release test gradcheck bench bench/char bench/eval bench/compare clean federated-demo \
+.PHONY: help build release test gradcheck bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt web/dev web/build
 
@@ -53,7 +53,9 @@ help:
 	@echo "  make bench/scaling           scaling-law sweep: fit L(N)=E+A*N^-alpha across sizes"
 	@echo "  make bench/eval ARCH=<name>  run the WHOLE battery vs one architecture (gpt|gpt-small|"
 	@echo "                               gpt-wide), aggregate per axis -> results/<arch>-<seed>.json"
-	@echo "  make bench/compare           side-by-side leaderboard of every results/*.json"
+	@echo "  make bench/scale ARCH=<name> predictive per-capability scaling: score@2x/@4x per axis"
+	@echo "  make bench/advise ARCH=<name> ranked tuning recommendations from eval(+scale) artifacts"
+	@echo "  make bench/compare           side-by-side leaderboard of every results/<arch>-<seed>.json"
 	@echo "  make bench/char              train+eval GPT on the shared char datasets (legacy)"
 	@echo "  make federated-demo          MoE train -> split -> verify -> merge round-trip"
 	@echo "  make web/dev | web/build     WebGPU browser demo (crates/web)"
@@ -128,13 +130,34 @@ bench/scaling: release
 bench/eval: release
 	$(BRAIN) bench eval --arch $(ARCH) --seed $(SEED)
 
+# `make bench/scale ARCH=<name>` runs the PREDICTIVE per-capability scaling sweep:
+# train+score one representative benchmark per capability axis across a small SIZE
+# grid, fit how each axis's score scales with params N, extrapolate the predicted
+# score at 2x/4x the largest N, and write results/scale-<arch>-<seed>.json. This
+# answers "how will each capability improve as we grow the model?" before paying
+# for the bigger run. ~few min on the CPU backend (3 sizes x 6 axes, smoke budget).
+bench/scale: release
+	$(BRAIN) bench scale --arch $(ARCH) --seed $(SEED)
+
+# `make bench/advise` prints RANKED tuning recommendations (what to tune to improve
+# in the best capability direction): headroom x size-slope per axis, with a concrete
+# action (increase size | change mechanism | more data/reg | deprioritize). Consumes
+# the eval artifact and, if present, the scaling artifact for the same ARCH/SEED.
+bench/advise: release
+	@set -e; ev="results/$(ARCH)-$(SEED).json"; sc="results/scale-$(ARCH)-$(SEED).json"; \
+	if [ ! -f "$$ev" ]; then \
+		echo "no $$ev — run 'make bench/eval ARCH=$(ARCH)' first"; exit 2; \
+	fi; \
+	if [ -f "$$sc" ]; then $(BRAIN) bench advise "$$ev" "$$sc"; \
+	else $(BRAIN) bench advise "$$ev"; fi
+
 # `make bench/compare` prints a side-by-side leaderboard (overall pass-rate +
 # per-axis + per-benchmark scores, columns = architectures) over every artifact
 # under results/, so a new architecture is diffed against priors at a glance.
 bench/compare: release
-	@set -e; files="$$(ls results/*.json 2>/dev/null || true)"; \
+	@set -e; files="$$(ls results/*.json 2>/dev/null | grep -v '/scale-' || true)"; \
 	if [ -z "$$files" ]; then \
-		echo "no results/*.json yet — run 'make bench/eval ARCH=<name>' first"; exit 2; \
+		echo "no eval artifacts yet — run 'make bench/eval ARCH=<name>' first"; exit 2; \
 	fi; \
 	$(BRAIN) bench compare $$files
 

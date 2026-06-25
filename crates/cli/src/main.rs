@@ -60,6 +60,14 @@ BENCHMARK SUITE (architecture evaluation)
                                            # run the WHOLE battery against one architecture,
                                            # aggregate per capability axis, write
                                            # results/<arch>-<seed>.json  (archs: gpt, gpt-small, gpt-wide)
+                                           # + prints a 'top tuning recommendations' footer (advisor)
+  brain bench scale --arch <name> [--seed S --out F]
+                                           # PREDICTIVE per-capability scaling: sweep model SIZE,
+                                           # fit how each axis's score scales with params N, predict
+                                           # score@2x/@4x, write results/scale-<arch>-<seed>.json
+  brain bench advise <eval.json> [<scale.json>]
+                                           # RANKED tuning recommendations: what to tune to improve
+                                           # in the best capability direction (headroom x size-slope)
   brain bench compare <a.json> <b.json> ...# side-by-side leaderboard across results artifacts
 
 OTHER
@@ -118,6 +126,8 @@ fn run_bench(args: &[String]) {
     match args.first().map(|s| s.as_str()) {
         Some("eval") => return run_bench_eval(&args[1..]),
         Some("compare") => return run_bench_compare(&args[1..]),
+        Some("scale") => return run_bench_scale(&args[1..]),
+        Some("advise") => return run_bench_advise(&args[1..]),
         _ => {}
     }
 
@@ -229,6 +239,15 @@ fn run_bench_eval(args: &[String]) {
     }
     println!("wrote results artifact: {}", path.display());
 
+    // The eval output itself carries the tuning breakdown the user asked for: run
+    // the advisor on the just-produced artifact (enriched with the capscale
+    // artifact for this arch/seed if one happens to exist) and print a short
+    // ranked footer of the top levers.
+    let eval_json = report.to_json();
+    let capscale = bench::advisor::try_load_capscale(&arch, seed);
+    let advice = bench::advisor::advise(&eval_json, capscale.as_ref());
+    bench::advisor::print_footer(&advice, 3);
+
     // Exit non-zero if a gating benchmark failed (informational ones excluded),
     // matching `brain bench`'s pass/fail contract.
     if report.gating_passed < report.gating_total {
@@ -238,6 +257,86 @@ fn run_bench_eval(args: &[String]) {
         );
         std::process::exit(1);
     }
+}
+
+/// `brain bench scale --arch <name> [--seed S] [--out <path>]` — the
+/// per-capability predictive-scaling sweep: train+score one representative
+/// benchmark per capability axis across a small SIZE grid, fit how each axis's
+/// score scales with params N, extrapolate the predicted score at 2×/4× the
+/// largest N, print the per-axis curves, and write
+/// `results/scale-<arch>-<seed>.json`.
+fn run_bench_scale(args: &[String]) {
+    let mut arch = "gpt".to_string();
+    let mut seed = 1337u64;
+    let mut out: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--arch" => {
+                i += 1;
+                arch = args.get(i).cloned().unwrap_or(arch);
+            }
+            "--seed" => {
+                i += 1;
+                seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(seed);
+            }
+            "--out" => {
+                i += 1;
+                out = args.get(i).cloned();
+            }
+            other => eprintln!("brain bench scale: ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+
+    let cfg = bench::capscale::CapScaleConfig { seed, ..Default::default() };
+    let report = match bench::capscale::run(&arch, &cfg) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("brain bench scale: {e}");
+            std::process::exit(2);
+        }
+    };
+    bench::capscale::print_report(&report);
+
+    let path = out
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| bench::capscale::default_out_path(&arch, seed));
+    if let Err(e) = bench::capscale::write_artifact(&report, &path) {
+        eprintln!("brain bench scale: writing {}: {e}", path.display());
+        std::process::exit(2);
+    }
+    println!("wrote scaling artifact: {}", path.display());
+}
+
+/// `brain bench advise <eval.json> [<scale.json>]` — load an eval artifact (and,
+/// optionally, a per-capability scaling artifact) and print a RANKED, concrete set
+/// of tuning recommendations for what to tune to improve in the best capability
+/// direction.
+fn run_bench_advise(args: &[String]) {
+    let paths: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let Some(eval_path) = paths.first() else {
+        eprintln!("brain bench advise: usage: brain bench advise <eval.json> [<scale.json>]");
+        std::process::exit(2);
+    };
+    let eval = match bench::advisor::load_eval(std::path::Path::new(eval_path.as_str())) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("brain bench advise: reading {eval_path}: {e}");
+            std::process::exit(2);
+        }
+    };
+    let capscale = paths.get(1).and_then(|p| {
+        match bench::capscale::load_artifact(std::path::Path::new(p.as_str())) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("brain bench advise: reading {p}: {e} (ignoring scaling artifact)");
+                None
+            }
+        }
+    });
+    let advice = bench::advisor::advise(&eval, capscale.as_ref());
+    bench::advisor::print_advice(&advice);
 }
 
 /// `brain bench compare <results.json> <results.json> ...` — load ≥2 artifacts

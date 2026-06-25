@@ -249,8 +249,9 @@ pub fn fit_power_law(points: &[SizePoint]) -> PowerLaw {
 }
 
 /// Ordinary least squares `y ≈ slope·x + intercept`; returns `(slope, intercept,
-/// r2)`. `r2` is the coefficient of determination (clamped to ≥0).
-fn ols(xs: &[f64], ys: &[f64]) -> (f64, f64, f64) {
+/// r2)`. `r2` is the coefficient of determination (clamped to ≥0). Shared with
+/// [`capscale`](crate::capscale)'s saturating-trend fit.
+pub(crate) fn ols(xs: &[f64], ys: &[f64]) -> (f64, f64, f64) {
     let n = xs.len() as f64;
     let mean_x = xs.iter().sum::<f64>() / n;
     let mean_y = ys.iter().sum::<f64>() / n;
