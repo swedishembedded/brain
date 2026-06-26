@@ -132,6 +132,13 @@ interaction** was. Profiling (`BRAIN_PROFILE` op counters) was the unlock.
    consecutive), so adjacent threads access adjacent addresses and the warp's
    reads/writes coalesce (uncoalesced access is a ~2–4× bandwidth hit).
 
+7. **Hoist boundary checks out of the channel loop** *(545 → 222 ms `forward`,
+   low-load)*. The padding/bounds checks + input offsets depend only on
+   `(kh,kw,position)`, not the input channel, so reorder to `(kh,kw)` outer / `ci`
+   inner and compute them once per tap — ~256× fewer bound evaluations for a
+   256-channel layer. This was the biggest single conv win after the tiling:
+   per-tap overhead, not just traffic, was limiting it.
+
 **Tried, regressed, made opt-in:** *weight-staged tiled conv* (`conv_act_tiled`,
 `BRAIN_TILED_CONV=1`). Staging the full weight tile costs up to 32 KiB of
 workgroup memory, which **collapses GPU occupancy** — measured *slower* than naive
@@ -178,13 +185,36 @@ GEMM that serves GPU and CPU from one kernel.
 
 ## What's next (the path to torch-parity on GPU)
 
-The GPU `forward` is now pure conv throughput. Remaining levers, in ROI order:
-1. **Coalescing** (done) — biggest small win.
-2. **Wider register tile** (4×8 / 8×4) — more reuse, until register pressure.
-3. **im2col + tiled GEMM** — the structural endgame: do the per-tap index/bounds
-   work *once* in im2col, then a clean coalesced tiled GEMM (no per-tap overhead),
-   built on the work-group JIT above. This is how cuDNN/oneDNN reach their
-   throughput and the realistic route to matching torch.
+The GPU `forward` is now pure conv throughput (~222 ms low-load vs torch ~50–130 ms,
+from ~1218 ms naive — a 5.5× conv speedup, ~12× overall from the 2749 ms start).
+The remaining levers were each assessed; most have hit diminishing returns:
+
+- **Wider register tile** (4×8 = 32 sums) — *register-limited*. Arrays spill to
+  local memory (the 4×4 array variant measured 927 ms vs the scalar 545 ms), and
+  32 scalar accumulators risk an occupancy drop on a memory-bound kernel. 4×4 is
+  the practical sweet spot.
+- **im2col + tiled GEMM** — *adds traffic, not a win here*. The GEMM is clean
+  (no per-tap overhead), but it materializes the im2col matrix `B`, which a
+  register-tiled GEMM re-reads ~`Cout/4` times (×64 for a 256-channel layer). On
+  the bandwidth-bound integrated GPU that extra `B` traffic outweighs removing the
+  (already-hoisted) per-tap overhead. Worth it on a compute-bound discrete GPU.
+- **Concat fusion** (producer→concat slices) — *high blast radius for a modest GPU
+  win*. Needs offset sub-buffer views in BOTH backends (the wgpu `DeviceBuffer`
+  carries no offset today — ~10 construction/access sites + offset-aware bindings)
+  and a C2f forward+backward restructure (gradcheck-critical). The reward is now
+  modest because the GPU is conv-bound. Right architectural fusion; deserves its
+  own focused, gradcheck-validated pass.
+- **Winograd F(2×2,3×3)** — the one remaining *algorithmic* lever: 2.25× fewer
+  multiplies for the dominant 3×3 layers. The CPU attempt showed transforms can
+  eat the gain (kept opt-in); on the GPU it's more promising but research-grade
+  (input/weight/output transforms + 16 transform-domain GEMMs, built on the
+  work-group JIT). This is the realistic route to closing the last gap to torch.
+
+> Honest framing: brain's from-scratch WGSL conv now runs ~12× faster than where
+> it started, but it competes with a mature vendor library (oneDNN) on the
+> vendor's own integrated silicon. The structural wins (sync / launch / fusion /
+> tiling / overhead-hoisting) are real and large; the last gap is genuine
+> GPU-kernel research (Winograd, or hand-tuned blocked kernels), not a toggle.
 
 ### On fusion specifically
 
