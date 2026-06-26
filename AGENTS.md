@@ -57,6 +57,7 @@ them, keeping the gradient-check discipline.
 | Architecture & crate graph | `docs/ARCHITECTURE.md` |
 | Federated MoE pipeline (done vs remaining) | `docs/FEDERATED.md` |
 | Testing strategy + gradient-check gate | `docs/TESTING.md` |
+| Performance: CPU/GPU inference optimizations (what sped things up + why) | `docs/PERFORMANCE.md` |
 | YOLOv8 detector training + inference (end-to-end guide) | `docs/yolo/README.md` |
 | Engine internals | `docs/engine-README.md`, `engine-TRAINING.md`, `engine-README_VULKAN.md`, `engine-README_WEB.md` |
 | Add/adjust a WGSL kernel | `crates/kernels/wgsl/*.wgsl` (regenerate the const list if you add files) |
