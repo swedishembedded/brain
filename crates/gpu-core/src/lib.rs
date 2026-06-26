@@ -312,12 +312,14 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub pipelines: Vec<wgpu::ComputePipeline>,
-    /// Lazily-accumulated command encoder: `submit` records its compute pass here
-    /// instead of calling `queue.submit` immediately, so a whole forward's worth
-    /// of dispatches coalesces into ONE submission (flushed on the next
-    /// read/write/poll). Cuts per-frame `queue.submit` calls from ~one-per-block
-    /// to one. `Mutex` keeps `Gpu: Sync`; it is only ever locked single-threaded.
-    pending: std::sync::Mutex<Option<wgpu::CommandEncoder>>,
+    /// Lazily-accumulated dispatches: `submit` appends its steps here instead of
+    /// encoding+submitting immediately, and `flush` records the WHOLE batch into a
+    /// single compute pass + one `queue.submit` (on the next read/write/poll). So
+    /// a forward's ~130 block dispatches become ONE submission and ONE compute
+    /// pass — instead of ~one queue.submit and ~one pass *per block*, each of
+    /// which is a GPU pipeline barrier that serialises an integrated GPU.
+    /// `Mutex` keeps `Gpu: Sync`; it is only ever locked single-threaded.
+    pending: std::sync::Mutex<Vec<Step>>,
     /// `BRAIN_PROFILE` op counters: (uniform buffers, bind groups, submits,
     /// dispatches, readbacks) — surfaces per-frame GPU resource churn / sync.
     stats: Option<std::sync::atomic::AtomicU64>,
@@ -443,7 +445,7 @@ impl Gpu {
             device,
             queue,
             pipelines,
-            pending: std::sync::Mutex::new(None),
+            pending: std::sync::Mutex::new(Vec::new()),
             stats,
             stats_bg: AtomicU64::new(0),
             stats_submit: AtomicU64::new(0),
@@ -452,14 +454,31 @@ impl Gpu {
         }
     }
 
-    /// Flush any pending (lazily-accumulated) command encoder to the queue. Idempotent.
+    /// Record all pending dispatches into ONE compute pass and submit. Idempotent.
+    /// wgpu inserts the necessary inter-dispatch barriers within the pass, so the
+    /// per-block read-after-write dependencies are preserved.
     fn flush(&self) {
-        let enc = self.pending.lock().unwrap().take();
-        if let Some(enc) = enc {
-            self.queue.submit(Some(enc.finish()));
-            if self.stats.is_some() {
-                self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let steps: Vec<Step> = std::mem::take(&mut *self.pending.lock().unwrap());
+        if steps.is_empty() {
+            return;
+        }
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            for (kind, bg, gx, gy) in &steps {
+                pass.set_pipeline(&self.pipelines[*kind]);
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups(*gx, *gy, 1);
             }
+        }
+        self.queue.submit(Some(enc.finish()));
+        if self.stats.is_some() {
+            self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -576,25 +595,21 @@ impl Gpu {
     /// dispatches coalesce into a single `queue.submit` instead of one per call.
     /// wgpu inserts the inter-dispatch barriers within and across the passes.
     pub fn submit(&self, clears: &[&wgpu::Buffer], steps: &[Step]) {
-        let mut guard = self.pending.lock().unwrap();
-        let enc = guard.get_or_insert_with(|| {
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None })
-        });
-        for c in clears {
-            enc.clear_buffer(c, 0, None);
-        }
-        {
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: None,
-                timestamp_writes: None,
-            });
-            for (kind, bg, gx, gy) in steps {
-                pass.set_pipeline(&self.pipelines[*kind]);
-                pass.set_bind_group(0, bg, &[]);
-                pass.dispatch_workgroups(*gx, *gy, 1);
+        // Clears can't go inside a compute pass: flush the accumulated dispatches
+        // (so they run before the clear) then clear in a transfer submission. In
+        // the eval/inference path there are no clears, so everything accumulates
+        // into a single pass flushed at the terminal readback.
+        if !clears.is_empty() {
+            self.flush();
+            let mut enc = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            for c in clears {
+                enc.clear_buffer(c, 0, None);
             }
+            self.queue.submit(Some(enc.finish()));
         }
+        self.pending.lock().unwrap().extend(steps.iter().cloned());
         if self.stats.is_some() {
             self.stats_dispatch
                 .fetch_add(steps.len() as u64, std::sync::atomic::Ordering::Relaxed);
