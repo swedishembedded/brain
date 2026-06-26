@@ -312,6 +312,12 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub pipelines: Vec<wgpu::ComputePipeline>,
+    /// Lazily-accumulated command encoder: `submit` records its compute pass here
+    /// instead of calling `queue.submit` immediately, so a whole forward's worth
+    /// of dispatches coalesces into ONE submission (flushed on the next
+    /// read/write/poll). Cuts per-frame `queue.submit` calls from ~one-per-block
+    /// to one. `Mutex` keeps `Gpu: Sync`; it is only ever locked single-threaded.
+    pending: std::sync::Mutex<Option<wgpu::CommandEncoder>>,
     /// `BRAIN_PROFILE` op counters: (uniform buffers, bind groups, submits,
     /// dispatches, readbacks) — surfaces per-frame GPU resource churn / sync.
     stats: Option<std::sync::atomic::AtomicU64>,
@@ -433,11 +439,23 @@ impl Gpu {
             device,
             queue,
             pipelines,
+            pending: std::sync::Mutex::new(None),
             stats,
             stats_bg: AtomicU64::new(0),
             stats_submit: AtomicU64::new(0),
             stats_dispatch: AtomicU64::new(0),
             stats_read: AtomicU64::new(0),
+        }
+    }
+
+    /// Flush any pending (lazily-accumulated) command encoder to the queue. Idempotent.
+    fn flush(&self) {
+        let enc = self.pending.lock().unwrap().take();
+        if let Some(enc) = enc {
+            self.queue.submit(Some(enc.finish()));
+            if self.stats.is_some() {
+                self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
@@ -548,12 +566,17 @@ impl Gpu {
         self.step_buf(kind, &self.uniform(params), bufs, threads)
     }
 
-    /// Clear the given buffers, then run all steps in a single compute pass
-    /// (wgpu inserts the inter-dispatch barriers).
+    /// Clear the given buffers, then run all steps as a compute pass. The work is
+    /// RECORDED into a lazily-accumulated command encoder (one per forward) and
+    /// only sent to the GPU on the next read/write/poll — so a whole forward's
+    /// dispatches coalesce into a single `queue.submit` instead of one per call.
+    /// wgpu inserts the inter-dispatch barriers within and across the passes.
     pub fn submit(&self, clears: &[&wgpu::Buffer], steps: &[Step]) {
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let mut guard = self.pending.lock().unwrap();
+        let enc = guard.get_or_insert_with(|| {
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None })
+        });
         for c in clears {
             enc.clear_buffer(c, 0, None);
         }
@@ -568,15 +591,16 @@ impl Gpu {
                 pass.dispatch_workgroups(*gx, *gy, 1);
             }
         }
-        self.queue.submit(Some(enc.finish()));
         if self.stats.is_some() {
-            use std::sync::atomic::Ordering::Relaxed;
-            self.stats_submit.fetch_add(1, Relaxed);
-            self.stats_dispatch.fetch_add(steps.len() as u64, Relaxed);
+            self.stats_dispatch
+                .fetch_add(steps.len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
     pub fn write(&self, buf: &wgpu::Buffer, data: &[u32]) {
+        // Flush pending compute first so a host write never races ahead of
+        // dispatches recorded before it (queue order: prior compute, then write).
+        self.flush();
         self.queue.write_buffer(buf, 0, bytemuck::cast_slice(data));
     }
 
@@ -592,6 +616,7 @@ impl Gpu {
     /// no blocking poll to call there.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn poll_wait(&self) {
+        self.flush();
         self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     }
 
@@ -603,6 +628,7 @@ impl Gpu {
         if self.stats.is_some() {
             self.stats_read.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+        self.flush(); // ensure all recorded compute is queued before the copy
         let staging = self.read_staging(buf, n);
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -620,6 +646,7 @@ impl Gpu {
     /// JS executor lets the GPU complete and fire the callback.
     #[cfg(target_arch = "wasm32")]
     pub async fn read_async(&self, buf: &wgpu::Buffer, n: usize) -> Vec<f32> {
+        self.flush();
         let staging = self.read_staging(buf, n);
         let slice = staging.slice(..);
         let (tx, rx) = futures_channel::oneshot::channel();
