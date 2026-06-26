@@ -385,6 +385,10 @@ impl Gpu {
         let adapter_limits = adapter.limits();
         limits.max_buffer_size = adapter_limits.max_buffer_size;
         limits.max_storage_buffer_binding_size = adapter_limits.max_storage_buffer_binding_size;
+        // The weight-tiled conv stages an output channel's weights in workgroup
+        // memory (up to 32 KiB); the downlevel default caps that at 16 KiB, so
+        // request whatever the adapter actually supports.
+        limits.max_compute_workgroup_storage_size = adapter_limits.max_compute_workgroup_storage_size;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("moe-rs-device"),

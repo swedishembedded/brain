@@ -72,6 +72,9 @@ pub const BIAS_GRAD: usize = 34;
 pub const CONV_ACT: usize = 35;
 // ---- single-pass channel-concat placement (replaces the O(n^2) concat fold) ----
 pub const CHAN_PLACE: usize = 36;
+// ---- weight-tiled (workgroup-memory) conv variants for the GPU backend ----
+pub const CONV2D_TILED: usize = 37;
+pub const CONV_ACT_TILED: usize = 38;
 
 /// Kernel registry passed to [`Gpu::new`] / [`Gpu::new_cpu`]. The position of
 /// each entry is its kernel index (the `const`s above).
@@ -117,6 +120,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("conv_act", kernels::CONV_ACT),
     // ---- single-pass channel-concat placement (index 36) ----
     ("chan_place", kernels::CHAN_PLACE),
+    // ---- weight-tiled conv variants (index 37..=38) ----
+    ("conv2d_tiled", kernels::CONV2D_TILED),
+    ("conv_act_tiled", kernels::CONV_ACT_TILED),
 ];
 
 /// An NCHW feature-map shape. Carried alongside buffers so blocks can compute

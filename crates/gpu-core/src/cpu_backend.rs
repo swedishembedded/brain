@@ -72,6 +72,10 @@ struct FastIdx {
     conv2d: Option<usize>,
     conv_act: Option<usize>,
     silu: Option<usize>,
+    // Weight-tiled (workgroup-memory) conv variants: on CPU they route to the
+    // same native fast paths as conv2d/conv_act (the tiling only helps the GPU).
+    conv2d_tiled: Option<usize>,
+    conv_act_tiled: Option<usize>,
     bn_eval: Option<usize>,
     concat2: Option<usize>,
     concat_split: Option<usize>,
@@ -107,6 +111,8 @@ impl CpuBackend {
                 conv2d: find("conv2d"),
                 conv_act: find("conv_act"),
                 silu: find("silu"),
+                conv2d_tiled: find("conv2d_tiled"),
+                conv_act_tiled: find("conv_act_tiled"),
                 bn_eval: find("bn_eval"),
                 concat2: find("concat2"),
                 concat_split: find("concat_split"),
@@ -227,7 +233,7 @@ impl CpuBackend {
         // the JIT below. All `unsafe` here reconstructs slices from the bound
         // storage bases, each sized to its tensor by the model.
         let f = &self.fast;
-        if Some(kind) == f.conv2d && bufs.len() >= 3 {
+        if (Some(kind) == f.conv2d || Some(kind) == f.conv2d_tiled) && bufs.len() >= 3 {
             unsafe {
                 let pu = std::slice::from_raw_parts(uniform, 10);
                 let p = crate::fast_conv::ConvParams::from_u32(pu);
@@ -238,7 +244,7 @@ impl CpuBackend {
             }
             return;
         }
-        if Some(kind) == f.conv_act && bufs.len() >= 4 {
+        if (Some(kind) == f.conv_act || Some(kind) == f.conv_act_tiled) && bufs.len() >= 4 {
             unsafe {
                 let pu = std::slice::from_raw_parts(uniform, 10);
                 let p = crate::fast_conv::ConvParams::from_u32(pu);
@@ -325,7 +331,16 @@ impl CpuBackend {
         // ~8 chunks per thread for load balance on divergent kernels (e.g. the
         // softmax row-loops whose trip count varies with the causal mask).
         let span = (self.threads as u64 * 8).max(1);
-        let chunk = total.div_ceil(span).max(1);
+        let mut chunk = total.div_ceil(span).max(1);
+        // Work-group kernels (workgroup memory + barriers) must be handed whole
+        // workgroups per chunk — a workgroup's invocations share scratch and a
+        // barrier, so a chunk boundary may not fall mid-workgroup. Round the chunk
+        // up to a multiple of the work-group size (the dispatch `total` is already
+        // a whole number of workgroups).
+        if let Some(wg) = self.jit.workgroup_size(kind) {
+            let wg = wg as u64;
+            chunk = chunk.div_ceil(wg) * wg;
+        }
         let starts: Vec<u64> = (0..total).step_by(chunk as usize).collect();
         let uni = SendConst(uniform);
         let bufs_ptr = SendMut(bufs.as_ptr());

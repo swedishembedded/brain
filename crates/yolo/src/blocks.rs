@@ -47,7 +47,7 @@ use paramstore::ParamStore;
 use crate::net::{Ctx, Shape};
 use crate::net::{
     ADD2, BN_DBETA, BN_DGAMMA, BN_DSTATS, BN_DX, BN_RUNNING, BN_STATS, BN_TRAIN, CHAN_PLACE, CONCAT2,
-    CONCAT_SPLIT, CONV2D, CONV2D_DW, CONV2D_DX, CONV_ACT, MAXPOOL5, MAXPOOL5_DX, SILU, SILU_BWD,
+    CONCAT_SPLIT, CONV2D, CONV2D_DW, CONV2D_DX, CONV_ACT_TILED, MAXPOOL5, MAXPOOL5_DX, SILU, SILU_BWD,
 };
 
 /// Interleave two per-channel vectors into a `[2C]` packed buffer.
@@ -205,6 +205,13 @@ impl Conv {
             self.out_shape.w,
         ]
     }
+    /// Invocation count for the weight-tiled conv: one workgroup (64 invocations)
+    /// per `(n, output-channel, 64-output-position block)`.
+    fn tiled_threads(&self) -> u32 {
+        let psz = self.out_shape.h * self.out_shape.w;
+        let blocks = psz.div_ceil(64);
+        self.out_shape.n * self.out_shape.c * blocks * 64
+    }
     fn nchw(&self) -> [u32; 4] {
         [self.out_shape.n, self.out_shape.c, self.out_shape.h, self.out_shape.w]
     }
@@ -235,11 +242,14 @@ impl Conv {
                 self.pack_sb(ctx, ps);
                 self.sb_ready.set(true);
             }
+            // Weight-tiled fused conv: one workgroup per (n, channel, 64-position
+            // block). On GPU this stages weights in workgroup memory (big win); on
+            // CPU it routes to the same native AVX2 fast path as conv_act.
             let s = ctx.step(
-                CONV_ACT,
+                CONV_ACT_TILED,
                 &[x_in, ps.w(&p("conv.weight")), &self.sb, &self.act],
                 &self.conv_params(),
-                on,
+                self.tiled_threads(),
             );
             ctx.gpu.submit(&[], &[s]);
             return;
