@@ -52,6 +52,11 @@ pub struct Jit {
     _module: JITModule,
     funcs: Vec<*const u8>,
     names: Vec<String>,
+    /// Per-kernel work-group size: `None` for the ordinary one-output-per-
+    /// invocation kernels, `Some(wgsize)` for kernels that use workgroup memory /
+    /// `workgroupBarrier()` (compiled with the work-group execution model). The
+    /// CPU dispatcher must hand the latter ranges aligned to `wgsize`.
+    wg_size: Vec<Option<u32>>,
 }
 
 // The JIT-compiled code is immutable after `new` returns; only `&Jit` is shared.
@@ -85,11 +90,13 @@ impl Jit {
         let mut ctx = module.make_context();
         let mut fctx = FunctionBuilderContext::new();
         let mut ids = Vec::with_capacity(kernels.len());
+        let mut wg_size = Vec::with_capacity(kernels.len());
 
         for (name, src) in kernels {
             ctx.func.signature = kernel_signature(module.target_config().pointer_type());
-            compile_one(name, src, &mut module, &math, &mut ctx, &mut fctx)
+            let wg = compile_one(name, src, &mut module, &math, &mut ctx, &mut fctx)
                 .map_err(|e| format!("kernel {name:?}: {e}"))?;
+            wg_size.push(wg);
             let id = module
                 .declare_function(name, Linkage::Export, &ctx.func.signature)
                 .map_err(|e| format!("declare {name:?}: {e}"))?;
@@ -109,12 +116,20 @@ impl Jit {
             _module: module,
             funcs,
             names: kernels.iter().map(|(n, _)| n.to_string()).collect(),
+            wg_size,
         })
     }
 
     /// Index of `name`, or `None` if no such kernel was compiled.
     pub fn index_of(&self, name: &str) -> Option<usize> {
         self.names.iter().position(|n| n == name)
+    }
+
+    /// Work-group size of kernel `kind` if it is a work-group kernel (uses
+    /// workgroup memory / barriers), else `None`. The CPU dispatcher uses this to
+    /// hand work-group kernels ranges aligned to whole workgroups.
+    pub fn workgroup_size(&self, kind: usize) -> Option<u32> {
+        self.wg_size.get(kind).copied().flatten()
     }
 
     /// Run kernel `kind` over invocation ids `[start, end)`.
@@ -286,7 +301,7 @@ fn compile_one(
     math: &MathRefs,
     ctx: &mut cranelift_codegen::Context,
     fctx: &mut FunctionBuilderContext,
-) -> Result<(), String> {
+) -> Result<Option<u32>, String> {
     let nmod = naga::front::wgsl::parse_str(src).map_err(|e| format!("WGSL parse: {e:?}"))?;
     let entry = nmod
         .entry_points
@@ -294,6 +309,14 @@ fn compile_one(
         .find(|e| e.name == "main")
         .ok_or("no `main` entry point")?;
     let func = &entry.function;
+
+    // Work-group kernels (workgroup memory / `workgroupBarrier()`) use a separate
+    // execution model; everything else is the one-output-per-invocation path.
+    if is_workgroup_kernel(&nmod, func) {
+        let wgsize = entry.workgroup_size[0];
+        compile_one_wg(&nmod, entry, module, math, ctx, fctx)?;
+        return Ok(Some(wgsize));
+    }
 
     let ptr_ty = module.target_config().pointer_type();
     let mut builder = FunctionBuilder::new(&mut ctx.func, fctx);
@@ -313,7 +336,9 @@ fn compile_one(
         (p[0], p[1], p[2], p[3], p[4], p[5]);
 
     // Resolve which function argument carries which builtin vec3.
-    let (gid_arg, nwg_arg) = builtin_args(func)?;
+    let ba = builtin_args(func);
+    let gid_arg = ba.gid.ok_or("kernel missing global_invocation_id arg")?;
+    let nwg_arg = ba.nwg.ok_or("kernel missing num_workgroups arg")?;
 
     // Base pointer of each storage binding (binding 1.. -> bufs[binding-1]).
     let mut buf_base: HashMap<u32, Value> = HashMap::new();
@@ -391,18 +416,24 @@ fn compile_one(
         }
     }
 
+    let empty_wg: HashMap<Handle<naga::GlobalVariable>, (Value, Ty)> = HashMap::new();
     let mut tr = Tr {
         module_ref: &nmod,
         b: &mut builder,
         cache: HashMap::new(),
         locals: &locals,
         buf_base: &buf_base,
+        wg_mem: &empty_wg,
         uniform_ptr,
         uniform_binding,
         gid,
         nwg,
-        gid_arg,
-        nwg_arg,
+        local_id: [zero32, zero32, zero32],
+        wgid: [zero32, zero32, zero32],
+        gid_arg: Some(gid_arg),
+        nwg_arg: Some(nwg_arg),
+        local_id_arg: None,
+        wgid_arg: None,
         unary_refs: &unary_refs,
         powf_ref,
         loop_stack: Vec::new(),
@@ -440,26 +471,331 @@ fn compile_one(
     builder.seal_all_blocks();
     builder.finalize();
     let _ = name;
+    Ok(None)
+}
+
+/// A kernel is a "work-group kernel" if it declares any `var<workgroup>` global
+/// or contains a `workgroupBarrier()` — it then needs the cooperative execution
+/// model (shared memory + barrier-split segments) rather than the independent
+/// one-output-per-invocation model.
+fn is_workgroup_kernel(m: &naga::Module, func: &naga::Function) -> bool {
+    let has_wg_global = m
+        .global_variables
+        .iter()
+        .any(|(_, gv)| matches!(gv.space, AddressSpace::WorkGroup));
+    has_wg_global || block_has_barrier(&func.body)
+}
+
+/// Whether a statement block contains a barrier (searched recursively).
+fn block_has_barrier(block: &Block) -> bool {
+    block.iter().any(|s| match s {
+        Statement::ControlBarrier(_) => true,
+        Statement::Block(b) => block_has_barrier(b),
+        Statement::If { accept, reject, .. } => block_has_barrier(accept) || block_has_barrier(reject),
+        Statement::Loop { body, continuing, .. } => block_has_barrier(body) || block_has_barrier(continuing),
+        _ => false,
+    })
+}
+
+/// Split a work-group kernel body at its single top-level `workgroupBarrier()`
+/// into the cooperative segment before it and the segment after. Restricted to
+/// exactly one top-level barrier (no nesting) — sufficient for the tiled kernels.
+fn split_at_barrier(body: &Block) -> Result<(Block, Block), String> {
+    let stmts: Vec<&Statement> = body.iter().collect();
+    let bpos = stmts
+        .iter()
+        .position(|s| matches!(s, Statement::ControlBarrier(_)))
+        .ok_or("work-group kernel without a top-level barrier (unsupported structure)")?;
+    let before: Vec<Statement> = stmts[..bpos].iter().map(|s| (*s).clone()).collect();
+    let after: Vec<Statement> = stmts[bpos + 1..].iter().map(|s| (*s).clone()).collect();
+    if before.iter().any(|s| block_has_barrier(&Block::from_vec(vec![s.clone()])))
+        || after.iter().any(|s| block_has_barrier(&Block::from_vec(vec![s.clone()])))
+    {
+        return Err("only a single top-level workgroupBarrier() is supported".into());
+    }
+    Ok((Block::from_vec(before), Block::from_vec(after)))
+}
+
+/// Compile a work-group kernel: process whole workgroups, each running its
+/// `wgsize` invocations cooperatively over per-workgroup scratch (`var<workgroup>`)
+/// with the body split at the barrier into two per-invocation segment loops.
+///
+/// Layout of the generated function (`start`/`end` are workgroup-aligned
+/// invocation ids supplied by the dispatcher):
+/// ```text
+/// for wg in start/wgsize .. end/wgsize:
+///     for lid in 0..wgsize: <segment before barrier>   // cooperative load etc.
+///     for lid in 0..wgsize: <segment after  barrier>   // per-invocation compute
+/// ```
+/// `var<workgroup>` arrays are a stack slot (allocated once, reused per wg);
+/// per-invocation `var` locals are SSA values re-initialised each lid iteration,
+/// so none may cross the barrier (the tiled kernels are written that way).
+fn compile_one_wg(
+    nmod: &naga::Module,
+    entry: &naga::EntryPoint,
+    module: &mut JITModule,
+    math: &MathRefs,
+    ctx: &mut cranelift_codegen::Context,
+    fctx: &mut FunctionBuilderContext,
+) -> Result<(), String> {
+    let func = &entry.function;
+    let ptr_ty = module.target_config().pointer_type();
+    let wgsize = entry.workgroup_size[0] as i64;
+    if wgsize == 0 {
+        return Err("work-group kernel with zero workgroup_size".into());
+    }
+
+    let mut builder = FunctionBuilder::new(&mut ctx.func, fctx);
+    let mut unary_refs = HashMap::new();
+    for (k, id) in &math.unary {
+        unary_refs.insert(*k, module.declare_func_in_func(*id, builder.func));
+    }
+    let powf_ref = module.declare_func_in_func(math.powf, builder.func);
+
+    let entry_block = builder.create_block();
+    builder.append_block_params_for_function_params(entry_block);
+    builder.switch_to_block(entry_block);
+    let p = builder.block_params(entry_block).to_vec();
+    let (start, end, gx, gy, uniform_ptr, bufs_ptr) = (p[0], p[1], p[2], p[3], p[4], p[5]);
+
+    let ba = builtin_args(func);
+
+    // Storage base pointers + uniform binding + workgroup-memory stack slots.
+    use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
+    let mut buf_base: HashMap<u32, Value> = HashMap::new();
+    let mut uniform_binding = None;
+    let mut wg_mem: HashMap<Handle<naga::GlobalVariable>, (Value, Ty)> = HashMap::new();
+    for (h, gv) in nmod.global_variables.iter() {
+        match gv.space {
+            AddressSpace::Uniform => uniform_binding = gv.binding.as_ref().map(|b| b.binding),
+            AddressSpace::Storage { .. } => {
+                let binding = gv.binding.as_ref().map(|b| b.binding).ok_or("storage without binding")?;
+                let slot = (binding - 1) as i64;
+                let addr = builder.ins().iadd_imm(bufs_ptr, slot * 8);
+                let base = builder.ins().load(ptr_ty, MemFlags::trusted(), addr, 0);
+                buf_base.insert(binding, base);
+            }
+            AddressSpace::WorkGroup => {
+                let (elem, count) = local_array_info(nmod, gv.ty)?;
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    count * 4,
+                    2,
+                ));
+                let base = builder.ins().stack_addr(ptr_ty, slot, 0);
+                wg_mem.insert(h, (base, elem));
+            }
+            other => return Err(format!("unsupported address space {other:?}")),
+        }
+    }
+
+    let (seg_before, seg_after) = split_at_barrier(&func.body)?;
+    // Expressions materialised (Emit'd) before the barrier but used after it must
+    // be re-materialised at the TOP of each segment's invocation body — otherwise
+    // the after-segment lazily evaluates them on first use (often deep in a nested
+    // loop) and reuses them in a shallower block, breaking SSA dominance. These
+    // top-level pre-barrier lets depend only on builtins/uniforms (not loop vars),
+    // so evaluating them at the segment top is always valid.
+    let mut carried: Vec<Handle<Expression>> = Vec::new();
+    for s in seg_before.iter() {
+        if let Statement::Emit(range) = s {
+            for h in range.clone() {
+                carried.push(h);
+            }
+        }
+    }
+
+    // Workgroup loop bounds: [start/wgsize, end/wgsize).
+    let wgsz = builder.ins().iconst(types::I64, wgsize);
+    let wg_lo = builder.ins().udiv(start, wgsz);
+    let wg_hi = builder.ins().udiv(end, wgsz);
+
+    let wg_header = builder.create_block();
+    builder.append_block_param(wg_header, types::I64);
+    let wg_body = builder.create_block();
+    let wg_latch = builder.create_block();
+    let exit = builder.create_block();
+    builder.ins().jump(wg_header, &[BlockArg::from(wg_lo)]);
+
+    builder.switch_to_block(wg_header);
+    let wg = builder.block_params(wg_header)[0];
+    let wg_done = builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, wg, wg_hi);
+    builder.ins().brif(wg_done, exit, &[], wg_body, &[]);
+
+    builder.switch_to_block(wg_body);
+    // The work-group / global ids are recomputed inside each invocation loop from
+    // `wg` (the loop-header param) so every operand is block-local — avoids
+    // cross-block dominance issues for values shared by both segment loops.
+    let bx = WgBuiltins { wg, gx, gy, wgsize: wgsize as i32 };
+    for seg in [&seg_before, &seg_after] {
+        emit_invocation_loop(
+            &mut builder, nmod, func, seg, &carried, &ba, &wg_mem, &buf_base, uniform_ptr,
+            uniform_binding, &unary_refs, powf_ref, &bx,
+        )?;
+    }
+    builder.ins().jump(wg_latch, &[]);
+
+    builder.switch_to_block(wg_latch);
+    let next = builder.ins().iadd_imm(wg, 1);
+    builder.ins().jump(wg_header, &[BlockArg::from(next)]);
+
+    builder.switch_to_block(exit);
+    builder.ins().return_(&[]);
+    builder.seal_all_blocks();
+    builder.finalize();
     Ok(())
 }
 
-/// The function-argument indices of `global_invocation_id` and `num_workgroups`.
-fn builtin_args(func: &naga::Function) -> Result<(u32, u32), String> {
-    let mut gid = None;
-    let mut nwg = None;
+/// Per-workgroup builtin inputs shared by both segment loops. `wg` is the flat
+/// work-group id (the wg-loop header param); `gx`/`gy` are num_workgroups.
+struct WgBuiltins {
+    wg: Value,
+    gx: Value,
+    gy: Value,
+    wgsize: i32,
+}
+
+/// Emit `for lid in 0..wgsize { <translate seg for invocation (wg,lid)> }`,
+/// leaving control at the loop-exit block so the caller continues after it.
+#[allow(clippy::too_many_arguments)]
+fn emit_invocation_loop(
+    builder: &mut FunctionBuilder,
+    nmod: &naga::Module,
+    func: &naga::Function,
+    seg: &Block,
+    carried: &[Handle<Expression>],
+    ba: &BuiltinArgs,
+    wg_mem: &HashMap<Handle<naga::GlobalVariable>, (Value, Ty)>,
+    buf_base: &HashMap<u32, Value>,
+    uniform_ptr: Value,
+    uniform_binding: Option<u32>,
+    unary_refs: &HashMap<&'static str, cranelift_codegen::ir::FuncRef>,
+    powf_ref: cranelift_codegen::ir::FuncRef,
+    bx: &WgBuiltins,
+) -> Result<(), String> {
+    let lid_header = builder.create_block();
+    builder.append_block_param(lid_header, types::I32);
+    let lid_body = builder.create_block();
+    let lid_latch = builder.create_block();
+    let lid_exit = builder.create_block();
+    let zero = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(lid_header, &[BlockArg::from(zero)]);
+
+    builder.switch_to_block(lid_header);
+    let lid = builder.block_params(lid_header)[0];
+    let n_wg = builder.ins().iconst(types::I32, bx.wgsize as i64);
+    let lid_done = builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, lid, n_wg);
+    builder.ins().brif(lid_done, lid_exit, &[], lid_body, &[]);
+
+    builder.switch_to_block(lid_body);
+    let z = builder.ins().iconst(types::I32, 0);
+    let one = builder.ins().iconst(types::I32, 1);
+    // workgroup_id from the flat wg: x = wg % gx, y = wg / gx (computed here so
+    // all operands are defined in this block).
+    let gx64 = builder.ins().uextend(types::I64, bx.gx);
+    let rem = builder.ins().urem(bx.wg, gx64);
+    let wgid_x = builder.ins().ireduce(types::I32, rem);
+    let div = builder.ins().udiv(bx.wg, gx64);
+    let wgid_y = builder.ins().ireduce(types::I32, div);
+    // global_invocation_id.x = workgroup_id.x * wgsize + local_id.x
+    let wgsz = builder.ins().iconst(types::I32, bx.wgsize as i64);
+    let prod = builder.ins().imul(wgid_x, wgsz);
+    let gid_x = builder.ins().iadd(prod, lid);
+    let local_id = [lid, z, z];
+    let wgid = [wgid_x, wgid_y, z];
+    let nwg = [bx.gx, bx.gy, one];
+    let gid = [gid_x, wgid_y, z];
+
+    // Per-invocation scalar locals (SSA, re-initialised here each iteration).
+    let mut locals: HashMap<Handle<naga::LocalVariable>, LocalSlot> = HashMap::new();
+    for (h, lv) in func.local_variables.iter() {
+        if let TypeInner::Array { .. } = &nmod.types[lv.ty].inner {
+            return Err("array local in a work-group kernel is unsupported".into());
+        }
+        let ty = scalar_ty_of(nmod, lv.ty)?;
+        let var = builder.declare_var(cl_ty(ty));
+        let init = match ty {
+            Ty::F32 => builder.ins().f32const(0.0),
+            _ => builder.ins().iconst(cl_ty(ty), 0),
+        };
+        builder.def_var(var, init);
+        locals.insert(h, LocalSlot::Scalar(var, ty));
+    }
+
+    let fell_through = {
+        let mut tr = Tr {
+            module_ref: nmod,
+            b: &mut *builder,
+            cache: HashMap::new(),
+            locals: &locals,
+            buf_base,
+            wg_mem,
+            uniform_ptr,
+            uniform_binding,
+            gid,
+            nwg,
+            local_id,
+            wgid,
+            gid_arg: ba.gid,
+            nwg_arg: ba.nwg,
+            local_id_arg: ba.local_id,
+            wgid_arg: ba.wgid,
+            unary_refs,
+            powf_ref,
+            loop_stack: Vec::new(),
+            latch: lid_latch,
+        };
+        // Apply each local's initialiser expression (e.g. `var i = lid.x`).
+        let inits: Vec<(Handle<naga::LocalVariable>, Handle<Expression>)> =
+            func.local_variables.iter().filter_map(|(h, lv)| lv.init.map(|i| (h, i))).collect();
+        for (h, init) in inits {
+            if let LocalSlot::Scalar(var, ty) = tr.locals[&h] {
+                let v = tr.scalar(init)?;
+                let v = tr.coerce(v, ty)?;
+                tr.b.def_var(var, v);
+            }
+        }
+        // Pre-materialise the carried pre-barrier lets in this (dominating) block.
+        for &h in carried {
+            tr.eval(h)?;
+        }
+        tr.block(seg)?
+    };
+    if fell_through {
+        builder.ins().jump(lid_latch, &[]);
+    }
+
+    builder.switch_to_block(lid_latch);
+    let nxt = builder.ins().iadd_imm(lid, 1);
+    builder.ins().jump(lid_header, &[BlockArg::from(nxt)]);
+
+    builder.switch_to_block(lid_exit);
+    Ok(())
+}
+
+/// The function-argument indices of the builtin vec3 inputs the kernel declares.
+#[derive(Default, Clone, Copy)]
+struct BuiltinArgs {
+    gid: Option<u32>,
+    nwg: Option<u32>,
+    local_id: Option<u32>,
+    wgid: Option<u32>,
+}
+
+fn builtin_args(func: &naga::Function) -> BuiltinArgs {
+    let mut b = BuiltinArgs::default();
     for (i, arg) in func.arguments.iter().enumerate() {
-        if let Some(naga::Binding::BuiltIn(b)) = &arg.binding {
-            match b {
-                BuiltIn::GlobalInvocationId => gid = Some(i as u32),
-                BuiltIn::NumWorkGroups => nwg = Some(i as u32),
+        if let Some(naga::Binding::BuiltIn(bi)) = &arg.binding {
+            match bi {
+                BuiltIn::GlobalInvocationId => b.gid = Some(i as u32),
+                BuiltIn::NumWorkGroups => b.nwg = Some(i as u32),
+                BuiltIn::LocalInvocationId => b.local_id = Some(i as u32),
+                BuiltIn::WorkGroupId => b.wgid = Some(i as u32),
                 _ => {}
             }
         }
     }
-    Ok((
-        gid.ok_or("kernel missing global_invocation_id arg")?,
-        nwg.ok_or("kernel missing num_workgroups arg")?,
-    ))
+    b
 }
 
 fn cl_ty(ty: Ty) -> types::Type {
@@ -495,12 +831,19 @@ struct Tr<'a, 'b> {
     cache: HashMap<Handle<Expression>, Eval>,
     locals: &'a HashMap<Handle<naga::LocalVariable>, LocalSlot>,
     buf_base: &'a HashMap<u32, Value>,
+    /// Base address + element type of each `var<workgroup>` global (per-workgroup
+    /// scratch), keyed by global handle. Empty for one-output-per-invocation kernels.
+    wg_mem: &'a HashMap<Handle<naga::GlobalVariable>, (Value, Ty)>,
     uniform_ptr: Value,
     uniform_binding: Option<u32>,
     gid: [Value; 3],
     nwg: [Value; 3],
-    gid_arg: u32,
-    nwg_arg: u32,
+    local_id: [Value; 3],
+    wgid: [Value; 3],
+    gid_arg: Option<u32>,
+    nwg_arg: Option<u32>,
+    local_id_arg: Option<u32>,
+    wgid_arg: Option<u32>,
     unary_refs: &'a HashMap<&'static str, cranelift_codegen::ir::FuncRef>,
     powf_ref: cranelift_codegen::ir::FuncRef,
     loop_stack: Vec<(cranelift_codegen::ir::Block, cranelift_codegen::ir::Block)>, // (continue, break)
@@ -594,6 +937,10 @@ impl<'a, 'b> Tr<'a, 'b> {
                     }
                     self.b.switch_to_block(exit_b);
                 }
+                // Barriers are handled structurally by the work-group compile path
+                // (it splits the body at the control barrier into per-invocation
+                // segment loops), so within a translated segment a barrier is a no-op.
+                Statement::ControlBarrier(_) | Statement::MemoryBarrier(_) => {}
                 other => return Err(format!("unsupported statement {other:?}")),
             }
         }
@@ -663,6 +1010,15 @@ impl<'a, 'b> Tr<'a, 'b> {
                 // addr of the base and elem from the array, but only Access uses it.
                 let gv = &self.module_ref.global_variables[*g];
                 let binding = gv.binding.as_ref().map(|b| b.binding);
+                // `var<workgroup>` arrays live in per-workgroup scratch (a stack
+                // slot set up by the work-group compile path), keyed by handle.
+                if let AddressSpace::WorkGroup = gv.space {
+                    let (base, elem) = *self
+                        .wg_mem
+                        .get(g)
+                        .ok_or("workgroup global without scratch base")?;
+                    return Ok(Eval::Place(Place::Mem { addr: base, elem }));
+                }
                 match gv.space {
                     AddressSpace::Storage { .. } => {
                         let b = binding.ok_or("storage global without binding")?;
@@ -711,10 +1067,14 @@ impl<'a, 'b> Tr<'a, 'b> {
                 // 1. A component of a builtin vector argument (gid.x, nwg.x, ...).
                 if let Expression::FunctionArgument(ai) = base_expr {
                     let comp = *index as usize;
-                    let v = if *ai == self.gid_arg {
+                    let v = if Some(*ai) == self.gid_arg {
                         self.gid[comp]
-                    } else if *ai == self.nwg_arg {
+                    } else if Some(*ai) == self.nwg_arg {
                         self.nwg[comp]
+                    } else if Some(*ai) == self.local_id_arg {
+                        self.local_id[comp]
+                    } else if Some(*ai) == self.wgid_arg {
+                        self.wgid[comp]
                     } else {
                         return Err("AccessIndex on unknown builtin arg".into());
                     };
@@ -1045,6 +1405,76 @@ mod tests {
             jit.run(0, 0, 64, 1, 1, uniform.as_ptr(), bufs.as_ptr());
         }
         assert_eq!(out, vec![11.0, 22.0, 33.0, 44.0]);
+    }
+
+    /// The work-group tiled conv (workgroup memory + barrier) compiled by the JIT
+    /// must match a direct scalar convolution. Exercises the whole B1 machinery:
+    /// `var<workgroup>` staging, `workgroupBarrier()` segment split, and the
+    /// local_invocation_id / workgroup_id builtins.
+    #[test]
+    fn conv2d_tiled_workgroup_matches_scalar() {
+        let jit = Jit::new(&[("conv2d_tiled", kernels::CONV2D_TILED)]).expect("compile tiled conv");
+        let idx = jit.index_of("conv2d_tiled").unwrap();
+        assert_eq!(jit.workgroup_size(idx), Some(64), "tiled conv must be a work-group kernel");
+
+        // Small conv: N=1, Cin=4, 7x5, Cout=6, 3x3 stride1 pad1.
+        let (n, cin, h, w, cout, k, stride, pad) = (1usize, 4, 7, 5, 6, 3usize, 1usize, 1usize);
+        let ho = (h + 2 * pad - k) / stride + 1;
+        let wo = (w + 2 * pad - k) / stride + 1;
+        let mut seed = 12345u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            ((seed >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
+        };
+        let mut x: Vec<f32> = (0..n * cin * h * w).map(|_| rnd()).collect();
+        let mut wt: Vec<f32> = (0..cout * cin * k * k).map(|_| rnd()).collect();
+        let mut y = vec![0.0f32; n * cout * ho * wo];
+
+        let params: [u32; 10] = [
+            n as u32, cin as u32, h as u32, w as u32, cout as u32, k as u32,
+            stride as u32, pad as u32, ho as u32, wo as u32,
+        ];
+        let bufs = vec![
+            x.as_mut_ptr() as *mut u8,
+            wt.as_mut_ptr() as *mut u8,
+            y.as_mut_ptr() as *mut u8,
+        ];
+        // Dispatch: one workgroup per (n, co, 64-spatial-block).
+        let psz = ho * wo;
+        let blocks = psz.div_ceil(64);
+        let num_wg = (n * cout * blocks) as u32;
+        unsafe {
+            jit.run(idx, 0, (num_wg as u64) * 64, num_wg, 1, params.as_ptr(), bufs.as_ptr());
+        }
+
+        // Scalar reference.
+        let mut yref = vec![0.0f32; n * cout * ho * wo];
+        for co in 0..cout {
+            for oh in 0..ho {
+                for ow in 0..wo {
+                    let mut acc = 0.0f32;
+                    for ci in 0..cin {
+                        for kh in 0..k {
+                            let hi = oh * stride + kh;
+                            if hi < pad || hi - pad >= h { continue; }
+                            for kw in 0..k {
+                                let wi = ow * stride + kw;
+                                if wi < pad || wi - pad >= w { continue; }
+                                let xi = ((ci) * h + (hi - pad)) * w + (wi - pad);
+                                let wi2 = ((co * cin + ci) * k + kh) * k + kw;
+                                acc += x[xi] * wt[wi2];
+                            }
+                        }
+                    }
+                    yref[(co * ho + oh) * wo + ow] = acc;
+                }
+            }
+        }
+        let mut maxerr = 0.0f32;
+        for (a, b) in y.iter().zip(yref.iter()) {
+            maxerr = maxerr.max((a - b).abs());
+        }
+        assert!(maxerr < 1e-4, "tiled conv max abs err {maxerr}");
     }
 
     #[test]

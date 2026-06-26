@@ -110,6 +110,8 @@ pub const CHAN_PLACE: &str = include_str!("../wgsl/chan_place.wgsl");
 pub const CONCAT_SPLIT: &str = include_str!("../wgsl/concat_split.wgsl");
 /// `wgsl/conv2d.wgsl`
 pub const CONV2D: &str = include_str!("../wgsl/conv2d.wgsl");
+/// `wgsl/conv2d_tiled.wgsl`
+pub const CONV2D_TILED: &str = include_str!("../wgsl/conv2d_tiled.wgsl");
 /// `wgsl/conv_act.wgsl`
 pub const CONV_ACT: &str = include_str!("../wgsl/conv_act.wgsl");
 /// `wgsl/conv2d_dw.wgsl`
@@ -261,6 +263,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("concat2", CONCAT2),
     ("concat_split", CONCAT_SPLIT),
     ("conv2d", CONV2D),
+    ("conv2d_tiled", CONV2D_TILED),
     ("conv_act", CONV_ACT),
     ("conv2d_dw", CONV2D_DW),
     ("conv2d_dx", CONV2D_DX),
