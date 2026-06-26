@@ -55,6 +55,13 @@ brain federated split moe.weights out/shards
 brain federated verify out/shards
 brain federated merge  out/shards --out out/moe-reassembled.weights
 
+# Intel NPU: quantize + compile the YOLO detector to a real NPU graph (OpenVINO)
+brain npu export   --weights out/yolo.weights --out out/yolo.onnx            # fp32 ONNX (pure Rust)
+brain npu quantize --weights out/yolo.weights --calib calib/ --out out/yolo.int8.onnx
+brain npu sim      --weights out/yolo.weights --data data/detect             # fp32 vs INT8 mAP, no NPU
+brain npu run      --onnx out/yolo.int8.onnx --image sample.ppm --device NPU # needs an Intel NPU
+brain yolo detect  --weights out/yolo.weights --image sample.ppm --device npu
+
 # correctness gate
 brain gradcheck
 ```

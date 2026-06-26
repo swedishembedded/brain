@@ -40,6 +40,8 @@ them, keeping the gradient-check discipline.
 | `gpt` | GPT model + training loop + sampling |
 | `moe` / `pid` | the MoE and PID models (fwd/bwd) |
 | `yolo` | YOLOv8-style detector: backbone/neck/head, DFL decode, assigner + detection loss, NMS, `detect` inference, canonical `yolov8n` weight import |
+| `onnx` | pure-Rust ONNX graph model + serializer (export only; vendored `prost` bindings, no `protoc` in the build) |
+| `npu` | YOLO→ONNX export + BN fold + brain-native INT8 PTQ + fake-quant simulator + OpenVINO **Intel NPU** runtime (default dep on x86_64 linux/windows; `runtime-linking`) |
 | `federated` | vertical expert split/assemble, hash-verified manifests |
 | `eval` | perplexity + task exact-match (LM) and detection metrics (mAP@0.5/precision/recall) |
 | `gradcheck` | finite-difference backprop correctness gate |
@@ -64,6 +66,7 @@ them, keeping the gradient-check discipline.
 | GPT model / training / sampling | `crates/gpt/src/{model,train,sample,init}.rs` |
 | YOLO model / loss / inference | `crates/yolo/src/{model,head,blocks,loss,assign,infer,nms,config}.rs` |
 | YOLO train / eval / detect / fine-tune (CLI) | `crates/cli/src/yolo_cli.rs` |
+| YOLO → Intel NPU: export / quantize / run / bench (OpenVINO) | `crates/npu`, `crates/onnx`, `crates/cli/src/npu_cli.rs`, `docs/yolo/NPU.md` |
 | Detection metrics (mAP/precision/recall) | `crates/eval/src/detection.rs` |
 | Synthetic detection dataset (RGB shapes + GT boxes) | `crates/data/src/gen_detect.rs` |
 | Event/HFSM controller (`brain run`): `camera_frame`→`object_detected`, `user_text`→`brain_text_chunk` | `crates/runtime/src/{lib,pump}.rs`, `crates/cli/src/run_cli.rs`, `crates/events/src/lib.rs` |
@@ -239,6 +242,12 @@ improves as the model grows, and **`advise`** says what to tune.
   WGSL stays the single source of truth. On wasm only the wgpu/WebGPU backend
   exists. `crates/vulkan` (coopmat) is excluded from `default-members`; the `web`
   crate is empty off wasm32.
+- **The Intel NPU is NOT a `gpu-core` backend.** OpenVINO is a *whole-graph*
+  compiler, so `--device npu` is a separate export→quantize→compile→run path
+  (`crates/npu`), not a per-op `Gpu`/`Step` backend. `crates/yolo` and the default
+  build stay free of OpenVINO at the source level; the OpenVINO runtime is loaded
+  at run time (`runtime-linking`), so `make build`/`make test` stay green with no
+  OpenVINO installed. See `docs/yolo/NPU.md`.
 - **Backprop is gated by `gradcheck`** (finite differences) — run it after any
   fwd/bwd math change. SSA-style forward (each stage writes a fresh buffer that
   doubles as the backprop activation cache) — preserve it when adding stages.

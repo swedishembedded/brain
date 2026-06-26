@@ -29,4 +29,7 @@ brain-bench.workspace = true
 brain-checkpoint.workspace = true
 brain-events.workspace = true
 brain-runtime.workspace = true
+brain-onnx.workspace = true
+brain-npu.workspace = true
+serde_json.workspace = true
 brain-vulkan = { workspace = true, optional = true }

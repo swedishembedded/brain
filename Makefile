@@ -47,7 +47,9 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
 .PHONY: help build release test gradcheck bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
-        train/yolo eval/yolo detect/yolo web/dev web/build
+        train/yolo eval/yolo detect/yolo \
+        export/yolo-onnx quantize/yolo sim/yolo-int8 run/yolo-npu bench/yolo-npu \
+        web/dev web/build
 
 help:
 	@echo "brain targets:"
@@ -141,6 +143,41 @@ eval/yolo: release
 detect/yolo: release
 	$(BRAIN) yolo detect --weights $(OUT)/yolo.weights --image $(DATA)/detect \
 		--conf $(YOLO_CONF) --iou $(YOLO_IOU)
+
+# ---- Intel NPU deployment (OpenVINO) --------------------------------------
+# Quantize the trained YOLO to INT8 and compile it to a real NPU graph.
+# `export/yolo-onnx` and `quantize/yolo` are PURE RUST (run on any machine);
+# `sim/yolo-int8` measures fp32-vs-INT8 mAP with NO NPU. `run/yolo-npu` and
+# `bench/yolo-npu` REQUIRE OpenVINO 2024.x + an Intel NPU (3720 / Meteor Lake) at
+# run time — they are NOT part of `make build`/`make test`. The NPU is a
+# whole-graph compiler, separate from --device cpu|gpu; see docs/yolo/NPU.md.
+ONNX        ?= $(OUT)/yolo.onnx
+ONNX_INT8   ?= $(OUT)/yolo.int8.onnx
+NPU_DEVICE  ?= NPU
+NPU_CACHE   ?= $(OUT)/npu-cache
+NPU_CALIB   ?= $(DATA)/detect
+NPU_NCALIB  ?= 256
+
+export/yolo-onnx: release
+	@mkdir -p $(OUT)
+	$(BRAIN) npu export --weights $(OUT)/yolo.weights --out $(ONNX)
+
+quantize/yolo: release
+	@mkdir -p $(OUT)
+	$(BRAIN) npu quantize --weights $(OUT)/yolo.weights --calib $(NPU_CALIB) \
+		--out $(ONNX_INT8) --num-calib $(NPU_NCALIB) --scales-out $(OUT)/yolo.scales.json
+
+sim/yolo-int8: release
+	$(BRAIN) npu sim --weights $(OUT)/yolo.weights --data $(DATA)/detect \
+		--calib $(NPU_CALIB) --num-calib $(NPU_NCALIB) --conf $(YOLO_CONF) --iou $(YOLO_IOU)
+
+run/yolo-npu: release
+	$(BRAIN) npu run --onnx $(ONNX_INT8) --image $(DATA)/detect --device $(NPU_DEVICE) \
+		--cache-dir $(NPU_CACHE) --conf $(YOLO_CONF) --iou $(YOLO_IOU)
+
+bench/yolo-npu: release
+	$(BRAIN) npu bench --onnx $(ONNX_INT8) --device $(NPU_DEVICE) \
+		--cache-dir $(NPU_CACHE) --hint throughput --iters 200 --warmup 20
 
 # ---- architecture-evaluation benchmark suite ------------------------------
 # `make bench` runs every registered benchmark (crates/bench) and prints one

@@ -301,7 +301,7 @@ fn eval(args: &[String]) {
         let off = (k as f32) * (data.w as f32 + 16.0);
         // CHW -> HWC for detect (it expects interleaved RGB).
         let chw = &data.images[i * stride..(i + 1) * stride];
-        let hwc = chw_to_hwc(chw, 3, data.h as usize, data.w as usize);
+        let hwc = crate::image_io::chw_to_hwc(chw, 3, data.h as usize, data.w as usize);
         let dets = model.detect(&hwc, data.w, data.h, conf, iou);
         for mut d in dets {
             d[0] += off;
@@ -348,13 +348,18 @@ fn detect(args: &[String]) {
     if weights.is_empty() || image.is_empty() {
         eprintln!("usage: brain yolo detect --weights F --image <path> [--conf X --iou X]");
         eprintln!("  <path> is a binary PPM (P6) or a detection dataset dir (uses image 0)");
+        eprintln!("  add --device npu to compile+run on the Intel NPU via OpenVINO");
         return;
+    }
+    // `--device npu` routes through the OpenVINO NPU path (export fp32 -> compile).
+    if crate::npu_requested() {
+        return detect_via_npu(&weights, &image, conf, iou);
     }
     let model = Yolo::load(&weights, 1);
 
     // Accept either a binary PPM (P6) file or a detection-dataset directory (in
     // which case image 0 is used). PPM/raw decoding reuses the `events` codec.
-    let (hwc, w, h) = match load_image(&image) {
+    let (hwc, w, h) = match crate::image_io::load_image(&image) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("brain yolo detect: {e}");
@@ -362,50 +367,37 @@ fn detect(args: &[String]) {
         }
     };
     let dets = model.detect(&hwc, w, h, conf, iou);
-    // One JSON line per detection: [x1,y1,x2,y2,conf,class].
-    for d in &dets {
-        println!(
-            "[{:.2},{:.2},{:.2},{:.2},{:.4},{}]",
-            d[0], d[1], d[2], d[3], d[4], d[5] as u32
-        );
-    }
+    print_dets(&dets);
     eprintln!("brain yolo detect: {} detection(s) on {w}x{h}", dets.len());
 }
 
-/// Load an image as interleaved-RGB HWC f32 `[0,1]`, returning `(hwc, w, h)`.
-/// Accepts a binary PPM (P6) file, a raw `<w>x<h>x3` rgb8 file, or a detection
-/// dataset directory (image 0, decoded from its CHW `images.f32`).
-fn load_image(path: &str) -> Result<(Vec<f32>, u32, u32), String> {
-    let p = Path::new(path);
-    if p.is_dir() {
-        let data = load_dataset(p).map_err(|e| format!("loading dataset {path}: {e}"))?;
-        if data.n == 0 {
-            return Err("dataset has no images".into());
+/// `--device npu` route for `detect`: auto-export the weights to an fp32 ONNX and
+/// run it on the Intel NPU via OpenVINO (host DFL-decode + NMS). For INT8, use
+/// `brain npu quantize` + `brain npu run`.
+fn detect_via_npu(weights: &str, image: &str, conf: f32, iou: f32) {
+    let (hwc, w, h) = match crate::image_io::load_image(image) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("brain yolo detect: {e}");
+            std::process::exit(1);
         }
-        let stride = data.image_stride();
-        let hwc = chw_to_hwc(&data.images[..stride], 3, data.h as usize, data.w as usize);
-        return Ok((hwc, data.w, data.h));
+    };
+    let cfg = npu::openvino::NpuConfig { device: npu::openvino::NpuDevice::Npu, ..Default::default() };
+    match npu::detect_weights_on_npu(weights, &hwc, w, h, conf, iou, &cfg, None) {
+        Ok(dets) => {
+            print_dets(&dets);
+            eprintln!("brain yolo detect (--device npu): {} detection(s) on {w}x{h}", dets.len());
+        }
+        Err(e) => {
+            eprintln!("brain yolo detect --device npu: {e}");
+            std::process::exit(1);
+        }
     }
-    let bytes = std::fs::read(p).map_err(|e| format!("reading {path}: {e}"))?;
-    if bytes.starts_with(b"P6") {
-        let (px, w, h) = events::ppm::decode_p6(&bytes)?;
-        let hwc: Vec<f32> = px.iter().map(|&b| b as f32 / 255.0).collect();
-        return Ok((hwc, w, h));
-    }
-    Err(format!(
-        "{path}: unsupported image (send a binary PPM 'P6' file or a detection dataset dir)"
-    ))
 }
 
-/// CHW `[c,h,w]` -> interleaved HWC `[h,w,c]`.
-fn chw_to_hwc(chw: &[f32], c: usize, h: usize, w: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; c * h * w];
-    for ch in 0..c {
-        for y in 0..h {
-            for x in 0..w {
-                out[(y * w + x) * c + ch] = chw[ch * h * w + y * w + x];
-            }
-        }
+/// Print one JSON line per detection: `[x1,y1,x2,y2,conf,class]`.
+fn print_dets(dets: &[[f32; 6]]) {
+    for d in dets {
+        println!("[{:.2},{:.2},{:.2},{:.2},{:.4},{}]", d[0], d[1], d[2], d[3], d[4], d[5] as u32);
     }
-    out
 }

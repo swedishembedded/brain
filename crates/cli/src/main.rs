@@ -15,9 +15,23 @@
 mod data_cli;
 mod federated_cli;
 mod gpt_cli;
+mod image_io;
+mod npu_cli;
 mod pid_cli;
 mod run_cli;
 mod yolo_cli;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set when `--device npu` is requested. The NPU is a whole-graph (OpenVINO)
+/// path, not a `gpu_core` backend, so it is tracked separately and consumed by
+/// the commands that support it (today: `brain yolo detect`).
+static NPU_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the user asked for `--device npu`.
+pub(crate) fn npu_requested() -> bool {
+    NPU_REQUESTED.load(Ordering::Relaxed)
+}
 
 const HELP: &str = "\
 brain — train and evaluate neural nets from scratch on the GPU (Rust + WGSL).
@@ -48,6 +62,18 @@ YOLO (from-scratch anchor-free object detector)
                                                                 # prints [x1,y1,x2,y2,conf,class] JSON lines
   brain yolo fine-tune <data_dir> --weights <pretrained> --out F [--freeze-backbone ...]
       Trains the tiny YOLOv8 graph on a `data gen detect` dataset (CPU backend).
+  brain yolo detect --weights F --image <...> --device npu     # run on the Intel NPU
+
+INTEL NPU (OpenVINO: quantize + compile YOLO to a real NPU graph)
+  brain npu export   --weights F --out model.onnx [--input S --opset N]    # fp32 ONNX
+  brain npu quantize --weights F --calib <dir> --out model.int8.onnx [--input S --num-calib N]
+  brain npu check    --onnx M [--device NPU]              # ONNX op histogram + compile/coverage
+  brain npu run      --onnx M --image <P6|dir> [--device NPU --conf X --iou X --nc C --reg-max R]
+  brain npu bench    --onnx M [--input S --device NPU --iters N --hint latency|throughput]
+  brain npu sim      --weights F --data <dir> [--calib <dir>]   # fp32 vs INT8 mAP, no NPU
+      export/quantize/sim are pure Rust (any machine); run/bench/check-compile need
+      OpenVINO + an Intel NPU. The whole-graph NPU path is separate from --device
+      cpu|gpu; see docs/yolo/NPU.md.
 
 SPARSE MoE
   brain train [--steps N --batch-size B --block-size T --lr X --out F]
@@ -112,6 +138,11 @@ Or drive everything via the Makefile:  make data/calculator train/gpt/calculator
 /// same without a flag. Both backends are compiled into every build; this only
 /// chooses which one each model instantiates at runtime.
 fn select_backend(argv: Vec<String>) -> Vec<String> {
+    // `brain npu …` subcommands parse their OWN `--device` (the OpenVINO target
+    // device); don't consume it here.
+    if argv.get(1).map(|s| s == "npu").unwrap_or(false) {
+        return argv;
+    }
     let mut out = Vec::with_capacity(argv.len());
     let mut i = 0;
     while i < argv.len() {
@@ -121,8 +152,13 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                 Some("gpu") | Some("wgpu") => {
                     gpu_core::set_default_backend(gpu_core::Backend::Wgpu)
                 }
+                // The NPU is a whole-graph (OpenVINO) path, not a gpu_core
+                // backend: record the request and leave the host backend at its
+                // default (the NPU path does its own compute via OpenVINO + a
+                // pure-Rust decode). Consumed by `brain yolo detect`.
+                Some("npu") => NPU_REQUESTED.store(true, Ordering::Relaxed),
                 other => {
-                    eprintln!("brain: --device expects cpu|gpu (got {other:?})");
+                    eprintln!("brain: --device expects cpu|gpu|npu (got {other:?})");
                     std::process::exit(2);
                 }
             }
@@ -379,6 +415,7 @@ fn main() {
         Some("data") => data_cli::run_data(&argv[2..]),
         Some("gpt") => gpt_cli::run_gpt(&argv[2..]),
         Some("yolo") => yolo_cli::run_yolo(&argv[2..]),
+        Some("npu") => npu_cli::run_npu(&argv[2..]),
         Some("federated") => federated_cli::run_federated(&argv[2..]),
         Some("gradcheck") => {
             let report = gradcheck::check_gpt(1);
