@@ -39,11 +39,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let cq = tt % ntc;
     let n = tt / ntc;
     let co0 = cq * 4u;
-    let pbase = pq * 4u;
     let nc = min(4u, p.Cout - co0);
 
-    // 4 positions (n fixed).
-    let q0 = pbase; let q1 = pbase + 1u; let q2 = pbase + 2u; let q3 = pbase + 3u;
+    // The thread's 4 output positions are STRIDED by npq (not consecutive), so
+    // adjacent threads (adjacent pq) own adjacent positions -> the warp's input
+    // reads and output writes coalesce, while the 4 positions still share the 4
+    // loaded weights (weight reuse). Each of the P positions is covered once.
+    let q0 = pq; let q1 = pq + npq; let q2 = pq + 2u * npq; let q3 = pq + 3u * npq;
     let ho0 = q0 / p.Wo; let wo0 = q0 % p.Wo;
     let ho1 = q1 / p.Wo; let wo1 = q1 % p.Wo;
     let ho2 = q2 / p.Wo; let wo2 = q2 % p.Wo;
