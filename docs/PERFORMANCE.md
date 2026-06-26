@@ -59,6 +59,12 @@ the scalar WGSL reference** (unit tests) and gated by runtime AVX2 detection
    computed **once** (no per-frame host stat packing); SiLU is applied in the
    GEMM epilogue. Eliminates two full activation memory passes + two dispatches.
 
+4b. **Fuse the detection-head conv + bias** into one `conv_bias` kernel (the
+   bias param is bound directly, added in the conv epilogue). Removes the
+   separate `bias_add` pass *and* the `pack_bcast` machinery (a host-built
+   `[C*HW]` broadcast buffer + a per-frame bias readback — a former GPU sync
+   source) per head branch (×6). Works in train and eval (bias read live).
+
 5. **Native memory-bound ops** (concat2 / concat_split / bn_eval / silu /
    upsample2). These were scalar one-element-per-invocation loops dominated by
    per-element index decode and (silu) a per-element libm `expf`. Replace with
@@ -175,12 +181,33 @@ GEMM that serves GPU and CPU from one kernel.
 The GPU `forward` is now pure conv throughput. Remaining levers, in ROI order:
 1. **Coalescing** (done) — biggest small win.
 2. **Wider register tile** (4×8 / 8×4) — more reuse, until register pressure.
-3. **Concat fusion** — write conv outputs directly into concat-buffer slices
-   (and read splits as views) to drop the remaining copies.
-4. **im2col + tiled GEMM** — the structural endgame: do the per-tap index/bounds
+3. **im2col + tiled GEMM** — the structural endgame: do the per-tap index/bounds
    work *once* in im2col, then a clean coalesced tiled GEMM (no per-tap overhead),
    built on the work-group JIT above. This is how cuDNN/oneDNN reach their
    throughput and the realistic route to matching torch.
+
+### On fusion specifically
+
+The right mental model for fusion: yolov8n must run as a **graph of ~dozens of
+kernels separated by unavoidable global barriers** (each layer reads the *whole*
+previous output across all workgroups — a kernel boundary *is* the global
+barrier; you can't make it one mega-kernel). The win is **vertical /
+producer-consumer fusion** *along* each barrier-free chain. Status:
+
+- **conv → BN(eval) → SiLU** — fused (`conv_act` / `conv_act_reg`). The big one.
+- **head conv → bias** — fused (`conv_bias`). Done.
+- **launch / submit / readback overhead** — minimized (one submit, one pass,
+  7 readbacks/frame).
+- **concat / slice into the producer** *(not yet — the next fusion)*. The C2f
+  split + channel-concats are pure data movement; having the conv that *produces*
+  a tensor write directly into its final slice of the concat buffer (and reading
+  the split halves as views) drops the `chan_place`/`concat_split` copies. This
+  needs **buffer-view infrastructure** (offset sub-buffers in both backends; wgpu
+  bindings have a 256-byte offset-alignment constraint) and a careful C2f
+  forward+backward restructure (the backward reads those activations, so
+  gradcheck must stay green). It's the right architectural fusion but a
+  higher-blast-radius change for a now-*modest* GPU win (the GPU is conv-bound),
+  so it's scoped as a focused follow-up rather than bundled with kernel tuning.
 
 > Honest framing: the from-scratch WGSL conv competes with a mature vendor
 > library (oneDNN/cuDNN) on the vendor's own silicon. The structural wins (sync /
