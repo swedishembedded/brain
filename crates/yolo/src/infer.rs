@@ -109,6 +109,13 @@ impl Yolo {
         if !was_eval {
             self.set_eval(false);
         }
+        // With lazy GPU submission `forward_net_pub` only RECORDS the dispatches;
+        // the GPU executes them at the first readback (in postprocess). Under
+        // profiling, force completion here so the `forward` stage reflects real
+        // GPU compute time and `postprocess` reflects host work, not the forward.
+        if prof {
+            self.gpu.poll_wait();
+        }
         let t_fwd = std::time::Instant::now();
 
         // 3-6. decode + score + NMS + un-letterbox, per image.

@@ -47,8 +47,20 @@ use paramstore::ParamStore;
 use crate::net::{Ctx, Shape};
 use crate::net::{
     ADD2, BN_DBETA, BN_DGAMMA, BN_DSTATS, BN_DX, BN_RUNNING, BN_STATS, BN_TRAIN, CHAN_PLACE, CONCAT2,
-    CONCAT_SPLIT, CONV2D, CONV2D_DW, CONV2D_DX, CONV_ACT_TILED, MAXPOOL5, MAXPOOL5_DX, SILU, SILU_BWD,
+    CONCAT_SPLIT, CONV2D, CONV2D_DW, CONV2D_DX, CONV_ACT, CONV_ACT_TILED, MAXPOOL5, MAXPOOL5_DX, SILU,
+    SILU_BWD,
 };
+
+/// Whether to use the weight-staged (workgroup-memory) tiled conv on the GPU.
+/// Off by default: staging the full weight tile costs up to ~10–32 KiB of
+/// workgroup memory, which collapses GPU occupancy and was measured SLOWER than
+/// the naive conv on Intel Arc. Kept opt-in (`BRAIN_TILED_CONV=1`) for the
+/// follow-up proper input+weight tiled GEMM. The work-group JIT path (solution
+/// B) it exercises is correct either way.
+fn use_tiled_conv() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BRAIN_TILED_CONV").map(|v| v != "0").unwrap_or(false))
+}
 
 /// Interleave two per-channel vectors into a `[2C]` packed buffer.
 fn pack2(a: &[f32], b: &[f32]) -> Vec<f32> {
@@ -242,14 +254,20 @@ impl Conv {
                 self.pack_sb(ctx, ps);
                 self.sb_ready.set(true);
             }
-            // Weight-tiled fused conv: one workgroup per (n, channel, 64-position
-            // block). On GPU this stages weights in workgroup memory (big win); on
-            // CPU it routes to the same native AVX2 fast path as conv_act.
+            // Fused conv -> BN(eval) -> SiLU. The weight-tiled variant (opt-in)
+            // exercises the single-source work-group kernel; the default naive
+            // variant is faster on current GPUs (full occupancy). Both route to
+            // the same native AVX2 fast path on CPU.
+            let (kind, threads) = if use_tiled_conv() {
+                (CONV_ACT_TILED, self.tiled_threads())
+            } else {
+                (CONV_ACT, self.out_shape.numel())
+            };
             let s = ctx.step(
-                CONV_ACT_TILED,
+                kind,
                 &[x_in, ps.w(&p("conv.weight")), &self.sb, &self.act],
                 &self.conv_params(),
-                self.tiled_threads(),
+                threads,
             );
             ctx.gpu.submit(&[], &[s]);
             return;
