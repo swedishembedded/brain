@@ -159,16 +159,38 @@ impl Shape {
     }
 }
 
+/// An activation tap: observe (and optionally rewrite, in place) each `Conv`'s
+/// input activation during a forward pass. Used by the NPU INT8 quantizer
+/// (`brain-npu`) to (a) collect per-conv activation ranges for calibration
+/// (read-only) and (b) simulate the INT8 quant→dequant effect in fp32 for the
+/// hardware-free accuracy-parity gate (in-place rewrite). `name` is the conv's
+/// unique prefix, which matches the exported ONNX node name.
+///
+/// The tap is only consulted on the eval-mode (inference) forward path, and only
+/// when one is installed via [`Ctx::with_tap`] — every normal `detect` runs with
+/// no tap and pays zero cost.
+pub trait ActTap {
+    fn tap(&self, name: &str, x: &mut [f32]);
+}
+
 /// Block-build context: a thin wrapper over the device that hands out fresh
 /// activation buffers and records dispatch [`Step`]s. Held by reference while a
 /// block records its forward/backward steps.
 pub struct Ctx<'g> {
     pub gpu: &'g Gpu,
+    /// Optional activation tap (calibration / fake-quant). `None` on every
+    /// normal forward — see [`ActTap`].
+    pub tap: Option<&'g dyn ActTap>,
 }
 
 impl<'g> Ctx<'g> {
     pub fn new(gpu: &'g Gpu) -> Ctx<'g> {
-        Ctx { gpu }
+        Ctx { gpu, tap: None }
+    }
+    /// A context whose `Conv` forwards route their input through the given
+    /// [`ActTap`]. Used only by the NPU calibrator / fake-quant simulator.
+    pub fn with_tap(gpu: &'g Gpu, tap: &'g dyn ActTap) -> Ctx<'g> {
+        Ctx { gpu, tap: Some(tap) }
     }
     /// A fresh activation / temporary buffer of `n` f32 elements.
     pub fn act(&self, n: u32) -> gpu_core::DeviceBuffer {

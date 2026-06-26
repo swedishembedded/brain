@@ -56,6 +56,93 @@ pub fn dfl_decode_dist(gpu: &gpu_core::Gpu, box_logits: &[f32], na: usize, reg_m
     gpu.read(&db, na * 4)
 }
 
+/// Pure-Rust (GPU-free) DFL decode, byte-for-byte equivalent to the `dfl_decode`
+/// WGSL kernel / [`dfl_decode_dist`]: per side, a numerically-stable softmax over
+/// `reg_max` logits then the expectation `E = Σ_i i·p_i`. Layout `[na, 4*reg_max]`
+/// (side-major then bin) -> `[na, 4]`. The NPU path uses this so it never needs a
+/// `Gpu`; a yolo test asserts parity with the kernel.
+pub fn dfl_decode_cpu(box_logits: &[f32], na: usize, reg_max: usize) -> Vec<f32> {
+    let mut dist = vec![0.0f32; na * 4];
+    for (idx, out) in dist.iter_mut().enumerate() {
+        let base = idx * reg_max;
+        let mut mx = f32::NEG_INFINITY;
+        for i in 0..reg_max {
+            mx = mx.max(box_logits[base + i]);
+        }
+        let mut sum = 0.0f32;
+        for i in 0..reg_max {
+            sum += (box_logits[base + i] - mx).exp();
+        }
+        let mut e = 0.0f32;
+        for i in 0..reg_max {
+            e += i as f32 * (box_logits[base + i] - mx).exp() / sum;
+        }
+        *out = e;
+    }
+    dist
+}
+
+/// Decode + per-class score + class-aware NMS + un-letterbox over already-
+/// flattened logits and DFL distances. The pure-Rust tail of detection inference,
+/// shared by [`Yolo::detect_batch`] (engine) and the NPU runtime — both feed it
+/// `cls [N,A,nc]`, `dist [N*A,4]`, the anchor geometry and per-image letterboxes,
+/// guaranteeing identical post-processing. Returns one `Vec<Detection>` per image
+/// in original-image pixel coords.
+#[allow(clippy::too_many_arguments)]
+pub fn decode_detections(
+    cls: &[f32],
+    dist: &[f32],
+    anchors: &[crate::assign::Anchor],
+    n: usize,
+    a: usize,
+    nc: usize,
+    lbs: &[Letterbox],
+    sizes: &[(u32, u32)],
+    conf_thresh: f32,
+    iou_thresh: f32,
+    max_det: usize,
+) -> Vec<Vec<Detection>> {
+    let mut out: Vec<Vec<Detection>> = Vec::with_capacity(n);
+    for img in 0..n {
+        let mut dets: Vec<Detection> = Vec::new();
+        for i in 0..a {
+            // Best class for this anchor (sigmoid is monotonic, so argmax over
+            // logits == argmax over scores; sigmoid only the winner).
+            let cbase = (img * a + i) * nc;
+            let mut best_c = 0usize;
+            let mut best_l = cls[cbase];
+            for c in 1..nc {
+                let l = cls[cbase + c];
+                if l > best_l {
+                    best_l = l;
+                    best_c = c;
+                }
+            }
+            let best_s = sigmoid(best_l);
+            if best_s < conf_thresh {
+                continue;
+            }
+            let an = anchors[i];
+            let dbase = (img * a + i) * 4;
+            let d = [dist[dbase], dist[dbase + 1], dist[dbase + 2], dist[dbase + 3]];
+            let bx = dist_to_xyxy(d, an.ax, an.ay, an.stride); // input coords
+            dets.push([bx[0], bx[1], bx[2], bx[3], best_s, best_c as f32]);
+        }
+        let kept = nms(&dets, iou_thresh, max_det);
+        let (w0, h0) = sizes[img];
+        let lb = lbs[img];
+        let mapped: Vec<Detection> = kept
+            .into_iter()
+            .map(|d| {
+                let b = lb.invert_box([d[0], d[1], d[2], d[3]], w0, h0);
+                [b[0], b[1], b[2], b[3], d[4], d[5]]
+            })
+            .collect();
+        out.push(mapped);
+    }
+    out
+}
+
 impl Yolo {
     /// Detect objects in ONE interleaved-RGB HWC image (`src[h0*w0*3]`) of size
     /// `w0 x h0`. Returns `[x1,y1,x2,y2,conf,class]` in original-image coords.
@@ -118,7 +205,7 @@ impl Yolo {
         }
         let t_fwd = std::time::Instant::now();
 
-        // 3-6. decode + score + NMS + un-letterbox, per image.
+        // 3-6. decode + score + NMS + un-letterbox, via the shared tail.
         let (cls, boxl) = self.raw_logits();
         let a = self.num_anchors() as usize;
         let nc = self.cfg.nc as usize;
@@ -126,49 +213,10 @@ impl Yolo {
         let anchors = self.anchor_geometry();
 
         let dist = dfl_decode_dist(&self.gpu, &boxl, n * a, reg_max);
-
-        let mut out: Vec<Vec<Detection>> = Vec::with_capacity(n);
-        for img in 0..n {
-            let mut dets: Vec<Detection> = Vec::new();
-            for i in 0..a {
-                // Best class for this anchor. SiLU/sigmoid is monotonic, so the
-                // argmax over the raw logits is the argmax over the scores —
-                // compute sigmoid only once (for the winner) instead of nc times
-                // per anchor (this loop runs over every anchor × class).
-                let cbase = (img * a + i) * nc;
-                let mut best_c = 0usize;
-                let mut best_l = cls[cbase];
-                for c in 1..nc {
-                    let l = cls[cbase + c];
-                    if l > best_l {
-                        best_l = l;
-                        best_c = c;
-                    }
-                }
-                let best_s = sigmoid(best_l);
-                if best_s < conf_thresh {
-                    continue;
-                }
-                let an = anchors[i];
-                let dbase = (img * a + i) * 4;
-                let d = [dist[dbase], dist[dbase + 1], dist[dbase + 2], dist[dbase + 3]];
-                let bx = dist_to_xyxy(d, an.ax, an.ay, an.stride); // input coords
-                dets.push([bx[0], bx[1], bx[2], bx[3], best_s, best_c as f32]);
-            }
-            // class-aware NMS in input coords.
-            let kept = nms(&dets, iou_thresh, self.max_det());
-            // un-letterbox to original coords.
-            let (_, w0, h0) = images[img];
-            let lb = lbs[img];
-            let mapped: Vec<Detection> = kept
-                .into_iter()
-                .map(|d| {
-                    let b = lb.invert_box([d[0], d[1], d[2], d[3]], w0, h0);
-                    [b[0], b[1], b[2], b[3], d[4], d[5]]
-                })
-                .collect();
-            out.push(mapped);
-        }
+        let sizes: Vec<(u32, u32)> = images.iter().map(|&(_, w0, h0)| (w0, h0)).collect();
+        let out = decode_detections(
+            &cls, &dist, &anchors, n, a, nc, &lbs, &sizes, conf_thresh, iou_thresh, self.max_det(),
+        );
         if prof {
             let t_end = std::time::Instant::now();
             eprintln!(

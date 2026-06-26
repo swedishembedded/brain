@@ -49,6 +49,35 @@ use paramstore::ParamStore;
 use crate::blocks::Conv;
 use crate::net::{Ctx, Shape, BIAS_GRAD, CONV2D_DW, CONV2D_DX, CONV_BIAS};
 
+/// Repack per-scale NCHW logit maps into a flat `[N, A, C]` host tensor with
+/// anchors ordered scale-major then row-major over `(H,W)` — the layout the loss
+/// and the inference decode consume. `scales[s] = (data_nchw, h, w)`, each
+/// `data_nchw` laid out `[N,C,H,W]` with the SAME `c` across scales;
+/// `a = Σ_s h·w`.
+///
+/// This is the one definition shared by the engine path ([`Head::gather_flat`])
+/// and the NPU path (which feeds OpenVINO's per-scale outputs straight in), so
+/// both produce byte-identical anchor ordering.
+pub fn repack_heads_to_flat(scales: &[(&[f32], u32, u32)], n: usize, c: usize, a: usize) -> Vec<f32> {
+    let mut flat = vec![0.0f32; n * a * c];
+    let mut anchor_base = 0usize;
+    for &(data, h, w) in scales {
+        let hw = (h * w) as usize;
+        for nn in 0..n {
+            for ch in 0..c {
+                for p in 0..hw {
+                    // NCHW src; flat dst groups all C of an anchor contiguously.
+                    let src = (nn * c + ch) * hw + p;
+                    let dst = (nn * a + anchor_base + p) * c + ch;
+                    flat[dst] = data[src];
+                }
+            }
+        }
+        anchor_base += hw;
+    }
+    flat
+}
+
 /// One scale's cls or reg branch: two `Conv`s then a BIASED 1x1 conv.
 pub struct Branch {
     pub c0: Conv,
@@ -339,7 +368,9 @@ impl Head {
 
     /// Read each scale's `[N,C,H,W]` logit map and repack to `[N, (sum H*W), C]`
     /// with anchors scale-major then row-major. `c` is the per-cell channel
-    /// count (nc or 4*reg_max).
+    /// count (nc or 4*reg_max). Delegates the host repack to
+    /// [`repack_heads_to_flat`] so the engine path and the NPU decode path share
+    /// one definition.
     fn gather_flat(
         &self,
         ctx: &Ctx,
@@ -349,26 +380,16 @@ impl Head {
     ) -> Vec<f32> {
         let n = self.in_shapes[0].n as usize;
         let a = self.num_anchors() as usize;
-        let cc = c as usize;
-        let mut flat = vec![0.0f32; n * a * cc];
-        let mut anchor_base = 0usize;
-        for scale in &self.scales {
-            let sh = shape(scale);
-            let hw = (sh.h * sh.w) as usize;
-            let data = ctx.gpu.read(out(scale), (sh.numel()) as usize);
-            // data is NCHW: index ((nn*C + ch)*H + h)*W + w = nn*C*hw + ch*hw + p
-            for nn in 0..n {
-                for ch in 0..cc {
-                    for p in 0..hw {
-                        let src = (nn * cc + ch) * hw + p;
-                        let dst = (nn * a + anchor_base + p) * cc + ch;
-                        flat[dst] = data[src];
-                    }
-                }
-            }
-            anchor_base += hw;
-        }
-        flat
+        let datas: Vec<(Vec<f32>, u32, u32)> = self
+            .scales
+            .iter()
+            .map(|scale| {
+                let sh = shape(scale);
+                (ctx.gpu.read(out(scale), sh.numel() as usize), sh.h, sh.w)
+            })
+            .collect();
+        let refs: Vec<(&[f32], u32, u32)> = datas.iter().map(|(d, h, w)| (d.as_slice(), *h, *w)).collect();
+        repack_heads_to_flat(&refs, n, c as usize, a)
     }
 
     /// Anchor-point centers `(ax, ay)` per cell, in FEATURE units (`ax =

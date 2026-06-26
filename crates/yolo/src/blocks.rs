@@ -121,6 +121,11 @@ pub struct Conv {
     d_bn: DeviceBuffer,   // grad wrt bn_out [out]
     bp: DeviceBuffer,     // packed [5C] from bn_dstats
     d_conv: DeviceBuffer, // grad wrt conv_out [out]
+
+    /// Lazily-allocated [in] scratch holding the tapped (possibly fake-quantized)
+    /// conv input, used only when a [`crate::net::ActTap`] is installed (NPU
+    /// calibration / fake-quant). Never allocated on the normal inference path.
+    q_in: std::cell::RefCell<Option<DeviceBuffer>>,
 }
 
 impl Conv {
@@ -165,6 +170,7 @@ impl Conv {
             d_bn: ctx.act(on),
             bp: ctx.act(5 * c),
             d_conv: ctx.act(on),
+            q_in: std::cell::RefCell::new(None),
         }
     }
 
@@ -279,6 +285,29 @@ impl Conv {
                 let npq = (self.out_shape.h * self.out_shape.w).div_ceil(4);
                 (CONV_ACT_REG, self.out_shape.n * ntc * npq)
             };
+            // Calibration / fake-quant tap (NPU INT8): route the conv input
+            // through the host so the tap can read its range and/or rewrite it
+            // (quant→dequant), then convolve the tapped copy. Only taken when a
+            // tap is installed; the normal inference path skips this entirely.
+            if let Some(tap) = ctx.tap {
+                let in_n = self.in_shape.numel() as usize;
+                let mut h = ctx.gpu.read(x_in, in_n);
+                tap.tap(&self.prefix, &mut h);
+                if self.q_in.borrow().is_none() {
+                    *self.q_in.borrow_mut() = Some(ctx.gpu.storage(in_n as u64));
+                }
+                let q = self.q_in.borrow();
+                let qbuf = q.as_ref().unwrap();
+                ctx.gpu.write(qbuf, bytemuck::cast_slice(&h));
+                let s = ctx.step(
+                    kind,
+                    &[qbuf, ps.w(&p("conv.weight")), &self.sb, &self.act],
+                    &self.conv_params(),
+                    threads,
+                );
+                ctx.gpu.submit(&[], &[s]);
+                return;
+            }
             let s = ctx.step(
                 kind,
                 &[x_in, ps.w(&p("conv.weight")), &self.sb, &self.act],

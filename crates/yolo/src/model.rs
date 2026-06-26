@@ -627,46 +627,61 @@ impl Yolo {
     /// in the head branch buffers (read by [`Self::loss`] / `raw_logits`).
     fn forward_net(&self) {
         let ctx = self.ctx();
+        self.forward_net_with(&ctx);
+    }
+
+    /// Run the full forward under an installed [`crate::net::ActTap`] — the NPU
+    /// INT8 calibrator / fake-quant simulator path. Every `Conv` routes its input
+    /// activation through the tap (range collection or in-place quant→dequant).
+    /// Must be in eval-mode BN ([`Yolo::set_eval(true)`]) like normal inference.
+    pub fn forward_net_tapped(&self, tap: &dyn crate::net::ActTap) {
+        let ctx = Ctx::with_tap(&self.gpu, tap);
+        self.forward_net_with(&ctx);
+    }
+
+    /// Shared forward body, parameterized by the [`Ctx`] (so the tapped and
+    /// untapped paths share one definition).
+    fn forward_net_with(&self, ctx: &Ctx) {
         let ps = &self.ps;
 
         // ---- backbone ----
-        self.b_conv0.forward(&ctx, ps, &self.img);
-        self.b_conv1.forward(&ctx, ps, self.b_conv0.out());
-        self.b_c2f0.forward(&ctx, ps, self.b_conv1.out());
-        self.b_conv2.forward(&ctx, ps, self.b_c2f0.out());
-        self.b_c2f1.forward(&ctx, ps, self.b_conv2.out()); // P3
-        self.b_conv3.forward(&ctx, ps, self.b_c2f1.out());
-        self.b_c2f2.forward(&ctx, ps, self.b_conv3.out()); // P4
-        self.b_conv4.forward(&ctx, ps, self.b_c2f2.out());
-        self.b_c2f3.forward(&ctx, ps, self.b_conv4.out());
-        self.b_sppf.forward(&ctx, ps, self.b_c2f3.out()); // P5
+        self.b_conv0.forward(ctx, ps, &self.img);
+        self.b_conv1.forward(ctx, ps, self.b_conv0.out());
+        self.b_c2f0.forward(ctx, ps, self.b_conv1.out());
+        self.b_conv2.forward(ctx, ps, self.b_c2f0.out());
+        self.b_c2f1.forward(ctx, ps, self.b_conv2.out()); // P3
+        self.b_conv3.forward(ctx, ps, self.b_c2f1.out());
+        self.b_c2f2.forward(ctx, ps, self.b_conv3.out()); // P4
+        self.b_conv4.forward(ctx, ps, self.b_c2f2.out());
+        self.b_c2f3.forward(ctx, ps, self.b_conv4.out());
+        self.b_sppf.forward(ctx, ps, self.b_c2f3.out()); // P5
 
         let p3 = self.b_c2f1.out();
         let p4 = self.b_c2f2.out();
         let p5 = self.b_sppf.out();
 
         // ---- neck top-down ----
-        self.up5.forward(&ctx, p5);
-        self.cat_p5p4.forward(&ctx, &self.up5.out, p4);
-        self.n_t4.forward(&ctx, ps, &self.cat_p5p4.out);
+        self.up5.forward(ctx, p5);
+        self.cat_p5p4.forward(ctx, &self.up5.out, p4);
+        self.n_t4.forward(ctx, ps, &self.cat_p5p4.out);
         let t4 = self.n_t4.out();
-        self.up4.forward(&ctx, t4);
-        self.cat_t4p3.forward(&ctx, &self.up4.out, p3);
-        self.n_n3.forward(&ctx, ps, &self.cat_t4p3.out);
+        self.up4.forward(ctx, t4);
+        self.cat_t4p3.forward(ctx, &self.up4.out, p3);
+        self.n_n3.forward(ctx, ps, &self.cat_t4p3.out);
         let n3 = self.n_n3.out();
 
         // ---- neck bottom-up ----
-        self.dn3.forward(&ctx, ps, n3);
-        self.cat_n3t4.forward(&ctx, self.dn3.out(), t4);
-        self.n_n4.forward(&ctx, ps, &self.cat_n3t4.out);
+        self.dn3.forward(ctx, ps, n3);
+        self.cat_n3t4.forward(ctx, self.dn3.out(), t4);
+        self.n_n4.forward(ctx, ps, &self.cat_n3t4.out);
         let n4 = self.n_n4.out();
-        self.dn4.forward(&ctx, ps, n4);
-        self.cat_n4p5.forward(&ctx, self.dn4.out(), p5);
-        self.n_n5.forward(&ctx, ps, &self.cat_n4p5.out);
+        self.dn4.forward(ctx, ps, n4);
+        self.cat_n4p5.forward(ctx, self.dn4.out(), p5);
+        self.n_n5.forward(ctx, ps, &self.cat_n4p5.out);
         let n5 = self.n_n5.out();
 
         // ---- head ----
-        self.head.forward(&ctx, ps, &[n3, n4, n5]);
+        self.head.forward(ctx, ps, &[n3, n4, n5]);
     }
 
     /// Proxy loss `L = Σ_branch <r_branch, branch_out>`.
