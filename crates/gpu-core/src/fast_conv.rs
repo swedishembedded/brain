@@ -93,6 +93,23 @@ fn winograd_applicable(p: &ConvParams) -> bool {
     p.k == 3 && p.stride == 1 && p.pad == 1 && p.n >= 1 && p.ho >= 1 && p.wo >= 1
 }
 
+/// Fused conv + per-output-channel bias (matches `conv_bias.wgsl`): the
+/// bias-free conv, then `y[co,..] += bias[co]`. `bias` is `[Cout]`.
+pub fn conv2d_bias(p: &ConvParams, x: &[f32], w: &[f32], bias: &[f32], y: &mut [f32]) {
+    conv2d_impl(p, x, w, y, None);
+    let psz = p.ho * p.wo;
+    if psz == 0 {
+        return;
+    }
+    // plane index = n*Cout + co, so the channel is plane % Cout.
+    y.par_chunks_mut(psz).enumerate().for_each(|(plane, row)| {
+        let b = bias[plane % p.cout];
+        for v in row.iter_mut() {
+            *v += b;
+        }
+    });
+}
+
 fn conv2d_impl(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32], sb: Option<&[f32]>) {
     debug_assert_eq!(x.len(), p.x_len());
     debug_assert_eq!(w.len(), p.w_len());

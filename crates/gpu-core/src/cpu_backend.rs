@@ -77,6 +77,7 @@ struct FastIdx {
     conv2d_tiled: Option<usize>,
     conv_act_tiled: Option<usize>,
     conv_act_reg: Option<usize>,
+    conv_bias: Option<usize>,
     bn_eval: Option<usize>,
     concat2: Option<usize>,
     concat_split: Option<usize>,
@@ -115,6 +116,7 @@ impl CpuBackend {
                 conv2d_tiled: find("conv2d_tiled"),
                 conv_act_tiled: find("conv_act_tiled"),
                 conv_act_reg: find("conv_act_reg"),
+                conv_bias: find("conv_bias"),
                 bn_eval: find("bn_eval"),
                 concat2: find("concat2"),
                 concat_split: find("concat_split"),
@@ -243,6 +245,18 @@ impl CpuBackend {
                 let w = std::slice::from_raw_parts(bufs[1] as *const f32, p.w_len());
                 let y = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, p.y_len());
                 crate::fast_conv::conv2d(&p, x, w, y);
+            }
+            return;
+        }
+        if Some(kind) == f.conv_bias && bufs.len() >= 4 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 10);
+                let p = crate::fast_conv::ConvParams::from_u32(pu);
+                let x = std::slice::from_raw_parts(bufs[0] as *const f32, p.x_len());
+                let w = std::slice::from_raw_parts(bufs[1] as *const f32, p.w_len());
+                let bias = std::slice::from_raw_parts(bufs[2] as *const f32, p.cout);
+                let y = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, p.y_len());
+                crate::fast_conv::conv2d_bias(&p, x, w, bias, y);
             }
             return;
         }

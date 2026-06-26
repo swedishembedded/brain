@@ -47,7 +47,7 @@ use gpu_core::DeviceBuffer;
 use paramstore::ParamStore;
 
 use crate::blocks::Conv;
-use crate::net::{Ctx, Shape, BIAS_ADD, BIAS_GRAD, CONV2D, CONV2D_DW, CONV2D_DX};
+use crate::net::{Ctx, Shape, BIAS_GRAD, CONV2D_DW, CONV2D_DX, CONV_BIAS};
 
 /// One scale's cls or reg branch: two `Conv`s then a BIASED 1x1 conv.
 pub struct Branch {
@@ -63,11 +63,7 @@ pub struct Branch {
     d_c0: DeviceBuffer,   // grad wrt c0.out  [n,mid,h,w]
 
     // head-bias plumbing (see module docs). C*H*W elements.
-    bcast: DeviceBuffer,  // broadcast bias bcast[c*HW+p] = bias[c]
     dbcast: DeviceBuffer, // bias_grad output before the host spatial-reduce
-    /// Whether `bcast` holds the current (constant in eval) broadcast bias, so
-    /// inference packs it once instead of a host readback+write every frame.
-    bcast_ready: std::cell::Cell<bool>,
 }
 
 impl Branch {
@@ -87,9 +83,7 @@ impl Branch {
             logits: ctx.act(out_shape.numel()),
             d_c1: ctx.act(mid_n),
             d_c0: ctx.act(mid_n),
-            bcast: ctx.act(chw),
             dbcast: ctx.act(chw),
-            bcast_ready: std::cell::Cell::new(false),
         }
     }
 
@@ -102,10 +96,6 @@ impl Branch {
     pub fn set_eval(&self, eval: bool) {
         self.c0.set_eval(eval);
         self.c1.set_eval(eval);
-        // Re-entering train mode means the bias can change again: recompute bcast.
-        if !eval {
-            self.bcast_ready.set(false);
-        }
     }
 
     /// Propagate the BN running-stat update toggle to the two Convs (the final
@@ -128,43 +118,21 @@ impl Branch {
         [cin.n, cin.c, cin.h, cin.w, self.out_c, 1, 1, 0, cin.h, cin.w]
     }
 
-    /// Build the broadcast bias `bcast[c*HW+p] = bias[c]` on the host from the
-    /// `[C]` bias param (see module docs). Returns `(N, C*HW)` for the kernel.
-    fn pack_bcast(&self, ctx: &Ctx, ps: &ParamStore) -> (u32, u32) {
-        let c = self.out_c as usize;
-        let hw = (self.out_shape.h * self.out_shape.w) as usize;
-        let bias = ctx.gpu.read(ps.w(&format!("{}.2.bias", self.prefix)), c);
-        let mut bcast = vec![0.0f32; c * hw];
-        for ch in 0..c {
-            let b = bias[ch];
-            let base = ch * hw;
-            for p in 0..hw {
-                bcast[base + p] = b;
-            }
-        }
-        ctx.gpu.write(&self.bcast, bytemuck::cast_slice(&bcast));
-        (self.out_shape.n, (self.out_c * self.out_shape.h * self.out_shape.w))
-    }
-
     pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
         self.c0.forward(ctx, ps, x_in);
         self.c1.forward(ctx, ps, self.c0.out());
+        // Fused conv + per-output-channel bias in one kernel: the bias param
+        // `[Cout]` is bound directly (always current, train or eval), so there is
+        // no separate bias_add pass and no host-built `[C*HW]` broadcast buffer.
         let w = ps.w(&format!("{}.2.weight", self.prefix));
-        let s = ctx.step(CONV2D, &[self.c1.out(), w, &self.logits], &self.conv1x1_params(), self.out_shape.numel());
+        let bias = ps.w(&format!("{}.2.bias", self.prefix));
+        let s = ctx.step(
+            CONV_BIAS,
+            &[self.c1.out(), w, bias, &self.logits],
+            &self.conv1x1_params(),
+            self.out_shape.numel(),
+        );
         ctx.gpu.submit(&[], &[s]);
-        // Add the per-channel bias via the [M,N] bias_add on the [N, C*HW] view.
-        // In eval the bias is constant, so pack the broadcast buffer once (skip the
-        // per-frame host readback+write); in train it can change, so always repack.
-        if !(self.c0.is_eval() && self.bcast_ready.get()) {
-            self.pack_bcast(ctx, ps);
-            if self.c0.is_eval() {
-                self.bcast_ready.set(true);
-            }
-        }
-        let m = self.out_shape.n;
-        let n = self.out_c * self.out_shape.h * self.out_shape.w;
-        let sb = ctx.step(BIAS_ADD, &[&self.logits, &self.bcast], &[m, n], m * n);
-        ctx.gpu.submit(&[], &[sb]);
     }
 
     /// Backward. `d_out` = grad wrt this branch's raw-logit output; `d_in`

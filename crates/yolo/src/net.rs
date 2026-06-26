@@ -77,6 +77,8 @@ pub const CONV2D_TILED: usize = 37;
 pub const CONV_ACT_TILED: usize = 38;
 // ---- register-tiled fused conv (4 output channels per invocation) ----
 pub const CONV_ACT_REG: usize = 39;
+// ---- fused conv + per-channel bias (detection head) ----
+pub const CONV_BIAS: usize = 40;
 
 /// Kernel registry passed to [`Gpu::new`] / [`Gpu::new_cpu`]. The position of
 /// each entry is its kernel index (the `const`s above).
@@ -127,6 +129,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("conv_act_tiled", kernels::CONV_ACT_TILED),
     // ---- register-tiled fused conv (index 39) ----
     ("conv_act_reg", kernels::CONV_ACT_REG),
+    // ---- fused conv + bias (index 40) ----
+    ("conv_bias", kernels::CONV_BIAS),
 ];
 
 /// An NCHW feature-map shape. Carried alongside buffers so blocks can compute
