@@ -2,22 +2,21 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // Register-tiled fused conv -> per-channel affine -> SiLU. Each invocation
-// computes a 4x4 output tile = 4 output channels x 4 spatial positions, holding
-// the 16 partial sums in SCALAR registers (fully unrolled, so the GPU keeps them
-// in registers, not local memory). Per tap it loads 4 weights (reused across the
-// 4 positions) and 4 inputs (reused across the 4 channels) -> both global-read
-// traffics drop ~4x vs the naive one-output-per-thread kernel. The 4 positions
-// are STRIDED by npq, so adjacent threads access adjacent addresses (coalesced).
+// computes an 8x4 output tile = 8 output channels x 4 spatial positions, holding
+// the 32 partial sums in SCALAR registers (fully unrolled, so the GPU keeps them
+// in registers, not local memory). Per tap it loads 8 weights (one per output
+// channel, reused across the 4 positions) and up to 4 inputs (one per position,
+// reused across the 8 channels): each strided NCHW input load now feeds 8 outputs
+// instead of 4, so input-read traffic drops ~8x vs naive (input reads, strided by
+// H*W across channels, are the integrated-GPU bottleneck). The 4 positions are
+// STRIDED by npq so adjacent threads access adjacent addresses (coalesced).
 //
-// Loop order is (kh, kw) OUTER, ci INNER: the per-position boundary checks +
-// input offsets depend only on (kh,kw,position), not on the input channel, so
-// they are computed ONCE per tap instead of once per (ci,tap) — for a
-// 256-channel layer that's ~256x fewer bound evaluations / index ops, the
-// per-tap overhead that limited the earlier ci-outer version.
+// Loop order is (kh,kw) OUTER, ci INNER so the per-position boundary checks +
+// input offsets are computed once per tap, not once per (ci,tap).
 //
-// No workgroup memory -> full GPU occupancy; plain per-invocation -> the
-// wgsl-cpu JIT compiles it unchanged. Same result as conv_act.wgsl.
-// Dispatch: total = N * ceil(Cout/4) * ceil(Ho*Wo/4).
+// No workgroup memory -> full GPU occupancy; plain per-invocation -> the JIT
+// compiles it unchanged. Same result as conv_act.wgsl.
+// Dispatch: total = N * ceil(Cout/8) * ceil(Ho*Wo/4).
 
 struct Params {
     N: u32, Cin: u32, H: u32, W: u32, Cout: u32,
@@ -38,18 +37,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let kg = p.Cin * kk;
     let hw = p.H * p.W;
     let psz = p.Ho * p.Wo;
-    let ntc = (p.Cout + 3u) / 4u;
-    let npq = (psz + 3u) / 4u;
+    let ntc = (p.Cout + 7u) / 8u;       // channel octets
+    let npq = (psz + 3u) / 4u;          // position quads
     if (idx >= p.N * ntc * npq) { return; }
 
     let pq = idx % npq;
     let tt = idx / npq;
     let cq = tt % ntc;
     let n = tt / ntc;
-    let co0 = cq * 4u;
-    let nc = min(4u, p.Cout - co0);
+    let co0 = cq * 8u;
+    let nc = min(8u, p.Cout - co0);
 
-    // Coalesced: 4 positions strided by npq (adjacent threads -> adjacent addrs).
+    // 4 coalesced positions strided by npq.
     let q0 = pq; let q1 = pq + npq; let q2 = pq + 2u * npq; let q3 = pq + 3u * npq;
     let ho0 = q0 / p.Wo; let wo0 = q0 % p.Wo;
     let ho1 = q1 / p.Wo; let wo1 = q1 % p.Wo;
@@ -57,16 +56,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let ho3 = q3 / p.Wo; let wo3 = q3 % p.Wo;
     let v1 = q1 < psz; let v2 = q2 < psz; let v3 = q3 < psz;
 
-    var a00 = 0.0; var a01 = 0.0; var a02 = 0.0; var a03 = 0.0;
-    var a10 = 0.0; var a11 = 0.0; var a12 = 0.0; var a13 = 0.0;
-    var a20 = 0.0; var a21 = 0.0; var a22 = 0.0; var a23 = 0.0;
-    var a30 = 0.0; var a31 = 0.0; var a32 = 0.0; var a33 = 0.0;
+    // 32 partial sums: a{pos}{ch}, pos 0..3, ch 0..7.
+    var a00 = 0.0; var a01 = 0.0; var a02 = 0.0; var a03 = 0.0; var a04 = 0.0; var a05 = 0.0; var a06 = 0.0; var a07 = 0.0;
+    var a10 = 0.0; var a11 = 0.0; var a12 = 0.0; var a13 = 0.0; var a14 = 0.0; var a15 = 0.0; var a16 = 0.0; var a17 = 0.0;
+    var a20 = 0.0; var a21 = 0.0; var a22 = 0.0; var a23 = 0.0; var a24 = 0.0; var a25 = 0.0; var a26 = 0.0; var a27 = 0.0;
+    var a30 = 0.0; var a31 = 0.0; var a32 = 0.0; var a33 = 0.0; var a34 = 0.0; var a35 = 0.0; var a36 = 0.0; var a37 = 0.0;
 
     let nci = n * p.Cin;
     for (var kh: u32 = 0u; kh < p.K; kh = kh + 1u) {
         for (var kw: u32 = 0u; kw < p.K; kw = kw + 1u) {
             let wtap = kh * p.K + kw;
-            // Per-position validity + spatial offset (channel part added below).
             let hb0 = ho0 * p.stride + kh; let xb0 = wo0 * p.stride + kw;
             let ok0 = hb0 >= p.pad && xb0 >= p.pad && hb0 - p.pad < p.H && xb0 - p.pad < p.W;
             let off0 = (hb0 - p.pad) * p.W + (xb0 - p.pad);
@@ -86,40 +85,76 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
                 let wt1 = select(0.0, w[(co0 + 1u) * kg + wbase], 1u < nc);
                 let wt2 = select(0.0, w[(co0 + 2u) * kg + wbase], 2u < nc);
                 let wt3 = select(0.0, w[(co0 + 3u) * kg + wbase], 3u < nc);
+                let wt4 = select(0.0, w[(co0 + 4u) * kg + wbase], 4u < nc);
+                let wt5 = select(0.0, w[(co0 + 5u) * kg + wbase], 5u < nc);
+                let wt6 = select(0.0, w[(co0 + 6u) * kg + wbase], 6u < nc);
+                let wt7 = select(0.0, w[(co0 + 7u) * kg + wbase], 7u < nc);
                 let xc = (nci + ci) * hw;
-                if (ok0) { let xv = x[xc + off0]; a00 = a00 + xv * wt0; a01 = a01 + xv * wt1; a02 = a02 + xv * wt2; a03 = a03 + xv * wt3; }
-                if (ok1) { let xv = x[xc + off1]; a10 = a10 + xv * wt0; a11 = a11 + xv * wt1; a12 = a12 + xv * wt2; a13 = a13 + xv * wt3; }
-                if (ok2) { let xv = x[xc + off2]; a20 = a20 + xv * wt0; a21 = a21 + xv * wt1; a22 = a22 + xv * wt2; a23 = a23 + xv * wt3; }
-                if (ok3) { let xv = x[xc + off3]; a30 = a30 + xv * wt0; a31 = a31 + xv * wt1; a32 = a32 + xv * wt2; a33 = a33 + xv * wt3; }
+                if (ok0) { let v = x[xc + off0]; a00 += v*wt0; a01 += v*wt1; a02 += v*wt2; a03 += v*wt3; a04 += v*wt4; a05 += v*wt5; a06 += v*wt6; a07 += v*wt7; }
+                if (ok1) { let v = x[xc + off1]; a10 += v*wt0; a11 += v*wt1; a12 += v*wt2; a13 += v*wt3; a14 += v*wt4; a15 += v*wt5; a16 += v*wt6; a17 += v*wt7; }
+                if (ok2) { let v = x[xc + off2]; a20 += v*wt0; a21 += v*wt1; a22 += v*wt2; a23 += v*wt3; a24 += v*wt4; a25 += v*wt5; a26 += v*wt6; a27 += v*wt7; }
+                if (ok3) { let v = x[xc + off3]; a30 += v*wt0; a31 += v*wt1; a32 += v*wt2; a33 += v*wt3; a34 += v*wt4; a35 += v*wt5; a36 += v*wt6; a37 += v*wt7; }
             }
         }
     }
 
+    // Affine (BN-eval collapsed) + SiLU, then store. Inlined per channel (the
+    // wgsl-cpu JIT has no user-function-call support). a{pos}{ch}.
     let nco = n * p.Cout;
-    let s0 = sb[2u * co0]; let b0 = sb[2u * co0 + 1u];
-    { let z = a00 * s0 + b0; y[(nco + co0) * psz + q0] = z / (1.0 + exp(-z)); }
-    if (v1) { let z = a10 * s0 + b0; y[(nco + co0) * psz + q1] = z / (1.0 + exp(-z)); }
-    if (v2) { let z = a20 * s0 + b0; y[(nco + co0) * psz + q2] = z / (1.0 + exp(-z)); }
-    if (v3) { let z = a30 * s0 + b0; y[(nco + co0) * psz + q3] = z / (1.0 + exp(-z)); }
+    {
+        let co = co0; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
+        { let z = a00*s+b; y[row+q0] = z/(1.0+exp(-z)); }
+        if (v1) { let z = a10*s+b; y[row+q1] = z/(1.0+exp(-z)); }
+        if (v2) { let z = a20*s+b; y[row+q2] = z/(1.0+exp(-z)); }
+        if (v3) { let z = a30*s+b; y[row+q3] = z/(1.0+exp(-z)); }
+    }
     if (1u < nc) {
-        let c = co0 + 1u; let s = sb[2u * c]; let b = sb[2u * c + 1u];
-        { let z = a01 * s + b; y[(nco + c) * psz + q0] = z / (1.0 + exp(-z)); }
-        if (v1) { let z = a11 * s + b; y[(nco + c) * psz + q1] = z / (1.0 + exp(-z)); }
-        if (v2) { let z = a21 * s + b; y[(nco + c) * psz + q2] = z / (1.0 + exp(-z)); }
-        if (v3) { let z = a31 * s + b; y[(nco + c) * psz + q3] = z / (1.0 + exp(-z)); }
+        let co = co0+1u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
+        { let z = a01*s+b; y[row+q0] = z/(1.0+exp(-z)); }
+        if (v1) { let z = a11*s+b; y[row+q1] = z/(1.0+exp(-z)); }
+        if (v2) { let z = a21*s+b; y[row+q2] = z/(1.0+exp(-z)); }
+        if (v3) { let z = a31*s+b; y[row+q3] = z/(1.0+exp(-z)); }
     }
     if (2u < nc) {
-        let c = co0 + 2u; let s = sb[2u * c]; let b = sb[2u * c + 1u];
-        { let z = a02 * s + b; y[(nco + c) * psz + q0] = z / (1.0 + exp(-z)); }
-        if (v1) { let z = a12 * s + b; y[(nco + c) * psz + q1] = z / (1.0 + exp(-z)); }
-        if (v2) { let z = a22 * s + b; y[(nco + c) * psz + q2] = z / (1.0 + exp(-z)); }
-        if (v3) { let z = a32 * s + b; y[(nco + c) * psz + q3] = z / (1.0 + exp(-z)); }
+        let co = co0+2u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
+        { let z = a02*s+b; y[row+q0] = z/(1.0+exp(-z)); }
+        if (v1) { let z = a12*s+b; y[row+q1] = z/(1.0+exp(-z)); }
+        if (v2) { let z = a22*s+b; y[row+q2] = z/(1.0+exp(-z)); }
+        if (v3) { let z = a32*s+b; y[row+q3] = z/(1.0+exp(-z)); }
     }
     if (3u < nc) {
-        let c = co0 + 3u; let s = sb[2u * c]; let b = sb[2u * c + 1u];
-        { let z = a03 * s + b; y[(nco + c) * psz + q0] = z / (1.0 + exp(-z)); }
-        if (v1) { let z = a13 * s + b; y[(nco + c) * psz + q1] = z / (1.0 + exp(-z)); }
-        if (v2) { let z = a23 * s + b; y[(nco + c) * psz + q2] = z / (1.0 + exp(-z)); }
-        if (v3) { let z = a33 * s + b; y[(nco + c) * psz + q3] = z / (1.0 + exp(-z)); }
+        let co = co0+3u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
+        { let z = a03*s+b; y[row+q0] = z/(1.0+exp(-z)); }
+        if (v1) { let z = a13*s+b; y[row+q1] = z/(1.0+exp(-z)); }
+        if (v2) { let z = a23*s+b; y[row+q2] = z/(1.0+exp(-z)); }
+        if (v3) { let z = a33*s+b; y[row+q3] = z/(1.0+exp(-z)); }
+    }
+    if (4u < nc) {
+        let co = co0+4u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
+        { let z = a04*s+b; y[row+q0] = z/(1.0+exp(-z)); }
+        if (v1) { let z = a14*s+b; y[row+q1] = z/(1.0+exp(-z)); }
+        if (v2) { let z = a24*s+b; y[row+q2] = z/(1.0+exp(-z)); }
+        if (v3) { let z = a34*s+b; y[row+q3] = z/(1.0+exp(-z)); }
+    }
+    if (5u < nc) {
+        let co = co0+5u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
+        { let z = a05*s+b; y[row+q0] = z/(1.0+exp(-z)); }
+        if (v1) { let z = a15*s+b; y[row+q1] = z/(1.0+exp(-z)); }
+        if (v2) { let z = a25*s+b; y[row+q2] = z/(1.0+exp(-z)); }
+        if (v3) { let z = a35*s+b; y[row+q3] = z/(1.0+exp(-z)); }
+    }
+    if (6u < nc) {
+        let co = co0+6u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
+        { let z = a06*s+b; y[row+q0] = z/(1.0+exp(-z)); }
+        if (v1) { let z = a16*s+b; y[row+q1] = z/(1.0+exp(-z)); }
+        if (v2) { let z = a26*s+b; y[row+q2] = z/(1.0+exp(-z)); }
+        if (v3) { let z = a36*s+b; y[row+q3] = z/(1.0+exp(-z)); }
+    }
+    if (7u < nc) {
+        let co = co0+7u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
+        { let z = a07*s+b; y[row+q0] = z/(1.0+exp(-z)); }
+        if (v1) { let z = a17*s+b; y[row+q1] = z/(1.0+exp(-z)); }
+        if (v2) { let z = a27*s+b; y[row+q2] = z/(1.0+exp(-z)); }
+        if (v3) { let z = a37*s+b; y[row+q3] = z/(1.0+exp(-z)); }
     }
 }
