@@ -270,11 +270,13 @@ impl Conv {
             } else if use_naive_conv() {
                 (CONV_ACT, self.out_shape.numel())
             } else {
-                // Default: register-tiled — 4 output channels per invocation,
-                // reusing each input load across them (no workgroup memory, full
-                // occupancy). threads = N * ceil(Cout/4) * Ho * Wo.
+                // Default: register-tiled — each invocation computes a 4x4 tile
+                // (4 channels x 4 positions), reusing weight + input loads across
+                // it (no workgroup memory, full occupancy).
+                // threads = N * ceil(Cout/4) * ceil(Ho*Wo/4).
                 let ntc = self.out_shape.c.div_ceil(4);
-                (CONV_ACT_REG, self.out_shape.n * ntc * self.out_shape.h * self.out_shape.w)
+                let npq = (self.out_shape.h * self.out_shape.w).div_ceil(4);
+                (CONV_ACT_REG, self.out_shape.n * ntc * npq)
             };
             let s = ctx.step(
                 kind,

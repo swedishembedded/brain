@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// Register-tiled fused conv -> per-channel affine -> SiLU. Same result as
-// conv_act.wgsl, but each invocation computes ONE output position for FOUR
-// output channels at once, loading each input value a single time and reusing it
-// across the 4 channels in registers. That cuts the dominant input-read traffic
-// ~4x (the naive kernel re-reads the whole input once per output channel), with
-// NO workgroup memory — so GPU occupancy stays full (unlike a weight-staged
-// kernel). Plain per-invocation, so the wgsl-cpu JIT compiles it unchanged.
+// Register-tiled fused conv -> per-channel affine -> SiLU. Each invocation
+// computes a 4x4 output tile = 4 output channels x 4 spatial positions, holding
+// the 16 partial sums in registers. Per kernel tap it loads 4 weights (one per
+// channel, reused across the 4 positions) and 4 input values (one per position,
+// reused across the 4 channels) — so BOTH the weight and the input global-read
+// traffic drop ~4x vs the naive one-output-per-thread kernel (which re-reads the
+// whole input once per output channel and the whole weight once per position).
+// No workgroup memory -> full GPU occupancy; plain per-invocation -> the
+// wgsl-cpu JIT compiles it unchanged. Same result as conv_act.wgsl.
 //
-// Dispatch: one invocation per (n, channel-quad, output-position):
-//   total = N * ceil(Cout/4) * Ho * Wo.
+// Dispatch: total = N * ceil(Cout/4) * ceil(Ho*Wo/4).
 
 struct Params {
     N: u32,
@@ -37,39 +38,55 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let idx = gid.y * (nwg.x * 64u) + gid.x;
     let kg = p.Cin * p.K * p.K;
     let psz = p.Ho * p.Wo;
-    let ntc = (p.Cout + 3u) / 4u;            // channel quads
-    let total = p.N * ntc * psz;
+    let ntc = (p.Cout + 3u) / 4u;      // channel quads
+    let npq = (psz + 3u) / 4u;         // position quads
+    let total = p.N * ntc * npq;
     if (idx >= total) { return; }
 
-    let pidx = idx % psz;
-    let t = idx / psz;
+    let pq = idx % npq;
+    let t = idx / npq;
     let cq = t % ntc;
     let n = t / ntc;
     let co0 = cq * 4u;
+    let p0 = pq * 4u;
 
-    let wo = pidx % p.Wo;
-    let ho = pidx / p.Wo;
+    // The 4 output positions (n is fixed); ho/wo per position.
+    var ho: array<u32, 4>;
+    var wo: array<u32, 4>;
+    var valid_p: array<bool, 4>;
+    for (var j: u32 = 0u; j < 4u; j = j + 1u) {
+        let pj = p0 + j;
+        valid_p[j] = pj < psz;
+        ho[j] = pj / p.Wo;
+        wo[j] = pj % p.Wo;
+    }
+    let nc = min(4u, p.Cout - co0);   // valid channels in this quad
 
-    var a0 = 0.0; var a1 = 0.0; var a2 = 0.0; var a3 = 0.0;
+    var acc: array<f32, 16>;          // [pos*4 + ch]
+    for (var i: u32 = 0u; i < 16u; i = i + 1u) { acc[i] = 0.0; }
+
     for (var ci: u32 = 0u; ci < p.Cin; ci = ci + 1u) {
         for (var kh: u32 = 0u; kh < p.K; kh = kh + 1u) {
-            let hi_b = ho * p.stride + kh;
-            if (hi_b >= p.pad) {
-                let hi = hi_b - p.pad;
-                if (hi < p.H) {
-                    for (var kw: u32 = 0u; kw < p.K; kw = kw + 1u) {
-                        let wi_b = wo * p.stride + kw;
-                        if (wi_b >= p.pad) {
-                            let wi = wi_b - p.pad;
-                            if (wi < p.W) {
-                                let xv = x[((n * p.Cin + ci) * p.H + hi) * p.W + wi];
-                                let woff = (ci * p.K + kh) * p.K + kw;
-                                // One input load, reused across the 4 channels.
-                                a0 = a0 + xv * w[(co0) * kg + woff];
-                                if (co0 + 1u < p.Cout) { a1 = a1 + xv * w[(co0 + 1u) * kg + woff]; }
-                                if (co0 + 2u < p.Cout) { a2 = a2 + xv * w[(co0 + 2u) * kg + woff]; }
-                                if (co0 + 3u < p.Cout) { a3 = a3 + xv * w[(co0 + 3u) * kg + woff]; }
-                            }
+            for (var kw: u32 = 0u; kw < p.K; kw = kw + 1u) {
+                let woff = (ci * p.K + kh) * p.K + kw;
+                // 4 weights (one per output channel), reused across positions.
+                var wt: array<f32, 4>;
+                for (var c: u32 = 0u; c < 4u; c = c + 1u) {
+                    wt[c] = select(0.0, w[(co0 + c) * kg + woff], c < nc);
+                }
+                for (var j: u32 = 0u; j < 4u; j = j + 1u) {
+                    if (!valid_p[j]) { continue; }
+                    let hi_b = ho[j] * p.stride + kh;
+                    let wi_b = wo[j] * p.stride + kw;
+                    if (hi_b >= p.pad && wi_b >= p.pad) {
+                        let hi = hi_b - p.pad;
+                        let wi = wi_b - p.pad;
+                        if (hi < p.H && wi < p.W) {
+                            let xv = x[((n * p.Cin + ci) * p.H + hi) * p.W + wi];
+                            acc[j * 4u + 0u] = acc[j * 4u + 0u] + xv * wt[0];
+                            acc[j * 4u + 1u] = acc[j * 4u + 1u] + xv * wt[1];
+                            acc[j * 4u + 2u] = acc[j * 4u + 2u] + xv * wt[2];
+                            acc[j * 4u + 3u] = acc[j * 4u + 3u] + xv * wt[3];
                         }
                     }
                 }
@@ -77,23 +94,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         }
     }
 
-    // Per-channel affine (BN-eval collapsed) + SiLU (inlined), then store.
-    let base = (n * p.Cout + co0) * psz + pidx;
-    let z0 = a0 * sb[2u * co0] + sb[2u * co0 + 1u];
-    y[base] = z0 / (1.0 + exp(-z0));
-    if (co0 + 1u < p.Cout) {
-        let c = co0 + 1u;
-        let z = a1 * sb[2u * c] + sb[2u * c + 1u];
-        y[base + psz] = z / (1.0 + exp(-z));
-    }
-    if (co0 + 2u < p.Cout) {
-        let c = co0 + 2u;
-        let z = a2 * sb[2u * c] + sb[2u * c + 1u];
-        y[base + 2u * psz] = z / (1.0 + exp(-z));
-    }
-    if (co0 + 3u < p.Cout) {
-        let c = co0 + 3u;
-        let z = a3 * sb[2u * c] + sb[2u * c + 1u];
-        y[base + 3u * psz] = z / (1.0 + exp(-z));
+    // Affine (BN-eval collapsed) + SiLU + store, for valid channels/positions.
+    for (var j: u32 = 0u; j < 4u; j = j + 1u) {
+        if (!valid_p[j]) { continue; }
+        for (var c: u32 = 0u; c < 4u; c = c + 1u) {
+            if (c >= nc) { continue; }
+            let co = co0 + c;
+            let z = acc[j * 4u + c] * sb[2u * co] + sb[2u * co + 1u];
+            y[(n * p.Cout + co) * psz + (p0 + j)] = z / (1.0 + exp(-z));
+        }
     }
 }
