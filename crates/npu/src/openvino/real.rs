@@ -1,0 +1,272 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! Real OpenVINO runtime (x86_64 linux/windows). Loads an ONNX graph (fp32 or
+//! INT8-QDQ), compiles it to the chosen device — `NPU` by default — and runs
+//! inference, handing the raw head tensors back to brain's host DFL-decode+NMS.
+//!
+//! The OpenVINO shared library is loaded at run time (`runtime-linking`): if it
+//! is not installed, [`available_devices`]/[`NpuSession::load`] return
+//! [`NpuError::RuntimeNotFound`] rather than failing the build.
+
+use super::{BenchResult, HeadOutputs, NpuConfig, NpuDevice, NpuError, PerfHint};
+use openvino::{Core, DeviceType, ElementType, RwPropertyKey, Shape, Tensor};
+use std::path::Path;
+use std::time::Instant;
+
+fn dev_to_ov(d: NpuDevice) -> DeviceType<'static> {
+    match d {
+        NpuDevice::Npu => DeviceType::NPU,
+        NpuDevice::Cpu => DeviceType::CPU,
+        NpuDevice::Gpu => DeviceType::GPU,
+        NpuDevice::Auto => DeviceType::Other("AUTO".into()),
+    }
+}
+
+fn dev_str(d: &DeviceType<'_>) -> String {
+    d.as_ref().to_string()
+}
+
+/// Is device id `id` (e.g. "NPU.0") an instance of base device `base` (e.g. "NPU")?
+fn matches_base(id: &str, base: &str) -> bool {
+    id == base || id.starts_with(&format!("{base}."))
+}
+
+fn new_core() -> Result<Core, NpuError> {
+    Core::new().map_err(|e| NpuError::RuntimeNotFound(format!("{e:?}")))
+}
+
+/// OpenVINO devices visible on this machine (e.g. `["CPU", "GPU", "NPU"]`).
+/// Returns [`NpuError::RuntimeNotFound`] if OpenVINO is not installed.
+pub fn available_devices() -> Result<Vec<String>, NpuError> {
+    let core = new_core()?;
+    let devs = core.available_devices().map_err(|e| NpuError::Other(format!("{e:?}")))?;
+    Ok(devs.iter().map(dev_str).collect())
+}
+
+/// Whether a supported Intel NPU is present (per OpenVINO's device list).
+pub fn npu_present() -> bool {
+    available_devices()
+        .map(|ds| ds.iter().any(|d| matches_base(d, "NPU")))
+        .unwrap_or(false)
+}
+
+/// Resolve the requested device against what's actually present, honouring
+/// `allow_fallback` (NPU → GPU → CPU). Returns the device to compile for.
+fn resolve_device(
+    want: NpuDevice,
+    avail: &[String],
+    allow_fallback: bool,
+) -> Result<DeviceType<'static>, NpuError> {
+    if matches!(want, NpuDevice::Auto) {
+        return Ok(dev_to_ov(want));
+    }
+    let want_str = want.ov_str();
+    if avail.iter().any(|d| matches_base(d, want_str)) {
+        return Ok(dev_to_ov(want));
+    }
+    if allow_fallback {
+        for cand in ["GPU", "CPU"] {
+            if avail.iter().any(|d| matches_base(d, cand)) {
+                eprintln!(
+                    "brain npu: requested device {want_str} not available; falling back to {cand}"
+                );
+                return Ok(DeviceType::from(cand).to_owned());
+            }
+        }
+    }
+    Err(NpuError::DeviceUnavailable(format!(
+        "{want_str} not in available OpenVINO devices {avail:?}{}",
+        if allow_fallback { " (and no CPU/GPU fallback found)" } else { "" }
+    )))
+}
+
+/// Apply the `NpuConfig` knobs to the device as OpenVINO properties (best-effort:
+/// a property a device rejects is logged, not fatal). NPU-only keys are skipped
+/// on non-NPU devices.
+fn apply_properties(core: &mut Core, device: &DeviceType<'static>, cfg: &NpuConfig) {
+    let dname = dev_str(device);
+    let is_npu = matches_base(&dname, "NPU");
+    let hint = match cfg.perf_hint {
+        PerfHint::Latency => "LATENCY",
+        PerfHint::Throughput => "THROUGHPUT",
+    };
+    let mut set = |key: RwPropertyKey, val: &str| {
+        if let Err(e) = core.set_property(device, &key, val) {
+            eprintln!("brain npu: set_property {} = {val} on {dname} failed ({e:?}); ignoring", key.as_ref());
+        }
+    };
+    set(RwPropertyKey::HintPerformanceMode, hint);
+    if let Some(dir) = &cfg.cache_dir {
+        if let Some(s) = dir.to_str() {
+            set(RwPropertyKey::CacheDir, s);
+        }
+    }
+    if cfg.profiling {
+        set(RwPropertyKey::EnableProfiling, "YES");
+    }
+    if is_npu {
+        if cfg.qdq_opt {
+            set(RwPropertyKey::Other("NPU_QDQ_OPTIMIZATION".into()), "YES");
+        }
+        if cfg.turbo {
+            set(RwPropertyKey::Other("NPU_TURBO".into()), "YES");
+        }
+        if let Some(t) = cfg.tiles {
+            set(RwPropertyKey::Other("NPU_TILES".into()), &t.to_string());
+        }
+        if let Some(p) = &cfg.compilation_params {
+            set(RwPropertyKey::Other("NPU_COMPILATION_MODE_PARAMS".into()), p);
+        }
+    }
+}
+
+/// A model compiled to a device, ready to run.
+pub struct NpuSession {
+    // `core` must outlive the compiled model / request (owns the plugin).
+    _core: Core,
+    request: openvino::InferRequest,
+    input_shape: [usize; 4],
+    output_names: Vec<String>,
+    device: String,
+}
+
+impl NpuSession {
+    /// Read an ONNX file (fp32 or INT8-QDQ) and compile it for the configured
+    /// device. The ONNX must have a single static `[1,3,S,S]` input.
+    pub fn load(onnx_path: &Path, cfg: &NpuConfig) -> Result<Self, NpuError> {
+        let bytes = std::fs::read(onnx_path)
+            .map_err(|e| NpuError::Other(format!("read {}: {e}", onnx_path.display())))?;
+        Self::load_bytes(&bytes, cfg)
+    }
+
+    /// Compile ONNX bytes directly (no temp file), e.g. an in-memory fp32 export.
+    pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
+        let mut core = new_core()?;
+
+        let avail: Vec<String> = core
+            .available_devices()
+            .map_err(|e| NpuError::Other(format!("{e:?}")))?
+            .iter()
+            .map(dev_str)
+            .collect();
+        let device = resolve_device(cfg.device, &avail, cfg.allow_fallback)?;
+        apply_properties(&mut core, &device, cfg);
+
+        let model = core
+            .read_model_from_buffer(bytes, None)
+            .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
+        let compiled = core
+            .compile_model(&model, device.to_owned())
+            .map_err(|e| NpuError::Other(format!("compile_model on {}: {e:?}", dev_str(&device))))?;
+
+        // Static input shape (sanity for the caller + run() validation).
+        let in_node = compiled
+            .get_input_by_index(0)
+            .map_err(|e| NpuError::Other(format!("get_input: {e:?}")))?;
+        let in_dims = in_node
+            .get_shape()
+            .map_err(|e| NpuError::Other(format!("input shape (is it static?): {e:?}")))?;
+        let d = in_dims.get_dimensions();
+        if d.len() != 4 {
+            return Err(NpuError::Other(format!("expected 4-D input, got shape {d:?}")));
+        }
+        let input_shape = [d[0] as usize, d[1] as usize, d[2] as usize, d[3] as usize];
+
+        let nout = compiled.get_output_size().map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        let mut output_names = Vec::with_capacity(nout);
+        for i in 0..nout {
+            let name = compiled
+                .get_output_by_index(i)
+                .and_then(|n| n.get_name())
+                .unwrap_or_else(|_| format!("output_{i}"));
+            output_names.push(name);
+        }
+
+        let mut compiled = compiled;
+        let request = compiled
+            .create_infer_request()
+            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
+
+        Ok(NpuSession { _core: core, request, input_shape, output_names, device: dev_str(&device) })
+    }
+
+    /// The static input shape `[N,C,H,W]` the compiled model expects.
+    pub fn input_shape(&self) -> [usize; 4] {
+        self.input_shape
+    }
+
+    /// The OpenVINO device the model was compiled for (e.g. "NPU", or a fallback).
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+
+    /// Run one inference on a preprocessed, letterboxed CHW f32 input and return
+    /// the raw head tensors (NCHW), in the graph's output order.
+    pub fn run(&mut self, input_chw: &[f32], shape: [usize; 4]) -> Result<HeadOutputs, NpuError> {
+        let want: usize = self.input_shape.iter().product();
+        if input_chw.len() != want {
+            return Err(NpuError::Other(format!(
+                "input has {} elems but model expects {} (shape {:?})",
+                input_chw.len(),
+                want,
+                self.input_shape
+            )));
+        }
+        let dims: Vec<i64> = shape.iter().map(|&x| x as i64).collect();
+        let ov_shape = Shape::new(&dims).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        let mut tensor =
+            Tensor::new(ElementType::F32, &ov_shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        {
+            let dst = tensor.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?;
+            dst.copy_from_slice(input_chw);
+        }
+        self.request.set_input_tensor(&tensor).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
+
+        let mut tensors = Vec::with_capacity(self.output_names.len());
+        for (i, name) in self.output_names.iter().enumerate() {
+            let t = self
+                .request
+                .get_output_tensor_by_index(i)
+                .map_err(|e| NpuError::Other(format!("get_output {i}: {e:?}")))?;
+            let sh: Vec<usize> =
+                t.get_shape().map_err(|e| NpuError::Other(format!("{e:?}")))?.get_dimensions().iter().map(|&x| x as usize).collect();
+            let data = t.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec();
+            tensors.push((name.clone(), sh, data));
+        }
+        Ok(HeadOutputs { tensors })
+    }
+}
+
+/// Warm-up then time `iters` inferences; report p50/p99/mean latency + throughput.
+pub fn bench(
+    session: &mut NpuSession,
+    input_chw: &[f32],
+    shape: [usize; 4],
+    warmup: usize,
+    iters: usize,
+) -> Result<BenchResult, NpuError> {
+    for _ in 0..warmup.max(1) {
+        session.run(input_chw, shape)?;
+    }
+    let mut samples = Vec::with_capacity(iters);
+    let t0 = Instant::now();
+    for _ in 0..iters.max(1) {
+        let t = Instant::now();
+        session.run(input_chw, shape)?;
+        samples.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    let wall = t0.elapsed().as_secs_f64();
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let pct = |p: f64| samples[((samples.len() as f64 * p) as usize).min(samples.len() - 1)];
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    Ok(BenchResult {
+        device: session.device().to_string(),
+        iters: samples.len(),
+        p50_ms: pct(0.50),
+        p99_ms: pct(0.99),
+        mean_ms: mean,
+        throughput_fps: samples.len() as f64 / wall,
+    })
+}

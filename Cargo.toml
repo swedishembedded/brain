@@ -28,6 +28,7 @@ default-members = [
     "crates/hfsm",
     "crates/yolo",
     "crates/onnx",
+    "crates/npu",
     "crates/runtime",
     "crates/cli",
     "crates/web",
@@ -63,6 +64,7 @@ brain-events = { path = "crates/events" }
 brain-hfsm = { path = "crates/hfsm" }
 brain-yolo = { path = "crates/yolo" }
 brain-onnx = { path = "crates/onnx" }
+brain-npu = { path = "crates/npu" }
 brain-runtime = { path = "crates/runtime" }
 brain-vulkan = { path = "crates/vulkan" }
 brain-wgsl-cpu = { path = "crates/wgsl-cpu" }
@@ -74,6 +76,11 @@ ash = { version = "0.38" }
 naga = { version = "29", features = ["wgsl-in", "spv-out"] }
 # ONNX export (pure-Rust serializer); only `prost` runtime is needed at build.
 prost = "0.14"
+# Intel NPU runtime (OpenVINO). Default dependency of brain-npu on x86_64
+# linux/windows. `runtime-linking` => the OpenVINO shared library is loaded at
+# run time (not linked at build), so the build stays green without OpenVINO
+# installed; `--device npu` works with no special rebuild.
+openvino = { version = "0.8", default-features = false, features = ["runtime-linking"] }
 
 [profile.release]
 opt-level = 3

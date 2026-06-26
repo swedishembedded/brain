@@ -1,0 +1,31 @@
+[package]
+name = "brain-npu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "YOLO -> ONNX export + brain-native INT8 PTQ + optional OpenVINO NPU runtime."
+build = "build.rs"
+
+[lib]
+name = "npu"
+path = "src/lib.rs"
+
+[dependencies]
+brain-onnx.workspace = true
+brain-checkpoint.workspace = true
+brain-yolo.workspace = true
+brain-data.workspace = true
+brain-eval.workspace = true
+brain-events.workspace = true
+bytemuck.workspace = true
+serde_json.workspace = true
+
+# OpenVINO is a DEFAULT dependency on x86_64 linux/windows (the only platforms
+# the NPU path targets), so `--device npu` works with no special rebuild. It is
+# platform-gated here only because the crate cannot build for wasm/etc. Thanks to
+# `runtime-linking` it does NOT link at build time — the OpenVINO shared library
+# is loaded at run time — so `cargo build`/`make test` stay green on machines
+# without OpenVINO installed; a missing runtime surfaces only when a session is
+# opened. On other targets a stub with the same API reports "unsupported".
+[target.'cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))'.dependencies]
+openvino.workspace = true
