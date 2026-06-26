@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+// Minimal subset of the ONNX protobuf schema, sufficient to *emit* models that
+// OpenVINO / onnxruntime can read. Field numbers and enum values are taken
+// VERBATIM from the official onnx.proto (onnx/onnx) so the encoded wire bytes
+// are byte-identical to a real ONNX file — only the set of messages is reduced
+// to what brain's exporter needs.
+//
+// proto3 is used deliberately (prost generates plain owned structs); the wire
+// format is identical to the upstream proto2 schema. The exporter never relies
+// on emitting a default-valued (0 / "" / empty) singular field, which is the one
+// place proto3 differs from proto2 on the wire.
+//
+// Regenerate the vendored bindings (src/onnx.rs) with:
+//     (see crates/onnx/proto/README.md)
+// This file is the source of truth for the regeneration; nothing reads it at
+// brain build time (the build depends only on the `prost` runtime crate).
+
+syntax = "proto3";
+
+package onnx;
+
+message TensorShapeProto {
+  message Dimension {
+    int64 dim_value = 1;
+    string dim_param = 2;
+    string denotation = 3;
+  }
+  repeated Dimension dim = 1;
+}
+
+message TypeProto {
+  message Tensor {
+    int32 elem_type = 1;
+    TensorShapeProto shape = 2;
+  }
+  Tensor tensor_type = 1;
+  string denotation = 6;
+}
+
+message TensorProto {
+  // DataType subset (values match onnx::TensorProto::DataType).
+  enum DataType {
+    UNDEFINED = 0;
+    FLOAT = 1;
+    UINT8 = 2;
+    INT8 = 3;
+    INT32 = 6;
+    INT64 = 7;
+  }
+  repeated int64 dims = 1;
+  int32 data_type = 2;
+  repeated float float_data = 4;
+  repeated int32 int32_data = 5;
+  repeated int64 int64_data = 7;
+  string name = 8;
+  bytes raw_data = 9;
+}
+
+message ValueInfoProto {
+  string name = 1;
+  TypeProto type = 2;
+  string doc_string = 3;
+}
+
+message AttributeProto {
+  enum AttributeType {
+    UNDEFINED = 0;
+    FLOAT = 1;
+    INT = 2;
+    STRING = 3;
+    TENSOR = 4;
+    GRAPH = 5;
+    FLOATS = 6;
+    INTS = 7;
+    STRINGS = 8;
+    TENSORS = 9;
+    GRAPHS = 10;
+  }
+  string name = 1;
+  float f = 2;
+  int64 i = 3;
+  bytes s = 4;
+  TensorProto t = 5;
+  repeated float floats = 7;
+  repeated int64 ints = 8;
+  repeated bytes strings = 9;
+  repeated TensorProto tensors = 10;
+  AttributeType type = 20;
+  string doc_string = 13;
+}
+
+message NodeProto {
+  repeated string input = 1;
+  repeated string output = 2;
+  string name = 3;
+  string op_type = 4;
+  string domain = 7;
+  repeated AttributeProto attribute = 5;
+  string doc_string = 6;
+}
+
+message GraphProto {
+  repeated NodeProto node = 1;
+  string name = 2;
+  repeated TensorProto initializer = 5;
+  string doc_string = 10;
+  repeated ValueInfoProto input = 11;
+  repeated ValueInfoProto output = 12;
+  repeated ValueInfoProto value_info = 13;
+}
+
+message OperatorSetIdProto {
+  string domain = 1;
+  int64 version = 2;
+}
+
+message ModelProto {
+  int64 ir_version = 1;
+  repeated OperatorSetIdProto opset_import = 8;
+  string producer_name = 2;
+  string producer_version = 3;
+  string domain = 4;
+  int64 model_version = 5;
+  string doc_string = 6;
+  GraphProto graph = 7;
+}

@@ -27,6 +27,7 @@ default-members = [
     "crates/events",
     "crates/hfsm",
     "crates/yolo",
+    "crates/onnx",
     "crates/runtime",
     "crates/cli",
     "crates/web",
@@ -61,6 +62,7 @@ brain-gradcheck = { path = "crates/gradcheck" }
 brain-events = { path = "crates/events" }
 brain-hfsm = { path = "crates/hfsm" }
 brain-yolo = { path = "crates/yolo" }
+brain-onnx = { path = "crates/onnx" }
 brain-runtime = { path = "crates/runtime" }
 brain-vulkan = { path = "crates/vulkan" }
 brain-wgsl-cpu = { path = "crates/wgsl-cpu" }
@@ -70,6 +72,8 @@ bytemuck = { version = "1", features = ["derive"] }
 serde_json = "1"
 ash = { version = "0.38" }
 naga = { version = "29", features = ["wgsl-in", "spv-out"] }
+# ONNX export (pure-Rust serializer); only `prost` runtime is needed at build.
+prost = "0.14"
 
 [profile.release]
 opt-level = 3

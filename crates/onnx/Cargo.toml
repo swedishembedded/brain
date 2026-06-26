@@ -1,0 +1,13 @@
+[package]
+name = "brain-onnx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure-Rust ONNX graph model + serializer (export only). Vendored prost bindings; no protoc/codegen in the build path."
+
+[lib]
+name = "onnx"
+path = "src/lib.rs"
+
+[dependencies]
+prost.workspace = true
