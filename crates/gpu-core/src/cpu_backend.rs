@@ -76,6 +76,7 @@ struct FastIdx {
     // same native fast paths as conv2d/conv_act (the tiling only helps the GPU).
     conv2d_tiled: Option<usize>,
     conv_act_tiled: Option<usize>,
+    conv_act_reg: Option<usize>,
     bn_eval: Option<usize>,
     concat2: Option<usize>,
     concat_split: Option<usize>,
@@ -113,6 +114,7 @@ impl CpuBackend {
                 silu: find("silu"),
                 conv2d_tiled: find("conv2d_tiled"),
                 conv_act_tiled: find("conv_act_tiled"),
+                conv_act_reg: find("conv_act_reg"),
                 bn_eval: find("bn_eval"),
                 concat2: find("concat2"),
                 concat_split: find("concat_split"),
@@ -244,7 +246,9 @@ impl CpuBackend {
             }
             return;
         }
-        if (Some(kind) == f.conv_act || Some(kind) == f.conv_act_tiled) && bufs.len() >= 4 {
+        if (Some(kind) == f.conv_act || Some(kind) == f.conv_act_tiled || Some(kind) == f.conv_act_reg)
+            && bufs.len() >= 4
+        {
             unsafe {
                 let pu = std::slice::from_raw_parts(uniform, 10);
                 let p = crate::fast_conv::ConvParams::from_u32(pu);

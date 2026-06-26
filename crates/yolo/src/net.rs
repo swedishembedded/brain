@@ -75,6 +75,8 @@ pub const CHAN_PLACE: usize = 36;
 // ---- weight-tiled (workgroup-memory) conv variants for the GPU backend ----
 pub const CONV2D_TILED: usize = 37;
 pub const CONV_ACT_TILED: usize = 38;
+// ---- register-tiled fused conv (4 output channels per invocation) ----
+pub const CONV_ACT_REG: usize = 39;
 
 /// Kernel registry passed to [`Gpu::new`] / [`Gpu::new_cpu`]. The position of
 /// each entry is its kernel index (the `const`s above).
@@ -123,6 +125,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // ---- weight-tiled conv variants (index 37..=38) ----
     ("conv2d_tiled", kernels::CONV2D_TILED),
     ("conv_act_tiled", kernels::CONV_ACT_TILED),
+    // ---- register-tiled fused conv (index 39) ----
+    ("conv_act_reg", kernels::CONV_ACT_REG),
 ];
 
 /// An NCHW feature-map shape. Carried alongside buffers so blocks can compute

@@ -47,8 +47,8 @@ use paramstore::ParamStore;
 use crate::net::{Ctx, Shape};
 use crate::net::{
     ADD2, BN_DBETA, BN_DGAMMA, BN_DSTATS, BN_DX, BN_RUNNING, BN_STATS, BN_TRAIN, CHAN_PLACE, CONCAT2,
-    CONCAT_SPLIT, CONV2D, CONV2D_DW, CONV2D_DX, CONV_ACT, CONV_ACT_TILED, MAXPOOL5, MAXPOOL5_DX, SILU,
-    SILU_BWD,
+    CONCAT_SPLIT, CONV2D, CONV2D_DW, CONV2D_DX, CONV_ACT, CONV_ACT_REG, CONV_ACT_TILED, MAXPOOL5,
+    MAXPOOL5_DX, SILU, SILU_BWD,
 };
 
 /// Whether to use the weight-staged (workgroup-memory) tiled conv on the GPU.
@@ -60,6 +60,13 @@ use crate::net::{
 fn use_tiled_conv() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("BRAIN_TILED_CONV").map(|v| v != "0").unwrap_or(false))
+}
+
+/// `BRAIN_NAIVE_CONV=1` forces the naive one-output-per-invocation fused conv
+/// (the previous default) instead of the register-tiled one — for comparison.
+fn use_naive_conv() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BRAIN_NAIVE_CONV").map(|v| v != "0").unwrap_or(false))
 }
 
 /// Interleave two per-channel vectors into a `[2C]` packed buffer.
@@ -260,8 +267,14 @@ impl Conv {
             // the same native AVX2 fast path on CPU.
             let (kind, threads) = if use_tiled_conv() {
                 (CONV_ACT_TILED, self.tiled_threads())
-            } else {
+            } else if use_naive_conv() {
                 (CONV_ACT, self.out_shape.numel())
+            } else {
+                // Default: register-tiled — 4 output channels per invocation,
+                // reusing each input load across them (no workgroup memory, full
+                // occupancy). threads = N * ceil(Cout/4) * Ho * Wo.
+                let ntc = self.out_shape.c.div_ceil(4);
+                (CONV_ACT_REG, self.out_shape.n * ntc * self.out_shape.h * self.out_shape.w)
             };
             let s = ctx.step(
                 kind,
