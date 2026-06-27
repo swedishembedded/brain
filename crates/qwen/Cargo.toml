@@ -1,0 +1,23 @@
+[package]
+name = "brain-qwen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qwen3 dense decoder Transformer (GQA + QK-norm + RoPE + SwiGLU): forward + backprop in WGSL."
+
+[lib]
+name = "qwen"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-checkpoint.workspace = true
+brain-kernels.workspace = true
+brain-data.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+wgpu = "29"
+pollster = "0.4"

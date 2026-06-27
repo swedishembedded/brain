@@ -200,6 +200,7 @@ dependencies = [
  "brain-gpt",
  "brain-model",
  "brain-moe",
+ "brain-qwen",
  "serde_json",
 ]
 
@@ -228,6 +229,7 @@ dependencies = [
  "brain-npu",
  "brain-onnx",
  "brain-pid",
+ "brain-qwen",
  "brain-runtime",
  "brain-vulkan",
  "brain-yolo",
@@ -312,6 +314,7 @@ dependencies = [
  "brain-model",
  "brain-moe",
  "brain-pid",
+ "brain-qwen",
  "brain-seq2seq",
 ]
 
@@ -401,6 +404,23 @@ name = "brain-pid"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
+ "pollster",
+ "serde_json",
+ "wgpu",
+]
+
+[[package]]
+name = "brain-qwen"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
