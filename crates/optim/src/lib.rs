@@ -62,7 +62,7 @@ impl Optim {
         if clipped {
             // grad-norm -> clip coefficient -> scale, all in this pass: each stage
             // depends on the previous via storage buffers, which wgpu barriers.
-            for (i, (name, numel)) in ps.params.iter().enumerate() {
+            for (i, (name, numel)) in ps.opt_params().iter().enumerate() {
                 let ub = gpu.uniform_dynamic(2);
                 gpu.write(&ub, &[*numel as u32, i as u32]);
                 steps.push(gpu.step_buf(self.gradnorm_sq, &ub, &[ps.g(name), &ps.norms], 1));
@@ -71,7 +71,7 @@ impl Optim {
             let cu = gpu.uniform_dynamic(3);
             steps.push(gpu.step_buf(self.clip_coef, &cu, &[&ps.norms, &ps.clip_coef], 1));
             clip_uni = Some(cu);
-            for (name, numel) in &ps.params {
+            for (name, numel) in ps.opt_params() {
                 let ub = gpu.uniform_dynamic(1);
                 gpu.write(&ub, &[*numel as u32]);
                 steps.push(gpu.step_buf(self.grad_scale_buf, &ub, &[ps.g(name), &ps.clip_coef], *numel as u32));
@@ -79,14 +79,14 @@ impl Optim {
             }
         } else if has_scale {
             // no clip: scale by the accumulation factor (uniform updated per step).
-            for (name, numel) in &ps.params {
+            for (name, numel) in ps.opt_params() {
                 let ub = gpu.uniform_dynamic(2);
                 steps.push(gpu.step_buf(self.grad_scale, &ub, &[ps.g(name)], *numel as u32));
                 scale_unis.push(ub);
             }
         }
 
-        for (name, numel) in &ps.params {
+        for (name, numel) in ps.opt_params() {
             let ub = gpu.uniform_dynamic(9);
             steps.push(gpu.step_buf(
                 self.adamw,
@@ -138,14 +138,14 @@ impl Optim {
 
         // Refresh the per-step uniform contents in place (no allocation).
         if let Some(max_norm) = clip {
-            gpu.write(g.clip_uni.as_ref().unwrap(), &[ps.params.len() as u32, f(max_norm), f(extra_scale)]);
+            gpu.write(g.clip_uni.as_ref().unwrap(), &[ps.opt_params().len() as u32, f(max_norm), f(extra_scale)]);
         }
         if has_scale {
-            for (i, (_, numel)) in ps.params.iter().enumerate() {
+            for (i, (_, numel)) in ps.opt_params().iter().enumerate() {
                 gpu.write(&g.scale_unis[i], &[*numel as u32, f(extra_scale)]);
             }
         }
-        for (i, (_, numel)) in ps.params.iter().enumerate() {
+        for (i, (_, numel)) in ps.opt_params().iter().enumerate() {
             gpu.write(
                 &g.adamw_unis[i],
                 &[*numel as u32, 0, f(lr), f(beta1), f(beta2), f(eps), f(wd), f(bc1), f(bc2)],
