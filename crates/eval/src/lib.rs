@@ -32,7 +32,7 @@ fn block_of(weights: &str) -> u32 {
 pub fn gpt_val_perplexity(weights: &str, data_dir: &Path, batches: usize, seed: u64) -> std::io::Result<f32> {
     let block = block_of(weights);
     let model = Gpt::load(weights, 16, block);
-    let val = data::binio::read_u16_bin(&data_dir.join("val.bin"))?;
+    let val = data::binio::read_tokens_u32(&data_dir.join("val"))?;
     let cfg = BatchConfig { batch_size: 16, block_size: block as usize, ..Default::default() };
     let ds = TokenDataset::new(val, &cfg);
     let mut rng = Rng::new(seed);
@@ -80,7 +80,7 @@ pub fn gpt_exact_match(
         let line = candidates[rng.gen_range_inclusive(0, candidates.len() as i64 - 1) as usize];
         let (lhs, rhs) = line.split_once('=').unwrap();
         let prompt = format!("{lhs}=");
-        let prompt_ids: Vec<u32> = tok.encode(&prompt).iter().map(|&t| t as u32).collect();
+        let prompt_ids: Vec<u32> = tok.encode(&prompt);
         if prompt_ids.is_empty() || prompt_ids.len() >= block as usize {
             continue;
         }
@@ -106,7 +106,7 @@ fn greedy_until_newline(model: &Gpt, prompt: &[u32], max_new: usize, tok: &CharT
         let vocab = model.cfg.vocab as usize;
         let last = &logits[logits.len() - vocab..];
         let next = argmax(last) as u32;
-        let ch = tok.decode(&[next as u16]);
+        let ch = tok.decode(&[next]);
         if ch == "\n" {
             break;
         }

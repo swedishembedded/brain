@@ -199,7 +199,7 @@ pub fn greedy_until_newline(
         let window: Vec<u32> =
             if ctx.len() > block { ctx[ctx.len() - block..].to_vec() } else { ctx.clone() };
         let next = scorer.predict_next(&window);
-        let ch = tok.decode(&[next as u16]);
+        let ch = tok.decode(&[next]);
         if ch == "\n" {
             break;
         }

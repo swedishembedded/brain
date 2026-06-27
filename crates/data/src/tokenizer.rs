@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Tokenizers. `u16` token ids throughout (GPT-2's 50257-entry vocab fits).
+//! Tokenizers. `u32` token ids throughout (small char/GPT-2 vocabs fit in the
+//! low 16 bits; large BPE vocabs such as Qwen's 151936 need the full `u32`).
 //!
 //! - [`CharTokenizer`] — character-level, vocabulary built from a corpus
 //!   (sorted unique chars), as in nanogpt's `create_char_level_encoding`.
 //! - The GPT-2 byte-pair tokenizer lives in [`crate::bpe`] and also implements
-//!   [`Tokenizer`].
+//!   [`Tokenizer`]; the Qwen byte-pair tokenizer lives in
+//!   [`crate::qwen_tokenizer`].
 
 /// A reversible text tokenizer.
 pub trait Tokenizer {
     /// Encode text to token ids.
-    fn encode(&self, text: &str) -> Vec<u16>;
+    fn encode(&self, text: &str) -> Vec<u32>;
     /// Decode token ids back to text.
-    fn decode(&self, ids: &[u16]) -> String;
+    fn decode(&self, ids: &[u32]) -> String;
     /// Number of distinct tokens.
     fn vocab_size(&self) -> usize;
 }
@@ -22,7 +24,7 @@ pub trait Tokenizer {
 #[derive(Clone, Debug)]
 pub struct CharTokenizer {
     itos: Vec<char>,
-    stoi: std::collections::HashMap<char, u16>,
+    stoi: std::collections::HashMap<char, u32>,
 }
 
 impl CharTokenizer {
@@ -39,7 +41,7 @@ impl CharTokenizer {
         let stoi = itos
             .iter()
             .enumerate()
-            .map(|(i, &c)| (c, i as u16))
+            .map(|(i, &c)| (c, i as u32))
             .collect();
         CharTokenizer { itos, stoi }
     }
@@ -50,17 +52,17 @@ impl CharTokenizer {
     }
 
     /// Token id for a single character, if in-vocabulary.
-    pub fn token_of(&self, c: char) -> Option<u16> {
+    pub fn token_of(&self, c: char) -> Option<u32> {
         self.stoi.get(&c).copied()
     }
 }
 
 impl Tokenizer for CharTokenizer {
-    fn encode(&self, text: &str) -> Vec<u16> {
+    fn encode(&self, text: &str) -> Vec<u32> {
         text.chars().filter_map(|c| self.stoi.get(&c).copied()).collect()
     }
 
-    fn decode(&self, ids: &[u16]) -> String {
+    fn decode(&self, ids: &[u32]) -> String {
         ids.iter()
             .filter_map(|&i| self.itos.get(i as usize).copied())
             .collect()

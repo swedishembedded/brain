@@ -9,6 +9,9 @@
 //!   * token datasets — `train.bin` / `val.bin` : raw little-endian `u16`
 //!     token arrays (GPT-2 vocab 50257 fits in `u16`, as in nanogpt); `input.txt`
 //!     (the source text); and, for char-level datasets, `meta.json`.
+//!   * large-vocab token datasets — `train.u32.bin` / `val.u32.bin` : raw
+//!     little-endian `u32` token arrays, for vocabularies that overflow `u16`
+//!     (e.g. Qwen's 151936). `meta.json` carries `"token_width": 32`.
 //!   * float datasets — `train.f32` / `val.f32` : raw little-endian `f32`, plus
 //!     `meta.json` carrying `{n_features, rows}`.
 
@@ -26,11 +29,11 @@ pub struct Meta {
 
 impl Meta {
     /// char -> id lookup (built on demand).
-    pub fn stoi(&self) -> std::collections::HashMap<char, u16> {
+    pub fn stoi(&self) -> std::collections::HashMap<char, u32> {
         self.itos
             .iter()
             .enumerate()
-            .map(|(i, &c)| (c, i as u16))
+            .map(|(i, &c)| (c, i as u32))
             .collect()
     }
 
@@ -51,16 +54,26 @@ impl Meta {
     pub fn from_json(s: &str) -> Result<Meta, String> {
         let v: serde_json::Value = serde_json::from_str(s).map_err(|e| e.to_string())?;
         let vocab_size = v["vocab_size"].as_u64().ok_or("meta: vocab_size")? as usize;
-        let mut itos = vec!['\0'; vocab_size];
-        let map = v["itos"].as_object().ok_or("meta: itos")?;
-        for (k, val) in map {
-            let id: usize = k.parse().map_err(|_| "meta: itos key")?;
-            let ch = val.as_str().and_then(|s| s.chars().next()).ok_or("meta: itos val")?;
-            if id < vocab_size {
-                itos[id] = ch;
+        // `itos` is optional: large-vocab (BPE) datasets record only `vocab_size`
+        // (no per-char table). Char datasets carry the full id->char map.
+        let mut itos = Vec::new();
+        if let Some(map) = v["itos"].as_object() {
+            itos = vec!['\0'; vocab_size];
+            for (k, val) in map {
+                let id: usize = k.parse().map_err(|_| "meta: itos key")?;
+                let ch = val.as_str().and_then(|s| s.chars().next()).ok_or("meta: itos val")?;
+                if id < vocab_size {
+                    itos[id] = ch;
+                }
             }
         }
         Ok(Meta { vocab_size, itos })
+    }
+
+    /// Minimal metadata for a large-vocab (BPE) dataset: just the vocab size,
+    /// no char table. Serialized as `{"vocab_size":N,"token_width":32}`.
+    pub fn vocab_only(vocab_size: usize) -> String {
+        serde_json::json!({ "vocab_size": vocab_size, "token_width": 32 }).to_string()
     }
 }
 
@@ -80,6 +93,38 @@ pub fn read_u16_bin(path: &Path) -> io::Result<Vec<u16>> {
         .chunks_exact(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect())
+}
+
+/// Write a `u32` token array as a raw little-endian `.bin` file. Used for
+/// large-vocabulary datasets (e.g. Qwen) whose ids overflow `u16`.
+pub fn write_u32_bin(path: &Path, tokens: &[u32]) -> io::Result<()> {
+    let mut bytes = Vec::with_capacity(tokens.len() * 4);
+    for &t in tokens {
+        bytes.extend_from_slice(&t.to_le_bytes());
+    }
+    fs::write(path, bytes)
+}
+
+/// Read a raw little-endian `u32` `.bin` token array.
+pub fn read_u32_bin(path: &Path) -> io::Result<Vec<u32>> {
+    let bytes = fs::read(path)?;
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
+
+/// Read a token split as `u32`, choosing the width from what exists on disk:
+/// a `<stem>.u32.bin` (raw `u32`) takes precedence over `<stem>.bin` (raw
+/// `u16`, upcast). `stem` is e.g. `dir.join("train")`. This lets the same
+/// training loop consume both small-vocab (u16) and large-vocab (u32) datasets.
+pub fn read_tokens_u32(stem: &Path) -> io::Result<Vec<u32>> {
+    let u32_path = stem.with_extension("u32.bin");
+    if u32_path.exists() {
+        return read_u32_bin(&u32_path);
+    }
+    let u16_path = stem.with_extension("bin");
+    Ok(read_u16_bin(&u16_path)?.into_iter().map(|t| t as u32).collect())
 }
 
 /// Write a `f32` array as a raw little-endian `.f32` file.

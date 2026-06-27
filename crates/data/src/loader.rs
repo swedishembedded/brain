@@ -22,13 +22,13 @@ pub struct BatchConfig {
     pub block_size: usize,
     /// Mask loss for tokens up to & including this token id, per the nanogpt
     /// calculator/reverser/wordcalc recipe (the `=` token).
-    pub mask_before_token: Option<u16>,
+    pub mask_before_token: Option<u32>,
     /// Reset masking at each newline (only meaningful with `mask_before_token`).
     pub mask_per_line: bool,
     /// Sample windows aligned to line starts (requires `newline_token`).
     pub align_to_lines: bool,
     /// Newline token id, needed for `mask_per_line` and `align_to_lines`.
-    pub newline_token: Option<u16>,
+    pub newline_token: Option<u32>,
 }
 
 impl Default for BatchConfig {
@@ -46,13 +46,13 @@ impl Default for BatchConfig {
 
 /// A loaded token split plus precomputed line starts for aligned sampling.
 pub struct TokenDataset {
-    data: Vec<u16>,
+    data: Vec<u32>,
     line_starts: Option<Vec<usize>>,
 }
 
 impl TokenDataset {
     /// Wrap a token array; precomputes line starts when `align_to_lines` is set.
-    pub fn new(data: Vec<u16>, cfg: &BatchConfig) -> Self {
+    pub fn new(data: Vec<u32>, cfg: &BatchConfig) -> Self {
         let line_starts = if cfg.align_to_lines {
             cfg.newline_token
                 .map(|nl| Self::precompute_line_starts(&data, nl, cfg.block_size))
@@ -72,7 +72,7 @@ impl TokenDataset {
 
     /// Line starts whose next newline fits within `block_size` (mirrors
     /// `_precompute_line_starts`).
-    fn precompute_line_starts(data: &[u16], newline: u16, block_size: usize) -> Vec<usize> {
+    fn precompute_line_starts(data: &[u32], newline: u32, block_size: usize) -> Vec<usize> {
         let nl_pos: Vec<usize> = data
             .iter()
             .enumerate()
@@ -114,7 +114,7 @@ impl TokenDataset {
         for b in 0..bs {
             let start = self.sample_start(cfg, rng);
             for t in 0..bl {
-                x[b * bl + t] = self.data[start + t] as u32;
+                x[b * bl + t] = self.data[start + t];
                 y[b * bl + t] = self.data[start + 1 + t] as i32;
             }
         }
@@ -140,7 +140,7 @@ impl TokenDataset {
 
     /// Port of `_apply_masking`: per-line resets masking at newlines; global
     /// masks up to & including the first occurrence in each row.
-    fn apply_masking(&self, y: &mut [i32], cfg: &BatchConfig, mask_tok: u16) {
+    fn apply_masking(&self, y: &mut [i32], cfg: &BatchConfig, mask_tok: u32) {
         let bl = cfg.block_size;
         let mask_tok = mask_tok as i32;
         let nl = cfg.newline_token.map(|n| n as i32);
@@ -181,7 +181,7 @@ mod tests {
     use super::*;
 
     // "ab=cd\nef=gh\n" with ids: a0 b1 =2 c3 d4 \n5 ... build a tiny vocab.
-    fn toks(s: &str, stoi: &dyn Fn(char) -> u16) -> Vec<u16> {
+    fn toks(s: &str, stoi: &dyn Fn(char) -> u32) -> Vec<u32> {
         s.chars().map(stoi).collect()
     }
 

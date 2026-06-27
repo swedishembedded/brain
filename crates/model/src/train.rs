@@ -99,22 +99,26 @@ struct Loaded {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
-    let train_tok = binio::read_u16_bin(&dir.join("train.bin"))?;
-    let val_tok = binio::read_u16_bin(&dir.join("val.bin"))?;
+    // Width-detecting read: `train.u32.bin` (large-vocab, e.g. Qwen) wins over
+    // `train.bin` (u16, char/GPT-2), both surfaced as `u32`.
+    let train_tok = binio::read_tokens_u32(&dir.join("train"))?;
+    let val_tok = binio::read_tokens_u32(&dir.join("val"))?;
 
-    // Vocab + mask/newline ids come from meta.json (char datasets). BPE has no
-    // meta; vocab is GPT-2's 50257 and masking/alignment are unsupported there.
+    // Vocab + mask/newline ids come from meta.json. Char datasets carry the full
+    // id->char table (`itos`); large-vocab datasets carry only `vocab_size`. BPE
+    // datasets without meta infer vocab from the max observed id.
     let (vocab, mask_id, newline_id, itos) = match std::fs::read_to_string(dir.join("meta.json")) {
         Ok(s) => {
             let meta = Meta::from_json(&s).map_err(std::io::Error::other)?;
             let stoi = meta.stoi();
             let mask_id = opts.mask_before.and_then(|c| stoi.get(&c).copied());
             let newline_id = stoi.get(&'\n').copied();
-            (meta.vocab_size as u32, mask_id, newline_id, Some(meta.itos))
+            let itos = if meta.itos.is_empty() { None } else { Some(meta.itos) };
+            (meta.vocab_size as u32, mask_id, newline_id, itos)
         }
         Err(_) => {
             let maxid = train_tok.iter().chain(val_tok.iter()).copied().max().unwrap_or(0);
-            (maxid as u32 + 1, None, None, None)
+            (maxid + 1, None, None, None)
         }
     };
 

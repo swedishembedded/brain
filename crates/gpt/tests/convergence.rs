@@ -63,7 +63,7 @@ fn tmpdir(tag: &str) -> PathBuf {
 /// corpus string, building the vocab from the corpus exactly like `prepare`.
 fn write_corpus(dir: &Path, corpus: &str) {
     let tok = CharTokenizer::from_corpus(corpus);
-    let ids = tok.encode(corpus);
+    let ids: Vec<u16> = tok.encode(corpus).into_iter().map(|t| t as u16).collect();
     let split = (ids.len() as f64 * 0.9) as usize;
     binio::write_u16_bin(&dir.join("train.bin"), &ids[..split]).unwrap();
     binio::write_u16_bin(&dir.join("val.bin"), &ids[split..]).unwrap();

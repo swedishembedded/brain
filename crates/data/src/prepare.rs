@@ -140,8 +140,8 @@ fn write_char_dataset(text: &str, dir: &Path) -> io::Result<()> {
     fs::write(dir.join("input.txt"), text)?;
 
     let (train_text, val_text) = char_split(text, TRAIN_SPLIT);
-    binio::write_u16_bin(&dir.join("train.bin"), &tok.encode(&train_text))?;
-    binio::write_u16_bin(&dir.join("val.bin"), &tok.encode(&val_text))?;
+    binio::write_u16_bin(&dir.join("train.bin"), &to_u16(tok.encode(&train_text)))?;
+    binio::write_u16_bin(&dir.join("val.bin"), &to_u16(tok.encode(&val_text)))?;
     Ok(())
 }
 
@@ -150,9 +150,15 @@ fn write_bpe_dataset(text: &str, dir: &Path) -> io::Result<()> {
     let tok = crate::bpe::Gpt2Bpe::new();
     fs::write(dir.join("input.txt"), text)?;
     let (train_text, val_text) = char_split(text, TRAIN_SPLIT);
-    binio::write_u16_bin(&dir.join("train.bin"), &tok.encode(&train_text))?;
-    binio::write_u16_bin(&dir.join("val.bin"), &tok.encode(&val_text))?;
+    binio::write_u16_bin(&dir.join("train.bin"), &to_u16(tok.encode(&train_text)))?;
+    binio::write_u16_bin(&dir.join("val.bin"), &to_u16(tok.encode(&val_text)))?;
     Ok(())
+}
+
+/// Narrow small-vocab token ids (char / GPT-2 BPE, both < 65536) from the `u32`
+/// [`Tokenizer`] interface to the `u16` on-disk format used by those datasets.
+fn to_u16(ids: Vec<u32>) -> Vec<u16> {
+    ids.into_iter().map(|t| t as u16).collect()
 }
 
 /// Time series: generate the 3-phase signal, chronological split with a gap,

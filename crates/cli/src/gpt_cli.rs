@@ -174,12 +174,11 @@ fn gen(args: &[String]) {
     // Build the model sized for block_size; seed prompt (default = newline).
     let model = Gpt::load(&weights, 1, model_block(&weights));
     let prompt_text = if prompt.is_empty() { "\n" } else { prompt.as_str() };
-    let prompt_ids: Vec<u32> = tok.encode(prompt_text).iter().map(|&t| t as u32).collect();
+    let prompt_ids: Vec<u32> = tok.encode(prompt_text);
     let mut rng = Rng::new(seed);
     let gen = gpt::sample::generate(&model, &prompt_ids, max_new, temp, top_k, &mut rng);
-    let gen_u16: Vec<u16> = gen.iter().map(|&t| t as u16).collect();
     print!("{prompt_text}");
-    print!("{}", tok.decode(&gen_u16));
+    print!("{}", tok.decode(&gen));
     println!();
 }
 

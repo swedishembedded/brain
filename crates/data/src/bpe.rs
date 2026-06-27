@@ -39,9 +39,9 @@ const VOCAB_BPE: &str = include_str!("../assets/vocab.bpe");
 /// GPT-2 byte-level BPE tokenizer.
 pub struct Gpt2Bpe {
     /// token string -> id
-    encoder: HashMap<String, u16>,
+    encoder: HashMap<String, u32>,
     /// id -> token string (inverse of `encoder`)
-    decoder: HashMap<u16, String>,
+    decoder: HashMap<u32, String>,
     /// (left, right) merge pair -> rank (lower = higher priority)
     bpe_ranks: HashMap<(String, String), u32>,
     /// byte value -> unicode char used in the string domain
@@ -57,7 +57,7 @@ pub struct Gpt2Bpe {
 /// every other byte is assigned a fresh code point starting at `256`, in
 /// ascending byte order. This guarantees a bijection between the 256 bytes and
 /// 256 distinct printable, non-whitespace characters.
-fn bytes_to_unicode() -> [char; 256] {
+pub(crate) fn bytes_to_unicode() -> [char; 256] {
     // The directly-mapped, printable byte ranges (inclusive) from the reference.
     let mut bs: Vec<u32> = Vec::new();
     bs.extend(b'!' as u32..=b'~' as u32);
@@ -86,7 +86,7 @@ fn bytes_to_unicode() -> [char; 256] {
 /// All adjacent symbol pairs of `word`, deduplicated, preserving first-seen
 /// order is unimportant (we only test membership / pick min rank), so a `Vec`
 /// of unique pairs suffices.
-fn get_pairs(word: &[String]) -> Vec<(String, String)> {
+pub(crate) fn get_pairs(word: &[String]) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
     for w in word.windows(2) {
         let pair = (w[0].clone(), w[1].clone());
@@ -97,6 +97,63 @@ fn get_pairs(word: &[String]) -> Vec<(String, String)> {
     pairs
 }
 
+/// Apply the BPE merge loop to a single pre-token already expressed as a vector
+/// of single-character symbol strings (each char is a byte-mapped unicode
+/// char), using `ranks` (`(left,right) -> priority`, lower = merged first).
+/// Shared by [`Gpt2Bpe`] and the Qwen tokenizer — only the rank table differs.
+pub(crate) fn bpe_merge(
+    ranks: &HashMap<(String, String), u32>,
+    token_chars: Vec<String>,
+) -> Vec<String> {
+    if token_chars.len() <= 1 {
+        return token_chars;
+    }
+
+    let mut word = token_chars;
+    loop {
+        let pairs = get_pairs(&word);
+        if pairs.is_empty() {
+            break;
+        }
+
+        // Find the pair with the lowest (best) rank.
+        let mut best: Option<(&(String, String), u32)> = None;
+        for pair in &pairs {
+            if let Some(&rank) = ranks.get(pair) {
+                match best {
+                    Some((_, br)) if rank >= br => {}
+                    _ => best = Some((pair, rank)),
+                }
+            }
+        }
+        let (first, second) = match best {
+            Some((pair, _)) => (pair.0.clone(), pair.1.clone()),
+            None => break, // no mergeable pair remains
+        };
+
+        // Merge every non-overlapping occurrence of (first, second).
+        let mut new_word = Vec::with_capacity(word.len());
+        let mut i = 0;
+        while i < word.len() {
+            if i + 1 < word.len() && word[i] == first && word[i + 1] == second {
+                let mut merged = String::with_capacity(first.len() + second.len());
+                merged.push_str(&first);
+                merged.push_str(&second);
+                new_word.push(merged);
+                i += 2;
+            } else {
+                new_word.push(word[i].clone());
+                i += 1;
+            }
+        }
+        word = new_word;
+        if word.len() == 1 {
+            break;
+        }
+    }
+    word
+}
+
 impl Gpt2Bpe {
     /// Build from the embedded GPT-2 `encoder.json` + `vocab.bpe`.
     ///
@@ -105,10 +162,9 @@ impl Gpt2Bpe {
         // Parse encoder.json: { "token": id, ... }.
         let raw: HashMap<String, u32> =
             serde_json::from_str(ENCODER_JSON).expect("embedded encoder.json is valid JSON");
-        let mut encoder: HashMap<String, u16> = HashMap::with_capacity(raw.len());
-        let mut decoder: HashMap<u16, String> = HashMap::with_capacity(raw.len());
+        let mut encoder: HashMap<String, u32> = HashMap::with_capacity(raw.len());
+        let mut decoder: HashMap<u32, String> = HashMap::with_capacity(raw.len());
         for (tok, id) in raw {
-            let id = u16::try_from(id).expect("GPT-2 vocab ids fit in u16");
             decoder.insert(id, tok.clone());
             encoder.insert(tok, id);
         }
@@ -143,67 +199,14 @@ impl Gpt2Bpe {
         }
     }
 
-    /// Apply the BPE merge loop to a single pre-token already expressed as a
-    /// vector of single-character symbol strings (each char is a byte-mapped
-    /// unicode char). Returns the merged subword strings.
-    fn bpe(&self, token_chars: Vec<String>) -> Vec<String> {
-        if token_chars.len() <= 1 {
-            return token_chars;
-        }
-
-        let mut word = token_chars;
-        loop {
-            let pairs = get_pairs(&word);
-            if pairs.is_empty() {
-                break;
-            }
-
-            // Find the pair with the lowest (best) rank.
-            let mut best: Option<(&(String, String), u32)> = None;
-            for pair in &pairs {
-                if let Some(&rank) = self.bpe_ranks.get(pair) {
-                    match best {
-                        Some((_, br)) if rank >= br => {}
-                        _ => best = Some((pair, rank)),
-                    }
-                }
-            }
-            let (first, second) = match best {
-                Some((pair, _)) => (pair.0.clone(), pair.1.clone()),
-                None => break, // no mergeable pair remains
-            };
-
-            // Merge every non-overlapping occurrence of (first, second).
-            let mut new_word = Vec::with_capacity(word.len());
-            let mut i = 0;
-            while i < word.len() {
-                if i + 1 < word.len() && word[i] == first && word[i + 1] == second {
-                    let mut merged = String::with_capacity(first.len() + second.len());
-                    merged.push_str(&first);
-                    merged.push_str(&second);
-                    new_word.push(merged);
-                    i += 2;
-                } else {
-                    new_word.push(word[i].clone());
-                    i += 1;
-                }
-            }
-            word = new_word;
-            if word.len() == 1 {
-                break;
-            }
-        }
-        word
-    }
-
     /// Encode a single pre-token (a substring of the original text) into ids.
-    fn encode_piece(&self, piece: &str, out: &mut Vec<u16>) {
+    fn encode_piece(&self, piece: &str, out: &mut Vec<u32>) {
         // Map each raw UTF-8 byte of the piece to its unicode char.
         let token_chars: Vec<String> = piece
             .bytes()
             .map(|b| self.byte_encoder[b as usize].to_string())
             .collect();
-        for sub in self.bpe(token_chars) {
+        for sub in bpe_merge(&self.bpe_ranks, token_chars) {
             let id = *self
                 .encoder
                 .get(&sub)
@@ -370,7 +373,7 @@ fn pre_tokenize(text: &str) -> Vec<String> {
 }
 
 impl Tokenizer for Gpt2Bpe {
-    fn encode(&self, text: &str) -> Vec<u16> {
+    fn encode(&self, text: &str) -> Vec<u32> {
         let mut out = Vec::new();
         for piece in pre_tokenize(text) {
             self.encode_piece(&piece, &mut out);
@@ -378,7 +381,7 @@ impl Tokenizer for Gpt2Bpe {
         out
     }
 
-    fn decode(&self, ids: &[u16]) -> String {
+    fn decode(&self, ids: &[u32]) -> String {
         // Concatenate token strings, then map each unicode char back to a byte.
         let mut bytes: Vec<u8> = Vec::new();
         for &id in ids {
