@@ -20,9 +20,42 @@ pub fn run_qwen(args: &[String]) {
     match args.first().map(|s| s.as_str()) {
         Some("import") => import(&args[1..]),
         Some("infer") | Some("gen") => infer(&args[1..]),
+        Some("export") => export(&args[1..]),
         Some("train") => train(&args[1..], None),
         Some("finetune") => finetune(&args[1..]),
-        other => eprintln!("usage: brain qwen <import|infer|train|finetune> ...  (got {other:?})"),
+        other => eprintln!("usage: brain qwen <import|infer|export|train|finetune> ...  (got {other:?})"),
+    }
+}
+
+/// Whether the NPU/OpenVINO path was requested (`--device npu` or BRAIN_DEVICE=npu).
+fn want_npu() -> bool {
+    crate::npu_requested()
+        || std::env::var("BRAIN_DEVICE").map(|v| v.eq_ignore_ascii_case("npu")).unwrap_or(false)
+}
+
+/// `brain qwen export --weights F --out model.onnx --seq T` — emit the ONNX
+/// decoder graph (for OpenVINO / `brain npu check`).
+fn export(args: &[String]) {
+    let mut weights = String::new();
+    let mut out = "qwen.onnx".to_string();
+    let mut seq = 32usize;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--weights" => weights = val(args, &mut i, "--weights"),
+            "--out" => out = val(args, &mut i, "--out"),
+            "--seq" => seq = val(args, &mut i, "--seq").parse().unwrap_or(seq),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    if weights.is_empty() {
+        eprintln!("usage: brain qwen export --weights F --out model.onnx [--seq T]");
+        return;
+    }
+    match npu::qwen_export::export_qwen_fp32(&weights, &out, seq) {
+        Ok(()) => println!("ok: wrote {out} (seq_len {seq})"),
+        Err(e) => eprintln!("export failed: {e}"),
     }
 }
 
@@ -99,6 +132,19 @@ fn infer(args: &[String]) {
     let ids = tok.encode(&text);
     if ids.is_empty() {
         eprintln!("empty prompt");
+        return;
+    }
+    // NPU / OpenVINO whole-graph path (greedy only): export -> compile -> decode.
+    if want_npu() {
+        match npu::qwen_decode::generate(&weights, &ids, max_new, npu::openvino::NpuDevice::Npu, true) {
+            Ok((gen, dev)) => {
+                eprintln!("npu: ran on OpenVINO device {dev}");
+                print!("{prompt}");
+                print!("{}", tok.decode(&gen));
+                println!();
+            }
+            Err(e) => eprintln!("npu infer failed: {e}"),
+        }
         return;
     }
     let cap = (ids.len() + max_new) as u32;
