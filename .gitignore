@@ -18,6 +18,7 @@ scratchpad/
 # Python caches (reference scripts live under scratchpad/reference only).
 __pycache__/
 *.pyc
+.mypy_cache
 
 # Architecture-eval results artifacts (`brain bench eval`/`scale` write here). Run
 # outputs are not committed; the dir is kept via results/.gitkeep and two example

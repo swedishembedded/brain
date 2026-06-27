@@ -80,7 +80,7 @@ prost = "0.14"
 # linux/windows. `runtime-linking` => the OpenVINO shared library is loaded at
 # run time (not linked at build), so the build stays green without OpenVINO
 # installed; `--device npu` works with no special rebuild.
-openvino = { version = "0.8", default-features = false, features = ["runtime-linking"] }
+openvino = { version = "0.11", default-features = false, features = ["runtime-linking"] }
 
 [profile.release]
 opt-level = 3
