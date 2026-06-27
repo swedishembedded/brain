@@ -32,6 +32,12 @@ impl GraphBuilder {
         self
     }
 
+    /// Register a typed INT64 graph input with a static shape (e.g. token ids).
+    pub fn input_i64(&mut self, name: &str, dims: &[i64]) -> &mut Self {
+        self.graph.inputs.push(ValueInfo { name: name.to_string(), dims: dims.to_vec(), elem: Elem::I64 });
+        self
+    }
+
     /// Register a typed FLOAT graph output with a static shape.
     pub fn output_f32(&mut self, name: &str, dims: &[i64]) -> &mut Self {
         self.graph.outputs.push(ValueInfo { name: name.to_string(), dims: dims.to_vec(), elem: Elem::F32 });
@@ -84,5 +90,29 @@ impl GraphBuilder {
     /// Serialize to ONNX bytes with an explicit opset / IR version.
     pub fn finish_with(&self, opset: i64, ir_version: i64) -> Vec<u8> {
         self.graph.to_proto(opset, ir_version).encode_to_vec()
+    }
+
+    /// Write the model to `model_path` plus a sidecar `<model_path>.data` holding
+    /// every initializer larger than `threshold` bytes (ONNX external data). This
+    /// keeps the `.onnx` proto small enough to parse (under protobuf's 2GB limit)
+    /// for multi-GB models. Read it back with a file-based loader (so the reader
+    /// resolves the sidecar relative to the model directory).
+    pub fn finish_external(&self, model_path: &str, threshold: usize) -> std::io::Result<()> {
+        self.finish_external_with(model_path, threshold, DEFAULT_OPSET, DEFAULT_IR_VERSION)
+    }
+
+    pub fn finish_external_with(
+        &self,
+        model_path: &str,
+        threshold: usize,
+        opset: i64,
+        ir_version: i64,
+    ) -> std::io::Result<()> {
+        let p = std::path::Path::new(model_path);
+        let data_name = format!("{}.data", p.file_name().and_then(|s| s.to_str()).unwrap_or("model.onnx"));
+        let (model, sidecar) = self.graph.to_proto_external(opset, ir_version, threshold, &data_name);
+        std::fs::write(model_path, model.encode_to_vec())?;
+        std::fs::write(p.with_file_name(&data_name), sidecar)?;
+        Ok(())
     }
 }

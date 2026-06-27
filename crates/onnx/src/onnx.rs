@@ -62,6 +62,21 @@ pub struct TensorProto {
     pub name: ::prost::alloc::string::String,
     #[prost(bytes = "vec", tag = "9")]
     pub raw_data: ::prost::alloc::vec::Vec<u8>,
+    /// Key/value metadata for `data_location = EXTERNAL` (keys: location/offset/length).
+    #[prost(message, repeated, tag = "13")]
+    pub external_data: ::prost::alloc::vec::Vec<StringStringEntryProto>,
+    /// 0 = DEFAULT (inline raw_data), 1 = EXTERNAL (data in a sidecar file).
+    #[prost(int32, tag = "14")]
+    pub data_location: i32,
+}
+/// ONNX `StringStringEntryProto` — a key/value string pair (a tensor's
+/// `external_data` entries: location, offset, length).
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StringStringEntryProto {
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub value: ::prost::alloc::string::String,
 }
 /// Nested message and enum types in `TensorProto`.
 pub mod tensor_proto {

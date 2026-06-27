@@ -235,6 +235,39 @@ impl Graph {
         out
     }
 
+    /// Like [`tensor_to_proto`] but, for tensors whose raw bytes exceed
+    /// `threshold`, write the payload into `sidecar` and reference it via ONNX
+    /// external-data (so the serialized `ModelProto` stays under protobuf's 2GB
+    /// limit — required for multi-GB models like Qwen3-0.6B).
+    fn tensor_to_proto_ext(t: &Tensor, threshold: usize, sidecar: &mut Vec<u8>, location: &str) -> p::TensorProto {
+        let raw = t.data.raw();
+        if raw.len() <= threshold {
+            return p::TensorProto {
+                dims: t.dims.clone(),
+                data_type: t.data.data_type(),
+                name: t.name.clone(),
+                raw_data: raw,
+                ..Default::default()
+            };
+        }
+        let offset = sidecar.len();
+        let length = raw.len();
+        sidecar.extend_from_slice(&raw);
+        let kv = |k: &str, v: String| p::StringStringEntryProto { key: k.to_string(), value: v };
+        p::TensorProto {
+            dims: t.dims.clone(),
+            data_type: t.data.data_type(),
+            name: t.name.clone(),
+            data_location: 1, // EXTERNAL
+            external_data: vec![
+                kv("location", location.to_string()),
+                kv("offset", offset.to_string()),
+                kv("length", length.to_string()),
+            ],
+            ..Default::default()
+        }
+    }
+
     fn to_graph_proto(&self) -> p::GraphProto {
         p::GraphProto {
             node: self
@@ -268,5 +301,51 @@ impl Graph {
             graph: Some(self.to_graph_proto()),
             ..Default::default()
         }
+    }
+
+    /// Build the `ModelProto` with initializers larger than `threshold` bytes
+    /// stored externally; returns `(model, sidecar_bytes)`. `location` is the
+    /// sidecar filename recorded in each external tensor (resolved by the reader
+    /// relative to the model file's directory).
+    pub fn to_proto_external(
+        &self,
+        opset: i64,
+        ir_version: i64,
+        threshold: usize,
+        location: &str,
+    ) -> (p::ModelProto, Vec<u8>) {
+        let mut sidecar = Vec::new();
+        let graph = p::GraphProto {
+            node: self
+                .nodes
+                .iter()
+                .map(|n| p::NodeProto {
+                    input: n.inputs.clone(),
+                    output: n.outputs.clone(),
+                    name: n.name.clone(),
+                    op_type: n.op_type.clone(),
+                    attribute: n.attrs.iter().map(Self::attr_to_proto).collect(),
+                    ..Default::default()
+                })
+                .collect(),
+            name: self.name.clone(),
+            initializer: self
+                .initializers
+                .iter()
+                .map(|t| Self::tensor_to_proto_ext(t, threshold, &mut sidecar, location))
+                .collect(),
+            input: self.inputs.iter().map(Self::value_info_to_proto).collect(),
+            output: self.outputs.iter().map(Self::value_info_to_proto).collect(),
+            ..Default::default()
+        };
+        let model = p::ModelProto {
+            ir_version,
+            opset_import: vec![p::OperatorSetIdProto { domain: String::new(), version: opset }],
+            producer_name: "brain".to_string(),
+            producer_version: env!("CARGO_PKG_VERSION").to_string(),
+            graph: Some(graph),
+            ..Default::default()
+        };
+        (model, sidecar)
     }
 }
