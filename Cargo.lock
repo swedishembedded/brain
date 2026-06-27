@@ -363,6 +363,7 @@ dependencies = [
  "brain-eval",
  "brain-events",
  "brain-onnx",
+ "brain-qwen",
  "brain-yolo",
  "bytemuck",
  "openvino",
