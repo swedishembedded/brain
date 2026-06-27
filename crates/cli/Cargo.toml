@@ -18,6 +18,7 @@ vulkan-coopmat = ["dep:brain-vulkan"]
 brain-gpu-core.workspace = true
 brain-moe.workspace = true
 brain-gpt.workspace = true
+brain-qwen.workspace = true
 brain-pid.workspace = true
 brain-yolo.workspace = true
 brain-model.workspace = true
