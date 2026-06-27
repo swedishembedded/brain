@@ -18,6 +18,9 @@ pub mod decode;
 pub mod export;
 pub mod fold;
 pub mod quant;
+pub mod qwen_decode;
+pub mod qwen_export;
+pub mod qwen_topology;
 pub mod sim;
 pub mod topology;
 

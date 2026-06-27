@@ -239,6 +239,120 @@ impl NpuSession {
     }
 }
 
+/// A compiled decoder graph: `input_ids:[1,T]` (int64) -> `logits:[1,T,vocab]`
+/// (f32). Separate from [`NpuSession`] (which is the YOLO 4-D-f32 shape).
+pub struct DecoderSession {
+    _core: Core,
+    request: openvino::InferRequest,
+    seq_len: usize,
+    vocab: usize,
+    device: String,
+}
+
+impl DecoderSession {
+    /// Compile a decoder ONNX from a file path. Required for models with ONNX
+    /// external data (the reader resolves the sidecar relative to the model dir).
+    pub fn load_path(onnx_path: &Path, cfg: &NpuConfig) -> Result<Self, NpuError> {
+        let mut core = new_core()?;
+        let avail: Vec<String> = core
+            .available_devices()
+            .map_err(|e| NpuError::Other(format!("{e:?}")))?
+            .iter()
+            .map(dev_str)
+            .collect();
+        let device = resolve_device(cfg.device, &avail, cfg.allow_fallback)?;
+        apply_properties(&mut core, &device, cfg);
+        // ONNX external-data is resolved relative to the model file's directory;
+        // the IR weights_path is unused for ONNX, so pass "".
+        let path_str = onnx_path.to_str().ok_or_else(|| NpuError::Other("non-utf8 path".into()))?;
+        let model = core
+            .read_model_from_file(path_str, "")
+            .map_err(|e| NpuError::Other(format!("read_model {}: {e:?}", onnx_path.display())))?;
+        Self::compile(core, model, device)
+    }
+
+    /// Compile ONNX decoder bytes for the configured device (no external data).
+    pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
+        let mut core = new_core()?;
+        let avail: Vec<String> = core
+            .available_devices()
+            .map_err(|e| NpuError::Other(format!("{e:?}")))?
+            .iter()
+            .map(dev_str)
+            .collect();
+        let device = resolve_device(cfg.device, &avail, cfg.allow_fallback)?;
+        apply_properties(&mut core, &device, cfg);
+
+        let model = core
+            .read_model_from_buffer(bytes, None)
+            .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
+        Self::compile(core, model, device)
+    }
+
+    fn compile(mut core: Core, model: openvino::Model, device: DeviceType<'static>) -> Result<Self, NpuError> {
+        let compiled = core
+            .compile_model(&model, device.to_owned())
+            .map_err(|e| NpuError::Other(format!("compile_model on {}: {e:?}", dev_str(&device))))?;
+
+        let in_dims = compiled
+            .get_input_by_index(0)
+            .and_then(|n| n.get_shape())
+            .map_err(|e| NpuError::Other(format!("input shape: {e:?}")))?;
+        let id = in_dims.get_dimensions();
+        let seq_len = *id.last().unwrap() as usize;
+
+        let out_dims = compiled
+            .get_output_by_index(0)
+            .and_then(|n| n.get_shape())
+            .map_err(|e| NpuError::Other(format!("output shape: {e:?}")))?;
+        let od = out_dims.get_dimensions();
+        let vocab = *od.last().unwrap() as usize;
+
+        let mut compiled = compiled;
+        let request = compiled
+            .create_infer_request()
+            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
+        Ok(DecoderSession { _core: core, request, seq_len, vocab, device: dev_str(&device) })
+    }
+
+    pub fn seq_len(&self) -> usize {
+        self.seq_len
+    }
+    pub fn vocab(&self) -> usize {
+        self.vocab
+    }
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+
+    /// Run the prefill over `ids` (length must equal the compiled `seq_len`;
+    /// shorter contexts are caller-padded). Returns the full `[T*vocab]` logits.
+    pub fn run_ids(&mut self, ids: &[i64]) -> Result<Vec<f32>, NpuError> {
+        if ids.len() != self.seq_len {
+            return Err(NpuError::Other(format!(
+                "decoder expects {} ids, got {}",
+                self.seq_len,
+                ids.len()
+            )));
+        }
+        let shape = Shape::new(&[1, self.seq_len as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        let mut tensor =
+            Tensor::new(ElementType::I64, &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        {
+            let dst = tensor.get_data_mut::<i64>().map_err(|e| NpuError::Other(format!("{e:?}")))?;
+            dst.copy_from_slice(ids);
+        }
+        self.request.set_input_tensor(&tensor).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
+        let out = self
+            .request
+            .get_output_tensor_by_index(0)
+            .map_err(|e| NpuError::Other(format!("get_output: {e:?}")))?;
+        let data = out.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec();
+        Ok(data)
+    }
+}
+
 /// Warm-up then time `iters` inferences; report p50/p99/mean latency + throughput.
 pub fn bench(
     session: &mut NpuSession,

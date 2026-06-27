@@ -54,3 +54,29 @@ pub fn bench(
 ) -> Result<BenchResult, NpuError> {
     unsupported()
 }
+
+/// A compiled decoder model. Never constructible on unsupported targets.
+pub struct DecoderSession {
+    _priv: (),
+}
+
+impl DecoderSession {
+    pub fn load_bytes(_bytes: &[u8], _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn load_path(_p: &Path, _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn seq_len(&self) -> usize {
+        0
+    }
+    pub fn vocab(&self) -> usize {
+        0
+    }
+    pub fn device(&self) -> &str {
+        ""
+    }
+    pub fn run_ids(&mut self, _ids: &[i64]) -> Result<Vec<f32>, NpuError> {
+        unsupported()
+    }
+}
