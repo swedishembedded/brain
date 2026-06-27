@@ -90,7 +90,10 @@ struct FastIdx {
 #[derive(Clone)]
 pub struct BindGroup {
     uniform: CpuBuffer,
-    bufs: Vec<CpuBuffer>,
+    /// `(buffer, word_offset)` — the offset lets a dispatch bind a sub-range of a
+    /// buffer (e.g. a vocab tile of a >128MB embedding) so it stays within a
+    /// backend's per-binding size limit, matching the wgpu offset binding.
+    bufs: Vec<(CpuBuffer, usize)>,
 }
 
 impl CpuBackend {
@@ -163,7 +166,7 @@ impl CpuBackend {
     pub fn step_buf(&self, kind: usize, ubuf: &CpuBuffer, bufs: &[&CpuBuffer], threads: u32) -> Step {
         let bg = BindGroup {
             uniform: ubuf.clone(),
-            bufs: bufs.iter().map(|b| (*b).clone()).collect(),
+            bufs: bufs.iter().map(|b| ((*b).clone(), 0usize)).collect(),
         };
         let (gx, gy) = crate::grid(threads);
         (kind, bg, gx, gy)
@@ -172,6 +175,19 @@ impl CpuBackend {
     pub fn step(&self, kind: usize, bufs: &[&CpuBuffer], params: &[u32], threads: u32) -> Step {
         let ubuf = CpuBuffer::with_words(params.to_vec());
         self.step_buf(kind, &ubuf, bufs, threads)
+    }
+
+    /// Like [`step`](Self::step) but each buffer carries a `(word_offset,
+    /// word_len)` — the dispatch sees the buffer starting at `word_offset`
+    /// (`word_len` is advisory on CPU; the kernel self-bounds via params).
+    pub fn step_sliced(&self, kind: usize, bufs: &[&CpuBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
+        let ubuf = CpuBuffer::with_words(params.to_vec());
+        let bg = BindGroup {
+            uniform: ubuf,
+            bufs: bufs.iter().enumerate().map(|(i, b)| ((*b).clone(), offsets[i].0 as usize)).collect(),
+        };
+        let (gx, gy) = crate::grid(threads);
+        (kind, bg, gx, gy)
     }
 
     /// Zero the `clears`, then run every step in order (the dependency-preserving
@@ -184,7 +200,7 @@ impl CpuBackend {
         for (kind, bg, gx, gy) in steps {
             let total = (*gx as u64) * (*gy as u64) * 64;
             let uniform = bg.uniform.base_ptr() as *const u32;
-            let bufs: Vec<*mut u8> = bg.bufs.iter().map(|b| b.base_ptr()).collect();
+            let bufs: Vec<*mut u8> = bg.bufs.iter().map(|(b, off)| unsafe { b.base_ptr().add(off * 4) }).collect();
             if let Some(prof) = &self.profile {
                 let t = std::time::Instant::now();
                 self.dispatch(*kind, total, *gx, *gy, uniform, &bufs);

@@ -35,6 +35,9 @@ use crate::config::QwenConfig;
 pub const IGNORE: u32 = 0xFFFF_FFFF;
 
 // ---- kernel indices (order matches PIPELINES) ----
+/// Plain (untiled) embedding gather — kept in PIPELINES at index 0 for stable
+/// indexing; the forward uses the vocab-tiled `EMBED_TILE` instead.
+#[allow(dead_code)]
 const EMBED: usize = 0;
 const MATMUL: usize = 1;
 const RMSNORM: usize = 2;
@@ -65,6 +68,8 @@ const GRAD_SCALE: usize = 26;
 const CLIP_COEF: usize = 27;
 const GRAD_SCALE_BUF: usize = 28;
 const AXPY: usize = 29;
+const EMBED_TILE: usize = 30;
+const MATMUL_TILE: usize = 31;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -97,7 +102,14 @@ const PIPELINES: &[(&str, &str)] = &[
     ("clip_coef", kernels::CLIP_COEF),
     ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
     ("axpy", kernels::AXPY),
+    ("embed_tile", kernels::EMBED_TILE),
+    ("matmul_tile", kernels::MATMUL_TILE),
 ];
+
+/// Per-binding budget (f32 words) for tiling the embedding / lm_head over vocab,
+/// so each storage binding stays under a backend's `max_storage_buffer_binding_
+/// size` (e.g. 128MB on Mesa-GL). ~96 MiB; small models collapse to one tile.
+const TILE_BUDGET_WORDS: u64 = 24 * 1024 * 1024;
 
 struct Layer {
     xn1: DeviceBuffer,
@@ -401,6 +413,22 @@ impl Qwen {
         }
     }
 
+    /// Vocab tiles `(v0, count)` sized so a `[count, d_model]` weight slice stays
+    /// within the per-binding budget. Small vocabularies yield a single tile.
+    fn vocab_tiles(&self) -> Vec<(u32, u32)> {
+        let d = self.cfg.d_model as u64;
+        let v = self.cfg.vocab as u64;
+        let rows = (TILE_BUDGET_WORDS / d.max(1)).max(1);
+        let mut out = Vec::new();
+        let mut v0 = 0u64;
+        while v0 < v {
+            let cnt = rows.min(v - v0);
+            out.push((v0 as u32, cnt as u32));
+            v0 += cnt;
+        }
+        out
+    }
+
     fn forward_steps(&self, b_use: u32, t_use: u32) -> Vec<Step> {
         let c = &self.cfg;
         let n = b_use * t_use;
@@ -416,8 +444,20 @@ impl Qwen {
         let grp = c.group();
         let theta = f(c.rope_theta);
         let mut s: Vec<Step> = Vec::new();
+        let dw = d as u64;
+        let tiles = self.vocab_tiles();
 
-        s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
+        // Token embedding, tiled over vocab so each `tok.weight` binding stays
+        // under the backend's max-binding size (GL: 128MB).
+        for &(v0, cnt) in &tiles {
+            s.push(self.gpu.step_sliced(
+                EMBED_TILE,
+                &[&self.tokens, self.w("tok.weight"), &self.res[0]],
+                &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
+                &[d, n, v0, cnt],
+                n * d,
+            ));
+        }
 
         for l in 0..c.n_layers as usize {
             let lb = &self.layers[l];
@@ -457,7 +497,17 @@ impl Qwen {
 
         let last = c.n_layers as usize;
         s.push(self.gpu.step(RMSNORM, &[&self.res[last], self.w("norm.weight"), &self.xn_final], &[d, n], n));
-        s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w(c.head_weight()), &self.logits], &[n, d, v], n * v));
+        // lm_head, tiled over vocab; each tile writes its column slice of logits.
+        let head = c.head_weight();
+        for &(v0, cnt) in &tiles {
+            s.push(self.gpu.step_sliced(
+                MATMUL_TILE,
+                &[&self.xn_final, self.w(head), &self.logits],
+                &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
+                &[n, d, v, v0, cnt],
+                n * cnt,
+            ));
+        }
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
         s
     }

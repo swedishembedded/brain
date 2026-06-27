@@ -233,6 +233,23 @@ impl Gpu {
             }
         }
     }
+
+    /// Like [`step`](Self::step) but each buffer binds the sub-range
+    /// `offsets[i] = (word_offset, word_len)` (`word_len == 0` => to end). Used to
+    /// tile a >128MB tensor (e.g. the Qwen embedding/lm_head) across vocab so each
+    /// binding stays under the backend's per-binding size limit.
+    pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
+        match self {
+            Gpu::Wgpu(g) => {
+                let bs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| b.wgpu()).collect();
+                Step::Wgpu(g.step_sliced(kind, &bs, offsets, params, threads))
+            }
+            Gpu::Cpu(c) => {
+                let bs: Vec<&cpu_backend::CpuBuffer> = bufs.iter().map(|b| b.cpu()).collect();
+                Step::Cpu(c.step_sliced(kind, &bs, offsets, params, threads))
+            }
+        }
+    }
     pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
         match self {
             Gpu::Wgpu(g) => {
@@ -587,6 +604,36 @@ impl Gpu {
     /// uniform/bind group are allocated once and reused.
     pub fn step(&self, kind: usize, bufs: &[&wgpu::Buffer], params: &[u32], threads: u32) -> Step {
         self.step_buf(kind, &self.uniform(params), bufs, threads)
+    }
+
+    /// Like [`step`](Self::step) but each storage buffer binds a sub-range
+    /// `(word_offset, word_len)` (`word_len == 0` => to the end). This keeps a
+    /// single binding within `max_storage_buffer_binding_size` (e.g. tiling a
+    /// >128MB embedding into vocab slices). Offsets must satisfy the adapter's
+    /// `min_storage_buffer_offset_alignment` (256B); row-aligned tiles do.
+    pub fn step_sliced(&self, kind: usize, bufs: &[&wgpu::Buffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
+        let ubuf = self.uniform(params);
+        let mut entries = vec![wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }];
+        for (i, b) in bufs.iter().enumerate() {
+            let (off_w, len_w) = offsets[i];
+            let resource = if off_w == 0 && len_w == 0 {
+                b.as_entire_binding()
+            } else {
+                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: b,
+                    offset: off_w * 4,
+                    size: if len_w == 0 { None } else { std::num::NonZeroU64::new(len_w * 4) },
+                })
+            };
+            entries.push(wgpu::BindGroupEntry { binding: (i + 1) as u32, resource });
+        }
+        let layout = self.pipelines[kind].get_bind_group_layout(0);
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &layout, entries: &entries });
+        if self.stats.is_some() {
+            self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let (gx, gy) = super::grid(threads);
+        (kind, bg, gx, gy)
     }
 
     /// Clear the given buffers, then run all steps as a compute pass. The work is

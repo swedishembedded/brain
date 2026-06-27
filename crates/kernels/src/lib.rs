@@ -236,6 +236,10 @@ pub const GQA_BWD_DQ: &str = include_str!("../wgsl/gqa_bwd_dq.wgsl");
 pub const GQA_BWD_DK: &str = include_str!("../wgsl/gqa_bwd_dk.wgsl");
 /// `wgsl/axpy.wgsl`
 pub const AXPY: &str = include_str!("../wgsl/axpy.wgsl");
+/// `wgsl/embed_tile.wgsl`
+pub const EMBED_TILE: &str = include_str!("../wgsl/embed_tile.wgsl");
+/// `wgsl/matmul_tile.wgsl`
+pub const MATMUL_TILE: &str = include_str!("../wgsl/matmul_tile.wgsl");
 
 /// All kernels as `(name, source)` pairs, sorted by name.
 pub const ALL: &[(&str, &str)] = &[
@@ -351,6 +355,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("gqa_bwd_dq", GQA_BWD_DQ),
     ("gqa_bwd_dk", GQA_BWD_DK),
     ("axpy", AXPY),
+    ("embed_tile", EMBED_TILE),
+    ("matmul_tile", MATMUL_TILE),
 ];
 
 /// Look up a kernel's WGSL source by file stem (e.g. `"matmul"`).
@@ -370,7 +376,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_kernels_present_and_nonempty() {
-        assert_eq!(ALL.len(), 112);
+        assert_eq!(ALL.len(), 114);
         for (n, s) in ALL { assert!(!s.trim().is_empty(), "empty kernel {n}"); }
     }
     #[test]
