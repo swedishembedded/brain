@@ -16,6 +16,7 @@
 pub mod binio;
 pub mod bpe;
 pub mod loader;
+pub mod qwen_tokenizer;
 pub mod rng;
 pub mod tokenizer;
 
