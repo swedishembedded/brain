@@ -216,6 +216,26 @@ pub const SILU_MUL: &str = include_str!("../wgsl/silu_mul.wgsl");
 pub const UPSAMPLE2: &str = include_str!("../wgsl/upsample2.wgsl");
 /// `wgsl/upsample2_dx.wgsl`
 pub const UPSAMPLE2_DX: &str = include_str!("../wgsl/upsample2_dx.wgsl");
+// ---- Qwen decoder kernels: configurable-base (half-split) RoPE, grouped-query
+// attention (fwd + bwd), and the LoRA scaled-accumulate. ----
+/// `wgsl/rope_base.wgsl`
+pub const ROPE_BASE: &str = include_str!("../wgsl/rope_base.wgsl");
+/// `wgsl/rope_base_bwd.wgsl`
+pub const ROPE_BASE_BWD: &str = include_str!("../wgsl/rope_base_bwd.wgsl");
+/// `wgsl/gqa_scores.wgsl`
+pub const GQA_SCORES: &str = include_str!("../wgsl/gqa_scores.wgsl");
+/// `wgsl/gqa_apply.wgsl`
+pub const GQA_APPLY: &str = include_str!("../wgsl/gqa_apply.wgsl");
+/// `wgsl/gqa_bwd_dscores.wgsl`
+pub const GQA_BWD_DSCORES: &str = include_str!("../wgsl/gqa_bwd_dscores.wgsl");
+/// `wgsl/gqa_bwd_dv.wgsl`
+pub const GQA_BWD_DV: &str = include_str!("../wgsl/gqa_bwd_dv.wgsl");
+/// `wgsl/gqa_bwd_dq.wgsl`
+pub const GQA_BWD_DQ: &str = include_str!("../wgsl/gqa_bwd_dq.wgsl");
+/// `wgsl/gqa_bwd_dk.wgsl`
+pub const GQA_BWD_DK: &str = include_str!("../wgsl/gqa_bwd_dk.wgsl");
+/// `wgsl/axpy.wgsl`
+pub const AXPY: &str = include_str!("../wgsl/axpy.wgsl");
 
 /// All kernels as `(name, source)` pairs, sorted by name.
 pub const ALL: &[(&str, &str)] = &[
@@ -322,6 +342,15 @@ pub const ALL: &[(&str, &str)] = &[
     ("silu_mul", SILU_MUL),
     ("upsample2", UPSAMPLE2),
     ("upsample2_dx", UPSAMPLE2_DX),
+    ("rope_base", ROPE_BASE),
+    ("rope_base_bwd", ROPE_BASE_BWD),
+    ("gqa_scores", GQA_SCORES),
+    ("gqa_apply", GQA_APPLY),
+    ("gqa_bwd_dscores", GQA_BWD_DSCORES),
+    ("gqa_bwd_dv", GQA_BWD_DV),
+    ("gqa_bwd_dq", GQA_BWD_DQ),
+    ("gqa_bwd_dk", GQA_BWD_DK),
+    ("axpy", AXPY),
 ];
 
 /// Look up a kernel's WGSL source by file stem (e.g. `"matmul"`).
@@ -341,7 +370,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_kernels_present_and_nonempty() {
-        assert_eq!(ALL.len(), 97);
+        assert_eq!(ALL.len(), 112);
         for (n, s) in ALL { assert!(!s.trim().is_empty(), "empty kernel {n}"); }
     }
     #[test]
