@@ -148,6 +148,12 @@ pub fn arch_registry() -> Vec<Arch> {
             size: Size::default(),
             factory: || Box::new(crate::MoeDecoder),
         },
+        Arch {
+            name: "qwen",
+            description: "Qwen3 dense decoder (GQA + QK-norm + RoPE + SwiGLU; size per benchmark)",
+            size: Size::default(),
+            factory: || Box::new(crate::QwenDecoder),
+        },
     ]
 }
 
