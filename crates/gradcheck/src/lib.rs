@@ -163,6 +163,48 @@ pub fn check_gpt(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Build a tiny Qwen3 decoder, set a fixed batch, and gradient-check it. This is
+/// the correctness gate for the GQA attention (fwd + the dq/dk/dv backward with
+/// kv-head accumulation), the per-head QK-RMSNorm, the half-split RoPE-base, the
+/// SwiGLU MLP, and the tied-embedding grad accumulation — all through the blanket
+/// `CheckModel for model::Model`. The tiny config uses 4 query / 2 kv heads
+/// (group 2) and a decoupled `head_dim` (8, vs d_model/n_heads = 4). Returns the
+/// report.
+pub fn check_qwen(seed: u64) -> Report {
+    use qwen::{Qwen, QwenConfig};
+    let cfg = QwenConfig::tiny();
+    let init = qwen::init_weights(&cfg, seed);
+    let model = Qwen::new(cfg, 2, 6, &init);
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
+    model.set_batch(&x, &y);
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
+/// Build a tiny **LoRA** Qwen3 decoder and gradient-check the adapters. The
+/// checker walks only the trainable params (`*.lora_a`/`*.lora_b`); the base
+/// weights are frozen. A few AdamW steps run first so the zero-initialised `B`
+/// adapter (and hence `A`'s gradient) is non-trivial before the FD comparison —
+/// this validates the LoRA forward (`axpy` fusion) and the A/B backward path.
+pub fn check_qwen_lora(seed: u64) -> Report {
+    use qwen::{LoraCfg, Qwen, QwenConfig};
+    let cfg = QwenConfig { lora: Some(LoraCfg::attn(2, 4.0)), ..QwenConfig::tiny() };
+    let init = qwen::init_weights(&cfg, seed);
+    let model = Qwen::new(cfg, 2, 6, &init);
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
+    model.set_batch(&x, &y);
+    // Move the adapters off the B=0 init so both A and B carry real gradients.
+    for step in 1..=5 {
+        model.zero_grads();
+        model.forward();
+        model.backward();
+        model.adamw_step(step, 5e-2, 0.0, Some(1.0), 1.0);
+        model.poll_wait();
+    }
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
 /// Build a tiny sparse-MoE Trainer, set a fixed batch, and gradient-check it
 /// (validates RMSNorm/RoPE/router/SwiGLU/aux+z-loss backprop). Now that MoE
 /// implements `model::Model`, the blanket `CheckModel` impl makes it checkable —
@@ -304,6 +346,39 @@ mod tests {
         assert!(
             fails.is_empty(),
             "gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn qwen_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_qwen(7);
+        report.print();
+        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn qwen_lora_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_qwen_lora(7);
+        report.print();
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "LoRA gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
     }

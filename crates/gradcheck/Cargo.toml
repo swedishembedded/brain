@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 brain-model.workspace = true
 brain-gpt.workspace = true
+brain-qwen.workspace = true
 brain-moe.workspace = true
 brain-pid.workspace = true
 brain-seq2seq.workspace = true
