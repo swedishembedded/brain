@@ -48,10 +48,18 @@ pub struct GenOpts {
 
 impl Default for GenOpts {
     fn default() -> GenOpts {
+        // The reference (`Qwen3TTSModel._merge_generate_kwargs`) decodes the Talker
+        // codebook-0 stream with sampling — `do_sample=True, top_k=50,
+        // temperature=0.9` — never greedily. Greedy (`temperature=0`) is degenerate
+        // for this autoregressive acoustic model: codebook-0 collapses into a single
+        // repeating token after a few frames, decoding to near-silence (rms ~0.004
+        // vs ~0.07 sampled). Default to the reference's sampling so a plain
+        // `brain tts clone` yields voice; pass `--temp 0` for the deterministic
+        // (greedy) parity path. The fixed `seed` keeps a single run reproducible.
         GenOpts {
             max_frames: 256,
-            temperature: 0.0, // greedy by default (deterministic demo)
-            top_k: 0,
+            temperature: 0.9,
+            top_k: 50,
             seed: 0,
             min_new: 2,
             cached: true,
@@ -204,17 +212,24 @@ pub fn generate_codes_cached(
     prompt: &Prompt,
     opts: &GenOpts,
 ) -> Vec<u32> {
+    use std::time::Instant;
+    // Coarse per-stage profiling, gated on `TTS_PROFILE` so normal runs are silent.
+    let profile = std::env::var("TTS_PROFILE").is_ok();
+    let (mut t_step, mut t_mtp) = (0.0f64, 0.0f64);
+
     let d = cpu.d();
     let n_trailing = prompt.trailing.len() / d;
     let mut rng = Rng::new(opts.seed);
 
     // Stream the whole prefix through the cache, keeping the last hidden state.
+    let t_prefix0 = Instant::now();
     cpu.reset();
     let n_prefix = prompt.embeds.len() / d;
     let mut past_hidden = vec![0.0f32; d];
     for i in 0..n_prefix {
         past_hidden = cpu.step(&prompt.embeds[i * d..(i + 1) * d]);
     }
+    let t_prefix = t_prefix0.elapsed().as_secs_f64() * 1e3;
     let mut cb0 = sample_cb0(
         cpu.codec_head_logits(&past_hidden),
         sp.codec_eos,
@@ -231,7 +246,9 @@ pub fn generate_codes_cached(
             break;
         }
         let cb0_embed = cpu.codec_embed(cb0).to_vec();
+        let tm = Instant::now();
         let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
+        t_mtp += tm.elapsed().as_secs_f64() * 1e3;
         frames.push(cb0);
         frames.extend_from_slice(&residuals);
 
@@ -247,7 +264,9 @@ pub fn generate_codes_cached(
             break;
         }
         // one incremental decoder step for the new frame.
+        let ts = Instant::now();
         past_hidden = cpu.step(&feed);
+        t_step += ts.elapsed().as_secs_f64() * 1e3;
         cb0 = sample_cb0(
             cpu.codec_head_logits(&past_hidden),
             sp.codec_eos,
@@ -255,6 +274,16 @@ pub fn generate_codes_cached(
             opts.temperature,
             opts.top_k,
             &mut rng,
+        );
+    }
+    if profile {
+        let nf = s.max(1) as f64;
+        eprintln!(
+            "[tts-profile] prefix-stream({n_prefix} pos)={t_prefix:.1}ms | \
+             talker-step total={t_step:.1}ms ({:.1}ms/frame) | \
+             mtp-residuals total={t_mtp:.1}ms ({:.1}ms/frame) | frames={s}",
+            t_step / nf,
+            t_mtp / nf,
         );
     }
     frames
@@ -392,5 +421,16 @@ pub fn decode_codes(codec_path: &str, codes: &[u32]) -> Result<Vec<f32>, String>
         return Err("no codec frames were generated".to_string());
     }
     let codec = codec::Codec::load_inference(codec_path);
+    if std::env::var("TTS_PROFILE").is_ok() {
+        let t0 = std::time::Instant::now();
+        let wav = codec.decode(codes);
+        eprintln!(
+            "[tts-profile] codec.decode({} frames)={:.1}ms -> {} samples",
+            codes.len() / 16,
+            t0.elapsed().as_secs_f64() * 1e3,
+            wav.len()
+        );
+        return Ok(wav);
+    }
     Ok(codec.decode(codes))
 }

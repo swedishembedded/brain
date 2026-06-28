@@ -263,6 +263,7 @@ dependencies = [
  "brain-optim",
  "brain-paramstore",
  "bytemuck",
+ "rayon",
  "serde_json",
 ]
 
@@ -529,6 +530,7 @@ dependencies = [
  "brain-qwen",
  "brain-speaker",
  "bytemuck",
+ "rayon",
  "serde_json",
 ]
 
