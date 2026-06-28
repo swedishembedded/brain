@@ -20,16 +20,27 @@ fn argmax(s: &[f32]) -> usize {
     bi
 }
 
+/// Timing + result of an OpenVINO decode run.
+pub struct NpuRun {
+    pub tokens: Vec<u32>,
+    pub device: String,
+    /// ONNX export + OpenVINO compile (one-time) in ms.
+    pub load_ms: f64,
+    /// Token generation loop in ms.
+    pub gen_ms: f64,
+}
+
 /// Greedily generate up to `max_new` tokens continuing `prompt_ids`, running the
 /// decoder on the OpenVINO `device` (falling back to CPU/GPU if `allow_fallback`
-/// and the device is absent). Returns `(generated_ids, device_used)`.
+/// and the device is absent). Returns the tokens, device, and load/gen timing.
 pub fn generate(
     weights_path: &str,
     prompt_ids: &[u32],
     max_new: usize,
     device: NpuDevice,
     allow_fallback: bool,
-) -> Result<(Vec<u32>, String), NpuError> {
+) -> Result<NpuRun, NpuError> {
+    let t_load = std::time::Instant::now();
     let cap = prompt_ids.len() + max_new;
     // Export the fixed-length decoder (weights as ONNX external data so the proto
     // stays under protobuf's 2GB limit) to a temp dir, then compile from the path.
@@ -49,7 +60,9 @@ pub fn generate(
     };
     let vocab = sess.vocab();
     let used = sess.device().to_string();
+    let load_ms = t_load.elapsed().as_secs_f64() * 1e3;
 
+    let t_gen = std::time::Instant::now();
     let mut ctx: Vec<i64> = prompt_ids.iter().map(|&x| x as i64).collect();
     let mut out = Vec::with_capacity(max_new);
     for _ in 0..max_new {
@@ -65,6 +78,7 @@ pub fn generate(
         ctx.push(next as i64);
         out.push(next);
     }
+    let gen_ms = t_gen.elapsed().as_secs_f64() * 1e3;
     std::fs::remove_dir_all(&dir).ok();
-    Ok((out, used))
+    Ok(NpuRun { tokens: out, device: used, load_ms, gen_ms })
 }

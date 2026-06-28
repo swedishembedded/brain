@@ -137,10 +137,11 @@ fn infer(args: &[String]) {
     // NPU / OpenVINO whole-graph path (greedy only): export -> compile -> decode.
     if want_npu() {
         match npu::qwen_decode::generate(&weights, &ids, max_new, npu::openvino::NpuDevice::Npu, true) {
-            Ok((gen, dev)) => {
-                eprintln!("npu: ran on OpenVINO device {dev}");
+            Ok(run) => {
+                eprintln!("npu: ran on OpenVINO device {}", run.device);
+                eprintln!("qwen-timing load_ms={:.1} gen_ms={:.1} tokens={}", run.load_ms, run.gen_ms, run.tokens.len());
                 print!("{prompt}");
-                print!("{}", tok.decode(&gen));
+                print!("{}", tok.decode(&run.tokens));
                 println!();
             }
             Err(e) => eprintln!("npu infer failed: {e}"),
@@ -148,10 +149,15 @@ fn infer(args: &[String]) {
         return;
     }
     let cap = (ids.len() + max_new) as u32;
+    let t_load = std::time::Instant::now();
     let model = Qwen::load_inference(&weights, 1, cap);
+    let load_ms = t_load.elapsed().as_secs_f64() * 1e3;
     let eos = tok.encode("<|im_end|>").first().copied();
     let mut rng = Rng::new(seed);
+    let t_gen = std::time::Instant::now();
     let gen = qwen::sample::generate(&model, &ids, max_new, temp, top_k, eos, &mut rng);
+    let gen_ms = t_gen.elapsed().as_secs_f64() * 1e3;
+    eprintln!("qwen-timing load_ms={load_ms:.1} gen_ms={gen_ms:.1} tokens={}", gen.len());
     print!("{prompt}");
     print!("{}", tok.decode(&gen));
     println!();
