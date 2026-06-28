@@ -38,8 +38,11 @@ impl fmt::Display for NpuError {
             ),
             NpuError::RuntimeNotFound(s) => write!(
                 f,
-                "OpenVINO runtime not found ({s}); install OpenVINO 2024.x + the Intel \
-                 NPU driver and source setupvars.sh. See docs/yolo/NPU.md"
+                "OpenVINO runtime not found ({s}). Install it with `make requirements` \
+                 (the `openvino` pip wheel) — brain auto-discovers it inside an active \
+                 virtualenv. Otherwise set LD_LIBRARY_PATH to the dir containing \
+                 libopenvino_c.so (or source an OpenVINO setupvars.sh). The Intel NPU \
+                 also needs its user-mode driver. See docs/yolo/NPU.md"
             ),
             NpuError::DeviceUnavailable(s) => write!(f, "device unavailable: {s}"),
             NpuError::Other(s) => write!(f, "{s}"),

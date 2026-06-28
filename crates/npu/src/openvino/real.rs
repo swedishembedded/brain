@@ -32,7 +32,75 @@ fn matches_base(id: &str, base: &str) -> bool {
     id == base || id.starts_with(&format!("{base}."))
 }
 
+/// Best-effort: make the OpenVINO runtime discoverable when it was installed via
+/// the `openvino` pip wheel (the common case here). The wheel puts the libraries
+/// in `<site-packages>/openvino/libs`, which isn't a path the openvino-finder
+/// checks by default — but it DOES scan `LD_LIBRARY_PATH`, and the wheel's
+/// `libopenvino_c.so` has `RPATH=$ORIGIN` so its dependencies resolve from the
+/// same dir. So we just locate that dir (active virtualenv first, then `python3`)
+/// and prepend it to `LD_LIBRARY_PATH` in-process before `Core::new`. Respects an
+/// already-configured OpenVINO env and is a no-op if nothing is found (the caller
+/// then reports `RuntimeNotFound`). This removes the manual env dance for
+/// `--device npu` inside a venv with `make requirements` installed.
+fn ensure_openvino_on_path() {
+    use std::path::{Path, PathBuf};
+    // Respect an explicit OpenVINO install env (e.g. a real setupvars.sh).
+    if ["OPENVINO_INSTALL_DIR", "INTEL_OPENVINO_DIR", "OPENVINO_BUILD_DIR"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some())
+    {
+        return;
+    }
+    let has_c = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .map(|rd| rd.flatten().any(|e| e.file_name().to_string_lossy().starts_with("libopenvino_c.so")))
+            .unwrap_or(false)
+    };
+    // Already reachable on LD_LIBRARY_PATH? Then nothing to do.
+    if let Some(p) = std::env::var_os("LD_LIBRARY_PATH") {
+        if std::env::split_paths(&p).any(|d| has_c(&d)) {
+            return;
+        }
+    }
+    // Find the pip wheel's libs dir: the active venv, then ask python3.
+    let mut found: Option<PathBuf> = None;
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        if let Ok(rd) = std::fs::read_dir(Path::new(&venv).join("lib")) {
+            for e in rd.flatten() {
+                let cand = e.path().join("site-packages/openvino/libs");
+                if has_c(&cand) {
+                    found = Some(cand);
+                    break;
+                }
+            }
+        }
+    }
+    if found.is_none() {
+        if let Ok(out) = std::process::Command::new("python3")
+            .args(["-c", "import openvino,os;print(os.path.join(os.path.dirname(openvino.__file__),'libs'))"])
+            .output()
+        {
+            if out.status.success() {
+                let dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+                if has_c(&dir) {
+                    found = Some(dir);
+                }
+            }
+        }
+    }
+    if let Some(dir) = found {
+        let mut paths = vec![dir];
+        if let Some(p) = std::env::var_os("LD_LIBRARY_PATH") {
+            paths.extend(std::env::split_paths(&p));
+        }
+        if let Ok(joined) = std::env::join_paths(paths) {
+            std::env::set_var("LD_LIBRARY_PATH", joined);
+        }
+    }
+}
+
 fn new_core() -> Result<Core, NpuError> {
+    ensure_openvino_on_path();
     Core::new().map_err(|e| NpuError::RuntimeNotFound(format!("{e:?}")))
 }
 

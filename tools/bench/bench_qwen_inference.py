@@ -53,41 +53,19 @@ def _vmhwm_kb(pid: int) -> int:
 
 
 def _npu_env():
-    """Child env so brain's OpenVINO runtime-linking finds libopenvino. Locates
-    the `openvino` pip package's libs dir, ensures the bare `libopenvino_c.so`
-    soname exists, and exports INTEL_OPENVINO_DIR (a constructed runtime/lib/
-    intel64 tree the openvino-finder expects) + LD_LIBRARY_PATH. Returns the env
-    unchanged if openvino isn't importable (the npu row then reports skipped)."""
+    """Child env for the npu row. brain auto-discovers the `openvino` pip wheel's
+    libs (active virtualenv, then `python3`) and adds them to LD_LIBRARY_PATH
+    itself, so usually no setup is needed. As a belt-and-suspenders for non-venv
+    invocations we still prepend the importable openvino libs dir when we can find
+    it; returns the env unchanged otherwise."""
     env = dict(os.environ)
     try:
         import openvino  # noqa: F401
         libs = os.path.join(os.path.dirname(str(openvino.__file__)), "libs")
-    except Exception:  # noqa: BLE001
-        return env
-    if not os.path.isdir(libs):
-        return env
-    soname = os.path.join(libs, "libopenvino_c.so")
-    if not os.path.exists(soname):
-        for f in sorted(os.listdir(libs)):
-            if f.startswith("libopenvino_c.so."):
-                try:
-                    os.symlink(f, soname)
-                except OSError:
-                    pass
-                break
-    # Construct an INTEL_OPENVINO_DIR tree the finder accepts (symlinks to libs).
-    root = "/tmp/brain_ov"
-    intel64 = os.path.join(root, "runtime", "lib", "intel64")
-    os.makedirs(intel64, exist_ok=True)
-    for f in os.listdir(libs):
-        dst = os.path.join(intel64, f)
-        if not os.path.exists(dst):
-            try:
-                os.symlink(os.path.join(libs, f), dst)
-            except OSError:
-                pass
-    env["INTEL_OPENVINO_DIR"] = root
-    env["LD_LIBRARY_PATH"] = libs + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+        if os.path.isdir(libs):
+            env["LD_LIBRARY_PATH"] = libs + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+    except Exception:  # noqa: BLE001 - brain still tries its own discovery
+        pass
     return env
 
 
