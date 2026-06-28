@@ -24,6 +24,8 @@
 
 use std::collections::HashMap;
 
+use rayon::prelude::*;
+
 use crate::config::TalkerConfig;
 use crate::talker::TextProjection;
 
@@ -74,15 +76,28 @@ fn silu(x: f32) -> f32 {
 }
 
 /// `out[o] = Σ_k w[o*in + k] * x[k]` — `y = x·Wᵀ` with `W:[out,in]` row-major.
+///
+/// The dominant cost of the cached Talker decode (7 projections × n_layers per
+/// frame). Output rows are independent dot products, so they fan out across all
+/// cores with rayon; the threshold keeps tiny projections on one thread to avoid
+/// scheduling overhead.
 fn matvec(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
     let mut y = vec![0.0f32; out];
-    for (o, yo) in y.iter_mut().enumerate() {
-        let row = &w[o * inn..o * inn + inn];
+    let dot = |row: &[f32]| -> f32 {
         let mut acc = 0.0f32;
         for k in 0..inn {
             acc += row[k] * x[k];
         }
-        *yo = acc;
+        acc
+    };
+    if out * inn >= 8192 {
+        y.par_iter_mut().enumerate().for_each(|(o, yo)| {
+            *yo = dot(&w[o * inn..o * inn + inn]);
+        });
+    } else {
+        for (o, yo) in y.iter_mut().enumerate() {
+            *yo = dot(&w[o * inn..o * inn + inn]);
+        }
     }
     y
 }
@@ -264,10 +279,10 @@ impl CpuTalker {
         let v = self.cfg.vocab as usize;
         assert_eq!(hidden_row.len(), d);
         let mut out = vec![0.0f32; v];
-        for (o, dst) in out.iter_mut().enumerate() {
+        out.par_iter_mut().enumerate().for_each(|(o, dst)| {
             let wrow = &self.codec_head[o * d..o * d + d];
             *dst = (0..d).map(|k| wrow[k] * hidden_row[k]).sum();
-        }
+        });
         out
     }
 

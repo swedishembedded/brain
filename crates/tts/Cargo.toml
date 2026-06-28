@@ -23,6 +23,7 @@ brain-speaker.workspace = true
 brain-audio.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
+rayon = "1"
 
 [dev-dependencies]
 brain-data.workspace = true
