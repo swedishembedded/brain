@@ -1,0 +1,15 @@
+# Python tooling for brain's benchmarks, parity checks, and the NPU runtime.
+#
+# The Rust engine itself needs NONE of these — `make release` builds it with
+# cargo alone. These power the tools/ scripts (inference benchmarks, parity
+# dumps) and provide the OpenVINO runtime that `brain … --device npu` loads at
+# run time (the pip `openvino` wheel bundles the native libraries the Rust
+# `openvino` crate dlopens). Install with `make requirements`.
+
+openvino>=2024.0       # NPU/OpenVINO runtime (native libs for `--device npu`)
+torch                  # HuggingFace reference rows in the inference benchmarks
+transformers>=4.51     # Qwen3 reference model + tokenizer (forward/tokenizer parity)
+numpy                  # parity logit/token dumps
+pillow                 # image I/O for the YOLO inference benchmark
+huggingface_hub        # fetching reference checkpoints / tokenizers
+ultralytics            # YOLOv8 reference row in tools/bench/bench_yolo_inference.py

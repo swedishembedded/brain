@@ -18,6 +18,7 @@
 #   make test            # full cargo test suite
 
 BRAIN  ?= ./target/release/brain
+PIP    ?= python3 -m pip
 DATA   ?= data
 OUT    ?= out
 SEED   ?= 1337
@@ -44,7 +45,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release test gradcheck bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo \
+.PHONY: help build release test gradcheck requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo \
@@ -54,6 +55,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
 help:
 	@echo "brain targets:"
 	@echo "  make release                 build the optimized 'brain' binary"
+	@echo "  make requirements            pip-install the Python tooling (OpenVINO/NPU, torch, ...)"
 	@echo "  make test                    full cargo test suite"
 	@echo "  make gradcheck               numerical backprop correctness gate (GPT)"
 	@echo "  make data/<name>             generate a dataset (calculator|reverser|wordcalc|"
@@ -84,6 +86,13 @@ release:
 
 test:
 	cargo test
+
+# Install the Python tooling (OpenVINO/NPU runtime, torch + transformers for the
+# benchmark reference rows, etc.) into the current environment. The Rust engine
+# needs none of these — this is for tools/ and the `--device npu` runtime.
+requirements:
+	$(PIP) install --upgrade pip
+	$(PIP) install -r requirements.txt
 
 gradcheck: release
 	$(BRAIN) gradcheck
