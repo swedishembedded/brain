@@ -65,6 +65,7 @@ fn prepare_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>) -> Res
                     _ => true,
                 };
             if !fresh {
+                eprintln!("npu: exporting ONNX decoder for seq={cap} (one-time, ~30s)…");
                 export_qwen_fp32(weights_path, onnx.to_str().unwrap(), cap).map_err(map)?;
             }
             Ok((onnx, None, fresh))
@@ -73,6 +74,7 @@ fn prepare_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>) -> Res
             let dir = std::env::temp_dir().join(format!("brain_qwen_npu_{}", std::process::id()));
             std::fs::create_dir_all(&dir).map_err(map)?;
             let onnx = dir.join("qwen.onnx");
+            eprintln!("npu: exporting ONNX decoder for seq={cap} (one-time, ~30s; no --npu-cache, so not reused)…");
             export_qwen_fp32(weights_path, onnx.to_str().unwrap(), cap).map_err(map)?;
             Ok((onnx, Some(dir), false))
         }
@@ -126,6 +128,11 @@ pub fn generate(
 
     let t_load = std::time::Instant::now();
     let (onnx, tmp, reused) = prepare_onnx(weights_path, cap, cache_dir)?;
+    eprintln!(
+        "npu: loading + compiling on OpenVINO for seq={cap} (the first run per seq compiles, \
+         ~1-2 min; cached{} after, then a few seconds)…",
+        cache_dir.map(|d| format!(" in {}", d.display())).unwrap_or_default()
+    );
     let sess_result = DecoderSession::load_path(&onnx, &config(device, allow_fallback, cache_dir));
     let mut sess = match sess_result {
         Ok(s) => s,
