@@ -113,7 +113,7 @@ impl MtpModel {
 
     /// Decoder block parameter list (blocks + final norm); the codec embeddings
     /// and heads live on the CPU.
-    fn decoder_param_list(cfg: &MtpConfig) -> Vec<(String, usize)> {
+    pub(crate) fn decoder_param_list(cfg: &MtpConfig) -> Vec<(String, usize)> {
         let d = cfg.d_model as usize;
         let ff = cfg.d_ff as usize;
         let hq = cfg.q_dim() as usize;
@@ -138,7 +138,7 @@ impl MtpModel {
         out
     }
 
-    fn build(
+    pub(crate) fn build(
         cfg: MtpConfig,
         decoder: std::collections::HashMap<String, Vec<f32>>,
         codec_embedding: Vec<Vec<f32>>,

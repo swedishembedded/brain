@@ -15,6 +15,7 @@
 pub mod config;
 pub mod gen;
 pub mod gen_kv;
+pub mod gen_kv_mtp;
 pub mod import;
 pub mod mtp;
 pub mod pipeline;
@@ -26,6 +27,7 @@ pub use config::{MtpConfig, TalkerConfig};
 pub use sft::{ce, ce_batch, FinetuneOpts, MultiCodebookLabels};
 pub use gen::TalkerGen;
 pub use gen_kv::CpuTalker;
+pub use gen_kv_mtp::CpuMtp;
 pub use mtp::MtpModel;
 pub use pipeline::{GenOpts, TtsPaths};
 pub use prompt::{Prompt, TtsSpecials};

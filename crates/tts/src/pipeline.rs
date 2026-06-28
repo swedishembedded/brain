@@ -199,7 +199,7 @@ pub fn generate_codes(
 /// `num_code_groups` and re-runs cheaply).
 pub fn generate_codes_cached(
     cpu: &mut crate::gen_kv::CpuTalker,
-    mtp: &MtpModel,
+    mtp: &mut crate::gen_kv_mtp::CpuMtp,
     sp: &TtsSpecials,
     prompt: &Prompt,
     opts: &GenOpts,
@@ -339,7 +339,7 @@ pub fn clone(
         prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, Some(&xvec), language_id)
     };
 
-    let codes = generate(&gen, &mtp, &sp, &prompt, opts, &paths.talker);
+    let codes = generate(&gen, &mtp, &sp, &prompt, opts, &paths.talker, &paths.mtp);
     decode_codes(&paths.codec, &codes)
 }
 
@@ -353,10 +353,12 @@ fn generate(
     prompt: &Prompt,
     opts: &GenOpts,
     talker_path: &str,
+    mtp_path: &str,
 ) -> Vec<u32> {
     if opts.cached {
         let mut cpu = crate::gen_kv::CpuTalker::load(talker_path);
-        generate_codes_cached(&mut cpu, mtp, sp, prompt, opts)
+        let mut cpu_mtp = crate::gen_kv_mtp::CpuMtp::load(mtp_path);
+        generate_codes_cached(&mut cpu, &mut cpu_mtp, sp, prompt, opts)
     } else {
         generate_codes(gen, mtp, sp, prompt, opts)
     }
@@ -380,7 +382,7 @@ pub fn synth(
     let mtp = MtpModel::load_inference(&paths.mtp);
     let prompt = prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, None, language_id);
 
-    let codes = generate(&gen, &mtp, &sp, &prompt, opts, &paths.talker);
+    let codes = generate(&gen, &mtp, &sp, &prompt, opts, &paths.talker, &paths.mtp);
     decode_codes(&paths.codec, &codes)
 }
 

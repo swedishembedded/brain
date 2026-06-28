@@ -30,6 +30,7 @@ use std::collections::HashMap;
 
 use bytemuck::cast_slice;
 use gpu_core::{f, BufUsage, DeviceBuffer, Gpu};
+use rayon::prelude::*;
 use model::block::{self, Gqa, KernelIds};
 use paramstore::{ParamStore, Role};
 
@@ -72,6 +73,11 @@ const PIPELINES: &[(&str, &str)] = &[
 const SNAKE_EPS: f32 = 1e-9;
 /// ConvNeXt LayerNorm epsilon.
 const LN_EPS: f32 = 1e-6;
+/// Element-count threshold below which host loops stay single-threaded (rayon
+/// fan-out costs more than it saves on tiny buffers). The decode path's hot host
+/// loops (transposes, ConvNeXt LayerNorm + exact-erf GELU, bias broadcast, final
+/// clamp) cross this once the sequence grows, so they spread across all cores.
+const PAR_MIN: usize = 1 << 14;
 
 /// The decode model: frozen weights on device + small (≤1-D) tensors mirrored on
 /// the host for per-channel NCL bias broadcasts and the host LayerNorm/GELU.
@@ -156,14 +162,22 @@ impl Codec {
         self.run(self.gpu.step(SCALE_CHAN, &[x, self.w(scale_name), &out], &[total, c, inner], total));
         out
     }
-    /// Transpose a row-major `[a, b]` buffer to `[b, a]` on the host.
+    /// Transpose a row-major `[a, b]` buffer to `[b, a]` on the host. Output rows
+    /// (`b` of them, each gathering one column of the input) are independent, so
+    /// they fan out across cores once the buffer is large.
     fn transpose(&self, x: &DeviceBuffer, a: u32, b: u32) -> DeviceBuffer {
         let v = self.gpu.read(x, (a * b) as usize);
-        let mut o = vec![0.0f32; (a * b) as usize];
-        for i in 0..a as usize {
-            for j in 0..b as usize {
-                o[j * a as usize + i] = v[i * b as usize + j];
+        let (a, b) = (a as usize, b as usize);
+        let mut o = vec![0.0f32; a * b];
+        let fill = |j: usize, row: &mut [f32]| {
+            for (i, dst) in row.iter_mut().enumerate() {
+                *dst = v[i * b + j];
             }
+        };
+        if a * b >= PAR_MIN {
+            o.par_chunks_mut(a).enumerate().for_each(|(j, row)| fill(j, row));
+        } else {
+            o.chunks_mut(a).enumerate().for_each(|(j, row)| fill(j, row));
         }
         self.upload(&o)
     }
@@ -209,15 +223,16 @@ impl Codec {
     /// to `[C, L]` and use `add2`.
     fn add_ncl_bias(&self, x: &DeviceBuffer, bias_name: &str, c: u32, l: u32) -> DeviceBuffer {
         let bias = &self.host[bias_name];
-        let mut bcast = vec![0.0f32; (c * l) as usize];
-        for ch in 0..c as usize {
-            let v = bias[ch];
-            for t in 0..l as usize {
-                bcast[ch * l as usize + t] = v;
-            }
+        let (c, l) = (c as usize, l as usize);
+        let mut bcast = vec![0.0f32; c * l];
+        let fill = |ch: usize, row: &mut [f32]| row.fill(bias[ch]);
+        if c * l >= PAR_MIN {
+            bcast.par_chunks_mut(l).enumerate().for_each(|(ch, row)| fill(ch, row));
+        } else {
+            bcast.chunks_mut(l).enumerate().for_each(|(ch, row)| fill(ch, row));
         }
         let bbuf = self.upload(&bcast);
-        self.add2(x, &bbuf, c * l)
+        self.add2(x, &bbuf, (c * l) as u32)
     }
 
     // ------------------------------------------------------------------
@@ -305,8 +320,12 @@ impl Codec {
 
         // --- 6. clamp ---
         let mut wav = self.gpu.read(&h, l as usize);
-        for s in &mut wav {
-            *s = s.clamp(-1.0, 1.0);
+        if wav.len() >= PAR_MIN {
+            wav.par_iter_mut().for_each(|s| *s = s.clamp(-1.0, 1.0));
+        } else {
+            for s in &mut wav {
+                *s = s.clamp(-1.0, 1.0);
+            }
         }
         wav
     }
@@ -336,9 +355,7 @@ impl Codec {
         let g = self.matmul(&tmb, &format!("{prefix}.pwconv1.weight"), l, c, hid);
         self.bias_add(&g, &format!("{prefix}.pwconv1.bias"), l, hid);
         let mut gv = self.gpu.read(&g, (l * hid) as usize);
-        for v in &mut gv {
-            *v = gelu_exact(*v);
-        }
+        par_gelu(&mut gv);
         let gbuf = self.upload(&gv);
         // pwconv2 (4C -> C) + bias
         let o = self.matmul(&gbuf, &format!("{prefix}.pwconv2.weight"), l, hid, c);
@@ -568,9 +585,7 @@ impl Codec {
             let xn = self.host_ln(&x, t, d, &p("post_attention_layernorm"), e.norm_eps);
             let g = self.matmul(&xn, &p("mlp.fc1.weight"), t, d, ff);
             let mut gv = self.gpu.read(&g, (t * ff) as usize);
-            for val in &mut gv {
-                *val = gelu_exact(*val);
-            }
+            par_gelu(&mut gv);
             let gbuf = self.upload(&gv);
             let mlp = self.matmul(&gbuf, &p("mlp.fc2.weight"), t, ff, d);
             let mlp = self.scale_chan(&mlp, &p("mlp_layer_scale.scale"), t * d, d, 1);
@@ -686,15 +701,33 @@ fn ids() -> KernelIds {
 }
 
 /// `nn.LayerNorm` over the last axis (C) of a row-major `[rows, C]` buffer,
-/// population variance, eps 1e-6, with affine γ/β. In place.
+/// population variance, eps 1e-6, with affine γ/β. In place. Rows are
+/// independent, so they fan out across cores for large buffers (the per-row sum
+/// order is unchanged — bit-identical to the serial path).
 fn host_layernorm(x: &mut [f32], rows: usize, c: usize, gamma: &[f32], beta: &[f32], eps: f32) {
-    for r in 0..rows {
-        let row = &mut x[r * c..(r + 1) * c];
+    let ln_row = |row: &mut [f32]| {
         let mean = row.iter().sum::<f32>() / c as f32;
         let var = row.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / c as f32;
         let inv = 1.0 / (var + eps).sqrt();
         for j in 0..c {
             row[j] = (row[j] - mean) * inv * gamma[j] + beta[j];
+        }
+    };
+    if rows * c >= PAR_MIN {
+        x.par_chunks_mut(c).for_each(ln_row);
+    } else {
+        x.chunks_mut(c).for_each(ln_row);
+    }
+}
+
+/// Exact (erf) GELU over a host buffer, in place; element-independent, so it
+/// parallelizes for large buffers (the ConvNeXt pwconv1 activation, `[L, 4C]`).
+fn par_gelu(buf: &mut [f32]) {
+    if buf.len() >= PAR_MIN {
+        buf.par_iter_mut().for_each(|v| *v = gelu_exact(*v));
+    } else {
+        for v in buf.iter_mut() {
+            *v = gelu_exact(*v);
         }
     }
 }

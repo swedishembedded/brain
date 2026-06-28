@@ -30,7 +30,7 @@ use crate::config::TalkerConfig;
 use crate::talker::TextProjection;
 
 /// Per-layer decoder weights (row-major, brain convention `W:[out,in]`).
-struct LayerW {
+pub(crate) struct LayerW {
     ln1: Vec<f32>,    // [d]
     wq: Vec<f32>,     // [hq, d]
     wk: Vec<f32>,     // [hkv, d]
@@ -46,9 +46,22 @@ struct LayerW {
 
 /// Per-layer running key/value cache for the incremental path.
 #[derive(Default, Clone)]
-struct Kv {
+pub(crate) struct Kv {
     k: Vec<f32>, // [t, hkv] post-QK-norm, post-RoPE keys
     v: Vec<f32>, // [t, hkv] values
+}
+
+/// The decoder block dimensions shared by [`decoder_layer_step`] /
+/// [`decoder_forward_full`] (a Qwen3 GQA block, identical for the Talker and the
+/// MTP code-predictor — only the values differ).
+#[derive(Clone, Copy)]
+pub(crate) struct Dims {
+    pub d: usize,     // d_model
+    pub hd: usize,    // head_dim
+    pub nh: usize,    // n query heads
+    pub nkv: usize,   // n kv heads
+    pub ff: usize,    // d_ff
+    pub theta: f32,   // rope base
 }
 
 /// A CPU-resident, KV-cached Talker decoder. Holds the frozen decoder weights in
@@ -81,7 +94,7 @@ fn silu(x: f32) -> f32 {
 /// frame). Output rows are independent dot products, so they fan out across all
 /// cores with rayon; the threshold keeps tiny projections on one thread to avoid
 /// scheduling overhead.
-fn matvec(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
+pub(crate) fn matvec(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
     let mut y = vec![0.0f32; out];
     let dot = |row: &[f32]| -> f32 {
         let mut acc = 0.0f32;
@@ -103,7 +116,7 @@ fn matvec(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
 }
 
 /// RMSNorm of a single `dim`-vector: `out = x / sqrt(mean(x²)+eps) * w`.
-fn rmsnorm(x: &[f32], w: &[f32]) -> Vec<f32> {
+pub(crate) fn rmsnorm(x: &[f32], w: &[f32]) -> Vec<f32> {
     let dim = x.len();
     let mut ss = 0.0f32;
     for &v in x {
@@ -146,7 +159,214 @@ fn rope(buf: &mut [f32], n_heads: usize, hd: usize, pos: usize, theta: f32) {
     }
 }
 
+/// Build the per-layer weight list (`blocks.{l}.*`) from a name->tensor accessor.
+/// Shared by the Talker ([`CpuTalker`]) and the MTP ([`crate::gen_kv_mtp::CpuMtp`])
+/// since both are the same Qwen3 decoder block with the same leaf names.
+pub(crate) fn load_layers(n_layers: u32, take: &dyn Fn(&str) -> Vec<f32>) -> Vec<LayerW> {
+    let mut layers = Vec::with_capacity(n_layers as usize);
+    for l in 0..n_layers {
+        let p = |s: &str| format!("blocks.{l}.{s}");
+        layers.push(LayerW {
+            ln1: take(&p("ln1.weight")),
+            wq: take(&p("attn.wq.weight")),
+            wk: take(&p("attn.wk.weight")),
+            wv: take(&p("attn.wv.weight")),
+            q_norm: take(&p("attn.q_norm.weight")),
+            k_norm: take(&p("attn.k_norm.weight")),
+            wo: take(&p("attn.wo.weight")),
+            ln2: take(&p("ln2.weight")),
+            gate: take(&p("mlp.gate.weight")),
+            up: take(&p("mlp.up.weight")),
+            down: take(&p("mlp.down.weight")),
+        });
+    }
+    layers
+}
+
+/// Run **one** new position `x_in:[d]` through a single decoder layer, appending
+/// its key/value to `kv` and attending causally over `[0..=pos]`. Returns the
+/// layer output `[d]`. The KV-cached incremental core shared by the Talker and
+/// the MTP code-predictor (same Qwen3 GQA block arithmetic).
+pub(crate) fn decoder_layer_step(
+    lw: &LayerW,
+    kv: &mut Kv,
+    dm: Dims,
+    x_in: &[f32],
+    pos: usize,
+) -> Vec<f32> {
+    let Dims { d, hd, nh, nkv, ff, theta } = dm;
+    let hq = nh * hd;
+    let hkv = nkv * hd;
+    let group = nh / nkv;
+
+    // --- attention ---
+    let h1 = rmsnorm(x_in, &lw.ln1);
+    let mut q = matvec(&lw.wq, &h1, hq, d);
+    let mut k = matvec(&lw.wk, &h1, hkv, d);
+    let vv = matvec(&lw.wv, &h1, hkv, d);
+    qk_norm(&mut q, &lw.q_norm, nh, hd);
+    qk_norm(&mut k, &lw.k_norm, nkv, hd);
+    rope(&mut q, nh, hd, pos, theta);
+    rope(&mut k, nkv, hd, pos, theta);
+
+    // append to cache, then attend over all cached positions.
+    kv.k.extend_from_slice(&k);
+    kv.v.extend_from_slice(&vv);
+    let kc = &kv.k;
+    let vc = &kv.v;
+    let t = pos + 1; // cached length
+    let scale = 1.0f32 / (hd as f32).sqrt();
+    let mut ctx = vec![0.0f32; hq];
+    let mut scores = vec![0.0f32; t];
+    for h in 0..nh {
+        let hkv_head = h / group;
+        let qh = &q[h * hd..h * hd + hd];
+        let mut mx = f32::NEG_INFINITY;
+        for (j, sj) in scores.iter_mut().enumerate() {
+            let kbase = j * hkv + hkv_head * hd;
+            let mut s = 0.0f32;
+            for dd in 0..hd {
+                s += qh[dd] * kc[kbase + dd];
+            }
+            s *= scale;
+            *sj = s;
+            if s > mx {
+                mx = s;
+            }
+        }
+        let mut sum = 0.0f32;
+        for sj in scores.iter_mut() {
+            *sj = (*sj - mx).exp();
+            sum += *sj;
+        }
+        let inv = 1.0f32 / sum;
+        let cbase = h * hd;
+        for (j, &sj) in scores.iter().enumerate() {
+            let p = sj * inv;
+            let vbase = j * hkv + hkv_head * hd;
+            for dd in 0..hd {
+                ctx[cbase + dd] += p * vc[vbase + dd];
+            }
+        }
+    }
+    let attn = matvec(&lw.wo, &ctx, d, hq);
+    let xmid: Vec<f32> = x_in.iter().zip(&attn).map(|(a, b)| a + b).collect();
+
+    // --- SwiGLU MLP ---
+    let h2 = rmsnorm(&xmid, &lw.ln2);
+    let gate = matvec(&lw.gate, &h2, ff, d);
+    let up = matvec(&lw.up, &h2, ff, d);
+    let hmlp: Vec<f32> = gate.iter().zip(&up).map(|(&g, &u)| silu(g) * u).collect();
+    let mlp_out = matvec(&lw.down, &hmlp, d, ff);
+    xmid.iter().zip(&mlp_out).map(|(a, b)| a + b).collect()
+}
+
+/// **Full recompute** of all positions from `inputs_embeds:[n, d]` (no cache);
+/// returns every position's final-norm hidden state `[n, d]`. The uncached
+/// `O(T²)` reference that the cached path is proven equal to. Shared by the
+/// Talker and the MTP code-predictor.
+pub(crate) fn decoder_forward_full(
+    layers: &[LayerW],
+    norm: &[f32],
+    dm: Dims,
+    inputs_embeds: &[f32],
+) -> Vec<f32> {
+    let Dims { d, hd, nh, nkv, ff, theta } = dm;
+    let hq = nh * hd;
+    let hkv = nkv * hd;
+    let group = nh / nkv;
+    let n = inputs_embeds.len() / d;
+    assert_eq!(inputs_embeds.len(), n * d);
+    let scale = 1.0f32 / (hd as f32).sqrt();
+
+    let mut x = inputs_embeds.to_vec();
+    for lw in layers {
+        let mut q = vec![0.0f32; n * hq];
+        let mut k = vec![0.0f32; n * hkv];
+        let mut v = vec![0.0f32; n * hkv];
+        for i in 0..n {
+            let xi = &x[i * d..i * d + d];
+            let h1 = rmsnorm(xi, &lw.ln1);
+            let mut qi = matvec(&lw.wq, &h1, hq, d);
+            let mut ki = matvec(&lw.wk, &h1, hkv, d);
+            let vi = matvec(&lw.wv, &h1, hkv, d);
+            qk_norm(&mut qi, &lw.q_norm, nh, hd);
+            qk_norm(&mut ki, &lw.k_norm, nkv, hd);
+            rope(&mut qi, nh, hd, i, theta);
+            rope(&mut ki, nkv, hd, i, theta);
+            q[i * hq..i * hq + hq].copy_from_slice(&qi);
+            k[i * hkv..i * hkv + hkv].copy_from_slice(&ki);
+            v[i * hkv..i * hkv + hkv].copy_from_slice(&vi);
+        }
+        for i in 0..n {
+            let mut ctx = vec![0.0f32; hq];
+            let mut scores = vec![0.0f32; i + 1];
+            for h in 0..nh {
+                let hkv_head = h / group;
+                let qh = &q[i * hq + h * hd..i * hq + h * hd + hd];
+                let mut mx = f32::NEG_INFINITY;
+                for (j, sj) in scores.iter_mut().enumerate() {
+                    let kbase = j * hkv + hkv_head * hd;
+                    let mut s = 0.0f32;
+                    for dd in 0..hd {
+                        s += qh[dd] * k[kbase + dd];
+                    }
+                    s *= scale;
+                    *sj = s;
+                    if s > mx {
+                        mx = s;
+                    }
+                }
+                let mut sum = 0.0f32;
+                for sj in scores.iter_mut() {
+                    *sj = (*sj - mx).exp();
+                    sum += *sj;
+                }
+                let inv = 1.0f32 / sum;
+                for (j, &sj) in scores.iter().enumerate() {
+                    let p = sj * inv;
+                    let vbase = j * hkv + hkv_head * hd;
+                    for dd in 0..hd {
+                        ctx[h * hd + dd] += p * v[vbase + dd];
+                    }
+                }
+            }
+            let attn = matvec(&lw.wo, &ctx, d, hq);
+            let xi = &x[i * d..i * d + d];
+            let xmid: Vec<f32> = xi.iter().zip(&attn).map(|(a, b)| a + b).collect();
+            let h2 = rmsnorm(&xmid, &lw.ln2);
+            let gate = matvec(&lw.gate, &h2, ff, d);
+            let up = matvec(&lw.up, &h2, ff, d);
+            let hmlp: Vec<f32> = gate.iter().zip(&up).map(|(&g, &u)| silu(g) * u).collect();
+            let mlp_out = matvec(&lw.down, &hmlp, d, ff);
+            let row = &mut x[i * d..i * d + d];
+            for (r, (a, b)) in row.iter_mut().zip(xmid.iter().zip(&mlp_out)) {
+                *r = a + b;
+            }
+        }
+    }
+    let mut out = vec![0.0f32; n * d];
+    for i in 0..n {
+        let h = rmsnorm(&x[i * d..i * d + d], norm);
+        out[i * d..i * d + d].copy_from_slice(&h);
+    }
+    out
+}
+
 impl CpuTalker {
+    /// Dimensions of the Talker decoder block.
+    pub(crate) fn dims(&self) -> Dims {
+        let c = &self.cfg;
+        Dims {
+            d: c.d_model as usize,
+            hd: c.head_dim as usize,
+            nh: c.n_heads as usize,
+            nkv: c.n_kv_heads as usize,
+            ff: c.d_ff as usize,
+            theta: c.rope_theta,
+        }
+    }
+
     /// Build from a decoder weight map (`blocks.{l}.*` + `norm.weight`). Mirrors
     /// the names [`crate::gen::TalkerGen`] / [`qwen::Qwen`] use, so the same
     /// frozen weights can drive either path.
@@ -156,23 +376,7 @@ impl CpuTalker {
                 .unwrap_or_else(|| panic!("CpuTalker: missing weight {n}"))
                 .clone()
         };
-        let mut layers = Vec::with_capacity(cfg.n_layers as usize);
-        for l in 0..cfg.n_layers {
-            let p = |s: &str| format!("blocks.{l}.{s}");
-            layers.push(LayerW {
-                ln1: take(&p("ln1.weight")),
-                wq: take(&p("attn.wq.weight")),
-                wk: take(&p("attn.wk.weight")),
-                wv: take(&p("attn.wv.weight")),
-                q_norm: take(&p("attn.q_norm.weight")),
-                k_norm: take(&p("attn.k_norm.weight")),
-                wo: take(&p("attn.wo.weight")),
-                ln2: take(&p("ln2.weight")),
-                gate: take(&p("mlp.gate.weight")),
-                up: take(&p("mlp.up.weight")),
-                down: take(&p("mlp.down.weight")),
-            });
-        }
+        let layers = load_layers(cfg.n_layers, &take);
         let norm = take("norm.weight");
         let n = cfg.n_layers as usize;
         CpuTalker {
@@ -301,86 +505,6 @@ impl CpuTalker {
         self.pos = 0;
     }
 
-    /// Run **one** new position `x_in:[d]` through a single layer `l`, appending
-    /// its key/value to the cache and attending over `[0..=pos]`. Returns the
-    /// layer output `[d]`.
-    fn layer_step(&mut self, l: usize, x_in: &[f32], pos: usize) -> Vec<f32> {
-        let c = &self.cfg;
-        let d = c.d_model as usize;
-        let hd = c.head_dim as usize;
-        let nh = c.n_heads as usize;
-        let nkv = c.n_kv_heads as usize;
-        let hq = nh * hd;
-        let hkv = nkv * hd;
-        let ff = c.d_ff as usize;
-        let group = nh / nkv;
-        let lw = &self.layers[l];
-
-        // --- attention ---
-        let h1 = rmsnorm(x_in, &lw.ln1);
-        let mut q = matvec(&lw.wq, &h1, hq, d);
-        let mut k = matvec(&lw.wk, &h1, hkv, d);
-        let vv = matvec(&lw.wv, &h1, hkv, d);
-        qk_norm(&mut q, &lw.q_norm, nh, hd);
-        qk_norm(&mut k, &lw.k_norm, nkv, hd);
-        rope(&mut q, nh, hd, pos, c.rope_theta);
-        rope(&mut k, nkv, hd, pos, c.rope_theta);
-
-        // append to cache, then attend over all cached positions.
-        self.cache[l].k.extend_from_slice(&k);
-        self.cache[l].v.extend_from_slice(&vv);
-        let kc = &self.cache[l].k;
-        let vc = &self.cache[l].v;
-        let t = pos + 1; // cached length
-        let scale = 1.0f32 / (hd as f32).sqrt();
-        let mut ctx = vec![0.0f32; hq];
-        let mut scores = vec![0.0f32; t];
-        for h in 0..nh {
-            let hkv_head = h / group;
-            let qh = &q[h * hd..h * hd + hd];
-            // scores
-            let mut mx = f32::NEG_INFINITY;
-            for (j, sj) in scores.iter_mut().enumerate() {
-                let kbase = j * hkv + hkv_head * hd;
-                let mut s = 0.0f32;
-                for dd in 0..hd {
-                    s += qh[dd] * kc[kbase + dd];
-                }
-                s *= scale;
-                *sj = s;
-                if s > mx {
-                    mx = s;
-                }
-            }
-            // softmax
-            let mut sum = 0.0f32;
-            for sj in scores.iter_mut() {
-                *sj = (*sj - mx).exp();
-                sum += *sj;
-            }
-            let inv = 1.0f32 / sum;
-            // ctx
-            let cbase = h * hd;
-            for (j, &sj) in scores.iter().enumerate() {
-                let p = sj * inv;
-                let vbase = j * hkv + hkv_head * hd;
-                for dd in 0..hd {
-                    ctx[cbase + dd] += p * vc[vbase + dd];
-                }
-            }
-        }
-        let attn = matvec(&lw.wo, &ctx, d, hq);
-        let xmid: Vec<f32> = x_in.iter().zip(&attn).map(|(a, b)| a + b).collect();
-
-        // --- SwiGLU MLP ---
-        let h2 = rmsnorm(&xmid, &lw.ln2);
-        let gate = matvec(&lw.gate, &h2, ff, d);
-        let up = matvec(&lw.up, &h2, ff, d);
-        let hmlp: Vec<f32> = gate.iter().zip(&up).map(|(&g, &u)| silu(g) * u).collect();
-        let mlp_out = matvec(&lw.down, &hmlp, d, ff);
-        xmid.iter().zip(&mlp_out).map(|(a, b)| a + b).collect()
-    }
-
     /// Incremental cached decode of **one** position. `embed:[d]` is the input
     /// embedding of the new position; returns its final-norm hidden state `[d]`.
     /// The position index advances automatically (call [`CpuTalker::reset`] to
@@ -389,9 +513,10 @@ impl CpuTalker {
         let d = self.d();
         assert_eq!(embed.len(), d, "embed must be [d_model]");
         let pos = self.pos;
+        let dims = self.dims();
         let mut x = embed.to_vec();
         for l in 0..self.layers.len() {
-            x = self.layer_step(l, &x, pos);
+            x = decoder_layer_step(&self.layers[l], &mut self.cache[l], dims, &x, pos);
         }
         self.pos += 1;
         rmsnorm(&x, &self.norm)
@@ -403,96 +528,7 @@ impl CpuTalker {
     /// [`crate::gen::TalkerGen::forward`]. Uses an independent (non-mutating) pass
     /// so it can serve as the `O(T²)` uncached baseline.
     pub fn forward_full(&self, inputs_embeds: &[f32]) -> Vec<f32> {
-        let c = &self.cfg;
-        let d = c.d_model as usize;
-        let hd = c.head_dim as usize;
-        let nh = c.n_heads as usize;
-        let nkv = c.n_kv_heads as usize;
-        let hq = nh * hd;
-        let hkv = nkv * hd;
-        let ff = c.d_ff as usize;
-        let group = nh / nkv;
-        let n = inputs_embeds.len() / d;
-        assert_eq!(inputs_embeds.len(), n * d);
-        let scale = 1.0f32 / (hd as f32).sqrt();
-
-        // residual stream, [n, d]
-        let mut x = inputs_embeds.to_vec();
-        for lw in &self.layers {
-            // project all positions
-            let mut q = vec![0.0f32; n * hq];
-            let mut k = vec![0.0f32; n * hkv];
-            let mut v = vec![0.0f32; n * hkv];
-            for i in 0..n {
-                let xi = &x[i * d..i * d + d];
-                let h1 = rmsnorm(xi, &lw.ln1);
-                let mut qi = matvec(&lw.wq, &h1, hq, d);
-                let mut ki = matvec(&lw.wk, &h1, hkv, d);
-                let vi = matvec(&lw.wv, &h1, hkv, d);
-                qk_norm(&mut qi, &lw.q_norm, nh, hd);
-                qk_norm(&mut ki, &lw.k_norm, nkv, hd);
-                rope(&mut qi, nh, hd, i, c.rope_theta);
-                rope(&mut ki, nkv, hd, i, c.rope_theta);
-                q[i * hq..i * hq + hq].copy_from_slice(&qi);
-                k[i * hkv..i * hkv + hkv].copy_from_slice(&ki);
-                v[i * hkv..i * hkv + hkv].copy_from_slice(&vi);
-            }
-            // causal attention + projections per position
-            for i in 0..n {
-                let mut ctx = vec![0.0f32; hq];
-                let mut scores = vec![0.0f32; i + 1];
-                for h in 0..nh {
-                    let hkv_head = h / group;
-                    let qh = &q[i * hq + h * hd..i * hq + h * hd + hd];
-                    let mut mx = f32::NEG_INFINITY;
-                    for (j, sj) in scores.iter_mut().enumerate() {
-                        let kbase = j * hkv + hkv_head * hd;
-                        let mut s = 0.0f32;
-                        for dd in 0..hd {
-                            s += qh[dd] * k[kbase + dd];
-                        }
-                        s *= scale;
-                        *sj = s;
-                        if s > mx {
-                            mx = s;
-                        }
-                    }
-                    let mut sum = 0.0f32;
-                    for sj in scores.iter_mut() {
-                        *sj = (*sj - mx).exp();
-                        sum += *sj;
-                    }
-                    let inv = 1.0f32 / sum;
-                    for (j, &sj) in scores.iter().enumerate() {
-                        let p = sj * inv;
-                        let vbase = j * hkv + hkv_head * hd;
-                        for dd in 0..hd {
-                            ctx[h * hd + dd] += p * v[vbase + dd];
-                        }
-                    }
-                }
-                let attn = matvec(&lw.wo, &ctx, d, hq);
-                let xi = &x[i * d..i * d + d];
-                let xmid: Vec<f32> = xi.iter().zip(&attn).map(|(a, b)| a + b).collect();
-                let h2 = rmsnorm(&xmid, &lw.ln2);
-                let gate = matvec(&lw.gate, &h2, ff, d);
-                let up = matvec(&lw.up, &h2, ff, d);
-                let hmlp: Vec<f32> =
-                    gate.iter().zip(&up).map(|(&g, &u)| silu(g) * u).collect();
-                let mlp_out = matvec(&lw.down, &hmlp, d, ff);
-                let row = &mut x[i * d..i * d + d];
-                for (r, (a, b)) in row.iter_mut().zip(xmid.iter().zip(&mlp_out)) {
-                    *r = a + b;
-                }
-            }
-        }
-        // final norm
-        let mut out = vec![0.0f32; n * d];
-        for i in 0..n {
-            let h = rmsnorm(&x[i * d..i * d + d], &self.norm);
-            out[i * d..i * d + d].copy_from_slice(&h);
-        }
-        out
+        decoder_forward_full(&self.layers, &self.norm, self.dims(), inputs_embeds)
     }
 }
 
