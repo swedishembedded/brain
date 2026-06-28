@@ -22,6 +22,7 @@ default-members = [
     "crates/autoencoder",
     "crates/timeseries",
     "crates/codec",
+    "crates/speaker",
     "crates/tts",
     "crates/pid",
     "crates/federated",
@@ -62,6 +63,7 @@ brain-seq2seq = { path = "crates/seq2seq" }
 brain-autoencoder = { path = "crates/autoencoder" }
 brain-timeseries = { path = "crates/timeseries" }
 brain-codec = { path = "crates/codec" }
+brain-speaker = { path = "crates/speaker" }
 brain-tts = { path = "crates/tts" }
 brain-pid = { path = "crates/pid" }
 brain-federated = { path = "crates/federated" }

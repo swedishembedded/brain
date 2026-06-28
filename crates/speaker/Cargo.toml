@@ -1,0 +1,24 @@
+[package]
+name = "brain-speaker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ECAPA-TDNN speaker encoder for Qwen3-TTS voice cloning: mel front-end + TDNN/Res2Net/SE blocks + attentive statistics pooling, forward + import in WGSL."
+
+[lib]
+name = "speaker"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-audio.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-checkpoint.workspace = true
+brain-data.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+brain-audio.workspace = true
