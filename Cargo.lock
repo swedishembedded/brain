@@ -225,8 +225,10 @@ dependencies = [
 name = "brain-cli"
 version = "0.1.0"
 dependencies = [
+ "brain-audio",
  "brain-bench",
  "brain-checkpoint",
+ "brain-codec",
  "brain-data",
  "brain-eval",
  "brain-events",
@@ -241,6 +243,8 @@ dependencies = [
  "brain-pid",
  "brain-qwen",
  "brain-runtime",
+ "brain-speaker",
+ "brain-tts",
  "brain-vulkan",
  "brain-yolo",
  "serde_json",
@@ -509,7 +513,9 @@ version = "0.1.0"
 name = "brain-tts"
 version = "0.1.0"
 dependencies = [
+ "brain-audio",
  "brain-checkpoint",
+ "brain-codec",
  "brain-data",
  "brain-gpu-core",
  "brain-gradcheck",
@@ -518,6 +524,7 @@ dependencies = [
  "brain-optim",
  "brain-paramstore",
  "brain-qwen",
+ "brain-speaker",
  "bytemuck",
  "serde_json",
 ]

@@ -20,6 +20,7 @@ mod npu_cli;
 mod pid_cli;
 mod qwen_cli;
 mod run_cli;
+mod tts_cli;
 mod yolo_cli;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -416,6 +417,7 @@ fn main() {
         Some("data") => data_cli::run_data(&argv[2..]),
         Some("gpt") => gpt_cli::run_gpt(&argv[2..]),
         Some("qwen") => qwen_cli::run_qwen(&argv[2..]),
+        Some("tts") => tts_cli::run_tts(&argv[2..]),
         Some("yolo") => yolo_cli::run_yolo(&argv[2..]),
         Some("npu") => npu_cli::run_npu(&argv[2..]),
         Some("federated") => federated_cli::run_federated(&argv[2..]),

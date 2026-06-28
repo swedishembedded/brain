@@ -13,10 +13,16 @@
 //! text-projection embeddings, a dual-track step graph, and a KV-cache seam.
 
 pub mod config;
+pub mod gen;
 pub mod import;
 pub mod mtp;
+pub mod pipeline;
+pub mod prompt;
 pub mod talker;
 
 pub use config::{MtpConfig, TalkerConfig};
+pub use gen::TalkerGen;
 pub use mtp::MtpModel;
+pub use pipeline::{GenOpts, TtsPaths};
+pub use prompt::{Prompt, TtsSpecials};
 pub use talker::{TalkerModel, TextProjection};

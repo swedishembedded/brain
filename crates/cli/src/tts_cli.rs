@@ -1,0 +1,242 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! `brain tts …` — Qwen3-TTS voice synthesis (Talker + MTP + codec + speaker).
+//!
+//!   brain tts import --ckpt <hf_dir> [--codec-ckpt <dir> --speaker-ckpt <dir>]
+//!                    [--out-dir out/tts]
+//!       Import all four components into brain checkpoints:
+//!         <out-dir>/talker.weights  <out-dir>/mtp.weights
+//!         <out-dir>/codec.weights   <out-dir>/speaker.weights
+//!
+//!   brain tts clone --text "..." --ref voice.wav --ref-text "..." --out demo.wav
+//!                   [--weights-dir out/tts --ckpt <hf_dir> --lang english
+//!                    --max-frames N --temp X --top-k K --seed S --ref-codes codes.bin]
+//!       Voice clone: x-vector timbre from the reference voice (pure brain). With
+//!       --ref-codes (external [T,16] u32 reference-audio codec codes) it runs the
+//!       in-context (ICL) path instead, which also conditions on --ref-text.
+//!
+//!   brain tts synth --text "..." --out out.wav
+//!                   [--weights-dir out/tts --ckpt <hf_dir> --lang english ...]
+//!       Speaker-free text-to-speech.
+
+use tts::{GenOpts, TtsPaths};
+
+fn val(args: &[String], i: &mut usize, flag: &str) -> String {
+    *i += 1;
+    args.get(*i).cloned().unwrap_or_else(|| {
+        eprintln!("{flag} requires a value");
+        std::process::exit(2);
+    })
+}
+
+pub fn run_tts(args: &[String]) {
+    match args.first().map(|s| s.as_str()) {
+        Some("import") => import(&args[1..]),
+        Some("clone") => clone(&args[1..]),
+        Some("synth") => synth(&args[1..]),
+        other => {
+            eprintln!("usage: brain tts <import|clone|synth> ...  (got {other:?})");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn import(args: &[String]) {
+    let mut ckpt = String::new();
+    let mut codec_ckpt = String::new();
+    let mut speaker_ckpt = String::new();
+    let mut out_dir = "out/tts".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--ckpt" => ckpt = val(args, &mut i, "--ckpt"),
+            "--codec-ckpt" => codec_ckpt = val(args, &mut i, "--codec-ckpt"),
+            "--speaker-ckpt" => speaker_ckpt = val(args, &mut i, "--speaker-ckpt"),
+            "--out-dir" => out_dir = val(args, &mut i, "--out-dir"),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    if ckpt.is_empty() {
+        eprintln!("usage: brain tts import --ckpt <hf_dir> [--codec-ckpt D --speaker-ckpt D --out-dir D]");
+        std::process::exit(2);
+    }
+    // The speaker encoder lives in the same checkpoint as the Talker; the codec
+    // (speech tokenizer) ships separately but defaults to <ckpt>/speech_tokenizer.
+    if codec_ckpt.is_empty() {
+        codec_ckpt = format!("{ckpt}/speech_tokenizer");
+    }
+    if speaker_ckpt.is_empty() {
+        speaker_ckpt = ckpt.clone();
+    }
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("create {out_dir}: {e}");
+        std::process::exit(2);
+    }
+    let talker = format!("{out_dir}/talker.weights");
+    let mtp = format!("{out_dir}/mtp.weights");
+    let codec_out = format!("{out_dir}/codec.weights");
+    let speaker_out = format!("{out_dir}/speaker.weights");
+
+    run_step("talker", tts::import::import_talker(&ckpt, &talker));
+    run_step("mtp", tts::import::import_mtp(&ckpt, &mtp));
+    run_step("codec", codec::import::import(&codec_ckpt, &codec_out));
+    run_step("speaker", speaker::import::import(&speaker_ckpt, &speaker_out));
+    println!("imported Qwen3-TTS components -> {out_dir}/");
+}
+
+fn run_step(name: &str, r: Result<(), String>) {
+    if let Err(e) = r {
+        eprintln!("import {name} failed: {e}");
+        std::process::exit(1);
+    }
+}
+
+struct CommonArgs {
+    weights_dir: String,
+    ckpt: String,
+    out: String,
+    lang: String,
+    opts: GenOpts,
+}
+
+fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<String, String>) {
+    let mut weights_dir = "out/tts".to_string();
+    let mut ckpt = "/data/workspace/tmp/qwen3-tts-resources/ckpt/Qwen3-TTS-12Hz-0.6B-Base".to_string();
+    let mut out = "out.wav".to_string();
+    let mut lang = "english".to_string();
+    let mut opts = GenOpts::default();
+    let mut extra = std::collections::HashMap::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--weights-dir" => weights_dir = val(args, &mut i, "--weights-dir"),
+            "--ckpt" => ckpt = val(args, &mut i, "--ckpt"),
+            "--out" => out = val(args, &mut i, "--out"),
+            "--lang" | "--language" => lang = val(args, &mut i, "--lang"),
+            "--max-frames" => {
+                opts.max_frames = val(args, &mut i, "--max-frames").parse().unwrap_or(opts.max_frames)
+            }
+            "--temp" => opts.temperature = val(args, &mut i, "--temp").parse().unwrap_or(opts.temperature),
+            "--top-k" => opts.top_k = val(args, &mut i, "--top-k").parse().unwrap_or(opts.top_k),
+            "--seed" => opts.seed = val(args, &mut i, "--seed").parse().unwrap_or(opts.seed),
+            "--text" => {
+                extra.insert("text".to_string(), val(args, &mut i, "--text"));
+            }
+            "--ref" => {
+                extra.insert("ref".to_string(), val(args, &mut i, "--ref"));
+            }
+            "--ref-text" => {
+                extra.insert("ref-text".to_string(), val(args, &mut i, "--ref-text"));
+            }
+            "--ref-codes" => {
+                extra.insert("ref-codes".to_string(), val(args, &mut i, "--ref-codes"));
+            }
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    (
+        CommonArgs {
+            weights_dir,
+            ckpt,
+            out,
+            lang,
+            opts,
+        },
+        extra,
+    )
+}
+
+fn paths(c: &CommonArgs) -> TtsPaths {
+    TtsPaths {
+        talker: format!("{}/talker.weights", c.weights_dir),
+        mtp: format!("{}/mtp.weights", c.weights_dir),
+        codec: format!("{}/codec.weights", c.weights_dir),
+        speaker: format!("{}/speaker.weights", c.weights_dir),
+        ckpt_dir: c.ckpt.clone(),
+    }
+}
+
+/// Read a `[T,16]` u32 codes file: 8-byte little-endian count header + u32 data
+/// (the format the reference dump scripts write).
+fn read_codes(path: &str) -> Result<Vec<u32>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    if bytes.len() < 8 {
+        return Err("codes file too short".to_string());
+    }
+    let n = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+    let data = &bytes[8..];
+    if data.len() < n * 4 {
+        return Err("codes file truncated".to_string());
+    }
+    Ok((0..n)
+        .map(|k| u32::from_le_bytes(data[k * 4..k * 4 + 4].try_into().unwrap()))
+        .collect())
+}
+
+fn clone(args: &[String]) {
+    let (c, extra) = parse_common(args);
+    let text = extra.get("text").cloned().unwrap_or_default();
+    let refw = extra.get("ref").cloned().unwrap_or_default();
+    let ref_text = extra.get("ref-text").cloned().unwrap_or_default();
+    if text.is_empty() || refw.is_empty() {
+        eprintln!("usage: brain tts clone --text \"...\" --ref voice.wav [--ref-text \"...\" --ref-codes F] --out demo.wav");
+        std::process::exit(2);
+    }
+    let ref_code = match extra.get("ref-codes") {
+        Some(p) => match read_codes(p) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("read ref codes: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+    let mode = if ref_code.is_some() { "ICL" } else { "x-vector-only" };
+    eprintln!(
+        "tts clone [{mode}]: lang={} max_frames={} temp={} -> {}",
+        c.lang, c.opts.max_frames, c.opts.temperature, c.out
+    );
+    let wav = match tts::pipeline::clone(&paths(&c), &c.opts, &text, &refw, &ref_text, &c.lang, ref_code) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("clone failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    write_wav(&c.out, &wav);
+}
+
+fn synth(args: &[String]) {
+    let (c, extra) = parse_common(args);
+    let text = extra.get("text").cloned().unwrap_or_default();
+    if text.is_empty() {
+        eprintln!("usage: brain tts synth --text \"...\" --out out.wav [--lang english ...]");
+        std::process::exit(2);
+    }
+    eprintln!("tts synth: lang={} max_frames={} -> {}", c.lang, c.opts.max_frames, c.out);
+    let wav = match tts::pipeline::synth(&paths(&c), &c.opts, &text, &c.lang) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("synth failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    write_wav(&c.out, &wav);
+}
+
+fn write_wav(path: &str, wav: &[f32]) {
+    let finite = wav.iter().all(|x| x.is_finite());
+    if let Err(e) = audio::wav::write(path, wav, 24000) {
+        eprintln!("write {path}: {e}");
+        std::process::exit(1);
+    }
+    println!(
+        "wrote {path}: {} samples, {:.2}s @ 24kHz (finite={finite})",
+        wav.len(),
+        wav.len() as f32 / 24000.0
+    );
+}

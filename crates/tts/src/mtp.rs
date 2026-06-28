@@ -410,6 +410,74 @@ impl MtpModel {
         out
     }
 
+    /// Per-frame residual codebook generation (greedy). Given the Talker final
+    /// hidden state at this frame (`talker_hidden`, `[d_model]`) and the Talker
+    /// codebook-0 embedding (`cb0_embed`, `[d_model]`, from the Talker's own
+    /// table), autoregressively predict residual codebooks `1..=15` and return
+    /// `(codes, residual_embed_sum)`:
+    ///   * `codes` — the 15 residual codebook ids (codebooks 1..15),
+    ///   * `residual_embed_sum` — `Σ_{i=1}^{15} codec_embedding[i-1][code_i]`
+    ///     (`[d_model]`), the residual part of the frame's feedback embedding.
+    ///
+    /// Mirrors `code_predictor.generate` in `modeling_qwen3_tts.py`: position 0 is
+    /// the Talker hidden, position 1 the cb0 embed, position `i+1` (`i>=1`) the
+    /// embedding of codebook `i`; `lm_head[i-1]` reads hidden position `i+1` to
+    /// predict codebook `i+1`. Because attention is causal, predicting codebook
+    /// `k` only needs positions `0..=k` filled, so we grow the sequence in place
+    /// (future positions stay zero and never influence the read position).
+    pub fn generate_residuals(
+        &self,
+        talker_hidden: &[f32],
+        cb0_embed: &[f32],
+    ) -> (Vec<u32>, Vec<f32>) {
+        let d = self.cfg.d_model as usize;
+        let v = self.cfg.vocab as usize;
+        let t = self.t as usize; // num_code_groups (16)
+        let nres = t - 1; // 15
+        assert_eq!(talker_hidden.len(), d);
+        assert_eq!(cb0_embed.len(), d);
+
+        let mut emb = vec![0.0f32; t * d];
+        emb[0..d].copy_from_slice(talker_hidden);
+        emb[d..2 * d].copy_from_slice(cb0_embed);
+
+        let mut codes = vec![0u32; nres];
+        let mut res_sum = vec![0.0f32; d];
+        // k = codebook index being predicted (1..=15); head index = k-1; read pos = k.
+        for k in 1..=nres {
+            let logits = self.logits(&emb); // [(t-1)*v]
+            let row = &logits[(k - 1) * v..k * v];
+            let mut best = 0usize;
+            for j in 1..v {
+                if row[j] > row[best] {
+                    best = j;
+                }
+            }
+            codes[k - 1] = best as u32;
+            // codec_embedding[k-1] embeds codebook k.
+            let tbl = &self.codec_embedding[k - 1];
+            let r = &tbl[best * d..(best + 1) * d];
+            for j in 0..d {
+                res_sum[j] += r[j];
+            }
+            if k < nres {
+                // position k+1 carries the embedding of codebook k for the next step.
+                emb[(k + 1) * d..(k + 2) * d].copy_from_slice(r);
+            }
+        }
+        (codes, res_sum)
+    }
+
+    /// Residual codebook embedding row: `codec_embedding[residual_idx][code]`
+    /// (`[d_model]`). `residual_idx` is `0..=14` (codebook `residual_idx + 1`).
+    /// Used to build the reference-audio codec embedding in ICL voice-clone
+    /// prompts.
+    pub fn codec_embed(&self, residual_idx: usize, code: u32) -> &[f32] {
+        let d = self.cfg.d_model as usize;
+        let s = code as usize * d;
+        &self.codec_embedding[residual_idx][s..s + d]
+    }
+
     /// Load an inference-only MTP from a brain checkpoint written by
     /// [`crate::import::import_mtp`].
     pub fn load_inference(path: &str) -> MtpModel {
