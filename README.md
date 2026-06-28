@@ -1,327 +1,244 @@
 # brain
 
-A small, dependency-light framework for **training and evaluating neural
-networks from scratch on the GPU** — **pure Rust + raw WGSL**, fp32-only so the
-same kernels run on old desktop GPUs and in the browser via WebGPU. It is a
-self-contained Cargo workspace (`crates/`); there is no Python in the build or
-test path (the former PyTorch oracle is replaced by an in-repo finite-difference
-gradient checker).
+A small, dependency-light framework for **training and evaluating neural networks
+from scratch on the GPU** — **pure Rust + raw WGSL**, fp32-only so the same kernels
+run on old desktop GPUs, on modern integrated GPUs, and in the browser via WebGPU.
+It is a self-contained Cargo workspace (`crates/`) with **no Python in the build or
+test path**; backprop correctness is gated by an in-repo finite-difference gradient
+checker instead of a PyTorch oracle.
 
-Models that share one engine: a **GPT decoder** (nanogpt parity, the dense
-baseline), a **sparse MoE** Transformer (with **federated/sharded** expert
-training), and the **PID** control Transformer (the WebGPU demo).
+One engine, **three runtime backends**, and a growing family of real models — from a
+nanoGPT-parity decoder to a from-scratch, checkpoint-compatible **Qwen3-TTS** voice
+cloner.
 
 - Architecture & crate graph: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-- Federated MoE pipeline: [`docs/FEDERATED.md`](docs/FEDERATED.md)
+- Routing guide for contributors: [`AGENTS.md`](AGENTS.md)
 - Testing strategy & the gradient-check gate: [`docs/TESTING.md`](docs/TESTING.md)
-- Engine internals (inference / training / vulkan / web): `docs/engine-*.md`
+- Performance notes: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)
+- Per-area deep dives: `docs/yolo/`, `docs/tts/`, `docs/FEDERATED.md`, `docs/engine-*.md`
 
-### Quick start
+---
+
+## Quick start
 
 ```bash
-make release
-make data/calculator                 # generate a dataset (also: reverser wordcalc
-                                      #   timeseries shakespeare_char gpt)
-make train/gpt/calculator            # train the GPT baseline -> out/gpt-calculator.weights
-make eval/gpt/calculator             # validation perplexity + task exact-match
-make gradcheck                       # backprop correctness gate (finite differences)
-make federated-demo                  # MoE train -> split -> verify -> merge round-trip
-make test                            # full cargo test suite
-make web/dev                         # WebGPU browser demo (crates/web)
+make release                          # build the optimized ./target/release/brain
+make test                             # full cargo test suite
+make gradcheck                        # backprop correctness gate (finite differences)
+
+# Train + evaluate the GPT baseline end to end:
+make data/calculator                  # generate a dataset
+make train/gpt/calculator             # -> out/gpt-calculator.weights
+make eval/gpt/calculator              # validation perplexity + task exact-match
 ```
 
-### Using the `brain` CLI
+Every model is one `brain <model> <verb>` subcommand:
 
-The model is chosen by the **subcommand** — there is no global model-type flag.
-Run `brain help` for the full list with examples. Highlights:
+```
+brain data        dataset generation + tokenizers
+brain gpt         GPT decoder: train | gen | eval
+brain qwen        Qwen3 LLM: import | infer | export | precompile | train | finetune
+brain tts         Qwen3-TTS: import | clone | synth | finetune
+brain yolo        YOLOv8 detector: train | fine-tune | eval | detect
+brain npu         OpenVINO/NPU: export | quantize | check | run | bench | sim
+brain federated   sharded MoE: split | verify | merge | assemble | train-expert
+brain pid         PID control transformer
+brain bench       architecture-evaluation harness (+ eval | scale | advise | compare)
+brain run         event-driven streaming controller (HFSM over JSONL)
+brain gradcheck   run the gradient checks
+```
+
+## Backends — CPU, GPU, NPU
+
+The same WGSL kernels run on three backends, selected at runtime:
 
 ```bash
-# datasets
-brain data gen calculator --out data/calculator --n 100000      # also: reverser
-                                                                #   wordcalc timeseries
-                                                                #   shakespeare_char gpt
-
-# GPT (dense baseline)
-brain gpt train data/calculator --out out/gpt.weights --steps 2000 --mask =
-brain gpt eval  --weights out/gpt.weights --data data/calculator      # perplexity + exact-match
-brain gpt gen   --weights out/gpt.weights --data data/calculator --prompt "12+7=" --max-new 8
-
-# sparse MoE
-brain train --steps 2000 --out moe.weights
-brain generate --weights moe.weights --prompt 1,2,3,4 --max-new 64
-
-# federated MoE: split a checkpoint into expert shards, verify, reassemble
-brain federated split moe.weights out/shards
-brain federated verify out/shards
-brain federated merge  out/shards --out out/moe-reassembled.weights
-
-# Intel NPU: quantize + compile the YOLO detector to a real NPU graph (OpenVINO)
-brain npu export   --weights out/yolo.weights --out out/yolo.onnx            # fp32 ONNX (pure Rust)
-brain npu quantize --weights out/yolo.weights --calib calib/ --out out/yolo.int8.onnx
-brain npu sim      --weights out/yolo.weights --data data/detect             # fp32 vs INT8 mAP, no NPU
-brain npu run      --onnx out/yolo.int8.onnx --image sample.ppm --device NPU # needs an Intel NPU
-brain yolo detect  --weights out/yolo.weights --image sample.ppm --device npu
-
-# correctness gate
-brain gradcheck
+brain gpt gen --weights out/gpt-calculator.weights --device gpu   # wgpu (default)
+brain gpt gen --weights out/gpt-calculator.weights --device cpu   # WGSL -> Cranelift JIT, all cores
+BRAIN_DEVICE=cpu make test                                        # whole suite, no GPU needed
 ```
 
-Commands that read a checkpoint take `--weights <file>`; if it's missing, the
-CLI tells you how to train one. The Makefile wraps these: e.g. `make
-data/calculator && make train/gpt/calculator && make eval/gpt/calculator`.
-
-The rest of this document explains the **MoE toy task** specifically — what the
-model learns, how to measure it honestly, and how the architecture maps onto the
-problem. (Paths below written as `moe-rs/` now live under `crates/`.)
+- **GPU (wgpu / WebGPU)** — the default; runs on desktop GPUs, integrated GPUs, and in
+  the browser.
+- **CPU** — the exact same WGSL, JIT-compiled to native code via Cranelift and run
+  across all cores with rayon. No GPU required.
+- **NPU (Intel, via OpenVINO)** — a separate whole-graph export → compile → run path
+  (`brain npu …`), loaded at runtime so the default build stays free of OpenVINO.
 
 ---
 
-## 1. The task and the data
+## Models
 
-We model a 1-D stream of integer token IDs in `[0, 64)`. The synthetic corpus
-(`make_toy_corpus`) is generated by a rule where **every token is a
-deterministic function of the two preceding tokens**:
+### GPT decoder — the dense baseline
 
-```
-table   = a fixed random permutation of 0..63          # a 64-entry substitution table
-data[i] = ( data[i-2] + table[data[i-1]] ) % 64        # the rule
-                                                        # …except every 257th token: a random reset
-```
-
-(Verified: the rule holds on **19,921 / 19,921** non-reset tokens.)
-
-Predicting the next token therefore decomposes into three composable skills:
-
-1. **Skip-copy** — recover the token *two* positions back, `data[i-2]`.
-2. **Substitute** — map the previous token through the fixed table, `table[data[i-1]]`.
-3. **Add mod 64** — combine them on the cyclic group of size 64.
-
-### Why the data is built this way
-
-- **No dependence on absolute position `i`.** Training samples random
-  fixed-length windows and the model only ever sees token *values* (RoPE encodes
-  positions *within* a window). A rule that depended on `i` would be
-  unobservable noise that caps accuracy — so the rule uses only previous token
-  values. This was the central fix early in the project.
-- **The transition is a bijection.** `(data[i-2], data[i-1]) → (data[i-1], data[i])`
-  is a bijection on the 64×64 state space, so the stream is one long
-  non-repeating orbit — it never collapses to a fixed point or a short cycle the
-  way a plain linear recurrence mod 64 can.
-- **Sparse resets** (1 in 257) inject ~0.4% irreducible noise, a small,
-  realistic floor on achievable accuracy.
-
----
-
-## 2. What the model actually learns
-
-Trained ~1500 steps, the model reaches train loss ≈ 0.87, val loss ≈ 2.6
-(`ln 64 ≈ 4.16` is the random-guess baseline). Measured next-token accuracy
-(greedy argmax vs. the true rule; random baseline = `100/64 ≈ 1.6%`):
-
-| Test | Accuracy |
-|---|---|
-| Train region | 96.6% |
-| Val region (same orbit, unseen positions) | 42.7% |
-| A new orbit (same rule, full context) | ~85% |
-| **States SEEN in training (recall)** | **~99%** |
-| **States UNSEEN in training (true extrapolation)** | **~0%** |
-| All 4096 `(a,b)` pairs, fed as a 2-token context | 10% |
-
-**The important correction:** the "new orbit" number is *not* generalization —
-it is mostly **recall**. The rule's predictive state is just the last two tokens
-`(a, b)`, and there are only `64×64 = 4096` such states. Training (18k tokens)
-covered **92%** of them, and a fresh orbit started elsewhere lands on an
-already-seen `(a,b)` **98%** of the time (96.7% of its 16-token windows appeared
-*verbatim* in training). So ~85% on a "new" orbit is mostly the model recalling
-transitions it saw.
-
-The real test is accuracy on `(a,b)` states the model **never trained on**.
-There it scores **~0%**. To see it cleanly, train on a small corpus that covers
-only part of the state space:
-
-```
-train on 1.5k tokens (covers 25% of states):
-  accuracy on SEEN   states : 99%     (it memorised them — train loss 0.16)
-  accuracy on UNSEEN states : 0.5%    (≈ random; no extrapolation at all)
-```
-
-So this model is in the **memorization regime**: it learned a big lookup from
-(context → next token) over the states it saw, *not* the compositional algorithm
-(copy `a`, look up `table[b]`, add mod 64). Consistent evidence: it needs ~16–32
-tokens of context (the rule needs only 2), leaning on the redundant long-range
-cues of the deterministic chain rather than the minimal circuit; and isolated
-2-token probes (recover the table, test additivity) score near zero.
-
-**Bottom line:** a 2-layer, `d_model=64`, 4-expert model trained ~1500 steps
-**memorizes** the rule over the state space it's exposed to; it does **not**
-extrapolate to unseen states. Getting true generalization (the "grokking"
-transition from memorization to the `(a + table[b]) % 64` algorithm) takes more
-training, regularization, and/or capacity.
-
----
-
-## 3. How to evaluate correctness — and test out of distribution
-
-The decisive advantage of a synthetic task: **the data comes from a known
-deterministic rule, so we have exact ground truth for *any* input.** Correctness
-is *measured*, not estimated — for any context the true next token is
-`(ctx[-2] + table[ctx[-1]]) % 64`, and we compare it to the model's argmax.
-
-"Out-of-distribution" means input not from the training distribution. But beware
-a trap this task makes vivid: a sequence can *look* OOD (a different trajectory)
-while its *predictive content* is fully in-distribution.
-
-Tests, weakest → strongest evidence:
-
-1. **Held-out val split** — same orbit, unseen positions. Mildly OOD (a
-   continuation of the training trajectory).
-2. **A fresh orbit** — same rule/table, different start. *Looks* disjoint, but
-   because the state space is tiny (4096) and training covered 92% of it, ~98% of
-   a fresh orbit revisits **seen** `(a,b)` states. So this mostly measures
-   **recall**, not generalization — useful for *comparing* checkpoints, but do
-   not mistake it for extrapolation.
-3. **Unseen `(a,b)` states** — split a fresh orbit's positions by whether the
-   ending state appeared in training, and score the unseen ones. **This is the
-   real generalization test** (here: ~0%). The cleanest way to get a meaningful
-   sample is to train on a small corpus so coverage is partial.
-4. **Full-domain enumeration** — all 64×64 `(a,b)` pairs, covering the whole
-   input space including never-trained states. Tests whether it learned the
-   *function* vs. memorized the visited path.
-4. **Counterfactual probes** — perturb one input token (does the prediction
-   depend on `data[i-2]`?), or fix `a=0` and sweep `b` to read out the learned
-   substitution table. Tests *mechanism*.
-
-**How to keep the number meaningful** — the trap our experiments exposed:
-*how* you test changes the score. Always compare against the right yardsticks
-(random = 1.6%; ceiling = 100% on a reset-free orbit), and **hold the input
-distribution fixed**. Feeding short or off-orbit contexts is distribution shift,
-so a low score there means "you tested OOD," not necessarily "the model is
-wrong." Change one variable at a time (context length, seen vs. unseen states,
-on- vs. off-orbit) to get an interpretable picture.
-
-### Tooling: compare two sets of weights
-
-Two ready-made evaluators report this analysis and tell you which checkpoint is
-better. They print two things: **new-orbit accuracy** (overall rule-fit — use
-this to *compare* checkpoints) and the **seen vs. unseen state split** (the true
-generalisation signal). Accuracy is taken at the model's **best context length**,
-because a model trained at sequence length `T` only saw RoPE positions `0..T-1`,
-so scoring it beyond `T` measures position extrapolation, not learning.
-
-**PyTorch checkpoints** (`.pt`) — `eval_rule.py`, with a side-by-side verdict:
+nanoGPT-parity: token + learned positional embeddings, pre-LN, causal MHA, GELU MLP,
+untied head, masked cross-entropy.
 
 ```bash
-python eval_rule.py --ckpt moe.pt                 # single report
-python eval_rule.py --ckpt good.pt --compare baseline.pt   # which is better?
-# => "good.pt is better: new-orbit accuracy higher by NN points"
+make data/calculator                  # or: reverser wordcalc timeseries shakespeare_char gpt
+brain gpt train data/calculator --out out/gpt.weights --steps 2000 --batch 32 --block 64
+brain gpt eval  --weights out/gpt.weights --data data/calculator
+brain gpt gen   --weights out/gpt.weights --prompt "12+7=" --max-new 8
 ```
 
-**Rust/GPU checkpoints** (`.weights`) — the same metrics on the GPU:
+### Qwen3 LLM — real 0.6B, on CPU/GPU/NPU
+
+A real, HF-parity-exact Qwen3 dense decoder (RMSNorm, GQA + per-head QK-norm,
+half-split RoPE, SwiGLU, tied head), with safetensors import, LoRA, and ONNX/OpenVINO
+export.
 
 ```bash
-./moe-rs/target/release/moe eval --weights moe_rs.weights --samples 400
+brain qwen import --hf <hf_dir> --out qwen.weights        # import HF safetensors
+brain qwen infer  --weights qwen.weights --tokenizer tokenizer.json --prompt "The capital of France is"
+brain qwen finetune data/mydata --weights qwen.weights --out qwen-ft.weights   # full or LoRA
+brain qwen export --weights qwen.weights --out qwen.onnx --seq 16               # -> ONNX (NPU)
+brain qwen precompile --weights qwen.weights --seq 16 --npu-cache out/npu-cache # warm NPU blob cache
+brain qwen infer --weights qwen.weights --device npu --seq 16 --npu-cache out/npu-cache --prompt "…"
 ```
 
-Example outputs (well-trained vs. a 150-step baseline; and a GPU-trained model
-whose context window is 32):
+### Qwen3-TTS — from-scratch, checkpoint-compatible voice cloning
 
+A complete Qwen3-TTS stack built from scratch on the same engine, parity-verified
+against the official reference: a Mimi-style 12 Hz neural **codec** (max-abs 3.7e-2
+vs reference), an **ECAPA-TDNN speaker encoder** (cosine 1.000), and a Qwen3 **Talker**
++ 5-layer **MTP** code predictor (top-1 logits exact). End-to-end voice clone reaches
+**0.96 speaker-similarity** to the reference voice — matching the official model's own
+baseline. See [`docs/tts/README.md`](docs/tts/README.md).
+
+```bash
+# import the four components (Talker, MTP, codec, speaker) from the HF checkpoints:
+brain tts import --ckpt <Qwen3-TTS-12Hz-0.6B-Base> --codec-ckpt <Qwen3-TTS-Tokenizer-12Hz> --out-dir out/tts
+
+# voice clone: synthesize new text in the timbre of a reference voice
+brain tts clone --weights-dir out/tts --ckpt <hf_dir> \
+                --text "Hello from brain." --ref voice.wav --ref-text "transcript of voice.wav" \
+                --lang english --out clone.wav
+
+# speaker-free text-to-speech
+brain tts synth --weights-dir out/tts --ckpt <hf_dir> --text "Hello from brain." --out tts.wav
+
+# single-speaker LoRA fine-tune
+brain tts finetune <data_dir> --weights-dir out/tts --out out/tts-ft
 ```
-moe.pt  (1500 steps):  new orbit 80.8%   sweep 2:5% 8:57% 16:75% 32:81% 64:78%
-weak.pt ( 150 steps):  new orbit  2.2%   sweep 2:2% 8:2%  16:2%  32:2%  64:2%
-moe_rs.weights      :  new orbit 98.5%   sweep 2:34% 8:97% 16:98% 32:97% 64:34%
+
+Codec decode also runs on the Intel NPU (OpenVINO); see `docs/tts/README.md` for the
+export/run path and the streaming `audio_chunk` serving seam.
+
+### YOLOv8 detector — from-scratch object detection
+
+Anchor-free CSP backbone → PAN-FPN neck → decoupled DFL head, with the assigner +
+BCE/CIoU/DFL loss and NMS decode. Byte-compatible with canonical `yolov8n` for weight
+import.
+
+```bash
+make data/detect                      # synthetic RGB-shapes detection dataset
+brain yolo train data/detect --out out/yolo.weights --steps 500 --batch 16
+brain yolo eval   --weights out/yolo.weights --data data/detect      # mAP@0.5 + P/R
+brain yolo detect --weights out/yolo.weights --image sample.ppm      # JSON boxes
 ```
 
-Use the new-orbit number to rank checkpoints (moe.pt ≫ weak.pt). But remember
-it is mostly recall — `eval_rule.py` also prints the **seen vs. unseen split**,
-and on truly unseen states even the good models score ~0% (the memorization
-finding above). The sweep is itself diagnostic: `moe_rs.weights` peaks at 97–98%
-for context 8–32 and drops at 64 because it was trained with `--block-size 32`
-(RoPE never saw positions 32–63). Each evaluator uses the corpus/table of its own
-side (numpy for `.pt`, the Rust generator for `.weights`), so compare checkpoints
-*within* a lineage.
+### Sparse MoE Transformer (+ federated experts)
 
-> Each evaluator disables MoE capacity dropping (`capacity_factor → ∞`) so it
-> measures the *learned mapping* rather than the training-time memory bound.
+RMSNorm/RoPE, top-2-of-4 routed SwiGLU experts; a toy 64-symbol next-token rule for
+studying memorization vs. generalization, with vertical expert sharding.
+
+```bash
+brain train data/moe --out out/moe.weights            # MoE train
+make federated-demo                                   # train -> split -> verify -> merge
+brain federated split out/moe.weights out/shards/
+brain federated verify out/shards/
+brain federated merge  out/shards/ --out out/merged.weights
+```
+
+### PID control Transformer
+
+A control policy over CBOR records that imitates a PID oracle — the model behind the
+browser demo (`make web/dev`).
+
+```bash
+brain pid …                           # see `brain pid` for the subcommands
+```
 
 ---
 
-## 4. How the MoE architecture maps onto the task
+## Architecture-evaluation harness (`brain bench`)
 
-The architecture's inductive biases line up with the task's structure
-surprisingly well — each piece of the rule has a natural home in the model:
+A model-agnostic battery for answering *"does this architecture actually learn task
+X?"* — each benchmark owns its dataset and scoring; the harness runs it the same way
+across architectures.
 
-| Rule sub-skill | Architectural mechanism |
-|---|---|
-| "next token over 64 symbols" | output is a **64-way classification**; `lm_head` is **tied** to the token embedding |
-| skip-copy `data[i-2]`, read `data[i-1]` | **causal attention + RoPE** — relative positions let a head attend to offsets −1/−2 and carry those tokens into the residual stream at position `i` |
-| `table[·]` (a 64-entry nonlinear lookup) | the **MoE feed-forward** experts (SwiGLU MLPs) — universal-ish per-token nonlinear maps |
-| `( … ) % 64` (modular addition) | distributed across embedding features + experts + head (the genuinely hard part — see below) |
-| stable composition / depth | **RMSNorm** pre-norm + **residual** stream that carries `data[i-2]` alongside the transformed `data[i-1]` |
+```bash
+brain bench                           # run every registered benchmark, one table
+brain bench mqar                      # run a single benchmark
+brain bench eval    --arch gpt        # whole battery vs one arch -> results/<arch>-<seed>.json
+brain bench scale   --arch gpt        # predictive per-capability scaling (score@2x/@4x)
+brain bench advise  results/gpt-0.json  # ranked tuning recommendations
+brain bench compare results/*.json    # side-by-side leaderboard
+```
 
-### Why a *Mixture of Experts* specifically fits
-
-The heart of the rule is a **lookup table plus a combine** — a fundamentally
-*conditional* computation: different previous-token values demand different
-outputs. That is exactly what sparse routing is for.
-
-- **Routing = conditioning.** The router (a linear map → softmax → top-2 of 4)
-  sends each token to a subset of experts. It can partition the input space
-  (e.g. by the previous token's value / class), so each expert **specializes** in
-  a region of the substitution table or a residue pattern, instead of one dense
-  FFN having to encode all 64 entries at once.
-- **More capacity at constant compute.** With top-2-of-4, every token uses 2
-  experts' worth of parameters but the model *contains* ~4×. For a task whose
-  difficulty is "store a 64-entry map and combine it arithmetically," that extra
-  parameter budget — paid only in memory, not per-token FLOPs — is well spent.
-- **Conditional structure ↔ conditional computation.** Dense models must
-  represent the whole map in superposition; an MoE can route it into
-  semi-independent pieces, which is a closer match to a lookup-table-shaped
-  problem.
-
-In training we observed the load-balancing aux loss keeping all **4/4 experts
-in use**, roughly balanced (top-1 usage ≈ 0.22–0.29, router entropy ≈ 1.10 of a
-max `ln 4 ≈ 1.39`) with **0% capacity dropping** — i.e. the router learned to
-spread work across experts rather than collapsing onto one.
-
-### Does it capture the relationships "perfectly"? No — and here's the honest why
-
-The architecture is *well-suited* to the rule (it can route, look up, and
-classify), and an MoE is a good structural match — but "captures perfectly"
-overstates what happens. What the model actually does is **memorize the
-transition table over the states it sees**, not learn the compositional
-algorithm. The MoE's contribution is best understood as **capacity to store that
-lookup** (more parameters at fixed per-token compute), which is genuinely a good
-fit for a lookup-shaped task — but storage is not the same as generalization.
-
-Two reasons it stays in the memorization regime:
-
-1. **Modular addition is hard to *learn* (vs. memorize).** Getting
-   `(a + b) mod 64` as an algorithm is the classic "grokking" problem — networks
-   reach it only by discovering periodic (Fourier-like) features, which needs
-   more capacity, training, and regularization than a 2-layer / `d_model=64` /
-   1500-step model has. So instead it tabulates.
-2. **The state space is small enough to memorize.** Only 4096 `(a,b)` states
-   exist and training covered 92%, so memorization *looks* like ~85–99% accuracy
-   on almost any orbit — while accuracy on the never-seen states is ~0%.
-
-So the accurate statement is: **the MoE's structure is well-matched to a
-routing/lookup/combine task, and it fits the rule over the covered state space
-very accurately — but it does so by memorization, not by capturing the rule as a
-generalizing function.** Closing that gap (the grokking transition to true
-extrapolation) is a matter of scale, training time, and regularization.
+Registered benchmarks include **mqar** (multi-query associative recall), the **MAD**
+family (recall / fuzzy / noisy / selective-copy / memorize), **toolcall**, and the
+algorithmic state-tracking probes **parity**, **mod_add** (grokking), and **dyck**.
+Capability axes (recall / copying / memory / state-tracking / compression / arithmetic)
+aggregate them into a comparable profile.
 
 ---
 
-## 5. Layout
+## Datasets, tokenizers, training
 
+```bash
+make data/<name>                      # calculator | reverser | wordcalc | timeseries
+                                      #   shakespeare_char | gpt | detect | tts
+brain data gen <name> --out data/<name> --n 10000 --seed 0
 ```
-tiny_sparse_moe.py   reference model: train / eval / generate / export
-eval_rule.py         rule-accuracy evaluator + side-by-side weight comparison
-train_ref.py         PyTorch golden reference for the Rust gradient check
-moe-rs/              Rust + WGSL engine (inference + training)
-  src/main.rs        inference & generation pipeline
-  src/train.rs       training pipeline + PyTorch validation
-  src/shaders/*.wgsl one compute kernel per stage (fwd + bwd)
-  README.md          inference docs
-  TRAINING.md        training docs + gradient-validation results
+
+Tokenizers: char-level, GPT-2 BPE, and the Qwen BPE (parses `tokenizer.json`). Datasets
+are a simple `train.bin`/`val.bin` (u16 or u32) + `meta.json` layout. Training is shared
+across models (`fit`): AdamW + grad clip, cosine LR with warmup, grad accumulation, and
+LoRA (frozen base + trainable adapters) for parameter-efficient fine-tuning.
+
+## NPU export (Intel, OpenVINO)
+
+```bash
+brain npu export   --weights out/yolo.weights --out yolo.onnx
+brain npu quantize --weights out/yolo.weights --calib data/detect --out yolo.int8.onnx
+brain npu check    --onnx yolo.onnx --device NPU
+brain npu run      --onnx yolo.onnx --image sample.ppm --device NPU
+brain npu bench    --onnx yolo.onnx --device NPU --iters 100
 ```
+
+`make requirements` installs the Python tooling (OpenVINO, etc.); the Rust engine needs
+none of it. OpenVINO is loaded at run time, so `make build`/`make test` stay green
+without it installed.
+
+## Streaming runtime + web demo
+
+```bash
+# event-driven controller: reads JSONL events on stdin, emits JSONL on stdout
+printf '{"event":"user_text","text":"hi"}\n' | brain run --gpt out/gpt.weights
+printf '{"event":"camera_frame","format":"rgb8","w":128,"h":128,"data":"…"}\n' | brain run --yolo out/yolo.weights
+
+make web/dev                          # WebGPU browser demo (Node 18+ and a WebGPU browser)
+```
+
+`brain run` is an HFSM controller: `user_text → brain_text_chunk` (streamed one token
+per tick), `camera_frame → object_detected`, and `user_synth_request → audio_chunk`.
+
+## Testing & correctness
+
+```bash
+make test                             # full suite (BRAIN_DEVICE=cpu to skip GPU; MOE_SKIP_GPU_TESTS=1 too)
+make gradcheck                        # finite-difference backprop gate
+```
+
+Every model's analytic WGSL gradients are checked against finite differences of its own
+forward pass; every external-weight import is gated by a parity test against a reference
+dump. The whole suite runs on CPU with no GPU required.
+
+## Invariants
+
+**WGSL is the source of truth** (kernels live only in `crates/kernels/wgsl/`); the engine
+is **fp32-only, core-compute-only** (single bind group, `@workgroup_size(64)`, no
+atomics/subgroups/f16) so it stays portable to old GPUs and WebGPU; **two backends, one
+API** (no per-backend model code — the CPU backend JIT-compiles the same WGSL); and
+**backprop is gated by the gradient checker**.
