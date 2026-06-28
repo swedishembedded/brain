@@ -1,0 +1,19 @@
+[package]
+name = "brain-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Audio foundation for the TTS stack: wav I/O, resampling, STFT/mel, and 1D-conv / transposed-conv Step-builders over the shared WGSL engine."
+
+[lib]
+name = "audio"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-data.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+brain-kernels.workspace = true

@@ -13,6 +13,7 @@ default-members = [
     "crates/optim",
     "crates/autodiff",
     "crates/data",
+    "crates/audio",
     "crates/model",
     "crates/moe",
     "crates/gpt",
@@ -50,6 +51,7 @@ brain-paramstore = { path = "crates/paramstore" }
 brain-optim = { path = "crates/optim" }
 brain-autodiff = { path = "crates/autodiff" }
 brain-data = { path = "crates/data" }
+brain-audio = { path = "crates/audio" }
 brain-model = { path = "crates/model" }
 brain-moe = { path = "crates/moe" }
 brain-gpt = { path = "crates/gpt" }

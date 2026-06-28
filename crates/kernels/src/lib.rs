@@ -124,6 +124,26 @@ pub const CONV_ACT_REG: &str = include_str!("../wgsl/conv_act_reg.wgsl");
 pub const CONV2D_DW: &str = include_str!("../wgsl/conv2d_dw.wgsl");
 /// `wgsl/conv2d_dx.wgsl`
 pub const CONV2D_DX: &str = include_str!("../wgsl/conv2d_dx.wgsl");
+/// `wgsl/conv1d.wgsl`
+pub const CONV1D: &str = include_str!("../wgsl/conv1d.wgsl");
+/// `wgsl/conv1d_dw.wgsl`
+pub const CONV1D_DW: &str = include_str!("../wgsl/conv1d_dw.wgsl");
+/// `wgsl/conv1d_dx.wgsl`
+pub const CONV1D_DX: &str = include_str!("../wgsl/conv1d_dx.wgsl");
+/// `wgsl/convtr1d.wgsl`
+pub const CONVTR1D: &str = include_str!("../wgsl/convtr1d.wgsl");
+/// `wgsl/convtr1d_dw.wgsl`
+pub const CONVTR1D_DW: &str = include_str!("../wgsl/convtr1d_dw.wgsl");
+/// `wgsl/convtr1d_dx.wgsl`
+pub const CONVTR1D_DX: &str = include_str!("../wgsl/convtr1d_dx.wgsl");
+/// `wgsl/leaky_relu.wgsl`
+pub const LEAKY_RELU: &str = include_str!("../wgsl/leaky_relu.wgsl");
+/// `wgsl/leaky_relu_bwd.wgsl`
+pub const LEAKY_RELU_BWD: &str = include_str!("../wgsl/leaky_relu_bwd.wgsl");
+/// `wgsl/tanh_act.wgsl`
+pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
+/// `wgsl/tanh_act_bwd.wgsl`
+pub const TANH_ACT_BWD: &str = include_str!("../wgsl/tanh_act_bwd.wgsl");
 /// `wgsl/dfl_decode.wgsl`
 pub const DFL_DECODE: &str = include_str!("../wgsl/dfl_decode.wgsl");
 /// `wgsl/dfl_grad.wgsl`
@@ -300,6 +320,16 @@ pub const ALL: &[(&str, &str)] = &[
     ("conv_bias", CONV_BIAS),
     ("conv2d_dw", CONV2D_DW),
     ("conv2d_dx", CONV2D_DX),
+    ("conv1d", CONV1D),
+    ("conv1d_dw", CONV1D_DW),
+    ("conv1d_dx", CONV1D_DX),
+    ("convtr1d", CONVTR1D),
+    ("convtr1d_dw", CONVTR1D_DW),
+    ("convtr1d_dx", CONVTR1D_DX),
+    ("leaky_relu", LEAKY_RELU),
+    ("leaky_relu_bwd", LEAKY_RELU_BWD),
+    ("tanh_act", TANH_ACT),
+    ("tanh_act_bwd", TANH_ACT_BWD),
     ("dfl_decode", DFL_DECODE),
     ("dfl_grad", DFL_GRAD),
     ("dfl_loss", DFL_LOSS),
@@ -376,7 +406,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_kernels_present_and_nonempty() {
-        assert_eq!(ALL.len(), 114);
+        assert_eq!(ALL.len(), 124);
         for (n, s) in ALL { assert!(!s.trim().is_empty(), "empty kernel {n}"); }
     }
     #[test]
