@@ -54,9 +54,13 @@ fn import_consumes_every_decoder_tensor() {
         .map(|t| (t["name"].as_str().unwrap().to_string(), t["numel"].as_u64().unwrap() as usize))
         .collect();
 
-    // 271 decoder tensors: 2 input_proj dropped, 32 codebook tensors collapse to
-    // 16 tables  =>  271 - 2 - 32 + 16 = 253 params.
-    assert_eq!(by_name.len(), 253, "unexpected param count after import");
+    // Decoder-derived params (names without the `encoder.` prefix): 271 decoder
+    // tensors, 2 input_proj dropped, 32 codebook tensors collapse to 16 tables
+    // => 271 - 2 - 32 + 16 = 253. (The import now ALSO carries the encode path
+    // under `encoder.*`; that is asserted in the `encode` test suite.)
+    let decoder_params = by_name.keys().filter(|n| !n.starts_with("encoder.")).count();
+    assert_eq!(decoder_params, 253, "unexpected decoder param count after import");
+    assert!(by_name.keys().any(|n| n.starts_with("encoder.")), "encoder params missing");
 
     let cfg = CodecConfig::from_json(&c.header["config"]);
     let dim = (cfg.codebook_dim / 2) as usize; // 256

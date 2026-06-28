@@ -5,7 +5,7 @@
 //!
 //!   brain data gen <name> [--out DIR] [--n N] [--seed S]
 //!
-//! Names: shakespeare_char | calculator | reverser | wordcalc | gpt | timeseries
+//! Names: shakespeare_char | calculator | reverser | wordcalc | gpt | timeseries | tts
 //! (shakespeare_char/gpt read `<DIR>/input.txt`; the synthetic ones generate it).
 
 use std::path::PathBuf;
@@ -28,7 +28,7 @@ fn gen(args: &[String]) {
     };
     let Some(ds) = Dataset::from_name(name) else {
         eprintln!(
-            "unknown dataset {name:?}; expected one of: shakespeare_char calculator reverser wordcalc gpt timeseries detect localization classification scale multi_object background"
+            "unknown dataset {name:?}; expected one of: shakespeare_char calculator reverser wordcalc gpt timeseries tts detect localization classification scale multi_object background"
         );
         return;
     };
@@ -39,6 +39,8 @@ fn gen(args: &[String]) {
         Dataset::Timeseries => 200_000,
         // Image datasets are far heavier per example; default to a small corpus.
         Dataset::Detect { .. } => 256,
+        // TTS `text->codes`: examples (each ~14 tokens); a few thousand suffice.
+        Dataset::Tts => 4_000,
         _ => 100_000,
     };
     let mut seed: u64 = 1337;

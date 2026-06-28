@@ -104,6 +104,10 @@ data/calculator data/reverser data/wordcalc: release
 data/timeseries: release
 	$(BRAIN) data gen timeseries --out $(DATA)/timeseries --n 200000 --seed $(SEED)
 
+# Synthetic Qwen3-TTS `text -> codebook-0 codes` stream (for Talker SFT smokes).
+data/tts: release
+	$(BRAIN) data gen tts --out $(DATA)/tts --n $(N) --seed $(SEED)
+
 $(DATA)/shakespeare_char/input.txt:
 	mkdir -p $(DATA)/shakespeare_char && curl -sSL -o $@ $(SHAKE_URL)
 data/shakespeare_char: release $(DATA)/shakespeare_char/input.txt

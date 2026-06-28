@@ -12,13 +12,21 @@
 //!   brain tts clone --text "..." --ref voice.wav --ref-text "..." --out demo.wav
 //!                   [--weights-dir out/tts --ckpt <hf_dir> --lang english
 //!                    --max-frames N --temp X --top-k K --seed S --ref-codes codes.bin]
-//!       Voice clone: x-vector timbre from the reference voice (pure brain). With
-//!       --ref-codes (external [T,16] u32 reference-audio codec codes) it runs the
-//!       in-context (ICL) path instead, which also conditions on --ref-text.
+//!       Voice clone: x-vector timbre from the reference voice (pure brain). When
+//!       --ref-text is given, the reference wav is encoded to [T,16] codes in-tree
+//!       (codec encoder) and the in-context (ICL) path runs automatically — no
+//!       external --ref-codes needed (an explicit --ref-codes still overrides).
 //!
 //!   brain tts synth --text "..." --out out.wav
 //!                   [--weights-dir out/tts --ckpt <hf_dir> --lang english ...]
 //!       Speaker-free text-to-speech.
+//!
+//!   brain tts finetune --base out/tts/talker.weights --data data/tts
+//!                      --out out/tts/talker_lora.weights
+//!                      [--steps N --lr X --rank R --alpha A --batch B --block T --seed S]
+//!       LoRA fine-tune (single-speaker SFT) the Talker on a `text->codes`
+//!       dataset (e.g. `make data/tts`). Freezes the base; trains the attention
+//!       adapters only. See `tts::sft` for the aligned multi-codebook loss.
 
 use tts::{GenOpts, TtsPaths};
 
@@ -35,9 +43,49 @@ pub fn run_tts(args: &[String]) {
         Some("import") => import(&args[1..]),
         Some("clone") => clone(&args[1..]),
         Some("synth") => synth(&args[1..]),
+        Some("finetune") => finetune(&args[1..]),
         other => {
-            eprintln!("usage: brain tts <import|clone|synth> ...  (got {other:?})");
+            eprintln!("usage: brain tts <import|clone|synth|finetune> ...  (got {other:?})");
             std::process::exit(2);
+        }
+    }
+}
+
+/// LoRA fine-tune the Talker on a `text->codes` dataset (single-speaker SFT).
+///
+///   brain tts finetune --base out/tts/talker.weights --data data/tts --out out/tts/talker_lora.weights
+///                      [--steps N --lr X --rank R --alpha A --batch B --block T --seed S]
+fn finetune(args: &[String]) {
+    let mut base = "out/tts/talker.weights".to_string();
+    let mut data_dir = "data/tts".to_string();
+    let mut out = "out/tts/talker_lora.weights".to_string();
+    let mut o = tts::FinetuneOpts::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--base" => base = val(args, &mut i, "--base"),
+            "--data" => data_dir = val(args, &mut i, "--data"),
+            "--out" => out = val(args, &mut i, "--out"),
+            "--steps" => o.steps = val(args, &mut i, "--steps").parse().unwrap_or(o.steps),
+            "--lr" => o.lr = val(args, &mut i, "--lr").parse().unwrap_or(o.lr),
+            "--rank" => o.rank = val(args, &mut i, "--rank").parse().unwrap_or(o.rank),
+            "--alpha" => o.alpha = val(args, &mut i, "--alpha").parse().unwrap_or(o.alpha),
+            "--batch" => o.batch = val(args, &mut i, "--batch").parse().unwrap_or(o.batch),
+            "--block" => o.block = val(args, &mut i, "--block").parse().unwrap_or(o.block),
+            "--seed" => o.seed = val(args, &mut i, "--seed").parse().unwrap_or(o.seed),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    eprintln!(
+        "tts finetune [LoRA r={} α={}]: base={base} data={data_dir} steps={} lr={} -> {out}",
+        o.rank, o.alpha, o.steps, o.lr
+    );
+    match tts::sft::finetune_lora(&base, std::path::Path::new(&data_dir), &out, &o) {
+        Ok((i0, i1)) => println!("finetune done: loss {i0:.4} -> {i1:.4}  saved -> {out}"),
+        Err(e) => {
+            eprintln!("finetune failed: {e}");
+            std::process::exit(1);
         }
     }
 }
@@ -195,7 +243,13 @@ fn clone(args: &[String]) {
         },
         None => None,
     };
-    let mode = if ref_code.is_some() { "ICL" } else { "x-vector-only" };
+    let mode = if ref_code.is_some() {
+        "ICL (external ref-codes)"
+    } else if !ref_text.trim().is_empty() {
+        "ICL (in-tree codec encode)"
+    } else {
+        "x-vector-only"
+    };
     eprintln!(
         "tts clone [{mode}]: lang={} max_frames={} temp={} -> {}",
         c.lang, c.opts.max_frames, c.opts.temperature, c.out

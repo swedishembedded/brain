@@ -274,11 +274,12 @@ fn max_ctx(opts: &GenOpts, ref_frames: usize) -> u32 {
 
 /// **Voice clone** — synthesize `target_text` in the timbre of `ref_wav_path`.
 ///
-/// By default this uses the **x-vector-only** path (speaker timbre from the
-/// reference's speaker embedding), which runs entirely within brain. If
-/// `ref_code` is supplied (`[T,16]` reference-audio codec codes, which brain's
-/// decode-only codec cannot produce in-tree), the **ICL** path is used instead,
-/// additionally conditioning on `ref_text` + the reference codes.
+/// When `ref_text` is non-empty, this uses the **ICL** path: the reference wav is
+/// encoded to `[T,16]` codec codes in-tree ([`codec::Codec::encode`]) and the
+/// Talker is conditioned on `ref_text` + those reference codes (plus the
+/// x-vector). An explicit `ref_code` (e.g. an external dump) still overrides the
+/// auto-encode. With an empty `ref_text` and no `ref_code`, the **x-vector-only**
+/// path is used (speaker timbre only). Both paths run entirely within brain.
 #[allow(clippy::too_many_arguments)]
 pub fn clone(
     paths: &TtsPaths,
@@ -297,6 +298,19 @@ pub fn clone(
     let wav = audio::wav::read(ref_wav_path).map_err(|e| format!("read {ref_wav_path}: {e}"))?;
     let speaker = speaker::SpeakerEncoder::load_inference(&paths.speaker);
     let xvec = speaker.embed_wav(&wav.samples, wav.sample_rate);
+
+    // ICL reference codes: an explicit dump wins; otherwise, when `ref_text` is
+    // given, encode the reference wav in-tree (no external `--ref-codes` needed).
+    let ref_code = match ref_code {
+        Some(c) => Some(c),
+        None if !ref_text.trim().is_empty() => {
+            let codec = codec::Codec::load_inference(&paths.codec);
+            let sr = codec.cfg.input_sample_rate;
+            let wav24 = audio::resample_linear(&wav.samples, wav.sample_rate, sr);
+            Some(codec.encode(&wav24))
+        }
+        None => None,
+    };
 
     // tokenize the target text via the assistant chat template.
     let input_ids = tok.encode(&assistant_text(target_text));
@@ -319,7 +333,13 @@ pub fn clone(
         prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, Some(&xvec), language_id)
     };
 
-    let codes = generate_codes(&gen, &mtp, &sp, &prompt, opts);
+    // Generate on the bit-exact KV-cache path (O(T) per frame vs O(T²) full
+    // recompute): same frozen weights → same codes, far faster on CPU. The
+    // prompt is already built (TalkerGen carries the text-embedding tables); the
+    // cached CpuTalker only needs the decoder weights, so free `gen` first.
+    drop(gen);
+    let mut cpu = crate::gen_kv::CpuTalker::load(&paths.talker);
+    let codes = generate_codes_cached(&mut cpu, &mtp, &sp, &prompt, opts);
     decode_codes(&paths.codec, &codes)
 }
 
@@ -341,7 +361,9 @@ pub fn synth(
     let mtp = MtpModel::load_inference(&paths.mtp);
     let prompt = prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, None, language_id);
 
-    let codes = generate_codes(&gen, &mtp, &sp, &prompt, opts);
+    drop(gen);
+    let mut cpu = crate::gen_kv::CpuTalker::load(&paths.talker);
+    let codes = generate_codes_cached(&mut cpu, &mtp, &sp, &prompt, opts);
     decode_codes(&paths.codec, &codes)
 }
 

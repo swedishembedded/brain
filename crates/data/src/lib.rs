@@ -26,6 +26,7 @@ pub mod gen_calculator;
 pub mod gen_detect;
 pub mod gen_reverser;
 pub mod gen_timeseries;
+pub mod gen_tts;
 pub mod gen_wordcalc;
 
 pub mod prepare;

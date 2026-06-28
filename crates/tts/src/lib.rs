@@ -19,9 +19,11 @@ pub mod import;
 pub mod mtp;
 pub mod pipeline;
 pub mod prompt;
+pub mod sft;
 pub mod talker;
 
 pub use config::{MtpConfig, TalkerConfig};
+pub use sft::{ce, ce_batch, FinetuneOpts, MultiCodebookLabels};
 pub use gen::TalkerGen;
 pub use gen_kv::CpuTalker;
 pub use mtp::MtpModel;

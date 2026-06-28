@@ -329,7 +329,7 @@ impl Codec {
         let dw = self.causal_conv(x, &format!("{prefix}.dwconv"), c, c, l, 7, 1, c); // [C, L]
         let mut tm = self.gpu.read(&self.transpose(&dw, c, l), (l * c) as usize); // host [L, C]
         // host LayerNorm over C
-        host_layernorm(&mut tm, l as usize, c as usize, &self.host[&format!("{prefix}.norm.weight")], &self.host[&format!("{prefix}.norm.bias")]);
+        host_layernorm(&mut tm, l as usize, c as usize, &self.host[&format!("{prefix}.norm.weight")], &self.host[&format!("{prefix}.norm.bias")], LN_EPS);
         let tmb = self.upload(&tm);
         // pwconv1 (C -> 4C) + bias, exact GELU on host
         let hid = c * 4;
@@ -398,6 +398,266 @@ impl Codec {
     }
 }
 
+// ======================================================================
+// ENCODE: wav -> codes [T,16]  (HuggingFace Mimi encoder, forward only)
+// ======================================================================
+//
+// Mirror of `MimiModel._encode_frame`:
+//   1. SEANet conv encoder (`encoder.encoder.layers.*`) -> [512, L']
+//   2. encoder transformer (`encoder.encoder_transformer.layers.*`, pre-LN,
+//      LayerNorm+bias, gelu MLP, LayerScale) -> [512, L']
+//   3. frame-rate-match downsample (replicate-padded causal conv, stride 2)
+//      -> [512, T]
+//   4. split-RVQ encode: project 512->256 (`input_proj`), then nearest-codebook
+//      argmin + residual subtraction across 1 semantic + 15 acoustic codebooks.
+//
+// Causal MimiConv1d uses LEFT pad = `effective_kernel - stride` with output
+// length `ceil(L / stride)` (zero pad on the right for `pad_mode="constant"`,
+// replicate for the downsample). The argmin/residual loop runs on the HOST (no
+// kernel exists; same policy as the speaker-pooling host code).
+impl Codec {
+    /// Encode a mono 24 kHz `wav` into `[T,16]` codec codes (row-major, q0
+    /// semantic + q1..15 acoustic) — the inverse of [`Codec::decode`].
+    pub fn encode(&self, wav: &[f32]) -> Vec<u32> {
+        assert!(!wav.is_empty(), "empty wav");
+        let e = self.cfg.enc.clone();
+        let l0 = wav.len() as u32;
+
+        // --- 1. SEANet conv encoder ---
+        // head conv: 1 -> num_filters, k=kernel_size, stride 1.
+        let x = self.upload(wav); // [1, L0] NCL (cin = 1)
+        let (mut h, mut l) = self.enc_conv(&x, "encoder.encoder.layers.0", 1, e.num_filters, l0, e.kernel_size, 1, 1, 1);
+        let mut dim = e.num_filters;
+        // downsample stages: reversed(upsampling_ratios).
+        let ratios: Vec<u32> = e.upsampling_ratios.iter().rev().copied().collect();
+        let mut li = 1usize;
+        for &r in &ratios {
+            // residual block: ELU, conv(dim->dim/compress,k=res_k), ELU, conv(->dim,k1).
+            let hidden = dim / e.compress;
+            let base = format!("encoder.encoder.layers.{li}");
+            let y = self.elu(&h, dim * l);
+            let (y, _) = self.enc_conv(&y, &format!("{base}.block.1"), dim, hidden, l, e.residual_kernel_size, 1, 1, 1);
+            let y = self.elu(&y, hidden * l);
+            let (y, _) = self.enc_conv(&y, &format!("{base}.block.3"), hidden, dim, l, 1, 1, 1, 1);
+            h = self.add2(&h, &y, dim * l);
+            li += 1; // resnet
+            li += 1; // ELU (no params)
+            // downsample conv: dim -> 2*dim, k=2r, stride=r.
+            let y = self.elu(&h, dim * l);
+            let (hd, lo) = self.enc_conv(&y, &format!("encoder.encoder.layers.{li}"), dim, dim * 2, l, 2 * r, r, 1, 1);
+            h = hd;
+            l = lo;
+            dim *= 2;
+            li += 1; // downsample conv
+        }
+        // final: ELU, conv(dim -> hidden_size, k=last_kernel_size, stride 1).
+        li += 1; // final ELU (no params)
+        let y = self.elu(&h, dim * l);
+        let (hd, lo) = self.enc_conv(&y, &format!("encoder.encoder.layers.{li}"), dim, e.hidden_size, l, e.last_kernel_size, 1, 1, 1);
+        h = hd;
+        l = lo;
+
+        // --- 2. encoder transformer (token-major [L, hidden]) ---
+        let mut tm = self.transpose(&h, e.hidden_size, l); // [L, 512]
+        tm = self.enc_transformer(&tm, l);
+        h = self.transpose(&tm, l, e.hidden_size); // [512, L]
+
+        // --- 3. frame-rate-match downsample ---
+        let (h, t) = self.enc_downsample(&h, e.hidden_size, l);
+
+        // --- 4. split-RVQ encode ---
+        self.rvq_encode(&h, t)
+    }
+
+    /// Causal Mimi `conv1d` (NCL): left pad `effective_kernel - stride`, output
+    /// length `ceil(L / stride)`, then add the per-channel `{prefix}.conv.bias`.
+    /// Returns `([Cout, lo], lo)`.
+    fn enc_conv(&self, x: &DeviceBuffer, prefix: &str, cin: u32, cout: u32, l: u32, k: u32, stride: u32, dilation: u32, groups: u32) -> (DeviceBuffer, u32) {
+        let keff = (k - 1) * dilation + 1;
+        let pad = keff - stride;
+        let lo = l.div_ceil(stride);
+        let c = audio::conv::Conv1d { n: 1, cin, l, cout, k, stride, pad, dilation, groups, lo };
+        let out = self.st((cout * lo) as usize);
+        self.run(audio::conv::conv1d_fwd(
+            &self.gpu,
+            &audio::conv::ConvKernels { fwd: CONV1D, dx: 0, dw: 0 },
+            &c,
+            x,
+            self.w(&format!("{prefix}.conv.weight")),
+            &out,
+        ));
+        let out = self.add_ncl_bias(&out, &format!("{prefix}.conv.bias"), cout, lo);
+        (out, lo)
+    }
+
+    /// The frame-rate-match downsample: a causal conv with **replicate** padding
+    /// (`hidden -> hidden`, kernel `downsample_kernel`, stride `downsample_stride`,
+    /// no bias). Left pad `k - stride` and right pad `extra = ceil(L/s)*s - L` are
+    /// filled by edge replication on the host, then a `pad=0` conv. Returns
+    /// `([C, T], T)`.
+    fn enc_downsample(&self, x: &DeviceBuffer, c: u32, l: u32) -> (DeviceBuffer, u32) {
+        let k = self.cfg.enc.downsample_kernel;
+        let stride = self.cfg.enc.downsample_stride;
+        let pad_left = k - stride;
+        let lo = l.div_ceil(stride);
+        let pad_right = lo * stride - l;
+        let xv = self.gpu.read(x, (c * l) as usize);
+        let lp = (pad_left + l + pad_right) as usize;
+        let (lu, plu) = (l as usize, pad_left as usize);
+        let mut padded = vec![0.0f32; c as usize * lp];
+        for ch in 0..c as usize {
+            let src = &xv[ch * lu..(ch + 1) * lu];
+            let dst = &mut padded[ch * lp..(ch + 1) * lp];
+            for d in dst.iter_mut().take(plu) {
+                *d = src[0];
+            }
+            dst[plu..plu + lu].copy_from_slice(src);
+            for d in dst[plu + lu..].iter_mut() {
+                *d = src[lu - 1];
+            }
+        }
+        let pbuf = self.upload(&padded);
+        let conv = audio::conv::Conv1d { n: 1, cin: c, l: lp as u32, cout: c, k, stride, pad: 0, dilation: 1, groups: 1, lo };
+        let out = self.st((c * lo) as usize);
+        self.run(audio::conv::conv1d_fwd(
+            &self.gpu,
+            &audio::conv::ConvKernels { fwd: CONV1D, dx: 0, dw: 0 },
+            &conv,
+            &pbuf,
+            self.w("encoder.downsample.conv.weight"),
+            &out,
+        ));
+        (out, lo)
+    }
+
+    /// Mimi encoder transformer over token-major `[T, hidden]`: 8 pre-LN layers
+    /// (LayerNorm **with bias**, RoPE GQA attention with scaling `1/√head_dim`,
+    /// gelu MLP `fc2(gelu(fc1))`, per-channel LayerScale on each residual). No
+    /// input/output projection and no final norm (unlike the decoder).
+    fn enc_transformer(&self, x0: &DeviceBuffer, t: u32) -> DeviceBuffer {
+        let e = self.cfg.enc.clone();
+        let d = e.hidden_size;
+        let hd = e.head_dim;
+        let nh = e.num_attention_heads;
+        let nkv = e.num_key_value_heads;
+        let hq = nh * hd;
+        let hkv = nkv * hd;
+        let ff = e.intermediate_size;
+        let theta = e.rope_theta;
+        let ids = ids();
+        let ga = Gqa { b: 1, t, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
+
+        let mut x = clone_buf(self, x0, t * d);
+        for layer in 0..e.num_hidden_layers as usize {
+            let p = |leaf: &str| format!("encoder.encoder_transformer.layers.{layer}.{leaf}");
+            // --- attention ---
+            let xn = self.host_ln(&x, t, d, &p("input_layernorm"), e.norm_eps);
+            let q = self.matmul(&xn, &p("self_attn.q_proj.weight"), t, d, hq);
+            let k = self.matmul(&xn, &p("self_attn.k_proj.weight"), t, d, hkv);
+            let v = self.matmul(&xn, &p("self_attn.v_proj.weight"), t, d, hkv);
+            self.run(block::rope_fwd(&self.gpu, &ids, &q, t, nh, hd, hq, t, theta));
+            self.run(block::rope_fwd(&self.gpu, &ids, &k, t, nkv, hd, hkv, t, theta));
+            let scores = self.st((nh * t * t) as usize);
+            let probs = self.st((nh * t * t) as usize);
+            let ctx = self.st((t * hq) as usize);
+            self.gpu.submit(&[], &block::gqa_fwd(&self.gpu, &ids, &ga, &q, &k, &v, &scores, &probs, &ctx));
+            let attn = self.matmul(&ctx, &p("self_attn.o_proj.weight"), t, hq, d);
+            let attn = self.scale_chan(&attn, &p("self_attn_layer_scale.scale"), t * d, d, 1);
+            x = self.add2(&x, &attn, t * d);
+            // --- MLP: fc2(gelu(fc1(x))) ---
+            let xn = self.host_ln(&x, t, d, &p("post_attention_layernorm"), e.norm_eps);
+            let g = self.matmul(&xn, &p("mlp.fc1.weight"), t, d, ff);
+            let mut gv = self.gpu.read(&g, (t * ff) as usize);
+            for val in &mut gv {
+                *val = gelu_exact(*val);
+            }
+            let gbuf = self.upload(&gv);
+            let mlp = self.matmul(&gbuf, &p("mlp.fc2.weight"), t, ff, d);
+            let mlp = self.scale_chan(&mlp, &p("mlp_layer_scale.scale"), t * d, d, 1);
+            x = self.add2(&x, &mlp, t * d);
+        }
+        x
+    }
+
+    /// Host `nn.LayerNorm` (affine γ/β, given eps) over the last axis of a
+    /// token-major `[t, d]` device buffer; returns a fresh device buffer.
+    fn host_ln(&self, x: &DeviceBuffer, t: u32, d: u32, prefix: &str, eps: f32) -> DeviceBuffer {
+        let mut v = self.gpu.read(x, (t * d) as usize);
+        host_layernorm(&mut v, t as usize, d as usize, &self.host[&format!("{prefix}.weight")], &self.host[&format!("{prefix}.bias")], eps);
+        self.upload(&v)
+    }
+
+    /// Host ELU activation (α = 1): `x if x>0 else exp(x)-1`. `n` = element count.
+    fn elu(&self, x: &DeviceBuffer, n: u32) -> DeviceBuffer {
+        let mut v = self.gpu.read(x, n as usize);
+        for val in &mut v {
+            if *val < 0.0 {
+                *val = val.exp() - 1.0;
+            }
+        }
+        self.upload(&v)
+    }
+
+    /// Split residual-vector-quantizer **encode**: project the `[hidden, T]`
+    /// embeddings to `codebook_dim` (semantic & acoustic `input_proj`), then run
+    /// the nearest-codebook argmin + residual loop on the host. Returns `[T,16]`
+    /// row-major codes (q0 semantic, q1..15 acoustic).
+    fn rvq_encode(&self, emb_ncl: &DeviceBuffer, t: u32) -> Vec<u32> {
+        let e = self.cfg.enc.clone();
+        let (h, cd) = (e.hidden_size, e.codebook_dim);
+        let cs = e.codebook_size as usize;
+        let n_sem = e.num_semantic_quantizers as usize;
+        let nq = self.cfg.num_quantizers as usize;
+        let n_aco = nq - n_sem;
+        let emb_tm = self.transpose(emb_ncl, h, t); // [T, hidden]
+
+        let sem_p = self.matmul(&emb_tm, "encoder.quantizer.semantic_residual_vector_quantizer.input_proj.weight", t, h, cd);
+        let aco_p = self.matmul(&emb_tm, "encoder.quantizer.acoustic_residual_vector_quantizer.input_proj.weight", t, h, cd);
+        let mut sem = self.gpu.read(&sem_p, (t * cd) as usize);
+        let mut aco = self.gpu.read(&aco_p, (t * cd) as usize);
+
+        let (cd, tt) = (cd as usize, t as usize);
+        let mut codes = vec![0u32; tt * nq];
+        let mut encode_group = |buf: &mut [f32], group: &str, layers: usize, col0: usize| {
+            for q in 0..layers {
+                let table = self.gpu.read(self.w(&format!("encoder.quantizer.{group}_residual_vector_quantizer.layers.{q}.table")), cs * cd);
+                for ti in 0..tt {
+                    let v = &buf[ti * cd..(ti + 1) * cd];
+                    let idx = nearest(v, &table, cs, cd);
+                    codes[ti * nq + col0 + q] = idx as u32;
+                    let row = &table[idx * cd..(idx + 1) * cd];
+                    for c in 0..cd {
+                        buf[ti * cd + c] -= row[c];
+                    }
+                }
+            }
+        };
+        encode_group(&mut sem, "semantic", n_sem, 0);
+        encode_group(&mut aco, "acoustic", n_aco, n_sem);
+        codes
+    }
+}
+
+/// Nearest codebook row (argmin squared-Euclidean) to `v` over a `[bins, dim]`
+/// flat table — `MimiEuclideanCodebook.quantize` (cdist p=2 + argmin).
+fn nearest(v: &[f32], table: &[f32], bins: usize, dim: usize) -> usize {
+    let mut best = 0usize;
+    let mut best_d = f32::INFINITY;
+    for b in 0..bins {
+        let row = &table[b * dim..(b + 1) * dim];
+        let mut d = 0.0f32;
+        for c in 0..dim {
+            let diff = v[c] - row[c];
+            d += diff * diff;
+        }
+        if d < best_d {
+            best_d = d;
+            best = b;
+        }
+    }
+    best
+}
+
 fn clone_buf(c: &Codec, x: &DeviceBuffer, n: u32) -> DeviceBuffer {
     let v = c.gpu.read(x, n as usize);
     c.upload(&v)
@@ -427,12 +687,12 @@ fn ids() -> KernelIds {
 
 /// `nn.LayerNorm` over the last axis (C) of a row-major `[rows, C]` buffer,
 /// population variance, eps 1e-6, with affine γ/β. In place.
-fn host_layernorm(x: &mut [f32], rows: usize, c: usize, gamma: &[f32], beta: &[f32]) {
+fn host_layernorm(x: &mut [f32], rows: usize, c: usize, gamma: &[f32], beta: &[f32], eps: f32) {
     for r in 0..rows {
         let row = &mut x[r * c..(r + 1) * c];
         let mean = row.iter().sum::<f32>() / c as f32;
         let var = row.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / c as f32;
-        let inv = 1.0 / (var + LN_EPS).sqrt();
+        let inv = 1.0 / (var + eps).sqrt();
         for j in 0..c {
             row[j] = (row[j] - mean) * inv * gamma[j] + beta[j];
         }

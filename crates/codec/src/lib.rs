@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen3-TTS 12 Hz neural audio codec (Mimi/Moshi-style), decode path first.
+//! Qwen3-TTS 12 Hz neural audio codec (Mimi/Moshi-style): decode **and** encode.
+//!
+//! The ENCODE path ([`Codec::encode`], wav `->` codes `[T,16]`) mirrors the
+//! HuggingFace `MimiModel` encoder: SEANet conv encoder -> encoder transformer
+//! (LayerNorm + gelu MLP) -> frame-rate-match downsample -> split-RVQ
+//! nearest-codebook encode (argmin + residual on the host). It is exact vs the
+//! reference `tokenizer.encode` (100% code-match on the golden dump).
 //!
 //! Pipeline (decode): codes `[T,16]` -> SplitResidualVectorQuantizer dequant
 //! (1 semantic + 15 acoustic codebooks, embedding gather + sum) -> pre-conv ->
@@ -15,6 +21,7 @@
 pub mod config;
 pub mod import;
 pub mod model;
+pub mod recon;
 
 pub use config::CodecConfig;
 pub use import::import;
