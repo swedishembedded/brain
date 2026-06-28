@@ -21,9 +21,12 @@ pub fn run_qwen(args: &[String]) {
         Some("import") => import(&args[1..]),
         Some("infer") | Some("gen") => infer(&args[1..]),
         Some("export") => export(&args[1..]),
+        Some("precompile") => precompile(&args[1..]),
         Some("train") => train(&args[1..], None),
         Some("finetune") => finetune(&args[1..]),
-        other => eprintln!("usage: brain qwen <import|infer|export|train|finetune> ...  (got {other:?})"),
+        other => {
+            eprintln!("usage: brain qwen <import|infer|export|precompile|train|finetune> ...  (got {other:?})")
+        }
     }
 }
 
@@ -89,6 +92,33 @@ fn import(args: &[String]) {
     }
 }
 
+/// `brain qwen precompile --weights F --seq T [--npu-cache D]` — export + compile
+/// the NPU decoder once into the cache so later `infer --device npu --seq T`
+/// (with the same `--npu-cache`) skips the export + compile wait.
+fn precompile(args: &[String]) {
+    let mut weights = String::new();
+    let mut npu_cache = "out/npu-cache".to_string();
+    let mut seq = 0usize;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--weights" => weights = val(args, &mut i, "--weights"),
+            "--npu-cache" => npu_cache = val(args, &mut i, "--npu-cache"),
+            "--seq" => seq = val(args, &mut i, "--seq").parse().unwrap_or(seq),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    if weights.is_empty() || seq == 0 {
+        eprintln!("usage: brain qwen precompile --weights F --seq T [--npu-cache out/npu-cache]");
+        return;
+    }
+    match npu::qwen_decode::precompile(&weights, seq, npu::openvino::NpuDevice::Npu, true, std::path::Path::new(&npu_cache)) {
+        Ok((dev, ms)) => println!("precompiled seq {seq} on OpenVINO {dev} in {:.1}s -> cache {npu_cache}", ms / 1e3),
+        Err(e) => eprintln!("precompile failed: {e}"),
+    }
+}
+
 fn infer(args: &[String]) {
     let mut weights = String::new();
     let mut tokenizer = String::new();
@@ -98,6 +128,8 @@ fn infer(args: &[String]) {
     let mut top_k = 0usize;
     let mut seed = 0u64;
     let mut chat = false;
+    let mut npu_cache = "out/npu-cache".to_string();
+    let mut seq: Option<usize> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -109,6 +141,10 @@ fn infer(args: &[String]) {
             "--top-k" => top_k = val(args, &mut i, "--top-k").parse().unwrap_or(top_k),
             "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
             "--chat" => chat = true,
+            // NPU: cache the exported ONNX + compiled blob here; "" disables.
+            "--npu-cache" => npu_cache = val(args, &mut i, "--npu-cache"),
+            // NPU: pin the compiled context length so one cache serves all prompts.
+            "--seq" => seq = val(args, &mut i, "--seq").parse().ok(),
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
@@ -136,9 +172,10 @@ fn infer(args: &[String]) {
     }
     // NPU / OpenVINO whole-graph path (greedy only): export -> compile -> decode.
     if want_npu() {
-        match npu::qwen_decode::generate(&weights, &ids, max_new, npu::openvino::NpuDevice::Npu, true) {
+        let cache = (!npu_cache.is_empty()).then(|| std::path::PathBuf::from(&npu_cache));
+        match npu::qwen_decode::generate(&weights, &ids, max_new, npu::openvino::NpuDevice::Npu, true, cache.as_deref(), seq) {
             Ok(run) => {
-                eprintln!("npu: ran on OpenVINO device {}", run.device);
+                eprintln!("npu: ran on OpenVINO device {} (onnx_cached={})", run.device, run.onnx_cached);
                 eprintln!("qwen-timing load_ms={:.1} gen_ms={:.1} tokens={}", run.load_ms, run.gen_ms, run.tokens.len());
                 print!("{prompt}");
                 print!("{}", tok.decode(&run.tokens));
