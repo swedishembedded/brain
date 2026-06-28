@@ -316,7 +316,10 @@ pub type Step = (usize, wgpu::BindGroup, u32, u32);
 /// goes to the browser console.
 #[cfg(not(target_arch = "wasm32"))]
 fn log_adapter(info: &wgpu::AdapterInfo) {
-    eprintln!("adapter: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
+    // Several engine instances may be built in one process (the TTS pipeline makes
+    // one per component); log the adapter line only once.
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    LOGGED.call_once(|| eprintln!("adapter: {} ({:?}, {:?})", info.name, info.device_type, info.backend));
 }
 #[cfg(target_arch = "wasm32")]
 fn log_adapter(info: &wgpu::AdapterInfo) {

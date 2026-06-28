@@ -100,7 +100,10 @@ impl CpuBackend {
     pub fn new(kernels: &[(&str, &str)]) -> CpuBackend {
         let jit = Jit::new(kernels).expect("WGSL->CPU JIT compilation failed");
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        eprintln!("adapter: brain-wgsl-cpu (Cranelift JIT, {threads} threads)");
+        // A process can build several engine instances (e.g. the TTS pipeline
+        // makes one per component); log the adapter line only once.
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        LOGGED.call_once(|| eprintln!("adapter: brain-wgsl-cpu (Cranelift JIT, {threads} threads)"));
         let names: Vec<String> = kernels.iter().map(|(n, _)| n.to_string()).collect();
         let profile = if std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false) {
             Some(Mutex::new(vec![(std::time::Duration::ZERO, 0u64); names.len()]))
