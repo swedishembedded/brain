@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use model::block::{self, Gqa, KernelIds};
 use optim::Optim;
 use paramstore::ParamStore;
 
@@ -350,14 +351,38 @@ impl Qwen {
         self.ps.grad.contains_key(name)
     }
 
-    /// RMSNorm backward: always emits the input grad (dX); emits the gain grad
-    /// (dW, needing the per-row inverse) only when the gain is trainable.
-    fn rmsnorm_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
-        if self.trainable(wname) {
-            s.push(self.gpu.step(RMS_INV, &[x, &self.inv], &[dim, rows], rows));
-            s.push(self.gpu.step(RMSNORM_DW, &[dy, x, &self.inv, self.g(wname)], &[dim, rows], dim));
+    /// Kernel-index map for the shared `model::block` Step-builders.
+    fn ids() -> KernelIds {
+        KernelIds {
+            rmsnorm: RMSNORM,
+            rms_inv: RMS_INV,
+            rmsnorm_dx: RMSNORM_DX,
+            rmsnorm_dw: RMSNORM_DW,
+            rope: ROPE,
+            rope_bwd: ROPE_BWD,
+            gqa_scores: GQA_SCORES,
+            gqa_apply: GQA_APPLY,
+            attn_softmax: ATTN_SOFTMAX,
+            gqa_dscores: GQA_DSCORES,
+            gqa_dv: GQA_DV,
+            gqa_dq: GQA_DQ,
+            gqa_dk: GQA_DK,
+            silu_mul: SILU_MUL,
+            silu_da: SILU_DA,
+            silu_db: SILU_DB,
         }
-        s.push(self.gpu.step(RMSNORM_DX, &[x, self.w(wname), dy, dx], &[dim, rows], rows));
+    }
+
+    /// GQA shape for `b`×`t` (the buffers are sized for the max `b`/`t`).
+    fn gqa(&self, b: u32, t: u32) -> Gqa {
+        Gqa { b, t, n_heads: self.cfg.n_heads, n_kv_heads: self.cfg.n_kv_heads, head_dim: self.cfg.head_dim }
+    }
+
+    /// RMSNorm backward via the shared builder: input grad always, gain grad only
+    /// when the gain is trainable (frozen LoRA base / inference skip it).
+    fn rmsnorm_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
+        let gw = self.trainable(wname).then(|| self.g(wname));
+        s.extend(block::rmsnorm_bwd(&self.gpu, &Self::ids(), x, self.w(wname), dy, dx, &self.inv, gw, dim, rows));
     }
 
     /// True if a LoRA adapter is configured for the given projection leaf.
@@ -436,13 +461,13 @@ impl Qwen {
         let ff = c.d_ff;
         let v = c.vocab;
         let hd = c.head_dim;
-        let half = hd / 2;
         let hq = c.q_dim();
         let hkv = c.kv_dim();
         let nh = c.n_heads;
         let nkv = c.n_kv_heads;
-        let grp = c.group();
-        let theta = f(c.rope_theta);
+        let ids = Self::ids();
+        let ga = self.gqa(b_use, t_use);
+        let theta = c.rope_theta;
         let mut s: Vec<Step> = Vec::new();
         let dw = d as u64;
         let tiles = self.vocab_tiles();
@@ -462,41 +487,38 @@ impl Qwen {
         for l in 0..c.n_layers as usize {
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
-            // --- attention ---
-            s.push(self.gpu.step(RMSNORM, &[&self.res[l], self.w(&p("ln1.weight")), &lb.xn1], &[d, n], n));
+            // --- attention --- (projections stay here: they carry LoRA/bias;
+            // norms/RoPE/attention-core come from the shared block builders)
+            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[l], self.w(&p("ln1.weight")), &lb.xn1, d, n));
             s.push(self.gpu.step(MATMUL, &[&lb.xn1, self.w(&p("attn.wq.weight")), &lb.q_pre], &[n, d, hq], n * hq));
             self.lora_fwd(&mut s, "wq", &lb.xn1, &p("attn.wq.weight"), &lb.q_pre, n, d, hq);
             s.push(self.gpu.step(MATMUL, &[&lb.xn1, self.w(&p("attn.wk.weight")), &lb.k_pre], &[n, d, hkv], n * hkv));
             self.lora_fwd(&mut s, "wk", &lb.xn1, &p("attn.wk.weight"), &lb.k_pre, n, d, hkv);
             s.push(self.gpu.step(MATMUL, &[&lb.xn1, self.w(&p("attn.wv.weight")), &lb.v], &[n, d, hkv], n * hkv));
             self.lora_fwd(&mut s, "wv", &lb.xn1, &p("attn.wv.weight"), &lb.v, n, d, hkv);
-            // QK-norm over head_dim (rows = n*heads for q, n*kv for k)
-            s.push(self.gpu.step(RMSNORM, &[&lb.q_pre, self.w(&p("attn.q_norm.weight")), &lb.q], &[hd, n * nh], n * nh));
-            s.push(self.gpu.step(RMSNORM, &[&lb.k_pre, self.w(&p("attn.k_norm.weight")), &lb.k], &[hd, n * nkv], n * nkv));
-            // RoPE (half-split, base theta), in place on q/k
-            s.push(self.gpu.step(ROPE, &[&lb.q], &[n, nh, hd, hq, 0, t_use, theta], n * nh * half));
-            s.push(self.gpu.step(ROPE, &[&lb.k], &[n, nkv, hd, hkv, 0, t_use, theta], n * nkv * half));
-            // GQA attention
-            s.push(self.gpu.step(GQA_SCORES, &[&lb.q, &lb.k, &self.scores], &[b_use, nh, nkv, t_use, hd, grp], b_use * nh * t_use * t_use));
-            s.push(self.gpu.step(ATTN_SOFTMAX, &[&self.scores, &lb.probs], &[b_use, nh, t_use], b_use * nh * t_use));
-            s.push(self.gpu.step(GQA_APPLY, &[&lb.probs, &lb.v, &lb.ctx], &[b_use, nh, nkv, t_use, hd, grp], b_use * nh * t_use * hd));
+            // QK-norm over head_dim then half-split RoPE on q/k.
+            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.q_pre, self.w(&p("attn.q_norm.weight")), &lb.q, hd, n * nh));
+            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.k_pre, self.w(&p("attn.k_norm.weight")), &lb.k, hd, n * nkv));
+            s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, nh, hd, hq, t_use, theta));
+            s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, nkv, hd, hkv, t_use, theta));
+            s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &self.scores, &lb.probs, &lb.ctx));
             s.push(self.gpu.step(MATMUL, &[&lb.ctx, self.w(&p("attn.wo.weight")), &self.proj], &[n, hq, d], n * d));
             self.lora_fwd(&mut s, "wo", &lb.ctx, &p("attn.wo.weight"), &self.proj, n, hq, d);
             s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
             // --- SwiGLU MLP ---
-            s.push(self.gpu.step(RMSNORM, &[&lb.xmid, self.w(&p("ln2.weight")), &lb.xn2], &[d, n], n));
+            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.xmid, self.w(&p("ln2.weight")), &lb.xn2, d, n));
             s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&p("mlp.gate.weight")), &lb.gate_pre], &[n, d, ff], n * ff));
             self.lora_fwd(&mut s, "gate", &lb.xn2, &p("mlp.gate.weight"), &lb.gate_pre, n, d, ff);
             s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&p("mlp.up.weight")), &lb.up], &[n, d, ff], n * ff));
             self.lora_fwd(&mut s, "up", &lb.xn2, &p("mlp.up.weight"), &lb.up, n, d, ff);
-            s.push(self.gpu.step(SILU_MUL, &[&lb.gate_pre, &lb.up, &lb.h], &[n * ff], n * ff));
+            s.push(block::swiglu_fwd(&self.gpu, &ids, &lb.gate_pre, &lb.up, &lb.h, n * ff));
             s.push(self.gpu.step(MATMUL, &[&lb.h, self.w(&p("mlp.down.weight")), &self.mlp_out], &[n, ff, d], n * d));
             self.lora_fwd(&mut s, "down", &lb.h, &p("mlp.down.weight"), &self.mlp_out, n, ff, d);
             s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
         }
 
         let last = c.n_layers as usize;
-        s.push(self.gpu.step(RMSNORM, &[&self.res[last], self.w("norm.weight"), &self.xn_final], &[d, n], n));
+        s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[last], self.w("norm.weight"), &self.xn_final, d, n));
         // lm_head, tiled over vocab; each tile writes its column slice of logits.
         let head = c.head_weight();
         for &(v0, cnt) in &tiles {
@@ -532,16 +554,16 @@ impl Qwen {
         let ff = c.d_ff;
         let v = c.vocab;
         let hd = c.head_dim;
-        let half = hd / 2;
         let hq = c.q_dim();
         let hkv = c.kv_dim();
         let nh = c.n_heads;
         let nkv = c.n_kv_heads;
-        let grp = c.group();
-        let theta = f(c.rope_theta);
+        let theta = c.rope_theta;
         let head = c.head_weight();
         let b = self.b;
         let t = self.t;
+        let ids = Self::ids();
+        let ga = self.gqa(b, t);
         let mut s: Vec<Step> = Vec::new();
 
         // ---- head + final norm ----
@@ -559,8 +581,7 @@ impl Qwen {
 
             // ---- SwiGLU MLP backward (input grad = dres[l+1]) ----
             self.proj_bwd(&mut s, "down", &self.dres[l + 1], &lb.h, &p("mlp.down.weight"), &self.d_h, n, ff, d, 0);
-            s.push(self.gpu.step(SILU_DA, &[&lb.gate_pre, &lb.up, &self.d_h, &self.d_gate_pre], &[n * ff], n * ff));
-            s.push(self.gpu.step(SILU_DB, &[&lb.gate_pre, &self.d_h, &self.d_up], &[n * ff], n * ff));
+            s.extend(block::swiglu_bwd(&self.gpu, &ids, &lb.gate_pre, &lb.up, &self.d_h, &self.d_gate_pre, &self.d_up, n * ff));
             self.proj_bwd(&mut s, "up", &self.d_up, &lb.xn2, &p("mlp.up.weight"), &self.d_xn, n, d, ff, 0);
             self.proj_bwd(&mut s, "gate", &self.d_gate_pre, &lb.xn2, &p("mlp.gate.weight"), &self.d_xn, n, d, ff, 1);
             self.rmsnorm_bwd(&mut s, &lb.xmid, &p("ln2.weight"), &self.d_xn, &self.d_tmp, d, n);
@@ -568,13 +589,12 @@ impl Qwen {
 
             // ---- attention backward (input grad = dxmid) ----
             self.proj_bwd(&mut s, "wo", &self.dxmid, &lb.ctx, &p("attn.wo.weight"), &self.d_ctx, n, hq, d, 0);
-            s.push(self.gpu.step(GQA_DSCORES, &[&self.d_ctx, &lb.v, &lb.probs, &self.d_scores], &[b, nh, nkv, t, hd, grp], b * nh * t));
-            s.push(self.gpu.step(GQA_DV, &[&lb.probs, &self.d_ctx, &self.d_v], &[b, nh, nkv, t, hd, grp], b * nkv * t * hd));
-            s.push(self.gpu.step(GQA_DQ, &[&self.d_scores, &lb.k, &self.d_q], &[b, nh, nkv, t, hd, grp], b * nh * t * hd));
-            s.push(self.gpu.step(GQA_DK, &[&self.d_scores, &lb.q, &self.d_k], &[b, nh, nkv, t, hd, grp], b * nkv * t * hd));
+            s.extend(block::gqa_bwd(
+                &self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &lb.probs, &self.d_ctx, &self.d_scores, &self.d_q, &self.d_k, &self.d_v,
+            ));
             // RoPE backward (in place on d_q/d_k -> grad wrt normed q/k)
-            s.push(self.gpu.step(ROPE_BWD, &[&self.d_q], &[n, nh, hd, hq, 0, t, theta], n * nh * half));
-            s.push(self.gpu.step(ROPE_BWD, &[&self.d_k], &[n, nkv, hd, hkv, 0, t, theta], n * nkv * half));
+            s.push(block::rope_bwd(&self.gpu, &ids, &self.d_q, n, nh, hd, hq, t, theta));
+            s.push(block::rope_bwd(&self.gpu, &ids, &self.d_k, n, nkv, hd, hkv, t, theta));
             // QK-norm backward: grad wrt q_pre/k_pre -> dq_pre/dk_pre
             self.rmsnorm_bwd(&mut s, &lb.q_pre, &p("attn.q_norm.weight"), &self.d_q, &self.dq_pre, hd, n * nh);
             self.rmsnorm_bwd(&mut s, &lb.k_pre, &p("attn.k_norm.weight"), &self.d_k, &self.dk_pre, hd, n * nkv);

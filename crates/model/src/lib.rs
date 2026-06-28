@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 
+pub mod block;
 pub mod train;
 
 pub use train::{cosine_lr, generate, FitOpts, IGNORE};
