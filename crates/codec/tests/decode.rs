@@ -19,12 +19,21 @@ fn ckpt_available() -> bool {
 }
 
 fn import_to_temp() -> String {
-    let out = std::env::temp_dir()
-        .join(format!("codec_decode_{}.weights", std::process::id()))
-        .to_string_lossy()
-        .into_owned();
-    codec::import(CKPT_DIR, &out).expect("import failed");
-    out
+    // Memoize: import the (651 MB) checkpoint ONCE and share the path across all
+    // tests. Without this, parallel tests race on the same temp filename and the
+    // checkpoint `rename` finalisation panics (and each test re-dequantizes the
+    // whole file). `get_or_init` runs the closure on exactly one thread.
+    static SHARED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            let out = std::env::temp_dir()
+                .join(format!("codec_decode_{}.weights", std::process::id()))
+                .to_string_lossy()
+                .into_owned();
+            codec::import(CKPT_DIR, &out).expect("import failed");
+            out
+        })
+        .clone()
 }
 
 /// Every `decoder.*` tensor is accounted for (mapped or intentionally dropped),

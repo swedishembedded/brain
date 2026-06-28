@@ -171,6 +171,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-audio"
+version = "0.1.0"
+dependencies = [
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "bytemuck",
+]
+
+[[package]]
 name = "brain-autodiff"
 version = "0.1.0"
 
@@ -233,6 +243,22 @@ dependencies = [
  "brain-runtime",
  "brain-vulkan",
  "brain-yolo",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-codec"
+version = "0.1.0"
+dependencies = [
+ "brain-audio",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
  "serde_json",
 ]
 
@@ -461,8 +487,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-speaker"
+version = "0.1.0"
+dependencies = [
+ "brain-audio",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-timeseries"
 version = "0.1.0"
+
+[[package]]
+name = "brain-tts"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-gradcheck",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "brain-qwen",
+ "bytemuck",
+ "serde_json",
+]
 
 [[package]]
 name = "brain-vulkan"
