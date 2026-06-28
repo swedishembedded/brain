@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! Talker + MTP code-predictor configuration, parsed from the official
+//! `Qwen3-TTS-12Hz-0.6B-Base` `config.json` (`talker_config`).
+//!
+//! NOTE the Talker uses **M-RoPE** (`rope_scaling.interleaved = true`,
+//! `mrope_section = [24,20,20]`), which differs from brain-qwen's half-split
+//! NeoX RoPE — the model code must apply the interleaved/mrope convention for
+//! HF parity.
+
+use serde_json::Value;
+
+/// Talker (Qwen3-style multi-codebook decoder) configuration.
+#[derive(Clone, Debug)]
+pub struct TalkerConfig {
+    pub n_layers: u32,     // 28
+    pub d_model: u32,      // 1024
+    pub head_dim: u32,     // 128 (note q_dim = n_heads*head_dim = 2048 != d_model)
+    pub n_heads: u32,      // 16
+    pub n_kv_heads: u32,   // 8
+    pub d_ff: u32,         // 3072
+    pub vocab: u32,        // 3072 (codebook-0 + specials)
+    pub num_code_groups: u32, // 16
+    pub text_hidden_size: u32, // 2048
+    pub text_vocab_size: u32,  // 151936
+    pub rope_theta: f32,   // 1e6
+    pub rms_norm_eps: f32, // 1e-6
+    pub max_position_embeddings: u32, // 32768
+    pub mrope_section: Vec<u32>, // [24,20,20]
+    pub mrope_interleaved: bool, // true
+    pub position_id_per_seconds: u32, // 13
+    // special codec token ids
+    pub codec_bos_id: u32,
+    pub codec_eos_token_id: u32,
+    pub codec_pad_id: u32,
+}
+
+/// MTP code-predictor (5-layer Qwen3 block) configuration.
+#[derive(Clone, Debug)]
+pub struct MtpConfig {
+    pub n_layers: u32,   // 5
+    pub d_model: u32,    // 1024
+    pub head_dim: u32,   // 128
+    pub n_heads: u32,    // 16
+    pub n_kv_heads: u32, // 8
+    pub d_ff: u32,       // 3072
+    pub vocab: u32,      // 2048 (per residual codebook)
+    pub num_code_groups: u32, // 16
+    pub rope_theta: f32, // 1e6
+    pub rms_norm_eps: f32, // 1e-6
+}
+
+fn gu(o: &Value, k: &str, d: u32) -> u32 {
+    o[k].as_u64().map(|x| x as u32).unwrap_or(d)
+}
+fn gf(o: &Value, k: &str, d: f32) -> f32 {
+    o[k].as_f64().map(|x| x as f32).unwrap_or(d)
+}
+
+impl TalkerConfig {
+    /// Parse from the top-level talker `config.json` value (the object that
+    /// contains `talker_config`).
+    pub fn from_json(root: &Value) -> TalkerConfig {
+        let t = &root["talker_config"];
+        let mrope = t["rope_scaling"]["mrope_section"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_u64().map(|y| y as u32)).collect())
+            .unwrap_or_else(|| vec![24, 20, 20]);
+        TalkerConfig {
+            n_layers: gu(t, "num_hidden_layers", 28),
+            d_model: gu(t, "hidden_size", 1024),
+            head_dim: gu(t, "head_dim", 128),
+            n_heads: gu(t, "num_attention_heads", 16),
+            n_kv_heads: gu(t, "num_key_value_heads", 8),
+            d_ff: gu(t, "intermediate_size", 3072),
+            vocab: gu(t, "vocab_size", 3072),
+            num_code_groups: gu(t, "num_code_groups", 16),
+            text_hidden_size: gu(t, "text_hidden_size", 2048),
+            text_vocab_size: gu(t, "text_vocab_size", 151936),
+            rope_theta: gf(t, "rope_theta", 1_000_000.0),
+            rms_norm_eps: gf(t, "rms_norm_eps", 1e-6),
+            max_position_embeddings: gu(t, "max_position_embeddings", 32768),
+            mrope_interleaved: t["rope_scaling"]["interleaved"].as_bool().unwrap_or(true),
+            mrope_section: mrope,
+            position_id_per_seconds: gu(t, "position_id_per_seconds", 13),
+            codec_bos_id: gu(t, "codec_bos_id", 2149),
+            codec_eos_token_id: gu(t, "codec_eos_token_id", 2150),
+            codec_pad_id: gu(t, "codec_pad_id", 2148),
+        }
+    }
+}
+
+impl MtpConfig {
+    pub fn from_json(root: &Value) -> MtpConfig {
+        let c = &root["talker_config"]["code_predictor_config"];
+        MtpConfig {
+            n_layers: gu(c, "num_hidden_layers", 5),
+            d_model: gu(c, "hidden_size", 1024),
+            head_dim: gu(c, "head_dim", 128),
+            n_heads: gu(c, "num_attention_heads", 16),
+            n_kv_heads: gu(c, "num_key_value_heads", 8),
+            d_ff: gu(c, "intermediate_size", 3072),
+            vocab: gu(c, "vocab_size", 2048),
+            num_code_groups: gu(c, "num_code_groups", 16),
+            rope_theta: gf(c, "rope_theta", 1_000_000.0),
+            rms_norm_eps: gf(c, "rms_norm_eps", 1e-6),
+        }
+    }
+}

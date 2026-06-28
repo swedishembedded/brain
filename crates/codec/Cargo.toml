@@ -1,0 +1,25 @@
+[package]
+name = "brain-codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qwen3-TTS 12Hz neural audio codec (Mimi-style): RVQ dequant + transformer + SEANet conv-transpose decoder. Forward (decode) + import + training, in WGSL."
+
+[lib]
+name = "codec"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-audio.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-checkpoint.workspace = true
+brain-data.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+brain-audio.workspace = true

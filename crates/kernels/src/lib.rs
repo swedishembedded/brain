@@ -144,6 +144,10 @@ pub const LEAKY_RELU_BWD: &str = include_str!("../wgsl/leaky_relu_bwd.wgsl");
 pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
 /// `wgsl/tanh_act_bwd.wgsl`
 pub const TANH_ACT_BWD: &str = include_str!("../wgsl/tanh_act_bwd.wgsl");
+/// `wgsl/snake_beta.wgsl`
+pub const SNAKE_BETA: &str = include_str!("../wgsl/snake_beta.wgsl");
+/// `wgsl/scale_chan.wgsl`
+pub const SCALE_CHAN: &str = include_str!("../wgsl/scale_chan.wgsl");
 /// `wgsl/dfl_decode.wgsl`
 pub const DFL_DECODE: &str = include_str!("../wgsl/dfl_decode.wgsl");
 /// `wgsl/dfl_grad.wgsl`
@@ -330,6 +334,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("leaky_relu_bwd", LEAKY_RELU_BWD),
     ("tanh_act", TANH_ACT),
     ("tanh_act_bwd", TANH_ACT_BWD),
+    ("snake_beta", SNAKE_BETA),
+    ("scale_chan", SCALE_CHAN),
     ("dfl_decode", DFL_DECODE),
     ("dfl_grad", DFL_GRAD),
     ("dfl_loss", DFL_LOSS),
@@ -406,7 +412,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_kernels_present_and_nonempty() {
-        assert_eq!(ALL.len(), 124);
+        assert_eq!(ALL.len(), 126);
         for (n, s) in ALL { assert!(!s.trim().is_empty(), "empty kernel {n}"); }
     }
     #[test]
