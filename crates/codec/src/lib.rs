@@ -13,5 +13,9 @@
 //! builders, the shared WGSL engine, and `checkpoint::safetensors` for import.
 
 pub mod config;
+pub mod import;
+pub mod model;
 
 pub use config::CodecConfig;
+pub use import::import;
+pub use model::Codec;

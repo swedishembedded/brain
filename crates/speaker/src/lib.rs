@@ -10,5 +10,10 @@
 //! weights from the 0.6B/1.7B checkpoints.
 
 pub mod config;
+pub mod import;
+pub mod mel;
+pub mod model;
 
 pub use config::SpeakerConfig;
+pub use import::import;
+pub use model::SpeakerEncoder;
