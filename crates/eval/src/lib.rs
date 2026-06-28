@@ -13,6 +13,7 @@
 //!   "did it actually learn the rule" number, not perplexity.
 
 pub mod detection;
+pub mod tts;
 
 use std::path::Path;
 

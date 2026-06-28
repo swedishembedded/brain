@@ -36,7 +36,11 @@ use hfsm::{Disp, Hsm, Machine};
 pub mod pump;
 pub mod sample;
 
-pub use pump::StreamPump;
+pub use pump::{AudioStreamPump, StreamPump};
+
+/// How many PCM samples each streamed `audio_chunk` carries (24 kHz · 1 s). The
+/// whole waveform is produced up front, then sliced into chunks of this size.
+pub const AUDIO_CHUNK_SAMPLES: usize = 24000;
 
 /// A text/token inference model (e.g. a GPT decoder) behind an object-safe seam.
 pub trait InferModel {
@@ -58,6 +62,40 @@ pub trait DetectModel {
     /// Class-id → label table (parallel to the `class` field of a detection).
     fn labels(&self) -> &[String] {
         &[]
+    }
+}
+
+/// A resolved text-to-speech request handed to a [`SynthModel`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SynthRequest {
+    /// The text to synthesize.
+    pub text: String,
+    /// Optional reference-audio path for voice cloning (x-vector timbre).
+    pub ref_audio: Option<String>,
+    /// Optional transcript of the reference audio (ICL path).
+    pub ref_text: Option<String>,
+    /// Optional language tag (e.g. `"english"`); the model picks a default.
+    pub language: Option<String>,
+}
+
+/// A text-to-speech model behind an object-safe seam (the TTS analogue of
+/// [`InferModel`]). The controller calls [`synth`](SynthModel::synth) once per
+/// request to produce the whole waveform, which is then streamed out in chunks.
+///
+/// A real Qwen3-TTS model plugs in here by wrapping [`tts::pipeline`]: an adapter
+/// holds the loaded [`tts::TtsPaths`] + [`tts::GenOpts`] and, in `synth`, calls
+/// `tts::pipeline::synth` (no reference) or `tts::pipeline::clone` (with
+/// `ref_audio`/`ref_text`), returning the 24 kHz waveform. It is intentionally
+/// NOT wired into `brain run` here to keep the runtime's build/deps light (the
+/// TTS stack pulls the whole codec+speaker+talker graph); the seam + a
+/// [`FakeSynthModel`] test is sufficient.
+pub trait SynthModel {
+    /// Synthesize a waveform for `req`. The companion [`sample_rate`] gives its
+    /// rate (Hz).
+    fn synth(&self, req: &SynthRequest) -> Vec<f32>;
+    /// Output sample rate (Hz). Defaults to 24 kHz (the Qwen3-TTS codec rate).
+    fn sample_rate(&self) -> u32 {
+        24000
     }
 }
 
@@ -238,6 +276,33 @@ fn trailing_match_len(tokens: &[u32], script: &[u32]) -> usize {
     0
 }
 
+/// A [`SynthModel`] returning a fixed, deterministic waveform whose length scales
+/// with the request text, so tests can assert chunking without a real TTS model.
+pub struct FakeSynthModel {
+    /// Samples of synthesized audio per input character (deterministic ramp).
+    pub samples_per_char: usize,
+    pub sample_rate: u32,
+}
+
+impl Default for FakeSynthModel {
+    fn default() -> FakeSynthModel {
+        // ~2.5 chunks of audio for a 60-char prompt at the default chunk size,
+        // enough to exercise multi-chunk streaming + the terminal `done`.
+        FakeSynthModel { samples_per_char: 1000, sample_rate: 24000 }
+    }
+}
+
+impl SynthModel for FakeSynthModel {
+    fn synth(&self, req: &SynthRequest) -> Vec<f32> {
+        let n = (req.text.chars().count().max(1)) * self.samples_per_char;
+        // Deterministic low-amplitude ramp; content is irrelevant to the tests.
+        (0..n).map(|i| ((i % 256) as f32 / 256.0) - 0.5).collect()
+    }
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+}
+
 /// A [`DetectModel`] returning one fixed, deterministic box. Stands in for YOLO.
 pub struct FakeDetectModel {
     pub det: [f32; 6],
@@ -266,6 +331,7 @@ impl DetectModel for FakeDetectModel {
 pub struct Registry {
     pub infer: Option<Box<dyn InferModel>>,
     pub detect: Option<Box<dyn DetectModel>>,
+    pub synth: Option<Box<dyn SynthModel>>,
 }
 
 impl Registry {
@@ -278,7 +344,7 @@ impl Registry {
         infer: Box<dyn InferModel>,
         detect: Box<dyn DetectModel>,
     ) -> Registry {
-        Registry { infer: Some(infer), detect: Some(detect) }
+        Registry { infer: Some(infer), detect: Some(detect), synth: None }
     }
 }
 
@@ -291,6 +357,7 @@ enum St {
     Idle,
     Chatting,
     Detecting,
+    Synthesizing,
     Faulted,
 }
 
@@ -326,6 +393,8 @@ struct Brain {
     registry: Registry,
     cfg: GenConfig,
     pump: Option<StreamPump>,
+    /// Active audio pump while in `Synthesizing` (parallel to `pump`).
+    audio_pump: Option<AudioStreamPump>,
     seq: u32,
     out: Vec<Envelope>,
     /// Prompt stashed by the controller before entering `Chatting` (entry actions
@@ -333,6 +402,8 @@ struct Brain {
     pending_prompt: Option<String>,
     /// Frame stashed before entering `Detecting`.
     pending_frame: Option<Event>,
+    /// Synth request stashed before entering `Synthesizing`.
+    pending_synth: Option<SynthRequest>,
     /// Set by a handler/entry action to request another `Tick` (Reminder).
     pending_tick: bool,
     /// Set when the current operational substate has finished and wants `Idle`.
@@ -360,7 +431,7 @@ impl Machine for Brain {
         match s {
             St::Root => None,
             St::Operational | St::Faulted => Some(St::Root),
-            St::Idle | St::Chatting | St::Detecting => Some(St::Operational),
+            St::Idle | St::Chatting | St::Detecting | St::Synthesizing => Some(St::Operational),
         }
     }
 
@@ -369,6 +440,7 @@ impl Machine for Brain {
             St::Idle => match ev {
                 Ev::External(Event::UserText { .. }) => Disp::Tran(St::Chatting),
                 Ev::External(Event::CameraFrame { .. }) => Disp::Tran(St::Detecting),
+                Ev::External(Event::UserSynthRequest { .. }) => Disp::Tran(St::Synthesizing),
                 _ => Disp::Unhandled, // bubble (cancel, etc.)
             },
             St::Chatting => match ev {
@@ -389,6 +461,18 @@ impl Machine for Brain {
                 Ev::Tick => Disp::Handled,
                 _ => Disp::Unhandled,
             },
+            St::Synthesizing => match ev {
+                Ev::Tick => {
+                    self.pump_one_chunk();
+                    Disp::Handled
+                }
+                Ev::GoIdle => Disp::Tran(St::Idle),
+                // ignore new input while synthesizing; cancel bubbles to Operational.
+                Ev::External(Event::UserText { .. })
+                | Ev::External(Event::CameraFrame { .. })
+                | Ev::External(Event::UserSynthRequest { .. }) => Disp::Handled,
+                _ => Disp::Unhandled,
+            },
             // `cancel`/error path handled once here, inherited by all substates.
             St::Operational => match ev {
                 Ev::External(Event::Cancel) => Disp::Tran(St::Faulted),
@@ -404,15 +488,18 @@ impl Machine for Brain {
         match s {
             St::Chatting => self.start_chat(),
             St::Detecting => self.run_detection(),
+            St::Synthesizing => self.start_synth(),
             St::Faulted => self.emit(Event::Error { message: "controller faulted".into() }),
             _ => {}
         }
     }
 
     fn on_exit(&mut self, s: St) {
-        if s == St::Chatting {
-            // free the pump exactly once on leaving Chatting
-            self.pump = None;
+        match s {
+            // free each pump exactly once on leaving its streaming state.
+            St::Chatting => self.pump = None,
+            St::Synthesizing => self.audio_pump = None,
+            _ => {}
         }
     }
 }
@@ -452,6 +539,45 @@ impl Brain {
             None => {
                 // EOS / max_new: terminal chunk then back to Idle.
                 self.emit(Event::BrainTextChunk { text: String::new(), seq: self.seq, done: true });
+                self.want_idle = true;
+            }
+        }
+    }
+
+    /// `Synthesizing::on_entry`: synthesize the whole waveform for the stashed
+    /// request, seed the [`AudioStreamPump`], and kick off streaming with a `Tick`.
+    /// Mirrors [`start_chat`](Self::start_chat). With no synth model loaded the
+    /// pump stays `None` and the first Tick emits just the terminal `done`.
+    fn start_synth(&mut self) {
+        let req = self.pending_synth.take().unwrap_or_default();
+        if let Some(synth) = self.registry.synth.as_deref() {
+            let pcm = synth.synth(&req);
+            self.audio_pump =
+                Some(AudioStreamPump::new(pcm, synth.sample_rate(), AUDIO_CHUNK_SAMPLES));
+        }
+        self.seq = 0;
+        self.pending_tick = true;
+    }
+
+    /// `Synthesizing` Tick handler: emit exactly one `audio_chunk`, re-post. At
+    /// the end of the waveform emit the terminal `done:true` chunk and go `Idle`.
+    fn pump_one_chunk(&mut self) {
+        let sr = self.audio_pump.as_ref().map(|p| p.sample_rate()).unwrap_or(24000);
+        let next = self.audio_pump.as_mut().and_then(|p| p.step());
+        match next {
+            Some(pcm_b64) => {
+                self.emit(Event::AudioChunk { pcm_b64, sample_rate: sr, seq: self.seq, done: false });
+                self.seq += 1;
+                self.pending_tick = true; // keep streaming
+            }
+            None => {
+                // Drained (or no model): terminal empty chunk, then back to Idle.
+                self.emit(Event::AudioChunk {
+                    pcm_b64: String::new(),
+                    sample_rate: sr,
+                    seq: self.seq,
+                    done: true,
+                });
                 self.want_idle = true;
             }
         }
@@ -510,10 +636,12 @@ impl Controller {
             registry,
             cfg,
             pump: None,
+            audio_pump: None,
             seq: 0,
             out: Vec::new(),
             pending_prompt: None,
             pending_frame: None,
+            pending_synth: None,
             pending_tick: false,
             want_idle: false,
             active_req_id: None,
@@ -560,6 +688,14 @@ impl Controller {
             Event::CameraFrame { .. } => {
                 self.hsm.machine_mut().pending_frame = Some(ev.clone());
             }
+            Event::UserSynthRequest { text, ref_audio, ref_text, language } => {
+                self.hsm.machine_mut().pending_synth = Some(SynthRequest {
+                    text: text.clone(),
+                    ref_audio: ref_audio.clone(),
+                    ref_text: ref_text.clone(),
+                    language: language.clone(),
+                });
+            }
             _ => {}
         }
         self.hsm.post(Ev::External(ev));
@@ -577,8 +713,11 @@ impl Controller {
     /// (one token / one completion step) before the next is posted, and the run is
     /// non-reentrant, so RTC ordering holds.
     fn pump_until_settled(&mut self) {
-        // Cap iterations as a safety net against a misbehaving pump.
-        for _ in 0..(self.hsm.machine().cfg.max_new + 8).max(8) {
+        // Cap iterations as a safety net against a misbehaving pump. The floor is
+        // generous so legitimate multi-chunk audio streams aren't truncated, while
+        // still bounding a pump that never clears `pending_tick` (each text token
+        // and each audio chunk advances deterministically toward completion).
+        for _ in 0..(self.hsm.machine().cfg.max_new + 8).max(100_000) {
             self.hsm.run();
             let m = self.hsm.machine_mut();
             if m.want_idle {

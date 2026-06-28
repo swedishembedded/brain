@@ -39,6 +39,19 @@ pub enum Event {
     /// Object detections: `dets[i]` = `[x1, y1, x2, y2, score, class]`, with an
     /// optional parallel `labels` of class names.
     ObjectDetected { dets: Vec<[f32; 6]>, labels: Vec<String> },
+    /// User request to synthesize speech from `text`, optionally voice-cloning a
+    /// reference utterance (`ref_audio` path + its transcript `ref_text`) in a
+    /// given `language`. The TTS analogue of [`Event::UserText`].
+    UserSynthRequest {
+        text: String,
+        ref_audio: Option<String>,
+        ref_text: Option<String>,
+        language: Option<String>,
+    },
+    /// A streamed chunk of synthesized audio: base64 little-endian f32 PCM mono
+    /// at `sample_rate`. `seq` orders chunks; `done` marks the final chunk of a
+    /// response. The audio analogue of [`Event::BrainTextChunk`].
+    AudioChunk { pcm_b64: String, sample_rate: u32, seq: u32, done: bool },
     /// Host-requested cancellation of the in-flight operation.
     Cancel,
     /// The runtime has finished initializing and is ready for input.
@@ -123,6 +136,14 @@ fn event_to_value(ev: &Event) -> Value {
             let dets: Vec<Value> = dets.iter().map(|d| json!(d.to_vec())).collect();
             json!({ "event": "object_detected", "dets": dets, "labels": labels })
         }
+        Event::UserSynthRequest { text, ref_audio, ref_text, language } => json!({
+            "event": "user_synth_request", "text": text,
+            "ref_audio": ref_audio, "ref_text": ref_text, "language": language,
+        }),
+        Event::AudioChunk { pcm_b64, sample_rate, seq, done } => json!({
+            "event": "audio_chunk", "pcm_b64": pcm_b64,
+            "sample_rate": sample_rate, "seq": seq, "done": done,
+        }),
         Event::Cancel => json!({ "event": "cancel" }),
         Event::Ready => json!({ "event": "ready" }),
         Event::Error { message } => json!({ "event": "error", "message": message }),
@@ -183,6 +204,18 @@ fn decode_event_value(v: &Value) -> Result<Event, String> {
                 .unwrap_or_default();
             Ok(Event::ObjectDetected { dets, labels })
         }
+        "user_synth_request" => Ok(Event::UserSynthRequest {
+            text: s("text"),
+            ref_audio: v["ref_audio"].as_str().map(|x| x.to_string()),
+            ref_text: v["ref_text"].as_str().map(|x| x.to_string()),
+            language: v["language"].as_str().map(|x| x.to_string()),
+        }),
+        "audio_chunk" => Ok(Event::AudioChunk {
+            pcm_b64: s("pcm_b64"),
+            sample_rate: u("sample_rate"),
+            seq: u("seq"),
+            done: v["done"].as_bool().unwrap_or(false),
+        }),
         "cancel" => Ok(Event::Cancel),
         "ready" => Ok(Event::Ready),
         "error" => Ok(Event::Error { message: s("message") }),
@@ -426,6 +459,20 @@ mod tests {
                 dets: vec![[1.0, 2.0, 3.0, 4.0, 0.9, 5.0], [0.0, 0.0, 1.0, 1.0, 0.5, 0.0]],
                 labels: vec!["cat".into(), "dog".into()],
             },
+            Event::UserSynthRequest {
+                text: "hello world".into(),
+                ref_audio: Some("voice.wav".into()),
+                ref_text: Some("reference".into()),
+                language: Some("english".into()),
+            },
+            Event::UserSynthRequest {
+                text: "no reference".into(),
+                ref_audio: None,
+                ref_text: None,
+                language: None,
+            },
+            Event::AudioChunk { pcm_b64: "AAAA".into(), sample_rate: 24000, seq: 0, done: false },
+            Event::AudioChunk { pcm_b64: "".into(), sample_rate: 24000, seq: 3, done: true },
             Event::Cancel,
             Event::Ready,
             Event::Error { message: "boom".into() },

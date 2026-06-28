@@ -5,7 +5,9 @@
 //! asserting the exact ordered event stream. No trained model, no GPU.
 
 use events::{base64, ppm, Envelope, Event};
-use runtime::{Controller, FakeDetectModel, FakeInferModel, GenConfig, Registry};
+use runtime::{
+    Controller, FakeDetectModel, FakeInferModel, FakeSynthModel, GenConfig, Registry,
+};
 
 /// Project the inner [`Event`]s out of a returned envelope stream (dropping
 /// req_ids) so the existing event-stream assertions read unchanged.
@@ -235,6 +237,120 @@ fn successive_requests_get_correctly_tagged_responses() {
     // And both actually streamed.
     assert!(first.iter().any(|e| matches!(e.event, Event::BrainTextChunk { .. })));
     assert!(second.iter().any(|e| matches!(e.event, Event::BrainTextChunk { .. })));
+}
+
+/// Build a controller wired with a fake TTS model (no real model, no GPU).
+fn synth_controller() -> Controller {
+    let reg = Registry {
+        synth: Some(Box::new(FakeSynthModel::default())),
+        ..Default::default()
+    };
+    Controller::new(reg)
+}
+
+#[test]
+fn user_synth_request_streams_audio_chunks_then_done() {
+    let mut ctrl = synth_controller();
+    // ~60 chars -> 60_000 samples -> 3 chunks at 24_000/chunk + a terminal done.
+    let text = "the quick brown fox jumps over the lazy dog twice and then again!";
+    let line = events::encode_line(&Event::UserSynthRequest {
+        text: text.into(),
+        ref_audio: None,
+        ref_text: None,
+        language: Some("english".into()),
+    });
+    let out = events_of(&ctrl.feed_line(&line));
+
+    let chunks: Vec<(&str, u32, u32, bool)> = out
+        .iter()
+        .filter_map(|e| match e {
+            Event::AudioChunk { pcm_b64, sample_rate, seq, done } => {
+                Some((pcm_b64.as_str(), *sample_rate, *seq, *done))
+            }
+            _ => None,
+        })
+        .collect();
+
+    // At least one chunk plus exactly one terminal done:true.
+    assert!(chunks.len() >= 2, "expected >=1 data chunk + terminal done: {out:?}");
+    assert_eq!(chunks.iter().filter(|c| c.3).count(), 1, "exactly one terminal done");
+    let (_, _, _, last_done) = *chunks.last().unwrap();
+    assert!(last_done, "the final chunk must be the terminal done:true");
+    // Every chunk carries the 24 kHz rate; seqs increment from 0.
+    assert!(chunks.iter().all(|c| c.1 == 24000));
+    assert_eq!(chunks.first().unwrap().2, 0, "first seq is 0");
+    // Non-terminal chunks decode back to f32 PCM cleanly.
+    for (b64, _, _, done) in &chunks {
+        if !done {
+            assert!(runtime::pump::decode_pcm(b64).is_ok(), "chunk must decode");
+        }
+    }
+}
+
+#[test]
+fn user_synth_request_with_req_id_echoes_it() {
+    let mut ctrl = synth_controller();
+    let ev = Event::UserSynthRequest {
+        text: "hello".into(),
+        ref_audio: Some("voice.wav".into()),
+        ref_text: Some("ref".into()),
+        language: None,
+    };
+    let line = events::encode_envelope(&Envelope::with_id(Some("s1".into()), ev));
+    let out = ctrl.feed_line(&line);
+    let chunks: Vec<&Envelope> =
+        out.iter().filter(|e| matches!(e.event, Event::AudioChunk { .. })).collect();
+    assert!(!chunks.is_empty(), "expected audio chunks: {out:?}");
+    for env in &out {
+        assert_eq!(env.req_id.as_deref(), Some("s1"), "every event echoes req_id: {env:?}");
+    }
+    assert!(out.iter().any(|e| matches!(e.event, Event::AudioChunk { done: true, .. })));
+}
+
+#[test]
+fn synth_without_model_emits_terminal_done_only() {
+    // No synth model in the registry: the request must still complete cleanly
+    // with a single terminal done chunk (never panic / hang).
+    let mut ctrl = Controller::new(Registry::new());
+    let line = events::encode_line(&Event::UserSynthRequest {
+        text: "anything".into(),
+        ref_audio: None,
+        ref_text: None,
+        language: None,
+    });
+    let out = events_of(&ctrl.feed_line(&line));
+    let chunks: Vec<&Event> =
+        out.iter().filter(|e| matches!(e, Event::AudioChunk { .. })).collect();
+    assert_eq!(chunks.len(), 1, "exactly the terminal chunk: {out:?}");
+    assert!(matches!(chunks[0], Event::AudioChunk { done: true, .. }));
+}
+
+#[test]
+fn synth_returns_to_idle_and_text_still_works() {
+    // After a synth turn the controller must return to Idle so a following text
+    // turn streams normally (the seam doesn't break the existing path).
+    let infer = Box::new(FakeInferModel::echoing("hi"));
+    let reg = Registry {
+        infer: Some(infer),
+        synth: Some(Box::new(FakeSynthModel::default())),
+        ..Default::default()
+    };
+    let cfg = GenConfig { max_new: 64, temperature: 0.0, top_k: 0, eos: Some(256), seed: 0 };
+    let mut ctrl = Controller::with_config(reg, cfg);
+
+    let s = events_of(&ctrl.feed_line(&events::encode_line(&Event::UserSynthRequest {
+        text: "speak".into(),
+        ref_audio: None,
+        ref_text: None,
+        language: None,
+    })));
+    assert!(s.iter().any(|e| matches!(e, Event::AudioChunk { done: true, .. })));
+
+    let t = events_of(&ctrl.feed_line(r#"{"event":"user_text","text":"go"}"#));
+    assert!(
+        t.iter().any(|e| matches!(e, Event::BrainTextChunk { done: true, .. })),
+        "text path must still stream after a synth turn: {t:?}"
+    );
 }
 
 #[test]

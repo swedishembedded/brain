@@ -279,9 +279,11 @@ dependencies = [
 name = "brain-eval"
 version = "0.1.0"
 dependencies = [
+ "brain-audio",
  "brain-checkpoint",
  "brain-data",
  "brain-gpt",
+ "brain-speaker",
  "brain-yolo",
  "serde_json",
 ]

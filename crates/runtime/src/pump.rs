@@ -88,3 +88,65 @@ fn decode_token(model: &dyn InferModel, tok: u32) -> String {
         None => char::from_u32(tok).unwrap_or('?').to_string(),
     }
 }
+
+/// Streaming pump for synthesized audio — the audio analogue of [`StreamPump`].
+///
+/// The [`crate::SynthModel`] produces the whole waveform up front (TTS is not
+/// incrementally decodable in this seam), so this pump just slices that buffer
+/// into fixed-size chunks and serializes each as base64 little-endian f32 PCM.
+/// One [`step`](AudioStreamPump::step) yields exactly one chunk's base64 (or
+/// `None` once the buffer is drained), letting the controller emit one
+/// `audio_chunk` per RTC tick exactly as the text path emits one `brain_text_chunk`.
+pub struct AudioStreamPump {
+    pcm: Vec<f32>,
+    sample_rate: u32,
+    chunk_samples: usize,
+    pos: usize,
+}
+
+impl AudioStreamPump {
+    /// Wrap a full waveform, chunked into `chunk_samples`-sample slices. A
+    /// `chunk_samples` of 0 is clamped to the whole buffer (a single chunk).
+    pub fn new(pcm: Vec<f32>, sample_rate: u32, chunk_samples: usize) -> AudioStreamPump {
+        let chunk_samples = if chunk_samples == 0 { pcm.len().max(1) } else { chunk_samples };
+        AudioStreamPump { pcm, sample_rate, chunk_samples, pos: 0 }
+    }
+
+    /// The waveform's sample rate (Hz).
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// Emit the next chunk as base64 LE-f32 PCM, or `None` when fully drained.
+    pub fn step(&mut self) -> Option<String> {
+        if self.pos >= self.pcm.len() {
+            return None;
+        }
+        let end = (self.pos + self.chunk_samples).min(self.pcm.len());
+        let slice = &self.pcm[self.pos..end];
+        self.pos = end;
+        Some(encode_pcm(slice))
+    }
+}
+
+/// Serialize f32 PCM samples to base64 of their little-endian byte layout.
+pub fn encode_pcm(samples: &[f32]) -> String {
+    let mut bytes = Vec::with_capacity(samples.len() * 4);
+    for &s in samples {
+        bytes.extend_from_slice(&s.to_le_bytes());
+    }
+    events::base64::encode(&bytes)
+}
+
+/// Decode base64 LE-f32 PCM back into samples (inverse of [`encode_pcm`]);
+/// returns `Err` on bad base64 or a non-multiple-of-4 byte length.
+pub fn decode_pcm(pcm_b64: &str) -> Result<Vec<f32>, String> {
+    let bytes = events::base64::decode(pcm_b64)?;
+    if bytes.len() % 4 != 0 {
+        return Err(format!("pcm byte length {} not a multiple of 4", bytes.len()));
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
