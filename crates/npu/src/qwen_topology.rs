@@ -131,8 +131,11 @@ pub fn build_qwen_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder)
     }
 
     let xf = tp.rmsnorm(&x, "norm.weight", w, d);
-    // Tied lm_head: reuse tok.weight (transposed to [d,vocab] for MatMul).
-    tp.linear_named(&xf, "tok.weight", "lm_head.w", w, vocab, d, "logits");
+    // lm_head. Tied models (`tie_embeddings`) reuse `tok.weight`; untied models
+    // (e.g. the Qwen3-TTS Talker, `tie_embeddings = false`) have a separate
+    // `lm_head.weight`. Both are `[vocab,d]`, transposed to `[d,vocab]` for MatMul.
+    let head = if cfg.tie_embeddings { "tok.weight" } else { "lm_head.weight" };
+    tp.linear_named(&xf, head, "lm_head.w", w, vocab, d, "logits");
 }
 
 /// ONNX graph assembly helper: unique temp names + node/initializer emission.

@@ -20,6 +20,23 @@ pub fn build_qwen_fp32_bytes(weights_path: &str, seq_len: usize) -> std::io::Res
     Ok((g.finish(), cfg))
 }
 
+/// Build the fp32 ONNX **Talker** decoder for `seq_len` and return
+/// `(bytes, config)`. The Qwen3-TTS Talker is byte-for-byte a Qwen3 decoder with
+/// an *untied* codec head (`tie_embeddings = false`, so a separate
+/// `lm_head.weight`), exported by the same [`build_qwen_fp32_bytes`] path — the
+/// `text_projection`/`text_embedding` tensors that ride along in the Talker
+/// container are simply unused by the decoder graph. Provided as a named entry
+/// point so callers reach for it by intent; the input is `input_ids` (codec
+/// token ids) and the output is the codebook-0 `logits`.
+pub fn build_talker_fp32_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
+    build_qwen_fp32_bytes(weights_path, seq_len)
+}
+
+/// Export the fp32 ONNX Talker decoder to `out_path` (+ sidecar).
+pub fn export_talker_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
+    export_qwen_fp32(weights_path, out_path, seq_len)
+}
+
 /// Bytes larger than this go to the ONNX external-data sidecar (keeps the proto
 /// under protobuf's 2GB parse limit while inlining the small tensors).
 const EXTERNAL_THRESHOLD: usize = 1 << 20; // 1 MiB

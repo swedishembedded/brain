@@ -391,6 +391,7 @@ name = "brain-npu"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-codec",
  "brain-data",
  "brain-eval",
  "brain-events",

@@ -14,6 +14,8 @@
 
 // Pure-Rust core (always compiled, hardware-free).
 pub mod calib;
+pub mod codec_export;
+pub mod codec_topology;
 pub mod decode;
 pub mod export;
 pub mod fold;
@@ -28,6 +30,7 @@ pub mod topology;
 pub mod openvino;
 
 pub use calib::{calibrate, calibrate_from_weights, load_calib_images, RangeCollector};
+pub use codec_export::{build_codec_fp32_bytes, export_codec_fp32};
 pub use decode::{decode_npu_outputs, detect_image, detect_weights_on_npu};
 pub use export::{build_fp32_bytes, config_of, export_fp32, export_int8};
 pub use quant::Quant;

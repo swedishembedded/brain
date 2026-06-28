@@ -14,6 +14,7 @@
 
 pub mod config;
 pub mod gen;
+pub mod gen_kv;
 pub mod import;
 pub mod mtp;
 pub mod pipeline;
@@ -22,6 +23,7 @@ pub mod talker;
 
 pub use config::{MtpConfig, TalkerConfig};
 pub use gen::TalkerGen;
+pub use gen_kv::CpuTalker;
 pub use mtp::MtpModel;
 pub use pipeline::{GenOpts, TtsPaths};
 pub use prompt::{Prompt, TtsSpecials};

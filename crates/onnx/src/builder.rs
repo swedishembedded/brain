@@ -77,6 +77,45 @@ impl GraphBuilder {
         self
     }
 
+    /// Append a 1-D `ConvTranspose`: registers the weight (`[Cin, Cout/group, K]`,
+    /// the brain `audio::conv` layout) and optional bias (`[Cout]`) as
+    /// initializers, then the node. `node_name` names both the op and its
+    /// weight/bias initializers; the output tensor is `out`. See
+    /// [`crate::conv::ConvTranspose1d`] for the shape/padding conventions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv_transpose1d(
+        &mut self,
+        node_name: &str,
+        x: &str,
+        out: &str,
+        weight: Vec<f32>,
+        bias: Option<Vec<f32>>,
+        c: &crate::conv::ConvTranspose1d,
+    ) -> &mut Self {
+        let cout_g = c.cout / c.groups;
+        let wname = format!("{node_name}.weight");
+        self.init_f32(&wname, &[c.cin as i64, cout_g as i64, c.k as i64], weight);
+        let mut inputs = vec![x.to_string(), wname];
+        if let Some(b) = bias {
+            let bname = format!("{node_name}.bias");
+            self.init_f32(&bname, &[c.cout as i64], b);
+            inputs.push(bname);
+        }
+        let in_refs: Vec<&str> = inputs.iter().map(|s| s.as_str()).collect();
+        let node = crate::conv::conv_transpose_node(
+            node_name,
+            &in_refs,
+            out,
+            &[c.k as i64],
+            &[c.stride as i64],
+            &[c.pad_begin as i64, c.pad_end as i64],
+            &[c.dilation as i64],
+            &[c.output_padding as i64],
+            c.groups as i64,
+        );
+        self.add(node)
+    }
+
     /// Borrow the underlying owned graph (e.g. for inspection in tests).
     pub fn graph(&self) -> &Graph {
         &self.graph

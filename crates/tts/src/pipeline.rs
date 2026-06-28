@@ -139,7 +139,7 @@ pub fn generate_codes(
     let mut cb0 = sample_cb0(
         gen.codec_head_logits(&past_hidden),
         sp.codec_eos,
-        0 >= opts.min_new,
+        opts.min_new == 0,
         opts.temperature,
         opts.top_k,
         &mut rng,
@@ -174,6 +174,76 @@ pub fn generate_codes(
         past_hidden = hidden[hidden.len() - d..].to_vec();
         cb0 = sample_cb0(
             gen.codec_head_logits(&past_hidden),
+            sp.codec_eos,
+            s >= opts.min_new,
+            opts.temperature,
+            opts.top_k,
+            &mut rng,
+        );
+    }
+    frames
+}
+
+/// KV-cached variant of [`generate_codes`]: identical autoregressive logic and
+/// sampling, but the Talker decoder is the incremental, key/value-cached
+/// [`CpuTalker`] (`O(T)` per frame) instead of the full-recompute
+/// [`TalkerGen::forward`] (`O(T²)`). The frozen weights and the resulting codes
+/// are the same (the cache is algebraically exact); only the decoder cost
+/// differs. The MTP residual fill is unchanged (it is bounded at
+/// `num_code_groups` and re-runs cheaply).
+pub fn generate_codes_cached(
+    cpu: &mut crate::gen_kv::CpuTalker,
+    mtp: &MtpModel,
+    sp: &TtsSpecials,
+    prompt: &Prompt,
+    opts: &GenOpts,
+) -> Vec<u32> {
+    let d = cpu.d();
+    let n_trailing = prompt.trailing.len() / d;
+    let mut rng = Rng::new(opts.seed);
+
+    // Stream the whole prefix through the cache, keeping the last hidden state.
+    cpu.reset();
+    let n_prefix = prompt.embeds.len() / d;
+    let mut past_hidden = vec![0.0f32; d];
+    for i in 0..n_prefix {
+        past_hidden = cpu.step(&prompt.embeds[i * d..(i + 1) * d]);
+    }
+    let mut cb0 = sample_cb0(
+        cpu.codec_head_logits(&past_hidden),
+        sp.codec_eos,
+        opts.min_new == 0,
+        opts.temperature,
+        opts.top_k,
+        &mut rng,
+    );
+
+    let mut frames: Vec<u32> = Vec::new();
+    let mut s = 0usize;
+    loop {
+        if (cb0 == sp.codec_eos && s >= opts.min_new) || s >= opts.max_frames {
+            break;
+        }
+        let cb0_embed = cpu.codec_embed(cb0).to_vec();
+        let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
+        frames.push(cb0);
+        frames.extend_from_slice(&residuals);
+
+        let mut feed = cb0_embed;
+        add_into(&mut feed, &res_sum);
+        if s < n_trailing {
+            add_into(&mut feed, &prompt.trailing[s * d..(s + 1) * d]);
+        } else {
+            add_into(&mut feed, &prompt.tts_pad);
+        }
+        s += 1;
+        if cpu.pos() >= cpu.cfg.max_position_embeddings as usize {
+            break;
+        }
+        // one incremental decoder step for the new frame.
+        past_hidden = cpu.step(&feed);
+        cb0 = sample_cb0(
+            cpu.codec_head_logits(&past_hidden),
             sp.codec_eos,
             s >= opts.min_new,
             opts.temperature,

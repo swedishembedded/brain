@@ -26,10 +26,12 @@
 //! ```
 
 pub mod builder;
+pub mod conv;
 pub mod graph;
 pub mod onnx;
 
 pub use builder::{GraphBuilder, DEFAULT_IR_VERSION, DEFAULT_OPSET};
+pub use conv::{conv_transpose1d_ref, conv_transpose_node, ConvTranspose1d};
 pub use graph::{Attr, AttrVal, Elem, Graph, Node, Tensor, TensorData, ValueInfo};
 
 /// Decode serialized ONNX bytes back into a [`onnx::ModelProto`] (for inspection
