@@ -169,6 +169,9 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
             "--temp" => opts.temperature = val(args, &mut i, "--temp").parse().unwrap_or(opts.temperature),
             "--top-k" => opts.top_k = val(args, &mut i, "--top-k").parse().unwrap_or(opts.top_k),
             "--seed" => opts.seed = val(args, &mut i, "--seed").parse().unwrap_or(opts.seed),
+            // Full-recompute on the selected gpu_core backend (pair with
+            // `--device gpu` to run the Talker on the GPU; the cache is CPU-only).
+            "--no-cache" => opts.cached = false,
             "--text" => {
                 extra.insert("text".to_string(), val(args, &mut i, "--text"));
             }

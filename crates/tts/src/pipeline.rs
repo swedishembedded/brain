@@ -39,6 +39,11 @@ pub struct GenOpts {
     pub top_k: usize,
     pub seed: u64,
     pub min_new: usize,
+    /// Decode on the bit-exact KV-cache CpuTalker (O(T)/frame, CPU host) when
+    /// true; otherwise the full-recompute `TalkerGen` path that runs on the
+    /// selected `gpu_core` backend (CPU JIT or the wgpu GPU). The GPU path needs
+    /// `cached = false`, since the cache mirror is CPU-only.
+    pub cached: bool,
 }
 
 impl Default for GenOpts {
@@ -49,6 +54,7 @@ impl Default for GenOpts {
             top_k: 0,
             seed: 0,
             min_new: 2,
+            cached: true,
         }
     }
 }
@@ -333,14 +339,27 @@ pub fn clone(
         prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, Some(&xvec), language_id)
     };
 
-    // Generate on the bit-exact KV-cache path (O(T) per frame vs O(T²) full
-    // recompute): same frozen weights → same codes, far faster on CPU. The
-    // prompt is already built (TalkerGen carries the text-embedding tables); the
-    // cached CpuTalker only needs the decoder weights, so free `gen` first.
-    drop(gen);
-    let mut cpu = crate::gen_kv::CpuTalker::load(&paths.talker);
-    let codes = generate_codes_cached(&mut cpu, &mtp, &sp, &prompt, opts);
+    let codes = generate(&gen, &mtp, &sp, &prompt, opts, &paths.talker);
     decode_codes(&paths.codec, &codes)
+}
+
+/// Dispatch generation to the cached CPU path or the backend (CPU/GPU) full
+/// recompute, per `opts.cached`. Both yield identical codes (the cache is
+/// algebraically exact); only the cost and the engine differ.
+fn generate(
+    gen: &TalkerGen,
+    mtp: &MtpModel,
+    sp: &TtsSpecials,
+    prompt: &Prompt,
+    opts: &GenOpts,
+    talker_path: &str,
+) -> Vec<u32> {
+    if opts.cached {
+        let mut cpu = crate::gen_kv::CpuTalker::load(talker_path);
+        generate_codes_cached(&mut cpu, mtp, sp, prompt, opts)
+    } else {
+        generate_codes(gen, mtp, sp, prompt, opts)
+    }
 }
 
 /// **Synth** — speaker-free text-to-speech (no reference voice).
@@ -361,9 +380,7 @@ pub fn synth(
     let mtp = MtpModel::load_inference(&paths.mtp);
     let prompt = prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, None, language_id);
 
-    drop(gen);
-    let mut cpu = crate::gen_kv::CpuTalker::load(&paths.talker);
-    let codes = generate_codes_cached(&mut cpu, &mtp, &sp, &prompt, opts);
+    let codes = generate(&gen, &mtp, &sp, &prompt, opts, &paths.talker);
     decode_codes(&paths.codec, &codes)
 }
 

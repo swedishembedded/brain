@@ -120,7 +120,7 @@ impl Codec {
         self.gpu.submit(&[], &[step]);
     }
     fn upload(&self, data: &[f32]) -> DeviceBuffer {
-        let b = self.gpu.buffer("act", (data.len() * 4) as u64, BufUsage::STORAGE | BufUsage::COPY_DST);
+        let b = self.gpu.buffer("act", (data.len() * 4) as u64, BufUsage::STORAGE | BufUsage::COPY_DST | BufUsage::COPY_SRC);
         self.gpu.write(&b, cast_slice(data));
         b
     }
