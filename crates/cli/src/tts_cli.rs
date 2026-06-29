@@ -43,9 +43,10 @@ pub fn run_tts(args: &[String]) {
         Some("import") => import(&args[1..]),
         Some("clone") => clone(&args[1..]),
         Some("synth") => synth(&args[1..]),
+        Some("design") => design(&args[1..]),
         Some("finetune") => finetune(&args[1..]),
         other => {
-            eprintln!("usage: brain tts <import|clone|synth|finetune> ...  (got {other:?})");
+            eprintln!("usage: brain tts <import|clone|synth|design|finetune> ...  (got {other:?})");
             std::process::exit(2);
         }
     }
@@ -130,7 +131,13 @@ fn import(args: &[String]) {
     run_step("talker", tts::import::import_talker(&ckpt, &talker));
     run_step("mtp", tts::import::import_mtp(&ckpt, &mtp));
     run_step("codec", codec::import::import(&codec_ckpt, &codec_out));
-    run_step("speaker", speaker::import::import(&speaker_ckpt, &speaker_out));
+    // The CustomVoice / VoiceDesign (instruct) checkpoints have no speaker encoder
+    // (tts_model_type != base) — they don't clone from reference audio. Skip it with
+    // a warning rather than failing the whole import.
+    match speaker::import::import(&speaker_ckpt, &speaker_out) {
+        Ok(()) => {}
+        Err(e) => eprintln!("import speaker: skipped ({e}) — fine for CustomVoice/VoiceDesign"),
+    }
     println!("imported Qwen3-TTS components -> {out_dir}/");
 }
 
@@ -183,6 +190,12 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
             }
             "--ref-codes" => {
                 extra.insert("ref-codes".to_string(), val(args, &mut i, "--ref-codes"));
+            }
+            "--instruct" => {
+                extra.insert("instruct".to_string(), val(args, &mut i, "--instruct"));
+            }
+            "--speaker" => {
+                extra.insert("speaker".to_string(), val(args, &mut i, "--speaker"));
             }
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
@@ -313,6 +326,47 @@ fn synth(args: &[String]) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("synth failed: {e}");
+            std::process::exit(1);
+        }
+    };
+    write_wav(&c.out, &wav);
+}
+
+/// `brain tts design --text "..." --instruct "..." [--speaker NAME] --out out.wav`
+/// VoiceDesign (instruct only) / CustomVoice (instruct + preset speaker). Needs a
+/// 1.7B CustomVoice/VoiceDesign checkpoint (the 0.6B Base has no instruct control).
+fn design(args: &[String]) {
+    let (c, extra) = parse_common(args);
+    let text = extra.get("text").cloned().unwrap_or_default();
+    let instruct = extra.get("instruct").cloned().unwrap_or_default();
+    let speaker = extra.get("speaker").map(|s| s.as_str());
+    if text.is_empty() {
+        eprintln!("usage: brain tts design --text \"...\" --instruct \"...\" [--speaker NAME] --out out.wav");
+        std::process::exit(2);
+    }
+    let npu = crate::npu_requested();
+    if npu {
+        gpu_core::set_default_backend(gpu_core::Backend::Cpu);
+    }
+    eprintln!(
+        "tts design{}: lang={} speaker={:?} instruct={:?} max_frames={} -> {}",
+        if npu { " on NPU (OpenVINO)" } else { "" },
+        c.lang,
+        speaker,
+        instruct,
+        c.opts.max_frames,
+        c.out
+    );
+    let result = if npu {
+        let cache = format!("{}/npu-cache", c.weights_dir);
+        tts::pipeline::design_npu(&paths(&c), &c.opts, &text, &c.lang, &instruct, speaker, Some(&cache))
+    } else {
+        tts::pipeline::design(&paths(&c), &c.opts, &text, &c.lang, &instruct, speaker)
+    };
+    let wav = match result {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("design failed: {e}");
             std::process::exit(1);
         }
     };

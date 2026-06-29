@@ -302,9 +302,78 @@ fn assistant_text(text: &str) -> String {
     format!("<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n")
 }
 
+/// The instruct turn for CustomVoice / VoiceDesign (`_build_instruct_text`).
+fn instruct_text(instruct: &str) -> String {
+    format!("<|im_start|>user\n{instruct}<|im_end|>\n")
+}
+
+/// Resolve a CustomVoice preset speaker name to its codec-token id (or error with
+/// the supported list). `None` name -> `None` (VoiceDesign).
+fn resolve_speaker(sp: &TtsSpecials, speaker: Option<&str>) -> Result<Option<u32>, String> {
+    match speaker {
+        None => Ok(None),
+        Some(name) if name.trim().is_empty() => Ok(None),
+        Some(name) => sp.speaker_id(name).map(Some).ok_or_else(|| {
+            let mut names: Vec<&String> = sp.spk_id.keys().collect();
+            names.sort();
+            format!("unknown speaker {name:?}; supported preset speakers: {names:?}")
+        }),
+    }
+}
+
 /// Upper bound on the Talker context length (prefix + generated frames).
 fn max_ctx(opts: &GenOpts, ref_frames: usize) -> u32 {
     (opts.max_frames + ref_frames + 32) as u32
+}
+
+/// ICL reference codes for `ref_wav_path`, encoded once and cached under
+/// `cache_dir` (keyed by the wav's name + mtime). Encoding the reference is the
+/// slow CPU step of a clone; caching it makes repeated clones of the same voice
+/// skip straight to generation. Returns the `[T,16]` codes.
+fn ref_codes_cached(codec_path: &str, wav: &audio::wav::Wav, ref_wav_path: &str, cache_dir: Option<&str>) -> Vec<u32> {
+    let cache_file = cache_dir.map(|d| {
+        let stem = std::path::Path::new(ref_wav_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("ref");
+        let mt = std::fs::metadata(ref_wav_path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        std::path::PathBuf::from(d).join(format!("refcodes-{stem}-{mt}.bin"))
+    });
+    if let Some(cf) = &cache_file {
+        if let Ok(bytes) = std::fs::read(cf) {
+            if bytes.len() >= 8 {
+                let n = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+                if bytes.len() >= 8 + n * 4 {
+                    eprintln!("tts: reusing cached reference codes ({n} values) from {}", cf.display());
+                    return (0..n)
+                        .map(|k| u32::from_le_bytes(bytes[8 + k * 4..12 + k * 4].try_into().unwrap()))
+                        .collect();
+                }
+            }
+        }
+    }
+    let codec = codec::Codec::load_inference(codec_path);
+    let sr = codec.cfg.input_sample_rate;
+    let wav24 = audio::resample_linear(&wav.samples, wav.sample_rate, sr);
+    let codes = codec.encode(&wav24);
+    if let Some(cf) = &cache_file {
+        if let Some(p) = cf.parent() {
+            std::fs::create_dir_all(p).ok();
+        }
+        let mut bytes = (codes.len() as u64).to_le_bytes().to_vec();
+        for c in &codes {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+        if std::fs::write(cf, &bytes).is_ok() {
+            eprintln!("tts: cached reference codes -> {}", cf.display());
+        }
+    }
+    codes
 }
 
 /// **Voice clone** — synthesize `target_text` in the timbre of `ref_wav_path`.
@@ -442,10 +511,7 @@ pub fn clone_npu(
     let ref_code = match ref_code {
         Some(c) => Some(c),
         None if !ref_text.trim().is_empty() => {
-            let codec = codec::Codec::load_inference(&paths.codec);
-            let sr = codec.cfg.input_sample_rate;
-            let wav24 = audio::resample_linear(&wav.samples, wav.sample_rate, sr);
-            Some(codec.encode(&wav24))
+            Some(ref_codes_cached(&paths.codec, &wav, ref_wav_path, npu_cache))
         }
         None => None,
     };
@@ -514,19 +580,49 @@ fn run_npu(
         .and_then(|s| npu::openvino::NpuDevice::parse(&s))
         .unwrap_or(npu::openvino::NpuDevice::Npu);
     let allow_fallback = true;
-    // Optional deterministic parity gate (NPU/OV-device vs CPU Talker hidden state).
-    if std::env::var("TTS_NPU_PARITY").is_ok() {
-        match crate::npu_gen::talker_prefix_parity(&paths.talker, tables, prompt, cache, device) {
-            Ok(m) => eprintln!(
-                "tts npu parity: Talker prefix hidden max-abs ({} vs CPU) = {m:.3e}",
-                device.ov_str()
-            ),
-            Err(e) => eprintln!("tts npu parity check failed: {e}"),
-        }
+
+    // Talker placement. The fp32 1.7B Talker (~7 GB) is too large to export +
+    // compile comfortably (high RAM, marginal on the NPU); weight-only INT8 (~1.75
+    // GB) fits and compiles faster, so a large Talker defaults to INT8 on the NPU.
+    // The 0.6B Talker stays fp32 on the NPU. `BRAIN_TTS_TALKER` forces the mode:
+    //   cpu      -> CPU KV-cache decoder (codec still on NPU),
+    //   npu      -> fp32 NPU graph,
+    //   npu-int8 -> weight-only INT8 NPU graph.
+    #[derive(PartialEq)]
+    enum Mode {
+        Cpu,
+        NpuF32,
+        NpuI8,
     }
-    let codes = crate::npu_gen::generate_npu(
-        &paths.talker, tables, mtp, sp, prompt, opts, device, allow_fallback, cache,
-    )?;
+    let mode = match std::env::var("BRAIN_TTS_TALKER").ok().as_deref() {
+        Some("cpu") => Mode::Cpu,
+        Some("npu") | Some("npu-fp32") => Mode::NpuF32,
+        Some("npu-int8") | Some("int8") => Mode::NpuI8,
+        _ if tables.cfg.d_model >= 2048 => Mode::NpuI8,
+        _ => Mode::NpuF32,
+    };
+
+    let codes = if mode == Mode::Cpu {
+        eprintln!("tts npu: Talker on CPU KV-cache (d_model={}); codec on NPU", tables.cfg.d_model);
+        let mut cpu = crate::gen_kv::CpuTalker::load(&paths.talker);
+        generate_codes_cached(&mut cpu, mtp, sp, prompt, opts)
+    } else {
+        let quant = mode == Mode::NpuI8;
+        // Optional deterministic parity gate (NPU/OV-device vs CPU Talker hidden state).
+        if std::env::var("TTS_NPU_PARITY").is_ok() {
+            match crate::npu_gen::talker_prefix_parity(&paths.talker, tables, prompt, cache, device, quant) {
+                Ok(m) => eprintln!(
+                    "tts npu parity: Talker prefix hidden max-abs ({}, {} vs CPU) = {m:.3e}",
+                    device.ov_str(),
+                    if quant { "INT8" } else { "fp32" }
+                ),
+                Err(e) => eprintln!("tts npu parity check failed: {e}"),
+            }
+        }
+        crate::npu_gen::generate_npu(
+            &paths.talker, tables, mtp, sp, prompt, opts, device, allow_fallback, cache, quant,
+        )?
+    };
     if codes.is_empty() {
         return Err("no codec frames were generated".to_string());
     }
@@ -534,6 +630,75 @@ fn run_npu(
     let (wav, codec_dev) = crate::npu_gen::decode_codes_npu(&paths.codec, &codes, device, allow_fallback, cache)?;
     eprintln!("tts npu: codec decode ran on {codec_dev}");
     Ok(wav)
+}
+
+/// **VoiceDesign / CustomVoice** — synthesize `target_text` in a voice described
+/// by the natural-language `instruct` (CustomVoice may also pick a preset
+/// `speaker`). The 0.6B Base model has no instruct control; use a 1.7B
+/// CustomVoice/VoiceDesign checkpoint. Runs on the selected `gpu_core` backend
+/// (CPU/GPU); see [`design_npu`] for the NPU path.
+pub fn design(
+    paths: &TtsPaths,
+    opts: &GenOpts,
+    target_text: &str,
+    language: &str,
+    instruct: &str,
+    speaker: Option<&str>,
+) -> Result<Vec<f32>, String> {
+    let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
+    let language_id = sp.language_id(language);
+    let speaker_id = resolve_speaker(&sp, speaker)?;
+
+    let input_ids = tok.encode(&assistant_text(target_text));
+    let (role_ids, text_ids) = split_input_ids(&input_ids)?;
+    let instruct_ids = if instruct.trim().is_empty() {
+        Vec::new()
+    } else {
+        tok.encode(&instruct_text(instruct))
+    };
+
+    // Generous context bound (instruct + text + frames) for the GPU recompute path.
+    let max_t = (instruct_ids.len() + input_ids.len() + opts.max_frames + 64) as u32;
+    let gen = TalkerGen::load(&paths.talker, max_t);
+    let mtp = MtpModel::load_inference(&paths.mtp);
+    let prompt =
+        prompt::build_instruct_prompt(&gen, &sp, &role_ids, &text_ids, &instruct_ids, speaker_id, language_id);
+
+    let codes = generate(&gen, &mtp, &sp, &prompt, opts, &paths.talker, &paths.mtp);
+    decode_codes(&paths.codec, &codes)
+}
+
+/// **VoiceDesign / CustomVoice on the Intel NPU** — as [`design`], with the
+/// Talker + codec running as compiled OpenVINO graphs.
+pub fn design_npu(
+    paths: &TtsPaths,
+    opts: &GenOpts,
+    target_text: &str,
+    language: &str,
+    instruct: &str,
+    speaker: Option<&str>,
+    npu_cache: Option<&str>,
+) -> Result<Vec<f32>, String> {
+    let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
+    let language_id = sp.language_id(language);
+    let speaker_id = resolve_speaker(&sp, speaker)?;
+
+    let input_ids = tok.encode(&assistant_text(target_text));
+    let (role_ids, text_ids) = split_input_ids(&input_ids)?;
+    let instruct_ids = if instruct.trim().is_empty() {
+        Vec::new()
+    } else {
+        tok.encode(&instruct_text(instruct))
+    };
+
+    let tables = crate::npu_gen::TalkerTables::load(&paths.talker);
+    let mut mtp = crate::gen_kv_mtp::CpuMtp::load(&paths.mtp);
+    let prompt =
+        prompt::build_instruct_prompt(&tables, &sp, &role_ids, &text_ids, &instruct_ids, speaker_id, language_id);
+
+    run_npu(paths, &tables, &mut mtp, &sp, &prompt, opts, npu_cache)
 }
 
 /// Decode `[T,16]` codes to a 24 kHz waveform (empty -> error).

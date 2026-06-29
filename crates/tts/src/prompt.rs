@@ -64,6 +64,9 @@ pub struct TtsSpecials {
     pub codec_bos: u32,
     pub codec_eos: u32,
     pub lang: HashMap<String, u32>,
+    /// Preset speaker name -> codec-token id (CustomVoice `talker_config.spk_id`).
+    /// Empty for Base / VoiceDesign.
+    pub spk_id: HashMap<String, u32>,
 }
 
 impl TtsSpecials {
@@ -85,6 +88,14 @@ impl TtsSpecials {
                 }
             }
         }
+        let mut spk_id = HashMap::new();
+        if let Some(m) = t["spk_id"].as_object() {
+            for (k, val) in m {
+                if let Some(id) = val.as_u64() {
+                    spk_id.insert(k.to_lowercase(), id as u32);
+                }
+            }
+        }
         Ok(TtsSpecials {
             tts_bos: gu(&v, "tts_bos_token_id", 151672),
             tts_eos: gu(&v, "tts_eos_token_id", 151673),
@@ -97,7 +108,13 @@ impl TtsSpecials {
             codec_bos: gu(t, "codec_bos_id", 2149),
             codec_eos: gu(t, "codec_eos_token_id", 2150),
             lang,
+            spk_id,
         })
+    }
+
+    /// Preset speaker codec-token id for a CustomVoice speaker name (case-insensitive).
+    pub fn speaker_id(&self, name: &str) -> Option<u32> {
+        self.spk_id.get(&name.to_lowercase()).copied()
     }
 
     /// Codec language id for a language name (case-insensitive). `"auto"` (or
@@ -258,6 +275,38 @@ pub fn build_xvector_prompt(
         trailing,
         tts_pad,
     }
+}
+
+/// **VoiceDesign / CustomVoice (instruct)** prompt — non-streaming. Built on top
+/// of [`build_xvector_prompt`] by prepending the projected **instruct** text
+/// (`instruct_ids` = the tokenized `<|im_start|>user\n{instruct}<|im_end|>\n`
+/// turn) to the input-embedding prefix — exactly as `Qwen3TTSModel.generate`
+/// prepends `text_projection(text_embedding(instruct_id))`.
+///
+/// For **CustomVoice**, pass the preset speaker's codec-token id (from
+/// [`TtsSpecials::speaker_id`]) as `speaker_id` — it is looked up in the Talker's
+/// codec embedding table and placed in the codec prefix's speaker slot (the same
+/// slot the x-vector occupies). For **VoiceDesign**, pass `speaker_id = None`: the
+/// model designs the voice purely from the instruction.
+#[allow(clippy::too_many_arguments)]
+pub fn build_instruct_prompt(
+    gen: &impl TalkerHost,
+    sp: &TtsSpecials,
+    role_ids: &[u32],
+    text_ids: &[u32],
+    instruct_ids: &[u32],
+    speaker_id: Option<u32>,
+    language_id: Option<u32>,
+) -> Prompt {
+    let speaker_embed: Option<Vec<f32>> = speaker_id.map(|id| gen.codec_embed(id).to_vec());
+    let mut base =
+        build_xvector_prompt(gen, sp, role_ids, text_ids, speaker_embed.as_deref(), language_id);
+    if !instruct_ids.is_empty() {
+        let mut embeds = proj(gen, instruct_ids);
+        embeds.extend_from_slice(&base.embeds);
+        base.embeds = embeds;
+    }
+    base
 }
 
 /// **ICL** voice-clone prompt — non-streaming. Conditions on the reference

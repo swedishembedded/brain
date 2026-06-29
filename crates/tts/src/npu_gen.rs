@@ -34,6 +34,16 @@ fn add_into(a: &mut [f32], b: &[f32]) {
     }
 }
 
+/// Talker graph context-length bucket and codec code-length bucket. Rounding the
+/// compiled shapes to these multiples means a small, fixed set of graphs/blobs is
+/// reused across prompts of varying length (bounded cache + amortised compile).
+const CAP_BUCKET: usize = 64;
+const CODEC_BUCKET: usize = 32;
+
+fn round_up(n: usize, m: usize) -> usize {
+    n.div_ceil(m) * m
+}
+
 /// CPU-only Talker tables for the NPU host path: `d_model`, the text-projection
 /// front-end, the codebook-0 input-embedding table (`tok.weight`) and the codec
 /// head (`lm_head.weight`). Loaded straight from the brain Talker checkpoint with
@@ -143,6 +153,7 @@ impl TalkerNpu {
     /// Export (or reuse cached) the Talker hidden graph for `cap` positions and
     /// compile it on the OpenVINO `device`. `max_pos` is the model's
     /// `max_position_embeddings` (a hard ceiling on the context).
+    #[allow(clippy::too_many_arguments)]
     pub fn load(
         talker_path: &str,
         cap: usize,
@@ -150,8 +161,9 @@ impl TalkerNpu {
         allow_fallback: bool,
         cache_dir: Option<&Path>,
         max_pos: usize,
+        quant: bool,
     ) -> Result<TalkerNpu, String> {
-        let onnx = prepare_talker_onnx(talker_path, cap, cache_dir)?;
+        let onnx = prepare_talker_onnx(talker_path, cap, cache_dir, quant)?;
         let cfg = npu_config(device, allow_fallback, cache_dir);
         let sess = EmbedSession::load_path(&onnx, &cfg).map_err(|e| e.to_string())?;
         let d = sess.d_in();
@@ -283,17 +295,24 @@ pub fn generate_npu(
     device: NpuDevice,
     allow_fallback: bool,
     cache_dir: Option<&Path>,
+    quant: bool,
 ) -> Result<Vec<u32>, String> {
     let d = tables.d();
     let n_prefix = prompt.embeds.len() / d;
     let max_pos = tables.cfg.max_position_embeddings as usize;
-    let cap = (n_prefix + opts.max_frames + 2).min(max_pos);
+    // Bucket the compiled context length to a multiple of CAP_BUCKET so prompts of
+    // similar size share ONE compiled graph — amortising the (slow) first compile
+    // across runs and bounding the NPU cache to a couple of graphs instead of one
+    // per exact length.
+    let need = n_prefix + opts.max_frames + 2;
+    let cap = round_up(need, CAP_BUCKET).min(max_pos);
     eprintln!(
-        "tts npu: compiling Talker hidden graph (prefix={n_prefix} + max_frames={} -> cap={cap}); \
-         first compile per cap is slow (~1-2 min), cached after…",
+        "tts npu: compiling Talker hidden graph ({} | prefix={n_prefix} + max_frames={} -> cap={cap}); \
+         first compile per cap is slow, cached after…",
+        if quant { "INT8" } else { "fp32" },
         opts.max_frames
     );
-    let mut talker = TalkerNpu::load(talker_path, cap, device, allow_fallback, cache_dir, max_pos)?;
+    let mut talker = TalkerNpu::load(talker_path, cap, device, allow_fallback, cache_dir, max_pos, quant)?;
     eprintln!("tts npu: Talker decoder running on {}", talker.device());
     generate_codes_npu(&mut talker, tables, mtp, sp, prompt, opts)
 }
@@ -303,12 +322,14 @@ pub fn generate_npu(
 /// hidden state at the last prefix position. Deterministic (no sampling, no
 /// codec), and prefix-only so it returns in seconds. Loads both decoders, so this
 /// is for explicit validation, not the hot path.
+#[allow(clippy::too_many_arguments)]
 pub fn talker_prefix_parity(
     talker_path: &str,
     tables: &TalkerTables,
     prompt: &Prompt,
     cache_dir: Option<&Path>,
     device: NpuDevice,
+    quant: bool,
 ) -> Result<f32, String> {
     let d = tables.d();
     let n_prefix = prompt.embeds.len() / d;
@@ -324,7 +345,7 @@ pub fn talker_prefix_parity(
     }
     // NPU: compile a prefix-sized graph and stream the prefix in one inference.
     let max_pos = tables.cfg.max_position_embeddings as usize;
-    let mut npu = TalkerNpu::load(talker_path, n_prefix, device, true, cache_dir, max_pos)?;
+    let mut npu = TalkerNpu::load(talker_path, n_prefix, device, true, cache_dir, max_pos, quant)?;
     let npu_h = npu.feed(&prompt.embeds)?;
     let maxabs = cpu_h
         .iter()
@@ -351,22 +372,30 @@ pub fn decode_codes_npu(
         return Err(format!("codes len {} is not a multiple of 16", codes.len()));
     }
     let t = codes.len() / ncode;
-    let onnx = prepare_codec_onnx(codec_path, t, cache_dir)?;
+    // Bucket the codec code length so one compiled graph serves a range of frame
+    // counts. The codec is causal, so decoding `tb >= t` frames (zero-padded) and
+    // trimming back to `t` frames is exact for the real region.
+    let tb = round_up(t, CODEC_BUCKET);
+    let onnx = prepare_codec_onnx(codec_path, tb, cache_dir)?;
     let cfg = npu_config(device, allow_fallback, cache_dir);
-    eprintln!("tts npu: compiling codec decoder graph (code_len={t})…");
+    eprintln!("tts npu: compiling codec decoder graph (code_len={tb} for {t} frames)…");
     let mut sess = CodecSession::load_path(&onnx, &cfg).map_err(|e| e.to_string())?;
     let nq = sess.nq();
     if nq != ncode {
         return Err(format!("codec graph expects {nq} codebooks, frames have {ncode}"));
     }
-    // [T,16] row-major u32 -> [nq,T] codebook-major i64.
-    let mut cm = vec![0i64; nq * t];
+    // [T,16] row-major u32 -> [nq,tb] codebook-major i64 (real frames, zero-padded).
+    let mut cm = vec![0i64; nq * tb];
     for f in 0..t {
         for q in 0..ncode {
-            cm[q * t + f] = codes[f * ncode + q] as i64;
+            cm[q * tb + f] = codes[f * ncode + q] as i64;
         }
     }
-    let wav = sess.run_codes(&cm).map_err(|e| e.to_string())?;
+    let wav_full = sess.run_codes(&cm).map_err(|e| e.to_string())?;
+    // Trim to the real frames (samples-per-frame = total upsampled length / tb).
+    let spf = if tb > 0 { sess.out_len() / tb } else { 0 };
+    let real = (t * spf).min(wav_full.len());
+    let wav = if real > 0 { wav_full[..real].to_vec() } else { wav_full };
     Ok((wav, sess.device().to_string()))
 }
 
@@ -416,14 +445,20 @@ fn prepare_graph(
     Ok(onnx)
 }
 
-fn prepare_talker_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>) -> Result<PathBuf, String> {
-    prepare_graph(
-        weights_path,
-        cache_dir,
-        &format!("talker-hidden-seq{cap}.onnx"),
-        "brain_tts_npu_talker",
-        |out| npu::qwen_export::export_talker_hidden_fp32(weights_path, out, cap),
-    )
+fn prepare_talker_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>, quant: bool) -> Result<PathBuf, String> {
+    let file = if quant {
+        format!("talker-hidden-int8-seq{cap}.onnx")
+    } else {
+        format!("talker-hidden-seq{cap}.onnx")
+    };
+    let tag = if quant { "brain_tts_npu_talker_int8" } else { "brain_tts_npu_talker" };
+    prepare_graph(weights_path, cache_dir, &file, tag, |out| {
+        if quant {
+            npu::qwen_export::export_talker_hidden_int8(weights_path, out, cap)
+        } else {
+            npu::qwen_export::export_talker_hidden_fp32(weights_path, out, cap)
+        }
+    })
 }
 
 fn prepare_codec_onnx(weights_path: &str, code_len: usize, cache_dir: Option<&Path>) -> Result<PathBuf, String> {
