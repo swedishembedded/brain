@@ -96,23 +96,77 @@ fn silu(x: f32) -> f32 {
 /// scheduling overhead.
 pub(crate) fn matvec(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
     let mut y = vec![0.0f32; out];
-    let dot = |row: &[f32]| -> f32 {
-        let mut acc = 0.0f32;
-        for k in 0..inn {
-            acc += row[k] * x[k];
-        }
-        acc
-    };
     if out * inn >= 8192 {
         y.par_iter_mut().enumerate().for_each(|(o, yo)| {
-            *yo = dot(&w[o * inn..o * inn + inn]);
+            *yo = dot(&w[o * inn..o * inn + inn], x);
         });
     } else {
         for (o, yo) in y.iter_mut().enumerate() {
-            *yo = dot(&w[o * inn..o * inn + inn]);
+            *yo = dot(&w[o * inn..o * inn + inn], x);
         }
     }
     y
+}
+
+/// `Σ row[k]·x[k]` — the inner dot of [`matvec`] and the per-step attention. Uses
+/// AVX2+FMA when the CPU supports it (8 f32 lanes/iter), else a scalar fallback.
+/// The 8-lane partial sums reorder the reduction, so results differ from the
+/// strictly-sequential scalar sum only in the last ~1 ULP — well inside the
+/// engine parity tolerances, and the KV-cache exactness tests use one impl for
+/// both cached and uncached paths so they stay bit-identical.
+#[inline]
+pub(crate) fn dot(row: &[f32], x: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // SAFETY: guarded by the runtime AVX2+FMA feature check above.
+            return unsafe { dot_avx2(row, x) };
+        }
+    }
+    dot_scalar(row, x)
+}
+
+#[inline]
+fn dot_scalar(row: &[f32], x: &[f32]) -> f32 {
+    let n = row.len().min(x.len());
+    let mut acc = 0.0f32;
+    for k in 0..n {
+        acc += row[k] * x[k];
+    }
+    acc
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_avx2(row: &[f32], x: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    let n = row.len().min(x.len());
+    // Four independent accumulators hide FMA latency (32 f32/iter).
+    let (mut a0, mut a1, mut a2, mut a3) =
+        (_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps());
+    let rp = row.as_ptr();
+    let xp = x.as_ptr();
+    let mut k = 0usize;
+    while k + 32 <= n {
+        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(rp.add(k)), _mm256_loadu_ps(xp.add(k)), a0);
+        a1 = _mm256_fmadd_ps(_mm256_loadu_ps(rp.add(k + 8)), _mm256_loadu_ps(xp.add(k + 8)), a1);
+        a2 = _mm256_fmadd_ps(_mm256_loadu_ps(rp.add(k + 16)), _mm256_loadu_ps(xp.add(k + 16)), a2);
+        a3 = _mm256_fmadd_ps(_mm256_loadu_ps(rp.add(k + 24)), _mm256_loadu_ps(xp.add(k + 24)), a3);
+        k += 32;
+    }
+    while k + 8 <= n {
+        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(rp.add(k)), _mm256_loadu_ps(xp.add(k)), a0);
+        k += 8;
+    }
+    let sum8 = _mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3));
+    let mut tmp = [0.0f32; 8];
+    _mm256_storeu_ps(tmp.as_mut_ptr(), sum8);
+    let mut s = tmp.iter().sum::<f32>();
+    while k < n {
+        s += *row.get_unchecked(k) * *x.get_unchecked(k);
+        k += 1;
+    }
+    s
 }
 
 /// RMSNorm of a single `dim`-vector: `out = x / sqrt(mean(x²)+eps) * w`.
@@ -224,11 +278,7 @@ pub(crate) fn decoder_layer_step(
         let mut mx = f32::NEG_INFINITY;
         for (j, sj) in scores.iter_mut().enumerate() {
             let kbase = j * hkv + hkv_head * hd;
-            let mut s = 0.0f32;
-            for dd in 0..hd {
-                s += qh[dd] * kc[kbase + dd];
-            }
-            s *= scale;
+            let s = dot(qh, &kc[kbase..kbase + hd]) * scale;
             *sj = s;
             if s > mx {
                 mx = s;
@@ -541,6 +591,26 @@ mod tests {
 
     fn gpu_disabled() -> bool {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    /// The SIMD `dot` must agree with the strictly-scalar reference within a few
+    /// ULPs across odd lengths (covers the 32/8-wide bodies and the scalar tail).
+    #[test]
+    fn dot_simd_matches_scalar() {
+        use data::rng::Rng;
+        let mut rng = Rng::new(1234);
+        for &n in &[0usize, 1, 7, 8, 31, 32, 33, 127, 128, 129, 1024, 3072] {
+            let a: Vec<f32> = (0..n).map(|_| rng.next_gaussian() as f32).collect();
+            let b: Vec<f32> = (0..n).map(|_| rng.next_gaussian() as f32).collect();
+            let simd = dot(&a, &b);
+            let scalar = dot_scalar(&a, &b);
+            let tol = 1e-4 * (n as f32).sqrt().max(1.0);
+            assert!(
+                (simd - scalar).abs() <= tol,
+                "n={n}: simd={simd} scalar={scalar} diff={}",
+                (simd - scalar).abs()
+            );
+        }
     }
 
     /// Decoder param names (mirrors gen.rs/mtp.rs `decoder_param_list`).
