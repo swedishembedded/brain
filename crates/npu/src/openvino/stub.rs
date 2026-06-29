@@ -80,3 +80,61 @@ impl DecoderSession {
         unsupported()
     }
 }
+
+/// A compiled input-embedding graph. Never constructible on unsupported targets.
+pub struct EmbedSession {
+    _priv: (),
+}
+
+impl EmbedSession {
+    pub fn load_bytes(_bytes: &[u8], _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn load_path(_p: &Path, _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn seq_len(&self) -> usize {
+        0
+    }
+    pub fn d_in(&self) -> usize {
+        0
+    }
+    pub fn d_out(&self) -> usize {
+        0
+    }
+    pub fn device(&self) -> &str {
+        ""
+    }
+    pub fn run_embeds(&mut self, _embeds: &[f32]) -> Result<Vec<f32>, NpuError> {
+        unsupported()
+    }
+}
+
+/// A compiled codec-decoder graph. Never constructible on unsupported targets.
+pub struct CodecSession {
+    _priv: (),
+}
+
+impl CodecSession {
+    pub fn load_bytes(_bytes: &[u8], _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn load_path(_p: &Path, _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn nq(&self) -> usize {
+        0
+    }
+    pub fn code_len(&self) -> usize {
+        0
+    }
+    pub fn out_len(&self) -> usize {
+        0
+    }
+    pub fn device(&self) -> &str {
+        ""
+    }
+    pub fn run_codes(&mut self, _codes: &[i64]) -> Result<Vec<f32>, NpuError> {
+        unsupported()
+    }
+}
