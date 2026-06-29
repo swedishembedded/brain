@@ -79,6 +79,12 @@ pub fn mtp_hf_to_brain(name: &str) -> Option<String> {
     if name == "talker.code_predictor.model.norm.weight" {
         return Some("norm.weight".to_string());
     }
+    if name == "talker.code_predictor.small_to_mtp_projection.weight" {
+        return Some("small_to_mtp_projection.weight".to_string());
+    }
+    if name == "talker.code_predictor.small_to_mtp_projection.bias" {
+        return Some("small_to_mtp_projection.bias".to_string());
+    }
     if let Some(i) = name
         .strip_prefix("talker.code_predictor.model.codec_embedding.")
         .and_then(|r| r.strip_suffix(".weight"))
@@ -155,9 +161,18 @@ fn mtp_param_specs(cfg: &MtpConfig) -> Vec<(String, usize)> {
         out.push((p("mlp.down.weight"), d * ff));
     }
     out.push(("norm.weight".to_string(), d));
+    let emb = cfg.embedding_dim as usize;
     for i in 0..cfg.n_residual() {
-        out.push((format!("codec_embedding.{i}.weight"), v * d));
+        // codec_embedding rows are in the Talker hidden width (`embedding_dim`);
+        // lm_head reads the MTP decoder hidden width (`d_model`).
+        out.push((format!("codec_embedding.{i}.weight"), v * emb));
         out.push((format!("lm_head.{i}.weight"), v * d));
+    }
+    // small_to_mtp_projection (embedding_dim -> d_model) exists only when the two
+    // widths differ (the 1.7B); the 0.6B has no such tensor (Identity).
+    if emb != d {
+        out.push(("small_to_mtp_projection.weight".to_string(), d * emb));
+        out.push(("small_to_mtp_projection.bias".to_string(), d));
     }
     out
 }

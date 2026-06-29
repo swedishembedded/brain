@@ -37,8 +37,11 @@ pub struct CpuMtp {
     cache: Vec<Kv>,
     pos: usize,
     // CPU front-end: residual input-embedding tables + output heads.
-    codec_embedding: Vec<Vec<f32>>, // [n_residual][vocab*d]
-    lm_head: Vec<Vec<f32>>,         // [n_residual][vocab*d]
+    codec_embedding: Vec<Vec<f32>>, // [n_residual][vocab*embedding_dim]
+    lm_head: Vec<Vec<f32>>,         // [n_residual][vocab*d_model]
+    /// `small_to_mtp_projection` (embedding_dim -> d_model): weight `[d*emb]` +
+    /// bias `[d]`. `None` on the 0.6B (embedding_dim == d_model, Identity).
+    proj: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 impl CpuMtp {
@@ -85,6 +88,7 @@ impl CpuMtp {
             pos: 0,
             codec_embedding,
             lm_head,
+            proj: None,
         }
     }
 
@@ -108,6 +112,15 @@ impl CpuMtp {
         let lm_head = (0..nres)
             .map(|i| take(&format!("lm_head.{i}.weight")))
             .collect();
+        // Optional embedding_dim -> d_model projection (present iff the widths differ).
+        let proj = if cfg.embedding_dim != cfg.d_model {
+            Some((
+                take("small_to_mtp_projection.weight"),
+                take("small_to_mtp_projection.bias"),
+            ))
+        } else {
+            None
+        };
         let n = cfg.n_layers as usize;
         CpuMtp {
             cfg,
@@ -117,6 +130,7 @@ impl CpuMtp {
             pos: 0,
             codec_embedding,
             lm_head,
+            proj,
         }
     }
 
@@ -147,6 +161,24 @@ impl CpuMtp {
         matvec(&self.lm_head[idx], hidden, v, d)
     }
 
+    /// Project a Talker-width embedding (`[embedding_dim]`) into the MTP decoder
+    /// width (`[d_model]`) via `small_to_mtp_projection`; Identity when the widths
+    /// match (the 0.6B has no projection tensor).
+    fn project(&self, emb: &[f32]) -> Vec<f32> {
+        match &self.proj {
+            Some((w, b)) => {
+                let d = self.d();
+                let e = self.cfg.embedding_dim as usize;
+                let mut y = matvec(w, emb, d, e); // [d] = W[d,e]·emb
+                for (yi, bi) in y.iter_mut().zip(b) {
+                    *yi += bi;
+                }
+                y
+            }
+            None => emb.to_vec(),
+        }
+    }
+
     /// Argmax over a logits row (ties to the lowest index), matching
     /// [`crate::mtp::MtpModel::generate_residuals`].
     fn argmax(row: &[f32]) -> usize {
@@ -172,31 +204,34 @@ impl CpuMtp {
         talker_hidden: &[f32],
         cb0_embed: &[f32],
     ) -> (Vec<u32>, Vec<f32>) {
-        let d = self.d();
+        let e = self.cfg.embedding_dim as usize;
         let nres = (self.cfg.num_code_groups - 1) as usize; // 15
-        assert_eq!(talker_hidden.len(), d);
-        assert_eq!(cb0_embed.len(), d);
+        assert_eq!(talker_hidden.len(), e);
+        assert_eq!(cb0_embed.len(), e);
 
         self.reset();
-        // pos 0: the Talker hidden (no head reads it).
-        let _h0 = self.step(talker_hidden);
+        // pos 0: the Talker hidden (no head reads it), projected to the MTP width.
+        let p0 = self.project(talker_hidden);
+        let _h0 = self.step(&p0);
 
         let mut codes = vec![0u32; nres];
-        let mut res_sum = vec![0.0f32; d];
-        // pos k (1..=nres): input is codebook (k-1)'s embedding (pos 1 = cb0).
-        let mut input = cb0_embed.to_vec();
+        let mut res_sum = vec![0.0f32; e]; // accumulated in the Talker width (feedback)
+        // pos k (1..=nres): input is codebook (k-1)'s embedding (pos 1 = cb0), each
+        // projected to the MTP width before the decoder step.
+        let mut input_raw = cb0_embed.to_vec(); // [embedding_dim]
         for k in 1..=nres {
-            let hidden = self.step(&input); // final-norm hidden at position k
+            let pin = self.project(&input_raw);
+            let hidden = self.step(&pin); // final-norm hidden at position k
             let logits = self.head_logits(k - 1, &hidden);
             let best = Self::argmax(&logits);
             codes[k - 1] = best as u32;
-            // codec_embedding[k-1] embeds codebook k.
-            let r = &self.codec_embedding[k - 1][best * d..(best + 1) * d];
-            for j in 0..d {
+            // codec_embedding[k-1] embeds codebook k (Talker-width row).
+            let r = &self.codec_embedding[k - 1][best * e..(best + 1) * e];
+            for j in 0..e {
                 res_sum[j] += r[j];
             }
             if k < nres {
-                input = r.to_vec(); // next position's input embedding
+                input_raw = r.to_vec(); // next position's input embedding
             }
         }
         (codes, res_sum)
@@ -258,9 +293,9 @@ impl CpuMtp {
 
 impl crate::prompt::MtpHost for CpuMtp {
     fn codec_embed(&self, residual_idx: usize, code: u32) -> &[f32] {
-        let d = self.d();
-        let s = code as usize * d;
-        &self.codec_embedding[residual_idx][s..s + d]
+        let e = self.cfg.embedding_dim as usize;
+        let s = code as usize * e;
+        &self.codec_embedding[residual_idx][s..s + e]
     }
 }
 

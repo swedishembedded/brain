@@ -40,7 +40,11 @@ pub struct TalkerConfig {
 #[derive(Clone, Debug)]
 pub struct MtpConfig {
     pub n_layers: u32,        // 5
-    pub d_model: u32,         // 1024
+    pub d_model: u32,         // 1024 (MTP decoder hidden)
+    /// Input/output embedding width = the Talker hidden size (== d_model on the
+    /// 0.6B; 2048 on the 1.7B, where `small_to_mtp_projection` maps it to
+    /// d_model). codec_embedding rows are `[vocab, embedding_dim]`.
+    pub embedding_dim: u32,   // 1024 (0.6B) | 2048 (1.7B)
     pub head_dim: u32,        // 128
     pub n_heads: u32,         // 16
     pub n_kv_heads: u32,      // 8
@@ -196,6 +200,7 @@ impl MtpConfig {
         MtpConfig {
             n_layers: 2,
             d_model: 16,
+            embedding_dim: 16,
             head_dim: 8,
             n_heads: 4,
             n_kv_heads: 2,
@@ -212,7 +217,8 @@ impl MtpConfig {
     pub fn to_json(&self) -> Value {
         serde_json::json!({
             "model": "qwen3_tts_mtp",
-            "n_layers": self.n_layers, "d_model": self.d_model, "head_dim": self.head_dim,
+            "n_layers": self.n_layers, "d_model": self.d_model, "embedding_dim": self.embedding_dim,
+            "head_dim": self.head_dim,
             "n_heads": self.n_heads, "n_kv_heads": self.n_kv_heads, "d_ff": self.d_ff,
             "vocab_size": self.vocab, "num_code_groups": self.num_code_groups,
             "rope_theta": self.rope_theta, "rms_norm_eps": self.rms_norm_eps,
@@ -221,9 +227,11 @@ impl MtpConfig {
 
     /// Parse the config object written by [`MtpConfig::to_json`].
     pub fn from_brain_json(c: &Value) -> MtpConfig {
+        let d_model = gu(c, "d_model", 1024);
         MtpConfig {
             n_layers: gu(c, "n_layers", 5),
-            d_model: gu(c, "d_model", 1024),
+            d_model,
+            embedding_dim: gu(c, "embedding_dim", d_model),
             head_dim: gu(c, "head_dim", 128),
             n_heads: gu(c, "n_heads", 16),
             n_kv_heads: gu(c, "n_kv_heads", 8),
@@ -236,10 +244,13 @@ impl MtpConfig {
     }
 
     pub fn from_json(root: &Value) -> MtpConfig {
-        let c = &root["talker_config"]["code_predictor_config"];
+        let t = &root["talker_config"];
+        let c = &t["code_predictor_config"];
         MtpConfig {
             n_layers: gu(c, "num_hidden_layers", 5),
             d_model: gu(c, "hidden_size", 1024),
+            // The MTP embeds codec ids into the Talker hidden width, then projects.
+            embedding_dim: gu(t, "hidden_size", gu(c, "hidden_size", 1024)),
             head_dim: gu(c, "head_dim", 128),
             n_heads: gu(c, "num_attention_heads", 16),
             n_kv_heads: gu(c, "num_key_value_heads", 8),
