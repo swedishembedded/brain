@@ -627,8 +627,17 @@ fn run_npu(
         return Err("no codec frames were generated".to_string());
     }
     eprintln!("tts npu: generated {} frames; decoding on NPU codec graph…", codes.len() / 16);
+    let tc = std::time::Instant::now();
     let (wav, codec_dev) = crate::npu_gen::decode_codes_npu(&paths.codec, &codes, device, allow_fallback, cache)?;
-    eprintln!("tts npu: codec decode ran on {codec_dev}");
+    if std::env::var("TTS_PROFILE").is_ok() {
+        eprintln!(
+            "[tts-npu-profile] codec compile+decode ({} frames) on {codec_dev} = {:.0}ms",
+            codes.len() / 16,
+            tc.elapsed().as_secs_f64() * 1e3
+        );
+    } else {
+        eprintln!("tts npu: codec decode ran on {codec_dev}");
+    }
     Ok(wav)
 }
 

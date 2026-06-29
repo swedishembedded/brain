@@ -233,9 +233,14 @@ pub fn generate_codes_npu(
     let d = tables.d();
     let n_trailing = prompt.trailing.len() / d;
     let mut rng = Rng::new(opts.seed);
+    let profile = std::env::var("TTS_PROFILE").is_ok();
+    let (mut t_step, mut t_mtp) = (0.0f64, 0.0f64);
+    use std::time::Instant;
 
     talker.reset();
+    let t_pref0 = Instant::now();
     let mut past_hidden = talker.feed(&prompt.embeds)?;
+    let t_prefix = t_pref0.elapsed().as_secs_f64() * 1e3;
     let mut cb0 = sample_cb0(
         tables.codec_head_logits(&past_hidden),
         sp.codec_eos,
@@ -252,7 +257,9 @@ pub fn generate_codes_npu(
             break;
         }
         let cb0_embed = tables.codec_embed(cb0).to_vec();
+        let tm = Instant::now();
         let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
+        t_mtp += tm.elapsed().as_secs_f64() * 1e3;
         frames.push(cb0);
         frames.extend_from_slice(&residuals);
 
@@ -268,7 +275,9 @@ pub fn generate_codes_npu(
         if talker.pos() >= talker.max_pos() || talker.pos() >= talker.cap() {
             break;
         }
+        let ts = Instant::now();
         past_hidden = talker.feed(&feed)?;
+        t_step += ts.elapsed().as_secs_f64() * 1e3;
         cb0 = sample_cb0(
             tables.codec_head_logits(&past_hidden),
             sp.codec_eos,
@@ -276,6 +285,15 @@ pub fn generate_codes_npu(
             opts.temperature,
             opts.top_k,
             &mut rng,
+        );
+    }
+    if profile {
+        let nf = s.max(1) as f64;
+        eprintln!(
+            "[tts-npu-profile] prefix-feed={t_prefix:.0}ms | talker-step total={t_step:.0}ms \
+             ({:.0}ms/frame) | mtp total={t_mtp:.0}ms ({:.0}ms/frame) | frames={s}",
+            t_step / nf,
+            t_mtp / nf,
         );
     }
     Ok(frames)
