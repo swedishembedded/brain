@@ -154,15 +154,28 @@ impl VkContext {
             instance.destroy_instance(None);
             return Err("no Vulkan physical devices found".into());
         }
-        // Prefer a discrete GPU.
-        let physical_device = physical_devices
-            .iter()
-            .copied()
-            .find(|&pd| {
-                instance.get_physical_device_properties(pd).device_type
-                    == vk::PhysicalDeviceType::DISCRETE_GPU
-            })
-            .unwrap_or(physical_devices[0]);
+        // Prefer a real GPU over a software rasteriser (llvmpipe): rank by device
+        // type discrete > integrated > virtual > other, and only fall back to a
+        // CPU device if nothing else exists. `BRAIN_VK_DEVICE=<index>` forces a
+        // specific physical-device index (overriding the ranking).
+        let rank = |t: vk::PhysicalDeviceType| -> i32 {
+            match t {
+                vk::PhysicalDeviceType::DISCRETE_GPU => 4,
+                vk::PhysicalDeviceType::INTEGRATED_GPU => 3,
+                vk::PhysicalDeviceType::VIRTUAL_GPU => 2,
+                vk::PhysicalDeviceType::CPU => 0,
+                _ => 1,
+            }
+        };
+        let forced = std::env::var("BRAIN_VK_DEVICE").ok().and_then(|s| s.parse::<usize>().ok());
+        let physical_device = match forced {
+            Some(i) if i < physical_devices.len() => physical_devices[i],
+            _ => physical_devices
+                .iter()
+                .copied()
+                .max_by_key(|&pd| rank(instance.get_physical_device_properties(pd).device_type))
+                .unwrap_or(physical_devices[0]),
+        };
 
         let props = instance.get_physical_device_properties(physical_device);
         let adapter_name = CStr::from_ptr(props.device_name.as_ptr())
@@ -333,6 +346,21 @@ impl VkContext {
                 .map_memory(buf.memory, 0, buf.size, vk::MemoryMapFlags::empty())
                 .expect("map_memory") as *mut u8;
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+            self.device.unmap_memory(buf.memory);
+        }
+    }
+
+    /// Zero-fill a host-visible buffer. Matches the wgpu/CPU backends, which
+    /// hand out zero-initialised storage; without this, kernels that read a
+    /// not-fully-written region (e.g. masked attention scores) would see
+    /// uninitialised device memory and produce nondeterministic results.
+    pub fn zero(&self, buf: &VkBuffer) {
+        unsafe {
+            let ptr = self
+                .device
+                .map_memory(buf.memory, 0, buf.size, vk::MemoryMapFlags::empty())
+                .expect("map_memory") as *mut u8;
+            std::ptr::write_bytes(ptr, 0, buf.size as usize);
             self.device.unmap_memory(buf.memory);
         }
     }

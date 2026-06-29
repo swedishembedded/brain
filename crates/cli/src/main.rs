@@ -154,13 +154,15 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
                 Some("gpu") | Some("wgpu") => {
                     gpu_core::set_default_backend(gpu_core::Backend::Wgpu)
                 }
+                // Native Vulkan compute (ash + naga). Falls back to wgpu if no ICD.
+                Some("vulkan") => gpu_core::set_default_backend(gpu_core::Backend::Vulkan),
                 // The NPU is a whole-graph (OpenVINO) path, not a gpu_core
                 // backend: record the request and leave the host backend at its
                 // default (the NPU path does its own compute via OpenVINO + a
                 // pure-Rust decode). Consumed by `brain yolo detect`.
                 Some("npu") => NPU_REQUESTED.store(true, Ordering::Relaxed),
                 other => {
-                    eprintln!("brain: --device expects cpu|gpu|npu (got {other:?})");
+                    eprintln!("brain: --device expects cpu|gpu|vulkan|npu (got {other:?})");
                     std::process::exit(2);
                 }
             }

@@ -45,6 +45,28 @@ pub fn wgsl_to_spirv(src: &str) -> Result<Vec<u32>, String> {
     Ok(words)
 }
 
+/// Reflect a WGSL kernel's `@group(0)` resource bindings as `(binding, is_uniform)`
+/// pairs, sorted by binding index. naga maps `@group(0) @binding(N)` to descriptor
+/// set 0 binding N, so this is exactly the descriptor-set-layout a generic backend
+/// must build to match the SPIR-V (uniform at binding 0, storage at 1..). Bindings
+/// in groups other than 0 are ignored (brain kernels use a single bind group).
+pub fn wgsl_bindings(src: &str) -> Result<Vec<(u32, bool)>, String> {
+    let module = naga::front::wgsl::parse_str(src)
+        .map_err(|e| format!("WGSL parse error: {e:?}"))?;
+    let mut out = Vec::new();
+    for (_h, gv) in module.global_variables.iter() {
+        if let Some(rb) = &gv.binding {
+            if rb.group != 0 {
+                continue;
+            }
+            let is_uniform = matches!(gv.space, naga::AddressSpace::Uniform);
+            out.push((rb.binding, is_uniform));
+        }
+    }
+    out.sort_by_key(|(b, _)| *b);
+    Ok(out)
+}
+
 /// Create a `vk::ShaderModule` from SPIR-V words.
 ///
 /// # Safety

@@ -20,6 +20,10 @@ bytemuck.workspace = true
 wgpu = "29"
 pollster = "0.4"
 brain-wgsl-cpu.workspace = true
+# Native Vulkan compute backend (ash + naga WGSL->SPIR-V), reusing brain-vulkan's
+# VkContext/shader. A third runtime-selected gpu-core backend alongside wgpu/CPU.
+brain-vulkan.workspace = true
+ash.workspace = true
 rayon = "1"
 
 # Browser GPU stack: wgpu's WebGPU backend only, plus async-readback glue.

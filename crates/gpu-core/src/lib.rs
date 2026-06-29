@@ -72,13 +72,15 @@ mod cpu_backend;
 mod fast_conv;
 #[cfg(not(target_arch = "wasm32"))]
 mod fast_ops;
+#[cfg(not(target_arch = "wasm32"))]
+mod vulkan_backend;
 
 /// Native builds carry both backends and pick one at runtime via this enum. On
 /// wasm only the wgpu/WebGPU backend exists, so `Gpu`/`DeviceBuffer`/`Step` are
 /// plain aliases to it (see the wasm `pub use` below) — no enum, no duplication.
 #[cfg(not(target_arch = "wasm32"))]
 mod native_accel {
-use super::{cpu_backend, wgpu_backend, BufUsage};
+use super::{cpu_backend, vulkan_backend, wgpu_backend, BufUsage};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Which compute backend a `Gpu` uses.
@@ -86,15 +88,25 @@ use std::sync::atomic::{AtomicU8, Ordering};
 pub enum Backend {
     Wgpu,
     Cpu,
+    /// Native Vulkan compute (ash + naga WGSL->SPIR-V). Falls back to wgpu if no
+    /// Vulkan device/ICD is present.
+    Vulkan,
 }
 
-static DEFAULT_BACKEND: AtomicU8 = AtomicU8::new(0); // 0=unset, 1=Wgpu, 2=Cpu
+static DEFAULT_BACKEND: AtomicU8 = AtomicU8::new(0); // 0=unset, 1=Wgpu, 2=Cpu, 3=Vulkan
 
 /// Set the process-wide default backend that `Gpu::new` builds. The CLI sets
-/// this from its `--device` flag. When unset, `BRAIN_DEVICE=cpu` selects the CPU
-/// backend; otherwise the default is wgpu (preserving prior behaviour).
+/// this from its `--device` flag. When unset, `BRAIN_DEVICE=cpu|vulkan` selects
+/// that backend; otherwise the default is wgpu (preserving prior behaviour).
 pub fn set_default_backend(b: Backend) {
-    DEFAULT_BACKEND.store(match b { Backend::Wgpu => 1, Backend::Cpu => 2 }, Ordering::Relaxed);
+    DEFAULT_BACKEND.store(
+        match b {
+            Backend::Wgpu => 1,
+            Backend::Cpu => 2,
+            Backend::Vulkan => 3,
+        },
+        Ordering::Relaxed,
+    );
 }
 
 /// True iff a backend was explicitly selected via [`set_default_backend`] (i.e.
@@ -108,11 +120,16 @@ fn resolve_backend() -> Backend {
     match DEFAULT_BACKEND.load(Ordering::Relaxed) {
         1 => Backend::Wgpu,
         2 => Backend::Cpu,
+        3 => Backend::Vulkan,
         _ => {
             #[cfg(not(target_arch = "wasm32"))]
-            if std::env::var("BRAIN_DEVICE").map(|v| v.eq_ignore_ascii_case("cpu")).unwrap_or(false)
-            {
-                return Backend::Cpu;
+            if let Ok(v) = std::env::var("BRAIN_DEVICE") {
+                if v.eq_ignore_ascii_case("cpu") {
+                    return Backend::Cpu;
+                }
+                if v.eq_ignore_ascii_case("vulkan") {
+                    return Backend::Vulkan;
+                }
             }
             Backend::Wgpu
         }
@@ -124,6 +141,8 @@ pub enum Step {
     Wgpu(wgpu_backend::Step),
     #[cfg(not(target_arch = "wasm32"))]
     Cpu(cpu_backend::Step),
+    #[cfg(not(target_arch = "wasm32"))]
+    Vulkan(vulkan_backend::Step),
 }
 
 /// A device buffer on whichever backend created it. Model code holds these and
@@ -132,6 +151,8 @@ pub enum DeviceBuffer {
     Wgpu(wgpu::Buffer),
     #[cfg(not(target_arch = "wasm32"))]
     Cpu(cpu_backend::CpuBuffer),
+    #[cfg(not(target_arch = "wasm32"))]
+    Vulkan(vulkan_backend::VkOwnedBuffer),
 }
 
 impl DeviceBuffer {
@@ -140,7 +161,7 @@ impl DeviceBuffer {
         match self {
             DeviceBuffer::Wgpu(b) => b,
             #[cfg(not(target_arch = "wasm32"))]
-            _ => panic!("DeviceBuffer/backend mismatch (cpu buffer on wgpu backend)"),
+            _ => panic!("DeviceBuffer/backend mismatch (non-wgpu buffer on wgpu backend)"),
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -148,17 +169,27 @@ impl DeviceBuffer {
     fn cpu(&self) -> &cpu_backend::CpuBuffer {
         match self {
             DeviceBuffer::Cpu(b) => b,
-            _ => panic!("DeviceBuffer/backend mismatch (wgpu buffer on cpu backend)"),
+            _ => panic!("DeviceBuffer/backend mismatch (non-cpu buffer on cpu backend)"),
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
+    fn vulkan(&self) -> &vulkan_backend::VkOwnedBuffer {
+        match self {
+            DeviceBuffer::Vulkan(b) => b,
+            _ => panic!("DeviceBuffer/backend mismatch (non-vulkan buffer on vulkan backend)"),
         }
     }
 }
 
-/// The compute device: a runtime choice between the wgpu and the native CPU
-/// backend. Both are compiled in; a given instance uses exactly one.
+/// The compute device: a runtime choice between the wgpu, native CPU, and native
+/// Vulkan backends. All are compiled in; a given instance uses exactly one.
 pub enum Gpu {
     Wgpu(wgpu_backend::Gpu),
     #[cfg(not(target_arch = "wasm32"))]
     Cpu(cpu_backend::CpuBackend),
+    #[cfg(not(target_arch = "wasm32"))]
+    Vulkan(vulkan_backend::Gpu),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -168,6 +199,16 @@ impl Gpu {
         match resolve_backend() {
             Backend::Wgpu => Gpu::Wgpu(wgpu_backend::Gpu::new(kernels)),
             Backend::Cpu => Gpu::Cpu(cpu_backend::CpuBackend::new(kernels)),
+            // Prefer Vulkan when selected; fall back to wgpu if there is no ICD /
+            // device or a kernel fails to compile, so the build stays usable
+            // everywhere (the user's graceful-fallback requirement).
+            Backend::Vulkan => match vulkan_backend::Gpu::try_new(kernels) {
+                Ok(g) => Gpu::Vulkan(g),
+                Err(e) => {
+                    eprintln!("brain: Vulkan backend unavailable ({e}); falling back to wgpu");
+                    Gpu::Wgpu(wgpu_backend::Gpu::new(kernels))
+                }
+            },
         }
     }
     /// Build on the native CPU backend regardless of the default selection.
@@ -178,47 +219,58 @@ impl Gpu {
     pub fn new_wgpu(kernels: &[(&str, &str)]) -> Gpu {
         Gpu::Wgpu(wgpu_backend::Gpu::new(kernels))
     }
+    /// Build on the native Vulkan backend, or `Err` if no Vulkan device is present.
+    pub fn try_new_vulkan(kernels: &[(&str, &str)]) -> Result<Gpu, String> {
+        vulkan_backend::Gpu::try_new(kernels).map(Gpu::Vulkan)
+    }
 
     pub fn storage(&self, n: u64) -> DeviceBuffer {
         match self {
             Gpu::Wgpu(g) => DeviceBuffer::Wgpu(g.storage(n)),
             Gpu::Cpu(c) => DeviceBuffer::Cpu(c.storage(n)),
+            Gpu::Vulkan(v) => DeviceBuffer::Vulkan(v.storage(n)),
         }
     }
     pub fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer {
         match self {
             Gpu::Wgpu(g) => DeviceBuffer::Wgpu(g.storage_init(name, data)),
             Gpu::Cpu(c) => DeviceBuffer::Cpu(c.storage_init(name, data)),
+            Gpu::Vulkan(v) => DeviceBuffer::Vulkan(v.storage_init(name, data)),
         }
     }
     pub fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> DeviceBuffer {
         match self {
             Gpu::Wgpu(g) => DeviceBuffer::Wgpu(g.buffer(label, size, usage)),
             Gpu::Cpu(c) => DeviceBuffer::Cpu(c.buffer(label, size, usage)),
+            Gpu::Vulkan(v) => DeviceBuffer::Vulkan(v.buffer(label, size, usage)),
         }
     }
     pub fn uniform_dynamic(&self, len: usize) -> DeviceBuffer {
         match self {
             Gpu::Wgpu(g) => DeviceBuffer::Wgpu(g.uniform_dynamic(len)),
             Gpu::Cpu(c) => DeviceBuffer::Cpu(c.uniform_dynamic(len)),
+            Gpu::Vulkan(v) => DeviceBuffer::Vulkan(v.uniform_dynamic(len)),
         }
     }
     pub fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
         match self {
             Gpu::Wgpu(g) => g.write(buf.wgpu(), data),
             Gpu::Cpu(c) => c.write(buf.cpu(), data),
+            Gpu::Vulkan(v) => v.write(buf.vulkan(), data),
         }
     }
     pub fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
         match self {
             Gpu::Wgpu(g) => g.read(buf.wgpu(), n),
             Gpu::Cpu(c) => c.read(buf.cpu(), n),
+            Gpu::Vulkan(v) => v.read(buf.vulkan(), n),
         }
     }
     pub fn poll_wait(&self) {
         match self {
             Gpu::Wgpu(g) => g.poll_wait(),
             Gpu::Cpu(c) => c.poll_wait(),
+            Gpu::Vulkan(v) => v.poll_wait(),
         }
     }
     pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
@@ -230,6 +282,10 @@ impl Gpu {
             Gpu::Cpu(c) => {
                 let bs: Vec<&cpu_backend::CpuBuffer> = bufs.iter().map(|b| b.cpu()).collect();
                 Step::Cpu(c.step(kind, &bs, params, threads))
+            }
+            Gpu::Vulkan(v) => {
+                let bs: Vec<&vulkan_backend::VkOwnedBuffer> = bufs.iter().map(|b| b.vulkan()).collect();
+                Step::Vulkan(v.step(kind, &bs, params, threads))
             }
         }
     }
@@ -248,6 +304,10 @@ impl Gpu {
                 let bs: Vec<&cpu_backend::CpuBuffer> = bufs.iter().map(|b| b.cpu()).collect();
                 Step::Cpu(c.step_sliced(kind, &bs, offsets, params, threads))
             }
+            Gpu::Vulkan(v) => {
+                let bs: Vec<&vulkan_backend::VkOwnedBuffer> = bufs.iter().map(|b| b.vulkan()).collect();
+                Step::Vulkan(v.step_sliced(kind, &bs, offsets, params, threads))
+            }
         }
     }
     pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
@@ -259,6 +319,10 @@ impl Gpu {
             Gpu::Cpu(c) => {
                 let bs: Vec<&cpu_backend::CpuBuffer> = bufs.iter().map(|b| b.cpu()).collect();
                 Step::Cpu(c.step_buf(kind, ubuf.cpu(), &bs, threads))
+            }
+            Gpu::Vulkan(v) => {
+                let bs: Vec<&vulkan_backend::VkOwnedBuffer> = bufs.iter().map(|b| b.vulkan()).collect();
+                Step::Vulkan(v.step_buf(kind, ubuf.vulkan(), &bs, threads))
             }
         }
     }
@@ -285,6 +349,17 @@ impl Gpu {
                     })
                     .collect();
                 c.submit(&cs, &ss);
+            }
+            Gpu::Vulkan(v) => {
+                let cs: Vec<&vulkan_backend::VkOwnedBuffer> = clears.iter().map(|b| b.vulkan()).collect();
+                let ss: Vec<vulkan_backend::Step> = steps
+                    .iter()
+                    .map(|s| match s {
+                        Step::Vulkan(t) => *t,
+                        _ => panic!("Step/backend mismatch"),
+                    })
+                    .collect();
+                v.submit(&cs, &ss);
             }
         }
     }
@@ -774,5 +849,35 @@ mod tests {
         let step = gpu.step(0, &[&a, &b, &out], &[4], 4);
         gpu.submit(&[], &[step]);
         assert_eq!(gpu.read(&out, 4), vec![11.0, 22.0, 33.0, 44.0]);
+    }
+
+    /// Same dispatch contract on the native **Vulkan** backend, when a Vulkan
+    /// device/ICD is present. Skips (does not fail) on hosts without Vulkan, so CI
+    /// stays green; on a real device it validates the ash pipeline/descriptor/
+    /// barrier/readback path against the CPU reference result.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn vulkan_dispatch_storage_and_readback() {
+        let gpu = match Gpu::try_new_vulkan(&[("add2", kernels::ADD2)]) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("skipping vulkan test (no Vulkan device): {e}");
+                return;
+            }
+        };
+        let a = gpu.storage_init("a", &[1.0, 2.0, 3.0, 4.0]);
+        let b = gpu.storage_init("b", &[10.0, 20.0, 30.0, 40.0]);
+        let out = gpu.storage(4);
+        let step = gpu.step(0, &[&a, &b, &out], &[4], 4);
+        gpu.submit(&[], &[step]);
+        assert_eq!(gpu.read(&out, 4), vec![11.0, 22.0, 33.0, 44.0]);
+
+        // Multi-dispatch with a read-after-write dependency exercises the inter-
+        // dispatch memory barrier: out2 = (a+b) + b.
+        let out2 = gpu.storage(4);
+        let s1 = gpu.step(0, &[&a, &b, &out], &[4], 4);
+        let s2 = gpu.step(0, &[&out, &b, &out2], &[4], 4);
+        gpu.submit(&[], &[s1, s2]);
+        assert_eq!(gpu.read(&out2, 4), vec![21.0, 42.0, 63.0, 84.0]);
     }
 }
