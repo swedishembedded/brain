@@ -44,22 +44,49 @@ pub fn export_talker_fp32(weights_path: &str, out_path: &str, seq_len: usize) ->
 /// post-final-norm). The codebook-0 head and MTP residual fill stay on the host.
 /// See [`crate::qwen_topology::build_talker_hidden_graph`].
 pub fn build_talker_hidden_fp32_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
-    let c = checkpoint::load(weights_path);
-    let cfg = QwenConfig::from_json(&c.header["config"]);
-    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    talker_hidden_bytes(weights_path, seq_len, false)
+}
+
+/// As [`build_talker_hidden_fp32_bytes`] but weight-only **INT8** (per-output-
+/// channel symmetric, `DequantizeLinear` -> MatMul): ~4x smaller, so the 1.7B
+/// Talker fits the NPU and compiles faster.
+pub fn build_talker_hidden_int8_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
+    talker_hidden_bytes(weights_path, seq_len, true)
+}
+
+fn talker_hidden_bytes(weights_path: &str, seq_len: usize, quant: bool) -> std::io::Result<(Vec<u8>, QwenConfig)> {
+    // Drop the checkpoint as soon as the tensors are extracted to bound peak RAM.
+    let (cfg, w) = {
+        let c = checkpoint::load(weights_path);
+        let cfg = QwenConfig::from_json(&c.header["config"]);
+        let w: HashMap<String, Vec<f32>> = c.by_role("");
+        (cfg, w)
+    };
     let mut g = GraphBuilder::new("qwen_talker_hidden");
-    crate::qwen_topology::build_talker_hidden_graph(&cfg, &w, seq_len, &mut g);
+    crate::qwen_topology::build_talker_hidden_graph(&cfg, &w, seq_len, quant, &mut g);
     Ok((g.finish(), cfg))
 }
 
 /// Export the fp32 ONNX Talker hidden-state graph to `out_path` (+ a
 /// `<out_path>.data` sidecar for the large decoder weights).
 pub fn export_talker_hidden_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
-    let c = checkpoint::load(weights_path);
-    let cfg = QwenConfig::from_json(&c.header["config"]);
-    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    export_talker_hidden(weights_path, out_path, seq_len, false)
+}
+
+/// Export the weight-only **INT8** Talker hidden-state graph to `out_path`.
+pub fn export_talker_hidden_int8(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
+    export_talker_hidden(weights_path, out_path, seq_len, true)
+}
+
+fn export_talker_hidden(weights_path: &str, out_path: &str, seq_len: usize, quant: bool) -> std::io::Result<()> {
+    let (cfg, w) = {
+        let c = checkpoint::load(weights_path);
+        let cfg = QwenConfig::from_json(&c.header["config"]);
+        let w: HashMap<String, Vec<f32>> = c.by_role("");
+        (cfg, w)
+    };
     let mut g = GraphBuilder::new("qwen_talker_hidden");
-    crate::qwen_topology::build_talker_hidden_graph(&cfg, &w, seq_len, &mut g);
+    crate::qwen_topology::build_talker_hidden_graph(&cfg, &w, seq_len, quant, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
 
