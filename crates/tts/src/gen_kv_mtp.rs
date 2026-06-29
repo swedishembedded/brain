@@ -256,6 +256,14 @@ impl CpuMtp {
     }
 }
 
+impl crate::prompt::MtpHost for CpuMtp {
+    fn codec_embed(&self, residual_idx: usize, code: u32) -> &[f32] {
+        let d = self.d();
+        let s = code as usize * d;
+        &self.codec_embedding[residual_idx][s..s + d]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

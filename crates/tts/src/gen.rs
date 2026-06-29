@@ -304,7 +304,8 @@ impl TalkerGen {
         self.gpu.read(&self.sc.xn_final, n * d)
     }
 
-    /// Codebook-0 logits (`[vocab]`) for a single final-norm hidden row.
+    /// Codebook-0 logits (`[vocab]`) for a single final-norm hidden row. Shared
+    /// host head used by the GPU/CPU recompute loop and the NPU loop alike.
     pub fn codec_head_logits(&self, hidden_row: &[f32]) -> Vec<f32> {
         let d = self.d();
         let v = self.cfg.vocab as usize;
@@ -319,5 +320,17 @@ impl TalkerGen {
             *dst = acc;
         }
         out
+    }
+}
+
+impl crate::prompt::TalkerHost for TalkerGen {
+    fn d(&self) -> usize {
+        self.cfg.d_model as usize
+    }
+    fn text(&self) -> &TextProjection {
+        &self.text
+    }
+    fn codec_embed(&self, id: u32) -> &[f32] {
+        TalkerGen::codec_embed(self, id)
     }
 }

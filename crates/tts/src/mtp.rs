@@ -534,6 +534,12 @@ impl MtpModel {
     }
 }
 
+impl crate::prompt::MtpHost for MtpModel {
+    fn codec_embed(&self, residual_idx: usize, code: u32) -> &[f32] {
+        MtpModel::codec_embed(self, residual_idx, code)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
