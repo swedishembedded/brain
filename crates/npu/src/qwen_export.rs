@@ -37,6 +37,32 @@ pub fn export_talker_fp32(weights_path: &str, out_path: &str, seq_len: usize) ->
     export_qwen_fp32(weights_path, out_path, seq_len)
 }
 
+/// Build the fp32 ONNX **Talker hidden-state** graph for `seq_len` and return
+/// `(bytes, config)`. Unlike [`build_talker_fp32_bytes`] (token-id → logits),
+/// this is the input-embedding-driven graph the autoregressive Talker loop needs:
+/// input `inputs_embeds:[1,seq_len,d]` (f32), output `hidden:[1,seq_len,d]` (f32,
+/// post-final-norm). The codebook-0 head and MTP residual fill stay on the host.
+/// See [`crate::qwen_topology::build_talker_hidden_graph`].
+pub fn build_talker_hidden_fp32_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
+    let c = checkpoint::load(weights_path);
+    let cfg = QwenConfig::from_json(&c.header["config"]);
+    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    let mut g = GraphBuilder::new("qwen_talker_hidden");
+    crate::qwen_topology::build_talker_hidden_graph(&cfg, &w, seq_len, &mut g);
+    Ok((g.finish(), cfg))
+}
+
+/// Export the fp32 ONNX Talker hidden-state graph to `out_path` (+ a
+/// `<out_path>.data` sidecar for the large decoder weights).
+pub fn export_talker_hidden_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
+    let c = checkpoint::load(weights_path);
+    let cfg = QwenConfig::from_json(&c.header["config"]);
+    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    let mut g = GraphBuilder::new("qwen_talker_hidden");
+    crate::qwen_topology::build_talker_hidden_graph(&cfg, &w, seq_len, &mut g);
+    g.finish_external(out_path, EXTERNAL_THRESHOLD)
+}
+
 /// Bytes larger than this go to the ONNX external-data sidecar (keeps the proto
 /// under protobuf's 2GB parse limit while inlining the small tensors).
 const EXTERNAL_THRESHOLD: usize = 1 << 20; // 1 MiB

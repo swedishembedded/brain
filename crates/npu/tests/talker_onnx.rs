@@ -64,3 +64,43 @@ fn talker_onnx_graph_is_well_formed_untied_head() {
     assert!(ops.get("MatMul").copied().unwrap_or(0) > 0);
     assert!(ops.get("Softmax").copied().unwrap_or(0) >= cfg.n_layers as usize);
 }
+
+/// The input-embedding Talker graph (`build_talker_hidden_graph`) the NPU
+/// generation loop compiles: float `inputs_embeds:[1,T,d]` in, `hidden:[1,T,d]`
+/// out (post-final-norm, *no* lm_head — the codebook-0 head stays on the host).
+#[test]
+fn talker_hidden_graph_is_embeds_in_hidden_out() {
+    let cfg = untied_tiny();
+    let t = 4u32;
+    let init: HashMap<String, Vec<f32>> = qwen::init_weights(&cfg, 11);
+    let model = Qwen::new(cfg.clone(), 1, t, &init);
+
+    let dir = std::env::temp_dir().join(format!("brain_talker_hidden_onnx_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wpath = dir.join("talker_tiny.weights");
+    model.save(wpath.to_str().unwrap());
+
+    let (bytes, _ecfg) =
+        npu::qwen_export::build_talker_hidden_fp32_bytes(wpath.to_str().unwrap(), t as usize)
+            .expect("build talker hidden onnx");
+    std::fs::remove_dir_all(&dir).ok();
+
+    let model = onnx::decode_model(&bytes).expect("talker hidden ONNX must decode");
+    let graph = model.graph.expect("graph");
+
+    // IO: float inputs_embeds -> hidden; no token-id input, no logits.
+    assert!(graph.input.iter().any(|i| i.name == "inputs_embeds"), "inputs_embeds input");
+    assert!(graph.output.iter().any(|o| o.name == "hidden"), "hidden output");
+    assert!(!graph.input.iter().any(|i| i.name == "input_ids"), "embeds graph has no input_ids");
+    assert!(!graph.output.iter().any(|o| o.name == "logits"), "embeds graph emits hidden, not logits");
+
+    // No lm_head: the codebook-0 head runs on the host, so neither the tied nor
+    // untied head initializer should be present.
+    assert!(
+        !graph.initializer.iter().any(|t| t.name == "lm_head.w"),
+        "hidden graph must not contain the lm_head projection"
+    );
+    // Body is still a full decoder stack.
+    let softmax = graph.node.iter().filter(|n| n.op_type == "Softmax").count();
+    assert!(softmax >= cfg.n_layers as usize, "one attention softmax per layer");
+}

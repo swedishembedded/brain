@@ -23,9 +23,56 @@ use qwen::config::QwenConfig;
 type W = HashMap<String, Vec<f32>>;
 
 /// Assembles the decoder graph into `g`. `w` is the brain checkpoint's tensors
-/// (role ""), `t` the fixed sequence length.
+/// (role ""), `t` the fixed sequence length. Input `input_ids:[1,T]` (int64),
+/// output `logits:[1,T,vocab]` (f32).
 pub fn build_qwen_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder) {
     let mut tp = Topo { g, n: 0 };
+    let d = cfg.d_model as usize;
+    let vocab = cfg.vocab as usize;
+    let ti = t as i64;
+
+    tp.g.input_i64("input_ids", &[1, ti]);
+    tp.g.output_f32("logits", &[1, ti, vocab as i64]);
+
+    // Token embedding: Gather(tok.weight[vocab,d], ids) -> [1,T,d].
+    tp.f32("tok.weight", &[vocab as i64, d as i64], w["tok.weight"].clone());
+    let x = tp.gather("tok.weight", "input_ids", 0, "emb");
+
+    let xf = build_stack(&mut tp, cfg, w, t, &x);
+    // lm_head. Tied models (`tie_embeddings`) reuse `tok.weight`; untied models
+    // (e.g. the Qwen3-TTS Talker, `tie_embeddings = false`) have a separate
+    // `lm_head.weight`. Both are `[vocab,d]`, transposed to `[d,vocab]` for MatMul.
+    let head = if cfg.tie_embeddings { "tok.weight" } else { "lm_head.weight" };
+    tp.linear_named(&xf, head, "lm_head.w", w, vocab, d, "logits");
+}
+
+/// Assemble the Talker decoder as an **input-embedding**-driven graph: input
+/// `inputs_embeds:[1,T,d]` (f32), output `hidden:[1,T,d]` (f32, the post-final-
+/// norm hidden states). This is the shape the autoregressive Talker loop needs —
+/// it feeds the text/codec/speaker-conditioned embedding stream straight into the
+/// residual stream (no token-id Gather) and reads back the per-position hidden
+/// state, exactly mirroring [`tts::gen::TalkerGen::forward`]. The codebook-0 head
+/// (`codec_head_logits`) and the MTP residual fill stay on the host, so this
+/// graph stops at the final RMSNorm and emits the hidden state, not logits.
+pub fn build_talker_hidden_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder) {
+    let mut tp = Topo { g, n: 0 };
+    let d = cfg.d_model as usize;
+    let ti = t as i64;
+
+    tp.g.input_f32("inputs_embeds", &[1, ti, d as i64]);
+    tp.g.output_f32("hidden", &[1, ti, d as i64]);
+
+    let xf = build_stack(&mut tp, cfg, w, t, "inputs_embeds");
+    // Surface the final-norm hidden state as the graph output `hidden`.
+    tp.node("Identity", &[&xf], "hidden");
+}
+
+/// Build the shared decoder body (constants + `n_layers` blocks + final RMSNorm)
+/// onto `tp`, reading the residual stream from `x_in` (`[1,T,d]`) and returning
+/// the name of the final-norm hidden states (`[1,T,d]`). Used by both the
+/// token-id graph ([`build_qwen_graph`]) and the input-embedding Talker graph
+/// ([`build_talker_hidden_graph`]).
+fn build_stack(tp: &mut Topo, cfg: &QwenConfig, w: &W, t: usize, x_in: &str) -> String {
     let d = cfg.d_model as usize;
     let nh = cfg.n_heads as usize;
     let nkv = cfg.n_kv_heads as usize;
@@ -35,12 +82,8 @@ pub fn build_qwen_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder)
     let hq = nh * hd;
     let hkv = nkv * hd;
     let ff = cfg.d_ff as usize;
-    let vocab = cfg.vocab as usize;
     let eps = cfg.rms_eps;
     let ti = t as i64;
-
-    tp.g.input_i64("input_ids", &[1, ti]);
-    tp.g.output_f32("logits", &[1, ti, vocab as i64]);
 
     // Shared constants.
     tp.f32("c_eps", &[1], vec![eps]);
@@ -82,9 +125,9 @@ pub fn build_qwen_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder)
     tp.i64("sh_nh", &[4], vec![1, nh as i64, ti, hd as i64]);
     tp.i64("sh_ctx", &[3], vec![1, ti, hq as i64]);
 
-    // Token embedding: Gather(tok.weight[vocab,d], ids) -> [1,T,d].
-    tp.f32("tok.weight", &[vocab as i64, d as i64], w["tok.weight"].clone());
-    let mut x = tp.gather("tok.weight", "input_ids", 0, "emb");
+    // Residual stream starts at the caller-provided input (token embeddings or
+    // the input-embedding stream), already `[1,T,d]`.
+    let mut x = x_in.to_string();
 
     for l in 0..cfg.n_layers as usize {
         let p = |s: &str| format!("blocks.{l}.{s}");
@@ -130,12 +173,7 @@ pub fn build_qwen_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder)
         x = tp.add_t(&x, &down);
     }
 
-    let xf = tp.rmsnorm(&x, "norm.weight", w, d);
-    // lm_head. Tied models (`tie_embeddings`) reuse `tok.weight`; untied models
-    // (e.g. the Qwen3-TTS Talker, `tie_embeddings = false`) have a separate
-    // `lm_head.weight`. Both are `[vocab,d]`, transposed to `[d,vocab]` for MatMul.
-    let head = if cfg.tie_embeddings { "tok.weight" } else { "lm_head.weight" };
-    tp.linear_named(&xf, head, "lm_head.w", w, vocab, d, "logits");
+    tp.rmsnorm(&x, "norm.weight", w, d)
 }
 
 /// ONNX graph assembly helper: unique temp names + node/initializer emission.
