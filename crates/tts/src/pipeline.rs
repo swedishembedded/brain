@@ -86,7 +86,7 @@ fn argmax(s: &[f32]) -> usize {
 /// Sample codebook-0 from `logits` with the reference's `suppress_tokens`: the
 /// top-1024 vocab entries `[v-1024, v)` are masked except the codec EOS, which is
 /// itself masked unless `allow_eos` (the `min_new_tokens` guard).
-fn sample_cb0(
+pub(crate) fn sample_cb0(
     mut logits: Vec<f32>,
     eos: u32,
     allow_eos: bool,
@@ -413,6 +413,127 @@ pub fn synth(
 
     let codes = generate(&gen, &mtp, &sp, &prompt, opts, &paths.talker, &paths.mtp);
     decode_codes(&paths.codec, &codes)
+}
+
+/// **Voice clone on the Intel NPU** — same conditioning as [`clone`], but the
+/// Talker decoder and the codec decode run as compiled OpenVINO graphs on the NPU
+/// (host-side codebook-0 sampling + MTP residual fill, via [`crate::npu_gen`]).
+/// `npu_cache`, when given, persists the exported ONNX + OpenVINO compiled blobs
+/// so re-runs skip the export/compile wait.
+#[allow(clippy::too_many_arguments)]
+pub fn clone_npu(
+    paths: &TtsPaths,
+    opts: &GenOpts,
+    target_text: &str,
+    ref_wav_path: &str,
+    ref_text: &str,
+    language: &str,
+    ref_code: Option<Vec<u32>>,
+    npu_cache: Option<&str>,
+) -> Result<Vec<f32>, String> {
+    let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
+    let language_id = sp.language_id(language);
+
+    let wav = audio::wav::read(ref_wav_path).map_err(|e| format!("read {ref_wav_path}: {e}"))?;
+    let speaker = speaker::SpeakerEncoder::load_inference(&paths.speaker);
+    let xvec = speaker.embed_wav(&wav.samples, wav.sample_rate);
+
+    let ref_code = match ref_code {
+        Some(c) => Some(c),
+        None if !ref_text.trim().is_empty() => {
+            let codec = codec::Codec::load_inference(&paths.codec);
+            let sr = codec.cfg.input_sample_rate;
+            let wav24 = audio::resample_linear(&wav.samples, wav.sample_rate, sr);
+            Some(codec.encode(&wav24))
+        }
+        None => None,
+    };
+
+    let input_ids = tok.encode(&assistant_text(target_text));
+    let (role_ids, text_ids) = split_input_ids(&input_ids)?;
+
+    let tables = crate::npu_gen::TalkerTables::load(&paths.talker);
+    let mut mtp = crate::gen_kv_mtp::CpuMtp::load(&paths.mtp);
+
+    let prompt = if let Some(ref_code) = ref_code {
+        let ref_ids_full = tok.encode(&format!("<|im_start|>assistant\n{ref_text}<|im_end|>\n"));
+        if ref_ids_full.len() < 3 + 2 + 1 {
+            return Err("ref_text tokenized too short".to_string());
+        }
+        let ref_ids = &ref_ids_full[3..ref_ids_full.len() - 2];
+        prompt::build_icl_prompt(
+            &tables, &mtp, &sp, &role_ids, &text_ids, ref_ids, &ref_code, &xvec, language_id,
+        )
+    } else {
+        prompt::build_xvector_prompt(&tables, &sp, &role_ids, &text_ids, Some(&xvec), language_id)
+    };
+
+    run_npu(paths, &tables, &mut mtp, &sp, &prompt, opts, npu_cache)
+}
+
+/// **Synth on the Intel NPU** — speaker-free text-to-speech (no reference voice).
+pub fn synth_npu(
+    paths: &TtsPaths,
+    opts: &GenOpts,
+    target_text: &str,
+    language: &str,
+    npu_cache: Option<&str>,
+) -> Result<Vec<f32>, String> {
+    let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
+    let language_id = sp.language_id(language);
+
+    let input_ids = tok.encode(&assistant_text(target_text));
+    let (role_ids, text_ids) = split_input_ids(&input_ids)?;
+
+    let tables = crate::npu_gen::TalkerTables::load(&paths.talker);
+    let mut mtp = crate::gen_kv_mtp::CpuMtp::load(&paths.mtp);
+    let prompt = prompt::build_xvector_prompt(&tables, &sp, &role_ids, &text_ids, None, language_id);
+
+    run_npu(paths, &tables, &mut mtp, &sp, &prompt, opts, npu_cache)
+}
+
+/// Shared NPU path: run the Talker generation loop on the NPU, then decode the
+/// codes on the NPU codec graph. Falls back to CPU/GPU within OpenVINO if the NPU
+/// is unavailable (so the same command works on any OpenVINO host).
+fn run_npu(
+    paths: &TtsPaths,
+    tables: &crate::npu_gen::TalkerTables,
+    mtp: &mut crate::gen_kv_mtp::CpuMtp,
+    sp: &TtsSpecials,
+    prompt: &Prompt,
+    opts: &GenOpts,
+    npu_cache: Option<&str>,
+) -> Result<Vec<f32>, String> {
+    let cache = npu_cache.map(std::path::Path::new);
+    // OpenVINO target device; override with BRAIN_TTS_NPU_DEVICE=cpu|gpu|npu|auto
+    // (e.g. `cpu` to validate the fp32 graph, since the NPU runs the graph in fp16).
+    let device = std::env::var("BRAIN_TTS_NPU_DEVICE")
+        .ok()
+        .and_then(|s| npu::openvino::NpuDevice::parse(&s))
+        .unwrap_or(npu::openvino::NpuDevice::Npu);
+    let allow_fallback = true;
+    // Optional deterministic parity gate (NPU/OV-device vs CPU Talker hidden state).
+    if std::env::var("TTS_NPU_PARITY").is_ok() {
+        match crate::npu_gen::talker_prefix_parity(&paths.talker, tables, prompt, cache, device) {
+            Ok(m) => eprintln!(
+                "tts npu parity: Talker prefix hidden max-abs ({} vs CPU) = {m:.3e}",
+                device.ov_str()
+            ),
+            Err(e) => eprintln!("tts npu parity check failed: {e}"),
+        }
+    }
+    let codes = crate::npu_gen::generate_npu(
+        &paths.talker, tables, mtp, sp, prompt, opts, device, allow_fallback, cache,
+    )?;
+    if codes.is_empty() {
+        return Err("no codec frames were generated".to_string());
+    }
+    eprintln!("tts npu: generated {} frames; decoding on NPU codec graph…", codes.len() / 16);
+    let (wav, codec_dev) = crate::npu_gen::decode_codes_npu(&paths.codec, &codes, device, allow_fallback, cache)?;
+    eprintln!("tts npu: codec decode ran on {codec_dev}");
+    Ok(wav)
 }
 
 /// Decode `[T,16]` codes to a 24 kHz waveform (empty -> error).

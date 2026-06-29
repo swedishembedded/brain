@@ -18,6 +18,7 @@ pub mod gen_kv;
 pub mod gen_kv_mtp;
 pub mod import;
 pub mod mtp;
+pub mod npu_gen;
 pub mod pipeline;
 pub mod prompt;
 pub mod sft;

@@ -19,6 +19,7 @@ brain-optim.workspace = true
 brain-checkpoint.workspace = true
 brain-data.workspace = true
 brain-codec.workspace = true
+brain-npu.workspace = true
 brain-speaker.workspace = true
 brain-audio.workspace = true
 serde_json.workspace = true

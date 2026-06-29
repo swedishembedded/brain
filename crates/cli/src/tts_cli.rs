@@ -253,11 +253,29 @@ fn clone(args: &[String]) {
     } else {
         "x-vector-only"
     };
+    let npu = crate::npu_requested();
+    if npu {
+        // Talker + codec run on the NPU; force any incidental gpu_core model (the
+        // speaker x-vector encoder) onto the CPU JIT instead of the wgpu/GL default.
+        gpu_core::set_default_backend(gpu_core::Backend::Cpu);
+    }
     eprintln!(
-        "tts clone [{mode}]: lang={} max_frames={} temp={} -> {}",
-        c.lang, c.opts.max_frames, c.opts.temperature, c.out
+        "tts clone [{mode}]{}: lang={} max_frames={} temp={} -> {}",
+        if npu { " on NPU (OpenVINO)" } else { "" },
+        c.lang,
+        c.opts.max_frames,
+        c.opts.temperature,
+        c.out
     );
-    let wav = match tts::pipeline::clone(&paths(&c), &c.opts, &text, &refw, &ref_text, &c.lang, ref_code) {
+    let result = if npu {
+        let cache = format!("{}/npu-cache", c.weights_dir);
+        tts::pipeline::clone_npu(
+            &paths(&c), &c.opts, &text, &refw, &ref_text, &c.lang, ref_code, Some(&cache),
+        )
+    } else {
+        tts::pipeline::clone(&paths(&c), &c.opts, &text, &refw, &ref_text, &c.lang, ref_code)
+    };
+    let wav = match result {
         Ok(w) => w,
         Err(e) => {
             eprintln!("clone failed: {e}");
@@ -274,8 +292,24 @@ fn synth(args: &[String]) {
         eprintln!("usage: brain tts synth --text \"...\" --out out.wav [--lang english ...]");
         std::process::exit(2);
     }
-    eprintln!("tts synth: lang={} max_frames={} -> {}", c.lang, c.opts.max_frames, c.out);
-    let wav = match tts::pipeline::synth(&paths(&c), &c.opts, &text, &c.lang) {
+    let npu = crate::npu_requested();
+    if npu {
+        gpu_core::set_default_backend(gpu_core::Backend::Cpu);
+    }
+    eprintln!(
+        "tts synth{}: lang={} max_frames={} -> {}",
+        if npu { " on NPU (OpenVINO)" } else { "" },
+        c.lang,
+        c.opts.max_frames,
+        c.out
+    );
+    let result = if npu {
+        let cache = format!("{}/npu-cache", c.weights_dir);
+        tts::pipeline::synth_npu(&paths(&c), &c.opts, &text, &c.lang, Some(&cache))
+    } else {
+        tts::pipeline::synth(&paths(&c), &c.opts, &text, &c.lang)
+    };
+    let wav = match result {
         Ok(w) => w,
         Err(e) => {
             eprintln!("synth failed: {e}");

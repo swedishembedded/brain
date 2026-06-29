@@ -525,6 +525,7 @@ dependencies = [
  "brain-gradcheck",
  "brain-kernels",
  "brain-model",
+ "brain-npu",
  "brain-optim",
  "brain-paramstore",
  "brain-qwen",
