@@ -1239,3 +1239,46 @@ impl NpuStreamCodec {
         Ok(total)
     }
 }
+
+#[cfg(test)]
+mod stream_codec_tests {
+    use super::*;
+
+    /// NPU stateful streaming codec vs the bit-exact CPU reference. Run (CPU dev):
+    ///   BRAIN_CODEC_WEIGHTS=.../codec.weights BRAIN_TTS_NPU_DEVICE=cpu \
+    ///   cargo test --release -p brain-tts npu_stream_matches_cpu -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn npu_stream_matches_cpu() {
+        let path = std::env::var("BRAIN_CODEC_WEIGHTS").expect("set BRAIN_CODEC_WEIGHTS");
+        let device = std::env::var("BRAIN_TTS_NPU_DEVICE")
+            .ok()
+            .and_then(|s| NpuDevice::parse(&s))
+            .unwrap_or(NpuDevice::Cpu);
+        let cache = std::path::Path::new("out/tts-1b7/npu-cache");
+        let (front_t, chunk) = (32usize, 16usize);
+        let mut npu = NpuStreamCodec::load(&path, front_t, chunk, device, true, Some(cache)).unwrap();
+
+        let nq = 16usize;
+        let t = 24usize;
+        let mut seed = 11u64;
+        let codes: Vec<u32> = (0..t * nq)
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                ((seed >> 40) % 64) as u32
+            })
+            .collect();
+
+        let mut npu_wav = Vec::new();
+        npu.decode(&codes, &mut |pcm, _| npu_wav.extend_from_slice(pcm)).unwrap();
+
+        let cpu = codec::decode_stream::StreamingCodecDecoder::load(&path);
+        let cpu_wav = cpu.decode_streaming(&codes, chunk);
+
+        let n = npu_wav.len().min(cpu_wav.len());
+        let maxd = npu_wav[..n].iter().zip(&cpu_wav[..n]).fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+        eprintln!("npu-stream vs cpu-stream: len {} vs {}, max-abs {maxd:.3e}", npu_wav.len(), cpu_wav.len());
+        assert_eq!(npu_wav.len(), cpu_wav.len(), "length mismatch");
+        assert!(maxd < 5e-3, "npu stream codec differs: {maxd}");
+    }
+}
