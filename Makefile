@@ -45,7 +45,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release test gradcheck requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo \
+.PHONY: help build release test gradcheck parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo \
@@ -96,6 +96,11 @@ requirements:
 
 gradcheck: release
 	$(BRAIN) gradcheck
+
+# Cross-backend parity gate: CPU == Vulkan == NPU (gradcheck on both backends +
+# direct CPU-vs-GPU forward parity + TTS NPU codec vs CPU reference).
+parity:
+	scripts/parity-gate.sh
 
 # ---- data generation ------------------------------------------------------
 data/calculator data/reverser data/wordcalc: release
