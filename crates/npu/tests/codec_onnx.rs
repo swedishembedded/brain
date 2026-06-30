@@ -39,6 +39,7 @@ fn tiny_cfg() -> CodecConfig {
         input_sample_rate: 24000,
         output_sample_rate: 24000,
         decode_upsample_rate: 8,
+        ..Default::default()
     }
 }
 

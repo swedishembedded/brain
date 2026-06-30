@@ -35,3 +35,55 @@ pub fn export_codec_fp32(weights_path: &str, out_path: &str, code_len: usize) ->
     crate::codec_topology::build_codec_graph(&cfg, &w, code_len, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
+
+/// Export the **front-only** codec graph (`codes:[nq,T]` -> `latent:[1,latent,T]`).
+pub fn export_codec_front_fp32(weights_path: &str, out_path: &str, t: usize) -> std::io::Result<CodecConfig> {
+    let c = checkpoint::load(weights_path);
+    let cfg = CodecConfig::from_json(&c.header["config"]);
+    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    let mut g = GraphBuilder::new("qwen3tts_codec_front");
+    crate::codec_topology::build_codec_front_graph(&cfg, &w, t, &mut g);
+    g.finish_external(out_path, EXTERNAL_THRESHOLD)?;
+    Ok(cfg)
+}
+
+/// Export the **streaming-back** codec graph (`latent:[1,latent,chunk]` + per-conv
+/// `bufin.*` -> `waveform` + per-conv `bufout.*`). Returns the buffer specs
+/// `(prefix, channels, width)` the host needs to allocate + carry across chunks.
+pub fn export_codec_back_stream_fp32(
+    weights_path: &str,
+    out_path: &str,
+    chunk: usize,
+) -> std::io::Result<(CodecConfig, Vec<(String, i64, i64)>)> {
+    let c = checkpoint::load(weights_path);
+    let cfg = CodecConfig::from_json(&c.header["config"]);
+    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    let mut g = GraphBuilder::new("qwen3tts_codec_back_stream");
+    let bufs = crate::codec_topology::build_codec_back_stream_graph(&cfg, &w, chunk, &mut g);
+    g.finish_external(out_path, EXTERNAL_THRESHOLD)?;
+    Ok((cfg, bufs))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Structural check: the front + streaming-back graphs build and emit valid
+    /// ONNX, and the back exposes the expected per-conv state buffers. Run:
+    ///   BRAIN_CODEC_WEIGHTS=.../codec.weights \
+    ///   cargo test -p brain-npu export_streaming_graphs -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn export_streaming_graphs() {
+        let path = std::env::var("BRAIN_CODEC_WEIGHTS").expect("set BRAIN_CODEC_WEIGHTS");
+        let dir = std::env::temp_dir();
+        let front = dir.join("codec_front.onnx");
+        let back = dir.join("codec_back_stream.onnx");
+        let cfg = super::export_codec_front_fp32(&path, front.to_str().unwrap(), 32).unwrap();
+        let (_, bufs) = super::export_codec_back_stream_fp32(&path, back.to_str().unwrap(), 16).unwrap();
+        eprintln!("front+back exported (latent={}); {} streaming buffers:", cfg.latent_dim, bufs.len());
+        for (p, c, w) in &bufs {
+            eprintln!("  {p}: [1,{c},{w}]");
+        }
+        assert!(front.exists() && back.exists(), "ONNX files not written");
+        assert!(bufs.len() >= 15, "expected ~21 conv state buffers, got {}", bufs.len());
+    }
+}

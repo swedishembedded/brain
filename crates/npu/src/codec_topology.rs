@@ -40,85 +40,39 @@ type W = HashMap<String, Vec<f32>>;
 /// decoder tensors (role ""); `t` is the fixed number of code frames. Input
 /// `codes:[nq,T]` (int64, codebook-major), output `waveform:[1,1,L]` (f32).
 pub fn build_codec_graph(cfg: &CodecConfig, w: &W, t: usize, g: &mut GraphBuilder) {
-    let nq = cfg.num_quantizers as usize;
-    let dim = (cfg.codebook_dim / 2) as usize; // per-codebook gather dim (256)
-    let lat = cfg.codebook_dim as usize; // quantizer output (512)
-    let hidden = cfg.hidden_size as usize; // 512
-    let latent = cfg.latent_dim as usize; // 1024
-    let ti = t as i64;
-
-    let mut tp = CodecTopo { g, n: 0, w, cfg };
-    tp.g.input_i64("codes", &[nq as i64, ti]);
-
-    // shared scalar/vector constants.
-    tp.f32("rms_eps", &[1], vec![cfg.rms_norm_eps]);
-    tp.f32("ln_eps", &[1], vec![1e-6]);
-    tp.f32("snake_eps", &[1], vec![1e-9]);
-    tp.f32("c_half", &[1], vec![0.5]);
-    tp.f32("c_one", &[1], vec![1.0]);
-    tp.f32("c_isqrt2", &[1], vec![std::f32::consts::FRAC_1_SQRT_2]);
-    tp.f32("c_attn_scale", &[1], vec![1.0 / (cfg.head_dim as f32).sqrt()]);
-    tp.f32("clip_lo", &[1], vec![-1.0]);
-    tp.f32("clip_hi", &[1], vec![1.0]);
-
-    // --- 1. RVQ dequant ---
-    // semantic group (rvq_first): codebook 0.
-    let sem = tp.gather_codebook("quantizer.rvq_first.vq.layers.0.table", 0, t, dim);
-    let first = tp.matmul(&sem, "quantizer.rvq_first.output_proj.weight", lat, dim); // [T,lat]
-    // acoustic group (rvq_rest): codebooks 1..nq-1, summed then projected.
-    let mut acc = tp.gather_codebook("quantizer.rvq_rest.vq.layers.0.table", 1, t, dim);
-    for i in 1..(nq - 1) {
-        let gi = tp.gather_codebook(&format!("quantizer.rvq_rest.vq.layers.{i}.table"), i + 1, t, dim);
-        acc = tp.add(&acc, &gi);
-    }
-    let rest = tp.matmul(&acc, "quantizer.rvq_rest.output_proj.weight", lat, dim); // [T,lat]
-    let quant_tm = tp.add(&first, &rest); // [T,lat]
-    let quant_tm = tp.reshape_to(&quant_tm, &[1, ti, lat as i64]); // [1,T,lat]
-    let mut h_ncl = tp.transpose(&quant_tm, &[0, 2, 1]); // [1,lat,T]
-
-    // --- 2. pre_conv (lat->latent, k3 causal) ---
-    h_ncl = tp.causal_conv(&h_ncl, "pre_conv", lat, latent, 3, 1, 1); // [1,latent,T]
-
-    // --- 3. pre_transformer ---
-    let mut x = tp.transpose(&h_ncl, &[0, 2, 1]); // [1,T,latent]
-    x = tp.linear_bias(&x, "pre_transformer.input_proj", latent, hidden); // [1,T,hidden]
-    x = tp.transformer(&x, t);
-    x = tp.linear_bias(&x, "pre_transformer.output_proj", hidden, latent); // [1,T,latent]
-    let mut h = tp.transpose(&x, &[0, 2, 1]); // [1,latent,T]
-    let mut l = t;
-
-    // --- 4. upsample stages ---
-    let ratios = cfg.upsampling_ratios.clone();
-    for (u, &factor) in ratios.iter().enumerate() {
-        h = tp.causal_convtr(&h, &format!("upsample.{u}.0"), latent, latent, factor as usize, factor as usize);
-        l *= factor as usize;
-        h = tp.convnext(&h, &format!("upsample.{u}.1"), latent, l);
-    }
-
-    // --- 5. SEANet decoder ---
-    let dec_dim = cfg.decoder_dim as usize;
-    h = tp.causal_conv(&h, "decoder.0", latent, dec_dim, 7, 1, 1); // [1,dec_dim,L]
-    let rates = cfg.upsample_rates.clone();
-    for (i, &rate) in rates.iter().enumerate() {
-        let in_dim = dec_dim >> i;
-        let out_dim = dec_dim >> (i + 1);
-        let bp = format!("decoder.{}", i + 1);
-        h = tp.snake(&h, &format!("{bp}.block.0"), in_dim);
-        h = tp.causal_convtr(&h, &format!("{bp}.block.1"), in_dim, out_dim, 2 * rate as usize, rate as usize);
-        l *= rate as usize;
-        for (j, dil) in [(2usize, 1usize), (3, 3), (4, 9)] {
-            h = tp.residual_unit(&h, &format!("{bp}.block.{j}"), out_dim, dil);
-        }
-    }
-    let out_dim = dec_dim >> rates.len();
-    h = tp.snake(&h, "decoder.5", out_dim);
-    h = tp.causal_conv(&h, "decoder.6", out_dim, 1, 7, 1, 1); // [1,1,L]
-
-    // --- 6. clamp ---
-    let wav = tp.clip(&h, "clip_lo", "clip_hi");
-    // rename final node output to graph output.
+    let mut tp = CodecTopo { g, n: 0, w, cfg, stream: false, bufs: Vec::new() };
+    tp.consts();
+    tp.g.input_i64("codes", &[cfg.num_quantizers as i64, t as i64]);
+    let h = tp.front(t);
+    let (wav, l) = tp.back(&h, t);
     tp.node("Identity", &[&wav], "waveform");
     tp.g.output_f32("waveform", &[1, 1, l as i64]);
+}
+
+/// Front-only graph: `codes:[nq,T]` -> `latent:[1,latent,T]` (RVQ + pre_conv +
+/// causal transformer). The front is causal, so in streaming decode it is run
+/// once over all frames and the back consumes slices of its output.
+pub fn build_codec_front_graph(cfg: &CodecConfig, w: &W, t: usize, g: &mut GraphBuilder) {
+    let mut tp = CodecTopo { g, n: 0, w, cfg, stream: false, bufs: Vec::new() };
+    tp.consts();
+    tp.g.input_i64("codes", &[cfg.num_quantizers as i64, t as i64]);
+    let h = tp.front(t);
+    tp.node("Identity", &[&h], "latent");
+    tp.g.output_f32("latent", &[1, cfg.latent_dim as i64, t as i64]);
+}
+
+/// Streaming-back graph: `latent:[1,latent,chunk]` + per-conv `bufin.{prefix}`
+/// -> `waveform:[1,1,chunk*R]` + per-conv `bufout.{prefix}`. Each causal
+/// (transposed-)conv carries its left-context / overlap as graph I/O, so a chunk
+/// decodes only its new frames. Returns the buffer specs `(prefix, C, width)`.
+pub fn build_codec_back_stream_graph(cfg: &CodecConfig, w: &W, chunk: usize, g: &mut GraphBuilder) -> Vec<(String, i64, i64)> {
+    let mut tp = CodecTopo { g, n: 0, w, cfg, stream: true, bufs: Vec::new() };
+    tp.consts();
+    tp.g.input_f32("latent", &[1, cfg.latent_dim as i64, chunk as i64]);
+    let (wav, l) = tp.back("latent", chunk);
+    tp.node("Identity", &[&wav], "waveform");
+    tp.g.output_f32("waveform", &[1, 1, l as i64]);
+    tp.bufs
 }
 
 struct CodecTopo<'a> {
@@ -126,6 +80,11 @@ struct CodecTopo<'a> {
     n: usize,
     w: &'a W,
     cfg: &'a CodecConfig,
+    /// When true, the back's causal (transposed-)convs carry per-module state via
+    /// `bufin.{prefix}` / `bufout.{prefix}` graph I/O (streaming decode).
+    stream: bool,
+    /// Streaming buffer specs `(prefix, channels, width)` for the host.
+    bufs: Vec<(String, i64, i64)>,
 }
 
 impl<'a> CodecTopo<'a> {
@@ -167,6 +126,115 @@ impl<'a> CodecTopo<'a> {
         let o = self.tmp("tr");
         self.g.add(Node::new("Transpose", &[x], &[&o]).attr_ints("perm", perm));
         o
+    }
+
+    /// Shared scalar constants used across the front and back.
+    fn consts(&mut self) {
+        let cfg = self.cfg;
+        self.f32("rms_eps", &[1], vec![cfg.rms_norm_eps]);
+        self.f32("ln_eps", &[1], vec![1e-6]);
+        self.f32("snake_eps", &[1], vec![1e-9]);
+        self.f32("c_half", &[1], vec![0.5]);
+        self.f32("c_one", &[1], vec![1.0]);
+        self.f32("c_isqrt2", &[1], vec![std::f32::consts::FRAC_1_SQRT_2]);
+        self.f32("c_attn_scale", &[1], vec![1.0 / (cfg.head_dim as f32).sqrt()]);
+        self.f32("clip_lo", &[1], vec![-1.0]);
+        self.f32("clip_hi", &[1], vec![1.0]);
+    }
+
+    /// Front (causal): `codes:[nq,T]` -> latent NCL `[1,latent,T]`.
+    fn front(&mut self, t: usize) -> String {
+        let nq = self.cfg.num_quantizers as usize;
+        let dim = (self.cfg.codebook_dim / 2) as usize;
+        let lat = self.cfg.codebook_dim as usize;
+        let hidden = self.cfg.hidden_size as usize;
+        let latent = self.cfg.latent_dim as usize;
+        let ti = t as i64;
+
+        let sem = self.gather_codebook("quantizer.rvq_first.vq.layers.0.table", 0, t, dim);
+        let first = self.matmul(&sem, "quantizer.rvq_first.output_proj.weight", lat, dim);
+        let mut acc = self.gather_codebook("quantizer.rvq_rest.vq.layers.0.table", 1, t, dim);
+        for i in 1..(nq - 1) {
+            let gi = self.gather_codebook(&format!("quantizer.rvq_rest.vq.layers.{i}.table"), i + 1, t, dim);
+            acc = self.add(&acc, &gi);
+        }
+        let rest = self.matmul(&acc, "quantizer.rvq_rest.output_proj.weight", lat, dim);
+        let quant_tm = self.add(&first, &rest);
+        let quant_tm = self.reshape_to(&quant_tm, &[1, ti, lat as i64]);
+        let h_ncl = self.transpose(&quant_tm, &[0, 2, 1]); // [1,lat,T]
+        let h_ncl = self.causal_conv(&h_ncl, "pre_conv", lat, latent, 3, 1, 1, t);
+        let mut x = self.transpose(&h_ncl, &[0, 2, 1]); // [1,T,latent]
+        x = self.linear_bias(&x, "pre_transformer.input_proj", latent, hidden);
+        x = self.transformer(&x, t);
+        x = self.linear_bias(&x, "pre_transformer.output_proj", hidden, latent);
+        self.transpose(&x, &[0, 2, 1]) // [1,latent,T]
+    }
+
+    /// Back: latent NCL `[1,latent,l0]` -> `(waveform, L)`. In `self.stream` mode
+    /// every causal (transposed-)conv carries its state via graph buffers.
+    fn back(&mut self, h_in: &str, l0: usize) -> (String, usize) {
+        let latent = self.cfg.latent_dim as usize;
+        let dec_dim = self.cfg.decoder_dim as usize;
+        let mut l = l0;
+        let mut h = h_in.to_string();
+
+        let ratios = self.cfg.upsampling_ratios.clone();
+        for (u, &factor) in ratios.iter().enumerate() {
+            let f = factor as usize;
+            h = self.causal_convtr(&h, &format!("upsample.{u}.0"), latent, latent, f, f, l);
+            l *= f;
+            h = self.convnext(&h, &format!("upsample.{u}.1"), latent, l);
+        }
+
+        h = self.causal_conv(&h, "decoder.0", latent, dec_dim, 7, 1, 1, l);
+        let rates = self.cfg.upsample_rates.clone();
+        for (i, &rate) in rates.iter().enumerate() {
+            let in_dim = dec_dim >> i;
+            let out_dim = dec_dim >> (i + 1);
+            let bp = format!("decoder.{}", i + 1);
+            h = self.snake(&h, &format!("{bp}.block.0"), in_dim);
+            h = self.causal_convtr(&h, &format!("{bp}.block.1"), in_dim, out_dim, 2 * rate as usize, rate as usize, l);
+            l *= rate as usize;
+            for (j, dil) in [(2usize, 1usize), (3, 3), (4, 9)] {
+                h = self.residual_unit(&h, &format!("{bp}.block.{j}"), out_dim, dil, l);
+            }
+        }
+        let out_dim = dec_dim >> rates.len();
+        h = self.snake(&h, "decoder.5", out_dim);
+        h = self.causal_conv(&h, "decoder.6", out_dim, 1, 7, 1, 1, l);
+        let wav = self.clip(&h, "clip_lo", "clip_hi");
+        (wav, l)
+    }
+
+    /// Slice NCL `[1,C,L]` along the length axis -> `[1,C,end-start]`.
+    fn slice_ncl(&mut self, x: &str, start: i64, end: i64) -> String {
+        let s = format!("sl_s_{}", self.n + 1);
+        let e = format!("sl_e_{}", self.n + 1);
+        let a = "axis2_const".to_string();
+        if !self.has(&a) {
+            self.g.init_i64(&a, &[1], vec![2]);
+        }
+        self.g.init_i64(&s, &[1], vec![start]);
+        self.g.init_i64(&e, &[1], vec![end]);
+        let o = self.tmp("slc");
+        self.g.add(Node::new("Slice", &[x, &s, &e, &a], &[&o]));
+        o
+    }
+
+    /// Concat two NCL `[1,C,*]` tensors along the length axis.
+    fn concat_ncl(&mut self, a: &str, b: &str) -> String {
+        let o = self.tmp("cat");
+        self.g.add(Node::new("Concat", &[a, b], &[&o]).attr_int("axis", 2));
+        o
+    }
+
+    /// NCL bias add: `[1,C,L] + bias[C]` broadcast as `[1,C,1]`.
+    fn add_ncl_bias(&mut self, x: &str, bias_name: &str, c: usize) -> String {
+        let bn = format!("{bias_name}.ncl");
+        if !self.has(&bn) {
+            self.f32(&bn, &[1, c as i64, 1], self.w[bias_name].clone());
+        }
+        self.add(x, &bn)
     }
 
     /// Gather codebook `col`'s rows: `idx = codes[col,:]` -> `table[idx]` -> `[T,dim]`.
@@ -239,7 +307,7 @@ impl<'a> CodecTopo<'a> {
     /// Causal `Conv1d` in NCL: left pad `dilation·(K-1)`, stride 1. brain weight
     /// `[Cout,Cin/g,K]` == ONNX `Conv`. Returns `[1,Cout,L]`.
     #[allow(clippy::too_many_arguments)]
-    fn causal_conv(&mut self, x: &str, prefix: &str, cin: usize, cout: usize, k: usize, dil: usize, groups: usize) -> String {
+    fn causal_conv(&mut self, x: &str, prefix: &str, cin: usize, cout: usize, k: usize, dil: usize, groups: usize, l: usize) -> String {
         let wname = format!("{prefix}.conv.weight");
         if !self.has(&wname) {
             self.f32(&wname, &[cout as i64, (cin / groups) as i64, k as i64], self.w[&wname].clone());
@@ -248,35 +316,76 @@ impl<'a> CodecTopo<'a> {
         if !self.has(&bname) {
             self.f32(&bname, &[cout as i64], self.w[&bname].clone());
         }
+        let ctx = dil * (k - 1);
+        if self.stream && ctx > 0 {
+            // Prepend the carried left-context buffer, conv with no left pad, then
+            // emit the last `ctx` input columns as the next chunk's buffer.
+            let bin = format!("bufin.{prefix}");
+            self.g.input_f32(&bin, &[1, cin as i64, ctx as i64]);
+            self.bufs.push((prefix.to_string(), cin as i64, ctx as i64));
+            let xin = self.concat_ncl(&bin, x); // [1,cin,ctx+l]
+            let o = self.tmp("conv");
+            self.g.add(
+                Node::new("Conv", &[&xin, &wname, &bname], &[&o])
+                    .name(prefix)
+                    .attr_ints("kernel_shape", &[k as i64])
+                    .attr_ints("strides", &[1])
+                    .attr_ints("pads", &[0, 0])
+                    .attr_ints("dilations", &[dil as i64])
+                    .attr_int("group", groups as i64),
+            );
+            let bo = self.slice_ncl(&xin, l as i64, (ctx + l) as i64);
+            let bout = format!("bufout.{prefix}");
+            self.node("Identity", &[&bo], &bout);
+            self.g.output_f32(&bout, &[1, cin as i64, ctx as i64]);
+            return o;
+        }
         let o = self.tmp("conv");
         self.g.add(
             Node::new("Conv", &[x, &wname, &bname], &[&o])
                 .name(prefix)
                 .attr_ints("kernel_shape", &[k as i64])
                 .attr_ints("strides", &[1])
-                .attr_ints("pads", &[(dil * (k - 1)) as i64, 0])
+                .attr_ints("pads", &[ctx as i64, 0])
                 .attr_ints("dilations", &[dil as i64])
                 .attr_int("group", groups as i64),
         );
+        let _ = l;
         o
     }
 
     /// Causal `ConvTranspose1d` in NCL (upsample by `stride`). brain weight
     /// `[Cin,Cout,K]` == ONNX `ConvTranspose`; `pads=[0,K-stride]` keeps the first
     /// `L·stride` samples. Returns `[1,Cout,L·stride]`.
-    fn causal_convtr(&mut self, x: &str, prefix: &str, cin: usize, cout: usize, k: usize, stride: usize) -> String {
-        let c = ConvTranspose1d {
-            cin,
-            cout,
-            l: 1, // unused for node emission
-            k,
-            stride,
-            pad_begin: 0,
-            pad_end: k - stride,
-            dilation: 1,
-            groups: 1,
-            output_padding: 0,
-        };
+    fn causal_convtr(&mut self, x: &str, prefix: &str, cin: usize, cout: usize, k: usize, stride: usize, l: usize) -> String {
+        let ov = k - stride;
+        if self.stream && ov > 0 {
+            // Full (untrimmed, unbiased) transposed conv, then add the carried
+            // overlap to the head, emit `l*stride` finalized samples (+ bias), and
+            // carry the trailing `ov` raw samples.
+            let c = ConvTranspose1d { cin, cout, l, k, stride, pad_begin: 0, pad_end: 0, dilation: 1, groups: 1, output_padding: 0 };
+            let raw = self.tmp("convtr_raw");
+            let weight = self.w[&format!("{prefix}.conv.weight")].clone();
+            self.g.conv_transpose1d(prefix, x, &raw, weight, None, &c);
+            let raw_len = ((l - 1) * stride + k) as i64;
+            let fin = (l * stride) as i64;
+            let ovi = ov as i64;
+            let bin = format!("bufin.{prefix}");
+            self.g.input_f32(&bin, &[1, cout as i64, ovi]);
+            self.bufs.push((prefix.to_string(), cout as i64, ovi));
+            let first = self.slice_ncl(&raw, 0, ovi);
+            let summed = self.add(&first, &bin);
+            let rest = self.slice_ncl(&raw, ovi, raw_len);
+            let raw2 = self.concat_ncl(&summed, &rest);
+            let finsl = self.slice_ncl(&raw2, 0, fin);
+            let finb = self.add_ncl_bias(&finsl, &format!("{prefix}.conv.bias"), cout);
+            let co = self.slice_ncl(&raw2, fin, raw_len);
+            let bout = format!("bufout.{prefix}");
+            self.node("Identity", &[&co], &bout);
+            self.g.output_f32(&bout, &[1, cout as i64, ovi]);
+            return finb;
+        }
+        let c = ConvTranspose1d { cin, cout, l, k, stride, pad_begin: 0, pad_end: k - stride, dilation: 1, groups: 1, output_padding: 0 };
         let out = self.tmp("convtr");
         let weight = self.w[&format!("{prefix}.conv.weight")].clone();
         let bias = self.w[&format!("{prefix}.conv.bias")].clone();
@@ -306,18 +415,18 @@ impl<'a> CodecTopo<'a> {
     }
 
     /// SEANet residual unit: `x + conv2(snake(conv1(snake(x))))`.
-    fn residual_unit(&mut self, x: &str, prefix: &str, c: usize, dil: usize) -> String {
+    fn residual_unit(&mut self, x: &str, prefix: &str, c: usize, dil: usize, l: usize) -> String {
         let y = self.snake(x, &format!("{prefix}.act1"), c);
-        let y = self.causal_conv(&y, &format!("{prefix}.conv1"), c, c, 7, dil, 1);
+        let y = self.causal_conv(&y, &format!("{prefix}.conv1"), c, c, 7, dil, 1, l);
         let y = self.snake(&y, &format!("{prefix}.act2"), c);
-        let y = self.causal_conv(&y, &format!("{prefix}.conv2"), c, c, 1, 1, 1);
+        let y = self.causal_conv(&y, &format!("{prefix}.conv2"), c, c, 1, 1, 1, l);
         self.add(x, &y)
     }
 
     /// ConvNeXt block (NCL in/out): depthwise causal conv -> LayerNorm -> pwconv1
     /// -> exact GELU -> pwconv2 -> γ scale -> residual.
-    fn convnext(&mut self, x: &str, prefix: &str, c: usize, _l: usize) -> String {
-        let dw = self.causal_conv(x, &format!("{prefix}.dwconv"), c, c, 7, 1, c); // [1,C,L]
+    fn convnext(&mut self, x: &str, prefix: &str, c: usize, l: usize) -> String {
+        let dw = self.causal_conv(x, &format!("{prefix}.dwconv"), c, c, 7, 1, c, l); // [1,C,L]
         let tm = self.transpose(&dw, &[0, 2, 1]); // [1,L,C]
         let normed = self.layernorm(&tm, &format!("{prefix}.norm"), c);
         let hid = c * 4;
