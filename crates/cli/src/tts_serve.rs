@@ -93,7 +93,10 @@ pub fn run_serve(args: &[String]) {
         enable = vec!["clone".into(), "design".into(), "customvoice".into(), "synth".into()];
     }
 
-    let device = npu::openvino::NpuDevice::Npu;
+    let device = std::env::var("BRAIN_TTS_NPU_DEVICE")
+        .ok()
+        .and_then(|s| npu::openvino::NpuDevice::parse(&s))
+        .unwrap_or(npu::openvino::NpuDevice::Npu);
     let cache = |w: &str| format!("{w}/npu-cache");
     let ref_text = std::fs::read_to_string(&clone_ref_text).unwrap_or_default().trim().to_string();
     for name in &enable {
@@ -115,7 +118,7 @@ pub fn run_serve(args: &[String]) {
                 ckpt_dir: design_c.clone(),
                 npu_cache: cache(&design_w),
                 device,
-                cap: cap_override.unwrap_or(256),
+                cap: cap_override.unwrap_or(192),
                 quant: true,
                 ref_wav: None,
                 ref_text: None,
@@ -126,7 +129,7 @@ pub fn run_serve(args: &[String]) {
                 ckpt_dir: cv_c.clone(),
                 npu_cache: cache(&cv_w),
                 device,
-                cap: cap_override.unwrap_or(256),
+                cap: cap_override.unwrap_or(192),
                 quant: true,
                 ref_wav: None,
                 ref_text: None,
@@ -137,7 +140,7 @@ pub fn run_serve(args: &[String]) {
                 ckpt_dir: design_c.clone(),
                 npu_cache: cache(&design_w),
                 device,
-                cap: cap_override.unwrap_or(256),
+                cap: cap_override.unwrap_or(192),
                 quant: true,
                 ref_wav: None,
                 ref_text: None,
@@ -187,13 +190,20 @@ fn executor(cfgs: HashMap<String, EngineCfg>, jobs: Receiver<Job>) {
             };
             eprintln!("tts serve: loading engine {:?} (one-time compile)…", job.engine);
             let t = Instant::now();
-            match TtsEngine::load(cfg) {
-                Ok(e) => {
+            // Catch panics during load so a bad engine reports an error instead of
+            // killing the executor (which would hang every future request).
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| TtsEngine::load(cfg)));
+            match res {
+                Ok(Ok(e)) => {
                     eprintln!("tts serve: engine {:?} ready on {} in {:.1}s", job.engine, e.device(), t.elapsed().as_secs_f64());
                     loaded.insert(job.engine.clone(), e);
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let _ = job.reply.send(Msg::Error(format!("load engine {:?}: {e}", job.engine)));
+                    continue;
+                }
+                Err(p) => {
+                    let _ = job.reply.send(Msg::Error(format!("load engine {:?} panicked: {}", job.engine, panic_msg(&p))));
                     continue;
                 }
             }
@@ -201,21 +211,39 @@ fn executor(cfgs: HashMap<String, EngineCfg>, jobs: Receiver<Job>) {
         let engine = loaded.get_mut(&job.engine).unwrap();
         let t = Instant::now();
         let reply = job.reply.clone();
-        let mut on_audio = |pcm: &[f32], seq: u32| {
-            let mut bytes = Vec::with_capacity(pcm.len() * 4);
-            for &s in pcm {
-                bytes.extend_from_slice(&s.to_le_bytes());
-            }
-            let _ = reply.send(Msg::Audio { pcm_b64: base64::encode(&bytes), seq });
-        };
-        match engine.run(&job.req, &mut on_audio) {
-            Ok(samples) => {
+        let req = &job.req;
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut on_audio = |pcm: &[f32], seq: u32| {
+                let mut bytes = Vec::with_capacity(pcm.len() * 4);
+                for &s in pcm {
+                    bytes.extend_from_slice(&s.to_le_bytes());
+                }
+                let _ = reply.send(Msg::Audio { pcm_b64: base64::encode(&bytes), seq });
+            };
+            engine.run(req, &mut on_audio)
+        }));
+        match res {
+            Ok(Ok(samples)) => {
                 let _ = job.reply.send(Msg::Done { samples, ms: t.elapsed().as_secs_f64() * 1e3 });
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let _ = job.reply.send(Msg::Error(e));
             }
+            Err(p) => {
+                let _ = job.reply.send(Msg::Error(format!("generation panicked: {}", panic_msg(&p))));
+            }
         }
+    }
+}
+
+/// Best-effort string from a panic payload.
+fn panic_msg(p: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = p.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
     }
 }
 

@@ -342,7 +342,9 @@ pub fn generate_npu(
 /// output) are written back into the cache at the current slot for the next step.
 pub struct KvTalker {
     sess: KvSession,
-    prefill: PrefillSession,
+    /// One-shot prefill graph — `None` skips compiling it (short prefixes seed the
+    /// cache token-by-token instead, avoiding a second ~1.4 GB graph compile).
+    prefill: Option<PrefillSession>,
     cap: usize,
     d: usize,
     nkv: usize,
@@ -359,6 +361,7 @@ pub struct KvTalker {
 
 impl KvTalker {
     /// Export (or reuse) the decode-step graph for `cap` cache slots and compile it.
+    #[allow(clippy::too_many_arguments)]
     pub fn load(
         talker_path: &str,
         cap: usize,
@@ -367,6 +370,7 @@ impl KvTalker {
         cache_dir: Option<&Path>,
         cfg: &TalkerConfig,
         quant: bool,
+        with_prefill: bool,
     ) -> Result<KvTalker, String> {
         let onnx = prepare_decode_onnx(talker_path, cap, cache_dir, quant)?;
         let ncfg = npu_config(device, allow_fallback, cache_dir);
@@ -375,9 +379,14 @@ impl KvTalker {
         let nl = cfg.n_layers as usize;
         let d = cfg.d_model as usize;
         let sess = KvSession::load_path(&onnx, &ncfg, nl, d, nkv, hd, cap).map_err(|e| e.to_string())?;
-        // Companion prefill graph (full context -> hidden + K/V) seeds the cache.
-        let ponnx = prepare_prefill_onnx(talker_path, cap, cache_dir, quant)?;
-        let prefill = PrefillSession::load_path(&ponnx, &ncfg, nl, d, nkv, hd, cap).map_err(|e| e.to_string())?;
+        // Companion prefill graph (full context -> hidden + K/V) seeds the cache in
+        // one inference — only worth its (large) compile for long prefixes (clone).
+        let prefill = if with_prefill {
+            let ponnx = prepare_prefill_onnx(talker_path, cap, cache_dir, quant)?;
+            Some(PrefillSession::load_path(&ponnx, &ncfg, nl, d, nkv, hd, cap).map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
         let device = sess.device().to_string();
         Ok(KvTalker {
             sess,
@@ -429,15 +438,25 @@ impl KvTalker {
         if n == 0 || n > self.cap {
             return Err(format!("prefix {n} positions exceeds cap {}", self.cap));
         }
-        let mut buf = vec![0.0f32; self.cap * d];
-        buf[..embeds.len()].copy_from_slice(embeds);
-        let (hidden, k, v) = self.prefill.run(&buf).map_err(|e| e.to_string())?;
-        for l in 0..self.n_layers {
-            self.past_k[l].copy_from_slice(&k[l]);
-            self.past_v[l].copy_from_slice(&v[l]);
+        // Fast path: one prefill inference seeds the whole cache.
+        if self.prefill.is_some() {
+            let mut buf = vec![0.0f32; self.cap * d];
+            buf[..embeds.len()].copy_from_slice(embeds);
+            let (hidden, k, v) = self.prefill.as_mut().unwrap().run(&buf).map_err(|e| e.to_string())?;
+            for l in 0..self.n_layers {
+                self.past_k[l].copy_from_slice(&k[l]);
+                self.past_v[l].copy_from_slice(&v[l]);
+            }
+            self.pos = n;
+            return Ok(hidden[(n - 1) * d..n * d].to_vec());
         }
-        self.pos = n;
-        Ok(hidden[(n - 1) * d..n * d].to_vec())
+        // Fallback (no prefill graph compiled): seed token-by-token. Cheap for the
+        // short prefixes (design/synth) this mode is used for.
+        let mut last = vec![0.0f32; d];
+        for i in 0..n {
+            last = self.feed1(&embeds[i * d..(i + 1) * d])?;
+        }
+        Ok(last)
     }
 
     /// Decode one token (`embed:[d]`), returning its final-norm hidden state `[d]`.
@@ -1064,7 +1083,7 @@ pub fn generate_kv(
         "tts npu: compiling KV-cache decode graph ({} | cap={cap}); first compile per cap is slow, cached after…",
         if quant { "INT8" } else { "fp32" }
     );
-    let mut kv = KvTalker::load(talker_path, cap, device, allow_fallback, cache_dir, &tables.cfg, quant)?;
+    let mut kv = KvTalker::load(talker_path, cap, device, allow_fallback, cache_dir, &tables.cfg, quant, true)?;
     eprintln!("tts npu: Talker (KV-cache decode) running on {}", kv.device());
     generate_codes_kv(&mut kv, tables, mtp, sp, prompt, opts)
 }
@@ -1094,7 +1113,7 @@ pub fn kv_prefix_parity(
     }
     let max_pos = tables.cfg.max_position_embeddings as usize;
     let cap = round_up(n_prefix + 2, CAP_BUCKET).min(max_pos);
-    let mut kv = KvTalker::load(talker_path, cap, device, true, cache_dir, &tables.cfg, quant)?;
+    let mut kv = KvTalker::load(talker_path, cap, device, true, cache_dir, &tables.cfg, quant, true)?;
     // Validate the one-shot prefill path (what generation uses) against the CPU.
     let kv_h = kv.prefill_prompt(&prompt.embeds)?;
     let maxabs = cpu_h

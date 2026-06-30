@@ -89,7 +89,10 @@ impl TtsEngine {
         let tables = TalkerTables::load(&talker);
         let mtp = CpuMtp::load(&mtp_path);
         let cache = Path::new(&cfg.npu_cache);
-        let kv = KvTalker::load(&talker, cfg.cap, cfg.device, true, Some(cache), &tables.cfg, cfg.quant)?;
+        // Only clone (long reference prefix) benefits from the prefill graph;
+        // design/cv/synth have short prefixes, so skip its ~1.4 GB compile.
+        let with_prefill = cfg.kind == Kind::Clone;
+        let kv = KvTalker::load(&talker, cfg.cap, cfg.device, true, Some(cache), &tables.cfg, cfg.quant, with_prefill)?;
 
         let (ref_code, ref_ids, xvec) = if cfg.kind == Kind::Clone {
             let rw = cfg.ref_wav.as_ref().ok_or("clone engine needs a reference wav")?;
