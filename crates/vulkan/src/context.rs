@@ -109,15 +109,20 @@ pub struct VkContext {
     pub adapter_name: String,
     pub caps: CoopMatCaps,
     mem_props: vk::PhysicalDeviceMemoryProperties,
+    /// Reusable host-visible staging buffer for device-local up/downloads (grown
+    /// on demand; transfers are fence-serialized so a single buffer suffices).
+    staging: std::sync::Mutex<Option<VkBuffer>>,
 }
 
-/// A device buffer + its backing memory. Host-visible/coherent so we can upload
-/// and read back without staging (sufficient for the smoke demo; a perf port
-/// would use a DEVICE_LOCAL + staging split).
+/// A device buffer + its backing memory. Storage buffers are `DEVICE_LOCAL`
+/// (compute reads/writes proper GPU memory; up/download go through a host-visible
+/// staging buffer + GPU copy). `host_visible` is true only for the llvmpipe
+/// fallback (no device-local heap) — then up/download map the buffer directly.
 pub struct VkBuffer {
     pub buffer: vk::Buffer,
     pub memory: vk::DeviceMemory,
     pub size: vk::DeviceSize,
+    pub host_visible: bool,
 }
 
 impl VkContext {
@@ -313,6 +318,7 @@ impl VkContext {
             adapter_name,
             caps,
             mem_props,
+            staging: std::sync::Mutex::new(None),
         })
     }
 
@@ -374,78 +380,148 @@ impl VkContext {
 
     /// Allocate a host-visible+coherent buffer usable as a compute storage
     /// buffer and as a transfer src/dst. `size` is in bytes.
-    pub fn storage(&self, size: vk::DeviceSize, extra_usage: vk::BufferUsageFlags) -> VkBuffer {
+    /// Allocate a buffer with the given usage and memory properties.
+    fn alloc_raw(
+        &self,
+        size: vk::DeviceSize,
+        usage: vk::BufferUsageFlags,
+        props: vk::MemoryPropertyFlags,
+        host_visible: bool,
+    ) -> Option<VkBuffer> {
         let size = size.max(4);
         unsafe {
-            let info = vk::BufferCreateInfo::default()
-                .size(size)
-                .usage(
-                    vk::BufferUsageFlags::STORAGE_BUFFER
-                        | vk::BufferUsageFlags::TRANSFER_SRC
-                        | vk::BufferUsageFlags::TRANSFER_DST
-                        | extra_usage,
-                )
-                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            let info = vk::BufferCreateInfo::default().size(size).usage(usage).sharing_mode(vk::SharingMode::EXCLUSIVE);
             let buffer = self.device.create_buffer(&info, None).expect("create_buffer");
             let req = self.device.get_buffer_memory_requirements(buffer);
-            let mem_type = self
-                .find_memory_type(
-                    req.memory_type_bits,
-                    vk::MemoryPropertyFlags::HOST_VISIBLE
-                        | vk::MemoryPropertyFlags::HOST_COHERENT,
-                )
-                .expect("no host-visible memory type");
-            let alloc = vk::MemoryAllocateInfo::default()
-                .allocation_size(req.size)
-                .memory_type_index(mem_type);
+            let mem_type = match self.find_memory_type(req.memory_type_bits, props) {
+                Some(t) => t,
+                None => {
+                    self.device.destroy_buffer(buffer, None);
+                    return None;
+                }
+            };
+            let alloc = vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(mem_type);
             let memory = self.device.allocate_memory(&alloc, None).expect("allocate_memory");
-            self.device
-                .bind_buffer_memory(buffer, memory, 0)
-                .expect("bind_buffer_memory");
-            VkBuffer { buffer, memory, size }
+            self.device.bind_buffer_memory(buffer, memory, 0).expect("bind_buffer_memory");
+            Some(VkBuffer { buffer, memory, size, host_visible })
         }
     }
 
-    /// Upload raw bytes to the start of a host-visible buffer.
+    /// Allocate a storage buffer. Prefers `DEVICE_LOCAL` (proper GPU memory — the
+    /// compute kernels read/write here); falls back to host-visible only when no
+    /// device-local heap exists (e.g. llvmpipe).
+    pub fn storage(&self, size: vk::DeviceSize, extra_usage: vk::BufferUsageFlags) -> VkBuffer {
+        let usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::TRANSFER_SRC
+            | vk::BufferUsageFlags::TRANSFER_DST
+            | extra_usage;
+        self.alloc_raw(size, usage, vk::MemoryPropertyFlags::DEVICE_LOCAL, false)
+            .or_else(|| {
+                self.alloc_raw(
+                    size,
+                    usage,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                    true,
+                )
+            })
+            .expect("no suitable memory type for storage buffer")
+    }
+
+    /// Map a host-visible buffer and run `f` on its pointer.
+    unsafe fn with_mapped<R>(&self, buf: &VkBuffer, f: impl FnOnce(*mut u8) -> R) -> R {
+        let ptr = self
+            .device
+            .map_memory(buf.memory, 0, buf.size, vk::MemoryMapFlags::empty())
+            .expect("map_memory") as *mut u8;
+        let r = f(ptr);
+        self.device.unmap_memory(buf.memory);
+        r
+    }
+
+    /// Run `f` to record a one-off command buffer, then submit + fence-wait.
+    fn run_cmd(&self, f: impl FnOnce(vk::CommandBuffer)) {
+        unsafe {
+            let alloc = vk::CommandBufferAllocateInfo::default()
+                .command_pool(self.command_pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1);
+            let cmd = self.device.allocate_command_buffers(&alloc).expect("alloc cmd")[0];
+            self.device
+                .begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))
+                .expect("begin");
+            f(cmd);
+            self.device.end_command_buffer(cmd).expect("end");
+            let fence = self.device.create_fence(&vk::FenceCreateInfo::default(), None).expect("fence");
+            let cmds = [cmd];
+            self.device.queue_submit(self.queue, &[vk::SubmitInfo::default().command_buffers(&cmds)], fence).expect("submit");
+            self.device.wait_for_fences(&[fence], true, u64::MAX).expect("wait");
+            self.device.destroy_fence(fence, None);
+            self.device.free_command_buffers(self.command_pool, &cmds);
+        }
+    }
+
+    /// Run `f` with the reusable host-visible staging buffer grown to >= `size`.
+    fn with_staging<R>(&self, size: vk::DeviceSize, f: impl FnOnce(&VkBuffer) -> R) -> R {
+        let mut guard = self.staging.lock().unwrap();
+        let need = size.max(4);
+        if guard.as_ref().map(|b| b.size < need).unwrap_or(true) {
+            if let Some(old) = guard.take() {
+                self.destroy_buffer(old);
+            }
+            let usage = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
+            let s = self
+                .alloc_raw(need, usage, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, true)
+                .expect("staging buffer");
+            *guard = Some(s);
+        }
+        f(guard.as_ref().unwrap())
+    }
+
+    fn copy_buffer(&self, src: &VkBuffer, dst: &VkBuffer, size: vk::DeviceSize) {
+        let region = [vk::BufferCopy::default().size(size)];
+        self.run_cmd(|cmd| unsafe { self.device.cmd_copy_buffer(cmd, src.buffer, dst.buffer, &region) });
+    }
+
+    /// Upload raw bytes to the start of a storage buffer (via staging for
+    /// device-local buffers; direct map for the host-visible fallback).
     pub fn upload(&self, buf: &VkBuffer, bytes: &[u8]) {
         assert!(bytes.len() as vk::DeviceSize <= buf.size, "upload overflows buffer");
-        unsafe {
-            let ptr = self
-                .device
-                .map_memory(buf.memory, 0, buf.size, vk::MemoryMapFlags::empty())
-                .expect("map_memory") as *mut u8;
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
-            self.device.unmap_memory(buf.memory);
+        if buf.host_visible {
+            unsafe { self.with_mapped(buf, |ptr| std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len())) };
+            return;
         }
+        let n = bytes.len() as vk::DeviceSize;
+        self.with_staging(n, |stg| {
+            unsafe { self.with_mapped(stg, |ptr| std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len())) };
+            self.copy_buffer(stg, buf, n);
+        });
     }
 
-    /// Zero-fill a host-visible buffer. Matches the wgpu/CPU backends, which
-    /// hand out zero-initialised storage; without this, kernels that read a
-    /// not-fully-written region (e.g. masked attention scores) would see
-    /// uninitialised device memory and produce nondeterministic results.
+    /// Zero-fill a storage buffer (so kernels that read a not-fully-written region
+    /// see zeros, matching the wgpu/CPU backends). `cmd_fill_buffer` on the GPU for
+    /// device-local; direct memset for the host-visible fallback.
     pub fn zero(&self, buf: &VkBuffer) {
-        unsafe {
-            let ptr = self
-                .device
-                .map_memory(buf.memory, 0, buf.size, vk::MemoryMapFlags::empty())
-                .expect("map_memory") as *mut u8;
-            std::ptr::write_bytes(ptr, 0, buf.size as usize);
-            self.device.unmap_memory(buf.memory);
+        if buf.host_visible {
+            unsafe { self.with_mapped(buf, |ptr| std::ptr::write_bytes(ptr, 0, buf.size as usize)) };
+            return;
         }
+        self.run_cmd(|cmd| unsafe { self.device.cmd_fill_buffer(cmd, buf.buffer, 0, buf.size, 0) });
     }
 
-    /// Read `len` bytes back from the start of a host-visible buffer.
+    /// Read `len` bytes back from the start of a storage buffer (via staging for
+    /// device-local buffers; direct map for the host-visible fallback).
     pub fn download(&self, buf: &VkBuffer, len: usize) -> Vec<u8> {
         assert!(len as vk::DeviceSize <= buf.size, "download overflows buffer");
         let mut out = vec![0u8; len];
-        unsafe {
-            let ptr = self
-                .device
-                .map_memory(buf.memory, 0, buf.size, vk::MemoryMapFlags::empty())
-                .expect("map_memory") as *const u8;
-            std::ptr::copy_nonoverlapping(ptr, out.as_mut_ptr(), len);
-            self.device.unmap_memory(buf.memory);
+        if buf.host_visible {
+            unsafe { self.with_mapped(buf, |ptr| std::ptr::copy_nonoverlapping(ptr as *const u8, out.as_mut_ptr(), len)) };
+            return out;
         }
+        let n = len as vk::DeviceSize;
+        self.with_staging(n, |stg| {
+            self.copy_buffer(buf, stg, n);
+            unsafe { self.with_mapped(stg, |ptr| std::ptr::copy_nonoverlapping(ptr as *const u8, out.as_mut_ptr(), len)) };
+        });
         out
     }
 
@@ -523,6 +599,10 @@ impl Drop for VkContext {
     fn drop(&mut self) {
         unsafe {
             let _ = self.device.device_wait_idle();
+            if let Some(s) = self.staging.lock().unwrap().take() {
+                self.device.destroy_buffer(s.buffer, None);
+                self.device.free_memory(s.memory, None);
+            }
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
