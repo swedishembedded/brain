@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use data::rng::Rng;
-use npu::openvino::{CodecSession, EmbedSession, NpuConfig, NpuDevice};
+use npu::openvino::{CodecSession, EmbedSession, KvSession, NpuConfig, NpuDevice, PrefillSession};
 
 use crate::config::TalkerConfig;
 use crate::pipeline::{sample_cb0, GenOpts};
@@ -335,6 +335,151 @@ pub fn generate_npu(
     generate_codes_npu(&mut talker, tables, mtp, sp, prompt, opts)
 }
 
+/// The NPU **KV-cache decode** Talker: a compiled decode-step graph plus the
+/// host-side per-layer key/value cache. Each [`feed1`](Self::feed1) processes ONE
+/// new token — O(1) projections + O(t) attention over the cache — instead of
+/// re-running the whole context like [`TalkerNpu`]. The new token's k/v (a graph
+/// output) are written back into the cache at the current slot for the next step.
+pub struct KvTalker {
+    sess: KvSession,
+    prefill: PrefillSession,
+    cap: usize,
+    d: usize,
+    nkv: usize,
+    hd: usize,
+    half: usize,
+    n_layers: usize,
+    theta: f32,
+    max_pos: usize,
+    past_k: Vec<Vec<f32>>, // [n_layers][nkv*cap*hd]
+    past_v: Vec<Vec<f32>>,
+    pos: usize,
+    device: String,
+}
+
+impl KvTalker {
+    /// Export (or reuse) the decode-step graph for `cap` cache slots and compile it.
+    pub fn load(
+        talker_path: &str,
+        cap: usize,
+        device: NpuDevice,
+        allow_fallback: bool,
+        cache_dir: Option<&Path>,
+        cfg: &TalkerConfig,
+        quant: bool,
+    ) -> Result<KvTalker, String> {
+        let onnx = prepare_decode_onnx(talker_path, cap, cache_dir, quant)?;
+        let ncfg = npu_config(device, allow_fallback, cache_dir);
+        let nkv = cfg.n_kv_heads as usize;
+        let hd = cfg.head_dim as usize;
+        let nl = cfg.n_layers as usize;
+        let d = cfg.d_model as usize;
+        let sess = KvSession::load_path(&onnx, &ncfg, nl, d, nkv, hd, cap).map_err(|e| e.to_string())?;
+        // Companion prefill graph (full context -> hidden + K/V) seeds the cache.
+        let ponnx = prepare_prefill_onnx(talker_path, cap, cache_dir, quant)?;
+        let prefill = PrefillSession::load_path(&ponnx, &ncfg, nl, d, nkv, hd, cap).map_err(|e| e.to_string())?;
+        let device = sess.device().to_string();
+        Ok(KvTalker {
+            sess,
+            prefill,
+            cap,
+            d,
+            nkv,
+            hd,
+            half: hd / 2,
+            n_layers: nl,
+            theta: cfg.rope_theta,
+            max_pos: cfg.max_position_embeddings as usize,
+            past_k: vec![vec![0.0f32; nkv * cap * hd]; nl],
+            past_v: vec![vec![0.0f32; nkv * cap * hd]; nl],
+            pos: 0,
+            device,
+        })
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+    pub fn d(&self) -> usize {
+        self.d
+    }
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+    pub fn max_pos(&self) -> usize {
+        self.max_pos
+    }
+
+    pub fn reset(&mut self) {
+        for b in self.past_k.iter_mut().chain(self.past_v.iter_mut()) {
+            b.iter_mut().for_each(|x| *x = 0.0);
+        }
+        self.pos = 0;
+    }
+
+    /// Seed the cache with the whole prompt prefix in ONE prefill inference (vs
+    /// streaming it token-by-token). Returns the final-norm hidden at the last
+    /// prefix position and leaves `pos = n_prefix`.
+    pub fn prefill_prompt(&mut self, embeds: &[f32]) -> Result<Vec<f32>, String> {
+        let d = self.d;
+        let n = embeds.len() / d;
+        if n == 0 || n > self.cap {
+            return Err(format!("prefix {n} positions exceeds cap {}", self.cap));
+        }
+        let mut buf = vec![0.0f32; self.cap * d];
+        buf[..embeds.len()].copy_from_slice(embeds);
+        let (hidden, k, v) = self.prefill.run(&buf).map_err(|e| e.to_string())?;
+        for l in 0..self.n_layers {
+            self.past_k[l].copy_from_slice(&k[l]);
+            self.past_v[l].copy_from_slice(&v[l]);
+        }
+        self.pos = n;
+        Ok(hidden[(n - 1) * d..n * d].to_vec())
+    }
+
+    /// Decode one token (`embed:[d]`), returning its final-norm hidden state `[d]`.
+    pub fn feed1(&mut self, embed: &[f32]) -> Result<Vec<f32>, String> {
+        assert_eq!(embed.len(), self.d);
+        if self.pos >= self.cap {
+            return Err(format!("KV cache full ({} slots)", self.cap));
+        }
+        let (hd, half, cap) = (self.hd, self.half, self.cap);
+        // RoPE tables for the current absolute position (half-split / NeoX).
+        let mut cos = vec![0.0f32; hd];
+        let mut sin = vec![0.0f32; hd];
+        for j in 0..hd {
+            let m = (j % half) as f32;
+            let ang = self.pos as f32 * self.theta.powf(-2.0 * m / hd as f32);
+            cos[j] = ang.cos();
+            sin[j] = ang.sin();
+        }
+        // Additive mask: the new token attends to the already-filled slots [0,pos).
+        let mut mask = vec![f32::NEG_INFINITY; cap];
+        for m in mask.iter_mut().take(self.pos) {
+            *m = 0.0;
+        }
+        let (hidden, nk, nv) = self
+            .sess
+            .run_step(embed, &cos, &sin, &mask, &self.past_k, &self.past_v)
+            .map_err(|e| e.to_string())?;
+        // Write this token's k/v into the cache at row `pos` (per head).
+        let pos = self.pos;
+        for l in 0..self.n_layers {
+            for h in 0..self.nkv {
+                let dst = h * cap * hd + pos * hd;
+                let src = h * hd;
+                self.past_k[l][dst..dst + hd].copy_from_slice(&nk[l][src..src + hd]);
+                self.past_v[l][dst..dst + hd].copy_from_slice(&nv[l][src..src + hd]);
+            }
+        }
+        self.pos += 1;
+        Ok(hidden)
+    }
+}
+
 /// Diagnostic parity gate: max-abs difference between the **NPU** Talker and the
 /// **CPU** KV-cache Talker ([`crate::gen_kv::CpuTalker`]) for the final-norm
 /// hidden state at the last prefix position. Deterministic (no sampling, no
@@ -477,6 +622,183 @@ fn prepare_talker_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>,
             npu::qwen_export::export_talker_hidden_fp32(weights_path, out, cap)
         }
     })
+}
+
+fn prepare_prefill_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>, quant: bool) -> Result<PathBuf, String> {
+    let file = if quant {
+        format!("talker-prefill-int8-seq{cap}.onnx")
+    } else {
+        format!("talker-prefill-seq{cap}.onnx")
+    };
+    let tag = if quant { "brain_tts_npu_prefill_int8" } else { "brain_tts_npu_prefill" };
+    prepare_graph(weights_path, cache_dir, &file, tag, |out| {
+        if quant {
+            npu::qwen_export::export_talker_prefill_int8(weights_path, out, cap)
+        } else {
+            npu::qwen_export::export_talker_prefill_fp32(weights_path, out, cap)
+        }
+    })
+}
+
+fn prepare_decode_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>, quant: bool) -> Result<PathBuf, String> {
+    let file = if quant {
+        format!("talker-decode-int8-seq{cap}.onnx")
+    } else {
+        format!("talker-decode-seq{cap}.onnx")
+    };
+    let tag = if quant { "brain_tts_npu_decode_int8" } else { "brain_tts_npu_decode" };
+    prepare_graph(weights_path, cache_dir, &file, tag, |out| {
+        if quant {
+            npu::qwen_export::export_talker_decode_int8(weights_path, out, cap)
+        } else {
+            npu::qwen_export::export_talker_decode_fp32(weights_path, out, cap)
+        }
+    })
+}
+
+/// Autoregressive generation with the **KV-cache decode** Talker: the prefix is
+/// streamed token-by-token into the cache, then each frame decodes one token.
+/// Same sampling + MTP feedback as [`generate_codes_npu`]; only the Talker decoder
+/// differs (resident cache vs cache-free recompute).
+pub fn generate_codes_kv(
+    kv: &mut KvTalker,
+    tables: &TalkerTables,
+    mtp: &mut crate::gen_kv_mtp::CpuMtp,
+    sp: &TtsSpecials,
+    prompt: &Prompt,
+    opts: &GenOpts,
+) -> Result<Vec<u32>, String> {
+    use std::time::Instant;
+    let d = tables.d();
+    let n_trailing = prompt.trailing.len() / d;
+    let n_prefix = prompt.embeds.len() / d;
+    let mut rng = Rng::new(opts.seed);
+    let profile = std::env::var("TTS_PROFILE").is_ok();
+
+    kv.reset();
+    let tp0 = Instant::now();
+    // Seed the cache for the whole prefix in one prefill inference.
+    let mut past_hidden = kv.prefill_prompt(&prompt.embeds)?;
+    let t_prefix = tp0.elapsed().as_secs_f64() * 1e3;
+    let mut cb0 = sample_cb0(
+        tables.codec_head_logits(&past_hidden),
+        sp.codec_eos,
+        opts.min_new == 0,
+        opts.temperature,
+        opts.top_k,
+        &mut rng,
+    );
+
+    let mut frames: Vec<u32> = Vec::new();
+    let mut s = 0usize;
+    let (mut t_step, mut t_mtp) = (0.0f64, 0.0f64);
+    loop {
+        if (cb0 == sp.codec_eos && s >= opts.min_new) || s >= opts.max_frames {
+            break;
+        }
+        let cb0_embed = tables.codec_embed(cb0).to_vec();
+        let tm = Instant::now();
+        let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
+        t_mtp += tm.elapsed().as_secs_f64() * 1e3;
+        frames.push(cb0);
+        frames.extend_from_slice(&residuals);
+
+        let mut feed = cb0_embed;
+        add_into(&mut feed, &res_sum);
+        if s < n_trailing {
+            add_into(&mut feed, &prompt.trailing[s * d..(s + 1) * d]);
+        } else {
+            add_into(&mut feed, &prompt.tts_pad);
+        }
+        s += 1;
+        if kv.pos() >= kv.max_pos() || kv.pos() >= kv.cap() {
+            break;
+        }
+        let ts = Instant::now();
+        past_hidden = kv.feed1(&feed)?;
+        t_step += ts.elapsed().as_secs_f64() * 1e3;
+        cb0 = sample_cb0(
+            tables.codec_head_logits(&past_hidden),
+            sp.codec_eos,
+            s >= opts.min_new,
+            opts.temperature,
+            opts.top_k,
+            &mut rng,
+        );
+    }
+    if profile {
+        let nf = s.max(1) as f64;
+        eprintln!(
+            "[tts-npu-profile] KV: prefix({n_prefix} tok)={t_prefix:.0}ms | talker-step total={t_step:.0}ms \
+             ({:.0}ms/frame) | mtp total={t_mtp:.0}ms ({:.0}ms/frame) | frames={s}",
+            t_step / nf,
+            t_mtp / nf,
+        );
+    }
+    Ok(frames)
+}
+
+/// One-shot: size + compile the decode-step graph for this prompt, then run the
+/// KV-cache generation loop.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_kv(
+    talker_path: &str,
+    tables: &TalkerTables,
+    mtp: &mut crate::gen_kv_mtp::CpuMtp,
+    sp: &TtsSpecials,
+    prompt: &Prompt,
+    opts: &GenOpts,
+    device: NpuDevice,
+    allow_fallback: bool,
+    cache_dir: Option<&Path>,
+    quant: bool,
+) -> Result<Vec<u32>, String> {
+    let d = tables.d();
+    let n_prefix = prompt.embeds.len() / d;
+    let max_pos = tables.cfg.max_position_embeddings as usize;
+    let cap = round_up(n_prefix + opts.max_frames + 2, CAP_BUCKET).min(max_pos);
+    eprintln!(
+        "tts npu: compiling KV-cache decode graph ({} | cap={cap}); first compile per cap is slow, cached after…",
+        if quant { "INT8" } else { "fp32" }
+    );
+    let mut kv = KvTalker::load(talker_path, cap, device, allow_fallback, cache_dir, &tables.cfg, quant)?;
+    eprintln!("tts npu: Talker (KV-cache decode) running on {}", kv.device());
+    generate_codes_kv(&mut kv, tables, mtp, sp, prompt, opts)
+}
+
+/// Diagnostic: max-abs difference between the **KV-cache decode** Talker and the
+/// CPU KV-cache reference ([`crate::gen_kv::CpuTalker`]) for the final-norm hidden
+/// at the last prefix position. Validates the resident-cache graph's correctness
+/// independent of the device (use `device = Cpu` for an exact fp32 check).
+pub fn kv_prefix_parity(
+    talker_path: &str,
+    tables: &TalkerTables,
+    prompt: &Prompt,
+    cache_dir: Option<&Path>,
+    device: NpuDevice,
+    quant: bool,
+) -> Result<f32, String> {
+    let d = tables.d();
+    let n_prefix = prompt.embeds.len() / d;
+    if n_prefix == 0 {
+        return Err("empty prompt prefix".to_string());
+    }
+    let mut cpu = crate::gen_kv::CpuTalker::load(talker_path);
+    cpu.reset();
+    let mut cpu_h = vec![0.0f32; d];
+    for i in 0..n_prefix {
+        cpu_h = cpu.step(&prompt.embeds[i * d..(i + 1) * d]);
+    }
+    let max_pos = tables.cfg.max_position_embeddings as usize;
+    let cap = round_up(n_prefix + 2, CAP_BUCKET).min(max_pos);
+    let mut kv = KvTalker::load(talker_path, cap, device, true, cache_dir, &tables.cfg, quant)?;
+    // Validate the one-shot prefill path (what generation uses) against the CPU.
+    let kv_h = kv.prefill_prompt(&prompt.embeds)?;
+    let maxabs = cpu_h
+        .iter()
+        .zip(&kv_h)
+        .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+    Ok(maxabs)
 }
 
 fn prepare_codec_onnx(weights_path: &str, code_len: usize, cache_dir: Option<&Path>) -> Result<PathBuf, String> {

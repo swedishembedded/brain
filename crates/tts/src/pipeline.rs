@@ -581,47 +581,73 @@ fn run_npu(
         .unwrap_or(npu::openvino::NpuDevice::Npu);
     let allow_fallback = true;
 
-    // Talker placement. The fp32 1.7B Talker (~7 GB) is too large to export +
-    // compile comfortably (high RAM, marginal on the NPU); weight-only INT8 (~1.75
-    // GB) fits and compiles faster, so a large Talker defaults to INT8 on the NPU.
-    // The 0.6B Talker stays fp32 on the NPU. `BRAIN_TTS_TALKER` forces the mode:
-    //   cpu      -> CPU KV-cache decoder (codec still on NPU),
-    //   npu      -> fp32 NPU graph,
-    //   npu-int8 -> weight-only INT8 NPU graph.
-    #[derive(PartialEq)]
+    // Talker placement (`BRAIN_TTS_TALKER`):
+    //   cpu          -> CPU KV-cache decoder (codec still on NPU),
+    //   npu          -> fp32 cache-free NPU graph,
+    //   npu-int8     -> weight-only INT8 cache-free NPU graph,
+    //   npu-kv       -> INT8 resident KV-cache decode graph (O(1) proj/frame),
+    //   npu-kv-fp32  -> fp32 resident KV-cache decode graph.
+    // A large Talker (d_model>=2048) defaults to INT8 cache-free; the KV-cache
+    // decode path (the per-frame speed win) is opt-in until it's the proven default.
+    #[derive(PartialEq, Clone, Copy)]
     enum Mode {
         Cpu,
         NpuF32,
         NpuI8,
+        NpuKvI8,
+        NpuKvF32,
     }
     let mode = match std::env::var("BRAIN_TTS_TALKER").ok().as_deref() {
         Some("cpu") => Mode::Cpu,
         Some("npu") | Some("npu-fp32") => Mode::NpuF32,
         Some("npu-int8") | Some("int8") => Mode::NpuI8,
-        _ if tables.cfg.d_model >= 2048 => Mode::NpuI8,
-        _ => Mode::NpuF32,
+        Some("npu-kv") | Some("kv") | Some("npu-kv-int8") => Mode::NpuKvI8,
+        Some("npu-kv-fp32") => Mode::NpuKvF32,
+        // Default: the resident KV-cache decode graph (talker ~7-19x faster/frame
+        // than cache-free). INT8 for the large 1.7B Talker, fp32 for the 0.6B.
+        _ if tables.cfg.d_model >= 2048 => Mode::NpuKvI8,
+        _ => Mode::NpuKvF32,
     };
 
-    let codes = if mode == Mode::Cpu {
-        eprintln!("tts npu: Talker on CPU KV-cache (d_model={}); codec on NPU", tables.cfg.d_model);
-        let mut cpu = crate::gen_kv::CpuTalker::load(&paths.talker);
-        generate_codes_cached(&mut cpu, mtp, sp, prompt, opts)
-    } else {
-        let quant = mode == Mode::NpuI8;
-        // Optional deterministic parity gate (NPU/OV-device vs CPU Talker hidden state).
-        if std::env::var("TTS_NPU_PARITY").is_ok() {
-            match crate::npu_gen::talker_prefix_parity(&paths.talker, tables, prompt, cache, device, quant) {
-                Ok(m) => eprintln!(
-                    "tts npu parity: Talker prefix hidden max-abs ({}, {} vs CPU) = {m:.3e}",
-                    device.ov_str(),
-                    if quant { "INT8" } else { "fp32" }
-                ),
-                Err(e) => eprintln!("tts npu parity check failed: {e}"),
-            }
+    let codes = match mode {
+        Mode::Cpu => {
+            eprintln!("tts npu: Talker on CPU KV-cache (d_model={}); codec on NPU", tables.cfg.d_model);
+            let mut cpu = crate::gen_kv::CpuTalker::load(&paths.talker);
+            generate_codes_cached(&mut cpu, mtp, sp, prompt, opts)
         }
-        crate::npu_gen::generate_npu(
-            &paths.talker, tables, mtp, sp, prompt, opts, device, allow_fallback, cache, quant,
-        )?
+        Mode::NpuKvI8 | Mode::NpuKvF32 => {
+            let quant = mode == Mode::NpuKvI8;
+            if std::env::var("TTS_NPU_PARITY").is_ok() {
+                match crate::npu_gen::kv_prefix_parity(&paths.talker, tables, prompt, cache, device, quant) {
+                    Ok(m) => eprintln!(
+                        "tts npu parity: KV-cache prefix hidden max-abs ({}, {} vs CPU) = {m:.3e}",
+                        device.ov_str(),
+                        if quant { "INT8" } else { "fp32" }
+                    ),
+                    Err(e) => eprintln!("tts npu parity check failed: {e}"),
+                }
+            }
+            crate::npu_gen::generate_kv(
+                &paths.talker, tables, mtp, sp, prompt, opts, device, allow_fallback, cache, quant,
+            )?
+        }
+        Mode::NpuF32 | Mode::NpuI8 => {
+            let quant = mode == Mode::NpuI8;
+            // Optional deterministic parity gate (NPU/OV-device vs CPU Talker hidden state).
+            if std::env::var("TTS_NPU_PARITY").is_ok() {
+                match crate::npu_gen::talker_prefix_parity(&paths.talker, tables, prompt, cache, device, quant) {
+                    Ok(m) => eprintln!(
+                        "tts npu parity: Talker prefix hidden max-abs ({}, {} vs CPU) = {m:.3e}",
+                        device.ov_str(),
+                        if quant { "INT8" } else { "fp32" }
+                    ),
+                    Err(e) => eprintln!("tts npu parity check failed: {e}"),
+                }
+            }
+            crate::npu_gen::generate_npu(
+                &paths.talker, tables, mtp, sp, prompt, opts, device, allow_fallback, cache, quant,
+            )?
+        }
     };
     if codes.is_empty() {
         return Err("no codec frames were generated".to_string());
