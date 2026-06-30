@@ -225,7 +225,7 @@ impl TalkerNpu {
 pub fn generate_codes_npu(
     talker: &mut TalkerNpu,
     tables: &TalkerTables,
-    mtp: &mut crate::gen_kv_mtp::CpuMtp,
+    mtp: &mut dyn MtpEngine,
     sp: &TtsSpecials,
     prompt: &Prompt,
     opts: &GenOpts,
@@ -306,7 +306,7 @@ pub fn generate_codes_npu(
 pub fn generate_npu(
     talker_path: &str,
     tables: &TalkerTables,
-    mtp: &mut crate::gen_kv_mtp::CpuMtp,
+    mtp: &mut dyn MtpEngine,
     sp: &TtsSpecials,
     prompt: &Prompt,
     opts: &GenOpts,
@@ -480,6 +480,196 @@ impl KvTalker {
     }
 }
 
+/// The per-frame residual (MTP) code predictor — implemented on the CPU
+/// ([`crate::gen_kv_mtp::CpuMtp`]) or on the NPU ([`KvMtp`]). Lets the generation
+/// loop pick the MTP backend without being generic.
+pub trait MtpEngine {
+    fn generate_residuals(&mut self, talker_hidden: &[f32], cb0_embed: &[f32]) -> (Vec<u32>, Vec<f32>);
+}
+
+impl MtpEngine for crate::gen_kv_mtp::CpuMtp {
+    fn generate_residuals(&mut self, talker_hidden: &[f32], cb0_embed: &[f32]) -> (Vec<u32>, Vec<f32>) {
+        crate::gen_kv_mtp::CpuMtp::generate_residuals(self, talker_hidden, cb0_embed)
+    }
+}
+
+/// MTP code predictor with its 5-layer decoder running on the NPU via the resident
+/// KV-cache decode graph (the same block as the Talker, reused). The 15 residual
+/// substeps each decode one token on the NPU; the `small_to_mtp_projection`,
+/// per-residual `codec_embedding` and `lm_head` stay on the host.
+pub struct KvMtp {
+    sess: KvSession,
+    cap: usize,    // num_code_groups (MTP sequence length)
+    d: usize,      // MTP decoder hidden
+    emb: usize,    // embedding_dim (Talker hidden)
+    nkv: usize,
+    hd: usize,
+    half: usize,
+    n_layers: usize,
+    theta: f32,
+    vocab: usize,
+    n_res: usize,
+    proj: Option<(Vec<f32>, Vec<f32>)>, // small_to_mtp_projection (d x emb) + bias
+    codec_embedding: Vec<Vec<f32>>,     // [n_res][vocab*emb]
+    lm_head: Vec<Vec<f32>>,             // [n_res][vocab*d]
+    past_k: Vec<Vec<f32>>,
+    past_v: Vec<Vec<f32>>,
+    pos: usize,
+    device: String,
+}
+
+impl KvMtp {
+    pub fn load(
+        mtp_path: &str,
+        device: NpuDevice,
+        allow_fallback: bool,
+        cache_dir: Option<&Path>,
+        quant: bool,
+    ) -> Result<KvMtp, String> {
+        let c = checkpoint::load(mtp_path);
+        let cfg = crate::config::MtpConfig::from_brain_json(&c.header["config"]);
+        let cap = cfg.num_code_groups as usize;
+        let d = cfg.d_model as usize;
+        let emb = cfg.embedding_dim as usize;
+        let nkv = cfg.n_kv_heads as usize;
+        let hd = cfg.head_dim as usize;
+        let nl = cfg.n_layers as usize;
+        let vocab = cfg.vocab as usize;
+        let n_res = cfg.n_residual() as usize;
+        let take = |n: &str| c.find(n, "").cloned().unwrap_or_else(|| panic!("KvMtp: missing {n}"));
+        let codec_embedding = (0..n_res).map(|i| take(&format!("codec_embedding.{i}.weight"))).collect();
+        let lm_head = (0..n_res).map(|i| take(&format!("lm_head.{i}.weight"))).collect();
+        let proj = if emb != d {
+            Some((take("small_to_mtp_projection.weight"), take("small_to_mtp_projection.bias")))
+        } else {
+            None
+        };
+        let onnx = prepare_mtp_decode_onnx(mtp_path, cap, cache_dir, quant)?;
+        let ncfg = npu_config(device, allow_fallback, cache_dir);
+        let sess = KvSession::load_path(&onnx, &ncfg, nl, d, nkv, hd, cap).map_err(|e| e.to_string())?;
+        let device = sess.device().to_string();
+        Ok(KvMtp {
+            sess,
+            cap,
+            d,
+            emb,
+            nkv,
+            hd,
+            half: hd / 2,
+            n_layers: nl,
+            theta: cfg.rope_theta,
+            vocab,
+            n_res,
+            proj,
+            codec_embedding,
+            lm_head,
+            past_k: vec![vec![0.0f32; nkv * cap * hd]; nl],
+            past_v: vec![vec![0.0f32; nkv * cap * hd]; nl],
+            pos: 0,
+            device,
+        })
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+
+    /// Project a Talker-width embedding to the MTP decoder width (Identity on 0.6B).
+    fn project(&self, emb: &[f32]) -> Vec<f32> {
+        match &self.proj {
+            Some((w, b)) => {
+                let mut y = crate::gen_kv::matvec(w, emb, self.d, self.emb);
+                for (yi, bi) in y.iter_mut().zip(b) {
+                    *yi += bi;
+                }
+                y
+            }
+            None => emb.to_vec(),
+        }
+    }
+
+    /// Decode one MTP token (already projected, `[d]`) on the NPU; returns the
+    /// final-norm hidden `[d]`.
+    fn feed1(&mut self, x: &[f32]) -> Result<Vec<f32>, String> {
+        let (hd, half, cap) = (self.hd, self.half, self.cap);
+        let mut cos = vec![0.0f32; hd];
+        let mut sin = vec![0.0f32; hd];
+        for j in 0..hd {
+            let m = (j % half) as f32;
+            let ang = self.pos as f32 * self.theta.powf(-2.0 * m / hd as f32);
+            cos[j] = ang.cos();
+            sin[j] = ang.sin();
+        }
+        let mut mask = vec![f32::NEG_INFINITY; cap];
+        for mm in mask.iter_mut().take(self.pos) {
+            *mm = 0.0;
+        }
+        let (hidden, nk, nv) = self
+            .sess
+            .run_step(x, &cos, &sin, &mask, &self.past_k, &self.past_v)
+            .map_err(|e| e.to_string())?;
+        let pos = self.pos;
+        for l in 0..self.n_layers {
+            for h in 0..self.nkv {
+                let dst = h * cap * hd + pos * hd;
+                let src = h * hd;
+                self.past_k[l][dst..dst + hd].copy_from_slice(&nk[l][src..src + hd]);
+                self.past_v[l][dst..dst + hd].copy_from_slice(&nv[l][src..src + hd]);
+            }
+        }
+        self.pos += 1;
+        Ok(hidden)
+    }
+
+    fn reset(&mut self) {
+        for b in self.past_k.iter_mut().chain(self.past_v.iter_mut()) {
+            b.iter_mut().for_each(|x| *x = 0.0);
+        }
+        self.pos = 0;
+    }
+
+    fn argmax(row: &[f32]) -> usize {
+        let mut best = 0usize;
+        for j in 1..row.len() {
+            if row[j] > row[best] {
+                best = j;
+            }
+        }
+        best
+    }
+}
+
+impl MtpEngine for KvMtp {
+    /// Mirror of [`crate::gen_kv_mtp::CpuMtp::generate_residuals`] but the 5-layer
+    /// decoder runs on the NPU. Greedy over the 15 residual codebooks.
+    fn generate_residuals(&mut self, talker_hidden: &[f32], cb0_embed: &[f32]) -> (Vec<u32>, Vec<f32>) {
+        let (emb, d, vocab) = (self.emb, self.d, self.vocab);
+        let nres = self.n_res;
+        self.reset();
+        // pos 0: the Talker hidden (projected); no head reads it.
+        let p0 = self.project(talker_hidden);
+        let _ = self.feed1(&p0).expect("KvMtp feed1");
+        let mut codes = vec![0u32; nres];
+        let mut res_sum = vec![0.0f32; emb];
+        let mut input_raw = cb0_embed.to_vec();
+        for k in 1..=nres {
+            let pin = self.project(&input_raw);
+            let hidden = self.feed1(&pin).expect("KvMtp feed1");
+            let logits = crate::gen_kv::matvec(&self.lm_head[k - 1], &hidden, vocab, d);
+            let best = Self::argmax(&logits);
+            codes[k - 1] = best as u32;
+            let r = self.codec_embedding[k - 1][best * emb..(best + 1) * emb].to_vec();
+            for j in 0..emb {
+                res_sum[j] += r[j];
+            }
+            if k < nres {
+                input_raw = r;
+            }
+        }
+        (codes, res_sum)
+    }
+}
+
 /// Diagnostic parity gate: max-abs difference between the **NPU** Talker and the
 /// **CPU** KV-cache Talker ([`crate::gen_kv::CpuTalker`]) for the final-norm
 /// hidden state at the last prefix position. Deterministic (no sampling, no
@@ -640,6 +830,22 @@ fn prepare_prefill_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>
     })
 }
 
+fn prepare_mtp_decode_onnx(mtp_path: &str, cap: usize, cache_dir: Option<&Path>, quant: bool) -> Result<PathBuf, String> {
+    let file = if quant {
+        format!("mtp-decode-int8-seq{cap}.onnx")
+    } else {
+        format!("mtp-decode-seq{cap}.onnx")
+    };
+    let tag = if quant { "brain_tts_npu_mtp_int8" } else { "brain_tts_npu_mtp" };
+    prepare_graph(mtp_path, cache_dir, &file, tag, |out| {
+        if quant {
+            npu::qwen_export::export_mtp_decode_int8(mtp_path, out, cap)
+        } else {
+            npu::qwen_export::export_mtp_decode_fp32(mtp_path, out, cap)
+        }
+    })
+}
+
 fn prepare_decode_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>, quant: bool) -> Result<PathBuf, String> {
     let file = if quant {
         format!("talker-decode-int8-seq{cap}.onnx")
@@ -663,7 +869,7 @@ fn prepare_decode_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>,
 pub fn generate_codes_kv(
     kv: &mut KvTalker,
     tables: &TalkerTables,
-    mtp: &mut crate::gen_kv_mtp::CpuMtp,
+    mtp: &mut dyn MtpEngine,
     sp: &TtsSpecials,
     prompt: &Prompt,
     opts: &GenOpts,
@@ -744,7 +950,7 @@ pub fn generate_codes_kv(
 pub fn generate_kv(
     talker_path: &str,
     tables: &TalkerTables,
-    mtp: &mut crate::gen_kv_mtp::CpuMtp,
+    mtp: &mut dyn MtpEngine,
     sp: &TtsSpecials,
     prompt: &Prompt,
     opts: &GenOpts,

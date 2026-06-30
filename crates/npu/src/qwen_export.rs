@@ -113,6 +113,50 @@ fn export_talker_decode(weights_path: &str, out_path: &str, cap: usize, quant: b
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
 
+/// Export the **MTP decode-step** graph: the MTP's 5-layer Qwen3 decoder is the
+/// same block as the Talker, so it reuses [`crate::qwen_topology::build_talker_decode_graph`]
+/// driven by the MTP's dims (from the brain MTP checkpoint header). Input `x` is
+/// the already-projected residual embedding `[1,1,d_mtp]`; the host keeps the
+/// `small_to_mtp_projection`, per-residual `codec_embedding` and `lm_head` tables.
+/// `cap` is `num_code_groups` (the MTP's 16-position sequence). `quant` => INT8.
+pub fn export_mtp_decode_fp32(mtp_path: &str, out_path: &str, cap: usize) -> std::io::Result<()> {
+    export_mtp_decode(mtp_path, out_path, cap, false)
+}
+
+/// INT8 weight-only variant of [`export_mtp_decode_fp32`].
+pub fn export_mtp_decode_int8(mtp_path: &str, out_path: &str, cap: usize) -> std::io::Result<()> {
+    export_mtp_decode(mtp_path, out_path, cap, true)
+}
+
+fn export_mtp_decode(mtp_path: &str, out_path: &str, cap: usize, quant: bool) -> std::io::Result<()> {
+    let (cfg, w) = {
+        let c = checkpoint::load(mtp_path);
+        let h = &c.header["config"];
+        let gu = |k: &str, d: u32| h[k].as_u64().map(|x| x as u32).unwrap_or(d);
+        let gf = |k: &str, d: f32| h[k].as_f64().map(|x| x as f32).unwrap_or(d);
+        // The MTP header (MtpConfig::to_json) keys map to the decoder QwenConfig.
+        let cfg = QwenConfig {
+            vocab: 0,
+            block_size: 0,
+            n_layers: gu("n_layers", 5),
+            d_model: gu("d_model", 1024),
+            n_heads: gu("n_heads", 16),
+            n_kv_heads: gu("n_kv_heads", 8),
+            head_dim: gu("head_dim", 128),
+            d_ff: gu("d_ff", 3072),
+            rope_theta: gf("rope_theta", 1_000_000.0),
+            rms_eps: gf("rms_norm_eps", 1e-6),
+            tie_embeddings: false,
+            lora: None,
+        };
+        let w: HashMap<String, Vec<f32>> = c.by_role("");
+        (cfg, w)
+    };
+    let mut g = GraphBuilder::new("qwen_mtp_decode");
+    crate::qwen_topology::build_talker_decode_graph(&cfg, &w, cap, quant, &mut g);
+    g.finish_external(out_path, EXTERNAL_THRESHOLD)
+}
+
 /// Export the **prefill** Talker graph (full context -> hidden + per-layer K/V) to
 /// seed the decode KV cache in one inference. `quant` selects weight-only INT8.
 pub fn export_talker_prefill_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {

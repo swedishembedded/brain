@@ -609,6 +609,17 @@ fn run_npu(
         _ => Mode::NpuKvF32,
     };
 
+    // MTP placement: the residual code-predictor runs its 5-layer decoder on the
+    // CPU by default; `BRAIN_TTS_MTP=npu` runs it as a resident KV-cache decode
+    // graph on the NPU (15 substeps/frame), INT8 for the large model. Not used for
+    // the CPU-Talker mode (which already uses the host MTP).
+    let mtp_npu = std::env::var("BRAIN_TTS_MTP").map(|v| v == "npu").unwrap_or(false) && mode != Mode::Cpu;
+    let mut kvmtp = if mtp_npu {
+        Some(crate::npu_gen::KvMtp::load(&paths.mtp, device, allow_fallback, cache, tables.cfg.d_model >= 2048)?)
+    } else {
+        None
+    };
+
     let codes = match mode {
         Mode::Cpu => {
             eprintln!("tts npu: Talker on CPU KV-cache (d_model={}); codec on NPU", tables.cfg.d_model);
@@ -627,8 +638,12 @@ fn run_npu(
                     Err(e) => eprintln!("tts npu parity check failed: {e}"),
                 }
             }
+            let eng: &mut dyn crate::npu_gen::MtpEngine = match &mut kvmtp {
+                Some(k) => k,
+                None => mtp,
+            };
             crate::npu_gen::generate_kv(
-                &paths.talker, tables, mtp, sp, prompt, opts, device, allow_fallback, cache, quant,
+                &paths.talker, tables, eng, sp, prompt, opts, device, allow_fallback, cache, quant,
             )?
         }
         Mode::NpuF32 | Mode::NpuI8 => {
@@ -644,8 +659,12 @@ fn run_npu(
                     Err(e) => eprintln!("tts npu parity check failed: {e}"),
                 }
             }
+            let eng: &mut dyn crate::npu_gen::MtpEngine = match &mut kvmtp {
+                Some(k) => k,
+                None => mtp,
+            };
             crate::npu_gen::generate_npu(
-                &paths.talker, tables, mtp, sp, prompt, opts, device, allow_fallback, cache, quant,
+                &paths.talker, tables, eng, sp, prompt, opts, device, allow_fallback, cache, quant,
             )?
         }
     };
