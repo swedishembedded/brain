@@ -208,10 +208,12 @@ impl TtsEngine {
             return Ok(total);
         }
 
-        // Codec backend `npu-stream`: the NPU *stateful* streaming decoder — front
-        // graph once, then the streaming-back graph per chunk carrying per-conv
-        // state (no warmup re-decode). The realtime path once warm.
-        if std::env::var("BRAIN_TTS_CODEC").map(|v| v == "npu-stream").unwrap_or(false) {
+        // Codec backend `npu-stream` (DEFAULT): the NPU *stateful* streaming
+        // decoder — front graph once, then the streaming-back graph per chunk
+        // carrying per-conv state (no warmup re-decode). Exact and ~faster than the
+        // windowed path. `BRAIN_TTS_CODEC=windowed` forces the old sliding-window
+        // path below.
+        if std::env::var("BRAIN_TTS_CODEC").map(|v| v != "windowed").unwrap_or(true) {
             let codes = generate_codes_kv(&mut self.kv, &self.tables, &mut self.mtp, &self.sp, &prompt, &opts)?;
             if codes.is_empty() {
                 return Err("no codec frames were generated".into());
