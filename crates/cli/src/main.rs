@@ -21,6 +21,7 @@ mod pid_cli;
 mod qwen_cli;
 mod run_cli;
 mod tts_cli;
+mod tts_serve;
 mod yolo_cli;
 
 use std::sync::atomic::{AtomicBool, Ordering};

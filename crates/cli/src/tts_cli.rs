@@ -44,9 +44,10 @@ pub fn run_tts(args: &[String]) {
         Some("clone") => clone(&args[1..]),
         Some("synth") => synth(&args[1..]),
         Some("design") => design(&args[1..]),
+        Some("serve") => crate::tts_serve::run_serve(&args[1..]),
         Some("finetune") => finetune(&args[1..]),
         other => {
-            eprintln!("usage: brain tts <import|clone|synth|design|finetune> ...  (got {other:?})");
+            eprintln!("usage: brain tts <import|clone|synth|design|serve|finetune> ...  (got {other:?})");
             std::process::exit(2);
         }
     }
