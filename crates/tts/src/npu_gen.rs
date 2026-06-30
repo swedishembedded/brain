@@ -969,6 +969,78 @@ pub fn generate_codes_kv(
     Ok(frames)
 }
 
+/// Streaming variant of [`generate_codes_kv`]: identical generation + sampling,
+/// but invokes `on_chunk(all_codes_so_far)` every `chunk` frames (and once more
+/// for the final remainder) so the caller can decode and emit audio progressively
+/// instead of waiting for the whole clip. Returns the full codes.
+pub fn generate_codes_kv_streaming(
+    kv: &mut KvTalker,
+    tables: &TalkerTables,
+    mtp: &mut dyn MtpEngine,
+    sp: &TtsSpecials,
+    prompt: &Prompt,
+    opts: &GenOpts,
+    chunk: usize,
+    on_chunk: &mut dyn FnMut(&[u32]),
+) -> Result<Vec<u32>, String> {
+    let d = tables.d();
+    let n_trailing = prompt.trailing.len() / d;
+    let mut rng = Rng::new(opts.seed);
+    let chunk = chunk.max(1);
+
+    kv.reset();
+    let mut past_hidden = kv.prefill_prompt(&prompt.embeds)?;
+    let mut cb0 = sample_cb0(
+        tables.codec_head_logits(&past_hidden),
+        sp.codec_eos,
+        opts.min_new == 0,
+        opts.temperature,
+        opts.top_k,
+        &mut rng,
+    );
+
+    let mut frames: Vec<u32> = Vec::new();
+    let mut s = 0usize;
+    let mut emitted = 0usize;
+    loop {
+        if (cb0 == sp.codec_eos && s >= opts.min_new) || s >= opts.max_frames {
+            break;
+        }
+        let cb0_embed = tables.codec_embed(cb0).to_vec();
+        let (residuals, res_sum) = mtp.generate_residuals(&past_hidden, &cb0_embed);
+        frames.push(cb0);
+        frames.extend_from_slice(&residuals);
+        let mut feed = cb0_embed;
+        add_into(&mut feed, &res_sum);
+        if s < n_trailing {
+            add_into(&mut feed, &prompt.trailing[s * d..(s + 1) * d]);
+        } else {
+            add_into(&mut feed, &prompt.tts_pad);
+        }
+        s += 1;
+        if s - emitted >= chunk {
+            on_chunk(&frames);
+            emitted = s;
+        }
+        if kv.pos() >= kv.max_pos() || kv.pos() >= kv.cap() {
+            break;
+        }
+        past_hidden = kv.feed1(&feed)?;
+        cb0 = sample_cb0(
+            tables.codec_head_logits(&past_hidden),
+            sp.codec_eos,
+            s >= opts.min_new,
+            opts.temperature,
+            opts.top_k,
+            &mut rng,
+        );
+    }
+    if s > emitted {
+        on_chunk(&frames);
+    }
+    Ok(frames)
+}
+
 /// One-shot: size + compile the decode-step graph for this prompt, then run the
 /// KV-cache generation loop.
 #[allow(clippy::too_many_arguments)]

@@ -34,7 +34,6 @@ use tts::serve::{EngineCfg, Kind, Req, TtsEngine};
 use tts::GenOpts;
 
 const SAMPLE_RATE: u32 = 24000;
-const CHUNK_SAMPLES: usize = 4800; // 0.2 s @ 24 kHz per streamed chunk
 
 /// Messages streamed from the executor back to a connection handler.
 enum Msg {
@@ -209,7 +208,7 @@ fn executor(cfgs: HashMap<String, EngineCfg>, jobs: Receiver<Job>) {
             }
             let _ = reply.send(Msg::Audio { pcm_b64: base64::encode(&bytes), seq });
         };
-        match engine.run(&job.req, CHUNK_SAMPLES, &mut on_audio) {
+        match engine.run(&job.req, &mut on_audio) {
             Ok(samples) => {
                 let _ = job.reply.send(Msg::Done { samples, ms: t.elapsed().as_secs_f64() * 1e3 });
             }

@@ -19,7 +19,7 @@ use npu::openvino::{CodecSession, NpuDevice};
 
 use crate::gen_kv_mtp::CpuMtp;
 use crate::npu_gen::{
-    codec_bucket, decode_with_session, generate_codes_kv, open_codec_session, KvTalker, TalkerTables,
+    codec_bucket, decode_with_session, generate_codes_kv_streaming, open_codec_session, KvTalker, TalkerTables,
 };
 use crate::pipeline::{self, GenOpts};
 use crate::prompt::{self, TtsSpecials};
@@ -126,10 +126,11 @@ impl TtsEngine {
         self.kv.device()
     }
 
-    /// Serve one request: build the prompt, generate codes on the resident KV
-    /// Talker, decode the codec, and stream the waveform in `chunk`-sample pieces
-    /// via `on_audio(samples, seq)`.
-    pub fn run(&mut self, req: &Req, chunk: usize, on_audio: &mut dyn FnMut(&[f32], u32)) -> Result<usize, String> {
+    /// Serve one request: build the prompt, then generate + decode + stream
+    /// progressively — a sliding `win`-frame codec window is decoded every `chunk`
+    /// frames and only the newest frames' audio is emitted via `on_audio`, so
+    /// playback can start after the first chunk instead of after the whole clip.
+    pub fn run(&mut self, req: &Req, on_audio: &mut dyn FnMut(&[f32], u32)) -> Result<usize, String> {
         let lang_id = self.sp.language_id(&req.lang);
         let input_ids = self.tok.encode(&pipeline::assistant_text(&req.text));
         let (role_ids, text_ids) = pipeline::split_input_ids(&input_ids)?;
@@ -171,26 +172,65 @@ impl TtsEngine {
             opts.max_frames = fit;
         }
 
-        let codes = generate_codes_kv(&mut self.kv, &self.tables, &mut self.mtp, &self.sp, &prompt, &opts)?;
-        if codes.is_empty() {
-            return Err("no codec frames were generated".into());
-        }
-        let frames = codes.len() / 16;
-        let bucket = codec_bucket(frames);
-        if !self.codec_sessions.contains_key(&bucket) {
+        // Sliding-window streaming codec. `win` is the decoded window (warmup +
+        // chunk) — its leading frames give the causal codec context; only the
+        // newest `chunk` frames' audio is emitted. Gaps between chunks are fine
+        // (fast hardware keeps up). One resident codec session at length `win`.
+        let envn = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let chunk = envn("BRAIN_TTS_STREAM_CHUNK", 16).max(1);
+        let win = codec_bucket(envn("BRAIN_TTS_STREAM_WIN", 32).max(chunk));
+        if !self.codec_sessions.contains_key(&win) {
             let codec_path = format!("{}/codec.weights", self.cfg.weights_dir);
-            let s = open_codec_session(&codec_path, bucket, self.cfg.device, true, Some(Path::new(&self.cfg.npu_cache)))?;
-            self.codec_sessions.insert(bucket, s);
+            let s = open_codec_session(&codec_path, win, self.cfg.device, true, Some(Path::new(&self.cfg.npu_cache)))?;
+            self.codec_sessions.insert(win, s);
         }
-        let sess = self.codec_sessions.get_mut(&bucket).unwrap();
-        let wav = decode_with_session(sess, &codes)?;
+        let sess = self.codec_sessions.get_mut(&win).unwrap();
 
-        let chunk = chunk.max(1);
+        let mut emitted = 0usize;
         let mut seq = 0u32;
-        for c in wav.chunks(chunk) {
-            on_audio(c, seq);
-            seq += 1;
+        let mut total_samples = 0usize;
+        let mut cb_err: Option<String> = None;
+        {
+            let mut on_chunk = |all: &[u32]| {
+                if cb_err.is_some() {
+                    return;
+                }
+                let total = all.len() / 16;
+                let new = total - emitted;
+                if new == 0 {
+                    return;
+                }
+                // Build the `win`-frame window: the last `win` real frames (the
+                // newest at the end), left-zero-padded when fewer are available.
+                let start = total.saturating_sub(win);
+                let pad = win - (total - start);
+                let mut wc = vec![0u32; win * 16];
+                for (i, f) in (start..total).enumerate() {
+                    let dst = (pad + i) * 16;
+                    wc[dst..dst + 16].copy_from_slice(&all[f * 16..f * 16 + 16]);
+                }
+                match decode_with_session(sess, &wc) {
+                    Ok(wav) => {
+                        let spf = wav.len() / win.max(1);
+                        let take = new.min(win) * spf;
+                        on_audio(&wav[wav.len() - take..], seq);
+                        seq += 1;
+                        total_samples += take;
+                    }
+                    Err(e) => cb_err = Some(e),
+                }
+                emitted = total;
+            };
+            generate_codes_kv_streaming(
+                &mut self.kv, &self.tables, &mut self.mtp, &self.sp, &prompt, &opts, chunk, &mut on_chunk,
+            )?;
         }
-        Ok(wav.len())
+        if let Some(e) = cb_err {
+            return Err(e);
+        }
+        if total_samples == 0 {
+            return Err("no audio produced".into());
+        }
+        Ok(total_samples)
     }
 }
