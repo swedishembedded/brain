@@ -110,7 +110,16 @@ const PIPELINES: &[(&str, &str)] = &[
 /// Per-binding budget (f32 words) for tiling the embedding / lm_head over vocab,
 /// so each storage binding stays under a backend's `max_storage_buffer_binding_
 /// size` (e.g. 128MB on Mesa-GL). ~96 MiB; small models collapse to one tile.
+/// `BRAIN_TILE_BUDGET_WORDS` overrides it (e.g. tiny, to force tiling in tests).
 const TILE_BUDGET_WORDS: u64 = 24 * 1024 * 1024;
+
+fn tile_budget_words() -> u64 {
+    std::env::var("BRAIN_TILE_BUDGET_WORDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&w| w > 0)
+        .unwrap_or(TILE_BUDGET_WORDS)
+}
 
 struct Layer {
     xn1: DeviceBuffer,
@@ -443,7 +452,7 @@ impl Qwen {
     fn vocab_tiles(&self) -> Vec<(u32, u32)> {
         let d = self.cfg.d_model as u64;
         let v = self.cfg.vocab as u64;
-        let rows = (TILE_BUDGET_WORDS / d.max(1)).max(1);
+        let rows = (tile_budget_words() / d.max(1)).max(1);
         let mut out = Vec::new();
         let mut v0 = 0u64;
         while v0 < v {
