@@ -21,7 +21,7 @@ use npu::openvino::{CodecSession, NpuDevice};
 use crate::gen_kv_mtp::CpuMtp;
 use crate::npu_gen::{
     codec_bucket, decode_with_session, generate_codes_kv, generate_codes_kv_streaming, open_codec_session, KvTalker,
-    TalkerTables,
+    NpuStreamCodec, TalkerTables,
 };
 use crate::pipeline::{self, GenOpts};
 use crate::prompt::{self, TtsSpecials};
@@ -73,6 +73,8 @@ pub struct TtsEngine {
     codec_sessions: HashMap<usize, CodecSession>,
     // Pure-CPU stateful streaming codec (BRAIN_TTS_CODEC=cpu-stream); lazily loaded.
     cpu_codec: Option<StreamingCodecDecoder>,
+    // NPU stateful streaming codec (BRAIN_TTS_CODEC=npu-stream); lazily loaded.
+    npu_codec: Option<NpuStreamCodec>,
     // Clone-mode, encoded once at load:
     ref_code: Option<Vec<u32>>,
     ref_ids: Option<Vec<u32>>,
@@ -121,6 +123,7 @@ impl TtsEngine {
             kv,
             codec_sessions: HashMap::new(),
             cpu_codec: None,
+            npu_codec: None,
             ref_code,
             ref_ids,
             xvec,
@@ -199,6 +202,34 @@ impl TtsEngine {
                 on_audio(pcm, seq);
                 total += pcm.len();
             });
+            if total == 0 {
+                return Err("no audio produced".into());
+            }
+            return Ok(total);
+        }
+
+        // Codec backend `npu-stream`: the NPU *stateful* streaming decoder — front
+        // graph once, then the streaming-back graph per chunk carrying per-conv
+        // state (no warmup re-decode). The realtime path once warm.
+        if std::env::var("BRAIN_TTS_CODEC").map(|v| v == "npu-stream").unwrap_or(false) {
+            let codes = generate_codes_kv(&mut self.kv, &self.tables, &mut self.mtp, &self.sp, &prompt, &opts)?;
+            if codes.is_empty() {
+                return Err("no codec frames were generated".into());
+            }
+            if self.npu_codec.is_none() {
+                let codec_path = format!("{}/codec.weights", self.cfg.weights_dir);
+                let front_t = self.kv.cap();
+                let chunk = std::env::var("BRAIN_TTS_STREAM_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(16usize).max(1);
+                self.npu_codec = Some(NpuStreamCodec::load(
+                    &codec_path,
+                    front_t,
+                    chunk,
+                    self.cfg.device,
+                    true,
+                    Some(Path::new(&self.cfg.npu_cache)),
+                )?);
+            }
+            let total = self.npu_codec.as_mut().unwrap().decode(&codes, on_audio)?;
             if total == 0 {
                 return Err("no audio produced".into());
             }

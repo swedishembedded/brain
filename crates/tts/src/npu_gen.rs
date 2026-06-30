@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use data::rng::Rng;
-use npu::openvino::{CodecSession, EmbedSession, KvSession, NpuConfig, NpuDevice, PrefillSession};
+use npu::openvino::{BackStreamSession, CodecSession, EmbedSession, KvSession, NpuConfig, NpuDevice, PrefillSession};
 
 use crate::config::TalkerConfig;
 use crate::pipeline::{sample_cb0, GenOpts};
@@ -1131,4 +1131,111 @@ fn prepare_codec_onnx(weights_path: &str, code_len: usize, cache_dir: Option<&Pa
         "brain_tts_npu_codec",
         |out| npu::codec_export::export_codec_fp32(weights_path, out, code_len),
     )
+}
+
+fn prepare_codec_front_onnx(weights_path: &str, t: usize, cache_dir: Option<&Path>) -> Result<PathBuf, String> {
+    prepare_graph(
+        weights_path,
+        cache_dir,
+        &format!("codec-front-t{t}.onnx"),
+        "brain_tts_npu_codec_front",
+        |out| npu::codec_export::export_codec_front_fp32(weights_path, out, t).map(|_| ()),
+    )
+}
+
+/// The stateful streaming codec on the NPU: the causal **front** graph
+/// (`codes -> latent`, run once, reusing [`CodecSession`]) plus the
+/// **streaming-back** graph driven chunk-by-chunk with the per-conv state
+/// carried on the host. Each chunk decodes only its new frames — no warmup
+/// re-decode (cf. the windowed [`decode_codes_npu`]).
+pub struct NpuStreamCodec {
+    front: CodecSession,
+    back: BackStreamSession,
+    bufs: Vec<Vec<f32>>,
+    latent_dim: usize,
+    front_t: usize,
+    chunk: usize,
+    nq: usize,
+    device: String,
+}
+
+impl NpuStreamCodec {
+    pub fn load(
+        codec_path: &str,
+        front_t: usize,
+        chunk: usize,
+        device: NpuDevice,
+        allow_fallback: bool,
+        cache_dir: Option<&Path>,
+    ) -> Result<NpuStreamCodec, String> {
+        let ncfg = npu_config(device, allow_fallback, cache_dir);
+        let fonnx = prepare_codec_front_onnx(codec_path, front_t, cache_dir)?;
+        let front = CodecSession::load_path(&fonnx, &ncfg).map_err(|e| e.to_string())?;
+        let nq = front.nq();
+        let latent_dim = front.out_len() / front_t;
+        // The streaming-back graph: always (re)export to recover the buffer specs;
+        // the per-bucket file lives in the cache and OpenVINO blob-caches the compile.
+        let dir = cache_dir.map(|p| p.to_path_buf()).unwrap_or_else(std::env::temp_dir);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let bpath = dir.join(format!("codec-back-stream-chunk{chunk}.onnx"));
+        let (_, specs) = npu::codec_export::export_codec_back_stream_fp32(codec_path, bpath.to_str().ok_or("path")?, chunk)
+            .map_err(|e| e.to_string())?;
+        let back = BackStreamSession::load_path(&bpath, &ncfg, specs, latent_dim, chunk).map_err(|e| e.to_string())?;
+        let bufs = back.zero_buffers();
+        let device = back.device().to_string();
+        Ok(NpuStreamCodec { front, back, bufs, latent_dim, front_t, chunk, nq, device })
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+    pub fn front_t(&self) -> usize {
+        self.front_t
+    }
+
+    /// Decode `[T,16]` row-major codes, streaming each chunk's audio via
+    /// `on_audio(samples, seq)`. `T` must be `<= front_t` (the compiled front).
+    pub fn decode(&mut self, codes_rowmajor: &[u32], on_audio: &mut dyn FnMut(&[f32], u32)) -> Result<usize, String> {
+        let nq = self.nq;
+        let t = codes_rowmajor.len() / nq;
+        if t == 0 {
+            return Err("no codec frames".into());
+        }
+        if t > self.front_t {
+            return Err(format!("{t} frames exceed front graph length {}", self.front_t));
+        }
+        // Front (one infer): codes [T,nq] row-major -> [nq,front_t] i64 (zero-padded).
+        let mut cm = vec![0i64; nq * self.front_t];
+        for f in 0..t {
+            for q in 0..nq {
+                cm[q * self.front_t + f] = codes_rowmajor[f * nq + q] as i64;
+            }
+        }
+        let latent = self.front.run_codes(&cm).map_err(|e| e.to_string())?; // [latent_dim, front_t] NCL
+        for b in self.bufs.iter_mut() {
+            b.iter_mut().for_each(|x| *x = 0.0);
+        }
+        let (ld, ft, ch) = (self.latent_dim, self.front_t, self.chunk);
+        let mut seq = 0u32;
+        let mut total = 0usize;
+        let mut a = 0usize;
+        while a < t {
+            let b = (a + ch).min(t);
+            let l_new = b - a;
+            // Slice latent cols [a,b) per channel into a chunk-wide slab (zero-pad).
+            let mut slab = vec![0.0f32; ld * ch];
+            for c in 0..ld {
+                slab[c * ch..c * ch + l_new].copy_from_slice(&latent[c * ft + a..c * ft + b]);
+            }
+            let (wav, nb) = self.back.run(&slab, &self.bufs).map_err(|e| e.to_string())?;
+            self.bufs = nb;
+            let spf = wav.len() / ch.max(1);
+            let take = l_new * spf;
+            on_audio(&wav[..take.min(wav.len())], seq);
+            seq += 1;
+            total += take;
+            a = b;
+        }
+        Ok(total)
+    }
 }
