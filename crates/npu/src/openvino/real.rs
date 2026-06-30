@@ -820,6 +820,87 @@ impl PrefillSession {
     }
 }
 
+/// A compiled **streaming-back** codec graph (see
+/// [`crate::codec_topology::build_codec_back_stream_graph`]): `latent` chunk +
+/// per-conv `bufin.{prefix}` in, `waveform` chunk + per-conv `bufout.{prefix}`
+/// out. The host carries the buffers across chunks so each chunk decodes only its
+/// new frames. Buffer specs `(prefix, channels, width)` are supplied by the
+/// exporter.
+pub struct BackStreamSession {
+    _core: Core,
+    request: openvino::InferRequest,
+    bufs: Vec<(String, i64, i64)>,
+    latent_dim: usize,
+    chunk: usize,
+    device: String,
+}
+
+impl BackStreamSession {
+    pub fn load_path(
+        onnx_path: &Path,
+        cfg: &NpuConfig,
+        bufs: Vec<(String, i64, i64)>,
+        latent_dim: usize,
+        chunk: usize,
+    ) -> Result<Self, NpuError> {
+        let mut core = new_core()?;
+        let device = pick_device(&mut core, cfg)?;
+        let path_str = onnx_path.to_str().ok_or_else(|| NpuError::Other("non-utf8 path".into()))?;
+        let model = core
+            .read_model_from_file(path_str, "")
+            .map_err(|e| NpuError::Other(format!("read_model {}: {e:?}", onnx_path.display())))?;
+        let mut compiled = core
+            .compile_model(&model, device.to_owned())
+            .map_err(|e| NpuError::Other(format!("compile_model on {}: {e:?}", dev_str(&device))))?;
+        let request = compiled
+            .create_infer_request()
+            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
+        Ok(BackStreamSession { _core: core, request, bufs, latent_dim, chunk, device: dev_str(&device) })
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+
+    /// Zeroed initial buffer state, one Vec per conv (`channels*width` f32).
+    pub fn zero_buffers(&self) -> Vec<Vec<f32>> {
+        self.bufs.iter().map(|&(_, c, w)| vec![0.0f32; (c * w) as usize]).collect()
+    }
+
+    fn set_f32(&mut self, holders: &mut Vec<Tensor>, name: &str, dims: &[i64], data: &[f32]) -> Result<(), NpuError> {
+        let shape = Shape::new(dims).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        let mut t = Tensor::new(ElementType::F32, &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        t.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(data);
+        self.request.set_tensor(name, &t).map_err(|e| NpuError::Other(format!("set {name}: {e:?}")))?;
+        holders.push(t);
+        Ok(())
+    }
+
+    /// Decode one chunk: `latent` is `[latent_dim*chunk]` (NCL), `bufins` are the
+    /// current per-conv buffers. Returns `(waveform, updated buffers)`.
+    pub fn run(&mut self, latent: &[f32], bufins: &[Vec<f32>]) -> Result<(Vec<f32>, Vec<Vec<f32>>), NpuError> {
+        let (ld, ch) = (self.latent_dim as i64, self.chunk as i64);
+        let mut holders: Vec<Tensor> = Vec::with_capacity(1 + self.bufs.len());
+        self.set_f32(&mut holders, "latent", &[1, ld, ch], latent)?;
+        let specs: Vec<(String, i64, i64)> = self.bufs.clone();
+        for (i, (prefix, c, w)) in specs.iter().enumerate() {
+            self.set_f32(&mut holders, &format!("bufin.{prefix}"), &[1, *c, *w], &bufins[i])?;
+        }
+        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
+        let get = |req: &openvino::InferRequest, name: &str| -> Result<Vec<f32>, NpuError> {
+            let t = req.get_tensor(name).map_err(|e| NpuError::Other(format!("get {name}: {e:?}")))?;
+            Ok(t.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec())
+        };
+        let wav = get(&self.request, "waveform")?;
+        let mut bufouts = Vec::with_capacity(specs.len());
+        for (prefix, _, _) in &specs {
+            bufouts.push(get(&self.request, &format!("bufout.{prefix}"))?);
+        }
+        drop(holders);
+        Ok((wav, bufouts))
+    }
+}
+
 /// Warm-up then time `iters` inferences; report p50/p99/mean latency + throughput.
 pub fn bench(
     session: &mut NpuSession,

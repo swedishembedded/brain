@@ -200,3 +200,28 @@ impl CodecSession {
         unsupported()
     }
 }
+
+pub struct BackStreamSession {
+    _priv: (),
+}
+
+impl BackStreamSession {
+    pub fn load_path(
+        _p: &Path,
+        _cfg: &NpuConfig,
+        _bufs: Vec<(String, i64, i64)>,
+        _latent_dim: usize,
+        _chunk: usize,
+    ) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn device(&self) -> &str {
+        ""
+    }
+    pub fn zero_buffers(&self) -> Vec<Vec<f32>> {
+        Vec::new()
+    }
+    pub fn run(&mut self, _latent: &[f32], _bufins: &[Vec<f32>]) -> Result<(Vec<f32>, Vec<Vec<f32>>), NpuError> {
+        unsupported()
+    }
+}
