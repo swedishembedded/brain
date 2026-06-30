@@ -14,12 +14,14 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use codec::decode_stream::StreamingCodecDecoder;
 use data::tokenizer::Tokenizer;
 use npu::openvino::{CodecSession, NpuDevice};
 
 use crate::gen_kv_mtp::CpuMtp;
 use crate::npu_gen::{
-    codec_bucket, decode_with_session, generate_codes_kv_streaming, open_codec_session, KvTalker, TalkerTables,
+    codec_bucket, decode_with_session, generate_codes_kv, generate_codes_kv_streaming, open_codec_session, KvTalker,
+    TalkerTables,
 };
 use crate::pipeline::{self, GenOpts};
 use crate::prompt::{self, TtsSpecials};
@@ -69,6 +71,8 @@ pub struct TtsEngine {
     mtp: CpuMtp,
     kv: KvTalker,
     codec_sessions: HashMap<usize, CodecSession>,
+    // Pure-CPU stateful streaming codec (BRAIN_TTS_CODEC=cpu-stream); lazily loaded.
+    cpu_codec: Option<StreamingCodecDecoder>,
     // Clone-mode, encoded once at load:
     ref_code: Option<Vec<u32>>,
     ref_ids: Option<Vec<u32>>,
@@ -113,6 +117,7 @@ impl TtsEngine {
             mtp,
             kv,
             codec_sessions: HashMap::new(),
+            cpu_codec: None,
             ref_code,
             ref_ids,
             xvec,
@@ -170,6 +175,31 @@ impl TtsEngine {
         let mut opts = req.opts.clone();
         if opts.max_frames > fit {
             opts.max_frames = fit;
+        }
+
+        // Codec backend `cpu-stream`: the pure-CPU *stateful* streaming decoder —
+        // each chunk decodes ONLY its new frames (no warmup re-decode), emitting
+        // audio progressively. Generate the full codes, then stream-decode.
+        if std::env::var("BRAIN_TTS_CODEC").map(|v| v == "cpu-stream").unwrap_or(false) {
+            let codes = generate_codes_kv(&mut self.kv, &self.tables, &mut self.mtp, &self.sp, &prompt, &opts)?;
+            if codes.is_empty() {
+                return Err("no codec frames were generated".into());
+            }
+            if self.cpu_codec.is_none() {
+                let codec_path = format!("{}/codec.weights", self.cfg.weights_dir);
+                self.cpu_codec = Some(StreamingCodecDecoder::load(&codec_path));
+            }
+            let chunk = std::env::var("BRAIN_TTS_STREAM_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(16usize).max(1);
+            let dec = self.cpu_codec.as_ref().unwrap();
+            let mut total = 0usize;
+            dec.decode_streaming_cb(&codes, chunk, &mut |pcm, seq| {
+                on_audio(pcm, seq);
+                total += pcm.len();
+            });
+            if total == 0 {
+                return Err("no audio produced".into());
+            }
+            return Ok(total);
         }
 
         // Sliding-window streaming codec. `win` is the decoded window (warmup +

@@ -8,7 +8,7 @@
 use serde_json::Value;
 
 /// Decoder (Mimi-style) configuration — the codes->waveform path.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CodecConfig {
     // RVQ
     pub num_quantizers: u32,          // 16 total (1 semantic + 15 acoustic)
@@ -45,7 +45,7 @@ pub struct CodecConfig {
 
 /// Mimi SEANet encoder + encoder-transformer + downsample hyperparameters, parsed
 /// from the codec `config.json`'s `encoder_config`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct EncoderConfig {
     pub num_filters: u32,         // 64
     pub hidden_size: u32,         // 512

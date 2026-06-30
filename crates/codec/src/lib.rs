@@ -20,6 +20,7 @@
 
 pub mod config;
 pub mod import;
+pub mod decode_stream;
 pub mod model;
 pub mod recon;
 pub mod streaming;
