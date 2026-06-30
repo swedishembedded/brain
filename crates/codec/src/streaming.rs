@@ -22,7 +22,7 @@
 //! one-shot output, which equals the reference causal op. Built on the pure-CPU
 //! [`audio::conv`] references so the state math is validated without a GPU/NPU.
 
-use audio::conv::{conv1d_ref, convtr1d_ref, Conv1d};
+use rayon::prelude::*;
 
 /// Streaming causal `Conv1d` (stride 1). Tensors are channel-major `[C, L]`.
 pub struct StreamConv1d {
@@ -58,24 +58,29 @@ impl StreamConv1d {
             xin[c * lin..c * lin + ctx].copy_from_slice(&self.buf[c * ctx..c * ctx + ctx]);
             xin[c * lin + ctx..c * lin + lin].copy_from_slice(&x[c * l_new..c * l_new + l_new]);
         }
-        let conv = Conv1d {
-            n: 1,
-            cin: cin as u32,
-            l: lin as u32,
-            cout: cout as u32,
-            k: self.k as u32,
-            stride: 1,
-            pad: 0,
-            dilation: self.dil as u32,
-            groups: self.groups as u32,
-            lo: l_new as u32,
-        };
-        let mut y = conv1d_ref(&conv, &xin, &self.w);
-        for co in 0..cout {
-            for lo in 0..l_new {
-                y[co * l_new + lo] += self.bias[co];
+        // Causal conv (stride 1, pad 0 — context is prepended), parallel over
+        // output channels. Same per-output accumulation order as the scalar
+        // reference, so the result is bit-identical (the exactness tests hold).
+        let (k, dil) = (self.k, self.dil);
+        let cin_g = cin / self.groups;
+        let cout_g = cout / self.groups;
+        let (w, bias) = (&self.w, &self.bias);
+        let mut y = vec![0.0f32; cout * l_new];
+        y.par_chunks_mut(l_new).enumerate().for_each(|(co, yrow)| {
+            let g = co / cout_g;
+            let b = bias[co];
+            for (lo, slot) in yrow.iter_mut().enumerate() {
+                let mut acc = b;
+                for cl in 0..cin_g {
+                    let xbase = (g * cin_g + cl) * lin;
+                    let wbase = (co * cin_g + cl) * k;
+                    for kw in 0..k {
+                        acc += xin[xbase + lo + kw * dil] * w[wbase + kw];
+                    }
+                }
+                *slot = acc;
             }
-        }
+        });
         // Save the last `ctx` input columns for the next chunk.
         for c in 0..cin {
             self.buf[c * ctx..c * ctx + ctx].copy_from_slice(&xin[c * lin + lin - ctx..c * lin + lin]);
@@ -110,19 +115,26 @@ impl StreamConvTr1d {
     pub fn step(&mut self, x: &[f32], l_new: usize) -> Vec<f32> {
         let (cin, cout, k, stride, ov) = (self.cin, self.cout, self.k, self.stride, self.ov);
         let raw_len = (l_new - 1) * stride + k;
-        let c = Conv1d {
-            n: 1,
-            cin: cin as u32,
-            l: l_new as u32,
-            cout: cout as u32,
-            k: k as u32,
-            stride: stride as u32,
-            pad: 0,
-            dilation: 1,
-            groups: 1,
-            lo: raw_len as u32,
-        };
-        let mut raw = convtr1d_ref(&c, x, &self.w); // [cout, raw_len], no bias
+        // Transposed conv (groups 1, no bias), parallel over output channels —
+        // same accumulation order as the scalar reference (bit-identical).
+        let w = &self.w;
+        let mut raw = vec![0.0f32; cout * raw_len];
+        raw.par_chunks_mut(raw_len).enumerate().for_each(|(co, rrow)| {
+            for (lo, slot) in rrow.iter_mut().enumerate() {
+                let mut acc = 0.0f32;
+                for kw in 0..k {
+                    if lo >= kw && (lo - kw) % stride == 0 {
+                        let li = (lo - kw) / stride;
+                        if li < l_new {
+                            for cl in 0..cin {
+                                acc += x[cl * l_new + li] * w[(cl * cout + co) * k + kw];
+                            }
+                        }
+                    }
+                }
+                *slot = acc;
+            }
+        });
         // Add the previous carry to the first `ov` (overlapping) output columns.
         for co in 0..cout {
             for j in 0..ov {

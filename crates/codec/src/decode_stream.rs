@@ -647,4 +647,32 @@ mod tests {
         // differences vs the gpu_core path, not an algorithmic mismatch.
         assert!(d_ref < 5e-3, "parity vs Codec::decode too large: {d_ref}");
     }
+
+    /// Wall-clock of the rayon decoder. Run in RELEASE:
+    ///   BRAIN_CODEC_WEIGHTS=.../codec.weights \
+    ///   cargo test --release -p brain-codec --lib bench_decode -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_decode() {
+        let path = std::env::var("BRAIN_CODEC_WEIGHTS").expect("set BRAIN_CODEC_WEIGHTS");
+        let dec = StreamingCodecDecoder::load(&path);
+        let nq = dec.cfg().num_quantizers as usize;
+        let t = 48usize;
+        let mut seed = 5u64;
+        let codes: Vec<u32> = (0..t * nq)
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                ((seed >> 40) % 256) as u32
+            })
+            .collect();
+        let t0 = std::time::Instant::now();
+        let wav = dec.decode_streaming(&codes, 16);
+        let dt = t0.elapsed().as_secs_f64();
+        let audio_s = wav.len() as f64 / 24000.0;
+        eprintln!(
+            "decode {t} frames -> {} samples ({audio_s:.2}s audio) in {dt:.2}s  =>  {:.2}x realtime",
+            wav.len(),
+            audio_s / dt
+        );
+    }
 }
