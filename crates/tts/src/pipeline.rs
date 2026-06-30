@@ -291,25 +291,25 @@ pub fn generate_codes_cached(
 
 /// Split the assistant chat-template ids into the 3-token role header and the
 /// target text content (`input_id[3..len-5]`).
-fn split_input_ids(ids: &[u32]) -> Result<(Vec<u32>, Vec<u32>), String> {
+pub(crate) fn split_input_ids(ids: &[u32]) -> Result<(Vec<u32>, Vec<u32>), String> {
     if ids.len() < 3 + 5 + 1 {
         return Err(format!("tokenized prompt too short ({} ids)", ids.len()));
     }
     Ok((ids[..3].to_vec(), ids[3..ids.len() - 5].to_vec()))
 }
 
-fn assistant_text(text: &str) -> String {
+pub(crate) fn assistant_text(text: &str) -> String {
     format!("<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n")
 }
 
 /// The instruct turn for CustomVoice / VoiceDesign (`_build_instruct_text`).
-fn instruct_text(instruct: &str) -> String {
+pub(crate) fn instruct_text(instruct: &str) -> String {
     format!("<|im_start|>user\n{instruct}<|im_end|>\n")
 }
 
 /// Resolve a CustomVoice preset speaker name to its codec-token id (or error with
 /// the supported list). `None` name -> `None` (VoiceDesign).
-fn resolve_speaker(sp: &TtsSpecials, speaker: Option<&str>) -> Result<Option<u32>, String> {
+pub(crate) fn resolve_speaker(sp: &TtsSpecials, speaker: Option<&str>) -> Result<Option<u32>, String> {
     match speaker {
         None => Ok(None),
         Some(name) if name.trim().is_empty() => Ok(None),
@@ -330,7 +330,7 @@ fn max_ctx(opts: &GenOpts, ref_frames: usize) -> u32 {
 /// `cache_dir` (keyed by the wav's name + mtime). Encoding the reference is the
 /// slow CPU step of a clone; caching it makes repeated clones of the same voice
 /// skip straight to generation. Returns the `[T,16]` codes.
-fn ref_codes_cached(codec_path: &str, wav: &audio::wav::Wav, ref_wav_path: &str, cache_dir: Option<&str>) -> Vec<u32> {
+pub(crate) fn ref_codes_cached(codec_path: &str, wav: &audio::wav::Wav, ref_wav_path: &str, cache_dir: Option<&str>) -> Vec<u32> {
     let cache_file = cache_dir.map(|d| {
         let stem = std::path::Path::new(ref_wav_path)
             .file_stem()

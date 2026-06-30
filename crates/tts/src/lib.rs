@@ -20,6 +20,7 @@ pub mod import;
 pub mod mtp;
 pub mod npu_gen;
 pub mod pipeline;
+pub mod serve;
 pub mod prompt;
 pub mod sft;
 pub mod talker;

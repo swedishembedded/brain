@@ -717,6 +717,37 @@ pub fn decode_codes_npu(
     allow_fallback: bool,
     cache_dir: Option<&Path>,
 ) -> Result<(Vec<f32>, String), String> {
+    let tb = codec_bucket(codes.len() / 16);
+    eprintln!("tts npu: compiling codec decoder graph (code_len={tb})…");
+    let mut sess = open_codec_session(codec_path, tb, device, allow_fallback, cache_dir)?;
+    let dev = sess.device().to_string();
+    let wav = decode_with_session(&mut sess, codes)?;
+    Ok((wav, dev))
+}
+
+/// Codec code-length bucket for `frames` (rounds up to [`CODEC_BUCKET`]). One
+/// compiled graph per bucket serves a range of frame counts.
+pub fn codec_bucket(frames: usize) -> usize {
+    round_up(frames.max(1), CODEC_BUCKET)
+}
+
+/// Compile (or reuse, via the blob cache) a codec decoder session for exactly
+/// `code_len` frames. The server caches these per bucket so they stay resident.
+pub fn open_codec_session(
+    codec_path: &str,
+    code_len: usize,
+    device: NpuDevice,
+    allow_fallback: bool,
+    cache_dir: Option<&Path>,
+) -> Result<CodecSession, String> {
+    let onnx = prepare_codec_onnx(codec_path, code_len, cache_dir)?;
+    CodecSession::load_path(&onnx, &npu_config(device, allow_fallback, cache_dir)).map_err(|e| e.to_string())
+}
+
+/// Decode `[T,16]` row-major codes on a resident codec session whose compiled
+/// `code_len` (`>= T`) the caller picked via [`codec_bucket`]. Pads to the
+/// session's length and trims the (causal) output back to `T` frames.
+pub fn decode_with_session(sess: &mut CodecSession, codes: &[u32]) -> Result<Vec<f32>, String> {
     if codes.is_empty() {
         return Err("no codec frames were generated".to_string());
     }
@@ -725,14 +756,10 @@ pub fn decode_codes_npu(
         return Err(format!("codes len {} is not a multiple of 16", codes.len()));
     }
     let t = codes.len() / ncode;
-    // Bucket the codec code length so one compiled graph serves a range of frame
-    // counts. The codec is causal, so decoding `tb >= t` frames (zero-padded) and
-    // trimming back to `t` frames is exact for the real region.
-    let tb = round_up(t, CODEC_BUCKET);
-    let onnx = prepare_codec_onnx(codec_path, tb, cache_dir)?;
-    let cfg = npu_config(device, allow_fallback, cache_dir);
-    eprintln!("tts npu: compiling codec decoder graph (code_len={tb} for {t} frames)…");
-    let mut sess = CodecSession::load_path(&onnx, &cfg).map_err(|e| e.to_string())?;
+    let tb = sess.code_len();
+    if t > tb {
+        return Err(format!("{t} frames exceed codec session code_len {tb}"));
+    }
     let nq = sess.nq();
     if nq != ncode {
         return Err(format!("codec graph expects {nq} codebooks, frames have {ncode}"));
@@ -745,11 +772,9 @@ pub fn decode_codes_npu(
         }
     }
     let wav_full = sess.run_codes(&cm).map_err(|e| e.to_string())?;
-    // Trim to the real frames (samples-per-frame = total upsampled length / tb).
     let spf = if tb > 0 { sess.out_len() / tb } else { 0 };
     let real = (t * spf).min(wav_full.len());
-    let wav = if real > 0 { wav_full[..real].to_vec() } else { wav_full };
-    Ok((wav, sess.device().to_string()))
+    Ok(if real > 0 { wav_full[..real].to_vec() } else { wav_full })
 }
 
 /// OpenVINO config: target `device`, optional CPU/GPU fallback, and the cache dir
