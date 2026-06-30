@@ -38,7 +38,7 @@ pub fn build_qwen_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder)
     tp.f32("tok.weight", &[vocab as i64, d as i64], w["tok.weight"].clone());
     let x = tp.gather("tok.weight", "input_ids", 0, "emb");
 
-    let xf = build_stack(&mut tp, cfg, w, t, &x);
+    let xf = build_stack(&mut tp, cfg, w, t, &x, false);
     // lm_head. Tied models (`tie_embeddings`) reuse `tok.weight`; untied models
     // (e.g. the Qwen3-TTS Talker, `tie_embeddings = false`) have a separate
     // `lm_head.weight`. Both are `[vocab,d]`, transposed to `[d,vocab]` for MatMul.
@@ -62,8 +62,150 @@ pub fn build_talker_hidden_graph(cfg: &QwenConfig, w: &W, t: usize, quant: bool,
     tp.g.input_f32("inputs_embeds", &[1, ti, d as i64]);
     tp.g.output_f32("hidden", &[1, ti, d as i64]);
 
-    let xf = build_stack(&mut tp, cfg, w, t, "inputs_embeds");
+    let xf = build_stack(&mut tp, cfg, w, t, "inputs_embeds", false);
     // Surface the final-norm hidden state as the graph output `hidden`.
+    tp.node("Identity", &[&xf], "hidden");
+}
+
+/// Build the **prefill** Talker graph: like [`build_talker_hidden_graph`] (full
+/// context, `inputs_embeds:[1,T,d] -> hidden:[1,T,d]`) but additionally emits the
+/// per-layer post-QK-norm/post-RoPE K/V (`k_{l}`/`v_{l}:[1,nkv,T,hd]`). Running
+/// this once seeds the resident decode cache for the whole prompt prefix in a
+/// single inference, instead of streaming the prefix token-by-token through the
+/// decode-step graph.
+pub fn build_talker_prefill_graph(cfg: &QwenConfig, w: &W, t: usize, quant: bool, g: &mut GraphBuilder) {
+    let mut tp = Topo { g, n: 0, quant };
+    let d = cfg.d_model as usize;
+    let ti = t as i64;
+    tp.g.input_f32("inputs_embeds", &[1, ti, d as i64]);
+    tp.g.output_f32("hidden", &[1, ti, d as i64]);
+    let xf = build_stack(&mut tp, cfg, w, t, "inputs_embeds", true);
+    tp.node("Identity", &[&xf], "hidden");
+}
+
+/// Build the **KV-cache decode-step** Talker graph: process ONE new token given
+/// the per-layer past key/value cache, so each generated frame is O(1)
+/// projections + O(t) attention instead of re-running the whole context. This is
+/// the resident-cache counterpart of [`build_talker_hidden_graph`] (which is the
+/// cache-free prefill).
+///
+/// Inputs: `x:[1,1,d]` (new token embedding); `rope_cos`/`rope_sin:[1,1,1,hd]`
+/// (the rotary tables for THIS absolute position, supplied by the host so no
+/// position arithmetic lives in the graph); `past_mask:[1,1,1,cap]` (additive 0
+/// for already-filled cache slots, -inf otherwise); and per layer
+/// `past_k_{l}`/`past_v_{l}:[1,nkv,cap,hd]` (post-QK-norm, post-RoPE, transposed).
+/// Outputs: `hidden:[1,1,d]` and per layer `new_k_{l}`/`new_v_{l}:[1,nkv,1,hd]`
+/// (this token's k/v, which the host writes into the cache at the current slot).
+/// Attention is over the (masked) past cache concatenated with the new token's
+/// own key/value, so the static `cap` shapes never change.
+pub fn build_talker_decode_graph(cfg: &QwenConfig, w: &W, cap: usize, quant: bool, g: &mut GraphBuilder) {
+    let mut tp = Topo { g, n: 0, quant };
+    let d = cfg.d_model as usize;
+    let nh = cfg.n_heads as usize;
+    let nkv = cfg.n_kv_heads as usize;
+    let hd = cfg.head_dim as usize;
+    let half = hd / 2;
+    let group = nh / nkv;
+    let hq = nh * hd;
+    let hkv = nkv * hd;
+    let ff = cfg.d_ff as usize;
+    let eps = cfg.rms_eps;
+    let capi = cap as i64;
+    let nl = cfg.n_layers as usize;
+
+    // ---- I/O ----
+    tp.g.input_f32("x", &[1, 1, d as i64]);
+    tp.g.input_f32("rope_cos", &[1, 1, 1, hd as i64]);
+    tp.g.input_f32("rope_sin", &[1, 1, 1, hd as i64]);
+    tp.g.input_f32("past_mask", &[1, 1, 1, capi]);
+    for l in 0..nl {
+        tp.g.input_f32(&format!("past_k_{l}"), &[1, nkv as i64, capi, hd as i64]);
+        tp.g.input_f32(&format!("past_v_{l}"), &[1, nkv as i64, capi, hd as i64]);
+        tp.g.output_f32(&format!("new_k_{l}"), &[1, nkv as i64, 1, hd as i64]);
+        tp.g.output_f32(&format!("new_v_{l}"), &[1, nkv as i64, 1, hd as i64]);
+    }
+    tp.g.output_f32("hidden", &[1, 1, d as i64]);
+
+    // ---- constants ----
+    tp.f32("c_eps", &[1], vec![eps]);
+    tp.f32("c_scale", &[1], vec![1.0 / (hd as f32).sqrt()]);
+    tp.i64("rh_ax", &[1], vec![3]);
+    tp.i64("rh_lo0", &[1], vec![0]);
+    tp.i64("rh_hi0", &[1], vec![half as i64]);
+    tp.i64("rh_lo1", &[1], vec![half as i64]);
+    tp.i64("rh_hi1", &[1], vec![hd as i64]);
+    tp.i64("dsh_q1", &[4], vec![1, 1, nh as i64, hd as i64]);
+    tp.i64("dsh_kv1", &[4], vec![1, 1, nkv as i64, hd as i64]);
+    tp.i64("dsh_ctx1", &[3], vec![1, 1, hq as i64]);
+    // GQA head-expand shapes: cache (cap) and single-token.
+    tp.i64("dsh_kv5c", &[5], vec![1, nkv as i64, 1, capi, hd as i64]);
+    tp.i64("dsh_expc", &[5], vec![1, nkv as i64, group as i64, capi, hd as i64]);
+    tp.i64("dsh_nhc", &[4], vec![1, nh as i64, capi, hd as i64]);
+    tp.i64("dsh_kv51", &[5], vec![1, nkv as i64, 1, 1, hd as i64]);
+    tp.i64("dsh_exp1", &[5], vec![1, nkv as i64, group as i64, 1, hd as i64]);
+    tp.i64("dsh_nh1", &[4], vec![1, nh as i64, 1, hd as i64]);
+    // probs split (axis 3): past [0,cap), self [cap,cap+1).
+    tp.i64("sl_ax", &[1], vec![3]);
+    tp.i64("sl_0", &[1], vec![0]);
+    tp.i64("sl_cap", &[1], vec![capi]);
+    tp.i64("sl_cap1", &[1], vec![capi + 1]);
+
+    let mut x = "x".to_string();
+    for l in 0..nl {
+        let p = |s: &str| format!("blocks.{l}.{s}");
+        // --- attention ---
+        let h1 = tp.rmsnorm(&x, &p("ln1.weight"), w, d);
+        let q = tp.linear(&h1, &p("attn.wq.weight"), w, hq, d);
+        let k = tp.linear(&h1, &p("attn.wk.weight"), w, hkv, d);
+        let v = tp.linear(&h1, &p("attn.wv.weight"), w, hkv, d);
+        let q = tp.reshape(&q, "dsh_q1");
+        let k = tp.reshape(&k, "dsh_kv1");
+        let v = tp.reshape(&v, "dsh_kv1");
+        let q = tp.rmsnorm(&q, &p("attn.q_norm.weight"), w, hd);
+        let k = tp.rmsnorm(&k, &p("attn.k_norm.weight"), w, hd);
+        let q = tp.rope(&q);
+        let k = tp.rope(&k);
+        let q = tp.transpose(&q, &[0, 2, 1, 3]); // [1,nh,1,hd]
+        // This token's k/v, transposed to [1,nkv,1,hd] — graph outputs (host caches).
+        let new_k = format!("new_k_{l}");
+        let new_v = format!("new_v_{l}");
+        tp.g.add(Node::new("Transpose", &[&k], &[&new_k]).attr_ints("perm", &[0, 2, 1, 3]));
+        tp.g.add(Node::new("Transpose", &[&v], &[&new_v]).attr_ints("perm", &[0, 2, 1, 3]));
+        // Expand kv heads (nkv->nh) for both the cache and the new token.
+        let pk_e = tp.expand_to(&format!("past_k_{l}"), "dsh_kv5c", "dsh_expc", "dsh_nhc");
+        let pv_e = tp.expand_to(&format!("past_v_{l}"), "dsh_kv5c", "dsh_expc", "dsh_nhc");
+        let nk_e = tp.expand_to(&new_k, "dsh_kv51", "dsh_exp1", "dsh_nh1");
+        let nv_e = tp.expand_to(&new_v, "dsh_kv51", "dsh_exp1", "dsh_nh1");
+        // scores: [q·pastᵀ*scale + mask | q·newᵀ*scale] -> softmax over cap+1.
+        let pkt = tp.transpose(&pk_e, &[0, 1, 3, 2]); // [1,nh,hd,cap]
+        let sp = tp.matmul(&q, &pkt);
+        let sp = tp.mul(&sp, "c_scale");
+        let sp = tp.add(&sp, "past_mask");
+        let nkt = tp.transpose(&nk_e, &[0, 1, 3, 2]); // [1,nh,hd,1]
+        let ss = tp.matmul(&q, &nkt);
+        let ss = tp.mul(&ss, "c_scale");
+        let scores = tp.concat2(&sp, &ss, 3); // [1,nh,1,cap+1]
+        let probs = tp.softmax(&scores, -1);
+        let pp = tp.slice(&probs, "sl_0", "sl_cap", "sl_ax"); // [1,nh,1,cap]
+        let ps = tp.slice(&probs, "sl_cap", "sl_cap1", "sl_ax"); // [1,nh,1,1]
+        let cp = tp.matmul(&pp, &pv_e); // [1,nh,1,hd]
+        let cs = tp.matmul(&ps, &nv_e); // [1,nh,1,hd]
+        let ctx = tp.add_t(&cp, &cs);
+        let ctx = tp.transpose(&ctx, &[0, 2, 1, 3]); // [1,1,nh,hd]
+        let ctx = tp.reshape(&ctx, "dsh_ctx1"); // [1,1,hq]
+        let attn = tp.linear(&ctx, &p("attn.wo.weight"), w, d, hq);
+        x = tp.add_t(&x, &attn);
+        // --- SwiGLU MLP ---
+        let h2 = tp.rmsnorm(&x, &p("ln2.weight"), w, d);
+        let gate = tp.linear(&h2, &p("mlp.gate.weight"), w, ff, d);
+        let up = tp.linear(&h2, &p("mlp.up.weight"), w, ff, d);
+        let sig = tp.unary("Sigmoid", &gate);
+        let silu = tp.mul_t(&gate, &sig);
+        let hmul = tp.mul_t(&silu, &up);
+        let down = tp.linear(&hmul, &p("mlp.down.weight"), w, d, ff);
+        x = tp.add_t(&x, &down);
+    }
+    let xf = tp.rmsnorm(&x, "norm.weight", w, d);
     tp.node("Identity", &[&xf], "hidden");
 }
 
@@ -72,7 +214,7 @@ pub fn build_talker_hidden_graph(cfg: &QwenConfig, w: &W, t: usize, quant: bool,
 /// the name of the final-norm hidden states (`[1,T,d]`). Used by both the
 /// token-id graph ([`build_qwen_graph`]) and the input-embedding Talker graph
 /// ([`build_talker_hidden_graph`]).
-fn build_stack(tp: &mut Topo, cfg: &QwenConfig, w: &W, t: usize, x_in: &str) -> String {
+fn build_stack(tp: &mut Topo, cfg: &QwenConfig, w: &W, t: usize, x_in: &str, emit_kv: bool) -> String {
     let d = cfg.d_model as usize;
     let nh = cfg.n_heads as usize;
     let nkv = cfg.n_kv_heads as usize;
@@ -146,8 +288,19 @@ fn build_stack(tp: &mut Topo, cfg: &QwenConfig, w: &W, t: usize, x_in: &str) -> 
         let k = tp.rope(&k);
         // To [1,heads,T,hd].
         let q = tp.transpose(&q, &[0, 2, 1, 3]);
-        let k = tp.transpose(&k, &[0, 2, 1, 3]);
-        let v = tp.transpose(&v, &[0, 2, 1, 3]);
+        let k = tp.transpose(&k, &[0, 2, 1, 3]); // [1,nkv,T,hd]
+        let v = tp.transpose(&v, &[0, 2, 1, 3]); // [1,nkv,T,hd]
+        // Prefill mode: surface the per-layer post-QK-norm/post-RoPE K/V (before
+        // the GQA head-expand) as graph outputs so the host can seed the decode
+        // KV cache in one inference (vs streaming the prefix token-by-token).
+        if emit_kv {
+            let nkv = cfg.n_kv_heads as i64;
+            let hd = cfg.head_dim as i64;
+            tp.g.output_f32(&format!("k_{l}"), &[1, nkv, t as i64, hd]);
+            tp.g.output_f32(&format!("v_{l}"), &[1, nkv, t as i64, hd]);
+            tp.node("Identity", &[&k], &format!("k_{l}"));
+            tp.node("Identity", &[&v], &format!("v_{l}"));
+        }
         // GQA: expand kv heads from nkv to nh by repeating each `group` times.
         let k = tp.expand_kv(&k);
         let v = tp.expand_kv(&v);
@@ -259,6 +412,26 @@ impl<'a> Topo<'a> {
         let e = self.tmp("exp");
         self.node("Expand", &[&r5, "sh_exp"], &e);
         self.reshape(&e, "sh_nh")
+    }
+    /// GQA head-expand with caller-named reshape/expand target shapes (decode graph
+    /// needs both a `cap`-length and a single-token variant).
+    fn expand_to(&mut self, x: &str, sh5: &str, shexp: &str, shnh: &str) -> String {
+        let r5 = self.reshape(x, sh5);
+        let e = self.tmp("exp");
+        self.node("Expand", &[&r5, shexp], &e);
+        self.reshape(&e, shnh)
+    }
+    /// `Slice(x, lo, hi, axis)` by initializer names.
+    fn slice(&mut self, x: &str, lo: &str, hi: &str, ax: &str) -> String {
+        let o = self.tmp("sl");
+        self.g.add(Node::new("Slice", &[x, lo, hi, ax], &[&o]));
+        o
+    }
+    /// `Concat([a,b], axis)`.
+    fn concat2(&mut self, a: &str, b: &str, axis: i64) -> String {
+        let o = self.tmp("cat");
+        self.g.add(Node::new("Concat", &[a, b], &[&o]).attr_int("axis", axis));
+        o
     }
 
     /// RMSNorm over the last `dim` axis with gain `name` (from `w`).

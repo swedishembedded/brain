@@ -110,6 +110,68 @@ impl EmbedSession {
     }
 }
 
+/// A compiled KV-cache decode-step graph. Never constructible on unsupported targets.
+pub struct KvSession {
+    _priv: (),
+}
+
+impl KvSession {
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_path(
+        _p: &Path,
+        _cfg: &NpuConfig,
+        _n_layers: usize,
+        _d: usize,
+        _nkv: usize,
+        _hd: usize,
+        _cap: usize,
+    ) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn device(&self) -> &str {
+        ""
+    }
+    #[allow(clippy::type_complexity)]
+    pub fn run_step(
+        &mut self,
+        _x: &[f32],
+        _cos: &[f32],
+        _sin: &[f32],
+        _mask: &[f32],
+        _past_k: &[Vec<f32>],
+        _past_v: &[Vec<f32>],
+    ) -> Result<(Vec<f32>, Vec<Vec<f32>>, Vec<Vec<f32>>), NpuError> {
+        unsupported()
+    }
+}
+
+/// A compiled prefill graph. Never constructible on unsupported targets.
+pub struct PrefillSession {
+    _priv: (),
+}
+
+impl PrefillSession {
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_path(
+        _p: &Path,
+        _cfg: &NpuConfig,
+        _n_layers: usize,
+        _d: usize,
+        _nkv: usize,
+        _hd: usize,
+        _cap: usize,
+    ) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn device(&self) -> &str {
+        ""
+    }
+    #[allow(clippy::type_complexity)]
+    pub fn run(&mut self, _embeds: &[f32]) -> Result<(Vec<f32>, Vec<Vec<f32>>, Vec<Vec<f32>>), NpuError> {
+        unsupported()
+    }
+}
+
 /// A compiled codec-decoder graph. Never constructible on unsupported targets.
 pub struct CodecSession {
     _priv: (),

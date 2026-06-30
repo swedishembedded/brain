@@ -90,6 +90,52 @@ fn export_talker_hidden(weights_path: &str, out_path: &str, seq_len: usize, quan
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
 
+/// Export the **KV-cache decode-step** Talker graph (one token + per-layer
+/// past/present K/V) for `cap` cache slots; `quant` selects weight-only INT8.
+pub fn export_talker_decode_fp32(weights_path: &str, out_path: &str, cap: usize) -> std::io::Result<()> {
+    export_talker_decode(weights_path, out_path, cap, false)
+}
+
+/// INT8 weight-only variant of [`export_talker_decode_fp32`].
+pub fn export_talker_decode_int8(weights_path: &str, out_path: &str, cap: usize) -> std::io::Result<()> {
+    export_talker_decode(weights_path, out_path, cap, true)
+}
+
+fn export_talker_decode(weights_path: &str, out_path: &str, cap: usize, quant: bool) -> std::io::Result<()> {
+    let (cfg, w) = {
+        let c = checkpoint::load(weights_path);
+        let cfg = QwenConfig::from_json(&c.header["config"]);
+        let w: HashMap<String, Vec<f32>> = c.by_role("");
+        (cfg, w)
+    };
+    let mut g = GraphBuilder::new("qwen_talker_decode");
+    crate::qwen_topology::build_talker_decode_graph(&cfg, &w, cap, quant, &mut g);
+    g.finish_external(out_path, EXTERNAL_THRESHOLD)
+}
+
+/// Export the **prefill** Talker graph (full context -> hidden + per-layer K/V) to
+/// seed the decode KV cache in one inference. `quant` selects weight-only INT8.
+pub fn export_talker_prefill_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
+    export_talker_prefill(weights_path, out_path, seq_len, false)
+}
+
+/// INT8 weight-only variant of [`export_talker_prefill_fp32`].
+pub fn export_talker_prefill_int8(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
+    export_talker_prefill(weights_path, out_path, seq_len, true)
+}
+
+fn export_talker_prefill(weights_path: &str, out_path: &str, seq_len: usize, quant: bool) -> std::io::Result<()> {
+    let (cfg, w) = {
+        let c = checkpoint::load(weights_path);
+        let cfg = QwenConfig::from_json(&c.header["config"]);
+        let w: HashMap<String, Vec<f32>> = c.by_role("");
+        (cfg, w)
+    };
+    let mut g = GraphBuilder::new("qwen_talker_prefill");
+    crate::qwen_topology::build_talker_prefill_graph(&cfg, &w, seq_len, quant, &mut g);
+    g.finish_external(out_path, EXTERNAL_THRESHOLD)
+}
+
 /// Bytes larger than this go to the ONNX external-data sidecar (keeps the proto
 /// under protobuf's 2GB parse limit while inlining the small tensors).
 const EXTERNAL_THRESHOLD: usize = 1 << 20; // 1 MiB

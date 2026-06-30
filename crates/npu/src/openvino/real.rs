@@ -645,6 +645,181 @@ impl CodecSession {
     }
 }
 
+/// A compiled **KV-cache decode-step** Talker graph (see
+/// [`crate::qwen_topology::build_talker_decode_graph`]): one token + per-layer
+/// past K/V in, hidden + per-layer new K/V out. Dimensions are supplied by the
+/// caller (known from the Talker config) rather than introspected.
+pub struct KvSession {
+    _core: Core,
+    request: openvino::InferRequest,
+    n_layers: usize,
+    d: usize,
+    nkv: usize,
+    hd: usize,
+    cap: usize,
+    device: String,
+}
+
+impl KvSession {
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_path(
+        onnx_path: &Path,
+        cfg: &NpuConfig,
+        n_layers: usize,
+        d: usize,
+        nkv: usize,
+        hd: usize,
+        cap: usize,
+    ) -> Result<Self, NpuError> {
+        let mut core = new_core()?;
+        let device = pick_device(&mut core, cfg)?;
+        let path_str = onnx_path.to_str().ok_or_else(|| NpuError::Other("non-utf8 path".into()))?;
+        let model = core
+            .read_model_from_file(path_str, "")
+            .map_err(|e| NpuError::Other(format!("read_model {}: {e:?}", onnx_path.display())))?;
+        let compiled = core
+            .compile_model(&model, device.to_owned())
+            .map_err(|e| NpuError::Other(format!("compile_model on {}: {e:?}", dev_str(&device))))?;
+        let mut compiled = compiled;
+        let request = compiled
+            .create_infer_request()
+            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
+        Ok(KvSession {
+            _core: core,
+            request,
+            n_layers,
+            d,
+            nkv,
+            hd,
+            cap,
+            device: dev_str(&device),
+        })
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+
+    fn set_f32(&mut self, holders: &mut Vec<Tensor>, name: &str, dims: &[i64], data: &[f32]) -> Result<(), NpuError> {
+        let shape = Shape::new(dims).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        let mut t = Tensor::new(ElementType::F32, &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        t.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(data);
+        self.request.set_tensor(name, &t).map_err(|e| NpuError::Other(format!("set {name}: {e:?}")))?;
+        holders.push(t);
+        Ok(())
+    }
+
+    /// Run one decode step. `past_k`/`past_v` are `n_layers` buffers of
+    /// `nkv*cap*hd` f32 (layout `[nkv,cap,hd]`); `mask` is `[cap]` additive (0 for
+    /// filled slots, -inf otherwise); `cos`/`sin` are `[hd]` for this position.
+    /// Returns `(hidden[d], new_k[L][nkv*hd], new_v[L][nkv*hd])`.
+    #[allow(clippy::type_complexity)]
+    pub fn run_step(
+        &mut self,
+        x: &[f32],
+        cos: &[f32],
+        sin: &[f32],
+        mask: &[f32],
+        past_k: &[Vec<f32>],
+        past_v: &[Vec<f32>],
+    ) -> Result<(Vec<f32>, Vec<Vec<f32>>, Vec<Vec<f32>>), NpuError> {
+        let (d, nkv, hd, cap, nl) = (self.d as i64, self.nkv as i64, self.hd as i64, self.cap as i64, self.n_layers);
+        let mut holders: Vec<Tensor> = Vec::with_capacity(4 + 2 * nl);
+        self.set_f32(&mut holders, "x", &[1, 1, d], x)?;
+        self.set_f32(&mut holders, "rope_cos", &[1, 1, 1, hd], cos)?;
+        self.set_f32(&mut holders, "rope_sin", &[1, 1, 1, hd], sin)?;
+        self.set_f32(&mut holders, "past_mask", &[1, 1, 1, cap], mask)?;
+        for l in 0..nl {
+            self.set_f32(&mut holders, &format!("past_k_{l}"), &[1, nkv, cap, hd], &past_k[l])?;
+            self.set_f32(&mut holders, &format!("past_v_{l}"), &[1, nkv, cap, hd], &past_v[l])?;
+        }
+        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
+
+        let get = |req: &openvino::InferRequest, name: &str| -> Result<Vec<f32>, NpuError> {
+            let t = req.get_tensor(name).map_err(|e| NpuError::Other(format!("get {name}: {e:?}")))?;
+            Ok(t.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec())
+        };
+        let hidden = get(&self.request, "hidden")?;
+        let mut new_k = Vec::with_capacity(nl);
+        let mut new_v = Vec::with_capacity(nl);
+        for l in 0..nl {
+            new_k.push(get(&self.request, &format!("new_k_{l}"))?);
+            new_v.push(get(&self.request, &format!("new_v_{l}"))?);
+        }
+        drop(holders);
+        Ok((hidden, new_k, new_v))
+    }
+}
+
+/// A compiled **prefill** Talker graph (full context -> hidden + per-layer K/V):
+/// seeds the decode KV cache for the whole prompt prefix in one inference.
+pub struct PrefillSession {
+    _core: Core,
+    request: openvino::InferRequest,
+    n_layers: usize,
+    d: usize,
+    nkv: usize,
+    hd: usize,
+    cap: usize,
+    device: String,
+}
+
+impl PrefillSession {
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_path(
+        onnx_path: &Path,
+        cfg: &NpuConfig,
+        n_layers: usize,
+        d: usize,
+        nkv: usize,
+        hd: usize,
+        cap: usize,
+    ) -> Result<Self, NpuError> {
+        let mut core = new_core()?;
+        let device = pick_device(&mut core, cfg)?;
+        let path_str = onnx_path.to_str().ok_or_else(|| NpuError::Other("non-utf8 path".into()))?;
+        let model = core
+            .read_model_from_file(path_str, "")
+            .map_err(|e| NpuError::Other(format!("read_model {}: {e:?}", onnx_path.display())))?;
+        let compiled = core
+            .compile_model(&model, device.to_owned())
+            .map_err(|e| NpuError::Other(format!("compile_model on {}: {e:?}", dev_str(&device))))?;
+        let mut compiled = compiled;
+        let request = compiled
+            .create_infer_request()
+            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
+        Ok(PrefillSession { _core: core, request, n_layers, d, nkv, hd, cap, device: dev_str(&device) })
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+
+    /// Run the prefill over `embeds` (length `cap*d`, zero-padded by the caller).
+    /// Returns `(hidden[cap*d], k[L][nkv*cap*hd], v[L][nkv*cap*hd])`.
+    #[allow(clippy::type_complexity)]
+    pub fn run(&mut self, embeds: &[f32]) -> Result<(Vec<f32>, Vec<Vec<f32>>, Vec<Vec<f32>>), NpuError> {
+        let shape = Shape::new(&[1, self.cap as i64, self.d as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        let mut t = Tensor::new(ElementType::F32, &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        t.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(embeds);
+        self.request.set_input_tensor(&t).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
+        let get = |req: &openvino::InferRequest, name: &str| -> Result<Vec<f32>, NpuError> {
+            let t = req.get_tensor(name).map_err(|e| NpuError::Other(format!("get {name}: {e:?}")))?;
+            Ok(t.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec())
+        };
+        let hidden = get(&self.request, "hidden")?;
+        let mut k = Vec::with_capacity(self.n_layers);
+        let mut v = Vec::with_capacity(self.n_layers);
+        let _ = (self.nkv, self.hd);
+        for l in 0..self.n_layers {
+            k.push(get(&self.request, &format!("k_{l}"))?);
+            v.push(get(&self.request, &format!("v_{l}"))?);
+        }
+        Ok((hidden, k, v))
+    }
+}
+
 /// Warm-up then time `iters` inferences; report p50/p99/mean latency + throughput.
 pub fn bench(
     session: &mut NpuSession,
