@@ -24,6 +24,21 @@ use std::ffi::{CStr, CString};
 
 use ash::vk;
 
+/// Debug-messenger callback for `BRAIN_VK_VALIDATE`: prints validation /
+/// synchronization-hazard messages to stderr.
+unsafe extern "system" fn vk_debug_callback(
+    severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    _types: vk::DebugUtilsMessageTypeFlagsEXT,
+    data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
+    _user: *mut std::ffi::c_void,
+) -> vk::Bool32 {
+    if !data.is_null() && !(*data).p_message.is_null() {
+        let msg = CStr::from_ptr((*data).p_message).to_string_lossy();
+        eprintln!("[VK {severity:?}] {msg}");
+    }
+    vk::FALSE
+}
+
 /// One supported cooperative-matrix shape, decoded from
 /// `VkCooperativeMatrixPropertiesKHR` into something printable / matchable.
 #[derive(Clone, Copy, Debug)]
@@ -127,25 +142,79 @@ impl VkContext {
             .engine_version(0)
             .api_version(vk::API_VERSION_1_3);
 
+        // Optional: `BRAIN_VK_VALIDATE` enables the Khronos validation layer with
+        // SYNCHRONIZATION_VALIDATION + a debug messenger, to catch GPU hazards
+        // (the loader's VK_INSTANCE_LAYERS env is unreliable, so we wire it here).
+        let validate = std::env::var("BRAIN_VK_VALIDATE").is_ok();
+        let val_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
+        let mut layers: Vec<*const std::ffi::c_char> = Vec::new();
+        // Validation instance extensions (debug messenger + sync-validation feature)
+        // are needed in BOTH the with- and without-coopmat instance variants.
+        let mut val_exts: Vec<*const std::ffi::c_char> = Vec::new();
+        if validate {
+            layers.push(val_layer.as_ptr());
+            val_exts.push(ash::ext::debug_utils::NAME.as_ptr());
+            val_exts.push(ash::ext::validation_features::NAME.as_ptr());
+        }
         // Instance must enable the cooperative-matrix instance extension so we
         // can call vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR.
-        let instance_exts = [ash::khr::cooperative_matrix::NAME.as_ptr()];
-        let instance_info = vk::InstanceCreateInfo::default()
+        let mut instance_exts: Vec<*const std::ffi::c_char> = vec![ash::khr::cooperative_matrix::NAME.as_ptr()];
+        instance_exts.extend_from_slice(&val_exts);
+        // BRAIN_VK_VALIDATE=gpu => GPU-assisted (in-shader OOB/descriptor checks);
+        // anything else => synchronization validation (race/hazard checks).
+        let gpu_av = std::env::var("BRAIN_VK_VALIDATE").map(|v| v == "gpu").unwrap_or(false);
+        let sync_feats = if gpu_av {
+            vec![vk::ValidationFeatureEnableEXT::GPU_ASSISTED]
+        } else {
+            vec![vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION]
+        };
+        let mut val_features = vk::ValidationFeaturesEXT::default().enabled_validation_features(&sync_feats);
+        let mut instance_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
+            .enabled_layer_names(&layers)
             .enabled_extension_names(&instance_exts);
+        if validate {
+            instance_info = instance_info.push_next(&mut val_features);
+        }
 
         // The cooperative-matrix instance extension may be absent on llvmpipe;
-        // retry without it (we then report extension_present = false).
+        // retry without it (we then report extension_present = false) — but keep the
+        // validation extensions so the debug messenger still loads.
         let (instance, coopmat_instance_ext) = match entry.create_instance(&instance_info, None) {
             Ok(i) => (i, true),
             Err(_) => {
-                let bare = vk::InstanceCreateInfo::default().application_info(&app_info);
+                let mut bare = vk::InstanceCreateInfo::default()
+                    .application_info(&app_info)
+                    .enabled_layer_names(&layers)
+                    .enabled_extension_names(&val_exts);
+                if validate {
+                    bare = bare.push_next(&mut val_features);
+                }
                 let i = entry
                     .create_instance(&bare, None)
                     .map_err(|e| format!("vkCreateInstance failed: {e}"))?;
                 (i, false)
             }
         };
+
+        if validate {
+            let info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+                .message_severity(
+                    vk::DebugUtilsMessageSeverityFlagsEXT::ERROR | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING,
+                )
+                .message_type(
+                    vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                        | vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                        | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                )
+                .pfn_user_callback(Some(vk_debug_callback));
+            let loader = ash::ext::debug_utils::Instance::new(&entry, &instance);
+            if let Ok(m) = loader.create_debug_utils_messenger(&info, None) {
+                // Leak for the process lifetime (diagnostic only).
+                std::mem::forget((loader, m));
+            }
+            eprintln!("[vk] validation layer + synchronization validation enabled");
+        }
 
         let physical_devices = instance
             .enumerate_physical_devices()

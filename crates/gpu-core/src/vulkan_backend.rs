@@ -39,6 +39,11 @@ pub struct Step {
     set: vk::DescriptorSet,
     gx: u32,
     gy: u32,
+    /// True when a storage buffer is bound at a non-zero (sub-range) offset.
+    /// Intel ANV mis-handles a compute-compute pipeline barrier across such
+    /// bindings (flaky stale reads); a submit+fence boundary is honoured, so a
+    /// batch containing a sliced step is serialized in `flush`.
+    sliced: bool,
 }
 
 /// A device buffer handle. Memory is freed when the owning [`Gpu`] is dropped (or
@@ -327,7 +332,8 @@ impl Gpu {
             .collect();
         unsafe { dev.update_descriptor_sets(&writes, &[]) };
         let (gx, gy) = super::grid(threads);
-        Step { kind, set, gx, gy }
+        let sliced = offsets.iter().any(|&(off, _)| off > 0);
+        Step { kind, set, gx, gy, sliced }
     }
 
     pub fn submit(&self, clears: &[&VkOwnedBuffer], steps: &[Step]) {
@@ -360,6 +366,27 @@ impl Gpu {
             return;
         }
         let dev = &self.ctx.device;
+        // Serialize (submit+fence per dispatch) when the batch contains a sliced
+        // (sub-range) binding: Intel ANV's compute-compute pipeline barrier does
+        // not reliably make a prior dispatch's writes visible across a non-zero
+        // descriptor offset, but a queue-submit/fence boundary does. Only the
+        // vocab-tiled embedding/lm_head use sliced bindings, so the (large) models
+        // that tile pay this; everything else takes the fast single-submit path.
+        // `BRAIN_VK_SERIAL` forces it for everything (diagnostic).
+        let force_serial = std::env::var("BRAIN_VK_SERIAL").is_ok();
+        if force_serial || steps.iter().any(|s| s.sliced) {
+            unsafe {
+                for s in &steps {
+                    let cmd = self.begin_cmd();
+                    let kp = &self.pipelines[s.kind];
+                    dev.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, kp.pipeline);
+                    dev.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, kp.layout, 0, &[s.set], &[]);
+                    dev.cmd_dispatch(cmd, s.gx, s.gy, 1);
+                    self.end_and_wait(cmd);
+                }
+            }
+            return;
+        }
         unsafe {
             let cmd = self.begin_cmd();
             // Conservative full memory barrier between dependent dispatches: every
