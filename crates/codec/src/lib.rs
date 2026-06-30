@@ -22,6 +22,7 @@ pub mod config;
 pub mod import;
 pub mod model;
 pub mod recon;
+pub mod streaming;
 
 pub use config::CodecConfig;
 pub use import::import;
