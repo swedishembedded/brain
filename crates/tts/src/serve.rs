@@ -48,6 +48,12 @@ pub struct EngineCfg {
     /// to fit; pick generously for the mode (e.g. clone ~384, design ~256).
     pub cap: usize,
     pub quant: bool,
+    /// Use the INT4 weight-compressed Talker decode graph (opt-in). On a device
+    /// whose native max is INT8 (the Intel NPU) this is weight-compression, not
+    /// native 4-bit — still ~20% faster on the bandwidth-bound Talker, half the
+    /// graph RAM. Forces the prefill graph off (compiling both i4 graphs OOMs), so
+    /// a long clone prefix seeds token-by-token (one-time cost).
+    pub int4: bool,
     /// Clone only: the reference voice and its transcript (encoded once at load).
     pub ref_wav: Option<String>,
     pub ref_text: Option<String>,
@@ -96,12 +102,14 @@ impl TtsEngine {
         let tables = TalkerTables::load(&talker);
         let mtp = CpuMtp::load(&mtp_path);
         let cache = Path::new(&cfg.npu_cache);
+        // Print the resolved hardware path (device + weight precision + native vs
+        // weight-compression) so `brain tts serve` startup logs what it actually uses.
+        eprintln!("{}", crate::npu_gen::describe_talker_path(cfg.device, true, cfg.quant, cfg.int4));
         // Only clone (long reference prefix) benefits from the prefill graph;
-        // design/cv/synth have short prefixes, so skip its ~1.4 GB compile.
-        let with_prefill = cfg.kind == Kind::Clone;
-        // int4=false: the server keeps the (proven) INT8/fp32 talker; INT4 is opt-in
-        // via the CLI (`BRAIN_TTS_TALKER=npu-kv-int4`) until its quality is validated.
-        let kv = KvTalker::load(&talker, cfg.cap, cfg.device, true, Some(cache), &tables.cfg, cfg.quant, false, with_prefill)?;
+        // design/cv/synth have short prefixes, so skip its ~1.4 GB compile. INT4 also
+        // skips prefill (compiling both i4 graphs OOMs) — prefix seeds token-by-token.
+        let with_prefill = cfg.kind == Kind::Clone && !cfg.int4;
+        let kv = KvTalker::load(&talker, cfg.cap, cfg.device, true, Some(cache), &tables.cfg, cfg.quant, cfg.int4, with_prefill)?;
 
         // MTP placement (mirrors `pipeline::run_npu`): the resident INT8 NPU decode
         // graph beats the host CpuMtp on the large model. Default on for d_model>=2048;

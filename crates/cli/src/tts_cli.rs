@@ -45,6 +45,7 @@ pub fn run_tts(args: &[String]) {
         Some("synth") => synth(&args[1..]),
         Some("design") => design(&args[1..]),
         Some("serve") => crate::tts_serve::run_serve(&args[1..]),
+        Some("sim") => sim(&args[1..]),
         Some("finetune") => finetune(&args[1..]),
         other => {
             eprintln!("usage: brain tts <import|clone|synth|design|serve|finetune> ...  (got {other:?})");
@@ -90,6 +91,44 @@ fn finetune(args: &[String]) {
             std::process::exit(1);
         }
     }
+}
+
+/// `brain tts sim --a A.wav --b B.wav [--speaker out/tts-1b7/speaker.weights]`
+/// Speaker-embedding cosine similarity between two utterances (ECAPA x-vectors) —
+/// the timbre-preservation metric. Used to validate that a quantized (e.g. INT4)
+/// Talker keeps the cloned voice: compare sim(int4_out, ref) vs sim(int8_out, ref).
+/// Each wav is embedded at its own sample rate (the encoder resamples internally).
+fn sim(args: &[String]) {
+    let mut a = String::new();
+    let mut b = String::new();
+    let mut speaker = "out/tts-1b7/speaker.weights".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--a" | "--pred" => a = val(args, &mut i, "--a"),
+            "--b" | "--ref" => b = val(args, &mut i, "--b"),
+            "--speaker" => speaker = val(args, &mut i, "--speaker"),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    if a.is_empty() || b.is_empty() {
+        eprintln!("usage: brain tts sim --a A.wav --b B.wav [--speaker speaker.weights]");
+        std::process::exit(2);
+    }
+    let wa = audio::wav::read(&a).unwrap_or_else(|e| { eprintln!("read {a}: {e}"); std::process::exit(1); });
+    let wb = audio::wav::read(&b).unwrap_or_else(|e| { eprintln!("read {b}: {e}"); std::process::exit(1); });
+    // Force the speaker encoder onto the CPU JIT (it's a small gpu_core model; avoids
+    // the wgpu/GL default when the user isn't otherwise on the GPU).
+    gpu_core::set_default_backend(gpu_core::Backend::Cpu);
+    let enc = speaker::SpeakerEncoder::load_inference(&speaker);
+    let ea = enc.embed_wav(&wa.samples, wa.sample_rate);
+    let eb = enc.embed_wav(&wb.samples, wb.sample_rate);
+    let dot: f32 = ea.iter().zip(&eb).map(|(x, y)| x * y).sum();
+    let na: f32 = ea.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = eb.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let cos = if na > 0.0 && nb > 0.0 { dot / (na * nb) } else { 0.0 };
+    println!("spk-cosine({a}, {b}) = {cos:.4}");
 }
 
 fn import(args: &[String]) {

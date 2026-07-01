@@ -9,8 +9,8 @@
 //! is not installed, [`available_devices`]/[`NpuSession::load`] return
 //! [`NpuError::RuntimeNotFound`] rather than failing the build.
 
-use super::{BenchResult, HeadOutputs, NpuConfig, NpuDevice, NpuError, PerfHint};
-use openvino::{Core, DeviceType, ElementType, RwPropertyKey, Shape, Tensor};
+use super::{BenchResult, DeviceInfo, HeadOutputs, NpuConfig, NpuDevice, NpuError, PerfHint};
+use openvino::{Core, DeviceType, ElementType, PropertyKey, RwPropertyKey, Shape, Tensor};
 use std::path::Path;
 use std::time::Instant;
 
@@ -110,6 +110,35 @@ pub fn available_devices() -> Result<Vec<String>, NpuError> {
     let core = new_core()?;
     let devs = core.available_devices().map_err(|e| NpuError::Other(format!("{e:?}")))?;
     Ok(devs.iter().map(dev_str).collect())
+}
+
+/// Resolve `device` (honouring `allow_fallback`) and report what it actually is:
+/// the resolved device string, its `FULL_DEVICE_NAME`, and its
+/// `OPTIMIZATION_CAPABILITIES`. Lets the caller print, at startup, the real
+/// hardware path and whether a requested weight precision is natively supported.
+pub fn device_info(device: NpuDevice, allow_fallback: bool) -> Result<DeviceInfo, NpuError> {
+    let core = new_core()?;
+    let avail: Vec<String> = core
+        .available_devices()
+        .map_err(|e| NpuError::Other(format!("{e:?}")))?
+        .iter()
+        .map(dev_str)
+        .collect();
+    let dev = resolve_device(device, &avail, allow_fallback)?;
+    let full_name = core
+        .get_property(&dev, &PropertyKey::DeviceFullName)
+        .unwrap_or_else(|_| "unknown".to_string());
+    let caps_raw = core
+        .get_property(&dev, &PropertyKey::DeviceCapabilities)
+        .unwrap_or_default();
+    // OV returns the list as a string (space- or comma-separated, sometimes
+    // bracketed) — split into tokens.
+    let capabilities = caps_raw
+        .split(|c: char| c == ' ' || c == ',' || c == '[' || c == ']' || c == '\'' || c == '"')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    Ok(DeviceInfo { device: dev_str(&dev), full_name, capabilities })
 }
 
 /// Whether a supported Intel NPU is present (per OpenVINO's device list).

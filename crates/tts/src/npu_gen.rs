@@ -27,6 +27,44 @@ use crate::pipeline::{sample_cb0, GenOpts};
 use crate::prompt::{Prompt, TalkerHost, TtsSpecials};
 use crate::talker::TextProjection;
 
+/// Human-readable summary of the resolved Talker hardware path, printed at startup
+/// so it is always clear which device + weight precision is ACTUALLY used. Crucially
+/// distinguishes a *native* INT4 device from one that only lists INT8: on the latter
+/// (the Intel NPU today) an INT4 graph still runs, but as weight-**compression** (the
+/// 4-bit weights are decompressed to a native type for the MAC) — a memory-bandwidth
+/// win, not native 4-bit arithmetic. Queries the device via OpenVINO.
+pub fn describe_talker_path(device: NpuDevice, allow_fallback: bool, quant: bool, int4: bool) -> String {
+    let want = if int4 { "INT4" } else if quant { "INT8" } else { "fp32" };
+    match npu::openvino::device_info(device, allow_fallback) {
+        Ok(info) => {
+            let precision = if int4 {
+                if info.supports("INT4") {
+                    "INT4 (native 4-bit compute)".to_string()
+                } else {
+                    let native_max = if info.supports("INT8") { "INT8" } else { "FP16" };
+                    format!(
+                        "INT4 weight-compression (device native max={native_max}; 4-bit weights \
+                         decompressed at runtime — a bandwidth win, NOT native 4-bit compute)"
+                    )
+                }
+            } else {
+                want.to_string()
+            };
+            format!(
+                "tts: Talker path => device={} ({}) | weights={} | device OPTIMIZATION_CAPABILITIES=[{}]",
+                info.device,
+                info.full_name,
+                precision,
+                info.capabilities.join(", ")
+            )
+        }
+        Err(e) => format!(
+            "tts: Talker path => device={} | weights={want} (device capability query failed: {e})",
+            device.ov_str()
+        ),
+    }
+}
+
 /// Elementwise `a += b` over `[d]` slices (host feedback-embedding accumulation).
 fn add_into(a: &mut [f32], b: &[f32]) {
     for (x, y) in a.iter_mut().zip(b) {

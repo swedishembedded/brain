@@ -120,6 +120,30 @@ impl Default for NpuConfig {
     }
 }
 
+/// What a resolved OpenVINO device reports about itself — used to print, at
+/// startup, exactly which hardware path a run actually takes and whether the
+/// requested weight precision is a *native* device capability.
+#[derive(Clone, Debug)]
+pub struct DeviceInfo {
+    /// The device actually resolved to (e.g. "NPU", or a CPU/GPU fallback).
+    pub device: String,
+    /// `FULL_DEVICE_NAME` (e.g. "Intel(R) AI Boost").
+    pub full_name: String,
+    /// `OPTIMIZATION_CAPABILITIES` (e.g. `["FP16","INT8","EXPORT_IMPORT"]`). The
+    /// Intel NPU lists `INT8` but **not** `INT4`: an INT4-weight graph still
+    /// compiles and runs there, but as weight-*compression* (the 4-bit weights are
+    /// decompressed to a native type for the MAC), not native 4-bit compute.
+    pub capabilities: Vec<String>,
+}
+
+impl DeviceInfo {
+    /// Does the device advertise `cap` (case-insensitive) as a native optimization
+    /// capability? e.g. `supports("INT4")`.
+    pub fn supports(&self, cap: &str) -> bool {
+        self.capabilities.iter().any(|c| c.eq_ignore_ascii_case(cap))
+    }
+}
+
 /// Raw model outputs handed back to brain's host decode: one entry per graph
 /// output, `(name, shape, data)` with NCHW layout preserved from the ONNX graph.
 pub struct HeadOutputs {

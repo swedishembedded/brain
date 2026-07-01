@@ -53,6 +53,10 @@ struct Job {
 pub fn run_serve(args: &[String]) {
     let mut socket = "/tmp/brain-tts.sock".to_string();
     let mut cap_override: Option<usize> = None;
+    // Talker weight precision: int8 (default), int4 (weight-compression — ~20%
+    // faster on the bandwidth-bound Talker + half the graph RAM; not native on the
+    // NPU, see startup log), or fp32.
+    let mut talker_quant = "int8".to_string();
     let mut engines: HashMap<String, EngineCfg> = HashMap::new();
 
     // Per-engine flag triplets/quads. Defaults below cover the known local setup.
@@ -76,6 +80,7 @@ pub fn run_serve(args: &[String]) {
         match args[i].as_str() {
             "--socket" => socket = val(args, &mut i),
             "--cap" => cap_override = val(args, &mut i).parse().ok(),
+            "--talker-quant" => talker_quant = val(args, &mut i),
             "--enable" => enable = val(args, &mut i).split(',').map(|s| s.trim().to_string()).collect(),
             "--clone-weights" => clone_w = val(args, &mut i),
             "--clone-ckpt" => clone_c = val(args, &mut i),
@@ -93,6 +98,16 @@ pub fn run_serve(args: &[String]) {
         enable = vec!["clone".into(), "design".into(), "customvoice".into(), "synth".into()];
     }
 
+    let (int4, quant) = match talker_quant.as_str() {
+        "int4" => (true, true),
+        "fp32" => (false, false),
+        "int8" => (false, true),
+        other => {
+            eprintln!("tts serve: unknown --talker-quant {other:?} (use int4|int8|fp32); defaulting to int8");
+            (false, true)
+        }
+    };
+    eprintln!("tts serve: talker weight precision = {talker_quant}");
     let device = std::env::var("BRAIN_TTS_NPU_DEVICE")
         .ok()
         .and_then(|s| npu::openvino::NpuDevice::parse(&s))
@@ -108,7 +123,8 @@ pub fn run_serve(args: &[String]) {
                 npu_cache: cache(&clone_w),
                 device,
                 cap: cap_override.unwrap_or(384),
-                quant: true,
+                quant,
+                int4,
                 ref_wav: Some(clone_ref.clone()),
                 ref_text: Some(ref_text.clone()),
             },
@@ -119,7 +135,8 @@ pub fn run_serve(args: &[String]) {
                 npu_cache: cache(&design_w),
                 device,
                 cap: cap_override.unwrap_or(192),
-                quant: true,
+                quant,
+                int4,
                 ref_wav: None,
                 ref_text: None,
             },
@@ -130,7 +147,8 @@ pub fn run_serve(args: &[String]) {
                 npu_cache: cache(&cv_w),
                 device,
                 cap: cap_override.unwrap_or(192),
-                quant: true,
+                quant,
+                int4,
                 ref_wav: None,
                 ref_text: None,
             },
@@ -141,7 +159,8 @@ pub fn run_serve(args: &[String]) {
                 npu_cache: cache(&design_w),
                 device,
                 cap: cap_override.unwrap_or(192),
-                quant: true,
+                quant,
+                int4,
                 ref_wav: None,
                 ref_text: None,
             },
@@ -262,6 +281,7 @@ impl CfgRegistry for HashMap<String, EngineCfg> {
             device: c.device,
             cap: c.cap,
             quant: c.quant,
+            int4: c.int4,
             ref_wav: c.ref_wav.clone(),
             ref_text: c.ref_text.clone(),
         })

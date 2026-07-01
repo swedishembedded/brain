@@ -610,6 +610,12 @@ fn run_npu(
         _ if tables.cfg.d_model >= 2048 => Mode::NpuKvI8,
         _ => Mode::NpuKvF32,
     };
+    // Print the resolved hardware path up front (device + weight precision + whether
+    // an INT4 request is native or weight-compression on this device).
+    if mode != Mode::Cpu {
+        let (q, i4) = (matches!(mode, Mode::NpuI8 | Mode::NpuKvI8), matches!(mode, Mode::NpuKvI4));
+        eprintln!("{}", crate::npu_gen::describe_talker_path(device, allow_fallback, q, i4));
+    }
 
     // MTP placement: the residual code-predictor re-runs its 5-layer decoder 16x
     // per frame. On the host that re-streams the MTP's ~300MB fp32 weights every

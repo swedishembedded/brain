@@ -5,7 +5,7 @@
 //! aarch64, macOS). The API matches [`super::real`] so the CLI compiles
 //! everywhere; every entry point reports the platform is unsupported.
 
-use super::{BenchResult, HeadOutputs, NpuConfig, NpuError};
+use super::{BenchResult, DeviceInfo, HeadOutputs, NpuConfig, NpuDevice, NpuError};
 use std::path::Path;
 
 fn unsupported<T>() -> Result<T, NpuError> {
@@ -15,6 +15,11 @@ fn unsupported<T>() -> Result<T, NpuError> {
 /// Always empty on unsupported targets.
 pub fn available_devices() -> Result<Vec<String>, NpuError> {
     Ok(Vec::new())
+}
+
+/// Unsupported on stub targets.
+pub fn device_info(_device: NpuDevice, _allow_fallback: bool) -> Result<DeviceInfo, NpuError> {
+    unsupported()
 }
 
 /// Always false on unsupported targets.
