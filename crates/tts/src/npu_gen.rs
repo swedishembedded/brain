@@ -732,6 +732,18 @@ impl MtpEngine for KvMtp {
 /// bound). The `small_to_mtp_projection`, per-residual `lm_head`/`codec_embedding`,
 /// argmax and gather all live inside the graph ([`build_mtp_fused_graph`]) — the host
 /// just feeds `talker_hidden`+`cb0_embed` and reads back `codes`+`res_sum`.
+///
+/// **Correctness vs precision (measured):** the topology is EXACT — on the OV-CPU
+/// device (fp32) it is bit-identical to [`crate::gen_kv_mtp::CpuMtp`] (codes match,
+/// res_sum max-abs 0.0; see `examples/fused_parity.rs`). It is also faster on the NPU
+/// (~203ms/frame hot vs KvMtp's ~232-267ms — one big infer beats 15 tiny ones). BUT
+/// the Intel NPU is **fp16-only** (`OPTIMIZATION_CAPABILITIES=[FP16,INT8]`), and doing
+/// the greedy **argmax in-graph in fp16** flips near-ties in the 2048-entry codebook,
+/// which then **cascades** through the autoregressive residual feedback → degraded
+/// audio (spk-cos to reference 0.84 vs KvMtp's 0.98). KvMtp sidesteps this by keeping
+/// lm_head+argmax on the **fp32 host**. So `fused` is opt-in and best on a device that
+/// can run the head/argmax in fp32 (or with sampling, which is fp16-robust); the
+/// default stays KvMtp for greedy decoding on this fp16 NPU.
 pub struct FusedMtp {
     sess: FusedMtpSession,
     device: String,
