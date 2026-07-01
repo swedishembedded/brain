@@ -69,6 +69,11 @@ pub struct TtsEngine {
     tok: data::qwen_tokenizer::QwenBpe,
     tables: TalkerTables,
     mtp: CpuMtp,
+    // Resident NPU MTP (INT8 KV-cache decode graph). When present it replaces the
+    // host `CpuMtp` in the generation loop — ~87ms/frame vs ~580ms on the large
+    // 1.7B (the host MTP re-streams its ~300MB fp32 weights 16x/frame and is
+    // memory-bandwidth bound). Loaded for d_model>=2048 unless `BRAIN_TTS_MTP=cpu`.
+    mtp_npu: Option<crate::npu_gen::KvMtp>,
     kv: KvTalker,
     codec_sessions: HashMap<usize, CodecSession>,
     // Pure-CPU stateful streaming codec (BRAIN_TTS_CODEC=cpu-stream); lazily loaded.
@@ -96,6 +101,26 @@ impl TtsEngine {
         let with_prefill = cfg.kind == Kind::Clone;
         let kv = KvTalker::load(&talker, cfg.cap, cfg.device, true, Some(cache), &tables.cfg, cfg.quant, with_prefill)?;
 
+        // MTP placement (mirrors `pipeline::run_npu`): the resident INT8 NPU decode
+        // graph beats the host CpuMtp on the large model. Default on for d_model>=2048;
+        // `BRAIN_TTS_MTP=cpu` forces the host path, `=npu` forces it on.
+        let want_npu_mtp = match std::env::var("BRAIN_TTS_MTP").ok().as_deref() {
+            Some("cpu") => false,
+            Some("npu") => true,
+            _ => tables.cfg.d_model >= 2048,
+        };
+        let mtp_npu = if want_npu_mtp {
+            match crate::npu_gen::KvMtp::load(&mtp_path, cfg.device, true, Some(cache), tables.cfg.d_model >= 2048) {
+                Ok(k) => Some(k),
+                Err(e) => {
+                    eprintln!("tts serve: NPU MTP unavailable ({e}); falling back to host CpuMtp");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let (ref_code, ref_ids, xvec) = if cfg.kind == Kind::Clone {
             let rw = cfg.ref_wav.as_ref().ok_or("clone engine needs a reference wav")?;
             let rt = cfg.ref_text.clone().unwrap_or_default();
@@ -120,6 +145,7 @@ impl TtsEngine {
             tok,
             tables,
             mtp,
+            mtp_npu,
             kv,
             codec_sessions: HashMap::new(),
             cpu_codec: None,
@@ -187,7 +213,9 @@ impl TtsEngine {
         // each chunk decodes ONLY its new frames (no warmup re-decode), emitting
         // audio progressively. Generate the full codes, then stream-decode.
         if std::env::var("BRAIN_TTS_CODEC").map(|v| v == "cpu-stream").unwrap_or(false) {
-            let codes = generate_codes_kv(&mut self.kv, &self.tables, &mut self.mtp, &self.sp, &prompt, &opts)?;
+            let mtp_eng: &mut dyn crate::npu_gen::MtpEngine =
+                match self.mtp_npu.as_mut() { Some(k) => k, None => &mut self.mtp };
+            let codes = generate_codes_kv(&mut self.kv, &self.tables, mtp_eng, &self.sp, &prompt, &opts)?;
             if codes.is_empty() {
                 return Err("no codec frames were generated".into());
             }
@@ -214,7 +242,9 @@ impl TtsEngine {
         // windowed path. `BRAIN_TTS_CODEC=windowed` forces the old sliding-window
         // path below.
         if std::env::var("BRAIN_TTS_CODEC").map(|v| v != "windowed").unwrap_or(true) {
-            let codes = generate_codes_kv(&mut self.kv, &self.tables, &mut self.mtp, &self.sp, &prompt, &opts)?;
+            let mtp_eng: &mut dyn crate::npu_gen::MtpEngine =
+                match self.mtp_npu.as_mut() { Some(k) => k, None => &mut self.mtp };
+            let codes = generate_codes_kv(&mut self.kv, &self.tables, mtp_eng, &self.sp, &prompt, &opts)?;
             if codes.is_empty() {
                 return Err("no codec frames were generated".into());
             }
@@ -287,8 +317,10 @@ impl TtsEngine {
                 }
                 emitted = total;
             };
+            let mtp_eng: &mut dyn crate::npu_gen::MtpEngine =
+                match self.mtp_npu.as_mut() { Some(k) => k, None => &mut self.mtp };
             generate_codes_kv_streaming(
-                &mut self.kv, &self.tables, &mut self.mtp, &self.sp, &prompt, &opts, chunk, &mut on_chunk,
+                &mut self.kv, &self.tables, mtp_eng, &self.sp, &prompt, &opts, chunk, &mut on_chunk,
             )?;
         }
         if let Some(e) = cb_err {

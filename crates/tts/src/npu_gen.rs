@@ -112,12 +112,9 @@ impl TalkerTables {
         let d = self.d();
         let v = self.cfg.vocab as usize;
         assert_eq!(hidden_row.len(), d);
-        let mut out = vec![0.0f32; v];
-        for (o, dst) in out.iter_mut().enumerate() {
-            let wrow = &self.codec_head[o * d..(o + 1) * d];
-            *dst = wrow.iter().zip(hidden_row).map(|(a, b)| a * b).sum();
-        }
-        out
+        // `y = x·Wᵀ`, W=codec_head[v,d] row-major — the shared AVX2+rayon matvec
+        // (was a scalar single-thread loop, ~15ms/frame; parallel ~2ms).
+        crate::gen_kv::matvec(&self.codec_head, hidden_row, v, d)
     }
 }
 
@@ -799,10 +796,15 @@ pub fn decode_with_session(sess: &mut CodecSession, codes: &[u32]) -> Result<Vec
 /// OpenVINO config: target `device`, optional CPU/GPU fallback, and the cache dir
 /// (reuses both the ONNX file and OpenVINO's compiled-blob cache).
 fn npu_config(device: NpuDevice, allow_fallback: bool, cache_dir: Option<&Path>) -> NpuConfig {
+    // `BRAIN_NPU_TURBO=1` requests the NPU's turbo clock (NPU_TURBO=YES). Off by
+    // default (it raises power/heat, which can throttle sooner under sustained
+    // load) — A/B it against the thermal envelope before making it the default.
+    let turbo = std::env::var("BRAIN_NPU_TURBO").map(|v| v == "1" || v == "yes").unwrap_or(false);
     NpuConfig {
         device,
         allow_fallback,
         cache_dir: cache_dir.map(|p| p.to_path_buf()),
+        turbo,
         ..Default::default()
     }
 }

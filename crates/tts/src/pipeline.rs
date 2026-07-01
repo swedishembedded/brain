@@ -609,11 +609,20 @@ fn run_npu(
         _ => Mode::NpuKvF32,
     };
 
-    // MTP placement: the residual code-predictor runs its 5-layer decoder on the
-    // CPU by default; `BRAIN_TTS_MTP=npu` runs it as a resident KV-cache decode
-    // graph on the NPU (15 substeps/frame), INT8 for the large model. Not used for
-    // the CPU-Talker mode (which already uses the host MTP).
-    let mtp_npu = std::env::var("BRAIN_TTS_MTP").map(|v| v == "npu").unwrap_or(false) && mode != Mode::Cpu;
+    // MTP placement: the residual code-predictor re-runs its 5-layer decoder 16x
+    // per frame. On the host that re-streams the MTP's ~300MB fp32 weights every
+    // substep and is memory-bandwidth bound — measured ~580ms/frame on the 1.7B
+    // (vs an earlier ~225ms when the decoder was smaller). The resident INT8 NPU
+    // decode graph (`KvMtp`) streams 4x-smaller weights from device memory and
+    // measures ~257ms/frame — a 2.25x win — so it is now the DEFAULT for the large
+    // (d_model>=2048) model. `BRAIN_TTS_MTP=cpu` forces the host path (still the
+    // default on the small 0.6B, whose CPU MTP is cheap); `=npu` forces it on.
+    // Not used for the CPU-Talker mode (which already uses the host MTP).
+    let mtp_npu = match std::env::var("BRAIN_TTS_MTP").ok().as_deref() {
+        Some("npu") => true,
+        Some("cpu") => false,
+        _ => tables.cfg.d_model >= 2048,
+    } && mode != Mode::Cpu;
     let mut kvmtp = if mtp_npu {
         Some(crate::npu_gen::KvMtp::load(&paths.mtp, device, allow_fallback, cache, tables.cfg.d_model >= 2048)?)
     } else {
