@@ -112,16 +112,23 @@ Output is always mono 24 kHz f32 PCM WAV.
 
 ## CPU / GPU / NPU
 
-The TTS stack runs on the shared brain WGSL engine, so it inherits every backend:
+**See [`ACCELERATION.md`](ACCELERATION.md)** for the full optimization write-up
+(what changed, why, validated numbers) and the backend speed comparison.
 
-- **GPU** (Vulkan/wgpu) — the intended path; the autoregressive Talker loop and
-  the codec decode both submit to the device.
-- **CPU** (`BRAIN_DEVICE=cpu`, the WGSL-CPU reference) — fully functional for
-  correctness/parity, but slow: the JIT path currently has **no KV-cache**, so
-  each Talker step re-runs the full prefix. Use short `--max-frames` for CPU
-  smoke tests.
-- **NPU** — the same `Step` graph targets the NPU backend where available; no
-  TTS-specific kernels are required.
+- **NPU** (`--device npu`, OpenVINO) — the fast path and the default for the 1.7B
+  models: a resident **KV-cache INT8 Talker** (~7–19× faster/frame than the old
+  cache-free path; ~26× faster prompt prefill) plus the **stateful streaming
+  codec**. `brain tts serve` keeps the compiled graphs resident across requests.
+- **CPU** (`--device npu BRAIN_TTS_TALKER=cpu`) — the portable fallback: a
+  KV-cache CPU Talker (AVX2/FMA) with the codec still on the NPU. Fits in host
+  RAM; slower on the talker.
+- **GPU** (Vulkan/wgpu, `BRAIN_DEVICE=vulkan`) — the shared `gpu-core`
+  training/forward backend and the path for the smaller (0.6B) models. The 1.7B
+  Talker decoder is multi-GB and is **not** uploaded to the GPU backend (the NPU
+  host path exists precisely to avoid that), so Vulkan is validated for
+  correctness (`make parity`) rather than used for 1.7B synthesis.
+
+Env knobs and the parity gate are documented in [`ACCELERATION.md`](ACCELERATION.md).
 
 ---
 
@@ -189,8 +196,12 @@ the text path:
 
 ## Current limitations
 
-- **CPU JIT is slow without a KV-cache** — the Talker re-runs its full prefix
-  each step on CPU. Fine for parity/smoke tests; use the GPU for real syntheses.
+- **The `gpu-core` (Vulkan/wgpu/JIT) Talker is cache-free** — it re-runs the full
+  prefix each step, so it's for the 0.6B / parity / training path. The fast
+  synthesis paths (NPU and `BRAIN_TTS_TALKER=cpu`) use a KV-cache — see
+  [`ACCELERATION.md`](ACCELERATION.md).
+- **MTP + codec are the remaining per-clip cost** after the Talker win — a fused
+  single-infer MTP graph and further codec work are the next levers.
 - **Codec windowed-mask for `T > 72`** is pending — the sliding-window codec
   transformer currently assumes the full sequence fits the window; long-form
   decode needs the windowed attention mask.
