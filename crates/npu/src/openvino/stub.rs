@@ -230,3 +230,19 @@ impl BackStreamSession {
         unsupported()
     }
 }
+
+pub struct FusedMtpSession {
+    _priv: (),
+}
+
+impl FusedMtpSession {
+    pub fn load_path(_p: &Path, _cfg: &NpuConfig, _emb: usize, _nres: usize) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn device(&self) -> &str {
+        ""
+    }
+    pub fn run(&mut self, _talker_hidden: &[f32], _cb0_embed: &[f32]) -> Result<(Vec<u32>, Vec<f32>), NpuError> {
+        unsupported()
+    }
+}

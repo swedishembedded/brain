@@ -626,15 +626,23 @@ fn run_npu(
     // (d_model>=2048) model. `BRAIN_TTS_MTP=cpu` forces the host path (still the
     // default on the small 0.6B, whose CPU MTP is cheap); `=npu` forces it on.
     // Not used for the CPU-Talker mode (which already uses the host MTP).
-    let mtp_npu = match std::env::var("BRAIN_TTS_MTP").ok().as_deref() {
-        Some("npu") => true,
-        Some("cpu") => false,
-        _ => tables.cfg.d_model >= 2048,
-    } && mode != Mode::Cpu;
-    let mut kvmtp = if mtp_npu {
-        Some(crate::npu_gen::KvMtp::load(&paths.mtp, device, allow_fallback, cache, tables.cfg.d_model >= 2048)?)
-    } else {
+    // `BRAIN_TTS_MTP`: `fused` = the single-infer fused graph (all 15 substeps in one
+    // NPU inference — kills the per-substep dispatch overhead); `npu` = the per-substep
+    // KvMtp; `cpu` = the host CpuMtp. Default for the large model is `npu` (KvMtp).
+    let mut npu_mtp: Option<Box<dyn crate::npu_gen::MtpEngine>> = if mode == Mode::Cpu {
         None
+    } else {
+        match std::env::var("BRAIN_TTS_MTP").ok().as_deref() {
+            Some("cpu") => None,
+            Some("fused") => Some(Box::new(crate::npu_gen::FusedMtp::load(&paths.mtp, device, allow_fallback, cache)?)),
+            Some("npu") => Some(Box::new(crate::npu_gen::KvMtp::load(
+                &paths.mtp, device, allow_fallback, cache, tables.cfg.d_model >= 2048,
+            )?)),
+            _ if tables.cfg.d_model >= 2048 => Some(Box::new(crate::npu_gen::KvMtp::load(
+                &paths.mtp, device, allow_fallback, cache, true,
+            )?)),
+            _ => None,
+        }
     };
 
     let codes = match mode {
@@ -656,8 +664,8 @@ fn run_npu(
                     Err(e) => eprintln!("tts npu parity check failed: {e}"),
                 }
             }
-            let eng: &mut dyn crate::npu_gen::MtpEngine = match &mut kvmtp {
-                Some(k) => k,
+            let eng: &mut dyn crate::npu_gen::MtpEngine = match &mut npu_mtp {
+                Some(k) => k.as_mut(),
                 None => mtp,
             };
             crate::npu_gen::generate_kv(
@@ -677,8 +685,8 @@ fn run_npu(
                     Err(e) => eprintln!("tts npu parity check failed: {e}"),
                 }
             }
-            let eng: &mut dyn crate::npu_gen::MtpEngine = match &mut kvmtp {
-                Some(k) => k,
+            let eng: &mut dyn crate::npu_gen::MtpEngine = match &mut npu_mtp {
+                Some(k) => k.as_mut(),
                 None => mtp,
             };
             crate::npu_gen::generate_npu(

@@ -20,7 +20,9 @@
 use std::path::{Path, PathBuf};
 
 use data::rng::Rng;
-use npu::openvino::{BackStreamSession, CodecSession, EmbedSession, KvSession, NpuConfig, NpuDevice, PrefillSession};
+use npu::openvino::{
+    BackStreamSession, CodecSession, EmbedSession, FusedMtpSession, KvSession, NpuConfig, NpuDevice, PrefillSession,
+};
 
 use crate::config::TalkerConfig;
 use crate::pipeline::{sample_cb0, GenOpts};
@@ -723,6 +725,52 @@ impl MtpEngine for KvMtp {
         }
         (codes, res_sum)
     }
+}
+
+/// The **fused single-infer MTP**: the whole per-frame residual prediction runs in
+/// ONE NPU inference (vs [`KvMtp`]'s 15 tiny per-substep infers, which are dispatch-
+/// bound). The `small_to_mtp_projection`, per-residual `lm_head`/`codec_embedding`,
+/// argmax and gather all live inside the graph ([`build_mtp_fused_graph`]) — the host
+/// just feeds `talker_hidden`+`cb0_embed` and reads back `codes`+`res_sum`.
+pub struct FusedMtp {
+    sess: FusedMtpSession,
+    device: String,
+}
+
+impl FusedMtp {
+    pub fn load(
+        mtp_path: &str,
+        device: NpuDevice,
+        allow_fallback: bool,
+        cache_dir: Option<&Path>,
+    ) -> Result<FusedMtp, String> {
+        let (emb, nres) = {
+            let c = checkpoint::load(mtp_path);
+            let cfg = crate::config::MtpConfig::from_brain_json(&c.header["config"]);
+            (cfg.embedding_dim as usize, cfg.n_residual() as usize)
+        };
+        let onnx = prepare_mtp_fused_onnx(mtp_path, cache_dir)?;
+        let ncfg = npu_config(device, allow_fallback, cache_dir);
+        let sess = FusedMtpSession::load_path(&onnx, &ncfg, emb, nres).map_err(|e| e.to_string())?;
+        let device = sess.device().to_string();
+        Ok(FusedMtp { sess, device })
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+}
+
+impl MtpEngine for FusedMtp {
+    fn generate_residuals(&mut self, talker_hidden: &[f32], cb0_embed: &[f32]) -> (Vec<u32>, Vec<f32>) {
+        self.sess.run(talker_hidden, cb0_embed).expect("FusedMtp inference")
+    }
+}
+
+fn prepare_mtp_fused_onnx(mtp_path: &str, cache_dir: Option<&Path>) -> Result<PathBuf, String> {
+    prepare_graph(mtp_path, cache_dir, "mtp-fused.onnx", "brain_tts_npu_mtp_fused", |out| {
+        npu::qwen_export::export_mtp_fused(mtp_path, out)
+    })
 }
 
 /// Diagnostic parity gate: max-abs difference between the **NPU** Talker and the

@@ -173,6 +173,41 @@ fn export_mtp_decode(mtp_path: &str, out_path: &str, cap: usize, quant: bool) ->
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
 
+/// Export the **fused single-infer MTP** graph (see
+/// [`crate::qwen_topology::build_mtp_fused_graph`]): the whole per-frame residual
+/// prediction (16 substeps) in ONE inference. Inputs `talker_hidden` + `cb0_embed`,
+/// outputs `codes` (f32, host rounds) + `res_sum`. fp32 weights.
+pub fn export_mtp_fused(mtp_path: &str, out_path: &str) -> std::io::Result<()> {
+    let (cfg, emb, vocab, n_groups, w) = {
+        let c = checkpoint::load(mtp_path);
+        let h = &c.header["config"];
+        let gu = |k: &str, d: u32| h[k].as_u64().map(|x| x as u32).unwrap_or(d);
+        let gf = |k: &str, d: f32| h[k].as_f64().map(|x| x as f32).unwrap_or(d);
+        let cfg = QwenConfig {
+            vocab: 0,
+            block_size: 0,
+            n_layers: gu("n_layers", 5),
+            d_model: gu("d_model", 1024),
+            n_heads: gu("n_heads", 16),
+            n_kv_heads: gu("n_kv_heads", 8),
+            head_dim: gu("head_dim", 128),
+            d_ff: gu("d_ff", 3072),
+            rope_theta: gf("rope_theta", 1_000_000.0),
+            rms_eps: gf("rms_norm_eps", 1e-6),
+            tie_embeddings: false,
+            lora: None,
+        };
+        let emb = gu("embedding_dim", gu("d_model", 1024)) as usize;
+        let vocab = gu("vocab_size", 2048) as usize;
+        let n_groups = gu("num_code_groups", 16) as usize;
+        let w: HashMap<String, Vec<f32>> = c.by_role("");
+        (cfg, emb, vocab, n_groups, w)
+    };
+    let mut g = GraphBuilder::new("qwen_mtp_fused");
+    crate::qwen_topology::build_mtp_fused_graph(&cfg, emb, vocab, n_groups, &w, &mut g);
+    g.finish_external(out_path, EXTERNAL_THRESHOLD)
+}
+
 /// Export the **prefill** Talker graph (full context -> hidden + per-layer K/V) to
 /// seed the decode KV cache in one inference. `quant` selects weight-only INT8.
 pub fn export_talker_prefill_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {

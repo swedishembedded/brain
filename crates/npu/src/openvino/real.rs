@@ -849,6 +849,63 @@ impl PrefillSession {
     }
 }
 
+/// A compiled **fused MTP** graph (see [`crate::qwen_topology::build_mtp_fused_graph`]):
+/// `talker_hidden:[1,1,emb]` + `cb0_embed:[1,1,emb]` -> `codes:[1,1,nres]` (f32,
+/// argmax ids cast to float) + `res_sum:[1,1,emb]`. One inference does all 15
+/// residual substeps on-device (no per-substep host round-trip).
+pub struct FusedMtpSession {
+    _core: Core,
+    request: openvino::InferRequest,
+    emb: usize,
+    nres: usize,
+    device: String,
+}
+
+impl FusedMtpSession {
+    pub fn load_path(onnx_path: &Path, cfg: &NpuConfig, emb: usize, nres: usize) -> Result<Self, NpuError> {
+        let mut core = new_core()?;
+        let device = pick_device(&mut core, cfg)?;
+        let path_str = onnx_path.to_str().ok_or_else(|| NpuError::Other("non-utf8 path".into()))?;
+        let model = core
+            .read_model_from_file(path_str, "")
+            .map_err(|e| NpuError::Other(format!("read_model {}: {e:?}", onnx_path.display())))?;
+        let mut compiled = core
+            .compile_model(&model, device.to_owned())
+            .map_err(|e| NpuError::Other(format!("compile_model on {}: {e:?}", dev_str(&device))))?;
+        let request = compiled
+            .create_infer_request()
+            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
+        Ok(FusedMtpSession { _core: core, request, emb, nres, device: dev_str(&device) })
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+
+    /// Run the whole per-frame residual prediction in one inference. Returns
+    /// `(codes[nres] as u32, res_sum[emb])`.
+    pub fn run(&mut self, talker_hidden: &[f32], cb0_embed: &[f32]) -> Result<(Vec<u32>, Vec<f32>), NpuError> {
+        let e = self.emb as i64;
+        let set = |req: &mut openvino::InferRequest, name: &str, data: &[f32]| -> Result<(), NpuError> {
+            let shape = Shape::new(&[1, 1, e]).map_err(|er| NpuError::Other(format!("{er:?}")))?;
+            let mut t = Tensor::new(ElementType::F32, &shape).map_err(|er| NpuError::Other(format!("{er:?}")))?;
+            t.get_data_mut::<f32>().map_err(|er| NpuError::Other(format!("{er:?}")))?.copy_from_slice(data);
+            req.set_tensor(name, &t).map_err(|er| NpuError::Other(format!("set {name}: {er:?}")))
+        };
+        set(&mut self.request, "talker_hidden", talker_hidden)?;
+        set(&mut self.request, "cb0_embed", cb0_embed)?;
+        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
+        let get = |req: &openvino::InferRequest, name: &str| -> Result<Vec<f32>, NpuError> {
+            let t = req.get_tensor(name).map_err(|e| NpuError::Other(format!("get {name}: {e:?}")))?;
+            Ok(t.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec())
+        };
+        let codes_f = get(&self.request, "codes")?;
+        let res_sum = get(&self.request, "res_sum")?;
+        let codes = codes_f.iter().take(self.nres).map(|&x| x.round().max(0.0) as u32).collect();
+        Ok((codes, res_sum))
+    }
+}
+
 /// A compiled **streaming-back** codec graph (see
 /// [`crate::codec_topology::build_codec_back_stream_graph`]): `latent` chunk +
 /// per-conv `bufin.{prefix}` in, `waveform` chunk + per-conv `bufout.{prefix}`

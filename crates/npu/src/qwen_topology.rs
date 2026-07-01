@@ -209,6 +209,192 @@ pub fn build_talker_decode_graph(cfg: &QwenConfig, w: &W, cap: usize, quant: Qua
     tp.node("Identity", &[&xf], "hidden");
 }
 
+/// Build the **fused single-infer MTP** graph: the whole per-frame residual
+/// code-prediction (16 autoregressive substeps) collapsed into ONE inference,
+/// instead of 15 tiny per-substep NPU infers (dispatch-bound). Inputs
+/// `talker_hidden:[1,1,emb]` + `cb0_embed:[1,1,emb]`; outputs `codes:[1,1,nres]`
+/// (f32, host rounds to the residual codebook ids) + `res_sum:[1,1,emb]`
+/// (Σ residual codec-embeddings, the Talker feedback). The 16 decoder positions
+/// are unrolled with the per-layer K/V grown in-graph (`Concat`) and constant
+/// per-position RoPE; each position `k≥1` does lm_head → ArgMax → Gather the next
+/// input embedding (the autoregressive feedback), all on-device.
+///
+/// `emb` = embedding_dim (Talker width, feedback), `d` = MTP decoder width,
+/// `vocab` = residual codebook size, `n_groups` = num_code_groups (16 → 15 residuals).
+/// Weights: `small_to_mtp_projection.{weight,bias}` (emb→d; Identity if emb==d),
+/// `blocks.{l}.*`, `norm.weight`, `codec_embedding.{i}.weight[vocab,emb]`,
+/// `lm_head.{i}.weight[vocab,d]` for i in 0..nres.
+pub fn build_mtp_fused_graph(cfg: &QwenConfig, emb: usize, vocab: usize, n_groups: usize, w: &W, g: &mut GraphBuilder) {
+    let mut tp = Topo { g, n: 0, quant: Quant::F32 };
+    let d = cfg.d_model as usize;
+    let nh = cfg.n_heads as usize;
+    let nkv = cfg.n_kv_heads as usize;
+    let hd = cfg.head_dim as usize;
+    let half = hd / 2;
+    let hq = nh * hd;
+    let nl = cfg.n_layers as usize;
+    let nres = n_groups - 1;
+    let has_proj = emb != d;
+
+    tp.g.input_f32("talker_hidden", &[1, 1, emb as i64]);
+    tp.g.input_f32("cb0_embed", &[1, 1, emb as i64]);
+    tp.g.output_f32("codes", &[1, 1, nres as i64]);
+    tp.g.output_f32("res_sum", &[1, 1, emb as i64]);
+
+    // shared constants
+    tp.f32("c_eps", &[1], vec![cfg.rms_eps]);
+    tp.f32("c_scale", &[1], vec![1.0 / (hd as f32).sqrt()]);
+    tp.i64("rh_ax", &[1], vec![3]);
+    tp.i64("rh_lo0", &[1], vec![0]);
+    tp.i64("rh_hi0", &[1], vec![half as i64]);
+    tp.i64("rh_lo1", &[1], vec![half as i64]);
+    tp.i64("rh_hi1", &[1], vec![hd as i64]);
+    tp.i64("mf_q1", &[4], vec![1, 1, nh as i64, hd as i64]);
+    tp.i64("mf_kv1", &[4], vec![1, 1, nkv as i64, hd as i64]);
+    tp.i64("mf_ctx1", &[3], vec![1, 1, hq as i64]);
+    tp.i64("mf_sq2", &[1], vec![2]); // squeeze axis for the argmax index
+
+    // Per-layer growing K/V accumulators (post-QK-norm/post-RoPE, [1,nkv,S,hd]).
+    let mut kacc: Vec<Option<String>> = vec![None; nl];
+    let mut vacc: Vec<Option<String>> = vec![None; nl];
+
+    // pos 0: project the Talker hidden and run one decode step (seeds the cache; no head).
+    let x0 = mtp_project(&mut tp, "talker_hidden", w, d, emb, has_proj);
+    let _ = mtp_decode_step(&mut tp, &mut kacc, &mut vacc, cfg, w, &x0, 0);
+
+    tp.f32("mf_zero", &[1, 1, emb as i64], vec![0.0; emb]);
+    let mut res_sum = "mf_zero".to_string();
+    let mut input_raw = "cb0_embed".to_string();
+    let mut code_cols: Vec<String> = Vec::with_capacity(nres);
+    for k in 1..=nres {
+        let pin = mtp_project(&mut tp, &input_raw, w, d, emb, has_proj);
+        let hidden = mtp_decode_step(&mut tp, &mut kacc, &mut vacc, cfg, w, &pin, k);
+        let logits = tp.linear(&hidden, &format!("lm_head.{}.weight", k - 1), w, vocab, d); // [1,1,vocab]
+        // greedy: first max index (matches CpuMtp argmax tie-to-lowest).
+        let idx = tp.tmp("mf_argmax");
+        tp.g.add(Node::new("ArgMax", &[&logits], &[&idx]).attr_int("axis", -1).attr_int("keepdims", 1)); // [1,1,1] i64
+        // codes column: cast to f32 for the graph output.
+        let idxf = tp.tmp("mf_idxf");
+        tp.g.add(Node::new("Cast", &[&idx], &[&idxf]).attr_int("to", 1)); // to FLOAT
+        code_cols.push(idxf);
+        // r = codec_embedding[k-1][idx]  ([1,1,emb])
+        let tbl = format!("codec_embedding.{}.weight", k - 1);
+        let tf = format!("{tbl}.f");
+        if !tp.has(&tf) {
+            tp.f32(&tf, &[vocab as i64, emb as i64], w[&tbl].clone());
+        }
+        let idx2 = tp.tmp("mf_idx2");
+        tp.g.add(Node::new("Squeeze", &[&idx, "mf_sq2"], &[&idx2])); // [1,1]
+        let r = tp.tmp("mf_r");
+        tp.g.add(Node::new("Gather", &[&tf, &idx2], &[&r]).attr_int("axis", 0)); // [1,1,emb]
+        res_sum = tp.add_t(&res_sum, &r);
+        input_raw = r;
+    }
+    // codes [1,1,nres] (f32) via concat along the last axis; res_sum passthrough.
+    let refs: Vec<&str> = code_cols.iter().map(|s| s.as_str()).collect();
+    let codes_cat = tp.tmp("mf_codes");
+    tp.g.add(Node::new("Concat", &refs, &[&codes_cat]).attr_int("axis", 2));
+    tp.node("Identity", &[&codes_cat], "codes");
+    tp.node("Identity", &[&res_sum], "res_sum");
+}
+
+/// Project an `[1,1,emb]` embedding to the MTP decoder width `[1,1,d]` via
+/// `small_to_mtp_projection` (Identity when `emb == d`, the 0.6B case).
+fn mtp_project(tp: &mut Topo, x: &str, w: &W, d: usize, emb: usize, has_proj: bool) -> String {
+    if !has_proj {
+        return x.to_string();
+    }
+    let y = tp.linear(x, "small_to_mtp_projection.weight", w, d, emb); // [1,1,d]
+    let bn = "small_to_mtp_projection.bias.b";
+    if !tp.has(bn) {
+        tp.f32(bn, &[d as i64], w["small_to_mtp_projection.bias"].clone());
+    }
+    tp.add(&y, bn)
+}
+
+/// One MTP decoder step at absolute position `pos`, appending this token's K/V to
+/// the per-layer accumulators (grown via `Concat`) and returning the final-norm
+/// hidden `[1,1,d]`. Attention is over positions `0..=pos` (causal by construction,
+/// so no mask); RoPE uses constants baked for `pos`.
+fn mtp_decode_step(
+    tp: &mut Topo,
+    kacc: &mut [Option<String>],
+    vacc: &mut [Option<String>],
+    cfg: &QwenConfig,
+    w: &W,
+    x_in: &str,
+    pos: usize,
+) -> String {
+    let d = cfg.d_model as usize;
+    let nh = cfg.n_heads as usize;
+    let nkv = cfg.n_kv_heads as usize;
+    let hd = cfg.head_dim as usize;
+    let group = nh / nkv;
+    let hq = nh * hd;
+    let hkv = nkv * hd;
+    let ff = cfg.d_ff as usize;
+    let s = pos + 1; // sequence length after appending this token
+    let mut x = x_in.to_string();
+    for l in 0..cfg.n_layers as usize {
+        let p = |t: &str| format!("blocks.{l}.{t}");
+        let h1 = tp.rmsnorm(&x, &p("ln1.weight"), w, d);
+        let q = tp.linear(&h1, &p("attn.wq.weight"), w, hq, d);
+        let k = tp.linear(&h1, &p("attn.wk.weight"), w, hkv, d);
+        let v = tp.linear(&h1, &p("attn.wv.weight"), w, hkv, d);
+        let q = tp.reshape(&q, "mf_q1");
+        let k = tp.reshape(&k, "mf_kv1");
+        let v = tp.reshape(&v, "mf_kv1");
+        let q = tp.rmsnorm(&q, &p("attn.q_norm.weight"), w, hd);
+        let k = tp.rmsnorm(&k, &p("attn.k_norm.weight"), w, hd);
+        let q = tp.rope_at(&q, pos, hd, cfg.rope_theta);
+        let k = tp.rope_at(&k, pos, hd, cfg.rope_theta);
+        let q = tp.transpose(&q, &[0, 2, 1, 3]); // [1,nh,1,hd]
+        let knew = tp.transpose(&k, &[0, 2, 1, 3]); // [1,nkv,1,hd]
+        let vnew = tp.transpose(&v, &[0, 2, 1, 3]); // [1,nkv,1,hd]
+        // Append to the accumulated K/V along the sequence axis (2).
+        let kall = match &kacc[l] {
+            None => knew.clone(),
+            Some(prev) => tp.concat2(prev, &knew, 2),
+        };
+        let vall = match &vacc[l] {
+            None => vnew.clone(),
+            Some(prev) => tp.concat2(prev, &vnew, 2),
+        };
+        kacc[l] = Some(kall.clone());
+        vacc[l] = Some(vall.clone());
+        // GQA head-expand [1,nkv,S,hd] -> [1,nh,S,hd] (shapes depend on S).
+        let sh5 = format!("mf_kv5_{s}");
+        let she = format!("mf_exp_{s}");
+        let shn = format!("mf_nh_{s}");
+        if !tp.has(&sh5) {
+            tp.i64(&sh5, &[5], vec![1, nkv as i64, 1, s as i64, hd as i64]);
+            tp.i64(&she, &[5], vec![1, nkv as i64, group as i64, s as i64, hd as i64]);
+            tp.i64(&shn, &[4], vec![1, nh as i64, s as i64, hd as i64]);
+        }
+        let kexp = tp.expand_to(&kall, &sh5, &she, &shn); // [1,nh,S,hd]
+        let vexp = tp.expand_to(&vall, &sh5, &she, &shn);
+        let kt = tp.transpose(&kexp, &[0, 1, 3, 2]); // [1,nh,hd,S]
+        let scores = tp.matmul(&q, &kt); // [1,nh,1,S]
+        let scores = tp.mul(&scores, "c_scale");
+        let probs = tp.softmax(&scores, -1);
+        let ctx = tp.matmul(&probs, &vexp); // [1,nh,1,hd]
+        let ctx = tp.transpose(&ctx, &[0, 2, 1, 3]); // [1,1,nh,hd]
+        let ctx = tp.reshape(&ctx, "mf_ctx1"); // [1,1,hq]
+        let attn = tp.linear(&ctx, &p("attn.wo.weight"), w, d, hq);
+        x = tp.add_t(&x, &attn);
+        let h2 = tp.rmsnorm(&x, &p("ln2.weight"), w, d);
+        let gate = tp.linear(&h2, &p("mlp.gate.weight"), w, ff, d);
+        let up = tp.linear(&h2, &p("mlp.up.weight"), w, ff, d);
+        let sig = tp.unary("Sigmoid", &gate);
+        let silu = tp.mul_t(&gate, &sig);
+        let hmul = tp.mul_t(&silu, &up);
+        let down = tp.linear(&hmul, &p("mlp.down.weight"), w, d, ff);
+        x = tp.add_t(&x, &down);
+        let _ = hkv;
+    }
+    tp.rmsnorm(&x, "norm.weight", w, d)
+}
+
 /// Build the shared decoder body (constants + `n_layers` blocks + final RMSNorm)
 /// onto `tp`, reading the residual stream from `x_in` (`[1,T,d]`) and returning
 /// the name of the final-norm hidden states (`[1,T,d]`). Used by both the
@@ -494,6 +680,46 @@ impl<'a> Topo<'a> {
         };
         let a = self.mul(x, "rope_cos");
         let b = self.mul(&rot, "rope_sin");
+        self.add_t(&a, &b)
+    }
+
+    /// RoPE (half-split) at a FIXED absolute position `pos` on `[1,1,heads,hd]` —
+    /// the fused-MTP unroll processes one token at a known position, so this token's
+    /// cos/sin are baked as constants (broadcast `[1,1,1,hd]` over the head axis).
+    /// Reuses the shared `rh_*` rotate-half slice bounds.
+    fn rope_at(&mut self, x: &str, pos: usize, hd: usize, theta: f32) -> String {
+        let half = hd / 2;
+        let cosn = format!("mf_cos_{pos}");
+        let sinn = format!("mf_sin_{pos}");
+        if !self.has(&cosn) {
+            let (mut cos, mut sin) = (vec![0f32; hd], vec![0f32; hd]);
+            for j in 0..hd {
+                let m = (j % half) as f32;
+                let ang = pos as f32 * theta.powf(-2.0 * m / hd as f32);
+                cos[j] = ang.cos();
+                sin[j] = ang.sin();
+            }
+            self.f32(&cosn, &[1, 1, 1, hd as i64], cos);
+            self.f32(&sinn, &[1, 1, 1, hd as i64], sin);
+        }
+        let x2 = {
+            let o = self.tmp("rha_x2");
+            self.g.add(Node::new("Slice", &[x, "rh_lo1", "rh_hi1", "rh_ax"], &[&o]));
+            o
+        };
+        let x1 = {
+            let o = self.tmp("rha_x1");
+            self.g.add(Node::new("Slice", &[x, "rh_lo0", "rh_hi0", "rh_ax"], &[&o]));
+            o
+        };
+        let nx2 = self.unary("Neg", &x2);
+        let rot = {
+            let o = self.tmp("rha");
+            self.g.add(Node::new("Concat", &[&nx2, &x1], &[&o]).attr_int("axis", 3));
+            o
+        };
+        let a = self.mul(x, &cosn);
+        let b = self.mul(&rot, &sinn);
         self.add_t(&a, &b)
     }
 
