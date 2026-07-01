@@ -60,6 +60,10 @@ pub enum TensorData {
     I8(Vec<i8>),
     I32(Vec<i32>),
     I64(Vec<i64>),
+    /// Weight-only 4-bit signed (ONNX `INT4`). Values are stored **unpacked**, one
+    /// per `i8` (each in `[-8,7]`), so `len()` matches the logical element count;
+    /// [`raw`](Self::raw) packs two per byte (low nibble first) as ONNX expects.
+    I4(Vec<i8>),
 }
 
 impl TensorData {
@@ -70,6 +74,7 @@ impl TensorData {
             TensorData::I8(_) => Int8 as i32,
             TensorData::I32(_) => Int32 as i32,
             TensorData::I64(_) => Int64 as i32,
+            TensorData::I4(_) => Int4 as i32,
         }
     }
     fn raw(&self) -> Vec<u8> {
@@ -78,6 +83,20 @@ impl TensorData {
             TensorData::I8(v) => v.iter().map(|x| *x as u8).collect(),
             TensorData::I32(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
             TensorData::I64(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            // ONNX INT4: pack two 4-bit two's-complement values per byte, the
+            // even-indexed element in the low nibble. Odd length -> last byte's
+            // high nibble is zero.
+            TensorData::I4(v) => {
+                let mut out = Vec::with_capacity(v.len().div_ceil(2));
+                let mut i = 0;
+                while i < v.len() {
+                    let lo = (v[i] as u8) & 0x0F;
+                    let hi = if i + 1 < v.len() { (v[i + 1] as u8) & 0x0F } else { 0 };
+                    out.push(lo | (hi << 4));
+                    i += 2;
+                }
+                out
+            }
         }
     }
     /// Number of scalar elements (for shape sanity checks).
@@ -87,6 +106,7 @@ impl TensorData {
             TensorData::I8(v) => v.len(),
             TensorData::I32(v) => v.len(),
             TensorData::I64(v) => v.len(),
+            TensorData::I4(v) => v.len(),
         }
     }
     pub fn is_empty(&self) -> bool {

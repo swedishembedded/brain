@@ -596,12 +596,14 @@ fn run_npu(
         NpuI8,
         NpuKvI8,
         NpuKvF32,
+        NpuKvI4,
     }
     let mode = match std::env::var("BRAIN_TTS_TALKER").ok().as_deref() {
         Some("cpu") => Mode::Cpu,
         Some("npu") | Some("npu-fp32") => Mode::NpuF32,
         Some("npu-int8") | Some("int8") => Mode::NpuI8,
         Some("npu-kv") | Some("kv") | Some("npu-kv-int8") => Mode::NpuKvI8,
+        Some("npu-kv-int4") | Some("int4") => Mode::NpuKvI4,
         Some("npu-kv-fp32") => Mode::NpuKvF32,
         // Default: the resident KV-cache decode graph (talker ~7-19x faster/frame
         // than cache-free). INT8 for the large 1.7B Talker, fp32 for the 0.6B.
@@ -635,7 +637,8 @@ fn run_npu(
             let mut cpu = crate::gen_kv::CpuTalker::load(&paths.talker);
             generate_codes_cached(&mut cpu, mtp, sp, prompt, opts)
         }
-        Mode::NpuKvI8 | Mode::NpuKvF32 => {
+        Mode::NpuKvI8 | Mode::NpuKvF32 | Mode::NpuKvI4 => {
+            let int4 = mode == Mode::NpuKvI4;
             let quant = mode == Mode::NpuKvI8;
             if std::env::var("TTS_NPU_PARITY").is_ok() {
                 match crate::npu_gen::kv_prefix_parity(&paths.talker, tables, prompt, cache, device, quant) {
@@ -652,7 +655,7 @@ fn run_npu(
                 None => mtp,
             };
             crate::npu_gen::generate_kv(
-                &paths.talker, tables, eng, sp, prompt, opts, device, allow_fallback, cache, quant,
+                &paths.talker, tables, eng, sp, prompt, opts, device, allow_fallback, cache, quant, int4,
             )?
         }
         Mode::NpuF32 | Mode::NpuI8 => {

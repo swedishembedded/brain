@@ -367,9 +367,10 @@ impl KvTalker {
         cache_dir: Option<&Path>,
         cfg: &TalkerConfig,
         quant: bool,
+        int4: bool,
         with_prefill: bool,
     ) -> Result<KvTalker, String> {
-        let onnx = prepare_decode_onnx(talker_path, cap, cache_dir, quant)?;
+        let onnx = prepare_decode_onnx(talker_path, cap, cache_dir, quant, int4)?;
         let ncfg = npu_config(device, allow_fallback, cache_dir);
         let nkv = cfg.n_kv_heads as usize;
         let hd = cfg.head_dim as usize;
@@ -379,7 +380,7 @@ impl KvTalker {
         // Companion prefill graph (full context -> hidden + K/V) seeds the cache in
         // one inference — only worth its (large) compile for long prefixes (clone).
         let prefill = if with_prefill {
-            let ponnx = prepare_prefill_onnx(talker_path, cap, cache_dir, quant)?;
+            let ponnx = prepare_prefill_onnx(talker_path, cap, cache_dir, quant, int4)?;
             Some(PrefillSession::load_path(&ponnx, &ncfg, nl, d, nkv, hd, cap).map_err(|e| e.to_string())?)
         } else {
             None
@@ -860,15 +861,18 @@ fn prepare_talker_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>,
     })
 }
 
-fn prepare_prefill_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>, quant: bool) -> Result<PathBuf, String> {
-    let file = if quant {
-        format!("talker-prefill-int8-seq{cap}.onnx")
+fn prepare_prefill_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>, quant: bool, int4: bool) -> Result<PathBuf, String> {
+    let (file, tag) = if int4 {
+        (format!("talker-prefill-int4-seq{cap}.onnx"), "brain_tts_npu_prefill_int4")
+    } else if quant {
+        (format!("talker-prefill-int8-seq{cap}.onnx"), "brain_tts_npu_prefill_int8")
     } else {
-        format!("talker-prefill-seq{cap}.onnx")
+        (format!("talker-prefill-seq{cap}.onnx"), "brain_tts_npu_prefill")
     };
-    let tag = if quant { "brain_tts_npu_prefill_int8" } else { "brain_tts_npu_prefill" };
     prepare_graph(weights_path, cache_dir, &file, tag, |out| {
-        if quant {
+        if int4 {
+            npu::qwen_export::export_talker_prefill_int4(weights_path, out, cap)
+        } else if quant {
             npu::qwen_export::export_talker_prefill_int8(weights_path, out, cap)
         } else {
             npu::qwen_export::export_talker_prefill_fp32(weights_path, out, cap)
@@ -892,15 +896,18 @@ fn prepare_mtp_decode_onnx(mtp_path: &str, cap: usize, cache_dir: Option<&Path>,
     })
 }
 
-fn prepare_decode_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>, quant: bool) -> Result<PathBuf, String> {
-    let file = if quant {
-        format!("talker-decode-int8-seq{cap}.onnx")
+fn prepare_decode_onnx(weights_path: &str, cap: usize, cache_dir: Option<&Path>, quant: bool, int4: bool) -> Result<PathBuf, String> {
+    let (file, tag) = if int4 {
+        (format!("talker-decode-int4-seq{cap}.onnx"), "brain_tts_npu_decode_int4")
+    } else if quant {
+        (format!("talker-decode-int8-seq{cap}.onnx"), "brain_tts_npu_decode_int8")
     } else {
-        format!("talker-decode-seq{cap}.onnx")
+        (format!("talker-decode-seq{cap}.onnx"), "brain_tts_npu_decode")
     };
-    let tag = if quant { "brain_tts_npu_decode_int8" } else { "brain_tts_npu_decode" };
     prepare_graph(weights_path, cache_dir, &file, tag, |out| {
-        if quant {
+        if int4 {
+            npu::qwen_export::export_talker_decode_int4(weights_path, out, cap)
+        } else if quant {
             npu::qwen_export::export_talker_decode_int8(weights_path, out, cap)
         } else {
             npu::qwen_export::export_talker_decode_fp32(weights_path, out, cap)
@@ -1076,6 +1083,7 @@ pub fn generate_kv(
     allow_fallback: bool,
     cache_dir: Option<&Path>,
     quant: bool,
+    int4: bool,
 ) -> Result<Vec<u32>, String> {
     let d = tables.d();
     let n_prefix = prompt.embeds.len() / d;
@@ -1083,9 +1091,13 @@ pub fn generate_kv(
     let cap = round_up(n_prefix + opts.max_frames + 2, CAP_BUCKET).min(max_pos);
     eprintln!(
         "tts npu: compiling KV-cache decode graph ({} | cap={cap}); first compile per cap is slow, cached after…",
-        if quant { "INT8" } else { "fp32" }
+        if int4 { "INT4" } else if quant { "INT8" } else { "fp32" }
     );
-    let mut kv = KvTalker::load(talker_path, cap, device, allow_fallback, cache_dir, &tables.cfg, quant, true)?;
+    // INT4: skip the companion prefill graph — compiling BOTH i4 graphs peaks ~15GB
+    // and OOMs on a memory-pressured box. With only the decode graph resident the
+    // compile fits; the prefix seeds token-by-token (slower once, same result).
+    let with_prefill = !int4;
+    let mut kv = KvTalker::load(talker_path, cap, device, allow_fallback, cache_dir, &tables.cfg, quant, int4, with_prefill)?;
     eprintln!("tts npu: Talker (KV-cache decode) running on {}", kv.device());
     generate_codes_kv(&mut kv, tables, mtp, sp, prompt, opts)
 }
@@ -1115,7 +1127,7 @@ pub fn kv_prefix_parity(
     }
     let max_pos = tables.cfg.max_position_embeddings as usize;
     let cap = round_up(n_prefix + 2, CAP_BUCKET).min(max_pos);
-    let mut kv = KvTalker::load(talker_path, cap, device, true, cache_dir, &tables.cfg, quant, true)?;
+    let mut kv = KvTalker::load(talker_path, cap, device, true, cache_dir, &tables.cfg, quant, false, true)?;
     // Validate the one-shot prefill path (what generation uses) against the CPU.
     let kv_h = kv.prefill_prompt(&prompt.embeds)?;
     let maxabs = cpu_h

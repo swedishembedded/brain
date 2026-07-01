@@ -100,6 +100,7 @@ pub mod tensor_proto {
         Int8 = 3,
         Int32 = 6,
         Int64 = 7,
+        Int4 = 22,
     }
     impl DataType {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -114,6 +115,7 @@ pub mod tensor_proto {
                 Self::Int8 => "INT8",
                 Self::Int32 => "INT32",
                 Self::Int64 => "INT64",
+                Self::Int4 => "INT4",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -125,6 +127,7 @@ pub mod tensor_proto {
                 "INT8" => Some(Self::Int8),
                 "INT32" => Some(Self::Int32),
                 "INT64" => Some(Self::Int64),
+                "INT4" => Some(Self::Int4),
                 _ => None,
             }
         }

@@ -59,6 +59,13 @@ impl GraphBuilder {
         self.push_init(name, dims, TensorData::I64(data))
     }
 
+    /// Add a weight-only **INT4** constant initializer. `data` holds one value per
+    /// logical element (each in `[-8,7]`), packed two-per-byte at serialization
+    /// (ONNX `INT4`). `dims` is the logical shape.
+    pub fn init_i4(&mut self, name: &str, dims: &[i64], data: Vec<i8>) -> &mut Self {
+        self.push_init(name, dims, TensorData::I4(data))
+    }
+
     fn push_init(&mut self, name: &str, dims: &[i64], data: TensorData) -> &mut Self {
         let want: i64 = dims.iter().product();
         assert_eq!(

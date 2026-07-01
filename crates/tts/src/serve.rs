@@ -99,7 +99,9 @@ impl TtsEngine {
         // Only clone (long reference prefix) benefits from the prefill graph;
         // design/cv/synth have short prefixes, so skip its ~1.4 GB compile.
         let with_prefill = cfg.kind == Kind::Clone;
-        let kv = KvTalker::load(&talker, cfg.cap, cfg.device, true, Some(cache), &tables.cfg, cfg.quant, with_prefill)?;
+        // int4=false: the server keeps the (proven) INT8/fp32 talker; INT4 is opt-in
+        // via the CLI (`BRAIN_TTS_TALKER=npu-kv-int4`) until its quality is validated.
+        let kv = KvTalker::load(&talker, cfg.cap, cfg.device, true, Some(cache), &tables.cfg, cfg.quant, false, with_prefill)?;
 
         // MTP placement (mirrors `pipeline::run_npu`): the resident INT8 NPU decode
         // graph beats the host CpuMtp on the large model. Default on for d_model>=2048;

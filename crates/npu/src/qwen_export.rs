@@ -93,15 +93,21 @@ fn export_talker_hidden(weights_path: &str, out_path: &str, seq_len: usize, quan
 /// Export the **KV-cache decode-step** Talker graph (one token + per-layer
 /// past/present K/V) for `cap` cache slots; `quant` selects weight-only INT8.
 pub fn export_talker_decode_fp32(weights_path: &str, out_path: &str, cap: usize) -> std::io::Result<()> {
-    export_talker_decode(weights_path, out_path, cap, false)
+    export_talker_decode(weights_path, out_path, cap, crate::qwen_topology::Quant::F32)
 }
 
 /// INT8 weight-only variant of [`export_talker_decode_fp32`].
 pub fn export_talker_decode_int8(weights_path: &str, out_path: &str, cap: usize) -> std::io::Result<()> {
-    export_talker_decode(weights_path, out_path, cap, true)
+    export_talker_decode(weights_path, out_path, cap, crate::qwen_topology::Quant::Int8)
 }
 
-fn export_talker_decode(weights_path: &str, out_path: &str, cap: usize, quant: bool) -> std::io::Result<()> {
+/// INT4 weight-only variant (~8x smaller than fp32; weight-bandwidth-bound decode
+/// runs faster and RAM roughly halves vs INT8). Lossier than INT8 — validate quality.
+pub fn export_talker_decode_int4(weights_path: &str, out_path: &str, cap: usize) -> std::io::Result<()> {
+    export_talker_decode(weights_path, out_path, cap, crate::qwen_topology::Quant::Int4)
+}
+
+fn export_talker_decode(weights_path: &str, out_path: &str, cap: usize, quant: crate::qwen_topology::Quant) -> std::io::Result<()> {
     let (cfg, w) = {
         let c = checkpoint::load(weights_path);
         let cfg = QwenConfig::from_json(&c.header["config"]);
@@ -110,7 +116,17 @@ fn export_talker_decode(weights_path: &str, out_path: &str, cap: usize, quant: b
     };
     let mut g = GraphBuilder::new("qwen_talker_decode");
     crate::qwen_topology::build_talker_decode_graph(&cfg, &w, cap, quant, &mut g);
-    g.finish_external(out_path, EXTERNAL_THRESHOLD)
+    finish_quant(&g, out_path, quant)
+}
+
+/// Serialize `g`: INT4 needs ONNX opset 21 / IR 10 (the version that introduced the
+/// 4-bit tensor types + `DequantizeLinear`-int4); INT8/fp32 use the default (13/8).
+fn finish_quant(g: &GraphBuilder, out_path: &str, quant: crate::qwen_topology::Quant) -> std::io::Result<()> {
+    if quant == crate::qwen_topology::Quant::Int4 {
+        g.finish_external_with(out_path, EXTERNAL_THRESHOLD, 21, 10)
+    } else {
+        g.finish_external(out_path, EXTERNAL_THRESHOLD)
+    }
 }
 
 /// Export the **MTP decode-step** graph: the MTP's 5-layer Qwen3 decoder is the
@@ -153,22 +169,28 @@ fn export_mtp_decode(mtp_path: &str, out_path: &str, cap: usize, quant: bool) ->
         (cfg, w)
     };
     let mut g = GraphBuilder::new("qwen_mtp_decode");
-    crate::qwen_topology::build_talker_decode_graph(&cfg, &w, cap, quant, &mut g);
+    crate::qwen_topology::build_talker_decode_graph(&cfg, &w, cap, crate::qwen_topology::Quant::from_bool(quant), &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
 
 /// Export the **prefill** Talker graph (full context -> hidden + per-layer K/V) to
 /// seed the decode KV cache in one inference. `quant` selects weight-only INT8.
 pub fn export_talker_prefill_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
-    export_talker_prefill(weights_path, out_path, seq_len, false)
+    export_talker_prefill(weights_path, out_path, seq_len, crate::qwen_topology::Quant::F32)
 }
 
 /// INT8 weight-only variant of [`export_talker_prefill_fp32`].
 pub fn export_talker_prefill_int8(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
-    export_talker_prefill(weights_path, out_path, seq_len, true)
+    export_talker_prefill(weights_path, out_path, seq_len, crate::qwen_topology::Quant::Int8)
 }
 
-fn export_talker_prefill(weights_path: &str, out_path: &str, seq_len: usize, quant: bool) -> std::io::Result<()> {
+/// INT4 weight-only variant of [`export_talker_prefill_fp32`] (pairs with the INT4
+/// decode graph so the prefill-seeded cache and the decode steps use matching weights).
+pub fn export_talker_prefill_int4(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
+    export_talker_prefill(weights_path, out_path, seq_len, crate::qwen_topology::Quant::Int4)
+}
+
+fn export_talker_prefill(weights_path: &str, out_path: &str, seq_len: usize, quant: crate::qwen_topology::Quant) -> std::io::Result<()> {
     let (cfg, w) = {
         let c = checkpoint::load(weights_path);
         let cfg = QwenConfig::from_json(&c.header["config"]);
@@ -177,7 +199,7 @@ fn export_talker_prefill(weights_path: &str, out_path: &str, seq_len: usize, qua
     };
     let mut g = GraphBuilder::new("qwen_talker_prefill");
     crate::qwen_topology::build_talker_prefill_graph(&cfg, &w, seq_len, quant, &mut g);
-    g.finish_external(out_path, EXTERNAL_THRESHOLD)
+    finish_quant(&g, out_path, quant)
 }
 
 /// Bytes larger than this go to the ONNX external-data sidecar (keeps the proto

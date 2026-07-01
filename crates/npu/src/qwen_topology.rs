@@ -26,7 +26,7 @@ type W = HashMap<String, Vec<f32>>;
 /// (role ""), `t` the fixed sequence length. Input `input_ids:[1,T]` (int64),
 /// output `logits:[1,T,vocab]` (f32).
 pub fn build_qwen_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder) {
-    let mut tp = Topo { g, n: 0, quant: false };
+    let mut tp = Topo { g, n: 0, quant: Quant::F32 };
     let d = cfg.d_model as usize;
     let vocab = cfg.vocab as usize;
     let ti = t as i64;
@@ -55,7 +55,7 @@ pub fn build_qwen_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder)
 /// (`codec_head_logits`) and the MTP residual fill stay on the host, so this
 /// graph stops at the final RMSNorm and emits the hidden state, not logits.
 pub fn build_talker_hidden_graph(cfg: &QwenConfig, w: &W, t: usize, quant: bool, g: &mut GraphBuilder) {
-    let mut tp = Topo { g, n: 0, quant };
+    let mut tp = Topo { g, n: 0, quant: Quant::from_bool(quant) };
     let d = cfg.d_model as usize;
     let ti = t as i64;
 
@@ -73,7 +73,7 @@ pub fn build_talker_hidden_graph(cfg: &QwenConfig, w: &W, t: usize, quant: bool,
 /// this once seeds the resident decode cache for the whole prompt prefix in a
 /// single inference, instead of streaming the prefix token-by-token through the
 /// decode-step graph.
-pub fn build_talker_prefill_graph(cfg: &QwenConfig, w: &W, t: usize, quant: bool, g: &mut GraphBuilder) {
+pub fn build_talker_prefill_graph(cfg: &QwenConfig, w: &W, t: usize, quant: Quant, g: &mut GraphBuilder) {
     let mut tp = Topo { g, n: 0, quant };
     let d = cfg.d_model as usize;
     let ti = t as i64;
@@ -98,7 +98,7 @@ pub fn build_talker_prefill_graph(cfg: &QwenConfig, w: &W, t: usize, quant: bool
 /// (this token's k/v, which the host writes into the cache at the current slot).
 /// Attention is over the (masked) past cache concatenated with the new token's
 /// own key/value, so the static `cap` shapes never change.
-pub fn build_talker_decode_graph(cfg: &QwenConfig, w: &W, cap: usize, quant: bool, g: &mut GraphBuilder) {
+pub fn build_talker_decode_graph(cfg: &QwenConfig, w: &W, cap: usize, quant: Quant, g: &mut GraphBuilder) {
     let mut tp = Topo { g, n: 0, quant };
     let d = cfg.d_model as usize;
     let nh = cfg.n_heads as usize;
@@ -329,15 +329,32 @@ fn build_stack(tp: &mut Topo, cfg: &QwenConfig, w: &W, t: usize, x_in: &str, emi
     tp.rmsnorm(&x, "norm.weight", w, d)
 }
 
+/// Weight quantization for the linear layers. `Int8`/`Int4` store weights as
+/// per-output-channel symmetric integers dequantised in-graph (`DequantizeLinear`
+/// -> MatMul): ~4x / ~8x smaller than fp32, so the 1.7B Talker fits the NPU and —
+/// being weight-bandwidth bound — decodes faster. Norms/RoPE/mask stay fp32.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Quant {
+    F32,
+    Int8,
+    Int4,
+}
+
+impl Quant {
+    pub fn from_bool(int8: bool) -> Quant {
+        if int8 {
+            Quant::Int8
+        } else {
+            Quant::F32
+        }
+    }
+}
+
 /// ONNX graph assembly helper: unique temp names + node/initializer emission.
 struct Topo<'a> {
     g: &'a mut GraphBuilder,
     n: usize,
-    /// Emit linear weights as weight-only per-output-channel INT8 (`DequantizeLinear`
-    /// -> MatMul) instead of fp32 — ~4x smaller graph so the 1.7B Talker fits the
-    /// NPU and compiles faster. Only the large linears are quantised; norms/RoPE/
-    /// mask stay fp32.
-    quant: bool,
+    quant: Quant,
 }
 
 impl<'a> Topo<'a> {
@@ -491,43 +508,49 @@ impl<'a> Topo<'a> {
     /// transposed weight initializer. In `quant` mode the weight is stored as
     /// per-output-channel symmetric INT8 and dequantised in-graph.
     fn linear_named(&mut self, x: &str, name: &str, winit: &str, w: &W, out: usize, inp: usize, y: &str) {
-        if self.quant {
-            let wq = format!("{winit}.q");
-            if !self.has(&wq) {
-                let wt = transpose(&w[name], out, inp); // [out,in] -> [in,out]
-                // Per-output-channel (axis=1) symmetric INT8: scale[o]=max|col|/127.
-                let mut scales = vec![0f32; out];
-                let mut q = vec![0i8; inp * out];
-                for o in 0..out {
-                    let mut mx = 0f32;
-                    for i in 0..inp {
-                        mx = mx.max(wt[i * out + o].abs());
-                    }
-                    let s = if mx > 0.0 { mx / 127.0 } else { 1.0 };
-                    scales[o] = s;
-                    for i in 0..inp {
-                        let v = (wt[i * out + o] / s).round().clamp(-127.0, 127.0);
-                        q[i * out + o] = v as i8;
-                    }
+        let (q4, qmax) = match self.quant {
+            Quant::F32 => {
+                if !self.has(winit) {
+                    let wt = transpose(&w[name], out, inp); // [out,in] -> [in,out]
+                    self.f32(winit, &[inp as i64, out as i64], wt);
                 }
-                self.g.init_i8(&wq, &[inp as i64, out as i64], q);
-                self.f32(&format!("{winit}.s"), &[out as i64], scales);
-                self.g.init_i8(&format!("{winit}.zp"), &[out as i64], vec![0i8; out]);
-                self.g.add(
-                    Node::new(
-                        "DequantizeLinear",
-                        &[&wq, &format!("{winit}.s"), &format!("{winit}.zp")],
-                        &[winit],
-                    )
-                    .attr_int("axis", 1),
-                );
+                self.node("MatMul", &[x, winit], y);
+                return;
             }
-            self.node("MatMul", &[x, winit], y);
-            return;
-        }
-        if !self.has(winit) {
+            Quant::Int8 => (false, 127.0f32),
+            Quant::Int4 => (true, 7.0f32),
+        };
+        // Per-output-channel (axis=1) symmetric integer weights: scale[o]=max|col|/qmax,
+        // dequantised in-graph (`DequantizeLinear`) then MatMul. INT4 packs 2/byte.
+        let wq = format!("{winit}.q");
+        if !self.has(&wq) {
             let wt = transpose(&w[name], out, inp); // [out,in] -> [in,out]
-            self.f32(winit, &[inp as i64, out as i64], wt);
+            let mut scales = vec![0f32; out];
+            let mut q = vec![0i8; inp * out];
+            for o in 0..out {
+                let mut mx = 0f32;
+                for i in 0..inp {
+                    mx = mx.max(wt[i * out + o].abs());
+                }
+                let s = if mx > 0.0 { mx / qmax } else { 1.0 };
+                scales[o] = s;
+                for i in 0..inp {
+                    let v = (wt[i * out + o] / s).round().clamp(-qmax, qmax);
+                    q[i * out + o] = v as i8;
+                }
+            }
+            let zp = format!("{winit}.zp");
+            if q4 {
+                self.g.init_i4(&wq, &[inp as i64, out as i64], q);
+                self.g.init_i4(&zp, &[out as i64], vec![0i8; out]);
+            } else {
+                self.g.init_i8(&wq, &[inp as i64, out as i64], q);
+                self.g.init_i8(&zp, &[out as i64], vec![0i8; out]);
+            }
+            self.f32(&format!("{winit}.s"), &[out as i64], scales);
+            self.g.add(
+                Node::new("DequantizeLinear", &[&wq, &format!("{winit}.s"), &zp], &[winit]).attr_int("axis", 1),
+            );
         }
         self.node("MatMul", &[x, winit], y);
     }
