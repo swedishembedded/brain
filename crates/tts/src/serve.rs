@@ -106,9 +106,12 @@ impl TtsEngine {
         // weight-compression) so `brain tts serve` startup logs what it actually uses.
         eprintln!("{}", crate::npu_gen::describe_talker_path(cfg.device, true, cfg.quant, cfg.int4));
         // Only clone (long reference prefix) benefits from the prefill graph;
-        // design/cv/synth have short prefixes, so skip its ~1.4 GB compile. INT4 also
-        // skips prefill (compiling both i4 graphs OOMs) — prefix seeds token-by-token.
-        let with_prefill = cfg.kind == Kind::Clone && !cfg.int4;
+        // design/cv/synth have short prefixes, so skip its ~1.4 GB compile. Unlike the
+        // one-shot CLI (which skips INT4 prefill to bound peak RAM in a process that also
+        // holds the other models), the SERVER compiles graphs ONCE at load, so it CAN
+        // afford the INT4 prefill graph — essential so a clone's long prefix seeds in one
+        // inference (~1s) instead of token-by-token (~20s) on every request.
+        let with_prefill = cfg.kind == Kind::Clone;
         let kv = KvTalker::load(&talker, cfg.cap, cfg.device, true, Some(cache), &tables.cfg, cfg.quant, cfg.int4, with_prefill)?;
 
         // MTP placement (mirrors `pipeline::run_npu`): the resident INT8 NPU decode
@@ -130,6 +133,32 @@ impl TtsEngine {
         } else {
             None
         };
+
+        // One-line summary of the resolved fastest-path components for this engine.
+        let talker_prec = if cfg.int4 {
+            "INT4 weight-compression"
+        } else if cfg.quant {
+            "INT8"
+        } else {
+            "fp32"
+        };
+        let mtp_place = if mtp_npu.is_some() {
+            "NPU KvMtp (INT8 decode + fp32 host argmax)"
+        } else {
+            "host CpuMtp"
+        };
+        let codec_place = match std::env::var("BRAIN_TTS_CODEC").ok().as_deref() {
+            Some("windowed") => "NPU windowed",
+            Some("cpu-stream") => "CPU streaming (reference)",
+            _ => "NPU streaming (stateful)",
+        };
+        eprintln!(
+            "tts serve: engine[{:?}] READY on {} | talker={talker_prec} (prefill={with_prefill}) | \
+             MTP={mtp_place} | codec={codec_place} | cap={}",
+            cfg.kind,
+            kv.device(),
+            cfg.cap
+        );
 
         let (ref_code, ref_ids, xvec) = if cfg.kind == Kind::Clone {
             let rw = cfg.ref_wav.as_ref().ok_or("clone engine needs a reference wav")?;
