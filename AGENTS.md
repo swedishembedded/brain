@@ -70,6 +70,7 @@ them, keeping the gradient-check discipline.
 | Task | Where |
 |---|---|
 | MoE toy task / honest eval methodology | `README.md` |
+| GLM-5.2 (MLA + MoE + DSA indexer + MTP): arch, status, CLI, NPU | `docs/glm/README.md`, `docs/glm/NPU.md`; `crates/glm`, `crates/cli/src/glm_cli.rs` |
 | Architecture & crate graph | `docs/ARCHITECTURE.md` |
 | Federated MoE pipeline (done vs remaining) | `docs/FEDERATED.md` |
 | Testing strategy + gradient-check gate | `docs/TESTING.md` |
