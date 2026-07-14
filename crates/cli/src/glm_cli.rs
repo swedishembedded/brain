@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! `brain glm …` — set up / train / evaluate / run the GLM-5.2 decoder
-//! (MLA + sigmoid noaux_tc MoE + shared expert).
+//! (MLA + sigmoid noaux_tc MoE + shared expert). Uses the shared `args` grammar.
 //!
 //!   brain glm train <data_dir> --out F [--steps N --batch B --block T --lr X
 //!                    --layers L --d-model D --heads H --experts E --size S --seed K]
@@ -10,7 +10,8 @@
 //!                    [--max-new N --temp X --top-k K --seed K --device cpu|gpu]
 //!   brain glm eval  --weights F --data <dir> [--batches N --block T --seed K]
 //!   brain glm finetune <data_dir> --weights BASE --out F [--steps N --lr X ...]
-//!   brain glm import --hf <dir> --out glm.weights   (HuggingFace safetensors)
+//!   brain glm import --hf <dir> --out glm.weights
+//!   brain glm export --weights F --out model.onnx --seq T
 
 use std::path::Path;
 
@@ -20,50 +21,26 @@ use data::tokenizer::{CharTokenizer, Tokenizer};
 use glm::config::GlmConfig;
 use glm::model::Glm;
 
-pub fn run_glm(args: &[String]) {
-    match args.first().map(|s| s.as_str()) {
-        Some("train") => train(&args[1..], None),
-        Some("finetune") => finetune(&args[1..]),
-        Some("infer") | Some("gen") => infer(&args[1..]),
-        Some("eval") => eval(&args[1..]),
-        Some("import") => import(&args[1..]),
-        Some("export") => export(&args[1..]),
+use crate::args::{canon_verb, Args};
+
+pub fn run_glm(argv: &[String]) {
+    match argv.first().map(|s| canon_verb(s)) {
+        Some("train") => train(&argv[1..], None),
+        Some("finetune") => finetune(&argv[1..]),
+        Some("infer") => infer(&argv[1..]),
+        Some("eval") => eval(&argv[1..]),
+        Some("import") => import(&argv[1..]),
+        Some("export") => export(&argv[1..]),
         other => eprintln!("usage: brain glm <train|finetune|infer|eval|import|export> ...  (got {other:?})"),
     }
 }
 
-fn val(args: &[String], i: &mut usize, flag: &str) -> String {
-    *i += 1;
-    args.get(*i).cloned().unwrap_or_else(|| {
-        eprintln!("{flag} requires a value");
-        std::process::exit(2);
-    })
-}
-
-/// Named size presets for from-scratch setup (`--size tiny|small|base`). All keep
-/// the MLA head split + a MoE layer; they differ in depth/width/experts.
+/// Named size presets for from-scratch setup (`--size tiny|small|base`).
 fn preset(size: &str, block: u32) -> GlmConfig {
     let base = GlmConfig { block_size: block, ..GlmConfig::tiny() };
     match size {
         "tiny" => GlmConfig { vocab: 0, ..base },
-        "small" => GlmConfig {
-            vocab: 0,
-            n_layers: 4,
-            d_model: 128,
-            n_heads: 4,
-            q_lora_rank: 96,
-            kv_lora_rank: 48,
-            qk_nope_head_dim: 32,
-            qk_rope_head_dim: 16,
-            v_head_dim: 32,
-            n_routed_experts: 4,
-            num_experts_per_tok: 2,
-            moe_intermediate_size: 256,
-            intermediate_size: 256,
-            first_k_dense_replace: 1,
-            ..base
-        },
-        _ => GlmConfig {
+        "base" => GlmConfig {
             vocab: 0,
             n_layers: 6,
             d_model: 256,
@@ -80,52 +57,48 @@ fn preset(size: &str, block: u32) -> GlmConfig {
             first_k_dense_replace: 1,
             ..base
         },
+        _ => GlmConfig {
+            // "small" (default)
+            vocab: 0,
+            n_layers: 4,
+            d_model: 128,
+            n_heads: 4,
+            q_lora_rank: 96,
+            kv_lora_rank: 48,
+            qk_nope_head_dim: 32,
+            qk_rope_head_dim: 16,
+            v_head_dim: 32,
+            n_routed_experts: 4,
+            num_experts_per_tok: 2,
+            moe_intermediate_size: 256,
+            intermediate_size: 256,
+            first_k_dense_replace: 1,
+            ..base
+        },
     }
 }
 
-/// Shared core for `train` (fresh) and `finetune` (seeded from `--weights`).
 fn train(args: &[String], base: Option<&str>) {
-    let mut data_dir = String::new();
-    let mut out = "out/glm.weights".to_string();
-    let mut steps = 2000u32;
-    let mut batch = 8u32;
-    let mut block = 128u32;
-    let mut lr = if base.is_some() { 1e-4 } else { 3e-4 };
-    let mut seed = 1234u64;
-    let mut size = "small".to_string();
-    let mut layers: Option<u32> = None;
-    let mut d_model: Option<u32> = None;
-    let mut heads: Option<u32> = None;
-    let mut experts: Option<u32> = None;
-    let mut mask: Option<char> = None;
-    let mut align = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--out" => out = val(args, &mut i, "--out"),
-            "--steps" => steps = val(args, &mut i, "--steps").parse().unwrap_or(steps),
-            "--batch" => batch = val(args, &mut i, "--batch").parse().unwrap_or(batch),
-            "--block" => block = val(args, &mut i, "--block").parse().unwrap_or(block),
-            "--lr" => lr = val(args, &mut i, "--lr").parse().unwrap_or(lr),
-            "--size" => size = val(args, &mut i, "--size"),
-            "--layers" => layers = val(args, &mut i, "--layers").parse().ok(),
-            "--d-model" => d_model = val(args, &mut i, "--d-model").parse().ok(),
-            "--heads" => heads = val(args, &mut i, "--heads").parse().ok(),
-            "--experts" => experts = val(args, &mut i, "--experts").parse().ok(),
-            "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
-            "--mask" => mask = val(args, &mut i, "--mask").chars().next(),
-            "--align" => align = true,
-            s if !s.starts_with("--") && data_dir.is_empty() => data_dir = s.to_string(),
-            other => eprintln!("ignoring unknown flag {other:?}"),
-        }
-        i += 1;
-    }
+    let mut a = Args::new(args);
+    let data_dir = a.positional().unwrap_or_default();
+    let out = a.str_or("--out", "out/glm.weights");
+    let steps = a.u32_or("--steps", 2000);
+    let batch = a.u32_or("--batch", 8);
+    let block = a.u32_or("--block", 128);
+    let lr = a.f32_or("--lr", if base.is_some() { 1e-4 } else { 3e-4 });
+    let seed = a.u64_or("--seed", 1234);
+    let size = a.str_or("--size", "small");
+    let layers = a.opt_u32("--layers");
+    let d_model = a.opt_u32("--d-model");
+    let heads = a.opt_u32("--heads");
+    let experts = a.opt_u32("--experts");
+    let mask = a.char_opt("--mask");
+    let align = a.take_flag("--align");
+    a.finish();
     if data_dir.is_empty() {
         eprintln!("usage: brain glm {{train|finetune}} <data_dir> --out F [--size tiny|small|base --steps N --batch B --block T --lr X --layers L --d-model D --heads H --experts E --mask = --align]");
         return;
     }
-    // finetune reads the architecture from the base checkpoint; train builds from
-    // the requested preset + explicit overrides.
     let mut cfg = match base {
         Some(p) => GlmConfig::from_json(&checkpoint::load(p).header["config"]),
         None => preset(&size, block),
@@ -179,21 +152,25 @@ fn train(args: &[String], base: Option<&str>) {
 }
 
 fn finetune(args: &[String]) {
-    let mut base = String::new();
-    let mut rest: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--weights" {
-            base = val(args, &mut i, "--weights");
-        } else {
-            rest.push(args[i].clone());
-        }
-        i += 1;
-    }
-    if base.is_empty() {
+    let mut a = Args::new(args);
+    let Some(base) = a.take_str("--weights") else {
         eprintln!("usage: brain glm finetune <data_dir> --weights BASE --out F [...]");
         return;
-    }
+    };
+    // Rebuild the remaining args (without --weights) for the shared train core.
+    let rest: Vec<String> = {
+        let mut r = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--weights" {
+                i += 2;
+            } else {
+                r.push(args[i].clone());
+                i += 1;
+            }
+        }
+        r
+    };
     train(&rest, Some(&base));
 }
 
@@ -202,33 +179,19 @@ fn model_block(weights: &str) -> u32 {
 }
 
 fn infer(args: &[String]) {
-    let mut weights = String::new();
-    let mut data_dir = String::new();
-    let mut prompt = String::new();
-    let mut max_new = 200usize;
-    let mut temp = 0.8f32;
-    let mut top_k = 40usize;
-    let mut seed = 1234u64;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--weights" => weights = val(args, &mut i, "--weights"),
-            "--data" => data_dir = val(args, &mut i, "--data"),
-            "--prompt" => prompt = val(args, &mut i, "--prompt"),
-            "--max-new" => max_new = val(args, &mut i, "--max-new").parse().unwrap_or(max_new),
-            "--temp" => temp = val(args, &mut i, "--temp").parse().unwrap_or(temp),
-            "--top-k" => top_k = val(args, &mut i, "--top-k").parse().unwrap_or(top_k),
-            "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
-            other => eprintln!("ignoring unknown flag {other:?}"),
-        }
-        i += 1;
-    }
+    let mut a = Args::new(args);
+    let weights = a.str_or("--weights", "");
+    let data_dir = a.str_or("--data", "");
+    let prompt = a.str_or("--prompt", "");
+    let max_new = a.usize_or("--max-new", 200);
+    let temp = a.f32_or("--temp", 0.8);
+    let top_k = a.usize_or("--top-k", 40);
+    let seed = a.u64_or("--seed", 1234);
+    a.finish();
     if weights.is_empty() {
         eprintln!("usage: brain glm infer --weights F [--data <dir>] [--prompt ... --max-new N --temp X --top-k K]");
         return;
     }
-    // Char vocab from the checkpoint (embedded at train time); `--data` is a
-    // fallback for checkpoints without embedded vocab.
     let itos = match Glm::load_itos(&weights) {
         Some(itos) => itos,
         None => {
@@ -257,26 +220,15 @@ fn infer(args: &[String]) {
     println!();
 }
 
-/// Validation perplexity: mean masked-CE over sampled val windows -> exp(). Uses
-/// the model's own forward (the same masked-CE the trainer optimises).
+/// Validation perplexity: mean masked-CE over sampled val windows -> exp().
 fn eval(args: &[String]) {
-    let mut weights = String::new();
-    let mut data_dir = String::new();
-    let mut batches = 20usize;
-    let mut block = 0u32;
-    let mut seed = 99u64;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--weights" => weights = val(args, &mut i, "--weights"),
-            "--data" => data_dir = val(args, &mut i, "--data"),
-            "--batches" => batches = val(args, &mut i, "--batches").parse().unwrap_or(batches),
-            "--block" => block = val(args, &mut i, "--block").parse().unwrap_or(block),
-            "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
-            other => eprintln!("ignoring unknown flag {other:?}"),
-        }
-        i += 1;
-    }
+    let mut a = Args::new(args);
+    let weights = a.str_or("--weights", "");
+    let data_dir = a.str_or("--data", "");
+    let batches = a.usize_or("--batches", 20);
+    let block = a.u32_or("--block", 0);
+    let seed = a.u64_or("--seed", 99);
+    a.finish();
     if weights.is_empty() || data_dir.is_empty() {
         eprintln!("usage: brain glm eval --weights F --data <dir> [--batches N --block T]");
         return;
@@ -309,17 +261,10 @@ fn eval(args: &[String]) {
 }
 
 fn import(args: &[String]) {
-    let mut hf = String::new();
-    let mut out = "glm.weights".to_string();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--hf" => hf = val(args, &mut i, "--hf"),
-            "--out" => out = val(args, &mut i, "--out"),
-            other => eprintln!("ignoring unknown flag {other:?}"),
-        }
-        i += 1;
-    }
+    let mut a = Args::new(args);
+    let hf = a.str_or("--hf", "");
+    let out = a.str_or("--out", "glm.weights");
+    a.finish();
     if hf.is_empty() {
         eprintln!("usage: brain glm import --hf <dir> --out glm.weights");
         return;
@@ -330,22 +275,14 @@ fn import(args: &[String]) {
     }
 }
 
-/// `brain glm export --weights F --out model.onnx --seq T` — emit the ONNX
-/// decoder graph (dense-expert MoE) for OpenVINO / the NPU (see docs/glm/NPU.md).
+/// `brain glm export --weights F --out model.onnx --seq T` — ONNX decoder graph
+/// (dense-expert MoE) for OpenVINO / the NPU (see docs/glm/NPU.md).
 fn export(args: &[String]) {
-    let mut weights = String::new();
-    let mut out = "glm.onnx".to_string();
-    let mut seq = 32usize;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--weights" => weights = val(args, &mut i, "--weights"),
-            "--out" => out = val(args, &mut i, "--out"),
-            "--seq" => seq = val(args, &mut i, "--seq").parse().unwrap_or(seq),
-            other => eprintln!("ignoring unknown flag {other:?}"),
-        }
-        i += 1;
-    }
+    let mut a = Args::new(args);
+    let weights = a.str_or("--weights", "");
+    let out = a.str_or("--out", "glm.onnx");
+    let seq = a.usize_or("--seq", 32);
+    a.finish();
     if weights.is_empty() {
         eprintln!("usage: brain glm export --weights F --out model.onnx [--seq T]");
         return;

@@ -17,9 +17,10 @@ use qwen::config::QwenConfig;
 use qwen::model::Qwen;
 
 pub fn run_qwen(args: &[String]) {
-    match args.first().map(|s| s.as_str()) {
+    // Canonical verbs shared with `gpt`/`glm` (`gen`->`infer`, `fine-tune`->`finetune`).
+    match args.first().map(|s| crate::args::canon_verb(s)) {
         Some("import") => import(&args[1..]),
-        Some("infer") | Some("gen") => infer(&args[1..]),
+        Some("infer") => infer(&args[1..]),
         Some("export") => export(&args[1..]),
         Some("precompile") => precompile(&args[1..]),
         Some("train") => train(&args[1..], None),

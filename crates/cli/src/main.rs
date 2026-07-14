@@ -14,6 +14,7 @@
 
 mod data_cli;
 mod federated_cli;
+mod args;
 mod glm_cli;
 mod gpt_cli;
 mod image_io;
