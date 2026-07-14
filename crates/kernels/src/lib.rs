@@ -198,6 +198,14 @@ pub const MLA_BWD_DK_PASS: &str = include_str!("../wgsl/mla_bwd_dk_pass.wgsl");
 pub const MLA_BWD_DQ_ROPE: &str = include_str!("../wgsl/mla_bwd_dq_rope.wgsl");
 /// `wgsl/mla_bwd_dk_rope.wgsl`
 pub const MLA_BWD_DK_ROPE: &str = include_str!("../wgsl/mla_bwd_dk_rope.wgsl");
+/// `wgsl/mla_index_scores.wgsl`
+pub const MLA_INDEX_SCORES: &str = include_str!("../wgsl/mla_index_scores.wgsl");
+/// `wgsl/rope_sub.wgsl`
+pub const ROPE_SUB: &str = include_str!("../wgsl/rope_sub.wgsl");
+/// `wgsl/topk_mask.wgsl`
+pub const TOPK_MASK: &str = include_str!("../wgsl/topk_mask.wgsl");
+/// `wgsl/add_index_mask.wgsl`
+pub const ADD_INDEX_MASK: &str = include_str!("../wgsl/add_index_mask.wgsl");
 /// `wgsl/maxpool5.wgsl`
 pub const MAXPOOL5: &str = include_str!("../wgsl/maxpool5.wgsl");
 /// `wgsl/maxpool5_dx.wgsl`
@@ -375,6 +383,10 @@ pub const ALL: &[(&str, &str)] = &[
     ("mla_bwd_dk_pass", MLA_BWD_DK_PASS),
     ("mla_bwd_dq_rope", MLA_BWD_DQ_ROPE),
     ("mla_bwd_dk_rope", MLA_BWD_DK_ROPE),
+    ("mla_index_scores", MLA_INDEX_SCORES),
+    ("rope_sub", ROPE_SUB),
+    ("topk_mask", TOPK_MASK),
+    ("add_index_mask", ADD_INDEX_MASK),
     ("maxpool5", MAXPOOL5),
     ("maxpool5_dx", MAXPOOL5_DX),
     ("mse_grad", MSE_GRAD),
@@ -433,7 +445,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_kernels_present_and_nonempty() {
-        assert_eq!(ALL.len(), 133);
+        assert_eq!(ALL.len(), 137);
         for (n, s) in ALL { assert!(!s.trim().is_empty(), "empty kernel {n}"); }
     }
     #[test]
