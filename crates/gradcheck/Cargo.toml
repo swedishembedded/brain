@@ -13,6 +13,7 @@ path = "src/lib.rs"
 brain-model.workspace = true
 brain-gpt.workspace = true
 brain-qwen.workspace = true
+brain-glm.workspace = true
 brain-moe.workspace = true
 brain-pid.workspace = true
 brain-seq2seq.workspace = true

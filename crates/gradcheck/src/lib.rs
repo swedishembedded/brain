@@ -244,6 +244,31 @@ pub fn check_moe(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Build a tiny GLM-5.2 (`glm_moe_dsa`) decoder, set a fixed batch, and
+/// gradient-check it. This is the correctness gate for **MLA** (low-rank q/kv
+/// down/up projections, the decoupled nope/rope head split, interleaved RoPE on
+/// the rope slice + the shared MQA key `k_rot` grad summed over heads, the
+/// `mla_scores`/`mla_bwd_*` kernels), the **sigmoid `noaux_tc` router**
+/// (`router_gate_sigmoid`/`router_bwd_sigmoid` through the sigmoid + top-k
+/// normalization), the **shared expert**, the **dense→MoE layer schedule**, and
+/// the untied `lm_head` — all through the blanket `CheckModel for model::Model`.
+///
+/// `top_k == n_routed_experts`: every expert is always selected, so the group
+/// top-k selection has no hard boundary (which FD cannot see) while the router's
+/// sigmoid + renormalization backward is still fully exercised. The router
+/// selection bias is Frozen (never in the trainable/checked set), matching the
+/// reference where it is a load-balance heuristic, not a backprop target.
+pub fn check_glm(seed: u64) -> Report {
+    use glm::{Glm, GlmConfig};
+    let cfg = GlmConfig { num_experts_per_tok: 3, ..GlmConfig::tiny() }; // top_k == n_routed_experts
+    let init = glm::init_weights(&cfg, seed);
+    let model = Glm::new(cfg, 2, 6, &init);
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
+    model.set_batch(&x, &y);
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
 /// Build a tiny PID event/effect transformer, set a fixed (partially masked)
 /// batch, and gradient-check it (validates LayerNorm-with-bias, biased linears,
 /// SwiGLU, key-padding causal attention, and the separate u_head backprop). PID
@@ -389,6 +414,23 @@ mod tests {
             return;
         }
         let report = check_moe(7);
+        report.print();
+        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn glm_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_glm(7);
         report.print();
         // fp32 directional FD on a software GPU: combined abs+rel tolerance.
         let (atol, rtol) = (4e-3, 8e-2);
