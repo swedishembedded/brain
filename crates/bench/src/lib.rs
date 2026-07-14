@@ -44,6 +44,7 @@ pub mod mad_selective_copy;
 pub mod metrics;
 pub mod mod_add;
 pub mod model;
+pub mod glm_decoder;
 pub mod moe_decoder;
 pub mod qwen_decoder;
 pub mod mqar;
@@ -54,6 +55,7 @@ pub mod toolcall;
 
 pub use metrics::Metrics;
 pub use model::{DecoderLm, GptDecoder, Scorer, TrainConfig};
+pub use glm_decoder::GlmDecoder;
 pub use moe_decoder::MoeDecoder;
 pub use qwen_decoder::QwenDecoder;
 

@@ -104,6 +104,15 @@ impl Arch {
             };
             return model::ModelConfig::param_list(&mcfg).iter().map(|(_, n)| *n as u64).sum();
         }
+        // GLM's MLA + per-expert FFNs + shared expert + untied head differ from
+        // GPT, so count from GLM's own param list via the decoder's config builder.
+        if self.name == "glm" {
+            let n_heads = self.size.n_heads.unwrap_or(4);
+            let tc = crate::TrainConfig { n_layers, d_model, n_heads, ..Default::default() };
+            let mut gcfg = crate::GlmDecoder.glm_config(block_size, &tc);
+            gcfg.vocab = vocab;
+            return model::ModelConfig::param_list(&gcfg).iter().map(|(_, n)| *n as u64).sum();
+        }
         let cfg = GptConfig {
             vocab,
             block_size,
@@ -153,6 +162,12 @@ pub fn arch_registry() -> Vec<Arch> {
             description: "Qwen3 dense decoder (GQA + QK-norm + RoPE + SwiGLU; size per benchmark)",
             size: Size::default(),
             factory: || Box::new(crate::QwenDecoder),
+        },
+        Arch {
+            name: "glm",
+            description: "GLM-5.2 decoder (MLA + sigmoid noaux_tc MoE + shared expert; size per benchmark)",
+            size: Size::default(),
+            factory: || Box::new(crate::GlmDecoder),
         },
     ]
 }

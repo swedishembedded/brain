@@ -15,6 +15,7 @@ brain-model.workspace = true
 brain-gpt.workspace = true
 brain-moe.workspace = true
 brain-qwen.workspace = true
+brain-glm.workspace = true
 brain-autoencoder.workspace = true
 brain-eval.workspace = true
 brain-checkpoint.workspace = true
