@@ -106,12 +106,20 @@ impl Arch {
         }
         // GLM's MLA + per-expert FFNs + shared expert + untied head differ from
         // GPT, so count from GLM's own param list via the decoder's config builder.
-        if self.name == "glm" {
+        if self.name.contains("glm") {
             let n_heads = self.size.n_heads.unwrap_or(4);
             let tc = crate::TrainConfig { n_layers, d_model, n_heads, ..Default::default() };
             let mut gcfg = crate::GlmDecoder.glm_config(block_size, &tc);
             gcfg.vocab = vocab;
             return model::ModelConfig::param_list(&gcfg).iter().map(|(_, n)| *n as u64).sum();
+        }
+        // Qwen (tied embeddings, GQA, QK-norm) differs from GPT too.
+        if self.name.contains("qwen") {
+            let n_heads = self.size.n_heads.unwrap_or(4);
+            let tc = crate::TrainConfig { n_layers, d_model, n_heads, ..Default::default() };
+            let mut qcfg = crate::QwenDecoder.qwen_config(block_size, &tc);
+            qcfg.vocab = vocab;
+            return model::ModelConfig::param_list(&qcfg).iter().map(|(_, n)| *n as u64).sum();
         }
         let cfg = GptConfig {
             vocab,
@@ -169,8 +177,27 @@ pub fn arch_registry() -> Vec<Arch> {
             size: Size::default(),
             factory: || Box::new(crate::GlmDecoder),
         },
+        // Matched-activation comparison pair (2 layers, 4 heads, ~250 steps each):
+        // GLM d=44 (activated ~69k) ≈ Qwen d=48 (dense, ~71k) at a nominal vocab.
+        Arch {
+            name: "qwen-cmp",
+            description: "Qwen dense, fixed L2xD48xH4 — activation-matched to glm-cmp",
+            size: Size::fixed(2, 48, 4),
+            factory: || Box::new(ScaledQwen(Size::fixed(2, 48, 4), CMP_STEPS)),
+        },
+        Arch {
+            name: "glm-cmp",
+            description: "GLM MoE, fixed L2xD44xH4 — activation-matched to qwen-cmp",
+            size: Size::fixed(2, 44, 4),
+            factory: || Box::new(ScaledGlm(Size::fixed(2, 44, 4), CMP_STEPS)),
+        },
     ]
 }
+
+/// Equal, moderate step budget for the matched-activation comparison archs (fair
+/// + fast on the CPU backend; both `qwen-cmp` and `glm-cmp` cap the benchmark's
+/// requested steps to this).
+const CMP_STEPS: u32 = 250;
 
 /// Look up an [`Arch`] by name.
 pub fn get_arch(name: &str) -> Option<Arch> {
@@ -235,6 +262,46 @@ impl DecoderLm for ScaledGpt {
     fn load_scorer(&self, weights: &Path, block_size: u32) -> Box<dyn Scorer> {
         // Reuse the GPT baseline's loader (shape is read from the checkpoint).
         crate::GptDecoder.load_scorer(weights, block_size)
+    }
+}
+
+/// Override the requested size + cap the step budget, then delegate to a base
+/// [`DecoderLm`]. Used for the fixed-shape, equal-budget comparison variants.
+fn scaled_cfg(size: Size, steps_cap: u32, cfg: &TrainConfig) -> TrainConfig {
+    TrainConfig {
+        n_layers: size.n_layers.unwrap_or(cfg.n_layers),
+        d_model: size.d_model.unwrap_or(cfg.d_model),
+        n_heads: size.n_heads.unwrap_or(cfg.n_heads),
+        steps: cfg.steps.min(steps_cap),
+        ..cfg.clone()
+    }
+}
+
+/// Qwen dense decoder at a fixed shape + capped steps (activation-matched variant).
+pub struct ScaledQwen(pub Size, pub u32);
+impl DecoderLm for ScaledQwen {
+    fn arch_name(&self) -> &'static str {
+        "qwen"
+    }
+    fn train_decoder(&self, dir: &Path, block_size: u32, cfg: &TrainConfig, out: &Path) -> std::io::Result<(f32, f32)> {
+        crate::QwenDecoder.train_decoder(dir, block_size, &scaled_cfg(self.0, self.1, cfg), out)
+    }
+    fn load_scorer(&self, weights: &Path, block_size: u32) -> Box<dyn Scorer> {
+        crate::QwenDecoder.load_scorer(weights, block_size)
+    }
+}
+
+/// GLM MoE decoder at a fixed shape + capped steps (activation-matched variant).
+pub struct ScaledGlm(pub Size, pub u32);
+impl DecoderLm for ScaledGlm {
+    fn arch_name(&self) -> &'static str {
+        "glm"
+    }
+    fn train_decoder(&self, dir: &Path, block_size: u32, cfg: &TrainConfig, out: &Path) -> std::io::Result<(f32, f32)> {
+        crate::GlmDecoder.train_decoder(dir, block_size, &scaled_cfg(self.0, self.1, cfg), out)
+    }
+    fn load_scorer(&self, weights: &Path, block_size: u32) -> Box<dyn Scorer> {
+        crate::GlmDecoder.load_scorer(weights, block_size)
     }
 }
 
