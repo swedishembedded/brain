@@ -8,8 +8,9 @@
 //! offsets are *byte* ranges into the blob (plus a `__metadata__` entry we
 //! skip). Tensors are dequantised to `f32` so the rest of brain's fp32-only
 //! engine can consume them directly. Supports F32, F16, and BF16 (Qwen ships
-//! bf16). Single-file only; sharded checkpoints (`*.index.json`) are handled by
-//! the caller iterating the shard list.
+//! bf16). [`parse`]/[`read`] handle one file; [`read_model_dir`] additionally
+//! resolves sharded checkpoints (`model.safetensors.index.json` +
+//! `model-0000k-of-000NN.safetensors`) by iterating the index `weight_map`.
 
 use serde_json::Value;
 
@@ -105,6 +106,57 @@ pub fn read(path: &str) -> Result<Vec<StTensor>, String> {
     parse(&bytes)
 }
 
+/// Read all tensors from a HuggingFace model directory, handling both the
+/// single-file (`model.safetensors`) and sharded
+/// (`model.safetensors.index.json` + `model-0000k-of-000NN.safetensors`)
+/// layouts. Large models (e.g. GLM) ship sharded; small ones (e.g. Qwen3-0.6B)
+/// ship a single file. When both are present the index wins.
+///
+/// Tensors are returned in a deterministic order: shards are read in the sorted
+/// order they first appear in the index `weight_map`, and within each shard the
+/// declared (file) order is preserved. The caller (an importer) remaps by name,
+/// so the exact interleaving does not matter — only that every tensor appears
+/// exactly once.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_model_dir(dir: &std::path::Path) -> Result<Vec<StTensor>, String> {
+    let index = dir.join("model.safetensors.index.json");
+    if index.exists() {
+        let idx_bytes =
+            std::fs::read(&index).map_err(|e| format!("cannot read {}: {e}", index.display()))?;
+        let idx: Value = serde_json::from_slice(&idx_bytes)
+            .map_err(|e| format!("safetensors index: bad json: {e}"))?;
+        let map = idx["weight_map"]
+            .as_object()
+            .ok_or("safetensors index: missing weight_map object")?;
+        // Unique shard filenames in first-seen order, then sorted for determinism.
+        let mut shards: Vec<String> = Vec::new();
+        for shard in map.values() {
+            let s = shard.as_str().ok_or("safetensors index: non-string shard name")?;
+            if !shards.iter().any(|x| x == s) {
+                shards.push(s.to_string());
+            }
+        }
+        shards.sort();
+        if shards.is_empty() {
+            return Err("safetensors index: empty weight_map".into());
+        }
+        let mut out = Vec::new();
+        for shard in &shards {
+            let p = dir.join(shard);
+            out.extend(read(p.to_str().ok_or("safetensors: non-utf8 shard path")?)?);
+        }
+        return Ok(out);
+    }
+    let single = dir.join("model.safetensors");
+    if single.exists() {
+        return read(single.to_str().ok_or("safetensors: non-utf8 path")?);
+    }
+    Err(format!(
+        "no model.safetensors or model.safetensors.index.json in {}",
+        dir.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +191,54 @@ mod tests {
         assert_eq!(f16_to_f32(0x3C00), 1.0); // 1.0
         assert_eq!(f16_to_f32(0xC000), -2.0); // -2.0
         assert_eq!(f16_to_f32(0x0000), 0.0); // +0
+    }
+
+    /// Build a one-tensor F32 safetensors byte buffer for the shard tests.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn one_tensor_bytes(name: &str, vals: &[f32]) -> Vec<u8> {
+        let hdr = serde_json::json!({
+            name: {"dtype": "F32", "shape": [vals.len()], "data_offsets": [0, vals.len() * 4]},
+        });
+        let hb = serde_json::to_vec(&hdr).unwrap();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(hb.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&hb);
+        for v in vals {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        buf
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn read_model_dir_sharded_and_single() {
+        let base = std::env::temp_dir().join(format!("brain-st-shard-{}", std::process::id()));
+        // Sharded layout: two shards + an index weight_map.
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("model-00001-of-00002.safetensors"), one_tensor_bytes("a", &[1.0, 2.0]))
+            .unwrap();
+        std::fs::write(base.join("model-00002-of-00002.safetensors"), one_tensor_bytes("b", &[3.0]))
+            .unwrap();
+        let index = serde_json::json!({
+            "metadata": {"total_size": 12},
+            "weight_map": {"a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"},
+        });
+        std::fs::write(base.join("model.safetensors.index.json"), serde_json::to_vec(&index).unwrap())
+            .unwrap();
+
+        let ts = read_model_dir(&base).unwrap();
+        assert_eq!(ts.len(), 2);
+        assert_eq!(ts.iter().find(|t| t.name == "a").unwrap().data, vec![1.0, 2.0]);
+        assert_eq!(ts.iter().find(|t| t.name == "b").unwrap().data, vec![3.0]);
+
+        // Single-file layout in a fresh dir.
+        let single = base.join("single");
+        std::fs::create_dir_all(&single).unwrap();
+        std::fs::write(single.join("model.safetensors"), one_tensor_bytes("c", &[9.0])).unwrap();
+        let ts = read_model_dir(&single).unwrap();
+        assert_eq!(ts.len(), 1);
+        assert_eq!(ts[0].name, "c");
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }
