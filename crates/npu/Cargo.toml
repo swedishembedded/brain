@@ -15,6 +15,7 @@ brain-backend-api.workspace = true
 brain-onnx.workspace = true
 brain-checkpoint.workspace = true
 brain-qwen.workspace = true
+brain-glm.workspace = true
 brain-codec.workspace = true
 brain-yolo.workspace = true
 brain-data.workspace = true

@@ -10,12 +10,15 @@ dense-expert export and its current status.
 - **cpu / gpu**: fully supported today — the GLM model is written once against the
   `Gpu`/`Step` seam (`crates/glm`), so `--device cpu|gpu` runs it unchanged
   (validated: gradcheck + learnability + end-to-end `brain glm train/eval/infer`).
-- **npu**: designed here, **not yet wired**. The export builder + parity test are
-  the remaining work; they require an OpenVINO install + NPU hardware to validate
-  (this repo's CI/build stays green without OpenVINO via `runtime-linking`, but
-  numerical parity can only be confirmed on a machine with the runtime — the same
-  gate the Qwen decoder export uses, `BRAIN_OV_PROBE`). Unverified graph code is
-  intentionally **not** committed.
+- **npu**: the **fp32 ONNX export is implemented** — `crates/npu/src/glm_topology.rs`
+  (MLA + dense-expert MoE, TopK gate, interleaved RoPE) + `glm_export.rs`, driven by
+  `brain glm export --weights F --out model.onnx --seq T`. A **structural test**
+  (`crates/npu/tests/glm_onnx.rs`, no OpenVINO needed) validates the graph decodes
+  to a well-formed `ModelProto` with the right inputs/outputs and op set.
+  **Numerical parity vs brain's own forward is NOT asserted here** — it requires an
+  OpenVINO install + NPU hardware (gated on `BRAIN_OV_PROBE`, like the Qwen decoder
+  export). INT8 weight-only quant + the OpenVINO decode session are the remaining
+  hardware-gated work.
 
 ## Why "dense-expert"
 

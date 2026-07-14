@@ -23,6 +23,8 @@ pub mod quant;
 pub mod qwen_decode;
 pub mod qwen_export;
 pub mod qwen_topology;
+pub mod glm_export;
+pub mod glm_topology;
 pub mod sim;
 pub mod topology;
 

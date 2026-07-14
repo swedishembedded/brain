@@ -27,7 +27,8 @@ pub fn run_glm(args: &[String]) {
         Some("infer") | Some("gen") => infer(&args[1..]),
         Some("eval") => eval(&args[1..]),
         Some("import") => import(&args[1..]),
-        other => eprintln!("usage: brain glm <train|finetune|infer|eval|import> ...  (got {other:?})"),
+        Some("export") => export(&args[1..]),
+        other => eprintln!("usage: brain glm <train|finetune|infer|eval|import|export> ...  (got {other:?})"),
     }
 }
 
@@ -326,5 +327,31 @@ fn import(args: &[String]) {
     match glm::import::import(&hf, &out) {
         Ok(()) => println!("ok: wrote {out}"),
         Err(e) => eprintln!("import failed: {e}"),
+    }
+}
+
+/// `brain glm export --weights F --out model.onnx --seq T` — emit the ONNX
+/// decoder graph (dense-expert MoE) for OpenVINO / the NPU (see docs/glm/NPU.md).
+fn export(args: &[String]) {
+    let mut weights = String::new();
+    let mut out = "glm.onnx".to_string();
+    let mut seq = 32usize;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--weights" => weights = val(args, &mut i, "--weights"),
+            "--out" => out = val(args, &mut i, "--out"),
+            "--seq" => seq = val(args, &mut i, "--seq").parse().unwrap_or(seq),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    if weights.is_empty() {
+        eprintln!("usage: brain glm export --weights F --out model.onnx [--seq T]");
+        return;
+    }
+    match npu::glm_export::export_glm_fp32(&weights, &out, seq) {
+        Ok(()) => println!("ok: wrote {out} (seq_len {seq})"),
+        Err(e) => eprintln!("export failed: {e}"),
     }
 }
