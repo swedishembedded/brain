@@ -1,9 +1,13 @@
 # AGENTS.md — brain (edge-AI model training framework)
 
 Routing guide for this repo. **brain** trains and evaluates **neural networks
-from scratch on the GPU**, **pure Rust + raw WGSL**, fp32-only so the same
-kernels run on old desktop GPUs and on WebGPU in the browser. It is a
-self-contained Cargo **workspace** under `crates/` — no Python in the build/test
+from scratch on the CPU, NPU and GPU**, **pure Rust + raw kernels**. Full
+validated parity between all supported accelerator backends.
+
+Brain provides both training and inference with quantization and with highly
+efficient use of accelerator hardware.
+
+It is a self-contained Cargo **workspace** under `crates/` — no Python in the build/test
 path; backprop correctness is gated by an in-repo finite-difference gradient
 checker (`crates/gradcheck`), not a PyTorch oracle.
 
@@ -51,6 +55,7 @@ them, keeping the gradient-check discipline.
 | `cli` | the `brain` binary (aggregates everything) |
 | `web` | wasm32/WebGPU PID demo; optional `vulkan` (coopmat) is non-default |
 
+
 ## Task → where to look
 
 | Task | Where |
@@ -74,6 +79,7 @@ them, keeping the gradient-check discipline.
 | Federated shard/assemble | `crates/federated/src/{shard,sha256}.rs` |
 | CLI subcommands | `crates/cli/src/{main,gpt_cli,yolo_cli,data_cli,federated_cli,pid_cli,run_cli}.rs` |
 | Porting source-of-truth (read-only) | `scratchpad/reference/{nanogpt,sharded_moe_example,pytorch}/` |
+
 
 ## Essential commands
 
@@ -112,6 +118,7 @@ make web/dev                         # WebGPU demo (delegates to crates/web)
 ./target/release/brain gpt train data/calculator --device cpu --out out/gpt.weights
 BRAIN_DEVICE=cpu make test            # run the whole suite on CPU, no GPU needed
 ```
+
 
 ## Benchmark suite (`crates/bench`)
 
