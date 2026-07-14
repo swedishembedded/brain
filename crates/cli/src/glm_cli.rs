@@ -210,9 +210,22 @@ fn infer(args: &[String]) {
         }
     };
     let tok = CharTokenizer::from_itos(itos);
-    let model = Glm::load_inference(&weights, 1, model_block(&weights));
     let prompt_text = if prompt.is_empty() { "\n" } else { prompt.as_str() };
     let prompt_ids: Vec<u32> = tok.encode(prompt_text);
+    // NPU / OpenVINO whole-graph path (greedy): export -> compile -> decode.
+    if crate::npu_requested() {
+        match npu::glm_decode::generate(&weights, &prompt_ids, max_new, npu::openvino::NpuDevice::Npu, true, None, false) {
+            Ok(run) => {
+                eprintln!("npu: ran on OpenVINO device {} (load_ms={:.1} gen_ms={:.1})", run.device, run.load_ms, run.gen_ms);
+                print!("{prompt_text}");
+                print!("{}", tok.decode(&run.tokens));
+                println!();
+            }
+            Err(e) => eprintln!("npu infer failed: {e}"),
+        }
+        return;
+    }
+    let model = Glm::load_inference(&weights, 1, model_block(&weights));
     let mut rng = Rng::new(seed);
     let gen = glm::sample::generate(&model, &prompt_ids, max_new, temp, top_k, None, &mut rng);
     print!("{prompt_text}");
@@ -282,13 +295,19 @@ fn export(args: &[String]) {
     let weights = a.str_or("--weights", "");
     let out = a.str_or("--out", "glm.onnx");
     let seq = a.usize_or("--seq", 32);
+    let int8 = a.take_flag("--int8");
     a.finish();
     if weights.is_empty() {
-        eprintln!("usage: brain glm export --weights F --out model.onnx [--seq T]");
+        eprintln!("usage: brain glm export --weights F --out model.onnx [--seq T --int8]");
         return;
     }
-    match npu::glm_export::export_glm_fp32(&weights, &out, seq) {
-        Ok(()) => println!("ok: wrote {out} (seq_len {seq})"),
+    let res = if int8 {
+        npu::glm_export::export_glm_int8(&weights, &out, seq)
+    } else {
+        npu::glm_export::export_glm_fp32(&weights, &out, seq)
+    };
+    match res {
+        Ok(()) => println!("ok: wrote {out} (seq_len {seq}{})", if int8 { ", int8" } else { "" }),
         Err(e) => eprintln!("export failed: {e}"),
     }
 }

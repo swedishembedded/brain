@@ -18,14 +18,22 @@ use onnx::builder::GraphBuilder;
 use onnx::graph::Node;
 use glm::config::GlmConfig;
 
+use crate::qwen_topology::Quant;
+
 type W = HashMap<String, Vec<f32>>;
 
-/// Assemble the GLM decoder graph into `g`. `w` = checkpoint tensors (role "").
+/// Assemble the GLM decoder graph into `g` (fp32). `w` = checkpoint tensors (role "").
 pub fn build_glm_graph(cfg: &GlmConfig, w: &W, t: usize, g: &mut GraphBuilder) {
+    build_glm_graph_quant(cfg, w, t, g, Quant::F32);
+}
+
+/// As [`build_glm_graph`] but with a weight quantization mode (`Int8` stores the
+/// linear weights per-output-channel and dequantises in-graph — ~4x smaller).
+pub fn build_glm_graph_quant(cfg: &GlmConfig, w: &W, t: usize, g: &mut GraphBuilder, quant: Quant) {
     let d = cfg.d_model as usize;
     let vocab = cfg.vocab as usize;
     let ti = t as i64;
-    let mut tp = Topo { g, n: 0 };
+    let mut tp = Topo { g, n: 0, quant };
 
     tp.g.input_i64("input_ids", &[1, ti]);
     tp.g.output_f32("logits", &[1, ti, vocab as i64]);
@@ -163,6 +171,7 @@ fn build_stack(tp: &mut Topo, cfg: &GlmConfig, w: &W, t: usize, x_in: &str) -> S
 struct Topo<'a> {
     g: &'a mut GraphBuilder,
     n: usize,
+    quant: Quant,
 }
 
 impl<'a> Topo<'a> {
@@ -303,9 +312,46 @@ impl<'a> Topo<'a> {
         o
     }
     fn linear_named(&mut self, x: &str, name: &str, winit: &str, w: &W, out: usize, inp: usize, y: &str) {
-        if !self.has(winit) {
-            let wt = transpose(&w[name], out, inp); // [out,in] -> [in,out]
-            self.f32(winit, &[inp as i64, out as i64], wt);
+        let qmax = match self.quant {
+            Quant::F32 => {
+                if !self.has(winit) {
+                    let wt = transpose(&w[name], out, inp); // [out,in] -> [in,out]
+                    self.f32(winit, &[inp as i64, out as i64], wt);
+                }
+                self.node("MatMul", &[x, winit], y);
+                return;
+            }
+            Quant::Int8 => 127.0f32,
+            Quant::Int4 => 7.0f32,
+        };
+        // Per-output-channel (axis=1) symmetric integer weights, dequantised
+        // in-graph (DequantizeLinear) then MatMul.
+        let wq = format!("{winit}.q");
+        if !self.has(&wq) {
+            let wt = transpose(&w[name], out, inp);
+            let mut scales = vec![0f32; out];
+            let mut q = vec![0i8; inp * out];
+            for o in 0..out {
+                let mut mx = 0f32;
+                for i in 0..inp {
+                    mx = mx.max(wt[i * out + o].abs());
+                }
+                let s = if mx > 0.0 { mx / qmax } else { 1.0 };
+                scales[o] = s;
+                for i in 0..inp {
+                    q[i * out + o] = (wt[i * out + o] / s).round().clamp(-qmax, qmax) as i8;
+                }
+            }
+            let zp = format!("{winit}.zp");
+            if matches!(self.quant, Quant::Int4) {
+                self.g.init_i4(&wq, &[inp as i64, out as i64], q);
+                self.g.init_i4(&zp, &[out as i64], vec![0i8; out]);
+            } else {
+                self.g.init_i8(&wq, &[inp as i64, out as i64], q);
+                self.g.init_i8(&zp, &[out as i64], vec![0i8; out]);
+            }
+            self.f32(&format!("{winit}.s"), &[out as i64], scales);
+            self.g.add(Node::new("DequantizeLinear", &[&wq, &format!("{winit}.s"), &zp], &[winit]).attr_int("axis", 1));
         }
         self.node("MatMul", &[x, winit], y);
     }

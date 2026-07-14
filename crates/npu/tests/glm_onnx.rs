@@ -161,3 +161,45 @@ fn glm_onnx_runs_on_npu() {
     eprintln!("GLM ONNX on NPU-requested: max_abs={max_abs:.5} (ran on {})", sess.device());
     assert!(max_abs < 2e-2, "logit mismatch too large: {max_abs}");
 }
+
+/// The INT8 weight-only GLM export compiles + runs on OpenVINO and roughly tracks
+/// brain (INT8 is lossy, so we check finiteness + a loose bound, not strict
+/// parity). Validates the in-graph DequantizeLinear path. Gated on BRAIN_OV_PROBE.
+#[test]
+fn glm_onnx_int8_runs() {
+    if std::env::var("BRAIN_OV_PROBE").is_err() || std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    use glm::model::Glm;
+    use npu::openvino::{DecoderSession, NpuConfig, NpuDevice};
+
+    let cfg = GlmConfig::tiny();
+    let vocab = cfg.vocab as usize;
+    let init = glm::init_weights(&cfg, 7);
+    let model = Glm::new(cfg.clone(), 1, cfg.block_size, &init);
+    let ids: Vec<u32> = (0..6).map(|i| (i * 5 + 1) % cfg.vocab).collect();
+    let reference = model.logits_all(&ids);
+
+    let dir = std::env::temp_dir().join(format!("brain-glm-int8-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wpath = dir.join("tiny.weights");
+    model.save(wpath.to_str().unwrap());
+    let (bytes, _) = npu::glm_export::build_glm_int8_bytes(wpath.to_str().unwrap(), ids.len()).unwrap();
+    let mut sess = DecoderSession::load_bytes(
+        &bytes,
+        &NpuConfig { device: NpuDevice::Cpu, allow_fallback: true, ..Default::default() },
+    )
+    .expect("compile INT8 GLM decoder");
+    let ids64: Vec<i64> = ids.iter().map(|&x| x as i64).collect();
+    let got = sess.run_ids(&ids64).expect("run INT8 GLM decoder");
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(got.len(), reference.len());
+    assert!(got.iter().all(|v| v.is_finite()), "INT8 logits must be finite");
+    let mut max_abs = 0f32;
+    for (a, b) in reference.iter().zip(&got) {
+        max_abs = max_abs.max((a - b).abs());
+    }
+    eprintln!("GLM INT8 ONNX vs brain: max_abs={max_abs:.4} (device {})", sess.device());
+    assert!(max_abs < 2.0, "INT8 logits wildly off: {max_abs}"); // loose: lossy quant on a random tiny model
+}
