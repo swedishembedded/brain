@@ -17,6 +17,7 @@
 //! architecture + parameter layout, `import.rs` the HuggingFace weight import.
 
 pub mod config;
+pub mod distill;
 pub mod import;
 pub mod init;
 pub mod model;

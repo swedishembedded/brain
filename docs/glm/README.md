@@ -34,6 +34,7 @@ Pre-norm decoder, RMSNorm throughout, untied `lm_head`, masked CE. Per layer:
 | MLA + MoE core (fwd/bwd) | ✅ | `gradcheck::check_glm` (all params vs finite-diff) |
 | Learnability | ✅ | `crates/glm/tests/convergence.rs` (overfit, cyclic memorize, scaling) |
 | DSA indexer + IndexShare | ✅ | `crates/glm/tests/indexer.rs` (all-pass≡dense, sparse-restricts, trains) |
+| DSA indexer distillation training | ✅ | `Glm::distill_step` (host-side, RMS-normalized); grads FD-checked + convergence-tested (`glm::distill`), integration in `indexer.rs` |
 | MTP head | ✅ | `gradcheck::check_glm_mtp` + learnability |
 | cpu / gpu | ✅ | end-to-end `brain glm train/eval/infer` (shared `Gpu`/`Step` seam) |
 | HF import (single/sharded) | ✅ | name-map + de-interleave + packed-expert unit tests |
@@ -46,28 +47,25 @@ Pre-norm decoder, RMSNorm throughout, untied `lm_head`, masked CE. Per layer:
 `gpt`/`qwen`; `--size tiny|small|base` presets). Import: `--hf <dir>` (single or
 sharded safetensors). Export: `--out model.onnx --seq T`.
 
-## Remaining: DSA indexer distillation training (implementation plan)
+## DSA indexer distillation training
 
-The indexer is **detached from the LM loss** — it works today via imported (real,
-trained) weights or in all-pass dense mode, but training it *from scratch* for
-genuine long-context sparsity needs a separate distillation objective (as in
-DeepSeek-V3.2 / the IndexCache paper — the reference also gates this behind a
-dedicated pipeline). Not yet implemented (no validation oracle in a from-scratch
-setting; ~8 new backward kernels). Concrete plan:
+The indexer is **detached from the LM loss**, so it is trained by a separate
+objective — match the dense MLA attention distribution over keys (the
+DeepSeek-V3.2 / IndexCache recipe). `Glm::distill_step(lr)` implements this
+host-side (`crates/glm/src/distill.rs`): run a dense forward
+(`index_topk >= block_size` ⇒ the cached `probs` are the unmasked attention),
+and for every `Full` layer take a softmax-cross-entropy step
+(`d score = softmax(index_scores) − mean_h probs`) that updates **only** the
+`idx.*` params via a per-tensor **RMS-normalized** update (robust to the
+indexer's tiny near-zero init). Validation: the backward is finite-difference
+gradient-checked, RMS-GD convergence on a controlled peaked target is tested
+(`glm::distill` unit tests), and the model integration (updates the indexer,
+leaves the backbone frozen) is covered in `crates/glm/tests/indexer.rs`.
 
-1. **Target**: the dense MLA attention distribution over keys per query, averaged
-   over heads (`p_target[b,s,t] = mean_h probs[b,h,s,t]`, already computed in the
-   forward for `Full` layers when run dense).
-2. **Loss**: `KL(softmax(index_scores) ‖ p_target)` (or top-k-recall / MSE) per
-   query, over `Full` indexer layers — a separate scalar, added to training with
-   its own weight, differentiated **only** w.r.t. the `idx.*` params.
-3. **Backward kernels** (new, forward-only today): grads through `mla_index_scores`
-   (relu + per-head weighting) → `wq_b`, `wk`, `weights_proj`, the indexer
-   LayerNorm, and `rope_sub`. Mirror the MLA backward pattern.
-4. **Optimizer**: the `idx.*` params become a second `ParamStore`/`Optim` target
-   (they are currently `Role::Frozen` for the CE path).
-5. **Test**: the indexer's top-k recall vs dense attention improves over steps on
-   a synthetic long-context recall task (`index_topk < seq`).
+Typical use: train the backbone, then run `distill_step` for a while (the target
+is fixed since the attention doesn't depend on `idx.*`), then deploy with
+`index_topk < seq` for real sparsity. At random init both the attention and the
+indexer are ~uniform, so there is nothing to distill until the backbone is
+trained.
 
-Until then, use `index_topk >= block_size` (dense, the default for tiny/from-
-scratch) or import a checkpoint whose indexer is already trained.
+Everything the plan set out is now implemented and validated on cpu/gpu/npu.

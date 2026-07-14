@@ -74,6 +74,44 @@ fn indexer_sparse_restricts_attention() {
     assert!((ls - lf).abs() > 1e-5, "top-k=2 mask did not change the output vs all-pass ({ls} vs {lf})");
 }
 
+/// DSA indexer distillation integration: `Glm::distill_step` runs a dense forward,
+/// reads the cached attention + indexer inputs, computes the host-side gradient,
+/// and updates the `idx.*` params (leaving the backbone untouched). This checks
+/// the end-to-end wiring; the *math* is gradient-checked and the *convergence* is
+/// validated on a controlled target in `glm::distill` unit tests.
+#[test]
+fn indexer_distillation_updates_weights() {
+    if skip() {
+        return;
+    }
+    let cfg = GlmConfig { indexer_full: vec![true, true], index_topk: 999, block_size: 16, ..GlmConfig::tiny() };
+    let init = glm::init_weights(&cfg, 5);
+    let model = Glm::new(cfg, 2, 8, &init);
+    let x: Vec<u32> = (0..16).map(|i| (i * 5 + 1) % 23).collect();
+    let y: Vec<u32> = (0..16).map(|i| (i * 5 + 2) % 23).collect();
+    model.set_batch(&x, &y);
+    // Train the backbone briefly so attention (the distillation target) is non-trivial.
+    for step in 1..=40 {
+        model.zero_grads();
+        model.forward();
+        model.backward();
+        model.adamw_step(step, 1e-2, 0.0, Some(1.0), 1.0);
+        model.poll_wait();
+    }
+    let loss = model.distill_step(0.0);
+    assert!(loss.is_finite() && loss > 0.0, "distill loss not finite: {loss}");
+
+    // A real step must move the indexer weights and leave the backbone unchanged.
+    let idx0 = model.read_weight("blocks.0.idx.weights_proj.weight");
+    let bb0 = model.read_weight("blocks.0.attn.q_a.weight");
+    model.distill_step(0.1);
+    model.poll_wait();
+    let idx1 = model.read_weight("blocks.0.idx.weights_proj.weight");
+    let bb1 = model.read_weight("blocks.0.attn.q_a.weight");
+    assert!(idx0.iter().zip(&idx1).any(|(a, b)| (a - b).abs() > 1e-6), "distill_step did not update the indexer");
+    assert_eq!(bb0, bb1, "distill_step must not touch the backbone");
+}
+
 /// An indexer-active model (IndexShare: `Full` + `Shared`) still trains — the
 /// extra indexer dispatches don't break forward/backward.
 #[test]

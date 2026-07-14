@@ -886,6 +886,74 @@ impl Glm {
         Some(arr.iter().filter_map(|x| x.as_str().and_then(|s| s.chars().next())).collect())
     }
 
+    /// One DSA-indexer **distillation** step (host-side): train the `idx.*` params
+    /// of every `Full` indexer layer to match the dense MLA attention distribution
+    /// over keys (the DeepSeek-V3.2 recipe — the indexer is detached from the LM
+    /// loss). Requires a dense forward (`index_topk >= block_size`, so the cached
+    /// `probs` are the *unmasked* attention). Each idx tensor is updated with a
+    /// per-tensor **RMS-normalized** step of size `lr` (RMSprop-style, so training
+    /// is robust to the indexer's tiny near-zero init where raw gradients are
+    /// minuscule). Pass `lr = 0` to just measure the loss. Returns the mean
+    /// distillation cross-entropy.
+    pub fn distill_step(&self, lr: f32) -> f32 {
+        use crate::distill::{layer_distill, IdxDims, IdxWeights};
+        let c = &self.cfg;
+        let n = (self.b * self.t) as usize;
+        let d = c.d_model as usize;
+        let ql = c.q_lora_rank as usize;
+        let bht2 = (self.b * c.n_heads * self.t * self.t) as usize;
+        self.forward(); // populate probs / xn1 / q_c_n (dense when index_topk >= block)
+        let dims = IdxDims {
+            b: self.b as usize,
+            t: self.t as usize,
+            h: c.index_n_heads as usize,
+            d: c.index_head_dim as usize,
+            rope: c.index_rope_dim() as usize,
+            ql,
+            dm: d,
+            mla_heads: c.n_heads as usize,
+        };
+        let mut total = 0.0f32;
+        let mut count = 0usize;
+        for l in 0..c.n_layers as usize {
+            if c.idx_mode(l as u32) != IdxMode::Full {
+                continue;
+            }
+            let lb = &self.layers[l];
+            let xn1 = self.gpu.read(&lb.xn1, n * d);
+            let q_c_n = self.gpu.read(&lb.q_c_n, n * ql);
+            let probs = self.gpu.read(&lb.probs, bht2);
+            let p = |s: &str| format!("blocks.{l}.idx.{s}");
+            let w = IdxWeights {
+                wq_b: self.read_weight(&p("wq_b.weight")),
+                wk: self.read_weight(&p("wk.weight")),
+                k_norm_w: self.read_weight(&p("k_norm.weight")),
+                k_norm_b: self.read_weight(&p("k_norm.bias")),
+                weights_proj: self.read_weight(&p("weights_proj.weight")),
+            };
+            let (loss, g) = layer_distill(&dims, &xn1, &q_c_n, &probs, &w);
+            total += loss;
+            count += 1;
+            let upd = |name: String, cur: &[f32], gr: &[f32]| {
+                // Per-tensor RMS-normalized step: effective size ~lr regardless of
+                // the (tiny) gradient magnitude at the near-zero indexer init.
+                let ms = gr.iter().map(|g| g * g).sum::<f32>() / gr.len().max(1) as f32;
+                let scale = if lr == 0.0 { 0.0 } else { lr / (ms.sqrt() + 1e-8) };
+                let nw: Vec<f32> = cur.iter().zip(gr).map(|(&x, &gg)| x - scale * gg).collect();
+                self.write_weight(&name, &nw);
+            };
+            upd(p("wq_b.weight"), &w.wq_b, &g.wq_b);
+            upd(p("wk.weight"), &w.wk, &g.wk);
+            upd(p("k_norm.weight"), &w.k_norm_w, &g.k_norm_w);
+            upd(p("k_norm.bias"), &w.k_norm_b, &g.k_norm_b);
+            upd(p("weights_proj.weight"), &w.weights_proj, &g.weights_proj);
+        }
+        if count == 0 {
+            return 0.0;
+        }
+        total / (count as f32 * n as f32)
+    }
+
     pub fn save(&self, path: &str) {
         self.save_with_itos(path, None);
     }
