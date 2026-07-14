@@ -1,0 +1,14 @@
+[package]
+name = "brain-backend-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Backend abstraction: Backend/GraphBackend traits, neutral buffer/step handles, and a backend registry. A new backend crate depends only on this."
+
+[lib]
+name = "backend_api"
+path = "src/lib.rs"
+
+# Intentionally dependency-free (std only): a new compute backend can implement
+# these traits without pulling in wgpu/ash/openvino or brain-gpu-core.
+[dependencies]

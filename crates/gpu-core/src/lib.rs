@@ -1,830 +1,243 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Shared GPU context + dispatch helpers (wgpu / Vulkan-Metal-DX12-GL).
+//! Compute-device facade.
 //!
-//! Both transformers (the sparse-MoE model and the PID event/effect model) build
-//! their own kernel set but share this plumbing: device init, the uniform/bind
-//! group/dispatch builder, a single-pass submit, and buffer read-back. Keeping it
-//! here removes the device-init + dispatch duplication that used to live in both
-//! the inference `Engine` and the training `Trainer`.
-
-//! ## Backends
+//! `Gpu` is a thin wrapper over a [`backend_api::Backend`] — the eager, per-step
+//! compute contract. Model code holds a `Gpu` and calls `storage`/`step`/`submit`/
+//! `read` without knowing which backend is behind it. The concrete backends live
+//! in their own crates (`brain-backend-wgpu`, `brain-backend-cpu`,
+//! `brain-backend-vulkan`), each implementing `Backend` and registering itself by
+//! name; adding a backend is a new crate that depends only on `brain-backend-api`,
+//! never this facade or its dispatch.
 //!
-//! By default this crate is the wgpu backend (`Gpu`). With the `cpu-backend`
-//! feature it instead compiles the WGSL kernels to native code via
-//! `brain-wgsl-cpu` and runs them across CPU cores — same `Gpu` API, same
-//! `Step`/`DeviceBuffer` names, so model code is backend-agnostic. The neutral
-//! `DeviceBuffer` alias and `BufUsage` type are what let the rest of the
-//! workspace avoid naming `wgpu::*` directly.
+//! The neutral [`DeviceBuffer`], [`Step`], and [`BufUsage`] types (re-exported
+//! from `backend_api`) are what let the rest of the workspace avoid naming
+//! `wgpu::*` / `ash::*` directly.
+//!
+//! ## Backend selection
+//!
+//! Native builds carry all three backends; a given `Gpu` uses exactly one, chosen
+//! by [`set_default_backend`] (the CLI's `--device` flag) or `BRAIN_DEVICE`. On
+//! wasm only the wgpu/WebGPU backend exists, so `Gpu` wraps it directly (no
+//! `dyn`, and async device init / read-back via `new_async` / `read_async`).
 
-/// Max workgroups per grid dimension (downlevel/Vulkan guarantee). The CPU
-/// backend reproduces the same tiling so the kernels' index math is identical.
-pub const MAX_GROUPS_PER_DIM: u32 = 65535;
+pub use backend_api::{f, BufUsage, DeviceBuffer, Step};
 
-/// Workgroup grid for `threads` invocations at `@workgroup_size(64)`: 1D until
-/// the count exceeds the per-dimension limit, then tiled into Y. Shared by both
-/// backends so the kernels' `gid.y*(nwg.x*64)+gid.x` reconstruction is identical.
-pub(crate) fn grid(threads: u32) -> (u32, u32) {
-    let groups = threads.div_ceil(64).max(1);
-    if groups <= MAX_GROUPS_PER_DIM {
-        (groups, 1)
-    } else {
-        (MAX_GROUPS_PER_DIM, groups.div_ceil(MAX_GROUPS_PER_DIM))
-    }
-}
-
-/// Pack an f32 into the u32 uniform stream (kernels read it back with bitcast).
-pub fn f(x: f32) -> u32 {
-    x.to_bits()
-}
-
-/// Backend-neutral buffer usage flags. Mirrors the subset of
-/// `wgpu::BufferUsages` the kernels need; the wgpu backend maps it back to
-/// `wgpu::BufferUsages`, the CPU backend ignores it (all allocations are plain
-/// host memory).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct BufUsage(pub u32);
-
-impl BufUsage {
-    pub const STORAGE: BufUsage = BufUsage(1);
-    pub const COPY_DST: BufUsage = BufUsage(2);
-    pub const COPY_SRC: BufUsage = BufUsage(4);
-    pub const UNIFORM: BufUsage = BufUsage(8);
-    pub fn contains(self, other: BufUsage) -> bool {
-        self.0 & other.0 == other.0
-    }
-}
-
-impl std::ops::BitOr for BufUsage {
-    type Output = BufUsage;
-    fn bitor(self, rhs: BufUsage) -> BufUsage {
-        BufUsage(self.0 | rhs.0)
-    }
-}
-
-// Both backends are compiled into every native build; the active one is chosen
-// at runtime per `Gpu` instance. On wasm only the wgpu/WebGPU backend exists
-// (Cranelift can't JIT there), so the CPU variant is cfg'd out.
-#[cfg(not(target_arch = "wasm32"))]
-mod cpu_backend;
-#[cfg(not(target_arch = "wasm32"))]
-mod fast_conv;
-#[cfg(not(target_arch = "wasm32"))]
-mod fast_ops;
-#[cfg(not(target_arch = "wasm32"))]
-mod vulkan_backend;
-
-/// Native builds carry both backends and pick one at runtime via this enum. On
-/// wasm only the wgpu/WebGPU backend exists, so `Gpu`/`DeviceBuffer`/`Step` are
-/// plain aliases to it (see the wasm `pub use` below) — no enum, no duplication.
-#[cfg(not(target_arch = "wasm32"))]
-mod native_accel {
-use super::{cpu_backend, vulkan_backend, wgpu_backend, BufUsage};
-use std::sync::atomic::{AtomicU8, Ordering};
-
-/// Which compute backend a `Gpu` uses.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Backend {
-    Wgpu,
-    Cpu,
-    /// Native Vulkan compute (ash + naga WGSL->SPIR-V). Falls back to wgpu if no
-    /// Vulkan device/ICD is present.
-    Vulkan,
-}
-
-static DEFAULT_BACKEND: AtomicU8 = AtomicU8::new(0); // 0=unset, 1=Wgpu, 2=Cpu, 3=Vulkan
-
-/// Set the process-wide default backend that `Gpu::new` builds. The CLI sets
-/// this from its `--device` flag. When unset, `BRAIN_DEVICE=cpu|vulkan` selects
-/// that backend; otherwise the default is wgpu (preserving prior behaviour).
-pub fn set_default_backend(b: Backend) {
-    DEFAULT_BACKEND.store(
-        match b {
-            Backend::Wgpu => 1,
-            Backend::Cpu => 2,
-            Backend::Vulkan => 3,
-        },
-        Ordering::Relaxed,
-    );
-}
-
-/// True iff a backend was explicitly selected via [`set_default_backend`] (i.e.
-/// the CLI saw a `--device` flag). Lets callers that historically defaulted to
-/// CPU (yolo) opt into the selected backend only when one was actually chosen.
-pub fn backend_selected() -> bool {
-    DEFAULT_BACKEND.load(Ordering::Relaxed) != 0
-}
-
-fn resolve_backend() -> Backend {
-    match DEFAULT_BACKEND.load(Ordering::Relaxed) {
-        1 => Backend::Wgpu,
-        2 => Backend::Cpu,
-        3 => Backend::Vulkan,
-        _ => {
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Ok(v) = std::env::var("BRAIN_DEVICE") {
-                if v.eq_ignore_ascii_case("cpu") {
-                    return Backend::Cpu;
-                }
-                if v.eq_ignore_ascii_case("vulkan") {
-                    return Backend::Vulkan;
-                }
-            }
-            Backend::Wgpu
-        }
-    }
-}
-
-/// A recorded dispatch, tagged by the backend that built it.
-pub enum Step {
-    Wgpu(wgpu_backend::Step),
-    #[cfg(not(target_arch = "wasm32"))]
-    Cpu(cpu_backend::Step),
-    #[cfg(not(target_arch = "wasm32"))]
-    Vulkan(vulkan_backend::Step),
-}
-
-/// A device buffer on whichever backend created it. Model code holds these and
-/// passes `&DeviceBuffer` to the dispatch methods without knowing the backend.
-pub enum DeviceBuffer {
-    Wgpu(wgpu::Buffer),
-    #[cfg(not(target_arch = "wasm32"))]
-    Cpu(cpu_backend::CpuBuffer),
-    #[cfg(not(target_arch = "wasm32"))]
-    Vulkan(vulkan_backend::VkOwnedBuffer),
-}
-
-impl DeviceBuffer {
-    #[inline]
-    fn wgpu(&self) -> &wgpu::Buffer {
-        match self {
-            DeviceBuffer::Wgpu(b) => b,
-            #[cfg(not(target_arch = "wasm32"))]
-            _ => panic!("DeviceBuffer/backend mismatch (non-wgpu buffer on wgpu backend)"),
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    #[inline]
-    fn cpu(&self) -> &cpu_backend::CpuBuffer {
-        match self {
-            DeviceBuffer::Cpu(b) => b,
-            _ => panic!("DeviceBuffer/backend mismatch (non-cpu buffer on cpu backend)"),
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    #[inline]
-    fn vulkan(&self) -> &vulkan_backend::VkOwnedBuffer {
-        match self {
-            DeviceBuffer::Vulkan(b) => b,
-            _ => panic!("DeviceBuffer/backend mismatch (non-vulkan buffer on vulkan backend)"),
-        }
-    }
-}
-
-/// The compute device: a runtime choice between the wgpu, native CPU, and native
-/// Vulkan backends. All are compiled in; a given instance uses exactly one.
-pub enum Gpu {
-    Wgpu(wgpu_backend::Gpu),
-    #[cfg(not(target_arch = "wasm32"))]
-    Cpu(cpu_backend::CpuBackend),
-    #[cfg(not(target_arch = "wasm32"))]
-    Vulkan(vulkan_backend::Gpu),
-}
+// ---- native facade ----------------------------------------------------------
 
 #[cfg(not(target_arch = "wasm32"))]
-impl Gpu {
-    /// Build the default backend (see [`set_default_backend`] / `BRAIN_DEVICE`).
-    pub fn new(kernels: &[(&str, &str)]) -> Gpu {
-        match resolve_backend() {
-            Backend::Wgpu => Gpu::Wgpu(wgpu_backend::Gpu::new(kernels)),
-            Backend::Cpu => Gpu::Cpu(cpu_backend::CpuBackend::new(kernels)),
-            // Prefer Vulkan when selected; fall back to wgpu if there is no ICD /
-            // device or a kernel fails to compile, so the build stays usable
-            // everywhere (the user's graceful-fallback requirement).
-            Backend::Vulkan => match vulkan_backend::Gpu::try_new(kernels) {
-                Ok(g) => Gpu::Vulkan(g),
-                Err(e) => {
-                    eprintln!("brain: Vulkan backend unavailable ({e}); falling back to wgpu");
-                    Gpu::Wgpu(wgpu_backend::Gpu::new(kernels))
-                }
+mod native_facade {
+    use super::{DeviceBuffer, Step};
+    use backend_api::BufUsage;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    /// Which compute backend a `Gpu` uses. A selection enum for the CLI — distinct
+    /// from the [`backend_api::Backend`] *trait* the backends implement.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Backend {
+        Wgpu,
+        Cpu,
+        /// Native Vulkan compute (ash + naga WGSL->SPIR-V). Falls back to wgpu if
+        /// no Vulkan device/ICD is present.
+        Vulkan,
+    }
+
+    static DEFAULT_BACKEND: AtomicU8 = AtomicU8::new(0); // 0=unset, 1=Wgpu, 2=Cpu, 3=Vulkan
+
+    /// Set the process-wide default backend that `Gpu::new` builds. The CLI sets
+    /// this from its `--device` flag. When unset, `BRAIN_DEVICE=cpu|vulkan`
+    /// selects that backend; otherwise the default is wgpu.
+    pub fn set_default_backend(b: Backend) {
+        DEFAULT_BACKEND.store(
+            match b {
+                Backend::Wgpu => 1,
+                Backend::Cpu => 2,
+                Backend::Vulkan => 3,
             },
-        }
-    }
-    /// Build on the native CPU backend regardless of the default selection.
-    pub fn new_cpu(kernels: &[(&str, &str)]) -> Gpu {
-        Gpu::Cpu(cpu_backend::CpuBackend::new(kernels))
-    }
-    /// Build on the wgpu backend regardless of the default selection.
-    pub fn new_wgpu(kernels: &[(&str, &str)]) -> Gpu {
-        Gpu::Wgpu(wgpu_backend::Gpu::new(kernels))
-    }
-    /// Build on the native Vulkan backend, or `Err` if no Vulkan device is present.
-    pub fn try_new_vulkan(kernels: &[(&str, &str)]) -> Result<Gpu, String> {
-        vulkan_backend::Gpu::try_new(kernels).map(Gpu::Vulkan)
+            Ordering::Relaxed,
+        );
     }
 
-    pub fn storage(&self, n: u64) -> DeviceBuffer {
-        match self {
-            Gpu::Wgpu(g) => DeviceBuffer::Wgpu(g.storage(n)),
-            Gpu::Cpu(c) => DeviceBuffer::Cpu(c.storage(n)),
-            Gpu::Vulkan(v) => DeviceBuffer::Vulkan(v.storage(n)),
-        }
+    /// True iff a backend was explicitly selected via [`set_default_backend`]
+    /// (i.e. the CLI saw a `--device` flag). Lets callers that historically
+    /// defaulted to CPU (yolo) opt into the selected backend only when one was
+    /// actually chosen.
+    pub fn backend_selected() -> bool {
+        DEFAULT_BACKEND.load(Ordering::Relaxed) != 0
     }
-    pub fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer {
-        match self {
-            Gpu::Wgpu(g) => DeviceBuffer::Wgpu(g.storage_init(name, data)),
-            Gpu::Cpu(c) => DeviceBuffer::Cpu(c.storage_init(name, data)),
-            Gpu::Vulkan(v) => DeviceBuffer::Vulkan(v.storage_init(name, data)),
-        }
-    }
-    pub fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> DeviceBuffer {
-        match self {
-            Gpu::Wgpu(g) => DeviceBuffer::Wgpu(g.buffer(label, size, usage)),
-            Gpu::Cpu(c) => DeviceBuffer::Cpu(c.buffer(label, size, usage)),
-            Gpu::Vulkan(v) => DeviceBuffer::Vulkan(v.buffer(label, size, usage)),
-        }
-    }
-    pub fn uniform_dynamic(&self, len: usize) -> DeviceBuffer {
-        match self {
-            Gpu::Wgpu(g) => DeviceBuffer::Wgpu(g.uniform_dynamic(len)),
-            Gpu::Cpu(c) => DeviceBuffer::Cpu(c.uniform_dynamic(len)),
-            Gpu::Vulkan(v) => DeviceBuffer::Vulkan(v.uniform_dynamic(len)),
-        }
-    }
-    pub fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
-        match self {
-            Gpu::Wgpu(g) => g.write(buf.wgpu(), data),
-            Gpu::Cpu(c) => c.write(buf.cpu(), data),
-            Gpu::Vulkan(v) => v.write(buf.vulkan(), data),
-        }
-    }
-    pub fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
-        match self {
-            Gpu::Wgpu(g) => g.read(buf.wgpu(), n),
-            Gpu::Cpu(c) => c.read(buf.cpu(), n),
-            Gpu::Vulkan(v) => v.read(buf.vulkan(), n),
-        }
-    }
-    pub fn poll_wait(&self) {
-        match self {
-            Gpu::Wgpu(g) => g.poll_wait(),
-            Gpu::Cpu(c) => c.poll_wait(),
-            Gpu::Vulkan(v) => v.poll_wait(),
-        }
-    }
-    pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
-        match self {
-            Gpu::Wgpu(g) => {
-                let bs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| b.wgpu()).collect();
-                Step::Wgpu(g.step(kind, &bs, params, threads))
-            }
-            Gpu::Cpu(c) => {
-                let bs: Vec<&cpu_backend::CpuBuffer> = bufs.iter().map(|b| b.cpu()).collect();
-                Step::Cpu(c.step(kind, &bs, params, threads))
-            }
-            Gpu::Vulkan(v) => {
-                let bs: Vec<&vulkan_backend::VkOwnedBuffer> = bufs.iter().map(|b| b.vulkan()).collect();
-                Step::Vulkan(v.step(kind, &bs, params, threads))
+
+    /// The registry name of the selected backend.
+    fn resolve_backend_name() -> &'static str {
+        match DEFAULT_BACKEND.load(Ordering::Relaxed) {
+            1 => "wgpu",
+            2 => "cpu",
+            3 => "vulkan",
+            _ => {
+                if let Ok(v) = std::env::var("BRAIN_DEVICE") {
+                    if v.eq_ignore_ascii_case("cpu") {
+                        return "cpu";
+                    }
+                    if v.eq_ignore_ascii_case("vulkan") {
+                        return "vulkan";
+                    }
+                }
+                "wgpu"
             }
         }
     }
 
-    /// Like [`step`](Self::step) but each buffer binds the sub-range
-    /// `offsets[i] = (word_offset, word_len)` (`word_len == 0` => to end). Used to
-    /// tile a >128MB tensor (e.g. the Qwen embedding/lm_head) across vocab so each
-    /// binding stays under the backend's per-binding size limit.
-    pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
-        match self {
-            Gpu::Wgpu(g) => {
-                let bs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| b.wgpu()).collect();
-                Step::Wgpu(g.step_sliced(kind, &bs, offsets, params, threads))
-            }
-            Gpu::Cpu(c) => {
-                let bs: Vec<&cpu_backend::CpuBuffer> = bufs.iter().map(|b| b.cpu()).collect();
-                Step::Cpu(c.step_sliced(kind, &bs, offsets, params, threads))
-            }
-            Gpu::Vulkan(v) => {
-                let bs: Vec<&vulkan_backend::VkOwnedBuffer> = bufs.iter().map(|b| b.vulkan()).collect();
-                Step::Vulkan(v.step_sliced(kind, &bs, offsets, params, threads))
+    /// Register the built-in backends' factories once (idempotent).
+    fn register_builtins() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            backend_wgpu::register();
+            backend_cpu::register();
+            backend_vulkan::register();
+        });
+    }
+
+    /// The compute device: a runtime-selected eager backend behind a trait object.
+    /// All are compiled in; a given instance uses exactly one. Adding a backend
+    /// never touches this type — the dispatch just forwards to `self.inner`.
+    pub struct Gpu {
+        inner: Box<dyn backend_api::Backend>,
+    }
+
+    impl Gpu {
+        /// Build the default backend (see [`set_default_backend`] / `BRAIN_DEVICE`).
+        /// Vulkan falls back to wgpu when no Vulkan device/ICD is present, so the
+        /// build stays usable everywhere.
+        pub fn new(kernels: &[(&str, &str)]) -> Gpu {
+            register_builtins();
+            let name = resolve_backend_name();
+            match backend_api::create_backend(name, kernels) {
+                Ok(inner) => Gpu { inner },
+                Err(e) if name == "vulkan" => {
+                    eprintln!("brain: Vulkan backend unavailable ({e}); falling back to wgpu");
+                    Gpu {
+                        inner: backend_api::create_backend("wgpu", kernels)
+                            .expect("wgpu backend must be available"),
+                    }
+                }
+                Err(e) => panic!("failed to build backend '{name}': {e}"),
             }
         }
-    }
-    pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
-        match self {
-            Gpu::Wgpu(g) => {
-                let bs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| b.wgpu()).collect();
-                Step::Wgpu(g.step_buf(kind, ubuf.wgpu(), &bs, threads))
-            }
-            Gpu::Cpu(c) => {
-                let bs: Vec<&cpu_backend::CpuBuffer> = bufs.iter().map(|b| b.cpu()).collect();
-                Step::Cpu(c.step_buf(kind, ubuf.cpu(), &bs, threads))
-            }
-            Gpu::Vulkan(v) => {
-                let bs: Vec<&vulkan_backend::VkOwnedBuffer> = bufs.iter().map(|b| b.vulkan()).collect();
-                Step::Vulkan(v.step_buf(kind, ubuf.vulkan(), &bs, threads))
-            }
+
+        /// Build on the native CPU backend regardless of the default selection.
+        pub fn new_cpu(kernels: &[(&str, &str)]) -> Gpu {
+            Gpu { inner: Box::new(backend_cpu::CpuBackend::new(kernels)) }
         }
-    }
-    pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
-        match self {
-            Gpu::Wgpu(g) => {
-                let cs: Vec<&wgpu::Buffer> = clears.iter().map(|b| b.wgpu()).collect();
-                let ss: Vec<wgpu_backend::Step> = steps
-                    .iter()
-                    .map(|s| match s {
-                        Step::Wgpu(t) => t.clone(),
-                        _ => panic!("Step/backend mismatch"),
-                    })
-                    .collect();
-                g.submit(&cs, &ss);
-            }
-            Gpu::Cpu(c) => {
-                let cs: Vec<&cpu_backend::CpuBuffer> = clears.iter().map(|b| b.cpu()).collect();
-                let ss: Vec<cpu_backend::Step> = steps
-                    .iter()
-                    .map(|s| match s {
-                        Step::Cpu(t) => t.clone(),
-                        _ => panic!("Step/backend mismatch"),
-                    })
-                    .collect();
-                c.submit(&cs, &ss);
-            }
-            Gpu::Vulkan(v) => {
-                let cs: Vec<&vulkan_backend::VkOwnedBuffer> = clears.iter().map(|b| b.vulkan()).collect();
-                let ss: Vec<vulkan_backend::Step> = steps
-                    .iter()
-                    .map(|s| match s {
-                        Step::Vulkan(t) => *t,
-                        _ => panic!("Step/backend mismatch"),
-                    })
-                    .collect();
-                v.submit(&cs, &ss);
-            }
+
+        /// Build on the wgpu backend regardless of the default selection.
+        pub fn new_wgpu(kernels: &[(&str, &str)]) -> Gpu {
+            Gpu { inner: Box::new(backend_wgpu::WgpuBackend::new(kernels)) }
+        }
+
+        /// Build on the native Vulkan backend, or `Err` if no Vulkan device is present.
+        pub fn try_new_vulkan(kernels: &[(&str, &str)]) -> Result<Gpu, String> {
+            backend_vulkan::VulkanBackend::try_new(kernels).map(|g| Gpu { inner: Box::new(g) })
+        }
+
+        pub fn storage(&self, n: u64) -> DeviceBuffer {
+            self.inner.storage(n)
+        }
+        pub fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer {
+            self.inner.storage_init(name, data)
+        }
+        pub fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> DeviceBuffer {
+            self.inner.buffer(label, size, usage)
+        }
+        pub fn uniform_dynamic(&self, len: usize) -> DeviceBuffer {
+            self.inner.uniform_dynamic(len)
+        }
+        pub fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
+            self.inner.write(buf, data)
+        }
+        pub fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
+            self.inner.read(buf, n)
+        }
+        pub fn poll_wait(&self) {
+            self.inner.poll_wait()
+        }
+        pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
+            self.inner.step(kind, bufs, params, threads)
+        }
+        pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
+            self.inner.step_sliced(kind, bufs, offsets, params, threads)
+        }
+        pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
+            self.inner.step_buf(kind, ubuf, bufs, threads)
+        }
+        pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
+            self.inner.submit(clears, steps)
         }
     }
 }
-} // mod native_accel
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native_accel::{backend_selected, set_default_backend, Backend, DeviceBuffer, Gpu, Step};
+pub use native_facade::{backend_selected, set_default_backend, Backend, Gpu};
 
-// On wasm there is only the wgpu/WebGPU backend, so the public types are direct
-// aliases to it — model code that uses `gpu_core::{Gpu, DeviceBuffer, Step}`
+// ---- wasm facade ------------------------------------------------------------
+
+// On wasm there is only the wgpu/WebGPU backend; `Gpu` wraps it concretely (no
+// `dyn`), and device init / read-back are async (no blocking executor / poll in
+// the browser). Model code that uses `gpu_core::{Gpu, DeviceBuffer, Step}`
 // compiles unchanged against either target.
 #[cfg(target_arch = "wasm32")]
-pub use wgpu::Buffer as DeviceBuffer;
+mod wasm_facade {
+    use super::{DeviceBuffer, Step};
+    use backend_api::{Backend, BufUsage};
+    use backend_wgpu::WgpuBackend;
+
+    pub struct Gpu {
+        inner: WgpuBackend,
+    }
+
+    impl Gpu {
+        /// Async device init + pipeline compile (the browser has no blocking
+        /// executor, so there is no synchronous `new`).
+        pub async fn new_async(kernels: &[(&str, &str)]) -> Gpu {
+            Gpu { inner: WgpuBackend::new_async(kernels).await }
+        }
+
+        pub fn storage(&self, n: u64) -> DeviceBuffer {
+            Backend::storage(&self.inner, n)
+        }
+        pub fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer {
+            Backend::storage_init(&self.inner, name, data)
+        }
+        pub fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> DeviceBuffer {
+            Backend::buffer(&self.inner, label, size, usage)
+        }
+        pub fn uniform_dynamic(&self, len: usize) -> DeviceBuffer {
+            Backend::uniform_dynamic(&self.inner, len)
+        }
+        pub fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
+            Backend::write(&self.inner, buf, data)
+        }
+        pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
+            Backend::step(&self.inner, kind, bufs, params, threads)
+        }
+        pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
+            Backend::step_sliced(&self.inner, kind, bufs, offsets, params, threads)
+        }
+        pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
+            Backend::step_buf(&self.inner, kind, ubuf, bufs, threads)
+        }
+        pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
+            Backend::submit(&self.inner, clears, steps)
+        }
+
+        /// Async buffer readback (browser): awaits the map callback.
+        pub async fn read_async(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
+            self.inner.read_async_buf(buf, n).await
+        }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
-pub use wgpu_backend::{Gpu, Step};
-
-mod wgpu_backend {
-use super::BufUsage;
-use wgpu::util::DeviceExt;
-
-/// A recorded dispatch: (pipeline index, bind group, grid_x, grid_y).
-/// The grid is 1D (grid_y = 1) until the workgroup count exceeds the per-
-/// dimension limit, then it tiles into Y; shaders reconstruct the linear thread
-/// index from `num_workgroups`, so the split is transparent.
-pub type Step = (usize, wgpu::BindGroup, u32, u32);
-
-/// Log the selected adapter. Native prints to stderr; wasm has no stderr, so it
-/// goes to the browser console.
-#[cfg(not(target_arch = "wasm32"))]
-fn log_adapter(info: &wgpu::AdapterInfo) {
-    // Several engine instances may be built in one process (the TTS pipeline makes
-    // one per component); log the adapter line only once.
-    static LOGGED: std::sync::Once = std::sync::Once::new();
-    LOGGED.call_once(|| eprintln!("adapter: {} ({:?}, {:?})", info.name, info.device_type, info.backend));
-}
-#[cfg(target_arch = "wasm32")]
-fn log_adapter(info: &wgpu::AdapterInfo) {
-    web_sys::console::log_1(
-        &format!("adapter: {} ({:?}, {:?})", info.name, info.device_type, info.backend).into(),
-    );
-}
-
-pub struct Gpu {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub pipelines: Vec<wgpu::ComputePipeline>,
-    /// Lazily-accumulated dispatches: `submit` appends its steps here instead of
-    /// encoding+submitting immediately, and `flush` records the WHOLE batch into a
-    /// single compute pass + one `queue.submit` (on the next read/write/poll). So
-    /// a forward's ~130 block dispatches become ONE submission and ONE compute
-    /// pass — instead of ~one queue.submit and ~one pass *per block*, each of
-    /// which is a GPU pipeline barrier that serialises an integrated GPU.
-    /// `Mutex` keeps `Gpu: Sync`; it is only ever locked single-threaded.
-    pending: std::sync::Mutex<Vec<Step>>,
-    /// `BRAIN_PROFILE` op counters: (uniform buffers, bind groups, submits,
-    /// dispatches, readbacks) — surfaces per-frame GPU resource churn / sync.
-    stats: Option<std::sync::atomic::AtomicU64>,
-    stats_bg: std::sync::atomic::AtomicU64,
-    stats_submit: std::sync::atomic::AtomicU64,
-    stats_dispatch: std::sync::atomic::AtomicU64,
-    stats_read: std::sync::atomic::AtomicU64,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for Gpu {
-    fn drop(&mut self) {
-        use std::sync::atomic::Ordering::Relaxed;
-        if let Some(uni) = &self.stats {
-            eprintln!(
-                "=== GPU op counts (BRAIN_PROFILE) === uniforms={} bind_groups={} submits={} dispatches={} readbacks={}",
-                uni.load(Relaxed),
-                self.stats_bg.load(Relaxed),
-                self.stats_submit.load(Relaxed),
-                self.stats_dispatch.load(Relaxed),
-                self.stats_read.load(Relaxed),
-            );
-        }
-    }
-}
-
-impl Gpu {
-    /// Initialise the device and compile `kernels` (name, WGSL source) into
-    /// pipelines indexed by their position in the slice.
-    ///
-    /// Native blocking entry: wraps the async core in `pollster::block_on` so
-    /// the existing synchronous call sites (CLI, training, tests) are unchanged.
-    /// On wasm the browser has no blocking executor, so use `new_async` instead.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn new(kernels: &[(&str, &str)]) -> Gpu {
-        pollster::block_on(Gpu::new_async(kernels))
-    }
-
-    /// Async device init + pipeline compile. This is the portable core used on
-    /// both targets: native wraps it in `pollster::block_on` (see `new`), wasm
-    /// awaits it from the wasm-bindgen entry point.
-    pub async fn new_async(kernels: &[(&str, &str)]) -> Gpu {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            })
-            .await
-            .expect("no suitable GPU adapter found");
-        let info = adapter.get_info();
-        log_adapter(&info);
-
-        // downlevel defaults => broad compatibility (incl. sm_61 / Pascal); bump
-        // the storage-buffer count to 8 (LayerNorm-dgamma and attention use up to 5).
-        let mut limits = wgpu::Limits::downlevel_defaults();
-        limits.max_storage_buffers_per_shader_stage = 8;
-        // Raise the buffer/binding SIZE caps to whatever this adapter actually
-        // supports. The downlevel defaults cap at 256MB buffer / 128MB binding,
-        // which on a big-VRAM card (e.g. 24GB P40) needlessly rejects large
-        // batches even with plenty of free memory. Requesting the adapter's own
-        // reported maxima is always valid, and on WebGPU it stays whatever the
-        // browser allows.
-        let adapter_limits = adapter.limits();
-        limits.max_buffer_size = adapter_limits.max_buffer_size;
-        limits.max_storage_buffer_binding_size = adapter_limits.max_storage_buffer_binding_size;
-        // The weight-tiled conv stages an output channel's weights in workgroup
-        // memory (up to 32 KiB); the downlevel default caps that at 16 KiB, so
-        // request whatever the adapter actually supports.
-        limits.max_compute_workgroup_storage_size = adapter_limits.max_compute_workgroup_storage_size;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("moe-rs-device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: limits,
-                memory_hints: wgpu::MemoryHints::Performance,
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                trace: wgpu::Trace::Off,
-            })
-            .await
-            .expect("request_device failed");
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let l = device.limits();
-            let mib = |b: u64| b / (1024 * 1024);
-            eprintln!(
-                "limits: max_buffer_size {} MiB, max_storage_buffer_binding_size {} MiB \
-                 (adapter caps: {} / {} MiB)",
-                mib(l.max_buffer_size),
-                mib(l.max_storage_buffer_binding_size as u64),
-                mib(adapter_limits.max_buffer_size),
-                mib(adapter_limits.max_storage_buffer_binding_size as u64),
-            );
-        }
-
-        let pipelines = kernels
-            .iter()
-            .map(|(name, src)| {
-                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(name),
-                    source: wgpu::ShaderSource::Wgsl((*src).into()),
-                });
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(name),
-                    layout: None,
-                    module: &module,
-                    entry_point: Some("main"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    cache: None,
-                })
-            })
-            .collect();
-
-        use std::sync::atomic::AtomicU64;
-        let stats = if std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false) {
-            Some(AtomicU64::new(0))
-        } else {
-            None
-        };
-        Gpu {
-            device,
-            queue,
-            pipelines,
-            pending: std::sync::Mutex::new(Vec::new()),
-            stats,
-            stats_bg: AtomicU64::new(0),
-            stats_submit: AtomicU64::new(0),
-            stats_dispatch: AtomicU64::new(0),
-            stats_read: AtomicU64::new(0),
-        }
-    }
-
-    /// Record all pending dispatches into ONE compute pass and submit. Idempotent.
-    /// wgpu inserts the necessary inter-dispatch barriers within the pass, so the
-    /// per-block read-after-write dependencies are preserved.
-    fn flush(&self) {
-        let steps: Vec<Step> = std::mem::take(&mut *self.pending.lock().unwrap());
-        if steps.is_empty() {
-            return;
-        }
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: None,
-                timestamp_writes: None,
-            });
-            for (kind, bg, gx, gy) in &steps {
-                pass.set_pipeline(&self.pipelines[*kind]);
-                pass.set_bind_group(0, bg, &[]);
-                pass.dispatch_workgroups(*gx, *gy, 1);
-            }
-        }
-        self.queue.submit(Some(enc.finish()));
-        if self.stats.is_some() {
-            self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    pub fn storage(&self, n: u64) -> wgpu::Buffer {
-        self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: (n * 4).max(4),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        })
-    }
-
-    pub fn storage_init(&self, name: &str, data: &[f32]) -> wgpu::Buffer {
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(name),
-            contents: bytemuck::cast_slice(data),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-        })
-    }
-
-    pub fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> wgpu::Buffer {
-        let mut u = wgpu::BufferUsages::empty();
-        if usage.contains(BufUsage::STORAGE) {
-            u |= wgpu::BufferUsages::STORAGE;
-        }
-        if usage.contains(BufUsage::COPY_DST) {
-            u |= wgpu::BufferUsages::COPY_DST;
-        }
-        if usage.contains(BufUsage::COPY_SRC) {
-            u |= wgpu::BufferUsages::COPY_SRC;
-        }
-        if usage.contains(BufUsage::UNIFORM) {
-            u |= wgpu::BufferUsages::UNIFORM;
-        }
-        self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size,
-            usage: u,
-            mapped_at_creation: false,
-        })
-    }
-
-    fn uniform(&self, data: &[u32]) -> wgpu::Buffer {
-        if let Some(s) = &self.stats {
-            s.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        let mut bytes: Vec<u8> = bytemuck::cast_slice(data).to_vec();
-        while bytes.len() % 16 != 0 {
-            bytes.push(0);
-        }
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("params"),
-            contents: &bytes,
-            usage: wgpu::BufferUsages::UNIFORM,
-        })
-    }
-
-    /// A writable uniform buffer sized for `len` u32s (16-byte aligned), to be
-    /// updated later via `write`. Lets a caller build a dispatch once and reuse
-    /// its bind group across many submits, changing only the uniform contents —
-    /// avoiding the per-dispatch buffer/bind-group churn that otherwise exhausts
-    /// the GPU memory aperture in long training loops.
-    pub fn uniform_dynamic(&self, len: usize) -> wgpu::Buffer {
-        let size = (((len * 4) + 15) / 16 * 16).max(16) as u64;
-        self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("params"),
-            size,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        })
-    }
-
-    /// Build one dispatch around an already-allocated uniform buffer: bind group
-    /// 0 = [ubuf, buffers...], grid = ceil(threads/64). The bind group keeps
-    /// `ubuf` and `bufs` alive for the lifetime of the returned `Step`.
-    pub fn step_buf(&self, kind: usize, ubuf: &wgpu::Buffer, bufs: &[&wgpu::Buffer], threads: u32) -> Step {
-        let mut entries = vec![wgpu::BindGroupEntry {
-            binding: 0,
-            resource: ubuf.as_entire_binding(),
-        }];
-        for (i, b) in bufs.iter().enumerate() {
-            entries.push(wgpu::BindGroupEntry {
-                binding: (i + 1) as u32,
-                resource: b.as_entire_binding(),
-            });
-        }
-        let layout = self.pipelines[kind].get_bind_group_layout(0);
-        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &layout,
-            entries: &entries,
-        });
-        if self.stats.is_some() {
-            self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        let (gx, gy) = super::grid(threads);
-        (kind, bg, gx, gy)
-    }
-
-    /// Build one dispatch with a fresh single-use uniform buffer. Convenient for
-    /// one-shot work; for hot loops prefer `uniform_dynamic` + `step_buf` so the
-    /// uniform/bind group are allocated once and reused.
-    pub fn step(&self, kind: usize, bufs: &[&wgpu::Buffer], params: &[u32], threads: u32) -> Step {
-        self.step_buf(kind, &self.uniform(params), bufs, threads)
-    }
-
-    /// Like [`step`](Self::step) but each storage buffer binds a sub-range
-    /// `(word_offset, word_len)` (`word_len == 0` => to the end). This keeps a
-    /// single binding within `max_storage_buffer_binding_size` (e.g. tiling a
-    /// >128MB embedding into vocab slices). Offsets must satisfy the adapter's
-    /// `min_storage_buffer_offset_alignment` (256B); row-aligned tiles do.
-    pub fn step_sliced(&self, kind: usize, bufs: &[&wgpu::Buffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
-        let ubuf = self.uniform(params);
-        let mut entries = vec![wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }];
-        for (i, b) in bufs.iter().enumerate() {
-            let (off_w, len_w) = offsets[i];
-            let resource = if off_w == 0 && len_w == 0 {
-                b.as_entire_binding()
-            } else {
-                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: b,
-                    offset: off_w * 4,
-                    size: if len_w == 0 { None } else { std::num::NonZeroU64::new(len_w * 4) },
-                })
-            };
-            entries.push(wgpu::BindGroupEntry { binding: (i + 1) as u32, resource });
-        }
-        let layout = self.pipelines[kind].get_bind_group_layout(0);
-        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &layout, entries: &entries });
-        if self.stats.is_some() {
-            self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        let (gx, gy) = super::grid(threads);
-        (kind, bg, gx, gy)
-    }
-
-    /// Clear the given buffers, then run all steps as a compute pass. The work is
-    /// RECORDED into a lazily-accumulated command encoder (one per forward) and
-    /// only sent to the GPU on the next read/write/poll — so a whole forward's
-    /// dispatches coalesce into a single `queue.submit` instead of one per call.
-    /// wgpu inserts the inter-dispatch barriers within and across the passes.
-    pub fn submit(&self, clears: &[&wgpu::Buffer], steps: &[Step]) {
-        // Clears can't go inside a compute pass: flush the accumulated dispatches
-        // (so they run before the clear) then clear in a transfer submission. In
-        // the eval/inference path there are no clears, so everything accumulates
-        // into a single pass flushed at the terminal readback.
-        if !clears.is_empty() {
-            self.flush();
-            let mut enc = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            for c in clears {
-                enc.clear_buffer(c, 0, None);
-            }
-            self.queue.submit(Some(enc.finish()));
-        }
-        self.pending.lock().unwrap().extend(steps.iter().cloned());
-        if self.stats.is_some() {
-            self.stats_dispatch
-                .fetch_add(steps.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    pub fn write(&self, buf: &wgpu::Buffer, data: &[u32]) {
-        // Flush pending compute first so a host write never races ahead of
-        // dispatches recorded before it (queue order: prior compute, then write).
-        self.flush();
-        self.queue.write_buffer(buf, 0, bytemuck::cast_slice(data));
-    }
-
-    /// Block until all submitted GPU work has completed, letting wgpu reclaim the
-    /// transient per-submit resources (command buffers and `write_buffer` staging
-    /// memory) that accrue otherwise. A long training loop that only submits —
-    /// never reads back — never triggers this reclaim, so those transients pile
-    /// up in the GPU memory aperture until an allocation fails mid-run (on
-    /// integrated GPUs the aperture is small, ~355 MiB). Call once per step to
-    /// bound the in-flight transient memory to a single iteration.
-    ///
-    /// Native only: the browser drives the device via its event loop, so there is
-    /// no blocking poll to call there.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn poll_wait(&self) {
-        self.flush();
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    }
-
-    /// Copy a device buffer into a MAP_READ staging buffer and return its
-    /// contents as f32. Native only: it blocks on `device.poll(wait)` + an mpsc
-    /// recv, which is impossible in a browser. Wasm uses `read_async`.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn read(&self, buf: &wgpu::Buffer, n: usize) -> Vec<f32> {
-        if self.stats.is_some() {
-            self.stats_read.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        self.flush(); // ensure all recorded compute is queued before the copy
-        let staging = self.read_staging(buf, n);
-        let slice = staging.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        rx.recv().unwrap().unwrap();
-        let out = bytemuck::cast_slice::<u8, f32>(&slice.get_mapped_range()).to_vec();
-        staging.unmap();
-        out
-    }
-
-    /// Async buffer readback for wasm: awaits the map callback rather than
-    /// blocking the thread. In the browser the device's work is driven by the
-    /// event loop, so no `device.poll(wait)` is needed -- yielding back to the
-    /// JS executor lets the GPU complete and fire the callback.
-    #[cfg(target_arch = "wasm32")]
-    pub async fn read_async(&self, buf: &wgpu::Buffer, n: usize) -> Vec<f32> {
-        self.flush();
-        let staging = self.read_staging(buf, n);
-        let slice = staging.slice(..);
-        let (tx, rx) = futures_channel::oneshot::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        // Schedule the mapping callbacks; on the WebGPU backend this is a no-op
-        // beyond servicing the queue, the actual completion arrives via the
-        // browser event loop while we await the oneshot.
-        let _ = self.device.poll(wgpu::PollType::Poll);
-        rx.await.expect("map_async channel dropped").expect("buffer map failed");
-        let out = bytemuck::cast_slice::<u8, f32>(&slice.get_mapped_range()).to_vec();
-        staging.unmap();
-        out
-    }
-
-    /// Shared staging-buffer copy used by both `read` (native) and `read_async`
-    /// (wasm).
-    fn read_staging(&self, buf: &wgpu::Buffer, n: usize) -> wgpu::Buffer {
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: (n * 4) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        enc.copy_buffer_to_buffer(buf, 0, &staging, 0, (n * 4) as u64);
-        self.queue.submit(Some(enc.finish()));
-        staging
-    }
-}
-} // mod wgpu_backend
+pub use wasm_facade::Gpu;
 
 #[cfg(test)]
 mod tests {

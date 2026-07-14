@@ -6,6 +6,10 @@ members = ["crates/*"]
 # invariant) by excluding it from the default set; build it explicitly with
 # `cargo build -p brain-vulkan` or via the cli's `vulkan-coopmat` feature.
 default-members = [
+    "crates/backend-api",
+    "crates/backend-wgpu",
+    "crates/backend-cpu",
+    "crates/backend-vulkan",
     "crates/gpu-core",
     "crates/kernels",
     "crates/checkpoint",
@@ -47,6 +51,10 @@ repository = "https://github.com/swedishembedded/brain"
 
 [workspace.dependencies]
 # Internal crates (path deps; short lib names used in `use` statements).
+brain-backend-api = { path = "crates/backend-api" }
+brain-backend-wgpu = { path = "crates/backend-wgpu" }
+brain-backend-cpu = { path = "crates/backend-cpu" }
+brain-backend-vulkan = { path = "crates/backend-vulkan" }
 brain-gpu-core = { path = "crates/gpu-core" }
 brain-kernels = { path = "crates/kernels" }
 brain-checkpoint = { path = "crates/checkpoint" }

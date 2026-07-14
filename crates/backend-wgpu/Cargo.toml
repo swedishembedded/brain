@@ -1,0 +1,25 @@
+[package]
+name = "brain-backend-wgpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "wgpu (Vulkan/Metal/DX12/GL/WebGPU) eager Backend implementation for brain."
+
+[lib]
+name = "backend_wgpu"
+path = "src/lib.rs"
+
+[dependencies]
+brain-backend-api.workspace = true
+bytemuck.workspace = true
+
+# Native GPU stack: full wgpu (desktop backends) + a blocking executor.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = "29"
+pollster = "0.4"
+
+# Browser GPU stack: wgpu's WebGPU backend only, plus async-readback glue.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { version = "29", default-features = false, features = ["webgpu", "wgsl"] }
+futures-channel = "0.3"
+web-sys = { version = "0.3", features = ["console"] }

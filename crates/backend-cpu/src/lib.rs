@@ -1,24 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Native CPU backend: runs the WGSL kernels (JIT-compiled by `brain-wgsl-cpu`)
-//! across CPU cores. API-compatible with the wgpu `Gpu` so model code is
-//! backend-agnostic; selected by the `cpu-backend` feature.
+//! Native CPU eager [`Backend`]: runs the WGSL kernels (JIT-compiled by
+//! `brain-wgsl-cpu`) across CPU cores. API-compatible with the wgpu backend so
+//! model code is backend-agnostic.
 //!
 //! A buffer is plain host memory (a `Vec<u32>`; every kernel element is 4 bytes).
 //! `submit` runs the recorded steps sequentially — preserving the inter-dispatch
 //! ordering the wgpu compute pass guarantees — and parallelises the invocations
 //! *within* each step across a rayon pool. Each invocation owns a disjoint output
 //! element, so the workers never alias their writes.
+//!
+//! The inherent methods operate on native `CpuBuffer`/[`CpuStep`]; the thin
+//! `impl Backend` downcasts the neutral [`DeviceBuffer`]/[`Step`] handles and
+//! delegates to them.
 
-use crate::BufUsage;
+mod fast_conv;
+mod fast_ops;
+
+use backend_api::{Backend, BufUsage, DeviceBuffer, Step};
 use rayon::prelude::*;
 use std::cell::UnsafeCell;
 use std::sync::{Arc, Mutex};
 use wgsl_cpu::Jit;
 
 /// A recorded dispatch: (kernel index, bind group, grid_x, grid_y).
-pub type Step = (usize, BindGroup, u32, u32);
+pub type CpuStep = (usize, BindGroup, u32, u32);
 
 struct BufInner {
     data: UnsafeCell<Vec<u32>>,
@@ -111,7 +118,7 @@ impl CpuBackend {
             None
         };
         let fast_off = std::env::var("BRAIN_NO_FASTCONV").map(|v| v != "0").unwrap_or(false);
-        let fast = if fast_off || !crate::fast_conv::avx2_available() {
+        let fast = if fast_off || !fast_conv::avx2_available() {
             FastIdx::default()
         } else {
             let find = |k: &str| names.iter().position(|n| n == k);
@@ -166,16 +173,16 @@ impl CpuBackend {
 
     /// Build a dispatch around an already-allocated uniform buffer. Mirrors the
     /// wgpu backend's grid math so the kernels' index reconstruction is identical.
-    pub fn step_buf(&self, kind: usize, ubuf: &CpuBuffer, bufs: &[&CpuBuffer], threads: u32) -> Step {
+    pub fn step_buf(&self, kind: usize, ubuf: &CpuBuffer, bufs: &[&CpuBuffer], threads: u32) -> CpuStep {
         let bg = BindGroup {
             uniform: ubuf.clone(),
             bufs: bufs.iter().map(|b| ((*b).clone(), 0usize)).collect(),
         };
-        let (gx, gy) = crate::grid(threads);
+        let (gx, gy) = backend_api::grid(threads);
         (kind, bg, gx, gy)
     }
 
-    pub fn step(&self, kind: usize, bufs: &[&CpuBuffer], params: &[u32], threads: u32) -> Step {
+    pub fn step(&self, kind: usize, bufs: &[&CpuBuffer], params: &[u32], threads: u32) -> CpuStep {
         let ubuf = CpuBuffer::with_words(params.to_vec());
         self.step_buf(kind, &ubuf, bufs, threads)
     }
@@ -183,20 +190,20 @@ impl CpuBackend {
     /// Like [`step`](Self::step) but each buffer carries a `(word_offset,
     /// word_len)` — the dispatch sees the buffer starting at `word_offset`
     /// (`word_len` is advisory on CPU; the kernel self-bounds via params).
-    pub fn step_sliced(&self, kind: usize, bufs: &[&CpuBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
+    pub fn step_sliced(&self, kind: usize, bufs: &[&CpuBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> CpuStep {
         let ubuf = CpuBuffer::with_words(params.to_vec());
         let bg = BindGroup {
             uniform: ubuf,
             bufs: bufs.iter().enumerate().map(|(i, b)| ((*b).clone(), offsets[i].0 as usize)).collect(),
         };
-        let (gx, gy) = crate::grid(threads);
+        let (gx, gy) = backend_api::grid(threads);
         (kind, bg, gx, gy)
     }
 
     /// Zero the `clears`, then run every step in order (the dependency-preserving
     /// equivalent of wgpu's single compute pass), parallelising invocations within
     /// each step across the rayon pool.
-    pub fn submit(&self, clears: &[&CpuBuffer], steps: &[Step]) {
+    pub fn submit(&self, clears: &[&CpuBuffer], steps: &[CpuStep]) {
         for c in clears {
             c.words_mut().iter_mut().for_each(|w| *w = 0);
         }
@@ -259,23 +266,23 @@ impl CpuBackend {
         if (Some(kind) == f.conv2d || Some(kind) == f.conv2d_tiled) && bufs.len() >= 3 {
             unsafe {
                 let pu = std::slice::from_raw_parts(uniform, 10);
-                let p = crate::fast_conv::ConvParams::from_u32(pu);
+                let p = fast_conv::ConvParams::from_u32(pu);
                 let x = std::slice::from_raw_parts(bufs[0] as *const f32, p.x_len());
                 let w = std::slice::from_raw_parts(bufs[1] as *const f32, p.w_len());
                 let y = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, p.y_len());
-                crate::fast_conv::conv2d(&p, x, w, y);
+                fast_conv::conv2d(&p, x, w, y);
             }
             return;
         }
         if Some(kind) == f.conv_bias && bufs.len() >= 4 {
             unsafe {
                 let pu = std::slice::from_raw_parts(uniform, 10);
-                let p = crate::fast_conv::ConvParams::from_u32(pu);
+                let p = fast_conv::ConvParams::from_u32(pu);
                 let x = std::slice::from_raw_parts(bufs[0] as *const f32, p.x_len());
                 let w = std::slice::from_raw_parts(bufs[1] as *const f32, p.w_len());
                 let bias = std::slice::from_raw_parts(bufs[2] as *const f32, p.cout);
                 let y = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, p.y_len());
-                crate::fast_conv::conv2d_bias(&p, x, w, bias, y);
+                fast_conv::conv2d_bias(&p, x, w, bias, y);
             }
             return;
         }
@@ -284,12 +291,12 @@ impl CpuBackend {
         {
             unsafe {
                 let pu = std::slice::from_raw_parts(uniform, 10);
-                let p = crate::fast_conv::ConvParams::from_u32(pu);
+                let p = fast_conv::ConvParams::from_u32(pu);
                 let x = std::slice::from_raw_parts(bufs[0] as *const f32, p.x_len());
                 let w = std::slice::from_raw_parts(bufs[1] as *const f32, p.w_len());
                 let sb = std::slice::from_raw_parts(bufs[2] as *const f32, 2 * p.cout);
                 let y = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, p.y_len());
-                crate::fast_conv::conv2d_act(&p, x, w, sb, y);
+                fast_conv::conv2d_act(&p, x, w, sb, y);
             }
             return;
         }
@@ -298,7 +305,7 @@ impl CpuBackend {
                 let total = *uniform as usize;
                 let x = std::slice::from_raw_parts(bufs[0] as *const f32, total);
                 let out = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, total);
-                crate::fast_ops::silu(x, out);
+                fast_ops::silu(x, out);
             }
             return;
         }
@@ -311,7 +318,7 @@ impl CpuBackend {
                 let mv = std::slice::from_raw_parts(bufs[1] as *const f32, 2 * c);
                 let gb = std::slice::from_raw_parts(bufs[2] as *const f32, 2 * c);
                 let out = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, len);
-                crate::fast_ops::bn_eval(pu, x, mv, gb, out);
+                fast_ops::bn_eval(pu, x, mv, gb, out);
             }
             return;
         }
@@ -324,7 +331,7 @@ impl CpuBackend {
                 let a = std::slice::from_raw_parts(bufs[0] as *const f32, n * ca * hw);
                 let b = std::slice::from_raw_parts(bufs[1] as *const f32, n * cb * hw);
                 let y = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, n * (ca + cb) * hw);
-                crate::fast_ops::concat2(pu, a, b, y);
+                fast_ops::concat2(pu, a, b, y);
             }
             return;
         }
@@ -337,7 +344,7 @@ impl CpuBackend {
                 let hw = h * w;
                 let dy = std::slice::from_raw_parts(bufs[0] as *const f32, n * ctot * hw);
                 let da = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, n * csrc * hw);
-                crate::fast_ops::concat_split(pu, dy, da);
+                fast_ops::concat_split(pu, dy, da);
             }
             return;
         }
@@ -350,7 +357,7 @@ impl CpuBackend {
                 let hw = h * w;
                 let src = std::slice::from_raw_parts(bufs[0] as *const f32, n * csrc * hw);
                 let dst = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, n * ctot * hw);
-                crate::fast_ops::chan_place(pu, src, dst);
+                fast_ops::chan_place(pu, src, dst);
             }
             return;
         }
@@ -361,7 +368,7 @@ impl CpuBackend {
                 let hw = h * w;
                 let x = std::slice::from_raw_parts(bufs[0] as *const f32, n * c * hw);
                 let y = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, n * c * 4 * hw);
-                crate::fast_ops::upsample2(pu, x, y);
+                fast_ops::upsample2(pu, x, y);
             }
             return;
         }
@@ -410,3 +417,51 @@ unsafe impl Sync for SendConst {}
 struct SendMut(*const *mut u8);
 unsafe impl Send for SendMut {}
 unsafe impl Sync for SendMut {}
+
+/// Neutral-handle bridge: downcast the opaque [`DeviceBuffer`]/[`Step`] back to
+/// `CpuBuffer`/[`CpuStep`] and delegate to the inherent methods.
+impl Backend for CpuBackend {
+    fn storage(&self, n: u64) -> DeviceBuffer {
+        DeviceBuffer::new(CpuBackend::storage(self, n))
+    }
+    fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer {
+        DeviceBuffer::new(CpuBackend::storage_init(self, name, data))
+    }
+    fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> DeviceBuffer {
+        DeviceBuffer::new(CpuBackend::buffer(self, label, size, usage))
+    }
+    fn uniform_dynamic(&self, len: usize) -> DeviceBuffer {
+        DeviceBuffer::new(CpuBackend::uniform_dynamic(self, len))
+    }
+    fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
+        CpuBackend::write(self, buf.downcast_ref::<CpuBuffer>(), data)
+    }
+    fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
+        let bs: Vec<&CpuBuffer> = bufs.iter().map(|b| b.downcast_ref::<CpuBuffer>()).collect();
+        Step::new(CpuBackend::step(self, kind, &bs, params, threads))
+    }
+    fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
+        let bs: Vec<&CpuBuffer> = bufs.iter().map(|b| b.downcast_ref::<CpuBuffer>()).collect();
+        Step::new(CpuBackend::step_sliced(self, kind, &bs, offsets, params, threads))
+    }
+    fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
+        let bs: Vec<&CpuBuffer> = bufs.iter().map(|b| b.downcast_ref::<CpuBuffer>()).collect();
+        Step::new(CpuBackend::step_buf(self, kind, ubuf.downcast_ref::<CpuBuffer>(), &bs, threads))
+    }
+    fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
+        let cs: Vec<&CpuBuffer> = clears.iter().map(|b| b.downcast_ref::<CpuBuffer>()).collect();
+        let ss: Vec<CpuStep> = steps.iter().map(|s| s.downcast_ref::<CpuStep>().clone()).collect();
+        CpuBackend::submit(self, &cs, &ss);
+    }
+    fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
+        CpuBackend::read(self, buf.downcast_ref::<CpuBuffer>(), n)
+    }
+    fn poll_wait(&self) {
+        CpuBackend::poll_wait(self)
+    }
+}
+
+/// Register this backend under `"cpu"` so the facade can build it by name.
+pub fn register() {
+    backend_api::register_backend("cpu", |kernels| Ok(Box::new(CpuBackend::new(kernels))));
+}

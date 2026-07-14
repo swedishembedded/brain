@@ -35,7 +35,8 @@ pub fn detect_weights_on_npu(
         cfg.input = s;
     }
     let bytes = crate::export::build_fp32_bytes(weights_path, input, onnx::DEFAULT_OPSET);
-    let mut session = NpuSession::load_bytes(&bytes, npu_cfg)?;
+    // Compile via the whole-graph `GraphBackend` contract (the NPU seam).
+    let mut session = <NpuSession as backend_api::GraphBackend>::compile(&bytes, npu_cfg)?;
     detect_image(&mut session, hwc, w0, h0, &cfg, conf, iou)
 }
 

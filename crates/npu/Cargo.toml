@@ -11,6 +11,7 @@ name = "npu"
 path = "src/lib.rs"
 
 [dependencies]
+brain-backend-api.workspace = true
 brain-onnx.workspace = true
 brain-checkpoint.workspace = true
 brain-qwen.workspace = true

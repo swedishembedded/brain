@@ -1,0 +1,16 @@
+[package]
+name = "brain-backend-cpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native CPU eager Backend: WGSL kernels JIT-compiled (Cranelift) and run across cores, with AVX2 fast paths."
+
+[lib]
+name = "backend_cpu"
+path = "src/lib.rs"
+
+# Native only: the WGSL->Cranelift JIT cannot target wasm.
+[dependencies]
+brain-backend-api.workspace = true
+brain-wgsl-cpu.workspace = true
+rayon = "1"

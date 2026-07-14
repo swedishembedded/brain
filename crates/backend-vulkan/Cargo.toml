@@ -1,0 +1,17 @@
+[package]
+name = "brain-backend-vulkan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native Vulkan (ash + naga WGSL->SPIR-V) eager Backend implementation for brain."
+
+[lib]
+name = "backend_vulkan"
+path = "src/lib.rs"
+
+# Native only: ash + naga WGSL->SPIR-V compute.
+[dependencies]
+brain-backend-api.workspace = true
+brain-vulkan.workspace = true
+ash.workspace = true
+bytemuck.workspace = true

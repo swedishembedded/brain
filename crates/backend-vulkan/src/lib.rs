@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Native **Vulkan compute** backend — a third `gpu_core` backend alongside wgpu
-//! and the CPU JIT, selected at runtime (`--device vulkan` / `BRAIN_DEVICE=vulkan`).
+//! Native **Vulkan compute** eager [`Backend`] — selected at runtime
+//! (`--device vulkan` / `BRAIN_DEVICE=vulkan`), with graceful fallback to wgpu
+//! when no Vulkan device/ICD is present.
 //!
 //! WGSL stays the single source of truth: each kernel is compiled WGSL -> SPIR-V
 //! by naga at init ([`vulkan::shader::wgsl_to_spirv`]), reflected for its
@@ -10,7 +11,7 @@
 //! descriptor-set layout (uniform at binding 0, storage at 1..), and compiled to a
 //! compute pipeline once. It honours the same engine invariants as the other
 //! backends — one bind group, `@workgroup_size(64)`, the >65535-group 2D-grid
-//! tiling (`super::grid`) — so every existing model runs unmodified.
+//! tiling ([`backend_api::grid`]) — so every existing model runs unmodified.
 //!
 //! Execution model mirrors the wgpu backend: `submit` lazily accumulates
 //! dispatches; the batch is flushed (recorded into one command buffer with a
@@ -29,12 +30,12 @@ use ash::vk;
 use vulkan::context::{VkBuffer, VkContext};
 use vulkan::shader;
 
-use super::BufUsage;
+use backend_api::{Backend, BufUsage, DeviceBuffer, Step};
 
 /// A recorded dispatch: (pipeline index, descriptor set, grid_x, grid_y). All
-/// fields are `Copy`, so `Step` is `Clone` like the wgpu backend's.
+/// fields are `Copy`, so `VkStep` is `Clone` like the wgpu backend's.
 #[derive(Clone, Copy)]
-pub struct Step {
+pub struct VkStep {
     kind: usize,
     set: vk::DescriptorSet,
     gx: u32,
@@ -46,9 +47,9 @@ pub struct Step {
     sliced: bool,
 }
 
-/// A device buffer handle. Memory is freed when the owning [`Gpu`] is dropped (or
-/// the process exits); individual drops are no-ops, matching how model code holds
-/// its buffers for the whole run.
+/// A device buffer handle. Memory is freed when the owning [`VulkanBackend`] is
+/// dropped (or the process exits); individual drops are no-ops, matching how model
+/// code holds its buffers for the whole run.
 pub struct VkOwnedBuffer {
     inner: VkBuffer,
 }
@@ -70,34 +71,35 @@ struct KernelPipeline {
 }
 
 /// The Vulkan compute device.
-pub struct Gpu {
+pub struct VulkanBackend {
     ctx: VkContext,
     pipelines: Vec<KernelPipeline>,
     /// Descriptor pools, grown on demand. A descriptor set's lifetime is tied to
-    /// its `Step` (which a caller may hold and re-submit, e.g. the `uniform_dynamic`
-    /// + `step_buf` reuse pattern), so sets are NEVER reset mid-run — that would
-    /// invalidate a reused set, exactly as the wgpu backend keeps its `BindGroup`
-    /// alive per-Step. When the active pool is exhausted a new one is appended; all
-    /// pools are freed when the `Gpu` drops. (A one-shot CLI is bounded; an
-    /// unbounded training loop should reuse Steps, which keeps the set count flat.)
+    /// its `VkStep` (which a caller may hold and re-submit, e.g. the
+    /// `uniform_dynamic` + `step_buf` reuse pattern), so sets are NEVER reset
+    /// mid-run — that would invalidate a reused set, exactly as the wgpu backend
+    /// keeps its `BindGroup` alive per-Step. When the active pool is exhausted a
+    /// new one is appended; all pools are freed when the backend drops. (A
+    /// one-shot CLI is bounded; an unbounded training loop should reuse Steps,
+    /// which keeps the set count flat.)
     pools: Mutex<Vec<vk::DescriptorPool>>,
     /// Accumulated dispatches, flushed as one command submission.
-    pending: Mutex<Vec<Step>>,
-    /// Per-dispatch uniform buffers (kept alive for the run; freed on `Gpu` drop).
+    pending: Mutex<Vec<VkStep>>,
+    /// Per-dispatch uniform buffers (kept alive for the run; freed on drop).
     uniforms: Mutex<Vec<VkBuffer>>,
 }
 
 // ash handles are Send+Sync; all interior mutation goes through the Mutexes above.
-unsafe impl Send for Gpu {}
-unsafe impl Sync for Gpu {}
+unsafe impl Send for VulkanBackend {}
+unsafe impl Sync for VulkanBackend {}
 
 const POOL_MAX_SETS: u32 = 16384;
 
-impl Gpu {
+impl VulkanBackend {
     /// Try to build the Vulkan backend, compiling every kernel to a pipeline.
     /// Returns `Err` (so the caller can fall back to wgpu) if no Vulkan device is
     /// available or a kernel fails to compile.
-    pub fn try_new(kernels: &[(&str, &str)]) -> Result<Gpu, String> {
+    pub fn try_new(kernels: &[(&str, &str)]) -> Result<VulkanBackend, String> {
         let ctx = VkContext::new()?;
         log_adapter(&ctx.adapter_name);
         let dev = &ctx.device;
@@ -152,7 +154,7 @@ impl Gpu {
         }
 
         let pool = unsafe { new_pool(dev)? };
-        Ok(Gpu {
+        Ok(VulkanBackend {
             ctx,
             pipelines,
             pools: Mutex::new(vec![pool]),
@@ -162,7 +164,7 @@ impl Gpu {
     }
 
     /// Allocate one descriptor set with `set_layout`, growing the pool list when
-    /// the active pool is exhausted (never resets — see [`Gpu::pools`]).
+    /// the active pool is exhausted (never resets — see [`VulkanBackend::pools`]).
     fn alloc_set(&self, set_layout: vk::DescriptorSetLayout) -> vk::DescriptorSet {
         let dev = &self.ctx.device;
         let set_layouts = [set_layout];
@@ -242,7 +244,7 @@ impl Gpu {
     // ---- dispatch ----
 
     /// Build a dispatch with a fresh single-use uniform buffer (tracked transient).
-    pub fn step(&self, kind: usize, bufs: &[&VkOwnedBuffer], params: &[u32], threads: u32) -> Step {
+    pub fn step(&self, kind: usize, bufs: &[&VkOwnedBuffer], params: &[u32], threads: u32) -> VkStep {
         let ubuf = self.make_uniform(params);
         let step = self.record(kind, &ubuf, bufs, &[], threads);
         self.uniforms.lock().unwrap().push(ubuf);
@@ -250,7 +252,7 @@ impl Gpu {
     }
 
     /// Build a dispatch around a caller-owned uniform buffer (reused across runs).
-    pub fn step_buf(&self, kind: usize, ubuf: &VkOwnedBuffer, bufs: &[&VkOwnedBuffer], threads: u32) -> Step {
+    pub fn step_buf(&self, kind: usize, ubuf: &VkOwnedBuffer, bufs: &[&VkOwnedBuffer], threads: u32) -> VkStep {
         self.record(kind, &ubuf.inner, bufs, &[], threads)
     }
 
@@ -263,7 +265,7 @@ impl Gpu {
         offsets: &[(u64, u64)],
         params: &[u32],
         threads: u32,
-    ) -> Step {
+    ) -> VkStep {
         let ubuf = self.make_uniform(params);
         let step = self.record(kind, &ubuf, bufs, offsets, threads);
         self.uniforms.lock().unwrap().push(ubuf);
@@ -281,7 +283,7 @@ impl Gpu {
     }
 
     /// Allocate a descriptor set for `kind`, wire the uniform (binding 0) and the
-    /// storage buffers (bindings 1..) — optionally sub-ranged — and return the Step.
+    /// storage buffers (bindings 1..) — optionally sub-ranged — and return the step.
     fn record(
         &self,
         kind: usize,
@@ -289,7 +291,7 @@ impl Gpu {
         bufs: &[&VkOwnedBuffer],
         offsets: &[(u64, u64)],
         threads: u32,
-    ) -> Step {
+    ) -> VkStep {
         let kp = &self.pipelines[kind];
         let dev = &self.ctx.device;
         let set = self.alloc_set(kp.set_layout);
@@ -331,12 +333,12 @@ impl Gpu {
             })
             .collect();
         unsafe { dev.update_descriptor_sets(&writes, &[]) };
-        let (gx, gy) = super::grid(threads);
+        let (gx, gy) = backend_api::grid(threads);
         let sliced = offsets.iter().any(|&(off, _)| off > 0);
-        Step { kind, set, gx, gy, sliced }
+        VkStep { kind, set, gx, gy, sliced }
     }
 
-    pub fn submit(&self, clears: &[&VkOwnedBuffer], steps: &[Step]) {
+    pub fn submit(&self, clears: &[&VkOwnedBuffer], steps: &[VkStep]) {
         if !clears.is_empty() {
             // Match wgpu: complete prior work, then zero the buffers, before the
             // new steps (which may read them) are queued.
@@ -361,7 +363,7 @@ impl Gpu {
     /// memory barrier between consecutive dispatches), submit, fence-wait, then
     /// reclaim the batch's descriptor sets + transient uniform buffers.
     fn flush(&self) {
-        let steps: Vec<Step> = std::mem::take(&mut *self.pending.lock().unwrap());
+        let steps: Vec<VkStep> = std::mem::take(&mut *self.pending.lock().unwrap());
         if steps.is_empty() {
             return;
         }
@@ -422,8 +424,8 @@ impl Gpu {
             self.end_and_wait(cmd);
         }
         // Descriptor sets + uniform buffers are intentionally NOT reclaimed here:
-        // a Step (and its set) may be re-submitted by the caller, so they live
-        // until the Gpu drops (see `Gpu::pools`).
+        // a step (and its set) may be re-submitted by the caller, so they live
+        // until the backend drops (see `VulkanBackend::pools`).
     }
 
     unsafe fn begin_cmd(&self) -> vk::CommandBuffer {
@@ -454,7 +456,7 @@ impl Gpu {
     }
 }
 
-impl Drop for Gpu {
+impl Drop for VulkanBackend {
     fn drop(&mut self) {
         let dev = &self.ctx.device;
         unsafe {
@@ -478,7 +480,8 @@ impl Drop for Gpu {
 }
 
 /// Create a fresh descriptor pool sized for `POOL_MAX_SETS` sets (uniform + up to
-/// 8 storage buffers each). Pools are grown, never reset (see [`Gpu::pools`]).
+/// 8 storage buffers each). Pools are grown, never reset (see
+/// [`VulkanBackend::pools`]).
 unsafe fn new_pool(dev: &ash::Device) -> Result<vk::DescriptorPool, String> {
     let sizes = [
         vk::DescriptorPoolSize::default()
@@ -498,4 +501,55 @@ unsafe fn new_pool(dev: &ash::Device) -> Result<vk::DescriptorPool, String> {
 fn log_adapter(name: &str) {
     static LOGGED: std::sync::Once = std::sync::Once::new();
     LOGGED.call_once(|| eprintln!("adapter: {name} (Vulkan compute, ash + naga WGSL->SPIR-V)"));
+}
+
+/// Neutral-handle bridge: downcast the opaque [`DeviceBuffer`]/[`Step`] back to
+/// `VkOwnedBuffer`/[`VkStep`] and delegate to the inherent methods.
+impl Backend for VulkanBackend {
+    fn storage(&self, n: u64) -> DeviceBuffer {
+        DeviceBuffer::new(VulkanBackend::storage(self, n))
+    }
+    fn storage_init(&self, name: &str, data: &[f32]) -> DeviceBuffer {
+        DeviceBuffer::new(VulkanBackend::storage_init(self, name, data))
+    }
+    fn buffer(&self, label: &str, size: u64, usage: BufUsage) -> DeviceBuffer {
+        DeviceBuffer::new(VulkanBackend::buffer(self, label, size, usage))
+    }
+    fn uniform_dynamic(&self, len: usize) -> DeviceBuffer {
+        DeviceBuffer::new(VulkanBackend::uniform_dynamic(self, len))
+    }
+    fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
+        VulkanBackend::write(self, buf.downcast_ref::<VkOwnedBuffer>(), data)
+    }
+    fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
+        let bs: Vec<&VkOwnedBuffer> = bufs.iter().map(|b| b.downcast_ref::<VkOwnedBuffer>()).collect();
+        Step::new(VulkanBackend::step(self, kind, &bs, params, threads))
+    }
+    fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
+        let bs: Vec<&VkOwnedBuffer> = bufs.iter().map(|b| b.downcast_ref::<VkOwnedBuffer>()).collect();
+        Step::new(VulkanBackend::step_sliced(self, kind, &bs, offsets, params, threads))
+    }
+    fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
+        let bs: Vec<&VkOwnedBuffer> = bufs.iter().map(|b| b.downcast_ref::<VkOwnedBuffer>()).collect();
+        Step::new(VulkanBackend::step_buf(self, kind, ubuf.downcast_ref::<VkOwnedBuffer>(), &bs, threads))
+    }
+    fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
+        let cs: Vec<&VkOwnedBuffer> = clears.iter().map(|b| b.downcast_ref::<VkOwnedBuffer>()).collect();
+        let ss: Vec<VkStep> = steps.iter().map(|s| *s.downcast_ref::<VkStep>()).collect();
+        VulkanBackend::submit(self, &cs, &ss);
+    }
+    fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
+        VulkanBackend::read(self, buf.downcast_ref::<VkOwnedBuffer>(), n)
+    }
+    fn poll_wait(&self) {
+        VulkanBackend::poll_wait(self)
+    }
+}
+
+/// Register this backend under `"vulkan"`. The factory returns `Err` when no
+/// Vulkan device/ICD is present, so the facade can fall back to wgpu.
+pub fn register() {
+    backend_api::register_backend("vulkan", |kernels| {
+        VulkanBackend::try_new(kernels).map(|g| Box::new(g) as Box<dyn Backend>)
+    });
 }

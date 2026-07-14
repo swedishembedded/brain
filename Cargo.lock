@@ -200,6 +200,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-backend-api"
+version = "0.1.0"
+
+[[package]]
+name = "brain-backend-cpu"
+version = "0.1.0"
+dependencies = [
+ "brain-backend-api",
+ "brain-wgsl-cpu",
+ "rayon",
+]
+
+[[package]]
+name = "brain-backend-vulkan"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "brain-backend-api",
+ "brain-vulkan",
+ "bytemuck",
+]
+
+[[package]]
+name = "brain-backend-wgpu"
+version = "0.1.0"
+dependencies = [
+ "brain-backend-api",
+ "bytemuck",
+ "futures-channel",
+ "pollster",
+ "web-sys",
+ "wgpu",
+]
+
+[[package]]
 name = "brain-bench"
 version = "0.1.0"
 dependencies = [
@@ -325,16 +360,11 @@ dependencies = [
 name = "brain-gpu-core"
 version = "0.1.0"
 dependencies = [
- "ash",
+ "brain-backend-api",
+ "brain-backend-cpu",
+ "brain-backend-vulkan",
+ "brain-backend-wgpu",
  "brain-kernels",
- "brain-vulkan",
- "brain-wgsl-cpu",
- "bytemuck",
- "futures-channel",
- "pollster",
- "rayon",
- "web-sys",
- "wgpu",
 ]
 
 [[package]]
@@ -393,6 +423,7 @@ dependencies = [
 name = "brain-npu"
 version = "0.1.0"
 dependencies = [
+ "brain-backend-api",
  "brain-checkpoint",
  "brain-codec",
  "brain-data",

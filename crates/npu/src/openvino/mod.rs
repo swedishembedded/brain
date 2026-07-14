@@ -172,3 +172,24 @@ pub use real::*;
 mod stub;
 #[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows"))))]
 pub use stub::*;
+
+/// The YOLO NPU session is a whole-graph [`GraphBackend`]: compile an ONNX graph
+/// once for a device, then run frames through it. This is the second backend
+/// contract (distinct from the eager per-step `backend_api::Backend`); the same
+/// impl covers the real OpenVINO session and the stub, since both expose
+/// `load_bytes`/`run`/`device`.
+impl backend_api::GraphBackend for NpuSession {
+    type Config = NpuConfig;
+    type Output = HeadOutputs;
+    type Error = NpuError;
+
+    fn compile(onnx: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
+        NpuSession::load_bytes(onnx, cfg)
+    }
+    fn run(&mut self, input: &[f32], shape: [usize; 4]) -> Result<HeadOutputs, NpuError> {
+        NpuSession::run(self, input, shape)
+    }
+    fn device(&self) -> &str {
+        NpuSession::device(self)
+    }
+}

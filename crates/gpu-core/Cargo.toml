@@ -3,31 +3,25 @@ name = "brain-gpu-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "GPU plumbing: device init, pipeline cache, dispatch, buffers, blocking/async readback."
+description = "Compute-device facade: selects and forwards to an eager Backend (wgpu / native CPU / native Vulkan)."
 
 [lib]
 name = "gpu_core"
 path = "src/lib.rs"
 
 [dependencies]
-brain-kernels.workspace = true
-bytemuck.workspace = true
+brain-backend-api.workspace = true
 
-# Native GPU stack: full wgpu (desktop backends) + a blocking executor, plus the
-# native CPU backend (WGSL->Cranelift JIT + rayon). Both are compiled in and the
-# active one is chosen at runtime. wasm keeps only the wgpu/WebGPU backend.
+# Native builds carry all three eager backends; the active one is chosen at
+# runtime per `Gpu` instance (registry lookup by name). wasm keeps only the
+# wgpu/WebGPU backend (Cranelift/ash can't target the browser).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-wgpu = "29"
-pollster = "0.4"
-brain-wgsl-cpu.workspace = true
-# Native Vulkan compute backend (ash + naga WGSL->SPIR-V), reusing brain-vulkan's
-# VkContext/shader. A third runtime-selected gpu-core backend alongside wgpu/CPU.
-brain-vulkan.workspace = true
-ash.workspace = true
-rayon = "1"
+brain-backend-wgpu.workspace = true
+brain-backend-cpu.workspace = true
+brain-backend-vulkan.workspace = true
 
-# Browser GPU stack: wgpu's WebGPU backend only, plus async-readback glue.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wgpu = { version = "29", default-features = false, features = ["webgpu", "wgsl"] }
-futures-channel = "0.3"
-web-sys = { version = "0.3", features = ["console"] }
+brain-backend-wgpu.workspace = true
+
+[dev-dependencies]
+brain-kernels.workspace = true
