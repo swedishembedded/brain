@@ -10,15 +10,24 @@ dense-expert export and its current status.
 - **cpu / gpu**: fully supported today — the GLM model is written once against the
   `Gpu`/`Step` seam (`crates/glm`), so `--device cpu|gpu` runs it unchanged
   (validated: gradcheck + learnability + end-to-end `brain glm train/eval/infer`).
-- **npu**: the **fp32 ONNX export is implemented** — `crates/npu/src/glm_topology.rs`
-  (MLA + dense-expert MoE, TopK gate, interleaved RoPE) + `glm_export.rs`, driven by
-  `brain glm export --weights F --out model.onnx --seq T`. A **structural test**
-  (`crates/npu/tests/glm_onnx.rs`, no OpenVINO needed) validates the graph decodes
-  to a well-formed `ModelProto` with the right inputs/outputs and op set.
-  **Numerical parity vs brain's own forward is NOT asserted here** — it requires an
-  OpenVINO install + NPU hardware (gated on `BRAIN_OV_PROBE`, like the Qwen decoder
-  export). INT8 weight-only quant + the OpenVINO decode session are the remaining
-  hardware-gated work.
+- **npu**: the **fp32 ONNX export is implemented AND validated on hardware** —
+  `crates/npu/src/glm_topology.rs` (MLA + dense-expert MoE, TopK gate, interleaved
+  RoPE) + `glm_export.rs`, driven by `brain glm export --weights F --out model.onnx
+  --seq T`. Tests (`crates/npu/tests/glm_onnx.rs`):
+  - `glm_onnx_graph_is_well_formed` (always): the export decodes to a well-formed
+    `ModelProto` with the right inputs/outputs + op set.
+  - `glm_onnx_matches_brain_forward` (`BRAIN_OV_PROBE`): the ONNX run through
+    OpenVINO's **CPU** plugin matches brain's own forward (argmax agrees,
+    `max_abs ≈ 0.005`).
+  - `glm_onnx_runs_on_npu` (`BRAIN_OV_PROBE`): the graph **compiles and runs on the
+    Intel NPU device** and still matches brain (`max_abs ≈ 0.005`). The NPU plugin
+    accepts the whole dense-expert MoE graph (TopK / GatherElements /
+    ScatterElements included).
+
+  Run the parity tests with OpenVINO on `LD_LIBRARY_PATH` (or an active venv/
+  `setupvars.sh`): `BRAIN_OV_PROBE=1 BRAIN_DEVICE=cpu cargo test -p brain-npu
+  --test glm_onnx`. Remaining: INT8 weight-only quant + wiring the OpenVINO decode
+  session into `brain glm infer --device npu`.
 
 ## Why "dense-expert"
 

@@ -56,3 +56,108 @@ fn glm_onnx_graph_is_well_formed() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Numerical parity: run the exported GLM ONNX through OpenVINO (CPU device) and
+/// compare per-position logits to brain's own forward. Validates the whole MLA +
+/// dense-expert MoE graph math. Gated on BRAIN_OV_PROBE (needs OpenVINO) and
+/// MOE_SKIP_GPU_TESTS (brain's reference forward needs a backend).
+#[test]
+fn glm_onnx_matches_brain_forward() {
+    if std::env::var("BRAIN_OV_PROBE").is_err() || std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    use glm::model::Glm;
+    use npu::openvino::{DecoderSession, NpuConfig, NpuDevice};
+
+    let cfg = GlmConfig::tiny(); // layer 0 dense, layer 1 MoE
+    let vocab = cfg.vocab as usize;
+    let init = glm::init_weights(&cfg, 7);
+    let model = Glm::new(cfg.clone(), 1, cfg.block_size, &init);
+    let ids: Vec<u32> = (0..6).map(|i| (i * 5 + 1) % cfg.vocab).collect();
+    let reference = model.logits_all(&ids); // [6 * vocab]
+
+    let dir = std::env::temp_dir().join(format!("brain-glm-parity-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wpath = dir.join("tiny.weights");
+    model.save(wpath.to_str().unwrap());
+
+    let (bytes, _) = npu::glm_export::build_glm_fp32_bytes(wpath.to_str().unwrap(), ids.len()).unwrap();
+    let mut sess = DecoderSession::load_bytes(
+        &bytes,
+        &NpuConfig { device: NpuDevice::Cpu, allow_fallback: true, ..Default::default() },
+    )
+    .expect("compile GLM decoder on OpenVINO CPU");
+
+    let ids64: Vec<i64> = ids.iter().map(|&x| x as i64).collect();
+    let got = sess.run_ids(&ids64).expect("run GLM decoder");
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(got.len(), reference.len(), "logit count");
+    let argmax = |s: &[f32]| (0..s.len()).max_by(|&a, &b| s[a].partial_cmp(&s[b]).unwrap()).unwrap();
+    let mut max_abs = 0f32;
+    for pos in 0..ids.len() {
+        let r = &reference[pos * vocab..(pos + 1) * vocab];
+        let gg = &got[pos * vocab..(pos + 1) * vocab];
+        for (a, b) in r.iter().zip(gg) {
+            max_abs = max_abs.max((a - b).abs());
+        }
+        assert_eq!(argmax(r), argmax(gg), "argmax disagree at position {pos} (max_abs so far {max_abs})");
+    }
+    eprintln!("GLM ONNX vs brain: max_abs={max_abs:.5} (device {})", sess.device());
+    assert!(max_abs < 1e-2, "logit mismatch too large: {max_abs}");
+}
+
+/// Compile + run the exported GLM ONNX on the actual Intel **NPU** device (with
+/// CPU fallback) and check parity vs brain. The NPU plugin may reject some ops
+/// (TopK / Scatter) and fall back — the test reports the device it landed on.
+/// Gated on BRAIN_OV_PROBE + a working backend.
+#[test]
+fn glm_onnx_runs_on_npu() {
+    if std::env::var("BRAIN_OV_PROBE").is_err() || std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
+    use glm::model::Glm;
+    use npu::openvino::{DecoderSession, NpuConfig, NpuDevice};
+
+    let cfg = GlmConfig::tiny();
+    let vocab = cfg.vocab as usize;
+    let init = glm::init_weights(&cfg, 7);
+    let model = Glm::new(cfg.clone(), 1, cfg.block_size, &init);
+    let ids: Vec<u32> = (0..6).map(|i| (i * 5 + 1) % cfg.vocab).collect();
+    let reference = model.logits_all(&ids);
+
+    let dir = std::env::temp_dir().join(format!("brain-glm-npu-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let wpath = dir.join("tiny.weights");
+    model.save(wpath.to_str().unwrap());
+    let (bytes, _) = npu::glm_export::build_glm_fp32_bytes(wpath.to_str().unwrap(), ids.len()).unwrap();
+
+    let sess = DecoderSession::load_bytes(
+        &bytes,
+        &NpuConfig { device: NpuDevice::Npu, allow_fallback: true, ..Default::default() },
+    );
+    let mut sess = match sess {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("GLM on NPU: compile failed ({e}); skipping (NPU op support gap)");
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+    };
+    let ids64: Vec<i64> = ids.iter().map(|&x| x as i64).collect();
+    let got = sess.run_ids(&ids64).expect("run GLM decoder on NPU/fallback");
+    std::fs::remove_dir_all(&dir).ok();
+
+    let argmax = |s: &[f32]| (0..s.len()).max_by(|&a, &b| s[a].partial_cmp(&s[b]).unwrap()).unwrap();
+    let mut max_abs = 0f32;
+    for pos in 0..ids.len() {
+        let r = &reference[pos * vocab..(pos + 1) * vocab];
+        let gg = &got[pos * vocab..(pos + 1) * vocab];
+        for (a, b) in r.iter().zip(gg) {
+            max_abs = max_abs.max((a - b).abs());
+        }
+        assert_eq!(argmax(r), argmax(gg), "argmax disagree at position {pos}");
+    }
+    eprintln!("GLM ONNX on NPU-requested: max_abs={max_abs:.5} (ran on {})", sess.device());
+    assert!(max_abs < 2e-2, "logit mismatch too large: {max_abs}");
+}

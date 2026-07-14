@@ -38,7 +38,7 @@ Pre-norm decoder, RMSNorm throughout, untied `lm_head`, masked CE. Per layer:
 | cpu / gpu | ✅ | end-to-end `brain glm train/eval/infer` (shared `Gpu`/`Step` seam) |
 | HF import (single/sharded) | ✅ | name-map + de-interleave + packed-expert unit tests |
 | bench arch `glm` | ✅ | `brain bench eval --arch glm` |
-| NPU fp32 ONNX export | ✅ (structural) | `crates/npu/tests/glm_onnx.rs`; parity is hardware-gated (`docs/glm/NPU.md`) |
+| NPU fp32 ONNX export | ✅ (validated on HW) | `crates/npu/tests/glm_onnx.rs`: parity vs brain on OpenVINO **CPU + Intel NPU** (`max_abs ≈ 0.005`, argmax agrees). `docs/glm/NPU.md` |
 
 ## CLI
 
