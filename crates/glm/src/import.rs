@@ -58,6 +58,16 @@ pub fn config_from_hf(json: &str) -> Result<GlmConfig, String> {
     cfg.index_topk = g("index_topk").unwrap_or(2048);
     cfg.index_n_heads = g("index_n_heads").unwrap_or(32);
     cfg.index_head_dim = g("index_head_dim").unwrap_or(128);
+    // Per-layer indexer schedule: "full" runs its own indexer, "shared" reuses
+    // the previous full layer's top-k (IndexShare). If absent, derive from the
+    // freq/offset schedule (index_topk_freq / index_skip_topk_offset).
+    cfg.indexer_full = if let Some(types) = v["indexer_types"].as_array() {
+        types.iter().map(|x| x.as_str() == Some("full")).collect()
+    } else {
+        let freq = g("index_topk_freq").unwrap_or(1).max(1);
+        let offset = g("index_skip_topk_offset").unwrap_or(2);
+        (0..cfg.n_layers).map(|i| (i.saturating_sub(offset) + 1) % freq == 0).collect()
+    };
     Ok(cfg)
 }
 
@@ -148,6 +158,12 @@ pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
             "self_attn.q_a_layernorm.weight" => put(bp("attn.q_a_norm.weight"), t.data.clone())?,
             "self_attn.kv_a_layernorm.weight" => put(bp("attn.kv_a_norm.weight"), t.data.clone())?,
             "self_attn.o_proj.weight" => put(bp("attn.o.weight"), t.data.clone())?,
+            // DSA indexer (only present on "full" layers in HF)
+            "self_attn.indexer.wq_b.weight" => put(bp("idx.wq_b.weight"), t.data.clone())?,
+            "self_attn.indexer.wk.weight" => put(bp("idx.wk.weight"), t.data.clone())?,
+            "self_attn.indexer.k_norm.weight" => put(bp("idx.k_norm.weight"), t.data.clone())?,
+            "self_attn.indexer.k_norm.bias" => put(bp("idx.k_norm.bias"), t.data.clone())?,
+            "self_attn.indexer.weights_proj.weight" => put(bp("idx.weights_proj.weight"), t.data.clone())?,
             "self_attn.q_b_proj.weight" => {
                 let (nope_w, rope_w) = split_heads(&t.data, h, nope, rope, cfg.q_lora_rank as usize);
                 put(bp("attn.q_b_nope.weight"), nope_w)?;

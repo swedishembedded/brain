@@ -37,8 +37,8 @@ pub fn init_weights(cfg: &GlmConfig, seed: u64) -> HashMap<String, Vec<f32>> {
     for (name, numel) in cfg.param_list() {
         let v = if is_norm_gain(&name) {
             vec![1.0; numel]
-        } else if name.ends_with("moe.router.bias") {
-            vec![0.0; numel]
+        } else if name.ends_with(".bias") {
+            vec![0.0; numel] // router selection bias + LayerNorm bias
         } else if is_residual_proj(&name) {
             normal(numel, proj_std, &mut rng)
         } else {

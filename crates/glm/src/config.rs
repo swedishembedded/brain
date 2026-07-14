@@ -18,6 +18,17 @@
 
 use serde_json::Value;
 
+/// Per-layer DSA indexer mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IdxMode {
+    /// No indexer (dense MLA) — the Phase-1 regime.
+    None,
+    /// Run this layer's own indexer to select the top-k keys.
+    Full,
+    /// Reuse the previous `Full` layer's top-k selection (IndexShare).
+    Shared,
+}
+
 #[derive(Clone, Debug)]
 pub struct GlmConfig {
     pub vocab: u32,
@@ -83,6 +94,26 @@ impl GlmConfig {
     /// Shared-expert inner dim (`moe_intermediate_size * n_shared_experts`).
     pub fn shared_ff(&self) -> u32 {
         self.moe_intermediate_size * self.n_shared_experts
+    }
+    /// All-heads indexer width (`index_n_heads * index_head_dim`).
+    pub fn idx_dim(&self) -> u32 {
+        self.index_n_heads * self.index_head_dim
+    }
+    /// The indexer rope slice width (per head), = `qk_rope_head_dim` (reference).
+    pub fn index_rope_dim(&self) -> u32 {
+        self.qk_rope_head_dim
+    }
+    /// Whether any DSA indexer layers are configured (else pure dense MLA).
+    pub fn has_indexer(&self) -> bool {
+        !self.indexer_full.is_empty()
+    }
+    /// The indexer mode for layer `l`.
+    pub fn idx_mode(&self, l: u32) -> IdxMode {
+        match self.indexer_full.get(l as usize) {
+            Some(true) => IdxMode::Full,
+            Some(false) => IdxMode::Shared,
+            None => IdxMode::None,
+        }
     }
     /// The lm_head parameter name (tied ⇒ the embedding table).
     pub fn head_weight(&self) -> &'static str {
@@ -179,7 +210,8 @@ impl GlmConfig {
             "rope_theta": self.rope_theta, "rms_norm_eps": self.rms_eps,
             "tie_word_embeddings": self.tie_embeddings,
             "index_topk": self.index_topk, "index_n_heads": self.index_n_heads,
-            "index_head_dim": self.index_head_dim
+            "index_head_dim": self.index_head_dim,
+            "indexer_full": self.indexer_full
         })
     }
 
@@ -214,7 +246,10 @@ impl GlmConfig {
             index_topk: g("index_topk", 4096),
             index_n_heads: g("index_n_heads", 2),
             index_head_dim: g("index_head_dim", 8),
-            indexer_full: Vec::new(),
+            indexer_full: c["indexer_full"]
+                .as_array()
+                .map(|a| a.iter().map(|x| x.as_bool().unwrap_or(false)).collect())
+                .unwrap_or_default(),
         }
     }
 
@@ -250,6 +285,16 @@ impl GlmConfig {
             out.push((p("attn.kv_b_nope.weight"), nope * kvl));
             out.push((p("attn.kv_b_v.weight"), vd * kvl));
             out.push((p("attn.o.weight"), d * vd));
+            // DSA indexer (only "full" layers carry their own projections).
+            if self.idx_mode(l) == IdxMode::Full {
+                let idx = self.idx_dim() as usize;
+                let idh = self.index_head_dim as usize;
+                out.push((p("idx.wq_b.weight"), idx * ql));
+                out.push((p("idx.wk.weight"), idh * d));
+                out.push((p("idx.k_norm.weight"), idh));
+                out.push((p("idx.k_norm.bias"), idh));
+                out.push((p("idx.weights_proj.weight"), self.index_n_heads as usize * d));
+            }
             out.push((p("post_ln.weight"), d));
             // MLP: dense for the first `first_k_dense_replace` layers, else MoE.
             if self.is_dense_layer(l) {

@@ -28,7 +28,7 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use optim::Optim;
 use paramstore::{ParamStore, Role};
 
-use crate::config::GlmConfig;
+use crate::config::{GlmConfig, IdxMode};
 
 /// Cross-entropy ignore index (masked target positions).
 pub const IGNORE: u32 = 0xFFFF_FFFF;
@@ -70,6 +70,12 @@ const GRADNORM_SQ: usize = 32;
 const GRAD_SCALE: usize = 33;
 const CLIP_COEF: usize = 34;
 const GRAD_SCALE_BUF: usize = 35;
+// DSA indexer (Phase 2; forward-only — the indexer is detached from the LM loss)
+const LAYERNORM: usize = 36;
+const MLA_INDEX_SCORES: usize = 37;
+const ROPE_SUB: usize = 38;
+const TOPK_MASK: usize = 39;
+const ADD_INDEX_MASK: usize = 40;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -108,6 +114,11 @@ const PIPELINES: &[(&str, &str)] = &[
     ("grad_scale", kernels::GRAD_SCALE),
     ("clip_coef", kernels::CLIP_COEF),
     ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
+    ("layernorm", kernels::LAYERNORM),
+    ("mla_index_scores", kernels::MLA_INDEX_SCORES),
+    ("rope_sub", kernels::ROPE_SUB),
+    ("topk_mask", kernels::TOPK_MASK),
+    ("add_index_mask", kernels::ADD_INDEX_MASK),
 ];
 
 /// MLP variant per layer (cached activations for backprop).
@@ -176,6 +187,16 @@ pub struct Glm {
     sh_out: DeviceBuffer,
     mlp_out: DeviceBuffer,
 
+    // DSA indexer forward temporaries (used only when `cfg.has_indexer()`).
+    // `idx_mask` persists across IndexShare `Shared` layers; the rest are
+    // recomputed at each `Full` layer.
+    q_idx: DeviceBuffer,
+    k_idx_pre: DeviceBuffer,
+    k_idx: DeviceBuffer,
+    idx_weights: DeviceBuffer,
+    index_scores: DeviceBuffer,
+    idx_mask: DeviceBuffer,
+
     // shared backward temporaries
     d_logits: DeviceBuffer,
     d_xn: DeviceBuffer,
@@ -232,7 +253,10 @@ impl Glm {
             .param_list()
             .into_iter()
             .map(|(n, c)| {
-                let role = if !train || n.ends_with("moe.router.bias") {
+                // The router selection bias and the whole DSA indexer are detached
+                // from the LM loss (never backprop'd) — keep them Frozen so they
+                // stay out of the optimiser and the gradient-checked set.
+                let role = if !train || n.ends_with("moe.router.bias") || n.contains(".idx.") {
                     Role::Frozen
                 } else {
                     Role::Trainable
@@ -257,6 +281,10 @@ impl Glm {
         let dense_ff = cfg.intermediate_size as u64;
         let shared_ff = cfg.shared_ff() as u64;
         let bht2 = (b * cfg.n_heads * t * t) as u64;
+        let idx_dim = cfg.idx_dim() as u64;
+        let idh = cfg.index_head_dim as u64;
+        let nih = cfg.index_n_heads as u64;
+        let btt = (b * t * t) as u64;
         let st = |x: u64| gpu.storage(x);
 
         let tokens = gpu.storage(n);
@@ -329,6 +357,12 @@ impl Glm {
             moe_acc: st(n * d),
             sh_out: st(n * d),
             mlp_out: st(n * d),
+            q_idx: st(n * idx_dim),
+            k_idx_pre: st(n * idh),
+            k_idx: st(n * idh),
+            idx_weights: st(n * nih),
+            index_scores: st(btt),
+            idx_mask: st(btt),
             d_logits: st(n * v),
             d_xn: st(n * d),
             d_tmp: st(n * d),
@@ -408,6 +442,36 @@ impl Glm {
         s.push(self.gpu.step(RMSNORM_DX, &[x, self.w(wname), dy, dx], &[dim, rows], rows));
     }
 
+    /// DSA indexer forward for one `Full` layer: project q (from the q residual)
+    /// and the shared single-head key, LayerNorm + sub-slice RoPE them, score with
+    /// `relu(q·k)` weighted per head, and select the top-`index_topk` causal keys
+    /// into `idx_mask`. Detached from the LM loss (Frozen params, no backward).
+    fn indexer_fwd(&self, s: &mut Vec<Step>, lb: &LayerBufs, l: usize, b_use: u32, t_use: u32) {
+        let c = &self.cfg;
+        let n = b_use * t_use;
+        let d = c.d_model;
+        let ql = c.q_lora_rank;
+        let idx = c.idx_dim();
+        let idh = c.index_head_dim;
+        let nih = c.index_n_heads;
+        let rope = c.index_rope_dim();
+        let p = |name: &str| format!("blocks.{l}.{name}");
+        // q_idx = q_resid·Wq_bᵀ ; k_idx = LayerNorm(x·Wkᵀ) ; weights = x·Wprojᵀ
+        self.mm(s, &lb.q_c_n, &p("idx.wq_b.weight"), &self.q_idx, n, ql, idx);
+        self.mm(s, &lb.xn1, &p("idx.wk.weight"), &self.k_idx_pre, n, d, idh);
+        s.push(self.gpu.step(LAYERNORM, &[&self.k_idx_pre, self.w(&p("idx.k_norm.weight")), self.w(&p("idx.k_norm.bias")), &self.k_idx], &[idh, n], n));
+        s.push(self.gpu.step(ROPE_SUB, &[&self.q_idx], &[n, nih, idh, rope, idx, t_use], n * nih * (rope / 2)));
+        s.push(self.gpu.step(ROPE_SUB, &[&self.k_idx], &[n, 1, idh, rope, idh, t_use], n * (rope / 2)));
+        self.mm(s, &lb.xn1, &p("idx.weights_proj.weight"), &self.idx_weights, n, d, nih);
+        s.push(self.gpu.step(MLA_INDEX_SCORES, &[&self.q_idx, &self.k_idx, &self.idx_weights, &self.index_scores], &[b_use, nih, t_use, idh], b_use * t_use * t_use));
+        s.push(self.gpu.step(TOPK_MASK, &[&self.index_scores, &self.idx_mask], &[b_use, t_use, c.index_topk], b_use * t_use));
+    }
+
+    /// Add the current DSA sparse mask into the MLA scores (shared across heads).
+    fn add_index_mask(&self, s: &mut Vec<Step>, b_use: u32, nh: u32, t_use: u32) {
+        s.push(self.gpu.step(ADD_INDEX_MASK, &[&self.idx_mask, &self.scores], &[b_use, nh, t_use], b_use * nh * t_use * t_use));
+    }
+
     fn build_forward(&self, b_use: u32, t_use: u32) -> Vec<Step> {
         let c = &self.cfg;
         let n = b_use * t_use;
@@ -451,6 +515,17 @@ impl Glm {
             self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_v.weight"), &lb.v, n, kvl, vd);
             // scores -> softmax -> ctx (v-side reuses the standard MHA apply)
             s.push(self.gpu.step(MLA_SCORES, &[&lb.q_pass, &lb.q_rot, &lb.k_pass, &lb.k_rot, &self.scores], &[b_use, nh, t_use, c.qk_nope_head_dim, rope1], b_use * nh * t_use * t_use));
+            // DSA sparse indexer (IndexShare): `Full` layers compute a fresh top-k
+            // mask; `Full`+`Shared` layers add it into the scores before softmax.
+            // The indexer is detached (Frozen params) — no backward path.
+            match c.idx_mode(l as u32) {
+                IdxMode::Full => {
+                    self.indexer_fwd(&mut s, lb, l, b_use, t_use);
+                    self.add_index_mask(&mut s, b_use, nh, t_use);
+                }
+                IdxMode::Shared => self.add_index_mask(&mut s, b_use, nh, t_use),
+                IdxMode::None => {}
+            }
             s.push(self.gpu.step(ATTN_SOFTMAX, &[&self.scores, &lb.probs], &[b_use, nh, t_use], b_use * nh * t_use));
             s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.v, &lb.ctx], &[b_use, nh, t_use, vhd, vd, 0, vd], b_use * nh * t_use * vhd));
             self.mm(&mut s, &lb.ctx, &p("attn.o.weight"), &self.proj, n, vd, d);
