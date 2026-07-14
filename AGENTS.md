@@ -24,7 +24,15 @@ them, keeping the gradient-check discipline.
    **federated/sharded** expert training (`crates/federated`).
 3. **PID event/effect Transformer** (`crates/pid`) — LayerNorm, learned
    positions, biased linears; backs the WebGPU demo (`crates/web`).
-4. **YOLOv8-style detector** (`crates/yolo`) — from-scratch anchor-free object
+4. **GLM-5.2 decoder** (`crates/glm`) — `glm_moe_dsa`: **MLA** (low-rank q/kv with
+   a decoupled nope/rope head split + interleaved RoPE), a **sigmoid `noaux_tc`
+   MoE** (per-expert selection bias, shared expert, `first_k_dense_replace`
+   dense→MoE schedule), untied `lm_head`. Phase 1 = the dense MLA-MoE core
+   (indexer is a no-op while `index_topk >= block_size`); the DSA sparse indexer,
+   MTP, and NPU export are later phases. Gradient-checked (`gradcheck::check_glm`)
+   + learnability tests. Train/eval/infer/finetune/import via `brain glm …`;
+   HF import (single/sharded safetensors). Bench arch `glm`.
+5. **YOLOv8-style detector** (`crates/yolo`) — from-scratch anchor-free object
    detector: CSP backbone → PAN-FPN neck → decoupled DFL head, with the
    assigner + BCE/CIoU/DFL detection loss and NMS box decode. Trains on the
    synthetic detection dataset and runs `detect` (boxes in pixel coords); CPU
@@ -43,6 +51,7 @@ them, keeping the gradient-check discipline.
 | `data` | char + GPT-2 **BPE** tokenizers, dataset generators, loaders (masking/alignment), normalization |
 | `gpt` | GPT model + training loop + sampling |
 | `moe` / `pid` | the MoE and PID models (fwd/bwd) |
+| `glm` | GLM-5.2 decoder: MLA + sigmoid `noaux_tc` MoE (+ shared expert, dense→MoE schedule); HF import (single/sharded) |
 | `yolo` | YOLOv8-style detector: backbone/neck/head, DFL decode, assigner + detection loss, NMS, `detect` inference, canonical `yolov8n` weight import |
 | `onnx` | pure-Rust ONNX graph model + serializer (export only; vendored `prost` bindings, no `protoc` in the build) |
 | `npu` | YOLO→ONNX export + BN fold + brain-native INT8 PTQ + fake-quant simulator + OpenVINO **Intel NPU** runtime (default dep on x86_64 linux/windows; `runtime-linking`) |

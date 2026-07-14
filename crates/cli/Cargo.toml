@@ -19,6 +19,7 @@ brain-gpu-core.workspace = true
 brain-moe.workspace = true
 brain-gpt.workspace = true
 brain-qwen.workspace = true
+brain-glm.workspace = true
 brain-tts.workspace = true
 brain-codec.workspace = true
 brain-speaker.workspace = true

@@ -14,6 +14,7 @@
 
 mod data_cli;
 mod federated_cli;
+mod glm_cli;
 mod gpt_cli;
 mod image_io;
 mod npu_cli;
@@ -420,6 +421,7 @@ fn main() {
         Some("data") => data_cli::run_data(&argv[2..]),
         Some("gpt") => gpt_cli::run_gpt(&argv[2..]),
         Some("qwen") => qwen_cli::run_qwen(&argv[2..]),
+        Some("glm") => glm_cli::run_glm(&argv[2..]),
         Some("tts") => tts_cli::run_tts(&argv[2..]),
         Some("yolo") => yolo_cli::run_yolo(&argv[2..]),
         Some("npu") => npu_cli::run_npu(&argv[2..]),
