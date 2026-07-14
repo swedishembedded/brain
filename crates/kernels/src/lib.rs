@@ -188,6 +188,16 @@ pub const MATMUL_DW: &str = include_str!("../wgsl/matmul_dw.wgsl");
 pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
 /// `wgsl/matmul.wgsl`
 pub const MATMUL: &str = include_str!("../wgsl/matmul.wgsl");
+/// `wgsl/mla_scores.wgsl`
+pub const MLA_SCORES: &str = include_str!("../wgsl/mla_scores.wgsl");
+/// `wgsl/mla_bwd_dq_pass.wgsl`
+pub const MLA_BWD_DQ_PASS: &str = include_str!("../wgsl/mla_bwd_dq_pass.wgsl");
+/// `wgsl/mla_bwd_dk_pass.wgsl`
+pub const MLA_BWD_DK_PASS: &str = include_str!("../wgsl/mla_bwd_dk_pass.wgsl");
+/// `wgsl/mla_bwd_dq_rope.wgsl`
+pub const MLA_BWD_DQ_ROPE: &str = include_str!("../wgsl/mla_bwd_dq_rope.wgsl");
+/// `wgsl/mla_bwd_dk_rope.wgsl`
+pub const MLA_BWD_DK_ROPE: &str = include_str!("../wgsl/mla_bwd_dk_rope.wgsl");
 /// `wgsl/maxpool5.wgsl`
 pub const MAXPOOL5: &str = include_str!("../wgsl/maxpool5.wgsl");
 /// `wgsl/maxpool5_dx.wgsl`
@@ -220,6 +230,10 @@ pub const ROUTER_BWD: &str = include_str!("../wgsl/router_bwd.wgsl");
 pub const ROUTER_GATE_TRAIN: &str = include_str!("../wgsl/router_gate_train.wgsl");
 /// `wgsl/router_gate.wgsl`
 pub const ROUTER_GATE: &str = include_str!("../wgsl/router_gate.wgsl");
+/// `wgsl/router_gate_sigmoid.wgsl`
+pub const ROUTER_GATE_SIGMOID: &str = include_str!("../wgsl/router_gate_sigmoid.wgsl");
+/// `wgsl/router_bwd_sigmoid.wgsl`
+pub const ROUTER_BWD_SIGMOID: &str = include_str!("../wgsl/router_bwd_sigmoid.wgsl");
 /// `wgsl/scale_add_dexp.wgsl`
 pub const SCALE_ADD_DEXP: &str = include_str!("../wgsl/scale_add_dexp.wgsl");
 /// `wgsl/scale_add_dgate.wgsl`
@@ -356,6 +370,11 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_dw", MATMUL_DW),
     ("matmul_dx", MATMUL_DX),
     ("matmul", MATMUL),
+    ("mla_scores", MLA_SCORES),
+    ("mla_bwd_dq_pass", MLA_BWD_DQ_PASS),
+    ("mla_bwd_dk_pass", MLA_BWD_DK_PASS),
+    ("mla_bwd_dq_rope", MLA_BWD_DQ_ROPE),
+    ("mla_bwd_dk_rope", MLA_BWD_DK_ROPE),
     ("maxpool5", MAXPOOL5),
     ("maxpool5_dx", MAXPOOL5_DX),
     ("mse_grad", MSE_GRAD),
@@ -372,6 +391,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("router_bwd", ROUTER_BWD),
     ("router_gate_train", ROUTER_GATE_TRAIN),
     ("router_gate", ROUTER_GATE),
+    ("router_gate_sigmoid", ROUTER_GATE_SIGMOID),
+    ("router_bwd_sigmoid", ROUTER_BWD_SIGMOID),
     ("scale_add_dexp", SCALE_ADD_DEXP),
     ("scale_add_dgate", SCALE_ADD_DGATE),
     ("scale_add", SCALE_ADD),
@@ -412,7 +433,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_kernels_present_and_nonempty() {
-        assert_eq!(ALL.len(), 126);
+        assert_eq!(ALL.len(), 133);
         for (n, s) in ALL { assert!(!s.trim().is_empty(), "empty kernel {n}"); }
     }
     #[test]
