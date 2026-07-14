@@ -242,6 +242,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-data",
  "brain-eval",
+ "brain-glm",
  "brain-gpt",
  "brain-model",
  "brain-moe",
@@ -268,6 +269,7 @@ dependencies = [
  "brain-eval",
  "brain-events",
  "brain-federated",
+ "brain-glm",
  "brain-gpt",
  "brain-gpu-core",
  "brain-gradcheck",
@@ -340,6 +342,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-glm"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-gpt"
 version = "0.1.0"
 dependencies = [
@@ -373,6 +390,7 @@ version = "0.1.0"
 dependencies = [
  "brain-autoencoder",
  "brain-data",
+ "brain-glm",
  "brain-gpt",
  "brain-gpu-core",
  "brain-kernels",

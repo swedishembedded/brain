@@ -1,0 +1,782 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! GLM-5.2 (`glm_moe_dsa`) decoder — forward + backprop as WGSL compute
+//! dispatches on the shared `gpu_core` engine. Phase 1: the dense MLA-MoE core
+//! (the DSA indexer is a no-op while `index_topk >= block_size`, so attention is
+//! exact dense MLA — the regime tiny models / tests run in).
+//!
+//! Per pre-norm block (no biases; RMSNorm everywhere):
+//!   h   = RMSNorm(x)·input_ln
+//!   --- MLA attention ---
+//!   qc  = RMSNorm(h·Wq_a)·q_a_norm
+//!   q_pass = qc·Wq_b_nope ;  q_rot = RoPE(qc·Wq_b_rope)
+//!   kvc = h·Wkv_a_c ;  k_rot = RoPE(h·Wkv_a_rope)          (shared MQA key)
+//!   kvcn = RMSNorm(kvc)·kv_a_norm
+//!   k_pass = kvcn·Wkv_b_nope ;  v = kvcn·Wkv_b_v
+//!   ctx = softmax(MLA-scores(q_pass,q_rot,k_pass,k_rot)) · v
+//!   x  += Wo·ctx
+//!   --- MLP: dense SwiGLU (first_k_dense layers) or MoE ---
+//!   h   = RMSNorm(x)·post_ln
+//!   MoE: x += Σ_topk gate_e·SwiGLU_e(h) + SwiGLU_shared(h)    (sigmoid noaux_tc router)
+//!   logits = lm_head·RMSNorm(x)·norm  (untied) ;  loss = masked cross-entropy
+
+use std::cell::Cell;
+use std::collections::HashMap;
+
+use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use optim::Optim;
+use paramstore::{ParamStore, Role};
+
+use crate::config::GlmConfig;
+
+/// Cross-entropy ignore index (masked target positions).
+pub const IGNORE: u32 = 0xFFFF_FFFF;
+
+// ---- kernel indices (order matches PIPELINES) ----
+const EMBED: usize = 0;
+const MATMUL: usize = 1;
+const MATMUL_DX: usize = 2;
+const MATMUL_DW: usize = 3;
+const RMSNORM: usize = 4;
+const RMS_INV: usize = 5;
+const RMSNORM_DX: usize = 6;
+const RMSNORM_DW: usize = 7;
+const ROPE: usize = 8;
+const ROPE_BWD: usize = 9;
+const MLA_SCORES: usize = 10;
+const ATTN_SOFTMAX: usize = 11;
+const ATTN_APPLY: usize = 12;
+const ATTN_BWD_DSCORES: usize = 13;
+const ATTN_BWD_DV: usize = 14;
+const MLA_BWD_DQ_PASS: usize = 15;
+const MLA_BWD_DK_PASS: usize = 16;
+const MLA_BWD_DQ_ROPE: usize = 17;
+const MLA_BWD_DK_ROPE: usize = 18;
+const SILU_MUL: usize = 19;
+const SILU_DA: usize = 20;
+const SILU_DB: usize = 21;
+const ROUTER_SIG: usize = 22;
+const ROUTER_SIG_BWD: usize = 23;
+const SCALE_ADD: usize = 24;
+const SCALE_ADD_DEXP: usize = 25;
+const SCALE_ADD_DGATE: usize = 26;
+const ADD2: usize = 27;
+const CE_VALUE: usize = 28;
+const CE_GRAD: usize = 29;
+const EMB_BWD: usize = 30;
+const ADAMW: usize = 31;
+const GRADNORM_SQ: usize = 32;
+const GRAD_SCALE: usize = 33;
+const CLIP_COEF: usize = 34;
+const GRAD_SCALE_BUF: usize = 35;
+
+const PIPELINES: &[(&str, &str)] = &[
+    ("embed", kernels::EMBED),
+    ("matmul", kernels::MATMUL),
+    ("matmul_dx", kernels::MATMUL_DX),
+    ("matmul_dw", kernels::MATMUL_DW),
+    ("rmsnorm", kernels::RMSNORM),
+    ("rms_inv", kernels::RMS_INV),
+    ("rmsnorm_dx", kernels::RMSNORM_DX),
+    ("rmsnorm_dw", kernels::RMSNORM_DW),
+    ("rope_train", kernels::ROPE_TRAIN),
+    ("rope_train_bwd", kernels::ROPE_TRAIN_BWD),
+    ("mla_scores", kernels::MLA_SCORES),
+    ("attn_softmax", kernels::ATTN_SOFTMAX),
+    ("attn_apply", kernels::ATTN_APPLY),
+    ("attn_bwd_dscores", kernels::ATTN_BWD_DSCORES),
+    ("attn_bwd_dv", kernels::ATTN_BWD_DV),
+    ("mla_bwd_dq_pass", kernels::MLA_BWD_DQ_PASS),
+    ("mla_bwd_dk_pass", kernels::MLA_BWD_DK_PASS),
+    ("mla_bwd_dq_rope", kernels::MLA_BWD_DQ_ROPE),
+    ("mla_bwd_dk_rope", kernels::MLA_BWD_DK_ROPE),
+    ("silu_mul", kernels::SILU_MUL),
+    ("silu_bwd_da", kernels::SILU_BWD_DA),
+    ("silu_bwd_db", kernels::SILU_BWD_DB),
+    ("router_gate_sigmoid", kernels::ROUTER_GATE_SIGMOID),
+    ("router_bwd_sigmoid", kernels::ROUTER_BWD_SIGMOID),
+    ("scale_add", kernels::SCALE_ADD),
+    ("scale_add_dexp", kernels::SCALE_ADD_DEXP),
+    ("scale_add_dgate", kernels::SCALE_ADD_DGATE),
+    ("add2", kernels::ADD2),
+    ("ce_value", kernels::CE_VALUE_MASKED),
+    ("ce_grad", kernels::CE_GRAD_MASKED),
+    ("emb_bwd", kernels::EMB_BWD),
+    ("adamw", kernels::ADAMW),
+    ("gradnorm_sq", kernels::GRADNORM_SQ),
+    ("grad_scale", kernels::GRAD_SCALE),
+    ("clip_coef", kernels::CLIP_COEF),
+    ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
+];
+
+/// MLP variant per layer (cached activations for backprop).
+enum Mlp {
+    Dense {
+        gate_pre: DeviceBuffer,
+        up: DeviceBuffer,
+        h: DeviceBuffer,
+    },
+    Moe {
+        router_logits: DeviceBuffer,
+        gate: DeviceBuffer,   // combine weights [n, E] (0 for non-selected)
+        probs: DeviceBuffer,  // sigmoid scores [n, E]
+        gate_pre: Vec<DeviceBuffer>,
+        up: Vec<DeviceBuffer>,
+        h: Vec<DeviceBuffer>,
+        expert_out: Vec<DeviceBuffer>,
+        sh_gate: DeviceBuffer,
+        sh_up: DeviceBuffer,
+        sh_h: DeviceBuffer,
+    },
+}
+
+struct LayerBufs {
+    xn1: DeviceBuffer,
+    q_c: DeviceBuffer,
+    q_c_n: DeviceBuffer,
+    q_pass: DeviceBuffer,
+    q_rot: DeviceBuffer,
+    kv_c: DeviceBuffer,
+    kv_c_n: DeviceBuffer,
+    k_rot: DeviceBuffer,
+    k_pass: DeviceBuffer,
+    v: DeviceBuffer,
+    probs: DeviceBuffer,
+    ctx: DeviceBuffer,
+    xmid: DeviceBuffer,
+    xn2: DeviceBuffer,
+    mlp: Mlp,
+}
+
+pub struct Glm {
+    pub gpu: Gpu,
+    pub cfg: GlmConfig,
+    ps: ParamStore,
+    opt: Optim,
+    b: u32,
+    t: u32,
+    count: Cell<f32>,
+
+    tokens: DeviceBuffer,
+    targets: DeviceBuffer,
+    ce_grad_uni: DeviceBuffer,
+
+    res: Vec<DeviceBuffer>,
+    dres: Vec<DeviceBuffer>,
+    layers: Vec<LayerBufs>,
+    xn_final: DeviceBuffer,
+    logits: DeviceBuffer,
+    ce_buf: DeviceBuffer,
+
+    // shared forward temporaries
+    scores: DeviceBuffer,
+    proj: DeviceBuffer,
+    moe_acc: DeviceBuffer,
+    sh_out: DeviceBuffer,
+    mlp_out: DeviceBuffer,
+
+    // shared backward temporaries
+    d_logits: DeviceBuffer,
+    d_xn: DeviceBuffer,
+    d_tmp: DeviceBuffer,
+    dxmid: DeviceBuffer,
+    d_ctx: DeviceBuffer,
+    d_scores: DeviceBuffer,
+    d_v: DeviceBuffer,
+    d_q_pass: DeviceBuffer,
+    d_k_pass: DeviceBuffer,
+    d_q_rot: DeviceBuffer,
+    d_k_rot: DeviceBuffer,
+    d_xn1: DeviceBuffer,
+    d_qc: DeviceBuffer,
+    d_qcn: DeviceBuffer,
+    d_kvc: DeviceBuffer,
+    d_kvcn: DeviceBuffer,
+    d_h: DeviceBuffer,
+    d_gate_pre: DeviceBuffer,
+    d_up: DeviceBuffer,
+    d_router_logits: DeviceBuffer,
+    d_gate: DeviceBuffer,
+    d_expert_out: DeviceBuffer,
+    inv: DeviceBuffer,
+
+    fwd_steps: Vec<Step>,
+    bwd_steps: Vec<Step>,
+}
+
+impl Glm {
+    pub fn load(path: &str, b: u32, t: u32) -> Glm {
+        let c = checkpoint::load(path);
+        let cfg = GlmConfig::from_json(&c.header["config"]);
+        Glm::new_impl(cfg, b, t, &c.by_role(""), true)
+    }
+
+    pub fn load_inference(path: &str, b: u32, t: u32) -> Glm {
+        let c = checkpoint::load(path);
+        let cfg = GlmConfig::from_json(&c.header["config"]);
+        Glm::new_impl(cfg, b, t, &c.by_role(""), false)
+    }
+
+    pub fn new(cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Glm {
+        Glm::new_impl(cfg, b, t, init, true)
+    }
+
+    fn new_impl(cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool) -> Glm {
+        let gpu = Gpu::new(PIPELINES);
+        // Roles: inference => all Frozen; training => all Trainable EXCEPT the
+        // router selection bias (`e_score_correction_bias`), which is never
+        // updated by backprop (matches the reference — a load-balance heuristic
+        // would drive it), so it stays Frozen and out of the optimiser.
+        let roles: Vec<_> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(n, c)| {
+                let role = if !train || n.ends_with("moe.router.bias") {
+                    Role::Frozen
+                } else {
+                    Role::Trainable
+                };
+                (n, c, role)
+            })
+            .collect();
+        let ps = ParamStore::new_with_roles(&gpu, roles, init);
+        let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
+
+        let n = (b * t) as u64;
+        let d = cfg.d_model as u64;
+        let v = cfg.vocab as u64;
+        let e = cfg.n_routed_experts as u64;
+        let ql = cfg.q_lora_rank as u64;
+        let kvl = cfg.kv_lora_rank as u64;
+        let nope = cfg.nope_dim() as u64;
+        let qrope = cfg.q_rope_dim() as u64;
+        let rope1 = cfg.qk_rope_head_dim as u64;
+        let vd = cfg.v_dim() as u64;
+        let moe_ff = cfg.moe_intermediate_size as u64;
+        let dense_ff = cfg.intermediate_size as u64;
+        let shared_ff = cfg.shared_ff() as u64;
+        let bht2 = (b * cfg.n_heads * t * t) as u64;
+        let st = |x: u64| gpu.storage(x);
+
+        let tokens = gpu.storage(n);
+        let targets = gpu.storage(n);
+        let ce_grad_uni = gpu.uniform_dynamic(4);
+
+        let mut res = Vec::new();
+        let mut dres = Vec::new();
+        for _ in 0..=cfg.n_layers {
+            res.push(st(n * d));
+            dres.push(st(n * d));
+        }
+        let mut layers = Vec::new();
+        for l in 0..cfg.n_layers {
+            let mlp = if cfg.is_dense_layer(l) {
+                Mlp::Dense { gate_pre: st(n * dense_ff), up: st(n * dense_ff), h: st(n * dense_ff) }
+            } else {
+                Mlp::Moe {
+                    router_logits: st(n * e),
+                    gate: st(n * e),
+                    probs: st(n * e),
+                    gate_pre: (0..e).map(|_| st(n * moe_ff)).collect(),
+                    up: (0..e).map(|_| st(n * moe_ff)).collect(),
+                    h: (0..e).map(|_| st(n * moe_ff)).collect(),
+                    expert_out: (0..e).map(|_| st(n * d)).collect(),
+                    sh_gate: st(n * shared_ff),
+                    sh_up: st(n * shared_ff),
+                    sh_h: st(n * shared_ff),
+                }
+            };
+            layers.push(LayerBufs {
+                xn1: st(n * d),
+                q_c: st(n * ql),
+                q_c_n: st(n * ql),
+                q_pass: st(n * nope),
+                q_rot: st(n * qrope),
+                kv_c: st(n * kvl),
+                kv_c_n: st(n * kvl),
+                k_rot: st(n * rope1),
+                k_pass: st(n * nope),
+                v: st(n * vd),
+                probs: st(bht2),
+                ctx: st(n * vd),
+                xmid: st(n * d),
+                xn2: st(n * d),
+                mlp,
+            });
+        }
+        // widest per-expert feed-forward width (dense vs moe) for the shared d_h.
+        let ff_max = dense_ff.max(moe_ff).max(shared_ff);
+
+        let mut m = Glm {
+            cfg,
+            b,
+            t,
+            count: Cell::new(1.0),
+            ps,
+            opt,
+            tokens,
+            targets,
+            ce_grad_uni,
+            res,
+            dres,
+            layers,
+            xn_final: st(n * d),
+            logits: st(n * v),
+            ce_buf: st(n),
+            scores: st(bht2),
+            proj: st(n * d),
+            moe_acc: st(n * d),
+            sh_out: st(n * d),
+            mlp_out: st(n * d),
+            d_logits: st(n * v),
+            d_xn: st(n * d),
+            d_tmp: st(n * d),
+            dxmid: st(n * d),
+            d_ctx: st(n * vd),
+            d_scores: st(bht2),
+            d_v: st(n * vd),
+            d_q_pass: st(n * nope),
+            d_k_pass: st(n * nope),
+            d_q_rot: st(n * qrope),
+            d_k_rot: st(n * rope1),
+            d_xn1: st(n * d),
+            d_qc: st(n * ql),
+            d_qcn: st(n * ql),
+            d_kvc: st(n * kvl),
+            d_kvcn: st(n * kvl),
+            d_h: st(n * ff_max),
+            d_gate_pre: st(n * ff_max),
+            d_up: st(n * ff_max),
+            d_router_logits: st(n * e),
+            d_gate: st(n * e),
+            d_expert_out: st(n * d),
+            inv: st(n),
+            fwd_steps: Vec::new(),
+            bwd_steps: Vec::new(),
+            gpu,
+        };
+        m.fwd_steps = m.build_forward(m.b, m.t);
+        m.bwd_steps = if train { m.build_backward() } else { Vec::new() };
+        m
+    }
+
+    fn w(&self, name: &str) -> &DeviceBuffer {
+        self.ps.w(name)
+    }
+    fn g(&self, name: &str) -> &DeviceBuffer {
+        self.ps.g(name)
+    }
+    fn trainable(&self, name: &str) -> bool {
+        self.ps.grad.contains_key(name)
+    }
+
+    pub fn set_batch(&self, x: &[u32], y: &[u32]) {
+        self.gpu.write(&self.tokens, bytemuck::cast_slice(x));
+        self.gpu.write(&self.targets, bytemuck::cast_slice(y));
+        let c = y.iter().filter(|&&v| v != IGNORE).count();
+        self.count.set(c.max(1) as f32);
+    }
+
+    // ---- dispatch helpers (mirror the moe/qwen style) ----
+
+    fn mm(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, m: u32, k: u32, nout: u32) {
+        s.push(self.gpu.step(MATMUL, &[x, self.w(wname), out], &[m, k, nout], m * nout));
+    }
+
+    /// Backward for `y = x·Wᵀ`: weight grad (if trainable) + input grad into `dx`
+    /// (`acc`=0 initialise, 1 accumulate).
+    #[allow(clippy::too_many_arguments)]
+    fn mm_bwd(&self, s: &mut Vec<Step>, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
+        if self.trainable(wname) {
+            s.push(self.gpu.step(MATMUL_DW, &[d_out, x, self.g(wname)], &[m, k, nout], nout * k));
+        }
+        s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+    }
+
+    fn norm_fwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, dim: u32, rows: u32) {
+        s.push(self.gpu.step(RMSNORM, &[x, self.w(wname), out], &[dim, rows], rows));
+    }
+
+    /// RMSNorm backward: gain grad (if trainable) via `rms_inv`+`rmsnorm_dw`, then
+    /// input grad via `rmsnorm_dx` into `dx`.
+    fn norm_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
+        if self.trainable(wname) {
+            s.push(self.gpu.step(RMS_INV, &[x, &self.inv], &[dim, rows], rows));
+            s.push(self.gpu.step(RMSNORM_DW, &[dy, x, &self.inv, self.g(wname)], &[dim, rows], dim));
+        }
+        s.push(self.gpu.step(RMSNORM_DX, &[x, self.w(wname), dy, dx], &[dim, rows], rows));
+    }
+
+    fn build_forward(&self, b_use: u32, t_use: u32) -> Vec<Step> {
+        let c = &self.cfg;
+        let n = b_use * t_use;
+        let d = c.d_model;
+        let v = c.vocab;
+        let e = c.n_routed_experts;
+        let ql = c.q_lora_rank;
+        let kvl = c.kv_lora_rank;
+        let nope = c.nope_dim();
+        let qrope = c.q_rope_dim();
+        let rope1 = c.qk_rope_head_dim;
+        let vd = c.v_dim();
+        let nh = c.n_heads;
+        let vhd = c.v_head_dim;
+        let moe_ff = c.moe_intermediate_size;
+        let dense_ff = c.intermediate_size;
+        let shared_ff = c.shared_ff();
+        let half_rope = rope1 / 2;
+        let mut s: Vec<Step> = Vec::new();
+
+        s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
+
+        for l in 0..c.n_layers as usize {
+            let lb = &self.layers[l];
+            let p = |name: &str| format!("blocks.{l}.{name}");
+
+            // ---- MLA attention ----
+            self.norm_fwd(&mut s, &self.res[l], &p("input_ln.weight"), &lb.xn1, d, n);
+            // Q: low-rank down -> norm -> split up (nope / rope), rope the rope slice
+            self.mm(&mut s, &lb.xn1, &p("attn.q_a.weight"), &lb.q_c, n, d, ql);
+            self.norm_fwd(&mut s, &lb.q_c, &p("attn.q_a_norm.weight"), &lb.q_c_n, ql, n);
+            self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_nope.weight"), &lb.q_pass, n, ql, nope);
+            self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_rope.weight"), &lb.q_rot, n, ql, qrope);
+            s.push(self.gpu.step(ROPE, &[&lb.q_rot], &[n, nh, rope1, qrope, 0, t_use], n * nh * half_rope));
+            // KV: compressed latent (+ shared rope key), norm, up-project to k_pass / v
+            self.mm(&mut s, &lb.xn1, &p("attn.kv_a_c.weight"), &lb.kv_c, n, d, kvl);
+            self.mm(&mut s, &lb.xn1, &p("attn.kv_a_rope.weight"), &lb.k_rot, n, d, rope1);
+            s.push(self.gpu.step(ROPE, &[&lb.k_rot], &[n, 1, rope1, rope1, 0, t_use], n * half_rope));
+            self.norm_fwd(&mut s, &lb.kv_c, &p("attn.kv_a_norm.weight"), &lb.kv_c_n, kvl, n);
+            self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_nope.weight"), &lb.k_pass, n, kvl, nope);
+            self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_v.weight"), &lb.v, n, kvl, vd);
+            // scores -> softmax -> ctx (v-side reuses the standard MHA apply)
+            s.push(self.gpu.step(MLA_SCORES, &[&lb.q_pass, &lb.q_rot, &lb.k_pass, &lb.k_rot, &self.scores], &[b_use, nh, t_use, c.qk_nope_head_dim, rope1], b_use * nh * t_use * t_use));
+            s.push(self.gpu.step(ATTN_SOFTMAX, &[&self.scores, &lb.probs], &[b_use, nh, t_use], b_use * nh * t_use));
+            s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.v, &lb.ctx], &[b_use, nh, t_use, vhd, vd, 0, vd], b_use * nh * t_use * vhd));
+            self.mm(&mut s, &lb.ctx, &p("attn.o.weight"), &self.proj, n, vd, d);
+            s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
+
+            // ---- MLP ----
+            self.norm_fwd(&mut s, &lb.xmid, &p("post_ln.weight"), &lb.xn2, d, n);
+            match &lb.mlp {
+                Mlp::Dense { gate_pre, up, h } => {
+                    self.mm(&mut s, &lb.xn2, &p("mlp.gate.weight"), gate_pre, n, d, dense_ff);
+                    self.mm(&mut s, &lb.xn2, &p("mlp.up.weight"), up, n, d, dense_ff);
+                    s.push(self.gpu.step(SILU_MUL, &[gate_pre, up, h], &[n * dense_ff], n * dense_ff));
+                    self.mm(&mut s, h, &p("mlp.down.weight"), &self.mlp_out, n, dense_ff, d);
+                    s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
+                }
+                Mlp::Moe { router_logits, gate, probs, gate_pre, up, h, expert_out, sh_gate, sh_up, sh_h } => {
+                    // router (sigmoid noaux_tc): logits -> gate weights [n,E]
+                    self.mm(&mut s, &lb.xn2, &p("moe.router.weight"), router_logits, n, d, e);
+                    s.push(self.gpu.step(
+                        ROUTER_SIG,
+                        &[router_logits, self.w(&p("moe.router.bias")), gate, probs],
+                        &[n, e, c.num_experts_per_tok, c.n_group, c.topk_group, c.norm_topk_prob as u32, f(c.routed_scaling_factor)],
+                        n,
+                    ));
+                    // routed experts (dense eval, gate-weighted accumulate)
+                    for ei in 0..e as usize {
+                        let ep = |nm: &str| format!("blocks.{l}.moe.experts.{ei}.{nm}");
+                        self.mm(&mut s, &lb.xn2, &ep("gate.weight"), &gate_pre[ei], n, d, moe_ff);
+                        self.mm(&mut s, &lb.xn2, &ep("up.weight"), &up[ei], n, d, moe_ff);
+                        s.push(self.gpu.step(SILU_MUL, &[&gate_pre[ei], &up[ei], &h[ei]], &[n * moe_ff], n * moe_ff));
+                        self.mm(&mut s, &h[ei], &ep("down.weight"), &expert_out[ei], n, moe_ff, d);
+                        let acc = if ei == 0 { 0 } else { 1 };
+                        s.push(self.gpu.step(SCALE_ADD, &[gate, &expert_out[ei], &self.moe_acc], &[n, d, e, ei as u32, acc], n * d));
+                    }
+                    // shared expert on the same input
+                    self.mm(&mut s, &lb.xn2, &p("moe.shared.gate.weight"), sh_gate, n, d, shared_ff);
+                    self.mm(&mut s, &lb.xn2, &p("moe.shared.up.weight"), sh_up, n, d, shared_ff);
+                    s.push(self.gpu.step(SILU_MUL, &[sh_gate, sh_up, sh_h], &[n * shared_ff], n * shared_ff));
+                    self.mm(&mut s, sh_h, &p("moe.shared.down.weight"), &self.sh_out, n, shared_ff, d);
+                    // moe_out = routed + shared ; x += moe_out
+                    s.push(self.gpu.step(ADD2, &[&self.moe_acc, &self.sh_out, &self.mlp_out], &[n * d], n * d));
+                    s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
+                }
+            }
+        }
+
+        // final norm + untied lm_head + masked CE
+        let last = c.n_layers as usize;
+        self.norm_fwd(&mut s, &self.res[last], "norm.weight", &self.xn_final, d, n);
+        self.mm(&mut s, &self.xn_final, c.head_weight(), &self.logits, n, d, v);
+        s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
+        s
+    }
+
+    fn build_backward(&self) -> Vec<Step> {
+        let c = &self.cfg;
+        let n = self.b * self.t;
+        let b_use = self.b;
+        let t_use = self.t;
+        let d = c.d_model;
+        let v = c.vocab;
+        let e = c.n_routed_experts;
+        let ql = c.q_lora_rank;
+        let kvl = c.kv_lora_rank;
+        let nope = c.nope_dim();
+        let qrope = c.q_rope_dim();
+        let rope1 = c.qk_rope_head_dim;
+        let vd = c.v_dim();
+        let nh = c.n_heads;
+        let vhd = c.v_head_dim;
+        let nope_hd = c.qk_nope_head_dim;
+        let moe_ff = c.moe_intermediate_size;
+        let dense_ff = c.intermediate_size;
+        let shared_ff = c.shared_ff();
+        let half_rope = rope1 / 2;
+        let head = c.head_weight();
+        let mut s: Vec<Step> = Vec::new();
+
+        // ---- head + final norm ----
+        s.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * v));
+        self.mm_bwd(&mut s, &self.d_logits, &self.xn_final, head, &self.d_xn, n, d, v, 0);
+        let last = c.n_layers as usize;
+        self.norm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
+
+        for l in (0..c.n_layers as usize).rev() {
+            let lb = &self.layers[l];
+            let p = |name: &str| format!("blocks.{l}.{name}");
+
+            // ===== MLP backward (output grad = dres[l+1]) -> dxmid =====
+            match &lb.mlp {
+                Mlp::Dense { gate_pre, up, h } => {
+                    self.mm_bwd(&mut s, &self.dres[l + 1], h, &p("mlp.down.weight"), &self.d_h, n, dense_ff, d, 0);
+                    s.push(self.gpu.step(SILU_DA, &[gate_pre, up, &self.d_h, &self.d_gate_pre], &[n * dense_ff], n * dense_ff));
+                    s.push(self.gpu.step(SILU_DB, &[gate_pre, &self.d_h, &self.d_up], &[n * dense_ff], n * dense_ff));
+                    self.mm_bwd(&mut s, &self.d_up, &lb.xn2, &p("mlp.up.weight"), &self.d_xn, n, d, dense_ff, 0);
+                    self.mm_bwd(&mut s, &self.d_gate_pre, &lb.xn2, &p("mlp.gate.weight"), &self.d_xn, n, d, dense_ff, 1);
+                }
+                Mlp::Moe { router_logits, gate, probs: _, gate_pre, up, h, expert_out, sh_gate, sh_up, sh_h } => {
+                    // shared expert backward (writes d_xn first, acc=0)
+                    self.mm_bwd(&mut s, &self.dres[l + 1], sh_h, &p("moe.shared.down.weight"), &self.d_h, n, shared_ff, d, 0);
+                    s.push(self.gpu.step(SILU_DA, &[sh_gate, sh_up, &self.d_h, &self.d_gate_pre], &[n * shared_ff], n * shared_ff));
+                    s.push(self.gpu.step(SILU_DB, &[sh_gate, &self.d_h, &self.d_up], &[n * shared_ff], n * shared_ff));
+                    self.mm_bwd(&mut s, &self.d_up, &lb.xn2, &p("moe.shared.up.weight"), &self.d_xn, n, d, shared_ff, 0);
+                    self.mm_bwd(&mut s, &self.d_gate_pre, &lb.xn2, &p("moe.shared.gate.weight"), &self.d_xn, n, d, shared_ff, 1);
+                    // router backward: d_gate[n,E] from each expert, then through sigmoid
+                    for ei in 0..e as usize {
+                        s.push(self.gpu.step(SCALE_ADD_DGATE, &[&expert_out[ei], &self.dres[l + 1], &self.d_gate], &[n, d, e, ei as u32], n));
+                    }
+                    s.push(self.gpu.step(
+                        ROUTER_SIG_BWD,
+                        &[router_logits, gate, &self.d_gate, &self.d_router_logits],
+                        &[n, e, c.num_experts_per_tok, c.norm_topk_prob as u32, f(c.routed_scaling_factor)],
+                        n,
+                    ));
+                    self.mm_bwd(&mut s, &self.d_router_logits, &lb.xn2, &p("moe.router.weight"), &self.d_xn, n, d, e, 1);
+                    // per-expert SwiGLU backward, accumulate into d_xn
+                    for ei in 0..e as usize {
+                        let ep = |nm: &str| format!("blocks.{l}.moe.experts.{ei}.{nm}");
+                        s.push(self.gpu.step(SCALE_ADD_DEXP, &[gate, &self.dres[l + 1], &self.d_expert_out], &[n, d, e, ei as u32], n * d));
+                        self.mm_bwd(&mut s, &self.d_expert_out, &h[ei], &ep("down.weight"), &self.d_h, n, moe_ff, d, 0);
+                        s.push(self.gpu.step(SILU_DA, &[&gate_pre[ei], &up[ei], &self.d_h, &self.d_gate_pre], &[n * moe_ff], n * moe_ff));
+                        s.push(self.gpu.step(SILU_DB, &[&gate_pre[ei], &self.d_h, &self.d_up], &[n * moe_ff], n * moe_ff));
+                        self.mm_bwd(&mut s, &self.d_up, &lb.xn2, &ep("up.weight"), &self.d_xn, n, d, moe_ff, 1);
+                        self.mm_bwd(&mut s, &self.d_gate_pre, &lb.xn2, &ep("gate.weight"), &self.d_xn, n, d, moe_ff, 1);
+                    }
+                }
+            }
+            // post_ln backward -> d_tmp ; dxmid = dres[l+1] + d_tmp
+            self.norm_bwd(&mut s, &lb.xmid, &p("post_ln.weight"), &self.d_xn, &self.d_tmp, d, n);
+            s.push(self.gpu.step(ADD2, &[&self.dres[l + 1], &self.d_tmp, &self.dxmid], &[n * d], n * d));
+
+            // ===== MLA attention backward (output grad = dxmid) =====
+            self.mm_bwd(&mut s, &self.dxmid, &lb.ctx, &p("attn.o.weight"), &self.d_ctx, n, vd, d, 0);
+            // v-side: softmax+apply backward (reuse standard MHA kernels, v geometry)
+            s.push(self.gpu.step(ATTN_BWD_DSCORES, &[&self.d_ctx, &lb.v, &lb.probs, &self.d_scores], &[b_use, nh, t_use, vhd, vd, 0, vd], b_use * nh * t_use));
+            s.push(self.gpu.step(ATTN_BWD_DV, &[&lb.probs, &self.d_ctx, &self.d_v], &[b_use, nh, t_use, vhd, vd, 0, vd], b_use * nh * t_use * vhd));
+            // q/k grads from d_scores
+            s.push(self.gpu.step(MLA_BWD_DQ_PASS, &[&self.d_scores, &lb.k_pass, &self.d_q_pass], &[b_use, nh, t_use, nope_hd, rope1], b_use * nh * t_use * nope_hd));
+            s.push(self.gpu.step(MLA_BWD_DK_PASS, &[&self.d_scores, &lb.q_pass, &self.d_k_pass], &[b_use, nh, t_use, nope_hd, rope1], b_use * nh * t_use * nope_hd));
+            s.push(self.gpu.step(MLA_BWD_DQ_ROPE, &[&self.d_scores, &lb.k_rot, &self.d_q_rot], &[b_use, nh, t_use, nope_hd, rope1], b_use * nh * t_use * rope1));
+            s.push(self.gpu.step(MLA_BWD_DK_ROPE, &[&self.d_scores, &lb.q_rot, &self.d_k_rot], &[b_use, nh, t_use, nope_hd, rope1], b_use * t_use * rope1));
+            // RoPE backward on the rope grads (in place)
+            s.push(self.gpu.step(ROPE_BWD, &[&self.d_q_rot], &[n, nh, rope1, qrope, 0, t_use], n * nh * half_rope));
+            s.push(self.gpu.step(ROPE_BWD, &[&self.d_k_rot], &[n, 1, rope1, rope1, 0, t_use], n * half_rope));
+            // KV projections backward -> d_xn1 (grad wrt xn1)
+            self.mm_bwd(&mut s, &self.d_v, &lb.kv_c_n, &p("attn.kv_b_v.weight"), &self.d_kvcn, n, kvl, vd, 0);
+            self.mm_bwd(&mut s, &self.d_k_pass, &lb.kv_c_n, &p("attn.kv_b_nope.weight"), &self.d_kvcn, n, kvl, nope, 1);
+            self.norm_bwd(&mut s, &lb.kv_c, &p("attn.kv_a_norm.weight"), &self.d_kvcn, &self.d_kvc, kvl, n);
+            self.mm_bwd(&mut s, &self.d_k_rot, &lb.xn1, &p("attn.kv_a_rope.weight"), &self.d_xn1, n, d, rope1, 0);
+            self.mm_bwd(&mut s, &self.d_kvc, &lb.xn1, &p("attn.kv_a_c.weight"), &self.d_xn1, n, d, kvl, 1);
+            // Q projections backward -> d_xn1
+            self.mm_bwd(&mut s, &self.d_q_pass, &lb.q_c_n, &p("attn.q_b_nope.weight"), &self.d_qcn, n, ql, nope, 0);
+            self.mm_bwd(&mut s, &self.d_q_rot, &lb.q_c_n, &p("attn.q_b_rope.weight"), &self.d_qcn, n, ql, qrope, 1);
+            self.norm_bwd(&mut s, &lb.q_c, &p("attn.q_a_norm.weight"), &self.d_qcn, &self.d_qc, ql, n);
+            self.mm_bwd(&mut s, &self.d_qc, &lb.xn1, &p("attn.q_a.weight"), &self.d_xn1, n, d, ql, 1);
+            // input_ln backward -> d_tmp ; dres[l] = dxmid + d_tmp
+            self.norm_bwd(&mut s, &self.res[l], &p("input_ln.weight"), &self.d_xn1, &self.d_tmp, d, n);
+            s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
+        }
+
+        // embedding backward (untied: only the embedding path writes tok.weight)
+        if self.trainable("tok.weight") {
+            s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("tok.weight")], &[n, d, v], v * d));
+        }
+        s
+    }
+
+    pub fn forward(&self) -> f32 {
+        self.gpu.submit(&[], &self.fwd_steps);
+        let n = (self.b * self.t) as usize;
+        let losses = self.gpu.read(&self.ce_buf, n);
+        losses.iter().sum::<f32>() / self.count.get()
+    }
+
+    pub fn backward(&self) {
+        let n = self.b * self.t;
+        self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab, IGNORE, f(self.count.get())]);
+        self.gpu.submit(&[], &self.bwd_steps);
+    }
+
+    pub fn zero_grads(&self) {
+        self.ps.zero_grads(&self.gpu);
+    }
+    pub fn poll_wait(&self) {
+        self.gpu.poll_wait();
+    }
+    pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
+        self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.95, 1e-8, clip, extra_scale);
+    }
+    pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        self.ps.read_grad(&self.gpu, name)
+    }
+    pub fn read_weight(&self, name: &str) -> Vec<f32> {
+        self.ps.read_weight(&self.gpu, name)
+    }
+    pub fn write_weight(&self, name: &str, data: &[f32]) {
+        self.gpu.write(self.w(name), bytemuck::cast_slice(data));
+    }
+    pub fn param_names(&self) -> Vec<String> {
+        self.ps.trainable.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    pub fn ctx_len(&self) -> usize {
+        self.t as usize
+    }
+
+    /// Per-position logits for one sequence (B must be 1, len <= t).
+    pub fn logits_all(&self, tokens: &[u32]) -> Vec<f32> {
+        let t_use = tokens.len() as u32;
+        assert!(t_use <= self.t && self.b == 1, "glm decoder sized too small");
+        let ignore = vec![IGNORE; t_use as usize];
+        self.set_batch(tokens, &ignore);
+        let s = self.build_forward(1, t_use);
+        self.gpu.submit(&[], &s);
+        self.gpu.read(&self.logits, (t_use * self.cfg.vocab) as usize)
+    }
+
+    /// Read the char tokenizer vocab (`itos`) embedded in a checkpoint at train
+    /// time (char datasets), so inference needs no dataset. `None` for token-id
+    /// (BPE) checkpoints that carry no char vocab.
+    pub fn load_itos(path: &str) -> Option<Vec<char>> {
+        let c = checkpoint::load(path);
+        let arr = c.header["config"]["itos"].as_array()?;
+        Some(arr.iter().filter_map(|x| x.as_str().and_then(|s| s.chars().next())).collect())
+    }
+
+    pub fn save(&self, path: &str) {
+        self.save_with_itos(path, None);
+    }
+
+    pub fn save_with_itos(&self, path: &str, itos: Option<&[char]>) {
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = self
+            .ps
+            .params
+            .iter()
+            .map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name)))
+            .collect();
+        let mut config = self.cfg.to_json();
+        if let Some(itos) = itos {
+            let arr: Vec<serde_json::Value> = itos.iter().map(|ch| serde_json::Value::from(ch.to_string())).collect();
+            config["itos"] = serde_json::Value::Array(arr);
+        }
+        checkpoint::save(path, config, &tensors);
+    }
+}
+
+// ---- architecture-agnostic Model seam ----
+
+impl model::ModelConfig for GlmConfig {
+    fn param_list(&self) -> Vec<(String, usize)> {
+        GlmConfig::param_list(self)
+    }
+    fn to_json(&self) -> serde_json::Value {
+        GlmConfig::to_json(self)
+    }
+    fn from_json(v: &serde_json::Value) -> Self {
+        GlmConfig::from_json(v)
+    }
+    fn vocab(&self) -> u32 {
+        self.vocab
+    }
+    fn block_size(&self) -> u32 {
+        self.block_size
+    }
+    fn finalize_for_dataset(mut self, vocab: u32, block_size: u32) -> Self {
+        self.vocab = vocab;
+        self.block_size = block_size;
+        self
+    }
+}
+
+impl model::Model for Glm {
+    type Config = GlmConfig;
+
+    fn new(cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
+        Glm::new(cfg, b, t, init)
+    }
+    fn init_weights(cfg: &GlmConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+        crate::init::init_weights(cfg, seed)
+    }
+    fn config(&self) -> &GlmConfig {
+        &self.cfg
+    }
+    fn set_batch(&self, batch: model::Batch) {
+        match batch {
+            model::Batch::Lm { tokens, targets } => Glm::set_batch(self, tokens, targets),
+            _ => panic!("glm::Glm only supports Batch::Lm"),
+        }
+    }
+    fn forward(&self) -> f32 {
+        Glm::forward(self)
+    }
+    fn backward(&self) {
+        Glm::backward(self)
+    }
+    fn zero_grads(&self) {
+        Glm::zero_grads(self)
+    }
+    fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
+        Glm::adamw_step(self, t, lr, wd, clip, extra_scale)
+    }
+    fn poll_wait(&self) {
+        Glm::poll_wait(self)
+    }
+    fn param_names(&self) -> Vec<String> {
+        Glm::param_names(self)
+    }
+    fn read_weight(&self, name: &str) -> Vec<f32> {
+        Glm::read_weight(self, name)
+    }
+    fn write_weight(&self, name: &str, data: &[f32]) {
+        Glm::write_weight(self, name, data)
+    }
+    fn read_grad(&self, name: &str) -> Vec<f32> {
+        Glm::read_grad(self, name)
+    }
+    fn logits_all(&self, tokens: &[u32]) -> Option<Vec<f32>> {
+        Some(Glm::logits_all(self, tokens))
+    }
+    fn save(&self, path: &str) {
+        Glm::save(self, path)
+    }
+    fn save_with_itos(&self, path: &str, itos: Option<&[char]>) {
+        Glm::save_with_itos(self, path, itos)
+    }
+    fn config_json(&self) -> serde_json::Value {
+        self.cfg.to_json()
+    }
+}
