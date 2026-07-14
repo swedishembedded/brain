@@ -61,6 +61,13 @@ pub struct GlmConfig {
     pub rms_eps: f32,
     pub tie_embeddings: bool,
 
+    /// Multi-Token Prediction: a lightweight auxiliary head that predicts token
+    /// t+2 (next-next) from the main hidden state + the embedded next token,
+    /// trained with an added CE loss and usable as a speculative-decoding draft.
+    /// (brain's MTP block is a position-wise SwiGLU head — no extra self-attention
+    /// — vs the reference's full decoder layer.)
+    pub mtp: bool,
+
     // --- DSA indexer (Phase 2; ignored while `index_topk >= block_size`) ---
     pub index_topk: u32,
     pub index_n_heads: u32,
@@ -152,6 +159,7 @@ impl GlmConfig {
             rope_theta: 1.0e4,
             rms_eps: 1e-5,
             tie_embeddings: false,
+            mtp: false,
             index_topk: 4096,
             index_n_heads: 2,
             index_head_dim: 8,
@@ -186,6 +194,7 @@ impl GlmConfig {
             rope_theta: 8.0e6,
             rms_eps: 1e-5,
             tie_embeddings: false,
+            mtp: true,
             index_topk: 2048,
             index_n_heads: 32,
             index_head_dim: 128,
@@ -208,7 +217,7 @@ impl GlmConfig {
             "n_group": self.n_group, "topk_group": self.topk_group,
             "routed_scaling_factor": self.routed_scaling_factor, "norm_topk_prob": self.norm_topk_prob,
             "rope_theta": self.rope_theta, "rms_norm_eps": self.rms_eps,
-            "tie_word_embeddings": self.tie_embeddings,
+            "tie_word_embeddings": self.tie_embeddings, "mtp": self.mtp,
             "index_topk": self.index_topk, "index_n_heads": self.index_n_heads,
             "index_head_dim": self.index_head_dim,
             "indexer_full": self.indexer_full
@@ -243,6 +252,7 @@ impl GlmConfig {
             rope_theta: gf("rope_theta", 1.0e4),
             rms_eps: gf("rms_norm_eps", 1e-5),
             tie_embeddings: gb("tie_word_embeddings", false),
+            mtp: gb("mtp", false),
             index_topk: g("index_topk", 4096),
             index_n_heads: g("index_n_heads", 2),
             index_head_dim: g("index_head_dim", 8),
@@ -318,6 +328,19 @@ impl GlmConfig {
         out.push(("norm.weight".to_string(), d));
         if !self.tie_embeddings {
             out.push(("lm_head.weight".to_string(), v * d));
+        }
+        if self.mtp {
+            // Lightweight MTP head: two-norm eh_proj (split e/h columns) ->
+            // block RMSNorm -> SwiGLU MLP -> shared-head norm (head reuses lm_head).
+            out.push(("mtp.enorm.weight".to_string(), d));
+            out.push(("mtp.hnorm.weight".to_string(), d));
+            out.push(("mtp.eh_proj_e.weight".to_string(), d * d));
+            out.push(("mtp.eh_proj_h.weight".to_string(), d * d));
+            out.push(("mtp.block_ln.weight".to_string(), d));
+            out.push(("mtp.mlp.gate.weight".to_string(), dense_ff * d));
+            out.push(("mtp.mlp.up.weight".to_string(), dense_ff * d));
+            out.push(("mtp.mlp.down.weight".to_string(), d * dense_ff));
+            out.push(("mtp.norm.weight".to_string(), d));
         }
         out
     }

@@ -69,6 +69,25 @@ fn glm_memorizes_cyclic_sequence() {
     assert!(loss < 0.20, "cyclic memorization loss too high: {loss}");
 }
 
+/// A GLM with the MTP head enabled trains (the added t+2 auxiliary loss and the
+/// shared-head/embedding grad accumulation don't break optimisation).
+#[test]
+fn glm_mtp_overfits_fixed_batch() {
+    if skip() {
+        return;
+    }
+    let cfg = GlmConfig { mtp: true, ..small_cfg(23, 16) };
+    let init = glm::init_weights(&cfg, 13);
+    let model = Glm::new(cfg, 2, 8, &init);
+    let x: Vec<u32> = (0..16).map(|i| (i * 7 % 23) as u32).collect();
+    let y: Vec<u32> = (0..16).map(|i| ((i * 7 + 1) % 23) as u32).collect();
+    model.set_batch(&x, &y);
+    let before = model.forward();
+    train_batch(&model, &x, &y, 60, 1e-2);
+    let after = model.forward();
+    assert!(after < before * 0.6, "MTP model did not learn: {before} -> {after}");
+}
+
 /// More capacity should fit the same fixed batch at least as well — a basic
 /// scaling-sanity signal that the architecture uses its parameters.
 #[test]

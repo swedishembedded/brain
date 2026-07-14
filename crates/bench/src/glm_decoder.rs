@@ -66,6 +66,7 @@ impl GlmDecoder {
             rope_theta: 1.0e4,
             rms_eps: 1e-5,
             tie_embeddings: false,
+            mtp: false,
             index_topk: block_size + 1, // >= seq ⇒ dense (no-op indexer)
             index_n_heads: 2,
             index_head_dim: hd,

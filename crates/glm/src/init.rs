@@ -14,9 +14,11 @@ use data::rng::Rng;
 
 use crate::config::GlmConfig;
 
-/// True for an RMSNorm gain tensor (initialised to 1.0).
+/// True for an RMSNorm/LayerNorm gain tensor (initialised to 1.0): anything
+/// ending in `norm.weight` (norm, q_a_norm, kv_a_norm, k_norm, enorm, hnorm,
+/// mtp.norm) or a `*_ln.weight` (input_ln, post_ln, block_ln).
 fn is_norm_gain(name: &str) -> bool {
-    name == "norm.weight" || name.ends_with("_ln.weight") || name.ends_with("_norm.weight")
+    name.ends_with("norm.weight") || name.ends_with("_ln.weight")
 }
 
 /// True for a residual-output projection (GPT-2 scaled init): the attention

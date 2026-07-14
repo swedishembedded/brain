@@ -269,6 +269,23 @@ pub fn check_glm(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Build a tiny GLM with the **MTP** (multi-token-prediction) head enabled and
+/// gradient-check it. Validates the added auxiliary t+2 path: the shared-embedding
+/// input, the two RMSNorms, the split `eh_proj`, the position-wise SwiGLU block
+/// with its residual, the shared-head norm, and the shared `lm_head` grad
+/// accumulation (main + MTP) — plus that the MTP grad correctly flows back into
+/// the final residual. `top_k == n_routed_experts` (smooth router).
+pub fn check_glm_mtp(seed: u64) -> Report {
+    use glm::{Glm, GlmConfig};
+    let cfg = GlmConfig { mtp: true, num_experts_per_tok: 3, ..GlmConfig::tiny() };
+    let init = glm::init_weights(&cfg, seed);
+    let model = Glm::new(cfg, 2, 6, &init);
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
+    model.set_batch(&x, &y);
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
 /// Build a tiny PID event/effect transformer, set a fixed (partially masked)
 /// batch, and gradient-check it (validates LayerNorm-with-bias, biased linears,
 /// SwiGLU, key-padding causal attention, and the separate u_head backprop). PID
@@ -438,6 +455,22 @@ mod tests {
         assert!(
             fails.is_empty(),
             "gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn glm_mtp_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_glm_mtp(7);
+        report.print();
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "MTP gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
     }

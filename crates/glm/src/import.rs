@@ -52,6 +52,11 @@ pub fn config_from_hf(json: &str) -> Result<GlmConfig, String> {
     cfg.norm_topk_prob = v["norm_topk_prob"].as_bool().unwrap_or(true);
     cfg.rms_eps = v["rms_norm_eps"].as_f64().unwrap_or(1e-5) as f32;
     cfg.tie_embeddings = v["tie_word_embeddings"].as_bool().unwrap_or(false);
+    // brain's MTP head is a simplified position-wise block, not the reference's
+    // full decoder layer, so the HF MTP weights are not imported (the MTP layer
+    // tensors at index `num_hidden_layers` are dropped); the main model imports
+    // normally and MTP, if wanted, is trained from scratch.
+    cfg.mtp = false;
     if let Some(rp) = v["rope_parameters"]["rope_theta"].as_f64().or_else(|| v["rope_theta"].as_f64()) {
         cfg.rope_theta = rp as f32;
     }

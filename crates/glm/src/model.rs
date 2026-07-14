@@ -197,6 +197,34 @@ pub struct Glm {
     index_scores: DeviceBuffer,
     idx_mask: DeviceBuffer,
 
+    // Multi-Token Prediction head (used only when `cfg.mtp`). Predicts token t+2.
+    mtp_input: DeviceBuffer,
+    mtp_target: DeviceBuffer,
+    mtp_e: DeviceBuffer,
+    mtp_en: DeviceBuffer,
+    mtp_hn: DeviceBuffer,
+    mtp_ehp: DeviceBuffer,
+    mtp_ehp2: DeviceBuffer,
+    mtp_xn: DeviceBuffer,
+    mtp_gate_pre: DeviceBuffer,
+    mtp_up: DeviceBuffer,
+    mtp_h: DeviceBuffer,
+    mtp_mlp_out: DeviceBuffer,
+    mtp_block_out: DeviceBuffer,
+    mtp_final: DeviceBuffer,
+    mtp_logits: DeviceBuffer,
+    mtp_ce_buf: DeviceBuffer,
+    // MTP backward temporaries
+    d_mtp_logits: DeviceBuffer,
+    d_mtp_final: DeviceBuffer,
+    d_mtp_block: DeviceBuffer,
+    d_mtp_ehp: DeviceBuffer,
+    d_mtp_en: DeviceBuffer,
+    d_mtp_hn: DeviceBuffer,
+    d_mtp_e: DeviceBuffer,
+    d_mtp_res: DeviceBuffer,
+    mtp_head_tmp: DeviceBuffer,
+
     // shared backward temporaries
     d_logits: DeviceBuffer,
     d_xn: DeviceBuffer,
@@ -285,7 +313,10 @@ impl Glm {
         let idh = cfg.index_head_dim as u64;
         let nih = cfg.index_n_heads as u64;
         let btt = (b * t * t) as u64;
+        let mtp = cfg.mtp;
         let st = |x: u64| gpu.storage(x);
+        // MTP buffers are allocated at full size only when MTP is enabled.
+        let msz = |x: u64| gpu.storage(if mtp { x.max(1) } else { 1 });
 
         let tokens = gpu.storage(n);
         let targets = gpu.storage(n);
@@ -363,6 +394,32 @@ impl Glm {
             idx_weights: st(n * nih),
             index_scores: st(btt),
             idx_mask: st(btt),
+            // MTP buffers: full size when enabled, 1-element placeholders otherwise.
+            mtp_input: gpu.storage(if mtp { n } else { 1 }),
+            mtp_target: gpu.storage(if mtp { n } else { 1 }),
+            mtp_e: msz(n * d),
+            mtp_en: msz(n * d),
+            mtp_hn: msz(n * d),
+            mtp_ehp: msz(n * d),
+            mtp_ehp2: msz(n * d),
+            mtp_xn: msz(n * d),
+            mtp_gate_pre: msz(n * dense_ff),
+            mtp_up: msz(n * dense_ff),
+            mtp_h: msz(n * dense_ff),
+            mtp_mlp_out: msz(n * d),
+            mtp_block_out: msz(n * d),
+            mtp_final: msz(n * d),
+            mtp_logits: msz(n * v),
+            mtp_ce_buf: msz(n),
+            d_mtp_logits: msz(n * v),
+            d_mtp_final: msz(n * d),
+            d_mtp_block: msz(n * d),
+            d_mtp_ehp: msz(n * d),
+            d_mtp_en: msz(n * d),
+            d_mtp_hn: msz(n * d),
+            d_mtp_e: msz(n * d),
+            d_mtp_res: msz(n * d),
+            mtp_head_tmp: msz(v * d),
             d_logits: st(n * v),
             d_xn: st(n * d),
             d_tmp: st(n * d),
@@ -410,6 +467,23 @@ impl Glm {
         self.gpu.write(&self.targets, bytemuck::cast_slice(y));
         let c = y.iter().filter(|&&v| v != IGNORE).count();
         self.count.set(c.max(1) as f32);
+        if self.cfg.mtp {
+            // MTP predicts token t+2 from hidden_t + embed(x[t+1]). Per sequence
+            // (b seqs of `seqlen`): input = x shifted +1, target = x shifted +2.
+            let bb = self.b as usize;
+            let seqlen = x.len() / bb.max(1);
+            let mut inp = vec![0u32; x.len()];
+            let mut tgt = vec![IGNORE; x.len()];
+            for s in 0..bb {
+                for t in 0..seqlen {
+                    let i = s * seqlen + t;
+                    inp[i] = if t + 1 < seqlen { x[s * seqlen + t + 1] } else { 0 };
+                    tgt[i] = if t + 2 < seqlen { x[s * seqlen + t + 2] } else { IGNORE };
+                }
+            }
+            self.gpu.write(&self.mtp_input, bytemuck::cast_slice(&inp));
+            self.gpu.write(&self.mtp_target, bytemuck::cast_slice(&tgt));
+        }
     }
 
     // ---- dispatch helpers (mirror the moe/qwen style) ----
@@ -577,6 +651,29 @@ impl Glm {
         self.norm_fwd(&mut s, &self.res[last], "norm.weight", &self.xn_final, d, n);
         self.mm(&mut s, &self.xn_final, c.head_weight(), &self.logits, n, d, v);
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
+
+        // ---- MTP head (predict t+2) ----
+        if c.mtp {
+            let head = c.head_weight();
+            let ff = c.intermediate_size;
+            s.push(self.gpu.step(EMBED, &[&self.mtp_input, self.w("tok.weight"), &self.mtp_e], &[d, n], n * d));
+            self.norm_fwd(&mut s, &self.mtp_e, "mtp.enorm.weight", &self.mtp_en, d, n);
+            self.norm_fwd(&mut s, &self.res[last], "mtp.hnorm.weight", &self.mtp_hn, d, n);
+            // eh_proj: hidden = We·enorm(e) + Wh·hnorm(h)
+            self.mm(&mut s, &self.mtp_en, "mtp.eh_proj_e.weight", &self.mtp_ehp, n, d, d);
+            self.mm(&mut s, &self.mtp_hn, "mtp.eh_proj_h.weight", &self.mtp_ehp2, n, d, d);
+            s.push(self.gpu.step(ADD2, &[&self.mtp_ehp, &self.mtp_ehp2, &self.mtp_ehp], &[n * d], n * d));
+            // position-wise SwiGLU block with a residual (no self-attention)
+            self.norm_fwd(&mut s, &self.mtp_ehp, "mtp.block_ln.weight", &self.mtp_xn, d, n);
+            self.mm(&mut s, &self.mtp_xn, "mtp.mlp.gate.weight", &self.mtp_gate_pre, n, d, ff);
+            self.mm(&mut s, &self.mtp_xn, "mtp.mlp.up.weight", &self.mtp_up, n, d, ff);
+            s.push(self.gpu.step(SILU_MUL, &[&self.mtp_gate_pre, &self.mtp_up, &self.mtp_h], &[n * ff], n * ff));
+            self.mm(&mut s, &self.mtp_h, "mtp.mlp.down.weight", &self.mtp_mlp_out, n, ff, d);
+            s.push(self.gpu.step(ADD2, &[&self.mtp_ehp, &self.mtp_mlp_out, &self.mtp_block_out], &[n * d], n * d));
+            self.norm_fwd(&mut s, &self.mtp_block_out, "mtp.norm.weight", &self.mtp_final, d, n);
+            self.mm(&mut s, &self.mtp_final, head, &self.mtp_logits, n, d, v); // shared lm_head
+            s.push(self.gpu.step(CE_VALUE, &[&self.mtp_logits, &self.mtp_target, &self.mtp_ce_buf], &[n, v, IGNORE], n));
+        }
         s
     }
 
@@ -609,6 +706,38 @@ impl Glm {
         self.mm_bwd(&mut s, &self.d_logits, &self.xn_final, head, &self.d_xn, n, d, v, 0);
         let last = c.n_layers as usize;
         self.norm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
+
+        // ---- MTP head backward (adds into dres[last], the shared head grad, and
+        // the embedding grad). Runs before the layer loop reads dres[last]. ----
+        if c.mtp {
+            let head = c.head_weight();
+            let ff = c.intermediate_size;
+            s.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.mtp_logits, &self.mtp_target, &self.d_mtp_logits], n * v));
+            // shared lm_head: accumulate its weight grad, then input grad -> d_mtp_final
+            if self.trainable(head) {
+                s.push(self.gpu.step(MATMUL_DW, &[&self.d_mtp_logits, &self.mtp_final, &self.mtp_head_tmp], &[n, d, v], v * d));
+                s.push(self.gpu.step(ADD2, &[self.g(head), &self.mtp_head_tmp, self.g(head)], &[v * d], v * d));
+            }
+            s.push(self.gpu.step(MATMUL_DX, &[&self.d_mtp_logits, self.w(head), &self.d_mtp_final], &[n, d, v, 0], n * d));
+            self.norm_bwd(&mut s, &self.mtp_block_out, "mtp.norm.weight", &self.d_mtp_final, &self.d_mtp_block, d, n);
+            // SwiGLU MLP backward (d_xn reused as the grad wrt mtp_xn)
+            self.mm_bwd(&mut s, &self.d_mtp_block, &self.mtp_h, "mtp.mlp.down.weight", &self.d_h, n, ff, d, 0);
+            s.push(self.gpu.step(SILU_DA, &[&self.mtp_gate_pre, &self.mtp_up, &self.d_h, &self.d_gate_pre], &[n * ff], n * ff));
+            s.push(self.gpu.step(SILU_DB, &[&self.mtp_gate_pre, &self.d_h, &self.d_up], &[n * ff], n * ff));
+            self.mm_bwd(&mut s, &self.d_up, &self.mtp_xn, "mtp.mlp.up.weight", &self.d_xn, n, d, ff, 0);
+            self.mm_bwd(&mut s, &self.d_gate_pre, &self.mtp_xn, "mtp.mlp.gate.weight", &self.d_xn, n, d, ff, 1);
+            self.norm_bwd(&mut s, &self.mtp_ehp, "mtp.block_ln.weight", &self.d_xn, &self.d_mtp_ehp, d, n);
+            s.push(self.gpu.step(ADD2, &[&self.d_mtp_block, &self.d_mtp_ehp, &self.d_mtp_ehp], &[n * d], n * d)); // + residual
+            // eh_proj backward -> grads wrt enorm/hnorm outputs
+            self.mm_bwd(&mut s, &self.d_mtp_ehp, &self.mtp_en, "mtp.eh_proj_e.weight", &self.d_mtp_en, n, d, d, 0);
+            self.mm_bwd(&mut s, &self.d_mtp_ehp, &self.mtp_hn, "mtp.eh_proj_h.weight", &self.d_mtp_hn, n, d, d, 0);
+            self.norm_bwd(&mut s, &self.mtp_e, "mtp.enorm.weight", &self.d_mtp_en, &self.d_mtp_e, d, n);
+            self.norm_bwd(&mut s, &self.res[last], "mtp.hnorm.weight", &self.d_mtp_hn, &self.d_mtp_res, d, n);
+            s.push(self.gpu.step(ADD2, &[&self.dres[last], &self.d_mtp_res, &self.dres[last]], &[n * d], n * d));
+            if self.trainable("tok.weight") {
+                s.push(self.gpu.step(EMB_BWD, &[&self.mtp_input, &self.d_mtp_e, self.g("tok.weight")], &[n, d, v], v * d));
+            }
+        }
 
         for l in (0..c.n_layers as usize).rev() {
             let lb = &self.layers[l];
@@ -696,8 +825,13 @@ impl Glm {
     pub fn forward(&self) -> f32 {
         self.gpu.submit(&[], &self.fwd_steps);
         let n = (self.b * self.t) as usize;
-        let losses = self.gpu.read(&self.ce_buf, n);
-        losses.iter().sum::<f32>() / self.count.get()
+        let mut total: f32 = self.gpu.read(&self.ce_buf, n).iter().sum();
+        // MTP auxiliary loss, added with the same count divisor (so `backward`,
+        // which reuses the same CE-grad uniform, differentiates exactly this).
+        if self.cfg.mtp {
+            total += self.gpu.read(&self.mtp_ce_buf, n).iter().sum::<f32>();
+        }
+        total / self.count.get()
     }
 
     pub fn backward(&self) {
