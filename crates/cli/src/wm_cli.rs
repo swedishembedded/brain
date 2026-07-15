@@ -179,7 +179,17 @@ fn run_play(rest: &[String]) {
     let weights = a.take_str("--weights");
     let device = a.take_str("--device");
     let seed_ctx = a.take_str("--seed-context");
+    let denoise_steps = a.u32_or("--denoise-steps", 0); // 0 = model default
     let mut model = build_model(&model_name, seed, weights.as_deref(), device.as_deref());
+    if denoise_steps > 0 {
+        // WorldModel::set_nfe quality codes: 0 = default (3 steps), 1 = 2
+        // steps, >=2 = 1 step (see wm_diamond::play).
+        model.set_nfe(match denoise_steps {
+            n if n >= 3 => 0,
+            2 => 1,
+            _ => 2,
+        });
+    }
     if let Some(dir) = seed_ctx {
         let (c, h, w) = model.frame_shape();
         let ctx = load_seed_context(&dir, c, h, w);

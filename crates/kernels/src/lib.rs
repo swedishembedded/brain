@@ -152,6 +152,8 @@ pub const DFL_LOSS: &str = include_str!("../wgsl/dfl_loss.wgsl");
 pub const DFL_LOSS_GRAD: &str = include_str!("../wgsl/dfl_loss_grad.wgsl");
 /// `wgsl/edm_mix.wgsl`
 pub const EDM_MIX: &str = include_str!("../wgsl/edm_mix.wgsl");
+/// `wgsl/edm_wrap.wgsl`
+pub const EDM_WRAP: &str = include_str!("../wgsl/edm_wrap.wgsl");
 /// `wgsl/emb_bwd.wgsl`
 pub const EMB_BWD: &str = include_str!("../wgsl/emb_bwd.wgsl");
 /// `wgsl/embed.wgsl`
@@ -406,6 +408,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("dfl_loss", DFL_LOSS),
     ("dfl_loss_grad", DFL_LOSS_GRAD),
     ("edm_mix", EDM_MIX),
+    ("edm_wrap", EDM_WRAP),
     ("emb_bwd", EMB_BWD),
     ("embed", EMBED),
     ("embed_tile", EMBED_TILE),
@@ -515,7 +518,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_kernels_present_and_nonempty() {
-        assert_eq!(ALL.len(), 161);
+        assert_eq!(ALL.len(), 162);
         for (n, s) in ALL { assert!(!s.trim().is_empty(), "empty kernel {n}"); }
     }
     #[test]

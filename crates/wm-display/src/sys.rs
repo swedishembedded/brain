@@ -24,7 +24,11 @@ pub const SDL_WINDOWPOS_CENTERED: c_int = 0x2FFF_0000u32 as c_int;
 pub const SDL_WINDOW_SHOWN: u32 = 0x0000_0004;
 pub const SDL_RENDERER_SOFTWARE: u32 = 0x0000_0001;
 // SDL_PIXELFORMAT_RGB24: tightly packed interleaved R,G,B bytes.
-pub const SDL_PIXELFORMAT_RGB24: u32 = 0x1701_1801;
+// SDL_DEFINE_PIXELFORMAT(ARRAYU8=7, ARRAYORDER_RGB=1, layout 0, 24 bits,
+// 3 bytes) = 0x17101803 — printed from SDL2/SDL_pixels.h by a C program,
+// NOT recomputed by hand (a hand-derived value shipped wrong once and
+// garbled the whole window; tests/sdl_roundtrip.rs now guards this).
+pub const SDL_PIXELFORMAT_RGB24: u32 = 0x1710_1803;
 pub const SDL_TEXTUREACCESS_STREAMING: c_int = 1;
 
 // Event types.
@@ -95,4 +99,11 @@ extern "C" {
     ) -> c_int;
     pub fn SDL_RenderPresent(r: *mut SDL_Renderer);
     pub fn SDL_PollEvent(ev: *mut SDL_Event) -> c_int;
+    pub fn SDL_RenderReadPixels(
+        r: *mut SDL_Renderer,
+        rect: *const c_void,
+        format: u32,
+        pixels: *mut c_void,
+        pitch: c_int,
+    ) -> c_int;
 }

@@ -18,6 +18,8 @@ improvising. Append newly discovered gotchas to the relevant section.
 The CPU backend compiles the SAME WGSL via naga -> Cranelift. Its subset is
 strict; violations are compile-time errors. KNOWN-UNSUPPORTED (append here):
 - `%` on f32 (float modulo) — use `x - y * floor(x / y)`.
+- `clamp(v, lo, hi)` — use `max(min(v, hi), lo)`.
+- `floor(v)` — for `v >= 0` use `f32(u32(v))` (u32 truncation == floor there).
 - Bare builtin vector values — index them (`gid.x`), never pass whole vectors.
 - Local arrays of non-scalar or non-constant size.
 - Workgroup kernels: only a single top-level `workgroupBarrier()`; no array

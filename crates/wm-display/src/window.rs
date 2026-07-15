@@ -80,6 +80,25 @@ impl SdlWindow {
         }
     }
 
+    /// Read back the renderer's current output as RGB24 (post-present).
+    /// For self-tests: proves the texture format/pitch path is faithful.
+    pub fn read_back(&mut self, w: u32, h: u32) -> Result<Vec<u8>, String> {
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        let rc = unsafe {
+            sys::SDL_RenderReadPixels(
+                self.ren,
+                std::ptr::null(),
+                sys::SDL_PIXELFORMAT_RGB24,
+                buf.as_mut_ptr() as *mut _,
+                (w * 3) as i32,
+            )
+        };
+        if rc != 0 {
+            return Err(sdl_error("SDL_RenderReadPixels"));
+        }
+        Ok(buf)
+    }
+
     /// Drain pending events into an [`Input`] snapshot.
     pub fn pump(&mut self) -> Input {
         let mut input = Input { pressed: self.pressed, ..Default::default() };
