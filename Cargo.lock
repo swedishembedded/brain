@@ -284,6 +284,7 @@ dependencies = [
  "brain-tts",
  "brain-vulkan",
  "brain-wm-core",
+ "brain-wm-diamond",
  "brain-wm-display",
  "brain-yolo",
  "serde_json",
@@ -639,6 +640,13 @@ dependencies = [
 [[package]]
 name = "brain-wm-diamond"
 version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-wm-core",
+ "serde_json",
+]
 
 [[package]]
 name = "brain-wm-display"

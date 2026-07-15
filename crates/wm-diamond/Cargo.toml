@@ -2,9 +2,16 @@
 name = "brain-wm-diamond"
 version = "0.1.0"
 edition = "2021"
-description = "DIAMOND EDM diffusion world model (P2 — stub crate; currently hosts the committed parity fixtures under tests/fixtures/)"
+description = "DIAMOND EDM diffusion world model (Atari-100k): pre-recorded UNet graph, torch .pt import, playable WorldModel. Parity fixtures under tests/fixtures/ via `make wm-fixtures`."
 license = "MIT"
 
 [lib]
 name = "wm_diamond"
 path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-checkpoint.workspace = true
+brain-wm-core.workspace = true
+serde_json.workspace = true

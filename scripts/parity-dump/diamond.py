@@ -145,8 +145,12 @@ def main() -> None:
             "sha256": hashlib.sha256(blob).hexdigest(),
         }
 
+    # state_dict()-equivalent coverage: parameters AND buffers (FourierFeatures
+    # registers its weight as a buffer, and the real checkpoints include it).
     for name, p in model.named_parameters():
         dump("weights", name, p)
+    for name, buf in model.named_buffers():
+        dump("weights", name, buf)
     dump("inputs", "noisy", noisy)
     dump("inputs", "c_noise", c_noise)
     dump("inputs", "obs", obs)

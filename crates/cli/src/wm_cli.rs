@@ -7,7 +7,8 @@
 
 use crate::args::Args;
 use wm_core::{FakeWorldModel, WorldModel};
-use wm_display::keymap::KeyChordMap;
+use wm_diamond::DiamondWorldModel;
+use wm_display::keymap::{Key, KeyChordMap, KeySet};
 use wm_display::pacing::{FixedTimestep, WallClock};
 use wm_display::sink::{fnv1a, HashSink, HeadlessSink, PpmDirSink, TeeSink};
 use wm_display::{play_loop, PlayReport, ScriptInput, SplitIo};
@@ -16,19 +17,112 @@ pub fn run_wm(args: &[String]) {
     match args.first().map(String::as_str) {
         Some("play") => run_play(&args[1..]),
         Some("bench") => run_bench(&args[1..]),
+        Some("import") => run_import(&args[1..]),
         _ => {
-            eprintln!("usage: brain wm <play|bench> [options]");
-            eprintln!("  play  --model fake [--fps N] [--scale N] [--seed N] [--adaptive]");
+            eprintln!("usage: brain wm <import|play|bench> [options]");
+            eprintln!("  import --arch diamond --src <agent.pt> --out <F.weights> [--actions-count N]");
+            eprintln!("  play  --model fake|diamond [--weights F.weights] [--device cpu|gpu]");
+            eprintln!("        [--fps N] [--scale N] [--seed N] [--adaptive]");
             eprintln!("        [--headless --frames N [--actions FILE | --action-seq a,b,c]");
             eprintln!("         [--dump-ppm DIR] [--hashes]]");
-            eprintln!("  bench --model fake [--frames N] [--seed N]");
+            eprintln!("  bench --model fake|diamond [--weights F] [--frames N] [--seed N]");
             std::process::exit(2);
         }
     }
 }
 
-fn build_model(name: &str, seed: u64) -> Box<dyn WorldModel> {
+fn run_import(rest: &[String]) {
+    let mut a = Args::new(rest);
+    let arch = a.str_or("--arch", "diamond");
+    if arch != "diamond" {
+        eprintln!("unknown --arch '{arch}' (available: diamond)");
+        std::process::exit(2);
+    }
+    let src = a.take_str("--src").unwrap_or_else(|| {
+        eprintln!("wm import needs --src <agent.pt>");
+        std::process::exit(2);
+    });
+    let out = a.take_str("--out").unwrap_or_else(|| {
+        eprintln!("wm import needs --out <F.weights>");
+        std::process::exit(2);
+    });
+    let actions = a.u32_or("--actions-count", 4);
+    match wm_diamond::import::import(&src, &out, actions) {
+        Ok(cfg) => println!(
+            "imported {} denoiser tensors -> {out} ({}x{} img, {} actions)",
+            cfg.param_list().len(),
+            cfg.h,
+            cfg.w,
+            cfg.num_actions
+        ),
+        Err(e) => {
+            eprintln!("import failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Atari keymap (Breakout-style 4 actions): Space=FIRE, D=RIGHT, A=LEFT.
+fn atari_keymap(num_actions: u32) -> KeyChordMap {
+    let mut chords = vec![];
+    if num_actions > 1 {
+        chords.push((KeySet::of(&[Key::Space]), 1));
+    }
+    if num_actions > 2 {
+        chords.push((KeySet::of(&[Key::D]), 2));
+        chords.push((KeySet::of(&[Key::Right]), 2));
+    }
+    if num_actions > 3 {
+        chords.push((KeySet::of(&[Key::A]), 3));
+        chords.push((KeySet::of(&[Key::Left]), 3));
+    }
+    KeyChordMap::new(chords, 0)
+}
+
+/// Load sorted `*.ppm` frames from a directory as trait-convention context
+/// (CHW f32 [0,1], oldest first, concatenated).
+fn load_seed_context(dir: &str, c: u32, h: u32, w: u32) -> Vec<f32> {
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("--seed-context {dir}: {e}"))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().map(|x| x == "ppm").unwrap_or(false))
+        .collect();
+    paths.sort();
+    assert!(!paths.is_empty(), "--seed-context {dir}: no .ppm files");
+    let mut out = vec![];
+    for p in paths {
+        let bytes = std::fs::read(&p).unwrap();
+        let (px, fw, fh) = events::ppm::decode_p6(&bytes).unwrap_or_else(|e| panic!("{p:?}: {e}"));
+        assert_eq!((fw, fh), (w, h), "{p:?}: expected {w}x{h}");
+        // HWC u8 -> CHW f32 [0,1].
+        let plane = (h * w) as usize;
+        let mut chw = vec![0.0f32; (c * h * w) as usize];
+        for i in 0..plane {
+            for ch in 0..(c as usize).min(3) {
+                chw[ch * plane + i] = px[i * 3 + ch] as f32 / 255.0;
+            }
+        }
+        out.extend(chw);
+    }
+    out
+}
+
+fn build_model(name: &str, seed: u64, weights: Option<&str>, device: Option<&str>) -> Box<dyn WorldModel> {
     match name {
+        "diamond" => {
+            let path = weights.unwrap_or_else(|| {
+                eprintln!("--model diamond needs --weights <F.weights> (from `brain wm import`)");
+                std::process::exit(2);
+            });
+            let (cfg, tensors) = wm_diamond::import::load(path).unwrap_or_else(|e| {
+                eprintln!("cannot load {path}: {e}");
+                std::process::exit(1);
+            });
+            let unet = wm_diamond::DiamondUNet::new(cfg, &tensors, device);
+            let mut m = Box::new(DiamondWorldModel::new(unet, seed));
+            m.reset(&[], &[]);
+            m
+        }
         "fake" => {
             let mut m = Box::new(FakeWorldModel::new());
             // Deterministic start position derived from the seed via the
@@ -81,8 +175,20 @@ fn run_play(rest: &[String]) {
     let print_hashes = a.take_flag("--hashes");
     let actions = parse_actions(&mut a);
 
-    let mut model = build_model(&model_name, seed);
-    let km = KeyChordMap::wasd(0);
+    let weights = a.take_str("--weights");
+    let device = a.take_str("--device");
+    let seed_ctx = a.take_str("--seed-context");
+    let mut model = build_model(&model_name, seed, weights.as_deref(), device.as_deref());
+    if let Some(dir) = seed_ctx {
+        let (c, h, w) = model.frame_shape();
+        let ctx = load_seed_context(&dir, c, h, w);
+        model.reset(&ctx, &[]);
+    }
+    let km = if model_name == "diamond" {
+        atari_keymap(model.num_actions())
+    } else {
+        KeyChordMap::wasd(0)
+    };
     let max_steps = if frames > 0 { Some(frames) } else { None };
 
     if headless {
@@ -158,8 +264,11 @@ fn run_bench(rest: &[String]) {
     let frames = a.u64_or("--frames", 200);
     let seed = a.u64_or("--seed", 7);
 
-    let mut model = build_model(&model_name, seed);
-    let mut input = ScriptInput::new((0..frames).map(|i| (i % 5) as u32).collect());
+    let weights = a.take_str("--weights");
+    let device = a.take_str("--device");
+    let mut model = build_model(&model_name, seed, weights.as_deref(), device.as_deref());
+    let na = model.num_actions() as u64;
+    let mut input = ScriptInput::new((0..frames).map(|i| (i % na) as u32).collect());
     let mut sink = HeadlessSink;
     let mut io = SplitIo { input: &mut input, sink: &mut sink };
     let t0 = std::time::Instant::now();

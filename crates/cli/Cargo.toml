@@ -20,6 +20,7 @@ wm-sdl = ["brain-wm-display/sdl"]
 [dependencies]
 brain-gpu-core.workspace = true
 brain-wm-core.workspace = true
+brain-wm-diamond.workspace = true
 brain-wm-display = { workspace = true, default-features = false }
 brain-moe.workspace = true
 brain-gpt.workspace = true

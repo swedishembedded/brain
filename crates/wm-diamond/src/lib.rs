@@ -1,9 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! DIAMOND EDM diffusion world model — placeholder.
+//! DIAMOND (Diffusion As a Model Of eNvironment Dreams, NeurIPS 2024) —
+//! the Atari-100k EDM diffusion world model, playable through
+//! [`wm_core::WorldModel`].
 //!
-//! The real model lands in phase P2 (see docs/world-models/phases/P2.yaml).
-//! This stub exists so the committed parity fixtures under `tests/fixtures/`
-//! (docs/world-models/FIXTURES.md) have their permanent home without breaking
-//! the `crates/*` workspace member glob.
+//! - [`config`]: architecture + parameter manifest (reference names).
+//! - [`cond`]: host-side EDM conditioners, Fourier/action/cond-MLP path,
+//!   AdaGroupNorm gamma/beta production, Karras sigmas.
+//! - [`model`]: the UNet as one pre-recorded brain kernel graph.
+//! - [`import`]: torch `.pt` -> `.weights` with full-coverage validation.
+//! - [`play`]: the context ring + Euler denoising loop behind the trait.
+//!
+//! Reference: /data/workspace/resources/world-models/repos/diamond (MIT).
+//! Parity fixtures: `make wm-fixtures` (docs/world-models/FIXTURES.md).
+
+pub mod cond;
+pub mod config;
+pub mod import;
+pub mod model;
+pub mod play;
+
+pub use config::DiamondConfig;
+pub use model::{DiamondUNet, Tensors};
+pub use play::DiamondWorldModel;
