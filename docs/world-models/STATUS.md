@@ -68,9 +68,20 @@ written from the specs in `docs/world-models/specs/`.
   AdaGN, decomposed GN, attention as MatMul/Softmax) -> `--device npu
   --onnx out/diamond.onnx` in play/bench; sampler host-side.
 
+- **Training (P3)**: full-UNet backward as a second SSA graph
+  (crates/wm-diamond/src/train.rs; all conv weights+biases trainable,
+  cond path frozen, gradients flow through GroupNorm), F-space EDM loss,
+  AdamW+clip; gates: training-fwd == inference-fwd exactly, FD gradcheck
+  across the whole net, 100-step overfit halves loss. `brain wm finetune`.
+- **Data (P3)**: episode datasets (atomic writer, boundary-safe windows,
+  split-by-episode), `brain data gen pong` (deterministic fixed-point env),
+  `--record` on wm play + `wm replay --verify` (exact roundtrip).
+
 ## Next
 - INT8 PTQ for the NPU graph (existing quant.rs machinery) — likely 2x more.
 - GPU: fold 3 per-NFE submits into 1 (3 pre-written gb sets); coopmat fp16.
+- Batched training (n>1) + backward-pass GPU tiling (conv2d_dx/dw are naive).
+- P4: GenieRedux (VQ tokenizer + MaskGIT) on the same seams.
 - P3: episode dataset + gen_pong + record/replay + DIAMOND training
   (EDM loss, check_wm_unet) + fine-tune.
 - P1 remainder: vq kernels, dwconv3d, maskgit host decode, EDM host math
