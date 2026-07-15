@@ -38,12 +38,32 @@ written from the specs in `docs/world-models/specs/`.
   scripted rollouts with fnv1a golden hashes) and `brain wm bench`, running
   the FakeWorldModel end-to-end. 12 display tests, all headless.
 
-## Next (P1 remainder → P2)
-- vq_argmin/vq_argmax_dot kernels; dwconv3d PEG family; maskgit host decode;
-  EDM/sampler/schedule host math (`wm_core::{edm,sampler,schedule}`).
-- torch `.pt` reader (evaluate candle-core pickle / repugnant-pickle first),
-  then DIAMOND UNet model + import + 3-step Euler playable path (P2) wired
-  into `brain wm play --model diamond`.
+- Pure-Rust torch `.pt` reader (`checkpoint::{zipread,torchpt}`): zip +
+  pickle state_dicts, f16/bf16/f64 -> f32, strided views, full-coverage
+  contract; 13 synthetic-bytes tests + bit-exact validation vs torch 2.12.
+- **DIAMOND playable (P2 core)**: `crates/wm-diamond` — reference-parity
+  UNet as one pre-recorded Step graph (AdaGN via gn_stats/gn_apply with
+  gamma=1+scale), host EDM/Fourier/cond path, Karras/Euler sampler with the
+  reference's exact quirks (unit-noise init, byte-truncation quantization,
+  attention residual on the NORMED input), `brain wm import` (236 tensors,
+  full coverage) and `brain wm play --model diamond --weights ... 
+  [--seed-context <ppm dir>]`. Forward parity < 1e-4 end-to-end and
+  per-module vs `make wm-fixtures`. Real Breakout checkpoint imported and
+  playable: coherent Breakout frames, paddle follows actions.
+
+## Measured (Breakout, 3 denoise steps, 64x64)
+- CPU: ~440 ms/frame (2.3 fps). iGPU (wgpu): ~1.95 s/frame — readback-bound,
+  same pattern as YOLO; per-NFE host round-trip is the known bottleneck.
+
+## Next
+- P2 perf: keep the 3-NFE denoise loop on-device (sigma via step_buf
+  uniforms, on-device Euler + quantize, context ring via step_sliced),
+  single submit per frame -> targets >=10 fps CPU / >=15 fps iGPU.
+- P3: episode dataset + gen_pong + record/replay + DIAMOND training
+  (EDM loss, check_wm_unet) + fine-tune.
+- P1 remainder: vq kernels, dwconv3d, maskgit host decode, EDM host math
+  already partially landed in wm-diamond (generalize into wm-core when
+  GenieRedux needs it).
 
 Backups of the pre-restructure orchestration experiment:
 `backup/wm-orchestration-v1`, `backup/wm-p1-*` branches.
