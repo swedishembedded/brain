@@ -27,3 +27,11 @@ __pycache__/
 !/results/.gitkeep
 !/results/gpt-1234.json
 !/results/scale-gpt-1234.json
+
+# Session-local agent machinery (worktrees, locks, loop state, workflows).
+.claude/
+
+# Generated world-model artifacts: parity fixtures (regenerate with
+# `make wm-fixtures`) and demo output.
+crates/wm-diamond/tests/fixtures/
+/out/wm-demos/

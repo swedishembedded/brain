@@ -1,0 +1,10 @@
+[package]
+name = "brain-wm-diamond"
+version = "0.1.0"
+edition = "2021"
+description = "DIAMOND EDM diffusion world model (P2 — stub crate; currently hosts the committed parity fixtures under tests/fixtures/)"
+license = "MIT"
+
+[lib]
+name = "wm_diamond"
+path = "src/lib.rs"

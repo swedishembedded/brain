@@ -45,7 +45,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release test gradcheck parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo \
+.PHONY: help build release test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo \
@@ -96,6 +96,18 @@ requirements:
 
 gradcheck: release
 	$(BRAIN) gradcheck
+
+# Regenerate the kernel const block + ALL registry in crates/kernels/src/lib.rs
+# from the contents of crates/kernels/wgsl/. Run after adding/removing a .wgsl
+# file; merge conflicts in lib.rs are resolved by union-ing wgsl/ + this target.
+kernels-regen:
+	scripts/kernels-regen.sh
+
+# Regenerate the DIAMOND parity fixtures (gitignored — never committed) from
+# the reference implementation in resources/world-models/repos/diamond.
+# Needs python3 + torch; see docs/world-models/FIXTURES.md for provenance.
+wm-fixtures:
+	python3 scripts/parity-dump/diamond.py --out crates/wm-diamond/tests/fixtures/diamond
 
 # Cross-backend parity gate: CPU == Vulkan == NPU (gradcheck on both backends +
 # direct CPU-vs-GPU forward parity + TTS NPU codec vs CPU reference).
