@@ -134,6 +134,8 @@ pub const CONV_ACT_REG: &str = include_str!("../wgsl/conv_act_reg.wgsl");
 pub const CONV_ACT_TILED: &str = include_str!("../wgsl/conv_act_tiled.wgsl");
 /// `wgsl/conv_bias.wgsl`
 pub const CONV_BIAS: &str = include_str!("../wgsl/conv_bias.wgsl");
+/// `wgsl/conv_bias_reg.wgsl`
+pub const CONV_BIAS_REG: &str = include_str!("../wgsl/conv_bias_reg.wgsl");
 /// `wgsl/convtr1d.wgsl`
 pub const CONVTR1D: &str = include_str!("../wgsl/convtr1d.wgsl");
 /// `wgsl/convtr1d_dw.wgsl`
@@ -194,8 +196,12 @@ pub const GN_DGAMMA: &str = include_str!("../wgsl/gn_dgamma.wgsl");
 pub const GN_DSUM: &str = include_str!("../wgsl/gn_dsum.wgsl");
 /// `wgsl/gn_dx.wgsl`
 pub const GN_DX: &str = include_str!("../wgsl/gn_dx.wgsl");
+/// `wgsl/gn_part.wgsl`
+pub const GN_PART: &str = include_str!("../wgsl/gn_part.wgsl");
 /// `wgsl/gn_stats.wgsl`
 pub const GN_STATS: &str = include_str!("../wgsl/gn_stats.wgsl");
+/// `wgsl/gn_stats2.wgsl`
+pub const GN_STATS2: &str = include_str!("../wgsl/gn_stats2.wgsl");
 /// `wgsl/gqa_apply.wgsl`
 pub const GQA_APPLY: &str = include_str!("../wgsl/gqa_apply.wgsl");
 /// `wgsl/gqa_bwd_dk.wgsl`
@@ -399,6 +405,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("conv_act_reg", CONV_ACT_REG),
     ("conv_act_tiled", CONV_ACT_TILED),
     ("conv_bias", CONV_BIAS),
+    ("conv_bias_reg", CONV_BIAS_REG),
     ("convtr1d", CONVTR1D),
     ("convtr1d_dw", CONVTR1D_DW),
     ("convtr1d_dx", CONVTR1D_DX),
@@ -429,7 +436,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("gn_dgamma", GN_DGAMMA),
     ("gn_dsum", GN_DSUM),
     ("gn_dx", GN_DX),
+    ("gn_part", GN_PART),
     ("gn_stats", GN_STATS),
+    ("gn_stats2", GN_STATS2),
     ("gqa_apply", GQA_APPLY),
     ("gqa_bwd_dk", GQA_BWD_DK),
     ("gqa_bwd_dq", GQA_BWD_DQ),
@@ -518,7 +527,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_kernels_present_and_nonempty() {
-        assert_eq!(ALL.len(), 162);
+        assert_eq!(ALL.len(), 165);
         for (n, s) in ALL { assert!(!s.trim().is_empty(), "empty kernel {n}"); }
     }
     #[test]

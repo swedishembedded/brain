@@ -274,6 +274,33 @@ fn run_bench(rest: &[String]) {
     let model_name = a.str_or("--model", "fake");
     let frames = a.u64_or("--frames", 200);
     let seed = a.u64_or("--seed", 7);
+    let profile = a.take_flag("--profile");
+
+    if profile {
+        if model_name != "diamond" {
+            eprintln!("--profile is diamond-only");
+            std::process::exit(2);
+        }
+        let weights = a.take_str("--weights").expect("--profile needs --weights");
+        let device = a.take_str("--device");
+        let (cfg, tensors) = wm_diamond::import::load(&weights).unwrap();
+        let unet = wm_diamond::DiamondUNet::new(cfg.clone(), &tensors, device.as_deref());
+        let n = (cfg.img_channels * cfg.h * cfg.w) as usize;
+        let noisy = vec![0.1f32; n];
+        let obs = vec![0.0f32; n * cfg.num_steps_conditioning as usize];
+        unet.set_context(&obs);
+        let actions = vec![0u32; cfg.num_steps_conditioning as usize];
+        // Warm up (JIT compile / pipeline setup), then profile.
+        let _ = unet.forward(&noisy, 0.1, &actions);
+        let prof = unet.profile_forward(&noisy, 0.1, &actions);
+        let total: f64 = prof.iter().map(|(_, ms, _)| ms).sum();
+        println!("per-kernel (one UNet forward, ONE SUBMIT PER STEP — ranking only):");
+        for (name, ms, count) in &prof {
+            println!("  {name:<20} {ms:8.2} ms  {count:4} dispatches  {:5.1}%", ms / total * 100.0);
+        }
+        println!("  {:<20} {total:8.2} ms  (per-step submit overhead included)", "TOTAL");
+        return;
+    }
 
     let weights = a.take_str("--weights");
     let device = a.take_str("--device");

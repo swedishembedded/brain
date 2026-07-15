@@ -32,8 +32,14 @@ const K_NLC_NCHW: usize = 8;
 const K_ATTN_SCORES: usize = 9;
 const K_ATTN_SOFTMAX: usize = 10;
 const K_ATTN_APPLY: usize = 11;
+const K_SCALE_ROW: usize = 12;
+const K_EDM_MIX: usize = 13;
+const K_EDM_WRAP: usize = 14;
+const K_GN_PART: usize = 15;
+const K_GN_STATS2: usize = 16;
+const K_CONV_BIAS_REG: usize = 17;
 
-const KERNELS: [(&str, &str); 12] = [
+const KERNELS: [(&str, &str); 18] = [
     ("conv_bias", kernels::CONV_BIAS),
     ("gn_stats", kernels::GN_STATS),
     ("gn_apply", kernels::GN_APPLY),
@@ -46,9 +52,17 @@ const KERNELS: [(&str, &str); 12] = [
     ("attn_scores_bidir", kernels::ATTN_SCORES_BIDIR),
     ("attn_softmax_bidir", kernels::ATTN_SOFTMAX_BIDIR),
     ("attn_apply_bidir", kernels::ATTN_APPLY_BIDIR),
+    ("scale_row", kernels::SCALE_ROW),
+    ("edm_mix", kernels::EDM_MIX),
+    ("edm_wrap", kernels::EDM_WRAP),
+    ("gn_part", kernels::GN_PART),
+    ("gn_stats2", kernels::GN_STATS2),
+    ("conv_bias_reg", kernels::CONV_BIAS_REG),
 ];
 
 const GN_EPS: f32 = 1e-5;
+/// Partial-reduction width for gn_part (threads per (n,g) group).
+const GN_P: u32 = 64;
 const ATTN_HEAD_DIM: u32 = 8;
 
 fn num_groups(c: u32) -> u32 {
@@ -70,9 +84,21 @@ pub struct DiamondUNet {
     /// AdaGroupNorm sites in graph order with their device gamma/beta buffers.
     adagn: Vec<(AdaGnSite, DeviceBuffer)>,
     steps: Vec<Step>,
+    kinds: Vec<usize>,
+    /// Full denoise-iteration step list: c_in scale -> UNet -> EDM wrap ->
+    /// Euler mix -> copy back into `x_state`. Submitted once per sigma; all
+    /// per-sigma scalars live in the tiny coef buffers below.
+    loop_steps: Vec<Step>,
     x_in: DeviceBuffer,
     obs_in: DeviceBuffer,
     y_out: DeviceBuffer,
+    /// Device-resident sampler state (x_t across denoise steps).
+    x_state: DeviceBuffer,
+    /// Quantized denoised output of one iteration (the final frame).
+    denoised: DeviceBuffer,
+    cin_buf: DeviceBuffer,
+    wrap_coef: DeviceBuffer,
+    euler_ab: DeviceBuffer,
     /// Named intermediate buffers for parity debugging (name, buffer, len).
     taps: Vec<(String, DeviceBuffer, usize)>,
 }
@@ -83,6 +109,8 @@ struct Builder<'a> {
     t: &'a Tensors,
     cc: usize,
     steps: Vec<Step>,
+    /// Kernel-table index of each recorded step (parallel to `steps`).
+    kinds: Vec<usize>,
     adagn: Vec<(AdaGnSite, DeviceBuffer)>,
     taps: Vec<(String, DeviceBuffer, usize)>,
 }
@@ -109,6 +137,11 @@ impl<'a> Builder<'a> {
         self.taps.push((name, buf.clone(), len as usize));
     }
 
+    fn push(&mut self, kind: usize, step: Step) {
+        self.kinds.push(kind);
+        self.steps.push(step);
+    }
+
     /// conv (+bias) `prefix.{weight,bias}`: x[cin,h,w] -> y[cout,ho,wo].
     fn conv(
         &mut self,
@@ -127,11 +160,13 @@ impl<'a> Builder<'a> {
         let wgt = self.dev(&format!("{prefix}.weight"));
         let bias = self.dev(&format!("{prefix}.bias"));
         let y = self.act((cout * ho * wo) as u64);
-        self.steps.push(self.gpu.step(
-            K_CONV_BIAS,
+        // Register-tiled conv (8 output channels x 4 positions per invocation).
+        let threads = cout.div_ceil(8) * (ho * wo).div_ceil(4);
+        self.push(K_CONV_BIAS_REG, self.gpu.step(
+            K_CONV_BIAS_REG,
             &[x, &wgt, &bias, &y],
             &[1, cin, h, w, cout, k, stride, pad, ho, wo],
-            cout * ho * wo,
+            threads,
         ));
         (y, ho, wo)
     }
@@ -167,13 +202,23 @@ impl<'a> Builder<'a> {
         let g = num_groups(c);
         let stats = self.act(2 * g as u64);
         let y = self.act((c * h * w) as u64);
-        self.steps.push(self.gpu.step(
-            K_GN_STATS,
-            &[x, &stats],
-            &[1, c, h, w, g, f(GN_EPS)],
+        // Parallel two-stage reduction (gn_part -> gn_stats2): the serial
+        // per-group gn_stats was measured at 77% of GPU frame time (2-4
+        // invocations looping 131k elements on one EU lane each).
+        let part = self.act(2 * g as u64 * GN_P as u64);
+        self.push(K_GN_PART, self.gpu.step(
+            K_GN_PART,
+            &[x, &part],
+            &[1, c, h, w, g, GN_P],
+            g * GN_P,
+        ));
+        self.push(K_GN_STATS2, self.gpu.step(
+            K_GN_STATS2,
+            &[&part, &stats],
+            &[1, c, h, w, g, GN_P, f(GN_EPS)],
             g,
         ));
-        self.steps.push(self.gpu.step(
+        self.push(K_GN_APPLY, self.gpu.step(
             K_GN_APPLY,
             &[x, &stats, gb, &y],
             &[1, c, h, w, g],
@@ -184,13 +229,13 @@ impl<'a> Builder<'a> {
 
     fn silu(&mut self, n: u32, x: &DeviceBuffer) -> DeviceBuffer {
         let y = self.act(n as u64);
-        self.steps.push(self.gpu.step(K_SILU, &[x, &y], &[n], n));
+        self.push(K_SILU, self.gpu.step(K_SILU, &[x, &y], &[n], n));
         y
     }
 
     fn add(&mut self, n: u32, a: &DeviceBuffer, b: &DeviceBuffer) -> DeviceBuffer {
         let y = self.act(n as u64);
-        self.steps.push(self.gpu.step(K_ADD2, &[a, b, &y], &[n], n));
+        self.push(K_ADD2, self.gpu.step(K_ADD2, &[a, b, &y], &[n], n));
         y
     }
 
@@ -204,7 +249,7 @@ impl<'a> Builder<'a> {
         b: &DeviceBuffer,
     ) -> DeviceBuffer {
         let y = self.act(((ca + cb) * h * w) as u64);
-        self.steps.push(self.gpu.step(
+        self.push(K_CONCAT2, self.gpu.step(
             K_CONCAT2,
             &[a, b, &y],
             &[1, ca, cb, h, w],
@@ -215,7 +260,7 @@ impl<'a> Builder<'a> {
 
     fn upsample(&mut self, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
         let y = self.act((c * 2 * h * 2 * w) as u64);
-        self.steps.push(self.gpu.step(K_UPSAMPLE2, &[x, &y], &[1, c, h, w], c * 4 * h * w));
+        self.push(K_UPSAMPLE2, self.gpu.step(K_UPSAMPLE2, &[x, &y], &[1, c, h, w], c * 4 * h * w));
         y
     }
 
@@ -231,7 +276,7 @@ impl<'a> Builder<'a> {
         self.tap(format!("{prefix}.qkv_proj"), &qkv_chw, 3 * c * h * w);
         // Reshape the conv output for attention: NCHW -> [T, 3C].
         let qkv = self.act((3 * c * t) as u64);
-        self.steps.push(self.gpu.step(
+        self.push(K_NCHW_NLC, self.gpu.step(
             K_NCHW_NLC,
             &[&qkv_chw, &qkv],
             &[3 * c * t, 3 * c, t],
@@ -239,7 +284,7 @@ impl<'a> Builder<'a> {
         ));
         self.tap(format!("{prefix}.qkv_rows"), &qkv, 3 * c * t);
         let scores = self.act((heads * t * t) as u64);
-        self.steps.push(self.gpu.step(
+        self.push(K_ATTN_SCORES, self.gpu.step(
             K_ATTN_SCORES,
             &[&qkv, &scores],
             &[1, heads, t, ATTN_HEAD_DIM, 3 * c, 0, c],
@@ -247,7 +292,7 @@ impl<'a> Builder<'a> {
         ));
         self.tap(format!("{prefix}.scores"), &scores, heads * t * t);
         let probs = self.act((heads * t * t) as u64);
-        self.steps.push(self.gpu.step(
+        self.push(K_ATTN_SOFTMAX, self.gpu.step(
             K_ATTN_SOFTMAX,
             &[&scores, &probs],
             &[1, heads, t],
@@ -256,7 +301,7 @@ impl<'a> Builder<'a> {
         self.tap(format!("{prefix}.probs"), &probs, heads * t * t);
         let attn_out = self.act((t * c) as u64);
         // NOTE binding order: attn_apply_bidir takes (probs, qkv, out).
-        self.steps.push(self.gpu.step(
+        self.push(K_ATTN_APPLY, self.gpu.step(
             K_ATTN_APPLY,
             &[&probs, &qkv, &attn_out],
             &[1, heads, t, ATTN_HEAD_DIM, 3 * c, 2 * c, c],
@@ -264,7 +309,7 @@ impl<'a> Builder<'a> {
         ));
         self.tap(format!("{prefix}.attn_rows"), &attn_out, t * c);
         let attn_chw = self.act((c * t) as u64);
-        self.steps.push(self.gpu.step(
+        self.push(K_NLC_NCHW, self.gpu.step(
             K_NLC_NCHW,
             &[&attn_out, &attn_chw],
             &[c * t, c, t],
@@ -364,7 +409,7 @@ impl DiamondUNet {
         };
 
         let mut b =
-            Builder { gpu: &gpu, t: tensors, cc, steps: vec![], adagn: vec![], taps: vec![] };
+            Builder { gpu: &gpu, t: tensors, cc, steps: vec![], kinds: vec![], adagn: vec![], taps: vec![] };
 
         let ic = cfg.img_channels;
         let (h0, w0) = (cfg.h, cfg.w);
@@ -486,15 +531,80 @@ impl DiamondUNet {
 
         assert_eq!(hw, (h0, w0), "UNet did not return to input resolution");
 
-        // End the builder's borrow of `gpu` before moving it into the model.
-        let Builder { steps, adagn, taps, gpu: _, t: _, cc: _ } = b;
+        // On-device sampler ring: scale_row(c_in) feeds the UNet, edm_wrap
+        // quantizes, edm_mix advances x, scale_row(1) copies back into
+        // x_state (no in-dispatch aliasing; each pass is elementwise).
+        let n_px = ic * h0 * w0;
+        let x_state = gpu.storage(n_px as u64);
+        let denoised = gpu.storage(n_px as u64);
+        let x_next = gpu.storage(n_px as u64);
+        let cin_buf = gpu.storage(1);
+        let one_buf = gpu.storage_init("wm.one", &[1.0]);
+        let wrap_coef = gpu.storage(2);
+        let euler_ab = gpu.storage(2);
+        let mut loop_steps: Vec<Step> = Vec::with_capacity(b.steps.len() + 4);
+        loop_steps.push(gpu.step(K_SCALE_ROW, &[&x_state, &cin_buf, &x_in], &[n_px, n_px], n_px));
+        loop_steps.extend(b.steps.iter().cloned());
+        loop_steps.push(gpu.step(K_EDM_WRAP, &[&x_state, &y_out, &wrap_coef, &denoised], &[n_px], n_px));
+        loop_steps.push(gpu.step(K_EDM_MIX, &[&x_state, &denoised, &euler_ab, &x_next], &[n_px, n_px], n_px));
+        loop_steps.push(gpu.step(K_SCALE_ROW, &[&x_next, &one_buf, &x_state], &[n_px, n_px], n_px));
 
-        DiamondUNet { gpu, cfg, cond, adagn, steps, x_in, obs_in, y_out, taps }
+        // End the builder's borrow of `gpu` before moving it into the model.
+        let Builder { steps, kinds, adagn, taps, gpu: _, t: _, cc: _ } = b;
+
+        DiamondUNet {
+            gpu,
+            cfg,
+            cond,
+            adagn,
+            steps,
+            kinds,
+            loop_steps,
+            x_in,
+            obs_in,
+            y_out,
+            x_state,
+            denoised,
+            cin_buf,
+            wrap_coef,
+            euler_ab,
+            taps,
+        }
     }
 
     /// Upload the rescaled context (obs / sigma_data), once per frame.
     pub fn set_context(&self, obs_rescaled: &[f32]) {
         wf(&self.gpu, &self.obs_in, obs_rescaled);
+    }
+
+    /// Wall-clock per-kernel profile of one forward: runs the recorded steps
+    /// ONE SUBMIT EACH (adds per-submit overhead — ranking, not gospel; the
+    /// production path is a single submit) and aggregates ms by kernel.
+    /// Returns (kernel name, total ms, dispatch count) sorted by time.
+    pub fn profile_forward(
+        &self,
+        noisy_scaled: &[f32],
+        c_noise: f32,
+        actions: &[u32],
+    ) -> Vec<(&'static str, f64, u32)> {
+        let cond = self.cond.cond(c_noise, actions);
+        for (site, gb) in &self.adagn {
+            wf(&self.gpu, gb, &site.gb(&cond));
+        }
+        wf(&self.gpu, &self.x_in, noisy_scaled);
+        let mut agg: std::collections::HashMap<usize, (f64, u32)> = Default::default();
+        for (step, &kind) in self.steps.iter().zip(&self.kinds) {
+            let t0 = std::time::Instant::now();
+            self.gpu.submit(&[], std::slice::from_ref(step));
+            self.gpu.poll_wait();
+            let e = agg.entry(kind).or_insert((0.0, 0));
+            e.0 += t0.elapsed().as_secs_f64() * 1e3;
+            e.1 += 1;
+        }
+        let mut out: Vec<(&'static str, f64, u32)> =
+            agg.into_iter().map(|(k, (ms, n))| (KERNELS[k].0, ms, n)).collect();
+        out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        out
     }
 
     /// Read a named intermediate tap after a forward (parity debugging).
@@ -508,6 +618,34 @@ impl DiamondUNet {
     /// Tap names in graph order.
     pub fn tap_names(&self) -> Vec<String> {
         self.taps.iter().map(|(n, _, _)| n.clone()).collect()
+    }
+
+    /// Full on-device denoising of one frame: upload the unit-noise init once,
+    /// then per sigma write only the tiny coef buffers + the conditioned
+    /// gamma/betas and submit the WHOLE iteration (c_in scale -> UNet -> wrap
+    /// -> Euler) — x never leaves the device; ONE readback per frame.
+    /// `sigmas` is the Karras schedule incl. trailing 0.
+    pub fn denoise_frame(&self, x0: &[f32], sigmas: &[f32], actions: &[u32]) -> Vec<f32> {
+        let cfg = &self.cfg;
+        wf(&self.gpu, &self.x_state, x0);
+        for i in 0..sigmas.len() - 1 {
+            let sigma = sigmas[i];
+            let next = sigmas[i + 1];
+            let cs = crate::cond::conditioners(sigma, cfg.sigma_data, cfg.sigma_offset_noise);
+            let cond = self.cond.cond(cs.c_noise, actions);
+            for (site, gb) in &self.adagn {
+                wf(&self.gpu, gb, &site.gb(&cond));
+            }
+            wf(&self.gpu, &self.cin_buf, &[cs.c_in]);
+            wf(&self.gpu, &self.wrap_coef, &[cs.c_skip, cs.c_out]);
+            let dt = next - sigma;
+            // Euler: x' = (1 + dt/sigma)*x - (dt/sigma)*denoised.
+            wf(&self.gpu, &self.euler_ab, &[1.0 + dt / sigma, -dt / sigma]);
+            self.gpu.submit(&[], &self.loop_steps);
+        }
+        let n = (cfg.img_channels * cfg.h * cfg.w) as usize;
+        // The final Euler step (sigma_next = 0) lands exactly on `denoised`.
+        self.gpu.read(&self.denoised, n)
     }
 
     /// One inner-model forward: F(c_in*x, c_noise, obs, act).

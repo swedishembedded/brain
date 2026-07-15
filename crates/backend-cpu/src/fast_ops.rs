@@ -399,3 +399,131 @@ mod tests {
         }
     }
 }
+
+/// `gn_stats`: two-pass GroupNorm statistics over NCHW (matches
+/// `gn_stats.wgsl`: population variance, eps inside the rsqrt). One entry per
+/// (n, g): `stats[2k] = mean`, `stats[2k+1] = 1/sqrt(var + eps)`. The group's
+/// channels are contiguous, so each reduction is one contiguous slice —
+/// parallelized over chunks with rayon and combined (fp32 accumulation in
+/// chunk-partials; validated against the scalar JIT within fp32 tolerance
+/// like the conv fast paths).
+pub fn gn_stats(params: &[u32], x: &[f32], stats: &mut [f32]) {
+    use rayon::prelude::*;
+    let (n, c, h, w, g) =
+        (params[0] as usize, params[1] as usize, params[2] as usize, params[3] as usize, params[4] as usize);
+    let eps = f32::from_bits(params[5]);
+    let cpg = c / g;
+    let m = cpg * h * w;
+    // n*g is tiny (2..8): keep groups sequential, parallelize each reduction
+    // over a few LARGE chunks (no nested rayon — nesting inside the backend's
+    // pool oversubscribes and measured slower than the scalar JIT).
+    const CH: usize = 32 * 1024;
+    for k in 0..n * g {
+        let (ni, gi) = (k / g, k % g);
+        let base = (ni * c + gi * cpg) * h * w;
+        let sl = &x[base..base + m];
+        let mean = if m >= 2 * CH {
+            sl.par_chunks(CH).map(|ch| ch.iter().sum::<f32>()).sum::<f32>() / m as f32
+        } else {
+            sl.iter().sum::<f32>() / m as f32
+        };
+        let var = if m >= 2 * CH {
+            sl.par_chunks(CH)
+                .map(|ch| ch.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>())
+                .sum::<f32>()
+                / m as f32
+        } else {
+            sl.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / m as f32
+        };
+        stats[2 * k] = mean;
+        stats[2 * k + 1] = 1.0 / (var + eps).sqrt();
+    }
+}
+
+/// `gn_apply`: `y = gb[c] * (x - mean_k) * rstd_k + gb[C + c]` (matches
+/// `gn_apply.wgsl`). Folded to one affine per contiguous channel slice:
+/// `y = a_c * x + b_c` with `a_c = gamma_c * rstd`, `b_c = beta_c - a_c*mean`.
+pub fn gn_apply(params: &[u32], x: &[f32], stats: &[f32], gb: &[f32], y: &mut [f32]) {
+    use rayon::prelude::*;
+    let (n, c, h, w, g) =
+        (params[0] as usize, params[1] as usize, params[2] as usize, params[3] as usize, params[4] as usize);
+    let hw = h * w;
+    let cpg = c / g;
+    // Coarse row batching: each rayon task handles >= ~32k elements so task
+    // overhead never dominates the (memory-bound) affine.
+    let rows_per_task = (32 * 1024 / hw).max(1);
+    y.par_chunks_mut(hw * rows_per_task).enumerate().for_each(|(t, yo)| {
+        let row0 = t * rows_per_task;
+        for (r, yrow) in yo.chunks_mut(hw).enumerate() {
+            let row = row0 + r;
+            let (ni, ci) = (row / c, row % c);
+            let k = ni * g + ci / cpg;
+            let (mean, rstd) = (stats[2 * k], stats[2 * k + 1]);
+            let a = gb[ci] * rstd;
+            let b = gb[c + ci] - a * mean;
+            let base = row * hw;
+            let xs = &x[base..base + hw];
+            for (o, &v) in yrow.iter_mut().zip(xs) {
+                *o = a * v + b;
+            }
+        }
+    });
+    let _ = n;
+}
+
+/// `gn_part` (stage 1): per-(group, t) partial (sum, sumsq) over contiguous
+/// chunks — matches `gn_part.wgsl`. Parallel over the partial index.
+pub fn gn_part(params: &[u32], x: &[f32], part: &mut [f32]) {
+    use rayon::prelude::*;
+    let (n, c, h, w, g, pp) = (
+        params[0] as usize,
+        params[1] as usize,
+        params[2] as usize,
+        params[3] as usize,
+        params[4] as usize,
+        params[5] as usize,
+    );
+    let cpg = c / g;
+    let m = cpg * h * w;
+    let chunk = m.div_ceil(pp);
+    part.par_chunks_mut(2).enumerate().take(n * g * pp).for_each(|(idx, o)| {
+        let (k, t) = (idx / pp, idx % pp);
+        let (ni, gi) = (k / g, k % g);
+        let base = (ni * c + gi * cpg) * h * w;
+        let lo = (t * chunk).min(m);
+        let hi = (lo + chunk).min(m);
+        let (mut s, mut s2) = (0.0f32, 0.0f32);
+        for &v in &x[base + lo..base + hi] {
+            s += v;
+            s2 += v * v;
+        }
+        o[0] = s;
+        o[1] = s2;
+    });
+}
+
+/// `gn_stats2` (stage 2): combine partials into (mean, rstd) — matches
+/// `gn_stats2.wgsl` (population variance via E[x^2] - mean^2, clamped at 0).
+pub fn gn_stats2(params: &[u32], part: &[f32], stats: &mut [f32]) {
+    let (n, c, h, w, g, pp) = (
+        params[0] as usize,
+        params[1] as usize,
+        params[2] as usize,
+        params[3] as usize,
+        params[4] as usize,
+        params[5] as usize,
+    );
+    let eps = f32::from_bits(params[6]);
+    let m = (c / g) * h * w;
+    for k in 0..n * g {
+        let (mut s, mut s2) = (0.0f32, 0.0f32);
+        for t in 0..pp {
+            s += part[(k * pp + t) * 2];
+            s2 += part[(k * pp + t) * 2 + 1];
+        }
+        let mean = s / m as f32;
+        let va = (s2 / m as f32 - mean * mean).max(0.0);
+        stats[2 * k] = mean;
+        stats[2 * k + 1] = 1.0 / (va + eps).sqrt();
+    }
+}

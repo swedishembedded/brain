@@ -85,7 +85,12 @@ struct FastIdx {
     conv_act_tiled: Option<usize>,
     conv_act_reg: Option<usize>,
     conv_bias: Option<usize>,
+    conv_bias_reg: Option<usize>,
     bn_eval: Option<usize>,
+    gn_stats: Option<usize>,
+    gn_part: Option<usize>,
+    gn_stats2: Option<usize>,
+    gn_apply: Option<usize>,
     concat2: Option<usize>,
     concat_split: Option<usize>,
     chan_place: Option<usize>,
@@ -130,7 +135,12 @@ impl CpuBackend {
                 conv_act_tiled: find("conv_act_tiled"),
                 conv_act_reg: find("conv_act_reg"),
                 conv_bias: find("conv_bias"),
+                conv_bias_reg: find("conv_bias_reg"),
                 bn_eval: find("bn_eval"),
+                gn_stats: find("gn_stats"),
+                gn_part: find("gn_part"),
+                gn_stats2: find("gn_stats2"),
+                gn_apply: find("gn_apply"),
                 concat2: find("concat2"),
                 concat_split: find("concat_split"),
                 chan_place: find("chan_place"),
@@ -274,7 +284,7 @@ impl CpuBackend {
             }
             return;
         }
-        if Some(kind) == f.conv_bias && bufs.len() >= 4 {
+        if (Some(kind) == f.conv_bias || Some(kind) == f.conv_bias_reg) && bufs.len() >= 4 {
             unsafe {
                 let pu = std::slice::from_raw_parts(uniform, 10);
                 let p = fast_conv::ConvParams::from_u32(pu);
@@ -306,6 +316,53 @@ impl CpuBackend {
                 let x = std::slice::from_raw_parts(bufs[0] as *const f32, total);
                 let out = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, total);
                 fast_ops::silu(x, out);
+            }
+            return;
+        }
+        if Some(kind) == f.gn_stats && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 6);
+                let (n, c, h, w, g) =
+                    (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
+                let x = std::slice::from_raw_parts(bufs[0] as *const f32, n * c * h * w);
+                let stats = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, 2 * n * g);
+                fast_ops::gn_stats(pu, x, stats);
+            }
+            return;
+        }
+        if Some(kind) == f.gn_part && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 6);
+                let (n, c, h, w, g, pp) = (
+                    pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize, pu[5] as usize,
+                );
+                let x = std::slice::from_raw_parts(bufs[0] as *const f32, n * c * h * w);
+                let part = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, 2 * n * g * pp);
+                fast_ops::gn_part(pu, x, part);
+            }
+            return;
+        }
+        if Some(kind) == f.gn_stats2 && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 7);
+                let (n, g, pp) = (pu[0] as usize, pu[4] as usize, pu[5] as usize);
+                let part = std::slice::from_raw_parts(bufs[0] as *const f32, 2 * n * g * pp);
+                let stats = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, 2 * n * g);
+                fast_ops::gn_stats2(pu, part, stats);
+            }
+            return;
+        }
+        if Some(kind) == f.gn_apply && bufs.len() >= 5 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 5);
+                let (n, c, h, w, g) =
+                    (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
+                let len = n * c * h * w;
+                let x = std::slice::from_raw_parts(bufs[0] as *const f32, len);
+                let stats = std::slice::from_raw_parts(bufs[1] as *const f32, 2 * n * g);
+                let gb = std::slice::from_raw_parts(bufs[2] as *const f32, 2 * c);
+                let y = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, len);
+                fast_ops::gn_apply(pu, x, stats, gb, y);
             }
             return;
         }

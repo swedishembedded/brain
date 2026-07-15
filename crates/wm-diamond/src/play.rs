@@ -13,7 +13,7 @@
 //!   x += (x - denoised)/sigma * (sigma_next - sigma)
 //! - frames live in [-1, 1] internally; the trait's [0,1] at the boundary.
 
-use crate::cond::{build_sigmas, conditioners};
+use crate::cond::build_sigmas;
 use crate::model::DiamondUNet;
 use wm_core::WorldModel;
 
@@ -101,28 +101,12 @@ impl DiamondWorldModel {
     }
 
     /// One world-model step: append the action, denoise the next frame.
+    /// The whole sampling loop runs on-device (see DiamondUNet::denoise_frame);
+    /// only the unit-noise init goes up and the final frame comes back.
     fn generate(&mut self) -> Vec<f32> {
         self.upload_context();
-        let cfg = &self.unet.cfg;
-        let mut x: Vec<f32> = (0..self.frame_len).map(|_| self.rng.normal()).collect();
-        let sigmas = self.sigmas.clone();
-        let mut denoised = vec![0.0f32; self.frame_len];
-        for i in 0..sigmas.len() - 1 {
-            let sigma = sigmas[i];
-            let next = sigmas[i + 1];
-            let cs = conditioners(sigma, cfg.sigma_data, cfg.sigma_offset_noise);
-            let scaled: Vec<f32> = x.iter().map(|v| v * cs.c_in).collect();
-            let f = self.unet.forward(&scaled, cs.c_noise, &self.act_ring);
-            for j in 0..self.frame_len {
-                denoised[j] = quantize(cs.c_skip * x[j] + cs.c_out * f[j]);
-            }
-            let dt = next - sigma;
-            for j in 0..self.frame_len {
-                x[j] += (x[j] - denoised[j]) / sigma * dt;
-            }
-        }
-        // With sigma_next = 0 the Euler step lands exactly on `denoised`.
-        denoised
+        let x0: Vec<f32> = (0..self.frame_len).map(|_| self.rng.normal()).collect();
+        self.unet.denoise_frame(&x0, &self.sigmas, &self.act_ring)
     }
 }
 
