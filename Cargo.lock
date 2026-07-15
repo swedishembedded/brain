@@ -647,6 +647,8 @@ dependencies = [
  "brain-kernels",
  "brain-npu",
  "brain-onnx",
+ "brain-optim",
+ "brain-paramstore",
  "brain-wm-core",
  "serde_json",
 ]
@@ -655,6 +657,7 @@ dependencies = [
 name = "brain-wm-display"
 version = "0.1.0"
 dependencies = [
+ "brain-data",
  "brain-wm-core",
 ]
 

@@ -22,6 +22,7 @@ pub mod import;
 pub mod model;
 pub mod npu;
 pub mod play;
+pub mod train;
 
 pub use config::DiamondConfig;
 pub use model::{DiamondUNet, Tensors};
