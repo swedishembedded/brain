@@ -33,3 +33,9 @@ serde_json.workspace = true
 # opened. On other targets a stub with the same API reports "unsupported".
 [target.'cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))'.dependencies]
 openvino.workspace = true
+
+# Tests only: the DIAMOND ONNX export tests (tests/wm_onnx.rs) cross-check the
+# exported graph against brain's own DiamondUNet forward. Dev-only, so the lib
+# dependency direction stays brain-wm-diamond -> brain-npu.
+[dev-dependencies]
+brain-wm-diamond.workspace = true

@@ -51,14 +51,26 @@ written from the specs in `docs/world-models/specs/`.
   per-module vs `make wm-fixtures`. Real Breakout checkpoint imported and
   playable: coherent Breakout frames, paddle follows actions.
 
-## Measured (Breakout, 3 denoise steps, 64x64)
-- CPU: ~440 ms/frame (2.3 fps). iGPU (wgpu): ~1.95 s/frame — readback-bound,
-  same pattern as YOLO; per-NFE host round-trip is the known bottleneck.
+## Measured (Breakout, 3 denoise steps, 64x64; warm/idle best-of-3 —
+## this 155H throttles 2-3x run-to-run, see docs/PERFORMANCE.md)
+- **Intel NPU (OpenVINO, fp32): ~60-63 ms/frame = 16 fps — realtime target
+  MET at full quality** (23.7 ms/UNet-inference on the NPU silicon;
+  parity vs brain engine 2.6e-4, fp16 internals).
+- CPU (wgsl-cpu + native fast paths): ~146-166 ms/frame (6 fps; ~18 fps at
+  1 denoise step). Was 440 before optimization.
+- iGPU (wgpu/Vulkan): ~140 ms/frame rested, 350-490 throttled. Was 2 392.
+- Levers (measurement-driven, docs/PERFORMANCE.md): parallel GroupNorm
+  reduction (gn_part/gn_stats2 — gn_stats was 77.6% of GPU frame time),
+  register-tiled conv_bias_reg (~21x GPU conv), native CPU gn fast paths,
+  on-device denoise loop (one readback/frame). scripts/wm-perf-gate.sh
+  guards order-of-magnitude regressions (x3 band; tighter flaps thermally).
+- NPU path: `brain wm export --arch diamond` -> fp32 ONNX (Gemm+Split
+  AdaGN, decomposed GN, attention as MatMul/Softmax) -> `--device npu
+  --onnx out/diamond.onnx` in play/bench; sampler host-side.
 
 ## Next
-- P2 perf: keep the 3-NFE denoise loop on-device (sigma via step_buf
-  uniforms, on-device Euler + quantize, context ring via step_sliced),
-  single submit per frame -> targets >=10 fps CPU / >=15 fps iGPU.
+- INT8 PTQ for the NPU graph (existing quant.rs machinery) — likely 2x more.
+- GPU: fold 3 per-NFE submits into 1 (3 pre-written gb sets); coopmat fp16.
 - P3: episode dataset + gen_pong + record/replay + DIAMOND training
   (EDM loss, check_wm_unet) + fine-tune.
 - P1 remainder: vq kernels, dwconv3d, maskgit host decode, EDM host math

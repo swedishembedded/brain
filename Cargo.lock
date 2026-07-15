@@ -453,6 +453,7 @@ dependencies = [
  "brain-glm",
  "brain-onnx",
  "brain-qwen",
+ "brain-wm-diamond",
  "brain-yolo",
  "bytemuck",
  "openvino",
@@ -644,6 +645,8 @@ dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
  "brain-kernels",
+ "brain-npu",
+ "brain-onnx",
  "brain-wm-core",
  "serde_json",
 ]

@@ -19,14 +19,16 @@ pub fn run_wm(args: &[String]) {
         Some("play") => run_play(&args[1..]),
         Some("bench") => run_bench(&args[1..]),
         Some("import") => run_import(&args[1..]),
+        Some("export") => run_export(&args[1..]),
         _ => {
-            eprintln!("usage: brain wm <import|play|bench> [options]");
+            eprintln!("usage: brain wm <import|export|play|bench> [options]");
             eprintln!("  import --arch diamond --src <agent.pt> --out <F.weights> [--actions-count N]");
-            eprintln!("  play  --model fake|diamond [--weights F.weights] [--device cpu|gpu]");
-            eprintln!("        [--fps N] [--scale N] [--seed N] [--adaptive]");
+            eprintln!("  export --arch diamond --weights <F.weights> --onnx <F.onnx>");
+            eprintln!("  play  --model fake|diamond [--weights F.weights] [--device cpu|gpu|npu]");
+            eprintln!("        [--onnx F.onnx (npu)] [--fps N] [--scale N] [--seed N] [--adaptive]");
             eprintln!("        [--headless --frames N [--actions FILE | --action-seq a,b,c]");
             eprintln!("         [--dump-ppm DIR] [--hashes]]");
-            eprintln!("  bench --model fake|diamond [--weights F] [--frames N] [--seed N]");
+            eprintln!("  bench --model fake|diamond [--weights F] [--onnx F.onnx (npu)] [--frames N] [--seed N]");
             std::process::exit(2);
         }
     }
@@ -58,6 +60,35 @@ fn run_import(rest: &[String]) {
         ),
         Err(e) => {
             eprintln!("import failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `brain wm export`: DIAMOND `.weights` -> fp32 ONNX of the UNet inner model
+/// (for `--device npu` play/bench via OpenVINO).
+fn run_export(rest: &[String]) {
+    let mut a = Args::new(rest);
+    let arch = a.str_or("--arch", "diamond");
+    if arch != "diamond" {
+        eprintln!("unknown --arch '{arch}' (available: diamond)");
+        std::process::exit(2);
+    }
+    let weights = a.take_str("--weights").unwrap_or_else(|| {
+        eprintln!("wm export needs --weights <F.weights> (from `brain wm import`)");
+        std::process::exit(2);
+    });
+    let onnx = a.take_str("--onnx").unwrap_or_else(|| {
+        eprintln!("wm export needs --onnx <F.onnx>");
+        std::process::exit(2);
+    });
+    match wm_diamond::npu::export_onnx(&weights, &onnx) {
+        Ok(cfg) => println!(
+            "exported diamond UNet -> {onnx} ({}x{} img, {} ctx frames, cond {}, fp32)",
+            cfg.h, cfg.w, cfg.num_steps_conditioning, cfg.cond_channels
+        ),
+        Err(e) => {
+            eprintln!("export failed: {e}");
             std::process::exit(1);
         }
     }
@@ -108,13 +139,46 @@ fn load_seed_context(dir: &str, c: u32, h: u32, w: u32) -> Vec<f32> {
     out
 }
 
-fn build_model(name: &str, seed: u64, weights: Option<&str>, device: Option<&str>) -> Box<dyn WorldModel> {
+fn build_model(
+    name: &str,
+    seed: u64,
+    weights: Option<&str>,
+    device: Option<&str>,
+    onnx: Option<&str>,
+) -> Box<dyn WorldModel> {
     match name {
         "diamond" => {
             let path = weights.unwrap_or_else(|| {
                 eprintln!("--model diamond needs --weights <F.weights> (from `brain wm import`)");
                 std::process::exit(2);
             });
+            // `--device npu` is consumed by main's select_backend (it is a
+            // whole-graph OpenVINO path, not a gpu_core backend) and lands in
+            // crate::npu_requested(), like the yolo/glm/tts subcommands.
+            if crate::npu_requested() || device == Some("npu") {
+                // Intel-NPU path: the UNet runs as a compiled OpenVINO graph,
+                // the sampler stays host-side (wm_diamond::npu).
+                let onnx_path = onnx.unwrap_or_else(|| {
+                    eprintln!(
+                        "--model diamond --device npu needs --onnx <F.onnx> \
+                         (from `brain wm export --weights {path} --onnx F.onnx`)"
+                    );
+                    std::process::exit(2);
+                });
+                let mut m = match wm_diamond::npu::DiamondNpuWorldModel::load(path, onnx_path, seed)
+                {
+                    Ok(m) => Box::new(m),
+                    Err(e) => {
+                        // e.g. OpenVINO runtime not installed / NPU absent —
+                        // NpuError's Display carries the install instructions.
+                        eprintln!("cannot start the diamond NPU world model: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                println!("diamond npu: compiled {onnx_path} on {}", m.device());
+                m.reset(&[], &[]);
+                return m;
+            }
             let (cfg, tensors) = wm_diamond::import::load(path).unwrap_or_else(|e| {
                 eprintln!("cannot load {path}: {e}");
                 std::process::exit(1);
@@ -178,9 +242,11 @@ fn run_play(rest: &[String]) {
 
     let weights = a.take_str("--weights");
     let device = a.take_str("--device");
+    let onnx = a.take_str("--onnx");
     let seed_ctx = a.take_str("--seed-context");
     let denoise_steps = a.u32_or("--denoise-steps", 0); // 0 = model default
-    let mut model = build_model(&model_name, seed, weights.as_deref(), device.as_deref());
+    let mut model =
+        build_model(&model_name, seed, weights.as_deref(), device.as_deref(), onnx.as_deref());
     if denoise_steps > 0 {
         // WorldModel::set_nfe quality codes: 0 = default (3 steps), 1 = 2
         // steps, >=2 = 1 step (see wm_diamond::play).
@@ -304,7 +370,9 @@ fn run_bench(rest: &[String]) {
 
     let weights = a.take_str("--weights");
     let device = a.take_str("--device");
-    let mut model = build_model(&model_name, seed, weights.as_deref(), device.as_deref());
+    let onnx = a.take_str("--onnx");
+    let mut model =
+        build_model(&model_name, seed, weights.as_deref(), device.as_deref(), onnx.as_deref());
     let na = model.num_actions() as u64;
     let mut input = ScriptInput::new((0..frames).map(|i| (i % na) as u32).collect());
     let mut sink = HeadlessSink;

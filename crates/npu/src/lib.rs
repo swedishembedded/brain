@@ -28,6 +28,7 @@ pub mod glm_decode;
 pub mod glm_topology;
 pub mod sim;
 pub mod topology;
+pub mod wm_topology;
 
 // OpenVINO runtime seam (real on x86_64 linux/windows, stub elsewhere).
 pub mod openvino;
@@ -41,3 +42,4 @@ pub use export::{build_fp32_bytes, config_of, export_fp32, export_int8};
 pub use quant::Quant;
 pub use sim::{reference_logits, simulate_logits, simulate_map, FakeQuantTap};
 pub use topology::{build_graph, WeightSource};
+pub use wm_topology::{build_diamond_graph, WmSession, WmUnetConfig};

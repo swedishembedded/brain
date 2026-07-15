@@ -11,6 +11,7 @@
 //! - [`model`]: the UNet as one pre-recorded brain kernel graph.
 //! - [`import`]: torch `.pt` -> `.weights` with full-coverage validation.
 //! - [`play`]: the context ring + Euler denoising loop behind the trait.
+//! - [`npu`]: fp32 ONNX export + the OpenVINO (Intel NPU) playback path.
 //!
 //! Reference: /data/workspace/resources/world-models/repos/diamond (MIT).
 //! Parity fixtures: `make wm-fixtures` (docs/world-models/FIXTURES.md).
@@ -19,6 +20,7 @@ pub mod cond;
 pub mod config;
 pub mod import;
 pub mod model;
+pub mod npu;
 pub mod play;
 
 pub use config::DiamondConfig;

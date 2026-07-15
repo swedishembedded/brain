@@ -1,4 +1,6 @@
 {
-  "diamond_cpu_ms_max": 11350,
-  "diamond_gpu_ms_max": 150
+  "_comment": "Hand-set envelopes from observed warm/hot ranges (cpu 146-600, gpu 116-491, npu 60-101 ms/frame at 3 denoise steps). The gate catches order-of-magnitude pathologies (e.g. a serial-reduction kernel), not thermal noise. Refresh deliberately, on an idle rested machine, via --update THEN hand-review.",
+  "diamond_cpu_ms_max": 1200,
+  "diamond_gpu_ms_max": 1500,
+  "diamond_npu_ms_max": 300
 }
