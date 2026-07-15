@@ -12,10 +12,12 @@
 
 /// `wgsl/adamw.wgsl`
 pub const ADAMW: &str = include_str!("../wgsl/adamw.wgsl");
-/// `wgsl/add2.wgsl`
-pub const ADD2: &str = include_str!("../wgsl/add2.wgsl");
 /// `wgsl/add.wgsl`
 pub const ADD: &str = include_str!("../wgsl/add.wgsl");
+/// `wgsl/add2.wgsl`
+pub const ADD2: &str = include_str!("../wgsl/add2.wgsl");
+/// `wgsl/add_index_mask.wgsl`
+pub const ADD_INDEX_MASK: &str = include_str!("../wgsl/add_index_mask.wgsl");
 /// `wgsl/attention.wgsl`
 pub const ATTENTION: &str = include_str!("../wgsl/attention.wgsl");
 /// `wgsl/attn_apply.wgsl`
@@ -48,22 +50,24 @@ pub const ATTN_BWD_DV: &str = include_str!("../wgsl/attn_bwd_dv.wgsl");
 pub const ATTN_BWD_DV_BIDIR: &str = include_str!("../wgsl/attn_bwd_dv_bidir.wgsl");
 /// `wgsl/attn_bwd_dv_cross.wgsl`
 pub const ATTN_BWD_DV_CROSS: &str = include_str!("../wgsl/attn_bwd_dv_cross.wgsl");
-/// `wgsl/attn_scores_masked.wgsl`
-pub const ATTN_SCORES_MASKED: &str = include_str!("../wgsl/attn_scores_masked.wgsl");
 /// `wgsl/attn_scores.wgsl`
 pub const ATTN_SCORES: &str = include_str!("../wgsl/attn_scores.wgsl");
 /// `wgsl/attn_scores_bidir.wgsl`
 pub const ATTN_SCORES_BIDIR: &str = include_str!("../wgsl/attn_scores_bidir.wgsl");
 /// `wgsl/attn_scores_cross.wgsl`
 pub const ATTN_SCORES_CROSS: &str = include_str!("../wgsl/attn_scores_cross.wgsl");
-/// `wgsl/attn_softmax_masked.wgsl`
-pub const ATTN_SOFTMAX_MASKED: &str = include_str!("../wgsl/attn_softmax_masked.wgsl");
+/// `wgsl/attn_scores_masked.wgsl`
+pub const ATTN_SCORES_MASKED: &str = include_str!("../wgsl/attn_scores_masked.wgsl");
 /// `wgsl/attn_softmax.wgsl`
 pub const ATTN_SOFTMAX: &str = include_str!("../wgsl/attn_softmax.wgsl");
 /// `wgsl/attn_softmax_bidir.wgsl`
 pub const ATTN_SOFTMAX_BIDIR: &str = include_str!("../wgsl/attn_softmax_bidir.wgsl");
 /// `wgsl/attn_softmax_cross.wgsl`
 pub const ATTN_SOFTMAX_CROSS: &str = include_str!("../wgsl/attn_softmax_cross.wgsl");
+/// `wgsl/attn_softmax_masked.wgsl`
+pub const ATTN_SOFTMAX_MASKED: &str = include_str!("../wgsl/attn_softmax_masked.wgsl");
+/// `wgsl/axpy.wgsl`
+pub const AXPY: &str = include_str!("../wgsl/axpy.wgsl");
 /// `wgsl/bce_logits.wgsl`
 pub const BCE_LOGITS: &str = include_str!("../wgsl/bce_logits.wgsl");
 /// `wgsl/bce_logits_grad.wgsl`
@@ -88,14 +92,16 @@ pub const BN_RUNNING: &str = include_str!("../wgsl/bn_running.wgsl");
 pub const BN_STATS: &str = include_str!("../wgsl/bn_stats.wgsl");
 /// `wgsl/bn_train.wgsl`
 pub const BN_TRAIN: &str = include_str!("../wgsl/bn_train.wgsl");
-/// `wgsl/ce_grad_masked.wgsl`
-pub const CE_GRAD_MASKED: &str = include_str!("../wgsl/ce_grad_masked.wgsl");
 /// `wgsl/ce_grad.wgsl`
 pub const CE_GRAD: &str = include_str!("../wgsl/ce_grad.wgsl");
-/// `wgsl/ce_value_masked.wgsl`
-pub const CE_VALUE_MASKED: &str = include_str!("../wgsl/ce_value_masked.wgsl");
+/// `wgsl/ce_grad_masked.wgsl`
+pub const CE_GRAD_MASKED: &str = include_str!("../wgsl/ce_grad_masked.wgsl");
 /// `wgsl/ce_value.wgsl`
 pub const CE_VALUE: &str = include_str!("../wgsl/ce_value.wgsl");
+/// `wgsl/ce_value_masked.wgsl`
+pub const CE_VALUE_MASKED: &str = include_str!("../wgsl/ce_value_masked.wgsl");
+/// `wgsl/chan_place.wgsl`
+pub const CHAN_PLACE: &str = include_str!("../wgsl/chan_place.wgsl");
 /// `wgsl/ciou.wgsl`
 pub const CIOU: &str = include_str!("../wgsl/ciou.wgsl");
 /// `wgsl/ciou_grad.wgsl`
@@ -104,50 +110,38 @@ pub const CIOU_GRAD: &str = include_str!("../wgsl/ciou_grad.wgsl");
 pub const CLIP_COEF: &str = include_str!("../wgsl/clip_coef.wgsl");
 /// `wgsl/concat2.wgsl`
 pub const CONCAT2: &str = include_str!("../wgsl/concat2.wgsl");
-/// `wgsl/chan_place.wgsl`
-pub const CHAN_PLACE: &str = include_str!("../wgsl/chan_place.wgsl");
 /// `wgsl/concat_split.wgsl`
 pub const CONCAT_SPLIT: &str = include_str!("../wgsl/concat_split.wgsl");
-/// `wgsl/conv2d.wgsl`
-pub const CONV2D: &str = include_str!("../wgsl/conv2d.wgsl");
-/// `wgsl/conv2d_tiled.wgsl`
-pub const CONV2D_TILED: &str = include_str!("../wgsl/conv2d_tiled.wgsl");
-/// `wgsl/conv_act.wgsl`
-pub const CONV_ACT: &str = include_str!("../wgsl/conv_act.wgsl");
-/// `wgsl/conv_bias.wgsl`
-pub const CONV_BIAS: &str = include_str!("../wgsl/conv_bias.wgsl");
-/// `wgsl/conv_act_tiled.wgsl`
-pub const CONV_ACT_TILED: &str = include_str!("../wgsl/conv_act_tiled.wgsl");
-/// `wgsl/conv_act_reg.wgsl`
-pub const CONV_ACT_REG: &str = include_str!("../wgsl/conv_act_reg.wgsl");
-/// `wgsl/conv2d_dw.wgsl`
-pub const CONV2D_DW: &str = include_str!("../wgsl/conv2d_dw.wgsl");
-/// `wgsl/conv2d_dx.wgsl`
-pub const CONV2D_DX: &str = include_str!("../wgsl/conv2d_dx.wgsl");
 /// `wgsl/conv1d.wgsl`
 pub const CONV1D: &str = include_str!("../wgsl/conv1d.wgsl");
 /// `wgsl/conv1d_dw.wgsl`
 pub const CONV1D_DW: &str = include_str!("../wgsl/conv1d_dw.wgsl");
 /// `wgsl/conv1d_dx.wgsl`
 pub const CONV1D_DX: &str = include_str!("../wgsl/conv1d_dx.wgsl");
+/// `wgsl/conv2d.wgsl`
+pub const CONV2D: &str = include_str!("../wgsl/conv2d.wgsl");
+/// `wgsl/conv2d_dw.wgsl`
+pub const CONV2D_DW: &str = include_str!("../wgsl/conv2d_dw.wgsl");
+/// `wgsl/conv2d_dx.wgsl`
+pub const CONV2D_DX: &str = include_str!("../wgsl/conv2d_dx.wgsl");
+/// `wgsl/conv2d_tiled.wgsl`
+pub const CONV2D_TILED: &str = include_str!("../wgsl/conv2d_tiled.wgsl");
+/// `wgsl/conv_act.wgsl`
+pub const CONV_ACT: &str = include_str!("../wgsl/conv_act.wgsl");
+/// `wgsl/conv_act_reg.wgsl`
+pub const CONV_ACT_REG: &str = include_str!("../wgsl/conv_act_reg.wgsl");
+/// `wgsl/conv_act_tiled.wgsl`
+pub const CONV_ACT_TILED: &str = include_str!("../wgsl/conv_act_tiled.wgsl");
+/// `wgsl/conv_bias.wgsl`
+pub const CONV_BIAS: &str = include_str!("../wgsl/conv_bias.wgsl");
 /// `wgsl/convtr1d.wgsl`
 pub const CONVTR1D: &str = include_str!("../wgsl/convtr1d.wgsl");
 /// `wgsl/convtr1d_dw.wgsl`
 pub const CONVTR1D_DW: &str = include_str!("../wgsl/convtr1d_dw.wgsl");
 /// `wgsl/convtr1d_dx.wgsl`
 pub const CONVTR1D_DX: &str = include_str!("../wgsl/convtr1d_dx.wgsl");
-/// `wgsl/leaky_relu.wgsl`
-pub const LEAKY_RELU: &str = include_str!("../wgsl/leaky_relu.wgsl");
-/// `wgsl/leaky_relu_bwd.wgsl`
-pub const LEAKY_RELU_BWD: &str = include_str!("../wgsl/leaky_relu_bwd.wgsl");
-/// `wgsl/tanh_act.wgsl`
-pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
-/// `wgsl/tanh_act_bwd.wgsl`
-pub const TANH_ACT_BWD: &str = include_str!("../wgsl/tanh_act_bwd.wgsl");
-/// `wgsl/snake_beta.wgsl`
-pub const SNAKE_BETA: &str = include_str!("../wgsl/snake_beta.wgsl");
-/// `wgsl/scale_chan.wgsl`
-pub const SCALE_CHAN: &str = include_str!("../wgsl/scale_chan.wgsl");
+/// `wgsl/crop2d.wgsl`
+pub const CROP2D: &str = include_str!("../wgsl/crop2d.wgsl");
 /// `wgsl/dfl_decode.wgsl`
 pub const DFL_DECODE: &str = include_str!("../wgsl/dfl_decode.wgsl");
 /// `wgsl/dfl_grad.wgsl`
@@ -156,98 +150,166 @@ pub const DFL_GRAD: &str = include_str!("../wgsl/dfl_grad.wgsl");
 pub const DFL_LOSS: &str = include_str!("../wgsl/dfl_loss.wgsl");
 /// `wgsl/dfl_loss_grad.wgsl`
 pub const DFL_LOSS_GRAD: &str = include_str!("../wgsl/dfl_loss_grad.wgsl");
+/// `wgsl/edm_mix.wgsl`
+pub const EDM_MIX: &str = include_str!("../wgsl/edm_mix.wgsl");
 /// `wgsl/emb_bwd.wgsl`
 pub const EMB_BWD: &str = include_str!("../wgsl/emb_bwd.wgsl");
 /// `wgsl/embed.wgsl`
 pub const EMBED: &str = include_str!("../wgsl/embed.wgsl");
+/// `wgsl/embed_tile.wgsl`
+pub const EMBED_TILE: &str = include_str!("../wgsl/embed_tile.wgsl");
 /// `wgsl/expert_counts.wgsl`
 pub const EXPERT_COUNTS: &str = include_str!("../wgsl/expert_counts.wgsl");
-/// `wgsl/gelu_bwd.wgsl`
-pub const GELU_BWD: &str = include_str!("../wgsl/gelu_bwd.wgsl");
+/// `wgsl/film_chan.wgsl`
+pub const FILM_CHAN: &str = include_str!("../wgsl/film_chan.wgsl");
+/// `wgsl/film_chan_dsb.wgsl`
+pub const FILM_CHAN_DSB: &str = include_str!("../wgsl/film_chan_dsb.wgsl");
+/// `wgsl/film_chan_dx.wgsl`
+pub const FILM_CHAN_DX: &str = include_str!("../wgsl/film_chan_dx.wgsl");
+/// `wgsl/film_row.wgsl`
+pub const FILM_ROW: &str = include_str!("../wgsl/film_row.wgsl");
+/// `wgsl/film_row_dsb.wgsl`
+pub const FILM_ROW_DSB: &str = include_str!("../wgsl/film_row_dsb.wgsl");
+/// `wgsl/film_row_dx.wgsl`
+pub const FILM_ROW_DX: &str = include_str!("../wgsl/film_row_dx.wgsl");
+/// `wgsl/gate_row.wgsl`
+pub const GATE_ROW: &str = include_str!("../wgsl/gate_row.wgsl");
+/// `wgsl/gate_row_dg.wgsl`
+pub const GATE_ROW_DG: &str = include_str!("../wgsl/gate_row_dg.wgsl");
+/// `wgsl/gate_row_dh.wgsl`
+pub const GATE_ROW_DH: &str = include_str!("../wgsl/gate_row_dh.wgsl");
 /// `wgsl/gelu.wgsl`
 pub const GELU: &str = include_str!("../wgsl/gelu.wgsl");
-/// `wgsl/gradnorm_sq.wgsl`
-pub const GRADNORM_SQ: &str = include_str!("../wgsl/gradnorm_sq.wgsl");
-/// `wgsl/grad_scale_buf.wgsl`
-pub const GRAD_SCALE_BUF: &str = include_str!("../wgsl/grad_scale_buf.wgsl");
+/// `wgsl/gelu_bwd.wgsl`
+pub const GELU_BWD: &str = include_str!("../wgsl/gelu_bwd.wgsl");
+/// `wgsl/gn_apply.wgsl`
+pub const GN_APPLY: &str = include_str!("../wgsl/gn_apply.wgsl");
+/// `wgsl/gn_dbeta.wgsl`
+pub const GN_DBETA: &str = include_str!("../wgsl/gn_dbeta.wgsl");
+/// `wgsl/gn_dgamma.wgsl`
+pub const GN_DGAMMA: &str = include_str!("../wgsl/gn_dgamma.wgsl");
+/// `wgsl/gn_dsum.wgsl`
+pub const GN_DSUM: &str = include_str!("../wgsl/gn_dsum.wgsl");
+/// `wgsl/gn_dx.wgsl`
+pub const GN_DX: &str = include_str!("../wgsl/gn_dx.wgsl");
+/// `wgsl/gn_stats.wgsl`
+pub const GN_STATS: &str = include_str!("../wgsl/gn_stats.wgsl");
+/// `wgsl/gqa_apply.wgsl`
+pub const GQA_APPLY: &str = include_str!("../wgsl/gqa_apply.wgsl");
+/// `wgsl/gqa_bwd_dk.wgsl`
+pub const GQA_BWD_DK: &str = include_str!("../wgsl/gqa_bwd_dk.wgsl");
+/// `wgsl/gqa_bwd_dq.wgsl`
+pub const GQA_BWD_DQ: &str = include_str!("../wgsl/gqa_bwd_dq.wgsl");
+/// `wgsl/gqa_bwd_dscores.wgsl`
+pub const GQA_BWD_DSCORES: &str = include_str!("../wgsl/gqa_bwd_dscores.wgsl");
+/// `wgsl/gqa_bwd_dv.wgsl`
+pub const GQA_BWD_DV: &str = include_str!("../wgsl/gqa_bwd_dv.wgsl");
+/// `wgsl/gqa_scores.wgsl`
+pub const GQA_SCORES: &str = include_str!("../wgsl/gqa_scores.wgsl");
 /// `wgsl/grad_scale.wgsl`
 pub const GRAD_SCALE: &str = include_str!("../wgsl/grad_scale.wgsl");
+/// `wgsl/grad_scale_buf.wgsl`
+pub const GRAD_SCALE_BUF: &str = include_str!("../wgsl/grad_scale_buf.wgsl");
+/// `wgsl/gradnorm_sq.wgsl`
+pub const GRADNORM_SQ: &str = include_str!("../wgsl/gradnorm_sq.wgsl");
+/// `wgsl/layernorm.wgsl`
+pub const LAYERNORM: &str = include_str!("../wgsl/layernorm.wgsl");
 /// `wgsl/layernorm_dbeta.wgsl`
 pub const LAYERNORM_DBETA: &str = include_str!("../wgsl/layernorm_dbeta.wgsl");
 /// `wgsl/layernorm_dgamma.wgsl`
 pub const LAYERNORM_DGAMMA: &str = include_str!("../wgsl/layernorm_dgamma.wgsl");
 /// `wgsl/layernorm_dx.wgsl`
 pub const LAYERNORM_DX: &str = include_str!("../wgsl/layernorm_dx.wgsl");
-/// `wgsl/layernorm.wgsl`
-pub const LAYERNORM: &str = include_str!("../wgsl/layernorm.wgsl");
+/// `wgsl/leaky_relu.wgsl`
+pub const LEAKY_RELU: &str = include_str!("../wgsl/leaky_relu.wgsl");
+/// `wgsl/leaky_relu_bwd.wgsl`
+pub const LEAKY_RELU_BWD: &str = include_str!("../wgsl/leaky_relu_bwd.wgsl");
 /// `wgsl/ln_stats.wgsl`
 pub const LN_STATS: &str = include_str!("../wgsl/ln_stats.wgsl");
+/// `wgsl/matmul.wgsl`
+pub const MATMUL: &str = include_str!("../wgsl/matmul.wgsl");
 /// `wgsl/matmul_dw.wgsl`
 pub const MATMUL_DW: &str = include_str!("../wgsl/matmul_dw.wgsl");
 /// `wgsl/matmul_dx.wgsl`
 pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
-/// `wgsl/matmul.wgsl`
-pub const MATMUL: &str = include_str!("../wgsl/matmul.wgsl");
-/// `wgsl/mla_scores.wgsl`
-pub const MLA_SCORES: &str = include_str!("../wgsl/mla_scores.wgsl");
-/// `wgsl/mla_bwd_dq_pass.wgsl`
-pub const MLA_BWD_DQ_PASS: &str = include_str!("../wgsl/mla_bwd_dq_pass.wgsl");
-/// `wgsl/mla_bwd_dk_pass.wgsl`
-pub const MLA_BWD_DK_PASS: &str = include_str!("../wgsl/mla_bwd_dk_pass.wgsl");
-/// `wgsl/mla_bwd_dq_rope.wgsl`
-pub const MLA_BWD_DQ_ROPE: &str = include_str!("../wgsl/mla_bwd_dq_rope.wgsl");
-/// `wgsl/mla_bwd_dk_rope.wgsl`
-pub const MLA_BWD_DK_ROPE: &str = include_str!("../wgsl/mla_bwd_dk_rope.wgsl");
-/// `wgsl/mla_index_scores.wgsl`
-pub const MLA_INDEX_SCORES: &str = include_str!("../wgsl/mla_index_scores.wgsl");
-/// `wgsl/rope_sub.wgsl`
-pub const ROPE_SUB: &str = include_str!("../wgsl/rope_sub.wgsl");
-/// `wgsl/topk_mask.wgsl`
-pub const TOPK_MASK: &str = include_str!("../wgsl/topk_mask.wgsl");
-/// `wgsl/add_index_mask.wgsl`
-pub const ADD_INDEX_MASK: &str = include_str!("../wgsl/add_index_mask.wgsl");
+/// `wgsl/matmul_tile.wgsl`
+pub const MATMUL_TILE: &str = include_str!("../wgsl/matmul_tile.wgsl");
 /// `wgsl/maxpool5.wgsl`
 pub const MAXPOOL5: &str = include_str!("../wgsl/maxpool5.wgsl");
 /// `wgsl/maxpool5_dx.wgsl`
 pub const MAXPOOL5_DX: &str = include_str!("../wgsl/maxpool5_dx.wgsl");
+/// `wgsl/mla_bwd_dk_pass.wgsl`
+pub const MLA_BWD_DK_PASS: &str = include_str!("../wgsl/mla_bwd_dk_pass.wgsl");
+/// `wgsl/mla_bwd_dk_rope.wgsl`
+pub const MLA_BWD_DK_ROPE: &str = include_str!("../wgsl/mla_bwd_dk_rope.wgsl");
+/// `wgsl/mla_bwd_dq_pass.wgsl`
+pub const MLA_BWD_DQ_PASS: &str = include_str!("../wgsl/mla_bwd_dq_pass.wgsl");
+/// `wgsl/mla_bwd_dq_rope.wgsl`
+pub const MLA_BWD_DQ_ROPE: &str = include_str!("../wgsl/mla_bwd_dq_rope.wgsl");
+/// `wgsl/mla_index_scores.wgsl`
+pub const MLA_INDEX_SCORES: &str = include_str!("../wgsl/mla_index_scores.wgsl");
+/// `wgsl/mla_scores.wgsl`
+pub const MLA_SCORES: &str = include_str!("../wgsl/mla_scores.wgsl");
 /// `wgsl/mse_grad.wgsl`
 pub const MSE_GRAD: &str = include_str!("../wgsl/mse_grad.wgsl");
+/// `wgsl/mse_grad_w.wgsl`
+pub const MSE_GRAD_W: &str = include_str!("../wgsl/mse_grad_w.wgsl");
 /// `wgsl/mse_value.wgsl`
 pub const MSE_VALUE: &str = include_str!("../wgsl/mse_value.wgsl");
+/// `wgsl/mse_value_w.wgsl`
+pub const MSE_VALUE_W: &str = include_str!("../wgsl/mse_value_w.wgsl");
+/// `wgsl/mul.wgsl`
+pub const MUL: &str = include_str!("../wgsl/mul.wgsl");
+/// `wgsl/nchw_nlc.wgsl`
+pub const NCHW_NLC: &str = include_str!("../wgsl/nchw_nlc.wgsl");
+/// `wgsl/nlc_nchw.wgsl`
+pub const NLC_NCHW: &str = include_str!("../wgsl/nlc_nchw.wgsl");
+/// `wgsl/pad2d.wgsl`
+pub const PAD2D: &str = include_str!("../wgsl/pad2d.wgsl");
 /// `wgsl/pos_add.wgsl`
 pub const POS_ADD: &str = include_str!("../wgsl/pos_add.wgsl");
 /// `wgsl/pos_bwd.wgsl`
 pub const POS_BWD: &str = include_str!("../wgsl/pos_bwd.wgsl");
 /// `wgsl/rms_inv.wgsl`
 pub const RMS_INV: &str = include_str!("../wgsl/rms_inv.wgsl");
+/// `wgsl/rmsnorm.wgsl`
+pub const RMSNORM: &str = include_str!("../wgsl/rmsnorm.wgsl");
 /// `wgsl/rmsnorm_dw.wgsl`
 pub const RMSNORM_DW: &str = include_str!("../wgsl/rmsnorm_dw.wgsl");
 /// `wgsl/rmsnorm_dx.wgsl`
 pub const RMSNORM_DX: &str = include_str!("../wgsl/rmsnorm_dx.wgsl");
-/// `wgsl/rmsnorm.wgsl`
-pub const RMSNORM: &str = include_str!("../wgsl/rmsnorm.wgsl");
-/// `wgsl/rope_train_bwd.wgsl`
-pub const ROPE_TRAIN_BWD: &str = include_str!("../wgsl/rope_train_bwd.wgsl");
-/// `wgsl/rope_train.wgsl`
-pub const ROPE_TRAIN: &str = include_str!("../wgsl/rope_train.wgsl");
 /// `wgsl/rope.wgsl`
 pub const ROPE: &str = include_str!("../wgsl/rope.wgsl");
+/// `wgsl/rope_base.wgsl`
+pub const ROPE_BASE: &str = include_str!("../wgsl/rope_base.wgsl");
+/// `wgsl/rope_base_bwd.wgsl`
+pub const ROPE_BASE_BWD: &str = include_str!("../wgsl/rope_base_bwd.wgsl");
+/// `wgsl/rope_sub.wgsl`
+pub const ROPE_SUB: &str = include_str!("../wgsl/rope_sub.wgsl");
+/// `wgsl/rope_train.wgsl`
+pub const ROPE_TRAIN: &str = include_str!("../wgsl/rope_train.wgsl");
+/// `wgsl/rope_train_bwd.wgsl`
+pub const ROPE_TRAIN_BWD: &str = include_str!("../wgsl/rope_train_bwd.wgsl");
 /// `wgsl/router_bwd.wgsl`
 pub const ROUTER_BWD: &str = include_str!("../wgsl/router_bwd.wgsl");
-/// `wgsl/router_gate_train.wgsl`
-pub const ROUTER_GATE_TRAIN: &str = include_str!("../wgsl/router_gate_train.wgsl");
+/// `wgsl/router_bwd_sigmoid.wgsl`
+pub const ROUTER_BWD_SIGMOID: &str = include_str!("../wgsl/router_bwd_sigmoid.wgsl");
 /// `wgsl/router_gate.wgsl`
 pub const ROUTER_GATE: &str = include_str!("../wgsl/router_gate.wgsl");
 /// `wgsl/router_gate_sigmoid.wgsl`
 pub const ROUTER_GATE_SIGMOID: &str = include_str!("../wgsl/router_gate_sigmoid.wgsl");
-/// `wgsl/router_bwd_sigmoid.wgsl`
-pub const ROUTER_BWD_SIGMOID: &str = include_str!("../wgsl/router_bwd_sigmoid.wgsl");
+/// `wgsl/router_gate_train.wgsl`
+pub const ROUTER_GATE_TRAIN: &str = include_str!("../wgsl/router_gate_train.wgsl");
+/// `wgsl/scale_add.wgsl`
+pub const SCALE_ADD: &str = include_str!("../wgsl/scale_add.wgsl");
 /// `wgsl/scale_add_dexp.wgsl`
 pub const SCALE_ADD_DEXP: &str = include_str!("../wgsl/scale_add_dexp.wgsl");
 /// `wgsl/scale_add_dgate.wgsl`
 pub const SCALE_ADD_DGATE: &str = include_str!("../wgsl/scale_add_dgate.wgsl");
-/// `wgsl/scale_add.wgsl`
-pub const SCALE_ADD: &str = include_str!("../wgsl/scale_add.wgsl");
+/// `wgsl/scale_chan.wgsl`
+pub const SCALE_CHAN: &str = include_str!("../wgsl/scale_chan.wgsl");
+/// `wgsl/scale_row.wgsl`
+pub const SCALE_ROW: &str = include_str!("../wgsl/scale_row.wgsl");
 /// `wgsl/silu.wgsl`
 pub const SILU: &str = include_str!("../wgsl/silu.wgsl");
 /// `wgsl/silu_bwd.wgsl`
@@ -258,40 +320,25 @@ pub const SILU_BWD_DA: &str = include_str!("../wgsl/silu_bwd_da.wgsl");
 pub const SILU_BWD_DB: &str = include_str!("../wgsl/silu_bwd_db.wgsl");
 /// `wgsl/silu_mul.wgsl`
 pub const SILU_MUL: &str = include_str!("../wgsl/silu_mul.wgsl");
+/// `wgsl/snake_beta.wgsl`
+pub const SNAKE_BETA: &str = include_str!("../wgsl/snake_beta.wgsl");
+/// `wgsl/tanh_act.wgsl`
+pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
+/// `wgsl/tanh_act_bwd.wgsl`
+pub const TANH_ACT_BWD: &str = include_str!("../wgsl/tanh_act_bwd.wgsl");
+/// `wgsl/topk_mask.wgsl`
+pub const TOPK_MASK: &str = include_str!("../wgsl/topk_mask.wgsl");
 /// `wgsl/upsample2.wgsl`
 pub const UPSAMPLE2: &str = include_str!("../wgsl/upsample2.wgsl");
 /// `wgsl/upsample2_dx.wgsl`
 pub const UPSAMPLE2_DX: &str = include_str!("../wgsl/upsample2_dx.wgsl");
-// ---- Qwen decoder kernels: configurable-base (half-split) RoPE, grouped-query
-// attention (fwd + bwd), and the LoRA scaled-accumulate. ----
-/// `wgsl/rope_base.wgsl`
-pub const ROPE_BASE: &str = include_str!("../wgsl/rope_base.wgsl");
-/// `wgsl/rope_base_bwd.wgsl`
-pub const ROPE_BASE_BWD: &str = include_str!("../wgsl/rope_base_bwd.wgsl");
-/// `wgsl/gqa_scores.wgsl`
-pub const GQA_SCORES: &str = include_str!("../wgsl/gqa_scores.wgsl");
-/// `wgsl/gqa_apply.wgsl`
-pub const GQA_APPLY: &str = include_str!("../wgsl/gqa_apply.wgsl");
-/// `wgsl/gqa_bwd_dscores.wgsl`
-pub const GQA_BWD_DSCORES: &str = include_str!("../wgsl/gqa_bwd_dscores.wgsl");
-/// `wgsl/gqa_bwd_dv.wgsl`
-pub const GQA_BWD_DV: &str = include_str!("../wgsl/gqa_bwd_dv.wgsl");
-/// `wgsl/gqa_bwd_dq.wgsl`
-pub const GQA_BWD_DQ: &str = include_str!("../wgsl/gqa_bwd_dq.wgsl");
-/// `wgsl/gqa_bwd_dk.wgsl`
-pub const GQA_BWD_DK: &str = include_str!("../wgsl/gqa_bwd_dk.wgsl");
-/// `wgsl/axpy.wgsl`
-pub const AXPY: &str = include_str!("../wgsl/axpy.wgsl");
-/// `wgsl/embed_tile.wgsl`
-pub const EMBED_TILE: &str = include_str!("../wgsl/embed_tile.wgsl");
-/// `wgsl/matmul_tile.wgsl`
-pub const MATMUL_TILE: &str = include_str!("../wgsl/matmul_tile.wgsl");
 
-/// All kernels as `(name, source)` pairs, sorted by name.
+/// Every kernel as `(name, source)`, name = file stem.
 pub const ALL: &[(&str, &str)] = &[
     ("adamw", ADAMW),
-    ("add2", ADD2),
     ("add", ADD),
+    ("add2", ADD2),
+    ("add_index_mask", ADD_INDEX_MASK),
     ("attention", ATTENTION),
     ("attn_apply", ATTN_APPLY),
     ("attn_apply_bidir", ATTN_APPLY_BIDIR),
@@ -308,14 +355,15 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_bwd_dv", ATTN_BWD_DV),
     ("attn_bwd_dv_bidir", ATTN_BWD_DV_BIDIR),
     ("attn_bwd_dv_cross", ATTN_BWD_DV_CROSS),
-    ("attn_scores_masked", ATTN_SCORES_MASKED),
     ("attn_scores", ATTN_SCORES),
     ("attn_scores_bidir", ATTN_SCORES_BIDIR),
     ("attn_scores_cross", ATTN_SCORES_CROSS),
-    ("attn_softmax_masked", ATTN_SOFTMAX_MASKED),
+    ("attn_scores_masked", ATTN_SCORES_MASKED),
     ("attn_softmax", ATTN_SOFTMAX),
     ("attn_softmax_bidir", ATTN_SOFTMAX_BIDIR),
     ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
+    ("attn_softmax_masked", ATTN_SOFTMAX_MASKED),
+    ("axpy", AXPY),
     ("bce_logits", BCE_LOGITS),
     ("bce_logits_grad", BCE_LOGITS_GRAD),
     ("bias_add", BIAS_ADD),
@@ -328,104 +376,126 @@ pub const ALL: &[(&str, &str)] = &[
     ("bn_running", BN_RUNNING),
     ("bn_stats", BN_STATS),
     ("bn_train", BN_TRAIN),
-    ("ce_grad_masked", CE_GRAD_MASKED),
     ("ce_grad", CE_GRAD),
-    ("ce_value_masked", CE_VALUE_MASKED),
+    ("ce_grad_masked", CE_GRAD_MASKED),
     ("ce_value", CE_VALUE),
+    ("ce_value_masked", CE_VALUE_MASKED),
+    ("chan_place", CHAN_PLACE),
     ("ciou", CIOU),
     ("ciou_grad", CIOU_GRAD),
     ("clip_coef", CLIP_COEF),
-    ("chan_place", CHAN_PLACE),
     ("concat2", CONCAT2),
     ("concat_split", CONCAT_SPLIT),
-    ("conv2d", CONV2D),
-    ("conv2d_tiled", CONV2D_TILED),
-    ("conv_act", CONV_ACT),
-    ("conv_act_tiled", CONV_ACT_TILED),
-    ("conv_act_reg", CONV_ACT_REG),
-    ("conv_bias", CONV_BIAS),
-    ("conv2d_dw", CONV2D_DW),
-    ("conv2d_dx", CONV2D_DX),
     ("conv1d", CONV1D),
     ("conv1d_dw", CONV1D_DW),
     ("conv1d_dx", CONV1D_DX),
+    ("conv2d", CONV2D),
+    ("conv2d_dw", CONV2D_DW),
+    ("conv2d_dx", CONV2D_DX),
+    ("conv2d_tiled", CONV2D_TILED),
+    ("conv_act", CONV_ACT),
+    ("conv_act_reg", CONV_ACT_REG),
+    ("conv_act_tiled", CONV_ACT_TILED),
+    ("conv_bias", CONV_BIAS),
     ("convtr1d", CONVTR1D),
     ("convtr1d_dw", CONVTR1D_DW),
     ("convtr1d_dx", CONVTR1D_DX),
-    ("leaky_relu", LEAKY_RELU),
-    ("leaky_relu_bwd", LEAKY_RELU_BWD),
-    ("tanh_act", TANH_ACT),
-    ("tanh_act_bwd", TANH_ACT_BWD),
-    ("snake_beta", SNAKE_BETA),
-    ("scale_chan", SCALE_CHAN),
+    ("crop2d", CROP2D),
     ("dfl_decode", DFL_DECODE),
     ("dfl_grad", DFL_GRAD),
     ("dfl_loss", DFL_LOSS),
     ("dfl_loss_grad", DFL_LOSS_GRAD),
+    ("edm_mix", EDM_MIX),
     ("emb_bwd", EMB_BWD),
     ("embed", EMBED),
+    ("embed_tile", EMBED_TILE),
     ("expert_counts", EXPERT_COUNTS),
-    ("gelu_bwd", GELU_BWD),
+    ("film_chan", FILM_CHAN),
+    ("film_chan_dsb", FILM_CHAN_DSB),
+    ("film_chan_dx", FILM_CHAN_DX),
+    ("film_row", FILM_ROW),
+    ("film_row_dsb", FILM_ROW_DSB),
+    ("film_row_dx", FILM_ROW_DX),
+    ("gate_row", GATE_ROW),
+    ("gate_row_dg", GATE_ROW_DG),
+    ("gate_row_dh", GATE_ROW_DH),
     ("gelu", GELU),
-    ("gradnorm_sq", GRADNORM_SQ),
-    ("grad_scale_buf", GRAD_SCALE_BUF),
+    ("gelu_bwd", GELU_BWD),
+    ("gn_apply", GN_APPLY),
+    ("gn_dbeta", GN_DBETA),
+    ("gn_dgamma", GN_DGAMMA),
+    ("gn_dsum", GN_DSUM),
+    ("gn_dx", GN_DX),
+    ("gn_stats", GN_STATS),
+    ("gqa_apply", GQA_APPLY),
+    ("gqa_bwd_dk", GQA_BWD_DK),
+    ("gqa_bwd_dq", GQA_BWD_DQ),
+    ("gqa_bwd_dscores", GQA_BWD_DSCORES),
+    ("gqa_bwd_dv", GQA_BWD_DV),
+    ("gqa_scores", GQA_SCORES),
     ("grad_scale", GRAD_SCALE),
+    ("grad_scale_buf", GRAD_SCALE_BUF),
+    ("gradnorm_sq", GRADNORM_SQ),
+    ("layernorm", LAYERNORM),
     ("layernorm_dbeta", LAYERNORM_DBETA),
     ("layernorm_dgamma", LAYERNORM_DGAMMA),
     ("layernorm_dx", LAYERNORM_DX),
-    ("layernorm", LAYERNORM),
+    ("leaky_relu", LEAKY_RELU),
+    ("leaky_relu_bwd", LEAKY_RELU_BWD),
     ("ln_stats", LN_STATS),
+    ("matmul", MATMUL),
     ("matmul_dw", MATMUL_DW),
     ("matmul_dx", MATMUL_DX),
-    ("matmul", MATMUL),
-    ("mla_scores", MLA_SCORES),
-    ("mla_bwd_dq_pass", MLA_BWD_DQ_PASS),
-    ("mla_bwd_dk_pass", MLA_BWD_DK_PASS),
-    ("mla_bwd_dq_rope", MLA_BWD_DQ_ROPE),
-    ("mla_bwd_dk_rope", MLA_BWD_DK_ROPE),
-    ("mla_index_scores", MLA_INDEX_SCORES),
-    ("rope_sub", ROPE_SUB),
-    ("topk_mask", TOPK_MASK),
-    ("add_index_mask", ADD_INDEX_MASK),
+    ("matmul_tile", MATMUL_TILE),
     ("maxpool5", MAXPOOL5),
     ("maxpool5_dx", MAXPOOL5_DX),
+    ("mla_bwd_dk_pass", MLA_BWD_DK_PASS),
+    ("mla_bwd_dk_rope", MLA_BWD_DK_ROPE),
+    ("mla_bwd_dq_pass", MLA_BWD_DQ_PASS),
+    ("mla_bwd_dq_rope", MLA_BWD_DQ_ROPE),
+    ("mla_index_scores", MLA_INDEX_SCORES),
+    ("mla_scores", MLA_SCORES),
     ("mse_grad", MSE_GRAD),
+    ("mse_grad_w", MSE_GRAD_W),
     ("mse_value", MSE_VALUE),
+    ("mse_value_w", MSE_VALUE_W),
+    ("mul", MUL),
+    ("nchw_nlc", NCHW_NLC),
+    ("nlc_nchw", NLC_NCHW),
+    ("pad2d", PAD2D),
     ("pos_add", POS_ADD),
     ("pos_bwd", POS_BWD),
     ("rms_inv", RMS_INV),
+    ("rmsnorm", RMSNORM),
     ("rmsnorm_dw", RMSNORM_DW),
     ("rmsnorm_dx", RMSNORM_DX),
-    ("rmsnorm", RMSNORM),
-    ("rope_train_bwd", ROPE_TRAIN_BWD),
-    ("rope_train", ROPE_TRAIN),
     ("rope", ROPE),
+    ("rope_base", ROPE_BASE),
+    ("rope_base_bwd", ROPE_BASE_BWD),
+    ("rope_sub", ROPE_SUB),
+    ("rope_train", ROPE_TRAIN),
+    ("rope_train_bwd", ROPE_TRAIN_BWD),
     ("router_bwd", ROUTER_BWD),
-    ("router_gate_train", ROUTER_GATE_TRAIN),
+    ("router_bwd_sigmoid", ROUTER_BWD_SIGMOID),
     ("router_gate", ROUTER_GATE),
     ("router_gate_sigmoid", ROUTER_GATE_SIGMOID),
-    ("router_bwd_sigmoid", ROUTER_BWD_SIGMOID),
+    ("router_gate_train", ROUTER_GATE_TRAIN),
+    ("scale_add", SCALE_ADD),
     ("scale_add_dexp", SCALE_ADD_DEXP),
     ("scale_add_dgate", SCALE_ADD_DGATE),
-    ("scale_add", SCALE_ADD),
+    ("scale_chan", SCALE_CHAN),
+    ("scale_row", SCALE_ROW),
     ("silu", SILU),
     ("silu_bwd", SILU_BWD),
     ("silu_bwd_da", SILU_BWD_DA),
     ("silu_bwd_db", SILU_BWD_DB),
     ("silu_mul", SILU_MUL),
+    ("snake_beta", SNAKE_BETA),
+    ("tanh_act", TANH_ACT),
+    ("tanh_act_bwd", TANH_ACT_BWD),
+    ("topk_mask", TOPK_MASK),
     ("upsample2", UPSAMPLE2),
     ("upsample2_dx", UPSAMPLE2_DX),
-    ("rope_base", ROPE_BASE),
-    ("rope_base_bwd", ROPE_BASE_BWD),
-    ("gqa_scores", GQA_SCORES),
-    ("gqa_apply", GQA_APPLY),
-    ("gqa_bwd_dscores", GQA_BWD_DSCORES),
-    ("gqa_bwd_dv", GQA_BWD_DV),
-    ("gqa_bwd_dq", GQA_BWD_DQ),
-    ("gqa_bwd_dk", GQA_BWD_DK),
-    ("axpy", AXPY),
-    ("embed_tile", EMBED_TILE),
-    ("matmul_tile", MATMUL_TILE),
 ];
 
 /// Look up a kernel's WGSL source by file stem (e.g. `"matmul"`).
@@ -445,7 +515,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_kernels_present_and_nonempty() {
-        assert_eq!(ALL.len(), 137);
+        assert_eq!(ALL.len(), 161);
         for (n, s) in ALL { assert!(!s.trim().is_empty(), "empty kernel {n}"); }
     }
     #[test]
