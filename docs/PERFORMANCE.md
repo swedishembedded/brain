@@ -264,6 +264,7 @@ as a warm-run best, and compare only like-for-like.
 | iGPU gn_stats (in-profile) | 1 436 ms (77.6% of frame) | ~21 ms (gn_part+gn_stats2) | two-stage parallel reduction |
 | iGPU conv (in-profile) | 1 274 ms | ~60 ms | register-tiled conv_bias_reg (conv_act_reg's 8x4 tile) |
 | iGPU whole forward (in-profile) | 1 975 ms | **107 ms** | all of the above |
+| **Intel NPU end-to-end** | — | **60-75 ms/frame (13-16 fps)** | fp32 ONNX whole-graph via OpenVINO (`brain wm export` + `--device npu`) |
 
 What the profiler taught (in order):
 
@@ -287,6 +288,12 @@ What the profiler taught (in order):
    SIGSEGVs Vulkan enumeration; 130 orphaned D-state rustc processes from
    killed builds inflate loadavg (harmless) while an actual background build
    poisons every number. `wm bench` runs are only comparable warm + idle.
+
+The NPU is the fastest path on this machine — 23.7 ms per UNet inference on
+the NPU silicon (vs 77.9 ms for OpenVINO-CPU on the same graph), parity
+2.6e-4 vs brain's engine (fp16 internals). The sampler stays host-side;
+`scripts/wm-perf-gate.sh` floors all three paths (hand-set x3 envelopes —
+auto-baselining was twice corrupted by background load on this box).
 
 Quality/speed ladder: `--denoise-steps 1..3` (1 step ≈ 3x the fps, still
 recognizably Breakout; `--adaptive` walks this automatically). At 1 step the
