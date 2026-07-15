@@ -16,6 +16,7 @@
 
 pub mod keymap;
 pub mod pacing;
+pub mod record;
 pub mod sink;
 #[cfg(feature = "sdl")]
 mod sys;
@@ -142,6 +143,10 @@ pub fn play_loop<C: Clock>(
     let mut hud = Hud { model: model_name.to_string(), target_fps, ..Default::default() };
     let mut works: Vec<u64> = vec![];
     let mut quality: i64 = 0;
+    // Set when a UxKey::Reset was applied; carried on the NEXT emitted frame
+    // as `hud.reset` (the first frame of the new episode), surviving paused
+    // ticks in between.
+    let mut pending_reset = false;
 
     loop {
         if let Some(m) = max_steps {
@@ -156,7 +161,10 @@ pub fn play_loop<C: Clock>(
         for ux in &polled.ux {
             match ux {
                 UxKey::Pause => hud.paused = !hud.paused,
-                UxKey::Reset => model.reset(&[], &[]),
+                UxKey::Reset => {
+                    model.reset(&[], &[]);
+                    pending_reset = true;
+                }
                 UxKey::QualityDown => {
                     quality = (quality - 1).max(-3);
                     apply_quality(model, quality);
@@ -194,6 +202,9 @@ pub fn play_loop<C: Clock>(
             hud.quality = (-quality) as u32;
         }
 
+        hud.action = action;
+        hud.reset = pending_reset;
+        pending_reset = false;
         let rgb = chw_to_rgb8(&frame, c, h, w);
         io.frame(&rgb, w, h, &hud);
     }

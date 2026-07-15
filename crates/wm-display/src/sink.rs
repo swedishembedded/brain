@@ -15,6 +15,13 @@ pub struct Hud {
     pub step: u64,
     pub paused: bool,
     pub quality: u32,
+    /// The action CONSUMED by the step that produced this frame (recorders
+    /// pair it with the frame; see `record::RecorderSink`).
+    pub action: u32,
+    /// True on the first frame emitted after a `UxKey::Reset` — i.e. this
+    /// frame starts a new episode. Recorders close the previous episode when
+    /// they see it.
+    pub reset: bool,
 }
 
 /// A consumer of interleaved RGB8 frames (`w*h*3` bytes).

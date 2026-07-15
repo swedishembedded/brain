@@ -15,6 +15,7 @@
 
 pub mod binio;
 pub mod bpe;
+pub mod episode;
 pub mod loader;
 pub mod qwen_tokenizer;
 pub mod rng;
@@ -24,6 +25,7 @@ pub mod tokenizer;
 // `scratchpad/reference/nanogpt/data_generators/*.py`.
 pub mod gen_calculator;
 pub mod gen_detect;
+pub mod gen_pong;
 pub mod gen_reverser;
 pub mod gen_timeseries;
 pub mod gen_tts;

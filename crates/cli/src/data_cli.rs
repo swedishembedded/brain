@@ -4,8 +4,9 @@
 //! `brain data …` — dataset generation/preparation.
 //!
 //!   brain data gen <name> [--out DIR] [--n N] [--seed S]
+//!   brain data gen pong [--out DIR] [--episodes E] [--steps N] [--seed S] [--policy random|chase]
 //!
-//! Names: shakespeare_char | calculator | reverser | wordcalc | gpt | timeseries | tts
+//! Names: shakespeare_char | calculator | reverser | wordcalc | gpt | timeseries | tts | pong
 //! (shakespeare_char/gpt read `<DIR>/input.txt`; the synthetic ones generate it).
 
 use std::path::PathBuf;
@@ -26,9 +27,12 @@ fn gen(args: &[String]) {
         eprintln!("usage: brain data gen <name> [--out DIR] [--n N] [--seed S]");
         return;
     };
+    if name == "pong" {
+        return gen_pong(&args[1..]);
+    }
     let Some(ds) = Dataset::from_name(name) else {
         eprintln!(
-            "unknown dataset {name:?}; expected one of: shakespeare_char calculator reverser wordcalc gpt timeseries tts detect localization classification scale multi_object background"
+            "unknown dataset {name:?}; expected one of: shakespeare_char calculator reverser wordcalc gpt timeseries tts pong detect localization classification scale multi_object background"
         );
         return;
     };
@@ -63,6 +67,54 @@ fn gen(args: &[String]) {
 
     println!("preparing {} -> {} (n={n}, seed={seed})", ds.name(), out.display());
     match prepare(ds, &out, n, seed) {
+        Ok(()) => println!("done: {}", out.display()),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `brain data gen pong` — roll the pong world-model substrate into an
+/// episode dataset (frames + actions + rewards; see `data::episode`).
+fn gen_pong(args: &[String]) {
+    let mut out: PathBuf = PathBuf::from("data").join("pong");
+    let mut episodes: usize = 10;
+    let mut steps: usize = 200;
+    let mut seed: u64 = 1337;
+    let mut policy = data::gen_pong::Policy::Random;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" => {
+                out = PathBuf::from(arg_val(args, &mut i, "--out"));
+            }
+            "--episodes" => {
+                episodes = arg_val(args, &mut i, "--episodes").parse().unwrap_or(episodes);
+            }
+            "--steps" => {
+                steps = arg_val(args, &mut i, "--steps").parse().unwrap_or(steps);
+            }
+            "--seed" => {
+                seed = arg_val(args, &mut i, "--seed").parse().unwrap_or(seed);
+            }
+            "--policy" => {
+                let p = arg_val(args, &mut i, "--policy");
+                policy = data::gen_pong::Policy::from_name(&p).unwrap_or_else(|| {
+                    eprintln!("unknown --policy {p:?}; expected random or chase");
+                    std::process::exit(2);
+                });
+            }
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+
+    println!(
+        "generating pong -> {} (episodes={episodes}, steps={steps}, seed={seed}, policy={policy:?})",
+        out.display()
+    );
+    match data::gen_pong::generate(&out, episodes, steps, seed, policy) {
         Ok(()) => println!("done: {}", out.display()),
         Err(e) => {
             eprintln!("error: {e}");

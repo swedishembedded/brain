@@ -7,31 +7,139 @@
 //! model). See docs/world-models/STATUS.md.
 
 use crate::args::Args;
+use data::episode::EpisodeDataset;
 use wm_core::{FakeWorldModel, WorldModel};
 use wm_diamond::DiamondWorldModel;
 use wm_display::keymap::{Key, KeyChordMap, KeySet};
 use wm_display::pacing::{FixedTimestep, WallClock};
-use wm_display::sink::{fnv1a, HashSink, HeadlessSink, PpmDirSink, TeeSink};
-use wm_display::{play_loop, PlayReport, ScriptInput, SplitIo};
+use wm_display::record::{rgb8_to_chw, RecorderSink};
+use wm_display::sink::{fnv1a, FrameSink, HashSink, HeadlessSink, Hud, PpmDirSink, TeeSink};
+use wm_display::{chw_to_rgb8, play_loop, PlayReport, ScriptInput, SplitIo};
 
 pub fn run_wm(args: &[String]) {
     match args.first().map(String::as_str) {
         Some("play") => run_play(&args[1..]),
+        Some("replay") => run_replay(&args[1..]),
         Some("bench") => run_bench(&args[1..]),
         Some("import") => run_import(&args[1..]),
+        Some("finetune") => run_finetune(&args[1..]),
         Some("export") => run_export(&args[1..]),
         _ => {
-            eprintln!("usage: brain wm <import|export|play|bench> [options]");
+            eprintln!("usage: brain wm <import|export|play|replay|bench> [options]");
             eprintln!("  import --arch diamond --src <agent.pt> --out <F.weights> [--actions-count N]");
             eprintln!("  export --arch diamond --weights <F.weights> --onnx <F.onnx>");
             eprintln!("  play  --model fake|diamond [--weights F.weights] [--device cpu|gpu|npu]");
             eprintln!("        [--onnx F.onnx (npu)] [--fps N] [--scale N] [--seed N] [--adaptive]");
+            eprintln!("        [--record DIR (episode dataset)]");
             eprintln!("        [--headless --frames N [--actions FILE | --action-seq a,b,c]");
             eprintln!("         [--dump-ppm DIR] [--hashes]]");
+            eprintln!("  replay --episode DIR [--verify --model fake|diamond [--weights F]");
+            eprintln!("         [--device cpu|gpu|npu] [--onnx F.onnx] [--seed N] [--denoise-steps N]");
+            eprintln!("         [--context N] [--tolerance T]]");
             eprintln!("  bench --model fake|diamond [--weights F] [--onnx F.onnx (npu)] [--frames N] [--seed N]");
             std::process::exit(2);
         }
     }
+}
+
+/// A [`FrameSink`] that may be absent: forwards when present, no-op when
+/// not. Lets play keep ONE sink pipeline (`hashes -> ppm? -> recorder?`)
+/// instead of a combinatorial match.
+struct OptSink<S: FrameSink>(Option<S>);
+
+impl<S: FrameSink> FrameSink for OptSink<S> {
+    fn frame(&mut self, rgb: &[u8], w: u32, h: u32, hud: &Hud) {
+        if let Some(s) = &mut self.0 {
+            s.frame(rgb, w, h, hud);
+        }
+    }
+}
+
+/// Finish a `--record` session: atomically publish the dataset directory.
+fn finalize_recording(rec: RecorderSink, dir: &str) {
+    let n = rec.frames_recorded();
+    match rec.finalize() {
+        Ok(()) if n > 0 => println!("recorded {n} frames -> {dir}"),
+        Ok(()) => eprintln!("record: no frames were recorded; {dir} not created"),
+        Err(e) => {
+            eprintln!("record: finalize failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run_finetune(rest: &[String]) {
+    let mut a = Args::new(rest);
+    let weights = a.take_str("--weights").unwrap_or_else(|| {
+        eprintln!("wm finetune needs --weights <base.weights>");
+        std::process::exit(2);
+    });
+    let data_dir = a.take_str("--data").unwrap_or_else(|| {
+        eprintln!("wm finetune needs --data <episode-dir>");
+        std::process::exit(2);
+    });
+    let out = a.take_str("--out").unwrap_or_else(|| {
+        eprintln!("wm finetune needs --out <tuned.weights>");
+        std::process::exit(2);
+    });
+    let steps = a.u32_or("--steps", 300);
+    let lr = a.f32_or("--lr", 1e-4);
+    let wd = a.f32_or("--wd", 1e-2);
+    let clip = a.f32_or("--clip", 1.0);
+    let seed = a.u64_or("--seed", 7);
+    let device = a.take_str("--device");
+
+    let (cfg, tensors) = wm_diamond::import::load(&weights).unwrap_or_else(|e| {
+        eprintln!("cannot load {weights}: {e}");
+        std::process::exit(1);
+    });
+    let ds = data::episode::EpisodeDataset::open(std::path::Path::new(&data_dir)).unwrap_or_else(|e| {
+        eprintln!("cannot open {data_dir}: {e}");
+        std::process::exit(1);
+    });
+    let nsc = cfg.num_steps_conditioning as usize;
+    let frame_len = (cfg.img_channels * cfg.h * cfg.w) as usize;
+
+    let tr = wm_diamond::train::DiamondTrainer::from_tensors(cfg.clone(), &tensors, device.as_deref());
+    println!(
+        "fine-tuning {} trainable conv tensors on {data_dir} ({steps} steps, lr {lr})",
+        wm_diamond::train::trainable_list(&cfg).len()
+    );
+    let mut drng = data::rng::Rng::new(seed ^ 0xD5);
+    let sampler = move |_: &mut wm_diamond::play::NormalRng| {
+        let w = ds
+            .sample_window(&mut drng, nsc + 1)
+            .expect("dataset has no episode long enough for nsc+1 frames");
+        // Dataset frames are [0,1]; the trainer wants [-1,1]. actions[i] is
+        // the action that PRODUCED frame i, so context actions (the action
+        // taken AT each context frame) are actions[1..=nsc].
+        let to_pm1 = |v: &f32| v * 2.0 - 1.0;
+        wm_diamond::train::Transition {
+            obs: w.frames_f32[..nsc * frame_len].iter().map(to_pm1).collect(),
+            clean: w.frames_f32[nsc * frame_len..].iter().map(to_pm1).collect(),
+            actions: w.actions[1..=nsc].to_vec(),
+        }
+    };
+    let t0 = std::time::Instant::now();
+    let (first, last) = wm_diamond::train::finetune(
+        &tr,
+        sampler,
+        steps,
+        lr,
+        wd,
+        Some(clip),
+        seed,
+        |t, loss| println!("  step {t:>5}  loss {loss:.5}"),
+    );
+    println!(
+        "done in {:.1}s: loss {first:.5} -> {last:.5}",
+        t0.elapsed().as_secs_f32()
+    );
+    if let Err(e) = tr.save(&tensors, &out) {
+        eprintln!("save failed: {e}");
+        std::process::exit(1);
+    }
+    println!("saved {out}");
 }
 
 fn run_import(rest: &[String]) {
@@ -237,6 +345,7 @@ fn run_play(rest: &[String]) {
     let frames = a.u64_or("--frames", 0);
     let adaptive = a.take_flag("--adaptive");
     let dump_ppm = a.take_str("--dump-ppm");
+    let record = a.take_str("--record");
     let print_hashes = a.take_flag("--hashes");
     let actions = parse_actions(&mut a);
 
@@ -271,23 +380,24 @@ fn run_play(rest: &[String]) {
     if headless {
         let acts = actions.unwrap_or_else(|| vec![0; frames.max(1) as usize]);
         let mut input = ScriptInput::new(acts);
-        let mut hashes = HashSink::default();
         // Unpaced (huge fps target): CI never sleeps.
         let pacer = FixedTimestep::new(WallClock::new(), 100_000, false);
-        let report = match dump_ppm {
-            Some(dir) => {
-                let ppm = PpmDirSink::new(&dir).expect("cannot create --dump-ppm dir");
-                let mut sink = TeeSink(std::mem::take(&mut hashes), ppm);
-                let mut io = SplitIo { input: &mut input, sink: &mut sink };
-                let r = play_loop(model.as_mut(), &mut io, &km, pacer, fps, &model_name, max_steps);
-                hashes = sink.0;
-                r
-            }
-            None => {
-                let mut io = SplitIo { input: &mut input, sink: &mut hashes };
-                play_loop(model.as_mut(), &mut io, &km, pacer, fps, &model_name, max_steps)
-            }
+        let ppm = dump_ppm
+            .as_deref()
+            .map(|dir| PpmDirSink::new(dir).expect("cannot create --dump-ppm dir"));
+        let rec = record
+            .as_deref()
+            .map(|dir| RecorderSink::new(dir, model.num_actions(), fps));
+        // One pipeline: hashes always, PPM dump / recorder when requested.
+        let mut sink = TeeSink(HashSink::default(), TeeSink(OptSink(ppm), OptSink(rec)));
+        let report = {
+            let mut io = SplitIo { input: &mut input, sink: &mut sink };
+            play_loop(model.as_mut(), &mut io, &km, pacer, fps, &model_name, max_steps)
         };
+        let hashes = sink.0;
+        if let Some(rec) = sink.1 .1 .0 {
+            finalize_recording(rec, record.as_deref().unwrap());
+        }
         print_report("", &report);
         if print_hashes {
             for h in &hashes.hashes {
@@ -316,21 +426,173 @@ fn run_play(rest: &[String]) {
             }
         };
         println!("controls: WASD move | Enter reset | . pause | e step | [ ] quality | Esc quit");
+        let mut rec = OptSink(
+            record.as_deref().map(|dir| RecorderSink::new(dir, model.num_actions(), fps)),
+        );
+        let mut io = WinRecIo { win: &mut win, rec: &mut rec };
         let report = play_loop(
             model.as_mut(),
-            &mut win,
+            &mut io,
             &km,
             FixedTimestep::new(WallClock::new(), fps, adaptive),
             fps,
             &model_name,
             max_steps,
         );
+        if let Some(r) = rec.0 {
+            finalize_recording(r, record.as_deref().unwrap());
+        }
         print_report("", &report);
     }
     #[cfg(not(feature = "wm-sdl"))]
     {
-        let _ = (scale, adaptive);
+        let _ = (scale, adaptive, record);
         eprintln!("windowed play requires building with --features wm-sdl (make build/wm); use --headless");
+        std::process::exit(1);
+    }
+}
+
+/// Windowed play + recording: the SDL window serves input and display while
+/// an optional [`RecorderSink`] tees the frames off into an episode dataset.
+#[cfg(feature = "wm-sdl")]
+struct WinRecIo<'a> {
+    win: &'a mut wm_display::window::SdlWindow,
+    rec: &'a mut OptSink<RecorderSink>,
+}
+
+#[cfg(feature = "wm-sdl")]
+impl wm_display::PlayIo for WinRecIo<'_> {
+    fn poll(&mut self) -> wm_display::PolledInput {
+        wm_display::PlayIo::poll(self.win)
+    }
+    fn frame(&mut self, rgb: &[u8], w: u32, h: u32, hud: &Hud) {
+        FrameSink::frame(self.win, rgb, w, h, hud);
+        self.rec.frame(rgb, w, h, hud);
+    }
+}
+
+/// `brain wm replay`: inspect a recorded episode dataset, and optionally
+/// re-generate it through a model and compare frame-by-frame.
+///
+/// Verification is exact-by-construction for deterministic models (fake) and
+/// honest about stochastic ones (diamond): every DIAMOND step draws exactly
+/// `frame_len` normals, so with the SAME `--seed` (and `--denoise-steps`)
+/// used at record time the noise streams align. `--context 0` (default)
+/// rebuilds the model exactly as `wm play` did and replays the FULL action
+/// sequence — the noise stream aligns from frame 0. `--context N` burns N
+/// steps (consuming N * frame_len normals, discarding the frames) and then
+/// resets with the first N recorded frames + actions as context, so
+/// verification starts at frame N with the noise stream still aligned.
+/// N.B. `--context N` only matches models whose reset is a pure context
+/// load (diamond); the fake model derives its state from a context HASH, so
+/// verify it with `--context 0`.
+fn run_replay(rest: &[String]) {
+    let mut a = Args::new(rest);
+    let dir = a.take_str("--episode").unwrap_or_else(|| {
+        eprintln!("wm replay needs --episode <DIR> (from `brain wm play --record DIR`)");
+        std::process::exit(2);
+    });
+    let verify = a.take_flag("--verify");
+    let ds = EpisodeDataset::open(std::path::Path::new(&dir)).unwrap_or_else(|e| {
+        eprintln!("cannot open {dir}: {e}");
+        std::process::exit(1);
+    });
+    println!(
+        "{dir}: {} frames ({}x{}x{} CHW u8), num_actions={} fps={} episodes={} rewards={}",
+        ds.n,
+        ds.c,
+        ds.h,
+        ds.w,
+        ds.num_actions,
+        ds.fps,
+        ds.episodes.len(),
+        if ds.rewards().is_some() { "yes" } else { "no" },
+    );
+    for (i, e) in ds.episodes.iter().enumerate() {
+        println!("  episode {i}: frames [{}, {})", e.start, e.start + e.len);
+    }
+    if !verify {
+        return;
+    }
+
+    let model_name = a.str_or("--model", "fake");
+    let seed = a.u64_or("--seed", 7);
+    let weights = a.take_str("--weights");
+    let device = a.take_str("--device");
+    let onnx = a.take_str("--onnx");
+    let denoise_steps = a.u32_or("--denoise-steps", 0);
+    let tolerance = a.f32_or("--tolerance", 2.0 / 255.0);
+    let context = a.usize_or("--context", 0);
+    let mut model =
+        build_model(&model_name, seed, weights.as_deref(), device.as_deref(), onnx.as_deref());
+    if denoise_steps > 0 {
+        // Same quality-code mapping as `wm play` (see run_play).
+        model.set_nfe(match denoise_steps {
+            n if n >= 3 => 0,
+            2 => 1,
+            _ => 2,
+        });
+    }
+    let (c, h, w) = model.frame_shape();
+    if (c, h, w) != (ds.c, ds.h, ds.w) {
+        eprintln!(
+            "model frames are {c}x{h}x{w} but the dataset is {}x{}x{}",
+            ds.c, ds.h, ds.w
+        );
+        std::process::exit(1);
+    }
+    if context >= ds.n {
+        eprintln!("--context {context} leaves no frames to verify (n = {})", ds.n);
+        std::process::exit(2);
+    }
+    let die = |e: String| -> ! {
+        eprintln!("{e}");
+        std::process::exit(1);
+    };
+    let actions = ds.actions().to_vec();
+    if context > 0 {
+        // Burn the context steps so a stochastic model's rng lands where it
+        // was at record time, then load the recorded frames as context.
+        for &act in &actions[..context] {
+            let _ = model.step(act);
+        }
+        let mut ctx = Vec::with_capacity(context * ds.frame_len());
+        for i in 0..context {
+            ctx.extend(ds.frame_f32(i).unwrap_or_else(|e| die(e)));
+        }
+        model.reset(&ctx, &actions[..context]);
+    }
+
+    let mut max_mad = 0f32;
+    let mut worst = context;
+    let mut failed = 0usize;
+    for i in context..ds.n {
+        let f = model.step(actions[i]);
+        // The exact conversion the recorder applied: f32 -> RGB8 -> CHW u8.
+        let got = rgb8_to_chw(&chw_to_rgb8(&f, c, h, w), w, h);
+        let want = ds.frame(i).unwrap_or_else(|e| die(e));
+        let sum: u64 = got
+            .iter()
+            .zip(&want)
+            .map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs() as u64)
+            .sum();
+        let mad = sum as f32 / (got.len() as f32 * 255.0);
+        if mad > max_mad {
+            max_mad = mad;
+            worst = i;
+        }
+        if mad > tolerance {
+            failed += 1;
+        }
+    }
+    let checked = ds.n - context;
+    let pass = failed == 0;
+    println!(
+        "verified {checked} frames: max_mad={max_mad:.6} (frame {worst}), tolerance={tolerance:.6} -> {}",
+        if pass { "PASS" } else { "FAIL" }
+    );
+    if !pass {
+        eprintln!("{failed} of {checked} frames exceeded the tolerance");
         std::process::exit(1);
     }
 }
