@@ -12,6 +12,8 @@ use std::io::Write;
 use serde_json::Value;
 
 pub mod safetensors;
+pub mod torchpt;
+pub mod zipread;
 
 /// One tensor read from a container (role is "" if the header omits it).
 pub struct LoadedTensor {

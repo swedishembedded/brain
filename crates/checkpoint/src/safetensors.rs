@@ -22,7 +22,7 @@ pub struct StTensor {
 }
 
 /// Decode an IEEE-754 binary16 (half) bit pattern to f32.
-fn f16_to_f32(h: u16) -> f32 {
+pub(crate) fn f16_to_f32(h: u16) -> f32 {
     let sign = ((h >> 15) & 1) as u32;
     let exp = ((h >> 10) & 0x1f) as u32;
     let mant = (h & 0x3ff) as u32;
@@ -51,6 +51,11 @@ fn f16_to_f32(h: u16) -> f32 {
         (sign << 31) | (exp << 23) | (mant << 13)
     };
     f32::from_bits(bits)
+}
+
+/// Decode a bfloat16 bit pattern to f32 (bf16 is the top 16 bits of an f32).
+pub(crate) fn bf16_to_f32(h: u16) -> f32 {
+    f32::from_bits((h as u32) << 16)
 }
 
 /// Parse a safetensors byte buffer into fp32 tensors (declared order preserved).
@@ -90,7 +95,7 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
             "F16" => raw.chunks_exact(2).map(|b| f16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect(),
             "BF16" => raw
                 .chunks_exact(2)
-                .map(|b| f32::from_bits((u16::from_le_bytes([b[0], b[1]]) as u32) << 16))
+                .map(|b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]])))
                 .collect(),
             other => return Err(format!("safetensors: unsupported dtype {other} for {name}")),
         };
