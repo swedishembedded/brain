@@ -1,0 +1,14 @@
+[package]
+name = "brain-wm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "World-model core: the playable WorldModel trait + deterministic GPU-free FakeWorldModel; harness home for the wm kernel-family tests (GroupNorm, FiLM). EDM/sampler/schedule host math lands next."
+
+[lib]
+name = "wm_core"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true

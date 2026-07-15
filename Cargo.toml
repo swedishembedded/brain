@@ -36,6 +36,7 @@ default-members = [
     "crates/gradcheck",
     "crates/events",
     "crates/hfsm",
+    "crates/wm-core",
     "crates/yolo",
     "crates/onnx",
     "crates/npu",
@@ -82,6 +83,7 @@ brain-bench = { path = "crates/bench" }
 brain-gradcheck = { path = "crates/gradcheck" }
 brain-events = { path = "crates/events" }
 brain-hfsm = { path = "crates/hfsm" }
+brain-wm-core = { path = "crates/wm-core" }
 brain-yolo = { path = "crates/yolo" }
 brain-onnx = { path = "crates/onnx" }
 brain-npu = { path = "crates/npu" }

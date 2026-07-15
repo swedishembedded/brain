@@ -447,6 +447,7 @@ dependencies = [
  "brain-data",
  "brain-eval",
  "brain-events",
+ "brain-glm",
  "brain-onnx",
  "brain-qwen",
  "brain-yolo",
@@ -624,6 +625,18 @@ dependencies = [
  "cranelift-native",
  "naga",
 ]
+
+[[package]]
+name = "brain-wm-core"
+version = "0.1.0"
+dependencies = [
+ "brain-gpu-core",
+ "brain-kernels",
+]
+
+[[package]]
+name = "brain-wm-diamond"
+version = "0.1.0"
 
 [[package]]
 name = "brain-yolo"
