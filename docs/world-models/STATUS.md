@@ -30,13 +30,20 @@ written from the specs in `docs/world-models/specs/`.
 - DIAMOND parity fixtures: regenerable via `make wm-fixtures` (not in git);
   `crates/wm-diamond` stub crate reserves the layout.
 
+- `wm-display` crate: SDL2 software-blit window (hand-rolled ~15-fn FFI,
+  feature `sdl`, links system libSDL2; iGPU stays free for compute),
+  longest-chord-wins keymap, fixed-timestep pacing with mock-clock tests and
+  adaptive-quality hysteresis, headless/hash/PPM/tee sinks, `PlayIo` seam.
+- `brain wm play` (windowed via `make build/wm`; `--headless` deterministic
+  scripted rollouts with fnv1a golden hashes) and `brain wm bench`, running
+  the FakeWorldModel end-to-end. 12 display tests, all headless.
+
 ## Next (P1 remainder → P2)
 - vq_argmin/vq_argmax_dot kernels; dwconv3d PEG family; maskgit host decode;
   EDM/sampler/schedule host math (`wm_core::{edm,sampler,schedule}`).
-- Display crate (SDL2 software-blit, keymap chords, pacing, headless sinks),
-  `brain wm play/bench` CLI on FakeWorldModel.
 - torch `.pt` reader (evaluate candle-core pickle / repugnant-pickle first),
-  then DIAMOND UNet model + import + 3-step Euler playable path (P2).
+  then DIAMOND UNet model + import + 3-step Euler playable path (P2) wired
+  into `brain wm play --model diamond`.
 
 Backups of the pre-restructure orchestration experiment:
 `backup/wm-orchestration-v1`, `backup/wm-p1-*` branches.

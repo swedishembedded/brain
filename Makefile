@@ -45,7 +45,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo \
+.PHONY: help build release build/wm wm/play wm-fixtures test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo \
@@ -75,6 +75,8 @@ help:
 	@echo "  make bench/advise ARCH=<name> ranked tuning recommendations from eval(+scale) artifacts"
 	@echo "  make bench/compare           side-by-side leaderboard of every results/<arch>-<seed>.json"
 	@echo "  make bench/char              train+eval GPT on the shared char datasets (legacy)"
+	@echo "  make build/wm | wm/play      SDL build of brain + play the fake world model (WASD)"
+	@echo "  make wm-fixtures             regenerate DIAMOND parity fixtures (needs torch)"
 	@echo "  make federated-demo          MoE train -> split -> verify -> merge round-trip"
 	@echo "  make web/dev | web/build     WebGPU browser demo (crates/web)"
 
@@ -108,6 +110,15 @@ kernels-regen:
 # Needs python3 + torch; see docs/world-models/FIXTURES.md for provenance.
 wm-fixtures:
 	python3 scripts/parity-dump/diamond.py --out crates/wm-diamond/tests/fixtures/diamond
+
+# World-model play build: the stock build has no SDL dependency; this one
+# links the system libSDL2 for the `brain wm play` window.
+build/wm:
+	cargo build --release --features wm-sdl
+
+# Play the deterministic fake world model in an SDL window (WASD; Esc quits).
+wm/play: build/wm
+	./target/release/brain wm play --model fake
 
 # Cross-backend parity gate: CPU == Vulkan == NPU (gradcheck on both backends +
 # direct CPU-vs-GPU forward parity + TTS NPU codec vs CPU reference).

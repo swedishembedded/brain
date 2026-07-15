@@ -13,9 +13,14 @@ path = "src/main.rs"
 # Optional native-Vulkan cooperative-matrix matmul path (ash + naga). OFF by
 # default — the default build stays pure wgpu/WGSL.
 vulkan-coopmat = ["dep:brain-vulkan"]
+# SDL2 window for `brain wm play` (links system libSDL2). OFF by default so
+# the stock build has no new native dependency; build with `make build/wm`.
+wm-sdl = ["brain-wm-display/sdl"]
 
 [dependencies]
 brain-gpu-core.workspace = true
+brain-wm-core.workspace = true
+brain-wm-display = { workspace = true, default-features = false }
 brain-moe.workspace = true
 brain-gpt.workspace = true
 brain-qwen.workspace = true

@@ -283,6 +283,8 @@ dependencies = [
  "brain-speaker",
  "brain-tts",
  "brain-vulkan",
+ "brain-wm-core",
+ "brain-wm-display",
  "brain-yolo",
  "serde_json",
 ]
@@ -637,6 +639,13 @@ dependencies = [
 [[package]]
 name = "brain-wm-diamond"
 version = "0.1.0"
+
+[[package]]
+name = "brain-wm-display"
+version = "0.1.0"
+dependencies = [
+ "brain-wm-core",
+]
 
 [[package]]
 name = "brain-yolo"

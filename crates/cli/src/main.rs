@@ -24,6 +24,7 @@ mod qwen_cli;
 mod run_cli;
 mod tts_cli;
 mod tts_serve;
+mod wm_cli;
 mod yolo_cli;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,6 +59,12 @@ GPT (dense baseline)
   brain gpt eval  --weights F --data <dir> [--batches N --samples M]
   brain gpt gen   --weights F [--data <dir>] [--prompt \"...\" --max-new N --temp X --top-k K]
                               (vocab is read from the checkpoint; --data only for old ones)
+
+World models (playable action-conditioned video models; docs/world-models/)
+  brain wm play  --model fake [--fps N --scale N --seed N --adaptive]   # SDL window (build: make build/wm)
+  brain wm play  --model fake --headless --frames N [--actions FILE | --action-seq 1,2,0]
+                 [--dump-ppm DIR] [--hashes]        # deterministic rollout + fnv1a hashes (CI)
+  brain wm bench --model fake [--frames N]          # ms/frame + fps
 
 YOLO (from-scratch anchor-free object detector)
   brain yolo train <data_dir> --out F [--steps N --batch B --lr X --nc C
@@ -424,6 +431,7 @@ fn main() {
         Some("qwen") => qwen_cli::run_qwen(&argv[2..]),
         Some("glm") => glm_cli::run_glm(&argv[2..]),
         Some("tts") => tts_cli::run_tts(&argv[2..]),
+        Some("wm") => wm_cli::run_wm(&argv[2..]),
         Some("yolo") => yolo_cli::run_yolo(&argv[2..]),
         Some("npu") => npu_cli::run_npu(&argv[2..]),
         Some("federated") => federated_cli::run_federated(&argv[2..]),
