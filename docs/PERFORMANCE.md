@@ -243,3 +243,51 @@ producer-consumer fusion** *along* each barrier-free chain. Status:
 > library (oneDNN/cuDNN) on the vendor's own silicon. The structural wins (sync /
 > launch / fusion / tiling) are real and large; closing the last gap is genuine
 > GPU-kernel engineering, not a quick toggle.
+
+---
+
+## World models: DIAMOND-Atari denoiser (`brain wm`)
+
+The playable diffusion world model (64x64 RGB, 3 denoising steps per frame,
+~4M-param conditional UNet ≈ 6 GFLOP/NFE). Measured with
+`brain wm bench --model diamond --profile` (per-kernel wall clock, one submit
+per step — ranking only; the production path is a single submit) and
+`brain wm bench` (end-to-end frames). Numbers from the Core Ultra 7 155H
+(22T AVX2) + its integrated Arc iGPU; this laptop-class part throttles under
+sustained load, so frame times vary run-to-run by ~1.5-2x — treat every number
+as a warm-run best, and compare only like-for-like.
+
+| Path | Before | After | Lever |
+|---|---|---|---|
+| CPU end-to-end | ~440 ms/frame | **~166 ms/frame (6 fps)** | native gn fast paths |
+| iGPU end-to-end | ~2 390 ms/frame | **~370 ms/frame** | parallel GN + tiled conv + on-device loop |
+| iGPU gn_stats (in-profile) | 1 436 ms (77.6% of frame) | ~21 ms (gn_part+gn_stats2) | two-stage parallel reduction |
+| iGPU conv (in-profile) | 1 274 ms | ~60 ms | register-tiled conv_bias_reg (conv_act_reg's 8x4 tile) |
+| iGPU whole forward (in-profile) | 1 975 ms | **107 ms** | all of the above |
+
+What the profiler taught (in order):
+
+1. **`gn_stats` was the GPU.** The serial per-group reduction dispatches
+   2-4 invocations total — one EU lane looping 131k elements. 77.6% of GPU
+   frame time for a "free" normalize. Fix: `gn_part` (64 partial sums per
+   group) + `gn_stats2` (combine); same stats layout, so `gn_apply`/backward
+   consume it unchanged, and native CPU fast paths keep the one-graph rule.
+2. **CPU GroupNorm cost 35% of the forward** for the same reason (2-4 rayon
+   tasks). First fix attempt nested rayon inside the backend's pool and
+   measured *slower* (440 -> 558 ms/frame): de-nested, coarse chunks -> 166 ms.
+   Measure after every change; parallelism that looks obviously right can lose.
+3. **Naive conv is 20x off on the iGPU.** `conv_bias_reg` re-applies
+   conv_act_reg's proven register tile (8 output channels x 4 coalesced
+   positions) with a plain bias epilogue: 1 274 -> 60 ms in-profile.
+4. **The on-device denoise loop** (per-sigma coefficients as 2-float buffer
+   writes into a pre-recorded scale -> UNet -> quantize-wrap -> Euler ring)
+   removed per-step readbacks; verified bit-identical rollouts before any
+   semantics-adjacent change landed.
+5. **Environment lies to benchmarks.** A stale `DISPLAY` without X auth
+   SIGSEGVs Vulkan enumeration; 130 orphaned D-state rustc processes from
+   killed builds inflate loadavg (harmless) while an actual background build
+   poisons every number. `wm bench` runs are only comparable warm + idle.
+
+Quality/speed ladder: `--denoise-steps 1..3` (1 step ≈ 3x the fps, still
+recognizably Breakout; `--adaptive` walks this automatically). At 1 step the
+CPU path reaches ~18 fps — playable-smooth on this machine today.
