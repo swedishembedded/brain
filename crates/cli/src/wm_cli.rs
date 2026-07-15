@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain wm …` — world-model subcommands: play (windowed SDL / headless)
-//! and bench. Models: `fake` today (deterministic test model); DIAMOND lands
-//! next (docs/world-models/STATUS.md).
+//! `brain wm …` — world-model subcommands: import (torch .pt -> .weights),
+//! play (windowed SDL / headless), bench. Models: `diamond` (pretrained
+//! Atari-100k EDM world model) and `fake` (deterministic GPU-free test
+//! model). See docs/world-models/STATUS.md.
 
 use crate::args::Args;
 use wm_core::{FakeWorldModel, WorldModel};
