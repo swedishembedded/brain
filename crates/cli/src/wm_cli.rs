@@ -135,6 +135,11 @@ fn run_finetune(rest: &[String]) {
         "done in {:.1}s: loss {first:.5} -> {last:.5}",
         t0.elapsed().as_secs_f32()
     );
+    if !last.is_finite() {
+        eprintln!("training diverged (NaN/inf loss) — NOT saving. Lower --lr (batch-1 \
+fine-tuning is sensitive; see docs/world-models/PLAYBOOKS.md).");
+        std::process::exit(1);
+    }
     if let Err(e) = tr.save(&tensors, &out) {
         eprintln!("save failed: {e}");
         std::process::exit(1);

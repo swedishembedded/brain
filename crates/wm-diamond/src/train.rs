@@ -781,6 +781,12 @@ pub fn finetune(
         if t % 25 == 0 || t == 1 || t == steps {
             on_log(t, loss);
         }
+        if !loss.is_finite() {
+            // Divergence: stop immediately — continuing would only burn time
+            // and the caller must NOT save these weights.
+            on_log(t, loss);
+            break;
+        }
     }
     (first, last)
 }
