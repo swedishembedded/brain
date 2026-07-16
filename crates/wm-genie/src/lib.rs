@@ -36,6 +36,9 @@ pub mod k {
     // 5..17 == BiasedAttn (see `biased_attn`)
     pub const DWCONV3D: usize = 17;
     pub const ADD2: usize = 18;
+    pub const BIAS_ADD: usize = 19;
+    pub const EMBED: usize = 20;
+    pub const VQ_ARGMAX_DOT: usize = 21;
 }
 
 /// `(name, source)` for `Gpu::new*`, in the index order `k` / [`biased_attn`].
@@ -50,6 +53,9 @@ pub fn kernel_sources() -> Vec<(&'static str, &'static str)> {
     v.extend_from_slice(&BiasedAttn::kernel_sources());
     v.push(("dwconv3d", kernels::DWCONV3D));
     v.push(("add2", kernels::ADD2));
+    v.push(("bias_add", kernels::BIAS_ADD));
+    v.push(("embed", kernels::EMBED));
+    v.push(("vq_argmax_dot", kernels::VQ_ARGMAX_DOT));
     v
 }
 
@@ -221,6 +227,54 @@ pub fn geglu_forward(gpu: &Gpu, x: &[f32], rows: u32, dim: u32, inner: u32, w: &
     gpu.read(&y, (rows * dim) as usize)
 }
 
+// ---- cosine vector quantization (tokenizer bottleneck) ----
+
+/// Weights of the tokenizer VQ (`use_cosine_sim`, codebook_dim 32, 1024 codes):
+/// `project_in` (dim→cd, bias), the codebook `[K, cd]`, `project_out` (cd→dim,
+/// bias).
+pub struct VqWeights {
+    pub project_in_w: Vec<f32>, pub project_in_b: Vec<f32>, // [cd,dim], [cd]
+    pub codebook: Vec<f32>,                                  // [K, cd]
+    pub project_out_w: Vec<f32>, pub project_out_b: Vec<f32>, // [dim,cd], [dim]
+}
+
+/// Cosine-similarity VQ forward: `project_in` → L2-normalize → argmax cosine
+/// against the L2-normalized codebook → gather `codebook[idx]` → `project_out`.
+/// Returns `(quantized [n,dim], indices [n])`. (Straight-through / commitment
+/// are training-only and handled by the caller via `wm_core::vq`.)
+pub fn vq_quantize(gpu: &Gpu, x: &[f32], w: &VqWeights, n: u32, dim: u32, code_dim: u32, n_codes: u32) -> (Vec<f32>, Vec<u32>) {
+    let att = biased_attn();
+    let ones = vec![1.0f32; code_dim as usize];
+    let onesb = gpu.storage_init("ones", &ones);
+
+    // project_in -> [n, cd]
+    let xb = gpu.storage_init("x", x);
+    let piw = gpu.storage_init("piw", &w.project_in_w);
+    let pib = gpu.storage_init("pib", &w.project_in_b);
+    let z = linear_bias(gpu, &xb, &piw, &pib, n, dim, code_dim);
+    // L2-normalize z and the codebook (g = ones -> pure L2 norm)
+    let zn = gpu.storage((n * code_dim) as u64);
+    gpu.submit(&[], &[att.step_l2norm(gpu, n, code_dim, 0.0, &z, &onesb, &zn)]);
+    let cb = gpu.storage_init("cb", &w.codebook);
+    let cbn = gpu.storage((n_codes * code_dim) as u64);
+    gpu.submit(&[], &[att.step_l2norm(gpu, n_codes, code_dim, 0.0, &cb, &onesb, &cbn)]);
+    // argmax cosine -> packed [idx, dot] per query
+    let packed = gpu.storage((2 * n) as u64);
+    gpu.submit(&[], &[gpu.step(k::VQ_ARGMAX_DOT, &[&zn, &cbn, &packed], &[n, n_codes, code_dim], n)]);
+    let packed_v = gpu.read(&packed, (2 * n) as usize);
+    let indices: Vec<u32> = packed_v.chunks_exact(2).map(|c| c[0] as u32).collect();
+
+    // gather codebook[idx] (raw) then project_out -> [n, dim]
+    let idxb = gpu.storage(n as u64);
+    gpu.write(&idxb, &indices);
+    let q = gpu.storage((n * code_dim) as u64);
+    gpu.submit(&[], &[gpu.step(k::EMBED, &[&idxb, &cb, &q], &[code_dim, n], n * code_dim)]);
+    let pow = gpu.storage_init("pow", &w.project_out_w);
+    let pob = gpu.storage_init("pob", &w.project_out_b);
+    let out = linear_bias(gpu, &q, &pow, &pob, n, code_dim, dim);
+    (gpu.read(&out, (n * dim) as usize), indices)
+}
+
 // ---- full STBlock ----
 
 /// Weights of one STBlock: spatial then temporal, each `PEG → Attention → FF`.
@@ -310,6 +364,96 @@ pub fn stblock_forward(
 /// GEGLU inner dim used by GenieRedux: `round(dim * 4 * 2/3)`.
 pub fn ff_inner(dim: u32) -> u32 {
     ((dim as f64) * 4.0 * 2.0 / 3.0) as u32
+}
+
+// ---- patch embed / unpatch (the video <-> token boundary) ----
+
+/// `nn.Linear` with bias: `y = x @ w^T + b`. (The attention/FF linears are
+/// bias-free; patch-embed, to_pixels and to_logits carry a bias.)
+fn linear_bias(gpu: &Gpu, x: &DeviceBuffer, w: &DeviceBuffer, b: &DeviceBuffer, m: u32, kk: u32, n: u32) -> DeviceBuffer {
+    let out = matmul(gpu, x, w, m, kk, n);
+    gpu.submit(&[], &[gpu.step(k::BIAS_ADD, &[&out, b], &[m, n], m * n)]);
+    out
+}
+fn layernorm_b(gpu: &Gpu, x: &[f32], g: &[f32], beta: &[f32], rows: u32, dim: u32) -> DeviceBuffer {
+    let xb = gpu.storage_init("x", x);
+    let gb = gpu.storage_init("g", g);
+    let bb = gpu.storage_init("b", beta);
+    layernorm(gpu, &xb, &gb, &bb, rows, dim)
+}
+
+/// Weights of a `to_patch_emb[_first_frame]`: LayerNorm(pf) → Linear(pf→dim) →
+/// LayerNorm(dim), all with bias (`nn.LayerNorm`/`nn.Linear`). `pf` = the patch
+/// feature count = channels·patch·patch (48 for 4×4×3).
+pub struct PatchEmbedWeights {
+    pub ln1_g: Vec<f32>, pub ln1_b: Vec<f32>, // [pf]
+    pub lin_w: Vec<f32>, pub lin_b: Vec<f32>, // [dim,pf], [dim]
+    pub ln2_g: Vec<f32>, pub ln2_b: Vec<f32>, // [dim]
+}
+
+/// Patchify a channels-first video `[b,c,t,H,W]` into `[b,t,h,w,pf]` (patch
+/// `p×p`, `pf = c*p*p`, feature order `(c p1 p2)`), matching the einops
+/// `b c t (h p1) (w p2) -> b t h w (c p1 p2)` (temporal_patch_size = 1).
+fn patchify(video: &[f32], b: usize, c: usize, t: usize, hh: usize, ww: usize, p: usize) -> (Vec<f32>, usize, usize) {
+    let (h, w) = (hh / p, ww / p);
+    let pf = c * p * p;
+    let mut out = vec![0.0f32; b * t * h * w * pf];
+    for bb in 0..b { for tt in 0..t { for hy in 0..h { for wx in 0..w {
+        for cc in 0..c { for p1 in 0..p { for p2 in 0..p {
+            let src = ((((bb*c+cc)*t+tt)*hh + hy*p+p1)*ww) + wx*p+p2;
+            let pidx = (cc*p + p1)*p + p2;
+            let dst = ((((bb*t+tt)*h+hy)*w+wx)*pf) + pidx;
+            out[dst] = video[src];
+        }}}
+    }}}}
+    (out, h, w)
+}
+
+/// `to_patch_emb`: patchify `[b,c,t,H,W]` then LN→Linear→LN → `[b,t,h,w,dim]`.
+#[allow(clippy::too_many_arguments)]
+pub fn patch_embed(gpu: &Gpu, video: &[f32], w: &PatchEmbedWeights, b: u32, c: u32, t: u32, hh: u32, ww: u32, p: u32, dim: u32) -> Vec<f32> {
+    let (patches, h, wd) = patchify(video, b as usize, c as usize, t as usize, hh as usize, ww as usize, p as usize);
+    let pf = (c * p * p) as u32;
+    let rows = b * t * h as u32 * wd as u32;
+    let n1 = layernorm_b(gpu, &patches, &w.ln1_g, &w.ln1_b, rows, pf);
+    let lw = gpu.storage_init("lw", &w.lin_w);
+    let lb = gpu.storage_init("lb", &w.lin_b);
+    let lin = linear_bias(gpu, &n1, &lw, &lb, rows, pf, dim);
+    let lin_v = gpu.read(&lin, (rows * dim) as usize);
+    let n2 = layernorm_b(gpu, &lin_v, &w.ln2_g, &w.ln2_b, rows, dim);
+    gpu.read(&n2, (rows * dim) as usize)
+}
+
+/// Weights of a `to_pixels[_first_frame]`: `Linear(dim→pf)` (with bias).
+pub struct ToPixelsWeights {
+    pub lin_w: Vec<f32>, // [pf, dim]
+    pub lin_b: Vec<f32>, // [pf]
+}
+
+/// `to_pixels`: Linear then unpatch `[b,t,h,w,dim]` → video `[b,c,t,H,W]`
+/// (inverse layout of [`patchify`]).
+#[allow(clippy::too_many_arguments)]
+pub fn to_pixels(gpu: &Gpu, tokens: &[f32], w: &ToPixelsWeights, b: u32, t: u32, h: u32, wd: u32, dim: u32, c: u32, p: u32) -> Vec<f32> {
+    let (bu, tu, hu, wu, cu, pu) = (b as usize, t as usize, h as usize, wd as usize, c as usize, p as usize);
+    let pf = cu * pu * pu;
+    let rows = b * t * h * wd;
+    let xb = gpu.storage_init("x", tokens);
+    let lw = gpu.storage_init("lw", &w.lin_w);
+    let lb = gpu.storage_init("lb", &w.lin_b);
+    let lin = linear_bias(gpu, &xb, &lw, &lb, rows, dim, pf as u32);
+    let patched = gpu.read(&lin, (rows as usize) * pf);
+    // unpatch to [b,c,t,H,W]
+    let (hh, ww) = (hu * pu, wu * pu);
+    let mut video = vec![0.0f32; bu*cu*tu*hh*ww];
+    for bb in 0..bu { for tt in 0..tu { for hy in 0..hu { for wx in 0..wu {
+        for cc in 0..cu { for p1 in 0..pu { for p2 in 0..pu {
+            let pidx = (cc*pu + p1)*pu + p2;
+            let src = ((((bb*tu+tt)*hu+hy)*wu+wx)*pf) + pidx;
+            let dst = ((((bb*cu+cc)*tu+tt)*hh + hy*pu+p1)*ww) + wx*pu+p2;
+            video[dst] = patched[src];
+        }}}
+    }}}}
+    video
 }
 
 // ---- STTransformer (a stack of STBlocks + final LayerNorm) ----
