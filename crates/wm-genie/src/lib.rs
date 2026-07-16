@@ -539,8 +539,22 @@ pub fn tokenizer_forward(
     let n = b * f * h * wd;
     let (quant, indices) = vq_quantize(gpu, &enc, &w.vq, n, dim, code_dim, n_codes);
 
-    // decode (ts) then to_pixels first/rest
-    let dec = sttransformer_forward(gpu, &quant, b, f, h, wd, dim, heads, head_dim, &w.decoder, &sbias, &tbias, true, true);
+    // decode the quantized latents back to a video.
+    let recon = decode_latents(gpu, &quant, w, b, f, h, wd, dim, heads, head_dim, c, p, &sbias, &tbias);
+    (recon, indices)
+}
+
+/// Decode quantized latents `[b,t,h,w,dim]` back to a video `[b,c,t,H,W]`:
+/// decoder STTransformer (order "ts") then to_pixels (first frame + rest).
+#[allow(clippy::too_many_arguments)]
+fn decode_latents(
+    gpu: &Gpu, latents: &[f32], w: &TokenizerWeights, b: u32, f: u32, h: u32, wd: u32,
+    dim: u32, heads: u32, head_dim: u32, c: u32, p: u32, sbias: &[f32], tbias: &[f32],
+) -> Vec<f32> {
+    let (bu, cu, fu) = (b as usize, c as usize, f as usize);
+    let (hhu, wwu, pu) = ((h * p) as usize, (wd * p) as usize, p as usize);
+    let frame_toklen = (h * wd * dim) as usize;
+    let dec = sttransformer_forward(gpu, latents, b, f, h, wd, dim, heads, head_dim, &w.decoder, sbias, tbias, true, true);
     let dfirst = {
         let mut v = vec![0.0f32; bu * frame_toklen];
         for bb in 0..bu { v[bb*frame_toklen..(bb+1)*frame_toklen].copy_from_slice(&dec[bb*fu*frame_toklen..bb*fu*frame_toklen+frame_toklen]); }
@@ -553,7 +567,7 @@ pub fn tokenizer_forward(
     };
     let pix_first = to_pixels(gpu, &dfirst, &w.to_pixels_first, b, 1, h, wd, dim, c, p);
     let pix_rest = to_pixels(gpu, &drest, &w.to_pixels_rest, b, f - 1, h, wd, dim, c, p);
-    // concat along the frame axis -> [b,c,f,H,W]
+    let _ = pu;
     let mut recon = vec![0.0f32; bu*cu*fu*hhu*wwu];
     for bb in 0..bu { for cc in 0..cu {
         let dst0 = ((bb*cu+cc)*fu)*hhu*wwu;
@@ -565,7 +579,108 @@ pub fn tokenizer_forward(
             recon[dst..dst+hhu*wwu].copy_from_slice(&pix_rest[src..src+hhu*wwu]);
         }
     }}
-    (recon, indices)
+    recon
+}
+
+/// Decode codebook INDICES `[b*t*h*w]` to a video `[b,c,t,H,W]` — the reference
+/// `decode_from_codebook_indices`: gather `codebook[idx]` -> project_out ->
+/// decode. This is the tokenizer half of the world-model loop (tokens -> frame).
+#[allow(clippy::too_many_arguments)]
+pub fn decode_indices(
+    gpu: &Gpu, indices: &[u32], w: &TokenizerWeights, b: u32, t: u32, h: u32, wd: u32,
+    dim: u32, heads: u32, head_dim: u32, code_dim: u32,
+) -> Vec<f32> {
+    let n = b * t * h * wd;
+    let codes = embed_gather(gpu, indices, &w.vq.codebook, n, code_dim); // [n, cd]
+    let cb = gpu.storage_init("c", &codes);
+    let pow = gpu.storage_init("pow", &w.vq.project_out_w);
+    let pob = gpu.storage_init("pob", &w.vq.project_out_b);
+    let latents = gpu.read(&linear_bias(gpu, &cb, &pow, &pob, n, code_dim, dim), (n * dim) as usize);
+    let sbias = bias::cpb_bias(&w.cpb_net, h as usize, wd as usize, heads as usize);
+    let tbias = bias::alibi_bias(heads as usize, t as usize);
+    // channels 3, patch 4 for CoinRun.
+    decode_latents(gpu, &latents, w, b, t, h, wd, dim, heads, head_dim, 3, 4, &sbias, &tbias)
+}
+
+fn argmax(row: &[f32]) -> u32 {
+    row.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &x)| if x > bv { (i, x) } else { (bi, bv) }).0 as u32
+}
+
+/// Guided-MaskGIT sampler — replicates `Dynamics.sample`. Generates `num_tokens`
+/// new tokens (one or more frames' worth) conditioned on `prime_ids` (the
+/// context frames' tokens flattened) and per-frame `actions`. `inference_steps`
+/// iterations of: re-mask the least-confident tokens (cosine schedule) -> run
+/// the dynamics forward on `cat(prime, current)[:, :-1]` (the reference drops
+/// the last frame) -> Gumbel-sample (argmax as temperature -> 0). For the
+/// checkpoint default (`inference_steps=1`, temperature*0) this is a single
+/// deterministic argmax pass. `seed` drives Gumbel noise when temperature > 0.
+#[allow(clippy::too_many_arguments)]
+pub fn maskgit_sample(
+    gpu: &Gpu, prime_ids: &[u32], actions: &[f32], num_tokens: usize, h: u32, wd: u32,
+    dw: &DynamicsWeights, dc: &crate::import::DynamicsConfig,
+    inference_steps: usize, sample_temperature: f32, seed: u64,
+) -> Vec<u32> {
+    let hw = (h * wd) as usize;
+    let nc = dc.n_codes as usize;
+    let mask_id = dc.n_codes;
+    let total = prime_ids.len() + num_tokens;
+    let tt = total / hw;          // frames in cat(prime, video)
+    let t_fwd = tt - 1;           // after the reference's [:, :-1]
+    let mut vids = vec![mask_id; num_tokens];
+    let mut scores = vec![0.0f32; num_tokens];
+    let mut masked_now = vec![true; num_tokens];
+    let mut rng = seed;
+    let mut next = || { rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407); (rng >> 33) as f32 / (1u64 << 31) as f32 };
+
+    for step in 0..inference_steps {
+        let steps_til_x0 = inference_steps - (step + 1);
+        if step != 0 {
+            let ratio = (step + 1) as f32 / inference_steps as f32;
+            let mask_ratio = (ratio * std::f32::consts::FRAC_PI_2).cos().clamp(1e-6, 1.0);
+            let num_mask = (mask_ratio * num_tokens as f32) as usize;
+            let mut order: Vec<usize> = (0..num_tokens).collect();
+            order.sort_by(|&a, &b| scores[b].partial_cmp(&scores[a]).unwrap());
+            masked_now = vec![false; num_tokens];
+            for &i in &order[..num_mask.min(num_tokens)] { masked_now[i] = true; }
+            for i in 0..num_tokens { if masked_now[i] { vids[i] = mask_id; } }
+        }
+        // input = cat(prime, vids); drop the last frame ([:, :-1])
+        let mut input = Vec::with_capacity(total);
+        input.extend_from_slice(prime_ids);
+        input.extend_from_slice(&vids);
+        let input_fwd = &input[..t_fwd * hw];
+        let logits = dynamics_forward(gpu, input_fwd, actions, dw, 1, t_fwd as u32, h, wd,
+            dc.dim, dc.heads, dc.head_dim, dc.n_codes, dc.code_dim, dc.num_actions);
+        let start = (t_fwd * hw - num_tokens) * nc; // last num_tokens rows
+        let temp = sample_temperature * (steps_til_x0 as f32 / inference_steps as f32);
+        for tk in 0..num_tokens {
+            let row = &logits[start + tk * nc..start + (tk + 1) * nc];
+            let pred = if temp < 1e-9 {
+                argmax(row)
+            } else {
+                // gumbel_sample: argmax(logit + temp * -log(-log(u)))
+                let mut bi = 0u32; let mut bv = f32::NEG_INFINITY;
+                for (i, &l) in row.iter().enumerate() {
+                    let u = next().clamp(1e-10, 1.0);
+                    let g = -(-u.ln()).ln();
+                    let v = l + temp * g;
+                    if v > bv { bv = v; bi = i as u32; }
+                }
+                bi
+            };
+            vids[tk] = pred;
+        }
+        if step + 1 < inference_steps {
+            for tk in 0..num_tokens {
+                let row = &logits[start + tk * nc..start + (tk + 1) * nc];
+                let mx = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let denom: f32 = row.iter().map(|&l| (l - mx).exp()).sum();
+                let prob = (row[vids[tk] as usize] - mx).exp() / denom;
+                scores[tk] = if masked_now[tk] { 1.0 - prob } else { -1e4 };
+            }
+        }
+    }
+    vids
 }
 
 // ---- dynamics (guided MaskGIT) ----
