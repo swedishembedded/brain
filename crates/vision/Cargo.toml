@@ -1,0 +1,16 @@
+[package]
+name = "brain-vision"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared conv-net building blocks: NCHW shapes, the block-build context, and name-resolved kernel ids for every vision model (yolo, depth)."
+
+[lib]
+name = "vision"
+path = "src/lib.rs"
+
+[dependencies]
+# Deliberately NOT brain-model: the blocks do not implement `Model`, and keeping
+# the trainer out means brain-npu can use the vision layer without pulling it in.
+# brain-paramstore / brain-kernels / bytemuck arrive with the blocks themselves.
+brain-gpu-core.workspace = true
