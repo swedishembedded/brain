@@ -53,15 +53,37 @@ InnerModel, InnerModelConfig = _inner.InnerModel, _inner.InnerModelConfig
 SEED = 7
 # Tiny but structurally complete: 2 levels (1 downsample), mid attention,
 # GroupNorm with 1 group (8 < GN_GROUP_SIZE=32 -> max(1, .)), AdaGroupNorm cond.
-CFG = InnerModelConfig(
-    img_channels=3,
-    num_steps_conditioning=2,
-    cond_channels=16,           # act_emb dim = 16 // 2 = 8 per step
-    depths=[1, 1],
-    channels=[8, 8],
-    attn_depths=[False, True],
-    num_actions=4,
-)
+import os
+if os.environ.get("WM_FIX_DEPTH2"):
+    CFG = InnerModelConfig(
+        img_channels=3, num_steps_conditioning=2, cond_channels=16,
+        depths=[2,2], channels=[8,8], attn_depths=[False,False], num_actions=4,
+    )
+elif os.environ.get("WM_FIX_REAL"):
+    # The published Atari config: 4 levels, 2 resblocks each, mid attention.
+    CFG = InnerModelConfig(
+        img_channels=3, num_steps_conditioning=4, cond_channels=256,
+        depths=[2,2,2,2], channels=[64,64,64,64], attn_depths=[False,False,False,False],
+        num_actions=4,
+    )
+elif os.environ.get("WM_FIX_G2"):
+    # channels 64 -> GroupNorm num_groups = 2 AND attention 8 heads.
+    CFG = InnerModelConfig(
+        img_channels=3, num_steps_conditioning=2, cond_channels=64,
+        depths=[1, 1], channels=[64, 64], attn_depths=[False, True], num_actions=4,
+    )
+elif os.environ.get("WM_FIX_HEADS2"):
+    # Attention at channels[-1]=16, head_dim 8 -> 2 heads (exercises the
+    # multi-head path the 8-channel fixture cannot).
+    CFG = InnerModelConfig(
+        img_channels=3, num_steps_conditioning=2, cond_channels=32,
+        depths=[1, 1], channels=[16, 16], attn_depths=[False, True], num_actions=4,
+    )
+else:
+    CFG = InnerModelConfig(
+        img_channels=3, num_steps_conditioning=2, cond_channels=16,
+        depths=[1, 1], channels=[8, 8], attn_depths=[False, True], num_actions=4,
+    )
 H = W = 8
 
 

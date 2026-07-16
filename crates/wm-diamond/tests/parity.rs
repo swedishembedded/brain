@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use wm_diamond::{DiamondConfig, DiamondUNet, Tensors};
 
 fn fixture_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("WM_FIXTURE_DIR") {
+        return PathBuf::from(d);
+    }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/diamond")
 }
 

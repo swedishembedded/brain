@@ -134,6 +134,7 @@ impl<'a> TB<'a> {
         TVal { buf: self.gpu.storage(len as u64), grad: self.gpu.storage(len as u64), len }
     }
 
+
     fn host(&self, name: &str) -> (Vec<usize>, Vec<f32>) {
         self.t.get(name).unwrap_or_else(|| panic!("diamond train: missing tensor {name}")).clone()
     }
@@ -187,12 +188,7 @@ impl<'a> TB<'a> {
             self.gpu.step(K_CONV_DX, &[&y.grad, wgt, &x.grad], &dims, cin * h * w),
             self.gpu.step(K_CONV_DW, &[&y.grad, &x.buf, dwgt], &dims, cout * cin * k * k),
             // dbias[c] = sum over positions: permute [C,HW] -> [HW,C], col-sum.
-            self.gpu.step(
-                K_NCHW_NLC,
-                &[&y.grad, &dy_nlc],
-                &[cout * ho * wo, cout, ho * wo],
-                cout * ho * wo,
-            ),
+            self.gpu.step(K_NCHW_NLC, &[&y.grad, &dy_nlc], &[cout * ho * wo, cout, ho * wo], cout * ho * wo),
             self.gpu.step(K_BIAS_GRAD, &[&dy_nlc, dbias], &[ho * wo, cout], cout),
         ]);
         (y, ho, wo)
@@ -207,12 +203,7 @@ impl<'a> TB<'a> {
         let y = self.val(c * h * w);
         let n = c * h * w;
         self.fwd.push(self.gpu.step(K_GN_PART, &[&x.buf, &part], &[1, c, h, w, g, GN_P], g * GN_P));
-        self.fwd.push(self.gpu.step(
-            K_GN_STATS2,
-            &[&part, &stats],
-            &[1, c, h, w, g, GN_P, f(GN_EPS)],
-            g,
-        ));
+        self.fwd.push(self.gpu.step(K_GN_STATS2, &[&part, &stats], &[1, c, h, w, g, GN_P, f(GN_EPS)], g));
         self.fwd.push(self.gpu.step(K_GN_APPLY, &[&x.buf, &stats, gb, &y.buf], &[1, c, h, w, g], n));
         // Backward (wm_core::gn recipe, dgamma/dbeta skipped — frozen):
         let dyg = self.gpu.storage(n as u64);
@@ -420,11 +411,12 @@ impl<'a> TB<'a> {
         let s2 = self.silu(&n2);
         let (c2, _, _) = self.conv(&format!("{prefix}.conv2"), cout, cout, 3, 1, 1, h, w, &s2);
         let y = self.add(&c2, &r, zero);
-        if attn {
+        let out = if attn {
             self.attn(&format!("{prefix}.attn"), cout, h, w, &y, zero)
         } else {
             y
-        }
+        };
+        out
     }
 }
 
@@ -503,7 +495,13 @@ impl DiamondTrainer {
         let obs_grad = gpu.storage((nsc * ic * h0 * w0) as u64); // discarded
         let x_in = gpu.storage(n_px as u64);
         let x_in_grad = gpu.storage(n_px as u64); // discarded (input grad)
-        let zero = gpu.storage(((nsc + 1) * ic * h0 * w0) as u64); // shared zeros
+        // Shared zeros for the residual-copy backward (`add2(y.grad, zero, .)`).
+        // MUST cover the LARGEST activation any add() operates on — the widest
+        // resblock/attention output is `max_channels * h0 * w0`, NOT the input
+        // `(nsc+1)*ic`. Undersizing here reads OOB zeros → garbage gradients
+        // for any channel width above the input's (the cpg>8 explosion bug).
+        let max_c = *cfg.channels.iter().max().unwrap();
+        let zero = gpu.storage((max_c * h0 * w0) as u64);
 
         let obs_v = TVal { buf: obs_in.clone(), grad: obs_grad, len: nsc * ic * h0 * w0 };
         let x_v = TVal { buf: x_in.clone(), grad: x_in_grad.clone(), len: n_px };
@@ -670,10 +668,12 @@ impl DiamondTrainer {
         *self.batch.borrow_mut() = Some((sigma, actions.to_vec()));
     }
 
+
     pub fn forward_loss(&self) -> f32 {
         self.gpu.submit(&[], &self.fwd);
         self.gpu.read(&self.loss_parts, self.n_px as usize).iter().sum()
     }
+
 
     pub fn backward(&self) {
         self.gpu.submit(&[], &self.bwd);
@@ -688,7 +688,9 @@ impl DiamondTrainer {
         self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, 1.0);
     }
 
+
     /// The inner-model output F of the last forward.
+
     pub fn read_output(&self) -> Vec<f32> {
         self.gpu.read(&self.y_out, self.n_px as usize)
     }

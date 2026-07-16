@@ -422,6 +422,7 @@ impl DiamondUNet {
 
         // conv_in over cat(obs, noisy) — concat then conv.
         let cat = b.concat(nsc * ic, ic, h0, w0, &obs_in, &x_in);
+        b.tap("cat".into(), &cat, (nsc + 1) * ic * h0 * w0);
         let c0 = cfg.channels[0];
         let (mut x, _, _) =
             b.conv_on("conv_in", (nsc + 1) * ic, c0, 3, 1, 1, h0, w0, &cat);
