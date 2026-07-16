@@ -236,6 +236,12 @@ pub const GRAD_SCALE: &str = include_str!("../wgsl/grad_scale.wgsl");
 pub const GRAD_SCALE_BUF: &str = include_str!("../wgsl/grad_scale_buf.wgsl");
 /// `wgsl/gradnorm_sq.wgsl`
 pub const GRADNORM_SQ: &str = include_str!("../wgsl/gradnorm_sq.wgsl");
+/// `wgsl/l2norm_scale.wgsl`
+pub const L2NORM_SCALE: &str = include_str!("../wgsl/l2norm_scale.wgsl");
+/// `wgsl/l2norm_scale_dg.wgsl`
+pub const L2NORM_SCALE_DG: &str = include_str!("../wgsl/l2norm_scale_dg.wgsl");
+/// `wgsl/l2norm_scale_dx.wgsl`
+pub const L2NORM_SCALE_DX: &str = include_str!("../wgsl/l2norm_scale_dx.wgsl");
 /// `wgsl/layernorm.wgsl`
 pub const LAYERNORM: &str = include_str!("../wgsl/layernorm.wgsl");
 /// `wgsl/layernorm_dbeta.wgsl`
@@ -476,6 +482,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("grad_scale", GRAD_SCALE),
     ("grad_scale_buf", GRAD_SCALE_BUF),
     ("gradnorm_sq", GRADNORM_SQ),
+    ("l2norm_scale", L2NORM_SCALE),
+    ("l2norm_scale_dg", L2NORM_SCALE_DG),
+    ("l2norm_scale_dx", L2NORM_SCALE_DX),
     ("layernorm", LAYERNORM),
     ("layernorm_dbeta", LAYERNORM_DBETA),
     ("layernorm_dgamma", LAYERNORM_DGAMMA),
