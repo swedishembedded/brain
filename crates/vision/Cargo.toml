@@ -12,5 +12,6 @@ path = "src/lib.rs"
 [dependencies]
 # Deliberately NOT brain-model: the blocks do not implement `Model`, and keeping
 # the trainer out means brain-npu can use the vision layer without pulling it in.
-# brain-paramstore / brain-kernels / bytemuck arrive with the blocks themselves.
 brain-gpu-core.workspace = true
+brain-paramstore.workspace = true
+bytemuck.workspace = true

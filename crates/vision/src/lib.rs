@@ -44,8 +44,10 @@
 //! not implement `Model`, and keeping the trainer out means `brain-npu` can use
 //! the vision layer without pulling it in.
 
+pub mod blocks;
 pub mod ids;
 pub mod net;
 
+pub use blocks::{Bottleneck, Conv, C2f, SPPF};
 pub use ids::{ConvKernelIds, NONE};
 pub use net::{ActTap, Ctx, Shape};

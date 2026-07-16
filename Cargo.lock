@@ -592,6 +592,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-vision"
+version = "0.1.0"
+dependencies = [
+ "brain-gpu-core",
+ "brain-paramstore",
+ "bytemuck",
+]
+
+[[package]]
 name = "brain-vulkan"
 version = "0.1.0"
 dependencies = [
@@ -684,6 +693,7 @@ dependencies = [
  "brain-model",
  "brain-optim",
  "brain-paramstore",
+ "brain-vision",
  "bytemuck",
  "serde_json",
 ]
