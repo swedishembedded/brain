@@ -297,3 +297,33 @@ pub fn stblock_forward(
 pub fn ff_inner(dim: u32) -> u32 {
     ((dim as f64) * 4.0 * 2.0 / 3.0) as u32
 }
+
+// ---- STTransformer (a stack of STBlocks + final LayerNorm) ----
+
+/// An STTransformer: `layers` STBlocks then `norm_out` — the body of the
+/// tokenizer encoder/decoder (8 blocks each) and the dynamics MaskGIT
+/// transformer (12 blocks). The spatial/temporal position biases are shared
+/// across layers (a fixed function of the grid), so they are supplied once.
+pub struct StTransformerWeights {
+    pub layers: Vec<StBlockWeights>,
+    pub norm_out_gamma: Vec<f32>, // [dim]
+}
+
+/// Run the block stack over a channels-last `[b,t,h,w,dim]` video and apply the
+/// final LayerNorm (no bias). Returns `[b,t,h,w,dim]`.
+#[allow(clippy::too_many_arguments)]
+pub fn sttransformer_forward(
+    gpu: &Gpu, x: &[f32], b: u32, t: u32, h: u32, w: u32, dim: u32, heads: u32, head_dim: u32,
+    wts: &StTransformerWeights, spatial_bias: &[f32], temporal_bias: &[f32], peg_causal: bool,
+) -> Vec<f32> {
+    let mut cur = x.to_vec();
+    for blk in &wts.layers {
+        cur = stblock_forward(gpu, &cur, b, t, h, w, dim, heads, head_dim, blk, spatial_bias, temporal_bias, peg_causal);
+    }
+    let rows = b * t * h * w;
+    let xb = gpu.storage_init("x", &cur);
+    let g = gpu.storage_init("g", &wts.norm_out_gamma);
+    let beta = gpu.storage(dim as u64);
+    let out = layernorm(gpu, &xb, &g, &beta, rows, dim);
+    gpu.read(&out, (rows * dim) as usize)
+}
