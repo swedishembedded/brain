@@ -1309,6 +1309,73 @@ impl<'a, 'b> Tr<'a, 'b> {
                 let call = self.b.ins().call(fref, &[a]);
                 Ok(Eval::Scalar(self.b.inst_results(call)[0], Ty::F32))
             }
+            // --- rounding: Cranelift has these natively, and each matches the
+            // WGSL builtin exactly. `Round` is roundToIntegralTiesToEven, which
+            // is WGSL's "halfway cases round to even" -- NOT `round-half-away`,
+            // so do not reach for a `floor(x+0.5)` shortcut here.
+            Floor => Ok(Eval::Scalar(self.b.ins().floor(a), Ty::F32)),
+            Ceil => Ok(Eval::Scalar(self.b.ins().ceil(a), Ty::F32)),
+            Trunc => Ok(Eval::Scalar(self.b.ins().trunc(a), Ty::F32)),
+            Round => Ok(Eval::Scalar(self.b.ins().nearest(a), Ty::F32)),
+            // fract(e) = e - floor(e)
+            Fract => {
+                let f = self.b.ins().floor(a);
+                Ok(Eval::Scalar(self.b.ins().fsub(a, f), Ty::F32))
+            }
+            // clamp(e, low, high) = min(max(e, low), high)
+            Clamp => {
+                let (lo, _) = self.scalar(arg1.ok_or("clamp needs 3 args")?)?;
+                let (hi, _) = self.scalar(_arg2.ok_or("clamp needs 3 args")?)?;
+                let v = if at.is_float() {
+                    let m = self.b.ins().fmax(a, lo);
+                    self.b.ins().fmin(m, hi)
+                } else if at == Ty::I32 {
+                    let m = self.b.ins().smax(a, lo);
+                    self.b.ins().smin(m, hi)
+                } else {
+                    let m = self.b.ins().umax(a, lo);
+                    self.b.ins().umin(m, hi)
+                };
+                Ok(Eval::Scalar(v, at))
+            }
+            // saturate(e) = clamp(e, 0.0, 1.0)
+            Saturate => {
+                let zero = self.b.ins().f32const(0.0);
+                let one = self.b.ins().f32const(1.0);
+                let m = self.b.ins().fmax(a, zero);
+                Ok(Eval::Scalar(self.b.ins().fmin(m, one), Ty::F32))
+            }
+            // mix(e1, e2, e3) = e1*(1-e3) + e2*e3  (the spec form, not the
+            // algebraically-equal `e1 + e3*(e2-e1)`: they differ in fp32 rounding
+            // and the spec form is what the wgpu path computes).
+            Mix => {
+                let (b, _) = self.scalar(arg1.ok_or("mix needs 3 args")?)?;
+                let (t, _) = self.scalar(_arg2.ok_or("mix needs 3 args")?)?;
+                let one = self.b.ins().f32const(1.0);
+                let inv = self.b.ins().fsub(one, t);
+                let l = self.b.ins().fmul(a, inv);
+                let r = self.b.ins().fmul(b, t);
+                Ok(Eval::Scalar(self.b.ins().fadd(l, r), Ty::F32))
+            }
+            // sign(e) = e < 0 ? -1 : (e > 0 ? 1 : 0)
+            Sign if at.is_float() => {
+                let zero = self.b.ins().f32const(0.0);
+                let pos1 = self.b.ins().f32const(1.0);
+                let neg1 = self.b.ins().f32const(-1.0);
+                let gt = self.b.ins().fcmp(FloatCC::GreaterThan, a, zero);
+                let hi = self.b.ins().select(gt, pos1, zero);
+                let lt = self.b.ins().fcmp(FloatCC::LessThan, a, zero);
+                Ok(Eval::Scalar(self.b.ins().select(lt, neg1, hi), Ty::F32))
+            }
+            Sign => {
+                let zero = self.b.ins().iconst(types::I32, 0);
+                let pos1 = self.b.ins().iconst(types::I32, 1);
+                let neg1 = self.b.ins().iconst(types::I32, -1);
+                let gt = self.b.ins().icmp(IntCC::SignedGreaterThan, a, zero);
+                let hi = self.b.ins().select(gt, pos1, zero);
+                let lt = self.b.ins().icmp(IntCC::SignedLessThan, a, zero);
+                Ok(Eval::Scalar(self.b.ins().select(lt, neg1, hi), Ty::I32))
+            }
             other => Err(format!("unsupported math fn {other:?}")),
         }
     }
