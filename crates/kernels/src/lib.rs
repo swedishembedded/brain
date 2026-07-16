@@ -26,14 +26,20 @@ pub const ATTN_APPLY: &str = include_str!("../wgsl/attn_apply.wgsl");
 pub const ATTN_APPLY_BIDIR: &str = include_str!("../wgsl/attn_apply_bidir.wgsl");
 /// `wgsl/attn_apply_cross.wgsl`
 pub const ATTN_APPLY_CROSS: &str = include_str!("../wgsl/attn_apply_cross.wgsl");
+/// `wgsl/attn_bwd_dbias.wgsl`
+pub const ATTN_BWD_DBIAS: &str = include_str!("../wgsl/attn_bwd_dbias.wgsl");
 /// `wgsl/attn_bwd_dk.wgsl`
 pub const ATTN_BWD_DK: &str = include_str!("../wgsl/attn_bwd_dk.wgsl");
+/// `wgsl/attn_bwd_dk_bias.wgsl`
+pub const ATTN_BWD_DK_BIAS: &str = include_str!("../wgsl/attn_bwd_dk_bias.wgsl");
 /// `wgsl/attn_bwd_dk_bidir.wgsl`
 pub const ATTN_BWD_DK_BIDIR: &str = include_str!("../wgsl/attn_bwd_dk_bidir.wgsl");
 /// `wgsl/attn_bwd_dk_cross.wgsl`
 pub const ATTN_BWD_DK_CROSS: &str = include_str!("../wgsl/attn_bwd_dk_cross.wgsl");
 /// `wgsl/attn_bwd_dq.wgsl`
 pub const ATTN_BWD_DQ: &str = include_str!("../wgsl/attn_bwd_dq.wgsl");
+/// `wgsl/attn_bwd_dq_bias.wgsl`
+pub const ATTN_BWD_DQ_BIAS: &str = include_str!("../wgsl/attn_bwd_dq_bias.wgsl");
 /// `wgsl/attn_bwd_dq_bidir.wgsl`
 pub const ATTN_BWD_DQ_BIDIR: &str = include_str!("../wgsl/attn_bwd_dq_bidir.wgsl");
 /// `wgsl/attn_bwd_dq_cross.wgsl`
@@ -54,6 +60,10 @@ pub const ATTN_BWD_DV_CROSS: &str = include_str!("../wgsl/attn_bwd_dv_cross.wgsl
 pub const ATTN_SCORES: &str = include_str!("../wgsl/attn_scores.wgsl");
 /// `wgsl/attn_scores_bidir.wgsl`
 pub const ATTN_SCORES_BIDIR: &str = include_str!("../wgsl/attn_scores_bidir.wgsl");
+/// `wgsl/attn_scores_bidir_bias.wgsl`
+pub const ATTN_SCORES_BIDIR_BIAS: &str = include_str!("../wgsl/attn_scores_bidir_bias.wgsl");
+/// `wgsl/attn_scores_causal_bias.wgsl`
+pub const ATTN_SCORES_CAUSAL_BIAS: &str = include_str!("../wgsl/attn_scores_causal_bias.wgsl");
 /// `wgsl/attn_scores_cross.wgsl`
 pub const ATTN_SCORES_CROSS: &str = include_str!("../wgsl/attn_scores_cross.wgsl");
 /// `wgsl/attn_scores_masked.wgsl`
@@ -361,10 +371,13 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_apply", ATTN_APPLY),
     ("attn_apply_bidir", ATTN_APPLY_BIDIR),
     ("attn_apply_cross", ATTN_APPLY_CROSS),
+    ("attn_bwd_dbias", ATTN_BWD_DBIAS),
     ("attn_bwd_dk", ATTN_BWD_DK),
+    ("attn_bwd_dk_bias", ATTN_BWD_DK_BIAS),
     ("attn_bwd_dk_bidir", ATTN_BWD_DK_BIDIR),
     ("attn_bwd_dk_cross", ATTN_BWD_DK_CROSS),
     ("attn_bwd_dq", ATTN_BWD_DQ),
+    ("attn_bwd_dq_bias", ATTN_BWD_DQ_BIAS),
     ("attn_bwd_dq_bidir", ATTN_BWD_DQ_BIDIR),
     ("attn_bwd_dq_cross", ATTN_BWD_DQ_CROSS),
     ("attn_bwd_dscores", ATTN_BWD_DSCORES),
@@ -375,6 +388,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_bwd_dv_cross", ATTN_BWD_DV_CROSS),
     ("attn_scores", ATTN_SCORES),
     ("attn_scores_bidir", ATTN_SCORES_BIDIR),
+    ("attn_scores_bidir_bias", ATTN_SCORES_BIDIR_BIAS),
+    ("attn_scores_causal_bias", ATTN_SCORES_CAUSAL_BIAS),
     ("attn_scores_cross", ATTN_SCORES_CROSS),
     ("attn_scores_masked", ATTN_SCORES_MASKED),
     ("attn_softmax", ATTN_SOFTMAX),
