@@ -126,14 +126,24 @@ actions.json (7 actions), convert via wm-ingest.
   step). ContinuousPositionBias/ALiBi MLP outputs are precomputed host-side and
   fed as the bias buffer.
 
+## P4 progress (cont.)
+- [done] dwconv3d generalized to independent spatial/temporal pad (causal PEG).
+- [done] STBlock assembled + host-verified (<2e-4): spatial(PEG->bidir attn CPB
+  ->GEGLU) then temporal(PEG->causal attn ALiBi->GEGLU), 6 residual stages, with
+  the (b t)(h w) <-> (b h w) t reshape. crates/wm-genie: peg_forward_w,
+  stblock_forward.
+- [done] STTransformer stack (N blocks + norm_out) — sttransformer_forward.
+  This is the shared body of tokenizer enc/dec (8) and dynamics (12).
+
 ## Next (P4 remaining)
-1. STBlock assembly: spatial(peg->attn(bidir,CPB)->ff) then temporal(peg->
-   attn(causal,ALiBi)->ff), post-residual, with the (b t)(h w)d <-> (b h w)t d
-   reshapes. PEG = dwconv3d (temporal causal pad (2,0) host pre-pad).
-2. Tokenizer: patch-embed (4x4x3) -> 8 enc STBlocks -> norm_out -> cosine VQ
-   (wm_core::vq, 1024x32) -> 8 dec STBlocks -> to_pixels. Import name-map (514).
-3. Dynamics: token/pos emb + action one-hot concat (dim 519) -> 12 STBlocks ->
-   to_logits (1024) -> guided MaskGIT sampler (host). Import name-map (372).
+1. Tokenizer forward: patch-embed (LN(48)->Linear48->512->LN, + first-frame
+   variant) -> STTransformer(8) -> project_in(512->32) -> cosine VQ
+   (wm_core::vq, 1024x32) -> project_out(32->512) -> STTransformer(8) ->
+   to_pixels(512->48) -> unpatch. NOTE: brain gelu=tanh vs torch erf F.gelu ->
+   may need an erf-gelu kernel for tight checkpoint parity.
+2. Dynamics forward: token/pos emb + action one-hot concat (dim 519) ->
+   STTransformer(12, dim 519) -> to_logits(1024) -> guided MaskGIT sampler.
+3. Import name-maps (tokenizer 514 / dynamics 372, full coverage).
 4. Parity dump (scripts/parity-dump/genie.py) + per-layer allclose.
 5. CoinRun ingest + WorldModel wrap -> interactive.
 
