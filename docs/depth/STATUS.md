@@ -58,17 +58,30 @@ from the specs in `docs/depth/specs/`.
 - Proof at every step: forward pin bitwise-identical, p8 297 tensors / 3,167,776
   params unchanged, p3 gradcheck green, full workspace suite 178/178.
 
-### P2 — the depth kernel family
-- 17 kernels, registry 180 → 200, all JIT-compiling on both backends.
+### P2 — the depth kernel family (COMPLETE for ZipDepth)
+- **28 kernels, registry 180 → 211**, all JIT-compiling on both backends.
+  `conv2d_gd{,_dx,_dw}`, `resize_bilinear{,_dx}`, `resize_nearest{,_dx}`,
+  `avgpool2d{,_dx}`, `strip_pool{,_dx}`, `broadcast_add_hw{,_da}`,
+  `softmax_hw{,_dx}`, `softmax_k{,_dx}`, `weighted_gap{,_dx,_dm}`,
+  `add_chan_bcast{,_dv}`, `pixel_shuffle{,_dx}`,
+  `convex_upsample{,_dmask,_dd}`, `sigmoid{,_bwd}`, `masked_l1{,_grad}`.
+  **Everything ZipDepth's default path executes now exists.**
 - **ReLU cost nothing**: `leaky_relu(slope=0)` is exactly ReLU in both
   directions. ConvTranspose2d deferred (DPT needs it, ZipDepth doesn't).
 - Tested by **adjointness**, not FD: every `*_dx` here is the adjoint of a linear
   op, so `<A(x),y> == <x,Aᵀ(y)>` holds to round-off rather than a tolerance, and
   it catches exactly this family's failure modes (dropped edge tap, transposed
-  group index, off-by-one window). 14 tests.
+  group index, off-by-one window). 19 tests.
+  ⚠️ An adjoint identity only holds for the operator you actually applied: where
+  the forward SUMS two broadcasts (`broadcast_add_hw`), each argument must be
+  isolated by zeroing the other, or the test reports a broken adjoint for a
+  correct kernel.
 - Backwards are all **gathers** (brain is atomic-free). Where inverting the index
   map is subtle, the candidate range is loose and each candidate re-evaluates the
   *forward's own* predicate — one definition, evaluated twice.
+- Fixed a latent **SIGPIPE race in `scripts/kernels-regen.sh`**
+  (`grep | head -1` under `set -o pipefail`): it worked at 180/200 kernels and
+  began aborting the regen at 211, reading as "nothing happened".
 
 ## Decisions
 
@@ -100,18 +113,43 @@ from the specs in `docs/depth/specs/`.
   `mla_scores` and `layernorm_dgamma` bind 5, and WebGPU guarantees 8.
 - The p3 yolo gradcheck takes **~29 min** under contention; budget for it.
 
-## Next
+## Next — P3, `crates/depth`: the ZipDepth model
 
-P3 — `crates/depth`: the ZipDepth model. Blocks compose from `crates/vision`
-(`ConvBN` + the new `conv2d_gd`), plus the ZipDepth-specific modules
-(`QARepBlock`, SE, `StripPoolingAttention`, `GlobalContextBlock`,
-`MinimalMultiScale`/`CrossScale`, `LightweightSPPF`, `UltraLightFusion`,
-`FastConvexUpsample`). `maxpool5` IS LightweightSPPF exactly.
+The kernel layer is complete; this is now purely composition. Everything below is
+verified against the two released checkpoints (`strict=True`, zero missing/
+unexpected keys) — see `resources/depth-models/README.md` and the spec notes in
+this repo's plan.
 
-Still needed before the model closes (identified while writing P2, not yet
-built): a broadcast-add for StripPoolingAttention (`[B,C,H,1] + [B,C,1,W]`), the
-GlobalContextBlock's per-image `[B,C,HW]x[B,HW,1]` weighted pool and its
-`[B,C,1,1]` residual add (`bias_add` is `[C]` shared across N, so it does not
-fit), a softmax over the **9 axis** for `FastConvexUpsample` (distinct from
-`softmax_hw`), and a generic-scale `resize_nearest` for `MinimalCrossScale`
-(`upsample2` is 2×-hardcoded).
+**Config (base/balanced, the 6.1M model):** `dims=[48,96,192,384]`,
+`depths=[2,2,6,2]`, `dec_ch=96`, `half_dec_ch=32`.
+
+**Module → kernel map** (all present):
+| module | kernels |
+|---|---|
+| `ConvBN` | `conv2d_gd` + `bn_*` + `leaky_relu(0)` |
+| `QARepBlock` | 2× `conv2d_gd` + `bn_*` + `add2` + relu. **Identity branch has NO BN** → its fuse adds no bias term |
+| `ChannelAttention` (SE) | `avgpool2d`(1,1) + 2× `conv2d_gd`(1×1, no bias) + relu + `sigmoid` + `mul` |
+| `StripPoolingAttention` | `strip_pool`×2 + `broadcast_add_hw` + depthwise `conv2d_gd` + `bn` + `sigmoid` + `mul` |
+| `GlobalContextBlock` | `conv2d_gd`(C→1, bias) + `softmax_hw` + `weighted_gap` + 2× `conv2d_gd` + `bn` + relu + `add_chan_bcast` |
+| `MinimalMultiScale` | 2× depthwise `conv2d_gd` (dilation 1 and 2) + `add2` + `bn` + `add2` |
+| `MinimalCrossScale` | grouped 1×1 `conv2d_gd` + `resize_nearest` + `avgpool2d` + `scale_chan`(0.3) + `add2` |
+| `LightweightSPPF` | `ConvBN` + 3× **`maxpool5`** (exact match, K/pad are params) + `concat2` + `ConvBN` |
+| `UltraLightFusion` | `resize_bilinear`(align=**false**) + 2× grouped 1×1 + `add2` + `bn` + relu |
+| `head_half` | `conv2d_gd`(3×3) + `bias_add` |
+| `FastConvexUpsample` (unfold) | `ConvBN` + `conv2d_gd`(→36, bias) + `softmax_k`(K=9) + `convex_upsample` |
+| `FastConvexUpsample` (npu) | 1×1 + `bn` + relu + depthwise 5×5 + `bn` + relu + 1×1 + `sigmoid` + blend of `resize_nearest`/`resize_bilinear` |
+
+**Gotchas already established:**
+- ImageNet normalize is **inside** the model; `mean`/`std` are `(1,3,1,1)` buffers
+  **in the state_dict**.
+- Output is `[B,1,H,W]` at **exactly** the input resolution, final **ReLU** →
+  unbounded non-negative **inverse depth**, relative only.
+- `_pick_groups(max_g=4)` must be replicated exactly — it determines weight shapes.
+- `align_corners` is inconsistent **by design**: `false` inside the decoder,
+  `true` in the predictor's final upsample to source resolution. Match both.
+- The 6.1M figure is **post-fusion**; the checkpoint stores the 6.79M unfused form.
+- Dead code — do not port: `decoder.forward`'s `size` arg, `edge_ch`,
+  `use_half_res=False`/`head_direct`, `ZipDepthDecoder.fuse()`.
+- Gradcheck at **eps=5e-4** (not 5e-3), per `yolo/tests/p3_gradcheck.rs:36-44`.
+
+Then: P4 (data/train/eval), P5 (demo), P6 (NPU), P7 (DA3), P8 (docs).
