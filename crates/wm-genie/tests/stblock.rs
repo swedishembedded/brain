@@ -98,16 +98,23 @@ fn h_peg(x: &[f32], w: &PegWeights, b: usize, t: usize, h: usize, wd: usize, d: 
 fn addv(a: &[f32], b: &[f32]) -> Vec<f32> { a.iter().zip(b).map(|(x,y)| x+y).collect() }
 
 #[allow(clippy::too_many_arguments)]
-fn h_stblock(x: &[f32], w: &StBlockWeights, b: usize, t: usize, h: usize, wd: usize, dim: usize,
-             heads: usize, hd: usize, sb: &[f32], tb: &[f32], causal: bool) -> Vec<f32> {
+fn h_spatial(x: &[f32], w: &StBlockWeights, b: usize, t: usize, h: usize, wd: usize, dim: usize,
+             heads: usize, hd: usize, sb: &[f32], causal: bool) -> Vec<f32> {
     let inner = ff_inner(dim as u32) as usize;
     let hw = h*wd;
     let mut xs = x.to_vec();
     xs = addv(&xs, &h_peg(&xs, &w.spatial_peg, b,t,h,wd,dim, causal));
     xs = addv(&xs, &h_attn(&xs, &w.spatial_attn, sb, b*t, hw, dim, heads, hd, false));
     xs = addv(&xs, &h_geglu(&xs, &w.spatial_ff, b*t*hw, dim, inner));
+    xs
+}
+#[allow(clippy::too_many_arguments)]
+fn h_temporal(x: &[f32], w: &StBlockWeights, b: usize, t: usize, h: usize, wd: usize, dim: usize,
+              heads: usize, hd: usize, tb: &[f32], causal: bool) -> Vec<f32> {
+    let inner = ff_inner(dim as u32) as usize;
+    let hw = h*wd;
+    let mut xs = x.to_vec();
     xs = addv(&xs, &h_peg(&xs, &w.temporal_peg, b,t,h,wd,dim, causal));
-    // permute [b,t,h,w,d] -> [b,h,w,t,d]
     let mut xt = vec![0.0f32; xs.len()];
     for bb in 0..b { for tt in 0..t { for hh in 0..h { for ww in 0..wd {
         let s=(((bb*t+tt)*h+hh)*wd+ww)*dim; let dd=(((bb*h+hh)*wd+ww)*t+tt)*dim;
@@ -121,6 +128,17 @@ fn h_stblock(x: &[f32], w: &StBlockWeights, b: usize, t: usize, h: usize, wd: us
         out[dd..dd+dim].copy_from_slice(&xt[s..s+dim]);
     }}}}
     out
+}
+#[allow(clippy::too_many_arguments)]
+fn h_stblock(x: &[f32], w: &StBlockWeights, b: usize, t: usize, h: usize, wd: usize, dim: usize,
+             heads: usize, hd: usize, sb: &[f32], tb: &[f32], causal: bool, temporal_first: bool) -> Vec<f32> {
+    if temporal_first {
+        let x = h_temporal(x, w, b, t, h, wd, dim, heads, hd, tb, causal);
+        h_spatial(&x, w, b, t, h, wd, dim, heads, hd, sb, causal)
+    } else {
+        let x = h_spatial(x, w, b, t, h, wd, dim, heads, hd, sb, causal);
+        h_temporal(&x, w, b, t, h, wd, dim, heads, hd, tb, causal)
+    }
 }
 
 fn mk_attn(dim: usize, inner: usize, hd: usize, s: u64) -> AttnWeights {
@@ -140,8 +158,7 @@ fn mk_peg(dim: usize, s: u64) -> PegWeights {
     PegWeights { dsconv: rand(s, dim*27).iter().map(|v| v*0.3).collect(), bias: rand(s+1, dim) }
 }
 
-#[test]
-fn stblock_matches_host_reference() {
+fn run_stblock(temporal_first: bool) {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
     let (b, t, h, w, dim, heads, hd) = (2usize, 3usize, 2usize, 2usize, 16usize, 2usize, 8usize);
     let inner = heads*hd;
@@ -154,8 +171,11 @@ fn stblock_matches_host_reference() {
         spatial_peg: mk_peg(dim, 100), spatial_attn: mk_attn(dim, inner, hd, 110), spatial_ff: mk_ff(dim, ffi, 120),
         temporal_peg: mk_peg(dim, 130), temporal_attn: mk_attn(dim, inner, hd, 140), temporal_ff: mk_ff(dim, ffi, 150),
     };
-    let got = stblock_forward(&gpu, &x, b as u32, t as u32, h as u32, w as u32, dim as u32, heads as u32, hd as u32, &wts, &sb, &tb, true);
-    let want = h_stblock(&x, &wts, b, t, h, w, dim, heads, hd, &sb, &tb, true);
+    let got = stblock_forward(&gpu, &x, b as u32, t as u32, h as u32, w as u32, dim as u32, heads as u32, hd as u32, &wts, &sb, &tb, true, temporal_first);
+    let want = h_stblock(&x, &wts, b, t, h, w, dim, heads, hd, &sb, &tb, true, temporal_first);
     let max = got.iter().zip(&want).map(|(a,b)|(a-b).abs()).fold(0.0f32,f32::max);
-    assert!(max < 2e-4, "stblock max abs {max}");
+    assert!(max < 2e-4, "stblock temporal_first={temporal_first} max abs {max}");
 }
+
+#[test] fn stblock_st_order() { run_stblock(false); } // encoder
+#[test] fn stblock_ts_order() { run_stblock(true); }  // decoder

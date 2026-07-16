@@ -263,34 +263,48 @@ fn from_temporal(x: &[f32], b: usize, t: usize, h: usize, w: usize, d: usize) ->
 /// Spatial sub-block attends over the `h·w` tokens of each frame
 /// (bidirectional; `spatial_bias` = ContinuousPositionBias `[heads,hw,hw]`);
 /// temporal attends over the `t` frames at each location (causal; `temporal_bias`
-/// = ALiBi `[heads,t,t]`). Each of the six stages is residual, matching
-/// `STBlock.spatial_temporal_forward`. PEGs are causal (temporal pad `(2,0)`).
+/// = ALiBi `[heads,t,t]`). Each of the six stages is residual. `temporal_first`
+/// selects the order: `false` = "st" (encoder), `true` = "ts" (decoder). PEGs
+/// are causal (temporal pad `(2,0)`). Matches `STBlock.{spatial_temporal,
+/// temporal_spatial}_forward`.
 #[allow(clippy::too_many_arguments)]
 pub fn stblock_forward(
     gpu: &Gpu, x: &[f32], b: u32, t: u32, h: u32, w: u32, dim: u32, heads: u32, head_dim: u32,
     wts: &StBlockWeights, spatial_bias: &[f32], temporal_bias: &[f32], peg_causal: bool,
+    temporal_first: bool,
 ) -> Vec<f32> {
     let (bu, tu, hu, wu, du) = (b as usize, t as usize, h as usize, w as usize, dim as usize);
     let hw = h * w;
 
-    // --- spatial: rows folded as (b t)(h w), directly contiguous ---
-    let mut xs = x.to_vec();
-    let p = peg_forward_w(gpu, &xs, &wts.spatial_peg, b, t, h, w, dim, peg_causal);
-    xs = add(&xs, &p);
-    let a = attn_forward(gpu, &xs, b * t, hw, dim, heads, head_dim, &wts.spatial_attn, spatial_bias, false);
-    xs = add(&xs, &a);
-    let f = geglu_forward(gpu, &xs, b * t * hw, dim, ff_inner(dim), &wts.spatial_ff);
-    xs = add(&xs, &f);
+    // Spatial half: rows folded as (b t)(h w), directly contiguous.
+    let spatial = |xin: &[f32]| -> Vec<f32> {
+        let mut xs = xin.to_vec();
+        let p = peg_forward_w(gpu, &xs, &wts.spatial_peg, b, t, h, w, dim, peg_causal);
+        xs = add(&xs, &p);
+        let a = attn_forward(gpu, &xs, b * t, hw, dim, heads, head_dim, &wts.spatial_attn, spatial_bias, false);
+        xs = add(&xs, &a);
+        let f = geglu_forward(gpu, &xs, b * t * hw, dim, ff_inner(dim), &wts.spatial_ff);
+        add(&xs, &f)
+    };
+    // Temporal half: PEG on the same video, then causal attention over t
+    // (rows re-folded as (b h w) t).
+    let temporal = |xin: &[f32]| -> Vec<f32> {
+        let mut xs = xin.to_vec();
+        let p = peg_forward_w(gpu, &xs, &wts.temporal_peg, b, t, h, w, dim, peg_causal);
+        xs = add(&xs, &p);
+        let mut xt = to_temporal(&xs, bu, tu, hu, wu, du);
+        let a = attn_forward(gpu, &xt, b * h * w, t, dim, heads, head_dim, &wts.temporal_attn, temporal_bias, true);
+        xt = add(&xt, &a);
+        let f = geglu_forward(gpu, &xt, b * h * w * t, dim, ff_inner(dim), &wts.temporal_ff);
+        xt = add(&xt, &f);
+        from_temporal(&xt, bu, tu, hu, wu, du)
+    };
 
-    // --- temporal: PEG on the same video, then attention over t ---
-    let p = peg_forward_w(gpu, &xs, &wts.temporal_peg, b, t, h, w, dim, peg_causal);
-    xs = add(&xs, &p);
-    let mut xt = to_temporal(&xs, bu, tu, hu, wu, du);
-    let a = attn_forward(gpu, &xt, b * h * w, t, dim, heads, head_dim, &wts.temporal_attn, temporal_bias, true);
-    xt = add(&xt, &a);
-    let f = geglu_forward(gpu, &xt, b * h * w * t, dim, ff_inner(dim), &wts.temporal_ff);
-    xt = add(&xt, &f);
-    from_temporal(&xt, bu, tu, hu, wu, du)
+    if temporal_first {
+        spatial(&temporal(x))
+    } else {
+        temporal(&spatial(x))
+    }
 }
 
 /// GEGLU inner dim used by GenieRedux: `round(dim * 4 * 2/3)`.
@@ -315,10 +329,11 @@ pub struct StTransformerWeights {
 pub fn sttransformer_forward(
     gpu: &Gpu, x: &[f32], b: u32, t: u32, h: u32, w: u32, dim: u32, heads: u32, head_dim: u32,
     wts: &StTransformerWeights, spatial_bias: &[f32], temporal_bias: &[f32], peg_causal: bool,
+    temporal_first: bool,
 ) -> Vec<f32> {
     let mut cur = x.to_vec();
     for blk in &wts.layers {
-        cur = stblock_forward(gpu, &cur, b, t, h, w, dim, heads, head_dim, blk, spatial_bias, temporal_bias, peg_causal);
+        cur = stblock_forward(gpu, &cur, b, t, h, w, dim, heads, head_dim, blk, spatial_bias, temporal_bias, peg_causal, temporal_first);
     }
     let rows = b * t * h * w;
     let xb = gpu.storage_init("x", &cur);

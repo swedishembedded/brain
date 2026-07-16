@@ -62,11 +62,11 @@ fn sttransformer_stacks_blocks_and_norms() {
         norm_out_gamma: norm_g.clone(),
     };
     let (bu,tu,hu,wu) = (b as u32, t as u32, h as u32, w as u32);
-    let got = sttransformer_forward(&gpu, &x, bu, tu, hu, wu, dim as u32, heads as u32, hd as u32, &wts, &sb, &tb, true);
+    let got = sttransformer_forward(&gpu, &x, bu, tu, hu, wu, dim as u32, heads as u32, hd as u32, &wts, &sb, &tb, true, false);
 
     // reference: two device STBlocks then the same LayerNorm.
-    let a = stblock_forward(&gpu, &x, bu, tu, hu, wu, dim as u32, heads as u32, hd as u32, &wts.layers[0], &sb, &tb, true);
-    let bb = stblock_forward(&gpu, &a, bu, tu, hu, wu, dim as u32, heads as u32, hd as u32, &wts.layers[1], &sb, &tb, true);
+    let a = stblock_forward(&gpu, &x, bu, tu, hu, wu, dim as u32, heads as u32, hd as u32, &wts.layers[0], &sb, &tb, true, false);
+    let bb = stblock_forward(&gpu, &a, bu, tu, hu, wu, dim as u32, heads as u32, hd as u32, &wts.layers[1], &sb, &tb, true, false);
     let want = h_layernorm(&bb, &norm_g, dim);
 
     assert_eq!(got.len(), b*t*h*w*dim);
