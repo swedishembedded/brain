@@ -34,16 +34,16 @@ fn vq_quantize_matches_host() {
     };
     let (got, idx) = vq_quantize(&gpu, &x, &w, N as u32, DIM as u32, CD as u32, K as u32);
 
-    // host reference
+    // host reference: normalize the input only, argmax dot against the RAW
+    // codebook (matching the reference cosine codebook), gather raw codebook.
     let z = linb(&x, &w.project_in_w, &w.project_in_b, N, DIM, CD);
-    let cbn: Vec<Vec<f32>> = (0..K).map(|j| l2(&w.codebook[j*CD..(j+1)*CD])).collect();
     let mut want_idx = vec![0u32; N];
     let mut q = vec![0.0f32; N*CD];
     for n in 0..N {
         let zn = l2(&z[n*CD..(n+1)*CD]);
         let (mut best, mut bi) = (f32::NEG_INFINITY, 0usize);
         for j in 0..K {
-            let dot: f32 = zn.iter().zip(&cbn[j]).map(|(a,b)| a*b).sum();
+            let dot: f32 = zn.iter().zip(&w.codebook[j*CD..(j+1)*CD]).map(|(a,b)| a*b).sum();
             if dot > best { best = dot; bi = j; }
         }
         want_idx[n] = bi as u32;

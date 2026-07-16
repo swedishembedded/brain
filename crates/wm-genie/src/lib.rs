@@ -264,15 +264,16 @@ pub fn vq_quantize(gpu: &Gpu, x: &[f32], w: &VqWeights, n: u32, dim: u32, code_d
     let piw = gpu.storage_init("piw", &w.project_in_w);
     let pib = gpu.storage_init("pib", &w.project_in_b);
     let z = linear_bias(gpu, &xb, &piw, &pib, n, dim, code_dim);
-    // L2-normalize z and the codebook (g = ones -> pure L2 norm)
+    // transform_input = L2-normalize the projected input ONLY (g = ones). The
+    // codebook is used RAW: the reference cosine codebook picks argmax of
+    // (l2norm(z) · embed_raw) — the stored embed is only ~unit-norm, so
+    // normalizing it too would change which code wins.
     let zn = gpu.storage((n * code_dim) as u64);
     gpu.submit(&[], &[att.step_l2norm(gpu, n, code_dim, 0.0, &z, &onesb, &zn)]);
     let cb = gpu.storage_init("cb", &w.codebook);
-    let cbn = gpu.storage((n_codes * code_dim) as u64);
-    gpu.submit(&[], &[att.step_l2norm(gpu, n_codes, code_dim, 0.0, &cb, &onesb, &cbn)]);
-    // argmax cosine -> packed [idx, dot] per query
+    // argmax (l2norm(z) · embed_raw) -> packed [idx, dot] per query
     let packed = gpu.storage((2 * n) as u64);
-    gpu.submit(&[], &[gpu.step(k::VQ_ARGMAX_DOT, &[&zn, &cbn, &packed], &[n, n_codes, code_dim], n)]);
+    gpu.submit(&[], &[gpu.step(k::VQ_ARGMAX_DOT, &[&zn, &cb, &packed], &[n, n_codes, code_dim], n)]);
     let packed_v = gpu.read(&packed, (2 * n) as usize);
     let indices: Vec<u32> = packed_v.chunks_exact(2).map(|c| c[0] as u32).collect();
 
