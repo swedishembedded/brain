@@ -25,6 +25,7 @@ use gpu_core::{DeviceBuffer, Gpu};
 use wm_core::attn::BiasedAttn;
 
 pub mod bias;
+pub mod import;
 
 /// Kernel-table indices used by this crate. Load [`kernel_sources`] at offset 0
 /// and these line up; the biased-attention slice (indices 5..17) also backs
