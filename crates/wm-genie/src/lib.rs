@@ -127,11 +127,14 @@ pub fn attn_forward(
     let gamma = up(&w.norm_gamma);
     let beta = gpu.storage(dim as u64); // LayerNorm bias is a fixed zero buffer
 
-    // pre-norm, then project
+    // q from the NORMED x; k,v from the RAW x. GenieRedux captures
+    // `kv_input = x` before `x = norm(x)`, so for self-attention (context=None)
+    // the key/value projections see the un-normalized input — a real parity
+    // detail, not an oversight.
     let xn = layernorm(gpu, &xb, &gamma, &beta, rows, dim);
     let q = matmul(gpu, &xn, &up(&w.to_q), rows, dim, inner);
-    let kk = matmul(gpu, &xn, &up(&w.to_k), rows, dim, inner);
-    let v = matmul(gpu, &xn, &up(&w.to_v), rows, dim, inner);
+    let kk = matmul(gpu, &xb, &up(&w.to_k), rows, dim, inner);
+    let v = matmul(gpu, &xb, &up(&w.to_v), rows, dim, inner);
 
     // QK-norm: L2 over head_dim (rows*heads slices) times per-dim scale.
     let qn = gpu.storage((rows * inner) as u64);

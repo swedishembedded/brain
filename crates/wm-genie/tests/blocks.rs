@@ -48,8 +48,8 @@ fn host_attn(x: &[f32], w: &AttnWeights, bias: &[f32], b: usize, n: usize, dim: 
     let rows = b*n;
     let xn = layernorm(x, &w.norm_gamma, dim);
     let q = matmul(&xn, &w.to_q, rows, dim, inner);
-    let k = matmul(&xn, &w.to_k, rows, dim, inner);
-    let v = matmul(&xn, &w.to_v, rows, dim, inner);
+    let k = matmul(x, &w.to_k, rows, dim, inner);   // k,v from RAW x
+    let v = matmul(x, &w.to_v, rows, dim, inner);
     let mut out = vec![0.0f32; rows*inner];
     for bb in 0..b { for h in 0..heads {
         let hslice = |t: &[f32], i: usize| t[(bb*n+i)*inner + h*hd .. (bb*n+i)*inner + h*hd + hd].to_vec();

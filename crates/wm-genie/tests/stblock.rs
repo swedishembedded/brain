@@ -44,8 +44,8 @@ fn h_attn(x: &[f32], w: &AttnWeights, bias: &[f32], b: usize, n: usize, dim: usi
     let inner = heads*hd; let rows = b*n;
     let xn = h_layernorm(x, &w.norm_gamma, dim);
     let q = h_matmul(&xn, &w.to_q, rows, dim, inner);
-    let k = h_matmul(&xn, &w.to_k, rows, dim, inner);
-    let v = h_matmul(&xn, &w.to_v, rows, dim, inner);
+    let k = h_matmul(x, &w.to_k, rows, dim, inner);   // k,v from RAW x
+    let v = h_matmul(x, &w.to_v, rows, dim, inner);
     let mut out = vec![0.0f32; rows*inner];
     for bb in 0..b { for hh in 0..heads {
         let sl = |t: &[f32], i: usize| t[(bb*n+i)*inner+hh*hd..(bb*n+i)*inner+hh*hd+hd].to_vec();
