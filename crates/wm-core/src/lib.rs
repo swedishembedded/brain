@@ -7,6 +7,7 @@
 //!
 //! Specs: docs/world-models/specs/P1.worldmodel-trait.md, P1.gn.md, P1.film.md
 
+pub mod attn;
 pub mod film;
 pub mod gn;
 pub mod vq;
