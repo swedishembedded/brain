@@ -158,15 +158,22 @@ actions.json (7 actions), convert via wm-ingest.
   checkpoint: imports clean, all 514 consumed, 8+8 blocks, shapes correct.
   (pure-Rust torchpt reader handles the 1.2GB .pt in ~145s.)
 
+- [DONE] TOKENIZER PARITY-EXACT vs the reference on the real 100M checkpoint:
+  codebook indices 1280/1280 exact, reconstruction max abs ~1e-6. Full pipeline
+  (patch->8 enc->cosine VQ->8 dec->pixels) verified. Final VQ fix: argmax
+  (l2norm(input) . embed_RAW) — codebook used raw (only ~unit-norm). Tooling:
+  scripts/parity-dump/genie_tokenizer.py + tests/parity_tokenizer.rs (ignored).
+  (CPU forward is slow ~19min for f=5 64x64; correctness milestone, not perf.)
+
 ## Next (P4 remaining)
-1. Real reconstruction: import -> tokenizer_forward on a CoinRun frame -> PSNR;
-   parity dump (scripts/parity-dump/genie.py) + per-layer allclose vs the
-   reference repo (case-study neurips branch). Convert .pt -> .weights once
-   (import is slow to re-read).
-2. Dynamics forward: token/pos emb + action one-hot concat (dim 519) ->
+1. Dynamics forward: token/pos emb + action one-hot concat (dim 519) ->
    STTransformer(12, dim 519) -> to_logits(1024) -> guided MaskGIT sampler +
-   import (372). Reuses the same STBlock/attention/bias/erf-gelu.
-3. CoinRun ingest + WorldModel wrap -> interactive SDL/WASD.
+   import (372). Reuses the same STBlock/attention/bias/erf-gelu (all parity-
+   verified). Parity-dump the same way.
+2. CoinRun ingest + WorldModel wrap -> interactive SDL/WASD.
+3. PERF (needed for interactive): the wm-genie forward is host-round-trip heavy
+   (gpu.read between every op) + naive matmul. Move to a single on-device graph
+   / GPU backend; convert .pt -> .weights once (import re-read is ~145s).
 
 ## Backlog (user-reported)
 - [#8 done] SDL window always compiled (no wm-sdl feature / build/wm).
