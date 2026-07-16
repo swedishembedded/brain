@@ -165,15 +165,23 @@ actions.json (7 actions), convert via wm-ingest.
   scripts/parity-dump/genie_tokenizer.py + tests/parity_tokenizer.rs (ignored).
   (CPU forward is slow ~19min for f=5 64x64; correctness milestone, not perf.)
 
+- [DONE] DYNAMICS (guided MaskGIT) forward + import + PARITY-EXACT: predicted
+  argmax 1280/1280, logit max abs ~4e-5 vs the reference on the real 80M ckpt.
+  dynamics_forward (token use_token-blend + pos_emb + action concat dim 512->519
+  -> STTransformer(12) -> to_logits) + import_dynamics (372 tensors, full
+  coverage). Passed on the FIRST parity run — reused the verified stack.
+  BOTH GenieRedux models are now parity-exact in brain.
+
 ## Next (P4 remaining)
-1. Dynamics forward: token/pos emb + action one-hot concat (dim 519) ->
-   STTransformer(12, dim 519) -> to_logits(1024) -> guided MaskGIT sampler +
-   import (372). Reuses the same STBlock/attention/bias/erf-gelu (all parity-
-   verified). Parity-dump the same way.
-2. CoinRun ingest + WorldModel wrap -> interactive SDL/WASD.
-3. PERF (needed for interactive): the wm-genie forward is host-round-trip heavy
-   (gpu.read between every op) + naive matmul. Move to a single on-device graph
-   / GPU backend; convert .pt -> .weights once (import re-read is ~145s).
+1. MaskGIT sampler (host decode loop): iterative confidence-based unmask,
+   cosine schedule, Gumbel/top-k over dynamics_forward logits -> next-frame
+   tokens -> tokenizer.decode -> frame. Then WorldModel wrap.
+2. CoinRun ingest (jpg frames + actions.json, 7 actions) -> wm-ingest.
+3. WorldModel wrap (tokenizer+dynamics+sampler) -> interactive SDL/WASD.
+4. PERF (needed for interactive; correctness is done): wm-genie forward is
+   host-round-trip heavy (gpu.read between every op) + naive matmul (~7-19min
+   CPU). Move to a single on-device graph / GPU backend; convert .pt -> .weights
+   once (import re-read ~145s tokenizer / ~100s dynamics).
 
 ## Backlog (user-reported)
 - [#8 done] SDL window always compiled (no wm-sdl feature / build/wm).
