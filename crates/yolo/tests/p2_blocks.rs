@@ -69,7 +69,7 @@ impl Harness {
     }
 
     fn ctx(&self) -> Ctx<'_> {
-        Ctx::new(&self.gpu)
+        Ctx::new(&self.gpu, yolo::net::ids())
     }
 }
 
@@ -189,7 +189,7 @@ fn conv_stride1_k3() {
     let g = gpu();
     let in_shape = Shape::new(N, 3, 8, 8);
     let block = {
-        let ctx = Ctx::new(&g);
+        let ctx = Ctx::new(&g, yolo::net::ids());
         Box::new(Conv::new(&ctx, "conv", in_shape, 5, 3, 1, 1, true))
     };
     assert_eq!(block.out_shape, Shape::new(N, 5, 8, 8));
@@ -202,7 +202,7 @@ fn conv_stride2_k3() {
     let g = gpu();
     let in_shape = Shape::new(N, 3, 8, 8);
     let block = {
-        let ctx = Ctx::new(&g);
+        let ctx = Ctx::new(&g, yolo::net::ids());
         Box::new(Conv::new(&ctx, "conv", in_shape, 5, 3, 2, 1, true))
     };
     assert_eq!(block.out_shape, Shape::new(N, 5, 4, 4));
@@ -215,7 +215,7 @@ fn conv_k1() {
     let g = gpu();
     let in_shape = Shape::new(N, 4, 6, 6);
     let block = {
-        let ctx = Ctx::new(&g);
+        let ctx = Ctx::new(&g, yolo::net::ids());
         Box::new(Conv::new(&ctx, "conv", in_shape, 6, 1, 1, 0, true))
     };
     assert_eq!(block.out_shape, Shape::new(N, 6, 6, 6));
@@ -228,7 +228,7 @@ fn bottleneck_shortcut_on() {
     let g = gpu();
     let in_shape = Shape::new(N, 6, 6, 6);
     let block = {
-        let ctx = Ctx::new(&g);
+        let ctx = Ctx::new(&g, yolo::net::ids());
         Box::new(Bottleneck::new(&ctx, "b", in_shape, 6, true, true)) // c_in==c_out -> residual
     };
     assert!(block.shortcut, "shortcut should be active for c_in==c_out");
@@ -242,7 +242,7 @@ fn bottleneck_shortcut_off() {
     let g = gpu();
     let in_shape = Shape::new(N, 4, 6, 6);
     let block = {
-        let ctx = Ctx::new(&g);
+        let ctx = Ctx::new(&g, yolo::net::ids());
         Box::new(Bottleneck::new(&ctx, "b", in_shape, 6, false, true)) // c_in!=c_out anyway
     };
     assert!(!block.shortcut);
@@ -257,7 +257,7 @@ fn c2f_block() {
     let in_shape = Shape::new(N, 6, 6, 6);
     // C_out=8 (c=4), n=2 bottlenecks, shortcut on (c_in==c_out==4 inside).
     let block = {
-        let ctx = Ctx::new(&g);
+        let ctx = Ctx::new(&g, yolo::net::ids());
         Box::new(C2f::new(&ctx, "c2f", in_shape, 8, 2, true, true))
     };
     assert_eq!(block.out_shape, Shape::new(N, 8, 6, 6));
@@ -270,7 +270,7 @@ fn sppf_block() {
     let g = gpu();
     let in_shape = Shape::new(N, 8, 6, 6);
     let block = {
-        let ctx = Ctx::new(&g);
+        let ctx = Ctx::new(&g, yolo::net::ids());
         Box::new(SPPF::new(&ctx, "sppf", in_shape, 8, true)) // c=4 inner, 4c=16 concat
     };
     assert_eq!(block.out_shape, Shape::new(N, 8, 6, 6));
@@ -284,7 +284,7 @@ fn head_cls_branch() {
     let in_shape = Shape::new(N, 8, 5, 5);
     let nc = 3;
     let block = {
-        let ctx = Ctx::new(&g);
+        let ctx = Ctx::new(&g, yolo::net::ids());
         Box::new(Branch::new(&ctx, "head.0.cls", in_shape, 6, nc, true))
     };
     assert_eq!(block.out_shape, Shape::new(N, nc, 5, 5));
@@ -298,7 +298,7 @@ fn head_reg_branch() {
     let in_shape = Shape::new(N, 8, 5, 5);
     let reg_max = 4;
     let block = {
-        let ctx = Ctx::new(&g);
+        let ctx = Ctx::new(&g, yolo::net::ids());
         Box::new(Branch::new(&ctx, "head.0.reg", in_shape, 6, 4 * reg_max, true))
     };
     assert_eq!(block.out_shape, Shape::new(N, 4 * reg_max, 5, 5));

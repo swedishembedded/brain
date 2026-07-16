@@ -45,6 +45,7 @@ use paramstore::ParamStore;
 
 use crate::blocks::{Conv, C2f, SPPF};
 use crate::head::Head;
+use crate::net;
 use crate::net::{Ctx, Shape, ADAMW, CLIP_COEF, GRADNORM_SQ, GRAD_SCALE, GRAD_SCALE_BUF, PIPELINES, UPSAMPLE2, UPSAMPLE2_DX, CONCAT2, CONCAT_SPLIT, ADD2};
 use crate::YoloConfig;
 
@@ -276,7 +277,7 @@ impl Yolo {
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         let train = true;
-        let ctx = Ctx::new(&gpu);
+        let ctx = Ctx::new(&gpu, net::ids());
         let side = cfg.input;
         let img_shape = Shape::new(b, 3, side, side);
         let img = gpu.buffer("img", (img_shape.numel() as u64) * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST);
@@ -620,7 +621,7 @@ impl Yolo {
     }
 
     fn ctx(&self) -> Ctx<'_> {
-        Ctx::new(&self.gpu)
+        Ctx::new(&self.gpu, net::ids())
     }
 
     /// Run the whole backbone+neck+head forward. Returns nothing; outputs live
@@ -635,7 +636,7 @@ impl Yolo {
     /// activation through the tap (range collection or in-place quant→dequant).
     /// Must be in eval-mode BN ([`Yolo::set_eval(true)`]) like normal inference.
     pub fn forward_net_tapped(&self, tap: &dyn crate::net::ActTap) {
-        let ctx = Ctx::with_tap(&self.gpu, tap);
+        let ctx = Ctx::with_tap(&self.gpu, net::ids(), tap);
         self.forward_net_with(&ctx);
     }
 

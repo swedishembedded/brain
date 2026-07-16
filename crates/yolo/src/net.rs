@@ -1,34 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Shared plumbing for the YOLOv8 conv-net blocks (P2).
+//! YOLOv8's kernel registry: the `PIPELINES` array and its index constants.
 //!
-//! This module defines the kernel-index registry and a [`Ctx`] helper that the
-//! conv blocks ([`crate::blocks`]) and detection head ([`crate::head`]) share.
+//! The block plumbing this module used to define — `Shape`, `Ctx`, `ActTap` —
+//! now lives in [`vision`], so the conv blocks can be shared with other vision
+//! models rather than forked. It is re-exported below; this module keeps only
+//! what is genuinely yolo's: the pipeline array and its frozen index order.
 //!
-//! ## Block abstraction
+//! ## Why the index constants stay
 //!
-//! Every block mirrors the [`gpt::Gpt`](../../gpt/src/model.rs) pattern: it is
-//! constructed once (registering its parameters and pre-allocating SSA
-//! activation + grad buffers), then it appends forward [`Step`]s to a shared
-//! `Vec<Step>` and, separately, backward `Step`s (in reverse order) to another
-//! shared vector. The blocks themselves never run anything; the owning model
-//! records `fwd_steps`/`bwd_steps` once and replays them via
-//! [`Gpu::submit`].
-//!
-//! SSA discipline: every forward stage writes a FRESH buffer, which doubles as
-//! the activation cache the backward pass reads. Multi-consumer / residual
-//! gradients accumulate out-of-place via the `add2` kernel into fresh buffers.
-//!
-//! Buffers come from two places, exactly as in `gpt`:
-//!   * weights + their grads from a [`ParamStore`] (keyed by the names each
-//!     block registers — see the per-block `param_list` helpers), and
-//!   * activations + backward temporaries from plain [`Gpu::storage`].
-//!
-//! The [`Ctx`] bundles the `&Gpu` and the activation allocator so a block can
-//! say `ctx.act(n)` for a fresh activation buffer and `ctx.step(KERNEL, ...)`.
+//! They are no longer the blocks' interface (see [`ids`]), but yolo's own
+//! loss/optim dispatch still uses them and the order is frozen by the checkpoint
+//! contract, so they are not dead weight — they are simply private to yolo now.
 
-use gpu_core::{Gpu, Step};
+use std::sync::OnceLock;
+
+use vision::ConvKernelIds;
+
+// `Shape`, `Ctx` and `ActTap` now live in `crates/vision` so the conv blocks can
+// be shared with other vision models. Re-exported here permanently: `brain-npu`
+// imports `yolo::net::ActTap`, and `yolo::lib` re-exports `net::{Ctx, Shape}`.
+pub use vision::{ActTap, Ctx, Shape};
 
 // ---- kernel indices (order MUST match `PIPELINES`) ----
 pub const CONV2D: usize = 0;
@@ -133,78 +126,15 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("conv_bias", kernels::CONV_BIAS),
 ];
 
-/// An NCHW feature-map shape. Carried alongside buffers so blocks can compute
-/// thread counts and the spatial dims kernels need.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Shape {
-    pub n: u32,
-    pub c: u32,
-    pub h: u32,
-    pub w: u32,
-}
-
-impl Shape {
-    pub fn new(n: u32, c: u32, h: u32, w: u32) -> Shape {
-        Shape { n, c, h, w }
-    }
-    /// Element count `N*C*H*W`.
-    pub fn numel(&self) -> u32 {
-        self.n * self.c * self.h * self.w
-    }
-    /// Output shape of a `K x K` conv with the given stride/pad.
-    pub fn conv_out(&self, cout: u32, k: u32, stride: u32, pad: u32) -> Shape {
-        let ho = (self.h + 2 * pad - k) / stride + 1;
-        let wo = (self.w + 2 * pad - k) / stride + 1;
-        Shape::new(self.n, cout, ho, wo)
-    }
-}
-
-/// An activation tap: observe (and optionally rewrite, in place) each `Conv`'s
-/// input activation during a forward pass. Used by the NPU INT8 quantizer
-/// (`brain-npu`) to (a) collect per-conv activation ranges for calibration
-/// (read-only) and (b) simulate the INT8 quant→dequant effect in fp32 for the
-/// hardware-free accuracy-parity gate (in-place rewrite). `name` is the conv's
-/// unique prefix, which matches the exported ONNX node name.
+/// Kernel indices for the shared [`vision`] conv blocks, resolved BY NAME against
+/// [`PIPELINES`] above — so the blocks never depend on this array's order.
 ///
-/// The tap is only consulted on the eval-mode (inference) forward path, and only
-/// when one is installed via [`Ctx::with_tap`] — every normal `detect` runs with
-/// no tap and pays zero cost.
-pub trait ActTap {
-    fn tap(&self, name: &str, x: &mut [f32]);
-}
-
-/// Block-build context: a thin wrapper over the device that hands out fresh
-/// activation buffers and records dispatch [`Step`]s. Held by reference while a
-/// block records its forward/backward steps.
-pub struct Ctx<'g> {
-    pub gpu: &'g Gpu,
-    /// Optional activation tap (calibration / fake-quant). `None` on every
-    /// normal forward — see [`ActTap`].
-    pub tap: Option<&'g dyn ActTap>,
-}
-
-impl<'g> Ctx<'g> {
-    pub fn new(gpu: &'g Gpu) -> Ctx<'g> {
-        Ctx { gpu, tap: None }
-    }
-    /// A context whose `Conv` forwards route their input through the given
-    /// [`ActTap`]. Used only by the NPU calibrator / fake-quant simulator.
-    pub fn with_tap(gpu: &'g Gpu, tap: &'g dyn ActTap) -> Ctx<'g> {
-        Ctx { gpu, tap: Some(tap) }
-    }
-    /// A fresh activation / temporary buffer of `n` f32 elements.
-    pub fn act(&self, n: u32) -> gpu_core::DeviceBuffer {
-        self.gpu.storage(n as u64)
-    }
-    /// Record a dispatch with `u32` uniform params (use [`gpu_core::f`] to pack
-    /// an f32 into the stream).
-    pub fn step(
-        &self,
-        kind: usize,
-        bufs: &[&gpu_core::DeviceBuffer],
-        params: &[u32],
-        threads: u32,
-    ) -> Step {
-        self.gpu.step(kind, bufs, params, threads)
-    }
+/// The positional `const`s at the top of this module are NOT the blocks'
+/// interface any more; they remain because yolo's own loss/optim dispatch and its
+/// checkpoint contract freeze the index order. That is precisely why resolution
+/// is by name: a second model's pipeline is ordered differently, and a shared
+/// block holding one of these literals would dispatch the wrong kernel under it.
+pub fn ids() -> &'static ConvKernelIds {
+    static IDS: OnceLock<ConvKernelIds> = OnceLock::new();
+    IDS.get_or_init(|| ConvKernelIds::resolve(PIPELINES))
 }
