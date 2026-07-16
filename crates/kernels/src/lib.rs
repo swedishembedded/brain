@@ -16,6 +16,10 @@ pub const ADAMW: &str = include_str!("../wgsl/adamw.wgsl");
 pub const ADD: &str = include_str!("../wgsl/add.wgsl");
 /// `wgsl/add2.wgsl`
 pub const ADD2: &str = include_str!("../wgsl/add2.wgsl");
+/// `wgsl/add_chan_bcast.wgsl`
+pub const ADD_CHAN_BCAST: &str = include_str!("../wgsl/add_chan_bcast.wgsl");
+/// `wgsl/add_chan_bcast_dv.wgsl`
+pub const ADD_CHAN_BCAST_DV: &str = include_str!("../wgsl/add_chan_bcast_dv.wgsl");
 /// `wgsl/add_index_mask.wgsl`
 pub const ADD_INDEX_MASK: &str = include_str!("../wgsl/add_index_mask.wgsl");
 /// `wgsl/attention.wgsl`
@@ -106,6 +110,10 @@ pub const BN_RUNNING: &str = include_str!("../wgsl/bn_running.wgsl");
 pub const BN_STATS: &str = include_str!("../wgsl/bn_stats.wgsl");
 /// `wgsl/bn_train.wgsl`
 pub const BN_TRAIN: &str = include_str!("../wgsl/bn_train.wgsl");
+/// `wgsl/broadcast_add_hw.wgsl`
+pub const BROADCAST_ADD_HW: &str = include_str!("../wgsl/broadcast_add_hw.wgsl");
+/// `wgsl/broadcast_add_hw_da.wgsl`
+pub const BROADCAST_ADD_HW_DA: &str = include_str!("../wgsl/broadcast_add_hw_da.wgsl");
 /// `wgsl/ce_grad.wgsl`
 pub const CE_GRAD: &str = include_str!("../wgsl/ce_grad.wgsl");
 /// `wgsl/ce_grad_masked.wgsl`
@@ -332,6 +340,10 @@ pub const POS_BWD: &str = include_str!("../wgsl/pos_bwd.wgsl");
 pub const RESIZE_BILINEAR: &str = include_str!("../wgsl/resize_bilinear.wgsl");
 /// `wgsl/resize_bilinear_dx.wgsl`
 pub const RESIZE_BILINEAR_DX: &str = include_str!("../wgsl/resize_bilinear_dx.wgsl");
+/// `wgsl/resize_nearest.wgsl`
+pub const RESIZE_NEAREST: &str = include_str!("../wgsl/resize_nearest.wgsl");
+/// `wgsl/resize_nearest_dx.wgsl`
+pub const RESIZE_NEAREST_DX: &str = include_str!("../wgsl/resize_nearest_dx.wgsl");
 /// `wgsl/rms_inv.wgsl`
 pub const RMS_INV: &str = include_str!("../wgsl/rms_inv.wgsl");
 /// `wgsl/rmsnorm.wgsl`
@@ -392,6 +404,10 @@ pub const SNAKE_BETA: &str = include_str!("../wgsl/snake_beta.wgsl");
 pub const SOFTMAX_HW: &str = include_str!("../wgsl/softmax_hw.wgsl");
 /// `wgsl/softmax_hw_dx.wgsl`
 pub const SOFTMAX_HW_DX: &str = include_str!("../wgsl/softmax_hw_dx.wgsl");
+/// `wgsl/softmax_k.wgsl`
+pub const SOFTMAX_K: &str = include_str!("../wgsl/softmax_k.wgsl");
+/// `wgsl/softmax_k_dx.wgsl`
+pub const SOFTMAX_K_DX: &str = include_str!("../wgsl/softmax_k_dx.wgsl");
 /// `wgsl/strip_pool.wgsl`
 pub const STRIP_POOL: &str = include_str!("../wgsl/strip_pool.wgsl");
 /// `wgsl/strip_pool_dx.wgsl`
@@ -410,12 +426,20 @@ pub const UPSAMPLE2_DX: &str = include_str!("../wgsl/upsample2_dx.wgsl");
 pub const VQ_ARGMAX_DOT: &str = include_str!("../wgsl/vq_argmax_dot.wgsl");
 /// `wgsl/vq_argmin.wgsl`
 pub const VQ_ARGMIN: &str = include_str!("../wgsl/vq_argmin.wgsl");
+/// `wgsl/weighted_gap.wgsl`
+pub const WEIGHTED_GAP: &str = include_str!("../wgsl/weighted_gap.wgsl");
+/// `wgsl/weighted_gap_dm.wgsl`
+pub const WEIGHTED_GAP_DM: &str = include_str!("../wgsl/weighted_gap_dm.wgsl");
+/// `wgsl/weighted_gap_dx.wgsl`
+pub const WEIGHTED_GAP_DX: &str = include_str!("../wgsl/weighted_gap_dx.wgsl");
 
 /// Every kernel as `(name, source)`, name = file stem.
 pub const ALL: &[(&str, &str)] = &[
     ("adamw", ADAMW),
     ("add", ADD),
     ("add2", ADD2),
+    ("add_chan_bcast", ADD_CHAN_BCAST),
+    ("add_chan_bcast_dv", ADD_CHAN_BCAST_DV),
     ("add_index_mask", ADD_INDEX_MASK),
     ("attention", ATTENTION),
     ("attn_apply", ATTN_APPLY),
@@ -461,6 +485,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("bn_running", BN_RUNNING),
     ("bn_stats", BN_STATS),
     ("bn_train", BN_TRAIN),
+    ("broadcast_add_hw", BROADCAST_ADD_HW),
+    ("broadcast_add_hw_da", BROADCAST_ADD_HW_DA),
     ("ce_grad", CE_GRAD),
     ("ce_grad_masked", CE_GRAD_MASKED),
     ("ce_value", CE_VALUE),
@@ -574,6 +600,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("pos_bwd", POS_BWD),
     ("resize_bilinear", RESIZE_BILINEAR),
     ("resize_bilinear_dx", RESIZE_BILINEAR_DX),
+    ("resize_nearest", RESIZE_NEAREST),
+    ("resize_nearest_dx", RESIZE_NEAREST_DX),
     ("rms_inv", RMS_INV),
     ("rmsnorm", RMSNORM),
     ("rmsnorm_dw", RMSNORM_DW),
@@ -604,6 +632,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("snake_beta", SNAKE_BETA),
     ("softmax_hw", SOFTMAX_HW),
     ("softmax_hw_dx", SOFTMAX_HW_DX),
+    ("softmax_k", SOFTMAX_K),
+    ("softmax_k_dx", SOFTMAX_K_DX),
     ("strip_pool", STRIP_POOL),
     ("strip_pool_dx", STRIP_POOL_DX),
     ("tanh_act", TANH_ACT),
@@ -613,6 +643,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("upsample2_dx", UPSAMPLE2_DX),
     ("vq_argmax_dot", VQ_ARGMAX_DOT),
     ("vq_argmin", VQ_ARGMIN),
+    ("weighted_gap", WEIGHTED_GAP),
+    ("weighted_gap_dm", WEIGHTED_GAP_DM),
+    ("weighted_gap_dx", WEIGHTED_GAP_DX),
 ];
 
 /// Look up a kernel's WGSL source by file stem (e.g. `"matmul"`).

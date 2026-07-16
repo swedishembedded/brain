@@ -14,10 +14,17 @@
 //! transposed group index, an off-by-one window) breaks it immediately. FD is
 //! used only where the op is genuinely nonlinear (sigmoid, softmax).
 //!
-//! `conv2d_gd` gets a different, stronger test: it must AGREE BIT-FOR-BIT with
-//! the existing, already-gated `conv2d` at groups=1/dilation=1. A generalization
-//! that changes the base case is a regression no matter how good its own tests
-//! look.
+//! `conv2d_gd` gets a different test: it must reproduce the existing,
+//! already-gated `conv2d` at groups=1/dilation=1 (to ≤4 ULP — see that test for
+//! why bit-equality is neither achievable nor desirable here). A generalization
+//! that changes its own base case is a regression no matter how good its other
+//! tests look.
+//!
+//! One caution the `broadcast_add_hw` case earned: an adjoint identity only holds
+//! for the operator you actually applied. Where the forward SUMS two independent
+//! broadcasts, `<y, dy>` carries both, so each argument's adjoint must be
+//! isolated by zeroing the other. Getting that wrong reports a broken adjoint for
+//! a correct kernel.
 //!
 //! Run with `BRAIN_DEVICE=cpu`.
 
@@ -45,6 +52,17 @@ const KERNELS: &[(&str, &str)] = &[
     ("sigmoid_bwd", kernels::SIGMOID_BWD),                       // 18
     ("masked_l1", kernels::MASKED_L1),                           // 19
     ("masked_l1_grad", kernels::MASKED_L1_GRAD),                 // 20
+    ("broadcast_add_hw", kernels::BROADCAST_ADD_HW),             // 21
+    ("broadcast_add_hw_da", kernels::BROADCAST_ADD_HW_DA),       // 22
+    ("resize_nearest", kernels::RESIZE_NEAREST),                 // 23
+    ("resize_nearest_dx", kernels::RESIZE_NEAREST_DX),           // 24
+    ("softmax_k", kernels::SOFTMAX_K),                           // 25
+    ("softmax_k_dx", kernels::SOFTMAX_K_DX),                     // 26
+    ("weighted_gap", kernels::WEIGHTED_GAP),                     // 27
+    ("weighted_gap_dx", kernels::WEIGHTED_GAP_DX),               // 28
+    ("weighted_gap_dm", kernels::WEIGHTED_GAP_DM),               // 29
+    ("add_chan_bcast", kernels::ADD_CHAN_BCAST),                 // 30
+    ("add_chan_bcast_dv", kernels::ADD_CHAN_BCAST_DV),           // 31
 ];
 
 fn lcg(state: &mut u64) -> f32 {
@@ -553,4 +571,179 @@ fn masked_l1_applies_the_mask_and_its_grad_is_the_signed_mask() {
     let d = run4(&gpu, 20, &pred, &tgt, &mask, n, &[n as u32, f(scale)]);
     // sign(pred-tgt)*mask*scale; sign(0)==0 -> elements 3,4 are 0.
     assert_eq!(d, vec![-0.25, 0.25, 0.0, 0.0, 0.0], "got {d:?}");
+}
+
+// ---- broadcast_add_hw (StripPoolingAttention) --------------------------------------
+
+#[test]
+fn broadcast_add_hw_broadcasts_two_strips_and_its_adjoints_are_the_axis_sums() {
+    let gpu = Gpu::new(KERNELS);
+    let (n, c, h, w) = (2u32, 3u32, 4u32, 5u32);
+    let a = randvec(81, (n * c * h) as usize); // [N,C,H,1]
+    let b = randvec(82, (n * c * w) as usize); // [N,C,1,W]
+    let yn = (n * c * h * w) as usize;
+    let params = [n, c, h, w];
+    let y = run3(&gpu, 21, &a, &b, yn, &params);
+    for nc in 0..(n * c) as usize {
+        for hi in 0..h as usize {
+            for wi in 0..w as usize {
+                let want = a[nc * h as usize + hi] + b[nc * w as usize + wi];
+                let g = y[(nc * h as usize + hi) * w as usize + wi];
+                assert!((g - want).abs() < 1e-6, "[{nc}][{hi}][{wi}]: {g} vs {want}");
+            }
+        }
+    }
+    // Adjoint in each strip SEPARATELY. `y` is a SUM of both strips' broadcasts,
+    // so <y, dy> carries the other strip's contribution too — each direction must
+    // be isolated by zeroing the other, or the identity simply does not apply.
+    let dy = randvec(83, yn);
+    let zero_a = vec![0.0f32; (n * c * h) as usize];
+    let zero_b = vec![0.0f32; (n * c * w) as usize];
+
+    let ya = run3(&gpu, 21, &a, &zero_b, yn, &params); // broadcast(a) alone
+    let da = run2(&gpu, 22, &dy, (n * c * h) as usize, &[n, c, h, w, 0]);
+    assert_adjoint("broadcast_add_hw (wrt a)", &ya, &dy, &a, &da);
+
+    let yb = run3(&gpu, 21, &zero_a, &b, yn, &params); // broadcast(b) alone
+    let db = run2(&gpu, 22, &dy, (n * c * w) as usize, &[n, c, h, w, 1]);
+    assert_adjoint("broadcast_add_hw (wrt b)", &yb, &dy, &b, &db);
+
+    // ...and the two contributions really do superpose into the full forward.
+    for i in 0..yn {
+        assert!((y[i] - (ya[i] + yb[i])).abs() < 1e-6, "broadcast_add_hw is not additive at {i}");
+    }
+}
+
+// ---- resize_nearest ----------------------------------------------------------------
+
+#[test]
+fn resize_nearest_selects_the_floor_tap_and_dx_is_adjoint() {
+    let gpu = Gpu::new(KERNELS);
+    // 2x up of a 2x2 must replicate each pixel into a 2x2 block.
+    let x = vec![1.0f32, 2.0, 3.0, 4.0];
+    let y = run2(&gpu, 23, &x, 16, &[1, 1, 2, 2, 4, 4]);
+    assert_eq!(
+        y,
+        vec![1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 3.0, 3.0, 4.0, 4.0]
+    );
+
+    for &(h, w, ho, wo) in &[(4u32, 4u32, 8u32, 8u32), (8, 8, 4, 4), (3, 5, 7, 2), (5, 3, 2, 7)] {
+        let (n, c) = (2u32, 3u32);
+        let xn = (n * c * h * w) as usize;
+        let yn = (n * c * ho * wo) as usize;
+        let xx = randvec(91, xn);
+        let yy = randvec(92, yn);
+        let params = [n, c, h, w, ho, wo];
+        let ax = run2(&gpu, 23, &xx, yn, &params);
+        let aty = run2(&gpu, 24, &yy, xn, &params);
+        assert_adjoint(&format!("resize_nearest {h}x{w}->{ho}x{wo}"), &ax, &yy, &xx, &aty);
+    }
+}
+
+// ---- softmax_k (the 9-neighbour axis) -----------------------------------------------
+
+#[test]
+fn softmax_k_normalizes_the_strided_axis_and_backward_matches_fd() {
+    let gpu = Gpu::new(KERNELS);
+    let (n, k, m) = (2u32, 9u32, 6u32); // K=9 like FastConvexUpsample
+    let x = randvec(101, (n * k * m) as usize);
+    let y = run2(&gpu, 25, &x, (n * k * m) as usize, &[n, k, m]);
+    // Each (n, m) group sums to 1 over the STRIDED k axis.
+    for ni in 0..n as usize {
+        for mi in 0..m as usize {
+            let s: f32 = (0..k as usize)
+                .map(|ki| y[ni * (k * m) as usize + ki * m as usize + mi])
+                .sum();
+            assert!((s - 1.0).abs() < 1e-5, "group ({ni},{mi}) sums to {s}");
+        }
+    }
+    // FD on L = <r, softmax_k(x)>.
+    let r = randvec(102, (n * k * m) as usize);
+    let analytic = run3(&gpu, 26, &y, &r, (n * k * m) as usize, &[n, k, m]);
+    let h = 1e-3f32;
+    for i in 0..(n * k * m) as usize {
+        let mut xp = x.clone();
+        xp[i] += h;
+        let mut xm = x.clone();
+        xm[i] -= h;
+        let yp = run2(&gpu, 25, &xp, (n * k * m) as usize, &[n, k, m]);
+        let ym = run2(&gpu, 25, &xm, (n * k * m) as usize, &[n, k, m]);
+        let fd = (dot(&r, &yp) - dot(&r, &ym)) / (2.0 * h as f64);
+        let a = analytic[i] as f64;
+        assert!(
+            (a - fd).abs() < 4e-3 + 8e-2 * a.abs().max(fd.abs()),
+            "softmax_k_dx[{i}]: analytic {a}, fd {fd}"
+        );
+    }
+}
+
+// ---- weighted_gap + add_chan_bcast (GlobalContextBlock) ------------------------------
+
+#[test]
+fn weighted_gap_contracts_against_the_weight_map_and_both_adjoints_hold() {
+    let gpu = Gpu::new(KERNELS);
+    let (n, c, hw) = (2u32, 3u32, 12u32);
+    let x = randvec(111, (n * c * hw) as usize);
+    let m = randvec(112, (n * hw) as usize);
+    let params = [n, c, hw];
+    let y = run3(&gpu, 27, &x, &m, (n * c) as usize, &params);
+    for ni in 0..n as usize {
+        for ci in 0..c as usize {
+            let want: f32 = (0..hw as usize)
+                .map(|i| x[(ni * c as usize + ci) * hw as usize + i] * m[ni * hw as usize + i])
+                .sum();
+            let g = y[ni * c as usize + ci];
+            assert!((g - want).abs() < 1e-4, "weighted_gap [{ni}][{ci}]: {g} vs {want}");
+        }
+    }
+    // Uniform weights 1/HW must reduce it to a plain global average — the
+    // relationship that makes "learned weighted GAP" the right description.
+    let uni = vec![1.0f32 / hw as f32; (n * hw) as usize];
+    let yu = run3(&gpu, 27, &x, &uni, (n * c) as usize, &params);
+    for nc in 0..(n * c) as usize {
+        let want: f32 = x[nc * hw as usize..(nc + 1) * hw as usize].iter().sum::<f32>() / hw as f32;
+        assert!((yu[nc] - want).abs() < 1e-5, "uniform weights != global mean");
+    }
+
+    // Bilinear -> adjoint in each argument.
+    let dy = randvec(113, (n * c) as usize);
+    let dx = run3(&gpu, 28, &dy, &m, (n * c * hw) as usize, &params);
+    assert_adjoint("weighted_gap (wrt x)", &y, &dy, &x, &dx);
+    let dm = run3(&gpu, 29, &dy, &x, (n * hw) as usize, &params);
+    assert_adjoint("weighted_gap (wrt m)", &y, &dy, &m, &dm);
+}
+
+/// `bias_add` cannot substitute for this: its bias is a [C] vector SHARED across
+/// the batch, while GlobalContextBlock's context is computed PER IMAGE. At N>1 a
+/// bias_add would add image 0's context to image 1. Asserted directly.
+#[test]
+fn add_chan_bcast_is_per_image_and_its_adjoint_is_the_spatial_sum() {
+    let gpu = Gpu::new(KERNELS);
+    let (n, c, hw) = (2u32, 3u32, 6u32);
+    let x = vec![0.0f32; (n * c * hw) as usize];
+    let v = randvec(121, (n * c) as usize);
+    let params = [n, c, hw];
+    let y = run3(&gpu, 30, &x, &v, (n * c * hw) as usize, &params);
+    for nc in 0..(n * c) as usize {
+        for i in 0..hw as usize {
+            assert_eq!(y[nc * hw as usize + i], v[nc], "channel scalar not broadcast");
+        }
+    }
+    // Image 1's values must differ from image 0's -> it is genuinely per-image.
+    assert!(
+        (0..c as usize).any(|ci| v[ci] != v[c as usize + ci]),
+        "fixture is degenerate; cannot distinguish per-image from shared"
+    );
+
+    let xr = randvec(122, (n * c * hw) as usize);
+    let yr = run3(&gpu, 30, &xr, &v, (n * c * hw) as usize, &params);
+    let dy = randvec(123, (n * c * hw) as usize);
+    let dv = run2(&gpu, 31, &dy, (n * c) as usize, &params);
+    // Adjoint wrt v: <A(v), dy> == <v, A^T(dy)> with x held at 0.
+    let y0 = run3(&gpu, 30, &x, &v, (n * c * hw) as usize, &params);
+    assert_adjoint("add_chan_bcast (wrt v)", &y0, &dy, &v, &dv);
+    // wrt x it is the identity, so the forward is exactly x + broadcast(v).
+    for i in 0..(n * c * hw) as usize {
+        assert!((yr[i] - (xr[i] + y0[i])).abs() < 1e-6);
+    }
 }
