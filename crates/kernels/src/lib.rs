@@ -76,6 +76,10 @@ pub const ATTN_SOFTMAX_BIDIR: &str = include_str!("../wgsl/attn_softmax_bidir.wg
 pub const ATTN_SOFTMAX_CROSS: &str = include_str!("../wgsl/attn_softmax_cross.wgsl");
 /// `wgsl/attn_softmax_masked.wgsl`
 pub const ATTN_SOFTMAX_MASKED: &str = include_str!("../wgsl/attn_softmax_masked.wgsl");
+/// `wgsl/avgpool2d.wgsl`
+pub const AVGPOOL2D: &str = include_str!("../wgsl/avgpool2d.wgsl");
+/// `wgsl/avgpool2d_dx.wgsl`
+pub const AVGPOOL2D_DX: &str = include_str!("../wgsl/avgpool2d_dx.wgsl");
 /// `wgsl/axpy.wgsl`
 pub const AXPY: &str = include_str!("../wgsl/axpy.wgsl");
 /// `wgsl/bce_logits.wgsl`
@@ -134,6 +138,12 @@ pub const CONV2D: &str = include_str!("../wgsl/conv2d.wgsl");
 pub const CONV2D_DW: &str = include_str!("../wgsl/conv2d_dw.wgsl");
 /// `wgsl/conv2d_dx.wgsl`
 pub const CONV2D_DX: &str = include_str!("../wgsl/conv2d_dx.wgsl");
+/// `wgsl/conv2d_gd.wgsl`
+pub const CONV2D_GD: &str = include_str!("../wgsl/conv2d_gd.wgsl");
+/// `wgsl/conv2d_gd_dw.wgsl`
+pub const CONV2D_GD_DW: &str = include_str!("../wgsl/conv2d_gd_dw.wgsl");
+/// `wgsl/conv2d_gd_dx.wgsl`
+pub const CONV2D_GD_DX: &str = include_str!("../wgsl/conv2d_gd_dx.wgsl");
 /// `wgsl/conv2d_tiled.wgsl`
 pub const CONV2D_TILED: &str = include_str!("../wgsl/conv2d_tiled.wgsl");
 /// `wgsl/conv_act.wgsl`
@@ -146,6 +156,12 @@ pub const CONV_ACT_TILED: &str = include_str!("../wgsl/conv_act_tiled.wgsl");
 pub const CONV_BIAS: &str = include_str!("../wgsl/conv_bias.wgsl");
 /// `wgsl/conv_bias_reg.wgsl`
 pub const CONV_BIAS_REG: &str = include_str!("../wgsl/conv_bias_reg.wgsl");
+/// `wgsl/convex_upsample.wgsl`
+pub const CONVEX_UPSAMPLE: &str = include_str!("../wgsl/convex_upsample.wgsl");
+/// `wgsl/convex_upsample_dd.wgsl`
+pub const CONVEX_UPSAMPLE_DD: &str = include_str!("../wgsl/convex_upsample_dd.wgsl");
+/// `wgsl/convex_upsample_dmask.wgsl`
+pub const CONVEX_UPSAMPLE_DMASK: &str = include_str!("../wgsl/convex_upsample_dmask.wgsl");
 /// `wgsl/convtr1d.wgsl`
 pub const CONVTR1D: &str = include_str!("../wgsl/convtr1d.wgsl");
 /// `wgsl/convtr1d_dw.wgsl`
@@ -260,6 +276,10 @@ pub const LEAKY_RELU: &str = include_str!("../wgsl/leaky_relu.wgsl");
 pub const LEAKY_RELU_BWD: &str = include_str!("../wgsl/leaky_relu_bwd.wgsl");
 /// `wgsl/ln_stats.wgsl`
 pub const LN_STATS: &str = include_str!("../wgsl/ln_stats.wgsl");
+/// `wgsl/masked_l1.wgsl`
+pub const MASKED_L1: &str = include_str!("../wgsl/masked_l1.wgsl");
+/// `wgsl/masked_l1_grad.wgsl`
+pub const MASKED_L1_GRAD: &str = include_str!("../wgsl/masked_l1_grad.wgsl");
 /// `wgsl/matmul.wgsl`
 pub const MATMUL: &str = include_str!("../wgsl/matmul.wgsl");
 /// `wgsl/matmul_dw.wgsl`
@@ -300,10 +320,18 @@ pub const NCHW_NLC: &str = include_str!("../wgsl/nchw_nlc.wgsl");
 pub const NLC_NCHW: &str = include_str!("../wgsl/nlc_nchw.wgsl");
 /// `wgsl/pad2d.wgsl`
 pub const PAD2D: &str = include_str!("../wgsl/pad2d.wgsl");
+/// `wgsl/pixel_shuffle.wgsl`
+pub const PIXEL_SHUFFLE: &str = include_str!("../wgsl/pixel_shuffle.wgsl");
+/// `wgsl/pixel_shuffle_dx.wgsl`
+pub const PIXEL_SHUFFLE_DX: &str = include_str!("../wgsl/pixel_shuffle_dx.wgsl");
 /// `wgsl/pos_add.wgsl`
 pub const POS_ADD: &str = include_str!("../wgsl/pos_add.wgsl");
 /// `wgsl/pos_bwd.wgsl`
 pub const POS_BWD: &str = include_str!("../wgsl/pos_bwd.wgsl");
+/// `wgsl/resize_bilinear.wgsl`
+pub const RESIZE_BILINEAR: &str = include_str!("../wgsl/resize_bilinear.wgsl");
+/// `wgsl/resize_bilinear_dx.wgsl`
+pub const RESIZE_BILINEAR_DX: &str = include_str!("../wgsl/resize_bilinear_dx.wgsl");
 /// `wgsl/rms_inv.wgsl`
 pub const RMS_INV: &str = include_str!("../wgsl/rms_inv.wgsl");
 /// `wgsl/rmsnorm.wgsl`
@@ -344,6 +372,10 @@ pub const SCALE_ADD_DGATE: &str = include_str!("../wgsl/scale_add_dgate.wgsl");
 pub const SCALE_CHAN: &str = include_str!("../wgsl/scale_chan.wgsl");
 /// `wgsl/scale_row.wgsl`
 pub const SCALE_ROW: &str = include_str!("../wgsl/scale_row.wgsl");
+/// `wgsl/sigmoid.wgsl`
+pub const SIGMOID: &str = include_str!("../wgsl/sigmoid.wgsl");
+/// `wgsl/sigmoid_bwd.wgsl`
+pub const SIGMOID_BWD: &str = include_str!("../wgsl/sigmoid_bwd.wgsl");
 /// `wgsl/silu.wgsl`
 pub const SILU: &str = include_str!("../wgsl/silu.wgsl");
 /// `wgsl/silu_bwd.wgsl`
@@ -356,6 +388,14 @@ pub const SILU_BWD_DB: &str = include_str!("../wgsl/silu_bwd_db.wgsl");
 pub const SILU_MUL: &str = include_str!("../wgsl/silu_mul.wgsl");
 /// `wgsl/snake_beta.wgsl`
 pub const SNAKE_BETA: &str = include_str!("../wgsl/snake_beta.wgsl");
+/// `wgsl/softmax_hw.wgsl`
+pub const SOFTMAX_HW: &str = include_str!("../wgsl/softmax_hw.wgsl");
+/// `wgsl/softmax_hw_dx.wgsl`
+pub const SOFTMAX_HW_DX: &str = include_str!("../wgsl/softmax_hw_dx.wgsl");
+/// `wgsl/strip_pool.wgsl`
+pub const STRIP_POOL: &str = include_str!("../wgsl/strip_pool.wgsl");
+/// `wgsl/strip_pool_dx.wgsl`
+pub const STRIP_POOL_DX: &str = include_str!("../wgsl/strip_pool_dx.wgsl");
 /// `wgsl/tanh_act.wgsl`
 pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
 /// `wgsl/tanh_act_bwd.wgsl`
@@ -406,6 +446,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_softmax_bidir", ATTN_SOFTMAX_BIDIR),
     ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
     ("attn_softmax_masked", ATTN_SOFTMAX_MASKED),
+    ("avgpool2d", AVGPOOL2D),
+    ("avgpool2d_dx", AVGPOOL2D_DX),
     ("axpy", AXPY),
     ("bce_logits", BCE_LOGITS),
     ("bce_logits_grad", BCE_LOGITS_GRAD),
@@ -435,12 +477,18 @@ pub const ALL: &[(&str, &str)] = &[
     ("conv2d", CONV2D),
     ("conv2d_dw", CONV2D_DW),
     ("conv2d_dx", CONV2D_DX),
+    ("conv2d_gd", CONV2D_GD),
+    ("conv2d_gd_dw", CONV2D_GD_DW),
+    ("conv2d_gd_dx", CONV2D_GD_DX),
     ("conv2d_tiled", CONV2D_TILED),
     ("conv_act", CONV_ACT),
     ("conv_act_reg", CONV_ACT_REG),
     ("conv_act_tiled", CONV_ACT_TILED),
     ("conv_bias", CONV_BIAS),
     ("conv_bias_reg", CONV_BIAS_REG),
+    ("convex_upsample", CONVEX_UPSAMPLE),
+    ("convex_upsample_dd", CONVEX_UPSAMPLE_DD),
+    ("convex_upsample_dmask", CONVEX_UPSAMPLE_DMASK),
     ("convtr1d", CONVTR1D),
     ("convtr1d_dw", CONVTR1D_DW),
     ("convtr1d_dx", CONVTR1D_DX),
@@ -498,6 +546,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("leaky_relu", LEAKY_RELU),
     ("leaky_relu_bwd", LEAKY_RELU_BWD),
     ("ln_stats", LN_STATS),
+    ("masked_l1", MASKED_L1),
+    ("masked_l1_grad", MASKED_L1_GRAD),
     ("matmul", MATMUL),
     ("matmul_dw", MATMUL_DW),
     ("matmul_dx", MATMUL_DX),
@@ -518,8 +568,12 @@ pub const ALL: &[(&str, &str)] = &[
     ("nchw_nlc", NCHW_NLC),
     ("nlc_nchw", NLC_NCHW),
     ("pad2d", PAD2D),
+    ("pixel_shuffle", PIXEL_SHUFFLE),
+    ("pixel_shuffle_dx", PIXEL_SHUFFLE_DX),
     ("pos_add", POS_ADD),
     ("pos_bwd", POS_BWD),
+    ("resize_bilinear", RESIZE_BILINEAR),
+    ("resize_bilinear_dx", RESIZE_BILINEAR_DX),
     ("rms_inv", RMS_INV),
     ("rmsnorm", RMSNORM),
     ("rmsnorm_dw", RMSNORM_DW),
@@ -540,12 +594,18 @@ pub const ALL: &[(&str, &str)] = &[
     ("scale_add_dgate", SCALE_ADD_DGATE),
     ("scale_chan", SCALE_CHAN),
     ("scale_row", SCALE_ROW),
+    ("sigmoid", SIGMOID),
+    ("sigmoid_bwd", SIGMOID_BWD),
     ("silu", SILU),
     ("silu_bwd", SILU_BWD),
     ("silu_bwd_da", SILU_BWD_DA),
     ("silu_bwd_db", SILU_BWD_DB),
     ("silu_mul", SILU_MUL),
     ("snake_beta", SNAKE_BETA),
+    ("softmax_hw", SOFTMAX_HW),
+    ("softmax_hw_dx", SOFTMAX_HW_DX),
+    ("strip_pool", STRIP_POOL),
+    ("strip_pool_dx", STRIP_POOL_DX),
     ("tanh_act", TANH_ACT),
     ("tanh_act_bwd", TANH_ACT_BWD),
     ("topk_mask", TOPK_MASK),
