@@ -68,6 +68,14 @@ written from the specs in `docs/world-models/specs/`.
   AdaGN, decomposed GN, attention as MatMul/Softmax) -> `--device npu
   --onnx out/diamond.onnx` in play/bench; sampler host-side.
 
+- **Fine-tuning verified end-to-end (P3)**: `brain data gen pong` -> 300-step
+  `brain wm finetune` on the Breakout model adapts it to pong (loss 0.115 ->
+  0.013, no divergence); base imposes a Breakout prior on pong frames, the
+  tuned model renders a clean pong court. Crux fix: the training graph's
+  shared residual-copy zeros buffer was sized to the model input, not the
+  widest activation -> OOB reads corrupted every gradient above input width
+  (why gradcheck only passed at tiny channel counts). Now: FD gradcheck
+  clean at cpg 8/16/32 + 1/2 groups; real Breakout 136/136 per-param scan.
 - **Training (P3)**: full-UNet backward as a second SSA graph
   (crates/wm-diamond/src/train.rs; all conv weights+biases trainable,
   cond path frozen, gradients flow through GroupNorm), F-space EDM loss,
