@@ -469,6 +469,94 @@ pub struct StTransformerWeights {
     pub norm_out_gamma: Vec<f32>, // [dim]
 }
 
+/// Split a channels-first video `[b,c,f,H,W]` into frame-range `[b,c,t,H,W]`.
+fn frame_slice(video: &[f32], b: usize, c: usize, f: usize, hh: usize, ww: usize, t0: usize, t1: usize) -> Vec<f32> {
+    let t = t1 - t0;
+    let mut o = vec![0.0f32; b*c*t*hh*ww];
+    for bb in 0..b { for cc in 0..c { for tt in 0..t { for p in 0..hh*ww {
+        o[(((bb*c+cc)*t+tt)*hh*ww)+p] = video[(((bb*c+cc)*f+(t0+tt))*hh*ww)+p];
+    }}}}
+    o
+}
+
+/// Weights of the full ST-ViViT tokenizer (encode → VQ → decode).
+pub struct TokenizerWeights {
+    pub patch_first: PatchEmbedWeights,
+    pub patch_rest: PatchEmbedWeights,
+    pub encoder: StTransformerWeights, // 8 blocks, order "st"
+    pub vq: VqWeights,
+    pub decoder: StTransformerWeights, // 8 blocks, order "ts"
+    pub to_pixels_first: ToPixelsWeights,
+    pub to_pixels_rest: ToPixelsWeights,
+    pub cpb_net: Vec<bias::CpbLayer>,  // spatial ContinuousPositionBias MLP
+}
+
+/// Full tokenizer forward: reconstruct a channels-first video `[b,c,f,H,W]`
+/// through patch-embed (first frame + rest, separate weights) → encoder(8,"st")
+/// → cosine VQ → decoder(8,"ts") → to_pixels. Returns `(recon [b,c,f,H,W],
+/// codebook indices [b*f*h*w])`.
+#[allow(clippy::too_many_arguments)]
+pub fn tokenizer_forward(
+    gpu: &Gpu, video: &[f32], w: &TokenizerWeights,
+    b: u32, c: u32, f: u32, hh: u32, ww: u32, p: u32, dim: u32, heads: u32, head_dim: u32,
+    code_dim: u32, n_codes: u32,
+) -> (Vec<f32>, Vec<u32>) {
+    let (bu, cu, fu, hhu, wwu, pu) = (b as usize, c as usize, f as usize, hh as usize, ww as usize, p as usize);
+    let (h, wd) = ((hhu / pu) as u32, (wwu / pu) as u32);
+
+    // patch-embed first frame + rest, concat along t -> [b,f,h,w,dim]
+    let first = frame_slice(video, bu, cu, fu, hhu, wwu, 0, 1);
+    let rest = frame_slice(video, bu, cu, fu, hhu, wwu, 1, fu);
+    let tok_first = patch_embed(gpu, &first, &w.patch_first, b, c, 1, hh, ww, p, dim);
+    let tok_rest = patch_embed(gpu, &rest, &w.patch_rest, b, c, f - 1, hh, ww, p, dim);
+    let frame_toklen = (h * wd * dim) as usize;
+    let mut tokens = vec![0.0f32; bu * fu * frame_toklen];
+    for bb in 0..bu {
+        let dst = bb * fu * frame_toklen;
+        tokens[dst..dst + frame_toklen].copy_from_slice(&tok_first[bb * frame_toklen..(bb + 1) * frame_toklen]);
+        let src = bb * (fu - 1) * frame_toklen;
+        tokens[dst + frame_toklen..dst + fu * frame_toklen]
+            .copy_from_slice(&tok_rest[src..src + (fu - 1) * frame_toklen]);
+    }
+
+    // position biases + encode (st)
+    let sbias = bias::cpb_bias(&w.cpb_net, h as usize, wd as usize, heads as usize);
+    let tbias = bias::alibi_bias(heads as usize, fu);
+    let enc = sttransformer_forward(gpu, &tokens, b, f, h, wd, dim, heads, head_dim, &w.encoder, &sbias, &tbias, true, false);
+
+    // VQ over all tokens
+    let n = b * f * h * wd;
+    let (quant, indices) = vq_quantize(gpu, &enc, &w.vq, n, dim, code_dim, n_codes);
+
+    // decode (ts) then to_pixels first/rest
+    let dec = sttransformer_forward(gpu, &quant, b, f, h, wd, dim, heads, head_dim, &w.decoder, &sbias, &tbias, true, true);
+    let dfirst = {
+        let mut v = vec![0.0f32; bu * frame_toklen];
+        for bb in 0..bu { v[bb*frame_toklen..(bb+1)*frame_toklen].copy_from_slice(&dec[bb*fu*frame_toklen..bb*fu*frame_toklen+frame_toklen]); }
+        v
+    };
+    let drest = {
+        let mut v = vec![0.0f32; bu * (fu-1) * frame_toklen];
+        for bb in 0..bu { v[bb*(fu-1)*frame_toklen..(bb+1)*(fu-1)*frame_toklen].copy_from_slice(&dec[bb*fu*frame_toklen+frame_toklen..(bb+1)*fu*frame_toklen]); }
+        v
+    };
+    let pix_first = to_pixels(gpu, &dfirst, &w.to_pixels_first, b, 1, h, wd, dim, c, p);
+    let pix_rest = to_pixels(gpu, &drest, &w.to_pixels_rest, b, f - 1, h, wd, dim, c, p);
+    // concat along the frame axis -> [b,c,f,H,W]
+    let mut recon = vec![0.0f32; bu*cu*fu*hhu*wwu];
+    for bb in 0..bu { for cc in 0..cu {
+        let dst0 = ((bb*cu+cc)*fu)*hhu*wwu;
+        let sf = ((bb*cu+cc)*1)*hhu*wwu;
+        recon[dst0..dst0+hhu*wwu].copy_from_slice(&pix_first[sf..sf+hhu*wwu]);
+        for tt in 0..fu-1 {
+            let src = ((bb*cu+cc)*(fu-1)+tt)*hhu*wwu;
+            let dst = ((bb*cu+cc)*fu+(tt+1))*hhu*wwu;
+            recon[dst..dst+hhu*wwu].copy_from_slice(&pix_rest[src..src+hhu*wwu]);
+        }
+    }}
+    (recon, indices)
+}
+
 /// Run the block stack over a channels-last `[b,t,h,w,dim]` video and apply the
 /// final LayerNorm (no bias). Returns `[b,t,h,w,dim]`.
 #[allow(clippy::too_many_arguments)]
