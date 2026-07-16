@@ -2,9 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 fn main() {
-    // Link the system SDL2 only when the window is compiled in. Headless
-    // builds (CI) never touch it.
-    if std::env::var_os("CARGO_FEATURE_SDL").is_some() {
-        println!("cargo:rustc-link-lib=SDL2");
-    }
+    // The SDL2 window is always compiled in; link the system libSDL2. The
+    // window is only OPENED when a run needs it (SdlWindow::new), so headless
+    // runs never touch SDL at runtime — but the symbols must resolve at link.
+    println!("cargo:rustc-link-lib=SDL2");
 }

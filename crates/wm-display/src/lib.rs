@@ -18,9 +18,7 @@ pub mod keymap;
 pub mod pacing;
 pub mod record;
 pub mod sink;
-#[cfg(feature = "sdl")]
 mod sys;
-#[cfg(feature = "sdl")]
 pub mod window;
 
 use keymap::{KeyChordMap, UxKey};
@@ -117,7 +115,6 @@ impl<I: InputSource + ?Sized, S: FrameSink + ?Sized> PlayIo for SplitIo<'_, I, S
     }
 }
 
-#[cfg(feature = "sdl")]
 impl PlayIo for window::SdlWindow {
     fn poll(&mut self) -> PolledInput {
         let i = self.pump();

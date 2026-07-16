@@ -418,8 +418,7 @@ fn run_play(rest: &[String]) {
         return;
     }
 
-    // Windowed play (needs the wm-sdl build feature and a real display).
-    #[cfg(feature = "wm-sdl")]
+    // Windowed play (opens a real SDL window; needs a display).
     {
         let (_c, h, w) = model.frame_shape();
         let mut win = match wm_display::window::SdlWindow::new("brain wm", w, h, scale) {
@@ -449,23 +448,15 @@ fn run_play(rest: &[String]) {
         }
         print_report("", &report);
     }
-    #[cfg(not(feature = "wm-sdl"))]
-    {
-        let _ = (scale, adaptive, record);
-        eprintln!("windowed play requires building with --features wm-sdl (make build/wm); use --headless");
-        std::process::exit(1);
-    }
 }
 
 /// Windowed play + recording: the SDL window serves input and display while
 /// an optional [`RecorderSink`] tees the frames off into an episode dataset.
-#[cfg(feature = "wm-sdl")]
 struct WinRecIo<'a> {
     win: &'a mut wm_display::window::SdlWindow,
     rec: &'a mut OptSink<RecorderSink>,
 }
 
-#[cfg(feature = "wm-sdl")]
 impl wm_display::PlayIo for WinRecIo<'_> {
     fn poll(&mut self) -> wm_display::PolledInput {
         wm_display::PlayIo::poll(self.win)

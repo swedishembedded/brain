@@ -34,7 +34,7 @@ written from the specs in `docs/world-models/specs/`.
   feature `sdl`, links system libSDL2; iGPU stays free for compute),
   longest-chord-wins keymap, fixed-timestep pacing with mock-clock tests and
   adaptive-quality hysteresis, headless/hash/PPM/tee sinks, `PlayIo` seam.
-- `brain wm play` (windowed via `make build/wm`; `--headless` deterministic
+- `brain wm play` (windowed via the standard build; `--headless` deterministic
   scripted rollouts with fnv1a golden hashes) and `brain wm bench`, running
   the FakeWorldModel end-to-end. 12 display tests, all headless.
 

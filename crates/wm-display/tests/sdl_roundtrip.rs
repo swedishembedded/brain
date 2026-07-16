@@ -6,7 +6,6 @@
 //! or pitch bugs that headless sinks can never see (this exact class of bug
 //! shipped once: a wrong SDL_PIXELFORMAT_RGB24 constant garbled the window
 //! while every headless golden test stayed green).
-#![cfg(feature = "sdl")]
 
 use wm_display::sink::{FrameSink, Hud};
 use wm_display::window::SdlWindow;

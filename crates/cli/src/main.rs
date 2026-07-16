@@ -61,7 +61,7 @@ GPT (dense baseline)
                               (vocab is read from the checkpoint; --data only for old ones)
 
 World models (playable action-conditioned video models; docs/world-models/)
-  brain wm play  --model fake [--fps N --scale N --seed N --adaptive]   # SDL window (build: make build/wm)
+  brain wm play  --model fake|diamond [--weights F --device cpu|gpu|npu --onnx M]   # SDL window
   brain wm play  --model fake --headless --frames N [--actions FILE | --action-seq 1,2,0]
                  [--dump-ppm DIR] [--hashes]        # deterministic rollout + fnv1a hashes (CI)
   brain wm bench --model fake [--frames N]          # ms/frame + fps
