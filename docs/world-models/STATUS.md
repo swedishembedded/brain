@@ -145,17 +145,28 @@ actions.json (7 actions), convert via wm-ingest.
       ->to_pixels(first+rest); end-to-end shape/finite/determinism/index-range.
   Kernel table: +bias_add, embed, vq_argmax_dot (all pre-existing kernels).
 
+## P4 progress (cont.)
+- [done] erf-gelu kernel (gelu_erf) matching torch F.gelu; wm-genie GEGLU uses
+  it. Closed the known numeric parity gap.
+- [done] TWO parity fixes found preparing import: (a) attention k,v project from
+  the UN-normed x (kv_input captured before norm); (b) FeedForward pre-norm is
+  nn.LayerNorm WITH bias (added FfWeights.norm_beta). Both host-verified.
+- [done] Tokenizer IMPORT (import::import_tokenizer): 514 model.* tensors ->
+  TokenizerWeights, full coverage (missing/leftover = hard error). Splits fused
+  to_kv->to_k|to_v and GEGLU in-proj->w_x|w_gate; asserts custom-LN beta / unused
+  context_norm are zero; drops VQ EMA buffers. VERIFIED against the real 1.2GB
+  checkpoint: imports clean, all 514 consumed, 8+8 blocks, shapes correct.
+  (pure-Rust torchpt reader handles the 1.2GB .pt in ~145s.)
+
 ## Next (P4 remaining)
-1. Import: tokenizer 514-tensor name-map (checkpoint::torchpt reader) ->
-   TokenizerWeights, full coverage. Then load the 100M ckpt + real CoinRun
-   frame -> reconstruction. NOTE gelu: brain tanh vs torch erf F.gelu -> add an
-   erf-gelu kernel for tight parity (the one known numeric gap).
-2. Parity dump (scripts/parity-dump/genie.py) + per-layer allclose vs the
-   reference repo (case-study neurips branch).
-3. Dynamics forward: token/pos emb + action one-hot concat (dim 519) ->
+1. Real reconstruction: import -> tokenizer_forward on a CoinRun frame -> PSNR;
+   parity dump (scripts/parity-dump/genie.py) + per-layer allclose vs the
+   reference repo (case-study neurips branch). Convert .pt -> .weights once
+   (import is slow to re-read).
+2. Dynamics forward: token/pos emb + action one-hot concat (dim 519) ->
    STTransformer(12, dim 519) -> to_logits(1024) -> guided MaskGIT sampler +
-   import (372). Reuses the same STBlock/attention/bias.
-4. CoinRun ingest + WorldModel wrap -> interactive SDL/WASD.
+   import (372). Reuses the same STBlock/attention/bias/erf-gelu.
+3. CoinRun ingest + WorldModel wrap -> interactive SDL/WASD.
 
 ## Backlog (user-reported)
 - [#8 done] SDL window always compiled (no wm-sdl feature / build/wm).
