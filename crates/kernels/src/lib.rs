@@ -202,6 +202,8 @@ pub const GATE_ROW_DH: &str = include_str!("../wgsl/gate_row_dh.wgsl");
 pub const GELU: &str = include_str!("../wgsl/gelu.wgsl");
 /// `wgsl/gelu_bwd.wgsl`
 pub const GELU_BWD: &str = include_str!("../wgsl/gelu_bwd.wgsl");
+/// `wgsl/gelu_erf.wgsl`
+pub const GELU_ERF: &str = include_str!("../wgsl/gelu_erf.wgsl");
 /// `wgsl/gn_apply.wgsl`
 pub const GN_APPLY: &str = include_str!("../wgsl/gn_apply.wgsl");
 /// `wgsl/gn_dbeta.wgsl`
@@ -465,6 +467,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("gate_row_dh", GATE_ROW_DH),
     ("gelu", GELU),
     ("gelu_bwd", GELU_BWD),
+    ("gelu_erf", GELU_ERF),
     ("gn_apply", GN_APPLY),
     ("gn_dbeta", GN_DBETA),
     ("gn_dgamma", GN_DGAMMA),

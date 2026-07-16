@@ -41,6 +41,7 @@ pub mod k {
     pub const BIAS_ADD: usize = 19;
     pub const EMBED: usize = 20;
     pub const VQ_ARGMAX_DOT: usize = 21;
+    pub const GELU_ERF: usize = 22;
 }
 
 /// `(name, source)` for `Gpu::new*`, in the index order `k` / [`biased_attn`].
@@ -58,6 +59,7 @@ pub fn kernel_sources() -> Vec<(&'static str, &'static str)> {
     v.push(("bias_add", kernels::BIAS_ADD));
     v.push(("embed", kernels::EMBED));
     v.push(("vq_argmax_dot", kernels::VQ_ARGMAX_DOT));
+    v.push(("gelu_erf", kernels::GELU_ERF));
     v
 }
 
@@ -218,10 +220,11 @@ pub fn geglu_forward(gpu: &Gpu, x: &[f32], rows: u32, dim: u32, inner: u32, w: &
     let xp = matmul(gpu, &xn, &up(&w.w_x), rows, dim, inner);
     let gate = matmul(gpu, &xn, &up(&w.w_gate), rows, dim, inner);
 
+    // GenieRedux uses torch's exact-erf F.gelu (not the tanh approximation).
     let g = gpu.storage((rows * inner) as u64);
     let act = gpu.storage((rows * inner) as u64);
     gpu.submit(&[], &[
-        gpu.step(k::GELU, &[&gate, &g], &[rows * inner], rows * inner),
+        gpu.step(k::GELU_ERF, &[&gate, &g], &[rows * inner], rows * inner),
         gpu.step(k::MUL, &[&g, &xp, &act], &[rows * inner], rows * inner),
     ]);
 
