@@ -665,6 +665,7 @@ dependencies = [
 name = "brain-wm-genie"
 version = "0.1.0"
 dependencies = [
+ "brain-checkpoint",
  "brain-gpu-core",
  "brain-kernels",
  "brain-wm-core",

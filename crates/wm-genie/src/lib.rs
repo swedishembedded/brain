@@ -203,9 +203,12 @@ pub fn peg_forward_w(gpu: &Gpu, x: &[f32], w: &PegWeights, b: u32, t: u32, h: u3
     out
 }
 
-/// Weights of one GenieRedux `FeedForward` (GEGLU) module.
+/// Weights of one GenieRedux `FeedForward` (GEGLU) module. The pre-norm is a
+/// standard `nn.LayerNorm` (WITH bias), unlike the attention's custom no-bias
+/// norm.
 pub struct FfWeights {
     pub norm_gamma: Vec<f32>, // [dim]
+    pub norm_beta: Vec<f32>,  // [dim]
     pub w_x: Vec<f32>,        // [inner, dim]   first chunk of the in-proj
     pub w_gate: Vec<f32>,     // [inner, dim]   second chunk
     pub w_out: Vec<f32>,      // [dim, inner]
@@ -217,7 +220,7 @@ pub fn geglu_forward(gpu: &Gpu, x: &[f32], rows: u32, dim: u32, inner: u32, w: &
     let up = |d: &[f32]| gpu.storage_init("w", d);
     let xb = up(x);
     let gamma = up(&w.norm_gamma);
-    let beta = gpu.storage(dim as u64);
+    let beta = up(&w.norm_beta);
 
     let xn = layernorm(gpu, &xb, &gamma, &beta, rows, dim);
     let xp = matmul(gpu, &xn, &up(&w.w_x), rows, dim, inner);

@@ -69,7 +69,8 @@ fn h_attn(x: &[f32], w: &AttnWeights, bias: &[f32], b: usize, n: usize, dim: usi
     h_matmul(&out, &w.to_out, rows, inner, dim)
 }
 fn h_geglu(x: &[f32], w: &FfWeights, rows: usize, dim: usize, inner: usize) -> Vec<f32> {
-    let xn = h_layernorm(x, &w.norm_gamma, dim);
+    let mut xn = h_layernorm(x, &w.norm_gamma, dim);
+    for r in 0..rows { for c in 0..dim { xn[r*dim+c] += w.norm_beta[c]; } } // FF LayerNorm has bias
     let xp = h_matmul(&xn, &w.w_x, rows, dim, inner);
     let gate = h_matmul(&xn, &w.w_gate, rows, dim, inner);
     let erf = |x: f32| { let s=x.signum(); let ax=x.abs(); let t=1.0/(1.0+0.3275911*ax);
@@ -155,6 +156,7 @@ fn mk_attn(dim: usize, inner: usize, hd: usize, s: u64) -> AttnWeights {
 }
 fn mk_ff(dim: usize, inner: usize, s: u64) -> FfWeights {
     FfWeights { norm_gamma: rand(s, dim).iter().map(|v| v+1.0).collect(),
+        norm_beta: rand(s+7, dim),
         w_x: rand(s+1, inner*dim), w_gate: rand(s+2, inner*dim), w_out: rand(s+3, dim*inner) }
 }
 fn mk_peg(dim: usize, s: u64) -> PegWeights {

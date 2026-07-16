@@ -110,11 +110,13 @@ fn genie_geglu() {
     let x = rand(1, rows*dim);
     let w = FfWeights {
         norm_gamma: rand(2, dim).iter().map(|v| v+1.0).collect(),
+        norm_beta: rand(6, dim),
         w_x: rand(3, inner*dim), w_gate: rand(4, inner*dim), w_out: rand(5, dim*inner),
     };
     let got = geglu_forward(&gpu, &x, rows as u32, dim as u32, inner as u32, &w);
 
-    let xn = layernorm(&x, &w.norm_gamma, dim);
+    let mut xn = layernorm(&x, &w.norm_gamma, dim);
+    for r in 0..rows { for c in 0..dim { xn[r*dim+c] += w.norm_beta[c]; } } // FF LayerNorm has bias
     let xp = matmul(&xn, &w.w_x, rows, dim, inner);
     let gate = matmul(&xn, &w.w_gate, rows, dim, inner);
     let erf = |x: f32| { let s=x.signum(); let ax=x.abs(); let t=1.0/(1.0+0.3275911*ax);

@@ -35,6 +35,7 @@ fn mk_attn(dim: usize, inner: usize, hd: usize, s: u64) -> AttnWeights {
 }
 fn mk_ff(dim: usize, inner: usize, s: u64) -> FfWeights {
     FfWeights { norm_gamma: rand(s, dim).iter().map(|v| v+1.0).collect(),
+        norm_beta: rand(s+7, dim),
         w_x: rand(s+1, inner*dim), w_gate: rand(s+2, inner*dim), w_out: rand(s+3, dim*inner) }
 }
 fn mk_peg(dim: usize, s: u64) -> PegWeights {
