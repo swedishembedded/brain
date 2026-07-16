@@ -85,11 +85,41 @@ written from the specs in `docs/world-models/specs/`.
   split-by-episode), `brain data gen pong` (deterministic fixed-point env),
   `--record` on wm play + `wm replay --verify` (exact roundtrip).
 
-## Next
+## P1 remainder (done)
+- VQ nearest-codebook: `vq_argmin` (Euclidean), `vq_argmax_dot` (cosine);
+  `wm_core::vq` dispatch + straight-through/EMA/usage host math. Tested.
+- Depthwise conv3d PEG: `dwconv3d` + `_dx` + `_dw`, FD-gradchecked.
+- (registry 170 kernels)
+
+## P4 GenieRedux-G CoinRun — spec ready (agent analysis)
+Checkpoints downloaded (gitignored scratch): tokenizer 101.7M + dynamics 80.8M
+(HF INSAIT-Institute/GenieRedux, `neurips` branch case study). Tokenizer =
+frozen ST-ViViT + cosine-VQ; dynamics = guided MaskGIT (12 blocks @ dim 519
+after one-hot(7) action concat). Both share ONE ST transformer (spatial "st" /
+temporal "ts" reshapes, per-block PEG dwconv3d + attention + GEGLU FF).
+brain HAS: cosine VQ, dwconv3d, leaky_relu, embed, matmul, layernorm, gelu/mul.
+TWO REAL KERNEL GAPS (the next build step, unlocks BOTH tokenizer+dynamics):
+1. additive per-head attention-score bias input `[H,i,j]` on attn_scores_bidir
+   (spatial ContinuousPositionBias) + attn_scores/_masked (causal ALiBi,
+   precomputed host-side) — plus matching backward.
+2. QK-L2-normalized attention with CONSTANT scale (8), learnable per-dim
+   q_scale/k_scale[64] — pre-normalize q,k (rmsnorm) + make the scores kernel's
+   scale a param instead of hardcoded inverseSqrt(head_dim).
+Then: GEGLU (compose gelu*mul), causal-PEG asymmetric temporal pad (2,0) via
+host pre-pad, gradient-shrink (backward grad*0.1), Gumbel/cosine/topk host
+decode. Build order: kernels -> shared STBlock -> tokenizer (load 100M for
+parity) -> dynamics (load 80M) -> MaskGIT sampler. Data: CoinRun jpg frames +
+actions.json (7 actions), convert via wm-ingest.
+
+## Backlog (user-reported)
+- [#8 done] SDL window always compiled (no wm-sdl feature / build/wm).
+- [#9] `wm play` Enter/reset must restore the INITIAL --seed-context + re-seed
+  the NormalRng (currently resets to zeros -> random dream, not the start).
+
+## Perf backlog
 - INT8 PTQ for the NPU graph (existing quant.rs machinery) — likely 2x more.
 - GPU: fold 3 per-NFE submits into 1 (3 pre-written gb sets); coopmat fp16.
 - Batched training (n>1) + backward-pass GPU tiling (conv2d_dx/dw are naive).
-- P4: GenieRedux (VQ tokenizer + MaskGIT) on the same seams.
 - P3: episode dataset + gen_pong + record/replay + DIAMOND training
   (EDM loss, check_wm_unet) + fine-tune.
 - P1 remainder: vq kernels, dwconv3d, maskgit host decode, EDM host math
