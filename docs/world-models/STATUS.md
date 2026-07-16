@@ -172,13 +172,20 @@ actions.json (7 actions), convert via wm-ingest.
   coverage). Passed on the FIRST parity run — reused the verified stack.
   BOTH GenieRedux models are now parity-exact in brain.
 
-## Next (P4 remaining)
-1. MaskGIT sampler (host decode loop): iterative confidence-based unmask,
-   cosine schedule, Gumbel/top-k over dynamics_forward logits -> next-frame
-   tokens -> tokenizer.decode -> frame. Then WorldModel wrap.
-2. CoinRun ingest (jpg frames + actions.json, 7 actions) -> wm-ingest.
-3. WorldModel wrap (tokenizer+dynamics+sampler) -> interactive SDL/WASD.
-4. PERF (needed for interactive; correctness is done): wm-genie forward is
+- [DONE] MaskGIT SAMPLER + CLOSED LOOP, parity-exact: maskgit_sample (replicates
+  Dynamics.sample: mask -> forward on cat(prime,cur)[:,:-1] -> gumbel/argmax +
+  cosine-schedule confidence re-mask) matches the reference 256/256 tokens
+  (inference_steps=1). decode_indices closes the loop (codebook gather ->
+  project_out -> decoder -> to_pixels). Full loop verified end-to-end: prime
+  tokens + action -> parity-exact next-frame tokens -> decoded 5-frame 64x64
+  video. The whole GenieRedux generative loop is now correctness-complete +
+  parity-verified in brain.
+
+## Next (P4 remaining — engineering, correctness is DONE)
+1. CoinRun ingest (jpg frames + actions.json, 7 actions) -> wm-ingest.
+2. WorldModel wrap (tokenizer+dynamics+sampler, rolling frame/token window) ->
+   interactive SDL/WASD.
+3. PERF (needed for interactive; correctness is done): wm-genie forward is
    host-round-trip heavy (gpu.read between every op) + naive matmul (~7-19min
    CPU). Move to a single on-device graph / GPU backend; convert .pt -> .weights
    once (import re-read ~145s tokenizer / ~100s dynamics).
