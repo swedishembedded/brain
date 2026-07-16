@@ -14,8 +14,8 @@
 
 use crate::bias::CpbLayer;
 use crate::{
-    AttnWeights, FfWeights, PatchEmbedWeights, PegWeights, StBlockWeights, StTransformerWeights,
-    ToPixelsWeights, TokenizerWeights, VqWeights,
+    AttnWeights, DynamicsWeights, FfWeights, PatchEmbedWeights, PegWeights, StBlockWeights,
+    StTransformerWeights, ToPixelsWeights, TokenizerWeights, VqWeights,
 };
 use std::collections::HashMap;
 
@@ -232,5 +232,85 @@ pub fn import_tokenizer(pt_path: &str) -> Result<(TokenizerWeights, TokenizerCon
             patch_first, patch_rest, encoder, vq, decoder, to_pixels_first, to_pixels_rest, cpb_net,
         },
         cfg,
+    ))
+}
+
+/// Static geometry of the released GenieRedux-CoinRun guided dynamics.
+#[derive(Clone, Copy, Debug)]
+pub struct DynamicsConfig {
+    pub dim: u32,          // token/embedding dim (512)
+    pub dim2: u32,         // transformer residual dim = dim + num_actions (519)
+    pub heads: u32,
+    pub head_dim: u32,
+    pub ff_inner: u32,     // round(dim2 * 8/3) = 1384
+    pub n_codes: u32,      // 1024
+    pub code_dim: u32,     // 32
+    pub num_actions: u32,  // 7
+    pub layers: usize,     // 12
+    pub cpb_hidden: u32,   // 64
+    pub max_seq_len: u32,  // 4000
+}
+
+impl Default for DynamicsConfig {
+    fn default() -> Self {
+        DynamicsConfig {
+            dim: 512, dim2: 519, heads: 8, head_dim: 64, ff_inner: 1384,
+            n_codes: 1024, code_dim: 32, num_actions: 7, layers: 12,
+            cpb_hidden: 64, max_seq_len: 4000,
+        }
+    }
+}
+
+/// Read the dynamics `.pt` and map its `model.dynamics.maskgit.*` tensors to
+/// [`DynamicsWeights`]. The tokenizer's `codebook`/`project_out` (from
+/// [`import_tokenizer`]) are needed for the `use_token` embedding blend and are
+/// copied in from `tok_vq`.
+pub fn import_dynamics(pt_path: &str, tok_vq: &VqWeights) -> Result<(DynamicsWeights, DynamicsConfig), String> {
+    let dc = DynamicsConfig::default();
+    let report = checkpoint::torchpt::read_report(pt_path)?;
+    let mut map = HashMap::new();
+    for t in report.tensors {
+        if let Some(name) = t.name.strip_prefix("model.dynamics.maskgit.") {
+            map.insert(name.to_string(), (t.shape, t.data));
+        }
+    }
+    if map.is_empty() {
+        return Err(format!("{pt_path}: no `model.dynamics.maskgit.*` tensors — not a GenieRedux dynamics?"));
+    }
+    let mut l = Loader { map };
+
+    // Reuse the STBlock helpers via a config with the transformer's dim2.
+    let tcfg = TokenizerConfig {
+        dim: dc.dim2, heads: dc.heads, head_dim: dc.head_dim, ff_inner: dc.ff_inner,
+        code_dim: dc.code_dim, n_codes: dc.n_codes, patch: 4, channels: 3,
+        enc_layers: dc.layers, dec_layers: 0, cpb_hidden: dc.cpb_hidden,
+    };
+
+    let (dim, dim2) = (dc.dim as usize, dc.dim2 as usize);
+    let token_emb = l.take("token_emb.weight", &[dc.n_codes as usize + 1, dim])?;
+    let pos_emb = l.take("pos_emb.weight", &[dc.max_seq_len as usize, dim])?;
+    let cpb_net = cpb(&mut l, "continuous_pos_bias", &tcfg)?;
+    let transformer = stack(&mut l, "transformer", dc.layers, &tcfg)?;
+    let to_logits_w = l.take("to_logits.weight", &[dc.n_codes as usize, dim2])?;
+    let to_logits_b = l.take("to_logits.bias", &[dc.n_codes as usize])?;
+
+    if !l.map.is_empty() {
+        let mut extra: Vec<&String> = l.map.keys().collect();
+        extra.sort();
+        return Err(format!(
+            "{} unexpected dynamics tensor(s) not mapped, e.g. {:?}",
+            l.map.len(),
+            &extra[..extra.len().min(8)]
+        ));
+    }
+    Ok((
+        DynamicsWeights {
+            token_emb, pos_emb,
+            codebook: tok_vq.codebook.clone(),
+            project_out_w: tok_vq.project_out_w.clone(),
+            project_out_b: tok_vq.project_out_b.clone(),
+            transformer, cpb_net, to_logits_w, to_logits_b,
+        },
+        dc,
     ))
 }

@@ -568,6 +568,100 @@ pub fn tokenizer_forward(
     (recon, indices)
 }
 
+// ---- dynamics (guided MaskGIT) ----
+
+/// Gather `emb[ids[i]]` -> `[n, d]` via the embed kernel (u32 indices).
+fn embed_gather(gpu: &Gpu, ids: &[u32], emb: &[f32], n: u32, d: u32) -> Vec<f32> {
+    let idb = gpu.storage(n as u64);
+    gpu.write(&idb, ids);
+    let eb = gpu.storage_init("emb", emb);
+    let out = gpu.storage((n * d) as u64);
+    gpu.submit(&[], &[gpu.step(k::EMBED, &[&idb, &eb, &out], &[d, n], n * d)]);
+    gpu.read(&out, (n * d) as usize)
+}
+
+/// Weights of the guided-MaskGIT dynamics. The token embedding blends the
+/// learned `token_emb` with the tokenizer's codebook (`use_token=True`), so the
+/// tokenizer's `codebook`/`project_out` are needed here too.
+pub struct DynamicsWeights {
+    pub token_emb: Vec<f32>,   // [num_tokens+1, dim]  (last row = mask)
+    pub pos_emb: Vec<f32>,     // [max_seq_len, dim]
+    // tokenizer VQ pieces for the use_token embedding blend:
+    pub codebook: Vec<f32>,        // [n_codes, code_dim]
+    pub project_out_w: Vec<f32>,   // [dim, code_dim]
+    pub project_out_b: Vec<f32>,   // [dim]
+    pub transformer: StTransformerWeights, // 12 blocks at dim2 = dim + num_actions
+    pub cpb_net: Vec<bias::CpbLayer>,
+    pub to_logits_w: Vec<f32>, // [n_codes, dim2]
+    pub to_logits_b: Vec<f32>, // [n_codes]
+}
+
+/// Guided-MaskGIT forward: token IDs (`mask_id = n_codes`) + per-frame action
+/// one-hots -> next-token logits `[b*n, n_codes]`. Matches `MaskGIT.forward`
+/// (use_token=True, is_guided=True; gradient-shrink is identity at inference).
+#[allow(clippy::too_many_arguments)]
+pub fn dynamics_forward(
+    gpu: &Gpu, ids: &[u32], actions: &[f32], w: &DynamicsWeights,
+    b: u32, t: u32, h: u32, wd: u32, dim: u32, heads: u32, head_dim: u32,
+    n_codes: u32, code_dim: u32, num_actions: u32,
+) -> Vec<f32> {
+    let (bu, tu, hu, wu, du, nau) = (b as usize, t as usize, h as usize, wd as usize, dim as usize, num_actions as usize);
+    let n = tu * hu * wu;          // tokens per batch
+    let rows = bu * n;
+    let mask_id = n_codes;
+
+    // token blend: token_emb(ids) + (project_out(codebook[where(mask,0,ids)]) * 10, zeroed at mask)
+    let masks: Vec<bool> = ids.iter().map(|&i| i == mask_id).collect();
+    let ids_zeroed: Vec<u32> = ids.iter().map(|&i| if i == mask_id { 0 } else { i }).collect();
+    let codes = embed_gather(gpu, &ids_zeroed, &w.codebook, rows as u32, code_dim); // [rows, cd]
+    let cb = gpu.storage_init("c", &codes);
+    let pw = gpu.storage_init("pw", &w.project_out_w);
+    let pb = gpu.storage_init("pb", &w.project_out_b);
+    let codes512 = gpu.read(&linear_bias(gpu, &cb, &pw, &pb, rows as u32, code_dim, dim), rows * du);
+    let temb = embed_gather(gpu, ids, &w.token_emb, rows as u32, dim); // [rows, dim]
+
+    let mut vt = vec![0.0f32; rows * du];
+    for r in 0..rows {
+        for c in 0..du {
+            let blend = if masks[r] { 0.0 } else { codes512[r * du + c] * 10.0 };
+            vt[r * du + c] = temb[r * du + c] + blend;
+        }
+    }
+    // + positional embedding (broadcast over batch): position = index within n.
+    for bb in 0..bu {
+        for pos in 0..n {
+            for c in 0..du {
+                vt[(bb * n + pos) * du + c] += w.pos_emb[pos * du + c];
+            }
+        }
+    }
+
+    // reshape [b,t,h,w,dim] and concat action one-hots -> dim2 = dim + num_actions
+    let dim2 = du + nau;
+    let mut vta = vec![0.0f32; rows * dim2];
+    for bb in 0..bu { for tt in 0..tu { for hh in 0..hu { for ww in 0..wu {
+        let tok = ((bb * tu + tt) * hu + hh) * wu + ww;
+        let dst = tok * dim2;
+        vta[dst..dst + du].copy_from_slice(&vt[tok * du..tok * du + du]);
+        // action one-hot for (bb, tt), broadcast across h,w
+        let act = &actions[(bb * tu + tt) * nau..(bb * tu + tt) * nau + nau];
+        vta[dst + du..dst + dim2].copy_from_slice(act);
+    }}}}
+
+    // STTransformer (12 blocks, order "st", causal temporal, peg causal) at dim2
+    let sbias = bias::cpb_bias(&w.cpb_net, hu, wu, heads as usize);
+    let tbias = bias::alibi_bias(heads as usize, tu);
+    let dim2u = dim2 as u32;
+    let enc = sttransformer_forward(gpu, &vta, b, t, h, wd, dim2u, heads, head_dim, &w.transformer, &sbias, &tbias, true, false);
+
+    // to_logits [n_codes, dim2]
+    let eb = gpu.storage_init("e", &enc);
+    let lw = gpu.storage_init("lw", &w.to_logits_w);
+    let lb = gpu.storage_init("lb", &w.to_logits_b);
+    let logits = linear_bias(gpu, &eb, &lw, &lb, rows as u32, dim2u, n_codes);
+    gpu.read(&logits, rows * n_codes as usize)
+}
+
 /// Run the block stack over a channels-last `[b,t,h,w,dim]` video and apply the
 /// final LayerNorm (no bias). Returns `[b,t,h,w,dim]`.
 #[allow(clippy::too_many_arguments)]
