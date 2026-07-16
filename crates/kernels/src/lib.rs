@@ -152,6 +152,12 @@ pub const DFL_GRAD: &str = include_str!("../wgsl/dfl_grad.wgsl");
 pub const DFL_LOSS: &str = include_str!("../wgsl/dfl_loss.wgsl");
 /// `wgsl/dfl_loss_grad.wgsl`
 pub const DFL_LOSS_GRAD: &str = include_str!("../wgsl/dfl_loss_grad.wgsl");
+/// `wgsl/dwconv3d.wgsl`
+pub const DWCONV3D: &str = include_str!("../wgsl/dwconv3d.wgsl");
+/// `wgsl/dwconv3d_dw.wgsl`
+pub const DWCONV3D_DW: &str = include_str!("../wgsl/dwconv3d_dw.wgsl");
+/// `wgsl/dwconv3d_dx.wgsl`
+pub const DWCONV3D_DX: &str = include_str!("../wgsl/dwconv3d_dx.wgsl");
 /// `wgsl/edm_mix.wgsl`
 pub const EDM_MIX: &str = include_str!("../wgsl/edm_mix.wgsl");
 /// `wgsl/edm_wrap.wgsl`
@@ -340,6 +346,10 @@ pub const TOPK_MASK: &str = include_str!("../wgsl/topk_mask.wgsl");
 pub const UPSAMPLE2: &str = include_str!("../wgsl/upsample2.wgsl");
 /// `wgsl/upsample2_dx.wgsl`
 pub const UPSAMPLE2_DX: &str = include_str!("../wgsl/upsample2_dx.wgsl");
+/// `wgsl/vq_argmax_dot.wgsl`
+pub const VQ_ARGMAX_DOT: &str = include_str!("../wgsl/vq_argmax_dot.wgsl");
+/// `wgsl/vq_argmin.wgsl`
+pub const VQ_ARGMIN: &str = include_str!("../wgsl/vq_argmin.wgsl");
 
 /// Every kernel as `(name, source)`, name = file stem.
 pub const ALL: &[(&str, &str)] = &[
@@ -414,6 +424,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("dfl_grad", DFL_GRAD),
     ("dfl_loss", DFL_LOSS),
     ("dfl_loss_grad", DFL_LOSS_GRAD),
+    ("dwconv3d", DWCONV3D),
+    ("dwconv3d_dw", DWCONV3D_DW),
+    ("dwconv3d_dx", DWCONV3D_DX),
     ("edm_mix", EDM_MIX),
     ("edm_wrap", EDM_WRAP),
     ("emb_bwd", EMB_BWD),
@@ -508,6 +521,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("topk_mask", TOPK_MASK),
     ("upsample2", UPSAMPLE2),
     ("upsample2_dx", UPSAMPLE2_DX),
+    ("vq_argmax_dot", VQ_ARGMAX_DOT),
+    ("vq_argmin", VQ_ARGMIN),
 ];
 
 /// Look up a kernel's WGSL source by file stem (e.g. `"matmul"`).
@@ -527,7 +542,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_kernels_present_and_nonempty() {
-        assert_eq!(ALL.len(), 165);
+        assert_eq!(ALL.len(), 170);
         for (n, s) in ALL { assert!(!s.trim().is_empty(), "empty kernel {n}"); }
     }
     #[test]

@@ -9,6 +9,7 @@
 
 pub mod film;
 pub mod gn;
+pub mod vq;
 
 /// A playable world model: reset with context, then step one action at a
 /// time, receiving one frame per step.
