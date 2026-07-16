@@ -46,6 +46,7 @@ use paramstore::ParamStore;
 use crate::blocks::{Conv, C2f, SPPF};
 use crate::head::Head;
 use crate::net;
+use vision::plumbing::{Acc, Cat, Up};
 use crate::net::{Ctx, Shape, ADAMW, CLIP_COEF, GRADNORM_SQ, GRAD_SCALE, GRAD_SCALE_BUF, PIPELINES, UPSAMPLE2, UPSAMPLE2_DX, CONCAT2, CONCAT_SPLIT, ADD2};
 use crate::YoloConfig;
 
@@ -70,98 +71,6 @@ pub enum LossMode {
 }
 
 // ===========================================================================
-// Neck plumbing: upsample / downsample-conv / concat + their backward.
-// ===========================================================================
-
-/// A 2x nearest-neighbour upsample stage (forward + backward), SSA.
-struct Up {
-    in_shape: Shape,
-    out_shape: Shape,
-    out: DeviceBuffer,
-    d_in: DeviceBuffer,
-}
-impl Up {
-    fn new(ctx: &Ctx, in_shape: Shape) -> Up {
-        let out_shape = Shape::new(in_shape.n, in_shape.c, in_shape.h * 2, in_shape.w * 2);
-        Up { in_shape, out_shape, out: ctx.act(out_shape.numel()), d_in: ctx.act(in_shape.numel()) }
-    }
-    fn params(&self) -> [u32; 4] {
-        [self.in_shape.n, self.in_shape.c, self.in_shape.h, self.in_shape.w]
-    }
-    fn forward(&self, ctx: &Ctx, x: &DeviceBuffer) {
-        let s = ctx.step(UPSAMPLE2, &[x, &self.out], &self.params(), self.out_shape.numel());
-        ctx.gpu.submit(&[], &[s]);
-    }
-    /// `d_out` (grad wrt upsampled output) -> `self.d_in` (grad wrt input).
-    fn backward(&self, ctx: &Ctx, d_out: &DeviceBuffer) {
-        let s = ctx.step(UPSAMPLE2_DX, &[d_out, &self.d_in], &self.params(), self.in_shape.numel());
-        ctx.gpu.submit(&[], &[s]);
-    }
-}
-
-/// A channel-concat of two equal-spatial feature maps `[a | b]` (forward +
-/// backward via concat_split). SSA.
-struct Cat {
-    n: u32,
-    ca: u32,
-    cb: u32,
-    h: u32,
-    w: u32,
-    out: DeviceBuffer,
-    d_a: DeviceBuffer,
-    d_b: DeviceBuffer,
-}
-impl Cat {
-    fn new(ctx: &Ctx, a: Shape, b: Shape) -> Cat {
-        assert_eq!((a.n, a.h, a.w), (b.n, b.h, b.w), "concat spatial mismatch");
-        let out = Shape::new(a.n, a.c + b.c, a.h, a.w);
-        Cat {
-            n: a.n,
-            ca: a.c,
-            cb: b.c,
-            h: a.h,
-            w: a.w,
-            out: ctx.act(out.numel()),
-            d_a: ctx.act(a.numel()),
-            d_b: ctx.act(b.numel()),
-        }
-    }
-    fn out_shape(&self) -> Shape {
-        Shape::new(self.n, self.ca + self.cb, self.h, self.w)
-    }
-    fn forward(&self, ctx: &Ctx, a: &DeviceBuffer, b: &DeviceBuffer) {
-        let threads = (self.ca + self.cb) * self.h * self.w * self.n;
-        let s = ctx.step(CONCAT2, &[a, b, &self.out], &[self.n, self.ca, self.cb, self.h, self.w], threads);
-        ctx.gpu.submit(&[], &[s]);
-    }
-    /// Split `d_out` into `self.d_a` (channels [0,ca)) and `self.d_b` ([ca,..)).
-    fn backward(&self, ctx: &Ctx, d_out: &DeviceBuffer) {
-        let ctot = self.ca + self.cb;
-        let na = self.ca * self.h * self.w * self.n;
-        let nb = self.cb * self.h * self.w * self.n;
-        // concat_split ABI: [N, Ctot, Csrc, c_off, H, W]
-        let sa = ctx.step(CONCAT_SPLIT, &[d_out, &self.d_a], &[self.n, ctot, self.ca, 0, self.h, self.w], na);
-        let sb = ctx.step(CONCAT_SPLIT, &[d_out, &self.d_b], &[self.n, ctot, self.cb, self.ca, self.h, self.w], nb);
-        ctx.gpu.submit(&[], &[sa, sb]);
-    }
-}
-
-/// A small out-of-place grad accumulator `dst = a + b` (the multi-consumer
-/// pattern). Owns the destination so it survives across the backward chain.
-struct Acc {
-    out: DeviceBuffer,
-    n: u32,
-}
-impl Acc {
-    fn new(ctx: &Ctx, shape: Shape) -> Acc {
-        Acc { out: ctx.act(shape.numel()), n: shape.numel() }
-    }
-    fn add(&self, ctx: &Ctx, a: &DeviceBuffer, b: &DeviceBuffer) {
-        let s = ctx.step(ADD2, &[a, b, &self.out], &[self.n], self.n);
-        ctx.gpu.submit(&[], &[s]);
-    }
-}
-
 // ===========================================================================
 // The model.
 // ===========================================================================
