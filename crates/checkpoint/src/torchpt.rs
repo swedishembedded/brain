@@ -12,11 +12,17 @@
 //! (possibly nested) state_dicts, resolve every `_rebuild_tensor_v2` node
 //! against its storage blob, and materialize each tensor as *contiguous* f32
 //! (applying `storage_offset` and strides, so non-contiguous views come out
-//! correct). F64/F32/F16/BF16 storages are converted to f32; any other dtype
+//! correct). F64/F32/F16/BF16/I64 storages are converted to f32; any other dtype
 //! is an error — the reader guarantees full coverage: every tensor in the
 //! file is returned or the whole read fails. Non-tensor leaves (ints, floats,
 //! strs, None, ...) are skipped silently but counted in
 //! [`ReadReport::skipped_non_tensor`].
+//!
+//! I64 is supported because it is unavoidable, not because it is meaningful:
+//! every `nn.BatchNorm2d` serializes an int64 `num_batches_tracked` scalar, so
+//! *any* conv net with BatchNorm is unreadable without it. Widening i64 to f32
+//! is exact below 2^24 and approximate above — the same lossy-by-design contract
+//! F64 already carries. Importers drop these tensors by name.
 //!
 //! Nested dict keys are flattened with '.' joins: `{"denoiser": {"conv.weight":
 //! t}}` yields the tensor name `denoiser.conv.weight`. Elements of lists and
@@ -55,13 +61,14 @@ enum DType {
     F64,
     F16,
     BF16,
+    I64,
 }
 
 impl DType {
     fn elem_size(self) -> usize {
         match self {
             DType::F32 => 4,
-            DType::F64 => 8,
+            DType::F64 | DType::I64 => 8,
             DType::F16 | DType::BF16 => 2,
         }
     }
@@ -76,9 +83,14 @@ fn storage_dtype(module: &str, name: &str) -> Result<DType, String> {
         "DoubleStorage" => Ok(DType::F64),
         "HalfStorage" => Ok(DType::F16),
         "BFloat16Storage" => Ok(DType::BF16),
+        // Every `nn.BatchNorm2d` serializes an int64 `num_batches_tracked` scalar,
+        // so any conv net with BN is unreadable without this arm. Converted to f32
+        // like the other non-f32 dtypes; see the note on `DType::I64` in
+        // `storage_f32` for the precision caveat.
+        "LongStorage" => Ok(DType::I64),
         _ => Err(format!(
             "torchpt: unsupported storage dtype {module}.{name} \
-             (supported: FloatStorage, DoubleStorage, HalfStorage, BFloat16Storage)"
+             (supported: FloatStorage, DoubleStorage, HalfStorage, BFloat16Storage, LongStorage)"
         )),
     }
 }
@@ -734,6 +746,19 @@ impl<'a> Archive<'a> {
             DType::BF16 => raw
                 .chunks_exact(2)
                 .map(|b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]])))
+                .collect(),
+            // Integer storages exist in real checkpoints only as bookkeeping
+            // (BatchNorm's `num_batches_tracked` step counter, index tensors).
+            // Widening to f32 is exact below 2^24 and approximate above it —
+            // the same lossy-by-design contract F64 already has here. Callers
+            // that care about an int64 payload must not route it through this
+            // reader; callers that don't (every importer, which drops
+            // `num_batches_tracked`) are unaffected.
+            DType::I64 => raw
+                .chunks_exact(8)
+                .map(|b| {
+                    i64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
+                })
                 .collect(),
         };
         let rc = Rc::new(data);

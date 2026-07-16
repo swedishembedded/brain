@@ -389,16 +389,82 @@ fn shared_storage_two_views() {
 /// the type, never a silent skip.
 #[test]
 fn unknown_storage_dtype_errors() {
+    // NOTE: this used to assert on `LongStorage`, which is now SUPPORTED (see
+    // `long_storage_widens_to_f32`) because BatchNorm makes it unavoidable.
+    // A complex storage can never be meaningful in an f32 reader, so it is the
+    // stable example of "genuinely out of scope".
     let p = P::new()
         .op(0x7d)
         .op(0x28)
-        .s("idx")
-        .tensor("LongStorage", "0", 2, 0, &[2], &[1])
+        .s("z")
+        .tensor("ComplexFloatStorage", "0", 2, 0, &[2], &[1])
         .op(0x75)
         .stop();
     let file = pt_archive(&p, &[("0", vec![0u8; 16])]);
     let err = torchpt::parse(&file).unwrap_err();
-    assert!(err.contains("LongStorage"), "error should name the dtype: {err}");
+    assert!(err.contains("ComplexFloatStorage"), "error should name the dtype: {err}");
+}
+
+/// Read a REAL `torch.save` file, if one is pointed at. Every fixture in this
+/// file is synthetic — which proves the reader matches our *model* of torch's
+/// writer, not torch itself. This closes that gap. Skips OK when unset, per the
+/// `YOLO_PARITY_WEIGHTS` convention.
+///
+/// ```text
+/// TORCHPT_REAL_PT=/path/to/zipdepth_base.pth \
+///   cargo test -p brain-checkpoint --test torchpt real_ -- --nocapture
+/// ```
+#[test]
+fn real_torch_file_parses() {
+    let Ok(path) = std::env::var("TORCHPT_REAL_PT") else {
+        eprintln!("SKIP: set TORCHPT_REAL_PT=<a real .pt/.pth> to run");
+        return;
+    };
+    let r = torchpt::read_report(&path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
+    assert!(!r.tensors.is_empty(), "no tensors read from {path}");
+    let total: usize = r.tensors.iter().map(|t| t.data.len()).sum();
+    let nbt = r.tensors.iter().filter(|t| t.name.ends_with("num_batches_tracked")).count();
+    println!(
+        "{path}: {} tensors, {total} elements, {nbt} num_batches_tracked, \
+         {} non-tensor leaves skipped",
+        r.tensors.len(),
+        r.skipped_non_tensor
+    );
+    for t in &r.tensors {
+        let numel: usize = t.shape.iter().product::<usize>().max(1);
+        assert_eq!(t.data.len(), numel, "tensor {} shape/data mismatch", t.name);
+        assert!(t.data.iter().all(|v| v.is_finite()), "tensor {} has non-finite values", t.name);
+    }
+}
+
+/// Every `nn.BatchNorm2d` serializes an int64 `num_batches_tracked` scalar, so a
+/// conv net with BN is entirely unreadable unless `LongStorage` parses. Before
+/// this arm existed the dtype error aborted the WHOLE file read — not just that
+/// tensor — so a single BN made the checkpoint unopenable.
+#[test]
+fn long_storage_widens_to_f32() {
+    let p = P::new()
+        .op(0x7d) // EMPTY_DICT
+        .op(0x28) // MARK
+        .s("bn.num_batches_tracked")
+        .tensor("LongStorage", "0", 1, 0, &[], &[]) // 0-dim scalar, as torch emits
+        .s("idx")
+        .tensor("LongStorage", "1", 3, 0, &[3], &[1])
+        .op(0x75) // SETITEMS
+        .stop();
+    let nbt: Vec<u8> = 1234i64.to_le_bytes().to_vec();
+    let idx: Vec<u8> = [-1i64, 0, 1 << 30].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let file = pt_archive(&p, &[("0", nbt), ("1", idx)]);
+
+    let r = torchpt::parse(&file).unwrap();
+    assert_eq!(r.tensors.len(), 2);
+    assert_eq!(r.tensors[0].name, "bn.num_batches_tracked");
+    assert_eq!(r.tensors[0].shape, Vec::<usize>::new(), "0-dim scalar");
+    assert_eq!(r.tensors[0].data, vec![1234.0]);
+    assert_eq!(r.tensors[1].name, "idx");
+    // 2^30 is exactly representable in f32; the widening is lossless here.
+    assert_eq!(r.tensors[1].data, vec![-1.0, 0.0, 1_073_741_824.0]);
+    assert_eq!(r.skipped_non_tensor, 0);
 }
 
 /// A DEFLATE-compressed entry is rejected with a clear error (torch containers
