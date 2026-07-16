@@ -34,6 +34,8 @@ pub mod k {
     pub const GELU: usize = 3;
     pub const MUL: usize = 4;
     // 5..17 == BiasedAttn (see `biased_attn`)
+    pub const DWCONV3D: usize = 17;
+    pub const ADD2: usize = 18;
 }
 
 /// `(name, source)` for `Gpu::new*`, in the index order `k` / [`biased_attn`].
@@ -46,6 +48,8 @@ pub fn kernel_sources() -> Vec<(&'static str, &'static str)> {
         ("mul", kernels::MUL),
     ];
     v.extend_from_slice(&BiasedAttn::kernel_sources());
+    v.push(("dwconv3d", kernels::DWCONV3D));
+    v.push(("add2", kernels::ADD2));
     v
 }
 
@@ -148,6 +152,44 @@ pub fn attn_forward(
     gpu.read(&y, (rows * dim) as usize)
 }
 
+// ---- PEG (position-encoding generator) ----
+
+/// Weights of one PEG module: a depthwise Conv3d(dim,dim,3,groups=dim).
+pub struct PegWeights {
+    pub dsconv: Vec<f32>, // [dim, 1, 3, 3, 3] == [dim, 27] per-channel kernels
+    pub bias: Vec<f32>,   // [dim]
+}
+
+/// PEG forward on a channels-LAST video `x` of shape `[b,t,h,w,dim]` (flat).
+/// Depthwise 3×3×3 conv with spatial pad 1 and temporal pad `(2,0)` when
+/// `causal` (matching `PEG(causal=True)`) else `(1,1)`; output shape unchanged.
+/// Returns the convolved video (NOT the residual — the caller adds `+ x`).
+pub fn peg_forward_w(gpu: &Gpu, x: &[f32], w: &PegWeights, b: u32, t: u32, h: u32, wd: u32, dim: u32, causal: bool) -> Vec<f32> {
+    let (bu, tu, hu, wu, du) = (b as usize, t as usize, h as usize, wd as usize, dim as usize);
+    let mut cf = vec![0.0f32; x.len()];
+    for bb in 0..bu { for tt in 0..tu { for hh in 0..hu { for ww in 0..wu { for d in 0..du {
+        let src = ((((bb*tu+tt)*hu+hh)*wu+ww)*du)+d;
+        let dst = ((((bb*du+d)*tu+tt)*hu+hh)*wu)+ww;
+        cf[dst] = x[src];
+    }}}}}
+    let xb = gpu.storage_init("x", &cf);
+    let wtb = gpu.storage_init("wt", &w.dsconv);
+    let bb_ = gpu.storage_init("b", &w.bias);
+    let yb = gpu.storage((x.len()) as u64);
+    let pt = if causal { 2u32 } else { 1u32 };
+    let params = [b, dim, t, h, wd, 3, 1, pt];
+    gpu.submit(&[], &[gpu.step(k::DWCONV3D, &[&xb, &wtb, &bb_, &yb], &params, (bu*du*tu*hu*wu) as u32)]);
+    let cf_out = gpu.read(&yb, x.len());
+    // channels-first [b,d,t,h,w] -> channels-last [b,t,h,w,d].
+    let mut out = vec![0.0f32; x.len()];
+    for bb in 0..bu { for d in 0..du { for tt in 0..tu { for hh in 0..hu { for ww in 0..wu {
+        let src = ((((bb*du+d)*tu+tt)*hu+hh)*wu)+ww;
+        let dst = ((((bb*tu+tt)*hu+hh)*wu+ww)*du)+d;
+        out[dst] = cf_out[src];
+    }}}}}
+    out
+}
+
 /// Weights of one GenieRedux `FeedForward` (GEGLU) module.
 pub struct FfWeights {
     pub norm_gamma: Vec<f32>, // [dim]
@@ -177,4 +219,81 @@ pub fn geglu_forward(gpu: &Gpu, x: &[f32], rows: u32, dim: u32, inner: u32, w: &
 
     let y = matmul(gpu, &act, &up(&w.w_out), rows, inner, dim);
     gpu.read(&y, (rows * dim) as usize)
+}
+
+// ---- full STBlock ----
+
+/// Weights of one STBlock: spatial then temporal, each `PEG → Attention → FF`.
+pub struct StBlockWeights {
+    pub spatial_peg: PegWeights,
+    pub spatial_attn: AttnWeights,
+    pub spatial_ff: FfWeights,
+    pub temporal_peg: PegWeights,
+    pub temporal_attn: AttnWeights,
+    pub temporal_ff: FfWeights,
+}
+
+fn add(a: &[f32], b: &[f32]) -> Vec<f32> {
+    a.iter().zip(b).map(|(x, y)| x + y).collect()
+}
+
+/// Permute a channels-last video between the spatial fold `[b,t,h,w,d]` (rows
+/// grouped as `(b t)(h w)`) and the temporal fold `[b,h,w,t,d]` (`(b h w) t`).
+fn to_temporal(x: &[f32], b: usize, t: usize, h: usize, w: usize, d: usize) -> Vec<f32> {
+    let mut o = vec![0.0f32; x.len()];
+    for bb in 0..b { for tt in 0..t { for hh in 0..h { for ww in 0..w {
+        let src = (((bb*t+tt)*h+hh)*w+ww)*d;
+        let dst = (((bb*h+hh)*w+ww)*t+tt)*d;
+        o[dst..dst+d].copy_from_slice(&x[src..src+d]);
+    }}}}
+    o
+}
+fn from_temporal(x: &[f32], b: usize, t: usize, h: usize, w: usize, d: usize) -> Vec<f32> {
+    let mut o = vec![0.0f32; x.len()];
+    for bb in 0..b { for hh in 0..h { for ww in 0..w { for tt in 0..t {
+        let src = (((bb*h+hh)*w+ww)*t+tt)*d;
+        let dst = (((bb*t+tt)*h+hh)*w+ww)*d;
+        o[dst..dst+d].copy_from_slice(&x[src..src+d]);
+    }}}}
+    o
+}
+
+/// One STBlock forward over a channels-last video `x` `[b,t,h,w,dim]`.
+///
+/// Spatial sub-block attends over the `h·w` tokens of each frame
+/// (bidirectional; `spatial_bias` = ContinuousPositionBias `[heads,hw,hw]`);
+/// temporal attends over the `t` frames at each location (causal; `temporal_bias`
+/// = ALiBi `[heads,t,t]`). Each of the six stages is residual, matching
+/// `STBlock.spatial_temporal_forward`. PEGs are causal (temporal pad `(2,0)`).
+#[allow(clippy::too_many_arguments)]
+pub fn stblock_forward(
+    gpu: &Gpu, x: &[f32], b: u32, t: u32, h: u32, w: u32, dim: u32, heads: u32, head_dim: u32,
+    wts: &StBlockWeights, spatial_bias: &[f32], temporal_bias: &[f32], peg_causal: bool,
+) -> Vec<f32> {
+    let (bu, tu, hu, wu, du) = (b as usize, t as usize, h as usize, w as usize, dim as usize);
+    let hw = h * w;
+
+    // --- spatial: rows folded as (b t)(h w), directly contiguous ---
+    let mut xs = x.to_vec();
+    let p = peg_forward_w(gpu, &xs, &wts.spatial_peg, b, t, h, w, dim, peg_causal);
+    xs = add(&xs, &p);
+    let a = attn_forward(gpu, &xs, b * t, hw, dim, heads, head_dim, &wts.spatial_attn, spatial_bias, false);
+    xs = add(&xs, &a);
+    let f = geglu_forward(gpu, &xs, b * t * hw, dim, ff_inner(dim), &wts.spatial_ff);
+    xs = add(&xs, &f);
+
+    // --- temporal: PEG on the same video, then attention over t ---
+    let p = peg_forward_w(gpu, &xs, &wts.temporal_peg, b, t, h, w, dim, peg_causal);
+    xs = add(&xs, &p);
+    let mut xt = to_temporal(&xs, bu, tu, hu, wu, du);
+    let a = attn_forward(gpu, &xt, b * h * w, t, dim, heads, head_dim, &wts.temporal_attn, temporal_bias, true);
+    xt = add(&xt, &a);
+    let f = geglu_forward(gpu, &xt, b * h * w * t, dim, ff_inner(dim), &wts.temporal_ff);
+    xt = add(&xt, &f);
+    from_temporal(&xt, bu, tu, hu, wu, du)
+}
+
+/// GEGLU inner dim used by GenieRedux: `round(dim * 4 * 2/3)`.
+pub fn ff_inner(dim: u32) -> u32 {
+    ((dim as f64) * 4.0 * 2.0 / 3.0) as u32
 }

@@ -74,7 +74,7 @@ fn dwconv3d_forward_matches_host_reference() {
     let wtb = gpu.storage_init("wt", &wt);
     let bb = gpu.storage_init("b", &bias);
     let yb = gpu.storage((N * C * T * H * W) as u64);
-    let params = [N as u32, C as u32, T as u32, H as u32, W as u32, KS as u32, P as u32];
+    let params = [N as u32, C as u32, T as u32, H as u32, W as u32, KS as u32, P as u32, P as u32];
     gpu.submit(&[], &[gpu.step(0, &[&xb, &wtb, &bb, &yb], &params, (N * C * T * H * W) as u32)]);
     let y = gpu.read(&yb, N * C * T * H * W);
     let want = host_fwd(&x, &wt, &bias);
@@ -92,7 +92,7 @@ fn dwconv3d_backward_finite_differences() {
     let wt = rnd(5, C * KS * KS * KS);
     let bias = vec![0.0f32; C];
     let dy = rnd(6, N * C * T * H * W); // upstream grad
-    let params = [N as u32, C as u32, T as u32, H as u32, W as u32, KS as u32, P as u32];
+    let params = [N as u32, C as u32, T as u32, H as u32, W as u32, KS as u32, P as u32, P as u32];
     let wf = |b: &gpu_core::DeviceBuffer, d: &[f32]| gpu.write(b, &d.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
 
     let xb = gpu.storage_init("x", &x);

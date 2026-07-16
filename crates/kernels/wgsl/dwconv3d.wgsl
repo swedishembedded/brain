@@ -3,15 +3,17 @@
 
 // Depthwise 3D convolution (forward) — the PEG (position-encoding generator)
 // of ST-ViViT tokenizers: a per-channel Conv3d over (T,H,W) with a K^3 kernel,
-// stride 1, symmetric zero-pad P (typically K=3, P=1). Layout [N,C,T,H,W];
-// weights [C,K,K,K] (one KxKxK kernel per channel, no Cin mixing) + bias[C].
-//   y[n,c,t,h,w] = bias[c] + sum_{kt,kh,kw} x[n,c,t+kt-P,h+kh-P,w+kw-P]
+// stride 1, zero-pad. Layout [N,C,T,H,W]; weights [C,K,K,K] (one KxKxK kernel
+// per channel, no Cin mixing) + bias[C]. Output size == input size.
+//   y[n,c,t,h,w] = bias[c] + sum_{kt,kh,kw} x[n,c,t+kt-pt,h+kh-ps,w+kw-ps]
 //                                            * wt[c,kt,kh,kw]   (zero outside)
-// One invocation per OUTPUT element. fp32, wg64, no barriers.
+// The spatial pad `ps` and TEMPORAL low-pad `pt` are independent, so the causal
+// PEG (temporal pad (2,0) with K=3: pt=2) and the non-causal PEG (pt=ps=1) both
+// map to this kernel. One invocation per OUTPUT element. fp32, wg64, no barriers.
 
 struct Params {
     N: u32, C: u32, T: u32, H: u32, W: u32,
-    K: u32, pad: u32,
+    K: u32, ps: u32, pt: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -36,16 +38,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     var acc = bias[c];
     for (var kt: u32 = 0u; kt < p.K; kt = kt + 1u) {
         let it = t + kt;
-        if (it >= p.pad && it - p.pad < p.T) {
-            let ti = it - p.pad;
+        if (it >= p.pt && it - p.pt < p.T) {
+            let ti = it - p.pt;
             for (var kh: u32 = 0u; kh < p.K; kh = kh + 1u) {
                 let ih = h + kh;
-                if (ih >= p.pad && ih - p.pad < p.H) {
-                    let hi = ih - p.pad;
+                if (ih >= p.ps && ih - p.ps < p.H) {
+                    let hi = ih - p.ps;
                     for (var kw: u32 = 0u; kw < p.K; kw = kw + 1u) {
                         let iw = w + kw;
-                        if (iw >= p.pad && iw - p.pad < p.W) {
-                            let wi = iw - p.pad;
+                        if (iw >= p.ps && iw - p.ps < p.W) {
+                            let wi = iw - p.ps;
                             let xi = ((((n * p.C + c) * p.T + ti) * p.H + hi) * p.W) + wi;
                             let wti = ((c * p.K + kt) * p.K + kh) * p.K + kw;
                             acc = acc + x[xi] * wt[wti];
