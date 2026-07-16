@@ -39,6 +39,37 @@ from the specs in `docs/depth/specs/`.
   any rtol**. The mispairing is not "usually missed"; it **cannot** be caught.
   DA3/DINOv2 uses exact GELU, so this had to exist before DA3 trains.
 
+### P1 — `crates/vision`, the shared conv layer
+- **`yolo/tests/p1_forward_pin.rs`** landed FIRST, before any refactor, so it
+  captures the pre-change baseline: 45,696 cls/box logits pinned bitwise in both
+  train and eval mode. This is the gate that matters — p8 pins only names/counts
+  and p3 only backward-vs-forward consistency, so both stay green through a
+  silent numeric shift.
+- **`crates/vision`**: `ConvKernelIds::resolve` looks kernels up **by name**,
+  killing the positional-index class of bug structurally (`wm-diamond` declares
+  `K_NLC_NCHW = 8` in one module and `= 18` in another for the same kernel).
+  Absent kernels → `NONE`, and `need()` panics naming the kernel.
+- **Moved out of yolo, as pure relocations** (verified by diffing against the
+  originals — only the const-import block, `ctx.ids.*` rewrites, and one doc
+  link): `ConvBN`/`Bottleneck`/`C2f`/`SPPF` (900 → 895 lines) and the neck
+  plumbing `Up`/`Cat`/`Acc` (previously private). yolo keeps its `PIPELINES` and
+  frozen index order (its checkpoint contract), plus config/head/loss/assign/
+  boxmath/nms/infer.
+- Proof at every step: forward pin bitwise-identical, p8 297 tensors / 3,167,776
+  params unchanged, p3 gradcheck green, full workspace suite 178/178.
+
+### P2 — the depth kernel family
+- 17 kernels, registry 180 → 200, all JIT-compiling on both backends.
+- **ReLU cost nothing**: `leaky_relu(slope=0)` is exactly ReLU in both
+  directions. ConvTranspose2d deferred (DPT needs it, ZipDepth doesn't).
+- Tested by **adjointness**, not FD: every `*_dx` here is the adjoint of a linear
+  op, so `<A(x),y> == <x,Aᵀ(y)>` holds to round-off rather than a tolerance, and
+  it catches exactly this family's failure modes (dropped edge tap, transposed
+  group index, off-by-one window). 14 tests.
+- Backwards are all **gathers** (brain is atomic-free). Where inverting the index
+  map is subtle, the candidate range is loose and each candidate re-evaluates the
+  *forward's own* predicate — one definition, evaluated twice.
+
 ## Decisions
 
 - **`gradcheck::directional_check_step` (per-tensor eps): considered, REFUTED,
@@ -53,10 +84,34 @@ from the specs in `docs/depth/specs/`.
   relocates the magic number. Revisit at P7.4 only if DA3's eps tuning is
   genuinely painful, with two real data points instead of one hypothesis.
 
+## Traps found by the gates (do not re-learn these)
+
+- **`target` is a WGSL reserved keyword.** `masked_l1` would not parse.
+- **The wgsl-cpu JIT rejects user-defined functions** — everything inlines into
+  `main`. A `src_coord()` helper compiled on wgpu and hard-failed on CPU, i.e. it
+  silently broke the two-backend invariant. Same reason `gelu_erf.wgsl` inlines
+  its erf. Any new kernel must be helper-free.
+- **`backend-cpu` binds fast paths BY KERNEL NAME** (`find("conv2d")`,
+  `lib.rs:127-133`) into AVX2/winograd. Naming a grouped conv `conv2d` would
+  silently inherit a DENSE path that ignores `groups` and computes wrong results
+  with **no error**. Hence `conv2d_gd`, and hence it is ~1 ULP off `conv2d`
+  (generic JIT vs vectorized summation order) — the test allows ≤4 ULP.
+- **`AGENTS.md`'s "≤4 storage buffers/kernel" is already false**: `router_bwd`,
+  `mla_scores` and `layernorm_dgamma` bind 5, and WebGPU guarantees 8.
+- The p3 yolo gradcheck takes **~29 min** under contention; budget for it.
+
 ## Next
 
-P1 — `crates/vision`: lift the conv blocks out of `crates/yolo` (they are generic
-but trapped behind hardcoded kernel-index consts, `blocks.rs:45-49`), resolving
-kernel ids **by name** via `ConvKernelIds::resolve`. Proof obligations: yolo's
-pinned fingerprint (297 tensors / 3,167,776 params) + p3 gradcheck + a new
-forward-value pin all unchanged.
+P3 — `crates/depth`: the ZipDepth model. Blocks compose from `crates/vision`
+(`ConvBN` + the new `conv2d_gd`), plus the ZipDepth-specific modules
+(`QARepBlock`, SE, `StripPoolingAttention`, `GlobalContextBlock`,
+`MinimalMultiScale`/`CrossScale`, `LightweightSPPF`, `UltraLightFusion`,
+`FastConvexUpsample`). `maxpool5` IS LightweightSPPF exactly.
+
+Still needed before the model closes (identified while writing P2, not yet
+built): a broadcast-add for StripPoolingAttention (`[B,C,H,1] + [B,C,1,W]`), the
+GlobalContextBlock's per-image `[B,C,HW]x[B,HW,1]` weighted pool and its
+`[B,C,1,1]` residual add (`bias_add` is `[C]` shared across N, so it does not
+fit), a softmax over the **9 axis** for `FastConvexUpsample` (distinct from
+`softmax_hw`), and a generic-scale `resize_nearest` for `MinimalCrossScale`
+(`upsample2` is 2×-hardcoded).
