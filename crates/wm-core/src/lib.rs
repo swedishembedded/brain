@@ -41,6 +41,18 @@ pub trait WorldModel {
     /// Diffusion-sampler quality knob (number of function evaluations).
     /// Models without an NFE concept ignore it; default is a no-op.
     fn set_nfe(&mut self, _n: u32) {}
+
+    /// Restore the exact state the model started from — the context it was
+    /// last [`reset`](WorldModel::reset)-ed with, re-seeding any internal RNG
+    /// so the SAME first frame (and sequence) is produced every time. This is
+    /// what the interactive "Enter to reset" key invokes: it must return to
+    /// the beginning, not spawn a fresh random dream. The default clears to
+    /// the empty-context reset (correct for stateless / RNG-free models like
+    /// [`FakeWorldModel`], whose reset is already a pure function of context);
+    /// stochastic models override it to also re-seed.
+    fn reset_initial(&mut self) {
+        self.reset(&[], &[]);
+    }
 }
 
 /// Deterministic, GPU-free test model: a bright 8x8 square (value `1.0` in

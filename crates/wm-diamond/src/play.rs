@@ -65,6 +65,14 @@ pub struct DiamondWorldModel {
     obs_ring: Vec<Vec<f32>>,
     act_ring: Vec<u32>,
     rng: NormalRng,
+    /// The seed the RNG is (re)initialized from — kept so `reset`/`reset_initial`
+    /// can rewind the noise stream to a reproducible start.
+    seed: u64,
+    /// Snapshot of the context rings captured at the last `reset`, so
+    /// `reset_initial` (the interactive Enter key) can restore the exact
+    /// starting frame instead of clearing to grey.
+    init_obs: Vec<Vec<f32>>,
+    init_act: Vec<u32>,
     num_denoise_steps: u32,
     sigmas: Vec<f32>,
     frame_len: usize,
@@ -84,6 +92,9 @@ impl DiamondWorldModel {
             obs_ring: vec![vec![0.0; frame_len]; nsc],
             act_ring: vec![0; nsc],
             rng: NormalRng::new(seed),
+            seed,
+            init_obs: vec![vec![0.0; frame_len]; nsc],
+            init_act: vec![0; nsc],
             num_denoise_steps: DEFAULT_DENOISE_STEPS,
             sigmas: build_sigmas(DEFAULT_DENOISE_STEPS, SIGMA_MIN, SIGMA_MAX, RHO),
             frame_len,
@@ -121,7 +132,10 @@ impl WorldModel for DiamondWorldModel {
     }
 
     /// Context frames arrive in trait convention ([0,1] CHW, oldest first);
-    /// missing context stays zero ([-1,1] mid-grey).
+    /// missing context stays zero ([-1,1] mid-grey). Re-seeds the noise stream
+    /// to the construction seed and snapshots the resulting context as the
+    /// initial state, so a subsequent [`reset_initial`](WorldModel::reset_initial)
+    /// (the Enter key) rewinds to exactly this frame.
     fn reset(&mut self, ctx_frames: &[f32], ctx_actions: &[u32]) {
         let nsc = self.obs_ring.len();
         for f in self.obs_ring.iter_mut() {
@@ -140,6 +154,18 @@ impl WorldModel for DiamondWorldModel {
         for k in 0..n_act {
             self.act_ring[nsc - n_act + k] = ctx_actions[k].min(self.unet.cfg.num_actions - 1);
         }
+        self.rng = NormalRng::new(self.seed);
+        self.init_obs = self.obs_ring.clone();
+        self.init_act = self.act_ring.clone();
+    }
+
+    /// Rewind to the snapshot captured at the last `reset`: restore the seed
+    /// context rings and re-seed the noise stream, so the interactive Enter
+    /// key replays the sequence from an identical first frame.
+    fn reset_initial(&mut self) {
+        self.obs_ring = self.init_obs.clone();
+        self.act_ring = self.init_act.clone();
+        self.rng = NormalRng::new(self.seed);
     }
 
     fn step(&mut self, action: u32) -> Vec<f32> {

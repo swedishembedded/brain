@@ -159,7 +159,9 @@ pub fn play_loop<C: Clock>(
             match ux {
                 UxKey::Pause => hud.paused = !hud.paused,
                 UxKey::Reset => {
-                    model.reset(&[], &[]);
+                    // Rewind to the initial seed context (re-seeding the RNG),
+                    // not a blank/random restart — Enter returns to the start.
+                    model.reset_initial();
                     pending_reset = true;
                 }
                 UxKey::QualityDown => {
