@@ -135,17 +135,27 @@ actions.json (7 actions), convert via wm-ingest.
 - [done] STTransformer stack (N blocks + norm_out) — sttransformer_forward.
   This is the shared body of tokenizer enc/dec (8) and dynamics (12).
 
+## P4 progress (cont.)
+- [done] Tokenizer FORWARD path complete + component-verified (crates/wm-genie):
+    * patch_embed / to_pixels (patchify 4x4x3, LN->Linear->LN with bias) <1e-4
+    * vq_quantize (cosine VQ: project_in -> l2norm -> argmax vs normed codebook
+      -> gather -> project_out) <1e-4 + exact indices
+    * bias::alibi_bias (temporal) + bias::cpb_bias (spatial CPB MLP)
+    * tokenizer_forward: patch(first+rest)->encoder(8,"st")->VQ->decoder(8,"ts")
+      ->to_pixels(first+rest); end-to-end shape/finite/determinism/index-range.
+  Kernel table: +bias_add, embed, vq_argmax_dot (all pre-existing kernels).
+
 ## Next (P4 remaining)
-1. Tokenizer forward: patch-embed (LN(48)->Linear48->512->LN, + first-frame
-   variant) -> STTransformer(8) -> project_in(512->32) -> cosine VQ
-   (wm_core::vq, 1024x32) -> project_out(32->512) -> STTransformer(8) ->
-   to_pixels(512->48) -> unpatch. NOTE: brain gelu=tanh vs torch erf F.gelu ->
-   may need an erf-gelu kernel for tight checkpoint parity.
-2. Dynamics forward: token/pos emb + action one-hot concat (dim 519) ->
-   STTransformer(12, dim 519) -> to_logits(1024) -> guided MaskGIT sampler.
-3. Import name-maps (tokenizer 514 / dynamics 372, full coverage).
-4. Parity dump (scripts/parity-dump/genie.py) + per-layer allclose.
-5. CoinRun ingest + WorldModel wrap -> interactive.
+1. Import: tokenizer 514-tensor name-map (checkpoint::torchpt reader) ->
+   TokenizerWeights, full coverage. Then load the 100M ckpt + real CoinRun
+   frame -> reconstruction. NOTE gelu: brain tanh vs torch erf F.gelu -> add an
+   erf-gelu kernel for tight parity (the one known numeric gap).
+2. Parity dump (scripts/parity-dump/genie.py) + per-layer allclose vs the
+   reference repo (case-study neurips branch).
+3. Dynamics forward: token/pos emb + action one-hot concat (dim 519) ->
+   STTransformer(12, dim 519) -> to_logits(1024) -> guided MaskGIT sampler +
+   import (372). Reuses the same STBlock/attention/bias.
+4. CoinRun ingest + WorldModel wrap -> interactive SDL/WASD.
 
 ## Backlog (user-reported)
 - [#8 done] SDL window always compiled (no wm-sdl feature / build/wm).
