@@ -112,13 +112,30 @@ decode. Build order: kernels -> shared STBlock -> tokenizer (load 100M for
 parity) -> dynamics (load 80M) -> MaskGIT sampler. Data: CoinRun jpg frames +
 actions.json (7 actions), convert via wm-ingest.
 
-## Next (P4 build order, kernels ready)
-1. STBlock (shared): l2norm_scale(q)/l2norm_scale(k) -> pack qkv ->
-   attn_scores_{bidir|causal}_bias(scale=8) -> softmax -> apply -> proj;
-   PEG dwconv3d pre-attn; GEGLU FF. Spatial ("st") vs temporal ("ts") = reshape.
-2. wm-genie crate: STTransformer, import (load tokenizer 101.7M / dynamics 80.8M
-   with full-coverage name-map), tokenizer round-trip, MaskGIT sampler.
-3. CoinRun ingest + WorldModel wrap -> interactive.
+## P4 progress
+- [done] wm-genie crate created. STBlock's two learnable sub-modules implemented
+  + verified vs exact host refs (crates/wm-genie/tests/blocks.rs, <1e-4):
+    * attn_forward — GenieRedux Attention (num_null_kv=0): pre-norm, fused to_kv,
+      QK-norm (l2norm_scale x q/k_scale), scale-8 biased scores (bidir CPB /
+      causal ALiBi), softmax, apply, to_out.
+    * geglu_forward — FeedForward: pre-norm -> gelu(gate)*x -> out-proj.
+  Verified architecture in docs/world-models/specs/P4.genie.md (from real ckpts
+  + reference source).
+- PARITY NOTE: brain gelu = tanh approx; GenieRedux uses torch exact-erf F.gelu.
+  Full checkpoint parity likely needs an erf-gelu kernel (small, add at parity
+  step). ContinuousPositionBias/ALiBi MLP outputs are precomputed host-side and
+  fed as the bias buffer.
+
+## Next (P4 remaining)
+1. STBlock assembly: spatial(peg->attn(bidir,CPB)->ff) then temporal(peg->
+   attn(causal,ALiBi)->ff), post-residual, with the (b t)(h w)d <-> (b h w)t d
+   reshapes. PEG = dwconv3d (temporal causal pad (2,0) host pre-pad).
+2. Tokenizer: patch-embed (4x4x3) -> 8 enc STBlocks -> norm_out -> cosine VQ
+   (wm_core::vq, 1024x32) -> 8 dec STBlocks -> to_pixels. Import name-map (514).
+3. Dynamics: token/pos emb + action one-hot concat (dim 519) -> 12 STBlocks ->
+   to_logits (1024) -> guided MaskGIT sampler (host). Import name-map (372).
+4. Parity dump (scripts/parity-dump/genie.py) + per-layer allclose.
+5. CoinRun ingest + WorldModel wrap -> interactive.
 
 ## Backlog (user-reported)
 - [#8 done] SDL window always compiled (no wm-sdl feature / build/wm).
