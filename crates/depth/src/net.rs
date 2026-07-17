@@ -23,7 +23,16 @@ use vision::ConvKernelIds;
 /// Ordered by concern, not by any external contract — nothing indexes this array
 /// positionally.
 pub const PIPELINES: &[(&str, &str)] = &[
-    // ---- conv (grouped + dilated; ZipDepth is grouped conv end to end) ----
+    // ---- conv. BOTH forms are registered, and both are used: ZipDepth's dense
+    // units (the stem, most QARepBlocks, SPPF, SE, GlobalContextBlock) are
+    // groups=1/dilation=1 and route to `conv2d`, which `backend-cpu` fast-paths
+    // through AVX2/winograd by NAME. Only the genuinely grouped/dilated units
+    // (MinimalMultiScale's depthwise branches, MinimalCrossScale, the fusion
+    // projections, the NPU upsampler's depthwise 5x5) go to `conv2d_gd`.
+    // `vision::ConvSpec::is_dense` makes that choice per unit.
+    ("conv2d", kernels::CONV2D),
+    ("conv2d_dx", kernels::CONV2D_DX),
+    ("conv2d_dw", kernels::CONV2D_DW),
     ("conv2d_gd", kernels::CONV2D_GD),
     ("conv2d_gd_dx", kernels::CONV2D_GD_DX),
     ("conv2d_gd_dw", kernels::CONV2D_GD_DW),
@@ -143,14 +152,30 @@ mod tests {
         }
     }
 
-    /// ZipDepth registers no `conv2d`/`silu`, and that is deliberate: it is
-    /// grouped-conv + ReLU throughout. Resolving to NONE is the CORRECT outcome —
-    /// `need()` then panics naming the kernel rather than dispatching a wrong one.
+    /// Kernels ZipDepth genuinely does not use resolve to NONE, and that is the
+    /// CORRECT outcome: `need()` then panics naming the kernel rather than
+    /// dispatching a wrong one.
+    ///
+    /// `conv2d` is deliberately NOT in this list. An earlier version asserted it
+    /// was absent, on the assumption that ZipDepth is grouped conv throughout —
+    /// which is false: the stem, most QARepBlocks, SPPF, SE and
+    /// GlobalContextBlock are all groups=1, and routing them through `conv2d_gd`
+    /// would forfeit the AVX2/winograd fast path for nothing. Both forms are
+    /// registered; `ConvSpec::is_dense` picks per unit.
     #[test]
     fn kernels_zipdepth_does_not_use_resolve_to_none() {
         let i = ids();
-        assert_eq!(i.conv2d, vision::NONE, "ZipDepth uses conv2d_gd, not dense conv2d");
         assert_eq!(i.silu, vision::NONE, "ZipDepth is ReLU, not SiLU");
-        assert_eq!(i.upsample2, vision::NONE, "ZipDepth resizes to arbitrary sizes");
+        assert_eq!(i.upsample2, vision::NONE, "ZipDepth resizes to arbitrary sizes, not 2x");
+        assert_eq!(i.conv_act_reg, vision::NONE, "the fused path is SiLU-only; ZipDepth never fuses");
+    }
+
+    /// ...and the dense conv IS registered, precisely so ZipDepth's many
+    /// groups=1 units keep the fast path.
+    #[test]
+    fn both_conv_forms_are_registered() {
+        let i = ids();
+        assert_ne!(i.conv2d, vision::NONE, "dense units need conv2d for the CPU fast path");
+        assert_ne!(i.conv2d_gd, vision::NONE, "grouped/dilated units need conv2d_gd");
     }
 }

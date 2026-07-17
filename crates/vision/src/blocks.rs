@@ -79,10 +79,77 @@ fn pack2(a: &[f32], b: &[f32]) -> Vec<f32> {
 // ===========================================================================
 
 /// A single `Conv` unit. Supports stride 1/2 and K=3 (pad 1) / K=1 (pad 0).
+
+/// A conv unit's activation. An enum rather than a bare kernel id: the id alone
+/// cannot express the unfused path's fwd+bwd PAIR, nor whether a fused kernel
+/// exists for it, and it would let a caller set an activation the fused path
+/// silently ignores.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Act {
+    /// No activation (a bare conv+BN).
+    None,
+    /// SiLU/swish. yolo. Has a fused conv->BN(eval)->act kernel.
+    Silu,
+    /// ReLU. ZipDepth. Dispatched as `leaky_relu` with slope 0 — which IS relu in
+    /// both directions — so it costs no kernel of its own.
+    Relu,
+}
+
+/// Everything that varies between conv units. Immutable after construction:
+/// `sb` caches the BN-eval collapse and is invalidated only on a train/eval
+/// flip, so a runtime-mutable activation or grouping would leave it stale.
+#[derive(Clone, Copy, Debug)]
+pub struct ConvSpec {
+    pub cout: u32,
+    pub k: u32,
+    pub stride: u32,
+    pub pad: u32,
+    pub groups: u32,
+    pub dilation: u32,
+    pub act: Act,
+}
+
+impl ConvSpec {
+    /// yolo's unit: dense, SiLU.
+    pub const fn silu(cout: u32, k: u32, stride: u32, pad: u32) -> ConvSpec {
+        ConvSpec { cout, k, stride, pad, groups: 1, dilation: 1, act: Act::Silu }
+    }
+    /// ZipDepth's `ConvBN`: grouped/dilated, ReLU.
+    pub const fn relu(cout: u32, k: u32, stride: u32, pad: u32) -> ConvSpec {
+        ConvSpec { cout, k, stride, pad, groups: 1, dilation: 1, act: Act::Relu }
+    }
+    pub const fn with_groups(self, groups: u32) -> ConvSpec {
+        ConvSpec { groups, ..self }
+    }
+    pub const fn with_dilation(self, dilation: u32) -> ConvSpec {
+        ConvSpec { dilation, ..self }
+    }
+    pub const fn with_act(self, act: Act) -> ConvSpec {
+        ConvSpec { act, ..self }
+    }
+    /// Depthwise: groups == cin == cout, weight `[C,1,k,k]`.
+    pub const fn depthwise(ch: u32, k: u32, stride: u32, pad: u32, act: Act) -> ConvSpec {
+        ConvSpec { cout: ch, k, stride, pad, groups: ch, dilation: 1, act }
+    }
+    /// Is this the plain dense case the pre-existing `conv2d` kernel covers?
+    ///
+    /// The distinction is load-bearing: `backend-cpu` binds an AVX2/winograd fast
+    /// path to the NAME `conv2d`, and that path is dense — it ignores `groups`
+    /// entirely. Routing a grouped conv there would compute wrong results with no
+    /// error, so grouping/dilation MUST go to `conv2d_gd`.
+    pub fn is_dense(&self) -> bool {
+        self.groups == 1 && self.dilation == 1
+    }
+    pub fn out_shape(&self, x: Shape) -> Shape {
+        x.conv_out_dilated(self.cout, self.k, self.stride, self.pad, self.dilation)
+    }
+}
+
 pub struct Conv {
     prefix: String,
     pub in_shape: Shape,
     pub out_shape: Shape,
+    pub spec: ConvSpec,
     k: u32,
     stride: u32,
     pad: u32,
@@ -125,6 +192,8 @@ pub struct Conv {
 
 impl Conv {
     #[allow(clippy::too_many_arguments)]
+    /// yolo's ctor, unchanged: dense conv + BN + SiLU.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &Ctx,
         prefix: &str,
@@ -135,13 +204,22 @@ impl Conv {
         pad: u32,
         train: bool,
     ) -> Conv {
-        let out_shape = in_shape.conv_out(cout, k, stride, pad);
+        Conv::with_spec(ctx, prefix, in_shape, ConvSpec::silu(cout, k, stride, pad), train)
+    }
+
+    /// The general ctor: any grouping/dilation/activation.
+    pub fn with_spec(ctx: &Ctx, prefix: &str, in_shape: Shape, spec: ConvSpec, train: bool) -> Conv {
+        let (cout, k, stride, pad) = (spec.cout, spec.k, spec.stride, spec.pad);
+        assert_eq!(in_shape.c % spec.groups, 0, "cin {} not divisible by groups {}", in_shape.c, spec.groups);
+        assert_eq!(cout % spec.groups, 0, "cout {cout} not divisible by groups {}", spec.groups);
+        let out_shape = spec.out_shape(in_shape);
         let on = out_shape.numel();
         let c = cout;
         Conv {
             prefix: prefix.to_string(),
             in_shape,
             out_shape,
+            spec,
             k,
             stride,
             pad,
@@ -211,8 +289,14 @@ impl Conv {
         ]
     }
 
-    fn conv_params(&self) -> [u32; 10] {
-        [
+    /// The conv uniform stream. TWO ABIs, picked by the spec:
+    ///   dense  -> conv2d's 10-u32 `[N,Cin,H,W,Cout,K,stride,pad,Ho,Wo]`
+    ///   gd     -> conv2d_gd's 12-u32, with `dilation,groups` before `Ho,Wo`
+    /// The legacy form is preserved exactly for the dense case so yolo's uniform
+    /// layout — and its AVX2/winograd fast path, which is bound to the NAME
+    /// `conv2d` — are untouched.
+    fn conv_params(&self) -> Vec<u32> {
+        let mut v = vec![
             self.in_shape.n,
             self.in_shape.c,
             self.in_shape.h,
@@ -221,9 +305,69 @@ impl Conv {
             self.k,
             self.stride,
             self.pad,
-            self.out_shape.h,
-            self.out_shape.w,
-        ]
+        ];
+        if !self.spec.is_dense() {
+            v.push(self.spec.dilation);
+            v.push(self.spec.groups);
+        }
+        v.push(self.out_shape.h);
+        v.push(self.out_shape.w);
+        v
+    }
+
+    /// Forward conv kernel: the dense fast-pathed one, or the grouped/dilated one.
+    fn conv_kind(&self, ctx: &Ctx) -> usize {
+        if self.spec.is_dense() {
+            ctx.ids.need(ctx.ids.conv2d, "conv2d")
+        } else {
+            ctx.ids.need(ctx.ids.conv2d_gd, "conv2d_gd")
+        }
+    }
+    fn conv_dx_kind(&self, ctx: &Ctx) -> usize {
+        if self.spec.is_dense() {
+            ctx.ids.need(ctx.ids.conv2d_dx, "conv2d_dx")
+        } else {
+            ctx.ids.need(ctx.ids.conv2d_gd_dx, "conv2d_gd_dx")
+        }
+    }
+    fn conv_dw_kind(&self, ctx: &Ctx) -> usize {
+        if self.spec.is_dense() {
+            ctx.ids.need(ctx.ids.conv2d_dw, "conv2d_dw")
+        } else {
+            ctx.ids.need(ctx.ids.conv2d_gd_dw, "conv2d_gd_dw")
+        }
+    }
+    /// Can this unit take the fused conv->BN(eval)->act path?
+    ///
+    /// Only SiLU has a fused kernel (`conv_act*` hardcodes it in the WGSL body),
+    /// and only the dense conv is fast-pathed. Everything else runs the unfused
+    /// `conv -> bn_eval -> act` — which is why `bn_eval`, registered and tested
+    /// but previously dead, now has a consumer. Its eps matches `pack_sb`'s
+    /// (`1e-5`), so the two paths agree numerically by construction.
+    fn can_fuse(&self, ctx: &Ctx) -> bool {
+        self.spec.act == Act::Silu && self.spec.is_dense() && ctx.ids.conv_act_reg != crate::NONE
+    }
+
+    /// The unfused activation's (forward, backward) kernel pair, or `None` for
+    /// `Act::None`. ReLU maps to `leaky_relu` at slope 0 — identical in both
+    /// directions — so it needs no kernel of its own.
+    fn act_pair(&self, ctx: &Ctx) -> Option<(usize, usize)> {
+        match self.spec.act {
+            Act::None => None,
+            Act::Silu => Some((ctx.ids.need(ctx.ids.silu, "silu"), ctx.ids.need(ctx.ids.silu_bwd, "silu_bwd"))),
+            Act::Relu => Some((
+                ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"),
+                ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"),
+            )),
+        }
+    }
+    /// `leaky_relu`'s uniform is `[total, slope]` with slope a bit-cast f32;
+    /// `silu`'s is `[total]`. Slope 0 makes leaky_relu exactly relu.
+    fn act_params(&self, n: u32) -> Vec<u32> {
+        match self.spec.act {
+            Act::Relu => vec![n, f(0.0)],
+            _ => vec![n],
+        }
     }
     /// Invocation count for the weight-tiled conv: one workgroup (64 invocations)
     /// per `(n, output-channel, 64-output-position block)`.
@@ -258,6 +402,14 @@ impl Conv {
             // transform is collapsed per channel into `sb` once (constant across
             // frames), so there is no per-frame host stat packing nor separate
             // bn_eval/silu passes.
+            if !self.can_fuse(ctx) {
+                // Unfused eval: conv -> bn_eval -> act. Taken by every ReLU or
+                // grouped/dilated unit (i.e. all of ZipDepth), since the fused
+                // conv_act* kernels hardcode SiLU in their WGSL body and the dense
+                // fast path ignores `groups`.
+                self.forward_eval_unfused(ctx, ps, x_in);
+                return;
+            }
             if !self.sb_ready.get() {
                 self.pack_sb(ctx, ps);
                 self.sb_ready.set(true);
@@ -315,7 +467,7 @@ impl Conv {
 
         // Train mode: conv -> bn_stats, host-pack mv/mvg, then bn_train -> silu.
         self.pack_gb(ctx, ps);
-        let s_conv = ctx.step(ctx.ids.conv2d, &[x_in, ps.w(&p("conv.weight")), &self.conv_out], &self.conv_params(), on);
+        let s_conv = ctx.step(self.conv_kind(ctx), &[x_in, ps.w(&p("conv.weight")), &self.conv_out], &self.conv_params(), on);
         let s_stats = ctx.step(ctx.ids.bn_stats, &[&self.conv_out, &self.mean, &self.var], &self.nchw(), c);
         let mut pre = vec![s_conv, s_stats];
         if self.update_running.get() {
@@ -329,13 +481,96 @@ impl Conv {
         ctx.gpu.submit(&[], &pre);
         self.pack_stats_host(ctx, ps);
         let s_train = ctx.step(ctx.ids.bn_train, &[&self.conv_out, &self.mv, &self.gb, &self.bn_out], &self.nchw(), on);
-        let s_silu = ctx.step(ctx.ids.silu, &[&self.bn_out, &self.act], &[on], on);
-        ctx.gpu.submit(&[], &[s_train, s_silu]);
+        let s_act = match self.act_pair(ctx) {
+            Some((fwd, _)) => ctx.step(fwd, &[&self.bn_out, &self.act], &self.act_params(on), on),
+            // Act::None: the block's output IS the BN output. Copying via a
+            // slope-1 leaky_relu would be a wasted dispatch, so alias instead.
+            None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.bn_out, &self.act], &[on, f(1.0)], on),
+        };
+        ctx.gpu.submit(&[], &[s_train, s_act]);
     }
 
     /// Collapse the BN-eval transform into per-channel `scale|bias` packed in
     /// `sb` (`sb[2c]=gamma/sqrt(run_var+eps)`, `sb[2c+1]=beta-run_mean*scale`),
     /// the constant the fused `conv_act` kernel consumes. Eps matches bn_eval.
+    /// Unfused eval: `conv -> bn_eval -> act`.
+    ///
+    /// Taken by every unit the fused path cannot serve — any ReLU unit, and any
+    /// grouped/dilated one (i.e. all of ZipDepth). The fused `conv_act*` kernels
+    /// hardcode SiLU in their WGSL body, and the dense conv they route to on CPU
+    /// ignores `groups`, so fusing here would be wrong rather than merely slower.
+    ///
+    /// This is what finally gives `bn_eval` a consumer: it has been registered and
+    /// tested since P2 but nothing dispatched it, because yolo always fused. Its
+    /// eps (`1e-5`) matches `pack_sb`'s, so the fused and unfused paths agree
+    /// numerically by construction rather than by coincidence.
+    ///
+    /// NOTE `bn_eval` takes the SAME four buffers as `bn_train` — `x, mv, gb,
+    /// out` — with the RUNNING mean|var in `mv`, not the collapsed `scale|bias`
+    /// in `sb`. `sb` exists only for the fused `conv_act*` kernels. Binding `sb`
+    /// here instead reads binding 3 out of bounds and, since the CPU JIT compiles
+    /// with `MemFlags::trusted()` (no bounds checks), SEGFAULTS rather than
+    /// erroring. The per-channel packing is still cached across frames via
+    /// `sb_ready`, which now gates `mv`+`gb` instead.
+    fn forward_eval_unfused(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
+        if !self.sb_ready.get() {
+            self.pack_running_mv(ctx, ps);
+            self.pack_gb(ctx, ps);
+            self.sb_ready.set(true);
+        }
+        let on = self.out_shape.numel();
+        // The calibration / fake-quant tap lives on the eval path, and must fire
+        // exactly once per conv at the same point as it does when fused — the NPU
+        // calibrator keys its scale map on `self.prefix`.
+        let tapped: Option<DeviceBuffer> = ctx.tap.map(|tap| {
+            let in_n = self.in_shape.numel() as usize;
+            let mut h = ctx.gpu.read(x_in, in_n);
+            tap.tap(&self.prefix, &mut h);
+            if self.q_in.borrow().is_none() {
+                *self.q_in.borrow_mut() = Some(ctx.gpu.storage(in_n as u64));
+            }
+            let q = self.q_in.borrow();
+            let qbuf = q.as_ref().unwrap().clone();
+            ctx.gpu.write(&qbuf, bytemuck::cast_slice(&h));
+            qbuf
+        });
+        let src = tapped.as_ref().unwrap_or(x_in);
+
+        let p = |n: &str| format!("{}.{}", self.prefix, n);
+        let s_conv = ctx.step(
+            self.conv_kind(ctx),
+            &[src, ps.w(&p("conv.weight")), &self.conv_out],
+            &self.conv_params(),
+            on,
+        );
+        let s_bn = ctx.step(
+            ctx.ids.need(ctx.ids.bn_eval, "bn_eval"),
+            &[&self.conv_out, &self.mv, &self.gb, &self.bn_out],
+            &self.nchw(),
+            on,
+        );
+        let s_act = match self.act_pair(ctx) {
+            Some((fwd, _)) => ctx.step(fwd, &[&self.bn_out, &self.act], &self.act_params(on), on),
+            None => ctx.step(
+                ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"),
+                &[&self.bn_out, &self.act],
+                &[on, f(1.0)],
+                on,
+            ),
+        };
+        ctx.gpu.submit(&[], &[s_conv, s_bn, s_act]);
+    }
+
+    /// Interleave the RUNNING mean/var into `mv` for `bn_eval` (which shares
+    /// `bn_train`'s signature and simply expects running stats there).
+    fn pack_running_mv(&self, ctx: &Ctx, ps: &ParamStore) {
+        let c = self.out_shape.c as usize;
+        let p = |s: &str| format!("{}.{s}", self.prefix);
+        let rmean = ctx.gpu.read(ps.w(&p("bn.run_mean")), c);
+        let rvar = ctx.gpu.read(ps.w(&p("bn.run_var")), c);
+        ctx.gpu.write(&self.mv, bytemuck::cast_slice(&pack2(&rmean, &rvar)));
+    }
+
     fn pack_sb(&self, ctx: &Ctx, ps: &ParamStore) {
         let c = self.out_shape.c as usize;
         let p = |s: &str| format!("{}.{s}", self.prefix);
@@ -387,18 +622,21 @@ impl Conv {
         let c = self.out_shape.c;
         let dw_n = self.out_shape.c * self.in_shape.c * self.k * self.k;
 
-        let s_silu = ctx.step(ctx.ids.silu_bwd, &[&self.bn_out, d_out, &self.d_bn], &[on], on);
+        let s_act = match self.act_pair(ctx) {
+            Some((_, bwd)) => ctx.step(bwd, &[&self.bn_out, d_out, &self.d_bn], &self.act_params(on), on),
+            None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"), &[&self.bn_out, d_out, &self.d_bn], &[on, f(1.0)], on),
+        };
         let s_dstats = ctx.step(ctx.ids.bn_dstats, &[&self.conv_out, &self.d_bn, &self.mvg, &self.bp], &self.nchw(), c);
         // bn_dgamma / bn_dbeta accumulate -> their grad buffers are pre-zeroed by
         // the model's zero_grads (clears list), exactly like gpt.
         let s_dgamma = ctx.step(ctx.ids.bn_dgamma, &[&self.conv_out, &self.d_bn, &self.mv, ps.g(&p("bn.gamma"))], &self.nchw(), c);
         let s_dbeta = ctx.step(ctx.ids.bn_dbeta, &[&self.d_bn, ps.g(&p("bn.beta"))], &self.nchw(), c);
         let s_dx = ctx.step(ctx.ids.bn_dx, &[&self.conv_out, &self.d_bn, &self.bp, &self.d_conv], &self.nchw(), on);
-        let s_dw = ctx.step(ctx.ids.conv2d_dw, &[&self.d_conv, x_in, ps.g(&p("conv.weight"))], &self.conv_params(), dw_n);
-        let s_dxin = ctx.step(ctx.ids.conv2d_dx, &[&self.d_conv, ps.w(&p("conv.weight")), d_in], &self.conv_params(), self.in_shape.numel());
+        let s_dw = ctx.step(self.conv_dw_kind(ctx), &[&self.d_conv, x_in, ps.g(&p("conv.weight"))], &self.conv_params(), dw_n);
+        let s_dxin = ctx.step(self.conv_dx_kind(ctx), &[&self.d_conv, ps.w(&p("conv.weight")), d_in], &self.conv_params(), self.in_shape.numel());
         // s_silu must precede s_dstats/s_dgamma/s_dbeta (they read d_bn); s_dstats
         // must precede s_dx (reads bp). Submit in this order.
-        ctx.gpu.submit(&[], &[s_silu, s_dstats, s_dgamma, s_dbeta, s_dx, s_dw, s_dxin]);
+        ctx.gpu.submit(&[], &[s_act, s_dstats, s_dgamma, s_dbeta, s_dx, s_dw, s_dxin]);
     }
 }
 

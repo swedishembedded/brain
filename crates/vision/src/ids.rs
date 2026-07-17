@@ -26,10 +26,16 @@ pub const NONE: usize = usize::MAX;
 /// yolo registers no depth kernels and depth registers no detection-loss ones.
 #[derive(Clone, Copy, Debug)]
 pub struct ConvKernelIds {
-    // ---- conv ----
+    // ---- conv: dense (fast-pathed on CPU by NAME) ----
     pub conv2d: usize,
     pub conv2d_dx: usize,
     pub conv2d_dw: usize,
+    // ---- conv: grouped + dilated. A DISTINCT name on purpose — `backend-cpu`
+    // binds its AVX2/winograd path to the name `conv2d`, and that path is dense:
+    // it ignores `groups` and would compute wrong results with no error.
+    pub conv2d_gd: usize,
+    pub conv2d_gd_dx: usize,
+    pub conv2d_gd_dw: usize,
     pub conv2d_tiled: usize,
     pub conv_bias: usize,
     pub bias_add: usize,
@@ -43,9 +49,14 @@ pub struct ConvKernelIds {
     pub bn_dx: usize,
     pub bn_dgamma: usize,
     pub bn_dbeta: usize,
-    // ---- activations ----
+    // ---- activations. `leaky_relu` at slope 0 IS relu in both directions, so
+    // ReLU models need no kernel of their own.
     pub silu: usize,
     pub silu_bwd: usize,
+    pub leaky_relu: usize,
+    pub leaky_relu_bwd: usize,
+    pub sigmoid: usize,
+    pub sigmoid_bwd: usize,
     // ---- fused conv -> affine -> act (inference only) ----
     pub conv_act: usize,
     pub conv_act_tiled: usize,
@@ -71,6 +82,9 @@ impl ConvKernelIds {
             conv2d: k("conv2d"),
             conv2d_dx: k("conv2d_dx"),
             conv2d_dw: k("conv2d_dw"),
+            conv2d_gd: k("conv2d_gd"),
+            conv2d_gd_dx: k("conv2d_gd_dx"),
+            conv2d_gd_dw: k("conv2d_gd_dw"),
             conv2d_tiled: k("conv2d_tiled"),
             conv_bias: k("conv_bias"),
             bias_add: k("bias_add"),
@@ -85,6 +99,10 @@ impl ConvKernelIds {
             bn_dbeta: k("bn_dbeta"),
             silu: k("silu"),
             silu_bwd: k("silu_bwd"),
+            leaky_relu: k("leaky_relu"),
+            leaky_relu_bwd: k("leaky_relu_bwd"),
+            sigmoid: k("sigmoid"),
+            sigmoid_bwd: k("sigmoid_bwd"),
             conv_act: k("conv_act"),
             conv_act_tiled: k("conv_act_tiled"),
             conv_act_reg: k("conv_act_reg"),
