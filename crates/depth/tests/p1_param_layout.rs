@@ -72,6 +72,25 @@ fn check(path: &str, cfg: ZipConfig) {
     // omission is complete and deliberate, not an accidental undercount.
     let bns = expected.keys().filter(|k| k.ends_with(".running_var")).count();
     assert_eq!(counters, bns, "num_batches_tracked count != BatchNorm count");
+
+    // ...and the BUILT graph must reproduce the SAME set. The config is written
+    // from the reference source; the graph is emitted block-by-block from the
+    // actual modules. Checking both against the file closes the gap where the two
+    // agree with each other but neither matches reality.
+    let gpu = gpu_core::Gpu::new_cpu(depth::net::PIPELINES);
+    let built = depth::ZipDepth::new(&gpu, cfg, 1, true).param_list();
+    let built_names: BTreeMap<String, usize> = built.into_iter().collect();
+    let file_numel: BTreeMap<String, usize> = actual.iter().map(|(k, s)| (k.clone(), s.iter().product())).collect();
+    let g_missing: Vec<&String> = file_numel.keys().filter(|k| !built_names.contains_key(*k)).collect();
+    let g_extra: Vec<&String> = built_names.keys().filter(|k| !file_numel.contains_key(*k)).collect();
+    assert!(g_missing.is_empty(), "the built ZipDepth graph is missing checkpoint keys:\n  {g_missing:#?}");
+    assert!(g_extra.is_empty(), "the built ZipDepth graph has keys the checkpoint lacks:\n  {g_extra:#?}");
+    let g_bad: Vec<String> = file_numel
+        .iter()
+        .filter_map(|(k, want)| built_names.get(k).filter(|g| *g != want).map(|g| format!("  {k}: file {want}, graph {g}")))
+        .collect();
+    assert!(g_bad.is_empty(), "the built graph's element counts diverge from the file:\n{}", g_bad.join("\n"));
+    println!("{path}: built ZipDepth graph matches the file exactly ({} tensors)", built_names.len());
 }
 
 #[test]
