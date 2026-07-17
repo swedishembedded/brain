@@ -376,6 +376,7 @@ impl MinimalMultiScale {
                 // else. The BN names are unused at Norm::None (param_list omits
                 // them and no dispatch reads them).
                 ConvNames {
+                    bias: String::new(),
                     weight: format!("{prefix}.{name}.weight"),
                     gamma: String::new(),
                     beta: String::new(),
@@ -594,6 +595,241 @@ impl StripPoolingAttention {
         let s = ctx.step(ctx.ids.add2, &[d_in, &self.acc, &self.d_xh], &[n], n);
         ctx.gpu.submit(&[], &[s]);
         let s = ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.d_xh, d_in], &[n, f(1.0)], n);
+        ctx.gpu.submit(&[], &[s]);
+    }
+}
+
+// ===========================================================================
+// GlobalContextBlock — GCNet-style learned global context
+// ===========================================================================
+
+/// `x + transform(bmm(x, softmax(context_weight(x))))` (`architecture.py:255-278`).
+///
+/// A LEARNED weighted global average pool: a 1x1 conv scores every spatial
+/// position, softmax over `H*W` turns the scores into weights summing to 1, and the
+/// feature map is contracted against them into a single `[B,C,1,1]` context vector.
+/// That contraction is upstream's `bmm(x.view(B,C,HW), mask.view(B,HW,1))` and is
+/// brain's [`weighted_gap`]; the residual add of a per-(image,channel) scalar is
+/// `add_chan_bcast` (NOT `bias_add`, whose `[C]` vector is shared across the batch —
+/// at N>1 it would add the wrong image's context).
+///
+/// The softmax is over the map, dispatched as `softmax_k` at `M=1`: a stride of 1
+/// over `K=H*W` IS a contiguous softmax, which the reuse audit established is
+/// bit-identical to the `softmax_hw` kernel that was written and then deleted.
+///
+/// All three convs are BIASED (`nn.Conv2d(..)` defaults `bias=True`) and all are
+/// dense. `transform.0`'s bias is mathematically redundant — the BN right after it
+/// subtracts the batch mean — but it is in the checkpoint, so it is carried.
+///
+/// ⚠️ TWO of the five bias/affine tensors here are MATHEMATICALLY DEAD — the loss is
+/// exactly invariant to them, so their gradient is identically zero and they can
+/// never learn:
+///   * `context_weight.bias` is one scalar added to every position of the softmax
+///     axis, and `softmax(z + b) == softmax(z)`.
+///   * `transform.0.bias` is immediately followed by BN, which subtracts the mean —
+///     the classic `bias=False`-before-BN redundancy, here left `True` upstream.
+/// Both are in the checkpoint and must be loaded, and both are carried faithfully.
+/// `gcb_two_biases_are_provably_dead` pins the invariance (measured: the loss moves
+/// by EXACTLY 0.0f32 when either is shifted by +-0.5, and by 2 ULP at +-5.0, where
+/// a live parameter would move it by ~850). That is also why neither can be
+/// finite-difference-checked: their FD is 100% round-off noise.
+///
+/// NOTE: upstream's ONNX export monkey-patches this block into a uniform
+/// `avg_pool2d`, DROPPING the learned softmax (`export.py:68-74`). brain implements
+/// the real thing; P6 adds the avg-pool variant as an ablation row.
+pub struct GlobalContextBlock {
+    pub shape: Shape,
+    /// dim -> 1, biased, no BN, no act. Scores each position.
+    score: Conv,
+    t0: Conv,
+    t1: Conv,
+    sm: DeviceBuffer,
+    gap: DeviceBuffer,
+    out: DeviceBuffer,
+    d_t: DeviceBuffer,
+    d_gap: DeviceBuffer,
+    d_sm: DeviceBuffer,
+    d_mask: DeviceBuffer,
+    d_xg: DeviceBuffer,
+    d_xs: DeviceBuffer,
+    acc: DeviceBuffer,
+}
+
+impl GlobalContextBlock {
+    pub fn new(ctx: &Ctx, prefix: &str, shape: Shape, reduction: u32, train: bool) -> GlobalContextBlock {
+        let c = shape.c;
+        let hidden = (c / reduction).max(8);
+        let score = Conv::with_names(
+            ctx,
+            &format!("{prefix}.context_weight"),
+            // A bare `nn.Conv2d` attribute: `.weight` + `.bias`, no BN.
+            ConvNames {
+                bias: format!("{prefix}.context_weight.bias"),
+                weight: format!("{prefix}.context_weight.weight"),
+                gamma: String::new(),
+                beta: String::new(),
+                run_mean: String::new(),
+                run_var: String::new(),
+            },
+            shape,
+            ConvSpec::relu(1, 1, 1, 0).with_norm(Norm::None).with_act(Act::None).with_bias(),
+            train,
+        );
+        // The transform runs on the CONTRACTED [B,C,1,1] vector, not the map.
+        let ctx_shape = Shape { h: 1, w: 1, ..shape };
+
+        // nn.Sequential(Conv2d(dim,hidden,1), BatchNorm2d, ReLU, Conv2d(hidden,dim,1))
+        // -> indices 0,1 and 3.
+        let t0 = Conv::with_names(
+            ctx,
+            &format!("{prefix}.transform.0"),
+            ConvNames::torch_seq(&format!("{prefix}.transform"), 0, 1),
+            ctx_shape,
+            ConvSpec::relu(hidden, 1, 1, 0).with_bias(),
+            train,
+        );
+        let t1 = Conv::with_names(
+            ctx,
+            &format!("{prefix}.transform.3"),
+            ConvNames {
+                bias: format!("{prefix}.transform.3.bias"),
+                weight: format!("{prefix}.transform.3.weight"),
+                gamma: String::new(),
+                beta: String::new(),
+                run_mean: String::new(),
+                run_var: String::new(),
+            },
+            t0.out_shape,
+            ConvSpec::relu(c, 1, 1, 0).with_norm(Norm::None).with_act(Act::None).with_bias(),
+            train,
+        );
+        let n = shape.numel();
+        let hw = shape.h * shape.w;
+        let t0_out = t0.out_shape.numel();
+        GlobalContextBlock {
+            shape,
+            score,
+            t0,
+            t1,
+            sm: ctx.act(shape.n * hw),
+            gap: ctx.act(shape.n * c),
+            out: ctx.act(n),
+            d_t: ctx.act(shape.n * c),
+            // Sized from t0's OUTPUT, not from `c`. `hidden` is `max(c/reduction, 8)`
+            // and the clamp makes it EXCEED c whenever c < 32 — at which point a
+            // `n*c` buffer here is an out-of-bounds write, and the CPU JIT's
+            // MemFlags::trusted() turns that into silent heap corruption rather
+            // than an error. (The two happen to be equal at c=32/reduction=4, which
+            // is precisely why this must be derived, not assumed.)
+            d_gap: ctx.act(t0_out),
+            d_sm: ctx.act(shape.n * hw),
+            d_mask: ctx.act(shape.n * hw),
+            d_xg: ctx.act(n),
+            d_xs: ctx.act(n),
+            acc: ctx.act(n),
+        }
+    }
+
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.out
+    }
+    pub fn set_eval(&self, on: bool) {
+        self.score.set_eval(on);
+        self.t0.set_eval(on);
+        self.t1.set_eval(on);
+    }
+    pub fn set_update_running(&self, on: bool) {
+        self.t0.set_update_running(on);
+    }
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let mut v = self.score.param_list();
+        v.extend(self.t0.param_list());
+        v.extend(self.t1.param_list());
+        v
+    }
+    fn gap_params(&self) -> Vec<u32> {
+        vec![self.shape.n, self.shape.c, self.shape.h * self.shape.w]
+    }
+}
+
+impl GlobalContextBlock {
+    pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
+        let n = self.shape.numel();
+        let hw = self.shape.h * self.shape.w;
+        self.score.forward(ctx, ps, x_in);
+        // softmax over the map: softmax_k at M=1 (a stride of 1 over K=H*W).
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.softmax_k, "softmax_k"),
+            &[self.score.out(), &self.sm],
+            &[self.shape.n, hw, 1],
+            self.shape.n,
+        );
+        ctx.gpu.submit(&[], &[s]);
+        // The bmm: contract x against the softmax'd weights, per image.
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.weighted_gap, "weighted_gap"),
+            &[x_in, &self.sm, &self.gap],
+            &self.gap_params(),
+            self.shape.n * self.shape.c,
+        );
+        ctx.gpu.submit(&[], &[s]);
+        self.t0.forward(ctx, ps, &self.gap);
+        self.t1.forward(ctx, ps, self.t0.out());
+        // The residual: x + context, broadcasting the per-(image,channel) scalar.
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.add_chan_bcast, "add_chan_bcast"),
+            &[x_in, self.t1.out(), &self.out],
+            &self.gap_params(),
+            n,
+        );
+        ctx.gpu.submit(&[], &[s]);
+    }
+
+    /// `x` has THREE routes: the score conv, the contraction, and the residual.
+    pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
+        let n = self.shape.numel();
+        let hw = self.shape.h * self.shape.w;
+        // The residual's adjoint: d_out passes to x unchanged, and reduces over
+        // space into the context's grad.
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.add_chan_bcast_dv, "add_chan_bcast_dv"),
+            &[d_out, &self.d_t],
+            &self.gap_params(),
+            self.shape.n * self.shape.c,
+        );
+        ctx.gpu.submit(&[], &[s]);
+        self.t1.backward(ctx, ps, self.t0.out(), &self.d_t, &self.d_gap);
+        // reuse d_t as the t0-input grad scratch ([N,C], same size as d_gap).
+        self.t0.backward(ctx, ps, &self.gap, &self.d_gap, &self.d_t);
+        // weighted_gap's two adjoints: wrt x (route 2) and wrt the mask.
+        let s_dx = ctx.step(
+            ctx.ids.need(ctx.ids.weighted_gap_dx, "weighted_gap_dx"),
+            &[&self.d_t, &self.sm, &self.d_xg],
+            &self.gap_params(),
+            n,
+        );
+        let s_dm = ctx.step(
+            ctx.ids.need(ctx.ids.weighted_gap_dm, "weighted_gap_dm"),
+            &[&self.d_t, x_in, &self.d_sm],
+            &self.gap_params(),
+            self.shape.n * hw,
+        );
+        ctx.gpu.submit(&[], &[s_dx, s_dm]);
+        // One invocation per softmax GROUP (the sum_j term couples all K), not per
+        // element: total = N*M = N*1.
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.softmax_k_dx, "softmax_k_dx"),
+            &[&self.sm, &self.d_sm, &self.d_mask],
+            &[self.shape.n, hw, 1],
+            self.shape.n,
+        );
+        ctx.gpu.submit(&[], &[s]);
+        // Route 3: back through the score conv.
+        self.score.backward(ctx, ps, x_in, &self.d_mask, &self.d_xs);
+        let s = ctx.step(ctx.ids.add2, &[&self.d_xg, &self.d_xs, &self.acc], &[n], n);
+        ctx.gpu.submit(&[], &[s]);
+        // ...plus the residual's own straight-through path.
+        let s = ctx.step(ctx.ids.add2, &[&self.acc, d_out, d_in], &[n], n);
         ctx.gpu.submit(&[], &[s]);
     }
 }

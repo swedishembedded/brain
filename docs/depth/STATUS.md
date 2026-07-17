@@ -238,11 +238,44 @@ their equivalence with a test so the duplication cannot drift.
 - Fixed `param_list` computing the weight as `[cout, cin, k, k]`; grouped convs
   are `[cout, cin/groups, k, k]`. The earlier blocks were dense, so it had not bitten.
 
-### Blocks: 3 of 10 done
+- **`vision::Act::Sigmoid`** — a conv unit whose output is a GATE, not a feature
+  map (`StripPoolingAttention` ends `Conv->BN->Sigmoid` and multiplies into `x`).
+  sigmoid's uniform is `[total]`, same as silu's, so only `act_pair` grew a line.
+- **`vision::ConvSpec::bias`** — a learned per-channel conv bias, dispatched as the
+  fused `conv_bias`. Independent of `norm`, because `GlobalContextBlock.transform.0`
+  is a biased conv followed by BN. `conv_bias` is DENSE-only (no groups/dilation in
+  its uniform), so `bias => is_dense()` is asserted in the ctor. Every forward path
+  now routes through ONE `conv_step` helper, so a biased unit cannot lose its bias
+  on one of the three paths (raw / train / unfused-eval). The backward is
+  `bias_grad` on the `[N, C*HW]` view + a host spatial reduce — **exactly what
+  `yolo/src/head.rs:177-201` hand-rolls**; that copy is now refactorable onto this.
+- **`blocks.rs` — `StripPoolingAttention`, `GlobalContextBlock`**.
+
+### Blocks: 5 of 10 done
 
 | done | remaining |
 |---|---|
-| `QARepBlock` (×15), `ChannelAttention` (SE), `MinimalMultiScale` | `StripPoolingAttention`, `GlobalContextBlock`, `MinimalCrossScale`, `LightweightSPPF`, `UltraLightFusion`, `FastConvexUpsample` (unfold + npu) |
+| `QARepBlock` (×15), `ChannelAttention` (SE), `MinimalMultiScale`, `StripPoolingAttention`, `GlobalContextBlock` | `MinimalCrossScale`, `LightweightSPPF`, `UltraLightFusion`, `FastConvexUpsample` (unfold + npu) |
+
+### Two findings from these two blocks
+
+- **`GlobalContextBlock` carries two MATHEMATICALLY DEAD parameters.** The loss is
+  exactly invariant to `context_weight.bias` (one scalar added to every position of
+  the softmax axis — `softmax(z+b) == softmax(z)`) and to `transform.0.bias` (BN
+  subtracts the mean right after: the classic `bias=False`-before-BN redundancy,
+  left `True` upstream). Both are in the checkpoint and must load; neither can ever
+  learn. Measured: shifting either by ±0.5 moves the loss by **exactly 0.0f32**, and
+  ±5.0 by 2 ULP (softmax's max-subtraction round-off), where a live parameter would
+  move it by ~850. **Neither can be FD-checked** — FD divides that round-off by
+  2·eps and reports noise (fd = 1.5e-1 against an analytic 4.2e-5). They are pinned
+  by the invariance itself instead, which is the stronger claim anyway.
+- **A real OOB bug, caught only by choosing a shape where a coincidence broke.**
+  `hidden = max(dim/reduction, 8)`, so the clamp makes hidden EXCEED `dim` whenever
+  `dim < 32`. `d_gap` was sized `n*c`; it receives the grad wrt `transform.3`'s input
+  `[N,hidden,1,1]`. At `dim=32` the two are equal and everything passes; at `dim=4`
+  it is an out-of-bounds write, and the CPU JIT's `MemFlags::trusted()` turns that
+  into **silent heap corruption** (`free(): invalid next size`) rather than an error.
+  Buffers must be sized from the producing unit's own `out_shape`, never re-derived.
 
 All the kernels the remaining 7 need already exist and are adjointness-tested.
 `LightweightSPPF` should be close to free — `maxpool5` *is* it (K/pad are params)

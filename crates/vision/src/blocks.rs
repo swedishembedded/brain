@@ -124,16 +124,33 @@ pub struct ConvSpec {
     pub dilation: u32,
     pub norm: Norm,
     pub act: Act,
+    /// A learned per-output-channel bias (`nn.Conv2d(.., bias=True)`).
+    ///
+    /// Dispatched as the FUSED `conv_bias` kernel, which is DENSE-only — its
+    /// uniform has no groups/dilation — so `bias` requires `is_dense()`, asserted
+    /// in the ctor. Every biased conv in ZipDepth is dense.
+    ///
+    /// `bias` is independent of `norm`: ZipDepth's `GlobalContextBlock.transform.0`
+    /// is a biased conv followed by BN, where the bias is mathematically redundant
+    /// (BN subtracts the batch mean) but is PRESENT in the checkpoint and must be
+    /// loaded and updated, or a strict load fails.
+    pub bias: bool,
 }
 
 impl ConvSpec {
     /// yolo's unit: dense, SiLU.
     pub const fn silu(cout: u32, k: u32, stride: u32, pad: u32) -> ConvSpec {
-        ConvSpec { cout, k, stride, pad, groups: 1, dilation: 1, norm: Norm::Bn, act: Act::Silu }
+        ConvSpec { cout, k, stride, pad, groups: 1, dilation: 1, norm: Norm::Bn, act: Act::Silu, bias: false }
     }
     /// ZipDepth's `ConvBN`: grouped/dilated, ReLU.
     pub const fn relu(cout: u32, k: u32, stride: u32, pad: u32) -> ConvSpec {
-        ConvSpec { cout, k, stride, pad, groups: 1, dilation: 1, norm: Norm::Bn, act: Act::Relu }
+        ConvSpec { cout, k, stride, pad, groups: 1, dilation: 1, norm: Norm::Bn, act: Act::Relu, bias: false }
+    }
+    /// Add a learned per-channel bias. Requires the unit to be dense (`conv_bias`
+    /// has no grouped form) — asserted at construction, not here, so the const fn
+    /// stays usable in a spec table.
+    pub const fn with_bias(self) -> ConvSpec {
+        ConvSpec { bias: true, ..self }
     }
     pub const fn with_groups(self, groups: u32) -> ConvSpec {
         ConvSpec { groups, ..self }
@@ -150,7 +167,7 @@ impl ConvSpec {
     }
     /// Depthwise: groups == cin == cout, weight `[C,1,k,k]`.
     pub const fn depthwise(ch: u32, k: u32, stride: u32, pad: u32, act: Act) -> ConvSpec {
-        ConvSpec { cout: ch, k, stride, pad, groups: ch, dilation: 1, norm: Norm::Bn, act }
+        ConvSpec { cout: ch, k, stride, pad, groups: ch, dilation: 1, norm: Norm::Bn, act, bias: false }
     }
     /// Is this the plain dense case the pre-existing `conv2d` kernel covers?
     ///
@@ -182,6 +199,10 @@ impl ConvSpec {
 /// translation table every other brain importer carries.
 #[derive(Clone, Debug)]
 pub struct ConvNames {
+    /// The conv's own bias tensor. Read only when `ConvSpec::bias` is set; every
+    /// name-builder fills it with torch's own convention (`<conv>.bias`) so a
+    /// caller that flips `with_bias()` on gets the right name for free.
+    pub bias: String,
     pub weight: String,
     pub gamma: String,
     pub beta: String,
@@ -193,6 +214,7 @@ impl ConvNames {
     /// brain / yolo / Ultralytics: `P.conv.weight` + `P.bn.{gamma,beta,run_mean,run_var}`.
     pub fn brain(prefix: &str) -> ConvNames {
         ConvNames {
+            bias: format!("{prefix}.conv.bias"),
             weight: format!("{prefix}.conv.weight"),
             gamma: format!("{prefix}.bn.gamma"),
             beta: format!("{prefix}.bn.beta"),
@@ -204,6 +226,7 @@ impl ConvNames {
     /// `P.conv.weight` + `P.bn.{weight,bias,running_mean,running_var}`.
     pub fn torch_conv_bn(prefix: &str) -> ConvNames {
         ConvNames {
+            bias: format!("{prefix}.conv.bias"),
             weight: format!("{prefix}.conv.weight"),
             gamma: format!("{prefix}.bn.weight"),
             beta: format!("{prefix}.bn.bias"),
@@ -216,6 +239,7 @@ impl ConvNames {
     /// POSITION, so `P.{ci}.weight` + `P.{bi}.{weight,bias,running_mean,running_var}`.
     pub fn torch_seq(prefix: &str, conv_idx: u32, bn_idx: u32) -> ConvNames {
         ConvNames {
+            bias: format!("{prefix}.{conv_idx}.bias"),
             weight: format!("{prefix}.{conv_idx}.weight"),
             gamma: format!("{prefix}.{bn_idx}.weight"),
             beta: format!("{prefix}.{bn_idx}.bias"),
@@ -269,6 +293,10 @@ pub struct Conv {
     bp: DeviceBuffer,     // packed [5C] from bn_dstats
     d_conv: DeviceBuffer, // grad wrt conv_out [out]
 
+    /// `bias_grad`'s output before the host spatial reduce: `[C*HW]`. Allocated
+    /// only for a biased unit (see `bias_backward` for why the view is [N, C*HW]).
+    dbcast: Option<DeviceBuffer>,
+
     /// Lazily-allocated [in] scratch holding the tapped (possibly fake-quantized)
     /// conv input, used only when a [`crate::ActTap`] is installed (NPU
     /// calibration / fake-quant). Never allocated on the normal inference path.
@@ -310,6 +338,10 @@ impl Conv {
         let (cout, k, stride, pad) = (spec.cout, spec.k, spec.stride, spec.pad);
         assert_eq!(in_shape.c % spec.groups, 0, "cin {} not divisible by groups {}", in_shape.c, spec.groups);
         assert_eq!(cout % spec.groups, 0, "cout {cout} not divisible by groups {}", spec.groups);
+        // `conv_bias` is the DENSE fused kernel — its uniform carries no
+        // groups/dilation, so a grouped biased conv would silently convolve as if
+        // dense. Fail loudly instead; no ZipDepth unit needs it.
+        assert!(spec.is_dense() || !spec.bias, "a biased conv must be dense: conv_bias has no grouped form");
         let out_shape = spec.out_shape(in_shape);
         let on = out_shape.numel();
         let c = cout;
@@ -342,6 +374,7 @@ impl Conv {
             d_bn: ctx.act(on),
             bp: ctx.act(5 * c),
             d_conv: ctx.act(on),
+            dbcast: if spec.bias { Some(ctx.act(cout * out_shape.h * out_shape.w)) } else { None },
             q_in: std::cell::RefCell::new(None),
         }
     }
@@ -386,6 +419,9 @@ impl Conv {
         let cin_g = (self.in_shape.c / self.spec.groups) as usize;
         let k = self.k as usize;
         let mut v = vec![(self.names.weight.clone(), c * cin_g * k * k)];
+        if self.spec.bias {
+            v.push((self.names.bias.clone(), c));
+        }
         if self.spec.norm == Norm::Bn {
             v.push((self.names.gamma.clone(), c));
             v.push((self.names.beta.clone(), c));
@@ -429,6 +465,26 @@ impl Conv {
             ctx.ids.need(ctx.ids.conv2d_gd, "conv2d_gd")
         }
     }
+    /// The forward conv dispatch, biased or not. EVERY forward path goes through
+    /// this — the raw-conv path, the train path and the unfused-eval path — so a
+    /// biased unit cannot silently lose its bias on one of the three.
+    ///
+    /// `conv_bias` fuses the per-channel NCHW add into the conv's own pass. It is
+    /// NOT `bias_add`, which is an [M,N] LINEAR-layer bias (`out[idx] += b[idx % N]`,
+    /// biased dim TRAILING) and indexes garbage in NCHW.
+    fn conv_step(&self, ctx: &Ctx, ps: &ParamStore, src: &DeviceBuffer, dst: &DeviceBuffer) -> gpu_core::Step {
+        let on = self.out_shape.numel();
+        if self.spec.bias {
+            ctx.step(
+                ctx.ids.need(ctx.ids.conv_bias, "conv_bias"),
+                &[src, ps.w(&self.names.weight), ps.w(&self.names.bias), dst],
+                &self.conv_params(),
+                on,
+            )
+        } else {
+            ctx.step(self.conv_kind(ctx), &[src, ps.w(&self.names.weight), dst], &self.conv_params(), on)
+        }
+    }
     fn conv_dx_kind(&self, ctx: &Ctx) -> usize {
         if self.spec.is_dense() {
             ctx.ids.need(ctx.ids.conv2d_dx, "conv2d_dx")
@@ -451,7 +507,11 @@ impl Conv {
     /// but previously dead, now has a consumer. Its eps matches `pack_sb`'s
     /// (`1e-5`), so the two paths agree numerically by construction.
     fn can_fuse(&self, ctx: &Ctx) -> bool {
-        self.spec.act == Act::Silu && self.spec.norm == Norm::Bn && self.spec.is_dense() && ctx.ids.conv_act_reg != crate::NONE
+        self.spec.act == Act::Silu
+            && self.spec.norm == Norm::Bn
+            && !self.spec.bias
+            && self.spec.is_dense()
+            && ctx.ids.conv_act_reg != crate::NONE
     }
 
     /// The unfused activation's (forward, backward) kernel pair, or `None` for
@@ -508,7 +568,7 @@ impl Conv {
         if self.spec.norm == Norm::None {
             // Raw conv -> act. No stats, no host interleave, no mode distinction:
             // without BN the two modes compute the same function.
-            let s_conv = ctx.step(self.conv_kind(ctx), &[x_in, ps.w(&self.names.weight), &self.conv_out], &self.conv_params(), on);
+            let s_conv = self.conv_step(ctx, ps, x_in, &self.conv_out);
             ctx.gpu.submit(&[], &[s_conv]);
             let s_act = match self.act_pair(ctx) {
                 Some((fwd, _)) => ctx.step(fwd, &[&self.conv_out, &self.act], &self.act_params(on), on),
@@ -588,7 +648,7 @@ impl Conv {
 
         // Train mode: conv -> bn_stats, host-pack mv/mvg, then bn_train -> silu.
         self.pack_gb(ctx, ps);
-        let s_conv = ctx.step(self.conv_kind(ctx), &[x_in, ps.w(&self.names.weight), &self.conv_out], &self.conv_params(), on);
+        let s_conv = self.conv_step(ctx, ps, x_in, &self.conv_out);
         let s_stats = ctx.step(ctx.ids.bn_stats, &[&self.conv_out, &self.mean, &self.var], &self.nchw(), c);
         let mut pre = vec![s_conv, s_stats];
         if self.update_running.get() {
@@ -658,12 +718,7 @@ impl Conv {
         });
         let src = tapped.as_ref().unwrap_or(x_in);
 
-        let s_conv = ctx.step(
-            self.conv_kind(ctx),
-            &[src, ps.w(&self.names.weight), &self.conv_out],
-            &self.conv_params(),
-            on,
-        );
+        let s_conv = self.conv_step(ctx, ps, src, &self.conv_out);
         let s_bn = ctx.step(
             ctx.ids.need(ctx.ids.bn_eval, "bn_eval"),
             &[&self.conv_out, &self.mv, &self.gb, &self.bn_out],
@@ -731,6 +786,34 @@ impl Conv {
         ctx.gpu.write(&self.mvg, bytemuck::cast_slice(&mvg));
     }
 
+    /// Accumulate this unit's bias gradient from `d_conv` (the grad wrt the conv+bias
+    /// output). No-op for an unbiased unit.
+    ///
+    /// `dbias[c] = sum over n,h,w of d_conv[n,c,h,w]`. The `bias_grad` kernel is
+    /// [M,N] row-major and reduces over M, so view `d_conv` as `[M=N, N=C*HW]`:
+    /// element `(n, c*HW+p)` IS `d_conv[n,c,h,w]`, and the kernel gives
+    /// `dbcast[c*HW+p] = sum_n d_conv[n,c,h,w]`. The remaining spatial sum is done
+    /// on the host — the same host-reduce split `gradnorm_sq` uses, and exactly what
+    /// yolo's head does by hand (`yolo/src/head.rs:177-201`).
+    ///
+    /// Must run AFTER the caller's submit: it reads `d_conv` back.
+    fn bias_backward(&self, ctx: &Ctx, ps: &ParamStore) {
+        let Some(dbcast) = self.dbcast.as_ref() else { return };
+        let cout = self.out_shape.c;
+        let hw = self.out_shape.h * self.out_shape.w;
+        let n = cout * hw;
+        // bias_grad ACCUMULATES into its output, and dbcast persists across
+        // backward passes -> it must be zeroed first.
+        let s = ctx.step(ctx.ids.need(ctx.ids.bias_grad, "bias_grad"), &[&self.d_conv, dbcast], &[self.out_shape.n, n], n);
+        ctx.gpu.submit(&[dbcast], &[s]);
+        let host = ctx.gpu.read(dbcast, n as usize);
+        let cur = ctx.gpu.read(ps.g(&self.names.bias), cout as usize);
+        let merged: Vec<f32> = (0..cout as usize)
+            .map(|ch| cur[ch] + host[ch * hw as usize..(ch + 1) * hw as usize].iter().sum::<f32>())
+            .collect();
+        ctx.gpu.write(ps.g(&self.names.bias), bytemuck::cast_slice(&merged));
+    }
+
     /// Backward. `d_out` = grad wrt this block's output; `d_in` receives the grad
     /// wrt `x_in` (overwritten). Param grads accumulate into the ParamStore.
     /// Assumes `forward` already ran (caches + `mv`/`mvg`/`bp` populated).
@@ -757,6 +840,7 @@ impl Conv {
             let s_dw = ctx.step(self.conv_dw_kind(ctx), &[&self.d_conv, x_in, ps.g(&self.names.weight)], &self.conv_params(), dw_n);
             let s_dxin = ctx.step(self.conv_dx_kind(ctx), &[&self.d_conv, ps.w(&self.names.weight), d_in], &self.conv_params(), self.in_shape.numel());
             ctx.gpu.submit(&[], &[s_dw, s_dxin]);
+            self.bias_backward(ctx, ps);
             return;
         }
         let s_act = match self.act_pair(ctx) {
@@ -774,6 +858,7 @@ impl Conv {
         // s_silu must precede s_dstats/s_dgamma/s_dbeta (they read d_bn); s_dstats
         // must precede s_dx (reads bp). Submit in this order.
         ctx.gpu.submit(&[], &[s_act, s_dstats, s_dgamma, s_dbeta, s_dx, s_dw, s_dxin]);
+        self.bias_backward(ctx, ps);
     }
 }
 
