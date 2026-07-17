@@ -158,3 +158,174 @@ impl QARepBlock {
         }
     }
 }
+
+// ===========================================================================
+// ChannelAttention (SE) — pool -> 1x1 -> relu -> 1x1 -> sigmoid -> scale
+// ===========================================================================
+
+/// Squeeze-and-excitation. `reduction = 8`, `hidden = max(dim/8, 4)`.
+///
+/// Both 1x1 convs are **bias-free and have no BatchNorm** (`architecture.py:
+/// 148-162`), so they are raw convs rather than `vision::Conv` units.
+///
+/// The gate is `[N,C,1,1]` — PER IMAGE. `scale_chan` indexes its scale by
+/// `(idx/inner) % c`, so the naive `(c=C, inner=H*W)` would apply image 0's gate
+/// to every image in the batch. Passing **`c = N*C, inner = H*W`** makes the index
+/// `n*C + c`, i.e. exactly the per-image gate — the existing kernel covers this
+/// under the right arguments, so no new one is needed. (Same class of trap as
+/// `bias_add`, which does NOT have such an escape.)
+pub struct ChannelAttention {
+    prefix: String,
+    pub shape: Shape,
+    hidden: u32,
+    pooled: DeviceBuffer,
+    h: DeviceBuffer,
+    h_act: DeviceBuffer,
+    g: DeviceBuffer,
+    gate: DeviceBuffer,
+    out: DeviceBuffer,
+    prod: DeviceBuffer,
+    d_gate: DeviceBuffer,
+    d_g: DeviceBuffer,
+    d_h_act: DeviceBuffer,
+    d_h: DeviceBuffer,
+    d_pooled: DeviceBuffer,
+    d_x_pool: DeviceBuffer,
+    d_x_mul: DeviceBuffer,
+}
+
+impl ChannelAttention {
+    pub fn new(ctx: &Ctx, prefix: &str, shape: Shape) -> ChannelAttention {
+        let (n, c) = (shape.n, shape.c);
+        let hidden = (c / 8).max(4);
+        ChannelAttention {
+            prefix: prefix.to_string(),
+            shape,
+            hidden,
+            pooled: ctx.act(n * c),
+            h: ctx.act(n * hidden),
+            h_act: ctx.act(n * hidden),
+            g: ctx.act(n * c),
+            gate: ctx.act(n * c),
+            out: ctx.act(shape.numel()),
+            prod: ctx.act(shape.numel()),
+            d_gate: ctx.act(n * c),
+            d_g: ctx.act(n * c),
+            d_h_act: ctx.act(n * hidden),
+            d_h: ctx.act(n * hidden),
+            d_pooled: ctx.act(n * c),
+            d_x_pool: ctx.act(shape.numel()),
+            d_x_mul: ctx.act(shape.numel()),
+        }
+    }
+
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.out
+    }
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let (c, h) = (self.shape.c as usize, self.hidden as usize);
+        vec![
+            (format!("{}.fc.0.weight", self.prefix), h * c),
+            (format!("{}.fc.2.weight", self.prefix), c * h),
+        ]
+    }
+
+    /// A 1x1 conv over a `[N,C,1,1]` map. Expressed with the same `conv2d` the
+    /// rest of the model uses, at H=W=1 — no separate GEMM path to keep in sync.
+    fn c1(&self, ctx: &Ctx, w: &DeviceBuffer, x: &DeviceBuffer, y: &DeviceBuffer, cin: u32, cout: u32) {
+        let n = self.shape.n;
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.conv2d, "conv2d"),
+            &[x, w, y],
+            &[n, cin, 1, 1, cout, 1, 1, 0, 1, 1],
+            n * cout,
+        );
+        ctx.gpu.submit(&[], &[s]);
+    }
+
+    pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
+        let (n, c, h, w) = (self.shape.n, self.shape.c, self.shape.h, self.shape.w);
+        let p = |s: &str| format!("{}.{s}", self.prefix);
+        let s_pool = ctx.step(
+            ctx.ids.need(ctx.ids.avgpool2d, "avgpool2d"),
+            &[x_in, &self.pooled],
+            &[n, c, h, w, 1, 1],
+            n * c,
+        );
+        ctx.gpu.submit(&[], &[s_pool]);
+        self.c1(ctx, ps.w(&p("fc.0.weight")), &self.pooled, &self.h, c, self.hidden);
+        let nh = n * self.hidden;
+        let s_relu = ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.h, &self.h_act], &[nh, f(0.0)], nh);
+        ctx.gpu.submit(&[], &[s_relu]);
+        self.c1(ctx, ps.w(&p("fc.2.weight")), &self.h_act, &self.g, self.hidden, c);
+        let s_sig = ctx.step(ctx.ids.need(ctx.ids.sigmoid, "sigmoid"), &[&self.g, &self.gate], &[n * c], n * c);
+        ctx.gpu.submit(&[], &[s_sig]);
+        // x * gate, per-image per-channel (see the struct doc for why c = N*C).
+        let s_mul = ctx.step(
+            ctx.ids.need(ctx.ids.scale_chan, "scale_chan"),
+            &[x_in, &self.gate, &self.out],
+            &[self.shape.numel(), n * c, h * w],
+            self.shape.numel(),
+        );
+        ctx.gpu.submit(&[], &[s_mul]);
+    }
+
+    /// `x` feeds TWO consumers — the squeeze (pool) and the scale (multiply) — so
+    /// their gradients accumulate.
+    pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
+        let (n, c, h, w) = (self.shape.n, self.shape.c, self.shape.h, self.shape.w);
+        let hw = h * w;
+        let tot = self.shape.numel();
+        let p = |s: &str| format!("{}.{s}", self.prefix);
+
+        // --- the multiply: out = x * gate ---
+        // d_x_mul = d_out * gate  (the same broadcast as the forward)
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.scale_chan, "scale_chan"),
+            &[d_out, &self.gate, &self.d_x_mul],
+            &[tot, n * c, hw],
+            tot,
+        );
+        ctx.gpu.submit(&[], &[s]);
+        // d_gate[n,c] = sum_hw d_out * x. Elementwise product, then the per-(n,c)
+        // spatial sum — which is exactly `add_chan_bcast_dv`'s adjoint-of-broadcast.
+        let s = ctx.step(ctx.ids.need(ctx.ids.mul, "mul"), &[d_out, x_in, &self.prod], &[tot], tot);
+        ctx.gpu.submit(&[], &[s]);
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.add_chan_bcast_dv, "add_chan_bcast_dv"),
+            &[&self.prod, &self.d_gate],
+            &[n, c, hw],
+            n * c,
+        );
+        ctx.gpu.submit(&[], &[s]);
+
+        // --- the excite chain, backwards ---
+        let s = ctx.step(ctx.ids.need(ctx.ids.sigmoid_bwd, "sigmoid_bwd"), &[&self.g, &self.d_gate, &self.d_g], &[n * c], n * c);
+        ctx.gpu.submit(&[], &[s]);
+        // fc.2: [hidden -> c] at 1x1
+        let p2 = [n, self.hidden, 1, 1, c, 1, 1, 0, 1, 1];
+        let s_dw = ctx.step(ctx.ids.need(ctx.ids.conv2d_dw, "conv2d_dw"), &[&self.d_g, &self.h_act, ps.g(&p("fc.2.weight"))], &p2, (c * self.hidden) as u32);
+        let s_dx = ctx.step(ctx.ids.need(ctx.ids.conv2d_dx, "conv2d_dx"), &[&self.d_g, ps.w(&p("fc.2.weight")), &self.d_h_act], &p2, n * self.hidden);
+        ctx.gpu.submit(&[], &[s_dw, s_dx]);
+        let nh = n * self.hidden;
+        let s = ctx.step(ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"), &[&self.h, &self.d_h_act, &self.d_h], &[nh, f(0.0)], nh);
+        ctx.gpu.submit(&[], &[s]);
+        // fc.0: [c -> hidden] at 1x1
+        let p0 = [n, c, 1, 1, self.hidden, 1, 1, 0, 1, 1];
+        let s_dw = ctx.step(ctx.ids.need(ctx.ids.conv2d_dw, "conv2d_dw"), &[&self.d_h, &self.pooled, ps.g(&p("fc.0.weight"))], &p0, (self.hidden * c) as u32);
+        let s_dx = ctx.step(ctx.ids.need(ctx.ids.conv2d_dx, "conv2d_dx"), &[&self.d_h, ps.w(&p("fc.0.weight")), &self.d_pooled], &p0, n * c);
+        ctx.gpu.submit(&[], &[s_dw, s_dx]);
+        // the squeeze's adjoint: spread d_pooled back over space / (H*W)
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.avgpool2d_dx, "avgpool2d_dx"),
+            &[&self.d_pooled, &self.d_x_pool],
+            &[n, c, h, w, 1, 1],
+            tot,
+        );
+        ctx.gpu.submit(&[], &[s]);
+
+        // --- x's two paths sum ---
+        let s = ctx.step(ctx.ids.add2, &[&self.d_x_mul, &self.d_x_pool, d_in], &[tot], tot);
+        ctx.gpu.submit(&[], &[s]);
+    }
+}
