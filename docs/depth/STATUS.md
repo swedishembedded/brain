@@ -220,29 +220,37 @@ their equivalence with a test so the duplication cannot drift.
   adjoint-of-a-broadcast) + `avgpool2d_dx`; the FD test checks `d_in` too, since a
   missing x-path is the classic SE bug and weight grads would not catch it.
 
-### NEXT, and it is a real design decision — not a bodge point
+- **`vision::BatchNorm`** — a standalone BN unit, because `MinimalMultiScale` is
+  `x + BN(dw₁(x) + dw₂(x))`: ONE BN over the SUM of two convs, which a unit whose
+  BN is welded to its own conv cannot express. `Conv` KEEPS its own deliberately —
+  its BN is fusion-aware (the eval fast path is `conv_act_reg`, one kernel doing
+  conv+BN+act from a collapsed `scale|bias`, where BN never runs as a separate
+  dispatch), while a standalone BN can never fuse and has no tap site. What is
+  shared and must not drift — the eps, the `mv`/`gb`/`mvg` layouts, the
+  `bn_stats`→host→`bn_train` interleave — is documented at both sites.
+- **`ConvSpec::norm`** (`Norm::{None,Bn}`) — a conv without its own BN. Needed by
+  `MinimalMultiScale`'s branches (the reference has exactly one `bn`, over their
+  sum) and SE's two 1×1s. At `Norm::None` the forward is a raw conv → act in both
+  modes, and `param_list` omits the four BN tensors.
+- **`blocks.rs` — `MinimalMultiScale`**: two `Norm::None` depthwise branches
+  (dilation 1 and 2, both shape-preserving) + the shared BN + residual, no
+  activation anywhere. FD-gated over both branch weights and the shared BN's gamma.
+- Fixed `param_list` computing the weight as `[cout, cin, k, k]`; grouped convs
+  are `[cout, cin/groups, k, k]`. The earlier blocks were dense, so it had not bitten.
 
-**`MinimalMultiScale` is `x + BN(dw₁(x) + dw₂(x))` — the BN sits on the SUM of
-two convs.** `vision::Conv` owns exactly one conv *and* its BN, so it cannot
-express this.
+### Blocks: 3 of 10 done
 
-The right fix is to **factor Conv's BN into a reusable `vision::BatchNorm` unit
-that Conv composes**, then MinimalMultiScale uses two `Act::None` convs + a
-standalone BN. The wrong fix is a private BN inside `crates/depth`: that
-duplicates ~150 lines of subtle machinery — the `bn_stats` → host-pack →
-`bn_train` interleave, the running-stat EMA, `bn_dstats`/`bn_dx`/`bn_dgamma`/
-`bn_dbeta` — which is exactly the duplication this workstream exists to remove.
-It would also fork the train/eval mode flag and the `sb` caching.
+| done | remaining |
+|---|---|
+| `QARepBlock` (×15), `ChannelAttention` (SE), `MinimalMultiScale` | `StripPoolingAttention`, `GlobalContextBlock`, `MinimalCrossScale`, `LightweightSPPF`, `UltraLightFusion`, `FastConvexUpsample` (unfold + npu) |
 
-Checked: no other block needs it. `gate_conv` is `Sequential(Conv, BN, Sigmoid)`
-= a `Act::None` Conv + `sigmoid`; `transform.0/.1` is conv+BN+ReLU = `Act::Relu`;
-`transform.3` is a biased conv (`conv_bias`). Only MinimalMultiScale has BN over
-a sum.
+All the kernels the remaining 7 need already exist and are adjointness-tested.
+`LightweightSPPF` should be close to free — `maxpool5` *is* it (K/pad are params)
+and `ConvBN` is `vision::Conv` with `ConvNames::torch_conv_bn`.
 
-**Then:** the remaining 7 blocks (StripPooling, GlobalContext, CrossScale, SPPF,
-UltraLightFusion, FastConvexUpsample ×2), `model.rs` (encoder/decoder +
-`impl model::Model`), `loss.rs` (`ZipDepthLoss`), `import.rs`, and the p3 master
-gradcheck at **eps=5e-4**.
+**Then:** `model.rs` (encoder/decoder wiring + `impl model::Model`), `loss.rs`
+(`ZipDepthLoss`), `import.rs` (1:1 name match — the layout is already verified),
+and the p3 master gradcheck at **eps=5e-4**.
 
 ## Reference — the ZipDepth spec
 
