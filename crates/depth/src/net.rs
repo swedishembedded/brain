@@ -87,6 +87,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("convex_upsample_dd", kernels::CONVEX_UPSAMPLE_DD),
     // ---- elementwise / plumbing ----
     ("add2", kernels::ADD2),
+    // MinimalCrossScale's `x + 0.3*delta`: a scaled accumulate needs no scale kernel.
+    ("axpy", kernels::AXPY),
     ("mul", kernels::MUL),
     ("scale_chan", kernels::SCALE_CHAN),
     ("concat2", kernels::CONCAT2),

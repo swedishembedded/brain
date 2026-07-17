@@ -94,6 +94,11 @@ pub struct ConvKernelIds {
     pub concat_split: usize,
     pub chan_place: usize,
     pub add2: usize,
+    /// `out += s * in`. A scaled residual (ZipDepth's `x + 0.3*delta`) with no
+    /// scale kernel of its own — read-modify-write, so the caller keeps SSA by
+    /// copying first, or by clearing `out` via submit's clear-list to get a plain
+    /// scaled copy.
+    pub axpy: usize,
 }
 
 impl ConvKernelIds {
@@ -159,6 +164,7 @@ impl ConvKernelIds {
             concat_split: k("concat_split"),
             chan_place: k("chan_place"),
             add2: k("add2"),
+            axpy: k("axpy"),
         }
     }
 

@@ -249,6 +249,43 @@ impl ConvNames {
     }
 }
 
+/// Which checkpoint naming convention a composite block gives its inner convs.
+///
+/// A composite (`SPPF`, `C2f`, ...) builds its own children's prefixes, so it —
+/// not the caller — decides their tensor names. Passing the convention rather than
+/// the names lets one block serve models whose checkpoints disagree: yolo's SPPF
+/// is `cv1.bn.gamma`, ZipDepth's is `cv1.bn.weight`, and the wiring is identical.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NameStyle {
+    /// brain / yolo: `P.conv.weight` + `P.bn.{gamma,beta,run_mean,run_var}`.
+    Brain,
+    /// torch `ConvBN`-style module: `P.conv.weight` + `P.bn.{weight,bias,running_*}`.
+    TorchConvBn,
+}
+
+impl NameStyle {
+    pub fn names(self, prefix: &str) -> ConvNames {
+        match self {
+            NameStyle::Brain => ConvNames::brain(prefix),
+            NameStyle::TorchConvBn => ConvNames::torch_conv_bn(prefix),
+        }
+    }
+}
+
+/// Everything that varies between SPPF instances.
+///
+/// The pooled width is `hidden`, NOT a fixed fraction: Ultralytics derives it from
+/// the OUTPUT channels (`c_out/2`) and ZipDepth's `LightweightSPPF` from the INPUT
+/// channels (`c1/4`). Those coincide often enough to hide the difference, so the
+/// caller states it.
+#[derive(Clone, Copy, Debug)]
+pub struct SppfSpec {
+    /// cv1's output channels — the width the 3 pools and the 4-way concat run at.
+    pub hidden: u32,
+    pub c_out: u32,
+    pub act: Act,
+}
+
 pub struct Conv {
     /// The ActTap key. MUST equal the exported ONNX node name — the NPU
     /// calibrator maps its per-tensor scales by this string. Kept separate from
@@ -1214,13 +1251,45 @@ pub struct SPPF {
 }
 
 impl SPPF {
+    /// yolo's ctor, unchanged: Ultralytics SPPF — cv1 halves channels to `c_out/2`,
+    /// SiLU, brain names.
     pub fn new(ctx: &Ctx, prefix: &str, in_shape: Shape, c_out: u32, train: bool) -> SPPF {
-        // Ultralytics SPPF: cv1 halves channels to c = c_out/2, cv2 maps 4c->c_out.
-        let c = c_out / 2;
-        let cv1 = Conv::new(ctx, &format!("{prefix}.cv1"), in_shape, c, 1, 1, 0, train);
+        let spec = SppfSpec { hidden: c_out / 2, c_out, act: Act::Silu };
+        SPPF::with_spec(ctx, prefix, in_shape, spec, NameStyle::Brain, train)
+    }
+
+    /// The general ctor. `cv1` narrows to `spec.hidden`, three K=5/pad=2 max-pools
+    /// chain off it, and `cv2` maps the 4-way concat to `spec.c_out`.
+    ///
+    /// K is fixed at 5 (the kernel is `maxpool5`, though K/pad are its params):
+    /// Ultralytics and ZipDepth both use 5, and ZipDepth's `k` argument is never
+    /// passed a different value. Widen this when something needs it.
+    pub fn with_spec(
+        ctx: &Ctx,
+        prefix: &str,
+        in_shape: Shape,
+        spec: SppfSpec,
+        style: NameStyle,
+        train: bool,
+    ) -> SPPF {
+        let (c, c_out) = (spec.hidden, spec.c_out);
+        let cspec = |cout: u32| ConvSpec {
+            cout,
+            k: 1,
+            stride: 1,
+            pad: 0,
+            groups: 1,
+            dilation: 1,
+            norm: Norm::Bn,
+            act: spec.act,
+            bias: false,
+        };
+        let p1 = format!("{prefix}.cv1");
+        let cv1 = Conv::with_names(ctx, &p1, style.names(&p1), in_shape, cspec(c), train);
         let sh = cv1.out_shape;
         let cat_shape = Shape::new(sh.n, 4 * c, sh.h, sh.w);
-        let cv2 = Conv::new(ctx, &format!("{prefix}.cv2"), cat_shape, c_out, 1, 1, 0, train);
+        let p2 = format!("{prefix}.cv2");
+        let cv2 = Conv::with_names(ctx, &p2, style.names(&p2), cat_shape, cspec(c_out), train);
         let out_shape = cv2.out_shape;
         let n1 = sh.numel();
         SPPF {

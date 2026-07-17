@@ -51,7 +51,7 @@ pub mod ids;
 pub mod net;
 pub mod plumbing;
 
-pub use blocks::{Act, Bottleneck, Conv, ConvNames, ConvSpec, C2f, SPPF};
+pub use blocks::{Act, Bottleneck, Conv, ConvNames, ConvSpec, NameStyle, Norm, SppfSpec, C2f, SPPF};
 pub use bn::{BatchNorm, BnNames};
 pub use fold::{fold_bn, BN_EPS};
 pub use ids::{ConvKernelIds, NONE};
