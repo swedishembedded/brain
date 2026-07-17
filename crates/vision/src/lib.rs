@@ -50,7 +50,7 @@ pub mod ids;
 pub mod net;
 pub mod plumbing;
 
-pub use blocks::{Bottleneck, Conv, C2f, SPPF};
+pub use blocks::{Act, Bottleneck, Conv, ConvNames, ConvSpec, C2f, SPPF};
 pub use fold::{fold_bn, BN_EPS};
 pub use ids::{ConvKernelIds, NONE};
 pub use net::{ActTap, Ctx, Shape};

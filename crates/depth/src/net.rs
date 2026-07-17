@@ -36,7 +36,16 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("conv2d_gd", kernels::CONV2D_GD),
     ("conv2d_gd_dx", kernels::CONV2D_GD_DX),
     ("conv2d_gd_dw", kernels::CONV2D_GD_DW),
-    ("bias_add", kernels::BIAS_ADD),
+    // Biased convs (head_half, mask_pred.3, GlobalContextBlock) are all DENSE, so
+    // the fused conv+per-channel-bias kernel covers every one of them.
+    //
+    // NOT `bias_add`: it is `out[idx] += bias[idx % n]`, i.e. [M,N] row-major with
+    // the biased dim TRAILING — a LINEAR-layer bias. In NCHW the channel is not
+    // the trailing dim, so it silently indexes garbage. yolo's head.rs:14-29
+    // documents the workaround (a host-built [C*HW] broadcast) and then replaces
+    // the forward with conv_bias exactly as here; `bias_grad` is still the right
+    // BACKWARD via the same [M=N, N=C*HW] view plus a host spatial reduce.
+    ("conv_bias", kernels::CONV_BIAS),
     ("bias_grad", kernels::BIAS_GRAD),
     // ---- batchnorm ----
     ("bn_stats", kernels::BN_STATS),

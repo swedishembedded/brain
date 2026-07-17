@@ -19,6 +19,7 @@
 //! Split `crates/da3` off only if DA3 grows the any-view machinery (CameraEnc/Dec,
 //! the depth-ray target); the arch enum is the seam that keeps that split cheap.
 
+pub mod blocks;
 pub mod config;
 pub mod init;
 pub mod net;

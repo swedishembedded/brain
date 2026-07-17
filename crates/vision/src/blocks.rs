@@ -145,8 +145,72 @@ impl ConvSpec {
     }
 }
 
+
+/// The five tensor names a `Conv` unit owns.
+///
+/// A property of WHERE THE WEIGHTS CAME FROM, not of the block — which is why it
+/// is data rather than a hardcoded `format!`. Two models share this block and
+/// spell BatchNorm differently:
+///   * yolo mirrors Ultralytics: `P.conv.weight` + `P.bn.{gamma,beta,run_mean,run_var}`
+///   * ZipDepth mirrors its own torch checkpoint: `P.bn.{weight,bias,running_mean,
+///     running_var}`, and inside a `nn.Sequential` the conv+BN are indexed
+///     POSITIONALLY (`P.0.weight`, `P.1.weight`) with no `.conv`/`.bn` at all.
+///
+/// Making this configurable is what lets each model's `param_list` mirror its own
+/// checkpoint exactly, so import is a 1:1 name match instead of the hand-written
+/// translation table every other brain importer carries.
+#[derive(Clone, Debug)]
+pub struct ConvNames {
+    pub weight: String,
+    pub gamma: String,
+    pub beta: String,
+    pub run_mean: String,
+    pub run_var: String,
+}
+
+impl ConvNames {
+    /// brain / yolo / Ultralytics: `P.conv.weight` + `P.bn.{gamma,beta,run_mean,run_var}`.
+    pub fn brain(prefix: &str) -> ConvNames {
+        ConvNames {
+            weight: format!("{prefix}.conv.weight"),
+            gamma: format!("{prefix}.bn.gamma"),
+            beta: format!("{prefix}.bn.beta"),
+            run_mean: format!("{prefix}.bn.run_mean"),
+            run_var: format!("{prefix}.bn.run_var"),
+        }
+    }
+    /// A torch module with `.conv` / `.bn` attributes (ZipDepth's `ConvBN`):
+    /// `P.conv.weight` + `P.bn.{weight,bias,running_mean,running_var}`.
+    pub fn torch_conv_bn(prefix: &str) -> ConvNames {
+        ConvNames {
+            weight: format!("{prefix}.conv.weight"),
+            gamma: format!("{prefix}.bn.weight"),
+            beta: format!("{prefix}.bn.bias"),
+            run_mean: format!("{prefix}.bn.running_mean"),
+            run_var: format!("{prefix}.bn.running_var"),
+        }
+    }
+    /// A torch `nn.Sequential(Conv2d, BatchNorm2d)` (ZipDepth's QARepBlock
+    /// branches, gate_conv, transform, mask_pred): children are indexed by
+    /// POSITION, so `P.{ci}.weight` + `P.{bi}.{weight,bias,running_mean,running_var}`.
+    pub fn torch_seq(prefix: &str, conv_idx: u32, bn_idx: u32) -> ConvNames {
+        ConvNames {
+            weight: format!("{prefix}.{conv_idx}.weight"),
+            gamma: format!("{prefix}.{bn_idx}.weight"),
+            beta: format!("{prefix}.{bn_idx}.bias"),
+            run_mean: format!("{prefix}.{bn_idx}.running_mean"),
+            run_var: format!("{prefix}.{bn_idx}.running_var"),
+        }
+    }
+}
+
 pub struct Conv {
+    /// The ActTap key. MUST equal the exported ONNX node name — the NPU
+    /// calibrator maps its per-tensor scales by this string. Kept separate from
+    /// [`ConvNames`]: the tap identifies the CONV SITE, the names identify its
+    /// weights, and they are not the same concept.
     prefix: String,
+    names: ConvNames,
     pub in_shape: Shape,
     pub out_shape: Shape,
     pub spec: ConvSpec,
@@ -207,8 +271,21 @@ impl Conv {
         Conv::with_spec(ctx, prefix, in_shape, ConvSpec::silu(cout, k, stride, pad), train)
     }
 
-    /// The general ctor: any grouping/dilation/activation.
+    /// The general ctor: any grouping/dilation/activation, brain-style names.
     pub fn with_spec(ctx: &Ctx, prefix: &str, in_shape: Shape, spec: ConvSpec, train: bool) -> Conv {
+        Conv::with_names(ctx, prefix, ConvNames::brain(prefix), in_shape, spec, train)
+    }
+
+    /// The fully general ctor: the caller supplies the tensor names, so each
+    /// model's param list can mirror its own checkpoint.
+    pub fn with_names(
+        ctx: &Ctx,
+        prefix: &str,
+        names: ConvNames,
+        in_shape: Shape,
+        spec: ConvSpec,
+        train: bool,
+    ) -> Conv {
         let (cout, k, stride, pad) = (spec.cout, spec.k, spec.stride, spec.pad);
         assert_eq!(in_shape.c % spec.groups, 0, "cin {} not divisible by groups {}", in_shape.c, spec.groups);
         assert_eq!(cout % spec.groups, 0, "cout {cout} not divisible by groups {}", spec.groups);
@@ -217,6 +294,7 @@ impl Conv {
         let c = cout;
         Conv {
             prefix: prefix.to_string(),
+            names,
             in_shape,
             out_shape,
             spec,
@@ -279,13 +357,12 @@ impl Conv {
         let c = self.out_shape.c as usize;
         let cin = self.in_shape.c as usize;
         let k = self.k as usize;
-        let p = |s: &str| format!("{}.{s}", self.prefix);
         vec![
-            (p("conv.weight"), c * cin * k * k),
-            (p("bn.gamma"), c),
-            (p("bn.beta"), c),
-            (p("bn.run_mean"), c),
-            (p("bn.run_var"), c),
+            (self.names.weight.clone(), (c * cin * k * k) as usize),
+            (self.names.gamma.clone(), c as usize),
+            (self.names.beta.clone(), c as usize),
+            (self.names.run_mean.clone(), c as usize),
+            (self.names.run_var.clone(), c as usize),
         ]
     }
 
@@ -384,16 +461,14 @@ impl Conv {
     /// params can't be aliased as the interleaved buffer the kernel wants.
     fn pack_gb(&self, ctx: &Ctx, ps: &ParamStore) {
         let c = self.out_shape.c as usize;
-        let p = |s: &str| format!("{}.{s}", self.prefix);
-        let gamma = ctx.gpu.read(ps.w(&p("bn.gamma")), c);
-        let beta = ctx.gpu.read(ps.w(&p("bn.beta")), c);
+        let gamma = ctx.gpu.read(ps.w(&self.names.gamma), c);
+        let beta = ctx.gpu.read(ps.w(&self.names.beta), c);
         ctx.gpu.write(&self.gb, bytemuck::cast_slice(&pack2(&gamma, &beta)));
     }
 
     /// Run the full forward and return this block's output buffer. Submits in
     /// dependency order, host-packing the BN stats at the one required boundary.
     pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
-        let p = |s: &str| format!("{}.{s}", self.prefix);
         let on = self.out_shape.numel();
         let c = self.out_shape.c;
 
@@ -448,7 +523,7 @@ impl Conv {
                 ctx.gpu.write(qbuf, bytemuck::cast_slice(&h));
                 let s = ctx.step(
                     kind,
-                    &[qbuf, ps.w(&p("conv.weight")), &self.sb, &self.act],
+                    &[qbuf, ps.w(&self.names.weight), &self.sb, &self.act],
                     &self.conv_params(),
                     threads,
                 );
@@ -457,7 +532,7 @@ impl Conv {
             }
             let s = ctx.step(
                 kind,
-                &[x_in, ps.w(&p("conv.weight")), &self.sb, &self.act],
+                &[x_in, ps.w(&self.names.weight), &self.sb, &self.act],
                 &self.conv_params(),
                 threads,
             );
@@ -467,13 +542,13 @@ impl Conv {
 
         // Train mode: conv -> bn_stats, host-pack mv/mvg, then bn_train -> silu.
         self.pack_gb(ctx, ps);
-        let s_conv = ctx.step(self.conv_kind(ctx), &[x_in, ps.w(&p("conv.weight")), &self.conv_out], &self.conv_params(), on);
+        let s_conv = ctx.step(self.conv_kind(ctx), &[x_in, ps.w(&self.names.weight), &self.conv_out], &self.conv_params(), on);
         let s_stats = ctx.step(ctx.ids.bn_stats, &[&self.conv_out, &self.mean, &self.var], &self.nchw(), c);
         let mut pre = vec![s_conv, s_stats];
         if self.update_running.get() {
             pre.push(ctx.step(
                 ctx.ids.bn_running,
-                &[&self.mean, &self.var, ps.w(&p("bn.run_mean")), ps.w(&p("bn.run_var"))],
+                &[&self.mean, &self.var, ps.w(&self.names.run_mean), ps.w(&self.names.run_var)],
                 &[c, f(self.momentum)],
                 c,
             ));
@@ -536,10 +611,9 @@ impl Conv {
         });
         let src = tapped.as_ref().unwrap_or(x_in);
 
-        let p = |n: &str| format!("{}.{}", self.prefix, n);
         let s_conv = ctx.step(
             self.conv_kind(ctx),
-            &[src, ps.w(&p("conv.weight")), &self.conv_out],
+            &[src, ps.w(&self.names.weight), &self.conv_out],
             &self.conv_params(),
             on,
         );
@@ -565,19 +639,17 @@ impl Conv {
     /// `bn_train`'s signature and simply expects running stats there).
     fn pack_running_mv(&self, ctx: &Ctx, ps: &ParamStore) {
         let c = self.out_shape.c as usize;
-        let p = |s: &str| format!("{}.{s}", self.prefix);
-        let rmean = ctx.gpu.read(ps.w(&p("bn.run_mean")), c);
-        let rvar = ctx.gpu.read(ps.w(&p("bn.run_var")), c);
+        let rmean = ctx.gpu.read(ps.w(&self.names.run_mean), c);
+        let rvar = ctx.gpu.read(ps.w(&self.names.run_var), c);
         ctx.gpu.write(&self.mv, bytemuck::cast_slice(&pack2(&rmean, &rvar)));
     }
 
     fn pack_sb(&self, ctx: &Ctx, ps: &ParamStore) {
         let c = self.out_shape.c as usize;
-        let p = |s: &str| format!("{}.{s}", self.prefix);
-        let gamma = ctx.gpu.read(ps.w(&p("bn.gamma")), c);
-        let beta = ctx.gpu.read(ps.w(&p("bn.beta")), c);
-        let rmean = ctx.gpu.read(ps.w(&p("bn.run_mean")), c);
-        let rvar = ctx.gpu.read(ps.w(&p("bn.run_var")), c);
+        let gamma = ctx.gpu.read(ps.w(&self.names.gamma), c);
+        let beta = ctx.gpu.read(ps.w(&self.names.beta), c);
+        let rmean = ctx.gpu.read(ps.w(&self.names.run_mean), c);
+        let rvar = ctx.gpu.read(ps.w(&self.names.run_var), c);
         let mut sb = Vec::with_capacity(2 * c);
         for i in 0..c {
             let scale = gamma[i] / (rvar[i] + 1e-5).sqrt();
@@ -591,11 +663,10 @@ impl Conv {
     /// into `mvg` (the BN-backward input). Called between `bn_stats` and
     /// `bn_train` during forward.
     fn pack_stats_host(&self, ctx: &Ctx, ps: &ParamStore) {
-        let p = |s: &str| format!("{}.{s}", self.prefix);
         let c = self.out_shape.c as usize;
         let mean = ctx.gpu.read(&self.mean, c);
         let var = ctx.gpu.read(&self.var, c);
-        let gamma = ctx.gpu.read(ps.w(&p("bn.gamma")), c);
+        let gamma = ctx.gpu.read(ps.w(&self.names.gamma), c);
         ctx.gpu.write(&self.mv, bytemuck::cast_slice(&pack2(&mean, &var)));
         let mut mvg = Vec::with_capacity(3 * c);
         for i in 0..c {
@@ -617,7 +688,6 @@ impl Conv {
         d_out: &DeviceBuffer,
         d_in: &DeviceBuffer,
     ) {
-        let p = |s: &str| format!("{}.{s}", self.prefix);
         let on = self.out_shape.numel();
         let c = self.out_shape.c;
         let dw_n = self.out_shape.c * self.in_shape.c * self.k * self.k;
@@ -629,11 +699,11 @@ impl Conv {
         let s_dstats = ctx.step(ctx.ids.bn_dstats, &[&self.conv_out, &self.d_bn, &self.mvg, &self.bp], &self.nchw(), c);
         // bn_dgamma / bn_dbeta accumulate -> their grad buffers are pre-zeroed by
         // the model's zero_grads (clears list), exactly like gpt.
-        let s_dgamma = ctx.step(ctx.ids.bn_dgamma, &[&self.conv_out, &self.d_bn, &self.mv, ps.g(&p("bn.gamma"))], &self.nchw(), c);
-        let s_dbeta = ctx.step(ctx.ids.bn_dbeta, &[&self.d_bn, ps.g(&p("bn.beta"))], &self.nchw(), c);
+        let s_dgamma = ctx.step(ctx.ids.bn_dgamma, &[&self.conv_out, &self.d_bn, &self.mv, ps.g(&self.names.gamma)], &self.nchw(), c);
+        let s_dbeta = ctx.step(ctx.ids.bn_dbeta, &[&self.d_bn, ps.g(&self.names.beta)], &self.nchw(), c);
         let s_dx = ctx.step(ctx.ids.bn_dx, &[&self.conv_out, &self.d_bn, &self.bp, &self.d_conv], &self.nchw(), on);
-        let s_dw = ctx.step(self.conv_dw_kind(ctx), &[&self.d_conv, x_in, ps.g(&p("conv.weight"))], &self.conv_params(), dw_n);
-        let s_dxin = ctx.step(self.conv_dx_kind(ctx), &[&self.d_conv, ps.w(&p("conv.weight")), d_in], &self.conv_params(), self.in_shape.numel());
+        let s_dw = ctx.step(self.conv_dw_kind(ctx), &[&self.d_conv, x_in, ps.g(&self.names.weight)], &self.conv_params(), dw_n);
+        let s_dxin = ctx.step(self.conv_dx_kind(ctx), &[&self.d_conv, ps.w(&self.names.weight), d_in], &self.conv_params(), self.in_shape.numel());
         // s_silu must precede s_dstats/s_dgamma/s_dbeta (they read d_bn); s_dstats
         // must precede s_dx (reads bp). Submit in this order.
         ctx.gpu.submit(&[], &[s_act, s_dstats, s_dgamma, s_dbeta, s_dx, s_dw, s_dxin]);
