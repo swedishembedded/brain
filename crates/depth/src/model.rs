@@ -263,6 +263,11 @@ pub struct ZipDepth {
     d_s4_pre: DeviceBuffer,
     d_s3_pre: DeviceBuffer,
     d_s2_pre: DeviceBuffer,
+    /// stage2's two-consumer grad sum. A DEDICATED buffer: aliasing it onto
+    /// d_s2_pre made stage2.backward take the same buffer as both d_out and d_in,
+    /// which corrupts as it reads d_out while writing d_in — the bug that made the
+    /// encoder gradients wrong and progressively worse toward the input.
+    d_c2_acc: DeviceBuffer,
     d_s1_pre: DeviceBuffer,
     d_quarter: DeviceBuffer,
     d_shalf: DeviceBuffer,
@@ -408,6 +413,7 @@ impl ZipDepth {
             d_s4_pre: ctx.act(s4.numel()),
             d_s3_pre: ctx.act(s3.numel()),
             d_s2_pre: ctx.act(s2.numel()),
+            d_c2_acc: ctx.act(s2.numel()),
             d_s1_pre: ctx.act(q.numel()),
             d_quarter: ctx.act(q.numel()),
             d_shalf: ctx.act(s_half_shape.numel()),
@@ -620,9 +626,9 @@ impl ZipDepth {
         self.down3.backward(ctx, ps, self.stage2.out(), &self.d_c3_cross, &self.d_s2_pre);
         // stage2's output has TWO consumers: down3 and fuse2.
         let n2 = self.sh_s2.numel();
-        let s = ctx.step(ctx.ids.add2, &[&self.d_s2_pre, &self.d_c2, &self.d_c2_acc()], &[n2], n2);
+        let s = ctx.step(ctx.ids.add2, &[&self.d_s2_pre, &self.d_c2, &self.d_c2_acc], &[n2], n2);
         ctx.gpu.submit(&[], &[s]);
-        self.stage2.backward(ctx, ps, self.down2.out(), &self.d_c2_acc(), &self.d_s2_pre);
+        self.stage2.backward(ctx, ps, self.down2.out(), &self.d_c2_acc, &self.d_s2_pre);
         self.down2.backward(ctx, ps, self.stage1.out(), &self.d_s2_pre, &self.d_s1_pre);
         // stage1's output has TWO consumers: down2 and fuse1.
         let n1 = self.sh_q.numel();
@@ -637,9 +643,6 @@ impl ZipDepth {
         self.stem_half.backward(ctx, ps, &self.normed, &self.d_shalf, &self.d_x);
     }
 
-    fn d_c2_acc(&self) -> &DeviceBuffer {
-        &self.d_s2_pre
-    }
 }
 
 /// Which attention tail a stage carries. See [`Stage`]'s doc: the order is part of
