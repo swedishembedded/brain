@@ -32,6 +32,7 @@ brain-yolo.workspace = true
 brain-depth.workspace = true
 brain-paramstore.workspace = true
 brain-vision.workspace = true
+brain-capture.workspace = true
 brain-model.workspace = true
 brain-data.workspace = true
 brain-federated.workspace = true

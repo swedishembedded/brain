@@ -1,0 +1,10 @@
+[package]
+name = "brain-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal V4L2 webcam capture: hand-rolled ioctl FFI, YUYV->RGB, and a single-slot latest-frame buffer for the depth demo."
+
+[lib]
+name = "capture"
+path = "src/lib.rs"

@@ -364,11 +364,33 @@ real photo: foreground reads red/near, background deep blue/far, smooth between.
   switch). Env-gated smoke test: deterministic headless run, 2x-width composite.
 - Makefile: `depth/demo`, `depth/smoke`.
 
-**Still remaining in P5**: the CAMERA — `crates/capture` (hand-rolled V4L2 ioctl
-FFI, YUYV) + the `DepthMachine` HFSM + the realtime `--camera` loop. That path
-reuses this predictor; it needs the target webcam to validate the pixel format
-(plan risk R4: many UVC cams are MJPEG-only). GPU/NPU device execution of the
-full model is wired (`--device`) but untested here (no GPU in this environment).
+### P5 camera — `brain depth --camera` (V4L2/YUYV), structurally complete
+
+`crates/capture`: hand-rolled V4L2 ioctl FFI (no `v4l`/`bindgen` dep), split so the
+subtle parts are testable with ZERO hardware —
+- `convert::yuyv_to_rgb` (BT.601), pinned: neutral chroma -> greyscale, +V pushes
+  red, +U pushes blue (catches the classic R/B swap). Odd width panics.
+- `slot::FrameSlot`: a single-slot latest-frame buffer (producer always wins,
+  drops counted) — NOT a channel (mpsc rebuilds a backlog; sync_channel(1) stalls
+  the producer and the driver silently drops with no counter). Send+Sync, lossy
+  not blocking, thread-shared. 6 tests.
+- `v4l2::Device`: mmap-streaming open/S_FMT(force YUYV)/REQBUFS/QBUF/DQBUF/STREAMON.
+  Every ioctl number, struct size and field offset was PRINTED from a C program
+  against the live `<linux/videodev2.h>` (never hand-computed) and `tests/abi.rs`
+  re-derives them, failing on any drift. Byte-buffer + offset technique like
+  wm-display's SDL_Event. Rejects an MJPEG-only camera by name.
+
+The `--camera` loop: capture thread -> FrameSlot -> take-latest -> Predictor ->
+EMA-smoothed bounds -> colorize -> composite -> SDL window, with a fps/infer-ms/drop
+HUD. Esc quits, `[`/`]` cycle colormaps live.
+
+**CANNOT be end-to-end validated in this environment** (the /dev/video* devices
+exist but are permission-denied, and there is no display) — exactly the R4
+hardware dependency the plan flagged. The pure pieces are fully tested, the ABI is
+pinned against the live header, and the device-open path errors gracefully. **Needs
+the user's actual laptop webcam to confirm it streams** (and that the cam exposes
+YUYV, not MJPEG-only). GPU/NPU full-model execution is wired (`--device`) but
+likewise untested here.
 
 **Not started**: P4 (train/eval from scratch — the other half of the goal), P6
 (NPU quant), P7 (DA3).

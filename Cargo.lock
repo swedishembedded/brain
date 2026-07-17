@@ -251,6 +251,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-capture"
+version = "0.1.0"
+
+[[package]]
 name = "brain-checkpoint"
 version = "0.1.0"
 dependencies = [
@@ -263,6 +267,7 @@ version = "0.1.0"
 dependencies = [
  "brain-audio",
  "brain-bench",
+ "brain-capture",
  "brain-checkpoint",
  "brain-codec",
  "brain-data",
