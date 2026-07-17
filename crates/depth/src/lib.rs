@@ -20,5 +20,7 @@
 //! the depth-ray target); the arch enum is the seam that keeps that split cheap.
 
 pub mod config;
+pub mod fuse;
 
 pub use config::{pick_groups, GlobalMode, ZipConfig};
+pub use fuse::{fuse_qarep, Branch};

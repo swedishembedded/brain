@@ -47,7 +47,7 @@ use crate::blocks::{Conv, C2f, SPPF};
 use crate::head::Head;
 use crate::net;
 use vision::plumbing::{Acc, Cat, Up};
-use crate::net::{Ctx, Shape, ADAMW, CLIP_COEF, GRADNORM_SQ, GRAD_SCALE, GRAD_SCALE_BUF, PIPELINES, UPSAMPLE2, UPSAMPLE2_DX, CONCAT2, CONCAT_SPLIT, ADD2};
+use crate::net::{Ctx, Shape, ADAMW, CLIP_COEF, GRADNORM_SQ, GRAD_SCALE, GRAD_SCALE_BUF, PIPELINES, ADD2};
 use crate::YoloConfig;
 
 /// A ground-truth box for the (P4) detection loss. Normalised xywh + class id.

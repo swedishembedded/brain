@@ -1,40 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! BatchNorm folding + weight quantization helpers.
+//! Weight quantization helpers, and a re-export of the BN fold.
 //!
-//! Brain's eval-mode `Conv` already collapses conv+BN into a per-channel
-//! scale/shift (`yolo::blocks::Conv::pack_sb`). The exporter reproduces the exact
-//! same fold here so the ONNX `Conv` (weight + bias) is numerically identical.
+//! `fold_bn`/`BN_EPS` moved to `crates/vision`: the fold is a property of the conv
+//! block (it is what `Conv`'s eval path already does), not of quantization, and
+//! ZipDepth's RepVGG reparameterization needs it without taking a dependency on
+//! this crate's OpenVINO runtime. Re-exported here so `topology.rs`/`sim.rs` and
+//! any out-of-tree caller keep working unchanged.
 
-/// Eps used by brain's BN-eval collapse (`Conv::pack_sb` / `bn_eval`). Must match.
-pub const BN_EPS: f32 = 1e-5;
-
-/// Fold BN(eval) into a bias-free conv weight, returning `(w', bias)`:
-/// `scale[o] = gamma[o]/sqrt(run_var[o]+eps)`, `w'[o,…] = w[o,…]·scale[o]`,
-/// `bias[o] = beta[o] − run_mean[o]·scale[o]`. `cout` = output channels; `w` is
-/// row-major `[cout, cin*k*k]`.
-pub fn fold_bn(
-    w: &[f32],
-    gamma: &[f32],
-    beta: &[f32],
-    run_mean: &[f32],
-    run_var: &[f32],
-    cout: usize,
-) -> (Vec<f32>, Vec<f32>) {
-    assert_eq!(w.len() % cout, 0, "weight length {} not divisible by cout {cout}", w.len());
-    let per = w.len() / cout;
-    let mut wp = vec![0.0f32; w.len()];
-    let mut bias = vec![0.0f32; cout];
-    for o in 0..cout {
-        let scale = gamma[o] / (run_var[o] + BN_EPS).sqrt();
-        for i in 0..per {
-            wp[o * per + i] = w[o * per + i] * scale;
-        }
-        bias[o] = beta[o] - run_mean[o] * scale;
-    }
-    (wp, bias)
-}
+pub use vision::fold::{fold_bn, BN_EPS};
 
 /// Symmetric per-output-channel INT8 quantization of a folded conv weight
 /// `[cout, per]`: returns the INT8 weights (same layout) and the per-channel
