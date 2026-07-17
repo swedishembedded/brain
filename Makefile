@@ -45,7 +45,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release wm/play wm-fixtures test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo \
+.PHONY: help build release wm/play wm-fixtures test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo depth/demo depth/smoke \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo \
@@ -181,6 +181,22 @@ eval/yolo: release
 detect/yolo: release
 	$(BRAIN) yolo detect --weights $(OUT)/yolo.weights --image $(DATA)/detect \
 		--conf $(YOLO_CONF) --iou $(YOLO_IOU)
+
+# ---- depth (ZipDepth) ------------------------------------------------------
+# Set ZIPDEPTH_PTH to a released checkpoint (see resources/depth-models).
+ZIPDEPTH_PTH ?= 
+DEPTH_IMG    ?= 
+
+depth/demo: release
+	@test -n "$(ZIPDEPTH_PTH)" || (echo "set ZIPDEPTH_PTH=<zipdepth_base.pth>"; exit 2)
+	@test -n "$(DEPTH_IMG)"    || (echo "set DEPTH_IMG=<image.ppm>"; exit 2)
+	$(BRAIN) depth --image $(DEPTH_IMG) --weights $(ZIPDEPTH_PTH)
+
+depth/smoke: release
+	@test -n "$(ZIPDEPTH_PTH)" || (echo "set ZIPDEPTH_PTH=<zipdepth_base.pth>"; exit 2)
+	@test -n "$(DEPTH_IMG)"    || (echo "set DEPTH_IMG=<image.ppm>"; exit 2)
+	DISPLAY= $(BRAIN) depth --image $(DEPTH_IMG) --weights $(ZIPDEPTH_PTH) \
+		--headless --out $(OUT)/depth.ppm
 
 # ---- Intel NPU deployment (OpenVINO) --------------------------------------
 # Quantize the trained YOLO to INT8 and compile it to a real NPU graph.

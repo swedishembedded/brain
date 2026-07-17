@@ -26,6 +26,7 @@ mod tts_cli;
 mod tts_serve;
 mod wm_cli;
 mod yolo_cli;
+mod depth_cli;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -433,6 +434,7 @@ fn main() {
         Some("tts") => tts_cli::run_tts(&argv[2..]),
         Some("wm") => wm_cli::run_wm(&argv[2..]),
         Some("yolo") => yolo_cli::run_yolo(&argv[2..]),
+        Some("depth") => depth_cli::run_depth(&argv[2..]),
         Some("npu") => npu_cli::run_npu(&argv[2..]),
         Some("federated") => federated_cli::run_federated(&argv[2..]),
         Some("gradcheck") => {

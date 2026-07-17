@@ -25,6 +25,7 @@ pub mod init;
 pub mod net;
 pub mod fuse;
 pub mod import;
+pub mod predict;
 pub mod viz;
 pub mod model;
 
@@ -33,3 +34,4 @@ pub use fuse::{fuse_qarep, Branch};
 pub use init::init_model as init_weights;
 pub use import::{load as load_checkpoint, load_into};
 pub use model::ZipDepth;
+pub use predict::Predictor;
