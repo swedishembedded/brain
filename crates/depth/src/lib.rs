@@ -24,9 +24,11 @@ pub mod config;
 pub mod init;
 pub mod net;
 pub mod fuse;
+pub mod import;
 pub mod model;
 
 pub use config::{pick_groups, GlobalMode, ZipConfig};
 pub use fuse::{fuse_qarep, Branch};
 pub use init::init_model as init_weights;
+pub use import::{load as load_checkpoint, load_into};
 pub use model::ZipDepth;

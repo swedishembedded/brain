@@ -319,6 +319,35 @@ generalizations rather than depth-specific hooks:
   gradient and restores ~4 orders of FD headroom. This will matter again for the
   real `ZipDepthLoss`.
 
+### P3 — the ZipDepth model (COMPLETE)
+
+- **All 10 blocks** compose into `ZipDepth` (`model.rs`): encoder (stem, 4 stages
+  with their attention tails, SPPF, cross-scale) + decoder (proj4, 4 fusions, head,
+  convex upsampler), forward + backward + `param_list` + eval/train toggle.
+- **Layout matches the released `.pth` EXACTLY**, verified against the real file
+  with brain's own reader — and the check is now three-way: `ZipConfig::param_list`
+  (from the reference source), the BUILT graph's `param_list` (block-by-block), and
+  the file all agree. base: 235 float tensors, npu: 239, zero missing/extra/mismatch.
+- **Master gradcheck** (`p3_gradcheck`): both variants gradcheck end to end,
+  element-wise on an eps ladder (directional FD is unusable on a deep post-ReLU
+  depth loss — the analytic is right, proven by single-element FD at ~2%; the
+  instrument needs per-magnitude eps). 15/16 spanning tensors at 86-100% / median
+  <0.04. Sabotage-verified: a dropped dominant path spikes the median >1.0.
+- **Import** (`import.rs`): loads a released checkpoint 1:1 by name (allowed to be
+  trivial because the layout is pre-verified), strict — rejects the wrong variant
+  and any missing/extra tensor by name. Env-gated test confirms the REAL
+  `zipdepth_base.pth` loads completely and a model on those weights runs a forward.
+
+**brain can now load pretrained ZipDepth and run it.** What remains before the
+camera demo: P4 (data/train/eval), P5 (capture + HFSM + SDL CLI), P6 (NPU quant).
+
+Buffer-sizing bugs found assembling the model (all the same class, all silent heap
+corruption / SIGSEGV under the CPU JIT's trusted stores): `scale_chan` given a
+2-field uniform (its ABI is `[total,c,inner]`, so it divided by inner=0 → SIGFPE on
+the first op); `d_fhalf_acc` reusing a buffer sized to the model output (8192) for
+f_half's grad (65536); and the recurring lesson holds — **size every backward
+buffer from the producing unit's own `out_shape`.**
+
 ## Reference — the ZipDepth spec
 
 Everything below is verified against the two released checkpoints
