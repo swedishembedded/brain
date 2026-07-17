@@ -348,6 +348,31 @@ the first op); `d_fhalf_acc` reusing a buffer sized to the model output (8192) f
 f_half's grad (65536); and the recurring lesson holds — **size every backward
 buffer from the producing unit's own `out_shape`.**
 
+### P5 (partial) — the demo runs on real weights, in a window
+
+`brain depth --image <ppm> --weights <pth>` loads pretrained ZipDepth and shows
+RGB | colorized depth side-by-side (Esc quits, `[`/`]` cycle colormaps without
+re-inference; `--headless` writes a PPM + content hash). **Verified visually on a
+real photo: foreground reads red/near, background deep blue/far, smooth between.**
+
+- `depth::viz` — Colormap (blue->red anchor ramp), robust p2/p98 Bounds (a lone
+  specular spike must not swing the hue), side-by-side composite. 9 tests.
+- `depth::Predictor` — letterbox in, eval forward, unwarp the depth onto the
+  frame's own grid (bilinear), like `Yolo::detect`. 2 tests.
+- `cli depth_cli` — the CLI, device-aware (`Gpu::new` honours `--device
+  cpu|vulkan` / `BRAIN_DEVICE`; CPU output is bit-identical before/after the
+  switch). Env-gated smoke test: deterministic headless run, 2x-width composite.
+- Makefile: `depth/demo`, `depth/smoke`.
+
+**Still remaining in P5**: the CAMERA — `crates/capture` (hand-rolled V4L2 ioctl
+FFI, YUYV) + the `DepthMachine` HFSM + the realtime `--camera` loop. That path
+reuses this predictor; it needs the target webcam to validate the pixel format
+(plan risk R4: many UVC cams are MJPEG-only). GPU/NPU device execution of the
+full model is wired (`--device`) but untested here (no GPU in this environment).
+
+**Not started**: P4 (train/eval from scratch — the other half of the goal), P6
+(NPU quant), P7 (DA3).
+
 ## Reference — the ZipDepth spec
 
 Everything below is verified against the two released checkpoints

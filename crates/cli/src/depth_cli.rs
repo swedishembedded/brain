@@ -121,7 +121,10 @@ fn run_image(args: &[String]) {
         std::process::exit(1);
     });
 
-    let gpu = Gpu::new_cpu(depth::net::PIPELINES);
+    // Gpu::new honours the process backend (`--device cpu|vulkan` / BRAIN_DEVICE),
+    // which main.rs::select_backend already parsed out of argv — so the same demo
+    // runs on the CPU JIT or a real GPU with no code change here.
+    let gpu = Gpu::new(depth::net::PIPELINES);
     let ps = import::load_into(&gpu, &o.weights, &cfg).unwrap_or_else(|e| {
         eprintln!("brain depth: loading {}: {e}", o.weights);
         std::process::exit(1);
