@@ -93,6 +93,10 @@ pub enum Act {
     /// ReLU. ZipDepth. Dispatched as `leaky_relu` with slope 0 — which IS relu in
     /// both directions — so it costs no kernel of its own.
     Relu,
+    /// Sigmoid. A conv unit whose output is a GATE rather than a feature map:
+    /// ZipDepth's `StripPoolingAttention` ends `Conv->BN->Sigmoid` and multiplies
+    /// the result into `x`. Never fuses (the fused kernel is SiLU-only).
+    Sigmoid,
 }
 
 /// Whether a conv unit carries its own BatchNorm.
@@ -461,10 +465,13 @@ impl Conv {
                 ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"),
                 ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"),
             )),
+            Act::Sigmoid => {
+                Some((ctx.ids.need(ctx.ids.sigmoid, "sigmoid"), ctx.ids.need(ctx.ids.sigmoid_bwd, "sigmoid_bwd")))
+            }
         }
     }
     /// `leaky_relu`'s uniform is `[total, slope]` with slope a bit-cast f32;
-    /// `silu`'s is `[total]`. Slope 0 makes leaky_relu exactly relu.
+    /// `silu`'s and `sigmoid`'s are `[total]`. Slope 0 makes leaky_relu exactly relu.
     fn act_params(&self, n: u32) -> Vec<u32> {
         match self.spec.act {
             Act::Relu => vec![n, f(0.0)],

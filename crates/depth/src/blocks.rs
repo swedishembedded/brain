@@ -458,3 +458,142 @@ impl MinimalMultiScale {
         ctx.gpu.submit(&[], &[s]);
     }
 }
+
+// ===========================================================================
+// StripPoolingAttention — orthogonal strip pooling into a depthwise gate
+// ===========================================================================
+
+/// `x * sigmoid(BN(dw1x1(mean_W(x) + mean_H(x))))` (`architecture.py:236-247`).
+///
+/// The two strips are `x.mean(dim=3, keepdim=True)` -> `[B,C,H,1]` and
+/// `x.mean(dim=2, keepdim=True)` -> `[B,C,1,W]`, and torch broadcasts their sum
+/// back to `[B,C,H,W]`. Both means are [`avgpool2d`] at a degenerate output size
+/// (`Ho=H,Wo=1` and `Ho=1,Wo=W`) — the reuse audit established these are
+/// bit-identical to the dedicated `strip_pool` kernels that were deleted.
+///
+/// The gate is a depthwise 1x1 conv: `groups == dim`, so each channel's gate is
+/// its own scalar weight — no cross-channel mixing at all. It is bias-free
+/// (`bias=False`) with the BN supplying the shift.
+///
+/// `x` reaches the output by THREE routes (the two strips and the final
+/// multiply), so its gradient is a three-way accumulation.
+pub struct StripPoolingAttention {
+    pub shape: Shape,
+    h_shape: Shape,
+    w_shape: Shape,
+    gate: Conv,
+    h_strip: DeviceBuffer,
+    w_strip: DeviceBuffer,
+    sum: DeviceBuffer,
+    out: DeviceBuffer,
+    d_gate: DeviceBuffer,
+    d_sum: DeviceBuffer,
+    d_h: DeviceBuffer,
+    d_w: DeviceBuffer,
+    d_xh: DeviceBuffer,
+    d_xw: DeviceBuffer,
+    acc: DeviceBuffer,
+}
+
+impl StripPoolingAttention {
+    pub fn new(ctx: &Ctx, prefix: &str, shape: Shape, train: bool) -> StripPoolingAttention {
+        let c = shape.c;
+        let h_shape = Shape { w: 1, ..shape };
+        let w_shape = Shape { h: 1, ..shape };
+        // nn.Sequential(Conv2d(dim,dim,1,groups=dim,bias=False), BatchNorm2d, Sigmoid)
+        // -> `.0.weight` and `.1.{weight,bias,running_*}`.
+        let gate = Conv::with_names(
+            ctx,
+            &format!("{prefix}.gate_conv"),
+            ConvNames::torch_seq(&format!("{prefix}.gate_conv"), 0, 1),
+            shape,
+            ConvSpec::depthwise(c, 1, 1, 0, Act::Sigmoid),
+            train,
+        );
+        assert_eq!(gate.out_shape, shape, "the gate must match x elementwise");
+        let n = shape.numel();
+        StripPoolingAttention {
+            shape,
+            h_shape,
+            w_shape,
+            gate,
+            h_strip: ctx.act(h_shape.numel()),
+            w_strip: ctx.act(w_shape.numel()),
+            sum: ctx.act(n),
+            out: ctx.act(n),
+            d_gate: ctx.act(n),
+            d_sum: ctx.act(n),
+            d_h: ctx.act(h_shape.numel()),
+            d_w: ctx.act(w_shape.numel()),
+            d_xh: ctx.act(n),
+            d_xw: ctx.act(n),
+            acc: ctx.act(n),
+        }
+    }
+
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.out
+    }
+    pub fn set_eval(&self, on: bool) {
+        self.gate.set_eval(on);
+    }
+    pub fn set_update_running(&self, on: bool) {
+        self.gate.set_update_running(on);
+    }
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        self.gate.param_list()
+    }
+
+    /// `avgpool2d`'s uniform, which is `[N, C, H, W, Ho, Wo]`.
+    fn pool_params(&self, o: Shape) -> Vec<u32> {
+        vec![self.shape.n, self.shape.c, self.shape.h, self.shape.w, o.h, o.w]
+    }
+}
+
+impl StripPoolingAttention {
+    pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
+        let n = self.shape.numel();
+        let pool = ctx.ids.need(ctx.ids.avgpool2d, "avgpool2d");
+        // mean over W -> [N,C,H,1]; mean over H -> [N,C,1,W].
+        let sh = ctx.step(pool, &[x_in, &self.h_strip], &self.pool_params(self.h_shape), self.h_shape.numel());
+        let sw = ctx.step(pool, &[x_in, &self.w_strip], &self.pool_params(self.w_shape), self.w_shape.numel());
+        ctx.gpu.submit(&[], &[sh, sw]);
+        // torch's broadcast of `h_strip + w_strip` back to the full map.
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.broadcast_add_hw, "broadcast_add_hw"),
+            &[&self.h_strip, &self.w_strip, &self.sum],
+            &[self.shape.n, self.shape.c, self.shape.h, self.shape.w],
+            n,
+        );
+        ctx.gpu.submit(&[], &[s]);
+        self.gate.forward(ctx, ps, &self.sum);
+        let s = ctx.step(ctx.ids.mul, &[x_in, self.gate.out(), &self.out], &[n], n);
+        ctx.gpu.submit(&[], &[s]);
+    }
+
+    pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
+        let n = self.shape.numel();
+        // `out = x * gate` -> d_gate = d_out * x, and x's FIRST route: d_out * gate.
+        let sg = ctx.step(ctx.ids.mul, &[d_out, x_in, &self.d_gate], &[n], n);
+        let sx = ctx.step(ctx.ids.mul, &[d_out, self.gate.out(), &self.acc], &[n], n);
+        ctx.gpu.submit(&[], &[sg, sx]);
+        self.gate.backward(ctx, ps, &self.sum, &self.d_gate, &self.d_sum);
+        // The adjoint of the broadcast: sum the map gradient over each broadcast axis.
+        let da = ctx.ids.need(ctx.ids.broadcast_add_hw_da, "broadcast_add_hw_da");
+        let p = |axis: u32| vec![self.shape.n, self.shape.c, self.shape.h, self.shape.w, axis];
+        let sh = ctx.step(da, &[&self.d_sum, &self.d_h], &p(0), self.h_shape.numel());
+        let sw = ctx.step(da, &[&self.d_sum, &self.d_w], &p(1), self.w_shape.numel());
+        ctx.gpu.submit(&[], &[sh, sw]);
+        // ...then back through each pool: x's second and third routes.
+        let pool_dx = ctx.ids.need(ctx.ids.avgpool2d_dx, "avgpool2d_dx");
+        let sh = ctx.step(pool_dx, &[&self.d_h, &self.d_xh], &self.pool_params(self.h_shape), n);
+        let sw = ctx.step(pool_dx, &[&self.d_w, &self.d_xw], &self.pool_params(self.w_shape), n);
+        ctx.gpu.submit(&[], &[sh, sw]);
+        let s = ctx.step(ctx.ids.add2, &[&self.d_xh, &self.d_xw, d_in], &[n], n);
+        ctx.gpu.submit(&[], &[s]);
+        let s = ctx.step(ctx.ids.add2, &[d_in, &self.acc, &self.d_xh], &[n], n);
+        ctx.gpu.submit(&[], &[s]);
+        let s = ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.d_xh, d_in], &[n, f(1.0)], n);
+        ctx.gpu.submit(&[], &[s]);
+    }
+}
