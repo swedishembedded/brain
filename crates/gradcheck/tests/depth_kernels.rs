@@ -6,7 +6,7 @@
 //!
 //! The dominant test technique here is ADJOINTNESS, not finite differences.
 //! Every `*_dx` kernel in this family is the adjoint of a LINEAR operator
-//! (resize, pool, shuffle, strip-mean, convex-combine), and for a linear `A` the
+//! (resize, pool, shuffle, broadcast, convex-combine), and for a linear `A` the
 //! backward is exactly `Aᵀ`. That gives an exact algebraic identity —
 //!     <A(x), y> == <x, Aᵀ(y)>   for ALL x, y
 //! — which is both cheaper and far sharper than FD: it holds to fp32 round-off
@@ -31,38 +31,35 @@
 use gpu_core::{f, Gpu};
 
 const KERNELS: &[(&str, &str)] = &[
-    ("conv2d", kernels::CONV2D),                                 // 0
-    ("conv2d_gd", kernels::CONV2D_GD),                           // 1
-    ("conv2d_gd_dx", kernels::CONV2D_GD_DX),                     // 2
-    ("conv2d_gd_dw", kernels::CONV2D_GD_DW),                     // 3
-    ("resize_bilinear", kernels::RESIZE_BILINEAR),               // 4
-    ("resize_bilinear_dx", kernels::RESIZE_BILINEAR_DX),         // 5
-    ("avgpool2d", kernels::AVGPOOL2D),                           // 6
-    ("avgpool2d_dx", kernels::AVGPOOL2D_DX),                     // 7
-    ("strip_pool", kernels::STRIP_POOL),                         // 8
-    ("strip_pool_dx", kernels::STRIP_POOL_DX),                   // 9
-    ("softmax_hw", kernels::SOFTMAX_HW),                         // 10
-    ("softmax_hw_dx", kernels::SOFTMAX_HW_DX),                   // 11
-    ("pixel_shuffle", kernels::PIXEL_SHUFFLE),                   // 12
-    ("pixel_shuffle_dx", kernels::PIXEL_SHUFFLE_DX),             // 13
-    ("convex_upsample", kernels::CONVEX_UPSAMPLE),               // 14
-    ("convex_upsample_dmask", kernels::CONVEX_UPSAMPLE_DMASK),   // 15
-    ("convex_upsample_dd", kernels::CONVEX_UPSAMPLE_DD),         // 16
-    ("sigmoid", kernels::SIGMOID),                               // 17
-    ("sigmoid_bwd", kernels::SIGMOID_BWD),                       // 18
-    ("masked_l1", kernels::MASKED_L1),                           // 19
-    ("masked_l1_grad", kernels::MASKED_L1_GRAD),                 // 20
-    ("broadcast_add_hw", kernels::BROADCAST_ADD_HW),             // 21
-    ("broadcast_add_hw_da", kernels::BROADCAST_ADD_HW_DA),       // 22
-    ("resize_nearest", kernels::RESIZE_NEAREST),                 // 23
-    ("resize_nearest_dx", kernels::RESIZE_NEAREST_DX),           // 24
-    ("softmax_k", kernels::SOFTMAX_K),                           // 25
-    ("softmax_k_dx", kernels::SOFTMAX_K_DX),                     // 26
-    ("weighted_gap", kernels::WEIGHTED_GAP),                     // 27
-    ("weighted_gap_dx", kernels::WEIGHTED_GAP_DX),               // 28
-    ("weighted_gap_dm", kernels::WEIGHTED_GAP_DM),               // 29
-    ("add_chan_bcast", kernels::ADD_CHAN_BCAST),                 // 30
-    ("add_chan_bcast_dv", kernels::ADD_CHAN_BCAST_DV),           // 31
+    ("conv2d", kernels::CONV2D),                              // 0
+    ("conv2d_gd", kernels::CONV2D_GD),                        // 1
+    ("conv2d_gd_dx", kernels::CONV2D_GD_DX),                  // 2
+    ("conv2d_gd_dw", kernels::CONV2D_GD_DW),                  // 3
+    ("resize_bilinear", kernels::RESIZE_BILINEAR),            // 4
+    ("resize_bilinear_dx", kernels::RESIZE_BILINEAR_DX),      // 5
+    ("avgpool2d", kernels::AVGPOOL2D),                        // 6
+    ("avgpool2d_dx", kernels::AVGPOOL2D_DX),                  // 7
+    ("pixel_shuffle", kernels::PIXEL_SHUFFLE),                // 8
+    ("pixel_shuffle_dx", kernels::PIXEL_SHUFFLE_DX),          // 9
+    ("convex_upsample", kernels::CONVEX_UPSAMPLE),            // 10
+    ("convex_upsample_dmask", kernels::CONVEX_UPSAMPLE_DMASK),// 11
+    ("convex_upsample_dd", kernels::CONVEX_UPSAMPLE_DD),      // 12
+    ("sigmoid", kernels::SIGMOID),                            // 13
+    ("sigmoid_bwd", kernels::SIGMOID_BWD),                    // 14
+    ("masked_l1", kernels::MASKED_L1),                        // 15
+    ("masked_l1_grad", kernels::MASKED_L1_GRAD),              // 16
+    ("broadcast_add_hw", kernels::BROADCAST_ADD_HW),          // 17
+    ("broadcast_add_hw_da", kernels::BROADCAST_ADD_HW_DA),    // 18
+    ("resize_nearest", kernels::RESIZE_NEAREST),              // 19
+    ("resize_nearest_dx", kernels::RESIZE_NEAREST_DX),        // 20
+    ("softmax_k", kernels::SOFTMAX_K),                        // 21
+    ("softmax_k_dx", kernels::SOFTMAX_K_DX),                  // 22
+    ("weighted_gap", kernels::WEIGHTED_GAP),                  // 23
+    ("weighted_gap_dx", kernels::WEIGHTED_GAP_DX),            // 24
+    ("weighted_gap_dm", kernels::WEIGHTED_GAP_DM),            // 25
+    ("add_chan_bcast", kernels::ADD_CHAN_BCAST),              // 26
+    ("add_chan_bcast_dv", kernels::ADD_CHAN_BCAST_DV),        // 27
+    ("upsample2", kernels::UPSAMPLE2),                        // 28 (pre-existing)
 ];
 
 fn lcg(state: &mut u64) -> f32 {
@@ -359,83 +356,6 @@ fn avgpool2d_global_is_the_mean_and_dx_is_adjoint() {
     }
 }
 
-// ---- strip_pool -----------------------------------------------------------------
-
-#[test]
-fn strip_pool_means_the_right_axis_and_dx_is_adjoint() {
-    let gpu = Gpu::new(KERNELS);
-    let (n, c, h, w) = (2u32, 3u32, 4u32, 5u32);
-    let x = randvec(31, (n * c * h * w) as usize);
-
-    // axis 0 -> [N,C,H,1]: mean over W.
-    let got = run2(&gpu, 8, &x, (n * c * h) as usize, &[n, c, h, w, 0]);
-    for nc in 0..(n * c) as usize {
-        for hi in 0..h as usize {
-            let row = &x[nc * (h * w) as usize + hi * w as usize..][..w as usize];
-            let want = row.iter().sum::<f32>() / w as f32;
-            let g = got[nc * h as usize + hi];
-            assert!((g - want).abs() < 1e-5, "strip_pool axis0 [{nc}][{hi}]: {g} vs {want}");
-        }
-    }
-    // axis 1 -> [N,C,1,W]: mean over H.
-    let got = run2(&gpu, 8, &x, (n * c * w) as usize, &[n, c, h, w, 1]);
-    for nc in 0..(n * c) as usize {
-        for wi in 0..w as usize {
-            let want: f32 = (0..h as usize)
-                .map(|hi| x[nc * (h * w) as usize + hi * w as usize + wi])
-                .sum::<f32>()
-                / h as f32;
-            let g = got[nc * w as usize + wi];
-            assert!((g - want).abs() < 1e-5, "strip_pool axis1 [{nc}][{wi}]: {g} vs {want}");
-        }
-    }
-
-    for &axis in &[0u32, 1u32] {
-        let keep = if axis == 0 { h } else { w };
-        let xn = (n * c * h * w) as usize;
-        let yn = (n * c * keep) as usize;
-        let y = randvec(32, yn);
-        let params = [n, c, h, w, axis];
-        let ax = run2(&gpu, 8, &x, yn, &params);
-        let aty = run2(&gpu, 9, &y, xn, &params);
-        assert_adjoint(&format!("strip_pool axis={axis}"), &ax, &y, &x, &aty);
-    }
-}
-
-// ---- softmax_hw (nonlinear -> FD) ------------------------------------------------
-
-#[test]
-fn softmax_hw_normalizes_and_its_backward_matches_fd() {
-    let gpu = Gpu::new(KERNELS);
-    let (n, hw) = (3u32, 16u32);
-    let x = randvec(41, (n * hw) as usize);
-    let y = run2(&gpu, 10, &x, (n * hw) as usize, &[n, hw]);
-    for i in 0..n as usize {
-        let s: f32 = y[i * hw as usize..(i + 1) * hw as usize].iter().sum();
-        assert!((s - 1.0).abs() < 1e-5, "image {i} sums to {s}, not 1");
-        assert!(y.iter().all(|v| *v >= 0.0), "softmax produced a negative");
-    }
-
-    // FD on L = <r, softmax(x)> for a fixed random r.
-    let r = randvec(42, (n * hw) as usize);
-    let analytic = run3(&gpu, 11, &y, &r, (n * hw) as usize, &[n, hw]);
-    let h = 1e-3f32;
-    for i in 0..(n * hw) as usize {
-        let mut xp = x.clone();
-        xp[i] += h;
-        let mut xm = x.clone();
-        xm[i] -= h;
-        let yp = run2(&gpu, 10, &xp, (n * hw) as usize, &[n, hw]);
-        let ym = run2(&gpu, 10, &xm, (n * hw) as usize, &[n, hw]);
-        let fd = (dot(&r, &yp) - dot(&r, &ym)) / (2.0 * h as f64);
-        let a = analytic[i] as f64;
-        assert!(
-            (a - fd).abs() < 4e-3 + 8e-2 * a.abs().max(fd.abs()),
-            "softmax_hw_dx[{i}]: analytic {a}, fd {fd}"
-        );
-    }
-}
-
 // ---- pixel_shuffle --------------------------------------------------------------
 
 #[test]
@@ -445,7 +365,7 @@ fn pixel_shuffle_is_a_permutation_and_dx_inverts_it() {
     let xn = (n * c * s * s * h * w) as usize;
     let x = randvec(51, xn);
     let params = [n, c, h, w, s];
-    let y = run2(&gpu, 12, &x, xn, &params);
+    let y = run2(&gpu, 8, &x, xn, &params);
 
     // A permutation preserves the multiset...
     let (mut a, mut b) = (x.clone(), y.clone());
@@ -453,12 +373,12 @@ fn pixel_shuffle_is_a_permutation_and_dx_inverts_it() {
     b.sort_by(|p, q| p.partial_cmp(q).unwrap());
     assert_eq!(a, b, "pixel_shuffle is not a permutation");
     // ...and its adjoint is its inverse, so the roundtrip is the identity.
-    let back = run2(&gpu, 13, &y, xn, &params);
+    let back = run2(&gpu, 9, &y, xn, &params);
     assert_eq!(back, x, "pixel_shuffle_dx(pixel_shuffle(x)) != x");
 
     // CRD layout check: y[0,0,0,0] must come from x[0, 0, 0, 0] and
     // y[0,0,0,1] (sub-pixel sw=1) from input channel 1.
-    let yv = run2(&gpu, 12, &(0..xn).map(|i| i as f32).collect::<Vec<_>>(), xn, &params);
+    let yv = run2(&gpu, 8, &(0..xn).map(|i| i as f32).collect::<Vec<_>>(), xn, &params);
     assert_eq!(yv[0], 0.0, "y[0,0,0,0] should be x[chan 0, 0, 0]");
     assert_eq!(yv[1], (h * w) as f32, "y[0,0,0,1] should be x[chan 1, 0, 0] (CRD)");
 }
@@ -489,7 +409,7 @@ fn convex_upsample_output_stays_within_the_neighbourhood() {
         }
     }
     let on = (n * h * s * w * s) as usize;
-    let y = run3(&gpu, 14, &mask, &d, on, &[n, h, w, s]);
+    let y = run3(&gpu, 10, &mask, &d, on, &[n, h, w, s]);
 
     for ho in 0..(h * s) as usize {
         for wo in 0..(w * s) as usize {
@@ -526,11 +446,11 @@ fn convex_upsample_backward_is_adjoint_in_both_inputs() {
     let dy = randvec(73, on);
     let params = [n, h, w, s];
 
-    let ax = run3(&gpu, 14, &mask, &d, on, &params);
+    let ax = run3(&gpu, 10, &mask, &d, on, &params);
     // Bilinear in (mask, d): adjoint holds separately in each argument.
-    let dmask = run3(&gpu, 15, &dy, &d, mn, &params);
+    let dmask = run3(&gpu, 11, &dy, &d, mn, &params);
     assert_adjoint("convex_upsample (wrt mask)", &ax, &dy, &mask, &dmask);
-    let dd = run3(&gpu, 16, &dy, &mask, dn, &params);
+    let dd = run3(&gpu, 12, &dy, &mask, dn, &params);
     assert_adjoint("convex_upsample (wrt d)", &ax, &dy, &d, &dd);
 }
 
@@ -541,13 +461,13 @@ fn sigmoid_and_its_backward() {
     let gpu = Gpu::new(KERNELS);
     let x: Vec<f32> = (-40..=40).map(|i| i as f32 / 10.0).collect();
     let n = x.len();
-    let y = run2(&gpu, 17, &x, n, &[n as u32]);
+    let y = run2(&gpu, 13, &x, n, &[n as u32]);
     for i in 0..n {
         let want = 1.0 / (1.0 + (-x[i]).exp());
         assert!((y[i] - want).abs() < 1e-6, "sigmoid({}) = {} want {want}", x[i], y[i]);
     }
     let dy = vec![1.0f32; n];
-    let dx = run3(&gpu, 18, &x, &dy, n, &[n as u32]);
+    let dx = run3(&gpu, 14, &x, &dy, n, &[n as u32]);
     for i in 0..n {
         let s = 1.0 / (1.0 + (-x[i]).exp());
         let want = s * (1.0 - s);
@@ -563,12 +483,12 @@ fn masked_l1_applies_the_mask_and_its_grad_is_the_signed_mask() {
     let mask = vec![1.0f32, 1.0, 0.0, 1.0, 1.0]; // element 2 masked OUT
     let n = pred.len();
 
-    let out = run4(&gpu, 19, &pred, &tgt, &mask, n, &[n as u32]);
+    let out = run4(&gpu, 15, &pred, &tgt, &mask, n, &[n as u32]);
     assert_eq!(out, vec![0.5, 2.0, 0.0, 0.0, 0.0], "masked element must contribute 0");
 
     // scale is a bit-cast f32 in the uniform (the host's 1/(sum(mask)+eps)).
     let scale = 0.25f32;
-    let d = run4(&gpu, 20, &pred, &tgt, &mask, n, &[n as u32, f(scale)]);
+    let d = run4(&gpu, 16, &pred, &tgt, &mask, n, &[n as u32, f(scale)]);
     // sign(pred-tgt)*mask*scale; sign(0)==0 -> elements 3,4 are 0.
     assert_eq!(d, vec![-0.25, 0.25, 0.0, 0.0, 0.0], "got {d:?}");
 }
@@ -583,7 +503,7 @@ fn broadcast_add_hw_broadcasts_two_strips_and_its_adjoints_are_the_axis_sums() {
     let b = randvec(82, (n * c * w) as usize); // [N,C,1,W]
     let yn = (n * c * h * w) as usize;
     let params = [n, c, h, w];
-    let y = run3(&gpu, 21, &a, &b, yn, &params);
+    let y = run3(&gpu, 17, &a, &b, yn, &params);
     for nc in 0..(n * c) as usize {
         for hi in 0..h as usize {
             for wi in 0..w as usize {
@@ -600,12 +520,12 @@ fn broadcast_add_hw_broadcasts_two_strips_and_its_adjoints_are_the_axis_sums() {
     let zero_a = vec![0.0f32; (n * c * h) as usize];
     let zero_b = vec![0.0f32; (n * c * w) as usize];
 
-    let ya = run3(&gpu, 21, &a, &zero_b, yn, &params); // broadcast(a) alone
-    let da = run2(&gpu, 22, &dy, (n * c * h) as usize, &[n, c, h, w, 0]);
+    let ya = run3(&gpu, 17, &a, &zero_b, yn, &params); // broadcast(a) alone
+    let da = run2(&gpu, 18, &dy, (n * c * h) as usize, &[n, c, h, w, 0]);
     assert_adjoint("broadcast_add_hw (wrt a)", &ya, &dy, &a, &da);
 
-    let yb = run3(&gpu, 21, &zero_a, &b, yn, &params); // broadcast(b) alone
-    let db = run2(&gpu, 22, &dy, (n * c * w) as usize, &[n, c, h, w, 1]);
+    let yb = run3(&gpu, 17, &zero_a, &b, yn, &params); // broadcast(b) alone
+    let db = run2(&gpu, 18, &dy, (n * c * w) as usize, &[n, c, h, w, 1]);
     assert_adjoint("broadcast_add_hw (wrt b)", &yb, &dy, &b, &db);
 
     // ...and the two contributions really do superpose into the full forward.
@@ -621,7 +541,7 @@ fn resize_nearest_selects_the_floor_tap_and_dx_is_adjoint() {
     let gpu = Gpu::new(KERNELS);
     // 2x up of a 2x2 must replicate each pixel into a 2x2 block.
     let x = vec![1.0f32, 2.0, 3.0, 4.0];
-    let y = run2(&gpu, 23, &x, 16, &[1, 1, 2, 2, 4, 4]);
+    let y = run2(&gpu, 19, &x, 16, &[1, 1, 2, 2, 4, 4]);
     assert_eq!(
         y,
         vec![1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0, 4.0, 4.0, 3.0, 3.0, 4.0, 4.0]
@@ -634,8 +554,8 @@ fn resize_nearest_selects_the_floor_tap_and_dx_is_adjoint() {
         let xx = randvec(91, xn);
         let yy = randvec(92, yn);
         let params = [n, c, h, w, ho, wo];
-        let ax = run2(&gpu, 23, &xx, yn, &params);
-        let aty = run2(&gpu, 24, &yy, xn, &params);
+        let ax = run2(&gpu, 19, &xx, yn, &params);
+        let aty = run2(&gpu, 20, &yy, xn, &params);
         assert_adjoint(&format!("resize_nearest {h}x{w}->{ho}x{wo}"), &ax, &yy, &xx, &aty);
     }
 }
@@ -647,7 +567,7 @@ fn softmax_k_normalizes_the_strided_axis_and_backward_matches_fd() {
     let gpu = Gpu::new(KERNELS);
     let (n, k, m) = (2u32, 9u32, 6u32); // K=9 like FastConvexUpsample
     let x = randvec(101, (n * k * m) as usize);
-    let y = run2(&gpu, 25, &x, (n * k * m) as usize, &[n, k, m]);
+    let y = run2(&gpu, 21, &x, (n * k * m) as usize, &[n, k, m]);
     // Each (n, m) group sums to 1 over the STRIDED k axis.
     for ni in 0..n as usize {
         for mi in 0..m as usize {
@@ -659,15 +579,15 @@ fn softmax_k_normalizes_the_strided_axis_and_backward_matches_fd() {
     }
     // FD on L = <r, softmax_k(x)>.
     let r = randvec(102, (n * k * m) as usize);
-    let analytic = run3(&gpu, 26, &y, &r, (n * k * m) as usize, &[n, k, m]);
+    let analytic = run3(&gpu, 22, &y, &r, (n * k * m) as usize, &[n, k, m]);
     let h = 1e-3f32;
     for i in 0..(n * k * m) as usize {
         let mut xp = x.clone();
         xp[i] += h;
         let mut xm = x.clone();
         xm[i] -= h;
-        let yp = run2(&gpu, 25, &xp, (n * k * m) as usize, &[n, k, m]);
-        let ym = run2(&gpu, 25, &xm, (n * k * m) as usize, &[n, k, m]);
+        let yp = run2(&gpu, 21, &xp, (n * k * m) as usize, &[n, k, m]);
+        let ym = run2(&gpu, 21, &xm, (n * k * m) as usize, &[n, k, m]);
         let fd = (dot(&r, &yp) - dot(&r, &ym)) / (2.0 * h as f64);
         let a = analytic[i] as f64;
         assert!(
@@ -686,7 +606,7 @@ fn weighted_gap_contracts_against_the_weight_map_and_both_adjoints_hold() {
     let x = randvec(111, (n * c * hw) as usize);
     let m = randvec(112, (n * hw) as usize);
     let params = [n, c, hw];
-    let y = run3(&gpu, 27, &x, &m, (n * c) as usize, &params);
+    let y = run3(&gpu, 23, &x, &m, (n * c) as usize, &params);
     for ni in 0..n as usize {
         for ci in 0..c as usize {
             let want: f32 = (0..hw as usize)
@@ -699,7 +619,7 @@ fn weighted_gap_contracts_against_the_weight_map_and_both_adjoints_hold() {
     // Uniform weights 1/HW must reduce it to a plain global average — the
     // relationship that makes "learned weighted GAP" the right description.
     let uni = vec![1.0f32 / hw as f32; (n * hw) as usize];
-    let yu = run3(&gpu, 27, &x, &uni, (n * c) as usize, &params);
+    let yu = run3(&gpu, 23, &x, &uni, (n * c) as usize, &params);
     for nc in 0..(n * c) as usize {
         let want: f32 = x[nc * hw as usize..(nc + 1) * hw as usize].iter().sum::<f32>() / hw as f32;
         assert!((yu[nc] - want).abs() < 1e-5, "uniform weights != global mean");
@@ -707,9 +627,9 @@ fn weighted_gap_contracts_against_the_weight_map_and_both_adjoints_hold() {
 
     // Bilinear -> adjoint in each argument.
     let dy = randvec(113, (n * c) as usize);
-    let dx = run3(&gpu, 28, &dy, &m, (n * c * hw) as usize, &params);
+    let dx = run3(&gpu, 24, &dy, &m, (n * c * hw) as usize, &params);
     assert_adjoint("weighted_gap (wrt x)", &y, &dy, &x, &dx);
-    let dm = run3(&gpu, 29, &dy, &x, (n * hw) as usize, &params);
+    let dm = run3(&gpu, 25, &dy, &x, (n * hw) as usize, &params);
     assert_adjoint("weighted_gap (wrt m)", &y, &dy, &m, &dm);
 }
 
@@ -723,7 +643,7 @@ fn add_chan_bcast_is_per_image_and_its_adjoint_is_the_spatial_sum() {
     let x = vec![0.0f32; (n * c * hw) as usize];
     let v = randvec(121, (n * c) as usize);
     let params = [n, c, hw];
-    let y = run3(&gpu, 30, &x, &v, (n * c * hw) as usize, &params);
+    let y = run3(&gpu, 26, &x, &v, (n * c * hw) as usize, &params);
     for nc in 0..(n * c) as usize {
         for i in 0..hw as usize {
             assert_eq!(y[nc * hw as usize + i], v[nc], "channel scalar not broadcast");
@@ -736,14 +656,39 @@ fn add_chan_bcast_is_per_image_and_its_adjoint_is_the_spatial_sum() {
     );
 
     let xr = randvec(122, (n * c * hw) as usize);
-    let yr = run3(&gpu, 30, &xr, &v, (n * c * hw) as usize, &params);
+    let yr = run3(&gpu, 26, &xr, &v, (n * c * hw) as usize, &params);
     let dy = randvec(123, (n * c * hw) as usize);
-    let dv = run2(&gpu, 31, &dy, (n * c) as usize, &params);
+    let dv = run2(&gpu, 27, &dy, (n * c) as usize, &params);
     // Adjoint wrt v: <A(v), dy> == <v, A^T(dy)> with x held at 0.
-    let y0 = run3(&gpu, 30, &x, &v, (n * c * hw) as usize, &params);
+    let y0 = run3(&gpu, 26, &x, &v, (n * c * hw) as usize, &params);
     assert_adjoint("add_chan_bcast (wrt v)", &y0, &dy, &v, &dv);
     // wrt x it is the identity, so the forward is exactly x + broadcast(v).
     for i in 0..(n * c * hw) as usize {
         assert!((yr[i] - (xr[i] + y0[i])).abs() < 1e-6);
+    }
+}
+
+// ---- deliberate duplication, pinned ------------------------------------------------
+
+/// `resize_nearest` SUBSUMES the pre-existing `upsample2` (which is 2x-hardcoded),
+/// so on the face of it one of them is redundant. Both are kept, deliberately:
+/// `backend-cpu` binds a vectorized fast path for `upsample2` BY NAME
+/// (`fast_ops::upsample2`, lib.rs:418-425), and yolo's neck plus wm-diamond sit on
+/// that hot path. Routing them through the generic kernel would silently cost that.
+///
+/// So the duplication is earned — but it has to stay HONEST, i.e. the two must not
+/// drift apart. This pins that they agree exactly at 2x. (Contrast `strip_pool` and
+/// `softmax_hw`, which were written for this feature and then deleted once they were
+/// shown to be `avgpool2d` and `softmax_k` with degenerate arguments — no fast path,
+/// no reason to exist.)
+#[test]
+fn resize_nearest_agrees_with_the_fast_pathed_upsample2() {
+    let gpu = Gpu::new(KERNELS);
+    for &(n, c, h, w) in &[(2u32, 3u32, 4u32, 5u32), (1, 1, 1, 1), (1, 8, 7, 3)] {
+        let x = randvec(131, (n * c * h * w) as usize);
+        let on = (n * c * h * 2 * w * 2) as usize;
+        let up = run2(&gpu, 28, &x, on, &[n, c, h, w]);
+        let rn = run2(&gpu, 19, &x, on, &[n, c, h, w, h * 2, w * 2]);
+        assert_eq!(up, rn, "upsample2 and resize_nearest(2x) disagree at {n}x{c}x{h}x{w}");
     }
 }

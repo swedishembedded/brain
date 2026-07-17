@@ -400,18 +400,10 @@ pub const SILU_BWD_DB: &str = include_str!("../wgsl/silu_bwd_db.wgsl");
 pub const SILU_MUL: &str = include_str!("../wgsl/silu_mul.wgsl");
 /// `wgsl/snake_beta.wgsl`
 pub const SNAKE_BETA: &str = include_str!("../wgsl/snake_beta.wgsl");
-/// `wgsl/softmax_hw.wgsl`
-pub const SOFTMAX_HW: &str = include_str!("../wgsl/softmax_hw.wgsl");
-/// `wgsl/softmax_hw_dx.wgsl`
-pub const SOFTMAX_HW_DX: &str = include_str!("../wgsl/softmax_hw_dx.wgsl");
 /// `wgsl/softmax_k.wgsl`
 pub const SOFTMAX_K: &str = include_str!("../wgsl/softmax_k.wgsl");
 /// `wgsl/softmax_k_dx.wgsl`
 pub const SOFTMAX_K_DX: &str = include_str!("../wgsl/softmax_k_dx.wgsl");
-/// `wgsl/strip_pool.wgsl`
-pub const STRIP_POOL: &str = include_str!("../wgsl/strip_pool.wgsl");
-/// `wgsl/strip_pool_dx.wgsl`
-pub const STRIP_POOL_DX: &str = include_str!("../wgsl/strip_pool_dx.wgsl");
 /// `wgsl/tanh_act.wgsl`
 pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
 /// `wgsl/tanh_act_bwd.wgsl`
@@ -630,12 +622,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("silu_bwd_db", SILU_BWD_DB),
     ("silu_mul", SILU_MUL),
     ("snake_beta", SNAKE_BETA),
-    ("softmax_hw", SOFTMAX_HW),
-    ("softmax_hw_dx", SOFTMAX_HW_DX),
     ("softmax_k", SOFTMAX_K),
     ("softmax_k_dx", SOFTMAX_K_DX),
-    ("strip_pool", STRIP_POOL),
-    ("strip_pool_dx", STRIP_POOL_DX),
     ("tanh_act", TANH_ACT),
     ("tanh_act_bwd", TANH_ACT_BWD),
     ("topk_mask", TOPK_MASK),
