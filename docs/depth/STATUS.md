@@ -66,22 +66,6 @@ from the specs in `docs/depth/specs/`.
   `convex_upsample{,_dmask,_dd}`, `sigmoid{,_bwd}`, `masked_l1{,_grad}`.
   **Everything ZipDepth's default path executes now exists.**
 
-**Reuse audit — 4 kernels written, then deleted as redundant.** Asked whether the
-new kernels duplicated existing ones, the answer was partly *yes*, and it was
-settled by test rather than by reading:
-  - `strip_pool{,_dx}` is **bit-identical** to `avgpool2d{,_dx}` with a degenerate
-    axis (`Ho=H,Wo=1` = mean over W; `Ho=1,Wo=W` = mean over H). Deleted.
-  - `softmax_hw{,_dx}` is **bit-identical** to `softmax_k{,_dx}` at `M=1`. Deleted.
-  - `resize_nearest` also subsumes the pre-existing `upsample2` — but `upsample2`
-    has a **name-bound CPU fast path** (`fast_ops::upsample2`, backend-cpu:418-425)
-    that yolo's neck and wm-diamond sit on, so both are kept and a test pins that
-    they agree at 2×. That duplication is earned; the other two were not.
-
-**Reused rather than rewritten**: `maxpool5` *is* LightweightSPPF exactly (K/pad
-are params); `bias_add` for the head; `scale_chan`/`mul`/`add2`/`concat2` for the
-attention gates and residuals; `leaky_relu(0)` for ReLU; `mse_value_w`'s
-weighted-loss shape as the precedent for `masked_l1`; the `gradnorm_sq`
-host-reduce split for all global reductions; `crates/vision` for every conv block.
 - **ReLU cost nothing**: `leaky_relu(slope=0)` is exactly ReLU in both
   directions. ConvTranspose2d deferred (DPT needs it, ZipDepth doesn't).
 - Tested by **adjointness**, not FD: every `*_dx` here is the adjoint of a linear
@@ -98,6 +82,33 @@ host-reduce split for all global reductions; `crates/vision` for every conv bloc
 - Fixed a latent **SIGPIPE race in `scripts/kernels-regen.sh`**
   (`grep | head -1` under `set -o pipefail`): it worked at 180/200 kernels and
   began aborting the regen at 211, reading as "nothing happened".
+
+### Reuse audit — 4 kernels written, then deleted as redundant
+
+Asked whether the new kernels duplicated ones brain already had, the answer was
+partly **yes**, and it was settled by test rather than by reading:
+
+- `strip_pool{,_dx}` is **bit-identical** to `avgpool2d{,_dx}` with a degenerate
+  axis (`Ho=H,Wo=1` = mean over W; `Ho=1,Wo=W` = mean over H), backward included.
+  **Deleted.**
+- `softmax_hw{,_dx}` is **bit-identical** to `softmax_k{,_dx}` at `M=1` — a stride
+  of 1 over `K=HW` *is* a contiguous softmax over the map. **Deleted.**
+- `resize_nearest` also subsumes the pre-existing `upsample2` — but `upsample2`
+  has a **name-bound vectorized CPU path** (`fast_ops::upsample2`,
+  backend-cpu:418-425) that yolo's neck and wm-diamond run on, so both are kept
+  and a test pins that they agree exactly at 2×. **That duplication is earned;
+  the other two were not.**
+
+**Reused rather than rewritten**: `maxpool5` *is* LightweightSPPF exactly (K/pad
+are params); `bias_add` for the head; `scale_chan`/`mul`/`add2`/`concat2` for the
+attention gates and residuals; `leaky_relu(0)` for ReLU; `mse_value_w`'s
+weighted-loss shape as the precedent for `masked_l1`; the `gradnorm_sq`
+host-reduce split for every global reduction; `crates/vision` for every conv
+block; `model::Model` + the blanket `CheckModel` impl for P3's gradcheck.
+
+**The standing rule this establishes:** before adding a kernel, check whether an
+existing one covers it under degenerate arguments — and if you keep both, pin
+their equivalence with a test so the duplication cannot drift.
 
 ## Decisions
 
