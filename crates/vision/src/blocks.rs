@@ -604,8 +604,14 @@ impl Conv {
 
         if self.spec.norm == Norm::None {
             // Raw conv -> act. No stats, no host interleave, no mode distinction:
-            // without BN the two modes compute the same function.
-            let s_conv = self.conv_step(ctx, ps, x_in, &self.conv_out);
+            // without BN the two modes compute the same function. The
+            // calibration/fake-quant tap still fires here — many of ZipDepth's
+            // DECODER convs (the fusion projections, the head, SE, GCB's raw
+            // convs) are Norm::None, and those are exactly the layers QuartDepth
+            // flags as quant-sensitive, so skipping them would blind the report.
+            let tapped = self.apply_tap(ctx, x_in);
+            let src = tapped.as_ref().unwrap_or(x_in);
+            let s_conv = self.conv_step(ctx, ps, src, &self.conv_out);
             ctx.gpu.submit(&[], &[s_conv]);
             let s_act = match self.act_pair(ctx) {
                 Some((fwd, _)) => ctx.step(fwd, &[&self.conv_out, &self.act], &self.act_params(on), on),
@@ -727,6 +733,27 @@ impl Conv {
     /// with `MemFlags::trusted()` (no bounds checks), SEGFAULTS rather than
     /// erroring. The per-channel packing is still cached across frames via
     /// `sb_ready`, which now gates `mv`+`gb` instead.
+    /// Read the conv input to the host, let an installed [`crate::ActTap`] observe
+    /// (and optionally rewrite in place — quant->dequant) it keyed by `self.prefix`,
+    /// and return a device copy of the tapped bytes. `None` when no tap is
+    /// installed (every normal inference), so the caller convolves `x_in` directly
+    /// and pays zero cost. Fires ONCE per conv at the conv's input, the same point
+    /// the exported ONNX graph inserts its Q/DQ pair — every conv variant routes
+    /// through here so the calibrator sees a complete, consistent set of tensors.
+    fn apply_tap(&self, ctx: &Ctx, x_in: &DeviceBuffer) -> Option<DeviceBuffer> {
+        let tap = ctx.tap?;
+        let in_n = self.in_shape.numel() as usize;
+        let mut h = ctx.gpu.read(x_in, in_n);
+        tap.tap(&self.prefix, &mut h);
+        if self.q_in.borrow().is_none() {
+            *self.q_in.borrow_mut() = Some(ctx.gpu.storage(in_n as u64));
+        }
+        let q = self.q_in.borrow();
+        let qbuf = q.as_ref().unwrap().clone();
+        ctx.gpu.write(&qbuf, bytemuck::cast_slice(&h));
+        Some(qbuf)
+    }
+
     fn forward_eval_unfused(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
         if self.spec.norm == Norm::None {
             // Handled by the shared raw-conv path in `forward`.
@@ -738,21 +765,7 @@ impl Conv {
             self.sb_ready.set(true);
         }
         let on = self.out_shape.numel();
-        // The calibration / fake-quant tap lives on the eval path, and must fire
-        // exactly once per conv at the same point as it does when fused — the NPU
-        // calibrator keys its scale map on `self.prefix`.
-        let tapped: Option<DeviceBuffer> = ctx.tap.map(|tap| {
-            let in_n = self.in_shape.numel() as usize;
-            let mut h = ctx.gpu.read(x_in, in_n);
-            tap.tap(&self.prefix, &mut h);
-            if self.q_in.borrow().is_none() {
-                *self.q_in.borrow_mut() = Some(ctx.gpu.storage(in_n as u64));
-            }
-            let q = self.q_in.borrow();
-            let qbuf = q.as_ref().unwrap().clone();
-            ctx.gpu.write(&qbuf, bytemuck::cast_slice(&h));
-            qbuf
-        });
+        let tapped = self.apply_tap(ctx, x_in);
         let src = tapped.as_ref().unwrap_or(x_in);
 
         let s_conv = self.conv_step(ctx, ps, src, &self.conv_out);

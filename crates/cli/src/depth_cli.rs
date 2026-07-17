@@ -29,6 +29,7 @@ pub fn run_depth(args: &[String]) {
     }
     match args.first().map(|s| s.as_str()) {
         Some("--image") | Some("image") => run_image(args),
+        Some("calib") => run_calib(&args[1..]),
         Some("--help") | Some("-h") | None => print!("{HELP}"),
         Some(other) => {
             eprintln!("brain depth: unknown option '{other}'\n");
@@ -409,4 +410,132 @@ fn run_camera(args: &[String]) {
 fn run_camera(_args: &[String]) {
     eprintln!("brain depth --camera is Linux/V4L2 only");
     std::process::exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// `brain depth calib --report` — per-layer activation outlier ratios (the INT8
+// decision data, measured with NO NPU).
+// ---------------------------------------------------------------------------
+
+fn run_calib(args: &[String]) {
+    let mut weights = String::new();
+    let mut images_dir = String::new();
+    let mut variant = "base".to_string();
+    let mut max_n = 100usize;
+    let mut top = 20usize;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].clone();
+        let mut val = |i: &mut usize| {
+            *i += 1;
+            args.get(*i).cloned().unwrap_or_default()
+        };
+        match a.as_str() {
+            "--report" => {}
+            "--weights" => weights = val(&mut i),
+            "--images" => images_dir = val(&mut i),
+            "--variant" => variant = val(&mut i),
+            "--max" => max_n = val(&mut i).parse().unwrap_or(100),
+            "--top" => top = val(&mut i).parse().unwrap_or(20),
+            _ => {}
+        }
+        i += 1;
+    }
+    if weights.is_empty() || images_dir.is_empty() {
+        eprintln!("usage: brain depth calib --report --weights <pth> --images <dir-of-ppm> [--max N] [--variant base|npu]");
+        std::process::exit(2);
+    }
+    let cfg = match variant.as_str() {
+        "npu" => ZipConfig { upsample_unfold: false, ..ZipConfig::base() },
+        _ => ZipConfig::base(),
+    };
+
+    // Load calibration images (any PPM in the dir), letterbox each to the model
+    // input as CHW.
+    let imgs = load_calib_chw(&images_dir, cfg.input, max_n);
+    if imgs.is_empty() {
+        eprintln!("brain depth: no PPM images found under {images_dir}");
+        std::process::exit(1);
+    }
+    eprintln!("calibrating on {} images at {}x{}...", imgs.len(), cfg.input, cfg.input);
+
+    let gpu = Gpu::new(depth::net::PIPELINES);
+    let ps = import::load_into(&gpu, &weights, &cfg).unwrap_or_else(|e| {
+        eprintln!("brain depth: loading {weights}: {e}");
+        std::process::exit(1);
+    });
+    let stats = depth::collect_activation_stats(&gpu, &cfg, &ps, &imgs);
+    let report = stats.report();
+
+    // Encoder vs decoder summary — the QuartDepth question.
+    let mean = |it: &[&depth::LayerReport]| -> f32 {
+        if it.is_empty() {
+            0.0
+        } else {
+            it.iter().map(|r| r.outlier_ratio).sum::<f32>() / it.len() as f32
+        }
+    };
+    let enc: Vec<&depth::LayerReport> = report.iter().filter(|r| r.is_encoder()).collect();
+    let dec: Vec<&depth::LayerReport> = report.iter().filter(|r| !r.is_encoder()).collect();
+
+    println!("\nper-layer activation outlier_ratio = absmax / p99.99 (higher = more INT8-hostile)\n");
+    println!("{:<48} {:>10} {:>10} {:>8}", "layer", "absmax", "p99.99", "ratio");
+    for r in report.iter().take(top) {
+        println!("{:<48} {:>10.4} {:>10.4} {:>8.2}", r.name, r.absmax, r.p9999, r.outlier_ratio);
+    }
+    println!("\nENCODER mean outlier_ratio = {:.2}  ({} layers)", mean(&enc), enc.len());
+    println!("DECODER mean outlier_ratio = {:.2}  ({} layers)", mean(&dec), dec.len());
+    let verdict = if mean(&dec) > 1.5 * mean(&enc).max(1e-3) {
+        "decoder tail DOMINATES -> QuartDepth holds; an FP decoder is likely worth it"
+    } else {
+        "decoder and encoder tails comparable -> a uniform INT8 policy may suffice"
+    };
+    println!("VERDICT: {verdict}");
+}
+
+/// Load up to `max_n` PPM images from `dir`, letterboxed to `[3,size,size]` CHW.
+fn load_calib_chw(dir: &str, size: u32, max_n: usize) -> Vec<Vec<f32>> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    let mut paths: Vec<std::path::PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    paths.sort();
+    for p in paths {
+        if out.len() >= max_n {
+            break;
+        }
+        let Ok(bytes) = std::fs::read(&p) else { continue };
+        if !bytes.starts_with(b"P6") {
+            continue;
+        }
+        let Ok((px, w, h)) = events::ppm::decode_p6(&bytes) else { continue };
+        let hwc: Vec<f32> = px.iter().map(|&b| b as f32 / 255.0).collect();
+        out.push(letterbox_chw(&hwc, w, h, size));
+    }
+    out
+}
+
+/// Aspect-preserving letterbox of an HWC `[0,1]` image into a `[3,size,size]` CHW
+/// tensor, grey pad — the same transform the predictor uses at inference.
+fn letterbox_chw(hwc: &[f32], w0: u32, h0: u32, size: u32) -> Vec<f32> {
+    let scale = (size as f32 / w0 as f32).min(size as f32 / h0 as f32);
+    let new_w = (w0 as f32 * scale).round() as usize;
+    let new_h = (h0 as f32 * scale).round() as usize;
+    let pad_x = ((size as f32 - new_w as f32) * 0.5) as usize;
+    let pad_y = ((size as f32 - new_h as f32) * 0.5) as usize;
+    let sz = size as usize;
+    let inv = 1.0 / scale;
+    let mut chw = vec![0.5f32; 3 * sz * sz];
+    for yi in 0..new_h {
+        let sy = (((yi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, h0 as f32 - 1.0)) as usize;
+        for xi in 0..new_w {
+            let sx = (((xi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, w0 as f32 - 1.0)) as usize;
+            let sbase = (sy * w0 as usize + sx) * 3;
+            for c in 0..3 {
+                chw[c * sz * sz + (yi + pad_y) * sz + (xi + pad_x)] = hwc[sbase + c];
+            }
+        }
+    }
+    chw
 }
