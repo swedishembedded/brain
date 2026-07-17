@@ -833,3 +833,816 @@ impl GlobalContextBlock {
         ctx.gpu.submit(&[], &[s]);
     }
 }
+
+// ===========================================================================
+// LightweightSPPF — IS vision::SPPF, at a different width/act/name convention
+// ===========================================================================
+
+/// ZipDepth's `LightweightSPPF` (`architecture.py:322-337`).
+///
+/// Not a new block: it is [`vision::SPPF`] exactly — cv1 narrows, three K=5/pad=2
+/// max-pools chain off it, the 4-way concat feeds cv2. Only three things differ
+/// from Ultralytics', and all three are configuration:
+///   * the pooled width is `c1/4` (from the INPUT channels) rather than `c_out/2`
+///     (from the output) — the reason `SppfSpec` states `hidden` instead of
+///     deriving it,
+///   * ReLU rather than SiLU,
+///   * torch `ConvBN` names (`cv1.bn.weight`) rather than brain's (`cv1.bn.gamma`).
+///
+/// The pool chain, the concat fold and the whole backward are shared verbatim.
+pub fn lightweight_sppf(ctx: &Ctx, prefix: &str, in_shape: Shape, c_out: u32, train: bool) -> vision::SPPF {
+    let spec = vision::SppfSpec { hidden: in_shape.c / 4, c_out, act: Act::Relu };
+    vision::SPPF::with_spec(ctx, prefix, in_shape, spec, vision::NameStyle::TorchConvBn, train)
+}
+
+// ===========================================================================
+// MinimalCrossScale — bidirectional 0.3-weighted exchange between two scales
+// ===========================================================================
+
+/// `(x_high + 0.3*up(l2h(x_low)), x_low + 0.3*pool(h2l(x_high)))`
+/// (`architecture.py:302-315`).
+///
+/// The only block with TWO inputs AND TWO outputs. Both projections are bias-free
+/// 1x1 grouped convs with no BN and no activation; the group counts come from the
+/// reference's own `_pick_groups(in, out, 4)` rule.
+///
+/// ⚠️ The order is PROJECT-then-RESAMPLE here, and RESAMPLE-then-PROJECT in
+/// [`UltraLightFusion`]. Both are 1x1 convs, so the two orders differ only in
+/// arithmetic cost — but they are not the same graph, and the checkpoint's shapes
+/// pin which is which.
+///
+/// The `* 0.3` fuses into `axpy` (`out += s*in`), so the residual costs one
+/// dispatch and no new kernel. The low->high resample is NEAREST, the high->low is
+/// `adaptive_avg_pool2d` — i.e. [`avgpool2d`], whose adaptive rule this is.
+pub struct MinimalCrossScale {
+    pub high: Shape,
+    pub low: Shape,
+    l2h: Conv,
+    h2l: Conv,
+    up: DeviceBuffer,
+    down: DeviceBuffer,
+    out_high: DeviceBuffer,
+    out_low: DeviceBuffer,
+    d_up: DeviceBuffer,
+    d_down: DeviceBuffer,
+    d_l2h: DeviceBuffer,
+    d_h2l: DeviceBuffer,
+    acc_h: DeviceBuffer,
+    acc_l: DeviceBuffer,
+}
+
+/// The reference's residual weight (`architecture.py:314`).
+const CROSS_SCALE_W: f32 = 0.3;
+
+impl MinimalCrossScale {
+    pub fn new(ctx: &Ctx, prefix: &str, high: Shape, low: Shape, train: bool) -> MinimalCrossScale {
+        let raw = |cout: u32, groups: u32| {
+            ConvSpec::relu(cout, 1, 1, 0).with_norm(Norm::None).with_act(Act::None).with_groups(groups)
+        };
+        let names = |n: &str| ConvNames {
+            bias: String::new(),
+            weight: format!("{prefix}.{n}.weight"),
+            gamma: String::new(),
+            beta: String::new(),
+            run_mean: String::new(),
+            run_var: String::new(),
+        };
+        // _pick_groups(in_ch, out_ch, 4) — note the argument order follows the
+        // DIRECTION of each projection, not a fixed (high, low) pair.
+        let g_h = crate::config::pick_groups(low.c, high.c, 4);
+        let g_l = crate::config::pick_groups(high.c, low.c, 4);
+        let l2h = Conv::with_names(ctx, &format!("{prefix}.low_to_high"), names("low_to_high"), low, raw(high.c, g_h), train);
+        let h2l = Conv::with_names(ctx, &format!("{prefix}.high_to_low"), names("high_to_low"), high, raw(low.c, g_l), train);
+        MinimalCrossScale {
+            high,
+            low,
+            l2h,
+            h2l,
+            up: ctx.act(high.numel()),
+            down: ctx.act(low.numel()),
+            out_high: ctx.act(high.numel()),
+            out_low: ctx.act(low.numel()),
+            d_up: ctx.act(high.numel()),
+            d_down: ctx.act(low.numel()),
+            // The projections' OWN output shapes: l2h emits [N, high.c, low.h, low.w]
+            // (project first, resample after), h2l emits [N, low.c, high.h, high.w].
+            d_l2h: ctx.act(low.n * high.c * low.h * low.w),
+            d_h2l: ctx.act(high.n * low.c * high.h * high.w),
+            // Per-scale accumulators. NOT `d_l2h`/`d_h2l` reused as scratch: those
+            // are sized to the PROJECTIONS' outputs (`[N, high.c, low.h, low.w]` and
+            // `[N, low.c, high.h, high.w]`), which are neither scale's own numel.
+            acc_h: ctx.act(high.numel()),
+            acc_l: ctx.act(low.numel()),
+        }
+    }
+
+    pub fn out_high(&self) -> &DeviceBuffer {
+        &self.out_high
+    }
+    pub fn out_low(&self) -> &DeviceBuffer {
+        &self.out_low
+    }
+    pub fn set_eval(&self, on: bool) {
+        self.l2h.set_eval(on);
+        self.h2l.set_eval(on);
+    }
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let mut v = self.l2h.param_list();
+        v.extend(self.h2l.param_list());
+        v
+    }
+    /// resize/pool ABI: `[N, C, H, W, Ho, Wo]`.
+    fn rs(&self, c: u32, from: Shape, to: Shape) -> Vec<u32> {
+        vec![from.n, c, from.h, from.w, to.h, to.w]
+    }
+}
+
+impl MinimalCrossScale {
+    pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_high: &DeviceBuffer, x_low: &DeviceBuffer) {
+        // low -> high: project at the LOW resolution, then upsample (nearest).
+        self.l2h.forward(ctx, ps, x_low);
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.resize_nearest, "resize_nearest"),
+            &[self.l2h.out(), &self.up],
+            &self.rs(self.high.c, self.low, self.high),
+            self.high.numel(),
+        );
+        ctx.gpu.submit(&[], &[s]);
+        // high -> low: project at the HIGH resolution, then adaptive-avg-pool down.
+        self.h2l.forward(ctx, ps, x_high);
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.avgpool2d, "avgpool2d"),
+            &[self.h2l.out(), &self.down],
+            &self.rs(self.low.c, self.high, self.low),
+            self.low.numel(),
+        );
+        ctx.gpu.submit(&[], &[s]);
+        // x + 0.3*delta, as copy-then-axpy. `axpy` is read-modify-write, so the
+        // copy is what keeps this SSA.
+        self.axpy_residual(ctx, x_high, &self.up, &self.out_high, self.high.numel());
+        self.axpy_residual(ctx, x_low, &self.down, &self.out_low, self.low.numel());
+    }
+
+    /// `out = x + 0.3*delta`. leaky_relu at slope 1 is brain's aliased copy.
+    fn axpy_residual(&self, ctx: &Ctx, x: &DeviceBuffer, delta: &DeviceBuffer, out: &DeviceBuffer, n: u32) {
+        let s = ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[x, out], &[n, f(1.0)], n);
+        ctx.gpu.submit(&[], &[s]);
+        let s = ctx.step(ctx.ids.need(ctx.ids.axpy, "axpy"), &[out, delta], &[n, f(CROSS_SCALE_W)], n);
+        ctx.gpu.submit(&[], &[s]);
+    }
+
+    /// Both outputs carry gradients, so this takes both. `x_high` reaches BOTH
+    /// outputs (its own residual and the high->low projection), likewise `x_low`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn backward(
+        &self,
+        ctx: &Ctx,
+        ps: &ParamStore,
+        x_high: &DeviceBuffer,
+        x_low: &DeviceBuffer,
+        d_high: &DeviceBuffer,
+        d_low: &DeviceBuffer,
+        d_in_high: &DeviceBuffer,
+        d_in_low: &DeviceBuffer,
+    ) {
+        let (nh, nl) = (self.high.numel(), self.low.numel());
+        // The 0.3-scaled residual's adjoint: d_delta = 0.3 * d_out. Clearing via
+        // submit's clear-list then axpy gives the scale without a second kernel.
+        let s = ctx.step(ctx.ids.need(ctx.ids.axpy, "axpy"), &[&self.d_up, d_high], &[nh, f(CROSS_SCALE_W)], nh);
+        ctx.gpu.submit(&[&self.d_up], &[s]);
+        let s = ctx.step(ctx.ids.need(ctx.ids.axpy, "axpy"), &[&self.d_down, d_low], &[nl, f(CROSS_SCALE_W)], nl);
+        ctx.gpu.submit(&[&self.d_down], &[s]);
+
+        // Back through the nearest upsample, then the low->high projection: this is
+        // x_low's SECOND route (the first is its own residual).
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.resize_nearest_dx, "resize_nearest_dx"),
+            &[&self.d_up, &self.d_l2h],
+            &self.rs(self.high.c, self.low, self.high),
+            self.low.n * self.high.c * self.low.h * self.low.w,
+        );
+        ctx.gpu.submit(&[], &[s]);
+        self.l2h.backward(ctx, ps, x_low, &self.d_l2h, d_in_low);
+
+        // Back through the pool, then the high->low projection: x_high's second route.
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.avgpool2d_dx, "avgpool2d_dx"),
+            &[&self.d_down, &self.d_h2l],
+            &self.rs(self.low.c, self.high, self.low),
+            self.high.n * self.low.c * self.high.h * self.high.w,
+        );
+        ctx.gpu.submit(&[], &[s]);
+        self.h2l.backward(ctx, ps, x_high, &self.d_h2l, &self.acc_h);
+
+        // ...plus each input's own straight-through residual (weight 1, not 0.3).
+        let s = ctx.step(ctx.ids.add2, &[&self.acc_h, d_high, d_in_high], &[nh], nh);
+        ctx.gpu.submit(&[], &[s]);
+        let s = ctx.step(ctx.ids.add2, &[d_in_low, d_low, &self.acc_l], &[nl], nl);
+        ctx.gpu.submit(&[], &[s]);
+        let s = ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.acc_l, d_in_low], &[nl, f(1.0)], nl);
+        ctx.gpu.submit(&[], &[s]);
+    }
+}
+
+// ===========================================================================
+// UltraLightFusion — the decoder's two-scale merge
+// ===========================================================================
+
+/// `relu(BN(proj_high(x_high) + proj_low(up_bilinear(x_low))))`
+/// (`architecture.py:345-359`).
+///
+/// One BN over the SUM of two projections — the same shape as
+/// [`MinimalMultiScale`], so the same `vision::BatchNorm` + `Norm::None` branches
+/// apply. Both projections are bias-free 1x1 grouped convs.
+///
+/// ⚠️ RESAMPLE-then-PROJECT, the opposite order to [`MinimalCrossScale`]'s: the
+/// reference rebinds `x_low = F.interpolate(x_low, ...)` BEFORE `self.proj_low(x_low)`.
+/// The upsample is bilinear with `align_corners=False`.
+pub struct UltraLightFusion {
+    pub high: Shape,
+    pub low: Shape,
+    pub out_shape: Shape,
+    proj_high: Conv,
+    proj_low: Conv,
+    bn: vision::BatchNorm,
+    up: DeviceBuffer,
+    sum: DeviceBuffer,
+    out: DeviceBuffer,
+    d_sum: DeviceBuffer,
+    d_pl: DeviceBuffer,
+    acc: DeviceBuffer,
+}
+
+impl UltraLightFusion {
+    pub fn new(ctx: &Ctx, prefix: &str, high: Shape, low: Shape, out_ch: u32, train: bool) -> UltraLightFusion {
+        let raw = |cout: u32, groups: u32| {
+            ConvSpec::relu(cout, 1, 1, 0).with_norm(Norm::None).with_act(Act::None).with_groups(groups)
+        };
+        let names = |n: &str| ConvNames {
+            bias: String::new(),
+            weight: format!("{prefix}.{n}.weight"),
+            gamma: String::new(),
+            beta: String::new(),
+            run_mean: String::new(),
+            run_var: String::new(),
+        };
+        let g_high = crate::config::pick_groups(high.c, out_ch, 4);
+        let g_low = crate::config::pick_groups(low.c, out_ch, 4);
+        // proj_low runs on the UPSAMPLED low map: low's channels at high's geometry.
+        let up_shape = Shape { c: low.c, ..high };
+        let proj_high = Conv::with_names(ctx, &format!("{prefix}.proj_high"), names("proj_high"), high, raw(out_ch, g_high), train);
+        let proj_low = Conv::with_names(ctx, &format!("{prefix}.proj_low"), names("proj_low"), up_shape, raw(out_ch, g_low), train);
+        let out_shape = proj_high.out_shape;
+        assert_eq!(out_shape, proj_low.out_shape, "both projections must land on the same map");
+        let bn = vision::BatchNorm::new(ctx, vision::BnNames::torch(&format!("{prefix}.bn")), out_shape, train);
+        let n = out_shape.numel();
+        UltraLightFusion {
+            high,
+            low,
+            out_shape,
+            proj_high,
+            proj_low,
+            bn,
+            up: ctx.act(up_shape.numel()),
+            sum: ctx.act(n),
+            out: ctx.act(n),
+            d_sum: ctx.act(n),
+            d_pl: ctx.act(up_shape.numel()),
+            acc: ctx.act(n),
+        }
+    }
+
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.out
+    }
+    pub fn set_eval(&self, on: bool) {
+        self.proj_high.set_eval(on);
+        self.proj_low.set_eval(on);
+        self.bn.set_eval(on);
+    }
+    pub fn set_update_running(&self, on: bool) {
+        self.bn.set_update_running(on);
+    }
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let mut v = self.proj_high.param_list();
+        v.extend(self.proj_low.param_list());
+        v.extend(self.bn.param_list());
+        v
+    }
+    /// resize_bilinear ABI: `[N, C, H, W, Ho, Wo, align_corners]`.
+    fn rs(&self) -> Vec<u32> {
+        vec![self.low.n, self.low.c, self.low.h, self.low.w, self.high.h, self.high.w, 0]
+    }
+    fn up_n(&self) -> u32 {
+        self.low.n * self.low.c * self.high.h * self.high.w
+    }
+}
+
+impl UltraLightFusion {
+    pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_high: &DeviceBuffer, x_low: &DeviceBuffer) {
+        let n = self.out_shape.numel();
+        // Resample FIRST (align_corners=False), then project.
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.resize_bilinear, "resize_bilinear"),
+            &[x_low, &self.up],
+            &self.rs(),
+            self.up_n(),
+        );
+        ctx.gpu.submit(&[], &[s]);
+        self.proj_high.forward(ctx, ps, x_high);
+        self.proj_low.forward(ctx, ps, &self.up);
+        let s = ctx.step(ctx.ids.add2, &[self.proj_high.out(), self.proj_low.out(), &self.sum], &[n], n);
+        ctx.gpu.submit(&[], &[s]);
+        self.bn.forward(ctx, ps, &self.sum);
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"),
+            &[self.bn.out(), &self.out],
+            &[n, f(0.0)],
+            n,
+        );
+        ctx.gpu.submit(&[], &[s]);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn backward(
+        &self,
+        ctx: &Ctx,
+        ps: &ParamStore,
+        x_high: &DeviceBuffer,
+        d_out: &DeviceBuffer,
+        d_in_high: &DeviceBuffer,
+        d_in_low: &DeviceBuffer,
+    ) {
+        let n = self.out_shape.numel();
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"),
+            &[self.bn.out(), d_out, &self.acc],
+            &[n, f(0.0)],
+            n,
+        );
+        ctx.gpu.submit(&[], &[s]);
+        self.bn.backward(ctx, ps, &self.sum, &self.acc, &self.d_sum);
+        // The sum is linear -> both projections see d_sum.
+        self.proj_high.backward(ctx, ps, x_high, &self.d_sum, d_in_high);
+        self.proj_low.backward(ctx, ps, &self.up, &self.d_sum, &self.d_pl);
+        // ...and back through the bilinear upsample to x_low.
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.resize_bilinear_dx, "resize_bilinear_dx"),
+            &[&self.d_pl, d_in_low],
+            &self.rs(),
+            self.low.numel(),
+        );
+        ctx.gpu.submit(&[], &[s]);
+    }
+}
+
+// ===========================================================================
+// FastConvexUpsample — the decoder's learned S-times upsample, two variants
+// ===========================================================================
+
+/// Which upsampler ZipDepth's decoder ends with (`architecture.py:367-430`).
+///
+/// The reference calls these the GPU/TensorRT path and the NPU path, and they are
+/// NOT two implementations of one function — they are different architectures with
+/// different parameters, and the two released checkpoints differ by exactly this
+/// (`zipdepth_base.pth` has `mask_pred.*`, `zipdepth_base_npu.pth` has
+/// `where_conv.*`; 278 vs 283 tensors). Picking the wrong one fails a strict load.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UpsampleKind {
+    /// `use_unfold=True`: predict a 3x3 convex-combination mask per sub-pixel.
+    /// Learns arbitrary local interpolation; needs the 9-way softmax and the
+    /// `unfold`-shaped gather.
+    Unfold,
+    /// `use_unfold=False`: predict a scalar per pixel and blend nearest against
+    /// bilinear. Cheap and NPU-friendly, but can only interpolate BETWEEN those
+    /// two, never outside them.
+    Blend,
+}
+
+/// `relu(pixel_shuffle(sum_k softmax(mask)_k * unfold(pad_replicate(depth))_k))`
+/// (`architecture.py:399-424`), or the nearest/bilinear blend (`:388-397`).
+///
+/// Takes TWO inputs: the decoder feature map (which predicts *how* to upsample)
+/// and the half-resolution depth (*what* to upsample), both at `[N, ., H, W]`.
+/// Emits `[N, 1, H*S, W*S]`.
+///
+/// The `Unfold` path needs no `pad`/`unfold`/`pixel_shuffle` dispatches at all:
+/// `convex_upsample` folds the replicate-pad, the 9-way gather and the shuffle
+/// into one kernel indexed by the output pixel, so the `[N,9,S*S,H,W]`
+/// intermediate never exists. Its softmax is `softmax_k` over the strided 9 axis
+/// (`K=9, M=S*S*H*W`) — the shape that kernel was written for.
+pub struct FastConvexUpsample {
+    pub kind: UpsampleKind,
+    pub feat: Shape,
+    pub depth: Shape,
+    pub out_shape: Shape,
+    scale: u32,
+    temperature: f32,
+    /// Unfold: mask_pred.0 / .3. Blend: where_conv.0 / .3 / .6.
+    c0: Conv,
+    c1: Conv,
+    c2: Option<Conv>,
+    // Unfold path
+    sm: DeviceBuffer,
+    d_sm: DeviceBuffer,
+    d_logits: DeviceBuffer,
+    // Blend path
+    nn_up: DeviceBuffer,
+    bi_up: DeviceBuffer,
+    alpha_up: DeviceBuffer,
+    alpha: DeviceBuffer,
+    t1: DeviceBuffer,
+    t2: DeviceBuffer,
+    d_alpha: DeviceBuffer,
+    d_alpha_lo: DeviceBuffer,
+    d_nn: DeviceBuffer,
+    d_bi: DeviceBuffer,
+    /// The two `[N, where_hidden, H, W]` links of the where_conv chain, plus the
+    /// two half-res depth-grad partials. Sized from the convs' OWN out_shapes.
+    d_c1: DeviceBuffer,
+    d_c0: DeviceBuffer,
+    dd1: DeviceBuffer,
+    dd2: DeviceBuffer,
+    // Shared
+    pre: DeviceBuffer,
+    out: DeviceBuffer,
+    d_pre: DeviceBuffer,
+    acc: DeviceBuffer,
+}
+
+impl FastConvexUpsample {
+    pub fn new(
+        ctx: &Ctx,
+        prefix: &str,
+        kind: UpsampleKind,
+        feat: Shape,
+        depth: Shape,
+        scale: u32,
+        temperature: f32,
+        train: bool,
+    ) -> FastConvexUpsample {
+        assert_eq!(depth.c, 1, "the depth map is single-channel");
+        assert_eq!((feat.h, feat.w), (depth.h, depth.w), "feat and depth share the half-res grid");
+        let s = scale;
+        let out_shape = Shape::new(depth.n, 1, depth.h * s, depth.w * s);
+        let bare = |p: String| ConvNames {
+            bias: format!("{p}.bias"),
+            weight: format!("{p}.weight"),
+            gamma: String::new(),
+            beta: String::new(),
+            run_mean: String::new(),
+            run_var: String::new(),
+        };
+        let (c0, c1, c2) = match kind {
+            UpsampleKind::Unfold => {
+                // Sequential(Conv2d(in,hidden,3,padding=1,bias=False), BN, ReLU,
+                //            Conv2d(hidden, 9*S*S, 1))   -> indices 0, 1, 3
+                let hidden = (feat.c / 4).max(8);
+                let p = format!("{prefix}.mask_pred");
+                let a = Conv::with_names(
+                    ctx,
+                    &format!("{p}.0"),
+                    ConvNames::torch_seq(&p, 0, 1),
+                    feat,
+                    ConvSpec::relu(hidden, 3, 1, 1),
+                    train,
+                );
+                // The last 1x1 is BIASED (nn.Conv2d's default) and has no BN/act.
+                let b = Conv::with_names(
+                    ctx,
+                    &format!("{p}.3"),
+                    bare(format!("{p}.3")),
+                    a.out_shape,
+                    ConvSpec::relu(9 * s * s, 1, 1, 0).with_norm(Norm::None).with_act(Act::None).with_bias(),
+                    train,
+                );
+                (a, b, None)
+            }
+            UpsampleKind::Blend => {
+                // Sequential(Conv2d(in,wh,1,bias=False), BN, ReLU,
+                //            Conv2d(wh,wh,5,padding=2,groups=wh,bias=False), BN, ReLU,
+                //            Conv2d(wh,1,1,bias=False))  -> indices 0, 3, 6
+                let wh = (feat.c / 2).max(8);
+                let p = format!("{prefix}.where_conv");
+                let a = Conv::with_names(
+                    ctx,
+                    &format!("{p}.0"),
+                    ConvNames::torch_seq(&p, 0, 1),
+                    feat,
+                    ConvSpec::relu(wh, 1, 1, 0),
+                    train,
+                );
+                let b = Conv::with_names(
+                    ctx,
+                    &format!("{p}.3"),
+                    ConvNames::torch_seq(&p, 3, 4),
+                    a.out_shape,
+                    ConvSpec::depthwise(wh, 5, 1, 2, Act::Relu),
+                    train,
+                );
+                let c = Conv::with_names(
+                    ctx,
+                    &format!("{p}.6"),
+                    ConvNames {
+                        bias: String::new(),
+                        weight: format!("{p}.6.weight"),
+                        gamma: String::new(),
+                        beta: String::new(),
+                        run_mean: String::new(),
+                        run_var: String::new(),
+                    },
+                    b.out_shape,
+                    ConvSpec::relu(1, 1, 1, 0).with_norm(Norm::None).with_act(Act::None),
+                    train,
+                );
+                (a, b, Some(c))
+            }
+        };
+        let mask_n = depth.n * 9 * s * s * depth.h * depth.w;
+        let on = out_shape.numel();
+        let dn = depth.numel();
+        // From the producing units' own shapes — never re-derived. (The GCB bug:
+        // `hidden` can exceed the nominal channel count, and the CPU JIT turns an
+        // undersized buffer into silent heap corruption.)
+        let (c0_out, c1_out) = (c0.out_shape.numel(), c1.out_shape.numel());
+        FastConvexUpsample {
+            kind,
+            feat,
+            depth,
+            out_shape,
+            scale: s,
+            temperature,
+            c0,
+            c1,
+            c2,
+            sm: ctx.act(if kind == UpsampleKind::Unfold { mask_n } else { 1 }),
+            d_sm: ctx.act(if kind == UpsampleKind::Unfold { mask_n } else { 1 }),
+            d_logits: ctx.act(if kind == UpsampleKind::Unfold { mask_n } else { 1 }),
+            nn_up: ctx.act(if kind == UpsampleKind::Blend { on } else { 1 }),
+            bi_up: ctx.act(if kind == UpsampleKind::Blend { on } else { 1 }),
+            alpha_up: ctx.act(if kind == UpsampleKind::Blend { on } else { 1 }),
+            alpha: ctx.act(if kind == UpsampleKind::Blend { on } else { 1 }),
+            t1: ctx.act(if kind == UpsampleKind::Blend { on } else { 1 }),
+            t2: ctx.act(if kind == UpsampleKind::Blend { on } else { 1 }),
+            d_alpha: ctx.act(if kind == UpsampleKind::Blend { on } else { 1 }),
+            d_alpha_lo: ctx.act(if kind == UpsampleKind::Blend { dn } else { 1 }),
+            d_nn: ctx.act(if kind == UpsampleKind::Blend { on } else { 1 }),
+            d_bi: ctx.act(if kind == UpsampleKind::Blend { on } else { 1 }),
+            d_c1: ctx.act(if kind == UpsampleKind::Blend { c1_out } else { 1 }),
+            // Both kinds need this: it is the grad wrt c0's OUTPUT, i.e. c1's input.
+            // NOT `acc` (sized to the block's output) — c0's output lives on the
+            // half-res grid at `hidden` channels and is a different size entirely.
+            d_c0: ctx.act(c0_out),
+            dd1: ctx.act(if kind == UpsampleKind::Blend { dn } else { 1 }),
+            dd2: ctx.act(if kind == UpsampleKind::Blend { dn } else { 1 }),
+            pre: ctx.act(on),
+            out: ctx.act(on),
+            d_pre: ctx.act(on),
+            acc: ctx.act(on),
+        }
+    }
+
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.out
+    }
+    pub fn set_eval(&self, on: bool) {
+        self.c0.set_eval(on);
+        self.c1.set_eval(on);
+        if let Some(c) = &self.c2 {
+            c.set_eval(on);
+        }
+    }
+    pub fn set_update_running(&self, on: bool) {
+        self.c0.set_update_running(on);
+        self.c1.set_update_running(on);
+        if let Some(c) = &self.c2 {
+            c.set_update_running(on);
+        }
+    }
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let mut v = self.c0.param_list();
+        v.extend(self.c1.param_list());
+        if let Some(c) = &self.c2 {
+            v.extend(c.param_list());
+        }
+        v
+    }
+    /// convex_upsample ABI: `[N, H, W, S]` (H/W are the HALF-res grid).
+    fn cu(&self) -> Vec<u32> {
+        vec![self.depth.n, self.depth.h, self.depth.w, self.scale]
+    }
+    /// softmax_k over the 9-neighbour axis: `[N, K=9, M=S*S*H*W]`.
+    fn sk(&self) -> Vec<u32> {
+        vec![self.depth.n, 9, self.scale * self.scale * self.depth.h * self.depth.w]
+    }
+    fn up_params(&self, c: u32, align: bool) -> Vec<u32> {
+        let mut v = vec![self.depth.n, c, self.depth.h, self.depth.w, self.out_shape.h, self.out_shape.w];
+        if align {
+            v.push(0);
+        }
+        v
+    }
+}
+
+impl FastConvexUpsample {
+    pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, feat: &DeviceBuffer, depth: &DeviceBuffer) {
+        let on = self.out_shape.numel();
+        match self.kind {
+            UpsampleKind::Unfold => {
+                self.c0.forward(ctx, ps, feat);
+                self.c1.forward(ctx, ps, self.c0.out());
+                // softmax(logits / T) over the 9 axis. At T == 1 the divide is the
+                // identity and is skipped rather than dispatched.
+                let logits = if (self.temperature - 1.0).abs() < f32::EPSILON {
+                    self.c1.out().clone()
+                } else {
+                    let n = self.depth.n * 9 * self.scale * self.scale * self.depth.h * self.depth.w;
+                    let s = ctx.step(
+                        ctx.ids.need(ctx.ids.axpy, "axpy"),
+                        &[&self.d_sm, self.c1.out()],
+                        &[n, f(1.0 / self.temperature)],
+                        n,
+                    );
+                    ctx.gpu.submit(&[&self.d_sm], &[s]);
+                    self.d_sm.clone()
+                };
+                let groups = self.depth.n * self.scale * self.scale * self.depth.h * self.depth.w;
+                let s = ctx.step(ctx.ids.need(ctx.ids.softmax_k, "softmax_k"), &[&logits, &self.sm], &self.sk(), groups);
+                ctx.gpu.submit(&[], &[s]);
+                let s = ctx.step(
+                    ctx.ids.need(ctx.ids.convex_upsample, "convex_upsample"),
+                    &[&self.sm, depth, &self.pre],
+                    &self.cu(),
+                    on,
+                );
+                ctx.gpu.submit(&[], &[s]);
+            }
+            UpsampleKind::Blend => {
+                let s_nn = ctx.step(
+                    ctx.ids.need(ctx.ids.resize_nearest, "resize_nearest"),
+                    &[depth, &self.nn_up],
+                    &self.up_params(1, false),
+                    on,
+                );
+                let s_bi = ctx.step(
+                    ctx.ids.need(ctx.ids.resize_bilinear, "resize_bilinear"),
+                    &[depth, &self.bi_up],
+                    &self.up_params(1, true),
+                    on,
+                );
+                ctx.gpu.submit(&[], &[s_nn, s_bi]);
+                self.c0.forward(ctx, ps, feat);
+                self.c1.forward(ctx, ps, self.c0.out());
+                let c2 = self.c2.as_ref().expect("Blend has a third conv");
+                c2.forward(ctx, ps, self.c1.out());
+                // The reference upsamples alpha BEFORE the sigmoid.
+                let s = ctx.step(
+                    ctx.ids.need(ctx.ids.resize_bilinear, "resize_bilinear"),
+                    &[c2.out(), &self.alpha_up],
+                    &self.up_params(1, true),
+                    on,
+                );
+                ctx.gpu.submit(&[], &[s]);
+                let s = ctx.step(ctx.ids.need(ctx.ids.sigmoid, "sigmoid"), &[&self.alpha_up, &self.alpha], &[on], on);
+                ctx.gpu.submit(&[], &[s]);
+                // out = a*nn + (1-a)*bi = bi + a*nn - a*bi. axpy at s=-1 is the
+                // subtract, so no sub kernel is needed.
+                let cp = ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.bi_up, &self.pre], &[on, f(1.0)], on);
+                let m1 = ctx.step(ctx.ids.mul, &[&self.alpha, &self.nn_up, &self.t1], &[on], on);
+                let m2 = ctx.step(ctx.ids.mul, &[&self.alpha, &self.bi_up, &self.t2], &[on], on);
+                ctx.gpu.submit(&[], &[cp, m1, m2]);
+                let a1 = ctx.step(ctx.ids.need(ctx.ids.axpy, "axpy"), &[&self.pre, &self.t1], &[on, f(1.0)], on);
+                ctx.gpu.submit(&[], &[a1]);
+                let a2 = ctx.step(ctx.ids.need(ctx.ids.axpy, "axpy"), &[&self.pre, &self.t2], &[on, f(-1.0)], on);
+                ctx.gpu.submit(&[], &[a2]);
+            }
+        }
+        // Both paths end in the same ReLU: the model's output is non-negative
+        // inverse depth.
+        let s = ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.pre, &self.out], &[on, f(0.0)], on);
+        ctx.gpu.submit(&[], &[s]);
+    }
+
+    /// `d_feat` and `d_depth_in` both receive gradients: the feature map decides
+    /// HOW to upsample and the depth map WHAT, and both are learned upstream.
+    #[allow(clippy::too_many_arguments)]
+    pub fn backward(
+        &self,
+        ctx: &Ctx,
+        ps: &ParamStore,
+        feat: &DeviceBuffer,
+        depth: &DeviceBuffer,
+        d_out: &DeviceBuffer,
+        d_feat: &DeviceBuffer,
+        d_depth_in: &DeviceBuffer,
+    ) {
+        let on = self.out_shape.numel();
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"),
+            &[&self.pre, d_out, &self.d_pre],
+            &[on, f(0.0)],
+            on,
+        );
+        ctx.gpu.submit(&[], &[s]);
+        match self.kind {
+            UpsampleKind::Unfold => {
+                let mask_n = self.depth.n * 9 * self.scale * self.scale * self.depth.h * self.depth.w;
+                // convex_upsample is bilinear in (mask, d): two independent adjoints.
+                let dm = ctx.step(
+                    ctx.ids.need(ctx.ids.convex_upsample_dmask, "convex_upsample_dmask"),
+                    &[&self.d_pre, depth, &self.d_sm],
+                    &self.cu(),
+                    mask_n,
+                );
+                let dd = ctx.step(
+                    ctx.ids.need(ctx.ids.convex_upsample_dd, "convex_upsample_dd"),
+                    &[&self.d_pre, &self.sm, d_depth_in],
+                    &self.cu(),
+                    self.depth.numel(),
+                );
+                ctx.gpu.submit(&[], &[dm, dd]);
+                let groups = self.depth.n * self.scale * self.scale * self.depth.h * self.depth.w;
+                let s = ctx.step(
+                    ctx.ids.need(ctx.ids.softmax_k_dx, "softmax_k_dx"),
+                    &[&self.sm, &self.d_sm, &self.d_logits],
+                    &self.sk(),
+                    groups,
+                );
+                ctx.gpu.submit(&[], &[s]);
+                // ...and the 1/T scale's adjoint is the same 1/T.
+                if (self.temperature - 1.0).abs() >= f32::EPSILON {
+                    let s = ctx.step(
+                        ctx.ids.need(ctx.ids.axpy, "axpy"),
+                        &[&self.d_sm, &self.d_logits],
+                        &[mask_n, f(1.0 / self.temperature)],
+                        mask_n,
+                    );
+                    ctx.gpu.submit(&[&self.d_sm], &[s]);
+                    self.c1.backward(ctx, ps, self.c0.out(), &self.d_sm, &self.d_c0);
+                } else {
+                    self.c1.backward(ctx, ps, self.c0.out(), &self.d_logits, &self.d_c0);
+                }
+                self.c0.backward(ctx, ps, feat, &self.d_c0, d_feat);
+            }
+            UpsampleKind::Blend => {
+                // pre = bi + a*nn - a*bi
+                //   d_a  = d_pre * (nn - bi)
+                //   d_nn = d_pre * a
+                //   d_bi = d_pre * (1 - a)
+                let dn = ctx.step(ctx.ids.mul, &[&self.d_pre, &self.alpha, &self.d_nn], &[on], on);
+                ctx.gpu.submit(&[], &[dn]);
+                // d_a = d_pre*nn - d_pre*bi, reusing t1/t2 (dead after forward).
+                let m1 = ctx.step(ctx.ids.mul, &[&self.d_pre, &self.nn_up, &self.t1], &[on], on);
+                let m2 = ctx.step(ctx.ids.mul, &[&self.d_pre, &self.bi_up, &self.t2], &[on], on);
+                ctx.gpu.submit(&[], &[m1, m2]);
+                let c1 = ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.t1, &self.d_alpha], &[on, f(1.0)], on);
+                ctx.gpu.submit(&[], &[c1]);
+                let a1 = ctx.step(ctx.ids.need(ctx.ids.axpy, "axpy"), &[&self.d_alpha, &self.t2], &[on, f(-1.0)], on);
+                ctx.gpu.submit(&[], &[a1]);
+                // d_bi = d_pre - d_pre*a  (t2 is free again after d_alpha).
+                let cb = ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.d_pre, &self.d_bi], &[on, f(1.0)], on);
+                ctx.gpu.submit(&[], &[cb]);
+                let ab = ctx.step(ctx.ids.need(ctx.ids.axpy, "axpy"), &[&self.d_bi, &self.d_nn], &[on, f(-1.0)], on);
+                ctx.gpu.submit(&[], &[ab]);
+
+                // Back through sigmoid, then the alpha upsample, then where_conv.
+                let s = ctx.step(
+                    ctx.ids.need(ctx.ids.sigmoid_bwd, "sigmoid_bwd"),
+                    &[&self.alpha_up, &self.d_alpha, &self.acc],
+                    &[on],
+                    on,
+                );
+                ctx.gpu.submit(&[], &[s]);
+                let s = ctx.step(
+                    ctx.ids.need(ctx.ids.resize_bilinear_dx, "resize_bilinear_dx"),
+                    &[&self.acc, &self.d_alpha_lo],
+                    &self.up_params(1, true),
+                    self.depth.numel(),
+                );
+                ctx.gpu.submit(&[], &[s]);
+                let c2 = self.c2.as_ref().expect("Blend has a third conv");
+                c2.backward(ctx, ps, self.c1.out(), &self.d_alpha_lo, &self.d_c1);
+                self.c1.backward(ctx, ps, self.c0.out(), &self.d_c1, &self.d_c0);
+                self.c0.backward(ctx, ps, feat, &self.d_c0, d_feat);
+
+                // ...and `depth`'s own two routes, through each upsample.
+                let s1 = ctx.step(
+                    ctx.ids.need(ctx.ids.resize_nearest_dx, "resize_nearest_dx"),
+                    &[&self.d_nn, &self.dd1],
+                    &self.up_params(1, false),
+                    self.depth.numel(),
+                );
+                let s2 = ctx.step(
+                    ctx.ids.need(ctx.ids.resize_bilinear_dx, "resize_bilinear_dx"),
+                    &[&self.d_bi, &self.dd2],
+                    &self.up_params(1, true),
+                    self.depth.numel(),
+                );
+                ctx.gpu.submit(&[], &[s1, s2]);
+                let dn_ = self.depth.numel();
+                let s = ctx.step(ctx.ids.add2, &[&self.dd1, &self.dd2, d_depth_in], &[dn_], dn_);
+                ctx.gpu.submit(&[], &[s]);
+            }
+        }
+    }
+}

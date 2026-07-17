@@ -251,13 +251,30 @@ their equivalence with a test so the duplication cannot drift.
   `yolo/src/head.rs:177-201` hand-rolls**; that copy is now refactorable onto this.
 - **`blocks.rs` — `StripPoolingAttention`, `GlobalContextBlock`**.
 
-### Blocks: 5 of 10 done
+### Blocks: 10 of 10 DONE
 
-| done | remaining |
-|---|---|
-| `QARepBlock` (×15), `ChannelAttention` (SE), `MinimalMultiScale`, `StripPoolingAttention`, `GlobalContextBlock` | `MinimalCrossScale`, `LightweightSPPF`, `UltraLightFusion`, `FastConvexUpsample` (unfold + npu) |
+`QARepBlock` (x15), `ChannelAttention` (SE), `MinimalMultiScale`,
+`StripPoolingAttention`, `GlobalContextBlock`, `LightweightSPPF`,
+`MinimalCrossScale`, `UltraLightFusion`, `FastConvexUpsample` (both variants).
 
-### Two findings from these two blocks
+**Not one of the ten needed a new kernel.** Every one composed from `crates/vision`
+plus the P2 family. Two additions to `vision` were forced, and both are genuine
+generalizations rather than depth-specific hooks:
+- **`Act::Sigmoid`** — a conv whose output is a gate, not a feature map.
+- **`ConvSpec::bias`** — a learned per-channel conv bias (`conv_bias`), independent
+  of `norm`. Its backward is `bias_grad` on the `[N, C*HW]` view + a host spatial
+  reduce, **exactly what `yolo/src/head.rs:177-201` hand-rolls**; that copy is now
+  refactorable onto it.
+- **`SPPF::with_spec` + `NameStyle` + `SppfSpec`** — `LightweightSPPF` IS
+  `vision::SPPF`, differing only in the hidden width (`c1/4` from the INPUT
+  channels, not `c_out/2` from the output), ReLU vs SiLU, and torch vs brain names.
+  The pool chain, the concat fold and the whole backward are shared verbatim, and
+  yolo's forward pin stayed bitwise identical through the refactor.
+- **`axpy`** registered — `x + 0.3*delta` and `a*nn + (1-a)*bi` both fall out of
+  `out += s*in` (at `s = -1` it is also the subtract), so the scaled residual and
+  the blend need no scale kernel.
+
+### Findings
 
 - **`GlobalContextBlock` carries two MATHEMATICALLY DEAD parameters.** The loss is
   exactly invariant to `context_weight.bias` (one scalar added to every position of
@@ -268,22 +285,39 @@ their equivalence with a test so the duplication cannot drift.
   ±5.0 by 2 ULP (softmax's max-subtraction round-off), where a live parameter would
   move it by ~850. **Neither can be FD-checked** — FD divides that round-off by
   2·eps and reports noise (fd = 1.5e-1 against an analytic 4.2e-5). They are pinned
-  by the invariance itself instead, which is the stronger claim anyway.
-- **A real OOB bug, caught only by choosing a shape where a coincidence broke.**
-  `hidden = max(dim/reduction, 8)`, so the clamp makes hidden EXCEED `dim` whenever
-  `dim < 32`. `d_gap` was sized `n*c`; it receives the grad wrt `transform.3`'s input
-  `[N,hidden,1,1]`. At `dim=32` the two are equal and everything passes; at `dim=4`
-  it is an out-of-bounds write, and the CPU JIT's `MemFlags::trusted()` turns that
-  into **silent heap corruption** (`free(): invalid next size`) rather than an error.
-  Buffers must be sized from the producing unit's own `out_shape`, never re-derived.
+  by the invariance itself, which is the stronger claim anyway.
+- **Buffer sizing caused THREE separate out-of-bounds bugs**, all of the same shape
+  and all invisible until a fixture broke the coincidence:
+  1. `GlobalContextBlock.d_gap` sized `n*c`, but `hidden = max(c/reduction, 8)`
+     EXCEEDS `c` whenever `c < 32`. Equal at `c=32`; heap corruption at `c=4`.
+  2. `MinimalCrossScale` reused `d_l2h` (32 elements) as scratch for a 64-element
+     add — the projection buffers are sized to the PROJECTIONS' outputs, which are
+     neither scale's own numel.
+  3. `FastConvexUpsample` used `acc` (the block's output size) to receive the grad
+     wrt `c0`'s output, which lives on the half-res grid at `hidden` channels.
 
-All the kernels the remaining 7 need already exist and are adjointness-tested.
-`LightweightSPPF` should be close to free — `maxpool5` *is* it (K/pad are params)
-and `ConvBN` is `vision::Conv` with `ConvNames::torch_conv_bn`.
-
-**Then:** `model.rs` (encoder/decoder wiring + `impl model::Model`), `loss.rs`
-(`ZipDepthLoss`), `import.rs` (1:1 name match — the layout is already verified),
-and the p3 master gradcheck at **eps=5e-4**.
+  The CPU JIT uses `MemFlags::trusted()`, so each was silent heap corruption
+  (`free(): invalid next size`) or a SIGSEGV — never an error message pointing at
+  the cause. **Standing rule: size every backward buffer from the PRODUCING unit's
+  own `out_shape`. Never re-derive it from the block's nominal channel count.**
+- **FD is the wrong instrument on a maxpool chain, and yolo's seed is a lottery.**
+  SPPF's directional FD does not converge as eps shrinks (16.8, 11.9, 12.4, 20.5,
+  30.1 at eps 1e-5..1e-2 against an analytic 11.4) — the signature of a kink, not of
+  a wrong gradient. At the worst element the one-sided slopes are 0.83 / 1.42 and
+  the analytic is 1.395: it matches the LEFT slope exactly and the central
+  difference splits them. At yolo's own parameters (N=4, eps=5e-3) this config fails
+  on **3 of 5 seeds**, while yolo's hand-picked `assert_grads(&h, 707, "sppf")`
+  passes. `maxpool5` caches its argmax, so brain's gradient is the FROZEN-argmax
+  gradient — a **subgradient**, which must lie within the envelope of the two
+  one-sided slopes. That is what the test asserts, with a derived noise floor
+  (`8*|L|*f32::EPSILON/eps`) below which the slopes are round-off.
+- **An FD fixture must not carry a large constant.** `FastConvexUpsample`'s output is
+  a depth map (~2.0 everywhere), so `sum(out*r)` with uncentered `r` came to -87.74,
+  whose f32 ULP is 7.6e-6. The signal is ~1e-2, so `lp-lm` was FIVE ULPs and every FD
+  value came out an exact multiple of the ULP — pure quantization, converging only
+  at eps=1e-2. **Centering the loss weights** removes the constant that carries no
+  gradient and restores ~4 orders of FD headroom. This will matter again for the
+  real `ZipDepthLoss`.
 
 ## Reference — the ZipDepth spec
 
