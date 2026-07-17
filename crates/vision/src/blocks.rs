@@ -95,6 +95,18 @@ pub enum Act {
     Relu,
 }
 
+/// Whether a conv unit carries its own BatchNorm.
+///
+/// `None` is not an optimisation — several ZipDepth blocks genuinely have raw
+/// convs: `MinimalMultiScale`'s two depthwise branches share ONE BN over their
+/// sum (so the branches must have none of their own), and SE's two 1x1s have no
+/// BN at all. A unit whose BN is mandatory cannot express either.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Norm {
+    None,
+    Bn,
+}
+
 /// Everything that varies between conv units. Immutable after construction:
 /// `sb` caches the BN-eval collapse and is invalidated only on a train/eval
 /// flip, so a runtime-mutable activation or grouping would leave it stale.
@@ -106,17 +118,18 @@ pub struct ConvSpec {
     pub pad: u32,
     pub groups: u32,
     pub dilation: u32,
+    pub norm: Norm,
     pub act: Act,
 }
 
 impl ConvSpec {
     /// yolo's unit: dense, SiLU.
     pub const fn silu(cout: u32, k: u32, stride: u32, pad: u32) -> ConvSpec {
-        ConvSpec { cout, k, stride, pad, groups: 1, dilation: 1, act: Act::Silu }
+        ConvSpec { cout, k, stride, pad, groups: 1, dilation: 1, norm: Norm::Bn, act: Act::Silu }
     }
     /// ZipDepth's `ConvBN`: grouped/dilated, ReLU.
     pub const fn relu(cout: u32, k: u32, stride: u32, pad: u32) -> ConvSpec {
-        ConvSpec { cout, k, stride, pad, groups: 1, dilation: 1, act: Act::Relu }
+        ConvSpec { cout, k, stride, pad, groups: 1, dilation: 1, norm: Norm::Bn, act: Act::Relu }
     }
     pub const fn with_groups(self, groups: u32) -> ConvSpec {
         ConvSpec { groups, ..self }
@@ -127,9 +140,13 @@ impl ConvSpec {
     pub const fn with_act(self, act: Act) -> ConvSpec {
         ConvSpec { act, ..self }
     }
+    /// Drop this unit's BatchNorm — it becomes a raw conv.
+    pub const fn with_norm(self, norm: Norm) -> ConvSpec {
+        ConvSpec { norm, ..self }
+    }
     /// Depthwise: groups == cin == cout, weight `[C,1,k,k]`.
     pub const fn depthwise(ch: u32, k: u32, stride: u32, pad: u32, act: Act) -> ConvSpec {
-        ConvSpec { cout: ch, k, stride, pad, groups: ch, dilation: 1, act }
+        ConvSpec { cout: ch, k, stride, pad, groups: ch, dilation: 1, norm: Norm::Bn, act }
     }
     /// Is this the plain dense case the pre-existing `conv2d` kernel covers?
     ///
@@ -325,6 +342,11 @@ impl Conv {
         }
     }
 
+    /// This unit's conv-weight tensor name.
+    pub fn names_weight(&self) -> &str {
+        &self.names.weight
+    }
+
     pub fn out(&self) -> &DeviceBuffer {
         &self.act
     }
@@ -355,15 +377,18 @@ impl Conv {
 
     pub fn param_list(&self) -> Vec<(String, usize)> {
         let c = self.out_shape.c as usize;
-        let cin = self.in_shape.c as usize;
+        // Grouped conv weights are `[cout, cin/groups, k, k]` — NOT `[cout, cin,
+        // k, k]`. Depthwise (groups == cin) makes the second axis 1.
+        let cin_g = (self.in_shape.c / self.spec.groups) as usize;
         let k = self.k as usize;
-        vec![
-            (self.names.weight.clone(), (c * cin * k * k) as usize),
-            (self.names.gamma.clone(), c as usize),
-            (self.names.beta.clone(), c as usize),
-            (self.names.run_mean.clone(), c as usize),
-            (self.names.run_var.clone(), c as usize),
-        ]
+        let mut v = vec![(self.names.weight.clone(), c * cin_g * k * k)];
+        if self.spec.norm == Norm::Bn {
+            v.push((self.names.gamma.clone(), c));
+            v.push((self.names.beta.clone(), c));
+            v.push((self.names.run_mean.clone(), c));
+            v.push((self.names.run_var.clone(), c));
+        }
+        v
     }
 
     /// The conv uniform stream. TWO ABIs, picked by the spec:
@@ -422,7 +447,7 @@ impl Conv {
     /// but previously dead, now has a consumer. Its eps matches `pack_sb`'s
     /// (`1e-5`), so the two paths agree numerically by construction.
     fn can_fuse(&self, ctx: &Ctx) -> bool {
-        self.spec.act == Act::Silu && self.spec.is_dense() && ctx.ids.conv_act_reg != crate::NONE
+        self.spec.act == Act::Silu && self.spec.norm == Norm::Bn && self.spec.is_dense() && ctx.ids.conv_act_reg != crate::NONE
     }
 
     /// The unfused activation's (forward, backward) kernel pair, or `None` for
@@ -471,6 +496,20 @@ impl Conv {
     pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
         let on = self.out_shape.numel();
         let c = self.out_shape.c;
+        let _ = c;
+
+        if self.spec.norm == Norm::None {
+            // Raw conv -> act. No stats, no host interleave, no mode distinction:
+            // without BN the two modes compute the same function.
+            let s_conv = ctx.step(self.conv_kind(ctx), &[x_in, ps.w(&self.names.weight), &self.conv_out], &self.conv_params(), on);
+            ctx.gpu.submit(&[], &[s_conv]);
+            let s_act = match self.act_pair(ctx) {
+                Some((fwd, _)) => ctx.step(fwd, &[&self.conv_out, &self.act], &self.act_params(on), on),
+                None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.conv_out, &self.act], &[on, f(1.0)], on),
+            };
+            ctx.gpu.submit(&[], &[s_act]);
+            return;
+        }
 
         if !self.train.get() {
             // Inference: one fused conv -> BN(eval) -> SiLU dispatch. The BN-eval
@@ -565,9 +604,6 @@ impl Conv {
         ctx.gpu.submit(&[], &[s_train, s_act]);
     }
 
-    /// Collapse the BN-eval transform into per-channel `scale|bias` packed in
-    /// `sb` (`sb[2c]=gamma/sqrt(run_var+eps)`, `sb[2c+1]=beta-run_mean*scale`),
-    /// the constant the fused `conv_act` kernel consumes. Eps matches bn_eval.
     /// Unfused eval: `conv -> bn_eval -> act`.
     ///
     /// Taken by every unit the fused path cannot serve — any ReLU unit, and any
@@ -588,6 +624,10 @@ impl Conv {
     /// erroring. The per-channel packing is still cached across frames via
     /// `sb_ready`, which now gates `mv`+`gb` instead.
     fn forward_eval_unfused(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
+        if self.spec.norm == Norm::None {
+            // Handled by the shared raw-conv path in `forward`.
+            unreachable!("Norm::None short-circuits before reaching the eval path");
+        }
         if !self.sb_ready.get() {
             self.pack_running_mv(ctx, ps);
             self.pack_gb(ctx, ps);
@@ -644,6 +684,13 @@ impl Conv {
         ctx.gpu.write(&self.mv, bytemuck::cast_slice(&pack2(&rmean, &rvar)));
     }
 
+    /// Collapse the BN-eval transform into per-channel `scale|bias` packed in
+    /// `sb` (`sb[2c] = gamma/sqrt(run_var+eps)`, `sb[2c+1] = beta - run_mean*scale`)
+    /// — the constant the FUSED `conv_act*` kernel consumes. Eps matches
+    /// `bn_eval`'s, so the fused and unfused paths agree by construction.
+    ///
+    /// Only the fused path uses this. `bn_eval` wants `mv`+`gb`, not `sb` — see
+    /// [`Conv::pack_running_mv`].
     fn pack_sb(&self, ctx: &Ctx, ps: &ParamStore) {
         let c = self.out_shape.c as usize;
         let gamma = ctx.gpu.read(ps.w(&self.names.gamma), c);
@@ -692,6 +739,19 @@ impl Conv {
         let c = self.out_shape.c;
         let dw_n = self.out_shape.c * self.in_shape.c * self.k * self.k;
 
+        if self.spec.norm == Norm::None {
+            // Raw conv: act backward straight into d_conv, then the conv adjoints.
+            let s_a = match self.act_pair(ctx) {
+                Some((_, bwd)) => ctx.step(bwd, &[&self.conv_out, d_out, &self.d_conv], &self.act_params(on), on),
+                None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"), &[&self.conv_out, d_out, &self.d_conv], &[on, f(1.0)], on),
+            };
+            ctx.gpu.submit(&[], &[s_a]);
+            let dw_n = self.out_shape.c * (self.in_shape.c / self.spec.groups) * self.k * self.k;
+            let s_dw = ctx.step(self.conv_dw_kind(ctx), &[&self.d_conv, x_in, ps.g(&self.names.weight)], &self.conv_params(), dw_n);
+            let s_dxin = ctx.step(self.conv_dx_kind(ctx), &[&self.d_conv, ps.w(&self.names.weight), d_in], &self.conv_params(), self.in_shape.numel());
+            ctx.gpu.submit(&[], &[s_dw, s_dxin]);
+            return;
+        }
         let s_act = match self.act_pair(ctx) {
             Some((_, bwd)) => ctx.step(bwd, &[&self.bn_out, d_out, &self.d_bn], &self.act_params(on), on),
             None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"), &[&self.bn_out, d_out, &self.d_bn], &[on, f(1.0)], on),

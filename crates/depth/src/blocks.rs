@@ -13,7 +13,7 @@
 
 use gpu_core::{f, DeviceBuffer};
 use paramstore::ParamStore;
-use vision::blocks::{Act, Conv, ConvNames, ConvSpec};
+use vision::blocks::{Act, Conv, ConvNames, ConvSpec, Norm};
 use vision::{Ctx, Shape};
 
 // ===========================================================================
@@ -326,6 +326,135 @@ impl ChannelAttention {
 
         // --- x's two paths sum ---
         let s = ctx.step(ctx.ids.add2, &[&self.d_x_mul, &self.d_x_pool, d_in], &[tot], tot);
+        ctx.gpu.submit(&[], &[s]);
+    }
+}
+
+// ===========================================================================
+// MinimalMultiScale — two depthwise 3x3 branches (dilation 1 & 2), BN, residual
+// ===========================================================================
+
+/// `x + BN(dw_d1(x) + dw_d2(x))` (`architecture.py:285-294`).
+///
+/// Unconditional in stage2 — NOT gated by `global_mode`. Both branches are
+/// bias-free depthwise 3x3 convs with no activation; there is no ReLU anywhere,
+/// and the single BN sits on their SUM.
+///
+/// That last point is why this needs `vision::BatchNorm` rather than a
+/// `vision::Conv`: a Conv's BN is welded to its own conv, and here one BN spans
+/// two. The dilated branch (pad 2, dilation 2) is shape-preserving exactly as the
+/// dilation-1 branch (pad 1) is — two receptive fields, one output shape, no
+/// resampling.
+pub struct MinimalMultiScale {
+    pub shape: Shape,
+    b1: Conv,
+    b2: Conv,
+    bn: vision::BatchNorm,
+    sum: DeviceBuffer,
+    out: DeviceBuffer,
+    d_sum: DeviceBuffer,
+    d_b2: DeviceBuffer,
+    acc: DeviceBuffer,
+}
+
+impl MinimalMultiScale {
+    pub fn new(ctx: &Ctx, prefix: &str, shape: Shape, train: bool) -> MinimalMultiScale {
+        let c = shape.c;
+        // Depthwise, bias-free, NO BN of their own (Act::None + a shared BN after).
+        let mk = |name: &str, dil: u32, pad: u32| {
+            // Norm::None: a RAW depthwise conv. The reference has exactly ONE bn
+            // here, over the branches' SUM — giving each branch its own would run
+            // BatchNorm twice and register BN tensors that do not exist in the
+            // checkpoint.
+            let spec = ConvSpec::depthwise(c, 3, 1, pad, Act::None)
+                .with_dilation(dil)
+                .with_norm(Norm::None);
+            Conv::with_names(
+                ctx,
+                &format!("{prefix}.{name}"),
+                // A bare `nn.Conv2d` attribute: `P.branchN.weight` and nothing
+                // else. The BN names are unused at Norm::None (param_list omits
+                // them and no dispatch reads them).
+                ConvNames {
+                    weight: format!("{prefix}.{name}.weight"),
+                    gamma: String::new(),
+                    beta: String::new(),
+                    run_mean: String::new(),
+                    run_var: String::new(),
+                },
+                shape,
+                spec,
+                train,
+            )
+        };
+        let b1 = mk("branch1", 1, 1);
+        let b2 = mk("branch2", 2, 2);
+        assert_eq!(b1.out_shape, shape, "MinimalMultiScale must be shape-preserving");
+        assert_eq!(b2.out_shape, shape, "the dilated branch must also preserve shape");
+        let bn = vision::BatchNorm::new(ctx, vision::BnNames::torch(&format!("{prefix}.bn")), shape, train);
+        let n = shape.numel();
+        MinimalMultiScale {
+            shape,
+            b1,
+            b2,
+            bn,
+            sum: ctx.act(n),
+            out: ctx.act(n),
+            d_sum: ctx.act(n),
+            d_b2: ctx.act(n),
+            acc: ctx.act(n),
+        }
+    }
+
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.out
+    }
+    pub fn set_eval(&self, on: bool) {
+        self.b1.set_eval(on);
+        self.b2.set_eval(on);
+        self.bn.set_eval(on);
+    }
+    pub fn set_update_running(&self, on: bool) {
+        self.bn.set_update_running(on);
+    }
+    /// The two branch weights + the ONE shared BN. Note the branches contribute no
+    /// BN tensors of their own — the reference has exactly one `bn` here.
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let mut v = self.b1.param_list();
+        v.extend(self.b2.param_list());
+        v.extend(self.bn.param_list());
+        v
+    }
+}
+
+impl MinimalMultiScale {
+    pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
+        let n = self.shape.numel();
+        self.b1.forward(ctx, ps, x_in);
+        self.b2.forward(ctx, ps, x_in);
+        let s = ctx.step(ctx.ids.add2, &[self.b1.out(), self.b2.out(), &self.sum], &[n], n);
+        ctx.gpu.submit(&[], &[s]);
+        self.bn.forward(ctx, ps, &self.sum);
+        // The residual. No activation anywhere in this block.
+        let s = ctx.step(ctx.ids.add2, &[x_in, self.bn.out(), &self.out], &[n], n);
+        ctx.gpu.submit(&[], &[s]);
+    }
+
+    /// `x` feeds THREE consumers — both branches and the residual — so the grads
+    /// accumulate.
+    pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
+        let n = self.shape.numel();
+        // The residual is `+`, so d_out passes straight through to both the BN and x.
+        self.bn.backward(ctx, ps, &self.sum, d_out, &self.d_sum);
+        // The sum is linear -> both branches see d_sum.
+        self.b1.backward(ctx, ps, x_in, &self.d_sum, &self.acc);
+        self.b2.backward(ctx, ps, x_in, &self.d_sum, &self.d_b2);
+        let s = ctx.step(ctx.ids.add2, &[&self.acc, &self.d_b2, d_in], &[n], n);
+        ctx.gpu.submit(&[], &[s]);
+        // + the residual's own path.
+        let s = ctx.step(ctx.ids.add2, &[d_in, d_out, &self.acc], &[n], n);
+        ctx.gpu.submit(&[], &[s]);
+        let s = ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.acc, d_in], &[n, f(1.0)], n);
         ctx.gpu.submit(&[], &[s]);
     }
 }
