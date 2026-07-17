@@ -138,6 +138,14 @@ their equivalence with a test so the duplication cannot drift.
   (generic JIT vs vectorized summation order) — the test allows ≤4 ULP.
 - **`AGENTS.md`'s "≤4 storage buffers/kernel" is already false**: `router_bwd`,
   `mla_scores` and `layernorm_dgamma` bind 5, and WebGPU guarantees 8.
+- **`bn_eval` takes `x, mv, gb, out` — the SAME four buffers as `bn_train`**, with
+  RUNNING stats in `mv`. It is NOT the collapsed `scale|bias` form; `sb` exists
+  only for the fused `conv_act*` kernels. Binding `sb` reads binding 3 OOB and
+  **SEGFAULTS** rather than erroring, because the CPU JIT compiles with
+  `MemFlags::trusted()` — there are no bounds checks anywhere in that backend.
+- **ZipDepth is NOT "grouped conv end to end"** — a wrong assumption of mine that
+  `ConvKernelIds::need()` caught by naming the kernel. The stem, most
+  QARepBlocks, SPPF, SE and GlobalContextBlock are all `groups=1`.
 - The p3 yolo gradcheck takes **~29 min** under contention; budget for it.
 
 ### P3 — `crates/depth` (in progress)
@@ -161,6 +169,23 @@ their equivalence with a test so the duplication cannot drift.
   imports and three consumers, only one of which is the NPU. The move lets
   `crates/depth` reuse it without depending on npu's OpenVINO runtime. npu
   re-exports it, so `topology.rs`/`sim.rs` are untouched.
+
+- **`net.rs`** — PIPELINES + `ids()`. Registers **both** conv forms: ZipDepth's
+  dense units (stem, most QARepBlocks, SPPF, SE, GCB — all `groups=1`) route to
+  `conv2d` for the AVX2 fast path; only the genuinely grouped/dilated ones go to
+  `conv2d_gd`. `ConvSpec::is_dense()` picks per unit.
+- **`init.rs`** — deterministic init. BatchNorm is classified **structurally**
+  (a sibling `running_var` exists) rather than by name pattern; misclassifying
+  BN's scale as a conv weight inits it Gaussian-around-0 instead of 1, and the
+  model then builds, runs, and trains to garbage. Asserted at exactly 43 BN
+  groups. `head_half.bias` inits to **0.5**, not 0 — the output is ReLU'd, so
+  zero parks every pixel on the flat side and the head gets no gradient.
+- **`vision::Conv` is now spec-driven** (`ConvSpec{groups,dilation,act}`) — the
+  deferred half of P1, done because ZipDepth needs grouped/dilated + ReLU while
+  yolo needs dense + SiLU, and the ~900 lines around them are identical. One conv
+  unit now serves both. yolo stays **bitwise identical** (forward pin 3/3).
+  This gave `bn_eval` its first consumer: registered and tested for ages, but
+  nothing dispatched it because yolo always fuses.
 
 **Still to do in P3:** `blocks.rs` (the 10 ZipDepth modules' fwd+bwd wiring),
 `model.rs` (encoder/decoder + `impl model::Model`), `loss.rs` (`ZipDepthLoss`),
