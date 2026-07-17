@@ -100,11 +100,12 @@ partly **yes**, and it was settled by test rather than by reading:
   the other two were not.**
 
 **Reused rather than rewritten**: `maxpool5` *is* LightweightSPPF exactly (K/pad
-are params); `bias_add` for the head; `scale_chan`/`mul`/`add2`/`concat2` for the
-attention gates and residuals; `leaky_relu(0)` for ReLU; `mse_value_w`'s
-weighted-loss shape as the precedent for `masked_l1`; the `gradnorm_sq`
-host-reduce split for every global reduction; `crates/vision` for every conv
-block; `model::Model` + the blanket `CheckModel` impl for P3's gradcheck.
+are params); **`conv_bias`** for every biased conv (NOT `bias_add` — see the trap
+below); `scale_chan`/`mul`/`add2`/`concat2` for the attention gates and
+residuals; `leaky_relu(0)` for ReLU; `mse_value_w`'s weighted-loss shape as the
+precedent for `masked_l1`; the `gradnorm_sq` host-reduce split for every global
+reduction; `crates/vision` for every conv block; `model::Model` + the blanket
+`CheckModel` impl for P3's gradcheck.
 
 **The standing rule this establishes:** before adding a kernel, check whether an
 existing one covers it under degenerate arguments — and if you keep both, pin
@@ -146,6 +147,14 @@ their equivalence with a test so the duplication cannot drift.
 - **ZipDepth is NOT "grouped conv end to end"** — a wrong assumption of mine that
   `ConvKernelIds::need()` caught by naming the kernel. The stem, most
   QARepBlocks, SPPF, SE and GlobalContextBlock are all `groups=1`.
+- **`bias_add` is a LINEAR-layer bias, NOT an NCHW conv bias.** It computes
+  `out[idx] += bias[idx % n]` — `[M,N]` row-major with the biased dim TRAILING.
+  In NCHW the channel is not trailing, so it silently indexes garbage (caught by
+  a test failing at 7.24). Use **`conv_bias`** (fused conv + per-channel bias);
+  every biased conv in ZipDepth is dense, so it covers all of them. `bias_grad`
+  IS still the right backward, via the `[M=N, N=C*HW]` view + a host spatial
+  reduce. All documented at `yolo/src/head.rs:14-29` — read it before wiring a
+  biased conv.
 - The p3 yolo gradcheck takes **~29 min** under contention; budget for it.
 
 ### P3 — `crates/depth` (in progress)
@@ -187,7 +196,22 @@ their equivalence with a test so the duplication cannot drift.
   This gave `bn_eval` its first consumer: registered and tested for ages, but
   nothing dispatched it because yolo always fuses.
 
-**Still to do in P3:** `blocks.rs` (the 10 ZipDepth modules' fwd+bwd wiring),
+- **`blocks.rs` — `QARepBlock`** (15 of the base config's blocks): two
+  `vision::Conv` units at `Act::None`, summed, plus a raw identity when
+  `cin==cout && stride==1`, then one ReLU. FD-gated over residual /
+  channel-change / stride-2, and — the property RepVGG exists for — the **fused
+  single conv is checked against the block's own eval forward** (<2e-4), not just
+  against `fuse.rs`'s host reference, since those two could agree with each other
+  and both disagree with the model.
+- **`vision::ConvNames`** makes the block's five tensor names data rather than a
+  hardcoded `format!`. Three styles: `brain` (yolo/Ultralytics), `torch_conv_bn`,
+  and `torch_seq(P, ci, bi)` — needed because inside an `nn.Sequential` torch
+  indexes conv and BN **positionally** (`branch_3x3.0`/`.1`), with no `.conv`/`.bn`
+  at all. `prefix` stays separate: it is the ActTap key and must equal the
+  exported ONNX node name, which identifies the conv SITE, not its weights.
+
+**Still to do in P3:** the remaining 9 blocks (SE, StripPooling, GlobalContext,
+MinimalMultiScale/CrossScale, SPPF, UltraLightFusion, FastConvexUpsample ×2),
 `model.rs` (encoder/decoder + `impl model::Model`), `loss.rs` (`ZipDepthLoss`),
 `import.rs`, and the p3 master gradcheck at **eps=5e-4**. This is the largest
 remaining single piece of the workstream.
