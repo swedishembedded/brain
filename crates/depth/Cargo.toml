@@ -1,0 +1,24 @@
+[package]
+name = "brain-depth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Monocular depth models: ZipDepth (pure-conv, RepVGG-reparameterizable) and Depth Anything 3, sharing one dense inverse-depth output contract."
+
+[lib]
+name = "depth"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-vision.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-checkpoint.workspace = true
+brain-kernels.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+brain-gradcheck.workspace = true

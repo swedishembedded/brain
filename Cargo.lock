@@ -317,6 +317,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-depth"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-gradcheck",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "brain-vision",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-eval"
 version = "0.1.0"
 dependencies = [

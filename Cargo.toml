@@ -41,6 +41,7 @@ default-members = [
     "crates/wm-diamond",
     "crates/wm-genie",
     "crates/vision",
+    "crates/depth",
     "crates/yolo",
     "crates/onnx",
     "crates/npu",
@@ -92,6 +93,7 @@ brain-wm-display = { path = "crates/wm-display" }
 brain-wm-diamond = { path = "crates/wm-diamond" }
 brain-wm-genie = { path = "crates/wm-genie" }
 brain-vision = { path = "crates/vision" }
+brain-depth = { path = "crates/depth" }
 brain-yolo = { path = "crates/yolo" }
 brain-onnx = { path = "crates/onnx" }
 brain-npu = { path = "crates/npu" }
