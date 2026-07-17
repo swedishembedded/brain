@@ -210,11 +210,39 @@ their equivalence with a test so the duplication cannot drift.
   at all. `prefix` stays separate: it is the ActTap key and must equal the
   exported ONNX node name, which identifies the conv SITE, not its weights.
 
-**Still to do in P3:** the remaining 9 blocks (SE, StripPooling, GlobalContext,
-MinimalMultiScale/CrossScale, SPPF, UltraLightFusion, FastConvexUpsample ×2),
-`model.rs` (encoder/decoder + `impl model::Model`), `loss.rs` (`ZipDepthLoss`),
-`import.rs`, and the p3 master gradcheck at **eps=5e-4**. This is the largest
-remaining single piece of the workstream.
+- **`blocks.rs` — `ChannelAttention` (SE)**: `hidden = max(dim/8,4)`, both 1×1s
+  bias-free with no BN. The gate is `[N,C,1,1]` — **per image** — and
+  `scale_chan` indexes by `(idx/inner) % c`, so the obvious `(c=C, inner=H*W)`
+  would apply image 0's gate to the whole batch. Applying the reuse rule instead
+  of writing a kernel: **`c = N*C, inner = H*W`** makes the index `n*C + c`,
+  exactly the per-image gate. Pinned by a test where the two images have opposite
+  sign. Backward reuses `mul` + `add_chan_bcast_dv` (which *is* the
+  adjoint-of-a-broadcast) + `avgpool2d_dx`; the FD test checks `d_in` too, since a
+  missing x-path is the classic SE bug and weight grads would not catch it.
+
+### NEXT, and it is a real design decision — not a bodge point
+
+**`MinimalMultiScale` is `x + BN(dw₁(x) + dw₂(x))` — the BN sits on the SUM of
+two convs.** `vision::Conv` owns exactly one conv *and* its BN, so it cannot
+express this.
+
+The right fix is to **factor Conv's BN into a reusable `vision::BatchNorm` unit
+that Conv composes**, then MinimalMultiScale uses two `Act::None` convs + a
+standalone BN. The wrong fix is a private BN inside `crates/depth`: that
+duplicates ~150 lines of subtle machinery — the `bn_stats` → host-pack →
+`bn_train` interleave, the running-stat EMA, `bn_dstats`/`bn_dx`/`bn_dgamma`/
+`bn_dbeta` — which is exactly the duplication this workstream exists to remove.
+It would also fork the train/eval mode flag and the `sb` caching.
+
+Checked: no other block needs it. `gate_conv` is `Sequential(Conv, BN, Sigmoid)`
+= a `Act::None` Conv + `sigmoid`; `transform.0/.1` is conv+BN+ReLU = `Act::Relu`;
+`transform.3` is a biased conv (`conv_bias`). Only MinimalMultiScale has BN over
+a sum.
+
+**Then:** the remaining 7 blocks (StripPooling, GlobalContext, CrossScale, SPPF,
+UltraLightFusion, FastConvexUpsample ×2), `model.rs` (encoder/decoder +
+`impl model::Model`), `loss.rs` (`ZipDepthLoss`), `import.rs`, and the p3 master
+gradcheck at **eps=5e-4**.
 
 ## Reference — the ZipDepth spec
 
