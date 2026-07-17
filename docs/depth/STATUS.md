@@ -140,12 +140,37 @@ their equivalence with a test so the duplication cannot drift.
   `mla_scores` and `layernorm_dgamma` bind 5, and WebGPU guarantees 8.
 - The p3 yolo gradcheck takes **~29 min** under contention; budget for it.
 
-## Next — P3, `crates/depth`: the ZipDepth model
+### P3 — `crates/depth` (in progress)
 
-The kernel layer is complete; this is now purely composition. Everything below is
-verified against the two released checkpoints (`strict=True`, zero missing/
-unexpected keys) — see `resources/depth-models/README.md` and the spec notes in
-this repo's plan.
+- **`config.rs` — the parameter layout, VERIFIED against both real checkpoints**,
+  key-by-key and shape-by-shape, with no GPU and no forward pass:
+  `zipdepth_base.pth` 235 float tensors + 43 counters → 0 missing / 0 extra /
+  0 shape-mismatched; `zipdepth_base_npu.pth` 239 + 44 → likewise. Plus
+  unconditional unit tests pinning the counts and element totals
+  (6,802,927−43 and 6,801,324−44).
+  This was built first on purpose: it is pure structure, so the config, channel
+  derivations, `_pick_groups`, BN placement, bias decisions and naming are all
+  proven before any arithmetic exists to debug on top of them.
+  Param names are the **reference's own state_dict keys** (following yolo ↔
+  Ultralytics), so import is a 1:1 name match rather than a translation table.
+- **`fuse.rs` — RepVGG reparameterization.** Host-side only. Verified equivalent
+  to the unfused three-branch forward against an independent host convolution,
+  across residual / no-residual / downsample / grouped / depthwise.
+- **`fold_bn` moved `crates/npu` → `crates/vision`.** It is a property of the conv
+  block (what `Conv`'s eval path already does), not of quantization; it had zero
+  imports and three consumers, only one of which is the NPU. The move lets
+  `crates/depth` reuse it without depending on npu's OpenVINO runtime. npu
+  re-exports it, so `topology.rs`/`sim.rs` are untouched.
+
+**Still to do in P3:** `blocks.rs` (the 10 ZipDepth modules' fwd+bwd wiring),
+`model.rs` (encoder/decoder + `impl model::Model`), `loss.rs` (`ZipDepthLoss`),
+`import.rs`, and the p3 master gradcheck at **eps=5e-4**. This is the largest
+remaining single piece of the workstream.
+
+## Reference — the ZipDepth spec
+
+Everything below is verified against the two released checkpoints
+(`strict=True`, zero missing/unexpected keys).
 
 **Config (base/balanced, the 6.1M model):** `dims=[48,96,192,384]`,
 `depths=[2,2,6,2]`, `dec_ch=96`, `half_dec_ch=32`.
@@ -166,7 +191,7 @@ this repo's plan.
 | `FastConvexUpsample` (unfold) | `ConvBN` + `conv2d_gd`(→36, bias) + `softmax_k`(K=9) + `convex_upsample` |
 | `FastConvexUpsample` (npu) | 1×1 + `bn` + relu + depthwise 5×5 + `bn` + relu + 1×1 + `sigmoid` + blend of `resize_nearest`/`resize_bilinear` |
 
-**Gotchas already established:**
+**Gotchas already established** (all now enforced by tests in `config.rs`/`fuse.rs`):
 - ImageNet normalize is **inside** the model; `mean`/`std` are `(1,3,1,1)` buffers
   **in the state_dict**.
 - Output is `[B,1,H,W]` at **exactly** the input resolution, final **ReLU** →
@@ -180,3 +205,18 @@ this repo's plan.
 - Gradcheck at **eps=5e-4** (not 5e-3), per `yolo/tests/p3_gradcheck.rs:36-44`.
 
 Then: P4 (data/train/eval), P5 (demo), P6 (NPU), P7 (DA3), P8 (docs).
+
+## Reuse rules established this workstream
+
+1. **Before adding a kernel, check whether an existing one covers it under
+   degenerate arguments** — and settle it with a test, not by reading.
+   `strip_pool` and `softmax_hw` were written, shown bit-identical to
+   `avgpool2d`/`softmax_k`, and deleted.
+2. **If you keep a duplicate, it must be earned and pinned.** `resize_nearest` vs
+   `upsample2` is kept only because `upsample2` has a name-bound vectorized CPU
+   path; a test pins that they agree so they cannot drift.
+3. **A pure function must not gate a model crate on a hardware backend.**
+   `fold_bn` had zero imports and lived in `crates/npu`; it moved to
+   `crates/vision` so `crates/depth` could reuse it without inheriting OpenVINO.
+4. **Structure before arithmetic.** The param layout was verified against the real
+   checkpoint before a single kernel was dispatched.
