@@ -1,0 +1,156 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! ZipDepth's kernel registry.
+//!
+//! The pipeline order here is ZipDepth's own and bears no relation to yolo's —
+//! which is exactly why the shared `vision` blocks resolve their kernels BY NAME
+//! ([`vision::ConvKernelIds::resolve`]) rather than by a positional constant. This
+//! model registers only what it dispatches; anything it omits resolves to
+//! `vision::NONE` and panics naming the kernel if reached, instead of silently
+//! running whatever happens to sit at that index.
+//!
+//! Note there is no `relu` entry: `leaky_relu` with `slope = 0` IS ReLU in both
+//! directions (`v>=0 -> v` else `0*v`; `x>=0 -> dy` else `0*dy`), and `slope` is a
+//! bit-cast f32 in the uniform, so ZipDepth's activation costs no new kernel.
+
+use std::sync::OnceLock;
+
+use vision::ConvKernelIds;
+
+/// Kernel registry passed to `Gpu::new`/`Gpu::new_cpu`.
+///
+/// Ordered by concern, not by any external contract — nothing indexes this array
+/// positionally.
+pub const PIPELINES: &[(&str, &str)] = &[
+    // ---- conv (grouped + dilated; ZipDepth is grouped conv end to end) ----
+    ("conv2d_gd", kernels::CONV2D_GD),
+    ("conv2d_gd_dx", kernels::CONV2D_GD_DX),
+    ("conv2d_gd_dw", kernels::CONV2D_GD_DW),
+    ("bias_add", kernels::BIAS_ADD),
+    ("bias_grad", kernels::BIAS_GRAD),
+    // ---- batchnorm ----
+    ("bn_stats", kernels::BN_STATS),
+    ("bn_running", kernels::BN_RUNNING),
+    ("bn_train", kernels::BN_TRAIN),
+    ("bn_eval", kernels::BN_EVAL),
+    ("bn_dstats", kernels::BN_DSTATS),
+    ("bn_dx", kernels::BN_DX),
+    ("bn_dgamma", kernels::BN_DGAMMA),
+    ("bn_dbeta", kernels::BN_DBETA),
+    // ---- activations (relu == leaky_relu at slope 0) ----
+    ("leaky_relu", kernels::LEAKY_RELU),
+    ("leaky_relu_bwd", kernels::LEAKY_RELU_BWD),
+    ("sigmoid", kernels::SIGMOID),
+    ("sigmoid_bwd", kernels::SIGMOID_BWD),
+    // ---- spatial ----
+    ("maxpool5", kernels::MAXPOOL5), // LightweightSPPF: K/pad are params
+    ("maxpool5_dx", kernels::MAXPOOL5_DX),
+    ("avgpool2d", kernels::AVGPOOL2D), // SE pool, cross-scale down, strip pool
+    ("avgpool2d_dx", kernels::AVGPOOL2D_DX),
+    ("resize_bilinear", kernels::RESIZE_BILINEAR),
+    ("resize_bilinear_dx", kernels::RESIZE_BILINEAR_DX),
+    ("resize_nearest", kernels::RESIZE_NEAREST),
+    ("resize_nearest_dx", kernels::RESIZE_NEAREST_DX),
+    ("pixel_shuffle", kernels::PIXEL_SHUFFLE),
+    ("pixel_shuffle_dx", kernels::PIXEL_SHUFFLE_DX),
+    // ---- attention / context ----
+    ("softmax_k", kernels::SOFTMAX_K), // both the 9-neighbour axis AND (M=1) the map
+    ("softmax_k_dx", kernels::SOFTMAX_K_DX),
+    ("weighted_gap", kernels::WEIGHTED_GAP),
+    ("weighted_gap_dx", kernels::WEIGHTED_GAP_DX),
+    ("weighted_gap_dm", kernels::WEIGHTED_GAP_DM),
+    ("add_chan_bcast", kernels::ADD_CHAN_BCAST),
+    ("add_chan_bcast_dv", kernels::ADD_CHAN_BCAST_DV),
+    ("broadcast_add_hw", kernels::BROADCAST_ADD_HW),
+    ("broadcast_add_hw_da", kernels::BROADCAST_ADD_HW_DA),
+    ("convex_upsample", kernels::CONVEX_UPSAMPLE),
+    ("convex_upsample_dmask", kernels::CONVEX_UPSAMPLE_DMASK),
+    ("convex_upsample_dd", kernels::CONVEX_UPSAMPLE_DD),
+    // ---- elementwise / plumbing ----
+    ("add2", kernels::ADD2),
+    ("mul", kernels::MUL),
+    ("scale_chan", kernels::SCALE_CHAN),
+    ("concat2", kernels::CONCAT2),
+    ("concat_split", kernels::CONCAT_SPLIT),
+    ("chan_place", kernels::CHAN_PLACE),
+    // ---- loss ----
+    ("masked_l1", kernels::MASKED_L1),
+    ("masked_l1_grad", kernels::MASKED_L1_GRAD),
+    // ---- optimizer ----
+    ("adamw", kernels::ADAMW),
+    ("gradnorm_sq", kernels::GRADNORM_SQ),
+    ("grad_scale", kernels::GRAD_SCALE),
+    ("clip_coef", kernels::CLIP_COEF),
+    ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
+];
+
+/// Optimizer kernel indices. These ARE looked up positionally (`Optim::new` takes
+/// bare indices), so unlike the block kernels they need constants — kept next to
+/// the array they index.
+pub fn optim_ids() -> (usize, usize, usize, usize, usize) {
+    let k = |n: &str| PIPELINES.iter().position(|(m, _)| *m == n).expect("optimizer kernel missing");
+    (k("adamw"), k("gradnorm_sq"), k("grad_scale"), k("clip_coef"), k("grad_scale_buf"))
+}
+
+/// The shared conv blocks' kernel ids, resolved by name against [`PIPELINES`].
+pub fn ids() -> &'static ConvKernelIds {
+    static IDS: OnceLock<ConvKernelIds> = OnceLock::new();
+    IDS.get_or_init(|| ConvKernelIds::resolve(PIPELINES))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_registered_kernel_name_exists() {
+        for (name, _) in PIPELINES {
+            assert!(
+                kernels::ALL.iter().any(|(n, _)| n == name),
+                "PIPELINES registers `{name}`, which is not in the kernel registry"
+            );
+        }
+    }
+
+    #[test]
+    fn no_duplicate_registrations() {
+        let mut seen = std::collections::HashSet::new();
+        for (name, _) in PIPELINES {
+            assert!(seen.insert(*name), "`{name}` registered twice");
+        }
+    }
+
+    /// The blocks reach their kernels through `Ctx.ids`, so anything ZipDepth's
+    /// blocks dispatch must resolve. A missing one would panic at build time
+    /// naming the kernel — this catches it in a fast unit test instead.
+    #[test]
+    fn the_conv_block_kernels_all_resolve() {
+        let i = ids();
+        for (id, what) in [
+            (i.bn_stats, "bn_stats"),
+            (i.bn_train, "bn_train"),
+            (i.bn_eval, "bn_eval"),
+            (i.bn_dstats, "bn_dstats"),
+            (i.bn_dx, "bn_dx"),
+            (i.bn_dgamma, "bn_dgamma"),
+            (i.bn_dbeta, "bn_dbeta"),
+            (i.add2, "add2"),
+            (i.concat2, "concat2"),
+            (i.maxpool5, "maxpool5"),
+        ] {
+            assert_ne!(id, vision::NONE, "`{what}` did not resolve");
+        }
+    }
+
+    /// ZipDepth registers no `conv2d`/`silu`, and that is deliberate: it is
+    /// grouped-conv + ReLU throughout. Resolving to NONE is the CORRECT outcome —
+    /// `need()` then panics naming the kernel rather than dispatching a wrong one.
+    #[test]
+    fn kernels_zipdepth_does_not_use_resolve_to_none() {
+        let i = ids();
+        assert_eq!(i.conv2d, vision::NONE, "ZipDepth uses conv2d_gd, not dense conv2d");
+        assert_eq!(i.silu, vision::NONE, "ZipDepth is ReLU, not SiLU");
+        assert_eq!(i.upsample2, vision::NONE, "ZipDepth resizes to arbitrary sizes");
+    }
+}
