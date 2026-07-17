@@ -395,6 +395,35 @@ likewise untested here.
 **Not started**: P4 (train/eval from scratch — the other half of the goal), P6
 (NPU quant), P7 (DA3).
 
+### P6 (measurement done) — the INT8 decision, with a plan-changing finding
+
+`brain depth calib --report` runs pretrained ZipDepth on real images and reports
+each conv's `outlier_ratio = absmax / p99.99` — the INT8-hostility signal — with
+NO NPU and NO OpenVINO, entirely on `--device cpu`. This is the plan's "run FIRST"
+step, and it did its job: it **removed** work rather than added it.
+
+**FINDING (real zipdepth_base.pth, 17 images):** ENCODER mean outlier_ratio 4.99,
+DECODER mean 3.98. **The decoder is NOT the quant-sensitive part** — which
+CONTRADICTS the QuartDepth prior (a ViT-L/DPT result) for this 6.1M pure-conv net.
+The worst layers (ratio 15-21) are all in the ENCODER's deep downsampling path:
+`down4`, `cross_scale.high_to_low`, and the GCB softmax `context_weight`. So the
+plan's expensive FP-decoder ablation is **unnecessary**; the INT8 policy should
+keep a handful of NAMED high-tail layers in FP, encoder or decoder alike.
+
+Mechanics: `vision::Conv::apply_tap` — every conv now taps at its input, including
+the Norm::None raw convs (fusion projections, head, GCB's raw convs) the eval path
+skipped before (which would have blinded the decoder analysis). yolo's forward pin
+stays bitwise identical. `depth::quant::ActStatsCollector` is an observe-only
+ActTap. SE is the one intentional non-tap (raw conv2d on a [N,C,1,1] descriptor).
+
+**REMAINING in P6 (larger, partly not verifiable here):**
+- The fake-quant SIM (quantify actual INT8 output loss, and the keep-top-K-FP
+  ablation). Coupled to the FUSED export topology: ZipDepth's QARepBlocks run 3
+  branches at train time but the INT8 graph quantizes the ONE fused biased 3x3, so
+  a faithful sim needs the fused inference graph (not just yolo's fold_bn trick).
+- ONNX export + OpenVINO + real `--device npu`. Needs NPU hardware to validate;
+  this environment has none.
+
 ## Reference — the ZipDepth spec
 
 Everything below is verified against the two released checkpoints
