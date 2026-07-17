@@ -25,6 +25,7 @@ pub mod init;
 pub mod net;
 pub mod fuse;
 pub mod import;
+pub mod viz;
 pub mod model;
 
 pub use config::{pick_groups, GlobalMode, ZipConfig};
