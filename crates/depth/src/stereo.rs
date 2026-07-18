@@ -33,11 +33,20 @@ pub struct StereoOpts {
 }
 
 impl StereoOpts {
-    /// Sensible defaults for a frame `w` px wide: ~5–6 pattern repeats, and a
-    /// stronger depth budget (`mu = 0.5`) so the relief reads clearly — 0.33 looked
-    /// flat in practice.
+    /// Defaults for a frame `w` px wide: 5 pattern repeats (so the textured tile is
+    /// a wide, meaningful `w/5` slice and the centre stripe is the image's centre),
+    /// and a stronger depth budget (`mu = 0.5`) so the relief reads clearly.
     pub fn for_width(w: u32) -> StereoOpts {
-        StereoOpts { eye_sep: (w / 5).clamp(90, 260), mu: 0.5, near_is_high: true }
+        StereoOpts::with_stripes(w, 5)
+    }
+
+    /// Choose the number of horizontal pattern repeats explicitly. Fewer stripes =
+    /// wider tile (more image per repeat, and closer to the eyes' physical
+    /// separation for comfortable free-viewing); more = denser. The far-plane tile
+    /// is `w/stripes` wide, and `eye_sep = 2 * tile`.
+    pub fn with_stripes(w: u32, stripes: u32) -> StereoOpts {
+        let stripes = stripes.max(2);
+        StereoOpts { eye_sep: (2 * w / stripes).clamp(60, 400), mu: 0.5, near_is_high: true }
     }
 }
 

@@ -142,6 +142,7 @@ OPTIONS:
   --colormap turbo|gray|grayinv   initial colormap (default turbo, cycle with [ ])
                        In-window keys: [ ] colormap, v cycle view, Esc quit
   --scale <n>          window pixel scale (default 2)
+  --stripes <n>        stereogram pattern repeats (default 5; fewer = wider slices)
   --infer engine|npu   engine = brain's CPU/GPU forward (default); npu = export to
                        ONNX and run on the Intel NPU (needs --variant npu)
   --headless           no window: write the composite PPM to --out and print a hash
@@ -159,6 +160,8 @@ struct Opts {
     out: String,
     /// "engine" (brain's own CPU/GPU forward) or "npu" (export -> OpenVINO NPU).
     infer: String,
+    /// Number of horizontal pattern repeats in the stereograms (default 5).
+    stripes: u32,
 }
 
 fn parse(args: &[String]) -> Opts {
@@ -172,6 +175,7 @@ fn parse(args: &[String]) -> Opts {
         headless: false,
         out: "out/depth.ppm".into(),
         infer: "engine".into(),
+        stripes: 5,
     };
     let mut i = 0;
     let next = |i: &mut usize| -> String {
@@ -195,6 +199,7 @@ fn parse(args: &[String]) -> Opts {
                 }
             }
             "--scale" => o.scale = next(&mut i).parse().unwrap_or(2),
+            "--stripes" => o.stripes = next(&mut i).parse().unwrap_or(5),
             "--headless" => o.headless = true,
             "--out" => o.out = next(&mut i),
             // `--infer npu` runs the exported ONNX on the Intel NPU via OpenVINO;
@@ -263,9 +268,9 @@ fn run_image(args: &[String]) {
     let bounds = Bounds::from_percentiles(&depth, 0.02, 0.98);
     let mut colormap = o.colormap;
     let mut mode = ViewMode::parse(&o.view);
-    // The stereogram's eye separation is sized to the frame width (its natural size),
-    // so it keeps the camera aspect rather than being stretched.
-    let stereo = depth::StereoOpts::for_width(w);
+    // The stereogram's eye separation is sized to the frame width and stripe count,
+    // so it keeps the camera aspect and shows `--stripes` repeats.
+    let stereo = depth::StereoOpts::with_stripes(w, o.stripes);
     let render = |mode: ViewMode, map: Colormap| render_view(&rgb8, &depth, w, h, mode, bounds, map, &stereo);
 
     if o.headless {
@@ -380,6 +385,7 @@ fn run_camera(args: &[String]) {
     let mut scale = 1u32;
     let mut view = "side".to_string();
     let mut infer = "engine".to_string();
+    let mut stripes = 5u32;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -408,6 +414,7 @@ fn run_camera(args: &[String]) {
                 }
             }
             "--scale" => scale = val().parse().unwrap_or(1),
+            "--stripes" => stripes = val().parse().unwrap_or(5),
             "--view" => view = val(),
             "--help" | "-h" => {
                 print!("{CAM_HELP}");
@@ -474,7 +481,7 @@ fn run_camera(args: &[String]) {
 
     // Each view renders at its natural size; the window resizes to match when `v`
     // cycles. Sized from the actual frame dims (cw/ch = the camera's negotiated res).
-    let stereo = depth::StereoOpts::for_width(cw);
+    let stereo = depth::StereoOpts::with_stripes(cw, stripes);
     let mut mode = ViewMode::parse(&view);
     let (mut win_w, mut win_h) = mode.canvas(cw, ch);
     let mut win = match wm_display::window::SdlWindow::new("brain depth", win_w, win_h, scale) {
