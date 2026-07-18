@@ -131,6 +131,7 @@ pub fn run_depth(args: &[String]) {
     match args.first().map(|s| s.as_str()) {
         Some("--image") | Some("image") => run_image(args),
         Some("calib") => run_calib(&args[1..]),
+        Some("train") => run_train(&args[1..]),
         Some("--help") | Some("-h") | None => print!("{HELP}"),
         Some(other) => {
             eprintln!("brain depth: unknown option '{other}'\n");
@@ -146,6 +147,9 @@ brain depth — monocular depth (ZipDepth)
 USAGE:
   brain depth --image <img>  --weights <ckpt.pth> [options]   # single image
   brain depth --camera       --weights <ckpt.pth> [options]   # realtime webcam
+  brain depth train --out <w.weights> [--steps N --batch B --lr X --size WxH
+                     --seed S --wd X --weights <init.pth>]    # train / fine-tune
+                    (synthetic RGB->depth pairs; loss printed per step)
 
 OPTIONS:
   --image <path>       input image (binary PPM 'P6', or a detection-dataset dir)
@@ -612,6 +616,100 @@ fn run_camera(_args: &[String]) {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Training path
+// ---------------------------------------------------------------------------
+
+/// `brain depth train` — the end-to-end loop on synthetic RGB->inverse-depth
+/// pairs: forward -> masked L1 -> backward -> AdamW (see `depth::train`).
+/// Placeholder-grade data, real loop; `--weights <ckpt.pth>` seeds from a
+/// released checkpoint (fine-tune), otherwise fresh `init_weights`.
+fn run_train(args: &[String]) {
+    let mut steps = 50u32;
+    let mut batch = 2u32;
+    let (mut w, mut h) = (64u32, 64u32);
+    let mut lr = 1e-3f32;
+    let mut wd = 0.0f32;
+    let mut seed = 7u64;
+    let mut out = String::new();
+    let mut weights = String::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let mut val = || {
+            i += 1;
+            args.get(i).cloned().unwrap_or_default()
+        };
+        match a {
+            "--steps" => steps = val().parse().unwrap_or(50),
+            "--batch" => batch = val().parse().unwrap_or(2),
+            "--lr" => lr = val().parse().unwrap_or(1e-3),
+            "--wd" => wd = val().parse().unwrap_or(0.0),
+            "--seed" => seed = val().parse().unwrap_or(7),
+            "--out" => out = val(),
+            "--weights" => weights = val(),
+            "--size" => {
+                let s = val();
+                if let Some((a, b)) = s.split_once('x') {
+                    w = a.parse().unwrap_or(64);
+                    h = b.parse().unwrap_or(64);
+                }
+            }
+            other => {
+                eprintln!("brain depth train: unknown option '{other}'");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    if out.is_empty() {
+        eprintln!("brain depth train: --out <file.weights> is required");
+        std::process::exit(2);
+    }
+    if w % 32 != 0 || h % 32 != 0 {
+        eprintln!("brain depth train: --size must be multiples of 32 (got {w}x{h})");
+        std::process::exit(2);
+    }
+
+    // Fine-tuning a released checkpoint must build the MATCHING variant; fresh
+    // training defaults to the base (unfold-upsampler) layout.
+    let cfg = if weights.is_empty() { ZipConfig::base() } else { cfg_for_checkpoint(&weights) };
+    let init = if weights.is_empty() {
+        depth::init_weights(&cfg, seed)
+    } else {
+        match depth::load_checkpoint(&weights, &cfg) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("brain depth train: loading {weights}: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
+
+    let gpu = Gpu::new(depth::net::PIPELINES);
+    let t = depth::train::TrainCfg { steps, batch, h, w, lr, wd, seed, fixed_batch: false };
+    println!(
+        "training zipdepth on synthetic pairs: {w}x{h} batch={batch} steps={steps} lr={lr} ({})",
+        if weights.is_empty() { "fresh init" } else { &weights }
+    );
+    let (ps, res) = depth::train::train_loop(&gpu, cfg, &t, &init, |step, loss| {
+        if step == 0 || (step + 1) % 10 == 0 || step + 1 == steps {
+            println!("step {:>5}/{steps}  loss {loss:.4}", step + 1);
+        }
+    });
+
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = ps
+        .params
+        .iter()
+        .map(|(name, _)| {
+            let n = ps.numel(name);
+            (name.clone(), vec![n as u64], gpu.read(ps.w(name), n))
+        })
+        .collect();
+    checkpoint::save(&out, serde_json::json!({ "model": "zipdepth", "variant": "base" }), &tensors);
+    println!("done: loss {:.4} -> {:.4}; saved {out}", res.first_loss, res.last_loss);
+}
+
 // `brain depth calib --report` — per-layer activation outlier ratios (the INT8
 // decision data, measured with NO NPU).
 // ---------------------------------------------------------------------------

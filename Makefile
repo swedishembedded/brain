@@ -45,7 +45,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release wm/play wm-fixtures test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo depth/demo depth/smoke depth/camera \
+.PHONY: help build release wm/play wm-fixtures test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo \
@@ -201,6 +201,13 @@ depth/smoke: release
 depth/camera: release
 	@test -n "$(ZIPDEPTH_PTH)" || (echo "set ZIPDEPTH_PTH=<zipdepth_base.pth>"; exit 2)
 	$(BRAIN) depth --camera --weights $(ZIPDEPTH_PTH) $(DEPTH_ARGS)
+
+# Train ZipDepth end to end on the synthetic RGB->depth pairs (placeholder data,
+# real loop: forward -> masked L1 -> backward -> AdamW; loss printed per step).
+# Fine-tune a released checkpoint instead with ZIPDEPTH_PTH set.
+train/zipdepth: release
+	$(BRAIN) depth train --out $(OUT)/zipdepth.weights --steps 50 --batch 2 \
+		$(if $(ZIPDEPTH_PTH),--weights $(ZIPDEPTH_PTH),)
 
 # ---- Intel NPU deployment (OpenVINO) --------------------------------------
 # Quantize the trained YOLO to INT8 and compile it to a real NPU graph.

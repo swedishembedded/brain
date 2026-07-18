@@ -128,6 +128,13 @@ pub fn optim_ids() -> (usize, usize, usize, usize, usize) {
     (k("adamw"), k("gradnorm_sq"), k("grad_scale"), k("clip_coef"), k("grad_scale_buf"))
 }
 
+/// The loss kernels' indices (`masked_l1`, `masked_l1_grad`) — positional for
+/// the same reason as [`optim_ids`].
+pub fn loss_ids() -> (usize, usize) {
+    let k = |n: &str| PIPELINES.iter().position(|(m, _)| *m == n).expect("loss kernel missing");
+    (k("masked_l1"), k("masked_l1_grad"))
+}
+
 /// The shared conv blocks' kernel ids, resolved by name against [`PIPELINES`].
 pub fn ids() -> &'static ConvKernelIds {
     static IDS: OnceLock<ConvKernelIds> = OnceLock::new();
