@@ -172,6 +172,12 @@ pub trait Backend: Send + Sync {
     fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32>;
     /// Block until all submitted device work has completed.
     fn poll_wait(&self);
+    /// Send recorded-but-unsubmitted work to the device WITHOUT waiting for
+    /// completion — the frame-pipelining hook: start the device on frame n,
+    /// overlap the host's preprocessing of frame n+1, synchronise at the next
+    /// `read`. Backends that execute eagerly at `submit` (CPU) have nothing
+    /// pending, so the default no-op is correct for them.
+    fn flush(&self) {}
 }
 
 /// wasm variant: no `Send + Sync` (WebGPU is single-threaded) and no blocking

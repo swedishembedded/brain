@@ -642,6 +642,12 @@ impl Backend for VulkanBackend {
     fn poll_wait(&self) {
         VulkanBackend::poll_wait(self)
     }
+    fn flush(&self) {
+        // This backend's flush fence-waits (its batch submission is
+        // synchronous by design), so there is no overlap win here — but the
+        // semantics ("all recorded work reaches the device") hold.
+        VulkanBackend::flush(self);
+    }
 }
 
 /// Register this backend under `"vulkan"`. The factory returns `Err` when no

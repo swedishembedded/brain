@@ -52,3 +52,21 @@ fn predict_produces_a_nonconstant_map() {
     // (Not a quality claim — just that the pipeline is not emitting a constant.)
     assert!(max - min > 1e-4 || max >= 0.0, "predictor emitted a flat map (min {min}, max {max})");
 }
+
+/// The pipelined split (`begin` + `finish`) computes exactly what the
+/// synchronous `predict` does — same preprocessing, same forward, same unwarp.
+/// The split exists so a camera loop can overlap frame n+1's host work with
+/// frame n's device compute; equivalence is what makes that overlap free.
+#[test]
+fn begin_finish_equals_predict() {
+    let gpu = Gpu::new_cpu(depth::net::PIPELINES);
+    let cfg = small_cfg();
+    let ps = store(&gpu, &cfg);
+    let p = Predictor::new(&gpu, cfg.clone(), ps);
+    let (w, h) = (80u32, 48u32);
+    let hwc: Vec<f32> = (0..(w * h * 3)).map(|i| ((i * 7 % 251) as f32) / 251.0).collect();
+    let sync = p.predict(&hwc, w, h);
+    p.begin(&hwc, w, h);
+    let split = p.finish();
+    assert_eq!(sync, split, "begin+finish must be bit-identical to predict");
+}

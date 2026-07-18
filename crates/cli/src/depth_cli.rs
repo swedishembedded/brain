@@ -567,6 +567,9 @@ fn run_camera(args: &[String]) {
     let mut bounds: Option<Bounds> = None;
     let mut fps = 0.0f32;
     let mut last = std::time::Instant::now();
+    // The one-frame pipeline: the frame whose inference is in flight (engine
+    // path only), kept so its RGB renders against its own depth.
+    let mut pipe_frame: Option<capture::Frame> = None;
     loop {
         let input = win.pump();
         if input.quit {
@@ -594,9 +597,26 @@ fn run_camera(args: &[String]) {
         };
         let hwc: Vec<f32> = frame.rgb.iter().map(|&b| b as f32 / 255.0).collect();
         let t0 = std::time::Instant::now();
-        let depth = match (&mut npu_sess, &predictor) {
-            (Some(sess), _) => run_npu_session(sess, &hwc, frame.w, frame.h, cam_th, cam_tw),
-            (None, Some(p)) => p.predict(&hwc, frame.w, frame.h),
+        // Engine path is PIPELINED: start this frame on the device, and while
+        // it computes, collect + render the PREVIOUS frame (its RGB is kept
+        // alongside so the composite panes stay aligned). Effective throughput
+        // becomes max(device, host) instead of their sum, at one frame of
+        // display latency. The first iteration primes the pipe; the NPU path
+        // stays synchronous (its session API blocks anyway).
+        let (frame, depth) = match (&mut npu_sess, &predictor) {
+            (Some(sess), _) => {
+                let d = run_npu_session(sess, &hwc, frame.w, frame.h, cam_th, cam_tw);
+                (frame, d)
+            }
+            (None, Some(p)) => {
+                let prev_depth = if p.in_flight() { Some(p.finish()) } else { None };
+                p.begin(&hwc, frame.w, frame.h);
+                let prev = pipe_frame.replace(frame);
+                match (prev, prev_depth) {
+                    (Some(pf), Some(d)) => (pf, d),
+                    _ => continue, // priming: nothing to show yet
+                }
+            }
             _ => unreachable!(),
         };
         let infer_ms = t0.elapsed().as_secs_f32() * 1000.0;

@@ -106,11 +106,15 @@ pub struct Predictor<'g> {
     ps: ParamStore,
     cfg: ZipConfig,
     built: RefCell<Option<Built>>,
+    /// The in-flight frame started by [`Predictor::begin`]: the source frame
+    /// geometry `(w0, h0)` and the model grid `(tw, th)` the depth must be
+    /// unwarped from. `None` when no frame is pending.
+    pending: RefCell<Option<(u32, u32, u32, u32)>>,
 }
 
 impl<'g> Predictor<'g> {
     pub fn new(gpu: &'g Gpu, cfg: ZipConfig, ps: ParamStore) -> Predictor<'g> {
-        Predictor { gpu, ps, cfg, built: RefCell::new(None) }
+        Predictor { gpu, ps, cfg, built: RefCell::new(None), pending: RefCell::new(None) }
     }
 
     pub fn input_size(&self) -> u32 {
@@ -125,7 +129,19 @@ impl<'g> Predictor<'g> {
     /// resize of the depth back to `w0 × h0`. The model normalizes internally, so
     /// the input stays `[0,1]`.
     pub fn predict(&self, hwc: &[f32], w0: u32, h0: u32) -> Vec<f32> {
+        self.begin(hwc, w0, h0);
+        self.finish()
+    }
+
+    /// Start inference for a frame: preprocess (host), upload, record the
+    /// forward and FLUSH it to the device — then return WITHOUT waiting. The
+    /// caller overlaps its own host work (capture, colorize, render of the
+    /// previous result) with the device compute and collects via
+    /// [`Predictor::finish`]. A second `begin` before `finish` would overwrite
+    /// the in-flight frame's input buffer, so it panics.
+    pub fn begin(&self, hwc: &[f32], w0: u32, h0: u32) {
         assert_eq!(hwc.len(), (w0 * h0 * 3) as usize, "hwc must be [h0*w0*3] RGB");
+        assert!(self.pending.borrow().is_none(), "begin() called with a frame already in flight");
         let (th, tw) = target_size(w0, h0, self.cfg.input);
 
         // (Re)build the model if the target size changed.
@@ -159,9 +175,26 @@ impl<'g> Predictor<'g> {
         self.gpu.write(&b.input, bytemuck::cast_slice(&chw));
         let ctx = Ctx::new(self.gpu, crate::net::ids());
         b.model.forward(&ctx, &self.ps, &b.input);
-        let depth_t = self.gpu.read(b.model.out(), hw);
+        // Send the recorded forward to the device now (no wait) — this is what
+        // buys the overlap; without it the work would only be submitted by the
+        // blocking read in `finish`.
+        self.gpu.flush();
+        *self.pending.borrow_mut() = Some((w0, h0, tw, th));
+    }
 
-        // Resize the depth back to the original frame grid.
+    /// Collect the frame started by [`Predictor::begin`]: block on the device,
+    /// read the depth and unwarp it onto the frame's own grid.
+    pub fn finish(&self) -> Vec<f32> {
+        let (w0, h0, tw, th) =
+            self.pending.borrow_mut().take().expect("finish() without a begin()");
+        let b = self.built.borrow();
+        let b = b.as_ref().unwrap();
+        let depth_t = self.gpu.read(b.model.out(), (th * tw) as usize);
         resize_map(&depth_t, tw, th, w0, h0)
+    }
+
+    /// Whether a `begin` is awaiting its `finish`.
+    pub fn in_flight(&self) -> bool {
+        self.pending.borrow().is_some()
     }
 }

@@ -160,6 +160,12 @@ mod native_facade {
         pub fn poll_wait(&self) {
             self.inner.poll_wait()
         }
+        /// Start all recorded work on the device without waiting (frame
+        /// pipelining: overlap host work with device compute; a later `read`
+        /// synchronises). No-op on eager backends (CPU).
+        pub fn flush(&self) {
+            self.inner.flush()
+        }
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
             self.inner.step(kind, bufs, params, threads)
         }

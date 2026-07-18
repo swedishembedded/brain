@@ -651,6 +651,11 @@ impl Backend for WgpuBackend {
     fn poll_wait(&self) {
         WgpuBackend::poll_wait(self)
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn flush(&self) {
+        // Submit the accumulated compute pass; no wait — the point is overlap.
+        WgpuBackend::flush(self);
+    }
 }
 
 /// Async read-back keyed by the neutral [`DeviceBuffer`] handle (wasm facade).
