@@ -25,6 +25,7 @@ struct Letterbox {
     scale: f32,
     pad_x: f32,
     pad_y: f32,
+    #[allow(dead_code)]
     size: u32,
 }
 

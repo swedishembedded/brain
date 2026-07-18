@@ -4,7 +4,7 @@
 //! P6: per-layer activation statistics for the INT8 decision (measured, no NPU).
 use std::collections::HashMap;
 
-use depth::{collect_activation_stats, ZipConfig, ZipDepth};
+use depth::{collect_activation_stats, ZipConfig};
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 use vision::Ctx;

@@ -55,6 +55,7 @@ const OFF_PIX_WIDTH: usize = 0;
 const OFF_PIX_HEIGHT: usize = 4;
 const OFF_PIX_PIXFMT: usize = 8;
 const OFF_PIX_FIELD: usize = 12;
+#[allow(dead_code)]
 const OFF_PIX_SIZEIMAGE: usize = 20;
 const OFF_REQ_COUNT: usize = 0;
 const OFF_REQ_TYPE: usize = 4;

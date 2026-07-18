@@ -2,7 +2,6 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! P5: the single-frame predictor — letterbox, forward, unwarp.
-use std::collections::HashMap;
 
 use depth::{Predictor, ZipConfig, ZipDepth};
 use gpu_core::Gpu;

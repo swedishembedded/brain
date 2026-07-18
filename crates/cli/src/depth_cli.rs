@@ -249,6 +249,8 @@ OPTIONS:
   --colormap turbo|gray|grayinv   initial colormap (cycle with [ ])
   --scale <n>          window pixel scale (default 1)
   --view side|depth    side-by-side (default) or depth only
+  --infer engine|npu   engine = brain CPU/GPU (default); npu = Intel NPU (needs
+                       --variant npu)
 Esc quits. Forces YUYV — an MJPEG-only camera is rejected (no JPEG decoder).
 ";
 
@@ -266,6 +268,7 @@ fn run_camera(args: &[String]) {
     let mut colormap = Colormap::Turbo;
     let mut scale = 1u32;
     let mut view = "side".to_string();
+    let mut infer = "engine".to_string();
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -275,6 +278,7 @@ fn run_camera(args: &[String]) {
         };
         match a {
             "--camera" => {}
+            "--infer" => infer = val(),
             "--weights" => weights = val(),
             "--variant" => variant = val(),
             "--device-path" => dev_path = val(),
@@ -342,14 +346,20 @@ fn run_camera(args: &[String]) {
         }
     });
 
-    // Load the model once.
+    // Build the inference backend once: brain's engine, or a compiled NPU session.
+    let use_npu = infer == "npu";
     let gpu = Gpu::new(depth::net::PIPELINES);
-    let ps = import::load_into(&gpu, &weights, &cfg).unwrap_or_else(|e| {
-        eprintln!("brain depth: loading {weights}: {e}");
-        running.store(false, Ordering::Relaxed);
-        std::process::exit(1);
-    });
-    let predictor = Predictor::new(&gpu, cfg, ps);
+    let mut npu_sess = if use_npu { Some(build_npu_session(&weights, &cfg)) } else { None };
+    let predictor = if use_npu {
+        None
+    } else {
+        let ps = import::load_into(&gpu, &weights, &cfg).unwrap_or_else(|e| {
+            eprintln!("brain depth: loading {weights}: {e}");
+            running.store(false, Ordering::Relaxed);
+            std::process::exit(1);
+        });
+        Some(Predictor::new(&gpu, cfg.clone(), ps))
+    };
 
     // Window sized for the composite (side) or the frame (depth).
     let out_w = if view == "depth" { cw } else { cw * 2 };
@@ -384,7 +394,11 @@ fn run_camera(args: &[String]) {
         };
         let hwc: Vec<f32> = frame.rgb.iter().map(|&b| b as f32 / 255.0).collect();
         let t0 = std::time::Instant::now();
-        let depth = predictor.predict(&hwc, frame.w, frame.h);
+        let depth = match (&mut npu_sess, &predictor) {
+            (Some(sess), _) => run_npu_session(sess, &cfg, &hwc, frame.w, frame.h),
+            (None, Some(p)) => p.predict(&hwc, frame.w, frame.h),
+            _ => unreachable!(),
+        };
         let infer_ms = t0.elapsed().as_secs_f32() * 1000.0;
 
         // EMA the depth window so the colors do not breathe frame-to-frame.
@@ -437,7 +451,7 @@ fn run_calib(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         let a = args[i].clone();
-        let mut val = |i: &mut usize| {
+        let val = |i: &mut usize| {
             *i += 1;
             args.get(*i).cloned().unwrap_or_default()
         };
@@ -555,9 +569,9 @@ fn letterbox_chw(hwc: &[f32], w0: u32, h0: u32, size: u32) -> Vec<f32> {
 // NPU inference: export ZipDepth to ONNX, compile on the Intel NPU, run.
 // ---------------------------------------------------------------------------
 
-/// Predict depth on the NPU: letterbox the frame, run the exported ONNX via
-/// OpenVINO, unwarp back to the frame grid. Mirrors depth::Predictor's geometry.
-fn predict_npu(weights: &str, cfg: &ZipConfig, hwc: &[f32], w0: u32, h0: u32) -> Vec<f32> {
+/// Export ZipDepth to ONNX and compile it on the NPU (once). The blend/where_conv
+/// variant is required (`--variant npu`).
+fn build_npu_session(weights: &str, cfg: &ZipConfig) -> npu::openvino::NpuSession {
     use npu::openvino::{NpuConfig, NpuDevice, NpuSession};
     assert!(!cfg.upsample_unfold, "--infer npu needs --variant npu (the blend upsampler)");
     let init = depth::import::load(weights, cfg).unwrap_or_else(|e| {
@@ -566,13 +580,24 @@ fn predict_npu(weights: &str, cfg: &ZipConfig, hwc: &[f32], w0: u32, h0: u32) ->
     });
     let mut g = onnx::GraphBuilder::new("zipdepth");
     npu::build_depth_graph(cfg, &init, &mut g);
-    let mut sess = NpuSession::load_bytes(&g.finish(), &NpuConfig { device: NpuDevice::Npu, allow_fallback: true, ..Default::default() })
+    let sess = NpuSession::load_bytes(&g.finish(), &NpuConfig { device: NpuDevice::Npu, allow_fallback: true, ..Default::default() })
         .unwrap_or_else(|e| {
             eprintln!("brain depth: NPU compile failed: {e}");
             std::process::exit(1);
         });
-    eprintln!("depth: running on {}", sess.device());
+    eprintln!("depth: compiled ZipDepth for {}", sess.device());
+    sess
+}
 
+/// One-shot NPU predict for the image path (compile + run).
+fn predict_npu(weights: &str, cfg: &ZipConfig, hwc: &[f32], w0: u32, h0: u32) -> Vec<f32> {
+    let mut sess = build_npu_session(weights, cfg);
+    run_npu_session(&mut sess, cfg, hwc, w0, h0)
+}
+
+/// Run one frame on an already-compiled NPU session: letterbox, infer, unwarp back
+/// to the frame grid. Mirrors depth::Predictor's geometry.
+fn run_npu_session(sess: &mut npu::openvino::NpuSession, cfg: &ZipConfig, hwc: &[f32], w0: u32, h0: u32) -> Vec<f32> {
     // Letterbox into a [3,sz,sz] CHW input (grey pad), matching the predictor.
     let sz = cfg.input;
     let scale = (sz as f32 / w0 as f32).min(sz as f32 / h0 as f32);
