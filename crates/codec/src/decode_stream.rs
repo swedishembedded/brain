@@ -542,7 +542,7 @@ mod tests {
         cfg.upsample_rates = vec![2, 2];
 
         let mut w: W = HashMap::new();
-        let mut fill = |w: &mut W, name: &str, n: usize, seed: &mut u64| {
+        let fill = |w: &mut W, name: &str, n: usize, seed: &mut u64| {
             w.insert(name.to_string(), (0..n).map(|_| rng(seed)).collect());
         };
         let latent = 4usize;

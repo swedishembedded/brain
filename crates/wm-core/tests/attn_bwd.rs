@@ -6,16 +6,6 @@
 //! all heads=1). T small so the numpy-free reference is cheap and exact.
 use gpu_core::Gpu;
 
-const K: [(&str, &str); 6] = [
-    ("nchw_nlc", kernels::NCHW_NLC),
-    ("attn_scores_bidir", kernels::ATTN_SCORES_BIDIR),
-    ("attn_softmax_bidir", kernels::ATTN_SOFTMAX_BIDIR),
-    ("attn_apply_bidir", kernels::ATTN_APPLY_BIDIR),
-    ("attn_bwd_dscores_bidir", kernels::ATTN_BWD_DSCORES_BIDIR),
-    ("attn_bwd_dv_bidir", kernels::ATTN_BWD_DV_BIDIR),
-];
-// second table with dq/dk (6 storage total across two dispatches — separate Gpu not needed)
-
 fn rand(seed: u64, n: usize) -> Vec<f32> {
     let mut s = seed;
     (0..n).map(|_| { s = s.wrapping_add(0x9E3779B97F4A7C15); let mut z=s;
