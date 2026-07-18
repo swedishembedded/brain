@@ -416,13 +416,33 @@ skipped before (which would have blinded the decoder analysis). yolo's forward p
 stays bitwise identical. `depth::quant::ActStatsCollector` is an observe-only
 ActTap. SE is the one intentional non-tap (raw conv2d on a [N,C,1,1] descriptor).
 
-**REMAINING in P6 (larger, partly not verifiable here):**
-- The fake-quant SIM (quantify actual INT8 output loss, and the keep-top-K-FP
-  ablation). Coupled to the FUSED export topology: ZipDepth's QARepBlocks run 3
-  branches at train time but the INT8 graph quantizes the ONE fused biased 3x3, so
-  a faithful sim needs the fused inference graph (not just yolo's fold_bn trick).
-- ONNX export + OpenVINO + real `--device npu`. Needs NPU hardware to validate;
-  this environment has none.
+### P6 (fp32 NPU DEPLOYMENT DONE — the NPU was here all along)
+
+The NPU IS available in this environment (Intel AI Boost, Core Ultra 7 155H,
+`/dev/accel/accel0`, OpenVINO 2026.2.1 auto-discovered from the venv). An earlier
+claim that it wasn't was WRONG.
+
+**ZipDepth runs on the Intel NPU end to end with exact parity.**
+`npu::depth_topology::build_depth_graph` walks `depth::ZipDepth`'s graph and emits
+fp32 ONNX for the blend/where_conv (NPU) variant — its upsampler is
+Conv/BN/Relu/Sigmoid/Resize/Mul/Add only (no unfold/softmax-9/pixel-shuffle), so
+every op is a standard NPU node. `fuse_qarep` collapses each RepVGG block to one
+biased 3x3, BN folds into every conv.
+
+Measured (`tests/depth_onnx.rs`, env-gated on ZIPDEPTH_NPU_PTH):
+  OpenVINO CPU: cosine(brain-CPU, ONNX) = **1.00000**, max|Δ| = 0.0000 (graph EXACT)
+  Intel NPU:    cosine = **0.99998**, max|Δ| = 0.0003 (fp16 internal precision)
+Every block matched brain's forward on the FIRST parity run. Visually confirmed on
+the ZipDepth sample. `npu::tests::npu_live` separately proves a brain-built ONNX
+compiles+runs on the device.
+
+`brain depth --image <ppm> --weights <npu.pth> --variant npu --infer npu` runs the
+demo on the NPU through the CLI. **The demo now runs on all three targets:** CPU +
+GPU via brain's engine (`--device cpu|vulkan`), Intel NPU via `--infer npu`.
+
+**REMAINING in P6:** INT8 quantization — emit QDQ convs (yolo's topology already
+has the pattern) keeping the handful of high-tail layers (from the outlier report)
+in FP, and measure the accuracy. The fp32 path is the harder, now-done part.
 
 ## Reference — the ZipDepth spec
 
