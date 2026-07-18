@@ -57,9 +57,24 @@ fn seed_color(x: usize, y: usize) -> [u8; 3] {
     [(h & 0xff) as u8, ((h >> 8) & 0xff) as u8, ((h >> 16) & 0xff) as u8]
 }
 
-/// Render a `[h*w]` depth map as a `w×h` RGB8 autostereogram, using `bounds` to
-/// normalize depth to `[0,1]`.
+/// Render a `[h*w]` depth map as a `w×h` RGB8 autostereogram of RANDOM DOTS.
 pub fn autostereogram(depth: &[f32], w: u32, h: u32, bounds: Bounds, opts: &StereoOpts) -> Vec<u8> {
+    build(depth, w, h, bounds, opts, None)
+}
+
+/// A TEXTURED autostereogram: unconstrained pixels are seeded from `source`
+/// (row-major RGB8, same `w×h`) instead of random dots, so the stereogram is made
+/// of the camera image's own colours and local textures — free-view it and the
+/// depth pops while the surface stays recognizably the photo. A single-image
+/// stereogram can only show one pattern period repeated, so the image tiles/warps,
+/// but disocclusions at depth edges reveal fresh image content where the geometry
+/// changes.
+pub fn autostereogram_textured(depth: &[f32], w: u32, h: u32, bounds: Bounds, opts: &StereoOpts, source: &[u8]) -> Vec<u8> {
+    assert_eq!(source.len(), (w * h * 3) as usize, "source must be [h*w*3] RGB");
+    build(depth, w, h, bounds, opts, Some(source))
+}
+
+fn build(depth: &[f32], w: u32, h: u32, bounds: Bounds, opts: &StereoOpts, source: Option<&[u8]>) -> Vec<u8> {
     assert_eq!(depth.len(), (w * h) as usize, "depth must be [h*w]");
     let (wi, hi) = (w as usize, h as usize);
     let e = opts.eye_sep as f32;
@@ -118,7 +133,10 @@ pub fn autostereogram(depth: &[f32], w: u32, h: u32, bounds: Bounds, opts: &Ster
         // Assign colours left-to-right so each `same[x]` source is already set.
         for x in 0..wi {
             let color = if same[x] == x {
-                seed_color(x, y)
+                match source {
+                    Some(src) => [src[(y * wi + x) * 3], src[(y * wi + x) * 3 + 1], src[(y * wi + x) * 3 + 2]],
+                    None => seed_color(x, y),
+                }
             } else {
                 let s = same[x];
                 [out[(y * wi + s) * 3], out[(y * wi + s) * 3 + 1], out[(y * wi + s) * 3 + 2]]

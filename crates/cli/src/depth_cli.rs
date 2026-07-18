@@ -22,20 +22,26 @@ use wm_display::sink::{FrameSink, Hud};
 use crate::image_io;
 
 /// What the demo shows. `v` cycles these live; `--view` picks the initial one.
+/// Each view renders at its NATURAL size (side is 2w wide, the rest are w wide), so
+/// the stereogram keeps the camera's aspect — the window resizes to match.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
-    /// RGB | colorized depth, side by side.
+    /// RGB | colorized depth, side by side (2w × h).
     Side,
-    /// Colorized depth alone, centered.
+    /// Colorized depth alone (w × h).
     Depth,
-    /// A Magic-Eye autostereogram of the depth (free-view to see 3D).
+    /// A random-dot Magic-Eye autostereogram of the depth (w × h).
     Stereo,
+    /// A TEXTURED autostereogram: the camera image itself is the pattern, so you see
+    /// the photo's textures with depth (w × h).
+    StereoTex,
 }
 
 impl ViewMode {
     fn parse(s: &str) -> ViewMode {
         match s {
-            "stereo" | "magiceye" | "magic" => ViewMode::Stereo,
+            "stereo" | "magiceye" | "magic" | "dots" => ViewMode::Stereo,
+            "stereo-image" | "stereo-tex" | "textured" | "photo" => ViewMode::StereoTex,
             "depth" => ViewMode::Depth,
             _ => ViewMode::Side,
         }
@@ -44,7 +50,8 @@ impl ViewMode {
         match self {
             ViewMode::Side => ViewMode::Depth,
             ViewMode::Depth => ViewMode::Stereo,
-            ViewMode::Stereo => ViewMode::Side,
+            ViewMode::Stereo => ViewMode::StereoTex,
+            ViewMode::StereoTex => ViewMode::Side,
         }
     }
     fn label(self) -> &'static str {
@@ -52,13 +59,19 @@ impl ViewMode {
             ViewMode::Side => "SIDE",
             ViewMode::Depth => "DEPTH",
             ViewMode::Stereo => "STEREO",
+            ViewMode::StereoTex => "STEREO-IMG",
+        }
+    }
+    /// The window/canvas size this view renders at, for a `w × h` frame.
+    fn canvas(self, w: u32, h: u32) -> (u32, u32) {
+        match self {
+            ViewMode::Side => (2 * w, h),
+            _ => (w, h),
         }
     }
 }
 
-/// Render one view into a canvas that is ALWAYS `2w × h`, so the SDL window never
-/// has to resize when `v` cycles the mode. Side fills it naturally; depth is
-/// centered with bars; the autostereogram is rendered at the full width.
+/// Render one view at its natural size (see [`ViewMode::canvas`]).
 #[allow(clippy::too_many_arguments)]
 fn render_view(
     rgb8: &[u8],
@@ -70,37 +83,15 @@ fn render_view(
     colormap: Colormap,
     stereo: &depth::StereoOpts,
 ) -> Vec<u8> {
-    let cw = 2 * w;
     match mode {
         ViewMode::Side => {
             let dcol = colorize(depth, bounds, colormap);
             composite_side_by_side(rgb8, w, h, &dcol, w, h).0
         }
-        ViewMode::Depth => {
-            let dcol = colorize(depth, bounds, colormap);
-            center_in(&dcol, w, h, cw)
-        }
-        ViewMode::Stereo => {
-            // Full-window Magic Eye: resize the depth to the canvas width first so
-            // the stereogram uses the whole pane (more area = easier to fuse).
-            let d2 = resize_map(depth, w, h, cw, h);
-            let mut so = *stereo;
-            so.eye_sep = depth::StereoOpts::for_width(cw).eye_sep;
-            depth::autostereogram(&d2, cw, h, bounds, &so)
-        }
+        ViewMode::Depth => colorize(depth, bounds, colormap),
+        ViewMode::Stereo => depth::autostereogram(depth, w, h, bounds, stereo),
+        ViewMode::StereoTex => depth::autostereogram_textured(depth, w, h, bounds, stereo, rgb8),
     }
-}
-
-/// Center a `w×h` RGB image in a `cw×h` black canvas.
-fn center_in(img: &[u8], w: u32, h: u32, cw: u32) -> Vec<u8> {
-    let mut out = vec![0u8; (cw * h * 3) as usize];
-    let x0 = (cw - w) / 2;
-    for y in 0..h {
-        let src = (y * w * 3) as usize;
-        let dst = ((y * cw + x0) * 3) as usize;
-        out[dst..dst + (w * 3) as usize].copy_from_slice(&img[src..src + (w * 3) as usize]);
-    }
-    out
 }
 
 pub fn run_depth(args: &[String]) {
@@ -132,8 +123,9 @@ OPTIONS:
   --image <path>       input image (binary PPM 'P6', or a detection-dataset dir)
   --weights <path>     ZipDepth .pth checkpoint (imported 1:1 by name)
   --variant base|npu   which checkpoint layout (default base = unfold upsampler)
-  --view side|depth|stereo  side-by-side RGB|depth (default), depth only, or a
-                       Magic-Eye autostereogram (free-view to see 3D)
+  --view side|depth|stereo|stereo-image  side-by-side RGB|depth (default), depth
+                       only, a random-dot Magic-Eye autostereogram, or a TEXTURED
+                       autostereogram made of the camera image (free-view for 3D)
   --colormap turbo|gray|grayinv   initial colormap (default turbo, cycle with [ ])
                        In-window keys: [ ] colormap, v cycle view, Esc quit
   --scale <n>          window pixel scale (default 2)
@@ -254,19 +246,17 @@ fn run_image(args: &[String]) {
     let infer_ms = t0.elapsed().as_secs_f32() * 1000.0;
     eprintln!("depth: {w}x{h}, inference {infer_ms:.1} ms ({})", o.infer);
 
-    // Build the initial canvas. The window is always 2w×h so `v` can cycle views
-    // (side / depth / stereo) without resizing.
     let rgb8: Vec<u8> = hwc.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
     let bounds = Bounds::from_percentiles(&depth, 0.02, 0.98);
     let mut colormap = o.colormap;
     let mut mode = ViewMode::parse(&o.view);
-    let stereo = depth::StereoOpts::for_width(2 * w);
-    let (cw, ch) = (2 * w, h);
+    // The stereogram's eye separation is sized to the frame width (its natural size),
+    // so it keeps the camera aspect rather than being stretched.
+    let stereo = depth::StereoOpts::for_width(w);
     let render = |mode: ViewMode, map: Colormap| render_view(&rgb8, &depth, w, h, mode, bounds, map, &stereo);
 
     if o.headless {
-        // Headless keeps the requested view but writes the natural size for it (a
-        // stereogram is a single pane, not the doubled canvas).
+        let (cw, ch) = mode.canvas(w, h);
         let canvas = render(mode, colormap);
         let dir = std::path::Path::new(&o.out).parent();
         if let Some(d) = dir {
@@ -282,7 +272,9 @@ fn run_image(args: &[String]) {
         return;
     }
 
-    // Windowed: [ / ] cycle colormaps, v cycles the view, Esc quits.
+    // Windowed: [ / ] cycle colormaps, v cycles the view (resizing the window to the
+    // view's natural aspect), Esc quits.
+    let (mut cw, mut ch) = mode.canvas(w, h);
     let mut win = match wm_display::window::SdlWindow::new("brain depth", cw, ch, o.scale) {
         Ok(w) => w,
         Err(e) => {
@@ -290,11 +282,8 @@ fn run_image(args: &[String]) {
             std::process::exit(1);
         }
     };
-    let present = |win: &mut wm_display::window::SdlWindow, mode: ViewMode, map: Colormap| {
-        let hud = Hud { model: format!("zipdepth {}", mode.label()), quality: map as u32, ..Default::default() };
-        win.frame(&render(mode, map), cw, ch, &hud);
-    };
-    present(&mut win, mode, colormap);
+    let hud = Hud { model: format!("zipdepth {}", mode.label()), quality: colormap as u32, ..Default::default() };
+    win.frame(&render(mode, colormap), cw, ch, &hud);
     loop {
         let input = win.pump();
         if input.quit {
@@ -310,13 +299,19 @@ fn run_image(args: &[String]) {
                 }
                 UxKey::CycleView => {
                     mode = mode.cycle();
+                    let (nw, nh) = mode.canvas(w, h);
+                    if (nw, nh) != (cw, ch) {
+                        (cw, ch) = (nw, nh);
+                        win = wm_display::window::SdlWindow::new("brain depth", cw, ch, o.scale).expect("recreate window");
+                    }
                     changed = true;
                 }
                 _ => {}
             }
         }
         if changed {
-            present(&mut win, mode, colormap);
+            let hud = Hud { model: format!("zipdepth {}", mode.label()), quality: colormap as u32, ..Default::default() };
+            win.frame(&render(mode, colormap), cw, ch, &hud);
         }
         std::thread::sleep(std::time::Duration::from_millis(16));
     }
@@ -350,8 +345,9 @@ OPTIONS:
   --variant base|npu   checkpoint layout (default base)
   --colormap turbo|gray|grayinv   initial colormap (cycle with [ ])
   --scale <n>          window pixel scale (default 1)
-  --view side|depth|stereo  side-by-side (default), depth only, or Magic-Eye
-                       autostereogram (free-view the depth in 3D)
+  --view side|depth|stereo|stereo-image  side-by-side (default), depth only,
+                       random-dot Magic-Eye, or a TEXTURED autostereogram made of
+                       the camera image (free-view the depth in 3D)
   --infer engine|npu   engine = brain CPU/GPU (default); npu = Intel NPU
 In-window keys: v cycle view (side/depth/stereo), [ ] colormap, Esc quit.
 Forces YUYV — an MJPEG-only camera is rejected (no JPEG decoder).
@@ -464,11 +460,12 @@ fn run_camera(args: &[String]) {
         Some(Predictor::new(&gpu, cfg.clone(), ps))
     };
 
-    // The window is always 2w×h so `v` can cycle views without resizing.
-    let (canvas_w, canvas_h) = (cw * 2, ch);
-    let stereo = depth::StereoOpts::for_width(canvas_w);
+    // Each view renders at its natural size; the window resizes to match when `v`
+    // cycles. Sized from the actual frame dims (cw/ch = the camera's negotiated res).
+    let stereo = depth::StereoOpts::for_width(cw);
     let mut mode = ViewMode::parse(&view);
-    let mut win = match wm_display::window::SdlWindow::new("brain depth", canvas_w, canvas_h, scale) {
+    let (mut win_w, mut win_h) = mode.canvas(cw, ch);
+    let mut win = match wm_display::window::SdlWindow::new("brain depth", win_w, win_h, scale) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("brain depth: no display ({e})");
@@ -490,7 +487,14 @@ fn run_camera(args: &[String]) {
             use wm_display::keymap::UxKey;
             match u {
                 UxKey::QualityUp | UxKey::QualityDown => colormap = colormap.next(),
-                UxKey::CycleView => mode = mode.cycle(),
+                UxKey::CycleView => {
+                    mode = mode.cycle();
+                    let (nw, nh) = mode.canvas(cw, ch);
+                    if (nw, nh) != (win_w, win_h) {
+                        (win_w, win_h) = (nw, nh);
+                        win = wm_display::window::SdlWindow::new("brain depth", win_w, win_h, scale).expect("recreate window");
+                    }
+                }
                 _ => {}
             }
         }
@@ -515,7 +519,7 @@ fn run_camera(args: &[String]) {
             None => target,
         });
         let mut canvas = render_view(&frame.rgb, &depth, frame.w, frame.h, mode, bounds.unwrap(), colormap, &stereo);
-        let (ww, hh) = (canvas_w, canvas_h);
+        let (ww, hh) = mode.canvas(frame.w, frame.h);
 
         let now = std::time::Instant::now();
         let dt = now.duration_since(last).as_secs_f32();
