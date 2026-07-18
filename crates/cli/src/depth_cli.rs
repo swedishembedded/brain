@@ -169,6 +169,10 @@ OPTIONS:
   --out <path>         PPM output path (default out/depth.ppm)
   --bench <n>          after the first (cold) inference, run n more and report
                        per-frame ms (min/median/mean) — steady-state timing
+  --input <n>          model input (shorter side; default = the checkpoint's
+                       native 384). The net is fully convolutional, so smaller
+                       inputs are valid and faster — work scales with n²
+                       (--input 256 is ~2.3x quicker, mildly softer depth)
 ";
 
 struct Opts {
@@ -186,6 +190,9 @@ struct Opts {
     stripes: u32,
     /// Warm re-inference count for steady-state timing (0 = off).
     bench: u32,
+    /// Model input (shorter side, rounded to x32 by the predictor); 0 = the
+    /// checkpoint's native 384. Smaller = faster: work scales with its square.
+    input: u32,
 }
 
 fn parse(args: &[String]) -> Opts {
@@ -201,6 +208,7 @@ fn parse(args: &[String]) -> Opts {
         infer: "engine".into(),
         stripes: 5,
         bench: 0,
+        input: 0,
     };
     let mut i = 0;
     let next = |i: &mut usize| -> String {
@@ -228,6 +236,7 @@ fn parse(args: &[String]) -> Opts {
             "--headless" => o.headless = true,
             "--out" => o.out = next(&mut i),
             "--bench" => o.bench = next(&mut i).parse().unwrap_or(0),
+            "--input" => o.input = next(&mut i).parse().unwrap_or(0),
             // `--infer npu` runs the exported ONNX on the Intel NPU via OpenVINO;
             // the default runs brain's own engine (honouring the global --device).
             "--infer" => {
@@ -265,7 +274,11 @@ fn cfg_for_checkpoint(weights: &str) -> ZipConfig {
 
 fn run_image(args: &[String]) {
     let o = parse(args);
-    let cfg = cfg_for_checkpoint(&o.weights);
+    let mut cfg = cfg_for_checkpoint(&o.weights);
+    if o.input > 0 {
+        // Fully convolutional: any x32 input works; the predictor rounds.
+        cfg.input = o.input;
+    }
 
     let (hwc, w, h) = image_io::load_image(&o.image).unwrap_or_else(|e| {
         eprintln!("brain depth: {e}");
@@ -413,6 +426,8 @@ OPTIONS:
   --scale <n>          window pixel scale (default 1)
   --view MODE          side (default) | fog | blur | depth | stereo | stereo-image |
                        stereo-dual. `v` cycles them live.
+  --input <n>          model input (shorter side, default 384). Smaller = faster,
+                       quadratically: --input 256 is ~2.3x quicker per frame.
   --infer engine|npu   engine = brain CPU/GPU (default); npu = Intel NPU
 In-window keys: v cycle view (side/depth/stereo), [ ] colormap, Esc quit.
 Forces YUYV — an MJPEG-only camera is rejected (no JPEG decoder).
@@ -434,6 +449,7 @@ fn run_camera(args: &[String]) {
     let mut view = "side".to_string();
     let mut infer = "engine".to_string();
     let mut stripes = 5u32;
+    let mut input = 0u32;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -464,6 +480,7 @@ fn run_camera(args: &[String]) {
             "--scale" => scale = val().parse().unwrap_or(1),
             "--stripes" => stripes = val().parse().unwrap_or(5),
             "--view" => view = val(),
+            "--input" => input = val().parse().unwrap_or(0),
             "--help" | "-h" => {
                 print!("{CAM_HELP}");
                 return;
@@ -477,7 +494,12 @@ fn run_camera(args: &[String]) {
         std::process::exit(2);
     }
     let _ = &variant; // variant is auto-detected from the checkpoint now.
-    let cfg = cfg_for_checkpoint(&weights);
+    let mut cfg = cfg_for_checkpoint(&weights);
+    if input > 0 {
+        // Fully convolutional: a smaller input trades depth sharpness for
+        // frame rate quadratically (--input 256 ≈ 2.3x faster than 384).
+        cfg.input = input;
+    }
 
     // Open the camera and negotiate YUYV. The driver reports the size it accepted.
     let mut dev = Device::open(&dev_path, req_w, req_h, 4).unwrap_or_else(|e| {
