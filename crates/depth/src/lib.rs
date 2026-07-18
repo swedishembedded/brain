@@ -38,4 +38,4 @@ pub use import::{load as load_checkpoint, load_into, tensor_names};
 pub use model::ZipDepth;
 pub use predict::Predictor;
 pub use quant::{collect_activation_stats, ActStatsCollector, LayerReport};
-pub use stereo::{autostereogram, autostereogram_textured, StereoOpts};
+pub use stereo::{autostereogram, autostereogram_textured, stereo_pair, StereoOpts};

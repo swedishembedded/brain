@@ -35,6 +35,9 @@ enum ViewMode {
     /// A TEXTURED autostereogram: the camera image itself is the pattern, so you see
     /// the photo's textures with depth (w × h).
     StereoTex,
+    /// A cross-eye stereo PAIR of the real image (left | right), offset by depth
+    /// (2w × h). Free-view CROSS-EYED to see the actual scene in 3D.
+    StereoDual,
 }
 
 impl ViewMode {
@@ -42,6 +45,7 @@ impl ViewMode {
         match s {
             "stereo" | "magiceye" | "magic" | "dots" => ViewMode::Stereo,
             "stereo-image" | "stereo-tex" | "textured" | "photo" => ViewMode::StereoTex,
+            "stereo-dual" | "dual" | "crosseye" | "cross-eye" | "cross" => ViewMode::StereoDual,
             "depth" => ViewMode::Depth,
             _ => ViewMode::Side,
         }
@@ -51,7 +55,8 @@ impl ViewMode {
             ViewMode::Side => ViewMode::Depth,
             ViewMode::Depth => ViewMode::Stereo,
             ViewMode::Stereo => ViewMode::StereoTex,
-            ViewMode::StereoTex => ViewMode::Side,
+            ViewMode::StereoTex => ViewMode::StereoDual,
+            ViewMode::StereoDual => ViewMode::Side,
         }
     }
     fn label(self) -> &'static str {
@@ -60,12 +65,13 @@ impl ViewMode {
             ViewMode::Depth => "DEPTH",
             ViewMode::Stereo => "STEREO",
             ViewMode::StereoTex => "STEREO-IMG",
+            ViewMode::StereoDual => "STEREO-DUAL",
         }
     }
     /// The window/canvas size this view renders at, for a `w × h` frame.
     fn canvas(self, w: u32, h: u32) -> (u32, u32) {
         match self {
-            ViewMode::Side => (2 * w, h),
+            ViewMode::Side | ViewMode::StereoDual => (2 * w, h),
             _ => (w, h),
         }
     }
@@ -91,6 +97,12 @@ fn render_view(
         ViewMode::Depth => colorize(depth, bounds, colormap),
         ViewMode::Stereo => depth::autostereogram(depth, w, h, bounds, stereo),
         ViewMode::StereoTex => depth::autostereogram_textured(depth, w, h, bounds, stereo, rgb8),
+        ViewMode::StereoDual => {
+            // Peak disparity ~ 1/25 of the width — enough relief to fuse, small
+            // enough that disocclusion holes stay tiny.
+            let max_disp = (w / 25).clamp(8, 40);
+            depth::stereo_pair(rgb8, depth, w, h, bounds, max_disp, stereo.near_is_high)
+        }
     }
 }
 
@@ -123,9 +135,10 @@ OPTIONS:
   --image <path>       input image (binary PPM 'P6', or a detection-dataset dir)
   --weights <path>     ZipDepth .pth checkpoint (imported 1:1 by name)
   --variant base|npu   which checkpoint layout (default base = unfold upsampler)
-  --view side|depth|stereo|stereo-image  side-by-side RGB|depth (default), depth
-                       only, a random-dot Magic-Eye autostereogram, or a TEXTURED
-                       autostereogram made of the camera image (free-view for 3D)
+  --view MODE          side (RGB|depth, default) | depth | stereo (random-dot
+                       Magic-Eye) | stereo-image (textured Magic-Eye from the camera
+                       image) | stereo-dual (cross-eye L|R image pair). Free-view
+                       stereo/stereo-image straight-on; stereo-dual cross-eyed.
   --colormap turbo|gray|grayinv   initial colormap (default turbo, cycle with [ ])
                        In-window keys: [ ] colormap, v cycle view, Esc quit
   --scale <n>          window pixel scale (default 2)
@@ -345,9 +358,8 @@ OPTIONS:
   --variant base|npu   checkpoint layout (default base)
   --colormap turbo|gray|grayinv   initial colormap (cycle with [ ])
   --scale <n>          window pixel scale (default 1)
-  --view side|depth|stereo|stereo-image  side-by-side (default), depth only,
-                       random-dot Magic-Eye, or a TEXTURED autostereogram made of
-                       the camera image (free-view the depth in 3D)
+  --view MODE          side (default) | depth | stereo | stereo-image | stereo-dual
+                       (cross-eye L|R image pair). `v` cycles them live.
   --infer engine|npu   engine = brain CPU/GPU (default); npu = Intel NPU
 In-window keys: v cycle view (side/depth/stereo), [ ] colormap, Esc quit.
 Forces YUYV — an MJPEG-only camera is rejected (no JPEG decoder).

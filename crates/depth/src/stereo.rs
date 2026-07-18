@@ -33,9 +33,11 @@ pub struct StereoOpts {
 }
 
 impl StereoOpts {
-    /// Sensible defaults for a frame `w` px wide: ~5–6 pattern repeats.
+    /// Sensible defaults for a frame `w` px wide: ~5–6 pattern repeats, and a
+    /// stronger depth budget (`mu = 0.5`) so the relief reads clearly — 0.33 looked
+    /// flat in practice.
     pub fn for_width(w: u32) -> StereoOpts {
-        StereoOpts { eye_sep: (w / 5).clamp(90, 260), mu: 0.33, near_is_high: true }
+        StereoOpts { eye_sep: (w / 5).clamp(90, 260), mu: 0.5, near_is_high: true }
     }
 }
 
@@ -62,13 +64,17 @@ pub fn autostereogram(depth: &[f32], w: u32, h: u32, bounds: Bounds, opts: &Ster
     build(depth, w, h, bounds, opts, None)
 }
 
-/// A TEXTURED autostereogram: unconstrained pixels are seeded from `source`
-/// (row-major RGB8, same `w×h`) instead of random dots, so the stereogram is made
-/// of the camera image's own colours and local textures — free-view it and the
-/// depth pops while the surface stays recognizably the photo. A single-image
-/// stereogram can only show one pattern period repeated, so the image tiles/warps,
-/// but disocclusions at depth edges reveal fresh image content where the geometry
-/// changes.
+/// A TEXTURED (wallpaper) autostereogram: instead of random dots, the pattern is a
+/// PERIODIC TILE taken from the centre strip of `source` (row-major RGB8, same
+/// `w×h`) and repeated with period = the far-plane separation. Because the tile is
+/// truly periodic, the eyes lock the repeat and the depth warps it — so it fuses to
+/// 3D while showing the camera's own colours and textures.
+///
+/// The tile is ONE separation-wide strip from the image's horizontal centre, and it
+/// varies per scanline, so vertical image detail is preserved and the perceived
+/// surface reads like the photo's centre band in relief. (Seeding per-pixel from the
+/// whole image — an earlier attempt — destroys the periodicity the illusion needs,
+/// so no depth appears; that is the bug this replaces.)
 pub fn autostereogram_textured(depth: &[f32], w: u32, h: u32, bounds: Bounds, opts: &StereoOpts, source: &[u8]) -> Vec<u8> {
     assert_eq!(source.len(), (w * h * 3) as usize, "source must be [h*w*3] RGB");
     build(depth, w, h, bounds, opts, Some(source))
@@ -76,6 +82,9 @@ pub fn autostereogram_textured(depth: &[f32], w: u32, h: u32, bounds: Bounds, op
 
 fn build(depth: &[f32], w: u32, h: u32, bounds: Bounds, opts: &StereoOpts, source: Option<&[u8]>) -> Vec<u8> {
     assert_eq!(depth.len(), (w * h) as usize, "depth must be [h*w]");
+    // The tile is the max (far-plane) separation wide; the centre strip of the image.
+    let tile_w = separation(0.0, opts.eye_sep as f32, opts.mu).max(1) as usize;
+    let tile_x0 = (w as usize).saturating_sub(tile_w) / 2;
     let (wi, hi) = (w as usize, h as usize);
     let e = opts.eye_sep as f32;
     let mu = opts.mu;
@@ -134,7 +143,12 @@ fn build(depth: &[f32], w: u32, h: u32, bounds: Bounds, opts: &StereoOpts, sourc
         for x in 0..wi {
             let color = if same[x] == x {
                 match source {
-                    Some(src) => [src[(y * wi + x) * 3], src[(y * wi + x) * 3 + 1], src[(y * wi + x) * 3 + 2]],
+                    // PERIODIC tile: sample the centre strip at (x mod tile_w), so the
+                    // seed pattern repeats with exactly the far-plane period.
+                    Some(src) => {
+                        let sx = (tile_x0 + (x % tile_w)).min(wi - 1);
+                        [src[(y * wi + sx) * 3], src[(y * wi + sx) * 3 + 1], src[(y * wi + sx) * 3 + 2]]
+                    }
                     None => seed_color(x, y),
                 }
             } else {
@@ -173,6 +187,61 @@ mod tests {
                 assert_eq!(a, b, "flat depth must repeat with period {s} at ({x},{y})");
             }
         }
+    }
+
+    /// The TEXTURED variant must ALSO be periodic on flat depth — that periodicity is
+    /// exactly what makes it fuse. (The bug it replaced seeded per-pixel from the
+    /// image, which was NOT periodic, so no 3D appeared.)
+    #[test]
+    fn textured_flat_depth_is_periodic() {
+        let (w, h) = (400u32, 8u32);
+        let opts = StereoOpts { eye_sep: 120, mu: 0.5, near_is_high: true };
+        let depth = vec![0.5f32; (w * h) as usize];
+        // A structured source (vertical stripes) — the tile must still repeat with s.
+        let src: Vec<u8> = (0..(w * h)).flat_map(|i| { let x = (i % w) as u8; [x, 255 - x, 128] }).collect();
+        let img = autostereogram_textured(&depth, w, h, Bounds { lo: 0.0, hi: 1.0 }, &opts, &src);
+        let s = separation(0.5, opts.eye_sep as f32, opts.mu) as usize;
+        for y in 0..h as usize {
+            for x in s..w as usize {
+                assert_eq!(&img[(y * w as usize + x) * 3..][..3], &img[(y * w as usize + (x - s)) * 3..][..3],
+                    "textured flat depth must repeat with period {s} at ({x},{y})");
+            }
+        }
+    }
+
+    /// The DIBR stereo pair: output is 2w wide, fully filled (no black holes), and
+    /// near objects are displaced OPPOSITELY in the two panes (the disparity that
+    /// produces depth on fusion).
+    #[test]
+    fn stereo_pair_fills_and_displaces() {
+        let (w, h) = (80u32, 8u32);
+        // A near red bar on a GREY far field (grey so a black column = a real hole).
+        let mut depth = vec![0.0f32; (w * h) as usize];
+        let mut rgb = vec![100u8; (w * h * 3) as usize];
+        for y in 0..h as usize { for x in 0..w as usize {
+            if (38..42).contains(&x) { depth[y*w as usize+x] = 1.0; rgb[(y*w as usize+x)*3..][..3].copy_from_slice(&[255,0,0]); }
+        }}
+        let out = stereo_pair(&rgb, &depth, w, h, Bounds{lo:0.0,hi:1.0}, 16, true);
+        assert_eq!(out.len(), (2*w*h*3) as usize);
+        // No black hole column: every column has some non-black pixel (the grey bg
+        // or the bar), so an all-black column would mean the fill missed it.
+        let ow = 2*w as usize;
+        for x in 0..ow {
+            let col_black = (0..h as usize).all(|y| out[(y*ow+x)*3..][..3]==[0,0,0]);
+            assert!(!col_black, "column {x} is an unfilled black streak");
+        }
+        // The red bar's centroid differs between the two panes (it was displaced).
+        let red_centroid = |x0:usize,x1:usize| -> f32 {
+            let (mut sum, mut n) = (0f32, 0f32);
+            for y in 0..h as usize { for x in x0..x1 {
+                if out[(y*ow+x)*3] > 200 && out[(y*ow+x)*3+1] < 80 { sum += (x-x0) as f32; n += 1.0; }
+            }}
+            if n>0.0 { sum/n } else { -1.0 }
+        };
+        let lc = red_centroid(0, w as usize);
+        let rc = red_centroid(w as usize, ow);
+        assert!(lc >= 0.0 && rc >= 0.0, "the red bar must appear in both panes ({lc},{rc})");
+        assert!((lc - rc).abs() > 2.0, "near object must be displaced between panes: {lc} vs {rc}");
     }
 
     /// A NEARER region uses a smaller separation than a farther one — the whole point
@@ -226,5 +295,82 @@ mod tests {
         };
         assert!(periodic(5, s_far), "a pure-background row should be periodic with s_far");
         assert!(!periodic(30, s_far), "a row through the near square must break s_far periodicity");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-eye stereo PAIR (depth-image-based rendering) — shows the actual image.
+// ---------------------------------------------------------------------------
+
+/// A cross-eye stereo pair (`left | right`, `2w × h`) synthesized from the image and
+/// its depth by Depth-Image-Based Rendering: each pixel is displaced horizontally by
+/// a disparity proportional to its (normalized) depth — nearer moves more — forward-
+/// warped with a per-pixel z-test so nearer pixels win, and disocclusion holes are
+/// filled from neighbours. Free-view CROSS-EYED (right eye on the LEFT image) and the
+/// actual scene appears in 3D — unlike an autostereogram, you see the real photo.
+///
+/// `max_disparity` is the peak shift in px (a knob, since depth is relative). Larger
+/// = more relief but bigger holes and harder fusion.
+pub fn stereo_pair(rgb: &[u8], depth: &[f32], w: u32, h: u32, bounds: Bounds, max_disparity: u32, near_is_high: bool) -> Vec<u8> {
+    assert_eq!(rgb.len(), (w * h * 3) as usize, "rgb must be [h*w*3]");
+    let (wi, hi) = (w as usize, h as usize);
+    let ow = wi * 2;
+    let md = max_disparity as f32;
+    let mut out = vec![0u8; ow * hi * 3];
+    let (mut lrow, mut rrow) = (vec![0u8; wi * 3], vec![0u8; wi * 3]);
+    let (mut lz, mut rz) = (vec![f32::NEG_INFINITY; wi], vec![f32::NEG_INFINITY; wi]);
+    let (mut lf, mut rf) = (vec![false; wi], vec![false; wi]);
+    for y in 0..hi {
+        lz.iter_mut().for_each(|v| *v = f32::NEG_INFINITY);
+        rz.iter_mut().for_each(|v| *v = f32::NEG_INFINITY);
+        lf.iter_mut().for_each(|v| *v = false);
+        rf.iter_mut().for_each(|v| *v = false);
+        for x in 0..wi {
+            let n = bounds.norm(depth[y * wi + x]);
+            let z = if near_is_high { n } else { 1.0 - n };
+            let d = (md * z * 0.5).round() as i32; // half-shift each side
+            let px = [rgb[(y * wi + x) * 3], rgb[(y * wi + x) * 3 + 1], rgb[(y * wi + x) * 3 + 2]];
+            // LEFT pane is the right-eye view (near shifts right); RIGHT pane the
+            // left-eye view (near shifts left) — the cross-eye convention.
+            let xl = x as i32 + d;
+            let xr = x as i32 - d;
+            if xl >= 0 && (xl as usize) < wi && z > lz[xl as usize] {
+                lz[xl as usize] = z;
+                lf[xl as usize] = true;
+                lrow[(xl as usize) * 3..][..3].copy_from_slice(&px);
+            }
+            if xr >= 0 && (xr as usize) < wi && z > rz[xr as usize] {
+                rz[xr as usize] = z;
+                rf[xr as usize] = true;
+                rrow[(xr as usize) * 3..][..3].copy_from_slice(&px);
+            }
+        }
+        fill_holes(&mut lrow, &lf, wi);
+        fill_holes(&mut rrow, &rf, wi);
+        out[(y * ow) * 3..(y * ow + wi) * 3].copy_from_slice(&lrow);
+        out[(y * ow + wi) * 3..(y * ow + 2 * wi) * 3].copy_from_slice(&rrow);
+    }
+    out
+}
+
+/// Fill unwritten (disoccluded) pixels in a row from the nearest written neighbour:
+/// interior/trailing holes copy from the left (the background just uncovered), and
+/// leading holes copy from the first written pixel.
+fn fill_holes(row: &mut [u8], filled: &[bool], w: usize) {
+    let get = |row: &[u8], x: usize| [row[x * 3], row[x * 3 + 1], row[x * 3 + 2]];
+    let mut last: Option<[u8; 3]> = None;
+    for x in 0..w {
+        if filled[x] {
+            last = Some(get(row, x));
+        } else if let Some(c) = last {
+            row[x * 3..][..3].copy_from_slice(&c);
+        }
+    }
+    // Leading holes (before the first filled pixel) get the first filled colour.
+    if let Some(fx) = (0..w).find(|&x| filled[x]) {
+        let c = get(row, fx);
+        for x in 0..fx {
+            row[x * 3..][..3].copy_from_slice(&c);
+        }
     }
 }
