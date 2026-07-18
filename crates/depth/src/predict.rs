@@ -44,10 +44,12 @@ pub fn target_size(w0: u32, h0: u32, input: u32) -> (u32, u32) {
 /// `align_corners=false` (`half_pixel`), matching the reference's `cv2` /
 /// `F.interpolate`.
 fn resize_hwc(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
+    use rayon::prelude::*;
     let mut out = vec![0f32; (tw * th * 3) as usize];
     let sx = w0 as f32 / tw as f32;
     let sy = h0 as f32 / th as f32;
-    for y in 0..th {
+    // Row-parallel: each output row only reads `src` and writes its own chunk.
+    out.par_chunks_mut((tw * 3) as usize).enumerate().for_each(|(y, row)| {
         let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, h0 as f32 - 1.0);
         let (y0, ty) = (fy.floor() as u32, fy - fy.floor());
         let y1 = (y0 + 1).min(h0 - 1);
@@ -59,19 +61,20 @@ fn resize_hwc(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
                 let p = |xx: u32, yy: u32| src[((yy * w0 + xx) * 3 + c) as usize];
                 let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
                 let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
-                out[((y * tw + x) * 3 + c) as usize] = top * (1.0 - ty) + bot * ty;
+                row[(x * 3 + c) as usize] = top * (1.0 - ty) + bot * ty;
             }
         }
-    }
+    });
     out
 }
 
 /// Bilinear resize of a single-channel `[h0*w0]` map to `th × tw`.
 fn resize_map(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
+    use rayon::prelude::*;
     let mut out = vec![0f32; (tw * th) as usize];
     let sx = w0 as f32 / tw as f32;
     let sy = h0 as f32 / th as f32;
-    for y in 0..th {
+    out.par_chunks_mut(tw as usize).enumerate().for_each(|(y, row)| {
         let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, h0 as f32 - 1.0);
         let (y0, ty) = (fy.floor() as u32, fy - fy.floor());
         let y1 = (y0 + 1).min(h0 - 1);
@@ -82,9 +85,9 @@ fn resize_map(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
             let p = |xx: u32, yy: u32| src[(yy * w0 + xx) as usize];
             let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
             let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
-            out[(y * tw + x) as usize] = top * (1.0 - ty) + bot * ty;
+            row[x as usize] = top * (1.0 - ty) + bot * ty;
         }
-    }
+    });
     out
 }
 
@@ -137,16 +140,18 @@ impl<'g> Predictor<'g> {
             }
         }
 
-        // Resize to (th, tw), pack HWC -> CHW.
+        // Resize to (th, tw), pack HWC -> CHW (channel-parallel: each channel
+        // plane strides through `resized` independently).
         let resized = resize_hwc(hwc, w0, h0, tw, th);
-        let mut chw = vec![0f32; (3 * th * tw) as usize];
         let hw = (th * tw) as usize;
-        for y in 0..th as usize {
-            for x in 0..tw as usize {
-                for c in 0..3 {
-                    chw[c * hw + y * tw as usize + x] = resized[(y * tw as usize + x) * 3 + c];
+        let mut chw = vec![0f32; 3 * hw];
+        {
+            use rayon::prelude::*;
+            chw.par_chunks_mut(hw).enumerate().for_each(|(c, plane)| {
+                for (i, v) in plane.iter_mut().enumerate() {
+                    *v = resized[i * 3 + c];
                 }
-            }
+            });
         }
 
         let b = self.built.borrow();

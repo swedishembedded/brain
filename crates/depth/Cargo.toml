@@ -20,6 +20,9 @@ brain-checkpoint.workspace = true
 brain-kernels.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
+# Host-side pre/post-processing (resize + layout pack) runs per camera frame;
+# row-parallelising it took it off the frame's critical path.
+rayon = "1"
 
 [dev-dependencies]
 brain-gradcheck.workspace = true
