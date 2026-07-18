@@ -199,9 +199,10 @@ pub(crate) unsafe fn exp256_ps(x: std::arch::x86_64::__m256) -> std::arch::x86_6
 pub fn bn_eval(params: &[u32], x: &[f32], mv: &[f32], gb: &[f32], out: &mut [f32]) {
     let (n, c, h, w) = (params[0] as usize, params[1] as usize, params[2] as usize, params[3] as usize);
     // 5th word = fused activation selector (0 identity, 1 relu, 2 silu,
-    // 3 sigmoid), mirroring bn_eval.wgsl. Uniforms are 16-byte padded, so a
-    // legacy 4-word caller reads 0 here = the old behavior.
-    let act = params[4];
+    // 3 sigmoid), mirroring bn_eval.wgsl. The dispatch layer pads uniforms to
+    // 16 bytes so the word always exists there; a DIRECT caller with the
+    // legacy 4-word slice gets the same treatment (absent = 0 = identity).
+    let act = params.get(4).copied().unwrap_or(0);
     let hw = h * w;
     // Per-channel collapse to an affine: out = x*scale + bias, then act.
     let scale: Vec<f32> = (0..c).map(|ci| gb[2 * ci] / (mv[2 * ci + 1] + 1e-5).sqrt()).collect();
@@ -403,14 +404,33 @@ mod tests {
         let x: Vec<f32> = (0..n * c * h * w).map(|_| lcg(&mut s)).collect();
         let mv: Vec<f32> = (0..2 * c).map(|i| if i % 2 == 1 { lcg(&mut s).abs() + 0.1 } else { lcg(&mut s) }).collect();
         let gb: Vec<f32> = (0..2 * c).map(|_| lcg(&mut s)).collect();
-        let mut o = vec![0.0f32; x.len()];
-        bn_eval(&[n as u32, c as u32, h as u32, w as u32], &x, &mv, &gb, &mut o);
         let hw = h * w;
-        for idx in 0..x.len() {
+        let affine = |idx: usize| {
             let ci = (idx / hw) % c;
             let inv = 1.0 / (mv[2 * ci + 1] + 1e-5).sqrt();
-            let r = (x[idx] - mv[2 * ci]) * inv * gb[2 * ci] + gb[2 * ci + 1];
+            (x[idx] - mv[2 * ci]) * inv * gb[2 * ci] + gb[2 * ci + 1]
+        };
+        // Legacy 4-word params: the absent act word means identity — the same
+        // contract the padded dispatch uniform provides.
+        let mut o = vec![0.0f32; x.len()];
+        bn_eval(&[n as u32, c as u32, h as u32, w as u32], &x, &mv, &gb, &mut o);
+        for idx in 0..x.len() {
+            let r = affine(idx);
             assert!((o[idx] - r).abs() < 1e-4, "bn {idx}");
+        }
+        // All four act codes against the scalar reference.
+        for act in 0..4u32 {
+            bn_eval(&[n as u32, c as u32, h as u32, w as u32, act], &x, &mv, &gb, &mut o);
+            for idx in 0..x.len() {
+                let z = affine(idx);
+                let r = match act {
+                    1 => z.max(0.0),
+                    2 => z / (1.0 + (-z).exp()),
+                    3 => 1.0 / (1.0 + (-z).exp()),
+                    _ => z,
+                };
+                assert!((o[idx] - r).abs() < 1e-4, "bn act={act} {idx}");
+            }
         }
     }
 
