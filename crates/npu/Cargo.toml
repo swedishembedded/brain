@@ -18,6 +18,7 @@ brain-qwen.workspace = true
 brain-glm.workspace = true
 brain-codec.workspace = true
 brain-vision.workspace = true
+brain-depth.workspace = true
 brain-yolo.workspace = true
 brain-data.workspace = true
 brain-eval.workspace = true
@@ -40,3 +41,5 @@ openvino.workspace = true
 # dependency direction stays brain-wm-diamond -> brain-npu.
 [dev-dependencies]
 brain-wm-diamond.workspace = true
+brain-gpu-core.workspace = true
+brain-paramstore.workspace = true
