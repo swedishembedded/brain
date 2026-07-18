@@ -55,6 +55,22 @@ pub struct WgpuBackend {
     stats_submit: std::sync::atomic::AtomicU64,
     stats_dispatch: std::sync::atomic::AtomicU64,
     stats_read: std::sync::atomic::AtomicU64,
+    /// `BRAIN_PROFILE` per-kernel GPU timing (native only, and only when the
+    /// adapter has TIMESTAMP_QUERY): each dispatch runs in its own compute pass
+    /// with begin/end timestamps, resolved and accumulated per kernel name.
+    /// Pure observability — the non-profiling flush path is untouched.
+    #[cfg(not(target_arch = "wasm32"))]
+    gpu_profile: Option<GpuProfile>,
+}
+
+/// Per-kernel GPU-time accumulator for the `BRAIN_PROFILE` timestamp path.
+#[cfg(not(target_arch = "wasm32"))]
+struct GpuProfile {
+    names: Vec<String>,
+    /// Nanoseconds per timestamp tick (`Queue::get_timestamp_period`).
+    period_ns: f32,
+    /// Per-pipeline (total_ms, calls).
+    acc: std::sync::Mutex<Vec<(f64, u64)>>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -70,6 +86,23 @@ impl Drop for WgpuBackend {
                 self.stats_dispatch.load(Relaxed),
                 self.stats_read.load(Relaxed),
             );
+        }
+        if let Some(p) = &self.gpu_profile {
+            let acc = p.acc.lock().unwrap();
+            let mut rows: Vec<(usize, f64, u64)> =
+                acc.iter().enumerate().filter(|(_, (_, c))| *c > 0).map(|(i, (ms, c))| (i, *ms, *c)).collect();
+            rows.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let total: f64 = rows.iter().map(|r| r.1).sum();
+            eprintln!("=== GPU kernel time (BRAIN_PROFILE, timestamp queries, total {total:.1} ms) ===");
+            for (i, ms, c) in rows {
+                eprintln!(
+                    "  {:<20} {:8.1} ms  {:5} calls  ({:4.1}%)",
+                    p.names[i],
+                    ms,
+                    c,
+                    ms / total.max(1e-9) * 100.0
+                );
+            }
         }
     }
 }
@@ -119,10 +152,18 @@ impl WgpuBackend {
         // memory (up to 32 KiB); the downlevel default caps that at 16 KiB, so
         // request whatever the adapter actually supports.
         limits.max_compute_workgroup_storage_size = adapter_limits.max_compute_workgroup_storage_size;
+        // BRAIN_PROFILE: per-kernel GPU timing wants timestamp queries. Opt-in
+        // and adapter-gated, so the default request stays feature-empty (the
+        // portability invariant) and profiling degrades to op counts where the
+        // feature is absent (WebGPU, old drivers).
+        let profile_on = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
+        let want_ts = profile_on && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let required_features =
+            if want_ts { wgpu::Features::TIMESTAMP_QUERY } else { wgpu::Features::empty() };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("moe-rs-device"),
-                required_features: wgpu::Features::empty(),
+                required_features,
                 required_limits: limits,
                 memory_hints: wgpu::MemoryHints::Performance,
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
@@ -145,13 +186,37 @@ impl WgpuBackend {
             );
         }
 
+        // `BRAIN_GPU_CHECKED=1` restores wgpu's injected per-access bounds
+        // clamps (the debugging default). Otherwise shaders compile TRUSTED —
+        // no clamp instruction on every buffer load/store — matching the CPU
+        // backend, whose Cranelift JIT has always run with
+        // `MemFlags::trusted()` and no bounds checks anywhere. The safety
+        // argument is the same on both backends: every kernel self-bounds on
+        // its uniform (`if (idx >= total) return`), and buffer sizes are fixed
+        // by the model at build time. The conv inner loops do ~1 load per
+        // 2-3 FMAs, so the removed clamps are directly measurable.
+        let checked = std::env::var("BRAIN_GPU_CHECKED").map(|v| v != "0").unwrap_or(false);
+        let runtime_checks = if checked {
+            wgpu::ShaderRuntimeChecks::checked()
+        } else {
+            wgpu::ShaderRuntimeChecks::unchecked()
+        };
         let pipelines = kernels
             .iter()
             .map(|(name, src)| {
-                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(name),
-                    source: wgpu::ShaderSource::Wgsl((*src).into()),
-                });
+                // SAFETY: kernels self-bound on their uniform and contain no
+                // unbounded loops (every loop is counted by a uniform field);
+                // buffer sizes are fixed by the model — the identical contract
+                // the CPU JIT has always relied on with `MemFlags::trusted()`.
+                let module = unsafe {
+                    device.create_shader_module_trusted(
+                        wgpu::ShaderModuleDescriptor {
+                            label: Some(name),
+                            source: wgpu::ShaderSource::Wgsl((*src).into()),
+                        },
+                        runtime_checks,
+                    )
+                };
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(name),
                     layout: None,
@@ -164,8 +229,14 @@ impl WgpuBackend {
             .collect();
 
         use std::sync::atomic::AtomicU64;
-        let stats = if std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false) {
-            Some(AtomicU64::new(0))
+        let stats = if profile_on { Some(AtomicU64::new(0)) } else { None };
+        #[cfg(not(target_arch = "wasm32"))]
+        let gpu_profile = if want_ts {
+            Some(GpuProfile {
+                names: kernels.iter().map(|(n, _)| n.to_string()).collect(),
+                period_ns: queue.get_timestamp_period(),
+                acc: std::sync::Mutex::new(vec![(0.0, 0); kernels.len()]),
+            })
         } else {
             None
         };
@@ -179,6 +250,8 @@ impl WgpuBackend {
             stats_submit: AtomicU64::new(0),
             stats_dispatch: AtomicU64::new(0),
             stats_read: AtomicU64::new(0),
+            #[cfg(not(target_arch = "wasm32"))]
+            gpu_profile,
         }
     }
 
@@ -188,6 +261,14 @@ impl WgpuBackend {
     fn flush(&self) {
         let steps: Vec<WgpuStep> = std::mem::take(&mut *self.pending.lock().unwrap());
         if steps.is_empty() {
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.gpu_profile.is_some() {
+            self.flush_profiled(&steps);
+            if self.stats.is_some() {
+                self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             return;
         }
         let mut enc = self
@@ -207,6 +288,73 @@ impl WgpuBackend {
         self.queue.submit(Some(enc.finish()));
         if self.stats.is_some() {
             self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// The `BRAIN_PROFILE` timestamp flush: one compute pass PER dispatch, each
+    /// bracketed by begin/end timestamps, resolved and read back synchronously,
+    /// accumulated per kernel. Slower than the production single-pass flush (the
+    /// readback stalls the queue once per flush) but numerically identical —
+    /// same pipelines, same bind groups, same order; wgpu barriers between
+    /// passes preserve the read-after-write dependencies exactly like within
+    /// one pass.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn flush_profiled(&self, steps: &[WgpuStep]) {
+        let p = self.gpu_profile.as_ref().unwrap();
+        // Chunked to stay comfortably under the per-query-set limit (8192).
+        for chunk in steps.chunks(2048) {
+            let n = chunk.len() as u32;
+            let qs = self.device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("brain-profile"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 2 * n,
+            });
+            let bytes = (2 * n * 8) as u64;
+            let resolve = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("brain-profile-resolve"),
+                size: bytes,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("brain-profile-staging"),
+                size: bytes,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            for (i, (kind, bg, gx, gy)) in chunk.iter().enumerate() {
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: None,
+                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                        query_set: &qs,
+                        beginning_of_pass_write_index: Some(2 * i as u32),
+                        end_of_pass_write_index: Some(2 * i as u32 + 1),
+                    }),
+                });
+                pass.set_pipeline(&self.pipelines[*kind]);
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups(*gx, *gy, 1);
+            }
+            enc.resolve_query_set(&qs, 0..2 * n, &resolve, 0);
+            enc.copy_buffer_to_buffer(&resolve, 0, &staging, 0, bytes);
+            self.queue.submit(Some(enc.finish()));
+
+            let slice = staging.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+            self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            rx.recv().unwrap().unwrap();
+            let ticks: Vec<u64> = bytemuck::cast_slice::<u8, u64>(&slice.get_mapped_range()).to_vec();
+            staging.unmap();
+
+            let mut acc = p.acc.lock().unwrap();
+            for (i, (kind, ..)) in chunk.iter().enumerate() {
+                let dt = ticks[2 * i + 1].saturating_sub(ticks[2 * i]);
+                let e = &mut acc[*kind];
+                e.0 += dt as f64 * p.period_ns as f64 / 1e6;
+                e.1 += 1;
+            }
         }
     }
 

@@ -228,6 +228,7 @@ name = "brain-backend-wgpu"
 version = "0.1.0"
 dependencies = [
  "brain-backend-api",
+ "brain-kernels",
  "bytemuck",
  "futures-channel",
  "pollster",
@@ -339,6 +340,7 @@ dependencies = [
  "brain-paramstore",
  "brain-vision",
  "bytemuck",
+ "rayon",
  "serde_json",
 ]
 
