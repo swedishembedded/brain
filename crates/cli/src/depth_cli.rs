@@ -408,7 +408,7 @@ fn run_camera(args: &[String]) {
             None => target,
         });
         let dcol = colorize(&depth, bounds.unwrap(), colormap);
-        let (canvas, ww, hh) = if view == "depth" {
+        let (mut canvas, ww, hh) = if view == "depth" {
             (dcol, frame.w, frame.h)
         } else {
             composite_side_by_side(&frame.rgb, frame.w, frame.h, &dcol, frame.w, frame.h)
@@ -419,8 +419,12 @@ fn run_camera(args: &[String]) {
         last = now;
         fps = 0.9 * fps + 0.1 * (1.0 / dt.max(1e-3));
         let st = slot.stats();
+        let backend = if use_npu { "NPU" } else { "ENGINE" };
+        // In-frame HUD so it reads on the image, not just the window title.
+        let line = format!("ZIPDEPTH {backend} {fps:.0}FPS {infer_ms:.0}MS DROP:{}", st.dropped);
+        depth::viz::draw_text(&mut canvas, ww, hh, 6, 6, &line, 2, [0, 255, 0]);
         let hud = Hud {
-            model: format!("zipdepth  {fps:.0} fps  {infer_ms:.0} ms  drop {}", st.dropped),
+            model: format!("zipdepth {backend}  {fps:.0} fps  {infer_ms:.0} ms  drop {}", st.dropped),
             fps,
             quality: colormap as u32,
             ..Default::default()
