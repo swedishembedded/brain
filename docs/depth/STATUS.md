@@ -1,9 +1,9 @@
 # Depth workstream — status
 
 Goal: monocular depth support in brain — train / quantize / infer **ZipDepth**
-(6.1M, pure conv, MIT) and **Depth Anything 3** on CPU/NPU/GPU, load open
-pretrained weights, and run `brain depth --camera` / `--image` rendering
-colorized depth in an SDL window in realtime. Reference material:
+(6.1M, pure conv, MIT) on CPU/NPU/GPU, load open pretrained weights, and run
+`brain depth --camera` / `--image` rendering colorized depth in an SDL window
+in realtime. (Depth Anything 3 was in the original goal; it is **dropped**.) Reference material:
 `/data/workspace/resources/depth-models/` (read-only), in particular
 `docs/brain-gap-analysis.md` (the verified gap audit) and
 `docs/losses-and-eval.md` (formula-level losses + the honest-eval protocol).
@@ -393,7 +393,81 @@ YUYV, not MJPEG-only). GPU/NPU full-model execution is wired (`--device`) but
 likewise untested here.
 
 **Not started**: P4 (train/eval from scratch — the other half of the goal), P6
-(NPU quant), P7 (DA3).
+(NPU quant). **P7 (DA3) is DROPPED** — decided 2026-07-18; ZipDepth is the
+depth model, full stop.
+
+### P5.5 — GPU performance: ~3000 ms/frame → ~170 ms/frame (wgpu, Intel Arc MTL)
+
+The demo ran at ~30 fps on the NPU but ~1–3 s/frame on the GPU backends — 50–100x
+too slow. Measured first (single cold image, 719x467 → 608x384 model input,
+contended box), then fixed TWO independent root causes:
+
+| backend | cold baseline | steady state after | best-observed |
+|---|---|---|---|
+| cpu | 855 ms | ~350 ms median | 226 ms |
+| gpu (wgpu) | 2901 ms | ~470 ms median | **170 ms** |
+| vulkan | 9364 ms | ~520 ms median | 345 ms |
+
+(The box is heavily contended — medians swing 2x between runs; the minima are
+the signal. `brain depth --bench N` was added to measure steady state: the
+single-image number conflates one-time model build + BN packing — 175 readbacks
+on frame 1 — with per-frame cost.)
+
+**Root cause 1 — the Vulkan backend did 2 blocking queue submits PER DISPATCH.**
+`make_uniform` allocated every transient uniform DEVICE_LOCAL, so its zero +
+upload each ran a one-off command buffer with submit + fence-wait (~600 blocking
+GPU round trips per ~300-dispatch frame), plus a `vkAllocateMemory` per uniform
+per frame, growing forever (a 30 fps camera leaks ~7k buffers+sets/s). Fix:
+transient uniforms are HOST_VISIBLE (written by direct map — zero submits) and
+recycled through size-keyed pools after each flush's fence-wait, descriptor sets
+through per-pipeline pools ⇒ steady state is 1 submit + 1 readback copy per
+frame. `backend-vulkan/tests/perf_contract.rs` pins all three properties
+(step-building performs NO queue submits / O(1) submits per frame / transient
+pool bounded across frames) via a `queue_submits()` counter, red→green.
+Transient steps (`step`/`step_sliced`) are now submit-once by contract;
+hold-and-resubmit code must use `uniform_dynamic` + `step_buf` (all in-repo
+code already did).
+
+**Root cause 2 — ZipDepth could not fuse a single conv.** The fused
+`conv_act*` kernels hardcoded SiLU, so every one of ZipDepth's (ReLU) conv+BN
+units ran naive conv2d + bn_eval + leaky_relu — three full-tensor passes, no
+register tiling. Fixes, each red→green-tested:
+
+- **Act selector in `conv_act`/`conv_act_reg`/`conv_act_tiled`** (`p.act`:
+  0 identity, 1 relu, 2 silu, 3 sigmoid — an 11th uniform word; the branch is
+  uniform ⇒ coherent). `can_fuse` is now act-agnostic, so every dense+BN unit
+  (any act) is ONE register-tiled dispatch. yolo's SiLU path stays bitwise
+  (forward pin green); fused==unfused pinned per act on CPU and on the real GPU
+  (`depth/tests/p3_fused_eval.rs`). CPU uniforms are now padded to 16B like the
+  GPU backends, so a grown Params struct reads 0 from a stale caller instead of
+  out of bounds.
+- **`conv_bias_reg` dispatched** (existed, never used): dense biased convs
+  (head, GCB) take the register-tiled kernel.
+- **`conv2d_gd_reg`** — NEW grouped/dilated register-tiled kernel with
+  GROUP-ALIGNED 8x4 octets (all 8 lanes share the group ⇒ shared input loads;
+  masked tail `nc = min(8, cout_g - oc*8)`; depthwise degenerates to 1x4).
+  After the fusion round, `conv2d_gd` was **56% of a CPU frame** (the grouped
+  1x1 fusion projections + dilated depthwise branches ran as scalar JIT loops).
+- **CPU fast path for `conv2d_gd`** (`fast_conv::conv2d_gd`): depthwise gets a
+  dedicated channel-parallel loop; general grouped runs the existing AVX2 GEMM
+  per (image, group) on contiguous channel slices; im2col grew dilation. CPU
+  binds `conv2d_gd` and `conv2d_gd_reg` to the same path (names exact-matched,
+  so the dense-fast-path name trap does not apply). conv2d_gd: ~910 → ~18
+  ms/frame on CPU; the depth master gradcheck itself dropped 281 s → 161 s.
+- **`leaky_relu` CPU fast path** (~40 dispatches/frame ran as scalar JIT).
+- GPU-vs-CPU parity for the grouped kernel pinned on real hardware over the
+  straddle-prone shapes (grouped 1x1 cout_g=12, depthwise, depthwise dilated).
+
+**Remaining follow-ups (not blocking the demo):**
+- QARep RepVGG-fused EVAL path: `fuse.rs` already computes the collapsed single
+  conv per block (verified); dispatching it in eval would halve the encoder's
+  conv work + drop the add/relu dispatches.
+- A proper GPU GEMM conv (im2col / vec4 loads) if low-tens-of-ms is needed at
+  384-input; alternatively `--input 256` quarters the work.
+- First-frame BN packing does 175 readbacks (one-time); could pack host-side at
+  import instead.
+- Vulkan `storage()` still zero-fills DEVICE_LOCAL buffers with one blocking
+  submit each at model build (~hundreds, one-time per resolution).
 
 ### P6 (measurement done) — the INT8 decision, with a plan-changing finding
 

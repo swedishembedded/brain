@@ -38,6 +38,13 @@ them, keeping the gradient-check discipline.
    synthetic detection dataset and runs `detect` (boxes in pixel coords); CPU
    backend only. Byte-compatible with canonical `yolov8n` for weight import.
    Train/eval/detect/fine-tune via `brain yolo …`.
+6. **ZipDepth monocular depth** (`crates/depth`) — the 6.1M pure-conv depth
+   net (QARep/RepVGG blocks, SE/strip/global-context attention, convex
+   upsampling), exact vs the reference PyTorch on the released checkpoints.
+   Realtime demo (`brain depth --image|--camera`, SDL views incl.
+   autostereograms) on CPU/GPU/Vulkan and the Intel NPU (ONNX/OpenVINO,
+   cosine 0.99998). Gradient-checked end to end. See `docs/depth/README.md` +
+   `docs/depth/STATUS.md`.
 
 ## Workspace layout (`crates/`)
 
@@ -53,6 +60,9 @@ them, keeping the gradient-check discipline.
 | `moe` / `pid` | the MoE and PID models (fwd/bwd) |
 | `glm` | GLM-5.2 decoder: MLA + sigmoid `noaux_tc` MoE (+ shared expert, dense→MoE schedule); HF import (single/sharded) |
 | `yolo` | YOLOv8-style detector: backbone/neck/head, DFL decode, assigner + detection loss, NMS, `detect` inference, canonical `yolov8n` weight import |
+| `vision` | shared conv-net blocks (spec-driven `Conv` incl. the fused/register-tiled eval paths, `BatchNorm`, `SPPF`, bottlenecks), name-resolved kernel ids, `fold_bn` |
+| `depth` | ZipDepth: model/blocks/import/fuse, `Predictor` (reference-exact preprocessing), viz/stereo/effects, INT8 calib report |
+| `capture` | V4L2 webcam (hand-rolled ioctl FFI, YUYV→RGB, latest-frame slot) |
 | `onnx` | pure-Rust ONNX graph model + serializer (export only; vendored `prost` bindings, no `protoc` in the build) |
 | `npu` | YOLO→ONNX export + BN fold + brain-native INT8 PTQ + fake-quant simulator + OpenVINO **Intel NPU** runtime (default dep on x86_64 linux/windows; `runtime-linking`) |
 | `federated` | vertical expert split/assemble, hash-verified manifests |
@@ -82,6 +92,10 @@ them, keeping the gradient-check discipline.
 | YOLO model / loss / inference | `crates/yolo/src/{model,head,blocks,loss,assign,infer,nms,config}.rs` |
 | YOLO train / eval / detect / fine-tune (CLI) | `crates/cli/src/yolo_cli.rs` |
 | YOLO → Intel NPU: export / quantize / run / bench (OpenVINO) | `crates/npu`, `crates/onnx`, `crates/cli/src/npu_cli.rs`, `docs/yolo/NPU.md` |
+| ZipDepth: guide / workstream ledger (incl. GPU perf root causes) | `docs/depth/README.md`, `docs/depth/STATUS.md` |
+| ZipDepth model / import / predictor / demo views | `crates/depth/src/{model,blocks,import,predict,viz,stereo,effects}.rs`, `crates/cli/src/depth_cli.rs` |
+| ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
+| Fused conv eval paths (act selector, register tiling, grouped) | `crates/vision/src/blocks.rs`, `crates/kernels/wgsl/conv_act*.wgsl`, `conv2d_gd_reg.wgsl`, `crates/backend-cpu/src/fast_conv.rs` |
 | Detection metrics (mAP/precision/recall) | `crates/eval/src/detection.rs` |
 | Synthetic detection dataset (RGB shapes + GT boxes) | `crates/data/src/gen_detect.rs` |
 | Event/HFSM controller (`brain run`): `camera_frame`→`object_detected`, `user_text`→`brain_text_chunk` | `crates/runtime/src/{lib,pump}.rs`, `crates/cli/src/run_cli.rs`, `crates/events/src/lib.rs` |
@@ -247,9 +261,10 @@ improves as the model grows, and **`advise`** says what to tune.
 - **WGSL is the source of truth.** Kernels live only in `crates/kernels/wgsl/`,
   embedded as consts; no kernel text is duplicated. Adding a `.wgsl` means
   regenerating the const list in `crates/kernels/src/lib.rs`.
-- **fp32 only, core compute only** — single bind group, ≤4 storage buffers/kernel,
-  `@workgroup_size(64)`, no atomics/subgroups/f16. This is what keeps it portable
-  to old GPUs and WebGPU.
+- **fp32 only, core compute only** — single bind group, ≤8 storage
+  buffers/kernel (the WebGPU guarantee; `router_bwd`/`mla_scores`/
+  `layernorm_dgamma` bind 5), `@workgroup_size(64)`, no atomics/subgroups/f16.
+  This is what keeps it portable to old GPUs and WebGPU.
 - **Two backends, one build, one API.** `gpu-core` exposes a single
   `Gpu`/`DeviceBuffer`/`Step` surface; every model (gpt/moe/pid) is written once
   against it. The accelerator is the *only* thing abstracted — there is no
