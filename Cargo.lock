@@ -218,6 +218,7 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "brain-backend-api",
+ "brain-kernels",
  "brain-vulkan",
  "bytemuck",
 ]

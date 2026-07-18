@@ -45,6 +45,16 @@ pub struct VkStep {
     /// bindings (flaky stale reads); a submit+fence boundary is honoured, so a
     /// batch containing a sliced step is serialized in `flush`.
     sliced: bool,
+    /// True for steps built by `step`/`step_sliced` (backend-owned uniform +
+    /// descriptor set, recycled after the flush that runs them). False for
+    /// `step_buf` steps (caller-owned uniform, e.g. the `uniform_dynamic`
+    /// training-loop reuse pattern), which stay valid across flushes.
+    ///
+    /// CONTRACT: a transient step is submit-once — re-submitting it after a
+    /// flush may read a recycled (rewritten) uniform/descriptor set. Every
+    /// in-repo model builds its transient steps and submits them immediately;
+    /// hold-and-resubmit code must use `uniform_dynamic` + `step_buf`.
+    transient: bool,
 }
 
 /// A device buffer handle. Memory is freed when the owning [`VulkanBackend`] is
@@ -85,8 +95,22 @@ pub struct VulkanBackend {
     pools: Mutex<Vec<vk::DescriptorPool>>,
     /// Accumulated dispatches, flushed as one command submission.
     pending: Mutex<Vec<VkStep>>,
-    /// Per-dispatch uniform buffers (kept alive for the run; freed on drop).
+    /// Transient uniforms of steps built but not yet passed to `submit`.
     uniforms: Mutex<Vec<VkBuffer>>,
+    /// Transient uniforms of submitted-but-not-yet-flushed steps. Moved from
+    /// `uniforms` at `submit`, recycled into `free_uniforms` after the flush's
+    /// fence wait — never earlier, or an in-flight dispatch could see its
+    /// params rewritten.
+    inflight_uniforms: Mutex<Vec<VkBuffer>>,
+    /// Recycled transient uniform buffers, keyed by byte size. A steady-state
+    /// frame allocates ZERO uniforms (and performs zero queue submits building
+    /// its steps — the uniforms are host-visible, written by direct map).
+    free_uniforms: Mutex<std::collections::HashMap<u64, Vec<VkBuffer>>>,
+    /// Recycled descriptor sets of flushed transient steps, keyed by pipeline
+    /// index (sets are layout-specific). Rewriting an idle set via
+    /// `update_descriptor_sets` is legal; the flush's fence wait is what makes
+    /// them idle.
+    free_sets: Mutex<std::collections::HashMap<usize, Vec<vk::DescriptorSet>>>,
 }
 
 // ash handles are Send+Sync; all interior mutation goes through the Mutexes above.
@@ -160,6 +184,9 @@ impl VulkanBackend {
             pools: Mutex::new(vec![pool]),
             pending: Mutex::new(Vec::new()),
             uniforms: Mutex::new(Vec::new()),
+            inflight_uniforms: Mutex::new(Vec::new()),
+            free_uniforms: Mutex::new(std::collections::HashMap::new()),
+            free_sets: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -218,8 +245,11 @@ impl VulkanBackend {
     }
 
     pub fn uniform_dynamic(&self, len: usize) -> VkOwnedBuffer {
+        // Host-visible: `write` then updates it by direct map (no staging
+        // submit), matching its purpose — a caller-owned uniform rewritten
+        // every iteration of a hot loop.
         let size = (((len * 4) + 15) / 16 * 16).max(16) as u64;
-        let b = self.ctx.storage(size, vk::BufferUsageFlags::UNIFORM_BUFFER);
+        let b = self.ctx.storage_host(size, vk::BufferUsageFlags::UNIFORM_BUFFER);
         self.ctx.zero(&b);
         VkOwnedBuffer { inner: b }
     }
@@ -246,14 +276,14 @@ impl VulkanBackend {
     /// Build a dispatch with a fresh single-use uniform buffer (tracked transient).
     pub fn step(&self, kind: usize, bufs: &[&VkOwnedBuffer], params: &[u32], threads: u32) -> VkStep {
         let ubuf = self.make_uniform(params);
-        let step = self.record(kind, &ubuf, bufs, &[], threads);
+        let step = self.record(kind, &ubuf, bufs, &[], threads, true);
         self.uniforms.lock().unwrap().push(ubuf);
         step
     }
 
     /// Build a dispatch around a caller-owned uniform buffer (reused across runs).
     pub fn step_buf(&self, kind: usize, ubuf: &VkOwnedBuffer, bufs: &[&VkOwnedBuffer], threads: u32) -> VkStep {
-        self.record(kind, &ubuf.inner, bufs, &[], threads)
+        self.record(kind, &ubuf.inner, bufs, &[], threads, false)
     }
 
     /// Build a dispatch where each storage buffer binds the sub-range
@@ -267,17 +297,43 @@ impl VulkanBackend {
         threads: u32,
     ) -> VkStep {
         let ubuf = self.make_uniform(params);
-        let step = self.record(kind, &ubuf, bufs, offsets, threads);
+        let step = self.record(kind, &ubuf, bufs, offsets, threads, true);
         self.uniforms.lock().unwrap().push(ubuf);
         step
     }
 
+    /// Total queue submissions (each a blocking submit + fence wait) since
+    /// construction. Perf observability for `tests/perf_contract.rs`.
+    pub fn queue_submits(&self) -> u64 {
+        self.ctx.submits.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Transient uniform buffers currently alive (unsubmitted + in-flight +
+    /// recycled). Bounded by the largest single frame, not by frame count.
+    pub fn transient_uniform_count(&self) -> usize {
+        self.uniforms.lock().unwrap().len()
+            + self.inflight_uniforms.lock().unwrap().len()
+            + self.free_uniforms.lock().unwrap().values().map(Vec::len).sum::<usize>()
+    }
+
+    /// A transient per-dispatch uniform: recycled from `free_uniforms` when one
+    /// of the right size is idle, else a fresh HOST-VISIBLE allocation. Both the
+    /// zero (pad bytes) and the params write go through a direct map — building
+    /// a dispatch performs NO queue submits. (The old DEVICE_LOCAL version cost
+    /// a fill submit + a staged-copy submit — two blocking GPU round trips — per
+    /// dispatch per frame, which serialized inference ~100x.)
     fn make_uniform(&self, params: &[u32]) -> VkBuffer {
         let size = ((params.len() * 4 + 15) / 16 * 16).max(16) as u64;
-        let b = self.ctx.storage(size, vk::BufferUsageFlags::UNIFORM_BUFFER);
-        self.ctx.zero(&b); // pad bytes beyond `params` must be 0
+        let b = self
+            .free_uniforms
+            .lock()
+            .unwrap()
+            .get_mut(&size)
+            .and_then(Vec::pop)
+            .unwrap_or_else(|| self.ctx.storage_host(size, vk::BufferUsageFlags::UNIFORM_BUFFER));
+        self.ctx.zero(&b); // pad bytes beyond `params` must be 0 (mapped memset)
         if !params.is_empty() {
-            self.ctx.upload(&b, bytemuck::cast_slice(params));
+            self.ctx.upload(&b, bytemuck::cast_slice(params)); // mapped memcpy
         }
         b
     }
@@ -291,10 +347,20 @@ impl VulkanBackend {
         bufs: &[&VkOwnedBuffer],
         offsets: &[(u64, u64)],
         threads: u32,
+        transient: bool,
     ) -> VkStep {
         let kp = &self.pipelines[kind];
         let dev = &self.ctx.device;
-        let set = self.alloc_set(kp.set_layout);
+        // Transient sets recycle through `free_sets` (same pipeline => same
+        // layout; the flush's fence wait made them idle, so rewriting below via
+        // `update_descriptor_sets` is legal). Caller-held `step_buf` sets must
+        // stay valid across flushes, so they always allocate fresh.
+        let set = if transient {
+            self.free_sets.lock().unwrap().get_mut(&kind).and_then(Vec::pop)
+        } else {
+            None
+        }
+        .unwrap_or_else(|| self.alloc_set(kp.set_layout));
 
         // Build the binding metadata first (binding 0 = uniform; the storage
         // bindings consume `bufs` in order), then materialise the buffer-info
@@ -335,7 +401,7 @@ impl VulkanBackend {
         unsafe { dev.update_descriptor_sets(&writes, &[]) };
         let (gx, gy) = backend_api::grid(threads);
         let sliced = offsets.iter().any(|&(off, _)| off > 0);
-        VkStep { kind, set, gx, gy, sliced }
+        VkStep { kind, set, gx, gy, sliced, transient }
     }
 
     pub fn submit(&self, clears: &[&VkOwnedBuffer], steps: &[VkStep]) {
@@ -346,6 +412,11 @@ impl VulkanBackend {
             self.run_clears(clears);
         }
         self.pending.lock().unwrap().extend_from_slice(steps);
+        // These steps' transient uniforms are now in flight: eligible for
+        // recycling once the flush that runs them has fence-waited. Uniforms of
+        // steps NOT yet submitted stay in `uniforms`, untouched by a flush that
+        // races between their creation and their own submit.
+        self.inflight_uniforms.lock().unwrap().append(&mut self.uniforms.lock().unwrap());
     }
 
     fn run_clears(&self, clears: &[&VkOwnedBuffer]) {
@@ -387,6 +458,7 @@ impl VulkanBackend {
                     self.end_and_wait(cmd);
                 }
             }
+            self.recycle_transients(&steps);
             return;
         }
         unsafe {
@@ -423,9 +495,26 @@ impl VulkanBackend {
             }
             self.end_and_wait(cmd);
         }
-        // Descriptor sets + uniform buffers are intentionally NOT reclaimed here:
-        // a step (and its set) may be re-submitted by the caller, so they live
-        // until the backend drops (see `VulkanBackend::pools`).
+        self.recycle_transients(&steps);
+    }
+
+    /// Recycle the flushed batch's TRANSIENT resources — the fence wait in
+    /// `end_and_wait` has just proven them idle. Uniforms go back to the
+    /// size-keyed pool, descriptor sets to the per-pipeline pool (deduped: the
+    /// same step submitted twice in one batch must not donate its set twice).
+    /// `step_buf` steps (transient = false) are caller-owned and left alone, so
+    /// the `uniform_dynamic` reuse pattern keeps working across flushes.
+    fn recycle_transients(&self, steps: &[VkStep]) {
+        for u in std::mem::take(&mut *self.inflight_uniforms.lock().unwrap()) {
+            self.free_uniforms.lock().unwrap().entry(u.size).or_default().push(u);
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut free = self.free_sets.lock().unwrap();
+        for s in steps {
+            if s.transient && seen.insert(s.set) {
+                free.entry(s.kind).or_default().push(s.set);
+            }
+        }
     }
 
     unsafe fn begin_cmd(&self) -> vk::CommandBuffer {
@@ -444,6 +533,7 @@ impl VulkanBackend {
     }
 
     unsafe fn end_and_wait(&self, cmd: vk::CommandBuffer) {
+        self.ctx.submits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dev = &self.ctx.device;
         dev.end_command_buffer(cmd).expect("end cmd");
         let fence = dev.create_fence(&vk::FenceCreateInfo::default(), None).expect("fence");
@@ -463,6 +553,14 @@ impl Drop for VulkanBackend {
             let _ = dev.device_wait_idle();
             for u in std::mem::take(&mut *self.uniforms.lock().unwrap()) {
                 self.ctx.destroy_buffer(u);
+            }
+            for u in std::mem::take(&mut *self.inflight_uniforms.lock().unwrap()) {
+                self.ctx.destroy_buffer(u);
+            }
+            for (_, us) in std::mem::take(&mut *self.free_uniforms.lock().unwrap()) {
+                for u in us {
+                    self.ctx.destroy_buffer(u);
+                }
             }
             for &pool in self.pools.lock().unwrap().iter() {
                 dev.destroy_descriptor_pool(pool, None);

@@ -112,6 +112,10 @@ pub struct VkContext {
     /// Reusable host-visible staging buffer for device-local up/downloads (grown
     /// on demand; transfers are fence-serialized so a single buffer suffices).
     staging: std::sync::Mutex<Option<VkBuffer>>,
+    /// Total queue submissions issued through this context (each is a blocking
+    /// submit + fence wait). Perf observability: inference must keep this O(1)
+    /// per frame, not O(dispatches) — see `backend-vulkan/tests/perf_contract.rs`.
+    pub submits: std::sync::atomic::AtomicU64,
 }
 
 /// A device buffer + its backing memory. Storage buffers are `DEVICE_LOCAL`
@@ -319,6 +323,7 @@ impl VkContext {
             caps,
             mem_props,
             staging: std::sync::Mutex::new(None),
+            submits: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -427,6 +432,27 @@ impl VkContext {
             .expect("no suitable memory type for storage buffer")
     }
 
+    /// Allocate a HOST_VISIBLE|HOST_COHERENT buffer (`host_visible = true`, so
+    /// `upload`/`zero`/`download` use a direct map — NO queue submits). For
+    /// small, host-written, GPU-read data: uniform/params buffers. Compute-hot
+    /// storage stays on [`Self::storage`]'s DEVICE_LOCAL path; on an integrated
+    /// GPU host-visible memory is the same physical RAM, so a uniform read
+    /// costs the same — what changes is that writing one stops costing two
+    /// blocking submits (fill + staged copy) per dispatch per frame.
+    pub fn storage_host(&self, size: vk::DeviceSize, extra_usage: vk::BufferUsageFlags) -> VkBuffer {
+        let usage = vk::BufferUsageFlags::STORAGE_BUFFER
+            | vk::BufferUsageFlags::TRANSFER_SRC
+            | vk::BufferUsageFlags::TRANSFER_DST
+            | extra_usage;
+        self.alloc_raw(
+            size,
+            usage,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            true,
+        )
+        .expect("no host-visible|coherent memory type (spec guarantees one)")
+    }
+
     /// Map a host-visible buffer and run `f` on its pointer.
     unsafe fn with_mapped<R>(&self, buf: &VkBuffer, f: impl FnOnce(*mut u8) -> R) -> R {
         let ptr = self
@@ -440,6 +466,7 @@ impl VkContext {
 
     /// Run `f` to record a one-off command buffer, then submit + fence-wait.
     fn run_cmd(&self, f: impl FnOnce(vk::CommandBuffer)) {
+        self.submits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         unsafe {
             let alloc = vk::CommandBufferAllocateInfo::default()
                 .command_pool(self.command_pool)
