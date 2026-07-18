@@ -482,16 +482,64 @@ register tiling. Fixes, each red→green-tested:
 - GPU-vs-CPU parity for the grouped kernel pinned on real hardware over the
   straddle-prone shapes (grouped 1x1 cout_g=12, depthwise, depthwise dilated).
 
+### P5.6 — round 2: measure properly, then collapse the graph (165 → 86 dispatches)
+
+Round 1 left all three backends converged at ~the same frame time, so round 2
+started by building the instruments the repo lacked:
+
+- **Per-kernel GPU timestamps** (`BRAIN_PROFILE=1`, wgpu, adapter-gated): each
+  dispatch in its own pass, begin/end timestamps, per-kernel table on Drop.
+  ATTRIBUTION only — pass-splitting inflates the absolutes.
+- **`backend-wgpu/tests/bench_conv.rs`** (ignored): min-of-N GFLOP/s on
+  ZipDepth's exact layer shapes, plus dependent-chain and tiny-chain probes.
+
+**The finding that redirected everything:** `conv_act_reg` is NOT slow —
+in isolation it does **413–523 GFLOP/s** on the model's own shapes (~1.4 ms
+for the largest layer). What costs is the DEPENDENT CHAIN: each hop pays
+~**71 µs fixed** plus ~**2x lost overlap** on real-sized dispatches
+(2.90 ms/dispatch chained vs 1.46 ms pipelined, same kernel, same shape).
+The frame is dispatch-count-bound, not FLOP-bound. Consequently:
+
+- **Trusted shaders by default** (`BRAIN_GPU_CHECKED=1` restores clamps):
+  wgpu's injected per-access bounds checks cost ~20% in the conv inner loop;
+  every kernel already self-bounds — the CPU JIT has run `MemFlags::trusted()`
+  since day one, same argument.
+- **QARep RepVGG-fused eval**: all 15 encoder blocks collapse to ONE
+  `conv_act_reg` dispatch each (`fuse_qarep` host-side, sb = [1, bias],
+  act = relu) — the paper's own deployment form, exact, parity red→green over
+  all three block geometries. ~5 dependent hops per block → 1.
+- **`Act::None` raw convs alias `out()` to `conv_out`** — the slope-1
+  leaky_relu copy (a full pass + a hop, ~12/frame) removed in both directions.
+  Found `bias_backward` reading the now-never-written `d_conv` (caught by the
+  GCB FD gate); it takes the effective buffer now.
+- **`bn_eval` act selector** (5th uniform word; 4-word callers read the pad =
+  0 = identity on every backend — the uniform-padding rule paying off): the
+  unfused eval path is conv → bn_eval(+act), and UltraLightFusion's trailing
+  ReLU rides the selector with `out()` aliasing the BN output.
+- **Host pre/post row-parallelized** (rayon): resize_hwc / HWC→CHW /
+  resize_map were single-threaded on the frame's critical path.
+- **Pipelined camera loop**: `Predictor::begin/finish` (begin+finish pinned
+  bit-identical to `predict`), `Backend::flush()` to start the device without
+  waiting; the loop renders frame n−1 while n computes → throughput
+  ≈ max(device, host), one frame of display latency.
+
+Net: **165 → 86 dispatches/frame**; quiet-box wgpu frame ~153 ms mid-round
+(QARep fused, before the bn-act/host rounds; the box's other tenants swing
+measurements 2–4x, so treat minima as the signal). Honest roofline at native
+384-input on this iGPU: ~21 serialized convs × ~1.5–3 ms chained + ~65 small
+hops ≈ **~60–100 ms/frame device-side floor** with this dispatch model —
+"low tens of ms" at full fidelity needs the camera pipeline (throughput ≈
+device-only) plus either `--input 256` (~2.3x) or a persistent-kernel/
+megakernel redesign that eliminates the per-hop serialization, which is the
+next frontier and out of scope here.
+
 **Remaining follow-ups (not blocking the demo):**
-- QARep RepVGG-fused EVAL path: `fuse.rs` already computes the collapsed single
-  conv per block (verified); dispatching it in eval would halve the encoder's
-  conv work + drop the add/relu dispatches.
-- A proper GPU GEMM conv (im2col / vec4 loads) if low-tens-of-ms is needed at
-  384-input; alternatively `--input 256` quarters the work.
-- First-frame BN packing does 175 readbacks (one-time); could pack host-side at
-  import instead.
+- First-frame packing/fusion does ~150 one-time readbacks; could fold host-side
+  at import instead.
 - Vulkan `storage()` still zero-fills DEVICE_LOCAL buffers with one blocking
   submit each at model build (~hundreds, one-time per resolution).
+- Camera batch mode (N=2) would trade one frame of latency for better wave
+  occupancy on the iGPU.
 
 ### P6 (measurement done) — the INT8 decision, with a plan-changing finding
 
