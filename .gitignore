@@ -35,3 +35,8 @@ __pycache__/
 # `make wm-fixtures`) and demo output.
 crates/wm-diamond/tests/fixtures/
 /out/wm-demos/
+
+# depth demo test artifacts (never commit — regenerable)
+photo.ppm
+*-depth.ppm
+out/depth.ppm
