@@ -53,6 +53,8 @@ OPTIONS:
   --view side|depth    side-by-side RGB|depth (default) or depth only
   --colormap turbo|gray|grayinv   initial colormap (default turbo, cycle with [ ])
   --scale <n>          window pixel scale (default 2)
+  --infer engine|npu   engine = brain's CPU/GPU forward (default); npu = export to
+                       ONNX and run on the Intel NPU (needs --variant npu)
   --headless           no window: write the composite PPM to --out and print a hash
   --out <path>         PPM output path (default out/depth.ppm)
 ";
@@ -66,6 +68,8 @@ struct Opts {
     scale: u32,
     headless: bool,
     out: String,
+    /// "engine" (brain's own CPU/GPU forward) or "npu" (export -> OpenVINO NPU).
+    infer: String,
 }
 
 fn parse(args: &[String]) -> Opts {
@@ -78,6 +82,7 @@ fn parse(args: &[String]) -> Opts {
         scale: 2,
         headless: false,
         out: "out/depth.ppm".into(),
+        infer: "engine".into(),
     };
     let mut i = 0;
     let next = |i: &mut usize| -> String {
@@ -103,6 +108,9 @@ fn parse(args: &[String]) -> Opts {
             "--scale" => o.scale = next(&mut i).parse().unwrap_or(2),
             "--headless" => o.headless = true,
             "--out" => o.out = next(&mut i),
+            // `--infer npu` runs the exported ONNX on the Intel NPU via OpenVINO;
+            // the default runs brain's own engine (honouring the global --device).
+            "--infer" => o.infer = next(&mut i),
             other => {
                 eprintln!("brain depth: unknown option '{other}'");
                 std::process::exit(2);
@@ -138,12 +146,15 @@ fn run_image(args: &[String]) {
         eprintln!("brain depth: loading {}: {e}", o.weights);
         std::process::exit(1);
     });
-    let predictor = Predictor::new(&gpu, cfg, ps);
-
     let t0 = std::time::Instant::now();
-    let depth = predictor.predict(&hwc, w, h);
+    let depth = if o.infer == "npu" {
+        predict_npu(&o.weights, &cfg, &hwc, w, h)
+    } else {
+        let predictor = Predictor::new(&gpu, cfg.clone(), ps);
+        predictor.predict(&hwc, w, h)
+    };
     let infer_ms = t0.elapsed().as_secs_f32() * 1000.0;
-    eprintln!("depth: {w}x{h}, inference {infer_ms:.1} ms");
+    eprintln!("depth: {w}x{h}, inference {infer_ms:.1} ms ({})", o.infer);
 
     // Build the initial canvas. Colormap can change later without re-inference.
     let rgb8: Vec<u8> = hwc.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
@@ -538,4 +549,78 @@ fn letterbox_chw(hwc: &[f32], w0: u32, h0: u32, size: u32) -> Vec<f32> {
         }
     }
     chw
+}
+
+// ---------------------------------------------------------------------------
+// NPU inference: export ZipDepth to ONNX, compile on the Intel NPU, run.
+// ---------------------------------------------------------------------------
+
+/// Predict depth on the NPU: letterbox the frame, run the exported ONNX via
+/// OpenVINO, unwarp back to the frame grid. Mirrors depth::Predictor's geometry.
+fn predict_npu(weights: &str, cfg: &ZipConfig, hwc: &[f32], w0: u32, h0: u32) -> Vec<f32> {
+    use npu::openvino::{NpuConfig, NpuDevice, NpuSession};
+    assert!(!cfg.upsample_unfold, "--infer npu needs --variant npu (the blend upsampler)");
+    let init = depth::import::load(weights, cfg).unwrap_or_else(|e| {
+        eprintln!("brain depth: loading {weights}: {e}");
+        std::process::exit(1);
+    });
+    let mut g = onnx::GraphBuilder::new("zipdepth");
+    npu::build_depth_graph(cfg, &init, &mut g);
+    let mut sess = NpuSession::load_bytes(&g.finish(), &NpuConfig { device: NpuDevice::Npu, allow_fallback: true, ..Default::default() })
+        .unwrap_or_else(|e| {
+            eprintln!("brain depth: NPU compile failed: {e}");
+            std::process::exit(1);
+        });
+    eprintln!("depth: running on {}", sess.device());
+
+    // Letterbox into a [3,sz,sz] CHW input (grey pad), matching the predictor.
+    let sz = cfg.input;
+    let scale = (sz as f32 / w0 as f32).min(sz as f32 / h0 as f32);
+    let new_w = (w0 as f32 * scale).round() as usize;
+    let new_h = (h0 as f32 * scale).round() as usize;
+    let pad_x = ((sz as f32 - new_w as f32) * 0.5) as usize;
+    let pad_y = ((sz as f32 - new_h as f32) * 0.5) as usize;
+    let szu = sz as usize;
+    let inv = 1.0 / scale;
+    let mut chw = vec![0.5f32; 3 * szu * szu];
+    for yi in 0..new_h {
+        let sy = (((yi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, h0 as f32 - 1.0)) as usize;
+        for xi in 0..new_w {
+            let sx = (((xi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, w0 as f32 - 1.0)) as usize;
+            let sbase = (sy * w0 as usize + sx) * 3;
+            for c in 0..3 {
+                chw[c * szu * szu + (yi + pad_y) * szu + (xi + pad_x)] = hwc[sbase + c];
+            }
+        }
+    }
+    let out = sess.run(&chw, [1, 3, szu, szu]).unwrap_or_else(|e| {
+        eprintln!("brain depth: NPU inference failed: {e}");
+        std::process::exit(1);
+    });
+    let depth_sq = &out.tensors[0].2;
+
+    // Unwarp the sz×sz depth onto the frame grid (bilinear), same as the predictor.
+    let sample = |fx: f32, fy: f32| -> f32 {
+        let x0 = fx.floor();
+        let y0 = fy.floor();
+        let tx = fx - x0;
+        let ty = fy - y0;
+        let cx = |v: f32| (v as i32).clamp(0, sz as i32 - 1) as usize;
+        let cy = |v: f32| (v as i32).clamp(0, sz as i32 - 1) as usize;
+        let at = |xx: usize, yy: usize| depth_sq[yy * szu + xx];
+        let (ax, bx) = (cx(x0), cx(x0 + 1.0));
+        let (ay, by) = (cy(y0), cy(y0 + 1.0));
+        let top = at(ax, ay) * (1.0 - tx) + at(bx, ay) * tx;
+        let bot = at(ax, by) * (1.0 - tx) + at(bx, by) * tx;
+        top * (1.0 - ty) + bot * ty
+    };
+    let mut depth = vec![0f32; (w0 * h0) as usize];
+    for y in 0..h0 {
+        let fy = (y as f32 + 0.5) * scale + pad_y as f32 - 0.5;
+        for x in 0..w0 {
+            let fx = (x as f32 + 0.5) * scale + pad_x as f32 - 0.5;
+            depth[(y * w0 + x) as usize] = sample(fx, fy);
+        }
+    }
+    depth
 }
