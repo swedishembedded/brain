@@ -163,6 +163,8 @@ OPTIONS:
                        ONNX and run on the Intel NPU (needs --variant npu)
   --headless           no window: write the composite PPM to --out and print a hash
   --out <path>         PPM output path (default out/depth.ppm)
+  --bench <n>          after the first (cold) inference, run n more and report
+                       per-frame ms (min/median/mean) — steady-state timing
 ";
 
 struct Opts {
@@ -178,6 +180,8 @@ struct Opts {
     infer: String,
     /// Number of horizontal pattern repeats in the stereograms (default 5).
     stripes: u32,
+    /// Warm re-inference count for steady-state timing (0 = off).
+    bench: u32,
 }
 
 fn parse(args: &[String]) -> Opts {
@@ -192,6 +196,7 @@ fn parse(args: &[String]) -> Opts {
         out: "out/depth.ppm".into(),
         infer: "engine".into(),
         stripes: 5,
+        bench: 0,
     };
     let mut i = 0;
     let next = |i: &mut usize| -> String {
@@ -218,6 +223,7 @@ fn parse(args: &[String]) -> Opts {
             "--stripes" => o.stripes = next(&mut i).parse().unwrap_or(5),
             "--headless" => o.headless = true,
             "--out" => o.out = next(&mut i),
+            "--bench" => o.bench = next(&mut i).parse().unwrap_or(0),
             // `--infer npu` runs the exported ONNX on the Intel NPU via OpenVINO;
             // the default runs brain's own engine (honouring the global --device).
             "--infer" => {
@@ -275,7 +281,29 @@ fn run_image(args: &[String]) {
         predict_npu(&o.weights, &cfg, &hwc, w, h)
     } else {
         let predictor = Predictor::new(&gpu, cfg.clone(), ps);
-        predictor.predict(&hwc, w, h)
+        let depth = predictor.predict(&hwc, w, h);
+        if o.bench > 0 {
+            // The first predict above paid the one-time costs (model build, BN
+            // packing, pipeline warm-up); these repeats measure the steady state
+            // a camera stream sees.
+            let mut ms: Vec<f32> = (0..o.bench)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    let _ = predictor.predict(&hwc, w, h);
+                    t.elapsed().as_secs_f32() * 1000.0
+                })
+                .collect();
+            ms.sort_by(f32::total_cmp);
+            let mean = ms.iter().sum::<f32>() / ms.len() as f32;
+            eprintln!(
+                "bench: {} warm frames — min {:.1} ms, median {:.1} ms, mean {:.1} ms",
+                ms.len(),
+                ms[0],
+                ms[ms.len() / 2],
+                mean
+            );
+        }
+        depth
     };
     let infer_ms = t0.elapsed().as_secs_f32() * 1000.0;
     eprintln!("depth: {w}x{h}, inference {infer_ms:.1} ms ({})", o.infer);
