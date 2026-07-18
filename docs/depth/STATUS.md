@@ -392,9 +392,33 @@ the user's actual laptop webcam to confirm it streams** (and that the cam expose
 YUYV, not MJPEG-only). GPU/NPU full-model execution is wired (`--device`) but
 likewise untested here.
 
-**Not started**: P4 (train/eval from scratch — the other half of the goal), P6
-(NPU quant). **P7 (DA3) is DROPPED** — decided 2026-07-18; ZipDepth is the
-depth model, full stop.
+**Remaining**: P4 beyond placeholder grade (real datasets + the SSI/gradient
+loss — the loop itself is DONE, see below), P6 INT8 quant. **P7 (DA3) is
+DROPPED** — decided 2026-07-18; ZipDepth is the depth model, full stop.
+
+### P4 (placeholder-grade, END-TO-END) — `brain depth train` learns
+
+`depth::train::train_loop`: forward -> `masked_l1` (device per-element terms,
+host sum — the standing global-reduction pattern) -> `masked_l1_grad`
+(`sign * mask / total`) -> the master-gradcheck-proven backward -> the shared
+on-device AdamW (`optim::Optim`, one submit per step). BN running stats track
+during training so eval on the saved weights works. `ParamStore` comes back to
+the caller; the CLI saves it as a brain-native `.weights`.
+
+Data is a built-in synthetic generator: 6 random rectangles over a far
+background, painted far-to-near, each SHADED by its own inverse depth — so
+brightness genuinely predicts nearness and the task is learnable rather than
+memorisable. `tests/p4_train.rs` pins: overfit-one-batch at least halves the
+loss in 30 steps (RED verified with the optimizer step disabled — loss exactly
+flat), pairs deterministic in the seed, near-quartile brighter than far.
+
+CLI: `brain depth train --out F [--steps N --batch B --lr X --wd X --size WxH
+--seed S --weights <ckpt.pth>]` — `--weights` seeds from a released checkpoint
+(fine-tune, variant auto-detected). `make train/zipdepth`.
+
+What placeholder-grade means here: the DATA and LOSS are stand-ins (swap-in
+points are the two dispatch sites in `train_loop`); the LOOP is the real,
+tested thing.
 
 ### P5.5 — GPU performance: ~3000 ms/frame → ~170 ms/frame (wgpu, Intel Arc MTL)
 

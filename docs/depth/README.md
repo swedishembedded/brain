@@ -86,15 +86,29 @@ pick the (encoder-side) layers to keep in FP when quantizing.
 
 ## Training / fine-tuning
 
-`brain depth train` runs brain's own loop on RGB→inverse-depth pairs:
-forward → masked L1 → backward → AdamW, gradient-faithful to the master
-gradcheck. See `brain depth train --help` for the dataset layout; the
-overfit-one-batch sanity path is `tests/` — loss must strictly decrease.
+`brain depth train` runs brain's own loop end to end: forward → masked L1 →
+backward → on-device AdamW — the same forward/backward the master gradcheck
+proves. Data is currently the built-in synthetic generator (random rectangles
+whose brightness correlates with nearness, so the task is genuinely learnable);
+real datasets and the SSI + gradient loss slot into the same two dispatch
+sites in `depth::train`.
+
+```bash
+brain depth train --out out/zipdepth.weights --steps 50 --batch 2 --size 64x64
+brain depth train --out out/ft.weights --weights zipdepth_base.pth   # fine-tune
+```
+
+`tests/p4_train.rs` pins that overfitting one batch at least halves the loss
+(verified red with the optimizer disabled), that the synthetic pairs are
+deterministic in the seed, and that the near-quartile really is brighter than
+the far one.
 
 ## Makefile targets
 
 ```bash
-make depth/demo    ZIPDEPTH_PTH=…   # windowed still-image demo
-make depth/smoke   ZIPDEPTH_PTH=…   # headless deterministic render + hash
-make depth/camera  ZIPDEPTH_PTH=…   # webcam window
+make depth/demo     ZIPDEPTH_PTH=…   # windowed still-image demo
+make depth/smoke    ZIPDEPTH_PTH=…   # headless deterministic render + hash
+make depth/camera   ZIPDEPTH_PTH=…   # webcam window
+make train/zipdepth                  # synthetic end-to-end training run
+make train/zipdepth ZIPDEPTH_PTH=…   # fine-tune from a released checkpoint
 ```
