@@ -52,6 +52,69 @@ unsafe fn silu_avx2(x: &[f32], out: &mut [f32]) {
     }
 }
 
+/// `out[i] = x[i] >= 0 ? x[i] : slope*x[i]` (`leaky_relu.wgsl`; slope 0 is ReLU,
+/// slope 1 is the aliasing copy some blocks use). Branch-free select
+/// auto-vectorizes; ~40 dispatches per ZipDepth frame ran as scalar JIT before.
+pub(crate) fn leaky_relu(x: &[f32], out: &mut [f32], slope: f32) {
+    for (o, &v) in out.iter_mut().zip(x.iter()) {
+        *o = if v >= 0.0 { v } else { slope * v };
+    }
+}
+
+/// Apply `out = out*s + b` in place (fused conv epilogue, `act = 0`/identity —
+/// e.g. ZipDepth's QARep branches, whose activation comes after the branch sum).
+/// The plain FMA auto-vectorizes; no hand-rolled AVX2 needed.
+pub(crate) fn affine_inplace(buf: &mut [f32], s: f32, b: f32) {
+    for v in buf.iter_mut() {
+        *v = *v * s + b;
+    }
+}
+
+/// Apply `out = max(out*s + b, 0)` in place (fused conv epilogue, `act = 1` —
+/// the ReLU nets: ZipDepth). FMA + max auto-vectorize.
+pub(crate) fn affine_relu_inplace(buf: &mut [f32], s: f32, b: f32) {
+    for v in buf.iter_mut() {
+        *v = (*v * s + b).max(0.0);
+    }
+}
+
+/// Apply `out = sigmoid(out*s + b)` in place (fused conv epilogue, `act = 3` —
+/// gate-producing convs). AVX2 via the shared `exp256_ps` when available.
+pub(crate) fn affine_sigmoid_inplace(buf: &mut [f32], s: f32, b: f32) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::fast_conv::avx2_available() {
+        unsafe { affine_sigmoid_avx2(buf, s, b) };
+        return;
+    }
+    for v in buf.iter_mut() {
+        let z = *v * s + b;
+        *v = 1.0 / (1.0 + (-z).exp());
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn affine_sigmoid_avx2(buf: &mut [f32], s: f32, b: f32) {
+    use std::arch::x86_64::*;
+    let n = buf.len();
+    let sv = _mm256_set1_ps(s);
+    let bv = _mm256_set1_ps(b);
+    let one = _mm256_set1_ps(1.0);
+    let neg = _mm256_set1_ps(-1.0);
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let v = _mm256_loadu_ps(buf.as_ptr().add(i));
+        let z = _mm256_fmadd_ps(v, sv, bv);
+        let e = exp256_ps(_mm256_mul_ps(z, neg));
+        _mm256_storeu_ps(buf.as_mut_ptr().add(i), _mm256_div_ps(one, _mm256_add_ps(one, e)));
+        i += 8;
+    }
+    for j in i..n {
+        let z = *buf.get_unchecked(j) * s + b;
+        *buf.get_unchecked_mut(j) = 1.0 / (1.0 + (-z).exp());
+    }
+}
+
 /// Apply `out = silu(out*s + b)` in place over a slice (the fused conv epilogue:
 /// BatchNorm-eval affine collapsed to `(s,b)` per channel, then SiLU). Scalar
 /// fallback; AVX2 variant below.

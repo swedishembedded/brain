@@ -512,11 +512,29 @@ impl Conv {
     fn conv_step(&self, ctx: &Ctx, ps: &ParamStore, src: &DeviceBuffer, dst: &DeviceBuffer) -> gpu_core::Step {
         let on = self.out_shape.numel();
         if self.spec.bias {
+            // Register-tiled variant when registered: same math, ~8x less input
+            // traffic on the GPU (`conv_bias` is dense-only, so the reg tiling
+            // always applies). CPU routes both names to the same fast path.
+            let (kind, threads) = if ctx.ids.conv_bias_reg != crate::NONE {
+                (ctx.ids.conv_bias_reg, self.reg_threads())
+            } else {
+                (ctx.ids.need(ctx.ids.conv_bias, "conv_bias"), on)
+            };
             ctx.step(
-                ctx.ids.need(ctx.ids.conv_bias, "conv_bias"),
+                kind,
                 &[src, ps.w(&self.names.weight), ps.w(&self.names.bias), dst],
                 &self.conv_params(),
-                on,
+                threads,
+            )
+        } else if !self.spec.is_dense() && ctx.ids.conv2d_gd_reg != crate::NONE {
+            // Grouped/dilated register-tiled variant: group-aligned 8x4 tile,
+            // ~8x less input traffic for the grouped 1x1 projections. Same math
+            // as conv2d_gd (CPU routes both names to one fast path).
+            ctx.step(
+                ctx.ids.conv2d_gd_reg,
+                &[src, ps.w(&self.names.weight), dst],
+                &self.conv_params(),
+                self.gd_reg_threads(),
             )
         } else {
             ctx.step(self.conv_kind(ctx), &[src, ps.w(&self.names.weight), dst], &self.conv_params(), on)
@@ -538,17 +556,42 @@ impl Conv {
     }
     /// Can this unit take the fused conv->BN(eval)->act path?
     ///
-    /// Only SiLU has a fused kernel (`conv_act*` hardcodes it in the WGSL body),
-    /// and only the dense conv is fast-pathed. Everything else runs the unfused
-    /// `conv -> bn_eval -> act` — which is why `bn_eval`, registered and tested
-    /// but previously dead, now has a consumer. Its eps matches `pack_sb`'s
-    /// (`1e-5`), so the two paths agree numerically by construction.
-    fn can_fuse(&self, ctx: &Ctx) -> bool {
-        self.spec.act == Act::Silu
-            && self.spec.norm == Norm::Bn
+    /// Any activation fuses — the `conv_act*` kernels take the act selector in
+    /// their uniform (0 identity, 1 relu, 2 silu, 3 sigmoid), so a ReLU model
+    /// (ZipDepth) fuses exactly like a SiLU one (yolo). What still can't fuse:
+    /// grouped/dilated convs (the fused kernels and the CPU fast path they route
+    /// to are dense — binding a grouped unit would silently ignore `groups`),
+    /// and biased units (`conv_bias` is its own kernel). Those run the unfused
+    /// `conv -> bn_eval -> act`, whose eps matches `pack_sb`'s (`1e-5`), so the
+    /// two paths agree numerically by construction.
+    ///
+    /// `pub` so tests can pin that a given spec actually takes the fused path —
+    /// a silent fall-back to unfused is a 3x-dispatch perf regression that no
+    /// output comparison would ever catch.
+    pub fn can_fuse(&self, ctx: &Ctx) -> bool {
+        self.spec.norm == Norm::Bn
             && !self.spec.bias
             && self.spec.is_dense()
             && ctx.ids.conv_act_reg != crate::NONE
+    }
+
+    /// The fused kernels' activation selector (WGSL `p.act` / the CPU fast
+    /// path's `act`).
+    fn act_code(&self) -> u32 {
+        match self.spec.act {
+            Act::None => 0,
+            Act::Relu => 1,
+            Act::Silu => 2,
+            Act::Sigmoid => 3,
+        }
+    }
+
+    /// `conv_params()` + the act selector — the 11-u32 uniform stream of the
+    /// fused `conv_act*` kernels.
+    fn fused_params(&self) -> Vec<u32> {
+        let mut v = self.conv_params();
+        v.push(self.act_code());
+        v
     }
 
     /// The unfused activation's (forward, backward) kernel pair, or `None` for
@@ -575,6 +618,24 @@ impl Conv {
             _ => vec![n],
         }
     }
+    /// Invocation count for the register-tiled conv kernels (`conv_act_reg`,
+    /// `conv_bias_reg`): one invocation per 8-channel x 4-position tile.
+    fn reg_threads(&self) -> u32 {
+        let ntc = self.out_shape.c.div_ceil(8);
+        let npq = (self.out_shape.h * self.out_shape.w).div_ceil(4);
+        self.out_shape.n * ntc * npq
+    }
+
+    /// Invocation count for `conv2d_gd_reg`: octets are GROUP-ALIGNED, so the
+    /// channel-tile count is `groups * ceil(cout_g/8)`, not `ceil(cout/8)` —
+    /// they differ whenever `cout_g % 8 != 0` (e.g. depthwise: cout_g = 1).
+    fn gd_reg_threads(&self) -> u32 {
+        let cout_g = self.out_shape.c / self.spec.groups;
+        let ntc = self.spec.groups * cout_g.div_ceil(8);
+        let npq = (self.out_shape.h * self.out_shape.w).div_ceil(4);
+        self.out_shape.n * ntc * npq
+    }
+
     /// Invocation count for the weight-tiled conv: one workgroup (64 invocations)
     /// per `(n, output-channel, 64-output-position block)`.
     fn tiled_threads(&self) -> u32 {
@@ -627,10 +688,10 @@ impl Conv {
             // frames), so there is no per-frame host stat packing nor separate
             // bn_eval/silu passes.
             if !self.can_fuse(ctx) {
-                // Unfused eval: conv -> bn_eval -> act. Taken by every ReLU or
-                // grouped/dilated unit (i.e. all of ZipDepth), since the fused
-                // conv_act* kernels hardcode SiLU in their WGSL body and the dense
-                // fast path ignores `groups`.
+                // Unfused eval: conv -> bn_eval -> act. Taken by the units the
+                // fused path cannot serve — grouped/dilated convs (the fused
+                // kernels and the dense CPU fast path ignore `groups`) and any
+                // unit whose registry omits `conv_act_reg`.
                 self.forward_eval_unfused(ctx, ps, x_in);
                 return;
             }
@@ -651,10 +712,7 @@ impl Conv {
                 // (8 output channels x 4 positions), reusing weight + input loads
                 // across it (no workgroup memory, full occupancy). Each strided
                 // NCHW input load feeds all 8 channels -> input traffic ~/8.
-                // threads = N * ceil(Cout/8) * ceil(Ho*Wo/4).
-                let ntc = self.out_shape.c.div_ceil(8);
-                let npq = (self.out_shape.h * self.out_shape.w).div_ceil(4);
-                (ctx.ids.conv_act_reg, self.out_shape.n * ntc * npq)
+                (ctx.ids.conv_act_reg, self.reg_threads())
             };
             // Calibration / fake-quant tap (NPU INT8): route the conv input
             // through the host so the tap can read its range and/or rewrite it
@@ -673,7 +731,7 @@ impl Conv {
                 let s = ctx.step(
                     kind,
                     &[qbuf, ps.w(&self.names.weight), &self.sb, &self.act],
-                    &self.conv_params(),
+                    &self.fused_params(),
                     threads,
                 );
                 ctx.gpu.submit(&[], &[s]);
@@ -682,7 +740,7 @@ impl Conv {
             let s = ctx.step(
                 kind,
                 &[x_in, ps.w(&self.names.weight), &self.sb, &self.act],
-                &self.conv_params(),
+                &self.fused_params(),
                 threads,
             );
             ctx.gpu.submit(&[], &[s]);

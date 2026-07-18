@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// Register-tiled fused conv -> per-channel affine -> SiLU. Each invocation
+// Register-tiled fused conv -> per-channel affine -> activation. Each invocation
 // computes an 8x4 output tile = 8 output channels x 4 spatial positions, holding
 // the 32 partial sums in SCALAR registers (fully unrolled, so the GPU keeps them
 // in registers, not local memory). Per tap it loads 8 weights (one per output
@@ -15,12 +15,15 @@
 // input offsets are computed once per tap, not once per (ci,tap).
 //
 // No workgroup memory -> full GPU occupancy; plain per-invocation -> the JIT
-// compiles it unchanged. Same result as conv_act.wgsl.
+// compiles it unchanged. Same result as conv_act.wgsl, including its `p.act`
+// selector (0 = identity, 1 = ReLU, 2 = SiLU, 3 = sigmoid) — the uniform branch
+// is coherent, so a ReLU model (ZipDepth) fuses as cheaply as a SiLU one (yolo).
 // Dispatch: total = N * ceil(Cout/8) * ceil(Ho*Wo/4).
 
 struct Params {
     N: u32, Cin: u32, H: u32, W: u32, Cout: u32,
     K: u32, stride: u32, pad: u32, Ho: u32, Wo: u32,
+    act: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -98,63 +101,67 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         }
     }
 
-    // Affine (BN-eval collapsed) + SiLU, then store. Inlined per channel (the
-    // wgsl-cpu JIT has no user-function-call support). a{pos}{ch}.
+    // Affine (BN-eval collapsed) + selected activation, then store. Inlined per
+    // channel (the wgsl-cpu JIT has no user-function-call support). a{pos}{ch}.
+    // `p.act` is uniform across the dispatch, so the branches are coherent.
+    let is_r = p.act == 1u;
+    let is_si = p.act == 2u;
+    let is_sg = p.act == 3u;
     let nco = n * p.Cout;
     {
         let co = co0; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
-        { let z = a00*s+b; y[row+q0] = z/(1.0+exp(-z)); }
-        if (v1) { let z = a10*s+b; y[row+q1] = z/(1.0+exp(-z)); }
-        if (v2) { let z = a20*s+b; y[row+q2] = z/(1.0+exp(-z)); }
-        if (v3) { let z = a30*s+b; y[row+q3] = z/(1.0+exp(-z)); }
+        { var z = a00*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q0] = z; }
+        if (v1) { var z = a10*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q1] = z; }
+        if (v2) { var z = a20*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q2] = z; }
+        if (v3) { var z = a30*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q3] = z; }
     }
     if (1u < nc) {
         let co = co0+1u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
-        { let z = a01*s+b; y[row+q0] = z/(1.0+exp(-z)); }
-        if (v1) { let z = a11*s+b; y[row+q1] = z/(1.0+exp(-z)); }
-        if (v2) { let z = a21*s+b; y[row+q2] = z/(1.0+exp(-z)); }
-        if (v3) { let z = a31*s+b; y[row+q3] = z/(1.0+exp(-z)); }
+        { var z = a01*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q0] = z; }
+        if (v1) { var z = a11*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q1] = z; }
+        if (v2) { var z = a21*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q2] = z; }
+        if (v3) { var z = a31*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q3] = z; }
     }
     if (2u < nc) {
         let co = co0+2u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
-        { let z = a02*s+b; y[row+q0] = z/(1.0+exp(-z)); }
-        if (v1) { let z = a12*s+b; y[row+q1] = z/(1.0+exp(-z)); }
-        if (v2) { let z = a22*s+b; y[row+q2] = z/(1.0+exp(-z)); }
-        if (v3) { let z = a32*s+b; y[row+q3] = z/(1.0+exp(-z)); }
+        { var z = a02*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q0] = z; }
+        if (v1) { var z = a12*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q1] = z; }
+        if (v2) { var z = a22*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q2] = z; }
+        if (v3) { var z = a32*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q3] = z; }
     }
     if (3u < nc) {
         let co = co0+3u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
-        { let z = a03*s+b; y[row+q0] = z/(1.0+exp(-z)); }
-        if (v1) { let z = a13*s+b; y[row+q1] = z/(1.0+exp(-z)); }
-        if (v2) { let z = a23*s+b; y[row+q2] = z/(1.0+exp(-z)); }
-        if (v3) { let z = a33*s+b; y[row+q3] = z/(1.0+exp(-z)); }
+        { var z = a03*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q0] = z; }
+        if (v1) { var z = a13*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q1] = z; }
+        if (v2) { var z = a23*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q2] = z; }
+        if (v3) { var z = a33*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q3] = z; }
     }
     if (4u < nc) {
         let co = co0+4u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
-        { let z = a04*s+b; y[row+q0] = z/(1.0+exp(-z)); }
-        if (v1) { let z = a14*s+b; y[row+q1] = z/(1.0+exp(-z)); }
-        if (v2) { let z = a24*s+b; y[row+q2] = z/(1.0+exp(-z)); }
-        if (v3) { let z = a34*s+b; y[row+q3] = z/(1.0+exp(-z)); }
+        { var z = a04*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q0] = z; }
+        if (v1) { var z = a14*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q1] = z; }
+        if (v2) { var z = a24*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q2] = z; }
+        if (v3) { var z = a34*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q3] = z; }
     }
     if (5u < nc) {
         let co = co0+5u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
-        { let z = a05*s+b; y[row+q0] = z/(1.0+exp(-z)); }
-        if (v1) { let z = a15*s+b; y[row+q1] = z/(1.0+exp(-z)); }
-        if (v2) { let z = a25*s+b; y[row+q2] = z/(1.0+exp(-z)); }
-        if (v3) { let z = a35*s+b; y[row+q3] = z/(1.0+exp(-z)); }
+        { var z = a05*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q0] = z; }
+        if (v1) { var z = a15*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q1] = z; }
+        if (v2) { var z = a25*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q2] = z; }
+        if (v3) { var z = a35*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q3] = z; }
     }
     if (6u < nc) {
         let co = co0+6u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
-        { let z = a06*s+b; y[row+q0] = z/(1.0+exp(-z)); }
-        if (v1) { let z = a16*s+b; y[row+q1] = z/(1.0+exp(-z)); }
-        if (v2) { let z = a26*s+b; y[row+q2] = z/(1.0+exp(-z)); }
-        if (v3) { let z = a36*s+b; y[row+q3] = z/(1.0+exp(-z)); }
+        { var z = a06*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q0] = z; }
+        if (v1) { var z = a16*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q1] = z; }
+        if (v2) { var z = a26*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q2] = z; }
+        if (v3) { var z = a36*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q3] = z; }
     }
     if (7u < nc) {
         let co = co0+7u; let s = sb[2u*co]; let b = sb[2u*co+1u]; let row = (nco+co)*psz;
-        { let z = a07*s+b; y[row+q0] = z/(1.0+exp(-z)); }
-        if (v1) { let z = a17*s+b; y[row+q1] = z/(1.0+exp(-z)); }
-        if (v2) { let z = a27*s+b; y[row+q2] = z/(1.0+exp(-z)); }
-        if (v3) { let z = a37*s+b; y[row+q3] = z/(1.0+exp(-z)); }
+        { var z = a07*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q0] = z; }
+        if (v1) { var z = a17*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q1] = z; }
+        if (v2) { var z = a27*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q2] = z; }
+        if (v3) { var z = a37*s+b; if (is_r) { z = max(z, 0.0); } else if (is_si) { z = z/(1.0+exp(-z)); } else if (is_sg) { z = 1.0/(1.0+exp(-z)); } y[row+q3] = z; }
     }
 }

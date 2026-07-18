@@ -86,6 +86,11 @@ struct FastIdx {
     conv_act_reg: Option<usize>,
     conv_bias: Option<usize>,
     conv_bias_reg: Option<usize>,
+    // Grouped/dilated conv (12-u32 ABI) + its register-tiled GPU variant: both
+    // route to the per-group GEMM / depthwise fast path.
+    conv2d_gd: Option<usize>,
+    conv2d_gd_reg: Option<usize>,
+    leaky_relu: Option<usize>,
     bn_eval: Option<usize>,
     gn_stats: Option<usize>,
     gn_part: Option<usize>,
@@ -136,6 +141,9 @@ impl CpuBackend {
                 conv_act_reg: find("conv_act_reg"),
                 conv_bias: find("conv_bias"),
                 conv_bias_reg: find("conv_bias_reg"),
+                conv2d_gd: find("conv2d_gd"),
+                conv2d_gd_reg: find("conv2d_gd_reg"),
+                leaky_relu: find("leaky_relu"),
                 bn_eval: find("bn_eval"),
                 gn_stats: find("gn_stats"),
                 gn_part: find("gn_part"),
@@ -192,8 +200,19 @@ impl CpuBackend {
         (kind, bg, gx, gy)
     }
 
+    /// Pad a uniform stream to a 16-byte multiple, matching the wgpu/vulkan
+    /// backends' uniform padding. This is a safety property, not cosmetics: a
+    /// kernel whose Params struct grew a trailing field (e.g. `conv_act`'s act
+    /// selector) reads the pad word — in bounds, value 0 — from a caller that
+    /// predates the field, instead of reading out of bounds.
+    fn pad_uniform(params: &[u32]) -> Vec<u32> {
+        let mut v = params.to_vec();
+        v.resize(v.len().div_ceil(4).max(1) * 4, 0);
+        v
+    }
+
     pub fn step(&self, kind: usize, bufs: &[&CpuBuffer], params: &[u32], threads: u32) -> CpuStep {
-        let ubuf = CpuBuffer::with_words(params.to_vec());
+        let ubuf = CpuBuffer::with_words(Self::pad_uniform(params));
         self.step_buf(kind, &ubuf, bufs, threads)
     }
 
@@ -201,7 +220,7 @@ impl CpuBackend {
     /// word_len)` — the dispatch sees the buffer starting at `word_offset`
     /// (`word_len` is advisory on CPU; the kernel self-bounds via params).
     pub fn step_sliced(&self, kind: usize, bufs: &[&CpuBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> CpuStep {
-        let ubuf = CpuBuffer::with_words(params.to_vec());
+        let ubuf = CpuBuffer::with_words(Self::pad_uniform(params));
         let bg = BindGroup {
             uniform: ubuf,
             bufs: bufs.iter().enumerate().map(|(i, b)| ((*b).clone(), offsets[i].0 as usize)).collect(),
@@ -284,6 +303,28 @@ impl CpuBackend {
             }
             return;
         }
+        if (Some(kind) == f.conv2d_gd || Some(kind) == f.conv2d_gd_reg) && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 12);
+                let (p, groups) = fast_conv::ConvParams::from_u32_gd(pu);
+                let x = std::slice::from_raw_parts(bufs[0] as *const f32, p.x_len());
+                let cin_g = p.cin / groups.max(1);
+                let w = std::slice::from_raw_parts(bufs[1] as *const f32, p.cout * cin_g * p.k * p.k);
+                let y = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, p.y_len());
+                fast_conv::conv2d_gd(&p, groups, x, w, y);
+            }
+            return;
+        }
+        if Some(kind) == f.leaky_relu && bufs.len() >= 2 {
+            unsafe {
+                let total = *uniform as usize;
+                let slope = f32::from_bits(*uniform.add(1));
+                let x = std::slice::from_raw_parts(bufs[0] as *const f32, total);
+                let out = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, total);
+                fast_ops::leaky_relu(x, out, slope);
+            }
+            return;
+        }
         if (Some(kind) == f.conv_bias || Some(kind) == f.conv_bias_reg) && bufs.len() >= 4 {
             unsafe {
                 let pu = std::slice::from_raw_parts(uniform, 10);
@@ -300,13 +341,18 @@ impl CpuBackend {
             && bufs.len() >= 4
         {
             unsafe {
-                let pu = std::slice::from_raw_parts(uniform, 10);
+                // 11th word = activation selector (0 identity, 1 relu, 2 silu,
+                // 3 sigmoid), mirroring the WGSL Params. The uniform buffer is
+                // 16-byte padded, so the word exists even for a legacy 10-word
+                // caller — and reads 0 (identity), which the vision dispatch
+                // never emits (it always appends the act code).
+                let pu = std::slice::from_raw_parts(uniform, 11);
                 let p = fast_conv::ConvParams::from_u32(pu);
                 let x = std::slice::from_raw_parts(bufs[0] as *const f32, p.x_len());
                 let w = std::slice::from_raw_parts(bufs[1] as *const f32, p.w_len());
                 let sb = std::slice::from_raw_parts(bufs[2] as *const f32, 2 * p.cout);
                 let y = std::slice::from_raw_parts_mut(bufs[3] as *mut f32, p.y_len());
-                fast_conv::conv2d_act(&p, x, w, sb, y);
+                fast_conv::conv2d_act(&p, x, w, sb, y, pu[10]);
             }
             return;
         }

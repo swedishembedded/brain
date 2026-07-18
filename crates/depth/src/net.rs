@@ -34,6 +34,10 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("conv2d_dx", kernels::CONV2D_DX),
     ("conv2d_dw", kernels::CONV2D_DW),
     ("conv2d_gd", kernels::CONV2D_GD),
+    // Register-tiled grouped forward — taken over conv2d_gd when present. The
+    // grouped 1x1 fusion projections + dilated depthwise branches were the
+    // hottest kernel of a frame (56% CPU) as naive/scalar dispatches.
+    ("conv2d_gd_reg", kernels::CONV2D_GD_REG),
     ("conv2d_gd_dx", kernels::CONV2D_GD_DX),
     ("conv2d_gd_dw", kernels::CONV2D_GD_DW),
     // Biased convs (head_half, mask_pred.3, GlobalContextBlock) are all DENSE, so
@@ -46,7 +50,18 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // the forward with conv_bias exactly as here; `bias_grad` is still the right
     // BACKWARD via the same [M=N, N=C*HW] view plus a host spatial reduce.
     ("conv_bias", kernels::CONV_BIAS),
+    ("conv_bias_reg", kernels::CONV_BIAS_REG),
     ("bias_grad", kernels::BIAS_GRAD),
+    // ---- fused eval: conv -> BN(eval) affine -> act, one dispatch. The act
+    // SELECTOR in the kernels' uniform (0 none, 1 relu, 2 silu, 3 sigmoid) is
+    // what lets a ReLU model fuse — every dense+BN unit takes conv_act_reg
+    // instead of conv2d + bn_eval + leaky_relu (3 full-tensor passes -> 1,
+    // ~8x less input traffic on the GPU). Grouped/dilated units still run
+    // unfused. conv_act/conv_act_tiled are the BRAIN_NAIVE_CONV/
+    // BRAIN_TILED_CONV comparison variants of the same fusion.
+    ("conv_act", kernels::CONV_ACT),
+    ("conv_act_reg", kernels::CONV_ACT_REG),
+    ("conv_act_tiled", kernels::CONV_ACT_TILED),
     // ---- batchnorm ----
     ("bn_stats", kernels::BN_STATS),
     ("bn_running", kernels::BN_RUNNING),
@@ -178,7 +193,18 @@ mod tests {
         let i = ids();
         assert_eq!(i.silu, vision::NONE, "ZipDepth is ReLU, not SiLU");
         assert_eq!(i.upsample2, vision::NONE, "ZipDepth resizes to arbitrary sizes, not 2x");
-        assert_eq!(i.conv_act_reg, vision::NONE, "the fused path is SiLU-only; ZipDepth never fuses");
+    }
+
+    /// The fused eval kernels ARE registered: since the act selector landed the
+    /// fused path serves ReLU (and None/Sigmoid) units, so ZipDepth's dense+BN
+    /// convs run one `conv_act_reg` dispatch instead of conv2d + bn_eval + act.
+    /// (An earlier version pinned `conv_act_reg == NONE` — "the fused path is
+    /// SiLU-only" — which stopped being true, and was the 3x-dispatch perf bug.)
+    #[test]
+    fn the_fused_eval_kernels_are_registered() {
+        let i = ids();
+        assert_ne!(i.conv_act_reg, vision::NONE, "dense+BN units fuse through conv_act_reg");
+        assert_ne!(i.conv_bias_reg, vision::NONE, "dense biased convs take the register-tiled kernel");
     }
 
     /// ...and the dense conv IS registered, precisely so ZipDepth's many

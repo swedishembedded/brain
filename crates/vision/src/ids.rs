@@ -34,10 +34,16 @@ pub struct ConvKernelIds {
     // binds its AVX2/winograd path to the name `conv2d`, and that path is dense:
     // it ignores `groups` and would compute wrong results with no error.
     pub conv2d_gd: usize,
+    /// Register-tiled grouped/dilated conv (8x4 group-aligned tile) — same math
+    /// as `conv2d_gd`, taken when registered; CPU binds both to one fast path.
+    pub conv2d_gd_reg: usize,
     pub conv2d_gd_dx: usize,
     pub conv2d_gd_dw: usize,
     pub conv2d_tiled: usize,
     pub conv_bias: usize,
+    /// Register-tiled `conv_bias` (8x4 tile, `conv_act_reg`'s dispatch shape).
+    /// Same math; CPU routes both to the same fast path.
+    pub conv_bias_reg: usize,
     pub bias_add: usize,
     pub bias_grad: usize,
     // ---- batchnorm ----
@@ -111,10 +117,12 @@ impl ConvKernelIds {
             conv2d_dx: k("conv2d_dx"),
             conv2d_dw: k("conv2d_dw"),
             conv2d_gd: k("conv2d_gd"),
+            conv2d_gd_reg: k("conv2d_gd_reg"),
             conv2d_gd_dx: k("conv2d_gd_dx"),
             conv2d_gd_dw: k("conv2d_gd_dw"),
             conv2d_tiled: k("conv2d_tiled"),
             conv_bias: k("conv_bias"),
+            conv_bias_reg: k("conv_bias_reg"),
             bias_add: k("bias_add"),
             bias_grad: k("bias_grad"),
             bn_stats: k("bn_stats"),

@@ -152,6 +152,8 @@ pub const CONV2D_GD: &str = include_str!("../wgsl/conv2d_gd.wgsl");
 pub const CONV2D_GD_DW: &str = include_str!("../wgsl/conv2d_gd_dw.wgsl");
 /// `wgsl/conv2d_gd_dx.wgsl`
 pub const CONV2D_GD_DX: &str = include_str!("../wgsl/conv2d_gd_dx.wgsl");
+/// `wgsl/conv2d_gd_reg.wgsl`
+pub const CONV2D_GD_REG: &str = include_str!("../wgsl/conv2d_gd_reg.wgsl");
 /// `wgsl/conv2d_tiled.wgsl`
 pub const CONV2D_TILED: &str = include_str!("../wgsl/conv2d_tiled.wgsl");
 /// `wgsl/conv_act.wgsl`
@@ -498,6 +500,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("conv2d_gd", CONV2D_GD),
     ("conv2d_gd_dw", CONV2D_GD_DW),
     ("conv2d_gd_dx", CONV2D_GD_DX),
+    ("conv2d_gd_reg", CONV2D_GD_REG),
     ("conv2d_tiled", CONV2D_TILED),
     ("conv_act", CONV_ACT),
     ("conv_act_reg", CONV_ACT_REG),

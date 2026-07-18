@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// Weight-staged fused conv -> per-channel affine -> SiLU. Same result as
-// conv_act.wgsl, but one workgroup stages its output channel's weights in
-// WORKGROUP (on-chip) memory and reuses them across a 64-position block, instead
-// of re-reading every weight from global memory once per output pixel.
+// Weight-staged fused conv -> per-channel affine -> activation. Same result as
+// conv_act.wgsl (including its `p.act` selector: 0 = identity, 1 = ReLU,
+// 2 = SiLU, 3 = sigmoid), but one workgroup stages its output channel's weights
+// in WORKGROUP (on-chip) memory and reuses them across a 64-position block,
+// instead of re-reading every weight from global memory once per output pixel.
 //
 // Single source of truth for both backends: wgpu runs it directly; the wgsl-cpu
 // JIT compiles it with its work-group execution model (the CPU backend then
@@ -13,7 +14,7 @@
 // Layout: one workgroup = one (n, output-channel, 64-position block); the 64
 // invocations load w[co,:] into `wsh`, barrier, then each computes one output:
 //   z   = conv(x,wsh) * sb[2co] + sb[2co+1]      // BatchNorm-eval affine collapsed
-//   y   = z / (1 + exp(-z))                        // SiLU
+//   y   = act(z)
 // Dispatch: total invocations = N * Cout * ceil(Ho*Wo / 64) * 64.
 
 struct Params {
@@ -27,6 +28,7 @@ struct Params {
     pad: u32,
     Ho: u32,
     Wo: u32,
+    act: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -85,7 +87,10 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
                 }
             }
         }
-        let z = acc * sb[2u * co] + sb[2u * co + 1u];
-        y[(n * p.Cout + co) * psz + pidx] = z / (1.0 + exp(-z));
+        var z = acc * sb[2u * co] + sb[2u * co + 1u];
+        if (p.act == 1u) { z = max(z, 0.0); }
+        else if (p.act == 2u) { z = z / (1.0 + exp(-z)); }
+        else if (p.act == 3u) { z = 1.0 / (1.0 + exp(-z)); }
+        y[(n * p.Cout + co) * psz + pidx] = z;
     }
 }

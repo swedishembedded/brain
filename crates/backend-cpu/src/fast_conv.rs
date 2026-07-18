@@ -23,6 +23,7 @@
 use rayon::prelude::*;
 
 /// Decoded `conv2d.wgsl` uniform params (`[N,Cin,H,W,Cout,K,stride,pad,Ho,Wo]`).
+/// `dilation` is 1 for the dense ABI; the grouped ABI (`from_u32_gd`) carries it.
 #[derive(Clone, Copy, Debug)]
 pub struct ConvParams {
     pub n: usize,
@@ -33,6 +34,7 @@ pub struct ConvParams {
     pub k: usize,
     pub stride: usize,
     pub pad: usize,
+    pub dilation: usize,
     pub ho: usize,
     pub wo: usize,
 }
@@ -48,9 +50,32 @@ impl ConvParams {
             k: p[5] as usize,
             stride: p[6] as usize,
             pad: p[7] as usize,
+            dilation: 1,
             ho: p[8] as usize,
             wo: p[9] as usize,
         }
+    }
+    /// The grouped/dilated 12-u32 ABI of `conv2d_gd.wgsl` / `conv2d_gd_reg.wgsl`
+    /// (`[N,Cin,H,W,Cout,K,stride,pad,dilation,groups,Ho,Wo]`). Returns the
+    /// params (dilation folded in) and `groups` separately — the GEMM machinery
+    /// is per-group dense, so groups never enters `ConvParams` itself.
+    pub fn from_u32_gd(p: &[u32]) -> (ConvParams, usize) {
+        (
+            ConvParams {
+                n: p[0] as usize,
+                cin: p[1] as usize,
+                h: p[2] as usize,
+                w: p[3] as usize,
+                cout: p[4] as usize,
+                k: p[5] as usize,
+                stride: p[6] as usize,
+                pad: p[7] as usize,
+                dilation: p[8] as usize,
+                ho: p[10] as usize,
+                wo: p[11] as usize,
+            },
+            p[9] as usize,
+        )
     }
     pub fn x_len(&self) -> usize { self.n * self.cin * self.h * self.w }
     pub fn w_len(&self) -> usize { self.cout * self.cin * self.k * self.k }
@@ -77,20 +102,86 @@ pub fn conv2d(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32]) {
     conv2d_impl(p, x, w, y, None);
 }
 
-/// Fused conv -> per-channel affine -> SiLU (matches `conv_act.wgsl`). `sb` is
-/// `[2*Cout]` with `sb[2c]=scale[c]`, `sb[2c+1]=bias[c]`; the epilogue
-/// `y = silu(conv*scale + bias)` is applied panel-hot right after each GEMM
-/// panel, so no separate bn_eval/silu memory passes are needed.
-pub fn conv2d_act(p: &ConvParams, x: &[f32], w: &[f32], sb: &[f32], y: &mut [f32]) {
+/// Fused conv -> per-channel affine -> activation (matches `conv_act.wgsl`).
+/// `sb` is `[2*Cout]` with `sb[2c]=scale[c]`, `sb[2c+1]=bias[c]`; `act` selects
+/// the epilogue like the WGSL `p.act` (0 identity, 1 ReLU, 2 SiLU, 3 sigmoid),
+/// applied panel-hot right after each GEMM panel, so no separate bn_eval/act
+/// memory passes are needed.
+pub fn conv2d_act(p: &ConvParams, x: &[f32], w: &[f32], sb: &[f32], y: &mut [f32], act: u32) {
     debug_assert_eq!(sb.len(), 2 * p.cout);
-    conv2d_impl(p, x, w, y, Some(sb));
+    conv2d_impl(p, x, w, y, Some((sb, act)));
 }
 
 /// True iff Winograd F(2×2,3×3) applies: a 3×3 stride-1 pad-1 conv (the dominant
 /// yolov8 backbone/neck shape). Other shapes use the GEMM path.
 #[inline]
 fn winograd_applicable(p: &ConvParams) -> bool {
-    p.k == 3 && p.stride == 1 && p.pad == 1 && p.n >= 1 && p.ho >= 1 && p.wo >= 1
+    p.k == 3 && p.stride == 1 && p.pad == 1 && p.dilation == 1 && p.n >= 1 && p.ho >= 1 && p.wo >= 1
+}
+
+/// Grouped/dilated conv (matches `conv2d_gd.wgsl` / `conv2d_gd_reg.wgsl`
+/// exactly, up to fp reassociation). Two routes:
+///
+///   * depthwise (`groups == cin == cout`): a dedicated channel-parallel loop —
+///     per-group GEMM would be a [1 x K²]·[K² x P] degenerate product whose
+///     im2col/panel overhead dwarfs the K² multiplies;
+///   * general grouped: each `(image, group)` is a DENSE conv on contiguous
+///     channel slices (x, w and y are all channel-major), so it reuses the
+///     whole GEMM machinery — im2col is dilation-aware.
+///
+/// This is what un-JITs ZipDepth's hottest remaining kernel (the grouped 1x1
+/// fusion projections + the dilated depthwise branches were 56% of a CPU frame
+/// as scalar JIT loops).
+pub fn conv2d_gd(p: &ConvParams, groups: usize, x: &[f32], w: &[f32], y: &mut [f32]) {
+    let g = groups.max(1);
+    let (cin_g, cout_g) = (p.cin / g, p.cout / g);
+    if cin_g == 1 && cout_g == 1 {
+        return conv2d_depthwise(p, x, w, y);
+    }
+    let (hw, psz, kg) = (p.h * p.w, p.ho * p.wo, cin_g * p.k * p.k);
+    let sub = ConvParams { n: 1, cin: cin_g, cout: cout_g, ..*p };
+    for n in 0..p.n {
+        for gi in 0..g {
+            let xo = (n * p.cin + gi * cin_g) * hw;
+            let yo = (n * p.cout + gi * cout_g) * psz;
+            let wo = gi * cout_g * kg;
+            conv2d_impl(&sub, &x[xo..xo + cin_g * hw], &w[wo..wo + cout_g * kg], &mut y[yo..yo + cout_g * psz], None);
+        }
+    }
+}
+
+/// Depthwise conv (`groups == cin == cout`), channel-parallel, dilation-aware.
+/// Interior rows skip the bounds checks (the hot path for K=3/5 same-pad).
+fn conv2d_depthwise(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32]) {
+    let (hw, psz, kk) = (p.h * p.w, p.ho * p.wo, p.k * p.k);
+    y.par_chunks_mut(psz).enumerate().for_each(|(plane, yc)| {
+        let c = plane % p.cout;
+        let n = plane / p.cout;
+        let xc = &x[(n * p.cin + c) * hw..(n * p.cin + c) * hw + hw];
+        let wc = &w[c * kk..(c + 1) * kk];
+        for ho in 0..p.ho {
+            let hbase = ho * p.stride;
+            for wo_ in 0..p.wo {
+                let wbase = wo_ * p.stride;
+                let mut acc = 0.0f32;
+                for kh in 0..p.k {
+                    let hib = hbase + kh * p.dilation;
+                    if hib < p.pad || hib - p.pad >= p.h {
+                        continue;
+                    }
+                    let row = (hib - p.pad) * p.w;
+                    for kw in 0..p.k {
+                        let wib = wbase + kw * p.dilation;
+                        if wib < p.pad || wib - p.pad >= p.w {
+                            continue;
+                        }
+                        acc += xc[row + (wib - p.pad)] * wc[kh * p.k + kw];
+                    }
+                }
+                yc[ho * p.wo + wo_] = acc;
+            }
+        }
+    });
 }
 
 /// Fused conv + per-output-channel bias (matches `conv_bias.wgsl`): the
@@ -110,7 +201,7 @@ pub fn conv2d_bias(p: &ConvParams, x: &[f32], w: &[f32], bias: &[f32], y: &mut [
     });
 }
 
-fn conv2d_impl(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32], sb: Option<&[f32]>) {
+fn conv2d_impl(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32], sb: Option<(&[f32], u32)>) {
     debug_assert_eq!(x.len(), p.x_len());
     debug_assert_eq!(w.len(), p.w_len());
     debug_assert_eq!(y.len(), p.y_len());
@@ -184,13 +275,19 @@ fn conv2d_impl(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32], sb: Option<&
                     } else {
                         gemm_cols_scalar(p.cout, kg, w.as_ptr(), b_base, bstride, c_base, psz, pw);
                     }
-                    // Fused epilogue: apply per-channel affine + SiLU to this
-                    // panel's freshly-written output columns (still cache-hot),
-                    // so bn_eval+silu need no separate memory passes.
-                    if let Some(sb) = sb {
+                    // Fused epilogue: apply per-channel affine + activation to
+                    // this panel's freshly-written output columns (still
+                    // cache-hot), so bn_eval+act need no separate memory passes.
+                    if let Some((sb, act)) = sb {
                         for co in 0..p.cout {
                             let row = std::slice::from_raw_parts_mut(c_base.add(co * psz), pw);
-                            crate::fast_ops::affine_silu_inplace(row, sb[2 * co], sb[2 * co + 1]);
+                            let (s, b) = (sb[2 * co], sb[2 * co + 1]);
+                            match act {
+                                1 => crate::fast_ops::affine_relu_inplace(row, s, b),
+                                2 => crate::fast_ops::affine_silu_inplace(row, s, b),
+                                3 => crate::fast_ops::affine_sigmoid_inplace(row, s, b),
+                                _ => crate::fast_ops::affine_inplace(row, s, b),
+                            }
                         }
                     }
                 }
@@ -233,8 +330,8 @@ unsafe fn build_im2col_panel(
         let xc = xptr.add(ci * hw);
         let row = bpanel.as_mut_ptr().add(kgi * pw);
         for (j, &(ho, wo)) in coords.iter().enumerate().take(pw) {
-            let hib = ho * p.stride + kh;
-            let wib = wo * p.stride + kw;
+            let hib = ho * p.stride + kh * p.dilation;
+            let wib = wo * p.stride + kw * p.dilation;
             let v = if hib >= p.pad && hib - p.pad < p.h && wib >= p.pad && wib - p.pad < p.w {
                 *xc.add((hib - p.pad) * p.w + (wib - p.pad))
             } else {
@@ -460,7 +557,7 @@ mod winograd {
         }
     }
 
-    pub fn conv2d_f23(p: &ConvParams, x: &[f32], w: &[f32], sb: Option<&[f32]>, y: &mut [f32]) {
+    pub fn conv2d_f23(p: &ConvParams, x: &[f32], w: &[f32], sb: Option<(&[f32], u32)>, y: &mut [f32]) {
         let (cin, cout) = (p.cin, p.cout);
         let (h, wd, ho, wo) = (p.h, p.w, p.ho, p.wo);
         let (tth, ttw) = (ho.div_ceil(2), wo.div_ceil(2)); // output tile grid
@@ -544,17 +641,17 @@ mod winograd {
                 });
             }
 
-            // 4. Output transform + scatter (+ optional fused affine/SiLU),
+            // 4. Output transform + scatter (+ optional fused affine/act),
             //    parallel over Cout.
             let y_img = &mut y[n * cout * ho * wo..(n + 1) * cout * ho * wo];
             let yptr = SendMutPtr(y_img.as_mut_ptr());
             (0..cout).into_par_iter().for_each(|co| {
                 let yptr = yptr;
                 let (scale, bias) = match sb {
-                    Some(sb) => (sb[2 * co], sb[2 * co + 1]),
+                    Some((sb, _)) => (sb[2 * co], sb[2 * co + 1]),
                     None => (1.0, 0.0),
                 };
-                let fused = sb.is_some();
+                let act = sb.map(|(_, a)| a);
                 let mut mf = [0.0f32; 16];
                 let mut yf = [0.0f32; 4];
                 for tyi in 0..tth {
@@ -572,9 +669,14 @@ mod winograd {
                                 let ox = 2 * txi + dc;
                                 if ox >= wo { continue; }
                                 let mut z = yf[dr * 2 + dc];
-                                if fused {
+                                if let Some(act) = act {
                                     z = z * scale + bias;
-                                    z /= 1.0 + (-z).exp();
+                                    match act {
+                                        1 => z = z.max(0.0),
+                                        2 => z /= 1.0 + (-z).exp(),
+                                        3 => z = 1.0 / (1.0 + (-z).exp()),
+                                        _ => {}
+                                    }
                                 }
                                 unsafe { *yptr.0.add((co * ho + oy) * wo + ox) = z; }
                             }
@@ -624,6 +726,89 @@ mod tests {
         y
     }
 
+    /// Reference for the GROUPED/DILATED conv: the exact `conv2d_gd.wgsl` math,
+    /// one output element at a time (`w` is `[Cout, Cin/G, K, K]`).
+    fn conv_gd_ref(p: &ConvParams, groups: usize, x: &[f32], w: &[f32]) -> Vec<f32> {
+        let (cin_g, cout_g) = (p.cin / groups, p.cout / groups);
+        let mut y = vec![0.0f32; p.y_len()];
+        for n in 0..p.n {
+            for co in 0..p.cout {
+                let g = co / cout_g;
+                for ho in 0..p.ho {
+                    for wo in 0..p.wo {
+                        let mut acc = 0.0f32;
+                        for cl in 0..cin_g {
+                            let ci = g * cin_g + cl;
+                            for kh in 0..p.k {
+                                let hib = ho * p.stride + kh * p.dilation;
+                                if hib < p.pad { continue; }
+                                let hi = hib - p.pad;
+                                if hi >= p.h { continue; }
+                                for kw in 0..p.k {
+                                    let wib = wo * p.stride + kw * p.dilation;
+                                    if wib < p.pad { continue; }
+                                    let wi = wib - p.pad;
+                                    if wi >= p.w { continue; }
+                                    let xi = ((n * p.cin + ci) * p.h + hi) * p.w + wi;
+                                    let wi2 = ((co * cin_g + cl) * p.k + kh) * p.k + kw;
+                                    acc += x[xi] * w[wi2];
+                                }
+                            }
+                        }
+                        y[((n * p.cout + co) * p.ho + ho) * p.wo + wo] = acc;
+                    }
+                }
+            }
+        }
+        y
+    }
+
+    #[test]
+    fn conv2d_gd_matches_grouped_reference() {
+        // (cin, cout, groups, k, stride, pad, dilation): grouped 1x1 with a
+        // non-multiple-of-8 cout_g (the fusion-projection shape), grouped 3x3,
+        // depthwise 3x3, and depthwise DILATED 3x3 (MinimalMultiScale).
+        let cases = [
+            (24, 24, 2, 1, 1, 0, 1),
+            (12, 20, 4, 3, 1, 1, 1),
+            (16, 16, 16, 3, 1, 1, 1),
+            (16, 16, 16, 3, 1, 2, 2),
+            (8, 12, 2, 3, 2, 1, 1),
+        ];
+        for (cin, cout, groups, k, stride, pad, dil) in cases {
+            let eff = dil * (k - 1) + 1;
+            let (h, w) = (13usize, 11usize);
+            let p = ConvParams {
+                n: 2,
+                cin,
+                h,
+                w,
+                cout,
+                k,
+                stride,
+                pad,
+                dilation: dil,
+                ho: (h + 2 * pad - eff) / stride + 1,
+                wo: (w + 2 * pad - eff) / stride + 1,
+            };
+            let mut s = 999u32 ^ (cout as u32 * 31 + groups as u32);
+            let x: Vec<f32> = (0..p.x_len()).map(|_| lcg(&mut s)).collect();
+            let wlen = cout * (cin / groups) * k * k;
+            let wt: Vec<f32> = (0..wlen).map(|_| lcg(&mut s)).collect();
+            let mut y = vec![0.0f32; p.y_len()];
+            conv2d_gd(&p, groups, &x, &wt, &mut y);
+            let yref = conv_gd_ref(&p, groups, &x, &wt);
+            let mut maxerr = 0.0f32;
+            for (a, b) in y.iter().zip(yref.iter()) {
+                maxerr = maxerr.max((a - b).abs() / (b.abs() + 1e-3));
+            }
+            assert!(
+                maxerr < 2e-3,
+                "grouped conv rel err {maxerr} for cin={cin} cout={cout} g={groups} k={k} s={stride} p={pad} d={dil}"
+            );
+        }
+    }
+
     fn lcg(seed: &mut u32) -> f32 {
         *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
         ((*seed >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
@@ -646,7 +831,7 @@ mod tests {
     fn cp(n: usize, cin: usize, h: usize, w: usize, cout: usize, k: usize, stride: usize, pad: usize) -> ConvParams {
         let ho = (h + 2 * pad - k) / stride + 1;
         let wo = (w + 2 * pad - k) / stride + 1;
-        ConvParams { n, cin, h, w, cout, k, stride, pad, ho, wo }
+        ConvParams { n, cin, h, w, cout, k, stride, pad, dilation: 1, ho, wo }
     }
 
     #[test]
@@ -693,26 +878,38 @@ mod tests {
     }
 
     #[test]
-    fn conv_act_matches_conv_then_affine_silu() {
-        for p in [cp(1, 8, 12, 12, 16, 3, 1, 1), cp(1, 13, 7, 5, 6, 1, 1, 0), cp(1, 6, 16, 16, 10, 3, 2, 1)] {
-            let mut s = 7u32 ^ p.cout as u32;
-            let x: Vec<f32> = (0..p.x_len()).map(|_| lcg(&mut s)).collect();
-            let w: Vec<f32> = (0..p.w_len()).map(|_| lcg(&mut s)).collect();
-            let sb: Vec<f32> = (0..2 * p.cout).map(|_| lcg(&mut s)).collect();
-            let mut y = vec![0.0f32; p.y_len()];
-            conv2d_act(&p, &x, &w, &sb, &mut y);
-            // Reference: conv, then per-channel affine, then SiLU.
-            let yc = conv_ref(&p, &x, &w);
-            let psz = p.ho * p.wo;
-            let mut maxerr = 0.0f32;
-            for co in 0..p.cout {
-                for j in 0..psz {
-                    let z = yc[co * psz + j] * sb[2 * co] + sb[2 * co + 1];
-                    let r = z / (1.0 + (-z).exp());
-                    maxerr = maxerr.max((y[co * psz + j] - r).abs() / (r.abs() + 1e-3));
-                }
+    fn conv_act_matches_conv_then_affine_act() {
+        // All four epilogues of the act selector (0 identity, 1 relu, 2 silu,
+        // 3 sigmoid) against the unfused reference: conv, then per-channel
+        // affine, then the activation applied on the host.
+        let act_ref = |act: u32, z: f32| -> f32 {
+            match act {
+                1 => z.max(0.0),
+                2 => z / (1.0 + (-z).exp()),
+                3 => 1.0 / (1.0 + (-z).exp()),
+                _ => z,
             }
-            assert!(maxerr < 2e-3, "fused conv_act rel err {maxerr} for {p:?}");
+        };
+        for p in [cp(1, 8, 12, 12, 16, 3, 1, 1), cp(1, 13, 7, 5, 6, 1, 1, 0), cp(1, 6, 16, 16, 10, 3, 2, 1)] {
+            for act in 0..4u32 {
+                let mut s = 7u32 ^ p.cout as u32 ^ (act << 8);
+                let x: Vec<f32> = (0..p.x_len()).map(|_| lcg(&mut s)).collect();
+                let w: Vec<f32> = (0..p.w_len()).map(|_| lcg(&mut s)).collect();
+                let sb: Vec<f32> = (0..2 * p.cout).map(|_| lcg(&mut s)).collect();
+                let mut y = vec![0.0f32; p.y_len()];
+                conv2d_act(&p, &x, &w, &sb, &mut y, act);
+                let yc = conv_ref(&p, &x, &w);
+                let psz = p.ho * p.wo;
+                let mut maxerr = 0.0f32;
+                for co in 0..p.cout {
+                    for j in 0..psz {
+                        let z = yc[co * psz + j] * sb[2 * co] + sb[2 * co + 1];
+                        let r = act_ref(act, z);
+                        maxerr = maxerr.max((y[co * psz + j] - r).abs() / (r.abs() + 1e-3));
+                    }
+                }
+                assert!(maxerr < 2e-3, "fused conv_act rel err {maxerr} for {p:?} act={act}");
+            }
         }
     }
 
