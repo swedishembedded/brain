@@ -169,6 +169,16 @@ impl BatchNorm {
     }
 
     pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer) {
+        self.forward_act(ctx, ps, x, 0);
+    }
+
+    /// Forward with a fused activation in EVAL mode (`act` codes as the
+    /// `conv_act*`/`bn_eval` selector: 0 identity, 1 relu, 2 silu, 3 sigmoid).
+    /// Returns `true` when the activation was applied — the caller then skips
+    /// its own activation dispatch. The TRAIN path ignores `act` and returns
+    /// `false`: training needs the pre-activation output as a backward cache,
+    /// so the caller keeps its separate activation there.
+    pub fn forward_act(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer, act: u32) -> bool {
         let (c, on) = (self.shape.c, self.shape.numel());
         if !self.train.get() {
             if !self.ready.get() {
@@ -176,9 +186,11 @@ impl BatchNorm {
                 self.pack_gb(ctx, ps);
                 self.ready.set(true);
             }
-            let s = ctx.step(ctx.ids.need(ctx.ids.bn_eval, "bn_eval"), &[x, &self.mv, &self.gb, &self.out], &self.nchw(), on);
+            let mut params = self.nchw().to_vec();
+            params.push(act);
+            let s = ctx.step(ctx.ids.need(ctx.ids.bn_eval, "bn_eval"), &[x, &self.mv, &self.gb, &self.out], &params, on);
             ctx.gpu.submit(&[], &[s]);
-            return;
+            return true;
         }
         self.pack_gb(ctx, ps);
         let s_stats = ctx.step(ctx.ids.need(ctx.ids.bn_stats, "bn_stats"), &[x, &self.mean, &self.var], &self.nchw(), c);
@@ -195,6 +207,7 @@ impl BatchNorm {
         self.pack_stats_host(ctx, ps);
         let s = ctx.step(ctx.ids.need(ctx.ids.bn_train, "bn_train"), &[x, &self.mv, &self.gb, &self.out], &self.nchw(), on);
         ctx.gpu.submit(&[], &[s]);
+        false
     }
 
     /// `d_out` -> `d_in`, accumulating `gamma`/`beta` grads. Train mode only —

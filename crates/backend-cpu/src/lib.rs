@@ -414,7 +414,8 @@ impl CpuBackend {
         }
         if Some(kind) == f.bn_eval && bufs.len() >= 5 {
             unsafe {
-                let pu = std::slice::from_raw_parts(uniform, 4);
+                // 5 words: NCHW + the act selector (pad word 0 for old callers).
+                let pu = std::slice::from_raw_parts(uniform, 5);
                 let (n, c, h, w) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize);
                 let len = n * c * h * w;
                 let x = std::slice::from_raw_parts(bufs[0] as *const f32, len);

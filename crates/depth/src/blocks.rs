@@ -34,6 +34,7 @@ pub struct QARepBlock {
     pub in_shape: Shape,
     pub out_shape: Shape,
     has_identity: bool,
+    stride: u32,
     b3: Conv,
     b1: Conv,
     sum: DeviceBuffer,   // branch_3x3 + branch_1x1 [+ x]  (pre-activation)
@@ -41,6 +42,12 @@ pub struct QARepBlock {
     d_sum: DeviceBuffer, // grad wrt sum
     d_b1: DeviceBuffer,  // grad wrt x from the 1x1 branch
     acc: DeviceBuffer,   // out-of-place accumulator for the multi-consumer x grad
+    /// Eval mode: the whole block runs as ONE fused dispatch (see `forward`).
+    eval: std::cell::Cell<bool>,
+    /// The RepVGG-collapsed `(weight, scale|bias)` device tensors, built lazily
+    /// on the first eval forward from the ParamStore (host-side `fuse_qarep`)
+    /// and invalidated by `set_eval(false)` — training changes the weights.
+    fused: std::cell::RefCell<Option<(DeviceBuffer, DeviceBuffer)>>,
 }
 
 impl QARepBlock {
@@ -74,6 +81,7 @@ impl QARepBlock {
             in_shape,
             out_shape,
             has_identity,
+            stride,
             b3,
             b1,
             sum: ctx.act(on),
@@ -81,6 +89,8 @@ impl QARepBlock {
             d_sum: ctx.act(on),
             d_b1: ctx.act(in_shape.numel()),
             acc: ctx.act(in_shape.numel()),
+            eval: std::cell::Cell::new(false),
+            fused: std::cell::RefCell::new(None),
         }
     }
 
@@ -88,8 +98,59 @@ impl QARepBlock {
         &self.act
     }
     pub fn set_eval(&self, on: bool) {
+        self.eval.set(on);
+        if !on {
+            // Leaving eval invalidates the collapse: training will move the
+            // branch weights the fused tensors were derived from.
+            *self.fused.borrow_mut() = None;
+        }
         self.b3.set_eval(on);
         self.b1.set_eval(on);
+    }
+
+    /// Whether eval runs the RepVGG-collapsed single dispatch. Needs the fused
+    /// kernel in the registry, and steps aside when a calibration tap is
+    /// installed — the tap observes the two BRANCH convs' inputs, which the
+    /// collapsed form no longer has.
+    pub fn eval_fused(&self, ctx: &Ctx) -> bool {
+        self.eval.get() && ctx.tap.is_none() && ctx.ids.conv_act_reg != vision::NONE
+    }
+
+    /// Build the collapsed `(kernel, scale|bias)` on device: read the ten
+    /// branch tensors, run the (verified) host-side [`crate::fuse_qarep`], and
+    /// upload. `scale` is 1 — the BN folding already happened inside the fuse —
+    /// so the fused conv is dispatched through `conv_act_reg` as
+    /// `relu(conv(x, k) * 1 + bias)`, one dispatch for the whole block.
+    fn ensure_fused(&self, ctx: &Ctx, ps: &ParamStore) {
+        if self.fused.borrow().is_some() {
+            return;
+        }
+        let cin = self.in_shape.c as usize;
+        let cout = self.out_shape.c as usize;
+        let rd = |name: &str, len: usize| ctx.gpu.read(ps.w(name), len);
+        let n3 = self.b3.names();
+        let n1 = self.b1.names();
+        let (w3, g3, be3, m3, v3) = (
+            rd(&n3.weight, cout * cin * 9),
+            rd(&n3.gamma, cout),
+            rd(&n3.beta, cout),
+            rd(&n3.run_mean, cout),
+            rd(&n3.run_var, cout),
+        );
+        let (w1, g1, be1, m1, v1) = (
+            rd(&n1.weight, cout * cin),
+            rd(&n1.gamma, cout),
+            rd(&n1.beta, cout),
+            rd(&n1.run_mean, cout),
+            rd(&n1.run_var, cout),
+        );
+        let br3 = crate::fuse::Branch { weight: &w3, gamma: &g3, beta: &be3, run_mean: &m3, run_var: &v3 };
+        let br1 = crate::fuse::Branch { weight: &w1, gamma: &g1, beta: &be1, run_mean: &m1, run_var: &v1 };
+        let (k, b) = crate::fuse::fuse_qarep(&br3, &br1, cin, cout, 1, self.has_identity);
+        let sb: Vec<f32> = b.iter().flat_map(|&bias| [1.0, bias]).collect();
+        let kb = ctx.gpu.storage_init("qarep.fused.w", &k);
+        let sbb = ctx.gpu.storage_init("qarep.fused.sb", &sb);
+        *self.fused.borrow_mut() = Some((kb, sbb));
     }
     pub fn set_update_running(&self, on: bool) {
         self.b3.set_update_running(on);
@@ -103,6 +164,35 @@ impl QARepBlock {
 
     pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
         let on = self.out_shape.numel();
+        if self.eval_fused(ctx) {
+            // The RepVGG collapse: relu(conv3x3(x, k_fused) + b_fused) — the
+            // exact function of the three branches (crate::fuse, tested for
+            // all x), as ONE register-tiled dispatch instead of ~5 dependent
+            // ones (2 convs + 1-2 adds + relu). On the measured Intel Arc,
+            // every dependent dispatch pays a serialization hop, so the win is
+            // latency as much as arithmetic.
+            self.ensure_fused(ctx, ps);
+            let fused = self.fused.borrow();
+            let (k, sb) = fused.as_ref().unwrap();
+            let s = self.out_shape;
+            let params = [
+                s.n,
+                self.in_shape.c,
+                self.in_shape.h,
+                self.in_shape.w,
+                s.c,
+                3,
+                self.stride,
+                1,
+                s.h,
+                s.w,
+                1, // act = relu
+            ];
+            let threads = s.n * s.c.div_ceil(8) * (s.h * s.w).div_ceil(4);
+            let step = ctx.step(ctx.ids.conv_act_reg, &[x_in, k, sb, &self.act], &params, threads);
+            ctx.gpu.submit(&[], &[step]);
+            return;
+        }
         self.b3.forward(ctx, ps, x_in);
         self.b1.forward(ctx, ps, x_in);
         // sum = b3 + b1 [+ x]. `add2` is SSA (distinct in/out buffers), so with an
@@ -1071,6 +1161,9 @@ pub struct UltraLightFusion {
     d_sum: DeviceBuffer,
     d_pl: DeviceBuffer,
     acc: DeviceBuffer,
+    /// Eval fuses the trailing ReLU into `bn_eval`'s act selector; `out()`
+    /// then aliases the BN's own output (one dispatch + one memory pass fewer).
+    eval: std::cell::Cell<bool>,
 }
 
 impl UltraLightFusion {
@@ -1109,13 +1202,19 @@ impl UltraLightFusion {
             d_sum: ctx.act(n),
             d_pl: ctx.act(up_shape.numel()),
             acc: ctx.act(n),
+            eval: std::cell::Cell::new(false),
         }
     }
 
     pub fn out(&self) -> &DeviceBuffer {
-        &self.out
+        if self.eval.get() {
+            self.bn.out() // relu fused into bn_eval; the BN output IS the block output
+        } else {
+            &self.out
+        }
     }
     pub fn set_eval(&self, on: bool) {
+        self.eval.set(on);
         self.proj_high.set_eval(on);
         self.proj_low.set_eval(on);
         self.bn.set_eval(on);
@@ -1153,14 +1252,18 @@ impl UltraLightFusion {
         self.proj_low.forward(ctx, ps, &self.up);
         let s = ctx.step(ctx.ids.add2, &[self.proj_high.out(), self.proj_low.out(), &self.sum], &[n], n);
         ctx.gpu.submit(&[], &[s]);
-        self.bn.forward(ctx, ps, &self.sum);
-        let s = ctx.step(
-            ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"),
-            &[self.bn.out(), &self.out],
-            &[n, f(0.0)],
-            n,
-        );
-        ctx.gpu.submit(&[], &[s]);
+        // Eval: the ReLU rides in bn_eval's act selector and `out()` aliases
+        // the BN output. Train keeps the separate ReLU — its backward needs
+        // the pre-activation BN output as a cache.
+        if !self.bn.forward_act(ctx, ps, &self.sum, 1) {
+            let s = ctx.step(
+                ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"),
+                &[self.bn.out(), &self.out],
+                &[n, f(0.0)],
+                n,
+            );
+            ctx.gpu.submit(&[], &[s]);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

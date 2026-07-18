@@ -169,6 +169,83 @@ fn fused_eval_gpu_matches_cpu() {
     }
 }
 
+/// 5. The QARep RepVGG collapse at eval: the whole block — two conv+BN
+///    branches (+ identity) + ReLU — runs as ONE fused dispatch whose output
+///    matches the unfused block to round-off. The reference engine strips
+///    `conv_act*`, which forces the branch-by-branch path (`eval_fused` is
+///    false there, which doubles as the negative path check). All three block
+///    geometries: residual (identity), downsample (stride 2), channel change.
+#[test]
+fn qarep_fused_eval_matches_unfused() {
+    use depth::blocks::QARepBlock;
+
+    let fused_gpu = Gpu::new_cpu(depth::net::PIPELINES);
+    let plain = pipelines_without_fused();
+    let plain_gpu = Gpu::new_cpu(&plain);
+    let plain_ids = ConvKernelIds::resolve(&plain);
+
+    let block_forward = |gpu: &Gpu, ids: &ConvKernelIds, in_shape: Shape, cout: u32, stride: u32, seed: u64, expect_fused: bool| -> Vec<f32> {
+        let ctx = Ctx::new(gpu, ids);
+        let blk = QARepBlock::new(&ctx, "q", in_shape, cout, stride, false);
+        blk.set_eval(true);
+        assert_eq!(
+            blk.eval_fused(&ctx),
+            expect_fused,
+            "fused-path selection (expect_fused={expect_fused})"
+        );
+        let mut s = seed;
+        let mut rv = |n: usize, f: &dyn Fn(f32) -> f32| -> Vec<f32> {
+            (0..n)
+                .map(|_| {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    f(((s >> 33) as f32 / (1u64 << 31) as f32) - 1.0)
+                })
+                .collect()
+        };
+        let mut init: HashMap<String, Vec<f32>> = HashMap::new();
+        for (name, numel) in blk.param_list() {
+            let v = if name.ends_with(".1.weight") {
+                rv(numel, &|r| 1.0 + 0.2 * r) // BN gamma
+            } else if name.ends_with(".1.bias") {
+                rv(numel, &|r| 0.1 * r) // BN beta
+            } else if name.ends_with("running_mean") {
+                rv(numel, &|r| 0.3 * r)
+            } else if name.ends_with("running_var") {
+                rv(numel, &|r| 1.0 + 0.5 * r.abs())
+            } else {
+                rv(numel, &|r| 0.5 * r) // conv weights
+            };
+            init.insert(name, v);
+        }
+        let ps = ParamStore::new(gpu, blk.param_list(), &init);
+        let x = gpu.storage_init("x", &rv(in_shape.numel() as usize, &|r| r));
+        blk.forward(&ctx, &ps, &x);
+        gpu.read(blk.out(), blk.out_shape.numel() as usize)
+    };
+
+    for (i, (in_shape, cout, stride)) in [
+        (Shape::new(2, 12, 10, 14), 12, 1), // residual: identity branch live
+        (Shape::new(2, 12, 10, 14), 20, 1), // channel change: no identity
+        (Shape::new(2, 12, 10, 14), 24, 2), // downsample
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let seed = 101 + i as u64;
+        let f = block_forward(&fused_gpu, depth::net::ids(), in_shape, cout, stride, seed, true);
+        let u = block_forward(&plain_gpu, &plain_ids, in_shape, cout, stride, seed, false);
+        assert_eq!(f.len(), u.len());
+        let mut max_rel = 0.0f32;
+        for (a, b) in f.iter().zip(u.iter()) {
+            max_rel = max_rel.max((a - b).abs() / (b.abs() + 1e-4));
+        }
+        assert!(
+            max_rel < 1e-3,
+            "QARep fused vs unfused rel err {max_rel} (cout {cout}, stride {stride})"
+        );
+    }
+}
+
 /// 4. The GROUPED register-tiled forward (`conv2d_gd_reg`), GPU vs CPU, over
 ///    ZipDepth's grouped shapes: grouped 1x1 (the fusion projections — octets
 ///    within one group, the hot case), depthwise 3x3, and depthwise DILATED 3x3

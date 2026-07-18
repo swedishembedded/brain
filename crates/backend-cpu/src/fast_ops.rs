@@ -198,8 +198,12 @@ pub(crate) unsafe fn exp256_ps(x: std::arch::x86_64::__m256) -> std::arch::x86_6
 /// `mv[2c]=mean, mv[2c+1]=var`; `gb[2c]=gamma, gb[2c+1]=beta`; eps=1e-5.
 pub fn bn_eval(params: &[u32], x: &[f32], mv: &[f32], gb: &[f32], out: &mut [f32]) {
     let (n, c, h, w) = (params[0] as usize, params[1] as usize, params[2] as usize, params[3] as usize);
+    // 5th word = fused activation selector (0 identity, 1 relu, 2 silu,
+    // 3 sigmoid), mirroring bn_eval.wgsl. Uniforms are 16-byte padded, so a
+    // legacy 4-word caller reads 0 here = the old behavior.
+    let act = params[4];
     let hw = h * w;
-    // Per-channel collapse to an affine: out = x*scale + bias.
+    // Per-channel collapse to an affine: out = x*scale + bias, then act.
     let scale: Vec<f32> = (0..c).map(|ci| gb[2 * ci] / (mv[2 * ci + 1] + 1e-5).sqrt()).collect();
     let bias: Vec<f32> = (0..c).map(|ci| gb[2 * ci + 1] - mv[2 * ci] * scale[ci]).collect();
     // Coarse parallelism: ~threads*4 tasks, each handling many (n,c) planes, so
@@ -212,13 +216,25 @@ pub fn bn_eval(params: &[u32], x: &[f32], mv: &[f32], gb: &[f32], out: &mut [f32
             let ci = plane % c;
             let (s, b) = (scale[ci], bias[ci]);
             let xi = &x[plane * hw..plane * hw + o.len()];
-            #[cfg(target_arch = "x86_64")]
-            if crate::fast_conv::avx2_available() {
-                unsafe { affine_avx2(xi, s, b, o) };
-                continue;
-            }
-            for (oo, &v) in o.iter_mut().zip(xi) {
-                *oo = v * s + b;
+            if act == 0 {
+                #[cfg(target_arch = "x86_64")]
+                if crate::fast_conv::avx2_available() {
+                    unsafe { affine_avx2(xi, s, b, o) };
+                    continue;
+                }
+                for (oo, &v) in o.iter_mut().zip(xi) {
+                    *oo = v * s + b;
+                }
+            } else {
+                // Reuse the fused-conv epilogues: copy the affine input into
+                // place, then the in-place affine+act (AVX2 where it matters).
+                o.copy_from_slice(xi);
+                match act {
+                    1 => affine_relu_inplace(o, s, b),
+                    2 => affine_silu_inplace(o, s, b),
+                    3 => affine_sigmoid_inplace(o, s, b),
+                    _ => affine_inplace(o, s, b),
+                }
             }
         }
     });

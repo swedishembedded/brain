@@ -422,7 +422,17 @@ impl Conv {
     }
 
     pub fn out(&self) -> &DeviceBuffer {
-        &self.act
+        // A raw conv with no activation IS its conv output: dispatching a
+        // slope-1 leaky_relu just to copy it into `act` cost a full extra
+        // memory pass AND a dependent-dispatch hop per unit (ZipDepth has ~12
+        // such units per frame: the fusion/cross-scale projections and the
+        // MinimalMultiScale branches). Alias instead; forward/backward skip
+        // the copy dispatches to match.
+        if self.spec.norm == Norm::None && self.spec.act == Act::None {
+            &self.conv_out
+        } else {
+            &self.act
+        }
     }
 
     /// Flip this Conv's BN to eval-mode (running stats) or train-mode (batch
@@ -447,6 +457,13 @@ impl Conv {
     /// data and eval-mode inference works; left OFF for the gradient check.
     pub fn set_update_running(&self, on: bool) {
         self.update_running.set(on);
+    }
+
+    /// The unit's tensor names — read-only. Lets a block-level fusion (e.g.
+    /// depth's QARep RepVGG collapse) read this conv's weights/BN stats from
+    /// the ParamStore without duplicating the naming rules.
+    pub fn names(&self) -> &ConvNames {
+        &self.names
     }
 
     pub fn param_list(&self) -> Vec<(String, usize)> {
@@ -674,11 +691,11 @@ impl Conv {
             let src = tapped.as_ref().unwrap_or(x_in);
             let s_conv = self.conv_step(ctx, ps, src, &self.conv_out);
             ctx.gpu.submit(&[], &[s_conv]);
-            let s_act = match self.act_pair(ctx) {
-                Some((fwd, _)) => ctx.step(fwd, &[&self.conv_out, &self.act], &self.act_params(on), on),
-                None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.conv_out, &self.act], &[on, f(1.0)], on),
-            };
-            ctx.gpu.submit(&[], &[s_act]);
+            // Act::None: `out()` aliases `conv_out` — no copy dispatch.
+            if let Some((fwd, _)) = self.act_pair(ctx) {
+                let s_act = ctx.step(fwd, &[&self.conv_out, &self.act], &self.act_params(on), on);
+                ctx.gpu.submit(&[], &[s_act]);
+            }
             return;
         }
 
@@ -826,23 +843,20 @@ impl Conv {
         let tapped = self.apply_tap(ctx, x_in);
         let src = tapped.as_ref().unwrap_or(x_in);
 
+        // conv -> bn_eval(+act): the activation rides in bn_eval's act
+        // selector, straight into `self.act` — one dispatch (and one full
+        // memory pass) fewer than conv -> bn -> act. Eval-only, so nothing
+        // reads the pre-activation `bn_out` cache this path no longer writes.
         let s_conv = self.conv_step(ctx, ps, src, &self.conv_out);
+        let mut bn_params = self.nchw().to_vec();
+        bn_params.push(self.act_code());
         let s_bn = ctx.step(
             ctx.ids.need(ctx.ids.bn_eval, "bn_eval"),
-            &[&self.conv_out, &self.mv, &self.gb, &self.bn_out],
-            &self.nchw(),
+            &[&self.conv_out, &self.mv, &self.gb, &self.act],
+            &bn_params,
             on,
         );
-        let s_act = match self.act_pair(ctx) {
-            Some((fwd, _)) => ctx.step(fwd, &[&self.bn_out, &self.act], &self.act_params(on), on),
-            None => ctx.step(
-                ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"),
-                &[&self.bn_out, &self.act],
-                &[on, f(1.0)],
-                on,
-            ),
-        };
-        ctx.gpu.submit(&[], &[s_conv, s_bn, s_act]);
+        ctx.gpu.submit(&[], &[s_conv, s_bn]);
     }
 
     /// Interleave the RUNNING mean/var into `mv` for `bn_eval` (which shares
@@ -904,15 +918,19 @@ impl Conv {
     /// on the host — the same host-reduce split `gradnorm_sq` uses, and exactly what
     /// yolo's head does by hand (`yolo/src/head.rs:177-201`).
     ///
-    /// Must run AFTER the caller's submit: it reads `d_conv` back.
-    fn bias_backward(&self, ctx: &Ctx, ps: &ParamStore) {
+    /// Must run AFTER the caller's submit: it reads the conv-output grad back.
+    /// `d_conv` is passed in rather than read from `self.d_conv` because the
+    /// Act::None raw path binds the caller's `d_out` DIRECTLY (no act-backward
+    /// copy dispatch) — reading `self.d_conv` there would reduce a buffer that
+    /// was never written.
+    fn bias_backward(&self, ctx: &Ctx, ps: &ParamStore, d_conv: &DeviceBuffer) {
         let Some(dbcast) = self.dbcast.as_ref() else { return };
         let cout = self.out_shape.c;
         let hw = self.out_shape.h * self.out_shape.w;
         let n = cout * hw;
         // bias_grad ACCUMULATES into its output, and dbcast persists across
         // backward passes -> it must be zeroed first.
-        let s = ctx.step(ctx.ids.need(ctx.ids.bias_grad, "bias_grad"), &[&self.d_conv, dbcast], &[self.out_shape.n, n], n);
+        let s = ctx.step(ctx.ids.need(ctx.ids.bias_grad, "bias_grad"), &[d_conv, dbcast], &[self.out_shape.n, n], n);
         ctx.gpu.submit(&[dbcast], &[s]);
         let host = ctx.gpu.read(dbcast, n as usize);
         let cur = ctx.gpu.read(ps.g(&self.names.bias), cout as usize);
@@ -938,17 +956,21 @@ impl Conv {
         let dw_n = self.out_shape.c * self.in_shape.c * self.k * self.k;
 
         if self.spec.norm == Norm::None {
-            // Raw conv: act backward straight into d_conv, then the conv adjoints.
-            let s_a = match self.act_pair(ctx) {
-                Some((_, bwd)) => ctx.step(bwd, &[&self.conv_out, d_out, &self.d_conv], &self.act_params(on), on),
-                None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"), &[&self.conv_out, d_out, &self.d_conv], &[on, f(1.0)], on),
+            // Raw conv: act backward straight into d_conv, then the conv
+            // adjoints. Act::None needs no act backward at all — `out()`
+            // aliases `conv_out`, so `d_out` IS d(conv_out); bind it directly.
+            let d_conv: &DeviceBuffer = if let Some((_, bwd)) = self.act_pair(ctx) {
+                let s_a = ctx.step(bwd, &[&self.conv_out, d_out, &self.d_conv], &self.act_params(on), on);
+                ctx.gpu.submit(&[], &[s_a]);
+                &self.d_conv
+            } else {
+                d_out
             };
-            ctx.gpu.submit(&[], &[s_a]);
             let dw_n = self.out_shape.c * (self.in_shape.c / self.spec.groups) * self.k * self.k;
-            let s_dw = ctx.step(self.conv_dw_kind(ctx), &[&self.d_conv, x_in, ps.g(&self.names.weight)], &self.conv_params(), dw_n);
-            let s_dxin = ctx.step(self.conv_dx_kind(ctx), &[&self.d_conv, ps.w(&self.names.weight), d_in], &self.conv_params(), self.in_shape.numel());
+            let s_dw = ctx.step(self.conv_dw_kind(ctx), &[d_conv, x_in, ps.g(&self.names.weight)], &self.conv_params(), dw_n);
+            let s_dxin = ctx.step(self.conv_dx_kind(ctx), &[d_conv, ps.w(&self.names.weight), d_in], &self.conv_params(), self.in_shape.numel());
             ctx.gpu.submit(&[], &[s_dw, s_dxin]);
-            self.bias_backward(ctx, ps);
+            self.bias_backward(ctx, ps, d_conv);
             return;
         }
         let s_act = match self.act_pair(ctx) {
@@ -966,7 +988,7 @@ impl Conv {
         // s_silu must precede s_dstats/s_dgamma/s_dbeta (they read d_bn); s_dstats
         // must precede s_dx (reads bp). Submit in this order.
         ctx.gpu.submit(&[], &[s_act, s_dstats, s_dgamma, s_dbeta, s_dx, s_dw, s_dxin]);
-        self.bias_backward(ctx, ps);
+        self.bias_backward(ctx, ps, &self.d_conv);
     }
 }
 
