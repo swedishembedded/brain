@@ -21,6 +21,88 @@ use wm_display::sink::{FrameSink, Hud};
 
 use crate::image_io;
 
+/// What the demo shows. `v` cycles these live; `--view` picks the initial one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    /// RGB | colorized depth, side by side.
+    Side,
+    /// Colorized depth alone, centered.
+    Depth,
+    /// A Magic-Eye autostereogram of the depth (free-view to see 3D).
+    Stereo,
+}
+
+impl ViewMode {
+    fn parse(s: &str) -> ViewMode {
+        match s {
+            "stereo" | "magiceye" | "magic" => ViewMode::Stereo,
+            "depth" => ViewMode::Depth,
+            _ => ViewMode::Side,
+        }
+    }
+    fn cycle(self) -> ViewMode {
+        match self {
+            ViewMode::Side => ViewMode::Depth,
+            ViewMode::Depth => ViewMode::Stereo,
+            ViewMode::Stereo => ViewMode::Side,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            ViewMode::Side => "SIDE",
+            ViewMode::Depth => "DEPTH",
+            ViewMode::Stereo => "STEREO",
+        }
+    }
+}
+
+/// Render one view into a canvas that is ALWAYS `2w × h`, so the SDL window never
+/// has to resize when `v` cycles the mode. Side fills it naturally; depth is
+/// centered with bars; the autostereogram is rendered at the full width.
+#[allow(clippy::too_many_arguments)]
+fn render_view(
+    rgb8: &[u8],
+    depth: &[f32],
+    w: u32,
+    h: u32,
+    mode: ViewMode,
+    bounds: Bounds,
+    colormap: Colormap,
+    stereo: &depth::StereoOpts,
+) -> Vec<u8> {
+    let cw = 2 * w;
+    match mode {
+        ViewMode::Side => {
+            let dcol = colorize(depth, bounds, colormap);
+            composite_side_by_side(rgb8, w, h, &dcol, w, h).0
+        }
+        ViewMode::Depth => {
+            let dcol = colorize(depth, bounds, colormap);
+            center_in(&dcol, w, h, cw)
+        }
+        ViewMode::Stereo => {
+            // Full-window Magic Eye: resize the depth to the canvas width first so
+            // the stereogram uses the whole pane (more area = easier to fuse).
+            let d2 = resize_map(depth, w, h, cw, h);
+            let mut so = *stereo;
+            so.eye_sep = depth::StereoOpts::for_width(cw).eye_sep;
+            depth::autostereogram(&d2, cw, h, bounds, &so)
+        }
+    }
+}
+
+/// Center a `w×h` RGB image in a `cw×h` black canvas.
+fn center_in(img: &[u8], w: u32, h: u32, cw: u32) -> Vec<u8> {
+    let mut out = vec![0u8; (cw * h * 3) as usize];
+    let x0 = (cw - w) / 2;
+    for y in 0..h {
+        let src = (y * w * 3) as usize;
+        let dst = ((y * cw + x0) * 3) as usize;
+        out[dst..dst + (w * 3) as usize].copy_from_slice(&img[src..src + (w * 3) as usize]);
+    }
+    out
+}
+
 pub fn run_depth(args: &[String]) {
     // --camera anywhere selects the live path; otherwise it's the image path.
     if args.iter().any(|a| a == "--camera") {
@@ -50,8 +132,10 @@ OPTIONS:
   --image <path>       input image (binary PPM 'P6', or a detection-dataset dir)
   --weights <path>     ZipDepth .pth checkpoint (imported 1:1 by name)
   --variant base|npu   which checkpoint layout (default base = unfold upsampler)
-  --view side|depth    side-by-side RGB|depth (default) or depth only
+  --view side|depth|stereo  side-by-side RGB|depth (default), depth only, or a
+                       Magic-Eye autostereogram (free-view to see 3D)
   --colormap turbo|gray|grayinv   initial colormap (default turbo, cycle with [ ])
+                       In-window keys: [ ] colormap, v cycle view, Esc quit
   --scale <n>          window pixel scale (default 2)
   --infer engine|npu   engine = brain's CPU/GPU forward (default); npu = export to
                        ONNX and run on the Intel NPU (needs --variant npu)
@@ -170,22 +254,20 @@ fn run_image(args: &[String]) {
     let infer_ms = t0.elapsed().as_secs_f32() * 1000.0;
     eprintln!("depth: {w}x{h}, inference {infer_ms:.1} ms ({})", o.infer);
 
-    // Build the initial canvas. Colormap can change later without re-inference.
+    // Build the initial canvas. The window is always 2w×h so `v` can cycle views
+    // (side / depth / stereo) without resizing.
     let rgb8: Vec<u8> = hwc.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect();
     let bounds = Bounds::from_percentiles(&depth, 0.02, 0.98);
     let mut colormap = o.colormap;
-    let compose = |map: Colormap| -> (Vec<u8>, u32, u32) {
-        let dcol = colorize(&depth, bounds, map);
-        if o.view == "depth" {
-            (dcol, w, h)
-        } else {
-            composite_side_by_side(&rgb8, w, h, &dcol, w, h)
-        }
-    };
-
-    let (canvas, cw, ch) = compose(colormap);
+    let mut mode = ViewMode::parse(&o.view);
+    let stereo = depth::StereoOpts::for_width(2 * w);
+    let (cw, ch) = (2 * w, h);
+    let render = |mode: ViewMode, map: Colormap| render_view(&rgb8, &depth, w, h, mode, bounds, map, &stereo);
 
     if o.headless {
+        // Headless keeps the requested view but writes the natural size for it (a
+        // stereogram is a single pane, not the doubled canvas).
+        let canvas = render(mode, colormap);
         let dir = std::path::Path::new(&o.out).parent();
         if let Some(d) = dir {
             let _ = std::fs::create_dir_all(d);
@@ -196,11 +278,11 @@ fn run_image(args: &[String]) {
             std::process::exit(1);
         });
         let hash = fnv1a(&canvas);
-        println!("wrote {} ({cw}x{ch})  rollout_hash={hash:016x}", o.out);
+        println!("wrote {} ({cw}x{ch}) [{}]  rollout_hash={hash:016x}", o.out, mode.label());
         return;
     }
 
-    // Windowed: show the canvas, cycle colormaps on [ / ], quit on Esc.
+    // Windowed: [ / ] cycle colormaps, v cycles the view, Esc quits.
     let mut win = match wm_display::window::SdlWindow::new("brain depth", cw, ch, o.scale) {
         Ok(w) => w,
         Err(e) => {
@@ -208,9 +290,11 @@ fn run_image(args: &[String]) {
             std::process::exit(1);
         }
     };
-    let hud = Hud { model: "zipdepth".into(), quality: colormap as u32, ..Default::default() };
-    let mut current = canvas;
-    win.frame(&current, cw, ch, &hud);
+    let present = |win: &mut wm_display::window::SdlWindow, mode: ViewMode, map: Colormap| {
+        let hud = Hud { model: format!("zipdepth {}", mode.label()), quality: map as u32, ..Default::default() };
+        win.frame(&render(mode, map), cw, ch, &hud);
+    };
+    present(&mut win, mode, colormap);
     loop {
         let input = win.pump();
         if input.quit {
@@ -219,16 +303,20 @@ fn run_image(args: &[String]) {
         let mut changed = false;
         for u in &input.ux {
             use wm_display::keymap::UxKey;
-            if matches!(u, UxKey::QualityUp | UxKey::QualityDown) {
-                colormap = colormap.next();
-                changed = true;
+            match u {
+                UxKey::QualityUp | UxKey::QualityDown => {
+                    colormap = colormap.next();
+                    changed = true;
+                }
+                UxKey::CycleView => {
+                    mode = mode.cycle();
+                    changed = true;
+                }
+                _ => {}
             }
         }
         if changed {
-            let (c, _, _) = compose(colormap);
-            current = c;
-            let hud = Hud { model: "zipdepth".into(), quality: colormap as u32, ..Default::default() };
-            win.frame(&current, cw, ch, &hud);
+            present(&mut win, mode, colormap);
         }
         std::thread::sleep(std::time::Duration::from_millis(16));
     }
@@ -262,10 +350,11 @@ OPTIONS:
   --variant base|npu   checkpoint layout (default base)
   --colormap turbo|gray|grayinv   initial colormap (cycle with [ ])
   --scale <n>          window pixel scale (default 1)
-  --view side|depth    side-by-side (default) or depth only
-  --infer engine|npu   engine = brain CPU/GPU (default); npu = Intel NPU (needs
-                       --variant npu)
-Esc quits. Forces YUYV — an MJPEG-only camera is rejected (no JPEG decoder).
+  --view side|depth|stereo  side-by-side (default), depth only, or Magic-Eye
+                       autostereogram (free-view the depth in 3D)
+  --infer engine|npu   engine = brain CPU/GPU (default); npu = Intel NPU
+In-window keys: v cycle view (side/depth/stereo), [ ] colormap, Esc quit.
+Forces YUYV — an MJPEG-only camera is rejected (no JPEG decoder).
 ";
 
 #[cfg(target_os = "linux")]
@@ -375,9 +464,11 @@ fn run_camera(args: &[String]) {
         Some(Predictor::new(&gpu, cfg.clone(), ps))
     };
 
-    // Window sized for the composite (side) or the frame (depth).
-    let out_w = if view == "depth" { cw } else { cw * 2 };
-    let mut win = match wm_display::window::SdlWindow::new("brain depth", out_w, ch, scale) {
+    // The window is always 2w×h so `v` can cycle views without resizing.
+    let (canvas_w, canvas_h) = (cw * 2, ch);
+    let stereo = depth::StereoOpts::for_width(canvas_w);
+    let mut mode = ViewMode::parse(&view);
+    let mut win = match wm_display::window::SdlWindow::new("brain depth", canvas_w, canvas_h, scale) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("brain depth: no display ({e})");
@@ -397,8 +488,10 @@ fn run_camera(args: &[String]) {
         }
         for u in &input.ux {
             use wm_display::keymap::UxKey;
-            if matches!(u, UxKey::QualityUp | UxKey::QualityDown) {
-                colormap = colormap.next();
+            match u {
+                UxKey::QualityUp | UxKey::QualityDown => colormap = colormap.next(),
+                UxKey::CycleView => mode = mode.cycle(),
+                _ => {}
             }
         }
         // Take the latest frame; a tick with none just idles.
@@ -421,12 +514,8 @@ fn run_camera(args: &[String]) {
             Some(b) => b.ema(target, 0.1),
             None => target,
         });
-        let dcol = colorize(&depth, bounds.unwrap(), colormap);
-        let (mut canvas, ww, hh) = if view == "depth" {
-            (dcol, frame.w, frame.h)
-        } else {
-            composite_side_by_side(&frame.rgb, frame.w, frame.h, &dcol, frame.w, frame.h)
-        };
+        let mut canvas = render_view(&frame.rgb, &depth, frame.w, frame.h, mode, bounds.unwrap(), colormap, &stereo);
+        let (ww, hh) = (canvas_w, canvas_h);
 
         let now = std::time::Instant::now();
         let dt = now.duration_since(last).as_secs_f32();
@@ -435,10 +524,10 @@ fn run_camera(args: &[String]) {
         let st = slot.stats();
         let backend = if use_npu { "NPU" } else { "ENGINE" };
         // In-frame HUD so it reads on the image, not just the window title.
-        let line = format!("ZIPDEPTH {backend} {fps:.0}FPS {infer_ms:.0}MS DROP:{}", st.dropped);
+        let line = format!("ZIPDEPTH {backend} {} {fps:.0}FPS {infer_ms:.0}MS DROP:{}", mode.label(), st.dropped);
         depth::viz::draw_text(&mut canvas, ww, hh, 6, 6, &line, 2, [0, 255, 0]);
         let hud = Hud {
-            model: format!("zipdepth {backend}  {fps:.0} fps  {infer_ms:.0} ms  drop {}", st.dropped),
+            model: format!("zipdepth {backend} {}  {fps:.0} fps  {infer_ms:.0} ms  drop {}", mode.label(), st.dropped),
             fps,
             quality: colormap as u32,
             ..Default::default()

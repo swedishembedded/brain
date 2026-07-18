@@ -27,6 +27,7 @@ pub mod fuse;
 pub mod import;
 pub mod predict;
 pub mod quant;
+pub mod stereo;
 pub mod viz;
 pub mod model;
 
@@ -37,3 +38,4 @@ pub use import::{load as load_checkpoint, load_into, tensor_names};
 pub use model::ZipDepth;
 pub use predict::Predictor;
 pub use quant::{collect_activation_stats, ActStatsCollector, LayerReport};
+pub use stereo::{autostereogram, StereoOpts};

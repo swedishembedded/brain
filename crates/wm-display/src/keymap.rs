@@ -117,6 +117,7 @@ pub enum UxKey {
     StepOnce,   // e (while paused)
     QualityUp,  // ]
     QualityDown, // [
+    CycleView,  // v — cycle the demo's view mode (side / depth / stereo)
 }
 
 #[cfg(test)]

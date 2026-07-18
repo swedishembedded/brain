@@ -167,6 +167,7 @@ fn keycode_to_key(sym: i32) -> Mapped {
         101 => Mapped::Ux(UxKey::StepOnce), // e
         91 => Mapped::Ux(UxKey::QualityDown), // [
         93 => Mapped::Ux(UxKey::QualityUp),   // ]
+        118 => Mapped::Ux(UxKey::CycleView),  // v
         _ => Mapped::None,
     }
 }

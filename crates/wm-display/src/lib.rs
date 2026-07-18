@@ -174,7 +174,7 @@ pub fn play_loop<C: Clock>(
                     apply_quality(model, quality);
                     hud.quality = (-quality) as u32;
                 }
-                UxKey::StepOnce | UxKey::Quit => {}
+                UxKey::StepOnce | UxKey::Quit | UxKey::CycleView => {}
             }
         }
         let step_once = polled.ux.contains(&UxKey::StepOnce);
