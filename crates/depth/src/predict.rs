@@ -1,15 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Single-image / single-frame depth inference: letterbox an arbitrary-size RGB
-//! frame into the model's square input, run the eval forward, and unwarp the depth
-//! map back onto the frame's OWN pixel grid — exactly as `Yolo::detect` returns
-//! boxes in frame coordinates.
+//! Single-image / single-frame depth inference, matching the reference's
+//! preprocessing so brain's output matches the reference PyTorch's.
 //!
-//! The letterbox math is a compact copy rather than a dependency on
-//! `yolo::boxmath`: depth is a peer model, not a consumer of yolo, and the
-//! transform is ~20 lines. (A shared `vision::letterbox` is the eventual home if a
-//! third model needs it.)
+//! The reference does NOT letterbox to a fixed square. It resizes the image
+//! preserving aspect ratio so the SHORTER side is `input` (384), rounds both dims
+//! to a multiple of 32, feeds that RECTANGULAR input to the (fully convolutional)
+//! model, and resizes the depth back to the original resolution
+//! (`zipdepth/inference/predictor.py`). Letterboxing to a padded square — which an
+//! earlier version of this did — both downscales more (wasting resolution on the
+//! pad) and feeds the network grey borders, visibly degrading the depth. The model
+//! itself is exact against the reference (`tests/p3_reference_rect.rs`); getting the
+//! preprocessing right is what makes the whole pipeline match.
+//!
+//! The model is rebuilt when the target size changes (cached otherwise), so a
+//! fixed-resolution camera stream builds once and a still image builds once.
+
+use std::cell::RefCell;
 
 use gpu_core::{DeviceBuffer, Gpu};
 use paramstore::ParamStore;
@@ -18,44 +26,88 @@ use vision::Ctx;
 use crate::config::ZipConfig;
 use crate::model::ZipDepth;
 
-/// Aspect-preserving resize + centre-pad transform from a `w0 x h0` frame to a
-/// `size x size` square.
-#[derive(Clone, Copy, Debug)]
-struct Letterbox {
-    scale: f32,
-    pad_x: f32,
-    pad_y: f32,
-    #[allow(dead_code)]
-    size: u32,
+/// Round `v` to the nearest multiple of `m`, at least `m` — the reference's
+/// `make_divisible`.
+fn make_divisible(v: f32, m: u32) -> u32 {
+    let r = ((v / m as f32).round() as u32) * m;
+    r.max(m)
 }
 
-impl Letterbox {
-    fn compute(w0: u32, h0: u32, size: u32) -> Letterbox {
-        let scale = (size as f32 / w0 as f32).min(size as f32 / h0 as f32);
-        let new_w = (w0 as f32 * scale).round();
-        let new_h = (h0 as f32 * scale).round();
-        Letterbox { scale, pad_x: (size as f32 - new_w) * 0.5, pad_y: (size as f32 - new_h) * 0.5, size }
+/// The reference's target size: resize so the shorter side is `input`, both dims
+/// rounded to a multiple of 32, aspect preserved.
+pub fn target_size(w0: u32, h0: u32, input: u32) -> (u32, u32) {
+    let scale = input as f32 / w0.min(h0) as f32;
+    (make_divisible(h0 as f32 * scale, 32), make_divisible(w0 as f32 * scale, 32))
+}
+
+/// Bilinear resize of an interleaved-RGB HWC `[h0*w0*3]` image to `th × tw`,
+/// `align_corners=false` (`half_pixel`), matching the reference's `cv2` /
+/// `F.interpolate`.
+fn resize_hwc(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
+    let mut out = vec![0f32; (tw * th * 3) as usize];
+    let sx = w0 as f32 / tw as f32;
+    let sy = h0 as f32 / th as f32;
+    for y in 0..th {
+        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, h0 as f32 - 1.0);
+        let (y0, ty) = (fy.floor() as u32, fy - fy.floor());
+        let y1 = (y0 + 1).min(h0 - 1);
+        for x in 0..tw {
+            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, w0 as f32 - 1.0);
+            let (x0, tx) = (fx.floor() as u32, fx - fx.floor());
+            let x1 = (x0 + 1).min(w0 - 1);
+            for c in 0..3u32 {
+                let p = |xx: u32, yy: u32| src[((yy * w0 + xx) * 3 + c) as usize];
+                let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
+                let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
+                out[((y * tw + x) * 3 + c) as usize] = top * (1.0 - ty) + bot * ty;
+            }
+        }
     }
+    out
 }
 
-/// A ready-to-run ZipDepth predictor: the eval-mode model plus its weights, sized
-/// for one image at `cfg.input`.
-pub struct Predictor<'g> {
-    gpu: &'g Gpu,
+/// Bilinear resize of a single-channel `[h0*w0]` map to `th × tw`.
+fn resize_map(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
+    let mut out = vec![0f32; (tw * th) as usize];
+    let sx = w0 as f32 / tw as f32;
+    let sy = h0 as f32 / th as f32;
+    for y in 0..th {
+        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, h0 as f32 - 1.0);
+        let (y0, ty) = (fy.floor() as u32, fy - fy.floor());
+        let y1 = (y0 + 1).min(h0 - 1);
+        for x in 0..tw {
+            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, w0 as f32 - 1.0);
+            let (x0, tx) = (fx.floor() as u32, fx - fx.floor());
+            let x1 = (x0 + 1).min(w0 - 1);
+            let p = |xx: u32, yy: u32| src[(yy * w0 + xx) as usize];
+            let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
+            let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
+            out[(y * tw + x) as usize] = top * (1.0 - ty) + bot * ty;
+        }
+    }
+    out
+}
+
+/// A model built for one target size, plus its input buffer.
+struct Built {
+    th: u32,
+    tw: u32,
     model: ZipDepth,
-    ps: ParamStore,
-    cfg: ZipConfig,
     input: DeviceBuffer,
 }
 
+/// A ready-to-run ZipDepth predictor. The model is (re)built lazily when the target
+/// input size changes, so a fixed-resolution stream compiles once.
+pub struct Predictor<'g> {
+    gpu: &'g Gpu,
+    ps: ParamStore,
+    cfg: ZipConfig,
+    built: RefCell<Option<Built>>,
+}
+
 impl<'g> Predictor<'g> {
-    /// Build a predictor from a loaded ParamStore (see [`crate::import::load_into`]).
     pub fn new(gpu: &'g Gpu, cfg: ZipConfig, ps: ParamStore) -> Predictor<'g> {
-        let ctx = Ctx::new(gpu, crate::net::ids());
-        let model = ZipDepth::build(&ctx, cfg.clone(), 1, false);
-        model.set_eval(true);
-        let input = gpu.storage((3 * cfg.input * cfg.input) as u64);
-        Predictor { gpu, model, ps, cfg, input }
+        Predictor { gpu, ps, cfg, built: RefCell::new(None) }
     }
 
     pub fn input_size(&self) -> u32 {
@@ -63,69 +115,48 @@ impl<'g> Predictor<'g> {
     }
 
     /// Predict depth for an interleaved-RGB HWC frame in `[0,1]`, returning a
-    /// `[h0*w0]` inverse-depth map on the frame's own grid (row-major).
+    /// `[h0*w0]` inverse-depth map on the frame's own grid.
     ///
-    /// The pipeline: letterbox `hwc` into the model's `[3,S,S]` CHW input (the model
-    /// applies ImageNet normalize internally, so the input stays `[0,1]`), run the
-    /// forward, then for each original pixel sample the `S x S` depth map at that
-    /// pixel's letterboxed location (bilinear). Padding regions of the square are
-    /// never sampled — the unwarp only reads inside the content box.
+    /// Aspect-preserving resize to the reference target (shorter side = `input`,
+    /// ×32) — NOT a letterboxed square — then the model forward, then a bilinear
+    /// resize of the depth back to `w0 × h0`. The model normalizes internally, so
+    /// the input stays `[0,1]`.
     pub fn predict(&self, hwc: &[f32], w0: u32, h0: u32) -> Vec<f32> {
         assert_eq!(hwc.len(), (w0 * h0 * 3) as usize, "hwc must be [h0*w0*3] RGB");
-        let s = self.cfg.input;
-        let lb = Letterbox::compute(w0, h0, s);
+        let (th, tw) = target_size(w0, h0, self.cfg.input);
 
-        // Letterbox -> CHW [3,S,S], grey pad. Nearest-neighbour resize (the model
-        // is robust to it and it avoids a second bilinear pass on the host).
-        let sz = s as usize;
-        let mut chw = vec![0.5f32; 3 * sz * sz];
-        let inv = 1.0 / lb.scale;
-        let new_w = (w0 as f32 * lb.scale).round() as usize;
-        let new_h = (h0 as f32 * lb.scale).round() as usize;
-        for yi in 0..new_h {
-            let sy = (((yi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, h0 as f32 - 1.0)) as usize;
-            let dy = yi + lb.pad_y as usize;
-            for xi in 0..new_w {
-                let sx = (((xi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, w0 as f32 - 1.0)) as usize;
-                let dx = xi + lb.pad_x as usize;
-                let sbase = (sy * w0 as usize + sx) * 3;
+        // (Re)build the model if the target size changed.
+        {
+            let needs = self.built.borrow().as_ref().map(|b| (b.th, b.tw) != (th, tw)).unwrap_or(true);
+            if needs {
+                let ctx = Ctx::new(self.gpu, crate::net::ids());
+                let model = ZipDepth::build_hw(&ctx, self.cfg.clone(), 1, th, tw, false);
+                model.set_eval(true);
+                let input = self.gpu.storage((3 * th * tw) as u64);
+                *self.built.borrow_mut() = Some(Built { th, tw, model, input });
+            }
+        }
+
+        // Resize to (th, tw), pack HWC -> CHW.
+        let resized = resize_hwc(hwc, w0, h0, tw, th);
+        let mut chw = vec![0f32; (3 * th * tw) as usize];
+        let hw = (th * tw) as usize;
+        for y in 0..th as usize {
+            for x in 0..tw as usize {
                 for c in 0..3 {
-                    chw[c * sz * sz + dy * sz + dx] = hwc[sbase + c];
+                    chw[c * hw + y * tw as usize + x] = resized[(y * tw as usize + x) * 3 + c];
                 }
             }
         }
 
-        self.gpu.write(&self.input, bytemuck::cast_slice(&chw));
+        let b = self.built.borrow();
+        let b = b.as_ref().unwrap();
+        self.gpu.write(&b.input, bytemuck::cast_slice(&chw));
         let ctx = Ctx::new(self.gpu, crate::net::ids());
-        self.model.forward(&ctx, &self.ps, &self.input);
-        let depth_sq = self.gpu.read(self.model.out(), (s * s) as usize);
+        b.model.forward(&ctx, &self.ps, &b.input);
+        let depth_t = self.gpu.read(b.model.out(), hw);
 
-        // Unwarp: sample the S x S depth at each original pixel's letterboxed spot,
-        // bilinearly. The content box is [pad_x, pad_x+new_w) x [pad_y, ...).
-        let mut out = vec![0f32; (w0 * h0) as usize];
-        for y in 0..h0 {
-            let fy = (y as f32 + 0.5) * lb.scale + lb.pad_y - 0.5;
-            for x in 0..w0 {
-                let fx = (x as f32 + 0.5) * lb.scale + lb.pad_x - 0.5;
-                out[(y * w0 + x) as usize] = sample_bilinear(&depth_sq, s, s, fx, fy);
-            }
-        }
-        out
+        // Resize the depth back to the original frame grid.
+        resize_map(&depth_t, tw, th, w0, h0)
     }
-}
-
-/// Bilinear sample of a `[h*w]` map at `(fx, fy)`, edge-clamped.
-fn sample_bilinear(map: &[f32], w: u32, h: u32, fx: f32, fy: f32) -> f32 {
-    let x0 = fx.floor();
-    let y0 = fy.floor();
-    let tx = fx - x0;
-    let ty = fy - y0;
-    let cx = |v: f32| (v as i32).clamp(0, w as i32 - 1) as usize;
-    let cy = |v: f32| (v as i32).clamp(0, h as i32 - 1) as usize;
-    let (x0, x1) = (cx(x0), cx(x0 + 1.0));
-    let (y0, y1) = (cy(y0), cy(y0 + 1.0));
-    let at = |xx: usize, yy: usize| map[yy * w as usize + xx];
-    let top = at(x0, y0) * (1.0 - tx) + at(x1, y0) * tx;
-    let bot = at(x0, y1) * (1.0 - tx) + at(x1, y1) * tx;
-    top * (1.0 - ty) + bot * ty
 }

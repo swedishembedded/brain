@@ -401,14 +401,24 @@ impl<'a> Exporter<'a> {
 /// imported weights; `cfg.upsample_unfold` must be false (this exporter only emits
 /// the blend upsampler — the unfold path's unfold/pixel-shuffle are not NPU ops).
 pub fn build_depth_graph(cfg: &ZipConfig, w: &dyn WeightSource, g: &mut GraphBuilder) {
+    let sz = cfg.input;
+    build_depth_graph_hw(cfg, w, sz, sz, g);
+}
+
+/// As [`build_depth_graph`], for an arbitrary `h × w` input (both multiples of 32).
+/// The reference feeds an aspect-preserving rectangular input, not a padded square,
+/// so the NPU path exports at the resized frame size to match — see
+/// `depth::predict::target_size`.
+pub fn build_depth_graph_hw(cfg: &ZipConfig, w: &dyn WeightSource, in_h: u32, in_w: u32, g: &mut GraphBuilder) {
     assert!(!cfg.upsample_unfold, "the NPU exporter emits the blend (where_conv) upsampler; set upsample_unfold=false");
     assert_ne!(cfg.global_mode, GlobalMode::Full, "GlobalMode::Full (EGA) is not exported");
+    assert_eq!(in_h % 32, 0, "input height must be a multiple of 32");
+    assert_eq!(in_w % 32, 0, "input width must be a multiple of 32");
     let d = cfg.dims;
     let half = cfg.half_ch();
-    let sz = cfg.input;
     let use_global = cfg.global_mode != GlobalMode::None;
 
-    g.input_f32("input", &[1, 3, sz as i64, sz as i64]);
+    g.input_f32("input", &[1, 3, in_h as i64, in_w as i64]);
     let mut e = Exporter { g, w, uid: 0 };
 
     // normalize: (x - mean) / std, both [1,3,1,1] buffers in the state_dict.
@@ -419,7 +429,7 @@ pub fn build_depth_graph(cfg: &ZipConfig, w: &dyn WeightSource, g: &mut GraphBui
     e.g.init_f32("norm.invstd", &[1, 3, 1, 1], inv_std);
     e.g.add(Node::new("Sub", &["input", "norm.mean"], &["norm.sub"]));
     e.g.add(Node::new("Mul", &["norm.sub", "norm.invstd"], &["norm.x"]));
-    let x = Feat { name: "norm.x".into(), c: 3, h: sz, w: sz };
+    let x = Feat { name: "norm.x".into(), c: 3, h: in_h, w: in_w };
 
     // ---- encoder ----
     let x = e.conv_bn("encoder.stem_half", &x, half, 3, 2, 1, 1, true);
@@ -477,7 +487,7 @@ pub fn build_depth_graph(cfg: &ZipConfig, w: &dyn WeightSource, g: &mut GraphBui
     let out = e.convex_up_blend("decoder.convex_up", &f_half, &depth_half, 2);
 
     e.g.add(Node::new("Identity", &[&out.name], &["output"]));
-    e.g.output_f32("output", &[1, 1, sz as i64, sz as i64]);
+    e.g.output_f32("output", &[1, 1, out.h as i64, out.w as i64]);
 }
 
 /// Local weight source over an imported map.

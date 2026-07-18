@@ -43,5 +43,5 @@ pub use quant::Quant;
 pub use sim::{reference_logits, simulate_logits, simulate_map, FakeQuantTap};
 pub use topology::{build_graph, WeightSource};
 pub mod depth_topology;
-pub use depth_topology::build_depth_graph;
+pub use depth_topology::{build_depth_graph, build_depth_graph_hw};
 pub use wm_topology::{build_diamond_graph, WmSession, WmUnetConfig};

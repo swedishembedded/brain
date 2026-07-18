@@ -102,3 +102,10 @@ pub fn load_into(
         cfg.param_list().into_iter().map(|(n, s)| (n, s.iter().product())).collect();
     Ok(paramstore::ParamStore::new(gpu, params, &init))
 }
+
+/// The tensor names in a checkpoint (for variant auto-detection), without loading
+/// the data into a model. Skips the int64 counters.
+pub fn tensor_names(path: &str) -> Result<Vec<String>, String> {
+    let tensors = checkpoint::torchpt::read(path)?;
+    Ok(tensors.into_iter().map(|t| t.name).filter(|n| !is_counter(n)).collect())
+}

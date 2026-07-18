@@ -280,12 +280,23 @@ impl ZipDepth {
         ZipDepth::build(&ctx, cfg, n, train)
     }
 
+    /// Build for a square `cfg.input × cfg.input` input.
     pub fn build(ctx: &Ctx, cfg: ZipConfig, n: u32, train: bool) -> ZipDepth {
+        let sz = cfg.input;
+        ZipDepth::build_hw(ctx, cfg, n, sz, sz, train)
+    }
+
+    /// Build for an arbitrary `h × w` input (both multiples of 32). The model is
+    /// fully convolutional, so it runs at any such size — and the reference feeds a
+    /// RECTANGULAR aspect-preserving input (shorter side = `input`, rounded to ×32),
+    /// NOT a padded square. Matching that is what recovers the reference's accuracy;
+    /// letterboxing to a square both downscales more and feeds the net grey padding.
+    pub fn build_hw(ctx: &Ctx, cfg: ZipConfig, n: u32, h: u32, w: u32, train: bool) -> ZipDepth {
         let d = cfg.dims;
         let half = cfg.half_ch();
-        let sz = cfg.input;
-        assert_eq!(sz % 32, 0, "the input side must be a multiple of 32 (five stride-2 stages)");
-        let in_shape = Shape::new(n, 3, sz, sz);
+        assert_eq!(h % 32, 0, "input height must be a multiple of 32 (five stride-2 stages)");
+        assert_eq!(w % 32, 0, "input width must be a multiple of 32 (five stride-2 stages)");
+        let in_shape = Shape::new(n, 3, h, w);
         let use_global = cfg.global_mode != GlobalMode::None;
         assert_ne!(cfg.global_mode, GlobalMode::Full, "GlobalMode::Full needs EfficientGlobalAttention, which is not implemented (no released checkpoint uses it)");
 

@@ -110,7 +110,13 @@ fn parse(args: &[String]) -> Opts {
             "--out" => o.out = next(&mut i),
             // `--infer npu` runs the exported ONNX on the Intel NPU via OpenVINO;
             // the default runs brain's own engine (honouring the global --device).
-            "--infer" => o.infer = next(&mut i),
+            "--infer" => {
+                // cpu/gpu are engine aliases; npu runs on the NPU.
+                o.infer = match next(&mut i).as_str() {
+                    "npu" => "npu".to_string(),
+                    _ => "engine".to_string(),
+                };
+            }
             other => {
                 eprintln!("brain depth: unknown option '{other}'");
                 std::process::exit(2);
@@ -126,12 +132,20 @@ fn parse(args: &[String]) -> Opts {
     o
 }
 
+
+/// Pick the ZipConfig by inspecting the checkpoint's own tensor names, so the user
+/// never has to match --variant to the file: `where_conv.*` -> blend (NPU) variant,
+/// `mask_pred.*` -> unfold (base) variant. A wrong --variant was the classic
+/// footgun ("11 tensors the model does not declare").
+fn cfg_for_checkpoint(weights: &str) -> ZipConfig {
+    let names = depth::import::tensor_names(weights).unwrap_or_default();
+    let blend = names.iter().any(|n| n.contains("where_conv"));
+    ZipConfig { upsample_unfold: !blend, ..ZipConfig::base() }
+}
+
 fn run_image(args: &[String]) {
     let o = parse(args);
-    let cfg = match o.variant.as_str() {
-        "npu" => ZipConfig { upsample_unfold: false, ..ZipConfig::base() },
-        _ => ZipConfig::base(),
-    };
+    let cfg = cfg_for_checkpoint(&o.weights);
 
     let (hwc, w, h) = image_io::load_image(&o.image).unwrap_or_else(|e| {
         eprintln!("brain depth: {e}");
@@ -278,7 +292,7 @@ fn run_camera(args: &[String]) {
         };
         match a {
             "--camera" => {}
-            "--infer" => infer = val(),
+            "--infer" => infer = if val() == "npu" { "npu".to_string() } else { "engine".to_string() },
             "--weights" => weights = val(),
             "--variant" => variant = val(),
             "--device-path" => dev_path = val(),
@@ -310,10 +324,8 @@ fn run_camera(args: &[String]) {
         eprintln!("brain depth --camera needs --weights\n{CAM_HELP}");
         std::process::exit(2);
     }
-    let cfg = match variant.as_str() {
-        "npu" => ZipConfig { upsample_unfold: false, ..ZipConfig::base() },
-        _ => ZipConfig::base(),
-    };
+    let _ = &variant; // variant is auto-detected from the checkpoint now.
+    let cfg = cfg_for_checkpoint(&weights);
 
     // Open the camera and negotiate YUYV. The driver reports the size it accepted.
     let mut dev = Device::open(&dev_path, req_w, req_h, 4).unwrap_or_else(|e| {
@@ -346,10 +358,12 @@ fn run_camera(args: &[String]) {
         }
     });
 
-    // Build the inference backend once: brain's engine, or a compiled NPU session.
+    // Build the inference backend once: brain's engine, or a compiled NPU session
+    // sized for this camera's target (aspect-preserving, ×32).
     let use_npu = infer == "npu";
+    let (cam_th, cam_tw) = depth::predict::target_size(cw, ch, cfg.input);
     let gpu = Gpu::new(depth::net::PIPELINES);
-    let mut npu_sess = if use_npu { Some(build_npu_session(&weights, &cfg)) } else { None };
+    let mut npu_sess = if use_npu { Some(build_npu_session(&weights, &cfg, cam_th, cam_tw)) } else { None };
     let predictor = if use_npu {
         None
     } else {
@@ -395,7 +409,7 @@ fn run_camera(args: &[String]) {
         let hwc: Vec<f32> = frame.rgb.iter().map(|&b| b as f32 / 255.0).collect();
         let t0 = std::time::Instant::now();
         let depth = match (&mut npu_sess, &predictor) {
-            (Some(sess), _) => run_npu_session(sess, &cfg, &hwc, frame.w, frame.h),
+            (Some(sess), _) => run_npu_session(sess, &hwc, frame.w, frame.h, cam_th, cam_tw),
             (None, Some(p)) => p.predict(&hwc, frame.w, frame.h),
             _ => unreachable!(),
         };
@@ -474,10 +488,8 @@ fn run_calib(args: &[String]) {
         eprintln!("usage: brain depth calib --report --weights <pth> --images <dir-of-ppm> [--max N] [--variant base|npu]");
         std::process::exit(2);
     }
-    let cfg = match variant.as_str() {
-        "npu" => ZipConfig { upsample_unfold: false, ..ZipConfig::base() },
-        _ => ZipConfig::base(),
-    };
+    let _ = &variant; // variant is auto-detected from the checkpoint now.
+    let cfg = cfg_for_checkpoint(&weights);
 
     // Load calibration images (any PPM in the dir), letterbox each to the model
     // input as CHW.
@@ -573,83 +585,94 @@ fn letterbox_chw(hwc: &[f32], w0: u32, h0: u32, size: u32) -> Vec<f32> {
 // NPU inference: export ZipDepth to ONNX, compile on the Intel NPU, run.
 // ---------------------------------------------------------------------------
 
-/// Export ZipDepth to ONNX and compile it on the NPU (once). The blend/where_conv
-/// variant is required (`--variant npu`).
-fn build_npu_session(weights: &str, cfg: &ZipConfig) -> npu::openvino::NpuSession {
+/// Export ZipDepth to ONNX at target size (th×tw) and compile it on the NPU.
+fn build_npu_session(weights: &str, cfg: &ZipConfig, th: u32, tw: u32) -> npu::openvino::NpuSession {
     use npu::openvino::{NpuConfig, NpuDevice, NpuSession};
-    assert!(!cfg.upsample_unfold, "--infer npu needs --variant npu (the blend upsampler)");
+    assert!(!cfg.upsample_unfold, "--infer npu needs the blend (npu) checkpoint");
     let init = depth::import::load(weights, cfg).unwrap_or_else(|e| {
         eprintln!("brain depth: loading {weights}: {e}");
         std::process::exit(1);
     });
     let mut g = onnx::GraphBuilder::new("zipdepth");
-    npu::build_depth_graph(cfg, &init, &mut g);
+    npu::build_depth_graph_hw(cfg, &init, th, tw, &mut g);
     let sess = NpuSession::load_bytes(&g.finish(), &NpuConfig { device: NpuDevice::Npu, allow_fallback: true, ..Default::default() })
         .unwrap_or_else(|e| {
             eprintln!("brain depth: NPU compile failed: {e}");
             std::process::exit(1);
         });
-    eprintln!("depth: compiled ZipDepth for {}", sess.device());
+    eprintln!("depth: compiled ZipDepth {tw}x{th} for {}", sess.device());
     sess
 }
 
-/// One-shot NPU predict for the image path (compile + run).
+/// One-shot NPU predict for the image path: compile at the aspect-preserving target
+/// size, run, resize the depth back to the frame grid.
 fn predict_npu(weights: &str, cfg: &ZipConfig, hwc: &[f32], w0: u32, h0: u32) -> Vec<f32> {
-    let mut sess = build_npu_session(weights, cfg);
-    run_npu_session(&mut sess, cfg, hwc, w0, h0)
+    let (th, tw) = depth::predict::target_size(w0, h0, cfg.input);
+    let mut sess = build_npu_session(weights, cfg, th, tw);
+    run_npu_session(&mut sess, hwc, w0, h0, th, tw)
 }
 
-/// Run one frame on an already-compiled NPU session: letterbox, infer, unwarp back
-/// to the frame grid. Mirrors depth::Predictor's geometry.
-fn run_npu_session(sess: &mut npu::openvino::NpuSession, cfg: &ZipConfig, hwc: &[f32], w0: u32, h0: u32) -> Vec<f32> {
-    // Letterbox into a [3,sz,sz] CHW input (grey pad), matching the predictor.
-    let sz = cfg.input;
-    let scale = (sz as f32 / w0 as f32).min(sz as f32 / h0 as f32);
-    let new_w = (w0 as f32 * scale).round() as usize;
-    let new_h = (h0 as f32 * scale).round() as usize;
-    let pad_x = ((sz as f32 - new_w as f32) * 0.5) as usize;
-    let pad_y = ((sz as f32 - new_h as f32) * 0.5) as usize;
-    let szu = sz as usize;
-    let inv = 1.0 / scale;
-    let mut chw = vec![0.5f32; 3 * szu * szu];
-    for yi in 0..new_h {
-        let sy = (((yi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, h0 as f32 - 1.0)) as usize;
-        for xi in 0..new_w {
-            let sx = (((xi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, w0 as f32 - 1.0)) as usize;
-            let sbase = (sy * w0 as usize + sx) * 3;
+/// Run one frame on an NPU session compiled for (th×tw): aspect-preserving resize
+/// to (th,tw), infer, resize the depth back to the frame grid. Matches the engine
+/// predictor's preprocessing (which matches the reference).
+fn run_npu_session(sess: &mut npu::openvino::NpuSession, hwc: &[f32], w0: u32, h0: u32, th: u32, tw: u32) -> Vec<f32> {
+    let resized = resize_hwc(hwc, w0, h0, tw, th);
+    let hw = (th * tw) as usize;
+    let mut chw = vec![0f32; 3 * hw];
+    for y in 0..th as usize {
+        for x in 0..tw as usize {
             for c in 0..3 {
-                chw[c * szu * szu + (yi + pad_y) * szu + (xi + pad_x)] = hwc[sbase + c];
+                chw[c * hw + y * tw as usize + x] = resized[(y * tw as usize + x) * 3 + c];
             }
         }
     }
-    let out = sess.run(&chw, [1, 3, szu, szu]).unwrap_or_else(|e| {
+    let out = sess.run(&chw, [1, 3, th as usize, tw as usize]).unwrap_or_else(|e| {
         eprintln!("brain depth: NPU inference failed: {e}");
         std::process::exit(1);
     });
-    let depth_sq = &out.tensors[0].2;
+    resize_map(&out.tensors[0].2, tw, th, w0, h0)
+}
 
-    // Unwarp the sz×sz depth onto the frame grid (bilinear), same as the predictor.
-    let sample = |fx: f32, fy: f32| -> f32 {
-        let x0 = fx.floor();
-        let y0 = fy.floor();
-        let tx = fx - x0;
-        let ty = fy - y0;
-        let cx = |v: f32| (v as i32).clamp(0, sz as i32 - 1) as usize;
-        let cy = |v: f32| (v as i32).clamp(0, sz as i32 - 1) as usize;
-        let at = |xx: usize, yy: usize| depth_sq[yy * szu + xx];
-        let (ax, bx) = (cx(x0), cx(x0 + 1.0));
-        let (ay, by) = (cy(y0), cy(y0 + 1.0));
-        let top = at(ax, ay) * (1.0 - tx) + at(bx, ay) * tx;
-        let bot = at(ax, by) * (1.0 - tx) + at(bx, by) * tx;
-        top * (1.0 - ty) + bot * ty
-    };
-    let mut depth = vec![0f32; (w0 * h0) as usize];
-    for y in 0..h0 {
-        let fy = (y as f32 + 0.5) * scale + pad_y as f32 - 0.5;
-        for x in 0..w0 {
-            let fx = (x as f32 + 0.5) * scale + pad_x as f32 - 0.5;
-            depth[(y * w0 + x) as usize] = sample(fx, fy);
+/// Host bilinear resize of interleaved RGB HWC (half_pixel), matching the predictor.
+fn resize_hwc(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
+    let mut out = vec![0f32; (tw * th * 3) as usize];
+    let (sx, sy) = (w0 as f32 / tw as f32, h0 as f32 / th as f32);
+    for y in 0..th {
+        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, h0 as f32 - 1.0);
+        let (y0, ty) = (fy.floor() as u32, fy - fy.floor());
+        let y1 = (y0 + 1).min(h0 - 1);
+        for x in 0..tw {
+            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, w0 as f32 - 1.0);
+            let (x0, tx) = (fx.floor() as u32, fx - fx.floor());
+            let x1 = (x0 + 1).min(w0 - 1);
+            for c in 0..3u32 {
+                let p = |xx: u32, yy: u32| src[((yy * w0 + xx) * 3 + c) as usize];
+                let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
+                let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
+                out[((y * tw + x) * 3 + c) as usize] = top * (1.0 - ty) + bot * ty;
+            }
         }
     }
-    depth
+    out
+}
+
+/// Host bilinear resize of a single-channel map.
+fn resize_map(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
+    let mut out = vec![0f32; (tw * th) as usize];
+    let (sx, sy) = (w0 as f32 / tw as f32, h0 as f32 / th as f32);
+    for y in 0..th {
+        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, h0 as f32 - 1.0);
+        let (y0, ty) = (fy.floor() as u32, fy - fy.floor());
+        let y1 = (y0 + 1).min(h0 - 1);
+        for x in 0..tw {
+            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, w0 as f32 - 1.0);
+            let (x0, tx) = (fx.floor() as u32, fx - fx.floor());
+            let x1 = (x0 + 1).min(w0 - 1);
+            let p = |xx: u32, yy: u32| src[(yy * w0 + xx) as usize];
+            let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
+            let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
+            out[(y * tw + x) as usize] = top * (1.0 - ty) + bot * ty;
+        }
+    }
+    out
 }
