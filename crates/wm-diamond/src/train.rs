@@ -443,9 +443,11 @@ pub struct DiamondTrainer {
     fwd: Vec<Step>,
     bwd: Vec<Step>,
     x_in: DeviceBuffer,
+    #[allow(dead_code)]
     x_in_grad: DeviceBuffer,
     obs_in: DeviceBuffer,
     y_out: DeviceBuffer,
+    #[allow(dead_code)]
     y_grad: DeviceBuffer,
     tgt: DeviceBuffer,
     loss_parts: DeviceBuffer,

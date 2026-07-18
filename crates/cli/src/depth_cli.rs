@@ -38,6 +38,10 @@ enum ViewMode {
     /// A cross-eye stereo PAIR of the real image (left | right), offset by depth
     /// (2w × h). Free-view CROSS-EYED to see the actual scene in 3D.
     StereoDual,
+    /// The camera image with depth fog: far objects fade into an eerie haze (w × h).
+    Fog,
+    /// The camera image with depth-of-field blur: far objects softer (w × h).
+    Blur,
 }
 
 impl ViewMode {
@@ -46,13 +50,18 @@ impl ViewMode {
             "stereo" | "magiceye" | "magic" | "dots" => ViewMode::Stereo,
             "stereo-image" | "stereo-tex" | "textured" | "photo" => ViewMode::StereoTex,
             "stereo-dual" | "dual" | "crosseye" | "cross-eye" | "cross" => ViewMode::StereoDual,
+            "fog" | "haze" => ViewMode::Fog,
+            "blur" | "dof" => ViewMode::Blur,
             "depth" => ViewMode::Depth,
             _ => ViewMode::Side,
         }
     }
     fn cycle(self) -> ViewMode {
+        // Grouped for demoing: plain image effects, then the depth map, then stereo.
         match self {
-            ViewMode::Side => ViewMode::Depth,
+            ViewMode::Side => ViewMode::Fog,
+            ViewMode::Fog => ViewMode::Blur,
+            ViewMode::Blur => ViewMode::Depth,
             ViewMode::Depth => ViewMode::Stereo,
             ViewMode::Stereo => ViewMode::StereoTex,
             ViewMode::StereoTex => ViewMode::StereoDual,
@@ -66,6 +75,8 @@ impl ViewMode {
             ViewMode::Stereo => "STEREO",
             ViewMode::StereoTex => "STEREO-IMG",
             ViewMode::StereoDual => "STEREO-DUAL",
+            ViewMode::Fog => "FOG",
+            ViewMode::Blur => "BLUR",
         }
     }
     /// The window/canvas size this view renders at, for a `w × h` frame.
@@ -103,6 +114,11 @@ fn render_view(
             let max_disp = (w / 25).clamp(8, 40);
             depth::stereo_pair(rgb8, depth, w, h, bounds, max_disp, stereo.near_is_high)
         }
+        ViewMode::Fog => depth::fog(rgb8, depth, w, h, bounds, [210, 216, 226], 3.5, stereo.near_is_high),
+        ViewMode::Blur => {
+            let max_radius = (w / 40).clamp(3, 20);
+            depth::depth_blur(rgb8, depth, w, h, bounds, max_radius, stereo.near_is_high)
+        }
     }
 }
 
@@ -135,10 +151,10 @@ OPTIONS:
   --image <path>       input image (binary PPM 'P6', or a detection-dataset dir)
   --weights <path>     ZipDepth .pth checkpoint (imported 1:1 by name)
   --variant base|npu   which checkpoint layout (default base = unfold upsampler)
-  --view MODE          side (RGB|depth, default) | depth | stereo (random-dot
-                       Magic-Eye) | stereo-image (textured Magic-Eye from the camera
-                       image) | stereo-dual (cross-eye L|R image pair). Free-view
-                       stereo/stereo-image straight-on; stereo-dual cross-eyed.
+  --view MODE          side (RGB|depth, default) | fog | blur | depth | stereo
+                       (random-dot Magic-Eye) | stereo-image (textured Magic-Eye) |
+                       stereo-dual (cross-eye L|R pair). fog/blur are depth effects
+                       on the image; free-view stereo* straight-on, dual cross-eyed.
   --colormap turbo|gray|grayinv   initial colormap (default turbo, cycle with [ ])
                        In-window keys: [ ] colormap, v cycle view, Esc quit
   --scale <n>          window pixel scale (default 2)
@@ -363,8 +379,8 @@ OPTIONS:
   --variant base|npu   checkpoint layout (default base)
   --colormap turbo|gray|grayinv   initial colormap (cycle with [ ])
   --scale <n>          window pixel scale (default 1)
-  --view MODE          side (default) | depth | stereo | stereo-image | stereo-dual
-                       (cross-eye L|R image pair). `v` cycles them live.
+  --view MODE          side (default) | fog | blur | depth | stereo | stereo-image |
+                       stereo-dual. `v` cycles them live.
   --infer engine|npu   engine = brain CPU/GPU (default); npu = Intel NPU
 In-window keys: v cycle view (side/depth/stereo), [ ] colormap, Esc quit.
 Forces YUYV — an MJPEG-only camera is rejected (no JPEG decoder).

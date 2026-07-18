@@ -20,7 +20,9 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use std::collections::HashMap;
 
 // Kernel-table indices (order matches KERNELS).
+#[allow(dead_code)]
 const K_CONV_BIAS: usize = 0;
+#[allow(dead_code)]
 const K_GN_STATS: usize = 1;
 const K_GN_APPLY: usize = 2;
 const K_SILU: usize = 3;

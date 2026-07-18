@@ -91,9 +91,6 @@ pub fn autostereogram_textured(depth: &[f32], w: u32, h: u32, bounds: Bounds, op
 
 fn build(depth: &[f32], w: u32, h: u32, bounds: Bounds, opts: &StereoOpts, source: Option<&[u8]>) -> Vec<u8> {
     assert_eq!(depth.len(), (w * h) as usize, "depth must be [h*w]");
-    // The tile is the max (far-plane) separation wide; the centre strip of the image.
-    let tile_w = separation(0.0, opts.eye_sep as f32, opts.mu).max(1) as usize;
-    let tile_x0 = (w as usize).saturating_sub(tile_w) / 2;
     let (wi, hi) = (w as usize, h as usize);
     let e = opts.eye_sep as f32;
     let mu = opts.mu;
@@ -106,65 +103,34 @@ fn build(depth: &[f32], w: u32, h: u32, bounds: Bounds, opts: &StereoOpts, sourc
         }
     };
 
+    // Wallpaper method, left to right: `out[x] = out[x - separation(depth[x])]`. This
+    // applies depth at EVERY column — a centred subject is fully in 3D. The ONLY
+    // depth-free region is the leftmost ~max-separation strip, whose partner is
+    // off-screen; a single-image stereogram cannot avoid one such strip, so it goes
+    // at the EDGE (usually background) rather than the centre (the subject). For the
+    // textured variant that seed strip tiles the image's CENTRE band, so the whole
+    // surface is textured with the photo — sampled `x % tile_w` from the centre strip
+    // to stay exactly periodic.
+    let tile_w = (separation(0.0, e, mu).max(1) as usize).min(wi);
+    let tile_x0 = (wi - tile_w) / 2; // image centre strip
     let mut out = vec![0u8; wi * hi * 3];
-    let mut same = vec![0usize; wi];
     for y in 0..hi {
-        for (x, s) in same.iter_mut().enumerate() {
-            *s = x;
-        }
+        let base = y * wi;
         for x in 0..wi {
-            let z = z_of(depth[y * wi + x]);
-            let s = separation(z, e, mu);
-            let left = x as i32 - s / 2;
-            let right = left + s;
-            if left < 0 || right as usize >= wi {
-                continue;
-            }
-            let (left, right) = (left as usize, right as usize);
-
-            // Hidden-surface test (Thimbleby et al): a constraint is only honoured if
-            // both linked pixels are actually visible from this depth — otherwise a
-            // nearer surface between them would occlude one eye, and linking creates
-            // ghost echoes at depth edges.
-            let mut visible = true;
-            let mut t = 1i32;
-            loop {
-                let zt = z + 2.0 * (2.0 - mu * z) * (t as f32) / (mu * e);
-                let (xl, xr) = (x as i32 - t, x as i32 + t);
-                if xl < 0 || xr as usize >= wi || zt >= 1.0 {
-                    break;
-                }
-                let zl = z_of(depth[y * wi + xl as usize]);
-                let zr = z_of(depth[y * wi + xr as usize]);
-                visible = zl < zt && zr < zt;
-                if !visible {
-                    break;
-                }
-                t += 1;
-            }
-            if visible {
-                // `right` copies from `left`; the left-to-right fill below then
-                // ripples the pattern into the surface.
-                same[right] = left;
-            }
-        }
-        // Assign colours left-to-right so each `same[x]` source is already set.
-        for x in 0..wi {
-            let color = if same[x] == x {
+            let s = separation(z_of(depth[base + x]), e, mu).max(1) as usize;
+            let c = if x >= s {
+                let sx = base + x - s;
+                [out[sx * 3], out[sx * 3 + 1], out[sx * 3 + 2]]
+            } else {
                 match source {
-                    // PERIODIC tile: sample the centre strip at (x mod tile_w), so the
-                    // seed pattern repeats with exactly the far-plane period.
                     Some(src) => {
-                        let sx = (tile_x0 + (x % tile_w)).min(wi - 1);
-                        [src[(y * wi + sx) * 3], src[(y * wi + sx) * 3 + 1], src[(y * wi + sx) * 3 + 2]]
+                        let sx = base + tile_x0 + (x % tile_w);
+                        [src[sx * 3], src[sx * 3 + 1], src[sx * 3 + 2]]
                     }
                     None => seed_color(x, y),
                 }
-            } else {
-                let s = same[x];
-                [out[(y * wi + s) * 3], out[(y * wi + s) * 3 + 1], out[(y * wi + s) * 3 + 2]]
             };
-            out[(y * wi + x) * 3..(y * wi + x) * 3 + 3].copy_from_slice(&color);
+            out[(base + x) * 3..(base + x) * 3 + 3].copy_from_slice(&c);
         }
     }
     out
@@ -174,46 +140,81 @@ fn build(depth: &[f32], w: u32, h: u32, bounds: Bounds, opts: &StereoOpts, sourc
 mod tests {
     use super::*;
 
-    /// A FLAT depth field must produce a strictly horizontally-periodic pattern with
-    /// period = `separation(z)` — the defining property: with no depth variation the
-    /// autostereogram is just a repeating wallpaper, and the period is exactly the
-    /// separation. Any deviation means the linking is wrong.
+    /// DEPTH MUST BE APPLIED AT EVERY COLUMN, INCLUDING THE CENTRE. Two depth maps
+    /// that differ ONLY in a patch at the exact centre must produce DIFFERENT output
+    /// in that patch — otherwise a centred subject shows no 3D there ("two ears
+    /// clipped instead of the full head"). A static/flat centre reference tile
+    /// ignores its own depth and fails this.
+    #[test]
+    fn centre_output_depends_on_centre_depth() {
+        let (w, h) = (400u32, 8u32);
+        let opts = StereoOpts { eye_sep: 120, mu: 0.5, near_is_high: true };
+        let cx = w as usize / 2;
+        let far = vec![0.0f32; (w * h) as usize];
+        let mut near_patch = far.clone();
+        for y in 0..h as usize {
+            for x in (cx - 15)..(cx + 15) {
+                near_patch[y * w as usize + x] = 1.0; // a near bump at the exact centre
+            }
+        }
+        let b = Bounds { lo: 0.0, hi: 1.0 };
+        let a = autostereogram(&far, w, h, b, &opts);
+        let c = autostereogram(&near_patch, w, h, b, &opts);
+        // The centre patch must be encoded: the two images must differ there.
+        let diff: usize = (0..h as usize)
+            .flat_map(|y| ((cx - 15)..(cx + 15)).map(move |x| (y, x)))
+            .filter(|&(y, x)| a[(y * w as usize + x) * 3..][..3] != c[(y * w as usize + x) * 3..][..3])
+            .count();
+        assert!(diff > 0, "the centre depth change was NOT encoded — the centre is a static tile");
+    }
+
+    /// On FLAT depth the pattern must be horizontally periodic with EXACTLY
+    /// `separation(z)` at every column past the first period — the wavelength that
+    /// encodes depth. The only non-periodic region is the leftmost seed strip
+    /// (`x < separation`), whose partner is off-screen.
     #[test]
     fn flat_depth_is_periodic_with_the_separation() {
         let (w, h) = (400u32, 8u32);
         let opts = StereoOpts { eye_sep: 120, mu: 0.33, near_is_high: true };
-        // z = 0.5 everywhere.
-        let bounds = Bounds { lo: 0.0, hi: 1.0 };
         let depth = vec![0.5f32; (w * h) as usize];
-        let img = autostereogram(&depth, w, h, bounds, &opts);
+        let img = autostereogram(&depth, w, h, Bounds { lo: 0.0, hi: 1.0 }, &opts);
         let s = separation(0.5, opts.eye_sep as f32, opts.mu) as usize;
-        assert!(s > 4, "separation should be meaningful, got {s}");
-        // Every pixel at least `s` from the left edge equals the one `s` to its left.
+        assert!(s > 4);
         for y in 0..h as usize {
             for x in s..w as usize {
-                let a = &img[(y * w as usize + x) * 3..][..3];
-                let b = &img[(y * w as usize + (x - s)) * 3..][..3];
-                assert_eq!(a, b, "flat depth must repeat with period {s} at ({x},{y})");
+                assert_eq!(&img[(y * w as usize + x) * 3..][..3], &img[(y * w as usize + (x - s)) * 3..][..3],
+                    "flat depth must repeat with period {s} at ({x},{y})");
             }
         }
     }
 
-    /// The TEXTURED variant must ALSO be periodic on flat depth — that periodicity is
-    /// exactly what makes it fuse. (The bug it replaced seeded per-pixel from the
-    /// image, which was NOT periodic, so no 3D appeared.)
+    /// The TEXTURED variant is periodic on flat depth (that periodicity is what makes
+    /// it fuse) AND its wallpaper is sampled from the image's CENTRE strip, so the
+    /// surface shows the photo. The seed strip (first period) must equal the image's
+    /// centre band, and the rest repeats with the separation.
     #[test]
-    fn textured_flat_depth_is_periodic() {
+    fn textured_is_periodic_and_seeded_from_the_image_centre() {
         let (w, h) = (400u32, 8u32);
         let opts = StereoOpts { eye_sep: 120, mu: 0.5, near_is_high: true };
         let depth = vec![0.5f32; (w * h) as usize];
-        // A structured source (vertical stripes) — the tile must still repeat with s.
         let src: Vec<u8> = (0..(w * h)).flat_map(|i| { let x = (i % w) as u8; [x, 255 - x, 128] }).collect();
         let img = autostereogram_textured(&depth, w, h, Bounds { lo: 0.0, hi: 1.0 }, &opts, &src);
         let s = separation(0.5, opts.eye_sep as f32, opts.mu) as usize;
+        let tile = separation(0.0, opts.eye_sep as f32, opts.mu) as usize;
+        let tx0 = (w as usize - tile) / 2;
+        // The seed strip (x < s) tiles the image's centre band.
+        for y in 0..h as usize {
+            for x in 0..s {
+                let sx = tx0 + (x % tile);
+                assert_eq!(&img[(y * w as usize + x) * 3..][..3], &src[(y * w as usize + sx) * 3..][..3],
+                    "seed strip must come from the image centre band at ({x},{y})");
+            }
+        }
+        // The rest is periodic with the separation.
         for y in 0..h as usize {
             for x in s..w as usize {
                 assert_eq!(&img[(y * w as usize + x) * 3..][..3], &img[(y * w as usize + (x - s)) * 3..][..3],
-                    "textured flat depth must repeat with period {s} at ({x},{y})");
+                    "textured must repeat with period {s} at ({x},{y})");
             }
         }
     }
