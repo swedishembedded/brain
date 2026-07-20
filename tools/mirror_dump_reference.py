@@ -235,7 +235,8 @@ def main():
                 captured["gs_feat"] = gs_feat.detach()
             else:
                 headm(tap_list, imgs5, patch_start, frames_chunk_size=8)
-        meta[f"t5_{name}"] = sample(captured[name][0].numpy(), k=128, seed=hash(name) % 1000)
+        # NOT hash(name): string hashing is salted per process → unstable indices
+        meta[f"t5_{name}"] = sample(captured[name][0].numpy(), k=128, seed=sum(name.encode()) % 1000)
 
     # gs_renderer parameter convs (built manually — avoids the gsplat import)
     import torch.nn as nn
@@ -257,6 +258,23 @@ def main():
         pred_seq = cam_head([t for t in tap_list], steps=4)
     meta["t5_cam"] = sample(pred_seq[-1][0].numpy(), k=9, seed=88)
     print("cam:", pred_seq[-1][0].numpy())
+
+    # ---- T7: RECTANGULAR input (pos-embed interpolation + rect trunk/DPT) ----
+    # portrait crop -> reference preprocessing -> 392x518 (grid 28x37)
+    rect = pil.crop((100, 0, 500, 400)).resize((392, 518), Image.Resampling.BICUBIC)
+    r8 = np.asarray(rect)
+    meta["t7_input_u8"] = sample(r8, seed=50)
+    imgs_r = torch.from_numpy(r8.transpose(2, 0, 1).astype(np.float32) / 255.0)[None, None]
+    tap_list_r, ps_r = vgt(imgs_r)
+    assert ps_r == 7
+    meta["t7_tap0"] = sample(tap_list_r[0][0, 0].numpy(), k=192, seed=51)
+    meta["t7_tap3"] = sample(tap_list_r[3][0, 0].numpy(), k=192, seed=52)
+    with torch.no_grad():
+        heads["depth_head"](tap_list_r, imgs_r, ps_r, frames_chunk_size=8)
+    meta["t7_depth_head"] = sample(captured["depth_head"][0].numpy(), k=128, seed=53)
+    with torch.no_grad():
+        pred_seq_r = cam_head([t for t in tap_list_r], steps=4)
+    meta["t7_cam"] = sample(pred_seq_r[-1][0].numpy(), k=9, seed=54)
 
     with open(f"{args.out}/golden_meta.json", "w") as f:
         json.dump(meta, f, indent=1)

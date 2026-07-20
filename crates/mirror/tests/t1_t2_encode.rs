@@ -191,4 +191,49 @@ fn t2_dinov2_patch_tokens() {
         errs.push(format!("{e}; full cam vec {cam:?}"));
     }
     assert!(errs.is_empty(), "stage mismatches:\n{}", errs.join("\n"));
+
+    // ---- T7: rectangular input (392x518, grid 28x37) — pos-embed
+    // interpolation + rect trunk/RoPE/DPT, reusing the loaded weights ----
+    if m.get("t7_tap0").is_some() {
+        let mut crop = RgbImage { w: 400, h: 400, rgb: vec![0; 400 * 400 * 3] };
+        for y in 0..400 {
+            let src = (y * 600 + 100) * 3;
+            crop.rgb[y * 400 * 3..y * 400 * 3 + 1200]
+                .copy_from_slice(&img.rgb[src..src + 1200]);
+        }
+        let rect = resize_bicubic(&crop, 392, 518);
+        let got_u8: Vec<f32> = rect.rgb.iter().map(|&b| b as f32).collect();
+        check_sample("t7_input_u8", &got_u8, &get_sample(&m, "t7_input_u8"), 0.5);
+        let (w2, h2) = (392usize, 518usize);
+        let mut chw2 = vec![0.0f32; 3 * w2 * h2];
+        for c in 0..3 {
+            for y in 0..h2 {
+                for x in 0..w2 {
+                    chw2[c * w2 * h2 + y * w2 + x] = rect.rgb[(y * w2 + x) * 3 + c] as f32 / 255.0;
+                }
+            }
+        }
+        model.forward(&chw2, 1, 37, 28);
+        let td = 7 + 37 * 28;
+        let mut errs7: Vec<String> = Vec::new();
+        for (key, ti) in [("t7_tap0", 0usize), ("t7_tap3", 3)] {
+            let got = gpu.read(&model.taps()[ti], td * 2048);
+            if let Some(e) = diff_sample(key, &got, &get_sample(&m, key), 3e-3) {
+                errs7.push(e);
+            }
+        }
+        let got = gpu.read(model.head_out(Head::Depth, 0), 3 * w2 * h2);
+        if let Some(e) = diff_sample("t7_depth_head", &got, &get_sample(&m, "t7_depth_head"), 5e-3) {
+            errs7.push(e);
+        }
+        let mut cam7 = model.cam_pred_raw();
+        cam7[7] = cam7[7].max(0.0);
+        cam7[8] = cam7[8].max(0.0);
+        if let Some(e) = diff_sample("t7_cam", &cam7, &get_sample(&m, "t7_cam"), 2e-3) {
+            errs7.push(e);
+        }
+        assert!(errs7.is_empty(), "T7 rect mismatches:\n{}", errs7.join("\n"));
+    } else {
+        eprintln!("no t7 goldens in meta — regenerate with tools/mirror_dump_reference.py");
+    }
 }

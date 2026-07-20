@@ -76,7 +76,7 @@ WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/mirror/)
   brain mirror infer --weights F --images <dir|a.ppm,b.ppm,…> [--out DIR]
       [--ply scene.ply] [--maps] [--min-opacity X] [--max-depth X]
       Images → navigable 3DGS scene (scene.ply + cameras.json + depth/normal
-      maps). Square inputs for now (native 518 grid).
+      maps). Any aspect ratio (non-native grids interpolate the pos-embed).
   brain mirror demo  --weights F --images <…> [--width N --height N --fov D]
       infer + interactive fly-through of the reconstructed world.
 

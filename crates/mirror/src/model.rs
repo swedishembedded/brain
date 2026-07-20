@@ -274,18 +274,13 @@ impl<'g> Mirror<'g> {
     }
 
     /// (Re)build buffers + record the full forward (DINOv2 encode + trunk)
-    /// for `s` frames of `hp*wp` patches (native 37×37 grid only for now —
-    /// pos-embed interpolation for other grids lands with the infer CLI).
+    /// for `s` frames of `hp*wp` patches; non-native grids bicubic-
+    /// interpolate the DINOv2 patch pos-embed (torch antialias semantics).
     fn build(&mut self, s: usize, hp: usize, wp: usize) {
         let cfg = &self.cfg;
         let c = cfg.dim;
         let reg = cfg.reg_tokens;
         let patches = hp * wp;
-        assert_eq!(
-            patches,
-            cfg.patches(),
-            "pos-embed interpolation for non-native grids is not wired yet"
-        );
         let td = 1 + reg + patches; // per-frame DINOv2 tokens
         let td_t = PATCH_START + patches; // per-frame trunk tokens
         let rows = (s * td) as u32;
@@ -325,7 +320,28 @@ impl<'g> Mirror<'g> {
             probs: gpu.storage(slab),
         };
         let head_rows_buf = gpu.storage_init("mirror.head_rows", &self.head_rows);
-        let pos_patch_buf = gpu.storage_init("mirror.pos_patch", &self.pos_patch);
+        // Non-native grids interpolate the 37x37 patch pos-embed (reference:
+        // torch bicubic, align_corners=False, antialias=True).
+        let pos_patch_data = if patches == cfg.patches() {
+            self.pos_patch.clone()
+        } else {
+            let native = (cfg.img / cfg.patch, cfg.img / cfg.patch);
+            let mut planar = vec![0.0f32; c * native.0 * native.1];
+            for t in 0..native.0 * native.1 {
+                for d in 0..c {
+                    planar[d * native.0 * native.1 + t] = self.pos_patch[t * c + d];
+                }
+            }
+            let resized = crate::preprocess::resize_bicubic_torch(&planar, c, native.0, native.1, hp, wp);
+            let mut tok = vec![0.0f32; patches * c];
+            for t in 0..patches {
+                for d in 0..c {
+                    tok[t * c + d] = resized[d * patches + t];
+                }
+            }
+            tok
+        };
+        let pos_patch_buf = gpu.storage_init("mirror.pos_patch", &pos_patch_data);
 
         let mut steps: Vec<Step> = Vec::new();
         // patch conv [S,3,H,W] -> [S,C,hp,wp] + channel bias

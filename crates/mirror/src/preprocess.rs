@@ -198,3 +198,87 @@ pub fn preprocess(img: &RgbImage, target: usize, patch: usize) -> (Vec<f32>, usi
     }
     (chw, cw, ch_)
 }
+
+// ---- torch-semantics float bicubic (pos-embed interpolation) ----
+
+/// torch ANTIALIASED bicubic kernel. Surprise worth documenting: the
+/// antialiased resampler was ported from PIL including its a = -0.5 —
+/// torch's non-AA bicubic uses -0.75, the AA one does not.
+fn torch_cubic(x: f64) -> f64 {
+    const A: f64 = -0.5;
+    let x = x.abs();
+    if x < 1.0 {
+        ((A + 2.0) * x - (A + 3.0)) * x * x + 1.0
+    } else if x < 2.0 {
+        (((x - 5.0) * x + 8.0) * x - 4.0) * A
+    } else {
+        0.0
+    }
+}
+
+/// One axis of `F.interpolate(mode="bicubic", align_corners=False,
+/// antialias=True)`: torch's AA resampler is a float port of PIL's windowing
+/// (center = (i+0.5)·scale, window clipped then normalized).
+fn torch_axis_weights(in_n: usize, out_n: usize) -> Vec<(usize, Vec<f64>)> {
+    let scale = in_n as f64 / out_n as f64;
+    let filterscale = scale.max(1.0);
+    let support = 2.0 * filterscale;
+    let inv = 1.0 / filterscale;
+    (0..out_n)
+        .map(|i| {
+            let center = (i as f64 + 0.5) * scale;
+            let xmin = ((center - support + 0.5).floor().max(0.0)) as usize;
+            let xmax = (((center + support + 0.5).floor()) as usize).min(in_n);
+            let mut ws: Vec<f64> = (xmin..xmax)
+                .map(|j| torch_cubic((j as f64 - center + 0.5) * inv))
+                .collect();
+            let sum: f64 = ws.iter().sum();
+            for w in ws.iter_mut() {
+                *w /= sum;
+            }
+            (xmin, ws)
+        })
+        .collect()
+}
+
+/// Bicubic-resize a planar `[c, in_h, in_w]` f32 tensor to `[c, out_h, out_w]`
+/// with torch semantics (align_corners=False, antialias) — the DINOv2
+/// pos-embed interpolation path (`interpolate_antialias=True, offset=0`).
+pub fn resize_bicubic_torch(
+    x: &[f32],
+    c: usize,
+    in_h: usize,
+    in_w: usize,
+    out_h: usize,
+    out_w: usize,
+) -> Vec<f32> {
+    let wy = torch_axis_weights(in_h, out_h);
+    let wx = torch_axis_weights(in_w, out_w);
+    // horizontal pass
+    let mut mid = vec![0.0f64; c * in_h * out_w];
+    for ch in 0..c {
+        for y in 0..in_h {
+            for (ox, (x0, ws)) in wx.iter().enumerate() {
+                let mut acc = 0.0;
+                for (k, w) in ws.iter().enumerate() {
+                    acc += w * x[ch * in_h * in_w + y * in_w + x0 + k] as f64;
+                }
+                mid[ch * in_h * out_w + y * out_w + ox] = acc;
+            }
+        }
+    }
+    // vertical pass
+    let mut out = vec![0.0f32; c * out_h * out_w];
+    for ch in 0..c {
+        for (oy, (y0, ws)) in wy.iter().enumerate() {
+            for ox in 0..out_w {
+                let mut acc = 0.0;
+                for (k, w) in ws.iter().enumerate() {
+                    acc += w * mid[ch * in_h * out_w + (y0 + k) * out_w + ox];
+                }
+                out[ch * out_h * out_w + oy * out_w + ox] = acc as f32;
+            }
+        }
+    }
+    out
+}

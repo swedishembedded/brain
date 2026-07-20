@@ -8,8 +8,8 @@
 //!         [--ply scene.ply] [--maps] [--min-opacity X] [--max-depth X]
 //!   brain mirror demo   --weights F --images <…> [viewer flags]
 //!
-//! Inputs are P6 PPM images (square for now — the native 518 grid; pos-embed
-//! interpolation for other aspect ratios is a follow-up).
+//! Inputs are P6 PPM images; any aspect ratio (the DINOv2 pos-embed is
+//! bicubic-interpolated for non-native grids, reference semantics).
 
 use gpu_core::Gpu;
 use mirror::config::MirrorConfig;
@@ -67,14 +67,6 @@ fn load_frames(spec: &str, cfg: &MirrorConfig) -> (Vec<f32>, usize, usize, usize
         let (nw, nh) = preprocess::resize_dims(img.w, img.h, target, cfg.patch);
         let resized = preprocess::resize_bicubic(&img, nw, nh);
         let (cw, ch) = (nw.min(target), nh.min(target));
-        if cw != ch || cw != cfg.img {
-            eprintln!(
-                "{path}: preprocessed to {cw}x{ch}; only the native square {0}x{0} is wired \
-                 so far — crop your input square (pos-embed interpolation is a follow-up)",
-                cfg.img
-            );
-            std::process::exit(2);
-        }
         let (x0, y0) = ((nw - cw) / 2, (nh - ch) / 2);
         for c in 0..3 {
             for y in 0..ch {
