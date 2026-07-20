@@ -29,6 +29,7 @@ pub mod glm_topology;
 pub mod sim;
 pub mod topology;
 pub mod wm_topology;
+pub mod mirror_topology;
 
 // OpenVINO runtime seam (real on x86_64 linux/windows, stub elsewhere).
 pub mod openvino;
