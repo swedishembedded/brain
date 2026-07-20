@@ -49,6 +49,7 @@ const K_SILU: usize = 21;
 const K_MUL: usize = 22;
 const K_NLC_NCHW: usize = 23;
 const K_ADD_INPLACE: usize = 24;
+const K_MATMUL_ROWS: usize = 25;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("layernorm", kernels::LAYERNORM),
@@ -76,12 +77,14 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("mul", kernels::MUL),
     ("nlc_nchw", kernels::NLC_NCHW),
     ("add_inplace", kernels::ADD_INPLACE),
+    ("matmul_rows", kernels::MATMUL_ROWS),
 ];
 
 fn vit_ids(base: usize) -> VitKernelIds {
     VitKernelIds {
         layernorm: base + K_LAYERNORM,
         matmul: base + K_MATMUL,
+        matmul_rows: base + K_MATMUL_ROWS,
         bias_add: base + K_BIAS_ADD,
         gelu_erf: base + K_GELU_ERF,
         scale_chan: base + K_SCALE_CHAN,

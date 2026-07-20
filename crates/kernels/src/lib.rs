@@ -306,6 +306,8 @@ pub const MATMUL: &str = include_str!("../wgsl/matmul.wgsl");
 pub const MATMUL_DW: &str = include_str!("../wgsl/matmul_dw.wgsl");
 /// `wgsl/matmul_dx.wgsl`
 pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
+/// `wgsl/matmul_rows.wgsl`
+pub const MATMUL_ROWS: &str = include_str!("../wgsl/matmul_rows.wgsl");
 /// `wgsl/matmul_tile.wgsl`
 pub const MATMUL_TILE: &str = include_str!("../wgsl/matmul_tile.wgsl");
 /// `wgsl/maxpool5.wgsl`
@@ -629,6 +631,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul", MATMUL),
     ("matmul_dw", MATMUL_DW),
     ("matmul_dx", MATMUL_DX),
+    ("matmul_rows", MATMUL_ROWS),
     ("matmul_tile", MATMUL_TILE),
     ("maxpool5", MAXPOOL5),
     ("maxpool5_dx", MAXPOOL5_DX),

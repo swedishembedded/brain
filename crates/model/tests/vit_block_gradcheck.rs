@@ -45,6 +45,7 @@ const PIPES: &[(&str, &str)] = &[
     ("ln_stats", kernels::LN_STATS),
     ("region_copy", kernels::REGION_COPY),
     ("axpy", kernels::AXPY),
+    ("matmul_rows", kernels::MATMUL_ROWS),
 ];
 
 fn ids() -> (VitKernelIds, VitBwdIds) {
@@ -61,6 +62,7 @@ fn ids() -> (VitKernelIds, VitBwdIds) {
             attn_apply_cross: 8,
             ln_head: 9,
             rope2d: 10,
+            matmul_rows: 28,
         },
         VitBwdIds {
             layernorm_dx: 11,

@@ -24,6 +24,9 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 pub struct VitKernelIds {
     pub layernorm: usize,
     pub matmul: usize,
+    /// 8-row-blocked matmul (bit-identical to `matmul`, 8× less weight
+    /// traffic) — used for the large forward linears.
+    pub matmul_rows: usize,
     pub bias_add: usize,
     pub gelu_erf: usize,
     pub scale_chan: usize,
@@ -261,7 +264,7 @@ pub fn vit_block_fwd(
 
     // ---- attention half ----
     steps.push(g.step(k.layernorm, &[x, w.norm1_w, w.norm1_b, &scr.ln], &[c, rows, f(sh.eps)], rows));
-    steps.push(g.step(k.matmul, &[&scr.ln, w.qkv_w, &scr.qkv], &[rows, c, stride], rows * stride));
+    steps.push(g.step(k.matmul_rows, &[&scr.ln, w.qkv_w, &scr.qkv], &[rows, c, stride], rows.div_ceil(8) * stride));
     steps.push(g.step(k.bias_add, &[&scr.qkv, w.qkv_b], &[rows, stride], rows * stride));
     if let Some(qk) = &w.qk_norm {
         steps.push(g.step(k.ln_head, &[&scr.qkv, qk.q_w, qk.q_b], &[rows, sh.heads, hd, stride, 0, f(sh.eps)], rows * sh.heads));
@@ -273,7 +276,7 @@ pub fn vit_block_fwd(
         steps.push(g.step(k.rope2d, &[&scr.qkv, r.cos, r.sin], &[rows, sh.heads, half, stride, c, r.tmod, f(1.0)], rows * sh.heads * half));
     }
     chunked_attn_fwd(g, k, sh, &scr.qkv, &scr.ctx, &scr.scores, &scr.probs, spans, chunk, steps);
-    steps.push(g.step(k.matmul, &[&scr.ctx, w.proj_w, &scr.ln], &[rows, c, c], rows * c));
+    steps.push(g.step(k.matmul_rows, &[&scr.ctx, w.proj_w, &scr.ln], &[rows, c, c], rows.div_ceil(8) * c));
     steps.push(g.step(k.bias_add, &[&scr.ln, w.proj_b], &[rows, c], rows * c));
     let branch: &DeviceBuffer = if let Some(ls1) = w.ls1 {
         steps.push(g.step(k.scale_chan, &[&scr.ln, ls1, &scr.ctx], &[rows * c, c, 1], rows * c));
@@ -285,10 +288,10 @@ pub fn vit_block_fwd(
 
     // ---- MLP half ----
     steps.push(g.step(k.layernorm, &[&scr.res, w.norm2_w, w.norm2_b, &scr.ln], &[c, rows, f(sh.eps)], rows));
-    steps.push(g.step(k.matmul, &[&scr.ln, w.fc1_w, &scr.h], &[rows, c, sh.mlp], rows * sh.mlp));
+    steps.push(g.step(k.matmul_rows, &[&scr.ln, w.fc1_w, &scr.h], &[rows, c, sh.mlp], rows.div_ceil(8) * sh.mlp));
     steps.push(g.step(k.bias_add, &[&scr.h, w.fc1_b], &[rows, sh.mlp], rows * sh.mlp));
     steps.push(g.step(k.gelu_erf, &[&scr.h, &scr.h2], &[rows * sh.mlp], rows * sh.mlp));
-    steps.push(g.step(k.matmul, &[&scr.h2, w.fc2_w, &scr.ln], &[rows, sh.mlp, c], rows * c));
+    steps.push(g.step(k.matmul_rows, &[&scr.h2, w.fc2_w, &scr.ln], &[rows, sh.mlp, c], rows.div_ceil(8) * c));
     steps.push(g.step(k.bias_add, &[&scr.ln, w.fc2_b], &[rows, c], rows * c));
     let branch: &DeviceBuffer = if let Some(ls2) = w.ls2 {
         steps.push(g.step(k.scale_chan, &[&scr.ln, ls2, &scr.ctx], &[rows * c, c, 1], rows * c));
