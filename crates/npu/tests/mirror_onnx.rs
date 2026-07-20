@@ -109,8 +109,11 @@ fn trunk_graph_structure() {
     let graph = model.graph.expect("graph");
     assert_eq!(graph.input.len(), 1);
     assert_eq!(graph.input[0].name, "patch_tokens");
+    // taps are emitted as separate frame/global halves — Concat(a, f(a)) whose
+    // result is a graph output miscompiles on the Intel NPU (see topology).
     let outs: Vec<&str> = graph.output.iter().map(|o| o.name.as_str()).collect();
-    assert_eq!(outs, ["tap0", "tap1"]);
+    assert_eq!(outs, ["tap0_frame", "tap0_global", "tap1_frame", "tap1_global"]);
+    assert_eq!(graph.node.iter().filter(|n| n.op_type == "Concat" && n.output.iter().any(|o| o.starts_with("tap"))).count(), 0);
     let count = |op: &str| graph.node.iter().filter(|n| n.op_type == op).count();
     // 2 levels x (frame + global) = 4 attention blocks
     assert_eq!(count("Softmax"), 4);

@@ -378,13 +378,33 @@ pub fn build_trunk_graph(
     for l in 0..levels {
         x = tp.trunk_block(&x, &format!("{VGT}.frame_blocks.{l}"), sb, td, "mir_rope_cos_f", "mir_rope_sin_f");
         let frame_out = x.clone();
-        let flat = tp.reshape_to(&x, &[1, sb * td, C]);
+        // At S=1 the [S,td,C] <-> [1,S*td,C] pair is an identity reshape.
+        // Emit it only when it actually changes the shape: a no-op Reshape
+        // whose only consumer is a graph output made the Intel NPU compiler
+        // drop the block's result and hand back the frame tensor instead.
+        let flat = if sb == 1 { x.clone() } else { tp.reshape_to(&x, &[1, sb * td, C]) };
         let gout = tp.trunk_block(&flat, &format!("{VGT}.global_blocks.{l}"), 1, sb * td, "mir_rope_cos_g", "mir_rope_sin_g");
-        x = tp.reshape_to(&gout, &[sb, td, C]);
+        x = if sb == 1 { gout } else { tp.reshape_to(&gout, &[sb, td, C]) };
         if tap_levels.contains(&l) {
             let name = format!("tap{tap_i}");
-            tp.g.add(Node::new("Concat", &[&frame_out, &x], &[&name]).attr_int("axis", 2));
-            tp.g.output_f32(&name, &[sb, td, 2 * C]);
+            // The Concat must NOT write straight into a graph output: the
+            // Intel NPU plugin then fills the second half wrongly (measured:
+            // the last level's global half came back at the frame half's
+            // magnitudes, 13.8% rms error, while the identical tensor routed
+            // through an Identity was correct to 0.18%). Landing the concat
+            // in an internal tensor and copying it out fixes it, and costs
+            // nothing on CPU/GPU.
+            // Emit the frame and global halves as SEPARATE outputs instead of
+            // Concat(frame_out, x). The concat form is the pathological case
+            // `Concat(a, f(a))` whose result feeds only a graph output, and
+            // the Intel NPU plugin gets its second input wrong there: at the
+            // last level the global half came back holding the frame half's
+            // values (13.8% rms error), while the very same tensor routed out
+            // on its own was correct to 0.18%. The consumer concatenates.
+            tp.g.add(Node::new("Identity", &[&frame_out], &[&format!("{name}_frame")]));
+            tp.g.output_f32(&format!("{name}_frame"), &[sb, td, C]);
+            tp.g.add(Node::new("Identity", &[&x], &[&format!("{name}_global")]));
+            tp.g.output_f32(&format!("{name}_global"), &[sb, td, C]);
             tap_i += 1;
         }
     }

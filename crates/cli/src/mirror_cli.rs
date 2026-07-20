@@ -178,8 +178,11 @@ fn export_npu(argv: &[String]) {
     let s = a.u32_or("--frames", 1) as usize;
     let hp = a.u32_or("--hp", 37) as usize;
     let wp = a.u32_or("--wp", 37) as usize;
-    a.finish();
+    // debug knobs for bisecting device parity: fewer levels, taps anywhere
     let cfg = MirrorConfig::default();
+    let levels = a.u32_or("--levels", cfg.depth as u32) as usize;
+    let tap_spec = a.take_str("--tap-levels");
+    a.finish();
     eprintln!("loading {weights} …");
     let init = mirror::import::load_weights(&weights, &cfg).unwrap_or_else(|e| {
         eprintln!("{e}");
@@ -204,9 +207,13 @@ fn export_npu(argv: &[String]) {
     let mut g = onnx::builder::GraphBuilder::new(&format!("mirror_{stage}"));
     match stage.as_str() {
         "dino" => npu::mirror_topology::build_dinov2_graph(&init, &mut g, cfg.depth),
-        "trunk" => npu::mirror_topology::build_trunk_graph(
-            &init, &mut g, s, hp, wp, cfg.depth, &cfg.tap_levels,
-        ),
+        "trunk" => {
+            let taps: Vec<usize> = match &tap_spec {
+                Some(spec) => spec.split(',').map(|v| v.trim().parse().expect("--tap-levels N,N,…")).collect(),
+                None => cfg.tap_levels.to_vec(),
+            };
+            npu::mirror_topology::build_trunk_graph(&init, &mut g, s, hp, wp, levels, &taps)
+        }
         other => {
             eprintln!("unknown --stage {other} (dino|trunk|heads)");
             std::process::exit(2);

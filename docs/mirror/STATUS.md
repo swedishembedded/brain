@@ -93,37 +93,41 @@ to 285,536 with `--prune 0.002`, three distinct predicted camera poses
 geometry fused from the non-reference frames (stools and a chair absent
 from frame 0), at ~0.6 s per 518² frame on the CPU backend.
 
-## NPU / OpenVINO (measured, OpenVINO 2026.2, Intel NPU present)
+## NPU / OpenVINO (measured, OpenVINO 2026.2, Intel NPU)
 
-All three stages export and were run for real — on OpenVINO **CPU** every
-stage matches the reference goldens at fp32:
+All three stages export and were run for real, on both devices:
 
-| Graph | OpenVINO CPU | Intel NPU (fp16-only) |
+| Graph | OpenVINO CPU (fp32) | Intel NPU (fp16-only) |
 |---|---|---|
-| DINOv2 encoder (6a) | 1e-6 | **OK** — median rel 1.3e-3, per-token cosine ≥0.99985 |
-| Trunk, 24 levels (6b) | taps ≤1.3e-6 | **FAILS** — see below |
-| 4 DPT heads (6c) | ≤1.0e-5 | **OK** — median rel ~3e-4 |
+| DINOv2 encoder (6a) | 1.0e-6 | median rel 1.3e-3, per-token cosine ≥0.99985 |
+| Trunk, 24 levels (6b) | taps ≤1.3e-6 | tap0 5e-4 → tap3 2.5e-2 median rel, cosine ≥0.9990 |
+| 4 DPT heads (6c) | ≤1.0e-5 | median rel ~3e-4 from clean taps |
+| Full NPU chain (trunk→heads) | — | depth head rms within **0.039%** of the fp32 golden |
 
 The NPU executes fp16 only (it rejects `INFERENCE_PRECISION_HINT: f32`), so
-the encoder/head deviations above are expected precision, not error — the
-check tool now uses a device-aware tolerance for them.
+the deviations above are precision, not error, and the check tool uses
+measurement-justified per-device tolerances.
 
-**The trunk genuinely fails on NPU** and is the one open defect here: taps 0
-and 1 are clean, but tap3 (level 23) comes back with rms 0.216 against a
-golden 0.349, worst sampled diff 3.1e-1. The NPU's largest tap3 activation
-is 5.2 where the CPU's is 12.8 — large activations are being *suppressed*,
-not rounded. It is not fp16 range (max |x| = 12.8, far below 65504) and not
-smooth accumulation (the error jumps ~300× between level 17 and level 23).
-Since the encoder and all four heads run correctly on the same plugin, the
-suspect is trunk-only structure: the per-head QK LayerNorm over 4D
-`[b,H,t,64]` slices and/or the 2D-RoPE Slice/Mul/Concat. The trunk check
-deliberately keeps its fp32 tolerance so this keeps failing loudly.
+**Bug found and fixed — it was our graph construction, not the plugin.** The
+trunk first came back badly wrong on NPU (last-level tap 38% rms error, its
+global half holding the frame half's values). Bisecting per level showed
+levels 1–21 clean and only the *last* level broken, and re-exporting a
+22-level trunk moved the breakage to level 21 — i.e. "last level", not
+"level 23". The cause was emitting the tap as `Concat(frame_out, x)` writing
+straight into a graph output, where `frame_out` is an ancestor of `x` and
+nothing else consumes `x`: the NPU plugin resolved the concat's second input
+wrongly. The identical tensor routed out on its own was correct to 0.18%.
+Inserting an `Identity` did not help (the plugin folds it); emitting the two
+halves as separate `tap{i}_frame` / `tap{i}_global` outputs and
+concatenating in the consumer fixed it completely. Worth remembering as a
+general ONNX-authoring rule: **do not let a `Concat` write directly into a
+graph output when one of its inputs is an ancestor of another.**
 
 ## Remaining
 
-- Run the trunk/heads ONNX exports on an OpenVINO machine and record the
-  parity + NPU timings (emitters + structural tests + check tool are in;
-  the 6a DINOv2 graph is already OpenVINO-verified to 1e-6).
+- NPU timings/throughput are not measured yet (parity is); the fp16 drift at
+  the deepest tap (2.5e-2 median relative) is worth revisiting if the NPU
+  path is used for anything beyond preview-quality geometry.
 - Cross-attn bwd kernels assign rather than accumulate → training bwd needs
   chunk ≥ span (documented constraint, fine for the tiny-config path).
 - Perf: wgpu memory budget autotune, frame pipelining; further CPU matmul
