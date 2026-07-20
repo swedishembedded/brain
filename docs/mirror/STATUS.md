@@ -73,10 +73,12 @@ point values per stage).
 
 ## Performance (honest, CPU JIT release, 22 threads)
 
-- 1-frame 518² full forward (DINOv2 + trunk + 4 heads + cam): ~10–14 min.
-  The engine is unoptimized for this model class (naive matmul kernel
-  dominates); `matmul_tile` routing, wgpu, and the NPU export (P6) are the
-  acceleration paths. Import: 5 GB in ~15 s.
+- 1-frame 518² full forward (DINOv2 + trunk + 4 heads + cam): ~9–14 min.
+- 3-frame 518² forward + assembly: 4585 s (~76 min). `matmul_rows` bought
+  ~8% at S=3 (5003 s → 4585 s on the same input) — real but modest, because
+  global attention over 3×1376 tokens, not the linears, dominates at this
+  frame count. wgpu and the NPU exports (P6) remain the real acceleration
+  paths. Import: 5 GB in ~15 s.
 
 ## End-to-end demo (verified)
 
@@ -85,9 +87,17 @@ photo): 268,324 gaussians + predicted camera + depth/normal maps in 547 s
 (CPU JIT, 1 frame). `brain splat render` reproduces the input from the
 predicted pose and shows correct parallax from novel views (renders saved in
 `out/mirror-scene/`); `brain mirror demo` opens the interactive fly-through.
+Multi-view verified: three kitchen frames → 804,972 gaussians, voxel-pruned
+to 285,536 with `--prune 0.002`, three distinct predicted camera poses
+(baseline ~0.16 in scene units). Novel views render correctly and show
+geometry fused from the non-reference frames (stools and a chair absent
+from frame 0), at ~0.6 s per 518² frame on the CPU backend.
+
 NPU: the DINOv2 encoder exports to ONNX and matches the reference under
 OpenVINO-CPU to 1e-6 (`brain mirror export-npu` +
-`tools/mirror_check_onnx.py`, runnable with the `NPU` device argument).
+`tools/mirror_check_onnx.py`, runnable with the `NPU` device argument);
+trunk and DPT-head graphs export with the same emitter and are structurally
+tested, pending an OpenVINO run.
 
 ## Remaining
 
