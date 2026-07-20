@@ -1,0 +1,5362 @@
+{
+"cam_head.adapt_norm_gen.1.bias": [
+6144
+],
+"cam_head.adapt_norm_gen.1.weight": [
+6144,
+2048
+],
+"cam_head.init_token": [
+1,
+1,
+9
+],
+"cam_head.out_norm.bias": [
+2048
+],
+"cam_head.out_norm.weight": [
+2048
+],
+"cam_head.param_embed.bias": [
+2048
+],
+"cam_head.param_embed.weight": [
+2048,
+9
+],
+"cam_head.param_predictor.fc1.bias": [
+1024
+],
+"cam_head.param_predictor.fc1.weight": [
+1024,
+2048
+],
+"cam_head.param_predictor.fc2.bias": [
+9
+],
+"cam_head.param_predictor.fc2.weight": [
+9,
+1024
+],
+"cam_head.refine_net.0.attn.proj.bias": [
+2048
+],
+"cam_head.refine_net.0.attn.proj.weight": [
+2048,
+2048
+],
+"cam_head.refine_net.0.attn.qkv.bias": [
+6144
+],
+"cam_head.refine_net.0.attn.qkv.weight": [
+6144,
+2048
+],
+"cam_head.refine_net.0.ls1.gamma": [
+2048
+],
+"cam_head.refine_net.0.ls2.gamma": [
+2048
+],
+"cam_head.refine_net.0.mlp.fc1.bias": [
+8192
+],
+"cam_head.refine_net.0.mlp.fc1.weight": [
+8192,
+2048
+],
+"cam_head.refine_net.0.mlp.fc2.bias": [
+2048
+],
+"cam_head.refine_net.0.mlp.fc2.weight": [
+2048,
+8192
+],
+"cam_head.refine_net.0.norm1.bias": [
+2048
+],
+"cam_head.refine_net.0.norm1.weight": [
+2048
+],
+"cam_head.refine_net.0.norm2.bias": [
+2048
+],
+"cam_head.refine_net.0.norm2.weight": [
+2048
+],
+"cam_head.refine_net.1.attn.proj.bias": [
+2048
+],
+"cam_head.refine_net.1.attn.proj.weight": [
+2048,
+2048
+],
+"cam_head.refine_net.1.attn.qkv.bias": [
+6144
+],
+"cam_head.refine_net.1.attn.qkv.weight": [
+6144,
+2048
+],
+"cam_head.refine_net.1.ls1.gamma": [
+2048
+],
+"cam_head.refine_net.1.ls2.gamma": [
+2048
+],
+"cam_head.refine_net.1.mlp.fc1.bias": [
+8192
+],
+"cam_head.refine_net.1.mlp.fc1.weight": [
+8192,
+2048
+],
+"cam_head.refine_net.1.mlp.fc2.bias": [
+2048
+],
+"cam_head.refine_net.1.mlp.fc2.weight": [
+2048,
+8192
+],
+"cam_head.refine_net.1.norm1.bias": [
+2048
+],
+"cam_head.refine_net.1.norm1.weight": [
+2048
+],
+"cam_head.refine_net.1.norm2.bias": [
+2048
+],
+"cam_head.refine_net.1.norm2.weight": [
+2048
+],
+"cam_head.refine_net.2.attn.proj.bias": [
+2048
+],
+"cam_head.refine_net.2.attn.proj.weight": [
+2048,
+2048
+],
+"cam_head.refine_net.2.attn.qkv.bias": [
+6144
+],
+"cam_head.refine_net.2.attn.qkv.weight": [
+6144,
+2048
+],
+"cam_head.refine_net.2.ls1.gamma": [
+2048
+],
+"cam_head.refine_net.2.ls2.gamma": [
+2048
+],
+"cam_head.refine_net.2.mlp.fc1.bias": [
+8192
+],
+"cam_head.refine_net.2.mlp.fc1.weight": [
+8192,
+2048
+],
+"cam_head.refine_net.2.mlp.fc2.bias": [
+2048
+],
+"cam_head.refine_net.2.mlp.fc2.weight": [
+2048,
+8192
+],
+"cam_head.refine_net.2.norm1.bias": [
+2048
+],
+"cam_head.refine_net.2.norm1.weight": [
+2048
+],
+"cam_head.refine_net.2.norm2.bias": [
+2048
+],
+"cam_head.refine_net.2.norm2.weight": [
+2048
+],
+"cam_head.refine_net.3.attn.proj.bias": [
+2048
+],
+"cam_head.refine_net.3.attn.proj.weight": [
+2048,
+2048
+],
+"cam_head.refine_net.3.attn.qkv.bias": [
+6144
+],
+"cam_head.refine_net.3.attn.qkv.weight": [
+6144,
+2048
+],
+"cam_head.refine_net.3.ls1.gamma": [
+2048
+],
+"cam_head.refine_net.3.ls2.gamma": [
+2048
+],
+"cam_head.refine_net.3.mlp.fc1.bias": [
+8192
+],
+"cam_head.refine_net.3.mlp.fc1.weight": [
+8192,
+2048
+],
+"cam_head.refine_net.3.mlp.fc2.bias": [
+2048
+],
+"cam_head.refine_net.3.mlp.fc2.weight": [
+2048,
+8192
+],
+"cam_head.refine_net.3.norm1.bias": [
+2048
+],
+"cam_head.refine_net.3.norm1.weight": [
+2048
+],
+"cam_head.refine_net.3.norm2.bias": [
+2048
+],
+"cam_head.refine_net.3.norm2.weight": [
+2048
+],
+"cam_head.token_norm.bias": [
+2048
+],
+"cam_head.token_norm.weight": [
+2048
+],
+"depth_head.norm.bias": [
+2048
+],
+"depth_head.norm.weight": [
+2048
+],
+"depth_head.projects.0.bias": [
+256
+],
+"depth_head.projects.0.weight": [
+256,
+2048,
+1,
+1
+],
+"depth_head.projects.1.bias": [
+512
+],
+"depth_head.projects.1.weight": [
+512,
+2048,
+1,
+1
+],
+"depth_head.projects.2.bias": [
+1024
+],
+"depth_head.projects.2.weight": [
+1024,
+2048,
+1,
+1
+],
+"depth_head.projects.3.bias": [
+1024
+],
+"depth_head.projects.3.weight": [
+1024,
+2048,
+1,
+1
+],
+"depth_head.resize_layers.0.bias": [
+256
+],
+"depth_head.resize_layers.0.weight": [
+256,
+256,
+4,
+4
+],
+"depth_head.resize_layers.1.bias": [
+512
+],
+"depth_head.resize_layers.1.weight": [
+512,
+512,
+2,
+2
+],
+"depth_head.resize_layers.3.bias": [
+1024
+],
+"depth_head.resize_layers.3.weight": [
+1024,
+1024,
+3,
+3
+],
+"depth_head.scratch.layer1_rn.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.layer2_rn.weight": [
+256,
+512,
+3,
+3
+],
+"depth_head.scratch.layer3_rn.weight": [
+256,
+1024,
+3,
+3
+],
+"depth_head.scratch.layer4_rn.weight": [
+256,
+1024,
+3,
+3
+],
+"depth_head.scratch.output_conv1.bias": [
+128
+],
+"depth_head.scratch.output_conv1.weight": [
+128,
+256,
+3,
+3
+],
+"depth_head.scratch.output_conv2.0.bias": [
+32
+],
+"depth_head.scratch.output_conv2.0.weight": [
+32,
+128,
+3,
+3
+],
+"depth_head.scratch.output_conv2.2.bias": [
+3
+],
+"depth_head.scratch.output_conv2.2.weight": [
+3,
+32,
+1,
+1
+],
+"depth_head.scratch.refinenet1.out_conv.bias": [
+256
+],
+"depth_head.scratch.refinenet1.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"depth_head.scratch.refinenet1.resConfUnit1.conv1.bias": [
+256
+],
+"depth_head.scratch.refinenet1.resConfUnit1.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.refinenet1.resConfUnit1.conv2.bias": [
+256
+],
+"depth_head.scratch.refinenet1.resConfUnit1.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.refinenet1.resConfUnit2.conv1.bias": [
+256
+],
+"depth_head.scratch.refinenet1.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.refinenet1.resConfUnit2.conv2.bias": [
+256
+],
+"depth_head.scratch.refinenet1.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.refinenet2.out_conv.bias": [
+256
+],
+"depth_head.scratch.refinenet2.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"depth_head.scratch.refinenet2.resConfUnit1.conv1.bias": [
+256
+],
+"depth_head.scratch.refinenet2.resConfUnit1.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.refinenet2.resConfUnit1.conv2.bias": [
+256
+],
+"depth_head.scratch.refinenet2.resConfUnit1.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.refinenet2.resConfUnit2.conv1.bias": [
+256
+],
+"depth_head.scratch.refinenet2.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.refinenet2.resConfUnit2.conv2.bias": [
+256
+],
+"depth_head.scratch.refinenet2.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.refinenet3.out_conv.bias": [
+256
+],
+"depth_head.scratch.refinenet3.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"depth_head.scratch.refinenet3.resConfUnit1.conv1.bias": [
+256
+],
+"depth_head.scratch.refinenet3.resConfUnit1.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.refinenet3.resConfUnit1.conv2.bias": [
+256
+],
+"depth_head.scratch.refinenet3.resConfUnit1.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.refinenet3.resConfUnit2.conv1.bias": [
+256
+],
+"depth_head.scratch.refinenet3.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.refinenet3.resConfUnit2.conv2.bias": [
+256
+],
+"depth_head.scratch.refinenet3.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.refinenet4.out_conv.bias": [
+256
+],
+"depth_head.scratch.refinenet4.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"depth_head.scratch.refinenet4.resConfUnit2.conv1.bias": [
+256
+],
+"depth_head.scratch.refinenet4.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"depth_head.scratch.refinenet4.resConfUnit2.conv2.bias": [
+256
+],
+"depth_head.scratch.refinenet4.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.input_merger.0.bias": [
+128
+],
+"gs_head.input_merger.0.weight": [
+128,
+3,
+7,
+7
+],
+"gs_head.norm.bias": [
+2048
+],
+"gs_head.norm.weight": [
+2048
+],
+"gs_head.projects.0.bias": [
+256
+],
+"gs_head.projects.0.weight": [
+256,
+2048,
+1,
+1
+],
+"gs_head.projects.1.bias": [
+512
+],
+"gs_head.projects.1.weight": [
+512,
+2048,
+1,
+1
+],
+"gs_head.projects.2.bias": [
+1024
+],
+"gs_head.projects.2.weight": [
+1024,
+2048,
+1,
+1
+],
+"gs_head.projects.3.bias": [
+1024
+],
+"gs_head.projects.3.weight": [
+1024,
+2048,
+1,
+1
+],
+"gs_head.resize_layers.0.bias": [
+256
+],
+"gs_head.resize_layers.0.weight": [
+256,
+256,
+4,
+4
+],
+"gs_head.resize_layers.1.bias": [
+512
+],
+"gs_head.resize_layers.1.weight": [
+512,
+512,
+2,
+2
+],
+"gs_head.resize_layers.3.bias": [
+1024
+],
+"gs_head.resize_layers.3.weight": [
+1024,
+1024,
+3,
+3
+],
+"gs_head.scratch.layer1_rn.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.layer2_rn.weight": [
+256,
+512,
+3,
+3
+],
+"gs_head.scratch.layer3_rn.weight": [
+256,
+1024,
+3,
+3
+],
+"gs_head.scratch.layer4_rn.weight": [
+256,
+1024,
+3,
+3
+],
+"gs_head.scratch.output_conv1.bias": [
+128
+],
+"gs_head.scratch.output_conv1.weight": [
+128,
+256,
+3,
+3
+],
+"gs_head.scratch.output_conv2.0.bias": [
+32
+],
+"gs_head.scratch.output_conv2.0.weight": [
+32,
+128,
+3,
+3
+],
+"gs_head.scratch.output_conv2.2.bias": [
+3
+],
+"gs_head.scratch.output_conv2.2.weight": [
+3,
+32,
+1,
+1
+],
+"gs_head.scratch.refinenet1.out_conv.bias": [
+256
+],
+"gs_head.scratch.refinenet1.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"gs_head.scratch.refinenet1.resConfUnit1.conv1.bias": [
+256
+],
+"gs_head.scratch.refinenet1.resConfUnit1.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.refinenet1.resConfUnit1.conv2.bias": [
+256
+],
+"gs_head.scratch.refinenet1.resConfUnit1.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.refinenet1.resConfUnit2.conv1.bias": [
+256
+],
+"gs_head.scratch.refinenet1.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.refinenet1.resConfUnit2.conv2.bias": [
+256
+],
+"gs_head.scratch.refinenet1.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.refinenet2.out_conv.bias": [
+256
+],
+"gs_head.scratch.refinenet2.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"gs_head.scratch.refinenet2.resConfUnit1.conv1.bias": [
+256
+],
+"gs_head.scratch.refinenet2.resConfUnit1.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.refinenet2.resConfUnit1.conv2.bias": [
+256
+],
+"gs_head.scratch.refinenet2.resConfUnit1.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.refinenet2.resConfUnit2.conv1.bias": [
+256
+],
+"gs_head.scratch.refinenet2.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.refinenet2.resConfUnit2.conv2.bias": [
+256
+],
+"gs_head.scratch.refinenet2.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.refinenet3.out_conv.bias": [
+256
+],
+"gs_head.scratch.refinenet3.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"gs_head.scratch.refinenet3.resConfUnit1.conv1.bias": [
+256
+],
+"gs_head.scratch.refinenet3.resConfUnit1.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.refinenet3.resConfUnit1.conv2.bias": [
+256
+],
+"gs_head.scratch.refinenet3.resConfUnit1.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.refinenet3.resConfUnit2.conv1.bias": [
+256
+],
+"gs_head.scratch.refinenet3.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.refinenet3.resConfUnit2.conv2.bias": [
+256
+],
+"gs_head.scratch.refinenet3.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.refinenet4.out_conv.bias": [
+256
+],
+"gs_head.scratch.refinenet4.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"gs_head.scratch.refinenet4.resConfUnit2.conv1.bias": [
+256
+],
+"gs_head.scratch.refinenet4.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"gs_head.scratch.refinenet4.resConfUnit2.conv2.bias": [
+256
+],
+"gs_head.scratch.refinenet4.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"gs_renderer.gs_head.0.weight": [
+256,
+128,
+3,
+3
+],
+"gs_renderer.gs_head.2.bias": [
+12
+],
+"gs_renderer.gs_head.2.weight": [
+12,
+256,
+1,
+1
+],
+"norm_head.norm.bias": [
+2048
+],
+"norm_head.norm.weight": [
+2048
+],
+"norm_head.projects.0.bias": [
+256
+],
+"norm_head.projects.0.weight": [
+256,
+2048,
+1,
+1
+],
+"norm_head.projects.1.bias": [
+512
+],
+"norm_head.projects.1.weight": [
+512,
+2048,
+1,
+1
+],
+"norm_head.projects.2.bias": [
+1024
+],
+"norm_head.projects.2.weight": [
+1024,
+2048,
+1,
+1
+],
+"norm_head.projects.3.bias": [
+1024
+],
+"norm_head.projects.3.weight": [
+1024,
+2048,
+1,
+1
+],
+"norm_head.resize_layers.0.bias": [
+256
+],
+"norm_head.resize_layers.0.weight": [
+256,
+256,
+4,
+4
+],
+"norm_head.resize_layers.1.bias": [
+512
+],
+"norm_head.resize_layers.1.weight": [
+512,
+512,
+2,
+2
+],
+"norm_head.resize_layers.3.bias": [
+1024
+],
+"norm_head.resize_layers.3.weight": [
+1024,
+1024,
+3,
+3
+],
+"norm_head.scratch.layer1_rn.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.layer2_rn.weight": [
+256,
+512,
+3,
+3
+],
+"norm_head.scratch.layer3_rn.weight": [
+256,
+1024,
+3,
+3
+],
+"norm_head.scratch.layer4_rn.weight": [
+256,
+1024,
+3,
+3
+],
+"norm_head.scratch.output_conv1.bias": [
+128
+],
+"norm_head.scratch.output_conv1.weight": [
+128,
+256,
+3,
+3
+],
+"norm_head.scratch.output_conv2.0.bias": [
+32
+],
+"norm_head.scratch.output_conv2.0.weight": [
+32,
+128,
+3,
+3
+],
+"norm_head.scratch.output_conv2.2.bias": [
+4
+],
+"norm_head.scratch.output_conv2.2.weight": [
+4,
+32,
+1,
+1
+],
+"norm_head.scratch.refinenet1.out_conv.bias": [
+256
+],
+"norm_head.scratch.refinenet1.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"norm_head.scratch.refinenet1.resConfUnit1.conv1.bias": [
+256
+],
+"norm_head.scratch.refinenet1.resConfUnit1.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.refinenet1.resConfUnit1.conv2.bias": [
+256
+],
+"norm_head.scratch.refinenet1.resConfUnit1.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.refinenet1.resConfUnit2.conv1.bias": [
+256
+],
+"norm_head.scratch.refinenet1.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.refinenet1.resConfUnit2.conv2.bias": [
+256
+],
+"norm_head.scratch.refinenet1.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.refinenet2.out_conv.bias": [
+256
+],
+"norm_head.scratch.refinenet2.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"norm_head.scratch.refinenet2.resConfUnit1.conv1.bias": [
+256
+],
+"norm_head.scratch.refinenet2.resConfUnit1.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.refinenet2.resConfUnit1.conv2.bias": [
+256
+],
+"norm_head.scratch.refinenet2.resConfUnit1.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.refinenet2.resConfUnit2.conv1.bias": [
+256
+],
+"norm_head.scratch.refinenet2.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.refinenet2.resConfUnit2.conv2.bias": [
+256
+],
+"norm_head.scratch.refinenet2.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.refinenet3.out_conv.bias": [
+256
+],
+"norm_head.scratch.refinenet3.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"norm_head.scratch.refinenet3.resConfUnit1.conv1.bias": [
+256
+],
+"norm_head.scratch.refinenet3.resConfUnit1.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.refinenet3.resConfUnit1.conv2.bias": [
+256
+],
+"norm_head.scratch.refinenet3.resConfUnit1.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.refinenet3.resConfUnit2.conv1.bias": [
+256
+],
+"norm_head.scratch.refinenet3.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.refinenet3.resConfUnit2.conv2.bias": [
+256
+],
+"norm_head.scratch.refinenet3.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.refinenet4.out_conv.bias": [
+256
+],
+"norm_head.scratch.refinenet4.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"norm_head.scratch.refinenet4.resConfUnit2.conv1.bias": [
+256
+],
+"norm_head.scratch.refinenet4.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"norm_head.scratch.refinenet4.resConfUnit2.conv2.bias": [
+256
+],
+"norm_head.scratch.refinenet4.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.norm.bias": [
+2048
+],
+"pts_head.norm.weight": [
+2048
+],
+"pts_head.projects.0.bias": [
+256
+],
+"pts_head.projects.0.weight": [
+256,
+2048,
+1,
+1
+],
+"pts_head.projects.1.bias": [
+512
+],
+"pts_head.projects.1.weight": [
+512,
+2048,
+1,
+1
+],
+"pts_head.projects.2.bias": [
+1024
+],
+"pts_head.projects.2.weight": [
+1024,
+2048,
+1,
+1
+],
+"pts_head.projects.3.bias": [
+1024
+],
+"pts_head.projects.3.weight": [
+1024,
+2048,
+1,
+1
+],
+"pts_head.resize_layers.0.bias": [
+256
+],
+"pts_head.resize_layers.0.weight": [
+256,
+256,
+4,
+4
+],
+"pts_head.resize_layers.1.bias": [
+512
+],
+"pts_head.resize_layers.1.weight": [
+512,
+512,
+2,
+2
+],
+"pts_head.resize_layers.3.bias": [
+1024
+],
+"pts_head.resize_layers.3.weight": [
+1024,
+1024,
+3,
+3
+],
+"pts_head.scratch.layer1_rn.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.layer2_rn.weight": [
+256,
+512,
+3,
+3
+],
+"pts_head.scratch.layer3_rn.weight": [
+256,
+1024,
+3,
+3
+],
+"pts_head.scratch.layer4_rn.weight": [
+256,
+1024,
+3,
+3
+],
+"pts_head.scratch.output_conv1.bias": [
+128
+],
+"pts_head.scratch.output_conv1.weight": [
+128,
+256,
+3,
+3
+],
+"pts_head.scratch.output_conv2.0.bias": [
+32
+],
+"pts_head.scratch.output_conv2.0.weight": [
+32,
+128,
+3,
+3
+],
+"pts_head.scratch.output_conv2.2.bias": [
+4
+],
+"pts_head.scratch.output_conv2.2.weight": [
+4,
+32,
+1,
+1
+],
+"pts_head.scratch.refinenet1.out_conv.bias": [
+256
+],
+"pts_head.scratch.refinenet1.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"pts_head.scratch.refinenet1.resConfUnit1.conv1.bias": [
+256
+],
+"pts_head.scratch.refinenet1.resConfUnit1.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.refinenet1.resConfUnit1.conv2.bias": [
+256
+],
+"pts_head.scratch.refinenet1.resConfUnit1.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.refinenet1.resConfUnit2.conv1.bias": [
+256
+],
+"pts_head.scratch.refinenet1.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.refinenet1.resConfUnit2.conv2.bias": [
+256
+],
+"pts_head.scratch.refinenet1.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.refinenet2.out_conv.bias": [
+256
+],
+"pts_head.scratch.refinenet2.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"pts_head.scratch.refinenet2.resConfUnit1.conv1.bias": [
+256
+],
+"pts_head.scratch.refinenet2.resConfUnit1.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.refinenet2.resConfUnit1.conv2.bias": [
+256
+],
+"pts_head.scratch.refinenet2.resConfUnit1.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.refinenet2.resConfUnit2.conv1.bias": [
+256
+],
+"pts_head.scratch.refinenet2.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.refinenet2.resConfUnit2.conv2.bias": [
+256
+],
+"pts_head.scratch.refinenet2.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.refinenet3.out_conv.bias": [
+256
+],
+"pts_head.scratch.refinenet3.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"pts_head.scratch.refinenet3.resConfUnit1.conv1.bias": [
+256
+],
+"pts_head.scratch.refinenet3.resConfUnit1.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.refinenet3.resConfUnit1.conv2.bias": [
+256
+],
+"pts_head.scratch.refinenet3.resConfUnit1.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.refinenet3.resConfUnit2.conv1.bias": [
+256
+],
+"pts_head.scratch.refinenet3.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.refinenet3.resConfUnit2.conv2.bias": [
+256
+],
+"pts_head.scratch.refinenet3.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.refinenet4.out_conv.bias": [
+256
+],
+"pts_head.scratch.refinenet4.out_conv.weight": [
+256,
+256,
+1,
+1
+],
+"pts_head.scratch.refinenet4.resConfUnit2.conv1.bias": [
+256
+],
+"pts_head.scratch.refinenet4.resConfUnit2.conv1.weight": [
+256,
+256,
+3,
+3
+],
+"pts_head.scratch.refinenet4.resConfUnit2.conv2.bias": [
+256
+],
+"pts_head.scratch.refinenet4.resConfUnit2.conv2.weight": [
+256,
+256,
+3,
+3
+],
+"visual_geometry_transformer.cam_token": [
+1,
+2,
+1,
+1024
+],
+"visual_geometry_transformer.depth_embed.proj.2.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.depth_embed.proj.2.fc1.weight": [
+4096,
+196
+],
+"visual_geometry_transformer.depth_embed.proj.2.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.depth_embed.proj.2.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.0.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.0.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.0.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.0.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.0.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.0.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.0.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.0.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.0.attn.rope.periods": [
+16
+],
+"visual_geometry_transformer.frame_blocks.0.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.0.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.0.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.0.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.0.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.0.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.0.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.0.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.0.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.0.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.1.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.1.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.1.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.1.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.1.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.1.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.1.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.1.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.1.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.1.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.1.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.1.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.1.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.1.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.1.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.1.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.1.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.1.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.10.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.10.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.10.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.10.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.10.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.10.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.10.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.10.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.10.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.10.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.10.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.10.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.10.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.10.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.10.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.10.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.10.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.10.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.11.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.11.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.11.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.11.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.11.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.11.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.11.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.11.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.11.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.11.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.11.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.11.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.11.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.11.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.11.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.11.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.11.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.11.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.12.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.12.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.12.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.12.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.12.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.12.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.12.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.12.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.12.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.12.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.12.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.12.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.12.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.12.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.12.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.12.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.12.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.12.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.13.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.13.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.13.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.13.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.13.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.13.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.13.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.13.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.13.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.13.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.13.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.13.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.13.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.13.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.13.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.13.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.13.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.13.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.14.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.14.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.14.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.14.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.14.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.14.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.14.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.14.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.14.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.14.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.14.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.14.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.14.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.14.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.14.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.14.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.14.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.14.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.15.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.15.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.15.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.15.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.15.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.15.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.15.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.15.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.15.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.15.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.15.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.15.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.15.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.15.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.15.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.15.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.15.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.15.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.16.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.16.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.16.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.16.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.16.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.16.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.16.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.16.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.16.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.16.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.16.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.16.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.16.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.16.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.16.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.16.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.16.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.16.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.17.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.17.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.17.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.17.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.17.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.17.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.17.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.17.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.17.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.17.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.17.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.17.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.17.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.17.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.17.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.17.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.17.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.17.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.18.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.18.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.18.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.18.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.18.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.18.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.18.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.18.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.18.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.18.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.18.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.18.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.18.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.18.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.18.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.18.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.18.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.18.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.19.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.19.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.19.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.19.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.19.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.19.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.19.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.19.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.19.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.19.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.19.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.19.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.19.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.19.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.19.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.19.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.19.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.19.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.2.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.2.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.2.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.2.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.2.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.2.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.2.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.2.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.2.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.2.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.2.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.2.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.2.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.2.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.2.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.2.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.2.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.2.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.20.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.20.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.20.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.20.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.20.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.20.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.20.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.20.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.20.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.20.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.20.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.20.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.20.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.20.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.20.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.20.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.20.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.20.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.21.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.21.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.21.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.21.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.21.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.21.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.21.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.21.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.21.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.21.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.21.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.21.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.21.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.21.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.21.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.21.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.21.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.21.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.22.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.22.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.22.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.22.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.22.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.22.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.22.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.22.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.22.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.22.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.22.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.22.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.22.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.22.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.22.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.22.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.22.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.22.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.23.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.23.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.23.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.23.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.23.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.23.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.23.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.23.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.23.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.23.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.23.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.23.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.23.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.23.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.23.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.23.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.23.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.23.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.3.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.3.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.3.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.3.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.3.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.3.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.3.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.3.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.3.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.3.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.3.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.3.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.3.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.3.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.3.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.3.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.3.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.3.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.4.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.4.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.4.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.4.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.4.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.4.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.4.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.4.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.4.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.4.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.4.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.4.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.4.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.4.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.4.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.4.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.4.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.4.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.5.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.5.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.5.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.5.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.5.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.5.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.5.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.5.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.5.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.5.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.5.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.5.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.5.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.5.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.5.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.5.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.5.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.5.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.6.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.6.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.6.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.6.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.6.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.6.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.6.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.6.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.6.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.6.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.6.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.6.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.6.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.6.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.6.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.6.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.6.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.6.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.7.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.7.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.7.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.7.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.7.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.7.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.7.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.7.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.7.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.7.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.7.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.7.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.7.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.7.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.7.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.7.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.7.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.7.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.8.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.8.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.8.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.8.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.8.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.8.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.8.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.8.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.8.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.8.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.8.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.8.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.8.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.8.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.8.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.8.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.8.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.8.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.9.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.9.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.9.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.9.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.frame_blocks.9.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.frame_blocks.9.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.frame_blocks.9.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.frame_blocks.9.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.frame_blocks.9.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.9.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.9.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.frame_blocks.9.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.frame_blocks.9.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.9.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.frame_blocks.9.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.9.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.9.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.frame_blocks.9.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.0.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.0.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.0.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.0.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.0.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.0.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.0.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.0.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.0.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.0.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.0.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.0.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.0.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.0.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.0.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.0.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.0.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.0.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.1.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.1.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.1.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.1.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.1.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.1.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.1.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.1.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.1.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.1.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.1.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.1.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.1.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.1.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.1.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.1.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.1.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.1.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.10.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.10.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.10.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.10.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.10.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.10.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.10.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.10.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.10.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.10.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.10.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.10.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.10.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.10.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.10.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.10.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.10.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.10.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.11.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.11.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.11.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.11.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.11.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.11.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.11.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.11.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.11.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.11.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.11.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.11.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.11.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.11.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.11.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.11.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.11.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.11.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.12.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.12.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.12.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.12.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.12.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.12.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.12.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.12.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.12.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.12.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.12.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.12.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.12.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.12.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.12.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.12.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.12.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.12.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.13.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.13.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.13.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.13.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.13.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.13.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.13.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.13.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.13.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.13.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.13.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.13.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.13.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.13.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.13.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.13.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.13.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.13.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.14.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.14.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.14.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.14.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.14.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.14.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.14.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.14.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.14.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.14.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.14.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.14.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.14.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.14.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.14.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.14.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.14.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.14.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.15.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.15.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.15.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.15.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.15.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.15.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.15.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.15.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.15.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.15.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.15.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.15.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.15.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.15.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.15.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.15.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.15.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.15.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.16.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.16.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.16.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.16.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.16.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.16.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.16.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.16.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.16.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.16.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.16.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.16.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.16.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.16.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.16.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.16.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.16.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.16.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.17.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.17.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.17.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.17.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.17.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.17.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.17.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.17.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.17.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.17.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.17.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.17.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.17.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.17.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.17.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.17.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.17.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.17.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.18.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.18.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.18.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.18.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.18.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.18.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.18.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.18.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.18.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.18.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.18.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.18.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.18.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.18.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.18.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.18.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.18.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.18.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.19.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.19.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.19.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.19.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.19.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.19.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.19.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.19.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.19.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.19.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.19.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.19.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.19.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.19.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.19.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.19.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.19.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.19.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.2.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.2.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.2.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.2.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.2.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.2.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.2.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.2.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.2.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.2.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.2.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.2.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.2.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.2.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.2.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.2.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.2.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.2.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.20.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.20.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.20.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.20.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.20.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.20.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.20.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.20.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.20.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.20.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.20.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.20.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.20.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.20.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.20.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.20.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.20.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.20.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.21.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.21.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.21.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.21.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.21.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.21.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.21.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.21.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.21.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.21.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.21.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.21.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.21.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.21.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.21.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.21.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.21.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.21.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.22.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.22.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.22.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.22.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.22.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.22.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.22.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.22.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.22.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.22.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.22.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.22.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.22.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.22.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.22.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.22.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.22.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.22.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.23.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.23.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.23.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.23.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.23.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.23.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.23.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.23.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.23.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.23.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.23.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.23.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.23.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.23.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.23.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.23.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.23.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.23.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.3.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.3.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.3.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.3.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.3.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.3.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.3.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.3.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.3.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.3.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.3.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.3.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.3.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.3.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.3.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.3.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.3.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.3.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.4.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.4.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.4.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.4.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.4.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.4.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.4.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.4.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.4.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.4.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.4.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.4.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.4.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.4.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.4.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.4.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.4.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.4.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.5.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.5.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.5.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.5.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.5.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.5.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.5.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.5.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.5.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.5.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.5.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.5.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.5.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.5.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.5.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.5.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.5.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.5.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.6.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.6.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.6.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.6.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.6.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.6.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.6.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.6.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.6.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.6.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.6.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.6.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.6.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.6.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.6.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.6.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.6.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.6.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.7.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.7.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.7.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.7.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.7.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.7.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.7.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.7.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.7.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.7.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.7.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.7.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.7.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.7.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.7.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.7.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.7.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.7.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.8.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.8.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.8.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.8.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.8.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.8.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.8.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.8.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.8.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.8.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.8.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.8.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.8.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.8.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.8.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.8.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.8.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.8.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.9.attn.k_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.9.attn.k_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.9.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.9.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.global_blocks.9.attn.q_norm.bias": [
+64
+],
+"visual_geometry_transformer.global_blocks.9.attn.q_norm.weight": [
+64
+],
+"visual_geometry_transformer.global_blocks.9.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.global_blocks.9.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.global_blocks.9.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.9.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.global_blocks.9.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.global_blocks.9.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.global_blocks.9.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.9.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.global_blocks.9.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.9.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.global_blocks.9.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.global_blocks.9.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.0.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.0.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.0.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.0.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.0.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.0.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.0.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.0.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.0.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.0.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.0.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.0.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.0.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.0.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.1.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.1.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.1.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.1.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.1.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.1.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.1.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.1.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.1.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.1.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.1.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.1.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.1.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.1.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.10.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.10.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.10.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.10.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.10.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.10.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.10.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.10.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.10.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.10.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.10.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.10.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.10.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.10.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.11.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.11.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.11.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.11.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.11.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.11.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.11.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.11.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.11.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.11.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.11.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.11.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.11.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.11.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.12.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.12.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.12.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.12.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.12.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.12.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.12.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.12.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.12.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.12.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.12.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.12.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.12.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.12.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.13.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.13.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.13.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.13.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.13.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.13.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.13.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.13.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.13.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.13.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.13.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.13.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.13.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.13.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.14.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.14.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.14.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.14.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.14.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.14.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.14.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.14.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.14.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.14.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.14.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.14.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.14.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.14.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.15.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.15.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.15.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.15.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.15.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.15.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.15.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.15.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.15.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.15.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.15.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.15.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.15.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.15.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.16.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.16.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.16.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.16.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.16.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.16.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.16.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.16.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.16.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.16.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.16.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.16.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.16.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.16.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.17.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.17.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.17.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.17.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.17.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.17.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.17.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.17.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.17.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.17.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.17.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.17.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.17.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.17.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.18.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.18.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.18.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.18.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.18.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.18.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.18.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.18.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.18.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.18.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.18.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.18.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.18.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.18.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.19.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.19.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.19.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.19.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.19.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.19.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.19.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.19.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.19.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.19.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.19.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.19.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.19.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.19.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.2.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.2.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.2.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.2.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.2.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.2.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.2.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.2.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.2.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.2.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.2.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.2.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.2.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.2.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.20.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.20.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.20.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.20.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.20.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.20.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.20.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.20.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.20.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.20.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.20.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.20.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.20.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.20.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.21.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.21.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.21.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.21.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.21.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.21.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.21.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.21.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.21.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.21.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.21.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.21.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.21.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.21.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.22.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.22.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.22.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.22.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.22.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.22.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.22.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.22.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.22.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.22.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.22.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.22.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.22.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.22.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.23.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.23.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.23.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.23.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.23.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.23.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.23.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.23.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.23.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.23.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.23.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.23.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.23.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.23.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.3.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.3.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.3.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.3.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.3.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.3.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.3.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.3.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.3.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.3.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.3.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.3.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.3.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.3.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.4.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.4.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.4.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.4.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.4.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.4.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.4.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.4.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.4.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.4.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.4.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.4.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.4.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.4.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.5.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.5.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.5.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.5.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.5.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.5.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.5.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.5.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.5.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.5.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.5.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.5.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.5.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.5.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.6.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.6.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.6.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.6.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.6.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.6.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.6.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.6.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.6.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.6.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.6.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.6.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.6.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.6.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.7.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.7.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.7.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.7.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.7.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.7.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.7.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.7.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.7.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.7.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.7.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.7.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.7.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.7.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.8.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.8.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.8.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.8.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.8.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.8.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.8.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.8.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.8.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.8.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.8.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.8.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.8.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.8.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.9.attn.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.9.attn.proj.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.9.attn.qkv.bias": [
+3072
+],
+"visual_geometry_transformer.patch_embed.blocks.9.attn.qkv.weight": [
+3072,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.9.ls1.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.9.ls2.gamma": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.9.mlp.fc1.bias": [
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.9.mlp.fc1.weight": [
+4096,
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.9.mlp.fc2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.9.mlp.fc2.weight": [
+1024,
+4096
+],
+"visual_geometry_transformer.patch_embed.blocks.9.norm1.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.9.norm1.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.9.norm2.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.blocks.9.norm2.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.cls_token": [
+1,
+1,
+1024
+],
+"visual_geometry_transformer.patch_embed.mask_token": [
+1,
+1024
+],
+"visual_geometry_transformer.patch_embed.norm.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.norm.weight": [
+1024
+],
+"visual_geometry_transformer.patch_embed.patch_embed.proj.bias": [
+1024
+],
+"visual_geometry_transformer.patch_embed.patch_embed.proj.weight": [
+1024,
+3,
+14,
+14
+],
+"visual_geometry_transformer.patch_embed.pos_embed": [
+1,
+1370,
+1024
+],
+"visual_geometry_transformer.patch_embed.register_tokens": [
+1,
+4,
+1024
+],
+"visual_geometry_transformer.pose_embed.0.bias": [
+1024
+],
+"visual_geometry_transformer.pose_embed.0.weight": [
+1024,
+7
+],
+"visual_geometry_transformer.pose_embed.2.bias": [
+1024
+],
+"visual_geometry_transformer.pose_embed.2.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.ray_embed.0.bias": [
+1024
+],
+"visual_geometry_transformer.ray_embed.0.weight": [
+1024,
+4
+],
+"visual_geometry_transformer.ray_embed.2.bias": [
+1024
+],
+"visual_geometry_transformer.ray_embed.2.weight": [
+1024,
+1024
+],
+"visual_geometry_transformer.reg_token": [
+1,
+2,
+4,
+1024
+]
+}
