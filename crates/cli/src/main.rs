@@ -27,6 +27,8 @@ mod tts_serve;
 mod wm_cli;
 mod yolo_cli;
 mod depth_cli;
+mod mirror_cli;
+mod splat_cli;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -66,6 +68,26 @@ World models (playable action-conditioned video models; docs/world-models/)
   brain wm play  --model fake --headless --frames N [--actions FILE | --action-seq 1,2,0]
                  [--dump-ppm DIR] [--hashes]        # deterministic rollout + fnv1a hashes (CI)
   brain wm bench --model fake [--frames N]          # ms/frame + fps
+
+WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/mirror/)
+  brain mirror import <model.safetensors|hf_dir> --out mirror.weights
+      One-time conversion of the reference HY-WorldMirror-2.0 checkpoint (strict
+      1:1, every tensor verified).
+  brain mirror infer --weights F --images <dir|a.ppm,b.ppm,…> [--out DIR]
+      [--ply scene.ply] [--maps] [--min-opacity X] [--max-depth X]
+      Images → navigable 3DGS scene (scene.ply + cameras.json + depth/normal
+      maps). Square inputs for now (native 518 grid).
+  brain mirror demo  --weights F --images <…> [--width N --height N --fov D]
+      infer + interactive fly-through of the reconstructed world.
+
+3D GAUSSIAN SPLATTING (scene viewer/renderer; crates/splat)
+  brain splat info   <scene.ply>
+  brain splat render <scene.ply> --out img.ppm [--width N --height N]
+        [--eye x,y,z --target x,y,z --up x,y,z --fov D] [--depth] [--bg r,g,b]
+  brain splat view   <scene.ply> [--width N --height N --fov D --bg r,g,b]
+        Interactive fly-through: WASD move, Space/C up/down, Shift sprint,
+        m mouse-look, arrows look, [ ] quality, v depth view, p screenshot,
+        Enter reset, Esc quit.
 
 YOLO (from-scratch anchor-free object detector)
   brain yolo train <data_dir> --out F [--steps N --batch B --lr X --nc C
@@ -435,6 +457,8 @@ fn main() {
         Some("wm") => wm_cli::run_wm(&argv[2..]),
         Some("yolo") => yolo_cli::run_yolo(&argv[2..]),
         Some("depth") => depth_cli::run_depth(&argv[2..]),
+        Some("mirror") => mirror_cli::run_mirror(&argv[2..]),
+        Some("splat") => splat_cli::run_splat(&argv[2..]),
         Some("npu") => npu_cli::run_npu(&argv[2..]),
         Some("federated") => federated_cli::run_federated(&argv[2..]),
         Some("gradcheck") => {

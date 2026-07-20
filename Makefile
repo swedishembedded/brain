@@ -45,7 +45,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release wm/play wm-fixtures test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth \
+.PHONY: help build release wm/play wm-fixtures test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo \
@@ -201,6 +201,33 @@ depth/smoke: release
 depth/camera: release
 	@test -n "$(ZIPDEPTH_PTH)" || (echo "set ZIPDEPTH_PTH=<zipdepth_base.pth>"; exit 2)
 	$(BRAIN) depth --camera --weights $(ZIPDEPTH_PTH) $(DEPTH_ARGS)
+
+# WorldMirror-2 (multi-view 3D reconstruction). MIRROR_CKPT = the reference
+# model.safetensors (or its HF dir); the converted .weights is what infer uses.
+MIRROR_CKPT    ?=
+MIRROR_WEIGHTS ?= $(OUT)/mirror.weights
+
+mirror/import: release
+	@test -n "$(MIRROR_CKPT)" || (echo "set MIRROR_CKPT=<model.safetensors|hf_dir>"; exit 2)
+	$(BRAIN) mirror import $(MIRROR_CKPT) --out $(MIRROR_WEIGHTS)
+
+# 3DGS scene viewer (interactive fly-through; WASD + mouse, see --help).
+SPLAT_SCENE ?=
+
+splat/view: release
+	@test -n "$(SPLAT_SCENE)" || (echo "set SPLAT_SCENE=<scene.ply>"; exit 2)
+	$(BRAIN) splat view $(SPLAT_SCENE) $(SPLAT_ARGS)
+
+# images -> 3DGS scene (+ view). MIRROR_IMAGES = dir of .ppm or comma list.
+MIRROR_IMAGES ?=
+
+mirror/infer: release
+	@test -n "$(MIRROR_IMAGES)" || (echo "set MIRROR_IMAGES=<dir|a.ppm,b.ppm>"; exit 2)
+	$(BRAIN) mirror infer --weights $(MIRROR_WEIGHTS) --images $(MIRROR_IMAGES) $(MIRROR_ARGS)
+
+mirror/demo: release
+	@test -n "$(MIRROR_IMAGES)" || (echo "set MIRROR_IMAGES=<dir|a.ppm,b.ppm>"; exit 2)
+	$(BRAIN) mirror demo --weights $(MIRROR_WEIGHTS) --images $(MIRROR_IMAGES) $(MIRROR_ARGS)
 
 # Train ZipDepth end to end on the synthetic RGB->depth pairs (placeholder data,
 # real loop: forward -> masked L1 -> backward -> AdamW; loss printed per step).
