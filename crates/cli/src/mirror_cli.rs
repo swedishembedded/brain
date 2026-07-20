@@ -167,12 +167,17 @@ fn write_cameras_json(path: &str, cams: &[splat::types::Camera]) {
         .unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
 }
 
-/// Export the per-frame DINOv2 encoder as fp32 ONNX for OpenVINO (NPU/CPU).
-/// Weights external (model.onnx + model.onnx.data next to it).
+/// Export model stages as fp32 ONNX for OpenVINO (NPU/CPU). `--stage dino`
+/// (per-frame encoder) or `--stage trunk` (fixed-S alternating-attention
+/// trunk → 4 taps). Weights external (model.onnx + model.onnx.data).
 fn export_npu(argv: &[String]) {
     let mut a = Args::new(argv);
     let weights = a.str_or("--weights", "out/mirror.weights");
-    let out = a.str_or("--out", "out/mirror-dino.onnx");
+    let stage = a.str_or("--stage", "dino");
+    let out = a.str_or("--out", &format!("out/mirror-{stage}.onnx"));
+    let s = a.u32_or("--frames", 1) as usize;
+    let hp = a.u32_or("--hp", 37) as usize;
+    let wp = a.u32_or("--wp", 37) as usize;
     a.finish();
     let cfg = MirrorConfig::default();
     eprintln!("loading {weights} …");
@@ -180,8 +185,33 @@ fn export_npu(argv: &[String]) {
         eprintln!("{e}");
         std::process::exit(1);
     });
-    let mut g = onnx::builder::GraphBuilder::new("mirror_dino");
-    npu::mirror_topology::build_dinov2_graph(&init, &mut g, cfg.depth);
+    if stage == "heads" {
+        // one graph per DPT head (the gs head carries the rgb-merge branch)
+        for (name, out_ch, gs) in
+            [("depth_head", 3i64, false), ("pts_head", 4, false), ("norm_head", 4, false), ("gs_head", 3, true)]
+        {
+            let mut g = onnx::builder::GraphBuilder::new(&format!("mirror_{name}"));
+            npu::mirror_topology::build_dpt_head_graph(&init, &mut g, &cfg, name, out_ch, hp, wp, gs);
+            let path = format!("out/mirror-{name}.onnx");
+            g.finish_external(&path, 1 << 20).unwrap_or_else(|e| {
+                eprintln!("ONNX write failed: {e}");
+                std::process::exit(1);
+            });
+            println!("wrote {path} (+ external weight data)");
+        }
+        return;
+    }
+    let mut g = onnx::builder::GraphBuilder::new(&format!("mirror_{stage}"));
+    match stage.as_str() {
+        "dino" => npu::mirror_topology::build_dinov2_graph(&init, &mut g, cfg.depth),
+        "trunk" => npu::mirror_topology::build_trunk_graph(
+            &init, &mut g, s, hp, wp, cfg.depth, &cfg.tap_levels,
+        ),
+        other => {
+            eprintln!("unknown --stage {other} (dino|trunk|heads)");
+            std::process::exit(2);
+        }
+    }
     g.finish_external(&out, 1 << 20).unwrap_or_else(|e| {
         eprintln!("ONNX write failed: {e}");
         std::process::exit(1);
