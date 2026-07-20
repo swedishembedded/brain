@@ -533,7 +533,7 @@ impl Glm {
         // q_idx = q_resid·Wq_bᵀ ; k_idx = LayerNorm(x·Wkᵀ) ; weights = x·Wprojᵀ
         self.mm(s, &lb.q_c_n, &p("idx.wq_b.weight"), &self.q_idx, n, ql, idx);
         self.mm(s, &lb.xn1, &p("idx.wk.weight"), &self.k_idx_pre, n, d, idh);
-        s.push(self.gpu.step(LAYERNORM, &[&self.k_idx_pre, self.w(&p("idx.k_norm.weight")), self.w(&p("idx.k_norm.bias")), &self.k_idx], &[idh, n], n));
+        s.push(self.gpu.step(LAYERNORM, &[&self.k_idx_pre, self.w(&p("idx.k_norm.weight")), self.w(&p("idx.k_norm.bias")), &self.k_idx], &[idh, n, f(1e-5)], n));
         s.push(self.gpu.step(ROPE_SUB, &[&self.q_idx], &[n, nih, idh, rope, idx, t_use], n * nih * (rope / 2)));
         s.push(self.gpu.step(ROPE_SUB, &[&self.k_idx], &[n, 1, idh, rope, idh, t_use], n * (rope / 2)));
         self.mm(s, &lb.xn1, &p("idx.weights_proj.weight"), &self.idx_weights, n, d, nih);

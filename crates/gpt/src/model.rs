@@ -355,7 +355,7 @@ impl Gpt {
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
             // attention
-            s.push(self.gpu.step(LAYERNORM, &[&self.res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out], &[d, n], n));
+            s.push(self.gpu.step(LAYERNORM, &[&self.res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out], &[d, n, f(1e-5)], n));
             s.push(self.gpu.step(MATMUL, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], n * 3 * d));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[n, 3 * d], n * 3 * d));
             s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &lb.scores], &[b_use, c.n_heads, t_use, hd, 3 * d, 0, d], b_use * c.n_heads * t_use * t_use));
@@ -365,7 +365,7 @@ impl Gpt {
             s.push(self.gpu.step(BIAS_ADD, &[&self.proj, self.w(&p("attn.out.bias"))], &[n, d], n * d));
             s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
             // MLP: fc -> GELU -> proj
-            s.push(self.gpu.step(LAYERNORM, &[&lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out], &[d, n], n));
+            s.push(self.gpu.step(LAYERNORM, &[&lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out], &[d, n, f(1e-5)], n));
             s.push(self.gpu.step(MATMUL, &[&lb.ln2_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[n, d, ff], n * ff));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.fc, self.w(&p("mlp.fc.bias"))], &[n, ff], n * ff));
             s.push(self.gpu.step(GELU, &[&lb.fc, &lb.gelu], &[n * ff], n * ff));
@@ -375,7 +375,7 @@ impl Gpt {
         }
 
         let last = c.n_layers as usize;
-        s.push(self.gpu.step(LAYERNORM, &[&self.res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final], &[d, n], n));
+        s.push(self.gpu.step(LAYERNORM, &[&self.res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final], &[d, n, f(1e-5)], n));
         s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w("lm_head.weight"), &self.logits], &[n, d, v], n * v));
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
         s
@@ -419,10 +419,10 @@ impl Gpt {
         s.push(self.gpu.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, g("lm_head.weight")], &[n, d, v], v * d));
         s.push(self.gpu.step(MATMUL_DX, &[&self.d_logits, self.w("lm_head.weight"), &self.d_xn], &[n, d, v, 0], n * d));
         let last = c.n_layers as usize;
-        s.push(self.gpu.step(LN_STATS, &[&self.res[last], &self.ln_mean, &self.ln_inv], &[d, n], n));
+        s.push(self.gpu.step(LN_STATS, &[&self.res[last], &self.ln_mean, &self.ln_inv], &[d, n, f(1e-5)], n));
         s.push(self.gpu.step(LN_DGAMMA, &[&self.d_xn, &self.res[last], &self.ln_mean, &self.ln_inv, g("ln.weight")], &[d, n], d));
         s.push(self.gpu.step(LN_DBETA, &[&self.d_xn, g("ln.bias")], &[d, n], d));
-        s.push(self.gpu.step(LN_DX, &[&self.res[last], self.w("ln.weight"), &self.d_xn, &self.dres[last]], &[d, n], n));
+        s.push(self.gpu.step(LN_DX, &[&self.res[last], self.w("ln.weight"), &self.d_xn, &self.dres[last]], &[d, n, f(1e-5)], n));
 
         for l in (0..c.n_layers as usize).rev() {
             let lb = &self.layers[l];
@@ -434,10 +434,10 @@ impl Gpt {
             s.push(self.gpu.step(BIAS_GRAD, &[&self.d_fc, g(&p(l, "mlp.fc.bias"))], &[n, ff], ff));
             s.push(self.gpu.step(MATMUL_DW, &[&self.d_fc, &lb.ln2_out, g(&p(l, "mlp.fc.weight"))], &[n, d, ff], ff * d));
             s.push(self.gpu.step(MATMUL_DX, &[&self.d_fc, self.w(&p(l, "mlp.fc.weight")), &self.d_branch], &[n, d, ff, 0], n * d));
-            s.push(self.gpu.step(LN_STATS, &[&lb.xmid, &self.ln_mean, &self.ln_inv], &[d, n], n));
+            s.push(self.gpu.step(LN_STATS, &[&lb.xmid, &self.ln_mean, &self.ln_inv], &[d, n, f(1e-5)], n));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_branch, &lb.xmid, &self.ln_mean, &self.ln_inv, g(&p(l, "ln2.weight"))], &[d, n], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p(l, "ln2.bias"))], &[d, n], d));
-            s.push(self.gpu.step(LN_DX, &[&lb.xmid, self.w(&p(l, "ln2.weight")), &self.d_branch, &self.d_tmp], &[d, n], n));
+            s.push(self.gpu.step(LN_DX, &[&lb.xmid, self.w(&p(l, "ln2.weight")), &self.d_branch, &self.d_tmp], &[d, n, f(1e-5)], n));
             s.push(self.gpu.step(ADD2, &[&self.dres[l + 1], &self.d_tmp, &self.dxmid], &[n * d], n * d));
 
             // attention backward (input grad = dxmid)
@@ -451,10 +451,10 @@ impl Gpt {
             s.push(self.gpu.step(BIAS_GRAD, &[&self.d_qkv, g(&p(l, "attn.qkv.bias"))], &[n, 3 * d], 3 * d));
             s.push(self.gpu.step(MATMUL_DW, &[&self.d_qkv, &lb.ln1_out, g(&p(l, "attn.qkv.weight"))], &[n, d, 3 * d], 3 * d * d));
             s.push(self.gpu.step(MATMUL_DX, &[&self.d_qkv, self.w(&p(l, "attn.qkv.weight")), &self.d_branch], &[n, d, 3 * d, 0], n * d));
-            s.push(self.gpu.step(LN_STATS, &[&self.res[l], &self.ln_mean, &self.ln_inv], &[d, n], n));
+            s.push(self.gpu.step(LN_STATS, &[&self.res[l], &self.ln_mean, &self.ln_inv], &[d, n, f(1e-5)], n));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_branch, &self.res[l], &self.ln_mean, &self.ln_inv, g(&p(l, "ln1.weight"))], &[d, n], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p(l, "ln1.bias"))], &[d, n], d));
-            s.push(self.gpu.step(LN_DX, &[&self.res[l], self.w(&p(l, "ln1.weight")), &self.d_branch, &self.d_tmp], &[d, n], n));
+            s.push(self.gpu.step(LN_DX, &[&self.res[l], self.w(&p(l, "ln1.weight")), &self.d_branch, &self.d_tmp], &[d, n, f(1e-5)], n));
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
         }
 

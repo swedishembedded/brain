@@ -2,12 +2,13 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // LayerNorm helper: per-row mean and inverse-std.
-//   mean[n] = mean_c(x);  inv[n] = 1/sqrt(var+eps),  var = mean_c((x-mean)^2), eps=1e-5
+//   mean[n] = mean_c(x);  inv[n] = 1/sqrt(var+eps),  var = mean_c((x-mean)^2), eps a param
 // One invocation per row. Feeds layernorm_dgamma (mirrors rms_inv -> rmsnorm_dw).
 
 struct Params {
     d_model: u32,
     n_rows: u32,
+    eps: f32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -33,5 +34,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         va = va + dx * dx;
     }
     mean[n] = m;
-    inv[n] = inverseSqrt(va / f32(d) + 1e-5);
+    inv[n] = inverseSqrt(va / f32(d) + p.eps);
 }

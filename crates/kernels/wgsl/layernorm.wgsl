@@ -3,12 +3,13 @@
 
 // LayerNorm forward (matches torch.nn.LayerNorm):
 //   mean = mean_c(x);  var = mean_c((x-mean)^2)   (biased/population variance)
-//   y[c] = (x[c]-mean) / sqrt(var+eps) * gamma[c] + beta[c],   eps = 1e-5
+//   y[c] = (x[c]-mean) / sqrt(var+eps) * gamma[c] + beta[c],   eps a param (1e-5 torch default)
 // One invocation per row (d_model small => per-row loop is fine).
 
 struct Params {
     d_model: u32,
     n_rows: u32,
+    eps: f32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -35,7 +36,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         va = va + dx * dx;
     }
     va = va / f32(d);
-    let inv = inverseSqrt(va + 1e-5);
+    let inv = inverseSqrt(va + p.eps);
     for (var c: u32 = 0u; c < d; c = c + 1u) {
         out[base + c] = (x[base + c] - mean) * inv * gamma[c] + beta[c];
     }

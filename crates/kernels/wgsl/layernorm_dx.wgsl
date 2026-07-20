@@ -8,6 +8,7 @@
 struct Params {
     d_model: u32,
     n_rows: u32,
+    eps: f32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -35,7 +36,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         let v = x[base + c] - mean;
         va = va + v * v;
     }
-    let inv = inverseSqrt(va / df + 1e-5);
+    let inv = inverseSqrt(va / df + p.eps);
 
     var sum_g = 0.0;
     var sum_gx = 0.0;
