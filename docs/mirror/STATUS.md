@@ -93,11 +93,31 @@ to 285,536 with `--prune 0.002`, three distinct predicted camera poses
 geometry fused from the non-reference frames (stools and a chair absent
 from frame 0), at ~0.6 s per 518² frame on the CPU backend.
 
-NPU: the DINOv2 encoder exports to ONNX and matches the reference under
-OpenVINO-CPU to 1e-6 (`brain mirror export-npu` +
-`tools/mirror_check_onnx.py`, runnable with the `NPU` device argument);
-trunk and DPT-head graphs export with the same emitter and are structurally
-tested, pending an OpenVINO run.
+## NPU / OpenVINO (measured, OpenVINO 2026.2, Intel NPU present)
+
+All three stages export and were run for real — on OpenVINO **CPU** every
+stage matches the reference goldens at fp32:
+
+| Graph | OpenVINO CPU | Intel NPU (fp16-only) |
+|---|---|---|
+| DINOv2 encoder (6a) | 1e-6 | **OK** — median rel 1.3e-3, per-token cosine ≥0.99985 |
+| Trunk, 24 levels (6b) | taps ≤1.3e-6 | **FAILS** — see below |
+| 4 DPT heads (6c) | ≤1.0e-5 | **OK** — median rel ~3e-4 |
+
+The NPU executes fp16 only (it rejects `INFERENCE_PRECISION_HINT: f32`), so
+the encoder/head deviations above are expected precision, not error — the
+check tool now uses a device-aware tolerance for them.
+
+**The trunk genuinely fails on NPU** and is the one open defect here: taps 0
+and 1 are clean, but tap3 (level 23) comes back with rms 0.216 against a
+golden 0.349, worst sampled diff 3.1e-1. The NPU's largest tap3 activation
+is 5.2 where the CPU's is 12.8 — large activations are being *suppressed*,
+not rounded. It is not fp16 range (max |x| = 12.8, far below 65504) and not
+smooth accumulation (the error jumps ~300× between level 17 and level 23).
+Since the encoder and all four heads run correctly on the same plugin, the
+suspect is trunk-only structure: the per-head QK LayerNorm over 4D
+`[b,H,t,64]` slices and/or the 2D-RoPE Slice/Mul/Concat. The trunk check
+deliberately keeps its fp32 tolerance so this keeps failing loudly.
 
 ## Remaining
 
