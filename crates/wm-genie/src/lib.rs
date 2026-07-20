@@ -21,7 +21,7 @@
 //! einops fold (b·t for spatial, b·h·w for temporal) and its "sequence" `n` is
 //! the attended axis (h·w spatial, t temporal).
 
-use gpu_core::{DeviceBuffer, Gpu};
+use gpu_core::{f, DeviceBuffer, Gpu};
 use wm_core::attn::BiasedAttn;
 
 pub mod bias;
@@ -86,7 +86,9 @@ pub struct AttnWeights {
 
 fn layernorm(gpu: &Gpu, x: &DeviceBuffer, gamma: &DeviceBuffer, beta: &DeviceBuffer, rows: u32, dim: u32) -> DeviceBuffer {
     let out = gpu.storage((rows * dim) as u64);
-    gpu.submit(&[], &[gpu.step(k::LAYERNORM, &[x, gamma, beta, &out], &[dim, rows], rows)]);
+    // eps is a kernel param (torch LayerNorm default 1e-5); omitting it left
+    // the uniform's third word unset and the layer normalizing with garbage eps.
+    gpu.submit(&[], &[gpu.step(k::LAYERNORM, &[x, gamma, beta, &out], &[dim, rows, f(1e-5)], rows)]);
     out
 }
 
