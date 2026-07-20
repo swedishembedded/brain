@@ -13,6 +13,7 @@
 
 pub mod opt;
 pub mod ply;
+pub mod prune;
 pub mod reference;
 pub mod renderer;
 pub mod sort;

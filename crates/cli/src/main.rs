@@ -74,9 +74,9 @@ WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/mirror/)
       One-time conversion of the reference HY-WorldMirror-2.0 checkpoint (strict
       1:1, every tensor verified).
   brain mirror infer --weights F --images <dir|a.ppm,b.ppm,…> [--out DIR]
-      [--ply scene.ply] [--maps] [--min-opacity X] [--max-depth X]
+      [--ply scene.ply] [--maps] [--min-opacity X] [--max-depth X] [--prune VOXEL]
       Images → navigable 3DGS scene (scene.ply + cameras.json + depth/normal
-      maps). Any aspect ratio (non-native grids interpolate the pos-embed).
+      maps). Any aspect ratio; --prune 0.002 voxel-merges multi-view duplicates.
   brain mirror demo  --weights F --images <…> [--width N --height N --fov D]
       infer + interactive fly-through of the reconstructed world.
 

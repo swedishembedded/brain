@@ -6,7 +6,8 @@
 //!   brain mirror import <safetensors|hf_dir> --out mirror.weights
 //!   brain mirror infer  --weights F --images <dir|a.ppm,b.ppm,…> [--out DIR]
 //!         [--ply scene.ply] [--maps] [--min-opacity X] [--max-depth X]
-//!   brain mirror demo   --weights F --images <…> [viewer flags]
+//!         [--prune VOXEL]   (voxel-merge duplicates, try 0.002 for multi-view)
+//!   brain mirror demo   --weights F --images <…> [viewer flags] [--prune VOXEL]
 //!
 //! Inputs are P6 PPM images; any aspect ratio (the DINOv2 pos-embed is
 //! bicubic-interpolated for non-native grids, reference semantics).
@@ -91,6 +92,7 @@ fn with_scene<R>(
     images: &str,
     min_op: f32,
     max_depth: f32,
+    prune_voxel: f32,
     k: impl FnOnce(&Gpu, &Mirror, &Splats, &[splat::types::Camera], usize, u32, u32) -> R,
 ) -> R {
     let cfg = MirrorConfig::default();
@@ -111,12 +113,17 @@ fn with_scene<R>(
     let t0 = std::time::Instant::now();
     model.forward(&frames, s, hp, wp);
     let opts = AssembleOpts { min_opacity: min_op, max_depth };
-    let (splats, cams, _weights) = assemble(&gpu, &model, &frames, s, w, h, &opts);
+    let (mut splats, cams, weights) = assemble(&gpu, &model, &frames, s, w, h, &opts);
     eprintln!(
         "forward + assembly: {:.1}s, {} gaussians",
         t0.elapsed().as_secs_f32(),
         splats.len()
     );
+    if prune_voxel > 0.0 {
+        let before = splats.len();
+        splats = splat::prune::voxel_merge(&splats, &weights, prune_voxel, 0);
+        eprintln!("voxel prune ({prune_voxel}): {before} -> {} gaussians", splats.len());
+    }
     k(&gpu, &model, &splats, &cams, s, w, h)
 }
 
@@ -195,11 +202,12 @@ fn infer(argv: &[String]) {
     let maps = a.take_flag("--maps");
     let min_op = a.f32_or("--min-opacity", 0.01);
     let max_depth = a.f32_or("--max-depth", 0.0);
+    let prune = a.f32_or("--prune", 0.0);
     a.finish();
 
     std::fs::create_dir_all(&out_dir).ok();
     let ply_path = ply.unwrap_or_else(|| format!("{out_dir}/scene.ply"));
-    with_scene(&weights, &images, min_op, max_depth, |gpu, model, splats, cams, s, w, h| {
+    with_scene(&weights, &images, min_op, max_depth, prune, |gpu, model, splats, cams, s, w, h| {
         splat::ply::write(&ply_path, splats).unwrap_or_else(|e| {
             eprintln!("PLY write failed: {e}");
             std::process::exit(1);
@@ -228,9 +236,10 @@ fn demo(argv: &[String]) {
     let frames_cap = a.opt_u32("--frames").map(|n| n as u64);
     let min_op = a.f32_or("--min-opacity", 0.01);
     let max_depth = a.f32_or("--max-depth", 0.0);
+    let prune = a.f32_or("--prune", 0.0);
     a.finish();
 
-    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, |_gpu, _model, splats, cams, _s, _w, _h| {
+    let (splats, init_cam) = with_scene(&weights, &images, min_op, max_depth, prune, |_gpu, _model, splats, cams, _s, _w, _h| {
         let init_cam = cams.first().map(|c| splat::types::Camera {
             width,
             height,
