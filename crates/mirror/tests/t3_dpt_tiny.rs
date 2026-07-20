@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use gpu_core::Gpu;
 use mirror::config::MirrorConfig;
-use mirror::dpt::{DptCtx, DptKernels, DptScratch, HeadWeights};
+use mirror::dpt::{DptCtx, DptScratch, HeadWeights};
 
 fn read_bin(path: &str) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));

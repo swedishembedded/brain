@@ -208,6 +208,8 @@ name = "brain-backend-cpu"
 version = "0.1.0"
 dependencies = [
  "brain-backend-api",
+ "brain-gpu-core",
+ "brain-kernels",
  "brain-wgsl-cpu",
  "rayon",
 ]
@@ -497,6 +499,7 @@ dependencies = [
  "brain-events",
  "brain-glm",
  "brain-gpu-core",
+ "brain-mirror",
  "brain-onnx",
  "brain-paramstore",
  "brain-qwen",

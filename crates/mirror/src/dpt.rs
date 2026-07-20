@@ -110,7 +110,7 @@ pub struct DptScratch {
     pub u: DeviceBuffer,       // fusion tmp 2 (RCU needs 4 distinct buffers)
     pub full_a: DeviceBuffer,  // [128, H, W]
     pub full_b: DeviceBuffer,  // [128, H, W]
-    pub head32: DeviceBuffer,  // [32, H, W]
+    pub head32: DeviceBuffer,  // [f2/8 (= 32), H, W]
     pub gs256: DeviceBuffer,   // [256, H, W]
     pub pos: [DeviceBuffer; 4],
     pub pos_full: DeviceBuffer, // [128, H, W]
@@ -143,7 +143,7 @@ impl DptScratch {
             u: mk(f2 * 64 * p),
             full_a: mk((f2 / 2) * h * w),
             full_b: mk((f2 / 2) * h * w),
-            head32: mk(32 * h * w),
+            head32: mk((f2 / 8) * h * w),
             gs256: mk(f2 * h * w),
             pos,
             pos_full: gpu.storage_init("dpt.pos_full", &pos_embed_chw(f2 / 2, h, w, 0.1)),
@@ -376,9 +376,9 @@ impl<'a> DptCtx<'a> {
         ));
 
         // ---- output_conv2: conv3 → relu → conv1 ----
-        self.conv(&scr.full_a, hw.get("scratch.output_conv2.0.weight"), Some(hw.get("scratch.output_conv2.0.bias")), &scr.head32, (f2 / 2, h, w), 32, 3, 1, 1, steps);
-        self.relu_inplace(&scr.head32, 32 * h * w, steps);
-        self.conv(&scr.head32, hw.get("scratch.output_conv2.2.weight"), Some(hw.get("scratch.output_conv2.2.bias")), out, (32, h, w), out_ch, 1, 1, 0, steps);
+        self.conv(&scr.full_a, hw.get("scratch.output_conv2.0.weight"), Some(hw.get("scratch.output_conv2.0.bias")), &scr.head32, (f2 / 2, h, w), f2 / 8, 3, 1, 1, steps);
+        self.relu_inplace(&scr.head32, (f2 / 8) * h * w, steps);
+        self.conv(&scr.head32, hw.get("scratch.output_conv2.2.weight"), Some(hw.get("scratch.output_conv2.2.bias")), out, (f2 / 8, h, w), out_ch, 1, 1, 0, steps);
 
         // ---- GS branch: fused += relu(conv7(rgb)); gaussian-param convs ----
         if let Some(g) = gs {

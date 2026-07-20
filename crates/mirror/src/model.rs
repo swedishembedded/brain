@@ -119,7 +119,8 @@ struct Built {
     #[allow(dead_code)]
     conv_out: DeviceBuffer,
     tokens: DeviceBuffer,
-    scr: VitScratch,
+    // kept alive for the recorded steps, never read back
+    _scr: VitScratch,
     patch_out: DeviceBuffer,
     trunk_tokens: DeviceBuffer,
     zeros: DeviceBuffer,
@@ -355,12 +356,19 @@ impl<'g> Mirror<'g> {
             ],
             (s * c * patches) as u32,
         ));
-        steps.push(gpu.step(
-            self.base + K_ADD_CHAN_BCAST,
-            &[&conv_raw, self.w(&pe("bias")), &conv_out],
-            &[s as u32, c as u32, patches as u32],
-            (s * c * patches) as u32,
-        ));
+        // conv bias is a SHARED [C] vector; add_chan_bcast broadcasts a
+        // per-image [N,C] one, so dispatch it per frame (N=1) — at N=s it
+        // would read past the bias for every frame but the first.
+        for fi in 0..s {
+            let off = (fi * c * patches) as u64;
+            steps.push(gpu.step_sliced(
+                self.base + K_ADD_CHAN_BCAST,
+                &[&conv_raw, self.w(&pe("bias")), &conv_out],
+                &[(off, 0), (0, 0), (off, 0)],
+                &[1, c as u32, patches as u32],
+                (c * patches) as u32,
+            ));
+        }
         // per frame: tokens = [cls+pos0, regs, patches+pos]
         for fi in 0..s {
             let row0 = (fi * td) as u64;
@@ -528,7 +536,7 @@ impl<'g> Mirror<'g> {
             axpy: self.base + K_AXPY,
         };
         let cwt = CamWeights { ps: &self.ps };
-        record_cam_head(gpu, &ck, &cwt, &cam, &taps[cfg.tap_levels.len() - 1], s, td_t, 2 * c, 4, &mut steps);
+        record_cam_head(gpu, &ck, &cwt, &cam, &taps[cfg.tap_levels.len() - 1], s, td_t, 2 * c, 4, cfg.cam_blocks, &mut steps);
 
         self.built = Some(Built {
             s,
@@ -538,7 +546,7 @@ impl<'g> Mirror<'g> {
             conv_raw,
             conv_out,
             tokens,
-            scr,
+            _scr: scr,
             patch_out,
             trunk_tokens,
             zeros,
@@ -620,6 +628,30 @@ impl<'g> Mirror<'g> {
         &self.built.as_ref().unwrap().patch_out
     }
 
+    /// Post-trunk token buffer `[s*(7+hp*wp), C]` — smoke-test introspection.
+    #[doc(hidden)]
+    pub fn trunk_tokens(&self) -> &DeviceBuffer {
+        &self.built.as_ref().unwrap().trunk_tokens
+    }
+
+    /// Patch-conv output `[s, C, hp*wp]` — smoke-test introspection.
+    #[doc(hidden)]
+    pub fn conv_out(&self) -> &DeviceBuffer {
+        &self.built.as_ref().unwrap().conv_out
+    }
+
+    /// DPT scratch (holds the LAST recorded head's stages) — introspection.
+    #[doc(hidden)]
+    pub fn dpt_scratch(&self) -> &crate::dpt::DptScratch {
+        &self.built.as_ref().unwrap().dscr
+    }
+
+    /// Raw RGB buffer for one frame — smoke-test introspection.
+    #[doc(hidden)]
+    pub fn rgb_frame(&self, fi: usize) -> &DeviceBuffer {
+        &self.built.as_ref().unwrap().rgb_frames[fi]
+    }
+
     /// The 4 tap buffers `[s*(7+hp*wp), 2C]` (frame‖global concat).
     pub fn taps(&self) -> &[DeviceBuffer] {
         &self.built.as_ref().unwrap().taps
@@ -651,7 +683,7 @@ pub fn dpt_kernels(base: usize) -> DptKernels {
 }
 
 /// Which dense-head output to fetch.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Head {
     Depth,
     Points,

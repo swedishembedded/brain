@@ -111,7 +111,7 @@ fn with_scene<R>(
     let t0 = std::time::Instant::now();
     model.forward(&frames, s, hp, wp);
     let opts = AssembleOpts { min_opacity: min_op, max_depth };
-    let (splats, cams) = assemble(&gpu, &model, &frames, s, w, h, &opts);
+    let (splats, cams, _weights) = assemble(&gpu, &model, &frames, s, w, h, &opts);
     eprintln!(
         "forward + assembly: {:.1}s, {} gaussians",
         t0.elapsed().as_secs_f32(),

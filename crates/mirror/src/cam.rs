@@ -102,6 +102,7 @@ pub fn record_cam_head(
     td: usize,
     dim2: usize,
     iters: usize,
+    blocks: usize,
     steps: &mut Vec<Step>,
 ) {
     let su = s as u32;
@@ -169,8 +170,8 @@ pub fn record_cam_head(
         steps.push(gpu.step(k.vit.add2, &[&b.m[1], &b.shift, &b.m[2]], &[n2], n2));
         steps.push(gpu.step(k.mul, &[&b.m[2], &b.gate, &b.m[0]], &[n2], n2));
         steps.push(gpu.step(k.vit.add2, &[&b.m[0], &b.cam_n, &b.x], &[n2], n2));
-        // 4 plain 2048-dim blocks over the S frame tokens
-        for blk in 0..4 {
+        // cfg.cam_blocks plain 2048-dim blocks over the S frame tokens
+        for blk in 0..blocks {
             let p = |n: &str| format!("refine_net.{blk}.{n}");
             let w = VitBlockWeights {
                 norm1_w: cw.get(&p("norm1.weight")),

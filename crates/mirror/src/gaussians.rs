@@ -76,8 +76,9 @@ impl Default for AssembleOpts {
     }
 }
 
-/// Read the GS head outputs for all frames and build the host scene +
-/// per-frame maps. `frames_chw` = the raw [0,1] input frames (color source).
+/// Read the GS head outputs for all frames and build the host scene.
+/// `frames_chw` = the raw [0,1] input frames (color source). Also returns the
+/// per-gaussian sigmoid merge weights (channel 12) for `splat::prune`.
 pub fn assemble(
     gpu: &Gpu,
     model: &Mirror,
@@ -86,10 +87,11 @@ pub fn assemble(
     width: u32,
     height: u32,
     opts: &AssembleOpts,
-) -> (Splats, Vec<Camera>) {
+) -> (Splats, Vec<Camera>, Vec<f32>) {
     let cams = decode_cameras(&model.cam_pred_raw(), s, width, height);
     let hw = (width * height) as usize;
     let mut out = Splats::default();
+    let mut weights = Vec::new();
     for (fi, cam) in cams.iter().enumerate() {
         let gsd = gpu.read(model.head_out(Head::GsDepth, fi), 3 * hw);
         let gsp = gpu.read(model.head_out(Head::GsParams, fi), 12 * hw);
@@ -130,10 +132,11 @@ pub fn assemble(
                     gsp[9 * hw + i] * SH_C0 + rgb[hw + i],
                     gsp[10 * hw + i] * SH_C0 + rgb[2 * hw + i],
                 ]);
+                weights.push(sigmoid(gsp[11 * hw + i]));
             }
         }
     }
-    (out, cams)
+    (out, cams, weights)
 }
 
 /// Depth/normal/confidence maps for one frame, activations applied.

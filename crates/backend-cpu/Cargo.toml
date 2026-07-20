@@ -14,3 +14,7 @@ path = "src/lib.rs"
 brain-backend-api.workspace = true
 brain-wgsl-cpu.workspace = true
 rayon = "1"
+
+[dev-dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
