@@ -19,6 +19,10 @@ pub enum Key {
     Down,
     Left,
     Right,
+    /// Left shift — fly-camera sprint modifier.
+    Shift,
+    /// c — fly-camera move-down.
+    C,
 }
 
 impl Key {
@@ -34,6 +38,8 @@ impl Key {
             Key::Down => 1 << 6,
             Key::Left => 1 << 7,
             Key::Right => 1 << 8,
+            Key::Shift => 1 << 9,
+            Key::C => 1 << 10,
         }
     }
 }
@@ -118,6 +124,8 @@ pub enum UxKey {
     QualityUp,  // ]
     QualityDown, // [
     CycleView,  // v — cycle the demo's view mode (side / depth / stereo)
+    Screenshot, // p — save the current frame
+    ToggleMouse, // m — capture/release relative mouse-look
 }
 
 #[cfg(test)]

@@ -35,6 +35,7 @@ pub const SDL_TEXTUREACCESS_STREAMING: c_int = 1;
 pub const SDL_QUIT: u32 = 0x100;
 pub const SDL_KEYDOWN: u32 = 0x300;
 pub const SDL_KEYUP: u32 = 0x301;
+pub const SDL_MOUSEMOTION: u32 = 0x400;
 
 /// 64-byte buffer covering SDL2's 56-byte SDL_Event union.
 #[repr(C, align(8))]
@@ -55,6 +56,15 @@ impl SDL_Event {
     /// SDL_KeyboardEvent.repeat (u8 at byte offset 13): key-repeat events.
     pub fn is_repeat(&self) -> bool {
         self.0[13] != 0
+    }
+    /// SDL_MouseMotionEvent.xrel (i32 at byte offset 28: type 0, timestamp 4,
+    /// windowID 8, which 12, state 16, x 20, y 24, xrel 28, yrel 32).
+    pub fn motion_xrel(&self) -> i32 {
+        i32::from_ne_bytes([self.0[28], self.0[29], self.0[30], self.0[31]])
+    }
+    /// SDL_MouseMotionEvent.yrel (i32 at byte offset 32).
+    pub fn motion_yrel(&self) -> i32 {
+        i32::from_ne_bytes([self.0[32], self.0[33], self.0[34], self.0[35]])
     }
 }
 
@@ -99,6 +109,7 @@ extern "C" {
     ) -> c_int;
     pub fn SDL_RenderPresent(r: *mut SDL_Renderer);
     pub fn SDL_PollEvent(ev: *mut SDL_Event) -> c_int;
+    pub fn SDL_SetRelativeMouseMode(enabled: c_int) -> c_int;
     pub fn SDL_RenderReadPixels(
         r: *mut SDL_Renderer,
         rect: *const c_void,

@@ -10,12 +10,15 @@ use crate::sink::{FrameSink, Hud};
 use crate::sys;
 use std::ffi::CString;
 
-/// Input state snapshot from one pump: latest pressed-set + UX commands.
+/// Input state snapshot from one pump: latest pressed-set + UX commands +
+/// relative mouse motion accumulated over the drained events.
 #[derive(Clone, Debug, Default)]
 pub struct Input {
     pub pressed: KeySet,
     pub ux: Vec<UxKey>,
     pub quit: bool,
+    pub mouse_dx: i32,
+    pub mouse_dy: i32,
 }
 
 pub struct SdlWindow {
@@ -119,6 +122,10 @@ impl SdlWindow {
                             input.pressed.release(k);
                         }
                     }
+                    sys::SDL_MOUSEMOTION => {
+                        input.mouse_dx += ev.motion_xrel();
+                        input.mouse_dy += ev.motion_yrel();
+                    }
                     _ => {}
                 }
             }
@@ -128,6 +135,14 @@ impl SdlWindow {
         }
         self.pressed = input.pressed;
         input
+    }
+
+    /// Capture (or release) the mouse for relative look: hides the cursor and
+    /// streams unbounded `xrel/yrel` deltas into [`Input::mouse_dx`]/`dy`.
+    pub fn set_relative_mouse(&mut self, on: bool) {
+        unsafe {
+            sys::SDL_SetRelativeMouseMode(on as i32);
+        }
     }
 }
 
@@ -157,6 +172,8 @@ fn keycode_to_key(sym: i32) -> Mapped {
         115 => Mapped::Action(Key::S),      // s
         100 => Mapped::Action(Key::D),      // d
         32 => Mapped::Action(Key::Space),   // space
+        99 => Mapped::Action(Key::C),       // c
+        0x4000_00E1 => Mapped::Action(Key::Shift), // left shift
         0x4000_0052 => Mapped::Action(Key::Up),
         0x4000_0051 => Mapped::Action(Key::Down),
         0x4000_0050 => Mapped::Action(Key::Left),
@@ -168,6 +185,8 @@ fn keycode_to_key(sym: i32) -> Mapped {
         91 => Mapped::Ux(UxKey::QualityDown), // [
         93 => Mapped::Ux(UxKey::QualityUp),   // ]
         118 => Mapped::Ux(UxKey::CycleView),  // v
+        112 => Mapped::Ux(UxKey::Screenshot), // p
+        109 => Mapped::Ux(UxKey::ToggleMouse), // m
         _ => Mapped::None,
     }
 }
