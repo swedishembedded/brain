@@ -1,6 +1,6 @@
 # mirror — workstream ledger
 
-2026-07-19, branch feat/world-models. Model = HY-WorldMirror-2.0 (1.26B fp32),
+2026-07-20, branch feat/world-models. Model = HY-WorldMirror-2.0 (1.26B fp32),
 imported exactly; all parity vs the PyTorch reference via
 `tools/mirror_dump_reference.py` goldens (committed samples: rms + 64–256
 point values per stage).
@@ -37,7 +37,28 @@ point values per stage).
   starts at the first predicted pose).
 - **T1 (kernels)**: gradchecks for `rope2d` (sign=-1 VJP), `ln_head_dx/dgb`,
   `scale_chan_dg` vs finite differences — green. Block-level `vit_block_bwd`
-  composition: cache struct landed; full assembly pending.
+  landed and verified against committed float64 torch-autograd goldens
+  (finite differences are noise-dominated through attention softmax), both
+  trunk-like and DINOv2-like configs.
+- **Rect inputs (T7)**: non-native grids bicubic-interpolate the DINOv2
+  pos-embed with torch-antialias semantics (t6 gates the resampler — torch's
+  AA bicubic uses PIL's a=-0.5, not -0.75); a full 392×518 forward matches
+  fresh reference goldens (taps/depth/camera) at the T4/T5 tolerances. The
+  CLI accepts any aspect ratio.
+- **Multi-frame (S>1) fixed**: the first S=3 run produced an all-NaN scene —
+  every parity gate was single-frame. Root causes: the patch-conv bias went
+  through `add_chan_bcast` at N=s (a per-image [N,C] kernel; the shared [C]
+  bias overran for frames ≥1) and `dpt.rs` hardcoded the reference's
+  32-channel `output_conv2.0` where `param_list` says `feat/8`. Now gated by
+  a tiny-config S=3 smoke test (t8: every stage finite for every frame),
+  chunk-invariance tests for the query-chunked attention, and a batched
+  conv fast-path parity test in backend-cpu.
+- **Voxel prune**: `--prune 0.002` collapses multi-view duplicate gaussians
+  with the reference `prune_gs` weighted-merge semantics (`splat::prune`).
+- **P6b/6c**: trunk + all four DPT heads export to ONNX (`export-npu --stage
+  trunk|heads`); RoPE tables/pos-embeds as initializers, structural tests
+  green; `tools/mirror_check_onnx.py --stage trunk|heads` verifies against
+  the T4/T5 goldens under OpenVINO (chained trunk→heads).
 
 ## Parity ladder
 
@@ -48,6 +69,7 @@ point values per stage).
 | T2 | DINOv2 patch tokens | ≤2e-4 |
 | T4 | trunk taps ×4 | ≤3e-3 |
 | T5 | heads + gaussians + camera | ≤5e-3 (all four heads, 12ch gaussian params, cam 9-vec) |
+| T7 | rectangular 392×518 forward (pos-embed interp) | taps ≤3e-3, depth/cam ≤5e-3 |
 
 ## Performance (honest, CPU JIT release, 22 threads)
 
@@ -69,12 +91,10 @@ OpenVINO-CPU to 1e-6 (`brain mirror export-npu` +
 
 ## Remaining
 
-- Pos-embed interpolation for non-square/non-native grids (CLI errors
-  loudly today).
-- T1 block-level `vit_block_bwd` assembly (kernel-level gradchecks green;
-  `VitBlockCache` scaffold landed; cross-attn bwd kernels assign rather than
-  accumulate → training bwd needs chunk ≥ span).
-- P6b/6c: trunk + DPT-head ONNX export (6a DINOv2 verified; same emitter
-  pattern, RoPE tables as initializers).
-- Perf: matmul_tile routing for [T,C]×[C,3C] shapes, wgpu memory budget
-  autotune, frame pipelining.
+- Run the trunk/heads ONNX exports on an OpenVINO machine and record the
+  parity + NPU timings (emitters + structural tests + check tool are in;
+  the 6a DINOv2 graph is already OpenVINO-verified to 1e-6).
+- Cross-attn bwd kernels assign rather than accumulate → training bwd needs
+  chunk ≥ span (documented constraint, fine for the tiny-config path).
+- Perf: wgpu memory budget autotune, frame pipelining; further CPU matmul
+  blocking (column tiles) if the forward needs another step.

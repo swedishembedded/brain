@@ -63,5 +63,8 @@ gaussians (a 1-frame WorldMirror scene is ~268k pre-prune). Small scenes:
 - R4 optimization pass: BRAIN_PROFILE stage breakdown, radix chunk tuning,
   per-tile sort experiments, pipelined present (render N while presenting
   N-1 — hooks exist via `flush()`).
-- SH degree 1–3 color kernel; `.splat`/`.spz` IO; densify/prune for full
+- `prune::voxel_merge` landed: reference `prune_gs` voxel merge (weighted
+  means/scales/colors, Σw²/Σw opacity, renormalized quats), wired as
+  `brain mirror infer|demo --prune VOXEL`.
+- SH degree 1–3 color kernel; `.splat`/`.spz` IO; densify/prune-in-training for full
   from-scratch scene training; accumulate-mode attention bwd for chunked fits.
