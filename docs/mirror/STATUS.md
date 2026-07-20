@@ -125,12 +125,12 @@ graph output when one of its inputs is an ancestor of another.**
 
 ## Known unrelated failure
 
-`brain-glm --test convergence glm_mtp_overfits_fixed_batch` fails on the
-wgpu backend with a buffer usage conflict (STORAGE_READ_ONLY vs
-STORAGE_READ_WRITE in one dispatch) — the same aliasing class fixed in
-mirror, but in GLM's MTP path. **Pre-existing**: verified failing
-identically at 3a6169c, the commit before this workstream. The rest of the
-workspace suite is green (355 passed).
+`brain-wm-genie --test blocks genie_geglu` fails a 1e-4 tolerance at
+1.38e-3 against a host reference that uses an Abramowitz-Stegun erf
+approximation. **Pre-existing and unrelated**: byte-identical failure
+(0.0013809204) at 3a6169c, the commit before this workstream, and
+wm-genie depends only on gpu-core + kernels. Rest of the workspace: 713
+passed.
 
 ## Remaining
 

@@ -76,6 +76,11 @@ const MLA_INDEX_SCORES: usize = 37;
 const ROPE_SUB: usize = 38;
 const TOPK_MASK: usize = 39;
 const ADD_INDEX_MASK: usize = 40;
+/// `out += a` with a single read_write binding. ADD2 cannot express an
+/// accumulate-into-self: binding the same buffer read-only AND read-write in
+/// one dispatch is a wgpu usage-scope violation (it panics on the GPU
+/// backend), which is exactly what the MTP path used to do.
+const ADD_INPLACE: usize = 41;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -119,6 +124,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("rope_sub", kernels::ROPE_SUB),
     ("topk_mask", kernels::TOPK_MASK),
     ("add_index_mask", kernels::ADD_INDEX_MASK),
+    ("add_inplace", kernels::ADD_INPLACE),
 ];
 
 /// MLP variant per layer (cached activations for backprop).
@@ -662,7 +668,7 @@ impl Glm {
             // eh_proj: hidden = We·enorm(e) + Wh·hnorm(h)
             self.mm(&mut s, &self.mtp_en, "mtp.eh_proj_e.weight", &self.mtp_ehp, n, d, d);
             self.mm(&mut s, &self.mtp_hn, "mtp.eh_proj_h.weight", &self.mtp_ehp2, n, d, d);
-            s.push(self.gpu.step(ADD2, &[&self.mtp_ehp, &self.mtp_ehp2, &self.mtp_ehp], &[n * d], n * d));
+            s.push(self.gpu.step(ADD_INPLACE, &[&self.mtp_ehp, &self.mtp_ehp2], &[n * d], n * d));
             // position-wise SwiGLU block with a residual (no self-attention)
             self.norm_fwd(&mut s, &self.mtp_ehp, "mtp.block_ln.weight", &self.mtp_xn, d, n);
             self.mm(&mut s, &self.mtp_xn, "mtp.mlp.gate.weight", &self.mtp_gate_pre, n, d, ff);
@@ -716,7 +722,7 @@ impl Glm {
             // shared lm_head: accumulate its weight grad, then input grad -> d_mtp_final
             if self.trainable(head) {
                 s.push(self.gpu.step(MATMUL_DW, &[&self.d_mtp_logits, &self.mtp_final, &self.mtp_head_tmp], &[n, d, v], v * d));
-                s.push(self.gpu.step(ADD2, &[self.g(head), &self.mtp_head_tmp, self.g(head)], &[v * d], v * d));
+                s.push(self.gpu.step(ADD_INPLACE, &[self.g(head), &self.mtp_head_tmp], &[v * d], v * d));
             }
             s.push(self.gpu.step(MATMUL_DX, &[&self.d_mtp_logits, self.w(head), &self.d_mtp_final], &[n, d, v, 0], n * d));
             self.norm_bwd(&mut s, &self.mtp_block_out, "mtp.norm.weight", &self.d_mtp_final, &self.d_mtp_block, d, n);
@@ -727,13 +733,13 @@ impl Glm {
             self.mm_bwd(&mut s, &self.d_up, &self.mtp_xn, "mtp.mlp.up.weight", &self.d_xn, n, d, ff, 0);
             self.mm_bwd(&mut s, &self.d_gate_pre, &self.mtp_xn, "mtp.mlp.gate.weight", &self.d_xn, n, d, ff, 1);
             self.norm_bwd(&mut s, &self.mtp_ehp, "mtp.block_ln.weight", &self.d_xn, &self.d_mtp_ehp, d, n);
-            s.push(self.gpu.step(ADD2, &[&self.d_mtp_block, &self.d_mtp_ehp, &self.d_mtp_ehp], &[n * d], n * d)); // + residual
+            s.push(self.gpu.step(ADD_INPLACE, &[&self.d_mtp_ehp, &self.d_mtp_block], &[n * d], n * d)); // + residual
             // eh_proj backward -> grads wrt enorm/hnorm outputs
             self.mm_bwd(&mut s, &self.d_mtp_ehp, &self.mtp_en, "mtp.eh_proj_e.weight", &self.d_mtp_en, n, d, d, 0);
             self.mm_bwd(&mut s, &self.d_mtp_ehp, &self.mtp_hn, "mtp.eh_proj_h.weight", &self.d_mtp_hn, n, d, d, 0);
             self.norm_bwd(&mut s, &self.mtp_e, "mtp.enorm.weight", &self.d_mtp_en, &self.d_mtp_e, d, n);
             self.norm_bwd(&mut s, &self.res[last], "mtp.hnorm.weight", &self.d_mtp_hn, &self.d_mtp_res, d, n);
-            s.push(self.gpu.step(ADD2, &[&self.dres[last], &self.d_mtp_res, &self.dres[last]], &[n * d], n * d));
+            s.push(self.gpu.step(ADD_INPLACE, &[&self.dres[last], &self.d_mtp_res], &[n * d], n * d));
             if self.trainable("tok.weight") {
                 s.push(self.gpu.step(EMB_BWD, &[&self.mtp_input, &self.d_mtp_e, self.g("tok.weight")], &[n, d, v], v * d));
             }

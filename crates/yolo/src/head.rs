@@ -274,7 +274,7 @@ impl ScaleHead {
         self.reg.backward(ctx, ps, x_in, d_reg, d_in);
         self.cls.backward(ctx, ps, x_in, d_cls, &self.d_in_cls);
         let n = self.in_shape.numel();
-        let s = ctx.step(crate::net::ADD2, &[d_in, &self.d_in_cls, d_in], &[n], n);
+        let s = ctx.step(crate::net::ADD_INPLACE, &[d_in, &self.d_in_cls], &[n], n);
         ctx.gpu.submit(&[], &[s]);
     }
 }

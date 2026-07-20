@@ -72,6 +72,10 @@ pub const CONV_ACT_TILED: usize = 38;
 pub const CONV_ACT_REG: usize = 39;
 // ---- fused conv + per-channel bias (detection head) ----
 pub const CONV_BIAS: usize = 40;
+/// `out += a`, single read_write binding (index 41). ADD2 cannot accumulate
+/// into one of its own inputs: binding a buffer read-only AND read-write in
+/// one dispatch is a wgpu usage-scope violation.
+pub const ADD_INPLACE: usize = 41;
 
 /// Kernel registry passed to [`Gpu::new`] / [`Gpu::new_cpu`]. The position of
 /// each entry is its kernel index (the `const`s above).
@@ -124,6 +128,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("conv_act_reg", kernels::CONV_ACT_REG),
     // ---- fused conv + bias (index 40) ----
     ("conv_bias", kernels::CONV_BIAS),
+    // ---- accumulate-in-place (index 41) ----
+    ("add_inplace", kernels::ADD_INPLACE),
 ];
 
 /// Kernel indices for the shared [`vision`] conv blocks, resolved BY NAME against

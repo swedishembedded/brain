@@ -1075,7 +1075,7 @@ impl Bottleneck {
         self.cv1.backward(ctx, ps, x_in, &self.d_mid, d_in);
         if self.shortcut {
             let on = self.in_shape.numel();
-            let s = ctx.step(ctx.ids.add2, &[d_in, d_out, d_in], &[on], on);
+            let s = ctx.step(ctx.ids.add_inplace, &[d_in, d_out], &[on], on);
             ctx.gpu.submit(&[], &[s]);
         }
     }
@@ -1291,7 +1291,7 @@ impl C2f {
             // backward produces grad wrt input into d_y1 (scratch), then we add
             // it onto the running chunk grad of the input chunk.
             b.backward(ctx, ps, x_in_b, &self.d_chunk[out_idx], &self.d_y1);
-            let s = ctx.step(ctx.ids.add2, &[&self.d_chunk[in_idx], &self.d_y1, &self.d_chunk[in_idx]], &[chunk_n], chunk_n);
+            let s = ctx.step(ctx.ids.add_inplace, &[&self.d_chunk[in_idx], &self.d_y1], &[chunk_n], chunk_n);
             ctx.gpu.submit(&[], &[s]);
         }
 

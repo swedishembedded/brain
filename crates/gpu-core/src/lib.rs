@@ -167,9 +167,12 @@ mod native_facade {
             self.inner.flush()
         }
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
+            crate::assert_no_output_alias(bufs);
             self.inner.step(kind, bufs, params, threads)
         }
         pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
+            // NB: sliced views of ONE buffer at disjoint offsets are legal and common
+            // here, so no alias check — wgpu validates the concrete ranges.
             self.inner.step_sliced(kind, bufs, offsets, params, threads)
         }
         pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
@@ -223,6 +226,7 @@ mod wasm_facade {
             Backend::write(&self.inner, buf, data)
         }
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
+            crate::assert_no_output_alias(bufs);
             Backend::step(&self.inner, kind, bufs, params, threads)
         }
         pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
@@ -298,5 +302,30 @@ mod tests {
         let s2 = gpu.step(0, &[&out, &b, &out2], &[4], 4);
         gpu.submit(&[], &[s1, s2]);
         assert_eq!(gpu.read(&out2, 4), vec![21.0, 42.0, 63.0, 84.0]);
+    }
+}
+
+/// Reject a dispatch that binds its OUTPUT buffer as an input as well.
+///
+/// wgpu treats `STORAGE_READ_WRITE` as exclusive within one dispatch, so
+/// `f(x, y, x)` is a validation error there even though the CPU backend would
+/// happily run it — the failure then shows up only on GPU, often surfacing at
+/// an unrelated later call. Binding a buffer twice READ-ONLY is fine (the
+/// chunked-attention trio deliberately binds one fused qkv buffer as both the
+/// q and kv views), so only the output slot is checked. Kernels that must
+/// accumulate into themselves have a dedicated `*_inplace` form with a single
+/// read_write binding.
+#[track_caller]
+fn assert_no_output_alias(bufs: &[&DeviceBuffer]) {
+    // The output is the last binding (for the `*_inplace` family it is the
+    // first, but then the *other* operand is last, so the same test holds).
+    if let Some(out) = bufs.last() {
+        if bufs.iter().filter(|b| b.alloc_id() == out.alloc_id()).count() > 1 {
+            panic!(
+                "dispatch binds its output buffer as an input as well; this is a \
+                 wgpu usage-scope violation (STORAGE_READ_WRITE is exclusive). \
+                 Use the kernel's *_inplace form, or write to a distinct buffer."
+            );
+        }
     }
 }

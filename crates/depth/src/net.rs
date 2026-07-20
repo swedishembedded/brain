@@ -102,6 +102,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("convex_upsample_dd", kernels::CONVEX_UPSAMPLE_DD),
     // ---- elementwise / plumbing ----
     ("add2", kernels::ADD2),
+    // not used by ZipDepth itself, but vision::blocks' backward needs it
+    ("add_inplace", kernels::ADD_INPLACE),
     // MinimalCrossScale's `x + 0.3*delta`: a scaled accumulate needs no scale kernel.
     ("axpy", kernels::AXPY),
     ("mul", kernels::MUL),

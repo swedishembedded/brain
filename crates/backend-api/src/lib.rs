@@ -106,6 +106,11 @@ impl DeviceBuffer {
     pub fn new<T: Any + ThreadSafe>(inner: T) -> DeviceBuffer {
         DeviceBuffer(Arc::new(inner))
     }
+    /// Identity of the underlying allocation. Two `DeviceBuffer`s alias the
+    /// same memory iff their ids are equal (clones share one `Arc`).
+    pub fn alloc_id(&self) -> *const () {
+        Arc::as_ptr(&self.0) as *const ()
+    }
     /// Recover the native buffer. Panics on a backend mismatch (a buffer from one
     /// backend handed to another) — the same fail-fast the enum dispatch had.
     pub fn downcast_ref<T: Any>(&self) -> &T {

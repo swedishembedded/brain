@@ -100,6 +100,8 @@ pub struct ConvKernelIds {
     pub concat_split: usize,
     pub chan_place: usize,
     pub add2: usize,
+    /// `out += a` (single read_write binding) — the wgpu-safe accumulate.
+    pub add_inplace: usize,
     /// `out += s * in`. A scaled residual (ZipDepth's `x + 0.3*delta`) with no
     /// scale kernel of its own — read-modify-write, so the caller keeps SSA by
     /// copying first, or by clearing `out` via submit's clear-list to get a plain
@@ -172,6 +174,7 @@ impl ConvKernelIds {
             concat_split: k("concat_split"),
             chan_place: k("chan_place"),
             add2: k("add2"),
+            add_inplace: k("add_inplace"),
             axpy: k("axpy"),
         }
     }
@@ -252,6 +255,7 @@ mod tests {
             ("concat2", ""),
             ("concat_split", ""),
             ("add2", ""),
+            ("add_inplace", ""),
         ];
         let ids = ConvKernelIds::resolve(yolo_pipelines);
         // The literals here are yolo/src/net.rs's consts.
