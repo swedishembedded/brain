@@ -123,6 +123,15 @@ concatenating in the consumer fixed it completely. Worth remembering as a
 general ONNX-authoring rule: **do not let a `Concat` write directly into a
 graph output when one of its inputs is an ancestor of another.**
 
+## Known unrelated failure
+
+`brain-glm --test convergence glm_mtp_overfits_fixed_batch` fails on the
+wgpu backend with a buffer usage conflict (STORAGE_READ_ONLY vs
+STORAGE_READ_WRITE in one dispatch) — the same aliasing class fixed in
+mirror, but in GLM's MTP path. **Pre-existing**: verified failing
+identically at 3a6169c, the commit before this workstream. The rest of the
+workspace suite is green (355 passed).
+
 ## Remaining
 
 - NPU timings/throughput are not measured yet (parity is); the fp16 drift at
