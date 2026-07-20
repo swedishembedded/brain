@@ -386,6 +386,10 @@ pub const SCALE_ADD_DGATE: &str = include_str!("../wgsl/scale_add_dgate.wgsl");
 pub const SCALE_CHAN: &str = include_str!("../wgsl/scale_chan.wgsl");
 /// `wgsl/scale_row.wgsl`
 pub const SCALE_ROW: &str = include_str!("../wgsl/scale_row.wgsl");
+/// `wgsl/scan_add.wgsl`
+pub const SCAN_ADD: &str = include_str!("../wgsl/scan_add.wgsl");
+/// `wgsl/scan_block.wgsl`
+pub const SCAN_BLOCK: &str = include_str!("../wgsl/scan_block.wgsl");
 /// `wgsl/sigmoid.wgsl`
 pub const SIGMOID: &str = include_str!("../wgsl/sigmoid.wgsl");
 /// `wgsl/sigmoid_bwd.wgsl`
@@ -406,6 +410,10 @@ pub const SNAKE_BETA: &str = include_str!("../wgsl/snake_beta.wgsl");
 pub const SOFTMAX_K: &str = include_str!("../wgsl/softmax_k.wgsl");
 /// `wgsl/softmax_k_dx.wgsl`
 pub const SOFTMAX_K_DX: &str = include_str!("../wgsl/softmax_k_dx.wgsl");
+/// `wgsl/sort_hist.wgsl`
+pub const SORT_HIST: &str = include_str!("../wgsl/sort_hist.wgsl");
+/// `wgsl/sort_scatter.wgsl`
+pub const SORT_SCATTER: &str = include_str!("../wgsl/sort_scatter.wgsl");
 /// `wgsl/tanh_act.wgsl`
 pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
 /// `wgsl/tanh_act_bwd.wgsl`
@@ -617,6 +625,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("scale_add_dgate", SCALE_ADD_DGATE),
     ("scale_chan", SCALE_CHAN),
     ("scale_row", SCALE_ROW),
+    ("scan_add", SCAN_ADD),
+    ("scan_block", SCAN_BLOCK),
     ("sigmoid", SIGMOID),
     ("sigmoid_bwd", SIGMOID_BWD),
     ("silu", SILU),
@@ -627,6 +637,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("snake_beta", SNAKE_BETA),
     ("softmax_k", SOFTMAX_K),
     ("softmax_k_dx", SOFTMAX_K_DX),
+    ("sort_hist", SORT_HIST),
+    ("sort_scatter", SORT_SCATTER),
     ("tanh_act", TANH_ACT),
     ("tanh_act_bwd", TANH_ACT_BWD),
     ("topk_mask", TOPK_MASK),
