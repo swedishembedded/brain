@@ -281,6 +281,7 @@ dependencies = [
  "brain-gpt",
  "brain-gpu-core",
  "brain-gradcheck",
+ "brain-mirror",
  "brain-model",
  "brain-moe",
  "brain-npu",
@@ -290,6 +291,7 @@ dependencies = [
  "brain-qwen",
  "brain-runtime",
  "brain-speaker",
+ "brain-splat",
  "brain-tts",
  "brain-vision",
  "brain-vulkan",
@@ -439,6 +441,20 @@ version = "0.1.0"
 [[package]]
 name = "brain-kernels"
 version = "0.1.0"
+
+[[package]]
+name = "brain-mirror"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-paramstore",
+ "brain-splat",
+ "brain-vision",
+ "serde_json",
+]
 
 [[package]]
 name = "brain-model"
@@ -593,6 +609,16 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-paramstore",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-splat"
+version = "0.1.0"
+dependencies = [
+ "brain-gpu-core",
+ "brain-kernels",
  "bytemuck",
  "serde_json",
 ]

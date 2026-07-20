@@ -430,6 +430,32 @@ pub const SOFTMAX_K_DX: &str = include_str!("../wgsl/softmax_k_dx.wgsl");
 pub const SORT_HIST: &str = include_str!("../wgsl/sort_hist.wgsl");
 /// `wgsl/sort_scatter.wgsl`
 pub const SORT_SCATTER: &str = include_str!("../wgsl/sort_scatter.wgsl");
+/// `wgsl/splat_bwd_count.wgsl`
+pub const SPLAT_BWD_COUNT: &str = include_str!("../wgsl/splat_bwd_count.wgsl");
+/// `wgsl/splat_bwd_emit.wgsl`
+pub const SPLAT_BWD_EMIT: &str = include_str!("../wgsl/splat_bwd_emit.wgsl");
+/// `wgsl/splat_bwd_keys.wgsl`
+pub const SPLAT_BWD_KEYS: &str = include_str!("../wgsl/splat_bwd_keys.wgsl");
+/// `wgsl/splat_emit.wgsl`
+pub const SPLAT_EMIT: &str = include_str!("../wgsl/splat_emit.wgsl");
+/// `wgsl/splat_grad_reduce.wgsl`
+pub const SPLAT_GRAD_REDUCE: &str = include_str!("../wgsl/splat_grad_reduce.wgsl");
+/// `wgsl/splat_naive.wgsl`
+pub const SPLAT_NAIVE: &str = include_str!("../wgsl/splat_naive.wgsl");
+/// `wgsl/splat_pack_rgba8.wgsl`
+pub const SPLAT_PACK_RGBA8: &str = include_str!("../wgsl/splat_pack_rgba8.wgsl");
+/// `wgsl/splat_project.wgsl`
+pub const SPLAT_PROJECT: &str = include_str!("../wgsl/splat_project.wgsl");
+/// `wgsl/splat_project_bwd.wgsl`
+pub const SPLAT_PROJECT_BWD: &str = include_str!("../wgsl/splat_project_bwd.wgsl");
+/// `wgsl/splat_rasterize.wgsl`
+pub const SPLAT_RASTERIZE: &str = include_str!("../wgsl/splat_rasterize.wgsl");
+/// `wgsl/splat_tile_count.wgsl`
+pub const SPLAT_TILE_COUNT: &str = include_str!("../wgsl/splat_tile_count.wgsl");
+/// `wgsl/splat_tile_ranges.wgsl`
+pub const SPLAT_TILE_RANGES: &str = include_str!("../wgsl/splat_tile_ranges.wgsl");
+/// `wgsl/splat_unpack.wgsl`
+pub const SPLAT_UNPACK: &str = include_str!("../wgsl/splat_unpack.wgsl");
 /// `wgsl/tanh_act.wgsl`
 pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
 /// `wgsl/tanh_act_bwd.wgsl`
@@ -663,6 +689,19 @@ pub const ALL: &[(&str, &str)] = &[
     ("softmax_k_dx", SOFTMAX_K_DX),
     ("sort_hist", SORT_HIST),
     ("sort_scatter", SORT_SCATTER),
+    ("splat_bwd_count", SPLAT_BWD_COUNT),
+    ("splat_bwd_emit", SPLAT_BWD_EMIT),
+    ("splat_bwd_keys", SPLAT_BWD_KEYS),
+    ("splat_emit", SPLAT_EMIT),
+    ("splat_grad_reduce", SPLAT_GRAD_REDUCE),
+    ("splat_naive", SPLAT_NAIVE),
+    ("splat_pack_rgba8", SPLAT_PACK_RGBA8),
+    ("splat_project", SPLAT_PROJECT),
+    ("splat_project_bwd", SPLAT_PROJECT_BWD),
+    ("splat_rasterize", SPLAT_RASTERIZE),
+    ("splat_tile_count", SPLAT_TILE_COUNT),
+    ("splat_tile_ranges", SPLAT_TILE_RANGES),
+    ("splat_unpack", SPLAT_UNPACK),
     ("tanh_act", TANH_ACT),
     ("tanh_act_bwd", TANH_ACT_BWD),
     ("topk_mask", TOPK_MASK),

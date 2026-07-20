@@ -1,0 +1,18 @@
+[package]
+name = "brain-splat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "3D Gaussian Splatting: PLY scene IO, generic device scan/radix-sort primitives, and the tiled fp32 WGSL rasterizer (forward + backward) shared by the mirror model demo and the standalone splat viewer."
+
+[lib]
+name = "splat"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+
+[dev-dependencies]
+bytemuck.workspace = true
+serde_json.workspace = true
