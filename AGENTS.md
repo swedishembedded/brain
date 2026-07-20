@@ -38,7 +38,19 @@ them, keeping the gradient-check discipline.
    synthetic detection dataset and runs `detect` (boxes in pixel coords); CPU
    backend only. Byte-compatible with canonical `yolov8n` for weight import.
    Train/eval/detect/fine-tune via `brain yolo …`.
-6. **ZipDepth monocular depth** (`crates/depth`) — the 6.1M pure-conv depth
+6. **WorldMirror-2 multi-view 3D reconstruction** (`crates/mirror`) — the
+   HY-World 2.0 1.26B feed-forward model: per-frame DINOv2 ViT-L/14 encoding,
+   24 alternating frame/global attention levels (QK-norm + normalized 2D
+   RoPE), DPT heads (depth/points/normals/gaussians) + iterative camera head;
+   photos → a navigable 3DGS scene. Imported exactly from the reference
+   checkpoint; parity-gated per stage vs PyTorch goldens. `brain mirror
+   {import,infer,demo,export-npu}`; docs `docs/mirror/`.
+7. **3D Gaussian Splatting** (`crates/splat`) — from-scratch tiled 3DGS
+   rasterizer (atomic-free/barrier-free WGSL: generic scan + radix sort →
+   per-tile compositing) with forward AND backward (autograd-verified),
+   Inria PLY IO, interactive WASD+mouse viewer, and `splat fit` scene
+   optimization. `brain splat {info,render,view,fit}`; docs `docs/splat/`.
+8. **ZipDepth monocular depth** (`crates/depth`) — the 6.1M pure-conv depth
    net (QARep/RepVGG blocks, SE/strip/global-context attention, convex
    upsampling), exact vs the reference PyTorch on the released checkpoints.
    Realtime demo (`brain depth --image|--camera`, SDL views incl.
@@ -62,6 +74,8 @@ them, keeping the gradient-check discipline.
 | `yolo` | YOLOv8-style detector: backbone/neck/head, DFL decode, assigner + detection loss, NMS, `detect` inference, canonical `yolov8n` weight import |
 | `vision` | shared conv-net blocks (spec-driven `Conv` incl. the fused/register-tiled eval paths, `BatchNorm`, `SPPF`, bottlenecks), name-resolved kernel ids, `fold_bn` |
 | `depth` | ZipDepth: model/blocks/import/fuse, `Predictor` (reference-exact preprocessing), viz/stereo/effects, INT8 calib report |
+| `mirror` | WorldMirror-2: config/param_list, strict import, DINOv2+trunk (via `model::vit`), DPT/camera heads, PIL-exact preprocessing, gaussian assembly |
+| `splat` | 3DGS: generic device scan/radix-sort (brain's first), tiled rasterizer fwd+bwd, PLY IO, `fit` optimizer, viewer plumbing |
 | `capture` | V4L2 webcam (hand-rolled ioctl FFI, YUYV→RGB, latest-frame slot) |
 | `onnx` | pure-Rust ONNX graph model + serializer (export only; vendored `prost` bindings, no `protoc` in the build) |
 | `npu` | YOLO→ONNX export + BN fold + brain-native INT8 PTQ + fake-quant simulator + OpenVINO **Intel NPU** runtime (default dep on x86_64 linux/windows; `runtime-linking`) |
@@ -93,6 +107,9 @@ them, keeping the gradient-check discipline.
 | YOLO train / eval / detect / fine-tune (CLI) | `crates/cli/src/yolo_cli.rs` |
 | YOLO → Intel NPU: export / quantize / run / bench (OpenVINO) | `crates/npu`, `crates/onnx`, `crates/cli/src/npu_cli.rs`, `docs/yolo/NPU.md` |
 | ZipDepth: guide / workstream ledger (incl. GPU perf root causes) | `docs/depth/README.md`, `docs/depth/STATUS.md` |
+| WorldMirror-2 (photos → 3DGS scene): guide / ledger / parity gates | `docs/mirror/README.md`, `docs/mirror/STATUS.md`; `crates/mirror`, `crates/cli/src/mirror_cli.rs` |
+| 3D Gaussian Splatting rasterizer + viewer + fit | `docs/splat/README.md`, `docs/splat/STATUS.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
+| Shared ViT block builder (DINOv2/trunk/camera-head blocks) | `crates/model/src/vit.rs` |
 | ZipDepth model / import / predictor / demo views | `crates/depth/src/{model,blocks,import,predict,viz,stereo,effects}.rs`, `crates/cli/src/depth_cli.rs` |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
 | Fused conv eval paths (act selector, register tiling, grouped) | `crates/vision/src/blocks.rs`, `crates/kernels/wgsl/conv_act*.wgsl`, `conv2d_gd_reg.wgsl`, `crates/backend-cpu/src/fast_conv.rs` |
