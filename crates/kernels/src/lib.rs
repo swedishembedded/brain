@@ -348,6 +348,8 @@ pub const PIXEL_SHUFFLE_DX: &str = include_str!("../wgsl/pixel_shuffle_dx.wgsl")
 pub const POS_ADD: &str = include_str!("../wgsl/pos_add.wgsl");
 /// `wgsl/pos_bwd.wgsl`
 pub const POS_BWD: &str = include_str!("../wgsl/pos_bwd.wgsl");
+/// `wgsl/region_copy.wgsl`
+pub const REGION_COPY: &str = include_str!("../wgsl/region_copy.wgsl");
 /// `wgsl/relu_inplace.wgsl`
 pub const RELU_INPLACE: &str = include_str!("../wgsl/relu_inplace.wgsl");
 /// `wgsl/resize_bilinear.wgsl`
@@ -648,6 +650,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("pixel_shuffle_dx", PIXEL_SHUFFLE_DX),
     ("pos_add", POS_ADD),
     ("pos_bwd", POS_BWD),
+    ("region_copy", REGION_COPY),
     ("relu_inplace", RELU_INPLACE),
     ("resize_bilinear", RESIZE_BILINEAR),
     ("resize_bilinear_dx", RESIZE_BILINEAR_DX),

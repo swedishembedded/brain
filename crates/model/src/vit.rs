@@ -197,7 +197,7 @@ pub struct VitBwdIds {
     pub attn_bwd_dq_cross: usize,
     pub attn_bwd_dk_cross: usize,
     pub ln_stats: usize,
-    pub mul: usize,
+    pub region_copy: usize,
     pub axpy: usize,
 }
 
@@ -297,4 +297,272 @@ pub fn vit_block_fwd(
         &scr.ln
     };
     steps.push(g.step(k.add2, &[&scr.res, branch, x], &[rows * c], rows * c));
+}
+
+/// Gradient buffers for one block's parameters (accumulated `+=`; zero them
+/// before the backward like `ParamStore::zero_grads` does).
+pub struct VitBlockGrads<'a> {
+    pub norm1_w: &'a DeviceBuffer,
+    pub norm1_b: &'a DeviceBuffer,
+    pub qkv_w: &'a DeviceBuffer,
+    pub qkv_b: &'a DeviceBuffer,
+    pub q_norm_w: Option<&'a DeviceBuffer>,
+    pub q_norm_b: Option<&'a DeviceBuffer>,
+    pub k_norm_w: Option<&'a DeviceBuffer>,
+    pub k_norm_b: Option<&'a DeviceBuffer>,
+    pub proj_w: &'a DeviceBuffer,
+    pub proj_b: &'a DeviceBuffer,
+    pub ls1: Option<&'a DeviceBuffer>,
+    pub norm2_w: &'a DeviceBuffer,
+    pub norm2_b: &'a DeviceBuffer,
+    pub fc1_w: &'a DeviceBuffer,
+    pub fc1_b: &'a DeviceBuffer,
+    pub fc2_w: &'a DeviceBuffer,
+    pub fc2_b: &'a DeviceBuffer,
+    pub ls2: Option<&'a DeviceBuffer>,
+}
+
+/// Backward scratch, reusable across blocks (per-block state lives in the
+/// caches). Sizes: `[rows,C]` ×4, `[rows,3C]` ×2, `[rows,M]` ×2, per-row LN
+/// stats ×2, and a `[heads, span, span]` dscores slab.
+pub struct VitBwdScratch {
+    pub d_res: DeviceBuffer,
+    pub d_branch: DeviceBuffer,
+    pub d_ln: DeviceBuffer,
+    pub tmp: DeviceBuffer,
+    pub d_qkv: DeviceBuffer,
+    pub d_qkv_pre: DeviceBuffer,
+    pub d_ctx: DeviceBuffer,
+    pub d_h: DeviceBuffer,
+    pub d_h2: DeviceBuffer,
+    pub mean: DeviceBuffer,
+    pub inv: DeviceBuffer,
+    pub dscores: DeviceBuffer,
+}
+
+impl VitBwdScratch {
+    pub fn new(gpu: &Gpu, sh: &VitShape, rows: u32, max_span: u32) -> VitBwdScratch {
+        let rc = rows as u64 * sh.dim as u64;
+        VitBwdScratch {
+            d_res: gpu.storage(rc),
+            d_branch: gpu.storage(rc),
+            d_ln: gpu.storage(rc),
+            tmp: gpu.storage(rc),
+            d_qkv: gpu.storage(3 * rc),
+            d_qkv_pre: gpu.storage(3 * rc),
+            d_ctx: gpu.storage(rc),
+            d_h: gpu.storage(rows as u64 * sh.mlp as u64),
+            d_h2: gpu.storage(rows as u64 * sh.mlp as u64),
+            mean: gpu.storage(rows as u64),
+            inv: gpu.storage(rows as u64),
+            dscores: gpu.storage(sh.heads as u64 * max_span as u64 * max_span as u64),
+        }
+    }
+}
+
+/// Training-mode forward: like [`vit_block_fwd`] but every stage lands in
+/// the block's [`VitBlockCache`] for the backward. Input = `cache.x_in`
+/// (caller-filled), output → `x_out`. Attention runs ONE dispatch per span
+/// (chunk == span), caching probs per span at offset `k·heads·len²`.
+/// `cache.qkv` must be in the submit clears list (axpy-copied).
+#[allow(clippy::too_many_arguments)]
+pub fn vit_block_fwd_cached(
+    g: &Gpu,
+    k: &VitKernelIds,
+    kb: &VitBwdIds,
+    sh: &VitShape,
+    w: &VitBlockWeights,
+    cache: &VitBlockCache,
+    x_out: &DeviceBuffer,
+    rows: u32,
+    spans: &[(u32, u32)],
+    scr_tmp: &DeviceBuffer, // [rows, C] LayerScale staging
+    scores: &DeviceBuffer,  // [heads, max_span, max_span] transient
+    steps: &mut Vec<Step>,
+) {
+    let c = sh.dim;
+    let hd = sh.head_dim();
+    let stride = 3 * c;
+    let _ = kb;
+
+    steps.push(g.step(k.layernorm, &[&cache.x_in, w.norm1_w, w.norm1_b, &cache.ln1], &[c, rows, f(sh.eps)], rows));
+    steps.push(g.step(k.matmul, &[&cache.ln1, w.qkv_w, &cache.qkv_pre], &[rows, c, stride], rows * stride));
+    steps.push(g.step(k.bias_add, &[&cache.qkv_pre, w.qkv_b], &[rows, stride], rows * stride));
+    steps.push(g.step(kb.axpy, &[&cache.qkv, &cache.qkv_pre], &[rows * stride, f(1.0)], rows * stride));
+    if let Some(qk) = &w.qk_norm {
+        steps.push(g.step(k.ln_head, &[&cache.qkv, qk.q_w, qk.q_b], &[rows, sh.heads, hd, stride, 0, f(sh.eps)], rows * sh.heads));
+        steps.push(g.step(k.ln_head, &[&cache.qkv, qk.k_w, qk.k_b], &[rows, sh.heads, hd, stride, c, f(sh.eps)], rows * sh.heads));
+    }
+    if let Some(r) = &w.rope {
+        let half = hd / 2;
+        steps.push(g.step(k.rope2d, &[&cache.qkv, r.cos, r.sin], &[rows, sh.heads, half, stride, 0, r.tmod, f(1.0)], rows * sh.heads * half));
+        steps.push(g.step(k.rope2d, &[&cache.qkv, r.cos, r.sin], &[rows, sh.heads, half, stride, c, r.tmod, f(1.0)], rows * sh.heads * half));
+    }
+    for (si, &(row0, len)) in spans.iter().enumerate() {
+        let q_off = row0 as u64 * stride as u64;
+        let probs_off = si as u64 * sh.heads as u64 * len as u64 * len as u64;
+        let ctx_off = row0 as u64 * c as u64;
+        steps.push(g.step_sliced(
+            k.attn_scores_cross,
+            &[&cache.qkv, &cache.qkv, scores],
+            &[(q_off, 0), (q_off, 0), (0, 0)],
+            &[1, sh.heads, len, len, hd, stride, stride, 0, c],
+            sh.heads * len * len,
+        ));
+        steps.push(g.step_sliced(
+            k.attn_softmax_cross,
+            &[scores, &cache.probs],
+            &[(0, 0), (probs_off, 0)],
+            &[1, sh.heads, len, len],
+            sh.heads * len,
+        ));
+        steps.push(g.step_sliced(
+            k.attn_apply_cross,
+            &[&cache.probs, &cache.qkv, &cache.ctx],
+            &[(probs_off, 0), (q_off, 0), (ctx_off, 0)],
+            &[1, sh.heads, len, len, hd, stride, 2 * c, c],
+            sh.heads * len * hd,
+        ));
+    }
+    steps.push(g.step(k.matmul, &[&cache.ctx, w.proj_w, &cache.attn_proj], &[rows, c, c], rows * c));
+    steps.push(g.step(k.bias_add, &[&cache.attn_proj, w.proj_b], &[rows, c], rows * c));
+    let branch: &DeviceBuffer = if let Some(ls1) = w.ls1 {
+        steps.push(g.step(k.scale_chan, &[&cache.attn_proj, ls1, scr_tmp], &[rows * c, c, 1], rows * c));
+        scr_tmp
+    } else {
+        &cache.attn_proj
+    };
+    steps.push(g.step(k.add2, &[&cache.x_in, branch, &cache.res_mid], &[rows * c], rows * c));
+
+    steps.push(g.step(k.layernorm, &[&cache.res_mid, w.norm2_w, w.norm2_b, &cache.ln2], &[c, rows, f(sh.eps)], rows));
+    steps.push(g.step(k.matmul, &[&cache.ln2, w.fc1_w, &cache.h], &[rows, c, sh.mlp], rows * sh.mlp));
+    steps.push(g.step(k.bias_add, &[&cache.h, w.fc1_b], &[rows, sh.mlp], rows * sh.mlp));
+    steps.push(g.step(k.gelu_erf, &[&cache.h, &cache.h2], &[rows * sh.mlp], rows * sh.mlp));
+    steps.push(g.step(k.matmul, &[&cache.h2, w.fc2_w, &cache.mlp_out], &[rows, sh.mlp, c], rows * c));
+    steps.push(g.step(k.bias_add, &[&cache.mlp_out, w.fc2_b], &[rows, c], rows * c));
+    let branch: &DeviceBuffer = if let Some(ls2) = w.ls2 {
+        steps.push(g.step(k.scale_chan, &[&cache.mlp_out, ls2, scr_tmp], &[rows * c, c, 1], rows * c));
+        scr_tmp
+    } else {
+        &cache.mlp_out
+    };
+    steps.push(g.step(k.add2, &[&cache.res_mid, branch, x_out], &[rows * c], rows * c));
+}
+
+/// Backward through one cached block: upstream `d_out` → `d_x_in`, parameter
+/// grads accumulated into `gr`. Same span discipline as the cached forward
+/// (chunk == span; the cross-attention backward kernels ASSIGN, so spans
+/// must cover disjoint rows — which frame spans and the single global span
+/// both satisfy). `sb.d_qkv`/`sb.d_qkv_pre` must be zero-cleared by the
+/// caller's submit for each block.
+#[allow(clippy::too_many_arguments)]
+pub fn vit_block_bwd(
+    g: &Gpu,
+    k: &VitKernelIds,
+    kb: &VitBwdIds,
+    sh: &VitShape,
+    w: &VitBlockWeights,
+    gr: &VitBlockGrads,
+    cache: &VitBlockCache,
+    d_out: &DeviceBuffer,
+    d_x_in: &DeviceBuffer,
+    rows: u32,
+    spans: &[(u32, u32)],
+    sb: &VitBwdScratch,
+    steps: &mut Vec<Step>,
+) {
+    let c = sh.dim;
+    let hd = sh.head_dim();
+    let stride = 3 * c;
+    let m = sh.mlp;
+
+    // ---- MLP half (upstream d_out) ----
+    let d_mlp: &DeviceBuffer = if let Some(ls2) = w.ls2 {
+        steps.push(g.step(kb.scale_chan_dg, &[&cache.mlp_out, d_out, gr.ls2.expect("ls2 grad")], &[rows * c, c, 1], c));
+        steps.push(g.step(k.scale_chan, &[d_out, ls2, &sb.d_branch], &[rows * c, c, 1], rows * c));
+        &sb.d_branch
+    } else {
+        d_out
+    };
+    steps.push(g.step(kb.matmul_dx, &[d_mlp, w.fc2_w, &sb.d_h2], &[rows, m, c, 0], rows * m));
+    steps.push(g.step(kb.matmul_dw, &[d_mlp, &cache.h2, gr.fc2_w], &[rows, m, c], c * m));
+    steps.push(g.step(kb.bias_grad, &[d_mlp, gr.fc2_b], &[rows, c], c));
+    steps.push(g.step(kb.gelu_erf_bwd, &[&cache.h, &sb.d_h2, &sb.d_h], &[rows * m], rows * m));
+    steps.push(g.step(kb.matmul_dx, &[&sb.d_h, w.fc1_w, &sb.d_ln], &[rows, c, m, 0], rows * c));
+    steps.push(g.step(kb.matmul_dw, &[&sb.d_h, &cache.ln2, gr.fc1_w], &[rows, c, m], m * c));
+    steps.push(g.step(kb.bias_grad, &[&sb.d_h, gr.fc1_b], &[rows, m], m));
+    steps.push(g.step(kb.ln_stats, &[&cache.res_mid, &sb.mean, &sb.inv], &[c, rows, f(sh.eps)], rows));
+    steps.push(g.step(kb.ln_dgamma, &[&sb.d_ln, &cache.res_mid, &sb.mean, &sb.inv, gr.norm2_w], &[c, rows], c));
+    steps.push(g.step(kb.ln_dbeta, &[&sb.d_ln, gr.norm2_b], &[c, rows], c));
+    steps.push(g.step(kb.layernorm_dx, &[&cache.res_mid, w.norm2_w, &sb.d_ln, &sb.tmp], &[c, rows, f(sh.eps)], rows));
+    steps.push(g.step(k.add2, &[d_out, &sb.tmp, &sb.d_res], &[rows * c], rows * c));
+
+    // ---- attention half (upstream sb.d_res) ----
+    let d_attn: &DeviceBuffer = if let Some(ls1) = w.ls1 {
+        steps.push(g.step(kb.scale_chan_dg, &[&cache.attn_proj, &sb.d_res, gr.ls1.expect("ls1 grad")], &[rows * c, c, 1], c));
+        steps.push(g.step(k.scale_chan, &[&sb.d_res, ls1, &sb.d_branch], &[rows * c, c, 1], rows * c));
+        &sb.d_branch
+    } else {
+        &sb.d_res
+    };
+    steps.push(g.step(kb.matmul_dx, &[d_attn, w.proj_w, &sb.d_ctx], &[rows, c, c, 0], rows * c));
+    steps.push(g.step(kb.matmul_dw, &[d_attn, &cache.ctx, gr.proj_w], &[rows, c, c], c * c));
+    steps.push(g.step(kb.bias_grad, &[d_attn, gr.proj_b], &[rows, c], c));
+
+    for (si, &(row0, len)) in spans.iter().enumerate() {
+        let q_off = row0 as u64 * stride as u64;
+        let probs_off = si as u64 * sh.heads as u64 * len as u64 * len as u64;
+        let ctx_off = row0 as u64 * c as u64;
+        steps.push(g.step_sliced(
+            kb.attn_bwd_dscores_cross,
+            &[&sb.d_ctx, &cache.qkv, &cache.probs, &sb.dscores],
+            &[(ctx_off, 0), (q_off, 0), (probs_off, 0), (0, 0)],
+            &[1, sh.heads, len, len, hd, stride, 2 * c, c],
+            sh.heads * len * len,
+        ));
+        steps.push(g.step_sliced(
+            kb.attn_bwd_dv_cross,
+            &[&cache.probs, &sb.d_ctx, &sb.d_qkv],
+            &[(probs_off, 0), (ctx_off, 0), (q_off, 0)],
+            &[1, sh.heads, len, len, hd, stride, 2 * c, c],
+            sh.heads * len * hd,
+        ));
+        steps.push(g.step_sliced(
+            kb.attn_bwd_dq_cross,
+            &[&sb.dscores, &cache.qkv, &sb.d_qkv],
+            &[(0, 0), (q_off, 0), (q_off, 0)],
+            &[1, sh.heads, len, len, hd, stride, stride, 0, c],
+            sh.heads * len * hd,
+        ));
+        steps.push(g.step_sliced(
+            kb.attn_bwd_dk_cross,
+            &[&sb.dscores, &cache.qkv, &sb.d_qkv],
+            &[(0, 0), (q_off, 0), (q_off, 0)],
+            &[1, sh.heads, len, len, hd, stride, stride, 0, c],
+            sh.heads * len * hd,
+        ));
+    }
+    if let Some(r) = &w.rope {
+        let half = hd / 2;
+        steps.push(g.step(k.rope2d, &[&sb.d_qkv, r.cos, r.sin], &[rows, sh.heads, half, stride, 0, r.tmod, f(-1.0)], rows * sh.heads * half));
+        steps.push(g.step(k.rope2d, &[&sb.d_qkv, r.cos, r.sin], &[rows, sh.heads, half, stride, c, r.tmod, f(-1.0)], rows * sh.heads * half));
+    }
+    let d_lin: &DeviceBuffer = if let Some(qk) = &w.qk_norm {
+        steps.push(g.step(kb.ln_head_dgb, &[&cache.qkv_pre, &sb.d_qkv, gr.q_norm_w.expect("qnw"), gr.q_norm_b.expect("qnb")], &[rows, sh.heads, hd, stride, 0, f(sh.eps)], hd));
+        steps.push(g.step(kb.ln_head_dgb, &[&cache.qkv_pre, &sb.d_qkv, gr.k_norm_w.expect("knw"), gr.k_norm_b.expect("knb")], &[rows, sh.heads, hd, stride, c, f(sh.eps)], hd));
+        steps.push(g.step(kb.ln_head_dx, &[&cache.qkv_pre, qk.q_w, &sb.d_qkv, &sb.d_qkv_pre], &[rows, sh.heads, hd, stride, 0, f(sh.eps)], rows * sh.heads));
+        steps.push(g.step(kb.ln_head_dx, &[&cache.qkv_pre, qk.k_w, &sb.d_qkv, &sb.d_qkv_pre], &[rows, sh.heads, hd, stride, c, f(sh.eps)], rows * sh.heads));
+        steps.push(g.step(kb.region_copy, &[&sb.d_qkv, &sb.d_qkv_pre], &[rows, c, stride, 2 * c], rows * c));
+        &sb.d_qkv_pre
+    } else {
+        &sb.d_qkv
+    };
+    steps.push(g.step(kb.matmul_dx, &[d_lin, w.qkv_w, &sb.d_ln], &[rows, c, stride, 0], rows * c));
+    steps.push(g.step(kb.matmul_dw, &[d_lin, &cache.ln1, gr.qkv_w], &[rows, c, stride], stride * c));
+    steps.push(g.step(kb.bias_grad, &[d_lin, gr.qkv_b], &[rows, stride], stride));
+    steps.push(g.step(kb.ln_stats, &[&cache.x_in, &sb.mean, &sb.inv], &[c, rows, f(sh.eps)], rows));
+    steps.push(g.step(kb.ln_dgamma, &[&sb.d_ln, &cache.x_in, &sb.mean, &sb.inv, gr.norm1_w], &[c, rows], c));
+    steps.push(g.step(kb.ln_dbeta, &[&sb.d_ln, gr.norm1_b], &[c, rows], c));
+    steps.push(g.step(kb.layernorm_dx, &[&cache.x_in, w.norm1_w, &sb.d_ln, &sb.tmp], &[c, rows, f(sh.eps)], rows));
+    steps.push(g.step(k.add2, &[&sb.d_res, &sb.tmp, d_x_in], &[rows * c], rows * c));
 }
