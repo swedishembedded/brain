@@ -20,6 +20,10 @@ pub const ADD2: &str = include_str!("../wgsl/add2.wgsl");
 pub const ADD_CHAN_BCAST: &str = include_str!("../wgsl/add_chan_bcast.wgsl");
 /// `wgsl/add_chan_bcast_dv.wgsl`
 pub const ADD_CHAN_BCAST_DV: &str = include_str!("../wgsl/add_chan_bcast_dv.wgsl");
+/// `wgsl/add_chan_inplace.wgsl`
+pub const ADD_CHAN_INPLACE: &str = include_str!("../wgsl/add_chan_inplace.wgsl");
+/// `wgsl/add_inplace.wgsl`
+pub const ADD_INPLACE: &str = include_str!("../wgsl/add_inplace.wgsl");
 /// `wgsl/add_index_mask.wgsl`
 pub const ADD_INDEX_MASK: &str = include_str!("../wgsl/add_index_mask.wgsl");
 /// `wgsl/attention.wgsl`
@@ -284,6 +288,12 @@ pub const LAYERNORM_DX: &str = include_str!("../wgsl/layernorm_dx.wgsl");
 pub const LEAKY_RELU: &str = include_str!("../wgsl/leaky_relu.wgsl");
 /// `wgsl/leaky_relu_bwd.wgsl`
 pub const LEAKY_RELU_BWD: &str = include_str!("../wgsl/leaky_relu_bwd.wgsl");
+/// `wgsl/ln_head.wgsl`
+pub const LN_HEAD: &str = include_str!("../wgsl/ln_head.wgsl");
+/// `wgsl/ln_head_dgb.wgsl`
+pub const LN_HEAD_DGB: &str = include_str!("../wgsl/ln_head_dgb.wgsl");
+/// `wgsl/ln_head_dx.wgsl`
+pub const LN_HEAD_DX: &str = include_str!("../wgsl/ln_head_dx.wgsl");
 /// `wgsl/ln_stats.wgsl`
 pub const LN_STATS: &str = include_str!("../wgsl/ln_stats.wgsl");
 /// `wgsl/masked_l1.wgsl`
@@ -338,6 +348,8 @@ pub const PIXEL_SHUFFLE_DX: &str = include_str!("../wgsl/pixel_shuffle_dx.wgsl")
 pub const POS_ADD: &str = include_str!("../wgsl/pos_add.wgsl");
 /// `wgsl/pos_bwd.wgsl`
 pub const POS_BWD: &str = include_str!("../wgsl/pos_bwd.wgsl");
+/// `wgsl/relu_inplace.wgsl`
+pub const RELU_INPLACE: &str = include_str!("../wgsl/relu_inplace.wgsl");
 /// `wgsl/resize_bilinear.wgsl`
 pub const RESIZE_BILINEAR: &str = include_str!("../wgsl/resize_bilinear.wgsl");
 /// `wgsl/resize_bilinear_dx.wgsl`
@@ -356,6 +368,8 @@ pub const RMSNORM_DW: &str = include_str!("../wgsl/rmsnorm_dw.wgsl");
 pub const RMSNORM_DX: &str = include_str!("../wgsl/rmsnorm_dx.wgsl");
 /// `wgsl/rope.wgsl`
 pub const ROPE: &str = include_str!("../wgsl/rope.wgsl");
+/// `wgsl/rope2d.wgsl`
+pub const ROPE2D: &str = include_str!("../wgsl/rope2d.wgsl");
 /// `wgsl/rope_base.wgsl`
 pub const ROPE_BASE: &str = include_str!("../wgsl/rope_base.wgsl");
 /// `wgsl/rope_base_bwd.wgsl`
@@ -384,6 +398,8 @@ pub const SCALE_ADD_DEXP: &str = include_str!("../wgsl/scale_add_dexp.wgsl");
 pub const SCALE_ADD_DGATE: &str = include_str!("../wgsl/scale_add_dgate.wgsl");
 /// `wgsl/scale_chan.wgsl`
 pub const SCALE_CHAN: &str = include_str!("../wgsl/scale_chan.wgsl");
+/// `wgsl/scale_chan_dg.wgsl`
+pub const SCALE_CHAN_DG: &str = include_str!("../wgsl/scale_chan_dg.wgsl");
 /// `wgsl/scale_row.wgsl`
 pub const SCALE_ROW: &str = include_str!("../wgsl/scale_row.wgsl");
 /// `wgsl/scan_add.wgsl`
@@ -442,6 +458,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("add2", ADD2),
     ("add_chan_bcast", ADD_CHAN_BCAST),
     ("add_chan_bcast_dv", ADD_CHAN_BCAST_DV),
+    ("add_chan_inplace", ADD_CHAN_INPLACE),
+    ("add_inplace", ADD_INPLACE),
     ("add_index_mask", ADD_INDEX_MASK),
     ("attention", ATTENTION),
     ("attn_apply", ATTN_APPLY),
@@ -574,6 +592,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("layernorm_dx", LAYERNORM_DX),
     ("leaky_relu", LEAKY_RELU),
     ("leaky_relu_bwd", LEAKY_RELU_BWD),
+    ("ln_head", LN_HEAD),
+    ("ln_head_dgb", LN_HEAD_DGB),
+    ("ln_head_dx", LN_HEAD_DX),
     ("ln_stats", LN_STATS),
     ("masked_l1", MASKED_L1),
     ("masked_l1_grad", MASKED_L1_GRAD),
@@ -601,6 +622,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("pixel_shuffle_dx", PIXEL_SHUFFLE_DX),
     ("pos_add", POS_ADD),
     ("pos_bwd", POS_BWD),
+    ("relu_inplace", RELU_INPLACE),
     ("resize_bilinear", RESIZE_BILINEAR),
     ("resize_bilinear_dx", RESIZE_BILINEAR_DX),
     ("resize_nearest", RESIZE_NEAREST),
@@ -610,6 +632,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("rmsnorm_dw", RMSNORM_DW),
     ("rmsnorm_dx", RMSNORM_DX),
     ("rope", ROPE),
+    ("rope2d", ROPE2D),
     ("rope_base", ROPE_BASE),
     ("rope_base_bwd", ROPE_BASE_BWD),
     ("rope_sub", ROPE_SUB),
@@ -624,6 +647,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("scale_add_dexp", SCALE_ADD_DEXP),
     ("scale_add_dgate", SCALE_ADD_DGATE),
     ("scale_chan", SCALE_CHAN),
+    ("scale_chan_dg", SCALE_CHAN_DG),
     ("scale_row", SCALE_ROW),
     ("scan_add", SCAN_ADD),
     ("scan_block", SCAN_BLOCK),
