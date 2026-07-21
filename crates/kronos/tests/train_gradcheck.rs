@@ -230,3 +230,42 @@ fn milestone_d_lora_gradcheck_and_learns() {
     eprintln!("LoRA learning: {l0:.4} -> {last:.4} ({} adapters)", names.len());
     assert!(last < l0, "LoRA adapters did not reduce the loss: {l0:.4} -> {last:.4}");
 }
+
+#[test]
+fn milestone_e_promotion_gate() {
+    if skip() {
+        return;
+    }
+    use kronos::train::{finetune, FinetuneOpts, LoraCfg, TokenBatch};
+    let cfg = KronosConfig::tiny();
+    let t = 8u32;
+    // A learnable, memorizable task; val overlaps the train distribution so a
+    // correctly-trained model beats the base on held-out loss.
+    let mk = |seed: u64| -> TokenBatch {
+        let mut r = Rng(seed);
+        let s1: Vec<u32> = (0..t).map(|_| r.below(cfg.s1_vocab() as u32)).collect();
+        let s2: Vec<u32> = (0..t).map(|_| r.below(cfg.s2_vocab() as u32)).collect();
+        let cal: [Vec<u32>; 5] = std::array::from_fn(|c| (0..t).map(|_| r.below(CAL[c].1 as u32)).collect());
+        // targets = a fixed deterministic rule of the inputs (learnable).
+        let s1_targets: Vec<u32> = s1.iter().map(|&x| (x + 1) % cfg.s1_vocab() as u32).collect();
+        let s2_targets: Vec<u32> = s2.iter().map(|&x| (x + 2) % cfg.s2_vocab() as u32).collect();
+        let sampled_s1 = s1.clone();
+        TokenBatch { s1, s2, cal, sampled_s1, s1_targets, s2_targets }
+    };
+    let train: Vec<TokenBatch> = (0..6).map(mk).collect();
+    let val = train.clone(); // held-out from the same rule
+    let init = init_weights(&cfg, 3);
+
+    // (1) trained → should beat base and be PROMOTED (weights returned).
+    let opts = FinetuneOpts { epochs: 80, lr: 5e-3, wd: 0.0, clip: 3.0, lora: None };
+    let (rep, w) = finetune(cfg.clone(), t, &init, &train, &val, &opts);
+    eprintln!("gate(train): base_val {:.3} ft_val {:.3} promoted {}", rep.base_val, rep.ft_val, rep.promoted);
+    assert!(rep.ft_val < rep.base_val, "fine-tune did not beat base on held-out");
+    assert!(rep.promoted && w.is_some(), "gate should promote a genuine improvement");
+
+    // (2) no training (LoRA B=0 → ft == base) → NOT promoted (gate rejects noise).
+    let opts0 = FinetuneOpts { epochs: 0, lr: 5e-3, wd: 0.0, clip: 3.0, lora: Some(LoraCfg::attn(4, 8.0)) };
+    let (rep0, w0) = finetune(cfg, t, &init, &train, &val, &opts0);
+    eprintln!("gate(noop): base_val {:.3} ft_val {:.3} promoted {}", rep0.base_val, rep0.ft_val, rep0.promoted);
+    assert!(!rep0.promoted && w0.is_none(), "gate must reject a non-improvement");
+}

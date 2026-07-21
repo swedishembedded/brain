@@ -815,3 +815,129 @@ impl KronosTrain {
         self.ps.read_grad(&self.gpu, name)
     }
 }
+
+/// One pre-tokenized training example: the frozen-tokenizer output for a single
+/// leak-safe OHLCV window (s1/s2 context tokens, the five calendar-stamp columns,
+/// the exposure-bias sampled-s1, and the s1/s2 next-token targets).
+#[derive(Clone)]
+pub struct TokenBatch {
+    pub s1: Vec<u32>,
+    pub s2: Vec<u32>,
+    pub cal: [Vec<u32>; 5],
+    pub sampled_s1: Vec<u32>,
+    pub s1_targets: Vec<u32>,
+    pub s2_targets: Vec<u32>,
+}
+
+impl KronosTrain {
+    /// Upload a [`TokenBatch`].
+    pub fn set(&self, b: &TokenBatch) {
+        let calr: [&[u32]; 5] = [&b.cal[0], &b.cal[1], &b.cal[2], &b.cal[3], &b.cal[4]];
+        self.set_batch(&b.s1, &b.s2, &calr, &b.sampled_s1, &b.s1_targets, &b.s2_targets);
+    }
+    /// Mean forward loss over a set of batches (no gradient) — the held-out metric
+    /// the promotion gate compares.
+    pub fn mean_loss(&self, batches: &[TokenBatch]) -> f32 {
+        if batches.is_empty() {
+            return f32::NAN;
+        }
+        let mut sum = 0.0;
+        for b in batches {
+            self.set(b);
+            sum += self.forward();
+        }
+        sum / batches.len() as f32
+    }
+    /// Every decoder weight in REFERENCE names, merging `fusion_l`/`fusion_r` back
+    /// into `embedding.fusion_proj.weight` — ready for `checkpoint::save` / reload.
+    pub fn to_reference_weights(&self) -> HashMap<String, Vec<f32>> {
+        let d = self.cfg.d_model;
+        let mut w = HashMap::new();
+        for (name, _) in param_list_c(&self.cfg) {
+            if name == "embedding.fusion_l" || name == "embedding.fusion_r" {
+                continue;
+            }
+            w.insert(name.clone(), self.ps.read_weight(&self.gpu, &name));
+        }
+        let fl = self.ps.read_weight(&self.gpu, "embedding.fusion_l");
+        let fr = self.ps.read_weight(&self.gpu, "embedding.fusion_r");
+        let mut fp = vec![0.0f32; d * 2 * d];
+        for o in 0..d {
+            fp[o * 2 * d..o * 2 * d + d].copy_from_slice(&fl[o * d..o * d + d]);
+            fp[o * 2 * d + d..o * 2 * d + 2 * d].copy_from_slice(&fr[o * d..o * d + d]);
+        }
+        w.insert("embedding.fusion_proj.weight".into(), fp);
+        w
+    }
+    /// Save as a brain decoder `.weights` checkpoint (loadable by the inference
+    /// `KronosDecoder`/`KronosForecaster`).
+    pub fn save(&self, path: &str) {
+        let w = self.to_reference_weights();
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = self
+            .cfg
+            .param_list()
+            .into_iter()
+            .map(|(n, shape)| (n.clone(), shape.iter().map(|&x| x as u64).collect(), w[&n].clone()))
+            .collect();
+        checkpoint::save(path, self.cfg.to_json(), &tensors);
+    }
+}
+
+/// Fine-tuning hyperparameters (small LR + the anti-overfit defaults from the
+/// reference recipe). `lora = Some(..)` freezes the base and trains adapters only.
+#[derive(Clone)]
+pub struct FinetuneOpts {
+    pub epochs: u32,
+    pub lr: f32,
+    pub wd: f32,
+    pub clip: f32,
+    pub lora: Option<LoraCfg>,
+}
+
+impl Default for FinetuneOpts {
+    fn default() -> Self {
+        FinetuneOpts { epochs: 8, lr: 4e-5, wd: 0.1, clip: 3.0, lora: None }
+    }
+}
+
+/// The gate decision: whether the fine-tuned checkpoint beat the base on held-out
+/// data (and by how much).
+#[derive(Clone, Debug)]
+pub struct FinetuneReport {
+    pub promoted: bool,
+    pub base_val: f32,
+    pub ft_val: f32,
+    pub steps: u32,
+}
+
+/// Fine-tune the Kronos decoder on `train`, then **promote only if the held-out
+/// `val` loss beats the untouched base model** — the walk-forward gate that makes
+/// a weekly update earn its place instead of chasing noise. Returns the report and,
+/// when promoted, the fine-tuned decoder weights (reference-named, ready to save).
+/// The tokenizer is not touched here (frozen upstream), matching the recipe.
+pub fn finetune(
+    cfg: KronosConfig,
+    t: u32,
+    base_init: &HashMap<String, Vec<f32>>,
+    train: &[TokenBatch],
+    val: &[TokenBatch],
+    opts: &FinetuneOpts,
+) -> (FinetuneReport, Option<HashMap<String, Vec<f32>>>) {
+    let base_val = KronosTrain::new(cfg.clone(), t, base_init).mean_loss(val);
+    let ft = KronosTrain::with_lora(cfg, t, base_init, opts.lora.clone());
+    let mut step = 0u32;
+    for _ in 0..opts.epochs {
+        for b in train {
+            step += 1;
+            ft.set(b);
+            ft.zero_grads();
+            let _ = ft.forward();
+            ft.backward();
+            ft.adamw_step(step, opts.lr, opts.wd, Some(opts.clip));
+        }
+    }
+    let ft_val = ft.mean_loss(val);
+    let promoted = ft_val.is_finite() && base_val.is_finite() && ft_val < base_val;
+    let weights = promoted.then(|| ft.to_reference_weights());
+    (FinetuneReport { promoted, base_val, ft_val, steps: step }, weights)
+}
