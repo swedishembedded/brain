@@ -24,6 +24,7 @@ pub mod import;
 pub mod kvcache;
 pub mod nn;
 pub mod preprocess;
+pub mod finetune;
 pub mod tokenizer;
 pub mod train;
 

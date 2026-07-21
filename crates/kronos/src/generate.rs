@@ -68,6 +68,17 @@ impl KronosModel {
     pub fn max_context(&self) -> usize {
         self.decoder.config().max_context
     }
+    /// The decoder config (for building a trainable twin).
+    pub fn decoder_config(&self) -> &KronosConfig {
+        self.decoder.config()
+    }
+    /// Frozen-tokenizer path: per-feature-normalize `bars` `[t, feat]` (past-only,
+    /// clip ±5, the inference contract) then BSQ-encode → `(s1, s2)` token streams
+    /// `[t]`. Used to build fine-tuning batches without touching the tokenizer.
+    pub fn tokenize(&self, bars: &[f32], t: usize) -> (Vec<u32>, Vec<u32>) {
+        let (_norm, x) = preprocess::normalize(bars, t, self.feat(), 5.0);
+        self.tokenizer.encode(&x, t)
+    }
 
     /// Forecast `pred_len` future bars from `bars` `[T, feat]` (row-major
     /// OHLCV(+amount)). `ctx_stamp` is `[T, 5]` and `fut_stamp` is
