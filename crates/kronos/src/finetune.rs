@@ -79,6 +79,17 @@ pub fn finetune_universe(
     finetune(cfg, t, base_init, &train, &val, opts)
 }
 
+/// Write a reference-named decoder weight map as a brain `.weights` checkpoint
+/// (loadable by the inference `KronosDecoder`/`KronosForecaster`).
+pub fn save_decoder_weights(cfg: &crate::config::KronosConfig, weights: &HashMap<String, Vec<f32>>, path: &str) {
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
+        .param_list()
+        .into_iter()
+        .map(|(n, shape)| (n.clone(), shape.iter().map(|&x| x as u64).collect(), weights[&n].clone()))
+        .collect();
+    checkpoint::save(path, cfg.to_json(), &tensors);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

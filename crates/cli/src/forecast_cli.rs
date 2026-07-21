@@ -22,8 +22,9 @@ pub fn run_forecast(argv: &[String]) {
         Some("compare") => compare(&argv[1..]),
         Some("serve") => serve(&argv[1..]),
         Some("import") => import(&argv[1..]),
+        Some("finetune") => finetune(&argv[1..]),
         other => {
-            eprintln!("usage: brain forecast <compare|serve|import> ...  (got {other:?})");
+            eprintln!("usage: brain forecast <compare|serve|import|finetune> ...  (got {other:?})");
         }
     }
 }
@@ -182,5 +183,94 @@ fn serve(args: &[String]) {
             eprintln!("serve_stdio failed: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// Load a directory of `<TICKER>.csv` (Date,open,high,low,close,volume) into
+/// leak-safe-windowing `Series` (drops the index ETF `QQQ` if present).
+fn load_series(dir: &str) -> Vec<forecast::train_data::Series> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else { return out };
+    for ent in rd.flatten() {
+        let name = ent.file_name().to_string_lossy().to_string();
+        let Some(ticker) = name.strip_suffix(".csv") else { continue };
+        if ticker.eq_ignore_ascii_case("QQQ") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(ent.path()) else { continue };
+        let mut dates = Vec::new();
+        let mut ohlcv = Vec::new();
+        for (i, line) in text.lines().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            let c: Vec<&str> = line.split(',').collect();
+            if c.len() < 6 {
+                continue;
+            }
+            let d: Vec<i64> = c[0][..10.min(c[0].len())].split('-').filter_map(|x| x.parse().ok()).collect();
+            let v: Option<Vec<f32>> = c[1..6].iter().map(|x| x.parse().ok()).collect();
+            if d.len() == 3 {
+                if let Some(v) = v {
+                    dates.push((d[0] as i32, d[1] as u32, d[2] as u32));
+                    ohlcv.push([v[0], v[1], v[2], v[3], v[4]]);
+                }
+            }
+        }
+        if !ohlcv.is_empty() {
+            out.push(forecast::train_data::Series { ticker: ticker.into(), dates, ohlcv });
+        }
+    }
+    out
+}
+
+/// `brain forecast finetune` — weekly gated fine-tune of the Kronos decoder over a
+/// universe of OHLCV CSVs. Fine-tunes on the past, and writes a promoted checkpoint
+/// ONLY if it beats the base on a held-out (embargoed) split.
+fn finetune(args: &[String]) {
+    let mut a = Args::new(args);
+    let tok = a.str_or("--kronos-tokenizer", "");
+    let dec = a.str_or("--kronos-decoder", "");
+    let data = a.str_or("--data", "");
+    let out = a.take_str("--out");
+    let context = a.usize_or("--context", 180);
+    let horizon = a.usize_or("--horizon", 5);
+    let epochs = a.usize_or("--epochs", 8) as u32;
+    let lr = a.f32_or("--lr", 4e-5);
+    let lora_rank = a.usize_or("--lora", 0);
+    let embargo = a.usize_or("--embargo", horizon);
+    a.finish();
+    if tok.is_empty() || dec.is_empty() || data.is_empty() {
+        eprintln!("usage: brain forecast finetune --kronos-tokenizer <dir> --kronos-decoder <dir> --data <csv-dir> \\");
+        eprintln!("         [--out <ckpt>] [--context 180] [--horizon 5] [--epochs 8] [--lr 4e-5] [--lora RANK] [--embargo N]");
+        return;
+    }
+    let (cfg, base) = match kronos::import::load_decoder(&dec) {
+        Ok(x) => x,
+        Err(e) => return eprintln!("load decoder: {e}"),
+    };
+    let model = match kronos::import::load_model(&tok, &dec) {
+        Ok(m) => m,
+        Err(e) => return eprintln!("load model: {e}"),
+    };
+    let series = load_series(&data);
+    if series.len() < 2 {
+        return eprintln!("need >= 2 series with data in {data}");
+    }
+    eprintln!("finetune: {} names · context {context} · horizon {horizon} · epochs {epochs} · lr {lr}{}",
+        series.len(), if lora_rank > 0 { format!(" · LoRA r{lora_rank}") } else { " · full".into() });
+    let split = forecast::train_data::SplitConfig { train_frac: 0.7, val_frac: 0.15, embargo };
+    let lora = (lora_rank > 0).then(|| kronos::train::LoraCfg::attn(lora_rank, (lora_rank * 2) as f32));
+    let opts = kronos::train::FinetuneOpts { epochs, lr, wd: 0.1, clip: 3.0, lora };
+    let (rep, weights) = kronos::finetune::finetune_universe(&model, &base, &series, context, horizon, split, &opts);
+    println!(
+        "gate: base_val {:.4} → ft_val {:.4}  ({} steps)  ⇒  {}",
+        rep.base_val, rep.ft_val, rep.steps,
+        if rep.promoted { "PROMOTE (fine-tune beats base out-of-sample)" } else { "KEEP BASE (no held-out improvement)" }
+    );
+    if let Some(w) = weights {
+        let path = out.unwrap_or_else(|| "kronos-decoder-ft.weights".into());
+        kronos::finetune::save_decoder_weights(&cfg, &w, &path);
+        println!("promoted checkpoint → {path}");
     }
 }
