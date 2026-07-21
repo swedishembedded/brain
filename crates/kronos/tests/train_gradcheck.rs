@@ -11,7 +11,7 @@
 //! Gated off by `MOE_SKIP_GPU_TESTS`.
 
 use kronos::config::KronosConfig;
-use kronos::train::{param_list_c, KronosTrain, CAL};
+use kronos::train::{param_list_c, KronosTrain, LoraCfg, CAL};
 use std::collections::HashMap;
 
 struct Rng(u64);
@@ -162,4 +162,71 @@ fn milestone_c_learns_a_fixed_batch_from_scratch() {
     eprintln!("learning: initial {l0:.4} -> final {last:.4}");
     assert!(last < 0.4 * l0, "loss did not collapse: {l0:.4} -> {last:.4}");
     assert!(last < 0.5, "final loss {last:.4} too high to call it memorized");
+}
+
+#[test]
+fn milestone_d_lora_gradcheck_and_learns() {
+    if skip() {
+        return;
+    }
+    // frozen full-precision base + trainable rank-4 adapters on the block attention.
+    let cfg = KronosConfig::tiny();
+    let t = 8u32;
+    let m = KronosTrain::with_lora(cfg.clone(), t, &init_weights(&cfg, 7), Some(LoraCfg::attn(4, 8.0)));
+    let mut r = Rng(7 ^ 0xDEAD_BEEF);
+    let s1: Vec<u32> = (0..t).map(|_| r.below(cfg.s1_vocab() as u32)).collect();
+    let s2: Vec<u32> = (0..t).map(|_| r.below(cfg.s2_vocab() as u32)).collect();
+    let cal: [Vec<u32>; 5] = std::array::from_fn(|c| (0..t).map(|_| r.below(CAL[c].1 as u32)).collect());
+    let samp: Vec<u32> = (0..t).map(|_| r.below(cfg.s1_vocab() as u32)).collect();
+    let tg1: Vec<u32> = (0..t).map(|_| r.below(cfg.s1_vocab() as u32)).collect();
+    let tg2: Vec<u32> = (0..t).map(|_| r.below(cfg.s2_vocab() as u32)).collect();
+    let calr: [&[u32]; 5] = [&cal[0], &cal[1], &cal[2], &cal[3], &cal[4]];
+    m.set_batch(&s1, &s2, &calr, &samp, &tg1, &tg2);
+
+    // gradcheck the adapters only (base is frozen → param_names are the lora tensors)
+    m.zero_grads();
+    let _ = m.forward();
+    m.backward();
+    m.poll_wait();
+    let (eps, atol, rtol) = (5e-3f32, 4e-3f32, 8e-2f32);
+    let mut rng = Rng(321);
+    let names = m.param_names();
+    assert!(names.iter().all(|n| n.ends_with(".lora_a") || n.ends_with(".lora_b")), "only adapters should train under LoRA");
+    for name in &names {
+        let w0 = m.read_weight(name);
+        let g = m.read_grad(name);
+        let mut best: Option<(f32, f32)> = None;
+        for _ in 0..4 {
+            let v: Vec<f32> = (0..w0.len()).map(|_| if rng.u64() & 1 == 0 { 1.0 } else { -1.0 }).collect();
+            let a: f32 = g.iter().zip(&v).map(|(x, y)| x * y).sum();
+            let wp: Vec<f32> = w0.iter().zip(&v).map(|(x, y)| x + eps * y).collect();
+            m.write_weight(name, &wp);
+            let lp = m.forward();
+            let wm: Vec<f32> = w0.iter().zip(&v).map(|(x, y)| x - eps * y).collect();
+            m.write_weight(name, &wm);
+            let lm = m.forward();
+            m.write_weight(name, &w0);
+            let num = (lp - lm) / (2.0 * eps);
+            if best.map(|(_, nn)| num.abs() > nn.abs()).unwrap_or(true) {
+                best = Some((a, num));
+            }
+        }
+        let (a, num) = best.unwrap();
+        let err = (a - num).abs();
+        let tol = atol + rtol * a.abs().max(num.abs());
+        assert!(err <= tol, "LoRA gradcheck FAIL {name}: {a:.5} vs {num:.5} (err {err:.5} > tol {tol:.5})");
+    }
+    eprintln!("LoRA gradcheck OK: {} adapter tensors", names.len());
+
+    // adapters (B=0 init → starts == base) must be able to reduce the loss.
+    let l0 = m.forward();
+    for step in 1..=300u32 {
+        m.zero_grads();
+        let _ = m.forward();
+        m.backward();
+        m.adamw_step(step, 5e-3, 0.0, Some(3.0));
+    }
+    let last = m.forward();
+    eprintln!("LoRA learning: {l0:.4} -> {last:.4} ({} adapters)", names.len());
+    assert!(last < l0, "LoRA adapters did not reduce the loss: {l0:.4} -> {last:.4}");
 }

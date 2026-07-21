@@ -68,6 +68,7 @@ const DK_BIDIR: usize = 36;
 const DV_BIDIR: usize = 37;
 const CONCAT2: usize = 38;
 const CONCAT_SPLIT: usize = 39;
+const AXPY: usize = 40;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -110,7 +111,41 @@ const PIPELINES: &[(&str, &str)] = &[
     ("attn_bwd_dv_bidir", kernels::ATTN_BWD_DV_BIDIR),
     ("concat2", kernels::CONCAT2),
     ("concat_split", kernels::CONCAT_SPLIT),
+    ("axpy", kernels::AXPY),
 ];
+
+/// LoRA fine-tuning config: rank-`r` adapters (scale `alpha/r`) on the linear
+/// projections whose weight name ends with one of `targets` (e.g. `q_proj.weight`).
+/// With LoRA on, the base weights are frozen and only `*.lora_a`/`*.lora_b` train —
+/// the anti-overfit default for weekly fine-tuning.
+#[derive(Clone, Debug)]
+pub struct LoraCfg {
+    pub rank: usize,
+    pub alpha: f32,
+    pub targets: Vec<String>,
+}
+
+impl LoraCfg {
+    /// Default surface: the self-attention projections in every transformer block.
+    pub fn attn(rank: usize, alpha: f32) -> LoraCfg {
+        LoraCfg {
+            rank,
+            alpha,
+            targets: [
+                "self_attn.q_proj.weight",
+                "self_attn.k_proj.weight",
+                "self_attn.v_proj.weight",
+                "self_attn.out_proj.weight",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        }
+    }
+    fn hits(&self, wname: &str) -> bool {
+        self.targets.iter().any(|t| wname.ends_with(t))
+    }
+}
 
 const ROPE_THETA: f32 = 10000.0;
 
@@ -143,6 +178,10 @@ pub struct KronosTrain {
     t: u32,
     count: Cell<f32>,
     sqrt_d: f32,
+    lora: Option<LoraCfg>,
+    lora_a_buf: DeviceBuffer,
+    lora_da_buf: DeviceBuffer,
+    lora_out_buf: DeviceBuffer,
 
     // inputs (uploaded per batch)
     s1_ids: DeviceBuffer,
@@ -294,18 +333,47 @@ fn split_fusion(init: &HashMap<String, Vec<f32>>, d: usize) -> (Vec<f32>, Vec<f3
 }
 
 impl KronosTrain {
-    /// `init` uses reference param names (incl. `embedding.fusion_proj.weight`
-    /// `[d,2d]`, split internally). All params are trainable (full backprop).
+    /// Full-backprop constructor: every param trainable. `init` uses reference
+    /// names (incl. `embedding.fusion_proj.weight` `[d,2d]`, split internally).
     pub fn new(cfg: KronosConfig, t: u32, init: &HashMap<String, Vec<f32>>) -> KronosTrain {
+        Self::with_lora(cfg, t, init, None)
+    }
+
+    /// LoRA (or full) constructor. With `lora = Some(..)` every base weight is
+    /// frozen and only the adapters train (the anti-overfit weekly-fine-tune path);
+    /// with `None` it is full-backprop. Adapter weights are seeded here (A small
+    /// random, B zero → the initial LoRA delta is zero, so the model starts == base).
+    pub fn with_lora(cfg: KronosConfig, t: u32, init: &HashMap<String, Vec<f32>>, lora: Option<LoraCfg>) -> KronosTrain {
         let gpu = Gpu::new(PIPELINES);
+        let d = cfg.d_model;
         // build the internal init (fusion split) then the ParamStore.
         let mut init2 = init.clone();
-        let (fl, fr) = split_fusion(init, cfg.d_model);
+        let (fl, fr) = split_fusion(init, d);
         init2.remove("embedding.fusion_proj.weight");
         init2.insert("embedding.fusion_l".into(), fl);
         init2.insert("embedding.fusion_r".into(), fr);
-        let ps = ParamStore::new(&gpu, param_list_c(&cfg), &init2);
+        let ps = if let Some(lc) = &lora {
+            // seed adapters + build role list (base Frozen, adapters Trainable).
+            let mut seed = 0x51A7_u64;
+            let mut roles: Vec<(String, usize, paramstore::Role)> = Vec::new();
+            for (name, numel) in param_list_c(&cfg) {
+                roles.push((name.clone(), numel, paramstore::Role::Frozen));
+                if lc.hits(&name) {
+                    let (r, k, nout) = (lc.rank, d, numel / d); // targeted projections are d×k
+                    init2.entry(format!("{name}.lora_a")).or_insert_with(|| {
+                        (0..r * k).map(|_| { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1); ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.02 }).collect()
+                    });
+                    init2.entry(format!("{name}.lora_b")).or_insert_with(|| vec![0.0f32; nout * r]);
+                    roles.push((format!("{name}.lora_a"), r * k, paramstore::Role::Trainable));
+                    roles.push((format!("{name}.lora_b"), nout * r, paramstore::Role::Trainable));
+                }
+            }
+            ParamStore::new_with_roles(&gpu, roles, &init2)
+        } else {
+            ParamStore::new(&gpu, param_list_c(&cfg), &init2)
+        };
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
+        let lora_r = lora.as_ref().map(|l| l.rank as u64).unwrap_or(1).max(1);
 
         let d = cfg.d_model as u64;
         let ff = cfg.ff_dim as u64;
@@ -337,6 +405,10 @@ impl KronosTrain {
             t,
             count: Cell::new(1.0),
             sqrt_d: (d as f32).sqrt(),
+            lora,
+            lora_a_buf: st(n * lora_r),
+            lora_da_buf: st(n * lora_r),
+            lora_out_buf: st(n * d),
             ps,
             opt,
             s1_ids: idbuf("s1_ids"),
@@ -416,13 +488,62 @@ impl KronosTrain {
         s.push(self.gpu.step(BIAS_ADD, &[out, self.w(bname)], &[m, n], m * n));
     }
     fn rms_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, dy: &DeviceBuffer, dx: &DeviceBuffer, dim: u32, rows: u32) {
-        s.extend(block::rmsnorm_bwd(&self.gpu, &Self::ids(), x, self.w(wname), dy, dx, &self.inv, Some(self.g(wname)), dim, rows));
+        // gain grad only when the norm weight trains (frozen under LoRA → dx only).
+        let gw = self.trainable(wname).then(|| self.g(wname));
+        s.extend(block::rmsnorm_bwd(&self.gpu, &Self::ids(), x, self.w(wname), dy, dx, &self.inv, gw, dim, rows));
     }
-    /// Backward for a linear `y = x·Wᵀ + b`: dW, db, and dX (acc into dx).
+    /// A weight gradient that runs only for a trainable weight (frozen → skipped).
+    fn dw(&self, s: &mut Vec<Step>, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, m: u32, k: u32, nout: u32) {
+        if self.trainable(wname) {
+            s.push(self.gpu.step(MATMUL_DW, &[d_out, x, self.g(wname)], &[m, k, nout], nout * k));
+        }
+    }
+    fn trainable(&self, name: &str) -> bool {
+        self.ps.grad.contains_key(name)
+    }
+    fn lora_for(&self, wname: &str) -> Option<(u32, f32)> {
+        self.lora.as_ref().filter(|lc| lc.hits(wname)).map(|lc| (lc.rank as u32, lc.alpha / lc.rank as f32))
+    }
+    /// Forward LoRA delta `y += (alpha/r)·(x·Aᵀ)·Bᵀ` for a targeted projection
+    /// (no-op otherwise). Must be wired at the SAME projections `proj_bwd`'s LoRA
+    /// branch fires on, so forward and backward stay consistent.
+    fn lora_fwd(&self, s: &mut Vec<Step>, wname: &str, x: &DeviceBuffer, y: &DeviceBuffer, m: u32, k: u32, nout: u32) {
+        let Some((r, scale)) = self.lora_for(wname) else { return };
+        let a = format!("{wname}.lora_a");
+        let b = format!("{wname}.lora_b");
+        s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a_buf], &[m, k, r], m * r));
+        s.push(self.gpu.step(MATMUL, &[&self.lora_a_buf, self.w(&b), &self.lora_out_buf], &[m, r, nout], m * nout));
+        s.push(self.gpu.step(AXPY, &[y, &self.lora_out_buf], &[m * nout, f(scale)], m * nout));
+    }
+    /// Backward for a linear `y = x·Wᵀ + b`. Full: dW, db, dX. LoRA: base weight
+    /// frozen (dX only, no dW), adapter grads gA/gB (Qwen pattern). Frozen params
+    /// (LoRA base, frozen bias) get no weight/bias grad — only dX flows.
+    #[allow(clippy::too_many_arguments)]
     fn proj_bwd(&self, s: &mut Vec<Step>, d_out: &DeviceBuffer, x: &DeviceBuffer, wname: &str, bname: &str, dx: &DeviceBuffer, m: u32, k: u32, nout: u32, acc: u32) {
-        s.push(self.gpu.step(MATMUL_DW, &[d_out, x, self.g(wname)], &[m, k, nout], nout * k));
-        s.push(self.gpu.step(BIAS_GRAD, &[d_out, self.g(bname)], &[m, nout], nout));
-        s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+        if self.trainable(bname) {
+            s.push(self.gpu.step(BIAS_GRAD, &[d_out, self.g(bname)], &[m, nout], nout));
+        }
+        match self.lora_for(wname) {
+            Some((r, scale)) => {
+                // frozen base: dx += d_out·W (no dW)
+                s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+                let a = format!("{wname}.lora_a");
+                let b = format!("{wname}.lora_b");
+                s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a_buf], &[m, k, r], m * r));
+                s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_a_buf], &[m * r, f(scale)], m * r));
+                s.push(self.gpu.step(MATMUL_DW, &[d_out, &self.lora_a_buf, self.g(&b)], &[m, r, nout], nout * r));
+                s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(&b), &self.lora_da_buf], &[m, r, nout, 0], m * r));
+                s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_da_buf], &[m * r, f(scale)], m * r));
+                s.push(self.gpu.step(MATMUL_DW, &[&self.lora_da_buf, x, self.g(&a)], &[m, k, r], r * k));
+                s.push(self.gpu.step(MATMUL_DX, &[&self.lora_da_buf, self.w(&a), dx], &[m, k, r, 1], m * k));
+            }
+            None => {
+                if self.trainable(wname) {
+                    s.push(self.gpu.step(MATMUL_DW, &[d_out, x, self.g(wname)], &[m, k, nout], nout * k));
+                }
+                s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+            }
+        }
     }
 
     fn forward_steps(&self) -> Vec<Step> {
@@ -462,15 +583,19 @@ impl KronosTrain {
             s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[l], self.w(&p("norm1.weight")), &lb.xn1, d, n));
             self.matmul(&mut s, &lb.xn1, &p("self_attn.q_proj.weight"), &lb.q, n, d, d);
             self.bias(&mut s, &lb.q, &p("self_attn.q_proj.bias"), n, d);
+            self.lora_fwd(&mut s, &p("self_attn.q_proj.weight"), &lb.xn1, &lb.q, n, d, d);
             self.matmul(&mut s, &lb.xn1, &p("self_attn.k_proj.weight"), &lb.k, n, d, d);
             self.bias(&mut s, &lb.k, &p("self_attn.k_proj.bias"), n, d);
+            self.lora_fwd(&mut s, &p("self_attn.k_proj.weight"), &lb.xn1, &lb.k, n, d, d);
             self.matmul(&mut s, &lb.xn1, &p("self_attn.v_proj.weight"), &lb.v, n, d, d);
             self.bias(&mut s, &lb.v, &p("self_attn.v_proj.bias"), n, d);
+            self.lora_fwd(&mut s, &p("self_attn.v_proj.weight"), &lb.xn1, &lb.v, n, d, d);
             s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, heads, hd, d, n, ROPE_THETA));
             s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, heads, hd, d, n, ROPE_THETA));
             s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &self.scores, &lb.probs, &lb.ctx));
             self.matmul(&mut s, &lb.ctx, &p("self_attn.out_proj.weight"), &self.proj, n, d, d);
             self.bias(&mut s, &self.proj, &p("self_attn.out_proj.bias"), n, d);
+            self.lora_fwd(&mut s, &p("self_attn.out_proj.weight"), &lb.ctx, &self.proj, n, d, d);
             s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
             s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.xmid, self.w(&p("norm2.weight")), &lb.xn2, d, n));
             self.matmul(&mut s, &lb.xn2, &p("ffn.w1.weight"), &lb.gate, n, d, ff);
@@ -564,7 +689,9 @@ impl KronosTrain {
         self.proj_bwd(&mut s, &self.d_dk, &self.xn_final, &dp("k_proj.weight"), &dp("k_proj.bias"), &self.d_xn, n, d, d, 0);
         self.proj_bwd(&mut s, &self.d_dv, &self.xn_final, &dp("v_proj.weight"), &dp("v_proj.bias"), &self.d_xn, n, d, d, 1);
         // sibling embedding grad scatters into emb_s1 at the SAMPLED rows (RAW, no √d).
-        s.push(self.gpu.step(EMB_BWD, &[&self.sampled_s1_ids, &self.d_sib, self.g("embedding.emb_s1.weight")], &[n, d, s1v], s1v * d));
+        if self.trainable("embedding.emb_s1.weight") {
+            s.push(self.gpu.step(EMB_BWD, &[&self.sampled_s1_ids, &self.d_sib, self.g("embedding.emb_s1.weight")], &[n, d, s1v], s1v * d));
+        }
 
         // ---- s1 head backward, accumulating into d_xn ----
         s.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * s1v));
@@ -576,13 +703,13 @@ impl KronosTrain {
         for l in (0..c.n_layers).rev() {
             let lb = &self.layers[l];
             let p = |nm: &str| format!("transformer.{l}.{nm}");
-            // FFN backward (input grad = dres[l+1])
-            s.push(self.gpu.step(MATMUL_DW, &[&self.dres[l + 1], &lb.h, self.g(&p("ffn.w2.weight"))], &[n, ff, d], d * ff));
+            // FFN backward (input grad = dres[l+1]); dW guarded for frozen (LoRA) params
+            self.dw(&mut s, &self.dres[l + 1], &lb.h, &p("ffn.w2.weight"), n, ff, d);
             s.push(self.gpu.step(MATMUL_DX, &[&self.dres[l + 1], self.w(&p("ffn.w2.weight")), &self.d_h], &[n, ff, d, 0], n * ff));
             s.extend(block::swiglu_bwd(&self.gpu, &ids, &lb.gate, &lb.up, &self.d_h, &self.d_gate, &self.d_up, n * ff));
-            s.push(self.gpu.step(MATMUL_DW, &[&self.d_up, &lb.xn2, self.g(&p("ffn.w3.weight"))], &[n, d, ff], ff * d));
+            self.dw(&mut s, &self.d_up, &lb.xn2, &p("ffn.w3.weight"), n, d, ff);
             s.push(self.gpu.step(MATMUL_DX, &[&self.d_up, self.w(&p("ffn.w3.weight")), &self.d_xn], &[n, d, ff, 0], n * d));
-            s.push(self.gpu.step(MATMUL_DW, &[&self.d_gate, &lb.xn2, self.g(&p("ffn.w1.weight"))], &[n, d, ff], ff * d));
+            self.dw(&mut s, &self.d_gate, &lb.xn2, &p("ffn.w1.weight"), n, d, ff);
             s.push(self.gpu.step(MATMUL_DX, &[&self.d_gate, self.w(&p("ffn.w1.weight")), &self.d_xn], &[n, d, ff, 1], n * d));
             self.rms_bwd(&mut s, &lb.xmid, &p("norm2.weight"), &self.d_xn, &self.d_tmp, d, n);
             s.push(self.gpu.step(ADD2, &[&self.dres[l + 1], &self.d_tmp, &self.dxmid], &[n * d], n * d));
@@ -599,22 +726,26 @@ impl KronosTrain {
         }
 
         // ---- embedding backward (input grad = dres[0]) ----
-        // temporal tables: each receives dres[0] (they enter by addition).
-        for (ci, (name, _)) in CAL.iter().enumerate() {
-            let size = CAL[ci].1 as u32;
-            s.push(self.gpu.step(EMB_BWD, &[&self.cal_ids[ci], &self.dres[0], self.g(&format!("time_emb.{name}_embed.weight"))], &[n, d, size], size * d));
+        // Input layer: weight grads only, no downstream dX. Under LoRA every
+        // embedding param is frozen (shared role) → skip the whole section.
+        if self.trainable("embedding.emb_s1.weight") {
+            // temporal tables: each receives dres[0] (they enter by addition).
+            for (ci, (name, _)) in CAL.iter().enumerate() {
+                let size = CAL[ci].1 as u32;
+                s.push(self.gpu.step(EMB_BWD, &[&self.cal_ids[ci], &self.dres[0], self.g(&format!("time_emb.{name}_embed.weight"))], &[n, d, size], size * d));
+            }
+            // fusion: xf = e1·fl^T + e2·fr^T + bias
+            s.push(self.gpu.step(BIAS_GRAD, &[&self.dres[0], self.g("embedding.fusion_proj.bias")], &[n, d], d));
+            s.push(self.gpu.step(MATMUL_DW, &[&self.dres[0], &self.e1, self.g("embedding.fusion_l")], &[n, d, d], d * d));
+            s.push(self.gpu.step(MATMUL_DX, &[&self.dres[0], self.w("embedding.fusion_l"), &self.d_e1], &[n, d, d, 0], n * d));
+            s.push(self.gpu.step(MATMUL_DW, &[&self.dres[0], &self.e2, self.g("embedding.fusion_r")], &[n, d, d], d * d));
+            s.push(self.gpu.step(MATMUL_DX, &[&self.dres[0], self.w("embedding.fusion_r"), &self.d_e2], &[n, d, d, 0], n * d));
+            // e = √d · gather(emb) → scale the grad, then scatter into the table.
+            s.push(self.gpu.step(GRAD_SCALE, &[&self.d_e1], &[n * d, f(self.sqrt_d)], n * d));
+            s.push(self.gpu.step(GRAD_SCALE, &[&self.d_e2], &[n * d, f(self.sqrt_d)], n * d));
+            s.push(self.gpu.step(EMB_BWD, &[&self.s1_ids, &self.d_e1, self.g("embedding.emb_s1.weight")], &[n, d, s1v], s1v * d));
+            s.push(self.gpu.step(EMB_BWD, &[&self.s2_ids, &self.d_e2, self.g("embedding.emb_s2.weight")], &[n, d, s2v], s2v * d));
         }
-        // fusion: xf = e1·fl^T + e2·fr^T + bias
-        s.push(self.gpu.step(BIAS_GRAD, &[&self.dres[0], self.g("embedding.fusion_proj.bias")], &[n, d], d));
-        s.push(self.gpu.step(MATMUL_DW, &[&self.dres[0], &self.e1, self.g("embedding.fusion_l")], &[n, d, d], d * d));
-        s.push(self.gpu.step(MATMUL_DX, &[&self.dres[0], self.w("embedding.fusion_l"), &self.d_e1], &[n, d, d, 0], n * d));
-        s.push(self.gpu.step(MATMUL_DW, &[&self.dres[0], &self.e2, self.g("embedding.fusion_r")], &[n, d, d], d * d));
-        s.push(self.gpu.step(MATMUL_DX, &[&self.dres[0], self.w("embedding.fusion_r"), &self.d_e2], &[n, d, d, 0], n * d));
-        // e = √d · gather(emb) → scale the grad, then scatter into the table.
-        s.push(self.gpu.step(GRAD_SCALE, &[&self.d_e1], &[n * d, f(self.sqrt_d)], n * d));
-        s.push(self.gpu.step(GRAD_SCALE, &[&self.d_e2], &[n * d, f(self.sqrt_d)], n * d));
-        s.push(self.gpu.step(EMB_BWD, &[&self.s1_ids, &self.d_e1, self.g("embedding.emb_s1.weight")], &[n, d, s1v], s1v * d));
-        s.push(self.gpu.step(EMB_BWD, &[&self.s2_ids, &self.d_e2, self.g("embedding.emb_s2.weight")], &[n, d, s2v], s2v * d));
         s
     }
 
