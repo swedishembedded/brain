@@ -14,6 +14,7 @@
 
 mod data_cli;
 mod federated_cli;
+mod forecast_cli;
 mod args;
 mod glm_cli;
 mod gpt_cli;
@@ -473,6 +474,7 @@ fn main() {
             }
         }
         Some("bench") => run_bench(&argv[2..]),
+        Some("forecast") => forecast_cli::run_forecast(&argv[2..]),
         Some("run") | Some("serve") => run_cli::run_serve(&argv[2..]),
         Some("pid") => pid_cli::run_pid(&argv[2..]),
         Some("validate") => {

@@ -14,11 +14,20 @@
 //! ```text
 //! Root
 //! ├── Operational
-//! │   ├── Idle        (waiting for input)
-//! │   ├── Chatting    (streaming a text response, one token per Tick)
-//! │   └── Detecting   (one-shot object detection)
-//! └── Faulted         (error sink)
+//! │   ├── Idle         (waiting for input)
+//! │   ├── Chatting     (streaming a text response, one token per Tick)
+//! │   ├── Detecting    (one-shot object detection)
+//! │   ├── Synthesizing (streaming synthesized audio, one chunk per Tick)
+//! │   ├── Forecasting  (one-shot forecast: forecast_request -> forecast_result)
+//! │   └── Backtesting  (one-shot rolling-origin backtest -> backtest_result)
+//! └── Faulted          (error sink)
 //! ```
+//! The forecasting seam is the fourth model trait ([`forecast::ForecastModel`],
+//! alongside [`InferModel`]/[`DetectModel`]/[`SynthModel`]) and, unlike the
+//! others, is a **named multi-model map** in the [`Registry`] — the client
+//! selects a model per request and negotiates capabilities. Forecast/backtest
+//! are one-shot (entry action computes + emits, like `Detecting`); forecast
+//! errors take the recoverable emit-and-return-to-`Idle` path, never `Faulted`.
 //! Built on [`hfsm`], applying the embedded state-machine skill's patterns:
 //!   * **Reminder** — `Chatting::on_entry` seeds the [`StreamPump`] and posts a
 //!     `Tick`; each `Tick` pumps exactly one token, emits one `brain_text_chunk`,
@@ -31,7 +40,10 @@
 //!     once, guaranteed by the engine's exit-chain on any outbound transition.
 
 use events::{Envelope, Event};
+use forecast::{BacktestSpec, ForecastModel, ForecastSpec, Panel};
 use hfsm::{Disp, Hsm, Machine};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 pub mod pump;
 pub mod sample;
@@ -327,11 +339,18 @@ impl DetectModel for FakeDetectModel {
 // ---- Registry -------------------------------------------------------------
 
 /// Holds the models loaded for a session.
+///
+/// The text/image/audio seams are single-slot (one model per kind); the
+/// forecasting seam is a **named map** because the forecasting API is
+/// multi-model by design — a client selects a model by name per request, and
+/// capability negotiation enumerates them. Models are `Arc` so a future
+/// multi-threaded server can share one instance across workers.
 #[derive(Default)]
 pub struct Registry {
     pub infer: Option<Box<dyn InferModel>>,
     pub detect: Option<Box<dyn DetectModel>>,
     pub synth: Option<Box<dyn SynthModel>>,
+    pub forecast: HashMap<String, Arc<dyn ForecastModel>>,
 }
 
 impl Registry {
@@ -344,7 +363,33 @@ impl Registry {
         infer: Box<dyn InferModel>,
         detect: Box<dyn DetectModel>,
     ) -> Registry {
-        Registry { infer: Some(infer), detect: Some(detect), synth: None }
+        Registry {
+            infer: Some(infer),
+            detect: Some(detect),
+            synth: None,
+            forecast: HashMap::new(),
+        }
+    }
+
+    /// Register a forecasting model under its own [`Capabilities::name`]. A later
+    /// registration under the same name replaces the earlier one.
+    pub fn register_forecast(&mut self, model: Arc<dyn ForecastModel>) -> &mut Self {
+        let name = model.capabilities().name;
+        self.forecast.insert(name, model);
+        self
+    }
+
+    /// Look up a forecasting model by name.
+    pub fn forecast_model(&self, name: &str) -> Option<Arc<dyn ForecastModel>> {
+        self.forecast.get(name).cloned()
+    }
+
+    /// All registered forecasting models' capabilities, sorted by name — the
+    /// payload of a `capabilities_result`.
+    pub fn capabilities(&self) -> Vec<forecast::Capabilities> {
+        let mut v: Vec<_> = self.forecast.values().map(|m| m.capabilities()).collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v
     }
 }
 
@@ -358,6 +403,12 @@ enum St {
     Chatting,
     Detecting,
     Synthesizing,
+    /// One-shot forecast: the entry action computes and emits a `forecast_result`
+    /// (or a structured `error`), then returns to `Idle`. Follows `Detecting`.
+    Forecasting,
+    /// One-shot rolling-origin backtest: the entry action runs the whole backtest
+    /// and emits a `backtest_result`, then returns to `Idle`.
+    Backtesting,
     Faulted,
 }
 
@@ -404,6 +455,10 @@ struct Brain {
     pending_frame: Option<Event>,
     /// Synth request stashed before entering `Synthesizing`.
     pending_synth: Option<SynthRequest>,
+    /// Forecast request `(model, panel, spec)` stashed before `Forecasting`.
+    pending_forecast: Option<(String, Panel, ForecastSpec)>,
+    /// Backtest request `(panel, spec)` stashed before `Backtesting`.
+    pending_backtest: Option<(Panel, BacktestSpec)>,
     /// Set by a handler/entry action to request another `Tick` (Reminder).
     pending_tick: bool,
     /// Set when the current operational substate has finished and wants `Idle`.
@@ -431,7 +486,12 @@ impl Machine for Brain {
         match s {
             St::Root => None,
             St::Operational | St::Faulted => Some(St::Root),
-            St::Idle | St::Chatting | St::Detecting | St::Synthesizing => Some(St::Operational),
+            St::Idle
+            | St::Chatting
+            | St::Detecting
+            | St::Synthesizing
+            | St::Forecasting
+            | St::Backtesting => Some(St::Operational),
         }
     }
 
@@ -441,6 +501,15 @@ impl Machine for Brain {
                 Ev::External(Event::UserText { .. }) => Disp::Tran(St::Chatting),
                 Ev::External(Event::CameraFrame { .. }) => Disp::Tran(St::Detecting),
                 Ev::External(Event::UserSynthRequest { .. }) => Disp::Tran(St::Synthesizing),
+                Ev::External(Event::ForecastRequest { .. }) => Disp::Tran(St::Forecasting),
+                Ev::External(Event::BacktestRequest { .. }) => Disp::Tran(St::Backtesting),
+                // Capability negotiation is instantaneous and stateless: answer in
+                // place without a state change.
+                Ev::External(Event::CapabilitiesRequest) => {
+                    let models = self.registry.capabilities();
+                    self.emit(Event::CapabilitiesResult { models });
+                    Disp::Handled
+                }
                 _ => Disp::Unhandled, // bubble (cancel, etc.)
             },
             St::Chatting => match ev {
@@ -457,6 +526,12 @@ impl Machine for Brain {
             },
             St::Detecting => match ev {
                 // entry action already did the detection + emit; complete to Idle.
+                Ev::GoIdle => Disp::Tran(St::Idle),
+                Ev::Tick => Disp::Handled,
+                _ => Disp::Unhandled,
+            },
+            // one-shot: entry action computed + emitted; complete to Idle.
+            St::Forecasting | St::Backtesting => match ev {
                 Ev::GoIdle => Disp::Tran(St::Idle),
                 Ev::Tick => Disp::Handled,
                 _ => Disp::Unhandled,
@@ -489,6 +564,8 @@ impl Machine for Brain {
             St::Chatting => self.start_chat(),
             St::Detecting => self.run_detection(),
             St::Synthesizing => self.start_synth(),
+            St::Forecasting => self.run_forecast(),
+            St::Backtesting => self.run_backtest(),
             St::Faulted => self.emit(Event::Error { message: "controller faulted".into() }),
             _ => {}
         }
@@ -616,6 +693,64 @@ impl Brain {
             }
         }
     }
+
+    /// `Forecasting::on_entry`: resolve the requested model, validate + forecast
+    /// the stashed panel, and emit one `forecast_result`. On any failure emit a
+    /// structured `error` (code/retryable) and return to `Idle` — a forecast
+    /// error is recoverable and never faults the session (mirrors the
+    /// frame-decode error path in `run_detection`).
+    fn run_forecast(&mut self) {
+        let Some((model_name, panel, spec)) = self.pending_forecast.take() else {
+            self.emit(Event::Error { message: "no pending forecast".into() });
+            self.want_idle = true;
+            return;
+        };
+        match self.registry.forecast_model(&model_name) {
+            None => self.emit(Event::ForecastError {
+                error: forecast::ForecastError::unknown_model(&model_name),
+            }),
+            Some(model) => match model.forecast(&panel, &spec) {
+                Ok(forecast) => self.emit(Event::ForecastResult { forecast }),
+                Err(error) => self.emit(Event::ForecastError { error }),
+            },
+        }
+        self.want_idle = true;
+    }
+
+    /// `Backtesting::on_entry`: resolve every requested model, run a
+    /// rolling-origin backtest over the stashed panel, and emit one
+    /// `backtest_result`. Unknown model names are skipped with a `log` note
+    /// rather than failing the whole request. Buffered (not streamed) in P0.
+    fn run_backtest(&mut self) {
+        let Some((panel, spec)) = self.pending_backtest.take() else {
+            self.emit(Event::Error { message: "no pending backtest".into() });
+            self.want_idle = true;
+            return;
+        };
+        // resolve model names -> resident instances
+        let resolved: Vec<(String, Arc<dyn ForecastModel>)> = spec
+            .models
+            .iter()
+            .filter_map(|name| self.registry.forecast_model(name).map(|m| (name.clone(), m)))
+            .collect();
+        for name in &spec.models {
+            if self.registry.forecast_model(name).is_none() {
+                self.emit(Event::Log { message: format!("backtest: unknown model {name} skipped") });
+            }
+        }
+        if resolved.is_empty() {
+            self.emit(Event::ForecastError {
+                error: forecast::ForecastError::bad_request("no known models in backtest request"),
+            });
+            self.want_idle = true;
+            return;
+        }
+        let model_refs: Vec<(String, &dyn ForecastModel)> =
+            resolved.iter().map(|(n, m)| (n.clone(), m.as_ref())).collect();
+        let report = fcbench::backtest::run(&model_refs, &panel, &spec);
+        self.emit(Event::BacktestResult { report });
+        self.want_idle = true;
+    }
 }
 
 /// Drives the runtime: consumes protocol lines, emits protocol events. Owns the
@@ -642,6 +777,8 @@ impl Controller {
             pending_prompt: None,
             pending_frame: None,
             pending_synth: None,
+            pending_forecast: None,
+            pending_backtest: None,
             pending_tick: false,
             want_idle: false,
             active_req_id: None,
@@ -696,6 +833,13 @@ impl Controller {
                     language: language.clone(),
                 });
             }
+            Event::ForecastRequest { model, panel, spec } => {
+                self.hsm.machine_mut().pending_forecast =
+                    Some((model.clone(), panel.clone(), spec.clone()));
+            }
+            Event::BacktestRequest { panel, spec } => {
+                self.hsm.machine_mut().pending_backtest = Some((panel.clone(), spec.clone()));
+            }
             _ => {}
         }
         self.hsm.post(Ev::External(ev));
@@ -739,6 +883,7 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use forecast::{Representation, Variate};
 
     #[test]
     fn empty_decode_error_is_surfaced() {
@@ -748,5 +893,106 @@ mod tests {
             out.as_slice(),
             [Envelope { req_id: None, event: Event::Error { .. } }]
         ));
+    }
+
+    fn registry_with_naive() -> Registry {
+        let mut reg = Registry::new();
+        reg.register_forecast(Arc::new(fcbench::RandomWalk));
+        reg
+    }
+
+    fn forecast_request(model: &str, req: Option<&str>) -> Envelope {
+        let panel = Panel::single("1d", "AAPL", vec![Variate::target("close", vec![1.0, 2.0, 3.0])]);
+        let spec = ForecastSpec {
+            horizon: 3,
+            representations: vec![Representation::Quantiles, Representation::Point],
+            quantile_levels: vec![0.1, 0.5, 0.9],
+            num_samples: 0,
+            seed: 0,
+        };
+        Envelope::with_id(
+            req.map(|s| s.to_string()),
+            Event::ForecastRequest { model: model.to_string(), panel, spec },
+        )
+    }
+
+    #[test]
+    fn forecast_request_yields_a_result_and_returns_to_idle() {
+        let mut ctrl = Controller::with_config(registry_with_naive(), GenConfig::default());
+        let env = forecast_request("naive", Some("r1"));
+        let out = ctrl.feed_event_with_id(env.req_id, env.event);
+        // exactly one forecast_result, carrying the req_id
+        assert_eq!(out.len(), 1, "{out:?}");
+        match &out[0] {
+            Envelope { req_id, event: Event::ForecastResult { forecast } } => {
+                assert_eq!(req_id.as_deref(), Some("r1"));
+                assert_eq!(forecast.model, "naive");
+                assert_eq!(forecast.targets[0].name, "close");
+                assert!(forecast.targets[0].quantiles.is_some());
+            }
+            other => panic!("expected forecast_result, got {other:?}"),
+        }
+        // a second request still works -> we returned to Idle, not Faulted
+        let env2 = forecast_request("naive", Some("r2"));
+        let out2 = ctrl.feed_event_with_id(env2.req_id, env2.event);
+        assert!(matches!(out2.as_slice(), [Envelope { event: Event::ForecastResult { .. }, .. }]));
+    }
+
+    #[test]
+    fn unknown_model_yields_structured_error_and_stays_operational() {
+        let mut ctrl = Controller::with_config(registry_with_naive(), GenConfig::default());
+        let env = forecast_request("does_not_exist", Some("r1"));
+        let out = ctrl.feed_event_with_id(env.req_id, env.event);
+        match out.as_slice() {
+            [Envelope { event: Event::ForecastError { error }, .. }] => {
+                assert_eq!(error.code, "unknown_model");
+            }
+            other => panic!("expected forecast error, got {other:?}"),
+        }
+        // still operational: a valid request now succeeds
+        let env2 = forecast_request("naive", None);
+        let out2 = ctrl.feed_event(env2.event);
+        assert!(matches!(out2.as_slice(), [Envelope { event: Event::ForecastResult { .. }, .. }]));
+    }
+
+    #[test]
+    fn capabilities_request_enumerates_registered_models() {
+        let mut ctrl = Controller::with_config(registry_with_naive(), GenConfig::default());
+        let out = ctrl.feed_event(Event::CapabilitiesRequest);
+        match out.as_slice() {
+            [Envelope { event: Event::CapabilitiesResult { models }, .. }] => {
+                assert_eq!(models.len(), 1);
+                assert_eq!(models[0].name, "naive");
+            }
+            other => panic!("expected capabilities_result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backtest_request_yields_an_aggregated_report() {
+        let mut reg = Registry::new();
+        reg.register_forecast(Arc::new(fcbench::RandomWalk));
+        reg.register_forecast(Arc::new(fcbench::Drift));
+        let mut ctrl = Controller::with_config(reg, GenConfig::default());
+        // a longer series so the rolling origin has room
+        let series: Vec<f32> = (0..120).map(|i| 100.0 + (i as f32) * 0.1).collect();
+        let panel = Panel::single("1d", "SIM", vec![Variate::target("close", series)]);
+        let spec = BacktestSpec {
+            models: vec!["naive".into(), "drift".into()],
+            horizon: 5,
+            origins: 10,
+            stride: 2,
+            metrics: vec!["mase".into(), "wql".into()],
+            quantile_levels: vec![0.1, 0.5, 0.9],
+            seed: 0,
+        };
+        let out = ctrl.feed_event(Event::BacktestRequest { panel, spec });
+        match out.as_slice() {
+            [Envelope { event: Event::BacktestResult { report }, .. }] => {
+                assert!(report.get("naive", "mase").is_some());
+                assert!(report.get("drift", "mase").is_some());
+            }
+            other => panic!("expected backtest_result, got {other:?}"),
+        }
     }
 }

@@ -52,6 +52,114 @@ unsafe fn silu_avx2(x: &[f32], out: &mut [f32]) {
     }
 }
 
+/// `matmul` (`matmul.wgsl`): `C[M,N] = sum_k A[M,K]·B[N,K]` — i.e. `A @ Bᵀ` with
+/// K contiguous in both operands. This is the transformer hot path (every q/k/v/o
+/// projection, FFN, and head), which otherwise runs as the scalar per-element JIT
+/// loop. Threaded over output rows; each row uses AVX2 FMA with 4-column register
+/// blocking so each A-row load feeds four B-row dot products.
+pub fn matmul_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
+    if m == 0 || n == 0 {
+        return;
+    }
+    let row = |arow: &[f32], crow: &mut [f32]| {
+        #[cfg(target_arch = "x86_64")]
+        if crate::fast_conv::avx2_available() {
+            unsafe { row_abt_avx2(arow, b, crow, k, n) };
+            return;
+        }
+        row_abt_scalar(arow, b, crow, k, n);
+    };
+    // Small problems: rayon fan-out costs more than it saves — run inline (still
+    // AVX2). Threshold ~ a few hundred K MACs, below which the tiny transformer
+    // matmuls (patch/head) were slower threaded than the scalar JIT loop.
+    if m * n * k < 262_144 {
+        for r in 0..m {
+            row(&a[r * k..r * k + k], &mut c[r * n..r * n + n]);
+        }
+        return;
+    }
+    let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
+    c.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cchunk)| {
+        let row0 = ci * rows_per;
+        let nrows = cchunk.len() / n;
+        for r in 0..nrows {
+            row(&a[(row0 + r) * k..(row0 + r) * k + k], &mut cchunk[r * n..r * n + n]);
+        }
+    });
+}
+
+#[allow(dead_code)]
+fn row_abt_scalar(a: &[f32], b: &[f32], c: &mut [f32], k: usize, n: usize) {
+    for (j, cj) in c.iter_mut().enumerate() {
+        let brow = &b[j * k..j * k + k];
+        *cj = a.iter().zip(brow).map(|(x, y)| x * y).sum();
+    }
+    let _ = n;
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn row_abt_avx2(a: &[f32], b: &[f32], c: &mut [f32], k: usize, n: usize) {
+    use std::arch::x86_64::*;
+    #[inline]
+    unsafe fn hsum(v: __m256) -> f32 {
+        let lo = _mm256_castps256_ps128(v);
+        let hi = _mm256_extractf128_ps(v, 1);
+        let s = _mm_add_ps(lo, hi);
+        let s = _mm_hadd_ps(s, s);
+        let s = _mm_hadd_ps(s, s);
+        _mm_cvtss_f32(s)
+    }
+    let ap = a.as_ptr();
+    let bp = b.as_ptr();
+    let mut j = 0usize;
+    while j + 4 <= n {
+        let (p0, p1, p2, p3) =
+            (bp.add(j * k), bp.add((j + 1) * k), bp.add((j + 2) * k), bp.add((j + 3) * k));
+        let (mut a0, mut a1, mut a2, mut a3) =
+            (_mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps(), _mm256_setzero_ps());
+        let mut kk = 0usize;
+        while kk + 8 <= k {
+            let av = _mm256_loadu_ps(ap.add(kk));
+            a0 = _mm256_fmadd_ps(av, _mm256_loadu_ps(p0.add(kk)), a0);
+            a1 = _mm256_fmadd_ps(av, _mm256_loadu_ps(p1.add(kk)), a1);
+            a2 = _mm256_fmadd_ps(av, _mm256_loadu_ps(p2.add(kk)), a2);
+            a3 = _mm256_fmadd_ps(av, _mm256_loadu_ps(p3.add(kk)), a3);
+            kk += 8;
+        }
+        let (mut s0, mut s1, mut s2, mut s3) = (hsum(a0), hsum(a1), hsum(a2), hsum(a3));
+        while kk < k {
+            let av = *ap.add(kk);
+            s0 += av * *p0.add(kk);
+            s1 += av * *p1.add(kk);
+            s2 += av * *p2.add(kk);
+            s3 += av * *p3.add(kk);
+            kk += 1;
+        }
+        c[j] = s0;
+        c[j + 1] = s1;
+        c[j + 2] = s2;
+        c[j + 3] = s3;
+        j += 4;
+    }
+    while j < n {
+        let p0 = bp.add(j * k);
+        let mut acc = _mm256_setzero_ps();
+        let mut kk = 0usize;
+        while kk + 8 <= k {
+            acc = _mm256_fmadd_ps(_mm256_loadu_ps(ap.add(kk)), _mm256_loadu_ps(p0.add(kk)), acc);
+            kk += 8;
+        }
+        let mut s = hsum(acc);
+        while kk < k {
+            s += *ap.add(kk) * *p0.add(kk);
+            kk += 1;
+        }
+        c[j] = s;
+        j += 1;
+    }
+}
+
 /// `out[i] = x[i] >= 0 ? x[i] : slope*x[i]` (`leaky_relu.wgsl`; slope 0 is ReLU,
 /// slope 1 is the aliasing copy some blocks use). Branch-free select
 /// auto-vectorizes; ~40 dispatches per ZipDepth frame ran as scalar JIT before.
@@ -395,6 +503,69 @@ mod tests {
             let r = v / (1.0 + (-v).exp());
             assert!((o[i] - r).abs() < 1e-4, "silu {v} -> {} vs {r}", o[i]);
         }
+    }
+
+    #[test]
+    fn matmul_abt_matches_scalar() {
+        // sweep shapes incl. non-multiples of 8 (K tail) and 4 (N tail).
+        let mut s = 7u32;
+        for &(m, k, n) in &[(1, 16, 32), (5, 63, 17), (33, 128, 40), (8, 7, 3), (2, 512, 1024)] {
+            let a: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
+            let b: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
+            let mut c = vec![0.0f32; m * n];
+            matmul_abt(&a, &b, &mut c, m, k, n);
+            let mut maxerr = 0.0f32;
+            for i in 0..m {
+                for j in 0..n {
+                    let r: f32 = (0..k).map(|kk| a[i * k + kk] * b[j * k + kk]).sum();
+                    maxerr = maxerr.max((c[i * n + j] - r).abs() / (r.abs() + 1e-3));
+                }
+            }
+            assert!(maxerr < 2e-3, "matmul_abt rel err {maxerr} for ({m},{k},{n})");
+        }
+    }
+
+    // Perf microbench (run: cargo test -p brain-backend-cpu --release matmul_bench -- --ignored --nocapture)
+    #[test]
+    #[ignore]
+    fn matmul_bench() {
+        let (m, k, n) = (512, 512, 1024); // Kronos-scale linear
+        let mut s = 3u32;
+        let a: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
+        let b: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
+        let mut c = vec![0.0f32; m * n];
+        let iters = 20;
+        // AVX2 + threaded
+        matmul_abt(&a, &b, &mut c, m, k, n); // warm
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            matmul_abt(&a, &b, &mut c, m, k, n);
+        }
+        let avx = t.elapsed().as_secs_f64() / iters as f64;
+        // scalar single-thread reference
+        let mut c2 = vec![0.0f32; m * n];
+        let t = std::time::Instant::now();
+        for r in 0..m {
+            row_abt_scalar(&a[r * k..r * k + k], &b, &mut c2[r * n..r * n + n], k, n);
+        }
+        let scal = t.elapsed().as_secs_f64();
+        // scalar + rayon (the true JIT baseline is threaded-scalar)
+        let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            c2.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cc)| {
+                let row0 = ci * rows_per;
+                for r in 0..cc.len() / n {
+                    row_abt_scalar(&a[(row0 + r) * k..(row0 + r) * k + k], &b, &mut cc[r * n..r * n + n], k, n);
+                }
+            });
+        }
+        let scalt = t.elapsed().as_secs_f64() / iters as f64;
+        let gflops = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
+        eprintln!(
+            "matmul {m}x{k}x{n} ({} threads): AVX2+threads {:.2} ms ({:.1} GFLOP/s) | scalar+threads {:.2} ms ({:.1} GFLOP/s) | scalar-1t {:.2} ms | AVX2-vs-scalar-threaded {:.1}x",
+            rayon::current_num_threads(), avx * 1e3, gflops / avx, scalt * 1e3, gflops / scalt, scal * 1e3, scalt / avx
+        );
     }
 
     #[test]

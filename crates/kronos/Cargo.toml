@@ -1,0 +1,22 @@
+[package]
+name = "brain-kronos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kronos (NeoQuasar) from scratch: BSQ tokenizer (OHLCV bar -> hierarchical tokens) + autoregressive decoder with a dual head. MIT reference; imported exactly, parity-gated."
+
+[lib]
+name = "kronos"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-checkpoint.workspace = true
+brain-kernels.workspace = true
+brain-forecast.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
+rayon = "1"

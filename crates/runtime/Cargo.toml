@@ -18,6 +18,8 @@ brain-hfsm.workspace = true
 brain-gpt.workspace = true
 brain-yolo.workspace = true
 brain-checkpoint.workspace = true
+brain-forecast.workspace = true
+brain-fcbench.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

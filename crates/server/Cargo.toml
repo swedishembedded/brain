@@ -1,0 +1,19 @@
+[package]
+name = "brain-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "One JSONL protocol, three transports: stdio, TCP, and Unix socket — all carrying identical events::Event frames. Thread-per-connection, bounded, panic-isolated."
+
+[lib]
+name = "server"
+path = "src/lib.rs"
+
+[dependencies]
+brain-events.workspace = true
+brain-runtime.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-forecast.workspace = true
+brain-fcbench.workspace = true

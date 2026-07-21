@@ -50,7 +50,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo \
         export/yolo-onnx quantize/yolo sim/yolo-int8 run/yolo-npu bench/yolo-npu \
-        web/dev web/build
+        web/dev web/build forecast/compare forecast/serve
 
 help:
 	@echo "brain targets:"
@@ -279,6 +279,22 @@ bench/yolo-npu: release
 # the generic `bench/%` rule runs any registered name with no Makefile change.
 bench: release
 	$(BRAIN) bench --seed $(SEED)
+
+# ---- forecasting ----------------------------------------------------------
+# `make forecast/compare` runs the scenario battery against the statistical
+# baselines and renders the model x scenario x metric report (markdown to
+# stdout). The random-walk negative control is a HARD gate: the command exits
+# non-zero if any model falsely beats naive on it. Add HTML=path to also write a
+# self-contained HTML report. Foundation models join the same battery as they
+# are imported.
+forecast/compare: release
+	$(BRAIN) forecast compare --seed $(SEED) $(if $(HTML),--html $(HTML),)
+
+# `make forecast/serve` starts the unified JSONL server with the baselines
+# registered. Defaults to a Unix socket; override with LISTEN=host:port for TCP
+# or SOCKET=path for a different socket path.
+forecast/serve: release
+	$(BRAIN) forecast serve $(if $(LISTEN),--listen $(LISTEN),--socket $(or $(SOCKET),/tmp/brain-forecast.sock))
 
 # `make bench/scaling` runs the multi-scale scaling-law sweep (a separate entry
 # point, not a registry benchmark): it trains the MQAR task at several model

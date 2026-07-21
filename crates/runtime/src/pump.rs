@@ -130,23 +130,15 @@ impl AudioStreamPump {
 }
 
 /// Serialize f32 PCM samples to base64 of their little-endian byte layout.
+///
+/// A thin alias over [`events::bytes::encode_f32`] — the shared array codec —
+/// kept for call-site clarity in the audio path.
 pub fn encode_pcm(samples: &[f32]) -> String {
-    let mut bytes = Vec::with_capacity(samples.len() * 4);
-    for &s in samples {
-        bytes.extend_from_slice(&s.to_le_bytes());
-    }
-    events::base64::encode(&bytes)
+    events::bytes::encode_f32(samples)
 }
 
 /// Decode base64 LE-f32 PCM back into samples (inverse of [`encode_pcm`]);
 /// returns `Err` on bad base64 or a non-multiple-of-4 byte length.
 pub fn decode_pcm(pcm_b64: &str) -> Result<Vec<f32>, String> {
-    let bytes = events::base64::decode(pcm_b64)?;
-    if bytes.len() % 4 != 0 {
-        return Err(format!("pcm byte length {} not a multiple of 4", bytes.len()));
-    }
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect())
+    events::bytes::decode_f32(pcm_b64)
 }

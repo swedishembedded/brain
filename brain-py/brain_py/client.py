@@ -33,15 +33,28 @@ import itertools
 import json
 import os
 import shutil
+import socket as _socket
 import subprocess
 import threading
 from dataclasses import dataclass
 from typing import Optional
 
+from .forecast import Forecast, Panel
+
 try:
     from PIL import Image
 except ImportError:  # pragma: no cover - Pillow is a declared dependency
     Image = None  # type: ignore
+
+# Events that terminate a request on their own (one-shot results). Any streaming
+# chunk instead terminates on a ``done: true`` field. Generalising this registry
+# is what keeps the reader loop protocol-agnostic as new events are added.
+_TERMINAL_EVENTS = frozenset({
+    "object_detected",
+    "forecast_result",
+    "backtest_result",
+    "capabilities_result",
+})
 
 
 @dataclass
@@ -113,15 +126,26 @@ class BrainClient:
         extra_args: Optional[list[str]] = None,
         device: str = "cpu",
         ready_timeout: float = 30.0,
+        forecast: bool = False,
     ) -> None:
+        """Spawn a brain server subprocess and drive it over JSONL.
+
+        With ``forecast=True`` the client launches ``brain forecast serve`` (the
+        statistical baselines registered, foundation models added as they land)
+        so :meth:`forecast`, :meth:`backtest` and :meth:`capabilities` work.
+        Otherwise it launches ``brain run`` for :meth:`chat` / :meth:`detect`.
+        """
         self._binary = _find_brain_binary(brain_bin)
-        argv = [self._binary, "run"]
-        if yolo:
-            argv += ["--yolo", yolo]
-        if gpt:
-            argv += ["--gpt", gpt]
-        if conf is not None:
-            argv += ["--conf", str(conf)]
+        if forecast:
+            argv = [self._binary, "forecast", "serve"]
+        else:
+            argv = [self._binary, "run"]
+            if yolo:
+                argv += ["--yolo", yolo]
+            if gpt:
+                argv += ["--gpt", gpt]
+            if conf is not None:
+                argv += ["--conf", str(conf)]
         if extra_args:
             argv += list(extra_args)
 
@@ -137,29 +161,77 @@ class BrainClient:
             bufsize=1,  # line-buffered
             env=env,
         )
+        self._sock = None
+        self._rfile = self._proc.stdout
+        self._wfile = self._proc.stdin
+        self._boot(ready_timeout, drain_stderr=True)
 
+    @classmethod
+    def connect(
+        cls,
+        socket_path: Optional[str] = None,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+        ready_timeout: float = 30.0,
+    ) -> "BrainClient":
+        """Connect to an ALREADY-RUNNING ``brain forecast serve`` over a socket.
+
+        Unlike the constructor (which spawns its own stdio subprocess), this
+        attaches to a long-lived server that keeps the models warm across many
+        requests — the right shape for a batch job that forecasts a whole
+        universe. Pass either ``socket_path`` (a Unix socket, matching
+        ``brain forecast serve --socket <path>``) or ``host``+``port`` (matching
+        ``--listen <host:port>``).
+
+        The same :meth:`forecast` / :meth:`capabilities` / :meth:`backtest` API
+        works over the socket exactly as over stdio.
+        """
+        self = cls.__new__(cls)
+        self._binary = None
+        self._proc = None
+        if socket_path is not None:
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            sock.connect(socket_path)
+        elif host is not None and port is not None:
+            sock = _socket.create_connection((host, port))
+        else:
+            raise ValueError("connect() needs socket_path=... or host=...+port=...")
+        self._sock = sock
+        # Text line streams over the socket (mirrors the stdio pipes).
+        self._rfile = sock.makefile("r", encoding="utf-8", newline="\n")
+        self._wfile = sock.makefile("w", encoding="utf-8", newline="\n")
+        self._boot(ready_timeout, drain_stderr=False)
+        return self
+
+    def _boot(self, ready_timeout: float, drain_stderr: bool) -> None:
+        """Shared startup: the condition-guarded queue + reader thread + wait for
+        the ``ready`` greeting (emitted per connection, over stdio and socket)."""
         # The condition-guarded queue: all shared state below is protected by it.
         self._cond = threading.Condition()
         self._pending: dict[str, _Pending] = {}
         self._ready = False
         self._closed = False
         self._ids = itertools.count(1)
+        # Serialize writes so concurrent requests can't interleave JSON lines.
+        self._write_lock = threading.Lock()
 
         self._reader = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader.start()
-        self._err_thread = threading.Thread(target=self._drain_stderr, daemon=True)
-        self._err_thread.start()
+        if drain_stderr and self._proc is not None:
+            self._err_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+            self._err_thread.start()
 
         if not self._wait_ready(ready_timeout):
             self.close()
-            raise RuntimeError("brain run did not emit a 'ready' event in time")
+            raise RuntimeError("brain did not emit a 'ready' event in time")
 
     # -- background threads --------------------------------------------------
 
     def _reader_loop(self) -> None:
-        """Read stdout lines, parse JSON, route by req_id under the condition."""
-        assert self._proc.stdout is not None
-        for line in self._proc.stdout:
+        """Read result lines, parse JSON, route by req_id under the condition.
+        Works over the subprocess stdout pipe and the socket read stream alike."""
+        assert self._rfile is not None
+        for line in self._rfile:
             line = line.strip()
             if not line:
                 continue
@@ -180,12 +252,14 @@ class BrainClient:
                     continue
                 p = self._pending.setdefault(req_id, _Pending())
                 p.events.append(evt)
-                if ev == "object_detected":
+                # Generalised completion: an error, a one-shot terminal event, or
+                # any streaming chunk carrying done:true ends the request.
+                if ev == "error":
+                    p.error = evt.get("message") or evt.get("code") or "error"
                     p.done = True
-                elif ev == "error":
-                    p.error = evt.get("message", "error")
+                elif ev in _TERMINAL_EVENTS:
                     p.done = True
-                elif ev == "brain_text_chunk" and evt.get("done"):
+                elif evt.get("done") is True:
                     p.done = True
                 self._cond.notify_all()
         # stdout closed -> mark everything done so waiters wake.
@@ -212,10 +286,14 @@ class BrainClient:
         return f"r{next(self._ids)}"
 
     def _send(self, obj: dict) -> None:
-        if self._proc.stdin is None or self._closed:
-            raise RuntimeError("brain process stdin is closed")
-        self._proc.stdin.write(json.dumps(obj) + "\n")
-        self._proc.stdin.flush()
+        line = json.dumps(obj) + "\n"
+        # A single lock serializes the write+flush so two threads issuing
+        # requests concurrently can't interleave bytes on the stream.
+        with self._write_lock:
+            if self._wfile is None or self._closed:
+                raise RuntimeError("brain connection is closed")
+            self._wfile.write(line)
+            self._wfile.flush()
 
     def _wait_for(self, req_id: str, timeout: float) -> _Pending:
         with self._cond:
@@ -224,6 +302,8 @@ class BrainClient:
                 timeout,
             )
             if not ok:
+                # Don't leak the pending entry on timeout.
+                self._pending.pop(req_id, None)
                 raise TimeoutError(f"timed out waiting for response to {req_id!r}")
             p = self._pending.pop(req_id)
         if p.error:
@@ -285,26 +365,118 @@ class BrainClient:
                 parts.append(e.get("text", ""))
         return "".join(parts)
 
+    # -- forecasting API -----------------------------------------------------
+
+    def capabilities(self, timeout: float = 30.0) -> dict:
+        """Return ``{model_name: capabilities_dict}`` for every registered
+        forecasting model, so an app can discover constraints (max context,
+        covariate support, native representation) instead of hard-coding them.
+        """
+        rid = self._next_id()
+        self._send({"req_id": rid, "event": "capabilities_request"})
+        p = self._wait_for(rid, timeout)
+        evt = next((e for e in p.events if e.get("event") == "capabilities_result"), None)
+        models = (evt or {}).get("models", [])
+        return {m["name"]: m for m in models}
+
+    def forecast(self, panel: Panel, horizon: int,
+                 quantiles: Optional[list] = None, num_samples: int = 0,
+                 representations: Optional[list] = None, model: str = "naive",
+                 seed: int = 0, timeout: float = 120.0,
+                 req_id: Optional[str] = None) -> Forecast:
+        """Forecast ``panel`` over ``horizon`` steps with the named ``model``.
+
+        ``quantiles`` selects the quantile levels (default 10/50/90); pass
+        ``num_samples > 0`` to also draw sample trajectories. Returns a
+        :class:`Forecast` whose ``.median()`` / ``.interval()`` / ``.samples()``
+        and ``.derived`` expose the result honestly (derived fields flagged).
+        """
+        levels = quantiles or [0.1, 0.5, 0.9]
+        reps = representations or (["quantiles", "point"] + (["samples"] if num_samples else []))
+        rid = req_id or self._next_id()
+        self._send({
+            "req_id": rid,
+            "event": "forecast_request",
+            "model": model,
+            "panel": panel.to_wire(),
+            # the runtime reads the whole spec (horizon, reps, levels, samples,
+            # seed) from the "output" object.
+            "output": {
+                "horizon": horizon,
+                "representations": reps,
+                "quantile_levels": levels,
+                "num_samples": num_samples,
+                "seed": seed,
+            },
+        })
+        p = self._wait_for(rid, timeout)
+        evt = next((e for e in p.events if e.get("event") == "forecast_result"), None)
+        if evt is None:
+            raise RuntimeError(f"no forecast_result for {rid!r}")
+        assert evt.get("req_id") == rid, "req_id mismatch on forecast_result"
+        return Forecast(evt)
+
+    def backtest(self, panel: Panel, horizon: int, models: list,
+                 origins: int = 30, stride: int = 1,
+                 metrics: Optional[list] = None, seed: int = 0,
+                 timeout: float = 600.0, req_id: Optional[str] = None) -> dict:
+        """Run a server-side rolling-origin backtest of ``models`` over ``panel``.
+
+        Returns ``{model: {metric: value}}`` aggregated over origins. Always
+        include ``"naive"`` so results are read relative to the baseline.
+        """
+        rid = req_id or self._next_id()
+        self._send({
+            "req_id": rid,
+            "event": "backtest_request",
+            "panel": panel.to_wire(),
+            "spec": {
+                "models": list(models),
+                "horizon": horizon,
+                "origins": origins,
+                "stride": stride,
+                "metrics": metrics or ["mase", "wql", "coverage", "directional"],
+                "seed": seed,
+            },
+        })
+        p = self._wait_for(rid, timeout)
+        evt = next((e for e in p.events if e.get("event") == "backtest_result"), None)
+        rows = ((evt or {}).get("report") or {}).get("rows", [])
+        out: dict[str, dict[str, float]] = {}
+        for r in rows:
+            out.setdefault(r["model"], {})[r["metric"]] = r["value"]
+        return out
+
     # -- lifecycle -----------------------------------------------------------
 
     def close(self) -> None:
-        if getattr(self, "_proc", None) is None:
-            return
+        # Idempotent; handles both the subprocess and socket transports.
+        with getattr(self, "_cond", threading.Condition()):
+            self._closed = True
         try:
-            if self._proc.stdin and not self._proc.stdin.closed:
-                self._proc.stdin.close()  # EOF -> brain's read loop ends
+            if self._wfile is not None:
+                self._wfile.close()  # EOF -> brain's read loop ends this connection
         except (OSError, ValueError):
             pass
-        try:
-            self._proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self._proc.terminate()
+        proc = getattr(self, "_proc", None)
+        if proc is not None:
             try:
-                self._proc.wait(timeout=5)
+                proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                self._proc.kill()
-        if self._reader.is_alive():
-            self._reader.join(timeout=5)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        sock = getattr(self, "_sock", None)
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        reader = getattr(self, "_reader", None)
+        if reader is not None and reader.is_alive():
+            reader.join(timeout=5)
 
     def __enter__(self) -> "BrainClient":
         return self

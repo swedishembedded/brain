@@ -20,6 +20,10 @@
 //!   predicted correctly (the MQAR headline metric); chance is `1/vocab`.
 //! - **distinct-n** — `unique n-grams / total n-grams`, a diversity proxy.
 //! - **repetition-rate** — fraction of adjacent token pairs that are identical.
+//!
+//! Float-valued probabilistic forecasting metrics (pinball, CRPS, MASE, …) live
+//! in [`forecast::metrics`] — the light crate the backtester and served
+//! baselines can reach without the training stack.
 
 use std::collections::HashMap;
 

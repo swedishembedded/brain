@@ -266,6 +266,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-chronos2"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-forecast",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-cli"
 version = "0.1.0"
 dependencies = [
@@ -273,16 +288,20 @@ dependencies = [
  "brain-bench",
  "brain-capture",
  "brain-checkpoint",
+ "brain-chronos2",
  "brain-codec",
  "brain-data",
  "brain-depth",
  "brain-eval",
  "brain-events",
+ "brain-fcbench",
  "brain-federated",
+ "brain-forecast",
  "brain-glm",
  "brain-gpt",
  "brain-gpu-core",
  "brain-gradcheck",
+ "brain-kronos",
  "brain-mirror",
  "brain-model",
  "brain-moe",
@@ -292,6 +311,7 @@ dependencies = [
  "brain-pid",
  "brain-qwen",
  "brain-runtime",
+ "brain-server",
  "brain-speaker",
  "brain-splat",
  "brain-tts",
@@ -365,7 +385,15 @@ dependencies = [
 name = "brain-events"
 version = "0.1.0"
 dependencies = [
+ "brain-forecast",
  "serde_json",
+]
+
+[[package]]
+name = "brain-fcbench"
+version = "0.1.0"
+dependencies = [
+ "brain-forecast",
 ]
 
 [[package]]
@@ -373,6 +401,13 @@ name = "brain-federated"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-forecast"
+version = "0.1.0"
+dependencies = [
  "serde_json",
 ]
 
@@ -445,6 +480,22 @@ name = "brain-kernels"
 version = "0.1.0"
 
 [[package]]
+name = "brain-kronos"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-forecast",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
+ "rayon",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-mirror"
 version = "0.1.0"
 dependencies = [
@@ -492,6 +543,7 @@ version = "0.1.0"
 dependencies = [
  "brain-backend-api",
  "brain-checkpoint",
+ "brain-chronos2",
  "brain-codec",
  "brain-data",
  "brain-depth",
@@ -499,6 +551,7 @@ dependencies = [
  "brain-events",
  "brain-glm",
  "brain-gpu-core",
+ "brain-kronos",
  "brain-mirror",
  "brain-onnx",
  "brain-paramstore",
@@ -580,6 +633,8 @@ version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
  "brain-events",
+ "brain-fcbench",
+ "brain-forecast",
  "brain-gpt",
  "brain-hfsm",
  "brain-yolo",
@@ -598,6 +653,17 @@ dependencies = [
  "brain-optim",
  "brain-paramstore",
  "bytemuck",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-server"
+version = "0.1.0"
+dependencies = [
+ "brain-events",
+ "brain-fcbench",
+ "brain-forecast",
+ "brain-runtime",
  "serde_json",
 ]
 

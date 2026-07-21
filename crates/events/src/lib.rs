@@ -16,7 +16,13 @@
 //! unsupported (no decoder dependency) and return a clear error rather than
 //! panicking.
 
+use forecast::{
+    BacktestReport, BacktestSpec, Capabilities, Forecast, ForecastError as FcError, ForecastSpec,
+    Panel,
+};
 use serde_json::{json, Value};
+
+pub mod forecast_wire;
 
 /// One protocol event. `#[non_exhaustive]` so adding variants in later phases is
 /// not a breaking change for downstream `match`es.
@@ -60,6 +66,30 @@ pub enum Event {
     Error { message: String },
     /// A free-form diagnostic log line.
     Log { message: String },
+
+    // ---- forecasting -------------------------------------------------------
+    /// A forecast request: run `model` on `panel` per `spec`.
+    ForecastRequest { model: String, panel: Panel, spec: ForecastSpec },
+    /// A one-shot forecast result.
+    ForecastResult { forecast: Forecast },
+    /// A streamed partial forecast (per item / per origin). `seq` orders chunks,
+    /// `done` marks the last.
+    ForecastChunk { forecast: Forecast, seq: u32, done: bool },
+    /// Ask the runtime which forecasting models it has and what they support.
+    CapabilitiesRequest,
+    /// The models' self-descriptions.
+    CapabilitiesResult { models: Vec<Capabilities> },
+    /// A rolling-origin backtest request.
+    BacktestRequest { panel: Panel, spec: BacktestSpec },
+    /// A streamed partial backtest result (aggregates so far). `done` marks the
+    /// last.
+    BacktestChunk { report: BacktestReport, seq: u32, done: bool },
+    /// The final aggregated backtest report.
+    BacktestResult { report: BacktestReport },
+    /// A structured forecasting error — machine-readable `code` + `retryable`,
+    /// distinct from the free-form [`Event::Error`]. Shares the `"error"` wire
+    /// tag, disambiguated by the presence of a `code` field.
+    ForecastError { error: FcError },
 }
 
 /// A protocol line: one [`Event`] plus an OPTIONAL request-correlation id.
@@ -148,6 +178,50 @@ fn event_to_value(ev: &Event) -> Value {
         Event::Ready => json!({ "event": "ready" }),
         Event::Error { message } => json!({ "event": "error", "message": message }),
         Event::Log { message } => json!({ "event": "log", "message": message }),
+        Event::ForecastRequest { model, panel, spec } => json!({
+            "event": "forecast_request",
+            "model": model,
+            "panel": forecast_wire::panel_to_value(panel),
+            "output": forecast_wire::spec_to_value(spec),
+        }),
+        Event::ForecastResult { forecast } => {
+            let mut v = forecast_wire::forecast_to_value(forecast);
+            v.as_object_mut().unwrap().insert("event".into(), json!("forecast_result"));
+            v
+        }
+        Event::ForecastChunk { forecast, seq, done } => {
+            let mut v = forecast_wire::forecast_to_value(forecast);
+            let m = v.as_object_mut().unwrap();
+            m.insert("event".into(), json!("forecast_chunk"));
+            m.insert("seq".into(), json!(seq));
+            m.insert("done".into(), json!(done));
+            v
+        }
+        Event::CapabilitiesRequest => json!({ "event": "capabilities_request" }),
+        Event::CapabilitiesResult { models } => json!({
+            "event": "capabilities_result",
+            "models": models.iter().map(|c| c.to_json()).collect::<Vec<_>>(),
+        }),
+        Event::BacktestRequest { panel, spec } => json!({
+            "event": "backtest_request",
+            "panel": forecast_wire::panel_to_value(panel),
+            "spec": forecast_wire::backtest_spec_to_value(spec),
+        }),
+        Event::BacktestChunk { report, seq, done } => json!({
+            "event": "backtest_chunk",
+            "report": forecast_wire::backtest_report_to_value(report),
+            "seq": seq,
+            "done": done,
+        }),
+        Event::BacktestResult { report } => json!({
+            "event": "backtest_result",
+            "report": forecast_wire::backtest_report_to_value(report),
+        }),
+        Event::ForecastError { error } => {
+            let mut v = error.to_json();
+            v.as_object_mut().unwrap().insert("event".into(), json!("error"));
+            v
+        }
     }
 }
 
@@ -218,8 +292,47 @@ fn decode_event_value(v: &Value) -> Result<Event, String> {
         }),
         "cancel" => Ok(Event::Cancel),
         "ready" => Ok(Event::Ready),
-        "error" => Ok(Event::Error { message: s("message") }),
+        "error" => {
+            // Structured forecast errors carry a `code`; legacy errors do not.
+            if v.get("code").is_some() {
+                Ok(Event::ForecastError { error: FcError::from_json(v) })
+            } else {
+                Ok(Event::Error { message: s("message") })
+            }
+        }
         "log" => Ok(Event::Log { message: s("message") }),
+        "forecast_request" => Ok(Event::ForecastRequest {
+            model: s("model"),
+            panel: forecast_wire::panel_from_value(&v["panel"]),
+            spec: forecast_wire::spec_from_value(&v["output"]),
+        }),
+        "forecast_result" => {
+            Ok(Event::ForecastResult { forecast: forecast_wire::forecast_from_value(v) })
+        }
+        "forecast_chunk" => Ok(Event::ForecastChunk {
+            forecast: forecast_wire::forecast_from_value(v),
+            seq: u("seq"),
+            done: v["done"].as_bool().unwrap_or(false),
+        }),
+        "capabilities_request" => Ok(Event::CapabilitiesRequest),
+        "capabilities_result" => Ok(Event::CapabilitiesResult {
+            models: v["models"]
+                .as_array()
+                .map(|a| a.iter().map(forecast_wire::capabilities_from_value).collect())
+                .unwrap_or_default(),
+        }),
+        "backtest_request" => Ok(Event::BacktestRequest {
+            panel: forecast_wire::panel_from_value(&v["panel"]),
+            spec: forecast_wire::backtest_spec_from_value(&v["spec"]),
+        }),
+        "backtest_chunk" => Ok(Event::BacktestChunk {
+            report: forecast_wire::backtest_report_from_value(&v["report"]),
+            seq: u("seq"),
+            done: v["done"].as_bool().unwrap_or(false),
+        }),
+        "backtest_result" => Ok(Event::BacktestResult {
+            report: forecast_wire::backtest_report_from_value(&v["report"]),
+        }),
         other => Err(format!("unknown event tag: {other:?}")),
     }
 }
@@ -360,6 +473,36 @@ pub mod base64 {
     }
 }
 
+/// Shaped numeric payloads: base64 of little-endian f32, the wire encoding for
+/// bulk arrays (context windows, quantile matrices, sample trajectories).
+///
+/// This is the byte layout formerly living as `runtime::pump::encode_pcm` /
+/// `decode_pcm`, promoted here so every transport shares one array codec rather
+/// than each re-implementing it.
+pub mod bytes {
+    /// Encode f32 values to base64 of their little-endian byte layout.
+    pub fn encode_f32(values: &[f32]) -> String {
+        let mut b = Vec::with_capacity(values.len() * 4);
+        for &v in values {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        super::base64::encode(&b)
+    }
+
+    /// Decode base64 LE-f32 back into values. `Err` on bad base64 or a byte
+    /// length that is not a multiple of 4.
+    pub fn decode_f32(b64: &str) -> Result<Vec<f32>, String> {
+        let bytes = super::base64::decode(b64)?;
+        if bytes.len() % 4 != 0 {
+            return Err(format!("f32 payload byte length {} not a multiple of 4", bytes.len()));
+        }
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect())
+    }
+}
+
 /// Minimal binary PPM (P6) reader/writer for RGB8 frames.
 pub mod ppm {
     /// Encode interleaved RGB8 `px` (`w*h*3` bytes) as a binary P6 PPM.
@@ -477,7 +620,112 @@ mod tests {
             Event::Ready,
             Event::Error { message: "boom".into() },
             Event::Log { message: "hello".into() },
+            forecast_request_sample(),
+            forecast_result_sample(),
+            Event::ForecastChunk { forecast: sample_forecast(), seq: 2, done: false },
+            Event::CapabilitiesRequest,
+            Event::CapabilitiesResult { models: vec![sample_caps()] },
+            Event::BacktestRequest { panel: sample_panel(), spec: sample_backtest_spec() },
+            Event::BacktestChunk { report: sample_report(), seq: 0, done: false },
+            Event::BacktestResult { report: sample_report() },
+            Event::ForecastError {
+                error: forecast::ForecastError::context_too_long(512, 900),
+            },
         ]
+    }
+
+    // All f32s below are exact binary fractions so base64-LE roundtrips exactly.
+    fn sample_panel() -> Panel {
+        use forecast::{Kind, Role, Variate};
+        Panel {
+            freq: "1d".into(),
+            start: Some("2026-01-02T00:00:00Z".into()),
+            items: vec![forecast::Item {
+                item_id: "AAPL".into(),
+                variates: vec![
+                    Variate::target("close", vec![1.0, 2.0, 3.0, 4.0]),
+                    Variate {
+                        name: "is_earnings".into(),
+                        role: Role::KnownFuture,
+                        kind: Kind::Categorical,
+                        data: vec![0.0, 0.0, 1.0, 0.0],
+                        future: Some(vec![0.0, 0.5]),
+                        observed: None,
+                        cardinality: Some(2),
+                    },
+                ],
+            }],
+        }
+    }
+
+    fn sample_forecast() -> Forecast {
+        use forecast::{Block, Representation, TargetForecast};
+        let mut tf = TargetForecast::new("AAPL", "close");
+        tf.quantiles = Some(Block::native(vec![2, 3], vec![0.5, 1.0, 1.5, 0.25, 0.75, 1.25]));
+        tf.levels = vec![0.25, 0.5, 0.75];
+        let mut fc = Forecast::new("chronos2", Representation::Quantiles, 2, "1d");
+        fc.model_version = "amazon/chronos-2@abc".into();
+        fc.targets = vec![tf];
+        fc
+    }
+
+    fn sample_caps() -> Capabilities {
+        use forecast::{CovariateSupport, Representation};
+        Capabilities {
+            name: "chronos2".into(),
+            max_context: 8192,
+            max_horizon: Some(1024),
+            native_representation: Representation::Quantiles,
+            covariates: CovariateSupport::Full,
+            supports_known_future: true,
+            multivariate: true,
+            arbitrary_quantile_levels: true,
+            stochastic: false,
+            requires_variates: vec![],
+        }
+    }
+
+    fn sample_backtest_spec() -> BacktestSpec {
+        BacktestSpec {
+            models: vec!["chronos2".into(), "naive".into()],
+            horizon: 5,
+            origins: 30,
+            stride: 1,
+            metrics: vec!["mase".into(), "crps".into()],
+            quantile_levels: vec![0.1, 0.5, 0.9],
+            seed: 42,
+        }
+    }
+
+    fn sample_report() -> BacktestReport {
+        use forecast::BacktestRow;
+        BacktestReport {
+            rows: vec![
+                BacktestRow { model: "chronos2".into(), metric: "mase".into(), value: 0.5, n_origins: 30 },
+                BacktestRow { model: "naive".into(), metric: "mase".into(), value: 1.0, n_origins: 30 },
+            ],
+        }
+    }
+
+    fn forecast_request_sample() -> Event {
+        Event::ForecastRequest {
+            model: "chronos2".into(),
+            panel: sample_panel(),
+            spec: ForecastSpec {
+                horizon: 2,
+                representations: vec![
+                    forecast::Representation::Quantiles,
+                    forecast::Representation::Samples,
+                ],
+                quantile_levels: vec![0.25, 0.5, 0.75],
+                num_samples: 100,
+                seed: 42,
+            },
+        }
+    }
+
+    fn forecast_result_sample() -> Event {
+        Event::ForecastResult { forecast: sample_forecast() }
     }
 
     #[test]

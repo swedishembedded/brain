@@ -22,10 +22,10 @@ pub const ADD_CHAN_BCAST: &str = include_str!("../wgsl/add_chan_bcast.wgsl");
 pub const ADD_CHAN_BCAST_DV: &str = include_str!("../wgsl/add_chan_bcast_dv.wgsl");
 /// `wgsl/add_chan_inplace.wgsl`
 pub const ADD_CHAN_INPLACE: &str = include_str!("../wgsl/add_chan_inplace.wgsl");
-/// `wgsl/add_inplace.wgsl`
-pub const ADD_INPLACE: &str = include_str!("../wgsl/add_inplace.wgsl");
 /// `wgsl/add_index_mask.wgsl`
 pub const ADD_INDEX_MASK: &str = include_str!("../wgsl/add_index_mask.wgsl");
+/// `wgsl/add_inplace.wgsl`
+pub const ADD_INPLACE: &str = include_str!("../wgsl/add_inplace.wgsl");
 /// `wgsl/attention.wgsl`
 pub const ATTENTION: &str = include_str!("../wgsl/attention.wgsl");
 /// `wgsl/attn_apply.wgsl`
@@ -34,6 +34,8 @@ pub const ATTN_APPLY: &str = include_str!("../wgsl/attn_apply.wgsl");
 pub const ATTN_APPLY_BIDIR: &str = include_str!("../wgsl/attn_apply_bidir.wgsl");
 /// `wgsl/attn_apply_cross.wgsl`
 pub const ATTN_APPLY_CROSS: &str = include_str!("../wgsl/attn_apply_cross.wgsl");
+/// `wgsl/attn_apply_full.wgsl`
+pub const ATTN_APPLY_FULL: &str = include_str!("../wgsl/attn_apply_full.wgsl");
 /// `wgsl/attn_bwd_dbias.wgsl`
 pub const ATTN_BWD_DBIAS: &str = include_str!("../wgsl/attn_bwd_dbias.wgsl");
 /// `wgsl/attn_bwd_dk.wgsl`
@@ -74,14 +76,20 @@ pub const ATTN_SCORES_BIDIR_BIAS: &str = include_str!("../wgsl/attn_scores_bidir
 pub const ATTN_SCORES_CAUSAL_BIAS: &str = include_str!("../wgsl/attn_scores_causal_bias.wgsl");
 /// `wgsl/attn_scores_cross.wgsl`
 pub const ATTN_SCORES_CROSS: &str = include_str!("../wgsl/attn_scores_cross.wgsl");
+/// `wgsl/attn_scores_full.wgsl`
+pub const ATTN_SCORES_FULL: &str = include_str!("../wgsl/attn_scores_full.wgsl");
 /// `wgsl/attn_scores_masked.wgsl`
 pub const ATTN_SCORES_MASKED: &str = include_str!("../wgsl/attn_scores_masked.wgsl");
+/// `wgsl/attn_scores_qk.wgsl`
+pub const ATTN_SCORES_QK: &str = include_str!("../wgsl/attn_scores_qk.wgsl");
 /// `wgsl/attn_softmax.wgsl`
 pub const ATTN_SOFTMAX: &str = include_str!("../wgsl/attn_softmax.wgsl");
 /// `wgsl/attn_softmax_bidir.wgsl`
 pub const ATTN_SOFTMAX_BIDIR: &str = include_str!("../wgsl/attn_softmax_bidir.wgsl");
 /// `wgsl/attn_softmax_cross.wgsl`
 pub const ATTN_SOFTMAX_CROSS: &str = include_str!("../wgsl/attn_softmax_cross.wgsl");
+/// `wgsl/attn_softmax_full.wgsl`
+pub const ATTN_SOFTMAX_FULL: &str = include_str!("../wgsl/attn_softmax_full.wgsl");
 /// `wgsl/attn_softmax_masked.wgsl`
 pub const ATTN_SOFTMAX_MASKED: &str = include_str!("../wgsl/attn_softmax_masked.wgsl");
 /// `wgsl/avgpool2d.wgsl`
@@ -118,6 +126,8 @@ pub const BN_TRAIN: &str = include_str!("../wgsl/bn_train.wgsl");
 pub const BROADCAST_ADD_HW: &str = include_str!("../wgsl/broadcast_add_hw.wgsl");
 /// `wgsl/broadcast_add_hw_da.wgsl`
 pub const BROADCAST_ADD_HW_DA: &str = include_str!("../wgsl/broadcast_add_hw_da.wgsl");
+/// `wgsl/bsq_quantize.wgsl`
+pub const BSQ_QUANTIZE: &str = include_str!("../wgsl/bsq_quantize.wgsl");
 /// `wgsl/ce_grad.wgsl`
 pub const CE_GRAD: &str = include_str!("../wgsl/ce_grad.wgsl");
 /// `wgsl/ce_grad_masked.wgsl`
@@ -310,6 +320,8 @@ pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
 pub const MATMUL_ROWS: &str = include_str!("../wgsl/matmul_rows.wgsl");
 /// `wgsl/matmul_tile.wgsl`
 pub const MATMUL_TILE: &str = include_str!("../wgsl/matmul_tile.wgsl");
+/// `wgsl/matmul_tiled.wgsl`
+pub const MATMUL_TILED: &str = include_str!("../wgsl/matmul_tiled.wgsl");
 /// `wgsl/maxpool5.wgsl`
 pub const MAXPOOL5: &str = include_str!("../wgsl/maxpool5.wgsl");
 /// `wgsl/maxpool5_dx.wgsl`
@@ -378,6 +390,8 @@ pub const ROPE2D: &str = include_str!("../wgsl/rope2d.wgsl");
 pub const ROPE_BASE: &str = include_str!("../wgsl/rope_base.wgsl");
 /// `wgsl/rope_base_bwd.wgsl`
 pub const ROPE_BASE_BWD: &str = include_str!("../wgsl/rope_base_bwd.wgsl");
+/// `wgsl/rope_neox.wgsl`
+pub const ROPE_NEOX: &str = include_str!("../wgsl/rope_neox.wgsl");
 /// `wgsl/rope_sub.wgsl`
 pub const ROPE_SUB: &str = include_str!("../wgsl/rope_sub.wgsl");
 /// `wgsl/rope_train.wgsl`
@@ -422,6 +436,8 @@ pub const SILU_BWD: &str = include_str!("../wgsl/silu_bwd.wgsl");
 pub const SILU_BWD_DA: &str = include_str!("../wgsl/silu_bwd_da.wgsl");
 /// `wgsl/silu_bwd_db.wgsl`
 pub const SILU_BWD_DB: &str = include_str!("../wgsl/silu_bwd_db.wgsl");
+/// `wgsl/silu_gate.wgsl`
+pub const SILU_GATE: &str = include_str!("../wgsl/silu_gate.wgsl");
 /// `wgsl/silu_mul.wgsl`
 pub const SILU_MUL: &str = include_str!("../wgsl/silu_mul.wgsl");
 /// `wgsl/snake_beta.wgsl`
@@ -489,12 +505,13 @@ pub const ALL: &[(&str, &str)] = &[
     ("add_chan_bcast", ADD_CHAN_BCAST),
     ("add_chan_bcast_dv", ADD_CHAN_BCAST_DV),
     ("add_chan_inplace", ADD_CHAN_INPLACE),
-    ("add_inplace", ADD_INPLACE),
     ("add_index_mask", ADD_INDEX_MASK),
+    ("add_inplace", ADD_INPLACE),
     ("attention", ATTENTION),
     ("attn_apply", ATTN_APPLY),
     ("attn_apply_bidir", ATTN_APPLY_BIDIR),
     ("attn_apply_cross", ATTN_APPLY_CROSS),
+    ("attn_apply_full", ATTN_APPLY_FULL),
     ("attn_bwd_dbias", ATTN_BWD_DBIAS),
     ("attn_bwd_dk", ATTN_BWD_DK),
     ("attn_bwd_dk_bias", ATTN_BWD_DK_BIAS),
@@ -515,10 +532,13 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_scores_bidir_bias", ATTN_SCORES_BIDIR_BIAS),
     ("attn_scores_causal_bias", ATTN_SCORES_CAUSAL_BIAS),
     ("attn_scores_cross", ATTN_SCORES_CROSS),
+    ("attn_scores_full", ATTN_SCORES_FULL),
     ("attn_scores_masked", ATTN_SCORES_MASKED),
+    ("attn_scores_qk", ATTN_SCORES_QK),
     ("attn_softmax", ATTN_SOFTMAX),
     ("attn_softmax_bidir", ATTN_SOFTMAX_BIDIR),
     ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
+    ("attn_softmax_full", ATTN_SOFTMAX_FULL),
     ("attn_softmax_masked", ATTN_SOFTMAX_MASKED),
     ("avgpool2d", AVGPOOL2D),
     ("avgpool2d_dx", AVGPOOL2D_DX),
@@ -537,6 +557,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("bn_train", BN_TRAIN),
     ("broadcast_add_hw", BROADCAST_ADD_HW),
     ("broadcast_add_hw_da", BROADCAST_ADD_HW_DA),
+    ("bsq_quantize", BSQ_QUANTIZE),
     ("ce_grad", CE_GRAD),
     ("ce_grad_masked", CE_GRAD_MASKED),
     ("ce_value", CE_VALUE),
@@ -633,6 +654,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_dx", MATMUL_DX),
     ("matmul_rows", MATMUL_ROWS),
     ("matmul_tile", MATMUL_TILE),
+    ("matmul_tiled", MATMUL_TILED),
     ("maxpool5", MAXPOOL5),
     ("maxpool5_dx", MAXPOOL5_DX),
     ("mla_bwd_dk_pass", MLA_BWD_DK_PASS),
@@ -667,6 +689,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("rope2d", ROPE2D),
     ("rope_base", ROPE_BASE),
     ("rope_base_bwd", ROPE_BASE_BWD),
+    ("rope_neox", ROPE_NEOX),
     ("rope_sub", ROPE_SUB),
     ("rope_train", ROPE_TRAIN),
     ("rope_train_bwd", ROPE_TRAIN_BWD),
@@ -689,6 +712,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("silu_bwd", SILU_BWD),
     ("silu_bwd_da", SILU_BWD_DA),
     ("silu_bwd_db", SILU_BWD_DB),
+    ("silu_gate", SILU_GATE),
     ("silu_mul", SILU_MUL),
     ("snake_beta", SNAKE_BETA),
     ("softmax_k", SOFTMAX_K),

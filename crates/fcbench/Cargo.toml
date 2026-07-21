@@ -1,0 +1,13 @@
+[package]
+name = "brain-fcbench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Forecasting baselines, scenario generators, and the rolling-origin backtester. Light (brain-forecast only) so the server can serve baselines without the training stack."
+
+[lib]
+name = "fcbench"
+path = "src/lib.rs"
+
+[dependencies]
+brain-forecast.workspace = true

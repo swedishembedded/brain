@@ -76,6 +76,8 @@ pub struct CpuBackend {
 /// `fast_ops`). `None` if the kernel isn't registered for this model.
 #[derive(Default)]
 struct FastIdx {
+    matmul: Option<usize>,
+    matmul_tiled: Option<usize>,
     conv2d: Option<usize>,
     conv_act: Option<usize>,
     silu: Option<usize>,
@@ -133,6 +135,8 @@ impl CpuBackend {
         } else {
             let find = |k: &str| names.iter().position(|n| n == k);
             FastIdx {
+                matmul: find("matmul"),
+                matmul_tiled: find("matmul_tiled"),
                 conv2d: find("conv2d"),
                 conv_act: find("conv_act"),
                 silu: find("silu"),
@@ -292,6 +296,20 @@ impl CpuBackend {
         // the JIT below. All `unsafe` here reconstructs slices from the bound
         // storage bases, each sized to its tensor by the model.
         let f = &self.fast;
+        // matmul{,_tiled}.wgsl: out[M,N] = A[M,K] @ B[N,K]^T. params = [m, k, n];
+        // bufs = [A, B, out]. Same math either way; the tiled kernel is GPU-only
+        // (multi-barrier), so on CPU both route to the AVX2 gemm.
+        if (Some(kind) == f.matmul || Some(kind) == f.matmul_tiled) && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 3);
+                let (m, k, n) = (pu[0] as usize, pu[1] as usize, pu[2] as usize);
+                let a = std::slice::from_raw_parts(bufs[0] as *const f32, m * k);
+                let b = std::slice::from_raw_parts(bufs[1] as *const f32, n * k);
+                let c = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, m * n);
+                fast_ops::matmul_abt(a, b, c, m, k, n);
+            }
+            return;
+        }
         if (Some(kind) == f.conv2d || Some(kind) == f.conv2d_tiled) && bufs.len() >= 3 {
             unsafe {
                 let pu = std::slice::from_raw_parts(uniform, 10);

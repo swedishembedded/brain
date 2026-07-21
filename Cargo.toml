@@ -25,6 +25,10 @@ default-members = [
     "crates/glm",
     "crates/seq2seq",
     "crates/autoencoder",
+    "crates/forecast",
+    "crates/fcbench",
+    "crates/chronos2",
+    "crates/kronos",
     "crates/timeseries",
     "crates/codec",
     "crates/speaker",
@@ -49,6 +53,7 @@ default-members = [
     "crates/onnx",
     "crates/npu",
     "crates/runtime",
+    "crates/server",
     "crates/cli",
     "crates/web",
 ]
@@ -103,7 +108,12 @@ brain-capture = { path = "crates/capture" }
 brain-yolo = { path = "crates/yolo" }
 brain-onnx = { path = "crates/onnx" }
 brain-npu = { path = "crates/npu" }
+brain-forecast = { path = "crates/forecast" }
+brain-fcbench = { path = "crates/fcbench" }
+brain-chronos2 = { path = "crates/chronos2" }
+brain-kronos = { path = "crates/kronos" }
 brain-runtime = { path = "crates/runtime" }
+brain-server = { path = "crates/server" }
 brain-vulkan = { path = "crates/vulkan" }
 brain-wgsl-cpu = { path = "crates/wgsl-cpu" }
 

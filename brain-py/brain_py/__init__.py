@@ -10,5 +10,6 @@ JSONL-over-stdio event protocol, correlating requests/responses by ``req_id``.
 
 from .client import BrainClient, Detection
 from .annotate import annotate
+from .forecast import Forecast, Panel, Variate
 
-__all__ = ["BrainClient", "Detection", "annotate"]
+__all__ = ["BrainClient", "Detection", "annotate", "Panel", "Variate", "Forecast"]

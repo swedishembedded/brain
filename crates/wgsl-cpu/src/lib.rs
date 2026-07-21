@@ -50,7 +50,12 @@ pub type KernelFn =
 /// construction, so calling the kernels from many threads concurrently is sound.
 pub struct Jit {
     _module: JITModule,
-    funcs: Vec<*const u8>,
+    /// One entry per registered kernel (index-stable). `None` for a kernel the
+    /// CPU JIT declined to compile — e.g. a multi-barrier tiled GEMM the
+    /// work-group model can't express. Such a kernel must run via a native fast
+    /// path (see `backend-cpu`) or the GPU backend; dispatching it through the JIT
+    /// panics with a clear message rather than miscompiling.
+    funcs: Vec<Option<*const u8>>,
     names: Vec<String>,
     /// Per-kernel work-group size: `None` for the ordinary one-output-per-
     /// invocation kernels, `Some(wgsize)` for kernels that use workgroup memory /
@@ -94,24 +99,37 @@ impl Jit {
 
         for (name, src) in kernels {
             ctx.func.signature = kernel_signature(module.target_config().pointer_type());
-            let wg = compile_one(name, src, &mut module, &math, &mut ctx, &mut fctx)
-                .map_err(|e| format!("kernel {name:?}: {e}"))?;
-            wg_size.push(wg);
-            let id = module
-                .declare_function(name, Linkage::Export, &ctx.func.signature)
-                .map_err(|e| format!("declare {name:?}: {e}"))?;
-            module
-                .define_function(id, &mut ctx)
-                .map_err(|e| format!("define {name:?}: {e:?}"))?;
-            module.clear_context(&mut ctx);
-            ids.push(id);
+            match compile_one(name, src, &mut module, &math, &mut ctx, &mut fctx) {
+                Ok(wg) => {
+                    wg_size.push(wg);
+                    let id = module
+                        .declare_function(name, Linkage::Export, &ctx.func.signature)
+                        .map_err(|e| format!("declare {name:?}: {e}"))?;
+                    module
+                        .define_function(id, &mut ctx)
+                        .map_err(|e| format!("define {name:?}: {e:?}"))?;
+                    module.clear_context(&mut ctx);
+                    ids.push(Some(id));
+                }
+                // A work-group kernel the CPU model can't express (e.g. a tiled
+                // GEMM with a barrier inside the K-loop). Skip it — it runs via a
+                // native fast path on CPU or on the GPU backend. Genuine compile
+                // errors (anything not barrier-structural) still fail hard.
+                Err(e) if e.contains("barrier") => {
+                    eprintln!("wgsl-cpu: kernel {name:?} not JIT-compiled ({e}); must use a native fast path or the GPU");
+                    wg_size.push(None);
+                    ids.push(None);
+                    module.clear_context(&mut ctx);
+                }
+                Err(e) => return Err(format!("kernel {name:?}: {e}")),
+            }
         }
 
         module
             .finalize_definitions()
             .map_err(|e| format!("finalize: {e}"))?;
 
-        let funcs = ids.iter().map(|id| module.get_finalized_function(*id)).collect();
+        let funcs = ids.iter().map(|id| id.map(|id| module.get_finalized_function(id))).collect();
         Ok(Jit {
             _module: module,
             funcs,
@@ -151,7 +169,14 @@ impl Jit {
         uniform: *const u32,
         bufs: *const *mut u8,
     ) {
-        let f: KernelFn = std::mem::transmute(self.funcs[kind]);
+        let ptr = self.funcs[kind].unwrap_or_else(|| {
+            panic!(
+                "wgsl-cpu: kernel {:?} was not JIT-compiled (unsupported work-group structure); \
+                 dispatch it via the native fast path or the GPU backend",
+                self.names.get(kind).map(String::as_str).unwrap_or("?")
+            )
+        });
+        let f: KernelFn = std::mem::transmute(ptr);
         f(start, end, grid_x, grid_y, uniform, bufs);
     }
 }

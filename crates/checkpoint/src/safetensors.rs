@@ -97,6 +97,18 @@ pub fn parse(bytes: &[u8]) -> Result<Vec<StTensor>, String> {
                 .chunks_exact(2)
                 .map(|b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]])))
                 .collect(),
+            // Integer buffers (never learnable weights — e.g. Kronos's BSQ basis
+            // buffers) are read as f32 so the whole file parses; callers skip
+            // them by name. Exact for the small-int values these hold.
+            "I64" => raw
+                .chunks_exact(8)
+                .map(|b| i64::from_le_bytes(b.try_into().unwrap()) as f32)
+                .collect(),
+            "I32" => raw
+                .chunks_exact(4)
+                .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32)
+                .collect(),
+            "U8" => raw.iter().map(|&b| b as f32).collect(),
             other => return Err(format!("safetensors: unsupported dtype {other} for {name}")),
         };
         out.push(StTensor { name: name.clone(), shape, data });

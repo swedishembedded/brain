@@ -1,0 +1,13 @@
+[package]
+name = "brain-forecast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Model-agnostic forecasting domain types + ForecastModel seam (Panel in, distribution-valued Forecast out). No model code."
+
+[lib]
+name = "forecast"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true
