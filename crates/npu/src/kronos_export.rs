@@ -56,6 +56,87 @@ mod tests {
         std::fs::write(path, &b).unwrap();
     }
 
+    /// End-to-end: a tiny Kronos decoder's exported `decode_s1`/`decode_s2` graphs,
+    /// compiled + run through [`KronosS1Session`]/[`KronosS2Session`], must
+    /// reproduce the device `core_forward_s1`/`core_forward_s2`. Runs on the NPU
+    /// when present, else CPU-OpenVINO; skips only with no OpenVINO runtime. Guards
+    /// the multi-IO session wiring `brain npu kronos` depends on (s1: 1 in → ctx +
+    /// s1_logits; s2: ctx + sib → s2_logits).
+    #[test]
+    fn kronos_sessions_match_core_forward() {
+        use crate::openvino::{KronosS1Session, KronosS2Session, NpuConfig, NpuDevice};
+        use kronos::config::KronosConfig;
+        use kronos::decoder::KronosDecoder;
+        use std::collections::HashMap;
+
+        let cfg = KronosConfig::tiny();
+        let (d, t) = (cfg.d_model, 8usize);
+        let (vs1, vs2) = (cfg.s1_vocab(), cfg.s2_vocab());
+        let mut seed = 0x0DE_u64;
+        let mut rnd = |n: usize| -> Vec<f32> {
+            (0..n)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.1
+                })
+                .collect()
+        };
+        let weights: HashMap<String, Vec<f32>> =
+            cfg.param_list().into_iter().map(|(k, s)| (k, rnd(s.iter().product()))).collect();
+        let dec = KronosDecoder::from_weights(cfg.clone(), &weights).unwrap();
+
+        // deterministic in-vocab tokens.
+        let s1: Vec<u32> = (0..t).map(|i| (i as u32 * 3 + 1) % vs1 as u32).collect();
+        let s2: Vec<u32> = (0..t).map(|i| (i as u32 * 5 + 2) % vs2 as u32).collect();
+        let x = dec.embed_tokens(&s1, &s2, &[]);
+        let (s1_ref, ctx_ref) = dec.core_forward_s1(&x, t);
+        let sib = dec.sib_embed(&s1);
+        let s2_ref = dec.core_forward_s2(&ctx_ref, &sib, t);
+
+        // save tiny decoder, export both graphs at T=t.
+        let tmp = std::env::temp_dir().join(format!("kronos_tiny_{}.weights", std::process::id()));
+        let tmp = tmp.to_str().unwrap();
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(k, shp)| (k.clone(), shp.iter().map(|&x| x as u64).collect(), weights[&k].clone()))
+            .collect();
+        checkpoint::save(tmp, cfg.to_json(), &tensors);
+        let s1_bytes = export_onnx(tmp, t, Quant::F32).expect("export decode_s1");
+        let s2_bytes = export_dep_onnx(tmp, t, Quant::F32).expect("export decode_s2");
+        let _ = std::fs::remove_file(tmp);
+
+        let npu_cfg = NpuConfig { device: NpuDevice::Npu, allow_fallback: true, ..Default::default() };
+        let mut s1_sess = match KronosS1Session::load_bytes(&s1_bytes, &npu_cfg) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("no OpenVINO runtime, skipping: {e:?}");
+                return;
+            }
+        };
+        let mut s2_sess = KronosS2Session::load_bytes(&s2_bytes, &npu_cfg).expect("compile decode_s2");
+
+        let (ctx_npu, s1_npu) = s1_sess.run(&x).expect("s1 infer");
+        let s2_npu = s2_sess.run(&ctx_npu, &sib).expect("s2 infer");
+
+        let cos = |a: &[f32], b: &[f32]| -> f32 {
+            let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+            let na = a.iter().map(|v| v * v).sum::<f32>().sqrt();
+            let nb = b.iter().map(|v| v * v).sum::<f32>().sqrt();
+            dot / (na * nb + 1e-9)
+        };
+        let dev = s1_sess.device().to_string();
+        eprintln!(
+            "kronos sessions on {dev}: ctx cos {:.6}, s1 cos {:.6}, s2 cos {:.6}",
+            cos(&ctx_npu, &ctx_ref),
+            cos(&s1_npu, &s1_ref),
+            cos(&s2_npu, &s2_ref)
+        );
+        assert!(cos(&ctx_npu, &ctx_ref) > 0.99, "ctx parity");
+        assert!(cos(&s1_npu, &s1_ref) > 0.99, "s1_logits parity");
+        assert!(cos(&s2_npu, &s2_ref) > 0.99, "s2_logits parity");
+    }
+
     /// Env-gated: export the REAL Kronos decoder to ONNX so an external OpenVINO
     /// probe can compile it for the NPU. Writes `$KRONOS_ONNX_OUT` (or /tmp).
     #[test]

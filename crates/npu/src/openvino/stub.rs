@@ -138,6 +138,52 @@ impl Chronos2Session {
     }
 }
 
+/// The Kronos decode_s1 core graph. Never constructible on unsupported targets.
+pub struct KronosS1Session {
+    _priv: (),
+}
+
+impl KronosS1Session {
+    pub fn load_bytes(_bytes: &[u8], _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn device(&self) -> &str {
+        ""
+    }
+    pub fn seq_len(&self) -> usize {
+        0
+    }
+    pub fn s1_vocab(&self) -> usize {
+        0
+    }
+    pub fn run(&mut self, _x: &[f32]) -> Result<(Vec<f32>, Vec<f32>), NpuError> {
+        unsupported()
+    }
+}
+
+/// The Kronos decode_s2 dependency graph. Never constructible on unsupported targets.
+pub struct KronosS2Session {
+    _priv: (),
+}
+
+impl KronosS2Session {
+    pub fn load_bytes(_bytes: &[u8], _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn device(&self) -> &str {
+        ""
+    }
+    pub fn seq_len(&self) -> usize {
+        0
+    }
+    pub fn s2_vocab(&self) -> usize {
+        0
+    }
+    pub fn run(&mut self, _ctx: &[f32], _sib: &[f32]) -> Result<Vec<f32>, NpuError> {
+        unsupported()
+    }
+}
+
 /// A compiled KV-cache decode-step graph. Never constructible on unsupported targets.
 pub struct KvSession {
     _priv: (),

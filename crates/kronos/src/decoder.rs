@@ -81,14 +81,17 @@ impl KronosDecoder {
     /// `decode_s1`: fuse the (s1,s2) embeddings (+calendar), run the causal
     /// transformer, return `(s1_logits [T, s1_vocab], context [T, d])`.
     /// `stamp` is `[T, 5]` calendar indices (minute,hour,weekday,day,month).
-    pub fn decode_s1(&self, s1: &[u32], s2: &[u32], stamp: &[u32]) -> (Vec<f32>, DeviceBuffer) {
+    /// Host-assemble the decoder input embedding `x` `[T, d]` from the token
+    /// streams: hierarchical `[emb_s1·√d | emb_s2·√d] → fusion_proj` plus the
+    /// summed calendar embeddings (skipped for an empty `stamp`, matching the
+    /// reference `decode_s1(..., stamp=None)`). Returns the on-device buffer.
+    fn embed_x(&self, s1: &[u32], s2: &[u32], stamp: &[u32]) -> DeviceBuffer {
         let cfg = &self.cfg;
         let d = cfg.d_model;
         let t = s1.len();
         let ops = self.ops();
         let sqrt_d = (d as f32).sqrt();
 
-        // hierarchical embedding: [emb_s1*√d | emb_s2*√d] -> fusion_proj -> [T,d]
         let e1 = Self::gather(&self.emb_s1, s1, d, sqrt_d);
         let e2 = Self::gather(&self.emb_s2, s2, d, sqrt_d);
         let mut cat = vec![0.0f32; t * 2 * d];
@@ -98,9 +101,6 @@ impl KronosDecoder {
         }
         let catd = self.gpu.storage_init("cat", &cat);
         let x = ops.linear(&catd, "embedding.fusion_proj.weight", "embedding.fusion_proj.bias", t, 2 * d, d);
-
-        // + summed calendar embeddings (skipped when no stamp is supplied, matching
-        // the reference `decode_s1(..., stamp=None)`).
         if !stamp.is_empty() {
             let mut te = vec![0.0f32; t * d];
             for (ci, (_, _)) in CAL.iter().enumerate() {
@@ -113,6 +113,30 @@ impl KronosDecoder {
             let ted = self.gpu.storage_init("te", &te);
             ops.add(&ted, &x, t * d);
         }
+        x
+    }
+
+    /// The host token-embedding `x` `[T, d]` read back to the host — the exact
+    /// input the ONNX/NPU `decode_s1` graph consumes (feed it to
+    /// [`core_forward_s1`](Self::core_forward_s1) or the NPU s1 session).
+    pub fn embed_tokens(&self, s1: &[u32], s2: &[u32], stamp: &[u32]) -> Vec<f32> {
+        let x = self.embed_x(s1, s2, stamp);
+        self.gpu.read(&x, s1.len() * self.cfg.d_model)
+    }
+
+    /// The RAW `emb_s1` sibling embedding `sib` `[T, d]` (no `√d` scale) that
+    /// `decode_s2` cross-attends — the `sib` input the NPU s2 graph consumes.
+    pub fn sib_embed(&self, s1: &[u32]) -> Vec<f32> {
+        Self::gather(&self.emb_s1, s1, self.cfg.d_model, 1.0)
+    }
+
+    pub fn decode_s1(&self, s1: &[u32], s2: &[u32], stamp: &[u32]) -> (Vec<f32>, DeviceBuffer) {
+        let cfg = &self.cfg;
+        let d = cfg.d_model;
+        let t = s1.len();
+        let ops = self.ops();
+
+        let x = self.embed_x(s1, s2, stamp);
 
         // causal transformer blocks + final norm
         for i in 0..cfg.n_layers {

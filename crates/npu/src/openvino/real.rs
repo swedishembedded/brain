@@ -666,6 +666,171 @@ impl Chronos2Session {
     }
 }
 
+/// The Kronos `decode_s1` core graph: input `x:[1,T,D]` (host token-embedding) →
+/// two outputs `ctx:[1,T,D]` + `s1_logits:[1,T,s1_vocab]`. One AR step of the
+/// s1 head; the host embeds tokens, samples the last position, and slides.
+pub struct KronosS1Session {
+    _core: Core,
+    request: openvino::InferRequest,
+    t: usize,
+    d: usize,
+    s1v: usize,
+    ctx_idx: usize,
+    s1_idx: usize,
+    device: String,
+}
+
+impl KronosS1Session {
+    pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
+        let mut core = new_core()?;
+        let device = pick_device(&mut core, cfg)?;
+        let model = core
+            .read_model_from_buffer(bytes, None)
+            .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
+        Self::compile(core, model, device)
+    }
+
+    fn compile(mut core: Core, model: openvino::Model, device: DeviceType<'static>) -> Result<Self, NpuError> {
+        let compiled = core
+            .compile_model(&model, device.to_owned())
+            .map_err(|e| NpuError::Other(format!("compile_model on {}: {e:?}", dev_str(&device))))?;
+        let ix = compiled
+            .get_input_by_index(0)
+            .and_then(|n| n.get_shape())
+            .map_err(|e| NpuError::Other(format!("x input shape: {e:?}")))?;
+        let ixd = ix.get_dimensions();
+        let (t, d) = (ixd[1] as usize, ixd[2] as usize);
+        // two outputs, order ctx/s1_logits: disambiguate by last dim (== d → ctx).
+        let last = |i| -> Result<usize, NpuError> {
+            let s = compiled
+                .get_output_by_index(i)
+                .and_then(|n| n.get_shape())
+                .map_err(|e| NpuError::Other(format!("output {i} shape: {e:?}")))?;
+            Ok(*s.get_dimensions().last().unwrap() as usize)
+        };
+        let (l0, l1) = (last(0)?, last(1)?);
+        let (ctx_idx, s1_idx, s1v) = if l0 == d { (0, 1, l1) } else { (1, 0, l0) };
+        let mut compiled = compiled;
+        let request = compiled
+            .create_infer_request()
+            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
+        Ok(KronosS1Session { _core: core, request, t, d, s1v, ctx_idx, s1_idx, device: dev_str(&device) })
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+    pub fn seq_len(&self) -> usize {
+        self.t
+    }
+    pub fn s1_vocab(&self) -> usize {
+        self.s1v
+    }
+
+    /// Run one s1 step over the host embedding `x` (`T*D` f32). Returns
+    /// `(ctx [T*D], s1_logits [T*s1_vocab])`.
+    pub fn run(&mut self, x: &[f32]) -> Result<(Vec<f32>, Vec<f32>), NpuError> {
+        if x.len() != self.t * self.d {
+            return Err(NpuError::Other(format!("x: expected {} f32, got {}", self.t * self.d, x.len())));
+        }
+        let shape = Shape::new(&[1, self.t as i64, self.d as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        let mut tx = Tensor::new(ElementType::F32, &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        tx.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(x);
+        self.request.set_tensor("x", &tx).map_err(|e| NpuError::Other(format!("set x: {e:?}")))?;
+        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
+        let ctx = self
+            .request
+            .get_output_tensor_by_index(self.ctx_idx)
+            .map_err(|e| NpuError::Other(format!("get ctx: {e:?}")))?
+            .get_data::<f32>()
+            .map_err(|e| NpuError::Other(format!("{e:?}")))?
+            .to_vec();
+        let s1 = self
+            .request
+            .get_output_tensor_by_index(self.s1_idx)
+            .map_err(|e| NpuError::Other(format!("get s1_logits: {e:?}")))?
+            .get_data::<f32>()
+            .map_err(|e| NpuError::Other(format!("{e:?}")))?
+            .to_vec();
+        Ok((ctx, s1))
+    }
+}
+
+/// The Kronos `decode_s2` dependency graph: inputs `ctx:[1,T,D]` + `sib:[1,T,D]`
+/// (RAW `emb_s1` of the sampled s1) → `s2_logits:[1,T,s2_vocab]`.
+pub struct KronosS2Session {
+    _core: Core,
+    request: openvino::InferRequest,
+    t: usize,
+    d: usize,
+    s2v: usize,
+    device: String,
+}
+
+impl KronosS2Session {
+    pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
+        let mut core = new_core()?;
+        let device = pick_device(&mut core, cfg)?;
+        let model = core
+            .read_model_from_buffer(bytes, None)
+            .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
+        Self::compile(core, model, device)
+    }
+
+    fn compile(mut core: Core, model: openvino::Model, device: DeviceType<'static>) -> Result<Self, NpuError> {
+        let compiled = core
+            .compile_model(&model, device.to_owned())
+            .map_err(|e| NpuError::Other(format!("compile_model on {}: {e:?}", dev_str(&device))))?;
+        let ic = compiled
+            .get_input_by_index(0)
+            .and_then(|n| n.get_shape())
+            .map_err(|e| NpuError::Other(format!("ctx input shape: {e:?}")))?;
+        let icd = ic.get_dimensions();
+        let (t, d) = (icd[1] as usize, icd[2] as usize);
+        let od = compiled
+            .get_output_by_index(0)
+            .and_then(|n| n.get_shape())
+            .map_err(|e| NpuError::Other(format!("s2_logits output shape: {e:?}")))?;
+        let s2v = *od.get_dimensions().last().unwrap() as usize;
+        let mut compiled = compiled;
+        let request = compiled
+            .create_infer_request()
+            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
+        Ok(KronosS2Session { _core: core, request, t, d, s2v, device: dev_str(&device) })
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+    pub fn seq_len(&self) -> usize {
+        self.t
+    }
+    pub fn s2_vocab(&self) -> usize {
+        self.s2v
+    }
+
+    /// Run one s2 step: `ctx` (`T*D`) from the s1 session + `sib` (`T*D`) the RAW
+    /// s1-sibling embedding. Returns `s2_logits [T*s2_vocab]`.
+    pub fn run(&mut self, ctx: &[f32], sib: &[f32]) -> Result<Vec<f32>, NpuError> {
+        if ctx.len() != self.t * self.d || sib.len() != self.t * self.d {
+            return Err(NpuError::Other(format!("ctx/sib: expected {} f32 each", self.t * self.d)));
+        }
+        let shape = Shape::new(&[1, self.t as i64, self.d as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        let mut tc = Tensor::new(ElementType::F32, &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        tc.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(ctx);
+        self.request.set_tensor("ctx", &tc).map_err(|e| NpuError::Other(format!("set ctx: {e:?}")))?;
+        let mut ts = Tensor::new(ElementType::F32, &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        ts.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(sib);
+        self.request.set_tensor("sib", &ts).map_err(|e| NpuError::Other(format!("set sib: {e:?}")))?;
+        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
+        let out = self
+            .request
+            .get_output_tensor_by_index(0)
+            .map_err(|e| NpuError::Other(format!("get s2_logits: {e:?}")))?;
+        Ok(out.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec())
+    }
+}
+
 /// A compiled codec-decoder graph: int64 `codes:[nq,T]` (codebook-major) ->
 /// f32 `waveform:[1,1,L]`. Single whole-graph inference (no autoregression).
 pub struct CodecSession {

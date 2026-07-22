@@ -72,6 +72,14 @@ impl KronosModel {
     pub fn decoder_config(&self) -> &KronosConfig {
         self.decoder.config()
     }
+    /// The decoder (host embedding + s1/s2 cores) — used by the NPU AR-loop driver.
+    pub fn decoder(&self) -> &KronosDecoder {
+        &self.decoder
+    }
+    /// The frozen BSQ tokenizer — decode generated `(s1, s2)` tails back to bars.
+    pub fn tokenizer(&self) -> &KronosTokenizer {
+        &self.tokenizer
+    }
     /// Frozen-tokenizer path: per-feature-normalize `bars` `[t, feat]` (past-only,
     /// clip ±5, the inference contract) then BSQ-encode → `(s1, s2)` token streams
     /// `[t]`. Used to build fine-tuning batches without touching the tokenizer.

@@ -175,7 +175,7 @@ mod tests {
         let (model, base) = tiny_model();
         let series: Vec<Series> = (0..3).map(|i| synth_series(&format!("S{i}"), 120)).collect();
         let split = SplitConfig { train_frac: 0.6, val_frac: 0.25, embargo: 5 };
-        let opts = FinetuneOpts { epochs: 2, lr: 1e-3, wd: 0.0, clip: 3.0, lora: None };
+        let opts = FinetuneOpts { epochs: 2, lr: 1e-3, wd: 0.0, clip: 3.0, lora: None, progress: false };
         let (rep, w) = finetune_universe(&model, &base, &series, 10, 3, split, &opts);
         // plumbing must run and produce a well-formed decision.
         assert!(rep.base_val.is_finite() && rep.ft_val.is_finite());

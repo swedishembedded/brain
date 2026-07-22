@@ -17,7 +17,9 @@
 use std::path::Path;
 use std::time::Instant;
 
-use npu::openvino::{Chronos2Session, NpuConfig, NpuDevice, NpuError, NpuSession, PerfHint};
+use npu::openvino::{
+    Chronos2Session, KronosS1Session, KronosS2Session, NpuConfig, NpuDevice, NpuError, NpuSession, PerfHint,
+};
 
 pub fn run_npu(args: &[String]) {
     match args.first().map(|s| s.as_str()) {
@@ -28,8 +30,9 @@ pub fn run_npu(args: &[String]) {
         Some("bench") => bench(&args[1..]),
         Some("sim") => sim(&args[1..]),
         Some("chronos2") => chronos2(&args[1..]),
+        Some("kronos") => kronos(&args[1..]),
         other => eprintln!(
-            "usage: brain npu <export|quantize|check|run|bench|sim|chronos2> ...  (got {other:?})"
+            "usage: brain npu <export|quantize|check|run|bench|sim|chronos2|kronos> ...  (got {other:?})"
         ),
     }
 }
@@ -160,6 +163,185 @@ fn chronos2(args: &[String]) {
 
 fn parse_opt_u32(args: &[String], i: &mut usize, flag: &str) -> Option<u32> {
     val(args, i, flag).parse().ok()
+}
+
+fn argmax(x: &[f32]) -> u32 {
+    (0..x.len()).max_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap()).unwrap_or(0) as u32
+}
+
+/// The Kronos AR rollout, parameterized by the s1/s2 **core** so the identical
+/// loop runs on the device (`core_forward_s1/s2`) or the NPU (the two sessions):
+/// per step, host-embed the window → s1 core → argmax → sib-embed → s2 core →
+/// argmax → append → slide the `t_win` window. Returns the generated `(s1, s2)`
+/// token tails. `s1_core(x) -> (ctx, s1_logits)`; `s2_core(ctx, sib) -> s2_logits`.
+fn kronos_rollout<F1, F2>(
+    dec: &kronos::decoder::KronosDecoder,
+    s1_ctx: &[u32],
+    s2_ctx: &[u32],
+    horizon: usize,
+    t_win: usize,
+    mut s1_core: F1,
+    mut s2_core: F2,
+) -> (Vec<u32>, Vec<u32>)
+where
+    F1: FnMut(&[f32]) -> (Vec<f32>, Vec<f32>),
+    F2: FnMut(&[f32], &[f32]) -> Vec<f32>,
+{
+    let (vs1, vs2) = (dec.config().s1_vocab(), dec.config().s2_vocab());
+    let ctx_len = s1_ctx.len();
+    let mut s1 = s1_ctx.to_vec();
+    let mut s2 = s2_ctx.to_vec();
+    for _ in 0..horizon {
+        let len = s1.len();
+        let w0 = len - t_win;
+        let (s1w, s2w) = (&s1[w0..], &s2[w0..]);
+        let x = dec.embed_tokens(s1w, s2w, &[]);
+        let (ctx, s1_logits) = s1_core(&x);
+        let samp_s1 = argmax(&s1_logits[(t_win - 1) * vs1..t_win * vs1]);
+        let mut s1_cond = s1w.to_vec();
+        *s1_cond.last_mut().unwrap() = samp_s1;
+        let sib = dec.sib_embed(&s1_cond);
+        let s2_logits = s2_core(&ctx, &sib);
+        let samp_s2 = argmax(&s2_logits[(t_win - 1) * vs2..t_win * vs2]);
+        s1.push(samp_s1);
+        s2.push(samp_s2);
+    }
+    (s1[ctx_len..].to_vec(), s2[ctx_len..].to_vec())
+}
+
+/// `brain npu kronos` — autoregressive Kronos forecast with both decoder graphs
+/// (`decode_s1` → s1, `decode_s2` → s2) running on the NPU. The host does BSQ
+/// tokenization, token embedding, argmax, and the sliding window. `--compare`
+/// also runs the identical rollout on the device core and reports token
+/// agreement (the NPU-vs-device parity check).
+fn kronos(args: &[String]) {
+    let mut tok_dir = String::new();
+    let mut dec_dir = String::new();
+    let mut context_len = 0usize; // 0 → use the decoder's max_context
+    let mut horizon = 8usize;
+    let mut compare = false;
+    let mut opts = NpuOpts::default();
+    let mut i = 0;
+    while i < args.len() {
+        if opts.parse_flag(args, &mut i) {
+            i += 1;
+            continue;
+        }
+        match args[i].as_str() {
+            "--kronos-tokenizer" | "--tokenizer" => tok_dir = val(args, &mut i, "--kronos-tokenizer"),
+            "--kronos-decoder" | "--decoder" => dec_dir = val(args, &mut i, "--kronos-decoder"),
+            "--context-len" => context_len = val(args, &mut i, "--context-len").parse().unwrap_or(0),
+            "--horizon" => horizon = val(args, &mut i, "--horizon").parse().unwrap_or(horizon),
+            "--compare" => compare = true,
+            other => {
+                eprintln!("brain npu kronos: unknown flag {other:?}");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    if tok_dir.is_empty() || dec_dir.is_empty() {
+        eprintln!(
+            "usage: brain npu kronos --kronos-tokenizer T --kronos-decoder D \
+             [--context-len N] [--horizon H] [--device NPU] [--compare]"
+        );
+        return;
+    }
+
+    let model = match kronos::import::load_model(&tok_dir, &dec_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("load kronos: {e}");
+            return;
+        }
+    };
+    // The graph is fixed-length; keep the window at exactly `t_win` so the device
+    // and NPU rollouts slide identically. Default to the decoder's max_context.
+    let t_win = if context_len > 0 { context_len } else { model.max_context() };
+    let feat = model.feat();
+
+    // synthetic OHLCV(+amount) context of `t_win` bars → BSQ tokens.
+    let mut bars = Vec::with_capacity(t_win * feat);
+    for i in 0..t_win {
+        let p = 100.0 + (i as f32 * 0.1).sin() * 5.0;
+        let (o, h, l, c, v) = (p, p + 0.5, p - 0.5, p + 0.2, 1000.0 + i as f32);
+        bars.extend_from_slice(&[o, h, l, c, v]);
+        if feat >= 6 {
+            bars.push(v * (o + h + l + c) / 4.0);
+        }
+        for _ in 6..feat {
+            bars.push(0.0);
+        }
+    }
+    let (s1_ctx, s2_ctx) = model.tokenize(&bars, t_win);
+    let dec = model.decoder();
+    let cfg = opts.to_config();
+
+    // export both graphs at T = t_win.
+    let s1_bytes = npu::kronos_export::export_onnx(&dec_dir, t_win, npu::qwen_topology::Quant::F32)
+        .unwrap_or_else(|e| {
+            eprintln!("export decode_s1: {e}");
+            std::process::exit(1);
+        });
+    let s2_bytes = npu::kronos_export::export_dep_onnx(&dec_dir, t_win, npu::qwen_topology::Quant::F32)
+        .unwrap_or_else(|e| {
+            eprintln!("export decode_s2: {e}");
+            std::process::exit(1);
+        });
+    let mut s1_sess = KronosS1Session::load_bytes(&s1_bytes, &cfg).unwrap_or_else(|e| {
+        eprintln!("compile decode_s1: {e}");
+        std::process::exit(1);
+    });
+    let mut s2_sess = KronosS2Session::load_bytes(&s2_bytes, &cfg).unwrap_or_else(|e| {
+        eprintln!("compile decode_s2: {e}");
+        std::process::exit(1);
+    });
+    let device = s1_sess.device().to_string();
+
+    let t0 = Instant::now();
+    let (g1, g2) = kronos_rollout(
+        dec,
+        &s1_ctx,
+        &s2_ctx,
+        horizon,
+        t_win,
+        |x| s1_sess.run(x).expect("npu decode_s1"),
+        |ctx, sib| s2_sess.run(ctx, sib).expect("npu decode_s2"),
+    );
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    let per_step = ms / horizon.max(1) as f64;
+
+    // detokenize the generated tail → normalized bars; show the close column.
+    let recon = model.tokenizer().decode(&g1, &g2); // [horizon, feat] normalized
+    let close: Vec<f32> = (0..horizon).map(|k| (recon[k * feat + 3] * 1000.0).round() / 1000.0).collect();
+    println!(
+        "kronos AR forecast on {device} · T={t_win} · horizon {horizon} · {ms:.1} ms ({per_step:.1} ms/step)"
+    );
+    println!("  generated {} s1 + {} s2 tokens; recon close (normalized): {close:?}", g1.len(), g2.len());
+
+    if compare {
+        let (d1, d2) = kronos_rollout(
+            dec,
+            &s1_ctx,
+            &s2_ctx,
+            horizon,
+            t_win,
+            |x| {
+                let (l, c) = dec.core_forward_s1(x, t_win);
+                (c, l)
+            },
+            |ctx, sib| dec.core_forward_s2(ctx, sib, t_win),
+        );
+        let a1 = g1.iter().zip(&d1).filter(|(a, b)| a == b).count();
+        let a2 = g2.iter().zip(&d2).filter(|(a, b)| a == b).count();
+        println!(
+            "  vs device core: s1 {}/{} match, s2 {}/{} match",
+            a1,
+            g1.len(),
+            a2,
+            g2.len()
+        );
+    }
 }
 
 /// Shared NPU run/compile options.
