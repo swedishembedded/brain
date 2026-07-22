@@ -42,6 +42,41 @@ pub fn pinball(q: f32, y: f32, tau: f32) -> f32 {
     (tau * e).max((tau - 1.0) * e)
 }
 
+/// Gradient of [`pinball`] with respect to the prediction `q` — the backward the
+/// Chronos-2 (and any quantile-head) trainer needs. Piecewise-constant: the loss
+/// is `tau*(y-q)` when `q < y` (slope `-tau`) and `(1-tau)*(q-y)` when `q > y`
+/// (slope `1-tau`). At the non-differentiable kink `q == y` we return the
+/// subgradient midpoint `tau - 0.5` (any value in `[-tau, 1-tau]` is valid).
+pub fn pinball_grad(q: f32, y: f32, tau: f32) -> f32 {
+    if q < y {
+        -tau
+    } else if q > y {
+        1.0 - tau
+    } else {
+        tau - 0.5
+    }
+}
+
+/// Gradient of [`mean_pinball`] w.r.t. each predicted quantile: a row-major
+/// `[H, Q]` matrix matching `quantiles`, scaled by `1/(H*Q)` to match the mean.
+pub fn mean_pinball_grad(quantiles: &[f32], levels: &[f32], actual: &[f32]) -> Vec<f32> {
+    let (h, qn) = (actual.len(), levels.len());
+    let mut g = vec![0.0f32; quantiles.len()];
+    if h == 0 || qn == 0 {
+        return g;
+    }
+    let scale = 1.0 / (h * qn) as f32;
+    for (t, &y) in actual.iter().enumerate() {
+        for (k, &tau) in levels.iter().enumerate() {
+            let idx = t * qn + k;
+            if idx < quantiles.len() {
+                g[idx] = pinball_grad(quantiles[idx], y, tau) * scale;
+            }
+        }
+    }
+    g
+}
+
 /// Mean pinball loss over a horizon and quantile grid. `quantiles` is a
 /// row-major `[H, Q]` matrix (step-major), `levels` the `Q` tau values,
 /// `actual` length `H`.
@@ -261,6 +296,49 @@ mod tests {
     fn mean_pinball_averages_over_horizon_and_levels() {
         let q = [1.0f32, 5.0];
         assert!((mean_pinball(&q, &[0.5], &[3.0, 4.0]) - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pinball_grad_matches_finite_difference() {
+        // Away from the kink (q != y), the analytic slope must match a central
+        // finite difference of `pinball`.
+        let eps = 1e-3f32;
+        for &(q, y, tau) in &[(1.0f32, 3.0, 0.1), (5.0, 2.0, 0.9), (0.3, -0.4, 0.5), (2.0, 2.5, 0.25)] {
+            let numeric = (pinball(q + eps, y, tau) - pinball(q - eps, y, tau)) / (2.0 * eps);
+            let analytic = pinball_grad(q, y, tau);
+            assert!((numeric - analytic).abs() < 1e-3, "q={q} y={y} tau={tau}: {numeric} vs {analytic}");
+        }
+        // At the kink the subgradient is the midpoint tau-0.5, in [-tau, 1-tau].
+        let g = pinball_grad(2.0, 2.0, 0.3);
+        assert!((-0.3..=0.7).contains(&g));
+    }
+
+    #[test]
+    fn mean_pinball_grad_matches_finite_difference_elementwise() {
+        // The gradient the quantile-head trainer backprops must be the exact
+        // derivative of `mean_pinball` w.r.t. every predicted quantile.
+        let levels = [0.1f32, 0.5, 0.9];
+        let actual = [1.0f32, -0.5, 2.0, 0.25];
+        // [H=4, Q=3] grid, none coinciding with an actual (avoid the kink).
+        let mut q: Vec<f32> = (0..12).map(|i| 0.37 * i as f32 - 1.1).collect();
+        for (i, &a) in actual.iter().enumerate() {
+            for k in 0..levels.len() {
+                if (q[i * levels.len() + k] - a).abs() < 1e-2 {
+                    q[i * levels.len() + k] += 0.1;
+                }
+            }
+        }
+        let analytic = mean_pinball_grad(&q, &levels, &actual);
+        let eps = 1e-3f32;
+        for i in 0..q.len() {
+            let mut qp = q.clone();
+            qp[i] += eps;
+            let mut qm = q.clone();
+            qm[i] -= eps;
+            let numeric =
+                (mean_pinball(&qp, &levels, &actual) - mean_pinball(&qm, &levels, &actual)) / (2.0 * eps);
+            assert!((numeric - analytic[i]).abs() < 1e-3, "elem {i}: {numeric} vs {}", analytic[i]);
+        }
     }
 
     #[test]
