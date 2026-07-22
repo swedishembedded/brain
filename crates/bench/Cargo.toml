@@ -19,4 +19,7 @@ brain-glm.workspace = true
 brain-autoencoder.workspace = true
 brain-eval.workspace = true
 brain-checkpoint.workspace = true
+# Forecasting scenarios (fcbench) so the forecasting battery registers as
+# Benchmarks alongside the LM/algorithmic ones.
+brain-fcbench.workspace = true
 serde_json.workspace = true

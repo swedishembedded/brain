@@ -150,6 +150,9 @@ fn grid_for(knob: Knob) -> Vec<(String, Size)> {
 /// - **arithmetic** → `mod_add`: the only arithmetic benchmark (informational;
 ///   grokking, so its curve is high-variance at a smoke budget — reported as a
 ///   diagnostic).
+/// - **forecasting** → `forecast_seasonal_trend`: the forecasting probe ignores
+///   the swept decoder entirely (its skill is a property of the scenario, not the
+///   arch), so its curve is flat — informational, reported for completeness.
 pub fn representative_bench(axis: &str) -> Option<&'static str> {
     match axis {
         "recall" => Some("mqar"),
@@ -158,6 +161,7 @@ pub fn representative_bench(axis: &str) -> Option<&'static str> {
         "state_tracking" => Some("parity"),
         "compression" => Some("mad_compress"),
         "arithmetic" => Some("mod_add"),
+        "forecasting" => Some("forecast_seasonal_trend"),
         _ => None,
     }
 }
@@ -181,6 +185,12 @@ fn build_bench(name: &str, cfg: &CapScaleConfig) -> Option<(Box<dyn Benchmark>, 
         "parity" => Box::new(parity::Parity { steps, n_sequences: n, eval_sequences: e, ..Default::default() }),
         "mad_compress" => Box::new(mad_compress::MadCompress { steps, n_sequences: n, eval_sequences: e, ..Default::default() }),
         "mod_add" => Box::new(mod_add::ModAdd { steps, ..Default::default() }),
+        // Forecasting probes ignore the decoder; build by scenario name.
+        n if n.starts_with("forecast_") => {
+            let b = crate::forecast_bench::build(n, e.max(8))?;
+            let informational = b.informational();
+            return Some((b, informational));
+        }
         _ => return None,
     };
     let informational = b.informational();

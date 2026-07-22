@@ -23,10 +23,14 @@
 //! - **compression** — bottleneck reconstruction: `mad_compress`.
 //! - **arithmetic** — modular-addition generalization (grokking): `mod_add`
 //!   (this benchmark is *informational*; see [`crate::Benchmark::informational`]).
+//! - **forecasting** — time-series skill on structured processes:
+//!   `forecast_seasonal_trend`, `forecast_ar1`, `forecast_garch_vol`,
+//!   `forecast_regime_switch`, `forecast_random_walk` (negative control),
+//!   `forecast_jump_diffusion` (all *informational*; they ignore the decoder arch).
 
 /// The canonical list of capability axes, in display order.
 pub const AXES: &[&str] =
-    &["recall", "copying", "memory", "state_tracking", "compression", "arithmetic"];
+    &["recall", "copying", "memory", "state_tracking", "compression", "arithmetic", "forecasting"];
 
 /// The capability axis a benchmark belongs to. Unknown names map to `"other"` so
 /// a newly-registered benchmark is still surfaced (and a `debug_assert` in tests
@@ -39,6 +43,8 @@ pub fn axis_of(name: &str) -> &'static str {
         "parity" | "dyck" => "state_tracking",
         "mad_compress" => "compression",
         "mod_add" => "arithmetic",
+        // Every forecasting scenario benchmark (forecast_seasonal_trend, …).
+        n if n.starts_with("forecast_") => "forecasting",
         _ => "other",
     }
 }

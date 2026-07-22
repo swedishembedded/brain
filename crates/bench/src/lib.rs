@@ -35,6 +35,7 @@ pub mod arch;
 pub mod axes;
 pub mod capscale;
 pub mod eval;
+pub mod forecast_bench;
 pub mod mad_compress;
 pub mod mad_fuzzy_recall;
 pub mod mad_memorize;
@@ -144,7 +145,7 @@ pub struct Outcome {
 /// All registered benchmarks. Sibling agents add new ones here (MAD, formal
 /// languages, scaling sweeps, …) by pushing another boxed [`Benchmark`].
 pub fn registry() -> Vec<Box<dyn Benchmark>> {
-    vec![
+    let mut benches: Vec<Box<dyn Benchmark>> = vec![
         Box::new(mqar::Mqar::default()),
         Box::new(toolcall::Toolcall::default()),
         Box::new(mad_recall::MadRecall::default()),
@@ -159,7 +160,10 @@ pub fn registry() -> Vec<Box<dyn Benchmark>> {
         // Non-LM objective: a bottleneck autoencoder with an MSE Regression head
         // (ADR §6 / PR-10) — sequence -> single compressed `z` -> reconstruction.
         Box::new(mad_compress::MadCompress::default()),
-    ]
+    ];
+    // Forecasting scenarios (informational; they ignore the decoder arch).
+    benches.extend(forecast_bench::forecast_benchmarks());
+    benches
 }
 
 /// A **smoke** registry: the same benchmarks as [`registry`] but with their step
@@ -173,7 +177,7 @@ pub fn registry_smoke() -> Vec<Box<dyn Benchmark>> {
     const STEPS: u32 = 30;
     const SEQS: usize = 600;
     const EVALS: usize = 40;
-    vec![
+    let mut benches: Vec<Box<dyn Benchmark>> = vec![
         Box::new(mqar::Mqar { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
         Box::new(toolcall::Toolcall { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
         Box::new(mad_recall::MadRecall { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
@@ -185,7 +189,9 @@ pub fn registry_smoke() -> Vec<Box<dyn Benchmark>> {
         Box::new(mod_add::ModAdd { steps: STEPS, ..Default::default() }),
         Box::new(dyck::Dyck { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
         Box::new(mad_compress::MadCompress { steps: STEPS, n_sequences: SEQS, eval_sequences: EVALS, ..Default::default() }),
-    ]
+    ];
+    benches.extend(forecast_bench::forecast_benchmarks_smoke());
+    benches
 }
 
 /// Look up a benchmark by [`Benchmark::name`].
