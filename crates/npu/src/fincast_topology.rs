@@ -237,8 +237,12 @@ impl Topo<'_> {
         o
     }
     fn reduce_sum(&mut self, x: &str, axis: i64) -> String {
+        // opset-13 ReduceSum takes `axes` as an INPUT tensor (not an attribute, as
+        // ReduceMean still does until opset 18) — pass it as an initializer.
+        let ax = format!("sum_axes_{axis}");
+        self.i64(&ax, &[1], vec![axis]);
         let o = self.tmp("rsum");
-        self.g.add(Node::new("ReduceSum", &[x], &[&o]).attr_ints("axes", &[axis]).attr_int("keepdims", 1));
+        self.g.add(Node::new("ReduceSum", &[x, &ax], &[&o]).attr_int("keepdims", 1));
         o
     }
     fn topk(&mut self, x: &str, k: &str, largest: i64) -> (String, String) {

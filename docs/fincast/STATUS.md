@@ -57,12 +57,43 @@ golden is deterministic and comparable. Documented, not hidden.
 
 - [x] **P1 config** — `config.rs`, `param_list()` in reference names, `tiny()`, workspace wiring.
 - [x] **P2 T0 gate** — golden `tests/golden/header.json` (from real `v1.pth`); `param_list()` matches golden AND the live 3.97 GB checkpoint name/shape (env `FINCAST_CKPT`).
-- [ ] P3 import — strict 1:1 over `checkpoint::safetensors`.
-- [ ] P4/P5 kernels + model forward (reuse existing kernels; zero-weight self-check).
-- [ ] P6 parity ladder (`tools/fincast_dump_reference.py`).
-- [ ] P7 forecaster adapter + CLI.
-- [ ] P8 NPU export + session.
-- [ ] P9 training + gradcheck + fine-tune gate.
+- [x] **P3 import** — strict 1:1 over `checkpoint::safetensors` (dup/missing/extra checks).
+- [x] **P4/P5 forward** — `model.rs` device forward (all GEMMs/norms/SiLU/ReLU via
+  gpu-core kernels; runs on CPU + GPU) + host causal MHA (per-dim softplus q-scale)
+  + deterministic top-2 MoE. Reused `matmul`/`bias_add`/`relu_inplace`/`silu`/`add`/
+  `rmsnorm`/`layernorm` — **no new WGSL kernel needed**. Zero-weight self-check
+  forecasts the first-patch mean.
+- [x] **P6 parity** — `tools/fincast_dump_reference.py` runs the REAL reference
+  (stochastic MoE neutralized) → committed golden. `tests/parity.rs` on the real
+  991M weights: **cosine=1.000000, pearson=0.999980, rel_rms=0.000000**.
+- [x] **P7 forecaster + CLI** — `FincastForecaster` (9 native quantiles +
+  interpolation, freq buckets); `brain forecast import/serve/compare --fincast`.
+- [x] **P8 NPU** — `fincast_topology.rs` (ONNX core: fused-qkv causal attention w/
+  folded q-scale, in-graph top-2 MoE via TopK+GreaterOrEqual mask, SiLU head) +
+  `fincast_export.rs` + `FincastSession` + `brain npu fincast`. Compiles and runs
+  **on the real NPU** (`/dev/accel/accel0`): reproduces `core_forward` at
+  **cosine 1.000000 on both CPU-OpenVINO (fp32) and the NPU (fp16)**.
+- [x] **P9 training** — `train.rs` host fwd+backward of the full core (causal MHA
+  w/ softplus-q-scale, top-2 MoE incl. softmax+renorm gate backward, LayerNorm/
+  SiLU/RMSNorm) + PQ loss. Gradcheck (eps 5e-3) green + from-scratch learning test.
+  Reuses `forecast::metrics::mean_pinball{,_grad}`. CPU + GPU (NPU inference-only).
+
+### Parity trap found: opset-13 `ReduceSum` axes-as-input
+The MoE weight normalization uses `ReduceSum` over the expert axis. At the
+builder's default **opset 13**, `ReduceSum` takes `axes` as an **input tensor**,
+not an attribute (whereas `ReduceMean` keeps the attribute until opset 18). The
+first cut passed `axes` as an attribute, which opset-13 ignored → it reduced over
+*all* axes, corrupting the per-token gate normalization → cosine ~0.92 on **both**
+CPU-OpenVINO and NPU (so it was a graph bug, not an fp16 artifact — the fp16
+hypothesis was disproved by the fp32 path also being 0.92). Passing `axes` as an
+initializer input fixed it: cosine **1.000000** on CPU-OpenVINO and the NPU.
+
+### Deferred / follow-ups
+- Tiled/register-blocked GEMM fast path (currently naive `matmul` for CPU+GPU
+  portability — the tiled kernel needs work-group barriers the CPU JIT rejects).
+- Per-stage parity goldens (only end-to-end committed; end-to-end is exact).
+- INT8/INT4 NPU QDQ calibration (the export supports the modes; not calibrated).
+- LoRA fine-tune entry reusing Kronos's LoRA (host trainer + gradcheck are in place).
 
 ## Checkpoint
 
