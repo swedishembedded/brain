@@ -857,7 +857,27 @@ impl KronosTrain {
             if name == "embedding.fusion_l" || name == "embedding.fusion_r" {
                 continue;
             }
-            w.insert(name.clone(), self.ps.read_weight(&self.gpu, &name));
+            let mut wv = self.ps.read_weight(&self.gpu, &name);
+            // Under LoRA the base weight is frozen; fold the trained adapter into it
+            // so the saved checkpoint carries the adaptation: W += (α/r)·(B·A),
+            // A = lora_a [r, k], B = lora_b [nout, r], W [nout, k].
+            if let Some((r, scale)) = self.lora_for(&name) {
+                let r = r as usize;
+                let a = self.ps.read_weight(&self.gpu, &format!("{name}.lora_a"));
+                let b = self.ps.read_weight(&self.gpu, &format!("{name}.lora_b"));
+                let k = a.len() / r; // A is [r, k]
+                let nout = wv.len() / k;
+                for o in 0..nout {
+                    for j in 0..k {
+                        let mut acc = 0.0f32;
+                        for x in 0..r {
+                            acc += b[o * r + x] * a[x * k + j];
+                        }
+                        wv[o * k + j] += scale * acc;
+                    }
+                }
+            }
+            w.insert(name.clone(), wv);
         }
         let fl = self.ps.read_weight(&self.gpu, "embedding.fusion_l");
         let fr = self.ps.read_weight(&self.gpu, "embedding.fusion_r");

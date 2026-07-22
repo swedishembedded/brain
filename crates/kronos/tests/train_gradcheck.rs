@@ -269,3 +269,47 @@ fn milestone_e_promotion_gate() {
     eprintln!("gate(noop): base_val {:.3} ft_val {:.3} promoted {}", rep0.base_val, rep0.ft_val, rep0.promoted);
     assert!(!rep0.promoted && w0.is_none(), "gate must reject a non-improvement");
 }
+
+#[test]
+fn milestone_d_lora_merge_matches_adapted_forward() {
+    if skip() {
+        return;
+    }
+    // Train LoRA adapters, then check the merged (reference) weights reproduce the
+    // adapted model's forward exactly — i.e. save() carries the fine-tune.
+    let cfg = KronosConfig::tiny();
+    let t = 8u32;
+    let m = KronosTrain::with_lora(cfg.clone(), t, &init_weights(&cfg, 5), Some(LoraCfg::attn(4, 8.0)));
+    let mut r = Rng(5 ^ 0xDEAD_BEEF);
+    let s1: Vec<u32> = (0..t).map(|_| r.below(cfg.s1_vocab() as u32)).collect();
+    let s2: Vec<u32> = (0..t).map(|_| r.below(cfg.s2_vocab() as u32)).collect();
+    let cal: [Vec<u32>; 5] = std::array::from_fn(|c| (0..t).map(|_| r.below(CAL[c].1 as u32)).collect());
+    let samp: Vec<u32> = (0..t).map(|_| r.below(cfg.s1_vocab() as u32)).collect();
+    let tg1: Vec<u32> = (0..t).map(|_| r.below(cfg.s1_vocab() as u32)).collect();
+    let tg2: Vec<u32> = (0..t).map(|_| r.below(cfg.s2_vocab() as u32)).collect();
+    let calr: [&[u32]; 5] = [&cal[0], &cal[1], &cal[2], &cal[3], &cal[4]];
+
+    let base_loss = {
+        // base = merged BEFORE any training (adapters B=0 → merged == base)
+        let merged0 = m.to_reference_weights();
+        let base = KronosTrain::new(cfg.clone(), t, &merged0);
+        base.set_batch(&s1, &s2, &calr, &samp, &tg1, &tg2);
+        base.forward()
+    };
+    m.set_batch(&s1, &s2, &calr, &samp, &tg1, &tg2);
+    for step in 1..=30u32 {
+        m.zero_grads();
+        let _ = m.forward();
+        m.backward();
+        m.adamw_step(step, 1e-2, 0.0, Some(3.0));
+    }
+    let l_lora = m.forward();
+    // merged full-precision weights → a fresh full model; forward must match.
+    let merged = m.to_reference_weights();
+    let full = KronosTrain::new(cfg, t, &merged);
+    full.set_batch(&s1, &s2, &calr, &samp, &tg1, &tg2);
+    let l_merged = full.forward();
+    eprintln!("merge: base {base_loss:.4}  lora {l_lora:.4}  merged {l_merged:.4}");
+    assert!((l_lora - l_merged).abs() < 2e-3, "merged forward {l_merged} != adapted {l_lora}");
+    assert!((l_lora - base_loss).abs() > 1e-3, "adaptation had no effect (merge/base identical)");
+}
