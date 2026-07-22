@@ -35,6 +35,7 @@ struct FmPaths {
     chronos2: Option<String>,
     kronos_tokenizer: Option<String>,
     kronos_decoder: Option<String>,
+    fincast: Option<String>,
 }
 
 /// Build a registry with the statistical baselines registered by name, plus any
@@ -63,17 +64,37 @@ fn build_registry(fm: &FmPaths) -> runtime::Registry {
             Err(e) => eprintln!("brain forecast: failed to load kronos: {e}"),
         }
     }
+    if let Some(path) = &fm.fincast {
+        match fincast::FincastForecaster::load(path) {
+            Ok(m) => {
+                reg.register_forecast(Arc::new(m));
+                eprintln!("brain forecast: loaded fincast from {path}");
+            }
+            Err(e) => eprintln!("brain forecast: failed to load fincast from {path}: {e}"),
+        }
+    }
     reg
 }
 
-/// `brain forecast import --hf <dir> --out chronos2.weights`.
+/// `brain forecast import --hf <dir> --out chronos2.weights` (Chronos-2), or
+/// `brain forecast import --fincast <v1.safetensors> --out fincast.weights`.
 fn import(args: &[String]) {
     let mut a = Args::new(args);
     let hf = a.str_or("--hf", "");
+    let fincast_ckpt = a.take_str("--fincast");
     let out = a.str_or("--out", "chronos2.weights");
     a.finish();
+    if let Some(ckpt) = fincast_ckpt {
+        let out = if out == "chronos2.weights" { "fincast.weights".to_string() } else { out };
+        match fincast::import::import(&ckpt, &out) {
+            Ok(()) => println!("ok: wrote {out}"),
+            Err(e) => eprintln!("import failed: {e}"),
+        }
+        return;
+    }
     if hf.is_empty() {
         eprintln!("usage: brain forecast import --hf <amazon/chronos-2 dir> --out chronos2.weights");
+        eprintln!("   or: brain forecast import --fincast <FinCast safetensors> --out fincast.weights");
         return;
     }
     match chronos2::import::import(&hf, &out) {
@@ -90,6 +111,7 @@ fn compare(args: &[String]) {
     let chronos2_weights = a.take_str("--chronos2");
     let kronos_tok = a.take_str("--kronos-tokenizer");
     let kronos_dec = a.take_str("--kronos-decoder");
+    let fincast_weights = a.take_str("--fincast");
     a.finish();
 
     let mut models = fcbench::baselines::default_set();
@@ -111,6 +133,16 @@ fn compare(args: &[String]) {
                 models.push(Box::new(m));
             }
             Err(e) => eprintln!("comparison: failed to load kronos: {e}"),
+        }
+    }
+    // optionally add the finance-native FinCast MoE model.
+    if let Some(path) = &fincast_weights {
+        match fincast::FincastForecaster::load(path) {
+            Ok(m) => {
+                eprintln!("comparison: loaded fincast from {path} (slow on CPU — keep --windows small)");
+                models.push(Box::new(m));
+            }
+            Err(e) => eprintln!("comparison: failed to load fincast from {path}: {e}"),
         }
     }
     let scenarios = fcbench::scenarios::default_battery();
@@ -142,6 +174,7 @@ fn serve(args: &[String]) {
     let chronos2 = a.take_str("--chronos2");
     let kronos_tok = a.take_str("--kronos-tokenizer");
     let kronos_dec = a.take_str("--kronos-decoder");
+    let fincast = a.take_str("--fincast");
     let max_conn = a.usize_or("--max-connections", 64);
     a.finish();
 
@@ -149,6 +182,7 @@ fn serve(args: &[String]) {
         chronos2: chronos2.clone(),
         kronos_tokenizer: kronos_tok,
         kronos_decoder: kronos_dec,
+        fincast,
     };
 
     let opts = server::ServeOpts { max_connections: max_conn };
