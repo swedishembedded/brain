@@ -184,6 +184,33 @@ fn rankic_backtest() {
     let model = kronos::import::load_model(&tok, &dec).expect("load kronos");
     let t_start = std::time::Instant::now();
 
+    // Serialize the accumulated records to `out`. Called after EVERY origin (not
+    // just at the end) so a run killed by a wall-clock timeout — common on a
+    // contended box — still leaves a valid, usable JSON of the origins completed
+    // so far. `n_origins` reflects origins actually written, so downstream tooling
+    // can intersect a partial fine-tuned run against a complete base run.
+    let write_json = |recs: &[(usize, String, String, f32, f32)], n_orig_done: usize| {
+        let mut js = String::from("{\n");
+        let _ = write!(
+            js,
+            "  \"meta\": {{\"context\": {ctx_len}, \"horizon\": {horizon}, \"step\": {step}, \"argmax\": {argmax}, \"nsamples\": {nsamples}, \"n_tickers\": {}, \"n_origins\": {n_orig_done}}},\n",
+            series.len(),
+        );
+        js.push_str("  \"records\": [\n");
+        for (i, (o, date, tk, pred, real)) in recs.iter().enumerate() {
+            let comma = if i + 1 < recs.len() { "," } else { "" };
+            let _ = write!(
+                js,
+                "    {{\"o\": {o}, \"date\": \"{date}\", \"ticker\": \"{tk}\", \"pred\": {pred:.6}, \"real\": {real:.6}}}{comma}\n"
+            );
+        }
+        js.push_str("  ]\n}\n");
+        // atomic-ish: write to a temp then rename so a reader never sees a half-file.
+        let tmp = format!("{out}.tmp");
+        std::fs::write(&tmp, js).expect("write json");
+        std::fs::rename(&tmp, &out).expect("rename json");
+    };
+
     // records: (origin, date, ticker, pred_ret, real_ret)
     let mut recs: Vec<(usize, String, String, f32, f32)> = Vec::new();
     for (oi, &o) in origins.iter().enumerate() {
@@ -202,26 +229,8 @@ fn rankic_backtest() {
             let pred = predict_return(&model, ctx, cdates, fdates, horizon, argmax, nsamples, seed);
             recs.push((o, date.clone(), s.ticker.clone(), pred, real));
         }
+        write_json(&recs, oi + 1); // checkpoint after each origin
         eprintln!("[{}/{}] origin {o} ({date}) done ({:.1}s elapsed)", oi + 1, origins.len(), t_start.elapsed().as_secs_f32());
     }
-
-    // write JSON array of records
-    let mut js = String::from("{\n");
-    let _ = write!(
-        js,
-        "  \"meta\": {{\"context\": {ctx_len}, \"horizon\": {horizon}, \"step\": {step}, \"argmax\": {argmax}, \"nsamples\": {nsamples}, \"n_tickers\": {}, \"n_origins\": {}}},\n",
-        series.len(),
-        origins.len()
-    );
-    js.push_str("  \"records\": [\n");
-    for (i, (o, date, tk, pred, real)) in recs.iter().enumerate() {
-        let comma = if i + 1 < recs.len() { "," } else { "" };
-        let _ = write!(
-            js,
-            "    {{\"o\": {o}, \"date\": \"{date}\", \"ticker\": \"{tk}\", \"pred\": {pred:.6}, \"real\": {real:.6}}}{comma}\n"
-        );
-    }
-    js.push_str("  ]\n}\n");
-    std::fs::write(&out, js).expect("write json");
     eprintln!("wrote {} records for {} origins to {out} ({:.1}s total)", recs.len(), origins.len(), t_start.elapsed().as_secs_f32());
 }

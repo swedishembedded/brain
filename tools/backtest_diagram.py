@@ -33,7 +33,12 @@ def load(p):
 meta, base, dates = load(BASE_J)
 _, ft, _ = load(FT_J)
 H = meta["horizon"]
-origins = sorted(base)
+# Only weeks present in BOTH dumps — the fine-tuned run may be partial (its
+# harness checkpoints per-origin, so a timeout on a contended box still yields
+# usable weeks); the comparison stays apples-to-apples on the shared origins.
+origins = sorted(set(base) & set(ft))
+if len(origins) < len(base):
+    print(f"note: aligning on {len(origins)} weeks shared by base({len(base)}) and ft({len(ft)})")
 
 def ls_return(row):
     """row: {ticker:(pred,real)} -> equal-weight top-K long minus bottom-K short realized."""
@@ -89,6 +94,34 @@ def cumulative(rets):
 cum = {k: cumulative(v) for k, v in series.items()}
 n = len(labels)
 
+# --- skill metrics (the durable read; 11-week cumulative return is noise-dominated) ---
+def rank_ic(byo):
+    """Mean per-week cross-sectional IC (corr of predicted vs realized return) ± stderr."""
+    ics = []
+    for o in origins:
+        rows = list(byo[o].values())
+        ps = [p for p, _ in rows]; rs = [r for _, r in rows]
+        mp, mr = statistics.fmean(ps), statistics.fmean(rs)
+        cv = sum((p - mp) * (r - mr) for p, r in rows)
+        sp = math.sqrt(sum((p - mp) ** 2 for p in ps)); sr = math.sqrt(sum((r - mr) ** 2 for r in rs))
+        if sp > 0 and sr > 0:
+            ics.append(cv / (sp * sr))
+    m = statistics.fmean(ics) if ics else float("nan")
+    se = statistics.pstdev(ics) / math.sqrt(len(ics)) if len(ics) > 1 else float("nan")
+    return m, se
+
+def dir_acc(byo):
+    tot = ok = 0
+    for o in origins:
+        for p, r in byo[o].values():
+            tot += 1; ok += (p > 0) == (r > 0)
+    return ok / tot if tot else float("nan")
+
+ft_ic, base_ic = rank_ic(ft), rank_ic(base)
+ft_da, base_da = dir_acc(ft), dir_acc(base)
+# "edge" is demonstrated only if fine-tuned IC is positive AND at least a stderr above zero.
+edge_shown = ft_ic[0] == ft_ic[0] and (ft_ic[0] - ft_ic[1]) > 0
+
 def stats(rets):
     if not rets:
         return (float("nan"),) * 3
@@ -129,13 +162,19 @@ def line_svg(w=940, h=340, pad=48):
     out.append("</svg>")
     return "".join(out)
 
+IC = {"Fine-tuned (L/S)": ft_ic, "Base Kronos (L/S)": base_ic}
+DA = {"Fine-tuned (L/S)": ft_da, "Base Kronos (L/S)": base_da}
 rows = ""
 for name in ["Fine-tuned (L/S)", "Base Kronos (L/S)", "SP500 (^gspc)", "Equal-weight market"]:
     tot, sh, win = stats(series[name])
+    ic = IC.get(name); da = DA.get(name)
+    ic_s = f"{ic[0]:+.3f}<span class='se'>±{ic[1]:.3f}</span>" if ic else "—"
+    da_s = f"{da*100:.0f}%" if da is not None else "—"
     beat = pc(ft_beat, 0) if name.startswith("Fine") else (pc(base_beat, 0) if name.startswith("Base") else "—")
     rows += (f'<tr><td><span class="sw" style="background:{COL[name]}"></span>{name}</td>'
+             f'<td class="num">{ic_s}</td><td class="num">{da_s}</td>'
              f'<td class="num" style="color:{COL[name]};font-weight:700">{pc(tot)}</td>'
-             f'<td class="num">{sh:.2f}</td><td class="num">{win*100:.0f}%</td><td class="num">{beat}</td></tr>')
+             f'<td class="num">{sh:.2f}</td><td class="num">{beat}</td></tr>')
 
 ft_tot = stats(series["Fine-tuned (L/S)"])[0]
 sp_tot = stats(series["SP500 (^gspc)"])[0]
@@ -160,21 +199,27 @@ table{{width:100%;border-collapse:collapse;font-size:14.5px}}td,th{{padding:8px 
 th{{font-family:var(--mono);font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}}
 td.num,th.num{{text-align:right;font-variant-numeric:tabular-nums}}.sw{{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:8px;vertical-align:middle}}
 .note{{color:var(--muted);font-size:13px}}.good{{color:var(--acc)}}
+.se{{font-size:11px;color:var(--muted);font-weight:400;margin-left:2px}}
+.verdict{{background:var(--surface);border:1px solid var(--line);border-left:4px solid {'#3f9d5a' if edge_shown else '#c48a2a'};border-radius:12px;padding:16px 18px;margin:16px 0}}
+.verdict b{{color:{'#3f9d5a' if edge_shown else '#c48a2a'}}}
 </style>
 <div class="wrap">
-<h1>Fine-tuned Kronos vs. the SP500 — walk-forward proof</h1>
-<p class="sub">{n} weekly rebalances on held-out weeks (the fine-tune's training data ended before this period — no look-ahead). Each week: rank the {meta['n_tickers']}-name universe, long the top {K} / short the bottom {K}, hold {H} days, net of {COST_BPS:.0f} bps/side. Cumulative return, compounded.</p>
+<h1>Fine-tuned Kronos vs. the SP500 — walk-forward evaluation</h1>
+<p class="sub">{n} weekly rebalances on held-out weeks (the fine-tune's training data ended before this period — no look-ahead). Each week: rank the {meta['n_tickers']}-name universe, long the top {K} / short the bottom {K}, hold {H} days, net of {COST_BPS:.0f} bps/side. The honest read is <b>RankIC</b> (does predicted rank track realized rank?), not the noise-dominated {n}-week return.</p>
+<div class="verdict"><b>{'EDGE SHOWN' if edge_shown else 'NO EDGE DEMONSTRATED ON THIS SAMPLE'}.</b>
+ Fine-tuned RankIC {ft_ic[0]:+.3f}±{ft_ic[1]:.3f}, base {base_ic[0]:+.3f}±{base_ic[1]:.3f} — {'the fine-tune shows positive, above-noise ranking skill.' if edge_shown else 'both are statistically indistinguishable from zero over ' + str(n) + ' weeks, so neither model shows reliable directional skill here.'}
+ The fine-tune lowered held-out next-token loss (its training objective) and generalized to unseen names, but on this window that did <b>not</b> convert into trading edge. A trustworthy verdict needs many more weeks of live RankIC.</div>
 <div class="tiles">
- <div class="tile"><div class="tl">Fine-tuned total</div><div class="tv good">{pc(ft_tot)}</div><div class="ts">over {n} weeks, net of cost</div></div>
- <div class="tile"><div class="tl">vs. SP500</div><div class="tv">{pc(edge)}</div><div class="ts">excess over ^gspc ({pc(sp_tot)})</div></div>
- <div class="tile"><div class="tl">Weeks beating SP500</div><div class="tv">{pc(ft_beat,0) if ft_beat==ft_beat else '—'}</div><div class="ts">fine-tuned vs base {pc(base_beat,0)}</div></div>
+ <div class="tile"><div class="tl">Fine-tuned RankIC</div><div class="tv">{ft_ic[0]:+.3f}</div><div class="ts">±{ft_ic[1]:.3f} se · base {base_ic[0]:+.3f}</div></div>
+ <div class="tile"><div class="tl">Directional acc.</div><div class="tv">{ft_da*100:.0f}%</div><div class="ts">ft vs base {base_da*100:.0f}% · 50% = coin-flip</div></div>
+ <div class="tile"><div class="tl">Fine-tuned total (net)</div><div class="tv">{pc(ft_tot)}</div><div class="ts">vs SP500 {pc(sp_tot)} · base {pc(stats(series['Base Kronos (L/S)'])[0])}</div></div>
 </div>
 <div class="panel">{line_svg()}</div>
 <div class="panel"><table>
-<thead><tr><th>Strategy</th><th class="num">Total</th><th class="num">Sharpe (ann.)</th><th class="num">Up weeks</th><th class="num">Beat SP500</th></tr></thead>
+<thead><tr><th>Strategy</th><th class="num">RankIC ±se</th><th class="num">Dir. acc</th><th class="num">Total</th><th class="num">Sharpe (ann.)</th><th class="num">Beat SP500</th></tr></thead>
 <tbody>{rows}</tbody></table>
-<p class="note">L/S = market-neutral long/short book (the "weekly trader" is the fine-tuned line). SP500 = ^gspc buy-hold over the same weeks. Sharpe annualized from weekly (×√52). Small sample ({n} weeks) — directional evidence, not a guarantee; the durable read is many-week live RankIC.</p></div>
-<p class="note">Not financial advice. Fine-tune adapted on data strictly before this window; the comparison is genuinely out-of-sample.</p>
+<p class="note">L/S = market-neutral long/short book (the "weekly trader" is the fine-tuned line). RankIC = mean per-week cross-sectional corr of predicted vs realized {H}-day return (the skill metric; ±se over {n} weeks). SP500 = ^gspc buy-hold over the same weeks. Sharpe annualized from weekly (×√52). {n}-week cumulative return is dominated by a few idiosyncratic moves — read RankIC, not the last point.</p></div>
+<p class="note">Not financial advice. Fine-tune adapted on data strictly before this window; the comparison is genuinely out-of-sample. Small sample — this proves the <i>machinery</i> (leak-safe fine-tune → gated promotion → walk-forward eval), not a market edge.</p>
 </div>"""
 open(OUT, "w").write(HTML)
 # a small machine-readable summary the weekly strategy script cites when it runs.
@@ -184,6 +229,10 @@ summary = {
     "base_total": stats(series["Base Kronos (L/S)"])[0],
     "sp500_total": sp_tot, "ft_vs_sp500": edge,
     "ft_weeks_beating_sp500": ft_beat, "base_weeks_beating_sp500": base_beat,
+    "ft_rankic": ft_ic[0], "ft_rankic_se": ft_ic[1],
+    "base_rankic": base_ic[0], "base_rankic_se": base_ic[1],
+    "ft_dir_acc": ft_da, "base_dir_acc": base_da,
+    "edge_shown": bool(edge_shown),
 }
 import os
 json.dump(summary, open(os.path.join(os.path.dirname(OUT) or ".", "backtest_summary.json"), "w"), indent=2)
