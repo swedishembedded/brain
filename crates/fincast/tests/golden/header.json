@@ -1,0 +1,5403 @@
+{
+"count": 1613,
+"note": "learnable tensors only; gate.threshold_{train,eval} buffers excluded",
+"source": "Vincent05R/FinCast v1.pth -> safetensors (tools/fincast_convert.py)",
+"tensors": {
+"freq_emb.weight": [
+3,
+1280
+],
+"horizon_ff_layer.hidden_layer.0.bias": [
+1280
+],
+"horizon_ff_layer.hidden_layer.0.weight": [
+1280,
+1280
+],
+"horizon_ff_layer.output_layer.bias": [
+1280
+],
+"horizon_ff_layer.output_layer.weight": [
+1280,
+1280
+],
+"horizon_ff_layer.residual_layer.bias": [
+1280
+],
+"horizon_ff_layer.residual_layer.weight": [
+1280,
+1280
+],
+"input_ff_layer.hidden_layer.0.bias": [
+1280
+],
+"input_ff_layer.hidden_layer.0.weight": [
+1280,
+64
+],
+"input_ff_layer.output_layer.bias": [
+1280
+],
+"input_ff_layer.output_layer.weight": [
+1280,
+1280
+],
+"input_ff_layer.residual_layer.bias": [
+1280
+],
+"input_ff_layer.residual_layer.weight": [
+1280,
+64
+],
+"stacked_transformer.layers.0.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.0.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.0.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.0.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.0.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.0.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.0.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.0.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.1.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.1.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.1.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.1.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.1.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.1.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.1.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.1.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.10.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.10.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.10.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.10.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.10.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.10.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.10.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.10.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.11.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.11.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.11.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.11.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.11.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.11.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.11.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.11.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.12.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.12.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.12.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.12.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.12.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.12.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.12.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.12.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.13.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.13.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.13.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.13.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.13.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.13.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.13.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.13.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.14.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.14.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.14.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.14.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.14.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.14.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.14.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.14.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.15.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.15.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.15.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.15.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.15.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.15.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.15.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.15.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.16.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.16.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.16.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.16.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.16.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.16.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.16.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.16.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.17.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.17.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.17.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.17.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.17.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.17.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.17.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.17.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.18.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.18.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.18.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.18.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.18.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.18.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.18.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.18.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.19.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.19.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.19.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.19.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.19.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.19.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.19.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.19.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.2.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.2.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.2.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.2.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.2.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.2.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.2.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.2.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.20.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.20.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.20.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.20.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.20.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.20.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.20.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.20.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.21.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.21.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.21.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.21.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.21.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.21.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.21.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.21.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.22.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.22.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.22.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.22.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.22.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.22.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.22.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.22.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.23.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.23.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.23.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.23.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.23.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.23.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.23.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.23.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.24.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.24.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.24.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.24.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.24.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.24.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.24.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.24.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.25.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.25.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.25.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.25.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.25.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.25.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.25.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.25.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.26.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.26.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.26.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.26.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.26.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.26.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.26.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.26.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.27.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.27.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.27.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.27.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.27.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.27.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.27.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.27.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.28.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.28.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.28.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.28.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.28.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.28.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.28.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.28.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.29.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.29.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.29.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.29.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.29.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.29.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.29.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.29.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.3.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.3.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.3.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.3.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.3.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.3.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.3.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.3.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.30.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.30.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.30.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.30.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.30.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.30.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.30.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.30.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.31.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.31.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.31.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.31.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.31.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.31.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.31.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.31.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.32.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.32.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.32.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.32.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.32.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.32.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.32.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.32.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.33.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.33.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.33.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.33.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.33.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.33.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.33.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.33.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.34.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.34.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.34.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.34.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.34.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.34.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.34.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.34.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.35.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.35.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.35.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.35.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.35.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.35.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.35.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.35.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.36.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.36.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.36.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.36.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.36.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.36.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.36.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.36.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.37.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.37.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.37.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.37.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.37.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.37.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.37.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.37.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.38.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.38.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.38.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.38.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.38.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.38.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.38.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.38.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.39.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.39.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.39.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.39.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.39.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.39.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.39.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.39.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.4.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.4.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.4.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.4.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.4.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.4.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.4.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.4.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.40.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.40.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.40.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.40.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.40.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.40.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.40.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.40.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.41.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.41.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.41.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.41.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.41.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.41.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.41.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.41.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.42.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.42.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.42.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.42.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.42.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.42.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.42.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.42.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.43.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.43.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.43.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.43.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.43.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.43.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.43.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.43.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.44.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.44.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.44.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.44.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.44.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.44.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.44.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.44.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.45.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.45.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.45.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.45.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.45.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.45.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.45.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.45.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.46.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.46.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.46.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.46.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.46.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.46.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.46.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.46.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.47.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.47.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.47.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.47.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.47.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.47.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.47.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.47.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.48.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.48.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.48.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.48.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.48.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.48.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.48.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.48.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.49.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.49.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.49.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.49.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.49.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.49.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.49.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.49.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.5.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.5.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.5.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.5.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.5.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.5.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.5.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.5.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.6.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.6.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.6.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.6.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.6.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.6.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.6.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.6.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.7.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.7.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.7.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.7.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.7.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.7.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.7.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.7.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.8.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.8.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.8.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.8.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.8.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.8.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.8.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.8.self_attn.scaling": [
+80
+],
+"stacked_transformer.layers.9.input_layernorm.weight": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.0.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.0.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.0.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.0.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.0.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.0.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.1.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.1.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.1.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.1.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.1.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.1.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.2.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.2.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.2.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.2.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.2.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.2.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.3.down_proj.bias": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.3.down_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.3.gate_proj.bias": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.3.gate_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.3.layer_norm.bias": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.experts.experts.3.layer_norm.weight": [
+1280
+],
+"stacked_transformer.layers.9.moe.moe.gate.to_gates.weight": [
+4,
+1280
+],
+"stacked_transformer.layers.9.moe.moe_prenorm.gamma": [
+1280
+],
+"stacked_transformer.layers.9.self_attn.o_proj.bias": [
+1280
+],
+"stacked_transformer.layers.9.self_attn.o_proj.weight": [
+1280,
+1280
+],
+"stacked_transformer.layers.9.self_attn.qkv_proj.bias": [
+3840
+],
+"stacked_transformer.layers.9.self_attn.qkv_proj.weight": [
+3840,
+1280
+],
+"stacked_transformer.layers.9.self_attn.scaling": [
+80
+]
+}
+}
