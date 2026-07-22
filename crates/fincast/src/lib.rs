@@ -16,9 +16,12 @@
 //! financial advice" (see `docs/licences.md`). Flagged, not blocked.
 
 pub mod config;
+pub mod forecaster;
 pub mod import;
 pub mod model;
 pub mod preprocess;
+pub mod train;
 
 pub use config::{FincastConfig, Param, QUANTILES};
+pub use forecaster::FincastForecaster;
 pub use model::Fincast;
