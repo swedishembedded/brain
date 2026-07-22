@@ -573,6 +573,99 @@ impl EmbedSession {
     }
 }
 
+/// The Chronos-2 transformer core as a compiled graph: two f32 inputs
+/// `emb:[1,S,D]` + `kmask:[1,1,1,S]` (additive) → f32 `qhead:[1,n_out,head_out]`.
+/// Single whole-graph inference (not autoregressive); the host does the
+/// scaler/patch/embed/REG assembly and the head rearrange/denorm around it. A
+/// graph is compiled per `(S, n_out)`.
+pub struct Chronos2Session {
+    _core: Core,
+    request: openvino::InferRequest,
+    s: usize,
+    d: usize,
+    n_out: usize,
+    head_out: usize,
+    device: String,
+}
+
+impl Chronos2Session {
+    /// Compile the core ONNX (e.g. from [`crate::chronos2_export::export_onnx`]).
+    pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
+        let mut core = new_core()?;
+        let device = pick_device(&mut core, cfg)?;
+        let model = core
+            .read_model_from_buffer(bytes, None)
+            .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
+        Self::compile(core, model, device)
+    }
+
+    fn compile(mut core: Core, model: openvino::Model, device: DeviceType<'static>) -> Result<Self, NpuError> {
+        let compiled = core
+            .compile_model(&model, device.to_owned())
+            .map_err(|e| NpuError::Other(format!("compile_model on {}: {e:?}", dev_str(&device))))?;
+        // input 0 = emb [1, S, D]
+        let ie = compiled
+            .get_input_by_index(0)
+            .and_then(|n| n.get_shape())
+            .map_err(|e| NpuError::Other(format!("emb input shape: {e:?}")))?;
+        let ed = ie.get_dimensions();
+        if ed.len() != 3 {
+            return Err(NpuError::Other(format!("expected emb [1,S,D], got {ed:?}")));
+        }
+        let (s, d) = (ed[1] as usize, ed[2] as usize);
+        // output 0 = qhead [1, n_out, head_out]
+        let od = compiled
+            .get_output_by_index(0)
+            .and_then(|n| n.get_shape())
+            .map_err(|e| NpuError::Other(format!("qhead output shape: {e:?}")))?;
+        let odd = od.get_dimensions();
+        let (n_out, head_out) = (odd[1] as usize, odd[2] as usize);
+        let mut compiled = compiled;
+        let request = compiled
+            .create_infer_request()
+            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
+        Ok(Chronos2Session { _core: core, request, s, d, n_out, head_out, device: dev_str(&device) })
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+    pub fn seq_len(&self) -> usize {
+        self.s
+    }
+    pub fn n_out(&self) -> usize {
+        self.n_out
+    }
+
+    /// Run the core: `emb` is `S*D` f32, `kmask` is `S` f32 (additive per key).
+    /// Returns the raw head `[n_out*head_out]`.
+    pub fn run(&mut self, emb: &[f32], kmask: &[f32]) -> Result<Vec<f32>, NpuError> {
+        if emb.len() != self.s * self.d {
+            return Err(NpuError::Other(format!("emb: expected {} f32, got {}", self.s * self.d, emb.len())));
+        }
+        if kmask.len() != self.s {
+            return Err(NpuError::Other(format!("kmask: expected {} f32, got {}", self.s, kmask.len())));
+        }
+        let emb_shape = Shape::new(&[1, self.s as i64, self.d as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        let mut te = Tensor::new(ElementType::F32, &emb_shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        te.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(emb);
+        self.request.set_tensor("emb", &te).map_err(|e| NpuError::Other(format!("set emb: {e:?}")))?;
+
+        let km_shape = Shape::new(&[1, 1, 1, self.s as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        let mut tk = Tensor::new(ElementType::F32, &km_shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        tk.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(kmask);
+        self.request.set_tensor("kmask", &tk).map_err(|e| NpuError::Other(format!("set kmask: {e:?}")))?;
+
+        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
+        let out = self
+            .request
+            .get_output_tensor_by_index(0)
+            .map_err(|e| NpuError::Other(format!("get_output: {e:?}")))?;
+        // te/tk stay alive until here.
+        Ok(out.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec())
+    }
+}
+
 /// A compiled codec-decoder graph: int64 `codes:[nq,T]` (codebook-major) ->
 /// f32 `waveform:[1,1,L]`. Single whole-graph inference (no autoregression).
 pub struct CodecSession {

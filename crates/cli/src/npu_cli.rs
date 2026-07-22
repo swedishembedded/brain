@@ -15,8 +15,9 @@
 //! they print a clear diagnostic. Output of `run` matches `brain yolo detect`.
 
 use std::path::Path;
+use std::time::Instant;
 
-use npu::openvino::{NpuConfig, NpuDevice, NpuError, NpuSession, PerfHint};
+use npu::openvino::{Chronos2Session, NpuConfig, NpuDevice, NpuError, NpuSession, PerfHint};
 
 pub fn run_npu(args: &[String]) {
     match args.first().map(|s| s.as_str()) {
@@ -26,8 +27,9 @@ pub fn run_npu(args: &[String]) {
         Some("run") => run(&args[1..]),
         Some("bench") => bench(&args[1..]),
         Some("sim") => sim(&args[1..]),
+        Some("chronos2") => chronos2(&args[1..]),
         other => eprintln!(
-            "usage: brain npu <export|quantize|check|run|bench|sim> ...  (got {other:?})"
+            "usage: brain npu <export|quantize|check|run|bench|sim|chronos2> ...  (got {other:?})"
         ),
     }
 }
@@ -38,6 +40,122 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
         eprintln!("{flag} requires a value");
         std::process::exit(2);
     })
+}
+
+/// `brain npu chronos2` — forecast a context series with the Chronos-2 transformer
+/// core running on the NPU. The host (this model's compute backend) does the
+/// scaler/patch/embed/REG assembly and the head rearrange/denorm; the exported
+/// ONNX core (`emb`+`kmask` → `qhead`) runs on the accelerator via the pluggable
+/// core seam. `--compare` also runs the pure device path and reports the max diff.
+fn chronos2(args: &[String]) {
+    use std::cell::RefCell;
+    let mut weights = String::new();
+    let mut context_len = 128usize;
+    let mut horizon = 8usize;
+    let mut series_file: Option<String> = None;
+    let mut compare = false;
+    let mut opts = NpuOpts::default();
+    let mut i = 0;
+    while i < args.len() {
+        if opts.parse_flag(args, &mut i) {
+            i += 1;
+            continue;
+        }
+        match args[i].as_str() {
+            "--weights" => weights = val(args, &mut i, "--weights"),
+            "--context-len" => context_len = val(args, &mut i, "--context-len").parse().unwrap_or(context_len),
+            "--horizon" => horizon = val(args, &mut i, "--horizon").parse().unwrap_or(horizon),
+            "--series" => series_file = Some(val(args, &mut i, "--series")),
+            "--compare" => compare = true,
+            other => {
+                eprintln!("brain npu chronos2: unknown flag {other:?}");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    if weights.is_empty() {
+        eprintln!(
+            "usage: brain npu chronos2 --weights W [--context-len N] [--horizon H] \
+             [--series file] [--compare] [--device NPU]"
+        );
+        return;
+    }
+
+    // context: a file of newline/space/comma-separated f32, else a synthetic sinusoid.
+    let context: Vec<f32> = match &series_file {
+        Some(f) => match std::fs::read_to_string(f) {
+            Ok(s) => s.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()).filter_map(|t| t.parse().ok()).collect(),
+            Err(e) => {
+                eprintln!("read {f}: {e}");
+                return;
+            }
+        },
+        None => (0..context_len).map(|i| 100.0 + (i as f32 * 0.1).sin() * 5.0).collect(),
+    };
+    if context.len() < 8 {
+        eprintln!("chronos2: context too short ({} points)", context.len());
+        return;
+    }
+
+    let model = match chronos2::model::Chronos2::load(&weights) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("load chronos2 {weights}: {e}");
+            return;
+        }
+    };
+    let d = model.config().d_model;
+    let q = model.config().num_quantiles;
+    let cfg = opts.to_config();
+
+    // Run the transformer core on the NPU via the pluggable-core seam. The closure
+    // compiles the ONNX for the exact (S, n_out) this context needs, then infers.
+    let device = RefCell::new(String::new());
+    let core_ms = RefCell::new(0.0f64);
+    let t0 = Instant::now();
+    let out = model.forecast_quantiles_with_core(&context, horizon, |emb, mask, n_out| {
+        let s = emb.len() / d;
+        let bytes = npu::chronos2_export::export_onnx(&weights, s, n_out, npu::qwen_topology::Quant::F32)
+            .unwrap_or_else(|e| {
+                eprintln!("export chronos2 core onnx: {e}");
+                std::process::exit(1);
+            });
+        let mut sess = Chronos2Session::load_bytes(&bytes, &cfg).unwrap_or_else(|e| {
+            eprintln!("compile chronos2 core: {e}");
+            std::process::exit(1);
+        });
+        *device.borrow_mut() = sess.device().to_string();
+        let tc = Instant::now();
+        let r = sess.run(emb, mask).unwrap_or_else(|e| {
+            eprintln!("npu infer: {e}");
+            std::process::exit(1);
+        });
+        *core_ms.borrow_mut() = tc.elapsed().as_secs_f64() * 1e3;
+        r
+    });
+    let total_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+    println!(
+        "chronos2 core on {} · horizon {horizon} · {} context pts · core {:.1} ms (total {total_ms:.1} ms)",
+        device.borrow(),
+        context.len(),
+        core_ms.borrow()
+    );
+    // print the median quantile path (and the 10%/90% band if present).
+    let row = |qi: usize| &out[qi * horizon..qi * horizon + horizon];
+    println!("  median : {:?}", row(q / 2).iter().map(|v| (v * 100.0).round() / 100.0).collect::<Vec<_>>());
+    if q >= 3 {
+        println!("  p10    : {:?}", row(0).iter().map(|v| (v * 100.0).round() / 100.0).collect::<Vec<_>>());
+        println!("  p90    : {:?}", row(q - 1).iter().map(|v| (v * 100.0).round() / 100.0).collect::<Vec<_>>());
+    }
+
+    if compare {
+        let cpu = model.forecast_quantiles(&context, horizon);
+        let maxdiff = out.iter().zip(&cpu).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        let scale = cpu.iter().map(|v| v.abs()).fold(0.0f32, f32::max).max(1e-6);
+        println!("  vs device core: max abs diff {maxdiff:.5} (rel {:.2e})", maxdiff / scale);
+    }
 }
 
 fn parse_opt_u32(args: &[String], i: &mut usize, flag: &str) -> Option<u32> {
