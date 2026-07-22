@@ -142,7 +142,17 @@ impl ForecastModel for KronosForecaster {
         }
         // Honor an explicit sample count; only fall back to the floor when the
         // caller asked for none (they still need a distribution to derive from).
-        let n_samples = if spec.num_samples == 0 { SAMPLE_FLOOR } else { spec.num_samples };
+        // `KRONOS_ARGMAX=1` selects the deterministic modal rollout (argmax over
+        // the token distribution): a single stable draw, matching the reference
+        // RankIC evaluation's point path — no sampling noise, and ~N× cheaper.
+        let argmax = std::env::var("KRONOS_ARGMAX").map(|v| v != "0").unwrap_or(false);
+        let n_samples = if argmax {
+            1
+        } else if spec.num_samples == 0 {
+            SAMPLE_FLOOR
+        } else {
+            spec.num_samples
+        };
         let mut fc = Forecast::new("kronos", Representation::Samples, spec.horizon, &panel.freq);
         fc.model_version = self.version.clone();
 
@@ -175,7 +185,7 @@ impl ForecastModel for KronosForecaster {
                     // default; top_p=1.0 (no truncation) samples the full tails and
                     // makes the rollout wildly over-dispersed on real data.
                     top_p: 0.9,
-                    argmax: false,
+                    argmax,
                     seed: spec.seed.wrapping_add(k as u64),
                 };
                 // KV-cached rollout: exact-parity with the un-cached path but

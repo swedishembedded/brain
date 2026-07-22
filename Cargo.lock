@@ -246,6 +246,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-data",
  "brain-eval",
+ "brain-fcbench",
  "brain-glm",
  "brain-gpt",
  "brain-model",
@@ -296,6 +297,7 @@ dependencies = [
  "brain-events",
  "brain-fcbench",
  "brain-federated",
+ "brain-fincast",
  "brain-forecast",
  "brain-glm",
  "brain-gpt",
@@ -401,6 +403,21 @@ name = "brain-federated"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-fincast"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-forecast",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
  "serde_json",
 ]
 
@@ -549,6 +566,7 @@ dependencies = [
  "brain-depth",
  "brain-eval",
  "brain-events",
+ "brain-fincast",
  "brain-glm",
  "brain-gpu-core",
  "brain-kronos",
