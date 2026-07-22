@@ -46,7 +46,7 @@
 //!     once, guaranteed by the engine's exit-chain on any outbound transition.
 
 use events::{Envelope, Event};
-use forecast::{BacktestSpec, ForecastModel, ForecastSpec, Panel};
+use forecast::{BacktestReport, BacktestSpec, ForecastModel, ForecastSpec, Panel};
 use hfsm::{Disp, Hsm, Machine};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -467,6 +467,33 @@ impl Default for GenConfig {
     }
 }
 
+/// Steps a rolling-origin backtest **one model at a time** so the controller can
+/// stream `backtest_chunk` progress. Each model's rolling-origin evaluation is
+/// independent (per-`(model, metric)` rows over the same deterministic origins),
+/// so running them one per `step()` and concatenating the rows reproduces exactly
+/// the all-models report — while letting the caller see partial aggregates as each
+/// model finishes.
+struct BacktestPump {
+    models: Vec<(String, Arc<dyn ForecastModel>)>,
+    panel: Panel,
+    spec: BacktestSpec,
+    next: usize,
+    report: BacktestReport,
+}
+
+impl BacktestPump {
+    /// Evaluate the next model, merge its rows into the running report, and return
+    /// `(report_so_far, is_last)`. `None` once every model has been evaluated.
+    fn step(&mut self) -> Option<(BacktestReport, bool)> {
+        let (name, model) = self.models.get(self.next)?;
+        let one = [(name.clone(), model.as_ref())];
+        let r = fcbench::backtest::run(&one, &self.panel, &self.spec);
+        self.report.rows.extend(r.rows);
+        self.next += 1;
+        Some((self.report.clone(), self.next >= self.models.len()))
+    }
+}
+
 /// The [`Machine`] implementation: holds the models, the active pump, the output
 /// sink, and the streaming sequence counter.
 struct Brain {
@@ -475,6 +502,10 @@ struct Brain {
     pump: Option<StreamPump>,
     /// Active audio pump while in `Synthesizing` (parallel to `pump`).
     audio_pump: Option<AudioStreamPump>,
+    /// Active backtest pump while in `Backtesting`: steps one model per `Tick`,
+    /// emitting an aggregates-so-far `backtest_chunk` after each, then the final
+    /// `backtest_result`.
+    backtest_pump: Option<BacktestPump>,
     seq: u32,
     out: Vec<Envelope>,
     /// Prompt stashed by the controller before entering `Chatting` (entry actions
@@ -561,9 +592,19 @@ impl Machine for Brain {
                 _ => Disp::Unhandled,
             },
             // one-shot: entry action computed + emitted; complete to Idle.
-            St::Forecasting | St::Backtesting | St::Cancelled => match ev {
+            St::Forecasting | St::Cancelled => match ev {
                 Ev::GoIdle => Disp::Tran(St::Idle),
                 Ev::Tick => Disp::Handled,
+                _ => Disp::Unhandled,
+            },
+            // streamed: each Tick evaluates one model, emitting a `backtest_chunk`,
+            // until the last model emits the terminal `backtest_result`.
+            St::Backtesting => match ev {
+                Ev::Tick => {
+                    self.pump_one_backtest();
+                    Disp::Handled
+                }
+                Ev::GoIdle => Disp::Tran(St::Idle),
                 _ => Disp::Unhandled,
             },
             St::Synthesizing => match ev {
@@ -597,7 +638,7 @@ impl Machine for Brain {
             St::Detecting => self.run_detection(),
             St::Synthesizing => self.start_synth(),
             St::Forecasting => self.run_forecast(),
-            St::Backtesting => self.run_backtest(),
+            St::Backtesting => self.start_backtest(),
             // Emit a terminal `cancelled` ack, then complete back to Idle. The
             // active pump (if any) was already freed by the exit chain leaving the
             // streaming substate, so this is a clean stop, not a fault.
@@ -615,6 +656,7 @@ impl Machine for Brain {
             // free each pump exactly once on leaving its streaming state.
             St::Chatting => self.pump = None,
             St::Synthesizing => self.audio_pump = None,
+            St::Backtesting => self.backtest_pump = None,
             _ => {}
         }
     }
@@ -760,14 +802,18 @@ impl Brain {
     /// rolling-origin backtest over the stashed panel, and emit one
     /// `backtest_result`. Unknown model names are skipped with a `log` note
     /// rather than failing the whole request. Buffered (not streamed) in P0.
-    fn run_backtest(&mut self) {
+    /// `Backtesting::on_entry`: resolve the requested models to resident instances
+    /// and seed the [`BacktestPump`], then kick off streaming with a `Tick`. Bad
+    /// requests (no pending backtest / no known models) emit an error and complete
+    /// immediately, exactly as the one-shot version did.
+    fn start_backtest(&mut self) {
         let Some((panel, spec)) = self.pending_backtest.take() else {
             self.emit(Event::Error { message: "no pending backtest".into() });
             self.want_idle = true;
             return;
         };
         // resolve model names -> resident instances
-        let resolved: Vec<(String, Arc<dyn ForecastModel>)> = spec
+        let models: Vec<(String, Arc<dyn ForecastModel>)> = spec
             .models
             .iter()
             .filter_map(|name| self.registry.forecast_model(name).map(|m| (name.clone(), m)))
@@ -777,18 +823,40 @@ impl Brain {
                 self.emit(Event::Log { message: format!("backtest: unknown model {name} skipped") });
             }
         }
-        if resolved.is_empty() {
+        if models.is_empty() {
             self.emit(Event::ForecastError {
                 error: forecast::ForecastError::bad_request("no known models in backtest request"),
             });
             self.want_idle = true;
             return;
         }
-        let model_refs: Vec<(String, &dyn ForecastModel)> =
-            resolved.iter().map(|(n, m)| (n.clone(), m.as_ref())).collect();
-        let report = fcbench::backtest::run(&model_refs, &panel, &spec);
-        self.emit(Event::BacktestResult { report });
-        self.want_idle = true;
+        self.backtest_pump =
+            Some(BacktestPump { models, panel, spec, next: 0, report: BacktestReport::default() });
+        self.seq = 0;
+        self.pending_tick = true;
+    }
+
+    /// `Backtesting` Tick handler: evaluate the next model. Each non-final model
+    /// emits a `backtest_chunk` (aggregates so far) and re-posts; the final model
+    /// emits the terminal `backtest_result` and returns to Idle. A single-model
+    /// backtest emits just the result (no chunks) — behavior identical to before.
+    fn pump_one_backtest(&mut self) {
+        match self.backtest_pump.as_mut().and_then(|p| p.step()) {
+            Some((report, false)) => {
+                self.emit(Event::BacktestChunk { report, seq: self.seq, done: false });
+                self.seq += 1;
+                self.pending_tick = true; // keep evaluating
+            }
+            Some((report, true)) => {
+                self.emit(Event::BacktestResult { report });
+                self.want_idle = true;
+            }
+            None => {
+                // no models (shouldn't happen — start_backtest guards) — complete.
+                self.emit(Event::BacktestResult { report: BacktestReport::default() });
+                self.want_idle = true;
+            }
+        }
     }
 }
 
@@ -811,6 +879,7 @@ impl Controller {
             cfg,
             pump: None,
             audio_pump: None,
+            backtest_pump: None,
             seq: 0,
             out: Vec::new(),
             pending_prompt: None,
@@ -1071,12 +1140,90 @@ mod tests {
             seed: 0,
         };
         let out = ctrl.feed_event(Event::BacktestRequest { panel, spec });
-        match out.as_slice() {
-            [Envelope { event: Event::BacktestResult { report }, .. }] => {
+        // Two models now stream: one `backtest_chunk` (partial, done:false) then a
+        // terminal `backtest_result` with BOTH models' rows.
+        let chunks: Vec<&Event> =
+            out.iter().map(|e| &e.event).filter(|e| matches!(e, Event::BacktestChunk { .. })).collect();
+        assert_eq!(chunks.len(), 1, "expected one interim chunk for the first model: {out:?}");
+        assert!(matches!(chunks[0], Event::BacktestChunk { done: false, .. }));
+        match out.last().map(|e| &e.event) {
+            Some(Event::BacktestResult { report }) => {
                 assert!(report.get("naive", "mase").is_some());
                 assert!(report.get("drift", "mase").is_some());
             }
-            other => panic!("expected backtest_result, got {other:?}"),
+            other => panic!("expected terminal backtest_result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn single_model_backtest_emits_only_a_result() {
+        // One model -> no interim chunks, just the terminal result (unchanged from
+        // the pre-streaming behavior).
+        let mut ctrl = Controller::with_config(registry_with_naive(), GenConfig::default());
+        let series: Vec<f32> = (0..80).map(|i| 100.0 + (i as f32) * 0.1).collect();
+        let panel = Panel::single("1d", "SIM", vec![Variate::target("close", series)]);
+        let spec = BacktestSpec {
+            models: vec!["naive".into()],
+            horizon: 5,
+            origins: 8,
+            stride: 2,
+            metrics: vec!["mase".into()],
+            quantile_levels: vec![0.5],
+            seed: 0,
+        };
+        let out = ctrl.feed_event(Event::BacktestRequest { panel, spec });
+        assert!(
+            !out.iter().any(|e| matches!(e.event, Event::BacktestChunk { .. })),
+            "single-model backtest must not emit chunks: {out:?}"
+        );
+        assert!(matches!(out.last().map(|e| &e.event), Some(Event::BacktestResult { .. })));
+    }
+
+    #[test]
+    fn backtest_can_be_cancelled_between_models_and_recovers() {
+        // Cancel after the first model's chunk: the backtest stops early with a
+        // `cancelled` ack, and the controller returns to Idle (a later request
+        // works). Uses the streaming pump + a control that cancels after 1 chunk.
+        struct CancelAfterOne(bool);
+        impl Control for CancelAfterOne {
+            fn poll(&mut self) -> Option<Event> {
+                if self.0 {
+                    Some(Event::Cancel)
+                } else {
+                    self.0 = true;
+                    None
+                }
+            }
+        }
+        let mut reg = Registry::new();
+        reg.register_forecast(Arc::new(fcbench::RandomWalk));
+        reg.register_forecast(Arc::new(fcbench::Drift));
+        let mut ctrl = Controller::with_config(reg, GenConfig::default());
+        let series: Vec<f32> = (0..120).map(|i| 100.0 + (i as f32) * 0.1).collect();
+        let panel = Panel::single("1d", "SIM", vec![Variate::target("close", series)]);
+        // First poll (before model 0) primes to None; the second (after model 0's
+        // chunk, before model 1) cancels — so exactly one chunk streams, then stop.
+        let spec = BacktestSpec {
+            models: vec!["naive".into(), "drift".into()],
+            horizon: 5,
+            origins: 10,
+            stride: 2,
+            metrics: vec!["mase".into()],
+            quantile_levels: vec![0.5],
+            seed: 0,
+        };
+        let mut out: Vec<Envelope> = Vec::new();
+        ctrl.feed_event_streaming(
+            None,
+            Event::BacktestRequest { panel, spec },
+            &mut out,
+            &mut CancelAfterOne(false),
+        );
+        // stopped before the final result; ended with a cancelled ack.
+        assert!(!out.iter().any(|e| matches!(e.event, Event::BacktestResult { .. })), "{out:?}");
+        assert!(matches!(out.last().map(|e| &e.event), Some(Event::Cancelled)), "{out:?}");
+        // recovered: a fresh capabilities request is answered.
+        let again = ctrl.feed_event(Event::CapabilitiesRequest);
+        assert!(again.iter().any(|e| matches!(e.event, Event::CapabilitiesResult { .. })));
     }
 }
