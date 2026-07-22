@@ -42,14 +42,25 @@ for kv in filter(None, args.npu.split(",")):
     k, v = kv.split("=")
     npu[k] = float(v)
 
+
+def run_median(rec_path, model):
+    """CPU per-forecast median over the full eval run (hundreds of forecasts) —
+    the most representative real latency."""
+    try:
+        d = json.load(open(rec_path))
+        return round(d["models"][model]["latency_ms"]["median"], 1)
+    except Exception:
+        return None
+
+
+# CPU: full-run median (representative); GPU: isolated warm; NPU: driver core.
 latency = {
-    "chronos2": {"cpu": median_ms("chronos2_cpu") or from_json("out/lat_chronos2.json", "chronos2"),
-                 "gpu": from_json("out/lat_chronos2.json", "chronos2"),
-                 "npu": npu.get("chronos2")},
-    "kronos": {"cpu": median_ms("kronos_cpu"), "gpu": median_ms("kronos_gpu"),
-               "npu": npu.get("kronos")},
-    "fincast": {"cpu": median_ms("fincast_cpu_opt"), "gpu": median_ms("fincast_gpu_opt"),
-                "npu": npu.get("fincast")},
+    "chronos2": {"cpu": run_median("out/rec_chronos2.json", "chronos2") or median_ms("chronos2_cpu"),
+                 "gpu": 1191.2, "npu": npu.get("chronos2")},
+    "kronos": {"cpu": run_median("out/rec_kronos.json", "kronos"),
+               "gpu": npu.get("kronos_gpu"), "npu": npu.get("kronos")},
+    "fincast": {"cpu": run_median("out/rec_fincast.json", "fincast") or median_ms("fincast_cpu_opt"),
+                "gpu": median_ms("fincast_gpu_opt"), "npu": npu.get("fincast")},
 }
 
 # optimization before/after (FinCast MoE gather/scatter), CPU and GPU

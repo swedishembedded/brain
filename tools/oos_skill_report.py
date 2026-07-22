@@ -179,7 +179,18 @@ for name, m in D["models"].items():
     res = eval_model(recs)
     res["mase"] = m.get("mase_mean")
     res["latency_ms"] = m.get("latency_ms")
-    res["neg_control"] = eval_model(recs, shuffle=True)
+    # Proper negative control: the null distribution of the skill metric under NO
+    # signal, estimated by averaging many independent within-week permutations of
+    # the predictions. The null mean must sit at ≈ 0 (the pipeline invents no
+    # skill); its spread is the noise band the real RankIC must clear.
+    ncs = [eval_model(recs, shuffle=True) for _ in range(40)]
+    nc_means = [x["rankic_mean"] for x in ncs if not np.isnan(x["rankic_mean"])]
+    nc = ncs[0]  # keep one realization for the L/S control curve
+    nc["rankic_mean"] = float(np.mean(nc_means)) if nc_means else float("nan")
+    nc["rankic_se"] = float(np.std(nc_means, ddof=1)) if len(nc_means) > 1 else float("nan")
+    nc["rankic_t"] = (nc["rankic_mean"] / nc["rankic_se"]) if nc["rankic_se"] else float("nan")
+    nc["n_perms"] = len(nc_means)
+    res["neg_control"] = nc
     res["naive"] = eval_model(recs, naive=True)
     out["models"][name] = res
     print(f"{name}: RankIC {res['rankic_mean']:+.4f} +/- {res['rankic_se']:.4f} "

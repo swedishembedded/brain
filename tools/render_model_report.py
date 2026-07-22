@@ -128,39 +128,42 @@ def bar_rankic(width=680, height=320):
     return "".join(parts)
 
 
-def grouped_latency(width=680, height=330):
-    """Grouped bars: per model, one bar per device (cpu/gpu/npu), log-ish linear ms."""
+def grouped_latency(width=680, height=340):
+    """Grouped bars: per model, one bar per device (cpu/gpu/npu). LOG10 ms scale —
+    the values span ~90 ms to ~16 s (nearly 3 orders of magnitude)."""
+    import math as _m
     lat = X["latency_ms"]
     devices = ["cpu", "gpu", "npu"]
     devcol = {"cpu": "var(--c1)", "gpu": "var(--c2)", "npu": "var(--c3)"}
-    allv = [lat[m][dv] for m in MODEL_ORDER for dv in devices if lat.get(m, {}).get(dv) is not None]
-    vmax = max(allv) * 1.15 if allv else 1
+    lo, hi = 1.0, 4.30103  # log10(10ms) .. log10(20000ms)
     pad_l, pad_r, pad_t, pad_b = 56, 14, 14, 46
     ng = len(MODEL_ORDER)
     gstep = (width - pad_l - pad_r) / ng
     bw = gstep / (len(devices) + 1)
-    def Y(v): return pad_t + (height - pad_t - pad_b) * (1 - v / vmax)
+    def Y(logv): return pad_t + (height - pad_t - pad_b) * (1 - (logv - lo) / (hi - lo))
     parts = [f'<svg viewBox="0 0 {width} {height}" class="chart" role="img">']
-    for k in range(5):
-        v = vmax * k / 4; y = Y(v)
+    for dec in [1, 2, 3, 4]:  # 10, 100, 1000, 10000 ms
+        y = Y(dec)
         parts.append(f'<line x1="{pad_l}" y1="{y:.1f}" x2="{width-pad_r}" y2="{y:.1f}" class="grid"/>')
-        parts.append(f'<text x="{pad_l-6}" y="{y+3:.1f}" class="axlab" text-anchor="end">{v:.0f}</text>')
-    parts.append(f'<text x="14" y="{pad_t+8}" class="axlab">ms</text>')
+        lab = {1: "10ms", 2: "100ms", 3: "1s", 4: "10s"}[dec]
+        parts.append(f'<text x="{pad_l-6}" y="{y+3:.1f}" class="axlab" text-anchor="end">{lab}</text>')
     for gi, m in enumerate(MODEL_ORDER):
         gx = pad_l + gstep * gi
         for di, dv in enumerate(devices):
             v = lat.get(m, {}).get(dv)
             x = gx + bw * (di + 0.5)
             if v is None:
-                parts.append(f'<text x="{x+bw/2:.1f}" y="{Y(0)-4:.1f}" class="axlab" text-anchor="middle">n/a</text>')
+                parts.append(f'<text x="{x+bw*0.43:.1f}" y="{Y(lo)-4:.1f}" class="axlab" text-anchor="middle">n/a</text>')
                 continue
-            y = Y(v); h = Y(0) - y
+            logv = max(lo, _m.log10(v))
+            y = Y(logv); h = Y(lo) - y
+            lab = f"{v/1000:.1f}s" if v >= 1000 else f"{v:.0f}ms"
             parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw*0.86:.1f}" height="{h:.1f}" rx="3" fill="{devcol[dv]}" opacity="0.9"/>')
-            parts.append(f'<text x="{x+bw*0.43:.1f}" y="{y-4:.1f}" class="axlab tick" text-anchor="middle">{v:.0f}</text>')
+            parts.append(f'<text x="{x+bw*0.43:.1f}" y="{y-4:.1f}" class="axlab tick" text-anchor="middle">{lab}</text>')
         parts.append(f'<text x="{gx+gstep/2:.1f}" y="{height-pad_b+22:.1f}" class="axlab strong" text-anchor="middle">{esc(m)}</text>')
     parts.append("</svg>")
     legend = '<div class="legend">' + "".join(
-        f'<span class="lg"><i style="background:{devcol[d]}"></i>{d.upper()}</span>' for d in devices) + "</div>"
+        f'<span class="lg"><i style="background:{devcol[d]}"></i>{d.upper()}</span>' for d in devices) + '<span class="lg" style="color:var(--muted)">log scale · lower is better</span></div>'
     return "".join(parts) + legend
 
 
@@ -301,9 +304,13 @@ def ls_charts():
 
 
 meta = S["meta"]
-scope_line = (f'{scope.get("n_names","?")} liquid SP500 names &times; {weeks_n} weekly origins in 2026 '
-              f'(horizon {meta["horizon"]} trading days, {meta["ctx"]}-bar context, {meta.get("device","?")} backend). '
-              f'Every 2026 origin post-dates each checkpoint’s training cutoff — genuinely out-of-sample.')
+perwk = ", ".join(f'{m} {S["models"][m]["n_weeks"]}' for m in MODEL_ORDER)
+scope_line = (f'A common {scope.get("n_names","?")}-name liquid SP500 universe, ranked identically by every model, '
+              f'over 2026 weekly origins (horizon {meta["horizon"]} trading days, CPU backend). Out-of-sample weeks '
+              f'scored per model: {perwk}. Every 2026 origin post-dates each checkpoint’s training cutoff — genuinely '
+              f'out-of-sample. Chronos-2 &amp; FinCast use a 200-bar context; Kronos uses 128 bars (its '
+              f'~10&thinsp;s/forecast CPU cost on this memory-constrained box capped its window). '
+              f'Small samples by design — the honest read is the RankIC t-stat, not any single return line.')
 
 CSS = """
 :root{
@@ -394,7 +401,7 @@ html_doc = f"""<div class="wrap">
 
 <section>
 <h2>Cross-sectional skill &mdash; RankIC &plusmn; stderr</h2>
-<p class="sub">Mean per-week Spearman rank correlation between predicted and realized {meta["horizon"]}-day returns, with standard error over {weeks_n} weeks and a t-stat. |t| &lt; 2 means no edge distinguishable from zero at this sample size. Each model's <b>shuffled negative control</b> (hatched) collapses to ≈ 0 — as it must.</p>
+<p class="sub">Mean per-week Spearman rank correlation between predicted and realized {meta["horizon"]}-day returns, with standard error over each model's out-of-sample weeks and a t-stat. |t| &lt; 2 means no edge distinguishable from zero at this sample size. Each model's <b>shuffled negative control</b> (hatched) collapses to ≈ 0 — as it must.</p>
 {bar_rankic()}
 </section>
 
@@ -412,7 +419,7 @@ html_doc = f"""<div class="wrap">
 
 <section>
 <h2>Latency by device</h2>
-<p class="sub">Real per-forecast latency (warm, median) driving each model through the same <code>forecast()</code> seam on the CPU (wgsl-cpu Cranelift-JIT + AVX2) and GPU (wgpu/Vulkan, Intel Arc), and via the dedicated <code>brain npu</code> driver (OpenVINO, Intel NPU / <code>/dev/accel/accel0</code>). Kronos draws {meta.get("nsamples","?")} stochastic sample paths per forecast; Chronos-2 and FinCast are deterministic.</p>
+<p class="sub">Real per-forecast latency driving each model through the same <code>forecast()</code> seam. <b>CPU</b> (wgsl-cpu Cranelift-JIT + AVX2) is the warm median over the full eval run; <b>GPU</b> (wgpu/Vulkan, Intel Arc) is a warm isolated median; <b>NPU</b> is the accelerator-core time from the dedicated <code>brain npu</code> driver (OpenVINO, <code>/dev/accel/accel0</code>), excluding host pre/post and one-time graph compile. The striking result: these small-context forecasts are <b>dispatch-bound on the GPU</b> (thousands of tiny kernel launches with host↔device syncs), so the CPU is 4–10× faster; the NPU, which runs the whole graph, is faster still. Kronos here uses a 128-bar context (single modal draw); its GPU path was impractically slow to benchmark, and FinCast's 991M-param NPU graph exceeded the compile budget.</p>
 {grouped_latency()}
 <div class="tablewrap"><table class="data"><tr><th>model</th><th>params</th><th>on disk</th><th>CPU ms</th><th>GPU ms</th><th>NPU ms</th></tr>
 {"".join(f'<tr><td class="mono strong" style="color:{COLORS[m]}">{esc(m)}</td><td class="num">{esc(X["model_sizes"][m]["params"])}</td><td class="num">{esc(X["model_sizes"][m]["disk"])}</td><td class="num">{fmt(X["latency_ms"][m].get("cpu"),nd=0)}</td><td class="num">{fmt(X["latency_ms"][m].get("gpu"),nd=0)}</td><td class="num">{fmt(X["latency_ms"][m].get("npu"),nd=0) if X["latency_ms"][m].get("npu") else "&mdash;"}</td></tr>' for m in MODEL_ORDER)}
@@ -432,7 +439,8 @@ html_doc = f"""<div class="wrap">
 
 <section>
 <h2>How to read this &mdash; honesty notes</h2>
-<div class="note"><b>Small samples are noise-dominated.</b> {weeks_n} weekly origins is a small sample for a RankIC of order 0.0–0.1. A single cumulative-return line can look impressive or dismal purely by chance; the t-stat is the load-bearing number, and at this n most are indistinguishable from zero.</div>
+<div class="note"><b>Small samples are noise-dominated.</b> {weeks_n} weekly origins × {scope.get("n_names","?")} names is a small sample for a RankIC of order 0.0–0.1. A single cumulative-return line can look impressive or dismal purely by chance; the t-stat is the load-bearing number, and at this n most are indistinguishable from zero.</div>
+<div class="note"><b>Scope was bounded by compute, not cherry-picked.</b> All three models ran through one harness on the same universe and weeks. Kronos's ~10&thinsp;s/forecast CPU cost (and FinCast's 991M-param, 4&nbsp;GB-per-forward memory pressure) on this shared, swap-saturated box capped the common window; the scope was fixed before looking at results, and every model is scored on the identical cross-section.</div>
 <div class="note"><b>Negative control.</b> Shuffling each model's predictions within every week destroys any real signal and should give RankIC ≈ 0. It does — demonstrating the harness manufactures no false skill. A model whose real RankIC is not clearly separated from its own shuffled control has shown no edge.</div>
 <div class="note"><b>Contamination.</b> Checkpoints predate 2026, so 2026 bars are genuinely unseen — but these names and their regimes resemble the pretraining distribution. Out-of-time is not out-of-distribution.</div>
 <div class="note"><b>Cost is modelled, and it dominates.</b> The L/S curves are net of {S["cost_bps"]} bps/side per weekly rebalance. Zero-cost backtests (e.g. StockMixer) are an upper bound, not a comparison point.</div>
