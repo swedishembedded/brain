@@ -31,13 +31,45 @@ pub mod transport;
 pub use controller_session::ControllerSession;
 pub use transport::{serve_tcp, serve_unix, ServeOpts};
 
+/// A sink for one already-encoded protocol line, written to the transport and
+/// **flushed immediately** — so a session that streams (one chunk per model step)
+/// reaches the peer incrementally instead of buffering the whole turn.
+pub trait LineSink {
+    fn send(&mut self, line: &str) -> io::Result<()>;
+}
+
+/// Adapts any [`Write`] into a [`LineSink`] that appends a newline and flushes
+/// per line (the live-streaming behavior [`pump_connection`] wants).
+struct WriterSink<'a, W: Write> {
+    w: &'a mut W,
+}
+
+impl<W: Write> LineSink for WriterSink<'_, W> {
+    fn send(&mut self, line: &str) -> io::Result<()> {
+        writeln!(self.w, "{line}")?;
+        self.w.flush()
+    }
+}
+
 /// A per-connection protocol handler. Stateful across lines within one
 /// connection (a `req_id` demux, a streaming turn), independent across
 /// connections.
 pub trait Session {
     /// Process one inbound JSONL line; return zero or more response lines
-    /// (already JSON-encoded, no trailing newline).
+    /// (already JSON-encoded, no trailing newline). The simple, buffered form.
     fn on_line(&mut self, line: &str) -> Vec<String>;
+
+    /// Stream response lines to `out` **as they are produced**, flushing per line.
+    /// The default forwards the whole [`on_line`](Session::on_line) batch, so a
+    /// buffered session streams trivially; a session that can produce output
+    /// incrementally (e.g. [`ControllerSession`] over a token stream) overrides
+    /// this to flush each chunk to the wire the moment it is generated.
+    fn on_line_streaming(&mut self, line: &str, out: &mut dyn LineSink) -> io::Result<()> {
+        for l in self.on_line(line) {
+            out.send(&l)?;
+        }
+        Ok(())
+    }
 
     /// Lines to emit once when the connection opens (e.g. a `ready` event).
     fn greeting(&mut self) -> Vec<String> {
@@ -67,18 +99,22 @@ pub fn pump_connection<R: BufRead, W: Write>(
         if line.trim().is_empty() {
             continue;
         }
-        let responses = match catch_unwind(AssertUnwindSafe(|| session.on_line(&line))) {
-            Ok(r) => r,
+        // Stream each response line straight to the writer (flushed per line) as
+        // the session produces it. `sink` borrows `writer` for the duration of the
+        // turn; scope it so `writer` is free again for the panic path below.
+        let outcome = {
+            let mut sink = WriterSink { w: &mut writer };
+            catch_unwind(AssertUnwindSafe(|| session.on_line_streaming(&line, &mut sink)))
+        };
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e), // a genuine write/IO error: propagate
             Err(_) => {
                 let _ = writeln!(writer, "{}", panic_error_line());
                 let _ = writer.flush();
                 break; // close the connection; session state is untrustworthy
             }
-        };
-        for r in responses {
-            writeln!(writer, "{r}")?;
         }
-        writer.flush()?;
     }
     Ok(())
 }
@@ -106,6 +142,88 @@ pub fn serve_stdio(session: &mut dyn Session) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// A [`Write`] that records the order of `write`/`flush` calls, so a test can
+    /// prove output is flushed per line (streamed) rather than batched.
+    #[derive(Default)]
+    struct RecordingWriter {
+        log: Vec<String>,
+    }
+    impl Write for RecordingWriter {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.log.push(format!("write:{}", String::from_utf8_lossy(b).trim_end()));
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.log.push("flush".into());
+            Ok(())
+        }
+    }
+
+    /// A session that emits two lines incrementally via the streaming sink.
+    struct StreamingSession;
+    impl Session for StreamingSession {
+        fn on_line(&mut self, _line: &str) -> Vec<String> {
+            unreachable!("streaming path must be used")
+        }
+        fn on_line_streaming(&mut self, _line: &str, out: &mut dyn LineSink) -> io::Result<()> {
+            out.send("a")?;
+            out.send("b")?;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn streaming_flushes_after_every_line() {
+        let mut w = RecordingWriter::default();
+        pump_connection(Cursor::new(b"x\n".to_vec()), &mut w, &mut StreamingSession).unwrap();
+        // The two streamed lines are each flushed as produced — a flush lands
+        // between the two content writes, not one batched flush at the end.
+        // (`writeln!` splits into a content write + a newline write, so match the
+        // content markers and require a flush between them.)
+        let ia = w.log.iter().position(|e| e == "write:a").expect("wrote a");
+        let ib = w.log.iter().position(|e| e == "write:b").expect("wrote b");
+        assert!(ia < ib, "lines out of order: {:?}", w.log);
+        assert!(
+            w.log[ia..ib].iter().any(|e| e == "flush"),
+            "first line must flush before the second is written (live streaming): {:?}",
+            w.log
+        );
+    }
+
+    #[test]
+    fn controller_session_streams_audio_chunks_live() {
+        // The whole chain: a fake TTS model → Controller → ControllerSession →
+        // wire. A synth request must produce several audio_chunk lines, each
+        // flushed to the writer as generated (not one batch at turn end).
+        let reg = runtime::Registry {
+            synth: Some(Box::new(runtime::FakeSynthModel::default())),
+            ..Default::default()
+        };
+        let mut session = ControllerSession::new(runtime::Controller::new(reg));
+        let req = events::encode_line(&events::Event::UserSynthRequest {
+            text: "the quick brown fox jumps over the lazy dog twice and then some".into(),
+            ref_audio: None,
+            ref_text: None,
+            language: None,
+        });
+        let input = format!("{req}\n");
+        let mut w = RecordingWriter::default();
+        pump_connection(Cursor::new(input.into_bytes()), &mut w, &mut session).unwrap();
+
+        let chunk_idxs: Vec<usize> =
+            w.log.iter().enumerate().filter(|(_, e)| e.contains("audio_chunk")).map(|(i, _)| i).collect();
+        assert!(chunk_idxs.len() >= 2, "expected several streamed audio chunks: {:?}", w.log);
+        // Consecutive chunks are separated by a flush — each reaches the wire
+        // before the next is generated (live streaming, not one batch at the end).
+        for pair in chunk_idxs.windows(2) {
+            assert!(
+                w.log[pair[0]..pair[1]].iter().any(|e| e == "flush"),
+                "no flush between streamed chunks: {:?}",
+                w.log
+            );
+        }
+    }
 
     /// A trivial session: echoes each line's length and greets with `ready`.
     struct LenSession;

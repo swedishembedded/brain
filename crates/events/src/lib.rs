@@ -60,6 +60,10 @@ pub enum Event {
     AudioChunk { pcm_b64: String, sample_rate: u32, seq: u32, done: bool },
     /// Host-requested cancellation of the in-flight operation.
     Cancel,
+    /// Terminal acknowledgement that an in-flight operation was cancelled and the
+    /// controller has returned to idle. Emitted in response to [`Event::Cancel`];
+    /// the recoverable counterpart to [`Event::Error`] (which faults).
+    Cancelled,
     /// The runtime has finished initializing and is ready for input.
     Ready,
     /// A fatal/handled error condition.
@@ -175,6 +179,7 @@ fn event_to_value(ev: &Event) -> Value {
             "sample_rate": sample_rate, "seq": seq, "done": done,
         }),
         Event::Cancel => json!({ "event": "cancel" }),
+        Event::Cancelled => json!({ "event": "cancelled" }),
         Event::Ready => json!({ "event": "ready" }),
         Event::Error { message } => json!({ "event": "error", "message": message }),
         Event::Log { message } => json!({ "event": "log", "message": message }),
@@ -291,6 +296,7 @@ fn decode_event_value(v: &Value) -> Result<Event, String> {
             done: v["done"].as_bool().unwrap_or(false),
         }),
         "cancel" => Ok(Event::Cancel),
+        "cancelled" => Ok(Event::Cancelled),
         "ready" => Ok(Event::Ready),
         "error" => {
             // Structured forecast errors carry a `code`; legacy errors do not.
@@ -617,6 +623,7 @@ mod tests {
             Event::AudioChunk { pcm_b64: "AAAA".into(), sample_rate: 24000, seq: 0, done: false },
             Event::AudioChunk { pcm_b64: "".into(), sample_rate: 24000, seq: 3, done: true },
             Event::Cancel,
+            Event::Cancelled,
             Event::Ready,
             Event::Error { message: "boom".into() },
             Event::Log { message: "hello".into() },

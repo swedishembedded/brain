@@ -54,6 +54,9 @@ _TERMINAL_EVENTS = frozenset({
     "forecast_result",
     "backtest_result",
     "capabilities_result",
+    # A cancelled streaming turn ends with a bare ``cancelled`` ack (no ``done``
+    # chunk), so it completes the request just like a one-shot result.
+    "cancelled",
 })
 
 

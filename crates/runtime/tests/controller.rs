@@ -91,19 +91,86 @@ fn camera_frame_via_ppm_path() {
 }
 
 #[test]
-fn cancel_faults_the_machine() {
+fn cancel_is_recoverable_not_terminal() {
     let mut ctrl = controller_with("hi");
     let out = events_of(&ctrl.feed_line(r#"{"event":"cancel"}"#));
+    // Cancel now emits a terminal `cancelled` ack, NOT a fault.
     assert!(
-        out.iter().any(|e| matches!(e, Event::Error { .. })),
-        "cancel should emit an error from Faulted: {out:?}"
+        out.iter().any(|e| matches!(e, Event::Cancelled)),
+        "cancel should emit a recoverable `cancelled` ack: {out:?}"
     );
-    // Once faulted, further input is swallowed (terminal sink): no new chunks.
+    assert!(
+        !out.iter().any(|e| matches!(e, Event::Error { .. })),
+        "cancel must not fault: {out:?}"
+    );
+    // The session is still alive: a following request streams normally.
     let out2 = events_of(&ctrl.feed_line(r#"{"event":"user_text","text":"more"}"#));
     assert!(
-        !out2.iter().any(|e| matches!(e, Event::BrainTextChunk { .. })),
-        "faulted machine must not stream: {out2:?}"
+        out2.iter().any(|e| matches!(e, Event::BrainTextChunk { done: true, .. })),
+        "controller must keep serving after a cancel: {out2:?}"
     );
+}
+
+/// A [`Control`] that lets `n` chunks through, then requests cancel forever.
+struct CancelAfter(usize);
+impl runtime::Control for CancelAfter {
+    fn poll(&mut self) -> Option<Event> {
+        if self.0 == 0 {
+            Some(Event::Cancel)
+        } else {
+            self.0 -= 1;
+            None
+        }
+    }
+}
+
+#[test]
+fn cancel_mid_stream_stops_early_and_recovers() {
+    let mut ctrl = synth_controller();
+    // ~100 chars -> ~100_000 samples -> ~5 chunks at 24_000/chunk if run to end.
+    let text = "the quick brown fox jumps over the lazy dog, then the lazy dog jumps over the quick brown fox again!";
+    let line = events::encode_line(&Event::UserSynthRequest {
+        text: text.into(),
+        ref_audio: None,
+        ref_text: None,
+        language: None,
+    });
+    let mut out: Vec<Envelope> = Vec::new();
+    // Cancel after exactly 2 chunks have streamed.
+    ctrl.feed_line_streaming(&line, &mut out, &mut CancelAfter(2));
+    let evs = events_of(&out);
+
+    let n_chunks = evs.iter().filter(|e| matches!(e, Event::AudioChunk { .. })).count();
+    assert_eq!(n_chunks, 2, "cancel must pre-empt after exactly 2 chunks: {evs:?}");
+    // No terminal done:true chunk — the stream was interrupted, not completed.
+    assert!(
+        !evs.iter().any(|e| matches!(e, Event::AudioChunk { done: true, .. })),
+        "interrupted stream must not emit a normal terminal chunk: {evs:?}"
+    );
+    // Instead it ends with the recoverable `cancelled` ack.
+    assert!(matches!(evs.last(), Some(Event::Cancelled)), "must end with cancelled: {evs:?}");
+
+    // And the controller recovered: a fresh synth turn runs to completion.
+    let again = events_of(&ctrl.feed_line(&line));
+    assert!(
+        again.iter().any(|e| matches!(e, Event::AudioChunk { done: true, .. })),
+        "controller must stream again after a mid-stream cancel: {again:?}"
+    );
+}
+
+#[test]
+fn streaming_sink_matches_buffered_output() {
+    // The streaming path with a Vec sink and no control must produce exactly the
+    // same envelope sequence as the buffered feed_line — streaming is a superset,
+    // not a behavior change, when nothing cancels.
+    let mut a = controller_with("hello");
+    let buffered = a.feed_line(r#"{"req_id":"r1","event":"user_text","text":"go"}"#);
+
+    let mut b = controller_with("hello");
+    let mut streamed: Vec<Envelope> = Vec::new();
+    b.feed_line_streaming(r#"{"req_id":"r1","event":"user_text","text":"go"}"#, &mut streamed, &mut ());
+
+    assert_eq!(buffered, streamed, "streaming and buffered output must match");
 }
 
 #[test]

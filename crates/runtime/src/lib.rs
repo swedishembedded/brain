@@ -19,7 +19,8 @@
 //! │   ├── Detecting    (one-shot object detection)
 //! │   ├── Synthesizing (streaming synthesized audio, one chunk per Tick)
 //! │   ├── Forecasting  (one-shot forecast: forecast_request -> forecast_result)
-//! │   └── Backtesting  (one-shot rolling-origin backtest -> backtest_result)
+//! │   ├── Backtesting  (one-shot rolling-origin backtest -> backtest_result)
+//! │   └── Cancelled    (one-shot: emit `cancelled` ack, back to Idle — RECOVERABLE)
 //! └── Faulted          (error sink)
 //! ```
 //! The forecasting seam is the fourth model trait ([`forecast::ForecastModel`],
@@ -35,7 +36,12 @@
 //!     transitions back to `Idle`. RTC guarantees the self-posted `Tick`s are
 //!     processed in order, one per dispatch.
 //!   * **Behavioural inheritance** — `cancel` is handled once in `Operational`
-//!     (→ `Faulted`) and inherited by every operational substate.
+//!     (→ recoverable `Cancelled`) and inherited by every operational substate;
+//!     a genuine `error` still routes to the terminal `Faulted` sink.
+//!   * **Streaming sink** — the pump flushes each emission to a caller-supplied
+//!     `&mut dyn Emit` as it is produced and polls a `&mut dyn Control` between
+//!     reminders, so chunks reach the wire live and a `Cancel` pre-empts the next
+//!     token instead of waiting for the whole turn to finish.
 //!   * **LCA-correct entry/exit** — `Chatting::on_exit` frees the pump exactly
 //!     once, guaranteed by the engine's exit-chain on any outbound transition.
 
@@ -111,15 +117,33 @@ pub trait SynthModel {
     }
 }
 
-/// A sink for events emitted by the controller during a turn. Tests capture into
-/// a `Vec`; the CLI writes JSONL to stdout.
+/// A live sink for envelopes emitted by the controller during a streaming turn.
+/// Each emission is delivered as it is produced (one token / one chunk), not
+/// buffered until the turn ends — so the CLI/socket can flush to the wire
+/// incrementally. Tests capture into a `Vec<Envelope>`; the server adapts it to
+/// a JSONL line writer.
 pub trait Emit {
-    fn emit(&mut self, ev: Event);
+    fn emit(&mut self, env: Envelope);
 }
 
-impl Emit for Vec<Event> {
-    fn emit(&mut self, ev: Event) {
-        self.push(ev);
+impl Emit for Vec<Envelope> {
+    fn emit(&mut self, env: Envelope) {
+        self.push(env);
+    }
+}
+
+/// An out-of-band control source polled *between* streaming steps, so a `Cancel`
+/// (or a structured `Error`) can interrupt a long generation without blocking the
+/// pump. Returns `None` when nothing is pending. The unit type is the no-control
+/// source — it never interrupts — used by the buffered [`Controller::feed_event`]
+/// path and by transports that don't (yet) supply a side channel.
+pub trait Control {
+    fn poll(&mut self) -> Option<Event>;
+}
+
+impl Control for () {
+    fn poll(&mut self) -> Option<Event> {
+        None
     }
 }
 
@@ -409,6 +433,11 @@ enum St {
     /// One-shot rolling-origin backtest: the entry action runs the whole backtest
     /// and emits a `backtest_result`, then returns to `Idle`.
     Backtesting,
+    /// Recoverable cancellation: the entry action emits a terminal `cancelled`
+    /// acknowledgement and returns to `Idle`. Distinct from [`St::Faulted`] —
+    /// a cancel does NOT brick the session (the counterpart to `Faulted` for the
+    /// benign, host-requested stop). Follows `Detecting`'s one-shot shape.
+    Cancelled,
     Faulted,
 }
 
@@ -491,7 +520,8 @@ impl Machine for Brain {
             | St::Detecting
             | St::Synthesizing
             | St::Forecasting
-            | St::Backtesting => Some(St::Operational),
+            | St::Backtesting
+            | St::Cancelled => Some(St::Operational),
         }
     }
 
@@ -531,7 +561,7 @@ impl Machine for Brain {
                 _ => Disp::Unhandled,
             },
             // one-shot: entry action computed + emitted; complete to Idle.
-            St::Forecasting | St::Backtesting => match ev {
+            St::Forecasting | St::Backtesting | St::Cancelled => match ev {
                 Ev::GoIdle => Disp::Tran(St::Idle),
                 Ev::Tick => Disp::Handled,
                 _ => Disp::Unhandled,
@@ -549,8 +579,10 @@ impl Machine for Brain {
                 _ => Disp::Unhandled,
             },
             // `cancel`/error path handled once here, inherited by all substates.
+            // Cancel is a benign, host-requested stop → the RECOVERABLE `Cancelled`
+            // state (emit ack, return to Idle). A genuine `error` still faults.
             St::Operational => match ev {
-                Ev::External(Event::Cancel) => Disp::Tran(St::Faulted),
+                Ev::External(Event::Cancel) => Disp::Tran(St::Cancelled),
                 Ev::External(Event::Error { .. }) => Disp::Tran(St::Faulted),
                 _ => Disp::Unhandled,
             },
@@ -566,6 +598,13 @@ impl Machine for Brain {
             St::Synthesizing => self.start_synth(),
             St::Forecasting => self.run_forecast(),
             St::Backtesting => self.run_backtest(),
+            // Emit a terminal `cancelled` ack, then complete back to Idle. The
+            // active pump (if any) was already freed by the exit chain leaving the
+            // streaming substate, so this is a clean stop, not a fault.
+            St::Cancelled => {
+                self.emit(Event::Cancelled);
+                self.want_idle = true;
+            }
             St::Faulted => self.emit(Event::Error { message: "controller faulted".into() }),
             _ => {}
         }
@@ -798,13 +837,19 @@ impl Controller {
     /// reminder follow-ups) to the HSM, runs to completion, and drains the sink.
     /// A decode error surfaces an `error` event (no `req_id`) without faulting.
     pub fn feed_line(&mut self, line: &str) -> Vec<Envelope> {
+        let mut out: Vec<Envelope> = Vec::new();
+        self.feed_line_streaming(line, &mut out, &mut ());
+        out
+    }
+
+    /// Streaming twin of [`feed_line`](Self::feed_line): emit each envelope to
+    /// `out` **as it is produced** (one token / one chunk), and poll `ctl` between
+    /// steps so a `Cancel` can interrupt mid-generation. A decode error surfaces an
+    /// `error` envelope (no `req_id`) without faulting.
+    pub fn feed_line_streaming(&mut self, line: &str, out: &mut dyn Emit, ctl: &mut dyn Control) {
         match events::decode_envelope(line) {
-            Ok(env) => self.feed_event_with_id(env.req_id, env.event),
-            Err(e) => {
-                // Surface a protocol error without faulting the machine. The line
-                // failed to parse, so we have no req_id to echo.
-                vec![Envelope::bare(Event::Error { message: format!("decode: {e}") })]
-            }
+            Ok(env) => self.feed_event_streaming(env.req_id, env.event, out, ctl),
+            Err(e) => out.emit(Envelope::bare(Event::Error { message: format!("decode: {e}") })),
         }
     }
 
@@ -813,9 +858,28 @@ impl Controller {
         self.feed_event_with_id(None, ev)
     }
 
-    /// Post an already-decoded [`Event`] tagged with `req_id` and run to
-    /// completion. Every emitted event for this turn carries `req_id`.
+    /// Post an already-decoded [`Event`] tagged with `req_id`, buffering the whole
+    /// turn's output. Thin wrapper over [`feed_event_streaming`](Self::feed_event_streaming)
+    /// with a `Vec` sink and no control source — behavior identical to before the
+    /// streaming seam existed.
     pub fn feed_event_with_id(&mut self, req_id: Option<String>, ev: Event) -> Vec<Envelope> {
+        let mut out: Vec<Envelope> = Vec::new();
+        self.feed_event_streaming(req_id, ev, &mut out, &mut ());
+        out
+    }
+
+    /// The streaming core: stash the payload, post the external event, then drive
+    /// the pump one reminder at a time — flushing every emission to `out` as it
+    /// happens and polling `ctl` for an out-of-band `Cancel` before each `Tick`.
+    /// A cancel routes through the recoverable `Cancelled` state (terminal
+    /// `cancelled` ack, back to `Idle`), so the controller keeps serving.
+    pub fn feed_event_streaming(
+        &mut self,
+        req_id: Option<String>,
+        ev: Event,
+        out: &mut dyn Emit,
+        ctl: &mut dyn Control,
+    ) {
         self.hsm.machine_mut().active_req_id = req_id;
         // Stash payloads the entry actions need (they see no event).
         match &ev {
@@ -843,26 +907,37 @@ impl Controller {
             _ => {}
         }
         self.hsm.post(Ev::External(ev));
-        self.pump_until_settled();
-        let out = std::mem::take(&mut self.hsm.machine_mut().out);
+        self.pump_streaming(out, ctl);
         // The turn is over; clear the active id so any later untagged emit can't
         // accidentally inherit it.
         self.hsm.machine_mut().active_req_id = None;
-        out
+    }
+
+    /// Move everything the machine has emitted so far out to the live sink. Called
+    /// after every engine step so streamed chunks reach the caller incrementally
+    /// rather than in one batch at the end of the turn.
+    fn flush(&mut self, out: &mut dyn Emit) {
+        for env in std::mem::take(&mut self.hsm.machine_mut().out) {
+            out.emit(env);
+        }
     }
 
     /// Bridge the machine's self-post flags (`pending_tick`, `want_idle`) into the
-    /// engine and drain until no more synthetic work remains. This realises the
+    /// engine and drive until no more synthetic work remains, flushing to `out`
+    /// after each step and polling `ctl` between reminders. This realises the
     /// Reminder pattern over the generic engine: each reminder is processed fully
     /// (one token / one completion step) before the next is posted, and the run is
-    /// non-reentrant, so RTC ordering holds.
-    fn pump_until_settled(&mut self) {
+    /// non-reentrant, so RTC ordering holds. A `Cancel` from `ctl` is injected as
+    /// an external event (handled by `Operational` → recoverable `Cancelled`),
+    /// pre-empting the next `Tick`.
+    fn pump_streaming(&mut self, out: &mut dyn Emit, ctl: &mut dyn Control) {
         // Cap iterations as a safety net against a misbehaving pump. The floor is
         // generous so legitimate multi-chunk audio streams aren't truncated, while
         // still bounding a pump that never clears `pending_tick` (each text token
         // and each audio chunk advances deterministically toward completion).
         for _ in 0..(self.hsm.machine().cfg.max_new + 8).max(100_000) {
             self.hsm.run();
+            self.flush(out);
             let m = self.hsm.machine_mut();
             if m.want_idle {
                 m.want_idle = false;
@@ -872,11 +947,20 @@ impl Controller {
             }
             if m.pending_tick {
                 m.pending_tick = false;
+                // Poll for an out-of-band cancel BEFORE producing the next chunk,
+                // so a long stream stops promptly. The injected event is handled
+                // like any external one (Operational → Cancelled), then the loop
+                // flushes the ack and settles back to Idle.
+                if let Some(ctl_ev) = ctl.poll() {
+                    self.hsm.post(Ev::External(ctl_ev));
+                    continue;
+                }
                 self.hsm.post(Ev::Tick);
                 continue;
             }
             break;
         }
+        self.flush(out);
     }
 }
 

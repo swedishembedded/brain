@@ -21,10 +21,33 @@
 
 use std::io::{BufRead, Write};
 
+use events::Envelope;
 use runtime::{
-    Controller, DetectModel, FakeDetectModel, FakeInferModel, GenConfig, GptInfer, Registry,
+    Controller, DetectModel, Emit, FakeDetectModel, FakeInferModel, GenConfig, GptInfer, Registry,
     YoloDetect,
 };
+
+/// A live [`Emit`] sink over a stdout writer: encodes each envelope to a JSONL
+/// line and flushes it immediately, so `brain run` streams token-by-token as the
+/// controller produces them (not one batch at the end of the turn). `ok` latches
+/// false once the pipe closes so the loop can stop.
+struct StdoutSink<'a, W: Write> {
+    w: &'a mut W,
+    ok: bool,
+}
+
+impl<W: Write> Emit for StdoutSink<'_, W> {
+    fn emit(&mut self, env: Envelope) {
+        if !self.ok {
+            return;
+        }
+        if writeln!(self.w, "{}", events::encode_envelope(&env)).is_err() {
+            self.ok = false;
+            return;
+        }
+        let _ = self.w.flush();
+    }
+}
 
 pub fn run_serve(args: &[String]) {
     let mut gpt_path = std::env::var("BRAIN_GPT").ok();
@@ -129,13 +152,15 @@ pub fn run_serve(args: &[String]) {
         if line.trim().is_empty() {
             continue;
         }
-        for env in ctrl.feed_line(&line) {
-            // Encode with the envelope so a `req_id` (if the request carried one)
-            // is echoed onto every emitted line for client-side demuxing.
-            if writeln!(out, "{}", events::encode_envelope(&env)).is_err() {
-                return; // stdout closed
-            }
-            let _ = out.flush();
+        // Stream each emitted envelope to stdout as it is produced (flushed per
+        // line), so a long chat response appears token-by-token rather than all at
+        // once when the turn completes. The req_id (if any) is echoed on every line
+        // for client-side demuxing. No control source on stdin's blocking read: a
+        // `cancel` is honored as the next line (recoverable), between turns.
+        let mut sink = StdoutSink { w: &mut out, ok: true };
+        ctrl.feed_line_streaming(&line, &mut sink, &mut ());
+        if !sink.ok {
+            return; // stdout closed
         }
     }
 }
