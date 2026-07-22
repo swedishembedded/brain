@@ -27,6 +27,7 @@ pub mod forecaster;
 pub mod import;
 pub mod model;
 pub mod preprocess;
+pub mod train;
 
 pub use config::{Chronos2Config, Param, QUANTILES};
 pub use forecaster::Chronos2Forecaster;
