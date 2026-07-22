@@ -233,6 +233,7 @@ fn finetune(args: &[String]) {
     let dec = a.str_or("--kronos-decoder", "");
     let data = a.str_or("--data", "");
     let out = a.take_str("--out");
+    let holdout = a.take_str("--holdout-data");
     let context = a.usize_or("--context", 180);
     let horizon = a.usize_or("--horizon", 5);
     let epochs = a.usize_or("--epochs", 8) as u32;
@@ -261,16 +262,33 @@ fn finetune(args: &[String]) {
         series.len(), if lora_rank > 0 { format!(" · LoRA r{lora_rank}") } else { " · full".into() });
     let split = forecast::train_data::SplitConfig { train_frac: 0.7, val_frac: 0.15, embargo };
     let lora = (lora_rank > 0).then(|| kronos::train::LoraCfg::attn(lora_rank, (lora_rank * 2) as f32));
-    let opts = kronos::train::FinetuneOpts { epochs, lr, wd: 0.1, clip: 3.0, lora };
+    let opts = kronos::train::FinetuneOpts { epochs, lr, wd: 0.1, clip: 3.0, lora, progress: true };
     let (rep, weights) = kronos::finetune::finetune_universe(&model, &base, &series, context, horizon, split, &opts);
     println!(
-        "gate: base_val {:.4} → ft_val {:.4}  ({} steps)  ⇒  {}",
+        "\ngate (INCLUDED names, held-out future): base_val {:.4} → ft_val {:.4}  ({} steps)  ⇒  {}",
         rep.base_val, rep.ft_val, rep.steps,
         if rep.promoted { "PROMOTE (fine-tune beats base out-of-sample)" } else { "KEEP BASE (no held-out improvement)" }
     );
-    if let Some(w) = weights {
+    let w = weights.expect("weights always returned");
+    // Save FIRST (so a slow generalization eval can't cost us the checkpoint).
+    if rep.promoted {
         let path = out.unwrap_or_else(|| "kronos-decoder-ft.weights".into());
         kronos::finetune::save_decoder_weights(&cfg, &w, &path);
         println!("promoted checkpoint → {path}");
+    } else {
+        println!("not promoted → no checkpoint written (base kept)");
+    }
+    // Generalization: does the fine-tune also improve names it NEVER trained on?
+    if let Some(hd) = holdout {
+        let hs = load_series(&hd);
+        if !hs.is_empty() {
+            let base_h = kronos::finetune::eval_universe_loss(&model, &base, &hs, context, horizon);
+            let ft_h = kronos::finetune::eval_universe_loss(&model, &w, &hs, context, horizon);
+            println!(
+                "held-out NAMES ({} names, never fine-tuned): base {base_h:.4} → ft {ft_h:.4}  ⇒  {}",
+                hs.len(),
+                if ft_h < base_h { "GENERALIZES (more accurate on unseen instruments)" } else { "no gain on unseen names" }
+            );
+        }
     }
 }

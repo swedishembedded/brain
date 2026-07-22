@@ -11,7 +11,7 @@
 //! on a held-out (embargoed) split.
 
 use crate::generate::KronosModel;
-use crate::train::{finetune, FinetuneOpts, FinetuneReport, TokenBatch};
+use crate::train::{finetune, FinetuneOpts, FinetuneReport, KronosTrain, TokenBatch};
 use forecast::train_data::{self, Series, SplitConfig, Window, WindowRef};
 use std::collections::HashMap;
 
@@ -77,6 +77,34 @@ pub fn finetune_universe(
     let cfg = model.decoder_config().clone();
     let t = (context - 1) as u32;
     finetune(cfg, t, base_init, &train, &val, opts)
+}
+
+/// Mean next-token loss of a decoder weight set over a universe's leak-safe windows
+/// — the generalization metric. Evaluate the base and fine-tuned weights on a
+/// **held-out set of names** (not in the fine-tune universe) to prove the fine-tune
+/// improves forecasting of instruments it never trained on, not just the ones it did.
+pub fn eval_universe_loss(
+    model: &KronosModel,
+    weights: &HashMap<String, Vec<f32>>,
+    series: &[Series],
+    context: usize,
+    horizon: usize,
+) -> f32 {
+    let windows = train_data::enumerate_windows(series, context, horizon);
+    // Subsample to keep the eval fast (a few hundred windows is plenty for a
+    // stable mean loss); tokenizing/forwarding every window would dominate.
+    let step = (windows.len() / 300).max(1);
+    let batches: Vec<TokenBatch> = windows
+        .iter()
+        .step_by(step)
+        .filter_map(|&wr| tokenize_window(model, &train_data::extract(series, wr, context, horizon)))
+        .collect();
+    if batches.is_empty() {
+        return f32::NAN;
+    }
+    let cfg = model.decoder_config().clone();
+    let t = (context - 1) as u32;
+    KronosTrain::new(cfg, t, weights).mean_loss(&batches)
 }
 
 /// Write a reference-named decoder weight map as a brain `.weights` checkpoint
@@ -152,7 +180,7 @@ mod tests {
         // plumbing must run and produce a well-formed decision.
         assert!(rep.base_val.is_finite() && rep.ft_val.is_finite());
         assert!(rep.steps > 0, "no training steps ran (no train windows tokenized)");
-        assert_eq!(rep.promoted, w.is_some());
+        assert!(w.is_some(), "fine-tuned weights are always returned");
         eprintln!("universe finetune: base {:.3} ft {:.3} promoted {} steps {}", rep.base_val, rep.ft_val, rep.promoted, rep.steps);
     }
 }

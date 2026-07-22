@@ -912,11 +912,13 @@ pub struct FinetuneOpts {
     pub wd: f32,
     pub clip: f32,
     pub lora: Option<LoraCfg>,
+    /// Print per-batch progress (epoch, step/total, running loss, elapsed + ETA).
+    pub progress: bool,
 }
 
 impl Default for FinetuneOpts {
     fn default() -> Self {
-        FinetuneOpts { epochs: 8, lr: 4e-5, wd: 0.1, clip: 3.0, lora: None }
+        FinetuneOpts { epochs: 8, lr: 4e-5, wd: 0.1, clip: 3.0, lora: None, progress: false }
     }
 }
 
@@ -944,20 +946,42 @@ pub fn finetune(
     opts: &FinetuneOpts,
 ) -> (FinetuneReport, Option<HashMap<String, Vec<f32>>>) {
     let base_val = KronosTrain::new(cfg.clone(), t, base_init).mean_loss(val);
+    if opts.progress {
+        eprintln!("  [finetune] base held-out loss {base_val:.4} · {} train / {} val windows · {} epoch(s)",
+            train.len(), val.len(), opts.epochs);
+    }
     let ft = KronosTrain::with_lora(cfg, t, base_init, opts.lora.clone());
+    let total = (opts.epochs as usize * train.len()).max(1);
+    let every = (total / 40).max(1);
+    let t0 = std::time::Instant::now();
+    let (mut run, mut cnt) = (0.0f32, 0u32);
     let mut step = 0u32;
-    for _ in 0..opts.epochs {
+    for ep in 0..opts.epochs {
         for b in train {
             step += 1;
             ft.set(b);
             ft.zero_grads();
-            let _ = ft.forward();
+            let l = ft.forward();
             ft.backward();
             ft.adamw_step(step, opts.lr, opts.wd, Some(opts.clip));
+            run += l;
+            cnt += 1;
+            if opts.progress && (step as usize % every == 0 || step as usize == total) {
+                let el = t0.elapsed().as_secs_f32();
+                let frac = step as f32 / total as f32;
+                let eta = if frac > 0.0 { el / frac - el } else { 0.0 };
+                eprintln!(
+                    "  [finetune] epoch {}/{}  step {step}/{total} ({:.0}%)  loss {:.4}  |  {:.0}s elapsed, ETA {:.0}s",
+                    ep + 1, opts.epochs, frac * 100.0, run / cnt as f32, el, eta
+                );
+                run = 0.0;
+                cnt = 0;
+            }
         }
     }
     let ft_val = ft.mean_loss(val);
     let promoted = ft_val.is_finite() && base_val.is_finite() && ft_val < base_val;
-    let weights = promoted.then(|| ft.to_reference_weights());
-    (FinetuneReport { promoted, base_val, ft_val, steps: step }, weights)
+    // Return the fine-tuned weights unconditionally so the caller can also evaluate
+    // generalization (held-out names); the caller saves iff `promoted`.
+    (FinetuneReport { promoted, base_val, ft_val, steps: step }, Some(ft.to_reference_weights()))
 }
