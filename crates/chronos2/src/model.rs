@@ -289,74 +289,64 @@ impl Chronos2 {
         self.gpu.read(&qp, n_out * head_out)
     }
 
-    /// Forecast the quantile paths for a single context series over `horizon`
-    /// steps. Returns `[num_quantiles, horizon]` row-major (quantile-major).
-    pub fn forecast_quantiles(&self, context: &[f32], horizon: usize) -> Vec<f32> {
+    /// Host-side scaler + patch-embed + REG assembly (steps 1–4 of the forecast):
+    /// a `context` series over `horizon` steps → the assembled token embeddings
+    /// `emb` `[s, d]`, the additive time-attention `mask[s]`, the future-patch
+    /// count `n_out`, and the [`LocScale`](preprocess::LocScale) needed to denorm.
+    /// This is the part that stays on the host regardless of where the transformer
+    /// core runs (device or NPU).
+    fn assemble_input(&self, context: &[f32], horizon: usize) -> (Vec<f32>, Vec<f32>, usize, preprocess::LocScale) {
         let cfg = &self.cfg;
         let d = cfg.d_model;
         let patch = cfg.input_patch_size;
-        let q = cfg.num_quantiles;
-        let head_out = cfg.head_out_dim();
 
-        // 1. standardize + patch
         let (ls, scaled) = preprocess::instance_norm(context, cfg.use_arcsinh);
         let ctx = preprocess::context_features(&scaled, patch, cfg.time_encoding_scale);
         let fut = preprocess::future_features(horizon, patch, cfg.time_encoding_scale);
         let n_ctx = ctx.n_patches;
         let n_out = fut.n_patches;
-        let s = n_ctx + 1 + n_out; // + REG token
 
-        // 2. embed all patch tokens (context + future) through the shared block
         let mut feats = ctx.features.clone();
         feats.extend_from_slice(&fut.features);
         let feat_buf = self.gpu.storage_init("feats", &feats);
         let patch_emb = self.residual_block("input_patch_embedding", &feat_buf, n_ctx + n_out, 3 * patch, cfg.d_ff, d);
         let patch_emb_host = self.gpu.read(&patch_emb, (n_ctx + n_out) * d);
 
-        // 3. assemble the token sequence with the REG embedding in the middle
+        // assemble ctx tokens · REG · future tokens
         let reg = &self.w_host_row("shared.weight", cfg.reg_token_id, d);
-        let mut emb_host = Vec::with_capacity(s * d);
-        emb_host.extend_from_slice(&patch_emb_host[..n_ctx * d]);
-        emb_host.extend_from_slice(reg);
-        emb_host.extend_from_slice(&patch_emb_host[n_ctx * d..]);
-        let emb = self.gpu.storage_init("emb", &emb_host);
+        let mut emb = Vec::with_capacity((n_ctx + 1 + n_out) * d);
+        emb.extend_from_slice(&patch_emb_host[..n_ctx * d]);
+        emb.extend_from_slice(reg);
+        emb.extend_from_slice(&patch_emb_host[n_ctx * d..]);
 
-        // 4. time-attention mask: ctx patches per their observed-mask, REG + future
-        //    always attendable. Additive: 0 attend, large-negative masked.
-        let mut mask = vec![0.0f32; s];
+        // additive mask: ctx patches per observed-mask, REG + future attendable.
+        let mut mask = vec![0.0f32; n_ctx + 1 + n_out];
         for p in 0..n_ctx {
             if ctx.attn_mask[p] == 0.0 {
                 mask[p] = -3.4e38;
             }
         }
-        let mask_buf = self.gpu.storage_init("mask", &mask);
+        (emb, mask, n_out, ls)
+    }
 
-        // 5. encoder blocks
-        for b in 0..cfg.num_layers {
-            self.block(b, &emb, s, &mask_buf);
-        }
+    /// Host-side head rearrange + denorm (step 8): the raw head output
+    /// `qp[n_out, num_quantiles*patch]` → `[num_quantiles, horizon]` (quantile-major),
+    /// each quantile row inverse-standardized by `ls` and trimmed to `horizon`.
+    fn head_to_quantiles(&self, qp: &[f32], n_out: usize, ls: preprocess::LocScale, horizon: usize) -> Vec<f32> {
+        let cfg = &self.cfg;
+        let patch = cfg.output_patch_size;
+        let q = cfg.num_quantiles;
+        let head_out = cfg.head_out_dim();
 
-        // 6. final norm
-        let normed = self.gpu.storage((s * d) as u64);
-        self.rms(&emb, "encoder.final_layer_norm.weight", &normed, d, s);
-
-        // 7. quantile head on the trailing future tokens
-        let normed_host = self.gpu.read(&normed, s * d);
-        let head_in = self.gpu.storage_init("head_in", &normed_host[(n_ctx + 1) * d..]);
-        let qp = self.residual_block("output_patch_embedding", &head_in, n_out, d, cfg.d_ff, head_out);
-        let qp_host = self.gpu.read(&qp, n_out * head_out); // [n_out, q*patch]
-
-        // 8. rearrange b n (q p) -> [q, n*patch] (q OUTER, p inner), denorm per row
         let hlen = n_out * patch;
         let mut out = vec![0.0f32; q * hlen];
         for n in 0..n_out {
             for qi in 0..q {
                 for pp in 0..patch {
-                    out[qi * hlen + n * patch + pp] = qp_host[n * head_out + qi * patch + pp];
+                    out[qi * hlen + n * patch + pp] = qp[n * head_out + qi * patch + pp];
                 }
             }
         }
-        // denorm each quantile row, then trim to the requested horizon
         let mut trimmed = vec![0.0f32; q * horizon];
         for qi in 0..q {
             let row = &out[qi * hlen..qi * hlen + hlen];
@@ -364,6 +354,28 @@ impl Chronos2 {
             trimmed[qi * horizon..qi * horizon + horizon].copy_from_slice(&dn[..horizon]);
         }
         trimmed
+    }
+
+    /// Forecast the quantile paths for a single context series, running the
+    /// transformer core through a pluggable `core(emb, mask, n_out) -> qhead`. The
+    /// host does the scaler/patch/embed/REG assembly and the head rearrange/denorm;
+    /// `core` is the `[s,d] + [s] -> [n_out, head_out]` transformer stack — swap in
+    /// an NPU-backed `core` (the exported ONNX graph) or reuse the device
+    /// [`core_forward`](Self::core_forward). Returns `[num_quantiles, horizon]`.
+    pub fn forecast_quantiles_with_core<F>(&self, context: &[f32], horizon: usize, core: F) -> Vec<f32>
+    where
+        F: Fn(&[f32], &[f32], usize) -> Vec<f32>,
+    {
+        let (emb, mask, n_out, ls) = self.assemble_input(context, horizon);
+        let qp = core(&emb, &mask, n_out);
+        self.head_to_quantiles(&qp, n_out, ls, horizon)
+    }
+
+    /// Forecast the quantile paths for a single context series over `horizon`
+    /// steps. Returns `[num_quantiles, horizon]` row-major (quantile-major). The
+    /// transformer core runs on this model's device via [`core_forward`](Self::core_forward).
+    pub fn forecast_quantiles(&self, context: &[f32], horizon: usize) -> Vec<f32> {
+        self.forecast_quantiles_with_core(context, horizon, |emb, mask, n_out| self.core_forward(emb, mask, n_out))
     }
 
     /// Read a full weight tensor to the host (small; used by the host-side group
@@ -640,6 +652,49 @@ mod tests {
             assert!(v.is_finite(), "output {i} not finite");
             assert!((v - mean).abs() < 1e-2, "zero-weight forecast should be the mean {mean}, got {v}");
         }
+    }
+
+    /// The pluggable-core seam: `forecast_quantiles` must equal
+    /// `forecast_quantiles_with_core` driven by the device `core_forward`, and a
+    /// custom `core` (e.g. an NPU-backed graph) must be invoked with the assembled
+    /// `emb`/`mask` and its output routed through the head rearrange/denorm.
+    #[test]
+    fn pluggable_core_routes_and_default_matches() {
+        if skip() {
+            return;
+        }
+        let cfg = Chronos2Config::tiny();
+        let weights: HashMap<String, Vec<f32>> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(k, s)| {
+                let n: usize = s.iter().product();
+                let seed = k.len();
+                (k, (0..n).map(|i| (((i + seed) as f32) * 0.1).sin() * 0.05).collect())
+            })
+            .collect();
+        let model = Chronos2::from_weights(cfg.clone(), &weights).unwrap();
+        let context: Vec<f32> = (0..40).map(|i| 3.0 + (i as f32 * 0.3).sin()).collect();
+        let horizon = 6;
+
+        // default pluggable core == the public forecast_quantiles.
+        let base = model.forecast_quantiles(&context, horizon);
+        let via = model.forecast_quantiles_with_core(&context, horizon, |e, m, n| model.core_forward(e, m, n));
+        assert_eq!(base, via, "default core must reproduce forecast_quantiles exactly");
+
+        // a custom core is invoked with the assembled inputs; its output flows out.
+        let d = cfg.d_model;
+        let head_out = cfg.head_out_dim();
+        let called = std::cell::Cell::new(false);
+        let out = model.forecast_quantiles_with_core(&context, horizon, |emb, mask, n_out| {
+            called.set(true);
+            assert_eq!(emb.len() % d, 0);
+            assert_eq!(emb.len() / d, mask.len(), "emb rows == mask len == s");
+            vec![0.0f32; n_out * head_out]
+        });
+        assert!(called.get(), "custom core must be invoked");
+        assert_eq!(out.len(), cfg.num_quantiles * horizon);
+        assert!(out.iter().all(|v| v.is_finite()), "denorm of a zero head must be finite");
     }
 
     /// The multivariate path with a single series must reproduce the
