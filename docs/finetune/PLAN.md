@@ -1,5 +1,7 @@
 # Weekly market fine-tuning pipeline — Chronos-2 + Kronos
 
+See DATASETS.md for the data inventory + the fetch & fine-tune commands.
+
 Goal: take the whole market's latest OHLCV, fine-tune both forecasting models, and
 produce a **dated weekly checkpoint** that adapts to recent market behavior so the
 next week's cross-sectional ranking is above average — **without overfitting**, on
