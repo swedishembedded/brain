@@ -194,6 +194,151 @@ fn residual_block_bwd(
     dx
 }
 
+// ---- NeoX RoPE (half-split) fwd + bwd -----------------------------------------
+
+/// Apply half-split NeoX RoPE in place to `buf` `[s, heads*hd]`: for each head,
+/// rotate the pair `(x[j], x[j+hd/2])` by `angle = t * theta^(-2j/hd)`.
+fn rope_neox(buf: &mut [f32], s: usize, heads: usize, hd: usize, theta: f32) {
+    let inner = heads * hd;
+    let half = hd / 2;
+    for t in 0..s {
+        for h in 0..heads {
+            let base = t * inner + h * hd;
+            for j in 0..half {
+                let ang = t as f32 * theta.powf(-2.0 * j as f32 / hd as f32);
+                let (sn, cs) = ang.sin_cos();
+                let a = buf[base + j];
+                let b = buf[base + j + half];
+                buf[base + j] = a * cs - b * sn;
+                buf[base + j + half] = b * cs + a * sn;
+            }
+        }
+    }
+}
+
+/// Backward of [`rope_neox`]: the rotation is orthogonal, so the gradient is the
+/// same rotation by the negated angle — applied in place to `dbuf`.
+fn rope_neox_bwd(dbuf: &mut [f32], s: usize, heads: usize, hd: usize, theta: f32) {
+    let inner = heads * hd;
+    let half = hd / 2;
+    for t in 0..s {
+        for h in 0..heads {
+            let base = t * inner + h * hd;
+            for j in 0..half {
+                let ang = t as f32 * theta.powf(-2.0 * j as f32 / hd as f32);
+                let (sn, cs) = ang.sin_cos();
+                let dj = dbuf[base + j];
+                let dj2 = dbuf[base + j + half];
+                dbuf[base + j] = dj * cs + dj2 * sn;
+                dbuf[base + j + half] = -dj * sn + dj2 * cs;
+            }
+        }
+    }
+}
+
+// ---- unscaled bidirectional multi-head attention fwd + bwd ---------------------
+
+/// `q,k,v` are `[s, heads*hd]`; `mask[s]` is additive per key. UNSCALED (no
+/// `1/sqrt(hd)`), matching Chronos-2's `attn_scores_full`. Returns
+/// `(ctx[s, heads*hd], probs[heads*s*s])`.
+fn attention(q: &[f32], k: &[f32], v: &[f32], mask: &[f32], s: usize, heads: usize, hd: usize) -> (Vec<f32>, Vec<f32>) {
+    let inner = heads * hd;
+    let mut probs = vec![0.0f32; heads * s * s];
+    let mut ctx = vec![0.0f32; s * inner];
+    for h in 0..heads {
+        for i in 0..s {
+            let mut sc = vec![0.0f32; s];
+            for (j, scj) in sc.iter_mut().enumerate() {
+                let mut dot = 0.0f32;
+                for dd in 0..hd {
+                    dot += q[i * inner + h * hd + dd] * k[j * inner + h * hd + dd];
+                }
+                *scj = dot + mask[j];
+            }
+            let mx = sc.iter().cloned().fold(f32::MIN, f32::max);
+            let mut sum = 0.0f32;
+            for scj in sc.iter_mut() {
+                *scj = (*scj - mx).exp();
+                sum += *scj;
+            }
+            for (j, &e) in sc.iter().enumerate() {
+                let p = e / sum;
+                probs[h * s * s + i * s + j] = p;
+                for dd in 0..hd {
+                    ctx[i * inner + h * hd + dd] += p * v[j * inner + h * hd + dd];
+                }
+            }
+        }
+    }
+    (ctx, probs)
+}
+
+/// Backward of [`attention`]: `d_ctx` + saved `probs` → `(dq, dk, dv)`.
+fn attention_bwd(
+    d_ctx: &[f32],
+    probs: &[f32],
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    s: usize,
+    heads: usize,
+    hd: usize,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let inner = heads * hd;
+    let mut dq = vec![0.0f32; s * inner];
+    let mut dk = vec![0.0f32; s * inner];
+    let mut dv = vec![0.0f32; s * inner];
+    for h in 0..heads {
+        for i in 0..s {
+            let mut dprob = vec![0.0f32; s];
+            for (j, dpj) in dprob.iter_mut().enumerate() {
+                let p = probs[h * s * s + i * s + j];
+                let mut dp = 0.0f32;
+                for dd in 0..hd {
+                    let g = d_ctx[i * inner + h * hd + dd];
+                    dp += g * v[j * inner + h * hd + dd];
+                    dv[j * inner + h * hd + dd] += p * g;
+                }
+                *dpj = dp;
+            }
+            // softmax jacobian: d_score_j = p_j (dprob_j - Σ_k p_k dprob_k)
+            let sdot: f32 = (0..s).map(|j| probs[h * s * s + i * s + j] * dprob[j]).sum();
+            for j in 0..s {
+                let dscore = probs[h * s * s + i * s + j] * (dprob[j] - sdot);
+                for dd in 0..hd {
+                    dq[i * inner + h * hd + dd] += dscore * k[j * inner + h * hd + dd];
+                    dk[j * inner + h * hd + dd] += dscore * q[i * inner + h * hd + dd];
+                }
+            }
+        }
+    }
+    (dq, dk, dv)
+}
+
+// ---- one encoder block (M3): time attention + group degeneration + FFN ---------
+
+/// Intermediates one [`Chronos2Train::block_forward`] backward needs.
+pub struct BlockCache {
+    emb_in: Vec<f32>,
+    xn0: Vec<f32>,
+    inv0: Vec<f32>,
+    q: Vec<f32>, // roped
+    k: Vec<f32>, // roped
+    v: Vec<f32>,
+    probs: Vec<f32>,
+    ctx: Vec<f32>,
+    emb1: Vec<f32>,
+    xn1: Vec<f32>,
+    inv1: Vec<f32>,
+    vg: Vec<f32>,
+    emb2: Vec<f32>,
+    xn2: Vec<f32>,
+    inv2: Vec<f32>,
+    hid: Vec<f32>, // pre-ReLU
+    hid_relu: Vec<f32>,
+    s: usize,
+}
+
 // ---- the differentiable head path (M2) ----------------------------------------
 
 /// The trainable Chronos-2 (host). Holds a config and a name→weights map; the
@@ -288,6 +433,84 @@ impl Chronos2Train {
             g.get_mut("encoder.final_layer_norm.weight").unwrap(),
         )
     }
+
+    /// Forward of encoder block `b` on `emb_in` `[s, d]` with additive key `mask`:
+    /// time attention (pre-norm bidirectional MHA + NeoX RoPE, residual) → group
+    /// degeneration (B=1: `o(v(rmsnorm))`, residual) → FFN (pre-norm ReLU MLP,
+    /// residual). Matches [`crate::model::Chronos2::block`]. Returns `(emb_out, cache)`.
+    pub fn block_forward(&self, b: usize, emb_in: &[f32], mask: &[f32], s: usize) -> (Vec<f32>, BlockCache) {
+        let cfg = &self.cfg;
+        let (d, inner, heads, hd, f, eps, theta) =
+            (cfg.d_model, cfg.inner_dim(), cfg.num_heads, cfg.d_kv, cfg.d_ff, cfg.layer_norm_epsilon, cfg.rope_theta);
+        let p = format!("encoder.block.{b}");
+        let ww = |n: &str| &self.w[n];
+
+        // -- time attention --
+        let (xn0, inv0) = rmsnorm(emb_in, ww(&format!("{p}.layer.0.layer_norm.weight")), s, d, eps);
+        let mut q = matmul(&xn0, ww(&format!("{p}.layer.0.self_attention.q.weight")), s, d, inner);
+        let mut k = matmul(&xn0, ww(&format!("{p}.layer.0.self_attention.k.weight")), s, d, inner);
+        let v = matmul(&xn0, ww(&format!("{p}.layer.0.self_attention.v.weight")), s, d, inner);
+        rope_neox(&mut q, s, heads, hd, theta);
+        rope_neox(&mut k, s, heads, hd, theta);
+        let (ctx, probs) = attention(&q, &k, &v, mask, s, heads, hd);
+        let o = matmul(&ctx, ww(&format!("{p}.layer.0.self_attention.o.weight")), s, inner, d);
+        let emb1: Vec<f32> = (0..s * d).map(|i| emb_in[i] + o[i]).collect();
+
+        // -- group degeneration --
+        let (xn1, inv1) = rmsnorm(&emb1, ww(&format!("{p}.layer.1.layer_norm.weight")), s, d, eps);
+        let vg = matmul(&xn1, ww(&format!("{p}.layer.1.self_attention.v.weight")), s, d, inner);
+        let og = matmul(&vg, ww(&format!("{p}.layer.1.self_attention.o.weight")), s, inner, d);
+        let emb2: Vec<f32> = (0..s * d).map(|i| emb1[i] + og[i]).collect();
+
+        // -- FFN --
+        let (xn2, inv2) = rmsnorm(&emb2, ww(&format!("{p}.layer.2.layer_norm.weight")), s, d, eps);
+        let hid = matmul(&xn2, ww(&format!("{p}.layer.2.mlp.wi.weight")), s, d, f);
+        let hid_relu: Vec<f32> = hid.iter().map(|&x| x.max(0.0)).collect();
+        let ff = matmul(&hid_relu, ww(&format!("{p}.layer.2.mlp.wo.weight")), s, f, d);
+        let emb3: Vec<f32> = (0..s * d).map(|i| emb2[i] + ff[i]).collect();
+
+        (emb3, BlockCache { emb_in: emb_in.to_vec(), xn0, inv0, q, k, v, probs, ctx, emb1, xn1, inv1, vg, emb2, xn2, inv2, hid, hid_relu, s })
+    }
+
+    /// Backward of [`block_forward`]: `d_emb_out` → `d_emb_in`, accumulating the
+    /// block's weight grads into `g`. Note: q/k/v/o attention projections and the
+    /// group/FFN linears are bias-free (matmul only), matching the forward.
+    pub fn block_backward(&self, b: usize, cache: &BlockCache, d_emb_out: &[f32], g: &mut HashMap<String, Vec<f32>>) -> Vec<f32> {
+        let cfg = &self.cfg;
+        let (d, inner, heads, hd, f, theta) =
+            (cfg.d_model, cfg.inner_dim(), cfg.num_heads, cfg.d_kv, cfg.d_ff, cfg.rope_theta);
+        let s = cache.s;
+        let p = format!("encoder.block.{b}");
+        let ww = |n: &str| &self.w[n];
+
+        // -- FFN backward (emb3 = emb2 + ff; residual passes d_emb_out to d_emb2) --
+        let d_hid_relu = matmul_bwd(&cache.hid_relu, ww(&format!("{p}.layer.2.mlp.wo.weight")), d_emb_out, s, f, d, g.get_mut(&format!("{p}.layer.2.mlp.wo.weight")).unwrap());
+        let d_hid: Vec<f32> = (0..s * f).map(|i| if cache.hid[i] > 0.0 { d_hid_relu[i] } else { 0.0 }).collect();
+        let d_xn2 = matmul_bwd(&cache.xn2, ww(&format!("{p}.layer.2.mlp.wi.weight")), &d_hid, s, d, f, g.get_mut(&format!("{p}.layer.2.mlp.wi.weight")).unwrap());
+        let d_emb2_a = rmsnorm_bwd(&cache.emb2, ww(&format!("{p}.layer.2.layer_norm.weight")), &cache.inv2, &d_xn2, s, d, g.get_mut(&format!("{p}.layer.2.layer_norm.weight")).unwrap());
+        let d_emb2: Vec<f32> = (0..s * d).map(|i| d_emb_out[i] + d_emb2_a[i]).collect();
+
+        // -- group backward (emb2 = emb1 + og) --
+        let d_vg = matmul_bwd(&cache.vg, ww(&format!("{p}.layer.1.self_attention.o.weight")), &d_emb2, s, inner, d, g.get_mut(&format!("{p}.layer.1.self_attention.o.weight")).unwrap());
+        let d_xn1 = matmul_bwd(&cache.xn1, ww(&format!("{p}.layer.1.self_attention.v.weight")), &d_vg, s, d, inner, g.get_mut(&format!("{p}.layer.1.self_attention.v.weight")).unwrap());
+        let d_emb1_a = rmsnorm_bwd(&cache.emb1, ww(&format!("{p}.layer.1.layer_norm.weight")), &cache.inv1, &d_xn1, s, d, g.get_mut(&format!("{p}.layer.1.layer_norm.weight")).unwrap());
+        let d_emb1: Vec<f32> = (0..s * d).map(|i| d_emb2[i] + d_emb1_a[i]).collect();
+
+        // -- time-attention backward (emb1 = emb_in + o) --
+        let d_ctx = matmul_bwd(&cache.ctx, ww(&format!("{p}.layer.0.self_attention.o.weight")), &d_emb1, s, inner, d, g.get_mut(&format!("{p}.layer.0.self_attention.o.weight")).unwrap());
+        let (mut d_q, mut d_k, d_v) = attention_bwd(&d_ctx, &cache.probs, &cache.q, &cache.k, &cache.v, s, heads, hd);
+        rope_neox_bwd(&mut d_q, s, heads, hd, theta);
+        rope_neox_bwd(&mut d_k, s, heads, hd, theta);
+        // three projections share the same input xn0; accumulate d_xn0 from each
+        // (sequential calls, each borrowing its own distinct grad tensor).
+        let d_xn0_q = matmul_bwd(&cache.xn0, ww(&format!("{p}.layer.0.self_attention.q.weight")), &d_q, s, d, inner, g.get_mut(&format!("{p}.layer.0.self_attention.q.weight")).unwrap());
+        let d_xn0_k = matmul_bwd(&cache.xn0, ww(&format!("{p}.layer.0.self_attention.k.weight")), &d_k, s, d, inner, g.get_mut(&format!("{p}.layer.0.self_attention.k.weight")).unwrap());
+        let d_xn0_v = matmul_bwd(&cache.xn0, ww(&format!("{p}.layer.0.self_attention.v.weight")), &d_v, s, d, inner, g.get_mut(&format!("{p}.layer.0.self_attention.v.weight")).unwrap());
+        let d_xn0: Vec<f32> = (0..s * d).map(|i| d_xn0_q[i] + d_xn0_k[i] + d_xn0_v[i]).collect();
+        let d_emb_in_a = rmsnorm_bwd(&cache.emb_in, ww(&format!("{p}.layer.0.layer_norm.weight")), &cache.inv0, &d_xn0, s, d, g.get_mut(&format!("{p}.layer.0.layer_norm.weight")).unwrap());
+
+        (0..s * d).map(|i| d_emb1[i] + d_emb_in_a[i]).collect()
+    }
 }
 
 #[cfg(test)]
@@ -324,6 +547,84 @@ mod tests {
             fill(nm, len, &mut w, seed);
         }
         w
+    }
+
+    fn block_params(cfg: &Chronos2Config, b: usize, seed: &mut u64) -> HashMap<String, Vec<f32>> {
+        let (d, inner, f) = (cfg.d_model, cfg.inner_dim(), cfg.d_ff);
+        let p = format!("encoder.block.{b}");
+        let mut w = HashMap::new();
+        let mut fill = |name: String, len: usize, gain1: bool, w: &mut HashMap<String, Vec<f32>>, seed: &mut u64| {
+            let base = if gain1 { 1.0 } else { 0.0 };
+            w.insert(name, (0..len).map(|_| base + rng(seed)).collect());
+        };
+        for (nm, len, g1) in [
+            (format!("{p}.layer.0.layer_norm.weight"), d, true),
+            (format!("{p}.layer.0.self_attention.q.weight"), inner * d, false),
+            (format!("{p}.layer.0.self_attention.k.weight"), inner * d, false),
+            (format!("{p}.layer.0.self_attention.v.weight"), inner * d, false),
+            (format!("{p}.layer.0.self_attention.o.weight"), d * inner, false),
+            (format!("{p}.layer.1.layer_norm.weight"), d, true),
+            (format!("{p}.layer.1.self_attention.v.weight"), inner * d, false),
+            (format!("{p}.layer.1.self_attention.o.weight"), d * inner, false),
+            (format!("{p}.layer.2.layer_norm.weight"), d, true),
+            (format!("{p}.layer.2.mlp.wi.weight"), f * d, false),
+            (format!("{p}.layer.2.mlp.wo.weight"), d * f, false),
+        ] {
+            fill(nm, len, g1, &mut w, seed);
+        }
+        w
+    }
+
+    #[test]
+    fn block_gradcheck() {
+        let cfg = Chronos2Config::tiny();
+        let mut seed = 0xB10C_u64;
+        let w = block_params(&cfg, 0, &mut seed);
+        let model = Chronos2Train { cfg: cfg.clone(), w };
+
+        let d = cfg.d_model;
+        let s = 4usize;
+        let emb: Vec<f32> = (0..s * d).map(|_| rng(&mut seed)).collect();
+        let mask = vec![0.0f32; s]; // all-attend
+        let proj: Vec<f32> = (0..s * d).map(|_| rng(&mut seed)).collect(); // random downstream grad
+
+        // scalar loss = <emb_out, proj>, so d_emb_out = proj.
+        let loss = |m: &Chronos2Train, e: &[f32]| -> f32 {
+            let (out, _) = m.block_forward(0, e, &mask, s);
+            out.iter().zip(&proj).map(|(a, b)| a * b).sum()
+        };
+
+        let (_out, cache) = model.block_forward(0, &emb, &mask, s);
+        let mut g = model.zero_grads();
+        let d_emb_in = model.block_backward(0, &cache, &proj, &mut g);
+
+        let eps = 4e-3f32;
+        let tol = |a: f32, n: f32| (a - n).abs() <= 4e-3 + 8e-2 * a.abs().max(n.abs());
+        let mut checked = 0usize;
+        for name in model.w.keys() {
+            let len = model.w[name].len();
+            for &idx in &[0usize, len / 3, len / 2, len - 1] {
+                let mut mp = Chronos2Train { cfg: cfg.clone(), w: model.w.clone() };
+                mp.w.get_mut(name).unwrap()[idx] += eps;
+                let lp = loss(&mp, &emb);
+                let mut mm = Chronos2Train { cfg: cfg.clone(), w: model.w.clone() };
+                mm.w.get_mut(name).unwrap()[idx] -= eps;
+                let lm = loss(&mm, &emb);
+                let numeric = (lp - lm) / (2.0 * eps);
+                assert!(tol(g[name][idx], numeric), "grad {name}[{idx}]: {} vs {numeric}", g[name][idx]);
+                checked += 1;
+            }
+        }
+        for &idx in &[0usize, s * d / 2, s * d - 1] {
+            let mut ep = emb.clone();
+            ep[idx] += eps;
+            let mut em = emb.clone();
+            em[idx] -= eps;
+            let numeric = (loss(&model, &ep) - loss(&model, &em)) / (2.0 * eps);
+            assert!(tol(d_emb_in[idx], numeric), "d_emb_in[{idx}]: {} vs {numeric}", d_emb_in[idx]);
+            checked += 1;
+        }
+        assert!(checked > 40, "expected a broad gradcheck, only {checked}");
     }
 
     #[test]
