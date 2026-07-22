@@ -18,7 +18,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use npu::openvino::{
-    Chronos2Session, KronosS1Session, KronosS2Session, NpuConfig, NpuDevice, NpuError, NpuSession, PerfHint,
+    Chronos2Session, FincastSession, KronosS1Session, KronosS2Session, NpuConfig, NpuDevice, NpuError, NpuSession,
+    PerfHint,
 };
 
 pub fn run_npu(args: &[String]) {
@@ -31,8 +32,9 @@ pub fn run_npu(args: &[String]) {
         Some("sim") => sim(&args[1..]),
         Some("chronos2") => chronos2(&args[1..]),
         Some("kronos") => kronos(&args[1..]),
+        Some("fincast") => fincast(&args[1..]),
         other => eprintln!(
-            "usage: brain npu <export|quantize|check|run|bench|sim|chronos2|kronos> ...  (got {other:?})"
+            "usage: brain npu <export|quantize|check|run|bench|sim|chronos2|kronos|fincast> ...  (got {other:?})"
         ),
     }
 }
@@ -155,6 +157,119 @@ fn chronos2(args: &[String]) {
 
     if compare {
         let cpu = model.forecast_quantiles(&context, horizon);
+        let maxdiff = out.iter().zip(&cpu).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        let scale = cpu.iter().map(|v| v.abs()).fold(0.0f32, f32::max).max(1e-6);
+        println!("  vs device core: max abs diff {maxdiff:.5} (rel {:.2e})", maxdiff / scale);
+    }
+}
+
+/// `brain npu fincast` — forecast a context series with the FinCast decoder+MoE
+/// transformer core running on the NPU. The host (this model's compute backend)
+/// does the patch-embed/freq assembly and the head rearrange/denorm; the exported
+/// ONNX core (`emb`+`amask` → `qhead`) runs on the accelerator via the pluggable
+/// core seam. `--compare` also runs the pure device path and reports the max diff.
+fn fincast(args: &[String]) {
+    use std::cell::RefCell;
+    let mut weights = String::new();
+    let mut freq = 0usize;
+    let mut horizon = 8usize;
+    let mut series_file: Option<String> = None;
+    let mut compare = false;
+    let mut opts = NpuOpts::default();
+    let mut i = 0;
+    while i < args.len() {
+        if opts.parse_flag(args, &mut i) {
+            i += 1;
+            continue;
+        }
+        match args[i].as_str() {
+            "--weights" => weights = val(args, &mut i, "--weights"),
+            "--freq" => freq = val(args, &mut i, "--freq").parse().unwrap_or(freq),
+            "--horizon" => horizon = val(args, &mut i, "--horizon").parse().unwrap_or(horizon),
+            "--series" => series_file = Some(val(args, &mut i, "--series")),
+            "--compare" => compare = true,
+            other => {
+                eprintln!("brain npu fincast: unknown flag {other:?}");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    if weights.is_empty() {
+        eprintln!(
+            "usage: brain npu fincast --weights W [--freq 0|1|2] [--horizon H] \
+             [--series file] [--compare] [--device NPU]"
+        );
+        return;
+    }
+
+    let context: Vec<f32> = match &series_file {
+        Some(f) => match std::fs::read_to_string(f) {
+            Ok(s) => s.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()).filter_map(|t| t.parse().ok()).collect(),
+            Err(e) => {
+                eprintln!("read {f}: {e}");
+                return;
+            }
+        },
+        None => (0..512).map(|i| 100.0 + 0.05 * i as f32 + (i as f32 * 0.1).sin() * 5.0).collect(),
+    };
+    if context.len() < 8 {
+        eprintln!("fincast: context too short ({} points)", context.len());
+        return;
+    }
+
+    let model = match fincast::model::Fincast::load(&weights) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("load fincast {weights}: {e}");
+            return;
+        }
+    };
+    let no = model.config().num_outputs();
+    let cfg = opts.to_config();
+
+    let device = RefCell::new(String::new());
+    let core_ms = RefCell::new(0.0f64);
+    let t0 = Instant::now();
+    let out = model.forecast_full_with_core(&context, freq, horizon, |emb, amask| {
+        let s = (amask.len() as f64).sqrt() as usize;
+        let bytes = npu::fincast_export::export_onnx(&weights, s, npu::qwen_topology::Quant::F32).unwrap_or_else(|e| {
+            eprintln!("export fincast core onnx: {e}");
+            std::process::exit(1);
+        });
+        let mut sess = FincastSession::load_bytes(&bytes, &cfg).unwrap_or_else(|e| {
+            eprintln!("compile fincast core: {e}");
+            std::process::exit(1);
+        });
+        *device.borrow_mut() = sess.device().to_string();
+        let tc = Instant::now();
+        let r = sess.run(emb, amask).unwrap_or_else(|e| {
+            eprintln!("npu infer: {e}");
+            std::process::exit(1);
+        });
+        *core_ms.borrow_mut() = tc.elapsed().as_secs_f64() * 1e3;
+        r
+    });
+    let total_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+    println!(
+        "fincast core on {} · horizon {horizon} · {} context pts · core {:.1} ms (total {total_ms:.1} ms)",
+        device.borrow(),
+        context.len(),
+        core_ms.borrow()
+    );
+    // out is [horizon, num_outputs] step-major: col 0 = mean, cols 1.. = quantiles.
+    let mean: Vec<f32> = (0..horizon).map(|t| (out[t * no] * 100.0).round() / 100.0).collect();
+    println!("  mean : {mean:?}");
+    if no >= 10 {
+        let p10: Vec<f32> = (0..horizon).map(|t| (out[t * no + 1] * 100.0).round() / 100.0).collect();
+        let p90: Vec<f32> = (0..horizon).map(|t| (out[t * no + 9] * 100.0).round() / 100.0).collect();
+        println!("  p10  : {p10:?}");
+        println!("  p90  : {p90:?}");
+    }
+
+    if compare {
+        let cpu = model.forecast_full(&context, freq, horizon);
         let maxdiff = out.iter().zip(&cpu).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         let scale = cpu.iter().map(|v| v.abs()).fold(0.0f32, f32::max).max(1e-6);
         println!("  vs device core: max abs diff {maxdiff:.5} (rel {:.2e})", maxdiff / scale);

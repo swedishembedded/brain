@@ -30,6 +30,8 @@ pub mod chronos2_topology;
 pub mod chronos2_export;
 pub mod kronos_topology;
 pub mod kronos_export;
+pub mod fincast_topology;
+pub mod fincast_export;
 pub mod sim;
 pub mod topology;
 pub mod wm_topology;

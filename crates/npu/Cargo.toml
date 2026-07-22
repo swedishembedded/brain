@@ -18,6 +18,7 @@ brain-qwen.workspace = true
 brain-glm.workspace = true
 brain-chronos2.workspace = true
 brain-kronos.workspace = true
+brain-fincast.workspace = true
 brain-codec.workspace = true
 brain-vision.workspace = true
 brain-depth.workspace = true

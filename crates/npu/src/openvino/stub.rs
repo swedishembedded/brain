@@ -138,6 +138,26 @@ impl Chronos2Session {
     }
 }
 
+/// The FinCast transformer core graph. Never constructible on unsupported targets.
+pub struct FincastSession {
+    _priv: (),
+}
+
+impl FincastSession {
+    pub fn load_bytes(_bytes: &[u8], _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn device(&self) -> &str {
+        ""
+    }
+    pub fn seq_len(&self) -> usize {
+        0
+    }
+    pub fn run(&mut self, _emb: &[f32], _amask: &[f32]) -> Result<Vec<f32>, NpuError> {
+        unsupported()
+    }
+}
+
 /// The Kronos decode_s1 core graph. Never constructible on unsupported targets.
 pub struct KronosS1Session {
     _priv: (),

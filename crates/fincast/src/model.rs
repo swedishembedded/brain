@@ -180,22 +180,47 @@ impl Fincast {
 
     /// The transformer core + head: assembled token embeddings `emb [s,d]` and a
     /// per-patch padding mask `padmask[s]` (1.0 = padded) → the horizon-head
-    /// output `[s, head_out]`. This is the parity reference for the NPU export.
+    /// output `[s, head_out]`. Builds the additive causal+padding `[s,s]` mask and
+    /// delegates to [`core_forward_amask`](Self::core_forward_amask).
     pub fn core_forward(&self, emb: &[f32], padmask: &[f32]) -> Vec<f32> {
+        let s = padmask.len();
+        self.core_forward_amask(emb, &Self::causal_amask(padmask, s))
+    }
+
+    /// The additive `[s,s]` attention mask for a per-patch padding mask: `0` where
+    /// key `j<=i` and unpadded, a large negative otherwise. This is exactly the
+    /// `amask` the NPU graph consumes.
+    pub fn causal_amask(padmask: &[f32], s: usize) -> Vec<f32> {
+        let mut m = vec![0.0f32; s * s];
+        for i in 0..s {
+            for j in 0..s {
+                if j > i || padmask[j] > 0.5 {
+                    m[i * s + j] = -1.0e9;
+                }
+            }
+        }
+        m
+    }
+
+    /// The transformer core + head over an explicit additive `[s,s]` mask. This is
+    /// the parity reference for the NPU export (`emb`+`amask` → `qhead`).
+    pub fn core_forward_amask(&self, emb: &[f32], amask: &[f32]) -> Vec<f32> {
         let cfg = &self.cfg;
         let d = cfg.hidden_size;
-        let s = padmask.len();
+        let s = (amask.len() as f64).sqrt() as usize;
+        assert_eq!(amask.len(), s * s, "amask must be [s, s]");
         assert_eq!(emb.len(), s * d, "emb must be [s, d]");
         let emb_buf = self.gpu.storage_init("emb", emb);
         for b in 0..cfg.num_layers {
-            self.block(b, &emb_buf, s, padmask);
+            self.block(b, &emb_buf, s, amask);
         }
         let hz = self.residual_block("horizon_ff_layer", &emb_buf, s, d, cfg.intermediate_size, cfg.head_out_dim());
         self.gpu.read(&hz, s * cfg.head_out_dim())
     }
 
-    /// One decoder block, in place on `emb [s,d]`.
-    fn block(&self, b: usize, emb: &DeviceBuffer, s: usize, padmask: &[f32]) {
+    /// One decoder block, in place on `emb [s,d]`. `amask` is the additive `[s,s]`
+    /// attention mask.
+    fn block(&self, b: usize, emb: &DeviceBuffer, s: usize, amask: &[f32]) {
         let cfg = &self.cfg;
         let d = cfg.hidden_size;
         let inner = cfg.inner_dim();
@@ -208,7 +233,7 @@ impl Fincast {
         self.mm(&xn, &format!("{pre}.self_attn.qkv_proj.weight"), &qkv, s, d, cfg.qkv_dim());
         self.bias(&qkv, &format!("{pre}.self_attn.qkv_proj.bias"), s, cfg.qkv_dim());
         let qkv_host = self.gpu.read(&qkv, s * cfg.qkv_dim());
-        let ctx = self.host_attention(b, &qkv_host, s, padmask);
+        let ctx = self.host_attention(b, &qkv_host, s, amask);
         let ctx_buf = self.gpu.storage_init("ctx", &ctx);
         let o = self.gpu.storage((s * d) as u64);
         self.mm(&ctx_buf, &format!("{pre}.self_attn.o_proj.weight"), &o, s, inner, d);
@@ -272,10 +297,10 @@ impl Fincast {
     }
 
     /// Causal multi-head attention over the patch tokens, on the host. `qkv` is
-    /// `[s, qkv_dim]` (fused, `[q | k | v]`); returns `ctx [s, inner]`. Applies
-    /// the per-dim query scaling `scale * softplus(scaling)` and masks keys that
-    /// are future (`j>i`) or padded.
-    fn host_attention(&self, layer: usize, qkv: &[f32], s: usize, padmask: &[f32]) -> Vec<f32> {
+    /// `[s, qkv_dim]` (fused, `[q | k | v]`); `amask` is the additive `[s,s]` mask
+    /// (`0` attend, large-negative forbid). Returns `ctx [s, inner]`. Applies the
+    /// per-dim query scaling `scale * softplus(scaling)`.
+    fn host_attention(&self, layer: usize, qkv: &[f32], s: usize, amask: &[f32]) -> Vec<f32> {
         let cfg = &self.cfg;
         let heads = cfg.num_heads;
         let hd = cfg.head_dim;
@@ -288,20 +313,15 @@ impl Fincast {
         let q_off = 0usize;
         let k_off = inner;
         let v_off = 2 * inner; // num_kv_heads == num_heads -> kv_size == inner
-        let _ = qkvd;
 
         let mut ctx = vec![0.0f32; s * inner];
         for h in 0..heads {
             let ho = h * hd;
             for i in 0..s {
-                // scores over keys j<=i, unpadded
-                let mut sc = vec![f32::NEG_INFINITY; s];
+                let mut sc = vec![0.0f32; s];
                 let mut mx = f32::NEG_INFINITY;
-                for j in 0..=i {
-                    if padmask[j] > 0.5 {
-                        continue;
-                    }
-                    let mut dot = 0.0f32;
+                for j in 0..s {
+                    let mut dot = amask[i * s + j];
                     for dd in 0..hd {
                         let qv = qkv[i * qkvd + q_off + ho + dd] * qscale[dd];
                         dot += qv * qkv[j * qkvd + k_off + ho + dd];
@@ -309,23 +329,16 @@ impl Fincast {
                     sc[j] = dot;
                     mx = mx.max(dot);
                 }
-                if mx == f32::NEG_INFINITY {
-                    continue; // all keys masked (fully-padded prefix) -> zero ctx
+                if mx <= -3.0e38 {
+                    continue; // all keys masked
                 }
                 let mut sum = 0.0f32;
-                for j in 0..=i {
-                    if sc[j] == f32::NEG_INFINITY {
-                        sc[j] = 0.0;
-                    } else {
-                        sc[j] = (sc[j] - mx).exp();
-                        sum += sc[j];
-                    }
+                for j in 0..s {
+                    sc[j] = (sc[j] - mx).exp();
+                    sum += sc[j];
                 }
                 let inv = 1.0 / sum;
-                for j in 0..=i {
-                    if sc[j] == 0.0 {
-                        continue;
-                    }
+                for j in 0..s {
                     let pw = sc[j] * inv;
                     for dd in 0..hd {
                         ctx[i * inner + ho + dd] += pw * qkv[j * qkvd + v_off + ho + dd];
@@ -361,8 +374,19 @@ impl Fincast {
     /// Forecast `[horizon, 1+num_quantiles]` (mean + 9 quantiles, step-major) for
     /// one context series and frequency bucket (0 high / 1 med / 2 low). Runs the
     /// reference autoregressive decode with `output_patch_len == horizon_len`,
-    /// feeding the mean forecast back for horizons beyond one patch.
+    /// feeding the mean forecast back for horizons beyond one patch. The
+    /// transformer core runs on this model's device via [`core_forward_amask`](Self::core_forward_amask).
     pub fn forecast_full(&self, context: &[f32], freq: usize, horizon: usize) -> Vec<f32> {
+        self.forecast_full_with_core(context, freq, horizon, |emb, amask| self.core_forward_amask(emb, amask))
+    }
+
+    /// As [`forecast_full`](Self::forecast_full), but the transformer core runs
+    /// through a pluggable `core(emb[s,d], amask[s,s]) -> qhead[s, head_out]` — swap
+    /// in an NPU-backed core (the exported ONNX graph) or reuse the device core.
+    pub fn forecast_full_with_core<F>(&self, context: &[f32], freq: usize, horizon: usize, core: F) -> Vec<f32>
+    where
+        F: Fn(&[f32], &[f32]) -> Vec<f32>,
+    {
         let cfg = &self.cfg;
         let no = cfg.num_outputs();
         let hlen = cfg.horizon_len;
@@ -371,8 +395,9 @@ impl Fincast {
         let n_steps = horizon.div_ceil(hlen);
         for _ in 0..n_steps {
             let (emb, padmask, ls) = self.assemble(&series, freq);
-            let head = self.core_forward(&emb, &padmask); // [s, head_out]
             let s = padmask.len();
+            let amask = Self::causal_amask(&padmask, s);
+            let head = core(&emb, &amask); // [s, head_out]
             let head_out = cfg.head_out_dim();
             // last patch row -> [horizon_len, num_outputs]; reference layout is
             // view(n, horizon_len, num_outputs) then reverse-transform.
