@@ -210,9 +210,15 @@ impl Fincast {
         let s = (amask.len() as f64).sqrt() as usize;
         assert_eq!(amask.len(), s * s, "amask must be [s, s]");
         assert_eq!(emb.len(), s * d, "emb must be [s, d]");
+        // MoE strategy: the default gathers each expert's routed tokens and runs
+        // the expert MLP on just that subset (top_n/num_experts of the dense work,
+        // bit-identical because every expert op is row-independent). Set
+        // `FINCAST_MOE_DENSE=1` to force the reference dense-compute-then-mask path
+        // (used by the parity test).
+        let dense_moe = std::env::var("FINCAST_MOE_DENSE").map(|v| v != "0").unwrap_or(false);
         let emb_buf = self.gpu.storage_init("emb", emb);
         for b in 0..cfg.num_layers {
-            self.block(b, &emb_buf, s, amask);
+            self.block(b, &emb_buf, s, amask, dense_moe);
         }
         let hz = self.residual_block("horizon_ff_layer", &emb_buf, s, d, cfg.intermediate_size, cfg.head_out_dim());
         self.gpu.read(&hz, s * cfg.head_out_dim())
@@ -220,7 +226,7 @@ impl Fincast {
 
     /// One decoder block, in place on `emb [s,d]`. `amask` is the additive `[s,s]`
     /// attention mask.
-    fn block(&self, b: usize, emb: &DeviceBuffer, s: usize, amask: &[f32]) {
+    fn block(&self, b: usize, emb: &DeviceBuffer, s: usize, amask: &[f32], dense_moe: bool) {
         let cfg = &self.cfg;
         let d = cfg.hidden_size;
         let inner = cfg.inner_dim();
@@ -250,21 +256,43 @@ impl Fincast {
         self.mm(&p, &format!("{pre}.moe.moe.gate.to_gates.weight"), &glog, s, d, e);
         let glog_host = self.gpu.read(&glog, s * e);
         let weights = self.gate_weights(&glog_host, s, e);
-        // dense expert compute + weighted combine on host
-        let mut combine = p_host.clone(); // moe_out starts at p (experts' internal +x residual, weights sum to 1)
+        // expert compute + weighted combine on host. moe_out starts at p (experts'
+        // internal +x residual, weights sum to 1 over the top-n).
+        let mut combine = p_host.clone();
         for ei in 0..e {
-            // only compute an expert if some token routes to it
-            if weights.iter().skip(ei).step_by(e).all(|&x| x == 0.0) {
+            // routed tokens for this expert; skip the expert entirely if none.
+            let rows: Vec<usize> = (0..s).filter(|&t| weights[t * e + ei] != 0.0).collect();
+            if rows.is_empty() {
                 continue;
             }
-            let mlp = self.expert_mlp(ei, b, &p, s);
-            for t in 0..s {
-                let wt = weights[t * e + ei];
-                if wt == 0.0 {
-                    continue;
+            if dense_moe {
+                // reference path: compute the expert MLP over ALL s tokens, then
+                // mask on combine — computes num_experts×s token-MLPs.
+                let mlp = self.expert_mlp(ei, b, &p, s);
+                for &t in &rows {
+                    let wt = weights[t * e + ei];
+                    for c in 0..d {
+                        combine[t * d + c] += wt * mlp[t * d + c];
+                    }
                 }
-                for c in 0..d {
-                    combine[t * d + c] += wt * mlp[t * d + c];
+            } else {
+                // gather the routed tokens, run the expert on just that subset,
+                // scatter the weighted result back. Every op in `expert_mlp`
+                // (layernorm / GEMM / ReLU / bias) is row-independent, so this is
+                // bit-identical to the dense path but does only top_n×s token-MLPs
+                // across the whole layer instead of num_experts×s.
+                let ne = rows.len();
+                let mut gathered = vec![0.0f32; ne * d];
+                for (r, &t) in rows.iter().enumerate() {
+                    gathered[r * d..r * d + d].copy_from_slice(&p_host[t * d..t * d + d]);
+                }
+                let gbuf = self.gpu.storage_init("moe_expert_in", &gathered);
+                let mlp = self.expert_mlp(ei, b, &gbuf, ne); // [ne, d]
+                for (r, &t) in rows.iter().enumerate() {
+                    let wt = weights[t * e + ei];
+                    for c in 0..d {
+                        combine[t * d + c] += wt * mlp[r * d + c];
+                    }
                 }
             }
         }
@@ -494,5 +522,44 @@ mod tests {
         assert_eq!(w[3], 0.0);
         assert!((w[4] + w[5] - 1.0).abs() < 1e-5);
         assert!(w[4] > w[5], "higher logit gets more weight");
+    }
+
+    /// The default gather/scatter MoE (compute only each expert's routed tokens)
+    /// is bit-identical to the reference dense-compute-then-mask path. Gates the
+    /// speed optimization: same math, less work.
+    #[test]
+    fn moe_gather_scatter_matches_dense() {
+        if skip() {
+            return;
+        }
+        let cfg = FincastConfig::tiny();
+        // Varied non-zero weights so per-token gating selects different experts,
+        // exercising the gather/scatter across tokens (not just the skip path).
+        let mut h: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut weights: HashMap<String, Vec<f32>> = HashMap::new();
+        for (k, shp) in cfg.param_list() {
+            let n: usize = shp.iter().product();
+            let mut v = Vec::with_capacity(n);
+            for _ in 0..n {
+                h ^= h << 13;
+                h ^= h >> 7;
+                h ^= h << 17;
+                v.push(((h >> 40) as f32 / 16_777_216.0 - 0.5) * 0.1);
+            }
+            weights.insert(k, v);
+        }
+        let model = Fincast::from_weights(cfg.clone(), &weights).unwrap();
+        let context: Vec<f32> = (0..40).map(|i| 10.0 + (i as f32 * 0.3).sin() * 2.0).collect();
+        let horizon = 6;
+
+        std::env::set_var("FINCAST_MOE_DENSE", "1");
+        let dense = model.forecast_full(&context, 0, horizon);
+        std::env::set_var("FINCAST_MOE_DENSE", "0");
+        let sparse = model.forecast_full(&context, 0, horizon);
+        std::env::remove_var("FINCAST_MOE_DENSE");
+
+        assert_eq!(dense.len(), sparse.len());
+        let worst = dense.iter().zip(&sparse).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-4, "gather/scatter MoE diverged from dense: worst abs diff {worst}");
     }
 }
