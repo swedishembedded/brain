@@ -339,6 +339,12 @@ pub struct BlockCache {
     s: usize,
 }
 
+/// Intermediates for the full-core backward (M4): every block's cache + the head's.
+pub struct FullCache {
+    blocks: Vec<BlockCache>,
+    head: HeadCache,
+}
+
 // ---- the differentiable head path (M2) ----------------------------------------
 
 /// The trainable Chronos-2 (host). Holds a config and a name→weights map; the
@@ -511,6 +517,49 @@ impl Chronos2Train {
 
         (0..s * d).map(|i| d_emb1[i] + d_emb_in_a[i]).collect()
     }
+
+    /// Full differentiable core (M4): `num_layers` blocks → head path. `emb_in`
+    /// `[s, d]` is the assembled token sequence (host scaler/patch/embed, kept
+    /// out of the trained graph — the scaler is data-derived, not learned).
+    /// Returns `(loss, cache)`.
+    pub fn full_forward(&self, emb_in: &[f32], mask: &[f32], n_out: usize, target: &[f32], levels: &[f32]) -> (f32, FullCache) {
+        let s = mask.len();
+        let mut emb = emb_in.to_vec();
+        let mut blocks = Vec::with_capacity(self.cfg.num_layers);
+        for b in 0..self.cfg.num_layers {
+            let (out, c) = self.block_forward(b, &emb, mask, s);
+            emb = out;
+            blocks.push(c);
+        }
+        let (loss, head) = self.head_forward(&emb, n_out, target, levels);
+        (loss, FullCache { blocks, head })
+    }
+
+    /// Backward of [`full_forward`]: head then blocks in reverse, accumulating all
+    /// grads into `g`; returns `d_emb_in`.
+    pub fn full_backward(&self, cache: &FullCache, target: &[f32], levels: &[f32], g: &mut HashMap<String, Vec<f32>>) -> Vec<f32> {
+        let mut d_emb = self.head_backward(&cache.head, target, levels, g);
+        for b in (0..self.cfg.num_layers).rev() {
+            d_emb = self.block_backward(b, &cache.blocks[b], &d_emb, g);
+        }
+        d_emb
+    }
+
+    /// One plain-SGD step on a single example (accumulate grads, then `w -= lr*g`).
+    /// Returns the pre-step loss. Used by the from-scratch learning test; the real
+    /// fine-tune entry (AdamW + LoRA + promotion gate) is milestone 5.
+    pub fn sgd_step(&mut self, emb_in: &[f32], mask: &[f32], n_out: usize, target: &[f32], levels: &[f32], lr: f32) -> f32 {
+        let (loss, cache) = self.full_forward(emb_in, mask, n_out, target, levels);
+        let mut g = self.zero_grads();
+        self.full_backward(&cache, target, levels, &mut g);
+        for (name, grad) in &g {
+            let w = self.w.get_mut(name).unwrap();
+            for (wi, gi) in w.iter_mut().zip(grad) {
+                *wi -= lr * gi;
+            }
+        }
+        loss
+    }
 }
 
 #[cfg(test)]
@@ -573,6 +622,90 @@ mod tests {
             fill(nm, len, g1, &mut w, seed);
         }
         w
+    }
+
+    /// Full param set: every block + the head path, for a `num_layers`-deep model.
+    fn full_params(cfg: &Chronos2Config, seed: &mut u64) -> HashMap<String, Vec<f32>> {
+        let mut w = head_params(cfg, seed);
+        for b in 0..cfg.num_layers {
+            w.extend(block_params(cfg, b, seed));
+        }
+        w
+    }
+
+    #[test]
+    fn full_backbone_gradcheck() {
+        let cfg = Chronos2Config::tiny(); // 2 layers
+        let mut seed = 0xFACE_u64;
+        let model = Chronos2Train { cfg: cfg.clone(), w: full_params(&cfg, &mut seed) };
+
+        let d = cfg.d_model;
+        let patch = cfg.output_patch_size;
+        let q = cfg.num_quantiles;
+        let (s, n_out) = (5usize, 2usize);
+        let h = n_out * patch;
+        let emb: Vec<f32> = (0..s * d).map(|_| rng(&mut seed)).collect();
+        let mask = vec![0.0f32; s];
+        let target: Vec<f32> = (0..h).map(|_| rng(&mut seed)).collect();
+        let levels: Vec<f32> = (0..q).map(|i| (i as f32 + 0.5) / q as f32).collect();
+
+        let (_l, cache) = model.full_forward(&emb, &mask, n_out, &target, &levels);
+        let mut g = model.zero_grads();
+        let d_emb = model.full_backward(&cache, &target, &levels, &mut g);
+
+        let loss = |m: &Chronos2Train, e: &[f32]| m.full_forward(e, &mask, n_out, &target, &levels).0;
+        let eps = 4e-3f32;
+        let tol = |a: f32, n: f32| (a - n).abs() <= 4e-3 + 8e-2 * a.abs().max(n.abs());
+        let mut checked = 0usize;
+        // sample across head + both blocks (weights end-to-end through the stack).
+        for name in model.w.keys() {
+            let len = model.w[name].len();
+            for &idx in &[0usize, len / 2, len - 1] {
+                let mut mp = Chronos2Train { cfg: cfg.clone(), w: model.w.clone() };
+                mp.w.get_mut(name).unwrap()[idx] += eps;
+                let mut mm = Chronos2Train { cfg: cfg.clone(), w: model.w.clone() };
+                mm.w.get_mut(name).unwrap()[idx] -= eps;
+                let numeric = (loss(&mp, &emb) - loss(&mm, &emb)) / (2.0 * eps);
+                assert!(tol(g[name][idx], numeric), "grad {name}[{idx}]: {} vs {numeric}", g[name][idx]);
+                checked += 1;
+            }
+        }
+        for &idx in &[0usize, s * d - 1] {
+            let mut ep = emb.clone();
+            ep[idx] += eps;
+            let mut em = emb.clone();
+            em[idx] -= eps;
+            let numeric = (loss(&model, &ep) - loss(&model, &em)) / (2.0 * eps);
+            assert!(tol(d_emb[idx], numeric), "d_emb[{idx}]: {} vs {numeric}", d_emb[idx]);
+            checked += 1;
+        }
+        assert!(checked > 60, "expected a broad end-to-end gradcheck, only {checked}");
+    }
+
+    #[test]
+    fn full_backbone_learns_a_fixed_example() {
+        // The whole differentiable core must actually reduce the pinball loss on a
+        // fixed (input, target) under plain SGD — end-to-end proof the forward,
+        // backward, and update compose correctly (not just locally consistent).
+        let cfg = Chronos2Config::tiny();
+        let mut seed = 0x5EED_u64;
+        let mut model = Chronos2Train { cfg: cfg.clone(), w: full_params(&cfg, &mut seed) };
+
+        let (s, n_out) = (5usize, 2usize);
+        let d = cfg.d_model;
+        let h = n_out * cfg.output_patch_size;
+        let q = cfg.num_quantiles;
+        let emb: Vec<f32> = (0..s * d).map(|_| rng(&mut seed)).collect();
+        let mask = vec![0.0f32; s];
+        let target: Vec<f32> = (0..h).map(|_| rng(&mut seed) * 3.0).collect();
+        let levels: Vec<f32> = (0..q).map(|i| (i as f32 + 0.5) / q as f32).collect();
+
+        let l0 = model.full_forward(&emb, &mask, n_out, &target, &levels).0;
+        let mut last = l0;
+        for _ in 0..300 {
+            last = model.sgd_step(&emb, &mask, n_out, &target, &levels, 0.05);
+        }
+        assert!(last < 0.5 * l0, "loss must fall substantially: {l0} -> {last}");
     }
 
     #[test]
