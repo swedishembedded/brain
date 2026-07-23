@@ -10,7 +10,6 @@ name = "qwen"
 path = "src/lib.rs"
 
 [dependencies]
-rayon = "1"
 brain-gpu-core.workspace = true
 brain-model.workspace = true
 brain-paramstore.workspace = true

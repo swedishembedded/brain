@@ -4,9 +4,29 @@ A **full replica** of the model on each GPU, each processing a different slice o
 the step's micro-batches **concurrently**, then a gradient all-reduce so every
 replica applies the identical update. This is the *throughput* path (a training
 speedup) for models that fit on one card; it composes with the pipeline
-[sharding](SHARDING.md) *capacity* path. Implemented for Qwen3 in
-[`crates/qwen/src/dataparallel.rs`](../crates/qwen/src/dataparallel.rs) as
-`DataParallel`.
+[sharding](SHARDING.md) *capacity* path.
+
+**Generic over every model.** `DataParallel<M: Model>` lives in
+[`crates/model/src/parallel.rs`](../crates/model/src/parallel.rs) and rides
+entirely on the [`Model`] trait surface (`set_batch` / `forward` / `backward` /
+`zero_grads` / `read_grad` / `read_weight` / `write_weight`), so **all nine
+models** — gpt, glm, moe, qwen, seq2seq, pid, chronos2, yolo, autoencoder — get
+multi-GPU data-parallel training with no per-model code. (The fused optimiser
+never touches model internals: it just reads grads and reads/writes weights.)
+Pipeline *sharding*, by contrast, is woven into each architecture's forward/
+backward graph and stays per-model (Qwen today).
+
+Bit-exact grad parity is validated on three deliberately different architectures
+covering two batch types:
+
+| model | architecture | batch | worst grad rel vs single-GPU |
+|---|---|---|--:|
+| qwen | GQA + RoPE + SwiGLU, tied head | `Lm` | 1.10e-7 |
+| gpt  | vanilla MHA + GELU + biases | `Lm` | 1.27e-7 |
+| autoencoder | non-LM float MLP | `Tensor` | 1.12e-7 |
+
+(`crates/{qwen,gpt,autoencoder}/tests/dp_parity.rs`.) The rest use the identical
+trait methods.
 
 ## The design that actually wins on this box (2× P40, no NVLink)
 
@@ -56,11 +76,13 @@ block 512), moments in host RAM.
 ## Running
 
 ```rust
-use qwen::{DataParallel, QwenConfig};
-let mut dp = DataParallel::new(cfg, batch, seqlen, &init, &[0, 1]); // one replica per GPU
+use model::{Batch, DataParallel};
+// one replica per GPU (any M: Model — Gpt, Qwen, Moe, Autoencoder, …)
+let mut dp = DataParallel::<Qwen>::new(cfg, batch, seqlen, &init, &[0, 1]);
+let mbs: Vec<Batch> = /* your micro-batches */;
 dp.zero_grads();
-dp.forward_backward(&microbatches);          // concurrent across cards
-dp.adamw_step(step, lr, wd, Some(1.0), 1.0 / microbatches.len() as f32);
+dp.forward_backward(&mbs);                    // concurrent across cards
+dp.adamw_step(step, lr, wd, Some(1.0), 1.0 / mbs.len() as f32);
 dp.save("out.weights");
 ```
 

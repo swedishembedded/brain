@@ -370,6 +370,7 @@ fn qwen3_dataparallel_speedup() {
         (x, y)
     };
     let mbs: Vec<(Vec<u32>, Vec<u32>)> = (0..k).map(mk).collect();
+    let batches: Vec<model::Batch> = mbs.iter().map(|(x, y)| model::Batch::Lm { tokens: x, targets: y }).collect();
     let steps = env_usize("QWEN3_DP_STEPS", 3);
     let inv_k = 1.0 / k as f32;
 
@@ -404,12 +405,12 @@ fn qwen3_dataparallel_speedup() {
     drop(single);
 
     // --- data-parallel across both P40s (fused all-reduce + host AdamW) ---
-    let mut dp = DataParallel::new(cfg.clone(), b, t, &init, &[0, 1]);
+    let mut dp = DataParallel::<Qwen>::new(cfg.clone(), b, t, &init, &[0, 1]);
     let (mut t_fb, mut t_opt) = (0f64, 0f64);
-    let mut one_step_dp = |dp: &mut DataParallel, step: u32, meas: bool| {
+    let mut one_step_dp = |dp: &mut DataParallel<Qwen>, step: u32, meas: bool| {
         dp.zero_grads();
         let a = Instant::now();
-        dp.forward_backward(&mbs);
+        dp.forward_backward(&batches);
         let fb = a.elapsed().as_secs_f64();
         let a = Instant::now();
         dp.adamw_step(step, 1e-4, 0.0, Some(1.0), inv_k); // fused reduce+opt+broadcast

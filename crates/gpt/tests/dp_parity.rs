@@ -1,23 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Data-parallel training is bit-exact against single-GPU grad accumulation.
+//! The generic `model::DataParallel` works for GPT (a second architecture, proving
+//! multi-GPU data-parallel training is not Qwen-specific): running `K`
+//! micro-batches split across 2 replicas produces the identical accumulated
+//! gradient as one GPU running the same `K` with grad-accum `K`.
 //!
-//! Running `K` micro-batches split across 2 replicas + all-reduce must produce
-//! the identical accumulated gradient as one GPU running the same `K`
-//! micro-batches with grad-accum `K`. (This also confirms the backward pass
-//! accumulates into the grad buffers, which grad-accum depends on.)
-//!
-//! Two replicas on GPUs 0 and 1 by default; `SHARD_TEST_GPUS=1,1` pins both to
-//! one card. Skipped under `MOE_SKIP_GPU_TESTS`.
+//! Two replicas on GPUs 0 and 1 by default; `SHARD_TEST_GPUS=1,1` pins both to one
+//! card. Skipped under `MOE_SKIP_GPU_TESTS`.
 
-use model::{Batch, DataParallel};
-use qwen::{Qwen, QwenConfig};
+use gpt::{Gpt, GptConfig};
+use model::{Batch, DataParallel, Model};
 
 fn gpu_disabled() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
 }
-
 fn stage_gpus() -> Vec<usize> {
     std::env::var("SHARD_TEST_GPUS")
         .ok()
@@ -27,15 +24,13 @@ fn stage_gpus() -> Vec<usize> {
 }
 
 #[test]
-fn dp_grad_parity() {
+fn dp_grad_parity_gpt() {
     if gpu_disabled() {
         return;
     }
-    let cfg = QwenConfig::tiny();
-    let init = qwen::init_weights(&cfg, 7);
+    let cfg = GptConfig::tiny().with_ff_default();
+    let init = gpt::init_weights(&cfg, 7);
     let (b, t) = (2u32, 8u32);
-
-    // K micro-batches (distinct data each).
     let k = 4usize;
     let mbs: Vec<(Vec<u32>, Vec<u32>)> = (0..k)
         .map(|j| {
@@ -47,7 +42,7 @@ fn dp_grad_parity() {
 
     // Single-GPU reference: accumulate all K micro-batches.
     std::env::remove_var("BRAIN_OFFLOAD_ADAM");
-    let single = Qwen::new(cfg.clone(), b, t, &init);
+    let single = Gpt::new(cfg.clone(), b, t, &init);
     single.zero_grads();
     for (x, y) in &mbs {
         single.set_batch(x, y);
@@ -56,16 +51,16 @@ fn dp_grad_parity() {
     }
     single.poll_wait();
 
-    // Data-parallel over 2 GPUs (generic over Model): same K micro-batches.
+    // Data-parallel over 2 GPUs.
     let batches: Vec<Batch> = mbs.iter().map(|(x, y)| Batch::Lm { tokens: x, targets: y }).collect();
-    let mut dp = DataParallel::<Qwen>::new(cfg.clone(), b, t, &init, &stage_gpus());
+    let mut dp = DataParallel::<Gpt>::new(cfg.clone(), b, t, &init, &stage_gpus());
     assert_eq!(dp.n_replicas(), 2);
     dp.zero_grads();
     dp.forward_backward(&batches);
 
     let mut worst = 0f32;
     let mut worst_name = String::new();
-    for (name, _) in cfg.param_list() {
+    for name in single.param_names() {
         let a = single.read_grad(&name);
         let g = dp.reduced_grad(&name);
         let (mut num, mut den) = (0f32, 1e-6f32);
@@ -78,7 +73,7 @@ fn dp_grad_parity() {
             worst = rel;
             worst_name = name.clone();
         }
-        assert!(rel < 1e-3, "dp grad mismatch for {name}: rel {rel:.2e}");
+        assert!(rel < 1e-3, "gpt dp grad mismatch for {name}: rel {rel:.2e}");
     }
-    eprintln!("dp vs single-GPU accumulation: worst grad rel {worst:.2e} ({worst_name})");
+    eprintln!("gpt dp vs single-GPU accumulation: worst grad rel {worst:.2e} ({worst_name})");
 }
