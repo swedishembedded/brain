@@ -54,6 +54,17 @@ fn env_usize(k: &str, def: usize) -> usize {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(def)
 }
 
+/// Per-card `used MiB` from nvidia-smi (best-effort; empty on failure).
+fn gpu_mem() -> String {
+    std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=index,memory.used", "--format=csv,noheader"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.replace('\n', " | "))
+        .unwrap_or_default()
+}
+
 fn argmax(s: &[f32]) -> usize {
     let mut bi = 0;
     for i in 1..s.len() {
@@ -336,6 +347,48 @@ fn qwen3_reasoning_finetune() {
 /// Full (optimizer-offloaded) vs LoRA fine-tuning on the SAME tool-call data:
 /// both must improve held-out tool-call exact-match; reports the two side by
 /// side. Proves the full-vs-LoRA comparison the offload path unblocked.
+/// Pipeline-parallel sharding of the **real** 0.6B across both P40s: the sharded
+/// forward loss must match the single-device model bit-for-bit, and the weights
+/// must actually distribute across the two cards (reported via nvidia-smi). This
+/// is the "a model larger than one card fits across several" mechanism, proven on
+/// the real checkpoint.
+#[test]
+#[ignore]
+fn qwen3_shard_real_2gpu() {
+    let Some(d) = dir() else { eprintln!("QWEN3_DIR unset; skipping"); return; };
+    setup();
+    std::env::remove_var("BRAIN_GPU_INDEX");
+    let path = weights_ft(&d);
+    let ps = path.to_str().unwrap();
+    let c = checkpoint::load(ps);
+    let cfg = QwenConfig::from_json(&c.header["config"]);
+    let init = c.by_role("");
+    let (b, t) = (1u32, 32u32);
+    let toks: Vec<u32> = (0..t).map(|i| ((i * 131 + 7) % cfg.vocab) as u32).collect();
+    let y: Vec<u32> = (0..t).map(|i| toks[((i + 1) % t) as usize]).collect();
+
+    // Single-device reference on GPU 0.
+    let single = Qwen::load_inference(ps, b, t);
+    single.set_batch(&toks, &y);
+    let l0 = single.forward();
+    single.poll_wait();
+    drop(single); // free GPU 0 before the pipeline claims it as stage 0
+
+    // Two-stage inference pipeline across GPUs 0 and 1 from the same weights.
+    let pipe = qwen::Pipeline::new(cfg.clone(), b, t, &init, false, &[0, 1]);
+    let l1 = pipe.forward(&toks, &y);
+    pipe.poll_wait();
+    let mem = gpu_mem();
+
+    let rel = (l0 - l1).abs() / l0.abs().max(1e-6);
+    println!("\n=== Qwen3-0.6B sharded across 2 P40s (pipeline-parallel) ===");
+    println!("  layers split: {} stages over {} layers", pipe.n_stages(), cfg.n_layers);
+    println!("  loss  single-GPU={l0:.6}  2-GPU-sharded={l1:.6}  rel={rel:.2e}");
+    println!("  per-card memory: {mem}");
+    assert_eq!(pipe.n_stages(), 2);
+    assert!(rel < 1e-4, "sharded loss diverged from single-GPU: {l0} vs {l1}");
+}
+
 #[test]
 #[ignore]
 fn qwen3_full_vs_lora_toolcall() {

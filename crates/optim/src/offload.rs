@@ -105,6 +105,68 @@ impl OffloadAdam {
         }
     }
 
+    /// Sum of squares of the offloaded gradients (host-side), excluding any named
+    /// params. For pipeline-parallel training the global grad-norm is the sum of
+    /// each stage's `grad_sq`; a replicated (tied) weight is excluded on all but
+    /// one stage so it is counted exactly once, matching the single-device norm.
+    pub fn grad_sq(&self, gpu: &Gpu, ps: &ParamStore, exclude: &[&str]) -> f64 {
+        let grads: Vec<Vec<f32>> = self
+            .state
+            .iter()
+            .filter(|(n, _, _, _)| !exclude.contains(&n.as_str()))
+            .map(|(n, w, _, _)| gpu.read(ps.g(n), w.len()))
+            .collect();
+        grads
+            .par_iter()
+            .map(|g| g.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>())
+            .sum()
+    }
+
+    /// One AdamW step multiplying every gradient by a **caller-supplied** `scale`
+    /// (which already folds in grad-accumulation averaging and any global clip
+    /// coefficient) — no internal norm computation. Used by the pipeline optimiser
+    /// so all stages apply one globally-reduced clip coefficient, keeping tied
+    /// replicas bit-identical. Element-wise identical to [`Self::step`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_scale(
+        &mut self,
+        gpu: &Gpu,
+        ps: &ParamStore,
+        t: u32,
+        lr: f32,
+        wd: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        scale: f32,
+    ) {
+        let bc1 = 1.0 - beta1.powi(t as i32);
+        let bc2 = 1.0 - beta2.powi(t as i32);
+        let grads: Vec<Vec<f32>> =
+            self.state.iter().map(|(name, w, _, _)| gpu.read(ps.g(name), w.len())).collect();
+        self.state
+            .par_iter_mut()
+            .zip(grads.par_iter())
+            .for_each(|((_, w, m, v), g)| {
+                for i in 0..w.len() {
+                    let gi = g[i] * scale;
+                    let mi = beta1 * m[i] + (1.0 - beta1) * gi;
+                    let vi = beta2 * v[i] + (1.0 - beta2) * gi * gi;
+                    m[i] = mi;
+                    v[i] = vi;
+                    let mhat = mi / bc1;
+                    let vhat = vi / bc2;
+                    let mut wi = w[i];
+                    wi -= lr * wd * wi;
+                    wi -= lr * mhat / (vhat.sqrt() + eps);
+                    w[i] = wi;
+                }
+            });
+        for (name, w, _, _) in &self.state {
+            gpu.write(ps.w(name), bytemuck::cast_slice(w));
+        }
+    }
+
     /// The current master weights (host copy), for saving a checkpoint without a
     /// device read-back.
     pub fn master(&self) -> impl Iterator<Item = (&str, &[f32])> {

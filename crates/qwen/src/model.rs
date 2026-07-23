@@ -167,6 +167,65 @@ fn tile_budget_words() -> u64 {
         .unwrap_or(TILE_BUDGET_WORDS)
 }
 
+/// Pipeline-parallel shard descriptor: which contiguous layer range and which
+/// endpoint responsibilities (token embedding / lm-head) this stage owns, and
+/// which physical GPU it runs on. The default [`Shard::whole`] is the entire
+/// model on GPU 0 — the single-device path, byte-for-byte unchanged.
+///
+/// A stage allocates weights + scratch only for `start..end` (plus `tok.weight`
+/// if it embeds and/or carries the tied head, and `norm.weight`+head if `head`).
+/// The residual stream `res[start]` is either produced by this stage's embedding
+/// (`embed`) or written from the previous stage; `res[end]` is handed to the
+/// next stage. See [`crate::shard::Pipeline`].
+#[derive(Clone, Debug)]
+pub struct Shard {
+    pub start: usize,
+    pub end: usize,
+    pub embed: bool,
+    pub head: bool,
+    pub gpu_index: usize,
+}
+
+impl Shard {
+    /// The whole model on GPU 0 (the non-sharded default).
+    pub fn whole(n_layers: usize) -> Shard {
+        Shard { start: 0, end: n_layers, embed: true, head: true, gpu_index: 0 }
+    }
+    fn owns(&self, l: usize) -> bool {
+        l >= self.start && l < self.end
+    }
+    fn is_whole(&self, n_layers: usize) -> bool {
+        self.start == 0 && self.end == n_layers && self.embed && self.head
+    }
+}
+
+/// The parameter subset a shard holds. A whole shard returns `cfg.param_list()`
+/// verbatim (so the single-device store is byte-identical). A partial shard keeps
+/// only its layers' weights, plus `tok.weight` when it embeds and/or carries the
+/// tied head, and `norm.weight`+head when it is the head stage.
+fn shard_param_list(cfg: &QwenConfig, shard: &Shard) -> Vec<(String, usize)> {
+    let full = cfg.param_list();
+    if shard.is_whole(cfg.n_layers as usize) {
+        return full;
+    }
+    let head = cfg.head_weight(); // "tok.weight" (tied) or "lm_head.weight"
+    let tied = head == "tok.weight";
+    full.into_iter()
+        .filter(|(name, _)| {
+            if let Some(rest) = name.strip_prefix("blocks.") {
+                let l: usize = rest.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+                return shard.owns(l);
+            }
+            match name.as_str() {
+                "tok.weight" => shard.embed || (shard.head && tied),
+                "norm.weight" => shard.head,
+                _ if name == head => shard.head, // untied lm_head
+                _ => false,
+            }
+        })
+        .collect()
+}
+
 struct Layer {
     xn1: DeviceBuffer,
     q_pre: DeviceBuffer,
@@ -187,6 +246,8 @@ pub struct Qwen {
     pub gpu: Gpu,
     pub cfg: QwenConfig,
     pub ps: ParamStore,
+    /// Pipeline shard this instance owns (whole model on GPU 0 by default).
+    pub shard: Shard,
     opt: Optim,
     /// Host AdamW for offloaded params (RAM-resident moments); None otherwise.
     offload_opt: std::cell::RefCell<Option<optim::OffloadAdam>>,
@@ -250,29 +311,41 @@ impl Qwen {
         let c = checkpoint::load(path);
         let cfg = QwenConfig::from_json(&c.header["config"]);
         let init = c.by_role("");
-        Qwen::new_impl(cfg, b, t, &init, false)
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen::new_impl(cfg, b, t, &init, false, shard)
     }
 
     pub fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, true)
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen::new_impl(cfg, b, t, init, true, shard)
     }
 
-    fn new_impl(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool) -> Qwen {
+    /// Build a single pipeline **stage**: only the layers (and endpoint weights)
+    /// in `shard` are allocated on this device. `train` selects the parameter
+    /// roles (offload/LoRA/frozen) exactly as the whole-model path does. The
+    /// caller ([`crate::shard::Pipeline`]) selects the physical GPU by setting
+    /// `BRAIN_GPU_INDEX` before this call.
+    pub fn new_shard(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool, shard: Shard) -> Qwen {
+        Qwen::new_impl(cfg, b, t, init, train, shard)
+    }
+
+    fn new_impl(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool, shard: Shard) -> Qwen {
         let gpu = Gpu::new(PIPELINES);
+        // The parameter set this stage actually holds: the whole list for a whole
+        // shard (byte-identical to before), or just this stage's slice otherwise.
+        let plist = shard_param_list(&cfg, &shard);
         // Role assignment:
         //  - inference (`!train`): every parameter Frozen (weights only).
         //  - LoRA training: only `*.lora_a`/`*.lora_b` trainable; base Frozen.
-        //  - full training: every parameter Trainable.
+        //  - full training: every parameter Trainable (or Offload).
         let ps = if !train {
-            let roles = cfg
-                .param_list()
+            let roles = plist
                 .into_iter()
                 .map(|(n, c)| (n, c, paramstore::Role::Frozen))
                 .collect();
             ParamStore::new_with_roles(&gpu, roles, init)
         } else if cfg.lora.is_some() {
-            let roles = cfg
-                .param_list()
+            let roles = plist
                 .into_iter()
                 .map(|(n, c)| {
                     let role = if n.ends_with(".lora_a") || n.ends_with(".lora_b") {
@@ -287,14 +360,13 @@ impl Qwen {
         } else if offload_adam() {
             // Full fine-tuning with the AdamW moments in system RAM (Role::Offload):
             // GPU holds only weight+grad (2×model) instead of 4×model.
-            let roles = cfg
-                .param_list()
+            let roles = plist
                 .into_iter()
                 .map(|(n, c)| (n, c, paramstore::Role::Offload))
                 .collect();
             ParamStore::new_with_roles(&gpu, roles, init)
         } else {
-            ParamStore::new(&gpu, cfg.param_list(), init)
+            ParamStore::new(&gpu, plist, init)
         };
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
         // Lazily-built host optimiser for the offloaded params (None unless any
@@ -322,28 +394,41 @@ impl Qwen {
         );
         let ce_grad_uni = gpu.uniform_dynamic(4); // [n, vocab, IGNORE, count]
 
+        // Residual stream: `res[i]` is live only at this shard's boundaries
+        // (`start..=end`); non-boundary indices are size-1 dummies so the model's
+        // absolute `res[l]`/`res[l+1]` indexing is preserved unchanged. For a
+        // whole shard every index is live — identical to the single-device path.
         let mut res = Vec::new();
         let mut dres = Vec::new();
-        for _ in 0..=cfg.n_layers {
-            res.push(st(n * d));
-            dres.push(st(n * d));
+        for i in 0..=cfg.n_layers as usize {
+            let live = i >= shard.start && i <= shard.end;
+            res.push(if live { st(n * d) } else { st(1) });
+            dres.push(if live { st(n * d) } else { st(1) });
         }
+        let dummy_layer = || Layer {
+            xn1: st(1), q_pre: st(1), q: st(1), k_pre: st(1), k: st(1), v: st(1),
+            probs: st(1), ctx: st(1), xmid: st(1), xn2: st(1), gate_pre: st(1), up: st(1), h: st(1),
+        };
         let mut layers = Vec::new();
-        for _ in 0..cfg.n_layers {
-            layers.push(Layer {
-                xn1: st(n * d),
-                q_pre: st(n * hq),
-                q: st(n * hq),
-                k_pre: st(n * hkv),
-                k: st(n * hkv),
-                v: st(n * hkv),
-                probs: st(bht2),
-                ctx: st(n * hq),
-                xmid: st(n * d),
-                xn2: st(n * d),
-                gate_pre: st(n * ff),
-                up: st(n * ff),
-                h: st(n * ff),
+        for l in 0..cfg.n_layers as usize {
+            layers.push(if shard.owns(l) {
+                Layer {
+                    xn1: st(n * d),
+                    q_pre: st(n * hq),
+                    q: st(n * hq),
+                    k_pre: st(n * hkv),
+                    k: st(n * hkv),
+                    v: st(n * hkv),
+                    probs: st(bht2),
+                    ctx: st(n * hq),
+                    xmid: st(n * d),
+                    xn2: st(n * d),
+                    gate_pre: st(n * ff),
+                    up: st(n * ff),
+                    h: st(n * ff),
+                }
+            } else {
+                dummy_layer()
             });
         }
         // `inv` must hold the per-row RMS for the largest norm: QK-norm-q has
@@ -353,12 +438,19 @@ impl Qwen {
         let r = cfg.lora.as_ref().map(|l| l.rank as u64).unwrap_or(0).max(1);
         let max_out = hq.max(ff).max(d).max(hkv);
 
+        // Head-only buffers (final norm + lm_head + cross-entropy). Only the last
+        // pipeline stage carries them; on other stages they are size-1 dummies —
+        // this is where sharding saves the most (`logits`/`d_logits` are
+        // `n·vocab`, ~311 MB each at vocab 152k, block 512).
+        let head = shard.head;
+        let hd_v = |x: u64| if head { st(x) } else { st(1) };
         let mut m = Qwen {
             cfg,
             b,
             t,
             count: Cell::new(1.0),
             ps,
+            shard,
             offload_opt,
             opt,
             tokens,
@@ -368,12 +460,12 @@ impl Qwen {
             proj: st(n * d),
             mlp_out: st(n * d),
             scores: st(bht2),
-            xn_final: st(n * d),
-            logits: st(n * v),
-            ce_buf: st(n),
+            xn_final: hd_v(n * d),
+            logits: hd_v(n * v),
+            ce_buf: hd_v(n),
             dres,
-            d_logits: st(n * v),
-            ce_stats: st(n * 2),
+            d_logits: hd_v(n * v),
+            ce_stats: hd_v(n * 2),
             d_xn: st(n * d),
             d_tmp: st(n * d),
             dxmid: st(n * d),
@@ -552,18 +644,21 @@ impl Qwen {
         let tiles = self.vocab_tiles();
 
         // Token embedding, tiled over vocab so each `tok.weight` binding stays
-        // under the backend's max-binding size (GL: 128MB).
-        for &(v0, cnt) in &tiles {
-            s.push(self.gpu.step_sliced(
-                EMBED_TILE,
-                &[&self.tokens, self.w("tok.weight"), &self.res[0]],
-                &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
-                &[d, n, v0, cnt],
-                n * d,
-            ));
+        // under the backend's max-binding size (GL: 128MB). Only the embed stage
+        // runs it; other stages receive `res[start]` from the previous stage.
+        if self.shard.embed {
+            for &(v0, cnt) in &tiles {
+                s.push(self.gpu.step_sliced(
+                    EMBED_TILE,
+                    &[&self.tokens, self.w("tok.weight"), &self.res[0]],
+                    &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
+                    &[d, n, v0, cnt],
+                    n * d,
+                ));
+            }
         }
 
-        for l in 0..c.n_layers as usize {
+        for l in self.shard.start..self.shard.end {
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
             // --- attention --- (projections stay here: they carry LoRA/bias;
@@ -603,6 +698,10 @@ impl Qwen {
             s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
         }
 
+        // Head epilogue (final norm + lm_head + CE): only the head stage.
+        if !self.shard.head {
+            return s;
+        }
         let last = c.n_layers as usize;
         s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[last], self.w("norm.weight"), &self.xn_final, d, n));
         // lm_head. When the whole vocab fits one tile (v0=0, cnt=v — the common
@@ -662,23 +761,26 @@ impl Qwen {
         let ga = self.gqa(b, t);
         let mut s: Vec<Step> = Vec::new();
 
-        // ---- head + final norm ----
-        // Two-pass CE gradient: compute per-row softmax stats ONCE (ce_stats),
-        // then the per-element gradient reads them — O(rows*vocab) instead of the
-        // naive per-element softmax recompute's O(rows*vocab^2). At vocab 151936
-        // this is the difference between ~10 ms and ~56 s per backward.
-        s.push(self.gpu.step(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[n, v, IGNORE], n));
-        s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.ce_stats, &self.d_logits], n * v));
-        if self.trainable(head) {
-            let (bk, bt) = dw_kernel_bw(v, d);
-            s.push(self.gpu.step(bk, &[&self.d_logits, &self.xn_final, self.g(head)], &[n, d, v], bt));
+        // ---- head + final norm ---- (head stage only; other stages receive
+        // dres[end] from the next stage and start straight at the layer loop)
+        if self.shard.head {
+            // Two-pass CE gradient: compute per-row softmax stats ONCE (ce_stats),
+            // then the per-element gradient reads them — O(rows*vocab) instead of
+            // the naive per-element softmax recompute's O(rows*vocab^2). At vocab
+            // 151936 this is the difference between ~10 ms and ~56 s per backward.
+            s.push(self.gpu.step(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[n, v, IGNORE], n));
+            s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.ce_stats, &self.d_logits], n * v));
+            if self.trainable(head) {
+                let (bk, bt) = dw_kernel_bw(v, d);
+                s.push(self.gpu.step(bk, &[&self.d_logits, &self.xn_final, self.g(head)], &[n, d, v], bt));
+            }
+            let (bk, bt) = dx_kernel_bw(n, d);
+            s.push(self.gpu.step(bk, &[&self.d_logits, self.w(head), &self.d_xn], &[n, d, v, 0], bt));
+            let last = c.n_layers as usize;
+            self.rmsnorm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
         }
-        let (bk, bt) = dx_kernel_bw(n, d);
-        s.push(self.gpu.step(bk, &[&self.d_logits, self.w(head), &self.d_xn], &[n, d, v, 0], bt));
-        let last = c.n_layers as usize;
-        self.rmsnorm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
 
-        for l in (0..c.n_layers as usize).rev() {
+        for l in (self.shard.start..self.shard.end).rev() {
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
 
@@ -710,8 +812,9 @@ impl Qwen {
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
         }
 
-        // embedding backward (tied: accumulates onto the head grad in tok.weight)
-        if self.trainable("tok.weight") {
+        // embedding backward (tied: accumulates onto the head grad in tok.weight);
+        // only the embed stage, which owns the embedding rows and dres[0].
+        if self.shard.embed && self.trainable("tok.weight") {
             s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], self.g("tok.weight")], &[n, d, v], v * d));
         }
         s
@@ -744,6 +847,81 @@ impl Qwen {
     }
     pub fn write_weight(&self, name: &str, data: &[f32]) {
         self.gpu.write(self.w(name), bytemuck::cast_slice(data));
+    }
+
+    // ---- pipeline-parallel cross-stage seam ----
+
+    /// Residual-stream element count at a stage boundary (`b·t·d_model`).
+    fn res_numel(&self) -> usize {
+        (self.b * self.t) as usize * self.cfg.d_model as usize
+    }
+    /// Does this stage hold parameter `name` (weight buffer present)?
+    pub fn has_param(&self, name: &str) -> bool {
+        self.ps.weight.contains_key(name)
+    }
+    /// Run the forward graph without reading the loss (non-head stages).
+    pub fn run_forward(&self) {
+        self.gpu.submit(&[], &self.fwd_steps);
+    }
+    /// Read this stage's OUTPUT residual `res[end]` (for the next stage's input).
+    pub fn read_out_res(&self) -> Vec<f32> {
+        self.gpu.read(&self.res[self.shard.end], self.res_numel())
+    }
+    /// Write this stage's INPUT residual `res[start]` (from the previous stage).
+    pub fn write_in_res(&self, data: &[f32]) {
+        self.gpu.write(&self.res[self.shard.start], bytemuck::cast_slice(data));
+    }
+    /// Run the backward graph. The head stage refreshes the CE-grad uniform first
+    /// (it drives `ce_grad_stats`); other stages consume `dres[end]` written by
+    /// [`Self::write_out_dres`].
+    pub fn run_backward(&self) {
+        if self.shard.head {
+            let n = self.b * self.t;
+            self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab, IGNORE, f(self.count.get())]);
+        }
+        self.gpu.submit(&[], &self.bwd_steps);
+    }
+    /// Read this stage's INPUT-side residual grad `dres[start]` (for the previous stage).
+    pub fn read_in_dres(&self) -> Vec<f32> {
+        self.gpu.read(&self.dres[self.shard.start], self.res_numel())
+    }
+    /// Write this stage's OUTPUT-side residual grad `dres[end]` (from the next stage).
+    pub fn write_out_dres(&self, data: &[f32]) {
+        self.gpu.write(&self.dres[self.shard.end], bytemuck::cast_slice(data));
+    }
+    /// Overwrite gradient buffer `name` (used to write back a summed tied grad).
+    pub fn write_grad(&self, name: &str, data: &[f32]) {
+        self.gpu.write(self.g(name), bytemuck::cast_slice(data));
+    }
+
+    /// Build the host offload optimiser on first use (full-offload training).
+    fn ensure_offload(&self) {
+        if self.ps.offload.is_empty() {
+            return;
+        }
+        let mut slot = self.offload_opt.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(optim::OffloadAdam::new(&self.gpu, &self.ps));
+        }
+    }
+    /// Sum-of-squares of this stage's offloaded grads, excluding `exclude`
+    /// (the pipeline excludes a replicated tied weight on all but one stage so it
+    /// is counted exactly once in the global grad-norm).
+    pub fn grad_sq(&self, exclude: &[&str]) -> f64 {
+        self.ensure_offload();
+        self.offload_opt
+            .borrow()
+            .as_ref()
+            .map(|o| o.grad_sq(&self.gpu, &self.ps, exclude))
+            .unwrap_or(0.0)
+    }
+    /// AdamW step over this stage's offloaded params, scaling grads by a
+    /// caller-supplied (globally-reduced) `scale`. Keeps tied replicas identical.
+    pub fn opt_step_scaled(&self, t: u32, lr: f32, wd: f32, scale: f32) {
+        self.ensure_offload();
+        if let Some(o) = self.offload_opt.borrow_mut().as_mut() {
+            o.step_with_scale(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, scale);
+        }
     }
 
     /// The maximum sequence length this instance was sized for (the `t` it was

@@ -11,8 +11,10 @@ pub mod init;
 pub mod model;
 pub mod sample;
 pub mod finetune;
+pub mod shard;
 pub mod toolcall_eval;
 
 pub use config::{LoraCfg, QwenConfig};
 pub use init::init_weights;
-pub use model::{Qwen, IGNORE};
+pub use model::{Qwen, Shard, IGNORE};
+pub use shard::Pipeline;
