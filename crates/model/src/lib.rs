@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 pub mod block;
 pub mod collective;
+pub mod grid;
 pub mod parallel;
 pub mod plan;
 pub mod shard;
@@ -24,6 +25,7 @@ pub mod train;
 pub mod vit;
 
 pub use collective::{Collective, HostCollective};
+pub use grid::{Coord, Grid};
 pub use parallel::DataParallel;
 pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
 pub use shard::{plan_balanced, Pipeline, Shard, ShardCost, Shardable};
