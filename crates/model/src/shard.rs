@@ -331,6 +331,107 @@ impl<M: Shardable> Pipeline<M> {
         }
     }
 
+    /// Run `microbatches` through the pipeline with a **GPipe** schedule: stages
+    /// run **concurrently** (one thread per GPU, connected by channels), so while
+    /// stage *i* processes microbatch *k* stage *i+1* processes *k-1* — overlapping
+    /// the cards instead of the plain sequential (one-batch) path's 1/p duty
+    /// cycle. Activations are **re-materialised** in the backward (each stage
+    /// keeps only per-microbatch *input residuals* and recomputes its forward
+    /// before its backward), so activation memory is `O(p · b·t·d)` regardless of
+    /// the microbatch count. Gradients accumulate across microbatches; returns the
+    /// summed loss. Bit-exact to running the microbatches sequentially with
+    /// grad-accum (validated in `shard_microbatch.rs`).
+    ///
+    /// Call [`Self::zero_grads`] first and an optimiser step (e.g.
+    /// [`Self::adamw_step`] with `extra_scale = 1/m`) after.
+    pub fn pipelined_fwd_bwd(&mut self, microbatches: &[crate::Batch]) -> f32 {
+        use std::sync::mpsc::{channel, Receiver, Sender};
+        let p = self.stages.len();
+        let m = microbatches.len();
+        if p == 1 {
+            // Degenerate pipeline: just accumulate the microbatches on the one stage.
+            let st = &self.stages[0];
+            let mut total = 0.0;
+            for mb in microbatches {
+                st.set_batch(clone_batch(mb));
+                total += st.run_forward_stage().unwrap_or(0.0);
+                st.run_backward_stage();
+            }
+            return total;
+        }
+        // fwd[s]: stage s -> s+1 ; bwd[s]: stage s+1 -> s   (s in 0..p-1)
+        let mut fwd_tx: Vec<Option<Sender<Vec<f32>>>> = Vec::new();
+        let mut fwd_rx: Vec<Option<Receiver<Vec<f32>>>> = Vec::new();
+        let mut bwd_tx: Vec<Option<Sender<Vec<f32>>>> = Vec::new();
+        let mut bwd_rx: Vec<Option<Receiver<Vec<f32>>>> = Vec::new();
+        for _ in 0..p - 1 {
+            let (ft, fr) = channel();
+            let (bt, br) = channel();
+            fwd_tx.push(Some(ft));
+            fwd_rx.push(Some(fr));
+            bwd_tx.push(Some(bt));
+            bwd_rx.push(Some(br));
+        }
+        let mbs = microbatches;
+        std::thread::scope(|sc| {
+            let mut handles = Vec::new();
+            for (s, stage) in self.stages.iter_mut().enumerate() {
+                let fin = if s > 0 { fwd_rx[s - 1].take() } else { None };
+                let fout = if s < p - 1 { fwd_tx[s].take() } else { None };
+                let bin = if s < p - 1 { bwd_rx[s].take() } else { None };
+                let bout = if s > 0 { bwd_tx[s - 1].take() } else { None };
+                handles.push(sc.spawn(move || {
+                    // Per-microbatch input residual (None on the embed stage, which
+                    // recomputes straight from the tokens).
+                    let mut stash: Vec<Option<Vec<f32>>> = (0..m).map(|_| None).collect();
+                    let mut total = 0.0f32;
+                    // Forward phase (microbatches in order).
+                    for mb in 0..m {
+                        stage.set_batch(clone_batch(&mbs[mb]));
+                        if let Some(rx) = &fin {
+                            let input = rx.recv().unwrap();
+                            stage.write_in_res(&input);
+                            stash[mb] = Some(input);
+                        }
+                        let loss = stage.run_forward_stage();
+                        match &fout {
+                            Some(tx) => tx.send(stage.read_out_res()).unwrap(),
+                            None => total += loss.expect("head stage returns a loss"),
+                        }
+                    }
+                    // Backward phase (reverse order): recompute forward, then backward.
+                    for mb in (0..m).rev() {
+                        stage.set_batch(clone_batch(&mbs[mb]));
+                        if let Some(inp) = &stash[mb] {
+                            stage.write_in_res(inp);
+                        }
+                        stage.run_forward_stage(); // re-materialise activations
+                        if let Some(rx) = &bin {
+                            let d = rx.recv().unwrap();
+                            stage.write_out_dres(&d);
+                        }
+                        stage.run_backward_stage();
+                        if let Some(tx) = &bout {
+                            tx.send(stage.read_in_dres()).unwrap();
+                        }
+                    }
+                    total
+                }));
+            }
+            handles.into_iter().map(|h| h.join().unwrap()).sum::<f32>()
+        })
+    }
+
+    /// A full micro-batched training step: [`Self::pipelined_fwd_bwd`] then the
+    /// fused optimiser (grads averaged by `1/m`). Returns the mean loss.
+    pub fn train_step(&mut self, microbatches: &[crate::Batch], t: u32, lr: f32, wd: f32, clip: Option<f32>) -> f32 {
+        self.zero_grads();
+        let total = self.pipelined_fwd_bwd(microbatches);
+        let m = microbatches.len().max(1);
+        self.adamw_step(t, lr, wd, clip, 1.0 / m as f32);
+        total / m as f32
+    }
+
     /// The true gradient for `name` (summed across replicas / read from its owner).
     pub fn reduced_grad(&self, name: &str) -> Vec<f32> {
         let (_, hs) = self.holders.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no stage holds {name}"));

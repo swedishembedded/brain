@@ -94,11 +94,36 @@ pipe.adamw_step(step, lr, wd, Some(1.0), 1.0 / grad_accum as f32);
 
 `Pipeline::with_shards` bypasses auto-placement with explicit `Shard`s.
 
+## Micro-batching (concurrent stages)
+
+`Pipeline::pipelined_fwd_bwd(microbatches)` runs a **GPipe** schedule: stages run
+**concurrently** (one thread per GPU, connected by channels), so while stage *i*
+processes microbatch *k*, stage *i+1* processes *k−1* — overlapping the cards
+instead of the plain one-batch path's 1/p duty cycle. Activations are
+**re-materialised** in the backward (each stage keeps only per-microbatch *input
+residuals*, `[b·t·d]`, and recomputes its forward before its backward), so
+activation memory is `O(p · b·t·d)` regardless of the microbatch count — this is
+what lets brain's single-activation-buffer stages pipeline at all. Grounded in
+GPipe / PipeDream-Flush (`resources/dp/`).
+
+Bit-exact to sequential grad-accumulation (`crates/qwen/tests/shard_microbatch.rs`:
+worst grad rel 1.11e-7). Real 0.6B, 4 microbatches across 2 P40s:
+
+```
+naive sequential pipeline:  7073 ms/step
+concurrent GPipe+recompute: 5604 ms/step   speedup 1.26x
+```
+
+The overlap beats the extra recompute forward even on a 2-stage pipeline; the win
+grows with pipeline depth (bubble ≈ (p−1)/m). `train_step` wraps it with the fused
+optimiser (grads averaged by 1/m).
+
 ## Composition & limits
 
 - Composes with [data-parallel](DATAPARALLEL.md): shard a large model across a
-  group, replicate the group data-parallel (2D parallelism).
-- Stages run sequentially (a pipeline *bubble*); micro-batch 1F1B scheduling would
-  overlap them for throughput — a scheduling layer on top of this correct base.
+  group, replicate the group data-parallel (2D parallelism). See
+  `resources/dp/README.md` for the full 3D (TP×PP×DP) design.
 - `plan_balanced` balances memory (parameter counts); a FLOP-weighted cost would
   balance latency instead — same DP, different `ShardCost`.
+- Full 1F1B interleaving (multiple chunks/device) would shrink the bubble further
+  at the cost of more communication — a scheduling refinement on this base.

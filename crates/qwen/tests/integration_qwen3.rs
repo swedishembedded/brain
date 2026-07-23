@@ -347,6 +347,66 @@ fn qwen3_reasoning_finetune() {
 /// Full (optimizer-offloaded) vs LoRA fine-tuning on the SAME tool-call data:
 /// both must improve held-out tool-call exact-match; reports the two side by
 /// side. Proves the full-vs-LoRA comparison the offload path unblocked.
+/// Micro-batched pipeline throughput on the real 0.6B across 2 P40s: the
+/// concurrent GPipe schedule (overlapped stages + recompute) vs the naive
+/// sequential pipeline (one microbatch at a time, no overlap), same M
+/// microbatches accumulated.
+#[test]
+#[ignore]
+fn qwen3_microbatch_pipeline_throughput() {
+    use std::time::Instant;
+    let Some(d) = dir() else { eprintln!("QWEN3_DIR unset; skipping"); return; };
+    setup();
+    std::env::remove_var("BRAIN_GPU_INDEX");
+    let path = weights_ft(&d);
+    let c = checkpoint::load(path.to_str().unwrap());
+    let cfg = QwenConfig::from_json(&c.header["config"]);
+    let init = c.by_role("");
+    let (b, t) = (1u32, 512u32);
+    let k = env_usize("QWEN3_MB", 4);
+    let mk = |j: usize| -> (Vec<u32>, Vec<u32>) {
+        let x = (0..t).map(|i| ((i * 131 + 7 + j as u32 * 97) % cfg.vocab) as u32).collect::<Vec<u32>>();
+        let y = (0..t).map(|i| ((i * 131 + 8 + j as u32 * 97) % cfg.vocab) as u32).collect::<Vec<u32>>();
+        (x, y)
+    };
+    let raw: Vec<(Vec<u32>, Vec<u32>)> = (0..k).map(mk).collect();
+    let batches: Vec<model::Batch> = raw.iter().map(|(x, y)| model::Batch::Lm { tokens: x, targets: y }).collect();
+    let steps = env_usize("QWEN3_MB_STEPS", 2);
+
+    let mut pipe = qwen::Pipeline::<Qwen>::new(cfg, b, t, &init, &[0, 1]);
+    eprintln!("shards: {:?}", pipe.shards());
+
+    // Naive: sequential stages, one microbatch at a time (grads accumulate).
+    let naive = |pipe: &mut qwen::Pipeline<Qwen>| {
+        pipe.zero_grads();
+        for bt in &batches {
+            pipe.forward(match bt { model::Batch::Lm { tokens, targets } => model::Batch::Lm { tokens, targets }, _ => unreachable!() });
+            pipe.backward();
+        }
+    };
+    naive(&mut pipe); // warmup
+    let t0 = Instant::now();
+    for _ in 0..steps {
+        naive(&mut pipe);
+    }
+    let naive_ms = t0.elapsed().as_secs_f64() * 1e3 / steps as f64;
+
+    // Micro-batched: concurrent stages + recompute.
+    pipe.zero_grads();
+    pipe.pipelined_fwd_bwd(&batches); // warmup
+    let t1 = Instant::now();
+    for _ in 0..steps {
+        pipe.zero_grads();
+        pipe.pipelined_fwd_bwd(&batches);
+    }
+    let mb_ms = t1.elapsed().as_secs_f64() * 1e3 / steps as f64;
+
+    println!("\n=== Qwen3-0.6B micro-batched pipeline ({k} microbatches, 2 P40s) ===");
+    println!("  naive sequential pipeline: {naive_ms:.0} ms/step");
+    println!("  concurrent GPipe+recompute: {mb_ms:.0} ms/step   speedup {:.2}x", naive_ms / mb_ms);
+    println!("  per-card memory: {}", gpu_mem());
+}
+
 /// Data-parallel training **speedup** on the real 0.6B: time one optimiser step
 /// (K micro-batches) on a single P40 vs both P40s (K/2 micro-batches per card,
 /// concurrent) + gradient all-reduce. Reports per-step time and the speedup.
