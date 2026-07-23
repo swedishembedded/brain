@@ -16,11 +16,13 @@
 use std::collections::HashMap;
 
 pub mod block;
+pub mod collective;
 pub mod parallel;
 pub mod shard;
 pub mod train;
 pub mod vit;
 
+pub use collective::{Collective, HostCollective};
 pub use parallel::DataParallel;
 pub use shard::{plan_balanced, Pipeline, Shard, ShardCost, Shardable};
 
