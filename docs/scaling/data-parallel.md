@@ -4,7 +4,7 @@ A **full replica** of the model on each GPU, each processing a different slice o
 the step's micro-batches **concurrently**, then a gradient all-reduce so every
 replica applies the identical update. This is the *throughput* path (a training
 speedup) for models that fit on one card; it composes with the pipeline
-[sharding](SHARDING.md) *capacity* path.
+[sharding](pipeline-sharding.md) *capacity* path.
 
 **Generic over every model.** `DataParallel<M: Model>` lives in
 [`crates/model/src/parallel.rs`](../crates/model/src/parallel.rs) and rides
@@ -90,7 +90,7 @@ dp.save("out.weights");
 
 - **Data-parallel** (this) — model fits one card, want it *faster*. Speedup grows
   with grad-accumulation; capped by the PCIe gradient sync (NVLink would lift it).
-- **Pipeline sharding** ([SHARDING.md](SHARDING.md)) — model too big for one card.
+- **Pipeline sharding** ([SHARDING.md](pipeline-sharding.md)) — model too big for one card.
   Distributes weights; bit-exact; no speedup on its own.
 - They **compose**: shard a large model across a group of GPUs, replicate the
   group data-parallel — 2D parallelism. The seams (`Pipeline`, `DataParallel`,

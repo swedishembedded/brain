@@ -10,7 +10,7 @@
 //! via `TopK` + `ScatterElements`. MLA runs dense (the DSA indexer is a no-op at
 //! `index_topk >= T`). Standard ONNX ops only — brain linear weights `[out,in]`
 //! are transposed once to ONNX `[in,out]`. RoPE uses brain's **interleaved**
-//! convention (base 10000, matching `rope_train`). See `docs/glm/NPU.md`.
+//! convention (base 10000, matching `rope_train`). See `docs/models/glm/npu.md`.
 
 use std::collections::HashMap;
 

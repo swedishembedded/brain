@@ -11,7 +11,7 @@
 //! Native representation for the `ForecastModel` adapter = **samples** (AR
 //! rollout of future bars). Imported exactly, parity-gated per stage vs the
 //! reference (T0 layout → T1 encode → T2 decode → T3 block → T4 dual head → T5
-//! generate). Full plan + resolved ambiguities in `docs/kronos/STATUS.md`.
+//! generate). Full plan + resolved ambiguities in `docs/models/kronos/status.md`.
 //!
 //! This milestone: the two configs + their `param_list()`s in the reference's
 //! own `state_dict` names, ready for the T0 layout gate.

@@ -31,7 +31,7 @@
 //! deterministic top-2 expectation (always route to the top-2, gates
 //! renormalized to sum 1, no capacity dropping) — the natural clean-room reading;
 //! the reference is made deterministic in the parity dump by driving
-//! `threshold_eval→0` and `capacity_factor_eval→∞`. See `docs/fincast/STATUS.md`.
+//! `threshold_eval→0` and `capacity_factor_eval→∞`. See `docs/models/fincast/status.md`.
 
 /// A named parameter with its shape (row-major, PyTorch `nn.Linear` `[out, in]`).
 pub type Param = (String, Vec<usize>);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! P1.film unit tests — written FROM `docs/world-models/specs/P1.film.md`
+//! P1.film unit tests — written FROM `docs/models/world-models/specs/p1.film.md`
 //! (NEVER from the implementation): §6 hand-computed references (EXACT `==`
 //! comparisons — every value is a small dyadic rational and every reduction
 //! has <= 4 exactly-representable terms), §9 kernel-level finite-difference

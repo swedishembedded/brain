@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! P1.gn — GroupNorm (NCHW) kernel-family tests, written FROM the spec
-//! (`docs/world-models/specs/P1.gn.md` §7 hand-computed reference, §9 edge
+//! (`docs/models/world-models/specs/p1.gn.md` §7 hand-computed reference, §9 edge
 //! cases, §10 required tests), never from the implementation.
 //!
 //! Gating runs are `BRAIN_DEVICE=cpu` (+ `MOE_SKIP_GPU_TESTS=1`), both set by

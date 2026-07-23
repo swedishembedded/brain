@@ -44,19 +44,19 @@ them, keeping the gradient-check discipline.
    RoPE), DPT heads (depth/points/normals/gaussians) + iterative camera head;
    photos → a navigable 3DGS scene. Imported exactly from the reference
    checkpoint; parity-gated per stage vs PyTorch goldens. `brain mirror
-   {import,infer,demo,export-npu}`; docs `docs/mirror/`.
+   {import,infer,demo,export-npu}`; docs `docs/models/mirror/`.
 7. **3D Gaussian Splatting** (`crates/splat`) — from-scratch tiled 3DGS
    rasterizer (atomic-free/barrier-free WGSL: generic scan + radix sort →
    per-tile compositing) with forward AND backward (autograd-verified),
    Inria PLY IO, interactive WASD+mouse viewer, and `splat fit` scene
-   optimization. `brain splat {info,render,view,fit}`; docs `docs/splat/`.
+   optimization. `brain splat {info,render,view,fit}`; docs `docs/models/splat/`.
 8. **ZipDepth monocular depth** (`crates/depth`) — the 6.1M pure-conv depth
    net (QARep/RepVGG blocks, SE/strip/global-context attention, convex
    upsampling), exact vs the reference PyTorch on the released checkpoints.
    Realtime demo (`brain depth --image|--camera`, SDL views incl.
    autostereograms) on CPU/GPU/Vulkan and the Intel NPU (ONNX/OpenVINO,
-   cosine 0.99998). Gradient-checked end to end. See `docs/depth/README.md` +
-   `docs/depth/STATUS.md`.
+   cosine 0.99998). Gradient-checked end to end. See `docs/models/depth/readme.md` +
+   `docs/models/depth/status.md`.
 
 ## Workspace layout (`crates/`)
 
@@ -94,21 +94,21 @@ them, keeping the gradient-check discipline.
 | Task | Where |
 |---|---|
 | MoE toy task / honest eval methodology | `README.md` |
-| GLM-5.2 (MLA + MoE + DSA indexer + MTP): arch, status, CLI, NPU | `docs/glm/README.md`, `docs/glm/NPU.md`; `crates/glm`, `crates/cli/src/glm_cli.rs` |
-| Architecture & crate graph | `docs/ARCHITECTURE.md` |
-| Federated MoE pipeline (done vs remaining) | `docs/FEDERATED.md` |
-| Testing strategy + gradient-check gate | `docs/TESTING.md` |
-| Performance: CPU/GPU inference optimizations (what sped things up + why) | `docs/PERFORMANCE.md` |
-| YOLOv8 detector training + inference (end-to-end guide) | `docs/yolo/README.md` |
-| Engine internals | `docs/engine-README.md`, `engine-TRAINING.md`, `engine-README_VULKAN.md`, `engine-README_WEB.md` |
+| GLM-5.2 (MLA + MoE + DSA indexer + MTP): arch, status, CLI, NPU | `docs/models/glm/readme.md`, `docs/models/glm/npu.md`; `crates/glm`, `crates/cli/src/glm_cli.rs` |
+| Architecture & crate graph | `docs/architecture.md` |
+| Federated MoE pipeline (done vs remaining) | `docs/federated.md` |
+| Testing strategy + gradient-check gate | `docs/testing.md` |
+| Performance: CPU/GPU inference optimizations (what sped things up + why) | `docs/performance/overview.md` |
+| YOLOv8 detector training + inference (end-to-end guide) | `docs/models/yolo/readme.md` |
+| Engine internals | `docs/engine/overview.md`, `engine-TRAINING.md`, `engine-README_VULKAN.md`, `engine-README_WEB.md` |
 | Add/adjust a WGSL kernel | `crates/kernels/wgsl/*.wgsl` (regenerate the const list if you add files) |
 | GPT model / training / sampling | `crates/gpt/src/{model,train,sample,init}.rs` |
 | YOLO model / loss / inference | `crates/yolo/src/{model,head,blocks,loss,assign,infer,nms,config}.rs` |
 | YOLO train / eval / detect / fine-tune (CLI) | `crates/cli/src/yolo_cli.rs` |
-| YOLO → Intel NPU: export / quantize / run / bench (OpenVINO) | `crates/npu`, `crates/onnx`, `crates/cli/src/npu_cli.rs`, `docs/yolo/NPU.md` |
-| ZipDepth: guide / workstream ledger (incl. GPU perf root causes) | `docs/depth/README.md`, `docs/depth/STATUS.md` |
-| WorldMirror-2 (photos → 3DGS scene): guide / ledger / parity gates | `docs/mirror/README.md`, `docs/mirror/STATUS.md`; `crates/mirror`, `crates/cli/src/mirror_cli.rs` |
-| 3D Gaussian Splatting rasterizer + viewer + fit | `docs/splat/README.md`, `docs/splat/STATUS.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
+| YOLO → Intel NPU: export / quantize / run / bench (OpenVINO) | `crates/npu`, `crates/onnx`, `crates/cli/src/npu_cli.rs`, `docs/models/yolo/npu.md` |
+| ZipDepth: guide / workstream ledger (incl. GPU perf root causes) | `docs/models/depth/readme.md`, `docs/models/depth/status.md` |
+| WorldMirror-2 (photos → 3DGS scene): guide / ledger / parity gates | `docs/models/mirror/readme.md`, `docs/models/mirror/status.md`; `crates/mirror`, `crates/cli/src/mirror_cli.rs` |
+| 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat/readme.md`, `docs/models/splat/status.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
 | Shared ViT block builder (DINOv2/trunk/camera-head blocks) | `crates/model/src/vit.rs` |
 | ZipDepth model / import / predictor / demo views | `crates/depth/src/{model,blocks,import,predict,viz,stereo,effects}.rs`, `crates/cli/src/depth_cli.rs` |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
@@ -296,7 +296,7 @@ improves as the model grows, and **`advise`** says what to tune.
   (`crates/npu`), not a per-op `Gpu`/`Step` backend. `crates/yolo` and the default
   build stay free of OpenVINO at the source level; the OpenVINO runtime is loaded
   at run time (`runtime-linking`), so `make build`/`make test` stay green with no
-  OpenVINO installed. See `docs/yolo/NPU.md`.
+  OpenVINO installed. See `docs/models/yolo/npu.md`.
 - **Backprop is gated by `gradcheck`** (finite differences) — run it after any
   fwd/bwd math change. SSA-style forward (each stage writes a fresh buffer that
   doubles as the backprop activation cache) — preserve it when adding stages.

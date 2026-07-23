@@ -18,7 +18,7 @@
 //! (`num_experts` experts, each `LayerNorm → gate_proj → ReLU → down_proj`)
 //! whose deterministic routing is expressed in-graph via `TopK` + a
 //! `GreaterOrEqual(prob, 2nd-largest)` mask (no `uniform` stochasticity — see
-//! `docs/fincast/STATUS.md`). The horizon head is a SiLU ResidualBlock.
+//! `docs/models/fincast/status.md`). The horizon head is a SiLU ResidualBlock.
 
 use std::collections::HashMap;
 

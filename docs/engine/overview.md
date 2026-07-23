@@ -2,8 +2,8 @@
 
 > For the task definition, what the model learns, how to evaluate it
 > (incl. out-of-distribution testing), and how/why the MoE structure maps onto
-> the problem, see the top-level [`../README.md`](../README.md). Training docs
-> are in [`TRAINING.md`](TRAINING.md).
+> the problem, see the top-level [`../../README.md`](../../README.md). Training docs
+> are in [`training.md`](training.md).
 
 Inference + generation for the `tiny_sparse_moe.py` model, reimplemented in Rust
 as a **raw-WGSL `wgpu` compute pipeline**. Every forward stage is its own hand-

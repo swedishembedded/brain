@@ -3,7 +3,7 @@
 
 //! P1.glue — tests for the nine elementwise/layout glue WGSL kernels.
 //!
-//! Written FROM docs/world-models/specs/P1.glue.md (§5 hand-computed
+//! Written FROM docs/models/world-models/specs/p1.glue.md (§5 hand-computed
 //! references, §6 required properties, §7 edge cases, §9 required tests,
 //! §10 determinism) — NEVER from the implementation.
 //!

@@ -4,7 +4,7 @@ The third parallelism dimension and the machinery that composes all three. Tenso
 parallelism splits **one tensor operation across devices** (`Y = XW` → each GPU
 computes `X·Wᵢ`, combined by a collective) — distinct from the intra-GPU
 kernel/workgroup tiling (brain's reg2 GEMM), which is how each *local* shard is
-then executed efficiently. See [`SCALING.md`](SCALING.md) for the umbrella.
+then executed efficiently. See [`SCALING.md`](overview.md) for the umbrella.
 
 Grounded in Megatron-LM and PTD-P (`resources/dp/`).
 

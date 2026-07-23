@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! FiLM / adaLN modulation host-side dispatch — spec:
-//! `docs/world-models/specs/P1.film.md`.
+//! `docs/models/world-models/specs/p1.film.md`.
 //!
 //! Three kernel sub-families over a shared `Gpu` kernel table:
 //!

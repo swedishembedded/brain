@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Unit P1.worldmodel-trait — tests written FROM THE SPEC
-//! (docs/world-models/specs/P1.worldmodel-trait.md), never from the
+//! (docs/models/world-models/specs/p1.worldmodel-trait.md), never from the
 //! implementation.
 //!
 //! Every test is named `worldmodel_*` so `cargo test worldmodel` selects

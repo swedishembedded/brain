@@ -112,7 +112,7 @@ Output is always mono 24 kHz f32 PCM WAV.
 
 ## CPU / GPU / NPU
 
-**See [`ACCELERATION.md`](ACCELERATION.md)** for the full optimization write-up
+**See [`ACCELERATION.md`](acceleration.md)** for the full optimization write-up
 (what changed, why, validated numbers) and the backend speed comparison.
 
 - **NPU** (`--device npu`, OpenVINO) — the fast path and the default for the 1.7B
@@ -128,7 +128,7 @@ Output is always mono 24 kHz f32 PCM WAV.
   host path exists precisely to avoid that), so Vulkan is validated for
   correctness (`make parity`) rather than used for 1.7B synthesis.
 
-Env knobs and the parity gate are documented in [`ACCELERATION.md`](ACCELERATION.md).
+Env knobs and the parity gate are documented in [`ACCELERATION.md`](acceleration.md).
 
 ---
 
@@ -199,7 +199,7 @@ the text path:
 - **The `gpu-core` (Vulkan/wgpu/JIT) Talker is cache-free** — it re-runs the full
   prefix each step, so it's for the 0.6B / parity / training path. The fast
   synthesis paths (NPU and `BRAIN_TTS_TALKER=cpu`) use a KV-cache — see
-  [`ACCELERATION.md`](ACCELERATION.md).
+  [`ACCELERATION.md`](acceleration.md).
 - **MTP + codec are the remaining per-clip cost** after the Talker win — a fused
   single-infer MTP graph and further codec work are the next levers.
 - **Codec windowed-mask for `T > 72`** is pending — the sliding-window codec
@@ -220,7 +220,7 @@ the wording; the top-level README is edited in a separate task):
 
 Pure-Rust voice synthesis: text (+ an optional reference voice) → 24 kHz audio,
 via a parity-verified Qwen3-TTS stack (Talker + MTP + Mimi-style codec + ECAPA
-speaker encoder). See [docs/tts/README.md](docs/tts/README.md) for the
+speaker encoder). See [readme.md](readme.md) for the
 architecture, the `brain tts {import,clone,synth}` commands, parity results, and
 streaming serving over the `brain run` event protocol.
 ```

@@ -5,9 +5,9 @@ dimensions brain implements, when to use each, what to expect, and how they
 compose toward multi-node clusters.
 
 This is the umbrella. Depth lives in:
-- [`DATAPARALLEL.md`](DATAPARALLEL.md) — **Data** parallelism (replicate + all-reduce)
-- [`SHARDING.md`](SHARDING.md) — **Pipeline** parallelism (split layers) + micro-batching
-- [`TENSOR_PARALLEL.md`](TENSOR_PARALLEL.md) — **Tensor** parallelism (split one op) + the
+- [`DATAPARALLEL.md`](data-parallel.md) — **Data** parallelism (replicate + all-reduce)
+- [`SHARDING.md`](pipeline-sharding.md) — **Pipeline** parallelism (split layers) + micro-batching
+- [`TENSOR_PARALLEL.md`](tensor-parallel.md) — **Tensor** parallelism (split one op) + the
   transport (collectives), the process **grid**, and the **planner**
 
 Design notes and the reference papers (Megatron, GPipe, PipeDream/1F1B, ZeRO,
@@ -117,7 +117,7 @@ Ranks form a `(tp, pp, dp)` **grid** (`model::Grid`), laid out TP-fastest so
 tensor-parallel peers are adjacent (they need the tightest coupling). Each
 dimension's peer set is a `Collective` group (`model::LocalGroups`). This is the
 Megatron PTD-P placement and is the same whether ranks are threads on one box or
-processes across a cluster. See [`TENSOR_PARALLEL.md`](TENSOR_PARALLEL.md).
+processes across a cluster. See [`TENSOR_PARALLEL.md`](tensor-parallel.md).
 
 ## Status & roadmap
 

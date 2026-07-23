@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! P1.gn — finite-difference (gradcheck) entry for the GroupNorm backward
-//! chain, written FROM the spec (`docs/world-models/specs/P1.gn.md` §10.3).
+//! chain, written FROM the spec (`docs/models/world-models/specs/p1.gn.md` §10.3).
 //!
 //! Kernel-level composed-backward FD check in the mse_fd.rs pattern
 //! (crates/gradcheck/tests/mse_fd.rs) — NOT a CheckModel registration:

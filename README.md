@@ -11,13 +11,13 @@ One engine, **three runtime backends**, and a growing family of real models — 
 nanoGPT-parity decoder to a from-scratch, checkpoint-compatible **Qwen3-TTS** voice
 cloner.
 
-- Architecture & crate graph: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- Architecture & crate graph: [`docs/architecture.md`](docs/architecture.md)
 - Routing guide for contributors: [`AGENTS.md`](AGENTS.md)
-- Testing strategy & the gradient-check gate: [`docs/TESTING.md`](docs/TESTING.md)
-- Performance notes: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)
-- **Scaling across GPUs (data / pipeline / tensor parallelism):** [`docs/SCALING.md`](docs/SCALING.md)
-  → [`docs/DATAPARALLEL.md`](docs/DATAPARALLEL.md), [`docs/SHARDING.md`](docs/SHARDING.md), [`docs/TENSOR_PARALLEL.md`](docs/TENSOR_PARALLEL.md)
-- Per-area deep dives: `docs/yolo/`, `docs/tts/`, `docs/FEDERATED.md`, `docs/engine-*.md`
+- Testing strategy & the gradient-check gate: [`docs/testing.md`](docs/testing.md)
+- Performance notes: [`docs/performance/overview.md`](docs/performance/overview.md)
+- **Scaling across GPUs (data / pipeline / tensor parallelism):** [`docs/scaling/overview.md`](docs/scaling/overview.md)
+  → [`docs/scaling/data-parallel.md`](docs/scaling/data-parallel.md), [`docs/scaling/pipeline-sharding.md`](docs/scaling/pipeline-sharding.md), [`docs/scaling/tensor-parallel.md`](docs/scaling/tensor-parallel.md)
+- Per-area deep dives: `docs/models/yolo/`, `docs/models/tts/`, `docs/federated.md`, `docs/engine/`
 
 ---
 
@@ -105,7 +105,7 @@ against the official reference: a Mimi-style 12 Hz neural **codec** (max-abs 3.7
 vs reference), an **ECAPA-TDNN speaker encoder** (cosine 1.000), and a Qwen3 **Talker**
 + 5-layer **MTP** code predictor (top-1 logits exact). End-to-end voice clone reaches
 **0.96 speaker-similarity** to the reference voice — matching the official model's own
-baseline. See [`docs/tts/README.md`](docs/tts/README.md).
+baseline. See [`docs/models/tts/readme.md`](docs/models/tts/readme.md).
 
 ```bash
 # import the four components (Talker, MTP, codec, speaker) from the HF checkpoints:
@@ -123,7 +123,7 @@ brain tts synth --weights-dir out/tts --ckpt <hf_dir> --text "Hello from brain."
 brain tts finetune <data_dir> --weights-dir out/tts --out out/tts-ft
 ```
 
-Codec decode also runs on the Intel NPU (OpenVINO); see `docs/tts/README.md` for the
+Codec decode also runs on the Intel NPU (OpenVINO); see `docs/models/tts/readme.md` for the
 export/run path and the streaming `audio_chunk` serving seam.
 
 ### YOLOv8 detector — from-scratch object detection

@@ -4,7 +4,7 @@
 //! GLM-5.2 (`glm_moe_dsa`) decoder for brain: pure Rust + WGSL, fp32, on the
 //! shared `gpu_core` engine (wgpu or the native CPU JIT).
 //!
-//! Architecture (see `docs/glm/README.md` and `resources/glm/`):
+//! Architecture (see `docs/models/glm/readme.md` and `resources/glm/`):
 //!   * **MLA** (Multi-head Latent Attention) — low-rank q/kv with a decoupled
 //!     nope/rope head split and interleaved RoPE on the rope slice.
 //!   * **MoE** — sigmoid `noaux_tc` router (per-expert selection bias), a shared

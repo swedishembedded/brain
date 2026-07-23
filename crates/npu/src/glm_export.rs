@@ -3,7 +3,7 @@
 
 //! Export a brain GLM `.weights` checkpoint to an ONNX decoder graph (fixed
 //! sequence length) for OpenVINO whole-graph compilation. Pure Rust — no NPU
-//! needed to produce the file. See `docs/glm/NPU.md`.
+//! needed to produce the file. See `docs/models/glm/npu.md`.
 
 use std::collections::HashMap;
 

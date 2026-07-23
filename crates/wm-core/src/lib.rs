@@ -5,7 +5,7 @@
 //! GPU-free [`FakeWorldModel`] test model, and host-side dispatch helpers for
 //! the world-model kernel families ([`gn`] GroupNorm, [`film`] FiLM/adaLN).
 //!
-//! Specs: docs/world-models/specs/P1.worldmodel-trait.md, P1.gn.md, P1.film.md
+//! Specs: docs/models/world-models/specs/p1.worldmodel-trait.md, P1.gn.md, P1.film.md
 
 pub mod attn;
 pub mod film;
@@ -73,7 +73,7 @@ pub trait WorldModel {
 ///   recoverable from a frame.
 ///
 /// Exact math, index conventions and hand-computed reference values:
-/// docs/world-models/specs/P1.worldmodel-trait.md §4–§5.
+/// docs/models/world-models/specs/p1.worldmodel-trait.md §4–§5.
 pub struct FakeWorldModel {
     /// Square top-left corner, `0..64` each (the only mutable state).
     px: u32,

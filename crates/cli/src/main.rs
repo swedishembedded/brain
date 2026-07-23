@@ -64,13 +64,13 @@ GPT (dense baseline)
   brain gpt gen   --weights F [--data <dir>] [--prompt \"...\" --max-new N --temp X --top-k K]
                               (vocab is read from the checkpoint; --data only for old ones)
 
-World models (playable action-conditioned video models; docs/world-models/)
+World models (playable action-conditioned video models; docs/models/world-models/)
   brain wm play  --model fake|diamond [--weights F --device cpu|gpu|npu --onnx M]   # SDL window
   brain wm play  --model fake --headless --frames N [--actions FILE | --action-seq 1,2,0]
                  [--dump-ppm DIR] [--hashes]        # deterministic rollout + fnv1a hashes (CI)
   brain wm bench --model fake [--frames N]          # ms/frame + fps
 
-WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/mirror/)
+WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/models/mirror/)
   brain mirror import <model.safetensors|hf_dir> --out mirror.weights
       One-time conversion of the reference HY-WorldMirror-2.0 checkpoint (strict
       1:1, every tensor verified).
@@ -109,7 +109,7 @@ INTEL NPU (OpenVINO: quantize + compile YOLO to a real NPU graph)
   brain npu sim      --weights F --data <dir> [--calib <dir>]   # fp32 vs INT8 mAP, no NPU
       export/quantize/sim are pure Rust (any machine); run/bench/check-compile need
       OpenVINO + an Intel NPU. The whole-graph NPU path is separate from --device
-      cpu|gpu; see docs/yolo/NPU.md.
+      cpu|gpu; see docs/models/yolo/npu.md.
 
 SPARSE MoE
   brain train [--steps N --batch-size B --block-size T --lr X --out F]

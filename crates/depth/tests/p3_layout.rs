@@ -50,7 +50,7 @@ fn the_built_graph_matches_the_config_exactly() {
 /// exactly (the counters are scalars, contributing 43 elements).
 ///
 /// These numbers are from an independent Python-side inspection of the real file,
-/// recorded in `docs/depth/STATUS.md` — not from anything in this repo.
+/// recorded in `docs/models/depth/status.md` — not from anything in this repo.
 #[test]
 fn the_graph_has_the_released_checkpoints_tensor_count_and_size() {
     let (_gpu, got) = build(ZipConfig::base());

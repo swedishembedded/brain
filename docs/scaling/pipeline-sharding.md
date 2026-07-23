@@ -120,7 +120,7 @@ optimiser (grads averaged by 1/m).
 
 ## Composition & limits
 
-- Composes with [data-parallel](DATAPARALLEL.md): shard a large model across a
+- Composes with [data-parallel](data-parallel.md): shard a large model across a
   group, replicate the group data-parallel (2D parallelism). See
   `resources/dp/README.md` for the full 3D (TP×PP×DP) design.
 - `plan_balanced` balances memory (parameter counts); a FLOP-weighted cost would
