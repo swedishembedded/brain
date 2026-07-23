@@ -377,3 +377,10 @@ web/build:
 clean:
 	cargo clean
 	rm -rf $(OUT)
+
+# ---- documentation ----------------------------------------------------------
+# Build the full docs bundle: build/docs/brain-docs.{md,pdf}. Requires pandoc +
+# xelatex. No HTML is produced.
+.PHONY: docs
+docs:
+	python3 docs/pandoc/build-docs.py

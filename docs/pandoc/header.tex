@@ -1,0 +1,37 @@
+% ---- brain docs: PDF typesetting (xelatex) ----------------------------------
+% Goal: professional, no text overflow anywhere.
+
+% Wrap long lines inside pandoc's highlighted code blocks (the usual overflow
+% source). fvextra hooks the Verbatim env pandoc uses for `Highlighting`.
+\usepackage{fvextra}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\}}
+% Plain (unhighlighted) fenced blocks — ASCII diagrams, etc. — also wrap.
+\fvset{breaklines=true,breakanywhere=true,fontsize=\small}
+\usepackage{fancyvrb}
+\RecustomVerbatimEnvironment{verbatim}{Verbatim}{breaklines,breakanywhere,fontsize=\small}
+
+% Justification + hyphenation that avoids overfull boxes on long tokens/URLs.
+\usepackage{microtype}
+\usepackage[none]{hyphenat}\sloppy
+\emergencystretch=4em
+\hbadness=10000  % silence underfull-box noise; overfull is what we care about
+\setcounter{secnumdepth}{3}
+
+% Tables: shrink font + wrap cell text, and never run off the page. booktabs +
+% array give tidy rules; \small keeps wide tables inside the margins.
+\usepackage{longtable,booktabs,array}
+\usepackage{etoolbox}
+\AtBeginEnvironment{longtable}{\small}
+\AtBeginEnvironment{tabular}{\small}
+
+% Inline code: allow line breaks so long `mono spans` don't overflow.
+\usepackage{xurl}
+\renewcommand{\texttt}[1]{{\small\ttfamily\hspace{0pt}#1\hspace{0pt}}}
+
+% Images never wider than the text block.
+\usepackage{graphicx}
+\setkeys{Gin}{width=\linewidth,keepaspectratio}
+
+% A little breathing room.
+\usepackage{setspace}
+\setlength{\parskip}{0.5em}

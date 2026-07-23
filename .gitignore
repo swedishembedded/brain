@@ -40,3 +40,6 @@ crates/wm-diamond/tests/fixtures/
 photo.ppm
 *-depth.ppm
 out/depth.ppm
+
+# generated documentation bundle (regenerate with 'make docs')
+/build/
