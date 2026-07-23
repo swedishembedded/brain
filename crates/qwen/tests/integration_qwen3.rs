@@ -477,9 +477,8 @@ fn qwen3_shard_real_2gpu() {
     drop(single); // free GPU 0 before the pipeline claims it as stage 0
 
     // Two-stage inference pipeline across GPUs 0 and 1 from the same weights.
-    let pipe = qwen::Pipeline::new(cfg.clone(), b, t, &init, false, &[0, 1]);
-    let l1 = pipe.forward(&toks, &y);
-    pipe.poll_wait();
+    let pipe = qwen::Pipeline::<Qwen>::new(cfg.clone(), b, t, &init, &[0, 1]);
+    let l1 = pipe.forward(model::Batch::Lm { tokens: &toks, targets: &y });
     let mem = gpu_mem();
 
     let rel = (l0 - l1).abs() / l0.abs().max(1e-6);

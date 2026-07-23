@@ -17,7 +17,6 @@ pub mod toolcall_eval;
 pub use config::{LoraCfg, QwenConfig};
 pub use init::init_weights;
 pub use model::{Qwen, Shard, IGNORE};
-pub use shard::Pipeline;
-/// Generic data-parallel training (see [`::model::DataParallel`]); use as
-/// `DataParallel::<Qwen>::new(..)`.
-pub use ::model::DataParallel;
+/// Generic multi-GPU training (see [`::model`]); use as `Pipeline::<Qwen>::new(..)`
+/// / `DataParallel::<Qwen>::new(..)`.
+pub use ::model::{DataParallel, Pipeline};

@@ -26,6 +26,30 @@ use serde_json::Value;
 use gpu_core::{f, Gpu, Step};
 use optim::Optim;
 use paramstore::ParamStore;
+pub use model::Shard;
+
+/// The parameter subset a shard holds. A whole shard returns `cfg.param_list()`
+/// verbatim; a partial shard keeps only its layers' weights, plus tok/pos
+/// embeddings when it embeds and the final norm + (untied) lm_head when it heads.
+fn shard_param_list(cfg: &GptConfig, shard: &Shard) -> Vec<(String, usize)> {
+    let full = cfg.param_list();
+    if shard.is_whole(cfg.n_layers as usize) {
+        return full;
+    }
+    full.into_iter()
+        .filter(|(name, _)| {
+            if let Some(rest) = name.strip_prefix("blocks.") {
+                let l: usize = rest.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+                return shard.owns(l);
+            }
+            match name.as_str() {
+                "tok.weight" | "pos.weight" => shard.embed,
+                "ln.weight" | "ln.bias" | "lm_head.weight" => shard.head,
+                _ => false,
+            }
+        })
+        .collect()
+}
 
 /// Cross-entropy ignore index (masked target positions). The data loader emits
 /// `-1` as `i32`; reinterpreted as `u32` that is exactly this value.
@@ -252,6 +276,8 @@ pub struct Gpt {
     pub gpu: Gpu,
     pub cfg: GptConfig,
     pub ps: ParamStore,
+    /// Pipeline shard this instance owns (whole model on GPU 0 by default).
+    pub shard: Shard,
     opt: Optim,
     b: u32,
     t: u32,
@@ -298,8 +324,17 @@ impl Gpt {
     }
 
     pub fn new(cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Gpt {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Gpt::new_shard(cfg, b, t, init, shard)
+    }
+
+    /// Build a single pipeline **stage**: only `shard`'s layers (and endpoint
+    /// weights) are allocated on this device. `Shard::whole` is the single-device
+    /// path, byte-for-byte unchanged. The physical GPU is selected via
+    /// `BRAIN_GPU_INDEX` (set by the caller before this call).
+    pub fn new_shard(cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Gpt {
         let gpu = Gpu::new(PIPELINES);
-        let ps = ParamStore::new(&gpu, cfg.param_list(), init);
+        let ps = ParamStore::new(&gpu, shard_param_list(&cfg, &shard), init);
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         let n = (b * t) as u64;
@@ -321,32 +356,49 @@ impl Gpt {
         );
         let ce_grad_uni = gpu.uniform_dynamic(4); // [n, vocab, IGNORE, count]
 
+        // Residual stream: live only at this shard's boundaries (`start..=end`);
+        // non-boundary indices are size-1 dummies (absolute `res[l]` indexing
+        // preserved). A whole shard has every index live — identical to before.
         let mut res = Vec::new();
         let mut dres = Vec::new();
-        for _ in 0..=cfg.n_layers {
-            res.push(st(n * d));
-            dres.push(st(n * d));
+        for i in 0..=cfg.n_layers as usize {
+            let live = i >= shard.start && i <= shard.end;
+            res.push(if live { st(n * d) } else { st(1) });
+            dres.push(if live { st(n * d) } else { st(1) });
         }
+        let dummy_layer = || Layer {
+            ln1_out: st(1), qkv: st(1), scores: st(1), probs: st(1), attn_ctx: st(1),
+            xmid: st(1), ln2_out: st(1), fc: st(1), gelu: st(1),
+        };
         let mut layers = Vec::new();
-        for _ in 0..cfg.n_layers {
-            layers.push(Layer {
-                ln1_out: st(n * d),
-                qkv: st(n * 3 * d),
-                scores: st(bht2),
-                probs: st(bht2),
-                attn_ctx: st(n * d),
-                xmid: st(n * d),
-                ln2_out: st(n * d),
-                fc: st(n * ff),
-                gelu: st(n * ff),
+        for l in 0..cfg.n_layers as usize {
+            layers.push(if shard.owns(l) {
+                Layer {
+                    ln1_out: st(n * d),
+                    qkv: st(n * 3 * d),
+                    scores: st(bht2),
+                    probs: st(bht2),
+                    attn_ctx: st(n * d),
+                    xmid: st(n * d),
+                    ln2_out: st(n * d),
+                    fc: st(n * ff),
+                    gelu: st(n * ff),
+                }
+            } else {
+                dummy_layer()
             });
         }
+        // Head-only buffers (final norm + lm_head + CE): only the last stage; the
+        // `n*vocab` logits buffers dominate the saving on other stages.
+        let head = shard.head;
+        let hd_v = |x: u64| if head { st(x) } else { st(1) };
         let mut m = Gpt {
             cfg,
             b,
             t,
             count: Cell::new(1.0),
             ps,
+            shard,
             opt,
             tokens,
             targets,
@@ -354,12 +406,12 @@ impl Gpt {
             layers,
             proj: st(n * d),
             ffn_out: st(n * d),
-            xn_final: st(n * d),
-            logits: st(n * v),
-            ce_buf: st(n),
+            xn_final: hd_v(n * d),
+            logits: hd_v(n * v),
+            ce_buf: hd_v(n),
             dres,
-            d_logits: st(n * v),
-            ce_stats: st(n * 2),
+            d_logits: hd_v(n * v),
+            ce_stats: hd_v(n * 2),
             d_xn: st(n * d),
             d_branch: st(n * d),
             d_tmp: st(n * d),
@@ -402,10 +454,14 @@ impl Gpt {
         let hd = c.head_dim();
         let mut s: Vec<Step> = Vec::new();
 
-        s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
-        s.push(self.gpu.step(POS_ADD, &[&self.res[0], self.w("pos.weight")], &[n * d, d, t_use], n * d));
+        // Token+positional embedding: only the embed stage; other stages receive
+        // res[start] from the previous stage.
+        if self.shard.embed {
+            s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, n], n * d));
+            s.push(self.gpu.step(POS_ADD, &[&self.res[0], self.w("pos.weight")], &[n * d, d, t_use], n * d));
+        }
 
-        for l in 0..c.n_layers as usize {
+        for l in self.shard.start..self.shard.end {
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
             // attention
@@ -432,6 +488,10 @@ impl Gpt {
             s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.ffn_out, &self.res[l + 1]], &[n * d], n * d));
         }
 
+        // Head epilogue (final norm + lm_head + CE): only the head stage.
+        if !self.shard.head {
+            return s;
+        }
         let last = c.n_layers as usize;
         s.push(self.gpu.step(LAYERNORM, &[&self.res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final], &[d, n, f(1e-5)], n));
         let (mk, mt) = linear_kernel(n as usize, v as usize);
@@ -469,6 +529,27 @@ impl Gpt {
         self.gpu.submit(&[], &self.bwd_steps);
     }
 
+    // ---- pipeline-parallel cross-stage seam (see `crate::shard`) ----
+    fn res_numel(&self) -> usize {
+        (self.b * self.t) as usize * self.cfg.d_model as usize
+    }
+    /// Read this stage's OUTPUT residual `res[end]` (input to the next stage).
+    pub fn read_out_res(&self) -> Vec<f32> {
+        self.gpu.read(&self.res[self.shard.end], self.res_numel())
+    }
+    /// Write this stage's INPUT residual `res[start]` (from the previous stage).
+    pub fn write_in_res(&self, data: &[f32]) {
+        self.gpu.write(&self.res[self.shard.start], bytemuck::cast_slice(data));
+    }
+    /// Read this stage's INPUT-side residual grad `dres[start]` (to the previous stage).
+    pub fn read_in_dres(&self) -> Vec<f32> {
+        self.gpu.read(&self.dres[self.shard.start], self.res_numel())
+    }
+    /// Write this stage's OUTPUT-side residual grad `dres[end]` (from the next stage).
+    pub fn write_out_dres(&self, data: &[f32]) {
+        self.gpu.write(&self.dres[self.shard.end], bytemuck::cast_slice(data));
+    }
+
     fn build_backward_steps(&self) -> Vec<Step> {
         let c = &self.cfg;
         let n = self.b * self.t;
@@ -480,21 +561,24 @@ impl Gpt {
         let p = |l: usize, name: &str| format!("blocks.{l}.{name}");
         let mut s: Vec<Step> = Vec::new();
 
-        // head (no bias) + final layernorm
-        // Two-pass CE gradient (see qwen): O(rows*vocab) not O(rows*vocab^2).
-        s.push(self.gpu.step(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[n, v, IGNORE], n));
-        s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.ce_stats, &self.d_logits], n * v));
-        let (bk, bt) = dw_kernel(v as usize, d as usize);
-        s.push(self.gpu.step(bk, &[&self.d_logits, &self.xn_final, g("lm_head.weight")], &[n, d, v], bt));
-        let (bk, bt) = dx_kernel(n as usize, d as usize);
-        s.push(self.gpu.step(bk, &[&self.d_logits, self.w("lm_head.weight"), &self.d_xn], &[n, d, v, 0], bt));
-        let last = c.n_layers as usize;
-        s.push(self.gpu.step(LN_STATS, &[&self.res[last], &self.ln_mean, &self.ln_inv], &[d, n, f(1e-5)], n));
-        s.push(self.gpu.step(LN_DGAMMA, &[&self.d_xn, &self.res[last], &self.ln_mean, &self.ln_inv, g("ln.weight")], &[d, n], d));
-        s.push(self.gpu.step(LN_DBETA, &[&self.d_xn, g("ln.bias")], &[d, n], d));
-        s.push(self.gpu.step(LN_DX, &[&self.res[last], self.w("ln.weight"), &self.d_xn, &self.dres[last]], &[d, n, f(1e-5)], n));
+        // head (no bias) + final layernorm — head stage only; other stages receive
+        // dres[end] from the next stage and start straight at the layer loop.
+        if self.shard.head {
+            // Two-pass CE gradient (see qwen): O(rows*vocab) not O(rows*vocab^2).
+            s.push(self.gpu.step(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[n, v, IGNORE], n));
+            s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.ce_stats, &self.d_logits], n * v));
+            let (bk, bt) = dw_kernel(v as usize, d as usize);
+            s.push(self.gpu.step(bk, &[&self.d_logits, &self.xn_final, g("lm_head.weight")], &[n, d, v], bt));
+            let (bk, bt) = dx_kernel(n as usize, d as usize);
+            s.push(self.gpu.step(bk, &[&self.d_logits, self.w("lm_head.weight"), &self.d_xn], &[n, d, v, 0], bt));
+            let last = c.n_layers as usize;
+            s.push(self.gpu.step(LN_STATS, &[&self.res[last], &self.ln_mean, &self.ln_inv], &[d, n, f(1e-5)], n));
+            s.push(self.gpu.step(LN_DGAMMA, &[&self.d_xn, &self.res[last], &self.ln_mean, &self.ln_inv, g("ln.weight")], &[d, n], d));
+            s.push(self.gpu.step(LN_DBETA, &[&self.d_xn, g("ln.bias")], &[d, n], d));
+            s.push(self.gpu.step(LN_DX, &[&self.res[last], self.w("ln.weight"), &self.d_xn, &self.dres[last]], &[d, n, f(1e-5)], n));
+        }
 
-        for l in (0..c.n_layers as usize).rev() {
+        for l in (self.shard.start..self.shard.end).rev() {
             let lb = &self.layers[l];
             // MLP backward (input grad = dres[l+1])
             s.push(self.gpu.step(BIAS_GRAD, &[&self.dres[l + 1], g(&p(l, "mlp.proj.bias"))], &[n, d], d));
@@ -536,9 +620,11 @@ impl Gpt {
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
         }
 
-        // embeddings backward
-        s.push(self.gpu.step(POS_BWD, &[&self.dres[0], g("pos.weight")], &[self.b, self.t, d], self.t * d));
-        s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], g("tok.weight")], &[n, d, c.vocab], c.vocab * d));
+        // embeddings backward — only the embed stage (owns tok/pos and dres[0]).
+        if self.shard.embed {
+            s.push(self.gpu.step(POS_BWD, &[&self.dres[0], g("pos.weight")], &[self.b, self.t, d], self.t * d));
+            s.push(self.gpu.step(EMB_BWD, &[&self.tokens, &self.dres[0], g("tok.weight")], &[n, d, c.vocab], c.vocab * d));
+        }
         s
     }
 

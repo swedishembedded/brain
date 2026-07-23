@@ -26,6 +26,7 @@ use serde_json::Value;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
+pub use model::Shard;
 use optim::Optim;
 use paramstore::ParamStore;
 
@@ -165,38 +166,6 @@ fn tile_budget_words() -> u64 {
         .and_then(|s| s.parse().ok())
         .filter(|&w| w > 0)
         .unwrap_or(TILE_BUDGET_WORDS)
-}
-
-/// Pipeline-parallel shard descriptor: which contiguous layer range and which
-/// endpoint responsibilities (token embedding / lm-head) this stage owns, and
-/// which physical GPU it runs on. The default [`Shard::whole`] is the entire
-/// model on GPU 0 — the single-device path, byte-for-byte unchanged.
-///
-/// A stage allocates weights + scratch only for `start..end` (plus `tok.weight`
-/// if it embeds and/or carries the tied head, and `norm.weight`+head if `head`).
-/// The residual stream `res[start]` is either produced by this stage's embedding
-/// (`embed`) or written from the previous stage; `res[end]` is handed to the
-/// next stage. See [`crate::shard::Pipeline`].
-#[derive(Clone, Debug)]
-pub struct Shard {
-    pub start: usize,
-    pub end: usize,
-    pub embed: bool,
-    pub head: bool,
-    pub gpu_index: usize,
-}
-
-impl Shard {
-    /// The whole model on GPU 0 (the non-sharded default).
-    pub fn whole(n_layers: usize) -> Shard {
-        Shard { start: 0, end: n_layers, embed: true, head: true, gpu_index: 0 }
-    }
-    fn owns(&self, l: usize) -> bool {
-        l >= self.start && l < self.end
-    }
-    fn is_whole(&self, n_layers: usize) -> bool {
-        self.start == 0 && self.end == n_layers && self.embed && self.head
-    }
 }
 
 /// The parameter subset a shard holds. A whole shard returns `cfg.param_list()`
@@ -1020,9 +989,14 @@ impl model::Model for Qwen {
         Qwen::poll_wait(self)
     }
     fn param_names(&self) -> Vec<String> {
-        // The *trainable* set (full: all params; LoRA: adapters only). Used by
-        // gradcheck and the optimiser-facing surface — frozen params have no grad.
-        self.ps.trainable.iter().map(|(n, _)| n.clone()).collect()
+        // The optimised set: full-training `trainable` plus any `offload` params
+        // (both carry a gradient; frozen params do not). LoRA -> adapters only.
+        self.ps
+            .trainable
+            .iter()
+            .chain(self.ps.offload.iter())
+            .map(|(n, _)| n.clone())
+            .collect()
     }
     fn read_weight(&self, name: &str) -> Vec<f32> {
         Qwen::read_weight(self, name)

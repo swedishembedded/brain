@@ -17,10 +17,12 @@ use std::collections::HashMap;
 
 pub mod block;
 pub mod parallel;
+pub mod shard;
 pub mod train;
 pub mod vit;
 
 pub use parallel::DataParallel;
+pub use shard::{plan_balanced, Pipeline, Shard, ShardCost, Shardable};
 
 pub use train::{cosine_lr, generate, FitOpts, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
