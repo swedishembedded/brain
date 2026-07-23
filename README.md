@@ -15,6 +15,8 @@ cloner.
 - Routing guide for contributors: [`AGENTS.md`](AGENTS.md)
 - Testing strategy & the gradient-check gate: [`docs/TESTING.md`](docs/TESTING.md)
 - Performance notes: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)
+- **Scaling across GPUs (data / pipeline / tensor parallelism):** [`docs/SCALING.md`](docs/SCALING.md)
+  → [`docs/DATAPARALLEL.md`](docs/DATAPARALLEL.md), [`docs/SHARDING.md`](docs/SHARDING.md), [`docs/TENSOR_PARALLEL.md`](docs/TENSOR_PARALLEL.md)
 - Per-area deep dives: `docs/yolo/`, `docs/tts/`, `docs/FEDERATED.md`, `docs/engine-*.md`
 
 ---

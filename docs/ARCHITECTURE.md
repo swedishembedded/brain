@@ -52,6 +52,25 @@ so the exact same kernels run on old desktop GPUs and on WebGPU in the browser.
         default member, so default `cargo build` stays pure-wgpu
 ```
 
+## Multi-GPU scaling (in `brain-model`)
+
+The `model` crate carries the architecture-agnostic scaling layer, written once
+over the `Model` trait so every model gets it:
+
+- `collective` — transport-agnostic collectives (`Collective` + `HostCollective`);
+  the seam a future network/cluster transport plugs into.
+- `grid` — the `(tensor, pipeline, data)` process `Grid` + `LocalGroups`
+  (rank↔coord mapping, per-group collectives; Megatron PTD-P layout).
+- `parallel` — `DataParallel<M>` (replicate + fused all-reduce optimiser).
+- `shard` — `Pipeline<M>` over the `Shardable` seam (split layers, auto-placed,
+  micro-batched).
+- `plan` — `plan_tp` tensor-parallel planner (capacity-first cost model).
+
+Tensor parallelism's mechanic (col/row-parallel MLP + attention, fwd+bwd) is
+validated in `crates/model/tests/tensor_parallel.rs`. See
+[`SCALING.md`](SCALING.md), [`DATAPARALLEL.md`](DATAPARALLEL.md),
+[`SHARDING.md`](SHARDING.md), [`TENSOR_PARALLEL.md`](TENSOR_PARALLEL.md).
+
 ## Conventions
 
 - **WGSL is the source of truth.** All kernels live in `crates/kernels/wgsl/*.wgsl`
