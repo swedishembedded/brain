@@ -37,6 +37,56 @@ fn attn_kernels() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+const MATMUL_DX: usize = 2;
+const MATMUL_DW: usize = 3;
+const GELU_BWD: usize = 4;
+
+fn bwd_kernels() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("matmul", kernels::MATMUL),
+        ("gelu", kernels::GELU),
+        ("matmul_dx", kernels::MATMUL_DX),
+        ("matmul_dw", kernels::MATMUL_DW),
+        ("gelu_bwd", kernels::GELU_BWD),
+    ]
+}
+
+/// One MLP forward+backward on `gpu` with local hidden width `ffl`
+/// (`w_fc` is `[ffl,d]`, `w_proj` is `[d,ffl]`). Given upstream grad `dz` `[m,d]`
+/// returns `(z, dx, dw_fc, dw_proj)` — `z`/`dx` are **partial** (all-reduce across
+/// TP ranks for the full values); `dw_fc`/`dw_proj` are the local weight-shard
+/// gradients. With `ffl==ff` this is the whole single-GPU MLP.
+#[allow(clippy::type_complexity)]
+fn mlp_fwd_bwd(gpu: &Gpu, x: &[f32], w_fc: &[f32], w_proj: &[f32], dz: &[f32], m: usize, d: usize, ffl: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    let (mu, du, fu) = (m as u32, d as u32, ffl as u32);
+    let xb = gpu.storage_init("x", x);
+    let wfc = gpu.storage_init("wfc", w_fc);
+    let wproj = gpu.storage_init("wproj", w_proj);
+    let dzb = gpu.storage_init("dz", dz);
+    let fc_pre = gpu.storage((m * ffl) as u64);
+    let y = gpu.storage((m * ffl) as u64);
+    let z = gpu.storage((m * d) as u64);
+    let dw_proj = gpu.storage((d * ffl) as u64);
+    let dy = gpu.storage((m * ffl) as u64);
+    let dpre = gpu.storage((m * ffl) as u64);
+    let dw_fc = gpu.storage((ffl * d) as u64);
+    let dx = gpu.storage((m * d) as u64);
+    let steps = [
+        // forward
+        gpu.step(MATMUL, &[&xb, &wfc, &fc_pre], &[mu, du, fu], m as u32 * ffl as u32),
+        gpu.step(GELU, &[&fc_pre, &y], &[(m * ffl) as u32], (m * ffl) as u32),
+        gpu.step(MATMUL, &[&y, &wproj, &z], &[mu, fu, du], (m * d) as u32),
+        // backward
+        gpu.step(MATMUL_DW, &[&dzb, &y, &dw_proj], &[mu, fu, du], (d * ffl) as u32),
+        gpu.step(MATMUL_DX, &[&dzb, &wproj, &dy], &[mu, fu, du, 0], (m * ffl) as u32),
+        gpu.step(GELU_BWD, &[&fc_pre, &dy, &dpre], &[(m * ffl) as u32], (m * ffl) as u32),
+        gpu.step(MATMUL_DW, &[&dpre, &xb, &dw_fc], &[mu, du, fu], (ffl * d) as u32),
+        gpu.step(MATMUL_DX, &[&dpre, &wfc, &dx], &[mu, du, fu, 0], (m * d) as u32),
+    ];
+    gpu.submit(&[], &steps);
+    (gpu.read(&z, m * d), gpu.read(&dx, m * d), gpu.read(&dw_fc, ffl * d), gpu.read(&dw_proj, d * ffl))
+}
+
 /// Multi-head self-attention **context** `[m, d_local]` for `nh_local` heads:
 /// qkv = X·Wqkv^T, causal scores, softmax, apply. `Wqkv` is `[3·d_local, d]`.
 /// (No output projection — the caller does that row-parallel.)
@@ -158,6 +208,89 @@ fn tensor_parallel_mlp_matches_single_gpu() {
     for r in 1..world {
         assert_eq!(*results[r].lock().unwrap(), z_tp, "rank {r} disagrees after all-reduce");
     }
+}
+
+#[test]
+fn tensor_parallel_mlp_training_matches_single_gpu() {
+    if gpu_disabled() {
+        return;
+    }
+    let gpus = stage_gpus();
+    let world = gpus.len();
+    let (m, d, ff) = (8usize, 16usize, 32usize);
+    assert_eq!(ff % world, 0);
+    let ffl = ff / world;
+
+    let x: Vec<f32> = (0..m * d).map(|i| ((i * 7 % 13) as f32 / 13.0) - 0.5).collect();
+    let w_fc: Vec<f32> = (0..ff * d).map(|i| ((i * 5 % 17) as f32 / 17.0) - 0.5).collect(); // [ff, d]
+    let w_proj: Vec<f32> = (0..d * ff).map(|i| ((i * 3 % 11) as f32 / 11.0) - 0.5).collect(); // [d, ff]
+    let dz: Vec<f32> = (0..m * d).map(|i| ((i * 2 % 7) as f32 / 7.0) - 0.5).collect(); // upstream grad
+
+    // --- single-GPU reference gradients ---
+    std::env::remove_var("BRAIN_GPU_INDEX");
+    let g0 = Gpu::new(&bwd_kernels());
+    let (_z0, dx0, dwfc0, dwproj0) = mlp_fwd_bwd(&g0, &x, &w_fc, &w_proj, &dz, m, d, ff);
+    drop(g0);
+
+    let rank_gpus: Vec<Gpu> = gpus
+        .iter()
+        .map(|&gi| {
+            std::env::set_var("BRAIN_GPU_INDEX", gi.to_string());
+            Gpu::new(&bwd_kernels())
+        })
+        .collect();
+    std::env::remove_var("BRAIN_GPU_INDEX");
+
+    // --- tensor-parallel forward+backward ---
+    let coll = HostCollective::new(world);
+    #[allow(clippy::type_complexity)]
+    let out: Vec<std::sync::Mutex<(Vec<f32>, Vec<f32>, Vec<f32>)>> =
+        (0..world).map(|_| std::sync::Mutex::new((Vec::new(), Vec::new(), Vec::new()))).collect();
+    std::thread::scope(|s| {
+        for (rank, g) in rank_gpus.iter().enumerate() {
+            let (coll, out, x, w_fc, w_proj, dz) = (&coll, &out, &x, &w_fc, &w_proj, &dz);
+            s.spawn(move || {
+                let w_fc_r: Vec<f32> = w_fc[rank * ffl * d..(rank + 1) * ffl * d].to_vec(); // [ffl, d]
+                let mut w_proj_r = vec![0f32; d * ffl];
+                for i in 0..d {
+                    w_proj_r[i * ffl..(i + 1) * ffl].copy_from_slice(&w_proj[i * ff + rank * ffl..i * ff + rank * ffl + ffl]);
+                }
+                let (_z, dx_p, dwfc_r, dwproj_r) = mlp_fwd_bwd(g, x, &w_fc_r, &w_proj_r, dz, m, d, ffl);
+                // f operator: all-reduce the input gradient.
+                let dx = coll.all_reduce(rank, dx_p);
+                *out[rank].lock().unwrap() = (dx, dwfc_r, dwproj_r);
+            });
+        }
+    });
+
+    // dX: all-reduced, identical on every rank, == single-GPU.
+    let dx_tp = out[0].lock().unwrap().0.clone();
+    let rel = |a: &[f32], b: &[f32]| {
+        let (mut n, mut den) = (0f32, 1e-6f32);
+        for (p, q) in a.iter().zip(b) {
+            n = n.max((p - q).abs());
+            den = den.max(p.abs());
+        }
+        n / den
+    };
+    let rdx = rel(&dx0, &dx_tp);
+    // dW_fc: rank shards stack over ff -> [ff, d].
+    let mut dwfc_tp = Vec::new();
+    for r in 0..world {
+        dwfc_tp.extend_from_slice(&out[r].lock().unwrap().1);
+    }
+    let rwfc = rel(&dwfc0, &dwfc_tp);
+    // dW_proj: rank shards are column blocks of [d, ff]; reassemble per row.
+    let mut dwproj_tp = vec![0f32; d * ff];
+    for (r, o) in out.iter().enumerate() {
+        let shard = &o.lock().unwrap().2; // [d, ffl]
+        for i in 0..d {
+            dwproj_tp[i * ff + r * ffl..i * ff + r * ffl + ffl].copy_from_slice(&shard[i * ffl..(i + 1) * ffl]);
+        }
+    }
+    let rwproj = rel(&dwproj0, &dwproj_tp);
+    eprintln!("TP training grads vs single-GPU: dX {rdx:.2e}  dWfc {rwfc:.2e}  dWproj {rwproj:.2e}");
+    assert!(rdx < 1e-4 && rwfc < 1e-4 && rwproj < 1e-4, "TP training gradients diverged");
 }
 
 #[test]
