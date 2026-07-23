@@ -79,9 +79,66 @@ impl Grid {
     }
 }
 
+// ---- in-process realisation: one collective per group in each dimension --------
+
+use crate::collective::HostCollective;
+use std::sync::Arc;
+
+/// In-process realisation of a [`Grid`]: one [`HostCollective`] per group in each
+/// dimension, so rank `r` can reach its tensor / pipeline / data peers. A future
+/// networked realisation builds the same per-group communicators over sockets —
+/// callers use the returned [`Collective`](crate::Collective) the same way.
+pub struct LocalGroups {
+    grid: Grid,
+    tp: Vec<(Arc<HostCollective>, usize)>, // per rank: (its TP collective, local index in group)
+    pp: Vec<(Arc<HostCollective>, usize)>,
+    dp: Vec<(Arc<HostCollective>, usize)>,
+}
+
+impl LocalGroups {
+    pub fn new(grid: Grid) -> LocalGroups {
+        let world = grid.world_size();
+        let build = |group_of: &dyn Fn(usize) -> Vec<usize>, size: usize| {
+            let mut out: Vec<Option<(Arc<HostCollective>, usize)>> = vec![None; world];
+            for r in 0..world {
+                if out[r].is_some() {
+                    continue;
+                }
+                let members = group_of(r);
+                let coll = HostCollective::new(size);
+                for (i, &m) in members.iter().enumerate() {
+                    out[m] = Some((coll.clone(), i));
+                }
+            }
+            out.into_iter().map(Option::unwrap).collect::<Vec<_>>()
+        };
+        let tp = build(&|r| grid.tp_group(r), grid.tp);
+        let pp = build(&|r| grid.pp_group(r), grid.pp);
+        let dp = build(&|r| grid.dp_group(r), grid.dp);
+        LocalGroups { grid, tp, pp, dp }
+    }
+
+    pub fn grid(&self) -> Grid {
+        self.grid
+    }
+    /// Rank `r`'s tensor-parallel collective + its local index within the group.
+    pub fn tp(&self, r: usize) -> (Arc<HostCollective>, usize) {
+        self.tp[r].clone()
+    }
+    /// Rank `r`'s pipeline collective + its local (stage) index.
+    pub fn pp(&self, r: usize) -> (Arc<HostCollective>, usize) {
+        self.pp[r].clone()
+    }
+    /// Rank `r`'s data-parallel collective + its local (replica) index.
+    pub fn dp(&self, r: usize) -> (Arc<HostCollective>, usize) {
+        self.dp[r].clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Collective;
 
     #[test]
     fn coord_rank_roundtrip_over_whole_world() {
@@ -156,5 +213,68 @@ mod tests {
         assert_eq!(g.tp_group(0), vec![0]);
         assert_eq!(g.pp_group(0), vec![0]);
         assert_eq!(g.dp_group(0), vec![0]);
+    }
+
+    // ---- LocalGroups: grid -> per-group collectives ----
+
+    #[test]
+    fn peers_share_a_collective_non_peers_do_not() {
+        let lg = LocalGroups::new(Grid::new(2, 2, 2)); // world 8
+        // TP peers 0 and 1 share their TP collective (local idx 0,1); rank 2 is a
+        // different TP group.
+        let (c0, i0) = lg.tp(0);
+        let (c1, i1) = lg.tp(1);
+        let (c2, _) = lg.tp(2);
+        assert!(Arc::ptr_eq(&c0, &c1), "TP peers share the collective");
+        assert!(!Arc::ptr_eq(&c0, &c2), "different TP group => different collective");
+        assert_eq!((i0, i1), (0, 1), "local ranks within the TP group");
+        // DP peers of rank 0 are 0 and 4 (stride tp*pp=4); they share the DP collective.
+        let (d0, _) = lg.dp(0);
+        let (d4, l4) = lg.dp(4);
+        assert!(Arc::ptr_eq(&d0, &d4));
+        assert_eq!(l4, 1);
+    }
+
+    #[test]
+    fn tp_collective_all_reduces_within_the_group() {
+        // (2,1,1): one TP group of 2. Drive an all-reduce through the grid-derived
+        // collective from two threads.
+        let lg = LocalGroups::new(Grid::new(2, 1, 1));
+        let out: Vec<std::sync::Mutex<Vec<f32>>> = (0..2).map(|_| std::sync::Mutex::new(Vec::new())).collect();
+        std::thread::scope(|s| {
+            for r in 0..2usize {
+                let (lg, out) = (&lg, &out);
+                s.spawn(move || {
+                    let (coll, local) = lg.tp(r);
+                    let z = coll.all_reduce(local, vec![(r + 1) as f32, 10.0]);
+                    *out[r].lock().unwrap() = z;
+                });
+            }
+        });
+        // ranks contribute [1,10] and [2,10] => sum [3,20] on both.
+        for m in out {
+            assert_eq!(m.into_inner().unwrap(), vec![3.0, 20.0]);
+        }
+    }
+
+    #[test]
+    fn independent_tp_groups_reduce_independently() {
+        // (2,2,1): two TP groups {0,1} and {2,3}. Each reduces only within itself.
+        let lg = LocalGroups::new(Grid::new(2, 2, 1));
+        let out: Vec<std::sync::Mutex<Vec<f32>>> = (0..4).map(|_| std::sync::Mutex::new(Vec::new())).collect();
+        std::thread::scope(|s| {
+            for r in 0..4usize {
+                let (lg, out) = (&lg, &out);
+                s.spawn(move || {
+                    let (coll, local) = lg.tp(r);
+                    *out[r].lock().unwrap() = coll.all_reduce(local, vec![r as f32]);
+                });
+            }
+        });
+        let r: Vec<Vec<f32>> = out.into_iter().map(|m| m.into_inner().unwrap()).collect();
+        assert_eq!(r[0], vec![1.0]); // 0+1
+        assert_eq!(r[1], vec![1.0]);
+        assert_eq!(r[2], vec![5.0]); // 2+3
+        assert_eq!(r[3], vec![5.0]);
     }
 }
