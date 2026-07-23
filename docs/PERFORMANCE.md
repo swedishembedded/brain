@@ -193,7 +193,7 @@ The remaining levers were each assessed; most have hit diminishing returns:
   local memory (the 4×4 array variant measured 927 ms vs the scalar 545 ms), and
   32 scalar accumulators risk an occupancy drop on a memory-bound kernel. 4×4 is
   the practical sweet spot.
-- **im2col + tiled GEMM** — *adds traffic, not a win here*. The GEMM is clean
+- **im2col + tiled GEMM** — *adds traffic, not a win here* (Arc). **[P40 UPDATE: confirmed the opposite on a compute-bound discrete GPU — im2col + `matmul_reg2` is 2-5× the direct conv on deep layers, 2.1-2.4× on the whole YOLOv8n@640 forward. See `docs/P40.md`.]** The GEMM is clean
   (no per-tap overhead), but it materializes the im2col matrix `B`, which a
   register-tiled GEMM re-reads ~`Cout/4` times (×64 for a 256-channel layer). On
   the bandwidth-bound integrated GPU that extra `B` traffic outweighs removing the

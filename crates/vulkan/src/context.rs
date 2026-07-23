@@ -107,7 +107,15 @@ pub struct VkContext {
     pub queue_family_index: u32,
     pub command_pool: vk::CommandPool,
     pub adapter_name: String,
+    /// PCI vendor id (0x10de NVIDIA, 0x8086 Intel, 0x1002 AMD). Used to gate
+    /// vendor-specific workarounds (e.g. the Intel-ANV sliced-binding serialize).
+    pub vendor_id: u32,
     pub caps: CoopMatCaps,
+    /// Which non-fp32 arithmetic the logical device was created able to execute
+    /// (queried from the physical device, enabled at `create_device` when
+    /// present). The peak-throughput bench uses these to skip a precision the
+    /// hardware/driver does not expose rather than fail pipeline creation.
+    pub prec: PrecisionCaps,
     mem_props: vk::PhysicalDeviceMemoryProperties,
     /// Reusable host-visible staging buffer for device-local up/downloads (grown
     /// on demand; transfers are fence-serialized so a single buffer suffices).
@@ -116,6 +124,20 @@ pub struct VkContext {
     /// submit + fence wait). Perf observability: inference must keep this O(1)
     /// per frame, not O(dispatches) — see `backend-vulkan/tests/perf_contract.rs`.
     pub submits: std::sync::atomic::AtomicU64,
+}
+
+/// Non-fp32 arithmetic the device exposes and this context enabled. fp32 is
+/// always available and needs no flag.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PrecisionCaps {
+    /// `shaderFloat64` (core) — WGSL `f64` arithmetic. NVIDIA: true (1/32 rate).
+    pub f64: bool,
+    /// `shaderFloat16` (VK_KHR_shader_float16_int8 / Vulkan 1.2) — WGSL `f16`.
+    /// P40: exposed via the extension even though the base 1.0 bit is false.
+    pub f16: bool,
+    /// `shaderIntegerDotProduct` (Vulkan 1.3) + a `4x8BitPacked*Accelerated`
+    /// device property — WGSL `dot4I8Packed` (DP4A). P40: accelerated.
+    pub dp4a: bool,
 }
 
 /// A device buffer + its backing memory. Storage buffers are `DEVICE_LOCAL`
@@ -259,6 +281,7 @@ impl VkContext {
         let adapter_name = CStr::from_ptr(props.device_name.as_ptr())
             .to_string_lossy()
             .into_owned();
+        let vendor_id = props.vendor_id;
 
         // Pick a queue family with COMPUTE.
         let queue_family_index = instance
@@ -287,14 +310,62 @@ impl VkContext {
             .queue_family_index(queue_family_index)
             .queue_priorities(&queue_priorities)];
 
+        // ---- non-fp32 arithmetic capability query ----
+        // Read what the physical device supports, so we enable exactly those at
+        // create_device (enabling an unsupported feature makes creation fail).
+        let mut sf16i8 = vk::PhysicalDeviceShaderFloat16Int8Features::default();
+        let mut sdot = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default();
+        let mut core_feats2 = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut sf16i8)
+            .push_next(&mut sdot);
+        instance.get_physical_device_features2(physical_device, &mut core_feats2);
+        // The `4x8BitPacked` signed-accelerated property confirms DP4A is a fast
+        // path (not emulated); pair it with the dot-product feature bit.
+        let mut dot_props = vk::PhysicalDeviceShaderIntegerDotProductProperties::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut dot_props);
+        instance.get_physical_device_properties2(physical_device, &mut props2);
+        let prec = PrecisionCaps {
+            f64: core_feats2.features.shader_float64 != 0,
+            f16: sf16i8.shader_float16 != 0,
+            dp4a: sdot.shader_integer_dot_product != 0
+                && dot_props.integer_dot_product4x8_bit_packed_signed_accelerated != 0,
+        };
+
+        // Enable the coopmat extension (if present) plus the promoted-core
+        // extensions that back f16/int8 and the integer dot product. Both were
+        // promoted to core (1.2 / 1.3), but requesting the extension name is the
+        // portable way to unlock the feature on a 1.3 device.
+        let mut device_ext_names: Vec<*const i8> = device_ext_names;
+        let dev_exts = instance.enumerate_device_extension_properties(physical_device).unwrap_or_default();
+        let has_ext = |name: &CStr| dev_exts.iter().any(|e| CStr::from_ptr(e.extension_name.as_ptr()) == name);
+        if prec.f16 && has_ext(ash::khr::shader_float16_int8::NAME) {
+            device_ext_names.push(ash::khr::shader_float16_int8::NAME.as_ptr());
+        }
+        if prec.dp4a && has_ext(ash::khr::shader_integer_dot_product::NAME) {
+            device_ext_names.push(ash::khr::shader_integer_dot_product::NAME.as_ptr());
+        }
+
         // Chain the coopmat feature struct only if supported.
         let mut coopmat_features = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default()
             .cooperative_matrix(caps.feature_supported);
+        // Enable exactly the non-fp32 arithmetic the device reported.
+        let core_enabled = vk::PhysicalDeviceFeatures::default().shader_float64(prec.f64);
+        let mut en_f16i8 = vk::PhysicalDeviceShaderFloat16Int8Features::default()
+            .shader_float16(prec.f16);
+        let mut en_dot = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default()
+            .shader_integer_dot_product(prec.dp4a);
         let mut device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
-            .enabled_extension_names(&device_ext_names);
+            .enabled_extension_names(&device_ext_names)
+            .enabled_features(&core_enabled);
         if caps.feature_supported {
             device_info = device_info.push_next(&mut coopmat_features);
+        }
+        if prec.f16 {
+            device_info = device_info.push_next(&mut en_f16i8);
+        }
+        if prec.dp4a {
+            device_info = device_info.push_next(&mut en_dot);
         }
 
         let device = instance
@@ -320,7 +391,9 @@ impl VkContext {
             queue_family_index,
             command_pool,
             adapter_name,
+            vendor_id,
             caps,
+            prec,
             mem_props,
             staging: std::sync::Mutex::new(None),
             submits: std::sync::atomic::AtomicU64::new(0),

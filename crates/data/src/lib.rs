@@ -14,6 +14,8 @@
 //! [`binio::read_f32_bin`] (time series).
 
 pub mod binio;
+pub mod chat;
+pub mod toolcall;
 pub mod bpe;
 pub mod episode;
 pub mod loader;

@@ -115,7 +115,7 @@ impl Jit {
                 // GEMM with a barrier inside the K-loop). Skip it — it runs via a
                 // native fast path on CPU or on the GPU backend. Genuine compile
                 // errors (anything not barrier-structural) still fail hard.
-                Err(e) if e.contains("barrier") => {
+                Err(e) if e.to_lowercase().contains("barrier") => {
                     eprintln!("wgsl-cpu: kernel {name:?} not JIT-compiled ({e}); must use a native fast path or the GPU");
                     wg_size.push(None);
                     ids.push(None);
@@ -570,6 +570,14 @@ fn compile_one_wg(
         return Err("work-group kernel with zero workgroup_size".into());
     }
 
+    // Validate the barrier structure BEFORE building any Cranelift IR. A tiled
+    // GEMM (multiple/nested barriers) errors here — and if that error escaped
+    // after a `FunctionBuilder` had started, the builder would drop without
+    // `finalize()`, leaving the shared `FunctionBuilderContext` corrupt so the
+    // NEXT kernel's compile fails with a bogus block-param mismatch (this bit
+    // conv_epilogue when it followed matmul_reg2 in a model's kernel list).
+    let (seg_before, seg_after) = split_at_barrier(&func.body)?;
+
     let mut builder = FunctionBuilder::new(&mut ctx.func, fctx);
     let mut unary_refs = HashMap::new();
     for (k, id) in &math.unary {
@@ -614,7 +622,6 @@ fn compile_one_wg(
         }
     }
 
-    let (seg_before, seg_after) = split_at_barrier(&func.body)?;
     // Expressions materialised (Emit'd) before the barrier but used after it must
     // be re-materialised at the TOP of each segment's invocation body — otherwise
     // the after-segment lazily evaluates them on first use (often deep in a nested

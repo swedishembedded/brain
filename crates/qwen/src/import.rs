@@ -77,10 +77,21 @@ pub fn config_from_hf(json: &str) -> Result<QwenConfig, String> {
 /// exactly once with the right element count; fails loudly otherwise (never
 /// writes a partial checkpoint).
 pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
+    import_with_block(hf_dir, out_path, None)
+}
+
+/// Like [`import`] but overrides the checkpoint's `block_size` (max context the
+/// model is built with). For RoPE the value is not a hard positional limit —
+/// inference sizes context via `load_inference(.., t)` — so a smaller value is a
+/// cheaper fine-tuning window (attention is O(T²)); `None` keeps the HF default.
+pub fn import_with_block(hf_dir: &str, out_path: &str, block_size: Option<u32>) -> Result<(), String> {
     let dir = Path::new(hf_dir);
     let cfg_json = std::fs::read_to_string(dir.join("config.json"))
         .map_err(|e| format!("read config.json: {e}"))?;
-    let cfg = config_from_hf(&cfg_json)?;
+    let mut cfg = config_from_hf(&cfg_json)?;
+    if let Some(b) = block_size {
+        cfg.block_size = b;
+    }
 
     let st_path = dir.join("model.safetensors");
     if !st_path.exists() {

@@ -130,6 +130,10 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("conv_bias", kernels::CONV_BIAS),
     // ---- accumulate-in-place (index 41) ----
     ("add_inplace", kernels::ADD_INPLACE),
+    // ---- conv-as-GEMM eval fast path (im2col + matmul_reg2 + conv_epilogue) ----
+    ("im2col", kernels::IM2COL),
+    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("conv_epilogue", kernels::CONV_EPILOGUE),
 ];
 
 /// Kernel indices for the shared [`vision`] conv blocks, resolved BY NAME against

@@ -84,6 +84,11 @@ struct KernelPipeline {
 pub struct VulkanBackend {
     ctx: VkContext,
     pipelines: Vec<KernelPipeline>,
+    /// Each kernel's declared `@workgroup_size` (parallel to `pipelines`), so the
+    /// grid is laid out with the size the kernel itself reconstructs its flat
+    /// invocation id from — 64 for almost everything, 256 for the register-tiled
+    /// GEMMs.
+    wgsizes: Vec<u32>,
     /// Descriptor pools, grown on demand. A descriptor set's lifetime is tied to
     /// its `VkStep` (which a caller may hold and re-submit, e.g. the
     /// `uniform_dynamic` + `step_buf` reuse pattern), so sets are NEVER reset
@@ -181,6 +186,7 @@ impl VulkanBackend {
         Ok(VulkanBackend {
             ctx,
             pipelines,
+            wgsizes: backend_api::workgroup_sizes(kernels),
             pools: Mutex::new(vec![pool]),
             pending: Mutex::new(Vec::new()),
             uniforms: Mutex::new(Vec::new()),
@@ -399,7 +405,7 @@ impl VulkanBackend {
             })
             .collect();
         unsafe { dev.update_descriptor_sets(&writes, &[]) };
-        let (gx, gy) = backend_api::grid(threads);
+        let (gx, gy) = backend_api::grid_ws(threads, self.wgsizes[kind]);
         let sliced = offsets.iter().any(|&(off, _)| off > 0);
         VkStep { kind, set, gx, gy, sliced, transient }
     }
@@ -440,14 +446,21 @@ impl VulkanBackend {
         }
         let dev = &self.ctx.device;
         // Serialize (submit+fence per dispatch) when the batch contains a sliced
-        // (sub-range) binding: Intel ANV's compute-compute pipeline barrier does
-        // not reliably make a prior dispatch's writes visible across a non-zero
-        // descriptor offset, but a queue-submit/fence boundary does. Only the
-        // vocab-tiled embedding/lm_head use sliced bindings, so the (large) models
-        // that tile pay this; everything else takes the fast single-submit path.
-        // `BRAIN_VK_SERIAL` forces it for everything (diagnostic).
+        // (sub-range) binding: **Intel ANV's** compute-compute pipeline barrier
+        // does not reliably make a prior dispatch's writes visible across a
+        // non-zero descriptor offset, but a queue-submit/fence boundary does. This
+        // is an Intel driver bug — on other vendors the standard memory barrier is
+        // correct, and serializing there is pure waste (a per-frame model with a
+        // vocab-tiled embedding does ~one submit+fence per *dispatch* instead of
+        // one per *frame*: on an NVIDIA P40 the TTS Talker forward was 2× slower).
+        // Gate the workaround to Intel (vendor 0x8086). `BRAIN_VK_SERIAL` forces
+        // it everywhere (diagnostic); `BRAIN_VK_NO_SERIAL` disables it (to confirm
+        // the Intel bug on that hardware).
+        const VENDOR_INTEL: u32 = 0x8086;
         let force_serial = std::env::var("BRAIN_VK_SERIAL").is_ok();
-        if force_serial || steps.iter().any(|s| s.sliced) {
+        let no_serial = std::env::var("BRAIN_VK_NO_SERIAL").is_ok();
+        let vendor_needs_serial = self.ctx.vendor_id == VENDOR_INTEL;
+        if !no_serial && (force_serial || (vendor_needs_serial && steps.iter().any(|s| s.sliced))) {
             unsafe {
                 for s in &steps {
                     let cmd = self.begin_cmd();

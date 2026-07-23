@@ -67,6 +67,11 @@ pub struct ConvKernelIds {
     pub conv_act: usize,
     pub conv_act_tiled: usize,
     pub conv_act_reg: usize,
+    // ---- conv-as-GEMM (im2col + matmul_reg2 + epilogue), the P40 fast path for
+    // deep layers where conv_act_reg collapses ----
+    pub im2col: usize,
+    pub matmul_reg2: usize,
+    pub conv_epilogue: usize,
     // ---- spatial ----
     pub avgpool2d: usize,
     pub avgpool2d_dx: usize,
@@ -144,6 +149,9 @@ impl ConvKernelIds {
             conv_act: k("conv_act"),
             conv_act_tiled: k("conv_act_tiled"),
             conv_act_reg: k("conv_act_reg"),
+            im2col: k("im2col"),
+            matmul_reg2: k("matmul_reg2"),
+            conv_epilogue: k("conv_epilogue"),
             avgpool2d: k("avgpool2d"),
             avgpool2d_dx: k("avgpool2d_dx"),
             resize_bilinear: k("resize_bilinear"),

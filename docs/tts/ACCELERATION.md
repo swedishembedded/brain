@@ -229,3 +229,68 @@ python scripts/voice-design.py --instruct "a deep cinematic narrator" --text "..
 | `BRAIN_TILE_BUDGET_WORDS` | force vocab tiling on small models (test #12) |
 
 Cross-backend parity: **`make parity`**.
+
+---
+
+## NVIDIA Tesla P40 (fp32 / INT8) — validated
+
+The sections above are Intel-NPU numbers. On the 2×P40 box the Talker is a
+`qwen::Qwen` decoder, so it inherits the register-tiled + software-pipelined
+`matmul_reg2` GEMM (see `docs/P40.md`). Validated by
+`crates/tts/tests/bench_inference.rs` and the TTS shapes in
+`crates/vulkan/tests/int8_gemm.rs` — 0.6B Talker, 256-frame forward (prefill /
+cache-free step cost):
+
+| path | ms/forward | frames/s | vs CPU |
+|---|--:|--:|--:|
+| CPU fp32 (48-thread AVX2) | 1538 | 166 | 1.0× |
+| **P40 fp32 (`matmul_reg2`)** | **437** | **586** | **3.5×** |
+
+- **Correct**: the P40 forward reproduces the CPU reference to **rel 2.9e-6**
+  across 786 432 logits — validated, not just fast.
+- **Realtime**: TTS runs at ~12.5 codec-Hz, so 586 frames/s is **~47× faster
+  than realtime** for the prefill; the production CPU KV-cache decode is O(1) in
+  context per frame on top of this.
+
+**INT8 (DP4A) on the Talker's dominant linears** (`matmul_i8`, per-tensor
+symmetric, cos(fp32) = 1.00000):
+
+| Talker linear | INT8 GOP/s | fp32 reg2 GOP/s | speedup |
+|---|--:|--:|--:|
+| q_proj 256×1024→2048 | 2240 | 944 | **2.37×** |
+| ffn-up 256×1024→3072 | 3296 | 1251 | **2.63×** |
+| ffn-dn 256×3072→1024 | 1483 | 556 | **2.67×** |
+
+So the compute-bound Talker linears gain **~2.5× at INT8** over the tuned fp32
+kernel (the DP4A path is opt-in Vulkan-only; wiring it into the Talker engine is
+the follow-up). **fp16 is not a P40 path** — NVIDIA's Vulkan driver does not
+expose `shaderFloat16` on Pascal, and GP102 fp16 is 1/64 rate regardless
+(`docs/P40.md` §G8).
+
+### Whole-model throughput + eliminating wasted time (P40)
+
+Measuring the *whole* 0.6B Talker forward (not just its GEMMs) exposed where
+time actually goes. The 256-frame forward is **242 GFLOP** (94% GEMM). Progress:
+
+| state | wgpu ms/fwd | GFLOP/s | % of peak | frames/s |
+|---|--:|--:|--:|--:|
+| initial (Vulkan backend) | 460 | 527 | 4.5% | 557 |
+| **wgpu backend** | 208 | 1164 | 9.9% | 1231 |
+| **+ lm_head on `matmul_reg2`** | **158** | **1542** | **13.1%** | **1617** |
+
+Two structural wastes fixed, both validated at parity (rel 2.8e-6 vs CPU):
+
+1. **Backend: wgpu is ~2× the native Vulkan backend** (158 vs 328 ms) — the ash
+   backend's per-dispatch overhead. wgpu is the `--device gpu` default, so this
+   is the path users get; the Vulkan backend is opt-in.
+2. **lm_head ran on the naive column-tiled `matmul_tile`** even when the vocab
+   fits one tile (Talker vocab 3072): **50 ms for a 1.6 GFLOP matmul (32 GFLOP/s)**.
+   Now a single full tile dispatches `matmul_reg2` → ~2 ms. −24% of the forward.
+3. **The Intel-ANV sliced-binding serialize was applied to NVIDIA** (gap G3) —
+   1.7× on large-vocab forwards; now vendor-gated to Intel.
+
+Where the remaining 158 ms goes (BRAIN_PROFILE, timestamp queries): **`matmul_reg2`
+60% (useful GEMM), `gqa_scores`+`gqa_apply` 25% (naive attention), `rmsnorm` 11%**.
+The GEMMs at m=256 run ~2400 GFLOP/s (20% peak — small-batch prefill under-fills
+the 128-tile); attention and norms are the next kernels to tile. One submit + one
+readback per forward — no per-frame sync waste.

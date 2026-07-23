@@ -70,6 +70,10 @@ pub struct CpuBackend {
     /// Native fast-path kernel indices, resolved by name once at construction.
     /// All `None` (and the fast path off) under `BRAIN_NO_FASTCONV=1` / non-AVX2.
     fast: FastIdx,
+    /// Each kernel's declared `@workgroup_size` (parallel to `names`). The CPU
+    /// dispatcher needs it for two things: laying out the same grid the GPU
+    /// backends do, and turning that grid back into an invocation count.
+    wgsizes: Vec<u32>,
 }
 
 /// Indices of the kernels that have a native CPU fast path (see `fast_conv` /
@@ -78,6 +82,12 @@ pub struct CpuBackend {
 struct FastIdx {
     matmul: Option<usize>,
     matmul_tiled: Option<usize>,
+    matmul_reg: Option<usize>,
+    matmul_reg2: Option<usize>,
+    matmul_dx: Option<usize>,
+    matmul_dx_reg: Option<usize>,
+    matmul_dw: Option<usize>,
+    matmul_dw_reg: Option<usize>,
     conv2d: Option<usize>,
     conv_act: Option<usize>,
     silu: Option<usize>,
@@ -116,6 +126,12 @@ pub struct BindGroup {
 }
 
 impl CpuBackend {
+    /// Kernel `kind`'s declared workgroup size.
+    #[inline]
+    fn wgsize(&self, kind: usize) -> u32 {
+        self.wgsizes.get(kind).copied().unwrap_or(backend_api::DEFAULT_WORKGROUP_SIZE)
+    }
+
     pub fn new(kernels: &[(&str, &str)]) -> CpuBackend {
         let jit = Jit::new(kernels).expect("WGSL->CPU JIT compilation failed");
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
@@ -137,6 +153,12 @@ impl CpuBackend {
             FastIdx {
                 matmul: find("matmul"),
                 matmul_tiled: find("matmul_tiled"),
+                matmul_reg: find("matmul_reg"),
+                matmul_reg2: find("matmul_reg2"),
+                matmul_dx: find("matmul_dx"),
+                matmul_dx_reg: find("matmul_dx_reg"),
+                matmul_dw: find("matmul_dw"),
+                matmul_dw_reg: find("matmul_dw_reg"),
                 conv2d: find("conv2d"),
                 conv_act: find("conv_act"),
                 silu: find("silu"),
@@ -159,7 +181,8 @@ impl CpuBackend {
                 upsample2: find("upsample2"),
             }
         };
-        CpuBackend { jit, threads, names, profile, fast }
+        let wgsizes = backend_api::workgroup_sizes(kernels);
+        CpuBackend { jit, threads, names, profile, fast, wgsizes }
     }
 
     pub fn storage(&self, n: u64) -> CpuBuffer {
@@ -200,7 +223,7 @@ impl CpuBackend {
             uniform: ubuf.clone(),
             bufs: bufs.iter().map(|b| ((*b).clone(), 0usize)).collect(),
         };
-        let (gx, gy) = backend_api::grid(threads);
+        let (gx, gy) = backend_api::grid_ws(threads, self.wgsize(kind));
         (kind, bg, gx, gy)
     }
 
@@ -229,7 +252,7 @@ impl CpuBackend {
             uniform: ubuf,
             bufs: bufs.iter().enumerate().map(|(i, b)| ((*b).clone(), offsets[i].0 as usize)).collect(),
         };
-        let (gx, gy) = backend_api::grid(threads);
+        let (gx, gy) = backend_api::grid_ws(threads, self.wgsize(kind));
         (kind, bg, gx, gy)
     }
 
@@ -241,7 +264,7 @@ impl CpuBackend {
             c.words_mut().iter_mut().for_each(|w| *w = 0);
         }
         for (kind, bg, gx, gy) in steps {
-            let total = (*gx as u64) * (*gy as u64) * 64;
+            let total = (*gx as u64) * (*gy as u64) * self.wgsize(*kind) as u64;
             let uniform = bg.uniform.base_ptr() as *const u32;
             let bufs: Vec<*mut u8> = bg.bufs.iter().map(|(b, off)| unsafe { b.base_ptr().add(off * 4) }).collect();
             if let Some(prof) = &self.profile {
@@ -296,10 +319,15 @@ impl CpuBackend {
         // the JIT below. All `unsafe` here reconstructs slices from the bound
         // storage bases, each sized to its tensor by the model.
         let f = &self.fast;
-        // matmul{,_tiled}.wgsl: out[M,N] = A[M,K] @ B[N,K]^T. params = [m, k, n];
-        // bufs = [A, B, out]. Same math either way; the tiled kernel is GPU-only
-        // (multi-barrier), so on CPU both route to the AVX2 gemm.
-        if (Some(kind) == f.matmul || Some(kind) == f.matmul_tiled) && bufs.len() >= 3 {
+        // matmul{,_tiled,_reg}.wgsl: out[M,N] = A[M,K] @ B[N,K]^T.
+        // params = [m, k, n]; bufs = [A, B, out]. Same math for all three; the
+        // tiled/register-tiled kernels are GPU-only (multi-barrier work-group
+        // structure the JIT does not compile), so on CPU all three route to the
+        // AVX2 gemm. That is the one-graph rule: a model may pick whichever
+        // variant suits its shapes without forking its CPU path.
+        if (Some(kind) == f.matmul || Some(kind) == f.matmul_tiled || Some(kind) == f.matmul_reg || Some(kind) == f.matmul_reg2)
+            && bufs.len() >= 3
+        {
             unsafe {
                 let pu = std::slice::from_raw_parts(uniform, 3);
                 let (m, k, n) = (pu[0] as usize, pu[1] as usize, pu[2] as usize);
@@ -307,6 +335,33 @@ impl CpuBackend {
                 let b = std::slice::from_raw_parts(bufs[1] as *const f32, n * k);
                 let c = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, m * n);
                 fast_ops::matmul_abt(a, b, c, m, k, n);
+            }
+            return;
+        }
+        // matmul_dx{,_reg}: dX[m,k] = sum_n dY[m,n]·W[n,k].  params = [m,k,n,acc];
+        // bufs = [dY, W, dX]. The tiled `_reg` variant is GPU-only, so on CPU both
+        // route to the same native backward GEMM (the one-graph rule for backprop).
+        if (Some(kind) == f.matmul_dx || Some(kind) == f.matmul_dx_reg) && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 4);
+                let (m, k, n, acc) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] != 0);
+                let dy = std::slice::from_raw_parts(bufs[0] as *const f32, m * n);
+                let w = std::slice::from_raw_parts(bufs[1] as *const f32, n * k);
+                let dx = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, m * k);
+                fast_ops::matmul_dx(dy, w, dx, m, k, n, acc);
+            }
+            return;
+        }
+        // matmul_dw{,_reg}: dW[n,k] += sum_m dY[m,n]·X[m,k].  params = [m,k,n];
+        // bufs = [dY, X, dW]. Always accumulates.
+        if (Some(kind) == f.matmul_dw || Some(kind) == f.matmul_dw_reg) && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 3);
+                let (m, k, n) = (pu[0] as usize, pu[1] as usize, pu[2] as usize);
+                let dy = std::slice::from_raw_parts(bufs[0] as *const f32, m * n);
+                let x = std::slice::from_raw_parts(bufs[1] as *const f32, m * k);
+                let dw = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, n * k);
+                fast_ops::matmul_dw(dy, x, dw, m, k, n);
             }
             return;
         }

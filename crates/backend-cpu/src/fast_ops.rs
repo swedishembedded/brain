@@ -797,3 +797,79 @@ pub fn gn_stats2(params: &[u32], part: &[f32], stats: &mut [f32]) {
         stats[2 * k + 1] = 1.0 / (va + eps).sqrt();
     }
 }
+
+/// dX[m,k] = sum_n dY[m,n] * W[n,k]   (+ accumulate into dx if `acc`).
+/// Backward of `out = x·Wᵀ` w.r.t. x — `matmul_dx`/`matmul_dx_reg` on CPU.
+/// dY is [M,N] row-major, W is [N,K] row-major, dX is [M,K].
+pub fn matmul_dx(dy: &[f32], w: &[f32], dx: &mut [f32], m: usize, k: usize, n: usize, acc: bool) {
+    if m == 0 || k == 0 {
+        return;
+    }
+    let row = |dyr: &[f32], dxr: &mut [f32]| {
+        if !acc {
+            dxr.iter_mut().for_each(|v| *v = 0.0);
+        }
+        // dxr[kk] += dy[nn] * w[nn*k + kk]; stream W row-major, one dy scalar per n.
+        for nn in 0..n {
+            let dyv = dyr[nn];
+            if dyv == 0.0 {
+                continue;
+            }
+            let wr = &w[nn * k..nn * k + k];
+            for (dstv, &wv) in dxr.iter_mut().zip(wr) {
+                *dstv += dyv * wv;
+            }
+        }
+    };
+    if m * n * k < 262_144 {
+        for r in 0..m {
+            row(&dy[r * n..r * n + n], &mut dx[r * k..r * k + k]);
+        }
+        return;
+    }
+    let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
+    dx.par_chunks_mut(rows_per * k).enumerate().for_each(|(ci, chunk)| {
+        let row0 = ci * rows_per;
+        let nrows = chunk.len() / k;
+        for r in 0..nrows {
+            row(&dy[(row0 + r) * n..(row0 + r) * n + n], &mut chunk[r * k..r * k + k]);
+        }
+    });
+}
+
+/// dW[n,k] += sum_m dY[m,n] * X[m,k]   (always accumulates).
+/// Backward of `out = x·Wᵀ` w.r.t. W — `matmul_dw`/`matmul_dw_reg` on CPU.
+/// dY is [M,N] row-major, X is [M,K] row-major, dW is [N,K].
+pub fn matmul_dw(dy: &[f32], x: &[f32], dw: &mut [f32], m: usize, k: usize, n: usize) {
+    if n == 0 || k == 0 {
+        return;
+    }
+    // Parallelise over N (output rows). Each n reads column n of dY (strided) and
+    // all of X; accumulate a [K] row.
+    let row = |nn: usize, dwr: &mut [f32]| {
+        for mm in 0..m {
+            let dyv = dy[mm * n + nn];
+            if dyv == 0.0 {
+                continue;
+            }
+            let xr = &x[mm * k..mm * k + k];
+            for (dstv, &xv) in dwr.iter_mut().zip(xr) {
+                *dstv += dyv * xv;
+            }
+        }
+    };
+    if m * n * k < 262_144 {
+        for nn in 0..n {
+            row(nn, &mut dw[nn * k..nn * k + k]);
+        }
+        return;
+    }
+    let rows_per = (n / (rayon::current_num_threads() * 4)).max(1);
+    dw.par_chunks_mut(rows_per * k).enumerate().for_each(|(ci, chunk)| {
+        let n0 = ci * rows_per;
+        let nrows = chunk.len() / k;
+        for r in 0..nrows {
+            row(n0 + r, &mut chunk[r * k..r * k + k]);
+        }
+    });
+}

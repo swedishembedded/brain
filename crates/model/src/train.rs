@@ -42,6 +42,12 @@ pub struct FitOpts {
     pub eval_interval: u32,
     pub eval_batches: u32,
     pub seed: u64,
+    /// Wall-clock checkpoint cadence: once this many seconds have elapsed since
+    /// the last save, the NEXT completed step writes a checkpoint (then the timer
+    /// restarts). Decoupled from `eval_interval` so a slow big-model step never
+    /// pays a 2.4 GB write every eval. `0` disables periodic saves (only the
+    /// final one runs). Default 600 (10 min).
+    pub checkpoint_secs: u64,
     /// Mask loss up to & including this char (e.g. `'='` for calculator).
     pub mask_before: Option<char>,
     pub mask_per_line: bool,
@@ -64,6 +70,7 @@ impl Default for FitOpts {
             eval_interval: 250,
             eval_batches: 20,
             seed: 1337,
+            checkpoint_secs: 600,
             mask_before: None,
             mask_per_line: false,
             align_to_lines: false,
@@ -97,6 +104,18 @@ struct Loaded {
     itos: Option<Vec<char>>,
 }
 
+/// Public masked-dataset loader for callers running their own training loop
+/// (e.g. the full-vs-LoRA finetune comparison). Returns `(train, val, batch_cfg,
+/// vocab)` — the token-level `train.mask.bin` (chat/tool-call) is honoured.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_dataset(
+    dir: &Path,
+    opts: &FitOpts,
+) -> std::io::Result<(TokenDataset, TokenDataset, data::loader::BatchConfig, u32)> {
+    let l = load(dir, opts)?;
+    Ok((l.train, l.val, l.batch_cfg, l.vocab))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
     // Width-detecting read: `train.u32.bin` (large-vocab, e.g. Qwen) wins over
@@ -122,17 +141,31 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
         }
     };
 
+    // Chat / tool-call fine-tuning: a `train.mask.bin` (u8, from `data::chat`)
+    // supervises only the assistant span at the TOKEN level, aligning windows to
+    // the `<|endoftext|>` example separator. When present it takes precedence
+    // over the char-boundary `mask_before_token`.
+    let train_mask = binio::read_mask_bin(&dir.join("train.mask.bin")).ok();
+    let val_mask = binio::read_mask_bin(&dir.join("val.mask.bin")).ok();
+    let has_token_mask = train_mask.is_some();
+
     let batch_cfg = BatchConfig {
         batch_size: opts.batch_size as usize,
         block_size: opts.block_size as usize,
-        mask_before_token: mask_id,
+        mask_before_token: if has_token_mask { None } else { mask_id },
         mask_per_line: opts.mask_per_line,
-        align_to_lines: opts.align_to_lines,
-        newline_token: newline_id,
+        // A token-masked chat dataset aligns windows to the `<|endoftext|>` example
+        // separator so each window starts at an example.
+        align_to_lines: opts.align_to_lines || has_token_mask,
+        newline_token: if has_token_mask { Some(data::chat::ENDOFTEXT) } else { newline_id },
+    };
+    let mk = |tok: Vec<u32>, mask: Option<Vec<bool>>| match mask {
+        Some(m) if m.len() == tok.len() => TokenDataset::new_with_mask(tok, m, &batch_cfg),
+        _ => TokenDataset::new(tok, &batch_cfg),
     };
     Ok(Loaded {
-        train: TokenDataset::new(train_tok, &batch_cfg),
-        val: TokenDataset::new(val_tok, &batch_cfg),
+        train: mk(train_tok, train_mask),
+        val: mk(val_tok, val_mask),
         vocab,
         batch_cfg,
         itos,
@@ -206,6 +239,7 @@ pub fn fit<M: Model>(
 
     let initial = sample_loss(&model, &loaded.train, &mut rng.clone(), 5);
     let mut last_train = initial;
+    let mut last_save = std::time::Instant::now();
 
     for step in 0..opts.steps {
         let lr = cosine_lr(step, opts);
@@ -227,23 +261,31 @@ pub fn fit<M: Model>(
 
         if opts.eval_interval > 0 && (step + 1) % opts.eval_interval == 0 {
             let eval_loss = sample_loss(&model, &loaded.val, &mut rng.clone(), opts.eval_batches);
-            // Checkpoint at every eval point so long runs are resumable and a
-            // crash loses at most `eval_interval` steps. The write is atomic
-            // (checkpoint::save renames a temp over the target).
-            let saved = match out {
-                Some(p) => {
-                    model.save_with_itos(p.to_str().expect("utf-8 path"), loaded.itos.as_deref());
-                    format!("  saved -> {}", p.display())
-                }
-                None => String::new(),
-            };
-            println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}{saved}", step + 1, lr, last_train, eval_loss);
+            println!("step {:>6}  lr {:.2e}  train {:.4}  eval {:.4}", step + 1, lr, last_train, eval_loss);
+        }
+
+        // Wall-clock checkpointing: once the timer has expired, the NEXT completed
+        // step saves (atomic temp-rename), reports the save duration, and restarts
+        // the timer. A slow big-model step thus never pays a per-eval 2.4 GB write.
+        if let Some(p) = out {
+            if opts.checkpoint_secs > 0 && last_save.elapsed().as_secs() >= opts.checkpoint_secs {
+                let ts = std::time::Instant::now();
+                model.save_with_itos(p.to_str().expect("utf-8 path"), loaded.itos.as_deref());
+                println!(
+                    "step {:>6}  saved checkpoint -> {} ({:.1} s)",
+                    step + 1,
+                    p.display(),
+                    ts.elapsed().as_secs_f64()
+                );
+                last_save = std::time::Instant::now();
+            }
         }
     }
 
     if let Some(p) = out {
+        let ts = std::time::Instant::now();
         model.save_with_itos(p.to_str().expect("utf-8 path"), loaded.itos.as_deref());
-        println!("saved checkpoint -> {}", p.display());
+        println!("saved checkpoint -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
     }
     Ok((initial, last_train))
 }

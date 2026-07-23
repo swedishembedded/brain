@@ -57,6 +57,16 @@ fn use_tiled_conv() -> bool {
     *ON.get_or_init(|| std::env::var("BRAIN_TILED_CONV").map(|v| v != "0").unwrap_or(false))
 }
 
+/// Minimum output channels for the conv-as-GEMM eval path (`BRAIN_CONV_GEMM_MIN`,
+/// default 32). Below this the direct register-tiled conv wins (large spatial /
+/// few channels under-fills the GEMM tile); at/above it, im2col + matmul_reg2 is
+/// 2-5x faster on the P40. Whole YOLOv8n@640 forward: 2.36x at 32.
+fn gemm_conv_min_cout() -> u32 {
+    use std::sync::OnceLock;
+    static V: OnceLock<u32> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("BRAIN_CONV_GEMM_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(32))
+}
+
 /// `BRAIN_NAIVE_CONV=1` forces the naive one-output-per-invocation fused conv
 /// (the previous default) instead of the register-tiled one — for comparison.
 fn use_naive_conv() -> bool {
@@ -338,6 +348,10 @@ pub struct Conv {
     /// conv input, used only when a [`crate::ActTap`] is installed (NPU
     /// calibration / fake-quant). Never allocated on the normal inference path.
     q_in: std::cell::RefCell<Option<DeviceBuffer>>,
+    /// Lazily-allocated `[Ho*Wo, Cin*K*K]` im2col scratch for the conv-as-GEMM
+    /// eval path (dense convs with large Cout, where `conv_act_reg` collapses on
+    /// the P40). Allocated once, reused across frames.
+    col: std::cell::RefCell<Option<DeviceBuffer>>,
 }
 
 impl Conv {
@@ -413,6 +427,7 @@ impl Conv {
             d_conv: ctx.act(on),
             dbcast: if spec.bias { Some(ctx.act(cout * out_shape.h * out_shape.w)) } else { None },
             q_in: std::cell::RefCell::new(None),
+            col: std::cell::RefCell::new(None),
         }
     }
 
@@ -716,6 +731,18 @@ impl Conv {
                 self.pack_sb(ctx, ps);
                 self.sb_ready.set(true);
             }
+            // Conv-as-GEMM fast path (P40 / compute-bound GPUs): a dense conv
+            // with many output channels is far faster as im2col + matmul_reg2 +
+            // per-channel-affine+SiLU epilogue than the direct register-tiled
+            // conv, which collapses on deep small-spatial layers (measured 2-5x
+            // on YOLOv8n's stage2-4). Same math — parity-gated by the detection
+            // test. Gated on: the three kernels registered, a dense single-batch
+            // SiLU conv past the tile threshold, and no calibration tap (the tap
+            // path stays on the direct conv). `BRAIN_CONV_GEMM=0` disables it.
+            if self.gemm_eval_eligible(ctx) {
+                self.forward_eval_gemm(ctx, ps, x_in);
+                return;
+            }
             // Fused conv -> BN(eval) -> SiLU. The weight-tiled variant (opt-in)
             // exercises the single-source work-group kernel; the default naive
             // variant is faster on current GPUs (full occupancy). Both route to
@@ -827,6 +854,51 @@ impl Conv {
         let qbuf = q.as_ref().unwrap().clone();
         ctx.gpu.write(&qbuf, bytemuck::cast_slice(&h));
         Some(qbuf)
+    }
+
+    /// Eligible for the conv-as-GEMM eval path (see the call site).
+    fn gemm_eval_eligible(&self, ctx: &Ctx) -> bool {
+        std::env::var("BRAIN_CONV_GEMM").map(|v| v != "0").unwrap_or(true)
+            && ctx.tap.is_none()
+            && self.spec.is_dense()
+            && self.out_shape.n == 1
+            && self.out_shape.c >= gemm_conv_min_cout()
+            && matches!(self.spec.act, Act::Silu)
+            && ctx.ids.im2col != crate::NONE
+            && ctx.ids.matmul_reg2 != crate::NONE
+            && ctx.ids.conv_epilogue != crate::NONE
+    }
+
+    /// im2col + matmul_reg2 (raw conv into `act`) + conv_epilogue (per-channel
+    /// affine from `sb` + SiLU, in place). Reproduces the fused conv_act exactly.
+    fn forward_eval_gemm(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
+        let (cin, h, w) = (self.in_shape.c, self.in_shape.h, self.in_shape.w);
+        let (k, stride, pad) = (self.spec.k, self.spec.stride, self.spec.pad);
+        let (cout, ho, wo) = (self.out_shape.c, self.out_shape.h, self.out_shape.w);
+        let cinkk = cin * k * k;
+        let hw = ho * wo;
+        if self.col.borrow().is_none() {
+            *self.col.borrow_mut() = Some(ctx.gpu.storage((hw as u64) * (cinkk as u64)));
+        }
+        let col_ref = self.col.borrow();
+        let col = col_ref.as_ref().unwrap();
+        let s_col = ctx.step(
+            ctx.ids.im2col,
+            &[x_in, col],
+            &[cin, h, w, k, stride, pad, ho, wo, cinkk],
+            hw * cinkk,
+        );
+        // y[Cout, HW] = W[Cout, CinKK] . col[HW, CinKK]^T into conv_out (raw conv).
+        let reg_threads = cout.div_ceil(128) * hw.div_ceil(128) * 256;
+        let s_gemm = ctx.step(
+            ctx.ids.matmul_reg2,
+            &[ps.w(&self.names.weight), col, &self.conv_out],
+            &[cout, cinkk, hw],
+            reg_threads,
+        );
+        // per-channel affine (BN-eval collapsed in `sb`) + SiLU (act=2): conv_out -> act.
+        let s_epi = ctx.step(ctx.ids.conv_epilogue, &[&self.sb, &self.conv_out, &self.act], &[cout, hw, 2], cout * hw);
+        ctx.gpu.submit(&[], &[s_col, s_gemm, s_epi]);
     }
 
     fn forward_eval_unfused(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {

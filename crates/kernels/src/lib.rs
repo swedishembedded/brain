@@ -3,8 +3,15 @@
 
 //! Raw WGSL compute kernels — the single source of truth for brain's GPU
 //! engine. fp32-only, core-compute-only (single bind group, <=4 storage
-//! buffers/kernel, `@workgroup_size(64)`, no atomics/subgroups/f16) so the
-//! same text runs on old desktop GPUs and on WebGPU in the browser.
+//! buffers/kernel, no atomics/subgroups/f16) so the same text runs on old
+//! desktop GPUs and on WebGPU in the browser.
+//!
+//! Workgroup size is `@workgroup_size(64)` everywhere except the register-tiled
+//! GEMMs (`matmul_reg*`), which need 256 invocations to hold a 128x128 output
+//! tile. Backends read each kernel's declared size via
+//! `backend_api::workgroup_size_of`, so a kernel's WGSL is the only place its
+//! size is written down — but a kernel that departs from 64 must also
+//! reconstruct its flat invocation id with its own size.
 //!
 //! Each `.wgsl` file under `wgsl/` is embedded as a `pub const` (UPPER_SNAKE of
 //! the file stem) and indexed by name via [`src`]. This crate is pure string
@@ -128,6 +135,10 @@ pub const BROADCAST_ADD_HW: &str = include_str!("../wgsl/broadcast_add_hw.wgsl")
 pub const BROADCAST_ADD_HW_DA: &str = include_str!("../wgsl/broadcast_add_hw_da.wgsl");
 /// `wgsl/bsq_quantize.wgsl`
 pub const BSQ_QUANTIZE: &str = include_str!("../wgsl/bsq_quantize.wgsl");
+/// `wgsl/ce_stats.wgsl`
+pub const CE_STATS: &str = include_str!("../wgsl/ce_stats.wgsl");
+/// `wgsl/ce_grad_stats.wgsl`
+pub const CE_GRAD_STATS: &str = include_str!("../wgsl/ce_grad_stats.wgsl");
 /// `wgsl/ce_grad.wgsl`
 pub const CE_GRAD: &str = include_str!("../wgsl/ce_grad.wgsl");
 /// `wgsl/ce_grad_masked.wgsl`
@@ -280,6 +291,10 @@ pub const GRAD_SCALE: &str = include_str!("../wgsl/grad_scale.wgsl");
 pub const GRAD_SCALE_BUF: &str = include_str!("../wgsl/grad_scale_buf.wgsl");
 /// `wgsl/gradnorm_sq.wgsl`
 pub const GRADNORM_SQ: &str = include_str!("../wgsl/gradnorm_sq.wgsl");
+/// `wgsl/conv_epilogue.wgsl`
+pub const CONV_EPILOGUE: &str = include_str!("../wgsl/conv_epilogue.wgsl");
+/// `wgsl/im2col.wgsl`
+pub const IM2COL: &str = include_str!("../wgsl/im2col.wgsl");
 /// `wgsl/l2norm_scale.wgsl`
 pub const L2NORM_SCALE: &str = include_str!("../wgsl/l2norm_scale.wgsl");
 /// `wgsl/l2norm_scale_dg.wgsl`
@@ -312,10 +327,20 @@ pub const MASKED_L1: &str = include_str!("../wgsl/masked_l1.wgsl");
 pub const MASKED_L1_GRAD: &str = include_str!("../wgsl/masked_l1_grad.wgsl");
 /// `wgsl/matmul.wgsl`
 pub const MATMUL: &str = include_str!("../wgsl/matmul.wgsl");
+/// `wgsl/matmul_dw_reg.wgsl`
+pub const MATMUL_DW_REG: &str = include_str!("../wgsl/matmul_dw_reg.wgsl");
 /// `wgsl/matmul_dw.wgsl`
 pub const MATMUL_DW: &str = include_str!("../wgsl/matmul_dw.wgsl");
+/// `wgsl/matmul_dx_reg.wgsl`
+pub const MATMUL_DX_REG: &str = include_str!("../wgsl/matmul_dx_reg.wgsl");
 /// `wgsl/matmul_dx.wgsl`
 pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
+/// `wgsl/matmul_i8.wgsl`
+pub const MATMUL_I8: &str = include_str!("../wgsl/matmul_i8.wgsl");
+/// `wgsl/matmul_reg.wgsl`
+pub const MATMUL_REG: &str = include_str!("../wgsl/matmul_reg.wgsl");
+/// `wgsl/matmul_reg2.wgsl`
+pub const MATMUL_REG2: &str = include_str!("../wgsl/matmul_reg2.wgsl");
 /// `wgsl/matmul_rows.wgsl`
 pub const MATMUL_ROWS: &str = include_str!("../wgsl/matmul_rows.wgsl");
 /// `wgsl/matmul_tile.wgsl`
@@ -559,6 +584,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("broadcast_add_hw_da", BROADCAST_ADD_HW_DA),
     ("bsq_quantize", BSQ_QUANTIZE),
     ("ce_grad", CE_GRAD),
+    ("ce_stats", CE_STATS),
+    ("ce_grad_stats", CE_GRAD_STATS),
     ("ce_grad_masked", CE_GRAD_MASKED),
     ("ce_value", CE_VALUE),
     ("ce_value_masked", CE_VALUE_MASKED),
@@ -637,6 +664,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("l2norm_scale", L2NORM_SCALE),
     ("l2norm_scale_dg", L2NORM_SCALE_DG),
     ("l2norm_scale_dx", L2NORM_SCALE_DX),
+    ("conv_epilogue", CONV_EPILOGUE),
+    ("im2col", IM2COL),
     ("layernorm", LAYERNORM),
     ("layernorm_dbeta", LAYERNORM_DBETA),
     ("layernorm_dgamma", LAYERNORM_DGAMMA),
@@ -651,7 +680,12 @@ pub const ALL: &[(&str, &str)] = &[
     ("masked_l1_grad", MASKED_L1_GRAD),
     ("matmul", MATMUL),
     ("matmul_dw", MATMUL_DW),
+    ("matmul_dw_reg", MATMUL_DW_REG),
     ("matmul_dx", MATMUL_DX),
+    ("matmul_dx_reg", MATMUL_DX_REG),
+    ("matmul_i8", MATMUL_I8),
+    ("matmul_reg", MATMUL_REG),
+    ("matmul_reg2", MATMUL_REG2),
     ("matmul_rows", MATMUL_ROWS),
     ("matmul_tile", MATMUL_TILE),
     ("matmul_tiled", MATMUL_TILED),

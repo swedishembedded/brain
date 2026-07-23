@@ -48,6 +48,7 @@ const ATTN_APPLY: usize = 12;
 const GELU: usize = 13;
 const GELU_BWD: usize = 14;
 const CE_VALUE: usize = 15;
+#[allow(dead_code)]
 const CE_GRAD: usize = 16;
 const MATMUL_DX: usize = 17;
 const MATMUL_DW: usize = 18;
@@ -63,6 +64,12 @@ const GRAD_SCALE: usize = 27;
 const ADAMW: usize = 28;
 const CLIP_COEF: usize = 29;
 const GRAD_SCALE_BUF: usize = 30;
+const MATMUL_REG: usize = 31;
+const MATMUL_REG2: usize = 32;
+const MATMUL_DX_REG: usize = 33;
+const MATMUL_DW_REG: usize = 34;
+const CE_STATS: usize = 35;
+const CE_GRAD_STATS: usize = 36;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -96,7 +103,52 @@ const PIPELINES: &[(&str, &str)] = &[
     ("adamw", kernels::ADAMW),
     ("clip_coef", kernels::CLIP_COEF),
     ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
+    ("matmul_reg", kernels::MATMUL_REG),
+    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_dx_reg", kernels::MATMUL_DX_REG),
+    ("matmul_dw_reg", kernels::MATMUL_DW_REG),
+    ("ce_stats", kernels::CE_STATS),
+    ("ce_grad_stats", kernels::CE_GRAD_STATS),
 ];
+
+/// Pick the forward-linear GEMM kernel + its dispatch thread count for an
+/// `[M,K]·[N,K]ᵀ` product. The software-pipelined `matmul_reg2` (128×128 output tile,
+/// 256 threads) wins by ~10× once both output dims fill at least one tile; below
+/// that the naive one-thread-per-output `matmul` is better (a whole tile for a
+/// handful of outputs is mostly masked lanes). Same math either way — parity is
+/// gated in `brain-gpu-core`'s `bench_matmul` and by `gradcheck` — so this only
+/// ever changes speed, never results. `BRAIN_GPT_NAIVE_MM=1` forces the naive
+/// kernel (A/B comparison + a fallback if a driver ever mishandles the tile).
+fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
+    let naive = std::env::var("BRAIN_GPT_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+    if naive || m < 128 || n < 128 {
+        return (MATMUL, (m * n) as u32);
+    }
+    let threads = (m.div_ceil(128) * n.div_ceil(128) * 256) as u32;
+    // `matmul_reg2` (software-pipelined) is the default; `BRAIN_GPT_REG1=1`
+    // selects the non-pipelined `matmul_reg` for A/B comparison.
+    if std::env::var("BRAIN_GPT_REG1").map(|v| v != "0").unwrap_or(false) {
+        (MATMUL_REG, threads)
+    } else {
+        (MATMUL_REG2, threads)
+    }
+}
+
+
+/// Backward GEMM pickers — the tiled `matmul_{dx,dw}_reg` (matmul_reg2 structure,
+/// ~34% of P40 peak, bit-identical to the naive kernels) once both output dims
+/// fill a 128-tile, else the naive per-output kernel. `BRAIN_GPT_NAIVE_MM=1`
+/// forces naive (shares the forward's flag). Same math — gradcheck-gated.
+fn dx_kernel(m: usize, k: usize) -> (usize, u32) {
+    let naive = std::env::var("BRAIN_GPT_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+    if naive || m < 128 || k < 128 { (MATMUL_DX, (m * k) as u32) }
+    else { (MATMUL_DX_REG, (m.div_ceil(128) * k.div_ceil(128) * 256) as u32) }
+}
+fn dw_kernel(nrows: usize, k: usize) -> (usize, u32) {
+    let naive = std::env::var("BRAIN_GPT_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+    if naive || nrows < 128 || k < 128 { (MATMUL_DW, (nrows * k) as u32) }
+    else { (MATMUL_DW_REG, (nrows.div_ceil(128) * k.div_ceil(128) * 256) as u32) }
+}
 
 #[derive(Clone, Debug)]
 pub struct GptConfig {
@@ -218,6 +270,7 @@ pub struct Gpt {
     // backward temporaries
     dres: Vec<gpu_core::DeviceBuffer>,
     d_logits: gpu_core::DeviceBuffer,
+    ce_stats: gpu_core::DeviceBuffer,
     d_xn: gpu_core::DeviceBuffer,
     d_branch: gpu_core::DeviceBuffer,
     d_tmp: gpu_core::DeviceBuffer,
@@ -306,6 +359,7 @@ impl Gpt {
             ce_buf: st(n),
             dres,
             d_logits: st(n * v),
+            ce_stats: st(n * 2),
             d_xn: st(n * d),
             d_branch: st(n * d),
             d_tmp: st(n * d),
@@ -356,33 +410,45 @@ impl Gpt {
             let p = |name: &str| format!("blocks.{l}.{name}");
             // attention
             s.push(self.gpu.step(LAYERNORM, &[&self.res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out], &[d, n, f(1e-5)], n));
-            s.push(self.gpu.step(MATMUL, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], n * 3 * d));
+            let (mk, mt) = linear_kernel(n as usize, (3 * d) as usize);
+            s.push(self.gpu.step(mk, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], mt));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[n, 3 * d], n * 3 * d));
             s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &lb.scores], &[b_use, c.n_heads, t_use, hd, 3 * d, 0, d], b_use * c.n_heads * t_use * t_use));
             s.push(self.gpu.step(ATTN_SOFTMAX, &[&lb.scores, &lb.probs], &[b_use, c.n_heads, t_use], b_use * c.n_heads * t_use));
             s.push(self.gpu.step(ATTN_APPLY, &[&lb.probs, &lb.qkv, &lb.attn_ctx], &[b_use, c.n_heads, t_use, hd, 3 * d, 2 * d, d], b_use * c.n_heads * t_use * hd));
-            s.push(self.gpu.step(MATMUL, &[&lb.attn_ctx, self.w(&p("attn.out.weight")), &self.proj], &[n, d, d], n * d));
+            let (mk, mt) = linear_kernel(n as usize, d as usize);
+            s.push(self.gpu.step(mk, &[&lb.attn_ctx, self.w(&p("attn.out.weight")), &self.proj], &[n, d, d], mt));
             s.push(self.gpu.step(BIAS_ADD, &[&self.proj, self.w(&p("attn.out.bias"))], &[n, d], n * d));
             s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
             // MLP: fc -> GELU -> proj
             s.push(self.gpu.step(LAYERNORM, &[&lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out], &[d, n, f(1e-5)], n));
-            s.push(self.gpu.step(MATMUL, &[&lb.ln2_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[n, d, ff], n * ff));
+            let (mk, mt) = linear_kernel(n as usize, ff as usize);
+            s.push(self.gpu.step(mk, &[&lb.ln2_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[n, d, ff], mt));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.fc, self.w(&p("mlp.fc.bias"))], &[n, ff], n * ff));
             s.push(self.gpu.step(GELU, &[&lb.fc, &lb.gelu], &[n * ff], n * ff));
-            s.push(self.gpu.step(MATMUL, &[&lb.gelu, self.w(&p("mlp.proj.weight")), &self.ffn_out], &[n, ff, d], n * d));
+            let (mk, mt) = linear_kernel(n as usize, d as usize);
+            s.push(self.gpu.step(mk, &[&lb.gelu, self.w(&p("mlp.proj.weight")), &self.ffn_out], &[n, ff, d], mt));
             s.push(self.gpu.step(BIAS_ADD, &[&self.ffn_out, self.w(&p("mlp.proj.bias"))], &[n, d], n * d));
             s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.ffn_out, &self.res[l + 1]], &[n * d], n * d));
         }
 
         let last = c.n_layers as usize;
         s.push(self.gpu.step(LAYERNORM, &[&self.res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final], &[d, n, f(1e-5)], n));
-        s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w("lm_head.weight"), &self.logits], &[n, d, v], n * v));
+        let (mk, mt) = linear_kernel(n as usize, v as usize);
+        s.push(self.gpu.step(mk, &[&self.xn_final, self.w("lm_head.weight"), &self.logits], &[n, d, v], mt));
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
         s
     }
 
     pub fn forward_submit(&self) {
         self.gpu.submit(&[], &self.fwd_steps);
+    }
+
+    /// The full `[B*T, vocab]` logits from the last `forward_submit` (blocking
+    /// read-back). Exposed for cross-backend/kernel equivalence benchmarks.
+    pub fn logits_host(&self) -> Vec<f32> {
+        let n = (self.b * self.t * self.cfg.vocab) as usize;
+        self.gpu.read(&self.logits, n)
     }
 
     pub fn loss(&self) -> f32 {
@@ -415,9 +481,13 @@ impl Gpt {
         let mut s: Vec<Step> = Vec::new();
 
         // head (no bias) + final layernorm
-        s.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * v));
-        s.push(self.gpu.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, g("lm_head.weight")], &[n, d, v], v * d));
-        s.push(self.gpu.step(MATMUL_DX, &[&self.d_logits, self.w("lm_head.weight"), &self.d_xn], &[n, d, v, 0], n * d));
+        // Two-pass CE gradient (see qwen): O(rows*vocab) not O(rows*vocab^2).
+        s.push(self.gpu.step(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[n, v, IGNORE], n));
+        s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.ce_stats, &self.d_logits], n * v));
+        let (bk, bt) = dw_kernel(v as usize, d as usize);
+        s.push(self.gpu.step(bk, &[&self.d_logits, &self.xn_final, g("lm_head.weight")], &[n, d, v], bt));
+        let (bk, bt) = dx_kernel(n as usize, d as usize);
+        s.push(self.gpu.step(bk, &[&self.d_logits, self.w("lm_head.weight"), &self.d_xn], &[n, d, v, 0], bt));
         let last = c.n_layers as usize;
         s.push(self.gpu.step(LN_STATS, &[&self.res[last], &self.ln_mean, &self.ln_inv], &[d, n, f(1e-5)], n));
         s.push(self.gpu.step(LN_DGAMMA, &[&self.d_xn, &self.res[last], &self.ln_mean, &self.ln_inv, g("ln.weight")], &[d, n], d));
@@ -428,12 +498,16 @@ impl Gpt {
             let lb = &self.layers[l];
             // MLP backward (input grad = dres[l+1])
             s.push(self.gpu.step(BIAS_GRAD, &[&self.dres[l + 1], g(&p(l, "mlp.proj.bias"))], &[n, d], d));
-            s.push(self.gpu.step(MATMUL_DW, &[&self.dres[l + 1], &lb.gelu, g(&p(l, "mlp.proj.weight"))], &[n, ff, d], d * ff));
-            s.push(self.gpu.step(MATMUL_DX, &[&self.dres[l + 1], self.w(&p(l, "mlp.proj.weight")), &self.d_gelu], &[n, ff, d, 0], n * ff));
+            let (bk, bt) = dw_kernel(d as usize, ff as usize);
+            s.push(self.gpu.step(bk, &[&self.dres[l + 1], &lb.gelu, g(&p(l, "mlp.proj.weight"))], &[n, ff, d], bt));
+            let (bk, bt) = dx_kernel(n as usize, ff as usize);
+            s.push(self.gpu.step(bk, &[&self.dres[l + 1], self.w(&p(l, "mlp.proj.weight")), &self.d_gelu], &[n, ff, d, 0], bt));
             s.push(self.gpu.step(GELU_BWD, &[&lb.fc, &self.d_gelu, &self.d_fc], &[n * ff], n * ff));
             s.push(self.gpu.step(BIAS_GRAD, &[&self.d_fc, g(&p(l, "mlp.fc.bias"))], &[n, ff], ff));
-            s.push(self.gpu.step(MATMUL_DW, &[&self.d_fc, &lb.ln2_out, g(&p(l, "mlp.fc.weight"))], &[n, d, ff], ff * d));
-            s.push(self.gpu.step(MATMUL_DX, &[&self.d_fc, self.w(&p(l, "mlp.fc.weight")), &self.d_branch], &[n, d, ff, 0], n * d));
+            let (bk, bt) = dw_kernel(ff as usize, d as usize);
+            s.push(self.gpu.step(bk, &[&self.d_fc, &lb.ln2_out, g(&p(l, "mlp.fc.weight"))], &[n, d, ff], bt));
+            let (bk, bt) = dx_kernel(n as usize, d as usize);
+            s.push(self.gpu.step(bk, &[&self.d_fc, self.w(&p(l, "mlp.fc.weight")), &self.d_branch], &[n, d, ff, 0], bt));
             s.push(self.gpu.step(LN_STATS, &[&lb.xmid, &self.ln_mean, &self.ln_inv], &[d, n, f(1e-5)], n));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_branch, &lb.xmid, &self.ln_mean, &self.ln_inv, g(&p(l, "ln2.weight"))], &[d, n], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p(l, "ln2.bias"))], &[d, n], d));
@@ -442,15 +516,19 @@ impl Gpt {
 
             // attention backward (input grad = dxmid)
             s.push(self.gpu.step(BIAS_GRAD, &[&self.dxmid, g(&p(l, "attn.out.bias"))], &[n, d], d));
-            s.push(self.gpu.step(MATMUL_DW, &[&self.dxmid, &lb.attn_ctx, g(&p(l, "attn.out.weight"))], &[n, d, d], d * d));
-            s.push(self.gpu.step(MATMUL_DX, &[&self.dxmid, self.w(&p(l, "attn.out.weight")), &self.d_attn_ctx], &[n, d, d, 0], n * d));
+            let (bk, bt) = dw_kernel(d as usize, d as usize);
+            s.push(self.gpu.step(bk, &[&self.dxmid, &lb.attn_ctx, g(&p(l, "attn.out.weight"))], &[n, d, d], bt));
+            let (bk, bt) = dx_kernel(n as usize, d as usize);
+            s.push(self.gpu.step(bk, &[&self.dxmid, self.w(&p(l, "attn.out.weight")), &self.d_attn_ctx], &[n, d, d, 0], bt));
             s.push(self.gpu.step(ATTN_DSCORES, &[&self.d_attn_ctx, &lb.qkv, &lb.probs, &self.d_scores], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t));
             s.push(self.gpu.step(ATTN_DV, &[&lb.probs, &self.d_attn_ctx, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 2 * d, d], self.b * c.n_heads * self.t * hd));
             s.push(self.gpu.step(ATTN_DQ, &[&self.d_scores, &lb.qkv, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * hd));
             s.push(self.gpu.step(ATTN_DK, &[&self.d_scores, &lb.qkv, &self.d_qkv], &[self.b, c.n_heads, self.t, hd, 3 * d, 0, d], self.b * c.n_heads * self.t * hd));
             s.push(self.gpu.step(BIAS_GRAD, &[&self.d_qkv, g(&p(l, "attn.qkv.bias"))], &[n, 3 * d], 3 * d));
-            s.push(self.gpu.step(MATMUL_DW, &[&self.d_qkv, &lb.ln1_out, g(&p(l, "attn.qkv.weight"))], &[n, d, 3 * d], 3 * d * d));
-            s.push(self.gpu.step(MATMUL_DX, &[&self.d_qkv, self.w(&p(l, "attn.qkv.weight")), &self.d_branch], &[n, d, 3 * d, 0], n * d));
+            let (bk, bt) = dw_kernel((3 * d) as usize, d as usize);
+            s.push(self.gpu.step(bk, &[&self.d_qkv, &lb.ln1_out, g(&p(l, "attn.qkv.weight"))], &[n, d, 3 * d], bt));
+            let (bk, bt) = dx_kernel(n as usize, d as usize);
+            s.push(self.gpu.step(bk, &[&self.d_qkv, self.w(&p(l, "attn.qkv.weight")), &self.d_branch], &[n, d, 3 * d, 0], bt));
             s.push(self.gpu.step(LN_STATS, &[&self.res[l], &self.ln_mean, &self.ln_inv], &[d, n, f(1e-5)], n));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_branch, &self.res[l], &self.ln_mean, &self.ln_inv, g(&p(l, "ln1.weight"))], &[d, n], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p(l, "ln1.bias"))], &[d, n], d));

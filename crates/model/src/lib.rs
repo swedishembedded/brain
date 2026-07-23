@@ -21,7 +21,7 @@ pub mod vit;
 
 pub use train::{cosine_lr, generate, FitOpts, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
-pub use train::fit;
+pub use train::{fit, load_dataset};
 
 /// What a batch looks like for a given model. Decoder-LM and seq2seq differ in
 /// whether there is a separate source sequence; this enum keeps `set_batch`

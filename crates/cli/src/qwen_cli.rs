@@ -25,8 +25,9 @@ pub fn run_qwen(args: &[String]) {
         Some("precompile") => precompile(&args[1..]),
         Some("train") => train(&args[1..], None),
         Some("finetune") => finetune(&args[1..]),
+        Some("toolcall") => toolcall(&args[1..]),
         other => {
-            eprintln!("usage: brain qwen <import|infer|export|precompile|train|finetune> ...  (got {other:?})")
+            eprintln!("usage: brain qwen <import|infer|export|precompile|train|finetune|toolcall> ...  (got {other:?})")
         }
     }
 }
@@ -72,6 +73,7 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
 }
 
 fn import(args: &[String]) {
+    let mut block: Option<u32> = None;
     let mut hf = String::new();
     let mut out = "qwen.weights".to_string();
     let mut i = 0;
@@ -79,6 +81,7 @@ fn import(args: &[String]) {
         match args[i].as_str() {
             "--hf" => hf = val(args, &mut i, "--hf"),
             "--out" => out = val(args, &mut i, "--out"),
+            "--block" => block = val(args, &mut i, "--block").parse().ok(),
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
@@ -87,7 +90,7 @@ fn import(args: &[String]) {
         eprintln!("usage: brain qwen import --hf <dir> --out qwen.weights");
         return;
     }
-    match qwen::import::import(&hf, &out) {
+    match qwen::import::import_with_block(&hf, &out, block) {
         Ok(()) => println!("ok: wrote {out}"),
         Err(e) => eprintln!("import failed: {e}"),
     }
@@ -212,6 +215,7 @@ fn train(args: &[String], base: Option<&str>) {
     let mut seed = 1234u64;
     let mut mask: Option<char> = None;
     let mut align = false;
+    let mut save_secs = 600u64;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -223,6 +227,7 @@ fn train(args: &[String], base: Option<&str>) {
             "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
             "--mask" => mask = val(args, &mut i, "--mask").chars().next(),
             "--align" => align = true,
+            "--save-secs" => save_secs = val(args, &mut i, "--save-secs").parse().unwrap_or(save_secs),
             s if !s.starts_with("--") && data_dir.is_empty() => data_dir = s.to_string(),
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
@@ -267,6 +272,7 @@ fn train(args: &[String], base: Option<&str>) {
         grad_accum: 1,
         eval_interval: (steps / 10).max(1),
         eval_batches: 20,
+        checkpoint_secs: save_secs,
         mask_before: mask,
         mask_per_line: mask.is_some(),
         align_to_lines: align,
@@ -302,4 +308,79 @@ fn finetune(args: &[String]) {
         return;
     }
     train(&rest, Some(&base));
+}
+
+
+/// `brain qwen toolcall gen  --out DIR [--n N --held M --tools K --vocab V --tokenizer T]`
+///   Write a masked tool-call fine-tuning dataset (train + held-out val).
+/// `brain qwen toolcall eval --weights F --tokenizer T [--n N --tools K --seq S]`
+///   Score a checkpoint's held-out tool-call exact-match (teacher-forced greedy).
+fn toolcall(args: &[String]) {
+    match args.first().map(|s| s.as_str()) {
+        Some("gen") => toolcall_gen(&args[1..]),
+        Some("eval") => toolcall_eval(&args[1..]),
+        other => eprintln!("usage: brain qwen toolcall <gen|eval> ...  (got {other:?})"),
+    }
+}
+
+fn toolcall_gen(args: &[String]) {
+    let mut out = "data/toolcall".to_string();
+    let mut tokenizer = String::new();
+    let (mut n, mut held, mut tools, mut vocab, mut seed) = (400usize, 40usize, 3usize, 151936usize, 1u64);
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" => out = val(args, &mut i, "--out"),
+            "--tokenizer" => tokenizer = val(args, &mut i, "--tokenizer"),
+            "--n" => n = val(args, &mut i, "--n").parse().unwrap_or(n),
+            "--held" => held = val(args, &mut i, "--held").parse().unwrap_or(held),
+            "--tools" => tools = val(args, &mut i, "--tools").parse().unwrap_or(tools),
+            "--vocab" => vocab = val(args, &mut i, "--vocab").parse().unwrap_or(vocab),
+            "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    if tokenizer.is_empty() {
+        eprintln!("usage: brain qwen toolcall gen --tokenizer tokenizer.json --out DIR [--n --held --tools --vocab --seed]");
+        return;
+    }
+    let tok = match data::qwen_tokenizer::QwenBpe::from_file(&tokenizer) {
+        Ok(t) => t,
+        Err(e) => { eprintln!("tokenizer: {e}"); return; }
+    };
+    let train: Vec<_> = data::toolcall::generate(n, tools, seed).iter().map(|c| c.to_chat_example()).collect();
+    let val: Vec<_> = data::toolcall::generate(held, tools, seed ^ 0xDEAD).iter().map(|c| c.to_chat_example()).collect();
+    match data::chat::prepare_chat(&train, &val, &tok, vocab, std::path::Path::new(&out)) {
+        Ok(()) => println!("ok: wrote {n} train + {held} val tool-call examples -> {out}"),
+        Err(e) => eprintln!("prepare failed: {e}"),
+    }
+}
+
+fn toolcall_eval(args: &[String]) {
+    let mut weights = String::new();
+    let mut tokenizer = String::new();
+    let (mut n, mut tools, mut seq, mut seed) = (40usize, 3usize, 512usize, 999u64);
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--weights" => weights = val(args, &mut i, "--weights"),
+            "--tokenizer" => tokenizer = val(args, &mut i, "--tokenizer"),
+            "--n" => n = val(args, &mut i, "--n").parse().unwrap_or(n),
+            "--tools" => tools = val(args, &mut i, "--tools").parse().unwrap_or(tools),
+            "--seq" => seq = val(args, &mut i, "--seq").parse().unwrap_or(seq),
+            "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    if weights.is_empty() || tokenizer.is_empty() {
+        eprintln!("usage: brain qwen toolcall eval --weights F --tokenizer T [--n --tools --seq --seed]");
+        return;
+    }
+    let tok = match data::qwen_tokenizer::QwenBpe::from_file(&tokenizer) {
+        Ok(t) => t, Err(e) => { eprintln!("tokenizer: {e}"); return; }
+    };
+    let (exact, tacc) = qwen::toolcall_eval::score(&weights, &tok, n, tools, seq, seed);
+    println!("tool-call eval: exact-match {:.1}%  token-acc {:.1}%  ({n} held-out cases)", exact * 100.0, tacc * 100.0);
 }

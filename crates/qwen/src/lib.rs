@@ -10,6 +10,8 @@ pub mod import;
 pub mod init;
 pub mod model;
 pub mod sample;
+pub mod finetune;
+pub mod toolcall_eval;
 
 pub use config::{LoraCfg, QwenConfig};
 pub use init::init_weights;

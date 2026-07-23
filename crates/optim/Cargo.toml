@@ -14,6 +14,7 @@ brain-gpu-core.workspace = true
 brain-paramstore.workspace = true
 brain-kernels.workspace = true
 bytemuck.workspace = true
+rayon = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wgpu = "29"
@@ -21,3 +22,4 @@ pollster = "0.4"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu = { version = "29", default-features = false, features = ["webgpu", "wgsl"] }
+[dev-dependencies]

@@ -11,6 +11,8 @@ use std::cell::RefCell;
 
 use gpu_core::{f, Gpu, Step};
 use paramstore::ParamStore;
+pub mod offload;
+pub use offload::OffloadAdam;
 
 /// The optimiser dispatch graph, built once and reused. The bind groups (and
 /// the storage buffers they reference) are fixed; only the uniform *contents*

@@ -36,6 +36,7 @@ pub const IGNORE: u32 = 0xFFFF_FFFF;
 // ---- kernel indices (order matches PIPELINES) ----
 const EMBED: usize = 0;
 const MATMUL: usize = 1;
+const MATMUL_REG2: usize = 42;
 const MATMUL_DX: usize = 2;
 const MATMUL_DW: usize = 3;
 const RMSNORM: usize = 4;
@@ -125,6 +126,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("topk_mask", kernels::TOPK_MASK),
     ("add_index_mask", kernels::ADD_INDEX_MASK),
     ("add_inplace", kernels::ADD_INPLACE),
+    ("matmul_reg2", kernels::MATMUL_REG2),
 ];
 
 /// MLP variant per layer (cached activations for backprop).
@@ -495,7 +497,17 @@ impl Glm {
     // ---- dispatch helpers (mirror the moe/qwen style) ----
 
     fn mm(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, m: u32, k: u32, nout: u32) {
-        s.push(self.gpu.step(MATMUL, &[x, self.w(wname), out], &[m, k, nout], m * nout));
+        // Size-adaptive GEMM: software-pipelined `matmul_reg2` (128x128 tile,
+        // ~4 TFLOP/s on a P40) once both output dims fill a tile, else the naive
+        // per-output `matmul`. Same math (parity gated by gradcheck::check_glm),
+        // so this only changes speed. `BRAIN_GLM_NAIVE_MM=1` forces naive.
+        let naive = std::env::var("BRAIN_GLM_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+        let (mk, mt) = if naive || m < 128 || nout < 128 {
+            (MATMUL, m * nout)
+        } else {
+            (MATMUL_REG2, (m as usize).div_ceil(128) as u32 * (nout as usize).div_ceil(128) as u32 * 256)
+        };
+        s.push(self.gpu.step(mk, &[x, self.w(wname), out], &[m, k, nout], mt));
     }
 
     /// Backward for `y = x·Wᵀ`: weight grad (if trainable) + input grad into `dx`

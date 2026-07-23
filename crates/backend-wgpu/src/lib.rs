@@ -40,6 +40,11 @@ pub struct WgpuBackend {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub pipelines: Vec<wgpu::ComputePipeline>,
+    /// Each kernel's declared `@workgroup_size` (parallel to `pipelines`). Almost
+    /// every kernel is the engine's default 64; the register-tiled GEMMs use 256.
+    /// The dispatch grid must be laid out with the kernel's OWN size, because the
+    /// kernel reconstructs its flat invocation id from it.
+    wgsizes: Vec<u32>,
     /// Lazily-accumulated dispatches: `submit` appends its steps here instead of
     /// encoding+submitting immediately, and `flush` records the WHOLE batch into a
     /// single compute pass + one `queue.submit` (on the next read/write/poll). So
@@ -124,6 +129,32 @@ impl WgpuBackend {
     /// awaits it from the wasm-bindgen entry point.
     pub async fn new_async(kernels: &[(&str, &str)]) -> WgpuBackend {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        // `BRAIN_GPU_INDEX=<i>` pins a specific physical GPU (the box has two
+        // Tesla P40s); without it the high-performance default is used. This is
+        // what lets one process drive card 0 and another card 1, and is the hook
+        // multi-GPU data-parallel / sharding builds on.
+        let forced = std::env::var("BRAIN_GPU_INDEX").ok().and_then(|v| v.parse::<usize>().ok());
+        #[cfg(not(target_arch = "wasm32"))]
+        let adapter = match forced {
+            Some(i) => {
+                let mut adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
+                // Prefer discrete GPUs, stable order, then index into them.
+                adapters.retain(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
+                if adapters.is_empty() {
+                    panic!("BRAIN_GPU_INDEX set but no discrete GPU adapters enumerated");
+                }
+                adapters.into_iter().nth(i).unwrap_or_else(|| panic!("BRAIN_GPU_INDEX={i} out of range"))
+            }
+            None => instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                })
+                .await
+                .expect("no suitable GPU adapter found"),
+        };
+        #[cfg(target_arch = "wasm32")]
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -244,6 +275,7 @@ impl WgpuBackend {
             device,
             queue,
             pipelines,
+            wgsizes: backend_api::workgroup_sizes(kernels),
             pending: std::sync::Mutex::new(Vec::new()),
             stats,
             stats_bg: AtomicU64::new(0),
@@ -454,7 +486,7 @@ impl WgpuBackend {
         if self.stats.is_some() {
             self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let (gx, gy) = backend_api::grid(threads);
+        let (gx, gy) = backend_api::grid_ws(threads, self.wgsizes[kind]);
         (kind, bg, gx, gy)
     }
 
@@ -491,7 +523,7 @@ impl WgpuBackend {
         if self.stats.is_some() {
             self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let (gx, gy) = backend_api::grid(threads);
+        let (gx, gy) = backend_api::grid_ws(threads, self.wgsizes[kind]);
         (kind, bg, gx, gy)
     }
 

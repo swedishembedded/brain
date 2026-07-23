@@ -118,6 +118,7 @@ fn train(args: &[String], base: Option<&str>) {
         }
         cfg.block_size = block;
     }
+    let save_secs = 600u64;
     let opts = model::FitOpts {
         steps,
         batch_size: batch,
@@ -131,6 +132,7 @@ fn train(args: &[String], base: Option<&str>) {
         grad_accum: 1,
         eval_interval: (steps / 10).max(1),
         eval_batches: 20,
+        checkpoint_secs: save_secs,
         mask_before: mask,
         mask_per_line: mask.is_some(),
         align_to_lines: align,

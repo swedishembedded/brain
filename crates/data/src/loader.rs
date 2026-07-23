@@ -48,6 +48,12 @@ impl Default for BatchConfig {
 pub struct TokenDataset {
     data: Vec<u32>,
     line_starts: Option<Vec<usize>>,
+    /// Optional per-token supervision mask (parallel to `data`): `mask[i] == true`
+    /// means "token `i` is a trainable target". Used for chat / tool-call
+    /// fine-tuning, where only the assistant/response span is supervised and the
+    /// prompt is masked — token-level, unlike the char-boundary `mask_before_token`
+    /// which cannot express a multi-token prompt prefix.
+    mask: Option<Vec<bool>>,
 }
 
 impl TokenDataset {
@@ -59,7 +65,16 @@ impl TokenDataset {
         } else {
             None
         };
-        TokenDataset { data, line_starts }
+        TokenDataset { data, line_starts, mask: None }
+    }
+
+    /// Wrap a token array with an explicit per-token supervision mask (see
+    /// [`TokenDataset::mask`]). `mask.len()` must equal `data.len()`.
+    pub fn new_with_mask(data: Vec<u32>, mask: Vec<bool>, cfg: &BatchConfig) -> Self {
+        assert_eq!(data.len(), mask.len(), "mask length must match data length");
+        let mut d = Self::new(data, cfg);
+        d.mask = Some(mask);
+        d
     }
 
     pub fn len(&self) -> usize {
@@ -111,8 +126,10 @@ impl TokenDataset {
         let mut x = vec![0u32; bs * bl];
         let mut y = vec![0i32; bs * bl];
 
+        let mut starts = vec![0usize; bs];
         for b in 0..bs {
             let start = self.sample_start(cfg, rng);
+            starts[b] = start;
             for t in 0..bl {
                 x[b * bl + t] = self.data[start + t];
                 y[b * bl + t] = self.data[start + 1 + t] as i32;
@@ -121,6 +138,18 @@ impl TokenDataset {
 
         if let Some(mask_tok) = cfg.mask_before_token {
             self.apply_masking(&mut y, cfg, mask_tok);
+        }
+        // Token-level supervision mask: target y[b,t] predicts data[start+1+t];
+        // supervise it only where that target token is flagged trainable.
+        if let Some(mask) = &self.mask {
+            for b in 0..bs {
+                let start = starts[b];
+                for t in 0..bl {
+                    if !mask[start + 1 + t] {
+                        y[b * bl + t] = IGNORE;
+                    }
+                }
+            }
         }
         (x, y)
     }

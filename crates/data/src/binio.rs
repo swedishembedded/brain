@@ -242,3 +242,14 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
+
+/// Write a per-token supervision mask as raw `u8` (1 = trainable target, 0 = masked).
+pub fn write_mask_bin(path: &Path, mask: &[bool]) -> io::Result<()> {
+    let bytes: Vec<u8> = mask.iter().map(|&b| b as u8).collect();
+    std::fs::write(path, &bytes)
+}
+
+/// Read a `u8` supervision mask written by [`write_mask_bin`].
+pub fn read_mask_bin(path: &Path) -> io::Result<Vec<bool>> {
+    Ok(std::fs::read(path)?.into_iter().map(|b| b != 0).collect())
+}

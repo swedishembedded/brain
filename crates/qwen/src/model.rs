@@ -59,6 +59,7 @@ const SILU_DA: usize = 16;
 const SILU_DB: usize = 17;
 const ADD2: usize = 18;
 const CE_VALUE: usize = 19;
+#[allow(dead_code)]
 const CE_GRAD: usize = 20;
 const MATMUL_DX: usize = 21;
 const MATMUL_DW: usize = 22;
@@ -71,6 +72,11 @@ const GRAD_SCALE_BUF: usize = 28;
 const AXPY: usize = 29;
 const EMBED_TILE: usize = 30;
 const MATMUL_TILE: usize = 31;
+const MATMUL_REG2: usize = 32;
+const MATMUL_DX_REG: usize = 33;
+const MATMUL_DW_REG: usize = 34;
+const CE_STATS: usize = 35;
+const CE_GRAD_STATS: usize = 36;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -105,7 +111,47 @@ const PIPELINES: &[(&str, &str)] = &[
     ("axpy", kernels::AXPY),
     ("embed_tile", kernels::EMBED_TILE),
     ("matmul_tile", kernels::MATMUL_TILE),
+    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_dx_reg", kernels::MATMUL_DX_REG),
+    ("matmul_dw_reg", kernels::MATMUL_DW_REG),
+    ("ce_stats", kernels::CE_STATS),
+    ("ce_grad_stats", kernels::CE_GRAD_STATS),
 ];
+
+/// Pick the GEMM kernel + dispatch thread count for a forward linear
+/// `[m,k]·[n,k]ᵀ`. The software-pipelined `matmul_reg2` (128×128 tile, 256
+/// threads, ~4 TFLOP/s on a P40) wins once both output dims fill a tile; below
+/// that the naive one-thread-per-output `matmul` is better. Same math either way
+/// (parity gated by `tests/backend_parity` + gradcheck), so this only changes
+/// speed. `BRAIN_QWEN_NAIVE_MM=1` forces the naive kernel.
+fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
+    let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+    if naive || m < 128 || n < 128 {
+        (MATMUL, (m * n) as u32)
+    } else {
+        (MATMUL_REG2, (m.div_ceil(128) * n.div_ceil(128) * 256) as u32)
+    }
+}
+
+/// Backward GEMM pickers: tiled `matmul_{dx,dw}_reg` (bit-identical to naive,
+/// ~34% of P40 peak) once both output dims fill a 128-tile, else naive. Small
+/// LoRA-rank matmuls fall back automatically. `BRAIN_QWEN_NAIVE_MM=1` forces naive.
+/// Full fine-tuning with AdamW moments offloaded to system RAM (`BRAIN_OFFLOAD_ADAM=1`).
+fn offload_adam() -> bool {
+    std::env::var("BRAIN_OFFLOAD_ADAM").map(|v| v != "0").unwrap_or(false)
+}
+
+fn dx_kernel_bw(m: u32, k: u32) -> (usize, u32) {
+    let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+    if naive || m < 128 || k < 128 { (MATMUL_DX, m * k) }
+    else { (MATMUL_DX_REG, m.div_ceil(128) * k.div_ceil(128) * 256) }
+}
+fn dw_kernel_bw(nrows: u32, k: u32) -> (usize, u32) {
+    let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
+    if naive || nrows < 128 || k < 128 { (MATMUL_DW, nrows * k) }
+    else { (MATMUL_DW_REG, nrows.div_ceil(128) * k.div_ceil(128) * 256) }
+}
+
 
 /// Per-binding budget (f32 words) for tiling the embedding / lm_head over vocab,
 /// so each storage binding stays under a backend's `max_storage_buffer_binding_
@@ -142,6 +188,8 @@ pub struct Qwen {
     pub cfg: QwenConfig,
     pub ps: ParamStore,
     opt: Optim,
+    /// Host AdamW for offloaded params (RAM-resident moments); None otherwise.
+    offload_opt: std::cell::RefCell<Option<optim::OffloadAdam>>,
     b: u32,
     t: u32,
     count: Cell<f32>,
@@ -160,6 +208,7 @@ pub struct Qwen {
     // backward temporaries
     dres: Vec<DeviceBuffer>,
     d_logits: DeviceBuffer,
+    ce_stats: DeviceBuffer,
     d_xn: DeviceBuffer,
     d_tmp: DeviceBuffer,
     dxmid: DeviceBuffer,
@@ -235,10 +284,22 @@ impl Qwen {
                 })
                 .collect();
             ParamStore::new_with_roles(&gpu, roles, init)
+        } else if offload_adam() {
+            // Full fine-tuning with the AdamW moments in system RAM (Role::Offload):
+            // GPU holds only weight+grad (2×model) instead of 4×model.
+            let roles = cfg
+                .param_list()
+                .into_iter()
+                .map(|(n, c)| (n, c, paramstore::Role::Offload))
+                .collect();
+            ParamStore::new_with_roles(&gpu, roles, init)
         } else {
             ParamStore::new(&gpu, cfg.param_list(), init)
         };
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
+        // Lazily-built host optimiser for the offloaded params (None unless any
+        // parameter took Role::Offload).
+        let offload_opt: std::cell::RefCell<Option<optim::OffloadAdam>> = std::cell::RefCell::new(None);
 
         let n = (b * t) as u64;
         let d = cfg.d_model as u64;
@@ -298,6 +359,7 @@ impl Qwen {
             t,
             count: Cell::new(1.0),
             ps,
+            offload_opt,
             opt,
             tokens,
             targets,
@@ -311,6 +373,7 @@ impl Qwen {
             ce_buf: st(n),
             dres,
             d_logits: st(n * v),
+            ce_stats: st(n * 2),
             d_xn: st(n * d),
             d_tmp: st(n * d),
             dxmid: st(n * d),
@@ -425,24 +488,31 @@ impl Qwen {
                 // base: dx += d_out·W (frozen weight — no dW). d_out is NOT mutated
                 // here: for `wo` it is `dxmid`, reused downstream as the residual
                 // grad, so the adapter scale is folded into the private scratch.
-                s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+                let (bk, bt) = dx_kernel_bw(m, k);
+                s.push(self.gpu.step(bk, &[d_out, self.w(wname), dx], &[m, k, nout, acc], bt));
                 let a = format!("{wname}.lora_a");
                 let bnm = format!("{wname}.lora_b");
                 // a = (alpha/r)·(x·Aᵀ)  -> gB += d_outᵀ·a
                 s.push(self.gpu.step(MATMUL, &[x, self.w(&a), &self.lora_a], &[m, k, r], m * r));
                 s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_a], &[m * r, f(scale)], m * r));
-                s.push(self.gpu.step(MATMUL_DW, &[d_out, &self.lora_a, self.g(&bnm)], &[m, r, nout], nout * r));
+                let (bk, bt) = dw_kernel_bw(nout, r);
+                s.push(self.gpu.step(bk, &[d_out, &self.lora_a, self.g(&bnm)], &[m, r, nout], bt));
                 // da = (alpha/r)·(d_out·B) -> gA += daᵀ·x ; dx += da·A
-                s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], m * r));
+                let (bk, bt) = dx_kernel_bw(m, r);
+                s.push(self.gpu.step(bk, &[d_out, self.w(&bnm), &self.lora_da], &[m, r, nout, 0], bt));
                 s.push(self.gpu.step(GRAD_SCALE, &[&self.lora_da], &[m * r, f(scale)], m * r));
-                s.push(self.gpu.step(MATMUL_DW, &[&self.lora_da, x, self.g(&a)], &[m, k, r], r * k));
-                s.push(self.gpu.step(MATMUL_DX, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], m * k));
+                let (bk, bt) = dw_kernel_bw(r, k);
+                s.push(self.gpu.step(bk, &[&self.lora_da, x, self.g(&a)], &[m, k, r], bt));
+                let (bk, bt) = dx_kernel_bw(m, k);
+                s.push(self.gpu.step(bk, &[&self.lora_da, self.w(&a), dx], &[m, k, r, 1], bt));
             }
             None => {
                 if self.trainable(wname) {
-                    s.push(self.gpu.step(MATMUL_DW, &[d_out, x, self.g(wname)], &[m, k, nout], nout * k));
+                    let (bk, bt) = dw_kernel_bw(nout, k);
+                    s.push(self.gpu.step(bk, &[d_out, x, self.g(wname)], &[m, k, nout], bt));
                 }
-                s.push(self.gpu.step(MATMUL_DX, &[d_out, self.w(wname), dx], &[m, k, nout, acc], m * k));
+                let (bk, bt) = dx_kernel_bw(m, k);
+                s.push(self.gpu.step(bk, &[d_out, self.w(wname), dx], &[m, k, nout, acc], bt));
             }
         }
     }
@@ -499,11 +569,14 @@ impl Qwen {
             // --- attention --- (projections stay here: they carry LoRA/bias;
             // norms/RoPE/attention-core come from the shared block builders)
             s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[l], self.w(&p("ln1.weight")), &lb.xn1, d, n));
-            s.push(self.gpu.step(MATMUL, &[&lb.xn1, self.w(&p("attn.wq.weight")), &lb.q_pre], &[n, d, hq], n * hq));
+            let (mk, mt) = linear_kernel(n as usize, hq as usize);
+            s.push(self.gpu.step(mk, &[&lb.xn1, self.w(&p("attn.wq.weight")), &lb.q_pre], &[n, d, hq], mt));
             self.lora_fwd(&mut s, "wq", &lb.xn1, &p("attn.wq.weight"), &lb.q_pre, n, d, hq);
-            s.push(self.gpu.step(MATMUL, &[&lb.xn1, self.w(&p("attn.wk.weight")), &lb.k_pre], &[n, d, hkv], n * hkv));
+            let (mk, mt) = linear_kernel(n as usize, hkv as usize);
+            s.push(self.gpu.step(mk, &[&lb.xn1, self.w(&p("attn.wk.weight")), &lb.k_pre], &[n, d, hkv], mt));
             self.lora_fwd(&mut s, "wk", &lb.xn1, &p("attn.wk.weight"), &lb.k_pre, n, d, hkv);
-            s.push(self.gpu.step(MATMUL, &[&lb.xn1, self.w(&p("attn.wv.weight")), &lb.v], &[n, d, hkv], n * hkv));
+            let (mk, mt) = linear_kernel(n as usize, hkv as usize);
+            s.push(self.gpu.step(mk, &[&lb.xn1, self.w(&p("attn.wv.weight")), &lb.v], &[n, d, hkv], mt));
             self.lora_fwd(&mut s, "wv", &lb.xn1, &p("attn.wv.weight"), &lb.v, n, d, hkv);
             // QK-norm over head_dim then half-split RoPE on q/k.
             s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.q_pre, self.w(&p("attn.q_norm.weight")), &lb.q, hd, n * nh));
@@ -511,33 +584,47 @@ impl Qwen {
             s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, nh, hd, hq, t_use, theta));
             s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, nkv, hd, hkv, t_use, theta));
             s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &self.scores, &lb.probs, &lb.ctx));
-            s.push(self.gpu.step(MATMUL, &[&lb.ctx, self.w(&p("attn.wo.weight")), &self.proj], &[n, hq, d], n * d));
+            let (mk, mt) = linear_kernel(n as usize, d as usize);
+            s.push(self.gpu.step(mk, &[&lb.ctx, self.w(&p("attn.wo.weight")), &self.proj], &[n, hq, d], mt));
             self.lora_fwd(&mut s, "wo", &lb.ctx, &p("attn.wo.weight"), &self.proj, n, hq, d);
             s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
             // --- SwiGLU MLP ---
             s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.xmid, self.w(&p("ln2.weight")), &lb.xn2, d, n));
-            s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&p("mlp.gate.weight")), &lb.gate_pre], &[n, d, ff], n * ff));
+            let (mk, mt) = linear_kernel(n as usize, ff as usize);
+            s.push(self.gpu.step(mk, &[&lb.xn2, self.w(&p("mlp.gate.weight")), &lb.gate_pre], &[n, d, ff], mt));
             self.lora_fwd(&mut s, "gate", &lb.xn2, &p("mlp.gate.weight"), &lb.gate_pre, n, d, ff);
-            s.push(self.gpu.step(MATMUL, &[&lb.xn2, self.w(&p("mlp.up.weight")), &lb.up], &[n, d, ff], n * ff));
+            let (mk, mt) = linear_kernel(n as usize, ff as usize);
+            s.push(self.gpu.step(mk, &[&lb.xn2, self.w(&p("mlp.up.weight")), &lb.up], &[n, d, ff], mt));
             self.lora_fwd(&mut s, "up", &lb.xn2, &p("mlp.up.weight"), &lb.up, n, d, ff);
             s.push(block::swiglu_fwd(&self.gpu, &ids, &lb.gate_pre, &lb.up, &lb.h, n * ff));
-            s.push(self.gpu.step(MATMUL, &[&lb.h, self.w(&p("mlp.down.weight")), &self.mlp_out], &[n, ff, d], n * d));
+            let (mk, mt) = linear_kernel(n as usize, d as usize);
+            s.push(self.gpu.step(mk, &[&lb.h, self.w(&p("mlp.down.weight")), &self.mlp_out], &[n, ff, d], mt));
             self.lora_fwd(&mut s, "down", &lb.h, &p("mlp.down.weight"), &self.mlp_out, n, ff, d);
             s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
         }
 
         let last = c.n_layers as usize;
         s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[last], self.w("norm.weight"), &self.xn_final, d, n));
-        // lm_head, tiled over vocab; each tile writes its column slice of logits.
+        // lm_head. When the whole vocab fits one tile (v0=0, cnt=v — the common
+        // case for a small vocab like the TTS Talker's 3072), it is a plain
+        // `[n,d]·[v,d]ᵀ` matmul, so dispatch the size-adaptive fast kernel
+        // (`matmul_reg2`) instead of the naive column-tiled `matmul_tile` — the
+        // Talker lm_head was ~50 ms (naive) vs ~2 ms (reg2). Only when the weight
+        // genuinely exceeds a binding budget do we fall back to the tiled path.
         let head = c.head_weight();
-        for &(v0, cnt) in &tiles {
-            s.push(self.gpu.step_sliced(
-                MATMUL_TILE,
-                &[&self.xn_final, self.w(head), &self.logits],
-                &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
-                &[n, d, v, v0, cnt],
-                n * cnt,
-            ));
+        if tiles.len() == 1 && tiles[0] == (0, v) {
+            let (mk, mt) = linear_kernel(n as usize, v as usize);
+            s.push(self.gpu.step(mk, &[&self.xn_final, self.w(head), &self.logits], &[n, d, v], mt));
+        } else {
+            for &(v0, cnt) in &tiles {
+                s.push(self.gpu.step_sliced(
+                    MATMUL_TILE,
+                    &[&self.xn_final, self.w(head), &self.logits],
+                    &[(0, 0), (v0 as u64 * dw, cnt as u64 * dw), (0, 0)],
+                    &[n, d, v, v0, cnt],
+                    n * cnt,
+                ));
+            }
         }
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
         s
@@ -576,11 +663,18 @@ impl Qwen {
         let mut s: Vec<Step> = Vec::new();
 
         // ---- head + final norm ----
-        s.push(self.gpu.step_buf(CE_GRAD, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.d_logits], n * v));
+        // Two-pass CE gradient: compute per-row softmax stats ONCE (ce_stats),
+        // then the per-element gradient reads them — O(rows*vocab) instead of the
+        // naive per-element softmax recompute's O(rows*vocab^2). At vocab 151936
+        // this is the difference between ~10 ms and ~56 s per backward.
+        s.push(self.gpu.step(CE_STATS, &[&self.logits, &self.targets, &self.ce_stats], &[n, v, IGNORE], n));
+        s.push(self.gpu.step_buf(CE_GRAD_STATS, &self.ce_grad_uni, &[&self.logits, &self.targets, &self.ce_stats, &self.d_logits], n * v));
         if self.trainable(head) {
-            s.push(self.gpu.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, self.g(head)], &[n, d, v], v * d));
+            let (bk, bt) = dw_kernel_bw(v, d);
+            s.push(self.gpu.step(bk, &[&self.d_logits, &self.xn_final, self.g(head)], &[n, d, v], bt));
         }
-        s.push(self.gpu.step(MATMUL_DX, &[&self.d_logits, self.w(head), &self.d_xn], &[n, d, v, 0], n * d));
+        let (bk, bt) = dx_kernel_bw(n, d);
+        s.push(self.gpu.step(bk, &[&self.d_logits, self.w(head), &self.d_xn], &[n, d, v, 0], bt));
         let last = c.n_layers as usize;
         self.rmsnorm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
 
@@ -630,7 +724,17 @@ impl Qwen {
         self.gpu.poll_wait();
     }
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
+        // GPU optimiser for `Trainable` params.
         self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, extra_scale);
+        // Host (RAM-resident) optimiser for `Offload` params — built lazily on the
+        // first step from the store's current weights.
+        if !self.ps.offload.is_empty() {
+            let mut slot = self.offload_opt.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(optim::OffloadAdam::new(&self.gpu, &self.ps));
+            }
+            slot.as_mut().unwrap().step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, extra_scale);
+        }
     }
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
         self.ps.read_grad(&self.gpu, name)

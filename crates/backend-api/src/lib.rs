@@ -53,16 +53,61 @@ impl<T: ?Sized> ThreadSafe for T {}
 /// reproduces the same tiling so the kernels' index math is identical.
 pub const MAX_GROUPS_PER_DIM: u32 = 65535;
 
+/// The workgroup size a kernel gets when its source declares none — and the
+/// size all but the register-tiled GEMMs use.
+pub const DEFAULT_WORKGROUP_SIZE: u32 = 64;
+
 /// Workgroup grid for `threads` invocations at `@workgroup_size(64)`: 1D until the
 /// count exceeds the per-dimension limit, then tiled into Y. Shared by every
 /// backend so the kernels' `gid.y*(nwg.x*64)+gid.x` reconstruction is identical.
 pub fn grid(threads: u32) -> (u32, u32) {
-    let groups = threads.div_ceil(64).max(1);
+    grid_ws(threads, DEFAULT_WORKGROUP_SIZE)
+}
+
+/// [`grid`] for a kernel whose `@workgroup_size` is `wg` rather than 64.
+///
+/// A kernel is free to declare a different workgroup size — a register-tiled
+/// GEMM wants 256 invocations per tile so it can hold a 128×128 output block —
+/// but then *every* backend must lay out the grid with that same `wg`, and the
+/// kernel must reconstruct its flat id as `gid.y*(nwg.x*WG)+gid.x` using its own
+/// `WG`. [`workgroup_size_of`] is how the backends learn it, so the WGSL source
+/// stays the single place the number is written down.
+pub fn grid_ws(threads: u32, wg: u32) -> (u32, u32) {
+    let wg = wg.max(1);
+    let groups = threads.div_ceil(wg).max(1);
     if groups <= MAX_GROUPS_PER_DIM {
         (groups, 1)
     } else {
         (MAX_GROUPS_PER_DIM, groups.div_ceil(MAX_GROUPS_PER_DIM))
     }
+}
+
+/// The `x` extent of a WGSL kernel's `@workgroup_size(...)` attribute, or
+/// [`DEFAULT_WORKGROUP_SIZE`] if the source has none.
+///
+/// A deliberately dumb scan rather than a naga parse: every backend needs this
+/// number at registration time (the CPU backend has no naga module at that
+/// point, and the wgpu backend would have to re-parse), the attribute is a
+/// literal in every in-repo kernel, and a wrong answer here would show up
+/// immediately as a wrong dispatch size in the cross-backend parity tests.
+/// Only decimal literals are recognised — `@workgroup_size(WG)` with a `const`
+/// would silently fall back to 64, so kernels spell the number out.
+pub fn workgroup_size_of(src: &str) -> u32 {
+    let Some(at) = src.find("@workgroup_size") else { return DEFAULT_WORKGROUP_SIZE };
+    let rest = &src[at + "@workgroup_size".len()..];
+    let Some(open) = rest.find('(') else { return DEFAULT_WORKGROUP_SIZE };
+    let digits: String = rest[open + 1..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().unwrap_or(DEFAULT_WORKGROUP_SIZE)
+}
+
+/// Per-kernel workgroup sizes for a `(name, wgsl)` registration list, in the
+/// same order — what a backend stores alongside its compiled pipelines.
+pub fn workgroup_sizes(kernels: &[(&str, &str)]) -> Vec<u32> {
+    kernels.iter().map(|(_, src)| workgroup_size_of(src)).collect()
 }
 
 /// Pack an f32 into the u32 uniform stream (kernels read it back with bitcast).
@@ -281,3 +326,44 @@ mod registry {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use registry::{backend_registered, create_backend, register_backend, Factory};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_workgroup_size_forms() {
+        assert_eq!(workgroup_size_of("@compute @workgroup_size(64)\nfn main() {}"), 64);
+        assert_eq!(workgroup_size_of("@workgroup_size(256)"), 256);
+        assert_eq!(workgroup_size_of("@workgroup_size( 128 , 1, 1 )"), 128);
+        // no attribute, or a non-literal extent => the engine default
+        assert_eq!(workgroup_size_of("fn main() {}"), DEFAULT_WORKGROUP_SIZE);
+        assert_eq!(workgroup_size_of("@workgroup_size(WG)"), DEFAULT_WORKGROUP_SIZE);
+    }
+
+    #[test]
+    fn grid_ws_matches_grid_at_64() {
+        for t in [1u32, 63, 64, 65, 4096, 4_194_240, 4_194_241] {
+            assert_eq!(grid(t), grid_ws(t, 64), "threads={t}");
+        }
+    }
+
+    #[test]
+    fn grid_ws_covers_every_thread() {
+        for wg in [64u32, 128, 256] {
+            for t in [1u32, wg - 1, wg, wg + 1, 100_000] {
+                let (gx, gy) = grid_ws(t, wg);
+                assert!((gx as u64) * (gy as u64) * (wg as u64) >= t as u64, "wg={wg} threads={t}");
+                assert!(gx <= MAX_GROUPS_PER_DIM && gy >= 1);
+            }
+        }
+    }
+
+    /// Past the 65535-group limit the grid tiles into Y — the case every
+    /// kernel's `gid.y*(nwg.x*WG)+gid.x` reconstruction depends on.
+    #[test]
+    fn grid_ws_tiles_into_y_past_the_limit() {
+        let (gx, gy) = grid_ws(MAX_GROUPS_PER_DIM * 256 + 256, 256);
+        assert_eq!((gx, gy), (MAX_GROUPS_PER_DIM, 2));
+    }
+}

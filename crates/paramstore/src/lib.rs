@@ -18,6 +18,14 @@ use gpu_core::Gpu;
 pub enum Role {
     Trainable,
     Frozen,
+    /// Optimised **off-device**: the weight and its gradient live on the GPU (the
+    /// forward/backward need them), but the AdamW moments (`m`/`v`) do NOT — they
+    /// are held in system RAM by [`optim::OffloadAdam`], which reads the grad off
+    /// the GPU, updates host-resident `m`/`v`/master-weights on the CPU (AVX2),
+    /// and writes the new weight back. Cuts GPU optimiser state from 4×params to
+    /// 2×params (weight+grad) and puts the other 2× (m+v) in the box's 177 GB of
+    /// RAM — enabling much larger models than fit in 24 GB of VRAM.
+    Offload,
 }
 
 pub struct ParamStore {
@@ -32,6 +40,9 @@ pub struct ParamStore {
     pub adam_v: HashMap<String, gpu_core::DeviceBuffer>,
     pub norms: gpu_core::DeviceBuffer,     // [n_trainable] sum-of-squares scratch for grad clipping
     pub clip_coef: gpu_core::DeviceBuffer, // [1] device-resident clip coefficient
+    /// Params optimised off-device (grad on GPU, moments in RAM). Disjoint from
+    /// `trainable`; the GPU optimiser skips these, `OffloadAdam` handles them.
+    pub offload: Vec<(String, usize)>,
 }
 
 impl ParamStore {
@@ -55,24 +66,34 @@ impl ParamStore {
         let mut adam_v = HashMap::new();
         let mut params = Vec::with_capacity(params_roles.len());
         let mut trainable = Vec::new();
+        let mut offload = Vec::new();
         for (name, numel, role) in &params_roles {
             let data = init
                 .get(name)
                 .unwrap_or_else(|| panic!("missing init weight {name}"));
             assert_eq!(data.len(), *numel, "size mismatch for {name}");
             weight.insert(name.clone(), gpu.storage_init(name, data));
-            if *role == Role::Trainable {
-                let z = vec![0.0f32; *numel];
-                grad.insert(name.clone(), gpu.storage_init(name, &z));
-                adam_m.insert(name.clone(), gpu.storage_init(name, &z));
-                adam_v.insert(name.clone(), gpu.storage_init(name, &z));
-                trainable.push((name.clone(), *numel));
+            match role {
+                Role::Trainable => {
+                    let z = vec![0.0f32; *numel];
+                    grad.insert(name.clone(), gpu.storage_init(name, &z));
+                    adam_m.insert(name.clone(), gpu.storage_init(name, &z));
+                    adam_v.insert(name.clone(), gpu.storage_init(name, &z));
+                    trainable.push((name.clone(), *numel));
+                }
+                Role::Offload => {
+                    // grad on GPU (backward writes it); moments live in RAM.
+                    let z = vec![0.0f32; *numel];
+                    grad.insert(name.clone(), gpu.storage_init(name, &z));
+                    offload.push((name.clone(), *numel));
+                }
+                Role::Frozen => {}
             }
             params.push((name.clone(), *numel));
         }
         let norms = gpu.storage(trainable.len().max(1) as u64);
         let clip_coef = gpu.storage(1);
-        ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef }
+        ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef, offload }
     }
 
     /// The optimised parameter list (grad/Adam present) — what the optimiser and
