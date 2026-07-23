@@ -347,6 +347,107 @@ fn qwen3_reasoning_finetune() {
 /// Full (optimizer-offloaded) vs LoRA fine-tuning on the SAME tool-call data:
 /// both must improve held-out tool-call exact-match; reports the two side by
 /// side. Proves the full-vs-LoRA comparison the offload path unblocked.
+/// Data-parallel training **speedup** on the real 0.6B: time one optimiser step
+/// (K micro-batches) on a single P40 vs both P40s (K/2 micro-batches per card,
+/// concurrent) + gradient all-reduce. Reports per-step time and the speedup.
+#[test]
+#[ignore]
+fn qwen3_dataparallel_speedup() {
+    use std::time::Instant;
+    let Some(d) = dir() else { eprintln!("QWEN3_DIR unset; skipping"); return; };
+    setup();
+    std::env::remove_var("BRAIN_GPU_INDEX");
+    let path = weights_ft(&d);
+    let ps = path.to_str().unwrap();
+    let c = checkpoint::load(ps);
+    let cfg = QwenConfig::from_json(&c.header["config"]);
+    let init = c.by_role("");
+    let (b, t) = (1u32, 512u32);
+    let k = env_usize("QWEN3_DP_MB", 4); // micro-batches per step
+    let mk = |j: usize| -> (Vec<u32>, Vec<u32>) {
+        let x = (0..t).map(|i| ((i * 131 + 7 + j as u32 * 97) % cfg.vocab) as u32).collect::<Vec<u32>>();
+        let y = (0..t).map(|i| ((i * 131 + 8 + j as u32 * 97) % cfg.vocab) as u32).collect::<Vec<u32>>();
+        (x, y)
+    };
+    let mbs: Vec<(Vec<u32>, Vec<u32>)> = (0..k).map(mk).collect();
+    let steps = env_usize("QWEN3_DP_STEPS", 3);
+    let inv_k = 1.0 / k as f32;
+
+    // --- single-GPU baseline (offload AdamW = host grad-norm, the fast optimiser
+    // here; on-GPU clip's single-threaded gradnorm_sq is ~30 s over 152k vocab) ---
+    std::env::set_var("BRAIN_OFFLOAD_ADAM", "1");
+    let single = Qwen::load(ps, b, t);
+    let mut single_fb = 0f64;
+    let mut one_step_single = |step: u32, meas: bool| {
+        single.zero_grads();
+        let a = Instant::now();
+        for (x, y) in &mbs {
+            single.set_batch(x, y);
+            single.forward();
+            single.backward();
+        }
+        single.poll_wait();
+        let fb = a.elapsed().as_secs_f64();
+        single.adamw_step(step, 1e-4, 0.0, Some(1.0), inv_k);
+        single.poll_wait();
+        if meas {
+            single_fb += fb;
+        }
+    };
+    one_step_single(1, false); // warmup (builds optimiser, compiles pipelines)
+    let t0 = Instant::now();
+    for s in 0..steps {
+        one_step_single(s as u32 + 2, true);
+    }
+    let single_ms = t0.elapsed().as_secs_f64() * 1e3 / steps as f64;
+    single_fb = single_fb * 1e3 / steps as f64;
+    drop(single);
+
+    // --- data-parallel across both P40s (fused all-reduce + host AdamW) ---
+    let mut dp = DataParallel::new(cfg.clone(), b, t, &init, &[0, 1]);
+    let (mut t_fb, mut t_opt) = (0f64, 0f64);
+    let mut one_step_dp = |dp: &mut DataParallel, step: u32, meas: bool| {
+        dp.zero_grads();
+        let a = Instant::now();
+        dp.forward_backward(&mbs);
+        let fb = a.elapsed().as_secs_f64();
+        let a = Instant::now();
+        dp.adamw_step(step, 1e-4, 0.0, Some(1.0), inv_k); // fused reduce+opt+broadcast
+        let op = a.elapsed().as_secs_f64();
+        if meas {
+            t_fb += fb;
+            t_opt += op;
+        }
+    };
+    one_step_dp(&mut dp, 1, false); // warmup
+    let t1 = Instant::now();
+    for s in 0..steps {
+        one_step_dp(&mut dp, s as u32 + 2, true);
+    }
+    let dp_ms = t1.elapsed().as_secs_f64() * 1e3 / steps as f64;
+    println!(
+        "  DP breakdown/step: fwd+bwd {:.0} ms | fused reduce+opt {:.0} ms",
+        t_fb * 1e3 / steps as f64,
+        t_opt * 1e3 / steps as f64
+    );
+
+    let dp_fb = t_fb * 1e3 / steps as f64;
+    println!("\n=== Qwen3-0.6B data-parallel training speedup (2x P40) ===");
+    println!("  {k} micro-batches/step, block {t}");
+    println!("  single-GPU: {single_ms:.0} ms/step  (fwd+bwd {single_fb:.0} ms)");
+    println!("  2-GPU DP:   {dp_ms:.0} ms/step  (fwd+bwd {dp_fb:.0} ms)  end-to-end {:.2}x", single_ms / dp_ms);
+    println!("  compute (fwd+bwd) speedup: {:.2}x", single_fb / dp_fb);
+    println!("  per-card memory: {}", gpu_mem());
+    // The parallelisable part (fwd+bwd) speeds up across the two cards, and — with
+    // the fused reduce+optimiser keeping the fixed per-step cost low — the
+    // end-to-end step is faster too (the fixed all-reduce amortises further at
+    // higher micro-batch counts: QWEN3_DP_MB).
+    assert!(dp_fb < single_fb * 0.75, "fwd+bwd did not parallelise: {single_fb:.0} vs {dp_fb:.0} ms");
+    assert!(dp_ms < single_ms, "data-parallel not faster end-to-end: {single_ms:.0} vs {dp_ms:.0} ms");
+}
+
+use qwen::DataParallel;
+
 /// Pipeline-parallel sharding of the **real** 0.6B across both P40s: the sharded
 /// forward loss must match the single-device model bit-for-bit, and the weights
 /// must actually distribute across the two cards (reported via nvidia-smi). This

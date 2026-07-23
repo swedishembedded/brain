@@ -642,6 +642,7 @@ dependencies = [
  "brain-paramstore",
  "bytemuck",
  "pollster",
+ "rayon",
  "serde_json",
  "wgpu",
 ]
