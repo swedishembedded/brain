@@ -1,0 +1,13 @@
+[package]
+name = "brain-capability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generalized model-capability interface: models advertise typed actions (a Manifest of ActionSpecs); the CLI and the event API dispatch them generically. Adding a capability is implementing an Action — no new commands or event variants."
+
+[lib]
+name = "capability"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true

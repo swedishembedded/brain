@@ -17,6 +17,7 @@
 //! `rmsnorm(x,w)·scale = rmsnorm(x, w·scale)` and `gate·rmsnorm(y,w) =
 //! rmsnorm(y, w·gate)` — so no scale/gate kernels are needed.
 
+pub mod caps;
 pub mod block;
 pub mod dev;
 pub mod devgrad;

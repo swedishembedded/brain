@@ -22,6 +22,7 @@ mod image_io;
 mod npu_cli;
 mod pid_cli;
 mod qwen_cli;
+mod caps_cli;
 mod run_cli;
 mod tts_cli;
 mod tts_serve;
@@ -475,6 +476,8 @@ fn main() {
         }
         Some("bench") => run_bench(&argv[2..]),
         Some("forecast") => forecast_cli::run_forecast(&argv[2..]),
+        Some("caps") | Some("capabilities") => std::process::exit(caps_cli::run_caps(&argv[2..])),
+        Some("do") => std::process::exit(caps_cli::run_do(&argv[2..])),
         Some("run") | Some("serve") => run_cli::run_serve(&argv[2..]),
         Some("pid") => pid_cli::run_pid(&argv[2..]),
         Some("validate") => {
