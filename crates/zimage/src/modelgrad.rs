@@ -97,23 +97,23 @@ pub struct ModelGrads {
     pub flin_b: Vec<f64>,
 }
 
-const TDIM: usize = 256; // timestep sinusoid width
-const TH: usize = 1024; // t_embedder hidden
-const LN_EPS: f64 = 1e-6;
+pub(crate) const TDIM: usize = 256; // timestep sinusoid width
+pub(crate) const TH: usize = 1024; // t_embedder hidden
+pub(crate) const LN_EPS: f64 = 1e-6;
 
-fn sigmoid(x: f64) -> f64 {
+pub(crate) fn sigmoid(x: f64) -> f64 {
     1.0 / (1.0 + (-x).exp())
 }
-fn silu(x: f64) -> f64 {
+pub(crate) fn silu(x: f64) -> f64 {
     x * sigmoid(x)
 }
-fn dsilu(x: f64) -> f64 {
+pub(crate) fn dsilu(x: f64) -> f64 {
     let s = sigmoid(x);
     s + x * s * (1.0 - s)
 }
 
 /// `y[r,o] = Σ_i x[r,i]·w[o,i] + b[o]`.
-fn linb(x: &[f64], rows: usize, inp: usize, w: &[f64], b: &[f64], out: usize) -> Vec<f64> {
+pub(crate) fn linb(x: &[f64], rows: usize, inp: usize, w: &[f64], b: &[f64], out: usize) -> Vec<f64> {
     let mut y = vec![0f64; rows * out];
     for r in 0..rows {
         for o in 0..out {
@@ -128,7 +128,7 @@ fn linb(x: &[f64], rows: usize, inp: usize, w: &[f64], b: &[f64], out: usize) ->
 }
 
 /// Linear+bias backward: returns `(dx, dw, db)`.
-fn linb_bwd(x: &[f64], rows: usize, inp: usize, w: &[f64], out: usize, dy: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+pub(crate) fn linb_bwd(x: &[f64], rows: usize, inp: usize, w: &[f64], out: usize, dy: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let mut dx = vec![0f64; rows * inp];
     let mut dw = vec![0f64; out * inp];
     let mut db = vec![0f64; out];
@@ -145,7 +145,7 @@ fn linb_bwd(x: &[f64], rows: usize, inp: usize, w: &[f64], out: usize, dy: &[f64
     (dx, dw, db)
 }
 
-fn rmsnorm(x: &[f64], rows: usize, d: usize, w: &[f64]) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn rmsnorm(x: &[f64], rows: usize, d: usize, w: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let mut y = vec![0f64; rows * d];
     let mut inv = vec![0f64; rows];
     for r in 0..rows {
@@ -161,7 +161,7 @@ fn rmsnorm(x: &[f64], rows: usize, d: usize, w: &[f64]) -> (Vec<f64>, Vec<f64>) 
 }
 
 /// RMSNorm gain grad only (input is data — no dx needed for the cap embedder).
-fn rmsnorm_dw(x: &[f64], rows: usize, d: usize, inv: &[f64], dy: &[f64]) -> Vec<f64> {
+pub(crate) fn rmsnorm_dw(x: &[f64], rows: usize, d: usize, inv: &[f64], dy: &[f64]) -> Vec<f64> {
     let mut dw = vec![0f64; d];
     for r in 0..rows {
         for c in 0..d {
@@ -171,7 +171,7 @@ fn rmsnorm_dw(x: &[f64], rows: usize, d: usize, inv: &[f64], dy: &[f64]) -> Vec<
     dw
 }
 
-fn timestep_embedding(t: f64) -> Vec<f64> {
+pub(crate) fn timestep_embedding(t: f64) -> Vec<f64> {
     let half = TDIM / 2;
     let mut e = vec![0f64; TDIM];
     for k in 0..half {
@@ -184,7 +184,7 @@ fn timestep_embedding(t: f64) -> Vec<f64> {
 }
 
 /// `[C,F=1,H,W] -> [n_img, patch·patch·C]` (matches diffusers `_patchify_image`).
-fn patchify(latent: &[f64], cfg: &Cfg) -> Vec<f64> {
+pub(crate) fn patchify(latent: &[f64], cfg: &Cfg) -> Vec<f64> {
     let (c, ps) = (cfg.in_channels, cfg.patch);
     let (ht, wt) = (cfg.h / ps, cfg.w / ps);
     let (fh, fw) = (cfg.h, cfg.w);
@@ -207,7 +207,7 @@ fn patchify(latent: &[f64], cfg: &Cfg) -> Vec<f64> {
 }
 
 /// LayerNorm (no affine) forward, per row over `d`. Returns `(y, inv[rows])`.
-fn layernorm(x: &[f64], rows: usize, d: usize) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn layernorm(x: &[f64], rows: usize, d: usize) -> (Vec<f64>, Vec<f64>) {
     let mut y = vec![0f64; rows * d];
     let mut inv = vec![0f64; rows];
     for r in 0..rows {
@@ -224,7 +224,7 @@ fn layernorm(x: &[f64], rows: usize, d: usize) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// LayerNorm (no affine) backward: `dx = inv·(dy − mean(dy) − xhat·mean(dy·xhat))`.
-fn layernorm_bwd(x: &[f64], rows: usize, d: usize, inv: &[f64], dy: &[f64]) -> Vec<f64> {
+pub(crate) fn layernorm_bwd(x: &[f64], rows: usize, d: usize, inv: &[f64], dy: &[f64]) -> Vec<f64> {
     let mut dx = vec![0f64; rows * d];
     for r in 0..rows {
         let xr = &x[r * d..r * d + d];

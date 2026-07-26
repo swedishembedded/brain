@@ -25,6 +25,7 @@ pub mod import;
 pub mod int8;
 pub mod model;
 pub mod modelgrad;
+pub mod train;
 
 pub use dev::{ZImageDit, ZImageDitI8, ZImageDitShard};
 
