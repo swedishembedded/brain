@@ -337,6 +337,8 @@ pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
 pub const MATMUL_DX_REG: &str = include_str!("../wgsl/matmul_dx_reg.wgsl");
 /// `wgsl/matmul_i8.wgsl`
 pub const MATMUL_I8: &str = include_str!("../wgsl/matmul_i8.wgsl");
+/// `wgsl/matmul_i8_dyn.wgsl`
+pub const MATMUL_I8_DYN: &str = include_str!("../wgsl/matmul_i8_dyn.wgsl");
 /// `wgsl/matmul_reg.wgsl`
 pub const MATMUL_REG: &str = include_str!("../wgsl/matmul_reg.wgsl");
 /// `wgsl/matmul_reg2.wgsl`
@@ -347,6 +349,10 @@ pub const MATMUL_ROWS: &str = include_str!("../wgsl/matmul_rows.wgsl");
 pub const MATMUL_TILE: &str = include_str!("../wgsl/matmul_tile.wgsl");
 /// `wgsl/matmul_tiled.wgsl`
 pub const MATMUL_TILED: &str = include_str!("../wgsl/matmul_tiled.wgsl");
+/// `wgsl/max_abs_final.wgsl`
+pub const MAX_ABS_FINAL: &str = include_str!("../wgsl/max_abs_final.wgsl");
+/// `wgsl/max_abs_part.wgsl`
+pub const MAX_ABS_PART: &str = include_str!("../wgsl/max_abs_part.wgsl");
 /// `wgsl/maxpool5.wgsl`
 pub const MAXPOOL5: &str = include_str!("../wgsl/maxpool5.wgsl");
 /// `wgsl/maxpool5_dx.wgsl`
@@ -389,6 +395,8 @@ pub const PIXEL_SHUFFLE_DX: &str = include_str!("../wgsl/pixel_shuffle_dx.wgsl")
 pub const POS_ADD: &str = include_str!("../wgsl/pos_add.wgsl");
 /// `wgsl/pos_bwd.wgsl`
 pub const POS_BWD: &str = include_str!("../wgsl/pos_bwd.wgsl");
+/// `wgsl/quant_pack.wgsl`
+pub const QUANT_PACK: &str = include_str!("../wgsl/quant_pack.wgsl");
 /// `wgsl/region_copy.wgsl`
 pub const REGION_COPY: &str = include_str!("../wgsl/region_copy.wgsl");
 /// `wgsl/relu_inplace.wgsl`
@@ -690,11 +698,14 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_dx", MATMUL_DX),
     ("matmul_dx_reg", MATMUL_DX_REG),
     ("matmul_i8", MATMUL_I8),
+    ("matmul_i8_dyn", MATMUL_I8_DYN),
     ("matmul_reg", MATMUL_REG),
     ("matmul_reg2", MATMUL_REG2),
     ("matmul_rows", MATMUL_ROWS),
     ("matmul_tile", MATMUL_TILE),
     ("matmul_tiled", MATMUL_TILED),
+    ("max_abs_final", MAX_ABS_FINAL),
+    ("max_abs_part", MAX_ABS_PART),
     ("maxpool5", MAXPOOL5),
     ("maxpool5_dx", MAXPOOL5_DX),
     ("mla_bwd_dk_pass", MLA_BWD_DK_PASS),
@@ -716,6 +727,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("pixel_shuffle_dx", PIXEL_SHUFFLE_DX),
     ("pos_add", POS_ADD),
     ("pos_bwd", POS_BWD),
+    ("quant_pack", QUANT_PACK),
     ("region_copy", REGION_COPY),
     ("relu_inplace", RELU_INPLACE),
     ("resize_bilinear", RESIZE_BILINEAR),

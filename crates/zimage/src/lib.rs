@@ -20,6 +20,7 @@
 pub mod block;
 pub mod dev;
 pub mod import;
+pub mod int8;
 pub mod model;
 
 pub use dev::{ZImageDit, ZImageDitShard};
