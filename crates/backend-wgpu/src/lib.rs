@@ -124,6 +124,12 @@ impl WgpuBackend {
         pollster::block_on(WgpuBackend::new_async(kernels))
     }
 
+    /// Blocking `count` backends on distinct physical cards (see [`new_multi_async`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_multi(kernels: &[(&str, &str)], count: usize) -> Vec<WgpuBackend> {
+        pollster::block_on(WgpuBackend::new_multi_async(kernels, count))
+    }
+
     /// Async device init + pipeline compile. This is the portable core used on
     /// both targets: native wraps it in `pollster::block_on` (see `new`), wasm
     /// awaits it from the wasm-bindgen entry point.
@@ -173,6 +179,34 @@ impl WgpuBackend {
             })
             .await
             .expect("no suitable GPU adapter found");
+        Self::from_adapter(&adapter, kernels).await
+    }
+
+    /// Create `count` backends on DISTINCT physical cards from ONE adapter
+    /// enumeration (Vulkan discrete GPUs, in enumerated order). This is the
+    /// reliable multi-GPU path: two separate `new_async` calls each re-enumerate
+    /// and wgpu can reorder the list, landing a second in-process device back on
+    /// card 0 (observed on the 2×P40 box). A single enumeration guarantees
+    /// `adapters[i]` → distinct physical card.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn new_multi_async(kernels: &[(&str, &str)], count: usize) -> Vec<WgpuBackend> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let mut adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
+        adapters.retain(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
+        if adapters.iter().any(|a| a.get_info().backend == wgpu::Backend::Vulkan) {
+            adapters.retain(|a| a.get_info().backend == wgpu::Backend::Vulkan);
+        }
+        assert!(adapters.len() >= count, "need {count} discrete GPUs, found {}", adapters.len());
+        let mut out = Vec::with_capacity(count);
+        for a in adapters.iter().take(count) {
+            out.push(Self::from_adapter(a, kernels).await);
+        }
+        out
+    }
+
+    /// Build a backend from an already-selected adapter (shared by [`new_async`]
+    /// and [`new_multi_async`]).
+    async fn from_adapter(adapter: &wgpu::Adapter, kernels: &[(&str, &str)]) -> WgpuBackend {
         let info = adapter.get_info();
         log_adapter(&info);
 
@@ -206,7 +240,15 @@ impl WgpuBackend {
                 label: Some("moe-rs-device"),
                 required_features,
                 required_limits: limits,
-                memory_hints: wgpu::MemoryHints::Performance,
+                // MemoryUsage (tight suballocation) not Performance (large blocks):
+                // a large resident model has hundreds of medium weight buffers, and
+                // Performance's big blocks waste ~2× (12 GB → 23 GB, OOMs a P40).
+                // BRAIN_GPU_MEM_PERF=1 restores the perf-first blocks.
+                memory_hints: if std::env::var("BRAIN_GPU_MEM_PERF").as_deref() == Ok("1") {
+                    wgpu::MemoryHints::Performance
+                } else {
+                    wgpu::MemoryHints::MemoryUsage
+                },
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 trace: wgpu::Trace::Off,
             })

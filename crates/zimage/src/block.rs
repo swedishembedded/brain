@@ -91,9 +91,17 @@ pub(crate) struct BlockWeights {
 
 impl BlockWeights {
     pub fn upload(gpu: &Gpu, t: &Tensors, prefix: &str) -> BlockWeights {
+        // Upload via storage()+write() (DEVICE_LOCAL + transient staging), NOT
+        // storage_init(): create_buffer_init's mapped-at-creation path forces
+        // weight buffers into an inefficient memory type on a non-ReBAR P40,
+        // ballooning ~12 GB of weights to ~22 GB (OOM). Plain DEVICE_LOCAL
+        // buffers pack tightly (a raw-alloc probe holds 22 GB cleanly).
         let dev = |n: &str| {
             let key = format!("{prefix}.{n}");
-            gpu.storage_init(&key, &t.get(&key).unwrap_or_else(|| panic!("zimage: missing {key}")).1)
+            let data = &t.get(&key).unwrap_or_else(|| panic!("zimage: missing {key}")).1;
+            let b = gpu.storage(data.len() as u64);
+            wf(gpu, &b, data);
+            b
         };
         BlockWeights {
             wq: dev("attention.to_q.weight"),
@@ -181,6 +189,52 @@ pub(crate) fn fold_adaln(nb: &NormBufs, c: &[f32], dim: usize, cdim: usize) -> (
 
 /// Append one block's forward steps to `s`, reading `x_in` and the shared
 /// `cos`/`sin` RoPE tables, and return the fresh output buffer (for chaining).
+/// Reusable per-block intermediate buffers, sized for a stage's token count.
+/// Allocated ONCE per stage and reused across its blocks (a forward needs no
+/// per-block SSA), cutting a 30-layer stack from ~660 buffers to ~24 — wgpu's
+/// block allocator otherwise wastes ~1.6× rounding each small buffer up.
+pub(crate) struct Scratch {
+    n1: DeviceBuffer,
+    q: DeviceBuffer,
+    k: DeviceBuffer,
+    v: DeviceBuffer,
+    qn: DeviceBuffer,
+    kn: DeviceBuffer,
+    qr: DeviceBuffer,
+    kr: DeviceBuffer,
+    qkv: DeviceBuffer,
+    scores: DeviceBuffer,
+    probs: DeviceBuffer,
+    ctx: DeviceBuffer,
+    attn_out: DeviceBuffer,
+    n2: DeviceBuffer,
+    x1: DeviceBuffer,
+    f1: DeviceBuffer,
+    g: DeviceBuffer,
+    u: DeviceBuffer,
+    hsw: DeviceBuffer,
+    ff: DeviceBuffer,
+    f2: DeviceBuffer,
+}
+
+impl Scratch {
+    pub fn new(gpu: &Gpu, d: BlockDims, t: u32) -> Scratch {
+        let td = (t * d.dim) as u64;
+        let th = (t * d.hidden) as u64;
+        let a = |n: u64| gpu.storage(n);
+        Scratch {
+            n1: a(td), q: a(td), k: a(td), v: a(td), qn: a(td), kn: a(td), qr: a(td), kr: a(td),
+            qkv: a((t * 3 * d.dim) as u64),
+            scores: a((d.n_heads * t * t) as u64), probs: a((d.n_heads * t * t) as u64),
+            ctx: a(td), attn_out: a(td), n2: a(td), x1: a(td), f1: a(td),
+            g: a(th), u: a(th), hsw: a(th), ff: a(td), f2: a(td),
+        }
+    }
+}
+
+/// Append one block's forward steps to `s`, reading `x_in` + shared `cos`/`sin`,
+/// reusing `scr`, and writing the result into `out` (which the caller must keep
+/// distinct from `x_in` — a stage double-buffers the residual across blocks).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_block_steps(
     gpu: &Gpu,
@@ -188,22 +242,16 @@ pub(crate) fn build_block_steps(
     w: &BlockWeights,
     nb: &NormBufs,
     x_in: &DeviceBuffer,
+    out: &DeviceBuffer,
+    scr: &Scratch,
     cos: &DeviceBuffer,
     sin: &DeviceBuffer,
     d: BlockDims,
     t: u32,
     reg2: bool,
-) -> DeviceBuffer {
+) {
     let (dim, nh, hd, hidden) = (d.dim, d.n_heads, d.head_dim, d.hidden);
     let half = hd / 2;
-    let td = (t * dim) as u64;
-    let a = |n: u64| gpu.storage(n);
-    let (n1, q, k, v, qn, kn, qr, kr) = (a(td), a(td), a(td), a(td), a(td), a(td), a(td), a(td));
-    let qkv = a((t * 3 * dim) as u64);
-    let (scores, probs) = (a((nh * t * t) as u64), a((nh * t * t) as u64));
-    let (ctx, attn_out, n2, x1, f1) = (a(td), a(td), a(td), a(td), a(td));
-    let (g, u, hsw, ff, f2, out) = (a((t * hidden) as u64), a((t * hidden) as u64), a((t * hidden) as u64), a(td), a(td), a(td));
-
     // GPU: register-tiled matmul_reg2 (128×128 tile, 256 threads). CPU: naive
     // matmul (native AVX2 fast path; the JIT can't compile reg2's barrier).
     let mm = |x: &DeviceBuffer, wt: &DeviceBuffer, o: &DeviceBuffer, m: u32, kk: u32, n: u32| {
@@ -214,30 +262,29 @@ pub(crate) fn build_block_steps(
         }
     };
     // attention
-    s.push(gpu.step(K_RMSNORM, &[x_in, &nb.an1, &n1], &[dim, t, f(EPS)], t));
-    s.push(mm(&n1, &w.wq, &q, t, dim, dim));
-    s.push(mm(&n1, &w.wk, &k, t, dim, dim));
-    s.push(mm(&n1, &w.wv, &v, t, dim, dim));
-    s.push(gpu.step(K_RMSNORM, &[&q, &w.nq, &qn], &[hd, t * nh, f(EPS)], t * nh));
-    s.push(gpu.step(K_RMSNORM, &[&k, &w.nk, &kn], &[hd, t * nh, f(EPS)], t * nh));
-    s.push(gpu.step(K_ROPE, &[&qn, cos, sin, &qr], &[t, nh, hd, half], t * nh * half));
-    s.push(gpu.step(K_ROPE, &[&kn, cos, sin, &kr], &[t, nh, hd, half], t * nh * half));
-    s.push(gpu.step(K_PACK, &[&qr, &kr, &v, &qkv], &[t, dim], t * 3 * dim));
-    s.push(gpu.step(K_SCORES, &[&qkv, &scores], &[1, nh, t, hd, 3 * dim, 0, dim], nh * t * t));
-    s.push(gpu.step(K_SOFTMAX, &[&scores, &probs], &[1, nh, t], nh * t));
-    s.push(gpu.step(K_APPLY, &[&probs, &qkv, &ctx], &[1, nh, t, hd, 3 * dim, 2 * dim, dim], nh * t * hd));
-    s.push(mm(&ctx, &w.wo, &attn_out, t, dim, dim));
-    s.push(gpu.step(K_RMSNORM, &[&attn_out, &nb.an2, &n2], &[dim, t, f(EPS)], t));
-    s.push(gpu.step(K_ADD2, &[x_in, &n2, &x1], &[t * dim], t * dim));
+    s.push(gpu.step(K_RMSNORM, &[x_in, &nb.an1, &scr.n1], &[dim, t, f(EPS)], t));
+    s.push(mm(&scr.n1, &w.wq, &scr.q, t, dim, dim));
+    s.push(mm(&scr.n1, &w.wk, &scr.k, t, dim, dim));
+    s.push(mm(&scr.n1, &w.wv, &scr.v, t, dim, dim));
+    s.push(gpu.step(K_RMSNORM, &[&scr.q, &w.nq, &scr.qn], &[hd, t * nh, f(EPS)], t * nh));
+    s.push(gpu.step(K_RMSNORM, &[&scr.k, &w.nk, &scr.kn], &[hd, t * nh, f(EPS)], t * nh));
+    s.push(gpu.step(K_ROPE, &[&scr.qn, cos, sin, &scr.qr], &[t, nh, hd, half], t * nh * half));
+    s.push(gpu.step(K_ROPE, &[&scr.kn, cos, sin, &scr.kr], &[t, nh, hd, half], t * nh * half));
+    s.push(gpu.step(K_PACK, &[&scr.qr, &scr.kr, &scr.v, &scr.qkv], &[t, dim], t * 3 * dim));
+    s.push(gpu.step(K_SCORES, &[&scr.qkv, &scr.scores], &[1, nh, t, hd, 3 * dim, 0, dim], nh * t * t));
+    s.push(gpu.step(K_SOFTMAX, &[&scr.scores, &scr.probs], &[1, nh, t], nh * t));
+    s.push(gpu.step(K_APPLY, &[&scr.probs, &scr.qkv, &scr.ctx], &[1, nh, t, hd, 3 * dim, 2 * dim, dim], nh * t * hd));
+    s.push(mm(&scr.ctx, &w.wo, &scr.attn_out, t, dim, dim));
+    s.push(gpu.step(K_RMSNORM, &[&scr.attn_out, &nb.an2, &scr.n2], &[dim, t, f(EPS)], t));
+    s.push(gpu.step(K_ADD2, &[x_in, &scr.n2, &scr.x1], &[t * dim], t * dim));
     // MLP
-    s.push(gpu.step(K_RMSNORM, &[&x1, &nb.fn1, &f1], &[dim, t, f(EPS)], t));
-    s.push(mm(&f1, &w.w1, &g, t, dim, hidden));
-    s.push(mm(&f1, &w.w3, &u, t, dim, hidden));
-    s.push(gpu.step(K_SILU_MUL, &[&g, &u, &hsw], &[t * hidden], t * hidden));
-    s.push(mm(&hsw, &w.w2, &ff, t, hidden, dim));
-    s.push(gpu.step(K_RMSNORM, &[&ff, &nb.fn2, &f2], &[dim, t, f(EPS)], t));
-    s.push(gpu.step(K_ADD2, &[&x1, &f2, &out], &[t * dim], t * dim));
-    out
+    s.push(gpu.step(K_RMSNORM, &[&scr.x1, &nb.fn1, &scr.f1], &[dim, t, f(EPS)], t));
+    s.push(mm(&scr.f1, &w.w1, &scr.g, t, dim, hidden));
+    s.push(mm(&scr.f1, &w.w3, &scr.u, t, dim, hidden));
+    s.push(gpu.step(K_SILU_MUL, &[&scr.g, &scr.u, &scr.hsw], &[t * hidden], t * hidden));
+    s.push(mm(&scr.hsw, &w.w2, &scr.ff, t, hidden, dim));
+    s.push(gpu.step(K_RMSNORM, &[&scr.ff, &nb.fn2, &scr.f2], &[dim, t, f(EPS)], t));
+    s.push(gpu.step(K_ADD2, &[&scr.x1, &scr.f2, out], &[t * dim], t * dim));
 }
 
 /// A single-block forward graph with weights resident, for a fixed token count.
@@ -252,6 +299,7 @@ pub struct ZImageBlock {
     sin: DeviceBuffer,
     nb: NormBufs,
     out: DeviceBuffer,
+    _scr: Scratch,
 }
 
 impl ZImageBlock {
@@ -269,8 +317,10 @@ impl ZImageBlock {
         let cos = gpu.storage((t * half) as u64);
         let sin = gpu.storage((t * half) as u64);
         let mut steps = Vec::new();
-        let out = build_block_steps(&gpu, &mut steps, &w, &nb, &x_in, &cos, &sin, d, t, reg2);
-        ZImageBlock { gpu, d, t, steps, x_in, cos, sin, nb, out }
+        let scr = Scratch::new(&gpu, d, t);
+        let out = gpu.storage((t * d.dim) as u64);
+        build_block_steps(&gpu, &mut steps, &w, &nb, &x_in, &out, &scr, &cos, &sin, d, t, reg2);
+        ZImageBlock { gpu, d, t, steps, x_in, cos, sin, nb, out, _scr: scr }
     }
 
     /// Forward one block. `x`: `[t·dim]`; `c`: `[cdim]` adaLN conditioning

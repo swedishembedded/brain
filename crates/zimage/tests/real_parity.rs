@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use zimage::{import::import_comfy, ZImageConfig, ZImageModel};
+use zimage::{import::import_comfy, ZImageConfig, ZImageDitShard, ZImageModel};
 
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/zimage_real.safetensors");
 
@@ -67,4 +67,42 @@ fn zimage_real_dit_matches_diffusers() {
     eprintln!("Z-Image REAL 6B DiT parity: cosine={cos:.6}  rel_l2={rl2:.5}  max_abs={max_abs:.4}");
     assert!(cos >= 0.999, "cosine {cos:.6} < 0.999");
     assert!(rl2 <= 0.03, "rel_l2 {rl2:.5} > 0.03");
+}
+
+/// 2-GPU sharded forward on the real 6B weights, matched against the diffusers
+/// golden. Validates that splitting the stack across both P40s (with the
+/// host-staged residual at the cut) is numerically correct — not just that it
+/// runs. Needs BOTH cards + BRAIN_ZIMAGE_DIT + BRAIN_ZIMAGE_SHARD=1; skips
+/// otherwise (it allocates ~24 GB per card).
+#[test]
+fn zimage_shard_matches_diffusers() {
+    if std::env::var("BRAIN_ZIMAGE_SHARD").as_deref() != Ok("1") {
+        eprintln!("SKIP: set BRAIN_ZIMAGE_SHARD=1 (+ BRAIN_ZIMAGE_DIT, 2 GPUs) to run the 2-GPU shard parity");
+        return;
+    }
+    let dit = match std::env::var("BRAIN_ZIMAGE_DIT") {
+        Ok(p) if !p.is_empty() => p,
+        _ => return,
+    };
+    let fx = checkpoint::safetensors::read(GOLDEN).expect("read real golden");
+    let g = |n: &str| &fx.iter().find(|t| t.name == n).unwrap().data;
+    let (latent, cap, tt, want) = (g("_latent"), g("_cap"), g("_t"), g("_out"));
+
+    let cfg = ZImageConfig::turbo();
+    let weights = import_comfy(checkpoint::safetensors::read(&dit).expect("read DiT"), &cfg);
+    // Golden latent is 16×16 (H=W=16) with 32 caption tokens.
+    let shard = ZImageDitShard::build(cfg, weights, 1, 16, 16, 32);
+    let got = shard.forward(latent, cap, tt[0]);
+
+    assert_eq!(got.len(), want.len());
+    let max_abs = got.iter().zip(want).map(|(&x, &y)| (x - y).abs()).fold(0.0f32, f32::max);
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
+    for (&x, &y) in got.iter().zip(want) {
+        num += (x as f64 - y as f64).powi(2);
+        den += (y as f64).powi(2);
+    }
+    let rl2 = (num / den).sqrt();
+    eprintln!("Z-Image 2-GPU SHARD parity: rel_l2={rl2:.5}  max_abs={max_abs:.4}");
+    assert!(rl2 <= 0.03, "shard rel_l2 {rl2:.5} > 0.03");
 }

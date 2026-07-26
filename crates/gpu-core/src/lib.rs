@@ -134,6 +134,17 @@ mod native_facade {
             Gpu { inner: Box::new(backend_wgpu::WgpuBackend::new(kernels)) }
         }
 
+        /// Build `count` wgpu devices on DISTINCT physical GPUs from one adapter
+        /// enumeration — the reliable multi-GPU path (two separate `new_wgpu`
+        /// calls can reorder and collide on one card). Returns one [`Gpu`] per card.
+        #[cfg(not(target_arch = "wasm32"))]
+        pub fn new_wgpu_multi(kernels: &[(&str, &str)], count: usize) -> Vec<Gpu> {
+            backend_wgpu::WgpuBackend::new_multi(kernels, count)
+                .into_iter()
+                .map(|b| Gpu { inner: Box::new(b) })
+                .collect()
+        }
+
         /// Build on the native Vulkan backend, or `Err` if no Vulkan device is present.
         pub fn try_new_vulkan(kernels: &[(&str, &str)]) -> Result<Gpu, String> {
             backend_vulkan::VulkanBackend::try_new(kernels).map(|g| Gpu { inner: Box::new(g) })

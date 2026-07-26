@@ -13,12 +13,13 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
-use crate::block::{build_block_steps, wf, BlockDims, BlockWeights, NormBufs, Tensors, KERNELS};
+use crate::block::{build_block_steps, wf, BlockDims, BlockWeights, NormBufs, Scratch, Tensors, KERNELS};
 use crate::model::{postprocess, preprocess, timestep_cond};
 use crate::ZImageConfig;
 
 /// One stage: a chain of blocks recorded into a single graph with resident
-/// weights + intermediates, run with one submit.
+/// weights, run with one submit. Intermediates come from a single reused
+/// [`Scratch`]; the residual double-buffers between two slabs (`input`/`_resb`).
 struct Phase {
     input: DeviceBuffer,
     output: DeviceBuffer,
@@ -28,28 +29,33 @@ struct Phase {
     _weights: Vec<BlockWeights>, // kept resident (referenced by steps)
     norms: Vec<NormBufs>,
     t: u32,
+    _scr: Scratch,
+    _resb: DeviceBuffer,
 }
 
 #[allow(clippy::too_many_arguments)]
 fn build_phase(gpu: &Gpu, tensors: &Tensors, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool, reg2: bool) -> Phase {
     let half = bd.head_dim / 2;
-    let input = gpu.storage((t * bd.dim) as u64);
+    let resa = gpu.storage((t * bd.dim) as u64);
+    let resb = gpu.storage((t * bd.dim) as u64);
     let cos = gpu.storage((t * half) as u64);
     let sin = gpu.storage((t * half) as u64);
+    let scr = Scratch::new(gpu, bd, t);
     let (mut weights, mut norms, mut steps) = (Vec::new(), Vec::new(), Vec::new());
-    let mut x = input.clone();
+    // Double-buffer the residual: block reads `cur_in`, writes `cur_out`, swap.
+    let (mut cur_in, mut cur_out) = (resa.clone(), resb.clone());
     for p in prefixes {
         let w = BlockWeights::upload(gpu, tensors, p);
         let nb = NormBufs::new(gpu, tensors, p, bd.dim, modulation);
-        x = build_block_steps(gpu, &mut steps, &w, &nb, &x, &cos, &sin, bd, t, reg2);
+        build_block_steps(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &scr, &cos, &sin, bd, t, reg2);
         weights.push(w);
         norms.push(nb);
-        // Flush per block so the create_buffer_init upload staging is reclaimed
-        // instead of accumulating on top of the resident weights (else a 13 GB
-        // half transiently doubles and OOMs a 24 GB card).
+        std::mem::swap(&mut cur_in, &mut cur_out);
+        // Flush so create_buffer_init upload staging is reclaimed rather than
+        // accumulating on top of the resident weights.
         gpu.poll_wait();
     }
-    Phase { input, output: x, cos, sin, steps, _weights: weights, norms, t }
+    Phase { input: resa, output: cur_in, cos, sin, steps, _weights: weights, norms, t, _scr: scr, _resb: resb }
 }
 
 impl Phase {
@@ -124,12 +130,6 @@ impl ZImageDit {
     }
 }
 
-/// Set the physical GPU for the next `Gpu::new_wgpu` (how `model::Pipeline`
-/// places stages). Sequential construction only — not thread-safe.
-fn on_gpu(index: usize) {
-    std::env::set_var("BRAIN_GPU_INDEX", index.to_string());
-}
-
 /// Z-Image DiT sharded across two GPUs so the 6B fp32 model FITS: the refiners +
 /// first half of the main layers on GPU 0, the second half on GPU 1, with one
 /// host-staged residual transfer at the cut (no NVLink on the P40 box). A single
@@ -157,12 +157,18 @@ impl ZImageDitShard {
         let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
         let n_img = (f / pf) * (h / ps) * (wd / ps);
         let ntot = n_img + cap_len;
-        let cut = (cfg.n_layers / 2) as usize;
+        // Balance by BLOCK COUNT (all blocks weigh the same): card 0 also carries
+        // the 2 noise + 2 context refiners, so it gets fewer main layers. cut so
+        // card0 (2·n_refiner + cut) ≈ card1 (n_layers - cut). Each card ~half the
+        // weights — the ~1.6× wgpu allocator overhead then fits a 24 GB card.
+        let refiners = 2 * cfg.n_refiner_layers;
+        let cut = (cfg.n_layers.saturating_sub(refiners) / 2) as usize;
 
-        on_gpu(0);
-        let gpu0 = Gpu::new_wgpu(&KERNELS);
-        on_gpu(1);
-        let gpu1 = Gpu::new_wgpu(&KERNELS);
+        // One enumeration → two distinct physical cards (two separate new_wgpu
+        // calls reorder and both land on card 0 on this box).
+        let mut gpus = Gpu::new_wgpu_multi(&KERNELS, 2);
+        let gpu1 = gpus.pop().unwrap();
+        let gpu0 = gpus.pop().unwrap();
 
         let np: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("noise_refiner.{l}")).collect();
         let cp: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("context_refiner.{l}")).collect();

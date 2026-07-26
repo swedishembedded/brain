@@ -53,6 +53,19 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_secs(20));
         return;
     }
+
+    // `probe2`: create TWO devices via new_wgpu_multi, put 3 GB on dev0 and 6 GB
+    // on dev1, hold — nvidia-smi then reveals which physical card each maps to.
+    if device == "probe2" {
+        use gpu_core::Gpu;
+        let gpus = Gpu::new_wgpu_multi(&[("add2", kernels::ADD2)], 2);
+        let mut hold = Vec::new();
+        for _ in 0..3 { hold.push(gpus[0].storage(256 * 1024 * 1024)); gpus[0].poll_wait(); }
+        for _ in 0..6 { hold.push(gpus[1].storage(256 * 1024 * 1024)); gpus[1].poll_wait(); }
+        eprintln!("probe2: dev0=3 GB, dev1=6 GB — nvidia-smi should show one card ~3 GB, other ~6 GB (holding 20s)");
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        return;
+    }
     let h: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(16);
     let w: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(16);
     let cap_len: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(32);
