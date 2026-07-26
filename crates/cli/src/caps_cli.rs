@@ -13,6 +13,7 @@
 //! `capability::Manifest` (discovery) and a `Provider` (execution) — see
 //! [`static_manifests`] and [`build_registry`].
 
+use crate::imageops;
 use std::sync::Arc;
 
 use capability::{Action, ActionSpec, Blob, Invocation, Manifest, Media, ParamType, Progress, Provider, Registry};
@@ -22,7 +23,7 @@ use serde_json::{json, Value};
 /// Every model's static capability manifest (discovery — no weights). Add a model
 /// here and it appears in `brain caps` immediately.
 fn static_manifests() -> Vec<Manifest> {
-    vec![zimage::caps::manifest(), DemoModel.manifest()]
+    vec![zimage::caps::manifest(), imageops::manifest(), DemoModel.manifest()]
 }
 
 /// Build an executable registry for `model` (loads what that model needs). `do`
@@ -31,6 +32,7 @@ fn build_registry(model: &str) -> Result<Registry, String> {
     let mut reg = Registry::new();
     match model {
         "demo" => reg.register(Arc::new(DemoModel)),
+        "imageops" => reg.register(Arc::new(imageops::ImageOps)),
         zimage::caps::MODEL => reg.register(Arc::new(zimage::caps::ZImageProvider::load()?)),
         other => return Err(format!("unknown model '{other}' (see `brain caps`)")),
     }

@@ -23,6 +23,7 @@ mod npu_cli;
 mod pid_cli;
 mod qwen_cli;
 mod caps_cli;
+mod imageops;
 mod run_cli;
 mod tts_cli;
 mod tts_serve;
