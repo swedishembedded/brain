@@ -44,6 +44,10 @@ fn build_phase(gpu: &Gpu, tensors: &Tensors, prefixes: &[String], bd: BlockDims,
         x = build_block_steps(gpu, &mut steps, &w, &nb, &x, &cos, &sin, bd, t, reg2);
         weights.push(w);
         norms.push(nb);
+        // Flush per block so the create_buffer_init upload staging is reclaimed
+        // instead of accumulating on top of the resident weights (else a 13 GB
+        // half transiently doubles and OOMs a 24 GB card).
+        gpu.poll_wait();
     }
     Phase { input, output: x, cos, sin, steps, _weights: weights, norms, t }
 }

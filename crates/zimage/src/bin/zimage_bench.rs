@@ -34,6 +34,25 @@ fn forward_gflop(cfg: &ZImageConfig, n_img: u64, ncap: u64) -> f64 {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let device = args.get(1).map(|s| s.as_str()).unwrap_or("cpu");
+
+    // `probe`: allocate ~Ngb GB on BRAIN_GPU_INDEX, hold it, so nvidia-smi shows
+    // which physical card the index selected + how much fits before OOM.
+    if device == "probe" {
+        use gpu_core::Gpu;
+        let gb: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
+        let idx = std::env::var("BRAIN_GPU_INDEX").unwrap_or_default();
+        eprintln!("probe: BRAIN_GPU_INDEX={idx}, allocating {gb} × 1 GB…");
+        let gpu = Gpu::new_wgpu(&[("add2", kernels::ADD2)]);
+        let mut bufs = Vec::new();
+        for i in 0..gb {
+            bufs.push(gpu.storage(256 * 1024 * 1024)); // 1 GB = 256M f32
+            gpu.poll_wait();
+            eprintln!("  allocated {} GB", i + 1);
+        }
+        eprintln!("probe: {gb} GB resident — check `nvidia-smi` now (holding 20s)");
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        return;
+    }
     let h: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(16);
     let w: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(16);
     let cap_len: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(32);
