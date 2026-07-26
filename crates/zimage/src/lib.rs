@@ -22,7 +22,7 @@ pub mod dev;
 pub mod import;
 pub mod model;
 
-pub use dev::ZImageDit;
+pub use dev::{ZImageDit, ZImageDitShard};
 
 pub use block::{BlockDims, Tensors, ZImageBlock};
 pub use model::{ZImageConfig, ZImageModel};
