@@ -122,18 +122,30 @@ impl Action for ZAction {
         manifest().actions.into_iter().find(|a| a.name == self.name).expect("known action")
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let steps = inv.get_i64("steps").unwrap_or(8).max(1) as u32;
-        progress(Progress { step: 0, total: steps, message: "preparing".into() });
-        // The generalized interface delivered a validated invocation; the sampling
-        // pipeline is the remaining assembly (tracked separately). Report it rather
-        // than emit a fake result.
-        let _ = steps;
-        Err(format!(
-            "z-image '{}' is discoverable and its arguments validated, but the end-to-end generation pipeline \
-             (tokenizer → Qwen encode → {}-step flow-match sampling over the DiT → VAE decode) is not yet assembled. \
-             Set BRAIN_ZIMAGE_DIT/_VAE/QWEN3_4B and wire zimage::pipeline to enable execution.",
-            self.name, steps
-        ))
+        use capability::{Blob, Media, Outcome};
+        match self.name.as_str() {
+            "text2image" => {
+                let paths = crate::pipeline::Paths::from_env()?;
+                let opts = crate::pipeline::Opts {
+                    steps: inv.get_i64("steps").unwrap_or(8).max(1) as u32,
+                    guidance: inv.get_f64("guidance").unwrap_or(0.0) as f32,
+                    seed: inv.get_i64("seed").unwrap_or(42).max(0) as u64,
+                    width: inv.get_i64("width").unwrap_or(1024) as u32,
+                    height: inv.get_i64("height").unwrap_or(1024) as u32,
+                };
+                let prompt = inv.get_str("prompt").unwrap_or_default();
+                let img = crate::pipeline::generate(&prompt, &opts, &paths, |step, total, message| progress(Progress { step, total, message: message.to_string() }))?;
+                let bytes: Vec<u8> = img.hwc.iter().flat_map(|f| f.to_le_bytes()).collect();
+                Ok(Outcome::new()
+                    .set("width", json!(img.w))
+                    .set("height", json!(img.h))
+                    .blob("image", Blob::new(Media::Image, bytes).with_meta(json!({"w": img.w, "h": img.h, "c": 3}))))
+            }
+            // image2image / inpaint / outpaint reuse the sampler with a starting
+            // latent + optional mask — a small extension of the same pipeline,
+            // wired next. lora_train reuses the training stack.
+            other => Err(format!("z-image '{other}': discoverable + validated; execution wiring pending (text2image runs the full pipeline today)")),
+        }
     }
 }
 

@@ -25,6 +25,7 @@ pub mod grad;
 pub mod import;
 pub mod int8;
 pub mod model;
+pub mod pipeline;
 pub mod modelgrad;
 pub mod shard;
 pub mod train;
