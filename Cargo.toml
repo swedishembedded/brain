@@ -27,6 +27,7 @@ default-members = [
     "crates/autoencoder",
     "crates/diffusion",
     "crates/vae",
+    "crates/dit",
     "crates/forecast",
     "crates/fcbench",
     "crates/chronos2",

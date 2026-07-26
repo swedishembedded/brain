@@ -1,0 +1,10 @@
+[package]
+name = "brain-dit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared diffusion-transformer (DiT) building blocks: multi-axis image RoPE, adaLN-zero modulation, timestep embedding, patchify/unpatchify, QK-norm attention, SwiGLU — composed for Z-Image (S³-DiT single stream), FLUX.2 (MMDiT), and HiDream. Host-math pieces first (RoPE tables); device blocks build on gpu-core/kernels/wm-core."
+
+[lib]
+name = "dit"
+path = "src/lib.rs"

@@ -378,6 +378,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-dit"
+version = "0.1.0"
+
+[[package]]
 name = "brain-eval"
 version = "0.1.0"
 dependencies = [
