@@ -15,11 +15,16 @@
 //! already lives. Tokens round-trip host↔device between blocks; a device-resident
 //! chaining is a later optimization (the numerics are what this validates).
 
-use dit::rope::{tables_for_ids, RopeConfig};
+use dit::rope::{tables_for_ids, RopeConfig, RopeTables};
 
 use crate::block::{BlockDims, Tensors, ZImageBlock};
 
-const LN_EPS: f32 = 1e-6; // FinalLayer norm_final (LayerNorm) epsilon.
+pub(crate) const LN_EPS: f32 = 1e-6; // FinalLayer norm_final (LayerNorm) epsilon.
+
+/// Weight lookup on a host tensor map.
+pub(crate) fn tget<'a>(w: &'a Tensors, name: &str) -> &'a [f32] {
+    &w.get(name).unwrap_or_else(|| panic!("zimage: missing {name}")).1
+}
 
 /// Z-Image transformer config (the fields the forward needs).
 #[derive(Clone, Debug)]
@@ -58,10 +63,10 @@ impl ZImageConfig {
             norm_eps: 1e-5,
         }
     }
-    fn block_dims(&self) -> BlockDims {
+    pub(crate) fn block_dims(&self) -> BlockDims {
         BlockDims::new(self.dim, self.n_heads)
     }
-    fn rope(&self) -> RopeConfig {
+    pub(crate) fn rope(&self) -> RopeConfig {
         RopeConfig {
             axes_dims: self.axes_dims.clone(),
             axes_lens: self.axes_lens.clone(),
@@ -73,7 +78,7 @@ impl ZImageConfig {
 // ---- host math helpers ----
 
 /// `out[r,o] = Σ_i x[r,i]·w[o,i] (+ b[o])`; `w` is `[out,in]` row-major (PyTorch).
-fn linear(x: &[f32], rows: usize, in_dim: usize, w: &[f32], b: Option<&[f32]>, out_dim: usize) -> Vec<f32> {
+pub(crate) fn linear(x: &[f32], rows: usize, in_dim: usize, w: &[f32], b: Option<&[f32]>, out_dim: usize) -> Vec<f32> {
     let mut out = vec![0f32; rows * out_dim];
     for r in 0..rows {
         let xr = &x[r * in_dim..r * in_dim + in_dim];
@@ -89,7 +94,7 @@ fn linear(x: &[f32], rows: usize, in_dim: usize, w: &[f32], b: Option<&[f32]>, o
     out
 }
 
-fn rmsnorm(x: &[f32], rows: usize, dim: usize, w: &[f32], eps: f32) -> Vec<f32> {
+pub(crate) fn rmsnorm(x: &[f32], rows: usize, dim: usize, w: &[f32], eps: f32) -> Vec<f32> {
     let mut out = vec![0f32; rows * dim];
     for r in 0..rows {
         let xr = &x[r * dim..r * dim + dim];
@@ -103,7 +108,7 @@ fn rmsnorm(x: &[f32], rows: usize, dim: usize, w: &[f32], eps: f32) -> Vec<f32> 
 }
 
 /// LayerNorm without affine params (FinalLayer.norm_final): per-row standardize.
-fn layernorm_noaffine(x: &[f32], rows: usize, dim: usize, eps: f32) -> Vec<f32> {
+pub(crate) fn layernorm_noaffine(x: &[f32], rows: usize, dim: usize, eps: f32) -> Vec<f32> {
     let mut out = vec![0f32; rows * dim];
     for r in 0..rows {
         let xr = &x[r * dim..r * dim + dim];
@@ -117,13 +122,13 @@ fn layernorm_noaffine(x: &[f32], rows: usize, dim: usize, eps: f32) -> Vec<f32> 
     out
 }
 
-fn silu(x: &[f32]) -> Vec<f32> {
+pub(crate) fn silu(x: &[f32]) -> Vec<f32> {
     x.iter().map(|&v| v / (1.0 + (-v).exp())).collect()
 }
 
 /// Sinusoidal timestep embedding (diffusers `TimestepEmbedder.timestep_embedding`,
 /// `dim` even): `[cos(t·freq_k) ‖ sin(t·freq_k)]`, `freq_k = max_period^(-k/half)`.
-fn timestep_embedding(t: f32, dim: usize, max_period: f32) -> Vec<f32> {
+pub(crate) fn timestep_embedding(t: f32, dim: usize, max_period: f32) -> Vec<f32> {
     let half = dim / 2;
     let mut e = vec![0f32; dim];
     for k in 0..half {
@@ -133,6 +138,88 @@ fn timestep_embedding(t: f32, dim: usize, max_period: f32) -> Vec<f32> {
         e[half + k] = arg.sin();
     }
     e
+}
+
+/// Host pre-block state: timestep conditioning, embedded image/caption tokens,
+/// and the per-stream RoPE tables. Shared by the reference ([`ZImageModel`]) and
+/// device-resident ([`crate::dev::ZImageDit`]) forwards.
+pub(crate) struct Pre {
+    pub img: Vec<f32>,
+    pub capt: Vec<f32>,
+    pub img_rope: RopeTables,
+    pub cap_rope: RopeTables,
+    pub n_img: usize,
+    pub ncap: usize,
+}
+
+/// Everything before the transformer blocks: t-embed, patchify + x-embed,
+/// cap-embed, and RoPE-id construction (caption i → (1+i,0,0); image (f,h,w) →
+/// (cap_len+1+f,h,w)).
+pub(crate) fn preprocess(cfg: &ZImageConfig, w: &Tensors, latent: &[f32], f: u32, h: u32, wd: u32, cap: &[f32], cap_len: u32) -> Pre {
+    let dim = cfg.dim as usize;
+    let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
+    let (ft, ht, wt) = (f / pf, h / ps, wd / ps);
+    let n_img = (ft * ht * wt) as usize;
+    let ncap = cap_len as usize;
+    let patch_dim = (pf * ps * ps * cfg.in_channels) as usize;
+
+    let patches = patchify(latent, cfg.in_channels, f, h, wd, ps, pf);
+    let xk = format!("all_x_embedder.{ps}-{pf}");
+    let img = linear(&patches, n_img, patch_dim, tget(w, &format!("{xk}.weight")), Some(tget(w, &format!("{xk}.bias"))), dim);
+    let cn = rmsnorm(cap, ncap, cfg.cap_feat_dim as usize, tget(w, "cap_embedder.0.weight"), cfg.norm_eps);
+    let capt = linear(&cn, ncap, cfg.cap_feat_dim as usize, tget(w, "cap_embedder.1.weight"), Some(tget(w, "cap_embedder.1.bias")), dim);
+
+    let rope = cfg.rope();
+    let mut img_ids = Vec::with_capacity(n_img * 3);
+    for fi in 0..ft {
+        for hi in 0..ht {
+            for wi in 0..wt {
+                img_ids.extend_from_slice(&[cap_len + 1 + fi, hi, wi]);
+            }
+        }
+    }
+    let mut cap_ids = Vec::with_capacity(ncap * 3);
+    for i in 0..cap_len {
+        cap_ids.extend_from_slice(&[1 + i, 0, 0]);
+    }
+    Pre {
+        img,
+        capt,
+        img_rope: tables_for_ids(&rope, &img_ids, 3),
+        cap_rope: tables_for_ids(&rope, &cap_ids, 3),
+        n_img,
+        ncap,
+    }
+}
+
+/// Timestep conditioning `c = t_embedder(t·t_scale)` `[cdim]`.
+pub(crate) fn timestep_cond(cfg: &ZImageConfig, w: &Tensors, t: f32) -> Vec<f32> {
+    let cdim = (cfg.dim as usize).min(256);
+    let te = timestep_embedding(t * cfg.t_scale, 256, 10000.0);
+    let h0 = silu(&linear(&te, 1, 256, tget(w, "t_embedder.mlp.0.weight"), Some(tget(w, "t_embedder.mlp.0.bias")), 1024));
+    linear(&h0, 1, 1024, tget(w, "t_embedder.mlp.2.weight"), Some(tget(w, "t_embedder.mlp.2.bias")), cdim)
+}
+
+/// FinalLayer (LayerNorm-no-affine · (1+adaLN(c)) → linear) + unpatchify the
+/// image portion (first `n_img` tokens of the unified sequence).
+pub(crate) fn postprocess(cfg: &ZImageConfig, w: &Tensors, uni: &[f32], cvec: &[f32], n_img: usize, f: u32, h: u32, wd: u32) -> Vec<f32> {
+    let dim = cfg.dim as usize;
+    let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
+    let cdim = dim.min(256);
+    let ntot = uni.len() / dim;
+    let patch_dim = (pf * ps * ps * cfg.in_channels) as usize;
+    let fk = format!("all_final_layer.{ps}-{pf}");
+    let adaln = linear(&silu(cvec), 1, cdim, tget(w, &format!("{fk}.adaLN_modulation.1.weight")), Some(tget(w, &format!("{fk}.adaLN_modulation.1.bias"))), dim);
+    let scale: Vec<f32> = adaln.iter().map(|&v| 1.0 + v).collect();
+    let normed = layernorm_noaffine(uni, ntot, dim, LN_EPS);
+    let mut scaled = vec![0f32; ntot * dim];
+    for r in 0..ntot {
+        for cc in 0..dim {
+            scaled[r * dim + cc] = normed[r * dim + cc] * scale[cc];
+        }
+    }
+    let final_out = linear(&scaled, ntot, dim, tget(w, &format!("{fk}.linear.weight")), Some(tget(w, &format!("{fk}.linear.bias"))), patch_dim);
+    unpatchify(&final_out[..n_img * patch_dim], cfg.in_channels, f, h, wd, ps, pf)
 }
 
 /// The Z-Image DiT: config + host weights, runs a single forward.
@@ -147,108 +234,42 @@ impl ZImageModel {
         ZImageModel { cfg, w: weights, device: device.map(|s| s.to_string()) }
     }
 
-    fn get(&self, name: &str) -> &[f32] {
-        &self.w.get(name).unwrap_or_else(|| panic!("zimage: missing {name}")).1
-    }
-
-    /// One DiT forward. `latent`: `[C·F·H·W]` row-major (C=in_channels); `cap`:
-    /// `[cap_len·cap_feat_dim]` Qwen3-4B features; `t`: the (unscaled) timestep.
-    /// `(f, h, w)`: latent spatial dims. Returns the predicted latent `[C·F·H·W]`.
+    /// One DiT forward (reference path: one device per block, host round-trips).
+    /// `latent`: `[C·F·H·W]`; `cap`: `[cap_len·cap_feat_dim]`; `t`: timestep;
+    /// `(f,h,w)`: latent spatial dims. Returns the predicted latent `[C·F·H·W]`.
     pub fn forward(&self, latent: &[f32], f: u32, h: u32, w: u32, cap: &[f32], cap_len: u32, t: f32) -> Vec<f32> {
         let c = &self.cfg;
-        let dim = c.dim as usize;
         let dev = self.device.as_deref();
-        let (ps, pf) = (c.patch_size, c.f_patch_size);
-        let (ft, ht, wt) = (f / pf, h / ps, w / ps);
-        let n_img = (ft * ht * wt) as usize;
-        let ncap = cap_len as usize;
-        let patch_dim = (pf * ps * ps * c.in_channels) as usize;
-
-        // --- timestep embedding -> adaln_input c [cdim] ---
-        let cdim = dim.min(256);
-        let te = timestep_embedding(t * c.t_scale, 256, 10000.0);
-        let h0 = linear(&te, 1, 256, self.get("t_embedder.mlp.0.weight"), Some(self.get("t_embedder.mlp.0.bias")), 1024);
-        let h0 = silu(&h0);
-        let cvec = linear(&h0, 1, 1024, self.get("t_embedder.mlp.2.weight"), Some(self.get("t_embedder.mlp.2.bias")), cdim);
-
-        // --- patchify latent [C,F,H,W] -> patches [n_img, patch_dim] ---
-        let patches = patchify(latent, c.in_channels, f, h, w, ps, pf);
-
-        // --- x_embedder: Linear(patch_dim -> dim) ---
-        let xk = format!("all_x_embedder.{ps}-{pf}");
-        let mut img = linear(&patches, n_img, patch_dim, self.get(&format!("{xk}.weight")), Some(self.get(&format!("{xk}.bias"))), dim);
-
-        // --- cap_embedder: RMSNorm(cap_feat_dim) + Linear(-> dim) ---
-        let cn = rmsnorm(cap, ncap, c.cap_feat_dim as usize, self.get("cap_embedder.0.weight"), c.norm_eps);
-        let mut capt = linear(&cn, ncap, c.cap_feat_dim as usize, self.get("cap_embedder.1.weight"), Some(self.get("cap_embedder.1.bias")), dim);
-
-        // --- RoPE ids: caption i -> (1+i,0,0); image (f,h,w) -> (cap_len+1+f,h,w) ---
-        let rope = c.rope();
-        let mut img_ids = Vec::with_capacity(n_img * 3);
-        for fi in 0..ft {
-            for hi in 0..ht {
-                for wi in 0..wt {
-                    img_ids.extend_from_slice(&[cap_len + 1 + fi, hi, wi]);
-                }
-            }
-        }
-        let mut cap_ids = Vec::with_capacity(ncap * 3);
-        for i in 0..cap_len {
-            cap_ids.extend_from_slice(&[1 + i, 0, 0]);
-        }
-        let img_rope = tables_for_ids(&rope, &img_ids, 3);
-        let cap_rope = tables_for_ids(&rope, &cap_ids, 3);
-
-        // --- image refine (noise_refiner: modulation) ---
+        let cvec = timestep_cond(c, &self.w, t);
+        let pre = preprocess(c, &self.w, latent, f, h, w, cap, cap_len);
         let bd = c.block_dims();
+        let (mut img, mut capt) = (pre.img, pre.capt);
         for l in 0..c.n_refiner_layers {
-            let blk = ZImageBlock::new(&self.w, &format!("noise_refiner.{l}"), bd, n_img as u32, true, dev);
-            img = blk.forward(&img, &cvec, &img_rope.cos, &img_rope.sin);
+            let blk = ZImageBlock::new(&self.w, &format!("noise_refiner.{l}"), bd, pre.n_img as u32, true, dev);
+            img = blk.forward(&img, &cvec, &pre.img_rope.cos, &pre.img_rope.sin);
         }
-        // --- caption refine (context_refiner: no modulation) ---
         for l in 0..c.n_refiner_layers {
-            let blk = ZImageBlock::new(&self.w, &format!("context_refiner.{l}"), bd, ncap as u32, false, dev);
-            capt = blk.forward(&capt, &cvec, &cap_rope.cos, &cap_rope.sin);
+            let blk = ZImageBlock::new(&self.w, &format!("context_refiner.{l}"), bd, pre.ncap as u32, false, dev);
+            capt = blk.forward(&capt, &cvec, &pre.cap_rope.cos, &pre.cap_rope.sin);
         }
-
-        // --- unified sequence [image, caption] ---
-        let ntot = n_img + ncap;
-        let mut uni = Vec::with_capacity(ntot * dim);
-        uni.extend_from_slice(&img);
+        // unified [image, caption]
+        let mut uni = img;
         uni.extend_from_slice(&capt);
-        let mut uni_cos = img_rope.cos.clone();
-        uni_cos.extend_from_slice(&cap_rope.cos);
-        let mut uni_sin = img_rope.sin.clone();
-        uni_sin.extend_from_slice(&cap_rope.sin);
-
-        // --- main layers ---
+        let mut uni_cos = pre.img_rope.cos.clone();
+        uni_cos.extend_from_slice(&pre.cap_rope.cos);
+        let mut uni_sin = pre.img_rope.sin.clone();
+        uni_sin.extend_from_slice(&pre.cap_rope.sin);
         for l in 0..c.n_layers {
-            let blk = ZImageBlock::new(&self.w, &format!("layers.{l}"), bd, ntot as u32, true, dev);
+            let blk = ZImageBlock::new(&self.w, &format!("layers.{l}"), bd, (pre.n_img + pre.ncap) as u32, true, dev);
             uni = blk.forward(&uni, &cvec, &uni_cos, &uni_sin);
         }
-
-        // --- FinalLayer: norm_final (LayerNorm no-affine) * (1 + adaLN(c)) -> Linear ---
-        let fk = format!("all_final_layer.{ps}-{pf}");
-        let adaln = linear(&silu(&cvec), 1, cdim, self.get(&format!("{fk}.adaLN_modulation.1.weight")), Some(self.get(&format!("{fk}.adaLN_modulation.1.bias"))), dim);
-        let scale: Vec<f32> = adaln.iter().map(|&v| 1.0 + v).collect();
-        let normed = layernorm_noaffine(&uni, ntot, dim, LN_EPS);
-        let mut scaled = vec![0f32; ntot * dim];
-        for r in 0..ntot {
-            for cc in 0..dim {
-                scaled[r * dim + cc] = normed[r * dim + cc] * scale[cc];
-            }
-        }
-        let out_ch = patch_dim; // patch_size^2 * f_patch * out_channels
-        let final_out = linear(&scaled, ntot, dim, self.get(&format!("{fk}.linear.weight")), Some(self.get(&format!("{fk}.linear.bias"))), out_ch);
-
-        // --- unpatchify the image portion (first n_img tokens) ---
-        unpatchify(&final_out[..n_img * out_ch], c.in_channels, f, h, w, ps, pf)
+        postprocess(c, &self.w, &uni, &cvec, pre.n_img, f, h, w)
     }
 }
 
 /// `[C,F,H,W] -> [n_patches, pF·pH·pW·C]`, patch (f,h,w) row-major, inner order
 /// `[pF,pH,pW,C]` (matches diffusers `_patchify_image`).
-fn patchify(latent: &[f32], ch: u32, f: u32, h: u32, w: u32, ps: u32, pf: u32) -> Vec<f32> {
+pub(crate) fn patchify(latent: &[f32], ch: u32, f: u32, h: u32, w: u32, ps: u32, pf: u32) -> Vec<f32> {
     let (c, ft, ht, wt) = (ch as usize, (f / pf) as usize, (h / ps) as usize, (w / ps) as usize);
     let (pf, ph, pw) = (pf as usize, ps as usize, ps as usize);
     let (fh, fw) = (h as usize, w as usize);
@@ -276,7 +297,7 @@ fn patchify(latent: &[f32], ch: u32, f: u32, h: u32, w: u32, ps: u32, pf: u32) -
 }
 
 /// Inverse of [`patchify`]: `[n_img, pF·pH·pW·C] -> [C,F,H,W]`.
-fn unpatchify(tokens: &[f32], ch: u32, f: u32, h: u32, w: u32, ps: u32, pf: u32) -> Vec<f32> {
+pub(crate) fn unpatchify(tokens: &[f32], ch: u32, f: u32, h: u32, w: u32, ps: u32, pf: u32) -> Vec<f32> {
     let (c, ft, ht, wt) = (ch as usize, (f / pf) as usize, (h / ps) as usize, (w / ps) as usize);
     let (pfz, ph, pw) = (pf as usize, ps as usize, ps as usize);
     let (fh, fw) = (h as usize, w as usize);
