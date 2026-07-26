@@ -131,13 +131,23 @@ pub fn generate(prompt: &str, opts: &Opts, paths: &Paths, mut progress: impl FnM
     let cap_len = tokens.len() as u32;
 
     // 2. Qwen-4B encode → caption features (penultimate hidden). Dropped after. -
-    progress(1, total, "encoding prompt (Qwen-4B)");
+    //
+    // The encoder is a SINGLE forward pass (not the heavy iterative compute), and
+    // its ~16.8 GB of f32 weights plus Vulkan's upload staging bump a 24 GB P40's
+    // ceiling. So we run just this one-shot on the CPU (AVX2+FMA matmul, a few
+    // seconds) and keep the *heavy* work — the 8-step DiT and the VAE — on the GPU
+    // (VRAM), which is where the repeated compute belongs. This is the intended
+    // "CPU only as a fallback for the piece that doesn't fit" split.
+    progress(1, total, "encoding prompt (Qwen-4B, CPU/AVX2)");
     let qcfg = QwenConfig::qwen3_4b();
     let qtensors = checkpoint::safetensors::read(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
     let qinit = qwen::import::brain_init_from_hf(qtensors, &qcfg)?;
     let cap = {
+        gpu_core::set_default_backend(gpu_core::Backend::Cpu); // encoder → CPU (AVX2)
         let enc = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, qwen::Shard::whole(qcfg.n_layers as usize));
-        enc.encode(&tokens) // [cap_len · 2560]
+        let c = enc.encode(&tokens); // [cap_len · 2560]
+        gpu_core::set_default_backend(gpu_core::Backend::Wgpu); // heavy compute → GPU
+        c
     };
     drop(qinit);
 
@@ -159,15 +169,23 @@ pub fn generate(prompt: &str, opts: &Opts, paths: &Paths, mut progress: impl FnM
         for i in 0..opts.steps as usize {
             progress(2 + i as u32, total, "sampling");
             let t_dit = (1000.0 - ts[i]) / 1000.0;
-            let v = dit.forward(&lat, &cap, t_dit);
+            // The reference negates the DiT output before the Euler step
+            // (`noise_pred = -noise_pred; scheduler.step(noise_pred, …)`): brain's
+            // scheduler is the bare `x + (σ_next−σ)·v`, so we negate here to match.
+            let v: Vec<f32> = dit.forward(&lat, &cap, t_dit).iter().map(|&x| -x).collect();
             lat = sched.step(&v, &lat);
         }
     } // dit dropped → free VRAM before the VAE
 
     // 6. VAE decode ----------------------------------------------------------
+    //
+    // On the GPU (VRAM): the decoder graph is built over the *latent* dims
+    // (`lh × lw`); it upsamples ×8 internally to the `height × wpx` image. Passing
+    // the latent dims keeps every buffer small (well under the P40's 2 GiB binding
+    // limit), so this runs on-device alongside the DiT.
     progress(total, total, "decoding (VAE)");
     let vtensors = tensors_map(checkpoint::safetensors::read(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
-    let vae = VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, opts.height, opts.width, Some("gpu"));
+    let vae = VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu"));
     let dec_in: Vec<f32> = lat.iter().map(|&x| x / 0.3611 + 0.1159).collect();
     let chw = vae.decode(&dec_in); // [3 · H · W] in [-1, 1]
 
