@@ -125,13 +125,38 @@ impl HotPipeline {
         progress("loading tokenizer");
         let tok = QwenBpe::from_file(&paths.tokenizer)?;
 
-        progress("building Qwen-4B encoder (CPU/AVX2)");
+        // Where the Qwen-4B encoder runs. `BRAIN_ZIMAGE_ENCODER_GPU=<i>` puts its
+        // ~16.8 GB f32 weights on GPU `i` (e.g. the second card while the int8 DiT
+        // owns the first) — the encode then runs in ~1-2 s on-device instead of
+        // ~38 s on the CPU. Card-agnostic: you choose the index; unset ⇒ CPU. When
+        // `hifi` already shards the fp32 DiT across both cards, there is no spare
+        // GPU, so the encoder stays on the CPU regardless.
         let qcfg = QwenConfig::qwen3_4b();
         let qtensors = checkpoint::safetensors::read(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
         let qinit = qwen::import::brain_init_from_hf(qtensors, &qcfg)?;
-        gpu_core::set_default_backend(gpu_core::Backend::Cpu); // encoder → CPU
-        let enc = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, qwen::Shard::whole(qcfg.n_layers as usize));
-        gpu_core::set_default_backend(gpu_core::Backend::Wgpu); // heavy compute → GPU
+        let enc_gpu = std::env::var("BRAIN_ZIMAGE_ENCODER_GPU").ok().filter(|s| !s.is_empty());
+        let dit_gpu = std::env::var("BRAIN_GPU_INDEX").ok(); // restore for the DiT/VAE (GPU 0)
+        let build_enc = || Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, qwen::Shard::whole(qcfg.n_layers as usize));
+        let enc = match (&enc_gpu, hifi) {
+            (Some(g), false) => {
+                progress(&format!("building Qwen-4B encoder (GPU {g})"));
+                std::env::set_var("BRAIN_GPU_INDEX", g);
+                gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
+                let e = build_enc(); // Qwen's Gpu handle captures GPU `g`
+                match &dit_gpu {
+                    Some(d) => std::env::set_var("BRAIN_GPU_INDEX", d),
+                    None => std::env::remove_var("BRAIN_GPU_INDEX"),
+                }
+                e
+            }
+            _ => {
+                progress("building Qwen-4B encoder (CPU/AVX2)");
+                gpu_core::set_default_backend(gpu_core::Backend::Cpu);
+                let e = build_enc();
+                gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
+                e
+            }
+        };
         drop(qinit);
 
         progress(if hifi { "building DiT (fp32, 2×GPU)" } else { "building DiT (int8, GPU)" });

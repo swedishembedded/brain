@@ -72,7 +72,22 @@ impl ParamStore {
                 .get(name)
                 .unwrap_or_else(|| panic!("missing init weight {name}"));
             assert_eq!(data.len(), *numel, "size mismatch for {name}");
-            weight.insert(name.clone(), gpu.storage_init(name, data));
+            // storage()+write() (plain DEVICE_LOCAL + transient staging) instead of
+            // storage_init(): create_buffer_init's mapped-at-creation path forces
+            // weights into an inefficient memory type on a non-ReBAR GPU, ballooning
+            // e.g. a 16.8 GB encoder to ~30 GB (OOM). DEVICE_LOCAL buffers pack
+            // tightly — the difference between the Qwen encoder fitting a 24 GB card
+            // or not. (Same fix as zimage's BlockWeights::upload.)
+            let wbuf = gpu.storage(*numel as u64);
+            let bits: Vec<u32> = data.iter().map(|v| v.to_bits()).collect();
+            gpu.write(&wbuf, &bits);
+            // Reclaim the write_buffer staging NOW, before the next weight — else it
+            // accrues (wgpu only frees it on poll_wait), so a 16.8 GB model uploads
+            // ~16.8 GB of extra staging on top of the weights and OOMs a 24 GB card.
+            // Peak staging is then just this one tensor. (The DiT does the same via
+            // poll_wait per block.)
+            gpu.poll_wait();
+            weight.insert(name.clone(), wbuf);
             match role {
                 Role::Trainable => {
                     let z = vec![0.0f32; *numel];
