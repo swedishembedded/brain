@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use data::qwen_tokenizer::QwenBpe;
 use data::Tokenizer;
 use diffusion::{default_z_image_sigmas, FlowMatchConfig, FlowMatchEulerScheduler};
-use qwen::{Qwen, QwenConfig};
+use qwen::{Qwen, QwenConfig, Shard, IGNORE};
 use vae::{VaeConfig, VaeDecoder, VaeEncoder};
 
 use crate::import::import_comfy;
@@ -88,9 +88,40 @@ impl DitEngine {
 /// handle from build time, so [`generate`](Self::generate) just runs forwards.
 /// Captions are padded/truncated to `cap_len` so the built graphs stay valid for
 /// any prompt (padding repeats the last token, keeping features in-distribution).
+/// Where/how the Qwen-4B text encoder runs.
+enum Encoder {
+    /// Whole model on the CPU (default) — no VRAM cost, ~38 s/encode.
+    Cpu(Qwen),
+    /// Split across two cards: `s0` (embedding + the first `cut` layers) on the
+    /// mostly-empty card, `s1` (the remaining layers up to the penultimate) on the
+    /// DiT's card. The fp32 encoder is ~23 GB resident — too big for one 24 GB
+    /// card, but a thin tail fits alongside the 13 GB int8 DiT while the bulk sits
+    /// on the spare card. Encode runs on-GPU (~1-2 s) with one small host-staged
+    /// residual at the cut.
+    Split { s0: Qwen, s1: Qwen, cap_len: u32 },
+}
+
+impl Encoder {
+    fn encode(&self, tokens: &[u32]) -> Vec<f32> {
+        match self {
+            Encoder::Cpu(q) => q.encode(tokens),
+            Encoder::Split { s0, s1, cap_len } => {
+                // Targets are unused (we read a hidden state, not a loss).
+                let ign = vec![IGNORE; *cap_len as usize];
+                s0.set_batch(tokens, &ign);
+                s0.run_forward(); // embed + layers 0..cut
+                let boundary = s0.read_out_res(); // res[cut] (host)
+                s1.write_in_res(&boundary); // res[cut] on the DiT card
+                s1.run_forward(); // layers cut..n_layers-1
+                s1.read_out_res() // res[n_layers-1] == penultimate hidden (== Qwen::encode)
+            }
+        }
+    }
+}
+
 pub struct HotPipeline {
     tok: QwenBpe,
-    enc: Qwen,
+    enc: Encoder,
     dit: DitEngine,
     vae: VaeDecoder,
     cap_len: u32,
@@ -125,38 +156,44 @@ impl HotPipeline {
         progress("loading tokenizer");
         let tok = QwenBpe::from_file(&paths.tokenizer)?;
 
-        // Where the Qwen-4B encoder runs. `BRAIN_ZIMAGE_ENCODER_GPU=<i>` puts its
-        // ~16.8 GB f32 weights on GPU `i` (e.g. the second card while the int8 DiT
-        // owns the first) — the encode then runs in ~1-2 s on-device instead of
-        // ~38 s on the CPU. Card-agnostic: you choose the index; unset ⇒ CPU. When
-        // `hifi` already shards the fp32 DiT across both cards, there is no spare
-        // GPU, so the encoder stays on the CPU regardless.
+        // Where the Qwen-4B encoder runs. `BRAIN_ZIMAGE_ENCODER_GPU=<i>` (when NOT
+        // hifi — hifi already uses both cards for the DiT) shards it across two
+        // cards: the bulk (embedding + first ~¾ of the layers) on GPU `i` (the
+        // otherwise-empty card) and the thin tail on the DiT's card. The whole fp32
+        // encoder (~23 GB resident) does not fit one 24 GB card, but this split
+        // does, and the encode then runs on-GPU (~1-2 s) instead of ~38 s on the
+        // CPU. Unset ⇒ CPU. Card-agnostic: you choose the bulk-card index.
         let qcfg = QwenConfig::qwen3_4b();
         let qtensors = checkpoint::safetensors::read(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
         let qinit = qwen::import::brain_init_from_hf(qtensors, &qcfg)?;
         let enc_gpu = std::env::var("BRAIN_ZIMAGE_ENCODER_GPU").ok().filter(|s| !s.is_empty());
-        let dit_gpu = std::env::var("BRAIN_GPU_INDEX").ok(); // restore for the DiT/VAE (GPU 0)
-        let build_enc = || Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, qwen::Shard::whole(qcfg.n_layers as usize));
+        let dit_gpu = std::env::var("BRAIN_GPU_INDEX").ok().unwrap_or_else(|| "0".to_string()); // the DiT/VAE card
         let enc = match (&enc_gpu, hifi) {
-            (Some(g), false) => {
-                progress(&format!("building Qwen-4B encoder (GPU {g})"));
-                std::env::set_var("BRAIN_GPU_INDEX", g);
+            (Some(bulk), false) => {
+                let n = qcfg.n_layers as usize;
+                let cut = (n * 3) / 4; // ~¾ of the layers (embedding side) on the bulk card
+                progress(&format!("building Qwen-4B encoder (split: GPU {bulk} + GPU {dit_gpu})"));
+                let (bi, di) = (bulk.parse().unwrap_or(1), dit_gpu.parse().unwrap_or(0));
+                // Bulk shard: embedding + layers 0..cut on the (empty) bulk card.
+                std::env::set_var("BRAIN_GPU_INDEX", bulk);
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
-                let e = build_enc(); // Qwen's Gpu handle captures GPU `g`
-                match &dit_gpu {
-                    Some(d) => std::env::set_var("BRAIN_GPU_INDEX", d),
-                    None => std::env::remove_var("BRAIN_GPU_INDEX"),
-                }
-                e
+                let s0 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard { start: 0, end: cut, embed: true, head: false, gpu_index: bi });
+                // Tail shard: layers cut..n_layers-1 (up to the penultimate) on the
+                // DiT's card. Built BEFORE the DiT so its ~4 GB is placed first.
+                std::env::set_var("BRAIN_GPU_INDEX", &dit_gpu);
+                let s1 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard { start: cut, end: n - 1, embed: false, head: false, gpu_index: di });
+                Encoder::Split { s0, s1, cap_len }
             }
             _ => {
                 progress("building Qwen-4B encoder (CPU/AVX2)");
                 gpu_core::set_default_backend(gpu_core::Backend::Cpu);
-                let e = build_enc();
+                let e = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard::whole(qcfg.n_layers as usize));
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
-                e
+                Encoder::Cpu(e)
             }
         };
+        // Ensure the DiT/VAE build lands on the DiT card regardless of the branch.
+        std::env::set_var("BRAIN_GPU_INDEX", &dit_gpu);
         drop(qinit);
 
         progress(if hifi { "building DiT (fp32, 2×GPU)" } else { "building DiT (int8, GPU)" });
