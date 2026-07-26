@@ -13,7 +13,10 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
-use crate::block::{build_block_steps, wf, BlockDims, BlockWeights, NormBufs, Scratch, Tensors, KERNELS};
+use crate::block::{
+    build_block_steps, build_block_steps_i8, wf, BlockDims, BlockWeights, Int8Scratch, Int8Weights,
+    NormBufs, Scratch, Tensors, KERNELS,
+};
 use crate::model::{postprocess, preprocess, timestep_cond};
 use crate::ZImageConfig;
 
@@ -198,6 +201,108 @@ impl ZImageDitShard {
         // GPU0: first half; host-staged residual; GPU1: second half.
         let mid = self.main0.run(&self.gpu0, &uni, &cvec, &uni_cos, &uni_sin, dim, cdim);
         let uni_out = self.main1.run(&self.gpu1, &mid, &cvec, &uni_cos, &uni_sin, dim, cdim);
+        postprocess(c, &self.w, &uni_out, &cvec, pre.n_img, self.f, self.h, self.wd)
+    }
+}
+
+// ---------------- int8 (DP4A) single-GPU DiT ----------------
+
+/// One int8 stage: like [`Phase`] but the linears run DP4A int8.
+struct Int8Phase {
+    input: DeviceBuffer,
+    output: DeviceBuffer,
+    cos: DeviceBuffer,
+    sin: DeviceBuffer,
+    steps: Vec<Step>,
+    _weights: Vec<Int8Weights>,
+    _scr: Scratch,
+    _i8: Int8Scratch,
+    _resb: DeviceBuffer,
+    norms: Vec<NormBufs>,
+    t: u32,
+}
+
+fn build_phase_i8(gpu: &Gpu, tensors: &Tensors, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool) -> Int8Phase {
+    let half = bd.head_dim / 2;
+    let resa = gpu.storage((t * bd.dim) as u64);
+    let resb = gpu.storage((t * bd.dim) as u64);
+    let cos = gpu.storage((t * half) as u64);
+    let sin = gpu.storage((t * half) as u64);
+    let scr = Scratch::new(gpu, bd, t);
+    let i8 = Int8Scratch::new(gpu, bd, t);
+    let (mut weights, mut norms, mut steps) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut cur_in, mut cur_out) = (resa.clone(), resb.clone());
+    for p in prefixes {
+        let w = Int8Weights::upload(gpu, tensors, p, bd);
+        let nb = NormBufs::new(gpu, tensors, p, bd.dim, modulation);
+        build_block_steps_i8(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &scr, &i8, &cos, &sin, bd, t);
+        weights.push(w);
+        norms.push(nb);
+        std::mem::swap(&mut cur_in, &mut cur_out);
+        gpu.poll_wait();
+    }
+    Int8Phase { input: resa, output: cur_in, cos, sin, steps, _weights: weights, _scr: scr, _i8: i8, _resb: resb, norms, t }
+}
+
+impl Int8Phase {
+    fn run(&self, gpu: &Gpu, tokens: &[f32], c: &[f32], cos: &[f32], sin: &[f32], dim: usize, cdim: usize) -> Vec<f32> {
+        for nb in &self.norms {
+            nb.upload_folded(gpu, c, dim, cdim);
+        }
+        wf(gpu, &self.input, tokens);
+        wf(gpu, &self.cos, cos);
+        wf(gpu, &self.sin, sin);
+        gpu.submit(&[], &self.steps);
+        gpu.read(&self.output, self.t as usize * dim)
+    }
+}
+
+/// Z-Image DiT with int8 (DP4A) linears — the 6B fits ONE 24 GB P40 (~6 GB of
+/// weights), no sharding. Build once, forward many times.
+pub struct ZImageDitI8 {
+    gpu: Gpu,
+    cfg: ZImageConfig,
+    w: Tensors,
+    f: u32,
+    h: u32,
+    wd: u32,
+    cap_len: u32,
+    noise: Int8Phase,
+    context: Int8Phase,
+    main: Int8Phase,
+}
+
+impl ZImageDitI8 {
+    pub fn build(cfg: ZImageConfig, weights: Tensors, f: u32, h: u32, wd: u32, cap_len: u32) -> ZImageDitI8 {
+        let gpu = Gpu::new_wgpu(&KERNELS);
+        let bd = cfg.block_dims();
+        let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
+        let n_img = (f / pf) * (h / ps) * (wd / ps);
+        let ntot = n_img + cap_len;
+        let np: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("noise_refiner.{l}")).collect();
+        let cp: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("context_refiner.{l}")).collect();
+        let mp: Vec<String> = (0..cfg.n_layers).map(|l| format!("layers.{l}")).collect();
+        let noise = build_phase_i8(&gpu, &weights, &np, bd, n_img, true);
+        let context = build_phase_i8(&gpu, &weights, &cp, bd, cap_len, false);
+        let main = build_phase_i8(&gpu, &weights, &mp, bd, ntot, true);
+        ZImageDitI8 { gpu, cfg, w: weights, f, h, wd, cap_len, noise, context, main }
+    }
+
+    pub fn forward(&self, latent: &[f32], cap: &[f32], t: f32) -> Vec<f32> {
+        let c = &self.cfg;
+        let dim = c.dim as usize;
+        let cdim = dim.min(256);
+        let cvec = timestep_cond(c, &self.w, t);
+        let pre = preprocess(c, &self.w, latent, self.f, self.h, self.wd, cap, self.cap_len);
+        let img = self.noise.run(&self.gpu, &pre.img, &cvec, &pre.img_rope.cos, &pre.img_rope.sin, dim, cdim);
+        let capt = self.context.run(&self.gpu, &pre.capt, &cvec, &pre.cap_rope.cos, &pre.cap_rope.sin, dim, cdim);
+        let mut uni = img;
+        uni.extend_from_slice(&capt);
+        let mut uni_cos = pre.img_rope.cos.clone();
+        uni_cos.extend_from_slice(&pre.cap_rope.cos);
+        let mut uni_sin = pre.img_rope.sin.clone();
+        uni_sin.extend_from_slice(&pre.cap_rope.sin);
+        let uni_out = self.main.run(&self.gpu, &uni, &cvec, &uni_cos, &uni_sin, dim, cdim);
         postprocess(c, &self.w, &uni_out, &cvec, pre.n_img, self.f, self.h, self.wd)
     }
 }

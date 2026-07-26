@@ -6,21 +6,19 @@
 //! shape. Per-tensor int8 is lossy, so the gate is cosine ≥ 0.999, not exact.
 //! Needs a GPU (DP4A + workgroup barriers don't run on the CPU JIT).
 
-use gpu_core::{f, Gpu};
-use zimage::int8::{quantize_weight, QP};
+use gpu_core::Gpu;
+use zimage::int8::quantize_weight;
 
-const KERNELS: [(&str, &str); 5] = [
-    ("max_abs_part", kernels::MAX_ABS_PART),
-    ("max_abs_final", kernels::MAX_ABS_FINAL),
+const KERNELS: [(&str, &str); 4] = [
+    ("max_abs_row", kernels::MAX_ABS_ROW),
     ("quant_pack", kernels::QUANT_PACK),
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
     ("matmul", kernels::MATMUL),
 ];
-const K_MAXP: usize = 0;
-const K_MAXF: usize = 1;
-const K_QP: usize = 2;
-const K_MM8: usize = 3;
-const K_MM: usize = 4;
+const K_MAXR: usize = 0;
+const K_QP: usize = 1;
+const K_MM8: usize = 2;
+const K_MM: usize = 3;
 
 fn fill(n: usize, seed: u64) -> Vec<f32> {
     let mut s = seed.wrapping_add(0x9E3779B97F4A7C15);
@@ -63,22 +61,21 @@ fn int8_gemm_matches_fp32() {
     gpu.submit(&[], &[s]);
     let want = gpu.read(&refb, m * n);
 
-    // int8: quantize weights on host, activations on device.
+    // int8: per-channel weight quant on host, activation quant on device.
     let (wq, sw) = quantize_weight(&w, n, k);
     let wqb = gpu.storage(wq.len() as u64);
     gpu.write(&wqb, &wq);
-    let part = gpu.storage(QP as u64);
-    let sx = gpu.storage(1);
+    let swb = gpu.storage_init("sw", &sw); // per-channel scales [N]
+    let sx = gpu.storage(m as u64); // per-token scales [M]
     let xq = gpu.storage((m * k / 4) as u64);
     let out8 = gpu.storage((m * n) as u64);
     let steps = [
-        gpu.step(K_MAXP, &[&xb, &part], &[(m * k) as u32, QP], QP),
-        gpu.step(K_MAXF, &[&part, &sx], &[QP], 64),
+        gpu.step(K_MAXR, &[&xb, &sx], &[m as u32, k as u32], m as u32),
         gpu.step(K_QP, &[&xb, &sx, &xq], &[m as u32, k as u32], (m * k / 4) as u32),
         gpu.step(
             K_MM8,
-            &[&xq, &wqb, &sx, &out8],
-            &[m as u32, (k / 4) as u32, n as u32, f(sw)],
+            &[&xq, &wqb, &sx, &swb, &out8],
+            &[m as u32, (k / 4) as u32, n as u32],
             (m as u32).div_ceil(128) * (n as u32).div_ceil(128) * 256,
         ),
     ];

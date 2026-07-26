@@ -13,7 +13,7 @@
 
 use std::time::Instant;
 
-use zimage::{import::import_comfy, ZImageConfig, ZImageDit, ZImageDitShard};
+use zimage::{import::import_comfy, ZImageConfig, ZImageDit, ZImageDitI8, ZImageDitShard};
 
 const P40_FP32_TFLOPS: f64 = 11.76;
 
@@ -115,7 +115,11 @@ fn main() {
 
     eprintln!("building resident graph on {device}…");
     let t0 = Instant::now();
-    let (best, cards) = if device == "shard" {
+    let (best, cards) = if device == "int8" {
+        let dit = ZImageDitI8::build(cfg.clone(), weights, f, h, w, cap_len);
+        eprintln!("  built in {:.1}s", t0.elapsed().as_secs_f64());
+        (time(&|| dit.forward(&latent, &cap, 0.5)), 1.0)
+    } else if device == "shard" {
         let dit = ZImageDitShard::build(cfg.clone(), weights, f, h, w, cap_len);
         eprintln!("  built in {:.1}s", t0.elapsed().as_secs_f64());
         (time(&|| dit.forward(&latent, &cap, 0.5)), 2.0)

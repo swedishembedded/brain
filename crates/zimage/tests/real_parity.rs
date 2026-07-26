@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use zimage::{import::import_comfy, ZImageConfig, ZImageDitShard, ZImageModel};
+use zimage::{import::import_comfy, ZImageConfig, ZImageDitI8, ZImageDitShard, ZImageModel};
 
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/zimage_real.safetensors");
 
@@ -105,4 +105,32 @@ fn zimage_shard_matches_diffusers() {
     let rl2 = (num / den).sqrt();
     eprintln!("Z-Image 2-GPU SHARD parity: rel_l2={rl2:.5}  max_abs={max_abs:.4}");
     assert!(rl2 <= 0.03, "shard rel_l2 {rl2:.5} > 0.03");
+}
+
+/// int8 (DP4A) single-GPU forward on the real 6B weights vs the diffusers golden.
+/// Per-tensor int8 across 34 blocks accumulates error, so the gate is cosine
+/// (structure preserved), not bit-exact. BRAIN_ZIMAGE_I8=1 + BRAIN_ZIMAGE_DIT.
+#[test]
+fn zimage_int8_matches_diffusers() {
+    if std::env::var("BRAIN_ZIMAGE_I8").as_deref() != Ok("1") {
+        eprintln!("SKIP: set BRAIN_ZIMAGE_I8=1 (+ BRAIN_ZIMAGE_DIT, GPU) for the int8 parity test");
+        return;
+    }
+    let dit = match std::env::var("BRAIN_ZIMAGE_DIT") {
+        Ok(p) if !p.is_empty() => p,
+        _ => return,
+    };
+    let fx = checkpoint::safetensors::read(GOLDEN).expect("read real golden");
+    let g = |n: &str| &fx.iter().find(|t| t.name == n).unwrap().data;
+    let (latent, cap, tt, want) = (g("_latent"), g("_cap"), g("_t"), g("_out"));
+
+    let cfg = ZImageConfig::turbo();
+    let weights = import_comfy(checkpoint::safetensors::read(&dit).expect("read DiT"), &cfg);
+    let i8 = ZImageDitI8::build(cfg, weights, 1, 16, 16, 32);
+    let got = i8.forward(latent, cap, tt[0]);
+
+    let cos = cosine(&got, want);
+    let rl2 = rel_l2(&got, want);
+    eprintln!("Z-Image int8 (1 GPU) parity: cosine={cos:.5}  rel_l2={rl2:.4}");
+    assert!(cos >= 0.99, "int8 cosine {cos:.5} < 0.99");
 }

@@ -24,7 +24,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let m = idx / kg;
     let g = idx % kg;
     let base = m * p.k + g * 4u;
-    let inv = 1.0 / sx[0];
+    let inv = 1.0 / sx[m]; // per-token (per-row) scale
     var w: u32 = 0u;
     for (var b: u32 = 0u; b < 4u; b = b + 1u) {
         let q = clamp(round(x[base + b] * inv), -127.0, 127.0);

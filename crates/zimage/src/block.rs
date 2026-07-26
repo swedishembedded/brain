@@ -34,8 +34,11 @@ pub(crate) const K_APPLY: usize = 6;
 pub(crate) const K_SILU_MUL: usize = 7;
 pub(crate) const K_ADD2: usize = 8;
 pub(crate) const K_MATMUL_REG2: usize = 9;
+pub(crate) const K_QUANT_PACK: usize = 12;
+pub(crate) const K_MATMUL_I8: usize = 13;
+pub(crate) const K_MAX_ABS_ROW: usize = 14;
 
-pub(crate) const KERNELS: [(&str, &str); 10] = [
+pub(crate) const KERNELS: [(&str, &str); 15] = [
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("matmul", kernels::MATMUL),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
@@ -48,6 +51,12 @@ pub(crate) const KERNELS: [(&str, &str); 10] = [
     // GPU-only fast GEMM (software-pipelined register tiling). The CPU JIT can't
     // compile its barrier, so CPU uses the naive `matmul` (native AVX2 path).
     ("matmul_reg2", kernels::MATMUL_REG2),
+    // int8 DP4A path (GPU only): per-token activation quant + DP4A GEMM.
+    ("max_abs_part", kernels::MAX_ABS_PART),
+    ("max_abs_final", kernels::MAX_ABS_FINAL),
+    ("quant_pack", kernels::QUANT_PACK),
+    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
+    ("max_abs_row", kernels::MAX_ABS_ROW),
 ];
 
 /// Host tensors by name → `(shape, row-major f32 data)`.
@@ -283,6 +292,137 @@ pub(crate) fn build_block_steps(
     s.push(mm(&scr.f1, &w.w3, &scr.u, t, dim, hidden));
     s.push(gpu.step(K_SILU_MUL, &[&scr.g, &scr.u, &scr.hsw], &[t * hidden], t * hidden));
     s.push(mm(&scr.hsw, &w.w2, &scr.ff, t, hidden, dim));
+    s.push(gpu.step(K_RMSNORM, &[&scr.ff, &nb.fn2, &scr.f2], &[dim, t, f(EPS)], t));
+    s.push(gpu.step(K_ADD2, &[&scr.x1, &scr.f2, out], &[t * dim], t * dim));
+}
+
+// ---------------- int8 (DP4A) block path ----------------
+
+/// Resident int8-quantized weights for one block: each linear as packed int8
+/// (`u32`, 4-per-word) + its per-tensor scale. Norms stay f32 (not matmuls).
+pub(crate) struct Int8Weights {
+    // (packed int8 weight, per-channel scale buffer [N]).
+    wq: (DeviceBuffer, DeviceBuffer),
+    wk: (DeviceBuffer, DeviceBuffer),
+    wv: (DeviceBuffer, DeviceBuffer),
+    wo: (DeviceBuffer, DeviceBuffer),
+    w1: (DeviceBuffer, DeviceBuffer),
+    w2: (DeviceBuffer, DeviceBuffer),
+    w3: (DeviceBuffer, DeviceBuffer),
+    nq: DeviceBuffer, // QK-norm weights stay f32 (RMSNorm, not a matmul)
+    nk: DeviceBuffer,
+}
+
+impl Int8Weights {
+    pub fn upload(gpu: &Gpu, t: &Tensors, prefix: &str, d: BlockDims) -> Int8Weights {
+        let (dim, hid) = (d.dim as usize, d.hidden as usize);
+        let raw = |n: &str| -> &[f32] {
+            &t.get(&format!("{prefix}.{n}")).unwrap_or_else(|| panic!("zimage: missing {prefix}.{n}")).1
+        };
+        let q = |n: &str, no: usize, k: usize| {
+            let (packed, sw) = crate::int8::quantize_weight(raw(n), no, k);
+            let pb = gpu.storage(packed.len() as u64);
+            gpu.write(&pb, &packed);
+            let sb = gpu.storage(sw.len() as u64);
+            wf(gpu, &sb, &sw);
+            (pb, sb)
+        };
+        let f32buf = |n: &str| {
+            let data = raw(n);
+            let b = gpu.storage(data.len() as u64);
+            wf(gpu, &b, data);
+            b
+        };
+        Int8Weights {
+            wq: q("attention.to_q.weight", dim, dim),
+            wk: q("attention.to_k.weight", dim, dim),
+            wv: q("attention.to_v.weight", dim, dim),
+            wo: q("attention.to_out.0.weight", dim, dim),
+            w1: q("feed_forward.w1.weight", hid, dim),
+            w2: q("feed_forward.w2.weight", dim, hid),
+            w3: q("feed_forward.w3.weight", hid, dim),
+            nq: f32buf("attention.norm_q.weight"),
+            nk: f32buf("attention.norm_k.weight"),
+        }
+    }
+}
+
+/// Per-stage int8 activation-quantization scratch (reused across blocks): the
+/// max-abs partials, the dynamic scale, and packed-activation buffers for the
+/// dim-width (q/k/v/out, w1/w3) and hidden-width (w2) inputs.
+pub(crate) struct Int8Scratch {
+    sx: DeviceBuffer, // [t] per-token activation scale
+    xq_dim: DeviceBuffer,
+    xq_hid: DeviceBuffer,
+}
+
+impl Int8Scratch {
+    pub fn new(gpu: &Gpu, d: BlockDims, t: u32) -> Int8Scratch {
+        Int8Scratch {
+            sx: gpu.storage(t as u64),
+            xq_dim: gpu.storage((t * d.dim / 4) as u64),
+            xq_hid: gpu.storage((t * d.hidden / 4) as u64),
+        }
+    }
+}
+
+/// Append one int8 DP4A block. Same math/graph as [`build_block_steps`] but the
+/// 7 linears run in int8: each activation is quantized once (shared by the
+/// linears reading it — n1→q/k/v, f1→w1/w3), then `matmul_i8_dyn` dequantizes.
+/// Norm/RoPE/attention/SwiGLU stay f32. GPU only (DP4A + barriers).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_block_steps_i8(
+    gpu: &Gpu,
+    s: &mut Vec<Step>,
+    w: &Int8Weights,
+    nb: &NormBufs,
+    x_in: &DeviceBuffer,
+    out: &DeviceBuffer,
+    scr: &Scratch,
+    i8: &Int8Scratch,
+    cos: &DeviceBuffer,
+    sin: &DeviceBuffer,
+    d: BlockDims,
+    t: u32,
+) {
+    let (dim, nh, hd, hidden) = (d.dim, d.n_heads, d.head_dim, d.hidden);
+    let half = hd / 2;
+    // Quantize activation `x` [t·k] → `xq` with fresh per-token scales i8.sx[t].
+    let quant = |s: &mut Vec<Step>, x: &DeviceBuffer, xq: &DeviceBuffer, k: u32| {
+        s.push(gpu.step(K_MAX_ABS_ROW, &[x, &i8.sx], &[t, k], t));
+        s.push(gpu.step(K_QUANT_PACK, &[x, &i8.sx, xq], &[t, k], t * k / 4));
+    };
+    // out = dequant(xq @ wᵀ): dynamic activation scale i8.sx × per-channel wp.1.
+    let mm8 = |s: &mut Vec<Step>, xq: &DeviceBuffer, wp: &(DeviceBuffer, DeviceBuffer), o: &DeviceBuffer, k: u32, n: u32| {
+        s.push(gpu.step(K_MATMUL_I8, &[xq, &wp.0, &i8.sx, &wp.1, o], &[t, k / 4, n], t.div_ceil(128) * n.div_ceil(128) * 256));
+    };
+
+    // attention
+    s.push(gpu.step(K_RMSNORM, &[x_in, &nb.an1, &scr.n1], &[dim, t, f(EPS)], t));
+    quant(s, &scr.n1, &i8.xq_dim, dim);
+    mm8(s, &i8.xq_dim, &w.wq, &scr.q, dim, dim);
+    mm8(s, &i8.xq_dim, &w.wk, &scr.k, dim, dim);
+    mm8(s, &i8.xq_dim, &w.wv, &scr.v, dim, dim);
+    s.push(gpu.step(K_RMSNORM, &[&scr.q, &w.nq, &scr.qn], &[hd, t * nh, f(EPS)], t * nh));
+    s.push(gpu.step(K_RMSNORM, &[&scr.k, &w.nk, &scr.kn], &[hd, t * nh, f(EPS)], t * nh));
+    s.push(gpu.step(K_ROPE, &[&scr.qn, cos, sin, &scr.qr], &[t, nh, hd, half], t * nh * half));
+    s.push(gpu.step(K_ROPE, &[&scr.kn, cos, sin, &scr.kr], &[t, nh, hd, half], t * nh * half));
+    s.push(gpu.step(K_PACK, &[&scr.qr, &scr.kr, &scr.v, &scr.qkv], &[t, dim], t * 3 * dim));
+    s.push(gpu.step(K_SCORES, &[&scr.qkv, &scr.scores], &[1, nh, t, hd, 3 * dim, 0, dim], nh * t * t));
+    s.push(gpu.step(K_SOFTMAX, &[&scr.scores, &scr.probs], &[1, nh, t], nh * t));
+    s.push(gpu.step(K_APPLY, &[&scr.probs, &scr.qkv, &scr.ctx], &[1, nh, t, hd, 3 * dim, 2 * dim, dim], nh * t * hd));
+    quant(s, &scr.ctx, &i8.xq_dim, dim);
+    mm8(s, &i8.xq_dim, &w.wo, &scr.attn_out, dim, dim);
+    s.push(gpu.step(K_RMSNORM, &[&scr.attn_out, &nb.an2, &scr.n2], &[dim, t, f(EPS)], t));
+    s.push(gpu.step(K_ADD2, &[x_in, &scr.n2, &scr.x1], &[t * dim], t * dim));
+    // MLP
+    s.push(gpu.step(K_RMSNORM, &[&scr.x1, &nb.fn1, &scr.f1], &[dim, t, f(EPS)], t));
+    quant(s, &scr.f1, &i8.xq_dim, dim);
+    mm8(s, &i8.xq_dim, &w.w1, &scr.g, dim, hidden);
+    mm8(s, &i8.xq_dim, &w.w3, &scr.u, dim, hidden);
+    s.push(gpu.step(K_SILU_MUL, &[&scr.g, &scr.u, &scr.hsw], &[t * hidden], t * hidden));
+    quant(s, &scr.hsw, &i8.xq_hid, hidden);
+    mm8(s, &i8.xq_hid, &w.w2, &scr.ff, hidden, dim);
     s.push(gpu.step(K_RMSNORM, &[&scr.ff, &nb.fn2, &scr.f2], &[dim, t, f(EPS)], t));
     s.push(gpu.step(K_ADD2, &[&scr.x1, &scr.f2, out], &[t * dim], t * dim));
 }

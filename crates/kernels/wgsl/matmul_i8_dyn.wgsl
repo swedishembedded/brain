@@ -26,13 +26,14 @@
 // @workgroup_size(256). Not CPU-JIT'able (multi-barrier work-group); the CPU
 // int8 reference lives in the validation test, so parity is still gated.
 
-struct Params { m: u32, kg: u32, n: u32, sw: f32 };  // dynamic-sx variant  // kg = K/4
+struct Params { m: u32, kg: u32, n: u32 };  // dynamic sx + per-channel sw, kg = K/4
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       x:   array<u32>;  // [M, kg]
 @group(0) @binding(2) var<storage, read>       w:   array<u32>;  // [N, kg]
 @group(0) @binding(3) var<storage, read>       sx:  array<f32>;  // [1] dynamic activation scale
-@group(0) @binding(4) var<storage, read_write> out: array<f32>;  // [M, N]
+@group(0) @binding(4) var<storage, read>       sw:  array<f32>;  // [N] per-channel weight scale
+@group(0) @binding(5) var<storage, read_write> out: array<f32>;  // [M, N]
 
 const BM: u32 = 128u;
 const BN: u32 = 128u;
@@ -128,7 +129,10 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
         workgroupBarrier();
     }
 
-    let sc = sx[0] * p.sw;
+
+    let c0 = col0 + bcol;
+    var swc: array<f32, 8>;
+    for (var j: u32 = 0u; j < 8u; j = j + 1u) { let cc = c0 + j; swc[j] = select(0.0, sw[cc], cc < p.n); }
     let m0 = row0 + arow + 0u;
     let m1 = row0 + arow + 1u;
     let m2 = row0 + arow + 2u;
@@ -137,93 +141,97 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>,
     let m5 = row0 + arow + 5u;
     let m6 = row0 + arow + 6u;
     let m7 = row0 + arow + 7u;
+    let sv0 = select(0.0, sx[m0], m0 < p.m); let sv1 = select(0.0, sx[m1], m1 < p.m);
+    let sv2 = select(0.0, sx[m2], m2 < p.m); let sv3 = select(0.0, sx[m3], m3 < p.m);
+    let sv4 = select(0.0, sx[m4], m4 < p.m); let sv5 = select(0.0, sx[m5], m5 < p.m);
+    let sv6 = select(0.0, sx[m6], m6 < p.m); let sv7 = select(0.0, sx[m7], m7 < p.m);
 
     if (m0 < p.m) {
         let r0 = m0 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r0 + 0u] = f32(c00) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r0 + 1u] = f32(c01) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r0 + 2u] = f32(c02) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r0 + 3u] = f32(c03) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r0 + 4u] = f32(c04) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r0 + 5u] = f32(c05) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r0 + 6u] = f32(c06) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r0 + 7u] = f32(c07) * sc; }
+        if (col0 + bcol + 0u < p.n) { out[r0 + 0u] = f32(c00) * sv0 * swc[0]; }
+        if (col0 + bcol + 1u < p.n) { out[r0 + 1u] = f32(c01) * sv0 * swc[1]; }
+        if (col0 + bcol + 2u < p.n) { out[r0 + 2u] = f32(c02) * sv0 * swc[2]; }
+        if (col0 + bcol + 3u < p.n) { out[r0 + 3u] = f32(c03) * sv0 * swc[3]; }
+        if (col0 + bcol + 4u < p.n) { out[r0 + 4u] = f32(c04) * sv0 * swc[4]; }
+        if (col0 + bcol + 5u < p.n) { out[r0 + 5u] = f32(c05) * sv0 * swc[5]; }
+        if (col0 + bcol + 6u < p.n) { out[r0 + 6u] = f32(c06) * sv0 * swc[6]; }
+        if (col0 + bcol + 7u < p.n) { out[r0 + 7u] = f32(c07) * sv0 * swc[7]; }
     }
     if (m1 < p.m) {
         let r1 = m1 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r1 + 0u] = f32(c10) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r1 + 1u] = f32(c11) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r1 + 2u] = f32(c12) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r1 + 3u] = f32(c13) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r1 + 4u] = f32(c14) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r1 + 5u] = f32(c15) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r1 + 6u] = f32(c16) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r1 + 7u] = f32(c17) * sc; }
+        if (col0 + bcol + 0u < p.n) { out[r1 + 0u] = f32(c10) * sv1 * swc[0]; }
+        if (col0 + bcol + 1u < p.n) { out[r1 + 1u] = f32(c11) * sv1 * swc[1]; }
+        if (col0 + bcol + 2u < p.n) { out[r1 + 2u] = f32(c12) * sv1 * swc[2]; }
+        if (col0 + bcol + 3u < p.n) { out[r1 + 3u] = f32(c13) * sv1 * swc[3]; }
+        if (col0 + bcol + 4u < p.n) { out[r1 + 4u] = f32(c14) * sv1 * swc[4]; }
+        if (col0 + bcol + 5u < p.n) { out[r1 + 5u] = f32(c15) * sv1 * swc[5]; }
+        if (col0 + bcol + 6u < p.n) { out[r1 + 6u] = f32(c16) * sv1 * swc[6]; }
+        if (col0 + bcol + 7u < p.n) { out[r1 + 7u] = f32(c17) * sv1 * swc[7]; }
     }
     if (m2 < p.m) {
         let r2 = m2 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r2 + 0u] = f32(c20) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r2 + 1u] = f32(c21) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r2 + 2u] = f32(c22) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r2 + 3u] = f32(c23) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r2 + 4u] = f32(c24) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r2 + 5u] = f32(c25) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r2 + 6u] = f32(c26) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r2 + 7u] = f32(c27) * sc; }
+        if (col0 + bcol + 0u < p.n) { out[r2 + 0u] = f32(c20) * sv2 * swc[0]; }
+        if (col0 + bcol + 1u < p.n) { out[r2 + 1u] = f32(c21) * sv2 * swc[1]; }
+        if (col0 + bcol + 2u < p.n) { out[r2 + 2u] = f32(c22) * sv2 * swc[2]; }
+        if (col0 + bcol + 3u < p.n) { out[r2 + 3u] = f32(c23) * sv2 * swc[3]; }
+        if (col0 + bcol + 4u < p.n) { out[r2 + 4u] = f32(c24) * sv2 * swc[4]; }
+        if (col0 + bcol + 5u < p.n) { out[r2 + 5u] = f32(c25) * sv2 * swc[5]; }
+        if (col0 + bcol + 6u < p.n) { out[r2 + 6u] = f32(c26) * sv2 * swc[6]; }
+        if (col0 + bcol + 7u < p.n) { out[r2 + 7u] = f32(c27) * sv2 * swc[7]; }
     }
     if (m3 < p.m) {
         let r3 = m3 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r3 + 0u] = f32(c30) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r3 + 1u] = f32(c31) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r3 + 2u] = f32(c32) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r3 + 3u] = f32(c33) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r3 + 4u] = f32(c34) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r3 + 5u] = f32(c35) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r3 + 6u] = f32(c36) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r3 + 7u] = f32(c37) * sc; }
+        if (col0 + bcol + 0u < p.n) { out[r3 + 0u] = f32(c30) * sv3 * swc[0]; }
+        if (col0 + bcol + 1u < p.n) { out[r3 + 1u] = f32(c31) * sv3 * swc[1]; }
+        if (col0 + bcol + 2u < p.n) { out[r3 + 2u] = f32(c32) * sv3 * swc[2]; }
+        if (col0 + bcol + 3u < p.n) { out[r3 + 3u] = f32(c33) * sv3 * swc[3]; }
+        if (col0 + bcol + 4u < p.n) { out[r3 + 4u] = f32(c34) * sv3 * swc[4]; }
+        if (col0 + bcol + 5u < p.n) { out[r3 + 5u] = f32(c35) * sv3 * swc[5]; }
+        if (col0 + bcol + 6u < p.n) { out[r3 + 6u] = f32(c36) * sv3 * swc[6]; }
+        if (col0 + bcol + 7u < p.n) { out[r3 + 7u] = f32(c37) * sv3 * swc[7]; }
     }
     if (m4 < p.m) {
         let r4 = m4 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r4 + 0u] = f32(c40) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r4 + 1u] = f32(c41) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r4 + 2u] = f32(c42) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r4 + 3u] = f32(c43) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r4 + 4u] = f32(c44) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r4 + 5u] = f32(c45) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r4 + 6u] = f32(c46) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r4 + 7u] = f32(c47) * sc; }
+        if (col0 + bcol + 0u < p.n) { out[r4 + 0u] = f32(c40) * sv4 * swc[0]; }
+        if (col0 + bcol + 1u < p.n) { out[r4 + 1u] = f32(c41) * sv4 * swc[1]; }
+        if (col0 + bcol + 2u < p.n) { out[r4 + 2u] = f32(c42) * sv4 * swc[2]; }
+        if (col0 + bcol + 3u < p.n) { out[r4 + 3u] = f32(c43) * sv4 * swc[3]; }
+        if (col0 + bcol + 4u < p.n) { out[r4 + 4u] = f32(c44) * sv4 * swc[4]; }
+        if (col0 + bcol + 5u < p.n) { out[r4 + 5u] = f32(c45) * sv4 * swc[5]; }
+        if (col0 + bcol + 6u < p.n) { out[r4 + 6u] = f32(c46) * sv4 * swc[6]; }
+        if (col0 + bcol + 7u < p.n) { out[r4 + 7u] = f32(c47) * sv4 * swc[7]; }
     }
     if (m5 < p.m) {
         let r5 = m5 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r5 + 0u] = f32(c50) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r5 + 1u] = f32(c51) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r5 + 2u] = f32(c52) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r5 + 3u] = f32(c53) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r5 + 4u] = f32(c54) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r5 + 5u] = f32(c55) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r5 + 6u] = f32(c56) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r5 + 7u] = f32(c57) * sc; }
+        if (col0 + bcol + 0u < p.n) { out[r5 + 0u] = f32(c50) * sv5 * swc[0]; }
+        if (col0 + bcol + 1u < p.n) { out[r5 + 1u] = f32(c51) * sv5 * swc[1]; }
+        if (col0 + bcol + 2u < p.n) { out[r5 + 2u] = f32(c52) * sv5 * swc[2]; }
+        if (col0 + bcol + 3u < p.n) { out[r5 + 3u] = f32(c53) * sv5 * swc[3]; }
+        if (col0 + bcol + 4u < p.n) { out[r5 + 4u] = f32(c54) * sv5 * swc[4]; }
+        if (col0 + bcol + 5u < p.n) { out[r5 + 5u] = f32(c55) * sv5 * swc[5]; }
+        if (col0 + bcol + 6u < p.n) { out[r5 + 6u] = f32(c56) * sv5 * swc[6]; }
+        if (col0 + bcol + 7u < p.n) { out[r5 + 7u] = f32(c57) * sv5 * swc[7]; }
     }
     if (m6 < p.m) {
         let r6 = m6 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r6 + 0u] = f32(c60) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r6 + 1u] = f32(c61) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r6 + 2u] = f32(c62) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r6 + 3u] = f32(c63) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r6 + 4u] = f32(c64) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r6 + 5u] = f32(c65) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r6 + 6u] = f32(c66) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r6 + 7u] = f32(c67) * sc; }
+        if (col0 + bcol + 0u < p.n) { out[r6 + 0u] = f32(c60) * sv6 * swc[0]; }
+        if (col0 + bcol + 1u < p.n) { out[r6 + 1u] = f32(c61) * sv6 * swc[1]; }
+        if (col0 + bcol + 2u < p.n) { out[r6 + 2u] = f32(c62) * sv6 * swc[2]; }
+        if (col0 + bcol + 3u < p.n) { out[r6 + 3u] = f32(c63) * sv6 * swc[3]; }
+        if (col0 + bcol + 4u < p.n) { out[r6 + 4u] = f32(c64) * sv6 * swc[4]; }
+        if (col0 + bcol + 5u < p.n) { out[r6 + 5u] = f32(c65) * sv6 * swc[5]; }
+        if (col0 + bcol + 6u < p.n) { out[r6 + 6u] = f32(c66) * sv6 * swc[6]; }
+        if (col0 + bcol + 7u < p.n) { out[r6 + 7u] = f32(c67) * sv6 * swc[7]; }
     }
     if (m7 < p.m) {
         let r7 = m7 * p.n + col0 + bcol;
-        if (col0 + bcol + 0u < p.n) { out[r7 + 0u] = f32(c70) * sc; }
-        if (col0 + bcol + 1u < p.n) { out[r7 + 1u] = f32(c71) * sc; }
-        if (col0 + bcol + 2u < p.n) { out[r7 + 2u] = f32(c72) * sc; }
-        if (col0 + bcol + 3u < p.n) { out[r7 + 3u] = f32(c73) * sc; }
-        if (col0 + bcol + 4u < p.n) { out[r7 + 4u] = f32(c74) * sc; }
-        if (col0 + bcol + 5u < p.n) { out[r7 + 5u] = f32(c75) * sc; }
-        if (col0 + bcol + 6u < p.n) { out[r7 + 6u] = f32(c76) * sc; }
-        if (col0 + bcol + 7u < p.n) { out[r7 + 7u] = f32(c77) * sc; }
+        if (col0 + bcol + 0u < p.n) { out[r7 + 0u] = f32(c70) * sv7 * swc[0]; }
+        if (col0 + bcol + 1u < p.n) { out[r7 + 1u] = f32(c71) * sv7 * swc[1]; }
+        if (col0 + bcol + 2u < p.n) { out[r7 + 2u] = f32(c72) * sv7 * swc[2]; }
+        if (col0 + bcol + 3u < p.n) { out[r7 + 3u] = f32(c73) * sv7 * swc[3]; }
+        if (col0 + bcol + 4u < p.n) { out[r7 + 4u] = f32(c74) * sv7 * swc[4]; }
+        if (col0 + bcol + 5u < p.n) { out[r7 + 5u] = f32(c75) * sv7 * swc[5]; }
+        if (col0 + bcol + 6u < p.n) { out[r7 + 6u] = f32(c76) * sv7 * swc[6]; }
+        if (col0 + bcol + 7u < p.n) { out[r7 + 7u] = f32(c77) * sv7 * swc[7]; }
     }
 }
