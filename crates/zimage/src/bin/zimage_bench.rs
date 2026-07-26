@@ -66,7 +66,14 @@ fn main() {
         }
     };
 
-    let cfg = ZImageConfig::turbo();
+    let mut cfg = ZImageConfig::turbo();
+    // Optional: run a layer-reduced model (fits one 24 GB card for single-GPU
+    // profiling; extrapolate ms to the full 30 layers). Uses real layer weights.
+    if let Ok(n) = std::env::var("BRAIN_ZIMAGE_LAYERS") {
+        if let Ok(n) = n.parse::<u32>() {
+            cfg.n_layers = n;
+        }
+    }
     let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
     let (f, ft, ht, wt) = (1u32, 1u32, h / ps, w / ps);
     let n_img = (ft * ht * wt) as u64;
