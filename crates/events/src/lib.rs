@@ -94,6 +94,44 @@ pub enum Event {
     /// distinct from the free-form [`Event::Error`]. Shares the `"error"` wire
     /// tag, disambiguated by the presence of a `code` field.
     ForecastError { error: FcError },
+
+    // ---- generic capability actions ---------------------------------------
+    /// Ask the runtime which models it has and what actions each supports (the
+    /// generic, model-agnostic counterpart to [`Event::CapabilitiesRequest`]).
+    ManifestRequest,
+    /// The models' capability manifests as `capability::Manifest` JSON.
+    ManifestResult { manifests: Value },
+    /// Invoke `action` on `model` with typed `params` and named binary `blobs`.
+    /// The generic verb of the event API — one shape for every model action.
+    ActionRequest { model: String, action: String, params: Value, blobs: Vec<WireBlob> },
+    /// A progress update while a streaming action runs.
+    ActionProgress { step: u32, total: u32, message: String },
+    /// The action's result: scalar `outputs` (JSON) + named binary `blobs`.
+    ActionResult { outputs: Value, blobs: Vec<WireBlob> },
+}
+
+/// A named binary payload on the wire: base64 bytes + media kind + free-form meta.
+/// The event-API analogue of `capability::Blob`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WireBlob {
+    pub name: String,
+    pub media: String,
+    pub b64: String,
+    pub meta: Value,
+}
+
+impl WireBlob {
+    pub fn to_json(&self) -> Value {
+        json!({ "name": self.name, "media": self.media, "b64": self.b64, "meta": self.meta })
+    }
+    pub fn from_json(v: &Value) -> WireBlob {
+        WireBlob {
+            name: v["name"].as_str().unwrap_or_default().to_string(),
+            media: v["media"].as_str().unwrap_or("bytes").to_string(),
+            b64: v["b64"].as_str().unwrap_or_default().to_string(),
+            meta: v.get("meta").cloned().unwrap_or(Value::Null),
+        }
+    }
 }
 
 /// A protocol line: one [`Event`] plus an OPTIONAL request-correlation id.
@@ -227,6 +265,17 @@ fn event_to_value(ev: &Event) -> Value {
             v.as_object_mut().unwrap().insert("event".into(), json!("error"));
             v
         }
+        Event::ManifestRequest => json!({ "event": "manifest_request" }),
+        Event::ManifestResult { manifests } => json!({ "event": "manifest_result", "manifests": manifests }),
+        Event::ActionRequest { model, action, params, blobs } => json!({
+            "event": "action_request", "model": model, "action": action, "params": params,
+            "blobs": blobs.iter().map(|b| b.to_json()).collect::<Vec<_>>(),
+        }),
+        Event::ActionProgress { step, total, message } => json!({ "event": "action_progress", "step": step, "total": total, "message": message }),
+        Event::ActionResult { outputs, blobs } => json!({
+            "event": "action_result", "outputs": outputs,
+            "blobs": blobs.iter().map(|b| b.to_json()).collect::<Vec<_>>(),
+        }),
     }
 }
 
@@ -338,6 +387,23 @@ fn decode_event_value(v: &Value) -> Result<Event, String> {
         }),
         "backtest_result" => Ok(Event::BacktestResult {
             report: forecast_wire::backtest_report_from_value(&v["report"]),
+        }),
+        "manifest_request" => Ok(Event::ManifestRequest),
+        "manifest_result" => Ok(Event::ManifestResult { manifests: v.get("manifests").cloned().unwrap_or(Value::Null) }),
+        "action_request" => Ok(Event::ActionRequest {
+            model: s("model"),
+            action: s("action"),
+            params: v.get("params").cloned().unwrap_or(json!({})),
+            blobs: v["blobs"].as_array().map(|a| a.iter().map(WireBlob::from_json).collect()).unwrap_or_default(),
+        }),
+        "action_progress" => Ok(Event::ActionProgress {
+            step: v["step"].as_u64().unwrap_or(0) as u32,
+            total: v["total"].as_u64().unwrap_or(0) as u32,
+            message: s("message"),
+        }),
+        "action_result" => Ok(Event::ActionResult {
+            outputs: v.get("outputs").cloned().unwrap_or(json!({})),
+            blobs: v["blobs"].as_array().map(|a| a.iter().map(WireBlob::from_json).collect()).unwrap_or_default(),
         }),
         other => Err(format!("unknown event tag: {other:?}")),
     }

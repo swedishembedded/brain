@@ -13,6 +13,7 @@ path = "src/lib.rs"
 # Minimal deps: the JSONL codec, the generic HSM engine, the GPT model + its
 # checkpoint loader. A real YOLO `DetectModel` adapter (brain-yolo) wires in
 # later behind the object-safe trait; tests use `FakeDetectModel`.
+brain-capability.workspace = true
 brain-events.workspace = true
 brain-hfsm.workspace = true
 brain-gpt.workspace = true
@@ -27,4 +28,5 @@ serde_json.workspace = true
 # and the codec helpers (base64/PPM) for synthetic frames.
 brain-gpt.workspace = true
 brain-yolo.workspace = true
+brain-capability.workspace = true
 brain-events.workspace = true

@@ -498,6 +498,9 @@ impl BacktestPump {
 /// sink, and the streaming sequence counter.
 struct Brain {
     registry: Registry,
+    /// Generic capability providers (Z-Image, …), driving `ActionRequest` /
+    /// `ManifestRequest` through the model-agnostic [`capability`] interface.
+    caps: capability::Registry,
     cfg: GenConfig,
     pump: Option<StreamPump>,
     /// Active audio pump while in `Synthesizing` (parallel to `pump`).
@@ -531,6 +534,55 @@ struct Brain {
 }
 
 impl Brain {
+    /// Run a generic [`Event::ActionRequest`] through the [`capability::Registry`]:
+    /// build a validated invocation from the wire params + base64 blobs, execute
+    /// the action (streaming `ActionProgress` inline), and emit `ActionResult`
+    /// (or a structured `Error`). Model-agnostic — every model's actions flow here.
+    fn run_action(&mut self, model: &str, action: &str, params: &serde_json::Value, blobs: &[events::WireBlob]) {
+        let Some(act) = self.caps.find(model, action) else {
+            self.emit(Event::Error { message: format!("no action '{action}' on model '{model}'") });
+            return;
+        };
+        // wire → capability::Invocation (decode base64 blobs).
+        let mut inv = capability::Invocation { params: params.clone(), blobs: Default::default() };
+        for wb in blobs {
+            let bytes = match events::base64::decode(&wb.b64) {
+                Ok(b) => b,
+                Err(e) => {
+                    self.emit(Event::Error { message: format!("blob '{}': {e}", wb.name) });
+                    return;
+                }
+            };
+            let media = capability::Media::parse(&wb.media).unwrap_or(capability::Media::Bytes);
+            inv.blobs.insert(wb.name.clone(), capability::Blob { media, bytes, meta: wb.meta.clone() });
+        }
+        let inv = match act.spec().validate(inv) {
+            Ok(i) => i,
+            Err(e) => {
+                self.emit(Event::Error { message: e });
+                return;
+            }
+        };
+        // run — progress streams inline (act is an owned Arc, so the closure may
+        // borrow self mutably).
+        let mut progress = Vec::new();
+        let res = act.run(&inv, &mut |p: capability::Progress| progress.push(p));
+        for p in progress {
+            self.emit(Event::ActionProgress { step: p.step, total: p.total, message: p.message });
+        }
+        match res {
+            Ok(outcome) => {
+                let wire_blobs = outcome
+                    .blobs
+                    .into_iter()
+                    .map(|(name, b)| events::WireBlob { name, media: b.media.name().to_string(), b64: events::base64::encode(&b.bytes), meta: b.meta })
+                    .collect();
+                self.emit(Event::ActionResult { outputs: outcome.outputs, blobs: wire_blobs });
+            }
+            Err(e) => self.emit(Event::Error { message: e }),
+        }
+    }
+
     /// Emit one event, stamped with the active request's `req_id` (if any).
     fn emit(&mut self, ev: Event) {
         let req_id = self.active_req_id.clone();
@@ -569,6 +621,18 @@ impl Machine for Brain {
                 Ev::External(Event::CapabilitiesRequest) => {
                     let models = self.registry.capabilities();
                     self.emit(Event::CapabilitiesResult { models });
+                    Disp::Handled
+                }
+                // Generic capability discovery + invocation — the model-agnostic
+                // path. Both are synchronous run-to-completion (progress streams
+                // inline), so they answer in Idle with no state change.
+                Ev::External(Event::ManifestRequest) => {
+                    let manifests = serde_json::Value::Array(self.caps.manifests().iter().map(|m| m.to_json()).collect());
+                    self.emit(Event::ManifestResult { manifests });
+                    Disp::Handled
+                }
+                Ev::External(Event::ActionRequest { model, action, params, blobs }) => {
+                    self.run_action(model, action, params, blobs);
                     Disp::Handled
                 }
                 _ => Disp::Unhandled, // bubble (cancel, etc.)
@@ -876,6 +940,7 @@ impl Controller {
     pub fn with_config(registry: Registry, cfg: GenConfig) -> Controller {
         let brain = Brain {
             registry,
+            caps: capability::Registry::new(),
             cfg,
             pump: None,
             audio_pump: None,
@@ -895,6 +960,13 @@ impl Controller {
         // Enter the initial Idle chain (Root→Operational→Idle).
         hsm.init();
         Controller { hsm }
+    }
+
+    /// Register a generic capability [`Provider`](capability::Provider) (e.g.
+    /// Z-Image), making its actions reachable over the event API via
+    /// `ManifestRequest` / `ActionRequest` — no new event variants per model.
+    pub fn register_provider(&mut self, p: std::sync::Arc<dyn capability::Provider>) {
+        self.hsm.machine_mut().caps.register(p);
     }
 
     /// Feed one JSONL protocol line; return every event emitted during that turn,
@@ -1052,6 +1124,70 @@ mod tests {
         let mut reg = Registry::new();
         reg.register_forecast(Arc::new(fcbench::RandomWalk));
         reg
+    }
+
+    // ---- generic capability actions over the event API ----
+
+    struct DemoAction;
+    impl capability::Action for DemoAction {
+        fn spec(&self) -> capability::ActionSpec {
+            use capability::{ActionSpec, BlobSpec, Media, ParamSpec, ParamType};
+            ActionSpec::new("echo", "echo text N times")
+                .param(ParamSpec::new("text", ParamType::Str, "text").required())
+                .param(ParamSpec::new("times", ParamType::Int, "count").default(serde_json::json!(1)))
+                .output(BlobSpec::new("result", Media::Text, "the echoed text"))
+        }
+        fn run(&self, inv: &capability::Invocation, progress: &mut dyn FnMut(capability::Progress)) -> capability::ActionResult {
+            progress(capability::Progress { step: 1, total: 1, message: "echoing".into() });
+            let s = inv.get_str("text").unwrap_or_default().repeat(inv.get_i64("times").unwrap_or(1) as usize);
+            Ok(capability::Outcome::new().set("chars", serde_json::json!(s.len())).blob("result", capability::Blob::new(capability::Media::Text, s.into_bytes())))
+        }
+    }
+    struct DemoProvider;
+    impl capability::Provider for DemoProvider {
+        fn manifest(&self) -> capability::Manifest {
+            use capability::Action as _;
+            capability::Manifest::new("demo", "demo", vec![DemoAction.spec()])
+        }
+        fn action(&self, name: &str) -> Option<Arc<dyn capability::Action>> {
+            (name == "echo").then(|| Arc::new(DemoAction) as Arc<dyn capability::Action>)
+        }
+    }
+
+    #[test]
+    fn generic_manifest_and_action_over_event_api() {
+        let mut ctrl = Controller::new(Registry::new());
+        ctrl.register_provider(Arc::new(DemoProvider));
+
+        // discovery
+        let out = ctrl.feed_line(r#"{"event":"manifest_request"}"#);
+        match &out[0].event {
+            Event::ManifestResult { manifests } => {
+                assert_eq!(manifests[0]["model"], "demo");
+                assert_eq!(manifests[0]["actions"][0]["name"], "echo");
+            }
+            e => panic!("expected manifest_result, got {e:?}"),
+        }
+
+        // invocation → progress + result (result blob is base64)
+        let out = ctrl.feed_line(r#"{"event":"action_request","model":"demo","action":"echo","params":{"text":"ab","times":3}}"#);
+        assert!(matches!(&out[0].event, Event::ActionProgress { total: 1, .. }));
+        match &out[1].event {
+            Event::ActionResult { outputs, blobs } => {
+                assert_eq!(outputs["chars"], 6);
+                let b = &blobs[0];
+                assert_eq!(b.name, "result");
+                assert_eq!(events::base64::decode(&b.b64).unwrap(), b"ababab");
+            }
+            e => panic!("expected action_result, got {e:?}"),
+        }
+
+        // validation error surfaces as a structured error, not a panic
+        let out = ctrl.feed_line(r#"{"event":"action_request","model":"demo","action":"echo","params":{}}"#);
+        assert!(matches!(&out[0].event, Event::Error { .. }));
+        // unknown model
+        let out = ctrl.feed_line(r#"{"event":"action_request","model":"nope","action":"echo","params":{}}"#);
+        assert!(matches!(&out[0].event, Event::Error { .. }));
     }
 
     fn forecast_request(model: &str, req: Option<&str>) -> Envelope {

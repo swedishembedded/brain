@@ -132,6 +132,10 @@ pub fn run_serve(args: &[String]) {
 
     let mut ctrl = Controller::with_config(Registry::with_models(infer, detect), cfg);
 
+    // Expose the generic capability providers over the event API (manifest_request
+    // / action_request) — the same actions `brain do` runs, now network-reachable.
+    ctrl.register_provider(std::sync::Arc::new(zimage::caps::ZImageProvider::load().expect("z-image provider")));
+
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
