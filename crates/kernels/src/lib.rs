@@ -135,14 +135,14 @@ pub const BROADCAST_ADD_HW: &str = include_str!("../wgsl/broadcast_add_hw.wgsl")
 pub const BROADCAST_ADD_HW_DA: &str = include_str!("../wgsl/broadcast_add_hw_da.wgsl");
 /// `wgsl/bsq_quantize.wgsl`
 pub const BSQ_QUANTIZE: &str = include_str!("../wgsl/bsq_quantize.wgsl");
-/// `wgsl/ce_stats.wgsl`
-pub const CE_STATS: &str = include_str!("../wgsl/ce_stats.wgsl");
-/// `wgsl/ce_grad_stats.wgsl`
-pub const CE_GRAD_STATS: &str = include_str!("../wgsl/ce_grad_stats.wgsl");
 /// `wgsl/ce_grad.wgsl`
 pub const CE_GRAD: &str = include_str!("../wgsl/ce_grad.wgsl");
 /// `wgsl/ce_grad_masked.wgsl`
 pub const CE_GRAD_MASKED: &str = include_str!("../wgsl/ce_grad_masked.wgsl");
+/// `wgsl/ce_grad_stats.wgsl`
+pub const CE_GRAD_STATS: &str = include_str!("../wgsl/ce_grad_stats.wgsl");
+/// `wgsl/ce_stats.wgsl`
+pub const CE_STATS: &str = include_str!("../wgsl/ce_stats.wgsl");
 /// `wgsl/ce_value.wgsl`
 pub const CE_VALUE: &str = include_str!("../wgsl/ce_value.wgsl");
 /// `wgsl/ce_value_masked.wgsl`
@@ -191,6 +191,8 @@ pub const CONV_ACT_TILED: &str = include_str!("../wgsl/conv_act_tiled.wgsl");
 pub const CONV_BIAS: &str = include_str!("../wgsl/conv_bias.wgsl");
 /// `wgsl/conv_bias_reg.wgsl`
 pub const CONV_BIAS_REG: &str = include_str!("../wgsl/conv_bias_reg.wgsl");
+/// `wgsl/conv_epilogue.wgsl`
+pub const CONV_EPILOGUE: &str = include_str!("../wgsl/conv_epilogue.wgsl");
 /// `wgsl/convex_upsample.wgsl`
 pub const CONVEX_UPSAMPLE: &str = include_str!("../wgsl/convex_upsample.wgsl");
 /// `wgsl/convex_upsample_dd.wgsl`
@@ -291,8 +293,6 @@ pub const GRAD_SCALE: &str = include_str!("../wgsl/grad_scale.wgsl");
 pub const GRAD_SCALE_BUF: &str = include_str!("../wgsl/grad_scale_buf.wgsl");
 /// `wgsl/gradnorm_sq.wgsl`
 pub const GRADNORM_SQ: &str = include_str!("../wgsl/gradnorm_sq.wgsl");
-/// `wgsl/conv_epilogue.wgsl`
-pub const CONV_EPILOGUE: &str = include_str!("../wgsl/conv_epilogue.wgsl");
 /// `wgsl/im2col.wgsl`
 pub const IM2COL: &str = include_str!("../wgsl/im2col.wgsl");
 /// `wgsl/l2norm_scale.wgsl`
@@ -327,14 +327,14 @@ pub const MASKED_L1: &str = include_str!("../wgsl/masked_l1.wgsl");
 pub const MASKED_L1_GRAD: &str = include_str!("../wgsl/masked_l1_grad.wgsl");
 /// `wgsl/matmul.wgsl`
 pub const MATMUL: &str = include_str!("../wgsl/matmul.wgsl");
-/// `wgsl/matmul_dw_reg.wgsl`
-pub const MATMUL_DW_REG: &str = include_str!("../wgsl/matmul_dw_reg.wgsl");
 /// `wgsl/matmul_dw.wgsl`
 pub const MATMUL_DW: &str = include_str!("../wgsl/matmul_dw.wgsl");
-/// `wgsl/matmul_dx_reg.wgsl`
-pub const MATMUL_DX_REG: &str = include_str!("../wgsl/matmul_dx_reg.wgsl");
+/// `wgsl/matmul_dw_reg.wgsl`
+pub const MATMUL_DW_REG: &str = include_str!("../wgsl/matmul_dw_reg.wgsl");
 /// `wgsl/matmul_dx.wgsl`
 pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
+/// `wgsl/matmul_dx_reg.wgsl`
+pub const MATMUL_DX_REG: &str = include_str!("../wgsl/matmul_dx_reg.wgsl");
 /// `wgsl/matmul_i8.wgsl`
 pub const MATMUL_I8: &str = include_str!("../wgsl/matmul_i8.wgsl");
 /// `wgsl/matmul_reg.wgsl`
@@ -377,6 +377,8 @@ pub const MUL: &str = include_str!("../wgsl/mul.wgsl");
 pub const NCHW_NLC: &str = include_str!("../wgsl/nchw_nlc.wgsl");
 /// `wgsl/nlc_nchw.wgsl`
 pub const NLC_NCHW: &str = include_str!("../wgsl/nlc_nchw.wgsl");
+/// `wgsl/pack_qkv.wgsl`
+pub const PACK_QKV: &str = include_str!("../wgsl/pack_qkv.wgsl");
 /// `wgsl/pad2d.wgsl`
 pub const PAD2D: &str = include_str!("../wgsl/pad2d.wgsl");
 /// `wgsl/pixel_shuffle.wgsl`
@@ -407,6 +409,8 @@ pub const RMSNORM: &str = include_str!("../wgsl/rmsnorm.wgsl");
 pub const RMSNORM_DW: &str = include_str!("../wgsl/rmsnorm_dw.wgsl");
 /// `wgsl/rmsnorm_dx.wgsl`
 pub const RMSNORM_DX: &str = include_str!("../wgsl/rmsnorm_dx.wgsl");
+/// `wgsl/rmsnorm_eps.wgsl`
+pub const RMSNORM_EPS: &str = include_str!("../wgsl/rmsnorm_eps.wgsl");
 /// `wgsl/rope.wgsl`
 pub const ROPE: &str = include_str!("../wgsl/rope.wgsl");
 /// `wgsl/rope2d.wgsl`
@@ -415,6 +419,8 @@ pub const ROPE2D: &str = include_str!("../wgsl/rope2d.wgsl");
 pub const ROPE_BASE: &str = include_str!("../wgsl/rope_base.wgsl");
 /// `wgsl/rope_base_bwd.wgsl`
 pub const ROPE_BASE_BWD: &str = include_str!("../wgsl/rope_base_bwd.wgsl");
+/// `wgsl/rope_interleave_table.wgsl`
+pub const ROPE_INTERLEAVE_TABLE: &str = include_str!("../wgsl/rope_interleave_table.wgsl");
 /// `wgsl/rope_neox.wgsl`
 pub const ROPE_NEOX: &str = include_str!("../wgsl/rope_neox.wgsl");
 /// `wgsl/rope_sub.wgsl`
@@ -584,9 +590,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("broadcast_add_hw_da", BROADCAST_ADD_HW_DA),
     ("bsq_quantize", BSQ_QUANTIZE),
     ("ce_grad", CE_GRAD),
-    ("ce_stats", CE_STATS),
-    ("ce_grad_stats", CE_GRAD_STATS),
     ("ce_grad_masked", CE_GRAD_MASKED),
+    ("ce_grad_stats", CE_GRAD_STATS),
+    ("ce_stats", CE_STATS),
     ("ce_value", CE_VALUE),
     ("ce_value_masked", CE_VALUE_MASKED),
     ("chan_place", CHAN_PLACE),
@@ -611,6 +617,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("conv_act_tiled", CONV_ACT_TILED),
     ("conv_bias", CONV_BIAS),
     ("conv_bias_reg", CONV_BIAS_REG),
+    ("conv_epilogue", CONV_EPILOGUE),
     ("convex_upsample", CONVEX_UPSAMPLE),
     ("convex_upsample_dd", CONVEX_UPSAMPLE_DD),
     ("convex_upsample_dmask", CONVEX_UPSAMPLE_DMASK),
@@ -661,11 +668,10 @@ pub const ALL: &[(&str, &str)] = &[
     ("grad_scale", GRAD_SCALE),
     ("grad_scale_buf", GRAD_SCALE_BUF),
     ("gradnorm_sq", GRADNORM_SQ),
+    ("im2col", IM2COL),
     ("l2norm_scale", L2NORM_SCALE),
     ("l2norm_scale_dg", L2NORM_SCALE_DG),
     ("l2norm_scale_dx", L2NORM_SCALE_DX),
-    ("conv_epilogue", CONV_EPILOGUE),
-    ("im2col", IM2COL),
     ("layernorm", LAYERNORM),
     ("layernorm_dbeta", LAYERNORM_DBETA),
     ("layernorm_dgamma", LAYERNORM_DGAMMA),
@@ -704,6 +710,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("mul", MUL),
     ("nchw_nlc", NCHW_NLC),
     ("nlc_nchw", NLC_NCHW),
+    ("pack_qkv", PACK_QKV),
     ("pad2d", PAD2D),
     ("pixel_shuffle", PIXEL_SHUFFLE),
     ("pixel_shuffle_dx", PIXEL_SHUFFLE_DX),
@@ -719,10 +726,12 @@ pub const ALL: &[(&str, &str)] = &[
     ("rmsnorm", RMSNORM),
     ("rmsnorm_dw", RMSNORM_DW),
     ("rmsnorm_dx", RMSNORM_DX),
+    ("rmsnorm_eps", RMSNORM_EPS),
     ("rope", ROPE),
     ("rope2d", ROPE2D),
     ("rope_base", ROPE_BASE),
     ("rope_base_bwd", ROPE_BASE_BWD),
+    ("rope_interleave_table", ROPE_INTERLEAVE_TABLE),
     ("rope_neox", ROPE_NEOX),
     ("rope_sub", ROPE_SUB),
     ("rope_train", ROPE_TRAIN),

@@ -28,6 +28,7 @@ default-members = [
     "crates/diffusion",
     "crates/vae",
     "crates/dit",
+    "crates/zimage",
     "crates/forecast",
     "crates/fcbench",
     "crates/chronos2",
@@ -89,6 +90,10 @@ brain-qwen = { path = "crates/qwen" }
 brain-glm = { path = "crates/glm" }
 brain-seq2seq = { path = "crates/seq2seq" }
 brain-autoencoder = { path = "crates/autoencoder" }
+brain-diffusion = { path = "crates/diffusion" }
+brain-vae = { path = "crates/vae" }
+brain-dit = { path = "crates/dit" }
+brain-zimage = { path = "crates/zimage" }
 brain-timeseries = { path = "crates/timeseries" }
 brain-codec = { path = "crates/codec" }
 brain-speaker = { path = "crates/speaker" }
