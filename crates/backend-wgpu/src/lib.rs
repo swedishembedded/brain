@@ -140,6 +140,16 @@ impl WgpuBackend {
                 let mut adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
                 // Prefer discrete GPUs, stable order, then index into them.
                 adapters.retain(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
+                // `enumerate_adapters(all())` lists each physical card ONCE PER
+                // graphics backend (Vulkan, GL, …), so indexing across the mixed
+                // list can select the same card via a different backend
+                // (`BRAIN_GPU_INDEX=1` landing back on card 0). Narrow to a single
+                // backend (prefer Vulkan on this Pascal/Linux box) so the index
+                // maps to distinct physical cards — the invariant multi-GPU
+                // sharding / data-parallel relies on.
+                if adapters.iter().any(|a| a.get_info().backend == wgpu::Backend::Vulkan) {
+                    adapters.retain(|a| a.get_info().backend == wgpu::Backend::Vulkan);
+                }
                 if adapters.is_empty() {
                     panic!("BRAIN_GPU_INDEX set but no discrete GPU adapters enumerated");
                 }
