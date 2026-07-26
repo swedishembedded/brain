@@ -27,7 +27,7 @@ use qwen::{Qwen, QwenConfig};
 use vae::{VaeConfig, VaeDecoder, VaeEncoder};
 
 use crate::import::import_comfy;
-use crate::{ZImageConfig, ZImageDitI8};
+use crate::{ZImageConfig, ZImageDitI8, ZImageDitShard};
 
 /// Filesystem locations of the four Z-Image components (never hard-coded — from
 /// the environment, mirroring the crate's tests).
@@ -52,6 +52,26 @@ pub struct Opts {
     pub seed: u64,
     pub width: u32,
     pub height: u32,
+    /// High-fidelity DiT: `false` = int8 on one P40 (~13 GB, cosine 0.99, fast);
+    /// `true` = full-precision fp32 sharded across both P40s (higher fidelity, no
+    /// quantisation error, needs 2 GPUs).
+    pub hifi: bool,
+}
+
+/// The denoiser backend chosen by [`Opts::hifi`]. Both expose the same
+/// `forward(latent, cap, t)`; the sampler is identical either way.
+enum DitEngine {
+    I8(ZImageDitI8),
+    Shard(ZImageDitShard),
+}
+
+impl DitEngine {
+    fn forward(&self, latent: &[f32], cap: &[f32], t: f32) -> Vec<f32> {
+        match self {
+            DitEngine::I8(d) => d.forward(latent, cap, t),
+            DitEngine::Shard(d) => d.forward(latent, cap, t),
+        }
+    }
 }
 
 /// A generated image: interleaved-RGB HWC in `[0,1]`.
@@ -299,13 +319,19 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
         }
     };
 
-    // 5. flow-match sampling over the DiT (int8) -----------------------------
+    // 5. flow-match sampling over the DiT ------------------------------------
+    // int8 on one P40 (default), or full-precision fp32 sharded across both P40s
+    // when `hifi` — no quantisation error, at the cost of a second card.
     let zcfg = ZImageConfig::turbo();
     let weights = import_comfy(checkpoint::safetensors::read(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
     {
-        let dit = ZImageDitI8::build(zcfg, weights, 1, lh, lw, cap_len);
+        let dit = if opts.hifi {
+            DitEngine::Shard(ZImageDitShard::build(zcfg, weights, 1, lh, lw, cap_len))
+        } else {
+            DitEngine::I8(ZImageDitI8::build(zcfg, weights, 1, lh, lw, cap_len))
+        };
         for i in start_step..opts.steps as usize {
-            progress(2 + i as u32, total, "sampling");
+            progress(2 + i as u32, total, if opts.hifi { "sampling (fp32, 2×GPU)" } else { "sampling" });
             let t_dit = (1000.0 - ts[i]) / 1000.0;
             // The reference negates the DiT output before the Euler step
             // (`noise_pred = -noise_pred; scheduler.step(noise_pred, …)`): brain's

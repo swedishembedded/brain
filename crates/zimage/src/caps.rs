@@ -24,6 +24,7 @@ fn gen_params(spec: ActionSpec) -> ActionSpec {
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .param(ParamSpec::new("width", ParamType::Int, "output width, px").default(json!(1024)))
         .param(ParamSpec::new("height", ParamType::Int, "output height, px").default(json!(1024)))
+        .param(ParamSpec::new("precision", ParamType::Enum(vec!["int8".into(), "fp32".into()]), "DiT precision: int8 (1 GPU, fast) or fp32 (2 GPUs, higher fidelity)").default(json!("int8")))
 }
 
 /// The full, static capability manifest — safe to build with no weights loaded.
@@ -183,6 +184,7 @@ fn opts_from(inv: &Invocation, width: u32, height: u32) -> crate::pipeline::Opts
         seed: inv.get_i64("seed").unwrap_or(42).max(0) as u64,
         width,
         height,
+        hifi: inv.get_str("precision").as_deref() == Some("fp32"),
     }
 }
 
