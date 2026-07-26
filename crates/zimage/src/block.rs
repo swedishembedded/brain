@@ -254,16 +254,21 @@ impl Scratch {
 
 /// Whether to use flash attention (fused, O(t·hd) memory) instead of the
 /// materialised scores→softmax→apply trio, for `nh` heads and `t` tokens.
-/// `BRAIN_ZIMAGE_FLASH=1|0` forces it on/off; otherwise auto-enable once the
-/// materialised `[nh·t·t]` scores would exceed ~512 MiB (well before the 2 GiB
-/// per-binding limit that OOMs high-resolution latents).
+///
+/// The materialised path uses a tuned register-tiled GEMM, so where it FITS it is
+/// faster than the hand-written fused flash loops on Pascal (no tensor cores).
+/// So flash is a MEMORY escape hatch, not a blanket speedup: auto-enable only once
+/// the `[nh·t·t]` scores buffer would approach the 2 GiB per-binding limit that
+/// OOMs it (~1800 MiB ≈ t≈4000, ~1024²). Below that, materialised stays (faster);
+/// above it, flash is the only thing that runs at all. `BRAIN_ZIMAGE_FLASH=1|0`
+/// forces it (1 to benchmark/verify flash at any size; 0 to prove the OOM).
 pub(crate) fn use_flash(nh: u32, t: u32) -> bool {
     match std::env::var("BRAIN_ZIMAGE_FLASH").ok().as_deref() {
         Some("1") => return true,
         Some("0") => return false,
         _ => {}
     }
-    (nh as u64) * (t as u64) * (t as u64) * 4 > 512 * 1024 * 1024
+    (nh as u64) * (t as u64) * (t as u64) * 4 > 1800 * 1024 * 1024
 }
 
 /// Append the self-attention (scores→softmax→apply) for one block, from the packed
