@@ -13,7 +13,7 @@
 //!      `x += (σ_next − σ)·v`; dynamic-shifted sigmas (mu from the sequence length);
 //!   4. VAE decode of `latent/scaling + shift` → RGB, `[-1,1] → [0,1]`.
 //!
-//! The DiT runs **int8** (13 GB — fits one P40; fp32 6B would not) at cosine 0.99.
+//! Runs on CPU (fp32) so the 6B fits the 172 GB RAM without the P40 memory limits.
 //! Models load sequentially and drop before the next, so peak VRAM is one model.
 
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ use qwen::{Qwen, QwenConfig};
 use vae::{VaeConfig, VaeDecoder};
 
 use crate::import::import_comfy;
-use crate::{ZImageConfig, ZImageDitI8};
+use crate::{ZImageConfig, ZImageDit};
 
 /// Filesystem locations of the four Z-Image components (never hard-coded — from
 /// the environment, mirroring the crate's tests).
@@ -120,6 +120,7 @@ pub fn generate(prompt: &str, opts: &Opts, paths: &Paths, mut progress: impl FnM
     if opts.width % 16 != 0 || opts.height % 16 != 0 {
         return Err("width/height must be multiples of 16".into());
     }
+    gpu_core::set_default_backend(gpu_core::Backend::Cpu); // fp32 6B fits the 172 GB RAM; int8 is GPU-only
     let (lh, lw) = (opts.height / 8, opts.width / 8); // VAE downscale 8
 
     // 1. tokenize (chat template) --------------------------------------------
@@ -153,7 +154,7 @@ pub fn generate(prompt: &str, opts: &Opts, paths: &Paths, mut progress: impl FnM
     let zcfg = ZImageConfig::turbo();
     let weights = import_comfy(checkpoint::safetensors::read(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
     {
-        let dit = ZImageDitI8::build(zcfg, weights, 1, lh, lw, cap_len);
+        let dit = ZImageDit::build(zcfg, weights, 1, lh, lw, cap_len, Some("cpu"));
         for i in 0..opts.steps as usize {
             progress(2 + i as u32, total, "sampling");
             let t_dit = (1000.0 - ts[i]) / 1000.0;
@@ -165,7 +166,7 @@ pub fn generate(prompt: &str, opts: &Opts, paths: &Paths, mut progress: impl FnM
     // 6. VAE decode ----------------------------------------------------------
     progress(total, total, "decoding (VAE)");
     let vtensors = tensors_map(checkpoint::safetensors::read(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
-    let vae = VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, opts.height, opts.width, Some("gpu"));
+    let vae = VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, opts.height, opts.width, Some("cpu"));
     let dec_in: Vec<f32> = lat.iter().map(|&x| x / 0.3611 + 0.1159).collect();
     let chw = vae.decode(&dec_in); // [3 · H · W] in [-1, 1]
 
