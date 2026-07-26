@@ -17,7 +17,9 @@ use std::collections::HashMap;
 
 pub mod block;
 pub mod collective;
+pub mod distributed;
 pub mod grid;
+pub mod netcollective;
 pub mod parallel;
 pub mod plan;
 pub mod shard;
@@ -25,6 +27,8 @@ pub mod train;
 pub mod vit;
 
 pub use collective::{Collective, HostCollective};
+pub use distributed::{federated_average, DdpOptimizer};
+pub use netcollective::NetworkCollective;
 pub use grid::{Coord, Grid, LocalGroups};
 pub use parallel::DataParallel;
 pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
