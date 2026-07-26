@@ -43,6 +43,7 @@ brain-eval.workspace = true
 brain-bench.workspace = true
 brain-checkpoint.workspace = true
 brain-capability.workspace = true
+clap.workspace = true
 brain-zimage.workspace = true
 brain-events.workspace = true
 brain-runtime.workspace = true

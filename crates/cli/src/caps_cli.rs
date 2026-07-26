@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use capability::{Action, ActionSpec, Blob, Invocation, Manifest, Media, ParamType, Progress, Provider, Registry};
+use clap::{Arg, ArgAction, Command};
 use serde_json::{json, Value};
 
 /// Every model's static capability manifest (discovery — no weights). Add a model
@@ -104,65 +105,48 @@ pub fn run_do(argv: &[String]) -> i32 {
     };
     let spec = act.spec();
 
-    // parse --param value / --in name=path / --out name=path / --json
+    // Build a clap parser *from the action's schema* — no hand-rolled arg loop.
+    // Each param becomes a typed `--name`, plus `--in`/`--out name=path` and `--json`.
+    let matches = match build_parser(&model, &action, &spec).try_get_matches_from(&argv[2..]) {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = e.print();
+            return if matches!(e.kind(), clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion) { 0 } else { 2 };
+        }
+    };
+
     let mut inv = Invocation::new();
-    let mut out_paths: Vec<(String, String)> = Vec::new();
-    let mut json_out = false;
-    let mut i = 2;
-    while i < argv.len() {
-        let a = &argv[i];
-        match a.as_str() {
-            "--json" => {
-                json_out = true;
-                i += 1;
+    for p in &spec.params {
+        if p.ty == ParamType::Bool {
+            if matches.get_flag(&p.name) {
+                inv = inv.set(&p.name, json!(true));
             }
-            "--in" => {
-                let Some(kv) = argv.get(i + 1).and_then(|s| s.split_once('=')) else {
-                    eprintln!("brain do: --in needs name=path");
-                    return 2;
-                };
-                match load_blob(&spec, kv.0, kv.1) {
-                    Ok(b) => inv = inv.blob(kv.0, b),
-                    Err(e) => {
-                        eprintln!("brain do: {e}");
-                        return 1;
-                    }
-                }
-                i += 2;
-            }
-            "--out" => {
-                let Some(kv) = argv.get(i + 1).and_then(|s| s.split_once('=')) else {
-                    eprintln!("brain do: --out needs name=path");
-                    return 2;
-                };
-                out_paths.push((kv.0.to_string(), kv.1.to_string()));
-                i += 2;
-            }
-            flag if flag.starts_with("--") => {
-                let name = &flag[2..];
-                let Some(ps) = spec.params.iter().find(|p| p.name == name) else {
-                    eprintln!("brain do: unknown param --{name} (see `brain caps {model}`)");
-                    return 1;
-                };
-                // bool params act as flags; others consume the next token.
-                if ps.ty == ParamType::Bool {
-                    inv = inv.set(name, json!(true));
-                    i += 1;
-                } else {
-                    let Some(val) = argv.get(i + 1) else {
-                        eprintln!("brain do: --{name} needs a value");
-                        return 2;
-                    };
-                    inv = inv.set(name, coerce(&ps.ty, val));
-                    i += 2;
-                }
-            }
-            other => {
-                eprintln!("brain do: unexpected argument '{other}'");
-                return 2;
+        } else if let Some(v) = matches.get_one::<String>(&p.name) {
+            inv = inv.set(&p.name, coerce(&p.ty, v));
+        }
+    }
+    for spec_val in matches.get_many::<String>("in").unwrap_or_default() {
+        let Some((name, path)) = spec_val.split_once('=') else {
+            eprintln!("brain do: --in must be name=path (got '{spec_val}')");
+            return 2;
+        };
+        match load_blob(&spec, name, path) {
+            Ok(b) => inv = inv.blob(name, b),
+            Err(e) => {
+                eprintln!("brain do: {e}");
+                return 1;
             }
         }
     }
+    let mut out_paths: Vec<(String, String)> = Vec::new();
+    for spec_val in matches.get_many::<String>("out").unwrap_or_default() {
+        let Some((name, path)) = spec_val.split_once('=') else {
+            eprintln!("brain do: --out must be name=path (got '{spec_val}')");
+            return 2;
+        };
+        out_paths.push((name.to_string(), path.to_string()));
+    }
+    let json_out = matches.get_flag("json");
 
     // run (progress → stderr)
     let mut progress = |p: Progress| {
@@ -202,6 +186,32 @@ pub fn run_do(argv: &[String]) -> i32 {
         }
     }
     0
+}
+
+/// Build a clap parser directly from an [`ActionSpec`]: one typed `--<param>` per
+/// param (required/enum/bool honoured by clap), plus repeatable `--in`/`--out
+/// name=path` and `--json`. All argument parsing goes through clap — no bespoke loop.
+fn build_parser(model: &str, action: &str, spec: &ActionSpec) -> Command {
+    let mut cmd = Command::new(format!("brain do {model} {action}")).no_binary_name(true).about(spec.summary.clone());
+    for p in &spec.params {
+        let mut arg = Arg::new(p.name.clone()).long(p.name.clone()).help(p.help.clone());
+        if p.ty == ParamType::Bool {
+            arg = arg.action(ArgAction::SetTrue);
+        } else {
+            arg = arg.action(ArgAction::Set).value_name(p.ty.name().to_uppercase());
+            if let ParamType::Enum(vals) = &p.ty {
+                arg = arg.value_parser(vals.clone());
+            }
+            if p.required && p.default.is_none() {
+                arg = arg.required(true);
+            }
+        }
+        cmd = cmd.arg(arg);
+    }
+    let in_help = if spec.inputs.is_empty() { "named binary input, e.g. image=in.ppm".to_string() } else { format!("named binary input ({})", spec.inputs.iter().map(|b| format!("{}=<{}>", b.name, b.media.name())).collect::<Vec<_>>().join(", ")) };
+    cmd.arg(Arg::new("in").long("in").action(ArgAction::Append).value_name("NAME=PATH").help(in_help))
+        .arg(Arg::new("out").long("out").action(ArgAction::Append).value_name("NAME=PATH").help("write a named output blob to a file, e.g. image=out.ppm"))
+        .arg(Arg::new("json").long("json").action(ArgAction::SetTrue).help("print scalar outputs as JSON"))
 }
 
 /// Coerce a CLI string to the JSON value the param type expects.
