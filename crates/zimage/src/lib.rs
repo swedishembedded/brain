@@ -18,6 +18,7 @@
 //! rmsnorm(y, w·gate)` — so no scale/gate kernels are needed.
 
 pub mod block;
+pub mod import;
 pub mod model;
 
 pub use block::{BlockDims, Tensors, ZImageBlock};
