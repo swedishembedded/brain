@@ -66,6 +66,95 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_secs(20));
         return;
     }
+    // `train`: measure a real training step's dominant cost — the forward and
+    // backward GEMM sweep across the whole 34-block DiT — with the actual
+    // register-tiled kernels (matmul_reg2 fwd, matmul_dx_reg + matmul_dw_reg
+    // bwd). No 6B load needed: GEMM time depends only on shapes, so we drive
+    // correctly-shaped scratch. Backward = dx (dY@W) + dW (dY^T@X) per linear =
+    // 2× the forward FLOP; this measures whether the bwd kernels hold the same
+    // ~34%-of-peak regime as the forward. Args: train [h w cap_len reps].
+    if device == "train" {
+        use gpu_core::Gpu;
+        let h: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(32);
+        let w: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(32);
+        let cap_len: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(64);
+        let reps: usize = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(8);
+        let mut cfg = ZImageConfig::turbo();
+        if let Ok(n) = std::env::var("BRAIN_ZIMAGE_LAYERS").and_then(|n| n.parse::<u32>().map_err(|_| std::env::VarError::NotPresent)) {
+            cfg.n_layers = n;
+        }
+        let (dim, hidden) = (cfg.dim as usize, (cfg.dim * 8 / 3) as usize);
+        let ps = cfg.patch_size;
+        let n_img = ((h / ps) * (w / ps)) as usize;
+        let ncap = cap_len as usize;
+        let ntot = n_img + ncap;
+
+        const K_FWD: usize = 0;
+        const K_DX: usize = 1;
+        const K_DW: usize = 2;
+        let kk = [("matmul_reg2", kernels::MATMUL_REG2), ("matmul_dx_reg", kernels::MATMUL_DX_REG), ("matmul_dw_reg", kernels::MATMUL_DW_REG)];
+        let gpu = Gpu::new_wgpu(&kk);
+        // Shared scratch, sized to the largest shape (reused across all linears —
+        // we time compute, not numerics). max activation ntot×hidden, max weight
+        // hidden×dim.
+        let big_act = (ntot * hidden) as u64;
+        let big_w = (hidden * dim) as u64;
+        let xb = gpu.storage(big_act);
+        let yb = gpu.storage(big_act);
+        let wb = gpu.storage(big_w);
+        let dyb = gpu.storage(big_act);
+        let dxb = gpu.storage(big_act);
+        let dwb = gpu.storage(big_w);
+        let d128 = |x: usize| ((x + 127) / 128) as u32;
+        // (in, out) of the 7 linears in one block.
+        let linears = [(dim, dim), (dim, dim), (dim, dim), (dim, dim), (dim, hidden), (dim, hidden), (hidden, dim)];
+        let mut fwd = Vec::new();
+        let mut bwd = Vec::new();
+        let push_block = |steps_f: &mut Vec<_>, steps_b: &mut Vec<_>, t: usize| {
+            for &(inp, out) in &linears {
+                let (m, kdim, n) = (t as u32, inp as u32, out as u32);
+                // forward y[m,n] = x[m,k] @ W[n,k]^T
+                steps_f.push(gpu.step(K_FWD, &[&xb, &wb, &yb], &[m, kdim, n], d128(t) * d128(out) * 256));
+                // dX[m,k] = dY[m,n] @ W[n,k]
+                steps_b.push(gpu.step(K_DX, &[&dyb, &wb, &dxb], &[m, kdim, n, 0], d128(t) * d128(inp) * 256));
+                // dW[n,k] += dY[m,n]^T @ X[m,k]
+                steps_b.push(gpu.step(K_DW, &[&dyb, &xb, &dwb], &[m, kdim, n], d128(out) * d128(inp) * 256));
+            }
+        };
+        for _ in 0..cfg.n_refiner_layers {
+            push_block(&mut fwd, &mut bwd, n_img);
+        }
+        for _ in 0..cfg.n_refiner_layers {
+            push_block(&mut fwd, &mut bwd, ncap);
+        }
+        for _ in 0..cfg.n_layers {
+            push_block(&mut fwd, &mut bwd, ntot);
+        }
+        let time = |steps: &[gpu_core::Step]| -> f64 {
+            gpu.submit(&[], steps);
+            gpu.poll_wait();
+            let mut best = f64::INFINITY;
+            for _ in 0..reps {
+                let t0 = Instant::now();
+                gpu.submit(&[], steps);
+                gpu.poll_wait();
+                best = best.min(t0.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let fwd_s = time(&fwd);
+        let bwd_s = time(&bwd);
+        let gflop = forward_gflop(&cfg, n_img as u64, ncap as u64);
+        let peak = P40_FP32_TFLOPS * 1e3;
+        println!("\n=== Z-Image DiT training GEMM sweep — 1×P40 ===");
+        println!("config: {} main + {} refiner layers, {ntot} tokens ({n_img} img + {ncap} cap)", cfg.n_layers, 2 * cfg.n_refiner_layers);
+        println!("fwd GEMM: {:.1} ms  ({:.0} GFLOP/s, {:.1}% peak) — {gflop:.0} GFLOP", fwd_s * 1e3, gflop / fwd_s, 100.0 * gflop / fwd_s / peak);
+        println!("bwd GEMM: {:.1} ms  ({:.0} GFLOP/s, {:.1}% peak) — {:.0} GFLOP (dx+dw = 2×fwd)", bwd_s * 1e3, 2.0 * gflop / bwd_s, 100.0 * 2.0 * gflop / bwd_s / peak, 2.0 * gflop);
+        println!("bwd/fwd ratio: {:.2}× (ideal 2.0)", bwd_s / fwd_s);
+        println!("fwd+bwd GEMM: {:.1} ms/step", (fwd_s + bwd_s) * 1e3);
+        return;
+    }
+
     let h: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(16);
     let w: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(16);
     let cap_len: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(32);
