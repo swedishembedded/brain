@@ -245,6 +245,8 @@ pub const FILM_ROW: &str = include_str!("../wgsl/film_row.wgsl");
 pub const FILM_ROW_DSB: &str = include_str!("../wgsl/film_row_dsb.wgsl");
 /// `wgsl/film_row_dx.wgsl`
 pub const FILM_ROW_DX: &str = include_str!("../wgsl/film_row_dx.wgsl");
+/// `wgsl/flash_attn_bidir.wgsl`
+pub const FLASH_ATTN_BIDIR: &str = include_str!("../wgsl/flash_attn_bidir.wgsl");
 /// `wgsl/gate_row.wgsl`
 pub const GATE_ROW: &str = include_str!("../wgsl/gate_row.wgsl");
 /// `wgsl/gate_row_dg.wgsl`
@@ -660,6 +662,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("film_row", FILM_ROW),
     ("film_row_dsb", FILM_ROW_DSB),
     ("film_row_dx", FILM_ROW_DX),
+    ("flash_attn_bidir", FLASH_ATTN_BIDIR),
     ("gate_row", GATE_ROW),
     ("gate_row_dg", GATE_ROW_DG),
     ("gate_row_dh", GATE_ROW_DH),

@@ -37,8 +37,9 @@ pub(crate) const K_MATMUL_REG2: usize = 9;
 pub(crate) const K_QUANT_PACK: usize = 10;
 pub(crate) const K_MATMUL_I8: usize = 11;
 pub(crate) const K_MAX_ABS_ROW: usize = 12;
+pub(crate) const K_FLASH: usize = 13;
 
-pub(crate) const KERNELS: [(&str, &str); 13] = [
+pub(crate) const KERNELS: [(&str, &str); 14] = [
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("matmul", kernels::MATMUL),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
@@ -55,6 +56,9 @@ pub(crate) const KERNELS: [(&str, &str); 13] = [
     ("quant_pack", kernels::QUANT_PACK),
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
     ("max_abs_row", kernels::MAX_ABS_ROW),
+    // Flash attention: fused scores/softmax/apply with online softmax, O(T·hd)
+    // memory (no materialised [nh·T·T]). Enables high-resolution latents.
+    ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
 ];
 
 /// Host tensors by name → `(shape, row-major f32 data)`.
@@ -226,16 +230,54 @@ pub(crate) struct Scratch {
 
 impl Scratch {
     pub fn new(gpu: &Gpu, d: BlockDims, t: u32) -> Scratch {
+        Scratch::new_maybe_flash(gpu, d, t, use_flash(d.n_heads, t))
+    }
+
+    /// Allocate block scratch. Under `flash`, the materialised `scores`/`probs`
+    /// `[nh·t·t]` buffers are NOT allocated (a single dummy element each), which is
+    /// the whole memory win — at high `t` those are gigabytes and hit the 2 GiB
+    /// per-binding limit.
+    pub fn new_maybe_flash(gpu: &Gpu, d: BlockDims, t: u32, flash: bool) -> Scratch {
         let td = (t * d.dim) as u64;
         let th = (t * d.hidden) as u64;
         let a = |n: u64| gpu.storage(n);
+        let attn_mat = if flash { 1 } else { (d.n_heads * t * t) as u64 };
         Scratch {
             n1: a(td), q: a(td), k: a(td), v: a(td), qn: a(td), kn: a(td), qr: a(td), kr: a(td),
             qkv: a((t * 3 * d.dim) as u64),
-            scores: a((d.n_heads * t * t) as u64), probs: a((d.n_heads * t * t) as u64),
+            scores: a(attn_mat), probs: a(attn_mat),
             ctx: a(td), attn_out: a(td), n2: a(td), x1: a(td), f1: a(td),
             g: a(th), u: a(th), hsw: a(th), ff: a(td), f2: a(td),
         }
+    }
+}
+
+/// Whether to use flash attention (fused, O(t·hd) memory) instead of the
+/// materialised scores→softmax→apply trio, for `nh` heads and `t` tokens.
+/// `BRAIN_ZIMAGE_FLASH=1|0` forces it on/off; otherwise auto-enable once the
+/// materialised `[nh·t·t]` scores would exceed ~512 MiB (well before the 2 GiB
+/// per-binding limit that OOMs high-resolution latents).
+pub(crate) fn use_flash(nh: u32, t: u32) -> bool {
+    match std::env::var("BRAIN_ZIMAGE_FLASH").ok().as_deref() {
+        Some("1") => return true,
+        Some("0") => return false,
+        _ => {}
+    }
+    (nh as u64) * (t as u64) * (t as u64) * 4 > 512 * 1024 * 1024
+}
+
+/// Append the self-attention (scores→softmax→apply) for one block, from the packed
+/// `qkv` into `ctx`. `flash` fuses it into one tiled online-softmax kernel with
+/// O(t·hd) memory; otherwise the materialised trio.
+pub(crate) fn push_attention(gpu: &Gpu, s: &mut Vec<Step>, scr: &Scratch, nh: u32, t: u32, hd: u32, dim: u32, flash: bool) {
+    if flash {
+        let br = 64u32; // must match BR in flash_attn_bidir.wgsl
+        let nwg = nh * t.div_ceil(br);
+        s.push(gpu.step(K_FLASH, &[&scr.qkv, &scr.ctx], &[1, nh, t, hd, 3 * dim, 0, dim, 2 * dim, dim], nwg * br));
+    } else {
+        s.push(gpu.step(K_SCORES, &[&scr.qkv, &scr.scores], &[1, nh, t, hd, 3 * dim, 0, dim], nh * t * t));
+        s.push(gpu.step(K_SOFTMAX, &[&scr.scores, &scr.probs], &[1, nh, t], nh * t));
+        s.push(gpu.step(K_APPLY, &[&scr.probs, &scr.qkv, &scr.ctx], &[1, nh, t, hd, 3 * dim, 2 * dim, dim], nh * t * hd));
     }
 }
 
@@ -278,9 +320,7 @@ pub(crate) fn build_block_steps(
     s.push(gpu.step(K_ROPE, &[&scr.qn, cos, sin, &scr.qr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_ROPE, &[&scr.kn, cos, sin, &scr.kr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_PACK, &[&scr.qr, &scr.kr, &scr.v, &scr.qkv], &[t, dim], t * 3 * dim));
-    s.push(gpu.step(K_SCORES, &[&scr.qkv, &scr.scores], &[1, nh, t, hd, 3 * dim, 0, dim], nh * t * t));
-    s.push(gpu.step(K_SOFTMAX, &[&scr.scores, &scr.probs], &[1, nh, t], nh * t));
-    s.push(gpu.step(K_APPLY, &[&scr.probs, &scr.qkv, &scr.ctx], &[1, nh, t, hd, 3 * dim, 2 * dim, dim], nh * t * hd));
+    push_attention(gpu, s, scr, nh, t, hd, dim, reg2 && use_flash(nh, t));
     s.push(mm(&scr.ctx, &w.wo, &scr.attn_out, t, dim, dim));
     s.push(gpu.step(K_RMSNORM, &[&scr.attn_out, &nb.an2, &scr.n2], &[dim, t, f(EPS)], t));
     s.push(gpu.step(K_ADD2, &[x_in, &scr.n2, &scr.x1], &[t * dim], t * dim));
@@ -406,9 +446,7 @@ pub(crate) fn build_block_steps_i8(
     s.push(gpu.step(K_ROPE, &[&scr.qn, cos, sin, &scr.qr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_ROPE, &[&scr.kn, cos, sin, &scr.kr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_PACK, &[&scr.qr, &scr.kr, &scr.v, &scr.qkv], &[t, dim], t * 3 * dim));
-    s.push(gpu.step(K_SCORES, &[&scr.qkv, &scr.scores], &[1, nh, t, hd, 3 * dim, 0, dim], nh * t * t));
-    s.push(gpu.step(K_SOFTMAX, &[&scr.scores, &scr.probs], &[1, nh, t], nh * t));
-    s.push(gpu.step(K_APPLY, &[&scr.probs, &scr.qkv, &scr.ctx], &[1, nh, t, hd, 3 * dim, 2 * dim, dim], nh * t * hd));
+    push_attention(gpu, s, scr, nh, t, hd, dim, use_flash(nh, t)); // int8 path is GPU-only
     quant(s, &scr.ctx, &i8.xq_dim, dim);
     mm8(s, &i8.xq_dim, &w.wo, &scr.attn_out, dim, dim);
     s.push(gpu.step(K_RMSNORM, &[&scr.attn_out, &nb.an2, &scr.n2], &[dim, t, f(EPS)], t));

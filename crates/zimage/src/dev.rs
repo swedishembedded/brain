@@ -43,7 +43,9 @@ fn build_phase(gpu: &Gpu, tensors: &Tensors, prefixes: &[String], bd: BlockDims,
     let resb = gpu.storage((t * bd.dim) as u64);
     let cos = gpu.storage((t * half) as u64);
     let sin = gpu.storage((t * half) as u64);
-    let scr = Scratch::new(gpu, bd, t);
+    // Flash only on the GPU (reg2 ⇒ GPU; the CPU JIT can't compile the barrier);
+    // Scratch must match so it skips the [nh·t·t] buffers under flash.
+    let scr = Scratch::new_maybe_flash(gpu, bd, t, reg2 && crate::block::use_flash(bd.n_heads, t));
     let (mut weights, mut norms, mut steps) = (Vec::new(), Vec::new(), Vec::new());
     // Double-buffer the residual: block reads `cur_in`, writes `cur_out`, swap.
     let (mut cur_in, mut cur_out) = (resa.clone(), resb.clone());
@@ -228,7 +230,8 @@ fn build_phase_i8(gpu: &Gpu, tensors: &Tensors, prefixes: &[String], bd: BlockDi
     let resb = gpu.storage((t * bd.dim) as u64);
     let cos = gpu.storage((t * half) as u64);
     let sin = gpu.storage((t * half) as u64);
-    let scr = Scratch::new(gpu, bd, t);
+    // int8 path is GPU-only, so flash follows the plain heuristic.
+    let scr = Scratch::new_maybe_flash(gpu, bd, t, crate::block::use_flash(bd.n_heads, t));
     let i8 = Int8Scratch::new(gpu, bd, t);
     let (mut weights, mut norms, mut steps) = (Vec::new(), Vec::new(), Vec::new());
     let (mut cur_in, mut cur_out) = (resa.clone(), resb.clone());
