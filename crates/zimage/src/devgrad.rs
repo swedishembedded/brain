@@ -120,7 +120,18 @@ pub struct BlockDev {
 
 impl BlockDev {
     pub fn new(max_t: usize, dim: usize, nh: usize) -> BlockDev {
-        let gpu = Gpu::new_wgpu(&KERNELS);
+        BlockDev::from_gpu(Gpu::new_wgpu(&KERNELS), max_t, dim, nh)
+    }
+
+    /// Build `count` engines, one per physical GPU, via a SINGLE device
+    /// enumeration (`new_wgpu_multi`) — the collision-free multi-card placement
+    /// the inference sharding uses. Each engine can host a different pipeline
+    /// stage's layer slice on its own card.
+    pub fn new_multi(count: usize, max_t: usize, dim: usize, nh: usize) -> Vec<BlockDev> {
+        Gpu::new_wgpu_multi(&KERNELS, count).into_iter().map(|g| BlockDev::from_gpu(g, max_t, dim, nh)).collect()
+    }
+
+    pub fn from_gpu(gpu: Gpu, max_t: usize, dim: usize, nh: usize) -> BlockDev {
         let hd = dim / nh;
         let hidden = dim * 8 / 3;
         let mut b = HashMap::new();

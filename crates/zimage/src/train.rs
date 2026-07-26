@@ -48,7 +48,7 @@ fn to64(v: &[f32]) -> Vec<f64> {
 
 /// Saved state of the wrapper front (timestep MLP, embedders, refiners) that the
 /// front backward needs. Produced by [`DeviceTrainer::front_fwd`].
-struct Front {
+pub(crate) struct Front {
     cvec: Vec<f64>,
     c32: Vec<f32>,
     te: Vec<f64>,
@@ -67,8 +67,20 @@ struct Front {
     uni_sin: Vec<f32>,
 }
 
+impl Front {
+    pub(crate) fn c32(&self) -> &[f32] {
+        &self.c32
+    }
+    pub(crate) fn uni_cos(&self) -> &[f32] {
+        &self.uni_cos
+    }
+    pub(crate) fn uni_sin(&self) -> &[f32] {
+        &self.uni_sin
+    }
+}
+
 /// Saved state of the final layer, for its backward.
-struct Back {
+pub(crate) struct Back {
     silu_c: Vec<f64>,
     normed: Vec<f64>,
     inv_ln: Vec<f64>,
@@ -77,7 +89,7 @@ struct Back {
 }
 
 /// Front backward's grads (everything before the main layers).
-struct FrontGrads {
+pub(crate) struct FrontGrads {
     t0_w: Vec<f64>,
     t0_b: Vec<f64>,
     t2_w: Vec<f64>,
@@ -92,7 +104,7 @@ struct FrontGrads {
 }
 
 /// Final-layer backward's grads.
-struct BackGrads {
+pub(crate) struct BackGrads {
     fadaln_w: Vec<f64>,
     fadaln_b: Vec<f64>,
     flin_w: Vec<f64>,
@@ -103,6 +115,16 @@ impl DeviceTrainer {
     pub fn new(cfg: Cfg) -> DeviceTrainer {
         let eng = BlockDev::new(cfg.ntot(), cfg.dim, cfg.nh);
         DeviceTrainer { eng, cfg }
+    }
+
+    /// Build over a pre-made engine (e.g. one card of a `BlockDev::new_multi`
+    /// group), so a pipeline can place each stage on its own GPU.
+    pub fn with_engine(cfg: Cfg, eng: BlockDev) -> DeviceTrainer {
+        DeviceTrainer { eng, cfg }
+    }
+
+    pub(crate) fn cfg(&self) -> &Cfg {
+        &self.cfg
     }
 
     fn dims(&self, t: usize) -> Dims {
@@ -161,7 +183,7 @@ impl DeviceTrainer {
 
     /// Wrapper front: timestep→c, embed image/caption, refiners, unify. Returns
     /// the unified residual `[ntot·dim]` and the saved state for its backward.
-    fn front_fwd(&self, w: &ModelWeights, b: &Batch) -> (Vec<f32>, Front) {
+    pub(crate) fn front_fwd(&self, w: &ModelWeights, b: &Batch) -> (Vec<f32>, Front) {
         let c = &self.cfg;
         let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
         let (n_img, ncap) = (c.n_img(), c.ncap);
@@ -198,19 +220,24 @@ impl DeviceTrainer {
     }
 
     /// Run a contiguous slice of main layers on the unified residual, saving each
-    /// block's input for the backward. Returns `(uni_out, inputs)`.
-    fn main_fwd(&self, main: &[Weights], mut uni: Vec<f32>, f: &Front) -> (Vec<f32>, Vec<Vec<f32>>) {
+    /// block's input for the backward. `c32`/`uni_cos`/`uni_sin` are the shared
+    /// conditioning + RoPE tables (from the front, or carried in the boundary).
+    /// Returns `(uni_out, inputs)`.
+    pub fn main_fwd_ctx(&self, main: &[Weights], mut uni: Vec<f32>, c32: &[f32], uni_cos: &[f32], uni_sin: &[f32]) -> (Vec<f32>, Vec<Vec<f32>>) {
         let ntot = self.cfg.ntot();
         let mut inputs = Vec::with_capacity(main.len());
         for bw in main {
             inputs.push(uni.clone());
-            uni = self.eng.forward(bw, self.dims(ntot), &uni, &f.c32, &f.uni_cos, &f.uni_sin, true);
+            uni = self.eng.forward(bw, self.dims(ntot), &uni, c32, uni_cos, uni_sin, true);
         }
         (uni, inputs)
     }
+    fn main_fwd(&self, main: &[Weights], uni: Vec<f32>, f: &Front) -> (Vec<f32>, Vec<Vec<f32>>) {
+        self.main_fwd_ctx(main, uni, &f.c32, &f.uni_cos, &f.uni_sin)
+    }
 
     /// Final layer + flow-matching loss. Returns `(loss, dpred, Back)`.
-    fn back_fwd(&self, w: &ModelWeights, uni32: &[f32], f: &Front, b: &Batch) -> (f64, Vec<f64>, Back) {
+    pub(crate) fn back_fwd(&self, w: &ModelWeights, uni32: &[f32], f: &Front, b: &Batch) -> (f64, Vec<f64>, Back) {
         let c = &self.cfg;
         let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
         let (n_img, ntot) = (c.n_img(), c.ntot());
@@ -239,7 +266,7 @@ impl DeviceTrainer {
     }
 
     /// Final-layer backward. Returns `(d_uni, dc, back_grads)`.
-    fn back_bwd(&self, w: &ModelWeights, bk: &Back, dpred: &[f64], _f: &Front) -> (Vec<f32>, Vec<f64>, BackGrads) {
+    pub(crate) fn back_bwd(&self, w: &ModelWeights, bk: &Back, dpred: &[f64], _f: &Front) -> (Vec<f32>, Vec<f64>, BackGrads) {
         let c = &self.cfg;
         let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
         let (n_img, ntot) = (c.n_img(), c.ntot());
@@ -265,12 +292,12 @@ impl DeviceTrainer {
 
     /// Backward through a slice of main layers (reverse), accumulating `dc`.
     /// Returns `(d_uni_out, dc_out, grads_in_forward_order)`.
-    fn main_bwd(&self, main: &[Weights], inputs: &[Vec<f32>], f: &Front, d_uni: &[f32], mut dc: Vec<f64>) -> (Vec<f32>, Vec<f64>, Vec<Grads>) {
+    pub fn main_bwd_ctx(&self, main: &[Weights], inputs: &[Vec<f32>], c32: &[f32], uni_cos: &[f32], uni_sin: &[f32], d_uni: &[f32], mut dc: Vec<f64>) -> (Vec<f32>, Vec<f64>, Vec<Grads>) {
         let (cdim, ntot) = (self.cfg.cdim(), self.cfg.ntot());
         let mut d = d_uni.to_vec();
         let mut g: Vec<Grads> = Vec::with_capacity(main.len());
         for (bw, inp) in main.iter().zip(inputs).rev() {
-            let gg = self.eng.backward(bw, self.dims(ntot), inp, &f.c32, &f.uni_cos, &f.uni_sin, true, &d);
+            let gg = self.eng.backward(bw, self.dims(ntot), inp, c32, uni_cos, uni_sin, true, &d);
             d = to32(&gg.dx);
             for j in 0..cdim {
                 dc[j] += gg.dc[j];
@@ -280,10 +307,13 @@ impl DeviceTrainer {
         g.reverse();
         (d, dc, g)
     }
+    fn main_bwd(&self, main: &[Weights], inputs: &[Vec<f32>], f: &Front, d_uni: &[f32], dc: Vec<f64>) -> (Vec<f32>, Vec<f64>, Vec<Grads>) {
+        self.main_bwd_ctx(main, inputs, &f.c32, &f.uni_cos, &f.uni_sin, d_uni, dc)
+    }
 
     /// Wrapper-front backward: split the residual, refiners, embedders, timestep
     /// MLP (consuming the accumulated `dc`). Returns `(front_grads, noise_g, ctx_g)`.
-    fn front_bwd(&self, w: &ModelWeights, b: &Batch, f: &Front, d_uni: &[f32], mut dc: Vec<f64>) -> FrontGrads {
+    pub(crate) fn front_bwd(&self, w: &ModelWeights, b: &Batch, f: &Front, d_uni: &[f32], mut dc: Vec<f64>) -> FrontGrads {
         let c = &self.cfg;
         let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
         let (n_img, ncap) = (c.n_img(), c.ncap);
@@ -335,7 +365,7 @@ fn scaledfrom(normed: &[f64], scale: &[f64], ntot: usize, dim: usize) -> Vec<f64
 }
 
 /// Reassemble a [`ModelGrads`] from the phase grads.
-fn assemble(fg: FrontGrads, bg: BackGrads, main_g: Vec<Grads>) -> ModelGrads {
+pub(crate) fn assemble(fg: FrontGrads, bg: BackGrads, main_g: Vec<Grads>) -> ModelGrads {
     ModelGrads {
         t0_w: fg.t0_w, t0_b: fg.t0_b, t2_w: fg.t2_w, t2_b: fg.t2_b,
         xemb_w: fg.xemb_w, xemb_b: fg.xemb_b, capn_w: fg.capn_w, cap1_w: fg.cap1_w, cap1_b: fg.cap1_b,
