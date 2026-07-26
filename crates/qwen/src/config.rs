@@ -91,6 +91,26 @@ impl QwenConfig {
         }
     }
 
+    /// The published Qwen3-4B shape (from its `config.json`) — the text encoder
+    /// used by Z-Image and FLUX.2 (`hidden_size` 2560, 36 layers, GQA 32/8,
+    /// `head_dim` 128 so `q_dim` 4096 ≠ 2560, SwiGLU `d_ff` 9728, tied).
+    pub fn qwen3_4b() -> QwenConfig {
+        QwenConfig {
+            vocab: 151936,
+            block_size: 1024,
+            n_layers: 36,
+            d_model: 2560,
+            n_heads: 32,
+            n_kv_heads: 8,
+            head_dim: 128,
+            d_ff: 9728,
+            rope_theta: 1.0e6,
+            rms_eps: 1e-6,
+            tie_embeddings: true,
+            lora: None,
+        }
+    }
+
     /// Apply derived defaults (head_dim = d_model/n_heads when unset).
     pub fn with_defaults(mut self) -> Self {
         if self.head_dim == 0 {

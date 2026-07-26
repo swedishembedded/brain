@@ -910,6 +910,34 @@ impl Qwen {
         self.gpu.read(&self.logits, (t_use * self.cfg.vocab) as usize)
     }
 
+    /// Hidden state (residual stream) at a given depth for a single sequence,
+    /// row-major `[len·d_model]`. `layer` indexes the residual buffer: `res[0]`
+    /// is the token embedding, `res[l]` (1..=n_layers) is the output of block
+    /// `l-1` (pre-final-norm). This is what diffusion text encoders consume —
+    /// Z-Image/FLUX.2 use the **penultimate** hidden state (transformers
+    /// `hidden_states[-2]`), which is `res[n_layers-1]` (see [`Self::encode`]).
+    ///
+    /// Runs the full forward with `IGNORE` targets (as [`Self::logits_all`]
+    /// does, so the masked CE is a safe no-op); the lm_head is computed but its
+    /// result is unused. B must be 1 and `t >= len`.
+    pub fn encode_hidden(&self, tokens: &[u32], layer: usize) -> Vec<f32> {
+        let t_use = tokens.len() as u32;
+        assert!(t_use <= self.t && self.b == 1, "qwen decoder sized too small");
+        assert!(layer <= self.cfg.n_layers as usize, "layer {layer} > n_layers");
+        let ignore = vec![IGNORE; t_use as usize];
+        self.set_batch(tokens, &ignore);
+        let s = self.forward_steps(1, t_use);
+        self.gpu.submit(&[], &s);
+        self.gpu.read(&self.res[layer], (t_use * self.cfg.d_model) as usize)
+    }
+
+    /// The **penultimate** hidden state (`res[n_layers-1]`, un-normed) — the
+    /// caption features Z-Image and FLUX.2 feed to the DiT (diffusers
+    /// `text_encoder(...).hidden_states[-2]`). Returns row-major `[len·d_model]`.
+    pub fn encode(&self, tokens: &[u32]) -> Vec<f32> {
+        self.encode_hidden(tokens, self.cfg.n_layers as usize - 1)
+    }
+
     pub fn save(&self, path: &str) {
         self.save_with_itos(path, None);
     }

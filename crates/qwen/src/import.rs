@@ -72,10 +72,44 @@ pub fn config_from_hf(json: &str) -> Result<QwenConfig, String> {
     Ok(cfg)
 }
 
-/// Import `<hf_dir>/config.json` + `<hf_dir>/model.safetensors` into the brain
-/// checkpoint `out_path`. Validates that every brain parameter is produced
-/// exactly once with the right element count; fails loudly otherwise (never
-/// writes a partial checkpoint).
+/// Remap a set of HF Qwen3 safetensors into brain's `name → f32 data` init map,
+/// validating full coverage against `cfg.param_list()` (every brain parameter
+/// produced exactly once with the right element count) and that no mapped HF
+/// tensor is left unused. Fails loudly. Shared by the checkpoint [`import`] path
+/// and by in-memory loaders (e.g. wiring the frozen text encoder directly).
+pub fn brain_init_from_hf(
+    tensors: Vec<checkpoint::safetensors::StTensor>,
+    cfg: &QwenConfig,
+) -> Result<HashMap<String, Vec<f32>>, String> {
+    let mut brain: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
+    for t in tensors {
+        if let Some(bn) = hf_to_brain(&t.name, cfg.tie_embeddings) {
+            if brain.insert(bn.clone(), (t.shape, t.data)).is_some() {
+                return Err(format!("duplicate mapping to {bn}"));
+            }
+        }
+    }
+    let mut init: HashMap<String, Vec<f32>> = HashMap::new();
+    for (name, numel) in cfg.param_list() {
+        let (_, data) = brain
+            .remove(&name)
+            .ok_or_else(|| format!("import: missing tensor for brain param {name}"))?;
+        if data.len() != numel {
+            return Err(format!("import: {name} element count {} != expected {numel}", data.len()));
+        }
+        init.insert(name, data);
+    }
+    if !brain.is_empty() {
+        let extra: Vec<&String> = brain.keys().collect();
+        return Err(format!("import: {} mapped HF tensors unused: {extra:?}", brain.len()));
+    }
+    Ok(init)
+}
+
+/// Import `<hf_dir>/config.json` + `model.safetensors` (single **or** sharded via
+/// `model.safetensors.index.json`) into the brain checkpoint `out_path`.
+/// Validates that every brain parameter is produced exactly once with the right
+/// element count; fails loudly otherwise (never writes a partial checkpoint).
 pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
     import_with_block(hf_dir, out_path, None)
 }
@@ -93,55 +127,18 @@ pub fn import_with_block(hf_dir: &str, out_path: &str, block_size: Option<u32>) 
         cfg.block_size = b;
     }
 
-    let st_path = dir.join("model.safetensors");
-    if !st_path.exists() {
-        return Err(format!(
-            "missing {}: sharded checkpoints (model.safetensors.index.json) are not yet supported",
-            st_path.display()
-        ));
-    }
-    let tensors = checkpoint::safetensors::read(st_path.to_str().unwrap())?;
+    // Single `model.safetensors` or sharded `model.safetensors.index.json`.
+    let tensors = checkpoint::safetensors::read_model_dir(dir)?;
+    let init = brain_init_from_hf(tensors, &cfg)?;
 
-    // Remap into a name -> (shape, data) table.
-    let mut brain: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
-    let mut dropped = 0usize;
-    for t in tensors {
-        match hf_to_brain(&t.name, cfg.tie_embeddings) {
-            Some(bn) => {
-                if brain.insert(bn.clone(), (t.shape, t.data)).is_some() {
-                    return Err(format!("duplicate mapping to {bn}"));
-                }
-            }
-            None => dropped += 1,
-        }
-    }
-
-    // Validate coverage against the model's parameter list and build the ordered
-    // tensor list for the checkpoint.
+    // Emit in param_list order (coverage already validated by brain_init_from_hf).
     let mut out: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
     for (name, numel) in cfg.param_list() {
-        let (_, data) = brain
-            .remove(&name)
-            .ok_or_else(|| format!("import: missing tensor for brain param {name}"))?;
-        if data.len() != numel {
-            return Err(format!(
-                "import: {name} element count {} != expected {numel}",
-                data.len()
-            ));
-        }
+        let data = init.get(&name).expect("coverage validated").clone();
         out.push((name, vec![numel as u64], data));
     }
-    if !brain.is_empty() {
-        let extra: Vec<&String> = brain.keys().collect();
-        return Err(format!("import: {} mapped HF tensors unused: {extra:?}", brain.len()));
-    }
-
     checkpoint::save(out_path, cfg.to_json(), &out);
-    eprintln!(
-        "imported {} tensors -> {out_path} ({} HF tensors dropped: tied lm_head/etc.)",
-        out.len(),
-        dropped
-    );
+    eprintln!("imported {} tensors -> {out_path}", out.len());
     Ok(())
 }
 
