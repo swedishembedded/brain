@@ -1,0 +1,16 @@
+[package]
+name = "brain-vae"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Convolutional KL image autoencoder (Stable-Diffusion / FLUX AutoencoderKL). Decoder-first (frozen inference for the latent-diffusion pipeline); encoder + KL sampling + training/gradcheck land alongside. Composed from the shared conv/GroupNorm/SiLU/attention/upsample kernels."
+
+[lib]
+name = "vae"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-checkpoint.workspace = true
+serde_json.workspace = true

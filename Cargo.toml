@@ -26,6 +26,7 @@ default-members = [
     "crates/seq2seq",
     "crates/autoencoder",
     "crates/diffusion",
+    "crates/vae",
     "crates/forecast",
     "crates/fcbench",
     "crates/chronos2",

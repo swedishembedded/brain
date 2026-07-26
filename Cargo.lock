@@ -746,6 +746,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-vae"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-vision"
 version = "0.1.0"
 dependencies = [
