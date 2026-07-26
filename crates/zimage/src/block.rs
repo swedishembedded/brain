@@ -34,11 +34,11 @@ pub(crate) const K_APPLY: usize = 6;
 pub(crate) const K_SILU_MUL: usize = 7;
 pub(crate) const K_ADD2: usize = 8;
 pub(crate) const K_MATMUL_REG2: usize = 9;
-pub(crate) const K_QUANT_PACK: usize = 12;
-pub(crate) const K_MATMUL_I8: usize = 13;
-pub(crate) const K_MAX_ABS_ROW: usize = 14;
+pub(crate) const K_QUANT_PACK: usize = 10;
+pub(crate) const K_MATMUL_I8: usize = 11;
+pub(crate) const K_MAX_ABS_ROW: usize = 12;
 
-pub(crate) const KERNELS: [(&str, &str); 15] = [
+pub(crate) const KERNELS: [(&str, &str); 13] = [
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("matmul", kernels::MATMUL),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
@@ -51,9 +51,7 @@ pub(crate) const KERNELS: [(&str, &str); 15] = [
     // GPU-only fast GEMM (software-pipelined register tiling). The CPU JIT can't
     // compile its barrier, so CPU uses the naive `matmul` (native AVX2 path).
     ("matmul_reg2", kernels::MATMUL_REG2),
-    // int8 DP4A path (GPU only): per-token activation quant + DP4A GEMM.
-    ("max_abs_part", kernels::MAX_ABS_PART),
-    ("max_abs_final", kernels::MAX_ABS_FINAL),
+    // int8 DP4A path (GPU only): per-token activation quant (max_abs_row) + DP4A GEMM.
     ("quant_pack", kernels::QUANT_PACK),
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
     ("max_abs_row", kernels::MAX_ABS_ROW),
