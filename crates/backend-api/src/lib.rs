@@ -228,6 +228,13 @@ pub trait Backend: Send + Sync {
     /// `read`. Backends that execute eagerly at `submit` (CPU) have nothing
     /// pending, so the default no-op is correct for them.
     fn flush(&self) {}
+    /// The largest a single storage-buffer binding may be on this device, in
+    /// bytes — the hardware limit a kernel's biggest buffer must fit under.
+    /// Card-dependent (wgpu reports the adapter's value); the default is the
+    /// common ~2 GiB so callers that never query a real device stay conservative.
+    fn max_storage_binding_bytes(&self) -> u64 {
+        2 * 1024 * 1024 * 1024 - 1
+    }
 }
 
 /// wasm variant: no `Send + Sync` (WebGPU is single-threaded) and no blocking

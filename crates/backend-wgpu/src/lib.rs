@@ -342,6 +342,10 @@ impl WgpuBackend {
     /// Record all pending dispatches into ONE compute pass and submit. Idempotent.
     /// wgpu inserts the necessary inter-dispatch barriers within the pass, so the
     /// per-block read-after-write dependencies are preserved.
+    fn max_storage_binding_bytes(&self) -> u64 {
+        self.device.limits().max_storage_buffer_binding_size as u64
+    }
+
     fn flush(&self) {
         let steps: Vec<WgpuStep> = std::mem::take(&mut *self.pending.lock().unwrap());
         if steps.is_empty() {

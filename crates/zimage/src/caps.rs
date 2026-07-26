@@ -82,21 +82,28 @@ pub fn manifest() -> Manifest {
 
 // ===================== execution =====================
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use capability::{Action, ActionResult, Invocation, Outcome, Progress, Provider};
 
-/// The executable Z-Image model behind the manifest. Constructed lazily (`load`),
-/// it resolves each action to a runnable [`Action`]. Weight paths come from the
-/// environment (`BRAIN_ZIMAGE_DIT` / `_VAE` / `QWEN3_4B`), mirroring the crate's
-/// tests, so `brain do z-image …` needs no extra flags once they are set.
+/// Cache key for a resident text-to-image pipeline: everything that fixes the
+/// built graphs. The caption length is a *property* of the built pipeline (not the
+/// key) — prompts are padded/truncated to it, so any prompt reuses the same hot
+/// weights.
+type HotKey = (u32, u32, bool); // (width, height, hifi)
+
+/// The executable Z-Image model behind the manifest. Holds a **hot pipeline
+/// cache** so a long-lived process (`brain run` / the event server) loads the
+/// ~20 GB of weights once and reuses them across `ActionRequest`s — subsequent
+/// generations are fast. Weight paths come from the environment
+/// (`BRAIN_ZIMAGE_DIT` / `_VAE` / `_QWEN` / `_TOKENIZER`).
 pub struct ZImageProvider {
-    _priv: (),
+    hot: Arc<Mutex<Option<(HotKey, crate::pipeline::HotPipeline)>>>,
 }
 
 impl ZImageProvider {
     pub fn load() -> Result<ZImageProvider, String> {
-        Ok(ZImageProvider { _priv: () })
+        Ok(ZImageProvider { hot: Arc::new(Mutex::new(None)) })
     }
 }
 
@@ -105,7 +112,7 @@ impl Provider for ZImageProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        manifest().actions.iter().any(|a| a.name == name).then(|| Arc::new(ZAction { name: name.to_string() }) as Arc<dyn Action>)
+        manifest().actions.iter().any(|a| a.name == name).then(|| Arc::new(ZAction { name: name.to_string(), hot: self.hot.clone() }) as Arc<dyn Action>)
     }
 }
 
@@ -118,6 +125,7 @@ impl Provider for ZImageProvider {
 /// pending rather than fabricating an image.
 struct ZAction {
     name: String,
+    hot: Arc<Mutex<Option<(HotKey, crate::pipeline::HotPipeline)>>>,
 }
 
 impl Action for ZAction {
@@ -130,8 +138,26 @@ impl Action for ZAction {
         let mut on = |step, total, message: &str| progress(Progress { step, total, message: message.to_string() });
         match self.name.as_str() {
             "text2image" => {
-                let opts = opts_from(inv, inv.get_i64("width").unwrap_or(1024) as u32, inv.get_i64("height").unwrap_or(1024) as u32);
-                emit(crate::pipeline::generate(&prompt, &opts, &paths, &mut on)?)
+                // Hot path: build the resident pipeline once per (size, precision),
+                // reuse across calls so a long-lived server generates fast.
+                let width = inv.get_i64("width").unwrap_or(1024) as u32;
+                let height = inv.get_i64("height").unwrap_or(1024) as u32;
+                let hifi = inv.get_str("precision").as_deref() == Some("fp32");
+                let seed = inv.get_i64("seed").unwrap_or(42).max(0) as u64;
+                let steps = inv.get_i64("steps").unwrap_or(8).max(1) as u32;
+                let key: HotKey = (width, height, hifi);
+
+                let mut guard = self.hot.lock().map_err(|_| "hot pipeline lock poisoned")?;
+                let rebuild = !matches!(&*guard, Some((k, _)) if *k == key);
+                if rebuild {
+                    *guard = None; // free the old resident weights before building new
+                    on(0, 1, "loading weights (first call for this size)");
+                    // A fixed caption length so any prompt reuses the built graphs.
+                    let pipe = crate::pipeline::HotPipeline::build(&paths, width, height, 64, hifi, |m| on(0, 1, m))?;
+                    *guard = Some((key, pipe));
+                }
+                let pipe = &guard.as_ref().unwrap().1;
+                emit(pipe.generate(&prompt, seed, steps, &mut on))
             }
             "image2image" => {
                 let (image, w, h) = blob_image(inv, "image")?;

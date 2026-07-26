@@ -54,6 +54,9 @@ _TERMINAL_EVENTS = frozenset({
     "forecast_result",
     "backtest_result",
     "capabilities_result",
+    # Generic capability interface (Z-Image &c.): one result per request.
+    "action_result",
+    "manifest_result",
     # A cancelled streaming turn ends with a bare ``cancelled`` ack (no ``done``
     # chunk), so it completes the request just like a one-shot result.
     "cancelled",
@@ -354,6 +357,71 @@ class BrainClient:
             label = labels[cls_i] if 0 <= cls_i < len(labels) else str(cls_i)
             out.append(Detection(x1, y1, x2, y2, float(c), cls_i, label))
         return out
+
+    # -- generic capability API (image generation &c.) -----------------------
+
+    def manifests(self, timeout: float = 30.0) -> dict:
+        """Discover every generic capability provider (Z-Image &c.): returns
+        ``{model_name: manifest_dict}`` via a ``manifest_request``."""
+        rid = self._next_id()
+        self._send({"req_id": rid, "event": "manifest_request"})
+        p = self._wait_for(rid, timeout)
+        evt = next((e for e in p.events if e.get("event") == "manifest_result"), None)
+        mans = (evt or {}).get("manifests", []) or []
+        return {m.get("model", m.get("name", str(i))): m for i, m in enumerate(mans)}
+
+    def action(self, model: str, action: str, params: Optional[dict] = None,
+               blobs: Optional[list] = None, timeout: float = 1800.0,
+               req_id: Optional[str] = None) -> dict:
+        """Run a generic ``action_request`` and return the ``action_result``
+        (``{"outputs": {...}, "blobs": [...]}``). Raises on an ``error`` event."""
+        rid = req_id or self._next_id()
+        self._send({
+            "req_id": rid,
+            "event": "action_request",
+            "model": model,
+            "action": action,
+            "params": params or {},
+            "blobs": blobs or [],
+        })
+        p = self._wait_for(rid, timeout)
+        if p.error:
+            raise RuntimeError(f"{model}.{action} failed: {p.error}")
+        res = next((e for e in p.events if e.get("event") == "action_result"), None)
+        if res is None:
+            raise RuntimeError(f"{model}.{action}: no action_result (events: {[e.get('event') for e in p.events]})")
+        return res
+
+    def text2image(self, prompt: str, width: int = 512, height: int = 512,
+                   steps: int = 8, seed: int = 42, precision: str = "int8",
+                   model: str = "z-image", timeout: float = 1800.0):
+        """Generate an image from ``prompt`` and return a PIL ``Image``.
+
+        Over a persistent connection (``BrainClient()`` stays alive), the server
+        loads the ~20 GB of weights on the FIRST call for a given size/precision
+        and reuses them — subsequent calls are fast. The image blob is raw HWC
+        float32 in ``[0,1]``; we decode it to RGB8.
+        """
+        if Image is None:
+            raise RuntimeError("Pillow is required for text2image()")
+        res = self.action(model, "text2image", {
+            "prompt": prompt, "width": width, "height": height,
+            "steps": steps, "seed": seed, "precision": precision,
+        }, timeout=timeout)
+        blob = next((b for b in res.get("blobs", []) if b.get("name") == "image"), None)
+        if blob is None:
+            raise RuntimeError("action_result carried no 'image' blob")
+        meta = blob.get("meta") or {}
+        w = int(meta.get("w", width))
+        h = int(meta.get("h", height))
+        c = int(meta.get("c", 3))
+        raw = base64.b64decode(blob["b64"])
+        import array
+        f = array.array("f")
+        f.frombytes(raw)
+        # HWC float32 [0,1] -> RGB8. (array is little-endian on our platforms.)
+        px = bytes(max(0, min(255, int(v * 255.0 + 0.5))) for v in f)
+        return Image.frombytes("RGB", (w, h), px) if c == 3 else Image.frombytes("L", (w, h), px[::c])
 
     def chat(self, text: str, timeout: float = 120.0,
              req_id: Optional[str] = None) -> str:

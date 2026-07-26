@@ -230,7 +230,7 @@ pub(crate) struct Scratch {
 
 impl Scratch {
     pub fn new(gpu: &Gpu, d: BlockDims, t: u32) -> Scratch {
-        Scratch::new_maybe_flash(gpu, d, t, use_flash(d.n_heads, t))
+        Scratch::new_maybe_flash(gpu, d, t, use_flash(gpu, d.n_heads, t))
     }
 
     /// Allocate block scratch. Under `flash`, the materialised `scores`/`probs`
@@ -253,22 +253,27 @@ impl Scratch {
 }
 
 /// Whether to use flash attention (fused, O(t·hd) memory) instead of the
-/// materialised scores→softmax→apply trio, for `nh` heads and `t` tokens.
+/// materialised scores→softmax→apply trio, for `nh` heads and `t` tokens on this
+/// `gpu`.
 ///
 /// The materialised path uses a tuned register-tiled GEMM, so where it FITS it is
-/// faster than the hand-written fused flash loops on Pascal (no tensor cores).
-/// So flash is a MEMORY escape hatch, not a blanket speedup: auto-enable only once
-/// the `[nh·t·t]` scores buffer would approach the 2 GiB per-binding limit that
-/// OOMs it (~1800 MiB ≈ t≈4000, ~1024²). Below that, materialised stays (faster);
-/// above it, flash is the only thing that runs at all. `BRAIN_ZIMAGE_FLASH=1|0`
-/// forces it (1 to benchmark/verify flash at any size; 0 to prove the OOM).
-pub(crate) fn use_flash(nh: u32, t: u32) -> bool {
+/// at least as fast as the fused flash loops. So flash is a MEMORY escape hatch,
+/// not a blanket speedup: auto-enable only once the `[nh·t·t]` scores buffer would
+/// approach **this device's** per-binding limit (queried, not hard-coded — so it
+/// scales from a 2 GiB-binding card up to a large-binding one). Below that,
+/// materialised stays; above it, flash is the only thing that runs at all.
+/// `BRAIN_ZIMAGE_FLASH=1|0` forces it (1 to benchmark/verify flash at any size;
+/// 0 to prove the OOM).
+pub(crate) fn use_flash(gpu: &Gpu, nh: u32, t: u32) -> bool {
     match std::env::var("BRAIN_ZIMAGE_FLASH").ok().as_deref() {
         Some("1") => return true,
         Some("0") => return false,
         _ => {}
     }
-    (nh as u64) * (t as u64) * (t as u64) * 4 > 1800 * 1024 * 1024
+    // Switch before the scores buffer reaches the binding ceiling (90% margin
+    // leaves room for `probs` + allocator overhead).
+    let scores = (nh as u64) * (t as u64) * (t as u64) * 4;
+    scores > gpu.max_storage_binding_bytes() * 9 / 10
 }
 
 /// Append the self-attention (scores→softmax→apply) for one block, from the packed
@@ -325,7 +330,7 @@ pub(crate) fn build_block_steps(
     s.push(gpu.step(K_ROPE, &[&scr.qn, cos, sin, &scr.qr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_ROPE, &[&scr.kn, cos, sin, &scr.kr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_PACK, &[&scr.qr, &scr.kr, &scr.v, &scr.qkv], &[t, dim], t * 3 * dim));
-    push_attention(gpu, s, scr, nh, t, hd, dim, reg2 && use_flash(nh, t));
+    push_attention(gpu, s, scr, nh, t, hd, dim, reg2 && use_flash(gpu, nh, t));
     s.push(mm(&scr.ctx, &w.wo, &scr.attn_out, t, dim, dim));
     s.push(gpu.step(K_RMSNORM, &[&scr.attn_out, &nb.an2, &scr.n2], &[dim, t, f(EPS)], t));
     s.push(gpu.step(K_ADD2, &[x_in, &scr.n2, &scr.x1], &[t * dim], t * dim));
@@ -451,7 +456,7 @@ pub(crate) fn build_block_steps_i8(
     s.push(gpu.step(K_ROPE, &[&scr.qn, cos, sin, &scr.qr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_ROPE, &[&scr.kn, cos, sin, &scr.kr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_PACK, &[&scr.qr, &scr.kr, &scr.v, &scr.qkv], &[t, dim], t * 3 * dim));
-    push_attention(gpu, s, scr, nh, t, hd, dim, use_flash(nh, t)); // int8 path is GPU-only
+    push_attention(gpu, s, scr, nh, t, hd, dim, use_flash(gpu, nh, t)); // int8 path is GPU-only
     quant(s, &scr.ctx, &i8.xq_dim, dim);
     mm8(s, &i8.xq_dim, &w.wo, &scr.attn_out, dim, dim);
     s.push(gpu.step(K_RMSNORM, &[&scr.attn_out, &nb.an2, &scr.n2], &[dim, t, f(EPS)], t));

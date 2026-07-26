@@ -66,11 +66,140 @@ enum DitEngine {
 }
 
 impl DitEngine {
+    fn build(hifi: bool, cfg: ZImageConfig, weights: crate::block::Tensors, lh: u32, lw: u32, cap_len: u32) -> DitEngine {
+        if hifi {
+            DitEngine::Shard(ZImageDitShard::build(cfg, weights, 1, lh, lw, cap_len))
+        } else {
+            DitEngine::I8(ZImageDitI8::build(cfg, weights, 1, lh, lw, cap_len))
+        }
+    }
     fn forward(&self, latent: &[f32], cap: &[f32], t: f32) -> Vec<f32> {
         match self {
             DitEngine::I8(d) => d.forward(latent, cap, t),
             DitEngine::Shard(d) => d.forward(latent, cap, t),
         }
+    }
+}
+
+/// A **resident** text-to-image pipeline: the Qwen-4B encoder (CPU), the DiT
+/// (int8 on one P40, or fp32 sharded across both), and the VAE decoder are built
+/// ONCE for a fixed output size and caption length, then reused across many
+/// generations — no ~20 GB reload per image. Each model keeps its own device
+/// handle from build time, so [`generate`](Self::generate) just runs forwards.
+/// Captions are padded/truncated to `cap_len` so the built graphs stay valid for
+/// any prompt (padding repeats the last token, keeping features in-distribution).
+pub struct HotPipeline {
+    tok: QwenBpe,
+    enc: Qwen,
+    dit: DitEngine,
+    vae: VaeDecoder,
+    cap_len: u32,
+    lh: u32,
+    lw: u32,
+    width: u32,
+    height: u32,
+    hifi: bool,
+}
+
+impl HotPipeline {
+    pub fn cap_len(&self) -> u32 {
+        self.cap_len
+    }
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+    pub fn hifi(&self) -> bool {
+        self.hifi
+    }
+
+    /// Build the resident models for `width×height`, `cap_len` caption tokens, and
+    /// the chosen precision. This is the slow one-time step (~weights load + int8
+    /// quantise / shard build); `generate` afterwards is fast. `progress(msg)`
+    /// streams the build stages.
+    pub fn build(paths: &Paths, width: u32, height: u32, cap_len: u32, hifi: bool, mut progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
+        if width % 16 != 0 || height % 16 != 0 {
+            return Err("width/height must be multiples of 16".into());
+        }
+        let (lh, lw) = (height / 8, width / 8);
+
+        progress("loading tokenizer");
+        let tok = QwenBpe::from_file(&paths.tokenizer)?;
+
+        progress("building Qwen-4B encoder (CPU/AVX2)");
+        let qcfg = QwenConfig::qwen3_4b();
+        let qtensors = checkpoint::safetensors::read(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
+        let qinit = qwen::import::brain_init_from_hf(qtensors, &qcfg)?;
+        gpu_core::set_default_backend(gpu_core::Backend::Cpu); // encoder → CPU
+        let enc = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, qwen::Shard::whole(qcfg.n_layers as usize));
+        gpu_core::set_default_backend(gpu_core::Backend::Wgpu); // heavy compute → GPU
+        drop(qinit);
+
+        progress(if hifi { "building DiT (fp32, 2×GPU)" } else { "building DiT (int8, GPU)" });
+        let zcfg = ZImageConfig::turbo();
+        let weights = import_comfy(checkpoint::safetensors::read(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
+        let dit = DitEngine::build(hifi, zcfg, weights, lh, lw, cap_len);
+
+        progress("building VAE decoder (GPU)");
+        let vtensors = tensors_map(checkpoint::safetensors::read(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
+        let vae = VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu"));
+
+        Ok(HotPipeline { tok, enc, dit, vae, cap_len, lh, lw, width, height, hifi })
+    }
+
+    /// Tokenize `prompt`, pad/truncate to `cap_len`, and run encode → DiT sampling
+    /// → VAE decode — all on the resident models. Fast (no weight loads).
+    pub fn generate(&self, prompt: &str, seed: u64, steps: u32, mut progress: impl FnMut(u32, u32, &str)) -> Image {
+        let steps = steps.max(1);
+        let total = steps + 2;
+
+        // 1. tokenize + pad/truncate to the built cap_len.
+        progress(1, total, "encoding prompt (Qwen-4B, CPU)");
+        let templated = self.tok.apply_chat_template(&[("user", prompt)], true);
+        let mut tokens = self.tok.encode(&templated);
+        let cl = self.cap_len as usize;
+        if tokens.len() > cl {
+            tokens.truncate(cl);
+        } else if tokens.len() < cl {
+            let pad = *tokens.last().unwrap_or(&0);
+            tokens.resize(cl, pad);
+        }
+        let cap = self.enc.encode(&tokens); // [cap_len · 2560]
+
+        // 2. seeded latent + scheduler.
+        let n = (16 * self.lh * self.lw) as usize;
+        let mut lat = randn(n, seed);
+        let seq_len = ((self.lh / 2) * (self.lw / 2)) as usize;
+        let sigmas = dynamic_shift(&default_z_image_sigmas(steps as usize), calc_mu(seq_len));
+        let mut sched = FlowMatchEulerScheduler::new(FlowMatchConfig { num_train_timesteps: 1000, shift: 1.0 });
+        sched.set_timesteps(&sigmas);
+        let ts = sched.timesteps().to_vec();
+        let sig_full = sched.sigmas().to_vec();
+
+        // 3. flow-match sampling on the resident DiT.
+        for i in 0..steps as usize {
+            progress(2 + i as u32, total, if self.hifi { "sampling (fp32, 2×GPU)" } else { "sampling" });
+            let t_dit = (1000.0 - ts[i]) / 1000.0;
+            let v: Vec<f32> = self.dit.forward(&lat, &cap, t_dit).iter().map(|&x| -x).collect();
+            let dt = sig_full[i + 1] - sig_full[i];
+            for (x, &vv) in lat.iter_mut().zip(&v) {
+                *x += dt * vv;
+            }
+        }
+
+        // 4. VAE decode + postprocess.
+        progress(total, total, "decoding (VAE)");
+        let dec_in: Vec<f32> = lat.iter().map(|&x| x / VAE_SCALE + VAE_SHIFT).collect();
+        let chw = self.vae.decode(&dec_in);
+        let (h, w) = (self.height as usize, self.width as usize);
+        let mut hwc = vec![0f32; h * w * 3];
+        for c in 0..3 {
+            for y in 0..h {
+                for x in 0..w {
+                    hwc[(y * w + x) * 3 + c] = (chw[(c * h + y) * w + x] * 0.5 + 0.5).clamp(0.0, 1.0);
+                }
+            }
+        }
+        Image { hwc, w, h }
     }
 }
 

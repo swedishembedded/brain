@@ -171,6 +171,12 @@ mod native_facade {
         pub fn poll_wait(&self) {
             self.inner.poll_wait()
         }
+        /// Largest single storage-buffer binding this device allows, in bytes —
+        /// the hardware ceiling a kernel's biggest buffer must fit under. Used to
+        /// pick attention backends per-card instead of assuming a fixed limit.
+        pub fn max_storage_binding_bytes(&self) -> u64 {
+            self.inner.max_storage_binding_bytes()
+        }
         /// Start all recorded work on the device without waiting (frame
         /// pipelining: overlap host work with device compute; a later `read`
         /// synchronises). No-op on eager backends (CPU).
