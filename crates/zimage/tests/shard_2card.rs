@@ -104,3 +104,64 @@ fn two_card_pipeline_matches_single_device() {
     assert!(worst < 1e-4, "2-card grad rel_l2 {worst:.3e} too high");
     eprintln!("Z-Image trains pipeline-parallel across both P40s, grad-parity with single-device.");
 }
+
+#[test]
+fn gpipe_microbatched_matches_summed_grads() {
+    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
+        eprintln!("SKIP: set BRAIN_DEV_GPU=1 (needs 2 GPUs) for the GPipe microbatch test");
+        return;
+    }
+    let c = cfg();
+    let mut r = rng(0x9E9E);
+    let w = init(&c, &mut r);
+    let mbs: Vec<Batch> = (0..4).map(|_| batch(&c, &mut r)).collect();
+
+    // ground truth: single-device, grads summed over the microbatches.
+    let single = DeviceTrainer::new(c);
+    let mut ref_loss = 0.0;
+    let mut ref_g: Option<ModelGrads> = None;
+    for mb in &mbs {
+        let (l, g) = single.grads(&w, mb);
+        ref_loss += l;
+        ref_g = Some(match ref_g {
+            None => g,
+            Some(mut acc) => {
+                add_grads(&mut acc, &g);
+                acc
+            }
+        });
+    }
+    let ref_g = ref_g.unwrap();
+
+    // GPipe: both cards concurrent, one thread each.
+    let pipe = ShardTrainer::new(c, 2);
+    let t0 = std::time::Instant::now();
+    let (loss, g) = pipe.grads_microbatched(&w, &mbs);
+    let dt = t0.elapsed().as_secs_f64();
+
+    assert!((ref_loss - loss).abs() / ref_loss.abs().max(1e-9) < 1e-3, "loss: summed {ref_loss} vs gpipe {loss}");
+    let (f0, f1) = (flat(&ref_g), flat(&g));
+    let mut worst = 0f64;
+    for (a, b) in f0.iter().zip(&f1) {
+        worst = worst.max(rel_l2(a, b));
+    }
+    eprintln!("GPipe microbatched ({} mbs) vs summed single-device: worst grad rel_l2 = {worst:.2e}, {dt:.3}s", mbs.len());
+    assert!(worst < 1e-3, "GPipe grad rel_l2 {worst:.3e} too high");
+    eprintln!("GPipe pipeline (both P40s concurrent) is grad-parity with the summed single-device grads.");
+}
+
+fn add_grads(acc: &mut ModelGrads, g: &ModelGrads) {
+    let gv = flat(g);
+    for (a, b) in flat_mut(acc).into_iter().zip(gv.iter()) {
+        for (x, y) in a.iter_mut().zip(b.iter()) {
+            *x += *y;
+        }
+    }
+}
+fn flat_mut(g: &mut ModelGrads) -> Vec<&mut Vec<f64>> {
+    let mut v = vec![&mut g.t0_w, &mut g.t2_w, &mut g.xemb_w, &mut g.cap1_w, &mut g.fadaln_w, &mut g.flin_w];
+    for b in g.noise_ref.iter_mut().chain(g.ctx_ref.iter_mut()).chain(g.main.iter_mut()) {
+        v.extend([&mut b.wq, &mut b.w1, &mut b.adaln_w]);
+    }
+    v
+}

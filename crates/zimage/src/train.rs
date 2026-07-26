@@ -42,7 +42,7 @@ pub struct DeviceTrainer {
 fn to32(v: &[f64]) -> Vec<f32> {
     v.iter().map(|&x| x as f32).collect()
 }
-fn to64(v: &[f32]) -> Vec<f64> {
+pub(crate) fn to64(v: &[f32]) -> Vec<f64> {
     v.iter().map(|&x| x as f64).collect()
 }
 
@@ -71,11 +71,77 @@ impl Front {
     pub(crate) fn c32(&self) -> &[f32] {
         &self.c32
     }
+    pub(crate) fn cvec(&self) -> &[f64] {
+        &self.cvec
+    }
     pub(crate) fn uni_cos(&self) -> &[f32] {
         &self.uni_cos
     }
     pub(crate) fn uni_sin(&self) -> &[f32] {
         &self.uni_sin
+    }
+}
+
+/// The unified RoPE tables `([img_cos‖cap_cos], [img_sin‖cap_sin])` as f32 — what
+/// a threaded stage rebuilds from its own microbatch (they aren't in the boundary).
+pub(crate) fn uni_rope(b: &Batch) -> (Vec<f32>, Vec<f32>) {
+    let mut cos = to32(&b.img_cos);
+    cos.extend(to32(&b.cap_cos));
+    let mut sin = to32(&b.img_sin);
+    sin.extend(to32(&b.cap_sin));
+    (cos, sin)
+}
+
+/// Accumulate `src` into `dst` element-wise (grad accumulation across microbatches).
+pub(crate) fn grad_add(dst: &mut Grads, src: &Grads) {
+    let pairs: [(&mut Vec<f64>, &Vec<f64>); 15] = [
+        (&mut dst.wq, &src.wq), (&mut dst.wk, &src.wk), (&mut dst.wv, &src.wv), (&mut dst.wo, &src.wo),
+        (&mut dst.w1, &src.w1), (&mut dst.w2, &src.w2), (&mut dst.w3, &src.w3), (&mut dst.nq, &src.nq), (&mut dst.nk, &src.nk),
+        (&mut dst.an1, &src.an1), (&mut dst.an2, &src.an2), (&mut dst.fn1, &src.fn1), (&mut dst.fn2, &src.fn2),
+        (&mut dst.adaln_w, &src.adaln_w), (&mut dst.adaln_b, &src.adaln_b),
+    ];
+    for (d, s) in pairs {
+        for (a, b) in d.iter_mut().zip(s) {
+            *a += b;
+        }
+    }
+}
+
+fn vadd(dst: &mut [f64], src: &[f64]) {
+    for (a, b) in dst.iter_mut().zip(src) {
+        *a += b;
+    }
+}
+
+pub(crate) fn front_grad_add(d: &mut FrontGrads, s: &FrontGrads) {
+    vadd(&mut d.t0_w, &s.t0_w);
+    vadd(&mut d.t0_b, &s.t0_b);
+    vadd(&mut d.t2_w, &s.t2_w);
+    vadd(&mut d.t2_b, &s.t2_b);
+    vadd(&mut d.xemb_w, &s.xemb_w);
+    vadd(&mut d.xemb_b, &s.xemb_b);
+    vadd(&mut d.capn_w, &s.capn_w);
+    vadd(&mut d.cap1_w, &s.cap1_w);
+    vadd(&mut d.cap1_b, &s.cap1_b);
+    for (a, b) in d.noise_ref.iter_mut().zip(&s.noise_ref) {
+        grad_add(a, b);
+    }
+    for (a, b) in d.ctx_ref.iter_mut().zip(&s.ctx_ref) {
+        grad_add(a, b);
+    }
+}
+
+pub(crate) fn back_grad_add(d: &mut BackGrads, s: &BackGrads) {
+    vadd(&mut d.fadaln_w, &s.fadaln_w);
+    vadd(&mut d.fadaln_b, &s.fadaln_b);
+    vadd(&mut d.flin_w, &s.flin_w);
+    vadd(&mut d.flin_b, &s.flin_b);
+}
+
+/// Accumulate a slice's per-layer grads (`grad_add` element-wise).
+pub(crate) fn main_grad_add(d: &mut [Grads], s: &[Grads]) {
+    for (a, b) in d.iter_mut().zip(s) {
+        grad_add(a, b);
     }
 }
 
@@ -135,8 +201,8 @@ impl DeviceTrainer {
     pub fn grads(&self, w: &ModelWeights, b: &Batch) -> (f64, ModelGrads) {
         let (uni, front) = self.front_fwd(w, b);
         let (uni, main_in) = self.main_fwd(&w.main, uni, &front);
-        let (loss, dpred, back) = self.back_fwd(w, &uni, &front, b);
-        let (d_uni, dc, bg) = self.back_bwd(w, &back, &dpred, &front);
+        let (loss, dpred, back) = self.back_fwd(w, &uni, &front.cvec, b);
+        let (d_uni, dc, bg) = self.back_bwd(w, &back, &dpred, &front.cvec);
         let (d_uni, dc, main_g) = self.main_bwd(&w.main, &main_in, &front, &d_uni, dc);
         let fg = self.front_bwd(w, b, &front, &d_uni, dc);
         (loss, assemble(fg, bg, main_g))
@@ -162,10 +228,10 @@ impl DeviceTrainer {
         debug_assert_eq!(c_carry, front.c32, "boundary must carry c intact");
         // stage 1: main[cut, end)
         let (uni, in1) = self.main_fwd(&w.main[cut..], uni, &front);
-        let (loss, dpred, back) = self.back_fwd(w, &uni, &front, b);
+        let (loss, dpred, back) = self.back_fwd(w, &uni, &front.cvec, b);
 
         // backward: head → stage 1 → boundary → stage 0 → front
-        let (d_uni, dc, bg) = self.back_bwd(w, &back, &dpred, &front);
+        let (d_uni, dc, bg) = self.back_bwd(w, &back, &dpred, &front.cvec);
         let (d_uni, dc, mut main_g1) = self.main_bwd(&w.main[cut..], &in1, &front, &d_uni, dc);
         // ---- boundary (backward): [d_uni ‖ dc] host-staged back to stage 0 ----
         let mut bwd_boundary = d_uni;
@@ -236,13 +302,15 @@ impl DeviceTrainer {
         self.main_fwd_ctx(main, uni, &f.c32, &f.uni_cos, &f.uni_sin)
     }
 
-    /// Final layer + flow-matching loss. Returns `(loss, dpred, Back)`.
-    pub(crate) fn back_fwd(&self, w: &ModelWeights, uni32: &[f32], f: &Front, b: &Batch) -> (f64, Vec<f64>, Back) {
+    /// Final layer + flow-matching loss. `cvec` is the conditioning (f64); a
+    /// threaded head takes it from the boundary `c`, a monolithic run from `Front`.
+    /// Returns `(loss, dpred, Back)`.
+    pub(crate) fn back_fwd(&self, w: &ModelWeights, uni32: &[f32], cvec: &[f64], b: &Batch) -> (f64, Vec<f64>, Back) {
         let c = &self.cfg;
         let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
         let (n_img, ntot) = (c.n_img(), c.ntot());
         let uni = to64(uni32);
-        let silu_c: Vec<f64> = f.cvec.iter().map(|&v| silu(v)).collect();
+        let silu_c: Vec<f64> = cvec.iter().map(|&v| silu(v)).collect();
         let adaln = linb(&silu_c, 1, cdim, &w.fadaln_w, &w.fadaln_b, dim);
         let scale: Vec<f64> = adaln.iter().map(|&v| 1.0 + v).collect();
         let (normed, inv_ln) = layernorm(&uni, ntot, dim);
@@ -265,8 +333,9 @@ impl DeviceTrainer {
         (loss, dpred, Back { silu_c, normed, inv_ln, scale, uni })
     }
 
-    /// Final-layer backward. Returns `(d_uni, dc, back_grads)`.
-    pub(crate) fn back_bwd(&self, w: &ModelWeights, bk: &Back, dpred: &[f64], _f: &Front) -> (Vec<f32>, Vec<f64>, BackGrads) {
+    /// Final-layer backward. `cvec` is the conditioning (f64). Returns
+    /// `(d_uni, dc, back_grads)`.
+    pub(crate) fn back_bwd(&self, w: &ModelWeights, bk: &Back, dpred: &[f64], cvec: &[f64]) -> (Vec<f32>, Vec<f64>, BackGrads) {
         let c = &self.cfg;
         let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
         let (n_img, ntot) = (c.n_img(), c.ntot());
@@ -285,7 +354,7 @@ impl DeviceTrainer {
         let d_uni_host = layernorm_bwd(&bk.uni, ntot, dim, &bk.inv_ln, &d_normed);
         let (d_silu_c, g_fadaln_w, g_fadaln_b) = linb_bwd(&bk.silu_c, 1, cdim, &w.fadaln_w, dim, &d_scale);
         for j in 0..cdim {
-            dc[j] += d_silu_c[j] * dsilu(_f.cvec[j]);
+            dc[j] += d_silu_c[j] * dsilu(cvec[j]);
         }
         (to32(&d_uni_host), dc, BackGrads { fadaln_w: g_fadaln_w, fadaln_b: g_fadaln_b, flin_w: g_flin_w, flin_b: g_flin_b })
     }
