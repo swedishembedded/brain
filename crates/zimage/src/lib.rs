@@ -23,6 +23,7 @@ pub mod dev;
 pub mod devgrad;
 pub mod grad;
 pub mod import;
+pub mod lora;
 pub mod int8;
 pub mod model;
 pub mod pipeline;
