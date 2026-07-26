@@ -371,6 +371,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-diffusion"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "brain-eval"
 version = "0.1.0"
 dependencies = [

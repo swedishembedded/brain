@@ -1,0 +1,13 @@
+[package]
+name = "brain-diffusion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Model-agnostic diffusion core: flow-matching / rectified-flow schedule + Euler sampler, timestep sampling, velocity loss, and classifier-free guidance. The scheduler is pure host math (no device); device-touching pieces (loss/CFG) build on gpu-core."
+
+[lib]
+name = "diffusion"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json = { workspace = true }
