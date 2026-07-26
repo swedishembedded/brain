@@ -118,6 +118,26 @@ impl<'a> Builder<'a> {
         y
     }
 
+    /// diffusers `Downsample2D` (`use_conv`, `padding=0`): F.pad(x,(0,1,0,1)) then
+    /// a stride-2, k=3, pad=0 conv → `[c, h/2, w/2]`. The right/bottom zero-pad is
+    /// reproduced by forcing `ho=wo=h/2` with `pad=0`: the kernel bounds-checks its
+    /// reads, so the extra bottom/right taps read 0 — exactly the asymmetric pad.
+    fn conv_down(&mut self, prefix: &str, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
+        let (ho, wo) = (h / 2, w / 2);
+        let wgt = self.dev(&format!("{prefix}.weight"));
+        let bias = self.dev(&format!("{prefix}.bias"));
+        let y = self.act((c * ho * wo) as u64);
+        let threads = c.div_ceil(8) * (ho * wo).div_ceil(4);
+        let step = self.gpu.step(
+            K_CONV,
+            &[x, &wgt, &bias, &y],
+            &[1, c, h, w, c, 3, 2, 0, ho, wo], // stride 2, pad 0, k 3
+            threads,
+        );
+        self.steps.push(step);
+        y
+    }
+
     /// Static affine GroupNorm from `prefix.{weight,bias}` (32 groups, eps
     /// 1e-6): `y = gamma·(x-μ)/σ + beta` per group. `gb = [gamma‖beta]`.
     fn gn(&mut self, prefix: &str, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
@@ -352,5 +372,103 @@ impl VaeDecoder {
 
     pub fn config(&self) -> &VaeConfig {
         &self.cfg
+    }
+}
+
+// ===================== encoder =====================
+
+/// An `AutoencoderKL` **encoder** graph for a fixed image size, weights resident.
+/// Mirrors [`VaeDecoder`]: `image[3,H,W] → moments[2·latent, H/8, W/8]` (mean ‖
+/// logvar). This VAE has no `quant_conv`, so `conv_out` yields the moments
+/// directly. Reuses the shared [`Builder`] blocks (conv/resnet/gn/silu/attn) and
+/// the strided [`Builder::conv_down`] for the diffusers `Downsample2D`.
+pub struct VaeEncoder {
+    gpu: Gpu,
+    cfg: VaeConfig,
+    steps: Vec<Step>,
+    img_in: DeviceBuffer,
+    out: DeviceBuffer,
+    out_len: usize,
+    taps: Vec<(String, DeviceBuffer, usize)>,
+}
+
+impl VaeEncoder {
+    /// Build the encode graph for an input image `[in_channels, h, w]` (full-res,
+    /// NOT latent size) and upload all encoder weights. `device`: `Some("cpu")` |
+    /// `Some("gpu")` | `None`.
+    pub fn from_diffusers(cfg: VaeConfig, tensors: &Tensors, h: u32, w: u32, device: Option<&str>) -> VaeEncoder {
+        let gpu = match device {
+            Some("cpu") => Gpu::new_cpu(&KERNELS),
+            Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
+            _ => Gpu::new(&KERNELS),
+        };
+        let mut b = Builder { gpu: &gpu, t: tensors, eps: cfg.norm_eps, groups: cfg.norm_num_groups, steps: vec![], taps: vec![] };
+
+        let img_in = gpu.storage((cfg.in_channels * h * w) as u64);
+        let ch = &cfg.block_out_channels;
+
+        // conv_in: image → block_out[0].
+        let mut x = b.conv("encoder.conv_in", cfg.in_channels, ch[0], 3, 1, h, w, &img_in);
+        b.tap("conv_in".into(), &x, ch[0] * h * w);
+
+        // Down blocks: `layers_per_block` resnets each; downsample on all but last.
+        let n_blocks = ch.len();
+        let n_res = cfg.layers_per_block;
+        let (mut cur_h, mut cur_w) = (h, w);
+        let mut prev = ch[0];
+        for (i, &out_c) in ch.iter().enumerate() {
+            for r in 0..n_res {
+                let cin = if r == 0 { prev } else { out_c };
+                x = b.resnet(&format!("encoder.down_blocks.{i}.resnets.{r}"), cin, out_c, cur_h, cur_w, &x);
+            }
+            prev = out_c;
+            if i < n_blocks - 1 {
+                x = b.conv_down(&format!("encoder.down_blocks.{i}.downsamplers.0.conv"), out_c, cur_h, cur_w, &x);
+                cur_h /= 2;
+                cur_w /= 2;
+            }
+            b.tap(format!("down_block.{i}"), &x, out_c * cur_h * cur_w);
+        }
+
+        // Mid block: resnet, (optional) attention, resnet.
+        let mid_c = *ch.last().unwrap();
+        x = b.resnet("encoder.mid_block.resnets.0", mid_c, mid_c, cur_h, cur_w, &x);
+        if cfg.mid_block_add_attention {
+            x = b.attn("encoder.mid_block.attentions.0", mid_c, cur_h, cur_w, &x);
+        }
+        x = b.resnet("encoder.mid_block.resnets.1", mid_c, mid_c, cur_h, cur_w, &x);
+        b.tap("mid".into(), &x, mid_c * cur_h * cur_w);
+
+        // Head: GroupNorm → SiLU → conv_out → moments (2·latent channels).
+        let hn = b.gn("encoder.conv_norm_out", mid_c, cur_h, cur_w, &x);
+        let hs = b.silu(mid_c * cur_h * cur_w, &hn);
+        let moments = 2 * cfg.latent_channels;
+        let out = b.conv("encoder.conv_out", mid_c, moments, 3, 1, cur_h, cur_w, &hs);
+        let out_len = (moments * cur_h * cur_w) as usize;
+
+        let Builder { steps, taps, .. } = b;
+        VaeEncoder { gpu, cfg, steps, img_in, out, out_len, taps }
+    }
+
+    /// Encode an image `[in_channels·H·W]` (row-major NCHW, batch 1) into the
+    /// moments `[2·latent·h·w]` — the first `latent` channels are the posterior
+    /// mean, the next `latent` the log-variance. Raw: no scaling/shift applied.
+    pub fn encode(&self, image: &[f32]) -> Vec<f32> {
+        let bits: Vec<u32> = image.iter().map(|v| v.to_bits()).collect();
+        self.gpu.write(&self.img_in, &bits);
+        self.gpu.submit(&[], &self.steps);
+        self.gpu.read(&self.out, self.out_len)
+    }
+
+    /// Encode and return only the posterior **mean** `[latent·h·w]` (the deterministic
+    /// latent used for image-conditioned generation).
+    pub fn encode_mean(&self, image: &[f32], lh: u32, lw: u32) -> Vec<f32> {
+        let m = self.encode(image);
+        let plane = (lh * lw) as usize;
+        m[..self.cfg.latent_channels as usize * plane].to_vec()
+    }
+
+    pub fn read_tap(&self, name: &str) -> Option<Vec<f32>> {
+        self.taps.iter().find(|(n, _, _)| n == name).map(|(_, buf, len)| self.gpu.read(buf, *len))
     }
 }
