@@ -19,6 +19,7 @@
 
 pub mod block;
 pub mod dev;
+pub mod devgrad;
 pub mod grad;
 pub mod import;
 pub mod int8;

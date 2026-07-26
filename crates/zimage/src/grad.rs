@@ -219,9 +219,7 @@ pub struct Cache {
     q: Vec<f64>,
     k: Vec<f64>,
     v: Vec<f64>,
-    qn: Vec<f64>,
     inv_qn: Vec<f64>,
-    kn: Vec<f64>,
     inv_kn: Vec<f64>,
     qr: Vec<f64>,
     kr: Vec<f64>,
@@ -319,7 +317,7 @@ pub fn forward(d: Dims, w: &Weights, x: &[f64], c: &[f64], cos: &[f64], sin: &[f
     let cache = Cache {
         x: x.to_vec(), c: c.to_vec(), cos: cos.to_vec(), sin: sin.to_vec(),
         scale_msa, gate_msa, scale_mlp, gate_mlp, an1f, an2f, fn1f, fn2f,
-        n1, inv_n1, q, k, v, qn, inv_qn, kn, inv_kn, qr, kr, probs, ctx, attn_out, inv_n2, x1,
+        n1, inv_n1, q, k, v, inv_qn, inv_kn, qr, kr, probs, ctx, attn_out, inv_n2, x1,
         f1, inv_f1, g, u, hsw, ff, inv_f2,
     };
     (out, cache)

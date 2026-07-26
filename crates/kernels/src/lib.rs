@@ -413,12 +413,16 @@ pub const RESIZE_NEAREST: &str = include_str!("../wgsl/resize_nearest.wgsl");
 pub const RESIZE_NEAREST_DX: &str = include_str!("../wgsl/resize_nearest_dx.wgsl");
 /// `wgsl/rms_inv.wgsl`
 pub const RMS_INV: &str = include_str!("../wgsl/rms_inv.wgsl");
+/// `wgsl/rms_inv_eps.wgsl`
+pub const RMS_INV_EPS: &str = include_str!("../wgsl/rms_inv_eps.wgsl");
 /// `wgsl/rmsnorm.wgsl`
 pub const RMSNORM: &str = include_str!("../wgsl/rmsnorm.wgsl");
 /// `wgsl/rmsnorm_dw.wgsl`
 pub const RMSNORM_DW: &str = include_str!("../wgsl/rmsnorm_dw.wgsl");
 /// `wgsl/rmsnorm_dx.wgsl`
 pub const RMSNORM_DX: &str = include_str!("../wgsl/rmsnorm_dx.wgsl");
+/// `wgsl/rmsnorm_dx_eps.wgsl`
+pub const RMSNORM_DX_EPS: &str = include_str!("../wgsl/rmsnorm_dx_eps.wgsl");
 /// `wgsl/rmsnorm_eps.wgsl`
 pub const RMSNORM_EPS: &str = include_str!("../wgsl/rmsnorm_eps.wgsl");
 /// `wgsl/rope.wgsl`
@@ -523,6 +527,8 @@ pub const TANH_ACT: &str = include_str!("../wgsl/tanh_act.wgsl");
 pub const TANH_ACT_BWD: &str = include_str!("../wgsl/tanh_act_bwd.wgsl");
 /// `wgsl/topk_mask.wgsl`
 pub const TOPK_MASK: &str = include_str!("../wgsl/topk_mask.wgsl");
+/// `wgsl/unpack_qkv.wgsl`
+pub const UNPACK_QKV: &str = include_str!("../wgsl/unpack_qkv.wgsl");
 /// `wgsl/upsample2.wgsl`
 pub const UPSAMPLE2: &str = include_str!("../wgsl/upsample2.wgsl");
 /// `wgsl/upsample2_dx.wgsl`
@@ -738,9 +744,11 @@ pub const ALL: &[(&str, &str)] = &[
     ("resize_nearest", RESIZE_NEAREST),
     ("resize_nearest_dx", RESIZE_NEAREST_DX),
     ("rms_inv", RMS_INV),
+    ("rms_inv_eps", RMS_INV_EPS),
     ("rmsnorm", RMSNORM),
     ("rmsnorm_dw", RMSNORM_DW),
     ("rmsnorm_dx", RMSNORM_DX),
+    ("rmsnorm_dx_eps", RMSNORM_DX_EPS),
     ("rmsnorm_eps", RMSNORM_EPS),
     ("rope", ROPE),
     ("rope2d", ROPE2D),
@@ -793,6 +801,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("tanh_act", TANH_ACT),
     ("tanh_act_bwd", TANH_ACT_BWD),
     ("topk_mask", TOPK_MASK),
+    ("unpack_qkv", UNPACK_QKV),
     ("upsample2", UPSAMPLE2),
     ("upsample2_dx", UPSAMPLE2_DX),
     ("vq_argmax_dot", VQ_ARGMAX_DOT),
