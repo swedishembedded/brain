@@ -46,6 +46,59 @@ fn to64(v: &[f32]) -> Vec<f64> {
     v.iter().map(|&x| x as f64).collect()
 }
 
+/// Saved state of the wrapper front (timestep MLP, embedders, refiners) that the
+/// front backward needs. Produced by [`DeviceTrainer::front_fwd`].
+struct Front {
+    cvec: Vec<f64>,
+    c32: Vec<f32>,
+    te: Vec<f64>,
+    h0pre: Vec<f64>,
+    h0: Vec<f64>,
+    patches: Vec<f64>,
+    capn: Vec<f64>,
+    inv_capn: Vec<f64>,
+    noise_in: Vec<Vec<f32>>,
+    ctx_in: Vec<Vec<f32>>,
+    ic: Vec<f32>,
+    is: Vec<f32>,
+    cc: Vec<f32>,
+    cs: Vec<f32>,
+    uni_cos: Vec<f32>,
+    uni_sin: Vec<f32>,
+}
+
+/// Saved state of the final layer, for its backward.
+struct Back {
+    silu_c: Vec<f64>,
+    normed: Vec<f64>,
+    inv_ln: Vec<f64>,
+    scale: Vec<f64>,
+    uni: Vec<f64>,
+}
+
+/// Front backward's grads (everything before the main layers).
+struct FrontGrads {
+    t0_w: Vec<f64>,
+    t0_b: Vec<f64>,
+    t2_w: Vec<f64>,
+    t2_b: Vec<f64>,
+    xemb_w: Vec<f64>,
+    xemb_b: Vec<f64>,
+    capn_w: Vec<f64>,
+    cap1_w: Vec<f64>,
+    cap1_b: Vec<f64>,
+    noise_ref: Vec<Grads>,
+    ctx_ref: Vec<Grads>,
+}
+
+/// Final-layer backward's grads.
+struct BackGrads {
+    fadaln_w: Vec<f64>,
+    fadaln_b: Vec<f64>,
+    flin_w: Vec<f64>,
+    flin_b: Vec<f64>,
+}
+
 impl DeviceTrainer {
     pub fn new(cfg: Cfg) -> DeviceTrainer {
         let eng = BlockDev::new(cfg.ntot(), cfg.dim, cfg.nh);
@@ -56,29 +109,73 @@ impl DeviceTrainer {
         Dims::new(t, self.cfg.dim, self.cfg.nh)
     }
 
-    /// Full forward+backward for one batch. Returns `(loss, grads)`.
+    /// Full forward+backward for one batch (single device). Returns `(loss, grads)`.
     pub fn grads(&self, w: &ModelWeights, b: &Batch) -> (f64, ModelGrads) {
+        let (uni, front) = self.front_fwd(w, b);
+        let (uni, main_in) = self.main_fwd(&w.main, uni, &front);
+        let (loss, dpred, back) = self.back_fwd(w, &uni, &front, b);
+        let (d_uni, dc, bg) = self.back_bwd(w, &back, &dpred, &front);
+        let (d_uni, dc, main_g) = self.main_bwd(&w.main, &main_in, &front, &d_uni, dc);
+        let fg = self.front_bwd(w, b, &front, &d_uni, dc);
+        (loss, assemble(fg, bg, main_g))
+    }
+
+    /// Same result as [`Self::grads`], but the main-layer stack is **cut** at
+    /// `cut` and the residual crosses the split through a flat `[uni ‖ c]`
+    /// boundary (forward) / `[d_uni ‖ dc]` (backward) — exactly what a pipeline
+    /// stage boundary carries. Proves the boundary slab is complete and that the
+    /// two halves are independent (each could stream its slice on its own card,
+    /// weights in RAM — the memory-safe path for the full 6B). Bit-identical to
+    /// `grads` (same ops/order; only a host round-trip is inserted at the cut).
+    pub fn grads_pipelined(&self, w: &ModelWeights, b: &Batch, cut: usize) -> (f64, ModelGrads) {
+        let cdim = self.cfg.cdim();
+        let (uni, front) = self.front_fwd(w, b);
+        // stage 0: main[0, cut)
+        let (uni, in0) = self.main_fwd(&w.main[..cut], uni, &front);
+        // ---- boundary (forward): [uni ‖ c] host-staged to stage 1 ----
+        let mut fwd_boundary = uni;
+        fwd_boundary.extend_from_slice(&front.c32);
+        let (uni, c_carry) = fwd_boundary.split_at(fwd_boundary.len() - cdim);
+        let (uni, c_carry) = (uni.to_vec(), c_carry.to_vec());
+        debug_assert_eq!(c_carry, front.c32, "boundary must carry c intact");
+        // stage 1: main[cut, end)
+        let (uni, in1) = self.main_fwd(&w.main[cut..], uni, &front);
+        let (loss, dpred, back) = self.back_fwd(w, &uni, &front, b);
+
+        // backward: head → stage 1 → boundary → stage 0 → front
+        let (d_uni, dc, bg) = self.back_bwd(w, &back, &dpred, &front);
+        let (d_uni, dc, mut main_g1) = self.main_bwd(&w.main[cut..], &in1, &front, &d_uni, dc);
+        // ---- boundary (backward): [d_uni ‖ dc] host-staged back to stage 0 ----
+        let mut bwd_boundary = d_uni;
+        bwd_boundary.extend(dc.iter().map(|&x| x as f32));
+        let (d_uni, dc_bytes) = bwd_boundary.split_at(bwd_boundary.len() - cdim);
+        let (d_uni, dc) = (d_uni.to_vec(), dc_bytes.iter().map(|&x| x as f64).collect::<Vec<f64>>());
+        let (d_uni, dc, mut main_g0) = self.main_bwd(&w.main[..cut], &in0, &front, &d_uni, dc);
+        let fg = self.front_bwd(w, b, &front, &d_uni, dc);
+
+        main_g0.append(&mut main_g1);
+        (loss, assemble(fg, bg, main_g0))
+    }
+
+    // ---- phases (each stage of a pipeline runs a subset) ----
+
+    /// Wrapper front: timestep→c, embed image/caption, refiners, unify. Returns
+    /// the unified residual `[ntot·dim]` and the saved state for its backward.
+    fn front_fwd(&self, w: &ModelWeights, b: &Batch) -> (Vec<f32>, Front) {
         let c = &self.cfg;
         let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
-        let (n_img, ncap, ntot) = (c.n_img(), c.ncap, c.ntot());
-
-        // ---- host: timestep conditioning ----
+        let (n_img, ncap) = (c.n_img(), c.ncap);
         let te = timestep_embedding(b.t * c.t_scale);
         let h0pre = linb(&te, 1, TDIM, &w.t0_w, &w.t0_b, TH);
         let h0: Vec<f64> = h0pre.iter().map(|&v| silu(v)).collect();
         let cvec = linb(&h0, 1, TH, &w.t2_w, &w.t2_b, cdim);
         let c32 = to32(&cvec);
-
-        // ---- host: embedders ----
         let patches = patchify(&b.latent, c);
         let img = linb(&patches, n_img, pd, &w.xemb_w, &w.xemb_b, dim);
         let (capn, inv_capn) = rmsnorm(&b.cap, ncap, c.cap_feat_dim, &w.capn_w);
         let capt = linb(&capn, ncap, c.cap_feat_dim, &w.cap1_w, &w.cap1_b, dim);
-
         let (ic, is) = (to32(&b.img_cos), to32(&b.img_sin));
         let (cc, cs) = (to32(&b.cap_cos), to32(&b.cap_sin));
-
-        // ---- device: block stack forward (save each block's input) ----
         let mut img32 = to32(&img);
         let mut noise_in = Vec::new();
         for bw in &w.noise_ref {
@@ -91,21 +188,34 @@ impl DeviceTrainer {
             ctx_in.push(capt32.clone());
             capt32 = self.eng.forward(bw, self.dims(ncap), &capt32, &c32, &cc, &cs, false);
         }
-        let mut uni32 = img32.clone();
+        let mut uni32 = img32;
         uni32.extend_from_slice(&capt32);
         let mut uni_cos = ic.clone();
         uni_cos.extend_from_slice(&cc);
         let mut uni_sin = is.clone();
         uni_sin.extend_from_slice(&cs);
-        let mut main_in = Vec::new();
-        for bw in &w.main {
-            main_in.push(uni32.clone());
-            uni32 = self.eng.forward(bw, self.dims(ntot), &uni32, &c32, &uni_cos, &uni_sin, true);
-        }
+        (uni32, Front { cvec, c32, te, h0pre, h0, patches, capn, inv_capn, noise_in, ctx_in, ic, is, cc, cs, uni_cos, uni_sin })
+    }
 
-        // ---- host: final layer + loss ----
-        let uni = to64(&uni32);
-        let silu_c: Vec<f64> = cvec.iter().map(|&v| silu(v)).collect();
+    /// Run a contiguous slice of main layers on the unified residual, saving each
+    /// block's input for the backward. Returns `(uni_out, inputs)`.
+    fn main_fwd(&self, main: &[Weights], mut uni: Vec<f32>, f: &Front) -> (Vec<f32>, Vec<Vec<f32>>) {
+        let ntot = self.cfg.ntot();
+        let mut inputs = Vec::with_capacity(main.len());
+        for bw in main {
+            inputs.push(uni.clone());
+            uni = self.eng.forward(bw, self.dims(ntot), &uni, &f.c32, &f.uni_cos, &f.uni_sin, true);
+        }
+        (uni, inputs)
+    }
+
+    /// Final layer + flow-matching loss. Returns `(loss, dpred, Back)`.
+    fn back_fwd(&self, w: &ModelWeights, uni32: &[f32], f: &Front, b: &Batch) -> (f64, Vec<f64>, Back) {
+        let c = &self.cfg;
+        let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
+        let (n_img, ntot) = (c.n_img(), c.ntot());
+        let uni = to64(uni32);
+        let silu_c: Vec<f64> = f.cvec.iter().map(|&v| silu(v)).collect();
         let adaln = linb(&silu_c, 1, cdim, &w.fadaln_w, &w.fadaln_b, dim);
         let scale: Vec<f64> = adaln.iter().map(|&v| 1.0 + v).collect();
         let (normed, inv_ln) = layernorm(&uni, ntot, dim);
@@ -125,51 +235,70 @@ impl DeviceTrainer {
             loss += e * e / n;
             dpred[i] = 2.0 * e / n;
         }
+        (loss, dpred, Back { silu_c, normed, inv_ln, scale, uni })
+    }
 
-        // ---- host: final layer backward ----
+    /// Final-layer backward. Returns `(d_uni, dc, back_grads)`.
+    fn back_bwd(&self, w: &ModelWeights, bk: &Back, dpred: &[f64], _f: &Front) -> (Vec<f32>, Vec<f64>, BackGrads) {
+        let c = &self.cfg;
+        let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
+        let (n_img, ntot) = (c.n_img(), c.ntot());
         let mut dc = vec![0f64; cdim];
         let mut d_final_out = vec![0f64; ntot * pd];
-        d_final_out[..n_img * pd].copy_from_slice(&dpred);
-        let (d_scaled, g_flin_w, g_flin_b) = linb_bwd(&scaled, ntot, dim, &w.flin_w, pd, &d_final_out);
+        d_final_out[..n_img * pd].copy_from_slice(dpred);
+        let (d_scaled, g_flin_w, g_flin_b) = linb_bwd(&scaledfrom(&bk.normed, &bk.scale, ntot, dim), ntot, dim, &w.flin_w, pd, &d_final_out);
         let mut d_normed = vec![0f64; ntot * dim];
         let mut d_scale = vec![0f64; dim];
         for r in 0..ntot {
             for cc2 in 0..dim {
-                d_normed[r * dim + cc2] = d_scaled[r * dim + cc2] * scale[cc2];
-                d_scale[cc2] += d_scaled[r * dim + cc2] * normed[r * dim + cc2];
+                d_normed[r * dim + cc2] = d_scaled[r * dim + cc2] * bk.scale[cc2];
+                d_scale[cc2] += d_scaled[r * dim + cc2] * bk.normed[r * dim + cc2];
             }
         }
-        let d_uni_host = layernorm_bwd(&uni, ntot, dim, &inv_ln, &d_normed);
-        let (d_silu_c, g_fadaln_w, g_fadaln_b) = linb_bwd(&silu_c, 1, cdim, &w.fadaln_w, dim, &d_scale);
+        let d_uni_host = layernorm_bwd(&bk.uni, ntot, dim, &bk.inv_ln, &d_normed);
+        let (d_silu_c, g_fadaln_w, g_fadaln_b) = linb_bwd(&bk.silu_c, 1, cdim, &w.fadaln_w, dim, &d_scale);
         for j in 0..cdim {
-            dc[j] += d_silu_c[j] * dsilu(cvec[j]);
+            dc[j] += d_silu_c[j] * dsilu(_f.cvec[j]);
         }
+        (to32(&d_uni_host), dc, BackGrads { fadaln_w: g_fadaln_w, fadaln_b: g_fadaln_b, flin_w: g_flin_w, flin_b: g_flin_b })
+    }
 
-        // ---- device: block stack backward (reverse) ----
-        let mut d_uni32 = to32(&d_uni_host);
-        let mut main_g: Vec<Grads> = Vec::new();
-        for (bw, inp) in w.main.iter().zip(&main_in).rev() {
-            let g = self.eng.backward(bw, self.dims(ntot), inp, &c32, &uni_cos, &uni_sin, true, &d_uni32);
-            d_uni32 = to32(&g.dx);
+    /// Backward through a slice of main layers (reverse), accumulating `dc`.
+    /// Returns `(d_uni_out, dc_out, grads_in_forward_order)`.
+    fn main_bwd(&self, main: &[Weights], inputs: &[Vec<f32>], f: &Front, d_uni: &[f32], mut dc: Vec<f64>) -> (Vec<f32>, Vec<f64>, Vec<Grads>) {
+        let (cdim, ntot) = (self.cfg.cdim(), self.cfg.ntot());
+        let mut d = d_uni.to_vec();
+        let mut g: Vec<Grads> = Vec::with_capacity(main.len());
+        for (bw, inp) in main.iter().zip(inputs).rev() {
+            let gg = self.eng.backward(bw, self.dims(ntot), inp, &f.c32, &f.uni_cos, &f.uni_sin, true, &d);
+            d = to32(&gg.dx);
             for j in 0..cdim {
-                dc[j] += g.dc[j];
+                dc[j] += gg.dc[j];
             }
-            main_g.push(g);
+            g.push(gg);
         }
-        main_g.reverse();
-        let mut d_img32 = d_uni32[..n_img * dim].to_vec();
-        let mut d_capt32 = d_uni32[n_img * dim..].to_vec();
+        g.reverse();
+        (d, dc, g)
+    }
 
+    /// Wrapper-front backward: split the residual, refiners, embedders, timestep
+    /// MLP (consuming the accumulated `dc`). Returns `(front_grads, noise_g, ctx_g)`.
+    fn front_bwd(&self, w: &ModelWeights, b: &Batch, f: &Front, d_uni: &[f32], mut dc: Vec<f64>) -> FrontGrads {
+        let c = &self.cfg;
+        let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
+        let (n_img, ncap) = (c.n_img(), c.ncap);
+        let mut d_img32 = d_uni[..n_img * dim].to_vec();
+        let mut d_capt32 = d_uni[n_img * dim..].to_vec();
         let mut ctx_g: Vec<Grads> = Vec::new();
-        for (bw, inp) in w.ctx_ref.iter().zip(&ctx_in).rev() {
-            let g = self.eng.backward(bw, self.dims(ncap), inp, &c32, &cc, &cs, false, &d_capt32);
+        for (bw, inp) in w.ctx_ref.iter().zip(&f.ctx_in).rev() {
+            let g = self.eng.backward(bw, self.dims(ncap), inp, &f.c32, &f.cc, &f.cs, false, &d_capt32);
             d_capt32 = to32(&g.dx);
             ctx_g.push(g);
         }
         ctx_g.reverse();
         let mut noise_g: Vec<Grads> = Vec::new();
-        for (bw, inp) in w.noise_ref.iter().zip(&noise_in).rev() {
-            let g = self.eng.backward(bw, self.dims(n_img), inp, &c32, &ic, &is, true, &d_img32);
+        for (bw, inp) in w.noise_ref.iter().zip(&f.noise_in).rev() {
+            let g = self.eng.backward(bw, self.dims(n_img), inp, &f.c32, &f.ic, &f.is, true, &d_img32);
             d_img32 = to32(&g.dx);
             for j in 0..cdim {
                 dc[j] += g.dc[j];
@@ -177,27 +306,41 @@ impl DeviceTrainer {
             noise_g.push(g);
         }
         noise_g.reverse();
-
-        // ---- host: embedders backward ----
-        let (_dp, g_xemb_w, g_xemb_b) = linb_bwd(&patches, n_img, pd, &w.xemb_w, dim, &to64(&d_img32));
-        let (d_capn, g_cap1_w, g_cap1_b) = linb_bwd(&capn, ncap, c.cap_feat_dim, &w.cap1_w, dim, &to64(&d_capt32));
-        let g_capn_w = rmsnorm_dw(&b.cap, ncap, c.cap_feat_dim, &inv_capn, &d_capn);
-
-        // ---- host: timestep MLP backward ----
-        let (d_h0, g_t2_w, g_t2_b) = linb_bwd(&h0, 1, TH, &w.t2_w, cdim, &dc);
+        let (_dp, g_xemb_w, g_xemb_b) = linb_bwd(&f.patches, n_img, pd, &w.xemb_w, dim, &to64(&d_img32));
+        let (d_capn, g_cap1_w, g_cap1_b) = linb_bwd(&f.capn, ncap, c.cap_feat_dim, &w.cap1_w, dim, &to64(&d_capt32));
+        let g_capn_w = rmsnorm_dw(&b.cap, ncap, c.cap_feat_dim, &f.inv_capn, &d_capn);
+        let (d_h0, g_t2_w, g_t2_b) = linb_bwd(&f.h0, 1, TH, &w.t2_w, cdim, &dc);
         let mut d_h0pre = vec![0f64; TH];
         for i in 0..TH {
-            d_h0pre[i] = d_h0[i] * dsilu(h0pre[i]);
+            d_h0pre[i] = d_h0[i] * dsilu(f.h0pre[i]);
         }
-        let (_dte, g_t0_w, g_t0_b) = linb_bwd(&te, 1, TDIM, &w.t0_w, TH, &d_h0pre);
-
-        let grads = ModelGrads {
+        let (_dte, g_t0_w, g_t0_b) = linb_bwd(&f.te, 1, TDIM, &w.t0_w, TH, &d_h0pre);
+        FrontGrads {
             t0_w: g_t0_w, t0_b: g_t0_b, t2_w: g_t2_w, t2_b: g_t2_b,
             xemb_w: g_xemb_w, xemb_b: g_xemb_b, capn_w: g_capn_w, cap1_w: g_cap1_w, cap1_b: g_cap1_b,
-            noise_ref: noise_g, ctx_ref: ctx_g, main: main_g,
-            fadaln_w: g_fadaln_w, fadaln_b: g_fadaln_b, flin_w: g_flin_w, flin_b: g_flin_b,
-        };
-        (loss, grads)
+            noise_ref: noise_g, ctx_ref: ctx_g,
+        }
+    }
+}
+
+/// Recompute `scaled = normed ⊙ scale` (the final-layer input) for its backward.
+fn scaledfrom(normed: &[f64], scale: &[f64], ntot: usize, dim: usize) -> Vec<f64> {
+    let mut s = vec![0f64; ntot * dim];
+    for r in 0..ntot {
+        for cc in 0..dim {
+            s[r * dim + cc] = normed[r * dim + cc] * scale[cc];
+        }
+    }
+    s
+}
+
+/// Reassemble a [`ModelGrads`] from the phase grads.
+fn assemble(fg: FrontGrads, bg: BackGrads, main_g: Vec<Grads>) -> ModelGrads {
+    ModelGrads {
+        t0_w: fg.t0_w, t0_b: fg.t0_b, t2_w: fg.t2_w, t2_b: fg.t2_b,
+        xemb_w: fg.xemb_w, xemb_b: fg.xemb_b, capn_w: fg.capn_w, cap1_w: fg.cap1_w, cap1_b: fg.cap1_b,
+        noise_ref: fg.noise_ref, ctx_ref: fg.ctx_ref, main: main_g,
+        fadaln_w: bg.fadaln_w, fadaln_b: bg.fadaln_b, flin_w: bg.flin_w, flin_b: bg.flin_b,
     }
 }
 
