@@ -200,6 +200,7 @@ fn rope_bwd(dy: &[f64], t: usize, nh: usize, hd: usize, cos: &[f64], sin: &[f64]
 
 /// Everything the backward needs from the forward pass.
 pub struct Cache {
+    modulation: bool,
     x: Vec<f64>,
     c: Vec<f64>,
     cos: Vec<f64>,
@@ -238,11 +239,18 @@ pub struct Cache {
     inv_f2: Vec<f64>,
 }
 
-/// One block forward. Returns `(out[t·dim], cache)`.
+/// One block forward (modulated — the default). Returns `(out[t·dim], cache)`.
 pub fn forward(d: Dims, w: &Weights, x: &[f64], c: &[f64], cos: &[f64], sin: &[f64]) -> (Vec<f64>, Cache) {
+    forward_m(d, w, x, c, cos, sin, true)
+}
+
+/// One block forward with an explicit `modulation` flag. When `false` (Z-Image's
+/// `context_refiner`), adaLN is skipped: the four norm weights pass through raw
+/// and `c` is unused, so the backward produces no `dc`/adaLN grads.
+pub fn forward_m(d: Dims, w: &Weights, x: &[f64], c: &[f64], cos: &[f64], sin: &[f64], modulation: bool) -> (Vec<f64>, Cache) {
     let (t, dim, nh, hd) = (d.t, d.dim, d.nh, d.hd);
-    // adaLN modulation: mod = adaln_w @ c + adaln_b, split 4×dim.
-    let m = {
+    // adaLN modulation: mod = adaln_w @ c + adaln_b, split 4×dim (zero when off).
+    let m = if modulation {
         let mut m = w.adaln_b.clone();
         for i in 0..4 * dim {
             let mut a = m[i];
@@ -252,15 +260,24 @@ pub fn forward(d: Dims, w: &Weights, x: &[f64], c: &[f64], cos: &[f64], sin: &[f
             m[i] = a;
         }
         m
+    } else {
+        vec![0.0; 4 * dim]
     };
     let scale_msa = m[0..dim].to_vec();
     let gate_msa = m[dim..2 * dim].to_vec();
     let scale_mlp = m[2 * dim..3 * dim].to_vec();
     let gate_mlp = m[3 * dim..4 * dim].to_vec();
-    let an1f: Vec<f64> = w.an1.iter().zip(&scale_msa).map(|(&r, &s)| r * (1.0 + s)).collect();
-    let an2f: Vec<f64> = w.an2.iter().zip(&gate_msa).map(|(&r, &g)| r * g.tanh()).collect();
-    let fn1f: Vec<f64> = w.fn1.iter().zip(&scale_mlp).map(|(&r, &s)| r * (1.0 + s)).collect();
-    let fn2f: Vec<f64> = w.fn2.iter().zip(&gate_mlp).map(|(&r, &g)| r * g.tanh()).collect();
+    // Modulated: an=raw·(1+scale) / raw·tanh(gate). Unmodulated: an=raw.
+    let (an1f, an2f, fn1f, fn2f): (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) = if modulation {
+        (
+            w.an1.iter().zip(&scale_msa).map(|(&r, &s)| r * (1.0 + s)).collect(),
+            w.an2.iter().zip(&gate_msa).map(|(&r, &g)| r * g.tanh()).collect(),
+            w.fn1.iter().zip(&scale_mlp).map(|(&r, &s)| r * (1.0 + s)).collect(),
+            w.fn2.iter().zip(&gate_mlp).map(|(&r, &g)| r * g.tanh()).collect(),
+        )
+    } else {
+        (w.an1.clone(), w.an2.clone(), w.fn1.clone(), w.fn2.clone())
+    };
 
     // attention
     let (n1, inv_n1) = rmsnorm(x, t, dim, &an1f);
@@ -315,6 +332,7 @@ pub fn forward(d: Dims, w: &Weights, x: &[f64], c: &[f64], cos: &[f64], sin: &[f
     let out: Vec<f64> = x1.iter().zip(&f2).map(|(&a, &b)| a + b).collect();
 
     let cache = Cache {
+        modulation,
         x: x.to_vec(), c: c.to_vec(), cos: cos.to_vec(), sin: sin.to_vec(),
         scale_msa, gate_msa, scale_mlp, gate_mlp, an1f, an2f, fn1f, fn2f,
         n1, inv_n1, q, k, v, inv_qn, inv_kn, qr, kr, probs, ctx, attn_out, inv_n2, x1,
@@ -434,6 +452,15 @@ pub fn backward(d: Dims, w: &Weights, cache: &Cache, dout: &[f64]) -> Grads {
 
     // ---- adaLN fold backward: fold folded-weight grads → raw norm weights,
     //      scale/gate, then through the modulation linear into raw weights + dc.
+    // Unmodulated (context_refiner): folded == raw, so the raw-norm grads are the
+    // folded grads directly and there is no adaLN/dc contribution.
+    if !cache.modulation {
+        g.an1 = d_an1f;
+        g.an2 = d_an2f;
+        g.fn1 = d_fn1f;
+        g.fn2 = d_fn2f;
+        return g;
+    }
     let mut dmod = vec![0f64; 4 * dim];
     for c in 0..dim {
         // an1f = an1·(1+scale_msa)
