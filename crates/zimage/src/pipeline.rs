@@ -74,6 +74,10 @@ pub struct Init<'a> {
     /// regenerate, `0` = keep). When present, kept regions are re-anchored to the
     /// (noised) input at every step so only the masked area changes.
     pub mask: Option<&'a [f32]>,
+    /// Feather radius in **latent cells** (VAE 8× downscale). `0` = a hard mask
+    /// edge; larger blurs the mask boundary so the regenerated region blends
+    /// smoothly into the kept pixels instead of showing a seam.
+    pub feather: u32,
 }
 
 /// Deterministic standard-normal samples via xorshift64* + Box–Muller — a fixed
@@ -150,6 +154,41 @@ fn downsample_mask(mask: &[f32], w: usize, h: usize, lw: usize, lh: usize) -> Ve
                 }
             }
             out[ly * lw + lx] = s / (sx * sy) as f32;
+        }
+    }
+    out
+}
+
+/// Separable box blur of a latent-resolution mask `[lh·lw]`, `radius` cells each
+/// side, clamped at the borders — feathers a hard mask into a smooth ramp so the
+/// inpaint/outpaint boundary blends. `radius = 0` returns the mask unchanged.
+fn feather_mask(mask: &[f32], lw: usize, lh: usize, radius: usize) -> Vec<f32> {
+    if radius == 0 {
+        return mask.to_vec();
+    }
+    let win = (2 * radius + 1) as f32;
+    // horizontal
+    let mut h = vec![0f32; lw * lh];
+    for y in 0..lh {
+        for x in 0..lw {
+            let mut s = 0.0;
+            for d in 0..=2 * radius {
+                let xx = (x + d).saturating_sub(radius).min(lw - 1);
+                s += mask[y * lw + xx];
+            }
+            h[y * lw + x] = s / win;
+        }
+    }
+    // vertical
+    let mut out = vec![0f32; lw * lh];
+    for y in 0..lh {
+        for x in 0..lw {
+            let mut s = 0.0;
+            for d in 0..=2 * radius {
+                let yy = (y + d).saturating_sub(radius).min(lh - 1);
+                s += h[yy * lw + x];
+            }
+            out[y * lw + x] = s / win;
         }
     }
     out
@@ -252,7 +291,10 @@ fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, m
             let sig = sig_full[start];
             let lat_init: Vec<f32> = lat0.iter().zip(&noise).map(|(&x0, &nz)| (1.0 - sig) * x0 + sig * nz).collect();
 
-            let mask_lat = init.mask.map(|m| downsample_mask(m, w, h, lw as usize, lh as usize));
+            let mask_lat = init.mask.map(|m| {
+                let ds = downsample_mask(m, w, h, lw as usize, lh as usize);
+                feather_mask(&ds, lw as usize, lh as usize, init.feather as usize)
+            });
             (lat_init, start, mask_lat, Some(lat0))
         }
     };

@@ -48,6 +48,7 @@ pub fn manifest() -> Manifest {
         .param(prompt())
         .param(neg())
         .param(ParamSpec::new("strength", ParamType::Float, "how strongly to regenerate the masked region").default(json!(0.85)))
+        .param(ParamSpec::new("feather", ParamType::Int, "mask-edge feather radius in latent cells (0 = hard edge)").default(json!(2)))
         .input(BlobSpec::new("image", Media::Image, "the image to edit").required())
         .input(BlobSpec::new("mask", Media::Mask, "white = regenerate, black = keep").required())
         .output(image_out());
@@ -58,6 +59,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("right", ParamType::Int, "pixels to add on the right").default(json!(0)))
         .param(ParamSpec::new("top", ParamType::Int, "pixels to add on top").default(json!(0)))
         .param(ParamSpec::new("bottom", ParamType::Int, "pixels to add on the bottom").default(json!(0)))
+        .param(ParamSpec::new("feather", ParamType::Int, "seam feather radius in latent cells (0 = hard edge)").default(json!(3)))
         .input(BlobSpec::new("image", Media::Image, "the image to extend").required())
         .output(image_out());
 
@@ -133,7 +135,7 @@ impl Action for ZAction {
             "image2image" => {
                 let (image, w, h) = blob_image(inv, "image")?;
                 let opts = opts_from(inv, w, h); // output matches the input image
-                let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.55) as f32, mask: None };
+                let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.55) as f32, mask: None, feather: 0 };
                 emit(crate::pipeline::generate_img(&prompt, &opts, &paths, init, &mut on)?)
             }
             "inpaint" => {
@@ -143,7 +145,7 @@ impl Action for ZAction {
                     return Err(format!("mask is {mw}×{mh} but image is {w}×{h}; they must match"));
                 }
                 let opts = opts_from(inv, w, h);
-                let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.85) as f32, mask: Some(&mask) };
+                let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.85) as f32, mask: Some(&mask), feather: inv.get_i64("feather").unwrap_or(2).max(0) as u32 };
                 emit(crate::pipeline::generate_img(&prompt, &opts, &paths, init, &mut on)?)
             }
             "outpaint" => {
@@ -153,10 +155,22 @@ impl Action for ZAction {
                 let opts = opts_from(inv, nw as u32, nh as u32);
                 // The new border regenerates from scratch (strength 1); the mask
                 // re-anchors the original region every step so it is preserved.
-                let init = crate::pipeline::Init { image: &canvas, strength: 1.0, mask: Some(&mask) };
+                let init = crate::pipeline::Init { image: &canvas, strength: 1.0, mask: Some(&mask), feather: inv.get_i64("feather").unwrap_or(3).max(0) as u32 };
                 emit(crate::pipeline::generate_img(&prompt, &opts, &paths, init, &mut on)?)
             }
-            other => Err(format!("z-image '{other}': not yet wired (lora_train reuses the training stack)")),
+            "lora_train" => {
+                // The LoRA training core is implemented and validated
+                // (`crate::lora`, tests/lora_train.rs): frozen base + trainable
+                // low-rank A,B, gradient projection, Adam, save/load. The remaining
+                // end-to-end wiring for a real 6B personalisation — importing the
+                // shipped DiT weights into the training-format `ModelWeightsF32`,
+                // and running the flow-matching loop via the 2-GPU `grads_pipelined`
+                // path (full fp32 6B fwd+bwd exceeds one P40) — lands on the fp32
+                // sharded path. We validate rather than fabricate an adapter.
+                let rank = inv.get_i64("rank").unwrap_or(16).max(1);
+                Err(format!("z-image lora_train: adapter core ready (rank {rank}); end-to-end 6B training needs the real-weight→training-format import + the 2-GPU fp32 pipeline (in progress)"))
+            }
+            other => Err(format!("z-image '{other}': unknown action")),
         }
     }
 }
