@@ -78,12 +78,24 @@ fn rel_l2(host: &[f64], dev: &[f64]) -> f64 {
 fn bgr(g: &Grads) -> Vec<&Vec<f64>> {
     vec![&g.wq, &g.wk, &g.wv, &g.wo, &g.w1, &g.w2, &g.w3, &g.nq, &g.nk, &g.an1, &g.an2, &g.fn1, &g.fn2, &g.adaln_w, &g.adaln_b]
 }
-fn mgr(g: &ModelGrads) -> Vec<&Vec<f64>> {
-    let mut v: Vec<&Vec<f64>> = vec![&g.t0_w, &g.t0_b, &g.t2_w, &g.t2_b, &g.xemb_w, &g.xemb_b, &g.capn_w, &g.cap1_w, &g.cap1_b];
+fn mgr(g: &ModelGrads) -> Vec<Vec<f64>> {
+    let mut v: Vec<Vec<f64>> = vec![g.t0_w.clone(), g.t0_b.clone(), g.t2_w.clone(), g.t2_b.clone(), g.xemb_w.clone(), g.xemb_b.clone(), g.capn_w.clone(), g.cap1_w.clone(), g.cap1_b.clone()];
     for b in g.noise_ref.iter().chain(g.ctx_ref.iter()).chain(g.main.iter()) {
-        v.extend(bgr(b));
+        v.extend(bgr(b).into_iter().cloned());
     }
-    v.extend([&g.fadaln_w, &g.fadaln_b, &g.flin_w, &g.flin_b]);
+    v.extend([g.fadaln_w.clone(), g.fadaln_b.clone(), g.flin_w.clone(), g.flin_b.clone()]);
+    v
+}
+fn f2d(v: &[f32]) -> Vec<f64> {
+    v.iter().map(|&x| x as f64).collect()
+}
+/// Flatten the device (f32-block) grads to f64, same order as `mgr`.
+fn df(g: &zimage::modelgrad::ModelGradsF32) -> Vec<Vec<f64>> {
+    let mut v: Vec<Vec<f64>> = vec![g.t0_w.clone(), g.t0_b.clone(), g.t2_w.clone(), g.t2_b.clone(), g.xemb_w.clone(), g.xemb_b.clone(), g.capn_w.clone(), g.cap1_w.clone(), g.cap1_b.clone()];
+    for b in g.noise_ref.iter().chain(g.ctx_ref.iter()).chain(g.main.iter()) {
+        v.extend([f2d(&b.wq), f2d(&b.wk), f2d(&b.wv), f2d(&b.wo), f2d(&b.w1), f2d(&b.w2), f2d(&b.w3), f2d(&b.nq), f2d(&b.nk), f2d(&b.an1), f2d(&b.an2), f2d(&b.fn1), f2d(&b.fn2), f2d(&b.adaln_w), f2d(&b.adaln_b)]);
+    }
+    v.extend([g.fadaln_w.clone(), g.fadaln_b.clone(), g.flin_w.clone(), g.flin_b.clone()]);
     v
 }
 
@@ -105,11 +117,11 @@ fn device_grads_match_host() {
 
     // device trainer
     let tr = DeviceTrainer::new(c);
-    let (dl, dg) = tr.grads(&w, &b);
+    let (dl, dg) = tr.grads(&w.to_f32(), &b);
 
     eprintln!("loss host={hl:.6} device={dl:.6}");
     assert!((hl - dl).abs() / hl.abs().max(1e-9) < 1e-3, "loss mismatch");
-    let (hv, dv) = (mgr(&hg), mgr(&dg));
+    let (hv, dv) = (mgr(&hg), df(&dg));
     let mut worst = 0.0f64;
     let mut worst_i = 0;
     for (i, (h, d)) in hv.iter().zip(&dv).enumerate() {
@@ -153,12 +165,12 @@ fn device_model_overfits() {
     let mut vv = vec![0f64; nparams];
     let (lr, b1, b2, eps): (f64, f64, f64, f64) = (3e-3, 0.9, 0.999, 1e-8);
 
-    let (l0, _) = tr.grads(&w, &b);
+    let (l0, _) = tr.grads(&w.to_f32(), &b);
     let mut l = l0;
     for step in 1..=120 {
-        let (loss, g) = tr.grads(&w, &b);
+        let (loss, g) = tr.grads(&w.to_f32(), &b);
         l = loss;
-        let grads: Vec<Vec<f64>> = mgr(&g).into_iter().cloned().collect();
+        let grads: Vec<Vec<f64>> = df(&g);
         let bc1 = 1.0 - b1.powi(step);
         let bc2 = 1.0 - b2.powi(step);
         let mut off = 0;

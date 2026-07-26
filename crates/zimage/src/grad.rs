@@ -58,6 +58,69 @@ pub struct Weights {
     pub adaln_b: Vec<f64>, // [4*dim]
 }
 
+/// f32 storage mirror of [`Weights`] — the **runtime** block-weight type. Same
+/// fields, half the RAM. The f64 [`Weights`] stays the finite-difference gradcheck
+/// reference (test-only, tiny, where precision is necessary and costs no memory);
+/// the real 6B holds its blocks as `WeightsF32` (24 GB vs 48 GB). The GPU compute
+/// was always f32, so this is lossless.
+#[derive(Clone)]
+pub struct WeightsF32 {
+    pub wq: Vec<f32>,
+    pub wk: Vec<f32>,
+    pub wv: Vec<f32>,
+    pub wo: Vec<f32>,
+    pub w1: Vec<f32>,
+    pub w2: Vec<f32>,
+    pub w3: Vec<f32>,
+    pub nq: Vec<f32>,
+    pub nk: Vec<f32>,
+    pub an1: Vec<f32>,
+    pub an2: Vec<f32>,
+    pub fn1: Vec<f32>,
+    pub fn2: Vec<f32>,
+    pub adaln_w: Vec<f32>,
+    pub adaln_b: Vec<f32>,
+}
+
+/// f32 storage mirror of [`Grads`] (the runtime per-block gradient type).
+#[derive(Clone)]
+pub struct GradsF32 {
+    pub wq: Vec<f32>,
+    pub wk: Vec<f32>,
+    pub wv: Vec<f32>,
+    pub wo: Vec<f32>,
+    pub w1: Vec<f32>,
+    pub w2: Vec<f32>,
+    pub w3: Vec<f32>,
+    pub nq: Vec<f32>,
+    pub nk: Vec<f32>,
+    pub an1: Vec<f32>,
+    pub an2: Vec<f32>,
+    pub fn1: Vec<f32>,
+    pub fn2: Vec<f32>,
+    pub adaln_w: Vec<f32>,
+    pub adaln_b: Vec<f32>,
+    pub dx: Vec<f32>,
+    pub dc: Vec<f32>,
+}
+
+fn d2f(v: &[f64]) -> Vec<f32> {
+    v.iter().map(|&x| x as f32).collect()
+}
+
+impl Weights {
+    /// Downcast the f64 gradcheck weights to the f32 runtime type (used by tests
+    /// that build a reference in f64 and feed the device path in f32).
+    pub fn to_f32(&self) -> WeightsF32 {
+        WeightsF32 {
+            wq: d2f(&self.wq), wk: d2f(&self.wk), wv: d2f(&self.wv), wo: d2f(&self.wo),
+            w1: d2f(&self.w1), w2: d2f(&self.w2), w3: d2f(&self.w3), nq: d2f(&self.nq), nk: d2f(&self.nk),
+            an1: d2f(&self.an1), an2: d2f(&self.an2), fn1: d2f(&self.fn1), fn2: d2f(&self.fn2),
+            adaln_w: d2f(&self.adaln_w), adaln_b: d2f(&self.adaln_b),
+        }
+    }
+}
+
 /// Gradients w.r.t. every [`Weights`] field, plus `dx` (to the previous block)
 /// and `dc` (to the timestep conditioning). Same layout as [`Weights`].
 #[derive(Clone)]

@@ -74,7 +74,7 @@ fn zimage_is_a_model_and_trains_via_ddp_optimizer() {
     }
     let c = cfg();
     let mut r = rng(0x2222);
-    let m = ZTrainModel::from_weights(c, init(&c, &mut r));
+    let m = ZTrainModel::from_weights(c, init(&c, &mut r).to_f32());
 
     // (1) param round-trip through the trait's named accessors.
     let names = m.param_names();

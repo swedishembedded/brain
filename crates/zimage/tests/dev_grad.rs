@@ -84,7 +84,7 @@ fn device_block_backward_matches_host() {
 
     // device (f32 kernels)
     let to32 = |v: &[f64]| v.iter().map(|&x| x as f32).collect::<Vec<f32>>();
-    let dev = zimage::devgrad::block_backward_device(d, &w, &to32(&x), &to32(&c), &to32(&cos), &to32(&sin), &to32(&dout));
+    let dev = zimage::devgrad::block_backward_device(d, &w.to_f32(), &to32(&x), &to32(&c), &to32(&cos), &to32(&sin), &to32(&dout));
 
     let check = |name: &str, h: &[f64], g: &[f64]| {
         let cos = cosine(h, g);
@@ -95,7 +95,7 @@ fn device_block_backward_matches_host() {
     };
     macro_rules! ck {
         ($f:ident) => {
-            check(stringify!($f), &host.$f, &dev.$f);
+            check(stringify!($f), &host.$f, &dev.$f.iter().map(|&x| x as f64).collect::<Vec<f64>>());
         };
     }
     let _ = &host as &Grads;

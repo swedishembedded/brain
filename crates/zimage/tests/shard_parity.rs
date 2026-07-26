@@ -9,7 +9,7 @@
 //! are independent, so each can stream its layer slice on its own card with
 //! weights in RAM (the memory-safe path). Needs a GPU: `BRAIN_DEV_GPU=1`.
 
-use zimage::modelgrad::{Cfg, ModelGrads, ModelWeights};
+use zimage::modelgrad::{Cfg, ModelGradsF32, ModelWeights};
 use zimage::train::{Batch, DeviceTrainer};
 
 fn rng(seed: u64) -> impl FnMut() -> f64 {
@@ -67,10 +67,13 @@ fn batch(c: &Cfg, r: &mut impl FnMut() -> f64) -> Batch {
     }
 }
 
-fn flat(g: &ModelGrads) -> Vec<Vec<f64>> {
+fn f2d(v: &[f32]) -> Vec<f64> {
+    v.iter().map(|&x| x as f64).collect()
+}
+fn flat(g: &ModelGradsF32) -> Vec<Vec<f64>> {
     let mut v = vec![g.t0_w.clone(), g.t0_b.clone(), g.t2_w.clone(), g.t2_b.clone(), g.xemb_w.clone(), g.xemb_b.clone(), g.capn_w.clone(), g.cap1_w.clone(), g.cap1_b.clone()];
     for b in g.noise_ref.iter().chain(g.ctx_ref.iter()).chain(g.main.iter()) {
-        v.extend([b.wq.clone(), b.wk.clone(), b.wv.clone(), b.wo.clone(), b.w1.clone(), b.w2.clone(), b.w3.clone(), b.nq.clone(), b.nk.clone(), b.an1.clone(), b.an2.clone(), b.fn1.clone(), b.fn2.clone(), b.adaln_w.clone(), b.adaln_b.clone()]);
+        v.extend([f2d(&b.wq), f2d(&b.wk), f2d(&b.wv), f2d(&b.wo), f2d(&b.w1), f2d(&b.w2), f2d(&b.w3), f2d(&b.nq), f2d(&b.nk), f2d(&b.an1), f2d(&b.an2), f2d(&b.fn1), f2d(&b.fn2), f2d(&b.adaln_w), f2d(&b.adaln_b)]);
     }
     v.extend([g.fadaln_w.clone(), g.fadaln_b.clone(), g.flin_w.clone(), g.flin_b.clone()]);
     v
@@ -93,10 +96,10 @@ fn pipeline_cut_matches_single_device() {
     let b = batch(&c, &mut r);
     let tr = DeviceTrainer::new(c);
 
-    let (l0, g0) = tr.grads(&w, &b);
+    let (l0, g0) = tr.grads(&w.to_f32(), &b);
     let f0 = flat(&g0);
     for cut in 1..c.n_layers {
-        let (l1, g1) = tr.grads_pipelined(&w, &b, cut);
+        let (l1, g1) = tr.grads_pipelined(&w.to_f32(), &b, cut);
         assert!((l0 - l1).abs() / l0.abs().max(1e-9) < 1e-5, "cut {cut}: loss {l0} vs {l1}");
         let f1 = flat(&g1);
         let mut worst = 0f64;

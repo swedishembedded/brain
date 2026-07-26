@@ -24,9 +24,9 @@
 use std::sync::mpsc::channel;
 
 use crate::devgrad::BlockDev;
-use crate::modelgrad::{Cfg, ModelGrads, ModelWeights};
+use crate::modelgrad::{Cfg, ModelGradsF32, ModelWeightsF32};
 use crate::train::{assemble, back_grad_add, front_grad_add, main_grad_add, to64, uni_rope, Back, Batch, BackGrads, DeviceTrainer, Front, FrontGrads};
-use crate::grad::Grads;
+use crate::grad::GradsF32;
 
 /// A two-card pipeline trainer for one Z-Image model (weights held by the caller
 /// in host RAM). Stage 0 = front + main`[0,cut)` on card 0; stage 1 = main`[cut,end)`
@@ -51,7 +51,7 @@ impl ShardTrainer {
 
     /// One full pipelined forward+backward, **sequential** (one card at a time).
     /// Returns `(loss, grads)`.
-    pub fn grads(&self, w: &ModelWeights, b: &Batch) -> (f64, ModelGrads) {
+    pub fn grads(&self, w: &ModelWeightsF32, b: &Batch) -> (f64, ModelGradsF32) {
         let cut = self.cut;
         let (uni, front) = self.stage0.front_fwd(w, b);
         let (uni, in0) = self.stage0.main_fwd_ctx(&w.main[..cut], uni, front.c32(), front.uni_cos(), front.uni_sin());
@@ -72,7 +72,7 @@ impl ShardTrainer {
     /// back. While card 0 works on microbatch `k+1`, card 1 works on `k` — both
     /// cards busy. Gradients accumulate across microbatches. Returns
     /// `(summed_loss, summed_grads)`; average by `1/m` in the optimiser.
-    pub fn grads_microbatched(&self, w: &ModelWeights, mbs: &[Batch]) -> (f64, ModelGrads) {
+    pub fn grads_microbatched(&self, w: &ModelWeightsF32, mbs: &[Batch]) -> (f64, ModelGradsF32) {
         let (cut, m) = (self.cut, mbs.len());
         let (fwd_tx, fwd_rx) = channel::<(Vec<f32>, Vec<f32>)>(); // (uni, c)
         let (bwd_tx, bwd_rx) = channel::<(Vec<f32>, Vec<f64>)>(); // (d_uni, dc)
@@ -91,7 +91,7 @@ impl ShardTrainer {
                     in0s.push(in0);
                 }
                 let mut fg: Option<FrontGrads> = None;
-                let mut mg0: Option<Vec<Grads>> = None;
+                let mut mg0: Option<Vec<GradsF32>> = None;
                 for k in 0..m {
                     let (d_uni, dc) = bwd_rx.recv().unwrap();
                     let fr = &fronts[k];
@@ -130,7 +130,7 @@ impl ShardTrainer {
                     ropes.push((ucos, usin));
                 }
                 let mut bg: Option<BackGrads> = None;
-                let mut mg1: Option<Vec<Grads>> = None;
+                let mut mg1: Option<Vec<GradsF32>> = None;
                 for k in 0..m {
                     let (d_uni, dc, b) = s1.back_bwd(wref, &backs[k], &dpreds[k], &cvecs[k]);
                     let (ucos, usin) = &ropes[k];

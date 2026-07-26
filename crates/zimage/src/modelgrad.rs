@@ -19,7 +19,7 @@
 //! correctness. The RoPE tables are fixed inputs (position → cos/sin), exactly as
 //! the block reference treats them.
 
-use crate::grad::{backward as block_bwd, forward_m as block_fwd, Cache, Dims, Grads, Weights};
+use crate::grad::{backward as block_bwd, forward_m as block_fwd, Cache, Dims, Grads, GradsF32, Weights, WeightsF32};
 
 /// Minimal config for the training reference.
 #[derive(Clone, Copy)]
@@ -95,6 +95,69 @@ pub struct ModelGrads {
     pub fadaln_b: Vec<f64>,
     pub flin_w: Vec<f64>,
     pub flin_b: Vec<f64>,
+}
+
+/// The **runtime** model weights: identical to [`ModelWeights`] except the
+/// memory-heavy transformer blocks are f32 ([`WeightsF32`]). The tiny wrapper
+/// linears (timestep MLP / embedders / final layer — ~100 MB even at 6B) stay f64
+/// so the host wrapper math reuses the f64 functions unchanged; the blocks (the
+/// 6B bulk) are f32 on both host and GPU (48→24 GB). The f64 [`ModelWeights`]
+/// remains the finite-difference gradcheck reference.
+#[derive(Clone)]
+pub struct ModelWeightsF32 {
+    pub t0_w: Vec<f64>,
+    pub t0_b: Vec<f64>,
+    pub t2_w: Vec<f64>,
+    pub t2_b: Vec<f64>,
+    pub xemb_w: Vec<f64>,
+    pub xemb_b: Vec<f64>,
+    pub capn_w: Vec<f64>,
+    pub cap1_w: Vec<f64>,
+    pub cap1_b: Vec<f64>,
+    pub noise_ref: Vec<WeightsF32>,
+    pub ctx_ref: Vec<WeightsF32>,
+    pub main: Vec<WeightsF32>,
+    pub fadaln_w: Vec<f64>,
+    pub fadaln_b: Vec<f64>,
+    pub flin_w: Vec<f64>,
+    pub flin_b: Vec<f64>,
+}
+
+/// Grads mirroring [`ModelWeightsF32`] (blocks f32, wrapper f64).
+#[derive(Clone)]
+pub struct ModelGradsF32 {
+    pub t0_w: Vec<f64>,
+    pub t0_b: Vec<f64>,
+    pub t2_w: Vec<f64>,
+    pub t2_b: Vec<f64>,
+    pub xemb_w: Vec<f64>,
+    pub xemb_b: Vec<f64>,
+    pub capn_w: Vec<f64>,
+    pub cap1_w: Vec<f64>,
+    pub cap1_b: Vec<f64>,
+    pub noise_ref: Vec<GradsF32>,
+    pub ctx_ref: Vec<GradsF32>,
+    pub main: Vec<GradsF32>,
+    pub fadaln_w: Vec<f64>,
+    pub fadaln_b: Vec<f64>,
+    pub flin_w: Vec<f64>,
+    pub flin_b: Vec<f64>,
+}
+
+impl ModelWeights {
+    /// Downcast to the runtime f32-block type (tests build an f64 reference then
+    /// feed the device path in f32).
+    pub fn to_f32(&self) -> ModelWeightsF32 {
+        ModelWeightsF32 {
+            t0_w: self.t0_w.clone(), t0_b: self.t0_b.clone(), t2_w: self.t2_w.clone(), t2_b: self.t2_b.clone(),
+            xemb_w: self.xemb_w.clone(), xemb_b: self.xemb_b.clone(), capn_w: self.capn_w.clone(),
+            cap1_w: self.cap1_w.clone(), cap1_b: self.cap1_b.clone(),
+            noise_ref: self.noise_ref.iter().map(|b| b.to_f32()).collect(),
+            ctx_ref: self.ctx_ref.iter().map(|b| b.to_f32()).collect(),
+            main: self.main.iter().map(|b| b.to_f32()).collect(),
+            fadaln_w: self.fadaln_w.clone(), fadaln_b: self.fadaln_b.clone(), flin_w: self.flin_w.clone(), flin_b: self.flin_b.clone(),
+        }
+    }
 }
 
 pub(crate) const TDIM: usize = 256; // timestep sinusoid width

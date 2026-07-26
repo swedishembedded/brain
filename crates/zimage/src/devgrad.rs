@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 
-use crate::grad::{Dims, Grads, Weights};
+use crate::grad::{Dims, GradsF32, WeightsF32};
 
 // Kernel indices.
 const K_RMS: usize = 0;
@@ -79,19 +79,18 @@ fn d128(x: usize) -> u32 {
 /// adaLN fold (host): `mod = adaln_w·c + adaln_b` → folded norm weights + the
 /// scale/gate vectors the backward needs. Unmodulated → raw weights, zero s/g.
 #[allow(clippy::type_complexity)]
-fn fold(w: &Weights, d: Dims, c: &[f32], modulation: bool) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+fn fold(w: &WeightsF32, d: Dims, c: &[f32], modulation: bool) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
     let dim = d.dim;
-    let raw = |v: &[f64]| v.iter().map(|&x| x as f32).collect::<Vec<f32>>();
-    let (an1, an2, fn1, fn2) = (raw(&w.an1), raw(&w.an2), raw(&w.fn1), raw(&w.fn2));
+    let (an1, an2, fn1, fn2) = (w.an1.clone(), w.an2.clone(), w.fn1.clone(), w.fn2.clone());
     if !modulation {
         let z = vec![0f32; dim];
         return (an1, an2, fn1, fn2, z.clone(), z.clone(), z.clone(), z);
     }
-    let mut m = w.adaln_b.iter().map(|&v| v as f32).collect::<Vec<f32>>();
+    let mut m = w.adaln_b.clone();
     for (i, mi) in m.iter_mut().enumerate() {
         let mut a = *mi;
         for (j, &cj) in c.iter().enumerate() {
-            a += w.adaln_w[i * d.cdim + j] as f32 * cj;
+            a += w.adaln_w[i * d.cdim + j] * cj;
         }
         *mi = a;
     }
@@ -199,32 +198,27 @@ impl BlockDev {
         let bits: Vec<u32> = data.iter().map(|v| v.to_bits()).collect();
         self.gpu.write(&self.b[name], &bits);
     }
-    fn upf64(&self, name: &str, data: &[f64]) {
-        let bits: Vec<u32> = data.iter().map(|&v| (v as f32).to_bits()).collect();
-        self.gpu.write(&self.b[name], &bits);
-    }
     fn zero(&self, name: &str, n: usize) {
         self.gpu.write(&self.b[name], &vec![0u32; n]);
     }
     fn g(&self, name: &str) -> &DeviceBuffer {
         &self.b[name]
     }
-    fn rd(&self, name: &str, n: usize) -> Vec<f64> {
-        self.gpu.read(&self.b[name], n).iter().map(|&v| v as f64).collect()
+    fn rd(&self, name: &str, n: usize) -> Vec<f32> {
+        self.gpu.read(&self.b[name], n)
     }
 
-    /// Upload one block's weights + folded norms + inputs.
-    fn upload(&self, w: &Weights, x: &[f32], cos: &[f32], sin: &[f32], an1f: &[f32], an2f: &[f32], fn1f: &[f32], fn2f: &[f32]) {
-        let cv = |v: &[f64]| v.iter().map(|&x| x as f32).collect::<Vec<f32>>();
-        self.upf("wq", &cv(&w.wq));
-        self.upf("wk", &cv(&w.wk));
-        self.upf("wv", &cv(&w.wv));
-        self.upf("wo", &cv(&w.wo));
-        self.upf("w1", &cv(&w.w1));
-        self.upf("w2", &cv(&w.w2));
-        self.upf("w3", &cv(&w.w3));
-        self.upf("nq", &cv(&w.nq));
-        self.upf("nk", &cv(&w.nk));
+    /// Upload one block's weights + folded norms + inputs (all f32 — direct).
+    fn upload(&self, w: &WeightsF32, x: &[f32], cos: &[f32], sin: &[f32], an1f: &[f32], an2f: &[f32], fn1f: &[f32], fn2f: &[f32]) {
+        self.upf("wq", &w.wq);
+        self.upf("wk", &w.wk);
+        self.upf("wv", &w.wv);
+        self.upf("wo", &w.wo);
+        self.upf("w1", &w.w1);
+        self.upf("w2", &w.w2);
+        self.upf("w3", &w.w3);
+        self.upf("nq", &w.nq);
+        self.upf("nk", &w.nk);
         self.upf("an1b", an1f);
         self.upf("an2b", an2f);
         self.upf("fn1b", fn1f);
@@ -336,7 +330,7 @@ impl BlockDev {
     }
 
     /// Forward one block, returning its output `[t·dim]`.
-    pub fn forward(&self, w: &Weights, d: Dims, x: &[f32], c: &[f32], cos: &[f32], sin: &[f32], modulation: bool) -> Vec<f32> {
+    pub fn forward(&self, w: &WeightsF32, d: Dims, x: &[f32], c: &[f32], cos: &[f32], sin: &[f32], modulation: bool) -> Vec<f32> {
         let (an1f, an2f, fn1f, fn2f, ..) = fold(w, d, c, modulation);
         self.upload(w, x, cos, sin, &an1f, &an2f, &fn1f, &fn2f);
         let steps = self.fwd_steps(d.t);
@@ -346,8 +340,8 @@ impl BlockDev {
     }
 
     /// Backward one block: recompute forward + backprop `dout`, returning the
-    /// per-tensor grads (host f64) and the input grad `dx`.
-    pub fn backward(&self, w: &Weights, d: Dims, x: &[f32], c: &[f32], cos: &[f32], sin: &[f32], modulation: bool, dout: &[f32]) -> Grads {
+    /// per-tensor grads (f32) and the input grad `dx`.
+    pub fn backward(&self, w: &WeightsF32, d: Dims, x: &[f32], c: &[f32], cos: &[f32], sin: &[f32], modulation: bool, dout: &[f32]) -> GradsF32 {
         let (dim, hd, hidden) = (self.dim, self.hd, self.hidden);
         let t = d.t;
         let (an1f, an2f, fn1f, fn2f, sm, gm, sp, gp) = fold(w, d, c, modulation);
@@ -364,7 +358,7 @@ impl BlockDev {
         self.gpu.poll_wait();
 
         let (da1, da2, df1, df2) = (self.rd("d_an1f", dim), self.rd("d_an2f", dim), self.rd("d_fn1f", dim), self.rd("d_fn2f", dim));
-        let mut gr = Grads {
+        let mut gr = GradsF32 {
             wq: self.rd("g_wq", dim * dim), wk: self.rd("g_wk", dim * dim), wv: self.rd("g_wv", dim * dim), wo: self.rd("g_wo", dim * dim),
             w1: self.rd("g_w1", hidden * dim), w2: self.rd("g_w2", dim * hidden), w3: self.rd("g_w3", hidden * dim),
             nq: self.rd("g_nq", hd), nk: self.rd("g_nk", hd),
@@ -379,23 +373,23 @@ impl BlockDev {
             gr.fn2 = df2;
             return gr;
         }
-        let mut dmod = vec![0f64; 4 * dim];
+        let mut dmod = vec![0f32; 4 * dim];
         for cc in 0..dim {
-            gr.an1[cc] = da1[cc] * (1.0 + sm[cc] as f64);
+            gr.an1[cc] = da1[cc] * (1.0 + sm[cc]);
             dmod[cc] = da1[cc] * w.an1[cc];
-            let tg = (gm[cc] as f64).tanh();
+            let tg = gm[cc].tanh();
             gr.an2[cc] = da2[cc] * tg;
             dmod[dim + cc] = da2[cc] * w.an2[cc] * (1.0 - tg * tg);
-            gr.fn1[cc] = df1[cc] * (1.0 + sp[cc] as f64);
+            gr.fn1[cc] = df1[cc] * (1.0 + sp[cc]);
             dmod[2 * dim + cc] = df1[cc] * w.fn1[cc];
-            let tgm = (gp[cc] as f64).tanh();
+            let tgm = gp[cc].tanh();
             gr.fn2[cc] = df2[cc] * tgm;
             dmod[3 * dim + cc] = df2[cc] * w.fn2[cc] * (1.0 - tgm * tgm);
         }
         for i in 0..4 * dim {
             gr.adaln_b[i] = dmod[i];
             for j in 0..d.cdim {
-                gr.adaln_w[i * d.cdim + j] = dmod[i] * c[j] as f64;
+                gr.adaln_w[i * d.cdim + j] = dmod[i] * c[j];
                 gr.dc[j] += dmod[i] * w.adaln_w[i * d.cdim + j];
             }
         }
@@ -405,7 +399,7 @@ impl BlockDev {
 
 /// Thin wrapper: build a fresh engine and run one block's backward. Kept for the
 /// standalone `tests/dev_grad.rs` parity check.
-pub fn block_backward_device(d: Dims, w: &Weights, x: &[f32], c: &[f32], cos: &[f32], sin: &[f32], dout: &[f32]) -> Grads {
+pub fn block_backward_device(d: Dims, w: &WeightsF32, x: &[f32], c: &[f32], cos: &[f32], sin: &[f32], dout: &[f32]) -> GradsF32 {
     let eng = BlockDev::new(d.t, d.dim, d.nh);
     eng.backward(w, d, x, c, cos, sin, true, dout)
 }

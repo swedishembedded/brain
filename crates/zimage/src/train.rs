@@ -7,7 +7,7 @@
 //! the thin wrapper — timestep MLP, image/caption embedders, adaLN final layer,
 //! flow-matching loss — runs on the host (it is a handful of small linears; you
 //! would not shard it anyway). Gradients from every stage are assembled into the
-//! same [`ModelGrads`] the host reference produces.
+//! same [`ModelGradsF32`] the host reference produces.
 //!
 //! This is the device counterpart of [`crate::modelgrad`]: `tests/device_train.rs`
 //! checks its grads match the gradchecked host reference (cosine ~1) and that it
@@ -18,8 +18,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::devgrad::BlockDev;
-use crate::grad::{Dims, Grads, Weights};
-use crate::modelgrad::{dsilu, layernorm, layernorm_bwd, linb, linb_bwd, patchify, rmsnorm, rmsnorm_dw, silu, timestep_embedding, Cfg, ModelGrads, ModelWeights, TDIM, TH};
+use crate::grad::{Dims, GradsF32, WeightsF32};
+use crate::modelgrad::{dsilu, layernorm, layernorm_bwd, linb, linb_bwd, patchify, rmsnorm, rmsnorm_dw, silu, timestep_embedding, Cfg, ModelGradsF32, ModelWeightsF32, TDIM, TH};
 
 /// One training batch (host f64), mirroring the reference.
 pub struct Batch {
@@ -93,8 +93,8 @@ pub(crate) fn uni_rope(b: &Batch) -> (Vec<f32>, Vec<f32>) {
 }
 
 /// Accumulate `src` into `dst` element-wise (grad accumulation across microbatches).
-pub(crate) fn grad_add(dst: &mut Grads, src: &Grads) {
-    let pairs: [(&mut Vec<f64>, &Vec<f64>); 15] = [
+pub(crate) fn grad_add(dst: &mut GradsF32, src: &GradsF32) {
+    let pairs: [(&mut Vec<f32>, &Vec<f32>); 15] = [
         (&mut dst.wq, &src.wq), (&mut dst.wk, &src.wk), (&mut dst.wv, &src.wv), (&mut dst.wo, &src.wo),
         (&mut dst.w1, &src.w1), (&mut dst.w2, &src.w2), (&mut dst.w3, &src.w3), (&mut dst.nq, &src.nq), (&mut dst.nk, &src.nk),
         (&mut dst.an1, &src.an1), (&mut dst.an2, &src.an2), (&mut dst.fn1, &src.fn1), (&mut dst.fn2, &src.fn2),
@@ -139,7 +139,7 @@ pub(crate) fn back_grad_add(d: &mut BackGrads, s: &BackGrads) {
 }
 
 /// Accumulate a slice's per-layer grads (`grad_add` element-wise).
-pub(crate) fn main_grad_add(d: &mut [Grads], s: &[Grads]) {
+pub(crate) fn main_grad_add(d: &mut [GradsF32], s: &[GradsF32]) {
     for (a, b) in d.iter_mut().zip(s) {
         grad_add(a, b);
     }
@@ -165,8 +165,8 @@ pub(crate) struct FrontGrads {
     capn_w: Vec<f64>,
     cap1_w: Vec<f64>,
     cap1_b: Vec<f64>,
-    noise_ref: Vec<Grads>,
-    ctx_ref: Vec<Grads>,
+    noise_ref: Vec<GradsF32>,
+    ctx_ref: Vec<GradsF32>,
 }
 
 /// Final-layer backward's grads.
@@ -198,7 +198,7 @@ impl DeviceTrainer {
     }
 
     /// Full forward+backward for one batch (single device). Returns `(loss, grads)`.
-    pub fn grads(&self, w: &ModelWeights, b: &Batch) -> (f64, ModelGrads) {
+    pub fn grads(&self, w: &ModelWeightsF32, b: &Batch) -> (f64, ModelGradsF32) {
         let (uni, front) = self.front_fwd(w, b);
         let (uni, main_in) = self.main_fwd(&w.main, uni, &front);
         let (loss, dpred, back) = self.back_fwd(w, &uni, &front.cvec, b);
@@ -215,7 +215,7 @@ impl DeviceTrainer {
     /// two halves are independent (each could stream its slice on its own card,
     /// weights in RAM — the memory-safe path for the full 6B). Bit-identical to
     /// `grads` (same ops/order; only a host round-trip is inserted at the cut).
-    pub fn grads_pipelined(&self, w: &ModelWeights, b: &Batch, cut: usize) -> (f64, ModelGrads) {
+    pub fn grads_pipelined(&self, w: &ModelWeightsF32, b: &Batch, cut: usize) -> (f64, ModelGradsF32) {
         let cdim = self.cfg.cdim();
         let (uni, front) = self.front_fwd(w, b);
         // stage 0: main[0, cut)
@@ -249,7 +249,7 @@ impl DeviceTrainer {
 
     /// Wrapper front: timestep→c, embed image/caption, refiners, unify. Returns
     /// the unified residual `[ntot·dim]` and the saved state for its backward.
-    pub(crate) fn front_fwd(&self, w: &ModelWeights, b: &Batch) -> (Vec<f32>, Front) {
+    pub(crate) fn front_fwd(&self, w: &ModelWeightsF32, b: &Batch) -> (Vec<f32>, Front) {
         let c = &self.cfg;
         let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
         let (n_img, ncap) = (c.n_img(), c.ncap);
@@ -289,7 +289,7 @@ impl DeviceTrainer {
     /// block's input for the backward. `c32`/`uni_cos`/`uni_sin` are the shared
     /// conditioning + RoPE tables (from the front, or carried in the boundary).
     /// Returns `(uni_out, inputs)`.
-    pub fn main_fwd_ctx(&self, main: &[Weights], mut uni: Vec<f32>, c32: &[f32], uni_cos: &[f32], uni_sin: &[f32]) -> (Vec<f32>, Vec<Vec<f32>>) {
+    pub fn main_fwd_ctx(&self, main: &[WeightsF32], mut uni: Vec<f32>, c32: &[f32], uni_cos: &[f32], uni_sin: &[f32]) -> (Vec<f32>, Vec<Vec<f32>>) {
         let ntot = self.cfg.ntot();
         let mut inputs = Vec::with_capacity(main.len());
         for bw in main {
@@ -298,14 +298,14 @@ impl DeviceTrainer {
         }
         (uni, inputs)
     }
-    fn main_fwd(&self, main: &[Weights], uni: Vec<f32>, f: &Front) -> (Vec<f32>, Vec<Vec<f32>>) {
+    fn main_fwd(&self, main: &[WeightsF32], uni: Vec<f32>, f: &Front) -> (Vec<f32>, Vec<Vec<f32>>) {
         self.main_fwd_ctx(main, uni, &f.c32, &f.uni_cos, &f.uni_sin)
     }
 
     /// Final layer + flow-matching loss. `cvec` is the conditioning (f64); a
     /// threaded head takes it from the boundary `c`, a monolithic run from `Front`.
     /// Returns `(loss, dpred, Back)`.
-    pub(crate) fn back_fwd(&self, w: &ModelWeights, uni32: &[f32], cvec: &[f64], b: &Batch) -> (f64, Vec<f64>, Back) {
+    pub(crate) fn back_fwd(&self, w: &ModelWeightsF32, uni32: &[f32], cvec: &[f64], b: &Batch) -> (f64, Vec<f64>, Back) {
         let c = &self.cfg;
         let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
         let (n_img, ntot) = (c.n_img(), c.ntot());
@@ -335,7 +335,7 @@ impl DeviceTrainer {
 
     /// Final-layer backward. `cvec` is the conditioning (f64). Returns
     /// `(d_uni, dc, back_grads)`.
-    pub(crate) fn back_bwd(&self, w: &ModelWeights, bk: &Back, dpred: &[f64], cvec: &[f64]) -> (Vec<f32>, Vec<f64>, BackGrads) {
+    pub(crate) fn back_bwd(&self, w: &ModelWeightsF32, bk: &Back, dpred: &[f64], cvec: &[f64]) -> (Vec<f32>, Vec<f64>, BackGrads) {
         let c = &self.cfg;
         let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
         let (n_img, ntot) = (c.n_img(), c.ntot());
@@ -361,46 +361,46 @@ impl DeviceTrainer {
 
     /// Backward through a slice of main layers (reverse), accumulating `dc`.
     /// Returns `(d_uni_out, dc_out, grads_in_forward_order)`.
-    pub fn main_bwd_ctx(&self, main: &[Weights], inputs: &[Vec<f32>], c32: &[f32], uni_cos: &[f32], uni_sin: &[f32], d_uni: &[f32], mut dc: Vec<f64>) -> (Vec<f32>, Vec<f64>, Vec<Grads>) {
+    pub fn main_bwd_ctx(&self, main: &[WeightsF32], inputs: &[Vec<f32>], c32: &[f32], uni_cos: &[f32], uni_sin: &[f32], d_uni: &[f32], mut dc: Vec<f64>) -> (Vec<f32>, Vec<f64>, Vec<GradsF32>) {
         let (cdim, ntot) = (self.cfg.cdim(), self.cfg.ntot());
         let mut d = d_uni.to_vec();
-        let mut g: Vec<Grads> = Vec::with_capacity(main.len());
+        let mut g: Vec<GradsF32> = Vec::with_capacity(main.len());
         for (bw, inp) in main.iter().zip(inputs).rev() {
             let gg = self.eng.backward(bw, self.dims(ntot), inp, c32, uni_cos, uni_sin, true, &d);
-            d = to32(&gg.dx);
+            d = gg.dx.clone();
             for j in 0..cdim {
-                dc[j] += gg.dc[j];
+                dc[j] += gg.dc[j] as f64;
             }
             g.push(gg);
         }
         g.reverse();
         (d, dc, g)
     }
-    fn main_bwd(&self, main: &[Weights], inputs: &[Vec<f32>], f: &Front, d_uni: &[f32], dc: Vec<f64>) -> (Vec<f32>, Vec<f64>, Vec<Grads>) {
+    fn main_bwd(&self, main: &[WeightsF32], inputs: &[Vec<f32>], f: &Front, d_uni: &[f32], dc: Vec<f64>) -> (Vec<f32>, Vec<f64>, Vec<GradsF32>) {
         self.main_bwd_ctx(main, inputs, &f.c32, &f.uni_cos, &f.uni_sin, d_uni, dc)
     }
 
     /// Wrapper-front backward: split the residual, refiners, embedders, timestep
     /// MLP (consuming the accumulated `dc`). Returns `(front_grads, noise_g, ctx_g)`.
-    pub(crate) fn front_bwd(&self, w: &ModelWeights, b: &Batch, f: &Front, d_uni: &[f32], mut dc: Vec<f64>) -> FrontGrads {
+    pub(crate) fn front_bwd(&self, w: &ModelWeightsF32, b: &Batch, f: &Front, d_uni: &[f32], mut dc: Vec<f64>) -> FrontGrads {
         let c = &self.cfg;
         let (dim, cdim, pd) = (c.dim, c.cdim(), c.patch_dim());
         let (n_img, ncap) = (c.n_img(), c.ncap);
         let mut d_img32 = d_uni[..n_img * dim].to_vec();
         let mut d_capt32 = d_uni[n_img * dim..].to_vec();
-        let mut ctx_g: Vec<Grads> = Vec::new();
+        let mut ctx_g: Vec<GradsF32> = Vec::new();
         for (bw, inp) in w.ctx_ref.iter().zip(&f.ctx_in).rev() {
             let g = self.eng.backward(bw, self.dims(ncap), inp, &f.c32, &f.cc, &f.cs, false, &d_capt32);
-            d_capt32 = to32(&g.dx);
+            d_capt32 = g.dx.clone();
             ctx_g.push(g);
         }
         ctx_g.reverse();
-        let mut noise_g: Vec<Grads> = Vec::new();
+        let mut noise_g: Vec<GradsF32> = Vec::new();
         for (bw, inp) in w.noise_ref.iter().zip(&f.noise_in).rev() {
             let g = self.eng.backward(bw, self.dims(n_img), inp, &f.c32, &f.ic, &f.is, true, &d_img32);
-            d_img32 = to32(&g.dx);
+            d_img32 = g.dx.clone();
             for j in 0..cdim {
-                dc[j] += g.dc[j];
+                dc[j] += g.dc[j] as f64;
             }
             noise_g.push(g);
         }
@@ -433,9 +433,9 @@ fn scaledfrom(normed: &[f64], scale: &[f64], ntot: usize, dim: usize) -> Vec<f64
     s
 }
 
-/// Reassemble a [`ModelGrads`] from the phase grads.
-pub(crate) fn assemble(fg: FrontGrads, bg: BackGrads, main_g: Vec<Grads>) -> ModelGrads {
-    ModelGrads {
+/// Reassemble a [`ModelGradsF32`] from the phase grads.
+pub(crate) fn assemble(fg: FrontGrads, bg: BackGrads, main_g: Vec<GradsF32>) -> ModelGradsF32 {
+    ModelGradsF32 {
         t0_w: fg.t0_w, t0_b: fg.t0_b, t2_w: fg.t2_w, t2_b: fg.t2_b,
         xemb_w: fg.xemb_w, xemb_b: fg.xemb_b, capn_w: fg.capn_w, cap1_w: fg.cap1_w, cap1_b: fg.cap1_b,
         noise_ref: fg.noise_ref, ctx_ref: fg.ctx_ref, main: main_g,
@@ -449,7 +449,7 @@ pub(crate) fn assemble(fg: FrontGrads, bg: BackGrads, main_g: Vec<Grads>) -> Mod
 // Once Z-Image is a `Model`, it inherits data-parallel / multi-machine / federated
 // training through `model::{DdpOptimizer, NetworkCollective, federated_average}`
 // with no zimage-specific code — the same seam every brain model rides. The
-// adapter is thin: named-tensor views bridge `ModelWeights`/`ModelGrads` to the
+// adapter is thin: named-tensor views bridge `ModelWeightsF32`/`ModelGradsF32` to the
 // trait's `read_weight`/`write_weight`/`read_grad`, and forward+backward delegate
 // to the validated `DeviceTrainer` (GPU block stack + host wrapper).
 // ============================================================================
@@ -495,46 +495,109 @@ fn param_layout(c: &Cfg) -> Vec<(String, usize)> {
     v
 }
 
-fn block_fields_mut(b: &mut Weights) -> Vec<&mut Vec<f64>> {
-    vec![&mut b.wq, &mut b.wk, &mut b.wv, &mut b.wo, &mut b.w1, &mut b.w2, &mut b.w3, &mut b.nq, &mut b.nk, &mut b.an1, &mut b.an2, &mut b.fn1, &mut b.fn2, &mut b.adaln_w, &mut b.adaln_b]
+// ---- hybrid name-dispatch accessors (wrapper tensors f64, blocks f32) ----
+
+fn block_field_f32<'a>(b: &'a WeightsF32, f: &str) -> &'a Vec<f32> {
+    match f {
+        "wq" => &b.wq, "wk" => &b.wk, "wv" => &b.wv, "wo" => &b.wo, "w1" => &b.w1, "w2" => &b.w2, "w3" => &b.w3,
+        "nq" => &b.nq, "nk" => &b.nk, "an1" => &b.an1, "an2" => &b.an2, "fn1" => &b.fn1, "fn2" => &b.fn2,
+        "adaln_w" => &b.adaln_w, "adaln_b" => &b.adaln_b, _ => panic!("bad field {f}"),
+    }
 }
-fn block_fields_ref(b: &Weights) -> Vec<&Vec<f64>> {
-    vec![&b.wq, &b.wk, &b.wv, &b.wo, &b.w1, &b.w2, &b.w3, &b.nq, &b.nk, &b.an1, &b.an2, &b.fn1, &b.fn2, &b.adaln_w, &b.adaln_b]
+fn block_field_f32_mut<'a>(b: &'a mut WeightsF32, f: &str) -> &'a mut Vec<f32> {
+    match f {
+        "wq" => &mut b.wq, "wk" => &mut b.wk, "wv" => &mut b.wv, "wo" => &mut b.wo, "w1" => &mut b.w1, "w2" => &mut b.w2, "w3" => &mut b.w3,
+        "nq" => &mut b.nq, "nk" => &mut b.nk, "an1" => &mut b.an1, "an2" => &mut b.an2, "fn1" => &mut b.fn1, "fn2" => &mut b.fn2,
+        "adaln_w" => &mut b.adaln_w, "adaln_b" => &mut b.adaln_b, _ => panic!("bad field {f}"),
+    }
+}
+fn grad_block_field_f32<'a>(g: &'a GradsF32, f: &str) -> &'a Vec<f32> {
+    match f {
+        "wq" => &g.wq, "wk" => &g.wk, "wv" => &g.wv, "wo" => &g.wo, "w1" => &g.w1, "w2" => &g.w2, "w3" => &g.w3,
+        "nq" => &g.nq, "nk" => &g.nk, "an1" => &g.an1, "an2" => &g.an2, "fn1" => &g.fn1, "fn2" => &g.fn2,
+        "adaln_w" => &g.adaln_w, "adaln_b" => &g.adaln_b, _ => panic!("bad field {f}"),
+    }
 }
 
-/// Flat mutable views over every weight tensor, in `param_layout` order.
-fn weights_flat_mut(m: &mut ModelWeights) -> Vec<&mut Vec<f64>> {
-    let mut v: Vec<&mut Vec<f64>> = vec![&mut m.t0_w, &mut m.t0_b, &mut m.t2_w, &mut m.t2_b, &mut m.xemb_w, &mut m.xemb_b, &mut m.capn_w, &mut m.cap1_w, &mut m.cap1_b];
-    for b in m.noise_ref.iter_mut().chain(m.ctx_ref.iter_mut()).chain(m.main.iter_mut()) {
-        v.extend(block_fields_mut(b));
+fn block_group<'a>(m: &'a ModelWeightsF32, grp: &str) -> &'a [WeightsF32] {
+    match grp {
+        "noise_ref" => &m.noise_ref, "ctx_ref" => &m.ctx_ref, "main" => &m.main, _ => panic!("bad group {grp}"),
     }
-    v.extend([&mut m.fadaln_w, &mut m.fadaln_b, &mut m.flin_w, &mut m.flin_b]);
-    v
 }
-fn weights_flat_ref(m: &ModelWeights) -> Vec<&Vec<f64>> {
-    let mut v: Vec<&Vec<f64>> = vec![&m.t0_w, &m.t0_b, &m.t2_w, &m.t2_b, &m.xemb_w, &m.xemb_b, &m.capn_w, &m.cap1_w, &m.cap1_b];
-    for b in m.noise_ref.iter().chain(m.ctx_ref.iter()).chain(m.main.iter()) {
-        v.extend(block_fields_ref(b));
+fn block_group_mut<'a>(m: &'a mut ModelWeightsF32, grp: &str) -> &'a mut [WeightsF32] {
+    match grp {
+        "noise_ref" => &mut m.noise_ref, "ctx_ref" => &mut m.ctx_ref, "main" => &mut m.main, _ => panic!("bad group {grp}"),
     }
-    v.extend([&m.fadaln_w, &m.fadaln_b, &m.flin_w, &m.flin_b]);
-    v
 }
-fn block_grad_fields(g: &Grads) -> Vec<&Vec<f64>> {
-    vec![&g.wq, &g.wk, &g.wv, &g.wo, &g.w1, &g.w2, &g.w3, &g.nq, &g.nk, &g.an1, &g.an2, &g.fn1, &g.fn2, &g.adaln_w, &g.adaln_b]
-}
-/// Flat views over every grad tensor, in the SAME order as `weights_flat_*`.
-fn grads_flat(g: &ModelGrads) -> Vec<&Vec<f64>> {
-    let mut v: Vec<&Vec<f64>> = vec![&g.t0_w, &g.t0_b, &g.t2_w, &g.t2_b, &g.xemb_w, &g.xemb_b, &g.capn_w, &g.cap1_w, &g.cap1_b];
-    for b in g.noise_ref.iter().chain(g.ctx_ref.iter()).chain(g.main.iter()) {
-        v.extend(block_grad_fields(b));
+fn grad_group<'a>(g: &'a ModelGradsF32, grp: &str) -> &'a [GradsF32] {
+    match grp {
+        "noise_ref" => &g.noise_ref, "ctx_ref" => &g.ctx_ref, "main" => &g.main, _ => panic!("bad group {grp}"),
     }
-    v.extend([&g.fadaln_w, &g.fadaln_b, &g.flin_w, &g.flin_b]);
-    v
 }
 
-fn zero_block(c: &Cfg) -> Weights {
-    let z = |n: usize| vec![0f64; n];
-    Weights {
+/// The wrapper (f64) tensor by name, or `None` if it is a block tensor.
+fn wrapper_ref<'a>(m: &'a ModelWeightsF32, n: &str) -> Option<&'a Vec<f64>> {
+    Some(match n {
+        "t0_w" => &m.t0_w, "t0_b" => &m.t0_b, "t2_w" => &m.t2_w, "t2_b" => &m.t2_b,
+        "xemb_w" => &m.xemb_w, "xemb_b" => &m.xemb_b, "capn_w" => &m.capn_w, "cap1_w" => &m.cap1_w, "cap1_b" => &m.cap1_b,
+        "fadaln_w" => &m.fadaln_w, "fadaln_b" => &m.fadaln_b, "flin_w" => &m.flin_w, "flin_b" => &m.flin_b,
+        _ => return None,
+    })
+}
+fn wrapper_mut<'a>(m: &'a mut ModelWeightsF32, n: &str) -> Option<&'a mut Vec<f64>> {
+    Some(match n {
+        "t0_w" => &mut m.t0_w, "t0_b" => &mut m.t0_b, "t2_w" => &mut m.t2_w, "t2_b" => &mut m.t2_b,
+        "xemb_w" => &mut m.xemb_w, "xemb_b" => &mut m.xemb_b, "capn_w" => &mut m.capn_w, "cap1_w" => &mut m.cap1_w, "cap1_b" => &mut m.cap1_b,
+        "fadaln_w" => &mut m.fadaln_w, "fadaln_b" => &mut m.fadaln_b, "flin_w" => &mut m.flin_w, "flin_b" => &mut m.flin_b,
+        _ => return None,
+    })
+}
+fn grad_wrapper_ref<'a>(g: &'a ModelGradsF32, n: &str) -> Option<&'a Vec<f64>> {
+    Some(match n {
+        "t0_w" => &g.t0_w, "t0_b" => &g.t0_b, "t2_w" => &g.t2_w, "t2_b" => &g.t2_b,
+        "xemb_w" => &g.xemb_w, "xemb_b" => &g.xemb_b, "capn_w" => &g.capn_w, "cap1_w" => &g.cap1_w, "cap1_b" => &g.cap1_b,
+        "fadaln_w" => &g.fadaln_w, "fadaln_b" => &g.fadaln_b, "flin_w" => &g.flin_w, "flin_b" => &g.flin_b,
+        _ => return None,
+    })
+}
+
+/// Read a named tensor as f32 (wrapper: f64→f32; block: direct).
+fn weight_get(m: &ModelWeightsF32, name: &str) -> Vec<f32> {
+    if let Some(w) = wrapper_ref(m, name) {
+        return w.iter().map(|&x| x as f32).collect();
+    }
+    let (grp, i, field) = parse_block(name);
+    block_field_f32(&block_group(m, grp)[i], field).clone()
+}
+/// Write a named tensor from f32 (wrapper: f32→f64; block: direct).
+fn weight_set(m: &mut ModelWeightsF32, name: &str, data: &[f32]) {
+    if let Some(w) = wrapper_mut(m, name) {
+        *w = data.iter().map(|&x| x as f64).collect();
+        return;
+    }
+    let (grp, i, field) = parse_block(name);
+    block_field_f32_mut(&mut block_group_mut(m, grp)[i], field).copy_from_slice(data);
+}
+/// Read a named gradient as f32.
+fn grad_get(g: &ModelGradsF32, name: &str) -> Vec<f32> {
+    if let Some(w) = grad_wrapper_ref(g, name) {
+        return w.iter().map(|&x| x as f32).collect();
+    }
+    let (grp, i, field) = parse_block(name);
+    grad_block_field_f32(&grad_group(g, grp)[i], field).clone()
+}
+/// Parse `"grp.i.field"` → `(grp, i, field)`.
+fn parse_block(name: &str) -> (&str, usize, &str) {
+    let mut it = name.splitn(3, '.');
+    let grp = it.next().unwrap();
+    let i: usize = it.next().unwrap().parse().unwrap();
+    let field = it.next().unwrap();
+    (grp, i, field)
+}
+
+fn zero_block(c: &Cfg) -> WeightsF32 {
+    let z = |n: usize| vec![0f32; n];
+    WeightsF32 {
         wq: z(block_size(c, "wq")), wk: z(block_size(c, "wk")), wv: z(block_size(c, "wv")), wo: z(block_size(c, "wo")),
         w1: z(block_size(c, "w1")), w2: z(block_size(c, "w2")), w3: z(block_size(c, "w3")),
         nq: z(block_size(c, "nq")), nk: z(block_size(c, "nk")),
@@ -544,10 +607,10 @@ fn zero_block(c: &Cfg) -> Weights {
 }
 
 /// All-zero weights of the right shape (filled by `write_weight` / `init`).
-pub fn zero_weights(c: &Cfg) -> ModelWeights {
+pub fn zero_weights(c: &Cfg) -> ModelWeightsF32 {
     let (dim, cdim, pd, cf) = (c.dim, c.cdim(), c.patch_dim(), c.cap_feat_dim);
     let z = |n: usize| vec![0f64; n];
-    ModelWeights {
+    ModelWeightsF32 {
         t0_w: z(1024 * 256), t0_b: z(1024), t2_w: z(cdim * 1024), t2_b: z(cdim),
         xemb_w: z(dim * pd), xemb_b: z(dim), capn_w: z(cf), cap1_w: z(dim * cf), cap1_b: z(dim),
         noise_ref: (0..c.n_refiner).map(|_| zero_block(c)).collect(),
@@ -594,21 +657,21 @@ impl ModelConfig for Cfg {
 pub struct ZTrainModel {
     cfg: Cfg,
     trainer: DeviceTrainer,
-    weights: RefCell<ModelWeights>,
+    weights: RefCell<ModelWeightsF32>,
     names: Vec<String>,
     idx: HashMap<String, usize>,
-    grad_acc: RefCell<Vec<Vec<f64>>>,
-    stash: RefCell<Option<ModelGrads>>,
+    grad_acc: RefCell<Vec<Vec<f32>>>,
+    stash: RefCell<Option<ModelGradsF32>>,
     batch: RefCell<Option<Batch>>,
     loss: RefCell<f32>,
 }
 
 impl ZTrainModel {
-    pub fn from_weights(cfg: Cfg, weights: ModelWeights) -> ZTrainModel {
+    pub fn from_weights(cfg: Cfg, weights: ModelWeightsF32) -> ZTrainModel {
         let layout = param_layout(&cfg);
         let names: Vec<String> = layout.iter().map(|(n, _)| n.clone()).collect();
         let idx = names.iter().cloned().enumerate().map(|(i, n)| (n, i)).collect();
-        let grad_acc = layout.iter().map(|(_, s)| vec![0f64; *s]).collect();
+        let grad_acc = layout.iter().map(|(_, s)| vec![0f32; *s]).collect();
         ZTrainModel {
             cfg,
             trainer: DeviceTrainer::new(cfg),
@@ -660,8 +723,8 @@ impl Model for ZTrainModel {
         let stash = self.stash.borrow();
         let g = stash.as_ref().expect("ZTrainModel::backward before forward");
         let mut acc = self.grad_acc.borrow_mut();
-        for (slot, gt) in acc.iter_mut().zip(grads_flat(g)) {
-            for (a, b) in slot.iter_mut().zip(gt) {
+        for (name, slot) in self.names.iter().zip(acc.iter_mut()) {
+            for (a, b) in slot.iter_mut().zip(grad_get(g, name)) {
                 *a += b;
             }
         }
@@ -681,21 +744,14 @@ impl Model for ZTrainModel {
         self.names.clone()
     }
     fn read_weight(&self, name: &str) -> Vec<f32> {
-        let i = self.idx[name];
-        weights_flat_ref(&self.weights.borrow())[i].iter().map(|&x| x as f32).collect()
+        weight_get(&self.weights.borrow(), name)
     }
     fn write_weight(&self, name: &str, data: &[f32]) {
-        let i = self.idx[name];
-        let mut w = self.weights.borrow_mut();
-        let t = weights_flat_mut(&mut w).into_iter().nth(i).unwrap();
-        assert_eq!(t.len(), data.len(), "write_weight {name}: len mismatch");
-        for (dst, &src) in t.iter_mut().zip(data) {
-            *dst = src as f64;
-        }
+        weight_set(&mut self.weights.borrow_mut(), name, data);
     }
     fn read_grad(&self, name: &str) -> Vec<f32> {
         let i = self.idx[name];
-        self.grad_acc.borrow()[i].iter().map(|&x| x as f32).collect()
+        self.grad_acc.borrow()[i].clone()
     }
     fn logits_all(&self, _tokens: &[u32]) -> Option<Vec<f32>> {
         None
