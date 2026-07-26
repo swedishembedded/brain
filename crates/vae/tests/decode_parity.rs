@@ -16,8 +16,6 @@ use std::path::Path;
 
 use vae::{VaeConfig, VaeDecoder};
 
-const DEFAULT_VAE: &str =
-    "/data/workspace/resources/image-models/z-image/weights/vae/diffusion_pytorch_model.safetensors";
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/zimage_vae_decode.safetensors");
 
 fn load_tensors(path: &str) -> HashMap<String, (Vec<usize>, Vec<f32>)> {
@@ -50,9 +48,15 @@ fn psnr(a: &[f32], b: &[f32]) -> f64 {
 
 #[test]
 fn zimage_vae_decode_matches_diffusers() {
-    let vae_path = std::env::var("BRAIN_ZIMAGE_VAE").unwrap_or_else(|_| DEFAULT_VAE.to_string());
+    let vae_path = match std::env::var("BRAIN_ZIMAGE_VAE") {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!("SKIP: set BRAIN_ZIMAGE_VAE to the Z-Image vae/ safetensors");
+            return;
+        }
+    };
     if !Path::new(&vae_path).exists() {
-        eprintln!("SKIP: reference VAE weights not found at {vae_path} (set BRAIN_ZIMAGE_VAE)");
+        eprintln!("SKIP: BRAIN_ZIMAGE_VAE={vae_path} not found");
         return;
     }
 

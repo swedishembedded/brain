@@ -15,8 +15,12 @@ import torch
 from diffusers import AutoencoderKL
 from safetensors.torch import load_file, save_file
 
-VAE_DIR = "/data/workspace/resources/image-models/z-image/weights/vae"
-OUT = "/data/workspace/brain/crates/vae/tests/golden/zimage_vae_decode.safetensors"
+if len(sys.argv) < 2:
+    sys.exit("usage: vae_dump_reference.py <vae_dir> [out.safetensors]\n"
+             "  <vae_dir>: diffusers vae/ dir (config.json + diffusion_pytorch_model.safetensors)")
+VAE_DIR = sys.argv[1]
+OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
+    os.path.dirname(__file__), "..", "crates", "vae", "tests", "golden", "zimage_vae_decode.safetensors")
 
 def main():
     cfg = json.load(open(os.path.join(VAE_DIR, "config.json")))

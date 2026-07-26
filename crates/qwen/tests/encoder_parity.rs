@@ -17,7 +17,6 @@ use std::path::Path;
 
 use qwen::{QwenConfig, Qwen};
 
-const DEFAULT_WEIGHTS: &str = "/data/workspace/resources/image-models/common/qwen3-4b-text-encoder/split_files/text_encoders/qwen_3_4b.safetensors";
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/qwen3_4b_encoder.safetensors");
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -42,9 +41,15 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
 
 #[test]
 fn qwen3_4b_penultimate_hidden_matches_transformers() {
-    let wpath = std::env::var("BRAIN_QWEN3_4B").unwrap_or_else(|_| DEFAULT_WEIGHTS.to_string());
+    let wpath = match std::env::var("BRAIN_QWEN3_4B") {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!("SKIP: set BRAIN_QWEN3_4B to the Qwen3-4B safetensors");
+            return;
+        }
+    };
     if !Path::new(&wpath).exists() {
-        eprintln!("SKIP: Qwen3-4B weights not found at {wpath} (set BRAIN_QWEN3_4B)");
+        eprintln!("SKIP: BRAIN_QWEN3_4B={wpath} not found");
         return;
     }
 

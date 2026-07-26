@@ -16,9 +16,13 @@ import torch
 from transformers import Qwen3ForCausalLM, Qwen3Config
 from safetensors.torch import load_file, save_file
 
-ENC_DIR = "/data/workspace/resources/image-models/z-image/weights/text_encoder"
-WEIGHTS = "/data/workspace/resources/image-models/common/qwen3-4b-text-encoder/split_files/text_encoders/qwen_3_4b.safetensors"
-OUT = "/data/workspace/brain/crates/qwen/tests/golden/qwen3_4b_encoder.safetensors"
+if len(sys.argv) < 3:
+    sys.exit("usage: qwen_encoder_dump_reference.py <enc_config_dir> <weights.safetensors> [out.safetensors]\n"
+             "  <enc_config_dir>: dir with the Qwen3-4B config.json; <weights>: the encoder safetensors")
+ENC_DIR = sys.argv[1]
+WEIGHTS = sys.argv[2]
+OUT = sys.argv[3] if len(sys.argv) > 3 else os.path.join(
+    os.path.dirname(__file__), "..", "crates", "qwen", "tests", "golden", "qwen3_4b_encoder.safetensors")
 
 # A fixed, arbitrary token sequence (valid ids < vocab 151936).
 TOKENS = [9707, 11, 419, 374, 264, 2613, 1273, 13]
