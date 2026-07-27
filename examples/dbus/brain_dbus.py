@@ -19,8 +19,10 @@ import os
 import sys
 from pathlib import Path
 
-from brain_dbus_client import BrainDBus, read_fd
-from brain_image import save_ppm
+# Use the reusable client from the brain-py package (run straight from the repo).
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.dbus import BrainDBus, read_fd  # noqa: E402
+from brain_py.image import save_ppm  # noqa: E402
 
 OUT = Path(os.environ.get("OUT", "/tmp"))
 

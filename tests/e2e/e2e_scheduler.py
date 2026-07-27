@@ -29,10 +29,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Dogfood the shipped D-Bus client + image helpers.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples" / "dbus"))
-from brain_dbus_client import BrainDBus, read_fd, sealed_memfd  # noqa: E402
-from brain_image import draw_boxes, save_ppm  # noqa: E402
+# Dogfood the reusable brain-py D-Bus client + image helpers.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.dbus import BrainDBus, read_fd, sealed_memfd  # noqa: E402
+from brain_py.image import draw_boxes, save_ppm  # noqa: E402
 
 OUT = Path(os.environ.get("OUT", "/tmp/brain_e2e"))
 SIZE = int(os.environ.get("SIZE", "256"))
