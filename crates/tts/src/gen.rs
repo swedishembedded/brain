@@ -61,6 +61,17 @@ const PIPELINES: &[(&str, &str)] = &[
     ("rope_at", kernels::ROPE_AT),
 ];
 
+/// Which position-dependent uniform a cached decode step needs refreshed each token.
+#[derive(Clone, Copy)]
+enum PosUniform {
+    RopeQ,
+    RopeK,
+    Append,
+    Scores,
+    Softmax,
+    Apply,
+}
+
 /// Per-layer / shared GPU scratch (reused across all layers since the forward is
 /// strictly sequential and only the final hidden state is read back).
 struct Scratch {
@@ -98,6 +109,9 @@ pub struct TalkerGen {
     vcache: Vec<DeviceBuffer>,
     // Next absolute position the incremental `step` will decode (cache fill level).
     dec_pos: std::cell::Cell<u32>,
+    // Cached decode tape (built once, reused every token) + the position-dependent
+    // uniform buffers to refresh per step — eliminates per-token tape rebuilding.
+    dec_cache: std::cell::RefCell<Option<(Vec<Step>, Vec<(DeviceBuffer, PosUniform)>)>>,
     // CPU tables.
     pub text: TextProjection,
     codec_embedding: Vec<f32>, // talker codec table [vocab, d] (= tok.weight)
@@ -250,6 +264,7 @@ impl TalkerGen {
             kcache,
             vcache,
             dec_pos: std::cell::Cell::new(0),
+            dec_cache: std::cell::RefCell::new(None),
             text,
             codec_embedding,
             codec_head,
@@ -310,7 +325,7 @@ impl TalkerGen {
             out: 0,
             text_vocab: 0,
         };
-        TalkerGen { cfg, gpu, ps, max_t, res, sc, kcache, vcache, dec_pos: std::cell::Cell::new(0), text, codec_embedding: Vec::new(), codec_head: Vec::new() }
+        TalkerGen { cfg, gpu, ps, max_t, res, sc, kcache, vcache, dec_pos: std::cell::Cell::new(0), dec_cache: std::cell::RefCell::new(None), text, codec_embedding: Vec::new(), codec_head: Vec::new() }
     }
 
     /// d_model.
@@ -406,9 +421,105 @@ impl TalkerGen {
     /// backend `Gpu` selected (GPU or the wgsl-cpu JIT) — one engine, any device.
     pub fn step(&self, embed: &[f32]) -> Vec<f32> {
         let pos = self.dec_pos.get();
-        let hidden = self.decode_at(embed, pos);
+        let hidden = self.decode_cached(embed, pos);
         self.dec_pos.set(pos + 1);
         hidden
+    }
+
+    /// Position-dependent uniform contents for a cached decode step at `pos`.
+    fn pu_params(&self, k: PosUniform, pos: u32) -> Vec<u32> {
+        let c = &self.cfg;
+        let (hd, hq, hkv) = (c.head_dim, c.q_dim(), c.kv_dim());
+        let (nh, nkv) = (c.n_heads, c.n_kv_heads);
+        let group = nh / nkv;
+        let cap = self.max_t;
+        let t = pos + 1;
+        let scale = (1.0f32 / (hd as f32).sqrt()).to_bits();
+        let theta = c.rope_theta.to_bits();
+        match k {
+            PosUniform::RopeQ => vec![1, nh, hd, hq, 0, pos, theta],
+            PosUniform::RopeK => vec![1, nkv, hd, hkv, 0, pos, theta],
+            PosUniform::Append => vec![hkv, pos],
+            PosUniform::Scores => vec![nh, group, hd, t, cap, hkv, scale],
+            PosUniform::Softmax => vec![nh, t, cap],
+            PosUniform::Apply => vec![nh, group, hd, t, cap, hkv],
+        }
+    }
+
+    /// Build the decode tape ONCE: constant-shape steps bake their uniforms; the
+    /// seven position-dependent steps per layer bind reusable uniform buffers that
+    /// [`Self::decode_cached`] refreshes each token. Reused across all tokens, this
+    /// removes the ~34ms/token host tape-rebuild the profiler flagged.
+    fn build_dec_cache(&self) -> (Vec<Step>, Vec<(DeviceBuffer, PosUniform)>) {
+        let c = &self.cfg;
+        let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
+        let (hq, hkv) = (c.q_dim(), c.kv_dim());
+        let (nh, nkv) = (c.n_heads, c.n_kv_heads);
+        let half = hd / 2;
+        let cap = self.max_t;
+        let g = &self.gpu;
+        let sc = &self.sc;
+        let ids = only_fwd_ids();
+        let w = |name: &str| self.ps.w(name);
+        let mut s: Vec<Step> = Vec::new();
+        let mut pus: Vec<(DeviceBuffer, PosUniform)> = Vec::new();
+        // A pos-dependent step: allocate its reusable uniform, record via step_buf,
+        // return both so the caller pushes into `s` and `pus` (no captured borrows).
+        let posstep = |kind: usize, nfields: usize, bufs: &[&DeviceBuffer], threads: u32| -> (Step, DeviceBuffer) {
+            let ub = g.uniform_dynamic(nfields);
+            let st = g.step_buf(kind, &ub, bufs, threads);
+            (st, ub)
+        };
+        let mut add_pos = |s: &mut Vec<Step>, pus: &mut Vec<(DeviceBuffer, PosUniform)>, pair: (Step, DeviceBuffer), pu: PosUniform| {
+            s.push(pair.0);
+            pus.push((pair.1, pu));
+        };
+        for l in 0..c.n_layers as usize {
+            let p = |name: &str| format!("blocks.{l}.{name}");
+            s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, 1));
+            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre], &[1, d, hq], hq));
+            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre], &[1, d, hkv], hkv));
+            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wv.weight")), &sc.v], &[1, d, hkv], hkv));
+            s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh));
+            s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv));
+            add_pos(&mut s, &mut pus, posstep(ROPE_AT, 7, &[&sc.q], nh * half), PosUniform::RopeQ);
+            add_pos(&mut s, &mut pus, posstep(ROPE_AT, 7, &[&sc.k], nkv * half), PosUniform::RopeK);
+            add_pos(&mut s, &mut pus, posstep(KV_APPEND, 2, &[&sc.k, &self.kcache[l]], hkv), PosUniform::Append);
+            add_pos(&mut s, &mut pus, posstep(KV_APPEND, 2, &[&sc.v, &self.vcache[l]], hkv), PosUniform::Append);
+            add_pos(&mut s, &mut pus, posstep(ATTN_DECODE_SCORES, 7, &[&sc.q, &self.kcache[l], &sc.scores], nh * cap), PosUniform::Scores);
+            add_pos(&mut s, &mut pus, posstep(DECODE_SOFTMAX, 3, &[&sc.scores, &sc.probs], nh), PosUniform::Softmax);
+            add_pos(&mut s, &mut pus, posstep(ATTN_DECODE_APPLY, 6, &[&sc.probs, &self.vcache[l], &sc.ctx], nh * hd), PosUniform::Apply);
+            s.push(g.step(MATMUL, &[&sc.ctx, w(&p("attn.wo.weight")), &sc.proj], &[1, hq, d], d));
+            s.push(g.step(ADD2, &[&self.res[l], &sc.proj, &sc.xmid], &[d], d));
+            s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, 1));
+            s.push(g.step(MATMUL, &[&sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre], &[1, d, ff], ff));
+            s.push(g.step(MATMUL, &[&sc.xn2, w(&p("mlp.up.weight")), &sc.up], &[1, d, ff], ff));
+            s.push(block::swiglu_fwd(g, &ids, &sc.gate_pre, &sc.up, &sc.h, ff));
+            s.push(g.step(MATMUL, &[&sc.h, w(&p("mlp.down.weight")), &sc.mlp_out], &[1, ff, d], d));
+            s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &self.res[l + 1]], &[d], d));
+        }
+        let last = c.n_layers as usize;
+        s.push(block::rmsnorm_fwd(g, &ids, &self.res[last], w("norm.weight"), &sc.xn_final, d, 1));
+        (s, pus)
+    }
+
+    /// Incremental decode using the cached tape: refresh the position-dependent
+    /// uniforms, submit the prebuilt steps, read the hidden state.
+    fn decode_cached(&self, embed: &[f32], pos: u32) -> Vec<f32> {
+        assert_eq!(embed.len(), self.cfg.d_model as usize, "step embed must be [d_model]");
+        assert!(pos < self.max_t, "decode pos {pos} exceeds max_t {}", self.max_t);
+        if self.dec_cache.borrow().is_none() {
+            *self.dec_cache.borrow_mut() = Some(self.build_dec_cache());
+        }
+        let g = &self.gpu;
+        g.write(&self.res[0], bytemuck::cast_slice(embed));
+        let cache = self.dec_cache.borrow();
+        let (steps, pus) = cache.as_ref().unwrap();
+        for (ub, k) in pus {
+            g.write(ub, &self.pu_params(*k, pos));
+        }
+        g.submit(&[], steps);
+        g.read(&self.sc.xn_final, self.cfg.d_model as usize)
     }
 
     /// Record + run the incremental decode tape for one token at absolute `pos`.
