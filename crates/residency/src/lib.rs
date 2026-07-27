@@ -19,9 +19,11 @@
 
 pub mod budget;
 pub mod lru;
+pub mod manager;
 pub mod model;
 pub mod place;
 
+pub use manager::ResidencyManager;
 pub use model::{Instance, ResidentModel};
 
 /// A device that can hold a hot model instance.
