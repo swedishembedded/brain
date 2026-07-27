@@ -11,3 +11,8 @@ path = "src/lib.rs"
 
 [dependencies]
 serde_json.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# On-demand, memory-mapped weight reads (the residency layer's cold tier). Native
+# only — wasm has no mmap and no fs.
+memmap2 = "0.9"

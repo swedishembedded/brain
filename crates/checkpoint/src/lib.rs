@@ -12,6 +12,8 @@ use std::io::Write;
 use serde_json::Value;
 
 pub mod safetensors;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mmap;
 pub mod torchpt;
 pub mod zipread;
 
