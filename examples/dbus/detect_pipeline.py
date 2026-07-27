@@ -51,8 +51,8 @@ def detect(brain: BrainDBus, image: bytes) -> list[dict]:
     return out.result.get("detections", [])
 
 
-def annotate(image: bytes, detections: list[dict], path: Path) -> None:
-    """Draw labeled boxes over the detections and save a PNG."""
+def annotate(image: bytes, detections: list[dict]):
+    """Return a PIL image with labeled boxes drawn over the detections."""
     from PIL import ImageDraw
 
     img = to_pil(image, SIZE, SIZE)
@@ -61,7 +61,7 @@ def annotate(image: bytes, detections: list[dict], path: Path) -> None:
         x1, y1, x2, y2 = d["bbox"]
         draw.rectangle([x1, y1, x2, y2], outline=(255, 40, 40), width=3)
         draw.text((x1 + 3, y1 + 3), f"{d['label']} {d['conf']:.2f}", fill=(255, 255, 0))
-    img.save(path)
+    return img
 
 
 def main() -> int:
@@ -74,21 +74,26 @@ def main() -> int:
                 print(f"FATAL: '{need}' not served (set its weights env)", file=sys.stderr)
                 return 2
 
-        print(f"[generate] z-image {SIZE}x{SIZE}: {PROMPT!r}")
+        # Step 1 — generate. Save the raw z-image output.
+        print(f"[1/3 generate] z-image {SIZE}x{SIZE}: {PROMPT!r}")
         t = time.perf_counter()
         image = generate(brain)
         gen_s = time.perf_counter() - t
-        print(f"[generate] done in {gen_s:.1f}s")
+        gen_path = OUT / "step1_generated.png"
+        to_pil(image, SIZE, SIZE).save(gen_path)
+        print(f"[1/3 generate] {gen_s:.1f}s -> {gen_path}")
 
+        # Step 2 — detect (over D-Bus, image passed as an fd).
         t = time.perf_counter()
         detections = detect(brain, image)
         det_s = time.perf_counter() - t
         summary = ", ".join(f"{d['label']}({d['conf']:.2f})" for d in detections)
-        print(f"[detect] {len(detections)} objects in {det_s:.2f}s: {summary}")
+        print(f"[2/3 detect] {len(detections)} objects in {det_s:.2f}s: {summary}")
 
-        out_path = OUT / "pipeline_boxes.png"
-        annotate(image, detections, out_path)
-        print(f"[draw] labeled boxes -> {out_path}")
+        # Step 3 — annotate. Save the final labeled image.
+        box_path = OUT / "step3_boxes.png"
+        annotate(image, detections).save(box_path)
+        print(f"[3/3 draw] labeled boxes -> {box_path}")
         print("stats:", brain.stats())
     print("OK")
     return 0

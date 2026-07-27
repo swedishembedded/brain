@@ -95,40 +95,88 @@ impl ResidentModel for YoloResident {
         MemCost::new(0, 128 << 20)
     }
     fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
-        Ok(Box::new(YoloInstance { yolo: yolo::Yolo::load(&self.path, 1) }))
+        // `BRAIN_YOLO_BATCH` (default 1) sets the forward batch: >1 enables a TRUE
+        // batched forward (one detect over N images) when the scheduler groups jobs.
+        let batch = std::env::var("BRAIN_YOLO_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(1u32).max(1);
+        Ok(Box::new(YoloInstance { yolo: yolo::Yolo::load(&self.path, batch), batch: batch as usize }))
     }
 }
 
 struct YoloInstance {
     yolo: yolo::Yolo,
+    batch: usize,
+}
+
+/// Decode an image blob (HWC f32 + `{w,h}` meta) into `(pixels, w, h)`.
+fn image_of(inv: &Invocation) -> Result<(Vec<f32>, u32, u32), String> {
+    let blob = inv.get_blob("image").ok_or("yolo detect: missing input 'image'")?;
+    let w = blob.meta.get("w").and_then(|v| v.as_u64()).ok_or("yolo detect: image meta needs w")? as u32;
+    let h = blob.meta.get("h").and_then(|v| v.as_u64()).ok_or("yolo detect: image meta needs h")? as u32;
+    let hwc: Vec<f32> = blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+    Ok((hwc, w, h))
+}
+
+fn detections_outcome(dets: &[[f32; 6]]) -> Outcome {
+    let objects: Vec<Value> = dets
+        .iter()
+        .map(|d| {
+            let cls = d[5] as usize;
+            json!({"bbox": [d[0], d[1], d[2], d[3]], "conf": d[4], "class": cls, "label": COCO.get(cls).copied().unwrap_or("?")})
+        })
+        .collect();
+    Outcome::new().set("count", json!(objects.len())).set("detections", json!(objects))
 }
 
 impl Instance for YoloInstance {
-    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let blob = inv.get_blob("image").ok_or("yolo detect: missing input 'image'")?;
-        let (w, h) = (
-            blob.meta.get("w").and_then(|v| v.as_u64()).ok_or("yolo detect: image meta needs w")? as u32,
-            blob.meta.get("h").and_then(|v| v.as_u64()).ok_or("yolo detect: image meta needs h")? as u32,
-        );
-        // Input is interleaved-RGB HWC f32 in [0,1] (the brain image convention) —
-        // exactly what Yolo::detect expects.
-        let hwc: Vec<f32> = blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
-        let conf = inv.get_f64("conf").unwrap_or(0.25) as f32;
-        let iou = inv.get_f64("iou").unwrap_or(0.45) as f32;
-        let dets = self.yolo.detect(&hwc, w, h, conf, iou);
-        let objects: Vec<Value> = dets
-            .iter()
-            .map(|d| {
-                let cls = d[5] as usize;
-                json!({
-                    "bbox": [d[0], d[1], d[2], d[3]],
-                    "conf": d[4],
-                    "class": cls,
-                    "label": COCO.get(cls).copied().unwrap_or("?"),
-                })
-            })
-            .collect();
-        Ok(Outcome::new().set("count", json!(objects.len())).set("detections", json!(objects)))
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        self.run_batch(action, std::slice::from_ref(inv), progress).pop().unwrap()
+    }
+
+    /// TRUE batched forward: chunk the invocations to the model's batch and run one
+    /// `detect_batch` per chunk (the last chunk padded to the batch, its padding
+    /// results discarded). With batch 1 this is one forward per image.
+    fn run_batch(&mut self, _action: &str, invs: &[Invocation], _progress: &mut dyn FnMut(Progress)) -> Vec<ActionResult> {
+        let b = self.batch;
+        let mut out: Vec<ActionResult> = Vec::with_capacity(invs.len());
+        for chunk in invs.chunks(b) {
+            // Decode this chunk's images (errors become per-job error results).
+            let mut imgs: Vec<(Vec<f32>, u32, u32)> = Vec::with_capacity(chunk.len());
+            let mut errs: Vec<Option<String>> = Vec::with_capacity(chunk.len());
+            for inv in chunk {
+                match image_of(inv) {
+                    Ok(im) => {
+                        imgs.push(im);
+                        errs.push(None);
+                    }
+                    Err(e) => errs.push(Some(e)),
+                }
+            }
+            if imgs.is_empty() {
+                out.extend(errs.into_iter().map(|e| Err(e.unwrap_or_default())));
+                continue;
+            }
+            // NMS thresholds from the first valid invocation (post-forward, per-image).
+            let (conf, iou) = chunk
+                .iter()
+                .find_map(|i| i.get_blob("image").map(|_| (i.get_f64("conf").unwrap_or(0.25) as f32, i.get_f64("iou").unwrap_or(0.45) as f32)))
+                .unwrap_or((0.25, 0.45));
+            // Pad to the model's batch by repeating the last image; drop the padding.
+            let last = imgs.last().unwrap().clone();
+            while imgs.len() < b {
+                imgs.push(last.clone());
+            }
+            let refs: Vec<(&[f32], u32, u32)> = imgs.iter().map(|(p, w, h)| (p.as_slice(), *w, *h)).collect();
+            let batched = self.yolo.detect_batch(&refs, conf, iou);
+            // Zip results back to the (possibly-erroring) chunk jobs, in order.
+            let mut valid = batched.into_iter();
+            for e in errs {
+                match e {
+                    Some(msg) => out.push(Err(msg)),
+                    None => out.push(Ok(detections_outcome(&valid.next().unwrap_or_default()))),
+                }
+            }
+        }
+        out
     }
 }
 
