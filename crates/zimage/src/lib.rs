@@ -22,6 +22,7 @@ pub mod block;
 pub mod dataset;
 pub mod dev;
 pub mod devgrad;
+pub mod finetune;
 pub mod grad;
 pub mod import;
 pub mod lora;
