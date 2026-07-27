@@ -32,6 +32,10 @@ const KV_APPEND_B: usize = 7;
 const SCORES_B: usize = 8;
 const SOFTMAX_B: usize = 9;
 const APPLY_B: usize = 10;
+// Causal attention over a whole prompt (batched prefill).
+const GQA_SCORES: usize = 11;
+const ATTN_SOFTMAX: usize = 12;
+const GQA_APPLY: usize = 13;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -45,6 +49,9 @@ const PIPELINES: &[(&str, &str)] = &[
     ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
     ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
     ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
+    ("gqa_scores", kernels::GQA_SCORES),
+    ("attn_softmax", kernels::ATTN_SOFTMAX),
+    ("gqa_apply", kernels::GQA_APPLY),
 ];
 
 fn ids() -> KernelIds {
@@ -57,9 +64,9 @@ fn ids() -> KernelIds {
         rmsnorm_dw: RMSNORM,
         rope: ROPE_PAGED,
         rope_bwd: ROPE_PAGED,
-        gqa_scores: 0,
-        gqa_apply: 0,
-        attn_softmax: 0,
+        gqa_scores: GQA_SCORES,
+        gqa_apply: GQA_APPLY,
+        attn_softmax: ATTN_SOFTMAX,
         gqa_dscores: 0,
         gqa_dv: 0,
         gqa_dq: 0,
@@ -141,6 +148,7 @@ pub struct Engine {
     block_size: u32,
     max_batch: u32,
     max_blocks_per_seq: u32,
+    max_prefill: u32,
     cap: u32,
     alloc: BlockAllocator,
     pool_k: Vec<DeviceBuffer>,
@@ -153,7 +161,7 @@ impl Engine {
     /// Build from an in-memory decoder weight map (tests / embedded weights).
     /// `num_blocks` physical blocks of `block_size` tokens, up to `max_batch`
     /// concurrent sequences of at most `max_blocks_per_seq * block_size` tokens.
-    pub fn from_map(cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32) -> Engine {
+    pub fn from_map(cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32) -> Engine {
         let gpu = Gpu::new(PIPELINES);
         let roles = decoder_param_list(&cfg).into_iter().map(|(n, c)| (n, c, paramstore::Role::Frozen)).collect();
         let ps = ParamStore::new_with_roles(&gpu, roles, weights);
@@ -161,10 +169,13 @@ impl Engine {
 
         let (d, ff) = (cfg.d_model as u64, cfg.d_ff as u64);
         let (hq, hkv) = (cfg.q_dim() as u64, cfg.kv_dim() as u64);
-        let b = max_batch as u64;
+        // Scratch rows serve both decode (max_batch sequences) and prefill (a whole
+        // prompt of up to max_prefill tokens processed in one forward).
+        let b = max_batch.max(max_prefill) as u64;
         let cap = max_blocks_per_seq * block_size;
         let nh = cfg.n_heads as u64;
-        let bcap = b * nh * cap as u64;
+        // scores/probs hold decode [rows,nh,cap] OR prefill causal [nh,N,N].
+        let bcap = (b * nh * cap as u64).max(max_prefill as u64 * max_prefill as u64 * nh);
         let st = |x: u64| gpu.storage(x);
 
         let mut res = Vec::new();
@@ -210,6 +221,7 @@ impl Engine {
             block_size,
             max_batch,
             max_blocks_per_seq,
+            max_prefill,
             cap,
             alloc: BlockAllocator::new(num_blocks, block_size),
             pool_k,
@@ -300,6 +312,74 @@ impl Engine {
         g.read(&sc.xn_final, (b * d) as usize)
     }
 
+    /// **Batched prefill**: process a whole prompt (`n` tokens) in ONE causal
+    /// forward, scattering each layer's K/V into the sequence's paged blocks for
+    /// later decode, and return the last token's final-norm hidden `[d_model]`.
+    /// Replaces feeding the prompt token-by-token (n forwards → 1).
+    pub(crate) fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
+        let c = &self.cfg;
+        let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
+        let (hq, hkv) = (c.q_dim(), c.kv_dim());
+        let (nh, nkv) = (c.n_heads, c.n_kv_heads);
+        let half = hd / 2;
+        let n = prompt.len() as u32;
+        assert!(n <= self.max_prefill, "prompt {n} exceeds max_prefill {}", self.max_prefill);
+        assert!(table.is_empty(), "prefill expects a fresh sequence");
+        let bs = self.block_size;
+        let theta = c.rope_theta;
+
+        // Reserve n positions; gather each token's (position, block, offset).
+        table.reserve(n, &mut self.alloc).expect("KV pool exhausted");
+        let (mut positions, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new());
+        for psn in 0..n {
+            let (bl, off) = table.locate(psn, bs);
+            positions.push(psn);
+            blocks.push(bl);
+            offsets.push(off);
+        }
+        let g = &self.gpu;
+        g.write(&self.sc.tok_buf, prompt);
+        g.write(&self.sc.pos_buf, &positions);
+        g.write(&self.sc.blk_buf, &blocks);
+        g.write(&self.sc.off_buf, &offsets);
+
+        let kids = ids();
+        let sc = &self.sc;
+        let w = |name: &str| self.ps.w(name);
+        let ga = block::Gqa { b: 1, t: n, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
+        let mut s: Vec<Step> = Vec::new();
+        s.push(g.step(EMBED, &[&sc.tok_buf, w("tok.weight"), &sc.res[0]], &[d, n], d * n));
+        for l in 0..c.n_layers as usize {
+            let p = |name: &str| format!("blocks.{l}.{name}");
+            s.push(block::rmsnorm_fwd(g, &kids, &sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, n));
+            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre], &[n, d, hq], n * hq));
+            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre], &[n, d, hkv], n * hkv));
+            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wv.weight")), &sc.v], &[n, d, hkv], n * hkv));
+            s.push(block::rmsnorm_fwd(g, &kids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, n * nh));
+            s.push(block::rmsnorm_fwd(g, &kids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, n * nkv));
+            s.push(g.step(ROPE_PAGED, &[&sc.q, &sc.pos_buf], &[n, nh, hd, hq, fb(theta)], n * nh * half));
+            s.push(g.step(ROPE_PAGED, &[&sc.k, &sc.pos_buf], &[n, nkv, hd, hkv, fb(theta)], n * nkv * half));
+            // Scatter the prompt's K/V into the paged pool for the decode phase.
+            s.push(g.step(KV_APPEND_B, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.pool_k[l]], &[n, hkv, bs], n * hkv));
+            s.push(g.step(KV_APPEND_B, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.pool_v[l]], &[n, hkv, bs], n * hkv));
+            // Causal attention among the prompt tokens (contiguous q/k/v).
+            s.extend(block::gqa_fwd(g, &kids, &ga, &sc.q, &sc.k, &sc.v, &sc.scores, &sc.probs, &sc.ctx));
+            s.push(g.step(MATMUL, &[&sc.ctx, w(&p("attn.wo.weight")), &sc.proj], &[n, hq, d], n * d));
+            s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[n * d], n * d));
+            s.push(block::rmsnorm_fwd(g, &kids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, n));
+            s.push(g.step(MATMUL, &[&sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre], &[n, d, ff], n * ff));
+            s.push(g.step(MATMUL, &[&sc.xn2, w(&p("mlp.up.weight")), &sc.up], &[n, d, ff], n * ff));
+            s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, n * ff));
+            s.push(g.step(MATMUL, &[&sc.h, w(&p("mlp.down.weight")), &sc.mlp_out], &[n, ff, d], n * d));
+            s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &sc.res[l + 1]], &[n * d], n * d));
+        }
+        let last = c.n_layers as usize;
+        s.push(block::rmsnorm_fwd(g, &kids, &sc.res[last], w("norm.weight"), &sc.xn_final, d, n));
+        g.submit(&[], &s);
+        let hidden = g.read(&sc.xn_final, (n * d) as usize);
+        hidden[((n - 1) * d) as usize..].to_vec()
+    }
+
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         let (d, v) = (self.cfg.d_model as usize, self.cfg.vocab as usize);
         (0..v).map(|o| self.head[o * d..o * d + d].iter().zip(hidden).map(|(a, b)| a * b).sum()).collect()
@@ -338,11 +418,7 @@ impl Engine {
         // Prefill each sequence and sample its first token.
         for (i, prompt) in prompts.iter().enumerate() {
             assert!(!prompt.is_empty(), "empty prompt");
-            let mut hidden = Vec::new();
-            for &tok in prompt {
-                let mut one = [&mut seqs[i].table];
-                hidden = self.forward_batched(&mut one, &[tok]);
-            }
+            let hidden = self.prefill(&mut seqs[i].table, prompt);
             let first = Self::argmax(&self.logits(&hidden));
             seqs[i].generated.push(first);
             if Some(first) == eos {
@@ -456,11 +532,7 @@ impl Scheduler {
             }
             let (id, req) = self.waiting.pop_front().unwrap();
             let mut table = BlockTable::new();
-            let mut hidden = Vec::new();
-            for &tok in &req.prompt {
-                let mut one = [&mut table];
-                hidden = self.eng.forward_batched(&mut one, &[tok]);
-            }
+            let hidden = self.eng.prefill(&mut table, &req.prompt);
             let first = Engine::argmax(&self.eng.logits(&hidden));
             let mut r = Running { id, table, generated: vec![first], max_new: req.max_new, eos: req.eos, next_input: first, done: false };
             Self::finish_check(&mut r);
@@ -553,7 +625,7 @@ mod tests {
         let ref1 = crate::sample::generate_kv(&model, &p1, 12, 0.0, 0, None, &mut r1);
 
         // Engine: run both prompts concurrently (batched paged).
-        let mut eng = Engine::from_map(cfg, &map, bs, num_blocks, max_batch, mbt);
+        let mut eng = Engine::from_map(cfg, &map, bs, num_blocks, max_batch, mbt, 32);
         let out = eng.generate_greedy(&[p0.clone(), p1.clone()], 12, None);
 
         assert_eq!(out[0], ref0, "seq0 batched paged != reference");
@@ -580,7 +652,7 @@ mod tests {
             })
             .collect();
 
-        let eng = Engine::from_map(cfg, &map, 4, 64, 4, 8);
+        let eng = Engine::from_map(cfg, &map, 4, 64, 4, 8, 32);
         let mut sched = Scheduler::new(eng, 4);
         let mut out: HashMap<u64, Vec<u32>> = HashMap::new();
 
@@ -631,7 +703,7 @@ mod tests {
         let prompts: Vec<Vec<u32>> = (0..n_req).map(|i| vec![(i as u32 % 200) + 1, 5, 3, 9, 2]).collect();
 
         // Sequential: one request at a time (fresh reuse of one engine's pool).
-        let mut eng_seq = Engine::from_map(cfg.clone(), &map, 16, 512, n_req as u32, 16);
+        let mut eng_seq = Engine::from_map(cfg.clone(), &map, 16, 512, n_req as u32, 16, 32);
         let t0 = std::time::Instant::now();
         for p in &prompts {
             eng_seq.generate_greedy(&[p.clone()], max_new, None);
@@ -639,7 +711,7 @@ mod tests {
         let seq_s = t0.elapsed().as_secs_f64();
 
         // Continuous batching: all requests admitted + decoded together.
-        let eng = Engine::from_map(cfg, &map, 16, 512, n_req as u32, 16);
+        let eng = Engine::from_map(cfg, &map, 16, 512, n_req as u32, 16, 32);
         let mut sched = Scheduler::new(eng, n_req);
         for p in &prompts {
             sched.submit(Request { prompt: p.clone(), max_new, eos: None });
