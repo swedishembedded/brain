@@ -245,7 +245,19 @@ impl HotPipeline {
         };
         drop(qinit);
 
-        progress("building VAE decoder (GPU)");
+        // VAE placement: with the int8 GPU encoder, the encoder card is idle during
+        // decode (encode is step 1, decode is the last step — never concurrent), so
+        // put the VAE there. That frees the DiT card of the VAE's multi-GB decode
+        // activations, raising the max image size (GPU 0 = DiT only). The latent
+        // crosses DiT→VAE through host memory already, so no cross-device GPU copy.
+        // CPU/fp32-split encoders keep the VAE on the DiT card (unchanged).
+        let vae_card = match &enc {
+            Encoder::Gpu8(_) => enc_gpu.clone().unwrap_or_else(|| dit_gpu.clone()),
+            _ => dit_gpu.clone(),
+        };
+        progress(&format!("building VAE decoder (GPU {vae_card})"));
+        std::env::set_var("BRAIN_GPU_INDEX", &vae_card);
+        gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
         let vtensors = tensors_map(checkpoint::safetensors::read(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
         let vae = VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu"));
 
