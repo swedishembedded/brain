@@ -119,6 +119,12 @@ pub const PAGED_DECODE_SCORES_BATCHED: &str = include_str!("../wgsl/paged_decode
 pub const DECODE_SOFTMAX_BATCHED: &str = include_str!("../wgsl/decode_softmax_batched.wgsl");
 /// `wgsl/paged_decode_apply_batched.wgsl` — batched paged decode (ragged multi-sequence).
 pub const PAGED_DECODE_APPLY_BATCHED: &str = include_str!("../wgsl/paged_decode_apply_batched.wgsl");
+/// `wgsl/paged_kv_append_i8_batched.wgsl` — int8 paged decode (dequant on read).
+pub const PAGED_KV_APPEND_I8_BATCHED: &str = include_str!("../wgsl/paged_kv_append_i8_batched.wgsl");
+/// `wgsl/paged_decode_scores_i8_batched.wgsl` — int8 paged decode (dequant on read).
+pub const PAGED_DECODE_SCORES_I8_BATCHED: &str = include_str!("../wgsl/paged_decode_scores_i8_batched.wgsl");
+/// `wgsl/paged_decode_apply_i8_batched.wgsl` — int8 paged decode (dequant on read).
+pub const PAGED_DECODE_APPLY_I8_BATCHED: &str = include_str!("../wgsl/paged_decode_apply_i8_batched.wgsl");
 /// `wgsl/attn_softmax_bidir.wgsl`
 pub const ATTN_SOFTMAX_BIDIR: &str = include_str!("../wgsl/attn_softmax_bidir.wgsl");
 /// `wgsl/attn_softmax_cross.wgsl`
@@ -627,6 +633,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("paged_decode_scores_batched", PAGED_DECODE_SCORES_BATCHED),
     ("decode_softmax_batched", DECODE_SOFTMAX_BATCHED),
     ("paged_decode_apply_batched", PAGED_DECODE_APPLY_BATCHED),
+    ("paged_kv_append_i8_batched", PAGED_KV_APPEND_I8_BATCHED),
+    ("paged_decode_scores_i8_batched", PAGED_DECODE_SCORES_I8_BATCHED),
+    ("paged_decode_apply_i8_batched", PAGED_DECODE_APPLY_I8_BATCHED),
     ("attn_softmax_bidir", ATTN_SOFTMAX_BIDIR),
     ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
     ("attn_softmax_full", ATTN_SOFTMAX_FULL),
