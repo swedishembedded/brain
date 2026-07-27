@@ -73,6 +73,18 @@ struct Builder<'a> {
     groups: u32,
     steps: Vec<Step>,
     taps: Vec<(String, DeviceBuffer, usize)>,
+    /// Free-list of activation buffers keyed by exact length (words). An `act(len)`
+    /// reuses a buffer of the same length whose last read is already recorded, so
+    /// the resident peak is the max *concurrently-live* activation set instead of
+    /// the sum of every activation — the difference between decoding 640² and 1536²
+    /// on a 24 GB card. Reuse is bit-exact: the graph runs its steps in order with
+    /// barriers (as the qwen/zimage scratch reuse relies on), and a buffer is only
+    /// freed after its last consumer step is emitted, so the reusing write always
+    /// follows the last read. Disabled when `taps_on` (taps pin buffers).
+    pool: std::collections::HashMap<u64, Vec<DeviceBuffer>>,
+    /// Record intermediate taps (for parity debugging via `read_tap`). Off by
+    /// default — pins buffers and defeats pooling. Enable with `BRAIN_VAE_TAPS=1`.
+    taps_on: bool,
 }
 
 impl<'a> Builder<'a> {
@@ -82,11 +94,26 @@ impl<'a> Builder<'a> {
     fn dev(&self, name: &str) -> DeviceBuffer {
         self.gpu.storage_init(name, &self.get(name).1)
     }
-    fn act(&self, len: u64) -> DeviceBuffer {
+    /// Allocate an activation buffer of `len` words, reusing a same-length freed
+    /// buffer from the pool when one is available (see [`Builder::pool`]).
+    fn act(&mut self, len: u64) -> DeviceBuffer {
+        if let Some(b) = self.pool.get_mut(&len).and_then(Vec::pop) {
+            return b;
+        }
         self.gpu.storage(len)
     }
+    /// Return an activation buffer to the pool for reuse. MUST be called only after
+    /// the buffer's last read step has been pushed (else a later reuse would clobber
+    /// data a pending step still needs). No-op when pooling is disabled.
+    fn free(&mut self, len: u64, buf: DeviceBuffer) {
+        if !self.taps_on {
+            self.pool.entry(len).or_default().push(buf);
+        }
+    }
     fn tap(&mut self, name: String, buf: &DeviceBuffer, len: u32) {
-        self.taps.push((name, buf.clone(), len as usize));
+        if self.taps_on {
+            self.taps.push((name, buf.clone(), len as usize));
+        }
     }
 
     /// Conv (+bias) `prefix.{weight,bias}`: `x[cin,h,w] → y[cout,ho,wo]`.
@@ -161,6 +188,7 @@ impl<'a> Builder<'a> {
             &[1, c, h, w, g],
             c * h * w,
         ));
+        self.free(2 * g as u64, stats); // last read was GN_APPLY above
         y
     }
 
@@ -194,18 +222,30 @@ impl<'a> Builder<'a> {
         w: u32,
         x: &DeviceBuffer,
     ) -> DeviceBuffer {
-        let r = if cin != cout {
-            self.conv(&format!("{prefix}.conv_shortcut"), cin, cout, 1, 0, h, w, x)
+        let (nin, nout) = ((cin * h * w) as u64, (cout * h * w) as u64);
+        // `r` aliases the input `x` when cin==cout (a residual we must NOT free — the
+        // caller owns `x`); when cin!=cout it is a fresh shortcut-conv buffer we own.
+        let (r, r_owned) = if cin != cout {
+            (self.conv(&format!("{prefix}.conv_shortcut"), cin, cout, 1, 0, h, w, x), true)
         } else {
-            x.clone()
+            (x.clone(), false)
         };
         let n1 = self.gn(&format!("{prefix}.norm1"), cin, h, w, x);
         let s1 = self.silu(cin * h * w, &n1);
+        self.free(nin, n1);
         let c1 = self.conv(&format!("{prefix}.conv1"), cin, cout, 3, 1, h, w, &s1);
+        self.free(nin, s1);
         let n2 = self.gn(&format!("{prefix}.norm2"), cout, h, w, &c1);
+        self.free(nout, c1);
         let s2 = self.silu(cout * h * w, &n2);
+        self.free(nout, n2);
         let c2 = self.conv(&format!("{prefix}.conv2"), cout, cout, 3, 1, h, w, &s2);
-        let out = self.add(cout * h * w, &c2, &r);
+        self.free(nout, s2);
+        let out = self.add(cout * h * w, &c2, &r); // last read of c2 and r
+        self.free(nout, c2);
+        if r_owned {
+            self.free(nout, r);
+        }
         self.tap(prefix.to_string(), &out, cout * h * w);
         out
     }
@@ -245,9 +285,11 @@ impl<'a> Builder<'a> {
             &[1, c, h, w, 3 * c, 1, 1, 0, h, w],
             (3 * c).div_ceil(8) * t.div_ceil(4),
         ));
+        self.free((c * t) as u64, normed); // last read was the qkv conv
         // NCHW [3C,h,w] → NLC rows [T, 3C].
         let qkv = self.act((3 * c * t) as u64);
         self.steps.push(self.gpu.step(K_NCHW_NLC, &[&qkv_chw, &qkv], &[3 * c * t, 3 * c, t], 3 * c * t));
+        self.free((3 * c * t) as u64, qkv_chw);
 
         // Single head, head_dim = C, scale 1/√C (applied in the kernel).
         let scores = self.act((t * t) as u64);
@@ -259,19 +301,26 @@ impl<'a> Builder<'a> {
         ));
         let probs = self.act((t * t) as u64);
         self.steps.push(self.gpu.step(K_ATTN_SOFTMAX, &[&scores, &probs], &[1, 1, t], t));
+        self.free((t * t) as u64, scores);
         let attn_rows = self.act((t * c) as u64);
         self.steps.push(self.gpu.step(
             K_ATTN_APPLY,
-            &[&probs, &qkv, &attn_rows],
+            &[&probs, &qkv, &attn_rows], // last read of both probs and qkv
             &[1, 1, t, c, 3 * c, 2 * c, c],
             t * c,
         ));
+        self.free((t * t) as u64, probs);
+        self.free((3 * c * t) as u64, qkv);
         // NLC rows [T, C] → NCHW [C,h,w].
         let attn_chw = self.act((c * t) as u64);
         self.steps.push(self.gpu.step(K_NLC_NCHW, &[&attn_rows, &attn_chw], &[c * t, c, t], c * t));
+        self.free((t * c) as u64, attn_rows);
 
         let proj = self.conv(&format!("{prefix}.to_out.0"), c, c, 1, 0, h, w, &attn_chw);
-        self.add(c * h * w, x, &proj)
+        self.free((c * t) as u64, attn_chw);
+        let out = self.add(c * h * w, x, &proj); // x is the residual input (caller-owned)
+        self.free((c * h * w) as u64, proj);
+        out
     }
 }
 
@@ -291,23 +340,34 @@ impl VaeDecoder {
             groups: cfg.norm_num_groups,
             steps: vec![],
             taps: vec![],
+            pool: std::collections::HashMap::new(),
+            taps_on: std::env::var("BRAIN_VAE_TAPS").is_ok(),
         };
 
         let z_in = gpu.storage((cfg.latent_channels * h * w) as u64);
         let rc = cfg.reversed_channels();
         let mid_c = *cfg.block_out_channels.last().unwrap();
 
-        // conv_in: latent → highest block channel.
+        // conv_in: latent → highest block channel. `z_in` is the persistent input,
+        // never freed; `xlen` tracks the current `x` length so the previous `x` can
+        // be returned to the pool once the next op has consumed it.
         let mut x = b.conv("decoder.conv_in", cfg.latent_channels, mid_c, 3, 1, h, w, &z_in);
+        let mut xlen = (mid_c * h * w) as u64;
         b.tap("conv_in".into(), &x, mid_c * h * w);
 
         // Mid block: resnet, (optional) attention, resnet.
-        x = b.resnet("decoder.mid_block.resnets.0", mid_c, mid_c, h, w, &x);
+        let nx = b.resnet("decoder.mid_block.resnets.0", mid_c, mid_c, h, w, &x);
+        b.free(xlen, x);
+        x = nx;
         if cfg.mid_block_add_attention {
-            x = b.attn("decoder.mid_block.attentions.0", mid_c, h, w, &x);
+            let nx = b.attn("decoder.mid_block.attentions.0", mid_c, h, w, &x);
+            b.free(xlen, x);
+            x = nx;
             b.tap("mid_attn".into(), &x, mid_c * h * w);
         }
-        x = b.resnet("decoder.mid_block.resnets.1", mid_c, mid_c, h, w, &x);
+        let nx = b.resnet("decoder.mid_block.resnets.1", mid_c, mid_c, h, w, &x);
+        b.free(xlen, x);
+        x = nx;
         b.tap("mid".into(), &x, mid_c * h * w);
 
         // Up blocks: reversed channel schedule; upsample on all but the last.
@@ -318,29 +378,21 @@ impl VaeDecoder {
         for (i, &out_c) in rc.iter().enumerate() {
             for r in 0..n_res {
                 let cin = if r == 0 { prev } else { out_c };
-                x = b.resnet(
-                    &format!("decoder.up_blocks.{i}.resnets.{r}"),
-                    cin,
-                    out_c,
-                    cur_h,
-                    cur_w,
-                    &x,
-                );
+                let nx = b.resnet(&format!("decoder.up_blocks.{i}.resnets.{r}"), cin, out_c, cur_h, cur_w, &x);
+                b.free(xlen, x);
+                x = nx;
+                xlen = (out_c * cur_h * cur_w) as u64;
             }
             if i < n_blocks - 1 {
-                x = b.upsample(out_c, cur_h, cur_w, &x);
+                let nx = b.upsample(out_c, cur_h, cur_w, &x);
+                b.free(xlen, x);
+                x = nx;
                 cur_h *= 2;
                 cur_w *= 2;
-                x = b.conv(
-                    &format!("decoder.up_blocks.{i}.upsamplers.0.conv"),
-                    out_c,
-                    out_c,
-                    3,
-                    1,
-                    cur_h,
-                    cur_w,
-                    &x,
-                );
+                xlen = (out_c * cur_h * cur_w) as u64;
+                let nx = b.conv(&format!("decoder.up_blocks.{i}.upsamplers.0.conv"), out_c, out_c, 3, 1, cur_h, cur_w, &x);
+                b.free(xlen, x);
+                x = nx;
             }
             prev = out_c;
             b.tap(format!("up_block.{i}"), &x, out_c * cur_h * cur_w);
@@ -348,8 +400,12 @@ impl VaeDecoder {
 
         // Head: GroupNorm → SiLU → conv_out.
         let hn = b.gn("decoder.conv_norm_out", prev, cur_h, cur_w, &x);
+        b.free(xlen, x);
+        let hlen = (prev * cur_h * cur_w) as u64;
         let hs = b.silu(prev * cur_h * cur_w, &hn);
+        b.free(hlen, hn);
         let out = b.conv("decoder.conv_out", prev, cfg.out_channels, 3, 1, cur_h, cur_w, &hs);
+        b.free(hlen, hs);
         let out_len = (cfg.out_channels * cur_h * cur_w) as usize;
 
         let Builder { steps, taps, .. } = b;
@@ -402,7 +458,7 @@ impl VaeEncoder {
             Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
             _ => Gpu::new(&KERNELS),
         };
-        let mut b = Builder { gpu: &gpu, t: tensors, eps: cfg.norm_eps, groups: cfg.norm_num_groups, steps: vec![], taps: vec![] };
+        let mut b = Builder { gpu: &gpu, t: tensors, eps: cfg.norm_eps, groups: cfg.norm_num_groups, steps: vec![], taps: vec![], pool: std::collections::HashMap::new(), taps_on: std::env::var("BRAIN_VAE_TAPS").is_ok() };
 
         let img_in = gpu.storage((cfg.in_channels * h * w) as u64);
         let ch = &cfg.block_out_channels;
