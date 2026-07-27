@@ -25,6 +25,16 @@ pub const SILU_GATE: usize = 7;
 pub const ADD: usize = 8;
 pub const BSQ_QUANTIZE: usize = 9;
 pub const MATMUL_TILED: usize = 10;
+// Incremental KV-cache decode kernels (single new token vs the growing cache).
+// Appended after the existing indices so nothing above shifts.
+pub const ATTN_DECODE_SCORES: usize = 11;
+pub const DECODE_SOFTMAX: usize = 12;
+pub const ATTN_DECODE_APPLY: usize = 13;
+pub const KV_APPEND: usize = 14;
+pub const ROPE_AT: usize = 15;
+/// Windowed decode scores: same as `attn_decode_scores` but masks positions
+/// `j < w0` to `-inf` (sliding-window attention over `[w0, t)`).
+pub const ATTN_DECODE_SCORES_WIN: usize = 16;
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -38,6 +48,12 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("add", kernels::ADD),
     ("bsq_quantize", kernels::BSQ_QUANTIZE),
     ("matmul_tiled", kernels::MATMUL_TILED),
+    ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
+    ("decode_softmax", kernels::DECODE_SOFTMAX),
+    ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
+    ("kv_append", kernels::KV_APPEND),
+    ("rope_at", kernels::ROPE_AT),
+    ("attn_decode_scores_win", kernels::ATTN_DECODE_SCORES_WIN),
 ];
 
 /// Workgroups for the tiled GEMM (32×32 output tile) → invocation count.

@@ -93,6 +93,8 @@ pub const ATTN_SCORES_QK: &str = include_str!("../wgsl/attn_scores_qk.wgsl");
 pub const ATTN_SOFTMAX: &str = include_str!("../wgsl/attn_softmax.wgsl");
 /// `wgsl/attn_decode_scores.wgsl` — decode-step single-query GQA attention scores.
 pub const ATTN_DECODE_SCORES: &str = include_str!("../wgsl/attn_decode_scores.wgsl");
+/// `wgsl/attn_decode_scores_win.wgsl` — decode-step scores over a sliding window `[w0, t)`.
+pub const ATTN_DECODE_SCORES_WIN: &str = include_str!("../wgsl/attn_decode_scores_win.wgsl");
 /// `wgsl/decode_softmax.wgsl` — decode-step per-head max-subtracted softmax.
 pub const DECODE_SOFTMAX: &str = include_str!("../wgsl/decode_softmax.wgsl");
 /// `wgsl/attn_decode_apply.wgsl` — decode-step GQA context = probs·V over the cache.
@@ -596,6 +598,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_scores_qk", ATTN_SCORES_QK),
     ("attn_softmax", ATTN_SOFTMAX),
     ("attn_decode_scores", ATTN_DECODE_SCORES),
+    ("attn_decode_scores_win", ATTN_DECODE_SCORES_WIN),
     ("decode_softmax", DECODE_SOFTMAX),
     ("attn_decode_apply", ATTN_DECODE_APPLY),
     ("kv_append", KV_APPEND),

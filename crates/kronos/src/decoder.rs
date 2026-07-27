@@ -326,6 +326,215 @@ impl KronosDecoder {
             cal: self.cal.clone(),
         }
     }
+
+    // ---- GPU/CPU-portable incremental KV-cache decode -----------------------
+    //
+    // The device twin of [`crate::kvcache::HostW::step_token`]: one new `(s1,s2)`
+    // token is embedded, run through the causal decoder with its RoPE'd K/V
+    // appended to a persistent per-layer cache, and attended by a SINGLE query
+    // over the cached keys (sliding window `[w0, t)` where `w0 =
+    // t.saturating_sub(max_context)`). Every stage is expressed in the shared
+    // WGSL op set (matmul/bias/rmsnorm/silu_gate/add + the decode kernels
+    // rope_at/kv_append/attn_decode_*), so it runs on whatever backend `Gpu`
+    // selected — real GPU or the wgsl-cpu JIT (`BRAIN_DEVICE=cpu`). `O(T)` per
+    // token vs `decode_s1`'s `O(T²)` full recompute.
+
+    /// Allocate a fresh GPU KV cache for a rollout of up to `cap` tokens.
+    pub fn new_gpu_cache(&self, cap: usize) -> GpuKvCache {
+        let d = self.cfg.d_model;
+        let heads = self.cfg.n_heads;
+        let k = (0..self.cfg.n_layers).map(|_| self.gpu.storage((cap * d) as u64)).collect();
+        let v = (0..self.cfg.n_layers).map(|_| self.gpu.storage((cap * d) as u64)).collect();
+        GpuKvCache {
+            k,
+            v,
+            ctx: self.gpu.storage((cap * d) as u64),
+            scores: self.gpu.storage((heads * cap) as u64),
+            probs: self.gpu.storage((heads * cap) as u64),
+            cap,
+            pos: 0,
+        }
+    }
+
+    /// RoPE-at-absolute-position over `n_rows` contiguous rows of `buf`
+    /// (`[n_rows, heads*hd]`), row `r` rotated at position `pos_base + r`
+    /// (NeoX half-split, θ=`rope_theta`). Generalises `rope_neox` (which is the
+    /// `pos_base=0` case) so the dep-layer window can rope keys at absolute
+    /// positions `w0..len`.
+    fn rope_at_rows(&self, buf: &DeviceBuffer, pos_base: usize, n_rows: usize, heads: usize, hd: usize) {
+        let half = hd / 2;
+        let st = self.gpu.step(
+            crate::nn::ROPE_AT,
+            &[buf],
+            &[n_rows as u32, heads as u32, hd as u32, (heads * hd) as u32, 0, pos_base as u32, f(self.ops().rope_theta)],
+            (n_rows * heads * half) as u32,
+        );
+        self.gpu.submit(&[], &[st]);
+    }
+
+    /// Append `src` `[width]` into cache row `row` (`dst[row*width..] = src`).
+    fn kv_append(&self, src: &DeviceBuffer, dst: &DeviceBuffer, width: usize, row: usize) {
+        let st = self.gpu.step(crate::nn::KV_APPEND, &[src, dst], &[width as u32, row as u32], width as u32);
+        self.gpu.submit(&[], &[st]);
+    }
+
+    /// Single-query windowed attention over a cached K/V: `q` `[heads*hd]` vs
+    /// `kcache`/`vcache` (`[*, heads*hd]`, rows `0..t` valid), window `[w0, t)`,
+    /// max-subtracted softmax, `scale`d. Writes the context `[heads*hd]` into
+    /// `out`. Uses `scores`/`probs` (row-stride `cap`) as scratch.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_attend(&self, q: &DeviceBuffer, kcache: &DeviceBuffer, vcache: &DeviceBuffer, out: &DeviceBuffer, scores: &DeviceBuffer, probs: &DeviceBuffer, heads: usize, hd: usize, t: usize, w0: usize, cap: usize, scale: f32) {
+        let g = &self.gpu;
+        let kv_stride = heads * hd; // MHA: n_kv_heads = n_heads, group = 1
+        let sc = if w0 == 0 {
+            g.step(crate::nn::ATTN_DECODE_SCORES, &[q, kcache, scores], &[heads as u32, 1, hd as u32, t as u32, cap as u32, kv_stride as u32, f(scale)], (heads * t) as u32)
+        } else {
+            g.step(crate::nn::ATTN_DECODE_SCORES_WIN, &[q, kcache, scores], &[heads as u32, 1, hd as u32, t as u32, cap as u32, kv_stride as u32, w0 as u32, f(scale)], (heads * t) as u32)
+        };
+        g.submit(&[], &[sc]);
+        let sm = g.step(crate::nn::DECODE_SOFTMAX, &[scores, probs], &[heads as u32, t as u32, cap as u32], heads as u32);
+        g.submit(&[], &[sm]);
+        let ap = g.step(crate::nn::ATTN_DECODE_APPLY, &[probs, vcache, out], &[heads as u32, 1, hd as u32, t as u32, cap as u32, kv_stride as u32], (heads * hd) as u32);
+        g.submit(&[], &[ap]);
+    }
+
+    /// **Incremental S1 decode** of one `(s1,s2)` token (`stamp` = 5 calendar
+    /// indices, or empty) at the current cache position. Mirrors
+    /// [`crate::kvcache::HostW::step_token`]: appends this token's K/V to the
+    /// per-layer cache, stashes its final-norm context row into `cache.ctx` (for
+    /// [`Self::kv_dep_step`]), and returns the token's `s1` logits `[s1_vocab]`.
+    pub fn kv_step(&self, cache: &mut GpuKvCache, s1: u32, s2: u32, stamp: &[u32]) -> Vec<f32> {
+        let cfg = &self.cfg;
+        let d = cfg.d_model;
+        let ff = cfg.ff_dim;
+        let heads = cfg.n_heads;
+        let hd = d / heads;
+        let scale = 1.0 / (hd as f32).sqrt();
+        let pos = cache.pos;
+        let cap = cache.cap;
+        assert!(pos < cap, "kv_step: pos {pos} exceeds cache cap {cap}");
+        let t = pos + 1;
+        let w0 = t.saturating_sub(cfg.max_context);
+        let ops = self.ops();
+        let g = &self.gpu;
+
+        // hierarchical embedding [1, d] (fusion_proj + calendar), on device.
+        let x = self.embed_x(&[s1], &[s2], stamp);
+
+        for l in 0..cfg.n_layers {
+            let pfx = format!("transformer.{l}");
+            // --- self-attention (RMSNorm -> qkv+bias -> RoPE@pos -> append -> attend) ---
+            let xn = g.storage(d as u64);
+            ops.rms(&x, &format!("{pfx}.norm1.weight"), &xn, d, 1);
+            let q = ops.linear(&xn, &format!("{pfx}.self_attn.q_proj.weight"), &format!("{pfx}.self_attn.q_proj.bias"), 1, d, d);
+            let k = ops.linear(&xn, &format!("{pfx}.self_attn.k_proj.weight"), &format!("{pfx}.self_attn.k_proj.bias"), 1, d, d);
+            let v = ops.linear(&xn, &format!("{pfx}.self_attn.v_proj.weight"), &format!("{pfx}.self_attn.v_proj.bias"), 1, d, d);
+            self.rope_at_rows(&q, pos, 1, heads, hd);
+            self.rope_at_rows(&k, pos, 1, heads, hd);
+            self.kv_append(&k, &cache.k[l], d, pos);
+            self.kv_append(&v, &cache.v[l], d, pos);
+            let ctxb = g.storage(d as u64);
+            self.decode_attend(&q, &cache.k[l], &cache.v[l], &ctxb, &cache.scores, &cache.probs, heads, hd, t, w0, cap, scale);
+            let o = ops.linear(&ctxb, &format!("{pfx}.self_attn.out_proj.weight"), &format!("{pfx}.self_attn.out_proj.bias"), 1, d, d);
+            ops.add(&o, &x, d); // x += attn_out
+
+            // --- SwiGLU FFN (no bias) ---
+            let xn2 = g.storage(d as u64);
+            ops.rms(&x, &format!("{pfx}.norm2.weight"), &xn2, d, 1);
+            let a = g.storage(ff as u64);
+            ops.mm(&xn2, &format!("{pfx}.ffn.w1.weight"), &a, 1, d, ff);
+            let b = g.storage(ff as u64);
+            ops.mm(&xn2, &format!("{pfx}.ffn.w3.weight"), &b, 1, d, ff);
+            let gg = g.storage(ff as u64);
+            ops.silu_gate(&a, &b, &gg, ff);
+            let ffo = g.storage(d as u64);
+            ops.mm(&gg, &format!("{pfx}.ffn.w2.weight"), &ffo, 1, ff, d);
+            ops.add(&ffo, &x, d); // x += ffn_out
+        }
+
+        // final norm -> context row (stashed for the dep stage) -> proj_s1
+        let ctx = g.storage(d as u64);
+        ops.rms(&x, "norm.weight", &ctx, d, 1);
+        self.kv_append(&ctx, &cache.ctx, d, pos);
+        let logits = ops.linear(&ctx, "head.proj_s1.weight", "head.proj_s1.bias", 1, d, cfg.s1_vocab());
+        cache.pos += 1;
+        g.read(&logits, cfg.s1_vocab())
+    }
+
+    /// **Incremental S2 decode** (dependency stage) for the just-decoded token:
+    /// cross-attend `sibling(sampled_s1)` (RAW `emb_s1`, no √d) over the cached
+    /// S1 context window, return `s2` logits `[s2_vocab]`. Mirrors
+    /// [`crate::kvcache::HostW::dep_step`]. Call after [`Self::kv_step`].
+    pub fn kv_dep_step(&self, cache: &GpuKvCache, sampled_s1: u32) -> Vec<f32> {
+        let cfg = &self.cfg;
+        let d = cfg.d_model;
+        let heads = cfg.dep_n_heads;
+        let hd = d / heads;
+        let scale = 1.0 / (hd as f32).sqrt();
+        let len = cache.pos;
+        assert!(len > 0, "kv_dep_step: empty context");
+        let w0 = len.saturating_sub(cfg.max_context);
+        let pos_last = len - 1;
+        let win = len - w0;
+        let ops = self.ops();
+        let g = &self.gpu;
+
+        // q from the sibling embedding, RoPE'd at the last absolute position.
+        let sib = Self::gather(&self.emb_s1, &[sampled_s1], d, 1.0);
+        let sibd = g.storage_init("dep_sib", &sib);
+        let q = ops.linear(&sibd, "dep_layer.cross_attn.q_proj.weight", "dep_layer.cross_attn.q_proj.bias", 1, d, d);
+        self.rope_at_rows(&q, pos_last, 1, heads, hd);
+
+        // k/v from the cached context window rows [w0, len); k RoPE'd at absolute
+        // positions w0..len. (Read the whole cache prefix, slice the window.)
+        let ctx_all = g.read(&cache.ctx, len * d);
+        let ctx_win = &ctx_all[w0 * d..len * d];
+        let ctxwd = g.storage_init("dep_ctx", ctx_win);
+        let k = ops.linear(&ctxwd, "dep_layer.cross_attn.k_proj.weight", "dep_layer.cross_attn.k_proj.bias", win, d, d);
+        let v = ops.linear(&ctxwd, "dep_layer.cross_attn.v_proj.weight", "dep_layer.cross_attn.v_proj.bias", win, d, d);
+        self.rope_at_rows(&k, w0, win, heads, hd);
+
+        // single-query non-causal cross-attention over the window (window already
+        // sliced -> local w0 = 0, t = win, cap = win).
+        let scores = g.storage((heads * win) as u64);
+        let probs = g.storage((heads * win) as u64);
+        let ctxo = g.storage(d as u64);
+        self.decode_attend(&q, &k, &v, &ctxo, &scores, &probs, heads, hd, win, 0, win, scale);
+        let o = ops.linear(&ctxo, "dep_layer.cross_attn.out_proj.weight", "dep_layer.cross_attn.out_proj.bias", 1, d, d);
+
+        // norm(context[last] + attn_out) -> proj_s2
+        let sumd = g.storage_init("dep_sum", &ctx_win[(win - 1) * d..win * d]);
+        ops.add(&o, &sumd, d);
+        let normed = g.storage(d as u64);
+        ops.rms(&sumd, "dep_layer.norm.weight", &normed, d, 1);
+        let logits = ops.linear(&normed, "head.proj_s2.weight", "head.proj_s2.bias", 1, d, cfg.s2_vocab());
+        g.read(&logits, cfg.s2_vocab())
+    }
+}
+
+/// Persistent per-layer K/V + context caches for a GPU/CPU incremental rollout,
+/// produced by [`KronosDecoder::new_gpu_cache`]. `pos` is the number of tokens
+/// already decoded (the next [`KronosDecoder::kv_step`] writes cache row `pos`).
+pub struct GpuKvCache {
+    k: Vec<DeviceBuffer>, // per layer, [cap, d] RoPE'd keys
+    v: Vec<DeviceBuffer>, // per layer, [cap, d] values
+    ctx: DeviceBuffer,    // [cap, d] final-norm S1 context per position
+    scores: DeviceBuffer, // [n_heads, cap] scratch
+    probs: DeviceBuffer,  // [n_heads, cap] scratch
+    cap: usize,
+    pos: usize,
+}
+
+impl GpuKvCache {
+    /// Tokens decoded so far (the next `kv_step` targets cache row `pos`).
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+    /// Reset to an empty sequence (next `kv_step` is position 0). Buffers are
+    /// overwritten in place, so no reallocation is needed.
+    pub fn reset(&mut self) {
+        self.pos = 0;
+    }
 }
 
 #[cfg(test)]
@@ -361,5 +570,148 @@ mod tests {
         let s2_logits = dec.decode_s2(&ctx, &s1);
         assert_eq!(s2_logits.len(), t * cfg.s2_vocab());
         assert!(s2_logits.iter().all(|&v| v.abs() < 1e-4), "s2 logits zero");
+    }
+
+    // -- KV-step parity ------------------------------------------------------
+
+    /// Tiny SplitMix64 -> Box-Muller gaussians, so the test needs no dev-dep.
+    struct Rng(u64);
+    impl Rng {
+        fn u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        fn f32(&mut self) -> f32 {
+            ((self.u64() >> 40) as f32) / (1u64 << 24) as f32
+        }
+        fn gauss(&mut self) -> f32 {
+            let u1 = (self.f32()).max(1e-7);
+            let u2 = self.f32();
+            (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+        }
+    }
+
+    fn random_decoder(cfg: &KronosConfig, seed: u64) -> KronosDecoder {
+        let mut rng = Rng(seed);
+        let mut map: HashMap<String, Vec<f32>> = HashMap::new();
+        for (name, shape) in cfg.param_list() {
+            let n: usize = shape.iter().product();
+            // RMSNorm weights ~1 (weight-only norm); everything else small gaussian.
+            let v = if name.ends_with("norm.weight") || name.contains(".norm1.") || name.contains(".norm2.") {
+                (0..n).map(|_| 1.0 + rng.gauss() * 0.02).collect()
+            } else {
+                (0..n).map(|_| rng.gauss() * 0.08).collect()
+            };
+            map.insert(name, v);
+        }
+        KronosDecoder::from_weights(cfg.clone(), &map).unwrap()
+    }
+
+    fn maxabs(a: &[f32], b: &[f32]) -> f32 {
+        assert_eq!(a.len(), b.len());
+        a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// The GPU/CPU-portable incremental `kv_step` (S1) + `kv_dep_step` (S2) must
+    /// reproduce BOTH the hand-rolled host oracle (`kvcache::HostW::step_token` /
+    /// `dep_step`) AND the `O(T²)` full recompute (`decode_s1`), per token, to
+    /// maxabs < 3e-3. Runs on whatever backend `Gpu` picked (GPU or
+    /// `BRAIN_DEVICE=cpu`) — one op set, any device. Sequence < `max_context`, so
+    /// the sliding window is inactive (w0 = 0); the windowed path is exercised by
+    /// `kv_step_matches_reference_windowed`.
+    #[test]
+    fn kv_step_matches_reference() {
+        if skip() {
+            return;
+        }
+        let cfg = KronosConfig::tiny(); // d16 L2 heads4 hd4 ff32 s1v/s2v=16 dep_heads2 max_ctx64
+        let seq = 6usize;
+        assert!(seq < cfg.max_context, "keep seq < max_context so w0=0");
+        let dec = random_decoder(&cfg, 0xC0FFEE);
+        let (s1v, s2v) = (cfg.s1_vocab(), cfg.s2_vocab());
+
+        let mut rng = Rng(7);
+        let s1: Vec<u32> = (0..seq).map(|_| (rng.u64() % s1v as u64) as u32).collect();
+        let s2: Vec<u32> = (0..seq).map(|_| (rng.u64() % s2v as u64) as u32).collect();
+        // Non-trivial calendar stamps (minute,hour,weekday,day,month) within table sizes.
+        let sizes = [60u64, 24, 7, 32, 13];
+        let stamp: Vec<u32> = (0..seq * 5).map(|j| (rng.u64() % sizes[j % 5]) as u32).collect();
+
+        // Host oracle rollout (the exact CPU KV reference).
+        let hw = dec.host_weights();
+        let mut hc = hw.new_cache();
+
+        // GPU/CPU incremental rollout.
+        let mut cache = dec.new_gpu_cache(seq);
+
+        let (mut worst_oracle_s1, mut worst_full_s1, mut worst_s2) = (0.0f32, 0.0f32, 0.0f32);
+        for i in 0..seq {
+            let row = &stamp[i * 5..i * 5 + 5];
+            let oracle_s1 = hw.step_token(s1[i], s2[i], row, i, &mut hc);
+            let gpu_s1 = dec.kv_step(&mut cache, s1[i], s2[i], row);
+            assert_eq!(gpu_s1.len(), s1v);
+            worst_oracle_s1 = worst_oracle_s1.max(maxabs(&gpu_s1, &oracle_s1));
+
+            // full recompute of the prefix; compare the last row's s1 logits.
+            let (full, _ctx) = dec.decode_s1(&s1[..=i], &s2[..=i], &stamp[..(i + 1) * 5]);
+            worst_full_s1 = worst_full_s1.max(maxabs(&gpu_s1, &full[i * s1v..(i + 1) * s1v]));
+
+            // S2 dependency stage for this position (arbitrary but shared sampled s1).
+            let sampled = s1[i];
+            let oracle_s2 = hw.dep_step(sampled, &hc.ctx);
+            let gpu_s2 = dec.kv_dep_step(&cache, sampled);
+            assert_eq!(gpu_s2.len(), s2v);
+            worst_s2 = worst_s2.max(maxabs(&gpu_s2, &oracle_s2));
+        }
+        println!("kv_step S1 vs host-oracle maxabs = {worst_oracle_s1:.3e}");
+        println!("kv_step S1 vs full-recompute maxabs = {worst_full_s1:.3e}");
+        println!("kv_dep_step S2 vs host-oracle maxabs = {worst_s2:.3e}");
+        assert!(worst_oracle_s1 < 3e-3, "S1 vs oracle maxabs = {worst_oracle_s1}");
+        assert!(worst_full_s1 < 3e-3, "S1 vs full recompute maxabs = {worst_full_s1}");
+        assert!(worst_s2 < 3e-3, "S2 vs oracle maxabs = {worst_s2}");
+    }
+
+    /// Sliding-window path: a sequence LONGER than `max_context` forces
+    /// `w0 = t - max_context > 0`, exercising `attn_decode_scores_win`. Validated
+    /// against the host oracle, whose `step_token`/`dep_step` window identically.
+    #[test]
+    fn kv_step_matches_reference_windowed() {
+        if skip() {
+            return;
+        }
+        let mut cfg = KronosConfig::tiny();
+        cfg.max_context = 4; // tiny window so a short seq still slides
+        let seq = 9usize;
+        assert!(seq > cfg.max_context, "seq must exceed max_context to slide the window");
+        let dec = random_decoder(&cfg, 0xBEEF);
+        let (s1v, s2v) = (cfg.s1_vocab(), cfg.s2_vocab());
+
+        let mut rng = Rng(11);
+        let s1: Vec<u32> = (0..seq).map(|_| (rng.u64() % s1v as u64) as u32).collect();
+        let s2: Vec<u32> = (0..seq).map(|_| (rng.u64() % s2v as u64) as u32).collect();
+        let sizes = [60u64, 24, 7, 32, 13];
+        let stamp: Vec<u32> = (0..seq * 5).map(|j| (rng.u64() % sizes[j % 5]) as u32).collect();
+
+        let hw = dec.host_weights();
+        let mut hc = hw.new_cache();
+        let mut cache = dec.new_gpu_cache(seq);
+        let (mut worst_s1, mut worst_s2) = (0.0f32, 0.0f32);
+        for i in 0..seq {
+            let row = &stamp[i * 5..i * 5 + 5];
+            let oracle_s1 = hw.step_token(s1[i], s2[i], row, i, &mut hc);
+            let gpu_s1 = dec.kv_step(&mut cache, s1[i], s2[i], row);
+            worst_s1 = worst_s1.max(maxabs(&gpu_s1, &oracle_s1));
+            let sampled = s1[i];
+            let oracle_s2 = hw.dep_step(sampled, &hc.ctx);
+            let gpu_s2 = dec.kv_dep_step(&cache, sampled);
+            worst_s2 = worst_s2.max(maxabs(&gpu_s2, &oracle_s2));
+        }
+        println!("windowed kv_step S1 vs oracle maxabs = {worst_s1:.3e}");
+        println!("windowed kv_dep_step S2 vs oracle maxabs = {worst_s2:.3e}");
+        assert!(worst_s1 < 3e-3, "windowed S1 vs oracle maxabs = {worst_s1}");
+        assert!(worst_s2 < 3e-3, "windowed S2 vs oracle maxabs = {worst_s2}");
     }
 }
