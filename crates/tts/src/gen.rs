@@ -543,4 +543,65 @@ mod kv_tests {
             assert!(err < 2e-3, "prefix {i}: KV step vs full recompute maxabs={err}");
         }
     }
+
+    fn medium_cfg() -> TalkerConfig {
+        let mut c = TalkerConfig::tiny();
+        c.n_layers = 12;
+        c.d_model = 512;
+        c.head_dim = 128;
+        c.n_heads = 8;
+        c.n_kv_heads = 4;
+        c.d_ff = 2048;
+        c
+    }
+
+    fn random_decoder(cfg: &TalkerConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+        let mut rng = Rng::new(seed);
+        let mut map = HashMap::new();
+        for (name, count) in TalkerGen::decoder_param_list(cfg) {
+            let v = if name.contains("ln") || name.ends_with("norm.weight") {
+                vec![1.0f32; count]
+            } else {
+                (0..count).map(|_| rng.next_gaussian() as f32 * 0.02).collect()
+            };
+            map.insert(name, v);
+        }
+        map
+    }
+
+    /// Throughput: incremental KV `step` (O(T)/token) vs `forward` full-recompute
+    /// (O(T²)) at growing context. Run with:
+    ///   cargo test -p brain-tts --lib bench_kv_decode -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_kv_decode() {
+        let cfg = medium_cfg();
+        let d = cfg.d_model as usize;
+        let max_t = 1200u32;
+        let tg = TalkerGen::from_decoder_map(cfg.clone(), &random_decoder(&cfg, 7), max_t);
+        let mut rng = Rng::new(99);
+        let embed: Vec<f32> = (0..d).map(|_| rng.next_gaussian() as f32).collect();
+        println!("Talker medium: d={} L={} heads={}/{} hd={} ff={}", cfg.d_model, cfg.n_layers, cfg.n_heads, cfg.n_kv_heads, cfg.head_dim, cfg.d_ff);
+        for &ctx in &[128usize, 512, 1024] {
+            // Prime the KV cache to `ctx` positions, then time one incremental step.
+            tg.reset_cache();
+            for _ in 0..ctx {
+                tg.step(&embed);
+            }
+            let iters = 20;
+            let t0 = std::time::Instant::now();
+            for _ in 0..iters {
+                tg.step(&embed);
+            }
+            let kv_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+            // O(T²) baseline: recompute the whole ctx-length prefix per token.
+            let prefix: Vec<f32> = (0..ctx * d).map(|i| embed[i % d]).collect();
+            let t1 = std::time::Instant::now();
+            for _ in 0..iters {
+                tg.forward(&prefix);
+            }
+            let full_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+            println!("ctx={ctx:>5}: KV step {kv_ms:>7.2} ms/tok ({:>6.1} tok/s)  |  full-recompute {full_ms:>8.2} ms/tok ({:>5.1} tok/s)  |  speedup {:.1}x", 1e3 / kv_ms, 1e3 / full_ms, full_ms / kv_ms);
+        }
+    }
 }
