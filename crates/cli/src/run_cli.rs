@@ -60,6 +60,7 @@ pub fn run_serve(args: &[String]) {
         std::env::var("BRAIN_CONF").ok().and_then(|s| s.parse().ok());
     // D-Bus control surface (`--dbus [--dbus-system] [--dbus-name NAME]`).
     let (mut dbus, mut dbus_system, mut dbus_name) = (false, false, None::<String>);
+    let mut dbus_reserve_gb: u64 = 2; // GB kept free per GPU (headroom for activations)
 
     let mut i = 0;
     while i < args.len() {
@@ -102,6 +103,10 @@ pub fn run_serve(args: &[String]) {
                 i += 1;
                 dbus_name = args.get(i).cloned();
             }
+            "--reserve-gb" => {
+                i += 1;
+                dbus_reserve_gb = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(dbus_reserve_gb);
+            }
             other => eprintln!("brain run: ignoring unknown flag {other:?}"),
         }
         i += 1;
@@ -110,7 +115,7 @@ pub fn run_serve(args: &[String]) {
     // The D-Bus control surface replaces the stdio loop when requested: it serves
     // every registered model over `com.swedishembedded.Brain1` until Ctrl-C.
     if dbus {
-        return run_dbus(dbus_system, dbus_name);
+        return run_dbus(dbus_system, dbus_name, dbus_reserve_gb);
     }
 
     // Build the registry: a real GPT if a checkpoint was given, else a fake echo
@@ -189,20 +194,53 @@ pub fn run_serve(args: &[String]) {
 /// Serve the D-Bus control surface (`brain serve --dbus`). Registers every model
 /// and hands the registry to `brain_dbus::serve`, which owns it for the service's
 /// lifetime. Compiled into the default build; only reached when `--dbus` is passed.
-fn run_dbus(system: bool, name: Option<String>) {
-    let reg = match crate::caps_cli::all_providers() {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("brain serve --dbus: {e}");
-            std::process::exit(1);
-        }
-    };
+fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64) {
+    // Discover the GPUs' capacity so the scheduler can budget/evict against real VRAM.
+    let gpus = query_gpu_mem();
+    if gpus.is_empty() {
+        eprintln!("brain serve --dbus: no GPUs detected (nvidia-smi); serving with CPU-only budget");
+    }
+    let ram = query_ram_bytes();
+    let reserved = reserve_gb << 30;
+    eprintln!(
+        "brain serve --dbus: {} GPU(s), {} GB reserved/card, {} GB RAM budget",
+        gpus.len(),
+        reserve_gb,
+        ram >> 30
+    );
+    let executor = crate::resident::build_executor(&gpus, reserved, ram, residency::Policy::default());
     let opts = brain_dbus::DbusOpts {
         bus: if system { brain_dbus::BusKind::System } else { brain_dbus::BusKind::Session },
         name: name.unwrap_or_else(|| "com.swedishembedded.Brain1".to_string()),
     };
-    if let Err(e) = brain_dbus::serve(reg, opts) {
+    if let Err(e) = brain_dbus::serve(executor, opts) {
         eprintln!("brain serve --dbus: {e}");
         std::process::exit(1);
     }
+}
+
+/// Per-GPU `(index, total_bytes)` via `nvidia-smi` (empty if none/unavailable).
+fn query_gpu_mem() -> Vec<(u32, u64)> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .enumerate()
+            .filter_map(|(i, l)| l.trim().parse::<u64>().ok().map(|mib| (i as u32, mib << 20)))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Total system RAM in bytes (from `/proc/meminfo`; falls back to 16 GB).
+fn query_ram_bytes() -> u64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|s| {
+            s.lines().find(|l| l.starts_with("MemTotal:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|kb| kb.parse::<u64>().ok())
+        })
+        .map(|kb| kb << 10)
+        .unwrap_or(16 << 30)
 }

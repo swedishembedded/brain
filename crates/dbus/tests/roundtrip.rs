@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use capability::{Action, ActionResult, ActionSpec, Blob, Invocation, Manifest, Media, Outcome, Progress, Provider, Registry};
+use capability::{Action, ActionResult, ActionSpec, Blob, Invocation, Manifest, Media, Outcome, Progress, Provider};
 use serde_json::json;
 use zbus::zvariant::OwnedFd as ZOwnedFd;
 
@@ -78,11 +78,13 @@ fn run_roundtrips_a_result_over_an_fd() {
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     rt.block_on(async {
-        // ---- service side ----
-        let mut reg = Registry::new();
-        reg.register(Arc::new(RevProvider));
-        let (handle, _join) = brain_dbus::worker::spawn(reg);
-        let manager = brain_dbus::service::Manager::new(handle);
+        // ---- service side: RevProvider as a (stateless) resident model behind the
+        // shared Executor, exactly as `brain serve --dbus` wires real models. ----
+        let rev: Arc<dyn residency::ResidentModel> = Arc::new(residency::bridge::ProviderResident::stateless(Arc::new(RevProvider)));
+        let mut budgets = residency::budget::Budgets::new();
+        budgets.set(residency::Device::Gpu(0), 24 << 30, 0);
+        let executor = residency::Executor::start(vec![rev], budgets, residency::Policy::default());
+        let manager = brain_dbus::service::Manager::new(executor);
         // Unique name so parallel test runs don't collide.
         let name = format!("com.swedishembedded.Brain1.test{}", std::process::id());
         let _conn = zbus::connection::Builder::session()

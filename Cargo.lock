@@ -362,6 +362,7 @@ dependencies = [
  "brain-paramstore",
  "brain-pid",
  "brain-qwen",
+ "brain-residency",
  "brain-runtime",
  "brain-server",
  "brain-speaker",
@@ -410,6 +411,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "brain-capability",
+ "brain-residency",
  "nix",
  "serde_json",
  "tokio",

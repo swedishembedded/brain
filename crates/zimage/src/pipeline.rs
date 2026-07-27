@@ -31,6 +31,7 @@ use crate::{ZImageConfig, ZImageDitI8, ZImageDitShard};
 
 /// Filesystem locations of the four Z-Image components (never hard-coded — from
 /// the environment, mirroring the crate's tests).
+#[derive(Clone)]
 pub struct Paths {
     pub dit: String,
     pub vae: String,

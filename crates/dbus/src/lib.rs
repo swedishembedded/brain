@@ -18,9 +18,8 @@
 pub mod fd;
 pub mod service;
 pub mod stream;
-pub mod worker;
 
-use capability::Registry;
+use residency::Executor;
 
 /// Which bus to connect to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -49,16 +48,15 @@ impl Default for DbusOpts {
 /// The object path the `Manager` is served at.
 pub const OBJECT_PATH: &str = "/com/swedishembedded/Brain1";
 
-/// Serve `registry` over D-Bus until Ctrl-C / SIGTERM. Builds a multi-threaded
-/// Tokio runtime, spawns the [`worker`] thread (which owns the registry and runs
-/// blocking inference), connects to the chosen bus, requests the well-known name,
-/// and serves the [`service::Manager`] at [`OBJECT_PATH`]. Blocks the calling
-/// thread for the lifetime of the service.
-pub fn serve(registry: Registry, opts: DbusOpts) -> anyhow::Result<()> {
+/// Serve the [`Executor`] over D-Bus until Ctrl-C / SIGTERM. Builds a multi-threaded
+/// Tokio runtime, connects to the chosen bus, requests the well-known name, and
+/// serves the [`service::Manager`] at [`OBJECT_PATH`]. The executor owns the
+/// residency manager + scheduler worker (inference runs there, off the bus threads).
+/// Blocks the calling thread for the lifetime of the service.
+pub fn serve(executor: Executor, opts: DbusOpts) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
-        let (handle, _join) = worker::spawn(registry);
-        let manager = service::Manager::new(handle);
+        let manager = service::Manager::new(executor);
         let builder = match opts.bus {
             BusKind::Session => zbus::connection::Builder::session()?,
             BusKind::System => zbus::connection::Builder::system()?,

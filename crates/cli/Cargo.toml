@@ -18,6 +18,7 @@ vulkan-coopmat = ["dep:brain-vulkan"]
 # D-Bus control surface: compiled into the default build so `brain serve --dbus`
 # always works, but only served when the `--dbus` flag is passed.
 brain-dbus.workspace = true
+brain-residency.workspace = true
 brain-gpu-core.workspace = true
 brain-wm-core.workspace = true
 brain-wm-diamond.workspace = true
