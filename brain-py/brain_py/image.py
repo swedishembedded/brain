@@ -19,6 +19,15 @@ def _pixels(data: bytes) -> array.array:
     return px
 
 
+def to_pil(data: bytes, w: int, h: int, c: int = 3):
+    """Convert an HWC-f32 blob to a PIL ``Image`` (RGB). Requires pillow."""
+    from PIL import Image
+
+    px = _pixels(data)
+    buf = bytes(_u8(px[i * c + (k if c >= 3 else 0)]) for i in range(w * h) for k in range(3))
+    return Image.frombytes("RGB", (w, h), buf)
+
+
 def _u8(value: float) -> int:
     return max(0, min(255, int(value * 255 + 0.5)))
 
