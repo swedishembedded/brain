@@ -78,6 +78,10 @@ const MATMUL_DX_REG: usize = 33;
 const MATMUL_DW_REG: usize = 34;
 const CE_STATS: usize = 35;
 const CE_GRAD_STATS: usize = 36;
+// int8 (DP4A) inference path for the encoder linears — GPU only.
+const QUANT_PACK: usize = 37;
+const MATMUL_I8: usize = 38;
+const MAX_ABS_ROW: usize = 39;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -117,6 +121,9 @@ const PIPELINES: &[(&str, &str)] = &[
     ("matmul_dw_reg", kernels::MATMUL_DW_REG),
     ("ce_stats", kernels::CE_STATS),
     ("ce_grad_stats", kernels::CE_GRAD_STATS),
+    ("quant_pack", kernels::QUANT_PACK),
+    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
+    ("max_abs_row", kernels::MAX_ABS_ROW),
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
@@ -262,6 +269,10 @@ pub struct Qwen {
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
     ce_grad_uni: DeviceBuffer,
+    /// Int8 (DP4A) linears for inference. When present, the 7 per-layer linears
+    /// run in int8 (weights ~4× smaller — fits the fp32-encoder-too-big case on
+    /// one card) and are absent from the fp32 `ps`. None ⇒ all-fp32 path.
+    q8: Option<crate::q8::Q8>,
 }
 
 impl Qwen {
@@ -281,12 +292,12 @@ impl Qwen {
         let cfg = QwenConfig::from_json(&c.header["config"]);
         let init = c.by_role("");
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &init, false, shard)
+        Qwen::new_impl(cfg, b, t, &init, false, shard, false)
     }
 
     pub fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, init, true, shard)
+        Qwen::new_impl(cfg, b, t, init, true, shard, false)
     }
 
     /// Build a single pipeline **stage**: only the layers (and endpoint weights)
@@ -295,14 +306,28 @@ impl Qwen {
     /// caller ([`crate::shard::Pipeline`]) selects the physical GPU by setting
     /// `BRAIN_GPU_INDEX` before this call.
     pub fn new_shard(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool, shard: Shard) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, train, shard)
+        Qwen::new_impl(cfg, b, t, init, train, shard, false)
     }
 
-    fn new_impl(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool, shard: Shard) -> Qwen {
+    /// Inference-only shard with the 7 per-layer linears quantized to int8 (DP4A).
+    /// Weights are ~4× smaller than fp32, so the whole Qwen3-4B encoder (~4.8 GB of
+    /// weights → ~9.5 GB resident) fits a single 24 GB card — where the fp32
+    /// encoder (~30 GB resident on non-ReBAR Pascal) does not. Frozen, no LoRA.
+    pub fn new_shard_i8(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Qwen {
+        Qwen::new_impl(cfg, b, t, init, false, shard, true)
+    }
+
+    fn new_impl(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool, shard: Shard, i8: bool) -> Qwen {
+        assert!(!(i8 && train), "int8 path is inference-only");
         let gpu = Gpu::new(PIPELINES);
         // The parameter set this stage actually holds: the whole list for a whole
         // shard (byte-identical to before), or just this stage's slice otherwise.
-        let plist = shard_param_list(&cfg, &shard);
+        // In int8 mode the 7 per-layer linears live in `q8` (packed int8), NOT the
+        // fp32 store — filter them out so no fp32 copy is ever uploaded.
+        let plist: Vec<(String, usize)> = shard_param_list(&cfg, &shard)
+            .into_iter()
+            .filter(|(name, _)| !(i8 && crate::q8::Q8::is_i8_linear(name)))
+            .collect();
         // Role assignment:
         //  - inference (`!train`): every parameter Frozen (weights only).
         //  - LoRA training: only `*.lora_a`/`*.lora_b` trainable; base Frozen.
@@ -413,6 +438,38 @@ impl Qwen {
         // `n·vocab`, ~311 MB each at vocab 152k, block 512).
         let head = shard.head;
         let hd_v = |x: u64| if head { st(x) } else { st(1) };
+
+        // Int8 linears (inference): quantize+upload the owned layers' 7 matmul
+        // weights from `init`; the fp32 store already excludes them (plist filter).
+        let q8 = if i8 {
+            let (dd, hqd, hkvd, ffd) = (d as usize, hq as usize, hkv as usize, ff as usize);
+            let dims = |leaf: &str| -> (usize, usize) {
+                match leaf {
+                    "attn.wq.weight" => (hqd, dd),
+                    "attn.wk.weight" => (hkvd, dd),
+                    "attn.wv.weight" => (hkvd, dd),
+                    "attn.wo.weight" => (dd, hqd),
+                    "mlp.gate.weight" => (ffd, dd),
+                    "mlp.up.weight" => (ffd, dd),
+                    "mlp.down.weight" => (dd, ffd),
+                    other => panic!("q8: unexpected linear leaf {other}"),
+                }
+            };
+            Some(crate::q8::Q8::build(
+                &gpu,
+                init,
+                shard.start..shard.end,
+                dims,
+                n as u32,
+                ff as u32,
+                MAX_ABS_ROW,
+                QUANT_PACK,
+                MATMUL_I8,
+            ))
+        } else {
+            None
+        };
+
         let mut m = Qwen {
             cfg,
             b,
@@ -455,6 +512,7 @@ impl Qwen {
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
             ce_grad_uni,
+            q8,
             gpu,
         };
         m.fwd_steps = m.forward_steps(m.b, m.t);
@@ -630,40 +688,67 @@ impl Qwen {
         for l in self.shard.start..self.shard.end {
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
+            // Int8 linears for this layer, if any (inference path: no LoRA/bias).
+            let q8l = self.q8.as_ref().map(|q| (q, q.layers.get(&l).expect("q8 layer present")));
             // --- attention --- (projections stay here: they carry LoRA/bias;
             // norms/RoPE/attention-core come from the shared block builders)
             s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[l], self.w(&p("ln1.weight")), &lb.xn1, d, n));
-            let (mk, mt) = linear_kernel(n as usize, hq as usize);
-            s.push(self.gpu.step(mk, &[&lb.xn1, self.w(&p("attn.wq.weight")), &lb.q_pre], &[n, d, hq], mt));
-            self.lora_fwd(&mut s, "wq", &lb.xn1, &p("attn.wq.weight"), &lb.q_pre, n, d, hq);
-            let (mk, mt) = linear_kernel(n as usize, hkv as usize);
-            s.push(self.gpu.step(mk, &[&lb.xn1, self.w(&p("attn.wk.weight")), &lb.k_pre], &[n, d, hkv], mt));
-            self.lora_fwd(&mut s, "wk", &lb.xn1, &p("attn.wk.weight"), &lb.k_pre, n, d, hkv);
-            let (mk, mt) = linear_kernel(n as usize, hkv as usize);
-            s.push(self.gpu.step(mk, &[&lb.xn1, self.w(&p("attn.wv.weight")), &lb.v], &[n, d, hkv], mt));
-            self.lora_fwd(&mut s, "wv", &lb.xn1, &p("attn.wv.weight"), &lb.v, n, d, hkv);
+            if let Some((q8, ql)) = q8l {
+                // xn1 quantized once, shared by q/k/v (DP4A GEMM per projection).
+                q8.quant(&self.gpu, &mut s, &lb.xn1, d, n);
+                q8.mm8(&self.gpu, &mut s, &ql.wq, &lb.q_pre, n);
+                q8.mm8(&self.gpu, &mut s, &ql.wk, &lb.k_pre, n);
+                q8.mm8(&self.gpu, &mut s, &ql.wv, &lb.v, n);
+            } else {
+                let (mk, mt) = linear_kernel(n as usize, hq as usize);
+                s.push(self.gpu.step(mk, &[&lb.xn1, self.w(&p("attn.wq.weight")), &lb.q_pre], &[n, d, hq], mt));
+                self.lora_fwd(&mut s, "wq", &lb.xn1, &p("attn.wq.weight"), &lb.q_pre, n, d, hq);
+                let (mk, mt) = linear_kernel(n as usize, hkv as usize);
+                s.push(self.gpu.step(mk, &[&lb.xn1, self.w(&p("attn.wk.weight")), &lb.k_pre], &[n, d, hkv], mt));
+                self.lora_fwd(&mut s, "wk", &lb.xn1, &p("attn.wk.weight"), &lb.k_pre, n, d, hkv);
+                let (mk, mt) = linear_kernel(n as usize, hkv as usize);
+                s.push(self.gpu.step(mk, &[&lb.xn1, self.w(&p("attn.wv.weight")), &lb.v], &[n, d, hkv], mt));
+                self.lora_fwd(&mut s, "wv", &lb.xn1, &p("attn.wv.weight"), &lb.v, n, d, hkv);
+            }
             // QK-norm over head_dim then half-split RoPE on q/k.
             s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.q_pre, self.w(&p("attn.q_norm.weight")), &lb.q, hd, n * nh));
             s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.k_pre, self.w(&p("attn.k_norm.weight")), &lb.k, hd, n * nkv));
             s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, nh, hd, hq, t_use, theta));
             s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, nkv, hd, hkv, t_use, theta));
             s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &self.scores, &lb.probs, &lb.ctx));
-            let (mk, mt) = linear_kernel(n as usize, d as usize);
-            s.push(self.gpu.step(mk, &[&lb.ctx, self.w(&p("attn.wo.weight")), &self.proj], &[n, hq, d], mt));
-            self.lora_fwd(&mut s, "wo", &lb.ctx, &p("attn.wo.weight"), &self.proj, n, hq, d);
+            if let Some((q8, ql)) = q8l {
+                q8.quant(&self.gpu, &mut s, &lb.ctx, hq, n);
+                q8.mm8(&self.gpu, &mut s, &ql.wo, &self.proj, n);
+            } else {
+                let (mk, mt) = linear_kernel(n as usize, d as usize);
+                s.push(self.gpu.step(mk, &[&lb.ctx, self.w(&p("attn.wo.weight")), &self.proj], &[n, hq, d], mt));
+                self.lora_fwd(&mut s, "wo", &lb.ctx, &p("attn.wo.weight"), &self.proj, n, hq, d);
+            }
             s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
             // --- SwiGLU MLP ---
             s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.xmid, self.w(&p("ln2.weight")), &lb.xn2, d, n));
-            let (mk, mt) = linear_kernel(n as usize, ff as usize);
-            s.push(self.gpu.step(mk, &[&lb.xn2, self.w(&p("mlp.gate.weight")), &lb.gate_pre], &[n, d, ff], mt));
-            self.lora_fwd(&mut s, "gate", &lb.xn2, &p("mlp.gate.weight"), &lb.gate_pre, n, d, ff);
-            let (mk, mt) = linear_kernel(n as usize, ff as usize);
-            s.push(self.gpu.step(mk, &[&lb.xn2, self.w(&p("mlp.up.weight")), &lb.up], &[n, d, ff], mt));
-            self.lora_fwd(&mut s, "up", &lb.xn2, &p("mlp.up.weight"), &lb.up, n, d, ff);
+            if let Some((q8, ql)) = q8l {
+                // xn2 quantized once, shared by gate/up.
+                q8.quant(&self.gpu, &mut s, &lb.xn2, d, n);
+                q8.mm8(&self.gpu, &mut s, &ql.gate, &lb.gate_pre, n);
+                q8.mm8(&self.gpu, &mut s, &ql.up, &lb.up, n);
+            } else {
+                let (mk, mt) = linear_kernel(n as usize, ff as usize);
+                s.push(self.gpu.step(mk, &[&lb.xn2, self.w(&p("mlp.gate.weight")), &lb.gate_pre], &[n, d, ff], mt));
+                self.lora_fwd(&mut s, "gate", &lb.xn2, &p("mlp.gate.weight"), &lb.gate_pre, n, d, ff);
+                let (mk, mt) = linear_kernel(n as usize, ff as usize);
+                s.push(self.gpu.step(mk, &[&lb.xn2, self.w(&p("mlp.up.weight")), &lb.up], &[n, d, ff], mt));
+                self.lora_fwd(&mut s, "up", &lb.xn2, &p("mlp.up.weight"), &lb.up, n, d, ff);
+            }
             s.push(block::swiglu_fwd(&self.gpu, &ids, &lb.gate_pre, &lb.up, &lb.h, n * ff));
-            let (mk, mt) = linear_kernel(n as usize, d as usize);
-            s.push(self.gpu.step(mk, &[&lb.h, self.w(&p("mlp.down.weight")), &self.mlp_out], &[n, ff, d], mt));
-            self.lora_fwd(&mut s, "down", &lb.h, &p("mlp.down.weight"), &self.mlp_out, n, ff, d);
+            if let Some((q8, ql)) = q8l {
+                q8.quant(&self.gpu, &mut s, &lb.h, ff, n);
+                q8.mm8(&self.gpu, &mut s, &ql.down, &self.mlp_out, n);
+            } else {
+                let (mk, mt) = linear_kernel(n as usize, d as usize);
+                s.push(self.gpu.step(mk, &[&lb.h, self.w(&p("mlp.down.weight")), &self.mlp_out], &[n, ff, d], mt));
+                self.lora_fwd(&mut s, "down", &lb.h, &p("mlp.down.weight"), &self.mlp_out, n, ff, d);
+            }
             s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
         }
 

@@ -92,6 +92,12 @@ impl DitEngine {
 enum Encoder {
     /// Whole model on the CPU (default) — no VRAM cost, ~38 s/encode.
     Cpu(Qwen),
+    /// Whole int8 encoder on one card. The 7 per-layer linears are DP4A int8
+    /// (~4× smaller than fp32), so the whole Qwen3-4B encoder is ~9.5 GB resident
+    /// and fits a single 24 GB card alongside nothing else — leaving the DiT its
+    /// own card. Encode runs on-GPU (~1-2 s). The robust "superfast" path; the
+    /// fp32 [`Encoder::Split`] does not fit two P40s (2× non-ReBAR overhead).
+    Gpu8(Qwen),
     /// Split across two cards: `s0` (embedding + the first `cut` layers) on the
     /// mostly-empty card, `s1` (the remaining layers up to the penultimate) on the
     /// DiT's card. The fp32 encoder is ~23 GB resident — too big for one 24 GB
@@ -104,7 +110,7 @@ enum Encoder {
 impl Encoder {
     fn encode(&self, tokens: &[u32]) -> Vec<f32> {
         match self {
-            Encoder::Cpu(q) => q.encode(tokens),
+            Encoder::Cpu(q) | Encoder::Gpu8(q) => q.encode(tokens),
             Encoder::Split { s0, s1, cap_len } => {
                 // Targets are unused (we read a hidden state, not a loss).
                 let ign = vec![IGNORE; *cap_len as usize];
@@ -168,38 +174,76 @@ impl HotPipeline {
         let qinit = qwen::import::brain_init_from_hf(qtensors, &qcfg)?;
         let enc_gpu = std::env::var("BRAIN_ZIMAGE_ENCODER_GPU").ok().filter(|s| !s.is_empty());
         let dit_gpu = std::env::var("BRAIN_GPU_INDEX").ok().unwrap_or_else(|| "0".to_string()); // the DiT/VAE card
-        let enc = match (&enc_gpu, hifi) {
-            (Some(bulk), false) => {
+
+        // For the 2-card encoder split we interleave the builds: bulk shard on the
+        // empty GPU `bulk`, THEN the DiT on GPU `dit_gpu` (while that card is still
+        // empty, so the DiT's transient upload-staging spike has headroom), THEN the
+        // thin tail shard packed on top of the DiT. Building the tail last is what
+        // makes GPU `dit_gpu` fit — the DiT's peak staging never overlaps the tail's
+        // resident bytes. `split` carries the params needed to finish after the DiT.
+        let mut split: Option<(Qwen, usize, usize, usize)> = None; // (s0, cut, n, di)
+        let enc_cpu = match (&enc_gpu, hifi) {
+            (Some(bulk), false) if std::env::var("BRAIN_ZIMAGE_ENCODER_FP32SPLIT").ok().as_deref() == Some("1") => {
                 let n = qcfg.n_layers as usize;
-                let cut = (n * 3) / 4; // ~¾ of the layers (embedding side) on the bulk card
-                progress(&format!("building Qwen-4B encoder (split: GPU {bulk} + GPU {dit_gpu})"));
+                // fp32 2-card split (opt-in; needs a large-binding / ReBAR card — it
+                // does NOT fit two P40s). Cut point: layers 0..cut (+ embedding) on
+                // the bulk card, cut..n-1 on the DiT's card. The fp32 encoder is
+                // ~16 GB and each card's usable budget (weights × ~2 alloc overhead
+                // on non-ReBAR Pascal) is < 24 GB, so the bulk must NOT exceed ~11 GB
+                // (≈ embed + ⅔ of the layers). `BRAIN_ZIMAGE_ENCODER_CUT` overrides.
+                let cut = std::env::var("BRAIN_ZIMAGE_ENCODER_CUT").ok().and_then(|s| s.parse().ok()).unwrap_or((n * 2) / 3).min(n - 1);
+                progress(&format!("building Qwen-4B encoder bulk (fp32 split @{cut}: GPU {bulk} + GPU {dit_gpu})"));
                 let (bi, di) = (bulk.parse().unwrap_or(1), dit_gpu.parse().unwrap_or(0));
                 // Bulk shard: embedding + layers 0..cut on the (empty) bulk card.
                 std::env::set_var("BRAIN_GPU_INDEX", bulk);
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
                 let s0 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard { start: 0, end: cut, embed: true, head: false, gpu_index: bi });
-                // Tail shard: layers cut..n_layers-1 (up to the penultimate) on the
-                // DiT's card. Built BEFORE the DiT so its ~4 GB is placed first.
-                std::env::set_var("BRAIN_GPU_INDEX", &dit_gpu);
-                let s1 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard { start: cut, end: n - 1, embed: false, head: false, gpu_index: di });
-                Encoder::Split { s0, s1, cap_len }
+                split = Some((s0, cut, n, di));
+                None // tail (and thus Encoder::Split) assembled after the DiT below
+            }
+            (Some(bulk), false) => {
+                // Default on-GPU encoder: whole Qwen-4B in int8 (DP4A) on ONE card.
+                // ~9.5 GB resident — fits a single 24 GB P40, leaving the DiT its own
+                // card. `end: n-1` skips the unused last layer (encode reads the
+                // penultimate hidden). This is the robust superfast path.
+                let n = qcfg.n_layers as usize;
+                let bi = bulk.parse().unwrap_or(1);
+                progress(&format!("building Qwen-4B encoder (int8 DP4A, GPU {bulk})"));
+                std::env::set_var("BRAIN_GPU_INDEX", bulk);
+                gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
+                let e = Qwen::new_shard_i8(qcfg.clone(), 1, cap_len, &qinit, Shard { start: 0, end: n - 1, embed: true, head: false, gpu_index: bi });
+                Some(Encoder::Gpu8(e))
             }
             _ => {
                 progress("building Qwen-4B encoder (CPU/AVX2)");
                 gpu_core::set_default_backend(gpu_core::Backend::Cpu);
                 let e = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard::whole(qcfg.n_layers as usize));
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
-                Encoder::Cpu(e)
+                Some(Encoder::Cpu(e))
             }
         };
         // Ensure the DiT/VAE build lands on the DiT card regardless of the branch.
         std::env::set_var("BRAIN_GPU_INDEX", &dit_gpu);
-        drop(qinit);
+        gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
 
         progress(if hifi { "building DiT (fp32, 2×GPU)" } else { "building DiT (int8, GPU)" });
         let zcfg = ZImageConfig::turbo();
         let weights = import_comfy(checkpoint::safetensors::read(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
         let dit = DitEngine::build(hifi, zcfg, weights, lh, lw, cap_len);
+
+        // Now the DiT is resident and its staging is reclaimed — pack the thin
+        // encoder tail on top of it (GPU `dit_gpu`), then assemble Encoder::Split.
+        let enc = match (enc_cpu, split) {
+            (Some(e), _) => e,
+            (None, Some((s0, cut, n, di))) => {
+                progress(&format!("building Qwen-4B encoder tail (layers {cut}..{})", n - 1));
+                std::env::set_var("BRAIN_GPU_INDEX", &dit_gpu);
+                let s1 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard { start: cut, end: n - 1, embed: false, head: false, gpu_index: di });
+                Encoder::Split { s0, s1, cap_len }
+            }
+            (None, None) => unreachable!("encoder neither CPU nor split"),
+        };
+        drop(qinit);
 
         progress("building VAE decoder (GPU)");
         let vtensors = tensors_map(checkpoint::safetensors::read(&paths.vae).map_err(|e| format!("read vae: {e}"))?);

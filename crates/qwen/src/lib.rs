@@ -9,6 +9,7 @@ pub mod config;
 pub mod import;
 pub mod init;
 pub mod model;
+pub mod q8;
 pub mod sample;
 pub mod finetune;
 pub mod shard;
