@@ -82,6 +82,79 @@ const ADD_INDEX_MASK: usize = 40;
 /// one dispatch is a wgpu usage-scope violation (it panics on the GPU
 /// backend), which is exactly what the MTP path used to do.
 const ADD_INPLACE: usize = 41;
+// ---- incremental KV-cache decode kernels (indices continue after MATMUL_REG2=42) ----
+const KV_APPEND: usize = 43;
+const DECODE_SOFTMAX: usize = 44;
+const ATTN_DECODE_APPLY: usize = 45;
+const MLA_DECODE_SCORES: usize = 46;
+const ROPE_TRAIN_AT: usize = 47;
+
+/// MLA decode scores: a SINGLE query (the new token at `pos`) against all `t`
+/// cached keys, MLA-style (two-part score = per-head `nope` + shared MQA `rope`).
+/// Mirrors `kernels::MLA_SCORES` exactly (nope loop then rope loop, then
+/// `*inverseSqrt(np+rp)`) so the score is bit-identical to the recompute path
+/// for the query row. `q_pass`=[H*np], `q_rot`=[H*rp], `kpass`=[cap, H*np],
+/// `krot`=[cap, rp] (shared), `scores`=[H, cap]. One invocation per (h, j<t).
+const MLA_DECODE_SCORES_WGSL: &str = r#"
+struct Params { n_heads: u32, np: u32, rp: u32, t: u32, cap: u32 };
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read>       q_pass: array<f32>;
+@group(0) @binding(2) var<storage, read>       q_rot:  array<f32>;
+@group(0) @binding(3) var<storage, read>       kpass:  array<f32>;
+@group(0) @binding(4) var<storage, read>       krot:   array<f32>;
+@group(0) @binding(5) var<storage, read_write> scores: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(num_workgroups) nwg: vec3<u32>) {
+    let idx = gid.y * (nwg.x * 64u) + gid.x;
+    let total = p.n_heads * p.t;
+    if (idx >= total) { return; }
+    let h = idx / p.t;
+    let j = idx % p.t;
+    let np = p.np;
+    let rp = p.rp;
+    let qp_base = h * np;
+    let kp_base = j * (p.n_heads * np) + h * np;
+    let qr_base = h * rp;
+    let kr_base = j * rp;
+    var s = 0.0;
+    for (var d: u32 = 0u; d < np; d = d + 1u) { s = s + q_pass[qp_base + d] * kpass[kp_base + d]; }
+    for (var d: u32 = 0u; d < rp; d = d + 1u) { s = s + q_rot[qr_base + d] * krot[kr_base + d]; }
+    scores[h * p.cap + j] = s * inverseSqrt(f32(np + rp));
+}
+"#;
+
+/// RoPE at an EXPLICIT absolute position, INTERLEAVED (adjacent pairs `2j,2j+1`)
+/// convention — the decode-step twin of `kernels::ROPE_TRAIN` (which GLM's
+/// forward uses). Identical math (base 10000, pairs `2j,2j+1`) but the rotary
+/// position is `pos_base + row` instead of `row % tcols`. NOT interchangeable
+/// with `kernels::ROPE_AT`, which is the half-split (GPT-NeoX) convention.
+const ROPE_TRAIN_AT_WGSL: &str = r#"
+struct Params { n_rows: u32, n_heads: u32, head_dim: u32, row_stride: u32, base_off: u32, pos_base: u32 };
+@group(0) @binding(0) var<uniform> p: Params;
+@group(0) @binding(1) var<storage, read_write> buf: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(num_workgroups) nwg: vec3<u32>) {
+    let gidx = gid.y * (nwg.x * 64u) + gid.x;
+    let half = p.head_dim / 2u;
+    let total = p.n_rows * p.n_heads * half;
+    if (gidx >= total) { return; }
+    let j = gidx % half;
+    let tmp = gidx / half;
+    let h = tmp % p.n_heads;
+    let row = tmp / p.n_heads;
+    let pos = p.pos_base + row;
+    let base = row * p.row_stride + p.base_off + h * p.head_dim + 2u * j;
+    let angle = f32(pos) * pow(10000.0, -f32(2u * j) / f32(p.head_dim));
+    let c = cos(angle);
+    let sn = sin(angle);
+    let e = buf[base];
+    let o = buf[base + 1u];
+    buf[base]      = e * c - o * sn;
+    buf[base + 1u] = e * sn + o * c;
+}
+"#;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -127,6 +200,12 @@ const PIPELINES: &[(&str, &str)] = &[
     ("add_index_mask", kernels::ADD_INDEX_MASK),
     ("add_inplace", kernels::ADD_INPLACE),
     ("matmul_reg2", kernels::MATMUL_REG2),
+    // incremental KV-cache decode kernels (indices 43..=47)
+    ("kv_append", kernels::KV_APPEND),
+    ("decode_softmax", kernels::DECODE_SOFTMAX),
+    ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
+    ("mla_decode_scores", MLA_DECODE_SCORES_WGSL),
+    ("rope_train_at", ROPE_TRAIN_AT_WGSL),
 ];
 
 /// MLP variant per layer (cached activations for backprop).
@@ -260,6 +339,16 @@ pub struct Glm {
 
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
+
+    // ---- incremental KV-cache decode (single new token vs the growing cache) ----
+    // MLA "materialised per-head" cache: per layer store the up-projected per-head
+    // key `k_pass` [cap, H*qk_nope], the shared MQA rope key `k_rot` [cap, qk_rope],
+    // and the per-head value `v` [cap, H*v_head]. `cap = t` (the configured ctx).
+    kpass_cache: Vec<DeviceBuffer>,
+    krot_cache: Vec<DeviceBuffer>,
+    v_cache: Vec<DeviceBuffer>,
+    // Next absolute position the incremental `step` will decode (cache fill level).
+    dec_pos: Cell<u32>,
 }
 
 impl Glm {
@@ -375,6 +464,18 @@ impl Glm {
         // widest per-expert feed-forward width (dense vs moe) for the shared d_h.
         let ff_max = dense_ff.max(moe_ff).max(shared_ff);
 
+        // Incremental-decode KV cache: one set of buffers per layer, sized to the
+        // configured context `t` (= cap). Stores the materialised per-head k_pass,
+        // the shared MQA k_rot, and per-head v (see field docs).
+        let mut kpass_cache = Vec::new();
+        let mut krot_cache = Vec::new();
+        let mut v_cache = Vec::new();
+        for _ in 0..cfg.n_layers {
+            kpass_cache.push(st(t as u64 * nope));
+            krot_cache.push(st(t as u64 * rope1));
+            v_cache.push(st(t as u64 * vd));
+        }
+
         let mut m = Glm {
             cfg,
             b,
@@ -453,6 +554,10 @@ impl Glm {
             inv: st(n),
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
+            kpass_cache,
+            krot_cache,
+            v_cache,
+            dec_pos: Cell::new(0),
             gpu,
         };
         m.fwd_steps = m.build_forward(m.b, m.t);
@@ -895,6 +1000,153 @@ impl Glm {
         self.gpu.read(&self.logits, (t_use * self.cfg.vocab) as usize)
     }
 
+    /// Per-position **final-norm hidden** states for one sequence (`[len, d_model]`),
+    /// the recompute twin of [`Self::step`]'s output — used to validate the KV
+    /// decode. (B must be 1, len <= t.)
+    pub fn hidden_all(&self, tokens: &[u32]) -> Vec<f32> {
+        let t_use = tokens.len() as u32;
+        assert!(t_use <= self.t && self.b == 1, "glm decoder sized too small");
+        let ignore = vec![IGNORE; t_use as usize];
+        self.set_batch(tokens, &ignore);
+        let s = self.build_forward(1, t_use);
+        self.gpu.submit(&[], &s);
+        self.gpu.read(&self.xn_final, (t_use * self.cfg.d_model) as usize)
+    }
+
+    // ================= incremental KV-cache decode =================
+
+    /// Reset the incremental KV cache to an empty sequence (next `step` is pos 0).
+    pub fn reset_cache(&self) {
+        self.dec_pos.set(0);
+    }
+
+    /// The absolute position the next [`Self::step`] will decode.
+    pub fn cache_pos(&self) -> u32 {
+        self.dec_pos.get()
+    }
+
+    /// **Incremental KV-cache decode** of one new token at the current cache
+    /// position, returning the final-norm hidden state (`[d_model]`). The `O(T)`
+    /// twin of [`Self::logits_all`]/[`Self::hidden_all`]'s `O(T²)` recompute: the
+    /// same GLM MLA + MoE block math, but the new token's k_pass / shared k_rot / v
+    /// are projected once, appended to the persistent per-layer cache, and attended
+    /// by a single query over cached positions `0..=pos`. Requires `b == 1`.
+    pub fn step(&self, token_id: u32) -> Vec<f32> {
+        let pos = self.dec_pos.get();
+        let hidden = self.decode_at(token_id, pos);
+        self.dec_pos.set(pos + 1);
+        hidden
+    }
+
+    /// Record + run the incremental decode tape for one token at absolute `pos`.
+    /// Runs entirely in the WGSL op set (GPU or wgsl-cpu), reusing every GLM
+    /// forward kernel at a single-query (n=1) shape plus the MLA-decode score
+    /// kernel + interleaved rope-at-pos (both inline in this crate) and the
+    /// committed `kv_append` / `decode_softmax` / `attn_decode_apply` kernels.
+    fn decode_at(&self, token_id: u32, pos: u32) -> Vec<f32> {
+        let c = &self.cfg;
+        let d = c.d_model;
+        let e = c.n_routed_experts;
+        let ql = c.q_lora_rank;
+        let kvl = c.kv_lora_rank;
+        let nope = c.nope_dim();
+        let qrope = c.q_rope_dim();
+        let rope1 = c.qk_rope_head_dim;
+        let nope_hd = c.qk_nope_head_dim;
+        let vd = c.v_dim();
+        let nh = c.n_heads;
+        let vhd = c.v_head_dim;
+        let moe_ff = c.moe_intermediate_size;
+        let dense_ff = c.intermediate_size;
+        let shared_ff = c.shared_ff();
+        let half_rope = rope1 / 2;
+        let cap = self.t;
+        let t = pos + 1; // cached length after appending this token
+        assert!(self.b == 1, "KV decode requires b == 1");
+        assert!(pos < self.t, "decode pos {pos} exceeds ctx {}", self.t);
+
+        // embed the single token into res[0] (row 0).
+        self.gpu.write(&self.tokens, &[token_id]);
+        let mut s: Vec<Step> = Vec::new();
+        s.push(self.gpu.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, 1], d));
+
+        for l in 0..c.n_layers as usize {
+            let lb = &self.layers[l];
+            let p = |name: &str| format!("blocks.{l}.{name}");
+
+            // ---- MLA attention (single query) ----
+            self.norm_fwd(&mut s, &self.res[l], &p("input_ln.weight"), &lb.xn1, d, 1);
+            // Q: low-rank down -> norm -> up split (nope / rope), rope the rope slice at pos
+            self.mm(&mut s, &lb.xn1, &p("attn.q_a.weight"), &lb.q_c, 1, d, ql);
+            self.norm_fwd(&mut s, &lb.q_c, &p("attn.q_a_norm.weight"), &lb.q_c_n, ql, 1);
+            self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_nope.weight"), &lb.q_pass, 1, ql, nope);
+            self.mm(&mut s, &lb.q_c_n, &p("attn.q_b_rope.weight"), &lb.q_rot, 1, ql, qrope);
+            s.push(self.gpu.step(ROPE_TRAIN_AT, &[&lb.q_rot], &[1, nh, rope1, qrope, 0, pos], nh * half_rope));
+            // KV: compressed latent (+ shared rope key), norm, up-project to k_pass / v
+            self.mm(&mut s, &lb.xn1, &p("attn.kv_a_c.weight"), &lb.kv_c, 1, d, kvl);
+            self.mm(&mut s, &lb.xn1, &p("attn.kv_a_rope.weight"), &lb.k_rot, 1, d, rope1);
+            s.push(self.gpu.step(ROPE_TRAIN_AT, &[&lb.k_rot], &[1, 1, rope1, rope1, 0, pos], half_rope));
+            self.norm_fwd(&mut s, &lb.kv_c, &p("attn.kv_a_norm.weight"), &lb.kv_c_n, kvl, 1);
+            self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_nope.weight"), &lb.k_pass, 1, kvl, nope);
+            self.mm(&mut s, &lb.kv_c_n, &p("attn.kv_b_v.weight"), &lb.v, 1, kvl, vd);
+            // append this token's materialised k_pass / shared k_rot / v to the cache
+            s.push(self.gpu.step(KV_APPEND, &[&lb.k_pass, &self.kpass_cache[l]], &[nope, pos], nope));
+            s.push(self.gpu.step(KV_APPEND, &[&lb.k_rot, &self.krot_cache[l]], &[rope1, pos], rope1));
+            s.push(self.gpu.step(KV_APPEND, &[&lb.v, &self.v_cache[l]], &[vd, pos], vd));
+            // single-query MLA scores over cached keys 0..t, softmax, apply (v side)
+            s.push(self.gpu.step(
+                MLA_DECODE_SCORES,
+                &[&lb.q_pass, &lb.q_rot, &self.kpass_cache[l], &self.krot_cache[l], &self.scores],
+                &[nh, nope_hd, rope1, t, cap],
+                nh * t,
+            ));
+            s.push(self.gpu.step(DECODE_SOFTMAX, &[&self.scores, &lb.probs], &[nh, t, cap], nh));
+            s.push(self.gpu.step(ATTN_DECODE_APPLY, &[&lb.probs, &self.v_cache[l], &lb.ctx], &[nh, 1, vhd, t, cap, vd], nh * vhd));
+            self.mm(&mut s, &lb.ctx, &p("attn.o.weight"), &self.proj, 1, vd, d);
+            s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[d], d));
+
+            // ---- MLP: dense SwiGLU or MoE (single row) ----
+            self.norm_fwd(&mut s, &lb.xmid, &p("post_ln.weight"), &lb.xn2, d, 1);
+            match &lb.mlp {
+                Mlp::Dense { gate_pre, up, h } => {
+                    self.mm(&mut s, &lb.xn2, &p("mlp.gate.weight"), gate_pre, 1, d, dense_ff);
+                    self.mm(&mut s, &lb.xn2, &p("mlp.up.weight"), up, 1, d, dense_ff);
+                    s.push(self.gpu.step(SILU_MUL, &[gate_pre, up, h], &[dense_ff], dense_ff));
+                    self.mm(&mut s, h, &p("mlp.down.weight"), &self.mlp_out, 1, dense_ff, d);
+                    s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[d], d));
+                }
+                Mlp::Moe { router_logits, gate, probs, gate_pre, up, h, expert_out, sh_gate, sh_up, sh_h } => {
+                    self.mm(&mut s, &lb.xn2, &p("moe.router.weight"), router_logits, 1, d, e);
+                    s.push(self.gpu.step(
+                        ROUTER_SIG,
+                        &[router_logits, self.w(&p("moe.router.bias")), gate, probs],
+                        &[1, e, c.num_experts_per_tok, c.n_group, c.topk_group, c.norm_topk_prob as u32, f(c.routed_scaling_factor)],
+                        1,
+                    ));
+                    for ei in 0..e as usize {
+                        let ep = |nm: &str| format!("blocks.{l}.moe.experts.{ei}.{nm}");
+                        self.mm(&mut s, &lb.xn2, &ep("gate.weight"), &gate_pre[ei], 1, d, moe_ff);
+                        self.mm(&mut s, &lb.xn2, &ep("up.weight"), &up[ei], 1, d, moe_ff);
+                        s.push(self.gpu.step(SILU_MUL, &[&gate_pre[ei], &up[ei], &h[ei]], &[moe_ff], moe_ff));
+                        self.mm(&mut s, &h[ei], &ep("down.weight"), &expert_out[ei], 1, moe_ff, d);
+                        let acc = if ei == 0 { 0 } else { 1 };
+                        s.push(self.gpu.step(SCALE_ADD, &[gate, &expert_out[ei], &self.moe_acc], &[1, d, e, ei as u32, acc], d));
+                    }
+                    self.mm(&mut s, &lb.xn2, &p("moe.shared.gate.weight"), sh_gate, 1, d, shared_ff);
+                    self.mm(&mut s, &lb.xn2, &p("moe.shared.up.weight"), sh_up, 1, d, shared_ff);
+                    s.push(self.gpu.step(SILU_MUL, &[sh_gate, sh_up, sh_h], &[shared_ff], shared_ff));
+                    self.mm(&mut s, sh_h, &p("moe.shared.down.weight"), &self.sh_out, 1, shared_ff, d);
+                    s.push(self.gpu.step(ADD2, &[&self.moe_acc, &self.sh_out, &self.mlp_out], &[d], d));
+                    s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[d], d));
+                }
+            }
+        }
+        let last = c.n_layers as usize;
+        self.norm_fwd(&mut s, &self.res[last], "norm.weight", &self.xn_final, d, 1);
+        self.gpu.submit(&[], &s);
+        self.gpu.read(&self.xn_final, d as usize)
+    }
+
     /// Read the char tokenizer vocab (`itos`) embedded in a checkpoint at train
     /// time (char datasets), so inference needs no dataset. `None` for token-id
     /// (BPE) checkpoints that carry no char vocab.
@@ -1073,5 +1325,67 @@ impl model::Model for Glm {
     }
     fn config_json(&self) -> serde_json::Value {
         self.cfg.to_json()
+    }
+}
+
+#[cfg(test)]
+mod kv_step_tests {
+    use super::*;
+    use crate::config::GlmConfig;
+
+    fn maxabs(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// lm_head applied on the host to a single final-norm hidden row, so the KV
+    /// decode's hidden can be turned into logits and checked against `logits_all`.
+    fn head_logits(m: &Glm, hidden: &[f32]) -> Vec<f32> {
+        let d = m.cfg.d_model as usize;
+        let v = m.cfg.vocab as usize;
+        let w = m.read_weight(m.cfg.head_weight()); // [v, d]
+        (0..v)
+            .map(|o| {
+                let row = &w[o * d..(o + 1) * d];
+                hidden.iter().zip(row).map(|(a, b)| a * b).sum::<f32>()
+            })
+            .collect()
+    }
+
+    /// The incremental KV-cache `step` must reproduce GLM's own `O(T²)` recompute
+    /// (`hidden_all` / `logits_all`) for every prefix — same engine, same weights,
+    /// so any difference is only float reassociation in the MLA attention reduction
+    /// and the (naive n=1 vs batched) matmuls. Exercises MLA + one dense + one MoE
+    /// layer (`tiny()`: first_k_dense_replace=1, n_layers=2).
+    #[test]
+    fn kv_step_matches_full_recompute() {
+        let cfg = GlmConfig::tiny();
+        let d = cfg.d_model as usize;
+        let v = cfg.vocab as usize;
+        let t = 8u32;
+        let seq = 6usize;
+        let init = crate::init::init_weights(&cfg, 7);
+        let m = Glm::new(cfg.clone(), 1, t, &init);
+
+        let tokens: Vec<u32> = (0..seq).map(|i| ((i * 5 + 3) as u32) % cfg.vocab).collect();
+
+        // Incremental: feed one token at a time through the KV cache.
+        m.reset_cache();
+        let inc: Vec<Vec<f32>> = tokens.iter().map(|&tk| m.step(tk)).collect();
+        assert_eq!(m.cache_pos(), seq as u32);
+
+        // Reference: full recompute of each prefix; compare the last row.
+        let mut worst_h = 0.0f32;
+        let mut worst_l = 0.0f32;
+        for i in 0..seq {
+            let pref = &tokens[..=i];
+            let hid = m.hidden_all(pref);
+            worst_h = worst_h.max(maxabs(&inc[i], &hid[i * d..(i + 1) * d]));
+            let logits = m.logits_all(pref);
+            let dec_l = head_logits(&m, &inc[i]);
+            worst_l = worst_l.max(maxabs(&dec_l, &logits[i * v..(i + 1) * v]));
+        }
+        println!("kv_step_matches_full_recompute: hidden maxabs={worst_h:.3e}  logits maxabs={worst_l:.3e}");
+        assert!(worst_h < 3e-3, "KV decode hidden diverges from recompute: maxabs={worst_h}");
+        assert!(worst_l < 3e-3, "KV decode logits diverge from recompute: maxabs={worst_l}");
     }
 }
