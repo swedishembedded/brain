@@ -18,7 +18,7 @@
 //!     accumulation into `tok.weight`) is a follow-up.
 //!   * GELU uses the tanh approximation (see `kernels/wgsl/gelu.wgsl`).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use serde_json::Value;
@@ -94,6 +94,11 @@ const MATMUL_DX_REG: usize = 33;
 const MATMUL_DW_REG: usize = 34;
 const CE_STATS: usize = 35;
 const CE_GRAD_STATS: usize = 36;
+// Incremental KV-cache decode kernels (single new token vs the growing cache).
+const ATTN_DECODE_SCORES: usize = 37;
+const DECODE_SOFTMAX: usize = 38;
+const ATTN_DECODE_APPLY: usize = 39;
+const KV_APPEND: usize = 40;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -133,6 +138,10 @@ const PIPELINES: &[(&str, &str)] = &[
     ("matmul_dw_reg", kernels::MATMUL_DW_REG),
     ("ce_stats", kernels::CE_STATS),
     ("ce_grad_stats", kernels::CE_GRAD_STATS),
+    ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
+    ("decode_softmax", kernels::DECODE_SOFTMAX),
+    ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
+    ("kv_append", kernels::KV_APPEND),
 ];
 
 /// Pick the forward-linear GEMM kernel + its dispatch thread count for an
@@ -312,6 +321,45 @@ pub struct Gpt {
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
     ce_grad_uni: gpu_core::DeviceBuffer,
+
+    // Incremental KV-cache decode state (lazily built on first `step`).
+    dec: RefCell<Option<Decode>>,
+    // Absolute position the next `step` will decode (cache fill level).
+    dec_pos: Cell<u32>,
+}
+
+/// Per-layer / shared GPU scratch for the incremental single-token decode path,
+/// plus the persistent K/V cache. Built lazily the first time [`Gpt::step`] runs
+/// (inference-only; sized for `n=1` rows and a `block_size` cache), so the
+/// training buffers above are never disturbed. The fused `attn.qkv.bias` is split
+/// once into contiguous per-region `[d]` buffers so the decode path can add each
+/// projection's bias without an unaligned buffer slice.
+struct Decode {
+    cap: u32, // K/V cache capacity == block_size (max context)
+    tok_id: gpu_core::DeviceBuffer,
+    pos_id: gpu_core::DeviceBuffer,
+    tok_e: gpu_core::DeviceBuffer,
+    pos_e: gpu_core::DeviceBuffer,
+    res: Vec<gpu_core::DeviceBuffer>, // [n_layers+1] residual-stream snapshots, [d]
+    xn1: gpu_core::DeviceBuffer,
+    q: gpu_core::DeviceBuffer,
+    k: gpu_core::DeviceBuffer,
+    v: gpu_core::DeviceBuffer,
+    scores: gpu_core::DeviceBuffer,
+    probs: gpu_core::DeviceBuffer,
+    ctx: gpu_core::DeviceBuffer,
+    proj: gpu_core::DeviceBuffer,
+    xmid: gpu_core::DeviceBuffer,
+    ln2_out: gpu_core::DeviceBuffer,
+    fc: gpu_core::DeviceBuffer,
+    gelu: gpu_core::DeviceBuffer,
+    ffn_out: gpu_core::DeviceBuffer,
+    xn_final: gpu_core::DeviceBuffer,
+    kcache: Vec<gpu_core::DeviceBuffer>, // per layer [cap*d]
+    vcache: Vec<gpu_core::DeviceBuffer>,
+    qbias: Vec<gpu_core::DeviceBuffer>, // per layer [d], split from attn.qkv.bias
+    kbias: Vec<gpu_core::DeviceBuffer>,
+    vbias: Vec<gpu_core::DeviceBuffer>,
 }
 
 impl Gpt {
@@ -426,6 +474,8 @@ impl Gpt {
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
             ce_grad_uni,
+            dec: RefCell::new(None),
+            dec_pos: Cell::new(0),
             gpu,
         };
         m.fwd_steps = m.forward_steps(m.b, m.t);
@@ -661,6 +711,160 @@ impl Gpt {
         self.gpu.read(&self.logits, (t_use * self.cfg.vocab) as usize)
     }
 
+    // ---- incremental KV-cache decode (nanoGPT single-token twin of forward) ----
+
+    /// Reset the incremental KV cache to an empty sequence (next [`Self::step`] is
+    /// absolute position 0).
+    pub fn reset_cache(&self) {
+        self.dec_pos.set(0);
+    }
+
+    /// The absolute position the next [`Self::step`] will decode (cache fill level).
+    pub fn cache_pos(&self) -> u32 {
+        self.dec_pos.get()
+    }
+
+    /// Build the lazy decode state (buffers + K/V cache) the first time it is
+    /// needed. The fused `attn.qkv.bias` is read back and split into contiguous
+    /// per-region `[d]` bias buffers here.
+    fn ensure_decode(&self) {
+        if self.dec.borrow().is_some() {
+            return;
+        }
+        assert!(self.shard.is_whole(self.cfg.n_layers as usize), "step() requires a whole-model shard");
+        let c = &self.cfg;
+        let d = c.d_model as u64;
+        let ff = c.d_ff as u64;
+        let nh = c.n_heads as u64;
+        let cap = c.block_size;
+        let g = &self.gpu;
+        let st = |x: u64| g.storage(x);
+        let idbuf = || g.buffer("dec_id", 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST);
+        let mut res = Vec::new();
+        for _ in 0..=c.n_layers as usize {
+            res.push(st(d));
+        }
+        let (mut kcache, mut vcache) = (Vec::new(), Vec::new());
+        let (mut qbias, mut kbias, mut vbias) = (Vec::new(), Vec::new(), Vec::new());
+        let dd = c.d_model as usize;
+        for l in 0..c.n_layers as usize {
+            kcache.push(st(cap as u64 * d));
+            vcache.push(st(cap as u64 * d));
+            let bias = self.ps.read_weight(g, &format!("blocks.{l}.attn.qkv.bias")); // [3d]
+            qbias.push(g.storage_init("dec_qbias", &bias[0..dd]));
+            kbias.push(g.storage_init("dec_kbias", &bias[dd..2 * dd]));
+            vbias.push(g.storage_init("dec_vbias", &bias[2 * dd..3 * dd]));
+        }
+        let dec = Decode {
+            cap,
+            tok_id: idbuf(),
+            pos_id: idbuf(),
+            tok_e: st(d),
+            pos_e: st(d),
+            res,
+            xn1: st(d),
+            q: st(d),
+            k: st(d),
+            v: st(d),
+            scores: st(nh * cap as u64),
+            probs: st(nh * cap as u64),
+            ctx: st(d),
+            proj: st(d),
+            xmid: st(d),
+            ln2_out: st(d),
+            fc: st(ff),
+            gelu: st(ff),
+            ffn_out: st(d),
+            xn_final: st(d),
+            kcache,
+            vcache,
+            qbias,
+            kbias,
+            vbias,
+        };
+        *self.dec.borrow_mut() = Some(dec);
+    }
+
+    /// **Incremental KV-cache decode** of a single token id at the current cache
+    /// position, returning the final-LayerNorm hidden state (`[d_model]`) for that
+    /// new token. This is the `O(T)`-per-token twin of the `O(T²)` full recompute
+    /// ([`Self::logits_all`]): the same dense nanoGPT block math, but only the new
+    /// token's Q/K/V are projected; its K/V are appended to the persistent per-layer
+    /// cache and a single query attends over positions `0..=pos`. Expressed entirely
+    /// in the existing WGSL op set, so it runs on whatever backend `Gpu` selected
+    /// (GPU or the wgsl-cpu JIT). Apply the (untied) `lm_head` to the returned hidden
+    /// row for logits.
+    pub fn step(&self, token_id: u32) -> Vec<f32> {
+        self.ensure_decode();
+        let pos = self.dec_pos.get();
+        let hidden = self.decode_at(token_id, pos);
+        self.dec_pos.set(pos + 1);
+        hidden
+    }
+
+    /// Record + run the incremental decode tape for one token at absolute `pos`.
+    fn decode_at(&self, token_id: u32, pos: u32) -> Vec<f32> {
+        let c = &self.cfg;
+        let d = c.d_model;
+        let ff = c.d_ff;
+        let nh = c.n_heads;
+        let hd = c.head_dim();
+        let dd = d as usize;
+        let t = pos + 1; // cached length after appending this token
+        let scale = 1.0f32 / (hd as f32).sqrt();
+        let g = &self.gpu;
+        let w = |name: &str| self.ps.w(name);
+        let dec_ref = self.dec.borrow();
+        let dec = dec_ref.as_ref().unwrap();
+        let cap_p = dec.cap;
+        assert!(pos < dec.cap, "decode pos {pos} exceeds block_size {}", dec.cap);
+
+        // --- token+position embedding: res[0] = tok[id] + pos[pos] ---
+        g.write(&dec.tok_id, &[token_id]);
+        g.write(&dec.pos_id, &[pos]);
+        let mut s: Vec<Step> = Vec::new();
+        s.push(g.step(EMBED, &[&dec.tok_id, w("tok.weight"), &dec.tok_e], &[d, 1], d));
+        s.push(g.step(EMBED, &[&dec.pos_id, w("pos.weight"), &dec.pos_e], &[d, 1], d));
+        s.push(g.step(ADD2, &[&dec.tok_e, &dec.pos_e, &dec.res[0]], &[d], d));
+
+        for l in 0..c.n_layers as usize {
+            let p = |name: &str| format!("blocks.{l}.{name}");
+            // --- attention: LN -> fused-QKV (as three contiguous slices) -> attend ---
+            s.push(g.step(LAYERNORM, &[&dec.res[l], w(&p("ln1.weight")), w(&p("ln1.bias")), &dec.xn1], &[d, 1, f(1e-5)], 1));
+            // q/k/v via the fused `attn.qkv.weight [3d,d]` sliced by output-row block
+            // (offsets d*d, 2*d*d are large + 256B-aligned) -> contiguous [d] buffers.
+            let dw = d * d;
+            s.push(g.step_sliced(MATMUL, &[&dec.xn1, w(&p("attn.qkv.weight")), &dec.q], &[(0, 0), (0, dw as u64), (0, 0)], &[1, d, d], d));
+            s.push(g.step_sliced(MATMUL, &[&dec.xn1, w(&p("attn.qkv.weight")), &dec.k], &[(0, 0), (dw as u64, dw as u64), (0, 0)], &[1, d, d], d));
+            s.push(g.step_sliced(MATMUL, &[&dec.xn1, w(&p("attn.qkv.weight")), &dec.v], &[(0, 0), (2 * dw as u64, dw as u64), (0, 0)], &[1, d, d], d));
+            s.push(g.step(BIAS_ADD, &[&dec.q, &dec.qbias[l]], &[1, d], d));
+            s.push(g.step(BIAS_ADD, &[&dec.k, &dec.kbias[l]], &[1, d], d));
+            s.push(g.step(BIAS_ADD, &[&dec.v, &dec.vbias[l]], &[1, d], d));
+            // append this token's K/V to the persistent cache (row = pos)
+            s.push(g.step(KV_APPEND, &[&dec.k, &dec.kcache[l]], &[d, pos], d));
+            s.push(g.step(KV_APPEND, &[&dec.v, &dec.vcache[l]], &[d, pos], d));
+            // single-query attention over positions 0..t (MHA: group=1, kv_stride=d)
+            s.push(g.step(ATTN_DECODE_SCORES, &[&dec.q, &dec.kcache[l], &dec.scores], &[nh, 1, hd, t, cap_p, d, scale.to_bits()], nh * t));
+            s.push(g.step(DECODE_SOFTMAX, &[&dec.scores, &dec.probs], &[nh, t, cap_p], nh));
+            s.push(g.step(ATTN_DECODE_APPLY, &[&dec.probs, &dec.vcache[l], &dec.ctx], &[nh, 1, hd, t, cap_p, d], nh * hd));
+            s.push(g.step(MATMUL, &[&dec.ctx, w(&p("attn.out.weight")), &dec.proj], &[1, d, d], d));
+            s.push(g.step(BIAS_ADD, &[&dec.proj, w(&p("attn.out.bias"))], &[1, d], d));
+            s.push(g.step(ADD2, &[&dec.res[l], &dec.proj, &dec.xmid], &[d], d));
+            // --- MLP: LN -> fc -> GELU -> proj ---
+            s.push(g.step(LAYERNORM, &[&dec.xmid, w(&p("ln2.weight")), w(&p("ln2.bias")), &dec.ln2_out], &[d, 1, f(1e-5)], 1));
+            s.push(g.step(MATMUL, &[&dec.ln2_out, w(&p("mlp.fc.weight")), &dec.fc], &[1, d, ff], ff));
+            s.push(g.step(BIAS_ADD, &[&dec.fc, w(&p("mlp.fc.bias"))], &[1, ff], ff));
+            s.push(g.step(GELU, &[&dec.fc, &dec.gelu], &[ff], ff));
+            s.push(g.step(MATMUL, &[&dec.gelu, w(&p("mlp.proj.weight")), &dec.ffn_out], &[1, ff, d], d));
+            s.push(g.step(BIAS_ADD, &[&dec.ffn_out, w(&p("mlp.proj.bias"))], &[1, d], d));
+            s.push(g.step(ADD2, &[&dec.xmid, &dec.ffn_out, &dec.res[l + 1]], &[d], d));
+        }
+        let last = c.n_layers as usize;
+        s.push(g.step(LAYERNORM, &[&dec.res[last], w("ln.weight"), w("ln.bias"), &dec.xn_final], &[d, 1, f(1e-5)], 1));
+        g.submit(&[], &s);
+        g.read(&dec.xn_final, dd)
+    }
+
     pub fn save(&self, path: &str) {
         self.save_with_itos(path, None);
     }
@@ -800,6 +1004,70 @@ mod tests {
 
     fn gpu_disabled() -> bool {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    fn maxabs(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// The incremental KV-cache `step` must reproduce the `O(T²)` full-recompute
+    /// (`logits_all`) for every prefix: the cache is algebraically exact, same
+    /// engine + weights, so the only difference is float reduction order. Runs on
+    /// whatever backend `Gpu` selected (GPU, or `BRAIN_DEVICE=cpu`).
+    #[test]
+    fn kv_step_matches_full_recompute() {
+        if gpu_disabled() {
+            return;
+        }
+        // d_model=32 (=> the fused-qkv weight-slice offsets d² are 256B-aligned),
+        // biases random so the fused-QKV bias split is genuinely exercised.
+        let cfg = GptConfig { vocab: 65, block_size: 16, n_layers: 2, d_model: 32, n_heads: 4, d_ff: 64 };
+        let d = cfg.d_model as usize;
+        let v = cfg.vocab as usize;
+        let seq = 10usize;
+        let mut rng = data::rng::Rng::new(4321);
+
+        let mut init: HashMap<String, Vec<f32>> = HashMap::new();
+        for (name, numel) in cfg.param_list() {
+            let val = if name.ends_with("ln1.weight") || name.ends_with("ln2.weight") || name == "ln.weight" {
+                vec![1.0f32; numel] // LayerNorm gain = 1
+            } else {
+                (0..numel).map(|_| rng.next_gaussian() as f32 * 0.08).collect()
+            };
+            init.insert(name, val);
+        }
+        let m = Gpt::new(cfg.clone(), 1, cfg.block_size, &init);
+        let lm_head = m.read_weight("lm_head.weight"); // [v, d], untied, no bias
+
+        let tokens: Vec<u32> = (0..seq).map(|_| (rng.next_u64() % v as u64) as u32).collect();
+
+        // Incremental: feed one token at a time; head-project each hidden row.
+        m.reset_cache();
+        let inc_logits: Vec<Vec<f32>> = tokens
+            .iter()
+            .enumerate()
+            .map(|(i, &tok)| {
+                assert_eq!(m.cache_pos(), i as u32);
+                let h = m.step(tok); // [d] final-LayerNorm hidden
+                (0..v)
+                    .map(|o| {
+                        let row = &lm_head[o * d..(o + 1) * d];
+                        (0..d).map(|k| row[k] * h[k]).sum::<f32>()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Reference: full recompute of each prefix; compare the last row's logits.
+        let mut worst = 0.0f32;
+        for i in 0..seq {
+            let full = m.logits_all(&tokens[..=i]); // [(i+1)*v]
+            let last = &full[i * v..(i + 1) * v];
+            let err = maxabs(&inc_logits[i], last);
+            worst = worst.max(err);
+            assert!(err < 2e-3, "prefix {i}: KV step vs full recompute maxabs={err}");
+        }
+        println!("kv_step_matches_full_recompute: seq={seq} worst maxabs={worst:e}");
     }
 
     #[test]
