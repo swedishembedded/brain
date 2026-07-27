@@ -82,6 +82,12 @@ const CE_GRAD_STATS: usize = 36;
 const QUANT_PACK: usize = 37;
 const MATMUL_I8: usize = 38;
 const MAX_ABS_ROW: usize = 39;
+// Incremental KV-cache decode kernels (single new token vs the growing cache).
+const ATTN_DECODE_SCORES: usize = 40;
+const DECODE_SOFTMAX: usize = 41;
+const ATTN_DECODE_APPLY: usize = 42;
+const KV_APPEND: usize = 43;
+const ROPE_AT: usize = 44;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -124,6 +130,11 @@ const PIPELINES: &[(&str, &str)] = &[
     ("quant_pack", kernels::QUANT_PACK),
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
     ("max_abs_row", kernels::MAX_ABS_ROW),
+    ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
+    ("decode_softmax", kernels::DECODE_SOFTMAX),
+    ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
+    ("kv_append", kernels::KV_APPEND),
+    ("rope_at", kernels::ROPE_AT),
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
@@ -269,6 +280,13 @@ pub struct Qwen {
     fwd_steps: Vec<Step>,
     bwd_steps: Vec<Step>,
     ce_grad_uni: DeviceBuffer,
+
+    // Persistent per-layer KV cache for incremental decode ([max_t, kv_dim] each),
+    // and the next absolute position `step` will decode (cache fill level). Sized
+    // for the whole model; the decode path requires a single-device (whole) shard.
+    kcache: Vec<DeviceBuffer>,
+    vcache: Vec<DeviceBuffer>,
+    dec_pos: Cell<u32>,
     /// Int8 (DP4A) linears for inference. When present, the 7 per-layer linears
     /// run in int8 (weights ~4× smaller — fits the fp32-encoder-too-big case on
     /// one card) and are absent from the fp32 `ps`. None ⇒ all-fp32 path.
@@ -470,6 +488,16 @@ impl Qwen {
             None
         };
 
+        // Incremental-decode KV cache: one [t, kv_dim] key/value buffer per layer.
+        // Only meaningful for a whole (single-device) model — `step` asserts that —
+        // so allocate for every layer regardless of `shard`.
+        let mut kcache = Vec::with_capacity(cfg.n_layers as usize);
+        let mut vcache = Vec::with_capacity(cfg.n_layers as usize);
+        for _ in 0..cfg.n_layers {
+            kcache.push(st(t as u64 * hkv));
+            vcache.push(st(t as u64 * hkv));
+        }
+
         let mut m = Qwen {
             cfg,
             b,
@@ -512,6 +540,9 @@ impl Qwen {
             fwd_steps: Vec::new(),
             bwd_steps: Vec::new(),
             ce_grad_uni,
+            kcache,
+            vcache,
+            dec_pos: Cell::new(0),
             q8,
             gpu,
         };
@@ -1023,6 +1054,104 @@ impl Qwen {
         self.encode_hidden(tokens, self.cfg.n_layers as usize - 1)
     }
 
+    // ---- incremental KV-cache decode (the O(T)/token twin of the O(T²) forward) ----
+
+    /// Reset the incremental KV cache to an empty sequence (the next [`Self::step`]
+    /// decodes absolute position 0).
+    pub fn reset_cache(&self) {
+        self.dec_pos.set(0);
+    }
+
+    /// The absolute position the next [`Self::step`] will decode (the cache fill level).
+    pub fn cache_pos(&self) -> u32 {
+        self.dec_pos.get()
+    }
+
+    /// **Incremental KV-cache decode** of a single new token id at the current cache
+    /// position, returning the final-norm hidden state (`[d_model]`) for that token.
+    /// This is the `O(T)`-per-token twin of the `O(T²)` full recompute
+    /// ([`Self::logits_all`] / [`Self::encode_hidden`]): the same Qwen3 block math,
+    /// but the new token's K/V are projected, QK-normed, RoPE'd at the absolute
+    /// position, appended to the persistent per-layer cache, and attended by a
+    /// single query over positions `0..=pos`. Expressed entirely in the WGSL op set,
+    /// so it runs on whatever backend `Gpu` selected (GPU or the wgsl-cpu JIT).
+    ///
+    /// The token is embedded through the tied `tok.weight` table; apply the (tied)
+    /// head to the returned hidden to get logits — `logits[v] = tok.weight[v]·hidden`.
+    pub fn step(&self, token_id: u32) -> Vec<f32> {
+        let pos = self.dec_pos.get();
+        let hidden = self.decode_at(token_id, pos);
+        self.dec_pos.set(pos + 1);
+        hidden
+    }
+
+    /// Record + run the incremental decode tape for one token at absolute `pos`.
+    /// Mirrors [`Self::forward_steps`] at `n = 1` (row 0 of the sized scratch),
+    /// swapping the batched GQA core for the decode kernels + persistent KV cache.
+    fn decode_at(&self, token_id: u32, pos: u32) -> Vec<f32> {
+        assert!(
+            self.shard.is_whole(self.cfg.n_layers as usize),
+            "KV-cache decode requires a whole (single-device) model"
+        );
+        assert!(self.q8.is_none(), "KV-cache decode: fp32 path only (int8 not supported)");
+        assert!(pos < self.t, "decode pos {pos} exceeds ctx_len {}", self.t);
+
+        let c = &self.cfg;
+        let d = c.d_model;
+        let ff = c.d_ff;
+        let hd = c.head_dim;
+        let hq = c.q_dim();
+        let hkv = c.kv_dim();
+        let nh = c.n_heads;
+        let nkv = c.n_kv_heads;
+        let group = nh / nkv;
+        let half = hd / 2;
+        let cap = self.t; // scores/probs row stride (== max cached length)
+        let t = pos + 1; // cached length after appending this token
+        let scale = 1.0f32 / (hd as f32).sqrt();
+        let theta = c.rope_theta;
+        let ids = Self::ids();
+        let g = &self.gpu;
+        let w = |name: &str| self.ps.w(name);
+
+        // Embed the token id into res[0] row 0 via the tied table (non-tiled gather).
+        g.write(&self.tokens, &[token_id]);
+        let mut s: Vec<Step> = Vec::new();
+        s.push(g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, 1], d));
+
+        for l in 0..c.n_layers as usize {
+            let lb = &self.layers[l];
+            let p = |name: &str| format!("blocks.{l}.{name}");
+            // --- attention: project, QK-norm, RoPE-at-pos, append, decode-attend ---
+            s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &lb.xn1, d, 1));
+            s.push(g.step(MATMUL, &[&lb.xn1, w(&p("attn.wq.weight")), &lb.q_pre], &[1, d, hq], hq));
+            s.push(g.step(MATMUL, &[&lb.xn1, w(&p("attn.wk.weight")), &lb.k_pre], &[1, d, hkv], hkv));
+            s.push(g.step(MATMUL, &[&lb.xn1, w(&p("attn.wv.weight")), &lb.v], &[1, d, hkv], hkv));
+            s.push(block::rmsnorm_fwd(g, &ids, &lb.q_pre, w(&p("attn.q_norm.weight")), &lb.q, hd, nh));
+            s.push(block::rmsnorm_fwd(g, &ids, &lb.k_pre, w(&p("attn.k_norm.weight")), &lb.k, hd, nkv));
+            s.push(g.step(ROPE_AT, &[&lb.q], &[1, nh, hd, hq, 0, pos, f(theta)], nh * half));
+            s.push(g.step(ROPE_AT, &[&lb.k], &[1, nkv, hd, hkv, 0, pos, f(theta)], nkv * half));
+            s.push(g.step(KV_APPEND, &[&lb.k, &self.kcache[l]], &[hkv, pos], hkv));
+            s.push(g.step(KV_APPEND, &[&lb.v, &self.vcache[l]], &[hkv, pos], hkv));
+            s.push(g.step(ATTN_DECODE_SCORES, &[&lb.q, &self.kcache[l], &self.scores], &[nh, group, hd, t, cap, hkv, f(scale)], nh * t));
+            s.push(g.step(DECODE_SOFTMAX, &[&self.scores, &lb.probs], &[nh, t, cap], nh));
+            s.push(g.step(ATTN_DECODE_APPLY, &[&lb.probs, &self.vcache[l], &lb.ctx], &[nh, group, hd, t, cap, hkv], nh * hd));
+            s.push(g.step(MATMUL, &[&lb.ctx, w(&p("attn.wo.weight")), &self.proj], &[1, hq, d], d));
+            s.push(g.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[d], d));
+            // --- SwiGLU MLP ---
+            s.push(block::rmsnorm_fwd(g, &ids, &lb.xmid, w(&p("ln2.weight")), &lb.xn2, d, 1));
+            s.push(g.step(MATMUL, &[&lb.xn2, w(&p("mlp.gate.weight")), &lb.gate_pre], &[1, d, ff], ff));
+            s.push(g.step(MATMUL, &[&lb.xn2, w(&p("mlp.up.weight")), &lb.up], &[1, d, ff], ff));
+            s.push(block::swiglu_fwd(g, &ids, &lb.gate_pre, &lb.up, &lb.h, ff));
+            s.push(g.step(MATMUL, &[&lb.h, w(&p("mlp.down.weight")), &self.mlp_out], &[1, ff, d], d));
+            s.push(g.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[d], d));
+        }
+        let last = c.n_layers as usize;
+        s.push(block::rmsnorm_fwd(g, &ids, &self.res[last], w("norm.weight"), &self.xn_final, d, 1));
+        g.submit(&[], &s);
+        g.read(&self.xn_final, d as usize)
+    }
+
     pub fn save(&self, path: &str) {
         self.save_with_itos(path, None);
     }
@@ -1208,5 +1337,86 @@ mod tests {
         }
         let after = model.forward();
         assert!(after < before, "overfit did not reduce loss: {before} -> {after}");
+    }
+}
+
+#[cfg(test)]
+mod kv_tests {
+    use super::*;
+    use data::rng::Rng;
+    use std::collections::HashMap;
+
+    fn gpu_disabled() -> bool {
+        std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    fn maxabs(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// The incremental KV-cache `step` must reproduce the `O(T²)` full-recompute
+    /// (`logits_all`) for every prefix — the cache is algebraically exact, same
+    /// engine, same weights, so any difference is only attention reduction order.
+    /// Runs on GPU and (with `BRAIN_DEVICE=cpu`) the wgsl-cpu JIT; both must pass.
+    #[test]
+    fn kv_step_matches_full_recompute() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny(); // v23 d16 L2 GQA 4/2 hd8 ff32 tied
+        let d = cfg.d_model as usize;
+        let v = cfg.vocab as usize;
+        let max_t = 8u32;
+        let seq = 6usize;
+        let mut rng = Rng::new(1234);
+
+        // Random decoder weights; RMSNorm/QK-norm gains at 1 (as init_weights does),
+        // other linears + the tied embedding table Normal(0, 0.08).
+        let mut map: HashMap<String, Vec<f32>> = HashMap::new();
+        for (name, count) in cfg.param_list() {
+            let val = if name == "norm.weight"
+                || name.ends_with("ln1.weight")
+                || name.ends_with("ln2.weight")
+                || name.ends_with("q_norm.weight")
+                || name.ends_with("k_norm.weight")
+            {
+                vec![1.0f32; count]
+            } else {
+                (0..count).map(|_| rng.next_gaussian() as f32 * 0.08).collect()
+            };
+            map.insert(name, val);
+        }
+        let model = Qwen::new(cfg, 1, max_t, &map);
+
+        // A random token sequence within the tiny vocab.
+        let tokens: Vec<u32> = (0..seq).map(|_| (rng.next_u64() % v as u64) as u32).collect();
+
+        // Incremental: feed one token at a time through the KV cache, apply the tied
+        // head on the host to get each new token's logits.
+        model.reset_cache();
+        let tok_w = model.read_weight("tok.weight"); // [v, d]
+        let inc_logits: Vec<Vec<f32>> = tokens
+            .iter()
+            .map(|&tid| {
+                let hidden = model.step(tid); // [d], final-norm hidden
+                (0..v)
+                    .map(|row| {
+                        let wr = &tok_w[row * d..(row + 1) * d];
+                        wr.iter().zip(&hidden).map(|(a, b)| a * b).sum::<f32>()
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Reference: full recompute of each prefix; compare the last row's logits.
+        let mut worst = 0.0f32;
+        for i in 0..seq {
+            let full = model.logits_all(&tokens[..i + 1]); // [(i+1)*v]
+            let ref_last = &full[i * v..(i + 1) * v];
+            let err = maxabs(&inc_logits[i], ref_last);
+            worst = worst.max(err);
+            assert!(err < 2e-3, "prefix {i}: KV step vs full recompute maxabs={err}");
+        }
+        println!("kv_step_matches_full_recompute: worst maxabs over {seq} prefixes = {worst:e}");
     }
 }
