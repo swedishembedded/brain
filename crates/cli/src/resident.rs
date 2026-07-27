@@ -42,6 +42,24 @@ pub fn build_executor(gpus: &[(u32, u64)], reserved: u64, ram_total: u64, policy
     } else {
         eprintln!("brain: yolo not served over the scheduler (set BRAIN_YOLO to a checkpoint)");
     }
+    // Text-generation LLMs (each gated on its own weights env var).
+    if let Some(g) = crate::resident_llm::GptResident::from_env() {
+        models.push(Arc::new(g));
+    }
+    if let Some(g) = crate::resident_llm::GlmResident::from_env() {
+        models.push(Arc::new(g));
+    }
+    if let Some(q) = crate::resident_llm::QwenResident::from_env() {
+        models.push(Arc::new(q));
+    }
+    // Monocular depth (BRAIN_DEPTH_WEIGHTS).
+    if let Some(d) = crate::resident_depth::DepthResident::from_env() {
+        models.push(Arc::new(d));
+    }
+    // Text-to-speech (BRAIN_TTS_WEIGHTS).
+    if let Some(t) = crate::resident_tts::TtsResident::from_env() {
+        models.push(Arc::new(t));
+    }
     // Stateless helpers (no weights) — always available.
     models.push(Arc::new(ProviderResident::stateless(Arc::new(crate::imageops::ImageOps))));
 

@@ -209,6 +209,8 @@ fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64) {
         ram >> 30
     );
     let executor = crate::resident::build_executor(&gpus, reserved, ram, residency::Policy::default());
+    let served: Vec<&str> = executor.manifests().iter().map(|m| m.model.as_str()).collect();
+    eprintln!("brain serve --dbus: models: {}", served.join(", "));
     let opts = brain_dbus::DbusOpts {
         bus: if system { brain_dbus::BusKind::System } else { brain_dbus::BusKind::Session },
         name: name.unwrap_or_else(|| "com.swedishembedded.Brain1".to_string()),
