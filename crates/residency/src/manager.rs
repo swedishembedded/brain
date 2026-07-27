@@ -13,15 +13,19 @@
 //! [`ResidentModel::estimate`]'s `ram`/secondary accounting and pins its own cards;
 //! the manager still tracks the primary-device budget.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 
 use crate::budget::Budgets;
 use crate::lru::Residents;
-use crate::place::{pick_device, plan_eviction};
-use crate::{Device, InstanceKey, ResidentModel, Tier};
+use crate::place::{no_exclude, pick_device, plan_eviction};
+use crate::{Device, Instance, InstanceKey, ResidentModel, Tier};
+
+/// A hot instance handle: the (mutex-guarded) instance plus the device it lives on.
+/// The scheduler runs it outside the manager lock; the key stays pinned meanwhile.
+pub type InstanceHandle = Arc<Mutex<Box<dyn Instance>>>;
 
 /// Owns the resident model instances, their budgets, and the LRU. Not thread-safe by
 /// itself — the scheduler owns one behind its worker(s).
@@ -29,7 +33,7 @@ pub struct ResidencyManager {
     models: HashMap<String, Arc<dyn ResidentModel>>,
     budgets: Budgets,
     residents: Residents,
-    instances: HashMap<InstanceKey, Box<dyn crate::Instance>>,
+    instances: HashMap<InstanceKey, InstanceHandle>,
     /// Eviction/promotion audit log (most recent last) for reporting/tests.
     pub events: Vec<String>,
     /// Cumulative counters (never reset) — instance builds and evictions.
@@ -60,6 +64,23 @@ impl ResidencyManager {
         self.models.get(model).map(|m| m.instance_key(action, inv))
     }
 
+    /// Could `key` run **now** on a device not in `exclude`? A resident instance is
+    /// runnable iff its device is free; a cold one iff it can be placed (or evicted
+    /// into) on some free device. Used by the parallel scheduler to skip groups whose
+    /// only device is busy, without mutating anything.
+    pub fn placeable(&self, key: &InstanceKey, model: &str, exclude: &HashSet<Device>) -> bool {
+        if let Some(e) = self.residents.get(key) {
+            return !exclude.contains(&e.device);
+        }
+        let m = match self.models.get(model) {
+            Some(m) => m,
+            None => return false,
+        };
+        let cost = m.estimate(key);
+        pick_device(&cost, &self.budgets, exclude).is_some()
+            || plan_eviction(&cost, &self.budgets, &self.residents, &[key.clone()], exclude).is_some()
+    }
+
     pub fn models(&self) -> Vec<String> {
         let mut v: Vec<String> = self.models.keys().cloned().collect();
         v.sort();
@@ -79,14 +100,37 @@ impl ResidencyManager {
     /// Promotes (evicting LRU as needed) automatically. Pins the instance while it
     /// runs so a concurrent request can't evict it mid-job.
     pub fn run(&mut self, model: &str, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let (handle, _device, key) = self.claim(model, action, inv, &no_exclude())?;
+        let out = handle.lock().unwrap().run(action, inv, progress);
+        self.release(&key);
+        out
+    }
+
+    /// Ensure the instance for `(model, action, inv)` is Hot and **pin** it, returning
+    /// a runnable handle + its device. The caller runs the handle (outside the manager
+    /// lock, so other lanes proceed) and MUST call [`release`](Self::release) after.
+    /// `exclude` names devices a concurrent lane is already using (so this placement
+    /// avoids them).
+    pub fn claim(
+        &mut self,
+        model: &str,
+        action: &str,
+        inv: &Invocation,
+        exclude: &HashSet<Device>,
+    ) -> Result<(InstanceHandle, Device, InstanceKey), String> {
         let m = self.models.get(model).ok_or_else(|| format!("no model '{model}'"))?.clone();
         let key = m.instance_key(action, inv);
-        self.ensure_hot(&key, &m)?;
+        self.ensure_hot(&key, &m, exclude)?;
         self.residents.set_pinned(&key, true);
-        let out = self.instances.get_mut(&key).expect("hot").run(action, inv, progress);
-        self.residents.set_pinned(&key, false);
-        self.residents.touch(&key);
-        out
+        let handle = self.instances.get(&key).expect("hot").clone();
+        let device = self.residents.get(&key).expect("resident").device;
+        Ok((handle, device, key))
+    }
+
+    /// Unpin an instance after a run and mark it most-recently-used.
+    pub fn release(&mut self, key: &InstanceKey) {
+        self.residents.set_pinned(key, false);
+        self.residents.touch(key);
     }
 
     /// Run several same-key invocations of one action on a single hot instance —
@@ -94,29 +138,26 @@ impl ResidencyManager {
     /// whole group (so it can't be evicted between jobs), then its `run_batch` runs
     /// them (a model with real batch support does one forward; others loop).
     pub fn run_batch(&mut self, model: &str, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(Progress)) -> Result<Vec<ActionResult>, String> {
-        let m = self.models.get(model).ok_or_else(|| format!("no model '{model}'"))?.clone();
-        let key = m.instance_key(action, invs.first().ok_or("empty batch")?);
-        self.ensure_hot(&key, &m)?;
-        self.residents.set_pinned(&key, true);
-        let out = self.instances.get_mut(&key).expect("hot").run_batch(action, invs, progress);
-        self.residents.set_pinned(&key, false);
-        self.residents.touch(&key);
+        let first = invs.first().ok_or("empty batch")?;
+        let (handle, _device, key) = self.claim(model, action, first, &no_exclude())?;
+        let out = handle.lock().unwrap().run_batch(action, invs, progress);
+        self.release(&key);
         Ok(out)
     }
 
     /// Promote `key` to Hot if not already: pick a device (evicting LRU victims when
     /// nothing fits), build the instance, and account its budget.
-    pub fn ensure_hot(&mut self, key: &InstanceKey, m: &Arc<dyn ResidentModel>) -> Result<(), String> {
+    pub fn ensure_hot(&mut self, key: &InstanceKey, m: &Arc<dyn ResidentModel>, exclude: &HashSet<Device>) -> Result<(), String> {
         if self.instances.contains_key(key) {
             self.residents.touch(key);
             return Ok(());
         }
         let cost = m.estimate(key);
-        let device = match pick_device(&cost, &self.budgets) {
+        let device = match pick_device(&cost, &self.budgets, exclude) {
             Some(d) => d,
             None => {
-                let plan = plan_eviction(&cost, &self.budgets, &self.residents, &[key.clone()])
-                    .ok_or_else(|| format!("{key} ({} MiB) is too large for any device", cost.vram >> 20))?;
+                let plan = plan_eviction(&cost, &self.budgets, &self.residents, &[key.clone()], exclude)
+                    .ok_or_else(|| format!("{key} ({} MiB) is too large for any available device", cost.vram >> 20))?;
                 for victim in &plan.victims {
                     self.evict(victim);
                 }
@@ -126,7 +167,7 @@ impl ResidencyManager {
         let inst = m.activate(key, device)?;
         self.budgets.alloc(device, cost.on(device));
         self.residents.insert(key.clone(), cost, device);
-        self.instances.insert(key.clone(), inst);
+        self.instances.insert(key.clone(), Arc::new(Mutex::new(inst)));
         self.builds += 1;
         self.events.push(format!("promote {key} -> {device:?}"));
         Ok(())

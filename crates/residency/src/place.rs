@@ -10,20 +10,27 @@
 //! keep-set. Both are pure functions of the budget + resident tables, so they are
 //! fully unit-tested without a GPU.
 
+use std::collections::HashSet;
+
 use crate::budget::Budgets;
 use crate::lru::Residents;
 use crate::{Device, InstanceKey, MemCost};
 
+/// An empty exclusion set (the common single-lane case).
+pub fn no_exclude() -> HashSet<Device> {
+    HashSet::new()
+}
+
 /// Choose a device for a new instance of `cost` that fits **right now** (respecting
 /// each device's reserved headroom). Prefers the GPU with the most free bytes
-/// (spreads load); falls back to the CPU/RAM pool for a CPU-resident model. Returns
-/// `None` if no device has room without eviction — the caller then tries
-/// [`plan_eviction`].
-pub fn pick_device(cost: &MemCost, budgets: &Budgets) -> Option<Device> {
+/// (spreads load); falls back to the CPU/RAM pool for a CPU-resident model. Devices
+/// in `exclude` are skipped (used by the parallel scheduler to avoid a device a lane
+/// is already running on). Returns `None` if none has room without eviction.
+pub fn pick_device(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>) -> Option<Device> {
     // GPUs first, most-free wins (ties broken by lower index for determinism).
     let mut best: Option<(Device, u64)> = None;
     for d in budgets.gpus() {
-        if cost.vram == 0 {
+        if cost.vram == 0 || exclude.contains(&d) {
             continue;
         }
         if let Some(b) = budgets.get(d) {
@@ -39,7 +46,7 @@ pub fn pick_device(cost: &MemCost, budgets: &Budgets) -> Option<Device> {
         return Some(d);
     }
     // CPU/RAM-resident model.
-    if cost.ram > 0 {
+    if cost.ram > 0 && !exclude.contains(&Device::Cpu) {
         if let Some(b) = budgets.get(Device::Cpu) {
             if b.fits(cost.ram) {
                 return Some(Device::Cpu);
@@ -61,12 +68,15 @@ pub struct EvictionPlan {
     pub freed: u64,
 }
 
-/// Plan eviction for a GPU-resident instance of `cost`. Returns `None` only if no
-/// GPU's usable budget can ever hold it (too big for every card).
-pub fn plan_eviction(cost: &MemCost, budgets: &Budgets, residents: &Residents, keep: &[InstanceKey]) -> Option<EvictionPlan> {
+/// Plan eviction for a GPU-resident instance of `cost`, avoiding `exclude` devices.
+/// Returns `None` only if no eligible GPU's usable budget can ever hold it.
+pub fn plan_eviction(cost: &MemCost, budgets: &Budgets, residents: &Residents, keep: &[InstanceKey], exclude: &HashSet<Device>) -> Option<EvictionPlan> {
     let need = cost.vram;
     let mut best: Option<EvictionPlan> = None;
     for d in budgets.gpus() {
+        if exclude.contains(&d) {
+            continue;
+        }
         let b = match budgets.get(d) {
             Some(b) => b,
             None => continue,
@@ -131,7 +141,7 @@ mod tests {
     fn picks_the_emptier_gpu() {
         let mut b = two_gpus();
         b.alloc(Device::Gpu(0), 15 * GB); // gpu0 has 7 free, gpu1 has 22
-        assert_eq!(pick_device(&vram(6), &b), Some(Device::Gpu(1)));
+        assert_eq!(pick_device(&vram(6), &b, &no_exclude()), Some(Device::Gpu(1)));
     }
 
     #[test]
@@ -140,7 +150,7 @@ mod tests {
         // Fill both GPUs so a 13 GB model fits nowhere.
         b.alloc(Device::Gpu(0), 20 * GB);
         b.alloc(Device::Gpu(1), 20 * GB);
-        assert_eq!(pick_device(&vram(13), &b), None);
+        assert_eq!(pick_device(&vram(13), &b, &no_exclude()), None);
 
         // Residents on gpu1: old=8GB (LRU), new=12GB.
         let mut r = Residents::new();
@@ -149,7 +159,7 @@ mod tests {
         r.touch(&ik("new"));
         // Need 13 GB; gpu1 free=2, deficit=11 → evicting `old`(8) alone isn't enough,
         // so both are evicted (LRU order: old then new).
-        let plan = plan_eviction(&vram(13), &b, &r, &[]).expect("a plan");
+        let plan = plan_eviction(&vram(13), &b, &r, &[], &no_exclude()).expect("a plan");
         assert_eq!(plan.device, Device::Gpu(1));
         assert_eq!(plan.victims, vec![ik("old"), ik("new")]);
         assert_eq!(plan.freed, 20 * GB);
@@ -165,7 +175,7 @@ mod tests {
         r.insert(ik("small_new"), vram(6), Device::Gpu(0));
         r.touch(&ik("small_new"));
         // Need 13 on a card with free=2, deficit=11; big_old(14) is LRU and covers it.
-        let plan = plan_eviction(&vram(13), &b, &r, &[]).expect("plan");
+        let plan = plan_eviction(&vram(13), &b, &r, &[], &no_exclude()).expect("plan");
         assert_eq!(plan.device, Device::Gpu(0));
         assert_eq!(plan.victims, vec![ik("big_old")]);
     }
@@ -174,7 +184,7 @@ mod tests {
     fn too_big_for_any_card_is_none() {
         let b = two_gpus(); // usable = 22 GB each
         let r = Residents::new();
-        assert!(plan_eviction(&vram(23), &b, &r, &[]).is_none());
+        assert!(plan_eviction(&vram(23), &b, &r, &[], &no_exclude()).is_none());
     }
 
     #[test]
@@ -185,7 +195,7 @@ mod tests {
         let mut r = Residents::new();
         r.insert(ik("keepme"), vram(22), Device::Gpu(0));
         // Only resident is protected → can't free enough on gpu0; gpu1 empty-usable=22<23? no, need 5.
-        let plan = plan_eviction(&vram(5), &b, &r, &[ik("keepme")]);
+        let plan = plan_eviction(&vram(5), &b, &r, &[ik("keepme")], &no_exclude());
         // gpu1 has nothing to evict and free=0 (22 alloc, 2 reserve) → deficit stays; gpu0 keepme protected.
         assert!(plan.is_none() || plan.unwrap().victims.iter().all(|v| v != &ik("keepme")));
     }
