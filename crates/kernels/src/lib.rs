@@ -91,6 +91,16 @@ pub const ATTN_SCORES_MASKED: &str = include_str!("../wgsl/attn_scores_masked.wg
 pub const ATTN_SCORES_QK: &str = include_str!("../wgsl/attn_scores_qk.wgsl");
 /// `wgsl/attn_softmax.wgsl`
 pub const ATTN_SOFTMAX: &str = include_str!("../wgsl/attn_softmax.wgsl");
+/// `wgsl/attn_decode_scores.wgsl` — decode-step single-query GQA attention scores.
+pub const ATTN_DECODE_SCORES: &str = include_str!("../wgsl/attn_decode_scores.wgsl");
+/// `wgsl/decode_softmax.wgsl` — decode-step per-head max-subtracted softmax.
+pub const DECODE_SOFTMAX: &str = include_str!("../wgsl/decode_softmax.wgsl");
+/// `wgsl/attn_decode_apply.wgsl` — decode-step GQA context = probs·V over the cache.
+pub const ATTN_DECODE_APPLY: &str = include_str!("../wgsl/attn_decode_apply.wgsl");
+/// `wgsl/kv_append.wgsl` — append a token's projected K/V into a KV cache row.
+pub const KV_APPEND: &str = include_str!("../wgsl/kv_append.wgsl");
+/// `wgsl/rope_at.wgsl` — RoPE at an explicit absolute position (decode step).
+pub const ROPE_AT: &str = include_str!("../wgsl/rope_at.wgsl");
 /// `wgsl/attn_softmax_bidir.wgsl`
 pub const ATTN_SOFTMAX_BIDIR: &str = include_str!("../wgsl/attn_softmax_bidir.wgsl");
 /// `wgsl/attn_softmax_cross.wgsl`
@@ -585,6 +595,11 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_scores_masked", ATTN_SCORES_MASKED),
     ("attn_scores_qk", ATTN_SCORES_QK),
     ("attn_softmax", ATTN_SOFTMAX),
+    ("attn_decode_scores", ATTN_DECODE_SCORES),
+    ("decode_softmax", DECODE_SOFTMAX),
+    ("attn_decode_apply", ATTN_DECODE_APPLY),
+    ("kv_append", KV_APPEND),
+    ("rope_at", ROPE_AT),
     ("attn_softmax_bidir", ATTN_SOFTMAX_BIDIR),
     ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
     ("attn_softmax_full", ATTN_SOFTMAX_FULL),

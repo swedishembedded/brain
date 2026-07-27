@@ -37,6 +37,12 @@ const ATTN_SOFTMAX: usize = 5;
 const GQA_APPLY: usize = 6;
 const SILU_MUL: usize = 7;
 const ADD2: usize = 8;
+// Incremental KV-cache decode kernels (single new token vs the growing cache).
+const ATTN_DECODE_SCORES: usize = 9;
+const DECODE_SOFTMAX: usize = 10;
+const ATTN_DECODE_APPLY: usize = 11;
+const KV_APPEND: usize = 12;
+const ROPE_AT: usize = 13;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -48,6 +54,11 @@ const PIPELINES: &[(&str, &str)] = &[
     ("gqa_apply", kernels::GQA_APPLY),
     ("silu_mul", kernels::SILU_MUL),
     ("add2", kernels::ADD2),
+    ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
+    ("decode_softmax", kernels::DECODE_SOFTMAX),
+    ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
+    ("kv_append", kernels::KV_APPEND),
+    ("rope_at", kernels::ROPE_AT),
 ];
 
 /// Per-layer / shared GPU scratch (reused across all layers since the forward is
@@ -82,6 +93,11 @@ pub struct TalkerGen {
     // residual stream snapshots between layers (res[0] = input embeds).
     res: Vec<DeviceBuffer>,
     sc: Scratch,
+    // Persistent per-layer KV cache for incremental decode ([max_t, kv_dim] each).
+    kcache: Vec<DeviceBuffer>,
+    vcache: Vec<DeviceBuffer>,
+    // Next absolute position the incremental `step` will decode (cache fill level).
+    dec_pos: std::cell::Cell<u32>,
     // CPU tables.
     pub text: TextProjection,
     codec_embedding: Vec<f32>, // talker codec table [vocab, d] (= tok.weight)
@@ -198,6 +214,12 @@ impl TalkerGen {
         for _ in 0..=cfg.n_layers {
             res.push(st(n * d));
         }
+        let mut kcache = Vec::new();
+        let mut vcache = Vec::new();
+        for _ in 0..cfg.n_layers {
+            kcache.push(st(n * hkv));
+            vcache.push(st(n * hkv));
+        }
         let sc = Scratch {
             xn1: st(n * d),
             q_pre: st(n * hq),
@@ -225,10 +247,70 @@ impl TalkerGen {
             max_t,
             res,
             sc,
+            kcache,
+            vcache,
+            dec_pos: std::cell::Cell::new(0),
             text,
             codec_embedding,
             codec_head,
         }
+    }
+
+    /// Test-only: build a decoder-only Talker from an in-memory weight map (the
+    /// `decoder_param_list` leaves), for KV-parity tests without a checkpoint.
+    #[cfg(test)]
+    pub(crate) fn from_decoder_map(cfg: TalkerConfig, map: &std::collections::HashMap<String, Vec<f32>>, max_t: u32) -> TalkerGen {
+        let gpu = Gpu::new(PIPELINES);
+        let roles = Self::decoder_param_list(&cfg).into_iter().map(|(n, c)| (n, c, paramstore::Role::Frozen)).collect();
+        let ps = ParamStore::new_with_roles(&gpu, roles, map);
+        let d = cfg.d_model as u64;
+        let ff = cfg.d_ff as u64;
+        let hq = cfg.q_dim() as u64;
+        let hkv = cfg.kv_dim() as u64;
+        let n = max_t as u64;
+        let bht2 = (cfg.n_heads * max_t * max_t) as u64;
+        let st = |x: u64| gpu.storage(x);
+        let mut res = Vec::new();
+        for _ in 0..=cfg.n_layers {
+            res.push(st(n * d));
+        }
+        let mut kcache = Vec::new();
+        let mut vcache = Vec::new();
+        for _ in 0..cfg.n_layers {
+            kcache.push(st(n * hkv));
+            vcache.push(st(n * hkv));
+        }
+        let sc = Scratch {
+            xn1: st(n * d),
+            q_pre: st(n * hq),
+            q: st(n * hq),
+            k_pre: st(n * hkv),
+            k: st(n * hkv),
+            v: st(n * hkv),
+            probs: st(bht2),
+            ctx: st(n * hq),
+            xmid: st(n * d),
+            xn2: st(n * d),
+            gate_pre: st(n * ff),
+            up: st(n * ff),
+            h: st(n * ff),
+            proj: st(n * d),
+            mlp_out: st(n * d),
+            scores: st(bht2),
+            xn_final: st(n * d),
+        };
+        let text = TextProjection {
+            text_embedding: None,
+            fc1_w: Vec::new(),
+            fc1_b: Vec::new(),
+            fc2_w: Vec::new(),
+            fc2_b: Vec::new(),
+            in_dim: 0,
+            inter: 0,
+            out: 0,
+            text_vocab: 0,
+        };
+        TalkerGen { cfg, gpu, ps, max_t, res, sc, kcache, vcache, dec_pos: std::cell::Cell::new(0), text, codec_embedding: Vec::new(), codec_head: Vec::new() }
     }
 
     /// d_model.
@@ -304,6 +386,84 @@ impl TalkerGen {
         self.gpu.read(&self.sc.xn_final, n * d)
     }
 
+    /// Reset the incremental KV cache to an empty sequence (next `step` is pos 0).
+    pub fn reset_cache(&self) {
+        self.dec_pos.set(0);
+    }
+
+    /// The absolute position the next [`Self::step`] will decode.
+    pub fn cache_pos(&self) -> u32 {
+        self.dec_pos.get()
+    }
+
+    /// **Incremental KV-cache decode** of a single new token embedding (`[d_model]`)
+    /// at the current cache position, returning the final-norm hidden state
+    /// (`[d_model]`). This is the `O(T)`-per-token twin of [`Self::forward`]'s
+    /// `O(T²)` recompute: the same Qwen3 block math, but K/V for the new token are
+    /// projected, QK-normed, RoPE'd at the absolute position, appended to the
+    /// persistent per-layer cache, and attended by a single query over positions
+    /// `0..=pos`. Expressed entirely in the WGSL op set, so it runs on whatever
+    /// backend `Gpu` selected (GPU or the wgsl-cpu JIT) — one engine, any device.
+    pub fn step(&self, embed: &[f32]) -> Vec<f32> {
+        let pos = self.dec_pos.get();
+        let hidden = self.decode_at(embed, pos);
+        self.dec_pos.set(pos + 1);
+        hidden
+    }
+
+    /// Record + run the incremental decode tape for one token at absolute `pos`.
+    fn decode_at(&self, embed: &[f32], pos: u32) -> Vec<f32> {
+        let c = &self.cfg;
+        let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
+        let (hq, hkv) = (c.q_dim(), c.kv_dim());
+        let (nh, nkv) = (c.n_heads, c.n_kv_heads);
+        let group = nh / nkv;
+        let half = hd / 2;
+        let cap = self.max_t;
+        let t = pos + 1; // cached length after appending this token
+        let scale = 1.0f32 / (hd as f32).sqrt();
+        let theta = c.rope_theta;
+        assert_eq!(embed.len(), d as usize, "step embed must be [d_model]");
+        assert!(pos < self.max_t, "decode pos {pos} exceeds max_t {}", self.max_t);
+
+        let g = &self.gpu;
+        let sc = &self.sc;
+        let ids = only_fwd_ids();
+        let w = |name: &str| self.ps.w(name);
+        g.write(&self.res[0], bytemuck::cast_slice(embed));
+        let mut s: Vec<Step> = Vec::new();
+        for l in 0..c.n_layers as usize {
+            let p = |name: &str| format!("blocks.{l}.{name}");
+            // --- attention: project, QK-norm, RoPE-at-pos, append, decode-attend ---
+            s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &sc.xn1, d, 1));
+            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre], &[1, d, hq], hq));
+            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre], &[1, d, hkv], hkv));
+            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wv.weight")), &sc.v], &[1, d, hkv], hkv));
+            s.push(block::rmsnorm_fwd(g, &ids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, nh));
+            s.push(block::rmsnorm_fwd(g, &ids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, nkv));
+            s.push(g.step(ROPE_AT, &[&sc.q], &[1, nh, hd, hq, 0, pos, theta.to_bits()], nh * half));
+            s.push(g.step(ROPE_AT, &[&sc.k], &[1, nkv, hd, hkv, 0, pos, theta.to_bits()], nkv * half));
+            s.push(g.step(KV_APPEND, &[&sc.k, &self.kcache[l]], &[hkv, pos], hkv));
+            s.push(g.step(KV_APPEND, &[&sc.v, &self.vcache[l]], &[hkv, pos], hkv));
+            s.push(g.step(ATTN_DECODE_SCORES, &[&sc.q, &self.kcache[l], &sc.scores], &[nh, group, hd, t, cap, hkv, scale.to_bits()], nh * t));
+            s.push(g.step(DECODE_SOFTMAX, &[&sc.scores, &sc.probs], &[nh, t, cap], nh));
+            s.push(g.step(ATTN_DECODE_APPLY, &[&sc.probs, &self.vcache[l], &sc.ctx], &[nh, group, hd, t, cap, hkv], nh * hd));
+            s.push(g.step(MATMUL, &[&sc.ctx, w(&p("attn.wo.weight")), &sc.proj], &[1, hq, d], d));
+            s.push(g.step(ADD2, &[&self.res[l], &sc.proj, &sc.xmid], &[d], d));
+            // --- SwiGLU MLP ---
+            s.push(block::rmsnorm_fwd(g, &ids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, 1));
+            s.push(g.step(MATMUL, &[&sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre], &[1, d, ff], ff));
+            s.push(g.step(MATMUL, &[&sc.xn2, w(&p("mlp.up.weight")), &sc.up], &[1, d, ff], ff));
+            s.push(block::swiglu_fwd(g, &ids, &sc.gate_pre, &sc.up, &sc.h, ff));
+            s.push(g.step(MATMUL, &[&sc.h, w(&p("mlp.down.weight")), &sc.mlp_out], &[1, ff, d], d));
+            s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &self.res[l + 1]], &[d], d));
+        }
+        let last = c.n_layers as usize;
+        s.push(block::rmsnorm_fwd(g, &ids, &self.res[last], w("norm.weight"), &sc.xn_final, d, 1));
+        g.submit(&[], &s);
+        g.read(&self.sc.xn_final, d as usize)
+    }
+
     /// Codebook-0 logits (`[vocab]`) for a single final-norm hidden row. Shared
     /// host head used by the GPU/CPU recompute loop and the NPU loop alike.
     pub fn codec_head_logits(&self, hidden_row: &[f32]) -> Vec<f32> {
@@ -332,5 +492,55 @@ impl crate::prompt::TalkerHost for TalkerGen {
     }
     fn codec_embed(&self, id: u32) -> &[f32] {
         TalkerGen::codec_embed(self, id)
+    }
+}
+
+#[cfg(test)]
+mod kv_tests {
+    use super::*;
+    use crate::config::TalkerConfig;
+    use data::rng::Rng;
+    use std::collections::HashMap;
+
+    fn maxabs(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// The incremental KV-cache `step` must reproduce the `O(T²)` `forward`
+    /// recompute for every prefix (the cache is algebraically exact) — same engine,
+    /// same weights, so any difference is only attention reduction order.
+    #[test]
+    fn kv_step_matches_full_recompute() {
+        let cfg = TalkerConfig::tiny(); // d16 L2 GQA 4/2 hd8 ff32
+        let d = cfg.d_model as usize;
+        let max_t = 8u32;
+        let seq = 6usize;
+        let mut rng = Rng::new(1234);
+
+        // Random decoder weights; norm/qk-norm/ln weights initialised to 1.
+        let mut map: HashMap<String, Vec<f32>> = HashMap::new();
+        for (name, count) in TalkerGen::decoder_param_list(&cfg) {
+            let v = if name.contains("ln") || name.ends_with("norm.weight") {
+                vec![1.0f32; count]
+            } else {
+                (0..count).map(|_| rng.next_gaussian() as f32 * 0.08).collect()
+            };
+            map.insert(name, v);
+        }
+        let tg = TalkerGen::from_decoder_map(cfg.clone(), &map, max_t);
+
+        let embeds: Vec<f32> = (0..seq * d).map(|_| rng.next_gaussian() as f32).collect();
+
+        // Incremental: feed one token at a time through the KV cache.
+        tg.reset_cache();
+        let inc: Vec<Vec<f32>> = (0..seq).map(|i| tg.step(&embeds[i * d..(i + 1) * d])).collect();
+
+        // Reference: full recompute of each prefix; compare the last row.
+        for i in 0..seq {
+            let full = tg.forward(&embeds[..(i + 1) * d]);
+            let last = &full[i * d..(i + 1) * d];
+            let err = maxabs(&inc[i], last);
+            assert!(err < 2e-3, "prefix {i}: KV step vs full recompute maxabs={err}");
+        }
     }
 }
