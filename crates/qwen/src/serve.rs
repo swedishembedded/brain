@@ -227,14 +227,14 @@ impl Engine {
     /// K/V into each sequence's paged cache and returns the per-sequence final-norm
     /// hidden state `[B, d_model]`. Metadata (positions, block tables, append
     /// slots) is derived from each sequence's current block table.
-    fn forward_batched(&mut self, seqs: &mut [&mut Seq], inputs: &[u32]) -> Vec<f32> {
+    pub(crate) fn forward_batched(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<f32> {
         let c = &self.cfg;
         let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
         let (hq, hkv) = (c.q_dim(), c.kv_dim());
         let (nh, nkv) = (c.n_heads, c.n_kv_heads);
         let group = nh / nkv;
         let half = hd / 2;
-        let bsz = seqs.len() as u32;
+        let bsz = tables.len() as u32;
         let bs = self.block_size;
         let cap = self.cap;
         let mbt = self.max_blocks_per_seq;
@@ -245,14 +245,14 @@ impl Engine {
         // Host metadata: append a slot for each sequence's new token.
         let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut bt = vec![0u32; bsz as usize * mbt as usize];
-        for (i, seq) in seqs.iter_mut().enumerate() {
-            let pos = seq.table.len();
-            let (block, offset) = seq.table.append(&mut self.alloc).expect("KV pool exhausted");
+        for (i, table) in tables.iter_mut().enumerate() {
+            let pos = table.len();
+            let (block, offset) = table.append(&mut self.alloc).expect("KV pool exhausted");
             positions.push(pos);
             seqlens.push(pos + 1);
             blocks.push(block);
             offsets.push(offset);
-            for (lb, &phys) in seq.table.blocks().iter().enumerate() {
+            for (lb, &phys) in table.blocks().iter().enumerate() {
                 bt[i * mbt as usize + lb] = phys;
             }
         }
@@ -305,6 +305,18 @@ impl Engine {
         (0..v).map(|o| self.head[o * d..o * d + d].iter().zip(hidden).map(|(a, b)| a * b).sum()).collect()
     }
 
+    /// Physical KV blocks currently free in the pool.
+    pub fn free_blocks(&self) -> u32 {
+        self.alloc.free_blocks()
+    }
+    /// Blocks a sequence of `tokens` length occupies (for admission checks).
+    pub fn blocks_for(&self, tokens: u32) -> u32 {
+        tokens.div_ceil(self.block_size)
+    }
+    fn release_table(&mut self, t: &mut BlockTable) {
+        t.release(&mut self.alloc);
+    }
+
     fn argmax(s: &[f32]) -> u32 {
         let mut bi = 0;
         for i in 1..s.len() {
@@ -328,7 +340,7 @@ impl Engine {
             assert!(!prompt.is_empty(), "empty prompt");
             let mut hidden = Vec::new();
             for &tok in prompt {
-                let mut one = [&mut seqs[i]];
+                let mut one = [&mut seqs[i].table];
                 hidden = self.forward_batched(&mut one, &[tok]);
             }
             let first = Self::argmax(&self.logits(&hidden));
@@ -345,14 +357,16 @@ impl Engine {
                 break;
             }
             let inputs: Vec<u32> = active.iter().map(|&i| *seqs[i].generated.last().unwrap()).collect();
-            // Borrow the active sequences mutably for the batched step.
-            let mut refs: Vec<&mut Seq> = Vec::new();
-            for (idx, seq) in seqs.iter_mut().enumerate() {
-                if active.contains(&idx) {
-                    refs.push(seq);
+            // Borrow the active sequences' block tables mutably for the batched step.
+            let hidden = {
+                let mut refs: Vec<&mut BlockTable> = Vec::new();
+                for (idx, seq) in seqs.iter_mut().enumerate() {
+                    if active.contains(&idx) {
+                        refs.push(&mut seq.table);
+                    }
                 }
-            }
-            let hidden = self.forward_batched(&mut refs, &inputs);
+                self.forward_batched(&mut refs, &inputs)
+            };
             let d = self.cfg.d_model as usize;
             for (bi, &si) in active.iter().enumerate() {
                 let next = Self::argmax(&self.logits(&hidden[bi * d..(bi + 1) * d]));
@@ -362,7 +376,143 @@ impl Engine {
                 }
             }
         }
+        for s in seqs.iter_mut() {
+            self.release_table(&mut s.table);
+        }
         seqs.into_iter().map(|s| s.generated).collect()
+    }
+}
+
+/// A submitted generation request.
+pub struct Request {
+    pub prompt: Vec<u32>,
+    pub max_new: usize,
+    pub eos: Option<u32>,
+}
+
+/// A sequence the scheduler is actively decoding.
+struct Running {
+    id: u64,
+    table: BlockTable,
+    generated: Vec<u32>,
+    max_new: usize,
+    eos: Option<u32>,
+    next_input: u32,
+    done: bool,
+}
+
+/// **Continuous-batching scheduler.** Requests are submitted at any time, admitted
+/// when the KV pool + batch have room (prefilled + first token sampled), then every
+/// running sequence advances together in one batched decode step per iteration.
+/// Finished sequences return their blocks immediately, so newly submitted requests
+/// can be admitted mid-flight — the batch composition changes each iteration to keep
+/// as much useful work resident as possible.
+pub struct Scheduler {
+    eng: Engine,
+    waiting: std::collections::VecDeque<(u64, Request)>,
+    running: Vec<Running>,
+    next_id: u64,
+    max_running: usize,
+}
+
+impl Scheduler {
+    pub fn new(eng: Engine, max_running: usize) -> Scheduler {
+        Scheduler { eng, waiting: std::collections::VecDeque::new(), running: Vec::new(), next_id: 0, max_running }
+    }
+
+    /// Enqueue a request; returns its id (results come back keyed by it).
+    pub fn submit(&mut self, req: Request) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.waiting.push_back((id, req));
+        id
+    }
+
+    /// True while any request is waiting or running.
+    pub fn pending(&self) -> bool {
+        !self.waiting.is_empty() || !self.running.is_empty()
+    }
+
+    fn finish_check(r: &mut Running) {
+        if Some(*r.generated.last().unwrap()) == r.eos || r.generated.len() >= r.max_new {
+            r.done = true;
+        }
+    }
+
+    /// One scheduler iteration: admit waiting requests that fit (prefill + sample
+    /// first token), run one batched decode step over all running sequences, then
+    /// reap completed ones. Returns the `(id, tokens)` of requests finished here.
+    pub fn step(&mut self) -> Vec<(u64, Vec<u32>)> {
+        let d = self.eng.cfg.d_model as usize;
+
+        // 1. Admit while there's batch room and enough free blocks for the prompt.
+        while self.running.len() < self.max_running {
+            let fits = match self.waiting.front() {
+                Some((_, req)) => self.eng.free_blocks() >= self.eng.blocks_for(req.prompt.len() as u32 + 1),
+                None => false,
+            };
+            if !fits {
+                break;
+            }
+            let (id, req) = self.waiting.pop_front().unwrap();
+            let mut table = BlockTable::new();
+            let mut hidden = Vec::new();
+            for &tok in &req.prompt {
+                let mut one = [&mut table];
+                hidden = self.eng.forward_batched(&mut one, &[tok]);
+            }
+            let first = Engine::argmax(&self.eng.logits(&hidden));
+            let mut r = Running { id, table, generated: vec![first], max_new: req.max_new, eos: req.eos, next_input: first, done: false };
+            Self::finish_check(&mut r);
+            self.running.push(r);
+        }
+
+        // 2. Batched decode over every running (not-done) sequence.
+        let active: Vec<usize> = (0..self.running.len()).filter(|&i| !self.running[i].done).collect();
+        if !active.is_empty() {
+            let inputs: Vec<u32> = active.iter().map(|&i| self.running[i].next_input).collect();
+            let hidden = {
+                let mut refs: Vec<&mut BlockTable> = Vec::new();
+                for (idx, r) in self.running.iter_mut().enumerate() {
+                    if active.contains(&idx) {
+                        refs.push(&mut r.table);
+                    }
+                }
+                self.eng.forward_batched(&mut refs, &inputs)
+            };
+            for (bi, &si) in active.iter().enumerate() {
+                let next = Engine::argmax(&self.eng.logits(&hidden[bi * d..(bi + 1) * d]));
+                let r = &mut self.running[si];
+                r.generated.push(next);
+                r.next_input = next;
+                Self::finish_check(r);
+            }
+        }
+
+        // 3. Reap completed sequences, returning their blocks to the pool.
+        let mut completed = Vec::new();
+        let mut i = 0;
+        while i < self.running.len() {
+            if self.running[i].done {
+                let mut r = self.running.remove(i);
+                self.eng.release_table(&mut r.table);
+                completed.push((r.id, r.generated));
+            } else {
+                i += 1;
+            }
+        }
+        completed
+    }
+
+    /// Drive to completion, returning every request's tokens keyed by id.
+    pub fn run(&mut self) -> HashMap<u64, Vec<u32>> {
+        let mut out = HashMap::new();
+        while self.pending() {
+            for (id, toks) in self.step() {
+                out.insert(id, toks);
+            }
+        }
+        out
     }
 }
 
@@ -408,5 +558,103 @@ mod tests {
 
         assert_eq!(out[0], ref0, "seq0 batched paged != reference");
         assert_eq!(out[1], ref1, "seq1 batched paged != reference");
+    }
+
+    /// Continuous batching: requests submitted at DIFFERENT times (one mid-flight)
+    /// must each produce the same tokens as run alone — the scheduler admits,
+    /// batches, completes, and frees dynamically without changing any output.
+    #[test]
+    fn scheduler_dynamic_admission_matches_reference() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let model = Qwen::new(cfg.clone(), 1, 64, &map);
+
+        let prompts = [vec![1u32, 5, 3, 9], vec![7u32, 2, 4], vec![3u32, 3, 8, 1, 6]];
+        let maxn = [10usize, 6, 8];
+        let refs: Vec<Vec<u32>> = prompts
+            .iter()
+            .zip(maxn)
+            .map(|(p, n)| {
+                let mut r = Rng::new(0);
+                crate::sample::generate_kv(&model, p, n, 0.0, 0, None, &mut r)
+            })
+            .collect();
+
+        let eng = Engine::from_map(cfg, &map, 4, 64, 4, 8);
+        let mut sched = Scheduler::new(eng, 4);
+        let mut out: HashMap<u64, Vec<u32>> = HashMap::new();
+
+        let id0 = sched.submit(Request { prompt: prompts[0].clone(), max_new: maxn[0], eos: None });
+        let id1 = sched.submit(Request { prompt: prompts[1].clone(), max_new: maxn[1], eos: None });
+        // Run two iterations with only the first two requests active...
+        for _ in 0..2 {
+            for (id, t) in sched.step() {
+                out.insert(id, t);
+            }
+        }
+        // ...then submit a third mid-flight; it must batch in and still be correct.
+        let id2 = sched.submit(Request { prompt: prompts[2].clone(), max_new: maxn[2], eos: None });
+        while sched.pending() {
+            for (id, t) in sched.step() {
+                out.insert(id, t);
+            }
+        }
+
+        assert_eq!(out[&id0], refs[0], "req0 under continuous batching != reference");
+        assert_eq!(out[&id1], refs[1], "req1 under continuous batching != reference");
+        assert_eq!(out[&id2], refs[2], "mid-flight req2 != reference");
+    }
+
+    fn medium_cfg() -> QwenConfig {
+        let mut c = QwenConfig::tiny();
+        c.n_layers = 8;
+        c.d_model = 256;
+        c.head_dim = 64;
+        c.n_heads = 8;
+        c.n_kv_heads = 4;
+        c.d_ff = 1024;
+        c.vocab = 256;
+        c
+    }
+
+    /// Throughput: N concurrent requests served with continuous batching vs run one
+    /// at a time. Batched decode should give higher aggregate tokens/sec.
+    ///   cargo test -p brain-qwen --lib serve_throughput -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn serve_throughput() {
+        let cfg = medium_cfg();
+        let (dm, nl) = (cfg.d_model, cfg.n_layers);
+        let map = tiny_weights(&cfg);
+        let n_req = 8usize;
+        let max_new = 48usize;
+        let prompts: Vec<Vec<u32>> = (0..n_req).map(|i| vec![(i as u32 % 200) + 1, 5, 3, 9, 2]).collect();
+
+        // Sequential: one request at a time (fresh reuse of one engine's pool).
+        let mut eng_seq = Engine::from_map(cfg.clone(), &map, 16, 512, n_req as u32, 16);
+        let t0 = std::time::Instant::now();
+        for p in &prompts {
+            eng_seq.generate_greedy(&[p.clone()], max_new, None);
+        }
+        let seq_s = t0.elapsed().as_secs_f64();
+
+        // Continuous batching: all requests admitted + decoded together.
+        let eng = Engine::from_map(cfg, &map, 16, 512, n_req as u32, 16);
+        let mut sched = Scheduler::new(eng, n_req);
+        for p in &prompts {
+            sched.submit(Request { prompt: p.clone(), max_new, eos: None });
+        }
+        let t1 = std::time::Instant::now();
+        let out = sched.run();
+        let batch_s = t1.elapsed().as_secs_f64();
+
+        let total_tokens = (n_req * max_new) as f64;
+        assert_eq!(out.len(), n_req);
+        println!(
+            "serve throughput ({n_req} reqs x {max_new} tok, d{dm} L{nl}): sequential {:.1} tok/s ({seq_s:.2}s) | continuous-batched {:.1} tok/s ({batch_s:.2}s) | {:.1}x",
+            total_tokens / seq_s,
+            total_tokens / batch_s,
+            seq_s / batch_s,
+        );
     }
 }
