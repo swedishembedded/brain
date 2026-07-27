@@ -16,7 +16,7 @@ use std::sync::Arc;
 use capability::{ActionResult, Blob, Invocation, Manifest, Media, Outcome, Progress};
 use residency::bridge::ProviderResident;
 use residency::{Device, Executor, Instance, InstanceKey, MemCost, Policy, ResidentModel};
-use serde_json::json;
+use serde_json::{json, Value};
 use zimage::pipeline::{HotPipeline, Image, Paths};
 
 /// Build the shared executor with every model registered, sized to the given per-GPU
@@ -36,10 +36,100 @@ pub fn build_executor(gpus: &[(u32, u64)], reserved: u64, ram_total: u64, policy
         Ok(z) => models.push(Arc::new(z)),
         Err(e) => eprintln!("brain: z-image not served over the scheduler ({e})"),
     }
+    // yolo object detection if a checkpoint is configured (BRAIN_YOLO).
+    if let Some(y) = YoloResident::from_env() {
+        models.push(Arc::new(y));
+    } else {
+        eprintln!("brain: yolo not served over the scheduler (set BRAIN_YOLO to a checkpoint)");
+    }
     // Stateless helpers (no weights) — always available.
     models.push(Arc::new(ProviderResident::stateless(Arc::new(crate::imageops::ImageOps))));
 
     Executor::start(models, budgets, policy)
+}
+
+// ---------------------------------------------------------------- yolo
+
+/// COCO-80 class names (index → label), so detections carry human labels (dog = 16).
+const COCO: [&str; 80] = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+    "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle",
+    "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
+    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed",
+    "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven",
+    "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+];
+
+/// YOLO detection behind the scheduler. Loads a brain-format YOLOv8 checkpoint
+/// (`BRAIN_YOLO`); the resident instance holds the model on the CPU (brain's yolo
+/// default) — dropping it frees the RAM. One action, `detect`.
+pub struct YoloResident {
+    path: String,
+}
+
+impl YoloResident {
+    pub fn from_env() -> Option<YoloResident> {
+        std::env::var("BRAIN_YOLO").ok().filter(|p| !p.is_empty()).map(|path| YoloResident { path })
+    }
+
+    fn detect_spec() -> capability::ActionSpec {
+        use capability::{BlobSpec, ParamSpec, ParamType};
+        capability::ActionSpec::new("detect", "detect objects in an image (YOLOv8, COCO-80 classes)")
+            .param(ParamSpec::new("conf", ParamType::Float, "confidence threshold").default(json!(0.25)))
+            .param(ParamSpec::new("iou", ParamType::Float, "NMS IoU threshold").default(json!(0.45)))
+            .input(BlobSpec::new("image", Media::Image, "the image to run detection on").required())
+    }
+}
+
+impl ResidentModel for YoloResident {
+    fn manifest(&self) -> Manifest {
+        Manifest::new("yolo", "object detection (YOLOv8, COCO-80)", vec![Self::detect_spec()])
+    }
+    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
+        InstanceKey::new("yolo", "default")
+    }
+    fn estimate(&self, _key: &InstanceKey) -> MemCost {
+        // YOLOv8n is small and runs on the CPU in brain → a modest RAM footprint.
+        MemCost::new(0, 128 << 20)
+    }
+    fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(YoloInstance { yolo: yolo::Yolo::load(&self.path, 1) }))
+    }
+}
+
+struct YoloInstance {
+    yolo: yolo::Yolo,
+}
+
+impl Instance for YoloInstance {
+    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let blob = inv.get_blob("image").ok_or("yolo detect: missing input 'image'")?;
+        let (w, h) = (
+            blob.meta.get("w").and_then(|v| v.as_u64()).ok_or("yolo detect: image meta needs w")? as u32,
+            blob.meta.get("h").and_then(|v| v.as_u64()).ok_or("yolo detect: image meta needs h")? as u32,
+        );
+        // Input is interleaved-RGB HWC f32 in [0,1] (the brain image convention) —
+        // exactly what Yolo::detect expects.
+        let hwc: Vec<f32> = blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+        let conf = inv.get_f64("conf").unwrap_or(0.25) as f32;
+        let iou = inv.get_f64("iou").unwrap_or(0.45) as f32;
+        let dets = self.yolo.detect(&hwc, w, h, conf, iou);
+        let objects: Vec<Value> = dets
+            .iter()
+            .map(|d| {
+                let cls = d[5] as usize;
+                json!({
+                    "bbox": [d[0], d[1], d[2], d[3]],
+                    "conf": d[4],
+                    "class": cls,
+                    "label": COCO.get(cls).copied().unwrap_or("?"),
+                })
+            })
+            .collect();
+        Ok(Outcome::new().set("count", json!(objects.len())).set("detections", json!(objects)))
+    }
 }
 
 // ---------------------------------------------------------------- z-image
