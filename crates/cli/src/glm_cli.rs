@@ -229,7 +229,7 @@ fn infer(args: &[String]) {
     }
     let model = Glm::load_inference(&weights, 1, model_block(&weights));
     let mut rng = Rng::new(seed);
-    let gen = glm::sample::generate(&model, &prompt_ids, max_new, temp, top_k, None, &mut rng);
+    let gen = glm::sample::generate_kv(&model, &prompt_ids, max_new, temp, top_k, None, &mut rng);
     print!("{prompt_text}");
     print!("{}", tok.decode(&gen));
     println!();

@@ -135,7 +135,7 @@ fn gen(args: &[String]) {
     let prompt_text = if prompt.is_empty() { "\n" } else { prompt.as_str() };
     let prompt_ids: Vec<u32> = tok.encode(prompt_text);
     let mut rng = Rng::new(seed);
-    let gen = gpt::sample::generate(&model, &prompt_ids, max_new, temp, top_k, &mut rng);
+    let gen = gpt::sample::generate_kv(&model, &prompt_ids, max_new, temp, top_k, &mut rng);
     print!("{prompt_text}");
     print!("{}", tok.decode(&gen));
     println!();
