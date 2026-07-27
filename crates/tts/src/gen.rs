@@ -430,6 +430,8 @@ impl TalkerGen {
         let sc = &self.sc;
         let ids = only_fwd_ids();
         let w = |name: &str| self.ps.w(name);
+        let prof = std::env::var("BRAIN_KV_PROFILE").is_ok();
+        let t0 = std::time::Instant::now();
         g.write(&self.res[0], bytemuck::cast_slice(embed));
         let mut s: Vec<Step> = Vec::new();
         for l in 0..c.n_layers as usize {
@@ -460,8 +462,21 @@ impl TalkerGen {
         }
         let last = c.n_layers as usize;
         s.push(block::rmsnorm_fwd(g, &ids, &self.res[last], w("norm.weight"), &sc.xn_final, d, 1));
+        let nsteps = s.len();
+        let t1 = std::time::Instant::now();
         g.submit(&[], &s);
-        g.read(&self.sc.xn_final, d as usize)
+        let t2 = std::time::Instant::now();
+        let out = g.read(&self.sc.xn_final, d as usize);
+        if prof {
+            let t3 = std::time::Instant::now();
+            eprintln!(
+                "kv-decode: build {:.2}ms ({nsteps} steps)  submit {:.2}ms  read {:.2}ms",
+                (t1 - t0).as_secs_f64() * 1e3,
+                (t2 - t1).as_secs_f64() * 1e3,
+                (t3 - t2).as_secs_f64() * 1e3,
+            );
+        }
+        out
     }
 
     /// Codebook-0 logits (`[vocab]`) for a single final-norm hidden row. Shared
@@ -542,6 +557,29 @@ mod kv_tests {
             let err = maxabs(&inc[i], last);
             assert!(err < 2e-3, "prefix {i}: KV step vs full recompute maxabs={err}");
         }
+    }
+
+    /// The shared-engine KV `step` must also match the INDEPENDENT hand-rolled
+    /// `CpuTalker` KV oracle on the same weights — the direct evidence that the two
+    /// tts engines (GPU `TalkerGen` + CPU `CpuTalker`) can collapse into this one.
+    #[test]
+    fn kv_step_matches_cpu_talker() {
+        use crate::gen_kv::CpuTalker;
+        let cfg = TalkerConfig::tiny();
+        let d = cfg.d_model as usize;
+        let map = random_decoder(&cfg, 20240727);
+        let tg = TalkerGen::from_decoder_map(cfg.clone(), &map, 8);
+        let mut cpu = CpuTalker::from_decoder_map(cfg.clone(), &map);
+        let mut rng = Rng::new(5);
+        tg.reset_cache();
+        cpu.reset();
+        let mut worst = 0f32;
+        for _ in 0..6 {
+            let e: Vec<f32> = (0..d).map(|_| rng.next_gaussian() as f32).collect();
+            worst = worst.max(maxabs(&tg.step(&e), &cpu.step(&e)));
+        }
+        println!("kv_step vs CpuTalker: worst maxabs = {worst}");
+        assert!(worst < 1e-2, "engine KV step vs CpuTalker oracle maxabs={worst}");
     }
 
     fn medium_cfg() -> TalkerConfig {
