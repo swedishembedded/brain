@@ -39,11 +39,6 @@ pub struct GenOpts {
     pub top_k: usize,
     pub seed: u64,
     pub min_new: usize,
-    /// Decode on the bit-exact KV-cache CpuTalker (O(T)/frame, CPU host) when
-    /// true; otherwise the full-recompute `TalkerGen` path that runs on the
-    /// selected `gpu_core` backend (CPU JIT or the wgpu GPU). The GPU path needs
-    /// `cached = false`, since the cache mirror is CPU-only.
-    pub cached: bool,
 }
 
 impl Default for GenOpts {
@@ -62,7 +57,6 @@ impl Default for GenOpts {
             top_k: 50,
             seed: 0,
             min_new: 2,
-            cached: true,
         }
     }
 }
@@ -147,9 +141,16 @@ pub fn generate_codes(
     let n_trailing = prompt.trailing.len() / d;
     let mut rng = Rng::new(opts.seed);
 
-    let mut ctx = prompt.embeds.clone();
-    let mut hidden = gen.forward(&ctx);
-    let mut past_hidden = hidden[hidden.len() - d..].to_vec();
+    // Stream the prefix through the incremental KV cache, keeping the last hidden.
+    // This is the unified O(T)/frame Talker decode (`TalkerGen::step`) — it runs on
+    // whatever backend `Gpu` selected (GPU or the wgsl-cpu JIT), replacing both the
+    // old O(T²) `forward` recompute and the CPU-only `CpuTalker` path.
+    gen.reset_cache();
+    let n_prefix = prompt.embeds.len() / d;
+    let mut past_hidden = vec![0.0f32; d];
+    for i in 0..n_prefix {
+        past_hidden = gen.step(&prompt.embeds[i * d..(i + 1) * d]);
+    }
     let mut cb0 = sample_cb0(
         gen.codec_head_logits(&past_hidden),
         sp.codec_eos,
@@ -178,14 +179,13 @@ pub fn generate_codes(
         } else {
             add_into(&mut feed, &prompt.tts_pad);
         }
-        ctx.extend_from_slice(&feed);
         s += 1;
-        if ctx.len() / d > gen.cfg.max_position_embeddings as usize {
+        if gen.cache_pos() as usize >= gen.cfg.max_position_embeddings as usize {
             break;
         }
 
-        hidden = gen.forward(&ctx);
-        past_hidden = hidden[hidden.len() - d..].to_vec();
+        // one incremental decoder step for the new frame.
+        past_hidden = gen.step(&feed);
         cb0 = sample_cb0(
             gen.codec_head_logits(&past_hidden),
             sp.codec_eos,
@@ -198,7 +198,10 @@ pub fn generate_codes(
     frames
 }
 
-/// KV-cached variant of [`generate_codes`]: identical autoregressive logic and
+/// CPU-only KV-cache Talker generation for the **NPU path's `Mode::Cpu`** (Talker
+/// on the host, codec/MTP on the NPU). The main `generate_codes` now uses the
+/// device-agnostic `TalkerGen::step`; this remains for the NPU-adjacent CPU decode.
+/// Identical autoregressive logic and
 /// sampling, but the Talker decoder is the incremental, key/value-cached
 /// [`CpuTalker`] (`O(T)` per frame) instead of the full-recompute
 /// [`TalkerGen::forward`] (`O(T²)`). The frozen weights and the resulting codes
@@ -437,29 +440,16 @@ pub fn clone(
         prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, Some(&xvec), language_id)
     };
 
-    let codes = generate(&gen, &mtp, &sp, &prompt, opts, &paths.talker, &paths.mtp);
+    let codes = generate(&gen, &mtp, &sp, &prompt, opts);
     decode_codes(&paths.codec, &codes)
 }
 
-/// Dispatch generation to the cached CPU path or the backend (CPU/GPU) full
-/// recompute, per `opts.cached`. Both yield identical codes (the cache is
-/// algebraically exact); only the cost and the engine differ.
-fn generate(
-    gen: &TalkerGen,
-    mtp: &MtpModel,
-    sp: &TtsSpecials,
-    prompt: &Prompt,
-    opts: &GenOpts,
-    talker_path: &str,
-    mtp_path: &str,
-) -> Vec<u32> {
-    if opts.cached {
-        let mut cpu = crate::gen_kv::CpuTalker::load(talker_path);
-        let mut cpu_mtp = crate::gen_kv_mtp::CpuMtp::load(mtp_path);
-        generate_codes_cached(&mut cpu, &mut cpu_mtp, sp, prompt, opts)
-    } else {
-        generate_codes(gen, mtp, sp, prompt, opts)
-    }
+/// Generate codec codes. Single engine: the incremental KV-cache
+/// [`TalkerGen::step`] Talker + the [`MtpModel`] residual fill, both running on
+/// whatever backend `Gpu` selected (GPU or the wgsl-cpu JIT). Replaces the former
+/// `opts.cached` split between a CPU-only `CpuTalker` and the O(T²) GPU recompute.
+fn generate(gen: &TalkerGen, mtp: &MtpModel, sp: &TtsSpecials, prompt: &Prompt, opts: &GenOpts) -> Vec<u32> {
+    generate_codes(gen, mtp, sp, prompt, opts)
 }
 
 /// **Synth** — speaker-free text-to-speech (no reference voice).
@@ -480,7 +470,7 @@ pub fn synth(
     let mtp = MtpModel::load_inference(&paths.mtp);
     let prompt = prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, None, language_id);
 
-    let codes = generate(&gen, &mtp, &sp, &prompt, opts, &paths.talker, &paths.mtp);
+    let codes = generate(&gen, &mtp, &sp, &prompt, opts);
     decode_codes(&paths.codec, &codes)
 }
 
@@ -745,7 +735,7 @@ pub fn design(
     let prompt =
         prompt::build_instruct_prompt(&gen, &sp, &role_ids, &text_ids, &instruct_ids, speaker_id, language_id);
 
-    let codes = generate(&gen, &mtp, &sp, &prompt, opts, &paths.talker, &paths.mtp);
+    let codes = generate(&gen, &mtp, &sp, &prompt, opts);
     decode_codes(&paths.codec, &codes)
 }
 
