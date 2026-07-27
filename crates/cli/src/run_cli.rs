@@ -58,6 +58,8 @@ pub fn run_serve(args: &[String]) {
     // default 0.25 filter would drop, so the demo can lower it (also `BRAIN_CONF`).
     let mut conf: Option<f32> =
         std::env::var("BRAIN_CONF").ok().and_then(|s| s.parse().ok());
+    // D-Bus control surface (`--dbus [--dbus-system] [--dbus-name NAME]`).
+    let (mut dbus, mut dbus_system, mut dbus_name) = (false, false, None::<String>);
 
     let mut i = 0;
     while i < args.len() {
@@ -91,9 +93,24 @@ pub fn run_serve(args: &[String]) {
                 i += 1;
                 conf = args.get(i).and_then(|s| s.parse().ok()).or(conf);
             }
+            "--dbus" => dbus = true,
+            "--dbus-system" => {
+                dbus = true;
+                dbus_system = true;
+            }
+            "--dbus-name" => {
+                i += 1;
+                dbus_name = args.get(i).cloned();
+            }
             other => eprintln!("brain run: ignoring unknown flag {other:?}"),
         }
         i += 1;
+    }
+
+    // The D-Bus control surface replaces the stdio loop when requested: it serves
+    // every registered model over `com.swedishembedded.Brain1` until Ctrl-C.
+    if dbus {
+        return run_dbus(dbus_system, dbus_name);
     }
 
     // Build the registry: a real GPT if a checkpoint was given, else a fake echo
@@ -167,4 +184,37 @@ pub fn run_serve(args: &[String]) {
             return; // stdout closed
         }
     }
+}
+
+/// Serve the D-Bus control surface (`brain serve --dbus`). Registers every model
+/// and hands the registry to `brain_dbus::serve`, which owns it for the service's
+/// lifetime. Only compiled with the `dbus` feature.
+#[cfg(feature = "dbus")]
+fn run_dbus(system: bool, name: Option<String>) {
+    let reg = match crate::caps_cli::all_providers() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("brain serve --dbus: {e}");
+            std::process::exit(1);
+        }
+    };
+    let opts = brain_dbus::DbusOpts {
+        bus: if system { brain_dbus::BusKind::System } else { brain_dbus::BusKind::Session },
+        name: name.unwrap_or_else(|| "com.swedishembedded.Brain1".to_string()),
+    };
+    if let Err(e) = brain_dbus::serve(reg, opts) {
+        eprintln!("brain serve --dbus: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// Without the `dbus` feature, `--dbus` is a clear build-time error rather than a
+/// silently-ignored flag.
+#[cfg(not(feature = "dbus"))]
+fn run_dbus(_system: bool, _name: Option<String>) {
+    eprintln!(
+        "brain serve --dbus: this binary was built without D-Bus support.\n\
+         Rebuild with:  cargo build -p brain-cli --features dbus"
+    );
+    std::process::exit(2);
 }

@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! Optional D-Bus control surface for brain.
+//!
+//! Exposes the synchronous [`capability::Registry`] over the bus name
+//! `com.swedishembedded.Brain1`, so local Linux apps can discover models, run
+//! actions, and exchange images/streams/results as **file descriptors**
+//! (memfd/mmap, and dmabuf where available) instead of bytes over D-Bus.
+//!
+//! Layering (kept deliberately thin — no model code here):
+//! - [`fd`] — memfd/mmap FD transport.
+//! - `worker` — a dedicated thread that owns the `Registry` and runs the blocking
+//!   inference off the async/D-Bus threads.
+//! - `service` — the zbus `Manager` interface (validate → enqueue → reply).
+//! - [`serve`] — wires a Tokio runtime + the worker + a zbus connection together.
+
+pub mod fd;
+pub mod service;
+pub mod stream;
+pub mod worker;
+
+use capability::Registry;
+
+/// Which bus to connect to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BusKind {
+    /// Per-user session bus (default; no policy file / root needed).
+    #[default]
+    Session,
+    /// System-wide bus (needs a `system.d` policy to be callable by non-root).
+    System,
+}
+
+/// Options for [`serve`].
+#[derive(Clone, Debug)]
+pub struct DbusOpts {
+    pub bus: BusKind,
+    /// Well-known name to request (default `com.swedishembedded.Brain1`).
+    pub name: String,
+}
+
+impl Default for DbusOpts {
+    fn default() -> DbusOpts {
+        DbusOpts { bus: BusKind::Session, name: "com.swedishembedded.Brain1".to_string() }
+    }
+}
+
+/// The object path the `Manager` is served at.
+pub const OBJECT_PATH: &str = "/com/swedishembedded/Brain1";
+
+/// Serve `registry` over D-Bus until Ctrl-C / SIGTERM. Builds a multi-threaded
+/// Tokio runtime, spawns the [`worker`] thread (which owns the registry and runs
+/// blocking inference), connects to the chosen bus, requests the well-known name,
+/// and serves the [`service::Manager`] at [`OBJECT_PATH`]. Blocks the calling
+/// thread for the lifetime of the service.
+pub fn serve(registry: Registry, opts: DbusOpts) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    rt.block_on(async move {
+        let (handle, _join) = worker::spawn(registry);
+        let manager = service::Manager::new(handle);
+        let builder = match opts.bus {
+            BusKind::Session => zbus::connection::Builder::session()?,
+            BusKind::System => zbus::connection::Builder::system()?,
+        };
+        let conn = builder
+            .name(opts.name.as_str())?
+            .serve_at(OBJECT_PATH, manager)?
+            .build()
+            .await?;
+        eprintln!("brain: serving {} on the {:?} bus at {OBJECT_PATH}", opts.name, opts.bus);
+        // Run until interrupted; graceful shutdown releases the name cleanly.
+        tokio::signal::ctrl_c().await?;
+        eprintln!("brain: shutting down D-Bus service");
+        conn.graceful_shutdown().await;
+        Ok::<(), anyhow::Error>(())
+    })
+}

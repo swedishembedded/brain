@@ -26,6 +26,17 @@ fn static_manifests() -> Vec<Manifest> {
     vec![zimage::caps::manifest(), imageops::manifest(), DemoModel.manifest()]
 }
 
+/// Build a registry with **every** provider registered — for the long-lived
+/// services (D-Bus / event loop) that must serve any model on demand. Providers are
+/// cheap to construct; model weights load lazily on the first action call.
+pub fn all_providers() -> Result<Registry, String> {
+    let mut reg = Registry::new();
+    reg.register(Arc::new(DemoModel));
+    reg.register(Arc::new(imageops::ImageOps));
+    reg.register(Arc::new(zimage::caps::ZImageProvider::load()?));
+    Ok(reg)
+}
+
 /// Build an executable registry for `model` (loads what that model needs). `do`
 /// only constructs the one model it was asked to run.
 fn build_registry(model: &str) -> Result<Registry, String> {

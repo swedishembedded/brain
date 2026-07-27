@@ -105,6 +105,7 @@ brain-eval = { path = "crates/eval" }
 brain-bench = { path = "crates/bench" }
 brain-gradcheck = { path = "crates/gradcheck" }
 brain-capability = { path = "crates/capability" }
+brain-dbus = { path = "crates/dbus" }
 brain-events = { path = "crates/events" }
 brain-hfsm = { path = "crates/hfsm" }
 brain-wm-core = { path = "crates/wm-core" }
