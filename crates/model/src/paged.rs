@@ -349,3 +349,109 @@ mod gpu_tests {
         assert!(err < 1e-6, "paged vs contiguous attention maxabs={err}");
     }
 }
+
+#[cfg(test)]
+mod batched_tests {
+    use super::*;
+    use data::rng::Rng;
+    use gpu_core::Gpu;
+
+    fn fb(x: f32) -> u32 {
+        x.to_bits()
+    }
+
+    /// Batched paged decode over sequences of DIFFERENT lengths must equal each
+    /// sequence decoded on its own (bit-exact). Each sequence has its own query,
+    /// length, and an interleaved (scrambled) block table sharing one pool.
+    #[test]
+    fn batched_paged_matches_per_sequence() {
+        // Contiguous (ref) at 0..2, batched paged at 3..5.
+        let pipes: &[(&str, &str)] = &[
+            ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
+            ("decode_softmax", kernels::DECODE_SOFTMAX),
+            ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
+            ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
+            ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
+            ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
+        ];
+        let g = Gpu::new(pipes);
+        let (nh, nkv, hd) = (4u32, 2u32, 8u32);
+        let group = nh / nkv;
+        let (hkv, hq) = (nkv * hd, nh * hd);
+        let scale = 1.0f32 / (hd as f32).sqrt();
+        let lens = [5u32, 12, 20];
+        let batch = lens.len() as u32;
+        let bs = 4u32;
+        let num_blocks = 32u32;
+        let max_bt = 5u32; // ceil(20/4)
+        let cap = max_bt * bs; // 20
+
+        let mut rng = Rng::new(11);
+        // Per-seq queries + K/V.
+        let qs: Vec<Vec<f32>> = (0..batch).map(|_| (0..hq).map(|_| rng.next_gaussian() as f32).collect()).collect();
+        let ks: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
+        let vs: Vec<Vec<f32>> = lens.iter().map(|&t| (0..t * hkv).map(|_| rng.next_gaussian() as f32).collect()).collect();
+
+        // Interleaved (scrambled) physical block tables: seq b uses blocks b, b+3, b+6...
+        let tables: Vec<Vec<u32>> = (0..batch).map(|b| (0..max_bt).map(|i| b + i * batch).collect()).collect();
+
+        // Fill one shared pool from the per-seq K/V through the block tables.
+        let mut pk = vec![0f32; (num_blocks * bs * hkv) as usize];
+        let mut pv = vec![0f32; (num_blocks * bs * hkv) as usize];
+        for b in 0..batch as usize {
+            for tok in 0..lens[b] {
+                let phys = tables[b][(tok / bs) as usize];
+                let dst = ((phys * bs + tok % bs) * hkv) as usize;
+                let src = (tok * hkv) as usize;
+                pk[dst..dst + hkv as usize].copy_from_slice(&ks[b][src..src + hkv as usize]);
+                pv[dst..dst + hkv as usize].copy_from_slice(&vs[b][src..src + hkv as usize]);
+            }
+        }
+
+        // --- batched paged ---
+        let qflat: Vec<f32> = qs.iter().flatten().copied().collect();
+        let qb = g.storage_init("q", &qflat);
+        let poolk = g.storage_init("pk", &pk);
+        let poolv = g.storage_init("pv", &pv);
+        let btflat: Vec<u32> = (0..batch as usize).flat_map(|b| tables[b].clone()).collect();
+        let bt = g.storage((batch * max_bt) as u64);
+        g.write(&bt, &btflat);
+        let sl = g.storage(batch as u64);
+        g.write(&sl, &lens);
+        let sc = g.storage((batch * nh * cap) as u64);
+        let pr = g.storage((batch * nh * cap) as u64);
+        let ctxb = g.storage((batch * hq) as u64);
+        let steps = vec![
+            g.step(3, &[&qb, &poolk, &bt, &sl, &sc], &[batch, nh, group, hd, bs, hkv, cap, max_bt, fb(scale)], batch * nh * cap),
+            g.step(4, &[&sc, &sl, &pr], &[batch, nh, cap], batch * nh),
+            g.step(5, &[&pr, &poolv, &bt, &sl, &ctxb], &[batch, nh, group, hd, bs, hkv, cap, max_bt], batch * nh * hd),
+        ];
+        g.submit(&[], &steps);
+        let ctx_batched = g.read(&ctxb, (batch * hq) as usize);
+
+        // --- reference: each seq contiguously on its own K/V ---
+        let mut worst = 0f32;
+        for b in 0..batch as usize {
+            let t = lens[b];
+            let qc = g.storage_init("qc", &qs[b]);
+            let kc = g.storage_init("kc", &ks[b]);
+            let vc = g.storage_init("vc", &vs[b]);
+            let rcap = t.max(1);
+            let scc = g.storage((nh * rcap) as u64);
+            let prc = g.storage((nh * rcap) as u64);
+            let ctxc = g.storage(hq as u64);
+            let rs = vec![
+                g.step(0, &[&qc, &kc, &scc], &[nh, group, hd, t, rcap, hkv, fb(scale)], nh * t),
+                g.step(1, &[&scc, &prc], &[nh, t, rcap], nh),
+                g.step(2, &[&prc, &vc, &ctxc], &[nh, group, hd, t, rcap, hkv], nh * hd),
+            ];
+            g.submit(&[], &rs);
+            let refb = g.read(&ctxc, hq as usize);
+            let got = &ctx_batched[b * hq as usize..(b + 1) * hq as usize];
+            let e = refb.iter().zip(got).fold(0f32, |m, (a, c)| m.max((a - c).abs()));
+            worst = worst.max(e);
+        }
+        println!("batched paged vs per-sequence: worst maxabs = {worst:e}");
+        assert!(worst < 1e-6, "batched paged vs per-sequence maxabs={worst}");
+    }
+}

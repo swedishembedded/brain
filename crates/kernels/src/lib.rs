@@ -109,6 +109,16 @@ pub const PAGED_KV_APPEND: &str = include_str!("../wgsl/paged_kv_append.wgsl");
 pub const PAGED_DECODE_SCORES: &str = include_str!("../wgsl/paged_decode_scores.wgsl");
 /// `wgsl/paged_decode_apply.wgsl` — paged KV-cache decode (block-table indirection).
 pub const PAGED_DECODE_APPLY: &str = include_str!("../wgsl/paged_decode_apply.wgsl");
+/// `wgsl/rope_paged.wgsl` — batched paged decode (ragged multi-sequence).
+pub const ROPE_PAGED: &str = include_str!("../wgsl/rope_paged.wgsl");
+/// `wgsl/paged_kv_append_batched.wgsl` — batched paged decode (ragged multi-sequence).
+pub const PAGED_KV_APPEND_BATCHED: &str = include_str!("../wgsl/paged_kv_append_batched.wgsl");
+/// `wgsl/paged_decode_scores_batched.wgsl` — batched paged decode (ragged multi-sequence).
+pub const PAGED_DECODE_SCORES_BATCHED: &str = include_str!("../wgsl/paged_decode_scores_batched.wgsl");
+/// `wgsl/decode_softmax_batched.wgsl` — batched paged decode (ragged multi-sequence).
+pub const DECODE_SOFTMAX_BATCHED: &str = include_str!("../wgsl/decode_softmax_batched.wgsl");
+/// `wgsl/paged_decode_apply_batched.wgsl` — batched paged decode (ragged multi-sequence).
+pub const PAGED_DECODE_APPLY_BATCHED: &str = include_str!("../wgsl/paged_decode_apply_batched.wgsl");
 /// `wgsl/attn_softmax_bidir.wgsl`
 pub const ATTN_SOFTMAX_BIDIR: &str = include_str!("../wgsl/attn_softmax_bidir.wgsl");
 /// `wgsl/attn_softmax_cross.wgsl`
@@ -612,6 +622,11 @@ pub const ALL: &[(&str, &str)] = &[
     ("paged_kv_append", PAGED_KV_APPEND),
     ("paged_decode_scores", PAGED_DECODE_SCORES),
     ("paged_decode_apply", PAGED_DECODE_APPLY),
+    ("rope_paged", ROPE_PAGED),
+    ("paged_kv_append_batched", PAGED_KV_APPEND_BATCHED),
+    ("paged_decode_scores_batched", PAGED_DECODE_SCORES_BATCHED),
+    ("decode_softmax_batched", DECODE_SOFTMAX_BATCHED),
+    ("paged_decode_apply_batched", PAGED_DECODE_APPLY_BATCHED),
     ("attn_softmax_bidir", ATTN_SOFTMAX_BIDIR),
     ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
     ("attn_softmax_full", ATTN_SOFTMAX_FULL),
