@@ -4,207 +4,139 @@
 
 """End-to-end scheduler + multi-model validation over brain's D-Bus surface.
 
-Drives `brain serve --dbus` through the residency Executor and validates, with real
+Drives ``brain serve --dbus`` through the residency Executor and validates, with real
 numbers:
 
-  1. generate — z-image text2image "two dogs" (streaming), timed + saved;
-  2. detect   — yolo `detect` on that image (when BRAIN_YOLO is configured), boxes
-                drawn client-side over the image buffer, timed + saved;
-  3. batch    — several text2image requests fired concurrently must coalesce into one
-                scheduler group (Stats.max_batch >= 2);
-  4. evict    — requesting more distinct instance sizes than fit forces LRU eviction
-                (Stats.evictions >= 1).
+1. **generate** — z-image ``text2image`` "two dogs" (streaming), timed + saved;
+2. **detect**   — yolo ``detect`` on that image (when ``BRAIN_YOLO`` is configured),
+   boxes drawn into the image buffer, saved;
+3. **batch**    — several ``text2image`` requests fired concurrently must coalesce
+   into one scheduler group (``Stats.max_batch >= 2``);
+4. **evict**    — requesting more distinct instance sizes than fit forces an LRU
+   eviction (``Stats.evictions >= 1``).
 
-Exit 0 iff the scheduler validations (batch + evict) pass. Prints a PROFILE block.
-Run under `brain serve --dbus` on a session bus (see the .bats wrapper).
+Exits 0 iff batching and eviction both pass; prints a PROFILE block. Run under
+``brain serve --dbus`` on a session bus — see ``scheduler.bats``.
 """
+from __future__ import annotations
+
 import json
-import mmap
 import os
-import struct
 import sys
 import threading
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
 
-from jeepney import DBusAddress, new_method_call
-from jeepney.fds import FileDescriptor
-from jeepney.io.blocking import open_dbus_connection
+# Dogfood the shipped D-Bus client + image helpers.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples" / "dbus"))
+from brain_dbus_client import BrainDBus, read_fd, sealed_memfd  # noqa: E402
+from brain_image import draw_boxes, save_ppm  # noqa: E402
 
-ADDR = DBusAddress("/com/swedishembedded/Brain1", bus_name="com.swedishembedded.Brain1",
-                   interface="com.swedishembedded.Brain1.Manager")
-OUT = os.environ.get("OUT", "/tmp/brain_e2e")
-os.makedirs(OUT, exist_ok=True)
-
-
-def conn():
-    return open_dbus_connection(bus="SESSION", enable_fds=True)
-
-
-def read_fd(fdobj) -> bytes:
-    raw = fdobj.to_raw_fd() if isinstance(fdobj, FileDescriptor) else int(fdobj)
-    try:
-        n = os.fstat(raw).st_size
-        return b"" if n == 0 else bytes(mmap.mmap(raw, n, prot=mmap.PROT_READ))
-    finally:
-        os.close(raw)
+OUT = Path(os.environ.get("OUT", "/tmp/brain_e2e"))
+SIZE = int(os.environ.get("SIZE", "256"))
+STEPS = int(os.environ.get("STEPS", "8"))
+BATCH_N = int(os.environ.get("BATCH_N", "4"))
 
 
-def memfd(data: bytes) -> FileDescriptor:
-    fd = os.memfd_create("e2e", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
-    os.write(fd, data)
-    import fcntl
-    fcntl.fcntl(fd, 1033, 0x1 | 0x2 | 0x4)
-    return FileDescriptor(fd)
+@dataclass
+class Profile:
+    times: dict[str, float] = field(default_factory=dict)
+
+    @contextmanager
+    def measure(self, name: str):
+        start = time.perf_counter()
+        yield
+        self.times[name] = round(time.perf_counter() - start, 2)
 
 
-def stats(c) -> dict:
-    return json.loads(c.send_and_get_reply(new_method_call(ADDR, "Stats")).body[0])
+def generate_dogs(brain: BrainDBus, prof: Profile) -> bytes:
+    """Stream a text2image generation; return the image bytes."""
+    image: bytes | None = None
+    params = {"prompt": "two dogs sitting side by side on grass, photo", "width": SIZE, "height": SIZE, "steps": STEPS, "seed": 7}
+    with prof.measure("generate_s"):
+        for frame, fds in brain.subscribe("z-image", "text2image", params):
+            if frame["type"] == "blob" and fds:
+                image = read_fd(fds[0])
+            elif frame["type"] == "error":
+                raise RuntimeError(frame["message"])
+    if image is None:
+        raise RuntimeError("z-image produced no image")
+    save_ppm(OUT / "dogs.ppm", image, SIZE, SIZE)
+    print(f"[generate] {SIZE}x{SIZE} in {prof.times['generate_s']}s -> {OUT / 'dogs.ppm'}")
+    return image
 
 
-def run(c, model, action, params, in_fds=None, in_meta=None):
-    msg = new_method_call(ADDR, "Run", "sssa{sh}ss",
-                          (model, action, json.dumps(params), in_fds or {}, json.dumps(in_meta or {}), "memfd"))
-    result, out_fds, out_meta = c.send_and_get_reply(msg).body
-    return json.loads(result), out_fds, json.loads(out_meta)
+def detect_and_annotate(brain: BrainDBus, image: bytes, prof: Profile) -> None:
+    """Run yolo detection over dbus and draw the boxes into the image buffer."""
+    meta = {"image": {"media": "image", "w": SIZE, "h": SIZE, "c": 3}}
+    with prof.measure("detect_s"):
+        out = brain.run("yolo", "detect", {"conf": 0.25}, in_fds={"image": sealed_memfd(image)}, in_meta=meta)
+    detections = out.result.get("detections", [])
+    labels = [f"{d['label']}({d['conf']:.2f})" for d in detections]
+    print(f"[detect] {out.result.get('count', 0)} objects in {prof.times['detect_s']}s: {labels}")
+    annotated = draw_boxes(image, SIZE, SIZE, [d["bbox"] for d in detections])
+    save_ppm(OUT / "dogs_boxes.ppm", annotated, SIZE, SIZE)
+    print(f"[detect] boxes drawn -> {OUT / 'dogs_boxes.ppm'}")
 
 
-def subscribe_text2image(c, prompt, w, h, steps, seed):
-    """text2image via Subscribe; returns (image_bytes, meta) after the done frame."""
-    msg = new_method_call(ADDR, "Subscribe", "sssa{sh}s",
-                          ("z-image", "text2image",
-                           json.dumps({"prompt": prompt, "width": w, "height": h, "steps": steps, "seed": seed}), {}, "{}"))
-    _job, event_fd = c.send_and_get_reply(msg).body
-    import socket
-    sock = socket.socket(fileno=event_fd.to_raw_fd())
-    sock.settimeout(600)
-    img, meta = None, {}
-    while True:
-        data, anc, _f, _ = sock.recvmsg(1 << 16, socket.CMSG_SPACE(4 * 8))
-        if not data:
-            break
-        fds = []
-        for lvl, typ, cd in anc:
-            if lvl == socket.SOL_SOCKET and typ == socket.SCM_RIGHTS:
-                fds = list(struct.unpack(f"{len(cd) // 4}i", cd[: len(cd) // 4 * 4]))
-        fr = json.loads(data)
-        if fr["type"] == "blob" and fds:
-            img, meta = read_fd(fds[0]), fr.get("meta") or {}
-        elif fr["type"] in ("done", "error"):
-            if fr["type"] == "error":
-                raise RuntimeError(fr["message"])
-            break
-    sock.close()
-    return img, meta
+def fire_concurrent(count: int) -> None:
+    """Submit `count` same-size text2image requests at once (each on its own connection)."""
+
+    def one(i: int) -> None:
+        with BrainDBus() as brain:
+            brain.run("z-image", "text2image", {"prompt": f"two dogs, variation {i}", "width": SIZE, "height": SIZE, "steps": STEPS, "seed": 100 + i})
+
+    threads = [threading.Thread(target=one, args=(i,)) for i in range(count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
 
-def save_ppm(path, data, w, h, c=3):
-    import array
-    flt = array.array("f"); flt.frombytes(data)
-    with open(path, "wb") as f:
-        f.write(f"P6\n{w} {h}\n255\n".encode())
-        f.write(bytes(max(0, min(255, int(flt[i * c + (k if c >= 3 else 0)] * 255 + 0.5)))
-                      for i in range(w * h) for k in range(3)))
+def main() -> int:
+    OUT.mkdir(parents=True, exist_ok=True)
+    prof = Profile()
+    with BrainDBus() as brain:
+        models = brain.models()
+        print("models:", models)
+        if "z-image" not in models:
+            print("FATAL: z-image not served (set BRAIN_ZIMAGE_*)", file=sys.stderr)
+            return 2
 
+        image = generate_dogs(brain, prof)
 
-def draw_boxes(rgb_f32: bytes, w, h, dets):
-    """Draw detection boxes into the HWC-f32 image buffer (thick red rectangles)."""
-    import array
-    a = array.array("f"); a.frombytes(rgb_f32)
+        if "yolo" in models:
+            detect_and_annotate(brain, image, prof)
+        else:
+            print("[detect] SKIPPED — no yolo model (set BRAIN_YOLO to a brain YOLOv8 checkpoint)")
 
-    def px(x, y, r, g, b):
-        if 0 <= x < w and 0 <= y < h:
-            i = (y * w + x) * 3
-            a[i], a[i + 1], a[i + 2] = r, g, b
+        # batching: concurrent same-size requests should coalesce into one group.
+        with prof.measure("batch_wall_s"):
+            fire_concurrent(BATCH_N)
+        after = brain.stats()
+        print(f"[batch] {BATCH_N} concurrent requests in {prof.times['batch_wall_s']}s; "
+              f"max_batch={after['max_batch']} batches={after['batches']} builds={after['builds']}")
 
-    for d in dets:
-        x1, y1, x2, y2 = (int(v) for v in d["bbox"])
-        for t in range(2):  # 2px border
-            for x in range(max(0, x1), min(w, x2)):
-                px(x, y1 + t, 1.0, 0.0, 0.0); px(x, y2 - t, 1.0, 0.0, 0.0)
-            for y in range(max(0, y1), min(h, y2)):
-                px(x1 + t, y, 1.0, 0.0, 0.0); px(x2 - t, y, 1.0, 0.0, 0.0)
-    return a.tobytes()
+        # eviction: more distinct instance sizes than fit → an LRU swap.
+        with prof.measure("evict_builds_s"):
+            for side in (SIZE + 32, SIZE + 64):
+                brain.run("z-image", "text2image", {"prompt": "two dogs", "width": side, "height": side, "steps": STEPS, "seed": 5})
+        final = brain.stats()
+        print(f"[evict] +2 sizes in {prof.times['evict_builds_s']}s; "
+              f"evictions={final['evictions']} builds={final['builds']} resident={final['resident']}")
 
-
-def main():
-    prof = {}
-    c = conn()
-    models = json.loads(c.send_and_get_reply(new_method_call(ADDR, "Manifests")).body[0])
-    names = [m["model"] for m in models]
-    print("models:", names, flush=True)
-    if "z-image" not in names:
-        print("FATAL: z-image not served (set BRAIN_ZIMAGE_*)", file=sys.stderr)
-        return 2
-
-    W = H = int(os.environ.get("SIZE", "256"))
-    STEPS = int(os.environ.get("STEPS", "8"))
-
-    # 1. generate two dogs -------------------------------------------------------
-    t = time.time()
-    img, meta = subscribe_text2image(c, "two dogs sitting side by side on grass, photo", W, H, STEPS, 7)
-    prof["generate_s"] = round(time.time() - t, 2)
-    save_ppm(f"{OUT}/dogs.ppm", img, W, H)
-    print(f"[generate] {W}x{H} in {prof['generate_s']}s -> {OUT}/dogs.ppm", flush=True)
-
-    # 2. detect + draw boxes (if yolo configured) --------------------------------
-    dets = []
-    if "yolo" in names:
-        t = time.time()
-        res, _fds, _m = run(c, "yolo", "detect", {"conf": 0.25},
-                            in_fds={"image": memfd(img)}, in_meta={"image": {"media": "image", "w": W, "h": H, "c": 3}})
-        prof["detect_s"] = round(time.time() - t, 2)
-        dets = res.get("detections", [])
-        labels = [f"{d['label']}({d['conf']:.2f})" for d in dets]
-        print(f"[detect] {res.get('count', 0)} objects in {prof['detect_s']}s: {labels}", flush=True)
-        annotated = draw_boxes(img, W, H, dets)
-        save_ppm(f"{OUT}/dogs_boxes.ppm", annotated, W, H)
-        print(f"[detect] boxes drawn -> {OUT}/dogs_boxes.ppm", flush=True)
-    else:
-        print("[detect] SKIPPED — no yolo model (set BRAIN_YOLO to a brain YOLOv8 checkpoint)", flush=True)
-
-    # 3. batching: fire N same-size text2image concurrently ----------------------
-    before = stats(c)
-    N = int(os.environ.get("BATCH_N", "4"))
-    t = time.time()
-
-    def fire(i):
-        cc = conn()
-        run(cc, "z-image", "text2image", {"prompt": f"two dogs, variation {i}", "width": W, "height": H, "steps": STEPS, "seed": 100 + i})
-        cc.close()
-
-    ths = [threading.Thread(target=fire, args=(i,)) for i in range(N)]
-    for th in ths:
-        th.start()
-    for th in ths:
-        th.join()
-    prof["batch_wall_s"] = round(time.time() - t, 2)
-    after = stats(c)
-    print(f"[batch] {N} concurrent requests in {prof['batch_wall_s']}s; "
-          f"max_batch={after['max_batch']} batches={after['batches']} builds={after['builds']}", flush=True)
-
-    # 4. eviction: request 2 more distinct sizes to overflow the GPU budget ------
-    t = time.time()
-    for (w, h) in [(W + 32, H + 32), (W + 64, H + 64)]:
-        run(c, "z-image", "text2image", {"prompt": "two dogs", "width": w, "height": h, "steps": STEPS, "seed": 5})
-    prof["evict_builds_s"] = round(time.time() - t, 2)
-    final = stats(c)
-    print(f"[evict] +2 sizes in {prof['evict_builds_s']}s; evictions={final['evictions']} "
-          f"builds={final['builds']} resident={final['resident']}", flush=True)
-
-    c.close()
-
-    # ---- PROFILE + validation --------------------------------------------------
     print("\n=== PROFILE ===")
-    for k, v in prof.items():
-        print(f"  {k:16} {v}")
-    print("=== FINAL STATS ===")
-    print(" ", json.dumps(final))
+    for name, seconds in prof.times.items():
+        print(f"  {name:16} {seconds}s")
+    print("=== FINAL STATS ===\n ", json.dumps(final))
 
     ok_batch = after["max_batch"] >= 2
     ok_evict = final["evictions"] >= 1
     print(f"\nVALIDATION: batching={'PASS' if ok_batch else 'FAIL'} (max_batch={after['max_batch']}) | "
-          f"eviction={'PASS' if ok_evict else 'FAIL'} (evictions={final['evictions']})", flush=True)
-    return 0 if (ok_batch and ok_evict) else 1
+          f"eviction={'PASS' if ok_evict else 'FAIL'} (evictions={final['evictions']})")
+    return 0 if ok_batch and ok_evict else 1
 
 
 if __name__ == "__main__":

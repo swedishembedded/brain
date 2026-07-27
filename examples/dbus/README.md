@@ -79,10 +79,12 @@ inference (`SEQPACKET` preserves message boundaries).
   dbus-run-session -- bash examples/dbus/busctl_smoke.sh target/debug/brain
   ```
 
-- **`brain_dbus.py`** — a pure-Python client (jeepney; `pip install jeepney`). Note
-  `open_dbus_connection(..., enable_fds=True)` is required for FD passing. It runs
-  discovery, `demo.echo` (text via fd), `imageops.gradient` (a real image via fd →
-  PPM), and — with `BRAIN_ZIMAGE_*` exported — a streaming `z-image text2image`:
+- **`brain_dbus_client.py`** — a small, reusable client (`BrainDBus` context manager
+  + `read_fd`/`sealed_memfd`; jeepney with `enable_fds=True`). **`brain_image.py`** —
+  PPM save + box drawing for brain's HWC-f32 image blobs (no third-party image lib).
+- **`brain_dbus.py`** — an example using the client: discovery, `imageops.gradient`
+  (a real image via fd → PPM), and — with `BRAIN_ZIMAGE_*` exported — a streaming
+  `z-image text2image`:
 
   ```bash
   dbus-run-session -- bash -c 'brain serve --dbus & sleep 1; python3 examples/dbus/brain_dbus.py'
