@@ -62,6 +62,7 @@ default-members = [
     "crates/server",
     "crates/cli",
     "crates/dbus",
+    "crates/residency",
     "crates/web",
 ]
 
@@ -106,6 +107,7 @@ brain-eval = { path = "crates/eval" }
 brain-bench = { path = "crates/bench" }
 brain-gradcheck = { path = "crates/gradcheck" }
 brain-capability = { path = "crates/capability" }
+brain-residency = { path = "crates/residency" }
 brain-dbus = { path = "crates/dbus" }
 brain-events = { path = "crates/events" }
 brain-hfsm = { path = "crates/hfsm" }

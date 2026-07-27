@@ -1,0 +1,14 @@
+[package]
+name = "brain-residency"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "brain's automatic model residency + job scheduling layer: tiers model weights across GPU/RAM/disk by LRU within a reserved memory budget, and schedules pending jobs (batch-by-model, queue-age-aware, parallel lanes) so many models serve efficiently. The general execution layer used by the CLI, the event runtime, and the D-Bus surface."
+
+[lib]
+name = "residency"
+path = "src/lib.rs"
+
+[dependencies]
+brain-capability.workspace = true
+serde_json.workspace = true
