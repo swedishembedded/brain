@@ -21,3 +21,7 @@ brain-vae.workspace = true
 brain-diffusion.workspace = true
 brain-data.workspace = true
 serde_json.workspace = true
+# JPEG/PNG decode for LoRA training datasets (folder of images). default-features
+# off elsewhere in the workspace; enabling the two codecs here turns them on for
+# the unified `image` build (jpeg-decoder + png only — no other formats pulled in).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "pnm"] }

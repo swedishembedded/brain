@@ -19,6 +19,7 @@
 
 pub mod caps;
 pub mod block;
+pub mod dataset;
 pub mod dev;
 pub mod devgrad;
 pub mod grad;
