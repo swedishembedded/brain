@@ -32,11 +32,19 @@ pub struct ResidencyManager {
     instances: HashMap<InstanceKey, Box<dyn crate::Instance>>,
     /// Eviction/promotion audit log (most recent last) for reporting/tests.
     pub events: Vec<String>,
+    /// Cumulative counters (never reset) — instance builds and evictions.
+    pub builds: u64,
+    pub evictions: u64,
 }
 
 impl ResidencyManager {
     pub fn new(budgets: Budgets) -> ResidencyManager {
-        ResidencyManager { models: HashMap::new(), budgets, residents: Residents::new(), instances: HashMap::new(), events: Vec::new() }
+        ResidencyManager { models: HashMap::new(), budgets, residents: Residents::new(), instances: HashMap::new(), events: Vec::new(), builds: 0, evictions: 0 }
+    }
+
+    /// Number of currently-hot instances.
+    pub fn resident_count(&self) -> usize {
+        self.instances.len()
     }
 
     pub fn register(&mut self, model: Arc<dyn ResidentModel>) {
@@ -119,6 +127,7 @@ impl ResidencyManager {
         self.budgets.alloc(device, cost.on(device));
         self.residents.insert(key.clone(), cost, device);
         self.instances.insert(key.clone(), inst);
+        self.builds += 1;
         self.events.push(format!("promote {key} -> {device:?}"));
         Ok(())
     }
@@ -128,6 +137,7 @@ impl ResidencyManager {
         if let Some(entry) = self.residents.remove(key) {
             self.budgets.release(entry.device, entry.cost.on(entry.device));
             self.instances.remove(key); // drops the Instance → frees the GPU
+            self.evictions += 1;
             self.events.push(format!("evict {key} <- {:?}", entry.device));
         }
     }

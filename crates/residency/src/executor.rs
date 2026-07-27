@@ -45,11 +45,25 @@ struct Pending {
     reply: Box<dyn FnOnce(ActionResult) + Send>,
 }
 
+/// Live counters for the scheduler — proof that batching and eviction happen, and
+/// the numbers to profile with. Cumulative unless noted.
+#[derive(Clone, Debug, Default)]
+pub struct Stats {
+    pub builds: u64,      // instance activations (a promotion / cold build)
+    pub evictions: u64,   // instance evictions (memory reclaimed)
+    pub batches: u64,     // group runs
+    pub jobs: u64,        // jobs completed
+    pub max_batch: usize, // largest batch actually run together
+    pub resident: usize,  // instances currently hot (instantaneous)
+    pub queue_peak: usize, // deepest the pending queue has been
+}
+
 /// Cheap-to-clone submission handle (many front-ends can submit concurrently).
 #[derive(Clone)]
 pub struct Executor {
     tx: Sender<Job>,
     manifests: Arc<Vec<Manifest>>,
+    stats: Arc<Mutex<Stats>>,
 }
 
 impl Executor {
@@ -61,11 +75,18 @@ impl Executor {
             mgr.register(m);
         }
         let (tx, rx) = channel::<Job>();
+        let stats = Arc::new(Mutex::new(Stats::default()));
+        let worker_stats = stats.clone();
         std::thread::Builder::new()
             .name("brain-executor".into())
-            .spawn(move || worker_loop(rx, mgr, policy))
+            .spawn(move || worker_loop(rx, mgr, policy, worker_stats))
             .expect("spawn executor worker");
-        Executor { tx, manifests: Arc::new(manifests) }
+        Executor { tx, manifests: Arc::new(manifests), stats }
+    }
+
+    /// A snapshot of the scheduler counters (builds/evictions/batches/max_batch/…).
+    pub fn stats(&self) -> Stats {
+        self.stats.lock().unwrap().clone()
     }
 
     /// Submit a job; the result arrives via `job.reply`.
@@ -102,7 +123,7 @@ struct GroupRow {
     summary: Group,
 }
 
-fn worker_loop(rx: Receiver<Job>, mut mgr: ResidencyManager, policy: Policy) {
+fn worker_loop(rx: Receiver<Job>, mut mgr: ResidencyManager, policy: Policy, stats: Arc<Mutex<Stats>>) {
     let mut queue: Vec<Pending> = Vec::new();
     loop {
         if queue.is_empty() {
@@ -116,6 +137,9 @@ fn worker_loop(rx: Receiver<Job>, mut mgr: ResidencyManager, policy: Policy) {
         }
         if queue.is_empty() {
             continue;
+        }
+        if let Ok(mut s) = stats.lock() {
+            s.queue_peak = s.queue_peak.max(queue.len());
         }
 
         let now = Instant::now();
@@ -135,7 +159,16 @@ fn worker_loop(rx: Receiver<Job>, mut mgr: ResidencyManager, policy: Policy) {
         let mut jobs: Vec<Pending> = idxs.into_iter().map(|i| queue.remove(i)).collect();
         jobs.reverse();
 
+        let ran = jobs.len();
         run_group(&mut mgr, &model, &action, jobs);
+        if let Ok(mut s) = stats.lock() {
+            s.batches += 1;
+            s.jobs += ran as u64;
+            s.max_batch = s.max_batch.max(ran);
+            s.builds = mgr.builds;
+            s.evictions = mgr.evictions;
+            s.resident = mgr.resident_count();
+        }
     }
 }
 
@@ -302,5 +335,71 @@ mod tests {
         let exec = Executor::start(vec![], Budgets::new(), Policy::default());
         let r = exec.run_blocking("nope", "x", Invocation::new(), |_| {});
         assert!(r.is_err());
+    }
+
+    /// A fake whose run sleeps, so jobs submitted after the first pile up and batch.
+    struct Slow {
+        name: String,
+        vram: u64,
+        builds: Arc<AtomicU32>,
+    }
+    struct SlowInst;
+    impl ResidentModel for Slow {
+        fn manifest(&self) -> Manifest {
+            Manifest::new(&self.name, "slow", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new(&self.name, "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(self.vram, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn crate::Instance>, String> {
+            self.builds.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(SlowInst))
+        }
+    }
+    impl crate::Instance for SlowInst {
+        fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+            Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
+        }
+    }
+
+    #[test]
+    fn stats_show_batching_and_eviction() {
+        let builds = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 2 * GB); // 22 usable
+        let models: Vec<Arc<dyn ResidentModel>> = vec![
+            Arc::new(Slow { name: "a".into(), vram: 20 * GB, builds: builds.clone() }),
+            Arc::new(Slow { name: "b".into(), vram: 20 * GB, builds: builds.clone() }),
+        ];
+        let exec = Executor::start(models, budgets, Policy::default());
+
+        // --- batching: fire 12 jobs for model "a" back-to-back; while the first runs
+        // (sleeping), the rest queue and batch. ---
+        let (tx, rx) = channel();
+        for _ in 0..12 {
+            let tx = tx.clone();
+            exec.submit(Job {
+                model: "a".into(), action: "run".into(), inv: Invocation::new(),
+                on_progress: Box::new(|_| {}), reply: Box::new(move |r| { let _ = tx.send(r); }),
+            });
+        }
+        drop(tx);
+        for _ in 0..12 {
+            rx.recv().unwrap().unwrap();
+        }
+        let s = exec.stats();
+        assert!(s.max_batch >= 2, "expected batching, max_batch={}", s.max_batch);
+        assert_eq!(s.jobs, 12);
+
+        // --- eviction: "a" (20 GB) is hot; running "b" (20 GB) can't fit alongside it
+        // (only 22 usable) → "a" is evicted. ---
+        exec.run_blocking("b", "run", Invocation::new(), |_| {}).unwrap();
+        let s = exec.stats();
+        assert!(s.evictions >= 1, "expected an eviction, stats={s:?}");
+        assert_eq!(s.resident, 1, "only one 20 GB model fits at a time");
     }
 }
