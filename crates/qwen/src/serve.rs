@@ -87,6 +87,14 @@ fn fb(x: f32) -> u32 {
     x.to_bits()
 }
 
+/// A batched-forward input: token ids (embedded via `tok.weight`) or ready-made
+/// per-row embeddings written straight into the residual stream (the tts Talker
+/// feeds codec/text-conditioned embeddings rather than ids).
+pub enum Input<'a> {
+    Tokens(&'a [u32]),
+    Embeds(&'a [f32]),
+}
+
 /// One decoder-param leaf name → element count (mirrors the decode weight set).
 fn decoder_param_list(cfg: &QwenConfig) -> Vec<(String, usize)> {
     let (d, ff) = (cfg.d_model as usize, cfg.d_ff as usize);
@@ -261,10 +269,8 @@ impl Engine {
         self.ps.w(name)
     }
 
-    /// Advance every sequence in `tables` by one token (decode): derive metadata
-    /// from each block table (append a slot per sequence), then run one batched
-    /// forward.
-    pub(crate) fn forward_batched(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<f32> {
+    /// Append one slot per sequence and gather the batched-forward metadata.
+    fn append_meta(&mut self, tables: &mut [&mut BlockTable]) -> (u32, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
         let mbt = self.max_blocks_per_seq as usize;
         let bsz = tables.len() as u32;
         assert!(bsz <= self.max_batch);
@@ -281,7 +287,22 @@ impl Engine {
                 bt[i * mbt + lb] = phys;
             }
         }
-        self.run_batched(bsz, inputs, &positions, &seqlens, &blocks, &offsets, &bt)
+        (bsz, positions, seqlens, blocks, offsets, bt)
+    }
+
+    /// Advance every sequence by one token (decode).
+    pub(crate) fn forward_batched(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<f32> {
+        let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
+        self.run_batched(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt)
+    }
+
+    /// Advance every sequence by one token from a ready-made embedding per sequence
+    /// (`[bsz, d_model]`) — the tts Talker multi-stream path: concurrent voice
+    /// streams decode together on the shared paged pool.
+    pub fn forward_batched_embed(&mut self, tables: &mut [&mut BlockTable], embeds: &[f32]) -> Vec<f32> {
+        let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
+        assert_eq!(embeds.len(), bsz as usize * self.cfg.d_model as usize);
+        self.run_batched(bsz, Input::Embeds(embeds), &positions, &seqlens, &blocks, &offsets, &bt)
     }
 
     /// Run one batched forward over `bsz` rows given fully-computed metadata:
@@ -291,7 +312,7 @@ impl Engine {
     /// `bt` the per-row block tables (`bsz * max_blocks_per_seq`). Serves decode
     /// (one new token per sequence) and prefill chunks alike.
     #[allow(clippy::too_many_arguments)]
-    fn run_batched(&self, bsz: u32, inputs: &[u32], positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> Vec<f32> {
+    fn run_batched(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> Vec<f32> {
         let c = &self.cfg;
         let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
         let (hq, hkv) = (c.q_dim(), c.kv_dim());
@@ -304,7 +325,6 @@ impl Engine {
         let scale = 1.0f32 / (hd as f32).sqrt();
         let theta = c.rope_theta;
         let g = &self.gpu;
-        g.write(&self.sc.tok_buf, inputs);
         g.write(&self.sc.pos_buf, positions);
         g.write(&self.sc.seqlen_buf, seqlens);
         g.write(&self.sc.blk_buf, blocks);
@@ -315,7 +335,15 @@ impl Engine {
         let w = |name: &str| self.ps.w(name);
         let b = bsz;
         let mut s: Vec<Step> = Vec::new();
-        s.push(g.step(EMBED, &[&sc.tok_buf, w("tok.weight"), &sc.res[0]], &[d, b], d * b));
+        match input {
+            Input::Tokens(t) => {
+                g.write(&sc.tok_buf, t);
+                s.push(g.step(EMBED, &[&sc.tok_buf, w("tok.weight"), &sc.res[0]], &[d, b], d * b));
+            }
+            Input::Embeds(e) => {
+                g.write(&sc.res[0], bytemuck::cast_slice(e));
+            }
+        }
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
             s.push(block::rmsnorm_fwd(g, &kids, &sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b));
@@ -385,7 +413,7 @@ impl Engine {
                     bt[i as usize * mbt + lb] = phys;
                 }
             }
-            let hidden = self.run_batched(cc, &prompt[start as usize..(start + cc) as usize], &positions, &seqlens, &blocks, &offsets, &bt);
+            let hidden = self.run_batched(cc, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), &positions, &seqlens, &blocks, &offsets, &bt);
             let cu = cc as usize;
             last = hidden[(cu - 1) * d..cu * d].to_vec();
             start += cc;
@@ -517,7 +545,7 @@ impl Engine {
                     bt[i as usize * mbt + lb] = phys;
                 }
             }
-            let hidden = self.run_batched(rows, &inputs, &positions, &seqlens, &blocks, &offsets, &bt);
+            let hidden = self.run_batched(rows, Input::Tokens(&inputs), &positions, &seqlens, &blocks, &offsets, &bt);
             forwards += 1;
 
             // hidden[j] gives the target distribution that should have produced
@@ -845,6 +873,48 @@ mod tests {
         assert_eq!(out_bad, greedy, "spec (bad draft) != greedy");
         assert!(fwd_oracle < max_new, "oracle draft should cut target forwards ({fwd_oracle} vs {max_new})");
         assert!(fwd_bad >= fwd_oracle, "bad draft should need more forwards");
+    }
+
+    /// tts multi-stream: N Talker streams (embedding inputs) decoded together on
+    /// the shared paged pool must match each stream decoded alone — bit-for-bit.
+    /// (The Talker is the same Qwen3 block, so the tiny config stands in for it.)
+    #[test]
+    fn tts_multistream_embed_matches_per_stream() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let d = cfg.d_model as usize;
+        let (n_streams, steps) = (3usize, 5usize);
+        let mut rng = Rng::new(42);
+        let embs: Vec<Vec<Vec<f32>>> = (0..n_streams)
+            .map(|_| (0..steps).map(|_| (0..d).map(|_| rng.next_gaussian() as f32).collect()).collect())
+            .collect();
+
+        // Batched: all streams advance together each step.
+        let mut e = Engine::from_map(cfg.clone(), &map, 4, 64, n_streams as u32, 8, 4, false);
+        let mut tables: Vec<BlockTable> = (0..n_streams).map(|_| BlockTable::new()).collect();
+        let mut batched: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n_streams];
+        for s in 0..steps {
+            let flat: Vec<f32> = (0..n_streams).flat_map(|i| embs[i][s].clone()).collect();
+            let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
+            let h = e.forward_batched_embed(&mut refs, &flat);
+            for (i, b) in batched.iter_mut().enumerate() {
+                b.push(h[i * d..(i + 1) * d].to_vec());
+            }
+        }
+
+        // Per-stream reference.
+        let mut worst = 0f32;
+        for (i, se) in embs.iter().enumerate() {
+            let mut e1 = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 4, false);
+            let mut t = BlockTable::new();
+            for (s, emb) in se.iter().enumerate() {
+                let mut refs = [&mut t];
+                let h = e1.forward_batched_embed(&mut refs, emb);
+                worst = worst.max(h.iter().zip(&batched[i][s]).fold(0f32, |m, (a, b)| m.max((a - b).abs())));
+            }
+        }
+        println!("tts multi-stream (embed) vs per-stream: worst maxabs = {worst:e}");
+        assert!(worst < 1e-6, "batched embed decode != per-stream: {worst}");
     }
 
     fn medium_cfg() -> QwenConfig {
