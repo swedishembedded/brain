@@ -40,6 +40,48 @@ pub fn generate(
     out
 }
 
+/// KV-cache generation: the O(T) fast path. Feeds the prompt through the
+/// incremental `step` (filling the cache), then samples one token per `step`
+/// instead of re-running the whole context each time. Produces the same tokens
+/// as [`generate`] for greedy decoding (the cache is algebraically exact). GLM's
+/// untied `lm_head` is applied on the host to the final-norm hidden state.
+pub fn generate_kv(
+    model: &Glm,
+    prompt: &[u32],
+    max_new: usize,
+    temperature: f32,
+    top_k: usize,
+    eos: Option<u32>,
+    rng: &mut Rng,
+) -> Vec<u32> {
+    let vocab = model.cfg.vocab as usize;
+    let d = model.cfg.d_model as usize;
+    let head = model.read_weight(model.cfg.head_weight()); // [vocab, d]
+    let logits_of = |hidden: &[f32]| -> Vec<f32> {
+        (0..vocab)
+            .map(|o| head[o * d..o * d + d].iter().zip(hidden).map(|(a, b)| a * b).sum())
+            .collect()
+    };
+    model.reset_cache();
+    let mut out = Vec::with_capacity(max_new);
+    // Feed the prompt; the hidden after the last prompt token gives the first
+    // next-token distribution. (Empty prompt → seed a single id 0.)
+    let mut hidden = Vec::new();
+    let seed_prompt: &[u32] = if prompt.is_empty() { &[0] } else { prompt };
+    for &t in seed_prompt {
+        hidden = model.step(t);
+    }
+    for _ in 0..max_new {
+        let next = sample_logits(&logits_of(&hidden), temperature, top_k, rng);
+        if Some(next) == eos {
+            break;
+        }
+        out.push(next);
+        hidden = model.step(next);
+    }
+    out
+}
+
 fn argmax(s: &[f32]) -> usize {
     let mut bi = 0;
     for i in 1..s.len() {
@@ -80,4 +122,26 @@ fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, rng: &mut Rng) 
         }
     }
     (scaled.len() - 1) as u32
+}
+
+#[cfg(test)]
+mod kv_gen_tests {
+    use super::*;
+    use crate::config::GlmConfig;
+    use crate::model::Glm;
+
+    /// KV-cache generation must produce the SAME greedy tokens as the O(T²)
+    /// recompute path (the cache is algebraically exact; logits agree to ~1e-3).
+    #[test]
+    fn generate_kv_matches_recompute_greedy() {
+        let cfg = GlmConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 7);
+        let model = Glm::new(cfg.clone(), 1, 8, &init);
+        let prompt = vec![1u32, 5, 3];
+        let mut r1 = data::rng::Rng::new(0);
+        let recompute = generate(&model, &prompt, 4, 0.0, 0, None, &mut r1);
+        let mut r2 = data::rng::Rng::new(0);
+        let kv = generate_kv(&model, &prompt, 4, 0.0, 0, None, &mut r2);
+        assert_eq!(recompute, kv, "KV greedy generation must equal recompute generation");
+    }
 }
