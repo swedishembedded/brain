@@ -47,6 +47,11 @@ impl ResidencyManager {
         self.models.values().map(|m| m.manifest()).collect()
     }
 
+    /// The instance key for `(model, action, inv)`, or `None` if the model is unknown.
+    pub fn instance_key_for(&self, model: &str, action: &str, inv: &Invocation) -> Option<InstanceKey> {
+        self.models.get(model).map(|m| m.instance_key(action, inv))
+    }
+
     pub fn models(&self) -> Vec<String> {
         let mut v: Vec<String> = self.models.keys().cloned().collect();
         v.sort();
@@ -74,6 +79,21 @@ impl ResidencyManager {
         self.residents.set_pinned(&key, false);
         self.residents.touch(&key);
         out
+    }
+
+    /// Run several same-key invocations of one action on a single hot instance —
+    /// the hot-path-reuse batch. The instance is promoted once and pinned for the
+    /// whole group (so it can't be evicted between jobs), then its `run_batch` runs
+    /// them (a model with real batch support does one forward; others loop).
+    pub fn run_batch(&mut self, model: &str, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(Progress)) -> Result<Vec<ActionResult>, String> {
+        let m = self.models.get(model).ok_or_else(|| format!("no model '{model}'"))?.clone();
+        let key = m.instance_key(action, invs.first().ok_or("empty batch")?);
+        self.ensure_hot(&key, &m)?;
+        self.residents.set_pinned(&key, true);
+        let out = self.instances.get_mut(&key).expect("hot").run_batch(action, invs, progress);
+        self.residents.set_pinned(&key, false);
+        self.residents.touch(&key);
+        Ok(out)
     }
 
     /// Promote `key` to Hot if not already: pick a device (evicting LRU victims when

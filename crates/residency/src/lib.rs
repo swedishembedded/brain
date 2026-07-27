@@ -18,13 +18,17 @@
 //! GPU or model dependency, so it is fully unit-testable.
 
 pub mod budget;
+pub mod executor;
 pub mod lru;
 pub mod manager;
 pub mod model;
 pub mod place;
+pub mod scheduler;
 
+pub use executor::{Executor, Job};
 pub use manager::ResidencyManager;
 pub use model::{Instance, ResidentModel};
+pub use scheduler::Policy;
 
 /// A device that can hold a hot model instance.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
