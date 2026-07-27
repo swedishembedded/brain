@@ -470,6 +470,88 @@ impl Engine {
         }
         seqs.into_iter().map(|s| s.generated).collect()
     }
+
+    /// **Speculative decoding** (greedy): a `draft` proposes up to `k` tokens from
+    /// the running context; the target verifies them in ONE batched forward,
+    /// accepting the longest correct prefix plus a bonus/correction token, and
+    /// rolling the paged cache back over any rejected tokens. The output is
+    /// identical to plain greedy target decoding — the win is fewer (expensive)
+    /// target forwards when the draft guesses well. `draft(ctx, want) -> tokens`.
+    /// Returns `(generated_tokens, target_forward_count)`.
+    pub fn spec_decode<D: FnMut(&[u32], u32) -> Vec<u32>>(&mut self, prompt: &[u32], max_new: usize, k: u32, mut draft: D) -> (Vec<u32>, usize) {
+        assert!(!prompt.is_empty() && k >= 1);
+        let d = self.cfg.d_model as usize;
+        let bs = self.block_size;
+        let mbt = self.max_blocks_per_seq as usize;
+        let mut table = BlockTable::new();
+        // Prefill all but the last prompt token; the last is the first `pending`.
+        if prompt.len() > 1 {
+            self.prefill(&mut table, &prompt[..prompt.len() - 1]);
+        }
+        let mut pending = *prompt.last().unwrap();
+        let mut ctx: Vec<u32> = prompt.to_vec();
+        let mut generated: Vec<u32> = Vec::new();
+        let mut forwards = 0usize;
+
+        while generated.len() < max_new {
+            let want = ((max_new - generated.len()) as u32).min(k);
+            let mut props = draft(&ctx, want);
+            props.truncate(want as usize);
+            let kk = props.len() as u32;
+
+            // Verify forward over [pending, props...] at positions base..=base+kk.
+            let base = table.len();
+            let inputs: Vec<u32> = std::iter::once(pending).chain(props.iter().copied()).collect();
+            let rows = kk + 1;
+            table.reserve(rows, &mut self.alloc).expect("KV pool exhausted");
+            let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let mut bt = vec![0u32; rows as usize * mbt];
+            for i in 0..rows {
+                let pos = base + i;
+                let (bl, off) = table.locate(pos, bs);
+                positions.push(pos);
+                seqlens.push(pos + 1);
+                blocks.push(bl);
+                offsets.push(off);
+                for (lb, &phys) in table.blocks().iter().enumerate() {
+                    bt[i as usize * mbt + lb] = phys;
+                }
+            }
+            let hidden = self.run_batched(rows, &inputs, &positions, &seqlens, &blocks, &offsets, &bt);
+            forwards += 1;
+
+            // hidden[j] gives the target distribution that should have produced
+            // props[j]; accept while it matches, else take the target's own token.
+            let mut accepted = 0usize;
+            let correction;
+            loop {
+                if accepted < kk as usize {
+                    let pred = Self::argmax(&self.logits(&hidden[accepted * d..(accepted + 1) * d]));
+                    if pred == props[accepted] {
+                        accepted += 1;
+                        continue;
+                    }
+                    correction = pred;
+                    break;
+                }
+                // All drafts accepted → the bonus token from the last position.
+                correction = Self::argmax(&self.logits(&hidden[kk as usize * d..(kk as usize + 1) * d]));
+                break;
+            }
+            for prop in props.iter().take(accepted) {
+                generated.push(*prop);
+                ctx.push(*prop);
+            }
+            generated.push(correction);
+            ctx.push(correction);
+            // Commit pending + accepted drafts; the correction is the next pending.
+            table.truncate(base + accepted as u32 + 1, &mut self.alloc);
+            pending = correction;
+        }
+        generated.truncate(max_new);
+        table.release(&mut self.alloc);
+        (generated, forwards)
+    }
 }
 
 /// A submitted generation request.
@@ -733,6 +815,36 @@ mod tests {
         let err = whole.iter().zip(&chunked).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
         println!("chunked (2) vs whole prefill: maxabs={err:e}");
         assert!(err < 1e-4, "chunked prefill != whole prefill: {err}");
+    }
+
+    /// Speculative decoding output equals plain greedy — with a good (oracle)
+    /// draft it takes far fewer target forwards; with a bad draft it falls back to
+    /// ~one token per forward. Either way the tokens are identical.
+    #[test]
+    fn spec_decode_matches_greedy() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let prompt = vec![1u32, 5, 3, 9];
+        let max_new = 20usize;
+
+        let mut e_ref = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 32, false);
+        let greedy = e_ref.generate_greedy(&[prompt.clone()], max_new, None)[0].clone();
+        let full: Vec<u32> = prompt.iter().copied().chain(greedy.iter().copied()).collect();
+
+        // Oracle draft: proposes the true continuation → all accepted.
+        let mut e1 = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 32, false);
+        let (out_oracle, fwd_oracle) = e1.spec_decode(&prompt, max_new, 4, |ctx, want| {
+            (0..want as usize).map(|i| full.get(ctx.len() + i).copied().unwrap_or(0)).collect()
+        });
+        // Bad draft: always proposes token 0 → mostly rejected.
+        let mut e2 = Engine::from_map(cfg, &map, 4, 64, 1, 8, 32, false);
+        let (out_bad, fwd_bad) = e2.spec_decode(&prompt, max_new, 4, |_ctx, want| vec![0u32; want as usize]);
+
+        println!("spec decode: greedy={max_new} tokens | oracle-draft {fwd_oracle} target-forwards | bad-draft {fwd_bad} forwards");
+        assert_eq!(out_oracle, greedy, "spec (oracle draft) != greedy");
+        assert_eq!(out_bad, greedy, "spec (bad draft) != greedy");
+        assert!(fwd_oracle < max_new, "oracle draft should cut target forwards ({fwd_oracle} vs {max_new})");
+        assert!(fwd_bad >= fwd_oracle, "bad draft should need more forwards");
     }
 
     fn medium_cfg() -> QwenConfig {

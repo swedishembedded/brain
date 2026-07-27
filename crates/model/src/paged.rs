@@ -135,6 +135,19 @@ impl BlockTable {
         Ok(start)
     }
 
+    /// Shrink to `new_len` tokens, freeing (decref) any blocks that fall entirely
+    /// beyond it — used to roll back rejected speculative tokens. `new_len` must
+    /// not exceed the current length.
+    pub fn truncate(&mut self, new_len: u32, alloc: &mut BlockAllocator) {
+        assert!(new_len <= self.len, "truncate {new_len} > len {}", self.len);
+        let keep = new_len.div_ceil(alloc.block_size()) as usize;
+        for &b in &self.blocks[keep..] {
+            alloc.decref(b);
+        }
+        self.blocks.truncate(keep);
+        self.len = new_len;
+    }
+
     /// Release every block (decref) — call when the sequence completes/evicts.
     pub fn release(&mut self, alloc: &mut BlockAllocator) {
         for &b in &self.blocks {
@@ -219,6 +232,25 @@ mod tests {
         assert_eq!(a.free_blocks(), 6);
         t.release(&mut a);
         assert_eq!(a.free_blocks(), 8);
+    }
+
+    #[test]
+    fn truncate_frees_tail_blocks() {
+        let mut a = BlockAllocator::new(8, 4); // block_size 4
+        let mut t = BlockTable::new();
+        for _ in 0..10 {
+            t.append(&mut a).unwrap(); // 10 tokens -> 3 blocks
+        }
+        assert_eq!(t.blocks().len(), 3);
+        let free_before = a.free_blocks();
+        // Roll back to 5 tokens -> 2 blocks; the 3rd block is freed.
+        t.truncate(5, &mut a);
+        assert_eq!(t.len(), 5);
+        assert_eq!(t.blocks().len(), 2);
+        assert_eq!(a.free_blocks(), free_before + 1);
+        // Truncate within the last kept block frees nothing more.
+        t.truncate(4, &mut a);
+        assert_eq!(t.blocks().len(), 1);
     }
 
     #[test]
