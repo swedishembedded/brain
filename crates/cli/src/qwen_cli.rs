@@ -21,6 +21,7 @@ pub fn run_qwen(args: &[String]) {
     match args.first().map(|s| crate::args::canon_verb(s)) {
         Some("import") => import(&args[1..]),
         Some("infer") => infer(&args[1..]),
+        Some("serve") => serve(&args[1..]),
         Some("export") => export(&args[1..]),
         Some("precompile") => precompile(&args[1..]),
         Some("train") => train(&args[1..], None),
@@ -121,6 +122,62 @@ fn precompile(args: &[String]) {
         Ok((dev, ms)) => println!("precompiled seq {seq} on OpenVINO {dev} in {:.1}s -> cache {npu_cache}", ms / 1e3),
         Err(e) => eprintln!("precompile failed: {e}"),
     }
+}
+
+/// `brain qwen serve` — continuous-batching serving: submit several prompts and
+/// decode them concurrently through the paged Scheduler (one batched forward per
+/// iteration over all running sequences).
+fn serve(args: &[String]) {
+    let mut weights = String::new();
+    let mut tokenizer = String::new();
+    let mut prompts: Vec<String> = Vec::new();
+    let mut max_new = 64usize;
+    let mut block_size = 16u32;
+    let mut int8 = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--weights" => weights = val(args, &mut i, "--weights"),
+            "--tokenizer" => tokenizer = val(args, &mut i, "--tokenizer"),
+            "--prompt" => prompts.push(val(args, &mut i, "--prompt")),
+            "--max-new" => max_new = val(args, &mut i, "--max-new").parse().unwrap_or(max_new),
+            "--block-size" => block_size = val(args, &mut i, "--block-size").parse().unwrap_or(block_size),
+            "--int8" => int8 = true,
+            other => eprintln!("serve: ignoring {other:?}"),
+        }
+        i += 1;
+    }
+    if weights.is_empty() || tokenizer.is_empty() || prompts.is_empty() {
+        eprintln!("usage: brain qwen serve --weights F --tokenizer T --prompt \"...\" [--prompt \"...\"]... [--max-new N --block-size B --int8]");
+        return;
+    }
+    let tok = match data::qwen_tokenizer::QwenBpe::from_file(&tokenizer) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("tokenizer load failed: {e}");
+            return;
+        }
+    };
+    let eos = tok.encode("<|im_end|>").first().copied();
+    let toks: Vec<Vec<u32>> = prompts.iter().map(|p| tok.encode(&tok.apply_chat_template(&[("user", p)], true))).collect();
+    let n = prompts.len() as u32;
+    let max_prompt = toks.iter().map(|t| t.len()).max().unwrap_or(1) as u32;
+    let max_len = max_prompt + max_new as u32 + 8;
+    let blocks_per_seq = max_len.div_ceil(block_size);
+    let num_blocks = blocks_per_seq * n + n; // headroom for every sequence
+    let eng = qwen::serve::Engine::load(&weights, block_size, num_blocks, n, blocks_per_seq, max_prompt.max(1), int8);
+    let mut sched = qwen::serve::Scheduler::new(eng, n as usize);
+    let ids: Vec<u64> = toks.iter().map(|t| sched.submit(qwen::serve::Request { prompt: t.clone(), max_new, eos })).collect();
+
+    let t0 = std::time::Instant::now();
+    let out = sched.run();
+    let secs = t0.elapsed().as_secs_f64();
+    let total: usize = out.values().map(|v| v.len()).sum();
+    for (i, id) in ids.iter().enumerate() {
+        println!("=== prompt {i}: {:?}", prompts[i]);
+        println!("{}\n", tok.decode(&out[id]));
+    }
+    eprintln!("served {n} prompts, {total} tokens in {secs:.2}s ({:.1} tok/s aggregate){}", total as f64 / secs, if int8 { " [int8 KV]" } else { "" });
 }
 
 fn infer(args: &[String]) {
