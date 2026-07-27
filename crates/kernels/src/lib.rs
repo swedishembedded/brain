@@ -103,6 +103,12 @@ pub const ATTN_DECODE_APPLY: &str = include_str!("../wgsl/attn_decode_apply.wgsl
 pub const KV_APPEND: &str = include_str!("../wgsl/kv_append.wgsl");
 /// `wgsl/rope_at.wgsl` — RoPE at an explicit absolute position (decode step).
 pub const ROPE_AT: &str = include_str!("../wgsl/rope_at.wgsl");
+/// `wgsl/paged_kv_append.wgsl` — paged KV-cache decode (block-table indirection).
+pub const PAGED_KV_APPEND: &str = include_str!("../wgsl/paged_kv_append.wgsl");
+/// `wgsl/paged_decode_scores.wgsl` — paged KV-cache decode (block-table indirection).
+pub const PAGED_DECODE_SCORES: &str = include_str!("../wgsl/paged_decode_scores.wgsl");
+/// `wgsl/paged_decode_apply.wgsl` — paged KV-cache decode (block-table indirection).
+pub const PAGED_DECODE_APPLY: &str = include_str!("../wgsl/paged_decode_apply.wgsl");
 /// `wgsl/attn_softmax_bidir.wgsl`
 pub const ATTN_SOFTMAX_BIDIR: &str = include_str!("../wgsl/attn_softmax_bidir.wgsl");
 /// `wgsl/attn_softmax_cross.wgsl`
@@ -603,6 +609,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_decode_apply", ATTN_DECODE_APPLY),
     ("kv_append", KV_APPEND),
     ("rope_at", ROPE_AT),
+    ("paged_kv_append", PAGED_KV_APPEND),
+    ("paged_decode_scores", PAGED_DECODE_SCORES),
+    ("paged_decode_apply", PAGED_DECODE_APPLY),
     ("attn_softmax_bidir", ATTN_SOFTMAX_BIDIR),
     ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
     ("attn_softmax_full", ATTN_SOFTMAX_FULL),

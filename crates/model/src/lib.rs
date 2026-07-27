@@ -17,6 +17,7 @@ use std::collections::HashMap;
 
 pub mod block;
 pub mod collective;
+pub mod paged;
 pub mod distributed;
 pub mod grid;
 pub mod netcollective;
