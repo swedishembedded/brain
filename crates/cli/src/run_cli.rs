@@ -188,8 +188,7 @@ pub fn run_serve(args: &[String]) {
 
 /// Serve the D-Bus control surface (`brain serve --dbus`). Registers every model
 /// and hands the registry to `brain_dbus::serve`, which owns it for the service's
-/// lifetime. Only compiled with the `dbus` feature.
-#[cfg(feature = "dbus")]
+/// lifetime. Compiled into the default build; only reached when `--dbus` is passed.
 fn run_dbus(system: bool, name: Option<String>) {
     let reg = match crate::caps_cli::all_providers() {
         Ok(r) => r,
@@ -206,15 +205,4 @@ fn run_dbus(system: bool, name: Option<String>) {
         eprintln!("brain serve --dbus: {e}");
         std::process::exit(1);
     }
-}
-
-/// Without the `dbus` feature, `--dbus` is a clear build-time error rather than a
-/// silently-ignored flag.
-#[cfg(not(feature = "dbus"))]
-fn run_dbus(_system: bool, _name: Option<String>) {
-    eprintln!(
-        "brain serve --dbus: this binary was built without D-Bus support.\n\
-         Rebuild with:  cargo build -p brain-cli --features dbus"
-    );
-    std::process::exit(2);
 }

@@ -13,13 +13,11 @@ path = "src/main.rs"
 # Optional native-Vulkan cooperative-matrix matmul path (ash + naga). OFF by
 # default — the default build stays pure wgpu/WGSL.
 vulkan-coopmat = ["dep:brain-vulkan"]
-# Optional D-Bus control surface (zbus + tokio). OFF by default so the core CLI
-# stays free of the async runtime; enable with `--features dbus`, then `brain
-# serve --dbus`.
-dbus = ["dep:brain-dbus"]
 
 [dependencies]
-brain-dbus = { workspace = true, optional = true }
+# D-Bus control surface: compiled into the default build so `brain serve --dbus`
+# always works, but only served when the `--dbus` flag is passed.
+brain-dbus.workspace = true
 brain-gpu-core.workspace = true
 brain-wm-core.workspace = true
 brain-wm-diamond.workspace = true

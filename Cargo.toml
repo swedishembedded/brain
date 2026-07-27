@@ -61,6 +61,7 @@ default-members = [
     "crates/runtime",
     "crates/server",
     "crates/cli",
+    "crates/dbus",
     "crates/web",
 ]
 

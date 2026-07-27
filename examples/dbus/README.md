@@ -1,19 +1,20 @@
 # brain over D-Bus (`com.swedishembedded.Brain1`)
 
-An optional D-Bus control surface lets local Linux apps use brain as a service:
-discover models, run actions, and exchange images / streams / results as **file
-descriptors** (memfd/mmap, and dmabuf where the kernel supports it) instead of
-bytes marshalled through D-Bus.
+A D-Bus control surface (compiled into the default build, opt-in at runtime via
+`--dbus`) lets local Linux apps use brain as a service: discover models, run
+actions, and exchange images / streams / results as **file descriptors** (memfd/mmap,
+and dmabuf where the kernel supports it) instead of bytes marshalled through D-Bus.
 
 It's a thin front-end over brain's `capability::Registry` — the same models and
 actions as `brain do` / `brain run`, now reachable over the bus.
 
 ## Enable & run
 
-Built behind a cargo feature so the core CLI stays free of the async runtime:
+Compiled into the default build; the service only runs when you pass `--dbus`:
 
 ```bash
-cargo build -p brain-cli --features dbus
+cargo build -p brain-cli
+brain serve                        # stdio JSONL loop (no D-Bus)
 brain serve --dbus                 # session bus (default), name com.swedishembedded.Brain1
 brain serve --dbus --dbus-system   # system bus (needs a system.d policy)
 brain serve --dbus --dbus-name com.example.MyBrain
@@ -96,5 +97,5 @@ inference (`SEQPACKET` preserves message boundaries).
   runs the blocking `Registry::run`; D-Bus methods only validate, enqueue, and reply.
   One worker ⇒ jobs serialize, which is correct for a single-GPU engine.
 - **Automated test**: `crates/dbus/tests/roundtrip.rs` (run under `dbus-run-session
-  -- cargo test -p brain-dbus --features dbus --test roundtrip`) round-trips a result
+  -- cargo test -p brain-dbus --test roundtrip`) round-trips a result
   and an input both through fds.
