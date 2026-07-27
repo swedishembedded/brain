@@ -36,6 +36,7 @@ pub fn manifest() -> Manifest {
     let text2image = gen_params(ActionSpec::new("text2image", "generate an image from a text prompt (posters, photos, art; strong at English/Chinese typography)").streaming())
         .param(prompt())
         .param(neg())
+        .param(ParamSpec::new("adapter", ParamType::Str, "path to a trained LoRA adapter (from lora_train) to apply"))
         .output(image_out());
 
     let image2image = gen_params(ActionSpec::new("image2image", "regenerate an input image toward a prompt (style/lighting/weather changes, sketch→image)").streaming())
@@ -64,14 +65,15 @@ pub fn manifest() -> Manifest {
         .input(BlobSpec::new("image", Media::Image, "the image to extend").required())
         .output(image_out());
 
-    let lora_train = ActionSpec::new("lora_train", "fine-tune a LoRA adapter on a few images to personalise a person/object/style")
+    let lora_train = ActionSpec::new("lora_train", "fine-tune a LoRA adapter on a folder of captioned images (personalise a person/object/style)")
         .streaming()
-        .param(ParamSpec::new("instance_prompt", ParamType::Str, "prompt naming the subject, e.g. 'a photo of sks dog'").required())
+        .param(ParamSpec::new("data", ParamType::Str, "folder with images + a captions.yaml (`filename: prompt`) and/or captions.jsonl").required())
+        .param(ParamSpec::new("save", ParamType::Str, "output path for the trained adapter").required())
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank (capacity/size tradeoff)").default(json!(16)))
-        .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(1000)))
+        .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(500)))
+        .param(ParamSpec::new("size", ParamType::Int, "training square size, px").default(json!(512)))
         .param(ParamSpec::new("lr", ParamType::Float, "learning rate").default(json!(1e-4)))
-        .input(BlobSpec::new("images", Media::Bytes, "a zip/tar of training images").required())
-        .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA safetensors"));
+        .param(ParamSpec::new("one_gpu", ParamType::Bool, "train on a single GPU (default: shard the 6B across both)").default(json!(false)));
 
     Manifest::new(
         MODEL,
@@ -90,7 +92,7 @@ use capability::{Action, ActionResult, Invocation, Outcome, Progress, Provider};
 /// built graphs. The caption length is a *property* of the built pipeline (not the
 /// key) — prompts are padded/truncated to it, so any prompt reuses the same hot
 /// weights.
-type HotKey = (u32, u32, bool); // (width, height, hifi)
+type HotKey = (u32, u32, bool, Option<String>); // (width, height, hifi, adapter path)
 
 /// The executable Z-Image model behind the manifest. Holds a **hot pipeline
 /// cache** so a long-lived process (`brain run` / the event server) loads the
@@ -145,7 +147,8 @@ impl Action for ZAction {
                 let hifi = inv.get_str("precision").as_deref() == Some("fp32");
                 let seed = inv.get_i64("seed").unwrap_or(42).max(0) as u64;
                 let steps = inv.get_i64("steps").unwrap_or(8).max(1) as u32;
-                let key: HotKey = (width, height, hifi);
+                let adapter = inv.get_str("adapter").filter(|s| !s.is_empty());
+                let key: HotKey = (width, height, hifi, adapter.clone());
 
                 let mut guard = self.hot.lock().map_err(|_| "hot pipeline lock poisoned")?;
                 let rebuild = !matches!(&*guard, Some((k, _)) if *k == key);
@@ -153,7 +156,7 @@ impl Action for ZAction {
                     *guard = None; // free the old resident weights before building new
                     on(0, 1, "loading weights (first call for this size)");
                     // A fixed caption length so any prompt reuses the built graphs.
-                    let pipe = crate::pipeline::HotPipeline::build(&paths, width, height, 64, hifi, |m| on(0, 1, m))?;
+                    let pipe = crate::pipeline::HotPipeline::build_adapted(&paths, width, height, 64, hifi, adapter.as_deref(), |m| on(0, 1, m))?;
                     *guard = Some((key, pipe));
                 }
                 let pipe = &guard.as_ref().unwrap().1;
@@ -186,16 +189,23 @@ impl Action for ZAction {
                 emit(crate::pipeline::generate_img(&prompt, &opts, &paths, init, &mut on)?)
             }
             "lora_train" => {
-                // The LoRA training core is implemented and validated
-                // (`crate::lora`, tests/lora_train.rs): frozen base + trainable
-                // low-rank A,B, gradient projection, Adam, save/load. The remaining
-                // end-to-end wiring for a real 6B personalisation — importing the
-                // shipped DiT weights into the training-format `ModelWeightsF32`,
-                // and running the flow-matching loop via the 2-GPU `grads_pipelined`
-                // path (full fp32 6B fwd+bwd exceeds one P40) — lands on the fp32
-                // sharded path. We validate rather than fabricate an adapter.
-                let rank = inv.get_i64("rank").unwrap_or(16).max(1);
-                Err(format!("z-image lora_train: adapter core ready (rank {rank}); end-to-end 6B training needs the real-weight→training-format import + the 2-GPU fp32 pipeline (in progress)"))
+                use capability::Outcome;
+                let dir = inv.get_str("data").ok_or("lora_train: 'data' folder is required")?;
+                let save = inv.get_str("save").ok_or("lora_train: 'save' path is required")?;
+                let opts = crate::finetune::TrainOpts {
+                    steps: inv.get_i64("steps").unwrap_or(500).max(1) as u32,
+                    rank: inv.get_i64("rank").unwrap_or(16).max(1) as usize,
+                    lr: inv.get_f64("lr").unwrap_or(1e-4) as f32,
+                    size: inv.get_i64("size").unwrap_or(512).max(16) as u32,
+                    cap_len: 64,
+                    seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
+                    two_gpu: !inv.get_bool("one_gpu").unwrap_or(false),
+                    save_path: save.clone(),
+                    ckpt_every: 100,
+                };
+                let mut prog = |step: u32, total: u32, message: String| progress(Progress { step, total, message });
+                let tensors = crate::finetune::run(&paths, std::path::Path::new(&dir), &opts, &mut prog)?;
+                Ok(Outcome::new().set("adapter", json!(save)).set("steps", json!(opts.steps)).set("tensors", json!(tensors.len())))
             }
             other => Err(format!("z-image '{other}': unknown action")),
         }

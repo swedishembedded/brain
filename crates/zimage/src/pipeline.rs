@@ -153,7 +153,14 @@ impl HotPipeline {
     /// the chosen precision. This is the slow one-time step (~weights load + int8
     /// quantise / shard build); `generate` afterwards is fast. `progress(msg)`
     /// streams the build stages.
-    pub fn build(paths: &Paths, width: u32, height: u32, cap_len: u32, hifi: bool, mut progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
+    pub fn build(paths: &Paths, width: u32, height: u32, cap_len: u32, hifi: bool, progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
+        Self::build_adapted(paths, width, height, cap_len, hifi, None, progress)
+    }
+
+    /// Like [`build`](Self::build), optionally folding a saved LoRA adapter into
+    /// the DiT weights before the (int8/fp32) engine is built — so the resident
+    /// pipeline generates adapter-conditioned images with no other change.
+    pub fn build_adapted(paths: &Paths, width: u32, height: u32, cap_len: u32, hifi: bool, adapter: Option<&str>, mut progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
         if width % 16 != 0 || height % 16 != 0 {
             return Err("width/height must be multiples of 16".into());
         }
@@ -228,7 +235,12 @@ impl HotPipeline {
 
         progress(if hifi { "building DiT (fp32, 2×GPU)" } else { "building DiT (int8, GPU)" });
         let zcfg = ZImageConfig::turbo();
-        let weights = import_comfy(checkpoint::safetensors::read(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
+        let mut weights = import_comfy(checkpoint::safetensors::read(&paths.dit).map_err(|e| format!("read dit: {e}"))?, &zcfg);
+        if let Some(ap) = adapter {
+            progress(&format!("folding LoRA adapter {ap}"));
+            let tcfg = crate::finetune::train_cfg(&zcfg, lh, lw, cap_len);
+            crate::finetune::load_adapter_folded(ap, &tcfg, &mut weights)?;
+        }
         let dit = DitEngine::build(hifi, zcfg, weights, lh, lw, cap_len);
 
         // Now the DiT is resident and its staging is reclaimed — pack the thin
@@ -382,12 +394,12 @@ fn dynamic_shift(sigmas: &[f32], mu: f32) -> Vec<f32> {
     sigmas.iter().map(|&s| e / (e + 1.0 / s - 1.0)).collect()
 }
 
-fn tensors_map(v: Vec<checkpoint::safetensors::StTensor>) -> HashMap<String, (Vec<usize>, Vec<f32>)> {
+pub(crate) fn tensors_map(v: Vec<checkpoint::safetensors::StTensor>) -> HashMap<String, (Vec<usize>, Vec<f32>)> {
     v.into_iter().map(|t| (t.name, (t.shape, t.data))).collect()
 }
 
 /// The FLUX-style 16-channel VAE config Z-Image ships (weights/vae/config.json).
-fn zimage_vae_config() -> VaeConfig {
+pub(crate) fn zimage_vae_config() -> VaeConfig {
     VaeConfig {
         in_channels: 3,
         out_channels: 3,

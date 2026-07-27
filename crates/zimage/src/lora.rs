@@ -226,6 +226,35 @@ impl LoraAdapter {
         self.rank
     }
 
+    pub fn alpha(&self) -> f32 {
+        self.scale * self.rank as f32
+    }
+
+    /// Fold this adapter's deltas into an **inference** tensor map (the
+    /// `import_comfy` layout the generation path builds from), so a plain
+    /// `text2image` produces adapter-conditioned images with no model change.
+    /// Each main block `l`'s `W += (α/r)·B·A` is added onto the matching
+    /// `layers.{l}.{…}.weight`. Refiner blocks are not adapted (the adapter only
+    /// targets the main layers). Errors if a targeted tensor is absent.
+    pub fn fold_into_comfy(&self, t: &mut crate::block::Tensors) -> Result<(), String> {
+        for (l, bl) in self.blocks.iter().enumerate() {
+            for (leaf, p) in [
+                ("attention.to_q.weight", &bl.wq), ("attention.to_k.weight", &bl.wk),
+                ("attention.to_v.weight", &bl.wv), ("attention.to_out.0.weight", &bl.wo),
+                ("feed_forward.w1.weight", &bl.w1), ("feed_forward.w2.weight", &bl.w2),
+                ("feed_forward.w3.weight", &bl.w3),
+            ] {
+                let key = format!("layers.{l}.{leaf}");
+                let w = t.get_mut(&key).ok_or_else(|| format!("lora: base tensor {key} missing"))?;
+                if w.1.len() != p.out * p.inn {
+                    return Err(format!("lora: {key} is {} elems, adapter expects {}", w.1.len(), p.out * p.inn));
+                }
+                p.delta(self.scale, &mut w.1);
+            }
+        }
+        Ok(())
+    }
+
     /// Reload an adapter (weights only; Adam state reset) from `to_tensors`
     /// output — a fresh adapter of the right shape with `A,B` overwritten.
     pub fn from_tensors(cfg: &Cfg, lc: LoraCfg, tensors: &std::collections::HashMap<String, (Vec<usize>, Vec<f32>)>) -> Result<LoraAdapter, String> {
