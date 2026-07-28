@@ -612,6 +612,23 @@ pub struct Request {
     pub eos: Option<u32>,
 }
 
+/// What one [`Scheduler::step_report`] iteration did. Latency metrics
+/// (time-to-first-token, inter-token latency) are computed from this: [`Scheduler::step`]
+/// alone reports only *completions*, which is too coarse to see when a sequence
+/// was admitted or when each token landed, so no caller can derive TTFT/ITL from it.
+#[derive(Debug, Default)]
+pub struct StepReport {
+    /// Requests admitted (prefilled + first token sampled) this iteration.
+    pub admitted: Vec<u64>,
+    /// `(id, tokens produced this iteration)` — the first token counts on the
+    /// iteration the request was admitted.
+    pub produced: Vec<(u64, usize)>,
+    /// Requests that finished this iteration.
+    pub finished: Vec<u64>,
+    /// The same `(id, tokens)` pairs [`Scheduler::step`] returns.
+    pub completed: Vec<(u64, Vec<u32>)>,
+}
+
 /// A sequence the scheduler is actively decoding.
 struct Running {
     id: u64,
@@ -661,10 +678,56 @@ impl Scheduler {
         }
     }
 
+    /// One scheduler iteration, reporting **everything that happened** — not just
+    /// what finished.
+    ///
+    /// [`Scheduler::step`] returns only completed requests, which is all a caller
+    /// collecting outputs needs but leaves per-request latency unobservable: with
+    /// completions alone you cannot tell when a sequence was admitted or when
+    /// each token appeared, so time-to-first-token and inter-token latency cannot
+    /// be computed at all. This variant additionally reports admissions and
+    /// per-sequence token counts, which is what `brain perf` measures.
+    pub fn step_report(&mut self) -> StepReport {
+        let mut report = StepReport::default();
+        let produced_before: HashMap<u64, usize> =
+            self.running.iter().map(|r| (r.id, r.generated.len())).collect();
+
+        let completed = self.step_inner(&mut report);
+
+        // Tokens produced this iteration by sequences that are still running...
+        for r in &self.running {
+            let prev = produced_before.get(&r.id).copied().unwrap_or(0);
+            if r.generated.len() > prev {
+                report.produced.push((r.id, r.generated.len() - prev));
+            }
+        }
+        // ...and by those that finished in this iteration.
+        for (id, toks) in &completed {
+            let prev = produced_before.get(id).copied().unwrap_or(0);
+            if toks.len() > prev {
+                report.produced.push((*id, toks.len() - prev));
+            }
+            report.finished.push(*id);
+        }
+        report.completed = completed;
+        report
+    }
+
+    /// The number of KV blocks still free in the pool — the memory-pressure
+    /// signal a benchmark records alongside its latencies.
+    pub fn free_blocks(&self) -> u32 {
+        self.eng.free_blocks()
+    }
+
     /// One scheduler iteration: admit waiting requests that fit (prefill + sample
     /// first token), run one batched decode step over all running sequences, then
     /// reap completed ones. Returns the `(id, tokens)` of requests finished here.
     pub fn step(&mut self) -> Vec<(u64, Vec<u32>)> {
+        let mut sink = StepReport::default();
+        self.step_inner(&mut sink)
+    }
+
+    fn step_inner(&mut self, report: &mut StepReport) -> Vec<(u64, Vec<u32>)> {
         let d = self.eng.cfg.d_model as usize;
 
         // 1. Admit while there's batch room and enough free blocks for the prompt.
@@ -682,6 +745,7 @@ impl Scheduler {
             let first = Engine::argmax(&self.eng.logits(&hidden));
             let mut r = Running { id, table, generated: vec![first], max_new: req.max_new, eos: req.eos, next_input: first, done: false };
             Self::finish_check(&mut r);
+            report.admitted.push(id);
             self.running.push(r);
         }
 
@@ -776,6 +840,89 @@ mod tests {
 
         assert_eq!(out[0], ref0, "seq0 batched paged != reference");
         assert_eq!(out[1], ref1, "seq1 batched paged != reference");
+    }
+
+    /// `step_report` must account for **every** token exactly once and admit each
+    /// request exactly once. `brain perf` derives time-to-first-token and
+    /// inter-token latency purely from these counts, so a double-count or a
+    /// dropped token silently corrupts every latency number computed from it.
+    #[test]
+    fn step_report_accounts_for_every_token_exactly_once() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map(cfg, &map, 4, 96, 3, 12, 8, false);
+        let mut sched = Scheduler::new(eng, 3);
+
+        let wants = [6usize, 4, 9];
+        let ids: Vec<u64> = wants
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| sched.submit(Request { prompt: vec![1u32 + i as u32, 5, 3], max_new: n, eos: None }))
+            .collect();
+
+        let mut produced: HashMap<u64, usize> = HashMap::new();
+        let mut admitted: Vec<u64> = Vec::new();
+        let mut finished: Vec<u64> = Vec::new();
+        let mut outputs: HashMap<u64, Vec<u32>> = HashMap::new();
+        while sched.pending() {
+            let rep = sched.step_report();
+            admitted.extend(rep.admitted.iter().copied());
+            for (id, n) in &rep.produced {
+                *produced.entry(*id).or_default() += n;
+            }
+            finished.extend(rep.finished.iter().copied());
+            for (id, toks) in rep.completed {
+                outputs.insert(id, toks);
+            }
+        }
+
+        admitted.sort_unstable();
+        finished.sort_unstable();
+        let mut expect = ids.clone();
+        expect.sort_unstable();
+        assert_eq!(admitted, expect, "every request must be admitted exactly once");
+        assert_eq!(finished, expect, "every request must finish exactly once");
+
+        for (i, id) in ids.iter().enumerate() {
+            let out = outputs.get(id).expect("request must complete");
+            assert_eq!(out.len(), wants[i], "request {id} produced the wrong length");
+            assert_eq!(
+                produced.get(id).copied().unwrap_or(0),
+                out.len(),
+                "incremental token report for {id} must sum to the tokens returned"
+            );
+        }
+    }
+
+    /// The reporting path must not change what the scheduler computes.
+    #[test]
+    fn step_report_does_not_perturb_outputs() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let reqs = || {
+            vec![
+                Request { prompt: vec![1u32, 5, 3], max_new: 7, eos: None },
+                Request { prompt: vec![9u32, 2], max_new: 5, eos: None },
+            ]
+        };
+
+        let mut a = Scheduler::new(Engine::from_map(cfg.clone(), &map, 4, 96, 2, 12, 8, false), 2);
+        for r in reqs() {
+            a.submit(r);
+        }
+        let via_step = a.run();
+
+        let mut b = Scheduler::new(Engine::from_map(cfg, &map, 4, 96, 2, 12, 8, false), 2);
+        for r in reqs() {
+            b.submit(r);
+        }
+        let mut via_report: HashMap<u64, Vec<u32>> = HashMap::new();
+        while b.pending() {
+            for (id, toks) in b.step_report().completed {
+                via_report.insert(id, toks);
+            }
+        }
+        assert_eq!(via_step, via_report, "the reporting path must be observationally identical");
     }
 
     /// Continuous batching: requests submitted at DIFFERENT times (one mid-flight)
