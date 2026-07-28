@@ -797,6 +797,93 @@ pub struct Request {
     pub eos: Option<u32>,
 }
 
+/// Why a request was refused at admission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RejectReason {
+    /// Can never fit the engine's per-sequence capacity.
+    ExceedsCapacity { need: u32, capacity: u32 },
+    /// Refused by the installed [`AdmissionPolicy`].
+    PolicyRejected { policy: &'static str },
+}
+
+impl std::fmt::Display for RejectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RejectReason::ExceedsCapacity { need, capacity } => {
+                write!(f, "needs {need} tokens, engine capacity is {capacity}")
+            }
+            RejectReason::PolicyRejected { policy } => write!(f, "rejected by {policy}"),
+        }
+    }
+}
+
+/// What the queue looks like when an admission decision is made.
+#[derive(Clone, Copy, Debug)]
+pub struct QueueState {
+    /// Requests waiting behind this one (its position in the queue).
+    pub queued_ahead: usize,
+    /// Sequences currently decoding.
+    pub running: usize,
+    /// KV blocks free in the pool.
+    pub free_blocks: u32,
+    /// Observed mean milliseconds to serve one request, when known.
+    pub mean_service_ms: Option<f64>,
+}
+
+/// Decide what to do with work that arrives beyond capacity.
+///
+/// `perf overload` measured the default (queue without bound) collapsing at 2x
+/// offered load: goodput fell below half its peak because compute was spent on
+/// answers past their deadline. An engine is rewarded for refusing work it
+/// provably cannot finish in time; policies are pure functions of
+/// [`QueueState`], unit-testable with no engine at all.
+pub trait AdmissionPolicy: Send + Sync {
+    fn name(&self) -> &'static str;
+    /// May this request enter the queue / stay admissible?
+    fn admit(&self, req: &Request, state: &QueueState) -> bool;
+}
+
+/// Queue without bound — the historical behaviour and the default.
+pub struct UnboundedQueue;
+impl AdmissionPolicy for UnboundedQueue {
+    fn name(&self) -> &'static str {
+        "unbounded_queue"
+    }
+    fn admit(&self, _req: &Request, _state: &QueueState) -> bool {
+        true
+    }
+}
+
+/// Refuse once more than `max` requests are already waiting.
+pub struct MaxQueueDepth(pub usize);
+impl AdmissionPolicy for MaxQueueDepth {
+    fn name(&self) -> &'static str {
+        "max_queue_depth"
+    }
+    fn admit(&self, _req: &Request, state: &QueueState) -> bool {
+        state.queued_ahead < self.0
+    }
+}
+
+/// Refuse work that provably cannot start inside its deadline: everything
+/// ahead must clear first, and if that alone exceeds the budget the compute
+/// would be spent on an answer nobody can use.
+pub struct DeadlineAware {
+    /// Per-request start deadline, ms.
+    pub deadline_ms: f64,
+}
+impl AdmissionPolicy for DeadlineAware {
+    fn name(&self) -> &'static str {
+        "deadline_aware"
+    }
+    fn admit(&self, _req: &Request, state: &QueueState) -> bool {
+        match state.mean_service_ms {
+            Some(svc) => (state.queued_ahead as f64) * svc <= self.deadline_ms,
+            None => true, // nothing measured yet — cannot prove lateness
+        }
+    }
+}
+
 /// What one [`Scheduler::step_report`] iteration did. Latency metrics
 /// (time-to-first-token, inter-token latency) are computed from this: [`Scheduler::step`]
 /// alone reports only *completions*, which is too coarse to see when a sequence
@@ -810,9 +897,9 @@ pub struct StepReport {
     pub produced: Vec<(u64, usize)>,
     /// Requests that finished this iteration.
     pub finished: Vec<u64>,
-    /// Requests refused at admission because they can never fit this engine's
-    /// per-sequence capacity. Refusing beats both crashing and queueing forever.
-    pub rejected: Vec<(u64, String)>,
+    /// Requests refused at admission — impossible sizes and policy rejections
+    /// alike. Refusing beats both crashing and queueing forever.
+    pub rejected: Vec<(u64, RejectReason)>,
     /// The same `(id, tokens)` pairs [`Scheduler::step`] returns.
     pub completed: Vec<(u64, Vec<u32>)>,
 }
@@ -840,6 +927,13 @@ pub struct Scheduler {
     running: Vec<Running>,
     next_id: u64,
     max_running: usize,
+    /// Admission policy — what to do with work arriving beyond capacity.
+    admission: Box<dyn AdmissionPolicy>,
+    /// EWMA of ms per completed request, feeding DeadlineAware decisions.
+    mean_service_ms: Option<f64>,
+    started: std::collections::HashMap<u64, std::time::Instant>,
+    /// Policy rejections made at submit time, surfaced in the next report.
+    pending_rejects: Vec<(u64, RejectReason)>,
     /// Max prompt tokens prefilled per iteration before yielding to decode.
     ///
     /// Admission runs a FULL prefill per accepted request, so without a budget
@@ -865,8 +959,19 @@ impl Scheduler {
             running: Vec::new(),
             next_id: 0,
             max_running,
+            admission: Box::new(UnboundedQueue),
+            mean_service_ms: None,
+            started: std::collections::HashMap::new(),
+            pending_rejects: Vec::new(),
             prefill_budget,
         }
+    }
+
+    /// Install an admission policy (default: [`UnboundedQueue`], the historical
+    /// behaviour). Applied at submit time; a refused request is reported in the
+    /// next iteration's [`StepReport::rejected`].
+    pub fn set_admission(&mut self, p: Box<dyn AdmissionPolicy>) {
+        self.admission = p;
     }
 
     /// Override the per-iteration prefill budget (tokens). `u32::MAX` restores
@@ -877,9 +982,23 @@ impl Scheduler {
     }
 
     /// Enqueue a request; returns its id (results come back keyed by it).
+    /// Submit a request. The admission policy is consulted HERE — a refusal
+    /// returns the id with the request never queued, and the rejection appears
+    /// in the next [`Scheduler::step_report`].
     pub fn submit(&mut self, req: Request) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
+        let state = QueueState {
+            queued_ahead: self.waiting.len(),
+            running: self.running.len(),
+            free_blocks: self.eng.free_blocks(),
+            mean_service_ms: self.mean_service_ms,
+        };
+        if !self.admission.admit(&req, &state) {
+            self.pending_rejects.push((id, RejectReason::PolicyRejected { policy: self.admission.name() }));
+            return id;
+        }
+        self.started.insert(id, std::time::Instant::now());
         self.waiting.push_back((id, req));
         id
     }
@@ -935,6 +1054,7 @@ impl Scheduler {
     /// per-sequence token counts, which is what `brain perf` measures.
     pub fn step_report(&mut self) -> StepReport {
         let mut report = StepReport::default();
+        report.rejected.append(&mut self.pending_rejects);
         let produced_before: HashMap<u64, usize> =
             self.running.iter().map(|r| (r.id, r.generated.len())).collect();
 
@@ -954,6 +1074,11 @@ impl Scheduler {
                 report.produced.push((*id, toks.len() - prev));
             }
             report.finished.push(*id);
+            if let Some(t0) = self.started.remove(id) {
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                self.mean_service_ms =
+                    Some(self.mean_service_ms.map_or(ms, |m| 0.8 * m + 0.2 * ms));
+            }
         }
         report.completed = completed;
         report
@@ -990,12 +1115,12 @@ impl Scheduler {
                 if need <= cap {
                     break;
                 }
-                let (id, req) = (*id, need);
+                let (id, need) = (*id, need as u32);
                 self.waiting.pop_front();
-                report.rejected.push((
-                    id,
-                    format!("needs {req} tokens, engine capacity is {cap}"),
-                ));
+                self.started.remove(&id);
+                report
+                    .rejected
+                    .push((id, RejectReason::ExceedsCapacity { need, capacity: cap as u32 }));
             }
             let fits = match self.waiting.front() {
                 Some((_, req)) => {
@@ -1136,12 +1261,51 @@ mod tests {
         let rep = sched.step_report();
         assert_eq!(rep.rejected.len(), 1, "the oversized request must be refused");
         assert_eq!(rep.rejected[0].0, huge);
-        assert!(rep.rejected[0].1.contains("capacity"));
+        assert!(matches!(rep.rejected[0].1, RejectReason::ExceedsCapacity { .. }));
 
         // The queue keeps moving and the viable request completes.
         let out = sched.run();
         assert!(out.contains_key(&ok));
         assert!(!out.contains_key(&huge));
+    }
+
+    /// Admission policies must refuse at submit time, report the refusal, and
+    /// leave already-queued work untouched.
+    #[test]
+    fn admission_policy_rejects_and_reports() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map(cfg, &map, 4, 96, 2, 12, 8, false);
+        let mut sched = Scheduler::new(eng, 2);
+        sched.set_admission(Box::new(MaxQueueDepth(1)));
+
+        let a = sched.submit(Request { prompt: vec![1, 5, 3], max_new: 4, eos: None }); // queued (0 ahead)
+        let b = sched.submit(Request { prompt: vec![2, 6, 4], max_new: 4, eos: None }); // queued (1 ahead? depth=1 => 1 not < 1 => REJECTED)
+        let rep = sched.step_report();
+        assert_eq!(rep.rejected.len(), 1, "the over-depth submit must be refused");
+        assert_eq!(rep.rejected[0].0, b);
+        assert!(matches!(rep.rejected[0].1, RejectReason::PolicyRejected { policy: "max_queue_depth" }));
+
+        let out = sched.run();
+        assert!(out.contains_key(&a), "admitted work completes normally");
+        assert!(!out.contains_key(&b));
+    }
+
+    /// DeadlineAware admits until a service time is measured, then refuses work
+    /// that provably cannot start in time.
+    #[test]
+    fn deadline_aware_uses_measured_service_time() {
+        let p = DeadlineAware { deadline_ms: 100.0 };
+        let mk = |queued, svc| QueueState {
+            queued_ahead: queued,
+            running: 0,
+            free_blocks: 99,
+            mean_service_ms: svc,
+        };
+        let r = Request { prompt: vec![1], max_new: 1, eos: None };
+        assert!(p.admit(&r, &mk(50, None)), "no measurement -> cannot prove lateness");
+        assert!(p.admit(&r, &mk(4, Some(20.0))), "4 x 20ms fits a 100ms deadline");
+        assert!(!p.admit(&r, &mk(6, Some(20.0))), "6 x 20ms provably misses it");
     }
 
     /// Cancelling must free the sequence's KV blocks immediately and stop its

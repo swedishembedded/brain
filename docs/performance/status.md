@@ -172,6 +172,20 @@ greedy through the same engine) now runs inside every Tier-1 scenario and
 reported `greedy_token_match: 1.0` — the artifacts are marked valid, not
 "unverified".
 
+
+### Fourth wave: policy seams (landed)
+
+- **AdmissionPolicy** (`qwen::serve`): `UnboundedQueue` (default, historical),
+  `MaxQueueDepth`, `DeadlineAware` (EWMA-fed). Consulted at submit; typed
+  `RejectReason` in `StepReport::rejected`. Policies are pure functions of
+  `QueueState` — unit-tested with no engine. Remaining: a `--admission` flag so
+  `perf overload` compares the ladder per policy.
+- **EvictionPolicy** (`residency::place`): `Lru` + `CostAware` (GDSF,
+  `uses x bytes / age`); `plan_eviction_with`, benchmark scores the real code
+  via `--policy`. Hit rate 50.0% -> 54.3% on identical seeds; cheap-before-
+  expensive eviction pinned by test. Event-counted regret is metric-limited at
+  4x overcommit — a bytes-weighted regret metric is the follow-up.
+
 ## Fixed along the way (pre-existing)
 
 - **SIGSEGV in every debug-profile test run that built GPU devices on more than
