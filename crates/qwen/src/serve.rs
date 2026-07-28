@@ -40,6 +40,9 @@ const GQA_APPLY: usize = 13;
 const APPEND_I8: usize = 14;
 const SCORES_I8: usize = 15;
 const APPLY_I8: usize = 16;
+// Device-side greedy head: matmul -> row argmax, so decode never ships a
+// [batch, vocab] logit block to the host.
+const ARGMAX_ROW: usize = 17;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -59,6 +62,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("paged_kv_append_i8_batched", kernels::PAGED_KV_APPEND_I8_BATCHED),
     ("paged_decode_scores_i8_batched", kernels::PAGED_DECODE_SCORES_I8_BATCHED),
     ("paged_decode_apply_i8_batched", kernels::PAGED_DECODE_APPLY_I8_BATCHED),
+    ("argmax_row", kernels::ARGMAX_ROW),
 ];
 
 fn ids() -> KernelIds {
@@ -174,7 +178,14 @@ pub struct Engine {
     scales_k: Vec<DeviceBuffer>,
     scales_v: Vec<DeviceBuffer>,
     sc: Scratch,
-    head: Vec<f32>, // [vocab, d] tied/untied head, host-applied
+    /// `[vocab, d]` tied/untied head, kept on the host for the prefill path
+    /// (applied once per request) and for callers that need full logits.
+    head: Vec<f32>,
+    /// The same head resident on the device, for the batched decode path.
+    head_dev: DeviceBuffer,
+    /// `[max_batch, vocab]` decode logits, and `[max_batch]` argmax indices.
+    logits_dev: DeviceBuffer,
+    argmax_dev: DeviceBuffer,
 }
 
 impl Engine {
@@ -245,6 +256,12 @@ impl Engine {
             off_buf: st(b),
             bt_buf: st(b * max_blocks_per_seq as u64),
         };
+        // Decode-side head. Sized by max_batch (NOT the prefill row count): only
+        // decode rows need logits, and [max_prefill, vocab] would be gigabytes.
+        let vocab = cfg.vocab as u64;
+        let head_dev = gpu.storage_init("lm_head", &head);
+        let logits_dev = st(max_batch as u64 * vocab);
+        let argmax_dev = st(max_batch as u64);
         Engine {
             cfg,
             gpu,
@@ -262,6 +279,9 @@ impl Engine {
             scales_v,
             sc,
             head,
+            head_dev,
+            logits_dev,
+            argmax_dev,
         }
     }
 
@@ -319,6 +339,14 @@ impl Engine {
         self.run_batched(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt)
     }
 
+    /// Advance every sequence by one token and return the **greedy next token**
+    /// per row, with the LM head applied on the device (see
+    /// [`Engine::run_batched_greedy`]).
+    pub(crate) fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
+        let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
+        self.run_batched_greedy(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt)
+    }
+
     /// Advance every sequence by one token from a ready-made embedding per sequence
     /// (`[bsz, d_model]`) — the tts Talker multi-stream path: concurrent voice
     /// streams decode together on the shared paged pool.
@@ -336,6 +364,17 @@ impl Engine {
     /// (one new token per sequence) and prefill chunks alike.
     #[allow(clippy::too_many_arguments)]
     fn run_batched(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> Vec<f32> {
+        let b = self.run_batched_submit(bsz, input, positions, seqlens, blocks, offsets, bt);
+        self.gpu.read(&self.sc.xn_final, (b * self.cfg.d_model) as usize)
+    }
+
+    /// The transformer body only: records and submits every stage, leaving the
+    /// final norm in `sc.xn_final` **without reading it back**. Submits are
+    /// accumulated lazily and flushed on the next read, so a caller that appends
+    /// more device work (the greedy head) still pays one flush per step rather
+    /// than two. Returns the row count.
+    #[allow(clippy::too_many_arguments)]
+    fn run_batched_submit(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> u32 {
         let c = &self.cfg;
         let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
         let (hq, hkv) = (c.q_dim(), c.kv_dim());
@@ -402,7 +441,45 @@ impl Engine {
         let last = c.n_layers as usize;
         s.push(block::rmsnorm_fwd(g, &kids, &sc.res[last], w("norm.weight"), &sc.xn_final, d, b));
         g.submit(&[], &s);
-        g.read(&sc.xn_final, (b * d) as usize)
+        b
+    }
+
+    /// One batched decode step that returns the **greedy next token per row**,
+    /// with the LM head evaluated on the device.
+    ///
+    /// The head is the largest single matmul in a small model (`vocab x d_model`
+    /// = 16.4M MACs per row at vocab 32k). Applying it on the host, once per
+    /// sequence per token, made decode host-bound: cost grew linearly with batch
+    /// size while the GPU idled, so continuous batching stopped paying — measured
+    /// at ~85% of each decode step, and throughput that gained only 1.4x from
+    /// concurrency 1->16 before regressing.
+    ///
+    /// Here the hidden state never leaves the device: `matmul` produces
+    /// `[bsz, vocab]` logits (parallel over every output element) and
+    /// `argmax_row` reduces each row, so only `bsz` indices are read back
+    /// instead of a `[bsz, vocab]` block.
+    #[allow(clippy::too_many_arguments)]
+    fn run_batched_greedy(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> Vec<u32> {
+        assert!(
+            bsz <= self.max_batch,
+            "greedy decode is sized for max_batch={} rows, got {bsz}",
+            self.max_batch
+        );
+        self.run_batched_submit(bsz, input, positions, seqlens, blocks, offsets, bt);
+        self.greedy_from_hidden(bsz)
+    }
+
+    /// `argmax(xn_final @ head^T)` per row, entirely on the device.
+    fn greedy_from_hidden(&self, bsz: u32) -> Vec<u32> {
+        let g = &self.gpu;
+        let (d, v) = (self.cfg.d_model, self.cfg.vocab);
+        let steps = [
+            g.step(MATMUL, &[&self.sc.xn_final, &self.head_dev, &self.logits_dev], &[bsz, d, v], bsz * v),
+            g.step(ARGMAX_ROW, &[&self.logits_dev, &self.argmax_dev], &[bsz, v], bsz),
+        ];
+        g.submit(&[], &steps);
+        // Indices come back as f32 (exact below 2^24, far above any vocabulary).
+        g.read(&self.argmax_dev, bsz as usize).into_iter().map(|x| x as u32).collect()
     }
 
     /// **Chunked prefill**: process the prompt in chunks of up to `max_prefill`
@@ -728,7 +805,6 @@ impl Scheduler {
     }
 
     fn step_inner(&mut self, report: &mut StepReport) -> Vec<(u64, Vec<u32>)> {
-        let d = self.eng.cfg.d_model as usize;
 
         // 1. Admit while there's batch room and enough free blocks for the prompt.
         while self.running.len() < self.max_running {
@@ -753,17 +829,17 @@ impl Scheduler {
         let active: Vec<usize> = (0..self.running.len()).filter(|&i| !self.running[i].done).collect();
         if !active.is_empty() {
             let inputs: Vec<u32> = active.iter().map(|&i| self.running[i].next_input).collect();
-            let hidden = {
+            let next_tokens = {
                 let mut refs: Vec<&mut BlockTable> = Vec::new();
                 for (idx, r) in self.running.iter_mut().enumerate() {
                     if active.contains(&idx) {
                         refs.push(&mut r.table);
                     }
                 }
-                self.eng.forward_batched(&mut refs, &inputs)
+                self.eng.forward_batched_greedy(&mut refs, &inputs)
             };
             for (bi, &si) in active.iter().enumerate() {
-                let next = Engine::argmax(&self.eng.logits(&hidden[bi * d..(bi + 1) * d]));
+                let next = next_tokens[bi];
                 let r = &mut self.running[si];
                 r.generated.push(next);
                 r.next_input = next;
@@ -840,6 +916,40 @@ mod tests {
 
         assert_eq!(out[0], ref0, "seq0 batched paged != reference");
         assert_eq!(out[1], ref1, "seq1 batched paged != reference");
+    }
+
+    /// The device-side greedy head must select exactly the token the host head
+    /// would. This is the invariant that lets decode skip shipping a
+    /// `[batch, vocab]` logit block back to the host — if it ever drifted, the
+    /// engine would silently generate different text at speed.
+    #[test]
+    fn device_head_argmax_matches_the_host_head() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let mut eng = Engine::from_map(cfg, &map, 4, 96, 4, 12, 8, false);
+
+        // Drive a few real decode steps so the hidden states are genuine.
+        let mut tables: Vec<BlockTable> = (0..3).map(|_| BlockTable::new()).collect();
+        let prompts = [vec![1u32, 5, 3], vec![7u32, 2, 9], vec![4u32, 4, 1]];
+        let mut inputs = Vec::new();
+        for (t, p) in tables.iter_mut().zip(prompts.iter()) {
+            let h = eng.prefill(t, p);
+            inputs.push(Engine::argmax(&eng.logits(&h)));
+        }
+        for _ in 0..4 {
+            // Host reference: hidden -> host matmul -> argmax, per row.
+            let hidden = {
+                let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
+                eng.forward_batched(&mut refs, &inputs)
+            };
+            let d = eng.cfg.d_model as usize;
+            let host: Vec<u32> =
+                (0..inputs.len()).map(|i| Engine::argmax(&eng.logits(&hidden[i * d..(i + 1) * d]))).collect();
+            // Device: same hidden already in sc.xn_final, head applied on device.
+            let dev = eng.greedy_from_hidden(inputs.len() as u32);
+            assert_eq!(dev, host, "device head picked a different token than the host head");
+            inputs = host;
+        }
     }
 
     /// `step_report` must account for **every** token exactly once and admit each

@@ -67,7 +67,7 @@ checkpoint needed, so hardware comparison works on any machine), and
 The suite's first run on real hardware found a decode bottleneck that is not
 in the GPU at all.
 
-**Batching barely helps.** `qwen-synth:8x512x8` (46.8M params, fp32),
+**Batching barely helped.** `qwen-synth:8x512x8` (46.8M params, fp32),
 decode-bound (8-token prompt, 64-token output), `--device gpu0`:
 
 | concurrency | out tok/s | TTFA p99 | IAL p99 |
@@ -81,7 +81,7 @@ Throughput gains 1.4× from concurrency 1→16 and then *regresses*, while
 latency grows 15×. A 47M fp32 model at ~36 tok/s is roughly **1% of the
 P40's fp32 peak** — overhead-bound, not compute-bound.
 
-**Cause: the LM head runs on the host, single-threaded.**
+**Cause: the LM head ran on the host, single-threaded.**
 `qwen::serve::Engine::logits` is a scalar Rust matmul over
 `[vocab, d_model]` — 16.4M multiply-accumulates per sequence per token at
 vocab 32k — executed once per sequence per decode step while the GPU sits
@@ -97,10 +97,49 @@ Confirmed causally by varying **only** vocab (same shape, same device):
 | 32 000 | 40.6 | 70.3 ms |
 
 `IAL ≈ 11 ms + 1.86 µs per 1000 vocab`, so at vocab 32k about **85% of each
-decode step is the host-side head**. Moving it onto the device (it is a
-plain matmul the engine already has a kernel for) and batching it across the
-running set is the single highest-value fix; the sweep above is the
-before-picture to measure it against.
+decode step was the host-side head**.
+
+### Fixed: the head now runs on the device
+
+`matmul` (parallel over every one of `bsz × vocab` outputs) followed by a new
+`argmax_row` kernel, so the hidden state never leaves the device and only
+`bsz` indices are read back instead of a `[bsz, vocab]` block. Prefill keeps
+the host head — it runs once per request, not once per token.
+
+Same commands, same hardware, `qwen-synth:8x512x8`, `--device gpu0`:
+
+| concurrency | before | after | gain |
+|---:|---:|---:|---:|
+| 1 | 36.4 | **74.2** | 2.0× |
+| 4 | 46.9 | **155.3** | 3.3× |
+| 16 | 50.3 | **234.9** | 4.7× |
+| 32 | 45.4 | **290.5** | 6.4× |
+
+Batching now scales **3.9× from concurrency 1→32** (was 1.25× and
+*regressing* past 16), and the workload meets its SLO at low concurrency
+instead of never — `sweep` reports a real max-sustainable point of
+concurrency 4 at 155 tok/s goodput.
+
+Vocab sensitivity is largely gone, which is the direct confirmation:
+
+| vocab | before | after |
+|---:|---:|---:|
+| 4 000 | 126.3 | **176.9** |
+| 8 000 | 100.7 | **168.7** |
+| 32 000 | 40.6 | **114.6** |
+
+8× vocab now costs 1.6× IAL (10.8 → 17.7 ms) instead of 3.8×.
+
+Correctness is pinned by `device_head_argmax_matches_the_host_head`, and the
+pre-existing token-for-token reference tests
+(`batched_serving_matches_reference`,
+`scheduler_dynamic_admission_matches_reference`) still pass — the engine
+generates identical text, faster. Verified on both backends: the same WGSL
+runs on the CPU backend via the Cranelift JIT.
+
+**Still on the table**: at 290 tok/s for a 47M fp32 model the P40 is still far
+from its ~11 TFLOP/s peak, so the next bottleneck is worth finding — likely
+per-step dispatch/sync overhead, since IAL p99 stays ~48 ms at batch 32.
 
 *(Numbers are `--target qwen-synth`, i.e. random weights — valid for cost,
 meaningless for output quality.)*

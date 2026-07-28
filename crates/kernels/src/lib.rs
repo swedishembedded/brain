@@ -33,6 +33,8 @@ pub const ADD_CHAN_INPLACE: &str = include_str!("../wgsl/add_chan_inplace.wgsl")
 pub const ADD_INDEX_MASK: &str = include_str!("../wgsl/add_index_mask.wgsl");
 /// `wgsl/add_inplace.wgsl`
 pub const ADD_INPLACE: &str = include_str!("../wgsl/add_inplace.wgsl");
+/// `wgsl/argmax_row.wgsl`
+pub const ARGMAX_ROW: &str = include_str!("../wgsl/argmax_row.wgsl");
 /// `wgsl/attention.wgsl`
 pub const ATTENTION: &str = include_str!("../wgsl/attention.wgsl");
 /// `wgsl/attn_apply.wgsl`
@@ -73,6 +75,12 @@ pub const ATTN_BWD_DV: &str = include_str!("../wgsl/attn_bwd_dv.wgsl");
 pub const ATTN_BWD_DV_BIDIR: &str = include_str!("../wgsl/attn_bwd_dv_bidir.wgsl");
 /// `wgsl/attn_bwd_dv_cross.wgsl`
 pub const ATTN_BWD_DV_CROSS: &str = include_str!("../wgsl/attn_bwd_dv_cross.wgsl");
+/// `wgsl/attn_decode_apply.wgsl`
+pub const ATTN_DECODE_APPLY: &str = include_str!("../wgsl/attn_decode_apply.wgsl");
+/// `wgsl/attn_decode_scores.wgsl`
+pub const ATTN_DECODE_SCORES: &str = include_str!("../wgsl/attn_decode_scores.wgsl");
+/// `wgsl/attn_decode_scores_win.wgsl`
+pub const ATTN_DECODE_SCORES_WIN: &str = include_str!("../wgsl/attn_decode_scores_win.wgsl");
 /// `wgsl/attn_scores.wgsl`
 pub const ATTN_SCORES: &str = include_str!("../wgsl/attn_scores.wgsl");
 /// `wgsl/attn_scores_bidir.wgsl`
@@ -91,40 +99,6 @@ pub const ATTN_SCORES_MASKED: &str = include_str!("../wgsl/attn_scores_masked.wg
 pub const ATTN_SCORES_QK: &str = include_str!("../wgsl/attn_scores_qk.wgsl");
 /// `wgsl/attn_softmax.wgsl`
 pub const ATTN_SOFTMAX: &str = include_str!("../wgsl/attn_softmax.wgsl");
-/// `wgsl/attn_decode_scores.wgsl` — decode-step single-query GQA attention scores.
-pub const ATTN_DECODE_SCORES: &str = include_str!("../wgsl/attn_decode_scores.wgsl");
-/// `wgsl/attn_decode_scores_win.wgsl` — decode-step scores over a sliding window `[w0, t)`.
-pub const ATTN_DECODE_SCORES_WIN: &str = include_str!("../wgsl/attn_decode_scores_win.wgsl");
-/// `wgsl/decode_softmax.wgsl` — decode-step per-head max-subtracted softmax.
-pub const DECODE_SOFTMAX: &str = include_str!("../wgsl/decode_softmax.wgsl");
-/// `wgsl/attn_decode_apply.wgsl` — decode-step GQA context = probs·V over the cache.
-pub const ATTN_DECODE_APPLY: &str = include_str!("../wgsl/attn_decode_apply.wgsl");
-/// `wgsl/kv_append.wgsl` — append a token's projected K/V into a KV cache row.
-pub const KV_APPEND: &str = include_str!("../wgsl/kv_append.wgsl");
-/// `wgsl/rope_at.wgsl` — RoPE at an explicit absolute position (decode step).
-pub const ROPE_AT: &str = include_str!("../wgsl/rope_at.wgsl");
-/// `wgsl/paged_kv_append.wgsl` — paged KV-cache decode (block-table indirection).
-pub const PAGED_KV_APPEND: &str = include_str!("../wgsl/paged_kv_append.wgsl");
-/// `wgsl/paged_decode_scores.wgsl` — paged KV-cache decode (block-table indirection).
-pub const PAGED_DECODE_SCORES: &str = include_str!("../wgsl/paged_decode_scores.wgsl");
-/// `wgsl/paged_decode_apply.wgsl` — paged KV-cache decode (block-table indirection).
-pub const PAGED_DECODE_APPLY: &str = include_str!("../wgsl/paged_decode_apply.wgsl");
-/// `wgsl/rope_paged.wgsl` — batched paged decode (ragged multi-sequence).
-pub const ROPE_PAGED: &str = include_str!("../wgsl/rope_paged.wgsl");
-/// `wgsl/paged_kv_append_batched.wgsl` — batched paged decode (ragged multi-sequence).
-pub const PAGED_KV_APPEND_BATCHED: &str = include_str!("../wgsl/paged_kv_append_batched.wgsl");
-/// `wgsl/paged_decode_scores_batched.wgsl` — batched paged decode (ragged multi-sequence).
-pub const PAGED_DECODE_SCORES_BATCHED: &str = include_str!("../wgsl/paged_decode_scores_batched.wgsl");
-/// `wgsl/decode_softmax_batched.wgsl` — batched paged decode (ragged multi-sequence).
-pub const DECODE_SOFTMAX_BATCHED: &str = include_str!("../wgsl/decode_softmax_batched.wgsl");
-/// `wgsl/paged_decode_apply_batched.wgsl` — batched paged decode (ragged multi-sequence).
-pub const PAGED_DECODE_APPLY_BATCHED: &str = include_str!("../wgsl/paged_decode_apply_batched.wgsl");
-/// `wgsl/paged_kv_append_i8_batched.wgsl` — int8 paged decode (dequant on read).
-pub const PAGED_KV_APPEND_I8_BATCHED: &str = include_str!("../wgsl/paged_kv_append_i8_batched.wgsl");
-/// `wgsl/paged_decode_scores_i8_batched.wgsl` — int8 paged decode (dequant on read).
-pub const PAGED_DECODE_SCORES_I8_BATCHED: &str = include_str!("../wgsl/paged_decode_scores_i8_batched.wgsl");
-/// `wgsl/paged_decode_apply_i8_batched.wgsl` — int8 paged decode (dequant on read).
-pub const PAGED_DECODE_APPLY_I8_BATCHED: &str = include_str!("../wgsl/paged_decode_apply_i8_batched.wgsl");
 /// `wgsl/attn_softmax_bidir.wgsl`
 pub const ATTN_SOFTMAX_BIDIR: &str = include_str!("../wgsl/attn_softmax_bidir.wgsl");
 /// `wgsl/attn_softmax_cross.wgsl`
@@ -241,6 +215,10 @@ pub const CONVTR1D_DW: &str = include_str!("../wgsl/convtr1d_dw.wgsl");
 pub const CONVTR1D_DX: &str = include_str!("../wgsl/convtr1d_dx.wgsl");
 /// `wgsl/crop2d.wgsl`
 pub const CROP2D: &str = include_str!("../wgsl/crop2d.wgsl");
+/// `wgsl/decode_softmax.wgsl`
+pub const DECODE_SOFTMAX: &str = include_str!("../wgsl/decode_softmax.wgsl");
+/// `wgsl/decode_softmax_batched.wgsl`
+pub const DECODE_SOFTMAX_BATCHED: &str = include_str!("../wgsl/decode_softmax_batched.wgsl");
 /// `wgsl/dfl_decode.wgsl`
 pub const DFL_DECODE: &str = include_str!("../wgsl/dfl_decode.wgsl");
 /// `wgsl/dfl_grad.wgsl`
@@ -331,6 +309,8 @@ pub const GRAD_SCALE_BUF: &str = include_str!("../wgsl/grad_scale_buf.wgsl");
 pub const GRADNORM_SQ: &str = include_str!("../wgsl/gradnorm_sq.wgsl");
 /// `wgsl/im2col.wgsl`
 pub const IM2COL: &str = include_str!("../wgsl/im2col.wgsl");
+/// `wgsl/kv_append.wgsl`
+pub const KV_APPEND: &str = include_str!("../wgsl/kv_append.wgsl");
 /// `wgsl/l2norm_scale.wgsl`
 pub const L2NORM_SCALE: &str = include_str!("../wgsl/l2norm_scale.wgsl");
 /// `wgsl/l2norm_scale_dg.wgsl`
@@ -425,6 +405,24 @@ pub const NLC_NCHW: &str = include_str!("../wgsl/nlc_nchw.wgsl");
 pub const PACK_QKV: &str = include_str!("../wgsl/pack_qkv.wgsl");
 /// `wgsl/pad2d.wgsl`
 pub const PAD2D: &str = include_str!("../wgsl/pad2d.wgsl");
+/// `wgsl/paged_decode_apply.wgsl`
+pub const PAGED_DECODE_APPLY: &str = include_str!("../wgsl/paged_decode_apply.wgsl");
+/// `wgsl/paged_decode_apply_batched.wgsl`
+pub const PAGED_DECODE_APPLY_BATCHED: &str = include_str!("../wgsl/paged_decode_apply_batched.wgsl");
+/// `wgsl/paged_decode_apply_i8_batched.wgsl`
+pub const PAGED_DECODE_APPLY_I8_BATCHED: &str = include_str!("../wgsl/paged_decode_apply_i8_batched.wgsl");
+/// `wgsl/paged_decode_scores.wgsl`
+pub const PAGED_DECODE_SCORES: &str = include_str!("../wgsl/paged_decode_scores.wgsl");
+/// `wgsl/paged_decode_scores_batched.wgsl`
+pub const PAGED_DECODE_SCORES_BATCHED: &str = include_str!("../wgsl/paged_decode_scores_batched.wgsl");
+/// `wgsl/paged_decode_scores_i8_batched.wgsl`
+pub const PAGED_DECODE_SCORES_I8_BATCHED: &str = include_str!("../wgsl/paged_decode_scores_i8_batched.wgsl");
+/// `wgsl/paged_kv_append.wgsl`
+pub const PAGED_KV_APPEND: &str = include_str!("../wgsl/paged_kv_append.wgsl");
+/// `wgsl/paged_kv_append_batched.wgsl`
+pub const PAGED_KV_APPEND_BATCHED: &str = include_str!("../wgsl/paged_kv_append_batched.wgsl");
+/// `wgsl/paged_kv_append_i8_batched.wgsl`
+pub const PAGED_KV_APPEND_I8_BATCHED: &str = include_str!("../wgsl/paged_kv_append_i8_batched.wgsl");
 /// `wgsl/pixel_shuffle.wgsl`
 pub const PIXEL_SHUFFLE: &str = include_str!("../wgsl/pixel_shuffle.wgsl");
 /// `wgsl/pixel_shuffle_dx.wgsl`
@@ -465,6 +463,8 @@ pub const RMSNORM_EPS: &str = include_str!("../wgsl/rmsnorm_eps.wgsl");
 pub const ROPE: &str = include_str!("../wgsl/rope.wgsl");
 /// `wgsl/rope2d.wgsl`
 pub const ROPE2D: &str = include_str!("../wgsl/rope2d.wgsl");
+/// `wgsl/rope_at.wgsl`
+pub const ROPE_AT: &str = include_str!("../wgsl/rope_at.wgsl");
 /// `wgsl/rope_base.wgsl`
 pub const ROPE_BASE: &str = include_str!("../wgsl/rope_base.wgsl");
 /// `wgsl/rope_base_bwd.wgsl`
@@ -473,6 +473,8 @@ pub const ROPE_BASE_BWD: &str = include_str!("../wgsl/rope_base_bwd.wgsl");
 pub const ROPE_INTERLEAVE_TABLE: &str = include_str!("../wgsl/rope_interleave_table.wgsl");
 /// `wgsl/rope_neox.wgsl`
 pub const ROPE_NEOX: &str = include_str!("../wgsl/rope_neox.wgsl");
+/// `wgsl/rope_paged.wgsl`
+pub const ROPE_PAGED: &str = include_str!("../wgsl/rope_paged.wgsl");
 /// `wgsl/rope_sub.wgsl`
 pub const ROPE_SUB: &str = include_str!("../wgsl/rope_sub.wgsl");
 /// `wgsl/rope_train.wgsl`
@@ -590,6 +592,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("add_chan_inplace", ADD_CHAN_INPLACE),
     ("add_index_mask", ADD_INDEX_MASK),
     ("add_inplace", ADD_INPLACE),
+    ("argmax_row", ARGMAX_ROW),
     ("attention", ATTENTION),
     ("attn_apply", ATTN_APPLY),
     ("attn_apply_bidir", ATTN_APPLY_BIDIR),
@@ -610,6 +613,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_bwd_dv", ATTN_BWD_DV),
     ("attn_bwd_dv_bidir", ATTN_BWD_DV_BIDIR),
     ("attn_bwd_dv_cross", ATTN_BWD_DV_CROSS),
+    ("attn_decode_apply", ATTN_DECODE_APPLY),
+    ("attn_decode_scores", ATTN_DECODE_SCORES),
+    ("attn_decode_scores_win", ATTN_DECODE_SCORES_WIN),
     ("attn_scores", ATTN_SCORES),
     ("attn_scores_bidir", ATTN_SCORES_BIDIR),
     ("attn_scores_bidir_bias", ATTN_SCORES_BIDIR_BIAS),
@@ -619,23 +625,6 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_scores_masked", ATTN_SCORES_MASKED),
     ("attn_scores_qk", ATTN_SCORES_QK),
     ("attn_softmax", ATTN_SOFTMAX),
-    ("attn_decode_scores", ATTN_DECODE_SCORES),
-    ("attn_decode_scores_win", ATTN_DECODE_SCORES_WIN),
-    ("decode_softmax", DECODE_SOFTMAX),
-    ("attn_decode_apply", ATTN_DECODE_APPLY),
-    ("kv_append", KV_APPEND),
-    ("rope_at", ROPE_AT),
-    ("paged_kv_append", PAGED_KV_APPEND),
-    ("paged_decode_scores", PAGED_DECODE_SCORES),
-    ("paged_decode_apply", PAGED_DECODE_APPLY),
-    ("rope_paged", ROPE_PAGED),
-    ("paged_kv_append_batched", PAGED_KV_APPEND_BATCHED),
-    ("paged_decode_scores_batched", PAGED_DECODE_SCORES_BATCHED),
-    ("decode_softmax_batched", DECODE_SOFTMAX_BATCHED),
-    ("paged_decode_apply_batched", PAGED_DECODE_APPLY_BATCHED),
-    ("paged_kv_append_i8_batched", PAGED_KV_APPEND_I8_BATCHED),
-    ("paged_decode_scores_i8_batched", PAGED_DECODE_SCORES_I8_BATCHED),
-    ("paged_decode_apply_i8_batched", PAGED_DECODE_APPLY_I8_BATCHED),
     ("attn_softmax_bidir", ATTN_SOFTMAX_BIDIR),
     ("attn_softmax_cross", ATTN_SOFTMAX_CROSS),
     ("attn_softmax_full", ATTN_SOFTMAX_FULL),
@@ -694,6 +683,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("convtr1d_dw", CONVTR1D_DW),
     ("convtr1d_dx", CONVTR1D_DX),
     ("crop2d", CROP2D),
+    ("decode_softmax", DECODE_SOFTMAX),
+    ("decode_softmax_batched", DECODE_SOFTMAX_BATCHED),
     ("dfl_decode", DFL_DECODE),
     ("dfl_grad", DFL_GRAD),
     ("dfl_loss", DFL_LOSS),
@@ -739,6 +730,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("grad_scale_buf", GRAD_SCALE_BUF),
     ("gradnorm_sq", GRADNORM_SQ),
     ("im2col", IM2COL),
+    ("kv_append", KV_APPEND),
     ("l2norm_scale", L2NORM_SCALE),
     ("l2norm_scale_dg", L2NORM_SCALE_DG),
     ("l2norm_scale_dx", L2NORM_SCALE_DX),
@@ -786,6 +778,15 @@ pub const ALL: &[(&str, &str)] = &[
     ("nlc_nchw", NLC_NCHW),
     ("pack_qkv", PACK_QKV),
     ("pad2d", PAD2D),
+    ("paged_decode_apply", PAGED_DECODE_APPLY),
+    ("paged_decode_apply_batched", PAGED_DECODE_APPLY_BATCHED),
+    ("paged_decode_apply_i8_batched", PAGED_DECODE_APPLY_I8_BATCHED),
+    ("paged_decode_scores", PAGED_DECODE_SCORES),
+    ("paged_decode_scores_batched", PAGED_DECODE_SCORES_BATCHED),
+    ("paged_decode_scores_i8_batched", PAGED_DECODE_SCORES_I8_BATCHED),
+    ("paged_kv_append", PAGED_KV_APPEND),
+    ("paged_kv_append_batched", PAGED_KV_APPEND_BATCHED),
+    ("paged_kv_append_i8_batched", PAGED_KV_APPEND_I8_BATCHED),
     ("pixel_shuffle", PIXEL_SHUFFLE),
     ("pixel_shuffle_dx", PIXEL_SHUFFLE_DX),
     ("pos_add", POS_ADD),
@@ -806,10 +807,12 @@ pub const ALL: &[(&str, &str)] = &[
     ("rmsnorm_eps", RMSNORM_EPS),
     ("rope", ROPE),
     ("rope2d", ROPE2D),
+    ("rope_at", ROPE_AT),
     ("rope_base", ROPE_BASE),
     ("rope_base_bwd", ROPE_BASE_BWD),
     ("rope_interleave_table", ROPE_INTERLEAVE_TABLE),
     ("rope_neox", ROPE_NEOX),
+    ("rope_paged", ROPE_PAGED),
     ("rope_sub", ROPE_SUB),
     ("rope_train", ROPE_TRAIN),
     ("rope_train_bwd", ROPE_TRAIN_BWD),
