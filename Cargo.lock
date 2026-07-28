@@ -473,6 +473,7 @@ dependencies = [
 name = "brain-fastvlm"
 version = "0.1.0"
 dependencies = [
+ "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
  "brain-kernels",
@@ -652,7 +653,9 @@ dependencies = [
 name = "brain-moondream"
 version = "0.1.0"
 dependencies = [
+ "brain-checkpoint",
  "brain-data",
+ "brain-federated",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",

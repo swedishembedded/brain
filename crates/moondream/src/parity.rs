@@ -77,16 +77,23 @@ mod tests {
 
         let (mut max_abs, mut sum_abs) = (0.0f32, 0.0f64);
         let vocab = v as usize;
+        let am = |x: &[f32]| x.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        let mut argmax_ok = true;
         for p in 0..tokens.len() {
             let (row, rref) = (&logits[p * vocab..(p + 1) * vocab], &ref_logits[p * vocab..(p + 1) * vocab]);
-            let am = |x: &[f32]| x.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
-            assert_eq!(am(row), am(rref), "argmax disagrees at position {p}");
+            argmax_ok &= am(row) == am(rref);
             for (a, b) in row.iter().zip(rref) {
                 max_abs = max_abs.max((a - b).abs());
                 sum_abs += (a - b).abs() as f64;
             }
         }
-        eprintln!("Moondream {N}-layer dense parity: mean|Δ|={:.4e} max|Δ|={:.4e}", sum_abs / logits.len() as f64, max_abs);
-        assert!(max_abs < 5e-3, "Moondream blocks diverge from HF: max|Δ|={max_abs}");
+        let per_pos: Vec<f32> = (0..tokens.len())
+            .map(|p| {
+                let (r, rf) = (&logits[p * vocab..(p + 1) * vocab], &ref_logits[p * vocab..(p + 1) * vocab]);
+                r.iter().zip(rf).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max)
+            })
+            .collect();
+        eprintln!("Moondream {N}-layer dense parity: mean|Δ|={:.4e} max|Δ|={:.4e} argmax_ok={argmax_ok}\n  per-position max|Δ|: {per_pos:?}", sum_abs / logits.len() as f64, max_abs);
+        assert!(max_abs < 5e-3 && argmax_ok, "Moondream blocks diverge from HF: max|Δ|={max_abs}");
     }
 }
