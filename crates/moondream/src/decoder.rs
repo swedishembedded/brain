@@ -8,16 +8,133 @@
 
 use std::collections::HashMap;
 
-use gpu_core::{DeviceBuffer, Gpu, Step};
+use gpu_core::{f, DeviceBuffer, Gpu, Step};
 
 /// Decoder kernel pipeline (indices used below).
 pub fn pipelines() -> &'static [(&'static str, &'static str)] {
     &[
-        ("matmul", kernels::MATMUL),           // 0
-        ("router_gate", kernels::ROUTER_GATE), // 1
-        ("geglu_shift", kernels::GEGLU_SHIFT), // 2
-        ("scale_add", kernels::SCALE_ADD),     // 3
+        ("matmul", kernels::MATMUL),                     // 0
+        ("router_gate", kernels::ROUTER_GATE),           // 1
+        ("geglu_shift", kernels::GEGLU_SHIFT),           // 2
+        ("scale_add", kernels::SCALE_ADD),               // 3
+        ("layernorm", kernels::LAYERNORM),               // 4
+        ("gelu", kernels::GELU),                         // 5 (tanh gelu_approx)
+        ("bias_add", kernels::BIAS_ADD),                 // 6
+        ("add2", kernels::ADD2),                         // 7
+        ("rope_partial", kernels::ROPE_PARTIAL),         // 8
+        ("attn_scores_bidir", kernels::ATTN_SCORES_BIDIR), // 9
+        ("attn_prefix_mask", kernels::ATTN_PREFIX_MASK), // 10
+        ("attn_softmax_bidir", kernels::ATTN_SOFTMAX_BIDIR), // 11
+        ("attn_apply_bidir", kernels::ATTN_APPLY_BIDIR), // 12
     ]
+}
+
+const LN_EPS: f32 = 1e-5;
+
+/// One Moondream decoder block — the PARALLEL attn+MLP form: a single shared
+/// LayerNorm feeds BOTH the attention and the FFN, and `x = x + l_attn + l_mlp`
+/// (a 3-way residual). The attention is full MHA with **partial RoPE** and the
+/// **prefix-LM mask** (image prefix bidirectional, else causal); the FFN here is
+/// the dense variant (layers 0..3). (The tau temperature and the MoE FFN variant
+/// for layers 4..23 are added on top; backward + gradcheck are a follow-up.)
+/// Weight keys: `ln.weight`/`ln.bias`, `attn.qkv.weight` `[3d, d]`,
+/// `attn.proj.weight` `[d,d]`/`attn.proj.bias`, `mlp.fc1.weight` `[ff,d]`/`.bias`,
+/// `mlp.fc2.weight` `[d,ff]`/`.bias`.
+pub struct MoondreamBlock<'g> {
+    gpu: &'g Gpu,
+    w: HashMap<String, DeviceBuffer>,
+    d: u32,
+    n_heads: u32,
+    head_dim: u32,
+    ff: u32,
+    t: u32,
+    prefix: u32,
+    rot_dim: u32,
+    theta: f32,
+    // scratch
+    l_in: DeviceBuffer,
+    qkv: DeviceBuffer,
+    scores: DeviceBuffer,
+    probs: DeviceBuffer,
+    ctx: DeviceBuffer,
+    l_attn: DeviceBuffer,
+    h: DeviceBuffer,
+    h2: DeviceBuffer,
+    l_mlp: DeviceBuffer,
+    mid: DeviceBuffer,
+    out: DeviceBuffer,
+}
+
+impl<'g> MoondreamBlock<'g> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(gpu: &'g Gpu, weights: &HashMap<String, Vec<f32>>, t: u32, d: u32, n_heads: u32, head_dim: u32, ff: u32, prefix: u32, rot_dim: u32, theta: f32) -> MoondreamBlock<'g> {
+        let w = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
+        let slab = (n_heads * t * t) as u64;
+        MoondreamBlock {
+            gpu,
+            w,
+            d,
+            n_heads,
+            head_dim,
+            ff,
+            t,
+            prefix,
+            rot_dim,
+            theta,
+            l_in: gpu.storage((t * d) as u64),
+            qkv: gpu.storage((t * 3 * d) as u64),
+            scores: gpu.storage(slab),
+            probs: gpu.storage(slab),
+            ctx: gpu.storage((t * d) as u64),
+            l_attn: gpu.storage((t * d) as u64),
+            h: gpu.storage((t * ff) as u64),
+            h2: gpu.storage((t * ff) as u64),
+            l_mlp: gpu.storage((t * d) as u64),
+            mid: gpu.storage((t * d) as u64),
+            out: gpu.storage((t * d) as u64),
+        }
+    }
+    fn wb(&self, n: &str) -> &DeviceBuffer {
+        self.w.get(n).unwrap_or_else(|| panic!("block weight missing: {n}"))
+    }
+    pub fn forward(&self, x: &DeviceBuffer) -> &DeviceBuffer {
+        let g = self.gpu;
+        let (t, d, nh, hd, ff) = (self.t, self.d, self.n_heads, self.head_dim, self.ff);
+        let stride3 = 3 * d;
+        let mut s: Vec<Step> = Vec::new();
+
+        // Shared LayerNorm (with bias).
+        s.push(g.step(4, &[x, self.wb("ln.weight"), self.wb("ln.bias"), &self.l_in], &[d, t, f(LN_EPS)], t));
+        // --- attention branch ---
+        // fused qkv = l_in · wqkv^T  ([t, 3d])
+        s.push(g.step(0, &[&self.l_in, self.wb("attn.qkv.weight"), &self.qkv], &[t, d, stride3], t * stride3));
+        // partial RoPE on q (off 0) and k (off d)
+        let half = self.rot_dim / 2;
+        s.push(g.step(8, &[&self.qkv], &[t, nh, hd, stride3, 0, t, f(self.theta), self.rot_dim], t * nh * half));
+        s.push(g.step(8, &[&self.qkv], &[t, nh, hd, stride3, d, t, f(self.theta), self.rot_dim], t * nh * half));
+        // bidir scores → prefix-LM mask → bidir softmax → bidir apply
+        s.push(g.step(9, &[&self.qkv, &self.scores], &[1, nh, t, hd, stride3, 0, d], nh * t * t));
+        s.push(g.step(10, &[&self.scores], &[1, nh, t, self.prefix], nh * t * t));
+        s.push(g.step(11, &[&self.scores, &self.probs], &[1, nh, t], nh * t));
+        s.push(g.step(12, &[&self.probs, &self.qkv, &self.ctx], &[1, nh, t, hd, stride3, 2 * d, d], nh * t * hd));
+        // proj + bias → l_attn
+        s.push(g.step(0, &[&self.ctx, self.wb("attn.proj.weight"), &self.l_attn], &[t, d, d], t * d));
+        s.push(g.step(6, &[&self.l_attn, self.wb("attn.proj.bias")], &[t, d], t * d));
+        // --- dense FFN branch (same l_in) ---
+        s.push(g.step(0, &[&self.l_in, self.wb("mlp.fc1.weight"), &self.h], &[t, d, ff], t * ff));
+        s.push(g.step(6, &[&self.h, self.wb("mlp.fc1.bias")], &[t, ff], t * ff));
+        s.push(g.step(5, &[&self.h, &self.h2], &[t * ff], t * ff)); // tanh GELU
+        s.push(g.step(0, &[&self.h2, self.wb("mlp.fc2.weight"), &self.l_mlp], &[t, ff, d], t * d));
+        s.push(g.step(6, &[&self.l_mlp, self.wb("mlp.fc2.bias")], &[t, d], t * d));
+        // --- 3-way residual: out = x + l_attn + l_mlp ---
+        s.push(g.step(7, &[x, &self.l_attn, &self.mid], &[t * d], t * d));
+        s.push(g.step(7, &[&self.mid, &self.l_mlp, &self.out], &[t * d], t * d));
+        g.submit(&[], &s);
+        &self.out
+    }
+    pub fn numel(&self) -> usize {
+        (self.t * self.d) as usize
+    }
 }
 
 /// Sparse-MoE FFN: `router → for each expert (w_h, w_g → geglu_shift → w_down) →
@@ -94,6 +211,29 @@ impl<'g> MoeFfn<'g> {
 mod tests {
     use super::*;
     use data::rng::Rng;
+
+    #[test]
+    fn parallel_block_runs() {
+        let gpu = Gpu::new_cpu(pipelines());
+        let (t, d, nh, hd, ff, prefix, rot) = (6u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32);
+        let mut rng = Rng::new(6);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
+        let mut w = HashMap::new();
+        w.insert("ln.weight".into(), vec![1.0; d as usize]);
+        w.insert("ln.bias".into(), r(d as usize));
+        w.insert("attn.qkv.weight".into(), r((3 * d * d) as usize));
+        w.insert("attn.proj.weight".into(), r((d * d) as usize));
+        w.insert("attn.proj.bias".into(), r(d as usize));
+        w.insert("mlp.fc1.weight".into(), r((ff * d) as usize));
+        w.insert("mlp.fc1.bias".into(), r(ff as usize));
+        w.insert("mlp.fc2.weight".into(), r((d * ff) as usize));
+        w.insert("mlp.fc2.bias".into(), r(d as usize));
+        let blk = MoondreamBlock::new(&gpu, &w, t, d, nh, hd, ff, prefix, rot, 1.5e6);
+        let x = gpu.storage_init("x", &(0..(t * d) as usize).map(|_| rng.next_f32() - 0.5).collect::<Vec<f32>>());
+        let out = gpu.read(blk.forward(&x), blk.numel());
+        assert_eq!(out.len(), (t * d) as usize);
+        assert!(out.iter().all(|v| v.is_finite()) && out.iter().any(|&v| v.abs() > 1e-6));
+    }
 
     #[test]
     fn moe_ffn_geglu_runs() {
