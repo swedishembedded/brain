@@ -17,6 +17,9 @@
 //! the file stem) and indexed by name via [`src`]. This crate is pure string
 //! data: no GPU, no std beyond core, safe for every target including wasm32.
 
+/// Kernel specialisation: one source, tunable constants (S3).
+pub mod template;
+
 /// `wgsl/adamw.wgsl`
 pub const ADAMW: &str = include_str!("../wgsl/adamw.wgsl");
 /// `wgsl/add.wgsl`

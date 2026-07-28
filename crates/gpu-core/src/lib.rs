@@ -498,6 +498,35 @@ mod tests {
         assert!(!c.numeric.int8_dot && !c.numeric.f16 && !c.numeric.coop_matrix);
     }
 
+    /// A template-specialised kernel (S3) is just another (name, source) pair:
+    /// it compiles and runs beside its base through the ordinary backend path,
+    /// and the tuned constant actually changes what executes.
+    #[test]
+    fn specialised_kernel_variant_runs_beside_its_base() {
+        static SRC: &str = "const SCALE: u32 = 2u;\n\
+            struct P { n: u32 };\n\
+            @group(0) @binding(0) var<uniform> p: P;\n\
+            @group(0) @binding(1) var<storage, read> x: array<f32>;\n\
+            @group(0) @binding(2) var<storage, read_write> y: array<f32>;\n\
+            @compute @workgroup_size(64)\n\
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>,\n\
+                    @builtin(num_workgroups) nwg: vec3<u32>) {\n\
+                let i = gid.y * (nwg.x * 64u) + gid.x;\n\
+                if (i >= p.n) { return; }\n\
+                y[i] = x[i] * f32(SCALE);\n\
+            }";
+        let (name, spec) = kernels::template::interned("scale", SRC, &[("SCALE", 5)]).unwrap();
+        let gpu = Gpu::new_cpu(&[("scale", SRC), (name, spec)]);
+        let x = gpu.storage_init("x", &[1.0, 2.0, 3.0]);
+        let y = gpu.storage(3);
+        let s0 = gpu.step(0, &[&x, &y], &[3], 3);
+        gpu.submit(&[], &[s0]);
+        assert_eq!(gpu.read(&y, 3), vec![2.0, 4.0, 6.0], "base kernel: SCALE=2");
+        let s1 = gpu.step(1, &[&x, &y], &[3], 3);
+        gpu.submit(&[], &[s1]);
+        assert_eq!(gpu.read(&y, 3), vec![5.0, 10.0, 15.0], "variant: SCALE=5");
+    }
+
     #[test]
     fn dispatch_storage_and_readback() {
         // Exercises the whole plumbing: storage_init, step, submit, read. Uses the
