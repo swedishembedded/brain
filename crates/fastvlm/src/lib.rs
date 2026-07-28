@@ -13,6 +13,7 @@
 
 pub mod config;
 pub mod encoder;
+pub mod model;
 pub mod import;
 
 pub use config::{FastVitHdConfig, FastVlmConfig};
