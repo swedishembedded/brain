@@ -289,14 +289,70 @@ them.
 - **ONNX emission centralised** (0f660d7): `npu::topo::TopoBase` — one DSL and
   one rmsnorm/layernorm/silu emitter across the eight topology builders.
 
+## Closed since (the portability spine + the remaining serving mitigations)
+
+One session (commits 4ca517b..07f28e2), in roadmap order:
+
+- **S1 `DeviceCaps`** (4ca517b): a queryable capability model on every backend —
+  class, limits, subgroup width, unified memory, and a `NumericSupport` tier
+  list where every value is queried, never assumed (fast-f16 stays `false`
+  until measured: Pascal exposes f16 at 1/64 rate). Recorded machine-readable
+  in every perf artifact's env block. Also fixed en route: the wgpu and Vulkan
+  backends never overrode `max_storage_binding_bytes`, so every caller saw a
+  fixed ~2 GiB instead of the device's real limit.
+- **S2 `KernelSelector`** (ff2612c): one pure, memoised policy for which kernel
+  variant runs per (op, shape, caps) — the scattered `kind() != "cpu"` regime
+  tests are gone, and the CPU JIT's inability to run workgroup reductions is an
+  honest capability (`workgroup_reductions`), not a string compare.
+- **A0 int8 serving weights** (5675a08): `--weights-int8` / target suffix
+  `:i8w`; the 7 per-layer linears + LM head quantize at load (per-channel,
+  packed 4/u32), activations quantize per forward, fp32 copies are not kept.
+  Measured on the P40 (decode_heavy): +32% throughput at c=16 (753 vs 570
+  tok/s) and TTFA p99 631 ms vs 2386 ms — but SLOWER at c=1 (78 vs 127),
+  because a 128×128 tile is mostly idle at m=1. That gap forced the next item:
+- **`matmul_i8_gemv`** (same commit): the decode-shaped packed GEMV; int8 c=1
+  now 131 tok/s. The GEMV/tile crossover is measured at m≈8 and lives in the
+  selector (`I8_GEMV_MAX_ROWS`) — refining it per-device is S5's job.
+- **F1/F2 warm start** (5675a08): `Engine::from_map_on` (one device per
+  process, engines share via `new_like`) + a persisted per-adapter driver
+  pipeline cache. `startup`'s two identical rows finally separate: device
+  953.9 → 239.7 ms, total 4117 → 2761 ms.
+- **Admission comparison** (5675a08): `overload --admission
+  {unbounded|depth:N|deadline:ms}` installs real engine policies; rejections
+  flow through `EmissionKind::Rejected` — terminal, never goodput, excluded
+  from the SLO denominator. An uninstallable policy is an error, not a silent
+  fallback. `residency` adds **bytes-weighted** eviction regret (a good policy
+  makes the regretted evictions the cheap ones) and fixes a regret-attribution
+  bug: a re-request now resolves its own eviction entry, not the most recent.
+- **A4 on-device decode window** (42ab2fa): decode feeds the argmax back and
+  advances paged metadata on the device for up to 4 tokens per host
+  round-trip; windows engage only when nothing is waiting, and a mid-window
+  EOS's surplus K/V rolls back. fp32 c=1 127 → 137 tok/s, c=4 286 → 327.
+  Also implemented `dot4I8Packed` in the CPU JIT (it previously failed
+  `Jit::new` hard on any kernel using it).
+- **D prefix cache** (ed3f516): full prompt blocks indexed by (parent physical
+  block, token ids) — exact by construction, no hash to collide; prefill
+  adopts the longest chain and computes only the tail; LRU eviction under
+  pool pressure, live sequences outrank the cache. `kvcache`'s hit-rate
+  counters are now real (`kv_prefix_hit_rate`, null until measured). Writing
+  its property test exposed a real hole: token ids were never validated, and
+  an out-of-vocab id sent the embedding gather out of bounds — silent garbage
+  under the trusted kernels. Now a typed `RejectReason::InvalidToken` at
+  admission plus a prefill backstop.
+- **testgpu adoption** (07f28e2): qwen/gpt/tts/speaker test construction on
+  the shared weak-pool device (qwen proven at `--test-threads=8` on the P40);
+  codec deliberately stays on its production CPU pin.
+
 ## Still planned
 
 1. `capability::Provider` adoption by `qwen`, `yolo`, `depth`, `tts` — each makes
    its model benchmarkable through `CapabilityTarget` with no new benchmark code.
-2. A pluggable admission policy → makes `overload` able to *compare* policies.
-3. Prefix caching / block reuse → makes `kvcache`'s hit-rate and eviction-regret
-   real rather than structurally null.
-4. A pipeline cache → gives `startup` a warm path worth measuring.
-5. Device utilisation counters in `gpu-core` → fills the `resources` block.
-6. `perf gate` + committed hard-floor baselines, and the fidelity gate wired
-   into every scenario rather than available to them.
+2. **S3** parameterised kernels (WGSL `override` / template step) and **S5**
+   the autotuner-as-selector — the measured refinement of every boundary the
+   static policy hard-codes (the i8 GEMV/tile crossover first).
+3. Device utilisation counters in `gpu-core` → fills the `resources` block (K).
+4. `perf gate` + committed hard-floor baselines (J2); `FaultSink` injection
+   points (G); real tokenizer/media stages in `frontend` (I); multi-model
+   `placement` reframing (H).
+5. Raise the global `TEST_THREADS` once the remaining GPU-test crates
+   (glm, moe, vision, depth, …) adopt `gpu_core::testgpu`.
