@@ -63,6 +63,54 @@ pub fn image_token_count(h_bar: u32, w_bar: u32, patch: u32, merge: u32) -> u32 
     gh * gw / (merge * merge)
 }
 
+/// im2col patch packing for one image (`t = 1`), porting HF's
+/// `view → permute(0,1,4,7,5,8,3,2,6,9) → reshape`. Input is a **normalized**
+/// CHW image `[channels, h_bar, w_bar]` (both sides multiples of `patch·merge`);
+/// output is `[N, channels·temporal·patch²]` (1536 for 4B) in spatial-merge-block
+/// order — the exact patch-token stream the ViT patch-embed consumes, and the
+/// same order as [`crate::vision::vision_position_ids`] /
+/// [`crate::vision::pos_embed_bilinear`]. The single frame is repeated across the
+/// `temporal` slices (images carry no motion).
+pub fn pack_patches(img_chw: &[f32], channels: u32, h_bar: u32, w_bar: u32, patch: u32, merge: u32, temporal: u32) -> Vec<f32> {
+    assert_eq!(img_chw.len(), (channels * h_bar * w_bar) as usize, "img must be [C, h_bar, w_bar]");
+    assert!(h_bar % (patch * merge) == 0 && w_bar % (patch * merge) == 0);
+    let (gh, gw) = patch_grid(h_bar, w_bar, patch);
+    let pv = channels * temporal * patch * patch;
+    let n = gh * gw;
+    let mut out = vec![0f32; (n * pv) as usize];
+    let pix = |c: u32, y: u32, x: u32| img_chw[((c * h_bar + y) * w_bar + x) as usize];
+    let mut row = 0u32;
+    for bh in 0..gh / merge {
+        for bw in 0..gw / merge {
+            for ih in 0..merge {
+                for iw in 0..merge {
+                    let (hi, wi) = (bh * merge + ih, bw * merge + iw);
+                    for c in 0..channels {
+                        for tp in 0..temporal {
+                            for ph in 0..patch {
+                                for pw in 0..patch {
+                                    let vidx = ((c * temporal + tp) * patch + ph) * patch + pw;
+                                    out[(row * pv + vidx) as usize] = pix(c, hi * patch + ph, wi * patch + pw);
+                                }
+                            }
+                        }
+                    }
+                    row += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Normalize `[0,1]` pixels to `[-1,1]` (Qwen3-VL uses mean=std=0.5 per channel):
+/// `x -> (x - 0.5) / 0.5`.
+pub fn normalize_unit(pixels: &mut [f32]) {
+    for p in pixels {
+        *p = (*p - 0.5) / 0.5;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +157,39 @@ mod tests {
         // 512×512, patch 16, merge 2 → 32×32 patches → 1024/4 = 256 tokens.
         assert_eq!(patch_grid(512, 512, 16), (32, 32));
         assert_eq!(image_token_count(512, 512, 16, 2), 256);
+    }
+
+    #[test]
+    fn pack_1x1_patches_is_merge_block_order() {
+        // C=1, patch=1, merge=2, temporal=1 on a 2×2 image → 4 patches, pv=1.
+        // merge-block order over a single 2×2 block = row-major (0,0),(0,1),(1,0),(1,1).
+        let img = vec![10.0, 20.0, 30.0, 40.0]; // [1,2,2]
+        let out = pack_patches(&img, 1, 2, 2, 1, 2, 1);
+        assert_eq!(out, vec![10.0, 20.0, 30.0, 40.0]);
+    }
+
+    #[test]
+    fn pack_single_patch_flattens_channel_temporal_ph_pw() {
+        // C=1, patch=2, merge=1, temporal=2 on a 2×2 image → 1 patch,
+        // pv = 1·2·2·2 = 8 = [temporal][ph][pw], frame repeated across temporal.
+        let img = vec![1.0, 2.0, 3.0, 4.0]; // [1,2,2] = [[1,2],[3,4]]
+        let out = pack_patches(&img, 1, 2, 2, 2, 1, 2);
+        // vidx = ((0·2 + tp)·2 + ph)·2 + pw; both temporal slices equal.
+        assert_eq!(out, vec![1.0, 2.0, 3.0, 4.0, /* tp=1 repeat */ 1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn pack_two_channels_are_channel_major() {
+        // C=2, patch=1, merge=1, temporal=1, 1×1 image → 1 patch, pv=2 = [c0, c1].
+        let img = vec![7.0, 9.0]; // c0=7 at (0,0), c1=9 at (0,0)
+        let out = pack_patches(&img, 2, 1, 1, 1, 1, 1);
+        assert_eq!(out, vec![7.0, 9.0]);
+    }
+
+    #[test]
+    fn normalize_maps_unit_to_signed() {
+        let mut p = vec![0.0, 0.5, 1.0];
+        normalize_unit(&mut p);
+        assert_eq!(p, vec![-1.0, 0.0, 1.0]);
     }
 }
