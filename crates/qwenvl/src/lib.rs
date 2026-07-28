@@ -17,6 +17,8 @@ pub mod config;
 pub mod encoder;
 pub mod import;
 pub mod model;
+#[cfg(test)]
+mod parity;
 pub mod mrope;
 pub mod preprocess;
 pub mod vision;
