@@ -8,9 +8,11 @@
 pub mod config;
 pub mod encoder;
 pub mod import;
+pub mod model;
 
 pub use config::{AudioEncoderConfig, QwenAsrConfig};
 pub use encoder::AudioEncoder;
+pub use model::Qwen3Asr;
 
 #[cfg(test)]
 mod tests {
@@ -35,6 +37,47 @@ mod tests {
     fn maxdiff(a: &[f32], b: &[f32]) -> f32 {
         assert_eq!(a.len(), b.len(), "len {} vs {}", a.len(), b.len());
         a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max)
+    }
+
+    fn read_u32_from_f32(path: &str) -> Vec<u32> {
+        read_f32(path).iter().map(|&v| v as u32).collect()
+    }
+
+    /// End-to-end transcription on a real LibriSpeech clip: brain must reproduce
+    /// the HF model's greedy token sequence exactly, and thus the transcription.
+    #[test]
+    #[ignore = "slow: loads the 1.7B checkpoint + cache-free greedy decode (~minutes)"]
+    fn qwen_transcribe_matches_reference() {
+        let dg = "/data/workspace/resources/asr/golden/qwen_decode";
+        if !have(&format!("{dg}/output_ids.f32")) || !have(&format!("{CKPT}/model.safetensors")) {
+            eprintln!("skipping: goldens/checkpoint absent");
+            return;
+        }
+        let cfg = QwenAsrConfig::qwen3_asr_1_7b();
+        let input_ids = read_u32_from_f32(&format!("{dg}/input_ids.f32"));
+        let mel = read_f32(&format!("{dg}/input_features.f32"));
+        let mask = read_f32(&format!("{dg}/input_features_mask.f32"));
+        let valid = mask.iter().filter(|&&v| v > 0.5).count() as u32;
+        let ref_out = read_u32_from_f32(&format!("{dg}/output_ids.f32"));
+        let ref_emb = read_f32(&format!("{dg}/audio_embeds.f32"));
+
+        // audio placement from the prompt: contiguous run of audio_token_id.
+        let atid = cfg.audio_token_id;
+        let row0 = input_ids.iter().position(|&t| t == atid).unwrap() as u32;
+        let n_audio = input_ids.iter().filter(|&&t| t == atid).count() as u32;
+        let seq_budget = input_ids.len() as u32 + ref_out.len() as u32 + 4;
+
+        let model = Qwen3Asr::from_hf(CKPT, cfg, seq_budget, row0, n_audio).expect("load");
+        let audio_embeds = model.encode_audio(&mel, valid);
+        // encoder parity on this clip too (isolates encoder from decoder)
+        let de = maxdiff(&audio_embeds, &ref_emb);
+        eprintln!("this-clip audio_embeds maxdiff {de} (n_audio={n_audio})");
+        assert!(de < 3e-2, "audio_embeds maxdiff {de}");
+
+        let out = model.transcribe(&input_ids, &audio_embeds, &[151643, 151645], 64);
+        eprintln!("brain out ({} tok): {:?}", out.len(), out);
+        eprintln!("ref   out ({} tok): {:?}", ref_out.len(), ref_out);
+        assert_eq!(out, ref_out, "greedy token sequence must match HF exactly");
     }
 
     /// Full audio encoder + projector parity against the dumped HF activations.

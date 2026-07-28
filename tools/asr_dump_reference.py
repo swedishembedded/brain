@@ -133,11 +133,69 @@ def dump_qwen_encoder():
     print("qwen encoder goldens written:", json.dumps(man, indent=2))
 
 
+def dump_qwen_decode():
+    """Full Qwen3-ASR transcription on a real clip: dump the prompt input_ids,
+    the audio placeholder positions, this clip's mel + audio_embeds, the greedy
+    output_ids and the decoded transcription — the end-to-end brain parity target."""
+    import numpy as np
+    import soundfile as sf
+    import torch
+    from transformers import AutoProcessor, Qwen3ASRForConditionalGeneration
+
+    wav_path = os.path.join(RES, "audio", "librispeech_mr_quilter.wav")
+    wav, sr = sf.read(wav_path)
+    wav = wav.astype(np.float32)
+    assert sr == 16000
+
+    proc = AutoProcessor.from_pretrained("Qwen/Qwen3-ASR-1.7B-hf")
+    model = Qwen3ASRForConditionalGeneration.from_pretrained(
+        "Qwen/Qwen3-ASR-1.7B-hf", dtype=torch.float32
+    ).eval()
+
+    inputs = proc.apply_transcription_request(audio=wav, language="en", sampling_rate=16000)
+    inputs = {k: (v.to(torch.float32) if torch.is_floating_point(v) else v) if torch.is_tensor(v) else v
+              for k, v in inputs.items()}
+
+    man = {}
+    input_ids = inputs["input_ids"][0].cpu().numpy()
+    audio_token_id = model.config.audio_token_id
+    audio_pos = np.nonzero(input_ids == audio_token_id)[0]
+    save("qwen_decode", "input_ids", input_ids.astype("float32"), man)
+    man["audio_token_id"] = int(audio_token_id)
+    man["n_audio"] = int(len(audio_pos))
+    man["audio_pos_first"] = int(audio_pos[0])
+    man["audio_pos_contiguous"] = bool(np.all(np.diff(audio_pos) == 1))
+    man["prompt_len"] = int(len(input_ids))
+
+    with torch.no_grad():
+        enc = model.model.audio_tower(
+            input_features=inputs["input_features"].to(torch.float32),
+            input_features_mask=inputs["input_features_mask"],
+        )
+        audio_embeds = model.model.multi_modal_projector(enc.last_hidden_state)
+        save("qwen_decode", "audio_embeds", audio_embeds.cpu().numpy(), man)
+        save("qwen_decode", "input_features", inputs["input_features"][0].cpu().numpy(), man)
+        save("qwen_decode", "input_features_mask", inputs["input_features_mask"][0].cpu().numpy().astype("float32"), man)
+
+        out = model.generate(**inputs, max_new_tokens=256, do_sample=False)
+    gen = out[0, input_ids.shape[0]:].cpu().numpy()
+    save("qwen_decode", "output_ids", gen.astype("float32"), man)
+    text = proc.decode(out[:, input_ids.shape[0]:], return_format="transcription_only")[0]
+    man["transcription"] = text
+    man["output_len"] = int(len(gen))
+
+    with open(os.path.join(GOLD, "qwen_decode", "manifest.json"), "w") as f:
+        json.dump(man, f, indent=2)
+    print("qwen decode goldens written:", json.dumps({k: v for k, v in man.items() if not isinstance(v, list)}, indent=2))
+
+
 if __name__ == "__main__":
     stage = sys.argv[1] if len(sys.argv) > 1 else "frontend"
     if stage == "frontend":
         dump_frontend()
     elif stage == "qwen_encoder":
         dump_qwen_encoder()
+    elif stage == "qwen_decode":
+        dump_qwen_decode()
     else:
         raise SystemExit(f"unknown stage {stage!r}")

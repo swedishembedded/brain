@@ -69,3 +69,42 @@ pub fn map_audio_encoder(src: &HashMap<String, Vec<f32>>, cfg: &AudioEncoderConf
     }
     w
 }
+
+/// Map an HF Qwen3-ASR decoder tensor name (`model.language_model.*`) to a brain
+/// Qwen parameter name. Standard Qwen3 leaves under an extra `language_model.`
+/// prefix; tied embeddings mean `embed_tokens` also serves as the head.
+pub fn map_decoder(hf: &str) -> Option<String> {
+    let s = hf.strip_prefix("model.language_model.")?;
+    match s {
+        "embed_tokens.weight" => return Some("tok.weight".into()),
+        "norm.weight" => return Some("norm.weight".into()),
+        _ => {}
+    }
+    let (n, leaf) = s.strip_prefix("layers.")?.split_once('.')?;
+    let mapped = match leaf {
+        "input_layernorm.weight" => "ln1.weight",
+        "post_attention_layernorm.weight" => "ln2.weight",
+        "self_attn.q_proj.weight" => "attn.wq.weight",
+        "self_attn.k_proj.weight" => "attn.wk.weight",
+        "self_attn.v_proj.weight" => "attn.wv.weight",
+        "self_attn.o_proj.weight" => "attn.wo.weight",
+        "self_attn.q_norm.weight" => "attn.q_norm.weight",
+        "self_attn.k_norm.weight" => "attn.k_norm.weight",
+        "mlp.gate_proj.weight" => "mlp.gate.weight",
+        "mlp.up_proj.weight" => "mlp.up.weight",
+        "mlp.down_proj.weight" => "mlp.down.weight",
+        _ => return None,
+    };
+    Some(format!("blocks.{n}.{mapped}"))
+}
+
+/// Build the brain Qwen decoder weight map from a name→f32 tensor map.
+pub fn map_decoder_weights(src: &HashMap<String, Vec<f32>>) -> HashMap<String, Vec<f32>> {
+    let mut w = HashMap::new();
+    for (name, data) in src {
+        if let Some(mapped) = map_decoder(name) {
+            w.insert(mapped, data.clone());
+        }
+    }
+    w
+}
