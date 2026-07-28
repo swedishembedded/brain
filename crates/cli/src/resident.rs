@@ -60,8 +60,15 @@ pub fn build_executor(gpus: &[(u32, u64)], reserved: u64, ram_total: u64, policy
     if let Some(t) = crate::resident_tts::TtsResident::from_env() {
         models.push(Arc::new(t));
     }
-    // Stateless helpers (no weights) — always available.
+    // Stateless helpers (no weights) — always available. `demo` is the worked
+    // example every transport smoke (busctl_smoke.sh) exercises.
+    models.push(Arc::new(ProviderResident::stateless(Arc::new(crate::caps_cli::DemoModel))));
     models.push(Arc::new(ProviderResident::stateless(Arc::new(crate::imageops::ImageOps))));
+    // FastVLM captioning: the provider manages its own weight residency
+    // (lazy per checkpoint dir, resident thereafter), so it serves as a
+    // stateless resident — invoking it with no checkpoint on disk is a clean
+    // per-call error, not a registration failure.
+    models.push(Arc::new(ProviderResident::stateless(Arc::new(fastvlm::caps::FastVlmProvider::new()))));
 
     Executor::start(models, budgets, policy)
 }

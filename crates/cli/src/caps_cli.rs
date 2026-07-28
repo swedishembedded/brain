@@ -300,7 +300,7 @@ fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
 
 /// A trivial always-available model so `brain do` (and the tests) work with no
 /// weights — and as a worked example of the [`Provider`]/[`Action`] pattern.
-struct DemoModel;
+pub(crate) struct DemoModel;
 struct EchoAction;
 
 impl Action for EchoAction {
