@@ -73,5 +73,5 @@ fn main() {
         "cb0 codec_head_logits: min={:.1}ms p50={:.1}ms max={:.1}ms",
         hs[0], hs[hs.len() / 2], hs[hs.len() - 1]
     );
-    println!("threads(rayon)={}", rayon::current_num_threads());
+    println!("threads={}", std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
 }
