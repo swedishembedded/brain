@@ -110,4 +110,66 @@ mod tests {
             assert_eq!(brain_gen, gen_ref, "brain greedy decode diverges from the HF reference");
         }
     }
+
+    const CAP_EMB: &str = "/data/workspace/resources/vl/parity/fastvlm_cap_embeds.bin";
+    const CAP_LAYOUT: &str = "/data/workspace/resources/vl/parity/fastvlm_cap_layout.bin";
+    const CAP_IDS: &str = "/data/workspace/resources/vl/parity/fastvlm_cap_ids.bin";
+    const CAP_GEN: &str = "/data/workspace/resources/vl/parity/fastvlm_cap_gen.bin";
+
+    #[test]
+    fn fastvlm_image_caption_matches_hf() {
+        // Full image → caption on real weights: brain's decoder consumes the 256 HF
+        // image embeddings (mobileclip vision + projector — brain's own FastViTHD
+        // still needs SE/head import to reach feature parity), splices them into the
+        // residual stream (enable_mm_splice), and greedy-decodes. It must reproduce
+        // the HF caption token-for-token — for the DOSBox logo: "A wooden frame with
+        // the letters B, D, and S in it.". Validates the image-token splice + decode
+        // on real weights + real image semantics.
+        let (Some(embeds), Some(layout), Some(ids), Some(gen_ref)) =
+            (read_f32(CAP_EMB), read_i32(CAP_LAYOUT), read_i32(CAP_IDS), read_i32(CAP_GEN))
+        else {
+            eprintln!("skip: FastVLM caption reference not present (run tools/fastvlm_caption_dump_reference.py)");
+            return;
+        };
+        let Ok(tensors) = checkpoint::safetensors::read(CKPT) else {
+            eprintln!("skip: FastVLM checkpoint not present");
+            return;
+        };
+        std::env::set_var("BRAIN_DEVICE", "cpu");
+        let (pre_len, post_len) = (layout[0] as usize, layout[1] as usize);
+        let n_img = embeds.len() / 896;
+        assert_eq!(ids.len(), pre_len + post_len);
+
+        let mut init: HashMap<String, Vec<f32>> = HashMap::new();
+        for t in tensors {
+            if let Some(name) = map_decoder(&t.name) {
+                init.insert(name, t.data);
+            }
+        }
+        let cfg = FastVlmConfig::fastvlm_0_5b().decoder;
+
+        // Prompt layout: [pre] [n_img image placeholders] [post], image at row pre_len.
+        let img_start = pre_len as u32;
+        let mut seq: Vec<u32> = ids[..pre_len].to_vec();
+        seq.extend(std::iter::repeat(0u32).take(n_img)); // overwritten by the splice
+        seq.extend(&ids[pre_len..]);
+        let prompt_len = seq.len();
+        let t_max = (prompt_len + gen_ref.len() + 1) as u32;
+
+        let mut qwen = Qwen::new(cfg, 1, t_max, &init);
+        qwen.enable_mm_splice(img_start, n_img as u32);
+        qwen.write_img_embeds(&embeds);
+
+        let vocab = FastVlmConfig::fastvlm_0_5b().decoder.vocab as usize;
+        let mut brain_gen = Vec::new();
+        for _ in 0..gen_ref.len() {
+            let lg = qwen.logits_all(&seq);
+            let last = &lg[(seq.len() - 1) * vocab..seq.len() * vocab];
+            let next = last.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
+            brain_gen.push(next);
+            seq.push(next);
+        }
+        eprintln!("brain caption tokens: {brain_gen:?}\nHF    caption tokens: {gen_ref:?}");
+        assert_eq!(brain_gen, gen_ref, "brain image caption diverges from HF");
+    }
 }

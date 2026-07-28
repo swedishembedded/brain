@@ -18,7 +18,8 @@ The validation ladder, weakest → strongest evidence:
 | Check | Model | Result | How |
 |---|---|---|---|
 | **Decoder logits** (24 layers, GQA, SwiGLU, tied head) | FastVLM-0.5B | **mean\|Δ\|≈3e-6, max\|Δ\|≈6e-5, argmax agrees everywhere** | `crates/fastvlm/src/parity.rs` vs `transformers` on the real bf16 checkpoint |
-| **Greedy generation** | FastVLM-0.5B | **brain decodes the identical token stream as HF** — "Name three primary colors." → **"Red, Blue, and Yellow."** | same test; brain argmax-decodes 8 tokens `[6033,11,8697,11,323,25462,13,151645]`, matching HF exactly |
+| **Greedy generation** (text) | FastVLM-0.5B | **brain decodes the identical token stream as HF** — "Name three primary colors." → **"Red, Blue, and Yellow."** | same test; brain argmax-decodes 8 tokens `[6033,11,8697,...]`, matching HF exactly |
+| **Image → caption** (splice + decode) | FastVLM-0.5B | **brain reproduces the HF caption token-for-token** — DOSBox logo → **"A wooden frame with the letters B, D, and S in it."** | `fastvlm_image_caption_matches_hf`: brain splices the 256 HF image embeddings (`enable_mm_splice`) and greedy-decodes `[32,22360,4034,…]`, identical to HF (`tools/fastvlm_caption_dump_reference.py`) |
 
 This validates the **shared decoder backbone** — the same block math (`crates/model/src/block.rs`)
 all three models decode with — against the actual reference model to fp32 reassociation
@@ -38,7 +39,8 @@ Legend: ✅ implemented + validated · 🟡 implemented, validation pending · �
 | **Decoder reference parity** | 🟡 (same harness, 8 GB ckpt) | ✅ (mean\|Δ\|≈3e-6) | 🟡 (MoE, 28 GB ckpt — per-block) |
 | Vision-encoder reference parity | 🟡 | 🟡 | 🟡 |
 | **Greedy generation (text) matches HF** | 🟡 | ✅ ("Red, Blue, and Yellow.") | 🟡 |
-| Full image → caption (vision + generate) | ⬜ | 🟡 (needs vision parity) | ⬜ |
+| **Image → caption (splice + decode) matches HF** | 🟡 | ✅ ("A wooden frame…", HF vision embeds) | 🟡 |
+| Full pipeline incl. brain's own vision tower | 🟡 | ⬜ (FastViTHD needs SE + head.proj + reparam import) | ⬜ |
 | Multi-crop / dynamic resolution | ✅ smart-resize | ✅ pad-to-square | ✅ overlap multi-crop |
 | MoE expert sharding | — | — | ✅ (federated round-trip) |
 | Data-/pipeline-parallel | ✅ (trait + splice seam) | ✅ | ✅ |
