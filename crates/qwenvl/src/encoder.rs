@@ -45,8 +45,12 @@ pub fn vision_pipelines() -> &'static [(&'static str, &'static str)] {
         ("ln_head", kernels::LN_HEAD),
         ("rope2d", kernels::ROPE2D),
         ("gelu_erf", kernels::GELU_ERF), // index 12: erf GELU for the PatchMerger
+        ("region_copy", kernels::REGION_COPY), // index 13: DeepStack tap snapshots
     ]
 }
+
+/// Snapshot a `[rows, dim]` buffer via region_copy (whole-buffer contiguous copy).
+const V_REGION_COPY: usize = 13;
 
 // PatchMerger kernel indices into `vision_pipelines`.
 const M_LAYERNORM: usize = 0;
@@ -131,6 +135,14 @@ impl<'g> VisionEncoder<'g> {
     /// host-packed `[N, patch_vec]` patch tensor in merge-block order. Returns the
     /// `[N, hidden]` patch features (post final LayerNorm).
     pub fn encode(&self, grid_h: u32, grid_w: u32, pixels: &[f32]) -> Vec<f32> {
+        self.encode_with_taps(grid_h, grid_w, pixels, &[]).0
+    }
+
+    /// Like [`Self::encode`], but also snapshot the output of each block whose
+    /// index is in `taps` (DeepStack tap points, e.g. `[5, 11, 17]`). Returns the
+    /// final `[N, hidden]` features and one `[N, hidden]` snapshot per tap (in the
+    /// order given), for the DeepStack mergers.
+    pub fn encode_with_taps(&self, grid_h: u32, grid_w: u32, pixels: &[f32], taps: &[u32]) -> (Vec<f32>, Vec<Vec<f32>>) {
         let g = self.gpu;
         let ids = vit_ids();
         let c = self.cfg.hidden;
@@ -150,6 +162,7 @@ impl<'g> VisionEncoder<'g> {
         let pos = g.storage_init("vit.pos", &self.pos_embeds(grid_h, grid_w));
         let pe = g.storage((n * c) as u64); // patch-embed output (kept distinct from x)
         let x = g.storage((n * c) as u64);
+        let tap_bufs: Vec<DeviceBuffer> = taps.iter().map(|_| g.storage((n * c) as u64)).collect();
 
         let scr = VitScratch::new(g, &sh, n, n, n); // one image → whole-image spans
 
@@ -182,13 +195,20 @@ impl<'g> VisionEncoder<'g> {
                 ls2: None,
             };
             vit_block_fwd(g, &ids, &sh, &bw, &x, n, &[(0, n)], n, &scr, &mut steps);
+            // Snapshot this block's output for DeepStack before the next block
+            // overwrites x (region_copy: whole-buffer contiguous copy).
+            if let Some(i) = taps.iter().position(|&t| t == b) {
+                steps.push(g.step(V_REGION_COPY, &[&x, &tap_bufs[i]], &[n, c, c, 0], n * c));
+            }
         }
         // Final LayerNorm into a fresh output buffer.
         let out = g.storage((n * c) as u64);
         steps.push(g.step(ids.layernorm, &[&x, self.wb("norm.weight"), self.wb("norm.bias"), &out], &[c, n, gpu_core::f(sh.eps)], n));
 
         g.submit(&[], &steps);
-        g.read(&out, (n * c) as usize)
+        let features = g.read(&out, (n * c) as usize);
+        let tap_feats = tap_bufs.iter().map(|tb| g.read(tb, (n * c) as usize)).collect();
+        (features, tap_feats)
     }
 }
 
@@ -314,6 +334,34 @@ mod tests {
         w.insert("fc2.weight".into(), r(out_dim as usize * merged));
         w.insert("fc2.bias".into(), r(out_dim as usize));
         w
+    }
+
+    #[test]
+    fn encode_with_taps_captures_intermediate_blocks() {
+        let cfg = tiny_cfg(); // depth 2
+        let gpu = Gpu::new_cpu(vision_pipelines());
+        let weights = rand_weights(&cfg, 7);
+        let enc = VisionEncoder::new(&gpu, cfg.clone(), &weights);
+        let (gh, gw) = (4u32, 4u32);
+        let n = (gh * gw) as usize;
+        let pv = cfg.patch_vec_dim() as usize;
+        let mut rng = Rng::new(99);
+        let pixels: Vec<f32> = (0..n * pv).map(|_| rng.next_f32() - 0.5).collect();
+
+        // Tap block 0 (its output must differ from the final post-norm features).
+        let (features, taps) = enc.encode_with_taps(gh, gw, &pixels, &[0]);
+        assert_eq!(taps.len(), 1);
+        assert_eq!(taps[0].len(), n * cfg.hidden as usize);
+        assert!(taps[0].iter().all(|v| v.is_finite()) && taps[0].iter().any(|&v| v.abs() > 1e-6));
+        assert!(taps[0].iter().zip(&features).any(|(a, b)| (a - b).abs() > 1e-4), "tap must differ from final features");
+
+        // A DeepStack merger (postshuffle norm) consumes the tap → visual tokens.
+        let (in_dim, merge, out_dim) = (cfg.hidden, cfg.spatial_merge_size, cfg.out_hidden_size);
+        let mw = merger_weights(in_dim, merge, out_dim, true, 8);
+        let ds = PatchMerger::new(&gpu, &mw, in_dim, merge, out_dim, true);
+        let embeds = ds.merge(&taps[0], gh * gw);
+        assert_eq!(embeds.len(), (gh * gw / (merge * merge) * out_dim) as usize);
+        assert!(embeds.iter().all(|v| v.is_finite()));
     }
 
     #[test]
