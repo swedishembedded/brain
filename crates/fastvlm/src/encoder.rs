@@ -105,6 +105,17 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("attn_scores_cross", kernels::ATTN_SCORES_CROSS),
     ("attn_softmax_cross", kernels::ATTN_SOFTMAX_CROSS),
     ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),
+    // --- backward (attention block: LN + fused-qkv MHSA) ---
+    ("matmul_dx", kernels::MATMUL_DX),
+    ("matmul_dw", kernels::MATMUL_DW),
+    ("layernorm_dx", kernels::LAYERNORM_DX),
+    ("layernorm_dgamma", kernels::LAYERNORM_DGAMMA),
+    ("layernorm_dbeta", kernels::LAYERNORM_DBETA),
+    ("ln_stats", kernels::LN_STATS),
+    ("attn_bwd_dscores_cross", kernels::ATTN_BWD_DSCORES_CROSS),
+    ("attn_bwd_dv_cross", kernels::ATTN_BWD_DV_CROSS),
+    ("attn_bwd_dq_cross", kernels::ATTN_BWD_DQ_CROSS),
+    ("attn_bwd_dk_cross", kernels::ATTN_BWD_DK_CROSS),
 ];
 
 /// Cached conv kernel-id resolution against [`PIPELINES`].
@@ -167,6 +178,11 @@ impl ConvUnit {
 
     pub fn out_shape(&self) -> Shape {
         self.out_shape
+    }
+
+    /// Input element count (`N·C·H·W`) — used to size the input grad in the encoder.
+    pub fn in_numel(&self) -> u32 {
+        self.conv.in_shape.numel()
     }
 
     pub fn param_list(&self) -> Vec<(String, usize)> {
@@ -358,6 +374,11 @@ impl RepMixerBlock {
         ctx.gpu.submit(&[], &[ctx.step(self.k_add2, &[d_out, &d_t_ffn, &d_t], &[tot], tot)]);
         self.mixer.backward(ctx, ps, x_in, &d_t, d_in);
     }
+
+    /// The block's cached output buffer, valid after `forward`.
+    pub fn output(&self) -> &DeviceBuffer {
+        &self.out
+    }
 }
 
 /// PatchEmbed — the FastViTHD inter-stage downsample (stride-2, `in_ch → out_ch`):
@@ -399,6 +420,11 @@ impl PatchEmbed {
         let d_r = ctx.gpu.storage(self.rlk.out_shape().numel() as u64);
         self.proj.backward(ctx, ps, r, d_out, &d_r);
         self.rlk.backward(ctx, ps, x_in, &d_r, d_in);
+    }
+
+    /// The downsample's cached output buffer (`= proj`'s output), valid after `forward`.
+    pub fn output(&self) -> &DeviceBuffer {
+        self.proj.output()
     }
 }
 
@@ -523,6 +549,87 @@ impl AttentionBlock {
         );
         &self.out
     }
+
+    /// Backward of [`forward`](Self::forward). Reverses the two LayerScale residuals,
+    /// the ConvFFN, the fused-qkv MHSA (full attention via the cross bwd kernels —
+    /// the cached `probs` carry the softmax), the pre-attention LayerNorm, and the
+    /// NCHW↔NLC transposes (their adjoint is the opposite transpose). Both residual
+    /// identity paths accumulate into `d_in`. (`x_in` is unused — the forward cached
+    /// every activation the backward needs, including the NLC input `self.nlc`.)
+    pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, _x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
+        let g = ctx.gpu;
+        let (nn, ch, h, w) = (self.out_shape.n, self.out_shape.c, self.out_shape.h, self.out_shape.w);
+        let rows = h * w;
+        let total = self.out_shape.numel();
+        let (c3, hd, heads) = (3 * ch, ATTN_HEAD_DIM, self.heads);
+        let eps = 1e-5f32;
+        let rc = (rows * ch) as u64;
+        let d_f_out = g.storage(rc);
+        let d_res1_ffn = g.storage(rc);
+        let d_res1 = g.storage(rc);
+        let d_back = g.storage(rc);
+        let d_proj = g.storage(rc);
+        let d_ctxb = g.storage(rc);
+        let d_qkv = g.storage(3 * rc);
+        let dscores = g.storage((heads * rows * rows) as u64);
+        let d_normed = g.storage(rc);
+        let d_nlc = g.storage(rc);
+        let d_xattn = g.storage(rc);
+        let (mean, inv) = (g.storage(rows as u64), g.storage(rows as u64));
+
+        // ls2 residual: out = res1 + film(ffn(res1), ls2). d_res1 = d_out (identity).
+        let f_out = self.ffn.output();
+        g.submit(
+            &[],
+            &[
+                g.step(kidx("film_chan_dx"), &[d_out, ps.w(&self.ls2), &d_f_out], &[nn, ch, h, w], total),
+                g.step(kidx("film_chan_dsb"), &[f_out, d_out, ps.g(&self.ls2)], &[nn, ch, h, w], nn * ch),
+            ],
+        );
+        self.ffn.backward(ctx, ps, &self.res1, &d_f_out, &d_res1_ffn);
+        g.submit(&[], &[g.step(kidx("add2"), &[d_out, &d_res1_ffn, &d_res1], &[total], total)]);
+
+        // ls1 residual: res1 = x_in + film(back, ls1). d_x_in = d_res1 (identity).
+        g.submit(
+            &[],
+            &[
+                g.step(kidx("film_chan_dx"), &[&d_res1, ps.w(&self.ls1), &d_back], &[nn, ch, h, w], total),
+                g.step(kidx("film_chan_dsb"), &[&self.back, &d_res1, ps.g(&self.ls1)], &[nn, ch, h, w], nn * ch),
+                // back = nlc_nchw(proj) → d_proj = nchw_nlc(d_back) (transpose adjoint).
+                g.step(kidx("nchw_nlc"), &[&d_back, &d_proj], &[total, ch, rows], total),
+                // proj = ctxb·proj_wᵀ + bias.
+                g.step(kidx("bias_grad"), &[&d_proj, ps.g(&self.proj_b)], &[rows, ch], ch),
+                g.step(kidx("matmul_dw"), &[&d_proj, &self.ctxb, ps.g(&self.proj_w)], &[rows, ch, ch], ch * ch),
+                g.step(kidx("matmul_dx"), &[&d_proj, ps.w(&self.proj_w), &d_ctxb], &[rows, ch, ch, 0], rows * ch),
+            ],
+        );
+        // Full-attention backward: cached probs carry the softmax; d_ctxb → d_qkv.
+        g.submit(
+            &[],
+            &[
+                g.step(kidx("attn_bwd_dscores_cross"), &[&d_ctxb, &self.qkv, &self.probs, &dscores], &[1, heads, rows, rows, hd, c3, 2 * ch, ch], heads * rows * rows),
+                g.step(kidx("attn_bwd_dv_cross"), &[&self.probs, &d_ctxb, &d_qkv], &[1, heads, rows, rows, hd, c3, 2 * ch, ch], heads * rows * hd),
+                g.step(kidx("attn_bwd_dq_cross"), &[&dscores, &self.qkv, &d_qkv], &[1, heads, rows, rows, hd, c3, c3, 0, ch], heads * rows * hd),
+                g.step(kidx("attn_bwd_dk_cross"), &[&dscores, &self.qkv, &d_qkv], &[1, heads, rows, rows, hd, c3, c3, 0, ch], heads * rows * hd),
+                // qkv = normed·qkv_wᵀ (no bias).
+                g.step(kidx("matmul_dw"), &[&d_qkv, &self.normed, ps.g(&self.qkv_w)], &[rows, ch, c3], c3 * ch),
+                g.step(kidx("matmul_dx"), &[&d_qkv, ps.w(&self.qkv_w), &d_normed], &[rows, ch, c3, 0], rows * ch),
+                // LayerNorm over C backward.
+                g.step(kidx("ln_stats"), &[&self.nlc, &mean, &inv], &[ch, rows, f(eps)], rows),
+                g.step(kidx("layernorm_dgamma"), &[&d_normed, &self.nlc, &mean, &inv, ps.g(&self.norm_w)], &[ch, rows], ch),
+                g.step(kidx("layernorm_dbeta"), &[&d_normed, ps.g(&self.norm_b)], &[ch, rows], ch),
+                g.step(kidx("layernorm_dx"), &[&self.nlc, ps.w(&self.norm_w), &d_normed, &d_nlc], &[ch, rows, f(eps)], rows),
+                // nlc = nchw_nlc(x_in) → d_x_attn = nlc_nchw(d_nlc); d_in = d_res1 + d_x_attn.
+                g.step(kidx("nlc_nchw"), &[&d_nlc, &d_xattn], &[total, ch, rows], total),
+                g.step(kidx("add2"), &[&d_res1, &d_xattn, d_in], &[total], total),
+            ],
+        );
+    }
+
+    /// The block's cached output buffer, valid after `forward`.
+    pub fn output(&self) -> &DeviceBuffer {
+        &self.out
+    }
 }
 
 /// RepCPE — the FastViTHD conditional positional encoding before the attention
@@ -564,6 +671,22 @@ impl Layer {
             Layer::Rep(b) => b.forward(ctx, ps, x),
             Layer::Attn(b) => b.forward(ctx, ps, x),
             Layer::Down(d) => d.forward(ctx, ps, x),
+        }
+    }
+    fn output(&self) -> &DeviceBuffer {
+        match self {
+            Layer::Conv(c) => c.output(),
+            Layer::Rep(b) => b.output(),
+            Layer::Attn(b) => b.output(),
+            Layer::Down(d) => d.output(),
+        }
+    }
+    fn backward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
+        match self {
+            Layer::Conv(c) => c.backward(ctx, ps, x_in, d_out, d_in),
+            Layer::Rep(b) => b.backward(ctx, ps, x_in, d_out, d_in),
+            Layer::Attn(b) => b.backward(ctx, ps, x_in, d_out, d_in),
+            Layer::Down(d) => d.backward(ctx, ps, x_in, d_out, d_in),
         }
     }
 }
@@ -664,6 +787,36 @@ impl Encoder {
         ctx.gpu.submit(&[], &[ctx.step(self.k_nchw_nlc, &[cur, &self.out], &[total, self.feature_dim, self.tokens], total)]);
         ctx.gpu.read(&self.out, total as usize)
     }
+
+    /// Backward from the `[tokens, feature_dim]` (NLC) output grad `d_out`: fill every
+    /// layer's grads in `ps` and return the input-image grad `[1, 3, input, input]`.
+    /// Reverses feature_select (nchw_nlc adjoint = nlc_nchw) then the layer chain,
+    /// each layer's cached output feeding the next layer's backward as its input.
+    pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, img: &DeviceBuffer, d_out: &DeviceBuffer) -> Vec<f32> {
+        let g = ctx.gpu;
+        // feature_select backward: d(last conv output, NCHW) = nlc_nchw(d_out).
+        let last = self.layers.last().unwrap().out_shape();
+        let total = self.tokens * self.feature_dim;
+        let d_last = g.storage(last.numel() as u64);
+        g.submit(&[], &[g.step(kidx("nlc_nchw"), &[d_out, &d_last], &[total, self.feature_dim, self.tokens], total)]);
+
+        // Layers in reverse; each layer's input is the previous layer's output (img
+        // for layer 0). d_cur threads the residual-stream grad back to the image.
+        let img_n = match &self.layers[0] {
+            Layer::Conv(c) => c.in_numel(),
+            _ => panic!("first layer must be the stem conv"),
+        };
+        let n = self.layers.len();
+        let mut d_cur = d_last;
+        for i in (0..n).rev() {
+            let x_in = if i == 0 { img } else { self.layers[i - 1].output() };
+            let in_numel = if i == 0 { img_n } else { self.layers[i - 1].out_shape().numel() };
+            let d_next = g.storage(in_numel as u64);
+            self.layers[i].backward(ctx, ps, x_in, &d_cur, &d_next);
+            d_cur = d_next;
+        }
+        g.read(&d_cur, img_n as usize)
+    }
 }
 
 #[cfg(test)]
@@ -748,6 +901,109 @@ mod tests {
             im.get_mut("cu.bias").unwrap()[j] -= eps;
             let num = (loss(&ip, &x_host) - loss(&im, &x_host)) / (2.0 * eps);
             assert!(ok(g_b[j], num), "d bias[{j}]: analytic {} vs numeric {}", g_b[j], num);
+        }
+    }
+
+    #[test]
+    fn encoder_backward_matches_finite_diff() {
+        // Full FastViTHD tower end-to-end: stem → RepMixer stages → PatchEmbed
+        // downsamples → RepCPE + AttentionBlock stages → conv_exp → feature_select.
+        // The input-image grad threads through every layer; sampled layer weights
+        // (stem, a RepMixer, an AttentionBlock's qkv, conv_exp) cover the chain.
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let enc = Encoder::new(&ctx, [1, 1, 1, 1, 1], [8, 16, 16, 32, 32], 2, 2, 64);
+        let plist = enc.param_list();
+        let out_n = (enc.tokens() * enc.feature_dim()) as usize;
+        let img_n = (3 * 64 * 64) as usize;
+        let mut rng = Rng::new(19);
+        let init = rand_init(&plist, &mut rng);
+        let x_host: Vec<f32> = (0..img_n).map(|_| (rng.next_f32() - 0.5) * 0.4).collect();
+
+        let ps = ParamStore::new(&gpu, plist.clone(), &init);
+        ps.zero_grads(&gpu);
+        let xb = gpu.storage_init("img", &x_host);
+        let _ = enc.forward(&ctx, &ps, &xb);
+        let d_out = gpu.storage_init("dout", &vec![1.0f32; out_n]);
+        let d_img = enc.backward(&ctx, &ps, &xb, &d_out);
+        let keys = ["stem.0.conv.weight", "network.0.0.token_mixer.conv.weight", "network.3.0.token_mixer.qkv.weight", "conv_exp.conv.weight"];
+        let grads: HashMap<&str, Vec<f32>> = keys.iter().map(|&k| (k, ps.read_grad(&gpu, k))).collect();
+
+        let loss = |im: &HashMap<String, Vec<f32>>, xh: &[f32]| -> f32 {
+            let ps = ParamStore::new(&gpu, plist.clone(), im);
+            let xb = gpu.storage_init("img", xh);
+            enc.forward(&ctx, &ps, &xb).iter().sum::<f32>()
+        };
+        let eps = 1e-3f32;
+        // Deep tower ⇒ larger accumulated roundoff; a slightly looser atol.
+        let ok = |a: f32, num: f32| (a - num).abs() <= 8e-3 + 1e-1 * num.abs();
+
+        for &i in &[0usize, 1000, 4000, 8000, 11000] {
+            let (mut xp, mut xm) = (x_host.clone(), x_host.clone());
+            xp[i] += eps;
+            xm[i] -= eps;
+            let num = (loss(&init, &xp) - loss(&init, &xm)) / (2.0 * eps);
+            assert!(ok(d_img[i], num), "d_img[{i}]: analytic {} vs numeric {}", d_img[i], num);
+        }
+        for &key in &keys {
+            for &j in &[0usize, 1] {
+                let (mut ip, mut im) = (init.clone(), init.clone());
+                ip.get_mut(key).unwrap()[j] += eps;
+                im.get_mut(key).unwrap()[j] -= eps;
+                let num = (loss(&ip, &x_host) - loss(&im, &x_host)) / (2.0 * eps);
+                assert!(ok(grads[key][j], num), "d {key}[{j}]: analytic {} vs numeric {}", grads[key][j], num);
+            }
+        }
+    }
+
+    #[test]
+    fn attention_block_backward_matches_finite_diff() {
+        // The FastViTHD stage-3/4 block: MHSA(LN) + LayerScale residual, then ConvFFN
+        // + LayerScale residual. Input grad + norm/qkv/proj/ls + ffn weights.
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let in_shape = Shape::new(1, 32, 3, 3); // 32 ch = 1 head × 32; 9 tokens
+        let blk = AttentionBlock::new(&ctx, "at", in_shape, 32, 2);
+        let plist = blk.param_list();
+        let out_n = blk.out_shape().numel() as usize;
+        let mut rng = Rng::new(14);
+        let init = rand_init(&plist, &mut rng);
+        let x_host: Vec<f32> = (0..in_shape.numel() as usize).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
+
+        let ps = ParamStore::new(&gpu, plist.clone(), &init);
+        ps.zero_grads(&gpu);
+        let xb = gpu.storage_init("x", &x_host);
+        let _ = blk.forward(&ctx, &ps, &xb);
+        let d_out = gpu.storage_init("dout", &vec![1.0f32; out_n]);
+        let d_in = gpu.storage(in_shape.numel() as u64);
+        blk.backward(&ctx, &ps, &xb, &d_out, &d_in);
+        let g_in = gpu.read(&d_in, in_shape.numel() as usize);
+        let keys = ["at.norm.weight", "at.token_mixer.qkv.weight", "at.token_mixer.proj.weight", "at.layer_scale_1_sb", "at.convffn.fc1.conv.weight"];
+        let grads: HashMap<&str, Vec<f32>> = keys.iter().map(|&k| (k, ps.read_grad(&gpu, k))).collect();
+
+        let loss = |im: &HashMap<String, Vec<f32>>, xh: &[f32]| -> f32 {
+            let ps = ParamStore::new(&gpu, plist.clone(), im);
+            let xb = gpu.storage_init("x", xh);
+            gpu.read(blk.forward(&ctx, &ps, &xb), out_n).iter().sum::<f32>()
+        };
+        let eps = 1e-3f32;
+        let ok = |a: f32, num: f32| (a - num).abs() <= 5e-3 + 8e-2 * num.abs();
+
+        for &i in &[0usize, 30, 77, 100, 150, 200] {
+            let (mut xp, mut xm) = (x_host.clone(), x_host.clone());
+            xp[i] += eps;
+            xm[i] -= eps;
+            let num = (loss(&init, &xp) - loss(&init, &xm)) / (2.0 * eps);
+            assert!(ok(g_in[i], num), "d_in[{i}]: analytic {} vs numeric {}", g_in[i], num);
+        }
+        for &key in &keys {
+            for &j in &[0usize, 3, 5] {
+                let (mut ip, mut im) = (init.clone(), init.clone());
+                ip.get_mut(key).unwrap()[j] += eps;
+                im.get_mut(key).unwrap()[j] -= eps;
+                let num = (loss(&ip, &x_host) - loss(&im, &x_host)) / (2.0 * eps);
+                assert!(ok(grads[key][j], num), "d {key}[{j}]: analytic {} vs numeric {}", grads[key][j], num);
+            }
         }
     }
 
