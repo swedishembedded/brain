@@ -26,6 +26,14 @@ USAGE
       units, excludes runs whose correctness gate failed, and warns on every
       environment/workload axis that differs between the runs.
 
+  brain perf gate <candidate.json> --baseline <b.json> [--floor 0.85] [--update]
+      Hard-floor regression gate: throughput floors at --floor of baseline,
+      latency ceilings at baseline / --floor (generous on purpose — tight
+      deltas flap on shared boxes and a flapping gate gets deleted). Refuses
+      incomparable pairs (different scenario/unit/hardware/build), smoke runs
+      and correctness-failed runs; unmeasured metrics skip and say so.
+      --update promotes the candidate to the new baseline. Exit 1 on failure.
+
 OPTIONS
   --target <spec>       what to measure (default: fake)
                           fake                     built-in synthetic engine (no
@@ -75,6 +83,7 @@ pub fn run_perf(args: &[String]) {
         Some("list") => print!("{}", perf::list()),
         Some("run") => run(&args[1..]),
         Some("compare") => compare(&args[1..]),
+        Some("gate") => gate(&args[1..]),
         Some("placement") => match crate::perf_engine::run_placement(&args[1..]) {
             Ok(art) => emit(&art, None, 0),
             Err(e) => {
@@ -97,6 +106,62 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
         eprintln!("perf: {flag} needs a value");
         std::process::exit(2);
     })
+}
+
+/// `perf gate <candidate.json> --baseline <b.json> [--floor 0.85] [--update]`
+/// — hard-floor regression gate (J2). Exit 0 = pass, 1 = fail/refused.
+fn gate(args: &[String]) {
+    let mut candidate = None;
+    let mut baseline = None;
+    let mut floor = 0.85f64;
+    let mut update = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--baseline" => baseline = Some(val(args, &mut i, "--baseline")),
+            "--floor" => floor = val(args, &mut i, "--floor").parse().unwrap_or(floor),
+            "--update" => update = true,
+            other if candidate.is_none() => candidate = Some(other.to_string()),
+            other => {
+                eprintln!("perf gate: unexpected argument {other:?}");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    let (Some(cand_path), Some(base_path)) = (candidate, baseline) else {
+        eprintln!("usage: brain perf gate <candidate.json> --baseline <baseline.json> [--floor 0.85] [--update]");
+        std::process::exit(2);
+    };
+    let cand = match perf::report::load(&cand_path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("perf gate: {e}");
+            std::process::exit(2);
+        }
+    };
+    if update {
+        // Promote the candidate to the new baseline — deliberate, never a
+        // side effect of a passing run.
+        if let Err(e) = std::fs::copy(&cand_path, &base_path) {
+            eprintln!("perf gate: updating baseline: {e}");
+            std::process::exit(2);
+        }
+        eprintln!("baseline {base_path} <- {cand_path}");
+        return;
+    }
+    let base = match perf::report::load(&base_path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("perf gate: {e} (create one with --update)");
+            std::process::exit(2);
+        }
+    };
+    let outcome = perf::gate::gate(&cand, &base, floor);
+    print!("{}", perf::gate::render(&outcome, floor));
+    if !outcome.passed() {
+        std::process::exit(1);
+    }
 }
 
 fn compare(args: &[String]) {
