@@ -15,6 +15,7 @@ pub mod config;
 pub mod encoder;
 pub mod model;
 pub mod import;
+pub mod vision_import;
 #[cfg(test)]
 mod parity;
 #[cfg(test)]
