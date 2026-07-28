@@ -12,5 +12,6 @@
 //! today: configuration.
 
 pub mod config;
+pub mod import;
 
 pub use config::{FastVitHdConfig, FastVlmConfig};
