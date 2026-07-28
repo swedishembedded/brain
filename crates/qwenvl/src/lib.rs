@@ -15,5 +15,6 @@
 
 pub mod config;
 pub mod mrope;
+pub mod vision;
 
 pub use config::{Qwen3VlConfig, VisionConfig};
