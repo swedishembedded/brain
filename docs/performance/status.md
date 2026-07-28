@@ -2,7 +2,7 @@
 
 Design: [`benchmarking.md`](benchmarking.md). This file tracks what is built.
 
-## P1 — harness core + Tier-1 scenarios ✅
+## P1–P5 — all 14 scenarios ✅
 
 **Crate `crates/perf`** (`brain-perf`, lib `perf`), 59 unit tests.
 
@@ -160,21 +160,61 @@ meaningless for output quality.)*
   tests assumed cards 0..n exist and died inside the driver. They now gate on
   `gpu_core::discrete_gpu_count()` and skip with a message.
 
-## Planned
+## Tier 2 — what each scenario can and cannot see today
 
-| Phase | Contents |
-|---|---|
-| **P2** | `startup`; the **correctness gate** wired into every scenario (reusing `make parity` / `gradcheck`); `perf gate` + committed hard-floor baselines; `--profile edge` scaled matrix |
-| **P3** | `residency` ★ (multi-model catalogue > memory, Zipf popularity, eviction regret) and `kvcache` (session lifecycle under KV pressure) |
-| **P4** | `placement` (CPU/GPU/Vulkan/NPU, `placement_efficiency`), `mixed` (traffic-class isolation), `overload` (admission control), `cancel` |
-| **P5** | `frontend`, `soak`, `faults`, `energy` |
+All ten are implemented and run. Each is explicit about its limits: where a
+metric needs an engine capability that does not exist, the field is `null` and
+the artifact carries a `notes` string. A confident number nobody measured is
+worse than an honest gap.
 
-Engine work these depend on, in dependency order:
+| scenario | measures today | blocked on |
+|---|---|---|
+| `startup` | device init / weights / first prefill, cold vs second build | a pipeline cache — there is no warm path, and the two rows matching is the evidence |
+| `mixed` | per-class goodput, P99 TTFA/IAL, **normalised slowdown** vs an isolated baseline, Jain fairness | — |
+| `overload` | capacity, then 0.5–4× offered load; goodput, queue P99, wasted admissions | a pluggable **admission policy**: nothing is ever rejected, so policies cannot be compared |
+| `cancel` | abort latency, block reclaim, waste, neighbour interference | an async client-disconnect path (transport-level) |
+| `kvcache` | admission pressure: KV stalls and stall time under a working set 3× the pool | **prefix caching / cross-request block reuse** — without it hit-rate and eviction-regret are structurally null |
+| `residency` ★ | warm/cold TTFA, weight-cache hit rate, **eviction regret**, per-model fairness under a shifting Zipf | wiring to real `ResidentModel`s for true load latency (activation is modelled from size) |
+| `placement` | `placement_efficiency` = best combined / best single | nothing — but `--device` is process-global, so it analyses per-device artifacts |
+| `frontend` | JSONL encode/decode and chat-template cost; host cores per saturated device | tokenizer + media inputs for the remaining stages |
+| `faults` | device-OOM injection, detection, no silent corruption | a **multi-rank harness** for worker death, hung ranks, collective timeouts, corrupt KV |
+| `soak` | throughput/latency/memory/KV series; drift per hour | nothing — but it **refuses to extrapolate** below 600 s |
+
+Cross-cutting: `fidelity` (greedy-token gate; a failing run is written
+`valid: false` and excluded from `compare`) and `energy` (external power
+sampling — an unreadable meter yields `null`, never a fabricated zero).
+
+### Second wave of findings (2×Tesla P40)
+
+- **`residency`: 64% eviction regret.** 24 models at 4× overcommit under a Zipf
+  load whose popularity shifts mid-run: LRU evicts models wanted again almost
+  immediately about two thirds of the time, hit rate 48%, fairness 0.494 with
+  every model still served. That is the "bad policy" signature rather than the
+  "cache too small" one — the distinction the regret metric exists to draw.
+- **`startup`: there is no warm start.** A second engine built in the same
+  process costs the same as the first (~3.1 s vs ~3.5 s, i.e. no reuse), because
+  every `Engine` constructs its own `Gpu` and recompiles every WGSL pipeline.
+  Device init ~0.3 s, weights ~1.8 s, first prefill ~1.0 s.
+- **`frontend`: the host is not the bottleneck.** JSONL + templating cost is
+  negligible against a ~290 tok/s device rate (well under 0.01 cores), so the
+  ceiling found earlier is genuinely in the engine.
+- **`cancel` is clean**: zero waste, zero leaked blocks, neighbours unharmed.
+- **An engine crash, found by `kvcache`.** A prompt longer than
+  `max_blocks_per_seq * block_size` wrote **past its row of the block table**
+  (index 82944 of 82944) — silently corrupting the next sequence's mapping
+  before it panicked. Now `Engine::max_seq_len` bounds it and the scheduler
+  rejects oversized requests at admission, reporting them in
+  `StepReport.rejected`, so the queue keeps moving instead of crashing or
+  blocking forever.
+
+## Still planned
 
 1. `capability::Provider` adoption by `qwen`, `yolo`, `depth`, `tts` — each makes
    its model benchmarkable through `CapabilityTarget` with no new benchmark code.
-2. Cancellation as an engine concept (a request abortable mid-decode) → `cancel`.
-3. A pluggable admission policy → `overload`.
-4. KV/eviction counters on the paged engine and on `residency` → `kvcache`,
-   `residency`.
-5. Device and energy counters in `gpu-core` → `resources`, `energy`.
+2. A pluggable admission policy → makes `overload` able to *compare* policies.
+3. Prefix caching / block reuse → makes `kvcache`'s hit-rate and eviction-regret
+   real rather than structurally null.
+4. A pipeline cache → gives `startup` a warm path worth measuring.
+5. Device utilisation counters in `gpu-core` → fills the `resources` block.
+6. `perf gate` + committed hard-floor baselines, and the fidelity gate wired
+   into every scenario rather than available to them.

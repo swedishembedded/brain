@@ -419,7 +419,7 @@ perf/compare: release
 
 # CI-sized: every scenario shrunk to seconds, on the CPU backend.
 perf/smoke: release
-	@set -e; for s in latency throughput serve sweep; do \
+	@set -e; for s in latency throughput serve sweep mixed overload soak frontend; do \
 		$(BRAIN) perf run $$s --target $(PERF_TARGET) --workload interactive --smoke --seed $(SEED); \
 	done
 

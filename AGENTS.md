@@ -422,11 +422,17 @@ flattering-but-wrong number):
   and warns on every environment/workload axis that differs;
 - a software rasteriser is labelled as one everywhere it appears.
 
-Tier 2 — `residency` (multi-model catalogue > device memory), `kvcache`,
-`placement` (CPU/GPU/Vulkan/NPU), `mixed`, `overload`, `cancel`, `soak`,
-`frontend`, `faults`, `energy` — is designed but not implemented; these are the
-scenarios where brain has something to measure that a single-model, single-GPU,
-HTTP-shaped harness structurally cannot.
+**All 14 scenarios are implemented**: Tier 1 (`latency`, `throughput`, `serve`,
+`sweep`, `startup`) plus Tier 2 — `mixed`, `overload`, `cancel`, `kvcache`,
+`residency` ★, `placement`, `frontend`, `faults`, `soak` — the ones where brain
+has something to measure that a single-model, single-GPU, HTTP-shaped harness
+structurally cannot. Cross-cutting: `fidelity` (correctness gate) and `energy`.
+
+Each scenario states what it *cannot* see: where a metric needs an engine
+capability that does not exist (a pluggable admission policy, prefix caching, a
+pipeline cache, a multi-rank harness), the field is `null` and the artifact
+carries a `notes` string explaining why. See `docs/performance/status.md` for the
+per-scenario table and the findings so far.
 
 ## Conventions & invariants
 
