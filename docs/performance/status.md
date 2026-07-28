@@ -210,11 +210,27 @@ sampling — an unreadable meter yields `null`, never a fabricated zero).
 ## Mitigations
 
 Every finding above has a designed mitigation with a root cause, an API sketch
-and a verification criterion in **[`mitigations.md`](mitigations.md)**. The
-headline: profiling shows decode is **64% GPU-busy**, so it is not host stalling
-— the hot kernels (`matmul` 67.5%, `rmsnorm` 16.6%, `argmax_row` 10.3%) all
-parallelise over output *rows*, which at decode batch sizes leaves the card
-almost idle. `rmsnorm` runs **8 threads on 3840 cores** at batch 8.
+and a verification criterion in **[`mitigations.md`](mitigations.md)**, organised
+around reaching *any* device's ceiling rather than this box's.
+
+Profiling shows decode is **64% GPU-busy**, so it is not host stalling. Three
+readings, in increasing order of importance:
+
+1. The hot kernels (`matmul` 67.5%, `rmsnorm` 16.6%, `argmax_row` 10.3%) all
+   parallelise over output *rows* — right for training, catastrophic for decode.
+   `rmsnorm` runs **8 threads on 3840 cores** at batch 8.
+2. Decode is **memory-bound, not compute-bound**: at M=8 arithmetic intensity is
+   ~0.25 FLOP/byte whatever the tiling, so *tiling cannot fix it*.
+3. Therefore the first-order lever is **bytes moved**, and it is the one lever
+   every device class shares. `matmul_i8` (DP4A, 4×) and `qwen::q8` already
+   exist — but `serve.rs` uses int8 for the **KV cache only, never for weights**.
+
+The structural blockers are that `Backend` exposes almost no device capability,
+kernel choice is fixed at model-construction time, tile sizes are literals in
+281 hand-written files, and the fp32-only invariant — which is what buys the
+old-GPU/WebGPU guarantee — is simultaneously the ceiling on modern hardware.
+`mitigations.md` Part I addresses those; Part II expresses each finding through
+them.
 
 ## Still planned
 
