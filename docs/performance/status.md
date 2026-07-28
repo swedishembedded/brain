@@ -144,6 +144,34 @@ per-step dispatch/sync overhead, since IAL p99 stays ~48 ms at batch 32.
 *(Numbers are `--target qwen-synth`, i.e. random weights — valid for cost,
 meaningless for output quality.)*
 
+
+### Third wave: decode-regime kernels + the fidelity gate (all landed)
+
+Same sweep, same hardware (`qwen-synth:8x512x8`, Tesla P40, decode-heavy):
+
+| concurrency | session start | + device head | + prefill budget | **+ decode kernels** | total |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 36.4 | 74.2 | 72.6 | **154.0** | 4.2× |
+| 4 | 46.9 | 155.3 | 154.5 | **381.7** | 8.1× |
+| 16 | 50.3 | 234.9 | 234.1 | **632.7** | 12.6× |
+| 32 | 45.4 | 290.5 | 289.6 | **865.5** | **19.1×** |
+
+IAL p99 at batch 32: 410 ms → **11.8 ms**. The interactive SLO now holds
+through concurrency 16 at 632 tok/s goodput (session start: no level at all).
+
+What landed: `matmul_gemv` (workgroup-per-column, W streamed once across all
+rows — the 67.5% kernel), `rmsnorm_rows` (workgroup-per-row — the 16.6%
+kernel), `argmax_part/final` (two-stage reduction — the 10.3% kernel), each
+selected per dispatch by row count so training/prefill shapes keep the
+per-element kernels. Gated off the CPU backend, whose JIT barrier-split model
+mis-executes them and whose native AVX2 fast paths already cover the regime —
+`Backend::kind()` makes the selection explicit.
+
+**Every number above is gated**: the fidelity check (batched-vs-sequential
+greedy through the same engine) now runs inside every Tier-1 scenario and
+reported `greedy_token_match: 1.0` — the artifacts are marked valid, not
+"unverified".
+
 ## Fixed along the way (pre-existing)
 
 - **SIGSEGV in every debug-profile test run that built GPU devices on more than

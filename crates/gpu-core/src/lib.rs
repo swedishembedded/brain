@@ -272,6 +272,11 @@ mod native_facade {
             }
         }
 
+        /// Which backend this handle executes on: `"wgpu" | "cpu" | "vulkan"`.
+        pub fn kind(&self) -> &'static str {
+            self.inner.kind()
+        }
+
         /// A weak handle for pools/fixtures — see [`WeakGpu`]. `None` when the
         /// backend has no shared state to weakly reference.
         pub fn downgrade(&self) -> Option<WeakGpu> {

@@ -620,6 +620,9 @@ impl backend_api::WeakBackend for WeakCpu {
 }
 
 impl Backend for CpuBackend {
+    fn kind(&self) -> &'static str {
+        "cpu"
+    }
     fn share(&self) -> Option<Box<dyn Backend>> {
         // Eager execution, no per-handle stream: sharing is an Arc clone.
         Some(Box::new(CpuBackend { shared: self.shared.clone() }))

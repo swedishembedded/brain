@@ -54,6 +54,8 @@ pub struct Options {
     pub soak_seconds: f64,
     /// A measured device artifact rate for `frontend` to size host cost against.
     pub device_rate: Option<f64>,
+    /// Skip the post-run correctness gate (it costs one short reference run).
+    pub no_gate: bool,
     pub input_override: Option<usize>,
     /// Override the workload's output length.
     ///
@@ -76,6 +78,7 @@ impl Default for Options {
             concurrency: vec![1, 2, 4, 8, 16, 32],
             num_requests: 64,
             warmup_requests: 4,
+            no_gate: false,
             soak_seconds: 60.0,
             device_rate: None,
             input_override: None,
@@ -230,7 +233,23 @@ pub fn run(
     art.memory = memory_with(&target.counters());
     art.best_of_n = opt.best_of.max(1);
     art.spread_pct = best.spread_pct();
+    apply_gate(&mut art, target, opt);
     Ok(art)
+}
+
+/// Run the target's self-check and record the verdict. A failing gate marks the
+/// artifact invalid — a performance number whose computation changed is not a
+/// slower-but-honest number, it is a measurement of something else.
+fn apply_gate(art: &mut Artifact, target: &mut dyn PerfTarget, opt: &Options) {
+    if opt.no_gate {
+        return;
+    }
+    if let Some(f) = target.fidelity() {
+        art.correctness = f.to_json();
+        if !f.passed {
+            art.invalidate(&f.failure_reason());
+        }
+    }
 }
 
 /// The concurrency ladder. The deliverable is not the peak rate — it is the
@@ -286,6 +305,7 @@ fn run_sweep(
     });
     art.curve = Some(curve);
     art.memory = memory_with(&target.counters());
+    apply_gate(&mut art, target, opt);
     Ok(art)
 }
 

@@ -33,6 +33,10 @@ pub const ADD_CHAN_INPLACE: &str = include_str!("../wgsl/add_chan_inplace.wgsl")
 pub const ADD_INDEX_MASK: &str = include_str!("../wgsl/add_index_mask.wgsl");
 /// `wgsl/add_inplace.wgsl`
 pub const ADD_INPLACE: &str = include_str!("../wgsl/add_inplace.wgsl");
+/// `wgsl/argmax_final.wgsl`
+pub const ARGMAX_FINAL: &str = include_str!("../wgsl/argmax_final.wgsl");
+/// `wgsl/argmax_part.wgsl`
+pub const ARGMAX_PART: &str = include_str!("../wgsl/argmax_part.wgsl");
 /// `wgsl/argmax_row.wgsl`
 pub const ARGMAX_ROW: &str = include_str!("../wgsl/argmax_row.wgsl");
 /// `wgsl/attention.wgsl`
@@ -351,6 +355,8 @@ pub const MATMUL_DW_REG: &str = include_str!("../wgsl/matmul_dw_reg.wgsl");
 pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
 /// `wgsl/matmul_dx_reg.wgsl`
 pub const MATMUL_DX_REG: &str = include_str!("../wgsl/matmul_dx_reg.wgsl");
+/// `wgsl/matmul_gemv.wgsl`
+pub const MATMUL_GEMV: &str = include_str!("../wgsl/matmul_gemv.wgsl");
 /// `wgsl/matmul_i8.wgsl`
 pub const MATMUL_I8: &str = include_str!("../wgsl/matmul_i8.wgsl");
 /// `wgsl/matmul_i8_dyn.wgsl`
@@ -459,6 +465,8 @@ pub const RMSNORM_DX: &str = include_str!("../wgsl/rmsnorm_dx.wgsl");
 pub const RMSNORM_DX_EPS: &str = include_str!("../wgsl/rmsnorm_dx_eps.wgsl");
 /// `wgsl/rmsnorm_eps.wgsl`
 pub const RMSNORM_EPS: &str = include_str!("../wgsl/rmsnorm_eps.wgsl");
+/// `wgsl/rmsnorm_rows.wgsl`
+pub const RMSNORM_ROWS: &str = include_str!("../wgsl/rmsnorm_rows.wgsl");
 /// `wgsl/rope.wgsl`
 pub const ROPE: &str = include_str!("../wgsl/rope.wgsl");
 /// `wgsl/rope2d.wgsl`
@@ -592,6 +600,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("add_chan_inplace", ADD_CHAN_INPLACE),
     ("add_index_mask", ADD_INDEX_MASK),
     ("add_inplace", ADD_INPLACE),
+    ("argmax_final", ARGMAX_FINAL),
+    ("argmax_part", ARGMAX_PART),
     ("argmax_row", ARGMAX_ROW),
     ("attention", ATTENTION),
     ("attn_apply", ATTN_APPLY),
@@ -751,6 +761,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_dw_reg", MATMUL_DW_REG),
     ("matmul_dx", MATMUL_DX),
     ("matmul_dx_reg", MATMUL_DX_REG),
+    ("matmul_gemv", MATMUL_GEMV),
     ("matmul_i8", MATMUL_I8),
     ("matmul_i8_dyn", MATMUL_I8_DYN),
     ("matmul_reg", MATMUL_REG),
@@ -805,6 +816,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("rmsnorm_dx", RMSNORM_DX),
     ("rmsnorm_dx_eps", RMSNORM_DX_EPS),
     ("rmsnorm_eps", RMSNORM_EPS),
+    ("rmsnorm_rows", RMSNORM_ROWS),
     ("rope", ROPE),
     ("rope2d", ROPE2D),
     ("rope_at", ROPE_AT),

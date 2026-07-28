@@ -133,6 +133,16 @@ pub trait PerfTarget {
     /// Reset between repetitions of a best-of-N measurement. Targets that hold a
     /// cache decide here whether a repeat is a cold or a warm run.
     fn reset(&mut self, _warm: bool) {}
+
+    /// Self-verify: produce a correctness verdict for THIS configuration, or
+    /// `None` when the target has no way to check itself. For a decoder the
+    /// meaningful check is batched-vs-sequential greedy equality through the
+    /// same engine — the exact numeric paths a batching optimisation can break.
+    /// Called after measurement; a failing verdict marks the artifact
+    /// `valid: false` and excludes it from comparison.
+    fn fidelity(&mut self) -> Option<crate::fidelity::Fidelity> {
+        None
+    }
 }
 
 #[cfg(test)]

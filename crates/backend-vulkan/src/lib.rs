@@ -617,6 +617,9 @@ fn log_adapter(name: &str) {
 /// Neutral-handle bridge: downcast the opaque [`DeviceBuffer`]/[`Step`] back to
 /// `VkOwnedBuffer`/[`VkStep`] and delegate to the inherent methods.
 impl Backend for VulkanBackend {
+    fn kind(&self) -> &'static str {
+        "vulkan"
+    }
     fn storage(&self, n: u64) -> DeviceBuffer {
         DeviceBuffer::new(VulkanBackend::storage(self, n))
     }

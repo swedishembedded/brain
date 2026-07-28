@@ -1003,6 +1003,9 @@ impl backend_api::WeakBackend for WeakWgpu {
 }
 
 impl Backend for WgpuBackend {
+    fn kind(&self) -> &'static str {
+        "wgpu"
+    }
     fn share(&self) -> Option<Box<dyn Backend>> {
         Some(Box::new(self.share_device()))
     }

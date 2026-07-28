@@ -43,6 +43,11 @@ const APPLY_I8: usize = 16;
 // Device-side greedy head: matmul -> row argmax, so decode never ships a
 // [batch, vocab] logit block to the host.
 const ARGMAX_ROW: usize = 17;
+const ARGMAX_PART: usize = 18;
+const ARGMAX_FINAL: usize = 19;
+// Decode-regime kernels: selected per dispatch by row count.
+const RMSNORM_ROWS: usize = 20;
+const MATMUL_GEMV: usize = 21;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -63,6 +68,10 @@ const PIPELINES: &[(&str, &str)] = &[
     ("paged_decode_scores_i8_batched", kernels::PAGED_DECODE_SCORES_I8_BATCHED),
     ("paged_decode_apply_i8_batched", kernels::PAGED_DECODE_APPLY_I8_BATCHED),
     ("argmax_row", kernels::ARGMAX_ROW),
+    ("argmax_part", kernels::ARGMAX_PART),
+    ("argmax_final", kernels::ARGMAX_FINAL),
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS),
+    ("matmul_gemv", kernels::MATMUL_GEMV),
 ];
 
 fn ids() -> KernelIds {
@@ -86,6 +95,18 @@ fn ids() -> KernelIds {
         silu_db: SILU_MUL,
     }
 }
+
+/// Rows at or below which the decode-regime kernels win. Above it, the
+/// per-element kernels already saturate the device (training/prefill shapes).
+/// 32 is also matmul_gemv's hard accumulator bound.
+const DECODE_REGIME_MAX_ROWS: u32 = 32;
+
+/// Chunks per row for the two-stage argmax; 256 threads per row saturates the
+/// reduction without a large partial buffer (256*2 f32 per row).
+const ARGMAX_CHUNKS: u32 = 256;
+/// Below this vocabulary the single-pass kernel wins (two dispatches cost more
+/// than they save on a short row).
+const ARGMAX_SPLIT_MIN_VOCAB: u32 = 4096;
 
 fn fb(x: f32) -> u32 {
     x.to_bits()
@@ -186,6 +207,9 @@ pub struct Engine {
     /// `[max_batch, vocab]` decode logits, and `[max_batch]` argmax indices.
     logits_dev: DeviceBuffer,
     argmax_dev: DeviceBuffer,
+    /// `[max_batch, ARGMAX_CHUNKS, 2]` partial (value, index) pairs for the
+    /// two-stage argmax reduction.
+    argmax_part_dev: DeviceBuffer,
 }
 
 impl Engine {
@@ -262,6 +286,7 @@ impl Engine {
         let head_dev = gpu.storage_init("lm_head", &head);
         let logits_dev = st(max_batch as u64 * vocab);
         let argmax_dev = st(max_batch as u64);
+        let argmax_part_dev = st(max_batch as u64 * ARGMAX_CHUNKS as u64 * 2);
         Engine {
             cfg,
             gpu,
@@ -282,6 +307,7 @@ impl Engine {
             head_dev,
             logits_dev,
             argmax_dev,
+            argmax_part_dev,
         }
     }
 
@@ -373,6 +399,30 @@ impl Engine {
     /// accumulated lazily and flushed on the next read, so a caller that appends
     /// more device work (the greedy head) still pays one flush per step rather
     /// than two. Returns the row count.
+    /// `out = x @ W^T`, choosing the decode-regime GEMV (one workgroup per
+    /// output column, W streamed once across all rows) when the row count is
+    /// small, else the per-element kernel. Same contract, same result.
+    fn mm(&self, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
+        let g = &self.gpu;
+        if m <= DECODE_REGIME_MAX_ROWS && g.kind() != "cpu" {
+            g.step(MATMUL_GEMV, &[x, w, out], &[m, k, n], n * 64)
+        } else {
+            g.step(MATMUL, &[x, w, out], &[m, k, n], m * n)
+        }
+    }
+
+    /// RMSNorm, choosing the workgroup-per-row kernel at decode row counts
+    /// (the per-element kernel runs `rows` threads — 8 threads on a 3840-core
+    /// card at batch 8, measured at 16.6% of decode time).
+    fn rms(&self, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, d: u32, rows: u32) -> Step {
+        let g = &self.gpu;
+        if rows <= DECODE_REGIME_MAX_ROWS && g.kind() != "cpu" {
+            g.step(RMSNORM_ROWS, &[x, w, out], &[d, rows], rows * 64)
+        } else {
+            g.step(RMSNORM, &[x, w, out], &[d, rows], rows)
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_batched_submit(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> u32 {
         let c = &self.cfg;
@@ -408,10 +458,10 @@ impl Engine {
         }
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
-            s.push(block::rmsnorm_fwd(g, &kids, &sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b));
-            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre], &[b, d, hq], b * hq));
-            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre], &[b, d, hkv], b * hkv));
-            s.push(g.step(MATMUL, &[&sc.xn1, w(&p("attn.wv.weight")), &sc.v], &[b, d, hkv], b * hkv));
+            s.push(self.rms(&sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b));
+            s.push(self.mm(&sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, b, d, hq));
+            s.push(self.mm(&sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, b, d, hkv));
+            s.push(self.mm(&sc.xn1, w(&p("attn.wv.weight")), &sc.v, b, d, hkv));
             s.push(block::rmsnorm_fwd(g, &kids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, b * nh));
             s.push(block::rmsnorm_fwd(g, &kids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, b * nkv));
             s.push(g.step(ROPE_PAGED, &[&sc.q, &sc.pos_buf], &[b, nh, hd, hq, fb(theta)], b * nh * half));
@@ -429,17 +479,17 @@ impl Engine {
                 s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
                 s.push(g.step(APPLY_B, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
             }
-            s.push(g.step(MATMUL, &[&sc.ctx, w(&p("attn.wo.weight")), &sc.proj], &[b, hq, d], b * d));
+            s.push(self.mm(&sc.ctx, w(&p("attn.wo.weight")), &sc.proj, b, hq, d));
             s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[b * d], b * d));
-            s.push(block::rmsnorm_fwd(g, &kids, &sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b));
-            s.push(g.step(MATMUL, &[&sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre], &[b, d, ff], b * ff));
-            s.push(g.step(MATMUL, &[&sc.xn2, w(&p("mlp.up.weight")), &sc.up], &[b, d, ff], b * ff));
+            s.push(self.rms(&sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b));
+            s.push(self.mm(&sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, b, d, ff));
+            s.push(self.mm(&sc.xn2, w(&p("mlp.up.weight")), &sc.up, b, d, ff));
             s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
-            s.push(g.step(MATMUL, &[&sc.h, w(&p("mlp.down.weight")), &sc.mlp_out], &[b, ff, d], b * d));
+            s.push(self.mm(&sc.h, w(&p("mlp.down.weight")), &sc.mlp_out, b, ff, d));
             s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &sc.res[l + 1]], &[b * d], b * d));
         }
         let last = c.n_layers as usize;
-        s.push(block::rmsnorm_fwd(g, &kids, &sc.res[last], w("norm.weight"), &sc.xn_final, d, b));
+        s.push(self.rms(&sc.res[last], w("norm.weight"), &sc.xn_final, d, b));
         g.submit(&[], &s);
         b
     }
@@ -470,14 +520,34 @@ impl Engine {
     }
 
     /// `argmax(xn_final @ head^T)` per row, entirely on the device.
+    ///
+    /// Two-stage reduction: `argmax_part` splits each row into
+    /// [`ARGMAX_CHUNKS`] chunks reduced by independent threads, `argmax_final`
+    /// folds the partials — `bsz * chunks` threads instead of `bsz`. The
+    /// original single-thread-per-row `argmax_row` scanned 32k logits alone
+    /// and was 10.3% of decode time; it remains registered as the small-vocab
+    /// path and the reference the tests compare against.
     fn greedy_from_hidden(&self, bsz: u32) -> Vec<u32> {
         let g = &self.gpu;
         let (d, v) = (self.cfg.d_model, self.cfg.vocab);
-        let steps = [
-            g.step(MATMUL, &[&self.sc.xn_final, &self.head_dev, &self.logits_dev], &[bsz, d, v], bsz * v),
-            g.step(ARGMAX_ROW, &[&self.logits_dev, &self.argmax_dev], &[bsz, v], bsz),
-        ];
-        g.submit(&[], &steps);
+        let mm = self.mm(&self.sc.xn_final, &self.head_dev, &self.logits_dev, bsz, d, v);
+        if v >= ARGMAX_SPLIT_MIN_VOCAB {
+            let chunk = v.div_ceil(ARGMAX_CHUNKS);
+            let steps = [
+                mm,
+                g.step(
+                    ARGMAX_PART,
+                    &[&self.logits_dev, &self.argmax_part_dev],
+                    &[bsz, v, ARGMAX_CHUNKS, chunk],
+                    bsz * ARGMAX_CHUNKS,
+                ),
+                g.step(ARGMAX_FINAL, &[&self.argmax_part_dev, &self.argmax_dev], &[bsz, ARGMAX_CHUNKS], bsz),
+            ];
+            g.submit(&[], &steps);
+        } else {
+            let steps = [mm, g.step(ARGMAX_ROW, &[&self.logits_dev, &self.argmax_dev], &[bsz, v], bsz)];
+            g.submit(&[], &steps);
+        }
         // Indices come back as f32 (exact below 2^24, far above any vocabulary).
         g.read(&self.argmax_dev, bsz as usize).into_iter().map(|x| x as u32).collect()
     }
@@ -1209,6 +1279,36 @@ mod tests {
         }
         assert!(admit_iters >= 2, "admissions must be spread across iterations");
         assert_eq!(got, want, "the budget changes WHEN tokens appear, never WHICH");
+    }
+
+    /// The two-stage argmax (vocab >= ARGMAX_SPLIT_MIN_VOCAB) must pick exactly
+    /// the token the host head picks — including the lowest-index tie-break.
+    #[test]
+    fn split_argmax_matches_the_host_head_at_large_vocab() {
+        let mut cfg = QwenConfig::tiny();
+        cfg.vocab = 8192; // forces the argmax_part/argmax_final path
+        let map = tiny_weights(&cfg);
+        let mut eng = Engine::from_map(cfg, &map, 4, 96, 3, 12, 8, false);
+
+        let mut tables: Vec<BlockTable> = (0..3).map(|_| BlockTable::new()).collect();
+        let prompts = [vec![11u32, 55, 33], vec![77u32, 22, 99], vec![44u32, 45, 46]];
+        let mut inputs = Vec::new();
+        for (t, p) in tables.iter_mut().zip(prompts.iter()) {
+            let h = eng.prefill(t, p);
+            inputs.push(Engine::argmax(&eng.logits(&h)));
+        }
+        for _ in 0..3 {
+            let hidden = {
+                let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
+                eng.forward_batched(&mut refs, &inputs)
+            };
+            let d = eng.cfg.d_model as usize;
+            let host: Vec<u32> =
+                (0..inputs.len()).map(|i| Engine::argmax(&eng.logits(&hidden[i * d..(i + 1) * d]))).collect();
+            let dev = eng.greedy_from_hidden(inputs.len() as u32);
+            assert_eq!(dev, host, "split argmax diverged from the host head");
+            inputs = host;
+        }
     }
 
     /// `step_report` must account for **every** token exactly once and admit each

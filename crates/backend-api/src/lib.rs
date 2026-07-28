@@ -239,6 +239,12 @@ pub trait Backend: Send + Sync {
     /// Exists because building a device is expensive and several concurrent
     /// devices on one physical card are hostile to the driver, so a process
     /// running many models wants one device and many handles.
+    /// Which execution backend this is: `"wgpu" | "cpu" | "vulkan"`. Kernel
+    /// selection needs it — e.g. the decode-regime workgroup kernels help every
+    /// GPU but are mis-executed by the CPU JIT's barrier-split model (and the
+    /// CPU backend has its own native fast paths), so they are gated off there.
+    fn kind(&self) -> &'static str;
+
     fn share(&self) -> Option<Box<dyn Backend>> {
         None
     }

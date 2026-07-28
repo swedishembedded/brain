@@ -175,6 +175,45 @@ impl PerfTarget for PagedLlmTarget {
     fn counters(&self) -> Vec<(String, serde_json::Value)> {
         vec![("kv_free_blocks".into(), serde_json::json!(self.sched.free_blocks()))]
     }
+
+    /// Batched-vs-sequential greedy equality through the SAME engine instance —
+    /// the numeric paths a batching/kernel optimisation can break. Greedy is
+    /// deterministic, so the gate demands exactness.
+    fn fidelity(&mut self) -> Option<crate::fidelity::Fidelity> {
+        let prompts: Vec<Vec<u32>> =
+            (0..3u64).map(|i| self.prompt(24, 0x5EED ^ i)).collect();
+        let max_new = 12usize;
+
+        // Sequential reference: one request at a time, drained to completion.
+        let mut seq_out = Vec::new();
+        for p in &prompts {
+            let id = self.sched.submit(qwen::serve::Request {
+                prompt: p.clone(),
+                max_new,
+                eos: None,
+            });
+            let done = self.sched.run();
+            seq_out.push(done.get(&id).cloned().unwrap_or_default());
+        }
+
+        // Batched candidate: all three in flight together.
+        let ids: Vec<u64> = prompts
+            .iter()
+            .map(|p| {
+                self.sched.submit(qwen::serve::Request { prompt: p.clone(), max_new, eos: None })
+            })
+            .collect();
+        let done = self.sched.run();
+        let bat_out: Vec<Vec<u32>> =
+            ids.iter().map(|id| done.get(id).cloned().unwrap_or_default()).collect();
+
+        Some(crate::fidelity::Fidelity::greedy(
+            "sequential-greedy-same-engine",
+            &bat_out,
+            &seq_out,
+            crate::fidelity::EXACT,
+        ))
+    }
 }
 
 #[cfg(test)]
