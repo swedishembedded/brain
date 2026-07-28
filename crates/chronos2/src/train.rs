@@ -22,6 +22,8 @@
 //! - M4: full backbone + a gated fine-tune entry (LoRA / promotion gate).
 
 use crate::config::Chronos2Config;
+// Single implementation of the elementwise/normalisation math.
+use model::hostmath;
 use std::collections::HashMap;
 
 // ---- host math primitives (fwd + bwd), row-major, weights stored `[out, in]` ---
@@ -76,20 +78,6 @@ fn bias_bwd(dout: &[f32], m: usize, n: usize, db: &mut [f32]) {
 
 /// RMSNorm per row with per-feature gain `g[d]`: `y[r,i] = x[r,i]/rms(x[r]) * g[i]`.
 /// Returns `(y, inv_rms[rows])` (the reciprocal norms, kept for the backward).
-fn rmsnorm(x: &[f32], g: &[f32], rows: usize, d: usize, eps: f32) -> (Vec<f32>, Vec<f32>) {
-    let mut y = vec![0.0f32; rows * d];
-    let mut inv = vec![0.0f32; rows];
-    for r in 0..rows {
-        let row = &x[r * d..r * d + d];
-        let ms = row.iter().map(|v| v * v).sum::<f32>() / d as f32;
-        let iv = 1.0 / (ms + eps).sqrt();
-        inv[r] = iv;
-        for i in 0..d {
-            y[r * d + i] = row[i] * iv * g[i];
-        }
-    }
-    (y, inv)
-}
 
 /// Backward of [`rmsnorm`]: `dy` → `dx`, accumulate `dg`. `inv` from the forward.
 fn rmsnorm_bwd(x: &[f32], g: &[f32], inv: &[f32], dy: &[f32], rows: usize, d: usize, dg: &mut [f32]) -> Vec<f32> {
@@ -384,7 +372,7 @@ impl Chronos2Train {
         let s = emb.len() / d;
         let eps = cfg.layer_norm_epsilon;
 
-        let (normed, inv) = rmsnorm(emb, &self.w["encoder.final_layer_norm.weight"], s, d, eps);
+        let (normed, inv) = hostmath::rmsnorm_rows_with_inv(emb, &self.w["encoder.final_layer_norm.weight"], s, d, eps);
         let head_in = normed[(s - n_out) * d..].to_vec();
         let (qp, rb) = residual_block(&self.w, "output_patch_embedding", &head_in, n_out, d, cfg.d_ff, head_out);
 
@@ -452,7 +440,7 @@ impl Chronos2Train {
         let ww = |n: &str| &self.w[n];
 
         // -- time attention --
-        let (xn0, inv0) = rmsnorm(emb_in, ww(&format!("{p}.layer.0.layer_norm.weight")), s, d, eps);
+        let (xn0, inv0) = hostmath::rmsnorm_rows_with_inv(emb_in, ww(&format!("{p}.layer.0.layer_norm.weight")), s, d, eps);
         let mut q = matmul(&xn0, ww(&format!("{p}.layer.0.self_attention.q.weight")), s, d, inner);
         let mut k = matmul(&xn0, ww(&format!("{p}.layer.0.self_attention.k.weight")), s, d, inner);
         let v = matmul(&xn0, ww(&format!("{p}.layer.0.self_attention.v.weight")), s, d, inner);
@@ -463,13 +451,13 @@ impl Chronos2Train {
         let emb1: Vec<f32> = (0..s * d).map(|i| emb_in[i] + o[i]).collect();
 
         // -- group degeneration --
-        let (xn1, inv1) = rmsnorm(&emb1, ww(&format!("{p}.layer.1.layer_norm.weight")), s, d, eps);
+        let (xn1, inv1) = hostmath::rmsnorm_rows_with_inv(&emb1, ww(&format!("{p}.layer.1.layer_norm.weight")), s, d, eps);
         let vg = matmul(&xn1, ww(&format!("{p}.layer.1.self_attention.v.weight")), s, d, inner);
         let og = matmul(&vg, ww(&format!("{p}.layer.1.self_attention.o.weight")), s, inner, d);
         let emb2: Vec<f32> = (0..s * d).map(|i| emb1[i] + og[i]).collect();
 
         // -- FFN --
-        let (xn2, inv2) = rmsnorm(&emb2, ww(&format!("{p}.layer.2.layer_norm.weight")), s, d, eps);
+        let (xn2, inv2) = hostmath::rmsnorm_rows_with_inv(&emb2, ww(&format!("{p}.layer.2.layer_norm.weight")), s, d, eps);
         let hid = matmul(&xn2, ww(&format!("{p}.layer.2.mlp.wi.weight")), s, d, f);
         let hid_relu: Vec<f32> = hid.iter().map(|&x| x.max(0.0)).collect();
         let ff = matmul(&hid_relu, ww(&format!("{p}.layer.2.mlp.wo.weight")), s, f, d);

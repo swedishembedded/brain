@@ -18,6 +18,8 @@
 //! perturbation (the top-2 boundary is measure-zero).
 
 use crate::config::{FincastConfig, QUANTILES};
+// Single implementation of the elementwise/normalisation math.
+use model::hostmath;
 use std::collections::HashMap;
 
 // ---- host math primitives (fwd + bwd), weights stored `[out, in]` -------------
@@ -69,20 +71,6 @@ fn bias_bwd(dout: &[f32], m: usize, n: usize, db: &mut [f32]) {
 
 /// RMSNorm per row with gain `g[d]` (eps matches the kernel's 1e-6). Returns
 /// `(y, inv_rms[rows])`.
-fn rmsnorm(x: &[f32], g: &[f32], rows: usize, d: usize, eps: f32) -> (Vec<f32>, Vec<f32>) {
-    let mut y = vec![0.0f32; rows * d];
-    let mut inv = vec![0.0f32; rows];
-    for r in 0..rows {
-        let row = &x[r * d..r * d + d];
-        let ms = row.iter().map(|v| v * v).sum::<f32>() / d as f32;
-        let iv = 1.0 / (ms + eps).sqrt();
-        inv[r] = iv;
-        for i in 0..d {
-            y[r * d + i] = row[i] * iv * g[i];
-        }
-    }
-    (y, inv)
-}
 fn rmsnorm_bwd(x: &[f32], g: &[f32], inv: &[f32], dy: &[f32], rows: usize, d: usize, dg: &mut [f32]) -> Vec<f32> {
     let mut dx = vec![0.0f32; rows * d];
     for r in 0..rows {
@@ -103,23 +91,6 @@ fn rmsnorm_bwd(x: &[f32], g: &[f32], inv: &[f32], dy: &[f32], rows: usize, d: us
 }
 
 /// LayerNorm per row with gain/bias (eps 1e-6). Returns `(y, mean[rows], inv[rows])`.
-fn layernorm(x: &[f32], g: &[f32], b: &[f32], rows: usize, d: usize, eps: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let mut y = vec![0.0f32; rows * d];
-    let mut mean = vec![0.0f32; rows];
-    let mut inv = vec![0.0f32; rows];
-    for r in 0..rows {
-        let row = &x[r * d..r * d + d];
-        let mu = row.iter().sum::<f32>() / d as f32;
-        let va = row.iter().map(|v| (v - mu) * (v - mu)).sum::<f32>() / d as f32;
-        let iv = 1.0 / (va + eps).sqrt();
-        mean[r] = mu;
-        inv[r] = iv;
-        for i in 0..d {
-            y[r * d + i] = (row[i] - mu) * iv * g[i] + b[i];
-        }
-    }
-    (y, mean, inv)
-}
 #[allow(clippy::too_many_arguments)]
 fn layernorm_bwd(x: &[f32], g: &[f32], mean: &[f32], inv: &[f32], dy: &[f32], rows: usize, d: usize, dg: &mut [f32], db: &mut [f32]) -> Vec<f32> {
     let mut dx = vec![0.0f32; rows * d];
@@ -362,7 +333,7 @@ impl FincastTrain {
         let ww = |n: &str| &self.w[n];
 
         // attention
-        let (xn, xn_inv) = rmsnorm(emb_in, ww(&format!("{p}.input_layernorm.weight")), s, d, eps);
+        let (xn, xn_inv) = hostmath::rmsnorm_rows_with_inv(emb_in, ww(&format!("{p}.input_layernorm.weight")), s, d, eps);
         let mut qkv = matmul(&xn, ww(&format!("{p}.self_attn.qkv_proj.weight")), s, d, cfg.qkv_dim());
         bias_add(&mut qkv, ww(&format!("{p}.self_attn.qkv_proj.bias")), s, cfg.qkv_dim());
         let scaling = ww(&format!("{p}.self_attn.scaling")).clone();
@@ -372,7 +343,7 @@ impl FincastTrain {
         let emb_attn: Vec<f32> = (0..s * d).map(|i| emb_in[i] + o[i]).collect();
 
         // MoE
-        let (pp, p_inv) = rmsnorm(&emb_attn, ww(&format!("{p}.moe.moe_prenorm.gamma")), s, d, eps);
+        let (pp, p_inv) = hostmath::rmsnorm_rows_with_inv(&emb_attn, ww(&format!("{p}.moe.moe_prenorm.gamma")), s, d, eps);
         let e = cfg.num_experts;
         let glog = matmul(&pp, ww(&format!("{p}.moe.moe.gate.to_gates.weight")), s, d, e);
         let (probs_full, sel, w) = self.softmax_top2(&glog, s, e);
@@ -389,7 +360,7 @@ impl FincastTrain {
         let mut experts = Vec::new();
         for &ei in &needed {
             let ep = format!("{p}.moe.moe.experts.experts.{ei}");
-            let (ln, ln_mean, ln_inv) = layernorm(&pp, ww(&format!("{ep}.layer_norm.weight")), ww(&format!("{ep}.layer_norm.bias")), s, d, 1e-6);
+            let (ln, ln_mean, ln_inv) = hostmath::layernorm_rows_with_stats(&pp, ww(&format!("{ep}.layer_norm.weight")), ww(&format!("{ep}.layer_norm.bias")), s, d, 1e-6);
             let mut g_pre = matmul(&ln, ww(&format!("{ep}.gate_proj.weight")), s, d, d);
             bias_add(&mut g_pre, ww(&format!("{ep}.gate_proj.bias")), s, d);
             let g: Vec<f32> = g_pre.iter().map(|&v| v.max(0.0)).collect();

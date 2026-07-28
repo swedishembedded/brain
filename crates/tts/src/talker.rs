@@ -30,7 +30,7 @@ use qwen::Qwen;
 use crate::config::TalkerConfig;
 
 /// CPU-resident text-conditioning weights: `text_projection` is a 2-layer MLP
-/// (`fc2(silu(fc1(x)))`, both with bias) mapping a `text_hidden`-dim text
+/// (`fc2(model::hostmath::silu(fc1(x)))`, both with bias) mapping a `text_hidden`-dim text
 /// embedding to the Talker `d_model`. `text_embedding` (the `[text_vocab,
 /// text_hidden]` lookup table) is optional — it is large (≈1.2 GB f32 for the
 /// real model) so callers may pre-embed text and pass hidden states to
@@ -47,10 +47,6 @@ pub struct TextProjection {
     pub text_vocab: usize,
 }
 
-#[inline]
-fn silu(x: f32) -> f32 {
-    x / (1.0 + (-x).exp())
-}
 
 impl TextProjection {
     /// Look up `ids` in the text-embedding table (panics if it was not loaded).
@@ -69,7 +65,7 @@ impl TextProjection {
     }
 
     /// Project `[n, in_dim]` text hidden states to `[n, out]` (the Talker
-    /// `d_model`) via `fc2(silu(fc1(x)))`. Matches `Qwen3TTSTalkerResizeMLP`.
+    /// `d_model`) via `fc2(model::hostmath::silu(fc1(x)))`. Matches `Qwen3TTSTalkerResizeMLP`.
     pub fn project(&self, hidden: &[f32]) -> Vec<f32> {
         let n = hidden.len() / self.in_dim;
         let mut out = vec![0.0f32; n * self.out];
@@ -82,7 +78,7 @@ impl TextProjection {
                 for k in 0..self.in_dim {
                     acc += w[k] * x[k];
                 }
-                mid[j] = silu(acc);
+                mid[j] = model::hostmath::silu(acc);
             }
             for o in 0..self.out {
                 let w = &self.fc2_w[o * self.inter..(o + 1) * self.inter];
@@ -238,9 +234,9 @@ mod tests {
         let h = vec![1.0f32, 2.0, 3.0];
         let y = tp.project(&h);
         assert_eq!(y.len(), 2);
-        // y[0] = silu(1), y[1] = silu(2)
-        assert!((y[0] - silu(1.0)).abs() < 1e-6);
-        assert!((y[1] - silu(2.0)).abs() < 1e-6);
+        // y[0] = model::hostmath::silu(1), y[1] = model::hostmath::silu(2)
+        assert!((y[0] - model::hostmath::silu(1.0)).abs() < 1e-6);
+        assert!((y[1] - model::hostmath::silu(2.0)).abs() < 1e-6);
         let e = tp.embed_text(&[0, 1]);
         assert_eq!(e.len(), 6);
     }

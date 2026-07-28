@@ -53,9 +53,6 @@ pub fn build_sigmas(num_steps: u32, sigma_min: f32, sigma_max: f32, rho: f32) ->
     out
 }
 
-fn silu(x: f32) -> f32 {
-    x / (1.0 + (-x).exp())
-}
 
 /// Row-major Linear: y[o] = b[o] + sum_i w[o*ni + i] * x[i].
 pub fn linear(w: &[f32], b: &[f32], x: &[f32], no: usize, ni: usize) -> Vec<f32> {
@@ -90,7 +87,7 @@ pub struct CondNet {
 }
 
 impl CondNet {
-    /// cond = mlp2(silu(mlp0(fourier(c_noise) + act_flat))), exactly
+    /// cond = mlp2(model::hostmath::silu(mlp0(fourier(c_noise) + act_flat))), exactly
     /// `InnerModel.forward`'s cond path.
     pub fn cond(&self, c_noise: f32, actions: &[u32]) -> Vec<f32> {
         let cc = self.cond_channels;
@@ -111,7 +108,7 @@ impl CondNet {
             }
         }
         let h: Vec<f32> =
-            linear(&self.mlp0_w, &self.mlp0_b, &e, cc, cc).into_iter().map(silu).collect();
+            linear(&self.mlp0_w, &self.mlp0_b, &e, cc, cc).into_iter().map(model::hostmath::silu).collect();
         linear(&self.mlp2_w, &self.mlp2_b, &h, cc, cc)
     }
 }

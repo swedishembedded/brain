@@ -16,6 +16,8 @@
 //! chaining is a later optimization (the numerics are what this validates).
 
 use dit::rope::{tables_for_ids, RopeConfig, RopeTables};
+// Single implementation of the elementwise/normalisation math.
+use model::hostmath;
 
 use crate::block::{BlockDims, Tensors, ZImageBlock};
 
@@ -94,18 +96,6 @@ pub(crate) fn linear(x: &[f32], rows: usize, in_dim: usize, w: &[f32], b: Option
     out
 }
 
-pub(crate) fn rmsnorm(x: &[f32], rows: usize, dim: usize, w: &[f32], eps: f32) -> Vec<f32> {
-    let mut out = vec![0f32; rows * dim];
-    for r in 0..rows {
-        let xr = &x[r * dim..r * dim + dim];
-        let ss: f32 = xr.iter().map(|v| v * v).sum::<f32>() / dim as f32;
-        let inv = 1.0 / (ss + eps).sqrt();
-        for c in 0..dim {
-            out[r * dim + c] = w[c] * xr[c] * inv;
-        }
-    }
-    out
-}
 
 /// LayerNorm without affine params (FinalLayer.norm_final): per-row standardize.
 pub(crate) fn layernorm_noaffine(x: &[f32], rows: usize, dim: usize, eps: f32) -> Vec<f32> {
@@ -122,9 +112,6 @@ pub(crate) fn layernorm_noaffine(x: &[f32], rows: usize, dim: usize, eps: f32) -
     out
 }
 
-pub(crate) fn silu(x: &[f32]) -> Vec<f32> {
-    x.iter().map(|&v| v / (1.0 + (-v).exp())).collect()
-}
 
 /// Sinusoidal timestep embedding (diffusers `TimestepEmbedder.timestep_embedding`,
 /// `dim` even): `[cos(t·freq_k) ‖ sin(t·freq_k)]`, `freq_k = max_period^(-k/half)`.
@@ -166,7 +153,13 @@ pub(crate) fn preprocess(cfg: &ZImageConfig, w: &Tensors, latent: &[f32], f: u32
     let patches = patchify(latent, cfg.in_channels, f, h, wd, ps, pf);
     let xk = format!("all_x_embedder.{ps}-{pf}");
     let img = linear(&patches, n_img, patch_dim, tget(w, &format!("{xk}.weight")), Some(tget(w, &format!("{xk}.bias"))), dim);
-    let cn = rmsnorm(cap, ncap, cfg.cap_feat_dim as usize, tget(w, "cap_embedder.0.weight"), cfg.norm_eps);
+    let cn = hostmath::rmsnorm_rows(
+        cap,
+        tget(w, "cap_embedder.0.weight"),
+        ncap,
+        cfg.cap_feat_dim as usize,
+        cfg.norm_eps,
+    );
     let capt = linear(&cn, ncap, cfg.cap_feat_dim as usize, tget(w, "cap_embedder.1.weight"), Some(tget(w, "cap_embedder.1.bias")), dim);
 
     let rope = cfg.rope();
@@ -196,7 +189,7 @@ pub(crate) fn preprocess(cfg: &ZImageConfig, w: &Tensors, latent: &[f32], f: u32
 pub(crate) fn timestep_cond(cfg: &ZImageConfig, w: &Tensors, t: f32) -> Vec<f32> {
     let cdim = (cfg.dim as usize).min(256);
     let te = timestep_embedding(t * cfg.t_scale, 256, 10000.0);
-    let h0 = silu(&linear(&te, 1, 256, tget(w, "t_embedder.mlp.0.weight"), Some(tget(w, "t_embedder.mlp.0.bias")), 1024));
+    let h0 = hostmath::silu_slice(&linear(&te, 1, 256, tget(w, "t_embedder.mlp.0.weight"), Some(tget(w, "t_embedder.mlp.0.bias")), 1024));
     linear(&h0, 1, 1024, tget(w, "t_embedder.mlp.2.weight"), Some(tget(w, "t_embedder.mlp.2.bias")), cdim)
 }
 
@@ -209,7 +202,7 @@ pub(crate) fn postprocess(cfg: &ZImageConfig, w: &Tensors, uni: &[f32], cvec: &[
     let ntot = uni.len() / dim;
     let patch_dim = (pf * ps * ps * cfg.in_channels) as usize;
     let fk = format!("all_final_layer.{ps}-{pf}");
-    let adaln = linear(&silu(cvec), 1, cdim, tget(w, &format!("{fk}.adaLN_modulation.1.weight")), Some(tget(w, &format!("{fk}.adaLN_modulation.1.bias"))), dim);
+    let adaln = linear(&hostmath::silu_slice(cvec), 1, cdim, tget(w, &format!("{fk}.adaLN_modulation.1.weight")), Some(tget(w, &format!("{fk}.adaLN_modulation.1.bias"))), dim);
     let scale: Vec<f32> = adaln.iter().map(|&v| 1.0 + v).collect();
     let normed = layernorm_noaffine(uni, ntot, dim, LN_EPS);
     let mut scaled = vec![0f32; ntot * dim];

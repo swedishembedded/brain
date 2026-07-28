@@ -20,10 +20,11 @@
 //! `i≥1` has its own output head `lm_head[i-1]`.
 
 use std::collections::HashMap;
+use model::hostmath;
 
 use crate::config::MtpConfig;
 use crate::gen_kv::{
-    decoder_forward_full, decoder_layer_step, load_layers, matvec, rmsnorm, Dims, Kv, LayerW,
+    decoder_forward_full, decoder_layer_step, load_layers, Dims, Kv, LayerW,
 };
 
 /// A CPU-resident, KV-cached MTP code-predictor. Holds the frozen 5-layer decoder
@@ -151,14 +152,14 @@ impl CpuMtp {
             x = decoder_layer_step(&self.layers[l], &mut self.cache[l], dims, &x, pos);
         }
         self.pos += 1;
-        rmsnorm(&x, &self.norm)
+        hostmath::rmsnorm(&x, &self.norm, crate::gen_kv::EPS)
     }
 
     /// `lm_head[idx]` logits (`[vocab]`) for a final-norm hidden row.
     fn head_logits(&self, idx: usize, hidden: &[f32]) -> Vec<f32> {
         let d = self.d();
         let v = self.cfg.vocab as usize;
-        matvec(&self.lm_head[idx], hidden, v, d)
+        hostmath::matvec(&self.lm_head[idx], hidden, v, d)
     }
 
     /// Project a Talker-width embedding (`[embedding_dim]`) into the MTP decoder
@@ -169,7 +170,7 @@ impl CpuMtp {
             Some((w, b)) => {
                 let d = self.d();
                 let e = self.cfg.embedding_dim as usize;
-                let mut y = matvec(w, emb, d, e); // [d] = W[d,e]·emb
+                let mut y = hostmath::matvec(w, emb, d, e); // [d] = W[d,e]·emb
                 for (yi, bi) in y.iter_mut().zip(b) {
                     *yi += bi;
                 }

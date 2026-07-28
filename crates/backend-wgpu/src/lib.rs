@@ -139,16 +139,42 @@ fn log_adapter(info: &wgpu::AdapterInfo) {
     );
 }
 
-/// The wgpu compute device.
-pub struct WgpuBackend {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub pipelines: Vec<wgpu::ComputePipeline>,
+/// The **expensive, shareable** half of a wgpu backend: the instance/adapter/
+/// device/queue and every compiled pipeline.
+///
+/// Split out from [`WgpuBackend`] because building it is what costs ~2-3 s (device
+/// init plus one shader compile per kernel), and because creating many of them on
+/// one physical GPU is actively harmful: several concurrent Vulkan devices on a
+/// single card deadlocked the test suite roughly half the time (all threads in
+/// futex wait) and made every model activation pay a full device init. One
+/// process now builds this once per distinct kernel set and shares it.
+struct DeviceShared {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipelines: Vec<wgpu::ComputePipeline>,
     /// Each kernel's declared `@workgroup_size` (parallel to `pipelines`). Almost
     /// every kernel is the engine's default 64; the register-tiled GEMMs use 256.
     /// The dispatch grid must be laid out with the kernel's OWN size, because the
     /// kernel reconstructs its flat invocation id from it.
     wgsizes: Vec<u32>,
+    /// `BRAIN_PROFILE` per-kernel GPU timing (native only, and only when the
+    /// adapter has TIMESTAMP_QUERY): each dispatch runs in its own compute pass
+    /// with begin/end timestamps, resolved and accumulated per kernel name.
+    /// Pure observability — the non-profiling flush path is untouched.
+    #[cfg(not(target_arch = "wasm32"))]
+    gpu_profile: Option<GpuProfile>,
+}
+
+/// The wgpu compute device: a handle onto a shared [`DeviceShared`] plus **its
+/// own** command stream.
+///
+/// The command stream stays per handle on purpose. `submit` batches dispatches
+/// and `flush` records the whole batch as one compute pass, so two handles that
+/// shared a pending list would interleave each other's batches. Sharing the
+/// device while keeping the stream private gives one Vulkan device per process
+/// *and* unchanged batching semantics for every existing caller.
+pub struct WgpuBackend {
+    shared: std::sync::Arc<DeviceShared>,
     /// Lazily-accumulated dispatches: `submit` appends its steps here instead of
     /// encoding+submitting immediately, and `flush` records the WHOLE batch into a
     /// single compute pass + one `queue.submit` (on the next read/write/poll). So
@@ -164,12 +190,19 @@ pub struct WgpuBackend {
     stats_submit: std::sync::atomic::AtomicU64,
     stats_dispatch: std::sync::atomic::AtomicU64,
     stats_read: std::sync::atomic::AtomicU64,
-    /// `BRAIN_PROFILE` per-kernel GPU timing (native only, and only when the
-    /// adapter has TIMESTAMP_QUERY): each dispatch runs in its own compute pass
-    /// with begin/end timestamps, resolved and accumulated per kernel name.
-    /// Pure observability — the non-profiling flush path is untouched.
-    #[cfg(not(target_arch = "wasm32"))]
-    gpu_profile: Option<GpuProfile>,
+}
+
+impl WgpuBackend {
+    // Field shims so the rest of this file (and its tests) keep reading
+    // `self.device()` / `self.queue()` / … unchanged.
+    #[inline]
+    fn device(&self) -> &wgpu::Device { &self.shared.device }
+    #[inline]
+    fn queue(&self) -> &wgpu::Queue { &self.shared.queue }
+    #[inline]
+    fn pipelines(&self) -> &[wgpu::ComputePipeline] { &self.shared.pipelines }
+    #[inline]
+    fn wgsizes(&self) -> &[u32] { &self.shared.wgsizes }
 }
 
 /// Per-kernel GPU-time accumulator for the `BRAIN_PROFILE` timestamp path.
@@ -196,7 +229,7 @@ impl Drop for WgpuBackend {
                 self.stats_read.load(Relaxed),
             );
         }
-        if let Some(p) = &self.gpu_profile {
+        if let Some(p) = &self.shared.gpu_profile {
             let acc = p.acc.lock().unwrap();
             let mut rows: Vec<(usize, f64, u64)> =
                 acc.iter().enumerate().filter(|(_, (_, c))| *c > 0).map(|(i, (ms, c))| (i, *ms, *c)).collect();
@@ -227,6 +260,26 @@ impl WgpuBackend {
     pub fn new(kernels: &[(&str, &str)]) -> WgpuBackend {
         let _guard = init_lock();
         pollster::block_on(WgpuBackend::new_async(kernels))
+    }
+
+    /// A second handle onto **this** backend's device: same instance, adapter,
+    /// queue and compiled pipelines, but its own command stream.
+    ///
+    /// Explicit on purpose. Building a device costs seconds and several
+    /// concurrent devices on one card are hostile to the driver, so callers that
+    /// need more than one handle — a serving process running several models, a
+    /// test binary — should create the device once and share it. Making that a
+    /// hidden process-global cache would be less code at the call site but would
+    /// tie every `Gpu` in the process together invisibly, and make "how many
+    /// devices exist" unanswerable from the code.
+    ///
+    /// The command stream stays per handle: `submit` batches dispatches and
+    /// `flush` records the batch as one compute pass, so two handles sharing a
+    /// pending list would interleave each other's batches.
+    pub fn share_device(&self) -> WgpuBackend {
+        let stats =
+            self.stats.as_ref().map(|_| std::sync::atomic::AtomicU64::new(0));
+        WgpuBackend::from_shared(self.shared.clone(), stats)
     }
 
     /// Blocking `count` backends on distinct physical cards (see [`new_multi_async`]).
@@ -429,27 +482,43 @@ impl WgpuBackend {
         } else {
             None
         };
-        WgpuBackend {
+        let shared = std::sync::Arc::new(DeviceShared {
             device,
             queue,
             pipelines,
             wgsizes: backend_api::workgroup_sizes(kernels),
+            #[cfg(not(target_arch = "wasm32"))]
+            gpu_profile,
+        });
+        WgpuBackend::from_shared(shared, stats)
+    }
+
+    /// A fresh handle (own command stream) onto an already-built device.
+    fn from_shared(
+        shared: std::sync::Arc<DeviceShared>,
+        stats: Option<std::sync::atomic::AtomicU64>,
+    ) -> WgpuBackend {
+        use std::sync::atomic::AtomicU64;
+        WgpuBackend {
+            shared,
             pending: std::sync::Mutex::new(Vec::new()),
             stats,
             stats_bg: AtomicU64::new(0),
             stats_submit: AtomicU64::new(0),
             stats_dispatch: AtomicU64::new(0),
             stats_read: AtomicU64::new(0),
-            #[cfg(not(target_arch = "wasm32"))]
-            gpu_profile,
         }
     }
 
     /// Record all pending dispatches into ONE compute pass and submit. Idempotent.
     /// wgpu inserts the necessary inter-dispatch barriers within the pass, so the
     /// per-block read-after-write dependencies are preserved.
+    fn share(&self) -> Option<Box<dyn Backend>> {
+        Some(Box::new(self.share_device()))
+    }
+
     fn max_storage_binding_bytes(&self) -> u64 {
-        self.device.limits().max_storage_buffer_binding_size as u64
+        self.device().limits().max_storage_buffer_binding_size as u64
     }
 
     fn flush(&self) {
@@ -458,7 +527,7 @@ impl WgpuBackend {
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if self.gpu_profile.is_some() {
+        if self.shared.gpu_profile.is_some() {
             self.flush_profiled(&steps);
             if self.stats.is_some() {
                 self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -466,7 +535,7 @@ impl WgpuBackend {
             return;
         }
         let mut enc = self
-            .device
+            .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -474,12 +543,12 @@ impl WgpuBackend {
                 timestamp_writes: None,
             });
             for (kind, bg, gx, gy) in &steps {
-                pass.set_pipeline(&self.pipelines[*kind]);
+                pass.set_pipeline(&self.pipelines()[*kind]);
                 pass.set_bind_group(0, bg, &[]);
                 pass.dispatch_workgroups(*gx, *gy, 1);
             }
         }
-        self.queue.submit(Some(enc.finish()));
+        self.queue().submit(Some(enc.finish()));
         if self.stats.is_some() {
             self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -494,29 +563,29 @@ impl WgpuBackend {
     /// one pass.
     #[cfg(not(target_arch = "wasm32"))]
     fn flush_profiled(&self, steps: &[WgpuStep]) {
-        let p = self.gpu_profile.as_ref().unwrap();
+        let p = self.shared.gpu_profile.as_ref().unwrap();
         // Chunked to stay comfortably under the per-query-set limit (8192).
         for chunk in steps.chunks(2048) {
             let n = chunk.len() as u32;
-            let qs = self.device.create_query_set(&wgpu::QuerySetDescriptor {
+            let qs = self.device().create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("brain-profile"),
                 ty: wgpu::QueryType::Timestamp,
                 count: 2 * n,
             });
             let bytes = (2 * n * 8) as u64;
-            let resolve = self.device.create_buffer(&wgpu::BufferDescriptor {
+            let resolve = self.device().create_buffer(&wgpu::BufferDescriptor {
                 label: Some("brain-profile-resolve"),
                 size: bytes,
                 usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
-            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            let staging = self.device().create_buffer(&wgpu::BufferDescriptor {
                 label: Some("brain-profile-staging"),
                 size: bytes,
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            let mut enc = self.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             for (i, (kind, bg, gx, gy)) in chunk.iter().enumerate() {
                 let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: None,
@@ -526,18 +595,18 @@ impl WgpuBackend {
                         end_of_pass_write_index: Some(2 * i as u32 + 1),
                     }),
                 });
-                pass.set_pipeline(&self.pipelines[*kind]);
+                pass.set_pipeline(&self.pipelines()[*kind]);
                 pass.set_bind_group(0, bg, &[]);
                 pass.dispatch_workgroups(*gx, *gy, 1);
             }
             enc.resolve_query_set(&qs, 0..2 * n, &resolve, 0);
             enc.copy_buffer_to_buffer(&resolve, 0, &staging, 0, bytes);
-            self.queue.submit(Some(enc.finish()));
+            self.queue().submit(Some(enc.finish()));
 
             let slice = staging.slice(..);
             let (tx, rx) = std::sync::mpsc::channel();
             slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-            self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            self.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
             rx.recv().unwrap().unwrap();
             let ticks: Vec<u64> = bytemuck::cast_slice::<u8, u64>(&slice.get_mapped_range()).to_vec();
             staging.unmap();
@@ -553,7 +622,7 @@ impl WgpuBackend {
     }
 
     pub fn storage(&self, n: u64) -> wgpu::Buffer {
-        self.device.create_buffer(&wgpu::BufferDescriptor {
+        self.device().create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: (n * 4).max(4),
             usage: wgpu::BufferUsages::STORAGE
@@ -564,7 +633,7 @@ impl WgpuBackend {
     }
 
     pub fn storage_init(&self, name: &str, data: &[f32]) -> wgpu::Buffer {
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        self.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(name),
             contents: bytemuck::cast_slice(data),
             usage: wgpu::BufferUsages::STORAGE
@@ -587,7 +656,7 @@ impl WgpuBackend {
         if usage.contains(BufUsage::UNIFORM) {
             u |= wgpu::BufferUsages::UNIFORM;
         }
-        self.device.create_buffer(&wgpu::BufferDescriptor {
+        self.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size,
             usage: u,
@@ -603,7 +672,7 @@ impl WgpuBackend {
         while bytes.len() % 16 != 0 {
             bytes.push(0);
         }
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        self.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("params"),
             contents: &bytes,
             usage: wgpu::BufferUsages::UNIFORM,
@@ -617,7 +686,7 @@ impl WgpuBackend {
     /// the GPU memory aperture in long training loops.
     pub fn uniform_dynamic(&self, len: usize) -> wgpu::Buffer {
         let size = (((len * 4) + 15) / 16 * 16).max(16) as u64;
-        self.device.create_buffer(&wgpu::BufferDescriptor {
+        self.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("params"),
             size,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -639,8 +708,8 @@ impl WgpuBackend {
                 resource: b.as_entire_binding(),
             });
         }
-        let layout = self.pipelines[kind].get_bind_group_layout(0);
-        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let layout = self.pipelines()[kind].get_bind_group_layout(0);
+        let bg = self.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &layout,
             entries: &entries,
@@ -648,7 +717,7 @@ impl WgpuBackend {
         if self.stats.is_some() {
             self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let (gx, gy) = backend_api::grid_ws(threads, self.wgsizes[kind]);
+        let (gx, gy) = backend_api::grid_ws(threads, self.wgsizes()[kind]);
         (kind, bg, gx, gy)
     }
 
@@ -680,12 +749,12 @@ impl WgpuBackend {
             };
             entries.push(wgpu::BindGroupEntry { binding: (i + 1) as u32, resource });
         }
-        let layout = self.pipelines[kind].get_bind_group_layout(0);
-        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &layout, entries: &entries });
+        let layout = self.pipelines()[kind].get_bind_group_layout(0);
+        let bg = self.device().create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &layout, entries: &entries });
         if self.stats.is_some() {
             self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let (gx, gy) = backend_api::grid_ws(threads, self.wgsizes[kind]);
+        let (gx, gy) = backend_api::grid_ws(threads, self.wgsizes()[kind]);
         (kind, bg, gx, gy)
     }
 
@@ -702,12 +771,12 @@ impl WgpuBackend {
         if !clears.is_empty() {
             self.flush();
             let mut enc = self
-                .device
+                .device()
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             for c in clears {
                 enc.clear_buffer(c, 0, None);
             }
-            self.queue.submit(Some(enc.finish()));
+            self.queue().submit(Some(enc.finish()));
         }
         self.pending.lock().unwrap().extend(steps.iter().cloned());
         if self.stats.is_some() {
@@ -720,7 +789,7 @@ impl WgpuBackend {
         // Flush pending compute first so a host write never races ahead of
         // dispatches recorded before it (queue order: prior compute, then write).
         self.flush();
-        self.queue.write_buffer(buf, 0, bytemuck::cast_slice(data));
+        self.queue().write_buffer(buf, 0, bytemuck::cast_slice(data));
     }
 
     /// Block until all submitted GPU work has completed, letting wgpu reclaim the
@@ -736,7 +805,7 @@ impl WgpuBackend {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn poll_wait(&self) {
         self.flush();
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        self.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
     }
 
     /// Copy a device buffer into a MAP_READ staging buffer and return its
@@ -752,7 +821,7 @@ impl WgpuBackend {
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-        self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        self.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
         rx.recv().unwrap().unwrap();
         let out = bytemuck::cast_slice::<u8, f32>(&slice.get_mapped_range()).to_vec();
         staging.unmap();
@@ -775,7 +844,7 @@ impl WgpuBackend {
         // Schedule the mapping callbacks; on the WebGPU backend this is a no-op
         // beyond servicing the queue, the actual completion arrives via the
         // browser event loop while we await the oneshot.
-        let _ = self.device.poll(wgpu::PollType::Poll);
+        let _ = self.device().poll(wgpu::PollType::Poll);
         rx.await.expect("map_async channel dropped").expect("buffer map failed");
         let out = bytemuck::cast_slice::<u8, f32>(&slice.get_mapped_range()).to_vec();
         staging.unmap();
@@ -785,17 +854,17 @@ impl WgpuBackend {
     /// Shared staging-buffer copy used by both `read` (native) and `read_async`
     /// (wasm).
     fn read_staging(&self, buf: &wgpu::Buffer, n: usize) -> wgpu::Buffer {
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let staging = self.device().create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: (n * 4) as u64,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let mut enc = self
-            .device
+            .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         enc.copy_buffer_to_buffer(buf, 0, &staging, 0, (n * 4) as u64);
-        self.queue.submit(Some(enc.finish()));
+        self.queue().submit(Some(enc.finish()));
         staging
     }
 }

@@ -911,6 +911,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
  "brain-kernels",
+ "brain-model",
  "brain-npu",
  "brain-onnx",
  "brain-optim",

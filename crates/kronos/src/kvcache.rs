@@ -112,12 +112,12 @@ impl HostW {
         }
 
         for l in 0..self.nl {
-            let xn = rmsnorm(&x, &self.norm1[l]);
+            let xn = hostmath::rmsnorm(&x, &self.norm1[l], EPS);
             let mut q = linear(&xn, &self.qw[l], &self.qb[l], d, d);
             let mut k = linear(&xn, &self.kw[l], &self.kb[l], d, d);
             let vv = linear(&xn, &self.vw[l], &self.vb[l], d, d);
-            rope1(&mut q, pos, self.heads, self.hd);
-            rope1(&mut k, pos, self.heads, self.hd);
+            hostmath::rope_neox_row(&mut q, self.heads, self.hd, pos, THETA);
+            hostmath::rope_neox_row(&mut k, self.heads, self.hd, pos, THETA);
             cache.k[l].extend_from_slice(&k);
             cache.v[l].extend_from_slice(&vv);
             let len = cache.k[l].len() / d;
@@ -129,16 +129,16 @@ impl HostW {
                 x[i] += o[i];
             }
             // SwiGLU FFN (no bias)
-            let xn2 = rmsnorm(&x, &self.norm2[l]);
-            let a = matvec(&xn2, &self.w1[l], self.ff, d);
-            let b = matvec(&xn2, &self.w3[l], self.ff, d);
-            let g: Vec<f32> = (0..self.ff).map(|i| silu(a[i]) * b[i]).collect();
-            let ffo = matvec(&g, &self.w2[l], d, self.ff);
+            let xn2 = hostmath::rmsnorm(&x, &self.norm2[l], EPS);
+            let a = hostmath::matvec(&self.w1[l], &xn2, self.ff, d);
+            let b = hostmath::matvec(&self.w3[l], &xn2, self.ff, d);
+            let g: Vec<f32> = (0..self.ff).map(|i| hostmath::silu(a[i]) * b[i]).collect();
+            let ffo = hostmath::matvec(&self.w2[l], &g, d, self.ff);
             for i in 0..d {
                 x[i] += ffo[i];
             }
         }
-        let ctx = rmsnorm(&x, &self.normf);
+        let ctx = hostmath::rmsnorm(&x, &self.normf, EPS);
         cache.ctx.extend_from_slice(&ctx);
         linear(&ctx, &self.ps1w, &self.ps1b, self.s1v, d)
     }
@@ -156,7 +156,7 @@ impl HostW {
 
         let sib = &self.emb_s1[sampled_s1 as usize * d..sampled_s1 as usize * d + d];
         let mut q = linear(sib, &self.dqw, &self.dqb, d, d);
-        rope1(&mut q, pos_last, heads, hd);
+        hostmath::rope_neox_row(&mut q, heads, hd, pos_last, THETA);
         // k/v from the cached context (non-causal cross-attention over w0..len)
         let win = len - w0;
         let mut kbuf = vec![0f32; win * d];
@@ -164,7 +164,7 @@ impl HostW {
         for (wi, j) in (w0..len).enumerate() {
             let cj = &ctx[j * d..j * d + d];
             let mut kj = linear(cj, &self.dkw, &self.dkb, d, d);
-            rope1(&mut kj, j, heads, hd);
+            hostmath::rope_neox_row(&mut kj, heads, hd, j, THETA);
             let vj = linear(cj, &self.dvw, &self.dvb, d, d);
             kbuf[wi * d..wi * d + d].copy_from_slice(&kj);
             vbuf[wi * d..wi * d + d].copy_from_slice(&vj);
@@ -176,21 +176,21 @@ impl HostW {
         for i in 0..d {
             sum[i] = ctx[pos_last * d + i] + o[i];
         }
-        let normed = rmsnorm(&sum, &self.dnorm);
+        let normed = hostmath::rmsnorm(&sum, &self.dnorm, EPS);
         linear(&normed, &self.ps2w, &self.ps2b, self.s2v, d)
     }
 }
 
 // -- host kernels (exact reproductions of the WGSL) --------------------------
 
-fn rmsnorm(x: &[f32], w: &[f32]) -> Vec<f32> {
-    let d = x.len();
-    let ss: f32 = x.iter().map(|v| v * v).sum();
-    let inv = 1.0 / (ss / d as f32 + EPS).sqrt();
-    (0..d).map(|i| x[i] * inv * w[i]).collect()
-}
 
 use rayon::prelude::*;
+
+// Elementwise/normalisation math comes from `model::hostmath` — the single
+// implementation, checked against the WGSL kernels. Called directly: a local
+// alias is how six crates ended up with six copies of rmsnorm.
+use model::hostmath;
+
 
 /// Above this many MACs a matvec fans out across the rayon pool; below it the
 /// per-call fan-out costs more than it saves.
@@ -214,42 +214,10 @@ fn linear(x: &[f32], w: &[f32], b: &[f32], out: usize, inp: usize) -> Vec<f32> {
     }
 }
 
-fn matvec(x: &[f32], w: &[f32], out: usize, inp: usize) -> Vec<f32> {
-    let row = |o: usize| {
-        let base = o * inp;
-        let mut acc = 0f32;
-        for i in 0..inp {
-            acc += x[i] * w[base + i];
-        }
-        acc
-    };
-    if out * inp >= PAR_THRESH {
-        (0..out).into_par_iter().map(row).collect()
-    } else {
-        (0..out).map(row).collect()
-    }
-}
 
 /// NeoX half-split RoPE on a single token's `[heads*hd]` vector at absolute
 /// position `pos`: pair `(j, j+half)` rotated by `angle = pos·θ^(-2j/hd)`.
-fn rope1(buf: &mut [f32], pos: usize, heads: usize, hd: usize) {
-    let half = hd / 2;
-    for h in 0..heads {
-        let off = h * hd;
-        for j in 0..half {
-            let angle = pos as f32 * THETA.powf(-(2.0 * j as f32) / hd as f32);
-            let (c, s) = (angle.cos(), angle.sin());
-            let a = buf[off + j];
-            let b = buf[off + j + half];
-            buf[off + j] = a * c - b * s;
-            buf[off + j + half] = b * c + a * s;
-        }
-    }
-}
 
-fn silu(x: f32) -> f32 {
-    x / (1.0 + (-x).exp())
-}
 
 /// Single-query multi-head attention: `q` `[heads*hd]` over keys/values
 /// `[len*d]` (windowed to `[w0,len)`), `scale`d, softmax over the window. Returns

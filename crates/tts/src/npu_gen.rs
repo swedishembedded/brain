@@ -154,7 +154,7 @@ impl TalkerTables {
         assert_eq!(hidden_row.len(), d);
         // `y = x·Wᵀ`, W=codec_head[v,d] row-major — the shared AVX2+rayon matvec
         // (was a scalar single-thread loop, ~15ms/frame; parallel ~2ms).
-        crate::gen_kv::matvec(&self.codec_head, hidden_row, v, d)
+        model::hostmath::matvec(&self.codec_head, hidden_row, v, d)
     }
 }
 
@@ -635,7 +635,7 @@ impl KvMtp {
     fn project(&self, emb: &[f32]) -> Vec<f32> {
         match &self.proj {
             Some((w, b)) => {
-                let mut y = crate::gen_kv::matvec(w, emb, self.d, self.emb);
+                let mut y = model::hostmath::matvec(w, emb, self.d, self.emb);
                 for (yi, bi) in y.iter_mut().zip(b) {
                     *yi += bi;
                 }
@@ -712,7 +712,7 @@ impl MtpEngine for KvMtp {
         for k in 1..=nres {
             let pin = self.project(&input_raw);
             let hidden = self.feed1(&pin).expect("KvMtp feed1");
-            let logits = crate::gen_kv::matvec(&self.lm_head[k - 1], &hidden, vocab, d);
+            let logits = model::hostmath::matvec(&self.lm_head[k - 1], &hidden, vocab, d);
             let best = Self::argmax(&logits);
             codes[k - 1] = best as u32;
             let r = self.codec_embedding[k - 1][best * emb..(best + 1) * emb].to_vec();

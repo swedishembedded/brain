@@ -155,6 +155,27 @@ mod native_facade {
             }
         }
 
+        /// A second handle onto **this** device: same adapter, queue and compiled
+        /// pipelines, its own command stream.
+        ///
+        /// Building a device costs seconds (device init + one shader compile per
+        /// kernel), and several concurrent devices on one card are hostile to the
+        /// driver. A process that needs many `Gpu`s — a server running several
+        /// models, a test binary — should build one and `share()` it, rather than
+        /// calling `new()` per model. Sharing is explicit so the number of real
+        /// devices stays answerable by reading the code.
+        ///
+        /// Only the wgpu backend can share today; other backends fall back to
+        /// building a fresh device, which is correct, just not free.
+        pub fn share(&self) -> Gpu {
+            match self.inner.share() {
+                Some(inner) => Gpu { inner },
+                None => panic!(
+                    "this backend cannot share a device; build a new Gpu instead"
+                ),
+            }
+        }
+
         /// Build on the native CPU backend regardless of the default selection.
         pub fn new_cpu(kernels: &[(&str, &str)]) -> Gpu {
             Gpu { inner: Box::new(backend_cpu::CpuBackend::new(kernels)) }
@@ -234,7 +255,8 @@ mod native_facade {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_facade::{
-    adapter_info, backend_name, backend_selected, discrete_gpu_count, set_default_backend, Backend, Gpu,
+    adapter_info, backend_name, backend_selected, discrete_gpu_count, set_default_backend, Backend,
+    Gpu,
 };
 
 // ---- wasm facade ------------------------------------------------------------

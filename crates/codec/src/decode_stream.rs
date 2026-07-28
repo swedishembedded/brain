@@ -22,6 +22,8 @@
 //! one-shot for the whole back.
 
 use std::collections::HashMap;
+// Single implementation of the elementwise/normalisation math.
+use model::hostmath;
 
 use crate::config::CodecConfig;
 use crate::streaming::{StreamConv1d, StreamConvTr1d};
@@ -74,33 +76,8 @@ fn transpose(x: &[f32], rows: usize, cols: usize) -> Vec<f32> {
 }
 
 /// RMSNorm over the last axis (`c`) of token-major `[rows,c]`.
-fn rmsnorm(x: &[f32], g: &[f32], rows: usize, c: usize, eps: f32) -> Vec<f32> {
-    let mut y = vec![0.0f32; rows * c];
-    for t in 0..rows {
-        let r = &x[t * c..t * c + c];
-        let ms = r.iter().map(|v| v * v).sum::<f32>() / c as f32;
-        let inv = 1.0 / (ms + eps).sqrt();
-        for j in 0..c {
-            y[t * c + j] = r[j] * inv * g[j];
-        }
-    }
-    y
-}
 
 /// LayerNorm over the last axis (`c`) of token-major `[rows,c]`, affine.
-fn layernorm(x: &[f32], g: &[f32], b: &[f32], rows: usize, c: usize, eps: f32) -> Vec<f32> {
-    let mut y = vec![0.0f32; rows * c];
-    for t in 0..rows {
-        let r = &x[t * c..t * c + c];
-        let mean = r.iter().sum::<f32>() / c as f32;
-        let var = r.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / c as f32;
-        let inv = 1.0 / (var + eps).sqrt();
-        for j in 0..c {
-            y[t * c + j] = (r[j] - mean) * inv * g[j] + b[j];
-        }
-    }
-    y
-}
 
 fn gelu_inplace(x: &mut [f32]) {
     for v in x.iter_mut() {
@@ -181,7 +158,7 @@ impl<'a> Back<'a> {
         let tm = transpose(&dw, c, l); // [l,c]
         let gn = self.w[&format!("{prefix}.norm.weight")].clone();
         let gb = self.w[&format!("{prefix}.norm.bias")].clone();
-        let normed = layernorm(&tm, &gn, &gb, l, c, 1e-6);
+        let normed = hostmath::layernorm_rows(&tm, &gn, &gb, l, c, 1e-6);
         let hid = c * 4;
         let p1w = self.w[&format!("{prefix}.pwconv1.weight")].clone();
         let p1b = self.w[&format!("{prefix}.pwconv1.bias")].clone();
@@ -302,23 +279,6 @@ fn full_causal_conv(w: &W, prefix: &str, x: &[f32], cin: usize, cout: usize, k: 
     y
 }
 
-fn rope(x: &mut [f32], rows: usize, heads: usize, hd: usize, theta: f32) {
-    let half = hd / 2;
-    for p in 0..rows {
-        for h in 0..heads {
-            let base = (p * heads + h) * hd;
-            let mut rot = vec![0.0f32; hd];
-            for j in 0..hd {
-                let m = (j % half) as f32;
-                let ang = p as f32 * theta.powf(-2.0 * m / hd as f32);
-                let (c, s) = (ang.cos(), ang.sin());
-                let xr = if j < half { -x[base + j + half] } else { x[base + j - half] };
-                rot[j] = x[base + j] * c + xr * s;
-            }
-            x[base..base + hd].copy_from_slice(&rot);
-        }
-    }
-}
 
 /// Front: codes `[nq,T]` (codebook-major i64) -> latent NCL `[latent, T]`.
 fn front(w: &W, cfg: &CodecConfig, codes: &[i64], t: usize) -> Vec<f32> {
@@ -367,12 +327,12 @@ fn front(w: &W, cfg: &CodecConfig, codes: &[i64], t: usize) -> Vec<f32> {
 
     for layer in 0..cfg.num_hidden_layers as usize {
         let p = |leaf: &str| format!("pre_transformer.layers.{layer}.{leaf}");
-        let xn = rmsnorm(&x, &w[&p("input_layernorm.weight")], t, hidden, eps);
+        let xn = hostmath::rmsnorm_rows(&x, &w[&p("input_layernorm.weight")], t, hidden, eps);
         let mut q = matmul(&xn, &w[&p("self_attn.q_proj.weight")], t, hidden, hq);
         let mut k = matmul(&xn, &w[&p("self_attn.k_proj.weight")], t, hidden, hkv);
         let v = matmul(&xn, &w[&p("self_attn.v_proj.weight")], t, hidden, hkv);
-        rope(&mut q, t, nh, hd, theta);
-        rope(&mut k, t, nkv, hd, theta);
+        hostmath::rope_neox(&mut q, t, nh, hd, 0, theta);
+        hostmath::rope_neox(&mut k, t, nkv, hd, 0, theta);
         // attention per head (full causal).
         let mut ctx = vec![0.0f32; t * hq];
         for h in 0..nh {
@@ -405,7 +365,7 @@ fn front(w: &W, cfg: &CodecConfig, codes: &[i64], t: usize) -> Vec<f32> {
             x[j] += attn[j];
         }
         // MLP (SwiGLU).
-        let xn = rmsnorm(&x, &w[&p("post_attention_layernorm.weight")], t, hidden, eps);
+        let xn = hostmath::rmsnorm_rows(&x, &w[&p("post_attention_layernorm.weight")], t, hidden, eps);
         let gate = matmul(&xn, &w[&p("mlp.gate_proj.weight")], t, hidden, ff);
         let up = matmul(&xn, &w[&p("mlp.up_proj.weight")], t, hidden, ff);
         let mut hmul = vec![0.0f32; t * ff];
@@ -419,7 +379,7 @@ fn front(w: &W, cfg: &CodecConfig, codes: &[i64], t: usize) -> Vec<f32> {
             x[j] += down[j];
         }
     }
-    let x = rmsnorm(&x, &w["pre_transformer.norm.weight"], t, hidden, eps);
+    let x = hostmath::rmsnorm_rows(&x, &w["pre_transformer.norm.weight"], t, hidden, eps);
     let opw = &w["pre_transformer.output_proj.weight"];
     let opb = &w["pre_transformer.output_proj.bias"];
     let mut out = matmul(&x, opw, t, hidden, latent);

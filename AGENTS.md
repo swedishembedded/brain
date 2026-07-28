@@ -436,6 +436,41 @@ per-scenario table and the findings so far.
 
 ## Conventions & invariants
 
+- **One implementation. Never re-implement anything that already exists in this
+  workspace — no matter what it is.** This is the rule that most needs enforcing:
+  before writing a function, search for it. `rmsnorm` once existed **seven**
+  times (one WGSL kernel plus six host copies in `kronos`, `tts`, `chronos2`,
+  `fincast`, `zimage` and `codec`), `rope` three times, `silu` four times. Every
+  copy is a place the epsilon, the RoPE layout or the reduction order can drift
+  from the kernel that is supposed to be authoritative, and nothing compares
+  copies against each other.
+
+  | need | where it belongs |
+  |---|---|
+  | math that runs on a device | a WGSL kernel in `crates/kernels/wgsl/`, dispatched via `gpu_core` |
+  | math that genuinely runs on the host | **`model::hostmath`** — and nowhere else |
+  | CPU-parallel execution (rayon) | `crates/backend-cpu` only — it is the on-CPU scheduler |
+  | shared model blocks | `model::block`, `model::vit` |
+  | ONNX graph emission | `crates/npu/src/*_topology.rs` |
+
+  Do **not** wrap a shared function in a local alias "for readability"
+  (`fn silu(x) { hostmath::silu(x) }`). A local name is how a shared function
+  becomes a private copy at the next edit. Call it directly.
+
+  Two narrow exceptions, both of which must say why in a comment:
+  1. a **gradcheck oracle** may re-derive the math independently (usually in
+     `f64`) — an oracle that shares code with the thing it checks proves
+     nothing (`zimage::grad`);
+  2. a **backend fast path** implements an op for its device and is validated
+     against the WGSL reference (`backend-cpu::fast_ops`).
+
+- **Host math does not run on the accelerator.** Anything in `model::hostmath`
+  is invisible to `--device`: it will not use the GPU, Vulkan or the NPU
+  whatever the user asked for, and a benchmark of such a path reports host
+  numbers under a device label. Host math is for `m=1` decode steps, references
+  and glue — never for a hot path. If it is hot, it needs a kernel.
+
+
 - **WGSL is the source of truth.** Kernels live only in `crates/kernels/wgsl/`,
   embedded as consts; no kernel text is duplicated. After adding/removing a
   `.wgsl`, run **`make kernels-regen`** (`scripts/kernels-regen.sh`) to

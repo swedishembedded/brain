@@ -45,7 +45,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release wm/play wm-fixtures test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: help build release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo \
@@ -56,7 +56,11 @@ help:
 	@echo "brain targets:"
 	@echo "  make release                 build the optimized 'brain' binary"
 	@echo "  make requirements            pip-install the Python tooling (OpenVINO/NPU, torch, ...)"
-	@echo "  make test                    full cargo test suite"
+	@echo "  make test                    FAST lane: unit+integration, no doc-tests"
+	@echo "  make test/doc                doc-tests (slow: one link per crate)"
+	@echo "  make test/slow               #[ignore]d long-running tests"
+	@echo "  make test/full               test + test/doc + test/slow"
+	@echo "  make test/times              rank test binaries by wall time"
 	@echo "  make gradcheck               numerical backprop correctness gate (GPT)"
 	@echo "  make data/<name>             generate a dataset (calculator|reverser|wordcalc|"
 	@echo "                               timeseries|shakespeare_char|gpt) into $(DATA)/<name>"
@@ -91,8 +95,57 @@ build:
 release:
 	cargo build --release
 
+# ---- tests -----------------------------------------------------------------
+# `make test` is the FAST LANE and must stay fast: unit + integration tests
+# only, reusing the release build.
+#
+# Three things were making the full suite take ~an hour, all measured:
+#
+#  1. `cargo test` defaults to the DEBUG profile, so it recompiled the whole
+#     workspace even right after `make release`. Tests now run `--release` and
+#     reuse that build.
+#  2. Doc-tests link one binary per crate against the full graph — ~18s per
+#     crate for ~30 examples, most of them `no_run`. They are real coverage but
+#     they are not fast feedback, so they get their own lane.
+#  3. brain's `Gpu` is not safe to use concurrently from several threads in one
+#     process: running a GPU-touching test binary with --test-threads=8
+#     deadlocked 3 runs in 6 (86 threads in futex wait), while --test-threads=1
+#     never did and cost ~1s more. Until models can share one device
+#     (docs/performance/mitigations.md F1), the suite serialises test threads.
+#
+# The timeout turns a deadlock into a fast, loud failure instead of an hour of
+# silence. Override any of these: TEST_THREADS=8 make test.
+TEST_THREADS ?= 1
+TEST_TIMEOUT ?= 900
+CARGO_TEST   ?= cargo test --release --offline
+
 test:
-	cargo test
+	@echo "test: fast lane (unit + integration, no doc-tests, GPU serialised)"
+	@timeout $(TEST_TIMEOUT) $(CARGO_TEST) --lib --bins --tests -- --test-threads=$(TEST_THREADS); \
+	rc=$$?; \
+	if [ $$rc -eq 124 ]; then \
+		echo; echo "TIMED OUT after $(TEST_TIMEOUT)s — almost certainly a deadlock, not slowness."; \
+		echo "Find it with:  scripts/test-times.sh --top 10"; \
+	fi; \
+	exit $$rc
+
+# Doc-tests: real coverage, but each crate links its own binary, so this is
+# minutes of linking for a handful of examples. Separate lane, not the default.
+test/doc:
+	$(CARGO_TEST) --doc
+
+# Tests marked `#[ignore = "slow: ..."]` — long training/parity runs that do not
+# belong in fast feedback.
+test/slow:
+	$(CARGO_TEST) --lib --bins --tests -- --ignored --test-threads=$(TEST_THREADS)
+
+# Everything, for a release gate.
+test/full: test test/doc test/slow
+
+# Rank every test binary by wall time; --budget fails if any exceeds it. This is
+# what keeps the fast lane fast.
+test/times: release
+	scripts/test-times.sh --top 15
 
 # Install the Python tooling (OpenVINO/NPU runtime, torch + transformers for the
 # benchmark reference rows, etc.) into the current environment. The Rust engine

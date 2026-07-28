@@ -232,6 +232,17 @@ pub trait Backend: Send + Sync {
     /// bytes — the hardware limit a kernel's biggest buffer must fit under.
     /// Card-dependent (wgpu reports the adapter's value); the default is the
     /// common ~2 GiB so callers that never query a real device stay conservative.
+    /// A second handle onto the **same** device: same queue and compiled
+    /// pipelines, its own command stream. `None` when the backend cannot share
+    /// (the caller then builds a fresh device, which is correct, just not free).
+    ///
+    /// Exists because building a device is expensive and several concurrent
+    /// devices on one physical card are hostile to the driver, so a process
+    /// running many models wants one device and many handles.
+    fn share(&self) -> Option<Box<dyn Backend>> {
+        None
+    }
+
     fn max_storage_binding_bytes(&self) -> u64 {
         2 * 1024 * 1024 * 1024 - 1
     }

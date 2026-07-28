@@ -20,6 +20,7 @@ pub mod collective;
 pub mod paged;
 pub mod distributed;
 pub mod grid;
+pub mod hostmath;
 pub mod netcollective;
 pub mod parallel;
 pub mod plan;

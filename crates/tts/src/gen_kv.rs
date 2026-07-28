@@ -29,6 +29,12 @@ use rayon::prelude::*;
 use crate::config::TalkerConfig;
 use crate::talker::TextProjection;
 
+// Elementwise/normalisation math comes from `model::hostmath` — the single
+// implementation, checked against the WGSL kernels. Called directly rather than
+// re-exported: a local alias is how six crates ended up with six copies.
+use model::hostmath;
+
+
 /// Per-layer decoder weights (row-major, brain convention `W:[out,in]`).
 pub(crate) struct LayerW {
     ln1: Vec<f32>,    // [d]
@@ -81,12 +87,9 @@ pub struct CpuTalker {
     codec_head: Vec<f32>,      // [vocab, d] (= lm_head.weight)
 }
 
-const EPS: f32 = 1e-6; // matches the WGSL rmsnorm kernel (hardcoded)
+pub(crate) const EPS: f32 = 1e-6; // matches the WGSL rmsnorm kernel (hardcoded)
 
 #[inline]
-fn silu(x: f32) -> f32 {
-    x / (1.0 + (-x).exp())
-}
 
 /// `out[o] = Σ_k w[o*in + k] * x[k]` — `y = x·Wᵀ` with `W:[out,in]` row-major.
 ///
@@ -94,19 +97,6 @@ fn silu(x: f32) -> f32 {
 /// frame). Output rows are independent dot products, so they fan out across all
 /// cores with rayon; the threshold keeps tiny projections on one thread to avoid
 /// scheduling overhead.
-pub(crate) fn matvec(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
-    let mut y = vec![0.0f32; out];
-    if out * inn >= 8192 {
-        y.par_iter_mut().enumerate().for_each(|(o, yo)| {
-            *yo = dot(&w[o * inn..o * inn + inn], x);
-        });
-    } else {
-        for (o, yo) in y.iter_mut().enumerate() {
-            *yo = dot(&w[o * inn..o * inn + inn], x);
-        }
-    }
-    y
-}
 
 /// `Σ row[k]·x[k]` — the inner dot of [`matvec`] and the per-step attention. Uses
 /// AVX2+FMA when the CPU supports it (8 f32 lanes/iter), else a scalar fallback.
@@ -170,15 +160,6 @@ unsafe fn dot_avx2(row: &[f32], x: &[f32]) -> f32 {
 }
 
 /// RMSNorm of a single `dim`-vector: `out = x / sqrt(mean(x²)+eps) * w`.
-pub(crate) fn rmsnorm(x: &[f32], w: &[f32]) -> Vec<f32> {
-    let dim = x.len();
-    let mut ss = 0.0f32;
-    for &v in x {
-        ss += v * v;
-    }
-    let inv = 1.0f32 / (ss / dim as f32 + EPS).sqrt();
-    x.iter().zip(w).map(|(&v, &g)| g * v * inv).collect()
-}
 
 /// In-place per-head RMSNorm (QK-norm) over `head_dim` of a `[n_heads*head_dim]`
 /// row, gain `w:[head_dim]`.
@@ -198,20 +179,6 @@ fn qk_norm(buf: &mut [f32], w: &[f32], n_heads: usize, hd: usize) {
 
 /// In-place half-split RoPE (Qwen/NeoX `rotate_half`) at absolute position `pos`
 /// over a `[n_heads*head_dim]` row, rotary base `theta`.
-fn rope(buf: &mut [f32], n_heads: usize, hd: usize, pos: usize, theta: f32) {
-    let half = hd / 2;
-    for h in 0..n_heads {
-        let base = h * hd;
-        for m in 0..half {
-            let angle = pos as f32 * theta.powf(-(2.0 * m as f32) / hd as f32);
-            let (s, c) = angle.sin_cos();
-            let x0 = buf[base + m];
-            let x1 = buf[base + m + half];
-            buf[base + m] = x0 * c - x1 * s;
-            buf[base + m + half] = x1 * c + x0 * s;
-        }
-    }
-}
 
 /// Build the per-layer weight list (`blocks.{l}.*`) from a name->tensor accessor.
 /// Shared by the Talker ([`CpuTalker`]) and the MTP ([`crate::gen_kv_mtp::CpuMtp`])
@@ -254,14 +221,14 @@ pub(crate) fn decoder_layer_step(
     let group = nh / nkv;
 
     // --- attention ---
-    let h1 = rmsnorm(x_in, &lw.ln1);
-    let mut q = matvec(&lw.wq, &h1, hq, d);
-    let mut k = matvec(&lw.wk, &h1, hkv, d);
-    let vv = matvec(&lw.wv, &h1, hkv, d);
+    let h1 = hostmath::rmsnorm(x_in, &lw.ln1, EPS);
+    let mut q = hostmath::matvec(&lw.wq, &h1, hq, d);
+    let mut k = hostmath::matvec(&lw.wk, &h1, hkv, d);
+    let vv = hostmath::matvec(&lw.wv, &h1, hkv, d);
     qk_norm(&mut q, &lw.q_norm, nh, hd);
     qk_norm(&mut k, &lw.k_norm, nkv, hd);
-    rope(&mut q, nh, hd, pos, theta);
-    rope(&mut k, nkv, hd, pos, theta);
+    hostmath::rope_neox_row(&mut q, nh, hd, pos, theta);
+    hostmath::rope_neox_row(&mut k, nkv, hd, pos, theta);
 
     // append to cache, then attend over all cached positions.
     kv.k.extend_from_slice(&k);
@@ -299,15 +266,15 @@ pub(crate) fn decoder_layer_step(
             }
         }
     }
-    let attn = matvec(&lw.wo, &ctx, d, hq);
+    let attn = hostmath::matvec(&lw.wo, &ctx, d, hq);
     let xmid: Vec<f32> = x_in.iter().zip(&attn).map(|(a, b)| a + b).collect();
 
     // --- SwiGLU MLP ---
-    let h2 = rmsnorm(&xmid, &lw.ln2);
-    let gate = matvec(&lw.gate, &h2, ff, d);
-    let up = matvec(&lw.up, &h2, ff, d);
-    let hmlp: Vec<f32> = gate.iter().zip(&up).map(|(&g, &u)| silu(g) * u).collect();
-    let mlp_out = matvec(&lw.down, &hmlp, d, ff);
+    let h2 = hostmath::rmsnorm(&xmid, &lw.ln2, EPS);
+    let gate = hostmath::matvec(&lw.gate, &h2, ff, d);
+    let up = hostmath::matvec(&lw.up, &h2, ff, d);
+    let hmlp: Vec<f32> = gate.iter().zip(&up).map(|(&g, &u)| hostmath::silu(g) * u).collect();
+    let mlp_out = hostmath::matvec(&lw.down, &hmlp, d, ff);
     xmid.iter().zip(&mlp_out).map(|(a, b)| a + b).collect()
 }
 
@@ -336,14 +303,14 @@ pub(crate) fn decoder_forward_full(
         let mut v = vec![0.0f32; n * hkv];
         for i in 0..n {
             let xi = &x[i * d..i * d + d];
-            let h1 = rmsnorm(xi, &lw.ln1);
-            let mut qi = matvec(&lw.wq, &h1, hq, d);
-            let mut ki = matvec(&lw.wk, &h1, hkv, d);
-            let vi = matvec(&lw.wv, &h1, hkv, d);
+            let h1 = hostmath::rmsnorm(xi, &lw.ln1, EPS);
+            let mut qi = hostmath::matvec(&lw.wq, &h1, hq, d);
+            let mut ki = hostmath::matvec(&lw.wk, &h1, hkv, d);
+            let vi = hostmath::matvec(&lw.wv, &h1, hkv, d);
             qk_norm(&mut qi, &lw.q_norm, nh, hd);
             qk_norm(&mut ki, &lw.k_norm, nkv, hd);
-            rope(&mut qi, nh, hd, i, theta);
-            rope(&mut ki, nkv, hd, i, theta);
+            hostmath::rope_neox_row(&mut qi, nh, hd, i, theta);
+            hostmath::rope_neox_row(&mut ki, nkv, hd, i, theta);
             q[i * hq..i * hq + hq].copy_from_slice(&qi);
             k[i * hkv..i * hkv + hkv].copy_from_slice(&ki);
             v[i * hkv..i * hkv + hkv].copy_from_slice(&vi);
@@ -381,14 +348,14 @@ pub(crate) fn decoder_forward_full(
                     }
                 }
             }
-            let attn = matvec(&lw.wo, &ctx, d, hq);
+            let attn = hostmath::matvec(&lw.wo, &ctx, d, hq);
             let xi = &x[i * d..i * d + d];
             let xmid: Vec<f32> = xi.iter().zip(&attn).map(|(a, b)| a + b).collect();
-            let h2 = rmsnorm(&xmid, &lw.ln2);
-            let gate = matvec(&lw.gate, &h2, ff, d);
-            let up = matvec(&lw.up, &h2, ff, d);
-            let hmlp: Vec<f32> = gate.iter().zip(&up).map(|(&g, &u)| silu(g) * u).collect();
-            let mlp_out = matvec(&lw.down, &hmlp, d, ff);
+            let h2 = hostmath::rmsnorm(&xmid, &lw.ln2, EPS);
+            let gate = hostmath::matvec(&lw.gate, &h2, ff, d);
+            let up = hostmath::matvec(&lw.up, &h2, ff, d);
+            let hmlp: Vec<f32> = gate.iter().zip(&up).map(|(&g, &u)| hostmath::silu(g) * u).collect();
+            let mlp_out = hostmath::matvec(&lw.down, &hmlp, d, ff);
             let row = &mut x[i * d..i * d + d];
             for (r, (a, b)) in row.iter_mut().zip(xmid.iter().zip(&mlp_out)) {
                 *r = a + b;
@@ -397,7 +364,7 @@ pub(crate) fn decoder_forward_full(
     }
     let mut out = vec![0.0f32; n * d];
     for i in 0..n {
-        let h = rmsnorm(&x[i * d..i * d + d], norm);
+        let h = hostmath::rmsnorm(&x[i * d..i * d + d], norm, EPS);
         out[i * d..i * d + d].copy_from_slice(&h);
     }
     out
@@ -569,7 +536,7 @@ impl CpuTalker {
             x = decoder_layer_step(&self.layers[l], &mut self.cache[l], dims, &x, pos);
         }
         self.pos += 1;
-        rmsnorm(&x, &self.norm)
+        hostmath::rmsnorm(&x, &self.norm, EPS)
     }
 
     /// **Full recompute** of all positions from `inputs_embeds:[n, d]` (no cache);
