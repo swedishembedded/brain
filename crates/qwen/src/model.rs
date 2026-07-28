@@ -88,6 +88,10 @@ const DECODE_SOFTMAX: usize = 41;
 const ATTN_DECODE_APPLY: usize = 42;
 const KV_APPEND: usize = 43;
 const ROPE_AT: usize = 44;
+// Vision-language residual splice (image-embedding injection). Off unless
+// `enable_mm_splice` was called; see `model::vlm`.
+const SPLICE: usize = 45;
+const SPLICE_BWD: usize = 46;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -135,6 +139,8 @@ const PIPELINES: &[(&str, &str)] = &[
     ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
     ("kv_append", kernels::KV_APPEND),
     ("rope_at", kernels::ROPE_AT),
+    ("splice", kernels::SPLICE),
+    ("splice_bwd", kernels::SPLICE_BWD),
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
@@ -246,6 +252,15 @@ pub struct Qwen {
     targets: DeviceBuffer,
     res: Vec<DeviceBuffer>,
     layers: Vec<Layer>,
+
+    // Vision-language embedding splice (off = None). When set to `(row0, n_rows)`
+    // the forward overwrites residual rows `[row0, row0+n_rows)` with `img_embeds`
+    // (written by the vision front-end via `write_img_embeds`) after the text
+    // token-embedding gather, and the backward routes those rows' gradient into
+    // `d_img_embeds` (read via `read_d_img_embeds`) instead of `tok.weight`.
+    mm_splice: Cell<Option<(u32, u32)>>,
+    img_embeds: DeviceBuffer,
+    d_img_embeds: DeviceBuffer,
     proj: DeviceBuffer,
     mlp_out: DeviceBuffer,
     scores: DeviceBuffer,
@@ -511,6 +526,9 @@ impl Qwen {
             targets,
             res,
             layers,
+            mm_splice: Cell::new(None),
+            img_embeds: st(1),
+            d_img_embeds: st(1),
             proj: st(n * d),
             mlp_out: st(n * d),
             scores: st(bht2),
@@ -714,6 +732,11 @@ impl Qwen {
                     n * d,
                 ));
             }
+            // Vision-language splice: overwrite the image-placeholder rows of the
+            // freshly-gathered residual stream with the projected image tokens.
+            if let Some((row0, n_rows)) = self.mm_splice.get() {
+                s.push(model::vlm::splice_fwd(&self.gpu, SPLICE, &self.img_embeds, &self.res[0], row0 * d, n_rows * d));
+            }
         }
 
         for l in self.shard.start..self.shard.end {
@@ -897,6 +920,15 @@ impl Qwen {
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
         }
 
+        // Vision-language splice backward: move the image rows' residual grad into
+        // `d_img_embeds` and ZERO them in dres[0] BEFORE emb_bwd, so the scatter
+        // below never trains the placeholder token's embedding row.
+        if self.shard.embed {
+            if let Some((row0, n_rows)) = self.mm_splice.get() {
+                s.push(model::vlm::splice_bwd(&self.gpu, SPLICE_BWD, &self.dres[0], &self.d_img_embeds, row0 * d, n_rows * d));
+            }
+        }
+
         // embedding backward (tied: accumulates onto the head grad in tok.weight);
         // only the embed stage, which owns the embedding rows and dres[0].
         if self.shard.embed && self.trainable("tok.weight") {
@@ -955,6 +987,43 @@ impl Qwen {
     /// Write this stage's INPUT residual `res[start]` (from the previous stage).
     pub fn write_in_res(&self, data: &[f32]) {
         self.gpu.write(&self.res[self.shard.start], bytemuck::cast_slice(data));
+    }
+
+    // ---- vision-language embedding splice seam ----
+
+    /// Enable the VLM embedding splice at residual rows `[row0, row0+n_rows)`:
+    /// after the text token-embedding gather the forward overwrites those rows
+    /// with the image tokens written via [`Self::write_img_embeds`], and the
+    /// backward routes their gradient to [`Self::read_d_img_embeds`] (zeroing them
+    /// in dres[0] so `emb_bwd` never trains the placeholder token). Reallocates the
+    /// image buffers and rebuilds the fwd/bwd graphs — call once after construction
+    /// (before the first forward). No effect on `tok.weight`/other params.
+    pub fn enable_mm_splice(&mut self, row0: u32, n_rows: u32) {
+        let sz = (n_rows * self.cfg.d_model) as u64;
+        self.img_embeds = self.gpu.storage(sz);
+        self.d_img_embeds = self.gpu.storage(sz);
+        self.mm_splice.set(Some((row0, n_rows)));
+        self.fwd_steps = self.forward_steps(self.b, self.t);
+        if !self.bwd_steps.is_empty() {
+            self.bwd_steps = self.build_backward_steps();
+        }
+    }
+
+    /// Number of spliced image embedding elements (`n_rows·d_model`); 0 if off.
+    fn img_numel(&self) -> usize {
+        self.mm_splice.get().map_or(0, |(_, n)| (n * self.cfg.d_model) as usize)
+    }
+
+    /// Write the projected image tokens `[n_rows, d_model]` (row-major) to splice
+    /// into the residual stream on the next forward.
+    pub fn write_img_embeds(&self, data: &[f32]) {
+        self.gpu.write(&self.img_embeds, bytemuck::cast_slice(data));
+    }
+
+    /// Read the gradient of the spliced image embeddings after `backward` — feeds
+    /// the vision connector/encoder backward.
+    pub fn read_d_img_embeds(&self) -> Vec<f32> {
+        self.gpu.read(&self.d_img_embeds, self.img_numel())
     }
     /// Run the backward graph. The head stage refreshes the CE-grad uniform first
     /// (it drives `ce_grad_stats`); other stages consume `dres[end]` written by
