@@ -276,6 +276,12 @@ pub const GATE_ROW: &str = include_str!("../wgsl/gate_row.wgsl");
 pub const GATE_ROW_DG: &str = include_str!("../wgsl/gate_row_dg.wgsl");
 /// `wgsl/gate_row_dh.wgsl`
 pub const GATE_ROW_DH: &str = include_str!("../wgsl/gate_row_dh.wgsl");
+/// `wgsl/geglu_shift.wgsl`
+pub const GEGLU_SHIFT: &str = include_str!("../wgsl/geglu_shift.wgsl");
+/// `wgsl/geglu_shift_da.wgsl`
+pub const GEGLU_SHIFT_DA: &str = include_str!("../wgsl/geglu_shift_da.wgsl");
+/// `wgsl/geglu_shift_db.wgsl`
+pub const GEGLU_SHIFT_DB: &str = include_str!("../wgsl/geglu_shift_db.wgsl");
 /// `wgsl/gelu.wgsl`
 pub const GELU: &str = include_str!("../wgsl/gelu.wgsl");
 /// `wgsl/gelu_bwd.wgsl`
@@ -735,6 +741,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("gate_row", GATE_ROW),
     ("gate_row_dg", GATE_ROW_DG),
     ("gate_row_dh", GATE_ROW_DH),
+    ("geglu_shift", GEGLU_SHIFT),
+    ("geglu_shift_da", GEGLU_SHIFT_DA),
+    ("geglu_shift_db", GEGLU_SHIFT_DB),
     ("gelu", GELU),
     ("gelu_bwd", GELU_BWD),
     ("gelu_erf", GELU_ERF),

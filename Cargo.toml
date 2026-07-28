@@ -24,6 +24,7 @@ default-members = [
     "crates/qwen",
     "crates/qwenvl",
     "crates/fastvlm",
+    "crates/moondream",
     "crates/glm",
     "crates/seq2seq",
     "crates/autoencoder",

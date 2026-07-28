@@ -1,0 +1,19 @@
+[package]
+name = "brain-moondream"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Moondream 3: SigLIP ViT + overlap multi-crop + a partial-RoPE/tau MoE decoder (parallel attn+MLP)."
+
+[lib]
+name = "moondream"
+path = "src/lib.rs"
+
+[dependencies]
+brain-qwen.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-data.workspace = true
