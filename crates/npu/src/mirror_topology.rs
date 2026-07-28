@@ -31,19 +31,21 @@ const EPS: f32 = 1e-6;
 const PE: &str = "visual_geometry_transformer.patch_embed";
 
 struct Topo<'a> {
-    g: &'a mut GraphBuilder,
+    b: crate::topo::TopoBase<'a>,
     w: &'a W,
-    n: usize,
+}
+
+// Identical DSL helpers live on `TopoBase` (crate::topo); dialect-specific ones
+// (tagged unary, model emitters) stay here.
+impl<'a> std::ops::Deref for Topo<'a> {
+    type Target = crate::topo::TopoBase<'a>;
+    fn deref(&self) -> &Self::Target { &self.b }
+}
+impl<'a> std::ops::DerefMut for Topo<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.b }
 }
 
 impl<'a> Topo<'a> {
-    fn tmp(&mut self, tag: &str) -> String {
-        self.n += 1;
-        format!("mir_{tag}_{}", self.n)
-    }
-    fn node(&mut self, op: &str, ins: &[&str], out: &str) {
-        self.g.add(Node::new(op, ins, &[out]));
-    }
     fn unary(&mut self, op: &str, x: &str, tag: &str) -> String {
         let o = self.tmp(tag);
         self.node(op, &[x], &o);
@@ -253,7 +255,7 @@ pub fn build_dinov2_graph(w: &W, g: &mut GraphBuilder, blocks: usize) {
     g.init_f32("mir_inv_sqrt2", &[1], vec![std::f32::consts::FRAC_1_SQRT_2]);
     g.init_f32("mir_attn_scale", &[1], vec![1.0 / (HD as f32).sqrt()]);
 
-    let mut tp = Topo { g, w, n: 0 };
+    let mut tp = Topo { b: crate::topo::TopoBase::new(g), w };
     // patch conv 14x14 s14
     let pw = tp.host(&format!("{PE}.patch_embed.proj.weight")).clone();
     tp.g.init_f32(&format!("{PE}.patch_embed.proj.weight"), &[C, 3, 14, 14], pw);
@@ -334,7 +336,7 @@ pub fn build_trunk_graph(
     g.init_f32("mir_inv_sqrt2", &[1], vec![std::f32::consts::FRAC_1_SQRT_2]);
     g.init_f32("mir_attn_scale", &[1], vec![1.0 / (HD as f32).sqrt()]);
 
-    let mut tp = Topo { g, w, n: 0 };
+    let mut tp = Topo { b: crate::topo::TopoBase::new(g), w };
     // special head rows [s, 7, C]: cam+reg variant 0 for frame 0, variant 1
     // for later frames; pose/ray rows zero (no-prior path).
     let ps = mirror::model::PATCH_START;
@@ -440,7 +442,7 @@ pub fn build_dpt_head_graph(
     }
     g.init_f32("mir_eps5", &[1], vec![1e-5]);
 
-    let mut tp = Topo { g, w, n: 0 };
+    let mut tp = Topo { b: crate::topo::TopoBase::new(g), w };
     let nm = |s: &str| format!("{prefix}.{s}");
     // conv with the bias as a direct Conv input
     fn conv(

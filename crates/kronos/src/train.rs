@@ -956,7 +956,7 @@ pub fn finetune(
     // One device for the whole finetune: base evaluation and the fine-tuned
     // trainer share it instead of each building their own.
     let dev = Gpu::new(PIPELINES);
-    let base_val = KronosTrain::with_lora_on(dev.share(), cfg.clone(), t, base_init, None).mean_loss(val);
+    let base_val = KronosTrain::with_lora_on(dev.share_or_new(PIPELINES), cfg.clone(), t, base_init, None).mean_loss(val);
     if opts.progress {
         eprintln!("  [finetune] base held-out loss {base_val:.4} · {} train / {} val windows · {} epoch(s)",
             train.len(), val.len(), opts.epochs);

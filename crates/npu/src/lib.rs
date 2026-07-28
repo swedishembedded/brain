@@ -15,6 +15,7 @@
 // Pure-Rust core (always compiled, hardware-free).
 pub mod calib;
 pub mod codec_export;
+pub(crate) mod topo;
 pub mod codec_topology;
 pub mod decode;
 pub mod export;

@@ -71,7 +71,9 @@ impl KronosModel {
         dec_cfg: KronosConfig,
         dec_w: &HashMap<String, Vec<f32>>,
     ) -> Result<KronosModel, String> {
-        let tok_gpu = gpu.share();
+        // share_or_new: on a backend without a shareable device (native Vulkan
+        // today) this builds fresh instead of panicking.
+        let tok_gpu = gpu.share_or_new(crate::nn::PIPELINES);
         Ok(KronosModel {
             tokenizer: KronosTokenizer::from_weights_on(tok_gpu, tok_cfg, tok_w)?,
             decoder: KronosDecoder::from_weights_on(gpu, dec_cfg, dec_w)?,

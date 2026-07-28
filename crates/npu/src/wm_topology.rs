@@ -68,7 +68,7 @@ pub fn build_diamond_graph(cfg: &WmUnetConfig, w: &W, g: &mut GraphBuilder) {
     let (h0, w0) = (cfg.h as i64, cfg.w as i64);
     let n_lv = cfg.channels.len();
 
-    let mut tp = Topo { g, w, cc, n: 0 };
+    let mut tp = Topo { b: crate::topo::TopoBase::new(g), w, cc };
     tp.g.input_f32("noisy_scaled", &[1, ic, h0, w0]);
     tp.g.input_f32("obs_rescaled", &[1, nsc * ic, h0, w0]);
     tp.g.input_f32("cond", &[1, cc]);
@@ -155,22 +155,24 @@ pub fn build_diamond_graph(cfg: &WmUnetConfig, w: &W, g: &mut GraphBuilder) {
 
 /// Graph-construction state.
 struct Topo<'a> {
-    g: &'a mut GraphBuilder,
+    b: crate::topo::TopoBase<'a>,
     w: &'a W,
     /// cond_channels.
     cc: i64,
-    n: usize,
+}
+
+// Identical DSL helpers live on `TopoBase` (crate::topo); dialect-specific ones
+// (tagged unary, model emitters) stay here.
+impl<'a> std::ops::Deref for Topo<'a> {
+    type Target = crate::topo::TopoBase<'a>;
+    fn deref(&self) -> &Self::Target { &self.b }
+}
+impl<'a> std::ops::DerefMut for Topo<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.b }
 }
 
 impl Topo<'_> {
-    fn tmp(&mut self, tag: &str) -> String {
-        self.n += 1;
-        format!("{tag}_{}", self.n)
-    }
 
-    fn has(&self, name: &str) -> bool {
-        self.g.graph().initializers.iter().any(|t| t.name == name)
-    }
 
     fn host(&self, name: &str) -> &(Vec<usize>, Vec<f32>) {
         self.w.get(name).unwrap_or_else(|| panic!("diamond onnx: missing tensor {name}"))
@@ -196,9 +198,6 @@ impl Topo<'_> {
         self.g.init_f32(alias, dims, data);
     }
 
-    fn node(&mut self, op: &str, ins: &[&str], out: &str) {
-        self.g.add(Node::new(op, ins, &[out]));
-    }
 
     fn unary(&mut self, op: &str, x: &str, tag: &str) -> String {
         let o = self.tmp(tag);

@@ -40,7 +40,7 @@ type W = HashMap<String, Vec<f32>>;
 /// decoder tensors (role ""); `t` is the fixed number of code frames. Input
 /// `codes:[nq,T]` (int64, codebook-major), output `waveform:[1,1,L]` (f32).
 pub fn build_codec_graph(cfg: &CodecConfig, w: &W, t: usize, g: &mut GraphBuilder) {
-    let mut tp = CodecTopo { g, n: 0, w, cfg, stream: false, bufs: Vec::new() };
+    let mut tp = CodecTopo { b: crate::topo::TopoBase::new(g), w, cfg, stream: false, bufs: Vec::new() };
     tp.consts();
     tp.g.input_i64("codes", &[cfg.num_quantizers as i64, t as i64]);
     let h = tp.front(t);
@@ -53,7 +53,7 @@ pub fn build_codec_graph(cfg: &CodecConfig, w: &W, t: usize, g: &mut GraphBuilde
 /// causal transformer). The front is causal, so in streaming decode it is run
 /// once over all frames and the back consumes slices of its output.
 pub fn build_codec_front_graph(cfg: &CodecConfig, w: &W, t: usize, g: &mut GraphBuilder) {
-    let mut tp = CodecTopo { g, n: 0, w, cfg, stream: false, bufs: Vec::new() };
+    let mut tp = CodecTopo { b: crate::topo::TopoBase::new(g), w, cfg, stream: false, bufs: Vec::new() };
     tp.consts();
     tp.g.input_i64("codes", &[cfg.num_quantizers as i64, t as i64]);
     let h = tp.front(t);
@@ -66,7 +66,7 @@ pub fn build_codec_front_graph(cfg: &CodecConfig, w: &W, t: usize, g: &mut Graph
 /// (transposed-)conv carries its left-context / overlap as graph I/O, so a chunk
 /// decodes only its new frames. Returns the buffer specs `(prefix, C, width)`.
 pub fn build_codec_back_stream_graph(cfg: &CodecConfig, w: &W, chunk: usize, g: &mut GraphBuilder) -> Vec<(String, i64, i64)> {
-    let mut tp = CodecTopo { g, n: 0, w, cfg, stream: true, bufs: Vec::new() };
+    let mut tp = CodecTopo { b: crate::topo::TopoBase::new(g), w, cfg, stream: true, bufs: Vec::new() };
     tp.consts();
     tp.g.input_f32("latent", &[1, cfg.latent_dim as i64, chunk as i64]);
     let (wav, l) = tp.back("latent", chunk);
@@ -76,8 +76,7 @@ pub fn build_codec_back_stream_graph(cfg: &CodecConfig, w: &W, chunk: usize, g: 
 }
 
 struct CodecTopo<'a> {
-    g: &'a mut GraphBuilder,
-    n: usize,
+    b: crate::topo::TopoBase<'a>,
     w: &'a W,
     cfg: &'a CodecConfig,
     /// When true, the back's causal (transposed-)convs carry per-module state via
@@ -87,20 +86,18 @@ struct CodecTopo<'a> {
     bufs: Vec<(String, i64, i64)>,
 }
 
+// Identical DSL helpers live on `TopoBase` (crate::topo); this file keeps only
+// its dialect-specific helpers (tagged unary/binary, weight-registering matmul)
+// and codec-specific emission.
+impl<'a> std::ops::Deref for CodecTopo<'a> {
+    type Target = crate::topo::TopoBase<'a>;
+    fn deref(&self) -> &Self::Target { &self.b }
+}
+impl<'a> std::ops::DerefMut for CodecTopo<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.b }
+}
+
 impl<'a> CodecTopo<'a> {
-    fn tmp(&mut self, tag: &str) -> String {
-        self.n += 1;
-        format!("{tag}_{}", self.n)
-    }
-    fn f32(&mut self, name: &str, dims: &[i64], data: Vec<f32>) {
-        self.g.init_f32(name, dims, data);
-    }
-    fn has(&self, name: &str) -> bool {
-        self.g.graph().initializers.iter().any(|t| t.name == name)
-    }
-    fn node(&mut self, op: &str, ins: &[&str], out: &str) {
-        self.g.add(Node::new(op, ins, &[out]));
-    }
     fn unary(&mut self, op: &str, x: &str, tag: &str) -> String {
         let o = self.tmp(tag);
         self.node(op, &[x], &o);
@@ -111,21 +108,10 @@ impl<'a> CodecTopo<'a> {
         self.node(op, &[a, b], &o);
         o
     }
-    fn add(&mut self, a: &str, b: &str) -> String {
-        self.binary("Add", a, b, "add")
-    }
-    fn mul(&mut self, a: &str, b: &str) -> String {
-        self.binary("Mul", a, b, "mul")
-    }
     fn reshape_to(&mut self, x: &str, shape: &[i64]) -> String {
         let sname = format!("shape_{}", self.n + 1);
         self.g.init_i64(&sname, &[shape.len() as i64], shape.to_vec());
         self.binary("Reshape", x, &sname, "rs")
-    }
-    fn transpose(&mut self, x: &str, perm: &[i64]) -> String {
-        let o = self.tmp("tr");
-        self.g.add(Node::new("Transpose", &[x], &[&o]).attr_ints("perm", perm));
-        o
     }
 
     /// Shared scalar constants used across the front and back.
@@ -232,7 +218,8 @@ impl<'a> CodecTopo<'a> {
     fn add_ncl_bias(&mut self, x: &str, bias_name: &str, c: usize) -> String {
         let bn = format!("{bias_name}.ncl");
         if !self.has(&bn) {
-            self.f32(&bn, &[1, c as i64, 1], self.w[bias_name].clone());
+            let wv = self.w[bias_name].clone();
+            self.f32(&bn, &[1, c as i64, 1], wv);
         }
         self.add(x, &bn)
     }
@@ -273,7 +260,8 @@ impl<'a> CodecTopo<'a> {
         let y = self.matmul(x, &format!("{prefix}.weight"), out, inp);
         let bname = format!("{prefix}.bias");
         if !self.has(&bname) {
-            self.f32(&bname, &[out as i64], self.w[&bname].clone());
+            let wv = self.w[&bname].clone();
+            self.f32(&bname, &[out as i64], wv);
         }
         self.add(&y, &bname)
     }
@@ -281,25 +269,15 @@ impl<'a> CodecTopo<'a> {
     /// RMSNorm over the last axis (`dim`) with gain `name`.
     fn rmsnorm(&mut self, x: &str, name: &str, dim: usize) -> String {
         let gain = format!("{name}.g");
-        if !self.has(&gain) {
-            self.f32(&gain, &[dim as i64], self.w[name].clone());
-        }
-        let sq = self.mul(x, x);
-        let ms = {
-            let o = self.tmp("rms_mean");
-            self.g.add(Node::new("ReduceMean", &[&sq], &[&o]).attr_ints("axes", &[-1]).attr_int("keepdims", 1));
-            o
-        };
-        let mse = self.add(&ms, "rms_eps");
-        let rms = self.unary("Sqrt", &mse, "sqrt");
-        let nrm = self.binary("Div", x, &rms, "rmsdiv");
-        self.mul(&nrm, &gain)
+        let gw = self.w[name].clone();
+        self.b.rmsnorm(x, &gain, gw, dim, "rms_eps")
     }
 
     /// Per-channel (last-axis) scale by initializer `name` (LayerScale / γ).
     fn scale_last(&mut self, x: &str, name: &str, c: usize) -> String {
         if !self.has(name) {
-            self.f32(name, &[c as i64], self.w[name].clone());
+            let wv = self.w[name].clone();
+            self.f32(name, &[c as i64], wv);
         }
         self.mul(x, name)
     }
@@ -310,11 +288,13 @@ impl<'a> CodecTopo<'a> {
     fn causal_conv(&mut self, x: &str, prefix: &str, cin: usize, cout: usize, k: usize, dil: usize, groups: usize, l: usize) -> String {
         let wname = format!("{prefix}.conv.weight");
         if !self.has(&wname) {
-            self.f32(&wname, &[cout as i64, (cin / groups) as i64, k as i64], self.w[&wname].clone());
+            let wv = self.w[&wname].clone();
+            self.f32(&wname, &[cout as i64, (cin / groups) as i64, k as i64], wv);
         }
         let bname = format!("{prefix}.conv.bias");
         if !self.has(&bname) {
-            self.f32(&bname, &[cout as i64], self.w[&bname].clone());
+            let wv = self.w[&bname].clone();
+            self.f32(&bname, &[cout as i64], wv);
         }
         let ctx = dil * (k - 1);
         if self.stream && ctx > 0 {
@@ -398,10 +378,12 @@ impl<'a> CodecTopo<'a> {
         let aname = format!("{prefix}.alpha");
         let bname = format!("{prefix}.beta");
         if !self.has(&aname) {
-            self.f32(&aname, &[1, c as i64, 1], self.w[&aname].clone());
+            let wv = self.w[&aname].clone();
+            self.f32(&aname, &[1, c as i64, 1], wv);
         }
         if !self.has(&bname) {
-            self.f32(&bname, &[1, c as i64, 1], self.w[&bname].clone());
+            let wv = self.w[&bname].clone();
+            self.f32(&bname, &[1, c as i64, 1], wv);
         }
         let ea = self.unary("Exp", &aname, "snexp_a");
         let ax = self.mul(x, &ea);
@@ -444,10 +426,12 @@ impl<'a> CodecTopo<'a> {
         let gn = format!("{prefix}.weight");
         let bn = format!("{prefix}.bias");
         if !self.has(&gn) {
-            self.f32(&gn, &[c as i64], self.w[&gn].clone());
+            let wv = self.w[&gn].clone();
+            self.f32(&gn, &[c as i64], wv);
         }
         if !self.has(&bn) {
-            self.f32(&bn, &[c as i64], self.w[&bn].clone());
+            let wv = self.w[&bn].clone();
+            self.f32(&bn, &[c as i64], wv);
         }
         let mean = {
             let o = self.tmp("ln_mean");

@@ -49,7 +49,7 @@ pub fn build_chronos2_graph_quant(
     let ff = cfg.d_ff;
     let head_out = cfg.head_out_dim();
     let si = s as i64;
-    let mut tp = Topo { g, n: 0, quant };
+    let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant };
 
     tp.g.input_f32("emb", &[1, si, d as i64]);
     tp.g.input_f32("kmask", &[1, 1, 1, si]);
@@ -138,80 +138,28 @@ pub fn build_chronos2_graph_quant(
 
 /// ONNX assembly helper (mirrors the GLM topology's `Topo`).
 struct Topo<'a> {
-    g: &'a mut GraphBuilder,
-    n: usize,
+    b: crate::topo::TopoBase<'a>,
     quant: Quant,
 }
 
+// DSL + shared math emitters live on `TopoBase` (crate::topo); Deref keeps this
+// file's call sites unchanged. Only model-specific emission stays here.
+impl<'a> std::ops::Deref for Topo<'a> {
+    type Target = crate::topo::TopoBase<'a>;
+    fn deref(&self) -> &Self::Target {
+        &self.b
+    }
+}
+impl<'a> std::ops::DerefMut for Topo<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.b
+    }
+}
+
 impl<'a> Topo<'a> {
-    fn tmp(&mut self, tag: &str) -> String {
-        self.n += 1;
-        format!("{tag}_{}", self.n)
-    }
-    fn has(&self, name: &str) -> bool {
-        self.g.graph().initializers.iter().any(|t| t.name == name)
-    }
-    fn f32(&mut self, name: &str, dims: &[i64], data: Vec<f32>) {
-        if !self.has(name) {
-            self.g.init_f32(name, dims, data);
-        }
-    }
-    fn i64(&mut self, name: &str, dims: &[i64], data: Vec<i64>) {
-        if !self.has(name) {
-            self.g.init_i64(name, dims, data);
-        }
-    }
-    fn node(&mut self, op: &str, ins: &[&str], out: &str) {
-        self.g.add(Node::new(op, ins, &[out]));
-    }
-    fn unary(&mut self, op: &str, x: &str) -> String {
-        let o = self.tmp(&op.to_lowercase());
-        self.node(op, &[x], &o);
-        o
-    }
-    fn mul(&mut self, x: &str, c: &str) -> String {
-        let o = self.tmp("mul");
-        self.node("Mul", &[x, c], &o);
-        o
-    }
-    fn add(&mut self, x: &str, c: &str) -> String {
-        let o = self.tmp("add");
-        self.node("Add", &[x, c], &o);
-        o
-    }
-    fn add_t(&mut self, a: &str, b: &str) -> String {
-        let o = self.tmp("res");
-        self.node("Add", &[a, b], &o);
-        o
-    }
     fn sub_t(&mut self, a: &str, b: &str) -> String {
         let o = self.tmp("sub");
         self.node("Sub", &[a, b], &o);
-        o
-    }
-    fn matmul(&mut self, a: &str, b: &str) -> String {
-        let o = self.tmp("mm");
-        self.node("MatMul", &[a, b], &o);
-        o
-    }
-    fn reshape(&mut self, x: &str, shape: &str) -> String {
-        let o = self.tmp("rs");
-        self.node("Reshape", &[x, shape], &o);
-        o
-    }
-    fn transpose(&mut self, x: &str, perm: &[i64]) -> String {
-        let o = self.tmp("tr");
-        self.g.add(Node::new("Transpose", &[x], &[&o]).attr_ints("perm", perm));
-        o
-    }
-    fn softmax(&mut self, x: &str, axis: i64) -> String {
-        let o = self.tmp("sm");
-        self.g.add(Node::new("Softmax", &[x], &[&o]).attr_int("axis", axis));
-        o
-    }
-    fn concat2(&mut self, a: &str, b: &str, axis: i64) -> String {
-        let o = self.tmp("cat");
-        self.g.add(Node::new("Concat", &[a, b], &[&o]).attr_int("axis", axis));
         o
     }
 
@@ -240,23 +188,7 @@ impl<'a> Topo<'a> {
 
     fn rmsnorm(&mut self, x: &str, name: &str, w: &W, dim: usize) -> String {
         let gain = format!("{name}.g");
-        self.f32(&gain, &[dim as i64], w[name].clone());
-        let sq = self.mul(x, x);
-        let ms = {
-            let o = self.tmp("rms_mean");
-            self.g.add(
-                Node::new("ReduceMean", &[&sq], &[&o]).attr_ints("axes", &[-1]).attr_int("keepdims", 1),
-            );
-            o
-        };
-        let mse = self.add(&ms, "c_eps");
-        let rms = self.unary("Sqrt", &mse);
-        let nrm = {
-            let o = self.tmp("rms_div");
-            self.node("Div", &[x, &rms], &o);
-            o
-        };
-        self.mul(&nrm, &gain)
+        self.b.rmsnorm(x, &gain, w[name].clone(), dim, "c_eps")
     }
 
     /// Bias-free linear `y = x @ W^T`; brain `[out,in]` transposed to ONNX

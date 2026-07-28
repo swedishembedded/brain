@@ -449,9 +449,9 @@ per-scenario table and the findings so far.
   |---|---|
   | math that runs on a device | a WGSL kernel in `crates/kernels/wgsl/`, dispatched via `gpu_core` |
   | math that genuinely runs on the host | **`model::hostmath`** — and nowhere else |
-  | CPU-parallel execution (rayon) | `crates/backend-cpu` only — it is the on-CPU scheduler |
+  | CPU-parallel execution (rayon) | `backend_cpu::par` only — the on-CPU scheduler's primitives; no other crate may depend on rayon |
   | shared model blocks | `model::block`, `model::vit` |
-  | ONNX graph emission | `crates/npu/src/*_topology.rs` |
+  | ONNX graph emission (DSL + shared norm/silu emitters) | `crates/npu/src/topo.rs` (`TopoBase`); model-specific graphs stay in `crates/npu/src/*_topology.rs` |
 
   Do **not** wrap a shared function in a local alias "for readability"
   (`fn silu(x) { hostmath::silu(x) }`). A local name is how a shared function

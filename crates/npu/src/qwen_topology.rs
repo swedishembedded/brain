@@ -26,7 +26,7 @@ type W = HashMap<String, Vec<f32>>;
 /// (role ""), `t` the fixed sequence length. Input `input_ids:[1,T]` (int64),
 /// output `logits:[1,T,vocab]` (f32).
 pub fn build_qwen_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder) {
-    let mut tp = Topo { g, n: 0, quant: Quant::F32 };
+    let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant: Quant::F32 };
     let d = cfg.d_model as usize;
     let vocab = cfg.vocab as usize;
     let ti = t as i64;
@@ -55,7 +55,7 @@ pub fn build_qwen_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder)
 /// (`codec_head_logits`) and the MTP residual fill stay on the host, so this
 /// graph stops at the final RMSNorm and emits the hidden state, not logits.
 pub fn build_talker_hidden_graph(cfg: &QwenConfig, w: &W, t: usize, quant: bool, g: &mut GraphBuilder) {
-    let mut tp = Topo { g, n: 0, quant: Quant::from_bool(quant) };
+    let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant: Quant::from_bool(quant) };
     let d = cfg.d_model as usize;
     let ti = t as i64;
 
@@ -74,7 +74,7 @@ pub fn build_talker_hidden_graph(cfg: &QwenConfig, w: &W, t: usize, quant: bool,
 /// single inference, instead of streaming the prefix token-by-token through the
 /// decode-step graph.
 pub fn build_talker_prefill_graph(cfg: &QwenConfig, w: &W, t: usize, quant: Quant, g: &mut GraphBuilder) {
-    let mut tp = Topo { g, n: 0, quant };
+    let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant };
     let d = cfg.d_model as usize;
     let ti = t as i64;
     tp.g.input_f32("inputs_embeds", &[1, ti, d as i64]);
@@ -99,7 +99,7 @@ pub fn build_talker_prefill_graph(cfg: &QwenConfig, w: &W, t: usize, quant: Quan
 /// Attention is over the (masked) past cache concatenated with the new token's
 /// own key/value, so the static `cap` shapes never change.
 pub fn build_talker_decode_graph(cfg: &QwenConfig, w: &W, cap: usize, quant: Quant, g: &mut GraphBuilder) {
-    let mut tp = Topo { g, n: 0, quant };
+    let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant };
     let d = cfg.d_model as usize;
     let nh = cfg.n_heads as usize;
     let nkv = cfg.n_kv_heads as usize;
@@ -225,7 +225,7 @@ pub fn build_talker_decode_graph(cfg: &QwenConfig, w: &W, cap: usize, quant: Qua
 /// `blocks.{l}.*`, `norm.weight`, `codec_embedding.{i}.weight[vocab,emb]`,
 /// `lm_head.{i}.weight[vocab,d]` for i in 0..nres.
 pub fn build_mtp_fused_graph(cfg: &QwenConfig, emb: usize, vocab: usize, n_groups: usize, w: &W, g: &mut GraphBuilder) {
-    let mut tp = Topo { g, n: 0, quant: Quant::F32 };
+    let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant: Quant::F32 };
     let d = cfg.d_model as usize;
     let nh = cfg.n_heads as usize;
     let nkv = cfg.n_kv_heads as usize;
@@ -538,77 +538,27 @@ impl Quant {
 
 /// ONNX graph assembly helper: unique temp names + node/initializer emission.
 struct Topo<'a> {
-    g: &'a mut GraphBuilder,
-    n: usize,
+    b: crate::topo::TopoBase<'a>,
     quant: Quant,
 }
 
-impl<'a> Topo<'a> {
-    fn tmp(&mut self, tag: &str) -> String {
-        self.n += 1;
-        format!("{tag}_{}", self.n)
+// The emission DSL and the shared math emitters live on `TopoBase`
+// (crate::topo) — one implementation across every topology builder. Deref keeps
+// this file's call sites (`self.tmp`, `self.node`, …) reading as before.
+impl<'a> std::ops::Deref for Topo<'a> {
+    type Target = crate::topo::TopoBase<'a>;
+    fn deref(&self) -> &Self::Target {
+        &self.b
     }
-    fn f32(&mut self, name: &str, dims: &[i64], data: Vec<f32>) {
-        self.g.init_f32(name, dims, data);
+}
+impl<'a> std::ops::DerefMut for Topo<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.b
     }
-    fn i64(&mut self, name: &str, dims: &[i64], data: Vec<i64>) {
-        self.g.init_i64(name, dims, data);
-    }
-    fn node(&mut self, op: &str, ins: &[&str], out: &str) {
-        self.g.add(Node::new(op, ins, &[out]));
-    }
+}
 
-    fn gather(&mut self, data: &str, idx: &str, axis: i64, tag: &str) -> String {
-        let o = self.tmp(tag);
-        self.g.add(Node::new("Gather", &[data, idx], &[&o]).attr_int("axis", axis));
-        o
-    }
-    fn unary(&mut self, op: &str, x: &str) -> String {
-        let o = self.tmp(&op.to_lowercase());
-        self.node(op, &[x], &o);
-        o
-    }
-    /// Binary op with an initializer/const second operand (by name).
-    fn mul(&mut self, x: &str, c: &str) -> String {
-        let o = self.tmp("mul");
-        self.node("Mul", &[x, c], &o);
-        o
-    }
-    fn add(&mut self, x: &str, c: &str) -> String {
-        let o = self.tmp("add");
-        self.node("Add", &[x, c], &o);
-        o
-    }
-    fn mul_t(&mut self, a: &str, b: &str) -> String {
-        let o = self.tmp("mul");
-        self.node("Mul", &[a, b], &o);
-        o
-    }
-    fn add_t(&mut self, a: &str, b: &str) -> String {
-        let o = self.tmp("res");
-        self.node("Add", &[a, b], &o);
-        o
-    }
-    fn matmul(&mut self, a: &str, b: &str) -> String {
-        let o = self.tmp("mm");
-        self.node("MatMul", &[a, b], &o);
-        o
-    }
-    fn reshape(&mut self, x: &str, shape: &str) -> String {
-        let o = self.tmp("rs");
-        self.node("Reshape", &[x, shape], &o);
-        o
-    }
-    fn transpose(&mut self, x: &str, perm: &[i64]) -> String {
-        let o = self.tmp("tr");
-        self.g.add(Node::new("Transpose", &[x], &[&o]).attr_ints("perm", perm));
-        o
-    }
-    fn softmax(&mut self, x: &str, axis: i64) -> String {
-        let o = self.tmp("sm");
-        self.g.add(Node::new("Softmax", &[x], &[&o]).attr_int("axis", axis));
-        o
-    }
+impl<'a> Topo<'a> {
+    
     fn expand_kv(&mut self, x: &str) -> String {
         // [1,nkv,T,hd] -> [1,nkv,1,T,hd] -> Expand [1,nkv,group,T,hd] -> [1,nh,T,hd]
         let r5 = self.reshape(x, "sh_q5");
@@ -624,39 +574,11 @@ impl<'a> Topo<'a> {
         self.node("Expand", &[&r5, shexp], &e);
         self.reshape(&e, shnh)
     }
-    /// `Slice(x, lo, hi, axis)` by initializer names.
-    fn slice(&mut self, x: &str, lo: &str, hi: &str, ax: &str) -> String {
-        let o = self.tmp("sl");
-        self.g.add(Node::new("Slice", &[x, lo, hi, ax], &[&o]));
-        o
-    }
-    /// `Concat([a,b], axis)`.
-    fn concat2(&mut self, a: &str, b: &str, axis: i64) -> String {
-        let o = self.tmp("cat");
-        self.g.add(Node::new("Concat", &[a, b], &[&o]).attr_int("axis", axis));
-        o
-    }
 
     /// RMSNorm over the last `dim` axis with gain `name` (from `w`).
     fn rmsnorm(&mut self, x: &str, name: &str, w: &W, dim: usize) -> String {
         let gain = format!("{name}.g");
-        if !self.has(&gain) {
-            self.f32(&gain, &[dim as i64], w[name].clone());
-        }
-        let sq = self.mul_t(x, x);
-        let ms = {
-            let o = self.tmp("rms_mean");
-            self.g.add(Node::new("ReduceMean", &[&sq], &[&o]).attr_ints("axes", &[-1]).attr_int("keepdims", 1));
-            o
-        };
-        let mse = self.add(&ms, "c_eps");
-        let rms = self.unary("Sqrt", &mse);
-        let nrm = {
-            let o = self.tmp("rms_div");
-            self.node("Div", &[x, &rms], &o);
-            o
-        };
-        self.mul(&nrm, &gain)
+        self.b.rmsnorm(x, &gain, w[name].clone(), dim, "c_eps")
     }
 
     /// RoPE (half-split) on [1,T,heads,hd]: x*cos + rotate_half(x)*sin.
@@ -781,9 +703,6 @@ impl<'a> Topo<'a> {
         self.node("MatMul", &[x, winit], y);
     }
 
-    fn has(&self, name: &str) -> bool {
-        self.g.graph().initializers.iter().any(|t| t.name == name)
-    }
 }
 
 /// Transpose a row-major `[rows, cols]` matrix to `[cols, rows]`.
