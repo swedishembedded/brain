@@ -186,6 +186,9 @@ struct DeviceShared {
     /// The dispatch grid must be laid out with the kernel's OWN size, because the
     /// kernel reconstructs its flat invocation id from it.
     wgsizes: Vec<u32>,
+    /// What this device can do — computed once from the adapter at construction
+    /// and shared by every handle (see `backend_api::DeviceCaps`).
+    caps: backend_api::DeviceCaps,
     /// `BRAIN_PROFILE` per-kernel GPU timing (native only, and only when the
     /// adapter has TIMESTAMP_QUERY): each dispatch runs in its own compute pass
     /// with begin/end timestamps, resolved and accumulated per kernel name.
@@ -205,6 +208,7 @@ impl DeviceShared {
         queue: wgpu::Queue,
         kernels: &[(&str, &str)],
         want_ts: bool,
+        caps: backend_api::DeviceCaps,
     ) -> DeviceShared {
         // BRAIN_GPU_CHECKED=1 restores wgpu's runtime bounds checks for kernel
         // debugging; the default trusts the kernels — no clamp instruction on
@@ -262,6 +266,7 @@ impl DeviceShared {
             io: std::sync::Mutex::new(()),
             pipelines,
             wgsizes: backend_api::workgroup_sizes(kernels),
+            caps,
             #[cfg(not(target_arch = "wasm32"))]
             gpu_profile,
         }
@@ -431,6 +436,7 @@ impl WgpuBackend {
             (*self.shared.queue).clone(),
             kernels,
             want_ts,
+            self.shared.caps.clone(),
         ));
         let stats = profile_on.then(|| std::sync::atomic::AtomicU64::new(0));
         WgpuBackend::from_shared(shared, stats)
@@ -599,8 +605,72 @@ impl WgpuBackend {
         // 2-3 FMAs, so the removed clamps are directly measurable.
         use std::sync::atomic::AtomicU64;
         let stats = if profile_on { Some(AtomicU64::new(0)) } else { None };
-        let shared = std::sync::Arc::new(DeviceShared::compile(device, queue, kernels, want_ts));
+        let caps = Self::query_caps(adapter, &info, &device);
+        let shared = std::sync::Arc::new(DeviceShared::compile(device, queue, kernels, want_ts, caps));
         WgpuBackend::from_shared(shared, stats)
+    }
+
+    /// Fill [`backend_api::DeviceCaps`] from what wgpu can actually report.
+    /// Unknowable values stay `None`/false — never assumed present.
+    fn query_caps(
+        adapter: &wgpu::Adapter,
+        info: &wgpu::AdapterInfo,
+        device: &wgpu::Device,
+    ) -> backend_api::DeviceCaps {
+        use backend_api::{DeviceCaps, DeviceClass, NumericSupport};
+        #[cfg(target_arch = "wasm32")]
+        let class = {
+            let _ = info;
+            DeviceClass::Browser
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let class = match info.device_type {
+            wgpu::DeviceType::DiscreteGpu => DeviceClass::DiscreteGpu,
+            wgpu::DeviceType::IntegratedGpu => DeviceClass::IntegratedGpu,
+            // A software rasteriser executes on host cores; a selector must
+            // size for cores, not for thousands of GPU lanes.
+            wgpu::DeviceType::Cpu => DeviceClass::Cpu,
+            // Unknown/virtual: the conservative middle — no discrete-GPU tile
+            // assumptions; unified memory is decided separately (below), so
+            // this does NOT assume zero-copy.
+            _ => DeviceClass::IntegratedGpu,
+        };
+        // Zero-copy is only claimed for device types known to share the host's
+        // memory; unknown types stay false.
+        #[cfg(not(target_arch = "wasm32"))]
+        let unified = matches!(
+            info.device_type,
+            wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::Cpu
+        );
+        #[cfg(target_arch = "wasm32")]
+        let unified = false;
+        let l = device.limits();
+        // Subgroup width is only meaningful when the SUBGROUP feature exists;
+        // 0 means the adapter reports none.
+        let subgroup_size = (adapter.features().contains(wgpu::Features::SUBGROUP)
+            && info.subgroup_min_size > 0)
+            .then_some(info.subgroup_min_size);
+        DeviceCaps {
+            class,
+            compute_units: None, // wgpu exposes no SM/CU count
+            max_workgroup_size: l.max_compute_invocations_per_workgroup,
+            workgroup_mem_bytes: l.max_compute_workgroup_storage_size,
+            subgroup_size,
+            unified_memory: unified,
+            peak_bandwidth_gbs: None, // no API reports it; measurement may fill it
+            numeric: NumericSupport {
+                f32: true,
+                // dot4I8Packed is core WGSL: naga lowers it to hardware DP4A
+                // where the driver has it, else a polyfill — the packed-int8
+                // kernels execute either way and the 4x weight-byte saving
+                // holds regardless.
+                int8_dot: true,
+                // Exposed-f16 is not fast-f16 (Pascal: 1/64 rate). Stays
+                // false until a measured rate says otherwise (S5).
+                f16: false,
+                coop_matrix: false,
+            },
+        }
     }
 
     /// A fresh handle (own command stream) onto an already-built device.
@@ -1005,6 +1075,18 @@ impl backend_api::WeakBackend for WeakWgpu {
 impl Backend for WgpuBackend {
     fn kind(&self) -> &'static str {
         "wgpu"
+    }
+    fn caps(&self) -> backend_api::DeviceCaps {
+        self.shared.caps.clone()
+    }
+    // Forward the device's real limit; without this override the trait default
+    // (a fixed ~2 GiB) silently misreports the card — too small for a big-VRAM
+    // card, too LARGE for a downlevel device, where an oversized binding is a
+    // validation error at dispatch. (Native trait only; the wasm trait variant
+    // has no such method.)
+    #[cfg(not(target_arch = "wasm32"))]
+    fn max_storage_binding_bytes(&self) -> u64 {
+        WgpuBackend::max_storage_binding_bytes(self)
     }
     fn share(&self) -> Option<Box<dyn Backend>> {
         Some(Box::new(self.share_device()))

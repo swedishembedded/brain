@@ -83,6 +83,13 @@ struct KernelPipeline {
 /// The Vulkan compute device.
 pub struct VulkanBackend {
     ctx: VkContext,
+    /// What this device can do — queried once at construction from the
+    /// physical device (see `backend_api::DeviceCaps`).
+    caps: backend_api::DeviceCaps,
+    /// The device's real `maxStorageBufferRange`. Overrides the trait's fixed
+    /// ~2 GiB default, which over-reports on devices with a smaller range
+    /// (an oversized binding fails at dispatch, not allocation).
+    max_storage_binding: u64,
     pipelines: Vec<KernelPipeline>,
     /// Each kernel's declared `@workgroup_size` (parallel to `pipelines`), so the
     /// grid is laid out with the size the kernel itself reconstructs its flat
@@ -183,8 +190,16 @@ impl VulkanBackend {
         }
 
         let pool = unsafe { new_pool(dev)? };
+        let caps = Self::query_caps(&ctx);
+        let max_storage_binding = unsafe {
+            ctx.instance.get_physical_device_properties(ctx.physical_device)
+        }
+        .limits
+        .max_storage_buffer_range as u64;
         Ok(VulkanBackend {
             ctx,
+            caps,
+            max_storage_binding,
             pipelines,
             wgsizes: backend_api::workgroup_sizes(kernels),
             pools: Mutex::new(vec![pool]),
@@ -194,6 +209,47 @@ impl VulkanBackend {
             free_uniforms: Mutex::new(std::collections::HashMap::new()),
             free_sets: Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    /// Fill [`backend_api::DeviceCaps`] from the physical device. Everything
+    /// here is queried, never assumed: `int8_dot` comes from the measured
+    /// DP4A property the context established at device creation, and fast-f16
+    /// stays false until a measured rate says otherwise (Pascal exposes f16 at
+    /// 1/64 rate — availability is not speed).
+    fn query_caps(ctx: &VkContext) -> backend_api::DeviceCaps {
+        use backend_api::{DeviceCaps, DeviceClass, NumericSupport};
+        let props = unsafe { ctx.instance.get_physical_device_properties(ctx.physical_device) };
+        let class = match props.device_type {
+            vk::PhysicalDeviceType::DISCRETE_GPU => DeviceClass::DiscreteGpu,
+            vk::PhysicalDeviceType::INTEGRATED_GPU => DeviceClass::IntegratedGpu,
+            // A software rasteriser executes on host cores.
+            vk::PhysicalDeviceType::CPU => DeviceClass::Cpu,
+            // Unknown/virtual: conservative middle; unified memory is decided
+            // separately so this assumes no zero-copy.
+            _ => DeviceClass::IntegratedGpu,
+        };
+        // Subgroup width (Vulkan 1.1 core; the context already requires 1.1+).
+        let mut sub = vk::PhysicalDeviceSubgroupProperties::default();
+        let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut sub);
+        unsafe { ctx.instance.get_physical_device_properties2(ctx.physical_device, &mut p2) };
+        DeviceCaps {
+            class,
+            compute_units: None, // core Vulkan exposes no SM/CU count
+            max_workgroup_size: props.limits.max_compute_work_group_invocations,
+            workgroup_mem_bytes: props.limits.max_compute_shared_memory_size,
+            subgroup_size: (sub.subgroup_size > 0).then_some(sub.subgroup_size),
+            unified_memory: matches!(
+                props.device_type,
+                vk::PhysicalDeviceType::INTEGRATED_GPU | vk::PhysicalDeviceType::CPU
+            ),
+            peak_bandwidth_gbs: None,
+            numeric: NumericSupport {
+                f32: true,
+                int8_dot: ctx.prec.dp4a,
+                f16: false,
+                coop_matrix: ctx.caps.feature_supported && !ctx.caps.shapes.is_empty(),
+            },
+        }
     }
 
     /// Allocate one descriptor set with `set_layout`, growing the pool list when
@@ -619,6 +675,12 @@ fn log_adapter(name: &str) {
 impl Backend for VulkanBackend {
     fn kind(&self) -> &'static str {
         "vulkan"
+    }
+    fn caps(&self) -> backend_api::DeviceCaps {
+        self.caps.clone()
+    }
+    fn max_storage_binding_bytes(&self) -> u64 {
+        self.max_storage_binding
     }
     fn storage(&self, n: u64) -> DeviceBuffer {
         DeviceBuffer::new(VulkanBackend::storage(self, n))

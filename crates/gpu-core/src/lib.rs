@@ -22,7 +22,7 @@
 //! wasm only the wgpu/WebGPU backend exists, so `Gpu` wraps it directly (no
 //! `dyn`, and async device init / read-back via `new_async` / `read_async`).
 
-pub use backend_api::{f, BufUsage, DeviceBuffer, Step};
+pub use backend_api::{f, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, NumericSupport, Step};
 
 /// `--device` parsing and resolution: which compute is *schedulable*.
 #[cfg(not(target_arch = "wasm32"))]
@@ -156,6 +156,21 @@ mod native_facade {
         backend_wgpu::adapter_desc().map(|a| (a.description, a.software))
     }
 
+    /// The capabilities of the first device this process built, if any — the
+    /// machine-readable sibling of [`adapter_info`], for result fingerprints
+    /// (`brain perf`'s env block). Per-handle callers use [`Gpu::caps`].
+    pub fn device_caps() -> Option<backend_api::DeviceCaps> {
+        CAPS.get().cloned()
+    }
+
+    static CAPS: std::sync::OnceLock<backend_api::DeviceCaps> = std::sync::OnceLock::new();
+
+    /// Remember the first-built device's caps for [`device_caps`] (first write
+    /// wins, mirroring the adapter record).
+    fn record_caps(inner: &dyn backend_api::Backend) {
+        let _ = CAPS.set(inner.caps());
+    }
+
     /// The registry name of the selected backend.
     fn resolve_backend_name() -> &'static str {
         match DEFAULT_BACKEND.load(Ordering::Relaxed) {
@@ -217,17 +232,17 @@ mod native_facade {
         pub fn new(kernels: &[(&str, &str)]) -> Gpu {
             register_builtins();
             let name = resolve_backend_name();
-            match backend_api::create_backend(name, kernels) {
-                Ok(inner) => Gpu { inner },
+            let inner = match backend_api::create_backend(name, kernels) {
+                Ok(inner) => inner,
                 Err(e) if name == "vulkan" => {
                     eprintln!("brain: Vulkan backend unavailable ({e}); falling back to wgpu");
-                    Gpu {
-                        inner: backend_api::create_backend("wgpu", kernels)
-                            .expect("wgpu backend must be available"),
-                    }
+                    backend_api::create_backend("wgpu", kernels)
+                        .expect("wgpu backend must be available")
                 }
                 Err(e) => panic!("failed to build backend '{name}': {e}"),
-            }
+            };
+            record_caps(inner.as_ref());
+            Gpu { inner }
         }
 
         /// A second handle onto **this** device: same adapter, queue and compiled
@@ -277,6 +292,12 @@ mod native_facade {
             self.inner.kind()
         }
 
+        /// What this device can actually do — class, limits, numeric tiers.
+        /// Cached at backend construction; reading it is free.
+        pub fn caps(&self) -> backend_api::DeviceCaps {
+            self.inner.caps()
+        }
+
         /// A weak handle for pools/fixtures — see [`WeakGpu`]. `None` when the
         /// backend has no shared state to weakly reference.
         pub fn downgrade(&self) -> Option<WeakGpu> {
@@ -285,12 +306,18 @@ mod native_facade {
 
         /// Build on the native CPU backend regardless of the default selection.
         pub fn new_cpu(kernels: &[(&str, &str)]) -> Gpu {
-            Gpu { inner: Box::new(backend_cpu::CpuBackend::new(kernels)) }
+            let inner: Box<dyn backend_api::Backend> =
+                Box::new(backend_cpu::CpuBackend::new(kernels));
+            record_caps(inner.as_ref());
+            Gpu { inner }
         }
 
         /// Build on the wgpu backend regardless of the default selection.
         pub fn new_wgpu(kernels: &[(&str, &str)]) -> Gpu {
-            Gpu { inner: Box::new(backend_wgpu::WgpuBackend::new(kernels)) }
+            let inner: Box<dyn backend_api::Backend> =
+                Box::new(backend_wgpu::WgpuBackend::new(kernels));
+            record_caps(inner.as_ref());
+            Gpu { inner }
         }
 
         /// Build `count` wgpu devices on DISTINCT physical GPUs from one adapter
@@ -362,8 +389,8 @@ mod native_facade {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_facade::{
-    adapter_info, backend_name, backend_selected, discrete_gpu_count, set_default_backend, Backend,
-    Gpu, WeakGpu,
+    adapter_info, backend_name, backend_selected, device_caps, discrete_gpu_count,
+    set_default_backend, Backend, Gpu, WeakGpu,
 };
 
 // ---- wasm facade ------------------------------------------------------------
@@ -422,6 +449,11 @@ mod wasm_facade {
         pub async fn read_async(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
             self.inner.read_async_buf(buf, n).await
         }
+
+        /// Device capabilities (the browser floor plus whatever WebGPU reports).
+        pub fn caps(&self) -> backend_api::DeviceCaps {
+            Backend::caps(&self.inner)
+        }
     }
 }
 
@@ -437,6 +469,23 @@ mod tests {
         assert_eq!(f(1.0), 1.0f32.to_bits());
         assert_eq!(f(-2.5), (-2.5f32).to_bits());
         assert_eq!(f32::from_bits(f(3.14159)), 3.14159f32);
+    }
+
+    /// The capability contract every consumer relies on: fp32 is always
+    /// available, the CPU backend reports itself honestly (class, cores,
+    /// unified memory), and nothing unknowable is assumed present.
+    #[test]
+    fn cpu_caps_are_honest() {
+        let gpu = Gpu::new_cpu(&[("add2", kernels::ADD2)]);
+        let c = gpu.caps();
+        assert_eq!(c.class, DeviceClass::Cpu);
+        assert!(c.numeric.f32, "fp32 is the portable baseline — always true");
+        assert!(c.compute_units.unwrap_or(0) >= 1);
+        assert!(c.unified_memory, "host memory IS device memory on the CPU");
+        // The CPU JIT cannot run the multi-barrier packed-int8 GEMMs, and
+        // fast-f16/coop-matrix don't exist there: claiming any of these would
+        // send a selector down a path that cannot execute.
+        assert!(!c.numeric.int8_dot && !c.numeric.f16 && !c.numeric.coop_matrix);
     }
 
     #[test]

@@ -115,6 +115,105 @@ pub fn f(x: f32) -> u32 {
     x.to_bits()
 }
 
+// ---- device capability model ------------------------------------------------
+//
+// What the device can actually do — the inputs a kernel selector needs to pick
+// a variant, and what `brain perf` records so a result is machine-comparable.
+// One struct, plain data, filled by each backend at construction and cached;
+// where a value is unknowable it is `None`, and a consumer must cope — an
+// unknown capability is never assumed present.
+
+/// Broad device class — the coarsest input a kernel selector keys on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeviceClass {
+    /// Host CPU execution — the Cranelift JIT backend, or a software
+    /// rasteriser behind a GPU API (llvmpipe/lavapipe): the work runs on cores
+    /// either way, and tiles sized for thousands of GPU lanes thrash both.
+    Cpu,
+    IntegratedGpu,
+    DiscreteGpu,
+    /// Whole-graph compiled accelerator (OpenVINO NPU). Not an eager
+    /// [`Backend`]; the class exists so caps recorded from that path share the
+    /// same vocabulary.
+    Npu,
+    /// WebGPU in a browser — the portability floor: no subgroups, no f16,
+    /// no native queries beyond the WebGPU limits.
+    Browser,
+}
+
+/// Numeric paths a device supports beyond the always-present fp32 baseline.
+///
+/// Semantics are "brain's kernels for this tier execute on this device", as
+/// established by the backend at construction — never assumed from the device's
+/// marketing. Speed *within* a supported tier is the autotuner's question, not
+/// this struct's: a device may expose f16 at 1/64 rate (Pascal), which is why
+/// `f16` here means *fast* f16 and stays `false` until measured.
+#[derive(Clone, Copy, Debug)]
+pub struct NumericSupport {
+    /// Always true — the portable baseline and the numerical reference every
+    /// other tier is parity-gated against.
+    pub f32: bool,
+    /// The packed-int8 dot kernels (`matmul_i8*`, WGSL `dot4I8Packed`)
+    /// execute. Hardware DP4A where the driver has it; the 4× weight-byte
+    /// saving holds regardless.
+    pub int8_dot: bool,
+    /// *Fast* f16 arithmetic. Deliberately not "f16 is exposed": Pascal
+    /// exposes f16 at 1/64 rate, so availability without a measured rate is
+    /// exactly the trap. Stays false until the autotuner (S5) measures it.
+    pub f16: bool,
+    /// Cooperative-matrix / tensor-core matmul (the optional
+    /// `VK_KHR_cooperative_matrix` path).
+    pub coop_matrix: bool,
+}
+
+impl NumericSupport {
+    /// The portable floor: fp32 only.
+    pub const BASELINE: NumericSupport =
+        NumericSupport { f32: true, int8_dot: false, f16: false, coop_matrix: false };
+}
+
+/// What the device can actually do. Filled once at backend construction,
+/// cached on the backend, exposed via [`Backend::caps`].
+#[derive(Clone, Debug)]
+pub struct DeviceCaps {
+    pub class: DeviceClass,
+    /// SMs / CUs / cores. `None` where the API does not expose it (wgpu).
+    pub compute_units: Option<u32>,
+    /// Largest `@workgroup_size` a kernel may declare on this device.
+    pub max_workgroup_size: u32,
+    /// Workgroup (shared) memory per workgroup, bytes.
+    pub workgroup_mem_bytes: u32,
+    /// SIMD/subgroup width. `None` = not exposed (the WebGPU baseline).
+    pub subgroup_size: Option<u32>,
+    /// No host<->device copy cost (integrated GPUs, CPU).
+    pub unified_memory: bool,
+    /// Peak memory bandwidth, GB/s. `None` = unknown (no API reports it; a
+    /// measured value may fill it later).
+    pub peak_bandwidth_gbs: Option<f32>,
+    pub numeric: NumericSupport,
+}
+
+impl DeviceCaps {
+    /// The WebGPU-guaranteed floor for `class`: conservative limits, fp32
+    /// only, nothing assumed. What a consumer gets when a backend knows
+    /// nothing better.
+    pub fn portable_baseline(class: DeviceClass) -> DeviceCaps {
+        DeviceCaps {
+            class,
+            compute_units: None,
+            // The engine's own invariants: kernels declare at most
+            // @workgroup_size(256) and stage at most 16 KiB (the downlevel
+            // default) unless the adapter reports more.
+            max_workgroup_size: 256,
+            workgroup_mem_bytes: 16 * 1024,
+            subgroup_size: None,
+            unified_memory: false,
+            peak_bandwidth_gbs: None,
+            numeric: NumericSupport::BASELINE,
+        }
+    }
+}
+
 /// Backend-neutral buffer usage flags. Mirrors the subset of `wgpu::BufferUsages`
 /// the kernels need; the wgpu backend maps it back to `wgpu::BufferUsages`, the
 /// CPU backend ignores it (all allocations are plain host memory).
@@ -271,6 +370,10 @@ pub trait Backend: Send + Sync {
     fn max_storage_binding_bytes(&self) -> u64 {
         2 * 1024 * 1024 * 1024 - 1
     }
+
+    /// What this device can actually do — see [`DeviceCaps`]. Filled at
+    /// construction; querying is a cached read, never a device round-trip.
+    fn caps(&self) -> DeviceCaps;
 }
 
 /// wasm variant: no `Send + Sync` (WebGPU is single-threaded) and no blocking
@@ -302,6 +405,11 @@ pub trait Backend {
     fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step;
     /// Clear the given buffers, then run all recorded steps.
     fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]);
+    /// What this device can actually do — see [`DeviceCaps`]. The default is
+    /// the browser floor, which is exactly what wasm is.
+    fn caps(&self) -> DeviceCaps {
+        DeviceCaps::portable_baseline(DeviceClass::Browser)
+    }
 }
 
 /// The whole-graph compile→run contract (the OpenVINO NPU path). A serialized

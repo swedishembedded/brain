@@ -28,6 +28,10 @@ pub struct Env {
     pub adapter: Option<String>,
     /// True when that adapter is a software rasteriser — i.e. not a real GPU.
     pub adapter_software: Option<bool>,
+    /// Machine-readable device capabilities (class, limits, numeric tiers) of
+    /// the first device this process built — the queryable sibling of the
+    /// adapter *string*. `None` when no device was built before capture.
+    pub device_caps: Option<gpu_core::DeviceCaps>,
     pub cpu_model: Option<String>,
     pub cpu_cores: usize,
     pub ram_gb: Option<f64>,
@@ -57,6 +61,7 @@ impl Env {
             backend: gpu_core::backend_name().to_string(),
             adapter,
             adapter_software,
+            device_caps: gpu_core::device_caps(),
             cpu_model: cpu_model(),
             cpu_cores: cpu_cores(),
             ram_gb: ram_gb(),
@@ -119,6 +124,24 @@ impl Env {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone().map(Value::from).unwrap_or(Value::Null)))
             .collect();
+        // Unknown caps fields serialise as null, never a fabricated number.
+        let caps = self.device_caps.as_ref().map(|c| {
+            json!({
+                "class": format!("{:?}", c.class),
+                "compute_units": c.compute_units.map(Value::from).unwrap_or(Value::Null),
+                "max_workgroup_size": c.max_workgroup_size,
+                "workgroup_mem_bytes": c.workgroup_mem_bytes,
+                "subgroup_size": c.subgroup_size.map(Value::from).unwrap_or(Value::Null),
+                "unified_memory": c.unified_memory,
+                "peak_bandwidth_gbs": c.peak_bandwidth_gbs.map(Value::from).unwrap_or(Value::Null),
+                "numeric": {
+                    "f32": c.numeric.f32,
+                    "int8_dot": c.numeric.int8_dot,
+                    "f16": c.numeric.f16,
+                    "coop_matrix": c.numeric.coop_matrix,
+                },
+            })
+        });
         json!({
             "commit": self.commit.clone().map(Value::from).unwrap_or(Value::Null),
             "dirty": self.dirty,
@@ -126,6 +149,7 @@ impl Env {
             "backend": self.backend,
             "adapter": self.adapter.clone().map(Value::from).unwrap_or(Value::Null),
             "adapter_is_software": self.adapter_software.map(Value::from).unwrap_or(Value::Null),
+            "device_caps": caps.unwrap_or(Value::Null),
             "cpu": {
                 "model": self.cpu_model.clone().map(Value::from).unwrap_or(Value::Null),
                 "cores": self.cpu_cores,
@@ -214,6 +238,7 @@ mod tests {
             backend: "cpu".into(),
             adapter: None,
             adapter_software: None,
+            device_caps: None,
             cpu_model: None,
             cpu_cores: 4,
             ram_gb: None,

@@ -623,6 +623,29 @@ impl Backend for CpuBackend {
     fn kind(&self) -> &'static str {
         "cpu"
     }
+    fn caps(&self) -> backend_api::DeviceCaps {
+        use backend_api::{DeviceCaps, DeviceClass, NumericSupport};
+        DeviceCaps {
+            class: DeviceClass::Cpu,
+            compute_units: Some(self.shared.threads as u32),
+            // The JIT's execution model, not a hardware limit: workgroups run
+            // as split-at-barrier loops, and the register-tiled 256-thread
+            // kernels are the largest in the tree.
+            max_workgroup_size: 256,
+            workgroup_mem_bytes: 32 * 1024,
+            subgroup_size: None, // no SIMD width is surfaced to WGSL
+            unified_memory: true,
+            peak_bandwidth_gbs: None,
+            numeric: NumericSupport {
+                f32: true,
+                // The multi-barrier packed-int8 GEMMs are outside the JIT's
+                // single-barrier model, and there is no VNNI fast path yet.
+                int8_dot: false,
+                f16: false,
+                coop_matrix: false,
+            },
+        }
+    }
     fn share(&self) -> Option<Box<dyn Backend>> {
         // Eager execution, no per-handle stream: sharing is an Arc clone.
         Some(Box::new(CpuBackend { shared: self.shared.clone() }))
