@@ -18,6 +18,7 @@ The validation ladder, weakest → strongest evidence:
 | Check | Model | Result | How |
 |---|---|---|---|
 | **Decoder logits** (24 layers, GQA, SwiGLU, tied head) | FastVLM-0.5B | **mean\|Δ\|≈3e-6, max\|Δ\|≈6e-5, argmax agrees everywhere** | `crates/fastvlm/src/parity.rs` vs `transformers` on the real bf16 checkpoint |
+| **Qwen3 decoder** (partial-depth: 4 real blocks, QK-norm, θ=5e6) | Qwen3-VL-4B | **mean\|Δ\|≈5e-6, max\|Δ\|≈7e-5, argmax agrees** | `crates/qwenvl/src/parity.rs` — shards streamed to fit RAM (the full 36-layer model is ~32 GB in-brain) |
 | **Greedy generation** (text) | FastVLM-0.5B | **brain decodes the identical token stream as HF** — "Name three primary colors." → **"Red, Blue, and Yellow."** | same test; brain argmax-decodes 8 tokens `[6033,11,8697,...]`, matching HF exactly |
 | **Image → caption** (splice + decode) | FastVLM-0.5B | **brain reproduces the HF caption token-for-token** — DOSBox logo → **"A wooden frame with the letters B, D, and S in it."** | `fastvlm_image_caption_matches_hf`: brain splices the 256 HF image embeddings (`enable_mm_splice`) and greedy-decodes `[32,22360,4034,…]`, identical to HF |
 | **Fully-in-brain caption** (vision + projector + decode) | FastVLM-0.5B | **brain runs the WHOLE pipeline on its own weights and matches HF** — same caption, zero HF tensors at inference | `fastvlm_full_pipeline_caption`: brain's mobileclip vision → mlp2x_gelu projector → Qwen2 decoder → greedy decode → `[32,22360,4034,…]` |

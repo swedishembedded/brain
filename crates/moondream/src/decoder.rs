@@ -179,6 +179,34 @@ impl<'g> MoondreamDecoder<'g> {
         ce.iter().sum::<f32>() / count
     }
 
+    /// Run the forward through the LM head and return the `[t, vocab]` logits
+    /// (embed → splice image tokens → blocks → post-LN → lm_head), skipping the CE.
+    /// Used for real-weight reference parity.
+    pub fn logits_all(&self, tokens: &[u32], image_embeds: &[f32]) -> Vec<f32> {
+        let g = self.gpu;
+        let (t, d, v) = (self.t, self.d, self.vocab);
+        g.write(&self.tokens, tokens);
+        let img = g.storage_init("md.img", image_embeds);
+        let mut steps = vec![g.step(13, &[&self.tokens, self.wb("tok.weight"), &self.res], &[d, t], t * d)];
+        if self.n_img > 0 {
+            steps.push(g.step(14, &[&img, &self.res], &[self.n_img * d, d], self.n_img * d));
+        }
+        g.submit(&[], &steps);
+        let mut cur: &DeviceBuffer = &self.res;
+        for b in &self.blocks {
+            cur = b.forward(cur);
+        }
+        g.submit(
+            &[],
+            &[
+                g.step(4, &[cur, self.wb("post_ln.weight"), self.wb("post_ln.bias"), &self.normed], &[d, t, f(LN_EPS)], t),
+                g.step(0, &[&self.normed, self.wb("lm_head.weight"), &self.logits], &[t, d, v], t * v),
+                g.step(6, &[&self.logits, self.wb("lm_head.bias")], &[t, v], t * v),
+            ],
+        );
+        g.read(&self.logits, (t * v) as usize)
+    }
+
     /// Decoder backward (dense blocks): from the cached forward (call `forward`
     /// first), fill every grad in `gr`. Chain: CE → lm_head → post-LN → blocks in
     /// reverse (each `MoondreamBlock::backward`, threading the residual-stream grad)
