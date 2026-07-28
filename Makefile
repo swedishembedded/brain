@@ -45,7 +45,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release wm/play wm-fixtures test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: help build release wm/play wm-fixtures test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo \
@@ -75,6 +75,11 @@ help:
 	@echo "  make bench/advise ARCH=<name> ranked tuning recommendations from eval(+scale) artifacts"
 	@echo "  make bench/compare           side-by-side leaderboard of every results/<arch>-<seed>.json"
 	@echo "  make bench/char              train+eval GPT on the shared char datasets (legacy)"
+	@echo "  make perf                    PERFORMANCE suite: latency/throughput/serve/sweep"
+	@echo "                               (how fast + at what cost; docs/performance/benchmarking.md)"
+	@echo "  make perf/<scenario>         one scenario (perf/sweep, perf/serve, ...)"
+	@echo "  make perf/compare            leaderboard over results/perf-*.json"
+	@echo "  make perf/smoke              CI-sized run of every perf scenario"
 	@echo "  make wm/play                  play the fake world model in an SDL window (WASD)"
 	@echo "  make wm-fixtures             regenerate DIAMOND parity fixtures (needs torch)"
 	@echo "  make federated-demo          MoE train -> split -> verify -> merge round-trip"
@@ -377,6 +382,46 @@ web/build:
 clean:
 	cargo clean
 	rm -rf $(OUT)
+
+
+# ---- performance benchmarking (brain perf) --------------------------------
+# Distinct from `make bench`: bench asks whether an architecture LEARNS a task;
+# perf asks how much correct work the engine delivers per unit of hardware,
+# memory, energy and time. Design: docs/performance/benchmarking.md.
+#
+# TARGET selects what is measured: `fake` (built-in synthetic engine — validates
+# the harness anywhere, absolute numbers meaningless), `qwen-synth:<L>x<D>x<H>`
+# (the REAL paged serving engine on random weights — same kernels, KV traffic and
+# batching, so hardware comparison works with no checkpoint on the machine), or
+# `qwen:<weights>` (the serving engine on a real checkpoint).
+PERF_TARGET ?= fake
+PERF_WORKLOAD ?= chat
+PERF_LADDER ?= 1,2,4,8,16,32
+
+# The whole core battery on the current device: latency floor, saturated
+# ceiling, realistic serving, and the concurrency curve.
+perf: release
+	@set -e; for s in latency throughput serve; do \
+		$(BRAIN) perf run $$s --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) --seed $(SEED); \
+	done; \
+	$(BRAIN) perf run sweep --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) --ladder $(PERF_LADDER) --seed $(SEED)
+
+# One scenario: `make perf/sweep`, `make perf/serve`, …
+perf/%: release
+	$(BRAIN) perf run $* --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) --ladder $(PERF_LADDER) --seed $(SEED)
+
+# Leaderboard over every perf artifact. Refuses to rank across artifact units,
+# excludes runs whose correctness gate failed, and warns on differing axes.
+perf/compare: release
+	@set -e; files="$$(ls results/perf-*.json 2>/dev/null || true)"; \
+	if [ -z "$$files" ]; then echo "no perf artifacts yet — run 'make perf' first"; exit 2; fi; \
+	$(BRAIN) perf compare $$files
+
+# CI-sized: every scenario shrunk to seconds, on the CPU backend.
+perf/smoke: release
+	@set -e; for s in latency throughput serve sweep; do \
+		$(BRAIN) perf run $$s --target $(PERF_TARGET) --workload interactive --smoke --seed $(SEED); \
+	done
 
 # ---- documentation ----------------------------------------------------------
 # Build the full docs bundle: build/docs/brain-docs.{md,pdf}. Requires pandoc +

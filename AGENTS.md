@@ -1,244 +1,360 @@
 # AGENTS.md — brain (edge-AI model training framework)
 
 Routing guide for this repo. **brain** trains and evaluates **neural networks
-from scratch on the CPU, NPU and GPU**, **pure Rust + raw kernels**. Full
+from scratch on the CPU, GPU and NPU**, **pure Rust + raw WGSL kernels**, with
 validated parity between all supported accelerator backends.
 
-Brain provides both training and inference with quantization and with highly
-efficient use of accelerator hardware.
+Brain provides both training and inference, with quantization, model residency,
+and concurrent serving on top of one hand-written kernel engine.
 
-It is a self-contained Cargo **workspace** under `crates/` — no Python in the build/test
-path; backprop correctness is gated by an in-repo finite-difference gradient
-checker (`crates/gradcheck`), not a PyTorch oracle.
+It is a self-contained Cargo **workspace** of ~60 crates under `crates/` — no
+Python in the build/test path; backprop correctness is gated by an in-repo
+finite-difference gradient checker (`crates/gradcheck`), not a PyTorch oracle.
 
-The engine is **architecture-agnostic**: the WGSL kernels (`crates/kernels`) are
-reusable building blocks, not a fixed model. New architectures are composed from
-them, keeping the gradient-check discipline.
+The engine is **architecture-agnostic**: the 281 WGSL kernels (`crates/kernels`)
+are reusable building blocks, not a fixed model. New architectures are composed
+from them, keeping the gradient-check discipline.
+
+---
 
 ## Models (today)
 
+### Language / decoder LMs
+
 1. **GPT decoder** (`crates/gpt`) — dense nanogpt-parity baseline: token+learned
    positional embeddings, pre-LN, causal MHA, GELU MLP, untied `lm_head`, masked
-   CE. Train/sample/eval via `brain gpt …`.
-2. **Sparse MoE Transformer** (`crates/moe`) — RMSNorm/RoPE, top-k experts; with
+   CE. `brain gpt {train,eval,gen}`.
+2. **Qwen3 decoder** (`crates/qwen`) — dense GQA + QK-norm + RoPE + SwiGLU;
+   HF import, LoRA finetune, INT8 (`q8.rs`), tensor/expert sharding, tool-call
+   eval, and the **concurrent paged-KV serving engine** (`serve.rs`, see below).
+   `brain qwen {import,infer,serve,export,precompile,train,finetune,toolcall}`.
+3. **Sparse MoE Transformer** (`crates/moe`) — RMSNorm/RoPE, top-k experts; with
    **federated/sharded** expert training (`crates/federated`).
-3. **PID event/effect Transformer** (`crates/pid`) — LayerNorm, learned
-   positions, biased linears; backs the WebGPU demo (`crates/web`).
 4. **GLM-5.2 decoder** (`crates/glm`) — `glm_moe_dsa`: **MLA** (low-rank q/kv with
    a decoupled nope/rope head split + interleaved RoPE), a **sigmoid `noaux_tc`
    MoE** (per-expert selection bias, shared expert, `first_k_dense_replace`
-   dense→MoE schedule), untied `lm_head`. Phase 1 = the dense MLA-MoE core
-   (indexer is a no-op while `index_topk >= block_size`); the DSA sparse indexer,
-   MTP, and NPU export are later phases. Gradient-checked (`gradcheck::check_glm`)
-   + learnability tests. Train/eval/infer/finetune/import via `brain glm …`;
-   HF import (single/sharded safetensors). Bench arch `glm`.
-5. **YOLOv8-style detector** (`crates/yolo`) — from-scratch anchor-free object
-   detector: CSP backbone → PAN-FPN neck → decoupled DFL head, with the
-   assigner + BCE/CIoU/DFL detection loss and NMS box decode. Trains on the
-   synthetic detection dataset and runs `detect` (boxes in pixel coords); CPU
-   backend only. Byte-compatible with canonical `yolov8n` for weight import.
-   Train/eval/detect/fine-tune via `brain yolo …`.
-6. **WorldMirror-2 multi-view 3D reconstruction** (`crates/mirror`) — the
-   HY-World 2.0 1.26B feed-forward model: per-frame DINOv2 ViT-L/14 encoding,
-   24 alternating frame/global attention levels (QK-norm + normalized 2D
-   RoPE), DPT heads (depth/points/normals/gaussians) + iterative camera head;
-   photos → a navigable 3DGS scene. Imported exactly from the reference
-   checkpoint; parity-gated per stage vs PyTorch goldens. `brain mirror
-   {import,infer,demo,export-npu}`; docs `docs/models/mirror/`.
-7. **3D Gaussian Splatting** (`crates/splat`) — from-scratch tiled 3DGS
-   rasterizer (atomic-free/barrier-free WGSL: generic scan + radix sort →
-   per-tile compositing) with forward AND backward (autograd-verified),
-   Inria PLY IO, interactive WASD+mouse viewer, and `splat fit` scene
-   optimization. `brain splat {info,render,view,fit}`; docs `docs/models/splat/`.
-8. **ZipDepth monocular depth** (`crates/depth`) — the 6.1M pure-conv depth
-   net (QARep/RepVGG blocks, SE/strip/global-context attention, convex
-   upsampling), exact vs the reference PyTorch on the released checkpoints.
-   Realtime demo (`brain depth --image|--camera`, SDL views incl.
-   autostereograms) on CPU/GPU/Vulkan and the Intel NPU (ONNX/OpenVINO,
-   cosine 0.99998). Gradient-checked end to end. See `docs/models/depth/readme.md` +
-   `docs/models/depth/status.md`.
+   dense→MoE schedule), untied `lm_head`, plus the DSA indexer and MTP.
+   Gradient-checked (`gradcheck::check_glm`, `check_glm_mtp`).
+   `brain glm {train,finetune,infer,eval,import,export}`.
+5. **PID event/effect Transformer** (`crates/pid`) — LayerNorm, learned positions,
+   biased linears; backs the WebGPU browser demo (`crates/web`).
+6. **Seq2seq** (`crates/seq2seq`) — encoder-decoder Transformer (bidirectional
+   encoder + causal/cross-attention decoder), gradient-checked.
+7. **Bottleneck autoencoder** (`crates/autoencoder`) — sequence → single
+   compressed representation → MLP reconstruction, MSE head; gradient-checked.
+
+### Vision & 3D
+
+8. **YOLOv8-style detector** (`crates/yolo`) — from-scratch anchor-free detector:
+   CSP backbone → PAN-FPN neck → decoupled DFL head, assigner + BCE/CIoU/DFL loss,
+   NMS box decode. Byte-compatible with canonical `yolov8n` for weight import.
+   `brain yolo {train,eval,detect,fine-tune}`; Intel-NPU path via `brain npu …`.
+9. **ZipDepth monocular depth** (`crates/depth`) — the 6.1M pure-conv depth net
+   (QARep/RepVGG blocks, SE/strip/global-context attention, convex upsampling),
+   exact vs the reference PyTorch on the released checkpoints. Realtime demo
+   (`brain depth --image|--camera`, SDL views incl. autostereograms) on
+   CPU/GPU/Vulkan and the Intel NPU (ONNX/OpenVINO, cosine 0.99998).
+   *(Depth Anything 3 was planned as a second arch behind the same contract and
+   is **dropped** — see `crates/depth/src/lib.rs`.)*
+10. **WorldMirror-2 multi-view 3D reconstruction** (`crates/mirror`) — the
+    HY-World 2.0 1.26B feed-forward model: per-frame DINOv2 ViT-L/14 encoding,
+    24 alternating frame/global attention levels (QK-norm + normalized 2D RoPE),
+    DPT heads (depth/points/normals/gaussians) + iterative camera head; photos →
+    a navigable 3DGS scene. Imported exactly, parity-gated per stage.
+    `brain mirror {import,infer,demo,export-npu}`.
+11. **3D Gaussian Splatting** (`crates/splat`) — from-scratch tiled 3DGS
+    rasterizer (atomic-free/barrier-free WGSL: generic scan + radix sort →
+    per-tile compositing) with forward AND backward (autograd-verified), Inria
+    PLY IO, interactive WASD+mouse viewer, and `splat fit` scene optimization.
+    `brain splat {info,render,view,fit}`.
+
+### Image generation (diffusion)
+
+12. **Z-Image** (`crates/zimage`) — Tongyi text-to-image: the **S³-DiT**
+    single-stream diffusion transformer over Qwen3-4B caption features + VAE
+    latents. Forward/inference first; LoRA, INT8, sharding, and hand-written
+    backward (`grad.rs`/`devgrad.rs`/`modelgrad.rs`) alongside. Assembled from
+    the shared `dit` / `diffusion` / `vae` / `qwen` crates.
+
+### Audio / speech
+
+13. **Qwen3-TTS** (`crates/tts` + `crates/codec` + `crates/speaker` +
+    `crates/audio`) — Talker (multi-codebook dual-track Qwen3 decoder) + 5-layer
+    MTP code predictor → 12 Hz Mimi-style neural codec (RVQ + transformer +
+    SEANet conv-transpose decoder); ECAPA-TDNN speaker encoder for voice cloning.
+    `brain tts {import,clone,synth,design,serve,sim,finetune}`.
+
+### Forecasting
+
+14. **Chronos-2** (`crates/chronos2`) — encoder-only T5-style patch transformer,
+    time+group attention, multi-patch quantile head. Imported exactly, parity-gated.
+15. **Kronos** (`crates/kronos`) — BSQ tokenizer (OHLCV bar → hierarchical tokens)
+    + autoregressive decoder with a dual head. Imported exactly, parity-gated.
+16. **FinCast** (`crates/fincast`) — TimesFM-style patched decoder with a sparse
+    top-2 MoE and a probabilistic-quantile head. Imported exactly, parity-gated.
+    *(Reference is research/educational use only.)*
+    All three sit behind the model-agnostic `forecast::ForecastModel` seam;
+    `crates/fcbench` holds baselines + the rolling-origin backtester.
+    `brain forecast {compare,serve,import,finetune}`.
+
+### World models (playable, action-conditioned video)
+
+17. **DIAMOND** (`crates/wm-diamond`) — EDM diffusion world model (Atari-100k):
+    pre-recorded UNet graph, torch `.pt` import, playable. Parity fixtures via
+    `make wm-fixtures`.
+18. **GenieRedux-G** (`crates/wm-genie`) — CoinRun ST-transformer world model
+    (QK-normalized biased attention, GEGLU FFN, PEG); tokenizer/MaskGIT dynamics
+    in progress. `brain wm {play,bench}` (SDL window via `crates/wm-display`).
+
+> `crates/timeseries` and `crates/autodiff` are **placeholders** — declared in the
+> workspace, implemented in a later phase.
+
+---
+
+## Serving & runtime stack
+
+The recent workstream (P7.x) is concurrent LLM serving. Key pieces:
+
+| Piece | Where | What |
+|---|---|---|
+| Paged KV foundation | `crates/model/src/paged.rs` | block allocator, `BlockTable` (+`truncate`) |
+| Serving engine | `crates/qwen/src/serve.rs` | shared block pools, batched **ragged paged decode**, batched + **chunked prefill**, **int8 paged KV** (~4× smaller pool), **speculative decoding**, `Engine::load` from checkpoint |
+| Scheduler | `crates/qwen/src/serve.rs` | continuous batching (multi-sequence concurrent decode) + throughput benchmark |
+| Residency | `crates/residency` | tiers model weights GPU/RAM/disk by LRU within a memory budget; schedules jobs (batch-by-model, queue-age-aware, parallel lanes) |
+| Capability interface | `crates/capability` | models advertise a `Manifest` of typed `ActionSpec`s; CLI (`brain caps` / `brain do`) and the event API dispatch generically — adding a capability = implementing `Action`, no new subcommand or event variant |
+| Transports | `crates/server` | one JSONL protocol over **stdio, TCP, and Unix socket**; thread-per-connection, bounded, panic-isolated |
+| D-Bus surface | `crates/dbus` | exposes `capability::Registry` over `com.swedishembedded.Brain1`, passing images/streams via fd (memfd/mmap + dmabuf). Example client: `examples/dbus` |
+| Event HFSM | `crates/runtime`, `crates/events`, `crates/hfsm` | `camera_frame`→`object_detected`, `user_text`→`brain_text_chunk` |
+| Python client | `brain-py/` | drives the `brain` binary as an event-driven subprocess (not in the build/test path) |
+
+Multi-GPU scaling lives in `crates/model`:
+`{distributed,parallel,collective,netcollective,shard,plan,grid}.rs` — see
+`docs/scaling/`.
+
+---
 
 ## Workspace layout (`crates/`)
 
+### Engine core
+
 | Crate | Responsibility |
 |---|---|
-| `kernels` | all WGSL kernels (the source of truth) as consts + `src()` |
-| `gpu-core` | the accelerator seam: one `Gpu`/`DeviceBuffer`/`Step` API over **two backends** — wgpu and the native CPU backend — chosen at runtime |
-| `wgsl-cpu` | the CPU backend's compiler: WGSL → naga IR → **Cranelift JIT** → native code run across cores with rayon |
-| `paramstore` / `optim` | param/grad/Adam buffers; AdamW + grad clip |
-| `checkpoint` | `.weights` container + manifest/SHA-256 |
+| `kernels` | all 281 WGSL kernels (the source of truth) as consts + `src()` |
+| `gpu-core` | compute-device facade: selects and forwards to an eager `Backend` |
+| `backend-api` | `Backend`/`GraphBackend` traits, neutral buffer/step handles, registry — a new backend depends only on this |
+| `backend-wgpu` | wgpu (Vulkan/Metal/DX12/GL/WebGPU) eager backend — **the default** |
+| `backend-cpu` | native CPU backend: WGSL → Cranelift JIT across cores, AVX2 fast paths |
+| `backend-vulkan` | native Vulkan (ash + naga WGSL→SPIR-V) eager backend |
+| `wgsl-cpu` | the CPU backend's compiler: WGSL → naga IR → Cranelift JIT |
+| `vulkan` | **optional, non-default** `VK_KHR_cooperative_matrix` matmul path (excluded from `default-members`; build with `-p brain-vulkan` / cli feature `vulkan-coopmat`) |
+| `paramstore` / `optim` | param/grad/Adam buffers; AdamW + global grad-norm clip |
+| `checkpoint` | `.weights` container + manifest/SHA-256 + expert-shard I/O (no fs on wasm) |
+| `model` | architecture-agnostic `Model` abstraction, generic trainer, shared block builders (`block.rs`, `vit.rs`), paged KV, and the multi-GPU parallelism layer |
+| `autodiff` | shared SSA forward-cache / reverse-mode scaffolding — **placeholder** |
 | `data` | char + GPT-2 **BPE** tokenizers, dataset generators, loaders (masking/alignment), normalization |
-| `gpt` | GPT model + training loop + sampling |
-| `moe` / `pid` | the MoE and PID models (fwd/bwd) |
-| `glm` | GLM-5.2 decoder: MLA + sigmoid `noaux_tc` MoE (+ shared expert, dense→MoE schedule); HF import (single/sharded) |
-| `yolo` | YOLOv8-style detector: backbone/neck/head, DFL decode, assigner + detection loss, NMS, `detect` inference, canonical `yolov8n` weight import |
-| `vision` | shared conv-net blocks (spec-driven `Conv` incl. the fused/register-tiled eval paths, `BatchNorm`, `SPPF`, bottlenecks), name-resolved kernel ids, `fold_bn` |
-| `depth` | ZipDepth: model/blocks/import/fuse, `Predictor` (reference-exact preprocessing), viz/stereo/effects, INT8 calib report |
-| `mirror` | WorldMirror-2: config/param_list, strict import, DINOv2+trunk (via `model::vit`), DPT/camera heads, PIL-exact preprocessing, gaussian assembly |
-| `splat` | 3DGS: generic device scan/radix-sort (brain's first), tiled rasterizer fwd+bwd, PLY IO, `fit` optimizer, viewer plumbing |
-| `capture` | V4L2 webcam (hand-rolled ioctl FFI, YUYV→RGB, latest-frame slot) |
-| `onnx` | pure-Rust ONNX graph model + serializer (export only; vendored `prost` bindings, no `protoc` in the build) |
-| `npu` | YOLO→ONNX export + BN fold + brain-native INT8 PTQ + fake-quant simulator + OpenVINO **Intel NPU** runtime (default dep on x86_64 linux/windows; `runtime-linking`) |
-| `federated` | vertical expert split/assemble, hash-verified manifests |
 | `eval` | perplexity + task exact-match (LM) and detection metrics (mAP@0.5/precision/recall) |
 | `gradcheck` | finite-difference backprop correctness gate |
-| `events` | JSONL event protocol (`user_text`/`camera_frame`/`brain_text_chunk`/`object_detected`) + base64/PPM frame decode |
-| `hfsm` | generic hierarchical state-machine engine (RTC dispatch, LCA entry/exit) |
-| `runtime` | event-driven HSM controller wiring loaded models to the event protocol (`InferModel`/`DetectModel` seams) |
+| `bench` | model-agnostic architecture-evaluation suite — *does it **learn**?* (see below) |
+| `perf` | performance benchmarking suite — *how **fast**, at what cost, still correct?* (see below) |
 | `cli` | the `brain` binary (aggregates everything) |
-| `web` | wasm32/WebGPU PID demo; optional `vulkan` (coopmat) is non-default |
+| `web` | wasm32/WebGPU PID demo (empty off wasm32) |
 
+### Model crates
+
+| Crate | Model |
+|---|---|
+| `gpt` / `qwen` / `moe` / `glm` / `pid` | decoder LMs (see Models) |
+| `seq2seq` / `autoencoder` / `timeseries` | encoder-decoder / bottleneck AE / placeholder |
+| `federated` | vertical expert split/assemble, hash-verified manifests, train-scope |
+| `yolo` / `vision` | detector; shared conv-net blocks (spec-driven `Conv` incl. fused/register-tiled eval paths, `BatchNorm`, `SPPF`, bottlenecks, `fold_bn`) |
+| `depth` | ZipDepth: model/blocks/import/fuse, `Predictor`, viz/stereo/effects, INT8 calib |
+| `mirror` / `splat` | WorldMirror-2; 3DGS rasterizer + PLY IO + `fit` + viewer |
+| `diffusion` / `dit` / `vae` / `zimage` | flow-matching core; shared DiT blocks; AutoencoderKL; Z-Image |
+| `audio` / `codec` / `speaker` / `tts` | wav/STFT/mel + 1D conv builders; Mimi codec; ECAPA-TDNN; Talker+MTP |
+| `forecast` / `fcbench` / `chronos2` / `kronos` / `fincast` | forecasting seam, backtester, three imported models |
+| `wm-core` / `wm-diamond` / `wm-genie` / `wm-display` | world-model trait + fake model; DIAMOND; GenieRedux-G; SDL window |
+
+### Deployment / IO
+
+| Crate | Responsibility |
+|---|---|
+| `onnx` | pure-Rust ONNX graph model + serializer (export only; vendored `prost`, no `protoc`) |
+| `npu` | YOLO/depth → ONNX export + BN fold + brain-native INT8 PTQ + fake-quant simulator + OpenVINO **Intel NPU** runtime (`runtime-linking`) |
+| `capture` | V4L2 webcam (hand-rolled ioctl FFI, YUYV→RGB, latest-frame slot) |
+| `capability` / `residency` / `server` / `dbus` / `runtime` / `events` / `hfsm` | the serving/runtime stack (table above) |
+
+---
 
 ## Task → where to look
 
 | Task | Where |
 |---|---|
-| MoE toy task / honest eval methodology | `README.md` |
-| GLM-5.2 (MLA + MoE + DSA indexer + MTP): arch, status, CLI, NPU | `docs/models/glm/readme.md`, `docs/models/glm/npu.md`; `crates/glm`, `crates/cli/src/glm_cli.rs` |
-| Architecture & crate graph | `docs/architecture.md` |
-| Federated MoE pipeline (done vs remaining) | `docs/federated.md` |
+| Architecture & crate graph | `docs/architecture.md` *(crate graph is stale — see Doc gaps)* |
 | Testing strategy + gradient-check gate | `docs/testing.md` |
-| Performance: CPU/GPU inference optimizations (what sped things up + why) | `docs/performance/overview.md` |
-| YOLOv8 detector training + inference (end-to-end guide) | `docs/models/yolo/readme.md` |
-| Engine internals | `docs/engine/overview.md`, `engine-TRAINING.md`, `engine-README_VULKAN.md`, `engine-README_WEB.md` |
-| Add/adjust a WGSL kernel | `crates/kernels/wgsl/*.wgsl` (regenerate the const list if you add files) |
+| Multi-GPU scaling (data / pipeline / tensor parallel) | `docs/scaling/*.md`; `crates/model/src/{distributed,parallel,collective,shard,plan,grid}.rs` |
+| Performance: CPU/GPU inference optimizations (what sped things up + why) | `docs/performance/overview.md`, `docs/performance/p40.md` |
+| **Performance benchmarking** (`brain perf`): design / ledger | `docs/performance/benchmarking.md`, `docs/performance/status.md`; `crates/perf`, `crates/cli/src/perf_cli.rs` |
+| Engine internals | `docs/engine/{overview,training,vulkan,web}.md` |
+| Add/adjust a WGSL kernel | `crates/kernels/wgsl/*.wgsl`, then **`make kernels-regen`** |
+| MoE toy task / honest eval methodology | `README.md` |
+| Federated MoE pipeline (done vs remaining) | `docs/federated.md`; `crates/federated/src/{shard,sha256}.rs` |
 | GPT model / training / sampling | `crates/gpt/src/{model,train,sample,init}.rs` |
-| YOLO model / loss / inference | `crates/yolo/src/{model,head,blocks,loss,assign,infer,nms,config}.rs` |
-| YOLO train / eval / detect / fine-tune (CLI) | `crates/cli/src/yolo_cli.rs` |
-| YOLO → Intel NPU: export / quantize / run / bench (OpenVINO) | `crates/npu`, `crates/onnx`, `crates/cli/src/npu_cli.rs`, `docs/models/yolo/npu.md` |
-| ZipDepth: guide / workstream ledger (incl. GPU perf root causes) | `docs/models/depth/readme.md`, `docs/models/depth/status.md` |
-| WorldMirror-2 (photos → 3DGS scene): guide / ledger / parity gates | `docs/models/mirror/readme.md`, `docs/models/mirror/status.md`; `crates/mirror`, `crates/cli/src/mirror_cli.rs` |
-| 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat/readme.md`, `docs/models/splat/status.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
-| Shared ViT block builder (DINOv2/trunk/camera-head blocks) | `crates/model/src/vit.rs` |
-| ZipDepth model / import / predictor / demo views | `crates/depth/src/{model,blocks,import,predict,viz,stereo,effects}.rs`, `crates/cli/src/depth_cli.rs` |
+| Qwen model / import / LoRA / INT8 / sharding | `crates/qwen/src/{model,import,finetune,q8,shard,sample}.rs` |
+| **Qwen concurrent serving (paged KV, continuous batching, spec decode)** | `crates/qwen/src/serve.rs`, `crates/model/src/paged.rs`, `crates/cli/src/qwen_cli.rs` |
+| Model residency / job scheduling | `crates/residency/src/{manager,scheduler,executor,budget,lru,place}.rs` |
+| Capability manifests + generic dispatch (`brain caps` / `brain do`) | `crates/capability/src/lib.rs`, `crates/cli/src/caps_cli.rs` |
+| JSONL transports (stdio / TCP / unix) | `crates/server/src/{transport,controller_session}.rs` |
+| D-Bus control surface | `crates/dbus`, `examples/dbus` |
+| Event/HFSM controller (`brain run`) | `crates/runtime/src/{lib,pump}.rs`, `crates/cli/src/run_cli.rs`, `crates/events/src/lib.rs` |
+| GLM-5.2 (MLA + MoE + DSA indexer + MTP) | `docs/models/glm/readme.md`, `docs/models/glm/npu.md`; `crates/glm`, `crates/cli/src/glm_cli.rs` |
+| YOLO model / loss / inference | `crates/yolo/src/{model,head,blocks,loss,assign,infer,nms,config}.rs`; `docs/models/yolo/readme.md` |
+| YOLO → Intel NPU (export/quantize/run/bench) | `crates/npu`, `crates/onnx`, `crates/cli/src/npu_cli.rs`, `docs/models/yolo/npu.md` |
+| ZipDepth: guide / ledger (incl. GPU perf root causes) | `docs/models/depth/{readme,status}.md`; `crates/depth/src/*`, `crates/cli/src/depth_cli.rs` |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
+| WorldMirror-2 (photos → 3DGS scene) | `docs/models/mirror/{readme,status}.md`; `crates/mirror`, `crates/cli/src/mirror_cli.rs` |
+| 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat/{readme,status}.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
+| Shared ViT block builder (DINOv2/trunk/camera-head) | `crates/model/src/vit.rs` |
 | Fused conv eval paths (act selector, register tiling, grouped) | `crates/vision/src/blocks.rs`, `crates/kernels/wgsl/conv_act*.wgsl`, `conv2d_gd_reg.wgsl`, `crates/backend-cpu/src/fast_conv.rs` |
 | Detection metrics (mAP/precision/recall) | `crates/eval/src/detection.rs` |
 | Synthetic detection dataset (RGB shapes + GT boxes) | `crates/data/src/gen_detect.rs` |
-| Event/HFSM controller (`brain run`): `camera_frame`→`object_detected`, `user_text`→`brain_text_chunk` | `crates/runtime/src/{lib,pump}.rs`, `crates/cli/src/run_cli.rs`, `crates/events/src/lib.rs` |
 | Datasets & tokenizers | `crates/data/src/{prepare,gen_*,tokenizer,bpe,loader,binio,rng}.rs` |
-| Federated shard/assemble | `crates/federated/src/{shard,sha256}.rs` |
-| CLI subcommands | `crates/cli/src/{main,gpt_cli,yolo_cli,data_cli,federated_cli,pid_cli,run_cli}.rs` |
-| Porting source-of-truth (read-only) | `scratchpad/reference/{nanogpt,sharded_moe_example,pytorch}/` |
+| TTS: guide / acceleration | `docs/models/tts/{readme,acceleration}.md`; `crates/{tts,codec,speaker,audio}`, `crates/cli/src/{tts_cli,tts_serve}.rs` |
+| Forecasting models + backtester | `docs/models/{chronos2,kronos,fincast}/status.md`; `crates/{forecast,fcbench,chronos2,kronos,fincast}`, `crates/cli/src/forecast_cli.rs` |
+| World models (playable) | `docs/models/world-models/{status,playbooks,fixtures}.md` + `specs/`; `crates/wm-*`, `crates/cli/src/wm_cli.rs` |
+| Z-Image / diffusion stack | `crates/{zimage,dit,diffusion,vae}` *(no docs/ entry yet)* |
+| Finetuning guides | `docs/guides/finetune/{plan,datasets}.md` |
+| CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
 
+---
 
 ## Essential commands
 
-**Always build through the Makefile, never `cargo` directly:** use `make build`
-for the debug build and `make release` for the optimized build (and `make test`
-for the suite). They wrap cargo with the project's expected flags/targets; calling
-`cargo build`/`cargo build --release` by hand is not supported.
+**Always build through the Makefile, never `cargo` directly:** `make build`
+(debug), `make release` (optimized), `make test` (suite). They wrap cargo with
+the project's expected flags/targets.
 
 ```bash
-make build                           # debug build (wraps cargo build)
+make build                           # debug build
 make release && make test            # optimized build + full suite (MOE_SKIP_GPU_TESTS=1 to skip GPU)
 make gradcheck                       # backprop correctness gate
-make data/<name>                     # calculator|reverser|wordcalc|timeseries|shakespeare_char|gpt
+make parity                          # cross-backend parity: CPU == Vulkan == NPU (scripts/parity-gate.sh)
+make kernels-regen                   # regenerate the kernel const block after adding/removing a .wgsl
+make docs                            # docs bundle -> build/docs/brain-docs.{md,pdf} (needs pandoc + xelatex)
+
+make data/<name>                     # calculator|reverser|wordcalc|timeseries|shakespeare_char|gpt|detect|tts
 make train/gpt/<name>                # train GPT -> out/gpt-<name>.weights
 make eval/gpt/<name>                 # perplexity + exact-match
-make data/detect                     # synthetic object-detection dataset -> data/detect
-make train/yolo                      # train tiny YOLO -> out/yolo.weights
-make eval/yolo                       # mAP@0.5 + precision/recall
-make detect/yolo                     # run detection on a sample image (JSON boxes)
-make bench                           # GPT baseline on shared char datasets
+make train/yolo | eval/yolo | detect/yolo
+make depth/demo | depth/smoke | depth/camera | train/zipdepth
+make mirror/import | mirror/infer | mirror/demo | splat/view
+make wm/play | wm-fixtures           # world models (SDL window; fixtures need torch)
+make forecast/compare | forecast/serve
+make export/yolo-onnx | quantize/yolo | sim/yolo-int8 | run/yolo-npu | bench/yolo-npu
 make federated-demo                  # MoE train -> split -> verify -> merge
-make web/dev                         # WebGPU demo (delegates to crates/web)
-
-# direct binary
-./target/release/brain {data|gpt|yolo|federated|gradcheck|pid|train|eval|generate} …
-
-# event/stdio controller: an HFSM (crates/runtime) reads JSONL events on stdin
-# and emits JSONL on stdout — user_text -> brain_text_chunk (streamed, one token
-# per tick) and camera_frame -> object_detected. --gpt/--yolo load real models
-# (or BRAIN_GPT/BRAIN_YOLO); with neither, fake echo/detector models keep the
-# loop usable. printf '{"event":"camera_frame","format":"rgb8","w":128,"h":128,
-# "data":"…"}\n' | brain run --yolo out/yolo.weights
-
-# CPU-only (no GPU): add --device cpu to any command, or set BRAIN_DEVICE=cpu.
-# Same WGSL kernels, JIT-compiled to native code across all cores.
-./target/release/brain gpt train data/calculator --device cpu --out out/gpt.weights
-BRAIN_DEVICE=cpu make test            # run the whole suite on CPU, no GPU needed
+make web/dev                         # WebGPU browser demo (crates/web)
+make bench                           # architecture-evaluation suite (see below)
 ```
 
+Direct binary — the model is selected by the command:
+
+```bash
+./target/release/brain <cmd> [opts]
+# data gpt qwen glm tts wm yolo depth mirror splat npu federated bench forecast
+# caps|capabilities  do  run|serve  pid  gradcheck  validate
+# train | eval | generate           (these three are the bare MoE model)
+```
+
+**Device selection** — `--device` declares **which compute is schedulable**, not
+"a backend". Omit it and brain uses *every* device present (all GPUs + CPU +
+NPU), scheduling models across them. `BRAIN_DEVICE` does the same without a flag.
+Parsing/resolution live in `crates/gpu-core/src/devices.rs`.
+
+| value | schedulable compute |
+|---|---|
+| *(omitted)* | every device on the machine, together |
+| `cpu` | CPU only, all cores |
+| `gpu` | every GPU, nothing else |
+| `npu` | NPU only |
+| `vulkan` | every GPU, via the native-Vulkan backend |
+| `gpu,cpu` | GPUs and CPU together (comma-separated = union) |
+| `gpu0` / `gpu0,gpu1` | those physical cards only |
+| `cpu21` | that one core |
+| `cpu0-7` | cores 0..=7 (inclusive range) |
+| `gpu1,cpu0-3` | one card plus four cores |
+
+An indexed CPU selection **pins process affinity** (`sched_setaffinity`) and
+sizes the rayon pool to match, so `cpu21` is genuinely one core. A single GPU
+selection pins `BRAIN_GPU_INDEX` to that card. Out-of-range indices are errors,
+never silent clamps.
+
+This bounds where work **executes** — host RAM and disk stay available as
+cache/spill tiers, so `--device gpu` still uses RAM for weight caching.
+
+```bash
+./target/release/brain gpt train data/calculator --device cpu --out out/gpt.weights
+./target/release/brain perf run sweep --device gpu0 --target qwen-synth:12x768x12
+BRAIN_DEVICE=cpu make test            # whole suite on CPU, no GPU needed
+```
+
+Event/stdio controller — an HFSM (`crates/runtime`) reads JSONL events on stdin
+and emits JSONL on stdout. `--gpt`/`--yolo` load real models (or `BRAIN_GPT`/
+`BRAIN_YOLO`); with neither, fake echo/detector models keep the loop usable:
+
+```bash
+printf '{"event":"user_text","text":"hi"}\n' | ./target/release/brain run
+```
+
+---
 
 ## Benchmark suite (`crates/bench`)
 
-`brain-bench` (lib `bench`) is a **model-agnostic** architecture-evaluation
-layer: each benchmark owns its *dataset* and its *scoring*, the harness owns
-running it. Use it to answer "does this architecture actually learn task X?"
-the same way across many tasks. The pattern is built to be copied — sibling
-work adds MAD, formal-language, and scaling-sweep benchmarks alongside the
-reference MQAR.
+`brain-bench` is a **model-agnostic** architecture-evaluation layer: each
+benchmark owns its *dataset* and its *scoring*, the harness owns running it. Use
+it to answer "does this architecture actually learn task X?" the same way across
+tasks. See `crates/bench/README.md` for the full design.
 
-**Run** (no usable GPU here — always select CPU):
+**Run** (this box has no *real* GPU — `--device gpu` resolves to the llvmpipe
+software rasteriser, so prefer CPU and never report such runs as GPU numbers):
 
 ```bash
-BRAIN_DEVICE=cpu make bench          # run every registered benchmark, one table
-BRAIN_DEVICE=cpu make bench/mqar     # run a single benchmark
+BRAIN_DEVICE=cpu make bench          # every registered benchmark, one table
+BRAIN_DEVICE=cpu make bench/mqar     # a single benchmark
 ./target/release/brain bench [--device cpu] [<name>] [--seed S]
 ```
 
-The runner prints one comparison table: `benchmark | score | (fields) |
-threshold | pass/fail`. `make bench/char` keeps the legacy GPT-on-char-datasets
-sweep.
+**Registered benchmarks:** `mqar` (multi-query associative recall — the
+reference), `toolcall` (map a user intent to one structured `TOOL_k args…` call,
+scored exact-match on the assistant span only), the MAD family (`mad_recall`,
+`mad_fuzzy_recall`, `mad_noisy_recall`, `mad_selective_copy`, `mad_memorize`,
+`mad_compress`), and the formal-language / state-tracking probes `parity`,
+`mod_add` (grokking), and `dyck` (Dyck-k brackets).
 
-**Add a benchmark:**
-
-1. New module `crates/bench/src/<name>.rs` with a type implementing the
-   `Benchmark` trait (`name`/`description`/`prepare`/`evaluate`/`threshold`).
-   `prepare` writes brain's `train.bin`/`val.bin`/`meta.json` token layout;
-   `evaluate` trains (today via `gpt::train`, behind a `// TODO(model-trait)`
-   seam) and returns `Metrics` (CE nats/bits, bits-per-byte, exact-match,
-   associative-recall, distinct-n, repetition-rate — all in `metrics.rs`).
-2. Register it in `bench::registry()` (`crates/bench/src/lib.rs`). The generic
-   `make bench/%` rule and `brain bench <name>` then pick it up with no further
-   wiring.
-3. Add a learnability test in `crates/bench/tests/`, gated by
-   `MOE_SKIP_GPU_TESTS`, asserting the score clears a **measured** threshold.
-
-The reference benchmark is **MQAR** (multi-query associative recall): per
-sequence, several `key→value` bindings then queried keys whose bound values the
-model must recall in-context; loss is masked to the answer region and windows
-are line-aligned. Registered benchmarks: **mqar**, **toolcall** (tool-calling:
-map a user intent to one structured tool call `TOOL_k args…`, masking the prompt
-and training/scoring exact-match only on the assistant tool-call span), plus the
-**mad_\*** family (recall, fuzzy/noisy recall, selective-copy, memorize). See
-`crates/bench/README.md` for the full design.
-
-Registered benchmarks: `mqar`, the MAD family (`mad_recall`, `mad_fuzzy_recall`,
-`mad_noisy_recall`, `mad_selective_copy`, `mad_memorize`), and the
-formal-language / algorithmic state-tracking probes `parity` (running-parity bit
-state), `mod_add` (`a+b=c (mod p)`, the grokking task), and `dyck` (Dyck-k
-balanced brackets, hierarchical state).
+**Add a benchmark:** new module in `crates/bench/src/<name>.rs` implementing
+`Benchmark` (`name`/`description`/`prepare`/`evaluate`/`threshold`) → register in
+`bench::registry()` (and `registry_smoke()`) → add a learnability test in
+`crates/bench/tests/` gated by `MOE_SKIP_GPU_TESTS` asserting a **measured**
+threshold. The generic `make bench/%` rule picks it up with no further wiring.
 
 ### Evaluating a new architecture (turn-key harness)
 
-The whole battery is architecture-agnostic via the `DecoderLm` seam, so the same
-benchmarks score *any* architecture and the results are directly comparable. The
-3-step recipe:
+The battery is architecture-agnostic via the `DecoderLm` seam, so the same
+benchmarks score *any* architecture and results are directly comparable:
 
-1. **Implement `DecoderLm`** for the model (`train_decoder` + `load_scorer`, plus
-   a `Scorer`). No benchmark changes — `GptDecoder` is the reference impl.
-2. **Add one line to `arch_registry()`** in `crates/bench/src/arch.rs` (name +
-   `Size` descriptor + a `factory`). Registered today: `gpt`, `gpt-small`,
-   `gpt-wide`.
-3. **Run + compare**:
+1. **Implement `DecoderLm`** (`train_decoder` + `load_scorer`, plus a `Scorer`).
+2. **Add one line to `arch_registry()`** (`crates/bench/src/arch.rs`).
+   Registered today: `gpt`, `gpt-small`, `gpt-wide`, `moe`, `qwen`, `glm`.
+3. **Run + compare:**
    ```bash
-   BRAIN_DEVICE=cpu make bench/eval ARCH=<name>   # whole battery -> results/<arch>-<seed>.json
-   BRAIN_DEVICE=cpu make bench/compare            # leaderboard over all results/*.json
+   BRAIN_DEVICE=cpu make bench/eval ARCH=<name>   # -> results/<arch>-<seed>.json
+   BRAIN_DEVICE=cpu make bench/compare            # leaderboard over results/*.json
    ```
-   (direct: `brain bench eval --arch <name> [--seed S --out F --smoke]`;
-   `brain bench compare a.json b.json …`).
 
-**Capability axes** (`crates/bench/src/axes.rs`) group benchmarks into a small
-profile — `recall` (mqar + mad recall/fuzzy/noisy), `copying` (selective-copy,
-toolcall), `memory` (memorize), `state_tracking` (parity, dyck), `compression`
-(mad_compress), `arithmetic` (mod_add, *informational*) — each scored as the mean
-of its benchmarks. `eval` writes a JSON artifact (arch, size, param count, commit,
-seed, timestamp, per-benchmark `{score, threshold, passed, informational,
-metrics}`, per-axis aggregates, gating pass-rate); `compare` diffs ≥2 of them
-side-by-side. `results/` is git-ignored. This is the foundation the next
-predictive-scaling + tuning-advisor layer builds on.
+**Capability axes** (`crates/bench/src/axes.rs`) group benchmarks into a profile —
+`recall`, `copying`, `memory`, `state_tracking`, `compression`, `arithmetic`
+(*informational*) — each scored as the mean of its benchmarks. `eval` writes a
+JSON artifact (arch, size, params, commit, seed, per-benchmark + per-axis
+results, gating pass-rate); `compare` diffs ≥2 side-by-side. `results/` is
+git-ignored except two committed examples.
 
 > Non-GPT caveat: `mad_compress` is a bottleneck autoencoder (MSE head), not a
 > next-token decoder, so it ignores the supplied `DecoderLm` — its `compression`
@@ -249,58 +365,133 @@ predictive-scaling + tuning-advisor layer builds on.
 `eval` says where an arch stands; **`scale`** predicts how each capability
 improves as the model grows, and **`advise`** says what to tune.
 
-- **`brain bench scale --arch <name>`** (`crates/bench/src/capscale.rs`): sweeps a
-  small SIZE grid (`L1xD32xH2 → L2xD64xH4 → L3xD96xH6`, increasing params via
-  `ScaledGpt`) and, per capability axis, trains+scores *one representative
-  benchmark* (cheapest informative: mqar/mad_selective_copy/mad_memorize/parity/
-  mad_compress/mod_add) at each size. Fits a **saturating trend**
-  `score(N) ≈ ceil − A·N^(−β)` (gap-to-ceiling power law, reuses `scaling::ols`),
-  records the **slope per doubling**, **β**, **R²**, **predicted score@2x/@4x**,
-  and a **verdict** ∈ {improving, saturating, flat}. Writes
-  `results/scale-<arch>-<seed>.json`. Smoke budget (~few min CPU); the *shape* of
-  the curve + extrapolation is the deliverable, not absolute scores.
-- **Experts knob (future MoE):** the sweep dimension is a generic `Knob` enum.
-  Only `Knob::Size` is wired; a MoE arch sweeps `Knob::Experts` the same way —
-  register the arch + fill the `// TODO(experts)` branch in `capscale::grid_for`;
-  the fit/advisor are dimension-agnostic and need no change. MoE *scoring* is not
-  implemented yet (no MoE arch registered).
-- **`brain bench advise <eval.json> [<scale.json>]`** (`crates/bench/src/advisor.rs`):
-  ranked, concrete recommendations. Lever = **headroom (1−score, gated axes) ×
-  size-slope**; per-axis signal → action (rising slope → *increase size*; flat
-  slope → *change the mechanism* = architecture-bound; low `train_ce` + low eval →
-  *more data/reg/steps*; ≈ceiling → *deprioritize*); each rec carries
-  score-per-Mparam (compute-efficiency). **`brain bench eval` prints the top-3 as
-  a footer**, so the eval output itself carries the tuning breakdown.
+- **`brain bench scale --arch <name>`** (`capscale.rs`): sweeps a SIZE grid
+  (`L1xD32xH2 → L2xD64xH4 → L3xD96xH6`) and, per axis, trains+scores one
+  representative benchmark at each size. Fits a saturating trend
+  `score(N) ≈ ceil − A·N^(−β)`, records slope-per-doubling, β, R², predicted
+  score@2x/@4x, and a verdict ∈ {improving, saturating, flat} →
+  `results/scale-<arch>-<seed>.json`. The *shape* of the curve is the
+  deliverable, not absolute scores.
+- **Experts knob (future MoE sweeps):** the sweep dimension is a generic `Knob`
+  enum; only `Knob::Size` is wired. Fill the `// TODO(experts)` branch in
+  `capscale::grid_for` — the fit/advisor are dimension-agnostic.
+- **`brain bench advise <eval.json> [<scale.json>]`** (`advisor.rs`): lever =
+  headroom (1−score, gated axes) × size-slope; per-axis signal → action (rising
+  slope → *increase size*; flat → *change the mechanism*; low `train_ce` + low
+  eval → *more data/reg/steps*; ≈ceiling → *deprioritize*), each carrying
+  score-per-Mparam. **`brain bench eval` prints the top-3 as a footer.**
   `make bench/scale ARCH=<name>` + `make bench/advise ARCH=<name>`.
+
+`make bench/scaling` runs the multi-size scaling-law sweep (`L(N)=E+A·N^-alpha`);
+`make bench/char` keeps the legacy GPT-on-char-datasets sweep.
+
+---
+
+## Performance benchmarking (`crates/perf`)
+
+`brain perf` is the sibling of `brain bench` and answers a different question:
+**how much correct work does brain deliver per unit of hardware, memory, energy
+and time?** Full design (including the scenarios not yet built) in
+`docs/performance/benchmarking.md`; what exists in `docs/performance/status.md`.
+
+```bash
+brain perf list                       # scenarios + the standard workload matrix
+make perf                             # latency + throughput + serve + sweep
+make perf/sweep                       # one scenario
+make perf/compare                     # leaderboard over results/perf-*.json
+make perf/smoke                       # CI-sized run of everything
+```
+
+It is **model-agnostic by construction**: rather than counting tokens, it
+measures *artifacts arriving over time* along `submit → admit → first → … →
+done`. That specialises to TTFT/ITL/TPOT for a decoder and collapses to a single
+latency for a one-shot model (detect, depth, a forecast). `capability::Action`'s
+existing `Progress` callback supplies the timeline, so **any model implementing
+`capability::Provider` is benchmarkable with no new benchmark code** — the reason
+adopting that seam is worth doing per model.
+
+Rules the harness enforces (each exists because violating it produces a
+flattering-but-wrong number):
+
+- warm-up requests never enter a statistic; failed/unfinished requests are never
+  goodput and never leave the denominator;
+- unmeasured fields serialise as `null`, never `0`, and an ungated run reports
+  `correctness.passed: null` — never `true`;
+- **goodput** (output meeting the SLO) is the comparison metric, not peak rate;
+- `compare` refuses to rank across artifact units, excludes `valid: false` runs,
+  and warns on every environment/workload axis that differs;
+- a software rasteriser is labelled as one everywhere it appears.
+
+Tier 2 — `residency` (multi-model catalogue > device memory), `kvcache`,
+`placement` (CPU/GPU/Vulkan/NPU), `mixed`, `overload`, `cancel`, `soak`,
+`frontend`, `faults`, `energy` — is designed but not implemented; these are the
+scenarios where brain has something to measure that a single-model, single-GPU,
+HTTP-shaped harness structurally cannot.
 
 ## Conventions & invariants
 
 - **WGSL is the source of truth.** Kernels live only in `crates/kernels/wgsl/`,
-  embedded as consts; no kernel text is duplicated. Adding a `.wgsl` means
-  regenerating the const list in `crates/kernels/src/lib.rs`.
-- **fp32 only, core compute only** — single bind group, ≤8 storage
-  buffers/kernel (the WebGPU guarantee; `router_bwd`/`mla_scores`/
-  `layernorm_dgamma` bind 5), `@workgroup_size(64)`, no atomics/subgroups/f16.
-  This is what keeps it portable to old GPUs and WebGPU.
-- **Two backends, one build, one API.** `gpu-core` exposes a single
-  `Gpu`/`DeviceBuffer`/`Step` surface; every model (gpt/moe/pid) is written once
-  against it. The accelerator is the *only* thing abstracted — there is no
-  per-backend model code. Both backends compile into every native build and are
-  selected at runtime (`--device cpu|gpu` / `BRAIN_DEVICE`); wgpu is the default.
-  The CPU backend reuses the **same WGSL** via the `wgsl-cpu` Cranelift JIT, so
-  WGSL stays the single source of truth. On wasm only the wgpu/WebGPU backend
-  exists. `crates/vulkan` (coopmat) is excluded from `default-members`; the `web`
-  crate is empty off wasm32.
+  embedded as consts; no kernel text is duplicated. After adding/removing a
+  `.wgsl`, run **`make kernels-regen`** (`scripts/kernels-regen.sh`) to
+  regenerate the const block + `ALL` registry in `crates/kernels/src/lib.rs`.
+- **fp32 only, core compute only** — single bind group, **≤8 storage
+  buffers/kernel** (the WebGPU guarantee; the splat backward kernels bind 8),
+  **no atomics, no subgroups, no f16** (the only mentions of those in the kernel
+  tree are comments asserting their absence). `@workgroup_size(64)` is the rule;
+  the six register-tiled matmuls (`matmul_reg*.wgsl`, `matmul_dw_reg.wgsl`,
+  `matmul_dx_reg.wgsl`, `matmul_i8*.wgsl`) use 256. This is what keeps the engine
+  portable to old GPUs and WebGPU.
+- **Three backends, one build, one API.** `gpu-core` exposes a single
+  `Gpu`/`DeviceBuffer`/`Step` surface; every model is written once against it.
+  The accelerator is the *only* thing abstracted — there is no per-backend model
+  code. `backend-wgpu` (default), `backend-cpu`, and `backend-vulkan` all compile
+  into every native build and are selected at runtime (`--device` / `BRAIN_DEVICE`).
+  The CPU backend reuses the **same WGSL** via the `wgsl-cpu` Cranelift JIT. On
+  wasm only wgpu/WebGPU exists. `crates/vulkan` (coopmat) is excluded from
+  `default-members`; `crates/web` is empty off wasm32.
 - **The Intel NPU is NOT a `gpu-core` backend.** OpenVINO is a *whole-graph*
   compiler, so `--device npu` is a separate export→quantize→compile→run path
-  (`crates/npu`), not a per-op `Gpu`/`Step` backend. `crates/yolo` and the default
-  build stay free of OpenVINO at the source level; the OpenVINO runtime is loaded
-  at run time (`runtime-linking`), so `make build`/`make test` stay green with no
-  OpenVINO installed. See `docs/models/yolo/npu.md`.
+  (`crates/npu`), not a per-op backend. The default build stays free of OpenVINO
+  at the source level; the runtime is loaded at run time (`runtime-linking`), so
+  `make build`/`make test` stay green with no OpenVINO installed.
 - **Backprop is gated by `gradcheck`** (finite differences) — run it after any
-  fwd/bwd math change. SSA-style forward (each stage writes a fresh buffer that
-  doubles as the backprop activation cache) — preserve it when adding stages.
+  fwd/bwd math change. Entry points today: `check_gpt`, `check_qwen`,
+  `check_qwen_lora`, `check_moe`, `check_glm`, `check_glm_mtp`, `check_pid`,
+  `check_seq2seq`, `check_autoencoder`. SSA-style forward (each stage writes a
+  fresh buffer that doubles as the backprop activation cache) — preserve it when
+  adding stages.
+- **Imported models are parity-gated, not gradient-guessed.** `mirror`,
+  `chronos2`, `kronos`, `fincast`, `depth`, `wm-diamond` are imported 1:1 from a
+  reference checkpoint and verified stage-by-stage against dumped goldens
+  (`scripts/parity-dump/`, `tools/*_dump_reference.py`). `make parity` is the
+  cross-backend gate (CPU == Vulkan == NPU).
+- **Adding a capability ≠ adding a subcommand.** Implement `capability::Action`
+  and list it in a `Provider`; `brain do` and the event API pick it up.
 - **Evaluate honestly.** Hold the input distribution fixed; separate the metric
   (perplexity) from the task (exact-match on held-out data); see `README.md` §3.
-- **`scratchpad/` is gitignored** — scratch weights, images, and the read-only
-  Python porting references. Generated `data/` and `out/` are gitignored too.
+- **Gitignored:** `scratchpad/` (scratch weights, images, porting references),
+  generated `data/`, `out/`, `build/`, `results/*.json`, and the world-model
+  parity fixtures.
+
+---
+
+## Doc gaps (as of this revision)
+
+Known-stale or missing, in rough priority order:
+
+1. **No `docs/models/` entry** for: `qwen` (incl. the whole paged-KV serving
+   workstream), `zimage`/`dit`/`diffusion`/`vae`, `gpt`, `moe`, `pid`, `seq2seq`.
+2. **No `status.md` ledger** for `qwen`, `tts`, `glm`, `yolo`, `zimage` (the
+   models that have one: `depth`, `mirror`, `splat`, `chronos2`, `kronos`,
+   `fincast`, `world-models`, and now `perf`).
+3. The serving/runtime stack (`capability`, `residency`, `server`, `dbus`) has
+   rich crate-level rustdoc but **no prose doc** — the table above is currently
+   the only map of it.
+
+Fixed in this revision: the CLI `HELP` now documents `qwen`, `glm`, `tts`,
+`depth`, `forecast`, `caps`/`do` and `perf`; `docs/architecture.md`'s crate graph
+and its "≤4 storage buffers" invariant are corrected.
+
+Not a gap, despite appearances: `federated-moe.md` at the repo root is the
+3148-line *source design* essay; `docs/federated.md` is the shorter "what brain
+implements" doc and cites it deliberately. Keep both.

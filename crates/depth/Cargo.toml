@@ -3,7 +3,7 @@ name = "brain-depth"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Monocular depth models: ZipDepth (pure-conv, RepVGG-reparameterizable) and Depth Anything 3, sharing one dense inverse-depth output contract."
+description = "Monocular depth: ZipDepth (6.1M pure-conv, RepVGG-reparameterizable) behind a dense relative inverse-depth output contract."
 
 [lib]
 name = "depth"
