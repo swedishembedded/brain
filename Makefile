@@ -112,13 +112,16 @@ release:
 #     it. FIXED at the root: models share one device (Gpu::share/new_like) and
 #     test binaries use the weak-pool fixture gpu_core::testgpu, whose device
 #     dies with its last in-process handle — kronos is proven clean at
-#     --test-threads=48, 30/30 runs. The default stays 1 only until the
-#     remaining GPU crates (qwen, tts, gpt, ...) adopt the fixture; migrating
-#     one is mechanical (route its test constructors through testgpu::dev).
+#     --test-threads=48, and after the fixture migration every GPU-test crate
+#     either shares the pooled device (qwen/gpt/tts/speaker/glm/moe/pid/
+#     seq2seq/autoencoder/chronos2/fincast/splat/model/wm-core/yolo), pins the
+#     CPU backend (never touches the card), or gates multi-device tests on the
+#     hardware being present. 8 is the suite-wide proven point (qwen + the six
+#     heaviest migrated crates, 0 failures).
 #
 # The timeout turns a deadlock into a fast, loud failure instead of an hour of
-# silence. Override any of these: TEST_THREADS=8 make test.
-TEST_THREADS ?= 1
+# silence. Override any of these: TEST_THREADS=1 make test restores serial.
+TEST_THREADS ?= 8
 # The guard is a DEADLOCK detector, not a performance target: it must sit above
 # the measured serial run time (~950s across 240+ suites) so a completing suite
 # never reads as a hang. Making the suite faster is the slow-lane migration and
