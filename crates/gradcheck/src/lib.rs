@@ -205,6 +205,68 @@ pub fn check_qwen_lora(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Gradient-check the vision-language embedding splice (`Qwen::enable_mm_splice`).
+/// The spliced image embeddings are an INPUT, not a parameter, so this runs a
+/// bespoke directional check on them: perturb `img_embeds` along random ±1
+/// directions and compare the central difference of the loss to the analytic
+/// gradient read back via `read_d_img_embeds`. This validates that `splice`
+/// injects the embeddings into the residual stream and `splice_bwd` extracts
+/// their gradient (and that the subsequent `emb_bwd` scatter, over rows the
+/// splice backward zeroed, does not corrupt it). The image rows carry IGNORE
+/// targets, so their only influence on the loss is through attention — a
+/// non-trivial path exercising the full splice + decoder graph. Returns a
+/// one-entry report ("img_embeds").
+pub fn check_vlm_splice(seed: u64) -> Report {
+    use qwen::{Qwen, QwenConfig, IGNORE};
+    let cfg = QwenConfig::tiny();
+    let d = cfg.d_model as usize;
+    let init = qwen::init_weights(&cfg, seed);
+    let mut model = Qwen::new(cfg, 2, 6, &init);
+    let (row0, n_rows) = (1u32, 2u32);
+    model.enable_mm_splice(row0, n_rows);
+
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    let mut y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
+    for r in row0..row0 + n_rows {
+        y[r as usize] = IGNORE; // image tokens are never a prediction target
+    }
+    model.set_batch(&x, &y);
+
+    let mut rng = Rng::new(seed ^ 0xA11CE);
+    let img0: Vec<f32> = (0..n_rows as usize * d).map(|_| rng.next_f32() - 0.5).collect();
+    model.write_img_embeds(&img0);
+
+    // Analytic grad of the loss w.r.t. the spliced image embeddings.
+    model.zero_grads();
+    let _ = model.forward();
+    model.backward();
+    let g = model.read_d_img_embeds();
+
+    // Directional central difference (same recipe as `directional_check`, but on
+    // the input rather than a parameter).
+    let (eps, n_dirs) = (5e-3f32, 4usize);
+    let mut best: Option<Check> = None;
+    for _ in 0..n_dirs {
+        let v: Vec<f32> = (0..img0.len()).map(|_| if rng.next_f32() < 0.5 { -1.0 } else { 1.0 }).collect();
+        let analytic: f32 = g.iter().zip(&v).map(|(&gi, &vi)| gi * vi).sum();
+        let ip: Vec<f32> = img0.iter().zip(&v).map(|(&w, &vi)| w + eps * vi).collect();
+        model.write_img_embeds(&ip);
+        let lp = model.forward();
+        let im: Vec<f32> = img0.iter().zip(&v).map(|(&w, &vi)| w - eps * vi).collect();
+        model.write_img_embeds(&im);
+        let lm = model.forward();
+        let numeric = (lp - lm) / (2.0 * eps);
+        let abs_err = (analytic - numeric).abs();
+        let denom = analytic.abs().max(numeric.abs()).max(1e-3);
+        let cand = Check { param: "img_embeds".into(), analytic, numeric, abs_err, rel_err: abs_err / denom };
+        if best.as_ref().is_none_or(|b| cand.rel_err < b.rel_err) {
+            best = Some(cand);
+        }
+    }
+    model.write_img_embeds(&img0); // restore
+    Report { checks: vec![best.unwrap()] }
+}
+
 /// Build a tiny sparse-MoE Trainer, set a fixed batch, and gradient-check it
 /// (validates RMSNorm/RoPE/router/SwiGLU/aux+z-loss backprop). Now that MoE
 /// implements `model::Model`, the blanket `CheckModel` impl makes it checkable —
@@ -421,6 +483,22 @@ mod tests {
         assert!(
             fails.is_empty(),
             "LoRA gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn vlm_splice_grad_matches_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_vlm_splice(7);
+        report.print();
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "VLM splice gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
     }
