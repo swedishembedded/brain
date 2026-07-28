@@ -259,6 +259,48 @@ impl RepMixerBlock {
     }
 }
 
+/// PatchEmbed — the FastViTHD inter-stage downsample (stride-2, `in_ch → out_ch`):
+/// a grouped large-kernel conv (7×7, stride 2, `groups = in_ch`, fused
+/// ReparamLargeKernelConv) then a 1×1 MobileOne. Halves H×W, `out_ch` must be a
+/// multiple of `in_ch` (FastViTHD doubles the channels).
+pub struct PatchEmbed {
+    rlk: ConvUnit,
+    proj: ConvUnit,
+    out_shape: Shape,
+}
+
+impl PatchEmbed {
+    pub fn new(ctx: &Ctx, prefix: &str, in_shape: Shape, out_ch: u32) -> PatchEmbed {
+        assert!(out_ch % in_shape.c == 0, "PatchEmbed out_ch must be a multiple of in_ch");
+        // Grouped 7×7 stride-2 (groups = in_ch), +bias, +GELU.
+        let rlk = ConvUnit::new(ctx, &format!("{prefix}.rlk"), in_shape, out_ch, 7, 2, 3, in_shape.c, false, true, true);
+        // 1×1 MobileOne (dense), +bias, +GELU.
+        let proj = ConvUnit::new(ctx, &format!("{prefix}.proj"), rlk.out_shape(), out_ch, 1, 1, 0, 1, false, true, true);
+        let out_shape = proj.out_shape();
+        PatchEmbed { rlk, proj, out_shape }
+    }
+    pub fn out_shape(&self) -> Shape {
+        self.out_shape
+    }
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let mut p = self.rlk.param_list();
+        p.extend(self.proj.param_list());
+        p
+    }
+    pub fn forward<'a>(&'a self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) -> &'a DeviceBuffer {
+        let r = self.rlk.forward(ctx, ps, x_in);
+        self.proj.forward(ctx, ps, r)
+    }
+}
+
+/// RepCPE — the FastViTHD conditional positional encoding before the attention
+/// stages: a single fused depthwise 7×7 conv + bias (the identity skip is folded
+/// into the conv), applied in place. It's exactly a [`ConvUnit`], so
+/// `repcpe(ctx, prefix, shape, ch)` is a thin constructor.
+pub fn repcpe(ctx: &Ctx, prefix: &str, in_shape: Shape, ch: u32) -> ConvUnit {
+    ConvUnit::new(ctx, prefix, in_shape, ch, 7, 1, 3, ch, false, true, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +326,37 @@ mod tests {
                 (n.clone(), v)
             })
             .collect()
+    }
+
+    #[test]
+    fn patch_embed_downsamples_and_doubles_channels() {
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let in_shape = Shape::new(1, 96, 16, 16);
+        let pe = PatchEmbed::new(&ctx, "pe", in_shape, 192); // /2, 96→192
+        assert_eq!(pe.out_shape(), Shape::new(1, 192, 8, 8));
+        let plist = pe.param_list();
+        let mut rng = Rng::new(4);
+        let ps = ParamStore::new(&gpu, plist.clone(), &rand_init(&plist, &mut rng));
+        let x: Vec<f32> = (0..in_shape.numel() as usize).map(|_| rng.next_f32() - 0.5).collect();
+        let out = gpu.read(pe.forward(&ctx, &ps, &gpu.storage_init("x", &x)), pe.out_shape().numel() as usize);
+        assert_eq!(out.len(), (192 * 8 * 8) as usize);
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn repcpe_is_a_depthwise_unit() {
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let in_shape = Shape::new(1, 32, 8, 8);
+        let pe = repcpe(&ctx, "cpe", in_shape, 32);
+        assert_eq!(pe.out_shape(), in_shape); // dw 7×7 pad 3 preserves shape
+        let plist = pe.param_list();
+        let mut rng = Rng::new(5);
+        let ps = ParamStore::new(&gpu, plist.clone(), &rand_init(&plist, &mut rng));
+        let x: Vec<f32> = (0..in_shape.numel() as usize).map(|_| rng.next_f32() - 0.5).collect();
+        let out = gpu.read(pe.forward(&ctx, &ps, &gpu.storage_init("x", &x)), in_shape.numel() as usize);
+        assert!(out.iter().all(|v| v.is_finite()));
     }
 
     #[test]
