@@ -17,5 +17,7 @@ pub mod model;
 pub mod import;
 #[cfg(test)]
 mod parity;
+#[cfg(test)]
+mod train_smoke;
 
 pub use config::{FastVitHdConfig, FastVlmConfig};

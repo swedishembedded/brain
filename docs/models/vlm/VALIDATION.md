@@ -27,6 +27,27 @@ noise, *and* the full decode loop (embed → 24 layers → tied head → argmax 
 a real, coherent, correct answer. It exercises the real-weight path end to end:
 `checkpoint::safetensors` (bf16→f32) → `import::map_decoder` → `Qwen::new` → `logits_all`.
 
+## Training convergence (tier 5)
+
+| Check | Result | How |
+|---|---|---|
+| **VLM finetune overfits** | **loss 3.12 → 0.01** on a single image→caption example | `crates/fastvlm/src/train_smoke.rs`: the full loop `zero_grads → set_batch → (image-splice) forward → backward → AdamW`, 300 steps |
+
+On top of the gradient checks (which prove the backward is *correct*), this proves the whole
+training loop — image-splice, decoder, backward, and the AdamW optimizer together — actually
+*drives learning*: the loss collapses from ~ln(vocab) to near zero as the model memorizes the
+example. This is the "gradient-faithful finetune" capability, confirmed empirically.
+
+## A note on big-checkpoint parity (memory)
+
+Full-model real-weight parity fits comfortably for **FastVLM-0.5B** (validated above). For
+**Qwen3-VL-4B** and **Moondream 3** it does not: a 4 B decoder needs ~14 GB as f32 weights
+*plus* a second ~14 GB device copy inside `Qwen::new` (≈32 GB), over the ~18 GB available here.
+Their correctness therefore rests on (a) the gradient checks, (b) import name-coverage, and
+(c) the shared-backbone parity FastVLM establishes; a **per-block streaming** parity (load one
+block's weights, compare that block's output) is the documented path to close the gap on a
+larger box.
+
 ## Capability matrix
 
 Legend: ✅ implemented + validated · 🟡 implemented, validation pending · ⬜ not yet built · — n/a
