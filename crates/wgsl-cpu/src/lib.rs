@@ -1408,6 +1408,24 @@ impl<'a, 'b> Tr<'a, 'b> {
                 let lt = self.b.ins().icmp(IntCC::SignedLessThan, a, zero);
                 Ok(Eval::Scalar(self.b.ins().select(lt, neg1, hi), Ty::I32))
             }
+            // dot4I8Packed(a, b): four signed-int8 multiply-accumulates over
+            // the bytes of two u32s (the DP4A the packed-int8 GEMMs use).
+            // Byte i sits at bits [8i, 8i+8): shift it to the top byte, then
+            // an arithmetic shift right 24 sign-extends it to i32.
+            Dot4I8Packed => {
+                let (b2, _) = self.scalar(arg1.ok_or("dot4I8Packed needs 2 args")?)?;
+                let mut acc = self.b.ins().iconst(types::I32, 0);
+                for i in 0..4 {
+                    let up = 24 - 8 * i;
+                    let ai = self.b.ins().ishl_imm(a, up);
+                    let ai = self.b.ins().sshr_imm(ai, 24);
+                    let bi = self.b.ins().ishl_imm(b2, up);
+                    let bi = self.b.ins().sshr_imm(bi, 24);
+                    let p = self.b.ins().imul(ai, bi);
+                    acc = self.b.ins().iadd(acc, p);
+                }
+                Ok(Eval::Scalar(acc, Ty::I32))
+            }
             other => Err(format!("unsupported math fn {other:?}")),
         }
     }
@@ -1504,6 +1522,61 @@ mod tests {
             jit.run(0, 0, 64, 1, 1, uniform.as_ptr(), bufs.as_ptr());
         }
         assert_eq!(out, vec![11.0, 22.0, 33.0, 44.0]);
+    }
+
+    /// `dot4I8Packed` must lower correctly: the packed-int8 decode GEMV
+    /// (single barrier, so JIT-able) against a host int8 reference. Signed
+    /// bytes are the trap — a zero-extend instead of sign-extend passes on
+    /// positive values and corrupts every negative weight.
+    #[test]
+    fn dot4i8packed_matches_host_reference() {
+        let jit = Jit::new(&[("matmul_i8_gemv", kernels::MATMUL_I8_GEMV)]).expect("compile i8 gemv");
+        let (m, k, n) = (2usize, 8usize, 3usize);
+        let kg = k / 4;
+        // Deliberately mixed-sign int8 values.
+        let xq_i: Vec<i8> = (0..m * k).map(|i| ((i as i32 * 37 + 11) % 255 - 127) as i8).collect();
+        let wq_i: Vec<i8> = (0..n * k).map(|i| ((i as i32 * 53 + 5) % 255 - 127) as i8).collect();
+        let pack = |v: &[i8]| -> Vec<f32> {
+            v.chunks(4)
+                .map(|c| {
+                    let w = (c[0] as u8 as u32)
+                        | ((c[1] as u8 as u32) << 8)
+                        | ((c[2] as u8 as u32) << 16)
+                        | ((c[3] as u8 as u32) << 24);
+                    f32::from_bits(w)
+                })
+                .collect()
+        };
+        let mut xq = pack(&xq_i);
+        let mut wq = pack(&wq_i);
+        let mut sx: Vec<f32> = vec![0.5, 0.25];
+        let mut sw: Vec<f32> = vec![1.0, 2.0, 0.125];
+        let mut out = vec![0.0f32; m * n];
+        let bufs = vec![
+            xq.as_mut_ptr() as *mut u8,
+            wq.as_mut_ptr() as *mut u8,
+            sx.as_mut_ptr() as *mut u8,
+            sw.as_mut_ptr() as *mut u8,
+            out.as_mut_ptr() as *mut u8,
+        ];
+        let uniform = [m as u32, kg as u32, n as u32];
+        // One workgroup (64 threads) per output column.
+        unsafe {
+            jit.run(0, 0, (n * 64) as u64, n as u32, 1, uniform.as_ptr(), bufs.as_ptr());
+        }
+        for row in 0..m {
+            for col in 0..n {
+                let acc: i32 = (0..k)
+                    .map(|kk| xq_i[row * k + kk] as i32 * wq_i[col * k + kk] as i32)
+                    .sum();
+                let want = acc as f32 * sx[row] * sw[col];
+                let got = out[row * n + col];
+                assert!(
+                    (got - want).abs() < 1e-4,
+                    "out[{row},{col}] = {got}, want {want}"
+                );
+            }
+        }
     }
 
     /// The work-group tiled conv (workgroup memory + barrier) compiled by the JIT

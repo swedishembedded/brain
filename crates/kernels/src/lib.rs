@@ -219,6 +219,10 @@ pub const CONVTR1D_DW: &str = include_str!("../wgsl/convtr1d_dw.wgsl");
 pub const CONVTR1D_DX: &str = include_str!("../wgsl/convtr1d_dx.wgsl");
 /// `wgsl/crop2d.wgsl`
 pub const CROP2D: &str = include_str!("../wgsl/crop2d.wgsl");
+/// `wgsl/decode_advance.wgsl`
+pub const DECODE_ADVANCE: &str = include_str!("../wgsl/decode_advance.wgsl");
+/// `wgsl/decode_feed.wgsl`
+pub const DECODE_FEED: &str = include_str!("../wgsl/decode_feed.wgsl");
 /// `wgsl/decode_softmax.wgsl`
 pub const DECODE_SOFTMAX: &str = include_str!("../wgsl/decode_softmax.wgsl");
 /// `wgsl/decode_softmax_batched.wgsl`
@@ -695,6 +699,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("convtr1d_dw", CONVTR1D_DW),
     ("convtr1d_dx", CONVTR1D_DX),
     ("crop2d", CROP2D),
+    ("decode_advance", DECODE_ADVANCE),
+    ("decode_feed", DECODE_FEED),
     ("decode_softmax", DECODE_SOFTMAX),
     ("decode_softmax_batched", DECODE_SOFTMAX_BATCHED),
     ("dfl_decode", DFL_DECODE),

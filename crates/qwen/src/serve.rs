@@ -58,6 +58,10 @@ const MAX_ABS_ROW: usize = 22;
 const QUANT_PACK: usize = 23;
 const MATMUL_I8_DYN: usize = 24;
 const MATMUL_I8_GEMV: usize = 25;
+// On-device decode window (A4): feed the argmax back as the next input and
+// advance the paged metadata without a host round-trip.
+const DECODE_FEED: usize = 26;
+const DECODE_ADVANCE: usize = 27;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -86,7 +90,15 @@ const PIPELINES: &[(&str, &str)] = &[
     ("quant_pack", kernels::QUANT_PACK),
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
     ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
+    ("decode_feed", kernels::DECODE_FEED),
+    ("decode_advance", kernels::DECODE_ADVANCE),
 ];
+
+/// Longest on-device decode window (tokens per host round-trip). The scheduler
+/// picks `min(this, tokens remaining)`; the window trades one readback per
+/// token for one per window, at the cost of up to `window - 1` wasted decode
+/// steps when a sequence hits EOS mid-window.
+pub const DECODE_WINDOW: usize = 4;
 
 fn ids() -> KernelIds {
     KernelIds {
@@ -128,6 +140,11 @@ fn fb(x: f32) -> u32 {
 pub enum Input<'a> {
     Tokens(&'a [u32]),
     Embeds(&'a [f32]),
+    /// Token ids already resident in the engine's `tok_buf` — the on-device
+    /// decode window (A4): `decode_feed` wrote them from the previous step's
+    /// argmax, and `decode_advance` already advanced the paged metadata, so
+    /// the forward performs NO host writes at all.
+    Resident,
 }
 
 /// One decoder-param leaf name → element count (mirrors the decode weight set).
@@ -188,6 +205,11 @@ struct Scratch {
     blk_buf: DeviceBuffer,
     off_buf: DeviceBuffer,
     bt_buf: DeviceBuffer,
+    /// `[DECODE_WINDOW-1, max_batch, 3]` device (block, offset, bt_index)
+    /// schedule for the on-device decode window (A4).
+    sched_buf: DeviceBuffer,
+    /// `[DECODE_WINDOW, max_batch]` window token history (greedy indices).
+    hist_buf: DeviceBuffer,
 }
 
 /// Paged, batched Qwen3 serving engine.
@@ -339,6 +361,8 @@ impl Engine {
             blk_buf: st(b),
             off_buf: st(b),
             bt_buf: st(b * max_blocks_per_seq as u64),
+            sched_buf: st((DECODE_WINDOW as u64 - 1) * max_batch as u64 * 3),
+            hist_buf: st(DECODE_WINDOW as u64 * max_batch as u64),
         };
         // Int8 weight bank: the 7 per-layer linears + the head, quantized once
         // at build (per-channel scales) and packed 4/u32. Activation-quant
@@ -574,11 +598,16 @@ impl Engine {
         let scale = 1.0f32 / (hd as f32).sqrt();
         let theta = c.rope_theta;
         let g = &self.gpu;
-        g.write(&self.sc.pos_buf, positions);
-        g.write(&self.sc.seqlen_buf, seqlens);
-        g.write(&self.sc.blk_buf, blocks);
-        g.write(&self.sc.off_buf, offsets);
-        g.write(&self.sc.bt_buf, bt);
+        // Resident mode (A4): every input — token ids AND paged metadata — was
+        // produced on the device by `decode_feed`/`decode_advance`, so writing
+        // host copies here would both be wrong (stale) and force a flush.
+        if !matches!(input, Input::Resident) {
+            g.write(&self.sc.pos_buf, positions);
+            g.write(&self.sc.seqlen_buf, seqlens);
+            g.write(&self.sc.blk_buf, blocks);
+            g.write(&self.sc.off_buf, offsets);
+            g.write(&self.sc.bt_buf, bt);
+        }
         let kids = ids();
         let sc = &self.sc;
         let w = |name: &str| self.ps.w(name);
@@ -587,6 +616,9 @@ impl Engine {
         match input {
             Input::Tokens(t) => {
                 g.write(&sc.tok_buf, t);
+                s.push(g.step(EMBED, &[&sc.tok_buf, w("tok.weight"), &sc.res[0]], &[d, b], d * b));
+            }
+            Input::Resident => {
                 s.push(g.step(EMBED, &[&sc.tok_buf, w("tok.weight"), &sc.res[0]], &[d, b], d * b));
             }
             Input::Embeds(e) => {
@@ -689,6 +721,15 @@ impl Engine {
     /// and was 10.3% of decode time; it remains registered as the small-vocab
     /// path and the reference the tests compare against.
     fn greedy_from_hidden(&self, bsz: u32) -> Vec<u32> {
+        self.submit_greedy_head(bsz);
+        // Indices come back as f32 (exact below 2^24, far above any vocabulary).
+        self.gpu.read(&self.argmax_dev, bsz as usize).into_iter().map(|x| x as u32).collect()
+    }
+
+    /// Record + submit the greedy head (logits + row argmax into
+    /// `argmax_dev`) WITHOUT reading back — the on-device decode window feeds
+    /// the result straight into the next step.
+    fn submit_greedy_head(&self, bsz: u32) {
         let g = &self.gpu;
         let (d, v) = (self.cfg.d_model, self.cfg.vocab);
         let mut steps: Vec<Step> = Vec::new();
@@ -719,8 +760,93 @@ impl Engine {
             steps.push(g.step(ARGMAX_ROW, &[&self.logits_dev, &self.argmax_dev], &[bsz, v], bsz));
         }
         g.submit(&[], &steps);
-        // Indices come back as f32 (exact below 2^24, far above any vocabulary).
-        g.read(&self.argmax_dev, bsz as usize).into_iter().map(|x| x as u32).collect()
+    }
+
+    /// Advance every sequence by `k` tokens with ONE host round-trip (A4).
+    ///
+    /// The host allocates the window's K/V slots up front and uploads them as
+    /// a device schedule; between sub-steps `decode_feed` turns the argmax
+    /// into the next input and `decode_advance` walks the metadata, so the
+    /// whole window records into one submission and the only readback is the
+    /// `[k, bsz]` token history at the end. Callers own EOS handling: a
+    /// sequence that finishes mid-window has its surplus tokens trimmed and
+    /// its surplus K/V slots rolled back (`BlockTable::truncate`).
+    ///
+    /// Requires `k <= DECODE_WINDOW` and enough free blocks for every append;
+    /// the scheduler falls back to the single-step path when either fails.
+    pub(crate) fn forward_batched_greedy_window(
+        &mut self,
+        tables: &mut [&mut BlockTable],
+        inputs: &[u32],
+        k: usize,
+    ) -> Vec<Vec<u32>> {
+        assert!(k >= 1 && k <= DECODE_WINDOW, "window {k} out of range");
+        let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
+        let mbt = self.max_blocks_per_seq;
+        // Pre-allocate sub-steps 1..k and build the device schedule:
+        // (block, offset, bt_index | NO_BT) per row per sub-step.
+        const NO_BT: u32 = u32::MAX;
+        let n = bsz as usize;
+        let mut sched = vec![0u32; (k - 1) * n * 3];
+        for s in 1..k {
+            for (i, table) in tables.iter_mut().enumerate() {
+                let before = table.blocks().len();
+                let (block, offset) =
+                    table.append(&mut self.alloc).expect("KV pool exhausted mid-window");
+                let bti = if table.blocks().len() > before {
+                    (table.blocks().len() - 1) as u32
+                } else {
+                    NO_BT
+                };
+                let base = ((s - 1) * n + i) * 3;
+                sched[base] = block;
+                sched[base + 1] = offset;
+                sched[base + 2] = bti;
+            }
+        }
+        let g = &self.gpu;
+        if k > 1 {
+            g.write(&self.sc.sched_buf, &sched);
+        }
+        // Sub-step 0: host-fed, as today — but the argmax stays on the device.
+        self.run_batched_submit(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt);
+        self.submit_greedy_head(bsz);
+        for s in 1..k {
+            let g = &self.gpu;
+            let feed = g.step(
+                DECODE_FEED,
+                &[&self.argmax_dev, &self.sc.tok_buf, &self.sc.hist_buf],
+                &[bsz, (s - 1) as u32],
+                bsz,
+            );
+            let adv = g.step(
+                DECODE_ADVANCE,
+                &[
+                    &self.sc.sched_buf,
+                    &self.sc.pos_buf,
+                    &self.sc.seqlen_buf,
+                    &self.sc.blk_buf,
+                    &self.sc.off_buf,
+                    &self.sc.bt_buf,
+                ],
+                &[bsz, (s - 1) as u32, mbt, NO_BT],
+                bsz,
+            );
+            g.submit(&[], &[feed, adv]);
+            self.run_batched_submit(bsz, Input::Resident, &[], &[], &[], &[], &[]);
+            self.submit_greedy_head(bsz);
+        }
+        // Record the final sub-step's tokens, then read the whole window once.
+        let g = &self.gpu;
+        let last = g.step(
+            DECODE_FEED,
+            &[&self.argmax_dev, &self.sc.tok_buf, &self.sc.hist_buf],
+            &[bsz, (k - 1) as u32],
+            bsz,
+        );
+        g.submit(&[], &[last]);
+        let flat = g.read(&self.sc.hist_buf, k * n);
+        (0..n).map(|i| (0..k).map(|s| flat[s * n + i] as u32).collect()).collect()
     }
 
     /// **Chunked prefill**: process the prompt in chunks of up to `max_prefill`
@@ -1320,25 +1446,67 @@ impl Scheduler {
             self.running.push(r);
         }
 
-        // 2. Batched decode over every running (not-done) sequence.
+        // 2. Batched decode over every running (not-done) sequence. When
+        //    nothing is waiting to be admitted, decode a WINDOW of tokens per
+        //    host round-trip (A4): the readback-per-token becomes a readback
+        //    per window, at the cost of up to window-1 wasted decode steps for
+        //    a sequence that hits EOS mid-window (its surplus K/V is rolled
+        //    back below). With work waiting, the window stays 1 so admission
+        //    latency is never traded away silently.
         let active: Vec<usize> = (0..self.running.len()).filter(|&i| !self.running[i].done).collect();
         if !active.is_empty() {
             let inputs: Vec<u32> = active.iter().map(|&i| self.running[i].next_input).collect();
-            let next_tokens = {
+            let remaining_min = active
+                .iter()
+                .map(|&i| {
+                    let r = &self.running[i];
+                    r.max_new.saturating_sub(r.generated.len()).max(1)
+                })
+                .min()
+                .unwrap_or(1);
+            let mut k = if self.waiting.is_empty() { remaining_min.min(DECODE_WINDOW) } else { 1 };
+            // Every append must succeed mid-window (no host decisions there):
+            // require a comfortable block reserve, else fall back to one step.
+            if k > 1 && (self.eng.free_blocks() as usize) < active.len() * k {
+                k = 1;
+            }
+            let window = {
                 let mut refs: Vec<&mut BlockTable> = Vec::new();
                 for (idx, r) in self.running.iter_mut().enumerate() {
                     if active.contains(&idx) {
                         refs.push(&mut r.table);
                     }
                 }
-                self.eng.forward_batched_greedy(&mut refs, &inputs)
+                if k > 1 {
+                    self.eng.forward_batched_greedy_window(&mut refs, &inputs, k)
+                } else {
+                    self.eng
+                        .forward_batched_greedy(&mut refs, &inputs)
+                        .into_iter()
+                        .map(|t| vec![t])
+                        .collect()
+                }
             };
             for (bi, &si) in active.iter().enumerate() {
-                let next = next_tokens[bi];
                 let r = &mut self.running[si];
-                r.generated.push(next);
-                r.next_input = next;
-                Self::finish_check(r);
+                let mut used = 0usize;
+                for &next in &window[bi] {
+                    r.generated.push(next);
+                    r.next_input = next;
+                    used += 1;
+                    Self::finish_check(r);
+                    if r.done {
+                        break;
+                    }
+                }
+                // A sequence that finished mid-window consumed only `used`
+                // inputs; the remaining pre-allocated slots hold garbage K/V
+                // and are rolled back so the pool never leaks waste.
+                let surplus = (k - used) as u32;
+                if surplus > 0 {
+                    let len = r.table.len();
+                    r.table.truncate(len - surplus, &mut self.eng.alloc);
+                }
             }
         }
 
@@ -1467,8 +1635,11 @@ mod tests {
         assert_eq!(rep.rejected[0].0, huge);
         assert!(matches!(rep.rejected[0].1, RejectReason::ExceedsCapacity { .. }));
 
-        // The queue keeps moving and the viable request completes.
-        let out = sched.run();
+        // The queue keeps moving and the viable request completes. With the
+        // decode window a short request can finish inside the SAME iteration
+        // that admitted it, so its tokens arrive in that report's `completed`.
+        let mut out = sched.run();
+        out.extend(rep.completed);
         assert!(out.contains_key(&ok));
         assert!(!out.contains_key(&huge));
     }
@@ -1490,7 +1661,8 @@ mod tests {
         assert_eq!(rep.rejected[0].0, b);
         assert!(matches!(rep.rejected[0].1, RejectReason::PolicyRejected { policy: "max_queue_depth" }));
 
-        let out = sched.run();
+        let mut out = sched.run();
+        out.extend(rep.completed);
         assert!(out.contains_key(&a), "admitted work completes normally");
         assert!(!out.contains_key(&b));
     }
@@ -1521,11 +1693,11 @@ mod tests {
         let eng = Engine::from_map(cfg, &map, 4, 96, 3, 12, 8, false, false);
         let mut sched = Scheduler::new(eng, 3);
 
-        let keep_a = sched.submit(Request { prompt: vec![1u32, 5, 3], max_new: 6, eos: None });
-        // Long enough to still be decoding when cancelled, but inside the
-        // engine's per-sequence capacity (12 blocks x 4 = 48 tokens).
+        // Everything long enough to still be decoding after two (windowed)
+        // iterations, and inside the per-sequence capacity (12 blocks x 4 = 48).
+        let keep_a = sched.submit(Request { prompt: vec![1u32, 5, 3], max_new: 20, eos: None });
         let doomed = sched.submit(Request { prompt: vec![7u32, 2, 9], max_new: 30, eos: None });
-        let keep_b = sched.submit(Request { prompt: vec![4u32, 4, 1], max_new: 6, eos: None });
+        let keep_b = sched.submit(Request { prompt: vec![4u32, 4, 1], max_new: 20, eos: None });
 
         // Admit everything and decode a couple of steps.
         sched.step();
@@ -1541,8 +1713,8 @@ mod tests {
         // The survivors still finish normally.
         let out = sched.run();
         assert_eq!(out.len(), 2);
-        assert_eq!(out[&keep_a].len(), 6);
-        assert_eq!(out[&keep_b].len(), 6);
+        assert_eq!(out[&keep_a].len(), 20);
+        assert_eq!(out[&keep_b].len(), 20);
         assert!(!out.contains_key(&doomed), "a cancelled request must not complete");
 
         // Cancelling twice, or an unknown id, is a no-op rather than a panic.
