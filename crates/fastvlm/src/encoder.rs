@@ -53,6 +53,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("bn_dbeta", kernels::BN_DBETA),
     ("silu", kernels::SILU),
     ("silu_bwd", kernels::SILU_BWD),
+    ("leaky_relu", kernels::LEAKY_RELU),
+    ("leaky_relu_bwd", kernels::LEAKY_RELU_BWD),
     ("sigmoid", kernels::SIGMOID),
     ("sigmoid_bwd", kernels::SIGMOID_BWD),
     ("im2col", kernels::IM2COL),
@@ -64,6 +66,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("add_chan_bcast", kernels::ADD_CHAN_BCAST),
     ("add_chan_bcast_dv", kernels::ADD_CHAN_BCAST_DV),
     ("scale_chan", kernels::SCALE_CHAN),
+    ("film_chan", kernels::FILM_CHAN), // LayerScale: y = x·(1+s)+b, s=ls-1, b=0
     ("chan_place", kernels::CHAN_PLACE),
     // --- transpose + attention (stage-4/5 blocks) ---
     ("nchw_nlc", kernels::NCHW_NLC),
@@ -168,6 +171,94 @@ impl ConvUnit {
     }
 }
 
+/// ConvFFN — the FastViTHD channel-mixer: depthwise 7×7 + BN → 1×1 (`fc1`) +bias
+/// → erf-GELU → 1×1 (`fc2`) +bias. Present in every RepMixer and Attention block.
+pub struct ConvFFN {
+    dw: ConvUnit,
+    fc1: ConvUnit,
+    fc2: ConvUnit,
+    out_shape: Shape,
+}
+
+impl ConvFFN {
+    pub fn new(ctx: &Ctx, prefix: &str, in_shape: Shape, ch: u32, mlp_ratio: u32) -> ConvFFN {
+        let dw = ConvUnit::new(ctx, &format!("{prefix}.dw"), in_shape, ch, 7, 1, 3, ch, true, false, false);
+        let fc1 = ConvUnit::new(ctx, &format!("{prefix}.fc1"), dw.out_shape(), ch * mlp_ratio, 1, 1, 0, 1, false, true, true);
+        let fc2 = ConvUnit::new(ctx, &format!("{prefix}.fc2"), fc1.out_shape(), ch, 1, 1, 0, 1, false, true, false);
+        let out_shape = fc2.out_shape();
+        ConvFFN { dw, fc1, fc2, out_shape }
+    }
+    pub fn out_shape(&self) -> Shape {
+        self.out_shape
+    }
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let mut p = self.dw.param_list();
+        p.extend(self.fc1.param_list());
+        p.extend(self.fc2.param_list());
+        p
+    }
+    pub fn forward<'a>(&'a self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) -> &'a DeviceBuffer {
+        let d = self.dw.forward(ctx, ps, x_in);
+        let h = self.fc1.forward(ctx, ps, d);
+        self.fc2.forward(ctx, ps, h)
+    }
+}
+
+/// RepMixerBlock — the FastViTHD stage-0–2 block: a RepMixer token-mixer (a single
+/// fused depthwise 3×3 conv + bias, no residual — folded) then a ConvFFN with a
+/// LayerScale residual `x = mixer(x) + layer_scale ⊙ ConvFFN(mixer(x))`. The
+/// LayerScale is stored as an `sb` buffer `[2C]` (`[scale=ls-1, shift=0]`) applied
+/// by `film_chan`, so it needs no per-channel-multiply kernel.
+pub struct RepMixerBlock {
+    mixer: ConvUnit,
+    ffn: ConvFFN,
+    ls_name: String,
+    scaled: DeviceBuffer,
+    out: DeviceBuffer,
+    out_shape: Shape,
+    k_film: usize,
+    k_add2: usize,
+}
+
+impl RepMixerBlock {
+    pub fn new(ctx: &Ctx, prefix: &str, in_shape: Shape, ch: u32, mlp_ratio: u32) -> RepMixerBlock {
+        let mixer = ConvUnit::new(ctx, &format!("{prefix}.token_mixer"), in_shape, ch, 3, 1, 1, ch, false, true, false);
+        let ffn = ConvFFN::new(ctx, &format!("{prefix}.convffn"), mixer.out_shape(), ch, mlp_ratio);
+        let out_shape = ffn.out_shape();
+        let n = out_shape.numel() as u64;
+        RepMixerBlock {
+            ls_name: format!("{prefix}.layer_scale_sb"),
+            scaled: ctx.gpu.storage(n),
+            out: ctx.gpu.storage(n),
+            out_shape,
+            k_film: kidx("film_chan"),
+            k_add2: kidx("add2"),
+            mixer,
+            ffn,
+        }
+    }
+    pub fn out_shape(&self) -> Shape {
+        self.out_shape
+    }
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let mut p = self.mixer.param_list();
+        p.extend(self.ffn.param_list());
+        p.push((self.ls_name.clone(), 2 * self.out_shape.c as usize)); // [scale(C), shift(C)]
+        p
+    }
+    pub fn forward<'a>(&'a self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) -> &'a DeviceBuffer {
+        let t = self.mixer.forward(ctx, ps, x_in);
+        let f = self.ffn.forward(ctx, ps, t);
+        let (nn, c, h, w) = (self.out_shape.n, self.out_shape.c, self.out_shape.h, self.out_shape.w);
+        let tot = self.out_shape.numel();
+        // scaled = f · layer_scale  (film_chan with s=ls-1, b=0)
+        ctx.gpu.submit(&[], &[ctx.step(self.k_film, &[f, ps.w(&self.ls_name), &self.scaled], &[nn, c, h, w], tot)]);
+        // out = mixer(x) + scaled
+        ctx.gpu.submit(&[], &[ctx.step(self.k_add2, &[t, &self.scaled, &self.out], &[tot], tot)]);
+        &self.out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +284,26 @@ mod tests {
                 (n.clone(), v)
             })
             .collect()
+    }
+
+    #[test]
+    fn repmixer_block_runs_preserves_shape() {
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let in_shape = Shape::new(1, 16, 8, 8);
+        let blk = RepMixerBlock::new(&ctx, "b", in_shape, 16, 4);
+        let plist = blk.param_list();
+        for want in ["b.token_mixer.conv.weight", "b.convffn.dw.conv.weight", "b.convffn.fc1.conv.weight", "b.convffn.fc2.conv.weight", "b.layer_scale_sb"] {
+            assert!(plist.iter().any(|(n, _)| n == want), "missing param {want}");
+        }
+        let mut rng = Rng::new(3);
+        let ps = ParamStore::new(&gpu, plist.clone(), &rand_init(&plist, &mut rng));
+        let x: Vec<f32> = (0..in_shape.numel() as usize).map(|_| rng.next_f32() - 0.5).collect();
+        let xb = gpu.storage_init("x", &x);
+        let out = blk.forward(&ctx, &ps, &xb);
+        let outv = gpu.read(out, blk.out_shape().numel() as usize);
+        assert_eq!(outv.len(), (16 * 8 * 8) as usize, "RepMixerBlock preserves C,H,W");
+        assert!(outv.iter().all(|v| v.is_finite()), "block output finite");
     }
 
     #[test]
