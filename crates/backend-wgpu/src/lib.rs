@@ -680,7 +680,6 @@ impl WgpuBackend {
         // its uniform (`if (idx >= total) return`), and buffer sizes are fixed
         // by the model at build time. The conv inner loops do ~1 load per
         // 2-3 FMAs, so the removed clamps are directly measurable.
-        use std::sync::atomic::AtomicU64;
         let caps = Self::query_caps(adapter, &info, &device);
         let plcache = PlCache::open(&device, adapter, &info).map(std::sync::Arc::new);
         let shared =
