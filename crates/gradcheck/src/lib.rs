@@ -205,6 +205,43 @@ pub fn check_qwen_lora(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Gradient-check the interleaved-M-RoPE decoder path (`Qwen::enable_mrope`),
+/// which swaps the analytic rope_base for the table-driven `rope2d` on q/k. Uses
+/// simple diagonal per-token position tables (so the rotation is non-trivial but
+/// the interleaving — validated separately in `qwenvl::mrope` — is not needed
+/// here); the check confirms `rope2d`'s forward and its sign=-1 backward are
+/// correctly wired into the decoder's parameter gradients. Returns the report.
+pub fn check_qwen_mrope(seed: u64) -> Report {
+    use qwen::{Qwen, QwenConfig};
+    let cfg = QwenConfig::tiny();
+    let (hd, t) = (cfg.head_dim as usize, 6usize);
+    let n = 2 * t; // b·t
+    let theta = cfg.rope_theta;
+    let init = qwen::init_weights(&cfg, seed);
+    let mut model = Qwen::new(cfg, 2, 6, &init);
+    model.enable_mrope();
+
+    // Per-token cos/sin for position = row-within-sequence (row % t), i.e. the
+    // ordinary sequential positions — a non-trivial rotation the rope2d path must
+    // reproduce and differentiate.
+    let half = hd / 2;
+    let (mut cos, mut sin) = (vec![0f32; n * half], vec![0f32; n * half]);
+    for r in 0..n {
+        let posn = (r % t) as f32;
+        for d in 0..half {
+            let ang = posn * theta.powf(-2.0 * d as f32 / hd as f32);
+            cos[r * half + d] = ang.cos();
+            sin[r * half + d] = ang.sin();
+        }
+    }
+    model.write_mrope_tables(&cos, &sin);
+
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
+    model.set_batch(&x, &y);
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
 /// Gradient-check the vision-language embedding splice (`Qwen::enable_mm_splice`).
 /// The spliced image embeddings are an INPUT, not a parameter, so this runs a
 /// bespoke directional check on them: perturb `img_embeds` along random ±1
@@ -483,6 +520,22 @@ mod tests {
         assert!(
             fails.is_empty(),
             "LoRA gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn qwen_mrope_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_qwen_mrope(7);
+        report.print();
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "M-RoPE gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
     }
