@@ -163,6 +163,93 @@ mod tests {
     const CAP_GEN: &str = "/data/workspace/resources/vl/parity/fastvlm_cap_gen.bin";
 
     #[test]
+    fn fastvlm_full_pipeline_caption() {
+        // brain does EVERYTHING on the real weights: mobileclip vision → mlp2x_gelu
+        // projector → Qwen2 decoder → greedy decode. No HF tensors at inference — the
+        // caption must still match HF's reference token-for-token.
+        let (Some(px), Some(layout), Some(ids), Some(gen_ref)) =
+            (read_f32(VIS_PX), read_i32(CAP_LAYOUT), read_i32(CAP_IDS), read_i32(CAP_GEN))
+        else {
+            eprintln!("skip: FastVLM full-pipeline reference not present");
+            return;
+        };
+        let Ok(tensors) = checkpoint::safetensors::read(CKPT) else {
+            eprintln!("skip: FastVLM checkpoint not present");
+            return;
+        };
+        std::env::set_var("BRAIN_DEVICE", "cpu");
+        use crate::encoder::{ctx as ectx, kidx, Encoder, PIPELINES};
+        use crate::import::{map_decoder, map_projector};
+        use crate::vision_import::build_vision_weights;
+        use gpu_core::Gpu;
+        use paramstore::ParamStore;
+
+        // Split the checkpoint into vision / projector / decoder maps.
+        let mut vt = Vec::new();
+        let mut proj: HashMap<String, Vec<f32>> = HashMap::new();
+        let mut dec: HashMap<String, Vec<f32>> = HashMap::new();
+        for t in tensors {
+            if t.name.contains("vision_tower") {
+                vt.push((t.name, t.data));
+            } else if let Some(k) = map_projector(&t.name) {
+                proj.insert(k, t.data);
+            } else if let Some(k) = map_decoder(&t.name) {
+                dec.insert(k, t.data);
+            }
+        }
+
+        // 1) vision tower → [256, 3072].
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ectx(&gpu);
+        let enc = Encoder::mobileclip_l(&ctx, 1024);
+        enc.set_eval(true);
+        let vps = ParamStore::new(&gpu, enc.param_list(), &build_vision_weights(&vt));
+        let img = gpu.storage_init("img", &px);
+        let feat = enc.forward(&ctx, &vps, &img); // [256, 3072]
+
+        // 2) mlp2x_gelu projector on the vision GPU: fc1 → erf-GELU → fc2 → [256, 896].
+        let (rows, vin, d) = (256u32, 3072u32, 896u32);
+        let featb = gpu.storage_init("feat", &feat);
+        let (fc1w, fc1b) = (gpu.storage_init("f1w", &proj["fc1.weight"]), gpu.storage_init("f1b", &proj["fc1.bias"]));
+        let (fc2w, fc2b) = (gpu.storage_init("f2w", &proj["fc2.weight"]), gpu.storage_init("f2b", &proj["fc2.bias"]));
+        let (h, h2, e) = (gpu.storage((rows * d) as u64), gpu.storage((rows * d) as u64), gpu.storage((rows * d) as u64));
+        gpu.submit(
+            &[],
+            &[
+                gpu.step(kidx("matmul"), &[&featb, &fc1w, &h], &[rows, vin, d], rows * d),
+                gpu.step(kidx("bias_add"), &[&h, &fc1b], &[rows, d], rows * d),
+                gpu.step(kidx("gelu_erf"), &[&h, &h2], &[rows * d], rows * d),
+                gpu.step(kidx("matmul"), &[&h2, &fc2w, &e], &[rows, d, d], rows * d),
+                gpu.step(kidx("bias_add"), &[&e, &fc2b], &[rows, d], rows * d),
+            ],
+        );
+        let embeds = gpu.read(&e, (rows * d) as usize);
+
+        // 3) decoder: splice brain's image embeds + greedy decode.
+        let cfg = FastVlmConfig::fastvlm_0_5b().decoder;
+        let (pre_len, _post_len) = (layout[0] as usize, layout[1] as usize);
+        let img_start = pre_len as u32;
+        let mut seq: Vec<u32> = ids[..pre_len].to_vec();
+        seq.extend(std::iter::repeat(0u32).take(rows as usize));
+        seq.extend(&ids[pre_len..]);
+        let t_max = (seq.len() + gen_ref.len() + 1) as u32;
+        let vocab = cfg.vocab as usize;
+        let mut qwen = Qwen::new(cfg, 1, t_max, &dec);
+        qwen.enable_mm_splice(img_start, rows);
+        qwen.write_img_embeds(&embeds);
+        let mut brain_gen = Vec::new();
+        for _ in 0..gen_ref.len() {
+            let lg = qwen.logits_all(&seq);
+            let last = &lg[(seq.len() - 1) * vocab..seq.len() * vocab];
+            let next = last.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
+            brain_gen.push(next);
+            seq.push(next);
+        }
+        eprintln!("FULLY-IN-BRAIN caption tokens: {brain_gen:?}\nHF reference          tokens: {gen_ref:?}");
+        assert_eq!(brain_gen, gen_ref, "fully-in-brain caption diverges from HF");
+    }
+
+    #[test]
     fn fastvlm_image_caption_matches_hf() {
         // Full image → caption on real weights: brain's decoder consumes the 256 HF
         // image embeddings (mobileclip vision + projector — brain's own FastViTHD

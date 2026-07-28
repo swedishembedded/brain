@@ -40,7 +40,7 @@ fn vit_ids() -> VitKernelIds {
 
 /// Index of a manually-dispatched kernel (not covered by `ConvKernelIds`) in
 /// [`PIPELINES`], by name. Panics if absent — a programming error.
-fn kidx(name: &str) -> usize {
+pub fn kidx(name: &str) -> usize {
     PIPELINES.iter().position(|(n, _)| *n == name).unwrap_or_else(|| panic!("kernel `{name}` not in FastViTHD PIPELINES"))
 }
 

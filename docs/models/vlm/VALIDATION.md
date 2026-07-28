@@ -19,7 +19,8 @@ The validation ladder, weakest → strongest evidence:
 |---|---|---|---|
 | **Decoder logits** (24 layers, GQA, SwiGLU, tied head) | FastVLM-0.5B | **mean\|Δ\|≈3e-6, max\|Δ\|≈6e-5, argmax agrees everywhere** | `crates/fastvlm/src/parity.rs` vs `transformers` on the real bf16 checkpoint |
 | **Greedy generation** (text) | FastVLM-0.5B | **brain decodes the identical token stream as HF** — "Name three primary colors." → **"Red, Blue, and Yellow."** | same test; brain argmax-decodes 8 tokens `[6033,11,8697,...]`, matching HF exactly |
-| **Image → caption** (splice + decode) | FastVLM-0.5B | **brain reproduces the HF caption token-for-token** — DOSBox logo → **"A wooden frame with the letters B, D, and S in it."** | `fastvlm_image_caption_matches_hf`: brain splices the 256 HF image embeddings (`enable_mm_splice`) and greedy-decodes `[32,22360,4034,…]`, identical to HF (`tools/fastvlm_caption_dump_reference.py`) |
+| **Image → caption** (splice + decode) | FastVLM-0.5B | **brain reproduces the HF caption token-for-token** — DOSBox logo → **"A wooden frame with the letters B, D, and S in it."** | `fastvlm_image_caption_matches_hf`: brain splices the 256 HF image embeddings (`enable_mm_splice`) and greedy-decodes `[32,22360,4034,…]`, identical to HF |
+| **Fully-in-brain caption** (vision + projector + decode) | FastVLM-0.5B | **brain runs the WHOLE pipeline on its own weights and matches HF** — same caption, zero HF tensors at inference | `fastvlm_full_pipeline_caption`: brain's mobileclip vision → mlp2x_gelu projector → Qwen2 decoder → greedy decode → `[32,22360,4034,…]` |
 
 This validates the **shared decoder backbone** — the same block math (`crates/model/src/block.rs`)
 all three models decode with — against the actual reference model to fp32 reassociation
@@ -70,9 +71,9 @@ Legend: ✅ implemented + validated · 🟡 implemented, validation pending · �
 
 ## Known gaps ("all capabilities" caveats)
 
-- **Generation loop.** The composites expose a training `forward` (image → CE loss) but
-  no greedy-decode `generate` yet — so no model produces a caption/answer end-to-end today.
-  FastVLM-0.5B is the first target (it is the only checkpoint that loads whole in RAM).
+- **Generation loop.** Done for FastVLM: greedy decode via `logits_all` + `enable_mm_splice`
+  drives the full image→caption above (matching HF). Qwen3-VL/Moondream composites still
+  expose only the training `forward`; wiring the same greedy loop onto them is mechanical.
 - **Moondream spatial heads.** The region/point/detect heads (grounding, pointing, object
   detection) were deferred; the importer *recognizes* their tensors but they are not built.
   Moondream's caption + visual-query paths are complete.
