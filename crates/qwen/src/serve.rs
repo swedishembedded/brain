@@ -14,7 +14,10 @@
 
 use std::collections::HashMap;
 
-use gpu_core::{DeviceBuffer, Gpu, Step};
+use gpu_core::select::{
+    CachedSelector, DefaultSelector, Dtype, KernelSelector, KernelVariant, Op, OpShape,
+};
+use gpu_core::{DeviceBuffer, DeviceCaps, Gpu, Step};
 use model::block::{self, KernelIds};
 use model::paged::{BlockAllocator, BlockTable};
 use paramstore::ParamStore;
@@ -96,17 +99,13 @@ fn ids() -> KernelIds {
     }
 }
 
-/// Rows at or below which the decode-regime kernels win. Above it, the
-/// per-element kernels already saturate the device (training/prefill shapes).
-/// 32 is also matmul_gemv's hard accumulator bound.
-const DECODE_REGIME_MAX_ROWS: u32 = 32;
+// The decode-regime boundaries (max rows, argmax split vocab) live in the
+// shared selection policy — `gpu_core::select` — not here: which kernel runs
+// for a shape on a device is the selector's single job.
 
 /// Chunks per row for the two-stage argmax; 256 threads per row saturates the
 /// reduction without a large partial buffer (256*2 f32 per row).
 const ARGMAX_CHUNKS: u32 = 256;
-/// Below this vocabulary the single-pass kernel wins (two dispatches cost more
-/// than they save on a short row).
-const ARGMAX_SPLIT_MIN_VOCAB: u32 = 4096;
 
 fn fb(x: f32) -> u32 {
     x.to_bits()
@@ -184,6 +183,11 @@ struct Scratch {
 pub struct Engine {
     cfg: QwenConfig,
     gpu: Gpu,
+    /// The device's capabilities, read once at build — the selector's input.
+    caps: DeviceCaps,
+    /// Which kernel variant runs for each (op, shape) — the shared decode-regime
+    /// policy, memoised per distinct shape.
+    selector: CachedSelector<DefaultSelector>,
     ps: ParamStore,
     block_size: u32,
     max_batch: u32,
@@ -289,7 +293,9 @@ impl Engine {
         let argmax_part_dev = st(max_batch as u64 * ARGMAX_CHUNKS as u64 * 2);
         Engine {
             cfg,
+            caps: gpu.caps(),
             gpu,
+            selector: CachedSelector::new(DefaultSelector),
             ps,
             block_size,
             max_batch,
@@ -400,14 +406,14 @@ impl Engine {
     /// more device work (the greedy head) still pays one flush per step rather
     /// than two. Returns the row count.
     /// `out = x @ W^T`, choosing the decode-regime GEMV (one workgroup per
-    /// output column, W streamed once across all rows) when the row count is
-    /// small, else the per-element kernel. Same contract, same result.
+    /// output column, W streamed once across all rows) when the selector says
+    /// the shape is in that regime. Same contract, same result.
     fn mm(&self, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
         let g = &self.gpu;
-        if m <= DECODE_REGIME_MAX_ROWS && g.kind() != "cpu" {
-            g.step(MATMUL_GEMV, &[x, w, out], &[m, k, n], n * 64)
-        } else {
-            g.step(MATMUL, &[x, w, out], &[m, k, n], m * n)
+        let shape = OpShape { m, n, k, dtype: Dtype::F32 };
+        match self.selector.select(Op::MatMul, shape, &self.caps) {
+            KernelVariant::WorkgroupPerOutput => g.step(MATMUL_GEMV, &[x, w, out], &[m, k, n], n * 64),
+            _ => g.step(MATMUL, &[x, w, out], &[m, k, n], m * n),
         }
     }
 
@@ -416,10 +422,10 @@ impl Engine {
     /// card at batch 8, measured at 16.6% of decode time).
     fn rms(&self, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, d: u32, rows: u32) -> Step {
         let g = &self.gpu;
-        if rows <= DECODE_REGIME_MAX_ROWS && g.kind() != "cpu" {
-            g.step(RMSNORM_ROWS, &[x, w, out], &[d, rows], rows * 64)
-        } else {
-            g.step(RMSNORM, &[x, w, out], &[d, rows], rows)
+        let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
+        match self.selector.select(Op::RmsNorm, shape, &self.caps) {
+            KernelVariant::WorkgroupPerOutput => g.step(RMSNORM_ROWS, &[x, w, out], &[d, rows], rows * 64),
+            _ => g.step(RMSNORM, &[x, w, out], &[d, rows], rows),
         }
     }
 
@@ -531,7 +537,10 @@ impl Engine {
         let g = &self.gpu;
         let (d, v) = (self.cfg.d_model, self.cfg.vocab);
         let mm = self.mm(&self.sc.xn_final, &self.head_dev, &self.logits_dev, bsz, d, v);
-        if v >= ARGMAX_SPLIT_MIN_VOCAB {
+        let argmax_shape = OpShape { m: bsz, n: v, k: 0, dtype: Dtype::F32 };
+        if self.selector.select(Op::ArgMaxRow, argmax_shape, &self.caps)
+            == KernelVariant::SplitReduction
+        {
             let chunk = v.div_ceil(ARGMAX_CHUNKS);
             let steps = [
                 mm,

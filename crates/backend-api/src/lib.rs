@@ -26,6 +26,9 @@
 use std::any::Any;
 use std::sync::Arc;
 
+/// Kernel selection: which implementation of an op runs, given shape + device.
+pub mod select;
+
 // The neutral handles and the `Backend` trait are `Send + Sync` on native (the
 // CPU backend hands disjoint buffer sub-ranges to rayon workers, and models cross
 // threads), but NOT on wasm: WebGPU's `wgpu::Buffer`/`Device` are `Rc`-based and
@@ -187,6 +190,14 @@ pub struct DeviceCaps {
     pub subgroup_size: Option<u32>,
     /// No host<->device copy cost (integrated GPUs, CPU).
     pub unified_memory: bool,
+    /// Kernels that stage partial sums in workgroup memory behind a
+    /// `workgroupBarrier()` execute *correctly* on this device. True on every
+    /// real GPU path; false on the CPU JIT, whose split-at-barrier execution
+    /// model mis-executes the decode-regime reduction kernels (its native
+    /// fast paths own that regime instead). A selector must not choose a
+    /// cooperative variant where this is false — that is a correctness gate,
+    /// not a tuning preference.
+    pub workgroup_reductions: bool,
     /// Peak memory bandwidth, GB/s. `None` = unknown (no API reports it; a
     /// measured value may fill it later).
     pub peak_bandwidth_gbs: Option<f32>,
@@ -208,6 +219,9 @@ impl DeviceCaps {
             workgroup_mem_bytes: 16 * 1024,
             subgroup_size: None,
             unified_memory: false,
+            // WebGPU-conformant devices execute workgroup barriers correctly —
+            // this is part of the floor, not an extension.
+            workgroup_reductions: true,
             peak_bandwidth_gbs: None,
             numeric: NumericSupport::BASELINE,
         }

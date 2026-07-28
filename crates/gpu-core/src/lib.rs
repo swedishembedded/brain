@@ -23,6 +23,7 @@
 //! `dyn`, and async device init / read-back via `new_async` / `read_async`).
 
 pub use backend_api::{f, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, NumericSupport, Step};
+pub use backend_api::select;
 
 /// `--device` parsing and resolution: which compute is *schedulable*.
 #[cfg(not(target_arch = "wasm32"))]

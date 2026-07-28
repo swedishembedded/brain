@@ -635,6 +635,10 @@ impl Backend for CpuBackend {
             workgroup_mem_bytes: 32 * 1024,
             subgroup_size: None, // no SIMD width is surfaced to WGSL
             unified_memory: true,
+            // The split-at-barrier JIT mis-executes the workgroup-cooperative
+            // reduction kernels (measured token-for-token); the AVX2 fast
+            // paths own the decode regime here instead.
+            workgroup_reductions: false,
             peak_bandwidth_gbs: None,
             numeric: NumericSupport {
                 f32: true,

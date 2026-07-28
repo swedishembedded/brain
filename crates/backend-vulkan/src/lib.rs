@@ -242,6 +242,7 @@ impl VulkanBackend {
                 props.device_type,
                 vk::PhysicalDeviceType::INTEGRATED_GPU | vk::PhysicalDeviceType::CPU
             ),
+            workgroup_reductions: true, // real barrier semantics (SPIR-V)
             peak_bandwidth_gbs: None,
             numeric: NumericSupport {
                 f32: true,

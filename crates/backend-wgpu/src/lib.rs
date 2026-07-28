@@ -657,6 +657,7 @@ impl WgpuBackend {
             workgroup_mem_bytes: l.max_compute_workgroup_storage_size,
             subgroup_size,
             unified_memory: unified,
+            workgroup_reductions: true, // real barrier semantics on every wgpu target
             peak_bandwidth_gbs: None, // no API reports it; measurement may fill it
             numeric: NumericSupport {
                 f32: true,
