@@ -119,12 +119,17 @@ TEST_THREADS ?= 1
 TEST_TIMEOUT ?= 900
 CARGO_TEST   ?= cargo test --release --offline
 
+# Build first WITHOUT the timeout, then run WITH it. The deadlock guard is a
+# statement about *running tests* — a cold rebuild after an engine change takes
+# minutes on its own, and letting it eat the budget turns "compiling" into a
+# false "TIMED OUT" that reads like a hang.
 test:
 	@echo "test: fast lane (unit + integration, no doc-tests, GPU serialised)"
+	@$(CARGO_TEST) --lib --bins --tests --no-run
 	@timeout $(TEST_TIMEOUT) $(CARGO_TEST) --lib --bins --tests -- --test-threads=$(TEST_THREADS); \
 	rc=$$?; \
 	if [ $$rc -eq 124 ]; then \
-		echo; echo "TIMED OUT after $(TEST_TIMEOUT)s — almost certainly a deadlock, not slowness."; \
+		echo; echo "TIMED OUT after $(TEST_TIMEOUT)s of RUNNING — almost certainly a deadlock."; \
 		echo "Find it with:  scripts/test-times.sh --top 10"; \
 	fi; \
 	exit $$rc
