@@ -26,7 +26,102 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         ("attn_prefix_mask", kernels::ATTN_PREFIX_MASK), // 10
         ("attn_softmax_bidir", kernels::ATTN_SOFTMAX_BIDIR), // 11
         ("attn_apply_bidir", kernels::ATTN_APPLY_BIDIR), // 12
+        ("embed", kernels::EMBED),                       // 13
+        ("splice", kernels::SPLICE),                     // 14
+        ("ce_value", kernels::CE_VALUE_MASKED),          // 15
     ]
+}
+
+/// Masked cross-entropy ignore index (matches the loaders' `-1 i32` as `u32`).
+pub const IGNORE: u32 = 0xFFFF_FFFF;
+
+/// The Moondream text decoder: token embedding → splice the projected image tokens
+/// into the prefix rows → a stack of [`MoondreamBlock`]s (dense 0..3, MoE 4..23) →
+/// post-LN → lm_head → masked cross-entropy. Image tokens occupy rows
+/// `[1, 1+n_img)` (after the bos), a positional prefix (no placeholder token).
+pub struct MoondreamDecoder<'g> {
+    gpu: &'g Gpu,
+    blocks: Vec<MoondreamBlock<'g>>,
+    w: HashMap<String, DeviceBuffer>,
+    d: u32,
+    vocab: u32,
+    t: u32,
+    tokens: DeviceBuffer,
+    targets: DeviceBuffer,
+    res: DeviceBuffer,
+    normed: DeviceBuffer,
+    logits: DeviceBuffer,
+    ce: DeviceBuffer,
+    n_img: u32,
+}
+
+impl<'g> MoondreamDecoder<'g> {
+    /// Build from per-layer prefixed weights (`blocks.{l}.…`) plus `tok.weight`
+    /// `[vocab,d]`, `post_ln.weight`/`.bias`, `lm_head.weight` `[vocab,d]`/`.bias`.
+    /// `moe_layers` marks which layers use the MoE FFN (their MoE weights are under
+    /// `blocks.{l}.moe.…`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(gpu: &'g Gpu, weights: &HashMap<String, Vec<f32>>, blocks: Vec<MoondreamBlock<'g>>, t: u32, d: u32, vocab: u32, n_img: u32) -> MoondreamDecoder<'g> {
+        let w = weights
+            .iter()
+            .filter(|(k, _)| !k.starts_with("blocks."))
+            .map(|(k, v)| (k.clone(), gpu.storage_init(k, v)))
+            .collect();
+        MoondreamDecoder {
+            gpu,
+            blocks,
+            w,
+            d,
+            vocab,
+            t,
+            tokens: gpu.storage(t as u64),
+            targets: gpu.storage(t as u64),
+            res: gpu.storage((t * d) as u64),
+            normed: gpu.storage((t * d) as u64),
+            logits: gpu.storage((t * vocab) as u64),
+            ce: gpu.storage(t as u64),
+            n_img,
+        }
+    }
+    fn wb(&self, n: &str) -> &DeviceBuffer {
+        self.w.get(n).unwrap_or_else(|| panic!("decoder weight missing: {n}"))
+    }
+    /// Forward → mean masked cross-entropy. `tokens`/`targets` length `t`
+    /// (targets IGNORE at the image + non-supervised rows); `image_embeds` is the
+    /// `[n_img, d]` connector output spliced at rows `[1, 1+n_img)`.
+    pub fn forward(&self, tokens: &[u32], targets: &[u32], image_embeds: &[f32]) -> f32 {
+        let g = self.gpu;
+        let (t, d, v) = (self.t, self.d, self.vocab);
+        g.write(&self.tokens, tokens);
+        g.write(&self.targets, targets);
+        let img = g.storage_init("md.img", image_embeds);
+        // embed → res, then splice image tokens at rows [1, 1+n_img) (base = 1·d).
+        g.submit(
+            &[],
+            &[
+                g.step(13, &[&self.tokens, self.wb("tok.weight"), &self.res], &[d, t], t * d),
+                g.step(14, &[&img, &self.res], &[self.n_img * d, d], self.n_img * d),
+            ],
+        );
+        // Block stack (each returns its own output buffer).
+        let mut cur: &DeviceBuffer = &self.res;
+        for b in &self.blocks {
+            cur = b.forward(cur);
+        }
+        // post-LN → lm_head → CE.
+        g.submit(
+            &[],
+            &[
+                g.step(4, &[cur, self.wb("post_ln.weight"), self.wb("post_ln.bias"), &self.normed], &[d, t, f(LN_EPS)], t),
+                g.step(0, &[&self.normed, self.wb("lm_head.weight"), &self.logits], &[t, d, v], t * v),
+                g.step(6, &[&self.logits, self.wb("lm_head.bias")], &[t, v], t * v),
+                g.step(15, &[&self.logits, &self.targets, &self.ce], &[t, v, IGNORE], t),
+            ],
+        );
+        let ce = g.read(&self.ce, t as usize);
+        let count = targets.iter().filter(|&&x| x != IGNORE).count().max(1) as f32;
+        ce.iter().sum::<f32>() / count
+    }
 }
 
 const LN_EPS: f32 = 1e-5;
@@ -258,6 +353,52 @@ mod tests {
         let out = gpu.read(blk.forward(&x), blk.numel());
         assert_eq!(out.len(), (t * d) as usize);
         assert!(out.iter().all(|v| v.is_finite()) && out.iter().any(|&v| v.abs() > 1e-6));
+    }
+
+    fn block_weights(d: u32, ff: u32, rng: &mut Rng) -> HashMap<String, Vec<f32>> {
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
+        let mut w = HashMap::new();
+        w.insert("ln.weight".into(), vec![1.0; d as usize]);
+        w.insert("ln.bias".into(), r(d as usize));
+        w.insert("attn.qkv.weight".into(), r((3 * d * d) as usize));
+        w.insert("attn.proj.weight".into(), r((d * d) as usize));
+        w.insert("attn.proj.bias".into(), r(d as usize));
+        w.insert("mlp.fc1.weight".into(), r((ff * d) as usize));
+        w.insert("mlp.fc1.bias".into(), r(ff as usize));
+        w.insert("mlp.fc2.weight".into(), r((d * ff) as usize));
+        w.insert("mlp.fc2.bias".into(), r(d as usize));
+        w
+    }
+
+    #[test]
+    fn full_decoder_forward_is_finite() {
+        // t=8 stream: bos + 4 image + 3 text (prefix=5). 2 dense layers.
+        let gpu = Gpu::new_cpu(pipelines());
+        let (t, d, nh, hd, ff, vocab, n_img, prefix, rot) = (8u32, 16u32, 2u32, 8u32, 32u32, 23u32, 4u32, 5u32, 4u32);
+        let mut rng = Rng::new(9);
+        let bw0 = block_weights(d, ff, &mut rng);
+        let bw1 = block_weights(d, ff, &mut rng);
+        let blocks = vec![
+            MoondreamBlock::new(&gpu, &bw0, t, d, nh, hd, ff, prefix, rot, 1.5e6),
+            MoondreamBlock::new(&gpu, &bw1, t, d, nh, hd, ff, prefix, rot, 1.5e6),
+        ];
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
+        let mut dw = HashMap::new();
+        dw.insert("tok.weight".into(), r((vocab * d) as usize));
+        dw.insert("post_ln.weight".into(), vec![1.0; d as usize]);
+        dw.insert("post_ln.bias".into(), r(d as usize));
+        dw.insert("lm_head.weight".into(), r((vocab * d) as usize));
+        dw.insert("lm_head.bias".into(), r(vocab as usize));
+        let dec = MoondreamDecoder::new(&gpu, &dw, blocks, t, d, vocab, n_img);
+
+        let tokens = vec![0u32, 5, 5, 5, 5, 7, 9, 11]; // bos + image + text
+        let mut targets = vec![5u32, 0, 0, 0, 0, 9, 11, 13];
+        for tg in targets.iter_mut().take(5).skip(1) {
+            *tg = IGNORE;
+        }
+        let img: Vec<f32> = r((n_img * d) as usize);
+        let loss = dec.forward(&tokens, &targets, &img);
+        assert!(loss.is_finite() && loss > 0.0, "moondream decoder loss must be finite+positive, got {loss}");
     }
 
     #[test]
