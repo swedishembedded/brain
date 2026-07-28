@@ -23,6 +23,7 @@ default-members = [
     "crates/gpt",
     "crates/qwen",
     "crates/qwenvl",
+    "crates/fastvlm",
     "crates/glm",
     "crates/seq2seq",
     "crates/autoencoder",

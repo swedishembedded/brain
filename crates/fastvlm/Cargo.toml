@@ -1,0 +1,14 @@
+[package]
+name = "brain-fastvlm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FastVLM: FastViTHD conv/attention vision encoder + mlp2x_gelu projector over a spliced Qwen2 decoder."
+
+[lib]
+name = "fastvlm"
+path = "src/lib.rs"
+
+[dependencies]
+brain-qwen.workspace = true
+serde_json.workspace = true
