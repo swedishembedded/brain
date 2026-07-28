@@ -29,11 +29,18 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         ("embed", kernels::EMBED),                       // 13
         ("splice", kernels::SPLICE),                     // 14
         ("ce_value", kernels::CE_VALUE_MASKED),          // 15
+        ("gelu_erf", kernels::GELU_ERF),                 // 16 (tau tok_feat: erf GELU)
+        ("tau_scale", kernels::TAU_SCALE),               // 17
     ]
 }
 
 /// Masked cross-entropy ignore index (matches the loaders' `-1 i32` as `u32`).
 pub const IGNORE: u32 = 0xFFFF_FFFF;
+
+/// Logistic sigmoid (host, for the tau position term).
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
 
 /// The Moondream text decoder: token embedding → splice the projected image tokens
 /// into the prefix rows → a stack of [`MoondreamBlock`]s (dense 0..3, MoE 4..23) →
@@ -146,9 +153,16 @@ pub struct MoondreamBlock<'g> {
     prefix: u32,
     rot_dim: u32,
     theta: f32,
+    /// True when `attn.tau.*` weights are present (per-head attention temperature).
+    tau: bool,
     // scratch
     l_in: DeviceBuffer,
     qkv: DeviceBuffer,
+    qkv2: DeviceBuffer,   // tau-scaled qkv (q,v scaled; k passthrough)
+    tok_feat: DeviceBuffer, // gelu_erf(qkv) [t, 3d]
+    tqr: DeviceBuffer,    // tok_feat·wqᵀ [t, nh]
+    tvr: DeviceBuffer,    // tok_feat·wvᵀ [t, nh]
+    s3: DeviceBuffer,     // [3·nh, t] per-(head,token) scale (q | k=1 | v)
     scores: DeviceBuffer,
     probs: DeviceBuffer,
     ctx: DeviceBuffer,
@@ -165,8 +179,9 @@ pub struct MoondreamBlock<'g> {
 impl<'g> MoondreamBlock<'g> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(gpu: &'g Gpu, weights: &HashMap<String, Vec<f32>>, t: u32, d: u32, n_heads: u32, head_dim: u32, ff: u32, prefix: u32, rot_dim: u32, theta: f32) -> MoondreamBlock<'g> {
-        let w = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
+        let w: HashMap<String, DeviceBuffer> = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
         let slab = (n_heads * t * t) as u64;
+        let tau = w.contains_key("attn.tau.wq");
         MoondreamBlock {
             gpu,
             w,
@@ -178,8 +193,14 @@ impl<'g> MoondreamBlock<'g> {
             prefix,
             rot_dim,
             theta,
+            tau,
             l_in: gpu.storage((t * d) as u64),
             qkv: gpu.storage((t * 3 * d) as u64),
+            qkv2: gpu.storage((t * 3 * d) as u64),
+            tok_feat: gpu.storage((t * 3 * d) as u64),
+            tqr: gpu.storage((t * n_heads) as u64),
+            tvr: gpu.storage((t * n_heads) as u64),
+            s3: gpu.storage((3 * n_heads * t) as u64),
             scores: gpu.storage(slab),
             probs: gpu.storage(slab),
             ctx: gpu.storage((t * d) as u64),
@@ -211,15 +232,47 @@ impl<'g> MoondreamBlock<'g> {
         // --- attention branch ---
         // fused qkv = l_in · wqkv^T  ([t, 3d])
         s.push(g.step(0, &[&self.l_in, self.wb("attn.qkv.weight"), &self.qkv], &[t, d, stride3], t * stride3));
+        // Per-head attention temperature (tau): scale q and v (NOT k) by a per-
+        // (head,token) scalar computed from the raw qkv, BEFORE RoPE. tok_feat is
+        // erf-GELU over the full 3d projection; tok_q/tok_v = tanh(tok_feat·w{q,v}ᵀ);
+        // tau_pos = 0.5+sigmoid(alpha·ln(pos+1)) folds on host (positions = row).
+        // Scalar scaling commutes with the RoPE rotation, so applying it here (pre-
+        // RoPE, matching the reference) is equivalent up to that rotation. The tiny
+        // tanh+tau_pos assembly into the [3·nh, t] scale (q | k=1 | v) folds on host.
+        let qkv = if self.tau {
+            s.push(g.step(16, &[&self.qkv, &self.tok_feat], &[t * stride3], t * stride3));
+            s.push(g.step(0, &[&self.tok_feat, self.wb("attn.tau.wq"), &self.tqr], &[t, stride3, nh], t * nh));
+            s.push(g.step(0, &[&self.tok_feat, self.wb("attn.tau.wv"), &self.tvr], &[t, stride3, nh], t * nh));
+            g.submit(&[], &s);
+            s = Vec::new();
+            let tqr = g.read(&self.tqr, (t * nh) as usize);
+            let tvr = g.read(&self.tvr, (t * nh) as usize);
+            let alpha = g.read(self.wb("attn.tau.alpha"), nh as usize);
+            let mut s3 = vec![1.0f32; (3 * nh * t) as usize];
+            for h in 0..nh as usize {
+                for row in 0..t as usize {
+                    let tau_pos = 0.5 + sigmoid(alpha[h] * ((row + 1) as f32).ln());
+                    s3[h * t as usize + row] = tqr[row * nh as usize + h].tanh() + tau_pos;
+                    s3[(2 * nh as usize + h) * t as usize + row] = tvr[row * nh as usize + h].tanh() + tau_pos;
+                }
+            }
+            let packed: Vec<u32> = s3.iter().map(|&x| f(x)).collect();
+            g.write(&self.s3, &packed);
+            // Treat qkv as [t, 3·nh, hd]: scale q-heads by s_q, k-heads by 1, v by s_v.
+            s.push(g.step(17, &[&self.qkv, &self.s3, &self.qkv2], &[t, 3 * nh, hd], t * stride3));
+            &self.qkv2
+        } else {
+            &self.qkv
+        };
         // partial RoPE on q (off 0) and k (off d)
         let half = self.rot_dim / 2;
-        s.push(g.step(8, &[&self.qkv], &[t, nh, hd, stride3, 0, t, f(self.theta), self.rot_dim], t * nh * half));
-        s.push(g.step(8, &[&self.qkv], &[t, nh, hd, stride3, d, t, f(self.theta), self.rot_dim], t * nh * half));
+        s.push(g.step(8, &[qkv], &[t, nh, hd, stride3, 0, t, f(self.theta), self.rot_dim], t * nh * half));
+        s.push(g.step(8, &[qkv], &[t, nh, hd, stride3, d, t, f(self.theta), self.rot_dim], t * nh * half));
         // bidir scores → prefix-LM mask → bidir softmax → bidir apply
-        s.push(g.step(9, &[&self.qkv, &self.scores], &[1, nh, t, hd, stride3, 0, d], nh * t * t));
+        s.push(g.step(9, &[qkv, &self.scores], &[1, nh, t, hd, stride3, 0, d], nh * t * t));
         s.push(g.step(10, &[&self.scores], &[1, nh, t, self.prefix], nh * t * t));
         s.push(g.step(11, &[&self.scores, &self.probs], &[1, nh, t], nh * t));
-        s.push(g.step(12, &[&self.probs, &self.qkv, &self.ctx], &[1, nh, t, hd, stride3, 2 * d, d], nh * t * hd));
+        s.push(g.step(12, &[&self.probs, qkv, &self.ctx], &[1, nh, t, hd, stride3, 2 * d, d], nh * t * hd));
         // proj + bias → l_attn. Submit phase 1 (LN + attention) so l_in/l_attn are
         // ready before the FFN (MoE submits internally).
         s.push(g.step(0, &[&self.ctx, self.wb("attn.proj.weight"), &self.l_attn], &[t, d, d], t * d));
@@ -353,6 +406,36 @@ mod tests {
         let out = gpu.read(blk.forward(&x), blk.numel());
         assert_eq!(out.len(), (t * d) as usize);
         assert!(out.iter().all(|v| v.is_finite()) && out.iter().any(|&v| v.abs() > 1e-6));
+    }
+
+    #[test]
+    fn tau_temperature_changes_block_output() {
+        // A block with attn.tau.* present applies per-head temperature to q,v and
+        // must differ from the same weights without tau.
+        let gpu = Gpu::new_cpu(pipelines());
+        let (t, d, nh, hd, ff, prefix, rot) = (6u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32);
+        let mut rng = Rng::new(11);
+        let base = block_weights(d, ff, &mut rng);
+        let x: Vec<f32> = (0..(t * d) as usize).map(|_| rng.next_f32() - 0.5).collect();
+
+        let blk = MoondreamBlock::new(&gpu, &base, t, d, nh, hd, ff, prefix, rot, 1.5e6);
+        let xb = gpu.storage_init("x", &x);
+        assert!(!blk.tau);
+        let plain = gpu.read(blk.forward(&xb), blk.numel());
+
+        let mut tw = base.clone();
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
+        tw.insert("attn.tau.wq".into(), r((nh * 3 * d) as usize));
+        tw.insert("attn.tau.wv".into(), r((nh * 3 * d) as usize));
+        tw.insert("attn.tau.alpha".into(), r(nh as usize));
+        let tblk = MoondreamBlock::new(&gpu, &tw, t, d, nh, hd, ff, prefix, rot, 1.5e6);
+        let xb2 = gpu.storage_init("x2", &x);
+        assert!(tblk.tau);
+        let tau = gpu.read(tblk.forward(&xb2), tblk.numel());
+
+        assert!(tau.iter().all(|v| v.is_finite()));
+        let diff: f32 = plain.iter().zip(&tau).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff > 1e-4, "tau must change the block output, Σ|Δ|={diff}");
     }
 
     fn block_weights(d: u32, ff: u32, rng: &mut Rng) -> HashMap<String, Vec<f32>> {
