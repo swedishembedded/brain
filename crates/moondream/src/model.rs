@@ -82,6 +82,30 @@ impl MoondreamModel {
         let dec = MoondreamDecoder::new(&self.dgpu, &self.dweights, blocks, self.seq_len, self.cfg.dim, self.cfg.vocab, ppc);
         dec.forward(tokens, targets, &img_embeds)
     }
+
+    /// Faithful overlap multi-crop forward: encode the global crop and `h·w` local
+    /// crops, reconstruct + adaptive-pool the locals and channel-concat with the
+    /// global into the `[729, 2·dim]` connector input, project, splice, decode →
+    /// loss. Requires `conn_in == 2·vision.dim`. `global_packed` is one crop's
+    /// `[ppc, patch_vec]`; `locals_packed` is `[h·w·ppc, patch_vec]` (tile order).
+    pub fn forward_multicrop(&self, tokens: &[u32], targets: &[u32], global_packed: &[f32], locals_packed: &[f32], h_tiles: u32, w_tiles: u32) -> f32 {
+        let (dim, grid, margin) = (self.cfg.vision.dim, self.cfg.vision.grid(), self.cfg.vision.overlap_margin);
+        assert_eq!(self.conn_in, 2 * dim, "multi-crop connector input must be 2·vision.dim");
+        let ppc = self.cfg.vision.patches_per_crop();
+        let n_local = h_tiles * w_tiles;
+
+        let enc = SiglipEncoder::new(&self.vgpu, self.cfg.vision.clone(), &self.vweights);
+        let global = enc.encode(1, global_packed);
+        let locals = enc.encode(n_local, locals_packed);
+        let concat = crate::preprocess::build_connector_input(&self.vgpu, &global, &locals, h_tiles, w_tiles, grid, dim, margin);
+
+        let conn = Connector::new(&self.vgpu, &self.conn_weights, self.conn_in, self.cfg.proj_inner, self.cfg.proj_out);
+        let img_embeds = conn.forward(ppc, &concat);
+
+        let blocks = self.build_blocks(&self.dgpu, self.seq_len);
+        let dec = MoondreamDecoder::new(&self.dgpu, &self.dweights, blocks, self.seq_len, self.cfg.dim, self.cfg.vocab, ppc);
+        dec.forward(tokens, targets, &img_embeds)
+    }
 }
 
 /// Extract the entries of `w` whose key starts with `prefix`, with the prefix
@@ -190,5 +214,92 @@ mod tests {
         let packed: Vec<f32> = r((ppc * vision.patch_vec()) as usize);
         let loss = model.forward(&tokens, &targets, &packed);
         assert!(loss.is_finite() && loss > 0.0, "moondream end-to-end loss must be finite+positive, got {loss}");
+    }
+
+    #[test]
+    fn multicrop_forward_with_tau_is_finite() {
+        // Faithful path: global + 2×2 local crops → [ppc,2·dim] concat → connector.
+        // conn_in = 2·vision.dim; tau enabled on the decoder blocks.
+        let vision = VisionConfig { dim: 16, patch: 2, n_layers: 2, ff_dim: 32, n_heads: 2, crop_size: 8, max_crops: 4, overlap_margin: 1 };
+        let cfg = MoondreamConfig {
+            dim: 24, ff_dim: 48, n_layers: 2, vocab: 23, n_heads: 3, head_dim: 8, prefix_attn: 17,
+            rot_dim: 4, rope_theta: 1.5e6, proj_inner: 48, proj_out: 24, vision: vision.clone(),
+            moe: MoeConfig { num_experts: 3, start_layer: 1, top_k: 2, inner_dim: 8 },
+        };
+        let ppc = vision.patches_per_crop();
+        let pv = vision.patch_vec() as usize;
+        let mut rng = Rng::new(4);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
+
+        let mut vw = HashMap::new();
+        vw.insert("patch_emb.weight".into(), r(vision.dim as usize * pv));
+        vw.insert("patch_emb.bias".into(), r(vision.dim as usize));
+        vw.insert("pos_emb".into(), r(ppc as usize * vision.dim as usize));
+        vw.insert("post_ln.weight".into(), vec![1.0; vision.dim as usize]);
+        vw.insert("post_ln.bias".into(), r(vision.dim as usize));
+        let c = vision.dim as usize;
+        for b in 0..vision.n_layers {
+            for (leaf, sz) in [
+                ("ln1.weight", c), ("ln1.bias", c), ("attn.qkv.weight", 3 * c * c), ("attn.qkv.bias", 3 * c),
+                ("attn.proj.weight", c * c), ("attn.proj.bias", c), ("ln2.weight", c), ("ln2.bias", c),
+                ("mlp.fc1.weight", vision.ff_dim as usize * c), ("mlp.fc1.bias", vision.ff_dim as usize),
+                ("mlp.fc2.weight", c * vision.ff_dim as usize), ("mlp.fc2.bias", c),
+            ] {
+                let v = if leaf.ends_with("ln1.weight") || leaf.ends_with("ln2.weight") { vec![1.0; sz] } else { r(sz) };
+                vw.insert(format!("blocks.{b}.{leaf}"), v);
+            }
+        }
+        // Connector in = 2·dim.
+        let conn_in = 2 * vision.dim;
+        let mut cw = HashMap::new();
+        cw.insert("fc1.weight".into(), r((cfg.proj_inner * conn_in) as usize));
+        cw.insert("fc1.bias".into(), r(cfg.proj_inner as usize));
+        cw.insert("fc2.weight".into(), r((cfg.proj_out * cfg.proj_inner) as usize));
+        cw.insert("fc2.bias".into(), r(cfg.proj_out as usize));
+        // Decoder weights incl. tau.
+        let (d, ff, vocab) = (cfg.dim, cfg.ff_dim, cfg.vocab);
+        let mut dw = HashMap::new();
+        dw.insert("tok.weight".into(), r((vocab * d) as usize));
+        dw.insert("post_ln.weight".into(), vec![1.0; d as usize]);
+        dw.insert("post_ln.bias".into(), r(d as usize));
+        dw.insert("lm_head.weight".into(), r((vocab * d) as usize));
+        dw.insert("lm_head.bias".into(), r(vocab as usize));
+        for l in 0..cfg.n_layers {
+            for (leaf, sz) in [
+                ("ln.weight", d as usize), ("ln.bias", d as usize), ("attn.qkv.weight", (3 * d * d) as usize),
+                ("attn.proj.weight", (d * d) as usize), ("attn.proj.bias", d as usize),
+                ("attn.tau.wq", (cfg.n_heads * 3 * d) as usize), ("attn.tau.wv", (cfg.n_heads * 3 * d) as usize), ("attn.tau.alpha", cfg.n_heads as usize),
+                ("mlp.fc1.weight", (ff * d) as usize), ("mlp.fc1.bias", ff as usize),
+                ("mlp.fc2.weight", (d * ff) as usize), ("mlp.fc2.bias", d as usize),
+            ] {
+                let v = if leaf.ends_with("ln.weight") { vec![1.0; sz] } else { r(sz) };
+                dw.insert(format!("blocks.{l}.{leaf}"), v);
+            }
+            if cfg.is_moe_layer(l) {
+                let (inner, e) = (cfg.moe.inner_dim, cfg.moe.num_experts);
+                dw.insert(format!("blocks.{l}.moe.router.weight"), r((e * d) as usize));
+                for ei in 0..e {
+                    dw.insert(format!("blocks.{l}.moe.experts.{ei}.w_h.weight"), r((inner * d) as usize));
+                    dw.insert(format!("blocks.{l}.moe.experts.{ei}.w_g.weight"), r((inner * d) as usize));
+                    dw.insert(format!("blocks.{l}.moe.experts.{ei}.w_down.weight"), r((d * inner) as usize));
+                }
+            }
+        }
+
+        let seq = 1 + ppc + 3;
+        let model = MoondreamModel::new(cfg, vw, cw, dw, conn_in, seq);
+        let mut tokens = vec![0u32];
+        tokens.extend(std::iter::repeat(5u32).take(ppc as usize));
+        tokens.extend([7u32, 9, 11]);
+        let mut targets = tokens[1..].to_vec();
+        targets.push(13);
+        for tg in targets.iter_mut().take(1 + ppc as usize) {
+            *tg = IGNORE;
+        }
+        let (ht, wt) = (2u32, 2u32);
+        let global: Vec<f32> = r((ppc * vision.patch_vec()) as usize);
+        let locals: Vec<f32> = r((ht * wt * ppc * vision.patch_vec()) as usize);
+        let loss = model.forward_multicrop(&tokens, &targets, &global, &locals, ht, wt);
+        assert!(loss.is_finite() && loss > 0.0, "multi-crop loss must be finite+positive, got {loss}");
     }
 }
