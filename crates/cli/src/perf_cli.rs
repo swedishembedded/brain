@@ -71,6 +71,13 @@ pub fn run_perf(args: &[String]) {
         Some("list") => print!("{}", perf::list()),
         Some("run") => run(&args[1..]),
         Some("compare") => compare(&args[1..]),
+        Some("placement") => match crate::perf_engine::run_placement(&args[1..]) {
+            Ok(art) => emit(&art, None, 0),
+            Err(e) => {
+                eprintln!("perf placement: {e}");
+                std::process::exit(2);
+            }
+        },
         Some("help") | Some("-h") | Some("--help") | None => print!("{HELP}"),
         Some(other) => {
             eprintln!("perf: unknown subcommand {other:?}\n");
@@ -126,6 +133,8 @@ fn run(args: &[String]) {
             "--best-of" => opt.best_of = val(args, &mut i, "--best-of").parse().unwrap_or(opt.best_of),
             "--seed" => opt.seed = val(args, &mut i, "--seed").parse().unwrap_or(opt.seed),
             "--out" => out = Some(val(args, &mut i, "--out")),
+            "--soak-seconds" => opt.soak_seconds = val(args, &mut i, "--soak-seconds").parse().unwrap_or(opt.soak_seconds),
+            "--device-rate" => opt.device_rate = val(args, &mut i, "--device-rate").parse().ok(),
             "--smoke" => opt = opt.smoke(),
             other => {
                 eprintln!("perf run: unknown flag {other:?}");
@@ -136,6 +145,42 @@ fn run(args: &[String]) {
     }
     if opt.concurrency.is_empty() {
         opt.concurrency = vec![1];
+    }
+
+    // Scenarios that need the engine itself (or no target at all) are dispatched
+    // before a generic target is built.
+    let engine_scenario = matches!(
+        scenario.as_str(),
+        "startup" | "cancel" | "kvcache" | "residency" | "faults"
+    );
+    if engine_scenario {
+        let art = match scenario.as_str() {
+            "residency" => crate::perf_engine::run_residency(&opt, 24, 4.0),
+            other => {
+                let shape = target_spec
+                    .strip_prefix("qwen-synth:")
+                    .ok_or_else(|| format!("`{other}` needs --target qwen-synth:<L>x<D>x<H>[xV]"))
+                    .and_then(|sh| SynthSpec::parse(sh, &workload));
+                match shape {
+                    Ok(sp) => match other {
+                        "startup" => crate::perf_engine::run_startup(&sp, opt.best_of.max(2), &opt),
+                        "cancel" => crate::perf_engine::run_cancel(&sp, &opt),
+                        "kvcache" => crate::perf_engine::run_kvcache(&sp, &opt),
+                        _ => crate::perf_engine::run_faults(&sp, &opt),
+                    },
+                    Err(e) => Err(e),
+                }
+            }
+        };
+        let art = match art {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("perf: {e}");
+                std::process::exit(2);
+            }
+        };
+        emit(&art, out, opt.seed);
+        return;
     }
 
     let mut target = match build_target(&target_spec, &workload) {
@@ -153,9 +198,17 @@ fn run(args: &[String]) {
             std::process::exit(2);
         }
     };
-    print!("{}", scenarios::render(&art));
+    emit(&art, out, opt.seed);
+}
 
-    let path = out.unwrap_or_else(|| art.default_path(opt.seed));
+/// Render an artifact and write it, printing any scenario notes so a limitation
+/// is visible in the terminal and not only in the JSON.
+fn emit(art: &perf::schema::Artifact, out: Option<String>, seed: u64) {
+    print!("{}", scenarios::render(art));
+    if let Some(n) = &art.notes {
+        println!("\nnote: {n}");
+    }
+    let path = out.unwrap_or_else(|| art.default_path(seed));
     match art.write(&path) {
         Ok(()) => eprintln!("\nwrote {path}"),
         Err(e) => eprintln!("\nfailed to write {path}: {e}"),
@@ -169,6 +222,109 @@ fn device_label() -> String {
     match crate::compute_set() {
         Some(s) => s.to_string(),
         None => gpu_core::backend_name().to_string(),
+    }
+}
+
+
+/// A synthetic model shape, reusable by the engine-coupled scenarios which need
+/// to build (and rebuild) the engine themselves rather than receive one.
+#[derive(Clone, Debug)]
+pub struct SynthSpec {
+    pub n_layers: u32,
+    pub d_model: u32,
+    pub n_heads: u32,
+    pub vocab: u32,
+    pub block_size: u32,
+    pub max_batch: u32,
+    pub num_blocks: u32,
+    pub per_seq: u32,
+    pub max_prefill: u32,
+}
+
+impl SynthSpec {
+    /// Parse `<L>x<D>x<H>[xV]` and size a KV pool for `workload`.
+    pub fn parse(shape: &str, workload: &str) -> Result<SynthSpec, String> {
+        let parts: Vec<u32> = shape.split('x').map(|p| p.trim().parse().unwrap_or(0)).collect();
+        if parts.len() < 3 || parts[..3].iter().any(|&v| v == 0) {
+            return Err(format!("bad shape {shape:?}, expected <layers>x<d_model>x<heads>[x<vocab>]"));
+        }
+        let (n_layers, d_model, n_heads) = (parts[0], parts[1], parts[2]);
+        if d_model % n_heads != 0 {
+            return Err(format!("d_model {d_model} must be divisible by n_heads {n_heads}"));
+        }
+        let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload)?;
+        Ok(SynthSpec {
+            n_layers,
+            d_model,
+            n_heads,
+            vocab: parts.get(3).copied().unwrap_or(32_000),
+            block_size,
+            max_batch,
+            num_blocks,
+            per_seq,
+            max_prefill,
+        })
+    }
+
+    pub fn shape(&self) -> String {
+        format!("L{}xD{}xH{}", self.n_layers, self.d_model, self.n_heads)
+    }
+    pub fn model_name(&self) -> String {
+        "qwen-synth".to_string()
+    }
+    pub fn prefill_tokens(&self) -> usize {
+        self.max_prefill.max(8) as usize
+    }
+
+    pub fn config(&self) -> qwen::QwenConfig {
+        let head_dim = self.d_model / self.n_heads;
+        let n_kv_heads = if self.n_heads % 4 == 0 { self.n_heads / 4 } else { self.n_heads };
+        qwen::QwenConfig {
+            vocab: self.vocab,
+            block_size: 4096,
+            n_layers: self.n_layers,
+            d_model: self.d_model,
+            n_heads: self.n_heads,
+            n_kv_heads,
+            head_dim,
+            d_ff: self.d_model * 4,
+            rope_theta: 1_000_000.0,
+            rms_eps: 1e-6,
+            tie_embeddings: true,
+            lora: None,
+        }
+    }
+
+    pub fn build_weights(&self) -> (qwen::QwenConfig, std::collections::HashMap<String, Vec<f32>>) {
+        let cfg = self.config();
+        let w = qwen::init_weights(&cfg, 1234);
+        (cfg, w)
+    }
+
+    pub fn build_engine(
+        &self,
+        cfg: qwen::QwenConfig,
+        w: &std::collections::HashMap<String, Vec<f32>>,
+    ) -> qwen::serve::Engine {
+        self.build_engine_with_blocks(cfg, w, self.num_blocks)
+    }
+
+    pub fn build_engine_with_blocks(
+        &self,
+        cfg: qwen::QwenConfig,
+        w: &std::collections::HashMap<String, Vec<f32>>,
+        num_blocks: u32,
+    ) -> qwen::serve::Engine {
+        qwen::serve::Engine::from_map(
+            cfg,
+            w,
+            self.block_size,
+            num_blocks,
+            self.max_batch,
+            self.per_seq,
+            self.max_prefill,
+            false,
+        )
     }
 }
 

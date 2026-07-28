@@ -4,15 +4,29 @@
 //! The scenarios. Each owns its workload shape and what it reports; the runner
 //! owns driving them — the same split `crates/bench` uses for learnability.
 //!
-//! Tier 1 (here): `latency`, `throughput`, `serve`, `sweep`.
-//! Tier 2 (`residency`, `kvcache`, `placement`, `mixed`, `overload`, `cancel`,
-//! `soak`, `frontend`, `faults`, `energy`) is designed in
-//! `docs/performance/benchmarking.md` and not yet implemented.
+//! Tier 1 (this file): `latency`, `throughput`, `serve`, `sweep`, `startup` —
+//! the core shapes every model and device is characterised with.
+//! Tier 2 (one module each): `mixed`, `overload`, `cancel`, `kvcache`,
+//! `residency`, `placement`, `frontend`, `faults`, `soak` — the scenarios where
+//! brain has something to measure that a single-model, single-GPU, HTTP-shaped
+//! harness structurally cannot. See `docs/performance/benchmarking.md`.
 //!
 //! The three core scenarios differ **only** in their arrival process, and that
 //! is the entire point: requests that all exist at t=0 exercise a different
 //! engine than requests arriving over time, so each is measured separately and
 //! never averaged together.
+
+pub mod cancel;
+pub mod run_tier2;
+pub mod faults;
+pub mod frontend;
+pub mod kvcache;
+pub mod mixed;
+pub mod overload;
+pub mod placement;
+pub mod residency;
+pub mod soak;
+pub mod startup;
 
 use crate::driver;
 use crate::env::Env;
@@ -36,6 +50,10 @@ pub struct Options {
     pub num_requests: usize,
     pub warmup_requests: usize,
     /// Override the workload's input length (prompt artifacts).
+    /// How long `soak` should run.
+    pub soak_seconds: f64,
+    /// A measured device artifact rate for `frontend` to size host cost against.
+    pub device_rate: Option<f64>,
     pub input_override: Option<usize>,
     /// Override the workload's output length.
     ///
@@ -58,6 +76,8 @@ impl Default for Options {
             concurrency: vec![1, 2, 4, 8, 16, 32],
             num_requests: 64,
             warmup_requests: 4,
+            soak_seconds: 60.0,
+            device_rate: None,
             input_override: None,
             output_override: None,
         }
@@ -76,24 +96,41 @@ impl Options {
         // Cap the output length too: request count alone does not bound run
         // time, output length does.
         self.output_override = Some(self.output_override.unwrap_or(8).min(8));
+        self.soak_seconds = self.soak_seconds.min(2.0);
         self
     }
 }
 
 /// The registered scenario names, in the order `brain perf list` prints them.
 pub const SCENARIOS: &[(&str, &str)] = &[
+    // Tier 1 — core shapes, every model and device.
     ("latency", "fixed batch, in-process, no transport — kernel/engine regression signal"),
     ("throughput", "offline saturated: every request available at t=0 — the efficiency ceiling"),
     ("serve", "arrival-process load at a fixed concurrency — realistic behaviour"),
     ("sweep", "a concurrency ladder — the throughput-vs-latency curve and max goodput under SLO"),
+    ("startup", "cold and warm time-to-first-artifact — deployment and autoscaling cost"),
+    // Tier 2 — what a single-model, single-GPU harness structurally cannot ask.
+    ("mixed", "traffic classes together — per-class SLO goodput, slowdown, fairness"),
+    ("overload", "offered load past capacity — admission, collapse, recovery"),
+    ("cancel", "cancellation waste, block reclaim, and neighbour interference"),
+    ("kvcache", "session lifecycle under KV pressure — hit rate, eviction regret"),
+    ("residency", "many models over one budget — warm/cold TTFA, eviction regret, fairness"),
+    ("placement", "heterogeneous CPU/GPU placement — placement_efficiency vs an oracle"),
+    ("frontend", "host-side saturation — cores required per saturated device"),
+    ("faults", "fault injection — detection, recovery, silent corruption"),
+    ("soak", "long-duration drift — throughput, latency, memory, leaks"),
 ];
+
+/// Scenarios implemented as a full run through the driver; the rest report via
+/// their own module and are dispatched separately.
+pub const TIER1: &[&str] = &["latency", "throughput", "serve", "sweep"];
 
 pub fn is_scenario(name: &str) -> bool {
     SCENARIOS.iter().any(|(n, _)| *n == name)
 }
 
 /// Build the workload a scenario uses for a given standard workload name.
-fn workload_for(scenario: &str, name: &str, opt: &Options, concurrency: usize) -> Option<Workload> {
+pub(crate) fn workload_for(scenario: &str, name: &str, opt: &Options, concurrency: usize) -> Option<Workload> {
     let arrival = match scenario {
         // `latency` is a fixed batch: exactly `concurrency` in flight, nothing queued
         // behind it, so the number is the engine's own latency and not queue time.
@@ -146,6 +183,28 @@ pub fn run(
 
     if scenario == "sweep" {
         return run_sweep(target, workload_name, opt, art);
+    }
+    // Tier 2 scenarios shape their own load; they do not go through the
+    // fixed-workload path below.
+    match scenario {
+        "mixed" => return run_tier2::run_mixed(target, concurrency, opt),
+        "overload" => return run_tier2::run_overload(target, workload_name, opt),
+        "soak" => return run_tier2::run_soak(target, workload_name, opt.soak_seconds, opt),
+        "frontend" => return run_tier2::run_frontend(opt.device_rate, opt.num_requests * 8, opt),
+        "startup" | "cancel" | "kvcache" | "residency" | "placement" | "faults" => {
+            return Err(format!(
+                "`{scenario}` is not driven through a plain target: {}",
+                match scenario {
+                    "startup" => "it must build the engine itself, so run it from the CLI (`brain perf run startup --target ...`)",
+                    "cancel" => "it needs to cancel mid-flight requests, which the CLI wires to the scheduler",
+                    "kvcache" => "it needs the paged engine's block counters, wired in the CLI",
+                    "residency" => "it exercises the residency manager, not an inference target",
+                    "placement" => "device selection is process-global, so it analyses per-device artifacts: `brain perf placement <a.json> <b.json> ...`",
+                    _ => "it injects failures, which the CLI wires to the engine",
+                }
+            ));
+        }
+        _ => {}
     }
 
     let w = workload_for(scenario, workload_name, opt, concurrency)
@@ -232,10 +291,101 @@ fn run_sweep(
 
 /// Render a finished artifact for the terminal.
 pub fn render(art: &Artifact) -> String {
-    if art.scenario == "sweep" {
-        return render_sweep(art);
+    match art.scenario.as_str() {
+        "sweep" => render_sweep(art),
+        // Scenarios whose payload is not a latency summary render their own
+        // shape; falling through to the generic renderer would print an empty
+        // table and hide the numbers they actually produced.
+        "startup" => render_block(art, &["cold", "warm"]),
+        "mixed" => render_mixed(art),
+        "overload" | "cancel" | "kvcache" | "residency" | "placement" | "faults" | "frontend"
+        | "soak" => render_json_summary(art),
+        _ => report::render(art),
     }
-    report::render(art)
+}
+
+fn header(art: &Artifact) -> String {
+    let mut s = format!("\n{} — {} on {}\n", art.scenario, art.target.model, art.env.label());
+    if art.env.is_software_gpu() {
+        s.push_str("  ! software rasteriser: this is NOT a hardware GPU result\n");
+    }
+    if !art.valid {
+        s.push_str(&format!("  ! INVALID: {}\n", art.invalid_reason.clone().unwrap_or_default()));
+    }
+    s
+}
+
+/// Print named sub-objects of `performance` as `key p50` lines.
+fn render_block(art: &Artifact, keys: &[&str]) -> String {
+    let mut s = header(art);
+    for k in keys {
+        let b = &art.performance[k];
+        if b.is_null() {
+            s.push_str(&format!("  {k:<8} —\n"));
+            continue;
+        }
+        let f = |name: &str| {
+            b[name]["p50"].as_f64().map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into())
+        };
+        s.push_str(&format!(
+            "  {k:<8} runs {:<3} device {:>9} weights {:>9} prefill {:>9} total {:>9} ms\n",
+            b["runs"].as_u64().unwrap_or(0),
+            f("device_init_ms"),
+            f("weights_load_ms"),
+            f("first_prefill_ms"),
+            f("total_ms"),
+        ));
+    }
+    s
+}
+
+fn render_mixed(art: &Artifact) -> String {
+    let mut s = header(art);
+    s.push_str(&format!(
+        "\n{:<14} {:>12} {:>12} {:>11} {:>11} {:>10}\n",
+        "class", "out/s", "goodput/s", "ttfa p99", "ial p99", "slowdown"
+    ));
+    s.push_str(&format!("{:-<74}\n", ""));
+    for c in art.per_class.iter().flatten() {
+        let p = &c["performance"];
+        let g = |k: &str| p[k].as_f64().map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into());
+        let pc = |k: &str, q: &str| {
+            p[k][q].as_f64().map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into())
+        };
+        s.push_str(&format!(
+            "{:<14} {:>12} {:>12} {:>11} {:>11} {:>10}\n",
+            c["class"].as_str().unwrap_or("?"),
+            g("output_artifacts_per_s"),
+            g("goodput_per_s"),
+            pc("ttfa_ms", "p99"),
+            pc("ial_ms", "p99"),
+            p["normalised_slowdown"].as_f64().map(|v| format!("{v:.2}x")).unwrap_or_else(|| "—".into()),
+        ));
+    }
+    if let Some(j) = art.scheduling["jain_fairness"].as_f64() {
+        s.push_str(&format!("\nfairness (Jain over per-class goodput): {j:.3}\n"));
+    }
+    s
+}
+
+/// Flat key/value view for scenarios whose payload is a set of scalars.
+fn render_json_summary(art: &Artifact) -> String {
+    let mut s = header(art);
+    if let Some(obj) = art.performance.as_object() {
+        for (k, v) in obj {
+            match v {
+                serde_json::Value::Array(a) => {
+                    s.push_str(&format!("  {k:<34} [{} entries]\n", a.len()))
+                }
+                serde_json::Value::Object(_) => {
+                    s.push_str(&format!("  {k:<34} {{...}}\n"));
+                }
+                serde_json::Value::Null => s.push_str(&format!("  {k:<34} —\n")),
+                other => s.push_str(&format!("  {k:<34} {other}\n")),
+            }
+        }
+    }
+    s
 }
 
 fn render_sweep(art: &Artifact) -> String {
@@ -288,7 +438,7 @@ mod tests {
 
     #[test]
     fn every_registered_scenario_runs_end_to_end() {
-        for (name, _) in SCENARIOS {
+        for name in TIER1 {
             let mut t = FakeTarget::new(8, 1);
             let art = run(name, &mut t, "interactive", 4, &opt())
                 .unwrap_or_else(|e| panic!("scenario {name} failed: {e}"));

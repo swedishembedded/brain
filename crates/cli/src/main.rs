@@ -21,6 +21,7 @@ mod gpt_cli;
 mod image_io;
 mod npu_cli;
 mod perf_cli;
+mod perf_engine;
 mod pid_cli;
 mod qwen_cli;
 mod resident;

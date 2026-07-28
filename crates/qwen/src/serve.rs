@@ -490,6 +490,19 @@ impl Engine {
     /// final-norm hidden `[d_model]`.
     pub(crate) fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
         assert!(table.is_empty(), "prefill expects a fresh sequence");
+        // A prompt longer than the per-sequence capacity would write past its
+        // row of the block table (`bt` is sized cc * max_blocks_per_seq), which
+        // silently corrupts the next row's mapping. Callers must check
+        // `max_seq_len()`; the scheduler rejects such requests at admission.
+        assert!(
+            prompt.len() <= self.max_seq_len(),
+            "prompt of {} tokens exceeds the engine's per-sequence capacity of {} \
+             (max_blocks_per_seq {} x block_size {})",
+            prompt.len(),
+            self.max_seq_len(),
+            self.max_blocks_per_seq,
+            self.block_size,
+        );
         let d = self.cfg.d_model as usize;
         let bs = self.block_size;
         let mbt = self.max_blocks_per_seq as usize;
@@ -526,10 +539,29 @@ impl Engine {
         (0..v).map(|o| self.head[o * d..o * d + d].iter().zip(hidden).map(|(a, b)| a * b).sum()).collect()
     }
 
+    /// Blocks free in the pool — the capacity figure `brain perf kvcache` sizes
+    /// its overcommitted session mix against.
+    pub fn free_blocks_for_perf(&self) -> u32 {
+        self.alloc.free_blocks()
+    }
+
+    /// Prefill a prompt and return the final hidden state. Public so the
+    /// `startup` benchmark can time a first real forward without going through
+    /// the scheduler.
+    pub fn prefill_for_perf(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
+        self.prefill(table, prompt)
+    }
+
     /// Physical KV blocks currently free in the pool.
     pub fn free_blocks(&self) -> u32 {
         self.alloc.free_blocks()
     }
+    /// The longest sequence (prompt + generated) this engine can hold for one
+    /// request: `max_blocks_per_seq * block_size`.
+    pub fn max_seq_len(&self) -> usize {
+        (self.max_blocks_per_seq * self.block_size) as usize
+    }
+
     /// Blocks a sequence of `tokens` length occupies (for admission checks).
     pub fn blocks_for(&self, tokens: u32) -> u32 {
         tokens.div_ceil(self.block_size)
@@ -702,6 +734,9 @@ pub struct StepReport {
     pub produced: Vec<(u64, usize)>,
     /// Requests that finished this iteration.
     pub finished: Vec<u64>,
+    /// Requests refused at admission because they can never fit this engine's
+    /// per-sequence capacity. Refusing beats both crashing and queueing forever.
+    pub rejected: Vec<(u64, String)>,
     /// The same `(id, tokens)` pairs [`Scheduler::step`] returns.
     pub completed: Vec<(u64, Vec<u32>)>,
 }
@@ -742,6 +777,35 @@ impl Scheduler {
         self.next_id += 1;
         self.waiting.push_back((id, req));
         id
+    }
+
+    /// Cancel a request: drop it whether queued or mid-decode and return its KV
+    /// blocks to the pool immediately. Returns the tokens produced so far, or
+    /// `None` if the id is unknown (already finished, or never submitted).
+    ///
+    /// Without this, an abandoned request keeps decoding to `max_new` — spending
+    /// device time on output nobody will read, and holding KV blocks that
+    /// requests still being waited on need. Reclaiming on cancel is what stops a
+    /// server under normal churn from losing its cache to dead sequences.
+    pub fn cancel(&mut self, id: u64) -> Option<Vec<u32>> {
+        if let Some(pos) = self.waiting.iter().position(|(qid, _)| *qid == id) {
+            self.waiting.remove(pos);
+            return Some(Vec::new()); // never admitted, so nothing was produced
+        }
+        let pos = self.running.iter().position(|r| r.id == id)?;
+        let mut r = self.running.remove(pos);
+        self.eng.release_table(&mut r.table);
+        Some(r.generated)
+    }
+
+    /// Requests currently admitted and decoding.
+    pub fn running_len(&self) -> usize {
+        self.running.len()
+    }
+
+    /// Requests admitted but not yet started.
+    pub fn waiting_len(&self) -> usize {
+        self.waiting.len()
     }
 
     /// True while any request is waiting or running.
@@ -808,6 +872,22 @@ impl Scheduler {
 
         // 1. Admit while there's batch room and enough free blocks for the prompt.
         while self.running.len() < self.max_running {
+            // Drop anything that can never fit, whatever the pool does — it
+            // would otherwise block the queue forever (or, before the capacity
+            // check, corrupt the block table).
+            let cap = self.eng.max_seq_len();
+            while let Some((id, req)) = self.waiting.front() {
+                let need = req.prompt.len() + req.max_new;
+                if need <= cap {
+                    break;
+                }
+                let (id, req) = (*id, need);
+                self.waiting.pop_front();
+                report.rejected.push((
+                    id,
+                    format!("needs {req} tokens, engine capacity is {cap}"),
+                ));
+            }
             let fits = match self.waiting.front() {
                 Some((_, req)) => self.eng.free_blocks() >= self.eng.blocks_for(req.prompt.len() as u32 + 1),
                 None => false,
@@ -916,6 +996,87 @@ mod tests {
 
         assert_eq!(out[0], ref0, "seq0 batched paged != reference");
         assert_eq!(out[1], ref1, "seq1 batched paged != reference");
+    }
+
+    /// A request too long for the engine must be REJECTED, not crash the process
+    /// and not sit in the queue forever. Before the capacity check, a prompt
+    /// longer than `max_blocks_per_seq * block_size` wrote past its row of the
+    /// block table.
+    #[test]
+    fn oversized_requests_are_rejected_not_fatal() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        // capacity = max_blocks_per_seq(4) * block_size(4) = 16 tokens.
+        let eng = Engine::from_map(cfg, &map, 4, 64, 2, 4, 8, false);
+        assert_eq!(eng.max_seq_len(), 16);
+        let mut sched = Scheduler::new(eng, 2);
+
+        let huge = sched.submit(Request { prompt: vec![1u32; 64], max_new: 4, eos: None });
+        let ok = sched.submit(Request { prompt: vec![2u32, 3, 4], max_new: 4, eos: None });
+
+        let rep = sched.step_report();
+        assert_eq!(rep.rejected.len(), 1, "the oversized request must be refused");
+        assert_eq!(rep.rejected[0].0, huge);
+        assert!(rep.rejected[0].1.contains("capacity"));
+
+        // The queue keeps moving and the viable request completes.
+        let out = sched.run();
+        assert!(out.contains_key(&ok));
+        assert!(!out.contains_key(&huge));
+    }
+
+    /// Cancelling must free the sequence's KV blocks immediately and stop its
+    /// decoding, without disturbing the requests running alongside it.
+    #[test]
+    fn cancel_reclaims_blocks_and_spares_neighbours() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map(cfg, &map, 4, 96, 3, 12, 8, false);
+        let mut sched = Scheduler::new(eng, 3);
+
+        let keep_a = sched.submit(Request { prompt: vec![1u32, 5, 3], max_new: 6, eos: None });
+        // Long enough to still be decoding when cancelled, but inside the
+        // engine's per-sequence capacity (12 blocks x 4 = 48 tokens).
+        let doomed = sched.submit(Request { prompt: vec![7u32, 2, 9], max_new: 30, eos: None });
+        let keep_b = sched.submit(Request { prompt: vec![4u32, 4, 1], max_new: 6, eos: None });
+
+        // Admit everything and decode a couple of steps.
+        sched.step();
+        sched.step();
+        assert_eq!(sched.running_len(), 3);
+        let free_before = sched.free_blocks();
+
+        let produced = sched.cancel(doomed).expect("cancelling a running request must succeed");
+        assert!(!produced.is_empty(), "it had already produced tokens");
+        assert_eq!(sched.running_len(), 2, "only the cancelled request is removed");
+        assert!(sched.free_blocks() > free_before, "its KV blocks must return to the pool at once");
+
+        // The survivors still finish normally.
+        let out = sched.run();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[&keep_a].len(), 6);
+        assert_eq!(out[&keep_b].len(), 6);
+        assert!(!out.contains_key(&doomed), "a cancelled request must not complete");
+
+        // Cancelling twice, or an unknown id, is a no-op rather than a panic.
+        assert!(sched.cancel(doomed).is_none());
+        assert!(sched.cancel(9999).is_none());
+    }
+
+    /// Cancelling a request that was never admitted just drops it from the queue.
+    #[test]
+    fn cancel_before_admission_produces_nothing() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        // One slot, so the second request cannot be admitted.
+        let eng = Engine::from_map(cfg, &map, 4, 32, 1, 12, 8, false);
+        let mut sched = Scheduler::new(eng, 1);
+        let _a = sched.submit(Request { prompt: vec![1u32, 5, 3], max_new: 4, eos: None });
+        let queued = sched.submit(Request { prompt: vec![2u32, 6, 4], max_new: 4, eos: None });
+        sched.step();
+        assert_eq!(sched.waiting_len(), 1);
+        assert_eq!(sched.cancel(queued), Some(Vec::new()));
+        assert_eq!(sched.waiting_len(), 0);
     }
 
     /// The device-side greedy head must select exactly the token the host head

@@ -42,6 +42,10 @@ pub struct Artifact {
     pub per_class: Option<Vec<Value>>,
     pub best_of_n: usize,
     pub spread_pct: Option<f64>,
+    /// What this run could NOT measure and why. A scenario that is limited by a
+    /// missing engine capability says so here rather than reporting a confident
+    /// number it did not observe.
+    pub notes: Option<String>,
 }
 
 impl Artifact {
@@ -64,6 +68,7 @@ impl Artifact {
             per_class: None,
             best_of_n: 1,
             spread_pct: None,
+            notes: None,
         }
     }
 
@@ -91,6 +96,7 @@ impl Artifact {
             "correctness": self.correctness,
             "best_of_n": self.best_of_n,
             "spread_pct": self.spread_pct.map(|v| Value::from(r3(v))).unwrap_or(Value::Null),
+            "notes": self.notes.clone().map(Value::from).unwrap_or(Value::Null),
             "curve": self.curve.clone().map(Value::from).unwrap_or(Value::Null),
             "per_class": self.per_class.clone().map(Value::from).unwrap_or(Value::Null),
         })

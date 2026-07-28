@@ -55,7 +55,9 @@
 //! ```
 
 pub mod driver;
+pub mod energy;
 pub mod env;
+pub mod fidelity;
 pub mod metrics;
 pub mod report;
 pub mod scenarios;
