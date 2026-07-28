@@ -76,6 +76,54 @@ impl Qwen3Vl {
         }
     }
 
+    /// Assemble from already-loaded HF tensors (name → f32). Partitions them via
+    /// [`crate::import`] and constructs the model for a fixed image placement.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_tensors(
+        tensors: Vec<checkpoint::safetensors::StTensor>,
+        vcfg: VisionConfig,
+        dcfg: QwenConfig,
+        seq_len: u32,
+        image_token_id: u32,
+        image_row0: u32,
+        n_visual: u32,
+        mrope_section: [u32; 3],
+    ) -> Qwen3Vl {
+        let map: HashMap<String, Vec<f32>> = tensors.into_iter().map(|t| (t.name, t.data)).collect();
+        let w = crate::import::partition(map, vcfg.deepstack_indexes.len());
+        Qwen3Vl::new(
+            vcfg,
+            dcfg,
+            w.vision,
+            w.main_merger,
+            w.deepstack,
+            &w.decoder,
+            seq_len,
+            image_token_id,
+            image_row0,
+            n_visual,
+            mrope_section,
+        )
+    }
+
+    /// Load a Hugging Face Qwen3-VL checkpoint directory (`config.json` +
+    /// `model.safetensors[.index.json]`, bf16 → f32) and assemble the model for a
+    /// fixed image placement. Note the released 4B checkpoint is ~16 GB in f32.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_hf(
+        dir: &str,
+        vcfg: VisionConfig,
+        dcfg: QwenConfig,
+        seq_len: u32,
+        image_token_id: u32,
+        image_row0: u32,
+        n_visual: u32,
+        mrope_section: [u32; 3],
+    ) -> Result<Qwen3Vl, String> {
+        let tensors = checkpoint::safetensors::read_model_dir(std::path::Path::new(dir))?;
+        Ok(Self::from_tensors(tensors, vcfg, dcfg, seq_len, image_token_id, image_row0, n_visual, mrope_section))
+    }
+
     /// End-to-end forward for one image + text stream; returns the decoder's scalar
     /// loss. `pixels` is the host-packed `[grid_h·grid_w, patch_vec]` patch tensor;
     /// `tokens`/`targets` are the full text stream (image placeholders carry IGNORE

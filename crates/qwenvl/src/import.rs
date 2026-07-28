@@ -169,6 +169,38 @@ mod tests {
         assert_eq!(map_decoder("model.language_model.layers.35.mlp.down_proj.weight").unwrap(), "blocks.35.mlp.down.weight");
     }
 
+    /// Coverage against the REAL released index (names only — no 16 GB data load).
+    /// Skips if the checkpoint isn't present. Asserts every decoder parameter the
+    /// config expects is imported and the vision/merger groups have the right counts.
+    #[test]
+    fn real_index_fully_covered() {
+        let path = "/data/workspace/resources/vl/qwen3-vl/Qwen3-VL-4B-Instruct/model.safetensors.index.json";
+        let Ok(txt) = std::fs::read_to_string(path) else {
+            eprintln!("skip real_index_fully_covered: checkpoint not present");
+            return;
+        };
+        let idx: serde_json::Value = serde_json::from_str(&txt).unwrap();
+        let names: Vec<String> = idx["weight_map"].as_object().unwrap().keys().cloned().collect();
+        let map: HashMap<String, Vec<f32>> = names.iter().map(|n| (n.clone(), vec![])).collect();
+        let total = map.len();
+        let w = partition(map, 3);
+
+        let cfg = crate::config::Qwen3VlConfig::qwen3_vl_4b();
+        for (name, _) in cfg.text.param_list() {
+            assert!(w.decoder.contains_key(&name), "decoder param not imported: {name}");
+        }
+        // 24 blocks × 12 leaves + patch_embed(w,b) + pos_embed.
+        assert_eq!(w.vision.len(), 24 * 12 + 3, "vision weight count");
+        assert_eq!(w.main_merger.len(), 6, "main merger weight count");
+        assert_eq!(w.deepstack.len(), 3);
+        for d in &w.deepstack {
+            assert_eq!(d.len(), 6, "deepstack merger weight count");
+        }
+        // Every real tensor should be accounted for (rotary tables aren't stored).
+        let mapped = w.vision.len() + w.main_merger.len() + w.deepstack.iter().map(|m| m.len()).sum::<usize>() + w.decoder.len();
+        assert_eq!(mapped, total, "every checkpoint tensor must map ({mapped}/{total})");
+    }
+
     #[test]
     fn partition_routes_each_group() {
         let mut hf = HashMap::new();
