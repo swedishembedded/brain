@@ -52,11 +52,35 @@ missing = [m for m in missing if m != "lm_head.weight"]
 assert not missing, f"missing decoder tensors: {missing[:8]}"
 model.eval().float()
 
-tokens = [151643, 9707, 11, 1879, 0, 1246, 525, 498]  # bos + arbitrary fixed ids
+# A real Qwen2 chat prompt so the greedy continuation is coherent text.
+from transformers import AutoTokenizer
+
+tok = AutoTokenizer.from_pretrained(CKPT)
+prompt = tok.apply_chat_template(
+    [{"role": "user", "content": "Name three primary colors."}],
+    tokenize=False,
+    add_generation_prompt=True,
+)
+tokens = tok(prompt, return_tensors="pt").input_ids[0].tolist()
 ids = torch.tensor([tokens], dtype=torch.long)
 with torch.no_grad():
     logits = model(ids).logits[0]  # [T, vocab]
 
 logits.numpy().astype("<f4").tofile(f"{OUT}/fastvlm_dec_ref.bin")
 np.array(tokens, dtype="<i4").tofile(f"{OUT}/fastvlm_dec_tokens.bin")
-print(f"dumped logits {tuple(logits.shape)} → {OUT}/fastvlm_dec_ref.bin")
+print(f"prompt ({len(tokens)} tokens), logits {tuple(logits.shape)} → {OUT}/fastvlm_dec_ref.bin")
+
+# Greedy continuation: the reference argmax-decode (no sampling), so brain's greedy
+# decode can be matched token-for-token. Stop at EOS.
+GEN = 24
+eos = cfg["eos_token_id"]
+seq = list(tokens)
+with torch.no_grad():
+    for _ in range(GEN):
+        nxt = int(model(torch.tensor([seq], dtype=torch.long)).logits[0, -1].argmax())
+        seq.append(nxt)
+        if nxt == eos:
+            break
+gen = seq[len(tokens):]
+np.array(gen, dtype="<i4").tofile(f"{OUT}/fastvlm_dec_gen.bin")
+print(f"greedy continuation ({len(gen)} tokens): {tok.decode(gen)!r}")

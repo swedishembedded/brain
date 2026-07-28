@@ -13,16 +13,18 @@ The validation ladder, weakest → strongest evidence:
 4. **End-to-end generation** — greedy-decodes a real caption / answer.
 5. **Training convergence** — finetune actually drives the loss down on real data.
 
-## Reference parity (tier 3) — the strongest signal we have
+## Reference parity (tier 3) + generation (tier 4) — the strongest signals we have
 
-| Component | Model | Result | How |
+| Check | Model | Result | How |
 |---|---|---|---|
-| **Qwen2 decoder** (24 layers, GQA, SwiGLU, tied head) | FastVLM-0.5B | **mean\|Δ\|≈7e-6, max\|Δ\|≈7e-5, argmax agrees at every position** | `crates/fastvlm/src/parity.rs` vs `transformers` on the real bf16 checkpoint (`tools/fastvlm_decoder_dump_reference.py`) |
+| **Decoder logits** (24 layers, GQA, SwiGLU, tied head) | FastVLM-0.5B | **mean\|Δ\|≈3e-6, max\|Δ\|≈6e-5, argmax agrees everywhere** | `crates/fastvlm/src/parity.rs` vs `transformers` on the real bf16 checkpoint |
+| **Greedy generation** | FastVLM-0.5B | **brain decodes the identical token stream as HF** — "Name three primary colors." → **"Red, Blue, and Yellow."** | same test; brain argmax-decodes 8 tokens `[6033,11,8697,11,323,25462,13,151645]`, matching HF exactly |
 
 This validates the **shared decoder backbone** — the same block math (`crates/model/src/block.rs`)
-all three models decode with — against the actual reference model, to fp32 reassociation
-noise. It also exercises the real-weight path: `checkpoint::safetensors` (bf16→f32) →
-the `import::map_decoder` name mapping → `Qwen::new` → `logits_all`.
+all three models decode with — against the actual reference model to fp32 reassociation
+noise, *and* the full decode loop (embed → 24 layers → tied head → argmax → append) producing
+a real, coherent, correct answer. It exercises the real-weight path end to end:
+`checkpoint::safetensors` (bf16→f32) → `import::map_decoder` → `Qwen::new` → `logits_all`.
 
 ## Capability matrix
 
@@ -33,9 +35,10 @@ Legend: ✅ implemented + validated · 🟡 implemented, validation pending · �
 | Image → training loss (fwd) | ✅ | ✅ | ✅ |
 | Gradient-faithful backward | ✅ decoder + ViT | ✅ decoder + FastViTHD | ✅ decoder + SigLIP ViT |
 | Checkpoint import (name-coverage) | ✅ | ✅ | ✅ (662 tensors) |
-| **Decoder reference parity** | 🟡 (same harness, 8 GB ckpt) | ✅ | 🟡 (MoE, 28 GB ckpt — per-block) |
+| **Decoder reference parity** | 🟡 (same harness, 8 GB ckpt) | ✅ (mean\|Δ\|≈3e-6) | 🟡 (MoE, 28 GB ckpt — per-block) |
 | Vision-encoder reference parity | 🟡 | 🟡 | 🟡 |
-| **Generate (caption / VQA)** | ⬜ | 🟡 (building) | ⬜ |
+| **Greedy generation (text) matches HF** | 🟡 | ✅ ("Red, Blue, and Yellow.") | 🟡 |
+| Full image → caption (vision + generate) | ⬜ | 🟡 (needs vision parity) | ⬜ |
 | Multi-crop / dynamic resolution | ✅ smart-resize | ✅ pad-to-square | ✅ overlap multi-crop |
 | MoE expert sharding | — | — | ✅ (federated round-trip) |
 | Data-/pipeline-parallel | ✅ (trait + splice seam) | ✅ | ✅ |

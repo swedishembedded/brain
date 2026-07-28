@@ -21,6 +21,12 @@ mod tests {
     const CKPT: &str = "/data/workspace/resources/vl/fastvlm/hf/FastVLM-0.5B/model.safetensors";
     const REF: &str = "/data/workspace/resources/vl/parity/fastvlm_dec_ref.bin";
     const TOK: &str = "/data/workspace/resources/vl/parity/fastvlm_dec_tokens.bin";
+    const GEN: &str = "/data/workspace/resources/vl/parity/fastvlm_dec_gen.bin";
+
+    fn read_i32(path: &str) -> Option<Vec<u32>> {
+        let b = std::fs::read(path).ok()?;
+        Some(b.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect())
+    }
 
     fn read_f32(path: &str) -> Option<Vec<f32>> {
         let b = std::fs::read(path).ok()?;
@@ -55,10 +61,13 @@ mod tests {
             assert!(init.contains_key(&name), "decoder param not imported: {name}");
         }
 
-        let t = tokens.len() as u32;
+        let prompt_len = tokens.len();
         let vocab = cfg.vocab as usize;
-        let qwen = Qwen::new(cfg, 1, t, &init);
-        let logits = qwen.logits_all(&tokens); // [T, vocab] flat
+        // Build with headroom so we can greedy-decode past the prompt.
+        let gen_ref = read_i32(GEN).unwrap_or_default();
+        let t_max = (prompt_len + gen_ref.len().max(1) + 1) as u32;
+        let qwen = Qwen::new(cfg, 1, t_max, &init);
+        let logits = qwen.logits_all(&tokens); // [prompt_len, vocab] flat
         assert_eq!(logits.len(), ref_logits.len(), "logit tensor shape mismatch");
 
         // Per-position: the argmax (predicted next token) must agree, and the logits
@@ -82,5 +91,23 @@ mod tests {
         // reassociation noise vs the bf16→fp32 reference. Thresholds keep ~50× headroom.
         assert!(max_abs < 5e-3, "decoder logits diverge from HF reference: max|Δ|={max_abs}");
         assert!(mean_abs < 1e-4, "decoder logits mean drift too high: {mean_abs}");
+
+        // Greedy generation: brain must argmax-decode the SAME tokens as HF. This
+        // proves the whole decode loop (embed → 24 layers → tied head → argmax) on
+        // the real weights — for "Name three primary colors." the reference answers
+        // "Red, Blue, and Yellow.".
+        if !gen_ref.is_empty() {
+            let mut seq = tokens.clone();
+            let mut brain_gen = Vec::new();
+            for _ in 0..gen_ref.len() {
+                let lg = qwen.logits_all(&seq);
+                let last = &lg[(seq.len() - 1) * vocab..seq.len() * vocab];
+                let next = last.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
+                brain_gen.push(next);
+                seq.push(next);
+            }
+            eprintln!("brain greedy gen: {brain_gen:?}\nHF   greedy gen: {gen_ref:?}");
+            assert_eq!(brain_gen, gen_ref, "brain greedy decode diverges from the HF reference");
+        }
     }
 }
