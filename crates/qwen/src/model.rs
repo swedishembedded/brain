@@ -92,6 +92,9 @@ const ROPE_AT: usize = 44;
 // `enable_mm_splice` was called; see `model::vlm`.
 const SPLICE: usize = 45;
 const SPLICE_BWD: usize = 46;
+// Table-driven RoPE for the interleaved M-RoPE path (Qwen3-VL). Off unless
+// `enable_mrope` was called; replaces the analytic rope_base on q/k.
+const ROPE2D: usize = 47;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -141,6 +144,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("rope_at", kernels::ROPE_AT),
     ("splice", kernels::SPLICE),
     ("splice_bwd", kernels::SPLICE_BWD),
+    ("rope2d", kernels::ROPE2D),
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
@@ -261,6 +265,13 @@ pub struct Qwen {
     mm_splice: Cell<Option<(u32, u32)>>,
     img_embeds: DeviceBuffer,
     d_img_embeds: DeviceBuffer,
+
+    // Interleaved M-RoPE (Qwen3-VL): when set, q/k use the table-driven `rope2d`
+    // with these host-precomputed per-token cos/sin tables `[b·t, head_dim/2]`
+    // (write via `write_mrope_tables`) instead of the analytic rope_base.
+    mrope: Cell<bool>,
+    mrope_cos: DeviceBuffer,
+    mrope_sin: DeviceBuffer,
     proj: DeviceBuffer,
     mlp_out: DeviceBuffer,
     scores: DeviceBuffer,
@@ -529,6 +540,9 @@ impl Qwen {
             mm_splice: Cell::new(None),
             img_embeds: st(1),
             d_img_embeds: st(1),
+            mrope: Cell::new(false),
+            mrope_cos: st(1),
+            mrope_sin: st(1),
             proj: st(n * d),
             mlp_out: st(n * d),
             scores: st(bht2),
@@ -616,6 +630,19 @@ impl Qwen {
     /// GQA shape for `b`×`t` (the buffers are sized for the max `b`/`t`).
     fn gqa(&self, b: u32, t: u32) -> Gqa {
         Gqa { b, t, n_heads: self.cfg.n_heads, n_kv_heads: self.cfg.n_kv_heads, head_dim: self.cfg.head_dim }
+    }
+
+    /// One table-driven M-RoPE rotation (`rope2d`) over the q or k buffer (region
+    /// offset 0, table rows = token rows). `sign` = 1 forward, -1 = the exact
+    /// inverse rotation (backward). Uses the host-written `mrope_cos/sin` tables.
+    fn rope2d_step(&self, buf: &DeviceBuffer, rows: u32, heads: u32, head_dim: u32, row_stride: u32, sign: f32) -> Step {
+        let half = head_dim / 2;
+        self.gpu.step(
+            ROPE2D,
+            &[buf, &self.mrope_cos, &self.mrope_sin],
+            &[rows, heads, half, row_stride, 0, rows, f(sign)],
+            rows * heads * half,
+        )
     }
 
     /// RMSNorm backward via the shared builder: input grad always, gain grad only
@@ -767,8 +794,13 @@ impl Qwen {
             // QK-norm over head_dim then half-split RoPE on q/k.
             s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.q_pre, self.w(&p("attn.q_norm.weight")), &lb.q, hd, n * nh));
             s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.k_pre, self.w(&p("attn.k_norm.weight")), &lb.k, hd, n * nkv));
-            s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, nh, hd, hq, t_use, theta));
-            s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, nkv, hd, hkv, t_use, theta));
+            if self.mrope.get() {
+                s.push(self.rope2d_step(&lb.q, n, nh, hd, hq, 1.0));
+                s.push(self.rope2d_step(&lb.k, n, nkv, hd, hkv, 1.0));
+            } else {
+                s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, nh, hd, hq, t_use, theta));
+                s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, nkv, hd, hkv, t_use, theta));
+            }
             s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &self.scores, &lb.probs, &lb.ctx));
             if let Some((q8, ql)) = q8l {
                 q8.quant(&self.gpu, &mut s, &lb.ctx, hq, n);
@@ -906,8 +938,13 @@ impl Qwen {
                 &self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &lb.probs, &self.d_ctx, &self.d_scores, &self.d_q, &self.d_k, &self.d_v,
             ));
             // RoPE backward (in place on d_q/d_k -> grad wrt normed q/k)
-            s.push(block::rope_bwd(&self.gpu, &ids, &self.d_q, n, nh, hd, hq, t, theta));
-            s.push(block::rope_bwd(&self.gpu, &ids, &self.d_k, n, nkv, hd, hkv, t, theta));
+            if self.mrope.get() {
+                s.push(self.rope2d_step(&self.d_q, n, nh, hd, hq, -1.0));
+                s.push(self.rope2d_step(&self.d_k, n, nkv, hd, hkv, -1.0));
+            } else {
+                s.push(block::rope_bwd(&self.gpu, &ids, &self.d_q, n, nh, hd, hq, t, theta));
+                s.push(block::rope_bwd(&self.gpu, &ids, &self.d_k, n, nkv, hd, hkv, t, theta));
+            }
             // QK-norm backward: grad wrt q_pre/k_pre -> dq_pre/dk_pre
             self.rmsnorm_bwd(&mut s, &lb.q_pre, &p("attn.q_norm.weight"), &self.d_q, &self.dq_pre, hd, n * nh);
             self.rmsnorm_bwd(&mut s, &lb.k_pre, &p("attn.k_norm.weight"), &self.d_k, &self.dk_pre, hd, n * nkv);
@@ -1024,6 +1061,31 @@ impl Qwen {
     /// the vision connector/encoder backward.
     pub fn read_d_img_embeds(&self) -> Vec<f32> {
         self.gpu.read(&self.d_img_embeds, self.img_numel())
+    }
+
+    // ---- interleaved M-RoPE seam (Qwen3-VL) ----
+
+    /// Switch q/k to the table-driven `rope2d` M-RoPE path (from the analytic
+    /// rope_base). Allocates the `[b·t, head_dim/2]` cos/sin tables and rebuilds
+    /// the fwd/bwd graphs — call once after construction, then supply the tables
+    /// each batch via [`Self::write_mrope_tables`] (computed by
+    /// `qwenvl::mrope::{get_rope_index, mrope_tables}`).
+    pub fn enable_mrope(&mut self) {
+        let sz = (self.b * self.t * self.cfg.head_dim / 2) as u64;
+        self.mrope_cos = self.gpu.storage(sz);
+        self.mrope_sin = self.gpu.storage(sz);
+        self.mrope.set(true);
+        self.fwd_steps = self.forward_steps(self.b, self.t);
+        if !self.bwd_steps.is_empty() {
+            self.bwd_steps = self.build_backward_steps();
+        }
+    }
+
+    /// Write the per-token M-RoPE cos/sin tables (`[b·t, head_dim/2]` row-major)
+    /// for the next forward.
+    pub fn write_mrope_tables(&self, cos: &[f32], sin: &[f32]) {
+        self.gpu.write(&self.mrope_cos, bytemuck::cast_slice(cos));
+        self.gpu.write(&self.mrope_sin, bytemuck::cast_slice(sin));
     }
     /// Run the backward graph. The head stage refreshes the CE-grad uniform first
     /// (it drives `ce_grad_stats`); other stages consume `dres[end]` written by
