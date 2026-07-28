@@ -142,6 +142,49 @@ impl<'g> SiglipEncoder<'g> {
     }
 }
 
+/// Moondream connector: a 2-layer MLP `Linear(in→inner)` → tanh-GELU →
+/// `Linear(inner→out)` mapping the `[729, 2·dim]` global‖local concat to `[729,
+/// dim_text]` image tokens. Reuses matmul/bias/gelu (no new kernels). Weight keys:
+/// `fc1.weight` `[inner,in]`/`fc1.bias`, `fc2.weight` `[out,inner]`/`fc2.bias`.
+pub struct Connector<'g> {
+    gpu: &'g Gpu,
+    w: HashMap<String, DeviceBuffer>,
+    in_dim: u32,
+    inner: u32,
+    out_dim: u32,
+}
+
+impl<'g> Connector<'g> {
+    pub fn new(gpu: &'g Gpu, weights: &HashMap<String, Vec<f32>>, in_dim: u32, inner: u32, out_dim: u32) -> Connector<'g> {
+        let w = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
+        Connector { gpu, w, in_dim, inner, out_dim }
+    }
+    fn wb(&self, n: &str) -> &DeviceBuffer {
+        self.w.get(n).unwrap_or_else(|| panic!("connector weight missing: {n}"))
+    }
+    /// Project `rows × in_dim` → `rows × out_dim`.
+    pub fn forward(&self, rows: u32, x: &[f32]) -> Vec<f32> {
+        let g = self.gpu;
+        assert_eq!(x.len(), (rows * self.in_dim) as usize);
+        let xb = g.storage_init("cin", x);
+        let h = g.storage((rows * self.inner) as u64);
+        let h2 = g.storage((rows * self.inner) as u64);
+        let out = g.storage((rows * self.out_dim) as u64);
+        // matmul(1) + bias(3) + gelu(4) + matmul(1) + bias(3), per vision_pipelines.
+        g.submit(
+            &[],
+            &[
+                g.step(1, &[&xb, self.wb("fc1.weight"), &h], &[rows, self.in_dim, self.inner], rows * self.inner),
+                g.step(3, &[&h, self.wb("fc1.bias")], &[rows, self.inner], rows * self.inner),
+                g.step(4, &[&h, &h2], &[rows * self.inner], rows * self.inner),
+                g.step(1, &[&h2, self.wb("fc2.weight"), &out], &[rows, self.inner, self.out_dim], rows * self.out_dim),
+                g.step(3, &[&out, self.wb("fc2.bias")], &[rows, self.out_dim], rows * self.out_dim),
+            ],
+        );
+        g.read(&out, (rows * self.out_dim) as usize)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +223,23 @@ mod tests {
         let out = enc.encode(n_crops, &packed);
         assert_eq!(out.len(), n_crops as usize * ppc * c);
         assert!(out.iter().all(|v| v.is_finite()) && out.iter().any(|&v| v.abs() > 1e-6));
+    }
+
+    #[test]
+    fn connector_projects() {
+        let gpu = Gpu::new_cpu(vision_pipelines());
+        let (in_dim, inner, out_dim, rows) = (48u32, 96u32, 32u32, 9u32);
+        let mut rng = Rng::new(4);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
+        let mut w = HashMap::new();
+        w.insert("fc1.weight".into(), r((inner * in_dim) as usize));
+        w.insert("fc1.bias".into(), r(inner as usize));
+        w.insert("fc2.weight".into(), r((out_dim * inner) as usize));
+        w.insert("fc2.bias".into(), r(out_dim as usize));
+        let conn = Connector::new(&gpu, &w, in_dim, inner, out_dim);
+        let x: Vec<f32> = (0..(rows * in_dim) as usize).map(|_| rng.next_f32() - 0.5).collect();
+        let out = conn.forward(rows, &x);
+        assert_eq!(out.len(), (rows * out_dim) as usize);
+        assert!(out.iter().all(|v| v.is_finite()));
     }
 }
