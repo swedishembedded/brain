@@ -194,6 +194,18 @@ impl ConvUnit {
         cur
     }
 
+    /// The unit's cached output buffer (valid after `forward`) — the activation if
+    /// GELU is on, else the biased conv output, else the raw conv/BN output.
+    pub fn output(&self) -> &DeviceBuffer {
+        if self.gelu {
+            &self.activated
+        } else if self.bias_name.is_some() {
+            &self.biased
+        } else {
+            self.conv.out()
+        }
+    }
+
     /// Backward of [`forward`](Self::forward): from the output grad `d_out`, fill the
     /// conv/BN/bias grads in `ps` and write the input grad into `d_in`. Reverse of
     /// the epilogue (GELU → +bias) then the shared [`Conv::backward`] (BN + conv).
@@ -246,6 +258,18 @@ impl ConvFFN {
         let d = self.dw.forward(ctx, ps, x_in);
         let h = self.fc1.forward(ctx, ps, d);
         self.fc2.forward(ctx, ps, h)
+    }
+
+    /// Backward: three [`ConvUnit::backward`]s in reverse (fc2 → fc1 → dw), threading
+    /// the grad through the cached intermediates. Assumes `forward` ran.
+    pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
+        let d = self.dw.output(); // dw output = fc1's input
+        let h = self.fc1.output(); // fc1 output = fc2's input
+        let d_h = ctx.gpu.storage(self.fc1.out_shape().numel() as u64);
+        let d_d = ctx.gpu.storage(self.dw.out_shape().numel() as u64);
+        self.fc2.backward(ctx, ps, h, d_out, &d_h);
+        self.fc1.backward(ctx, ps, d, &d_h, &d_d);
+        self.dw.backward(ctx, ps, x_in, &d_d, d_in);
     }
 }
 
@@ -684,6 +708,57 @@ mod tests {
             im.get_mut("cu.bias").unwrap()[j] -= eps;
             let num = (loss(&ip, &x_host) - loss(&im, &x_host)) / (2.0 * eps);
             assert!(ok(g_b[j], num), "d bias[{j}]: analytic {} vs numeric {}", g_b[j], num);
+        }
+    }
+
+    #[test]
+    fn convffn_backward_matches_finite_diff() {
+        // The FastViTHD channel-mixer (dw+BN → fc1+bias+GELU → fc2+bias): three
+        // ConvUnit backwards chained. Input grad + one weight per sub-conv.
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let in_shape = Shape::new(1, 6, 4, 4);
+        let ffn = ConvFFN::new(&ctx, "ffn", in_shape, 6, 2);
+        let plist = ffn.param_list();
+        let out_n = ffn.out_shape().numel() as usize;
+        let mut rng = Rng::new(6);
+        let init = rand_init(&plist, &mut rng);
+        let x_host: Vec<f32> = (0..in_shape.numel() as usize).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
+
+        let ps = ParamStore::new(&gpu, plist.clone(), &init);
+        ps.zero_grads(&gpu);
+        let xb = gpu.storage_init("x", &x_host);
+        let _ = ffn.forward(&ctx, &ps, &xb);
+        let d_out = gpu.storage_init("dout", &vec![1.0f32; out_n]);
+        let d_in = gpu.storage(in_shape.numel() as u64);
+        ffn.backward(&ctx, &ps, &xb, &d_out, &d_in);
+        let g_in = gpu.read(&d_in, in_shape.numel() as usize);
+        let keys = ["ffn.dw.conv.weight", "ffn.fc1.conv.weight", "ffn.fc2.conv.weight"];
+        let grads: HashMap<&str, Vec<f32>> = keys.iter().map(|&k| (k, ps.read_grad(&gpu, k))).collect();
+
+        let loss = |im: &HashMap<String, Vec<f32>>, xh: &[f32]| -> f32 {
+            let ps = ParamStore::new(&gpu, plist.clone(), im);
+            let xb = gpu.storage_init("x", xh);
+            gpu.read(ffn.forward(&ctx, &ps, &xb), out_n).iter().sum::<f32>()
+        };
+        let eps = 1e-3f32;
+        let ok = |a: f32, num: f32| (a - num).abs() <= 5e-3 + 8e-2 * num.abs();
+
+        for &i in &[0usize, 13, 40, 55, 77, 95] {
+            let (mut xp, mut xm) = (x_host.clone(), x_host.clone());
+            xp[i] += eps;
+            xm[i] -= eps;
+            let num = (loss(&init, &xp) - loss(&init, &xm)) / (2.0 * eps);
+            assert!(ok(g_in[i], num), "d_in[{i}]: analytic {} vs numeric {}", g_in[i], num);
+        }
+        for &key in &keys {
+            for &j in &[0usize, 5, 11] {
+                let (mut ip, mut im) = (init.clone(), init.clone());
+                ip.get_mut(key).unwrap()[j] += eps;
+                im.get_mut(key).unwrap()[j] -= eps;
+                let num = (loss(&ip, &x_host) - loss(&im, &x_host)) / (2.0 * eps);
+                assert!(ok(grads[key][j], num), "d {key}[{j}]: analytic {} vs numeric {}", grads[key][j], num);
+            }
         }
     }
 
