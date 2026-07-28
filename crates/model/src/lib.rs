@@ -57,6 +57,19 @@ pub enum Batch<'a> {
     /// regression). `tokens` is optional (e.g. token-id inputs reconstructed
     /// against themselves).
     Tensor { tokens: Option<&'a [u32]>, inputs: &'a [f32], targets: &'a [f32] },
+    /// Vision-language: a causal-LM text stream with pre-projected image-token
+    /// embeddings spliced into the residual stream. `tokens`/`targets` are the
+    /// full text stream (image-placeholder positions carry `IGNORE` targets so
+    /// they never enter the loss); `image_embeds` is the row-major
+    /// `[image_rows.len(), d_model]` block of vision tokens already projected to
+    /// decoder width, written over the residual rows named by `image_rows` (one
+    /// row index per spliced token). The vision encoder + connector produce
+    /// `image_embeds`; the decoder's embedding stage overwrites those rows after
+    /// the text gather, and its backward routes those rows' gradient to the
+    /// connector instead of `tok.weight`. Richer per-model side channels
+    /// (DeepStack levels, M-RoPE position ids, prefix length) travel through
+    /// model-specific `set_*` methods, keeping this shared variant minimal.
+    Multimodal { tokens: &'a [u32], targets: &'a [u32], image_embeds: &'a [f32], image_rows: &'a [u32] },
 }
 
 /// The objective head + loss a model's final stage realizes (ADR §2.3). Selected

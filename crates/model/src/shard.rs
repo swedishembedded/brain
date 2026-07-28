@@ -451,6 +451,9 @@ fn clone_batch<'a>(b: &crate::Batch<'a>) -> crate::Batch<'a> {
         Lm { tokens, targets } => Lm { tokens, targets },
         Seq2Seq { src, tgt, labels } => Seq2Seq { src, tgt, labels },
         Tensor { tokens, inputs, targets } => Tensor { tokens, inputs, targets },
+        Multimodal { tokens, targets, image_embeds, image_rows } => {
+            Multimodal { tokens, targets, image_embeds, image_rows }
+        }
     }
 }
 

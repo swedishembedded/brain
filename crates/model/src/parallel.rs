@@ -227,5 +227,8 @@ fn clone_batch<'a>(b: &Batch<'a>) -> Batch<'a> {
         Batch::Lm { tokens, targets } => Batch::Lm { tokens, targets },
         Batch::Seq2Seq { src, tgt, labels } => Batch::Seq2Seq { src, tgt, labels },
         Batch::Tensor { tokens, inputs, targets } => Batch::Tensor { tokens, inputs, targets },
+        Batch::Multimodal { tokens, targets, image_embeds, image_rows } => {
+            Batch::Multimodal { tokens, targets, image_embeds, image_rows }
+        }
     }
 }
