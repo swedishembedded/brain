@@ -111,6 +111,52 @@ mod tests {
         }
     }
 
+    const VIS_PX: &str = "/data/workspace/resources/vl/parity/fastvlm_vis_px.bin";
+    const VIS_FEAT: &str = "/data/workspace/resources/vl/parity/fastvlm_vis_feat.bin";
+
+    #[test]
+    fn fastvlm_vision_tower_matches_hf() {
+        // brain's OWN FastViTHD (Encoder::mobileclip_l) vs the HF mobileclip tower on
+        // the real weights: same preprocessed pixels → the [256, 3072] features must
+        // match (fully-in-brain vision, closing the loop for a native image caption).
+        let (Some(px), Some(feat)) = (read_f32(VIS_PX), read_f32(VIS_FEAT)) else {
+            eprintln!("skip: vision reference not present (run tools/fastvlm_vision_dump_reference.py)");
+            return;
+        };
+        let Ok(tensors) = checkpoint::safetensors::read(CKPT) else {
+            eprintln!("skip: FastVLM checkpoint not present");
+            return;
+        };
+        std::env::set_var("BRAIN_DEVICE", "cpu");
+        use crate::encoder::{ctx as ectx, Encoder, PIPELINES};
+        use crate::vision_import::build_vision_weights;
+        use gpu_core::Gpu;
+        use paramstore::ParamStore;
+
+        let vt: Vec<(String, Vec<f32>)> = tensors.into_iter().filter(|t| t.name.contains("vision_tower")).map(|t| (t.name, t.data)).collect();
+        let weights = build_vision_weights(&vt);
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ectx(&gpu);
+        let enc = Encoder::mobileclip_l(&ctx, 1024);
+        enc.set_eval(true); // running-stat BN, matching the reference
+        let ps = ParamStore::new(&gpu, enc.param_list(), &weights);
+        let img = gpu.storage_init("img", &px);
+        let out = enc.forward(&ctx, &ps, &img); // [256, 3072]
+        assert_eq!(out.len(), feat.len(), "feature shape mismatch");
+
+        let (mut max_abs, mut sum_abs, mut dot, mut na, mut nb) = (0.0f32, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for (a, b) in out.iter().zip(&feat) {
+            max_abs = max_abs.max((a - b).abs());
+            sum_abs += (a - b).abs() as f64;
+            dot += (*a as f64) * (*b as f64);
+            na += (*a as f64).powi(2);
+            nb += (*b as f64).powi(2);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt());
+        eprintln!("vision parity: mean|Δ|={:.4e} max|Δ|={:.4e} cosine={:.6}", sum_abs / out.len() as f64, max_abs, cos);
+        assert!(cos > 0.999, "brain vision features diverge from HF: cosine={cos}");
+    }
+
     const CAP_EMB: &str = "/data/workspace/resources/vl/parity/fastvlm_cap_embeds.bin";
     const CAP_LAYOUT: &str = "/data/workspace/resources/vl/parity/fastvlm_cap_layout.bin";
     const CAP_IDS: &str = "/data/workspace/resources/vl/parity/fastvlm_cap_ids.bin";

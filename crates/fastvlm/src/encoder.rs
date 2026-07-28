@@ -228,6 +228,11 @@ impl ConvUnit {
         self.conv.in_shape.numel()
     }
 
+    /// Switch the conv's BatchNorm to eval (running-stat) mode for inference/parity.
+    pub fn set_eval(&self, eval: bool) {
+        self.conv.set_eval(eval);
+    }
+
     pub fn param_list(&self) -> Vec<(String, usize)> {
         let mut p = self.conv.param_list();
         if let Some(b) = &self.bias_name {
@@ -365,6 +370,12 @@ impl ConvFFN {
     pub fn output(&self) -> &DeviceBuffer {
         self.fc2.output()
     }
+
+    fn set_eval(&self, eval: bool) {
+        self.dw.set_eval(eval);
+        self.fc1.set_eval(eval);
+        self.fc2.set_eval(eval);
+    }
 }
 
 /// RepMixerBlock — the FastViTHD stage-0–2 block: a RepMixer token-mixer (a single
@@ -450,6 +461,11 @@ impl RepMixerBlock {
     pub fn output(&self) -> &DeviceBuffer {
         &self.out
     }
+
+    fn set_eval(&self, eval: bool) {
+        self.mixer.set_eval(eval);
+        self.ffn.set_eval(eval);
+    }
 }
 
 /// PatchEmbed — the FastViTHD inter-stage downsample (stride-2, `in_ch → out_ch`):
@@ -496,6 +512,11 @@ impl PatchEmbed {
     /// The downsample's cached output buffer (`= proj`'s output), valid after `forward`.
     pub fn output(&self) -> &DeviceBuffer {
         self.proj.output()
+    }
+
+    fn set_eval(&self, eval: bool) {
+        self.rlk.set_eval(eval);
+        self.proj.set_eval(eval);
     }
 }
 
@@ -701,6 +722,10 @@ impl AttentionBlock {
     pub fn output(&self) -> &DeviceBuffer {
         &self.out
     }
+
+    fn set_eval(&self, eval: bool) {
+        self.ffn.set_eval(eval); // only the ConvFFN carries BN
+    }
 }
 
 /// RepCPE — the FastViTHD conditional positional encoding before the attention
@@ -758,6 +783,14 @@ impl Layer {
             Layer::Rep(b) => b.backward(ctx, ps, x_in, d_out, d_in),
             Layer::Attn(b) => b.backward(ctx, ps, x_in, d_out, d_in),
             Layer::Down(d) => d.backward(ctx, ps, x_in, d_out, d_in),
+        }
+    }
+    fn set_eval(&self, eval: bool) {
+        match self {
+            Layer::Conv(c) => c.set_eval(eval),
+            Layer::Rep(b) => b.set_eval(eval),
+            Layer::Attn(b) => b.set_eval(eval),
+            Layer::Down(d) => d.set_eval(eval),
         }
     }
 }
@@ -861,6 +894,14 @@ impl Encoder {
     }
     pub fn param_list(&self) -> Vec<(String, usize)> {
         self.layers.iter().flat_map(|l| l.param_list()).collect()
+    }
+
+    /// Put every BatchNorm in eval (running-stat) mode — required for inference /
+    /// reference parity (training-mode batch stats differ from the reference).
+    pub fn set_eval(&self, eval: bool) {
+        for l in &self.layers {
+            l.set_eval(eval);
+        }
     }
 
     /// Encode a `[1, 3, input, input]` image into `[tokens, feature_dim]` (NLC),

@@ -60,8 +60,8 @@ Legend: ✅ implemented + validated · 🟡 implemented, validation pending · �
 | **Decoder reference parity** | 🟡 (same harness, 8 GB ckpt) | ✅ (mean\|Δ\|≈3e-6) | 🟡 (MoE, 28 GB ckpt — per-block) |
 | Vision-encoder reference parity | 🟡 | 🟡 | 🟡 |
 | **Greedy generation (text) matches HF** | 🟡 | ✅ ("Red, Blue, and Yellow.") | 🟡 |
-| **Image → caption (splice + decode) matches HF** | 🟡 | ✅ ("A wooden frame…", HF vision embeds) | 🟡 |
-| Full pipeline incl. brain's own vision tower | 🟡 | ⬜ (FastViTHD needs SE + head.proj + reparam import) | ⬜ |
+| **Image → caption (splice + decode) matches HF** | 🟡 | ✅ ("A wooden frame…") | 🟡 |
+| **brain's own vision tower matches HF** | 🟡 | ✅ (FastViTHD, cosine=1.000000) | 🟡 |
 | Multi-crop / dynamic resolution | ✅ smart-resize | ✅ pad-to-square | ✅ overlap multi-crop |
 | MoE expert sharding | — | — | ✅ (federated round-trip) |
 | Data-/pipeline-parallel | ✅ (trait + splice seam) | ✅ | ✅ |
