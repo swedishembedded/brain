@@ -50,6 +50,11 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         ("splice_bwd", kernels::SPLICE_BWD),             // 33
         ("gelu_erf_bwd", kernels::GELU_ERF_BWD),         // 34 (tau tok_feat bwd)
         ("tau_scale_ds", kernels::TAU_SCALE_DS),         // 35 (tau scale grad)
+        ("geglu_shift_da", kernels::GEGLU_SHIFT_DA),     // 36 (MoE expert dh)
+        ("geglu_shift_db", kernels::GEGLU_SHIFT_DB),     // 37 (MoE expert dg)
+        ("scale_add_dexp", kernels::SCALE_ADD_DEXP),     // 38 (MoE combine → d_expert)
+        ("scale_add_dgate", kernels::SCALE_ADD_DGATE),   // 39 (MoE combine → d_gate)
+        ("router_bwd", kernels::ROUTER_BWD),             // 40 (top-k softmax gate bwd)
     ]
 }
 
@@ -72,6 +77,11 @@ const K_EMB_BWD: usize = 32;
 const K_SPLICE_BWD: usize = 33;
 const K_GELU_ERF_BWD: usize = 34;
 const K_TAU_SCALE_DS: usize = 35;
+const K_GEGLU_DA: usize = 36;
+const K_GEGLU_DB: usize = 37;
+const K_SCALE_ADD_DEXP: usize = 38;
+const K_SCALE_ADD_DGATE: usize = 39;
+const K_ROUTER_BWD: usize = 40;
 
 /// Masked cross-entropy ignore index (matches the loaders' `-1 i32` as `u32`).
 pub const IGNORE: u32 = 0xFFFF_FFFF;
@@ -444,7 +454,6 @@ impl<'g> MoondreamBlock<'g> {
     /// prefix mask (masked positions have prob≈0 → contribute 0). d_x_in = d_out
     /// (the 3-way residual's identity path) + the LayerNorm input grad.
     pub fn backward(&self, x: &DeviceBuffer, d_out: &DeviceBuffer, gr: &MoondreamBlockGrads, d_x_in: &DeviceBuffer) {
-        assert!(self.moe.is_none(), "MoE-expert backward is a follow-up");
         let g = self.gpu;
         let (t, d, nh, hd, ff) = (self.t, self.d, self.n_heads, self.head_dim, self.ff);
         let stride3 = 3 * d;
@@ -462,14 +471,18 @@ impl<'g> MoondreamBlock<'g> {
         let d_xln = g.storage((t * d) as u64);
         let mut s: Vec<Step> = Vec::new();
 
-        // --- MLP branch: d_out → d_ln (overwrite) ---
-        s.push(g.step(K_MATMUL_DX, &[d_out, self.wb("mlp.fc2.weight"), &d_h2], &[t, ff, d, 0], t * ff));
-        s.push(g.step(K_MATMUL_DW, &[d_out, &self.h2, &gr.fc2_w], &[t, ff, d], d * ff));
-        s.push(g.step(K_BIAS_GRAD, &[d_out, &gr.fc2_b], &[t, d], d));
-        s.push(g.step(K_GELU_BWD, &[&self.h, &d_h2, &d_h], &[t * ff], t * ff)); // tanh gelu
-        s.push(g.step(K_MATMUL_DX, &[&d_h, self.wb("mlp.fc1.weight"), &d_ln], &[t, d, ff, 0], t * d));
-        s.push(g.step(K_MATMUL_DW, &[&d_h, &self.l_in, &gr.fc1_w], &[t, d, ff], ff * d));
-        s.push(g.step(K_BIAS_GRAD, &[&d_h, &gr.fc1_b], &[t, ff], ff));
+        // --- FFN branch → d_ln (overwrite): dense MLP or MoE experts. ---
+        if let Some(moe) = &self.moe {
+            moe.backward(&self.l_in, d_out, gr.moe.as_ref().expect("moe grads required for a MoE block"), &d_ln);
+        } else {
+            s.push(g.step(K_MATMUL_DX, &[d_out, self.wb("mlp.fc2.weight"), &d_h2], &[t, ff, d, 0], t * ff));
+            s.push(g.step(K_MATMUL_DW, &[d_out, &self.h2, &gr.fc2_w], &[t, ff, d], d * ff));
+            s.push(g.step(K_BIAS_GRAD, &[d_out, &gr.fc2_b], &[t, d], d));
+            s.push(g.step(K_GELU_BWD, &[&self.h, &d_h2, &d_h], &[t * ff], t * ff)); // tanh gelu
+            s.push(g.step(K_MATMUL_DX, &[&d_h, self.wb("mlp.fc1.weight"), &d_ln], &[t, d, ff, 0], t * d));
+            s.push(g.step(K_MATMUL_DW, &[&d_h, &self.l_in, &gr.fc1_w], &[t, d, ff], ff * d));
+            s.push(g.step(K_BIAS_GRAD, &[&d_h, &gr.fc1_b], &[t, ff], ff));
+        }
 
         // --- attention branch → d_qkv (grad of attn_qkv, pre-RoPE) ---
         s.push(g.step(K_MATMUL_DX, &[d_out, self.wb("attn.proj.weight"), &d_ctx], &[t, d, d, 0], t * d));
@@ -561,6 +574,8 @@ pub struct MoondreamBlockGrads {
     pub fc2_b: DeviceBuffer,
     /// Present for tau blocks: grads of the attention-temperature head.
     pub tau: Option<TauGrads>,
+    /// Present for MoE blocks (replaces the dense fc1/fc2 grads).
+    pub moe: Option<MoeGrads>,
 }
 
 /// Gradient buffers for the per-head attention-temperature head (`attn.tau.*`).
@@ -585,6 +600,7 @@ impl MoondreamBlockGrads {
             fc2_w: z(d * ff),
             fc2_b: z(d),
             tau: None,
+            moe: None,
         }
     }
 
@@ -592,6 +608,12 @@ impl MoondreamBlockGrads {
     pub fn with_tau(mut self, g: &Gpu, nh: u32, d: u32) -> MoondreamBlockGrads {
         let z = |n: u32| g.storage_init("md.tg", &vec![0.0f32; n as usize]);
         self.tau = Some(TauGrads { wq: z(nh * 3 * d), wv: z(nh * 3 * d), alpha: z(nh) });
+        self
+    }
+
+    /// Add zeroed MoE grads (router + `e` experts) for a MoE block.
+    pub fn with_moe(mut self, g: &Gpu, d: u32, inner: u32, e: u32) -> MoondreamBlockGrads {
+        self.moe = Some(MoeGrads::new(g, d, inner, e));
         self
     }
 }
@@ -663,6 +685,86 @@ impl<'g> MoeFfn<'g> {
     /// Number of output elements (`t·d`).
     pub fn numel(&self) -> usize {
         (self.t * self.d) as usize
+    }
+
+    /// MoE backward: from the mixed-output grad `d_out` (= the block's `d_out`, since
+    /// the MoE output is a residual branch), fill `gr` and write the input grad into
+    /// `d_xn` (the shared-LN branch grad — its first write overwrites, so `d_xn` need
+    /// not be pre-zeroed). Per expert the forward is recomputed (the scratch isn't
+    /// cached per-expert), then: combine bwd (`scale_add_dexp/dgate`) → `w_down` →
+    /// `geglu_shift_da/db` → `w_h`/`w_g`. Finally the router (`router_bwd`, no aux/z
+    /// loss) → `router.weight`. Assumes `forward` ran (for `logits`/`gate`).
+    pub fn backward(&self, xn: &DeviceBuffer, d_out: &DeviceBuffer, gr: &MoeGrads, d_xn: &DeviceBuffer) {
+        let (t, d, inner, e) = (self.t, self.d, self.inner, self.e);
+        let g = self.gpu;
+        let d_gate = g.storage((t * e) as u64);
+        for ei in 0..e {
+            let ep = |leaf: &str| self.wb(&format!("experts.{ei}.{leaf}"));
+            let eg = &gr.experts[ei as usize];
+            let d_eout = g.storage((t * d) as u64);
+            let d_act = g.storage((t * inner) as u64);
+            let d_h = g.storage((t * inner) as u64);
+            let d_g = g.storage((t * inner) as u64);
+            let acc_first = if ei == 0 { 0 } else { 1 }; // first expert's w_h dx overwrites d_xn
+            g.submit(
+                &[],
+                &[
+                    // Recompute this expert's forward (h, g, act, eout).
+                    g.step(0, &[xn, ep("w_h.weight"), &self.h], &[t, d, inner], t * inner),
+                    g.step(0, &[xn, ep("w_g.weight"), &self.g], &[t, d, inner], t * inner),
+                    g.step(2, &[&self.h, &self.g, &self.act], &[t * inner], t * inner),
+                    g.step(0, &[&self.act, ep("w_down.weight"), &self.eout], &[t, inner, d], t * d),
+                    // Combine bwd: d_eout = gate[:,ei]·d_out; d_gate[:,ei] = Σ_c eout·d_out.
+                    g.step(K_SCALE_ADD_DEXP, &[&self.gate, d_out, &d_eout], &[t, d, e, ei], t * d),
+                    g.step(K_SCALE_ADD_DGATE, &[&self.eout, d_out, &d_gate], &[t, d, e, ei], t),
+                    // w_down bwd.
+                    g.step(K_MATMUL_DX, &[&d_eout, ep("w_down.weight"), &d_act], &[t, inner, d, 0], t * inner),
+                    g.step(K_MATMUL_DW, &[&d_eout, &self.act, &eg.w_down], &[t, inner, d], d * inner),
+                    // geglu_shift bwd: dh = d_act·(g+1)·gelu′(h); dg = d_act·gelu_erf(h).
+                    g.step(K_GEGLU_DA, &[&d_act, &self.g, &self.h, &d_h], &[t * inner], t * inner),
+                    g.step(K_GEGLU_DB, &[&d_act, &self.h, &d_g], &[t * inner], t * inner),
+                    // w_h / w_g bwd; d_xn accumulates over experts.
+                    g.step(K_MATMUL_DX, &[&d_h, ep("w_h.weight"), d_xn], &[t, d, inner, acc_first], t * d),
+                    g.step(K_MATMUL_DW, &[&d_h, xn, &eg.w_h], &[t, d, inner], inner * d),
+                    g.step(K_MATMUL_DX, &[&d_g, ep("w_g.weight"), d_xn], &[t, d, inner, 1], t * d),
+                    g.step(K_MATMUL_DW, &[&d_g, xn, &eg.w_g], &[t, d, inner], inner * d),
+                ],
+            );
+        }
+        // Router bwd (no load-balance / z-loss for finetune): d_gate → d_logits → xn.
+        let d_logits = g.storage((t * e) as u64);
+        let fe = g.storage_init("md.fe", &vec![0.0f32; e as usize]);
+        g.submit(
+            &[],
+            &[
+                g.step(K_ROUTER_BWD, &[&self.logits, &self.gate, &d_gate, &fe, &d_logits], &[t, e, self.top_k, 0, f(0.0), f(0.0)], t),
+                g.step(K_MATMUL_DX, &[&d_logits, self.wb("router.weight"), d_xn], &[t, d, e, 1], t * d),
+                g.step(K_MATMUL_DW, &[&d_logits, xn, &gr.router], &[t, d, e], e * d),
+            ],
+        );
+    }
+}
+
+/// Gradient buffers for one MoE expert (`w_h`/`w_g` `[inner,d]`, `w_down` `[d,inner]`).
+pub struct MoeExpertGrads {
+    pub w_h: DeviceBuffer,
+    pub w_g: DeviceBuffer,
+    pub w_down: DeviceBuffer,
+}
+
+/// Gradient buffers for an [`MoeFfn`] (router + per-expert), zeroed on build.
+pub struct MoeGrads {
+    pub router: DeviceBuffer,
+    pub experts: Vec<MoeExpertGrads>,
+}
+
+impl MoeGrads {
+    pub fn new(g: &Gpu, d: u32, inner: u32, e: u32) -> MoeGrads {
+        let z = |n: u32| g.storage_init("md.moeg", &vec![0.0f32; n as usize]);
+        MoeGrads {
+            router: z(e * d),
+            experts: (0..e).map(|_| MoeExpertGrads { w_h: z(inner * d), w_g: z(inner * d), w_down: z(d * inner) }).collect(),
+        }
     }
 }
 
@@ -832,6 +934,76 @@ mod tests {
             wm2.get_mut("attn.tau.wq").unwrap()[j] -= eps;
             let num = (loss(&wp, &x_host) - loss(&wm2, &x_host)) / (2.0 * eps);
             assert!(ok(g_wq[j], num), "d tau.wq[{j}]: analytic {} vs numeric {}", g_wq[j], num);
+        }
+    }
+
+    #[test]
+    fn moe_block_backward_matches_finite_diff() {
+        // Gradcheck the MoE FFN branch backward inside the parallel block: input grad
+        // exercises experts (geglu_shift + w_h/w_g/w_down) + router; an expert weight
+        // and a router weight cover those paths.
+        let gpu = Gpu::new_cpu(pipelines());
+        let (t, d, nh, hd, ff, prefix, rot, theta) = (5u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32, 1.5e6f32);
+        let (inner, e, top_k) = (6u32, 3u32, 2u32);
+        let mut rng = Rng::new(31);
+        let bw = block_weights(d, ff, &mut rng);
+        let mut mw = HashMap::new();
+        {
+            let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.4).collect::<Vec<f32>>();
+            mw.insert("router.weight".to_string(), r((e * d) as usize));
+            for ei in 0..e {
+                mw.insert(format!("experts.{ei}.w_h.weight"), r((inner * d) as usize));
+                mw.insert(format!("experts.{ei}.w_g.weight"), r((inner * d) as usize));
+                mw.insert(format!("experts.{ei}.w_down.weight"), r((d * inner) as usize));
+            }
+        }
+        let n = (t * d) as usize;
+        let x_host: Vec<f32> = (0..n).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
+
+        let build = |bwm: &HashMap<String, Vec<f32>>, mwm: &HashMap<String, Vec<f32>>| -> MoondreamBlock {
+            let moe = MoeFfn::new(&gpu, mwm, t, d, inner, e, top_k);
+            MoondreamBlock::new(&gpu, bwm, t, d, nh, hd, ff, prefix, rot, theta).with_moe(moe)
+        };
+        let blk = build(&bw, &mw);
+        let xb = gpu.storage_init("x", &x_host);
+        let _ = blk.forward(&xb);
+        let d_out = gpu.storage_init("dout", &vec![1.0f32; n]);
+        let gr = MoondreamBlockGrads::new(&gpu, d, ff).with_moe(&gpu, d, inner, e);
+        let d_x = gpu.storage((t * d) as u64);
+        blk.backward(&xb, &d_out, &gr, &d_x);
+        let dx = gpu.read(&d_x, n);
+        let mg = gr.moe.as_ref().unwrap();
+        let g_wh0 = gpu.read(&mg.experts[0].w_h, (inner * d) as usize);
+        let g_router = gpu.read(&mg.router, (e * d) as usize);
+
+        let loss = |mwm: &HashMap<String, Vec<f32>>, xh: &[f32]| -> f32 {
+            let b = build(&bw, mwm);
+            let xbb = gpu.storage_init("x", xh);
+            gpu.read(b.forward(&xbb), n).iter().sum::<f32>()
+        };
+        let eps = 1e-3f32;
+        let ok = |a: f32, num: f32| (a - num).abs() <= 4e-3 + 8e-2 * num.abs();
+
+        for &i in &[0usize, 7, 13, 21, 33, 44] {
+            let (mut xp, mut xm) = (x_host.clone(), x_host.clone());
+            xp[i] += eps;
+            xm[i] -= eps;
+            let num = (loss(&mw, &xp) - loss(&mw, &xm)) / (2.0 * eps);
+            assert!(ok(dx[i], num), "d_x[{i}]: analytic {} vs numeric {}", dx[i], num);
+        }
+        for &j in &[0usize, 17, 40] {
+            let (mut mp, mut mm) = (mw.clone(), mw.clone());
+            mp.get_mut("experts.0.w_h.weight").unwrap()[j] += eps;
+            mm.get_mut("experts.0.w_h.weight").unwrap()[j] -= eps;
+            let num = (loss(&mp, &x_host) - loss(&mm, &x_host)) / (2.0 * eps);
+            assert!(ok(g_wh0[j], num), "d expert0.w_h[{j}]: analytic {} vs numeric {}", g_wh0[j], num);
+        }
+        for &j in &[0usize, 20, 40] {
+            let (mut mp, mut mm) = (mw.clone(), mw.clone());
+            mp.get_mut("router.weight").unwrap()[j] += eps;
+            mm.get_mut("router.weight").unwrap()[j] -= eps;
+            let num = (loss(&mp, &x_host) - loss(&mm, &x_host)) / (2.0 * eps);
+            assert!(ok(g_router[j], num), "d router[{j}]: analytic {} vs numeric {}", g_router[j], num);
         }
     }
 
