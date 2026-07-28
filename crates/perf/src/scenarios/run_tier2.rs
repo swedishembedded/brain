@@ -262,12 +262,39 @@ pub fn run_frontend(device_rate: Option<f64>, iters: usize, opt: &Options) -> Re
     }
     stages.push(tpl);
 
+    // Tokenise/detokenise — the REAL GPT-2 BPE on its embedded assets (I):
+    // the same code `brain data gpt` ships, so the per-token host cost is a
+    // measurement of the pipeline, not of a stand-in. Units are tokens, which
+    // is what `cores_per_device` compares against the device's token rate.
+    {
+        use data::tokenizer::Tokenizer;
+        let bpe = data::bpe::Gpt2Bpe::new();
+        let text = "Summarise the following document in three bullet points, \
+                    quoting the relevant sections verbatim and preserving any \
+                    numeric values exactly as they appear in the source text. "
+            .repeat(8);
+        let mut tok = StageResult::new(Stage::Tokenise);
+        let mut detok = StageResult::new(Stage::Detokenise);
+        for _ in 0..n {
+            let t = Instant::now();
+            let ids = bpe.encode(&text);
+            tok.record(t.elapsed().as_secs_f64() * 1e6, ids.len());
+            let t = Instant::now();
+            let s = bpe.decode(&ids);
+            detok.record(t.elapsed().as_secs_f64() * 1e6, ids.len());
+            std::hint::black_box(s);
+        }
+        stages.push(tok);
+        stages.push(detok);
+    }
+
     let mut report = Report { stages, device_artifacts_per_s: device_rate };
     art.performance = report.to_json();
     art.notes = Some(
-        "Covers the protocol/templating stages that have no model dependency. \
-         Tokenise/detokenise need a tokenizer file and image/audio decode need a \
-         media input; those stages are absent rather than reported as free."
+        "Protocol, templating and REAL GPT-2 BPE tokenise/detokenise (embedded \
+         assets — the shipping code path). Image decode and audio resample \
+         need a media input and are absent rather than reported as free; the \
+         Qwen tokenizer needs its vocab file and is likewise absent."
             .into(),
     );
     Ok(art)
@@ -378,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn frontend_does_not_claim_stages_it_did_not_run() {
+    fn frontend_measures_real_tokeniser_and_omits_media_stages() {
         let art = run_frontend(None, 16, &opt()).unwrap();
         let names: Vec<&str> = art.performance["stages"]
             .as_array()
@@ -386,7 +413,10 @@ mod tests {
             .iter()
             .map(|s| s["stage"].as_str().unwrap())
             .collect();
-        assert!(!names.contains(&"tokenise"), "absent stages must be absent, not zero-cost");
-        assert!(art.notes.as_ref().unwrap().contains("tokenizer"));
+        // The REAL GPT-2 BPE runs (embedded assets, no file needed)...
+        assert!(names.contains(&"tokenise") && names.contains(&"detokenise"));
+        // ...while stages needing external inputs stay absent, never zero-cost.
+        assert!(!names.contains(&"image_decode") && !names.contains(&"audio_resample"));
+        assert!(art.notes.as_ref().unwrap().contains("absent rather than reported as free"));
     }
 }

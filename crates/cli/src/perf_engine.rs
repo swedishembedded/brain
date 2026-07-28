@@ -401,7 +401,16 @@ pub fn run_placement(paths: &[String]) -> Result<Artifact, String> {
     art.notes = Some(
         "Analyses artifacts from separate runs because `--device` is process-global: \
          one process cannot switch backends mid-run. Produce the inputs with \
-         `brain perf run sweep --device <spec> --out <file>` per device."
+         `brain perf run sweep --device <spec> --out <file>` per device. \
+         Scope (H): this measures per-device rates and the oracle gap for \
+         MULTI-MODEL placement — which model should live on which device — \
+         because that is the placement decision brain actually makes \
+         (residency schedules whole models across devices). Single-model \
+         cross-device execution does not exist: `--device gpu,cpu` makes both \
+         schedulable for DIFFERENT models, so per-layer placement numbers \
+         would describe an engine capability brain does not have; they become \
+         meaningful only once inference-side pipeline parallelism lands on \
+         the `model::shard` seam."
             .into(),
     );
     Ok(art)
