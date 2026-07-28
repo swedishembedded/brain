@@ -578,6 +578,8 @@ pub const SPLAT_TILE_RANGES: &str = include_str!("../wgsl/splat_tile_ranges.wgsl
 pub const SPLAT_UNPACK: &str = include_str!("../wgsl/splat_unpack.wgsl");
 /// `wgsl/splice.wgsl`
 pub const SPLICE: &str = include_str!("../wgsl/splice.wgsl");
+/// `wgsl/splice_add.wgsl`
+pub const SPLICE_ADD: &str = include_str!("../wgsl/splice_add.wgsl");
 /// `wgsl/splice_bwd.wgsl`
 pub const SPLICE_BWD: &str = include_str!("../wgsl/splice_bwd.wgsl");
 /// `wgsl/tanh_act.wgsl`
@@ -884,6 +886,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("splat_tile_ranges", SPLAT_TILE_RANGES),
     ("splat_unpack", SPLAT_UNPACK),
     ("splice", SPLICE),
+    ("splice_add", SPLICE_ADD),
     ("splice_bwd", SPLICE_BWD),
     ("tanh_act", TANH_ACT),
     ("tanh_act_bwd", TANH_ACT_BWD),

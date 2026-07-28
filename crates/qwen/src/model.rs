@@ -95,6 +95,9 @@ const SPLICE_BWD: usize = 46;
 // Table-driven RoPE for the interleaved M-RoPE path (Qwen3-VL). Off unless
 // `enable_mrope` was called; replaces the analytic rope_base on q/k.
 const ROPE2D: usize = 47;
+// DeepStack residual add (Qwen3-VL): adds a level's merged vision features into
+// the residual at the image rows after a layer. Off unless `enable_deepstack`.
+const SPLICE_ADD: usize = 48;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -145,6 +148,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("splice", kernels::SPLICE),
     ("splice_bwd", kernels::SPLICE_BWD),
     ("rope2d", kernels::ROPE2D),
+    ("splice_add", kernels::SPLICE_ADD),
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
@@ -272,6 +276,13 @@ pub struct Qwen {
     mrope: Cell<bool>,
     mrope_cos: DeviceBuffer,
     mrope_sin: DeviceBuffer,
+
+    // DeepStack (Qwen3-VL): `(row0, n_rows, n_levels)` and one `[n_rows·d]` buffer
+    // per level. When set, level `l`'s features are added into the residual at the
+    // image rows right after decoder layer `l` (for `l < n_levels`). Write each
+    // level via `write_deepstack`.
+    deepstack: Cell<Option<(u32, u32, u32)>>,
+    deepstack_bufs: Vec<DeviceBuffer>,
     proj: DeviceBuffer,
     mlp_out: DeviceBuffer,
     scores: DeviceBuffer,
@@ -543,6 +554,8 @@ impl Qwen {
             mrope: Cell::new(false),
             mrope_cos: st(1),
             mrope_sin: st(1),
+            deepstack: Cell::new(None),
+            deepstack_bufs: Vec::new(),
             proj: st(n * d),
             mlp_out: st(n * d),
             scores: st(bht2),
@@ -836,6 +849,13 @@ impl Qwen {
                 self.lora_fwd(&mut s, "down", &lb.h, &p("mlp.down.weight"), &self.mlp_out, n, ff, d);
             }
             s.push(self.gpu.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[n * d], n * d));
+            // DeepStack: add level `l`'s merged vision features into the image rows
+            // of this layer's output (level i -> layer i), for l < n_levels.
+            if let Some((row0, n_rows, nl)) = self.deepstack.get() {
+                if self.shard.embed && (l as u32) < nl {
+                    s.push(self.gpu.step(SPLICE_ADD, &[&self.deepstack_bufs[l], &self.res[l + 1]], &[n_rows * d, row0 * d], n_rows * d));
+                }
+            }
         }
 
         // Head epilogue (final norm + lm_head + CE): only the head stage.
@@ -1086,6 +1106,27 @@ impl Qwen {
     pub fn write_mrope_tables(&self, cos: &[f32], sin: &[f32]) {
         self.gpu.write(&self.mrope_cos, bytemuck::cast_slice(cos));
         self.gpu.write(&self.mrope_sin, bytemuck::cast_slice(sin));
+    }
+
+    // ---- DeepStack seam (Qwen3-VL) ----
+
+    /// Enable DeepStack: `n_levels` merged vision-feature buffers (each `[n_rows,
+    /// d_model]`) added into the image rows `[row0, row0+n_rows)` right after
+    /// decoder layers `0..n_levels`. Allocates the level buffers and rebuilds the
+    /// forward graph. The add is linear, so the decoder's parameter backward is
+    /// unchanged (no backward step is emitted); a full-tower finetune would gather
+    /// the residual grad at the image rows for the DeepStack merger grads.
+    pub fn enable_deepstack(&mut self, row0: u32, n_rows: u32, n_levels: u32) {
+        let sz = (n_rows * self.cfg.d_model) as u64;
+        self.deepstack_bufs = (0..n_levels).map(|_| self.gpu.storage(sz)).collect();
+        self.deepstack.set(Some((row0, n_rows, n_levels)));
+        self.fwd_steps = self.forward_steps(self.b, self.t);
+    }
+
+    /// Write DeepStack level `level`'s merged features `[n_rows, d_model]` for the
+    /// next forward.
+    pub fn write_deepstack(&self, level: usize, data: &[f32]) {
+        self.gpu.write(&self.deepstack_bufs[level], bytemuck::cast_slice(data));
     }
     /// Run the backward graph. The head stage refreshes the CE-grad uniform first
     /// (it drives `ce_grad_stats`); other stages consume `dres[end]` written by
