@@ -45,6 +45,9 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         ("attn_bwd_dq_cross", kernels::ATTN_BWD_DQ_CROSS), // 28
         ("attn_bwd_dk_cross", kernels::ATTN_BWD_DK_CROSS), // 29
         ("rope_partial_bwd", kernels::ROPE_PARTIAL_BWD), // 30
+        ("ce_grad_masked", kernels::CE_GRAD_MASKED),     // 31
+        ("emb_bwd", kernels::EMB_BWD),                   // 32
+        ("splice_bwd", kernels::SPLICE_BWD),             // 33
     ]
 }
 
@@ -62,6 +65,9 @@ const K_ATTN_DV: usize = 27;
 const K_ATTN_DQ: usize = 28;
 const K_ATTN_DK: usize = 29;
 const K_ROPE_PARTIAL_BWD: usize = 30;
+const K_CE_GRAD: usize = 31;
+const K_EMB_BWD: usize = 32;
+const K_SPLICE_BWD: usize = 33;
 
 /// Masked cross-entropy ignore index (matches the loaders' `-1 i32` as `u32`).
 pub const IGNORE: u32 = 0xFFFF_FFFF;
@@ -157,6 +163,86 @@ impl<'g> MoondreamDecoder<'g> {
         let ce = g.read(&self.ce, t as usize);
         let count = targets.iter().filter(|&&x| x != IGNORE).count().max(1) as f32;
         ce.iter().sum::<f32>() / count
+    }
+
+    /// Decoder backward (dense blocks): from the cached forward (call `forward`
+    /// first), fill every grad in `gr`. Chain: CE → lm_head → post-LN → blocks in
+    /// reverse (each `MoondreamBlock::backward`, threading the residual-stream grad)
+    /// → splice (image rows → `d_image_embeds`, zeroed in the residual grad) →
+    /// embedding (text rows → `tok.weight`). Requires all blocks dense/no-tau.
+    pub fn backward(&self, targets: &[u32], gr: &MoondreamDecoderGrads) {
+        let g = self.gpu;
+        let (t, d, v) = (self.t, self.d, self.vocab);
+        let count = targets.iter().filter(|&&x| x != IGNORE).count().max(1) as f32;
+        let d_logits = g.storage((t * v) as u64);
+        let d_normed = g.storage((t * d) as u64);
+        let d_last = g.storage((t * d) as u64);
+        let mean = g.storage(t as u64);
+        let inv = g.storage(t as u64);
+        let last_out = self.blocks.last().map(|b| b.output()).unwrap_or(&self.res);
+
+        // CE → d_logits; lm_head (bias/weight/input); post-LN → d_last.
+        g.submit(
+            &[],
+            &[
+                g.step(K_CE_GRAD, &[&self.logits, &self.targets, &d_logits], &[t, v, IGNORE, f(count)], t * v),
+                g.step(K_BIAS_GRAD, &[&d_logits, &gr.lm_head_b], &[t, v], v),
+                g.step(K_MATMUL_DW, &[&d_logits, &self.normed, &gr.lm_head_w], &[t, d, v], v * d),
+                g.step(K_MATMUL_DX, &[&d_logits, self.wb("lm_head.weight"), &d_normed], &[t, d, v, 0], t * d),
+                g.step(K_LN_STATS, &[last_out, &mean, &inv], &[d, t, f(LN_EPS)], t),
+                g.step(K_LN_DGAMMA, &[&d_normed, last_out, &mean, &inv, &gr.post_ln_w], &[d, t], d),
+                g.step(K_LN_DBETA, &[&d_normed, &gr.post_ln_b], &[d, t], d),
+                g.step(K_LN_DX, &[last_out, self.wb("post_ln.weight"), &d_normed, &d_last], &[d, t, f(LN_EPS)], t),
+            ],
+        );
+
+        // Blocks in reverse, threading the residual-stream grad (each submits itself).
+        let n = self.blocks.len();
+        let mut d_cur = d_last;
+        for i in (0..n).rev() {
+            let x_in = if i == 0 { &self.res } else { self.blocks[i - 1].output() };
+            let d_in = g.storage((t * d) as u64);
+            self.blocks[i].backward(x_in, &d_cur, &gr.blocks[i], &d_in);
+            d_cur = d_in;
+        }
+        // d_cur is now the grad of `res`. Route image rows → d_image_embeds (and zero
+        // them in d_cur), then scatter the text rows into tok.weight.
+        g.submit(
+            &[],
+            &[
+                g.step(K_SPLICE_BWD, &[&d_cur, &gr.d_image_embeds], &[self.n_img * d, d], self.n_img * d),
+                g.step(K_EMB_BWD, &[&self.tokens, &d_cur, &gr.tok_w], &[t, d, v], v * d),
+            ],
+        );
+    }
+}
+
+/// All gradient buffers for a dense [`MoondreamDecoder`] (per-block grads + the
+/// decoder-level embedding/head grads + the spliced image-embedding grad).
+pub struct MoondreamDecoderGrads {
+    pub blocks: Vec<MoondreamBlockGrads>,
+    pub tok_w: DeviceBuffer,
+    pub post_ln_w: DeviceBuffer,
+    pub post_ln_b: DeviceBuffer,
+    pub lm_head_w: DeviceBuffer,
+    pub lm_head_b: DeviceBuffer,
+    /// Grad w.r.t. the spliced image embeddings `[n_img, d]` (the connector output).
+    pub d_image_embeds: DeviceBuffer,
+}
+
+impl MoondreamDecoderGrads {
+    /// Allocate zeroed grads for a dense decoder of the given shape.
+    pub fn new(g: &Gpu, n_layers: u32, d: u32, ff: u32, vocab: u32, n_img: u32) -> MoondreamDecoderGrads {
+        let z = |n: u32| g.storage_init("md.dg", &vec![0.0f32; n as usize]);
+        MoondreamDecoderGrads {
+            blocks: (0..n_layers).map(|_| MoondreamBlockGrads::new(g, d, ff)).collect(),
+            tok_w: z(vocab * d),
+            post_ln_w: z(d),
+            post_ln_b: z(d),
+            lm_head_w: z(vocab * d),
+            lm_head_b: z(vocab),
+            d_image_embeds: z(n_img * d),
+        }
     }
 }
 
@@ -336,6 +422,12 @@ impl<'g> MoondreamBlock<'g> {
     }
     pub fn numel(&self) -> usize {
         (self.t * self.d) as usize
+    }
+
+    /// The block's output buffer (the residual-stream slice it produced), valid
+    /// after `forward`. Used as the next block's cached input during backward.
+    pub fn output(&self) -> &DeviceBuffer {
+        &self.out
     }
 
     /// Dense-block backward (no tau, no MoE): from the output grad `d_out`, fill the
@@ -606,6 +698,84 @@ mod tests {
             wm2.get_mut("ln.weight").unwrap()[j] -= eps;
             let num = (loss(&wp, &x_host) - loss(&wm2, &x_host)) / (2.0 * eps);
             assert!(ok(g_ln_w[j], num), "d ln.w[{j}]: analytic {} vs numeric {}", g_ln_w[j], num);
+        }
+    }
+
+    #[test]
+    fn check_moondream_dense_decoder_backward() {
+        // End-to-end gradcheck of the dense decoder backward: loss = mean masked CE.
+        // The image-embed grad exercises splice_bwd → the full block chain → head;
+        // lm_head.bias and tok.weight grads cover the head + embedding-scatter paths.
+        let gpu = Gpu::new_cpu(pipelines());
+        let (t, d, nh, hd, ff, vocab, n_img, prefix, rot, theta, nl) = (7u32, 16u32, 2u32, 8u32, 32u32, 19u32, 3u32, 4u32, 4u32, 1.5e6f32, 2u32);
+        let mut rng = Rng::new(15);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.3).collect::<Vec<f32>>();
+        let mut w = HashMap::new();
+        w.insert("tok.weight".to_string(), r((vocab * d) as usize));
+        w.insert("post_ln.weight".to_string(), vec![1.0; d as usize]);
+        w.insert("post_ln.bias".to_string(), r(d as usize));
+        w.insert("lm_head.weight".to_string(), r((vocab * d) as usize));
+        w.insert("lm_head.bias".to_string(), r(vocab as usize));
+        let img: Vec<f32> = r((n_img * d) as usize); // last use of `r` before rng is reborrowed
+        drop(r);
+        for l in 0..nl {
+            for (k, v) in block_weights(d, ff, &mut rng) {
+                w.insert(format!("blocks.{l}.{k}"), v);
+            }
+        }
+        let tokens = vec![0u32, 5, 5, 5, 7, 9, 11]; // bos + 3 image + 3 text
+        let mut targets = vec![5u32, 0, 0, 0, 9, 11, 13];
+        for tg in targets.iter_mut().take(1 + n_img as usize).skip(1) {
+            *tg = IGNORE; // image rows unsupervised
+        }
+
+        let build = |wm: &HashMap<String, Vec<f32>>| -> MoondreamDecoder {
+            let blocks = (0..nl)
+                .map(|l| {
+                    let bw: HashMap<String, Vec<f32>> = wm.iter().filter_map(|(k, v)| k.strip_prefix(&format!("blocks.{l}.")).map(|s| (s.to_string(), v.clone()))).collect();
+                    MoondreamBlock::new(&gpu, &bw, t, d, nh, hd, ff, prefix, rot, theta)
+                })
+                .collect();
+            MoondreamDecoder::new(&gpu, wm, blocks, t, d, vocab, n_img)
+        };
+
+        // Analytic grads.
+        let dec = build(&w);
+        let _ = dec.forward(&tokens, &targets, &img);
+        let gr = MoondreamDecoderGrads::new(&gpu, nl, d, ff, vocab, n_img);
+        dec.backward(&targets, &gr);
+        let d_img = gpu.read(&gr.d_image_embeds, (n_img * d) as usize);
+        let g_lmb = gpu.read(&gr.lm_head_b, vocab as usize);
+        let g_tok = gpu.read(&gr.tok_w, (vocab * d) as usize);
+
+        let loss = |wm: &HashMap<String, Vec<f32>>, im: &[f32]| -> f32 { build(wm).forward(&tokens, &targets, im) };
+        let eps = 1e-3f32;
+        let ok = |a: f32, num: f32| (a - num).abs() <= 4e-3 + 8e-2 * num.abs();
+
+        // Image-embedding grad (splice → blocks → head).
+        for &i in &[0usize, 7, 13, 20, 33, 44] {
+            let (mut ip, mut im) = (img.clone(), img.clone());
+            ip[i] += eps;
+            im[i] -= eps;
+            let num = (loss(&w, &ip) - loss(&w, &im)) / (2.0 * eps);
+            assert!(ok(d_img[i], num), "d_image_embeds[{i}]: analytic {} vs numeric {}", d_img[i], num);
+        }
+        // lm_head.bias grad.
+        for &j in &[0usize, 9, 13] {
+            let (mut wp, mut wm2) = (w.clone(), w.clone());
+            wp.get_mut("lm_head.bias").unwrap()[j] += eps;
+            wm2.get_mut("lm_head.bias").unwrap()[j] -= eps;
+            let num = (loss(&wp, &img) - loss(&wm2, &img)) / (2.0 * eps);
+            assert!(ok(g_lmb[j], num), "d lm_head.bias[{j}]: analytic {} vs numeric {}", g_lmb[j], num);
+        }
+        // tok.weight grad on a supervised text token's row (token 7 at position 4).
+        for &c in &[0usize, 5, 11] {
+            let j = 7 * d as usize + c;
+            let (mut wp, mut wm2) = (w.clone(), w.clone());
+            wp.get_mut("tok.weight").unwrap()[j] += eps;
+            wm2.get_mut("tok.weight").unwrap()[j] -= eps;
+            let num = (loss(&wp, &img) - loss(&wm2, &img)) / (2.0 * eps);
+            assert!(ok(g_tok[j], num), "d tok.weight[{j}]: analytic {} vs numeric {}", g_tok[j], num);
         }
     }
 
