@@ -16,6 +16,7 @@
 //! STFT / mel-spectrogram features land in [`mel`] (built out for the speaker
 //! encoder in Phase 3).
 
+pub mod asr_frontend;
 pub mod conv;
 pub mod mel;
 pub mod wav;
