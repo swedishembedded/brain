@@ -97,6 +97,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("layernorm", kernels::LAYERNORM),
     ("gelu", kernels::GELU),
     ("gelu_erf", kernels::GELU_ERF),
+    ("gelu_erf_bwd", kernels::GELU_ERF_BWD),
     ("matmul", kernels::MATMUL),
     ("matmul_rows", kernels::MATMUL_ROWS),
     ("attn_scores_cross", kernels::ATTN_SCORES_CROSS),
@@ -191,6 +192,27 @@ impl ConvUnit {
         // SAFETY of lifetimes: `cur` borrows either self.conv.out(), self.biased,
         // or self.activated — all owned by `self`, so `'a` is valid.
         cur
+    }
+
+    /// Backward of [`forward`](Self::forward): from the output grad `d_out`, fill the
+    /// conv/BN/bias grads in `ps` and write the input grad into `d_in`. Reverse of
+    /// the epilogue (GELU → +bias) then the shared [`Conv::backward`] (BN + conv).
+    pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
+        let tot = self.out_shape.numel();
+        // GELU backward on the pre-activation (self.biased): d_out → d_biased.
+        let d_biased: &DeviceBuffer = if self.gelu {
+            ctx.gpu.submit(&[], &[ctx.step(kidx("gelu_erf_bwd"), &[&self.biased, d_out, &self.activated], &[tot], tot)]);
+            &self.activated // reuse the activation buffer as the grad staging
+        } else {
+            d_out
+        };
+        // Per-channel bias grad = Σ over (n, hw); the bias is additive so its grad
+        // passes straight through to the conv's output grad (d_biased == d_conv_out).
+        if let Some(b) = &self.bias_name {
+            let (nn, c, hw) = (self.out_shape.n, self.out_shape.c, self.out_shape.h * self.out_shape.w);
+            ctx.gpu.submit(&[], &[ctx.step(kidx("add_chan_bcast_dv"), &[d_biased, ps.g(b)], &[nn, c, hw], c)]);
+        }
+        self.conv.backward(ctx, ps, x_in, d_biased, d_in);
     }
 }
 
@@ -605,6 +627,64 @@ mod tests {
                 (n.clone(), v)
             })
             .collect()
+    }
+
+    #[test]
+    fn convunit_backward_matches_finite_diff() {
+        // Gradcheck the vision Conv backward primitive (conv2d_gd_dx/dw) + external
+        // per-channel bias + erf-GELU, via a no-BN ConvUnit. This is the FastViTHD
+        // conv-tower backward foundation (first in-tree gradcheck of Conv::backward).
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let in_shape = Shape::new(1, 4, 5, 5);
+        let unit = ConvUnit::new(&ctx, "cu", in_shape, 6, 3, 1, 1, 1, false, true, true);
+        let plist = unit.param_list();
+        let out_n = unit.out_shape().numel() as usize;
+        let mut rng = Rng::new(2);
+        let init = rand_init(&plist, &mut rng);
+        let x_host: Vec<f32> = (0..in_shape.numel() as usize).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
+
+        // Analytic grads.
+        let ps = ParamStore::new(&gpu, plist.clone(), &init);
+        ps.zero_grads(&gpu);
+        let xb = gpu.storage_init("x", &x_host);
+        let _ = unit.forward(&ctx, &ps, &xb);
+        let d_out = gpu.storage_init("dout", &vec![1.0f32; out_n]);
+        let d_in = gpu.storage(in_shape.numel() as u64);
+        unit.backward(&ctx, &ps, &xb, &d_out, &d_in);
+        let g_in = gpu.read(&d_in, in_shape.numel() as usize);
+        let g_w = ps.read_grad(&gpu, "cu.conv.weight");
+        let g_b = ps.read_grad(&gpu, "cu.bias");
+
+        let loss = |im: &HashMap<String, Vec<f32>>, xh: &[f32]| -> f32 {
+            let ps = ParamStore::new(&gpu, plist.clone(), im);
+            let xb = gpu.storage_init("x", xh);
+            gpu.read(unit.forward(&ctx, &ps, &xb), out_n).iter().sum::<f32>()
+        };
+        let eps = 1e-3f32;
+        let ok = |a: f32, num: f32| (a - num).abs() <= 4e-3 + 8e-2 * num.abs();
+
+        for &i in &[0usize, 13, 40, 55, 77, 99] {
+            let (mut xp, mut xm) = (x_host.clone(), x_host.clone());
+            xp[i] += eps;
+            xm[i] -= eps;
+            let num = (loss(&init, &xp) - loss(&init, &xm)) / (2.0 * eps);
+            assert!(ok(g_in[i], num), "d_in[{i}]: analytic {} vs numeric {}", g_in[i], num);
+        }
+        for &j in &[0usize, 50, 100, 200] {
+            let (mut ip, mut im) = (init.clone(), init.clone());
+            ip.get_mut("cu.conv.weight").unwrap()[j] += eps;
+            im.get_mut("cu.conv.weight").unwrap()[j] -= eps;
+            let num = (loss(&ip, &x_host) - loss(&im, &x_host)) / (2.0 * eps);
+            assert!(ok(g_w[j], num), "d weight[{j}]: analytic {} vs numeric {}", g_w[j], num);
+        }
+        for &j in &[0usize, 3, 5] {
+            let (mut ip, mut im) = (init.clone(), init.clone());
+            ip.get_mut("cu.bias").unwrap()[j] += eps;
+            im.get_mut("cu.bias").unwrap()[j] -= eps;
+            let num = (loss(&ip, &x_host) - loss(&im, &x_host)) / (2.0 * eps);
+            assert!(ok(g_b[j], num), "d bias[{j}]: analytic {} vs numeric {}", g_b[j], num);
+        }
     }
 
     #[test]
