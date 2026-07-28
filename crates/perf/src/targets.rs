@@ -186,6 +186,21 @@ impl PerfTarget for PagedLlmTarget {
                 rate.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
             ),
             ("kv_prefix_cached_blocks".into(), serde_json::json!(cached)),
+            // Device-op accounting (K): submits/dispatches/readbacks since the
+            // engine was built. Null where the backend does not count.
+            (
+                "device_ops".into(),
+                self.sched
+                    .device_stats()
+                    .map(|d| {
+                        serde_json::json!({
+                            "submits": d.submits,
+                            "dispatches": d.dispatches,
+                            "readbacks": d.readbacks,
+                        })
+                    })
+                    .unwrap_or(serde_json::Value::Null),
+            ),
         ]
     }
 

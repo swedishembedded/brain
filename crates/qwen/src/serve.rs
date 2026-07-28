@@ -946,6 +946,13 @@ impl Engine {
         (self.prefix_hit_tokens, self.prefix_lookup_tokens, self.prefix.len())
     }
 
+    /// Device-op accounting for this engine's handle (K) — what a benchmark
+    /// records so submit/dispatch/readback cost is machine-readable. `None`
+    /// where the backend does not count.
+    pub fn device_stats(&self) -> Option<gpu_core::DeviceStats> {
+        self.gpu.stats()
+    }
+
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         let (d, v) = (self.cfg.d_model as usize, self.cfg.vocab as usize);
         (0..v).map(|o| self.head[o * d..o * d + d].iter().zip(hidden).map(|(a, b)| a * b).sum()).collect()
@@ -1443,6 +1450,11 @@ impl Scheduler {
     /// Prefix-cache effectiveness — see [`Engine::prefix_stats`].
     pub fn prefix_stats(&self) -> (u64, u64, usize) {
         self.eng.prefix_stats()
+    }
+
+    /// Device-op accounting — see [`Engine::device_stats`].
+    pub fn device_stats(&self) -> Option<gpu_core::DeviceStats> {
+        self.eng.device_stats()
     }
 
     /// One scheduler iteration: admit waiting requests that fit (prefill + sample

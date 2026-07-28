@@ -395,9 +395,11 @@ pub struct WgpuBackend {
     /// which is a GPU pipeline barrier that serialises an integrated GPU.
     /// `Mutex` keeps `WgpuBackend: Sync`; it is only ever locked single-threaded.
     pending: std::sync::Mutex<Vec<WgpuStep>>,
-    /// `BRAIN_PROFILE` op counters: (uniform buffers, bind groups, submits,
-    /// dispatches, readbacks) — surfaces per-frame GPU resource churn / sync.
-    stats: Option<std::sync::atomic::AtomicU64>,
+    /// Whether `BRAIN_PROFILE` prints the op-count summary at drop. The
+    /// counters themselves are ALWAYS maintained (relaxed atomics, negligible
+    /// next to a dispatch) so `Backend::stats` is queryable on every run.
+    profile: bool,
+    stats_uniform: std::sync::atomic::AtomicU64,
     stats_bg: std::sync::atomic::AtomicU64,
     stats_submit: std::sync::atomic::AtomicU64,
     stats_dispatch: std::sync::atomic::AtomicU64,
@@ -431,10 +433,10 @@ struct GpuProfile {
 impl Drop for WgpuBackend {
     fn drop(&mut self) {
         use std::sync::atomic::Ordering::Relaxed;
-        if let Some(uni) = &self.stats {
+        if self.profile {
             eprintln!(
                 "=== GPU op counts (BRAIN_PROFILE) === uniforms={} bind_groups={} submits={} dispatches={} readbacks={}",
-                uni.load(Relaxed),
+                self.stats_uniform.load(Relaxed),
                 self.stats_bg.load(Relaxed),
                 self.stats_submit.load(Relaxed),
                 self.stats_dispatch.load(Relaxed),
@@ -511,14 +513,11 @@ impl WgpuBackend {
             self.shared.caps.clone(),
             self.shared.plcache.clone(),
         ));
-        let stats = profile_on.then(|| std::sync::atomic::AtomicU64::new(0));
-        WgpuBackend::from_shared(shared, stats)
+        WgpuBackend::from_shared(shared, profile_on)
     }
 
     pub fn share_device(&self) -> WgpuBackend {
-        let stats =
-            self.stats.as_ref().map(|_| std::sync::atomic::AtomicU64::new(0));
-        WgpuBackend::from_shared(self.shared.clone(), stats)
+        WgpuBackend::from_shared(self.shared.clone(), self.profile)
     }
 
     /// Blocking `count` backends on distinct physical cards (see [`new_multi_async`]).
@@ -682,12 +681,11 @@ impl WgpuBackend {
         // by the model at build time. The conv inner loops do ~1 load per
         // 2-3 FMAs, so the removed clamps are directly measurable.
         use std::sync::atomic::AtomicU64;
-        let stats = if profile_on { Some(AtomicU64::new(0)) } else { None };
         let caps = Self::query_caps(adapter, &info, &device);
         let plcache = PlCache::open(&device, adapter, &info).map(std::sync::Arc::new);
         let shared =
             std::sync::Arc::new(DeviceShared::compile(device, queue, kernels, want_ts, caps, plcache));
-        WgpuBackend::from_shared(shared, stats)
+        WgpuBackend::from_shared(shared, profile_on)
     }
 
     /// Fill [`backend_api::DeviceCaps`] from what wgpu can actually report.
@@ -755,15 +753,13 @@ impl WgpuBackend {
     }
 
     /// A fresh handle (own command stream) onto an already-built device.
-    fn from_shared(
-        shared: std::sync::Arc<DeviceShared>,
-        stats: Option<std::sync::atomic::AtomicU64>,
-    ) -> WgpuBackend {
+    fn from_shared(shared: std::sync::Arc<DeviceShared>, profile: bool) -> WgpuBackend {
         use std::sync::atomic::AtomicU64;
         WgpuBackend {
             shared,
             pending: std::sync::Mutex::new(Vec::new()),
-            stats,
+            profile,
+            stats_uniform: AtomicU64::new(0),
             stats_bg: AtomicU64::new(0),
             stats_submit: AtomicU64::new(0),
             stats_dispatch: AtomicU64::new(0),
@@ -792,9 +788,7 @@ impl WgpuBackend {
         #[cfg(not(target_arch = "wasm32"))]
         if self.shared.gpu_profile.is_some() {
             self.flush_profiled(&steps);
-            if self.stats.is_some() {
-                self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
+            self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return;
         }
         let mut enc = self
@@ -812,9 +806,7 @@ impl WgpuBackend {
             }
         }
         self.queue().submit(Some(enc.finish()));
-        if self.stats.is_some() {
-            self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The `BRAIN_PROFILE` timestamp flush: one compute pass PER dispatch, each
@@ -928,9 +920,7 @@ impl WgpuBackend {
     }
 
     fn uniform(&self, data: &[u32]) -> wgpu::Buffer {
-        if let Some(s) = &self.stats {
-            s.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        self.stats_uniform.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut bytes: Vec<u8> = bytemuck::cast_slice(data).to_vec();
         while bytes.len() % 16 != 0 {
             bytes.push(0);
@@ -977,9 +967,7 @@ impl WgpuBackend {
             layout: &layout,
             entries: &entries,
         });
-        if self.stats.is_some() {
-            self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (gx, gy) = backend_api::grid_ws(threads, self.wgsizes()[kind]);
         (kind, bg, gx, gy)
     }
@@ -1014,9 +1002,7 @@ impl WgpuBackend {
         }
         let layout = self.pipelines()[kind].get_bind_group_layout(0);
         let bg = self.device().create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &layout, entries: &entries });
-        if self.stats.is_some() {
-            self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        self.stats_bg.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (gx, gy) = backend_api::grid_ws(threads, self.wgsizes()[kind]);
         (kind, bg, gx, gy)
     }
@@ -1042,10 +1028,8 @@ impl WgpuBackend {
             self.queue().submit(Some(enc.finish()));
         }
         self.pending.lock().unwrap().extend(steps.iter().cloned());
-        if self.stats.is_some() {
-            self.stats_dispatch
-                .fetch_add(steps.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        }
+        self.stats_dispatch
+            .fetch_add(steps.len() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn write(&self, buf: &wgpu::Buffer, data: &[u32]) {
@@ -1078,9 +1062,7 @@ impl WgpuBackend {
     /// recv, which is impossible in a browser. Wasm uses `read_async`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn read(&self, buf: &wgpu::Buffer, n: usize) -> Vec<f32> {
-        if self.stats.is_some() {
-            self.stats_read.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        self.stats_read.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _io = self.shared.io.lock().unwrap_or_else(|e| e.into_inner());
         self.flush_inner(); // ensure all recorded compute is queued before the copy
         let staging = self.read_staging(buf, n);
@@ -1148,8 +1130,7 @@ impl backend_api::WeakBackend for WeakWgpu {
     fn upgrade(&self) -> Option<Box<dyn Backend>> {
         let shared = self.0.upgrade()?;
         let profile_on = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
-        let stats = profile_on.then(|| std::sync::atomic::AtomicU64::new(0));
-        Some(Box::new(WgpuBackend::from_shared(shared, stats)))
+        Some(Box::new(WgpuBackend::from_shared(shared, profile_on)))
     }
 }
 
@@ -1159,6 +1140,16 @@ impl Backend for WgpuBackend {
     }
     fn caps(&self) -> backend_api::DeviceCaps {
         self.shared.caps.clone()
+    }
+    fn stats(&self) -> Option<backend_api::DeviceStats> {
+        use std::sync::atomic::Ordering::Relaxed;
+        Some(backend_api::DeviceStats {
+            submits: self.stats_submit.load(Relaxed),
+            dispatches: self.stats_dispatch.load(Relaxed),
+            readbacks: self.stats_read.load(Relaxed),
+            bind_groups: self.stats_bg.load(Relaxed),
+            uniform_allocs: self.stats_uniform.load(Relaxed),
+        })
     }
     // Forward the device's real limit; without this override the trait default
     // (a fixed ~2 GiB) silently misreports the card — too small for a big-VRAM

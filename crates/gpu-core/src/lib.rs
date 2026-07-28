@@ -22,7 +22,9 @@
 //! wasm only the wgpu/WebGPU backend exists, so `Gpu` wraps it directly (no
 //! `dyn`, and async device init / read-back via `new_async` / `read_async`).
 
-pub use backend_api::{f, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, NumericSupport, Step};
+pub use backend_api::{
+    f, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceStats, NumericSupport, Step,
+};
 pub use backend_api::select;
 
 /// `--device` parsing and resolution: which compute is *schedulable*.
@@ -297,6 +299,13 @@ mod native_facade {
         /// Cached at backend construction; reading it is free.
         pub fn caps(&self) -> backend_api::DeviceCaps {
             self.inner.caps()
+        }
+
+        /// Device-op accounting for this handle (submits/dispatches/readbacks)
+        /// since creation. `None` where the backend does not count — report
+        /// null, never zero.
+        pub fn stats(&self) -> Option<backend_api::DeviceStats> {
+            self.inner.stats()
         }
 
         /// A weak handle for pools/fixtures — see [`WeakGpu`]. `None` when the

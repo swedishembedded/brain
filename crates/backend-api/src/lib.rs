@@ -388,6 +388,25 @@ pub trait Backend: Send + Sync {
     /// What this device can actually do — see [`DeviceCaps`]. Filled at
     /// construction; querying is a cached read, never a device round-trip.
     fn caps(&self) -> DeviceCaps;
+
+    /// Device-op accounting for THIS handle since its creation, if the backend
+    /// counts (relaxed atomics, negligible next to a dispatch). `None` = not
+    /// counted — a consumer must report null, never zero.
+    fn stats(&self) -> Option<DeviceStats> {
+        None
+    }
+}
+
+/// Per-handle device-op counters — the queryable form of what
+/// `BRAIN_PROFILE` used to print only to stderr. What a benchmark records so
+/// "how many submits/readbacks did this run cost" is machine-readable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeviceStats {
+    pub submits: u64,
+    pub dispatches: u64,
+    pub readbacks: u64,
+    pub bind_groups: u64,
+    pub uniform_allocs: u64,
 }
 
 /// wasm variant: no `Send + Sync` (WebGPU is single-threaded) and no blocking
