@@ -86,6 +86,7 @@ fn build_model(seed: u64) -> (Yolo, YoloConfig) {
 }
 
 #[test]
+#[ignore = "slow: ~60s finite-difference gradcheck — run via `make test/slow` or `make gradcheck`"]
 fn detection_loss_gradcheck_frozen_assignment() {
     let (model, _cfg) = build_model(7);
     // Freeze the assignment from the unperturbed forward; the gradcheck's +/- eps

@@ -119,7 +119,11 @@ release:
 # The timeout turns a deadlock into a fast, loud failure instead of an hour of
 # silence. Override any of these: TEST_THREADS=8 make test.
 TEST_THREADS ?= 1
-TEST_TIMEOUT ?= 900
+# The guard is a DEADLOCK detector, not a performance target: it must sit above
+# the measured serial run time (~950s across 240+ suites) so a completing suite
+# never reads as a hang. Making the suite faster is the slow-lane migration and
+# per-crate testgpu adoption, not a tighter timeout.
+TEST_TIMEOUT ?= 1500
 CARGO_TEST   ?= cargo test --release --offline
 
 # Build first WITHOUT the timeout, then run WITH it. The deadlock guard is a
