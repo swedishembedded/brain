@@ -20,6 +20,7 @@ mod glm_cli;
 mod gpt_cli;
 mod image_io;
 mod npu_cli;
+mod perf_cli;
 mod pid_cli;
 mod qwen_cli;
 mod resident;
@@ -55,9 +56,21 @@ brain — train and evaluate neural nets from scratch on the GPU (Rust + WGSL).
 USAGE: brain <command> [options]
 The model is selected by the command.
 
-Add --device cpu (or set BRAIN_DEVICE=cpu) to run any command on the native CPU
-backend (WGSL kernels JIT-compiled to native code across all cores, no GPU);
---device gpu (the default) uses wgpu. Both are built into the same binary.
+--device selects WHICH COMPUTE IS SCHEDULABLE. Omit it and brain uses every
+device on the machine — all GPUs, the CPU, and an NPU if present — scheduling
+models across them. Name devices to restrict the set (BRAIN_DEVICE does the same
+without a flag):
+
+  (omitted)     every device, scheduled together
+  cpu           CPU only, all cores          gpu       every GPU, nothing else
+  npu           NPU only                     vulkan    every GPU, native-Vulkan backend
+  gpu,cpu       GPUs and CPU together        gpu0      only physical GPU 0
+  gpu0,gpu1     those two cards              cpu21     only CPU core 21
+  cpu0-7        CPU cores 0..=7              gpu1,cpu0-3   one card plus four cores
+
+Indexed CPU selections pin process affinity and size the thread pool to match.
+This bounds where work EXECUTES; host RAM and disk remain available as cache and
+spill tiers regardless, so --device gpu still uses RAM for weight caching.
 
 DATA
   brain data gen <name> [--out DIR --n N --seed S]
@@ -157,6 +170,45 @@ EVENT/STDIO CONTROLLER
       so the loop is usable without a trained checkpoint.
       Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain run
 
+PERFORMANCE BENCHMARKING (how fast, at what cost — see docs/performance/benchmarking.md)
+  brain perf list                          # scenarios + the standard workload matrix
+  brain perf run <latency|throughput|serve|sweep>
+      [--target fake | qwen-synth:<L>x<D>x<H>[xV] | qwen:<weights>]
+      [--workload interactive|chat|rag|rag_long|agent|decode_heavy|prefill_heavy|shared_prefix]
+      [--concurrency N | --ladder 1,2,4,8,16,32] [--requests N --warmup N]
+      [--best-of N --smoke --seed S --out F]
+                                           # writes results/perf-<...>.json
+  brain perf compare results/perf-*.json   # leaderboard; refuses to rank across
+                                           # artifact units, excludes runs whose
+                                           # correctness gate failed
+      Report output artifacts/s + the latency curve, never total throughput alone;
+      goodput (output meeting the SLO) is the comparison metric, not peak rate.
+
+QWEN3 (dense decoder; paged continuous-batching serving)
+  brain qwen import <hf_dir|safetensors> --out F
+  brain qwen infer  --weights F --tokenizer T --prompt \"...\" [--max-new N --temp X --top-k K]
+  brain qwen serve  --weights F --tokenizer T --prompt \"...\" [--prompt ...] [--max-new N
+                    --block-size B --int8]        # paged KV + continuous batching
+  brain qwen train|finetune|export|precompile|toolcall ...
+
+GLM-5.2 (MLA + sigmoid noaux_tc MoE)
+  brain glm <train|finetune|infer|eval|import|export> ...
+
+QWEN3-TTS (Talker + MTP + neural codec; voice cloning)
+  brain tts <import|clone|synth|design|serve|sim|finetune> ...
+
+MONOCULAR DEPTH (ZipDepth)
+  brain depth --image <P6.ppm> [...]       # single image
+  brain depth --camera                     # realtime V4L2 webcam (Linux)
+  brain depth <calib|train> ...
+
+FORECASTING (chronos2 / kronos / fincast behind one seam)
+  brain forecast <compare|serve|import|finetune> ...
+
+CAPABILITIES (typed actions; one dispatch path for CLI + event API)
+  brain caps                               # every model's action manifest
+  brain do <model> <action> [--param v ...]
+
 OTHER
   brain gradcheck                          # finite-difference backprop check (GPT)
   brain pid <validate|stream|train|rollout|profile> ...
@@ -181,28 +233,19 @@ Or drive everything via the Makefile:  make data/calculator train/gpt/calculator
 /// chooses which one each model instantiates at runtime.
 fn select_backend(argv: Vec<String>) -> Vec<String> {
     // `brain npu …` subcommands parse their OWN `--device` (the OpenVINO target
-    // device); don't consume it here.
+    // device, e.g. NPU/CPU/GPU as OpenVINO names them); don't consume it here.
     if argv.get(1).map(|s| s == "npu").unwrap_or(false) {
         return argv;
     }
     let mut out = Vec::with_capacity(argv.len());
+    let mut spec_text: Option<String> = None;
     let mut i = 0;
     while i < argv.len() {
         if argv[i] == "--device" {
-            match argv.get(i + 1).map(|s| s.as_str()) {
-                Some("cpu") => gpu_core::set_default_backend(gpu_core::Backend::Cpu),
-                Some("gpu") | Some("wgpu") => {
-                    gpu_core::set_default_backend(gpu_core::Backend::Wgpu)
-                }
-                // Native Vulkan compute (ash + naga). Falls back to wgpu if no ICD.
-                Some("vulkan") => gpu_core::set_default_backend(gpu_core::Backend::Vulkan),
-                // The NPU is a whole-graph (OpenVINO) path, not a gpu_core
-                // backend: record the request and leave the host backend at its
-                // default (the NPU path does its own compute via OpenVINO + a
-                // pure-Rust decode). Consumed by `brain yolo detect`.
-                Some("npu") => NPU_REQUESTED.store(true, Ordering::Relaxed),
-                other => {
-                    eprintln!("brain: --device expects cpu|gpu|vulkan|npu (got {other:?})");
+            match argv.get(i + 1) {
+                Some(v) => spec_text = Some(v.clone()),
+                None => {
+                    eprintln!("brain: --device needs a value (cpu | gpu | npu | gpu0 | cpu0-7 | gpu,cpu)");
                     std::process::exit(2);
                 }
             }
@@ -212,7 +255,45 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
             i += 1;
         }
     }
+
+    // No flag and no BRAIN_DEVICE => the empty spec, which resolves to every
+    // device on the machine (GPUs + CPU + NPU), scheduled together.
+    let text = spec_text.or_else(|| std::env::var("BRAIN_DEVICE").ok()).unwrap_or_default();
+    let spec = match gpu_core::DeviceSpec::parse(&text) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("brain: --device: {e}");
+            std::process::exit(2);
+        }
+    };
+    let set = match spec.resolve(&gpu_core::Inventory::probe()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("brain: --device: {e}");
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = set.apply() {
+        eprintln!("brain: --device: {e}");
+        std::process::exit(2);
+    }
+    // The NPU is a whole-graph (OpenVINO) path rather than a gpu_core backend, so
+    // it is a separate flag the NPU-capable subcommands consult.
+    NPU_REQUESTED.store(set.npu_enabled() && set.explicit, Ordering::Relaxed);
+    // Deliberately do NOT rewrite BRAIN_DEVICE: it is recorded verbatim in perf
+    // artifacts, and `gpu_core`'s own fallback parses it as a bare backend name,
+    // which an indexed spec like "gpu0" is not. The resolved set is published
+    // in-process instead.
+    COMPUTE.set(set).ok();
     out
+}
+
+/// The resolved compute set for this process, available to every subcommand.
+static COMPUTE: std::sync::OnceLock<gpu_core::ComputeSet> = std::sync::OnceLock::new();
+
+/// What `--device` resolved to. `None` only before `select_backend` has run.
+pub fn compute_set() -> Option<&'static gpu_core::ComputeSet> {
+    COMPUTE.get()
 }
 
 /// `brain bench [<name>] [--seed S]` — run the architecture-evaluation suite.
@@ -480,6 +561,7 @@ fn main() {
             }
         }
         Some("bench") => run_bench(&argv[2..]),
+        Some("perf") => perf_cli::run_perf(&argv[2..]),
         Some("forecast") => forecast_cli::run_forecast(&argv[2..]),
         Some("caps") | Some("capabilities") => std::process::exit(caps_cli::run_caps(&argv[2..])),
         Some("do") => std::process::exit(caps_cli::run_do(&argv[2..])),

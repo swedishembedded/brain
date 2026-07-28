@@ -24,6 +24,12 @@
 
 pub use backend_api::{f, BufUsage, DeviceBuffer, Step};
 
+/// `--device` parsing and resolution: which compute is *schedulable*.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod devices;
+#[cfg(not(target_arch = "wasm32"))]
+pub use devices::{ComputeSet, DeviceSpec, Inventory};
+
 // ---- native facade ----------------------------------------------------------
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -65,6 +71,31 @@ mod native_facade {
     /// actually chosen.
     pub fn backend_selected() -> bool {
         DEFAULT_BACKEND.load(Ordering::Relaxed) != 0
+    }
+
+    /// The registry name of the backend that will be (or was) selected —
+    /// `"wgpu" | "cpu" | "vulkan"`. Public so callers that record *what actually
+    /// ran* (the perf suite's result fingerprint) don't have to re-derive it.
+    pub fn backend_name() -> &'static str {
+        resolve_backend_name()
+    }
+
+    /// How many distinct physical discrete GPUs this machine has. `0` on a
+    /// GPU-less box (where `--device gpu` still works, via a software
+    /// rasteriser). Multi-GPU tests gate on this so they skip instead of
+    /// faulting inside the driver.
+    pub fn discrete_gpu_count() -> usize {
+        backend_wgpu::discrete_gpu_count()
+    }
+
+    /// The wgpu adapter this process selected, if a wgpu backend was built:
+    /// `(description, is_software)`. `None` on a pure CPU/Vulkan run.
+    ///
+    /// A box with no real GPU still serves `--device gpu` through a software
+    /// rasteriser, so any recorded performance number must carry this to be
+    /// interpretable.
+    pub fn adapter_info() -> Option<(String, bool)> {
+        backend_wgpu::adapter_desc().map(|a| (a.description, a.software))
     }
 
     /// The registry name of the selected backend.
@@ -202,7 +233,9 @@ mod native_facade {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native_facade::{backend_selected, set_default_backend, Backend, Gpu};
+pub use native_facade::{
+    adapter_info, backend_name, backend_selected, discrete_gpu_count, set_default_backend, Backend, Gpu,
+};
 
 // ---- wasm facade ------------------------------------------------------------
 

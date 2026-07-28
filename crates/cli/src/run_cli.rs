@@ -195,20 +195,36 @@ pub fn run_serve(args: &[String]) {
 /// and hands the registry to `brain_dbus::serve`, which owns it for the service's
 /// lifetime. Compiled into the default build; only reached when `--dbus` is passed.
 fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64) {
-    // Discover the GPUs' capacity so the scheduler can budget/evict against real VRAM.
-    let gpus = query_gpu_mem();
-    if gpus.is_empty() {
+    // Discover the GPUs' capacity so the scheduler can budget/evict against real VRAM,
+    // then narrow to what `--device` made schedulable. With no `--device` the set is
+    // every device, which is exactly the "use all the hardware wisely" default.
+    let all_gpus = query_gpu_mem();
+    let set = crate::compute_set();
+    let gpus: Vec<(u32, u64)> = match set {
+        Some(s) => all_gpus.iter().copied().filter(|(i, _)| s.gpus.contains(i)).collect(),
+        None => all_gpus.clone(),
+    };
+    let cpu_schedulable = set.map(|s| s.cpu_enabled()).unwrap_or(true);
+
+    if gpus.is_empty() && !all_gpus.is_empty() {
+        eprintln!("brain serve --dbus: --device excluded every GPU; scheduling on CPU only");
+    } else if all_gpus.is_empty() {
         eprintln!("brain serve --dbus: no GPUs detected (nvidia-smi); serving with CPU-only budget");
     }
     let ram = query_ram_bytes();
     let reserved = reserve_gb << 30;
+    // Host RAM stays a cache/spill tier even when the CPU is not schedulable for
+    // compute — `--device gpu` bounds where work runs, not where bytes may rest.
+    let cpu_compute_ram = if cpu_schedulable { ram } else { 0 };
     eprintln!(
-        "brain serve --dbus: {} GPU(s), {} GB reserved/card, {} GB RAM budget",
+        "brain serve --dbus: compute {} | {} GPU(s) schedulable, {} GB reserved/card, {} GB RAM budget",
+        set.map(|s| s.to_string()).unwrap_or_else(|| "all".into()),
         gpus.len(),
         reserve_gb,
         ram >> 30
     );
-    let executor = crate::resident::build_executor(&gpus, reserved, ram, residency::Policy::default());
+    let executor =
+        crate::resident::build_executor(&gpus, reserved, cpu_compute_ram, residency::Policy::default());
     let served: Vec<&str> = executor.manifests().iter().map(|m| m.model.as_str()).collect();
     eprintln!("brain serve --dbus: models: {}", served.join(", "));
     let opts = brain_dbus::DbusOpts {
