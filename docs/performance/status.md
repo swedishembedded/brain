@@ -207,6 +207,15 @@ sampling — an unreadable meter yields `null`, never a fabricated zero).
   `StepReport.rejected`, so the queue keeps moving instead of crashing or
   blocking forever.
 
+## Mitigations
+
+Every finding above has a designed mitigation with a root cause, an API sketch
+and a verification criterion in **[`mitigations.md`](mitigations.md)**. The
+headline: profiling shows decode is **64% GPU-busy**, so it is not host stalling
+— the hot kernels (`matmul` 67.5%, `rmsnorm` 16.6%, `argmax_row` 10.3%) all
+parallelise over output *rows*, which at decode batch sizes leaves the card
+almost idle. `rmsnorm` runs **8 threads on 3840 cores** at batch 8.
+
 ## Still planned
 
 1. `capability::Provider` adoption by `qwen`, `yolo`, `depth`, `tts` — each makes
