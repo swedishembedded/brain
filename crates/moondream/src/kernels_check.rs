@@ -44,6 +44,48 @@ mod tests {
     }
 
     #[test]
+    fn tau_scale_grads_match_finite_differences() {
+        use kernels::{TAU_SCALE, TAU_SCALE_DS};
+        let g = Gpu::new_cpu(&[("tau_scale", TAU_SCALE), ("tau_scale_ds", TAU_SCALE_DS)]);
+        let (rows, heads, hd) = (4u32, 2u32, 8u32);
+        let n = (rows * heads * hd) as usize;
+        let ns = (heads * rows) as usize;
+        // out[row,h,d] = in[row,h,d] * s[h,row]
+        let scale = |inp: &[f32], s: &[f32]| -> Vec<f32> {
+            let (ib, sb, ob) = (g.storage_init("i", inp), g.storage_init("s", s), g.storage(n as u64));
+            g.submit(&[], &[g.step(0, &[&ib, &sb, &ob], &[rows, heads, hd], n as u32)]);
+            g.read(&ob, n)
+        };
+        let ds_of = |dout: &[f32], inp: &[f32]| -> Vec<f32> {
+            let (a, b, o) = (g.storage_init("do", dout), g.storage_init("i", inp), g.storage(ns as u64));
+            g.submit(&[], &[g.step(1, &[&a, &b, &o], &[rows, heads, hd], ns as u32)]);
+            g.read(&o, ns)
+        };
+        let mut rng = Rng::new(21);
+        let inp: Vec<f32> = (0..n).map(|_| rng.next_f32() - 0.5).collect();
+        let s: Vec<f32> = (0..ns).map(|_| rng.next_f32() - 0.5).collect();
+        let dy: Vec<f32> = (0..n).map(|_| rng.next_f32() - 0.5).collect();
+        let vin: Vec<f32> = (0..n).map(|_| if rng.next_f32() < 0.5 { -1.0 } else { 1.0 }).collect();
+        let vs: Vec<f32> = (0..ns).map(|_| if rng.next_f32() < 0.5 { -1.0 } else { 1.0 }).collect();
+
+        let d_in = scale(&dy, &s); // d_in = dy * s (same op as forward)
+        let d_s = ds_of(&dy, &inp);
+        let an_in = dot(&d_in, &vin);
+        let an_s = dot(&d_s, &vs);
+
+        let eps = 1e-3f32;
+        let l = |o: &[f32]| dot(o, &dy);
+        let pin = |sg: f32| inp.iter().zip(&vin).map(|(b, d)| b + sg * eps * d).collect::<Vec<f32>>();
+        let ps = |sg: f32| s.iter().zip(&vs).map(|(b, d)| b + sg * eps * d).collect::<Vec<f32>>();
+        let num_in = (l(&scale(&pin(1.0), &s)) - l(&scale(&pin(-1.0), &s))) / (2.0 * eps);
+        let num_s = (l(&scale(&inp, &ps(1.0))) - l(&scale(&inp, &ps(-1.0)))) / (2.0 * eps);
+        for (name, a, nn) in [("d_in", an_in, num_in), ("d_s", an_s, num_s)] {
+            let rel = (a - nn).abs() / a.abs().max(nn.abs()).max(1e-3);
+            assert!(rel < 1e-2, "tau_scale {name}: analytic {a} vs numeric {nn} (rel {rel})");
+        }
+    }
+
+    #[test]
     fn geglu_shift_grads_match_finite_differences() {
         let g = gpu();
         let n = 32usize;
