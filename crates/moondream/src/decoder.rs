@@ -31,8 +31,37 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         ("ce_value", kernels::CE_VALUE_MASKED),          // 15
         ("gelu_erf", kernels::GELU_ERF),                 // 16 (tau tok_feat: erf GELU)
         ("tau_scale", kernels::TAU_SCALE),               // 17
+        // --- backward ---
+        ("matmul_dx", kernels::MATMUL_DX),               // 18
+        ("matmul_dw", kernels::MATMUL_DW),               // 19
+        ("bias_grad", kernels::BIAS_GRAD),               // 20
+        ("gelu_bwd", kernels::GELU_BWD),                 // 21 (tanh gelu bwd)
+        ("layernorm_dx", kernels::LAYERNORM_DX),         // 22
+        ("layernorm_dgamma", kernels::LAYERNORM_DGAMMA), // 23
+        ("layernorm_dbeta", kernels::LAYERNORM_DBETA),   // 24
+        ("ln_stats", kernels::LN_STATS),                 // 25
+        ("attn_bwd_dscores_cross", kernels::ATTN_BWD_DSCORES_CROSS), // 26
+        ("attn_bwd_dv_cross", kernels::ATTN_BWD_DV_CROSS), // 27
+        ("attn_bwd_dq_cross", kernels::ATTN_BWD_DQ_CROSS), // 28
+        ("attn_bwd_dk_cross", kernels::ATTN_BWD_DK_CROSS), // 29
+        ("rope_partial_bwd", kernels::ROPE_PARTIAL_BWD), // 30
     ]
 }
+
+// Backward kernel pipeline indices.
+const K_MATMUL_DX: usize = 18;
+const K_MATMUL_DW: usize = 19;
+const K_BIAS_GRAD: usize = 20;
+const K_GELU_BWD: usize = 21;
+const K_LN_DX: usize = 22;
+const K_LN_DGAMMA: usize = 23;
+const K_LN_DBETA: usize = 24;
+const K_LN_STATS: usize = 25;
+const K_ATTN_DSCORES: usize = 26;
+const K_ATTN_DV: usize = 27;
+const K_ATTN_DQ: usize = 28;
+const K_ATTN_DK: usize = 29;
+const K_ROPE_PARTIAL_BWD: usize = 30;
 
 /// Masked cross-entropy ignore index (matches the loaders' `-1 i32` as `u32`).
 pub const IGNORE: u32 = 0xFFFF_FFFF;
@@ -308,6 +337,98 @@ impl<'g> MoondreamBlock<'g> {
     pub fn numel(&self) -> usize {
         (self.t * self.d) as usize
     }
+
+    /// Dense-block backward (no tau, no MoE): from the output grad `d_out`, fill the
+    /// weight grads `gr` and the block-input grad `d_x_in`. Reuses the forward
+    /// scratch as the SSA cache (valid immediately after `forward`). The two branches
+    /// feed the SAME shared LayerNorm, so their input-grads accumulate into `d_ln`
+    /// (the MLP `matmul_dx` writes it, the attention `matmul_dx` adds) before one
+    /// `layernorm_dx` — the shared-activation pattern. The masked-bidir attention
+    /// backward reuses the ViT `_cross` kernels: the cached `probs` already carry the
+    /// prefix mask (masked positions have prob≈0 → contribute 0). d_x_in = d_out
+    /// (the 3-way residual's identity path) + the LayerNorm input grad.
+    pub fn backward(&self, x: &DeviceBuffer, d_out: &DeviceBuffer, gr: &MoondreamBlockGrads, d_x_in: &DeviceBuffer) {
+        assert!(!self.tau && self.moe.is_none(), "dense/no-tau backward only (tau + MoE bwd are follow-ups)");
+        let g = self.gpu;
+        let (t, d, nh, hd, ff) = (self.t, self.d, self.n_heads, self.head_dim, self.ff);
+        let stride3 = 3 * d;
+        let half = self.rot_dim / 2;
+        let d_ln = g.storage((t * d) as u64);
+        let d_h = g.storage((t * ff) as u64);
+        let d_h2 = g.storage((t * ff) as u64);
+        let d_ctx = g.storage((t * d) as u64);
+        let d_qkv = g.storage((t * 3 * d) as u64);
+        let dscores = g.storage((nh * t * t) as u64);
+        let mean = g.storage(t as u64);
+        let inv = g.storage(t as u64);
+        let d_xln = g.storage((t * d) as u64);
+        let mut s: Vec<Step> = Vec::new();
+
+        // --- MLP branch: d_out → d_ln (overwrite) ---
+        s.push(g.step(K_MATMUL_DX, &[d_out, self.wb("mlp.fc2.weight"), &d_h2], &[t, ff, d, 0], t * ff));
+        s.push(g.step(K_MATMUL_DW, &[d_out, &self.h2, &gr.fc2_w], &[t, ff, d], d * ff));
+        s.push(g.step(K_BIAS_GRAD, &[d_out, &gr.fc2_b], &[t, d], d));
+        s.push(g.step(K_GELU_BWD, &[&self.h, &d_h2, &d_h], &[t * ff], t * ff)); // tanh gelu
+        s.push(g.step(K_MATMUL_DX, &[&d_h, self.wb("mlp.fc1.weight"), &d_ln], &[t, d, ff, 0], t * d));
+        s.push(g.step(K_MATMUL_DW, &[&d_h, &self.l_in, &gr.fc1_w], &[t, d, ff], ff * d));
+        s.push(g.step(K_BIAS_GRAD, &[&d_h, &gr.fc1_b], &[t, ff], ff));
+
+        // --- attention branch: d_out → d_ln (accumulate) ---
+        s.push(g.step(K_MATMUL_DX, &[d_out, self.wb("attn.proj.weight"), &d_ctx], &[t, d, d, 0], t * d));
+        s.push(g.step(K_MATMUL_DW, &[d_out, &self.ctx, &gr.proj_w], &[t, d, d], d * d));
+        s.push(g.step(K_BIAS_GRAD, &[d_out, &gr.proj_b], &[t, d], d));
+        // self.qkv holds post-RoPE q,k and v; probs carry the prefix mask.
+        s.push(g.step(K_ATTN_DSCORES, &[&d_ctx, &self.qkv, &self.probs, &dscores], &[1, nh, t, t, hd, stride3, 2 * d, d], nh * t * t));
+        s.push(g.step(K_ATTN_DV, &[&self.probs, &d_ctx, &d_qkv], &[1, nh, t, t, hd, stride3, 2 * d, d], nh * t * hd));
+        s.push(g.step(K_ATTN_DQ, &[&dscores, &self.qkv, &d_qkv], &[1, nh, t, t, hd, stride3, stride3, 0, d], nh * t * hd));
+        s.push(g.step(K_ATTN_DK, &[&dscores, &self.qkv, &d_qkv], &[1, nh, t, t, hd, stride3, stride3, 0, d], nh * t * hd));
+        // Rotate d_q (off 0) and d_k (off d) back through the partial RoPE (−angle).
+        s.push(g.step(K_ROPE_PARTIAL_BWD, &[&d_qkv], &[t, nh, hd, stride3, 0, t, f(self.theta), self.rot_dim], t * nh * half));
+        s.push(g.step(K_ROPE_PARTIAL_BWD, &[&d_qkv], &[t, nh, hd, stride3, d, t, f(self.theta), self.rot_dim], t * nh * half));
+        s.push(g.step(K_MATMUL_DX, &[&d_qkv, self.wb("attn.qkv.weight"), &d_ln], &[t, d, stride3, 1], t * d)); // accumulate
+        s.push(g.step(K_MATMUL_DW, &[&d_qkv, &self.l_in, &gr.qkv_w], &[t, d, stride3], stride3 * d));
+
+        // --- shared LayerNorm backward: d_ln → ln grads + d_xln ---
+        s.push(g.step(K_LN_STATS, &[x, &mean, &inv], &[d, t, f(LN_EPS)], t));
+        s.push(g.step(K_LN_DGAMMA, &[&d_ln, x, &mean, &inv, &gr.ln_w], &[d, t], d));
+        s.push(g.step(K_LN_DBETA, &[&d_ln, &gr.ln_b], &[d, t], d));
+        s.push(g.step(K_LN_DX, &[x, self.wb("ln.weight"), &d_ln, &d_xln], &[d, t, f(LN_EPS)], t));
+        // d_x_in = d_out (residual identity) + LayerNorm input grad.
+        s.push(g.step(7, &[d_out, &d_xln, d_x_in], &[t * d], t * d)); // add2
+        g.submit(&[], &s);
+    }
+}
+
+/// Per-weight gradient buffers for a dense [`MoondreamBlock`] (zeroed on build; the
+/// accumulating bwd kernels add into them).
+pub struct MoondreamBlockGrads {
+    pub ln_w: DeviceBuffer,
+    pub ln_b: DeviceBuffer,
+    pub qkv_w: DeviceBuffer,
+    pub proj_w: DeviceBuffer,
+    pub proj_b: DeviceBuffer,
+    pub fc1_w: DeviceBuffer,
+    pub fc1_b: DeviceBuffer,
+    pub fc2_w: DeviceBuffer,
+    pub fc2_b: DeviceBuffer,
+}
+
+impl MoondreamBlockGrads {
+    /// Allocate zeroed grad buffers matching a dense block of the given shape.
+    pub fn new(g: &Gpu, d: u32, ff: u32) -> MoondreamBlockGrads {
+        let z = |n: u32| g.storage_init("md.g", &vec![0.0f32; n as usize]);
+        MoondreamBlockGrads {
+            ln_w: z(d),
+            ln_b: z(d),
+            qkv_w: z(3 * d * d),
+            proj_w: z(d * d),
+            proj_b: z(d),
+            fc1_w: z(ff * d),
+            fc1_b: z(ff),
+            fc2_w: z(d * ff),
+            fc2_b: z(d),
+        }
+    }
 }
 
 /// Sparse-MoE FFN: `router → for each expert (w_h, w_g → geglu_shift → w_down) →
@@ -436,6 +557,56 @@ mod tests {
         assert!(tau.iter().all(|v| v.is_finite()));
         let diff: f32 = plain.iter().zip(&tau).map(|(a, b)| (a - b).abs()).sum();
         assert!(diff > 1e-4, "tau must change the block output, Σ|Δ|={diff}");
+    }
+
+    #[test]
+    fn dense_block_backward_matches_finite_diff() {
+        // Directional finite-diff gradcheck of the dense parallel-block backward:
+        // the input grad exercises the whole reverse chain (residual → MLP+attn →
+        // shared-LN accumulation → LN dx); a weight grad covers the accumulating path.
+        let gpu = Gpu::new_cpu(pipelines());
+        let (t, d, nh, hd, ff, prefix, rot, theta) = (5u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32, 1.5e6f32);
+        let mut rng = Rng::new(7);
+        let w = block_weights(d, ff, &mut rng);
+        let n = (t * d) as usize;
+        let x_host: Vec<f32> = (0..n).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
+
+        // Analytic grads (forward populates the SSA cache, then backward).
+        let blk = MoondreamBlock::new(&gpu, &w, t, d, nh, hd, ff, prefix, rot, theta);
+        let xb = gpu.storage_init("x", &x_host);
+        let _ = blk.forward(&xb);
+        let d_out = gpu.storage_init("dout", &vec![1.0f32; n]);
+        let gr = MoondreamBlockGrads::new(&gpu, d, ff);
+        let d_x = gpu.storage((t * d) as u64);
+        blk.backward(&xb, &d_out, &gr, &d_x);
+        let dx = gpu.read(&d_x, n);
+        let g_ln_w = gpu.read(&gr.ln_w, d as usize);
+
+        // L(w, x) = Σ block.forward(x) (matches d_out = ones).
+        let loss = |wm: &HashMap<String, Vec<f32>>, xh: &[f32]| -> f32 {
+            let b = MoondreamBlock::new(&gpu, wm, t, d, nh, hd, ff, prefix, rot, theta);
+            let xbb = gpu.storage_init("x", xh);
+            gpu.read(b.forward(&xbb), n).iter().sum::<f32>()
+        };
+        let eps = 1e-3f32;
+        let ok = |a: f32, num: f32| (a - num).abs() <= 4e-3 + 8e-2 * num.abs();
+
+        // Input-gradient check on a sample of positions.
+        for &i in &[0usize, 7, 13, 21, 33, 44] {
+            let (mut xp, mut xm) = (x_host.clone(), x_host.clone());
+            xp[i] += eps;
+            xm[i] -= eps;
+            let num = (loss(&w, &xp) - loss(&w, &xm)) / (2.0 * eps);
+            assert!(ok(dx[i], num), "d_x[{i}]: analytic {} vs numeric {}", dx[i], num);
+        }
+        // Shared-LN weight-gradient check.
+        for &j in &[0usize, 5, 11] {
+            let (mut wp, mut wm2) = (w.clone(), w.clone());
+            wp.get_mut("ln.weight").unwrap()[j] += eps;
+            wm2.get_mut("ln.weight").unwrap()[j] -= eps;
+            let num = (loss(&wp, &x_host) - loss(&wm2, &x_host)) / (2.0 * eps);
+            assert!(ok(g_ln_w[j], num), "d ln.w[{j}]: analytic {} vs numeric {}", g_ln_w[j], num);
+        }
     }
 
     fn block_weights(d: u32, ff: u32, rng: &mut Rng) -> HashMap<String, Vec<f32>> {
