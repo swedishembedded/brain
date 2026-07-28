@@ -11,7 +11,15 @@
 
 use std::sync::OnceLock;
 
-use vision::{ConvKernelIds, Ctx, Shape};
+use gpu_core::DeviceBuffer;
+use paramstore::ParamStore;
+use vision::{Act, Conv, ConvKernelIds, ConvSpec, Ctx, Norm, Shape};
+
+/// Index of a manually-dispatched kernel (not covered by `ConvKernelIds`) in
+/// [`PIPELINES`], by name. Panics if absent — a programming error.
+fn kidx(name: &str) -> usize {
+    PIPELINES.iter().position(|(n, _)| *n == name).unwrap_or_else(|| panic!("kernel `{name}` not in FastViTHD PIPELINES"))
+}
 
 /// Kernel registry for the FastViTHD tower: the conv/BN/act family (RepMixer,
 /// MobileOne, ConvFFN, PatchEmbed, SE) plus the transpose + attention kernels the
@@ -81,6 +89,85 @@ pub fn ctx(gpu: &gpu_core::Gpu) -> Ctx<'_> {
     Ctx::new(gpu, ids())
 }
 
+/// The atomic FastViTHD conv primitive: a (grouped/depthwise/dense) conv with an
+/// optional BatchNorm, an optional **per-channel** bias (`add_chan_bcast`, which
+/// unlike the dense-only fused `conv_bias` handles grouped convs), and an optional
+/// **erf**-GELU. Every FastViTHD conv (MobileOne, RepMixer, ConvFFN's fc1/fc2,
+/// RepCPE, PatchEmbed, conv_exp) is one of these. Weight keys: `{prefix}.conv.*`
+/// (+ `.bn.*` when `bn`) and `{prefix}.bias` (when `bias`).
+pub struct ConvUnit {
+    conv: Conv,
+    bias_name: Option<String>,
+    gelu: bool,
+    out_shape: Shape,
+    biased: DeviceBuffer,
+    activated: DeviceBuffer,
+    k_add_chan: usize,
+    k_gelu: usize,
+}
+
+impl ConvUnit {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(ctx: &Ctx, prefix: &str, in_shape: Shape, cout: u32, k: u32, stride: u32, pad: u32, groups: u32, bn: bool, bias: bool, gelu: bool) -> ConvUnit {
+        let spec = ConvSpec {
+            cout,
+            k,
+            stride,
+            pad,
+            groups,
+            dilation: 1,
+            norm: if bn { Norm::Bn } else { Norm::None },
+            act: Act::None,
+            bias: false, // bias is applied by us (per-channel, grouped-safe)
+        };
+        // ConvNames::brain appends `.conv.weight`/`.bn.*` to the prefix.
+        let conv = Conv::with_spec(ctx, prefix, in_shape, spec, true);
+        let out_shape = conv.out_shape;
+        let n = out_shape.numel() as u64;
+        ConvUnit {
+            bias_name: bias.then(|| format!("{prefix}.bias")),
+            gelu,
+            out_shape,
+            biased: ctx.gpu.storage(n),
+            activated: ctx.gpu.storage(n),
+            k_add_chan: kidx("add_chan_bcast"),
+            k_gelu: kidx("gelu_erf"),
+            conv,
+        }
+    }
+
+    pub fn out_shape(&self) -> Shape {
+        self.out_shape
+    }
+
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let mut p = self.conv.param_list();
+        if let Some(b) = &self.bias_name {
+            p.push((b.clone(), self.out_shape.c as usize));
+        }
+        p
+    }
+
+    /// Run conv → (+bias) → (GELU); returns the final output buffer.
+    pub fn forward<'a>(&'a self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) -> &'a DeviceBuffer {
+        self.conv.forward(ctx, ps, x_in);
+        let mut cur: &DeviceBuffer = self.conv.out();
+        if let Some(b) = &self.bias_name {
+            let (nn, c, hw) = (self.out_shape.n, self.out_shape.c, self.out_shape.h * self.out_shape.w);
+            ctx.gpu.submit(&[], &[ctx.step(self.k_add_chan, &[cur, ps.w(b), &self.biased], &[nn, c, hw], self.out_shape.numel())]);
+            cur = &self.biased;
+        }
+        if self.gelu {
+            let tot = self.out_shape.numel();
+            ctx.gpu.submit(&[], &[ctx.step(self.k_gelu, &[cur, &self.activated], &[tot], tot)]);
+            cur = &self.activated;
+        }
+        // SAFETY of lifetimes: `cur` borrows either self.conv.out(), self.biased,
+        // or self.activated — all owned by `self`, so `'a` is valid.
+        cur
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +176,48 @@ mod tests {
     use paramstore::ParamStore;
     use std::collections::HashMap;
     use vision::Conv;
+
+    /// Random init for a param list, keeping BN running stats sane (var=1, mean=0)
+    /// so eval-mode BN never hits sqrt of a negative.
+    fn rand_init(plist: &[(String, usize)], rng: &mut Rng) -> HashMap<String, Vec<f32>> {
+        plist
+            .iter()
+            .map(|(n, sz)| {
+                let v = if n.ends_with("running_var") {
+                    vec![1.0; *sz]
+                } else if n.contains("running_mean") {
+                    vec![0.0; *sz]
+                } else {
+                    (0..*sz).map(|_| (rng.next_f32() - 0.5) * 0.2).collect()
+                };
+                (n.clone(), v)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn conv_unit_depthwise_bias_gelu_runs() {
+        // RepMixer-style unit: depthwise 3×3, no BN, +bias, +erf-GELU.
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let in_shape = Shape::new(1, 16, 8, 8);
+        let unit = ConvUnit::new(&ctx, "u", in_shape, 16, 3, 1, 1, 16, false, true, true);
+        let plist = unit.param_list();
+        assert!(plist.iter().any(|(n, _)| n == "u.conv.weight"), "depthwise conv weight present");
+        assert!(plist.iter().any(|(n, _)| n == "u.bias"), "per-channel bias present");
+
+        let mut rng = Rng::new(2);
+        let ps = ParamStore::new(&gpu, plist.clone(), &rand_init(&plist, &mut rng));
+        let x: Vec<f32> = (0..in_shape.numel() as usize).map(|_| rng.next_f32() - 0.5).collect();
+        let xb = gpu.storage_init("x", &x);
+        let out = unit.forward(&ctx, &ps, &xb);
+        let outv = gpu.read(out, unit.out_shape().numel() as usize);
+        assert_eq!(outv.len(), (16 * 8 * 8) as usize, "depthwise 3×3 pad 1 preserves 8×8");
+        assert!(outv.iter().all(|v| v.is_finite()), "output finite");
+        // erf-GELU has a global minimum ≈ -0.17, so post-activation values can't go
+        // much below that — a sanity check that the GELU actually ran.
+        assert!(outv.iter().cloned().fold(f32::INFINITY, f32::min) > -0.2, "GELU floor");
+    }
 
     #[test]
     fn conv_runs_in_fastvlm_crate() {
