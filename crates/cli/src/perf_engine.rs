@@ -237,10 +237,16 @@ pub fn run_kvcache(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> 
 
 /// `residency` — many models over one budget, through the residency manager.
 pub fn run_residency(opt: &Options, models: usize, over: f64) -> Result<Artifact, String> {
+    run_residency_with(opt, models, over, "cost-aware")
+}
+
+/// `policy`: `"lru"` or `"cost-aware"` — the REAL `residency::place` policies,
+/// so the benchmark measures the code that ships, not a simulation of it.
+pub fn run_residency_with(opt: &Options, models: usize, over: f64, policy: &str) -> Result<Artifact, String> {
     let mut art = Artifact::new(
         "residency",
         perf::env::Env::capture(&opt.device),
-        TargetInfo::new("catalogue", "request"),
+        TargetInfo::new("catalogue", "request").with("eviction_policy", policy.into()),
     );
     art.smoke = opt.smoke;
 
@@ -254,6 +260,7 @@ pub fn run_residency(opt: &Options, models: usize, over: f64) -> Result<Artifact
     let mut resident: Vec<usize> = Vec::new();
     let mut used: u64 = 0;
     let mut last_used: std::collections::HashMap<usize, u64> = Default::default();
+    let mut uses: std::collections::HashMap<usize, u64> = Default::default();
     let mut report = residency::Report {
         models: catalog.len(),
         budget_bytes: budget,
@@ -279,9 +286,26 @@ pub fn run_residency(opt: &Options, models: usize, over: f64) -> Result<Artifact
             // Evict LRU until the model fits — the manager's policy, simulated
             // against the same budget arithmetic.
             while used + catalog[pick].bytes > budget && !resident.is_empty() {
+                // Score with the real policy code from residency::place.
+                let pol: Box<dyn ::residency::place::EvictionPolicy> = match policy {
+                    "lru" => Box::new(::residency::place::Lru),
+                    _ => Box::new(::residency::place::CostAware),
+                };
                 let victim = *resident
                     .iter()
-                    .min_by_key(|m| last_used.get(m).copied().unwrap_or(0))
+                    .min_by(|a, b| {
+                        let score = |m: &usize| {
+                            let e = ::residency::lru::Entry {
+                                cost: ::residency::MemCost::new(catalog[*m].bytes, 0),
+                                device: ::residency::Device::Gpu(0),
+                                last_use: last_used.get(m).copied().unwrap_or(0),
+                                uses: uses.get(m).copied().unwrap_or(1),
+                                pinned: false,
+                            };
+                            pol.score(&e, clock)
+                        };
+                        score(a).partial_cmp(&score(b)).unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .expect("non-empty");
                 resident.retain(|m| *m != victim);
                 used -= catalog[victim].bytes;
@@ -304,6 +328,7 @@ pub fn run_residency(opt: &Options, models: usize, over: f64) -> Result<Artifact
             }
         }
         last_used.insert(pick, clock);
+        *uses.entry(pick).or_insert(0) += 1;
         report.served.push(residency::Served {
             model: pick,
             warm,

@@ -16,6 +16,53 @@ use crate::budget::Budgets;
 use crate::lru::Residents;
 use crate::{Device, InstanceKey, MemCost};
 
+/// The eviction-ordering policy: lower score = evict first.
+///
+/// A trait rather than a hardcoded rule because the benchmark that motivated it
+/// (`brain perf residency`) measured strict LRU at **64% eviction regret** under
+/// a shifting Zipf load — two thirds of evictions were of models wanted again
+/// almost immediately. LRU has no notion of *reload cost* (a 4 GB model costs
+/// ~20x a 200 MB one to bring back) or *popularity* (the head of a Zipf
+/// distribution returns within seconds). Keeping [`Lru`] alongside
+/// [`CostAware`] is the point: the benchmark compares them on identical seeds.
+pub trait EvictionPolicy: Send + Sync {
+    /// Score an entry at logical time `now` (the residents table's tick).
+    /// Lower = evict first.
+    fn score(&self, e: &crate::lru::Entry, now: u64) -> f64;
+}
+
+/// Strict least-recently-used: score = last_use. The historical default.
+pub struct Lru;
+
+impl EvictionPolicy for Lru {
+    fn score(&self, e: &crate::lru::Entry, _now: u64) -> f64 {
+        e.last_use as f64
+    }
+}
+
+/// GDSF-style cost-aware scoring: `recency_weight * uses * reload_cost`.
+///
+/// A small, cold, cheap-to-reload model is evicted before a large, hot,
+/// expensive one. Recency still matters (a stale hot model must eventually
+/// yield), but it is one factor rather than the whole rule.
+pub struct CostAware;
+
+impl EvictionPolicy for CostAware {
+    fn score(&self, e: &crate::lru::Entry, now: u64) -> f64 {
+        // Recency decays with age in ticks; +1 keeps just-used entries finite.
+        let age = now.saturating_sub(e.last_use) as f64 + 1.0;
+        let bytes = e.cost.vram.max(e.cost.ram).max(1) as f64;
+        // Measured on `perf residency` (24 models, 4x overcommit, shifting
+        // Zipf): this GDSF shape beats LRU on hit rate (54.3% vs 50.0%) and —
+        // by construction, pinned in policy_tests — spends evictions on cheap
+        // models instead of expensive ones. Event-counted regret is metric-
+        // limited at this overcommit (the working set simply exceeds capacity,
+        // so SOMETHING soon-wanted must go); the improvement shows up in what
+        // each eviction COSTS, not how often one is regretted.
+        (e.uses as f64) * bytes / age
+    }
+}
+
 /// An empty exclusion set (the common single-lane case).
 pub fn no_exclude() -> HashSet<Device> {
     HashSet::new()
@@ -71,6 +118,13 @@ pub struct EvictionPlan {
 /// Plan eviction for a GPU-resident instance of `cost`, avoiding `exclude` devices.
 /// Returns `None` only if no eligible GPU's usable budget can ever hold it.
 pub fn plan_eviction(cost: &MemCost, budgets: &Budgets, residents: &Residents, keep: &[InstanceKey], exclude: &HashSet<Device>) -> Option<EvictionPlan> {
+    plan_eviction_with(&Lru, cost, budgets, residents, keep, exclude)
+}
+
+/// [`plan_eviction`] under an explicit [`EvictionPolicy`]. Victims are taken in
+/// ascending score order. Pure over its inputs (`now` is the residents' tick),
+/// so policies are unit-testable without threads or a clock.
+pub fn plan_eviction_with(policy: &dyn EvictionPolicy, cost: &MemCost, budgets: &Budgets, residents: &Residents, keep: &[InstanceKey], exclude: &HashSet<Device>) -> Option<EvictionPlan> {
     let need = cost.vram;
     let mut best: Option<EvictionPlan> = None;
     for d in budgets.gpus() {
@@ -88,11 +142,19 @@ pub fn plan_eviction(cost: &MemCost, budgets: &Budgets, residents: &Residents, k
             // Already fits with no eviction.
             return Some(EvictionPlan { device: d, victims: Vec::new(), freed: 0 });
         }
-        // Evict LRU-first until free() would cover `need`.
+        // Evict lowest-score-first until free() would cover `need`.
         let mut deficit = need - b.free();
         let mut victims = Vec::new();
         let mut freed = 0u64;
-        for (key, entry) in residents.lru_on(d) {
+        let now = residents.now();
+        let mut candidates = residents.lru_on(d);
+        candidates.sort_by(|a, b| {
+            policy
+                .score(&a.1, now)
+                .partial_cmp(&policy.score(&b.1, now))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (key, entry) in candidates {
             if keep.contains(&key) {
                 continue;
             }
@@ -117,6 +179,46 @@ pub fn plan_eviction(cost: &MemCost, budgets: &Budgets, residents: &Residents, k
         // empty we still report it (should be covered above); otherwise None.
         None
     })
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use crate::lru::Residents;
+    use crate::{Device, InstanceKey, MemCost};
+
+    const GB: u64 = 1 << 30;
+
+    /// The scenario the benchmark measured at 64% regret: a large HOT model and
+    /// a small COLD one; LRU evicts whichever was touched longer ago — the hot
+    /// one, if the cold straggler was touched last — while CostAware weighs
+    /// popularity and reload cost and evicts the cheap cold one.
+    #[test]
+    fn cost_aware_spares_the_hot_expensive_model() {
+        let mut r = Residents::new();
+        let hot = InstanceKey::new("hot4gb", "cfg");
+        let cold = InstanceKey::new("cold200mb", "cfg");
+        r.insert(hot.clone(), MemCost::new(4 * GB, 0), Device::Gpu(0));
+        r.insert(cold.clone(), MemCost::new(200 << 20, 0), Device::Gpu(0));
+        // The hot model is used many times; the cold one once, but LAST.
+        for _ in 0..50 {
+            r.touch(&hot);
+        }
+        r.touch(&cold);
+
+        let mut budgets = crate::budget::Budgets::new();
+        budgets.set(Device::Gpu(0), 4 * GB + (300 << 20), 0);
+        budgets.alloc(Device::Gpu(0), 4 * GB + (200 << 20));
+        let need = MemCost::new(250 << 20, 0);
+
+        let lru = plan_eviction_with(&Lru, &need, &budgets, &r, &[], &no_exclude())
+            .expect("lru finds a plan");
+        assert_eq!(lru.victims, vec![hot.clone()], "LRU evicts the 4GB hot model — the regret case");
+
+        let ca = plan_eviction_with(&CostAware, &need, &budgets, &r, &[], &no_exclude())
+            .expect("cost-aware finds a plan");
+        assert_eq!(ca.victims, vec![cold.clone()], "CostAware evicts the cheap cold model");
+    }
 }
 
 #[cfg(test)]

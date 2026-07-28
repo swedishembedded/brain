@@ -16,6 +16,9 @@ pub struct Entry {
     pub device: Device,
     /// Monotonic last-use stamp (larger = more recent).
     pub last_use: u64,
+    /// How many times this instance has been used — the popularity signal a
+    /// cost-aware eviction policy scores against.
+    pub uses: u64,
     /// True while a job is actively running on this instance — it must not be evicted.
     pub pinned: bool,
 }
@@ -33,6 +36,12 @@ impl Residents {
         Residents::default()
     }
 
+    /// The current logical time (the last tick issued) — what eviction policies
+    /// measure age against.
+    pub fn now(&self) -> u64 {
+        self.tick
+    }
+
     fn next_tick(&mut self) -> u64 {
         self.tick += 1;
         self.tick
@@ -41,7 +50,7 @@ impl Residents {
     /// Record a newly-resident instance (or overwrite an existing one) as most-recent.
     pub fn insert(&mut self, key: InstanceKey, cost: MemCost, device: Device) {
         let last_use = self.next_tick();
-        self.map.insert(key, Entry { cost, device, last_use, pinned: false });
+        self.map.insert(key, Entry { cost, device, last_use, uses: 1, pinned: false });
     }
 
     /// Mark `key` as just-used (most-recent). No-op if absent.
@@ -49,6 +58,7 @@ impl Residents {
         let t = self.next_tick();
         if let Some(e) = self.map.get_mut(key) {
             e.last_use = t;
+            e.uses += 1;
         }
     }
 

@@ -113,6 +113,7 @@ fn run(args: &[String]) {
     let mut workload = "chat".to_string();
     let mut concurrency = 8usize;
     let mut out: Option<String> = None;
+    let mut policy = "cost-aware".to_string();
 
     let mut i = 1;
     while i < args.len() {
@@ -133,6 +134,7 @@ fn run(args: &[String]) {
             "--best-of" => opt.best_of = val(args, &mut i, "--best-of").parse().unwrap_or(opt.best_of),
             "--seed" => opt.seed = val(args, &mut i, "--seed").parse().unwrap_or(opt.seed),
             "--out" => out = Some(val(args, &mut i, "--out")),
+            "--policy" => policy = val(args, &mut i, "--policy"),
             "--soak-seconds" => opt.soak_seconds = val(args, &mut i, "--soak-seconds").parse().unwrap_or(opt.soak_seconds),
             "--device-rate" => opt.device_rate = val(args, &mut i, "--device-rate").parse().ok(),
             "--smoke" => opt = opt.smoke(),
@@ -155,7 +157,7 @@ fn run(args: &[String]) {
     );
     if engine_scenario {
         let art = match scenario.as_str() {
-            "residency" => crate::perf_engine::run_residency(&opt, 24, 4.0),
+            "residency" => crate::perf_engine::run_residency_with(&opt, 24, 4.0, &policy),
             other => {
                 let shape = target_spec
                     .strip_prefix("qwen-synth:")
