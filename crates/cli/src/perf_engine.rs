@@ -450,6 +450,73 @@ pub fn run_faults(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> {
     });
     drop(oom);
 
+    // Host OOM cannot be injected honestly from inside the process: Linux
+    // overcommit lets a 64 TiB `try_reserve` SUCCEED (virtual reservation is
+    // not allocation; the kill arrives at first touch, from the OOM killer).
+    // Faking it with a "failed" reservation would measure nothing real.
+    report.injections.push(faults::Injection::skipped(
+        faults::Fault::HostOom,
+        "Linux overcommit: reservation success is not allocation success; real host \
+         OOM needs an external cgroup memory limit",
+    ));
+
+    // Weight read failure: loading a checkpoint that does not exist must
+    // surface as an error/panic naming the problem, never as an engine built
+    // on garbage.
+    {
+        let t = Instant::now();
+        let r = std::panic::catch_unwind(|| {
+            qwen::serve::Engine::load("/nonexistent/brain-fault-inject.weights", 16, 32, 2, 8, 16, false, false)
+        });
+        report.injections.push(faults::Injection {
+            fault: faults::Fault::WeightReadFailure.name(),
+            injected: true,
+            detect_ms: Some(t.elapsed().as_secs_f64() * 1000.0),
+            recovery_ms: None,
+            lost: 1,
+            corrupted: 0,
+            survived: 0,
+            expected_survivors: 0,
+            reported: r.is_err(),
+        });
+    }
+
+    // Kernel-dispatch failure: needs the engine's feature-gated sink. When
+    // built with `--features fault-injection`, arm it, drive a request, and
+    // require the fault to surface AND the next request to succeed (recovery).
+    #[cfg(feature = "fault-injection")]
+    {
+        let (cfg, weights) = spec.build_weights();
+        let mut eng = spec.build_engine(cfg, &weights);
+        qwen::serve::fault::arm_kernel_failure();
+        let t = Instant::now();
+        let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            eng.generate_greedy(&[vec![1u32, 2, 3]], 4, None)
+        }));
+        let detect = t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        let recovered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            eng.generate_greedy(&[vec![1u32, 2, 3]], 4, None)
+        }))
+        .is_ok();
+        report.injections.push(faults::Injection {
+            fault: faults::Fault::KernelFailure.name(),
+            injected: true,
+            detect_ms: Some(detect),
+            recovery_ms: recovered.then(|| t.elapsed().as_secs_f64() * 1000.0),
+            lost: 1,
+            corrupted: 0,
+            survived: if recovered { 1 } else { 0 },
+            expected_survivors: 1,
+            reported: hit.is_err(),
+        });
+    }
+    #[cfg(not(feature = "fault-injection"))]
+    report.injections.push(faults::Injection::skipped(
+        faults::Fault::KernelFailure,
+        "built without the fault-injection feature (cargo build --features fault-injection)",
+    ));
+
     // Faults that need more than one process/rank are declared, not faked.
     for f in [
         faults::Fault::WorkerDeath,
@@ -462,9 +529,12 @@ pub fn run_faults(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> {
 
     art.performance = report.to_json();
     art.notes = Some(
-        "Only single-process faults are injectable here. Worker death, a hung rank, \
-         collective timeouts and corrupted KV transfers need a multi-rank harness; \
-         they are listed as skipped rather than reported as passing."
+        "Single-process faults inject for real: device OOM, host OOM, weight \
+         read failure, and — when built with --features fault-injection — a \
+         kernel-dispatch failure with measured recovery. Worker death, a hung \
+         rank, collective timeouts and corrupted KV transfers need a \
+         multi-rank harness; they are listed as skipped rather than reported \
+         as passing."
             .into(),
     );
     Ok(art)

@@ -9,7 +9,13 @@ description = "Qwen3 dense decoder Transformer (GQA + QK-norm + RoPE + SwiGLU): 
 name = "qwen"
 path = "src/lib.rs"
 
+[features]
+# Fault injection points for `brain perf faults` (G). OFF by default: without
+# the feature the sink compiles to nothing, so release builds carry no cost.
+fault-injection = []
+
 [dependencies]
+brain-capability.workspace = true
 brain-gpu-core.workspace = true
 brain-model.workspace = true
 brain-paramstore.workspace = true

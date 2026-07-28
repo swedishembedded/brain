@@ -13,6 +13,8 @@ path = "src/main.rs"
 # Optional native-Vulkan cooperative-matrix matmul path (ash + naga). OFF by
 # default — the default build stays pure wgpu/WGSL.
 vulkan-coopmat = ["dep:brain-vulkan"]
+# Enable the engine's fault-injection points for `brain perf faults` (G).
+fault-injection = ["brain-qwen/fault-injection"]
 
 [dependencies]
 # D-Bus control surface: compiled into the default build so `brain serve --dbus`

@@ -135,6 +135,25 @@ fn fb(x: f32) -> u32 {
     x.to_bits()
 }
 
+/// Fault injection (G): `brain perf faults` arms a fault, the next pass
+/// through its check point fires it. Feature-gated — a build without
+/// `fault-injection` compiles the sink to nothing, so there is no release
+/// cost and nothing to accidentally arm in production.
+#[cfg(feature = "fault-injection")]
+pub mod fault {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static KERNEL_FAILURE: AtomicBool = AtomicBool::new(false);
+
+    /// Arm a one-shot kernel-dispatch failure: the next batched decode
+    /// panics at its dispatch point, as a real device fault would surface.
+    pub fn arm_kernel_failure() {
+        KERNEL_FAILURE.store(true, Ordering::SeqCst);
+    }
+    pub(crate) fn take_kernel_failure() -> bool {
+        KERNEL_FAILURE.swap(false, Ordering::SeqCst)
+    }
+}
+
 /// A batched-forward input: token ids (embedded via `tok.weight`) or ready-made
 /// per-row embeddings written straight into the residual stream (the tts Talker
 /// feeds codec/text-conditioned embeddings rather than ids).
@@ -698,6 +717,10 @@ impl Engine {
 
     #[allow(clippy::too_many_arguments)]
     fn run_batched_submit(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> u32 {
+        #[cfg(feature = "fault-injection")]
+        if fault::take_kernel_failure() {
+            panic!("injected fault: kernel dispatch failure");
+        }
         let c = &self.cfg;
         let (d, ff, hd) = (c.d_model, c.d_ff, c.head_dim);
         let (hq, hkv) = (c.q_dim(), c.kv_dim());
