@@ -1,0 +1,18 @@
+[package]
+name = "brain-perf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Performance benchmarking suite: how much correct work brain delivers per unit of hardware, memory, energy and time. Model-agnostic over the capability progress seam; one JSON artifact per run, comparable across models and hardware."
+
+[lib]
+name = "perf"
+path = "src/lib.rs"
+
+[dependencies]
+brain-capability.workspace = true
+brain-checkpoint.workspace = true
+brain-data.workspace = true
+brain-gpu-core.workspace = true
+brain-qwen.workspace = true
+serde_json.workspace = true

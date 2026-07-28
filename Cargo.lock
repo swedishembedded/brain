@@ -360,6 +360,7 @@ dependencies = [
  "brain-npu",
  "brain-onnx",
  "brain-paramstore",
+ "brain-perf",
  "brain-pid",
  "brain-qwen",
  "brain-residency",
@@ -546,6 +547,7 @@ dependencies = [
  "brain-backend-vulkan",
  "brain-backend-wgpu",
  "brain-kernels",
+ "libc",
 ]
 
 [[package]]
@@ -689,6 +691,18 @@ dependencies = [
  "bytemuck",
  "pollster",
  "wgpu",
+]
+
+[[package]]
+name = "brain-perf"
+version = "0.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-qwen",
+ "serde_json",
 ]
 
 [[package]]
