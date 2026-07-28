@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod decoder;
+pub mod import;
 pub mod model;
 pub mod preprocess;
 pub mod vision;
