@@ -18,7 +18,7 @@
 use gpu_core::Gpu;
 
 // Kernel order passed to Gpu::new; indices below reference these.
-const KERNELS: &[(&str, &str)] = &[
+static KERNELS: &[(&str, &str)] = &[
     ("attn_scores_bidir", kernels::ATTN_SCORES_BIDIR),       // 0
     ("attn_softmax_bidir", kernels::ATTN_SOFTMAX_BIDIR),     // 1
     ("attn_apply_bidir", kernels::ATTN_APPLY_BIDIR),         // 2
@@ -117,7 +117,7 @@ fn loss(out: &[f32], g: &[f32]) -> f32 {
 
 #[test]
 fn bidir_forward_is_deterministic() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 2, h: 2, t: 5, hd: 4 };
     let mut st = 0x1234_5678u64;
     let qkv: Vec<f32> = (0..s.qkv_len()).map(|_| lcg(&mut st)).collect();
@@ -131,7 +131,7 @@ fn bidir_forward_is_deterministic() {
 #[test]
 fn bidir_softmax_rows_sum_to_one() {
     // Directly verify softmax_bidir normalises over the FULL row (non-causal).
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 1, h: 1, t: 6, hd: 3 };
     let d = s.d();
     let mut st = 0xABCDu64;
@@ -154,7 +154,7 @@ fn bidir_softmax_rows_sum_to_one() {
 
 #[test]
 fn bidir_backward_matches_finite_differences() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 2, h: 2, t: 4, hd: 3 };
     let mut st = 0xDEAD_BEEFu64;
     let qkv: Vec<f32> = (0..s.qkv_len()).map(|_| lcg(&mut st)).collect();

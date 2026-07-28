@@ -27,7 +27,7 @@ fn forward_ms(gemm: bool, init: &HashMap<String, Vec<f32>>, reps: usize) -> f64 
     std::env::set_var("BRAIN_CONV_GEMM", if gemm { "1" } else { "0" });
     set_default_backend(Backend::Wgpu);
     let cfg = YoloConfig::yolov8n();
-    let m = Yolo::new(cfg.clone(), 1, cfg.input, init);
+    let m = Yolo::new_on(gpu_core::testgpu::dev(yolo::net::PIPELINES), cfg.clone(), 1, cfg.input, init);
     m.set_eval(true);
     let img = randimg((3 * cfg.input * cfg.input) as usize);
     m.set_image(&img);

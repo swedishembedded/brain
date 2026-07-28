@@ -141,7 +141,7 @@ fn device_naive_matches_oracle_gpu() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
-    let g = Gpu::new(splat::PIPELINES);
+    let g = gpu_core::testgpu::dev(splat::PIPELINES);
     check_device_vs_oracle(&g, 2e-3);
 }
 

@@ -244,8 +244,11 @@ impl Trainer {
         // One shared accelerator (wgpu or native CPU, chosen at runtime). All the
         // device-init + dispatch plumbing that used to live here now lives in
         // `gpu_core`, shared with the GPT and PID models.
-        let gpu = Gpu::new(PIPELINES);
+        Trainer::new_on(Gpu::new(PIPELINES), cfg, b, t, init)
+    }
 
+    /// Build on an existing device handle — see `Gpt::new_on`.
+    pub(crate) fn new_on(gpu: Gpu, cfg: Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Trainer {
         let c = cfg.clone();
         // Parameter weights/grads/Adam-moment buffers (all zero-initialised) live
         // in the shared ParamStore; the shared Optim drives the AdamW + clip path.
@@ -1080,7 +1083,7 @@ mod tests {
             n_experts: 3, top_k: 2, d_ff: 64, aux_coef: 0.01, z_coef: 1e-4,
         };
         let init = init_weights(&cfg, 5);
-        let tr = Trainer::new(cfg.clone(), 2, 8, &init);
+        let tr = Trainer::new_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), 2, 8, &init);
         let (corpus, _table) = corpus_and_table(4000, cfg.vocab, 7);
 
         let backbone0 = tr.read_weight("token_emb.weight");

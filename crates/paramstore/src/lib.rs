@@ -153,7 +153,8 @@ mod tests {
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
             return;
         }
-        let gpu = Gpu::new(&[("add2", kernels::ADD2)]);
+        static KERNELS: &[(&str, &str)] = &[("add2", kernels::ADD2)];
+        let gpu = gpu_core::testgpu::dev(KERNELS);
         let mut init = HashMap::new();
         init.insert("w".to_string(), vec![1.5f32, -2.0, 3.0]);
         let ps = ParamStore::new(&gpu, vec![("w".to_string(), 3)], &init);

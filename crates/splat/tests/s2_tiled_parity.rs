@@ -98,7 +98,7 @@ fn tiled_matches_reference_gpu() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
-    let g = Gpu::new(splat::PIPELINES);
+    let g = gpu_core::testgpu::dev(splat::PIPELINES);
     check_tiled_vs_reference(&g, 1.0 / 255.0);
 }
 

@@ -42,7 +42,7 @@ fn end_to_end_matches_reference() {
 
     let cfg = FincastConfig::default();
     let weights: HashMap<String, Vec<f32>> = fincast::import::load_hf(&cfg, &ckpt).expect("load weights");
-    let model = Fincast::from_weights(cfg.clone(), &weights).unwrap();
+    let model = Fincast::from_weights_on(gpu_core::testgpu::dev(fincast::model::PIPELINES), cfg.clone(), &weights).unwrap();
 
     // brain's first AR step: forecast_full over the same context, one patch of
     // horizon (== horizon_len). Layout: [horizon, num_outputs] step-major — same

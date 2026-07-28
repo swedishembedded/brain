@@ -58,7 +58,7 @@ fn known_future_forward_matches_the_reference() {
     let reference = read_f32(&qp);
     assert_eq!(reference.len(), nq * horizon);
 
-    let model = Chronos2::load(&weights).expect("load weights");
+    let model = Chronos2::load_on(gpu_core::testgpu::dev(chronos2::model::PIPELINES), &weights).expect("load weights");
     // target future unknown; covariate future known.
     let series: Vec<&[f32]> = vec![&target, &cov];
     let futures: Vec<Option<&[f32]>> = vec![None, Some(&cov_future)];

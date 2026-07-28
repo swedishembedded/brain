@@ -23,7 +23,7 @@
 
 use gpu_core::Gpu;
 
-const KERNELS: &[(&str, &str)] = &[
+static KERNELS: &[(&str, &str)] = &[
     ("attn_scores_cross", kernels::ATTN_SCORES_CROSS),           // 0
     ("attn_softmax_cross", kernels::ATTN_SOFTMAX_CROSS),         // 1
     ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),             // 2
@@ -127,7 +127,7 @@ fn loss(out: &[f32], g: &[f32]) -> f32 {
 
 #[test]
 fn cross_forward_is_deterministic() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 2, h: 2, t_dec: 4, t_enc: 6, hd: 4 };
     let mut st = 0x0CADu64;
     let q_dec: Vec<f32> = (0..s.qdec_len()).map(|_| lcg(&mut st)).collect();
@@ -141,7 +141,7 @@ fn cross_forward_is_deterministic() {
 #[test]
 fn cross_softmax_rows_sum_to_one_over_t_enc() {
     // softmax_cross normalises over the T_enc key axis (row width = T_enc != T_dec).
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 1, h: 1, t_dec: 3, t_enc: 5, hd: 3 };
     let d = s.d();
     let mut st = 0xF00Du64;
@@ -166,7 +166,7 @@ fn cross_softmax_rows_sum_to_one_over_t_enc() {
 
 #[test]
 fn cross_backward_matches_finite_differences() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 2, h: 2, t_dec: 3, t_enc: 5, hd: 3 };
     let mut st = 0xC0FFEEu64;
     let q_dec: Vec<f32> = (0..s.qdec_len()).map(|_| lcg(&mut st)).collect();

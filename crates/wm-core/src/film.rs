@@ -141,7 +141,7 @@ impl Film {
     /// [`Film::seq`]: `["film_chan", "film_chan_dx", "film_chan_dsb",
     /// "film_row", "film_row_dx", "film_row_dsb", "gate_row",
     /// "gate_row_dh", "gate_row_dg"]`.
-    pub fn kernel_sources() -> [(&'static str, &'static str); 9] {
+    pub const fn kernel_sources() -> [(&'static str, &'static str); 9] {
         [
             ("film_chan", kernels::FILM_CHAN),
             ("film_chan_dx", kernels::FILM_CHAN_DX),

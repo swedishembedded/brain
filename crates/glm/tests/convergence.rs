@@ -39,7 +39,7 @@ fn glm_overfits_fixed_batch() {
     }
     let cfg = small_cfg(23, 16);
     let init = glm::init_weights(&cfg, 11);
-    let model = Glm::new(cfg, 2, 8, &init);
+    let model = Glm::new_on(gpu_core::testgpu::dev(glm::model::PIPELINES), cfg, 2, 8, &init);
     let x: Vec<u32> = (0..16).map(|i| (i * 7 % 23) as u32).collect();
     let y: Vec<u32> = (0..16).map(|i| ((i * 7 + 1) % 23) as u32).collect();
     model.set_batch(&x, &y);
@@ -59,7 +59,7 @@ fn glm_memorizes_cyclic_sequence() {
     let vocab = 7u32;
     let cfg = small_cfg(vocab, 16);
     let init = glm::init_weights(&cfg, 3);
-    let model = Glm::new(cfg, 2, 8, &init);
+    let model = Glm::new_on(gpu_core::testgpu::dev(glm::model::PIPELINES), cfg, 2, 8, &init);
     // Two sequences over the cycle 0,1,2,3,4,5,6,0,1,... (predict next).
     let cyc: Vec<u32> = (0..17).map(|i| (i % vocab as usize) as u32).collect();
     let x: Vec<u32> = [&cyc[0..8], &cyc[4..12]].concat();
@@ -78,7 +78,7 @@ fn glm_mtp_overfits_fixed_batch() {
     }
     let cfg = GlmConfig { mtp: true, ..small_cfg(23, 16) };
     let init = glm::init_weights(&cfg, 13);
-    let model = Glm::new(cfg, 2, 8, &init);
+    let model = Glm::new_on(gpu_core::testgpu::dev(glm::model::PIPELINES), cfg, 2, 8, &init);
     let x: Vec<u32> = (0..16).map(|i| (i * 7 % 23) as u32).collect();
     let y: Vec<u32> = (0..16).map(|i| ((i * 7 + 1) % 23) as u32).collect();
     model.set_batch(&x, &y);
@@ -101,7 +101,7 @@ fn glm_more_capacity_fits_better() {
     let run = |d_model: u32, moe_ff: u32| -> f32 {
         let cfg = GlmConfig { d_model, moe_intermediate_size: moe_ff, intermediate_size: moe_ff, ..small_cfg(23, 16) };
         let init: HashMap<_, _> = glm::init_weights(&cfg, 5);
-        let model = Glm::new(cfg, 2, 8, &init);
+        let model = Glm::new_on(gpu_core::testgpu::dev(glm::model::PIPELINES), cfg, 2, 8, &init);
         train_batch(&model, &x, &y, 120, 1e-2);
         model.forward()
     };

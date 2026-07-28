@@ -15,8 +15,11 @@ use wm_core::gn::{num_groups, Gn, GnDims};
 
 // ---------------------------------------------------------------- harness --
 
+// 'static so the per-test-binary device pool can key on the slice address.
+static KERNEL_SOURCES: [(&str, &str); 7] = Gn::kernel_sources();
+
 fn gpu() -> Gpu {
-    Gpu::new(&Gn::kernel_sources())
+    gpu_core::testgpu::dev(&KERNEL_SOURCES)
 }
 
 /// Deterministic LCG in [-1, 1). Spec §10.3 requires seeded data in [−1,1];

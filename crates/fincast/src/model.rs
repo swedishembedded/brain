@@ -43,7 +43,7 @@ const LAYERNORM: usize = 6;
 // CPU backend (the tiled kernel needs work-group barriers the Cranelift JIT
 // rejects), so the same forward runs on both CPU and GPU. A tiled/register-blocked
 // fast path is a perf follow-up (see docs/models/fincast/status.md).
-const PIPELINES: &[(&str, &str)] = &[
+pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("relu_inplace", kernels::RELU_INPLACE),
@@ -74,7 +74,11 @@ impl Fincast {
     /// Build from host-side weights (name → values), keyed by the reference
     /// `state_dict` names (see [`FincastConfig::param_list`]).
     pub fn from_weights(cfg: FincastConfig, weights: &HashMap<String, Vec<f32>>) -> Result<Fincast, String> {
-        let gpu = Gpu::new(PIPELINES);
+        Fincast::from_weights_on(Gpu::new(PIPELINES), cfg, weights)
+    }
+
+    /// Build on an existing device handle — see `Gpt::new_on`.
+    pub fn from_weights_on(gpu: Gpu, cfg: FincastConfig, weights: &HashMap<String, Vec<f32>>) -> Result<Fincast, String> {
         let mut w = HashMap::new();
         for (name, shape) in cfg.param_list() {
             let numel: usize = shape.iter().product();

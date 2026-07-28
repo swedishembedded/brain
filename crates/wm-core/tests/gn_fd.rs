@@ -21,6 +21,9 @@
 use gpu_core::Gpu;
 use wm_core::gn::{Gn, GnDims};
 
+// 'static so the per-test-binary device pool can key on the slice address.
+static KERNEL_SOURCES: [(&str, &str); 7] = Gn::kernel_sources();
+
 /// Deterministic LCG in [-1, 1). Spec §10.3 requires seeded data in [−1,1];
 /// mse_fd.rs's `>> 33` variant keeps only 31 bits and thus lands in [−1,0)
 /// (its `~[-1,1)` comment is wrong) — copying it here lost all sign coverage,
@@ -92,7 +95,7 @@ fn gn_fd_backward_directional() {
     gb.extend((0..d.c).map(|_| lcg(&mut seed))); // beta in [-1,1)
     let dy: Vec<f32> = (0..n_el).map(|_| lcg(&mut seed)).collect();
 
-    let gpu = Gpu::new(&Gn::kernel_sources());
+    let gpu = gpu_core::testgpu::dev(&KERNEL_SOURCES);
     let gn = Gn::seq();
     let (dx, dgb) = analytic_grads(&gpu, &gn, &d, &x, &gb, &dy);
 

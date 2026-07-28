@@ -23,7 +23,7 @@
 use gpu_core::Gpu;
 
 // Kernel order passed to Gpu::new; indices below reference these.
-const KERNELS: &[(&str, &str)] = &[
+static KERNELS: &[(&str, &str)] = &[
     ("gelu_erf", kernels::GELU_ERF),         // 0
     ("gelu_erf_bwd", kernels::GELU_ERF_BWD), // 1
     ("gelu", kernels::GELU),                 // 2
@@ -86,7 +86,7 @@ fn erf_ref(x: f64) -> f64 {
 
 #[test]
 fn gelu_erf_forward_matches_reference_erf() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let x: Vec<f32> = vec![-3.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 3.0];
     let got = fwd(&gpu, 0, &x);
     for (i, &xi) in x.iter().enumerate() {
@@ -102,7 +102,7 @@ fn gelu_erf_forward_matches_reference_erf() {
 /// The gate: analytic `gelu_erf_bwd` vs central differences of `gelu_erf`.
 #[test]
 fn gelu_erf_bwd_matches_finite_differences() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let mut st = 12345u64;
     let x: Vec<f32> = (0..64).map(|_| lcg(&mut st)).collect();
 
@@ -152,7 +152,7 @@ fn gelu_erf_bwd_matches_finite_differences() {
 fn gelu_bwd_is_not_gelu_erfs_derivative_and_gradcheck_cannot_tell() {
     const ATOL: f32 = 4e-3;
     const RTOL: f32 = 8e-2;
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let x: Vec<f32> = (-40..=40).map(|i| i as f32 / 10.0).collect(); // [-4, 4] step 0.1
 
     let d_erf = dgelu(&gpu, 1, &x); // correct derivative of gelu_erf

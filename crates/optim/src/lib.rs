@@ -169,13 +169,14 @@ mod tests {
         if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
             return;
         }
-        let gpu = Gpu::new(&[
+        static KERNELS: &[(&str, &str)] = &[
             ("adamw", kernels::ADAMW),
             ("gradnorm_sq", kernels::GRADNORM_SQ),
             ("grad_scale", kernels::GRAD_SCALE),
             ("clip_coef", kernels::CLIP_COEF),
             ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
-        ]);
+        ];
+        let gpu = gpu_core::testgpu::dev(KERNELS);
         let opt = Optim::new(0, 1, 2, 3, 4);
         let mut init = HashMap::new();
         init.insert("p".to_string(), vec![1.0f32; 4]);

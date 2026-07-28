@@ -84,8 +84,11 @@ fn run_passes(gpu: &Gpu, mk: &dyn Fn() -> Step, passes: usize) {
 
 /// One `Gpu` holding exactly the nine-family kernel table (spec §10:
 /// `gpu_core::Gpu::new(&Film::kernel_sources())`, like `mse_fd.rs`).
+// 'static so the per-test-binary device pool can key on the slice address.
+static KERNEL_SOURCES: [(&str, &str); 9] = Film::kernel_sources();
+
 fn film_gpu() -> (Gpu, Film) {
-    (Gpu::new(&Film::kernel_sources()), Film::seq())
+    (gpu_core::testgpu::dev(&KERNEL_SOURCES), Film::seq())
 }
 
 // --- channel family (NCHW; sb packed [N,2C]: scale first, shift second) ---

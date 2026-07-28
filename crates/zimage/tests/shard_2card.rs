@@ -88,8 +88,16 @@ fn rel_l2(a: &[f64], b: &[f64]) -> f64 {
     d / na.max(1e-9)
 }
 
+/// These tests build REAL devices on purpose — device lifecycle/sharding is
+/// the thing under test, so the pooled test device would defeat them. They
+/// must therefore not run concurrently with EACH OTHER: several fresh devices
+/// on one card is the exact driver deadlock the rest of the suite avoids via
+/// gpu_core::testgpu. One lock, held for each test's whole body.
+static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn two_card_pipeline_matches_single_device() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
         eprintln!("SKIP: set BRAIN_DEV_GPU=1 (needs 2 GPUs) for the 2-card pipeline test");
         return;
@@ -118,6 +126,7 @@ fn two_card_pipeline_matches_single_device() {
 
 #[test]
 fn gpipe_microbatched_matches_summed_grads() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
         eprintln!("SKIP: set BRAIN_DEV_GPU=1 (needs 2 GPUs) for the GPipe microbatch test");
         return;

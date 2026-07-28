@@ -72,7 +72,7 @@ fn full_forward_matches_the_reference() {
     let reference = read_f32(&q_path); // [nq, horizon] row-major (quantile-major)
     assert_eq!(reference.len(), nq * horizon, "golden shape mismatch");
 
-    let model = Chronos2::load(&weights).expect("load chronos2.weights");
+    let model = Chronos2::load_on(gpu_core::testgpu::dev(chronos2::model::PIPELINES), &weights).expect("load chronos2.weights");
     let brain = model.forecast_quantiles(&context, horizon); // [nq, horizon] quantile-major
     assert_eq!(brain.len(), nq * horizon, "brain forecast shape");
 

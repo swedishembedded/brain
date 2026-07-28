@@ -99,7 +99,7 @@ impl Gn {
     /// `(name, source)` pairs for `Gpu::new`, in the order matching
     /// [`Gn::seq`]: `gn_stats, gn_apply, gn_dgamma, gn_dbeta, gn_dsum,
     /// gn_dx, scale_chan`.
-    pub fn kernel_sources() -> [(&'static str, &'static str); 7] {
+    pub const fn kernel_sources() -> [(&'static str, &'static str); 7] {
         [
             ("gn_stats", kernels::GN_STATS),
             ("gn_apply", kernels::GN_APPLY),

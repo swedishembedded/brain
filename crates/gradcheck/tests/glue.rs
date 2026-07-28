@@ -21,7 +21,7 @@
 use gpu_core::{f, DeviceBuffer, Gpu};
 
 // Kernel order passed to Gpu::new; indices below reference these.
-const KERNELS: &[(&str, &str)] = &[
+static KERNELS: &[(&str, &str)] = &[
     ("mul", kernels::MUL),                 // 0
     ("scale_row", kernels::SCALE_ROW),     // 1
     ("edm_mix", kernels::EDM_MIX),         // 2
@@ -206,7 +206,7 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 #[test]
 fn glue_mul_matches_hand_reference() {
     // Spec §5.1.
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let a = [1.5f32, -2.0, 0.25, 3.0];
     let b = [4.0f32, 0.5, -8.0, -1.0];
 
@@ -226,7 +226,7 @@ fn glue_mul_matches_hand_reference() {
 #[test]
 fn glue_scale_row_matches_hand_reference() {
     // Spec §5.2: N=2, M=3.
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = [2.0f32, -0.5];
     let x = [1.0f32, 2.0, 3.0, 4.0, 6.0, -2.0];
 
@@ -244,7 +244,7 @@ fn glue_scale_row_matches_hand_reference() {
 #[test]
 fn glue_edm_mix_matches_hand_reference() {
     // Spec §5.3: N=2, M=2, ab packed [a0,b0,a1,b1].
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let ab = [2.0f32, 0.5, -1.0, 3.0];
     let x = [1.0f32, -2.0, 3.0, 0.5];
     let fv = [4.0f32, 8.0, -2.0, 1.0];
@@ -259,7 +259,7 @@ fn glue_edm_mix_matches_hand_reference() {
 fn glue_edm_mix_identity_skip() {
     // Spec §6.3 / §3.3: a=1, b=0 => y[i] == x[i] EXACT f32 equality
     // (`==`, NOT bitwise: x = -0.0 yields +0.0).
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, m) = (2usize, 6usize);
     let mut st = 0x1D_5EEDu64;
     let x = lcg_vec(&mut st, n * m);
@@ -281,7 +281,7 @@ fn glue_edm_mix_identity_skip() {
 #[test]
 fn glue_mse_value_w_matches_hand_reference() {
     // Spec §5.4: N=2, M=4; out = [0.75, 4.5]; host plain sum = 5.25.
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let pred = [1.0f32, 2.0, 3.0, 0.0, 0.0, -1.0, 2.0, 2.0];
     let tgt = [0.0f32, 2.0, 5.0, -1.0, 1.0, -1.0, 0.0, 4.0];
     let w = [0.5f32, 2.0];
@@ -302,7 +302,7 @@ fn glue_mse_value_w_matches_hand_reference() {
 fn glue_mse_grad_w_matches_hand_reference() {
     // Spec §5.5: same inputs as §5.4, scale = 0.5 (deliberately not 1.0 so
     // the test proves `scale` is read from params via bitcast<f32>).
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let pred = [1.0f32, 2.0, 3.0, 0.0, 0.0, -1.0, 2.0, 2.0];
     let tgt = [0.0f32, 2.0, 5.0, -1.0, 1.0, -1.0, 0.0, 4.0];
     let w = [0.5f32, 2.0];
@@ -327,7 +327,7 @@ fn glue_fd_mse_grad_w() {
     // Spec §9.7: N=3, M=5, LCG pred/tgt in [-1,1], w in [0.25, 2],
     // scale = 0.7. Global gradcheck tolerances (playbook §3): h = 5e-3,
     // atol = 4e-3, rtol = 8e-2 — NEVER loosened.
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, m) = (3usize, 5usize);
     let total = n * m;
     let scale = 0.7f32;
@@ -376,7 +376,7 @@ fn glue_fd_mse_grad_w() {
 fn glue_pad2d_matches_hand_reference() {
     // Spec §5.6: NC=1, h=2, w=2, (l,r,t,b) = (1,0,0,1) => 3x3 output.
     // Everything is either literal 0.0 or a copied input => bitwise.
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let x = [1.0f32, 2.0, 3.0, 4.0];
     let y = k_pad2d(&gpu, &x, 2, 2, (1, 0, 0, 1));
     let want = [0.0f32, 1.0, 2.0, 0.0, 3.0, 4.0, 0.0, 0.0, 0.0];
@@ -388,7 +388,7 @@ fn glue_pad2d_matches_hand_reference() {
 #[test]
 fn glue_crop2d_matches_hand_reference() {
     // Spec §5.7: same offsets (1,0,0,1); input is the padded 3x3.
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let xp = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
     let y = k_crop2d(&gpu, &xp, 2, 2, (1, 0, 0, 1));
     assert_bits(&y, &[2.0, 3.0, 5.0, 6.0], "crop2d y");
@@ -409,7 +409,7 @@ fn glue_pad_crop_adjoint() {
     // Spec §6.1: NC=2, h=3, w=2; offsets {(1,2,0,1), (0,0,0,0), (2,0,3,0)};
     // random tiny tensors (LCG, [-1,1]); adjoint gap <= 1e-5 with host f32
     // dot in ascending index order on both sides.
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (nc, h, w) = (2usize, 3usize, 2usize);
     let mut st = 0xADD_017u64;
 
@@ -448,7 +448,7 @@ fn glue_pad_crop_adjoint() {
 #[test]
 fn glue_nchw_nlc_matches_hand_reference() {
     // Spec §5.8: N=1, C=2, hw=4.
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let x = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]; // NCHW: c0 | c1
     let nlc = k_nchw_nlc(&gpu, &x, 2, 4);
     assert_bits(&nlc, &[1.0, 5.0, 2.0, 6.0, 3.0, 7.0, 4.0, 8.0], "nchw_nlc");
@@ -472,7 +472,7 @@ fn glue_nchw_nlc_matches_hand_reference() {
 #[test]
 fn glue_nlc_roundtrip_and_adjoint() {
     // Spec §6.2: random tiny N=2, C=3, hw=4.
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, hw) = (2usize, 3usize, 4usize);
     let total = n * c * hw;
     let mut st = 0x0DDB_A11u64;
@@ -496,7 +496,7 @@ fn glue_nlc_roundtrip_and_adjoint() {
 fn glue_deterministic_bitwise() {
     // Spec §9.13 / §10: run every one of the nine kernels twice on identical
     // LCG-seeded inputs with FRESH output buffers; ALL outputs bitwise equal.
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     const SEED: u64 = 0xDE7E_121Eu64;
 
     // Regenerate identical inputs from the same fixed seed for each pass.
@@ -551,7 +551,7 @@ fn glue_deterministic_bitwise() {
 fn glue_zero_weight_sample_contributes_zero() {
     // Spec §7: w[n] = 0 => the sample contributes EXACTLY 0.0 to both the
     // loss partial sum and the gradient (finite inputs by contract).
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (m, scale) = (3usize, 0.7f32);
     let mut st = 0x00C0_FFEEu64; // fixed seed
     let pred = lcg_vec(&mut st, 2 * m);
@@ -585,7 +585,7 @@ fn glue_zero_weight_sample_contributes_zero() {
 #[test]
 fn glue_m1_per_element_rows() {
     // Spec §7: M = 1 => n = i, per-element weights; must work unchanged.
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
 
     // scale_row with M=1 degenerates to elementwise product s[i]*x[i].
     let x = [1.0f32, -2.0, 0.5, 4.0];

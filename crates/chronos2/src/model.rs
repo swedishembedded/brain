@@ -45,7 +45,7 @@ const ATTN_SOFTMAX_FULL: usize = 7;
 const ATTN_APPLY_FULL: usize = 8;
 const MATMUL_TILED: usize = 9;
 
-const PIPELINES: &[(&str, &str)] = &[
+pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("relu_inplace", kernels::RELU_INPLACE),
@@ -79,7 +79,15 @@ impl Chronos2 {
         cfg: Chronos2Config,
         weights: &HashMap<String, Vec<f32>>,
     ) -> Result<Chronos2, String> {
-        let gpu = Gpu::new(PIPELINES);
+        Chronos2::from_weights_on(Gpu::new(PIPELINES), cfg, weights)
+    }
+
+    /// Build on an existing device handle — see `Gpt::new_on`.
+    pub fn from_weights_on(
+        gpu: Gpu,
+        cfg: Chronos2Config,
+        weights: &HashMap<String, Vec<f32>>,
+    ) -> Result<Chronos2, String> {
         let mut w = HashMap::new();
         for (name, shape) in cfg.param_list() {
             let numel: usize = shape.iter().product();
@@ -99,10 +107,15 @@ impl Chronos2 {
 
     /// Load a model from a brain `.weights` container (see [`crate::import`]).
     pub fn load(path: &str) -> Result<Chronos2, String> {
+        Chronos2::load_on(Gpu::new(PIPELINES), path)
+    }
+
+    /// Load on an existing device handle — see `Gpt::new_on`.
+    pub fn load_on(gpu: Gpu, path: &str) -> Result<Chronos2, String> {
         let c = checkpoint::load(path);
         let cfg = Chronos2Config::from_hf(&c.header["config"])?;
         let weights = c.by_role("");
-        Chronos2::from_weights(cfg, &weights)
+        Chronos2::from_weights_on(gpu, cfg, &weights)
     }
 
     /// The config this model was built with.

@@ -16,7 +16,7 @@
 use gpu_core::Gpu;
 
 // Kernel order passed to Gpu::new; indices below reference these.
-const KERNELS: &[(&str, &str)] = &[
+static KERNELS: &[(&str, &str)] = &[
     ("mse_value", kernels::MSE_VALUE), // 0
     ("mse_grad", kernels::MSE_GRAD),   // 1
 ];
@@ -52,7 +52,7 @@ fn grad(gpu: &Gpu, pred: &[f32], target: &[f32]) -> Vec<f32> {
 
 #[test]
 fn mse_value_matches_reference() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let pred = [1.0f32, 2.0, 3.0, -4.0];
     let target = [1.5f32, 0.0, 3.0, -2.0];
     // reference mean squared error
@@ -64,7 +64,7 @@ fn mse_value_matches_reference() {
 
 #[test]
 fn mse_grad_matches_finite_differences() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let mut st = 0x5EED_C0DEu64;
     let n = 37usize; // not a multiple of 64 -> exercises the bounds check
     let pred: Vec<f32> = (0..n).map(|_| lcg(&mut st)).collect();

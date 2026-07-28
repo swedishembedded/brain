@@ -30,7 +30,7 @@
 
 use gpu_core::{f, Gpu};
 
-const KERNELS: &[(&str, &str)] = &[
+static KERNELS: &[(&str, &str)] = &[
     ("conv2d", kernels::CONV2D),                              // 0
     ("conv2d_gd", kernels::CONV2D_GD),                        // 1
     ("conv2d_gd_dx", kernels::CONV2D_GD_DX),                  // 2
@@ -135,7 +135,7 @@ fn assert_adjoint(tag: &str, ax: &[f32], y: &[f32], x: &[f32], aty: &[f32]) {
 /// disagreement is the price of not having that bug.
 #[test]
 fn conv2d_gd_reproduces_conv2d_at_groups1_dilation1() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, cin, h, w, cout, k) = (2u32, 3u32, 9u32, 7u32, 4u32, 3u32);
     let x = randvec(1, (n * cin * h * w) as usize);
     let wt = randvec(2, (cout * cin * k * k) as usize);
@@ -171,7 +171,7 @@ fn conv2d_gd_reproduces_conv2d_at_groups1_dilation1() {
 /// index still produces plausible numbers, so this tests the isolation directly.
 #[test]
 fn conv2d_gd_depthwise_channels_are_isolated() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w, k) = (1u32, 4u32, 6u32, 6u32, 3u32);
     let (stride, pad, dil) = (1u32, 1u32, 1u32);
     let x = randvec(3, (n * c * h * w) as usize);
@@ -203,7 +203,7 @@ fn conv2d_gd_depthwise_channels_are_isolated() {
 /// offset — a golden that a wrong dilation cannot accidentally satisfy.
 #[test]
 fn conv2d_gd_dilation_moves_the_tap() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w, k) = (1u32, 1u32, 7u32, 7u32, 3u32);
     let mut x = vec![0.0f32; (h * w) as usize];
     x[(3 * w + 3) as usize] = 1.0; // delta at (3,3)
@@ -224,7 +224,7 @@ fn conv2d_gd_dilation_moves_the_tap() {
 
 #[test]
 fn conv2d_gd_backward_is_adjoint_and_weight_grad_matches() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, cin, h, w, cout, k, g) = (2u32, 4u32, 6u32, 6u32, 4u32, 3u32, 2u32);
     let (stride, pad, dil) = (1u32, 1u32, 1u32);
     let (ho, wo) = (h, w);
@@ -260,7 +260,7 @@ fn conv2d_gd_backward_is_adjoint_and_weight_grad_matches() {
 /// kernel remains perfectly self-consistent while resampling the wrong lattice.
 #[test]
 fn resize_bilinear_matches_both_coordinate_conventions() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (h, w, ho, wo) = (2u32, 2u32, 4u32, 4u32);
     // A plane f(y,x) = 10*y + x is reproduced EXACTLY by bilinear interpolation,
     // so the expected output is the mapping itself — no interpolation error to
@@ -304,7 +304,7 @@ fn resize_bilinear_matches_both_coordinate_conventions() {
 /// the edge clamps are right.
 #[test]
 fn resize_bilinear_dx_is_the_exact_adjoint() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let cases: &[(u32, u32, u32, u32)] = &[
         (4, 4, 8, 8),   // 2x up
         (8, 8, 4, 4),   // 2x down
@@ -334,7 +334,7 @@ fn resize_bilinear_dx_is_the_exact_adjoint() {
 
 #[test]
 fn avgpool2d_global_is_the_mean_and_dx_is_adjoint() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2u32, 3u32, 4u32, 5u32);
     let x = randvec(21, (n * c * h * w) as usize);
     // Ho=Wo=1 is SE's adaptive_avg_pool2d(x, 1): a plain per-channel mean.
@@ -360,7 +360,7 @@ fn avgpool2d_global_is_the_mean_and_dx_is_adjoint() {
 
 #[test]
 fn pixel_shuffle_is_a_permutation_and_dx_inverts_it() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w, s) = (2u32, 2u32, 3u32, 4u32, 2u32);
     let xn = (n * c * s * s * h * w) as usize;
     let x = randvec(51, xn);
@@ -390,7 +390,7 @@ fn pixel_shuffle_is_a_permutation_and_dx_inverts_it() {
 /// defining property of the op and it is checked directly.
 #[test]
 fn convex_upsample_output_stays_within_the_neighbourhood() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, h, w, s) = (1u32, 4u32, 4u32, 2u32);
     let ss = (s * s) as usize;
     let d = randvec(61, (n * h * w) as usize);
@@ -436,7 +436,7 @@ fn convex_upsample_output_stays_within_the_neighbourhood() {
 
 #[test]
 fn convex_upsample_backward_is_adjoint_in_both_inputs() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, h, w, s) = (2u32, 3u32, 4u32, 2u32);
     let dn = (n * h * w) as usize;
     let mn = (n * 9 * s * s * h * w) as usize;
@@ -458,7 +458,7 @@ fn convex_upsample_backward_is_adjoint_in_both_inputs() {
 
 #[test]
 fn sigmoid_and_its_backward() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let x: Vec<f32> = (-40..=40).map(|i| i as f32 / 10.0).collect();
     let n = x.len();
     let y = run2(&gpu, 13, &x, n, &[n as u32]);
@@ -477,7 +477,7 @@ fn sigmoid_and_its_backward() {
 
 #[test]
 fn masked_l1_applies_the_mask_and_its_grad_is_the_signed_mask() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let pred = vec![1.0f32, 2.0, -3.0, 4.0, 0.0];
     let tgt = vec![1.5f32, 0.0, -1.0, 4.0, 0.0];
     let mask = vec![1.0f32, 1.0, 0.0, 1.0, 1.0]; // element 2 masked OUT
@@ -497,7 +497,7 @@ fn masked_l1_applies_the_mask_and_its_grad_is_the_signed_mask() {
 
 #[test]
 fn broadcast_add_hw_broadcasts_two_strips_and_its_adjoints_are_the_axis_sums() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2u32, 3u32, 4u32, 5u32);
     let a = randvec(81, (n * c * h) as usize); // [N,C,H,1]
     let b = randvec(82, (n * c * w) as usize); // [N,C,1,W]
@@ -538,7 +538,7 @@ fn broadcast_add_hw_broadcasts_two_strips_and_its_adjoints_are_the_axis_sums() {
 
 #[test]
 fn resize_nearest_selects_the_floor_tap_and_dx_is_adjoint() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     // 2x up of a 2x2 must replicate each pixel into a 2x2 block.
     let x = vec![1.0f32, 2.0, 3.0, 4.0];
     let y = run2(&gpu, 19, &x, 16, &[1, 1, 2, 2, 4, 4]);
@@ -564,7 +564,7 @@ fn resize_nearest_selects_the_floor_tap_and_dx_is_adjoint() {
 
 #[test]
 fn softmax_k_normalizes_the_strided_axis_and_backward_matches_fd() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, k, m) = (2u32, 9u32, 6u32); // K=9 like FastConvexUpsample
     let x = randvec(101, (n * k * m) as usize);
     let y = run2(&gpu, 21, &x, (n * k * m) as usize, &[n, k, m]);
@@ -601,7 +601,7 @@ fn softmax_k_normalizes_the_strided_axis_and_backward_matches_fd() {
 
 #[test]
 fn weighted_gap_contracts_against_the_weight_map_and_both_adjoints_hold() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, hw) = (2u32, 3u32, 12u32);
     let x = randvec(111, (n * c * hw) as usize);
     let m = randvec(112, (n * hw) as usize);
@@ -638,7 +638,7 @@ fn weighted_gap_contracts_against_the_weight_map_and_both_adjoints_hold() {
 /// bias_add would add image 0's context to image 1. Asserted directly.
 #[test]
 fn add_chan_bcast_is_per_image_and_its_adjoint_is_the_spatial_sum() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, hw) = (2u32, 3u32, 6u32);
     let x = vec![0.0f32; (n * c * hw) as usize];
     let v = randvec(121, (n * c) as usize);
@@ -683,7 +683,7 @@ fn add_chan_bcast_is_per_image_and_its_adjoint_is_the_spatial_sum() {
 /// no reason to exist.)
 #[test]
 fn resize_nearest_agrees_with_the_fast_pathed_upsample2() {
-    let gpu = Gpu::new(KERNELS);
+    let gpu = gpu_core::testgpu::dev(KERNELS);
     for &(n, c, h, w) in &[(2u32, 3u32, 4u32, 5u32), (1, 1, 1, 1), (1, 8, 7, 3)] {
         let x = randvec(131, (n * c * h * w) as usize);
         let on = (n * c * h * 2 * w * 2) as usize;

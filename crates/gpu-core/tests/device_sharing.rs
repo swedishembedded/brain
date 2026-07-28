@@ -23,8 +23,16 @@ const K: &[(&str, &str)] = &[("add2", kernels::ADD2)];
 /// A shared handle computes correctly and independently of its parent: each
 /// handle has its own command stream, so interleaved use must not corrupt
 /// either's batches.
+/// These tests build REAL devices on purpose — device lifecycle/sharding is
+/// the thing under test, so the pooled test device would defeat them. They
+/// must therefore not run concurrently with EACH OTHER: several fresh devices
+/// on one card is the exact driver deadlock the rest of the suite avoids via
+/// gpu_core::testgpu. One lock, held for each test's whole body.
+static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn shared_handle_computes_independently() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip() {
         return;
     }
@@ -53,6 +61,7 @@ fn shared_handle_computes_independently() {
 /// handles instead of uploading them once per model object.
 #[test]
 fn buffers_are_usable_across_handles() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip() {
         return;
     }
@@ -71,6 +80,7 @@ fn buffers_are_usable_across_handles() {
 /// suite timeout; the assertions catch wrong results.
 #[test]
 fn concurrent_shared_handles_do_not_deadlock() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if skip() {
         return;
     }

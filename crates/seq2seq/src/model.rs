@@ -98,7 +98,7 @@ const ADAMW: usize = 42;
 const CLIP_COEF: usize = 43;
 const GRAD_SCALE_BUF: usize = 44;
 
-const PIPELINES: &[(&str, &str)] = &[
+pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
     ("pos_add", kernels::POS_ADD),
     ("layernorm", kernels::LAYERNORM),
@@ -395,7 +395,11 @@ impl Seq2Seq {
     }
 
     pub fn new(cfg: Seq2SeqConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Seq2Seq {
-        let gpu = Gpu::new(PIPELINES);
+        Seq2Seq::new_on(Gpu::new(PIPELINES), cfg, b, t, init)
+    }
+
+    /// Build on an existing device handle — see `Gpt::new_on`.
+    pub fn new_on(gpu: Gpu, cfg: Seq2SeqConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Seq2Seq {
         let ps = ParamStore::new(&gpu, cfg.param_list(), init);
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 

@@ -149,8 +149,16 @@ fn matmul(gpu: &Gpu, x: &[f32], w: &[f32], m: usize, k: usize, n: usize, gelu: b
     gpu.read(if gelu { &gb } else { &ob }, m * n)
 }
 
+/// These tests build REAL devices on purpose — device lifecycle/sharding is
+/// the thing under test, so the pooled test device would defeat them. They
+/// must therefore not run concurrently with EACH OTHER: several fresh devices
+/// on one card is the exact driver deadlock the rest of the suite avoids via
+/// gpu_core::testgpu. One lock, held for each test's whole body.
+static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn tensor_parallel_mlp_matches_single_gpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if gpu_disabled() {
         return;
     }
@@ -225,6 +233,7 @@ fn tensor_parallel_mlp_matches_single_gpu() {
 
 #[test]
 fn tensor_parallel_mlp_training_matches_single_gpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if gpu_disabled() {
         return;
     }
@@ -308,6 +317,7 @@ fn tensor_parallel_mlp_training_matches_single_gpu() {
 
 #[test]
 fn tensor_parallel_attention_matches_single_gpu() {
+    let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     if gpu_disabled() {
         return;
     }

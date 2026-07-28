@@ -196,7 +196,11 @@ impl Autoencoder {
     }
 
     pub fn new(cfg: AutoencoderConfig, b: u32, init: &HashMap<String, Vec<f32>>) -> Autoencoder {
-        let gpu = Gpu::new(PIPELINES);
+        Autoencoder::new_on(Gpu::new(PIPELINES), cfg, b, init)
+    }
+
+    /// Build on an existing device handle — see `Gpt::new_on`.
+    fn new_on(gpu: Gpu, cfg: AutoencoderConfig, b: u32, init: &HashMap<String, Vec<f32>>) -> Autoencoder {
         let ps = ParamStore::new(&gpu, cfg.param_list(), init);
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
@@ -514,7 +518,7 @@ mod tests {
         }
         let cfg = AutoencoderConfig::tiny();
         let init = crate::init::init_weights(&cfg, 7);
-        let model = Autoencoder::new(cfg.clone(), 3, &init);
+        let model = Autoencoder::new_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), 3, &init);
         let x: Vec<f32> = (0..(3 * cfg.in_dim)).map(|i| ((i % 7) as f32 - 3.0) * 0.2).collect();
         model.set_batch(&x, &x);
         let l1 = model.forward();
@@ -530,7 +534,7 @@ mod tests {
         }
         let cfg = AutoencoderConfig { in_dim: 8, hidden: 16, z_dim: 4 };
         let init = crate::init::init_weights(&cfg, 11);
-        let model = Autoencoder::new(cfg.clone(), 4, &init);
+        let model = Autoencoder::new_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), 4, &init);
         let x: Vec<f32> = (0..(4 * cfg.in_dim)).map(|i| ((i * 3 % 11) as f32 - 5.0) * 0.15).collect();
         model.set_batch(&x, &x);
         let before = model.forward();

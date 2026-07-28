@@ -182,6 +182,11 @@ impl Yolo {
         } else {
             Gpu::new_cpu(PIPELINES)
         };
+        Yolo::new_on(gpu, cfg, b, _t, init)
+    }
+
+    /// Build on an existing device handle — see `Gpt::new_on`.
+    pub fn new_on(gpu: Gpu, cfg: YoloConfig, b: u32, _t: u32, init: &HashMap<String, Vec<f32>>) -> Yolo {
         let ps = ParamStore::new(&gpu, ModelConfigParamList::param_list(&cfg), init);
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 

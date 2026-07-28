@@ -35,7 +35,7 @@ fn indexer_allpass_equals_dense() {
     }
     let cfg_idx = GlmConfig { indexer_full: vec![true, false], index_topk: 999, ..GlmConfig::tiny() };
     let init = glm::init_weights(&cfg_idx, 5);
-    let a = Glm::new(cfg_idx, 2, 6, &init);
+    let a = Glm::new_on(gpu_core::testgpu::dev(glm::model::PIPELINES), cfg_idx, 2, 6, &init);
     let (x, y) = batch();
     a.set_batch(&x, &y);
     let la = a.forward();
@@ -44,7 +44,7 @@ fn indexer_allpass_equals_dense() {
     let cfg_dense = GlmConfig { indexer_full: vec![], ..GlmConfig::tiny() };
     let init_dense: HashMap<String, Vec<f32>> =
         cfg_dense.param_list().into_iter().map(|(n, _)| (n.clone(), init[&n].clone())).collect();
-    let b = Glm::new(cfg_dense, 2, 6, &init_dense);
+    let b = Glm::new_on(gpu_core::testgpu::dev(glm::model::PIPELINES), cfg_dense, 2, 6, &init_dense);
     b.set_batch(&x, &y);
     let lb = b.forward();
 
@@ -63,10 +63,10 @@ fn indexer_sparse_restricts_attention() {
     let init = glm::init_weights(&cfg_sparse, 9); // param_list identical for both
     let (x, y) = batch();
 
-    let ms = Glm::new(cfg_sparse, 2, 6, &init);
+    let ms = Glm::new_on(gpu_core::testgpu::dev(glm::model::PIPELINES), cfg_sparse, 2, 6, &init);
     ms.set_batch(&x, &y);
     let ls = ms.forward();
-    let mf = Glm::new(cfg_full, 2, 6, &init);
+    let mf = Glm::new_on(gpu_core::testgpu::dev(glm::model::PIPELINES), cfg_full, 2, 6, &init);
     mf.set_batch(&x, &y);
     let lf = mf.forward();
 
@@ -86,7 +86,7 @@ fn indexer_distillation_updates_weights() {
     }
     let cfg = GlmConfig { indexer_full: vec![true, true], index_topk: 999, block_size: 16, ..GlmConfig::tiny() };
     let init = glm::init_weights(&cfg, 5);
-    let model = Glm::new(cfg, 2, 8, &init);
+    let model = Glm::new_on(gpu_core::testgpu::dev(glm::model::PIPELINES), cfg, 2, 8, &init);
     let x: Vec<u32> = (0..16).map(|i| (i * 5 + 1) % 23).collect();
     let y: Vec<u32> = (0..16).map(|i| (i * 5 + 2) % 23).collect();
     model.set_batch(&x, &y);
@@ -121,7 +121,7 @@ fn indexer_model_still_learns() {
     }
     let cfg = GlmConfig { indexer_full: vec![true, false], index_topk: 999, block_size: 16, ..GlmConfig::tiny() };
     let init = glm::init_weights(&cfg, 11);
-    let model = Glm::new(cfg, 2, 8, &init);
+    let model = Glm::new_on(gpu_core::testgpu::dev(glm::model::PIPELINES), cfg, 2, 8, &init);
     let x: Vec<u32> = (0..16).map(|i| (i * 7 % 23) as u32).collect();
     let y: Vec<u32> = (0..16).map(|i| ((i * 7 + 1) % 23) as u32).collect();
     model.set_batch(&x, &y);

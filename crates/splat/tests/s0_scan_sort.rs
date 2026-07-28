@@ -109,7 +109,7 @@ fn scan_sort_gpu() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
-    let g = Gpu::new(splat::PIPELINES);
+    let g = gpu_core::testgpu::dev(splat::PIPELINES);
     run_all(&g);
 }
 

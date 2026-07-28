@@ -153,7 +153,7 @@ mod tests {
         let cfg = FincastConfig::tiny();
         let weights: HashMap<String, Vec<f32>> =
             cfg.param_list().into_iter().map(|(k, s)| (k, vec![0.0; s.iter().product()])).collect();
-        Fincast::from_weights(cfg, &weights).unwrap()
+        Fincast::from_weights_on(gpu_core::testgpu::dev(crate::model::PIPELINES), cfg, &weights).unwrap()
     }
 
     #[test]

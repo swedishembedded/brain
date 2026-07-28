@@ -189,7 +189,7 @@ mod tests {
         let cfg = Chronos2Config::tiny();
         let weights: HashMap<String, Vec<f32>> =
             cfg.param_list().into_iter().map(|(k, s)| (k, vec![0.0; s.iter().product()])).collect();
-        Chronos2::from_weights(cfg, &weights).unwrap()
+        Chronos2::from_weights_on(gpu_core::testgpu::dev(crate::model::PIPELINES), cfg, &weights).unwrap()
     }
 
     #[test]

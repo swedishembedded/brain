@@ -781,7 +781,7 @@ mod tests {
         let mut cfg = PidConfig::default_small();
         cfg.block_size = 16;
         let init = crate::data::init_weights(&cfg, 3);
-        let model = Pid::new(cfg.clone(), 1, 8, &init);
+        let model = Pid::from_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), 1, 8, &init);
         // a BOS + a few event-ish tokens; label one DECIDE position
         let x: Vec<u32> = vec![BOS, EV_START, 1, 50, 50, 50, EV_END, DECIDE];
         let mut y = vec![IGNORE; 8];
@@ -804,7 +804,7 @@ mod tests {
         let mut cfg = PidConfig::default_small();
         cfg.block_size = 16;
         let init = crate::data::init_weights(&cfg, 4);
-        let model = Pid::new(cfg.clone(), 1, 8, &init);
+        let model = Pid::from_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), 1, 8, &init);
         let x: Vec<u32> = vec![BOS, EV_START, 1, 50, 50, 50, EV_END, DECIDE];
         let mut y = vec![IGNORE; 8];
         y[7] = 30;
@@ -825,7 +825,7 @@ mod tests {
         let mut cfg = PidConfig::default_small();
         cfg.block_size = 16;
         let init = crate::data::init_weights(&cfg, 5);
-        let model = Pid::new(cfg, 1, 16, &init);
+        let model = Pid::from_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, 1, 16, &init);
         let ctx: Vec<u32> = vec![BOS, EV_START, 1, 50, 50, 50, EV_END, DECIDE];
         let (mean, min, max) = model.profile_inference(&ctx, 3, 1);
         assert!(mean.is_finite() && mean > 0.0);

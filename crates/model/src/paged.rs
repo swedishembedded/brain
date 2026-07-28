@@ -505,13 +505,20 @@ mod tests {
 mod gpu_tests {
     use super::*;
     use data::rng::Rng;
-    use gpu_core::Gpu;
 
     const SCORES: usize = 0;
     const SOFTMAX: usize = 1;
     const APPLY: usize = 2;
     const P_SCORES: usize = 3;
     const P_APPLY: usize = 4;
+
+    static PIPES: &[(&str, &str)] = &[
+        ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
+        ("decode_softmax", kernels::DECODE_SOFTMAX),
+        ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
+        ("paged_decode_scores", kernels::PAGED_DECODE_SCORES),
+        ("paged_decode_apply", kernels::PAGED_DECODE_APPLY),
+    ];
 
     fn fb(x: f32) -> u32 {
         x.to_bits()
@@ -523,14 +530,7 @@ mod gpu_tests {
     /// physical block order to genuinely exercise the mapping.
     #[test]
     fn paged_attention_matches_contiguous() {
-        let pipes: &[(&str, &str)] = &[
-            ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
-            ("decode_softmax", kernels::DECODE_SOFTMAX),
-            ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
-            ("paged_decode_scores", kernels::PAGED_DECODE_SCORES),
-            ("paged_decode_apply", kernels::PAGED_DECODE_APPLY),
-        ];
-        let g = Gpu::new(pipes);
+        let g = gpu_core::testgpu::dev(PIPES);
         let (nh, nkv, hd) = (4u32, 2u32, 8u32);
         let group = nh / nkv;
         let hkv = nkv * hd;
@@ -595,7 +595,15 @@ mod gpu_tests {
 mod batched_tests {
     use super::*;
     use data::rng::Rng;
-    use gpu_core::Gpu;
+
+    static PIPES: &[(&str, &str)] = &[
+        ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
+        ("decode_softmax", kernels::DECODE_SOFTMAX),
+        ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
+        ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
+        ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
+        ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
+    ];
 
     fn fb(x: f32) -> u32 {
         x.to_bits()
@@ -607,15 +615,7 @@ mod batched_tests {
     #[test]
     fn batched_paged_matches_per_sequence() {
         // Contiguous (ref) at 0..2, batched paged at 3..5.
-        let pipes: &[(&str, &str)] = &[
-            ("attn_decode_scores", kernels::ATTN_DECODE_SCORES),
-            ("decode_softmax", kernels::DECODE_SOFTMAX),
-            ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
-            ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
-            ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
-            ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
-        ];
-        let g = Gpu::new(pipes);
+        let g = gpu_core::testgpu::dev(PIPES);
         let (nh, nkv, hd) = (4u32, 2u32, 8u32);
         let group = nh / nkv;
         let (hkv, hq) = (nkv * hd, nh * hd);

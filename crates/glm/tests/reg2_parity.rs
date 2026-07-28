@@ -34,7 +34,7 @@ fn logits(backend: Backend, naive: bool, c: &GlmConfig, init: &HashMap<String, V
         std::env::remove_var("BRAIN_GLM_NAIVE_MM");
     }
     set_default_backend(backend);
-    let m = Glm::new(c.clone(), 1, x.len() as u32, init);
+    let m = Glm::new_on(gpu_core::testgpu::dev(glm::model::PIPELINES), c.clone(), 1, x.len() as u32, init);
     m.logits_all(x)
 }
 

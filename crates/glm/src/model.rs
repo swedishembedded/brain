@@ -156,7 +156,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 }
 "#;
 
-const PIPELINES: &[(&str, &str)] = &[
+pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
     ("matmul", kernels::MATMUL),
     ("matmul_dx", kernels::MATMUL_DX),
@@ -368,8 +368,16 @@ impl Glm {
         Glm::new_impl(cfg, b, t, init, true)
     }
 
+    /// Build in training mode on an existing device handle — see `Gpt::new_on`.
+    pub fn new_on(gpu: Gpu, cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Glm {
+        Glm::new_impl_on(gpu, cfg, b, t, init, true)
+    }
+
     fn new_impl(cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool) -> Glm {
-        let gpu = Gpu::new(PIPELINES);
+        Glm::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, train)
+    }
+
+    fn new_impl_on(gpu: Gpu, cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool) -> Glm {
         // Roles: inference => all Frozen; training => all Trainable EXCEPT the
         // router selection bias (`e_score_correction_bias`), which is never
         // updated by backprop (matches the reference — a load-balance heuristic
@@ -1364,7 +1372,7 @@ mod kv_step_tests {
         let t = 8u32;
         let seq = 6usize;
         let init = crate::init::init_weights(&cfg, 7);
-        let m = Glm::new(cfg.clone(), 1, t, &init);
+        let m = Glm::new_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), 1, t, &init);
 
         let tokens: Vec<u32> = (0..seq).map(|i| ((i * 5 + 3) as u32) % cfg.vocab).collect();
 

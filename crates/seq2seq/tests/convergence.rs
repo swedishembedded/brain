@@ -92,7 +92,7 @@ fn engine_learns_copy_via_cross_attention() {
     let steps = 400u32;
 
     let init = Seq2Seq::init_weights(&cfg, 1234);
-    let model = Seq2Seq::new(cfg, b, task.len, &init);
+    let model = Seq2Seq::new_on(gpu_core::testgpu::dev(seq2seq::model::PIPELINES), cfg, b, task.len, &init);
 
     let opts = FitOpts {
         steps,

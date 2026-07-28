@@ -136,7 +136,7 @@ mod kv_gen_tests {
     fn generate_kv_matches_recompute_greedy() {
         let cfg = GlmConfig::tiny();
         let init = crate::init::init_weights(&cfg, 7);
-        let model = Glm::new(cfg.clone(), 1, 8, &init);
+        let model = Glm::new_on(gpu_core::testgpu::dev(crate::model::PIPELINES), cfg.clone(), 1, 8, &init);
         let prompt = vec![1u32, 5, 3];
         let mut r1 = data::rng::Rng::new(0);
         let recompute = generate(&model, &prompt, 4, 0.0, 0, None, &mut r1);
