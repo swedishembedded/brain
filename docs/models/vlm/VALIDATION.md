@@ -19,6 +19,7 @@ The validation ladder, weakest → strongest evidence:
 |---|---|---|---|
 | **Decoder logits** (24 layers, GQA, SwiGLU, tied head) | FastVLM-0.5B | **mean\|Δ\|≈3e-6, max\|Δ\|≈6e-5, argmax agrees everywhere** | `crates/fastvlm/src/parity.rs` vs `transformers` on the real bf16 checkpoint |
 | **Qwen3 decoder** (partial-depth: 4 real blocks, QK-norm, θ=5e6) | Qwen3-VL-4B | **mean\|Δ\|≈5e-6, max\|Δ\|≈7e-5, argmax agrees** | `crates/qwenvl/src/parity.rs` — shards streamed to fit RAM (the full 36-layer model is ~32 GB in-brain) |
+| **Moondream decoder** (partial-depth: 4 real dense blocks, parallel block + tau + partial RoPE) | Moondream 3 | **mean\|Δ\|≈5e-6, max\|Δ\|≈7e-5, argmax agrees** | `crates/moondream/src/parity.rs` — streamed from the 28 GB checkpoint; **caught a real bug**: the missing fused-qkv bias (below) |
 | **Greedy generation** (text) | FastVLM-0.5B | **brain decodes the identical token stream as HF** — "Name three primary colors." → **"Red, Blue, and Yellow."** | same test; brain argmax-decodes 8 tokens `[6033,11,8697,...]`, matching HF exactly |
 | **Image → caption** (splice + decode) | FastVLM-0.5B | **brain reproduces the HF caption token-for-token** — DOSBox logo → **"A wooden frame with the letters B, D, and S in it."** | `fastvlm_image_caption_matches_hf`: brain splices the 256 HF image embeddings (`enable_mm_splice`) and greedy-decodes `[32,22360,4034,…]`, identical to HF |
 | **Fully-in-brain caption** (vision + projector + decode) | FastVLM-0.5B | **brain runs the WHOLE pipeline on its own weights and matches HF** — same caption, zero HF tensors at inference | `fastvlm_full_pipeline_caption`: brain's mobileclip vision → mlp2x_gelu projector → Qwen2 decoder → greedy decode → `[32,22360,4034,…]` |
@@ -28,6 +29,16 @@ all three models decode with — against the actual reference model to fp32 reas
 noise, *and* the full decode loop (embed → 24 layers → tied head → argmax → append) producing
 a real, coherent, correct answer. It exercises the real-weight path end to end:
 `checkpoint::safetensors` (bf16→f32) → `import::map_decoder` → `Qwen::new` → `logits_all`.
+
+### What real-weight parity caught that gradchecks couldn't
+
+Moondream's fused-qkv is an `nn.Linear` **with a bias**, and the checkpoint ships
+`attn.qkv.bias` — but brain's `MoondreamBlock` did the qkv matmul with no bias add.
+The synthetic gradcheck weights had no such bias, so every self-consistency check
+(analytic == finite-diff) passed while the model computed a *different function* than
+the reference. Real-weight parity surfaced it immediately (mean\|Δ\|=1.08, growing
+with position); adding the (conditional) bias collapsed the delta to fp32 noise. This
+is precisely why tier-3 parity matters on top of the gradient checks.
 
 ## Training convergence (tier 5)
 

@@ -318,6 +318,9 @@ pub struct MoondreamBlock<'g> {
     theta: f32,
     /// True when `attn.tau.*` weights are present (per-head attention temperature).
     tau: bool,
+    /// True when `attn.qkv.bias` is present (the real checkpoint's fused-qkv Linear
+    /// has a bias; the synthetic gradcheck weights do not).
+    qkv_bias: bool,
     // scratch
     l_in: DeviceBuffer,
     qkv: DeviceBuffer,
@@ -345,6 +348,7 @@ impl<'g> MoondreamBlock<'g> {
         let w: HashMap<String, DeviceBuffer> = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
         let slab = (n_heads * t * t) as u64;
         let tau = w.contains_key("attn.tau.wq");
+        let qkv_bias = w.contains_key("attn.qkv.bias");
         MoondreamBlock {
             gpu,
             w,
@@ -357,6 +361,7 @@ impl<'g> MoondreamBlock<'g> {
             rot_dim,
             theta,
             tau,
+            qkv_bias,
             l_in: gpu.storage((t * d) as u64),
             qkv: gpu.storage((t * 3 * d) as u64),
             qkv2: gpu.storage((t * 3 * d) as u64),
@@ -393,8 +398,12 @@ impl<'g> MoondreamBlock<'g> {
         // Shared LayerNorm (with bias).
         s.push(g.step(4, &[x, self.wb("ln.weight"), self.wb("ln.bias"), &self.l_in], &[d, t, f(LN_EPS)], t));
         // --- attention branch ---
-        // fused qkv = l_in · wqkv^T  ([t, 3d])
+        // fused qkv = l_in · wqkv^T  ([t, 3d]) (+ bias on the real checkpoint). The
+        // bias must land before tau (whose tok_feat = gelu(qkv)) and RoPE/attention.
         s.push(g.step(0, &[&self.l_in, self.wb("attn.qkv.weight"), &self.qkv], &[t, d, stride3], t * stride3));
+        if self.qkv_bias {
+            s.push(g.step(6, &[&self.qkv, self.wb("attn.qkv.bias")], &[t, stride3], t * stride3));
+        }
         // Per-head attention temperature (tau): scale q and v (NOT k) by a per-
         // (head,token) scalar computed from the raw qkv, BEFORE RoPE. tok_feat is
         // erf-GELU over the full 3d projection; tok_q/tok_v = tanh(tok_feat·w{q,v}ᵀ);
