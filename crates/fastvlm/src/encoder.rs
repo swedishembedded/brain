@@ -392,6 +392,14 @@ impl PatchEmbed {
         let r = self.rlk.forward(ctx, ps, x_in);
         self.proj.forward(ctx, ps, r)
     }
+
+    /// Backward: `proj` then `rlk` (two [`ConvUnit::backward`]s).
+    pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
+        let r = self.rlk.output();
+        let d_r = ctx.gpu.storage(self.rlk.out_shape().numel() as u64);
+        self.proj.backward(ctx, ps, r, d_out, &d_r);
+        self.rlk.backward(ctx, ps, x_in, &d_r, d_in);
+    }
 }
 
 /// AttentionBlock — the FastViTHD stage-3/4 block: `x = x + ls1 ⊙ MHSA(LN(x))`
@@ -740,6 +748,56 @@ mod tests {
             im.get_mut("cu.bias").unwrap()[j] -= eps;
             let num = (loss(&ip, &x_host) - loss(&im, &x_host)) / (2.0 * eps);
             assert!(ok(g_b[j], num), "d bias[{j}]: analytic {} vs numeric {}", g_b[j], num);
+        }
+    }
+
+    #[test]
+    fn patchembed_backward_matches_finite_diff() {
+        // The stride-2 inter-stage downsample (grouped 7×7 + 1×1), two ConvUnits.
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let in_shape = Shape::new(1, 3, 8, 8);
+        let pe = PatchEmbed::new(&ctx, "pe", in_shape, 6);
+        let plist = pe.param_list();
+        let out_n = pe.out_shape().numel() as usize;
+        let mut rng = Rng::new(12);
+        let init = rand_init(&plist, &mut rng);
+        let x_host: Vec<f32> = (0..in_shape.numel() as usize).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
+
+        let ps = ParamStore::new(&gpu, plist.clone(), &init);
+        ps.zero_grads(&gpu);
+        let xb = gpu.storage_init("x", &x_host);
+        let _ = pe.forward(&ctx, &ps, &xb);
+        let d_out = gpu.storage_init("dout", &vec![1.0f32; out_n]);
+        let d_in = gpu.storage(in_shape.numel() as u64);
+        pe.backward(&ctx, &ps, &xb, &d_out, &d_in);
+        let g_in = gpu.read(&d_in, in_shape.numel() as usize);
+        let keys = ["pe.rlk.conv.weight", "pe.proj.conv.weight"];
+        let grads: HashMap<&str, Vec<f32>> = keys.iter().map(|&k| (k, ps.read_grad(&gpu, k))).collect();
+
+        let loss = |im: &HashMap<String, Vec<f32>>, xh: &[f32]| -> f32 {
+            let ps = ParamStore::new(&gpu, plist.clone(), im);
+            let xb = gpu.storage_init("x", xh);
+            gpu.read(pe.forward(&ctx, &ps, &xb), out_n).iter().sum::<f32>()
+        };
+        let eps = 1e-3f32;
+        let ok = |a: f32, num: f32| (a - num).abs() <= 5e-3 + 8e-2 * num.abs();
+
+        for &i in &[0usize, 30, 77, 100, 150, 190] {
+            let (mut xp, mut xm) = (x_host.clone(), x_host.clone());
+            xp[i] += eps;
+            xm[i] -= eps;
+            let num = (loss(&init, &xp) - loss(&init, &xm)) / (2.0 * eps);
+            assert!(ok(g_in[i], num), "d_in[{i}]: analytic {} vs numeric {}", g_in[i], num);
+        }
+        for &key in &keys {
+            for &j in &[0usize, 5, 11] {
+                let (mut ip, mut im) = (init.clone(), init.clone());
+                ip.get_mut(key).unwrap()[j] += eps;
+                im.get_mut(key).unwrap()[j] -= eps;
+                let num = (loss(&ip, &x_host) - loss(&im, &x_host)) / (2.0 * eps);
+                assert!(ok(grads[key][j], num), "d {key}[{j}]: analytic {} vs numeric {}", grads[key][j], num);
+            }
         }
     }
 
