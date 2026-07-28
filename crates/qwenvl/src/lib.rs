@@ -14,5 +14,6 @@
 //! DeepStack → import). Today: configuration.
 
 pub mod config;
+pub mod mrope;
 
 pub use config::{Qwen3VlConfig, VisionConfig};
