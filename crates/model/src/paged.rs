@@ -182,6 +182,149 @@ impl BlockTable {
         alloc.decref(last);
         Some((last, fresh))
     }
+
+    /// Start a FRESH table from shared full prefix blocks (incref each): the
+    /// prefix-cache hit path. The table's length becomes `blocks * block_size`
+    /// — adopted blocks are always full — and the next append/reserve writes
+    /// after them.
+    pub fn adopt_prefix(&mut self, blocks: &[u32], alloc: &mut BlockAllocator) {
+        assert!(self.is_empty(), "adopt_prefix expects a fresh sequence");
+        for &b in blocks {
+            alloc.incref(b);
+            self.blocks.push(b);
+        }
+        self.len = blocks.len() as u32 * alloc.block_size();
+    }
+}
+
+/// Content-addressed index of FULL, immutable KV blocks for prompt-prefix
+/// reuse. An entry maps `(parent physical block, this block's token ids)` to
+/// the physical block holding that prefix's K/V.
+///
+/// Chaining by the parent's *physical identity* rather than by a rolling hash
+/// makes a hit exact **by construction**: two different prefixes can never
+/// alias, because reaching an entry requires holding its actual parent block —
+/// there is no hash to collide. This is the invariant the warm-vs-cold
+/// identity test pins: a cache hit MUST produce byte-identical KV.
+///
+/// The cache holds one reference on every indexed block, so a cached block
+/// never returns to the free list while indexed; [`PrefixCache::evict`]
+/// releases least-recently-used entries under pool pressure. Only entries
+/// whose block is cache-only (refcount 1) are evictable — a block still backing
+/// a live sequence stays.
+#[derive(Debug, Default)]
+pub struct PrefixCache {
+    map: std::collections::HashMap<(u32, Vec<u32>), PrefixEntry>,
+    /// Reverse index for eviction bookkeeping.
+    by_block: std::collections::HashMap<u32, (u32, Vec<u32>)>,
+    tick: u64,
+}
+
+#[derive(Debug)]
+struct PrefixEntry {
+    block: u32,
+    last_use: u64,
+}
+
+/// The "no parent" sentinel: the first block of a sequence chains off this.
+pub const PREFIX_ROOT: u32 = u32::MAX;
+
+impl PrefixCache {
+    pub fn new() -> PrefixCache {
+        PrefixCache::default()
+    }
+
+    /// Cached full blocks currently indexed.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// The longest cached chain matching `prompt`'s leading full blocks,
+    /// covering at most `max_tokens` tokens. Returns the physical blocks to
+    /// adopt (possibly empty). Touches each hit's LRU stamp.
+    pub fn lookup(&mut self, prompt: &[u32], block_size: u32, max_tokens: usize) -> Vec<u32> {
+        let bs = block_size as usize;
+        let mut parent = PREFIX_ROOT;
+        let mut out = Vec::new();
+        for chunk in prompt.chunks_exact(bs) {
+            if (out.len() + 1) * bs > max_tokens {
+                break;
+            }
+            match self.map.get_mut(&(parent, chunk.to_vec())) {
+                Some(e) => {
+                    self.tick += 1;
+                    e.last_use = self.tick;
+                    parent = e.block;
+                    out.push(e.block);
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// Index `prompt`'s full blocks from block index `from` onward, whose K/V
+    /// now live in `blocks[from..]` (the sequence's own freshly-prefilled
+    /// blocks). Takes a cache reference on each newly indexed block. Blocks
+    /// `0..from` must be the chain a preceding [`Self::lookup`] returned.
+    pub fn insert_chain(
+        &mut self,
+        prompt: &[u32],
+        blocks: &[u32],
+        from: usize,
+        alloc: &mut BlockAllocator,
+    ) {
+        let bs = alloc.block_size() as usize;
+        let full = (prompt.len() / bs).min(blocks.len());
+        let mut parent = if from == 0 { PREFIX_ROOT } else { blocks[from - 1] };
+        for i in from..full {
+            let key = (parent, prompt[i * bs..(i + 1) * bs].to_vec());
+            if let Some(e) = self.map.get(&key) {
+                // An identical prefix was cached by another sequence; keep the
+                // canonical chain (later lookups follow the cached block).
+                parent = e.block;
+                continue;
+            }
+            let b = blocks[i];
+            if self.by_block.contains_key(&b) {
+                // Already indexed under a different key — cannot happen for a
+                // freshly prefilled block, but never double-index.
+                parent = b;
+                continue;
+            }
+            alloc.incref(b);
+            self.tick += 1;
+            self.map.insert(key.clone(), PrefixEntry { block: b, last_use: self.tick });
+            self.by_block.insert(b, key);
+            parent = b;
+        }
+    }
+
+    /// Release least-recently-used CACHE-ONLY entries (block refcount 1) until
+    /// `want` blocks have been freed or nothing more is evictable. Returns how
+    /// many were freed. Evicting a mid-chain parent strands its cached
+    /// children (unreachable by lookup); their stamps stop advancing, so they
+    /// become LRU and follow shortly.
+    pub fn evict(&mut self, want: u32, alloc: &mut BlockAllocator) -> u32 {
+        let mut freed = 0u32;
+        while freed < want {
+            let victim = self
+                .map
+                .iter()
+                .filter(|(_, e)| alloc.refcount(e.block) == 1)
+                .min_by_key(|(_, e)| e.last_use)
+                .map(|(k, e)| (k.clone(), e.block));
+            let Some((key, block)) = victim else { break };
+            self.map.remove(&key);
+            self.by_block.remove(&block);
+            alloc.decref(block);
+            freed += 1;
+        }
+        freed
+    }
 }
 
 #[cfg(test)]
@@ -264,6 +407,72 @@ mod tests {
         // append continues from there into the partially-filled 2nd block.
         let (blk, off) = t.append(&mut a).unwrap();
         assert_eq!((blk, off), (t.blocks()[1], 2));
+    }
+
+    /// A prefix hit must be exact: same tokens under a DIFFERENT parent are a
+    /// different prefix and must not alias — the chain is keyed by physical
+    /// parent identity, so there is no hash to collide.
+    #[test]
+    fn prefix_cache_is_exact_by_construction() {
+        let mut a = BlockAllocator::new(16, 4);
+        let mut cache = PrefixCache::new();
+
+        // Sequence A: prompt [1..8] -> two full blocks, cached.
+        let pa: Vec<u32> = (1..=8).collect();
+        let mut ta = BlockTable::new();
+        ta.reserve(8, &mut a).unwrap();
+        cache.insert_chain(&pa, ta.blocks(), 0, &mut a);
+        assert_eq!(cache.len(), 2);
+
+        // Same first block -> hit; the second block diverges -> chain stops.
+        let pb: Vec<u32> = vec![1, 2, 3, 4, 9, 9, 9, 9];
+        assert_eq!(cache.lookup(&pb, 4, 8), vec![ta.blocks()[0]]);
+
+        // The SECOND block of A has tokens [5,6,7,8]; a prompt STARTING with
+        // those tokens shares no parent, so it must miss entirely.
+        let pc: Vec<u32> = vec![5, 6, 7, 8];
+        assert!(cache.lookup(&pc, 4, 4).is_empty(), "same tokens, different prefix: no hit");
+
+        // Full match walks the whole chain, bounded by max_tokens.
+        assert_eq!(cache.lookup(&pa, 4, 8), ta.blocks().to_vec());
+        assert_eq!(cache.lookup(&pa, 4, 7).len(), 1, "max_tokens caps the chain");
+    }
+
+    /// The cache's reference keeps a block alive after its sequence releases
+    /// it; adoption increfs; eviction only touches cache-only blocks, LRU
+    /// first.
+    #[test]
+    fn prefix_cache_refcounts_and_lru_eviction() {
+        let mut a = BlockAllocator::new(8, 4);
+        let mut cache = PrefixCache::new();
+        let prompt: Vec<u32> = (0..8).collect();
+        let mut t = BlockTable::new();
+        t.reserve(8, &mut a).unwrap();
+        let blocks = t.blocks().to_vec();
+        cache.insert_chain(&prompt, t.blocks(), 0, &mut a);
+        assert_eq!(a.refcount(blocks[0]), 2, "sequence + cache");
+
+        // The sequence finishes: blocks stay alive on the cache's reference.
+        t.release(&mut a);
+        assert_eq!(a.refcount(blocks[0]), 1);
+        assert_eq!(a.free_blocks(), 6);
+
+        // A new sequence adopts the cached chain.
+        let mut t2 = BlockTable::new();
+        let hits = cache.lookup(&prompt, 4, 8);
+        t2.adopt_prefix(&hits, &mut a);
+        assert_eq!(t2.len(), 8);
+        assert_eq!(a.refcount(blocks[0]), 2);
+
+        // Under pressure, only the cache-only block is evictable... and a
+        // block still backing t2 stays even when asked for more.
+        t2.truncate(4, &mut a); // t2 keeps only block 0
+        let freed = cache.evict(2, &mut a);
+        assert_eq!(freed, 1, "block 0 is live in t2; only block 1 was evictable");
+        // Release t2; now block 0 (still cached) is evictable.
+        t2.release(&mut a);
+        assert_eq!(cache.evict(2, &mut a), 1);
+        assert_eq!(a.free_blocks(), 8, "everything returned to the pool");
     }
 
     #[test]

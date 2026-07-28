@@ -176,7 +176,17 @@ impl PerfTarget for PagedLlmTarget {
     }
 
     fn counters(&self) -> Vec<(String, serde_json::Value)> {
-        vec![("kv_free_blocks".into(), serde_json::json!(self.sched.free_blocks()))]
+        let (hit, looked, cached) = self.sched.prefix_stats();
+        // Hit rate only once something was looked up — never a fabricated 0.
+        let rate = (looked > 0).then(|| hit as f64 / looked as f64);
+        vec![
+            ("kv_free_blocks".into(), serde_json::json!(self.sched.free_blocks())),
+            (
+                "kv_prefix_hit_rate".into(),
+                rate.map(serde_json::Value::from).unwrap_or(serde_json::Value::Null),
+            ),
+            ("kv_prefix_cached_blocks".into(), serde_json::json!(cached)),
+        ]
     }
 
     /// Map the harness policy names onto the engine's admission seam.

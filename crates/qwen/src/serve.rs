@@ -19,7 +19,7 @@ use gpu_core::select::{
 };
 use gpu_core::{DeviceBuffer, DeviceCaps, Gpu, Step};
 use model::block::{self, KernelIds};
-use model::paged::{BlockAllocator, BlockTable};
+use model::paged::{BlockAllocator, BlockTable, PrefixCache};
 use paramstore::ParamStore;
 
 use crate::config::QwenConfig;
@@ -228,6 +228,14 @@ pub struct Engine {
     max_prefill: u32,
     cap: u32,
     alloc: BlockAllocator,
+    /// Prompt-prefix cache (D): full prompt blocks are indexed after prefill
+    /// and adopted (shared, refcounted) by later prompts with the same prefix,
+    /// so prefill computes only the unmatched tail. Purely a prefill
+    /// optimisation — decode never touches it.
+    prefix: PrefixCache,
+    /// Prefix-reuse counters: tokens looked up / tokens served from the cache.
+    prefix_lookup_tokens: u64,
+    prefix_hit_tokens: u64,
     pool_k: Vec<DeviceBuffer>,
     pool_v: Vec<DeviceBuffer>,
     // int8 KV: pools hold packed int8 (4/u32, ~4x smaller) + per-(token,kv-head)
@@ -424,6 +432,9 @@ impl Engine {
             max_prefill,
             cap,
             alloc: BlockAllocator::new(num_blocks, block_size),
+            prefix: PrefixCache::new(),
+            prefix_lookup_tokens: 0,
+            prefix_hit_tokens: 0,
             pool_k,
             pool_v,
             kv_int8,
@@ -870,13 +881,33 @@ impl Engine {
             self.max_blocks_per_seq,
             self.block_size,
         );
+        // An out-of-vocab id would make the embedding gather read out of
+        // bounds — the kernels are trusted (no per-access clamps on either
+        // backend), so the failure is silent garbage, not a clean error. The
+        // scheduler rejects such requests at admission; this backstop catches
+        // callers that bypass it.
+        if let Some(&bad) = prompt.iter().find(|&&t| t >= self.cfg.vocab) {
+            panic!("prompt token {bad} is outside the model vocabulary ({})", self.cfg.vocab);
+        }
         let d = self.cfg.d_model as usize;
         let bs = self.block_size;
         let mbt = self.max_blocks_per_seq as usize;
         let n = prompt.len() as u32;
         let chunk = self.max_prefill.max(1);
+        // Prefix reuse (D): adopt the longest cached chain of full prompt
+        // blocks and compute only the tail. Always leave at least one token to
+        // compute — the caller needs the LAST token's hidden state, which only
+        // a real forward produces.
+        let max_reuse = prompt.len().saturating_sub(1);
+        let hits = self.prefix.lookup(prompt, bs, max_reuse);
+        let matched = hits.len();
+        if matched > 0 {
+            table.adopt_prefix(&hits, &mut self.alloc);
+        }
+        self.prefix_lookup_tokens += prompt.len() as u64;
+        self.prefix_hit_tokens += (matched as u64) * bs as u64;
         let mut last = Vec::new();
-        let mut start = 0u32;
+        let mut start = matched as u32 * bs;
         while start < n {
             let cc = (n - start).min(chunk);
             table.reserve(cc, &mut self.alloc).expect("KV pool exhausted");
@@ -898,7 +929,21 @@ impl Engine {
             last = hidden[(cu - 1) * d..cu * d].to_vec();
             start += cc;
         }
+        // Index this prompt's freshly-computed full blocks for later prompts.
+        self.prefix.insert_chain(prompt, table.blocks(), matched, &mut self.alloc);
         last
+    }
+
+    /// Release up to `want` least-recently-used cache-only prefix blocks back
+    /// to the pool — the admission path calls this when the pool is short.
+    pub(crate) fn reclaim_prefix(&mut self, want: u32) -> u32 {
+        self.prefix.evict(want, &mut self.alloc)
+    }
+
+    /// Prefix-cache effectiveness: `(tokens served from cache, tokens looked
+    /// up, full blocks currently cached)`.
+    pub fn prefix_stats(&self) -> (u64, u64, usize) {
+        (self.prefix_hit_tokens, self.prefix_lookup_tokens, self.prefix.len())
     }
 
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
@@ -1101,6 +1146,11 @@ pub enum RejectReason {
     ExceedsCapacity { need: u32, capacity: u32 },
     /// Refused by the installed [`AdmissionPolicy`].
     PolicyRejected { policy: &'static str },
+    /// A prompt token outside the model's vocabulary. Admitting it would make
+    /// the embedding gather read out of bounds — the kernels are trusted (no
+    /// per-access clamps), so the failure would be silent garbage, not an
+    /// error.
+    InvalidToken { token: u32, vocab: u32 },
 }
 
 impl std::fmt::Display for RejectReason {
@@ -1110,6 +1160,9 @@ impl std::fmt::Display for RejectReason {
                 write!(f, "needs {need} tokens, engine capacity is {capacity}")
             }
             RejectReason::PolicyRejected { policy } => write!(f, "rejected by {policy}"),
+            RejectReason::InvalidToken { token, vocab } => {
+                write!(f, "token {token} is outside the vocabulary ({vocab})")
+            }
         }
     }
 }
@@ -1387,6 +1440,11 @@ impl Scheduler {
         self.eng.free_blocks()
     }
 
+    /// Prefix-cache effectiveness — see [`Engine::prefix_stats`].
+    pub fn prefix_stats(&self) -> (u64, u64, usize) {
+        self.eng.prefix_stats()
+    }
+
     /// One scheduler iteration: admit waiting requests that fit (prefill + sample
     /// first token), run one batched decode step over all running sequences, then
     /// reap completed ones. Returns the `(id, tokens)` of requests finished here.
@@ -1407,17 +1465,21 @@ impl Scheduler {
             // would otherwise block the queue forever (or, before the capacity
             // check, corrupt the block table).
             let cap = self.eng.max_seq_len();
+            let vocab = self.eng.vocab() as u32;
             while let Some((id, req)) = self.waiting.front() {
                 let need = req.prompt.len() + req.max_new;
-                if need <= cap {
+                let bad = req.prompt.iter().find(|&&t| t >= vocab).copied();
+                if need <= cap && bad.is_none() {
                     break;
                 }
                 let (id, need) = (*id, need as u32);
                 self.waiting.pop_front();
                 self.started.remove(&id);
-                report
-                    .rejected
-                    .push((id, RejectReason::ExceedsCapacity { need, capacity: cap as u32 }));
+                let reason = match bad {
+                    Some(token) => RejectReason::InvalidToken { token, vocab },
+                    None => RejectReason::ExceedsCapacity { need, capacity: cap as u32 },
+                };
+                report.rejected.push((id, reason));
             }
             let fits = match self.waiting.front() {
                 Some((_, req)) => {
@@ -1427,7 +1489,14 @@ impl Scheduler {
                     if admitted_this_iter > 0 && need > budget_left {
                         break;
                     }
-                    self.eng.free_blocks() >= self.eng.blocks_for(need + 1)
+                    let want = self.eng.blocks_for(need + 1);
+                    let free = self.eng.free_blocks();
+                    if free < want {
+                        // Cached prefix blocks are reclaimable capacity: live
+                        // sequences always outrank the cache.
+                        self.eng.reclaim_prefix(want - free);
+                    }
+                    self.eng.free_blocks() >= want
                 }
                 None => false,
             };
@@ -1581,6 +1650,71 @@ mod tests {
         assert_eq!(out[1], ref1, "seq1 batched paged != reference");
     }
 
+    /// THE prefix-cache invariant: a warm prefill (served from cached blocks)
+    /// must produce output IDENTICAL to the cold one — a cache hit that
+    /// changes a single token is corruption, not a cache. Also pins that the
+    /// cache actually engaged (a test that silently measured two cold runs
+    /// would prove nothing).
+    #[test]
+    fn warm_prefill_is_identical_to_cold() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let mut eng = Engine::from_map(cfg, &map, 4, 96, 2, 12, 16, false, false);
+        let prompt: Vec<u32> = vec![3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8];
+        let cold = eng.generate_greedy(&[prompt.clone()], 10, None);
+        let (hit0, _, cached) = eng.prefix_stats();
+        assert_eq!(hit0, 0, "first prefill must be cold");
+        assert!(cached > 0, "full prompt blocks must be indexed after prefill");
+        let warm = eng.generate_greedy(&[prompt.clone()], 10, None);
+        let (hit1, _, _) = eng.prefix_stats();
+        assert!(hit1 > 0, "the second prefill must actually reuse the prefix");
+        assert_eq!(warm, cold, "a cache hit must be byte-identical to computing the prefix");
+    }
+
+    /// Random shared prefixes: a prompt sharing a random-length prefix with
+    /// earlier traffic must prefill (through adopted cached blocks) to the
+    /// same final hidden state a fresh engine computes — within rounding.
+    ///
+    /// Deliberately NOT a token-equality test: reused KV is bit-identical to
+    /// its original computation, but the CPU backend's blocked GEMMs are not
+    /// row-count-invariant in final-bit rounding, so a tail-only prefill can
+    /// differ from a full one by an ulp — which flips argmax on a degenerate
+    /// random model while meaning nothing. Structural corruption (a wrongly
+    /// adopted block) produces O(1) relative error; rounding produces ~1e-6.
+    /// The 1e-3 gate separates them cleanly. Token-level identity is pinned by
+    /// `warm_prefill_is_identical_to_cold` where chunking is identical.
+    #[test]
+    fn random_shared_prefixes_stay_exact() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let mut cached_eng = Engine::from_map(cfg.clone(), &map, 4, 128, 2, 12, 16, false, false);
+        let mut rng = Rng::new(42);
+        let vocab = cfg.vocab as u64;
+        let base: Vec<u32> = (0..14).map(|_| (rng.next_u64() % vocab) as u32).collect();
+        for trial in 0..6 {
+            let keep = (rng.next_u64() as usize) % base.len();
+            let mut prompt = base[..keep].to_vec();
+            let extra = 3 + (rng.next_u64() as usize) % 6;
+            prompt.extend((0..extra).map(|_| (rng.next_u64() % vocab) as u32));
+            // Reference: a fresh engine has an empty cache by construction.
+            let mut fresh = Engine::from_map(cfg.clone(), &map, 4, 128, 2, 12, 16, false, false);
+            let mut tf = BlockTable::new();
+            let cold = fresh.prefill(&mut tf, &prompt);
+            let mut tc = BlockTable::new();
+            let warm = cached_eng.prefill(&mut tc, &prompt);
+            let err: f32 = warm.iter().zip(&cold).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
+            let norm: f32 = cold.iter().map(|v| v * v).sum::<f32>().sqrt();
+            let rel = err / norm.max(1e-12);
+            assert!(
+                rel < 1e-3,
+                "trial {trial}: warm prefill diverged structurally (rel L2 {rel:.6}) on prompt {prompt:?}"
+            );
+            cached_eng.release_table(&mut tc);
+        }
+        let (hit, looked, _) = cached_eng.prefix_stats();
+        assert!(hit > 0, "at least one trial must have actually reused a prefix ({hit}/{looked})");
+    }
+
     /// Int8 weights (A0) must stay numerically faithful to the fp32 engine:
     /// same weights, same prompt, and the final-norm hidden state after a
     /// quantized prefill must sit within a few percent of the fp32 one. A
@@ -1642,6 +1776,30 @@ mod tests {
         out.extend(rep.completed);
         assert!(out.contains_key(&ok));
         assert!(!out.contains_key(&huge));
+    }
+
+    /// An out-of-vocab token must be REJECTED at admission with a typed
+    /// reason. Admitting it would make the embedding gather read out of
+    /// bounds — the kernels are trusted, so the failure would be silent
+    /// garbage in the hidden states (found the hard way: NaN on CPU, wrong
+    /// finite values on GPU), not an error anyone can see.
+    #[test]
+    fn out_of_vocab_tokens_are_rejected_not_gathered() {
+        let cfg = QwenConfig::tiny();
+        let vocab = cfg.vocab;
+        let map = tiny_weights(&cfg);
+        let eng = Engine::from_map(cfg, &map, 4, 64, 2, 8, 8, false, false);
+        let mut sched = Scheduler::new(eng, 2);
+        let bad = sched.submit(Request { prompt: vec![1, vocab + 7, 2], max_new: 4, eos: None });
+        let ok = sched.submit(Request { prompt: vec![1, 2, 3], max_new: 4, eos: None });
+        let rep = sched.step_report();
+        assert_eq!(rep.rejected.len(), 1);
+        assert_eq!(rep.rejected[0].0, bad);
+        assert!(matches!(rep.rejected[0].1, RejectReason::InvalidToken { token, .. } if token == vocab + 7));
+        let mut out = sched.run();
+        out.extend(rep.completed);
+        assert!(out.contains_key(&ok), "valid work behind the bad request still completes");
+        assert!(!out.contains_key(&bad));
     }
 
     /// Admission policies must refuse at submit time, report the refusal, and
