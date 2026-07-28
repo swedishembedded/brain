@@ -102,6 +102,8 @@ const SPLICE_ADD: usize = 48;
 // `cfg.attn_bias` (FastVLM's Qwen2 decoder); Qwen3 is bias-free.
 const BIAS_ADD: usize = 49;
 const BIAS_GRAD: usize = 50;
+// Decode-regime int8 GEMV (single-barrier; the m=1 shape KV decode dispatches).
+const MATMUL_I8_GEMV: usize = 51;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -155,6 +157,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("splice_add", kernels::SPLICE_ADD),
     ("bias_add", kernels::BIAS_ADD),
     ("bias_grad", kernels::BIAS_GRAD),
+    ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
@@ -349,11 +352,22 @@ impl Qwen {
     /// grad/AdamW buffers), cutting device memory ~4× — essential for loading a
     /// real 0.6B checkpoint for generation. Builds only the forward graph.
     pub fn load_inference(path: &str, b: u32, t: u32) -> Qwen {
+        Self::load_inference_with(path, b, t, false)
+    }
+
+    /// [`Self::load_inference`] with the int8 numeric tier: per-channel weight
+    /// quantisation + dynamic activation quant, for both batched forwards and
+    /// KV-cache decode (the m=1 packed GEMV).
+    pub fn load_inference_i8(path: &str, b: u32, t: u32) -> Qwen {
+        Self::load_inference_with(path, b, t, true)
+    }
+
+    fn load_inference_with(path: &str, b: u32, t: u32, i8: bool) -> Qwen {
         let c = checkpoint::load(path);
         let cfg = QwenConfig::from_json(&c.header["config"]);
         let init = c.by_role("");
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &init, false, shard, false)
+        Qwen::new_impl(cfg, b, t, &init, false, shard, i8)
     }
 
     pub fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen {
@@ -1291,7 +1305,21 @@ impl Qwen {
     /// head to the returned hidden to get logits — `logits[v] = tok.weight[v]·hidden`.
     pub fn step(&self, token_id: u32) -> Vec<f32> {
         let pos = self.dec_pos.get();
-        let hidden = self.decode_at(token_id, pos);
+        let hidden = self.decode_at(Some(token_id), pos);
+        self.dec_pos.set(pos + 1);
+        hidden
+    }
+
+    /// [`Self::step`] from a RAW embedding instead of a token id — the seam a
+    /// vision-language front-end feeds image embeddings through: prefill walks
+    /// text tokens via `step` and image rows via `step_embed`, and the KV cache
+    /// never knows the difference. No residual splice needed on this path.
+    pub fn step_embed(&self, embed: &[f32]) -> Vec<f32> {
+        assert_eq!(embed.len(), self.cfg.d_model as usize, "step_embed wants one d_model row");
+        let pos = self.dec_pos.get();
+        // The embedding lands where EMBED would have written it (res[0] row 0).
+        self.gpu.write(&self.res[0], bytemuck::cast_slice(embed));
+        let hidden = self.decode_at(None, pos);
         self.dec_pos.set(pos + 1);
         hidden
     }
@@ -1299,12 +1327,11 @@ impl Qwen {
     /// Record + run the incremental decode tape for one token at absolute `pos`.
     /// Mirrors [`Self::forward_steps`] at `n = 1` (row 0 of the sized scratch),
     /// swapping the batched GQA core for the decode kernels + persistent KV cache.
-    fn decode_at(&self, token_id: u32, pos: u32) -> Vec<f32> {
+    fn decode_at(&self, token_id: Option<u32>, pos: u32) -> Vec<f32> {
         assert!(
             self.shard.is_whole(self.cfg.n_layers as usize),
             "KV-cache decode requires a whole (single-device) model"
         );
-        assert!(self.q8.is_none(), "KV-cache decode: fp32 path only (int8 not supported)");
         assert!(pos < self.t, "decode pos {pos} exceeds ctx_len {}", self.t);
 
         let c = &self.cfg;
@@ -1325,36 +1352,84 @@ impl Qwen {
         let g = &self.gpu;
         let w = |name: &str| self.ps.w(name);
 
-        // Embed the token id into res[0] row 0 via the tied table (non-tiled gather).
-        g.write(&self.tokens, &[token_id]);
+        // Embed the token id into res[0] row 0 via the tied table (non-tiled
+        // gather); `None` = the caller already wrote a raw embedding there
+        // (`step_embed`).
         let mut s: Vec<Step> = Vec::new();
-        s.push(g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, 1], d));
+        if let Some(token_id) = token_id {
+            g.write(&self.tokens, &[token_id]);
+            s.push(g.step(EMBED, &[&self.tokens, self.w("tok.weight"), &self.res[0]], &[d, 1], d));
+        }
+        // Int8 (m=1): quantize the input row once per distinct input, then the
+        // single-barrier packed GEMV — the exact decode-regime shape the
+        // serving engine measured (runs on the CPU JIT too, unlike the tiled
+        // GEMM, so int8 KV decode is not GPU-only).
+        let mm8 = |s: &mut Vec<Step>, q8: &crate::q8::Q8, lin: &crate::q8::Lin8, x: &DeviceBuffer, out: &DeviceBuffer, k: u32| {
+            q8.quant(g, s, x, k, 1);
+            s.push(g.step(
+                MATMUL_I8_GEMV,
+                &[&q8.xq, &lin.packed, &q8.sx, &lin.scale, out],
+                &[1, k / 4, lin.n],
+                lin.n * 64,
+            ));
+        };
 
         for l in 0..c.n_layers as usize {
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
             // --- attention: project, QK-norm, RoPE-at-pos, append, decode-attend ---
             s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &lb.xn1, d, 1));
-            s.push(g.step(MATMUL, &[&lb.xn1, w(&p("attn.wq.weight")), &lb.q_pre], &[1, d, hq], hq));
-            s.push(g.step(MATMUL, &[&lb.xn1, w(&p("attn.wk.weight")), &lb.k_pre], &[1, d, hkv], hkv));
-            s.push(g.step(MATMUL, &[&lb.xn1, w(&p("attn.wv.weight")), &lb.v], &[1, d, hkv], hkv));
-            s.push(block::rmsnorm_fwd(g, &ids, &lb.q_pre, w(&p("attn.q_norm.weight")), &lb.q, hd, nh));
-            s.push(block::rmsnorm_fwd(g, &ids, &lb.k_pre, w(&p("attn.k_norm.weight")), &lb.k, hd, nkv));
-            s.push(g.step(ROPE_AT, &[&lb.q], &[1, nh, hd, hq, 0, pos, f(theta)], nh * half));
-            s.push(g.step(ROPE_AT, &[&lb.k], &[1, nkv, hd, hkv, 0, pos, f(theta)], nkv * half));
-            s.push(g.step(KV_APPEND, &[&lb.k, &self.kcache[l]], &[hkv, pos], hkv));
+            let q8l = self.q8.as_ref().map(|q| (q, q.layers.get(&l).expect("q8 layer present")));
+            if let Some((q8, lay)) = q8l {
+                mm8(&mut s, q8, &lay.wq, &lb.xn1, &lb.q_pre, d);
+                mm8(&mut s, q8, &lay.wk, &lb.xn1, &lb.k_pre, d);
+                mm8(&mut s, q8, &lay.wv, &lb.xn1, &lb.v, d);
+            } else {
+                s.push(g.step(MATMUL, &[&lb.xn1, w(&p("attn.wq.weight")), &lb.q_pre], &[1, d, hq], hq));
+                s.push(g.step(MATMUL, &[&lb.xn1, w(&p("attn.wk.weight")), &lb.k_pre], &[1, d, hkv], hkv));
+                s.push(g.step(MATMUL, &[&lb.xn1, w(&p("attn.wv.weight")), &lb.v], &[1, d, hkv], hkv));
+            }
+            // Qwen2-style biased projections and Qwen3-style QK-norm, gated
+            // exactly as the batched forward gates them.
+            if c.attn_bias {
+                s.push(g.step(BIAS_ADD, &[&lb.q_pre, w(&p("attn.wq.bias"))], &[1, hq], hq));
+                s.push(g.step(BIAS_ADD, &[&lb.k_pre, w(&p("attn.wk.bias"))], &[1, hkv], hkv));
+                s.push(g.step(BIAS_ADD, &[&lb.v, w(&p("attn.wv.bias"))], &[1, hkv], hkv));
+            }
+            // Optional per-head QK-RMSNorm (Qwen3); Qwen2 routes q_pre/k_pre.
+            let (q_buf, k_buf): (&DeviceBuffer, &DeviceBuffer) = if c.qk_norm {
+                s.push(block::rmsnorm_fwd(g, &ids, &lb.q_pre, w(&p("attn.q_norm.weight")), &lb.q, hd, nh));
+                s.push(block::rmsnorm_fwd(g, &ids, &lb.k_pre, w(&p("attn.k_norm.weight")), &lb.k, hd, nkv));
+                (&lb.q, &lb.k)
+            } else {
+                (&lb.q_pre, &lb.k_pre)
+            };
+            s.push(g.step(ROPE_AT, &[q_buf], &[1, nh, hd, hq, 0, pos, f(theta)], nh * half));
+            s.push(g.step(ROPE_AT, &[k_buf], &[1, nkv, hd, hkv, 0, pos, f(theta)], nkv * half));
+            s.push(g.step(KV_APPEND, &[k_buf, &self.kcache[l]], &[hkv, pos], hkv));
             s.push(g.step(KV_APPEND, &[&lb.v, &self.vcache[l]], &[hkv, pos], hkv));
-            s.push(g.step(ATTN_DECODE_SCORES, &[&lb.q, &self.kcache[l], &self.scores], &[nh, group, hd, t, cap, hkv, f(scale)], nh * t));
+            s.push(g.step(ATTN_DECODE_SCORES, &[q_buf, &self.kcache[l], &self.scores], &[nh, group, hd, t, cap, hkv, f(scale)], nh * t));
             s.push(g.step(DECODE_SOFTMAX, &[&self.scores, &lb.probs], &[nh, t, cap], nh));
             s.push(g.step(ATTN_DECODE_APPLY, &[&lb.probs, &self.vcache[l], &lb.ctx], &[nh, group, hd, t, cap, hkv], nh * hd));
-            s.push(g.step(MATMUL, &[&lb.ctx, w(&p("attn.wo.weight")), &self.proj], &[1, hq, d], d));
+            if let Some((q8, lay)) = q8l {
+                mm8(&mut s, q8, &lay.wo, &lb.ctx, &self.proj, hq);
+            } else {
+                s.push(g.step(MATMUL, &[&lb.ctx, w(&p("attn.wo.weight")), &self.proj], &[1, hq, d], d));
+            }
             s.push(g.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[d], d));
             // --- SwiGLU MLP ---
             s.push(block::rmsnorm_fwd(g, &ids, &lb.xmid, w(&p("ln2.weight")), &lb.xn2, d, 1));
-            s.push(g.step(MATMUL, &[&lb.xn2, w(&p("mlp.gate.weight")), &lb.gate_pre], &[1, d, ff], ff));
-            s.push(g.step(MATMUL, &[&lb.xn2, w(&p("mlp.up.weight")), &lb.up], &[1, d, ff], ff));
-            s.push(block::swiglu_fwd(g, &ids, &lb.gate_pre, &lb.up, &lb.h, ff));
-            s.push(g.step(MATMUL, &[&lb.h, w(&p("mlp.down.weight")), &self.mlp_out], &[1, ff, d], d));
+            if let Some((q8, lay)) = q8l {
+                mm8(&mut s, q8, &lay.gate, &lb.xn2, &lb.gate_pre, d);
+                mm8(&mut s, q8, &lay.up, &lb.xn2, &lb.up, d);
+                s.push(block::swiglu_fwd(g, &ids, &lb.gate_pre, &lb.up, &lb.h, ff));
+                mm8(&mut s, q8, &lay.down, &lb.h, &self.mlp_out, ff);
+            } else {
+                s.push(g.step(MATMUL, &[&lb.xn2, w(&p("mlp.gate.weight")), &lb.gate_pre], &[1, d, ff], ff));
+                s.push(g.step(MATMUL, &[&lb.xn2, w(&p("mlp.up.weight")), &lb.up], &[1, d, ff], ff));
+                s.push(block::swiglu_fwd(g, &ids, &lb.gate_pre, &lb.up, &lb.h, ff));
+                s.push(g.step(MATMUL, &[&lb.h, w(&p("mlp.down.weight")), &self.mlp_out], &[1, ff, d], d));
+            }
             s.push(g.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[d], d));
         }
         let last = c.n_layers as usize;
@@ -1480,6 +1555,59 @@ mod tests {
 
     fn gpu_disabled() -> bool {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    /// `step_embed` must be indistinguishable from `step`: feeding token t's
+    /// own embedding row produces the identical hidden state. This is the seam
+    /// a VLM front-end trusts when it interleaves image rows with text tokens.
+    #[test]
+    fn step_embed_matches_step() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let w = crate::init::init_weights(&cfg, 7);
+        let m = Qwen::new(cfg.clone(), 1, 16, &w);
+        let prompt = [1u32, 5, 3, 9];
+        m.reset_cache();
+        let mut via_step = Vec::new();
+        for &t in &prompt {
+            via_step = m.step(t);
+        }
+        let emb = m.read_weight("tok.weight");
+        let d = cfg.d_model as usize;
+        let m2 = Qwen::new(cfg, 1, 16, &w);
+        m2.reset_cache();
+        let mut via_embed = Vec::new();
+        for &t in &prompt {
+            via_embed = m2.step_embed(&emb[t as usize * d..(t as usize + 1) * d]);
+        }
+        assert_eq!(via_step, via_embed, "an embedding row must be a perfect stand-in for its token");
+    }
+
+    /// Int8 KV decode (the packed GEMV at m=1) must track the fp32 KV decode
+    /// within honest quantisation noise: a scale-handling bug is O(1) relative
+    /// error, per-channel int8 noise is well under the 10% gate.
+    #[test]
+    fn int8_kv_decode_tracks_fp32() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let w = crate::init::init_weights(&cfg, 7);
+        let f = Qwen::new(cfg.clone(), 1, 16, &w);
+        let q = Qwen::new_shard_i8(cfg.clone(), 1, 16, &w, model::shard::Shard::whole(cfg.n_layers as usize));
+        f.reset_cache();
+        q.reset_cache();
+        let (mut hf, mut hq) = (Vec::new(), Vec::new());
+        for &t in &[1u32, 5, 3, 9, 2, 7] {
+            hf = f.step(t);
+            hq = q.step(t);
+        }
+        let err: f32 = hf.iter().zip(&hq).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
+        let norm: f32 = hf.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let rel = err / norm.max(1e-12);
+        assert!(rel < 0.10, "int8 KV decode diverged from fp32: rel L2 {rel:.4}");
     }
 
     #[test]

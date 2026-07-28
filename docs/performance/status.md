@@ -383,12 +383,45 @@ the test image), and the residency executor's scheduler. Measured on the
 - single caption: ~122 s wall — the fp32 MobileCLIP-L tower at 1024 px on the
   CPU backend dominates (it OOMs a 24 GB card as fp32 GPU activations, which
   is WHY it runs on CPU; the parity test made the same choice);
-- 3 concurrent captions over dbus: wall 252 s vs 592 s summed — 2.35×
-  effective concurrency; the executor overlaps tower (CPU, rayon across
-  cores) with decode (GPU) across requests;
-- the named lever for the next multiple: a streamed/chunked GPU vision tower
-  (bounded stage activations), plus int8 tower weights — both S3/S5-shaped
+- 3 concurrent captions over dbus: wall 252 s ≈ 3 × the ~84 s per-request
+  time — the provider's hot-model mutex serialises whole requests, so there
+  is NO cross-request overlap today (an earlier revision of this note
+  misread the same numbers as 2.35× concurrency; the arithmetic says
+  serial). Real concurrency needs per-request decoder instances (KV caches
+  are per-instance state) — an int8 decoder at 4× less VRAM is what makes
+  N-instance residency plausible;
+- the named levers for the next multiple: a streamed/chunked GPU vision
+  tower (bounded stage activations) and int8 tower weights — S3/S5-shaped
   work on the vision side.
+
+### Second profile: the decoder was O(T²) — fixed with KV decode
+
+`BRAIN_PROFILE` on the caption showed 96.5% of GPU time (28.9 s of 30) in
+`matmul_tile`: the caption loop recomputed the FULL sequence per token
+(`logits_all` — the parity harness's decode, never meant for serving). The
+fix is generic, not fastvlm-specific:
+
+- **`Qwen::step_embed`** — KV-cache decode from a RAW embedding, the seam
+  every VLM front-end needs: prefill walks text tokens via `step` and image
+  rows via `step_embed`; no residual splice on this path. Gated by
+  `step_embed_matches_step` (an embedding row is a bit-exact stand-in for
+  its token).
+- **Int8 KV decode** — `decode_at` no longer asserts fp32-only: under the
+  int8 tier every linear runs quant + the single-barrier packed GEMV at
+  m=1 (the measured decode-regime shape), so int8 KV decode runs on the CPU
+  JIT as well as the GPUs. Gated by `int8_kv_decode_tracks_fp32` (rel L2 <
+  10%) on both backends.
+- `decode_at` also gained the Qwen2 gates the batched forward always had
+  (attention biases, optional QK-norm) — it was Qwen3-only, which the
+  FastVLM Qwen2 decoder exposed immediately.
+
+Caption end-to-end (P40 + 48-core host, release, 8 tokens): **122 s → 40.9 s
+(3×)**, identical text. The CPU vision tower (~35 s) is now the entire
+bottleneck. `--precision int8` runs the caption on the quantized decoder
+(same convention as z-image's `precision` param; qwen `generate` takes it
+too via `Qwen::load_inference_i8`) — its steady-state decode cost is
+negligible here; the one-time load-hot quantisation pass (~9 s) amortises
+in serving.
 
 qwenvl and moondream3 checkpoints are re-fetched to
 `/data/workspace/resources/vl/` (the layout their parity harnesses stream

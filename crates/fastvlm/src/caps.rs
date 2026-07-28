@@ -44,6 +44,10 @@ pub fn manifest() -> Manifest {
         )
         .param(ParamSpec::new("prompt", ParamType::Str, "instruction for the model").default(serde_json::json!("Describe this image.")))
         .param(ParamSpec::new("max_new", ParamType::Int, "max caption tokens").default(serde_json::json!(48)))
+        .param(
+            ParamSpec::new("precision", ParamType::Str, "decoder precision: fp32, or int8 (per-channel weights + dynamic activation quant)")
+                .default(serde_json::json!("fp32")),
+        )
         .input(BlobSpec::new("image", Media::Image, "raw HWC f32 pixels in [0,1], meta {w,h}").required())
         .output(BlobSpec::new("text", Media::Text, "the caption"))
         .streaming();
@@ -54,10 +58,14 @@ pub fn manifest() -> Manifest {
 /// the vision device + encoder params, and the tokenizer.
 struct Hot {
     weights: String,
+    precision: String,
     gpu: Gpu,
     vision_ps: ParamStore,
     proj: HashMap<String, Vec<f32>>,
-    dec: HashMap<String, Vec<f32>>,
+    /// The resident KV decoder (fp32 or int8 per `precision`) + the host-side
+    /// head row-major table for per-token logits.
+    dec: Qwen,
+    head: Vec<f32>,
     tok: data::qwen_tokenizer::QwenBpe,
 }
 
@@ -100,12 +108,16 @@ impl Action for CaptionAction {
         let dir = inv.get_str("weights").unwrap_or_else(|| DEFAULT_WEIGHTS.to_string());
         let prompt = inv.get_str("prompt").unwrap_or_else(|| "Describe this image.".to_string());
         let max_new = inv.get_i64("max_new").unwrap_or(48).clamp(1, 512) as usize;
+        let precision = inv.get_str("precision").unwrap_or_else(|| "fp32".to_string());
+        if precision != "fp32" && precision != "int8" {
+            return Err(format!("fastvlm caption: precision must be fp32 or int8, got {precision:?}"));
+        }
         let (px, w, h) = image_of(inv)?;
 
         let mut guard = HOT.lock().map_err(|_| "fastvlm: hot lock poisoned")?;
-        if !matches!(&*guard, Some(hot) if hot.weights == dir) {
+        if !matches!(&*guard, Some(hot) if hot.weights == dir && hot.precision == precision) {
             *guard = None; // free the old resident weights first
-            *guard = Some(load_hot(&dir)?);
+            *guard = Some(load_hot(&dir, &precision)?);
         }
         let hot = guard.as_ref().unwrap();
 
@@ -145,28 +157,35 @@ impl Action for CaptionAction {
             gpu.read(&e, (IMG_TOKENS * 896) as usize)
         };
 
-        // 3) prompt layout: chat-template text around the spliced image span,
-        //    exactly the shape the parity harness verified.
-        let pre = hot.tok.encode(&format!("<|im_start|>user\n"));
+        // 3) KV-cached decode (O(T) per token, not the O(T^2) full recompute
+        //    the first profile caught at 96.5% of GPU time): text tokens step
+        //    through the cache, image rows enter via step_embed — no residual
+        //    splice needed on this path.
+        let pre = hot.tok.encode("<|im_start|>user\n");
         let post = hot.tok.encode(&format!("\n{prompt}<|im_end|>\n<|im_start|>assistant\n"));
-        let img_start = pre.len() as u32;
-        let mut seq: Vec<u32> = pre.clone();
-        seq.extend(std::iter::repeat(0u32).take(IMG_TOKENS as usize));
-        seq.extend(&post);
-
-        // 4) decoder with the image-embed splice; greedy, one Progress/token.
-        let cfg = crate::config::FastVlmConfig::fastvlm_0_5b().decoder;
-        let vocab = cfg.vocab as usize;
+        let d = 896usize;
+        let vocab = hot.dec.cfg.vocab as usize;
         let eos = hot.tok.encode("<|im_end|>").first().copied();
-        let t_max = (seq.len() + max_new + 1) as u32;
-        let mut dec = Qwen::new(cfg, 1, t_max, &hot.dec);
-        dec.enable_mm_splice(img_start, IMG_TOKENS);
-        dec.write_img_embeds(&embeds);
+        hot.dec.reset_cache();
+        let mut hidden = Vec::new();
+        for &t in &pre {
+            hidden = hot.dec.step(t);
+        }
+        for r in 0..IMG_TOKENS as usize {
+            hidden = hot.dec.step_embed(&embeds[r * d..(r + 1) * d]);
+        }
+        for &t in &post {
+            hidden = hot.dec.step(t);
+        }
+        let logits_of = |hidden: &[f32]| -> Vec<f32> {
+            (0..vocab)
+                .map(|o| hot.head[o * d..o * d + d].iter().zip(hidden).map(|(a, b)| a * b).sum())
+                .collect()
+        };
         let mut out_ids = Vec::new();
         for i in 0..max_new {
-            let lg = dec.logits_all(&seq);
-            let last = &lg[(seq.len() - 1) * vocab..seq.len() * vocab];
-            let next = last
+            let lg = logits_of(&hidden);
+            let next = lg
                 .iter()
                 .enumerate()
                 .max_by(|a, b| a.1.total_cmp(b.1))
@@ -176,8 +195,8 @@ impl Action for CaptionAction {
                 break;
             }
             out_ids.push(next);
-            seq.push(next);
             progress(Progress { step: i as u32 + 1, total: max_new as u32, message: String::new() });
+            hidden = hot.dec.step(next);
         }
         let text = hot.tok.decode(&out_ids);
         Ok(Outcome::new()
@@ -187,7 +206,7 @@ impl Action for CaptionAction {
     }
 }
 
-fn load_hot(dir: &str) -> Result<Hot, String> {
+fn load_hot(dir: &str, precision: &str) -> Result<Hot, String> {
     let ckpt = format!("{dir}/model.safetensors");
     let tensors = checkpoint::safetensors::read(&ckpt)
         .map_err(|e| format!("fastvlm: cannot read {ckpt}: {e}"))?;
@@ -214,7 +233,30 @@ fn load_hot(dir: &str) -> Result<Hot, String> {
     let ctx = ectx(&gpu);
     let enc = Encoder::mobileclip_l(&ctx, VISION_SIDE);
     let vision_ps = ParamStore::new(&gpu, enc.param_list(), &crate::vision_import::build_vision_weights(&vt));
-    Ok(Hot { weights: dir.to_string(), gpu, vision_ps, proj, dec, tok })
+    // Resident KV decoder, fp32 or int8 (per-channel weights + dynamic
+    // activation quant through the decode-regime packed GEMV). Context sized
+    // for prompt + image span + the longest caption.
+    let cfg = crate::config::FastVlmConfig::fastvlm_0_5b().decoder;
+    let head = dec
+        .get(cfg.head_weight())
+        .or_else(|| dec.get("tok.weight"))
+        .cloned()
+        .ok_or("fastvlm: head weight missing from checkpoint")?;
+    let t_max = 1024u32;
+    let dec_model = match precision {
+        "int8" => Qwen::new_shard_i8(cfg.clone(), 1, t_max, &dec, model::shard::Shard::whole(cfg.n_layers as usize)),
+        _ => Qwen::new(cfg, 1, t_max, &dec),
+    };
+    Ok(Hot {
+        weights: dir.to_string(),
+        precision: precision.to_string(),
+        gpu,
+        vision_ps,
+        proj,
+        dec: dec_model,
+        head,
+        tok,
+    })
 }
 
 /// Decode the standardized image blob: raw HWC f32 `[0,1]` + `{w,h}` meta.

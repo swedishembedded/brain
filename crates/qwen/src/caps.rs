@@ -40,6 +40,10 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (0 = disabled)").default(json!(0)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
+        .param(
+            ParamSpec::new("precision", ParamType::Str, "model precision: fp32, or int8 (per-channel weights + dynamic activation quant)")
+                .default(json!("fp32")),
+        )
         .param(ParamSpec::new("eos", ParamType::Int, "stop token id (default: the tokenizer's <|im_end|> when a tokenizer is given; -1 disables)"))
         .param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template to the prompt (needs a tokenizer)").default(json!(false)))
         .output(BlobSpec::new("text", Media::Text, "the generated text (space-separated token ids when no tokenizer is given)"));
@@ -50,6 +54,7 @@ pub fn manifest() -> Manifest {
 /// it. Reused while the weights path matches and the built context capacity
 /// covers the request; rebuilt (freeing the old weights first) otherwise.
 struct Hot {
+    precision: String,
     weights: String,
     cap: u32,
     model: Qwen,
@@ -127,14 +132,22 @@ impl Action for GenerateAction {
 
         // Hot path: keep the loaded model resident across calls; rebuild only when
         // the weights change or the built context is too small for this request.
+        let precision = inv.get_str("precision").unwrap_or_else(|| "fp32".to_string());
+        if precision != "fp32" && precision != "int8" {
+            return Err(format!("qwen generate: precision must be fp32 or int8, got {precision:?}"));
+        }
         let need = (ids.len() + max_new) as u32;
         let mut guard = self.hot.lock().map_err(|_| "qwen: hot model lock poisoned")?;
-        let reuse = matches!(&*guard, Some(h) if h.weights == weights && h.cap >= need);
+        let reuse = matches!(&*guard, Some(h) if h.weights == weights && h.cap >= need && h.precision == precision);
         if !reuse {
             *guard = None; // free the old resident weights before loading new
             let cap = need.max(64);
-            let model = Qwen::load_inference(&weights, 1, cap);
-            *guard = Some(Hot { weights: weights.clone(), cap, model });
+            let model = if precision == "int8" {
+                Qwen::load_inference_i8(&weights, 1, cap)
+            } else {
+                Qwen::load_inference(&weights, 1, cap)
+            };
+            *guard = Some(Hot { precision: precision.clone(), weights: weights.clone(), cap, model });
         }
         let model = &guard.as_ref().unwrap().model;
 
