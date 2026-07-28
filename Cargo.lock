@@ -473,7 +473,12 @@ dependencies = [
 name = "brain-fastvlm"
 version = "0.1.0"
 dependencies = [
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-paramstore",
  "brain-qwen",
+ "brain-vision",
  "serde_json",
 ]
 
