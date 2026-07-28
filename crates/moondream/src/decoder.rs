@@ -591,6 +591,10 @@ impl<'g> MoondreamBlock<'g> {
         };
         s.push(g.step(K_MATMUL_DX, &[&d_qkv_raw, self.wb("attn.qkv.weight"), &d_ln], &[t, d, stride3, 1], t * d)); // accumulate
         s.push(g.step(K_MATMUL_DW, &[&d_qkv_raw, &self.l_in, &gr.qkv_w], &[t, d, stride3], stride3 * d));
+        // Fused-qkv bias grad = Σ_rows d_qkv_raw (bias is additive on the raw qkv).
+        if let Some(qb) = &gr.qkv_b {
+            s.push(g.step(K_BIAS_GRAD, &[&d_qkv_raw, qb], &[t, stride3], stride3));
+        }
 
         // --- shared LayerNorm backward: d_ln → ln grads + d_xln ---
         s.push(g.step(K_LN_STATS, &[x, &mean, &inv], &[d, t, f(LN_EPS)], t));
@@ -617,6 +621,8 @@ pub struct MoondreamBlockGrads {
     pub fc2_b: DeviceBuffer,
     /// Present for tau blocks: grads of the attention-temperature head.
     pub tau: Option<TauGrads>,
+    /// Present when the block has a fused-qkv bias (`attn.qkv.bias`); grad `[3·d]`.
+    pub qkv_b: Option<DeviceBuffer>,
     /// Present for MoE blocks (replaces the dense fc1/fc2 grads).
     pub moe: Option<MoeGrads>,
 }
@@ -644,6 +650,7 @@ impl MoondreamBlockGrads {
             fc2_b: z(d),
             tau: None,
             moe: None,
+            qkv_b: None,
         }
     }
 
@@ -651,6 +658,12 @@ impl MoondreamBlockGrads {
     pub fn with_tau(mut self, g: &Gpu, nh: u32, d: u32) -> MoondreamBlockGrads {
         let z = |n: u32| g.storage_init("md.tg", &vec![0.0f32; n as usize]);
         self.tau = Some(TauGrads { wq: z(nh * 3 * d), wv: z(nh * 3 * d), alpha: z(nh) });
+        self
+    }
+
+    /// Add a zeroed fused-qkv bias grad `[3·d]` for a block with a qkv bias.
+    pub fn with_qkv_bias(mut self, g: &Gpu, d: u32) -> MoondreamBlockGrads {
+        self.qkv_b = Some(g.storage_init("md.qb", &vec![0.0f32; (3 * d) as usize]));
         self
     }
 
@@ -867,6 +880,42 @@ mod tests {
         assert!(tau.iter().all(|v| v.is_finite()));
         let diff: f32 = plain.iter().zip(&tau).map(|(a, b)| (a - b).abs()).sum();
         assert!(diff > 1e-4, "tau must change the block output, Σ|Δ|={diff}");
+    }
+
+    #[test]
+    fn qkv_bias_block_backward_matches_finite_diff() {
+        // With the real checkpoint's fused-qkv bias present, the block applies it
+        // (before tau/RoPE) and its grad = Σ_rows d_qkv_raw. Gradcheck the bias grad.
+        let gpu = Gpu::new_cpu(pipelines());
+        let (t, d, nh, hd, ff, prefix, rot, theta) = (5u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32, 1.5e6f32);
+        let mut rng = Rng::new(23);
+        let mut w = block_weights(d, ff, &mut rng);
+        w.insert("attn.qkv.bias".into(), (0..(3 * d) as usize).map(|_| (rng.next_f32() - 0.5) * 0.3).collect());
+        let n = (t * d) as usize;
+        let x_host: Vec<f32> = (0..n).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
+
+        let blk = MoondreamBlock::new(&gpu, &w, t, d, nh, hd, ff, prefix, rot, theta);
+        assert!(blk.qkv_bias);
+        let xb = gpu.storage_init("x", &x_host);
+        let _ = blk.forward(&xb);
+        let d_out = gpu.storage_init("dout", &vec![1.0f32; n]);
+        let gr = MoondreamBlockGrads::new(&gpu, d, ff).with_qkv_bias(&gpu, d);
+        let d_x = gpu.storage((t * d) as u64);
+        blk.backward(&xb, &d_out, &gr, &d_x);
+        let g_qb = gpu.read(gr.qkv_b.as_ref().unwrap(), (3 * d) as usize);
+
+        let loss = |wm: &HashMap<String, Vec<f32>>| -> f32 {
+            let b = MoondreamBlock::new(&gpu, wm, t, d, nh, hd, ff, prefix, rot, theta);
+            gpu.read(b.forward(&gpu.storage_init("x", &x_host)), n).iter().sum::<f32>()
+        };
+        let eps = 1e-3f32;
+        for &j in &[0usize, 17, 40] {
+            let (mut wp, mut wm2) = (w.clone(), w.clone());
+            wp.get_mut("attn.qkv.bias").unwrap()[j] += eps;
+            wm2.get_mut("attn.qkv.bias").unwrap()[j] -= eps;
+            let num = (loss(&wp) - loss(&wm2)) / (2.0 * eps);
+            assert!((g_qb[j] - num).abs() <= 4e-3 + 8e-2 * num.abs(), "d qkv.bias[{j}]: analytic {} vs numeric {}", g_qb[j], num);
+        }
     }
 
     #[test]
