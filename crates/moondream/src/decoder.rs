@@ -48,6 +48,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         ("ce_grad_masked", kernels::CE_GRAD_MASKED),     // 31
         ("emb_bwd", kernels::EMB_BWD),                   // 32
         ("splice_bwd", kernels::SPLICE_BWD),             // 33
+        ("gelu_erf_bwd", kernels::GELU_ERF_BWD),         // 34 (tau tok_feat bwd)
+        ("tau_scale_ds", kernels::TAU_SCALE_DS),         // 35 (tau scale grad)
     ]
 }
 
@@ -68,6 +70,8 @@ const K_ROPE_PARTIAL_BWD: usize = 30;
 const K_CE_GRAD: usize = 31;
 const K_EMB_BWD: usize = 32;
 const K_SPLICE_BWD: usize = 33;
+const K_GELU_ERF_BWD: usize = 34;
+const K_TAU_SCALE_DS: usize = 35;
 
 /// Masked cross-entropy ignore index (matches the loaders' `-1 i32` as `u32`).
 pub const IGNORE: u32 = 0xFFFF_FFFF;
@@ -440,11 +444,13 @@ impl<'g> MoondreamBlock<'g> {
     /// prefix mask (masked positions have prob≈0 → contribute 0). d_x_in = d_out
     /// (the 3-way residual's identity path) + the LayerNorm input grad.
     pub fn backward(&self, x: &DeviceBuffer, d_out: &DeviceBuffer, gr: &MoondreamBlockGrads, d_x_in: &DeviceBuffer) {
-        assert!(!self.tau && self.moe.is_none(), "dense/no-tau backward only (tau + MoE bwd are follow-ups)");
+        assert!(self.moe.is_none(), "MoE-expert backward is a follow-up");
         let g = self.gpu;
         let (t, d, nh, hd, ff) = (self.t, self.d, self.n_heads, self.head_dim, self.ff);
         let stride3 = 3 * d;
         let half = self.rot_dim / 2;
+        // The attention ran on qkv2 (post-tau) when tau is on, else the raw qkv.
+        let attn_qkv = if self.tau { &self.qkv2 } else { &self.qkv };
         let d_ln = g.storage((t * d) as u64);
         let d_h = g.storage((t * ff) as u64);
         let d_h2 = g.storage((t * ff) as u64);
@@ -465,20 +471,70 @@ impl<'g> MoondreamBlock<'g> {
         s.push(g.step(K_MATMUL_DW, &[&d_h, &self.l_in, &gr.fc1_w], &[t, d, ff], ff * d));
         s.push(g.step(K_BIAS_GRAD, &[&d_h, &gr.fc1_b], &[t, ff], ff));
 
-        // --- attention branch: d_out → d_ln (accumulate) ---
+        // --- attention branch → d_qkv (grad of attn_qkv, pre-RoPE) ---
         s.push(g.step(K_MATMUL_DX, &[d_out, self.wb("attn.proj.weight"), &d_ctx], &[t, d, d, 0], t * d));
         s.push(g.step(K_MATMUL_DW, &[d_out, &self.ctx, &gr.proj_w], &[t, d, d], d * d));
         s.push(g.step(K_BIAS_GRAD, &[d_out, &gr.proj_b], &[t, d], d));
-        // self.qkv holds post-RoPE q,k and v; probs carry the prefix mask.
-        s.push(g.step(K_ATTN_DSCORES, &[&d_ctx, &self.qkv, &self.probs, &dscores], &[1, nh, t, t, hd, stride3, 2 * d, d], nh * t * t));
+        s.push(g.step(K_ATTN_DSCORES, &[&d_ctx, attn_qkv, &self.probs, &dscores], &[1, nh, t, t, hd, stride3, 2 * d, d], nh * t * t));
         s.push(g.step(K_ATTN_DV, &[&self.probs, &d_ctx, &d_qkv], &[1, nh, t, t, hd, stride3, 2 * d, d], nh * t * hd));
-        s.push(g.step(K_ATTN_DQ, &[&dscores, &self.qkv, &d_qkv], &[1, nh, t, t, hd, stride3, stride3, 0, d], nh * t * hd));
-        s.push(g.step(K_ATTN_DK, &[&dscores, &self.qkv, &d_qkv], &[1, nh, t, t, hd, stride3, stride3, 0, d], nh * t * hd));
+        s.push(g.step(K_ATTN_DQ, &[&dscores, attn_qkv, &d_qkv], &[1, nh, t, t, hd, stride3, stride3, 0, d], nh * t * hd));
+        s.push(g.step(K_ATTN_DK, &[&dscores, attn_qkv, &d_qkv], &[1, nh, t, t, hd, stride3, stride3, 0, d], nh * t * hd));
         // Rotate d_q (off 0) and d_k (off d) back through the partial RoPE (−angle).
         s.push(g.step(K_ROPE_PARTIAL_BWD, &[&d_qkv], &[t, nh, hd, stride3, 0, t, f(self.theta), self.rot_dim], t * nh * half));
         s.push(g.step(K_ROPE_PARTIAL_BWD, &[&d_qkv], &[t, nh, hd, stride3, d, t, f(self.theta), self.rot_dim], t * nh * half));
-        s.push(g.step(K_MATMUL_DX, &[&d_qkv, self.wb("attn.qkv.weight"), &d_ln], &[t, d, stride3, 1], t * d)); // accumulate
-        s.push(g.step(K_MATMUL_DW, &[&d_qkv, &self.l_in, &gr.qkv_w], &[t, d, stride3], stride3 * d));
+
+        // Route d_qkv into the shared-LN grad. Dense: qkv matmul bwd directly. Tau:
+        // d_qkv is the grad of qkv2 = tau_scale(qkv_raw, s3), so it flows back through
+        // tau_scale (in-grad + the tok_feat/wq/wv/alpha chain) to the raw qkv first.
+        let d_qkv_raw = if self.tau {
+            let tg = gr.tau.as_ref().expect("tau grads required for a tau block");
+            let d_s3 = g.storage((3 * nh * t) as u64);
+            // ds[h,row] = Σ_d d_qkv[row,h,d]·qkv_raw[row,h,d] over the 3·nh heads.
+            s.push(g.step(K_TAU_SCALE_DS, &[&d_qkv, &self.qkv, &d_s3], &[t, 3 * nh, hd], 3 * nh * t));
+            g.submit(&[], &s);
+            s = Vec::new();
+            // Host: tanh′ and the alpha (tau_pos) grad; positions = row index.
+            let ds = g.read(&d_s3, (3 * nh * t) as usize);
+            let tqr = g.read(&self.tqr, (t * nh) as usize);
+            let tvr = g.read(&self.tvr, (t * nh) as usize);
+            let alpha = g.read(self.wb("attn.tau.alpha"), nh as usize);
+            let (mut d_tqr, mut d_tvr) = (vec![0.0f32; (t * nh) as usize], vec![0.0f32; (t * nh) as usize]);
+            let mut d_alpha = vec![0.0f32; nh as usize];
+            for h in 0..nh as usize {
+                for row in 0..t as usize {
+                    let lp = ((row + 1) as f32).ln();
+                    let sg = sigmoid(alpha[h] * lp);
+                    let (ds_q, ds_v) = (ds[h * t as usize + row], ds[(2 * nh as usize + h) * t as usize + row]);
+                    let (thq, thv) = (tqr[row * nh as usize + h].tanh(), tvr[row * nh as usize + h].tanh());
+                    d_tqr[row * nh as usize + h] = ds_q * (1.0 - thq * thq);
+                    d_tvr[row * nh as usize + h] = ds_v * (1.0 - thv * thv);
+                    d_alpha[h] += (ds_q + ds_v) * sg * (1.0 - sg) * lp; // dtau_pos/dα
+                }
+            }
+            let dtqr_b = g.storage_init("md.dtqr", &d_tqr);
+            let dtvr_b = g.storage_init("md.dtvr", &d_tvr);
+            g.write(&tg.alpha, &d_alpha.iter().map(|&v| f(v)).collect::<Vec<u32>>());
+            let d_qkv_in = g.storage((t * stride3) as u64); // in-grad through tau_scale
+            let d_tok_feat = g.storage((t * stride3) as u64);
+            let d_qraw2 = g.storage((t * stride3) as u64);
+            let d_qkv_raw = g.storage((t * stride3) as u64);
+            // in-grad: d_qkv_in = d_qkv · s3 (same tau_scale kernel).
+            s.push(g.step(17, &[&d_qkv, &self.s3, &d_qkv_in], &[t, 3 * nh, hd], t * stride3));
+            // wq/wv weight grads + d_tok_feat = d_tqr·wq + d_tvr·wv.
+            s.push(g.step(K_MATMUL_DW, &[&dtqr_b, &self.tok_feat, &tg.wq], &[t, stride3, nh], nh * stride3));
+            s.push(g.step(K_MATMUL_DX, &[&dtqr_b, self.wb("attn.tau.wq"), &d_tok_feat], &[t, stride3, nh, 0], t * stride3));
+            s.push(g.step(K_MATMUL_DW, &[&dtvr_b, &self.tok_feat, &tg.wv], &[t, stride3, nh], nh * stride3));
+            s.push(g.step(K_MATMUL_DX, &[&dtvr_b, self.wb("attn.tau.wv"), &d_tok_feat], &[t, stride3, nh, 1], t * stride3)); // accumulate
+            // tok_feat = gelu_erf(qkv_raw): d_qraw2 = d_tok_feat · gelu_erf′(qkv_raw).
+            s.push(g.step(K_GELU_ERF_BWD, &[&self.qkv, &d_tok_feat, &d_qraw2], &[t * stride3], t * stride3));
+            // Total raw-qkv grad = tau_scale in-grad + tok_feat path.
+            s.push(g.step(7, &[&d_qkv_in, &d_qraw2, &d_qkv_raw], &[t * stride3], t * stride3));
+            d_qkv_raw
+        } else {
+            d_qkv
+        };
+        s.push(g.step(K_MATMUL_DX, &[&d_qkv_raw, self.wb("attn.qkv.weight"), &d_ln], &[t, d, stride3, 1], t * d)); // accumulate
+        s.push(g.step(K_MATMUL_DW, &[&d_qkv_raw, &self.l_in, &gr.qkv_w], &[t, d, stride3], stride3 * d));
 
         // --- shared LayerNorm backward: d_ln → ln grads + d_xln ---
         s.push(g.step(K_LN_STATS, &[x, &mean, &inv], &[d, t, f(LN_EPS)], t));
@@ -503,6 +559,15 @@ pub struct MoondreamBlockGrads {
     pub fc1_b: DeviceBuffer,
     pub fc2_w: DeviceBuffer,
     pub fc2_b: DeviceBuffer,
+    /// Present for tau blocks: grads of the attention-temperature head.
+    pub tau: Option<TauGrads>,
+}
+
+/// Gradient buffers for the per-head attention-temperature head (`attn.tau.*`).
+pub struct TauGrads {
+    pub wq: DeviceBuffer,
+    pub wv: DeviceBuffer,
+    pub alpha: DeviceBuffer,
 }
 
 impl MoondreamBlockGrads {
@@ -519,7 +584,15 @@ impl MoondreamBlockGrads {
             fc1_b: z(ff),
             fc2_w: z(d * ff),
             fc2_b: z(d),
+            tau: None,
         }
+    }
+
+    /// Add zeroed tau grads (`wq`/`wv` `[nh, 3·d]`, `alpha` `[nh]`) for a tau block.
+    pub fn with_tau(mut self, g: &Gpu, nh: u32, d: u32) -> MoondreamBlockGrads {
+        let z = |n: u32| g.storage_init("md.tg", &vec![0.0f32; n as usize]);
+        self.tau = Some(TauGrads { wq: z(nh * 3 * d), wv: z(nh * 3 * d), alpha: z(nh) });
+        self
     }
 }
 
@@ -698,6 +771,67 @@ mod tests {
             wm2.get_mut("ln.weight").unwrap()[j] -= eps;
             let num = (loss(&wp, &x_host) - loss(&wm2, &x_host)) / (2.0 * eps);
             assert!(ok(g_ln_w[j], num), "d ln.w[{j}]: analytic {} vs numeric {}", g_ln_w[j], num);
+        }
+    }
+
+    #[test]
+    fn tau_block_backward_matches_finite_diff() {
+        // Gradcheck the tau path: input grad exercises the full tau chain (tau_scale
+        // in-grad + tok_feat/wq/wv/alpha); the alpha and wq grads cover the tau head.
+        let gpu = Gpu::new_cpu(pipelines());
+        let (t, d, nh, hd, ff, prefix, rot, theta) = (5u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32, 1.5e6f32);
+        let mut rng = Rng::new(21);
+        let mut w = block_weights(d, ff, &mut rng);
+        {
+            let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
+            w.insert("attn.tau.wq".into(), r((nh * 3 * d) as usize));
+            w.insert("attn.tau.wv".into(), r((nh * 3 * d) as usize));
+            w.insert("attn.tau.alpha".into(), r(nh as usize));
+        }
+        let n = (t * d) as usize;
+        let x_host: Vec<f32> = (0..n).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
+
+        let blk = MoondreamBlock::new(&gpu, &w, t, d, nh, hd, ff, prefix, rot, theta);
+        assert!(blk.tau);
+        let xb = gpu.storage_init("x", &x_host);
+        let _ = blk.forward(&xb);
+        let d_out = gpu.storage_init("dout", &vec![1.0f32; n]);
+        let gr = MoondreamBlockGrads::new(&gpu, d, ff).with_tau(&gpu, nh, d);
+        let d_x = gpu.storage((t * d) as u64);
+        blk.backward(&xb, &d_out, &gr, &d_x);
+        let dx = gpu.read(&d_x, n);
+        let tg = gr.tau.as_ref().unwrap();
+        let g_alpha = gpu.read(&tg.alpha, nh as usize);
+        let g_wq = gpu.read(&tg.wq, (nh * 3 * d) as usize);
+
+        let loss = |wm: &HashMap<String, Vec<f32>>, xh: &[f32]| -> f32 {
+            let b = MoondreamBlock::new(&gpu, wm, t, d, nh, hd, ff, prefix, rot, theta);
+            let xbb = gpu.storage_init("x", xh);
+            gpu.read(b.forward(&xbb), n).iter().sum::<f32>()
+        };
+        let eps = 1e-3f32;
+        let ok = |a: f32, num: f32| (a - num).abs() <= 4e-3 + 8e-2 * num.abs();
+
+        for &i in &[0usize, 7, 13, 21, 33, 44] {
+            let (mut xp, mut xm) = (x_host.clone(), x_host.clone());
+            xp[i] += eps;
+            xm[i] -= eps;
+            let num = (loss(&w, &xp) - loss(&w, &xm)) / (2.0 * eps);
+            assert!(ok(dx[i], num), "d_x[{i}]: analytic {} vs numeric {}", dx[i], num);
+        }
+        for &h in &[0usize, 1] {
+            let (mut wp, mut wm2) = (w.clone(), w.clone());
+            wp.get_mut("attn.tau.alpha").unwrap()[h] += eps;
+            wm2.get_mut("attn.tau.alpha").unwrap()[h] -= eps;
+            let num = (loss(&wp, &x_host) - loss(&wm2, &x_host)) / (2.0 * eps);
+            assert!(ok(g_alpha[h], num), "d tau.alpha[{h}]: analytic {} vs numeric {}", g_alpha[h], num);
+        }
+        for &j in &[0usize, 17, 40] {
+            let (mut wp, mut wm2) = (w.clone(), w.clone());
+            wp.get_mut("attn.tau.wq").unwrap()[j] += eps;
+            wm2.get_mut("attn.tau.wq").unwrap()[j] -= eps;
+            let num = (loss(&wp, &x_host) - loss(&wm2, &x_host)) / (2.0 * eps);
+            assert!(ok(g_wq[j], num), "d tau.wq[{j}]: analytic {} vs numeric {}", g_wq[j], num);
         }
     }
 
