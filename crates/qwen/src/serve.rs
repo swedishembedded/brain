@@ -556,6 +556,12 @@ impl Engine {
     pub fn free_blocks(&self) -> u32 {
         self.alloc.free_blocks()
     }
+    /// The prefill chunk size this engine was built with — the unit the
+    /// scheduler's per-iteration prefill budget is expressed against.
+    pub fn max_prefill_tokens(&self) -> u32 {
+        self.max_prefill
+    }
+
     /// The longest sequence (prompt + generated) this engine can hold for one
     /// request: `max_blocks_per_seq * block_size`.
     pub fn max_seq_len(&self) -> usize {
@@ -764,11 +770,40 @@ pub struct Scheduler {
     running: Vec<Running>,
     next_id: u64,
     max_running: usize,
+    /// Max prompt tokens prefilled per iteration before yielding to decode.
+    ///
+    /// Admission runs a FULL prefill per accepted request, so without a budget
+    /// a burst of N arrivals performs N whole prompt forwards back-to-back
+    /// while every running sequence stalls — measured as TTFA p99 growing
+    /// 230 ms → 3413 ms (15×) and inter-token p99 10× from concurrency 1→32,
+    /// with the interactive SLO met at no concurrency level. Bounding the
+    /// prefill work per iteration lets decode run every iteration and spreads
+    /// a burst across several; the budget always admits at least one waiting
+    /// request per iteration, so nothing can starve.
+    prefill_budget: u32,
 }
 
 impl Scheduler {
     pub fn new(eng: Engine, max_running: usize) -> Scheduler {
-        Scheduler { eng, waiting: std::collections::VecDeque::new(), running: Vec::new(), next_id: 0, max_running }
+        // Default budget: two full prefill chunks per iteration. Enough to keep
+        // admission moving under load, small enough that running sequences see
+        // a decode step between arrivals.
+        let prefill_budget = eng.max_prefill_tokens().saturating_mul(2).max(1);
+        Scheduler {
+            eng,
+            waiting: std::collections::VecDeque::new(),
+            running: Vec::new(),
+            next_id: 0,
+            max_running,
+            prefill_budget,
+        }
+    }
+
+    /// Override the per-iteration prefill budget (tokens). `u32::MAX` restores
+    /// the old admit-everything behaviour; recorded by `brain perf` in the
+    /// artifact's target config so a run states the policy it used.
+    pub fn set_prefill_budget(&mut self, tokens: u32) {
+        self.prefill_budget = tokens.max(1);
     }
 
     /// Enqueue a request; returns its id (results come back keyed by it).
@@ -870,7 +905,11 @@ impl Scheduler {
 
     fn step_inner(&mut self, report: &mut StepReport) -> Vec<(u64, Vec<u32>)> {
 
-        // 1. Admit while there's batch room and enough free blocks for the prompt.
+        // 1. Admit while there's batch room, enough free blocks for the prompt,
+        //    and prefill budget left this iteration (head-of-line guard: decode
+        //    must run between bursts of admissions).
+        let mut budget_left = self.prefill_budget;
+        let mut admitted_this_iter = 0u32;
         while self.running.len() < self.max_running {
             // Drop anything that can never fit, whatever the pool does — it
             // would otherwise block the queue forever (or, before the capacity
@@ -889,13 +928,23 @@ impl Scheduler {
                 ));
             }
             let fits = match self.waiting.front() {
-                Some((_, req)) => self.eng.free_blocks() >= self.eng.blocks_for(req.prompt.len() as u32 + 1),
+                Some((_, req)) => {
+                    let need = req.prompt.len() as u32;
+                    // Always admit at least one request per iteration (no
+                    // starvation); after that, stop once the budget is spent.
+                    if admitted_this_iter > 0 && need > budget_left {
+                        break;
+                    }
+                    self.eng.free_blocks() >= self.eng.blocks_for(need + 1)
+                }
                 None => false,
             };
             if !fits {
                 break;
             }
             let (id, req) = self.waiting.pop_front().unwrap();
+            budget_left = budget_left.saturating_sub(req.prompt.len() as u32);
+            admitted_this_iter += 1;
             let mut table = BlockTable::new();
             let hidden = self.eng.prefill(&mut table, &req.prompt);
             let first = Engine::argmax(&self.eng.logits(&hidden));
@@ -1111,6 +1160,55 @@ mod tests {
             assert_eq!(dev, host, "device head picked a different token than the host head");
             inputs = host;
         }
+    }
+
+    /// The prefill budget must spread a burst of admissions across iterations
+    /// (decode runs between them) without changing ANY output, and must never
+    /// starve: at least one waiting request is admitted per iteration.
+    #[test]
+    fn prefill_budget_spreads_admissions_without_changing_outputs() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let reqs = || {
+            (0..4u32)
+                .map(|i| Request { prompt: vec![1 + i, 5, 3, 7, 2], max_new: 5, eos: None })
+                .collect::<Vec<_>>()
+        };
+
+        // Reference: unlimited budget (the old behaviour).
+        let mut a = Scheduler::new(Engine::from_map(cfg.clone(), &map, 4, 96, 4, 12, 8, false), 4);
+        a.set_prefill_budget(u32::MAX);
+        for r in reqs() {
+            a.submit(r);
+        }
+        let want = a.run();
+
+        // Tight budget: one 5-token prompt exhausts it, so the 4 arrivals must
+        // be admitted over MULTIPLE iterations — with decode in between — and
+        // still produce token-identical outputs.
+        let mut b = Scheduler::new(Engine::from_map(cfg, &map, 4, 96, 4, 12, 8, false), 4);
+        b.set_prefill_budget(5);
+        for r in reqs() {
+            b.submit(r);
+        }
+        let mut admit_iters = 0;
+        let mut got = std::collections::HashMap::new();
+        while b.pending() {
+            let rep = b.step_report();
+            if !rep.admitted.is_empty() {
+                admit_iters += 1;
+                assert!(
+                    rep.admitted.len() <= 2,
+                    "a 5-token budget must not admit a whole burst at once, got {}",
+                    rep.admitted.len()
+                );
+            }
+            for (id, toks) in rep.completed {
+                got.insert(id, toks);
+            }
+        }
+        assert!(admit_iters >= 2, "admissions must be spread across iterations");
+        assert_eq!(got, want, "the budget changes WHEN tokens appear, never WHICH");
     }
 
     /// `step_report` must account for **every** token exactly once and admit each
