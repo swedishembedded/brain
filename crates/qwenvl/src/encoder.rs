@@ -44,8 +44,15 @@ pub fn vision_pipelines() -> &'static [(&'static str, &'static str)] {
         ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),
         ("ln_head", kernels::LN_HEAD),
         ("rope2d", kernels::ROPE2D),
+        ("gelu_erf", kernels::GELU_ERF), // index 12: erf GELU for the PatchMerger
     ]
 }
+
+// PatchMerger kernel indices into `vision_pipelines`.
+const M_LAYERNORM: usize = 0;
+const M_MATMUL: usize = 1;
+const M_BIAS_ADD: usize = 3;
+const M_GELU_ERF: usize = 12;
 
 fn vit_ids() -> VitKernelIds {
     VitKernelIds {
@@ -185,6 +192,74 @@ impl<'g> VisionEncoder<'g> {
     }
 }
 
+/// Qwen3-VL PatchMerger: fold each `merge×merge` block of patch features into one
+/// visual token. LayerNorm (over `in_dim` pre-shuffle for the main merger, or over
+/// `in_dim·merge²` post-shuffle for the DeepStack mergers) → Linear(→ merged) →
+/// GELU(erf) → Linear(→ out_dim). The 2×2 gather is a free contiguous reshape
+/// because patches arrive in spatial-merge-block order. Required weight keys:
+/// `ln.weight`/`ln.bias`, `fc1.weight` `[merged, merged]`/`fc1.bias`,
+/// `fc2.weight` `[out_dim, merged]`/`fc2.bias`, where `merged = in_dim·merge²`.
+pub struct PatchMerger<'g> {
+    gpu: &'g Gpu,
+    w: HashMap<String, DeviceBuffer>,
+    in_dim: u32,
+    merge: u32,
+    out_dim: u32,
+    /// `true` for DeepStack mergers (LayerNorm over the shuffled `in_dim·merge²`),
+    /// `false` for the main merger (LayerNorm over `in_dim` per patch).
+    postshuffle_norm: bool,
+}
+
+impl<'g> PatchMerger<'g> {
+    pub fn new(
+        gpu: &'g Gpu,
+        weights: &HashMap<String, Vec<f32>>,
+        in_dim: u32,
+        merge: u32,
+        out_dim: u32,
+        postshuffle_norm: bool,
+    ) -> PatchMerger<'g> {
+        let w = weights.iter().map(|(k, v)| (k.clone(), gpu.storage_init(k, v))).collect();
+        PatchMerger { gpu, w, in_dim, merge, out_dim, postshuffle_norm }
+    }
+
+    fn wb(&self, name: &str) -> &DeviceBuffer {
+        self.w.get(name).unwrap_or_else(|| panic!("merger weight missing: {name}"))
+    }
+
+    /// Merge `x` `[n, in_dim]` (patch features, merge-block order) into
+    /// `[n/merge², out_dim]` visual tokens.
+    pub fn merge(&self, x: &[f32], n: u32) -> Vec<f32> {
+        let g = self.gpu;
+        let m2 = self.merge * self.merge;
+        assert!(n % m2 == 0, "n must be a multiple of merge²");
+        let mrows = n / m2;
+        let merged = self.in_dim * m2; // e.g. 1024·4 = 4096
+        let eps = gpu_core::f(VISION_EPS);
+
+        let inp = g.storage_init("mrg.in", x);
+        let xn = g.storage((n * self.in_dim) as u64); // == mrows·merged elements
+        let mut steps: Vec<Step> = Vec::new();
+        if self.postshuffle_norm {
+            // Reshape [n, in_dim] -> [mrows, merged] first, then LayerNorm over merged.
+            steps.push(g.step(M_LAYERNORM, &[&inp, self.wb("ln.weight"), self.wb("ln.bias"), &xn], &[merged, mrows, eps], mrows));
+        } else {
+            // LayerNorm per patch over in_dim; the reshape to [mrows, merged] is free.
+            steps.push(g.step(M_LAYERNORM, &[&inp, self.wb("ln.weight"), self.wb("ln.bias"), &xn], &[self.in_dim, n, eps], n));
+        }
+        let h = g.storage((mrows * merged) as u64);
+        let h2 = g.storage((mrows * merged) as u64);
+        steps.push(g.step(M_MATMUL, &[&xn, self.wb("fc1.weight"), &h], &[mrows, merged, merged], mrows * merged));
+        steps.push(g.step(M_BIAS_ADD, &[&h, self.wb("fc1.bias")], &[mrows, merged], mrows * merged));
+        steps.push(g.step(M_GELU_ERF, &[&h, &h2], &[mrows * merged], mrows * merged));
+        let out = g.storage((mrows * self.out_dim) as u64);
+        steps.push(g.step(M_MATMUL, &[&h2, self.wb("fc2.weight"), &out], &[mrows, merged, self.out_dim], mrows * self.out_dim));
+        steps.push(g.step(M_BIAS_ADD, &[&out, self.wb("fc2.bias")], &[mrows, self.out_dim], mrows * self.out_dim));
+        g.submit(&[], &steps);
+        g.read(&out, (mrows * self.out_dim) as usize)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +299,37 @@ mod tests {
             }
         }
         w
+    }
+
+    fn merger_weights(in_dim: u32, merge: u32, out_dim: u32, postshuffle: bool, seed: u64) -> HashMap<String, Vec<f32>> {
+        let mut rng = Rng::new(seed);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
+        let merged = (in_dim * merge * merge) as usize;
+        let ln_dim = if postshuffle { merged } else { in_dim as usize };
+        let mut w = HashMap::new();
+        w.insert("ln.weight".into(), vec![1.0; ln_dim]);
+        w.insert("ln.bias".into(), r(ln_dim));
+        w.insert("fc1.weight".into(), r(merged * merged));
+        w.insert("fc1.bias".into(), r(merged));
+        w.insert("fc2.weight".into(), r(out_dim as usize * merged));
+        w.insert("fc2.bias".into(), r(out_dim as usize));
+        w
+    }
+
+    #[test]
+    fn patch_merger_shapes_and_norm_variants() {
+        let gpu = Gpu::new_cpu(vision_pipelines());
+        let (in_dim, merge, out_dim, n) = (8u32, 2u32, 10u32, 8u32);
+        let mut rng = Rng::new(1);
+        let x: Vec<f32> = (0..(n * in_dim) as usize).map(|_| rng.next_f32() - 0.5).collect();
+        for postshuffle in [false, true] {
+            let w = merger_weights(in_dim, merge, out_dim, postshuffle, 5);
+            let m = PatchMerger::new(&gpu, &w, in_dim, merge, out_dim, postshuffle);
+            let out = m.merge(&x, n);
+            assert_eq!(out.len(), (n / (merge * merge) * out_dim) as usize); // 2×10
+            assert!(out.iter().all(|v| v.is_finite()));
+            assert!(out.iter().any(|&v| v.abs() > 1e-6));
+        }
     }
 
     #[test]
