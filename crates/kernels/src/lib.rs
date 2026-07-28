@@ -22,6 +22,10 @@ pub mod template;
 
 /// `wgsl/adamw.wgsl`
 pub const ADAMW: &str = include_str!("../wgsl/adamw.wgsl");
+/// `wgsl/adaptive_avgpool2d.wgsl`
+pub const ADAPTIVE_AVGPOOL2D: &str = include_str!("../wgsl/adaptive_avgpool2d.wgsl");
+/// `wgsl/adaptive_avgpool2d_dx.wgsl`
+pub const ADAPTIVE_AVGPOOL2D_DX: &str = include_str!("../wgsl/adaptive_avgpool2d_dx.wgsl");
 /// `wgsl/add.wgsl`
 pub const ADD: &str = include_str!("../wgsl/add.wgsl");
 /// `wgsl/add2.wgsl`
@@ -618,6 +622,8 @@ pub const WEIGHTED_GAP_DX: &str = include_str!("../wgsl/weighted_gap_dx.wgsl");
 /// Every kernel as `(name, source)`, name = file stem.
 pub const ALL: &[(&str, &str)] = &[
     ("adamw", ADAMW),
+    ("adaptive_avgpool2d", ADAPTIVE_AVGPOOL2D),
+    ("adaptive_avgpool2d_dx", ADAPTIVE_AVGPOOL2D_DX),
     ("add", ADD),
     ("add2", ADD2),
     ("add_chan_bcast", ADD_CHAN_BCAST),

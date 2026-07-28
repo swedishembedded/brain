@@ -44,6 +44,40 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_avgpool2d_grads_match_finite_differences() {
+        use kernels::{ADAPTIVE_AVGPOOL2D, ADAPTIVE_AVGPOOL2D_DX};
+        let g = Gpu::new_cpu(&[("adaptive_avgpool2d", ADAPTIVE_AVGPOOL2D), ("adaptive_avgpool2d_dx", ADAPTIVE_AVGPOOL2D_DX)]);
+        // 4×4 → 3×3: non-integer ratio → overlapping bins (the general case).
+        let (nn, cc, h, w, oh, ow) = (1u32, 1u32, 4u32, 4u32, 3u32, 3u32);
+        let nx = (nn * cc * h * w) as usize;
+        let ny = (nn * cc * oh * ow) as usize;
+        let par = [nn, cc, h, w, oh, ow];
+        let pool = |x: &[f32]| -> Vec<f32> {
+            let (xb, yb) = (g.storage_init("x", x), g.storage(ny as u64));
+            g.submit(&[], &[g.step(0, &[&xb, &yb], &par, ny as u32)]);
+            g.read(&yb, ny)
+        };
+        let pool_dx = |dy: &[f32]| -> Vec<f32> {
+            let (a, o) = (g.storage_init("dy", dy), g.storage(nx as u64));
+            g.submit(&[], &[g.step(1, &[&a, &o], &par, nx as u32)]);
+            g.read(&o, nx)
+        };
+        let mut rng = Rng::new(31);
+        let x: Vec<f32> = (0..nx).map(|_| rng.next_f32() - 0.5).collect();
+        let dy: Vec<f32> = (0..ny).map(|_| rng.next_f32() - 0.5).collect();
+        let v: Vec<f32> = (0..nx).map(|_| if rng.next_f32() < 0.5 { -1.0 } else { 1.0 }).collect();
+
+        let dx = pool_dx(&dy);
+        let an = dot(&dx, &v);
+        let eps = 1e-3f32;
+        let l = |y: &[f32]| dot(y, &dy);
+        let px = |sg: f32| x.iter().zip(&v).map(|(b, d)| b + sg * eps * d).collect::<Vec<f32>>();
+        let num = (l(&pool(&px(1.0))) - l(&pool(&px(-1.0)))) / (2.0 * eps);
+        let rel = (an - num).abs() / an.abs().max(num.abs()).max(1e-3);
+        assert!(rel < 1e-2, "adaptive_avgpool2d dx: analytic {an} vs numeric {num} (rel {rel})");
+    }
+
+    #[test]
     fn tau_scale_grads_match_finite_differences() {
         use kernels::{TAU_SCALE, TAU_SCALE_DS};
         let g = Gpu::new_cpu(&[("tau_scale", TAU_SCALE), ("tau_scale_ds", TAU_SCALE_DS)]);
