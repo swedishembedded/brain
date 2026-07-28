@@ -6,5 +6,6 @@ pub mod decoder;
 pub mod import;
 pub mod model;
 pub mod preprocess;
+pub mod shard;
 pub mod vision;
 pub mod kernels_check;

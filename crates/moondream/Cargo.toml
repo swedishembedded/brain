@@ -18,3 +18,5 @@ serde_json.workspace = true
 
 [dev-dependencies]
 brain-data.workspace = true
+brain-federated.workspace = true
+brain-checkpoint.workspace = true
