@@ -31,8 +31,12 @@ pub fn vision_pipelines() -> &'static [(&'static str, &'static str)] {
         ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),
         ("ln_head", kernels::LN_HEAD),
         ("rope2d", kernels::ROPE2D),
+        ("adaptive_avgpool2d", kernels::ADAPTIVE_AVGPOOL2D), // 12: reconstruct→27×27 pool
     ]
 }
+
+/// Pipeline slot of `adaptive_avgpool2d` within [`vision_pipelines`].
+pub const ADAPTIVE_AVGPOOL2D_ID: usize = 12;
 
 fn vit_ids() -> VitKernelIds {
     VitKernelIds {

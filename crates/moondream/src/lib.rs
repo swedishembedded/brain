@@ -4,5 +4,6 @@
 pub mod config;
 pub mod decoder;
 pub mod model;
+pub mod preprocess;
 pub mod vision;
 pub mod kernels_check;
