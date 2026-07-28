@@ -94,8 +94,8 @@ pub struct VisionEncoder<'g> {
 impl<'g> VisionEncoder<'g> {
     /// Build from host weights. Required keys: `patch_embed.weight` `[hidden,
     /// patch_vec]`, `patch_embed.bias` `[hidden]`, `pos_embed` `[num_pos, hidden]`,
-    /// `norm.weight`/`norm.bias` `[hidden]`, and per block `blocks.{b}.<leaf>` for
-    /// every `BLOCK_LEAVES`.
+    /// and per block `blocks.{b}.<leaf>` for every `BLOCK_LEAVES`. (No post-block
+    /// norm — the PatchMerger's LayerNorm is the final norm, matching HF.)
     pub fn new(gpu: &'g Gpu, cfg: VisionConfig, weights: &HashMap<String, Vec<f32>>) -> VisionEncoder<'g> {
         let mut w = HashMap::new();
         for (name, data) in weights {
@@ -201,12 +201,10 @@ impl<'g> VisionEncoder<'g> {
                 steps.push(g.step(V_REGION_COPY, &[&x, &tap_bufs[i]], &[n, c, c, 0], n * c));
             }
         }
-        // Final LayerNorm into a fresh output buffer.
-        let out = g.storage((n * c) as u64);
-        steps.push(g.step(ids.layernorm, &[&x, self.wb("norm.weight"), self.wb("norm.bias"), &out], &[c, n, gpu_core::f(sh.eps)], n));
-
+        // No post-block norm: HF applies the PatchMerger (which carries its own
+        // LayerNorm) directly to the last block's output.
         g.submit(&[], &steps);
-        let features = g.read(&out, (n * c) as usize);
+        let features = g.read(&x, (n * c) as usize);
         let tap_feats = tap_bufs.iter().map(|tb| g.read(tb, (n * c) as usize)).collect();
         (features, tap_feats)
     }
@@ -309,8 +307,6 @@ mod tests {
         w.insert("patch_embed.weight".into(), r(c * pv));
         w.insert("patch_embed.bias".into(), r(c));
         w.insert("pos_embed".into(), r(cfg.num_position_embeddings as usize * c));
-        w.insert("norm.weight".into(), vec![1.0; c]);
-        w.insert("norm.bias".into(), r(c));
         for b in 0..cfg.depth {
             let dims = [c, c, 3 * c * c, 3 * c, c * c, c, c, c, mlp * c, mlp, c * mlp, c];
             for (leaf, &sz) in BLOCK_LEAVES.iter().zip(&dims) {

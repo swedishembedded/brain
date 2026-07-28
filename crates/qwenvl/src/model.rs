@@ -168,8 +168,6 @@ mod tests {
             ("patch_embed.weight", c * pv, false),
             ("patch_embed.bias", c, false),
             ("pos_embed", vcfg.num_position_embeddings as usize * c, false),
-            ("norm.weight", c, true),
-            ("norm.bias", c, false),
         ];
         let block_leaf_dims: Vec<(String, usize, bool)> = (0..vcfg.depth)
             .flat_map(|b| {
