@@ -62,6 +62,49 @@ checkpoint needed, so hardware comparison works on any machine), and
   fixed level. A true in-process fixed-batch path that bypasses the driver is
   worth adding when it starts mattering for regression signal.
 
+## First real findings (2×Tesla P40, 48-core host)
+
+The suite's first run on real hardware found a decode bottleneck that is not
+in the GPU at all.
+
+**Batching barely helps.** `qwen-synth:8x512x8` (46.8M params, fp32),
+decode-bound (8-token prompt, 64-token output), `--device gpu0`:
+
+| concurrency | out tok/s | TTFA p99 | IAL p99 |
+|---:|---:|---:|---:|
+| 1 | 36.4 | 63 ms | 32 ms |
+| 4 | 46.9 | 211 ms | 91 ms |
+| 16 | 50.3 | 811 ms | 279 ms |
+| 32 | 45.4 | 972 ms | 410 ms |
+
+Throughput gains 1.4× from concurrency 1→16 and then *regresses*, while
+latency grows 15×. A 47M fp32 model at ~36 tok/s is roughly **1% of the
+P40's fp32 peak** — overhead-bound, not compute-bound.
+
+**Cause: the LM head runs on the host, single-threaded.**
+`qwen::serve::Engine::logits` is a scalar Rust matmul over
+`[vocab, d_model]` — 16.4M multiply-accumulates per sequence per token at
+vocab 32k — executed once per sequence per decode step while the GPU sits
+idle. Batch size multiplies that host cost linearly, which is exactly why
+batching stops paying.
+
+Confirmed causally by varying **only** vocab (same shape, same device):
+
+| vocab | out tok/s | IAL p50 |
+|---:|---:|---:|
+| 4 000 | 126.3 | 18.3 ms |
+| 8 000 | 100.7 | 23.3 ms |
+| 32 000 | 40.6 | 70.3 ms |
+
+`IAL ≈ 11 ms + 1.86 µs per 1000 vocab`, so at vocab 32k about **85% of each
+decode step is the host-side head**. Moving it onto the device (it is a
+plain matmul the engine already has a kernel for) and batching it across the
+running set is the single highest-value fix; the sweep above is the
+before-picture to measure it against.
+
+*(Numbers are `--target qwen-synth`, i.e. random weights — valid for cost,
+meaningless for output quality.)*
+
 ## Fixed along the way (pre-existing)
 
 - **SIGSEGV in every debug-profile test run that built GPU devices on more than
