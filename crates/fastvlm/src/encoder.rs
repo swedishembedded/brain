@@ -11,9 +11,32 @@
 
 use std::sync::OnceLock;
 
-use gpu_core::DeviceBuffer;
+use gpu_core::{f, DeviceBuffer};
+use model::vit::{chunked_attn_fwd, VitKernelIds, VitShape};
 use paramstore::ParamStore;
 use vision::{Act, Conv, ConvKernelIds, ConvSpec, Ctx, Norm, Shape};
+
+/// FastViTHD's fixed attention head dimension (num_heads = channels / 32).
+const ATTN_HEAD_DIM: u32 = 32;
+
+/// Map the tower PIPELINES into `model::vit`'s kernel-id struct (only the fields
+/// the attention core dispatches need to be valid; the rest are unused here).
+fn vit_ids() -> VitKernelIds {
+    VitKernelIds {
+        layernorm: kidx("layernorm"),
+        matmul: kidx("matmul"),
+        matmul_rows: kidx("matmul_rows"),
+        bias_add: kidx("bias_add"),
+        gelu_erf: kidx("gelu_erf"),
+        scale_chan: kidx("scale_chan"),
+        add2: kidx("add2"),
+        attn_scores_cross: kidx("attn_scores_cross"),
+        attn_softmax_cross: kidx("attn_softmax_cross"),
+        attn_apply_cross: kidx("attn_apply_cross"),
+        ln_head: 0,
+        rope2d: 0,
+    }
+}
 
 /// Index of a manually-dispatched kernel (not covered by `ConvKernelIds`) in
 /// [`PIPELINES`], by name. Panics if absent — a programming error.
@@ -293,6 +316,129 @@ impl PatchEmbed {
     }
 }
 
+/// AttentionBlock — the FastViTHD stage-3/4 block: `x = x + ls1 ⊙ MHSA(LN(x))`
+/// then `x = x + ls2 ⊙ ConvFFN(x)`. The MHSA runs over the conv feature map by
+/// transposing NCHW→NLC (`nchw_nlc`), a per-token LayerNorm over C, a fused-qkv
+/// Linear (no bias, no RoPE, no QK-norm, head_dim 32), the shared
+/// `model::vit::chunked_attn_fwd` full-attention core, a biased proj Linear, then
+/// NLC→NCHW (`nlc_nchw`). LayerScales use `film_chan` (sb = [ls-1, 0]).
+pub struct AttentionBlock {
+    ch: u32,
+    heads: u32,
+    ffn: ConvFFN,
+    out_shape: Shape,
+    // params
+    norm_w: String,
+    norm_b: String,
+    qkv_w: String,
+    proj_w: String,
+    proj_b: String,
+    ls1: String,
+    ls2: String,
+    // scratch (rows = H*W, N = 1)
+    nlc: DeviceBuffer,
+    normed: DeviceBuffer,
+    qkv: DeviceBuffer,
+    ctxb: DeviceBuffer,
+    scores: DeviceBuffer,
+    probs: DeviceBuffer,
+    proj: DeviceBuffer,
+    back: DeviceBuffer,
+    scaled1: DeviceBuffer,
+    res1: DeviceBuffer,
+    scaled2: DeviceBuffer,
+    out: DeviceBuffer,
+}
+
+impl AttentionBlock {
+    pub fn new(ctx: &Ctx, prefix: &str, in_shape: Shape, ch: u32, mlp_ratio: u32) -> AttentionBlock {
+        assert_eq!(in_shape.c, ch);
+        assert_eq!(ch % ATTN_HEAD_DIM, 0, "channels must be a multiple of head_dim 32");
+        let rows = in_shape.h * in_shape.w;
+        let heads = ch / ATTN_HEAD_DIM;
+        let g = ctx.gpu;
+        let rc = (rows * ch) as u64;
+        let slab = (heads * rows * rows) as u64;
+        let ffn = ConvFFN::new(ctx, &format!("{prefix}.convffn"), in_shape, ch, mlp_ratio);
+        AttentionBlock {
+            ch,
+            heads,
+            out_shape: in_shape,
+            norm_w: format!("{prefix}.norm.weight"),
+            norm_b: format!("{prefix}.norm.bias"),
+            qkv_w: format!("{prefix}.token_mixer.qkv.weight"),
+            proj_w: format!("{prefix}.token_mixer.proj.weight"),
+            proj_b: format!("{prefix}.token_mixer.proj.bias"),
+            ls1: format!("{prefix}.layer_scale_1_sb"),
+            ls2: format!("{prefix}.layer_scale_2_sb"),
+            nlc: g.storage(rc),
+            normed: g.storage(rc),
+            qkv: g.storage(3 * rc),
+            ctxb: g.storage(rc),
+            scores: g.storage(slab),
+            probs: g.storage(slab),
+            proj: g.storage(rc),
+            back: g.storage(rc),
+            scaled1: g.storage(rc),
+            res1: g.storage(rc),
+            scaled2: g.storage(rc),
+            out: g.storage(rc),
+            ffn,
+        }
+    }
+    pub fn out_shape(&self) -> Shape {
+        self.out_shape
+    }
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let (c, c3) = (self.ch as usize, 3 * self.ch as usize);
+        let mut p = vec![
+            (self.norm_w.clone(), c),
+            (self.norm_b.clone(), c),
+            (self.qkv_w.clone(), c3 * c),
+            (self.proj_w.clone(), c * c),
+            (self.proj_b.clone(), c),
+            (self.ls1.clone(), 2 * c),
+            (self.ls2.clone(), 2 * c),
+        ];
+        p.extend(self.ffn.param_list());
+        p
+    }
+    pub fn forward<'a>(&'a self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) -> &'a DeviceBuffer {
+        let g = ctx.gpu;
+        let (nn, ch, h, w) = (self.out_shape.n, self.out_shape.c, self.out_shape.h, self.out_shape.w);
+        let rows = h * w;
+        let total = self.out_shape.numel();
+        let eps = 1e-5f32;
+
+        let mut s = Vec::new();
+        // NCHW -> NLC, LayerNorm over C, fused-qkv Linear (no bias).
+        s.push(g.step(kidx("nchw_nlc"), &[x_in, &self.nlc], &[total, ch, rows], total));
+        s.push(g.step(kidx("layernorm"), &[&self.nlc, ps.w(&self.norm_w), ps.w(&self.norm_b), &self.normed], &[ch, rows, f(eps)], rows));
+        let c3 = 3 * ch;
+        s.push(g.step(kidx("matmul_rows"), &[&self.normed, ps.w(&self.qkv_w), &self.qkv], &[rows, ch, c3], rows.div_ceil(8) * c3));
+        // Full attention over the H*W tokens.
+        let sh = VitShape { dim: ch, heads: self.heads, mlp: 0, eps };
+        chunked_attn_fwd(g, &vit_ids(), &sh, &self.qkv, &self.ctxb, &self.scores, &self.probs, &[(0, rows)], rows, &mut s);
+        // proj + bias, back to NCHW, ls1 residual.
+        s.push(g.step(kidx("matmul_rows"), &[&self.ctxb, ps.w(&self.proj_w), &self.proj], &[rows, ch, ch], rows.div_ceil(8) * ch));
+        s.push(g.step(kidx("bias_add"), &[&self.proj, ps.w(&self.proj_b)], &[rows, ch], rows * ch));
+        s.push(g.step(kidx("nlc_nchw"), &[&self.proj, &self.back], &[total, ch, rows], total));
+        s.push(g.step(kidx("film_chan"), &[&self.back, ps.w(&self.ls1), &self.scaled1], &[nn, ch, h, w], total));
+        s.push(g.step(kidx("add2"), &[x_in, &self.scaled1, &self.res1], &[total], total));
+        g.submit(&[], &s);
+        // ConvFFN (submits internally) + ls2 residual.
+        let f_out = self.ffn.forward(ctx, ps, &self.res1);
+        g.submit(
+            &[],
+            &[
+                g.step(kidx("film_chan"), &[f_out, ps.w(&self.ls2), &self.scaled2], &[nn, ch, h, w], total),
+                g.step(kidx("add2"), &[&self.res1, &self.scaled2, &self.out], &[total], total),
+            ],
+        );
+        &self.out
+    }
+}
+
 /// RepCPE — the FastViTHD conditional positional encoding before the attention
 /// stages: a single fused depthwise 7×7 conv + bias (the identity skip is folded
 /// into the conv), applied in place. It's exactly a [`ConvUnit`], so
@@ -326,6 +472,24 @@ mod tests {
                 (n.clone(), v)
             })
             .collect()
+    }
+
+    #[test]
+    fn attention_block_runs_preserves_shape() {
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let in_shape = Shape::new(1, 64, 4, 4); // ch 64 → 2 heads × 32; 16 tokens
+        let blk = AttentionBlock::new(&ctx, "a", in_shape, 64, 4);
+        let plist = blk.param_list();
+        for want in ["a.norm.weight", "a.token_mixer.qkv.weight", "a.token_mixer.proj.bias", "a.layer_scale_1_sb", "a.convffn.fc2.conv.weight"] {
+            assert!(plist.iter().any(|(n, _)| n == want), "missing {want}");
+        }
+        let mut rng = Rng::new(6);
+        let ps = ParamStore::new(&gpu, plist.clone(), &rand_init(&plist, &mut rng));
+        let x: Vec<f32> = (0..in_shape.numel() as usize).map(|_| rng.next_f32() - 0.5).collect();
+        let out = gpu.read(blk.forward(&ctx, &ps, &gpu.storage_init("x", &x)), in_shape.numel() as usize);
+        assert_eq!(out.len(), (64 * 4 * 4) as usize, "AttentionBlock preserves C,H,W");
+        assert!(out.iter().all(|v| v.is_finite()), "attention block output finite");
     }
 
     #[test]
