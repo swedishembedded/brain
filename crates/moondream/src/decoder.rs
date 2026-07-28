@@ -245,11 +245,17 @@ pub struct MoondreamDecoderGrads {
 }
 
 impl MoondreamDecoderGrads {
-    /// Allocate zeroed grads for a dense decoder of the given shape.
+    /// Allocate zeroed grads for a dense decoder of the given shape (dense blocks).
     pub fn new(g: &Gpu, n_layers: u32, d: u32, ff: u32, vocab: u32, n_img: u32) -> MoondreamDecoderGrads {
+        Self::from_blocks(g, (0..n_layers).map(|_| MoondreamBlockGrads::new(g, d, ff)).collect(), d, vocab, n_img)
+    }
+
+    /// Allocate zeroed decoder-level grads around caller-built per-block grads (so
+    /// tau/MoE blocks can supply `with_tau`/`with_moe` grads).
+    pub fn from_blocks(g: &Gpu, blocks: Vec<MoondreamBlockGrads>, d: u32, vocab: u32, n_img: u32) -> MoondreamDecoderGrads {
         let z = |n: u32| g.storage_init("md.dg", &vec![0.0f32; n as usize]);
         MoondreamDecoderGrads {
-            blocks: (0..n_layers).map(|_| MoondreamBlockGrads::new(g, d, ff)).collect(),
+            blocks,
             tok_w: z(vocab * d),
             post_ln_w: z(d),
             post_ln_b: z(d),
@@ -265,9 +271,9 @@ const LN_EPS: f32 = 1e-5;
 /// One Moondream decoder block — the PARALLEL attn+MLP form: a single shared
 /// LayerNorm feeds BOTH the attention and the FFN, and `x = x + l_attn + l_mlp`
 /// (a 3-way residual). The attention is full MHA with **partial RoPE** and the
-/// **prefix-LM mask** (image prefix bidirectional, else causal); the FFN here is
-/// the dense variant (layers 0..3). (The tau temperature and the MoE FFN variant
-/// for layers 4..23 are added on top; backward + gradcheck are a follow-up.)
+/// **prefix-LM mask** (image prefix bidirectional, else causal); the FFN is the
+/// dense variant (layers 0..3) or the MoE variant (layers 4..23, via `with_moe`).
+/// The optional tau temperature and the MoE FFN both have gradient-checked backwards.
 /// Weight keys: `ln.weight`/`ln.bias`, `attn.qkv.weight` `[3d, d]`,
 /// `attn.proj.weight` `[d,d]`/`attn.proj.bias`, `mlp.fc1.weight` `[ff,d]`/`.bias`,
 /// `mlp.fc2.weight` `[d,ff]`/`.bias`.
@@ -1082,6 +1088,106 @@ mod tests {
             wm2.get_mut("tok.weight").unwrap()[j] -= eps;
             let num = (loss(&wp, &img) - loss(&wm2, &img)) / (2.0 * eps);
             assert!(ok(g_tok[j], num), "d tok.weight[{j}]: analytic {} vs numeric {}", g_tok[j], num);
+        }
+    }
+
+    #[test]
+    fn check_moondream_full_decoder_backward() {
+        // End-to-end gradcheck of the REAL architecture: layer 0 = tau + dense FFN,
+        // layer 1 = tau + MoE FFN. Proves the decoder backward composes the tau and
+        // MoE block backwards through the residual-stream chain + splice + head.
+        let gpu = Gpu::new_cpu(pipelines());
+        let (t, d, nh, hd, ff, vocab, n_img, prefix, rot, theta) = (7u32, 16u32, 2u32, 8u32, 32u32, 19u32, 3u32, 4u32, 4u32, 1.5e6f32);
+        let (inner, e, top_k) = (6u32, 3u32, 2u32);
+        let mut rng = Rng::new(41);
+        let mut w = HashMap::new();
+        {
+            let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.3).collect::<Vec<f32>>();
+            w.insert("tok.weight".to_string(), r((vocab * d) as usize));
+            w.insert("post_ln.weight".to_string(), vec![1.0; d as usize]);
+            w.insert("post_ln.bias".to_string(), r(d as usize));
+            w.insert("lm_head.weight".to_string(), r((vocab * d) as usize));
+            w.insert("lm_head.bias".to_string(), r(vocab as usize));
+        }
+        for l in 0..2u32 {
+            for (k, v) in block_weights(d, ff, &mut rng) {
+                w.insert(format!("blocks.{l}.{k}"), v);
+            }
+            let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
+            w.insert(format!("blocks.{l}.attn.tau.wq"), r((nh * 3 * d) as usize));
+            w.insert(format!("blocks.{l}.attn.tau.wv"), r((nh * 3 * d) as usize));
+            w.insert(format!("blocks.{l}.attn.tau.alpha"), r(nh as usize));
+        }
+        // Layer 1 is MoE.
+        {
+            let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.4).collect::<Vec<f32>>();
+            w.insert("blocks.1.moe.router.weight".to_string(), r((e * d) as usize));
+            for ei in 0..e {
+                w.insert(format!("blocks.1.moe.experts.{ei}.w_h.weight"), r((inner * d) as usize));
+                w.insert(format!("blocks.1.moe.experts.{ei}.w_g.weight"), r((inner * d) as usize));
+                w.insert(format!("blocks.1.moe.experts.{ei}.w_down.weight"), r((d * inner) as usize));
+            }
+        }
+        let img: Vec<f32> = (0..(n_img * d) as usize).map(|_| (rng.next_f32() - 0.5) * 0.3).collect();
+        let tokens = vec![0u32, 5, 5, 5, 7, 9, 11];
+        let mut targets = vec![5u32, 0, 0, 0, 9, 11, 13];
+        for tg in targets.iter_mut().take(1 + n_img as usize).skip(1) {
+            *tg = IGNORE;
+        }
+
+        let sub = |wm: &HashMap<String, Vec<f32>>, pre: &str| -> HashMap<String, Vec<f32>> { wm.iter().filter_map(|(k, v)| k.strip_prefix(pre).map(|s| (s.to_string(), v.clone()))).collect() };
+        let build = |wm: &HashMap<String, Vec<f32>>| -> MoondreamDecoder {
+            let b0w: HashMap<String, Vec<f32>> = sub(wm, "blocks.0.").into_iter().filter(|(k, _)| !k.starts_with("moe.")).collect();
+            let b1w: HashMap<String, Vec<f32>> = sub(wm, "blocks.1.").into_iter().filter(|(k, _)| !k.starts_with("moe.")).collect();
+            let moe = MoeFfn::new(&gpu, &sub(wm, "blocks.1.moe."), t, d, inner, e, top_k);
+            let blocks = vec![
+                MoondreamBlock::new(&gpu, &b0w, t, d, nh, hd, ff, prefix, rot, theta),
+                MoondreamBlock::new(&gpu, &b1w, t, d, nh, hd, ff, prefix, rot, theta).with_moe(moe),
+            ];
+            MoondreamDecoder::new(&gpu, wm, blocks, t, d, vocab, n_img)
+        };
+
+        let dec = build(&w);
+        let _ = dec.forward(&tokens, &targets, &img);
+        let grads = MoondreamDecoderGrads::from_blocks(
+            &gpu,
+            vec![
+                MoondreamBlockGrads::new(&gpu, d, ff).with_tau(&gpu, nh, d),
+                MoondreamBlockGrads::new(&gpu, d, ff).with_tau(&gpu, nh, d).with_moe(&gpu, d, inner, e),
+            ],
+            d,
+            vocab,
+            n_img,
+        );
+        dec.backward(&targets, &grads);
+        let d_img = gpu.read(&grads.d_image_embeds, (n_img * d) as usize);
+        let g_alpha0 = gpu.read(&grads.blocks[0].tau.as_ref().unwrap().alpha, nh as usize);
+        let g_wh1 = gpu.read(&grads.blocks[1].moe.as_ref().unwrap().experts[0].w_h, (inner * d) as usize);
+
+        let loss = |wm: &HashMap<String, Vec<f32>>, im: &[f32]| -> f32 { build(wm).forward(&tokens, &targets, im) };
+        let eps = 1e-3f32;
+        let ok = |a: f32, num: f32| (a - num).abs() <= 5e-3 + 8e-2 * num.abs();
+
+        for &i in &[0usize, 7, 13, 20, 33, 44] {
+            let (mut ip, mut im) = (img.clone(), img.clone());
+            ip[i] += eps;
+            im[i] -= eps;
+            let num = (loss(&w, &ip) - loss(&w, &im)) / (2.0 * eps);
+            assert!(ok(d_img[i], num), "d_image_embeds[{i}]: analytic {} vs numeric {}", d_img[i], num);
+        }
+        for &h in &[0usize, 1] {
+            let (mut wp, mut wm2) = (w.clone(), w.clone());
+            wp.get_mut("blocks.0.attn.tau.alpha").unwrap()[h] += eps;
+            wm2.get_mut("blocks.0.attn.tau.alpha").unwrap()[h] -= eps;
+            let num = (loss(&wp, &img) - loss(&wm2, &img)) / (2.0 * eps);
+            assert!(ok(g_alpha0[h], num), "d blocks.0.tau.alpha[{h}]: analytic {} vs numeric {}", g_alpha0[h], num);
+        }
+        for &j in &[0usize, 17, 40] {
+            let (mut wp, mut wm2) = (w.clone(), w.clone());
+            wp.get_mut("blocks.1.moe.experts.0.w_h.weight").unwrap()[j] += eps;
+            wm2.get_mut("blocks.1.moe.experts.0.w_h.weight").unwrap()[j] -= eps;
+            let num = (loss(&wp, &img) - loss(&wm2, &img)) / (2.0 * eps);
+            assert!(ok(g_wh1[j], num), "d blocks.1.moe.w_h[{j}]: analytic {} vs numeric {}", g_wh1[j], num);
         }
     }
 
