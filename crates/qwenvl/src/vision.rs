@@ -56,6 +56,46 @@ pub fn vision_rope_tables(positions: &[(u32, u32)], head_dim: u32, theta: f32) -
     (cos, sin)
 }
 
+/// Bilinear-interpolation corner indices + weights for resampling the learned
+/// `side × side` pos-embed table onto a `grid_h × grid_w` patch grid, in
+/// spatial-merge-block order (matching [`vision_position_ids`]). Ports HF
+/// `get_vision_bilinear_indices_and_weights` exactly: sample coordinates
+/// `linspace(0, side-1, n)` (endpoints hit the table corners), take the floor/ceil
+/// neighbours (ceil clamped to `side-1`), and the four standard bilinear weights.
+/// Returns one `[c00, c01, c10, c11]` index quad (flattened `row*side+col` into the
+/// table) and one `[w00, w01, w10, w11]` weight quad per patch token; the pos-embed
+/// for a patch is `Σ table[idx[k]] * wts[k]`. Single image grid (temporal `t=1`);
+/// callers repeat per frame.
+pub fn pos_embed_bilinear(grid_h: u32, grid_w: u32, merge: u32, side: u32) -> (Vec<[u32; 4]>, Vec<[f32; 4]>) {
+    assert!(side >= 1 && grid_h % merge == 0 && grid_w % merge == 0);
+    // linspace(0, side-1, n)[i]; a single sample sits at 0 (torch semantics).
+    let lin = |i: u32, n: u32| -> f32 {
+        if n <= 1 {
+            0.0
+        } else {
+            i as f32 * (side as f32 - 1.0) / (n as f32 - 1.0)
+        }
+    };
+    let mut idx = Vec::with_capacity((grid_h * grid_w) as usize);
+    let mut wts = Vec::with_capacity((grid_h * grid_w) as usize);
+    for bh in 0..grid_h / merge {
+        for bw in 0..grid_w / merge {
+            for ih in 0..merge {
+                for iw in 0..merge {
+                    let (hi, wi) = (bh * merge + ih, bw * merge + iw);
+                    let (hg, wg) = (lin(hi, grid_h), lin(wi, grid_w));
+                    let (hf, wf) = (hg.floor() as u32, wg.floor() as u32);
+                    let (hc, wc) = ((hf + 1).min(side - 1), (wf + 1).min(side - 1));
+                    let (hfr, wfr) = (hg - hf as f32, wg - wf as f32);
+                    idx.push([hf * side + wf, hf * side + wc, hc * side + wf, hc * side + wc]);
+                    wts.push([(1.0 - hfr) * (1.0 - wfr), (1.0 - hfr) * wfr, hfr * (1.0 - wfr), hfr * wfr]);
+                }
+            }
+        }
+    }
+    (idx, wts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +149,40 @@ mod tests {
         let (cos, sin) = vision_rope_tables(&[(0, 0), (1, 1), (2, 0)], 64, 10000.0);
         assert_eq!(cos.len(), 3 * 32);
         assert_eq!(sin.len(), 3 * 32);
+    }
+
+    #[test]
+    fn bilinear_weights_are_a_partition_of_unity() {
+        let (_, wts) = pos_embed_bilinear(6, 10, 2, 48);
+        for q in &wts {
+            let s: f32 = q.iter().sum();
+            assert!((s - 1.0).abs() < 1e-5, "weights must sum to 1, got {s}");
+        }
+    }
+
+    #[test]
+    fn bilinear_identity_when_grid_equals_table() {
+        // grid == side: each patch lands exactly on a table cell (frac 0), so the
+        // first corner carries all the weight and indexes that cell directly.
+        let side = 4;
+        let (idx, wts) = pos_embed_bilinear(4, 4, 1, side);
+        for (k, (id, w)) in idx.iter().zip(&wts).enumerate() {
+            let (hi, wi) = (k as u32 / 4, k as u32 % 4); // merge=1 → row-major
+            assert_eq!(id[0], hi * side + wi);
+            assert!((w[0] - 1.0).abs() < 1e-6, "exact hit → weight [1,0,0,0]");
+            assert!(w[1] + w[2] + w[3] < 1e-6);
+        }
+    }
+
+    #[test]
+    fn bilinear_midpoint_split() {
+        // side 2, grid 3 (merge 1): linspace(0,1,3) = [0, 0.5, 1]. The middle
+        // sample (col 1) is halfway between table cols 0 and 1.
+        let (idx, wts) = pos_embed_bilinear(1, 3, 1, 2);
+        // patch (0,1): h_floor 0, h_ceil clamps to 1 (weight 0); w_floor 0,
+        // w_ceil 1, w_frac 0.5 → corners [0,1,2,3], weights [0.5,0.5,0,0].
+        assert_eq!(idx[1], [0, 1, 2, 3]);
+        assert!((wts[1][0] - 0.5).abs() < 1e-6 && (wts[1][1] - 0.5).abs() < 1e-6);
+        assert!(wts[1][2] < 1e-6 && wts[1][3] < 1e-6);
     }
 }
