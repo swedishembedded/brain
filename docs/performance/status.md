@@ -343,16 +343,42 @@ One session (commits 4ca517b..07f28e2), in roadmap order:
   the shared weak-pool device (qwen proven at `--test-threads=8` on the P40);
   codec deliberately stays on its production CPU pin.
 
+## Closed since (S3/S5 + the remaining scenario items)
+
+- **K DeviceStats** (de63006): submit/dispatch/readback counters always on
+  (relaxed atomics), queryable per handle, recorded as a `device_ops` block in
+  artifacts — null where a backend does not count, never zero.
+- **S3 kernel templating** (4e1727e): `kernels::template` rewrites tunable
+  `const` declarations + the `@workgroup_size` literal, so a specialised
+  kernel is just another (name, source) pair through all three backends.
+  Byte-identity with no params; unknown parameters error.
+- **S5 autotuner** (3673cf9): `select::candidates` is the one variant list
+  (the static policy is its head BY CONSTRUCTION); `AutoTuner` resolves
+  memo → per-adapter persistent store → measurement; `BRAIN_NO_AUTOTUNE=1`
+  forces static (tracked env flag). qwen tunes its int8 GEMV/tile crossover
+  at build; measured winners persist per adapter + kernel-source fingerprint.
+  Wiring it exposed and fixed a silent regression: the int8-weights gate had
+  begun probing the selector's head instead of the capability, falling back
+  to fp32 — masked by a skipping test that now fails on capable hardware.
+- **J2 perf gate** (8954804): `brain perf gate` — hard floors (throughput)
+  and ceilings (latency) at a generous fraction; refuses incomparable pairs,
+  smoke runs, correctness-failed runs, and zero-check vacuous passes.
+- **I frontend + H placement** (same commit): real GPT-2 BPE tokenise/
+  detokenise measured (tokenise is the honest bottleneck stage; host still
+  ~0.002 cores per saturated device); placement's notes state its
+  multi-model scope truthfully.
+- **G fault injection** (7fdd726): weight-read failure and a feature-gated
+  kernel-dispatch failure (757 ms measured recovery) inject for real;
+  host-OOM proved uninjectable in-process (Linux overcommit) and skips with
+  that reason. 3 injected / all acceptable / 5 honest skips.
+
 ## Still planned
 
-1. `capability::Provider` adoption by `qwen`, `yolo`, `depth`, `tts` — each makes
-   its model benchmarkable through `CapabilityTarget` with no new benchmark code.
-2. **S3** parameterised kernels (WGSL `override` / template step) and **S5**
-   the autotuner-as-selector — the measured refinement of every boundary the
-   static policy hard-codes (the i8 GEMV/tile crossover first).
-3. Device utilisation counters in `gpu-core` → fills the `resources` block (K).
-4. `perf gate` + committed hard-floor baselines (J2); `FaultSink` injection
-   points (G); real tokenizer/media stages in `frontend` (I); multi-model
-   `placement` reframing (H).
-5. Raise the global `TEST_THREADS` once the remaining GPU-test crates
-   (glm, moe, vision, depth, …) adopt `gpu_core::testgpu`.
+1. `capability::Provider` adoption by `qwen`, `yolo`, `depth`, `tts` (L) —
+   in progress.
+2. Raise the global `TEST_THREADS` once the remaining GPU-test crates
+   (glm, moe, vision, depth, …) adopt `gpu_core::testgpu` — in progress.
+3. Real host-OOM injection via an external cgroup memory limit; multi-rank
+   fault harness over `model::netcollective`.
+4. Committed per-box baseline artifacts for `perf gate` (the mechanism is in;
+   baselines are a deployment choice).
