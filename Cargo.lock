@@ -649,6 +649,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-moondream"
+version = "0.1.0"
+dependencies = [
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-qwen",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-npu"
 version = "0.1.0"
 dependencies = [
