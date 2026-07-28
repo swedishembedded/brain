@@ -447,6 +447,139 @@ pub fn repcpe(ctx: &Ctx, prefix: &str, in_shape: Shape, ch: u32) -> ConvUnit {
     ConvUnit::new(ctx, prefix, in_shape, ch, 7, 1, 3, ch, false, true, false)
 }
 
+/// One ordered layer of the FastViTHD forward.
+enum Layer {
+    Conv(ConvUnit),        // stem convs, RepCPE, conv_exp
+    Rep(RepMixerBlock),    // stage 0–2 blocks
+    Attn(AttentionBlock),  // stage 3–4 blocks
+    Down(PatchEmbed),      // inter-stage downsample
+}
+
+impl Layer {
+    fn out_shape(&self) -> Shape {
+        match self {
+            Layer::Conv(c) => c.out_shape(),
+            Layer::Rep(b) => b.out_shape(),
+            Layer::Attn(b) => b.out_shape(),
+            Layer::Down(d) => d.out_shape(),
+        }
+    }
+    fn param_list(&self) -> Vec<(String, usize)> {
+        match self {
+            Layer::Conv(c) => c.param_list(),
+            Layer::Rep(b) => b.param_list(),
+            Layer::Attn(b) => b.param_list(),
+            Layer::Down(d) => d.param_list(),
+        }
+    }
+    fn forward<'a>(&'a self, ctx: &Ctx, ps: &ParamStore, x: &'a DeviceBuffer) -> &'a DeviceBuffer {
+        match self {
+            Layer::Conv(c) => c.forward(ctx, ps, x),
+            Layer::Rep(b) => b.forward(ctx, ps, x),
+            Layer::Attn(b) => b.forward(ctx, ps, x),
+            Layer::Down(d) => d.forward(ctx, ps, x),
+        }
+    }
+}
+
+/// FastViTHD encoder: stem (3 MobileOne convs, /4) → 5 stages (RepMixer blocks in
+/// 0–2, RepCPE + AttentionBlocks in 3–4) with PatchEmbed downsamples between → a
+/// conv_exp MobileOne (last-dim → last-dim·cls_ratio) → feature_select (NCHW →
+/// `[tokens, feature_dim]`). Total downsample 64×, so a 1024² image → 256 tokens ×
+/// 3072. (conv_exp's SE gate is a later refinement.)
+pub struct Encoder {
+    layers: Vec<Layer>,
+    feature_dim: u32,
+    tokens: u32,
+    out: DeviceBuffer,
+    k_nchw_nlc: usize,
+}
+
+impl Encoder {
+    /// Build for `layers`/`embed_dims` (5 stages), `mlp_ratio`, `cls_ratio`, and a
+    /// square `input` size. `input` must be a multiple of 64 (the total downsample)
+    /// and its /64 grid gives the token count.
+    pub fn new(ctx: &Ctx, layers: [u32; 5], dims: [u32; 5], mlp_ratio: u32, cls_ratio: u32, input: u32) -> Encoder {
+        assert!(input % 64 == 0, "input must be a multiple of the 64× downsample");
+        let mut ls = Vec::new();
+        let mut shape = Shape::new(1, 3, input, input);
+        // Stem: dense 3→d0 /2, depthwise d0 /2, dense 1×1 d0.
+        let stem0 = ConvUnit::new(ctx, "stem.0", shape, dims[0], 3, 2, 1, 1, true, true, true);
+        shape = stem0.out_shape();
+        ls.push(Layer::Conv(stem0));
+        let stem1 = ConvUnit::new(ctx, "stem.1", shape, dims[0], 3, 2, 1, dims[0], true, true, true);
+        shape = stem1.out_shape();
+        ls.push(Layer::Conv(stem1));
+        let stem2 = ConvUnit::new(ctx, "stem.2", shape, dims[0], 1, 1, 0, 1, true, true, true);
+        shape = stem2.out_shape();
+        ls.push(Layer::Conv(stem2));
+
+        for stage in 0..5 {
+            let ch = dims[stage];
+            let is_attn = stage >= 3;
+            if is_attn {
+                let cpe = repcpe(ctx, &format!("stage{stage}.cpe"), shape, ch);
+                shape = cpe.out_shape();
+                ls.push(Layer::Conv(cpe));
+            }
+            for b in 0..layers[stage] {
+                let p = format!("network.{stage}.{b}");
+                if is_attn {
+                    let blk = AttentionBlock::new(ctx, &p, shape, ch, mlp_ratio);
+                    shape = blk.out_shape();
+                    ls.push(Layer::Attn(blk));
+                } else {
+                    let blk = RepMixerBlock::new(ctx, &p, shape, ch, mlp_ratio);
+                    shape = blk.out_shape();
+                    ls.push(Layer::Rep(blk));
+                }
+            }
+            if stage < 4 {
+                let d = PatchEmbed::new(ctx, &format!("downsample.{stage}"), shape, dims[stage + 1]);
+                shape = d.out_shape();
+                ls.push(Layer::Down(d));
+            }
+        }
+        // conv_exp: grouped MobileOne last-dim → last-dim·cls_ratio.
+        let out_dim = dims[4] * cls_ratio;
+        let conv_exp = ConvUnit::new(ctx, "conv_exp", shape, out_dim, 3, 1, 1, dims[4], true, true, true);
+        shape = conv_exp.out_shape();
+        ls.push(Layer::Conv(conv_exp));
+
+        let tokens = shape.h * shape.w;
+        Encoder {
+            feature_dim: out_dim,
+            tokens,
+            out: ctx.gpu.storage((tokens * out_dim) as u64),
+            k_nchw_nlc: kidx("nchw_nlc"),
+            layers: ls,
+        }
+    }
+
+    pub fn tokens(&self) -> u32 {
+        self.tokens
+    }
+    pub fn feature_dim(&self) -> u32 {
+        self.feature_dim
+    }
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        self.layers.iter().flat_map(|l| l.param_list()).collect()
+    }
+
+    /// Encode a `[1, 3, input, input]` image into `[tokens, feature_dim]` (NLC),
+    /// the sequence the mlp2x_gelu projector consumes.
+    pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, img: &DeviceBuffer) -> Vec<f32> {
+        let mut cur: &DeviceBuffer = img;
+        for l in &self.layers {
+            cur = l.forward(ctx, ps, cur);
+        }
+        // feature_select: NCHW [1, dim, H, W] -> NLC [tokens, dim].
+        let total = self.tokens * self.feature_dim;
+        ctx.gpu.submit(&[], &[ctx.step(self.k_nchw_nlc, &[cur, &self.out], &[total, self.feature_dim, self.tokens], total)]);
+        ctx.gpu.read(&self.out, total as usize)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +605,27 @@ mod tests {
                 (n.clone(), v)
             })
             .collect()
+    }
+
+    #[test]
+    fn encoder_assembles_and_produces_tokens() {
+        // Tiny 5-stage tower (1 block/stage), dims small but attention dims %32==0.
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let enc = Encoder::new(&ctx, [1, 1, 1, 1, 1], [8, 16, 16, 32, 32], 2, 2, 128);
+        assert_eq!(enc.tokens(), 4, "128/64 = 2 → 2×2 = 4 tokens");
+        assert_eq!(enc.feature_dim(), 64, "32 × cls_ratio 2");
+        let plist = enc.param_list();
+        assert!(plist.iter().any(|(n, _)| n == "stem.0.conv.weight"));
+        assert!(plist.iter().any(|(n, _)| n.starts_with("network.3.")), "attention stage present");
+        assert!(plist.iter().any(|(n, _)| n == "conv_exp.conv.weight"));
+
+        let mut rng = Rng::new(7);
+        let ps = ParamStore::new(&gpu, plist.clone(), &rand_init(&plist, &mut rng));
+        let img: Vec<f32> = (0..(3 * 128 * 128) as usize).map(|_| rng.next_f32() - 0.5).collect();
+        let out = enc.forward(&ctx, &ps, &gpu.storage_init("img", &img));
+        assert_eq!(out.len(), (4 * 64) as usize, "[tokens, feature_dim]");
+        assert!(out.iter().all(|v| v.is_finite()), "encoder output finite");
     }
 
     #[test]
