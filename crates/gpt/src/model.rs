@@ -100,7 +100,7 @@ const DECODE_SOFTMAX: usize = 38;
 const ATTN_DECODE_APPLY: usize = 39;
 const KV_APPEND: usize = 40;
 
-const PIPELINES: &[(&str, &str)] = &[
+pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
     ("pos_add", kernels::POS_ADD),
     ("layernorm", kernels::LAYERNORM),
@@ -376,12 +376,22 @@ impl Gpt {
         Gpt::new_shard(cfg, b, t, init, shard)
     }
 
+    /// Build on an existing device handle (see `gpu_core::Gpu::share`) so a
+    /// process holds ONE device however many components it loads.
+    pub fn new_on(gpu: Gpu, cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Gpt {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Gpt::new_shard_on(gpu, cfg, b, t, init, shard)
+    }
+
     /// Build a single pipeline **stage**: only `shard`'s layers (and endpoint
     /// weights) are allocated on this device. `Shard::whole` is the single-device
     /// path, byte-for-byte unchanged. The physical GPU is selected via
     /// `BRAIN_GPU_INDEX` (set by the caller before this call).
     pub fn new_shard(cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Gpt {
-        let gpu = Gpu::new(PIPELINES);
+        Gpt::new_shard_on(Gpu::new(PIPELINES), cfg, b, t, init, shard)
+    }
+
+    pub(crate) fn new_shard_on(gpu: Gpu, cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Gpt {
         let ps = ParamStore::new(&gpu, shard_param_list(&cfg, &shard), init);
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
@@ -1036,7 +1046,7 @@ mod tests {
             };
             init.insert(name, val);
         }
-        let m = Gpt::new(cfg.clone(), 1, cfg.block_size, &init);
+        let m = Gpt::new_on(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), 1, cfg.block_size, &init);
         let lm_head = m.read_weight("lm_head.weight"); // [v, d], untied, no bias
 
         let tokens: Vec<u32> = (0..seq).map(|_| (rng.next_u64() % v as u64) as u32).collect();
@@ -1098,7 +1108,7 @@ mod tests {
         }
         let cfg = GptConfig { vocab: 65, block_size: 16, n_layers: 2, d_model: 32, n_heads: 4, d_ff: 64 };
         let init = crate::init::init_weights(&cfg, 7);
-        let model = Gpt::new(cfg, 2, 8, &init);
+        let model = Gpt::new_on(gpu_core::testgpu::dev(PIPELINES), cfg, 2, 8, &init);
         let x: Vec<u32> = (0..16).map(|i| (i * 3 % 65) as u32).collect();
         let y: Vec<u32> = (0..16).map(|i| ((i * 3 + 1) % 65) as u32).collect();
         model.set_batch(&x, &y);
@@ -1117,7 +1127,7 @@ mod tests {
         }
         let cfg = GptConfig { vocab: 65, block_size: 16, n_layers: 2, d_model: 32, n_heads: 4, d_ff: 64 };
         let init = crate::init::init_weights(&cfg, 9);
-        let model = Gpt::new(cfg, 2, 8, &init);
+        let model = Gpt::new_on(gpu_core::testgpu::dev(PIPELINES), cfg, 2, 8, &init);
         let x: Vec<u32> = (0..16).map(|i| (i * 5 % 65) as u32).collect();
         let y: Vec<u32> = (0..16).map(|i| ((i * 5 + 1) % 65) as u32).collect();
         model.set_batch(&x, &y);
@@ -1136,7 +1146,7 @@ mod tests {
         }
         let cfg = GptConfig { vocab: 65, block_size: 16, n_layers: 2, d_model: 32, n_heads: 4, d_ff: 64 };
         let init = crate::init::init_weights(&cfg, 11);
-        let model = Gpt::new(cfg, 2, 8, &init);
+        let model = Gpt::new_on(gpu_core::testgpu::dev(PIPELINES), cfg, 2, 8, &init);
         let x: Vec<u32> = (0..16).map(|i| (i * 7 % 65) as u32).collect();
         let y: Vec<u32> = (0..16).map(|i| ((i * 7 + 1) % 65) as u32).collect();
         model.set_batch(&x, &y);

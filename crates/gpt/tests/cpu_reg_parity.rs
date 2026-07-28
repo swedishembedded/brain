@@ -18,12 +18,12 @@ fn cpu_register_equals_cpu_naive() {
     let y = vec![gpt::model::IGNORE; 512];
 
     std::env::set_var("BRAIN_GPT_NAIVE_MM", "1");
-    let m1 = Gpt::new(c.clone(), 4, 128, &init);
+    let m1 = Gpt::new_on(gpu_core::testgpu::dev(gpt::model::PIPELINES), c.clone(), 4, 128, &init);
     m1.set_batch(&x, &y); m1.forward_submit();
     let naive = m1.logits_host();
 
     std::env::remove_var("BRAIN_GPT_NAIVE_MM");
-    let m2 = Gpt::new(c.clone(), 4, 128, &init);   // M=512>=128, N picks reg where >=128
+    let m2 = Gpt::new_on(gpu_core::testgpu::dev(gpt::model::PIPELINES), c.clone(), 4, 128, &init); // M=512>=128, N picks reg where >=128
     m2.set_batch(&x, &y); m2.forward_submit();
     let reg = m2.logits_host();
 

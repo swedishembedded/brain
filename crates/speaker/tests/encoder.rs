@@ -76,7 +76,7 @@ fn forward_finite_random_mel() {
         return;
     }
     let out = shared_weights();
-    let enc = SpeakerEncoder::load_inference(out);
+    let enc = SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(speaker::model::PIPELINES), out);
     let t = 120usize;
     // deterministic pseudo-random mel in a plausible log-mel range.
     let mel: Vec<f32> = (0..t * 128)
@@ -108,7 +108,7 @@ fn parity_against_reference_dump() {
     assert_eq!(reference.len(), 1024);
 
     let out = shared_weights();
-    let enc = SpeakerEncoder::load_inference(out);
+    let enc = SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(speaker::model::PIPELINES), out);
     let emb = enc.embed(&mel);
     assert_eq!(emb.len(), reference.len());
 
@@ -128,7 +128,7 @@ fn embed_wav_runs() {
         return;
     }
     let out = shared_weights();
-    let enc = SpeakerEncoder::load_inference(out);
+    let enc = SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(speaker::model::PIPELINES), out);
     // 0.5 s of 24 kHz noise -> mel -> embedding.
     let samples: Vec<f32> = (0..12000)
         .map(|i| 0.1 * ((i as f32 * 0.07).sin()))

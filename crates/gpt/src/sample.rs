@@ -176,7 +176,7 @@ mod kv_gen_tests {
             map.insert(name, v);
         }
         // t sized to block_size so full-window recompute never exceeds the model.
-        let model = Gpt::new(cfg.clone(), 1, cfg.block_size, &map);
+        let model = Gpt::new_on(gpu_core::testgpu::dev(crate::model::PIPELINES), cfg.clone(), 1, cfg.block_size, &map);
         let prompt = vec![1u32, 5, 3];
         let mut r1 = Rng::new(0);
         let recompute = generate(&model, &prompt, 16, 0.0, 0, &mut r1);

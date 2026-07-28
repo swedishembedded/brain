@@ -49,7 +49,7 @@ fn cached_matches_cachefree() {
 
     // x-vector from the reference wav.
     let wav = audio::wav::read(REF_WAV).unwrap();
-    let speaker = speaker::SpeakerEncoder::load_inference(SPEAKER);
+    let speaker = speaker::SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(speaker::model::PIPELINES), SPEAKER);
     let xvec = speaker.embed_wav(&wav.samples, wav.sample_rate);
 
     // short text via the assistant chat template (mirror pipeline::clone).
@@ -66,8 +66,8 @@ fn cached_matches_cachefree() {
         min_new: 2,
     };
 
-    let gen = TalkerGen::load(TALKER, 16 + 32);
-    let mtp = MtpModel::load_inference(MTP);
+    let gen = TalkerGen::load_on(gpu_core::testgpu::dev(tts::gen::PIPELINES), TALKER, 16 + 32);
+    let mtp = MtpModel::load_inference_on(gpu_core::testgpu::dev(tts::mtp::PIPELINES), MTP);
     let prompt =
         prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, Some(&xvec), language_id);
 
@@ -206,7 +206,7 @@ fn cached_clone_audio_quality() {
     let tok = prompt::load_tokenizer(CKPT).unwrap();
     let language_id = sp.language_id("english");
     let refwav = audio::wav::read(REF_WAV).unwrap();
-    let spk = speaker::SpeakerEncoder::load_inference(SPEAKER);
+    let spk = speaker::SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(speaker::model::PIPELINES), SPEAKER);
     let xvec = spk.embed_wav(&refwav.samples, refwav.sample_rate);
     eprintln!(
         "x-vector: len={}, rms={:.4}, any_nan={}",
@@ -217,7 +217,7 @@ fn cached_clone_audio_quality() {
     let ids = tok.encode("<|im_start|>assistant\nTesting one two three.<|im_end|>\n<|im_start|>assistant\n");
     let role_ids = ids[..3].to_vec();
     let text_ids = ids[3..ids.len() - 5].to_vec();
-    let gen = TalkerGen::load(TALKER, 24 + 32);
+    let gen = TalkerGen::load_on(gpu_core::testgpu::dev(tts::gen::PIPELINES), TALKER, 24 + 32);
     let promptx =
         prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, Some(&xvec), language_id);
 

@@ -50,7 +50,7 @@ fn run(backend: Backend, naive_mm: bool, reps: usize) -> (Vec<f32>, f64) {
     set_default_backend(backend);
     let c = cfg();
     let init = gpt::init_weights(&c, 1234);
-    let m = Gpt::new(c.clone(), B as u32, T as u32, &init);
+    let m = Gpt::new_on(gpu_core::testgpu::dev(gpt::model::PIPELINES), c.clone(), B as u32, T as u32, &init);
     let (x, y) = tokens(&c);
 
     m.set_batch(&x, &y);

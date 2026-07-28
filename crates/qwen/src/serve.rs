@@ -1643,7 +1643,7 @@ mod tests {
         let ref1 = crate::sample::generate_kv(&model, &p1, 12, 0.0, 0, None, &mut r1);
 
         // Engine: run both prompts concurrently (batched paged).
-        let mut eng = Engine::from_map(cfg, &map, bs, num_blocks, max_batch, mbt, 32, false, false);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, bs, num_blocks, max_batch, mbt, 32, false, false);
         let out = eng.generate_greedy(&[p0.clone(), p1.clone()], 12, None);
 
         assert_eq!(out[0], ref0, "seq0 batched paged != reference");
@@ -1659,7 +1659,7 @@ mod tests {
     fn warm_prefill_is_identical_to_cold() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        let mut eng = Engine::from_map(cfg, &map, 4, 96, 2, 12, 16, false, false);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 96, 2, 12, 16, false, false);
         let prompt: Vec<u32> = vec![3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8];
         let cold = eng.generate_greedy(&[prompt.clone()], 10, None);
         let (hit0, _, cached) = eng.prefix_stats();
@@ -1687,7 +1687,7 @@ mod tests {
     fn random_shared_prefixes_stay_exact() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        let mut cached_eng = Engine::from_map(cfg.clone(), &map, 4, 128, 2, 12, 16, false, false);
+        let mut cached_eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 128, 2, 12, 16, false, false);
         let mut rng = Rng::new(42);
         let vocab = cfg.vocab as u64;
         let base: Vec<u32> = (0..14).map(|_| (rng.next_u64() % vocab) as u32).collect();
@@ -1697,7 +1697,7 @@ mod tests {
             let extra = 3 + (rng.next_u64() as usize) % 6;
             prompt.extend((0..extra).map(|_| (rng.next_u64() % vocab) as u32));
             // Reference: a fresh engine has an empty cache by construction.
-            let mut fresh = Engine::from_map(cfg.clone(), &map, 4, 128, 2, 12, 16, false, false);
+            let mut fresh = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 128, 2, 12, 16, false, false);
             let mut tf = BlockTable::new();
             let cold = fresh.prefill(&mut tf, &prompt);
             let mut tc = BlockTable::new();
@@ -1726,14 +1726,14 @@ mod tests {
     fn int8_weights_track_fp32() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        let mut eng8 = Engine::from_map(cfg.clone(), &map, 4, 64, 2, 8, 32, false, true);
+        let mut eng8 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 2, 8, 32, false, true);
         if !eng8.weights_int8() {
             // Capability-gated fallback (CPU JIT): the engine must run fp32
             // and say so — there is nothing further to compare here.
             eprintln!("skipping int8 comparison: device has no packed-int8 path");
             return;
         }
-        let mut eng = Engine::from_map(cfg, &map, 4, 64, 2, 8, 32, false, false);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 64, 2, 8, 32, false, false);
         let prompt = vec![1u32, 5, 3, 9, 2, 7];
         let mut t8 = BlockTable::new();
         let h8 = eng8.prefill(&mut t8, &prompt);
@@ -1757,7 +1757,7 @@ mod tests {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
         // capacity = max_blocks_per_seq(4) * block_size(4) = 16 tokens.
-        let eng = Engine::from_map(cfg, &map, 4, 64, 2, 4, 8, false, false);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 64, 2, 4, 8, false, false);
         assert_eq!(eng.max_seq_len(), 16);
         let mut sched = Scheduler::new(eng, 2);
 
@@ -1788,7 +1788,7 @@ mod tests {
         let cfg = QwenConfig::tiny();
         let vocab = cfg.vocab;
         let map = tiny_weights(&cfg);
-        let eng = Engine::from_map(cfg, &map, 4, 64, 2, 8, 8, false, false);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 64, 2, 8, 8, false, false);
         let mut sched = Scheduler::new(eng, 2);
         let bad = sched.submit(Request { prompt: vec![1, vocab + 7, 2], max_new: 4, eos: None });
         let ok = sched.submit(Request { prompt: vec![1, 2, 3], max_new: 4, eos: None });
@@ -1808,7 +1808,7 @@ mod tests {
     fn admission_policy_rejects_and_reports() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        let eng = Engine::from_map(cfg, &map, 4, 96, 2, 12, 8, false, false);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 96, 2, 12, 8, false, false);
         let mut sched = Scheduler::new(eng, 2);
         sched.set_admission(Box::new(MaxQueueDepth(1)));
 
@@ -1848,7 +1848,7 @@ mod tests {
     fn cancel_reclaims_blocks_and_spares_neighbours() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        let eng = Engine::from_map(cfg, &map, 4, 96, 3, 12, 8, false, false);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 96, 3, 12, 8, false, false);
         let mut sched = Scheduler::new(eng, 3);
 
         // Everything long enough to still be decoding after two (windowed)
@@ -1886,7 +1886,7 @@ mod tests {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
         // One slot, so the second request cannot be admitted.
-        let eng = Engine::from_map(cfg, &map, 4, 32, 1, 12, 8, false, false);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 32, 1, 12, 8, false, false);
         let mut sched = Scheduler::new(eng, 1);
         let _a = sched.submit(Request { prompt: vec![1u32, 5, 3], max_new: 4, eos: None });
         let queued = sched.submit(Request { prompt: vec![2u32, 6, 4], max_new: 4, eos: None });
@@ -1904,7 +1904,7 @@ mod tests {
     fn device_head_argmax_matches_the_host_head() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        let mut eng = Engine::from_map(cfg, &map, 4, 96, 4, 12, 8, false, false);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 96, 4, 12, 8, false, false);
 
         // Drive a few real decode steps so the hidden states are genuine.
         let mut tables: Vec<BlockTable> = (0..3).map(|_| BlockTable::new()).collect();
@@ -1944,7 +1944,7 @@ mod tests {
         };
 
         // Reference: unlimited budget (the old behaviour).
-        let mut a = Scheduler::new(Engine::from_map(cfg.clone(), &map, 4, 96, 4, 12, 8, false, false), 4);
+        let mut a = Scheduler::new(Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 96, 4, 12, 8, false, false), 4);
         a.set_prefill_budget(u32::MAX);
         for r in reqs() {
             a.submit(r);
@@ -1954,7 +1954,7 @@ mod tests {
         // Tight budget: one 5-token prompt exhausts it, so the 4 arrivals must
         // be admitted over MULTIPLE iterations — with decode in between — and
         // still produce token-identical outputs.
-        let mut b = Scheduler::new(Engine::from_map(cfg, &map, 4, 96, 4, 12, 8, false, false), 4);
+        let mut b = Scheduler::new(Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 96, 4, 12, 8, false, false), 4);
         b.set_prefill_budget(5);
         for r in reqs() {
             b.submit(r);
@@ -1986,7 +1986,7 @@ mod tests {
         let mut cfg = QwenConfig::tiny();
         cfg.vocab = 8192; // forces the argmax_part/argmax_final path
         let map = tiny_weights(&cfg);
-        let mut eng = Engine::from_map(cfg, &map, 4, 96, 3, 12, 8, false, false);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 96, 3, 12, 8, false, false);
 
         let mut tables: Vec<BlockTable> = (0..3).map(|_| BlockTable::new()).collect();
         let prompts = [vec![11u32, 55, 33], vec![77u32, 22, 99], vec![44u32, 45, 46]];
@@ -2017,7 +2017,7 @@ mod tests {
     fn step_report_accounts_for_every_token_exactly_once() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        let eng = Engine::from_map(cfg, &map, 4, 96, 3, 12, 8, false, false);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 96, 3, 12, 8, false, false);
         let mut sched = Scheduler::new(eng, 3);
 
         let wants = [6usize, 4, 9];
@@ -2073,13 +2073,13 @@ mod tests {
             ]
         };
 
-        let mut a = Scheduler::new(Engine::from_map(cfg.clone(), &map, 4, 96, 2, 12, 8, false, false), 2);
+        let mut a = Scheduler::new(Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 96, 2, 12, 8, false, false), 2);
         for r in reqs() {
             a.submit(r);
         }
         let via_step = a.run();
 
-        let mut b = Scheduler::new(Engine::from_map(cfg, &map, 4, 96, 2, 12, 8, false, false), 2);
+        let mut b = Scheduler::new(Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 96, 2, 12, 8, false, false), 2);
         for r in reqs() {
             b.submit(r);
         }
@@ -2112,7 +2112,7 @@ mod tests {
             })
             .collect();
 
-        let eng = Engine::from_map(cfg, &map, 4, 64, 4, 8, 32, false, false);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 64, 4, 8, 32, false, false);
         let mut sched = Scheduler::new(eng, 4);
         let mut out: HashMap<u64, Vec<u32>> = HashMap::new();
 
@@ -2145,7 +2145,7 @@ mod tests {
         let map = tiny_weights(&cfg);
         let prompt = vec![1u32, 5, 3, 9, 2];
         let run = |int8: bool| -> Vec<f32> {
-            let mut e = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 32, int8, false);
+            let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, int8, false);
             let mut t = BlockTable::new();
             let mut hidden = e.prefill(&mut t, &prompt);
             for _ in 0..6 {
@@ -2171,7 +2171,7 @@ mod tests {
         let map = tiny_weights(&cfg);
         let prompt = vec![1u32, 5, 3, 9, 2, 7, 4, 8];
         let prefill_last = |max_prefill: u32| -> Vec<f32> {
-            let mut e = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, max_prefill, false, false);
+            let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, max_prefill, false, false);
             let mut t = BlockTable::new();
             e.prefill(&mut t, &prompt)
         };
@@ -2192,17 +2192,17 @@ mod tests {
         let prompt = vec![1u32, 5, 3, 9];
         let max_new = 20usize;
 
-        let mut e_ref = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 32, false, false);
+        let mut e_ref = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, false, false);
         let greedy = e_ref.generate_greedy(&[prompt.clone()], max_new, None)[0].clone();
         let full: Vec<u32> = prompt.iter().copied().chain(greedy.iter().copied()).collect();
 
         // Oracle draft: proposes the true continuation → all accepted.
-        let mut e1 = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 32, false, false);
+        let mut e1 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, false, false);
         let (out_oracle, fwd_oracle) = e1.spec_decode(&prompt, max_new, 4, |ctx, want| {
             (0..want as usize).map(|i| full.get(ctx.len() + i).copied().unwrap_or(0)).collect()
         });
         // Bad draft: always proposes token 0 → mostly rejected.
-        let mut e2 = Engine::from_map(cfg, &map, 4, 64, 1, 8, 32, false, false);
+        let mut e2 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 64, 1, 8, 32, false, false);
         let (out_bad, fwd_bad) = e2.spec_decode(&prompt, max_new, 4, |_ctx, want| vec![0u32; want as usize]);
 
         println!("spec decode: greedy={max_new} tokens | oracle-draft {fwd_oracle} target-forwards | bad-draft {fwd_bad} forwards");
@@ -2227,7 +2227,7 @@ mod tests {
             .collect();
 
         // Batched: all streams advance together each step.
-        let mut e = Engine::from_map(cfg.clone(), &map, 4, 64, n_streams as u32, 8, 4, false, false);
+        let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, n_streams as u32, 8, 4, false, false);
         let mut tables: Vec<BlockTable> = (0..n_streams).map(|_| BlockTable::new()).collect();
         let mut batched: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n_streams];
         for s in 0..steps {
@@ -2242,7 +2242,7 @@ mod tests {
         // Per-stream reference.
         let mut worst = 0f32;
         for (i, se) in embs.iter().enumerate() {
-            let mut e1 = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 4, false, false);
+            let mut e1 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 4, false, false);
             let mut t = BlockTable::new();
             for (s, emb) in se.iter().enumerate() {
                 let mut refs = [&mut t];
@@ -2280,7 +2280,7 @@ mod tests {
         let prompts: Vec<Vec<u32>> = (0..n_req).map(|i| vec![(i as u32 % 200) + 1, 5, 3, 9, 2]).collect();
 
         // Sequential: one request at a time (fresh reuse of one engine's pool).
-        let mut eng_seq = Engine::from_map(cfg.clone(), &map, 16, 512, n_req as u32, 16, 32, false, false);
+        let mut eng_seq = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 16, 512, n_req as u32, 16, 32, false, false);
         let t0 = std::time::Instant::now();
         for p in &prompts {
             eng_seq.generate_greedy(&[p.clone()], max_new, None);
@@ -2288,7 +2288,7 @@ mod tests {
         let seq_s = t0.elapsed().as_secs_f64();
 
         // Continuous batching: all requests admitted + decoded together.
-        let eng = Engine::from_map(cfg, &map, 16, 512, n_req as u32, 16, 32, false, false);
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 16, 512, n_req as u32, 16, 32, false, false);
         let mut sched = Scheduler::new(eng, n_req);
         for p in &prompts {
             sched.submit(Request { prompt: p.clone(), max_new, eos: None });

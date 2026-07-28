@@ -48,7 +48,7 @@ fn shard_forward_and_grad_parity_gpt() {
     let y: Vec<u32> = (0..b * t).map(|i| ((i * 3 + 1) % cfg.vocab) as u32).collect();
 
     // Single-device reference.
-    let single = Gpt::new(cfg.clone(), b, t, &init);
+    let single = Gpt::new_on(gpu_core::testgpu::dev(gpt::model::PIPELINES), cfg.clone(), b, t, &init);
     single.set_batch(&x, &y);
     single.zero_grads();
     let l_single = single.forward();

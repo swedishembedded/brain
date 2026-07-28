@@ -40,7 +40,7 @@ const TANH_ACT: usize = 2;
 const SCALE_CHAN: usize = 3;
 const ADD2: usize = 4;
 
-const PIPELINES: &[(&str, &str)] = &[
+pub const PIPELINES: &[(&str, &str)] = &[
     ("conv1d", kernels::CONV1D),
     ("leaky_relu", kernels::LEAKY_RELU),
     ("tanh_act", kernels::TANH_ACT),
@@ -65,15 +65,24 @@ impl SpeakerEncoder {
     /// Load an inference-only encoder from a brain checkpoint produced by
     /// [`crate::import::import`].
     pub fn load_inference(weights_path: &str) -> SpeakerEncoder {
+        Self::load_inference_on(Gpu::new(PIPELINES), weights_path)
+    }
+
+    /// Build on an existing device handle (see `gpu_core::Gpu::share`) so a
+    /// process holds ONE device however many components it loads.
+    pub fn load_inference_on(gpu: Gpu, weights_path: &str) -> SpeakerEncoder {
         let c = checkpoint::load(weights_path);
         let cfg = SpeakerConfig::from_json(&c.header["config"]);
         let init = c.by_role("");
-        SpeakerEncoder::from_weights(cfg, init)
+        SpeakerEncoder::from_weights_on(gpu, cfg, init)
     }
 
     /// Build from an in-memory weight map (tests + [`load_inference`]).
     pub fn from_weights(cfg: SpeakerConfig, init: HashMap<String, Vec<f32>>) -> SpeakerEncoder {
-        let gpu = Gpu::new(PIPELINES);
+        Self::from_weights_on(Gpu::new(PIPELINES), cfg, init)
+    }
+
+    pub(crate) fn from_weights_on(gpu: Gpu, cfg: SpeakerConfig, init: HashMap<String, Vec<f32>>) -> SpeakerEncoder {
         let host = init.clone();
         let roles: Vec<(String, usize, Role)> =
             init.iter().map(|(n, v)| (n.clone(), v.len(), Role::Frozen)).collect();

@@ -65,7 +65,7 @@ impl CpuMtp {
 
     /// Build from in-memory weight parts: the decoder map (`blocks.{l}.*` +
     /// `norm.weight`), the residual input-embedding tables, and the output heads.
-    /// Mirrors [`crate::mtp::MtpModel::build`]'s name/role layout.
+    /// Mirrors [`crate::mtp::MtpModel::build_on`]'s name/role layout.
     pub fn from_parts(
         cfg: MtpConfig,
         decoder: HashMap<String, Vec<f32>>,
@@ -377,7 +377,13 @@ mod tests {
         if gpu_disabled() {
             return;
         }
-        let gpu = MtpModel::build(cfg.clone(), decoder, codec_embedding, lm_head);
+        let gpu = MtpModel::build_on(
+            gpu_core::testgpu::dev(crate::mtp::PIPELINES),
+            cfg.clone(),
+            decoder,
+            codec_embedding,
+            lm_head,
+        );
 
         // logits parity on a fixed assembled sequence.
         let nres_in = cfg.num_code_groups as usize - 2;

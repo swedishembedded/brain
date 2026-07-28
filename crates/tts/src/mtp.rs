@@ -40,7 +40,7 @@ const GQA_APPLY: usize = 6;
 const SILU_MUL: usize = 7;
 const ADD2: usize = 8;
 
-const PIPELINES: &[(&str, &str)] = &[
+pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
     ("rmsnorm", kernels::RMSNORM),
     ("rms_inv", kernels::RMS_INV),
@@ -138,14 +138,16 @@ impl MtpModel {
         out
     }
 
-    pub(crate) fn build(
+    /// Build on an existing device handle (see `gpu_core::Gpu::share`) so a
+    /// process holds ONE device however many components it loads.
+    pub(crate) fn build_on(
+        gpu: Gpu,
         cfg: MtpConfig,
         decoder: std::collections::HashMap<String, Vec<f32>>,
         codec_embedding: Vec<Vec<f32>>,
         lm_head: Vec<Vec<f32>>,
     ) -> MtpModel {
         let t = cfg.num_code_groups;
-        let gpu = Gpu::new(PIPELINES);
         let roles = Self::decoder_param_list(&cfg)
             .into_iter()
             .map(|(n, c)| (n, c, paramstore::Role::Frozen))
@@ -481,6 +483,11 @@ impl MtpModel {
     /// Load an inference-only MTP from a brain checkpoint written by
     /// [`crate::import::import_mtp`].
     pub fn load_inference(path: &str) -> MtpModel {
+        Self::load_inference_on(Gpu::new(PIPELINES), path)
+    }
+
+    /// Build on an existing device handle (see `gpu_core::Gpu::share`).
+    pub fn load_inference_on(gpu: Gpu, path: &str) -> MtpModel {
         let c = checkpoint::load(path);
         let cfg = MtpConfig::from_brain_json(&c.header["config"]);
         let take = |name: &str| {
@@ -500,11 +507,15 @@ impl MtpModel {
         let lm_head = (0..nres)
             .map(|i| take(&format!("lm_head.{i}.weight")))
             .collect();
-        MtpModel::build(cfg, decoder, codec_embedding, lm_head)
+        MtpModel::build_on(gpu, cfg, decoder, codec_embedding, lm_head)
     }
 
     /// Build a randomly-initialised MTP for tests.
     pub fn new_synthetic(cfg: MtpConfig, seed: u64) -> MtpModel {
+        Self::new_synthetic_on(Gpu::new(PIPELINES), cfg, seed)
+    }
+
+    pub(crate) fn new_synthetic_on(gpu: Gpu, cfg: MtpConfig, seed: u64) -> MtpModel {
         use data::rng::Rng;
         let mut rng = Rng::new(seed);
         let mut normal = |n: usize, s: f32| -> Vec<f32> {
@@ -530,7 +541,7 @@ impl MtpModel {
         let v = cfg.vocab as usize;
         let codec_embedding = (0..nres).map(|_| normal(v * d, 0.02)).collect();
         let lm_head = (0..nres).map(|_| normal(v * d, 0.02)).collect();
-        MtpModel::build(cfg, decoder, codec_embedding, lm_head)
+        MtpModel::build_on(gpu, cfg, decoder, codec_embedding, lm_head)
     }
 }
 
@@ -557,7 +568,7 @@ mod tests {
         let t = cfg.num_code_groups as usize;
         let d = cfg.d_model as usize;
         let v = cfg.vocab as usize;
-        let m = MtpModel::new_synthetic(cfg, 5);
+        let m = MtpModel::new_synthetic_on(gpu_core::testgpu::dev(PIPELINES), cfg, 5);
         let embeds: Vec<f32> = (0..t * d).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect();
         let logits = m.logits(&embeds);
         assert_eq!(logits.len(), (t - 1) * v);
@@ -571,7 +582,7 @@ mod tests {
         }
         let cfg = MtpConfig::tiny(); // num_code_groups = 4 -> residual_codes len 2
         let d = cfg.d_model as usize;
-        let m = MtpModel::new_synthetic(cfg, 1);
+        let m = MtpModel::new_synthetic_on(gpu_core::testgpu::dev(PIPELINES), cfg, 1);
         let th = vec![0.5f32; d];
         let cb0 = vec![-0.5f32; d];
         let embeds = m.assemble(&th, &cb0, &[1, 2]);

@@ -44,7 +44,7 @@ const ATTN_DECODE_APPLY: usize = 11;
 const KV_APPEND: usize = 12;
 const ROPE_AT: usize = 13;
 
-const PIPELINES: &[(&str, &str)] = &[
+pub const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
     ("rmsnorm", kernels::RMSNORM),
     ("rms_inv", kernels::RMS_INV),
@@ -169,6 +169,12 @@ impl TalkerGen {
     /// by [`crate::import::import_talker`]. `max_t` is the largest context length
     /// (prefix + generated frames) the buffers are sized for.
     pub fn load(path: &str, max_t: u32) -> TalkerGen {
+        Self::load_on(Gpu::new(PIPELINES), path, max_t)
+    }
+
+    /// Build on an existing device handle (see `gpu_core::Gpu::share`) so a
+    /// process holds ONE device however many components it loads.
+    pub fn load_on(gpu: Gpu, path: &str, max_t: u32) -> TalkerGen {
         let c = checkpoint::load(path);
         let qcfg = qwen::QwenConfig::from_json(&c.header["config"]);
         let mut cfg = TalkerConfig::from_qwen(&qcfg);
@@ -178,7 +184,6 @@ impl TalkerGen {
                 .unwrap_or_else(|| panic!("import: missing tensor {name}"))
         };
 
-        let gpu = Gpu::new(PIPELINES);
         let mut decoder = std::collections::HashMap::new();
         for (n, _) in Self::decoder_param_list(&cfg) {
             decoder.insert(n.clone(), take(&n));
@@ -275,7 +280,7 @@ impl TalkerGen {
     /// `decoder_param_list` leaves), for KV-parity tests without a checkpoint.
     #[cfg(test)]
     pub(crate) fn from_decoder_map(cfg: TalkerConfig, map: &std::collections::HashMap<String, Vec<f32>>, max_t: u32) -> TalkerGen {
-        let gpu = Gpu::new(PIPELINES);
+        let gpu = gpu_core::testgpu::dev(PIPELINES);
         let roles = Self::decoder_param_list(&cfg).into_iter().map(|(n, c)| (n, c, paramstore::Role::Frozen)).collect();
         let ps = ParamStore::new_with_roles(&gpu, roles, map);
         let d = cfg.d_model as u64;

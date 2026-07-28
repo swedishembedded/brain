@@ -15,7 +15,7 @@ fn mtp_real_import_and_forward() {
     let out = std::env::temp_dir().join("brain_mtp_test.weights");
     let out = out.to_str().unwrap();
     tts::import::import_mtp(&dir, out).expect("mtp import");
-    let m = MtpModel::load_inference(out);
+    let m = MtpModel::load_inference_on(gpu_core::testgpu::dev(tts::mtp::PIPELINES), out);
     assert_eq!(m.cfg.vocab, 2048);
     assert_eq!(m.cfg.num_code_groups, 16);
     let d = m.cfg.d_model as usize;

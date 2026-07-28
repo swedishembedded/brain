@@ -29,7 +29,7 @@ fn run(naive: bool, reps: usize) -> (f64, Vec<f32>) {
     set_default_backend(Backend::Wgpu);
     let c = cfg();
     let init = gpt::init_weights(&c, 1234);
-    let m = Gpt::new(c.clone(), B as u32, T as u32, &init);
+    let m = Gpt::new_on(gpu_core::testgpu::dev(gpt::model::PIPELINES), c.clone(), B as u32, T as u32, &init);
     let x: Vec<u32> = (0..B * T).map(|i| ((i * 131 + 7) as u32) % c.vocab).collect();
     let y: Vec<u32> = (0..B * T).map(|i| ((i * 131 + 8) as u32) % c.vocab).collect();
     m.set_batch(&x, &y);
