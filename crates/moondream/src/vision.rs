@@ -55,11 +55,6 @@ fn vit_ids() -> VitKernelIds {
     }
 }
 
-const BLOCK_LEAVES: &[&str] = &[
-    "ln1.weight", "ln1.bias", "attn.qkv.weight", "attn.qkv.bias", "attn.proj.weight", "attn.proj.bias", "ln2.weight",
-    "ln2.bias", "mlp.fc1.weight", "mlp.fc1.bias", "mlp.fc2.weight", "mlp.fc2.bias",
-];
-
 /// Moondream SigLIP ViT encoder over a `Gpu` preloaded with [`vision_pipelines`].
 pub struct SiglipEncoder<'g> {
     gpu: &'g Gpu,
@@ -194,6 +189,11 @@ mod tests {
     use super::*;
     use crate::config::MoondreamConfig;
     use data::rng::Rng;
+
+    const BLOCK_LEAVES: &[&str] = &[
+        "ln1.weight", "ln1.bias", "attn.qkv.weight", "attn.qkv.bias", "attn.proj.weight", "attn.proj.bias", "ln2.weight",
+        "ln2.bias", "mlp.fc1.weight", "mlp.fc1.bias", "mlp.fc2.weight", "mlp.fc2.bias",
+    ];
 
     // A tiny SigLIP config: 4×4 grid (16 patches), dim 32, 2 heads, 2 layers.
     fn tiny() -> VisionConfig {
