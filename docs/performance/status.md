@@ -232,6 +232,21 @@ old-GPU/WebGPU guarantee — is simultaneously the ceiling on modern hardware.
 `mitigations.md` Part I addresses those; Part II expresses each finding through
 them.
 
+## Closed since (suite reliability + duplication)
+
+- **Test-suite deadlock and exit-crash fixed** (commit 2fea497): one device per
+  process via explicit `share`/`new_like`/`WeakGpu`; the weak-pool test fixture
+  (`gpu_core::testgpu`) lets the device die with its last in-process handle —
+  the only teardown shape this NVIDIA driver survives. 30/30 parallel runs
+  clean at 8 and 48 test threads (was ~50% deadlock).
+- **rayon centralised** (5b0e539): `backend_cpu::par` is the one home for
+  host-parallel loops; `grep -l '^rayon' crates/*/Cargo.toml` returns exactly
+  `backend-cpu`.
+- **Host math centralised** (508d84d): `model::hostmath`, parity-tested against
+  the WGSL kernels through the CPU backend.
+- **ONNX emission centralised** (0f660d7): `npu::topo::TopoBase` — one DSL and
+  one rmsnorm/layernorm/silu emitter across the eight topology builders.
+
 ## Still planned
 
 1. `capability::Provider` adoption by `qwen`, `yolo`, `depth`, `tts` — each makes
