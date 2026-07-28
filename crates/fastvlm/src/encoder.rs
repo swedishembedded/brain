@@ -90,6 +90,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("add_chan_bcast_dv", kernels::ADD_CHAN_BCAST_DV),
     ("scale_chan", kernels::SCALE_CHAN),
     ("film_chan", kernels::FILM_CHAN), // LayerScale: y = x·(1+s)+b, s=ls-1, b=0
+    ("film_chan_dx", kernels::FILM_CHAN_DX), // LayerScale backward (input grad)
+    ("film_chan_dsb", kernels::FILM_CHAN_DSB), // LayerScale backward (scale/shift grad)
     ("chan_place", kernels::CHAN_PLACE),
     // --- transpose + attention (stage-4/5 blocks) ---
     ("nchw_nlc", kernels::NCHW_NLC),
@@ -271,6 +273,11 @@ impl ConvFFN {
         self.fc1.backward(ctx, ps, d, &d_h, &d_d);
         self.dw.backward(ctx, ps, x_in, &d_d, d_in);
     }
+
+    /// The channel-mixer's cached output (`= fc2`'s output), valid after `forward`.
+    pub fn output(&self) -> &DeviceBuffer {
+        self.fc2.output()
+    }
 }
 
 /// RepMixerBlock — the FastViTHD stage-0–2 block: a RepMixer token-mixer (a single
@@ -325,6 +332,31 @@ impl RepMixerBlock {
         // out = mixer(x) + scaled
         ctx.gpu.submit(&[], &[ctx.step(self.k_add2, &[t, &self.scaled, &self.out], &[tot], tot)]);
         &self.out
+    }
+
+    /// Backward: reverse of `out = mixer(x) + LayerScale(ffn(mixer(x)))`. The mixer
+    /// output grad accumulates the residual identity path (`d_out`) and the FFN
+    /// branch (through the LayerScale film + `ConvFFN::backward`).
+    pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
+        let (nn, c, h, w) = (self.out_shape.n, self.out_shape.c, self.out_shape.h, self.out_shape.w);
+        let tot = self.out_shape.numel();
+        let t = self.mixer.output();
+        let f = self.ffn.output();
+        let d_f = ctx.gpu.storage(tot as u64);
+        let d_t_ffn = ctx.gpu.storage(self.mixer.out_shape().numel() as u64);
+        let d_t = ctx.gpu.storage(tot as u64);
+        // LayerScale (film) backward: d_scaled = d_out. d_f = d_out·(1+s); ls grad.
+        ctx.gpu.submit(
+            &[],
+            &[
+                ctx.step(kidx("film_chan_dx"), &[d_out, ps.w(&self.ls_name), &d_f], &[nn, c, h, w], tot),
+                ctx.step(kidx("film_chan_dsb"), &[f, d_out, ps.g(&self.ls_name)], &[nn, c, h, w], nn * c),
+            ],
+        );
+        // FFN branch grad → d_t_ffn, then d_t = d_out (residual) + d_t_ffn.
+        self.ffn.backward(ctx, ps, t, &d_f, &d_t_ffn);
+        ctx.gpu.submit(&[], &[ctx.step(self.k_add2, &[d_out, &d_t_ffn, &d_t], &[tot], tot)]);
+        self.mixer.backward(ctx, ps, x_in, &d_t, d_in);
     }
 }
 
@@ -708,6 +740,57 @@ mod tests {
             im.get_mut("cu.bias").unwrap()[j] -= eps;
             let num = (loss(&ip, &x_host) - loss(&im, &x_host)) / (2.0 * eps);
             assert!(ok(g_b[j], num), "d bias[{j}]: analytic {} vs numeric {}", g_b[j], num);
+        }
+    }
+
+    #[test]
+    fn repmixer_block_backward_matches_finite_diff() {
+        // The FastViTHD stage-0–2 block: mixer + LayerScale-residual ConvFFN. Input
+        // grad + mixer/ffn weights + the LayerScale (film sb) scale grad.
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let in_shape = Shape::new(1, 6, 4, 4);
+        let blk = RepMixerBlock::new(&ctx, "rm", in_shape, 6, 2);
+        let plist = blk.param_list();
+        let out_n = blk.out_shape().numel() as usize;
+        let mut rng = Rng::new(9);
+        let init = rand_init(&plist, &mut rng);
+        let x_host: Vec<f32> = (0..in_shape.numel() as usize).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
+
+        let ps = ParamStore::new(&gpu, plist.clone(), &init);
+        ps.zero_grads(&gpu);
+        let xb = gpu.storage_init("x", &x_host);
+        let _ = blk.forward(&ctx, &ps, &xb);
+        let d_out = gpu.storage_init("dout", &vec![1.0f32; out_n]);
+        let d_in = gpu.storage(in_shape.numel() as u64);
+        blk.backward(&ctx, &ps, &xb, &d_out, &d_in);
+        let g_in = gpu.read(&d_in, in_shape.numel() as usize);
+        let keys = ["rm.token_mixer.conv.weight", "rm.convffn.fc1.conv.weight", "rm.layer_scale_sb"];
+        let grads: HashMap<&str, Vec<f32>> = keys.iter().map(|&k| (k, ps.read_grad(&gpu, k))).collect();
+
+        let loss = |im: &HashMap<String, Vec<f32>>, xh: &[f32]| -> f32 {
+            let ps = ParamStore::new(&gpu, plist.clone(), im);
+            let xb = gpu.storage_init("x", xh);
+            gpu.read(blk.forward(&ctx, &ps, &xb), out_n).iter().sum::<f32>()
+        };
+        let eps = 1e-3f32;
+        let ok = |a: f32, num: f32| (a - num).abs() <= 5e-3 + 8e-2 * num.abs();
+
+        for &i in &[0usize, 13, 40, 55, 77, 95] {
+            let (mut xp, mut xm) = (x_host.clone(), x_host.clone());
+            xp[i] += eps;
+            xm[i] -= eps;
+            let num = (loss(&init, &xp) - loss(&init, &xm)) / (2.0 * eps);
+            assert!(ok(g_in[i], num), "d_in[{i}]: analytic {} vs numeric {}", g_in[i], num);
+        }
+        for &key in &keys {
+            for &j in &[0usize, 3, 5] {
+                let (mut ip, mut im) = (init.clone(), init.clone());
+                ip.get_mut(key).unwrap()[j] += eps;
+                im.get_mut(key).unwrap()[j] -= eps;
+                let num = (loss(&ip, &x_host) - loss(&im, &x_host)) / (2.0 * eps);
+                assert!(ok(grads[key][j], num), "d {key}[{j}]: analytic {} vs numeric {}", grads[key][j], num);
+            }
         }
     }
 
