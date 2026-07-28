@@ -19,6 +19,8 @@ mod fast_conv;
 mod fast_ops;
 
 use backend_api::{Backend, BufUsage, DeviceBuffer, Step};
+pub mod par;
+
 use rayon::prelude::*;
 use std::cell::UnsafeCell;
 use std::sync::{Arc, Mutex};

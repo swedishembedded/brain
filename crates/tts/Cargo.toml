@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-gpu-core.workspace = true
+brain-backend-cpu.workspace = true
 brain-kernels.workspace = true
 brain-model.workspace = true
 brain-qwen.workspace = true
@@ -24,7 +25,6 @@ brain-speaker.workspace = true
 brain-audio.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
-rayon = "1"
 
 [dev-dependencies]
 brain-data.workspace = true

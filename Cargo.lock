@@ -385,6 +385,7 @@ name = "brain-codec"
 version = "0.1.0"
 dependencies = [
  "brain-audio",
+ "brain-backend-cpu",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
@@ -393,7 +394,6 @@ dependencies = [
  "brain-optim",
  "brain-paramstore",
  "bytemuck",
- "rayon",
  "serde_json",
 ]
 
@@ -423,6 +423,7 @@ dependencies = [
 name = "brain-depth"
 version = "0.1.0"
 dependencies = [
+ "brain-backend-cpu",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
@@ -433,7 +434,6 @@ dependencies = [
  "brain-paramstore",
  "brain-vision",
  "bytemuck",
- "rayon",
  "serde_json",
 ]
 
@@ -579,6 +579,7 @@ version = "0.1.0"
 name = "brain-kronos"
 version = "0.1.0"
 dependencies = [
+ "brain-backend-cpu",
  "brain-checkpoint",
  "brain-forecast",
  "brain-gpu-core",
@@ -587,7 +588,6 @@ dependencies = [
  "brain-optim",
  "brain-paramstore",
  "bytemuck",
- "rayon",
  "serde_json",
 ]
 
@@ -609,13 +609,13 @@ dependencies = [
 name = "brain-model"
 version = "0.1.0"
 dependencies = [
+ "brain-backend-cpu",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
  "brain-kernels",
  "brain-optim",
  "brain-paramstore",
- "rayon",
  "serde_json",
 ]
 
@@ -673,12 +673,12 @@ dependencies = [
 name = "brain-optim"
 version = "0.1.0"
 dependencies = [
+ "brain-backend-cpu",
  "brain-gpu-core",
  "brain-kernels",
  "brain-paramstore",
  "bytemuck",
  "pollster",
- "rayon",
  "wgpu",
 ]
 
@@ -821,6 +821,7 @@ name = "brain-tts"
 version = "0.1.0"
 dependencies = [
  "brain-audio",
+ "brain-backend-cpu",
  "brain-checkpoint",
  "brain-codec",
  "brain-data",
@@ -834,7 +835,6 @@ dependencies = [
  "brain-qwen",
  "brain-speaker",
  "bytemuck",
- "rayon",
  "serde_json",
 ]
 

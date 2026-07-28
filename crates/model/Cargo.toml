@@ -17,4 +17,9 @@ brain-kernels.workspace = true
 brain-checkpoint.workspace = true
 brain-data.workspace = true
 serde_json.workspace = true
-rayon = "1"
+
+# The CPU scheduler's parallel primitives (host reductions). Native-only:
+# backend-cpu (Cranelift JIT) does not build on wasm, and the modules using it
+# are the multi-GPU / offload paths that never run in a browser.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+brain-backend-cpu = { workspace = true }

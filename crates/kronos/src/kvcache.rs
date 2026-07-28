@@ -184,7 +184,9 @@ impl HostW {
 // -- host kernels (exact reproductions of the WGSL) --------------------------
 
 
-use rayon::prelude::*;
+// Host-parallel loops go through the CPU scheduler's primitives — rayon lives
+// only in backend-cpu, so `--device cpuN` pool policy governs every loop.
+use backend_cpu::par;
 
 // Elementwise/normalisation math comes from `model::hostmath` — the single
 // implementation, checked against the WGSL kernels. Called directly: a local
@@ -208,7 +210,7 @@ fn linear(x: &[f32], w: &[f32], b: &[f32], out: usize, inp: usize) -> Vec<f32> {
         acc
     };
     if out * inp >= PAR_THRESH {
-        (0..out).into_par_iter().map(row).collect()
+        par::map_f32(out, row)
     } else {
         (0..out).map(row).collect()
     }
@@ -257,5 +259,5 @@ fn attend(q: &[f32], kc: &[f32], vc: &[f32], w0: usize, len: usize, heads: usize
         }
         o
     };
-    (0..heads).into_par_iter().map(head).flatten().collect()
+    par::flat_map_f32(heads, head)
 }

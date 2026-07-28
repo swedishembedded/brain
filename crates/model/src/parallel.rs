@@ -28,7 +28,9 @@
 
 use std::collections::HashMap;
 
-use rayon::prelude::*;
+// Host-parallel reductions go through the CPU scheduler (`backend_cpu::par`);
+// rayon lives only there, so `--device cpuN` pool policy governs these loops.
+use backend_cpu::par;
 
 use crate::{Batch, Model};
 
@@ -140,7 +142,7 @@ impl<M: Model + Send> DataParallel<M> {
         // Phase 2: sum grads across replicas (host, parallel across params).
         let mut g = std::mem::take(&mut grads[0]);
         for rg in &grads[1..] {
-            g.par_iter_mut().zip(rg.par_iter()).for_each(|(acc, gi)| {
+            par::zip_each(&mut g, rg, |acc, gi| {
                 for (a, b) in acc.iter_mut().zip(gi) {
                     *a += b;
                 }
@@ -164,7 +166,7 @@ impl<M: Model + Send> DataParallel<M> {
         // Phase 3: global grad-norm -> clip coefficient (rayon, not on-GPU).
         let gscale = if extra_scale != 0.0 { 1.0 / extra_scale } else { 1.0 };
         let scale = if let Some(max_norm) = clip {
-            let sq: f64 = g.par_iter().map(|gi| gi.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>()).sum();
+            let sq: f64 = par::sum_sq_f64(&g);
             let norm = (sq.sqrt() as f32) * gscale;
             gscale * (max_norm / norm.max(max_norm)).min(1.0)
         } else {
@@ -176,7 +178,7 @@ impl<M: Model + Send> DataParallel<M> {
         let bc1 = 1.0 - b1.powi(t as i32);
         let bc2 = 1.0 - b2.powi(t as i32);
         let fused = self.fused.as_mut().unwrap();
-        fused.state.par_iter_mut().zip(g.par_iter()).for_each(|((_, w, m, v), gi)| {
+        par::zip_each(&mut fused.state, &g, |(_, w, m, v), gi| {
             for i in 0..w.len() {
                 let gg = gi[i] * scale;
                 let mi = b1 * m[i] + (1.0 - b1) * gg;

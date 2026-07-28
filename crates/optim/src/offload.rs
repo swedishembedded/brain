@@ -19,7 +19,7 @@
 
 use gpu_core::Gpu;
 use paramstore::ParamStore;
-use rayon::prelude::*;
+use backend_cpu::par;
 
 /// Host-resident AdamW state for the offloaded parameters.
 pub struct OffloadAdam {
@@ -69,10 +69,7 @@ impl OffloadAdam {
         // clip-coef path: coef = min(1, max_norm / (||g||*scale)).
         let gscale = if extra_scale != 0.0 { 1.0 / extra_scale } else { 1.0 };
         let scale = if let Some(max_norm) = clip {
-            let sq: f64 = grads
-                .par_iter()
-                .map(|g| g.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>())
-                .sum();
+            let sq: f64 = par::sum_sq_f64(&grads);
             let norm = (sq.sqrt() as f32) * gscale;
             gscale * (max_norm / norm.max(max_norm)).min(1.0)
         } else {
@@ -80,10 +77,7 @@ impl OffloadAdam {
         };
 
         // Element-wise AdamW per param, parallel across the 48 cores.
-        self.state
-            .par_iter_mut()
-            .zip(grads.par_iter())
-            .for_each(|((_, w, m, v), g)| {
+        par::zip_each(&mut self.state, &grads, |(_, w, m, v), g| {
                 for i in 0..w.len() {
                     let gi = g[i] * scale;
                     let mi = beta1 * m[i] + (1.0 - beta1) * gi;
@@ -116,10 +110,7 @@ impl OffloadAdam {
             .filter(|(n, _, _, _)| !exclude.contains(&n.as_str()))
             .map(|(n, w, _, _)| gpu.read(ps.g(n), w.len()))
             .collect();
-        grads
-            .par_iter()
-            .map(|g| g.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>())
-            .sum()
+        par::sum_sq_f64(&grads)
     }
 
     /// One AdamW step multiplying every gradient by a **caller-supplied** `scale`
@@ -144,10 +135,7 @@ impl OffloadAdam {
         let bc2 = 1.0 - beta2.powi(t as i32);
         let grads: Vec<Vec<f32>> =
             self.state.iter().map(|(name, w, _, _)| gpu.read(ps.g(name), w.len())).collect();
-        self.state
-            .par_iter_mut()
-            .zip(grads.par_iter())
-            .for_each(|((_, w, m, v), g)| {
+        par::zip_each(&mut self.state, &grads, |(_, w, m, v), g| {
                 for i in 0..w.len() {
                     let gi = g[i] * scale;
                     let mi = beta1 * m[i] + (1.0 - beta1) * gi;

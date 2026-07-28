@@ -22,7 +22,7 @@
 //! one-shot output, which equals the reference causal op. Built on the pure-CPU
 //! [`audio::conv`] references so the state math is validated without a GPU/NPU.
 
-use rayon::prelude::*;
+use backend_cpu::par;
 
 /// Streaming causal `Conv1d` (stride 1). Tensors are channel-major `[C, L]`.
 pub struct StreamConv1d {
@@ -66,7 +66,7 @@ impl StreamConv1d {
         let cout_g = cout / self.groups;
         let (w, bias) = (&self.w, &self.bias);
         let mut y = vec![0.0f32; cout * l_new];
-        y.par_chunks_mut(l_new).enumerate().for_each(|(co, yrow)| {
+        par::rows_mut(&mut y, l_new, |co, yrow| {
             let g = co / cout_g;
             let b = bias[co];
             for (lo, slot) in yrow.iter_mut().enumerate() {
@@ -119,7 +119,7 @@ impl StreamConvTr1d {
         // same accumulation order as the scalar reference (bit-identical).
         let w = &self.w;
         let mut raw = vec![0.0f32; cout * raw_len];
-        raw.par_chunks_mut(raw_len).enumerate().for_each(|(co, rrow)| {
+        par::rows_mut(&mut raw, raw_len, |co, rrow| {
             for (lo, slot) in rrow.iter_mut().enumerate() {
                 let mut acc = 0.0f32;
                 for kw in 0..k {

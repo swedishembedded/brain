@@ -18,12 +18,15 @@ use std::collections::HashMap;
 pub mod block;
 pub mod collective;
 pub mod paged;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod distributed;
 pub mod grid;
 pub mod hostmath;
 pub mod netcollective;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod parallel;
 pub mod plan;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod shard;
 pub mod train;
 pub mod vit;

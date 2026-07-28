@@ -30,7 +30,7 @@ use std::collections::HashMap;
 
 use bytemuck::cast_slice;
 use gpu_core::{f, BufUsage, DeviceBuffer, Gpu};
-use rayon::prelude::*;
+use backend_cpu::par;
 use model::block::{self, Gqa, KernelIds};
 use paramstore::{ParamStore, Role};
 
@@ -175,7 +175,7 @@ impl Codec {
             }
         };
         if a * b >= PAR_MIN {
-            o.par_chunks_mut(a).enumerate().for_each(|(j, row)| fill(j, row));
+            par::rows_mut(&mut o, a, fill);
         } else {
             o.chunks_mut(a).enumerate().for_each(|(j, row)| fill(j, row));
         }
@@ -227,7 +227,7 @@ impl Codec {
         let mut bcast = vec![0.0f32; c * l];
         let fill = |ch: usize, row: &mut [f32]| row.fill(bias[ch]);
         if c * l >= PAR_MIN {
-            bcast.par_chunks_mut(l).enumerate().for_each(|(ch, row)| fill(ch, row));
+            par::rows_mut(&mut bcast, l, fill);
         } else {
             bcast.chunks_mut(l).enumerate().for_each(|(ch, row)| fill(ch, row));
         }
@@ -321,7 +321,7 @@ impl Codec {
         // --- 6. clamp ---
         let mut wav = self.gpu.read(&h, l as usize);
         if wav.len() >= PAR_MIN {
-            wav.par_iter_mut().for_each(|s| *s = s.clamp(-1.0, 1.0));
+            par::each_mut(&mut wav, |_, s| *s = s.clamp(-1.0, 1.0));
         } else {
             for s in &mut wav {
                 *s = s.clamp(-1.0, 1.0);
@@ -714,7 +714,7 @@ fn host_layernorm(x: &mut [f32], rows: usize, c: usize, gamma: &[f32], beta: &[f
         }
     };
     if rows * c >= PAR_MIN {
-        x.par_chunks_mut(c).for_each(ln_row);
+        par::rows_mut(x, c, |_, row| ln_row(row));
     } else {
         x.chunks_mut(c).for_each(ln_row);
     }
@@ -724,7 +724,7 @@ fn host_layernorm(x: &mut [f32], rows: usize, c: usize, gamma: &[f32], beta: &[f
 /// parallelizes for large buffers (the ConvNeXt pwconv1 activation, `[L, 4C]`).
 fn par_gelu(buf: &mut [f32]) {
     if buf.len() >= PAR_MIN {
-        buf.par_iter_mut().for_each(|v| *v = gelu_exact(*v));
+        par::each_mut(buf, |_, v| *v = gelu_exact(*v));
     } else {
         for v in buf.iter_mut() {
             *v = gelu_exact(*v);

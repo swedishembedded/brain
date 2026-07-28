@@ -14,10 +14,17 @@ fn lcg(seed: &mut u64) -> f32 {
 
 #[test]
 fn matches_naive_matmul_bitwise() {
+    // Pin BOTH kernels to the scalar JIT. This test states that the row-blocked
+    // WGSL reorders nothing per output — a claim about the two KERNELS, which
+    // bitwise equality can only witness if both actually run as written. The
+    // backend's AVX2 fast path (which `matmul` otherwise routes to) sums in a
+    // different order; its accuracy has its own tests in backend-cpu.
+    std::env::set_var("BRAIN_NO_FASTCONV", "1");
     let gpu = Gpu::new_cpu(&[
         ("matmul", kernels::MATMUL),
         ("matmul_rows", kernels::MATMUL_ROWS),
     ]);
+    std::env::remove_var("BRAIN_NO_FASTCONV");
     let mut seed = 0xC0FFEE;
     for (m, k, n) in [(1usize, 7usize, 5usize), (8, 16, 3), (13, 32, 20), (64, 24, 8), (17, 5, 1)] {
         let x: Vec<f32> = (0..m * k).map(|_| lcg(&mut seed)).collect();

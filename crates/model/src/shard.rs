@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use rayon::prelude::*;
+use backend_cpu::par;
 
 use crate::Model;
 
@@ -291,7 +291,7 @@ impl<M: Shardable> Pipeline<M> {
 
         let gscale = if extra_scale != 0.0 { 1.0 / extra_scale } else { 1.0 };
         let scale = if let Some(max_norm) = clip {
-            let sq: f64 = grads.par_iter().map(|g| g.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>()).sum();
+            let sq: f64 = par::sum_sq_f64(&grads);
             let norm = (sq.sqrt() as f32) * gscale;
             gscale * (max_norm / norm.max(max_norm)).min(1.0)
         } else {
@@ -302,7 +302,7 @@ impl<M: Shardable> Pipeline<M> {
         let bc1 = 1.0 - b1.powi(t as i32);
         let bc2 = 1.0 - b2.powi(t as i32);
         let fused = self.fused.as_mut().unwrap();
-        fused.state.par_iter_mut().zip(grads.par_iter()).for_each(|((_, w, m, v), gi)| {
+        par::zip_each(&mut fused.state, &grads, |(_, w, m, v), gi| {
             for i in 0..w.len() {
                 let gg = gi[i] * scale;
                 let mi = b1 * m[i] + (1.0 - b1) * gg;

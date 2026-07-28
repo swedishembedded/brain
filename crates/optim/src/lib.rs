@@ -11,6 +11,7 @@ use std::cell::RefCell;
 
 use gpu_core::{f, Gpu, Step};
 use paramstore::ParamStore;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod offload;
 pub use offload::OffloadAdam;
 

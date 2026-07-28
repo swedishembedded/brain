@@ -44,12 +44,11 @@ pub fn target_size(w0: u32, h0: u32, input: u32) -> (u32, u32) {
 /// `align_corners=false` (`half_pixel`), matching the reference's `cv2` /
 /// `F.interpolate`.
 fn resize_hwc(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
-    use rayon::prelude::*;
     let mut out = vec![0f32; (tw * th * 3) as usize];
     let sx = w0 as f32 / tw as f32;
     let sy = h0 as f32 / th as f32;
     // Row-parallel: each output row only reads `src` and writes its own chunk.
-    out.par_chunks_mut((tw * 3) as usize).enumerate().for_each(|(y, row)| {
+    backend_cpu::par::rows_mut(&mut out, (tw * 3) as usize, |y, row| {
         let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, h0 as f32 - 1.0);
         let (y0, ty) = (fy.floor() as u32, fy - fy.floor());
         let y1 = (y0 + 1).min(h0 - 1);
@@ -70,11 +69,10 @@ fn resize_hwc(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
 
 /// Bilinear resize of a single-channel `[h0*w0]` map to `th × tw`.
 fn resize_map(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
-    use rayon::prelude::*;
     let mut out = vec![0f32; (tw * th) as usize];
     let sx = w0 as f32 / tw as f32;
     let sy = h0 as f32 / th as f32;
-    out.par_chunks_mut(tw as usize).enumerate().for_each(|(y, row)| {
+    backend_cpu::par::rows_mut(&mut out, tw as usize, |y, row| {
         let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, h0 as f32 - 1.0);
         let (y0, ty) = (fy.floor() as u32, fy - fy.floor());
         let y1 = (y0 + 1).min(h0 - 1);
@@ -162,8 +160,7 @@ impl<'g> Predictor<'g> {
         let hw = (th * tw) as usize;
         let mut chw = vec![0f32; 3 * hw];
         {
-            use rayon::prelude::*;
-            chw.par_chunks_mut(hw).enumerate().for_each(|(c, plane)| {
+                    backend_cpu::par::rows_mut(&mut chw, hw, |c, plane| {
                 for (i, v) in plane.iter_mut().enumerate() {
                     *v = resized[i * 3 + c];
                 }

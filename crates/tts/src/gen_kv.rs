@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 
-use rayon::prelude::*;
+use backend_cpu::par;
 
 use crate::config::TalkerConfig;
 use crate::talker::TextProjection;
@@ -500,7 +500,7 @@ impl CpuTalker {
         let v = self.cfg.vocab as usize;
         assert_eq!(hidden_row.len(), d);
         let mut out = vec![0.0f32; v];
-        out.par_iter_mut().enumerate().for_each(|(o, dst)| {
+        par::each_mut(&mut out, |o, dst| {
             let wrow = &self.codec_head[o * d..o * d + d];
             *dst = (0..d).map(|k| wrow[k] * hidden_row[k]).sum();
         });
