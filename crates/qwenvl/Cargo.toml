@@ -12,4 +12,9 @@ path = "src/lib.rs"
 [dependencies]
 brain-qwen.workspace = true
 brain-model.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+brain-data.workspace = true

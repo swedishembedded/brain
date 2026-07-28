@@ -14,6 +14,7 @@
 //! DeepStack → import). Today: configuration.
 
 pub mod config;
+pub mod encoder;
 pub mod mrope;
 pub mod vision;
 
