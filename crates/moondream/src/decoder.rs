@@ -63,6 +63,8 @@ pub struct MoondreamBlock<'g> {
     l_mlp: DeviceBuffer,
     mid: DeviceBuffer,
     out: DeviceBuffer,
+    /// `Some` for the MoE layers (4..23); `None` uses the dense FFN.
+    moe: Option<MoeFfn<'g>>,
 }
 
 impl<'g> MoondreamBlock<'g> {
@@ -92,7 +94,13 @@ impl<'g> MoondreamBlock<'g> {
             l_mlp: gpu.storage((t * d) as u64),
             mid: gpu.storage((t * d) as u64),
             out: gpu.storage((t * d) as u64),
+            moe: None,
         }
+    }
+    /// Attach an MoE FFN (replaces the dense FFN branch) for a deep layer.
+    pub fn with_moe(mut self, moe: MoeFfn<'g>) -> Self {
+        self.moe = Some(moe);
+        self
     }
     fn wb(&self, n: &str) -> &DeviceBuffer {
         self.w.get(n).unwrap_or_else(|| panic!("block weight missing: {n}"))
@@ -117,19 +125,36 @@ impl<'g> MoondreamBlock<'g> {
         s.push(g.step(10, &[&self.scores], &[1, nh, t, self.prefix], nh * t * t));
         s.push(g.step(11, &[&self.scores, &self.probs], &[1, nh, t], nh * t));
         s.push(g.step(12, &[&self.probs, &self.qkv, &self.ctx], &[1, nh, t, hd, stride3, 2 * d, d], nh * t * hd));
-        // proj + bias → l_attn
+        // proj + bias → l_attn. Submit phase 1 (LN + attention) so l_in/l_attn are
+        // ready before the FFN (MoE submits internally).
         s.push(g.step(0, &[&self.ctx, self.wb("attn.proj.weight"), &self.l_attn], &[t, d, d], t * d));
         s.push(g.step(6, &[&self.l_attn, self.wb("attn.proj.bias")], &[t, d], t * d));
-        // --- dense FFN branch (same l_in) ---
-        s.push(g.step(0, &[&self.l_in, self.wb("mlp.fc1.weight"), &self.h], &[t, d, ff], t * ff));
-        s.push(g.step(6, &[&self.h, self.wb("mlp.fc1.bias")], &[t, ff], t * ff));
-        s.push(g.step(5, &[&self.h, &self.h2], &[t * ff], t * ff)); // tanh GELU
-        s.push(g.step(0, &[&self.h2, self.wb("mlp.fc2.weight"), &self.l_mlp], &[t, ff, d], t * d));
-        s.push(g.step(6, &[&self.l_mlp, self.wb("mlp.fc2.bias")], &[t, d], t * d));
-        // --- 3-way residual: out = x + l_attn + l_mlp ---
-        s.push(g.step(7, &[x, &self.l_attn, &self.mid], &[t * d], t * d));
-        s.push(g.step(7, &[&self.mid, &self.l_mlp, &self.out], &[t * d], t * d));
         g.submit(&[], &s);
+
+        // --- FFN branch on the SAME l_in: MoE (layers 4..23) or dense. ---
+        let l_mlp: &DeviceBuffer = if let Some(moe) = &self.moe {
+            moe.forward(&self.l_in)
+        } else {
+            g.submit(
+                &[],
+                &[
+                    g.step(0, &[&self.l_in, self.wb("mlp.fc1.weight"), &self.h], &[t, d, ff], t * ff),
+                    g.step(6, &[&self.h, self.wb("mlp.fc1.bias")], &[t, ff], t * ff),
+                    g.step(5, &[&self.h, &self.h2], &[t * ff], t * ff), // tanh GELU
+                    g.step(0, &[&self.h2, self.wb("mlp.fc2.weight"), &self.l_mlp], &[t, ff, d], t * d),
+                    g.step(6, &[&self.l_mlp, self.wb("mlp.fc2.bias")], &[t, d], t * d),
+                ],
+            );
+            &self.l_mlp
+        };
+        // --- 3-way residual: out = x + l_attn + l_mlp ---
+        g.submit(
+            &[],
+            &[
+                g.step(7, &[x, &self.l_attn, &self.mid], &[t * d], t * d),
+                g.step(7, &[&self.mid, l_mlp, &self.out], &[t * d], t * d),
+            ],
+        );
         &self.out
     }
     pub fn numel(&self) -> usize {
@@ -229,6 +254,39 @@ mod tests {
         w.insert("mlp.fc2.weight".into(), r((d * ff) as usize));
         w.insert("mlp.fc2.bias".into(), r(d as usize));
         let blk = MoondreamBlock::new(&gpu, &w, t, d, nh, hd, ff, prefix, rot, 1.5e6);
+        let x = gpu.storage_init("x", &(0..(t * d) as usize).map(|_| rng.next_f32() - 0.5).collect::<Vec<f32>>());
+        let out = gpu.read(blk.forward(&x), blk.numel());
+        assert_eq!(out.len(), (t * d) as usize);
+        assert!(out.iter().all(|v| v.is_finite()) && out.iter().any(|&v| v.abs() > 1e-6));
+    }
+
+    #[test]
+    fn parallel_block_with_moe_runs() {
+        let gpu = Gpu::new_cpu(pipelines());
+        let (t, d, nh, hd, ff, prefix, rot) = (6u32, 16u32, 2u32, 8u32, 32u32, 3u32, 4u32);
+        let (inner, e, top_k) = (4u32, 3u32, 2u32);
+        let mut rng = Rng::new(8);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.2).collect::<Vec<f32>>();
+        let mut bw = HashMap::new();
+        bw.insert("ln.weight".into(), vec![1.0; d as usize]);
+        bw.insert("ln.bias".into(), r(d as usize));
+        bw.insert("attn.qkv.weight".into(), r((3 * d * d) as usize));
+        bw.insert("attn.proj.weight".into(), r((d * d) as usize));
+        bw.insert("attn.proj.bias".into(), r(d as usize));
+        // dense fc weights present but unused when MoE is attached.
+        bw.insert("mlp.fc1.weight".into(), r((ff * d) as usize));
+        bw.insert("mlp.fc1.bias".into(), r(ff as usize));
+        bw.insert("mlp.fc2.weight".into(), r((d * ff) as usize));
+        bw.insert("mlp.fc2.bias".into(), r(d as usize));
+        let mut mw = HashMap::new();
+        mw.insert("router.weight".into(), r((e * d) as usize));
+        for ei in 0..e {
+            mw.insert(format!("experts.{ei}.w_h.weight"), r((inner * d) as usize));
+            mw.insert(format!("experts.{ei}.w_g.weight"), r((inner * d) as usize));
+            mw.insert(format!("experts.{ei}.w_down.weight"), r((d * inner) as usize));
+        }
+        let moe = MoeFfn::new(&gpu, &mw, t, d, inner, e, top_k);
+        let blk = MoondreamBlock::new(&gpu, &bw, t, d, nh, hd, ff, prefix, rot, 1.5e6).with_moe(moe);
         let x = gpu.storage_init("x", &(0..(t * d) as usize).map(|_| rng.next_f32() - 0.5).collect::<Vec<f32>>());
         let out = gpu.read(blk.forward(&x), blk.numel());
         assert_eq!(out.len(), (t * d) as usize);
