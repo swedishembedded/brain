@@ -95,9 +95,49 @@ def dump_frontend():
     print(json.dumps(man, indent=2))
 
 
+def dump_qwen_encoder():
+    """Run the Qwen3-ASR audio tower + projector in fp32 on the test waveform and
+    dump the encoder output (post ln_post) and the projected audio embeddings."""
+    import torch
+    from transformers import AutoProcessor, Qwen3ASRForConditionalGeneration
+
+    wav = make_waveform()
+    man = {}
+    proc = AutoProcessor.from_pretrained("Qwen/Qwen3-ASR-1.7B-hf")
+    feat = proc.feature_extractor(
+        wav, sampling_rate=16000, return_tensors="pt", return_attention_mask=True
+    )
+    fk = "input_features"
+    mask_key = next(k for k in feat if "mask" in k)  # "attention_mask"
+    model = Qwen3ASRForConditionalGeneration.from_pretrained(
+        "Qwen/Qwen3-ASR-1.7B-hf", dtype=torch.float32
+    ).eval()
+
+    with torch.no_grad():
+        enc = model.model.audio_tower(
+            input_features=feat[fk].to(torch.float32),
+            input_features_mask=feat[mask_key],
+        )
+        hidden = enc.last_hidden_state  # (n_audio, 1024)
+        proj = model.model.multi_modal_projector(hidden)  # (n_audio, 2048)
+
+    save("qwen_encoder", "input_features", feat[fk][0].numpy(), man)
+    save("qwen_encoder", "input_features_mask", feat[mask_key][0].numpy().astype("float32"), man)
+    save("qwen_encoder", "encoder_out", hidden.numpy(), man)
+    save("qwen_encoder", "audio_embeds", proj.numpy(), man)
+    man["n_audio"] = int(hidden.shape[0])
+    man["enc_dim"] = int(hidden.shape[1])
+    man["proj_dim"] = int(proj.shape[1])
+    with open(os.path.join(GOLD, "qwen_encoder", "manifest.json"), "w") as f:
+        json.dump(man, f, indent=2)
+    print("qwen encoder goldens written:", json.dumps(man, indent=2))
+
+
 if __name__ == "__main__":
     stage = sys.argv[1] if len(sys.argv) > 1 else "frontend"
     if stage == "frontend":
         dump_frontend()
+    elif stage == "qwen_encoder":
+        dump_qwen_encoder()
     else:
         raise SystemExit(f"unknown stage {stage!r}")

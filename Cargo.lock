@@ -773,6 +773,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-qwen-asr"
+version = "0.1.0"
+dependencies = [
+ "brain-audio",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-qwen",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-qwenvl"
 version = "0.1.0"
 dependencies = [

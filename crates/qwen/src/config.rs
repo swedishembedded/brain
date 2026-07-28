@@ -101,6 +101,28 @@ impl QwenConfig {
         }
     }
 
+    /// The published Qwen3-1.7B shape (from its `config.json`) — the text
+    /// decoder used by Qwen3-ASR (`hidden_size` 2048, 28 layers, GQA 16/8,
+    /// `head_dim` 128 so `q_dim` 2048, SwiGLU `d_ff` 6144, tied, θ 1e6).
+    pub fn qwen3_1_7b() -> QwenConfig {
+        QwenConfig {
+            vocab: 151936,
+            block_size: 1024,
+            n_layers: 28,
+            d_model: 2048,
+            n_heads: 16,
+            n_kv_heads: 8,
+            head_dim: 128,
+            d_ff: 6144,
+            rope_theta: 1.0e6,
+            rms_eps: 1e-6,
+            tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
+            lora: None,
+        }
+    }
+
     /// The published Qwen3-4B shape (from its `config.json`) — the text encoder
     /// used by Z-Image and FLUX.2 (`hidden_size` 2560, 36 layers, GQA 32/8,
     /// `head_dim` 128 so `q_dim` 4096 ≠ 2560, SwiGLU `d_ff` 9728, tied).

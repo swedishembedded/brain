@@ -23,6 +23,7 @@ default-members = [
     "crates/gpt",
     "crates/qwen",
     "crates/qwenvl",
+    "crates/qwen-asr",
     "crates/fastvlm",
     "crates/moondream",
     "crates/glm",
