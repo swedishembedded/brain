@@ -372,6 +372,30 @@ One session (commits 4ca517b..07f28e2), in roadmap order:
   host-OOM proved uninjectable in-process (Linux overcommit) and skips with
   that reason. 3 injected / all acceptable / 5 honest skips.
 
+## VLM serving (fastvlm) — first measurements
+
+`fastvlm` (import-complete: token-for-token caption parity vs HF) now serves
+through the capability contract everywhere: `brain do`, `brain serve --dbus`
+(image in as a sealed memfd, caption back over an fd, correct description of
+the test image), and the residency executor's scheduler. Measured on the
+2×P40 box, release build, FastVLM-0.5B, 512px input:
+
+- single caption: ~122 s wall — the fp32 MobileCLIP-L tower at 1024 px on the
+  CPU backend dominates (it OOMs a 24 GB card as fp32 GPU activations, which
+  is WHY it runs on CPU; the parity test made the same choice);
+- 3 concurrent captions over dbus: wall 252 s vs 592 s summed — 2.35×
+  effective concurrency; the executor overlaps tower (CPU, rayon across
+  cores) with decode (GPU) across requests;
+- the named lever for the next multiple: a streamed/chunked GPU vision tower
+  (bounded stage activations), plus int8 tower weights — both S3/S5-shaped
+  work on the vision side.
+
+qwenvl and moondream3 checkpoints are re-fetched to
+`/data/workspace/resources/vl/` (the layout their parity harnesses stream
+from); their serving waits on full-depth import completion — in-flight work.
+No NPU hardware exists on this box, so NPU scheduling stays unverified here
+rather than faked.
+
 ## Still planned
 
 1. `capability::Provider` adoption by `qwen`, `yolo`, `depth`, `tts` (L) —
