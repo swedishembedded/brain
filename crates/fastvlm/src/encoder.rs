@@ -144,6 +144,26 @@ pub struct ConvUnit {
     activated: DeviceBuffer,
     k_add_chan: usize,
     k_gelu: usize,
+    /// Squeeze-excite gate applied after bias, before GELU (conv_exp only).
+    se: Option<SeBlock>,
+}
+
+/// Squeeze-and-excitation gate: global-avg-pool → 1×1 reduce (+bias) → ReLU → 1×1
+/// expand (+bias) → sigmoid → per-channel scale. Weight keys `{prefix}.se.reduce.*`,
+/// `{prefix}.se.expand.*` (the 1×1 convs are matmuls over the pooled `[1,C]` vector).
+struct SeBlock {
+    reduce_w: String,
+    reduce_b: String,
+    expand_w: String,
+    expand_b: String,
+    hidden: u32,
+    c: u32,
+    pooled: DeviceBuffer,
+    reduced: DeviceBuffer,
+    relu: DeviceBuffer,
+    expanded: DeviceBuffer,
+    gate: DeviceBuffer,
+    scaled: DeviceBuffer,
 }
 
 impl ConvUnit {
@@ -173,7 +193,30 @@ impl ConvUnit {
             k_add_chan: kidx("add_chan_bcast"),
             k_gelu: kidx("gelu_erf"),
             conv,
+            se: None,
         }
+    }
+
+    /// Add a squeeze-excite gate (as in mobileclip's conv_exp MobileOneBlock),
+    /// `reduction` = out_channels / hidden. Forward-only (parity/inference).
+    pub fn with_se(mut self, ctx: &Ctx, prefix: &str, reduction: u32) -> ConvUnit {
+        let c = self.out_shape.c;
+        let hidden = c / reduction;
+        self.se = Some(SeBlock {
+            reduce_w: format!("{prefix}.se.reduce.weight"),
+            reduce_b: format!("{prefix}.se.reduce.bias"),
+            expand_w: format!("{prefix}.se.expand.weight"),
+            expand_b: format!("{prefix}.se.expand.bias"),
+            hidden,
+            c,
+            pooled: ctx.gpu.storage(c as u64),
+            reduced: ctx.gpu.storage(hidden as u64),
+            relu: ctx.gpu.storage(hidden as u64),
+            expanded: ctx.gpu.storage(c as u64),
+            gate: ctx.gpu.storage(c as u64),
+            scaled: ctx.gpu.storage(self.out_shape.numel() as u64),
+        });
+        self
     }
 
     pub fn out_shape(&self) -> Shape {
@@ -190,10 +233,17 @@ impl ConvUnit {
         if let Some(b) = &self.bias_name {
             p.push((b.clone(), self.out_shape.c as usize));
         }
+        if let Some(se) = &self.se {
+            let (c, h) = (se.c as usize, se.hidden as usize);
+            p.push((se.reduce_w.clone(), h * c));
+            p.push((se.reduce_b.clone(), h));
+            p.push((se.expand_w.clone(), c * h));
+            p.push((se.expand_b.clone(), c));
+        }
         p
     }
 
-    /// Run conv → (+bias) → (GELU); returns the final output buffer.
+    /// Run conv → (+bias) → (SE gate) → (GELU); returns the final output buffer.
     pub fn forward<'a>(&'a self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) -> &'a DeviceBuffer {
         self.conv.forward(ctx, ps, x_in);
         let mut cur: &DeviceBuffer = self.conv.out();
@@ -201,6 +251,27 @@ impl ConvUnit {
             let (nn, c, hw) = (self.out_shape.n, self.out_shape.c, self.out_shape.h * self.out_shape.w);
             ctx.gpu.submit(&[], &[ctx.step(self.k_add_chan, &[cur, ps.w(b), &self.biased], &[nn, c, hw], self.out_shape.numel())]);
             cur = &self.biased;
+        }
+        if let Some(se) = &self.se {
+            let (nn, c, h, w) = (self.out_shape.n, self.out_shape.c, self.out_shape.h, self.out_shape.w);
+            let hw = h * w;
+            let g = ctx.gpu;
+            // global avg-pool → [C]; 1×1 reduce (+bias) → ReLU → 1×1 expand (+bias)
+            // → sigmoid → gate[C]; then per-channel scale of `cur`.
+            g.submit(
+                &[],
+                &[
+                    g.step(kidx("avgpool2d"), &[cur, &se.pooled], &[nn, c, h, w, 1, 1], c),
+                    g.step(kidx("matmul"), &[&se.pooled, ps.w(&se.reduce_w), &se.reduced], &[1, c, se.hidden], se.hidden),
+                    g.step(kidx("bias_add"), &[&se.reduced, ps.w(&se.reduce_b)], &[1, se.hidden], se.hidden),
+                    g.step(kidx("leaky_relu"), &[&se.reduced, &se.relu], &[se.hidden, f(0.0)], se.hidden),
+                    g.step(kidx("matmul"), &[&se.relu, ps.w(&se.expand_w), &se.expanded], &[1, se.hidden, c], c),
+                    g.step(kidx("bias_add"), &[&se.expanded, ps.w(&se.expand_b)], &[1, c], c),
+                    g.step(kidx("sigmoid"), &[&se.expanded, &se.gate], &[c], c),
+                    g.step(kidx("scale_chan"), &[cur, &se.gate, &se.scaled], &[self.out_shape.numel(), c, hw], self.out_shape.numel()),
+                ],
+            );
+            cur = &se.scaled;
         }
         if self.gelu {
             let tot = self.out_shape.numel();
@@ -708,18 +779,32 @@ impl Encoder {
     /// Build for `layers`/`embed_dims` (5 stages), `mlp_ratio`, `cls_ratio`, and a
     /// square `input` size. `input` must be a multiple of 64 (the total downsample)
     /// and its /64 grid gives the token count.
+    /// `se_reduction` > 0 gives conv_exp a squeeze-excite gate (mobileclip). The
+    /// stem and conv_exp are the fused-inference form (conv+bias, no BN) that the
+    /// released checkpoints ship; `fused_stem=false` keeps the BN form for tests.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(ctx: &Ctx, layers: [u32; 5], dims: [u32; 5], mlp_ratio: u32, cls_ratio: u32, input: u32) -> Encoder {
+        Self::new_cfg(ctx, layers, dims, mlp_ratio, cls_ratio, input, 0, true)
+    }
+
+    /// The released mobileclip_l (FastViTHD-L) image encoder: 1024² → [256, 3072].
+    pub fn mobileclip_l(ctx: &Ctx, input: u32) -> Encoder {
+        Self::new_cfg(ctx, [2, 12, 24, 4, 2], [96, 192, 384, 768, 1536], 4, 2, input, 16, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_cfg(ctx: &Ctx, layers: [u32; 5], dims: [u32; 5], mlp_ratio: u32, cls_ratio: u32, input: u32, se_reduction: u32, bn_stem: bool) -> Encoder {
         assert!(input % 64 == 0, "input must be a multiple of the 64× downsample");
         let mut ls = Vec::new();
         let mut shape = Shape::new(1, 3, input, input);
         // Stem: dense 3→d0 /2, depthwise d0 /2, dense 1×1 d0.
-        let stem0 = ConvUnit::new(ctx, "stem.0", shape, dims[0], 3, 2, 1, 1, true, true, true);
+        let stem0 = ConvUnit::new(ctx, "stem.0", shape, dims[0], 3, 2, 1, 1, bn_stem, true, true);
         shape = stem0.out_shape();
         ls.push(Layer::Conv(stem0));
-        let stem1 = ConvUnit::new(ctx, "stem.1", shape, dims[0], 3, 2, 1, dims[0], true, true, true);
+        let stem1 = ConvUnit::new(ctx, "stem.1", shape, dims[0], 3, 2, 1, dims[0], bn_stem, true, true);
         shape = stem1.out_shape();
         ls.push(Layer::Conv(stem1));
-        let stem2 = ConvUnit::new(ctx, "stem.2", shape, dims[0], 1, 1, 0, 1, true, true, true);
+        let stem2 = ConvUnit::new(ctx, "stem.2", shape, dims[0], 1, 1, 0, 1, bn_stem, true, true);
         shape = stem2.out_shape();
         ls.push(Layer::Conv(stem2));
 
@@ -751,7 +836,10 @@ impl Encoder {
         }
         // conv_exp: grouped MobileOne last-dim → last-dim·cls_ratio.
         let out_dim = dims[4] * cls_ratio;
-        let conv_exp = ConvUnit::new(ctx, "conv_exp", shape, out_dim, 3, 1, 1, dims[4], true, true, true);
+        let mut conv_exp = ConvUnit::new(ctx, "conv_exp", shape, out_dim, 3, 1, 1, dims[4], bn_stem, true, true);
+        if se_reduction > 0 {
+            conv_exp = conv_exp.with_se(ctx, "conv_exp", se_reduction);
+        }
         shape = conv_exp.out_shape();
         ls.push(Layer::Conv(conv_exp));
 
@@ -1208,6 +1296,23 @@ mod tests {
                 assert!(ok(grads[key][j], num), "d {key}[{j}]: analytic {} vs numeric {}", grads[key][j], num);
             }
         }
+    }
+
+    #[test]
+    fn mobileclip_l_structure() {
+        // The real FastViTHD-L config: 1024² → 256 tokens × 3072, conv_exp SE present.
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let enc = Encoder::mobileclip_l(&ctx, 1024);
+        assert_eq!(enc.tokens(), 256, "1024/64 = 16 → 16² = 256 tokens");
+        assert_eq!(enc.feature_dim(), 3072, "1536 × cls_ratio 2");
+        let plist = enc.param_list();
+        // conv_exp SE params present.
+        assert!(plist.iter().any(|(n, _)| n == "conv_exp.se.reduce.weight"));
+        assert!(plist.iter().any(|(n, _)| n == "conv_exp.se.expand.weight"));
+        // 5 block-stages [2,12,24,4,2] = 44 blocks; spot-check the deepest.
+        assert!(plist.iter().any(|(n, _)| n.starts_with("network.4.1.")), "stage-4 block 1 present");
+        assert!(plist.iter().any(|(n, _)| n == "stem.0.conv.weight"));
     }
 
     #[test]
