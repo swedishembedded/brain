@@ -15,5 +15,7 @@ pub mod config;
 pub mod encoder;
 pub mod model;
 pub mod import;
+#[cfg(test)]
+mod parity;
 
 pub use config::{FastVitHdConfig, FastVlmConfig};
