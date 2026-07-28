@@ -17,6 +17,7 @@ pub mod config;
 pub mod encoder;
 pub mod model;
 pub mod mrope;
+pub mod preprocess;
 pub mod vision;
 
 pub use model::Qwen3Vl;
