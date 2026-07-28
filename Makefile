@@ -107,11 +107,14 @@ release:
 #  2. Doc-tests link one binary per crate against the full graph — ~18s per
 #     crate for ~30 examples, most of them `no_run`. They are real coverage but
 #     they are not fast feedback, so they get their own lane.
-#  3. brain's `Gpu` is not safe to use concurrently from several threads in one
-#     process: running a GPU-touching test binary with --test-threads=8
-#     deadlocked 3 runs in 6 (86 threads in futex wait), while --test-threads=1
-#     never did and cost ~1s more. Until models can share one device
-#     (docs/performance/mitigations.md F1), the suite serialises test threads.
+#  3. Many concurrent GPU DEVICES in one process deadlock the NVIDIA driver
+#     (~50% of parallel runs), and a device leaked into process exit crashes
+#     it. FIXED at the root: models share one device (Gpu::share/new_like) and
+#     test binaries use the weak-pool fixture gpu_core::testgpu, whose device
+#     dies with its last in-process handle — kronos is proven clean at
+#     --test-threads=48, 30/30 runs. The default stays 1 only until the
+#     remaining GPU crates (qwen, tts, gpt, ...) adopt the fixture; migrating
+#     one is mechanical (route its test constructors through testgpu::dev).
 #
 # The timeout turns a deadlock into a fast, loud failure instead of an hour of
 # silence. Override any of these: TEST_THREADS=8 make test.

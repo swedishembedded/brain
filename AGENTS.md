@@ -464,6 +464,15 @@ per-scenario table and the findings so far.
   2. a **backend fast path** implements an op for its device and is validated
      against the WGSL reference (`backend-cpu::fast_ops`).
 
+- **One GPU device per process.** Building a `Gpu` per model object deadlocks
+  the driver under concurrency and a device leaked into process exit crashes
+  it. Production code shares explicitly (`Gpu::share` for the same kernel set,
+  `Gpu::new_like` for a different set on the same device, `share_or_new` when
+  the backend may not support sharing); **test binaries use
+  `gpu_core::testgpu::dev(KERNELS)`** — a weak pool whose device dies with its
+  last in-process handle. Never write a per-crate fixture; that is how
+  duplicate fixtures (and the crash) come back.
+
 - **Host math does not run on the accelerator.** Anything in `model::hostmath`
   is invisible to `--device`: it will not use the GPU, Vulkan or the NPU
   whatever the user asked for, and a benchmark of such a path reports host
