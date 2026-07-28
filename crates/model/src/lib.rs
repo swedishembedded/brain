@@ -30,6 +30,7 @@ pub mod plan;
 pub mod shard;
 pub mod train;
 pub mod vit;
+pub mod vlm;
 
 pub use collective::{Collective, HostCollective};
 pub use distributed::{federated_average, DdpOptimizer};
