@@ -470,6 +470,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-fastvlm"
+version = "0.1.0"
+dependencies = [
+ "brain-qwen",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-fcbench"
 version = "0.1.0"
 dependencies = [
@@ -736,6 +744,19 @@ dependencies = [
  "pollster",
  "serde_json",
  "wgpu",
+]
+
+[[package]]
+name = "brain-qwenvl"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-qwen",
+ "serde_json",
 ]
 
 [[package]]

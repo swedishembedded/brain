@@ -47,6 +47,12 @@ pub struct QwenConfig {
     pub rope_theta: f32,
     pub rms_eps: f32,
     pub tie_embeddings: bool,
+    /// Per-head QK-RMSNorm on q/k before RoPE. `true` for Qwen3; `false` for
+    /// Qwen2 (which has no QK-norm). Governs both the forward and `param_list`.
+    pub qk_norm: bool,
+    /// Bias on the q/k/v projections. `false` for Qwen3 (bias-free); `true` for
+    /// Qwen2 (q/k/v carry a bias, o/gate/up/down do not).
+    pub attn_bias: bool,
     /// `Some` selects LoRA fine-tuning (frozen base + adapters); `None` is a
     /// full (all-parameter) model.
     pub lora: Option<LoraCfg>,
@@ -69,6 +75,8 @@ impl QwenConfig {
             rope_theta: 1.0e6,
             rms_eps: 1e-6,
             tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
             lora: None,
         }
     }
@@ -87,6 +95,8 @@ impl QwenConfig {
             rope_theta: 1.0e6,
             rms_eps: 1e-6,
             tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
             lora: None,
         }
     }
@@ -107,6 +117,8 @@ impl QwenConfig {
             rope_theta: 1.0e6,
             rms_eps: 1e-6,
             tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
             lora: None,
         }
     }
@@ -166,9 +178,46 @@ impl QwenConfig {
             rope_theta: gf("rope_theta", 1.0e6),
             rms_eps: gf("rms_norm_eps", 1e-6),
             tie_embeddings: c["tie_word_embeddings"].as_bool().unwrap_or(true),
+            // Qwen3 default (QK-norm on, bias-free); a Qwen2 loader sets these.
+            qk_norm: c["qk_norm"].as_bool().unwrap_or(true),
+            attn_bias: c["attention_bias"].as_bool().unwrap_or(false),
             lora: None, // LoRA is a training-time choice, not stored in the checkpoint config
         }
         .with_defaults()
+    }
+
+    /// Qwen2 shape helper: QK-norm **off**, qkv **bias on** (the deltas vs Qwen3).
+    /// `head_dim = d_model / n_heads`. Used by FastVLM's decoder.
+    pub fn qwen2(vocab: u32, n_layers: u32, d_model: u32, n_heads: u32, n_kv_heads: u32, d_ff: u32, tie: bool) -> QwenConfig {
+        QwenConfig {
+            vocab,
+            block_size: 2048,
+            n_layers,
+            d_model,
+            n_heads,
+            n_kv_heads,
+            head_dim: d_model / n_heads,
+            d_ff,
+            rope_theta: 1.0e6,
+            rms_eps: 1e-6,
+            tie_embeddings: tie,
+            qk_norm: false,
+            attn_bias: true,
+            lora: None,
+        }
+    }
+
+    /// `Qwen2-0.5B` (FastVLM-0.5B decoder).
+    pub fn qwen2_0_5b() -> QwenConfig {
+        Self::qwen2(151936, 24, 896, 14, 2, 4864, true)
+    }
+    /// `Qwen2-1.5B` (FastVLM-1.5B decoder).
+    pub fn qwen2_1_5b() -> QwenConfig {
+        Self::qwen2(151936, 28, 1536, 12, 2, 8960, true)
+    }
+    /// `Qwen2-7B` (FastVLM-7B decoder; untied head, vocab 152064).
+    pub fn qwen2_7b() -> QwenConfig {
+        Self::qwen2(152064, 28, 3584, 28, 4, 18944, false)
     }
 
     /// Parameter list: `(name, numel)`. With LoRA, targeted projections become a
@@ -207,8 +256,16 @@ impl QwenConfig {
             lin(&mut out, p("attn.wq.weight"), "wq", hq, d);
             lin(&mut out, p("attn.wk.weight"), "wk", hkv, d);
             lin(&mut out, p("attn.wv.weight"), "wv", hkv, d);
-            out.push((p("attn.q_norm.weight"), hd));
-            out.push((p("attn.k_norm.weight"), hd));
+            if self.attn_bias {
+                // Qwen2: q/k/v projections carry a bias (o/gate/up/down do not).
+                out.push((p("attn.wq.bias"), hq));
+                out.push((p("attn.wk.bias"), hkv));
+                out.push((p("attn.wv.bias"), hkv));
+            }
+            if self.qk_norm {
+                out.push((p("attn.q_norm.weight"), hd));
+                out.push((p("attn.k_norm.weight"), hd));
+            }
             lin(&mut out, p("attn.wo.weight"), "wo", d, hq);
             out.push((p("ln2.weight"), d));
             lin(&mut out, p("mlp.gate.weight"), "gate", ff, d);

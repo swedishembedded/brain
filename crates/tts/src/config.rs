@@ -129,6 +129,8 @@ impl TalkerConfig {
             rope_theta: self.rope_theta,
             rms_eps: self.rms_norm_eps,
             tie_embeddings: false,
+            qk_norm: true,
+            attn_bias: false,
             lora: None,
         }
         .with_defaults()

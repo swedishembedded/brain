@@ -363,6 +363,8 @@ impl SynthSpec {
             rope_theta: 1_000_000.0,
             rms_eps: 1e-6,
             tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
             lora: None,
         }
     }
@@ -484,6 +486,8 @@ fn build_qwen_synth(shape: &str, workload: &str) -> Result<Box<dyn PerfTarget>, 
         rope_theta: 1_000_000.0,
         rms_eps: 1e-6,
         tie_embeddings: true,
+        qk_norm: true,
+        attn_bias: false,
         lora: None,
     };
     let params: usize = cfg.param_list().iter().map(|(_, n)| n).sum();

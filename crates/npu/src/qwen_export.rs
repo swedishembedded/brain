@@ -163,6 +163,8 @@ fn export_mtp_decode(mtp_path: &str, out_path: &str, cap: usize, quant: bool) ->
             rope_theta: gf("rope_theta", 1_000_000.0),
             rms_eps: gf("rms_norm_eps", 1e-6),
             tie_embeddings: false,
+            qk_norm: true,
+            attn_bias: false,
             lora: None,
         };
         let w: HashMap<String, Vec<f32>> = c.by_role("");
@@ -195,6 +197,8 @@ pub fn export_mtp_fused(mtp_path: &str, out_path: &str) -> std::io::Result<()> {
             rope_theta: gf("rope_theta", 1_000_000.0),
             rms_eps: gf("rms_norm_eps", 1e-6),
             tie_embeddings: false,
+            qk_norm: true,
+            attn_bias: false,
             lora: None,
         };
         let emb = gu("embedding_dim", gu("d_model", 1024)) as usize;

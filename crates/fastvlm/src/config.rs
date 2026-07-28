@@ -78,20 +78,8 @@ pub struct FastVlmConfig {
 
 impl FastVlmConfig {
     fn decoder_of(vocab: u32, layers: u32, hidden: u32, heads: u32, kv: u32, inter: u32, tie: bool) -> QwenConfig {
-        QwenConfig {
-            vocab,
-            block_size: 2048,
-            n_layers: layers,
-            d_model: hidden,
-            n_heads: heads,
-            n_kv_heads: kv,
-            head_dim: hidden / heads,
-            d_ff: inter,
-            rope_theta: 1.0e6,
-            rms_eps: 1e-6,
-            tie_embeddings: tie,
-            lora: None,
-        }
+        // Qwen2 decoder: QK-norm off, qkv bias on.
+        QwenConfig::qwen2(vocab, layers, hidden, heads, kv, inter, tie)
     }
 
     /// `apple/FastVLM-0.5B` (Qwen2-0.5B decoder).
@@ -152,6 +140,8 @@ impl FastVlmConfig {
                 rope_theta: c["rope_theta"].as_f64().unwrap_or(1e6) as f32,
                 rms_eps: c["rms_norm_eps"].as_f64().unwrap_or(1e-6) as f32,
                 tie_embeddings: c["tie_word_embeddings"].as_bool().unwrap_or(true),
+                qk_norm: false, // Qwen2
+                attn_bias: c["attention_bias"].as_bool().unwrap_or(true),
                 lora: None,
             },
             image_token_index: -200,

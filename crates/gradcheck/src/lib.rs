@@ -205,6 +205,21 @@ pub fn check_qwen_lora(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Gradient-check the **Qwen2** decoder variant: QK-norm **off**, q/k/v projection
+/// **bias on** (the deltas vs Qwen3, used by FastVLM). Validates the bias forward
+/// (`bias_add`) + backward (`bias_grad` row-sum) and the QK-norm-off routing (q/k
+/// flow straight from the biased projection into RoPE/attention). Returns the report.
+pub fn check_qwen2(seed: u64) -> Report {
+    use qwen::{Qwen, QwenConfig};
+    let cfg = QwenConfig { qk_norm: false, attn_bias: true, ..QwenConfig::tiny() };
+    let init = qwen::init_weights(&cfg, seed);
+    let model = Qwen::new(cfg, 2, 6, &init);
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    let y: Vec<u32> = (0..12).map(|i| (i * 5 + 2) % 23).collect();
+    model.set_batch(&x, &y);
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
 /// Gradient-check the interleaved-M-RoPE decoder path (`Qwen::enable_mrope`),
 /// which swaps the analytic rope_base for the table-driven `rope2d` on q/k. Uses
 /// simple diagonal per-token position tables (so the rotation is non-trivial but
@@ -520,6 +535,22 @@ mod tests {
         assert!(
             fails.is_empty(),
             "LoRA gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn qwen2_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_qwen2(7);
+        report.print();
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "Qwen2 (qk-norm off, bias on) gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
     }

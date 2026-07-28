@@ -98,6 +98,10 @@ const ROPE2D: usize = 47;
 // DeepStack residual add (Qwen3-VL): adds a level's merged vision features into
 // the residual at the image rows after a layer. Off unless `enable_deepstack`.
 const SPLICE_ADD: usize = 48;
+// Qwen2 q/k/v projection bias (add fwd, row-sum grad bwd). Used only when
+// `cfg.attn_bias` (FastVLM's Qwen2 decoder); Qwen3 is bias-free.
+const BIAS_ADD: usize = 49;
+const BIAS_GRAD: usize = 50;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -149,6 +153,8 @@ const PIPELINES: &[(&str, &str)] = &[
     ("splice_bwd", kernels::SPLICE_BWD),
     ("rope2d", kernels::ROPE2D),
     ("splice_add", kernels::SPLICE_ADD),
+    ("bias_add", kernels::BIAS_ADD),
+    ("bias_grad", kernels::BIAS_GRAD),
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
@@ -804,17 +810,29 @@ impl Qwen {
                 s.push(self.gpu.step(mk, &[&lb.xn1, self.w(&p("attn.wv.weight")), &lb.v], &[n, d, hkv], mt));
                 self.lora_fwd(&mut s, "wv", &lb.xn1, &p("attn.wv.weight"), &lb.v, n, d, hkv);
             }
-            // QK-norm over head_dim then half-split RoPE on q/k.
-            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.q_pre, self.w(&p("attn.q_norm.weight")), &lb.q, hd, n * nh));
-            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.k_pre, self.w(&p("attn.k_norm.weight")), &lb.k, hd, n * nkv));
-            if self.mrope.get() {
-                s.push(self.rope2d_step(&lb.q, n, nh, hd, hq, 1.0));
-                s.push(self.rope2d_step(&lb.k, n, nkv, hd, hkv, 1.0));
-            } else {
-                s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, nh, hd, hq, t_use, theta));
-                s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, nkv, hd, hkv, t_use, theta));
+            // Qwen2 q/k/v projection bias (Qwen3 is bias-free).
+            if self.cfg.attn_bias {
+                s.push(self.gpu.step(BIAS_ADD, &[&lb.q_pre, self.w(&p("attn.wq.bias"))], &[n, hq], n * hq));
+                s.push(self.gpu.step(BIAS_ADD, &[&lb.k_pre, self.w(&p("attn.wk.bias"))], &[n, hkv], n * hkv));
+                s.push(self.gpu.step(BIAS_ADD, &[&lb.v, self.w(&p("attn.wv.bias"))], &[n, hkv], n * hkv));
             }
-            s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &self.scores, &lb.probs, &lb.ctx));
+            // Optional per-head QK-RMSNorm (Qwen3); Qwen2 uses q_pre/k_pre directly.
+            let (q_buf, k_buf): (&DeviceBuffer, &DeviceBuffer) = if self.cfg.qk_norm {
+                s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.q_pre, self.w(&p("attn.q_norm.weight")), &lb.q, hd, n * nh));
+                s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.k_pre, self.w(&p("attn.k_norm.weight")), &lb.k, hd, n * nkv));
+                (&lb.q, &lb.k)
+            } else {
+                (&lb.q_pre, &lb.k_pre)
+            };
+            // Half-split RoPE on q/k (in place on the routed buffers).
+            if self.mrope.get() {
+                s.push(self.rope2d_step(q_buf, n, nh, hd, hq, 1.0));
+                s.push(self.rope2d_step(k_buf, n, nkv, hd, hkv, 1.0));
+            } else {
+                s.push(block::rope_fwd(&self.gpu, &ids, q_buf, n, nh, hd, hq, t_use, theta));
+                s.push(block::rope_fwd(&self.gpu, &ids, k_buf, n, nkv, hd, hkv, t_use, theta));
+            }
+            s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx));
             if let Some((q8, ql)) = q8l {
                 q8.quant(&self.gpu, &mut s, &lb.ctx, hq, n);
                 q8.mm8(&self.gpu, &mut s, &ql.wo, &self.proj, n);
@@ -954,10 +972,13 @@ impl Qwen {
 
             // ---- attention backward (input grad = dxmid) ----
             self.proj_bwd(&mut s, "wo", &self.dxmid, &lb.ctx, &p("attn.wo.weight"), &self.d_ctx, n, hq, d, 0);
+            // The roped q/k live in q/k (QK-norm) or q_pre/k_pre (Qwen2).
+            let (q_buf, k_buf): (&DeviceBuffer, &DeviceBuffer) =
+                if self.cfg.qk_norm { (&lb.q, &lb.k) } else { (&lb.q_pre, &lb.k_pre) };
             s.extend(block::gqa_bwd(
-                &self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &lb.probs, &self.d_ctx, &self.d_scores, &self.d_q, &self.d_k, &self.d_v,
+                &self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &lb.probs, &self.d_ctx, &self.d_scores, &self.d_q, &self.d_k, &self.d_v,
             ));
-            // RoPE backward (in place on d_q/d_k -> grad wrt normed q/k)
+            // RoPE backward (in place on d_q/d_k)
             if self.mrope.get() {
                 s.push(self.rope2d_step(&self.d_q, n, nh, hd, hq, -1.0));
                 s.push(self.rope2d_step(&self.d_k, n, nkv, hd, hkv, -1.0));
@@ -965,13 +986,31 @@ impl Qwen {
                 s.push(block::rope_bwd(&self.gpu, &ids, &self.d_q, n, nh, hd, hq, t, theta));
                 s.push(block::rope_bwd(&self.gpu, &ids, &self.d_k, n, nkv, hd, hkv, t, theta));
             }
-            // QK-norm backward: grad wrt q_pre/k_pre -> dq_pre/dk_pre
-            self.rmsnorm_bwd(&mut s, &lb.q_pre, &p("attn.q_norm.weight"), &self.d_q, &self.dq_pre, hd, n * nh);
-            self.rmsnorm_bwd(&mut s, &lb.k_pre, &p("attn.k_norm.weight"), &self.d_k, &self.dk_pre, hd, n * nkv);
+            // Optional QK-norm backward -> dq_pre/dk_pre; else d_q/d_k is the
+            // projection-output grad directly.
+            let (dq_buf, dk_buf): (&DeviceBuffer, &DeviceBuffer) = if self.cfg.qk_norm {
+                self.rmsnorm_bwd(&mut s, &lb.q_pre, &p("attn.q_norm.weight"), &self.d_q, &self.dq_pre, hd, n * nh);
+                self.rmsnorm_bwd(&mut s, &lb.k_pre, &p("attn.k_norm.weight"), &self.d_k, &self.dk_pre, hd, n * nkv);
+                (&self.dq_pre, &self.dk_pre)
+            } else {
+                (&self.d_q, &self.d_k)
+            };
+            // Qwen2 q/k/v bias grad = row-sum of each projection-output grad.
+            if self.cfg.attn_bias {
+                if self.trainable(&p("attn.wq.bias")) {
+                    s.push(self.gpu.step(BIAS_GRAD, &[dq_buf, self.g(&p("attn.wq.bias"))], &[n, hq], hq));
+                }
+                if self.trainable(&p("attn.wk.bias")) {
+                    s.push(self.gpu.step(BIAS_GRAD, &[dk_buf, self.g(&p("attn.wk.bias"))], &[n, hkv], hkv));
+                }
+                if self.trainable(&p("attn.wv.bias")) {
+                    s.push(self.gpu.step(BIAS_GRAD, &[&self.d_v, self.g(&p("attn.wv.bias"))], &[n, hkv], hkv));
+                }
+            }
             // q/k/v projection backward -> accumulate into d_xn (= grad wrt xn1)
             self.proj_bwd(&mut s, "wv", &self.d_v, &lb.xn1, &p("attn.wv.weight"), &self.d_xn, n, d, hkv, 0);
-            self.proj_bwd(&mut s, "wk", &self.dk_pre, &lb.xn1, &p("attn.wk.weight"), &self.d_xn, n, d, hkv, 1);
-            self.proj_bwd(&mut s, "wq", &self.dq_pre, &lb.xn1, &p("attn.wq.weight"), &self.d_xn, n, d, hq, 1);
+            self.proj_bwd(&mut s, "wk", dk_buf, &lb.xn1, &p("attn.wk.weight"), &self.d_xn, n, d, hkv, 1);
+            self.proj_bwd(&mut s, "wq", dq_buf, &lb.xn1, &p("attn.wq.weight"), &self.d_xn, n, d, hq, 1);
             // ln1 backward -> d_tmp ; dres[l] = dxmid + d_tmp
             self.rmsnorm_bwd(&mut s, &self.res[l], &p("ln1.weight"), &self.d_xn, &self.d_tmp, d, n);
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));

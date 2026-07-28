@@ -66,6 +66,8 @@ pub fn config_from_hf(json: &str) -> Result<QwenConfig, String> {
         rope_theta: v["rope_theta"].as_f64().unwrap_or(1.0e6) as f32,
         rms_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-6) as f32,
         tie_embeddings: v["tie_word_embeddings"].as_bool().unwrap_or(true),
+        qk_norm: true,
+        attn_bias: false,
         lora: None,
     }
     .with_defaults();
