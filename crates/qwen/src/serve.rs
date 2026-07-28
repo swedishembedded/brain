@@ -15,7 +15,8 @@
 use std::collections::HashMap;
 
 use gpu_core::select::{
-    CachedSelector, DefaultSelector, Dtype, KernelSelector, KernelVariant, Op, OpShape,
+    AutoTuner, CachedSelector, DefaultSelector, Dtype, KernelSelector, KernelVariant, Op, OpShape,
+    DECODE_REGIME_MAX_ROWS,
 };
 use gpu_core::{DeviceBuffer, DeviceCaps, Gpu, Step};
 use model::block::{self, KernelIds};
@@ -250,6 +251,10 @@ pub struct Engine {
     w8: Option<crate::q8::Q8>,
     /// The int8-packed LM head (present iff `w8` is).
     head8: Option<crate::q8::Lin8>,
+    /// Measured GEMV/tile choices for the int8 linears (S5), keyed by
+    /// `(row bucket, n, k)` — tuned once at build on THIS device (persisted
+    /// per adapter), so the hot path never measures. Empty on fp32 engines.
+    tuned_i8: HashMap<(u32, u32, u32), KernelVariant>,
     sc: Scratch,
     /// `[vocab, d]` tied/untied head, kept on the host for the prefill path
     /// (applied once per request) and for callers that need full logits.
@@ -293,12 +298,10 @@ impl Engine {
         // PackedInt8 gate). Elsewhere — the CPU JIT — fp32 weights stay, and
         // the fallback is said out loud rather than silently absorbed.
         let caps = gpu.caps();
-        let w8_on = weights_int8
-            && DefaultSelector.select(
-                Op::MatMul,
-                OpShape { m: 1, n: cfg.d_model, k: cfg.d_model, dtype: Dtype::I8 },
-                &caps,
-            ) == KernelVariant::PackedInt8;
+        // The gate is the CAPABILITY, not the selector's head: which int8
+        // variant is best at some shape is a tuning question, but whether the
+        // packed-dot kernels execute at all is numeric.int8_dot.
+        let w8_on = weights_int8 && caps.numeric.int8_dot;
         if weights_int8 && !w8_on {
             eprintln!("serve: int8 weights requested but this device has no packed-int8 path; using fp32 weights");
         }
@@ -412,6 +415,14 @@ impl Engine {
         } else {
             (None, None)
         };
+        // S5: measure the GEMV/tile crossover for THIS device's int8 shapes at
+        // build time (a few ms; persisted per adapter + kernel sources), so
+        // the hot path only ever looks the choice up. Row counts vary freely
+        // at runtime, so choices are keyed by power-of-two bucket.
+        let tuned_i8 = match (&w8, &head8) {
+            (Some(q8), Some(h8)) => Self::tune_i8(&gpu, &caps, q8, h8, b as u32),
+            _ => HashMap::new(),
+        };
         // Decode-side head. Sized by max_batch (NOT the prefill row count): only
         // decode rows need logits, and [max_prefill, vocab] would be gigabytes.
         // fp32 head only when the int8 head is absent — never both resident.
@@ -442,6 +453,7 @@ impl Engine {
             scales_v,
             w8,
             head8,
+            tuned_i8,
             sc,
             head,
             head_dev,
@@ -566,13 +578,22 @@ impl Engine {
         }
     }
 
-    /// One int8 linear through the selector: the packed GEMV at decode row
-    /// counts (the 128x128 tile is mostly idle there — measured 78 tok/s vs
-    /// the fp32 GEMV's 127 at c=1), the tile GEMM at prefill shapes. Must be
-    /// preceded by a matching `Q8::quant` of the input.
+    /// One int8 linear: the MEASURED choice for this device where one exists
+    /// (S5, tuned at build, keyed by row bucket), else the static policy. The
+    /// packed GEMV owns few rows, the 128x128 tile owns prefill shapes; the
+    /// crossover is per-device. Must be preceded by a matching `Q8::quant`.
     fn mm8(&self, q8: &crate::q8::Q8, s: &mut Vec<Step>, w: &crate::q8::Lin8, out: &DeviceBuffer, rows: u32) {
         let shape = OpShape { m: rows, n: w.n, k: w.k, dtype: Dtype::I8 };
-        match self.selector.select(Op::MatMul, shape, &self.caps) {
+        let variant = if rows <= DECODE_REGIME_MAX_ROWS {
+            let bucket = rows.next_power_of_two().min(DECODE_REGIME_MAX_ROWS);
+            self.tuned_i8
+                .get(&(bucket, w.n, w.k))
+                .copied()
+                .unwrap_or_else(|| self.selector.select(Op::MatMul, shape, &self.caps))
+        } else {
+            self.selector.select(Op::MatMul, shape, &self.caps)
+        };
+        match variant {
             KernelVariant::WorkgroupPerOutput => s.push(self.gpu.step(
                 MATMUL_I8_GEMV,
                 &[&q8.xq, &w.packed, &q8.sx, &w.scale, out],
@@ -581,6 +602,86 @@ impl Engine {
             )),
             _ => q8.mm8(&self.gpu, s, w, out, rows),
         }
+    }
+
+    /// Measure the GEMV/tile crossover for every distinct int8 linear shape
+    /// and row bucket on THIS device (S5). Both candidates are dispatched on
+    /// the engine's real buffers — REPS dispatches per timing so submit/poll
+    /// overhead amortises — and the winner persists per adapter + kernel
+    /// sources. `BRAIN_NO_AUTOTUNE=1` skips every measurement (static policy).
+    fn tune_i8(
+        gpu: &Gpu,
+        caps: &DeviceCaps,
+        q8: &crate::q8::Q8,
+        head: &crate::q8::Lin8,
+        max_rows: u32,
+    ) -> HashMap<(u32, u32, u32), KernelVariant> {
+        let fp = gpu_core::tune::source_fingerprint(&[kernels::MATMUL_I8_GEMV, kernels::MATMUL_I8_DYN]);
+        let store = gpu_core::tune::FileTuneStore::for_adapter(fp)
+            .map(|s| Box::new(s) as Box<dyn gpu_core::select::TuneStore>);
+        let tuner = AutoTuner::new(store);
+        // Distinct (n, k) shapes: every layer shares them, so layer 0 + head
+        // covers the whole model.
+        let mut shapes: Vec<(u32, u32, &crate::q8::Lin8)> = Vec::new();
+        if let Some(lay) = q8.layers.values().next() {
+            for lin in [&lay.wq, &lay.wk, &lay.wv, &lay.wo, &lay.gate, &lay.up, &lay.down] {
+                if !shapes.iter().any(|&(n, k, _)| n == lin.n && k == lin.k) {
+                    shapes.push((lin.n, lin.k, lin));
+                }
+            }
+        }
+        shapes.push((head.n, head.k, head));
+        let mut out = HashMap::new();
+        let cap_bucket = max_rows.next_power_of_two().min(DECODE_REGIME_MAX_ROWS);
+        for &m in &[1u32, 2, 4, 8, 16, 32] {
+            if m > cap_bucket {
+                break;
+            }
+            for &(n, k, lin) in &shapes {
+                let shape = OpShape { m, n, k, dtype: Dtype::I8 };
+                let mut measure =
+                    |v: KernelVariant| Self::measure_i8(gpu, q8, lin, m, v);
+                let choice = tuner.resolve(Op::MatMul, shape, caps, &mut measure);
+                out.insert((m, n, k), choice);
+            }
+        }
+        out
+    }
+
+    /// Time one int8 GEMM variant on real buffers: REPS dispatches in one
+    /// submission, mean milliseconds per dispatch. `None` = not measurable.
+    fn measure_i8(
+        gpu: &Gpu,
+        q8: &crate::q8::Q8,
+        lin: &crate::q8::Lin8,
+        m: u32,
+        variant: KernelVariant,
+    ) -> Option<f64> {
+        const REPS: usize = 8;
+        let out = gpu.storage(m as u64 * lin.n as u64);
+        let step = |_: usize| match variant {
+            KernelVariant::WorkgroupPerOutput => gpu.step(
+                MATMUL_I8_GEMV,
+                &[&q8.xq, &lin.packed, &q8.sx, &lin.scale, &out],
+                &[m, lin.k / 4, lin.n],
+                lin.n * 64,
+            ),
+            KernelVariant::PackedInt8 => gpu.step(
+                MATMUL_I8_DYN,
+                &[&q8.xq, &lin.packed, &q8.sx, &lin.scale, &out],
+                &[m, lin.k / 4, lin.n],
+                m.div_ceil(128) * lin.n.div_ceil(128) * 256,
+            ),
+            other => unreachable!("int8 candidates are GEMV or tile, got {other:?}"),
+        };
+        // Warm-up (pipeline residency, first-touch allocations), then timed.
+        gpu.submit(&[], &[step(0)]);
+        gpu.poll_wait();
+        let steps: Vec<Step> = (0..REPS).map(step).collect();
+        let t0 = std::time::Instant::now();
+        gpu.submit(&[], &steps);
+        gpu.poll_wait();
+        Some(t0.elapsed().as_secs_f64() * 1e3 / REPS as f64)
     }
 
     /// RMSNorm, choosing the workgroup-per-row kernel at decode row counts
@@ -1741,7 +1842,13 @@ mod tests {
         let mut eng8 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 2, 8, 32, false, true);
         if !eng8.weights_int8() {
             // Capability-gated fallback (CPU JIT): the engine must run fp32
-            // and say so — there is nothing further to compare here.
+            // and say so. A device whose caps DO report the packed-int8 path
+            // must never land here — a silent fallback on capable hardware is
+            // exactly the regression this branch once masked.
+            assert!(
+                !eng8.gpu().caps().numeric.int8_dot,
+                "device reports int8_dot but the engine fell back to fp32"
+            );
             eprintln!("skipping int8 comparison: device has no packed-int8 path");
             return;
         }

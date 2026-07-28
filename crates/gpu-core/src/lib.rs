@@ -27,6 +27,10 @@ pub use backend_api::{
 };
 pub use backend_api::select;
 
+/// File-backed persistence for measured kernel choices (S5).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tune;
+
 /// `--device` parsing and resolution: which compute is *schedulable*.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod devices;

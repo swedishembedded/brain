@@ -100,55 +100,174 @@ pub const ARGMAX_SPLIT_MIN_VOCAB: u32 = 4096;
 /// owns refining this boundary.
 pub const I8_GEMV_MAX_ROWS: u32 = 8;
 
-/// The static default policy — the measured rules from the decode-regime work,
-/// expressed once. Every rule is either a correctness gate (a capability the
-/// variant requires) or a measured regime boundary; nothing keys on a backend
-/// name.
+/// Every variant that can EXECUTE for `(op, shape)` on this device, with the
+/// static best guess FIRST. Never empty: `Reference` is always executable.
+///
+/// This is both the default policy (its head) and the autotuner's probe list
+/// (its tail): a measuring selector times exactly these — never a variant the
+/// device cannot run, which is what keeps tuning a refinement rather than a
+/// correctness risk. Ordering rules are either correctness gates (a capability
+/// the variant requires) or measured regime boundaries; nothing keys on a
+/// backend name.
+pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVariant> {
+    use KernelVariant::*;
+    match op {
+        Op::MatMul => match shape.dtype {
+            // Int8 GEMMs only where the packed-dot kernels execute; a device
+            // without them gets the fp32 reference (the caller keeps fp32
+            // weights in that case — see qwen::serve). Within int8, the split
+            // mirrors fp32: the 128x128 tile is mostly idle at decode row
+            // counts, but the packed GEMV's workgroup-memory accumulation
+            // grows per-row — the measured P40 crossover is m≈8, and refining
+            // it per device is exactly what the autotuner probes this tail
+            // for. The GEMV requires m <= 32 (its accumulator bound).
+            Dtype::I8 if caps.numeric.int8_dot => {
+                if shape.m > DECODE_REGIME_MAX_ROWS || !caps.workgroup_reductions {
+                    vec![PackedInt8]
+                } else if shape.m <= I8_GEMV_MAX_ROWS {
+                    vec![WorkgroupPerOutput, PackedInt8]
+                } else {
+                    vec![PackedInt8, WorkgroupPerOutput]
+                }
+            }
+            Dtype::I8 => vec![Reference],
+            Dtype::F32 if shape.m <= DECODE_REGIME_MAX_ROWS && caps.workgroup_reductions => {
+                vec![WorkgroupPerOutput, Reference]
+            }
+            Dtype::F32 => vec![Reference],
+        },
+        Op::RmsNorm => {
+            if shape.m <= DECODE_REGIME_MAX_ROWS && caps.workgroup_reductions {
+                vec![WorkgroupPerOutput, Reference]
+            } else {
+                vec![Reference]
+            }
+        }
+        // Device-independent: the split kernels have no barrier, so the
+        // boundary is purely the row length.
+        Op::ArgMaxRow => {
+            if shape.n >= ARGMAX_SPLIT_MIN_VOCAB {
+                vec![SplitReduction, Reference]
+            } else {
+                vec![Reference, SplitReduction]
+            }
+        }
+    }
+}
+
+/// The static default policy — the head of [`candidates`], BY CONSTRUCTION:
+/// there is one list, so the default choice and the tuner's probe set can
+/// never drift apart.
 pub struct DefaultSelector;
 
 impl KernelSelector for DefaultSelector {
     fn select(&self, op: Op, shape: OpShape, caps: &DeviceCaps) -> KernelVariant {
-        match op {
-            Op::MatMul => match shape.dtype {
-                // Int8 GEMMs only where the packed-dot kernels execute; a
-                // device without them gets the fp32 reference (the caller
-                // keeps fp32 weights in that case — see qwen::serve).
-                // Within int8, the regime split mirrors fp32: the 128x128
-                // tile GEMM is mostly idle at decode row counts (measured
-                // 78 tok/s vs the fp32 GEMV's 127 at c=1), so few rows take
-                // the packed GEMV shape instead.
-                Dtype::I8 if caps.numeric.int8_dot => {
-                    if shape.m <= I8_GEMV_MAX_ROWS && caps.workgroup_reductions {
-                        KernelVariant::WorkgroupPerOutput
-                    } else {
-                        KernelVariant::PackedInt8
-                    }
-                }
-                Dtype::I8 => KernelVariant::Reference,
-                Dtype::F32
-                    if shape.m <= DECODE_REGIME_MAX_ROWS && caps.workgroup_reductions =>
-                {
-                    KernelVariant::WorkgroupPerOutput
-                }
-                Dtype::F32 => KernelVariant::Reference,
-            },
-            Op::RmsNorm => {
-                if shape.m <= DECODE_REGIME_MAX_ROWS && caps.workgroup_reductions {
-                    KernelVariant::WorkgroupPerOutput
-                } else {
-                    KernelVariant::Reference
-                }
+        candidates(op, shape, caps)[0]
+    }
+}
+
+impl KernelVariant {
+    /// Stable name for persistence (the tune cache stores these).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KernelVariant::Reference => "reference",
+            KernelVariant::WorkgroupPerOutput => "workgroup_per_output",
+            KernelVariant::SplitReduction => "split_reduction",
+            KernelVariant::PackedInt8 => "packed_int8",
+        }
+    }
+    pub fn from_str(s: &str) -> Option<KernelVariant> {
+        Some(match s {
+            "reference" => KernelVariant::Reference,
+            "workgroup_per_output" => KernelVariant::WorkgroupPerOutput,
+            "split_reduction" => KernelVariant::SplitReduction,
+            "packed_int8" => KernelVariant::PackedInt8,
+            _ => return None,
+        })
+    }
+}
+
+/// Persistence for measured kernel choices — a trait so this crate stays
+/// dependency-free; the file-backed implementation lives in `gpu-core`
+/// (`tune::FileTuneStore`), keyed per adapter.
+pub trait TuneStore: Send + Sync {
+    fn load(&self, key: &str) -> Option<String>;
+    fn save(&self, key: &str, value: &str);
+}
+
+/// Measure-once-and-remember kernel selection (S5): the selector's model of a
+/// device is always approximate, so the right choice among [`candidates`] is
+/// empirical.
+///
+/// `resolve` consults its memo, then the persistent store, and only then
+/// measures — each candidate once via the caller's closure (the caller owns
+/// dispatch; this type owns policy). The winner is remembered and persisted.
+/// A measurement that fails (`None`) removes that candidate from contention;
+/// if nothing measures, the static best guess stands. `BRAIN_NO_AUTOTUNE=1`
+/// (read once at construction) forces the static selector everywhere — what
+/// CI and reproducible benchmarking use, so an autotuned result can never make
+/// a benchmark unreproducible. A persisted value that is not among today's
+/// candidates is IGNORED, never trusted — the stale-cache rule.
+pub struct AutoTuner {
+    enabled: bool,
+    store: Option<Box<dyn TuneStore>>,
+    memo: std::sync::Mutex<std::collections::HashMap<(Op, OpShape), KernelVariant>>,
+}
+
+impl AutoTuner {
+    pub fn new(store: Option<Box<dyn TuneStore>>) -> AutoTuner {
+        let enabled = std::env::var("BRAIN_NO_AUTOTUNE").map(|v| v == "0").unwrap_or(true);
+        AutoTuner { enabled, store, memo: Default::default() }
+    }
+
+    /// A tuner that never measures — the static policy with the same API.
+    pub fn disabled() -> AutoTuner {
+        AutoTuner { enabled: false, store: None, memo: Default::default() }
+    }
+
+    fn key(op: Op, shape: OpShape) -> String {
+        format!("{:?}/{:?}/{}x{}x{}", op, shape.dtype, shape.m, shape.n, shape.k)
+    }
+
+    /// The measured-best variant for `(op, shape)`. `measure` returns the cost
+    /// (lower is better; typically milliseconds) of running one candidate, or
+    /// `None` if it could not be measured.
+    pub fn resolve(
+        &self,
+        op: Op,
+        shape: OpShape,
+        caps: &DeviceCaps,
+        measure: &mut dyn FnMut(KernelVariant) -> Option<f64>,
+    ) -> KernelVariant {
+        let cands = candidates(op, shape, caps);
+        if !self.enabled || cands.len() < 2 {
+            return cands[0];
+        }
+        if let Some(&hit) = self.memo.lock().unwrap().get(&(op, shape)) {
+            return hit;
+        }
+        let key = Self::key(op, shape);
+        if let Some(stored) = self.store.as_ref().and_then(|s| s.load(&key)) {
+            if let Some(v) = KernelVariant::from_str(&stored).filter(|v| cands.contains(v)) {
+                self.memo.lock().unwrap().insert((op, shape), v);
+                return v;
             }
-            // Device-independent: the split kernels have no barrier, so the
-            // boundary is purely the row length.
-            Op::ArgMaxRow => {
-                if shape.n >= ARGMAX_SPLIT_MIN_VOCAB {
-                    KernelVariant::SplitReduction
-                } else {
-                    KernelVariant::Reference
+        }
+        let mut best = cands[0];
+        let mut best_cost = f64::INFINITY;
+        for &c in &cands {
+            if let Some(cost) = measure(c) {
+                if cost < best_cost {
+                    best_cost = cost;
+                    best = c;
                 }
             }
         }
+        self.memo.lock().unwrap().insert((op, shape), best);
+        if let Some(s) = &self.store {
+            s.save(&key, best.as_str());
+        }
+        best
     }
 }
 
@@ -258,6 +377,80 @@ mod tests {
                 KernelVariant::Reference
             );
         }
+    }
+
+    /// The candidate list is never empty and its head IS the default policy —
+    /// one list, so the static choice and the tuner's probe set cannot drift.
+    #[test]
+    fn candidates_head_is_the_default_policy() {
+        let s = DefaultSelector;
+        for caps in [gpu_caps(), cpu_caps()] {
+            for op in [Op::MatMul, Op::RmsNorm, Op::ArgMaxRow] {
+                for m in [1u32, 8, 9, 33, 4096] {
+                    for dtype in [Dtype::F32, Dtype::I8] {
+                        let sh = shape(m, 8192, 512, dtype);
+                        let c = candidates(op, sh, &caps);
+                        assert!(!c.is_empty());
+                        assert_eq!(s.select(op, sh, &caps), c[0]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The tuner picks the measured minimum, measures each candidate exactly
+    /// once per shape (memoised after), persists the winner, and trusts a
+    /// stored value only if it is still a valid candidate today.
+    #[test]
+    fn autotuner_measures_once_and_persists() {
+        use std::sync::Mutex;
+        #[derive(Default)]
+        struct MapStore(Mutex<std::collections::HashMap<String, String>>);
+        impl TuneStore for MapStore {
+            fn load(&self, k: &str) -> Option<String> {
+                self.0.lock().unwrap().get(k).cloned()
+            }
+            fn save(&self, k: &str, v: &str) {
+                self.0.lock().unwrap().insert(k.into(), v.into());
+            }
+        }
+        let store = Box::leak(Box::new(MapStore::default()));
+        // (Deliberately reborrow as a plain reference impl for the Box.)
+        struct Ref(&'static MapStore);
+        impl TuneStore for Ref {
+            fn load(&self, k: &str) -> Option<String> {
+                self.0.load(k)
+            }
+            fn save(&self, k: &str, v: &str) {
+                self.0.save(k, v)
+            }
+        }
+        let t = AutoTuner { enabled: true, store: Some(Box::new(Ref(store))), memo: Default::default() };
+        let sh = shape(4, 512, 512, Dtype::I8); // static best: WorkgroupPerOutput
+        let caps = gpu_caps();
+        let mut calls = 0;
+        // The tile GEMM measures FASTER here, overriding the static guess.
+        let mut measure = |v: KernelVariant| {
+            calls += 1;
+            Some(if v == KernelVariant::PackedInt8 { 1.0 } else { 2.0 })
+        };
+        assert_eq!(t.resolve(Op::MatMul, sh, &caps, &mut measure), KernelVariant::PackedInt8);
+        assert_eq!(t.resolve(Op::MatMul, sh, &caps, &mut measure), KernelVariant::PackedInt8);
+        assert_eq!(calls, 2, "both candidates measured once; the second resolve is a memo hit");
+        // A fresh tuner sharing the store trusts the persisted winner without
+        // measuring at all.
+        let t2 = AutoTuner { enabled: true, store: Some(Box::new(Ref(store))), memo: Default::default() };
+        let mut no_measure = |_: KernelVariant| -> Option<f64> { panic!("stored winner must be reused") };
+        assert_eq!(t2.resolve(Op::MatMul, sh, &caps, &mut no_measure), KernelVariant::PackedInt8);
+        // Disabled tuner = the static policy, zero measurements.
+        let td = AutoTuner::disabled();
+        let mut no_measure2 =
+            |_: KernelVariant| -> Option<f64> { panic!("disabled tuner must not measure") };
+        assert_eq!(
+            td.resolve(Op::MatMul, sh, &caps, &mut no_measure2),
+            KernelVariant::WorkgroupPerOutput,
+            "disabled = the static best guess"
+        );
     }
 
     /// The memo consults its inner policy once per distinct (op, shape).
