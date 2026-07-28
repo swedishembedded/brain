@@ -688,6 +688,57 @@ mod tests {
     }
 
     #[test]
+    fn convunit_bn_backward_matches_finite_diff() {
+        // Full conv+BN+bias+GELU unit. ConvUnit's conv is train-mode (batch-stat BN),
+        // so Conv::backward's training-BN grads (bn_dstats/dx/dgamma/dbeta) must match
+        // finite differences that recompute the batch statistics.
+        let gpu = Gpu::new_cpu(PIPELINES);
+        let ctx = ctx(&gpu);
+        let in_shape = Shape::new(1, 4, 5, 5);
+        let unit = ConvUnit::new(&ctx, "cu", in_shape, 6, 3, 1, 1, 1, true, true, true);
+        let plist = unit.param_list();
+        let out_n = unit.out_shape().numel() as usize;
+        let mut rng = Rng::new(4);
+        let init = rand_init(&plist, &mut rng);
+        let x_host: Vec<f32> = (0..in_shape.numel() as usize).map(|_| (rng.next_f32() - 0.5) * 0.5).collect();
+
+        let ps = ParamStore::new(&gpu, plist.clone(), &init);
+        ps.zero_grads(&gpu);
+        let xb = gpu.storage_init("x", &x_host);
+        let _ = unit.forward(&ctx, &ps, &xb);
+        let d_out = gpu.storage_init("dout", &vec![1.0f32; out_n]);
+        let d_in = gpu.storage(in_shape.numel() as u64);
+        unit.backward(&ctx, &ps, &xb, &d_out, &d_in);
+        let g_in = gpu.read(&d_in, in_shape.numel() as usize);
+        let grads: HashMap<&str, Vec<f32>> = ["cu.conv.weight", "cu.bn.gamma", "cu.bn.beta", "cu.bias"].iter().map(|&k| (k, ps.read_grad(&gpu, k))).collect();
+
+        let loss = |im: &HashMap<String, Vec<f32>>, xh: &[f32]| -> f32 {
+            let ps = ParamStore::new(&gpu, plist.clone(), im);
+            let xb = gpu.storage_init("x", xh);
+            gpu.read(unit.forward(&ctx, &ps, &xb), out_n).iter().sum::<f32>()
+        };
+        let eps = 1e-3f32;
+        let ok = |a: f32, num: f32| (a - num).abs() <= 5e-3 + 8e-2 * num.abs();
+
+        for &i in &[0usize, 13, 40, 55, 77, 99] {
+            let (mut xp, mut xm) = (x_host.clone(), x_host.clone());
+            xp[i] += eps;
+            xm[i] -= eps;
+            let num = (loss(&init, &xp) - loss(&init, &xm)) / (2.0 * eps);
+            assert!(ok(g_in[i], num), "d_in[{i}]: analytic {} vs numeric {}", g_in[i], num);
+        }
+        for (key, idxs) in [("cu.conv.weight", &[0usize, 50, 200][..]), ("cu.bn.gamma", &[0, 3, 5]), ("cu.bn.beta", &[0, 3, 5]), ("cu.bias", &[0, 3, 5])] {
+            for &j in idxs {
+                let (mut ip, mut im) = (init.clone(), init.clone());
+                ip.get_mut(key).unwrap()[j] += eps;
+                im.get_mut(key).unwrap()[j] -= eps;
+                let num = (loss(&ip, &x_host) - loss(&im, &x_host)) / (2.0 * eps);
+                assert!(ok(grads[key][j], num), "d {key}[{j}]: analytic {} vs numeric {}", grads[key][j], num);
+            }
+        }
+    }
+
+    #[test]
     fn encoder_assembles_and_produces_tokens() {
         // Tiny 5-stage tower (1 block/stage), dims small but attention dims %32==0.
         let gpu = Gpu::new_cpu(PIPELINES);
