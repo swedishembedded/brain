@@ -22,6 +22,7 @@ default-members = [
     "crates/moe",
     "crates/gpt",
     "crates/qwen",
+    "crates/qwenvl",
     "crates/glm",
     "crates/seq2seq",
     "crates/autoencoder",

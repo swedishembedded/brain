@@ -1,0 +1,15 @@
+[package]
+name = "brain-qwenvl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Qwen3-VL: ViT vision encoder + PatchMerger + DeepStack over a spliced Qwen3 decoder (interleaved M-RoPE)."
+
+[lib]
+name = "qwenvl"
+path = "src/lib.rs"
+
+[dependencies]
+brain-qwen.workspace = true
+brain-model.workspace = true
+serde_json.workspace = true
