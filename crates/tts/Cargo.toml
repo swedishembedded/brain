@@ -10,6 +10,7 @@ name = "tts"
 path = "src/lib.rs"
 
 [dependencies]
+brain-capability.workspace = true
 brain-gpu-core.workspace = true
 brain-backend-cpu.workspace = true
 brain-kernels.workspace = true

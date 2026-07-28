@@ -13,6 +13,7 @@
 pub mod assign;
 pub mod blocks;
 pub mod boxmath;
+pub mod caps;
 pub mod config;
 pub mod head;
 pub mod infer;

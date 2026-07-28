@@ -54,6 +54,24 @@ pub fn generate_kv(
     eos: Option<u32>,
     rng: &mut Rng,
 ) -> Vec<u32> {
+    generate_kv_stream(model, prompt, max_new, temperature, top_k, eos, rng, &mut |_, _| {})
+}
+
+/// [`generate_kv`] with a per-token callback: `on_token(index, token)` fires as
+/// each token is accepted (before the next decode step), giving callers a true
+/// streaming timeline (TTFT/ITL) without re-implementing the decode loop. This
+/// IS the implementation; [`generate_kv`] delegates here with a no-op callback.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_kv_stream(
+    model: &Qwen,
+    prompt: &[u32],
+    max_new: usize,
+    temperature: f32,
+    top_k: usize,
+    eos: Option<u32>,
+    rng: &mut Rng,
+    on_token: &mut dyn FnMut(usize, u32),
+) -> Vec<u32> {
     let vocab = model.cfg.vocab as usize;
     let d = model.cfg.d_model as usize;
     let head = model.read_weight(model.cfg.head_weight()); // [vocab, d]
@@ -77,6 +95,7 @@ pub fn generate_kv(
             break;
         }
         out.push(next);
+        on_token(out.len() - 1, next);
         hidden = model.step(next);
     }
     out

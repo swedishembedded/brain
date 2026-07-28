@@ -424,6 +424,7 @@ name = "brain-depth"
 version = "0.1.0"
 dependencies = [
  "brain-backend-cpu",
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
@@ -754,6 +755,7 @@ dependencies = [
 name = "brain-qwen"
 version = "0.1.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
@@ -864,6 +866,7 @@ version = "0.1.0"
 dependencies = [
  "brain-audio",
  "brain-backend-cpu",
+ "brain-capability",
  "brain-checkpoint",
  "brain-codec",
  "brain-data",
@@ -984,6 +987,7 @@ dependencies = [
 name = "brain-yolo"
 version = "0.1.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-eval",

@@ -5,6 +5,7 @@
 //! the shared `gpu_core` engine (wgpu or the native CPU JIT). See `model.rs` for
 //! the forward/backprop dispatch graph and `config.rs` for the architecture.
 
+pub mod caps;
 pub mod config;
 pub mod import;
 pub mod init;

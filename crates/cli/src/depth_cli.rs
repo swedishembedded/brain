@@ -262,14 +262,11 @@ fn parse(args: &[String]) -> Opts {
 }
 
 
-/// Pick the ZipConfig by inspecting the checkpoint's own tensor names, so the user
-/// never has to match --variant to the file: `where_conv.*` -> blend (NPU) variant,
-/// `mask_pred.*` -> unfold (base) variant. A wrong --variant was the classic
-/// footgun ("11 tensors the model does not declare").
+/// Pick the ZipConfig by inspecting the checkpoint's own tensor names (see
+/// [`depth::cfg_for_checkpoint`]); an unreadable file falls back to the base
+/// variant so the strict importer reports the real error.
 fn cfg_for_checkpoint(weights: &str) -> ZipConfig {
-    let names = depth::import::tensor_names(weights).unwrap_or_default();
-    let blend = names.iter().any(|n| n.contains("where_conv"));
-    ZipConfig { upsample_unfold: !blend, ..ZipConfig::base() }
+    depth::cfg_for_checkpoint(weights).unwrap_or_else(|_| ZipConfig::base())
 }
 
 fn run_image(args: &[String]) {

@@ -23,7 +23,15 @@ use serde_json::{json, Value};
 /// Every model's static capability manifest (discovery — no weights). Add a model
 /// here and it appears in `brain caps` immediately.
 fn static_manifests() -> Vec<Manifest> {
-    vec![zimage::caps::manifest(), imageops::manifest(), DemoModel.manifest()]
+    vec![
+        zimage::caps::manifest(),
+        qwen::caps::manifest(),
+        yolo::caps::manifest(),
+        depth::caps::manifest(),
+        tts::caps::manifest(),
+        imageops::manifest(),
+        DemoModel.manifest(),
+    ]
 }
 
 /// Build a registry with **every** provider registered — for the long-lived
@@ -34,6 +42,10 @@ pub fn all_providers() -> Result<Registry, String> {
     reg.register(Arc::new(DemoModel));
     reg.register(Arc::new(imageops::ImageOps));
     reg.register(Arc::new(zimage::caps::ZImageProvider::load()?));
+    reg.register(Arc::new(qwen::caps::QwenProvider::new()));
+    reg.register(Arc::new(yolo::caps::YoloProvider::new()));
+    reg.register(Arc::new(depth::caps::DepthProvider::new()));
+    reg.register(Arc::new(tts::caps::TtsProvider::new()));
     Ok(reg)
 }
 
@@ -45,6 +57,10 @@ fn build_registry(model: &str) -> Result<Registry, String> {
         "demo" => reg.register(Arc::new(DemoModel)),
         "imageops" => reg.register(Arc::new(imageops::ImageOps)),
         zimage::caps::MODEL => reg.register(Arc::new(zimage::caps::ZImageProvider::load()?)),
+        qwen::caps::MODEL => reg.register(Arc::new(qwen::caps::QwenProvider::new())),
+        yolo::caps::MODEL => reg.register(Arc::new(yolo::caps::YoloProvider::new())),
+        depth::caps::MODEL => reg.register(Arc::new(depth::caps::DepthProvider::new())),
+        tts::caps::MODEL => reg.register(Arc::new(tts::caps::TtsProvider::new())),
         other => return Err(format!("unknown model '{other}' (see `brain caps`)")),
     }
     Ok(reg)

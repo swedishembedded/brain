@@ -12,6 +12,7 @@
 //! `crates/model::block` builders; the new structure is multi-codebook +
 //! text-projection embeddings, a dual-track step graph, and a KV-cache seam.
 
+pub mod caps;
 pub mod config;
 pub mod gen;
 pub mod gen_kv;

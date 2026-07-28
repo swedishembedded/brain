@@ -10,6 +10,7 @@
 //! planned as a second architecture behind the same contract; it is DROPPED.)
 
 pub mod blocks;
+pub mod caps;
 pub mod config;
 pub mod init;
 pub mod net;
@@ -26,7 +27,7 @@ pub mod model;
 pub use config::{pick_groups, GlobalMode, ZipConfig};
 pub use fuse::{fuse_qarep, Branch};
 pub use init::init_model as init_weights;
-pub use import::{load as load_checkpoint, load_into, tensor_names};
+pub use import::{cfg_for_checkpoint, load as load_checkpoint, load_into, tensor_names};
 pub use model::ZipDepth;
 pub use predict::Predictor;
 pub use quant::{collect_activation_stats, ActStatsCollector, LayerReport};

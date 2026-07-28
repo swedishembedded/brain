@@ -61,11 +61,9 @@ impl ResidentModel for DepthResident {
     }
     fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
         // Auto-detect the checkpoint variant from its own tensor names, exactly like
-        // `brain depth` (`where_conv.*` -> blend/npu upsampler, else unfold/base), so
-        // the strict importer's shapes match without the caller passing a variant.
-        let names = depth::import::tensor_names(&self.path).unwrap_or_default();
-        let blend = names.iter().any(|n| n.contains("where_conv"));
-        let cfg = ZipConfig { upsample_unfold: !blend, ..ZipConfig::base() };
+        // `brain depth` (see `depth::cfg_for_checkpoint`), so the strict importer's
+        // shapes match without the caller passing a variant.
+        let cfg = depth::cfg_for_checkpoint(&self.path).unwrap_or_else(|_| ZipConfig::base());
 
         // Build the engine once (honours the process backend / `--device`), and
         // import the weights once into a host-RAM map the instance keeps resident.
