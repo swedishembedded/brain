@@ -15,7 +15,10 @@
 
 pub mod config;
 pub mod encoder;
+pub mod model;
 pub mod mrope;
 pub mod vision;
+
+pub use model::Qwen3Vl;
 
 pub use config::{Qwen3VlConfig, VisionConfig};
