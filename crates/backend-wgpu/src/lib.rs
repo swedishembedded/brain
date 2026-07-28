@@ -19,10 +19,113 @@ use wgpu::util::DeviceExt;
 /// `num_workgroups`, so the split is transparent.
 pub type WgpuStep = (usize, wgpu::BindGroup, u32, u32);
 
+/// What adapter this process actually got. Captured the first time a backend is
+/// built, so callers can *record* it rather than only see it on stderr.
+///
+/// `software` is the load-bearing field: a box with no real GPU still serves
+/// `--device gpu` through a software rasteriser (llvmpipe/lavapipe/SwiftShader).
+/// A benchmark that reports such a run as a "GPU number" is worse than useless,
+/// so `brain perf` embeds this in every result artifact.
+#[derive(Clone, Debug)]
+pub struct AdapterDesc {
+    /// `"<name> (<device_type>, <backend>)"` — the same text `log_adapter` prints.
+    pub description: String,
+    pub name: String,
+    pub device_type: String,
+    pub backend: String,
+    pub software: bool,
+}
+
+static ADAPTER: std::sync::OnceLock<AdapterDesc> = std::sync::OnceLock::new();
+
+/// The instance options every backend is built from.
+///
+/// wgpu's default `InstanceFlags` are `from_build_config()`, which turns on
+/// `DEBUG | VALIDATION` whenever `debug_assertions` is set — so a plain
+/// `cargo test` / `make build` silently enables the Vulkan validation layers and
+/// `VK_EXT_debug_utils` object naming, while `make release` does not.
+///
+/// That divergence is not harmless: on a software Vulkan ICD (lavapipe, the only
+/// Vulkan device on a box with no real GPU) `vkSetDebugUtilsObjectNameEXT`
+/// faults inside the loader, so every debug-profile test that writes a buffer
+/// from more than one thread dies with SIGSEGV in `libvulkan.so.1`. Validation
+/// also costs real time in exactly the builds used for iterating.
+///
+/// So: opt **in**, never by default. `BRAIN_GPU_VALIDATION=1` restores the
+/// layers when you actually want them, and debug and release now build the same
+/// instance.
+fn instance_descriptor() -> wgpu::InstanceDescriptor {
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.flags = match std::env::var("BRAIN_GPU_VALIDATION") {
+        Ok(v) if v != "0" => wgpu::InstanceFlags::debugging(),
+        _ => wgpu::InstanceFlags::empty(),
+    };
+    desc
+}
+
+/// Serialises backend construction across threads.
+///
+/// Building a backend creates a `wgpu::Instance`, which enumerates **every**
+/// graphics backend — including GL via EGL. Mesa's EGL/GL loader is not safe to
+/// enter concurrently from several threads in one process: doing so faults
+/// inside the driver (seen as `MESA: error: ZINK: failed to choose pdev`
+/// followed by SIGSEGV) whenever more than one test thread builds a device at
+/// the same time. Device creation happens once per engine and never on a hot
+/// path, so serialising it costs nothing measurable and makes multi-threaded
+/// construction safe — which the test suite and any multi-model host both do.
+#[cfg(not(target_arch = "wasm32"))]
+fn init_lock() -> std::sync::MutexGuard<'static, ()> {
+    static INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A poisoned lock only means some other thread panicked while building a
+    // device; the data is `()`, so recovering is always correct.
+    INIT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The adapter this process selected, or `None` if no wgpu backend was built
+/// (e.g. a pure `--device cpu` run).
+pub fn adapter_desc() -> Option<AdapterDesc> {
+    ADAPTER.get().cloned()
+}
+
+/// How many **distinct physical discrete GPUs** this machine exposes.
+///
+/// Counted the same way the multi-GPU paths select cards: discrete adapters,
+/// narrowed to one graphics backend (Vulkan when present) so a single card
+/// enumerated once per backend is not counted twice.
+///
+/// Multi-GPU tests use this to *skip* rather than fault: without it they assume
+/// cards 0 and 1 exist and die inside the driver on any single-GPU or GPU-less
+/// box, which reads as a real failure and hides actual regressions.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn discrete_gpu_count() -> usize {
+    let _guard = init_lock();
+    pollster::block_on(async {
+        let instance = wgpu::Instance::new(instance_descriptor());
+        let mut adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
+        adapters.retain(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
+        if adapters.iter().any(|a| a.get_info().backend == wgpu::Backend::Vulkan) {
+            adapters.retain(|a| a.get_info().backend == wgpu::Backend::Vulkan);
+        }
+        adapters.len()
+    })
+}
+
+fn record_adapter(info: &wgpu::AdapterInfo) {
+    let _ = ADAPTER.set(AdapterDesc {
+        description: format!("{} ({:?}, {:?})", info.name, info.device_type, info.backend),
+        name: info.name.clone(),
+        device_type: format!("{:?}", info.device_type),
+        backend: format!("{:?}", info.backend),
+        // Cpu = a software rasteriser. Unknown adapters are not assumed real.
+        software: matches!(info.device_type, wgpu::DeviceType::Cpu),
+    });
+}
+
 /// Log the selected adapter. Native prints to stderr; wasm has no stderr, so it
 /// goes to the browser console.
 #[cfg(not(target_arch = "wasm32"))]
 fn log_adapter(info: &wgpu::AdapterInfo) {
+    record_adapter(info);
     // Several engine instances may be built in one process (the TTS pipeline makes
     // one per component); log the adapter line only once.
     static LOGGED: std::sync::Once = std::sync::Once::new();
@@ -30,6 +133,7 @@ fn log_adapter(info: &wgpu::AdapterInfo) {
 }
 #[cfg(target_arch = "wasm32")]
 fn log_adapter(info: &wgpu::AdapterInfo) {
+    record_adapter(info);
     web_sys::console::log_1(
         &format!("adapter: {} ({:?}, {:?})", info.name, info.device_type, info.backend).into(),
     );
@@ -121,12 +225,14 @@ impl WgpuBackend {
     /// On wasm the browser has no blocking executor, so use `new_async` instead.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new(kernels: &[(&str, &str)]) -> WgpuBackend {
+        let _guard = init_lock();
         pollster::block_on(WgpuBackend::new_async(kernels))
     }
 
     /// Blocking `count` backends on distinct physical cards (see [`new_multi_async`]).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn new_multi(kernels: &[(&str, &str)], count: usize) -> Vec<WgpuBackend> {
+        let _guard = init_lock();
         pollster::block_on(WgpuBackend::new_multi_async(kernels, count))
     }
 
@@ -134,7 +240,7 @@ impl WgpuBackend {
     /// both targets: native wraps it in `pollster::block_on` (see `new`), wasm
     /// awaits it from the wasm-bindgen entry point.
     pub async fn new_async(kernels: &[(&str, &str)]) -> WgpuBackend {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(instance_descriptor());
         // `BRAIN_GPU_INDEX=<i>` pins a specific physical GPU (the box has two
         // Tesla P40s); without it the high-performance default is used. This is
         // what lets one process drive card 0 and another card 1, and is the hook
@@ -190,7 +296,7 @@ impl WgpuBackend {
     /// `adapters[i]` → distinct physical card.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn new_multi_async(kernels: &[(&str, &str)], count: usize) -> Vec<WgpuBackend> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(instance_descriptor());
         let mut adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
         adapters.retain(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
         if adapters.iter().any(|a| a.get_info().backend == wgpu::Backend::Vulkan) {
