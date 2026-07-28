@@ -138,7 +138,7 @@ mod tests {
         };
         let tw: HashMap<String, Vec<f32>> = tc.param_list().into_iter().map(|(k, s)| (k, rnd(s.iter().product()))).collect();
         let dw: HashMap<String, Vec<f32>> = dc.param_list().into_iter().map(|(k, s)| (k, rnd(s.iter().product()))).collect();
-        (KronosModel::from_weights(tc, &tw, dc, &dw).unwrap(), dw)
+        (KronosModel::from_weights_on(gpu_core::testgpu::dev(crate::nn::PIPELINES), tc, &tw, dc, &dw).unwrap(), dw)
     }
 
     fn synth_series(ticker: &str, n: usize) -> Series {

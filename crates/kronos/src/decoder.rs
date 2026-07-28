@@ -38,7 +38,15 @@ impl KronosDecoder {
         cfg: KronosConfig,
         weights: &HashMap<String, Vec<f32>>,
     ) -> Result<KronosDecoder, String> {
-        let gpu = Gpu::new(nn::PIPELINES);
+        Self::from_weights_on(Gpu::new(nn::PIPELINES), cfg, weights)
+    }
+
+    /// Build on an existing device handle — see `KronosTokenizer::from_weights_on`.
+    pub fn from_weights_on(
+        gpu: Gpu,
+        cfg: KronosConfig,
+        weights: &HashMap<String, Vec<f32>>,
+    ) -> Result<KronosDecoder, String> {
         let w = nn::load_weights(&gpu, &cfg.param_list(), weights)?;
         let get = |name: &str| -> Result<Vec<f32>, String> {
             weights.get(name).cloned().ok_or_else(|| format!("kronos: missing {name}"))
@@ -549,7 +557,7 @@ mod tests {
         let cfg = KronosConfig::tiny();
         let weights: HashMap<String, Vec<f32>> =
             cfg.param_list().into_iter().map(|(k, s)| (k, vec![0.0; s.iter().product()])).collect();
-        KronosDecoder::from_weights(cfg, &weights).unwrap()
+        KronosDecoder::from_weights_on(gpu_core::testgpu::dev(crate::nn::PIPELINES), cfg, &weights).unwrap()
     }
 
     #[test]
@@ -607,7 +615,7 @@ mod tests {
             };
             map.insert(name, v);
         }
-        KronosDecoder::from_weights(cfg.clone(), &map).unwrap()
+        KronosDecoder::from_weights_on(gpu_core::testgpu::dev(crate::nn::PIPELINES), cfg.clone(), &map).unwrap()
     }
 
     fn maxabs(a: &[f32], b: &[f32]) -> f32 {

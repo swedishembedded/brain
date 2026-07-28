@@ -231,7 +231,7 @@ mod tests {
             tc.param_list().into_iter().map(|(k, s)| (k, vec![0.0; s.iter().product()])).collect();
         let dw: HashMap<String, Vec<f32>> =
             dc.param_list().into_iter().map(|(k, s)| (k, vec![0.0; s.iter().product()])).collect();
-        KronosModel::from_weights(tc, &tw, dc, &dw).unwrap()
+        KronosModel::from_weights_on(gpu_core::testgpu::dev(crate::nn::PIPELINES), tc, &tw, dc, &dw).unwrap()
     }
 
     fn ohlcv_panel(t: usize) -> Panel {

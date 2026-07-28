@@ -59,7 +59,11 @@ impl CpuBuffer {
 }
 
 /// The CPU compute backend.
-pub struct CpuBackend {
+/// The compiled, shareable state of a CPU backend. The CPU backend executes
+/// eagerly — there is no per-handle command stream — so a second handle
+/// ([`CpuBackend::share`], the `Backend::share` contract) is nothing but
+/// another `Arc` onto this.
+struct CpuShared {
     jit: Jit,
     threads: usize,
     /// Kernel names in index order (mirrors the registry passed to `new`), used
@@ -74,6 +78,10 @@ pub struct CpuBackend {
     /// dispatcher needs it for two things: laying out the same grid the GPU
     /// backends do, and turning that grid back into an invocation count.
     wgsizes: Vec<u32>,
+}
+
+pub struct CpuBackend {
+    shared: std::sync::Arc<CpuShared>,
 }
 
 /// Indices of the kernels that have a native CPU fast path (see `fast_conv` /
@@ -129,7 +137,7 @@ impl CpuBackend {
     /// Kernel `kind`'s declared workgroup size.
     #[inline]
     fn wgsize(&self, kind: usize) -> u32 {
-        self.wgsizes.get(kind).copied().unwrap_or(backend_api::DEFAULT_WORKGROUP_SIZE)
+        self.shared.wgsizes.get(kind).copied().unwrap_or(backend_api::DEFAULT_WORKGROUP_SIZE)
     }
 
     pub fn new(kernels: &[(&str, &str)]) -> CpuBackend {
@@ -182,7 +190,9 @@ impl CpuBackend {
             }
         };
         let wgsizes = backend_api::workgroup_sizes(kernels);
-        CpuBackend { jit, threads, names, profile, fast, wgsizes }
+        CpuBackend {
+            shared: std::sync::Arc::new(CpuShared { jit, threads, names, profile, fast, wgsizes }),
+        }
     }
 
     pub fn storage(&self, n: u64) -> CpuBuffer {
@@ -267,7 +277,7 @@ impl CpuBackend {
             let total = (*gx as u64) * (*gy as u64) * self.wgsize(*kind) as u64;
             let uniform = bg.uniform.base_ptr() as *const u32;
             let bufs: Vec<*mut u8> = bg.bufs.iter().map(|(b, off)| unsafe { b.base_ptr().add(off * 4) }).collect();
-            if let Some(prof) = &self.profile {
+            if let Some(prof) = &self.shared.profile {
                 let t = std::time::Instant::now();
                 self.dispatch(*kind, total, *gx, *gy, uniform, &bufs);
                 let dt = t.elapsed();
@@ -283,7 +293,7 @@ impl CpuBackend {
     /// Print the accumulated per-kernel timing breakdown (only if `BRAIN_PROFILE`
     /// was set). Sorted by total time descending.
     pub fn dump_profile(&self) {
-        let Some(prof) = &self.profile else { return };
+        let Some(prof) = &self.shared.profile else { return };
         let g = prof.lock().unwrap();
         let mut rows: Vec<(usize, std::time::Duration, u64)> =
             g.iter().enumerate().map(|(i, (d, c))| (i, *d, *c)).filter(|r| r.2 > 0).collect();
@@ -293,7 +303,7 @@ impl CpuBackend {
         for (i, d, c) in rows {
             eprintln!(
                 "  {:<16} {:8.1} ms  {:5} calls  ({:4.1}%)",
-                self.names[i],
+                self.shared.names[i],
                 d.as_secs_f64() * 1e3,
                 c,
                 d.as_secs_f64() / total.as_secs_f64().max(1e-9) * 100.0,
@@ -318,7 +328,7 @@ impl CpuBackend {
         // the one-invocation-per-element JIT loop. Anything else falls through to
         // the JIT below. All `unsafe` here reconstructs slices from the bound
         // storage bases, each sized to its tensor by the model.
-        let f = &self.fast;
+        let f = &self.shared.fast;
         // matmul{,_tiled,_reg}.wgsl: out[M,N] = A[M,K] @ B[N,K]^T.
         // params = [m, k, n]; bufs = [A, B, out]. Same math for all three; the
         // tiled/register-tiled kernels are GPU-only (multi-barrier work-group
@@ -551,21 +561,21 @@ impl CpuBackend {
         }
         // ~8 chunks per thread for load balance on divergent kernels (e.g. the
         // softmax row-loops whose trip count varies with the causal mask).
-        let span = (self.threads as u64 * 8).max(1);
+        let span = (self.shared.threads as u64 * 8).max(1);
         let mut chunk = total.div_ceil(span).max(1);
         // Work-group kernels (workgroup memory + barriers) must be handed whole
         // workgroups per chunk — a workgroup's invocations share scratch and a
         // barrier, so a chunk boundary may not fall mid-workgroup. Round the chunk
         // up to a multiple of the work-group size (the dispatch `total` is already
         // a whole number of workgroups).
-        if let Some(wg) = self.jit.workgroup_size(kind) {
+        if let Some(wg) = self.shared.jit.workgroup_size(kind) {
             let wg = wg as u64;
             chunk = chunk.div_ceil(wg) * wg;
         }
         let starts: Vec<u64> = (0..total).step_by(chunk as usize).collect();
         let uni = SendConst(uniform);
         let bufs_ptr = SendMut(bufs.as_ptr());
-        let jit = &self.jit;
+        let jit = &self.shared.jit;
         starts.par_iter().for_each(|&s| {
             // Rebind whole wrappers so the closure captures the `Send` newtypes,
             // not their raw-pointer fields (Rust 2021 disjoint capture).
@@ -597,7 +607,25 @@ unsafe impl Sync for SendMut {}
 
 /// Neutral-handle bridge: downcast the opaque [`DeviceBuffer`]/[`Step`] back to
 /// `CpuBuffer`/[`CpuStep`] and delegate to the inherent methods.
+
+/// Weak handle onto the compiled JIT state — `backend_api::Backend::downgrade`.
+struct WeakCpu(std::sync::Weak<CpuShared>);
+
+impl backend_api::WeakBackend for WeakCpu {
+    fn upgrade(&self) -> Option<Box<dyn Backend>> {
+        Some(Box::new(CpuBackend { shared: self.0.upgrade()? }))
+    }
+}
+
 impl Backend for CpuBackend {
+    fn share(&self) -> Option<Box<dyn Backend>> {
+        // Eager execution, no per-handle stream: sharing is an Arc clone.
+        Some(Box::new(CpuBackend { shared: self.shared.clone() }))
+    }
+    fn downgrade(&self) -> Option<Box<dyn backend_api::WeakBackend>> {
+        Some(Box::new(WeakCpu(std::sync::Arc::downgrade(&self.shared))))
+    }
+
     fn storage(&self, n: u64) -> DeviceBuffer {
         DeviceBuffer::new(CpuBackend::storage(self, n))
     }

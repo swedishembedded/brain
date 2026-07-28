@@ -56,6 +56,19 @@ static ADAPTER: std::sync::OnceLock<AdapterDesc> = std::sync::OnceLock::new();
 /// instance.
 fn instance_descriptor() -> wgpu::InstanceDescriptor {
     let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    // PRIMARY (Vulkan/Metal/DX12/WebGPU) — never the GL fallback. brain reaches
+    // old GPUs through Vulkan and browsers through WebGPU, so GL adds nothing;
+    // enumerating it initialises EGL, and the EGL driver cores are the crash
+    // site of two distinct suite failures: Mesa's loader faulted under
+    // concurrent debug-build init (lavapipe, SIGSEGV in libvulkan), and
+    // NVIDIA's eglcore worker thread ("[vkps] Update") segfaulted
+    // intermittently while tests ran concurrently. BRAIN_GPU_GL=1 restores the
+    // old behaviour if a GL-only machine ever actually needs it.
+    desc.backends = if std::env::var("BRAIN_GPU_GL").as_deref() == Ok("1") {
+        wgpu::Backends::all()
+    } else {
+        wgpu::Backends::PRIMARY
+    };
     desc.flags = match std::env::var("BRAIN_GPU_VALIDATION") {
         Ok(v) if v != "0" => wgpu::InstanceFlags::debugging(),
         _ => wgpu::InstanceFlags::empty(),
@@ -101,7 +114,7 @@ pub fn discrete_gpu_count() -> usize {
     let _guard = init_lock();
     pollster::block_on(async {
         let instance = wgpu::Instance::new(instance_descriptor());
-        let mut adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
+        let mut adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY).await;
         adapters.retain(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
         if adapters.iter().any(|a| a.get_info().backend == wgpu::Backend::Vulkan) {
             adapters.retain(|a| a.get_info().backend == wgpu::Backend::Vulkan);
@@ -149,8 +162,24 @@ fn log_adapter(info: &wgpu::AdapterInfo) {
 /// futex wait) and made every model activation pay a full device init. One
 /// process now builds this once per distinct kernel set and shares it.
 struct DeviceShared {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    // ManuallyDrop so teardown can control ORDER and LOCKING: everything —
+    // pipelines, queue, device — is destroyed inside `drop` under the same lock
+    // that guards creation. Dropping a device while its driver worker thread
+    // ("[vkps] Update") is still optimising pipelines, or while another thread
+    // creates on a sibling device, segfaults this NVIDIA driver.
+    device: std::mem::ManuallyDrop<wgpu::Device>,
+    queue: std::mem::ManuallyDrop<wgpu::Queue>,
+    /// Serialises submission and readback across every handle on this device.
+    ///
+    /// One device, one lane — the same policy the residency executor applies at
+    /// the scheduling layer. Mechanically: this NVIDIA driver's worker threads
+    /// ("[vkps] Update") segfault intermittently under concurrent
+    /// submit + poll(wait) from many host threads on one device, and many
+    /// devices per process instead deadlocks it. Serialising the short
+    /// encode/submit/poll critical sections is cheap (production serving drives
+    /// the GPU from one scheduler thread anyway) and makes multi-threaded use —
+    /// the test suite, multi-model hosts — safe on this driver.
+    io: std::sync::Mutex<()>,
     pipelines: Vec<wgpu::ComputePipeline>,
     /// Each kernel's declared `@workgroup_size` (parallel to `pipelines`). Almost
     /// every kernel is the engine's default 64; the register-tiled GEMMs use 256.
@@ -163,6 +192,112 @@ struct DeviceShared {
     /// Pure observability — the non-profiling flush path is untouched.
     #[cfg(not(target_arch = "wasm32"))]
     gpu_profile: Option<GpuProfile>,
+}
+
+impl DeviceShared {
+    /// Compile `kernels` into pipelines on an existing device+queue. Used both
+    /// when a device is first created and by [`WgpuBackend::new_like`], which
+    /// compiles a *different* kernel set onto the **same** device —
+    /// `wgpu::Device` is a cheap Arc-backed handle, so cloning it refers to the
+    /// same underlying device, never a second one on the card.
+    fn compile(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        kernels: &[(&str, &str)],
+        want_ts: bool,
+    ) -> DeviceShared {
+        // BRAIN_GPU_CHECKED=1 restores wgpu's runtime bounds checks for kernel
+        // debugging; the default trusts the kernels — no clamp instruction on
+        // every buffer load/store — matching the CPU backend, whose Cranelift
+        // JIT has always run with `MemFlags::trusted()`. The safety argument is
+        // the same on both backends: every kernel self-bounds on its uniform
+        // (`if (idx >= total) return`) and buffer sizes are fixed by the model.
+        let checked = std::env::var("BRAIN_GPU_CHECKED").map(|v| v != "0").unwrap_or(false);
+        let runtime_checks = if checked {
+            wgpu::ShaderRuntimeChecks::checked()
+        } else {
+            wgpu::ShaderRuntimeChecks::unchecked()
+        };
+        let pipelines = kernels
+            .iter()
+            .map(|(name, src)| {
+                // SAFETY: kernels self-bound on their uniform and contain no
+                // unbounded loops (every loop is counted by a uniform field);
+                // buffer sizes are fixed by the model — the identical contract
+                // the CPU JIT has always relied on with `MemFlags::trusted()`.
+                let module = unsafe {
+                    device.create_shader_module_trusted(
+                        wgpu::ShaderModuleDescriptor {
+                            label: Some(name),
+                            source: wgpu::ShaderSource::Wgsl((*src).into()),
+                        },
+                        runtime_checks,
+                    )
+                };
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(name),
+                    layout: None,
+                    module: &module,
+                    entry_point: Some("main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    cache: None,
+                })
+            })
+            .collect();
+        #[cfg(not(target_arch = "wasm32"))]
+        let gpu_profile = if want_ts {
+            Some(GpuProfile {
+                names: kernels.iter().map(|(n, _)| n.to_string()).collect(),
+                period_ns: queue.get_timestamp_period(),
+                acc: std::sync::Mutex::new(vec![(0.0, 0); kernels.len()]),
+            })
+        } else {
+            None
+        };
+        #[cfg(target_arch = "wasm32")]
+        let _ = want_ts;
+        DeviceShared {
+            device: std::mem::ManuallyDrop::new(device),
+            queue: std::mem::ManuallyDrop::new(queue),
+            io: std::sync::Mutex::new(()),
+            pipelines,
+            wgsizes: backend_api::workgroup_sizes(kernels),
+            #[cfg(not(target_arch = "wasm32"))]
+            gpu_profile,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for DeviceShared {
+    fn drop(&mut self) {
+        // Tear down under the same lock that guards creation, in a safe order:
+        // drain the queue, drop the pipelines, then the queue, then the device.
+        // Without the drain + serialisation, destroying a device races the
+        // driver's background pipeline-optimiser thread and other threads'
+        // device-level calls — observed as intermittent SIGSEGV in
+        // "[vkps] Update" while the test suite ran concurrently.
+        let _guard = init_lock();
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        self.pipelines.clear();
+        // SAFETY: drop() runs exactly once; the fields are never used again.
+        unsafe {
+            std::mem::ManuallyDrop::drop(&mut self.queue);
+            std::mem::ManuallyDrop::drop(&mut self.device);
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for DeviceShared {
+    fn drop(&mut self) {
+        // SAFETY: drop() runs exactly once; no locking needed on wasm (single
+        // threaded) and no driver worker to race.
+        unsafe {
+            std::mem::ManuallyDrop::drop(&mut self.queue);
+            std::mem::ManuallyDrop::drop(&mut self.device);
+        }
+    }
 }
 
 /// The wgpu compute device: a handle onto a shared [`DeviceShared`] plus **its
@@ -276,6 +411,31 @@ impl WgpuBackend {
     /// The command stream stays per handle: `submit` batches dispatches and
     /// `flush` records the batch as one compute pass, so two handles sharing a
     /// pending list would interleave each other's batches.
+    /// A backend for a **different kernel set** on **this same device**: clones
+    /// the (Arc-backed) `wgpu::Device`/`Queue` handles and compiles the new
+    /// pipelines onto them. This is what lets one process hold every model's
+    /// pipelines on a single device instead of one device per model —
+    /// many concurrent devices on one card is what deadlocked the suite.
+    pub fn new_like_device(&self, kernels: &[(&str, &str)]) -> WgpuBackend {
+        // Serialised like `new`: pipeline creation is a device-level operation,
+        // and the NVIDIA driver's worker threads segfault under many concurrent
+        // pipeline-set compilations/teardowns on one device.
+        let _guard = init_lock();
+        let profile_on = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
+        #[cfg(not(target_arch = "wasm32"))]
+        let want_ts = profile_on && self.shared.gpu_profile.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let want_ts = false;
+        let shared = std::sync::Arc::new(DeviceShared::compile(
+            (*self.shared.device).clone(),
+            (*self.shared.queue).clone(),
+            kernels,
+            want_ts,
+        ));
+        let stats = profile_on.then(|| std::sync::atomic::AtomicU64::new(0));
+        WgpuBackend::from_shared(shared, stats)
+    }
+
     pub fn share_device(&self) -> WgpuBackend {
         let stats =
             self.stats.as_ref().map(|_| std::sync::atomic::AtomicU64::new(0));
@@ -302,7 +462,7 @@ impl WgpuBackend {
         #[cfg(not(target_arch = "wasm32"))]
         let adapter = match forced {
             Some(i) => {
-                let mut adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
+                let mut adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY).await;
                 // Prefer discrete GPUs, stable order, then index into them.
                 adapters.retain(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
                 // `enumerate_adapters(all())` lists each physical card ONCE PER
@@ -350,7 +510,7 @@ impl WgpuBackend {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn new_multi_async(kernels: &[(&str, &str)], count: usize) -> Vec<WgpuBackend> {
         let instance = wgpu::Instance::new(instance_descriptor());
-        let mut adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
+        let mut adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY).await;
         adapters.retain(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
         if adapters.iter().any(|a| a.get_info().backend == wgpu::Backend::Vulkan) {
             adapters.retain(|a| a.get_info().backend == wgpu::Backend::Vulkan);
@@ -437,59 +597,9 @@ impl WgpuBackend {
         // its uniform (`if (idx >= total) return`), and buffer sizes are fixed
         // by the model at build time. The conv inner loops do ~1 load per
         // 2-3 FMAs, so the removed clamps are directly measurable.
-        let checked = std::env::var("BRAIN_GPU_CHECKED").map(|v| v != "0").unwrap_or(false);
-        let runtime_checks = if checked {
-            wgpu::ShaderRuntimeChecks::checked()
-        } else {
-            wgpu::ShaderRuntimeChecks::unchecked()
-        };
-        let pipelines = kernels
-            .iter()
-            .map(|(name, src)| {
-                // SAFETY: kernels self-bound on their uniform and contain no
-                // unbounded loops (every loop is counted by a uniform field);
-                // buffer sizes are fixed by the model — the identical contract
-                // the CPU JIT has always relied on with `MemFlags::trusted()`.
-                let module = unsafe {
-                    device.create_shader_module_trusted(
-                        wgpu::ShaderModuleDescriptor {
-                            label: Some(name),
-                            source: wgpu::ShaderSource::Wgsl((*src).into()),
-                        },
-                        runtime_checks,
-                    )
-                };
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(name),
-                    layout: None,
-                    module: &module,
-                    entry_point: Some("main"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    cache: None,
-                })
-            })
-            .collect();
-
         use std::sync::atomic::AtomicU64;
         let stats = if profile_on { Some(AtomicU64::new(0)) } else { None };
-        #[cfg(not(target_arch = "wasm32"))]
-        let gpu_profile = if want_ts {
-            Some(GpuProfile {
-                names: kernels.iter().map(|(n, _)| n.to_string()).collect(),
-                period_ns: queue.get_timestamp_period(),
-                acc: std::sync::Mutex::new(vec![(0.0, 0); kernels.len()]),
-            })
-        } else {
-            None
-        };
-        let shared = std::sync::Arc::new(DeviceShared {
-            device,
-            queue,
-            pipelines,
-            wgsizes: backend_api::workgroup_sizes(kernels),
-            #[cfg(not(target_arch = "wasm32"))]
-            gpu_profile,
-        });
+        let shared = std::sync::Arc::new(DeviceShared::compile(device, queue, kernels, want_ts));
         WgpuBackend::from_shared(shared, stats)
     }
 
@@ -510,18 +620,20 @@ impl WgpuBackend {
         }
     }
 
-    /// Record all pending dispatches into ONE compute pass and submit. Idempotent.
-    /// wgpu inserts the necessary inter-dispatch barriers within the pass, so the
-    /// per-block read-after-write dependencies are preserved.
-    fn share(&self) -> Option<Box<dyn Backend>> {
-        Some(Box::new(self.share_device()))
-    }
-
     fn max_storage_binding_bytes(&self) -> u64 {
         self.device().limits().max_storage_buffer_binding_size as u64
     }
 
+    /// Record all pending dispatches into ONE compute pass and submit. Idempotent.
+    /// wgpu inserts the necessary inter-dispatch barriers within the pass, so the
+    /// per-block read-after-write dependencies are preserved.
     fn flush(&self) {
+        let _io = self.shared.io.lock().unwrap_or_else(|e| e.into_inner());
+        self.flush_inner();
+    }
+
+    /// [`Self::flush`] body, with the device's io lock already held.
+    fn flush_inner(&self) {
         let steps: Vec<WgpuStep> = std::mem::take(&mut *self.pending.lock().unwrap());
         if steps.is_empty() {
             return;
@@ -788,7 +900,9 @@ impl WgpuBackend {
     pub fn write(&self, buf: &wgpu::Buffer, data: &[u32]) {
         // Flush pending compute first so a host write never races ahead of
         // dispatches recorded before it (queue order: prior compute, then write).
-        self.flush();
+        // One io hold across both, so another handle's submit cannot interleave.
+        let _io = self.shared.io.lock().unwrap_or_else(|e| e.into_inner());
+        self.flush_inner();
         self.queue().write_buffer(buf, 0, bytemuck::cast_slice(data));
     }
 
@@ -816,7 +930,8 @@ impl WgpuBackend {
         if self.stats.is_some() {
             self.stats_read.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        self.flush(); // ensure all recorded compute is queued before the copy
+        let _io = self.shared.io.lock().unwrap_or_else(|e| e.into_inner());
+        self.flush_inner(); // ensure all recorded compute is queued before the copy
         let staging = self.read_staging(buf, n);
         let slice = staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -873,7 +988,30 @@ impl WgpuBackend {
 /// `wgpu::Buffer`/[`WgpuStep`] and delegate to the inherent methods. Inherent
 /// methods take resolution priority, so `WgpuBackend::method(self, …)` is
 /// unambiguous.
+
+/// Weak handle onto a [`DeviceShared`] — see `backend_api::Backend::downgrade`.
+/// Holds no strong count, so the device still dies with its last real handle.
+struct WeakWgpu(std::sync::Weak<DeviceShared>);
+
+impl backend_api::WeakBackend for WeakWgpu {
+    fn upgrade(&self) -> Option<Box<dyn Backend>> {
+        let shared = self.0.upgrade()?;
+        let profile_on = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
+        let stats = profile_on.then(|| std::sync::atomic::AtomicU64::new(0));
+        Some(Box::new(WgpuBackend::from_shared(shared, stats)))
+    }
+}
+
 impl Backend for WgpuBackend {
+    fn share(&self) -> Option<Box<dyn Backend>> {
+        Some(Box::new(self.share_device()))
+    }
+    fn new_like(&self, kernels: &[(&str, &str)]) -> Option<Box<dyn Backend>> {
+        Some(Box::new(self.new_like_device(kernels)))
+    }
+    fn downgrade(&self) -> Option<Box<dyn backend_api::WeakBackend>> {
+        Some(Box::new(WeakWgpu(std::sync::Arc::downgrade(&self.shared))))
+    }
     fn storage(&self, n: u64) -> DeviceBuffer {
         DeviceBuffer::new(WgpuBackend::storage(self, n))
     }

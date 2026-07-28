@@ -70,7 +70,7 @@ const CONCAT2: usize = 38;
 const CONCAT_SPLIT: usize = 39;
 const AXPY: usize = 40;
 
-const PIPELINES: &[(&str, &str)] = &[
+pub(crate) const PIPELINES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
     ("rmsnorm", kernels::RMSNORM),
     ("rms_inv", kernels::RMS_INV),
@@ -344,7 +344,12 @@ impl KronosTrain {
     /// with `None` it is full-backprop. Adapter weights are seeded here (A small
     /// random, B zero → the initial LoRA delta is zero, so the model starts == base).
     pub fn with_lora(cfg: KronosConfig, t: u32, init: &HashMap<String, Vec<f32>>, lora: Option<LoraCfg>) -> KronosTrain {
-        let gpu = Gpu::new(PIPELINES);
+        Self::with_lora_on(Gpu::new(PIPELINES), cfg, t, init, lora)
+    }
+
+    /// Build on an existing device handle (`gpu_core::Gpu::share`) — one device
+    /// per process, however many trainers/evaluators a run constructs.
+    pub fn with_lora_on(gpu: Gpu, cfg: KronosConfig, t: u32, init: &HashMap<String, Vec<f32>>, lora: Option<LoraCfg>) -> KronosTrain {
         let d = cfg.d_model;
         // build the internal init (fusion split) then the ParamStore.
         let mut init2 = init.clone();
@@ -935,7 +940,10 @@ pub struct FinetuneReport {
 /// Fine-tune the Kronos decoder on `train`, then **promote only if the held-out
 /// `val` loss beats the untouched base model** — the walk-forward gate that makes
 /// a weekly update earn its place instead of chasing noise. Returns the report and,
-/// when promoted, the fine-tuned decoder weights (reference-named, ready to save).
+/// the fine-tuned decoder weights (reference-named). Returned unconditionally so
+/// the caller can also evaluate generalization on a non-promoted candidate;
+/// **save iff `report.promoted`** — the gate decision is the report, not the
+/// presence of weights.
 /// The tokenizer is not touched here (frozen upstream), matching the recipe.
 pub fn finetune(
     cfg: KronosConfig,
@@ -945,12 +953,15 @@ pub fn finetune(
     val: &[TokenBatch],
     opts: &FinetuneOpts,
 ) -> (FinetuneReport, Option<HashMap<String, Vec<f32>>>) {
-    let base_val = KronosTrain::new(cfg.clone(), t, base_init).mean_loss(val);
+    // One device for the whole finetune: base evaluation and the fine-tuned
+    // trainer share it instead of each building their own.
+    let dev = Gpu::new(PIPELINES);
+    let base_val = KronosTrain::with_lora_on(dev.share(), cfg.clone(), t, base_init, None).mean_loss(val);
     if opts.progress {
         eprintln!("  [finetune] base held-out loss {base_val:.4} · {} train / {} val windows · {} epoch(s)",
             train.len(), val.len(), opts.epochs);
     }
-    let ft = KronosTrain::with_lora(cfg, t, base_init, opts.lora.clone());
+    let ft = KronosTrain::with_lora_on(dev, cfg, t, base_init, opts.lora.clone());
     let total = (opts.epochs as usize * train.len()).max(1);
     let every = (total / 40).max(1);
     let t0 = std::time::Instant::now();

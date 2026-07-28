@@ -243,6 +243,25 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// A weak handle onto this backend's shared device state, for pools and
+    /// fixtures that must NOT keep the device alive: a device should die with
+    /// its last real handle (an orderly, in-process `vkDestroyDevice`), never
+    /// at process exit — a device torn down during exit crashes the NVIDIA
+    /// driver's worker threads. `None` when the backend has no shared state.
+    fn downgrade(&self) -> Option<Box<dyn WeakBackend>> {
+        None
+    }
+
+    /// A backend for a **different kernel set** on the **same device** — the
+    /// multi-model form of [`Backend::share`]. One process serving N models
+    /// wants one device carrying N pipeline sets, not N devices: many
+    /// concurrent devices on one card is both slow (a full device init each)
+    /// and hazardous (it deadlocked the test suite). `None` when the backend
+    /// has no shareable device; the caller then builds a fresh backend.
+    fn new_like(&self, _kernels: &[(&str, &str)]) -> Option<Box<dyn Backend>> {
+        None
+    }
+
     fn max_storage_binding_bytes(&self) -> u64 {
         2 * 1024 * 1024 * 1024 - 1
     }
@@ -296,6 +315,13 @@ pub trait GraphBackend: Sized {
     fn run(&mut self, input: &[f32], shape: [usize; 4]) -> Result<Self::Output, Self::Error>;
     /// The device this session actually resolved to (e.g. "NPU", or a fallback).
     fn device(&self) -> &str;
+}
+
+
+/// A weak reference to a backend's shared device state — see [`Backend::downgrade`].
+pub trait WeakBackend: ThreadSafe {
+    /// A fresh strong handle, if the device is still alive.
+    fn upgrade(&self) -> Option<Box<dyn Backend>>;
 }
 
 // ---- backend registry -------------------------------------------------------

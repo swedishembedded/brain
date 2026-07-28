@@ -14,6 +14,7 @@ use crate::config::{KronosConfig, KronosTokenizerConfig};
 use crate::decoder::KronosDecoder;
 use crate::preprocess;
 use crate::tokenizer::KronosTokenizer;
+use gpu_core::Gpu;
 use std::collections::HashMap;
 
 /// Sampling options for the rollout.
@@ -56,9 +57,24 @@ impl KronosModel {
         dec_cfg: KronosConfig,
         dec_w: &HashMap<String, Vec<f32>>,
     ) -> Result<KronosModel, String> {
+        // Tokenizer and decoder run the same kernel set, so they share ONE
+        // device: two handles, one device on the card.
+        Self::from_weights_on(Gpu::new(crate::nn::PIPELINES), tok_cfg, tok_w, dec_cfg, dec_w)
+    }
+
+    /// Build both nets on an existing device handle — one device per process,
+    /// however many models it loads.
+    pub fn from_weights_on(
+        gpu: Gpu,
+        tok_cfg: KronosTokenizerConfig,
+        tok_w: &HashMap<String, Vec<f32>>,
+        dec_cfg: KronosConfig,
+        dec_w: &HashMap<String, Vec<f32>>,
+    ) -> Result<KronosModel, String> {
+        let tok_gpu = gpu.share();
         Ok(KronosModel {
-            tokenizer: KronosTokenizer::from_weights(tok_cfg, tok_w)?,
-            decoder: KronosDecoder::from_weights(dec_cfg, dec_w)?,
+            tokenizer: KronosTokenizer::from_weights_on(tok_gpu, tok_cfg, tok_w)?,
+            decoder: KronosDecoder::from_weights_on(gpu, dec_cfg, dec_w)?,
         })
     }
 
@@ -306,7 +322,7 @@ mod tests {
             tc.param_list().into_iter().map(|(k, s)| (k, vec![0.0; s.iter().product()])).collect();
         let dw: HashMap<String, Vec<f32>> =
             dc.param_list().into_iter().map(|(k, s)| (k, vec![0.0; s.iter().product()])).collect();
-        KronosModel::from_weights(tc, &tw, dc, &dw).unwrap()
+        KronosModel::from_weights_on(gpu_core::testgpu::dev(crate::nn::PIPELINES), tc, &tw, dc, &dw).unwrap()
     }
 
     #[test]

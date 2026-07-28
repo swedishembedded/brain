@@ -264,10 +264,16 @@ fn milestone_e_promotion_gate() {
     assert!(rep.promoted && w.is_some(), "gate should promote a genuine improvement");
 
     // (2) no training (LoRA B=0 → ft == base) → NOT promoted (gate rejects noise).
+    // Weights still come back — the contract returns them unconditionally so a
+    // caller can evaluate generalization on a rejected candidate; the GATE
+    // decision is `promoted`, and the caller saves iff it is true.
     let opts0 = FinetuneOpts { epochs: 0, lr: 5e-3, wd: 0.0, clip: 3.0, lora: Some(LoraCfg::attn(4, 8.0)), progress: false };
     let (rep0, w0) = finetune(cfg, t, &init, &train, &val, &opts0);
     eprintln!("gate(noop): base_val {:.3} ft_val {:.3} promoted {}", rep0.base_val, rep0.ft_val, rep0.promoted);
-    assert!(!rep0.promoted && w0.is_none(), "gate must reject a non-improvement");
+    assert!(!rep0.promoted, "gate must reject a non-improvement");
+    assert!(w0.is_some(), "weights are returned for generalization eval even when rejected");
+    // A rejected no-op candidate must equal the base on held-out loss.
+    assert!((rep0.ft_val - rep0.base_val).abs() < 1e-6, "LoRA B=0 must leave the model == base");
 }
 
 #[test]

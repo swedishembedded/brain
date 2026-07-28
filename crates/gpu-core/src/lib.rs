@@ -30,6 +30,64 @@ pub mod devices;
 #[cfg(not(target_arch = "wasm32"))]
 pub use devices::{ComputeSet, DeviceSpec, Inventory};
 
+
+/// A process-wide device fixture for **test binaries** — explicit, documented,
+/// and torn down before exit.
+///
+/// libtest runs tests concurrently in one process, and each GPU test that
+/// builds its own `Gpu` puts another live device on the card. On the NVIDIA
+/// driver this box runs, that shape fails two ways, both measured:
+/// many concurrent devices deadlock (~50% of runs, every thread in futex
+/// wait), and a device *leaked in a static* at process exit segfaults the
+/// driver's worker thread during teardown — after every test has passed.
+///
+/// So: one parent device per test binary, one handle per kernel set via
+/// [`Gpu::new_like`], and an `atexit` hook that drops everything in an orderly
+/// fashion (drain, destroy pipelines, destroy device — under the same lock as
+/// creation) before the process tears the driver's threads down.
+///
+/// Production code must NOT use this: it states its sharing explicitly at its
+/// own call sites (`Gpu::share` / `Gpu::new_like`), and a process that exits
+/// drops its engines first.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod testgpu {
+    use super::{Gpu, WeakGpu};
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Keyed by the kernel slice's address: kernel sets are `'static` consts,
+    /// so the pointer is a stable identity.
+    static POOL: OnceLock<Mutex<HashMap<usize, WeakGpu>>> = OnceLock::new();
+
+    /// A handle for `kernels` on this test binary's shared device.
+    ///
+    /// The pool holds only **weak** references: the device stays alive exactly
+    /// as long as some test holds a handle, and dies in an orderly in-process
+    /// destruction with the last one. That lifecycle is the entire point — a
+    /// device that survives into process exit (leaked static) crashed the
+    /// driver's worker threads intermittently, and tearing one down from an
+    /// `atexit` hook crashed every run. Overlapping tests share one device;
+    /// a gap in the schedule lets it die and the next test rebuilds it.
+    pub fn dev(kernels: &'static [(&'static str, &'static str)]) -> Gpu {
+        let cell = POOL.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut map = cell.lock().unwrap_or_else(|e| e.into_inner());
+        let key = kernels.as_ptr() as usize;
+        if let Some(g) = map.get(&key).and_then(|w| w.upgrade()) {
+            return g;
+        }
+        // Any live entry can parent a new kernel set on the same device.
+        let parent = map.values().find_map(|w| w.upgrade());
+        let g = match parent {
+            Some(p) => p.new_like(kernels),
+            None => Gpu::new(kernels),
+        };
+        if let Some(w) = g.downgrade() {
+            map.insert(key, w);
+        }
+        g
+    }
+}
+
 // ---- native facade ----------------------------------------------------------
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -128,6 +186,23 @@ mod native_facade {
         });
     }
 
+
+    /// A weak `Gpu` handle: holds the device's compiled state without keeping it
+    /// alive. The point is lifecycle: a pooled device must die with its **last
+    /// real handle** — an orderly in-process destruction — because a device that
+    /// survives into process exit (leaked in a static, or torn down from an
+    /// `atexit` hook) crashes the NVIDIA driver's worker threads during
+    /// teardown. Measured on the test suite: in-test drops never crash; a
+    /// leaked static crashed intermittently; atexit teardown crashed every run.
+    pub struct WeakGpu(Box<dyn backend_api::WeakBackend>);
+
+    impl WeakGpu {
+        /// A fresh strong handle, if the device is still alive.
+        pub fn upgrade(&self) -> Option<Gpu> {
+            self.0.upgrade().map(|inner| Gpu { inner })
+        }
+    }
+
     /// The compute device: a runtime-selected eager backend behind a trait object.
     /// All are compiled in; a given instance uses exactly one. Adding a backend
     /// never touches this type — the dispatch just forwards to `self.inner`.
@@ -174,6 +249,33 @@ mod native_facade {
                     "this backend cannot share a device; build a new Gpu instead"
                 ),
             }
+        }
+
+        /// [`Gpu::share`] when the backend supports it, else a fresh build of
+        /// `kernels` — for callers that must work on every backend (the CPU JIT
+        /// has no shareable device; building fresh there is cheap and correct).
+        pub fn share_or_new(&self, kernels: &[(&str, &str)]) -> Gpu {
+            match self.inner.share() {
+                Some(inner) => Gpu { inner },
+                None => Gpu::new(kernels),
+            }
+        }
+
+        /// A `Gpu` for a **different kernel set** on the **same device** — how a
+        /// process holds many models on one card. Backends without a shareable
+        /// device (the CPU JIT compiles per kernel set anyway) just build fresh,
+        /// which is correct and cheap there.
+        pub fn new_like(&self, kernels: &[(&str, &str)]) -> Gpu {
+            match self.inner.new_like(kernels) {
+                Some(inner) => Gpu { inner },
+                None => Gpu::new(kernels),
+            }
+        }
+
+        /// A weak handle for pools/fixtures — see [`WeakGpu`]. `None` when the
+        /// backend has no shared state to weakly reference.
+        pub fn downgrade(&self) -> Option<WeakGpu> {
+            self.inner.downgrade().map(WeakGpu)
         }
 
         /// Build on the native CPU backend regardless of the default selection.
@@ -256,7 +358,7 @@ mod native_facade {
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_facade::{
     adapter_info, backend_name, backend_selected, discrete_gpu_count, set_default_backend, Backend,
-    Gpu,
+    Gpu, WeakGpu,
 };
 
 // ---- wasm facade ------------------------------------------------------------

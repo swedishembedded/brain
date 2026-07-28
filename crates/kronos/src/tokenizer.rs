@@ -23,7 +23,18 @@ impl KronosTokenizer {
         cfg: KronosTokenizerConfig,
         weights: &HashMap<String, Vec<f32>>,
     ) -> Result<KronosTokenizer, String> {
-        let gpu = Gpu::new(nn::PIPELINES);
+        Self::from_weights_on(Gpu::new(nn::PIPELINES), cfg, weights)
+    }
+
+    /// Build on an existing device handle (see `gpu_core::Gpu::share`) so a
+    /// process holds ONE device however many components it loads. One device per
+    /// component is both slow (a full device init each) and hazardous — many
+    /// concurrent devices on one card deadlocked the test suite.
+    pub fn from_weights_on(
+        gpu: Gpu,
+        cfg: KronosTokenizerConfig,
+        weights: &HashMap<String, Vec<f32>>,
+    ) -> Result<KronosTokenizer, String> {
         let w = nn::load_weights(&gpu, &cfg.param_list(), weights)?;
         Ok(KronosTokenizer { gpu, cfg, w })
     }
@@ -95,7 +106,7 @@ mod tests {
         let cfg = KronosTokenizerConfig::tiny();
         let weights: HashMap<String, Vec<f32>> =
             cfg.param_list().into_iter().map(|(k, s)| (k, vec![0.0; s.iter().product()])).collect();
-        KronosTokenizer::from_weights(cfg, &weights).unwrap()
+        KronosTokenizer::from_weights_on(gpu_core::testgpu::dev(crate::nn::PIPELINES), cfg, &weights).unwrap()
     }
 
     #[test]
