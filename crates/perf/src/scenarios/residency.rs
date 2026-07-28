@@ -108,13 +108,23 @@ pub struct Served {
     pub blocked_ms: f64,
 }
 
+/// One eviction: what it cost and whether it turned out to be wanted again.
+#[derive(Clone, Debug)]
+pub struct Eviction {
+    /// Bytes evicted — reload cost is proportional to this, which is why the
+    /// bytes-weighted regret is the number that matters: evicting a 200 MB
+    /// model that comes back is a nuisance, evicting a 4 GB one is an outage.
+    pub bytes: u64,
+    /// How long until that model was next requested (ms).
+    /// `None` = never requested again — a correct eviction.
+    pub until_rerequest_ms: Option<f64>,
+}
+
 /// Aggregate outcome.
 #[derive(Clone, Debug, Default)]
 pub struct Report {
     pub served: Vec<Served>,
-    /// Evictions, each with how long until that model was next requested (ms).
-    /// `None` = never requested again — a correct eviction.
-    pub evictions: Vec<Option<f64>>,
+    pub evictions: Vec<Eviction>,
     pub wall_s: f64,
     pub models: usize,
     pub budget_bytes: u64,
@@ -132,13 +142,31 @@ impl Report {
         (!self.served.is_empty())
             .then(|| self.served.iter().filter(|s| s.warm).count() as f64 / self.served.len() as f64)
     }
-    /// Evictions of a model that was wanted again almost immediately.
+    /// Evictions of a model that was wanted again almost immediately —
+    /// event-counted (every eviction weighs the same).
     pub fn eviction_regret(&self) -> Option<f64> {
         if self.evictions.is_empty() {
             return None;
         }
-        let bad = self.evictions.iter().filter(|e| matches!(e, Some(ms) if *ms <= 30_000.0)).count();
+        let bad = self.evictions.iter().filter(|e| Self::regretted(e)).count();
         Some(bad as f64 / self.evictions.len() as f64)
+    }
+
+    /// Regret weighted by the bytes each eviction throws away. This is the
+    /// number a cost-aware policy is supposed to move: at high overcommit
+    /// *some* evictions are inevitable (event counts saturate), but a good
+    /// policy makes the regretted ones the CHEAP ones.
+    pub fn eviction_regret_bytes(&self) -> Option<f64> {
+        let total: u64 = self.evictions.iter().map(|e| e.bytes).sum();
+        if total == 0 {
+            return None;
+        }
+        let bad: u64 = self.evictions.iter().filter(|e| Self::regretted(e)).map(|e| e.bytes).sum();
+        Some(bad as f64 / total as f64)
+    }
+
+    fn regretted(e: &Eviction) -> bool {
+        matches!(e.until_rerequest_ms, Some(ms) if ms <= 30_000.0)
     }
     /// Requests per second, per model — the input to fairness.
     pub fn per_model_rate(&self) -> Vec<f64> {
@@ -179,6 +207,7 @@ impl Report {
             "cold_ttfa_ms": cold.to_json(),
             "evictions": self.evictions.len(),
             "eviction_regret": self.eviction_regret().map(|v| Value::from(r3(v))).unwrap_or(Value::Null),
+            "eviction_regret_bytes": self.eviction_regret_bytes().map(|v| Value::from(r3(v))).unwrap_or(Value::Null),
             "blocked_behind_load_ms": r3(self.blocked_ms()),
             "per_model_fairness": self.fairness().map(|v| Value::from(r3(v))).unwrap_or(Value::Null),
             "models_never_served": self.per_model_rate().iter().filter(|r| **r == 0.0).count(),
@@ -198,9 +227,10 @@ pub fn render(r: &Report) -> String {
     );
     s.push_str(&format!("  warm TTFA p50 {} ms   cold TTFA p50 {} ms\n", f(&mut warm), f(&mut cold)));
     s.push_str(&format!(
-        "  hit-rate {}   eviction regret {}   fairness {}\n",
+        "  hit-rate {}   eviction regret {} (bytes-weighted {})   fairness {}\n",
         r.weight_cache_hit_rate().map(|v| format!("{:.1}%", v * 100.0)).unwrap_or_else(|| "—".into()),
         r.eviction_regret().map(|v| format!("{:.1}%", v * 100.0)).unwrap_or_else(|| "—".into()),
+        r.eviction_regret_bytes().map(|v| format!("{:.1}%", v * 100.0)).unwrap_or_else(|| "—".into()),
         r.fairness().map(|v| format!("{v:.3}")).unwrap_or_else(|| "—".into()),
     ));
     let starved = r.per_model_rate().iter().filter(|x| **x == 0.0).count();
@@ -279,12 +309,38 @@ mod tests {
         assert!(render(&r).contains("never served"));
     }
 
+    fn ev(bytes: u64, back_ms: Option<f64>) -> Eviction {
+        Eviction { bytes, until_rerequest_ms: back_ms }
+    }
+
     #[test]
     fn eviction_regret_distinguishes_cold_from_wrong() {
-        let cold = Report { evictions: vec![None, None], ..Default::default() };
+        let cold = Report { evictions: vec![ev(100, None), ev(100, None)], ..Default::default() };
         assert_eq!(cold.eviction_regret(), Some(0.0));
-        let wrong = Report { evictions: vec![Some(100.0), Some(200.0)], ..Default::default() };
+        let wrong =
+            Report { evictions: vec![ev(100, Some(100.0)), ev(100, Some(200.0))], ..Default::default() };
         assert_eq!(wrong.eviction_regret(), Some(1.0));
+    }
+
+    /// The metric a cost-aware policy is supposed to move: when the regretted
+    /// evictions are the cheap ones, bytes-weighted regret is low even though
+    /// event-counted regret says half of them were wrong.
+    #[test]
+    fn bytes_weighting_separates_cheap_regret_from_expensive() {
+        let good_policy = Report {
+            // Regrets only the 200 MB model; the 4 GB one stays correct.
+            evictions: vec![ev(200, Some(100.0)), ev(4000, None)],
+            ..Default::default()
+        };
+        let bad_policy = Report {
+            evictions: vec![ev(200, None), ev(4000, Some(100.0))],
+            ..Default::default()
+        };
+        // Event-counted: identical. Bytes-weighted: an order of magnitude apart.
+        assert_eq!(good_policy.eviction_regret(), bad_policy.eviction_regret());
+        let g = good_policy.eviction_regret_bytes().unwrap();
+        let b = bad_policy.eviction_regret_bytes().unwrap();
+        assert!(g < 0.05 && b > 0.9, "bytes must expose the difference: {g} vs {b}");
     }
 
     #[test]

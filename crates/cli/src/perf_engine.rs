@@ -29,13 +29,20 @@ pub fn run_startup(spec: &SynthSpec, runs: usize, opt: &Options) -> Result<Artif
 
     let mut cold = Vec::new();
     let mut warm = Vec::new();
+    // The first engine stays alive as the device parent: warm runs build on
+    // ITS device (`Engine::from_map_on`), which is the warm-start path a
+    // serving process actually uses.
+    let mut parent: Option<qwen::serve::Engine> = None;
     for i in 0..runs.max(1) {
         let mut w = startup::Watch::new();
         // Weight synthesis stands in for reading a checkpoint; it is the same
         // host-side work of materialising every parameter.
         let (cfg, weights) = spec.build_weights();
         w.weights_ready();
-        let mut eng = spec.build_engine(cfg, &weights);
+        let mut eng = match &parent {
+            None => spec.build_engine(cfg, &weights),
+            Some(p) => spec.build_engine_on(p, cfg, &weights),
+        };
         w.device_ready();
         let mut table = model_paged_table();
         let prompt: Vec<u32> = (0..spec.prefill_tokens()).map(|i| (i % spec.vocab as usize) as u32).collect();
@@ -43,11 +50,9 @@ pub fn run_startup(spec: &SynthSpec, runs: usize, opt: &Options) -> Result<Artif
         w.first_prefill_done();
         std::hint::black_box(&hidden);
         w.first_artifact();
-        // Every `Engine` builds its own `Gpu`, which recompiles every WGSL
-        // pipeline — so a second build in the same process is NOT warm. Both
-        // rows are reported, and the note explains why they match.
         if i == 0 {
             cold.push(w.timings);
+            parent = Some(eng);
         } else {
             warm.push(w.timings);
         }
@@ -55,12 +60,13 @@ pub fn run_startup(spec: &SynthSpec, runs: usize, opt: &Options) -> Result<Artif
 
     art.performance = startup::to_json(&cold, &warm);
     art.notes = Some(
-        "\"warm\" is a SECOND engine built in the same process, and it is expected \
-         to match \"cold\": every Engine constructs its own Gpu and recompiles \
-         every WGSL pipeline, so brain has no warm-start path today. A pipeline \
-         cache is what would separate these two rows — until then the second \
-         column is the evidence that nothing is being reused. Neither row \
-         includes process start or page-cache misses."
+        "\"warm\" is a second engine built ON THE FIRST ENGINE'S DEVICE \
+         (Engine::from_map_on): it pays weight upload and pipeline compilation \
+         but no device init. Cold additionally pays device init, and — where \
+         the driver supports Features::PIPELINE_CACHE — its pipeline creation \
+         is served from the persisted per-adapter cache after the first ever \
+         run on the machine. Neither row includes process start or page-cache \
+         misses."
             .into(),
     );
     Ok(art)
@@ -269,7 +275,9 @@ pub fn run_residency_with(opt: &Options, models: usize, over: f64, policy: &str)
     };
     let mut clock: u64 = 0;
     let started = Instant::now();
-    let mut evicted_at: std::collections::HashMap<usize, u64> = Default::default();
+    // Per victim: (clock at eviction, index of its entry in report.evictions),
+    // so a re-request resolves ITS OWN eviction — not whichever happened last.
+    let mut evicted_at: std::collections::HashMap<usize, (u64, usize)> = Default::default();
 
     for i in 0..requests {
         // Popularity shifts halfway, so the cache must re-converge rather than
@@ -309,8 +317,11 @@ pub fn run_residency_with(opt: &Options, models: usize, over: f64, policy: &str)
                     .expect("non-empty");
                 resident.retain(|m| *m != victim);
                 used -= catalog[victim].bytes;
-                evicted_at.insert(victim, clock);
-                report.evictions.push(None); // resolved below if re-requested
+                evicted_at.insert(victim, (clock, report.evictions.len()));
+                report.evictions.push(residency::Eviction {
+                    bytes: catalog[victim].bytes,
+                    until_rerequest_ms: None, // resolved below if re-requested
+                });
             }
             if used + catalog[pick].bytes <= budget {
                 resident.push(pick);
@@ -319,12 +330,12 @@ pub fn run_residency_with(opt: &Options, models: usize, over: f64, policy: &str)
             }
             // If it was evicted recently and is wanted again, that eviction was
             // regretted — this is the number that separates a small cache from a
-            // bad policy.
-            if let Some(t) = evicted_at.remove(&pick) {
+            // bad policy. Resolve the eviction OF THIS MODEL by its recorded
+            // index; writing to the most recent entry instead credited the
+            // regret to whichever model happened to be evicted last.
+            if let Some((t, idx)) = evicted_at.remove(&pick) {
                 let ago_ms = (clock - t) as f64 * 10.0;
-                if let Some(last) = report.evictions.last_mut() {
-                    *last = Some(ago_ms);
-                }
+                report.evictions[idx].until_rerequest_ms = Some(ago_ms);
             }
         }
         last_used.insert(pick, clock);

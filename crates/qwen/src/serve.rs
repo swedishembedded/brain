@@ -51,6 +51,13 @@ const ARGMAX_FINAL: usize = 19;
 // Decode-regime kernels: selected per dispatch by row count.
 const RMSNORM_ROWS: usize = 20;
 const MATMUL_GEMV: usize = 21;
+// Int8 weight path (A0): per-token activation quant + DP4A GEMMs with
+// per-token x per-channel dequant scales — the tile GEMM for prefill shapes,
+// the packed GEMV for decode row counts.
+const MAX_ABS_ROW: usize = 22;
+const QUANT_PACK: usize = 23;
+const MATMUL_I8_DYN: usize = 24;
+const MATMUL_I8_GEMV: usize = 25;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -75,6 +82,10 @@ const PIPELINES: &[(&str, &str)] = &[
     ("argmax_final", kernels::ARGMAX_FINAL),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("matmul_gemv", kernels::MATMUL_GEMV),
+    ("max_abs_row", kernels::MAX_ABS_ROW),
+    ("quant_pack", kernels::QUANT_PACK),
+    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
+    ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
 ];
 
 fn ids() -> KernelIds {
@@ -202,12 +213,21 @@ pub struct Engine {
     kv_int8: bool,
     scales_k: Vec<DeviceBuffer>,
     scales_v: Vec<DeviceBuffer>,
+    /// Int8 WEIGHT path (A0): the 7 per-layer linears quantized per-channel and
+    /// packed 4/u32 (~4x fewer weight bytes in the bandwidth-bound decode
+    /// regime), with per-token dynamic activation quant. `None` = fp32 weights
+    /// — always the case on a device whose caps report no packed-int8 path.
+    w8: Option<crate::q8::Q8>,
+    /// The int8-packed LM head (present iff `w8` is).
+    head8: Option<crate::q8::Lin8>,
     sc: Scratch,
     /// `[vocab, d]` tied/untied head, kept on the host for the prefill path
     /// (applied once per request) and for callers that need full logits.
     head: Vec<f32>,
-    /// The same head resident on the device, for the batched decode path.
-    head_dev: DeviceBuffer,
+    /// The same head resident on the device (fp32), for the batched decode
+    /// path. `None` when the head lives on the device as int8 (`head8`) —
+    /// keeping both resident would forfeit the memory the quantisation buys.
+    head_dev: Option<DeviceBuffer>,
     /// `[max_batch, vocab]` decode logits, and `[max_batch]` argmax indices.
     logits_dev: DeviceBuffer,
     argmax_dev: DeviceBuffer,
@@ -221,9 +241,45 @@ impl Engine {
     /// `num_blocks` physical blocks of `block_size` tokens, up to `max_batch`
     /// concurrent sequences of at most `max_blocks_per_seq * block_size` tokens.
     #[allow(clippy::too_many_arguments)]
-    pub fn from_map(cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool) -> Engine {
-        let gpu = Gpu::new(PIPELINES);
-        let roles = decoder_param_list(&cfg).into_iter().map(|(n, c)| (n, c, paramstore::Role::Frozen)).collect();
+    pub fn from_map(cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
+        Self::from_map_with_gpu(Gpu::new(PIPELINES), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
+    }
+
+    /// [`Engine::from_map`] on an EXISTING device (F1 warm start): the caller's
+    /// `Gpu` parents this engine via [`Gpu::new_like`], so building another
+    /// engine costs pipeline compilation only — never a second full device
+    /// init. This is what a serving process or the residency executor should
+    /// use: one device per process, many engines on it (many concurrent
+    /// devices on one card is both slow and hostile to the driver).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_map_on(parent: &Gpu, cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
+        Self::from_map_with_gpu(parent.new_like(PIPELINES), cfg, weights, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_map_with_gpu(gpu: Gpu, cfg: QwenConfig, weights: &HashMap<String, Vec<f32>>, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
+        // Int8 weights are capability-driven, never assumed: the request only
+        // takes effect where the packed-dot GEMM executes (the selector's
+        // PackedInt8 gate). Elsewhere — the CPU JIT — fp32 weights stay, and
+        // the fallback is said out loud rather than silently absorbed.
+        let caps = gpu.caps();
+        let w8_on = weights_int8
+            && DefaultSelector.select(
+                Op::MatMul,
+                OpShape { m: 1, n: cfg.d_model, k: cfg.d_model, dtype: Dtype::I8 },
+                &caps,
+            ) == KernelVariant::PackedInt8;
+        if weights_int8 && !w8_on {
+            eprintln!("serve: int8 weights requested but this device has no packed-int8 path; using fp32 weights");
+        }
+        // The 7 per-layer linears live in the int8 bank when it is on — loading
+        // them into the fp32 ParamStore as well would keep both copies resident
+        // and forfeit the memory the quantisation buys.
+        let roles = decoder_param_list(&cfg)
+            .into_iter()
+            .filter(|(n, _)| !(w8_on && crate::q8::Q8::is_i8_linear(n)))
+            .map(|(n, c)| (n, c, paramstore::Role::Frozen))
+            .collect();
         let ps = ParamStore::new_with_roles(&gpu, roles, weights);
         let head = weights.get(cfg.head_weight()).cloned().unwrap_or_else(|| weights.get("tok.weight").cloned().expect("head weight"));
 
@@ -284,16 +340,57 @@ impl Engine {
             off_buf: st(b),
             bt_buf: st(b * max_blocks_per_seq as u64),
         };
+        // Int8 weight bank: the 7 per-layer linears + the head, quantized once
+        // at build (per-channel scales) and packed 4/u32. Activation-quant
+        // scratch is sized for the widest input rows the forward ever sees —
+        // prefill chunks run through the same path as decode.
+        let (w8, head8) = if w8_on {
+            let (dm, ffm) = (cfg.d_model as usize, cfg.d_ff as usize);
+            let (hqm, hkvm) = (cfg.q_dim() as usize, cfg.kv_dim() as usize);
+            let dims = move |leaf: &str| -> (usize, usize) {
+                match leaf {
+                    "attn.wq.weight" => (hqm, dm),
+                    "attn.wk.weight" | "attn.wv.weight" => (hkvm, dm),
+                    "attn.wo.weight" => (dm, hqm),
+                    "mlp.gate.weight" | "mlp.up.weight" => (ffm, dm),
+                    "mlp.down.weight" => (dm, ffm),
+                    other => panic!("q8 dims: unknown linear {other}"),
+                }
+            };
+            let q8 = crate::q8::Q8::build(
+                &gpu,
+                weights,
+                0..cfg.n_layers as usize,
+                dims,
+                b as u32,
+                ff.max(hq).max(d) as u32,
+                MAX_ABS_ROW,
+                QUANT_PACK,
+                MATMUL_I8_DYN,
+            );
+            let (packed, sw) = crate::q8::quantize_weight(&head, cfg.vocab as usize, cfg.d_model as usize);
+            let pb = gpu.storage(packed.len() as u64);
+            gpu.write(&pb, &packed);
+            gpu.poll_wait();
+            let sb = gpu.storage(sw.len() as u64);
+            gpu.write(&sb, &sw.iter().map(|v| v.to_bits()).collect::<Vec<u32>>());
+            gpu.poll_wait();
+            let h8 = crate::q8::Lin8 { packed: pb, scale: sb, k: cfg.d_model, n: cfg.vocab };
+            (Some(q8), Some(h8))
+        } else {
+            (None, None)
+        };
         // Decode-side head. Sized by max_batch (NOT the prefill row count): only
         // decode rows need logits, and [max_prefill, vocab] would be gigabytes.
+        // fp32 head only when the int8 head is absent — never both resident.
         let vocab = cfg.vocab as u64;
-        let head_dev = gpu.storage_init("lm_head", &head);
+        let head_dev = if w8_on { None } else { Some(gpu.storage_init("lm_head", &head)) };
         let logits_dev = st(max_batch as u64 * vocab);
         let argmax_dev = st(max_batch as u64);
         let argmax_part_dev = st(max_batch as u64 * ARGMAX_CHUNKS as u64 * 2);
         Engine {
             cfg,
-            caps: gpu.caps(),
+            caps,
             gpu,
             selector: CachedSelector::new(DefaultSelector),
             ps,
@@ -308,6 +405,8 @@ impl Engine {
             kv_int8,
             scales_k,
             scales_v,
+            w8,
+            head8,
             sc,
             head,
             head_dev,
@@ -317,9 +416,11 @@ impl Engine {
         }
     }
 
-    /// Load a serving engine from a brain Qwen checkpoint (fp32 decode weights).
+    /// Load a serving engine from a brain Qwen checkpoint (fp32 tensors;
+    /// `weights_int8` quantizes the linears + head at load where the device
+    /// has a packed-int8 path).
     #[allow(clippy::too_many_arguments)]
-    pub fn load(path: &str, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool) -> Engine {
+    pub fn load(path: &str, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, weights_int8: bool) -> Engine {
         let c = checkpoint::load(path);
         let cfg = QwenConfig::from_json(&c.header["config"]);
         let mut map = HashMap::new();
@@ -332,7 +433,20 @@ impl Engine {
             let h = c.find(hw, "").cloned().unwrap_or_else(|| panic!("serve: checkpoint missing head {hw}"));
             map.insert(hw.to_string(), h);
         }
-        Engine::from_map(cfg, &map, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8)
+        Engine::from_map(cfg, &map, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
+    }
+
+    /// True when the decode path runs on int8 weights (the request survived the
+    /// device capability gate). What a caller should report, rather than what
+    /// was asked for.
+    pub fn weights_int8(&self) -> bool {
+        self.w8.is_some()
+    }
+
+    /// The device this engine runs on — the parent handle for building more
+    /// engines on the same device ([`Engine::from_map_on`]).
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
     }
 
     /// The model's vocabulary size (for a caller doing its own sampling).
@@ -417,6 +531,23 @@ impl Engine {
         }
     }
 
+    /// One int8 linear through the selector: the packed GEMV at decode row
+    /// counts (the 128x128 tile is mostly idle there — measured 78 tok/s vs
+    /// the fp32 GEMV's 127 at c=1), the tile GEMM at prefill shapes. Must be
+    /// preceded by a matching `Q8::quant` of the input.
+    fn mm8(&self, q8: &crate::q8::Q8, s: &mut Vec<Step>, w: &crate::q8::Lin8, out: &DeviceBuffer, rows: u32) {
+        let shape = OpShape { m: rows, n: w.n, k: w.k, dtype: Dtype::I8 };
+        match self.selector.select(Op::MatMul, shape, &self.caps) {
+            KernelVariant::WorkgroupPerOutput => s.push(self.gpu.step(
+                MATMUL_I8_GEMV,
+                &[&q8.xq, &w.packed, &q8.sx, &w.scale, out],
+                &[rows, w.k / 4, w.n],
+                w.n * 64,
+            )),
+            _ => q8.mm8(&self.gpu, s, w, out, rows),
+        }
+    }
+
     /// RMSNorm, choosing the workgroup-per-row kernel at decode row counts
     /// (the per-element kernel runs `rows` threads — 8 threads on a 3840-core
     /// card at batch 8, measured at 16.6% of decode time).
@@ -464,10 +595,20 @@ impl Engine {
         }
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
+            let l8 = self.w8.as_ref().map(|q8| (q8, &q8.layers[&l]));
             s.push(self.rms(&sc.res[l], w(&p("ln1.weight")), &sc.xn1, d, b));
-            s.push(self.mm(&sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, b, d, hq));
-            s.push(self.mm(&sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, b, d, hkv));
-            s.push(self.mm(&sc.xn1, w(&p("attn.wv.weight")), &sc.v, b, d, hkv));
+            if let Some((q8, lay)) = l8 {
+                // One activation quant per distinct input, shared by every
+                // linear reading it (xn1 -> q/k/v).
+                q8.quant(g, &mut s, &sc.xn1, d, b);
+                self.mm8(q8, &mut s, &lay.wq, &sc.q_pre, b);
+                self.mm8(q8, &mut s, &lay.wk, &sc.k_pre, b);
+                self.mm8(q8, &mut s, &lay.wv, &sc.v, b);
+            } else {
+                s.push(self.mm(&sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, b, d, hq));
+                s.push(self.mm(&sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, b, d, hkv));
+                s.push(self.mm(&sc.xn1, w(&p("attn.wv.weight")), &sc.v, b, d, hkv));
+            }
             s.push(block::rmsnorm_fwd(g, &kids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, b * nh));
             s.push(block::rmsnorm_fwd(g, &kids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, b * nkv));
             s.push(g.step(ROPE_PAGED, &[&sc.q, &sc.pos_buf], &[b, nh, hd, hq, fb(theta)], b * nh * half));
@@ -485,13 +626,27 @@ impl Engine {
                 s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
                 s.push(g.step(APPLY_B, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
             }
-            s.push(self.mm(&sc.ctx, w(&p("attn.wo.weight")), &sc.proj, b, hq, d));
+            if let Some((q8, lay)) = l8 {
+                q8.quant(g, &mut s, &sc.ctx, hq, b);
+                self.mm8(q8, &mut s, &lay.wo, &sc.proj, b);
+            } else {
+                s.push(self.mm(&sc.ctx, w(&p("attn.wo.weight")), &sc.proj, b, hq, d));
+            }
             s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[b * d], b * d));
             s.push(self.rms(&sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b));
-            s.push(self.mm(&sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, b, d, ff));
-            s.push(self.mm(&sc.xn2, w(&p("mlp.up.weight")), &sc.up, b, d, ff));
-            s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
-            s.push(self.mm(&sc.h, w(&p("mlp.down.weight")), &sc.mlp_out, b, ff, d));
+            if let Some((q8, lay)) = l8 {
+                q8.quant(g, &mut s, &sc.xn2, d, b);
+                self.mm8(q8, &mut s, &lay.gate, &sc.gate_pre, b);
+                self.mm8(q8, &mut s, &lay.up, &sc.up, b);
+                s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
+                q8.quant(g, &mut s, &sc.h, ff, b);
+                self.mm8(q8, &mut s, &lay.down, &sc.mlp_out, b);
+            } else {
+                s.push(self.mm(&sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, b, d, ff));
+                s.push(self.mm(&sc.xn2, w(&p("mlp.up.weight")), &sc.up, b, d, ff));
+                s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
+                s.push(self.mm(&sc.h, w(&p("mlp.down.weight")), &sc.mlp_out, b, ff, d));
+            }
             s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &sc.res[l + 1]], &[b * d], b * d));
         }
         let last = c.n_layers as usize;
@@ -536,27 +691,34 @@ impl Engine {
     fn greedy_from_hidden(&self, bsz: u32) -> Vec<u32> {
         let g = &self.gpu;
         let (d, v) = (self.cfg.d_model, self.cfg.vocab);
-        let mm = self.mm(&self.sc.xn_final, &self.head_dev, &self.logits_dev, bsz, d, v);
+        let mut steps: Vec<Step> = Vec::new();
+        match (&self.w8, &self.head8, &self.head_dev) {
+            // Int8 head: quantize the final hidden rows, DP4A GEMM into logits.
+            (Some(q8), Some(h8), _) => {
+                q8.quant(g, &mut steps, &self.sc.xn_final, d, bsz);
+                self.mm8(q8, &mut steps, h8, &self.logits_dev, bsz);
+            }
+            (_, _, Some(head_dev)) => {
+                steps.push(self.mm(&self.sc.xn_final, head_dev, &self.logits_dev, bsz, d, v));
+            }
+            _ => unreachable!("engine holds either an fp32 or an int8 head"),
+        }
         let argmax_shape = OpShape { m: bsz, n: v, k: 0, dtype: Dtype::F32 };
         if self.selector.select(Op::ArgMaxRow, argmax_shape, &self.caps)
             == KernelVariant::SplitReduction
         {
             let chunk = v.div_ceil(ARGMAX_CHUNKS);
-            let steps = [
-                mm,
-                g.step(
-                    ARGMAX_PART,
-                    &[&self.logits_dev, &self.argmax_part_dev],
-                    &[bsz, v, ARGMAX_CHUNKS, chunk],
-                    bsz * ARGMAX_CHUNKS,
-                ),
-                g.step(ARGMAX_FINAL, &[&self.argmax_part_dev, &self.argmax_dev], &[bsz, ARGMAX_CHUNKS], bsz),
-            ];
-            g.submit(&[], &steps);
+            steps.push(g.step(
+                ARGMAX_PART,
+                &[&self.logits_dev, &self.argmax_part_dev],
+                &[bsz, v, ARGMAX_CHUNKS, chunk],
+                bsz * ARGMAX_CHUNKS,
+            ));
+            steps.push(g.step(ARGMAX_FINAL, &[&self.argmax_part_dev, &self.argmax_dev], &[bsz, ARGMAX_CHUNKS], bsz));
         } else {
-            let steps = [mm, g.step(ARGMAX_ROW, &[&self.logits_dev, &self.argmax_dev], &[bsz, v], bsz)];
-            g.submit(&[], &steps);
+            steps.push(g.step(ARGMAX_ROW, &[&self.logits_dev, &self.argmax_dev], &[bsz, v], bsz));
         }
+        g.submit(&[], &steps);
         // Indices come back as f32 (exact below 2^24, far above any vocabulary).
         g.read(&self.argmax_dev, bsz as usize).into_iter().map(|x| x as u32).collect()
     }
@@ -1244,11 +1406,44 @@ mod tests {
         let ref1 = crate::sample::generate_kv(&model, &p1, 12, 0.0, 0, None, &mut r1);
 
         // Engine: run both prompts concurrently (batched paged).
-        let mut eng = Engine::from_map(cfg, &map, bs, num_blocks, max_batch, mbt, 32, false);
+        let mut eng = Engine::from_map(cfg, &map, bs, num_blocks, max_batch, mbt, 32, false, false);
         let out = eng.generate_greedy(&[p0.clone(), p1.clone()], 12, None);
 
         assert_eq!(out[0], ref0, "seq0 batched paged != reference");
         assert_eq!(out[1], ref1, "seq1 batched paged != reference");
+    }
+
+    /// Int8 weights (A0) must stay numerically faithful to the fp32 engine:
+    /// same weights, same prompt, and the final-norm hidden state after a
+    /// quantized prefill must sit within a few percent of the fp32 one. A
+    /// scale-handling bug (the realistic failure mode) produces ~100% error,
+    /// so the 10% gate separates cleanly while tolerating honest quant noise.
+    /// The stream-level greedy-agreement threshold lives in `brain perf`'s
+    /// fidelity gate, which measures it on real checkpoints.
+    #[test]
+    fn int8_weights_track_fp32() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let mut eng8 = Engine::from_map(cfg.clone(), &map, 4, 64, 2, 8, 32, false, true);
+        if !eng8.weights_int8() {
+            // Capability-gated fallback (CPU JIT): the engine must run fp32
+            // and say so — there is nothing further to compare here.
+            eprintln!("skipping int8 comparison: device has no packed-int8 path");
+            return;
+        }
+        let mut eng = Engine::from_map(cfg, &map, 4, 64, 2, 8, 32, false, false);
+        let prompt = vec![1u32, 5, 3, 9, 2, 7];
+        let mut t8 = BlockTable::new();
+        let h8 = eng8.prefill(&mut t8, &prompt);
+        let mut tf = BlockTable::new();
+        let hf = eng.prefill(&mut tf, &prompt);
+        let dot_err: f32 = h8.iter().zip(&hf).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
+        let norm: f32 = hf.iter().map(|v| v * v).sum::<f32>().sqrt();
+        let rel = dot_err / norm.max(1e-12);
+        assert!(rel < 0.10, "int8 hidden state diverged from fp32: relative L2 {rel:.4}");
+        // And the engine still decodes end-to-end on the int8 path.
+        let out = eng8.generate_greedy(&[prompt], 8, None);
+        assert_eq!(out[0].len(), 8, "int8 engine must produce the requested tokens");
     }
 
     /// A request too long for the engine must be REJECTED, not crash the process
@@ -1260,7 +1455,7 @@ mod tests {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
         // capacity = max_blocks_per_seq(4) * block_size(4) = 16 tokens.
-        let eng = Engine::from_map(cfg, &map, 4, 64, 2, 4, 8, false);
+        let eng = Engine::from_map(cfg, &map, 4, 64, 2, 4, 8, false, false);
         assert_eq!(eng.max_seq_len(), 16);
         let mut sched = Scheduler::new(eng, 2);
 
@@ -1284,7 +1479,7 @@ mod tests {
     fn admission_policy_rejects_and_reports() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        let eng = Engine::from_map(cfg, &map, 4, 96, 2, 12, 8, false);
+        let eng = Engine::from_map(cfg, &map, 4, 96, 2, 12, 8, false, false);
         let mut sched = Scheduler::new(eng, 2);
         sched.set_admission(Box::new(MaxQueueDepth(1)));
 
@@ -1323,7 +1518,7 @@ mod tests {
     fn cancel_reclaims_blocks_and_spares_neighbours() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        let eng = Engine::from_map(cfg, &map, 4, 96, 3, 12, 8, false);
+        let eng = Engine::from_map(cfg, &map, 4, 96, 3, 12, 8, false, false);
         let mut sched = Scheduler::new(eng, 3);
 
         let keep_a = sched.submit(Request { prompt: vec![1u32, 5, 3], max_new: 6, eos: None });
@@ -1361,7 +1556,7 @@ mod tests {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
         // One slot, so the second request cannot be admitted.
-        let eng = Engine::from_map(cfg, &map, 4, 32, 1, 12, 8, false);
+        let eng = Engine::from_map(cfg, &map, 4, 32, 1, 12, 8, false, false);
         let mut sched = Scheduler::new(eng, 1);
         let _a = sched.submit(Request { prompt: vec![1u32, 5, 3], max_new: 4, eos: None });
         let queued = sched.submit(Request { prompt: vec![2u32, 6, 4], max_new: 4, eos: None });
@@ -1379,7 +1574,7 @@ mod tests {
     fn device_head_argmax_matches_the_host_head() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        let mut eng = Engine::from_map(cfg, &map, 4, 96, 4, 12, 8, false);
+        let mut eng = Engine::from_map(cfg, &map, 4, 96, 4, 12, 8, false, false);
 
         // Drive a few real decode steps so the hidden states are genuine.
         let mut tables: Vec<BlockTable> = (0..3).map(|_| BlockTable::new()).collect();
@@ -1419,7 +1614,7 @@ mod tests {
         };
 
         // Reference: unlimited budget (the old behaviour).
-        let mut a = Scheduler::new(Engine::from_map(cfg.clone(), &map, 4, 96, 4, 12, 8, false), 4);
+        let mut a = Scheduler::new(Engine::from_map(cfg.clone(), &map, 4, 96, 4, 12, 8, false, false), 4);
         a.set_prefill_budget(u32::MAX);
         for r in reqs() {
             a.submit(r);
@@ -1429,7 +1624,7 @@ mod tests {
         // Tight budget: one 5-token prompt exhausts it, so the 4 arrivals must
         // be admitted over MULTIPLE iterations — with decode in between — and
         // still produce token-identical outputs.
-        let mut b = Scheduler::new(Engine::from_map(cfg, &map, 4, 96, 4, 12, 8, false), 4);
+        let mut b = Scheduler::new(Engine::from_map(cfg, &map, 4, 96, 4, 12, 8, false, false), 4);
         b.set_prefill_budget(5);
         for r in reqs() {
             b.submit(r);
@@ -1461,7 +1656,7 @@ mod tests {
         let mut cfg = QwenConfig::tiny();
         cfg.vocab = 8192; // forces the argmax_part/argmax_final path
         let map = tiny_weights(&cfg);
-        let mut eng = Engine::from_map(cfg, &map, 4, 96, 3, 12, 8, false);
+        let mut eng = Engine::from_map(cfg, &map, 4, 96, 3, 12, 8, false, false);
 
         let mut tables: Vec<BlockTable> = (0..3).map(|_| BlockTable::new()).collect();
         let prompts = [vec![11u32, 55, 33], vec![77u32, 22, 99], vec![44u32, 45, 46]];
@@ -1492,7 +1687,7 @@ mod tests {
     fn step_report_accounts_for_every_token_exactly_once() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        let eng = Engine::from_map(cfg, &map, 4, 96, 3, 12, 8, false);
+        let eng = Engine::from_map(cfg, &map, 4, 96, 3, 12, 8, false, false);
         let mut sched = Scheduler::new(eng, 3);
 
         let wants = [6usize, 4, 9];
@@ -1548,13 +1743,13 @@ mod tests {
             ]
         };
 
-        let mut a = Scheduler::new(Engine::from_map(cfg.clone(), &map, 4, 96, 2, 12, 8, false), 2);
+        let mut a = Scheduler::new(Engine::from_map(cfg.clone(), &map, 4, 96, 2, 12, 8, false, false), 2);
         for r in reqs() {
             a.submit(r);
         }
         let via_step = a.run();
 
-        let mut b = Scheduler::new(Engine::from_map(cfg, &map, 4, 96, 2, 12, 8, false), 2);
+        let mut b = Scheduler::new(Engine::from_map(cfg, &map, 4, 96, 2, 12, 8, false, false), 2);
         for r in reqs() {
             b.submit(r);
         }
@@ -1587,7 +1782,7 @@ mod tests {
             })
             .collect();
 
-        let eng = Engine::from_map(cfg, &map, 4, 64, 4, 8, 32, false);
+        let eng = Engine::from_map(cfg, &map, 4, 64, 4, 8, 32, false, false);
         let mut sched = Scheduler::new(eng, 4);
         let mut out: HashMap<u64, Vec<u32>> = HashMap::new();
 
@@ -1620,7 +1815,7 @@ mod tests {
         let map = tiny_weights(&cfg);
         let prompt = vec![1u32, 5, 3, 9, 2];
         let run = |int8: bool| -> Vec<f32> {
-            let mut e = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 32, int8);
+            let mut e = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 32, int8, false);
             let mut t = BlockTable::new();
             let mut hidden = e.prefill(&mut t, &prompt);
             for _ in 0..6 {
@@ -1646,7 +1841,7 @@ mod tests {
         let map = tiny_weights(&cfg);
         let prompt = vec![1u32, 5, 3, 9, 2, 7, 4, 8];
         let prefill_last = |max_prefill: u32| -> Vec<f32> {
-            let mut e = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, max_prefill, false);
+            let mut e = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, max_prefill, false, false);
             let mut t = BlockTable::new();
             e.prefill(&mut t, &prompt)
         };
@@ -1667,17 +1862,17 @@ mod tests {
         let prompt = vec![1u32, 5, 3, 9];
         let max_new = 20usize;
 
-        let mut e_ref = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 32, false);
+        let mut e_ref = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 32, false, false);
         let greedy = e_ref.generate_greedy(&[prompt.clone()], max_new, None)[0].clone();
         let full: Vec<u32> = prompt.iter().copied().chain(greedy.iter().copied()).collect();
 
         // Oracle draft: proposes the true continuation → all accepted.
-        let mut e1 = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 32, false);
+        let mut e1 = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 32, false, false);
         let (out_oracle, fwd_oracle) = e1.spec_decode(&prompt, max_new, 4, |ctx, want| {
             (0..want as usize).map(|i| full.get(ctx.len() + i).copied().unwrap_or(0)).collect()
         });
         // Bad draft: always proposes token 0 → mostly rejected.
-        let mut e2 = Engine::from_map(cfg, &map, 4, 64, 1, 8, 32, false);
+        let mut e2 = Engine::from_map(cfg, &map, 4, 64, 1, 8, 32, false, false);
         let (out_bad, fwd_bad) = e2.spec_decode(&prompt, max_new, 4, |_ctx, want| vec![0u32; want as usize]);
 
         println!("spec decode: greedy={max_new} tokens | oracle-draft {fwd_oracle} target-forwards | bad-draft {fwd_bad} forwards");
@@ -1702,7 +1897,7 @@ mod tests {
             .collect();
 
         // Batched: all streams advance together each step.
-        let mut e = Engine::from_map(cfg.clone(), &map, 4, 64, n_streams as u32, 8, 4, false);
+        let mut e = Engine::from_map(cfg.clone(), &map, 4, 64, n_streams as u32, 8, 4, false, false);
         let mut tables: Vec<BlockTable> = (0..n_streams).map(|_| BlockTable::new()).collect();
         let mut batched: Vec<Vec<Vec<f32>>> = vec![Vec::new(); n_streams];
         for s in 0..steps {
@@ -1717,7 +1912,7 @@ mod tests {
         // Per-stream reference.
         let mut worst = 0f32;
         for (i, se) in embs.iter().enumerate() {
-            let mut e1 = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 4, false);
+            let mut e1 = Engine::from_map(cfg.clone(), &map, 4, 64, 1, 8, 4, false, false);
             let mut t = BlockTable::new();
             for (s, emb) in se.iter().enumerate() {
                 let mut refs = [&mut t];
@@ -1755,7 +1950,7 @@ mod tests {
         let prompts: Vec<Vec<u32>> = (0..n_req).map(|i| vec![(i as u32 % 200) + 1, 5, 3, 9, 2]).collect();
 
         // Sequential: one request at a time (fresh reuse of one engine's pool).
-        let mut eng_seq = Engine::from_map(cfg.clone(), &map, 16, 512, n_req as u32, 16, 32, false);
+        let mut eng_seq = Engine::from_map(cfg.clone(), &map, 16, 512, n_req as u32, 16, 32, false, false);
         let t0 = std::time::Instant::now();
         for p in &prompts {
             eng_seq.generate_greedy(&[p.clone()], max_new, None);
@@ -1763,7 +1958,7 @@ mod tests {
         let seq_s = t0.elapsed().as_secs_f64();
 
         // Continuous batching: all requests admitted + decoded together.
-        let eng = Engine::from_map(cfg, &map, 16, 512, n_req as u32, 16, 32, false);
+        let eng = Engine::from_map(cfg, &map, 16, 512, n_req as u32, 16, 32, false, false);
         let mut sched = Scheduler::new(eng, n_req);
         for p in &prompts {
             sched.submit(Request { prompt: p.clone(), max_new, eos: None });

@@ -157,6 +157,9 @@ impl PerfTarget for PagedLlmTarget {
         for id in report.admitted {
             out.push(Emission { id, at: now, kind: EmissionKind::Admitted });
         }
+        for (id, _reason) in report.rejected {
+            out.push(Emission { id, at: now, kind: EmissionKind::Rejected });
+        }
         for (id, n) in report.produced {
             for _ in 0..n {
                 out.push(Emission { id, at: now, kind: EmissionKind::Artifact });
@@ -174,6 +177,32 @@ impl PerfTarget for PagedLlmTarget {
 
     fn counters(&self) -> Vec<(String, serde_json::Value)> {
         vec![("kv_free_blocks".into(), serde_json::json!(self.sched.free_blocks()))]
+    }
+
+    /// Map the harness policy names onto the engine's admission seam.
+    fn set_admission(&mut self, policy: &str) -> bool {
+        use qwen::serve::{DeadlineAware, MaxQueueDepth, UnboundedQueue};
+        match policy.split_once(':') {
+            None if policy == "unbounded" => {
+                self.sched.set_admission(Box::new(UnboundedQueue));
+                true
+            }
+            Some(("depth", n)) => match n.parse::<usize>() {
+                Ok(n) if n > 0 => {
+                    self.sched.set_admission(Box::new(MaxQueueDepth(n)));
+                    true
+                }
+                _ => false,
+            },
+            Some(("deadline", ms)) => match ms.parse::<f64>() {
+                Ok(ms) if ms > 0.0 => {
+                    self.sched.set_admission(Box::new(DeadlineAware { deadline_ms: ms }));
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     /// Batched-vs-sequential greedy equality through the SAME engine instance —

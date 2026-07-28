@@ -44,6 +44,11 @@ pub enum EmissionKind {
     Done,
     /// The request failed; it counts as an error, never as goodput.
     Failed,
+    /// The engine's admission policy refused the request. Distinct from
+    /// `Failed`: refusing provably-late work is the *desired* behaviour under
+    /// overload, and conflating the two would penalise exactly the policy the
+    /// overload scenario exists to reward.
+    Rejected,
 }
 
 /// One unit of work to submit.
@@ -133,6 +138,15 @@ pub trait PerfTarget {
     /// Reset between repetitions of a best-of-N measurement. Targets that hold a
     /// cache decide here whether a repeat is a cold or a warm run.
     fn reset(&mut self, _warm: bool) {}
+
+    /// Install a named admission policy on the underlying engine:
+    /// `"unbounded"`, `"depth:<N>"`, or `"deadline:<ms>"`. Returns `false`
+    /// when this target has no admission seam — the scenario then reports
+    /// that nothing could ever be rejected, rather than pretending a policy
+    /// was in force.
+    fn set_admission(&mut self, _policy: &str) -> bool {
+        false
+    }
 
     /// Self-verify: produce a correctness verdict for THIS configuration, or
     /// `None` when the target has no way to check itself. For a decoder the

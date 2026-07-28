@@ -66,6 +66,12 @@ pub struct Options {
     /// while making TTFA-relative-to-E2E incomparable — so the override is
     /// recorded in the artifact.
     pub output_override: Option<usize>,
+    /// Admission policy for `overload`: `"unbounded"`, `"depth:<N>"`, or
+    /// `"deadline:<ms>"`. `None` keeps the engine default (unbounded). The
+    /// scenario errors if the target has no admission seam and a policy other
+    /// than unbounded was requested — a run that silently measured a different
+    /// policy than it reports is the worst outcome.
+    pub admission: Option<String>,
 }
 
 impl Default for Options {
@@ -83,6 +89,7 @@ impl Default for Options {
             device_rate: None,
             input_override: None,
             output_override: None,
+            admission: None,
         }
     }
 }

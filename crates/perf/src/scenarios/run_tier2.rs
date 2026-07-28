@@ -75,7 +75,24 @@ pub fn run_overload(
     let cap = Summary::build(&cap_run.records, cap_run.wall_s, class.slo);
     let capacity = cap.requests_per_s.max(0.01);
 
-    let policy = overload::Admission::UnboundedQueue;
+    // Install the requested admission policy on the engine. A requested policy
+    // the target cannot install is an ERROR, not a silent fp32-style fallback:
+    // an artifact naming a policy that was not in force is the worst outcome.
+    let spec = opt.admission.as_deref().unwrap_or("unbounded");
+    let policy = match spec.split_once(':') {
+        None if spec == "unbounded" => overload::Admission::UnboundedQueue,
+        Some(("depth", n)) => overload::Admission::MaxQueueDepth(
+            n.parse().map_err(|_| format!("bad --admission depth {n:?}"))?,
+        ),
+        Some(("deadline", _)) => overload::Admission::DeadlineAware,
+        _ => return Err(format!("unknown --admission {spec:?} (unbounded | depth:<N> | deadline:<ms>)")),
+    };
+    if spec != "unbounded" && !target.set_admission(spec) {
+        return Err(format!(
+            "this target has no admission seam; --admission {spec} cannot be honoured"
+        ));
+    }
+
     let mut points = Vec::new();
     for &m in overload::MULTIPLES {
         target.reset(true);
@@ -84,19 +101,20 @@ pub fn run_overload(
         let mut s = Summary::build(&r.records, r.wall_s, class.slo);
         let met = r.records.iter().filter(|x| !x.warmup && x.meets(&class.slo)).count();
         let completed = s.completed;
+        let admitted = s.requests.saturating_sub(s.rejected);
         points.push(overload::Point {
             multiple: m,
             offered_per_s: capacity * m,
-            admitted: s.requests,
-            // The default engine has no admission policy: it queues everything.
-            // Reporting 0 rejections is the honest measurement of that, and it
-            // is exactly the behaviour the scenario exists to expose.
-            rejected: 0,
+            admitted,
+            // Real engine rejections, surfaced through the admission seam.
+            // Under the default unbounded policy this stays 0 — the honest
+            // measurement of queue-without-bound.
+            rejected: s.rejected,
             completed,
             met_slo: met,
             goodput_per_s: s.goodput_per_s,
             queue_p99_ms: s.queue.percentile(0.99),
-            wasted: s.requests.saturating_sub(met),
+            wasted: admitted.saturating_sub(met),
         });
     }
 
@@ -112,18 +130,25 @@ pub fn run_overload(
         "lost_requests": 0,
         "corrupted_responses": 0,
         "errors": 0,
-        // No pluggable admission policy exists yet, so nothing is ever rejected.
-        "rejections": 0,
+        // Real engine rejections through the admission seam (0 under unbounded).
+        "rejections": points.iter().map(|p| p.rejected).sum::<usize>(),
         "timeouts": points.iter().map(|p| p.wasted).sum::<usize>(),
         "ooms": 0,
     });
-    art.notes = Some(
-        "The engine queues without bound: it has no admission-policy seam, so \
-         `rejected` is 0 at every offered load and `waste_fraction` is the share \
-         of admitted work that missed its deadline. Comparing policies needs that \
-         seam first."
-            .into(),
-    );
+    art.notes = Some(match spec {
+        "unbounded" => {
+            "Default unbounded admission: the engine queues everything, so \
+             `rejected` is 0 at every offered load and `waste_fraction` is the \
+             share of admitted work that missed its deadline. Re-run with \
+             --admission depth:<N> or deadline:<ms> to compare policies."
+                .to_string()
+        }
+        s => format!(
+            "Admission policy `{s}` installed on the engine; `rejected` counts \
+             real refusals at submit time, and SLO attainment is over admitted \
+             work only."
+        ),
+    });
     Ok(art)
 }
 
@@ -310,6 +335,24 @@ mod tests {
         // implying a policy was evaluated.
         assert_eq!(art.reliability["rejections"], 0);
         assert!(art.notes.as_ref().unwrap().contains("admission"));
+    }
+
+    /// A requested policy the target cannot install must be an ERROR — an
+    /// artifact naming a policy that was not actually in force is the failure
+    /// mode this seam exists to prevent.
+    #[test]
+    fn overload_refuses_a_policy_the_target_cannot_install() {
+        let mut t = FakeTarget::new(8, 1); // FakeTarget has no admission seam
+        let mut o = opt();
+        o.admission = Some("depth:4".into());
+        let err = match run_overload(&mut t, "interactive", &o) {
+            Err(e) => e,
+            Ok(_) => panic!("an uninstallable policy must be refused"),
+        };
+        assert!(err.contains("admission"), "error must name the problem: {err}");
+        // The default (unbounded) still runs on such a target.
+        o.admission = None;
+        run_overload(&mut t, "interactive", &o).expect("unbounded needs no seam");
     }
 
     #[test]

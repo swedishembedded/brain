@@ -51,6 +51,10 @@ OPTIONS
                         comparable; the override is recorded in the artifact.
   --warmup <N>          warm-up requests, excluded from every statistic (default 4)
   --best-of <N>         repeat and keep the best, reporting the spread (default 1)
+  --admission <p>       overload only: admission policy installed on the engine —
+                        unbounded (default) | depth:<N> | deadline:<ms>. Real
+                        rejections are counted; SLO attainment covers admitted
+                        work only.
   --smoke               shrink everything to seconds, for CI
   --seed <S>            default 1234
   --out <file>          artifact path (default results/perf-<...>.json)
@@ -135,6 +139,7 @@ fn run(args: &[String]) {
             "--seed" => opt.seed = val(args, &mut i, "--seed").parse().unwrap_or(opt.seed),
             "--out" => out = Some(val(args, &mut i, "--out")),
             "--policy" => policy = val(args, &mut i, "--policy"),
+            "--admission" => opt.admission = Some(val(args, &mut i, "--admission")),
             "--soak-seconds" => opt.soak_seconds = val(args, &mut i, "--soak-seconds").parse().unwrap_or(opt.soak_seconds),
             "--device-rate" => opt.device_rate = val(args, &mut i, "--device-rate").parse().ok(),
             "--smoke" => opt = opt.smoke(),
@@ -311,6 +316,28 @@ impl SynthSpec {
         self.build_engine_with_blocks(cfg, w, self.num_blocks)
     }
 
+    /// Build on an existing engine's device (`Engine::from_map_on`) — the
+    /// warm-start path `perf startup` measures.
+    pub fn build_engine_on(
+        &self,
+        parent: &qwen::serve::Engine,
+        cfg: qwen::QwenConfig,
+        w: &std::collections::HashMap<String, Vec<f32>>,
+    ) -> qwen::serve::Engine {
+        qwen::serve::Engine::from_map_on(
+            parent.gpu(),
+            cfg,
+            w,
+            self.block_size,
+            self.num_blocks,
+            self.max_batch,
+            self.per_seq,
+            self.max_prefill,
+            false,
+            false,
+        )
+    }
+
     pub fn build_engine_with_blocks(
         &self,
         cfg: qwen::QwenConfig,
@@ -325,6 +352,7 @@ impl SynthSpec {
             self.max_batch,
             self.per_seq,
             self.max_prefill,
+            false,
             false,
         )
     }
@@ -342,8 +370,16 @@ fn build_target(spec: &str, workload: &str) -> Result<Box<dyn PerfTarget>, Strin
     }
     Err(format!(
         "unknown --target {spec:?} \
-         (expected 'fake', 'qwen-synth:<L>x<D>x<H>[xV]', or 'qwen:<weights>')"
+         (expected 'fake', 'qwen-synth:<L>x<D>x<H>[xV][:i8w]', or 'qwen:<weights>[:i8w]')"
     ))
+}
+
+/// Split an optional `:i8w` flag (int8 weights) off a target spec tail.
+fn spec_flags(spec: &str) -> (&str, bool) {
+    match spec.rsplit_once(':') {
+        Some((head, "i8w")) => (head, true),
+        _ => (spec, false),
+    }
 }
 
 /// Build the serving engine on **randomly initialised weights** of a given
@@ -356,6 +392,7 @@ fn build_target(spec: &str, workload: &str) -> Result<Box<dyn PerfTarget>, Strin
 /// for anything about output quality: generated tokens are meaningless, so the
 /// artifact records `weights: "random"` and no correctness gate can pass on it.
 fn build_qwen_synth(shape: &str, workload: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (shape, weights_int8) = spec_flags(shape);
     let parts: Vec<u32> = shape.split('x').map(|p| p.trim().parse().unwrap_or(0)).collect();
     if parts.len() < 3 || parts[..3].iter().any(|&v| v == 0) {
         return Err(format!("bad shape {shape:?}, expected <layers>x<d_model>x<heads>[x<vocab>]"));
@@ -394,7 +431,7 @@ fn build_qwen_synth(shape: &str, workload: &str) -> Result<Box<dyn PerfTarget>, 
     let weights = qwen::init_weights(&cfg, 1234);
     let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload)?;
     let eng = qwen::serve::Engine::from_map(
-        cfg, &weights, block_size, num_blocks, max_batch, per_seq, max_prefill, false,
+        cfg, &weights, block_size, num_blocks, max_batch, per_seq, max_prefill, false, weights_int8,
     );
     let info = TargetInfo::new("qwen-synth", "token")
         .with("shape", format!("L{n_layers}xD{d_model}xH{n_heads}").into())
@@ -402,7 +439,9 @@ fn build_qwen_synth(shape: &str, workload: &str) -> Result<Box<dyn PerfTarget>, 
         .with("weights", "random".into())
         .with("block_size", block_size.into())
         .with("max_batch", max_batch.into())
-        .with("kv_dtype", "fp32".into());
+        .with("kv_dtype", "fp32".into())
+        // What actually ran: the int8 request is capability-gated in the engine.
+        .with("weights_dtype", if eng.weights_int8() { "int8" } else { "fp32" }.into());
     let sched = qwen::serve::Scheduler::new(eng, max_batch as usize);
     Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, None, vocab)))
 }
@@ -425,6 +464,7 @@ fn pool_for(workload: &str) -> Result<(u32, u32, u32, u32, u32), String> {
 /// Size the KV pool for the workload so admission, not allocation failure, is
 /// what limits concurrency.
 fn build_qwen(weights: &str, workload: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (weights, weights_int8) = spec_flags(weights);
     let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload)?;
     let eng = qwen::serve::Engine::load(
         weights,
@@ -434,14 +474,17 @@ fn build_qwen(weights: &str, workload: &str) -> Result<Box<dyn PerfTarget>, Stri
         per_seq,
         max_prefill,
         false,
+        weights_int8,
     );
     let vocab = eng.vocab() as u32;
+    let w8_effective = eng.weights_int8();
     let sched = qwen::serve::Scheduler::new(eng, max_batch as usize);
     let info = TargetInfo::new("qwen", "token")
         .with("weights", weights.into())
         .with("block_size", block_size.into())
         .with("max_batch", max_batch.into())
-        .with("kv_dtype", "fp32".into());
+        .with("kv_dtype", "fp32".into())
+        .with("weights_dtype", if w8_effective { "int8" } else { "fp32" }.into());
     Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, None, vocab)))
 }
 

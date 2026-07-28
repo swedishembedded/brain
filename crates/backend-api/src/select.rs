@@ -92,6 +92,14 @@ pub const DECODE_REGIME_MAX_ROWS: u32 = 32;
 /// than they save on a short row.
 pub const ARGMAX_SPLIT_MIN_VOCAB: u32 = 4096;
 
+/// The int8 GEMV/tile crossover sits LOWER than fp32's: the packed GEMV
+/// accumulates through workgroup memory (one read-modify-write per row per
+/// K-group), so its per-row cost grows faster than the register-tiled GEMM's.
+/// Measured on a P40 (qwen-synth 8x512x8, decode_heavy): GEMV 299 vs tile 225
+/// tok/s at m=4, tile 753 vs GEMV 592 at m=16. A per-device autotuner (S5)
+/// owns refining this boundary.
+pub const I8_GEMV_MAX_ROWS: u32 = 8;
+
 /// The static default policy — the measured rules from the decode-regime work,
 /// expressed once. Every rule is either a correctness gate (a capability the
 /// variant requires) or a measured regime boundary; nothing keys on a backend
@@ -102,10 +110,20 @@ impl KernelSelector for DefaultSelector {
     fn select(&self, op: Op, shape: OpShape, caps: &DeviceCaps) -> KernelVariant {
         match op {
             Op::MatMul => match shape.dtype {
-                // Int8 GEMM only where the packed-dot kernels execute; a
+                // Int8 GEMMs only where the packed-dot kernels execute; a
                 // device without them gets the fp32 reference (the caller
                 // keeps fp32 weights in that case — see qwen::serve).
-                Dtype::I8 if caps.numeric.int8_dot => KernelVariant::PackedInt8,
+                // Within int8, the regime split mirrors fp32: the 128x128
+                // tile GEMM is mostly idle at decode row counts (measured
+                // 78 tok/s vs the fp32 GEMV's 127 at c=1), so few rows take
+                // the packed GEMV shape instead.
+                Dtype::I8 if caps.numeric.int8_dot => {
+                    if shape.m <= I8_GEMV_MAX_ROWS && caps.workgroup_reductions {
+                        KernelVariant::WorkgroupPerOutput
+                    } else {
+                        KernelVariant::PackedInt8
+                    }
+                }
                 Dtype::I8 => KernelVariant::Reference,
                 Dtype::F32
                     if shape.m <= DECODE_REGIME_MAX_ROWS && caps.workgroup_reductions =>
@@ -211,14 +229,18 @@ mod tests {
         assert_eq!(s.select(Op::RmsNorm, train, &gpu_caps()), KernelVariant::Reference);
     }
 
-    /// Int8 selects the packed GEMM only where the packed-dot kernels execute;
-    /// claiming it elsewhere would dispatch a kernel the device cannot run.
+    /// Int8 selects the packed kernels only where they execute — and splits
+    /// by regime exactly like fp32: the packed GEMV at decode row counts (a
+    /// 128x128 tile is mostly idle at m=8), the tile GEMM at prefill shapes.
     #[test]
     fn int8_requires_the_capability() {
         let s = DefaultSelector;
-        let sh = shape(8, 512, 512, Dtype::I8);
-        assert_eq!(s.select(Op::MatMul, sh, &gpu_caps()), KernelVariant::PackedInt8);
-        assert_eq!(s.select(Op::MatMul, sh, &cpu_caps()), KernelVariant::Reference);
+        let decode = shape(8, 512, 512, Dtype::I8);
+        let prefill = shape(512, 512, 512, Dtype::I8);
+        assert_eq!(s.select(Op::MatMul, decode, &gpu_caps()), KernelVariant::WorkgroupPerOutput);
+        assert_eq!(s.select(Op::MatMul, prefill, &gpu_caps()), KernelVariant::PackedInt8);
+        assert_eq!(s.select(Op::MatMul, decode, &cpu_caps()), KernelVariant::Reference);
+        assert_eq!(s.select(Op::MatMul, prefill, &cpu_caps()), KernelVariant::Reference);
     }
 
     /// Argmax splits by row length alone — the split kernels are barrier-free,

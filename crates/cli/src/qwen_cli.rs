@@ -134,6 +134,7 @@ fn serve(args: &[String]) {
     let mut max_new = 64usize;
     let mut block_size = 16u32;
     let mut int8 = false;
+    let mut weights_int8 = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -143,12 +144,13 @@ fn serve(args: &[String]) {
             "--max-new" => max_new = val(args, &mut i, "--max-new").parse().unwrap_or(max_new),
             "--block-size" => block_size = val(args, &mut i, "--block-size").parse().unwrap_or(block_size),
             "--int8" => int8 = true,
+            "--weights-int8" => weights_int8 = true,
             other => eprintln!("serve: ignoring {other:?}"),
         }
         i += 1;
     }
     if weights.is_empty() || tokenizer.is_empty() || prompts.is_empty() {
-        eprintln!("usage: brain qwen serve --weights F --tokenizer T --prompt \"...\" [--prompt \"...\"]... [--max-new N --block-size B --int8]");
+        eprintln!("usage: brain qwen serve --weights F --tokenizer T --prompt \"...\" [--prompt \"...\"]... [--max-new N --block-size B --int8 --weights-int8]");
         return;
     }
     let tok = match data::qwen_tokenizer::QwenBpe::from_file(&tokenizer) {
@@ -165,7 +167,10 @@ fn serve(args: &[String]) {
     let max_len = max_prompt + max_new as u32 + 8;
     let blocks_per_seq = max_len.div_ceil(block_size);
     let num_blocks = blocks_per_seq * n + n; // headroom for every sequence
-    let eng = qwen::serve::Engine::load(&weights, block_size, num_blocks, n, blocks_per_seq, max_prompt.max(1), int8);
+    let eng = qwen::serve::Engine::load(&weights, block_size, num_blocks, n, blocks_per_seq, max_prompt.max(1), int8, weights_int8);
+    // Report what actually ran: the int8-weights request is capability-gated
+    // and may have fallen back to fp32.
+    let weights_int8 = eng.weights_int8();
     let mut sched = qwen::serve::Scheduler::new(eng, n as usize);
     let ids: Vec<u64> = toks.iter().map(|t| sched.submit(qwen::serve::Request { prompt: t.clone(), max_new, eos })).collect();
 
@@ -177,7 +182,12 @@ fn serve(args: &[String]) {
         println!("=== prompt {i}: {:?}", prompts[i]);
         println!("{}\n", tok.decode(&out[id]));
     }
-    eprintln!("served {n} prompts, {total} tokens in {secs:.2}s ({:.1} tok/s aggregate){}", total as f64 / secs, if int8 { " [int8 KV]" } else { "" });
+    eprintln!(
+        "served {n} prompts, {total} tokens in {secs:.2}s ({:.1} tok/s aggregate){}{}",
+        total as f64 / secs,
+        if int8 { " [int8 KV]" } else { "" },
+        if weights_int8 { " [int8 weights]" } else { "" }
+    );
 }
 
 fn infer(args: &[String]) {

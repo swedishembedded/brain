@@ -36,6 +36,9 @@ pub struct ReqRecord {
     pub first: Option<Instant>,
     pub done: Option<Instant>,
     pub failed: bool,
+    /// Refused by the engine's admission policy — terminal, never serviced,
+    /// and deliberately NOT a failure (see `EmissionKind::Rejected`).
+    pub rejected: bool,
     /// Timestamp of every artifact, in order.
     pub artifacts: Vec<Instant>,
 }
@@ -52,6 +55,7 @@ impl ReqRecord {
             first: None,
             done: None,
             failed: false,
+            rejected: false,
             artifacts: Vec::new(),
         }
     }
@@ -124,6 +128,9 @@ pub struct Summary {
     pub requests: usize,
     pub completed: usize,
     pub failed: usize,
+    /// Refused at admission — never serviced, so excluded from the SLO
+    /// denominator (refusing hopeless work must not read as missing SLOs).
+    pub rejected: usize,
     pub input_artifacts: usize,
     pub output_artifacts: usize,
     pub requests_per_s: f64,
@@ -153,11 +160,16 @@ impl Summary {
 
         let mut completed = 0usize;
         let mut failed = 0usize;
+        let mut rejected = 0usize;
         let mut in_arts = 0usize;
         let mut out_arts = 0usize;
         let mut met = 0usize;
 
         for r in &measured {
+            if r.rejected {
+                rejected += 1;
+                continue; // never serviced: no latency samples, no artifacts
+            }
             if r.failed {
                 failed += 1;
             } else if r.done.is_some() {
@@ -192,18 +204,22 @@ impl Summary {
         let good_arts: usize =
             measured.iter().filter(|r| r.meets(&slo)).map(|r| r.output_artifacts()).sum();
 
+        // SLO attainment is over ADMITTED work: a policy that sheds hopeless
+        // requests must not have its refusals scored as SLO misses.
+        let n_admitted = n - rejected;
         Summary {
             wall_s,
             requests: n,
             completed,
             failed,
+            rejected,
             input_artifacts: in_arts,
             output_artifacts: out_arts,
             requests_per_s: completed as f64 / secs,
             input_per_s: in_arts as f64 / secs,
             output_per_s: out_arts as f64 / secs,
             goodput_per_s: good_arts as f64 / secs,
-            slo_attainment: if n == 0 { 1.0 } else { met as f64 / n as f64 },
+            slo_attainment: if n_admitted == 0 { 1.0 } else { met as f64 / n_admitted as f64 },
             ttfa,
             ial,
             tpoa,
@@ -219,6 +235,7 @@ impl Summary {
             "requests": self.requests,
             "completed": self.completed,
             "failed": self.failed,
+            "rejected": self.rejected,
             "requests_per_s": r3(self.requests_per_s),
             "input_artifacts_per_s": r3(self.input_per_s),
             "output_artifacts_per_s": r3(self.output_per_s),
@@ -302,6 +319,23 @@ mod tests {
         let s = Summary::build(&recs, 1.0, Slo::NONE);
         assert_eq!(s.requests, 1, "only the measured request counts");
         assert_eq!(s.output_artifacts, 5, "warm-up artifacts must not inflate the rate");
+    }
+
+    /// A rejected request is terminal but neither completed nor failed, and it
+    /// must not drag down SLO attainment: refusing hopeless work is the
+    /// behaviour the overload scenario exists to reward, not to penalise.
+    #[test]
+    fn rejected_requests_leave_the_slo_denominator() {
+        let base = Instant::now();
+        let mut rej = ReqRecord::new(1, 0, 32, false, base);
+        rej.rejected = true;
+        let recs = vec![sample(base, 0, false), rej];
+        let s = Summary::build(&recs, 1.0, Slo::ttfa(1000.0));
+        assert_eq!(s.requests, 2);
+        assert_eq!(s.rejected, 1);
+        assert_eq!(s.completed, 1);
+        assert_eq!(s.failed, 0, "a refusal is not an error");
+        assert_eq!(s.slo_attainment, 1.0, "attainment is over admitted work only");
     }
 
     #[test]

@@ -152,6 +152,67 @@ fn log_adapter(info: &wgpu::AdapterInfo) {
     );
 }
 
+/// Driver pipeline cache persisted per adapter (F2 warm start): pipeline
+/// creation on a later process becomes a driver cache hit instead of a shader
+/// recompile. Vulkan-only (`Features::PIPELINE_CACHE`); a missing, stale or
+/// corrupt blob is IGNORED (wgpu's `fallback: true`), never trusted.
+/// No target cfg: on wasm the feature is never present, so `open` returns
+/// `None` before any filesystem call.
+struct PlCache {
+    cache: wgpu::PipelineCache,
+    path: std::path::PathBuf,
+}
+
+impl PlCache {
+    /// Where cache blobs live: `BRAIN_PIPELINE_CACHE_DIR`, else
+    /// `$XDG_CACHE_HOME/brain`, else `~/.cache/brain`. `None` = nowhere to
+    /// persist, which simply disables the warm start.
+    fn dir() -> Option<std::path::PathBuf> {
+        if let Ok(d) = std::env::var("BRAIN_PIPELINE_CACHE_DIR") {
+            return Some(d.into());
+        }
+        if let Ok(d) = std::env::var("XDG_CACHE_HOME") {
+            return Some(std::path::Path::new(&d).join("brain"));
+        }
+        std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".cache/brain"))
+    }
+
+    /// Open (or freshly create) the persisted cache for this adapter.
+    fn open(device: &wgpu::Device, adapter: &wgpu::Adapter, info: &wgpu::AdapterInfo) -> Option<PlCache> {
+        if !adapter.features().contains(wgpu::Features::PIPELINE_CACHE) {
+            return None;
+        }
+        // The key encodes adapter identity + driver version, so a driver
+        // update invalidates by filename rather than by trusting the blob.
+        let key = wgpu::util::pipeline_cache_key(info)?;
+        let path = Self::dir()?.join(key);
+        let data = std::fs::read(&path).ok();
+        // SAFETY: `data` comes from a previous `get_data()` written below;
+        // anything else (torn write, foreign file) is covered by fallback.
+        let cache = unsafe {
+            device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                label: Some("brain-pipeline-cache"),
+                data: data.as_deref(),
+                fallback: true,
+            })
+        };
+        Some(PlCache { cache, path })
+    }
+
+    /// Persist the current blob (atomic rename so readers never see a torn
+    /// write). Best-effort: a read-only filesystem just loses the warm start.
+    fn persist(&self) {
+        let Some(data) = self.cache.get_data() else { return };
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let tmp = self.path.with_extension("tmp");
+        if std::fs::write(&tmp, &data).is_ok() {
+            let _ = std::fs::rename(&tmp, &self.path);
+        }
+    }
+}
+
 /// The **expensive, shareable** half of a wgpu backend: the instance/adapter/
 /// device/queue and every compiled pipeline.
 ///
@@ -189,6 +250,10 @@ struct DeviceShared {
     /// What this device can do — computed once from the adapter at construction
     /// and shared by every handle (see `backend_api::DeviceCaps`).
     caps: backend_api::DeviceCaps,
+    /// Persisted driver pipeline cache (F2), shared across kernel sets on this
+    /// device so `new_like` compilations hit it too. `None` where the feature
+    /// is absent (wasm, non-Vulkan) or there is nowhere to persist.
+    plcache: Option<std::sync::Arc<PlCache>>,
     /// `BRAIN_PROFILE` per-kernel GPU timing (native only, and only when the
     /// adapter has TIMESTAMP_QUERY): each dispatch runs in its own compute pass
     /// with begin/end timestamps, resolved and accumulated per kernel name.
@@ -209,6 +274,7 @@ impl DeviceShared {
         kernels: &[(&str, &str)],
         want_ts: bool,
         caps: backend_api::DeviceCaps,
+        plcache: Option<std::sync::Arc<PlCache>>,
     ) -> DeviceShared {
         // BRAIN_GPU_CHECKED=1 restores wgpu's runtime bounds checks for kernel
         // debugging; the default trusts the kernels — no clamp instruction on
@@ -244,7 +310,7 @@ impl DeviceShared {
                     module: &module,
                     entry_point: Some("main"),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    cache: None,
+                    cache: plcache.as_ref().map(|p| &p.cache),
                 })
             })
             .collect();
@@ -260,6 +326,11 @@ impl DeviceShared {
         };
         #[cfg(target_arch = "wasm32")]
         let _ = want_ts;
+        // Persist the (possibly grown) blob after every compile pass, so both
+        // a later process AND a later `new_like` kernel set start warm.
+        if let Some(p) = &plcache {
+            p.persist();
+        }
         DeviceShared {
             device: std::mem::ManuallyDrop::new(device),
             queue: std::mem::ManuallyDrop::new(queue),
@@ -267,6 +338,7 @@ impl DeviceShared {
             pipelines,
             wgsizes: backend_api::workgroup_sizes(kernels),
             caps,
+            plcache,
             #[cfg(not(target_arch = "wasm32"))]
             gpu_profile,
         }
@@ -437,6 +509,7 @@ impl WgpuBackend {
             kernels,
             want_ts,
             self.shared.caps.clone(),
+            self.shared.plcache.clone(),
         ));
         let stats = profile_on.then(|| std::sync::atomic::AtomicU64::new(0));
         WgpuBackend::from_shared(shared, stats)
@@ -558,8 +631,13 @@ impl WgpuBackend {
         // feature is absent (WebGPU, old drivers).
         let profile_on = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
         let want_ts = profile_on && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
-        let required_features =
+        let mut required_features =
             if want_ts { wgpu::Features::TIMESTAMP_QUERY } else { wgpu::Features::empty() };
+        // Persisted pipeline cache (F2 warm start) — request where present;
+        // absent (WebGPU, non-Vulkan) the engine just stays cold-start.
+        if adapter.features().contains(wgpu::Features::PIPELINE_CACHE) {
+            required_features |= wgpu::Features::PIPELINE_CACHE;
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("moe-rs-device"),
@@ -606,7 +684,9 @@ impl WgpuBackend {
         use std::sync::atomic::AtomicU64;
         let stats = if profile_on { Some(AtomicU64::new(0)) } else { None };
         let caps = Self::query_caps(adapter, &info, &device);
-        let shared = std::sync::Arc::new(DeviceShared::compile(device, queue, kernels, want_ts, caps));
+        let plcache = PlCache::open(&device, adapter, &info).map(std::sync::Arc::new);
+        let shared =
+            std::sync::Arc::new(DeviceShared::compile(device, queue, kernels, want_ts, caps, plcache));
         WgpuBackend::from_shared(shared, stats)
     }
 
