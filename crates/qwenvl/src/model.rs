@@ -27,6 +27,8 @@ pub struct Qwen3Vl {
     vcfg: VisionConfig,
     vweights: HashMap<String, Vec<f32>>,
     merger_weights: HashMap<String, Vec<f32>>,
+    /// One postshuffle-norm merger weight set per DeepStack tap (empty = no DeepStack).
+    ds_merger_weights: Vec<HashMap<String, Vec<f32>>>,
     decoder: Qwen,
     merge: u32,
     image_token_id: u32,
@@ -44,6 +46,7 @@ impl Qwen3Vl {
         dcfg: QwenConfig,
         vweights: HashMap<String, Vec<f32>>,
         merger_weights: HashMap<String, Vec<f32>>,
+        ds_merger_weights: Vec<HashMap<String, Vec<f32>>>,
         dweights: &HashMap<String, Vec<f32>>,
         seq_len: u32,
         image_token_id: u32,
@@ -51,15 +54,20 @@ impl Qwen3Vl {
         n_visual: u32,
         mrope_section: [u32; 3],
     ) -> Qwen3Vl {
+        assert_eq!(ds_merger_weights.len(), vcfg.deepstack_indexes.len(), "one merger per DeepStack tap");
         let merge = vcfg.spatial_merge_size;
         let mut decoder = Qwen::new(dcfg, 1, seq_len, dweights);
         decoder.enable_mm_splice(image_row0, n_visual);
         decoder.enable_mrope();
+        if !ds_merger_weights.is_empty() {
+            decoder.enable_deepstack(image_row0, n_visual, ds_merger_weights.len() as u32);
+        }
         Qwen3Vl {
             vgpu: Gpu::new_cpu(vision_pipelines()),
             vcfg,
             vweights,
             merger_weights,
+            ds_merger_weights,
             decoder,
             merge,
             image_token_id,
@@ -79,12 +87,18 @@ impl Qwen3Vl {
         let n_visual = n / m2;
         let d_model = self.decoder.cfg.d_model;
 
-        // Vision tower → visual tokens at the decoder width.
+        // Vision tower → visual tokens at the decoder width (+ DeepStack taps).
         let enc = VisionEncoder::new(&self.vgpu, self.vcfg.clone(), &self.vweights);
-        let feats = enc.encode(gh, gw, pixels);
+        let (feats, tap_feats) = enc.encode_with_taps(gh, gw, pixels, &self.vcfg.deepstack_indexes);
         let merger = PatchMerger::new(&self.vgpu, &self.merger_weights, self.vcfg.hidden, self.merge, d_model, false);
         let visual = merger.merge(&feats, n);
         assert_eq!(visual.len(), (n_visual * d_model) as usize);
+
+        // DeepStack: each tap → its own postshuffle merger → decoder level buffer.
+        for (level, (tap, mw)) in tap_feats.iter().zip(&self.ds_merger_weights).enumerate() {
+            let ds = PatchMerger::new(&self.vgpu, mw, self.vcfg.hidden, self.merge, d_model, true);
+            self.decoder.write_deepstack(level, &ds.merge(tap, n));
+        }
 
         // M-RoPE tables from the 3-axis position ids for this stream.
         let grids_llm = [(1, gh / self.merge, gw / self.merge)];
@@ -131,7 +145,7 @@ mod tests {
             num_position_embeddings: 16,
             out_hidden_size: 40,
             in_channels: 2,
-            deepstack_indexes: vec![],
+            deepstack_indexes: vec![0, 1], // tap both blocks → decoder layers 0,1
         };
         let dcfg = QwenConfig {
             vocab: 23,
@@ -181,6 +195,7 @@ mod tests {
         let vweights = rand_map(Rng::new(1), &vspecs);
 
         let merged = (c * 4) as usize; // in_dim·merge²
+        // Main merger: LayerNorm over in_dim (postshuffle_norm=false).
         let mweights = rand_map(
             Rng::new(2),
             &[
@@ -192,6 +207,22 @@ mod tests {
                 ("fc2.bias", 40, false),
             ],
         );
+        // DeepStack mergers (one per tap): LayerNorm over merged (postshuffle_norm=true).
+        let ds_mweights: Vec<HashMap<String, Vec<f32>>> = (0..2u64)
+            .map(|i| {
+                rand_map(
+                    Rng::new(20 + i),
+                    &[
+                        ("ln.weight", merged, true),
+                        ("ln.bias", merged, false),
+                        ("fc1.weight", merged * merged, false),
+                        ("fc1.bias", merged, false),
+                        ("fc2.weight", 40 * merged, false),
+                        ("fc2.bias", 40, false),
+                    ],
+                )
+            })
+            .collect();
 
         let dweights = qwen::init_weights(&dcfg, 3);
 
@@ -202,7 +233,8 @@ mod tests {
             *t = qwen::IGNORE;
         }
 
-        let model = Qwen3Vl::new(vcfg.clone(), dcfg, vweights, mweights, &dweights, tokens.len() as u32, IMG, 2, 4, [2, 1, 1]);
+        let model =
+            Qwen3Vl::new(vcfg.clone(), dcfg, vweights, mweights, ds_mweights, &dweights, tokens.len() as u32, IMG, 2, 4, [2, 1, 1]);
 
         let pv_total = (16 * vcfg.patch_vec_dim()) as usize;
         let mut rng = Rng::new(4);
