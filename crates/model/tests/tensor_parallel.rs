@@ -112,7 +112,20 @@ fn attn_ctx(gpu: &Gpu, x: &[f32], w_qkv: &[f32], b: usize, t: usize, d: usize, n
 }
 
 fn gpu_disabled() -> bool {
-    std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return true;
+    }
+    // Skip rather than fault when this box lacks the cards the test pins to.
+    // Without the check the multi-GPU paths assume cards 0..n exist and die
+    // inside the driver on a single-GPU or GPU-less machine, which reads as a
+    // real regression and masks actual ones.
+    let need = stage_gpus().iter().copied().max().unwrap_or(0) + 1;
+    let have = gpu_core::discrete_gpu_count();
+    if have < need {
+        eprintln!("skipping: needs {need} discrete GPU(s), found {have}");
+        return true;
+    }
+    false
 }
 fn stage_gpus() -> Vec<usize> {
     std::env::var("SHARD_TEST_GPUS")

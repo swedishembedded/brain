@@ -257,14 +257,14 @@ fn milestone_e_promotion_gate() {
     let init = init_weights(&cfg, 3);
 
     // (1) trained → should beat base and be PROMOTED (weights returned).
-    let opts = FinetuneOpts { epochs: 80, lr: 5e-3, wd: 0.0, clip: 3.0, lora: None };
+    let opts = FinetuneOpts { epochs: 80, lr: 5e-3, wd: 0.0, clip: 3.0, lora: None, progress: false };
     let (rep, w) = finetune(cfg.clone(), t, &init, &train, &val, &opts);
     eprintln!("gate(train): base_val {:.3} ft_val {:.3} promoted {}", rep.base_val, rep.ft_val, rep.promoted);
     assert!(rep.ft_val < rep.base_val, "fine-tune did not beat base on held-out");
     assert!(rep.promoted && w.is_some(), "gate should promote a genuine improvement");
 
     // (2) no training (LoRA B=0 → ft == base) → NOT promoted (gate rejects noise).
-    let opts0 = FinetuneOpts { epochs: 0, lr: 5e-3, wd: 0.0, clip: 3.0, lora: Some(LoraCfg::attn(4, 8.0)) };
+    let opts0 = FinetuneOpts { epochs: 0, lr: 5e-3, wd: 0.0, clip: 3.0, lora: Some(LoraCfg::attn(4, 8.0)), progress: false };
     let (rep0, w0) = finetune(cfg, t, &init, &train, &val, &opts0);
     eprintln!("gate(noop): base_val {:.3} ft_val {:.3} promoted {}", rep0.base_val, rep0.ft_val, rep0.promoted);
     assert!(!rep0.promoted && w0.is_none(), "gate must reject a non-improvement");

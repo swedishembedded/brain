@@ -64,7 +64,6 @@ fn cached_matches_cachefree() {
         top_k: 0,
         seed: 0,
         min_new: 2,
-        cached: true,
     };
 
     let gen = TalkerGen::load(TALKER, 16 + 32);
@@ -185,7 +184,6 @@ fn cached_clone_audio_quality() {
         top_k: 0,
         seed: 0,
         min_new: 2,
-        cached: true,
     };
     // --- codec sanity: decode the PyTorch golden codes with our codec.weights ---
     const GOLD: &str = "/data/workspace/tmp/qwen3-tts-resources/dumps/codec_ref/codes.bin";
@@ -252,7 +250,6 @@ fn cached_clone_audio_quality() {
         top_k: 50,
         seed: 0,
         min_new: 2,
-        cached: true,
     };
     let mut cpu_s = CpuTalker::load(TALKER);
     let mut cpu_mtp_s = CpuMtp::load(MTP);
