@@ -92,6 +92,8 @@ pub const ATTN_DECODE_APPLY: &str = include_str!("../wgsl/attn_decode_apply.wgsl
 pub const ATTN_DECODE_SCORES: &str = include_str!("../wgsl/attn_decode_scores.wgsl");
 /// `wgsl/attn_decode_scores_win.wgsl`
 pub const ATTN_DECODE_SCORES_WIN: &str = include_str!("../wgsl/attn_decode_scores_win.wgsl");
+/// `wgsl/attn_prefix_mask.wgsl`
+pub const ATTN_PREFIX_MASK: &str = include_str!("../wgsl/attn_prefix_mask.wgsl");
 /// `wgsl/attn_scores.wgsl`
 pub const ATTN_SCORES: &str = include_str!("../wgsl/attn_scores.wgsl");
 /// `wgsl/attn_scores_bidir.wgsl`
@@ -502,6 +504,10 @@ pub const ROPE_INTERLEAVE_TABLE: &str = include_str!("../wgsl/rope_interleave_ta
 pub const ROPE_NEOX: &str = include_str!("../wgsl/rope_neox.wgsl");
 /// `wgsl/rope_paged.wgsl`
 pub const ROPE_PAGED: &str = include_str!("../wgsl/rope_paged.wgsl");
+/// `wgsl/rope_partial.wgsl`
+pub const ROPE_PARTIAL: &str = include_str!("../wgsl/rope_partial.wgsl");
+/// `wgsl/rope_partial_bwd.wgsl`
+pub const ROPE_PARTIAL_BWD: &str = include_str!("../wgsl/rope_partial_bwd.wgsl");
 /// `wgsl/rope_sub.wgsl`
 pub const ROPE_SUB: &str = include_str!("../wgsl/rope_sub.wgsl");
 /// `wgsl/rope_train.wgsl`
@@ -657,6 +663,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_decode_apply", ATTN_DECODE_APPLY),
     ("attn_decode_scores", ATTN_DECODE_SCORES),
     ("attn_decode_scores_win", ATTN_DECODE_SCORES_WIN),
+    ("attn_prefix_mask", ATTN_PREFIX_MASK),
     ("attn_scores", ATTN_SCORES),
     ("attn_scores_bidir", ATTN_SCORES_BIDIR),
     ("attn_scores_bidir_bias", ATTN_SCORES_BIDIR_BIAS),
@@ -862,6 +869,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("rope_interleave_table", ROPE_INTERLEAVE_TABLE),
     ("rope_neox", ROPE_NEOX),
     ("rope_paged", ROPE_PAGED),
+    ("rope_partial", ROPE_PARTIAL),
+    ("rope_partial_bwd", ROPE_PARTIAL_BWD),
     ("rope_sub", ROPE_SUB),
     ("rope_train", ROPE_TRAIN),
     ("rope_train_bwd", ROPE_TRAIN_BWD),

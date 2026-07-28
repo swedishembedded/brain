@@ -44,6 +44,64 @@ mod tests {
     }
 
     #[test]
+    fn rope_partial_inverse_and_grad() {
+        use gpu_core::f;
+        use kernels::{ROPE_PARTIAL, ROPE_PARTIAL_BWD};
+        let g = Gpu::new_cpu(&[("rope_partial", ROPE_PARTIAL), ("rope_partial_bwd", ROPE_PARTIAL_BWD)]);
+        // 4 rows (T=4), 1 head, head_dim 8, rot_dim 4 → rotate first 4 channels.
+        let (rows, heads, hd, rot) = (4u32, 1u32, 8u32, 4u32);
+        let n = (rows * heads * hd) as usize;
+        let par = [rows, heads, hd, heads * hd, 0, rows, f(1.5e6), rot];
+        let disp = rows * heads * (rot / 2);
+        let rope = |x: &[f32], bwd: bool| -> Vec<f32> {
+            let b = g.storage_init("b", x);
+            g.submit(&[], &[g.step(if bwd { 1 } else { 0 }, &[&b], &par, disp)]);
+            g.read(&b, n)
+        };
+        let mut rng = Rng::new(41);
+        let x: Vec<f32> = (0..n).map(|_| rng.next_f32() - 0.5).collect();
+
+        // Inverse: bwd(fwd(x)) == x (rotated pairs round-trip; tail untouched).
+        let rt = rope(&rope(&x, false), true);
+        for (a, b) in x.iter().zip(&rt) {
+            assert!((a - b).abs() < 1e-4, "rope_partial not invertible: {a} vs {b}");
+        }
+
+        // Directional grad of L = <fwd(x), dy>: d_x = bwd(dy) (rotation adjoint).
+        let dy: Vec<f32> = (0..n).map(|_| rng.next_f32() - 0.5).collect();
+        let v: Vec<f32> = (0..n).map(|_| if rng.next_f32() < 0.5 { -1.0 } else { 1.0 }).collect();
+        let dx = rope(&dy, true);
+        let an = dot(&dx, &v);
+        let eps = 1e-3f32;
+        let l = |y: &[f32]| dot(y, &dy);
+        let px = |sg: f32| x.iter().zip(&v).map(|(b, d)| b + sg * eps * d).collect::<Vec<f32>>();
+        let num = (l(&rope(&px(1.0), false)) - l(&rope(&px(-1.0), false))) / (2.0 * eps);
+        let rel = (an - num).abs() / an.abs().max(num.abs()).max(1e-3);
+        assert!(rel < 1e-2, "rope_partial grad: analytic {an} vs numeric {num} (rel {rel})");
+    }
+
+    #[test]
+    fn attn_prefix_mask_pattern() {
+        use kernels::ATTN_PREFIX_MASK;
+        let g = Gpu::new_cpu(&[("attn_prefix_mask", ATTN_PREFIX_MASK)]);
+        // T=4, prefix P=2, 1 head. allow = (i<2 && j<2) || (j<=i).
+        let (bsz, heads, t, p) = (1u32, 1u32, 4u32, 2u32);
+        let n = (bsz * heads * t * t) as usize;
+        let sb = g.storage_init("s", &vec![1.0f32; n]);
+        g.submit(&[], &[g.step(0, &[&sb], &[bsz, heads, t, p], n as u32)]);
+        let s = g.read(&sb, n);
+        let at = |i: u32, j: u32| s[(i * t + j) as usize];
+        // allowed (unchanged at 1.0): prefix pairs + causal
+        for (i, j) in [(0u32, 1u32), (1, 0), (3, 0), (2, 2), (0, 0)] {
+            assert!((at(i, j) - 1.0).abs() < 1e-6, "({i},{j}) should be allowed");
+        }
+        // masked (large negative): non-prefix, non-causal
+        for (i, j) in [(0u32, 2u32), (0, 3), (1, 2), (1, 3), (2, 3)] {
+            assert!(at(i, j) < -1.0e29, "({i},{j}) should be masked");
+        }
+    }
+
+    #[test]
     fn adaptive_avgpool2d_grads_match_finite_differences() {
         use kernels::{ADAPTIVE_AVGPOOL2D, ADAPTIVE_AVGPOOL2D_DX};
         let g = Gpu::new_cpu(&[("adaptive_avgpool2d", ADAPTIVE_AVGPOOL2D), ("adaptive_avgpool2d_dx", ADAPTIVE_AVGPOOL2D_DX)]);
