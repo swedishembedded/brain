@@ -11,13 +11,17 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-qwen.workspace = true
+brain-capability.workspace = true
 brain-model.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-vision.workspace = true
 brain-paramstore.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
+bytemuck.workspace = true
+# The caption provider tokenizes (data) and reads safetensors (checkpoint)
+# at run time, not just in tests.
 brain-data.workspace = true
 brain-checkpoint.workspace = true
+
+[dev-dependencies]

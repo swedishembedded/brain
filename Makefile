@@ -123,10 +123,12 @@ release:
 # silence. Override any of these: TEST_THREADS=1 make test restores serial.
 TEST_THREADS ?= 8
 # The guard is a DEADLOCK detector, not a performance target: it must sit above
-# the measured serial run time (~950s across 240+ suites) so a completing suite
-# never reads as a hang. Making the suite faster is the slow-lane migration and
-# per-crate testgpu adoption, not a tighter timeout.
-TEST_TIMEOUT ?= 1500
+# the measured run time so a completing suite never reads as a hang. The VLM
+# crates (fastvlm/qwenvl/moondream) grew the suite past the old 1500s budget —
+# 266 suites / 1492 tests now complete at TEST_THREADS=8 inside ~2000s wall on
+# the 2xP40 box, so the guard sits at 2400. Making the suite faster is real
+# work (slow-lane moves), not a tighter timeout.
+TEST_TIMEOUT ?= 2400
 CARGO_TEST   ?= cargo test --release --offline
 
 # Build first WITHOUT the timeout, then run WITH it. The deadlock guard is a

@@ -194,6 +194,12 @@ Multi-GPU scaling lives in `crates/model`:
 | Multi-GPU scaling (data / pipeline / tensor parallel) | `docs/scaling/*.md`; `crates/model/src/{distributed,parallel,collective,shard,plan,grid}.rs` |
 | Performance: CPU/GPU inference optimizations (what sped things up + why) | `docs/performance/overview.md`, `docs/performance/p40.md` |
 | **Performance benchmarking** (`brain perf`): design / ledger | `docs/performance/benchmarking.md`, `docs/performance/status.md`; `crates/perf`, `crates/cli/src/perf_cli.rs` |
+| Perf regression gate (hard floors vs a committed baseline) | `brain perf gate`; `crates/perf/src/gate.rs` |
+| Device capabilities (class/limits/numeric tiers, queried never assumed) | `backend_api::DeviceCaps`; filled per backend, `Gpu::caps()` |
+| Kernel selection policy + autotuner (which variant runs, measured per device) | `backend_api::select` (`candidates`/`DefaultSelector`/`AutoTuner`), `gpu_core::tune`; `BRAIN_NO_AUTOTUNE=1` forces static |
+| Kernel specialisation (one WGSL source, tunable constants) | `kernels::template` |
+| Prompt-prefix cache (paged block reuse across requests) | `model::paged::PrefixCache`; adoption in `qwen::serve::Engine::prefill` |
+| Int8 serving weights + on-device decode window | `qwen::serve` (`--weights-int8` / target suffix `:i8w`; `DECODE_WINDOW`) |
 | Engine internals | `docs/engine/{overview,training,vulkan,web}.md` |
 | Add/adjust a WGSL kernel | `crates/kernels/wgsl/*.wgsl`, then **`make kernels-regen`** |
 | MoE toy task / honest eval methodology | `README.md` |
@@ -235,7 +241,9 @@ the project's expected flags/targets.
 
 ```bash
 make build                           # debug build
-make release && make test            # optimized build + full suite (MOE_SKIP_GPU_TESTS=1 to skip GPU)
+make release && make test            # optimized build + full suite (MOE_SKIP_GPU_TESTS=1 to skip GPU;
+                                     # tests run at TEST_THREADS=8 on the pooled test device — every
+                                     # test binary shares one device via gpu_core::testgpu)
 make gradcheck                       # backprop correctness gate
 make parity                          # cross-backend parity: CPU == Vulkan == NPU (scripts/parity-gate.sh)
 make kernels-regen                   # regenerate the kernel const block after adding/removing a .wgsl
@@ -313,8 +321,9 @@ benchmark owns its *dataset* and its *scoring*, the harness owns running it. Use
 it to answer "does this architecture actually learn task X?" the same way across
 tasks. See `crates/bench/README.md` for the full design.
 
-**Run** (this box has no *real* GPU — `--device gpu` resolves to the llvmpipe
-software rasteriser, so prefer CPU and never report such runs as GPU numbers):
+**Run** (this box has two real Tesla P40s — `--device gpu0` selects one; a
+GPU-less box still serves `--device gpu` through the llvmpipe software
+rasteriser, and such runs must never be reported as GPU numbers):
 
 ```bash
 BRAIN_DEVICE=cpu make bench          # every registered benchmark, one table

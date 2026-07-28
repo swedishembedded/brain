@@ -345,6 +345,7 @@ dependencies = [
  "brain-depth",
  "brain-eval",
  "brain-events",
+ "brain-fastvlm",
  "brain-fcbench",
  "brain-federated",
  "brain-fincast",
@@ -474,6 +475,7 @@ dependencies = [
 name = "brain-fastvlm"
 version = "0.1.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
@@ -482,6 +484,7 @@ dependencies = [
  "brain-paramstore",
  "brain-qwen",
  "brain-vision",
+ "bytemuck",
  "serde_json",
 ]
 

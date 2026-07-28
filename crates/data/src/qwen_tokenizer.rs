@@ -40,6 +40,51 @@ impl QwenBpe {
         Self::from_json_bytes(&bytes)
     }
 
+    /// Build from a checkpoint DIRECTORY: `tokenizer.json` when present, else
+    /// the split `vocab.json` + `merges.txt` (+ `added_tokens.json`) layout
+    /// some Qwen2-family repos ship (FastVLM). Same byte-level BPE either way
+    /// — the split files are re-assembled into the unified shape and parsed by
+    /// the ONE existing parser, so the formats cannot drift apart.
+    pub fn from_dir(dir: &str) -> Result<QwenBpe, String> {
+        let unified = format!("{dir}/tokenizer.json");
+        if std::path::Path::new(&unified).exists() {
+            return Self::from_file(&unified);
+        }
+        let vocab: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(format!("{dir}/vocab.json")).map_err(|e| format!("read {dir}/vocab.json: {e}"))?,
+        )
+        .map_err(|e| format!("vocab.json: {e}"))?;
+        let merges_txt = std::fs::read_to_string(format!("{dir}/merges.txt"))
+            .map_err(|e| format!("read {dir}/merges.txt: {e}"))?;
+        let merges: Vec<serde_json::Value> = merges_txt
+            .lines()
+            .skip_while(|l| l.starts_with("#version"))
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::Value::String(l.to_string()))
+            .collect();
+        let added: serde_json::Value = std::fs::read(format!("{dir}/added_tokens.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .map(|m| {
+                // added_tokens.json is { content: id }; unified wants records.
+                let arr: Vec<serde_json::Value> = m
+                    .as_object()
+                    .map(|o| {
+                        o.iter()
+                            .map(|(c, id)| serde_json::json!({"content": c, "id": id}))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                serde_json::Value::Array(arr)
+            })
+            .unwrap_or(serde_json::Value::Array(Vec::new()));
+        let unified = serde_json::json!({
+            "model": { "vocab": vocab, "merges": merges },
+            "added_tokens": added,
+        });
+        Self::from_json_bytes(unified.to_string().as_bytes())
+    }
+
     pub fn from_json_bytes(bytes: &[u8]) -> Result<QwenBpe, String> {
         let j: serde_json::Value =
             serde_json::from_slice(bytes).map_err(|e| format!("tokenizer.json: {e}"))?;

@@ -28,6 +28,7 @@ brain-wm-display.workspace = true
 brain-moe.workspace = true
 brain-gpt.workspace = true
 brain-qwen.workspace = true
+brain-fastvlm.workspace = true
 brain-glm.workspace = true
 brain-tts.workspace = true
 brain-codec.workspace = true
