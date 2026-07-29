@@ -12,8 +12,8 @@
 # Env (defaults follow the pre-registered protocol in trademiner
 # docs/validation-criteria.md):
 #   DB=stocks.db  OUT=out/bt  TOK=<tokenizer dir>  BASE_DEC=<decoder dir>
-#   NAMES=0 (full universe)  BT_BARS=400  FT_BARS=400  EMBARGO=10  SEED=7
-#   CTX=120  HOR=5  STEP=5  NSAMPLES=3  START=<auto: first OOS date>
+#   NAMES=0 (full universe)  BT_BARS=400  FT_BARS=400  OOS_BARS=260  EMBARGO=10
+#   SEED=7  CTX=120  HOR=5  STEP=5  NSAMPLES=3  START=<auto: manifest first_origin>
 #   SHARDS=(cores-2)  EPOCHS=2  LR=5e-4  LORA=8  FT_DEVICE=vulkan
 #   SUMMARY=out/backtest_summary.json
 set -euo pipefail
@@ -28,6 +28,7 @@ BASE_DEC="${BASE_DEC:?set BASE_DEC=<kronos decoder dir>}"
 NAMES="${NAMES:-0}"
 BT_BARS="${BT_BARS:-400}"
 FT_BARS="${FT_BARS:-400}"
+OOS_BARS="${OOS_BARS:-260}"
 EMBARGO="${EMBARGO:-10}"
 SEED="${SEED:-7}"
 CTX="${CTX:-120}"
@@ -46,22 +47,11 @@ mkdir -p "$OUT"
 echo "== [1/4] prep: leak-free stratified split =="
 python3 "$HERE/prep_backtest_data.py" --db "$DB" --out "$OUT" \
     --names "$NAMES" --bt-bars "$BT_BARS" --ft-bars "$FT_BARS" \
-    --embargo "$EMBARGO" --seed "$SEED"
+    --oos-bars "$OOS_BARS" --embargo "$EMBARGO" --seed "$SEED"
 
-# First OOS origin: the first bt date strictly after T0 (data <= T0 was
-# fine-tunable). Derive it from the manifest unless START is given.
+# First OOS origin comes from the prep manifest: embargo bars after T0.
 T0="$(python3 -c "import json;print(json.load(open('$OUT/split_manifest.json'))['t0'])")"
-START="${START:-$(python3 - "$OUT" "$T0" <<'EOF'
-import glob, sys
-out, t0 = sys.argv[1], sys.argv[2]
-dates = set()
-for f in glob.glob(f"{out}/bt/*.csv"):
-    for i, ln in enumerate(open(f)):
-        if i and ln[:10] > t0:
-            dates.add(ln[:10])
-print(min(dates))
-EOF
-)}"
+START="${START:-$(python3 -c "import json;print(json.load(open('$OUT/split_manifest.json'))['first_origin'])")}"
 echo "T0=$T0  first OOS origin=$START"
 
 echo "== [2/4] fine-tune on the ft-half (data <= T0, gated) =="

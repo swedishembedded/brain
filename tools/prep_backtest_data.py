@@ -5,8 +5,7 @@
 """Prepare a leak-free walk-forward split from trademiner's stocks.db:
 
   - FT (fine-tune): HALF the universe, liquidity-stratified random split
-    (seeded), recent history ENDING at T0 (`embargo` bars before the latest) —
-    the model sees nothing after T0.
+    (seeded), recent history ENDING at T0 — the model sees nothing after T0.
   - HOLDOUT: the other half, same ≤T0 window — never fine-tuned, so its
     RankIC measures generalization, not memorization.
   - BT (backtest): ALL names, the full recent window — the ranking universe,
@@ -22,10 +21,13 @@ report score ft-names and holdout-names separately.
 
 Defaults are FULL-UNIVERSE, quality-first (--names 0 = everything fresh with
 enough history); windows sized for the pre-registered 52-weekly-origin
-protocol at CTX=120 (bt = 120 + 52*5 + margin, embargo = 2x horizon).
+protocol at CTX=120: T0 sits (oos_bars + embargo) bars before the latest
+session, origins span the last oos_bars (52*5=260), and the embargo (2x
+horizon) separates T0 from the first origin so no fine-tune label overlaps
+any graded week. The manifest records the exact first-origin date.
 
 Usage: prep_backtest_data.py --db <stocks.db> --out <dir> [--names 0]
-         [--bt-bars 400] [--ft-bars 400] [--embargo 10] [--seed 7]
+         [--bt-bars 400] [--ft-bars 400] [--oos-bars 260] [--embargo 10] [--seed 7]
 """
 import argparse
 import glob
@@ -42,7 +44,8 @@ ap.add_argument("--out", required=True, help="output root (creates ft/ holdout/ 
 ap.add_argument("--names", type=int, default=0, help="cap universe (0 = full fresh universe)")
 ap.add_argument("--bt-bars", type=int, default=400)
 ap.add_argument("--ft-bars", type=int, default=400)
-ap.add_argument("--embargo", type=int, default=10)
+ap.add_argument("--oos-bars", type=int, default=260, help="graded OOS window (52 weekly origins * 5)")
+ap.add_argument("--embargo", type=int, default=10, help="bars between T0 and the first origin")
 ap.add_argument("--seed", type=int, default=7)
 args = ap.parse_args()
 
@@ -53,7 +56,7 @@ for x in glob.glob(f"{allroot}/*.csv"):
 subprocess.run([sys.executable, os.path.join(HERE, "export_ohlcv.py"),
                 "--db", args.db, "--out", allroot, "--max", str(args.names),
                 "--fresh-only", "--min-history",
-                str(max(args.bt_bars, args.ft_bars + args.embargo) + 40)], check=True)
+                str(max(args.bt_bars, args.ft_bars + args.oos_bars + args.embargo) + 40)], check=True)
 
 files = sorted(glob.glob(f"{allroot}/*.csv"))
 if args.names > 0:
@@ -61,9 +64,12 @@ if args.names > 0:
 names = [os.path.basename(f)[:-4] for f in files]
 
 # --- liquidity as of T0: median close*volume over the last 20 bars <= T0 ----
+RESERVE = args.oos_bars + args.embargo  # bars after T0 (embargo + graded window)
+
+
 def liquidity(path: str) -> float:
     rows = open(path).read().splitlines()[1:]
-    upto = rows[: -args.embargo] if args.embargo else rows
+    upto = rows[: -RESERVE] if RESERVE else rows
     tail = upto[-20:]
     dollars = []
     for ln in tail:
@@ -96,21 +102,24 @@ for sub in ("ft", "holdout", "bt"):
     os.makedirs(d, exist_ok=True)
     for x in glob.glob(f"{d}/*.csv"):
         os.remove(x)
-t0_date = None
+t0_date, first_origin = None, None
 for f in files:
     n = os.path.basename(f)[:-4]
     ls = open(f).read().splitlines()
     hdr, data = ls[0], ls[1:]
     open(os.path.join(args.out, "bt", f"{n}.csv"), "w").write(
         "\n".join([hdr] + data[-args.bt_bars:]) + "\n")
-    ft = (data[: -args.embargo] if args.embargo else data)[-args.ft_bars:]
+    ft = (data[: -RESERVE] if RESERVE else data)[-args.ft_bars:]
     if ft and t0_date is None:
         t0_date = ft[-1].split(",")[0]
+    if first_origin is None and len(data) >= args.oos_bars:
+        first_origin = data[-args.oos_bars].split(",")[0]
     dest = "ft" if n in ft_set else "holdout"
     open(os.path.join(args.out, dest, f"{n}.csv"), "w").write("\n".join([hdr] + ft) + "\n")
 
 manifest = {
-    "seed": args.seed, "t0": t0_date, "embargo_bars": args.embargo,
+    "seed": args.seed, "t0": t0_date, "first_origin": first_origin,
+    "oos_bars": args.oos_bars, "embargo_bars": args.embargo,
     "bt_bars": args.bt_bars, "ft_bars": args.ft_bars, "n_deciles": n_dec,
     "ft": sorted(ft_set), "holdout": sorted(hold_set),
     "decile": decile, "liquidity_usd": {n: round(v) for n, v in liq.items()},
@@ -119,5 +128,6 @@ with open(os.path.join(args.out, "split_manifest.json"), "w") as f:
     json.dump(manifest, f, indent=2)
 
 print(f"ft={len(ft_set)} names  holdout={len(hold_set)} names  bt={len(files)} names  "
-      f"(T0={t0_date}, {args.embargo} bars before latest; liquidity-stratified seed={args.seed})")
+      f"(T0={t0_date}, first origin={first_origin}, embargo={args.embargo} bars; "
+      f"liquidity-stratified seed={args.seed})")
 print(f"wrote {os.path.join(args.out, 'split_manifest.json')}")
