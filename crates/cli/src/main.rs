@@ -14,6 +14,7 @@
 
 mod data_cli;
 mod federated_cli;
+mod flops_cli;
 mod forecast_cli;
 mod args;
 mod glm_cli;
@@ -186,6 +187,14 @@ PERFORMANCE BENCHMARKING (how fast, at what cost — see docs/performance/benchm
                                            # correctness gate failed
       Report output artifacts/s + the latency curve, never total throughput alone;
       goodput (output meeting the SLO) is the comparison metric, not peak rate.
+
+FLOP/OPS ACCOUNTING (docs/performance/flops.md)
+  brain flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T]
+              [--train] [--i8] [--stages N] [--run]
+      OFFLINE per-kernel FLOP/int-OPS/bytes for the recorded forward (and
+      backward with --train) — no execution. --run also executes one pass and
+      prints the ONLINE counters (accumulated at dispatch; int8 kernels count
+      integer OPS). --stages N reports per-stage = per-device numbers.
 
 QWEN3 (dense decoder; paged continuous-batching serving)
   brain qwen import <hf_dir|safetensors> --out F
@@ -564,6 +573,7 @@ fn main() {
         Some("splat") => splat_cli::run_splat(&argv[2..]),
         Some("npu") => npu_cli::run_npu(&argv[2..]),
         Some("federated") => federated_cli::run_federated(&argv[2..]),
+        Some("flops") => flops_cli::run_flops(&argv[2..]),
         Some("gradcheck") => {
             let report = gradcheck::check_gpt(1);
             report.print();
