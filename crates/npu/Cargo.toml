@@ -17,6 +17,7 @@ brain-checkpoint.workspace = true
 brain-qwen.workspace = true
 brain-glm.workspace = true
 brain-chronos2.workspace = true
+brain-lfm.workspace = true
 brain-kronos.workspace = true
 brain-fincast.workspace = true
 brain-codec.workspace = true

@@ -115,6 +115,32 @@ impl EmbedSession {
     }
 }
 
+/// The LFM2.5-Encoder graph. Never constructible on unsupported targets.
+pub struct LfmSession {
+    _priv: (),
+}
+
+impl LfmSession {
+    pub fn load_bytes(_bytes: &[u8], _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn load_path(_path: &str, _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn device(&self) -> &str {
+        ""
+    }
+    pub fn seq_len(&self) -> usize {
+        0
+    }
+    pub fn dim(&self) -> usize {
+        0
+    }
+    pub fn run(&mut self, _ids: &[i64], _kmask: &[f32]) -> Result<Vec<f32>, NpuError> {
+        unsupported()
+    }
+}
+
 /// The Chronos-2 transformer core graph. Never constructible on unsupported targets.
 pub struct Chronos2Session {
     _priv: (),

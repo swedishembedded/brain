@@ -653,65 +653,12 @@ impl<'a> Topo<'a> {
         o
     }
     /// As [`linear`] but writes to an explicit output name; `winit` names the
-    /// transposed weight initializer. In `quant` mode the weight is stored as
-    /// per-output-channel symmetric INT8 and dequantised in-graph.
+    /// transposed weight initializer. Delegates to the ONE shared
+    /// weight-quantizing emitter ([`crate::topo::linear_quant`]).
     fn linear_named(&mut self, x: &str, name: &str, winit: &str, w: &W, out: usize, inp: usize, y: &str) {
-        let (q4, qmax) = match self.quant {
-            Quant::F32 => {
-                if !self.has(winit) {
-                    let wt = transpose(&w[name], out, inp); // [out,in] -> [in,out]
-                    self.f32(winit, &[inp as i64, out as i64], wt);
-                }
-                self.node("MatMul", &[x, winit], y);
-                return;
-            }
-            Quant::Int8 => (false, 127.0f32),
-            Quant::Int4 => (true, 7.0f32),
-        };
-        // Per-output-channel (axis=1) symmetric integer weights: scale[o]=max|col|/qmax,
-        // dequantised in-graph (`DequantizeLinear`) then MatMul. INT4 packs 2/byte.
-        let wq = format!("{winit}.q");
-        if !self.has(&wq) {
-            let wt = transpose(&w[name], out, inp); // [out,in] -> [in,out]
-            let mut scales = vec![0f32; out];
-            let mut q = vec![0i8; inp * out];
-            for o in 0..out {
-                let mut mx = 0f32;
-                for i in 0..inp {
-                    mx = mx.max(wt[i * out + o].abs());
-                }
-                let s = if mx > 0.0 { mx / qmax } else { 1.0 };
-                scales[o] = s;
-                for i in 0..inp {
-                    let v = (wt[i * out + o] / s).round().clamp(-qmax, qmax);
-                    q[i * out + o] = v as i8;
-                }
-            }
-            let zp = format!("{winit}.zp");
-            if q4 {
-                self.g.init_i4(&wq, &[inp as i64, out as i64], q);
-                self.g.init_i4(&zp, &[out as i64], vec![0i8; out]);
-            } else {
-                self.g.init_i8(&wq, &[inp as i64, out as i64], q);
-                self.g.init_i8(&zp, &[out as i64], vec![0i8; out]);
-            }
-            self.f32(&format!("{winit}.s"), &[out as i64], scales);
-            self.g.add(
-                Node::new("DequantizeLinear", &[&wq, &format!("{winit}.s"), &zp], &[winit]).attr_int("axis", 1),
-            );
-        }
-        self.node("MatMul", &[x, winit], y);
+        let quant = self.quant;
+        crate::topo::linear_quant(&mut self.b, x, name, winit, w, out, inp, quant, y);
     }
 
 }
 
-/// Transpose a row-major `[rows, cols]` matrix to `[cols, rows]`.
-fn transpose(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    let mut out = vec![0f32; data.len()];
-    for r in 0..rows {
-        for c in 0..cols {
-            out[c * rows + r] = data[r * cols + c];
-        }
-    }
-    out
-}

@@ -27,6 +27,8 @@ pub mod qwen_topology;
 pub mod glm_export;
 pub mod glm_decode;
 pub mod glm_topology;
+pub mod lfm_topology;
+pub mod lfm_export;
 pub mod chronos2_topology;
 pub mod chronos2_export;
 pub mod kronos_topology;

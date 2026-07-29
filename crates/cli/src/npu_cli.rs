@@ -30,11 +30,12 @@ pub fn run_npu(args: &[String]) {
         Some("run") => run(&args[1..]),
         Some("bench") => bench(&args[1..]),
         Some("sim") => sim(&args[1..]),
+        Some("lfm") => lfm(&args[1..]),
         Some("chronos2") => chronos2(&args[1..]),
         Some("kronos") => kronos(&args[1..]),
         Some("fincast") => fincast(&args[1..]),
         other => eprintln!(
-            "usage: brain npu <export|quantize|check|run|bench|sim|chronos2|kronos|fincast> ...  (got {other:?})"
+            "usage: brain npu <export|quantize|check|run|bench|sim|lfm|chronos2|kronos|fincast> ...  (got {other:?})"
         ),
     }
 }
@@ -52,6 +53,38 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
 /// scaler/patch/embed/REG assembly and the head rearrange/denorm; the exported
 /// ONNX core (`emb`+`kmask` → `qhead`) runs on the accelerator via the pluggable
 /// core seam. `--compare` also runs the pure device path and reports the max diff.
+/// `brain npu lfm --weights F --seq S --out model.onnx [--int8]` — export the
+/// LFM2.5-Encoder at a fixed sequence-length bucket for OpenVINO compilation
+/// (static shapes; one graph per bucket, see docs/models/lfm/status.md).
+fn lfm(args: &[String]) {
+    let mut weights = String::new();
+    let mut seq = 1024usize;
+    let mut out = String::from("out/lfm.onnx");
+    let mut int8 = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--weights" => weights = val(args, &mut i, "--weights"),
+            "--seq" => seq = val(args, &mut i, "--seq").parse().unwrap_or(seq),
+            "--out" => out = val(args, &mut i, "--out"),
+            "--int8" => int8 = true,
+            other => {
+                eprintln!("brain npu lfm: unknown flag {other:?}");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    if weights.is_empty() {
+        eprintln!("usage: brain npu lfm --weights F --seq S --out model.onnx [--int8]");
+        std::process::exit(2);
+    }
+    if let Err(e) = npu::lfm_export::export(&weights, seq, &out, int8) {
+        eprintln!("brain npu lfm: {e}");
+        std::process::exit(1);
+    }
+}
+
 fn chronos2(args: &[String]) {
     use std::cell::RefCell;
     let mut weights = String::new();

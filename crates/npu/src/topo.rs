@@ -21,6 +21,8 @@
 
 use onnx::{GraphBuilder, Node};
 
+pub use crate::qwen_topology::Quant;
+
 /// The shared graph-builder core: the wrapped graph, the temp-name counter and
 /// the emission DSL. Model builders hold one and `Deref` to it.
 pub(crate) struct TopoBase<'a> {
@@ -244,4 +246,76 @@ impl<'a> TopoBase<'a> {
         let scaled = self.mul(&nrm, gamma_name);
         self.add(&scaled, beta_name)
     }
+}
+
+/// Bias-free linear `y = x @ Wᵀ` with per-output-channel weight-only
+/// quantization — the ONE emitter every topology's `linear` delegates to
+/// (the per-model copies it replaces drifted exactly the way AGENTS.md's
+/// one-implementation rule warns about). Brain weights are `[out,in]`
+/// row-major; ONNX wants `[in,out]`, transposed here once. `Quant::F32`
+/// stores the fp32 initializer; `Int8`/`Int4` store symmetric integers +
+/// scales and dequantise in-graph (`DequantizeLinear` → MatMul).
+#[allow(clippy::too_many_arguments)]
+pub fn linear_quant(
+    b: &mut TopoBase,
+    x: &str,
+    name: &str,
+    winit: &str,
+    w: &std::collections::HashMap<String, Vec<f32>>,
+    out: usize,
+    inp: usize,
+    quant: Quant,
+    y: &str,
+) {
+    let transpose = |m: &[f32]| -> Vec<f32> {
+        let mut t = vec![0f32; m.len()];
+        for r in 0..out {
+            for c in 0..inp {
+                t[c * out + r] = m[r * inp + c];
+            }
+        }
+        t
+    };
+    let (q4, qmax) = match quant {
+        Quant::F32 => {
+            if !b.has(winit) {
+                let wt = transpose(&w[name]);
+                b.f32(winit, &[inp as i64, out as i64], wt);
+            }
+            b.node("MatMul", &[x, winit], y);
+            return;
+        }
+        Quant::Int8 => (false, 127.0f32),
+        Quant::Int4 => (true, 7.0f32),
+    };
+    let wq = format!("{winit}.q");
+    if !b.has(&wq) {
+        let wt = transpose(&w[name]);
+        let mut scales = vec![0f32; out];
+        let mut q = vec![0i8; inp * out];
+        for o in 0..out {
+            let mut mx = 0f32;
+            for i in 0..inp {
+                mx = mx.max(wt[i * out + o].abs());
+            }
+            let s = if mx > 0.0 { mx / qmax } else { 1.0 };
+            scales[o] = s;
+            for i in 0..inp {
+                q[i * out + o] = (wt[i * out + o] / s).round().clamp(-qmax, qmax) as i8;
+            }
+        }
+        let zp = format!("{winit}.zp");
+        if q4 {
+            b.g.init_i4(&wq, &[inp as i64, out as i64], q);
+            b.g.init_i4(&zp, &[out as i64], vec![0i8; out]);
+        } else {
+            b.g.init_i8(&wq, &[inp as i64, out as i64], q);
+            b.g.init_i8(&zp, &[out as i64], vec![0i8; out]);
+        }
+        b.f32(&format!("{winit}.s"), &[out as i64], scales);
+        b.g.add(
+            Node::new("DequantizeLinear", &[&wq, &format!("{winit}.s"), &zp], &[winit]).attr_int("axis", 1),
+        );
+    }
+    b.node("MatMul", &[x, winit], y);
 }

@@ -666,6 +666,98 @@ impl Chronos2Session {
     }
 }
 
+/// The LFM2.5-Encoder graph: inputs `ids:[1,S]` (i64 token ids) +
+/// `kmask:[1,1,1,S]` (additive key-padding mask; zeros for no padding) →
+/// output `hidden:[1,S,D]` (post embedding_norm). The tied MLM head runs on
+/// host over probe rows. Mirrors [`Chronos2Session`] with an i64 ids input.
+pub struct LfmSession {
+    _core: Core,
+    request: openvino::InferRequest,
+    s: usize,
+    d: usize,
+    device: String,
+}
+
+impl LfmSession {
+    /// Compile in-memory ONNX bytes (small/test graphs; real checkpoints use
+    /// [`Self::load_path`] — external-data models must load from a file).
+    pub fn load_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<Self, NpuError> {
+        let mut core = new_core()?;
+        let device = pick_device(&mut core, cfg)?;
+        let model = core
+            .read_model_from_buffer(bytes, None)
+            .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
+        Self::compile(core, model, device)
+    }
+
+    /// Compile from a model file (required for `finish_external` exports).
+    pub fn load_path(path: &str, cfg: &NpuConfig) -> Result<Self, NpuError> {
+        let mut core = new_core()?;
+        let device = pick_device(&mut core, cfg)?;
+        let model = core
+            .read_model_from_file(path, "")
+            .map_err(|e| NpuError::Other(format!("read_model {path}: {e:?}")))?;
+        Self::compile(core, model, device)
+    }
+
+    fn compile(mut core: Core, model: openvino::Model, device: DeviceType<'static>) -> Result<Self, NpuError> {
+        let compiled = core
+            .compile_model(&model, device.to_owned())
+            .map_err(|e| NpuError::Other(format!("compile_model on {}: {e:?}", dev_str(&device))))?;
+        let od = compiled
+            .get_output_by_index(0)
+            .and_then(|n| n.get_shape())
+            .map_err(|e| NpuError::Other(format!("hidden output shape: {e:?}")))?;
+        let odd = od.get_dimensions();
+        if odd.len() != 3 {
+            return Err(NpuError::Other(format!("expected hidden [1,S,D], got {odd:?}")));
+        }
+        let (s, d) = (odd[1] as usize, odd[2] as usize);
+        let mut compiled = compiled;
+        let request = compiled
+            .create_infer_request()
+            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
+        Ok(LfmSession { _core: core, request, s, d, device: dev_str(&device) })
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+    pub fn seq_len(&self) -> usize {
+        self.s
+    }
+    pub fn dim(&self) -> usize {
+        self.d
+    }
+
+    /// Run the encoder: `ids` are exactly `S` token ids; `kmask` is `S` additive
+    /// per-key floats (0 keeps, large-negative masks). Returns `[S*D]` hidden.
+    pub fn run(&mut self, ids: &[i64], kmask: &[f32]) -> Result<Vec<f32>, NpuError> {
+        if ids.len() != self.s {
+            return Err(NpuError::Other(format!("ids: expected {} tokens, got {}", self.s, ids.len())));
+        }
+        if kmask.len() != self.s {
+            return Err(NpuError::Other(format!("kmask: expected {} f32, got {}", self.s, kmask.len())));
+        }
+        let id_shape = Shape::new(&[1, self.s as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        let mut ti = Tensor::new(ElementType::I64, &id_shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        ti.get_data_mut::<i64>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(ids);
+        self.request.set_tensor("ids", &ti).map_err(|e| NpuError::Other(format!("set ids: {e:?}")))?;
+
+        let km_shape = Shape::new(&[1, 1, 1, self.s as i64]).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        let mut tk = Tensor::new(ElementType::F32, &km_shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+        tk.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(kmask);
+        self.request.set_tensor("kmask", &tk).map_err(|e| NpuError::Other(format!("set kmask: {e:?}")))?;
+
+        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
+        let out = self
+            .request
+            .get_output_tensor_by_index(0)
+            .map_err(|e| NpuError::Other(format!("get_output: {e:?}")))?;
+        Ok(out.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec())
+    }
+}
+
 /// The FinCast transformer core graph: inputs `emb:[1,S,D]` (assembled patch
 /// tokens) + `amask:[1,1,S,S]` (additive causal + padding mask) → output
 /// `qhead:[1,S,head_out]`. Mirrors [`Chronos2Session`] with a full `[S,S]` mask
