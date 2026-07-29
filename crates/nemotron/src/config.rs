@@ -69,6 +69,17 @@ impl NemotronConfig {
         self.subsampling_factor.trailing_zeros()
     }
 
+    /// Valid subsampled length after the subsampling stack, from `mel_valid` real
+    /// mel frames (each stage applies the `(k-1,s-1)` causal length formula).
+    pub fn subsampled_len(&self, mel_valid: u32) -> u32 {
+        let (k, s) = (self.subsampling_kernel, self.subsampling_stride);
+        let mut l = mel_valid;
+        for _ in 0..self.subsampling_stages() {
+            l = (l + (k - 1) + (s - 1) - k) / s + 1;
+        }
+        l
+    }
+
     /// Output freq bins after the subsampling stack (causal pad `(k-1, s-1)` each stage).
     pub fn subsampling_out_freq(&self) -> u32 {
         let (k, s) = (self.subsampling_kernel, self.subsampling_stride);
