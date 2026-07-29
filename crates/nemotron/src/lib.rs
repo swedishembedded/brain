@@ -12,6 +12,7 @@ pub mod import;
 pub mod kernels;
 pub mod model;
 pub mod reference;
+pub mod stream;
 pub mod tokenizer;
 pub mod train;
 

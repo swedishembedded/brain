@@ -60,23 +60,26 @@ fn pad_nchw(x: &[f32], n: u32, c: u32, h: u32, w: u32, top: u32, bot: u32, left:
 /// and reuses it across every call — the `DeviceBuffer` handles are lifetime-free,
 /// so there is no borrow tying the encoder to an external `Gpu`.
 pub struct Encoder {
-    g: Gpu,
+    pub(crate) g: Gpu,
     cfg: NemotronConfig,
     w: HashMap<String, DeviceBuffer>,
-    raw: HashMap<String, Vec<f32>>,
+    pub(crate) raw: HashMap<String, Vec<f32>>,
+    /// Lazily-built per-layer relative-position tables for the streaming path
+    /// (see `stream::rel_tables`): `[n_layers][band_width * hidden]`.
+    pub(crate) rel_band: std::sync::OnceLock<Vec<Vec<f32>>>,
 }
 
 impl Encoder {
     pub fn new(g: Gpu, cfg: NemotronConfig, weights: &HashMap<String, Vec<f32>>) -> Encoder {
         let w = weights.iter().map(|(k, v)| (k.clone(), g.storage_init(k, v))).collect();
-        Encoder { g, cfg, w, raw: weights.clone() }
+        Encoder { g, cfg, w, raw: weights.clone(), rel_band: std::sync::OnceLock::new() }
     }
 
     pub fn config(&self) -> &NemotronConfig {
         &self.cfg
     }
 
-    fn wb(&self, name: &str) -> &DeviceBuffer {
+    pub(crate) fn wb(&self, name: &str) -> &DeviceBuffer {
         self.w.get(name).unwrap_or_else(|| panic!("nemotron weight missing: {name}"))
     }
 
@@ -113,6 +116,41 @@ impl Encoder {
         ];
         self.g.submit(&[], &steps);
         self.g.read(&out, (cout * h * w) as usize)
+    }
+
+    /// Strided conv (dense or depthwise, + per-channel bias) over an already-padded
+    /// NCHW slab `[1, cin, h, w]`, pad=0 — the streaming path's window into the same
+    /// kernels `causal_conv` dispatches (identical patches → identical values).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn conv_slab(&self, slab: &[f32], cin: usize, h: usize, w: usize, cout: usize, wname: &str, bname: &str, groups: u32, ho: usize, wo: usize) -> Vec<f32> {
+        let (k, s) = (self.cfg.subsampling_kernel, self.cfg.subsampling_stride);
+        let (cin, h, w, cout, ho, wo) = (cin as u32, h as u32, w as u32, cout as u32, ho as u32, wo as u32);
+        let xin = self.g.storage_init("nem.conv.x", slab);
+        let conv = self.g.storage((cout * ho * wo) as u64);
+        let out = self.g.storage((cout * ho * wo) as u64);
+        let mut steps = Vec::new();
+        if groups == 1 {
+            steps.push(self.g.step(K_CONV2D, &[&xin, self.wb(wname), &conv], &[1, cin, h, w, cout, k, s, 0, ho, wo], cout * ho * wo));
+        } else {
+            steps.push(self.g.step(K_CONV2D_GD, &[&xin, self.wb(wname), &conv], &[1, cin, h, w, cout, k, s, 0, 1, groups, ho, wo], cout * ho * wo));
+        }
+        steps.push(self.g.step(K_ADD_CHAN, &[&conv, self.wb(bname), &out], &[1, cout, ho * wo], cout * ho * wo));
+        self.g.submit(&[], &steps);
+        self.g.read(&out, (cout * ho * wo) as usize)
+    }
+
+    /// 1×1 pointwise conv (+ bias) over an NCHW slab `[1, ch, h, w]` (stride 1).
+    pub(crate) fn pointwise_slab(&self, x: &[f32], ch: usize, h: usize, w: usize, wname: &str, bname: &str) -> Vec<f32> {
+        let (ch, h, w) = (ch as u32, h as u32, w as u32);
+        let xin = self.g.storage_init("nem.pw.x", x);
+        let conv = self.g.storage((ch * h * w) as u64);
+        let out = self.g.storage((ch * h * w) as u64);
+        let steps = vec![
+            self.g.step(K_CONV2D, &[&xin, self.wb(wname), &conv], &[1, ch, h, w, ch, 1, 1, 0, h, w], ch * h * w),
+            self.g.step(K_ADD_CHAN, &[&conv, self.wb(bname), &out], &[1, ch, h * w], ch * h * w),
+        ];
+        self.g.submit(&[], &steps);
+        self.g.read(&out, (ch * h * w) as usize)
     }
 
     fn relu(&self, x: &mut [f32]) {
@@ -197,14 +235,14 @@ impl Encoder {
 
     // ---- device Conformer blocks (big matmuls on device; small ops host) ----
 
-    fn rw(&self, name: &str) -> &Vec<f32> {
+    pub(crate) fn rw(&self, name: &str) -> &Vec<f32> {
         self.raw.get(name).unwrap_or_else(|| panic!("nemotron weight missing: {name}"))
     }
 
     /// Device matmul `[m,k]·Wᵀ → [m,n]` using the pre-uploaded weight `wname [n,k]`.
     /// Uses the 8-row-blocked kernel (bit-identical to `matmul`, 8× less weight
     /// memory traffic — the FF/projection linears are weight-bandwidth-bound).
-    fn mm(&self, x: &[f32], wname: &str, m: usize, k: usize, n: usize) -> Vec<f32> {
+    pub(crate) fn mm(&self, x: &[f32], wname: &str, m: usize, k: usize, n: usize) -> Vec<f32> {
         let xb = self.g.storage_init("nem.mm.x", x);
         let ob = self.g.storage((m * n) as u64);
         self.g.submit(&[], &[self.g.step(K_MATMUL, &[&xb, self.wb(wname), &ob], &[m as u32, k as u32, n as u32], (m * n) as u32)]);
@@ -214,7 +252,7 @@ impl Encoder {
     /// Macaron feed-forward on device in ONE submit: Linear(c→ffn) → SiLU →
     /// Linear(ffn→c). Keeps the intermediate on-device (no host round-trip / extra
     /// submit vs two separate matmuls). Bit-identical to two `mm` + host SiLU.
-    fn ff_dev(&self, x: &[f32], pre: &str, t: usize) -> Vec<f32> {
+    pub(crate) fn ff_dev(&self, x: &[f32], pre: &str, t: usize) -> Vec<f32> {
         let (c, ffn) = (self.cfg.hidden as usize, self.cfg.intermediate as usize);
         let xb = self.g.storage_init("nem.ff.x", x);
         let h1 = self.g.storage((t * ffn) as u64);
@@ -446,8 +484,20 @@ impl Encoder {
         for b in 0..cfg.n_layers {
             h = self.block_dev_batch(&h, b, &spans, tt);
         }
-        // 3. prompt + encoder projectors — batched over all rows (device matmuls +
-        //    host bias/relu/one-hot). Every row carries the same language one-hot.
+        // 3. prompt + encoder projectors — batched over all rows.
+        let pooler = self.project_rows(&h, tt, prompt_id);
+        let dh = cfg.decoder_hidden as usize;
+        // 4. split the pooler back into per-item slices.
+        spans.iter().map(|&(off, ti, vi)| (pooler[off * dh..(off + ti) * dh].to_vec(), vi as u32)).collect()
+    }
+
+    /// Prompt + encoder projectors over `tt` Conformer-output rows `[tt, hidden]` →
+    /// pooler `[tt, decoder_hidden]` (device matmuls + host bias/relu/one-hot; every
+    /// row carries the same language one-hot). Per-frame math — shared by the
+    /// batched offline forward and the streaming path.
+    pub(crate) fn project_rows(&self, h: &[f32], tt: usize, prompt_id: usize) -> Vec<f32> {
+        let cfg = &self.cfg;
+        let c = cfg.hidden as usize;
         let (np, pi, dh) = (cfg.num_prompts as usize, cfg.prompt_intermediate as usize, cfg.decoder_hidden as usize);
         let mut cat = vec![0.0f32; tt * (c + np)];
         for i in 0..tt {
@@ -475,8 +525,7 @@ impl Encoder {
                 pooler[i * dh + j] += eb[j];
             }
         }
-        // 4. split the pooler back into per-item slices.
-        spans.iter().map(|&(off, ti, vi)| (pooler[off * dh..(off + ti) * dh].to_vec(), vi as u32)).collect()
+        pooler
     }
 
     /// Batched transcription: N waveforms → N token-id sequences. The encoder forward
@@ -523,28 +572,53 @@ impl Encoder {
 
     /// RNN-T greedy transducer decode over an encoded `pooler` `[T, decoder_hidden]`.
     /// LSTM prediction net runs host-side (m=1 steps); the joint head is on device.
-    fn rnnt_greedy(&self, pooler: &[f32], valid: usize) -> Vec<u32> {
-        use crate::reference::{lstm_predict, LstmState};
-        let cfg = &self.cfg;
+    /// One implementation with the streaming path: a fresh [`DecodeState`] stepped
+    /// over every frame.
+    pub(crate) fn rnnt_greedy(&self, pooler: &[f32], valid: usize) -> Vec<u32> {
+        let mut st = DecodeState::new(self, self.cfg.blank_token_id);
+        st.step_frames(self, pooler, valid);
+        st.emitted
+    }
+}
+
+/// Persistent RNN-T greedy-decode state: the LSTM prediction-net state, the current
+/// decoder output vector, and the tokens emitted so far. The streaming path keeps
+/// one alive across pushes; the offline `rnnt_greedy` runs a fresh one to the end —
+/// the same frame loop either way, so streamed decode is identical by construction.
+pub(crate) struct DecodeState {
+    lstm: crate::reference::LstmState,
+    dec: Vec<f32>,
+    pub(crate) emitted: Vec<u32>,
+}
+
+impl DecodeState {
+    pub(crate) fn new(enc: &Encoder, blank: u32) -> DecodeState {
+        let cfg = enc.config();
+        let mut lstm = crate::reference::LstmState::new(cfg.num_decoder_layers as usize, cfg.decoder_hidden as usize);
+        let dec = crate::reference::lstm_predict(blank, &mut lstm, &enc.raw, cfg);
+        DecodeState { lstm, dec, emitted: Vec::new() }
+    }
+
+    /// Greedy-decode `n` new pooler frames `[n, decoder_hidden]`, appending emitted
+    /// tokens. Each frame's blank-terminated inner loop completes within the call,
+    /// so state carried across calls is exactly (LSTM state, decoder output, tokens).
+    pub(crate) fn step_frames(&mut self, enc: &Encoder, pooler: &[f32], n: usize) {
+        let cfg = *enc.config();
         let dh = cfg.decoder_hidden as usize;
         let blank = cfg.blank_token_id;
-        let mut st = LstmState::new(cfg.num_decoder_layers as usize, dh);
-        let mut dec = lstm_predict(blank, &mut st, &self.raw, cfg);
         let (mut frame, mut symbols) = (0usize, 0u32);
-        let mut emitted = Vec::new();
-        while frame < valid {
-            let logits = self.joint_logits(&pooler[frame * dh..frame * dh + dh], &dec);
+        while frame < n {
+            let logits = enc.joint_logits(&pooler[frame * dh..frame * dh + dh], &self.dec);
             let token = logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).unwrap();
             if token == blank || symbols >= cfg.max_symbols_per_step {
                 frame += 1;
                 symbols = 0;
             } else {
-                emitted.push(token);
+                self.emitted.push(token);
                 symbols += 1;
-                dec = lstm_predict(token, &mut st, &self.raw, cfg);
+                self.dec = crate::reference::lstm_predict(token, &mut self.lstm, &enc.raw, &cfg);
             }
         }
-        emitted
     }
 }
 

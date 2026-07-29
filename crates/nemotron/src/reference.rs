@@ -232,15 +232,15 @@ pub fn conformer_block_backward(h0: &[f32], w: &W, b: u32, cfg: &NemotronConfig,
     d_h0
 }
 
-/// Relative positional encoding `[2T-1, C]`: interleaved sin/cos over positions
-/// `[T-1 .. -(T-1)]`, `inv_freq[i] = 10000^(-2i/C)`.
-pub(crate) fn rel_pos_encoding(t: usize, c: usize) -> Vec<f32> {
+/// Relative positional rows `[positions.len(), C]`: interleaved sin/cos per
+/// position value, `inv_freq[i] = 10000^(-2i/C)`. A row depends only on its
+/// position *value*, so the offline `[2T-1]` ladder and the streaming band table
+/// share this one implementation (bit-identical rows for equal positions).
+pub(crate) fn rel_pos_rows(positions: &[f32], c: usize) -> Vec<f32> {
     let half = c / 2;
     let inv: Vec<f32> = (0..half).map(|i| (10000f32).powf(-(2.0 * i as f32) / c as f32)).collect();
-    let l = 2 * t - 1;
-    let mut pe = vec![0.0f32; l * c];
-    for idx in 0..l {
-        let pos = (t as i64 - 1 - idx as i64) as f32; // T-1 .. -(T-1)
+    let mut pe = vec![0.0f32; positions.len() * c];
+    for (idx, &pos) in positions.iter().enumerate() {
         for i in 0..half {
             let f = pos * inv[i];
             pe[idx * c + 2 * i] = f.sin();
@@ -248,6 +248,12 @@ pub(crate) fn rel_pos_encoding(t: usize, c: usize) -> Vec<f32> {
         }
     }
     pe
+}
+
+/// Relative positional encoding `[2T-1, C]` over positions `[T-1 .. -(T-1)]`.
+pub(crate) fn rel_pos_encoding(t: usize, c: usize) -> Vec<f32> {
+    let pos: Vec<f32> = (0..2 * t - 1).map(|idx| (t as i64 - 1 - idx as i64) as f32).collect();
+    rel_pos_rows(&pos, c)
 }
 
 /// `chunked_limited` validity: query `i` may attend key `j` iff
