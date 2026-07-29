@@ -50,7 +50,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo \
         export/yolo-onnx quantize/yolo sim/yolo-int8 run/yolo-npu bench/yolo-npu \
-        web/dev web/build forecast/compare forecast/serve
+        web/dev web/build forecast/compare forecast/serve fetch/testdata
 
 help:
 	@echo "brain targets:"
@@ -207,6 +207,12 @@ data/timeseries: release
 # Synthetic Qwen3-TTS `text -> codebook-0 codes` stream (for Talker SFT smokes).
 data/tts: release
 	$(BRAIN) data gen tts --out $(DATA)/tts --n $(N) --seed $(SEED)
+
+# Populate the gitignored testdata/ tree (checkpoints/goldens/audio) that parity
+# and integration tests read from $BRAIN_TESTDATA. Idempotent — fetches only what
+# is missing, from a local mirror (hard-linked) or a URL. See scripts/fetch-testdata.sh.
+fetch/testdata:
+	bash scripts/fetch-testdata.sh
 
 $(DATA)/shakespeare_char/input.txt:
 	mkdir -p $(DATA)/shakespeare_char && curl -sSL -o $@ $(SHAKE_URL)

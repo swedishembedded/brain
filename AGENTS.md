@@ -531,6 +531,23 @@ per-scenario table and the findings so far.
   cross-backend gate (CPU == Vulkan == NPU).
 - **Adding a capability ≠ adding a subcommand.** Implement `capability::Action`
   and list it in a `Provider`; `brain do` and the event API pick it up.
+- **No absolute paths in source — anywhere.** Never hardcode a machine-specific
+  absolute path (`/data/…`, `/home/…`, `/tmp/…`) in `crates/**`: not in code, not
+  in a test `const`, not as a runtime default, not in a doc comment. Two homes for
+  what used to be hardcoded:
+  1. **Test / parity fixtures** live under the **gitignored `testdata/` tree**,
+     resolved at runtime from `$BRAIN_TESTDATA` (default `<repo>/testdata`, via a
+     `#[cfg(test)] fn testdata(rel)` helper per crate). A test **skips itself** when
+     its fixture is absent. Populate the tree with **`make fetch/testdata`**
+     (`scripts/fetch-testdata.sh`) — it hard-links from a local mirror or downloads
+     from a URL, fetching only files not already present, organised as a tree
+     (`testdata/<domain>/<model>/…`). The mirror location is an overridable script
+     variable — the ONE permitted place a machine path may appear.
+  2. **In-repo artifacts** (`out/…` build outputs, `scratchpad/…`) are resolved
+     **repo-relative** (`concat!(env!("CARGO_MANIFEST_DIR"), "/../../out/…")`), never
+     as an absolute literal.
+  Runtime weight locations come from an **env var or CLI flag**, never a baked-in
+  path. Grep gate: `grep -rn '/data/\|/home/' crates/**/*.rs` must stay empty.
 - **Evaluate honestly.** Hold the input distribution fixed; separate the metric
   (perplexity) from the task (exact-match on held-out data); see `README.md` §3.
 - **Gitignored:** `scratchpad/` (scratch weights, images, porting references),

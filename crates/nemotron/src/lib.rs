@@ -14,3 +14,14 @@ pub mod reference;
 pub mod train;
 
 pub use config::NemotronConfig;
+
+/// Resolve a test-fixture path under the gitignored `testdata/` tree — never a
+/// hardcoded absolute path (that invariant is enforced in `AGENTS.md`). The root is
+/// `$BRAIN_TESTDATA`, defaulting to `<repo>/testdata` (populated by
+/// `make fetch/testdata`). Tests skip themselves when the file is absent.
+#[cfg(test)]
+pub(crate) fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}

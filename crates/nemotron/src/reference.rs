@@ -1452,12 +1452,11 @@ pub fn encode_pooler_grads(sub: &[f32], w: &W, cfg: &NemotronConfig, t: usize, v
 
 #[cfg(test)]
 mod tests {
+    #![allow(non_snake_case)] // GOLD/CKPT test-path locals (see AGENTS.md: no absolute paths)
     use super::*;
     use std::io::Read;
     use std::path::Path;
 
-    const GOLD: &str = "/data/workspace/resources/asr/golden/nemotron";
-    const CKPT: &str = "/data/workspace/resources/asr/nemotron/hf";
 
     fn read_f32(p: &str) -> Vec<f32> {
         let mut f = std::fs::File::open(p).unwrap_or_else(|_| panic!("missing {p}"));
@@ -1814,6 +1813,8 @@ mod tests {
 
     #[test]
     fn conformer_block0_matches_reference() {
+        let GOLD = crate::testdata("asr/golden/nemotron");
+        let CKPT = crate::testdata("asr/nemotron/hf");
         if !Path::new(&format!("{GOLD}/block0.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
             eprintln!("skipping: goldens/checkpoint absent");
             return;
@@ -1822,7 +1823,7 @@ mod tests {
         let sub = read_f32(&format!("{GOLD}/subsampling.f32")); // block0 input [T, 1024]
         let ref_b0 = read_f32(&format!("{GOLD}/block0.f32"));
         let t = sub.len() / cfg.hidden as usize;
-        let w = crate::import::load_tensors(Path::new(CKPT)).expect("load");
+        let w = crate::import::load_tensors(Path::new(&CKPT)).expect("load");
         let valid = cfg.subsampled_len(585) as usize;
         let out = conformer_block(&sub, &w, 0, &cfg, t, valid);
         // compare only valid frames; the invalid tail (frames >= valid) is garbage in
@@ -1835,6 +1836,8 @@ mod tests {
 
     #[test]
     fn encoder_pooler_matches_reference() {
+        let GOLD = crate::testdata("asr/golden/nemotron");
+        let CKPT = crate::testdata("asr/nemotron/hf");
         if !Path::new(&format!("{GOLD}/pooler.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
             eprintln!("skipping: goldens/checkpoint absent");
             return;
@@ -1844,7 +1847,7 @@ mod tests {
         let ref_pool = read_f32(&format!("{GOLD}/pooler.f32")); // [T, 640]
         let t = sub.len() / cfg.hidden as usize;
         let valid = cfg.subsampled_len(585) as usize;
-        let w = crate::import::load_tensors(Path::new(CKPT)).expect("load");
+        let w = crate::import::load_tensors(Path::new(&CKPT)).expect("load");
         let pool = encode_pooler(&sub, &w, &cfg, t, valid, 0); // prompt_id 0 (en)
         let dh = cfg.decoder_hidden as usize;
         let n = valid * dh;
@@ -1855,6 +1858,8 @@ mod tests {
 
     #[test]
     fn rnnt_greedy_matches_reference() {
+        let GOLD = crate::testdata("asr/golden/nemotron");
+        let CKPT = crate::testdata("asr/nemotron/hf");
         if !Path::new(&format!("{GOLD}/pooler.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
             eprintln!("skipping: goldens/checkpoint absent");
             return;
@@ -1864,7 +1869,7 @@ mod tests {
         let dh = cfg.decoder_hidden as usize;
         let t = pooler.len() / dh;
         let valid = cfg.subsampled_len(585) as usize;
-        let w = crate::import::load_tensors(Path::new(CKPT)).expect("load");
+        let w = crate::import::load_tensors(Path::new(&CKPT)).expect("load");
         let emitted = rnnt_greedy(&pooler, valid.min(t), &w, &cfg);
 
         // golden output_ids include blanks + the decoder-start; the transcript is the

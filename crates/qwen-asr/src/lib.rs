@@ -14,14 +14,23 @@ pub use config::{AudioEncoderConfig, QwenAsrConfig};
 pub use encoder::AudioEncoder;
 pub use model::Qwen3Asr;
 
+/// Resolve a test-fixture path under the gitignored `testdata/` tree — never a
+/// hardcoded absolute path (enforced in `AGENTS.md`). Root is `$BRAIN_TESTDATA`,
+/// defaulting to `<repo>/testdata` (populated by `make fetch/testdata`).
+#[cfg(test)]
+pub(crate) fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(non_snake_case)] // GOLD/CKPT test-path locals (see AGENTS.md: no absolute paths)
     use super::*;
     use std::io::Read;
     use std::path::Path;
 
-    const GOLD: &str = "/data/workspace/resources/asr/golden/qwen_encoder";
-    const CKPT: &str = "/data/workspace/resources/asr/qwen3-asr/hf";
 
     fn read_f32(path: &str) -> Vec<f32> {
         let mut f = std::fs::File::open(path).unwrap_or_else(|_| panic!("missing {path}"));
@@ -48,7 +57,8 @@ mod tests {
     #[test]
     #[ignore = "slow: loads the 1.7B checkpoint + KV-cache decode (~minutes; bandwidth-bound)"]
     fn qwen_transcribe_matches_reference() {
-        let dg = "/data/workspace/resources/asr/golden/qwen_decode";
+        let dg = crate::testdata("asr/golden/qwen_decode");
+        let CKPT = crate::testdata("asr/qwen-asr/hf");
         if !have(&format!("{dg}/output_ids.f32")) || !have(&format!("{CKPT}/model.safetensors")) {
             eprintln!("skipping: goldens/checkpoint absent");
             return;
@@ -67,7 +77,7 @@ mod tests {
         let n_audio = input_ids.iter().filter(|&&t| t == atid).count() as u32;
         let seq_budget = input_ids.len() as u32 + ref_out.len() as u32 + 4;
 
-        let model = Qwen3Asr::from_hf(CKPT, cfg, seq_budget, row0, n_audio).expect("load");
+        let model = Qwen3Asr::from_hf(&CKPT, cfg, seq_budget, row0, n_audio).expect("load");
         let audio_embeds = model.encode_audio(&mel, valid);
         // encoder parity on this clip too (isolates encoder from decoder)
         let de = maxdiff(&audio_embeds, &ref_emb);
@@ -88,6 +98,8 @@ mod tests {
     /// Full audio encoder + projector parity against the dumped HF activations.
     #[test]
     fn qwen_encoder_matches_reference() {
+        let GOLD = crate::testdata("asr/golden/qwen_encoder");
+        let CKPT = crate::testdata("asr/qwen-asr/hf");
         if !have(&format!("{GOLD}/encoder_out.f32")) || !have(&format!("{CKPT}/model.safetensors")) {
             eprintln!("skipping: goldens/checkpoint absent");
             return;
@@ -98,7 +110,7 @@ mod tests {
         let mask = read_f32(&format!("{GOLD}/input_features_mask.f32"));
         let valid_frames = mask.iter().filter(|&&v| v > 0.5).count() as u32;
 
-        let weights = import::load_audio_encoder(Path::new(CKPT), &cfg).expect("load");
+        let weights = import::load_audio_encoder(Path::new(&CKPT), &cfg).expect("load");
         let gpu = gpu_core::Gpu::new_cpu(encoder::audio_pipelines());
         let enc = AudioEncoder::new(&gpu, cfg, &weights);
         let (encoder_out, audio_embeds) = enc.encode(&mel, valid_frames);
