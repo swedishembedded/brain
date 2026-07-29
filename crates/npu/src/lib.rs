@@ -39,6 +39,7 @@ pub mod sim;
 pub mod topology;
 pub mod wm_topology;
 pub mod mirror_topology;
+pub mod nemotron_topology;
 
 // OpenVINO runtime seam (real on x86_64 linux/windows, stub elsewhere).
 pub mod openvino;
@@ -55,6 +56,7 @@ pub use topology::{build_graph, WeightSource};
 pub mod depth_topology;
 pub use depth_topology::{build_depth_graph, build_depth_graph_hw};
 pub use wm_topology::{build_diamond_graph, WmSession, WmUnetConfig};
+pub use nemotron_topology::{build_subsampling, NemotronTopo};
 
 /// The one per-model NPU seam (see `docs/npu-residency.md`). A model implements
 /// [`build`](NpuModel::build) — its device-heavy forward, composed from the shared
