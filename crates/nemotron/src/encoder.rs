@@ -27,8 +27,11 @@ pub fn encoder_pipelines() -> &'static [(&'static str, &'static str)] {
         ("relu_inplace", kernels::RELU_INPLACE),     // 3
         ("matmul", kernels::MATMUL),                 // 4
         ("bias_add", kernels::BIAS_ADD),             // 5
+        ("matmul_rows", kernels::MATMUL_ROWS),       // 6 (unused on CPU: slower than matmul)
+        ("silu", kernels::SILU),                     // 7
     ]
 }
+const K_SILU: usize = 7;
 const K_CONV2D: usize = 0;
 const K_CONV2D_GD: usize = 1;
 const K_ADD_CHAN: usize = 2;
@@ -191,11 +194,31 @@ impl<'g> Encoder<'g> {
     }
 
     /// Device matmul `[m,k]·Wᵀ → [m,n]` using the pre-uploaded weight `wname [n,k]`.
+    /// Uses the 8-row-blocked kernel (bit-identical to `matmul`, 8× less weight
+    /// memory traffic — the FF/projection linears are weight-bandwidth-bound).
     fn mm(&self, x: &[f32], wname: &str, m: usize, k: usize, n: usize) -> Vec<f32> {
         let xb = self.g.storage_init("nem.mm.x", x);
         let ob = self.g.storage((m * n) as u64);
         self.g.submit(&[], &[self.g.step(K_MATMUL, &[&xb, self.wb(wname), &ob], &[m as u32, k as u32, n as u32], (m * n) as u32)]);
         self.g.read(&ob, m * n)
+    }
+
+    /// Macaron feed-forward on device in ONE submit: Linear(c→ffn) → SiLU →
+    /// Linear(ffn→c). Keeps the intermediate on-device (no host round-trip / extra
+    /// submit vs two separate matmuls). Bit-identical to two `mm` + host SiLU.
+    fn ff_dev(&self, x: &[f32], pre: &str, t: usize) -> Vec<f32> {
+        let (c, ffn) = (self.cfg.hidden as usize, self.cfg.intermediate as usize);
+        let xb = self.g.storage_init("nem.ff.x", x);
+        let h1 = self.g.storage((t * ffn) as u64);
+        let h2 = self.g.storage((t * ffn) as u64);
+        let ob = self.g.storage((t * c) as u64);
+        let steps = vec![
+            self.g.step(K_MATMUL, &[&xb, self.wb(&format!("{pre}.linear1.weight")), &h1], &[t as u32, c as u32, ffn as u32], (t * ffn) as u32),
+            self.g.step(K_SILU, &[&h1, &h2], &[(t * ffn) as u32], (t * ffn) as u32),
+            self.g.step(K_MATMUL, &[&h2, self.wb(&format!("{pre}.linear2.weight")), &ob], &[t as u32, ffn as u32, c as u32], (t * c) as u32),
+        ];
+        self.g.submit(&[], &steps);
+        self.g.read(&ob, t * c)
     }
 
     /// Rel-pos MHA (device projections + o_proj; per-head scoring host). Mirrors
@@ -313,16 +336,6 @@ impl<'g> Encoder<'g> {
             *v = silu(*v);
         }
         self.mm(&act, &format!("{pre}.pointwise_conv2.weight"), t, c, c)
-    }
-
-    fn ff_dev(&self, x: &[f32], pre: &str, t: usize) -> Vec<f32> {
-        use crate::reference::silu;
-        let (c, ffn) = (self.cfg.hidden as usize, self.cfg.intermediate as usize);
-        let mut h = self.mm(x, &format!("{pre}.linear1.weight"), t, c, ffn);
-        for v in &mut h {
-            *v = silu(*v);
-        }
-        self.mm(&h, &format!("{pre}.linear2.weight"), t, ffn, c)
     }
 
     /// One Conformer block on device. Bit-parity with `reference::conformer_block`.
