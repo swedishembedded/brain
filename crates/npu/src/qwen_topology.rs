@@ -519,7 +519,7 @@ fn build_stack(tp: &mut Topo, cfg: &QwenConfig, w: &W, t: usize, x_in: &str, emi
 /// per-output-channel symmetric integers dequantised in-graph (`DequantizeLinear`
 /// -> MatMul): ~4x / ~8x smaller than fp32, so the 1.7B Talker fits the NPU and —
 /// being weight-bandwidth bound — decodes faster. Norms/RoPE/mask stay fp32.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Quant {
     F32,
     Int8,

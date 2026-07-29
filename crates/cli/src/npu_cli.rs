@@ -31,11 +31,12 @@ pub fn run_npu(args: &[String]) {
         Some("bench") => bench(&args[1..]),
         Some("sim") => sim(&args[1..]),
         Some("lfm") => lfm(&args[1..]),
+        Some("lfm-bench") => lfm_bench(&args[1..]),
         Some("chronos2") => chronos2(&args[1..]),
         Some("kronos") => kronos(&args[1..]),
         Some("fincast") => fincast(&args[1..]),
         other => eprintln!(
-            "usage: brain npu <export|quantize|check|run|bench|sim|lfm|chronos2|kronos|fincast> ...  (got {other:?})"
+            "usage: brain npu <export|quantize|check|run|bench|sim|lfm|lfm-bench|chronos2|kronos|fincast> ...  (got {other:?})"
         ),
     }
 }
@@ -82,6 +83,175 @@ fn lfm(args: &[String]) {
     if let Err(e) = npu::lfm_export::export(&weights, seq, &out, int8) {
         eprintln!("brain npu lfm: {e}");
         std::process::exit(1);
+    }
+}
+
+fn cosine_f32(a: &[f32], b: &[f32]) -> (f64, f32) {
+    let (mut dot, mut na, mut nb, mut max_abs) = (0f64, 0f64, 0f64, 0f32);
+    for (&x, &y) in a.iter().zip(b) {
+        dot += x as f64 * y as f64;
+        na += x as f64 * x as f64;
+        nb += y as f64 * y as f64;
+        max_abs = max_abs.max((x - y).abs());
+    }
+    (dot / (na.sqrt() * nb.sqrt()), max_abs)
+}
+
+/// `brain npu lfm-bench` — export the LFM2.5-Encoder at a fixed sequence bucket,
+/// compile it on the accelerator (no CPU/GPU fallback), and time the encoder's
+/// one-shot forward: `--warmup` runs excluded, then `--iters` timed `sess.run()`
+/// calls → p50/p99/mean ms. **Compile time is reported separately** from
+/// inference (never mixed). `--compare` also runs brain's own chunked forward on
+/// the *same* fixed token ids and reports cosine — the NPU-fp16 vs brain-fp32
+/// parity gate (≥ 0.999; the NPU executes fp16 internally so we gate on cosine,
+/// not max-abs). The device is asserted to be exactly the requested one so a
+/// silent fallback is never reported as an NPU number.
+fn lfm_bench(args: &[String]) {
+    use npu::openvino::LfmSession;
+    use npu::qwen_topology::Quant;
+    let mut weights = String::new();
+    let mut seq = 8192usize;
+    let mut out = String::from("out/lfm-bench.onnx");
+    let mut iters = 20usize;
+    let mut warmup = 5usize;
+    // The Intel NPU is fp16-native, so an fp32 graph runs in fp16 on it: that is
+    // the `f16` precision. `int8`/`int4` add weight-only quantization on top.
+    let mut quant = Quant::F32;
+    let mut quant_label = "f16 (NPU-native)";
+    let mut compare = false;
+    let mut opts = NpuOpts::default(); // device NPU, latency hint, allow_fallback = false
+    let mut i = 0;
+    while i < args.len() {
+        if opts.parse_flag(args, &mut i) {
+            i += 1;
+            continue;
+        }
+        match args[i].as_str() {
+            "--weights" => weights = val(args, &mut i, "--weights"),
+            "--seq" => seq = val(args, &mut i, "--seq").parse().unwrap_or(seq),
+            "--out" => out = val(args, &mut i, "--out"),
+            "--iters" => iters = val(args, &mut i, "--iters").parse().unwrap_or(iters),
+            "--warmup" => warmup = val(args, &mut i, "--warmup").parse().unwrap_or(warmup),
+            "--quant" => {
+                let q = val(args, &mut i, "--quant");
+                (quant, quant_label) = match q.as_str() {
+                    "f16" | "fp16" | "f32" => (Quant::F32, "f16 (NPU-native)"),
+                    "int8" | "i8" => (Quant::Int8, "int8-weights (fp16 acts)"),
+                    "int4" | "i4" => (Quant::Int4, "int4-weights (fp16 acts)"),
+                    other => {
+                        eprintln!("brain npu lfm-bench: --quant expects f16|int8|int4 (got {other:?})");
+                        std::process::exit(2);
+                    }
+                };
+            }
+            "--int8" => (quant, quant_label) = (Quant::Int8, "int8-weights (fp16 acts)"),
+            "--compare" => compare = true,
+            other => {
+                eprintln!("brain npu lfm-bench: unknown flag {other:?}");
+                std::process::exit(2);
+            }
+        }
+        i += 1;
+    }
+    if weights.is_empty() || iters == 0 {
+        eprintln!(
+            "usage: brain npu lfm-bench --weights F [--seq S --iters N --warmup W \
+             --device NPU --quant f16|int8|int4 --compare]"
+        );
+        std::process::exit(2);
+    }
+
+    // Vocab (for in-range token ids) from the checkpoint config — cheap header read.
+    let cfg = lfm::config::LfmConfig::from_json(&checkpoint::load(&weights).header["config"]);
+    let vocab = cfg.vocab;
+
+    // 1) Export the fixed-shape graph (external-data sidecar) — pure Rust, one-time.
+    if let Some(p) = Path::new(&out).parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let t_exp = Instant::now();
+    if let Err(e) = npu::lfm_export::export_quant(&weights, seq, &out, quant) {
+        eprintln!("brain npu lfm-bench: export: {e}");
+        std::process::exit(1);
+    }
+    let export_ms = t_exp.elapsed().as_secs_f64() * 1e3;
+
+    // 2) Compile on the accelerator (no fallback). Compile time is measured and
+    //    reported on its own line — it is a one-time cost, not per-inference.
+    let ncfg = opts.to_config();
+    let t_c = Instant::now();
+    let mut sess = match LfmSession::load_path(&out, &ncfg) {
+        Ok(s) => s,
+        Err(e) => die(e),
+    };
+    let compile_ms = t_c.elapsed().as_secs_f64() * 1e3;
+
+    // Hard rule: a CPU/GPU fallback must never be reported as an NPU number.
+    let dev = sess.device().to_string();
+    let want = match opts.device {
+        NpuDevice::Npu => "NPU",
+        NpuDevice::Gpu => "GPU",
+        NpuDevice::Cpu => "CPU",
+        NpuDevice::Auto => "",
+    };
+    if !want.is_empty() && dev != want {
+        eprintln!(
+            "brain npu lfm-bench: compiled on {dev}, not {want} (allow_fallback off) — \
+             refusing to report a non-{want} number"
+        );
+        std::process::exit(1);
+    }
+    if sess.seq_len() != seq {
+        eprintln!("brain npu lfm-bench: compiled S={} != requested {seq}", sess.seq_len());
+        std::process::exit(1);
+    }
+
+    // 3) Fixed inputs: token ids [1,S] + a zero key-mask (no padding).
+    let ids_u32: Vec<u32> = (0..seq as u32).map(|k| (k.wrapping_mul(2_654_435_761) % vocab).max(1)).collect();
+    let ids_i64: Vec<i64> = ids_u32.iter().map(|&x| x as i64).collect();
+    let kmask = vec![0.0f32; seq];
+
+    for _ in 0..warmup {
+        sess.run(&ids_i64, &kmask).unwrap_or_else(|e| die(e));
+    }
+    let mut ms: Vec<f64> = Vec::with_capacity(iters);
+    let mut got = Vec::new();
+    for _ in 0..iters {
+        let t = Instant::now();
+        got = sess.run(&ids_i64, &kmask).unwrap_or_else(|e| die(e));
+        ms.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let pick = |q: f64| ms[(((ms.len() - 1) as f64) * q).round() as usize];
+    let (p50, p99, mean) = (pick(0.5), pick(0.99), ms.iter().sum::<f64>() / ms.len() as f64);
+
+    println!("model        LFM2.5-Encoder  S={seq}  {quant_label}");
+    println!("device       {dev}");
+    println!("export       {export_ms:.1} ms   (pure Rust, one-time)");
+    println!("compile      {compile_ms:.1} ms   (one-time; cache with --cache-dir)");
+    println!("iters        {iters}   (warmup {warmup} excluded)");
+    println!("latency p50  {p50:.1} ms");
+    println!("latency p99  {p99:.1} ms");
+    println!("latency mean {mean:.1} ms");
+    println!("e2e/infer    {:.3} s   (single-sequence {seq}-token forward)", p50 / 1e3);
+
+    // 4) Parity gate: NPU output vs brain's own chunked forward on identical ids.
+    if compare {
+        let m = lfm::model::Lfm::load_inference_chunked(&weights, 1, seq as u32, 512 << 20, 0);
+        m.set_tokens(&ids_u32);
+        m.forward();
+        let reference = m.read_hidden();
+        drop(m);
+        if reference.len() != got.len() {
+            eprintln!("parity: len {} != NPU {}", reference.len(), got.len());
+            std::process::exit(1);
+        }
+        let (cos, max_abs) = cosine_f32(&reference, &got);
+        println!("parity       cosine {cos:.6}  max_abs {max_abs:.4}  (NPU fp16 vs brain fp32)");
+        if cos < 0.999 {
+            eprintln!("brain npu lfm-bench: PARITY FAIL cosine {cos:.6} < 0.999");
+            std::process::exit(1);
+        }
     }
 }
 

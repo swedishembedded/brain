@@ -15,13 +15,21 @@ use crate::qwen_topology::Quant;
 /// `<out>.data` for the 256 MB embedding + linears). `int8` selects
 /// per-output-channel weight-only INT8.
 pub fn export(weights: &str, s: usize, out: &str, int8: bool) -> Result<(), String> {
+    export_quant(weights, s, out, Quant::from_bool(int8))
+}
+
+/// Like [`export`] but selects the weight precision explicitly: `Quant::F32`
+/// (dense fp32 weights — the Intel NPU still executes the graph in its native
+/// fp16), `Quant::Int8` / `Quant::Int4` (per-output-channel weight-only
+/// quantization, fp16 activations). One graph per (S, quant) bucket.
+pub fn export_quant(weights: &str, s: usize, out: &str, quant: Quant) -> Result<(), String> {
     let c = checkpoint::load(weights);
     let cfg = LfmConfig::from_json(&c.header["config"]);
     let w = c.by_role("");
     let mut g = GraphBuilder::new("lfm25_encoder");
-    crate::lfm_topology::build_lfm_graph_quant(&cfg, &w, s, &mut g, Quant::from_bool(int8));
+    crate::lfm_topology::build_lfm_graph_quant(&cfg, &w, s, &mut g, quant);
     g.finish_external(out, 1 << 20).map_err(|e| format!("write {out}: {e}"))?;
-    eprintln!("exported {weights} (S={s}, {}) -> {out}", if int8 { "int8-weights" } else { "fp32" });
+    eprintln!("exported {weights} (S={s}, {quant:?}) -> {out}");
     Ok(())
 }
 
