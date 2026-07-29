@@ -10,6 +10,7 @@ name = "nemotron"
 path = "src/lib.rs"
 
 [dependencies]
+brain-data.workspace = true
 brain-model.workspace = true
 brain-audio.workspace = true
 brain-gpu-core.workspace = true
@@ -19,3 +20,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 brain-data.workspace = true
+brain-gradcheck.workspace = true

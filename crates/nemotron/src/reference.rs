@@ -763,6 +763,13 @@ fn argmax(v: &[f32]) -> u32 {
 /// recurrent training path (lstm gate backward + W_ih/W_hh matmul bwd, chained in
 /// time). Validated by finite differences.
 pub fn predictor_sequence_backward(tokens: &[u32], w: &W, cfg: &NemotronConfig, d_dec: &[Vec<f32>]) -> Vec<f32> {
+    predictor_grads(tokens, w, cfg, d_dec).remove("decoder.embedding.weight").unwrap()
+}
+
+/// Full BPTT gradient map for the LSTM prediction net + decoder_projector: returns
+/// grads for `decoder.embedding.weight`, `decoder.lstm.weight_{ih,hh}_l*`,
+/// `decoder.lstm.bias_{ih,hh}_l*`, and `decoder.decoder_projector.{weight,bias}`.
+pub fn predictor_grads(tokens: &[u32], w: &W, cfg: &NemotronConfig, d_dec: &[Vec<f32>]) -> W {
     let dh = cfg.decoder_hidden as usize;
     let layers = cfg.num_decoder_layers as usize;
     let emb = &w["decoder.embedding.weight"];
@@ -807,20 +814,27 @@ pub fn predictor_sequence_backward(tokens: &[u32], w: &W, cfg: &NemotronConfig, 
         ca_projin[ti] = input; // h[last]
     }
 
-    // backward (BPTT)
+    // backward (BPTT) — accumulate ALL predictor weight grads
     let mut d_embed = vec![0.0f32; emb.len()];
+    let mut d_wih = vec![vec![0.0f32; 4 * dh * dh]; layers];
+    let mut d_whh = vec![vec![0.0f32; 4 * dh * dh]; layers];
+    let mut d_bih = vec![vec![0.0f32; 4 * dh]; layers];
+    let mut d_bhh = vec![vec![0.0f32; 4 * dh]; layers];
+    let mut d_wproj = vec![0.0f32; dh * dh];
+    let mut d_bproj = vec![0.0f32; dh];
     let mut d_h = vec![vec![0.0f32; dh]; layers];
     let mut d_c = vec![vec![0.0f32; dh]; layers];
     for ti in (0..n).rev() {
-        // decoder_projector: dec = projin·Wprojᵀ → d_projin = d_dec·Wproj
+        // decoder_projector: dec = projin·Wprojᵀ + b → d_projin = d_dec·Wproj; grads
         let dd = &d_dec[ti];
+        let projin = &ca_projin[ti];
         let mut d_top = vec![0.0f32; dh];
-        for j in 0..dh {
-            let mut a = 0.0f32;
-            for o in 0..dh {
-                a += dd[o] * wproj[o * dh + j];
+        for o in 0..dh {
+            d_bproj[o] += dd[o];
+            for j in 0..dh {
+                d_top[j] += dd[o] * wproj[o * dh + j];
+                d_wproj[o * dh + j] += dd[o] * projin[j];
             }
-            d_top[j] = a;
         }
         for j in 0..dh {
             d_h[layers - 1][j] += d_top[j];
@@ -839,6 +853,16 @@ pub fn predictor_sequence_backward(tokens: &[u32], w: &W, cfg: &NemotronConfig, 
                 d_pre[dh + j] = df * ff * (1.0 - ff);
                 d_pre[2 * dh + j] = dg * (1.0 - gg * gg);
                 d_pre[3 * dh + j] = doo * oo * (1.0 - oo);
+            }
+            // weight grads: d_W_ih += outer(d_pre, input); d_W_hh += outer(d_pre, h_prev); biases += d_pre
+            let (inp, hprev) = (&ca_input[ti][l], &ca_hprev[ti][l]);
+            for o in 0..4 * dh {
+                d_bih[l][o] += d_pre[o];
+                d_bhh[l][o] += d_pre[o];
+                for j in 0..dh {
+                    d_wih[l][o * dh + j] += d_pre[o] * inp[j];
+                    d_whh[l][o * dh + j] += d_pre[o] * hprev[j];
+                }
             }
             // d_input = W_ihᵀ·d_pre ; d_hprev = W_hhᵀ·d_pre
             let mut d_input = vec![0.0f32; dh];
@@ -868,7 +892,17 @@ pub fn predictor_sequence_backward(tokens: &[u32], w: &W, cfg: &NemotronConfig, 
             }
         }
     }
-    d_embed
+    let mut grads: W = W::new();
+    grads.insert("decoder.embedding.weight".into(), d_embed);
+    for l in 0..layers {
+        grads.insert(format!("decoder.lstm.weight_ih_l{l}"), std::mem::take(&mut d_wih[l]));
+        grads.insert(format!("decoder.lstm.weight_hh_l{l}"), std::mem::take(&mut d_whh[l]));
+        grads.insert(format!("decoder.lstm.bias_ih_l{l}"), std::mem::take(&mut d_bih[l]));
+        grads.insert(format!("decoder.lstm.bias_hh_l{l}"), std::mem::take(&mut d_bhh[l]));
+    }
+    grads.insert("decoder.decoder_projector.weight".into(), d_wproj);
+    grads.insert("decoder.decoder_projector.bias".into(), d_bproj);
+    grads
 }
 
 /// Greedy RNN-T transducer decode over encoder frames `pooler[T, decoder_hidden]`

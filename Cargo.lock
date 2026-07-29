@@ -675,6 +675,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
+ "brain-gradcheck",
  "brain-kernels",
  "brain-model",
  "serde_json",

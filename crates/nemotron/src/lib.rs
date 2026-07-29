@@ -11,5 +11,6 @@ pub mod import;
 pub mod kernels;
 pub mod model;
 pub mod reference;
+pub mod train;
 
 pub use config::NemotronConfig;
