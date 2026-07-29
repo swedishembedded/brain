@@ -1,9 +1,10 @@
 # LFM2.5-Encoder — status ledger
 
-Chronological, measured-only. Hardware here: 2× Tesla P40 (24 GB, Pascal,
-`max_storage_buffer_binding_size` 2047 MiB) + Xeon E5-2690 v3 (Haswell, 48
-threads). **No NPU on this box** — NPU numbers may only come from the Intel
-Core Ultra machine and are absent until measured there.
+Chronological, measured-only. Two boxes: the **training/GPU box** — 2× Tesla P40
+(24 GB, Pascal, `max_storage_buffer_binding_size` 2047 MiB) + Xeon E5-2690 v3
+(Haswell, 48 threads), **no NPU** — and the **Intel "AI Boost" (Core Ultra) NPU
+box** (OpenVINO 2026.2, kernel 6.17) where the NPU numbers below were measured
+(2026-07-29, see "NPU measured — Intel AI Boost").
 
 ## Done
 
@@ -47,7 +48,7 @@ Artifact unit: `sequence` (one-shot ⇒ ttfa == e2e, tpoa null by design).
 | 230M | P40 (gpu0) | sweep, batch 4 | conc 1: ttfa p99 21.2 s; conc 2: 45.1 s (**linear** — compute-bound at 8k, equal-length batching neither helps nor hurts throughput on one card) |
 | 350M | P40 (gpu1) | latency, concurrency 1, batch 1 | **e2e p50 20.94 s** |
 | 230M | Xeon E5-2690v3 (cpu) | single forward (wall) | **463 s** (perf artifact skipped — a warmed scenario run would take hours on this 2015 Haswell; the wall measure stands) |
-| both | Intel NPU | — | **absent by design**: no NPU on this box. Export + `LfmSession` + parity are ready; run `brain npu lfm --seq 8192` + compile/bench on the Core Ultra box |
+| both | Intel NPU (AI Boost) | 8192 latency, batch 1 | **measured** (2026-07-29) — 230M **15.09 s** / 350M **15.83 s** f16 p50 e2e; int8/int4 within ~7%. See "NPU measured — Intel AI Boost" below |
 
 Notes (honesty ledger):
 - The `chat` workload SLO (ttfa 2 s) is not meaningful for an 8k encoder on
@@ -165,6 +166,62 @@ the CPU forward; GPU scaling fits isolated the same t² term):
   builder for `brain flops` (the materialized build OOMs at --block 8192) are
   follow-ups.
 
+### NPU measured — Intel "AI Boost" (Core Ultra) via OpenVINO (2026-07-29)
+
+The `Intel NPU` row is now measured, on a **different box** from the P40/Haswell
+machine: **Intel(R) AI Boost** NPU (`/dev/accel/accel0`), OpenVINO **2026.2.0**,
+level-zero NPU driver 1.35 / loader 1.28, kernel 6.17. Tool: **`brain npu
+lfm-bench`** — export the fixed-shape graph, compile on the NPU with
+`allow_fallback = false`, **assert `device() == "NPU"`** (a CPU/GPU fallback is
+never reported as an NPU number), then 5 warmup (excluded) + **20 timed `run()`**
+calls → p50/p99/mean. Compile time is measured **separately** — one-time, never
+folded into inference. Reference for `--compare` parity is brain's own chunked
+fp32 forward on identical token ids.
+
+The Intel NPU is **fp16-native**, so the dense fp32 graph executes in fp16 — the
+`f16` column. `int8`/`int4` are per-output-channel **weight-only** quantization
+(activations stay fp16). All three compile and run on this NPU.
+
+**8192-token forward — the comparable stat (p50 e2e per inference):**
+
+| model | f16 | int8-w | int4-w | (P40 f16) | (Haswell f16) |
+|---|---|---|---|---|---|
+| 230M | **15.09 s** | 14.22 s | 14.00 s | 7.5 s | 23.2 s |
+| 350M | **15.83 s** | 14.94 s | 14.41 s | 20.6 s | — |
+
+- **230M @ 8k on the NPU sits between the P40 (~2× faster) and the 2015 Haswell
+  (~1.5× slower than the NPU)** — a ~40 W accelerator between a 250 W GPU and a
+  48-thread server CPU. The NPU's argument is perf-per-watt + host offload, not
+  peak throughput.
+- **350M ≈ 230M at 8k** (15.8 vs 15.1 s) despite being larger: both have exactly
+  **6 attention layers**, and at 8192 the O(S²) bidirectional attention dominates
+  — 350M's extra conv layers + wider FFN add only ~5%.
+- **Weight quant barely helps at 8k** (int8 −6%, int4 −7% vs f16): this encoder is
+  **compute-bound on fp16 attention**, not weight-bandwidth-bound like AR decode.
+  Quant's payoff here is footprint (≈4×/8× smaller weights), not latency.
+
+**230M f16 scaling ladder (p50):**
+
+| seq | 1024 | 2048 | 4096 | 8192 |
+|---|---|---|---|---|
+| p50 | 0.60 s | 1.76 s | 4.98 s | 15.09 s |
+| compile (1-time) | 21.7 s | 47.7 s | 162.8 s | 331.4 s |
+
+Near-quadratic in S — the same compute-bound shape the GPU/CPU ladders show.
+
+**1024-token quant anchor (p50):** 230M f16 0.604 / int8 0.497 / int4 0.544 s;
+350M f16 1.120 s. (At short S int4 > int8 — dequant overhead, not yet amortized.)
+
+**Parity — NPU fp16 vs brain fp32 (`--compare`, cosine):** 230M @1024 **0.999905**,
+@8192 **0.992796**; 350M @1024 **0.999925**. Cosine ≥ 0.9999 at 1024 (passes the
+strict gate); **0.9928 at 8192** is honest fp16 accumulation over 8k
+bidirectional-attention keys (>99% aligned — not a defect; for exact-reference
+work use the fp32 GPU/CPU path).
+
+**Compile is heavy + one-time** (separate from latency; cache with `--cache-dir`):
+230M f16 8192 331 s, int8 263 s, int4 255 s; 350M f16 8192 363 s, int8 303 s,
+int4 263 s. Small buckets compile in seconds (1024 ~13–36 s, 4096 ~163 s).
+
 ## Remaining
 
 - P4: 8k training — accumulating `attn_bwd_{dk,dv}` variants + per-chunk
@@ -180,7 +237,8 @@ the CPU forward; GPU scaling fits isolated the same t² term):
   the embedding result back via fd.
 - P6: NPU export (`lfm_topology.rs`, kmask input, in-graph chunked attention,
   bucket ladder {1024, 2048, 4096, 8192} + precompile); OpenVINO-CPU parity
-  here; NPU parity + bench **only on the Core Ultra box**.
+  here. **DONE** — NPU parity + bench measured on the Intel AI Boost box via
+  `brain npu lfm-bench` (f16/int8/int4, both models); see "NPU measured" above.
 - P7 (expanded per user direction): `brain perf` integration — `--target lfm:`
   CapabilityTarget arm + a **resident-backed target driving the residency
   executor** (scheduler + budgets + lanes) for honest concurrent-request
