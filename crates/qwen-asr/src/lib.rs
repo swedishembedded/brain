@@ -46,7 +46,7 @@ mod tests {
     /// End-to-end transcription on a real LibriSpeech clip: brain must reproduce
     /// the HF model's greedy token sequence exactly, and thus the transcription.
     #[test]
-    #[ignore = "slow: loads the 1.7B checkpoint + cache-free greedy decode (~minutes)"]
+    #[ignore = "slow: loads the 1.7B checkpoint + KV-cache decode (~minutes; bandwidth-bound)"]
     fn qwen_transcribe_matches_reference() {
         let dg = "/data/workspace/resources/asr/golden/qwen_decode";
         if !have(&format!("{dg}/output_ids.f32")) || !have(&format!("{CKPT}/model.safetensors")) {
@@ -74,7 +74,12 @@ mod tests {
         eprintln!("this-clip audio_embeds maxdiff {de} (n_audio={n_audio})");
         assert!(de < 3e-2, "audio_embeds maxdiff {de}");
 
+        let audio_s = mel.len() as f32 / 128.0 * 0.01; // ~frames*10ms
+        let t0 = std::time::Instant::now();
         let out = model.transcribe(&input_ids, &audio_embeds, &[151643, 151645], 64);
+        let dt = t0.elapsed();
+        eprintln!("transcribe (KV): {} tokens in {:?} (prompt {} + gen)", out.len(), dt, input_ids.len());
+        let _ = audio_s;
         eprintln!("brain out ({} tok): {:?}", out.len(), out);
         eprintln!("ref   out ({} tok): {:?}", ref_out.len(), ref_out);
         assert_eq!(out, ref_out, "greedy token sequence must match HF exactly");

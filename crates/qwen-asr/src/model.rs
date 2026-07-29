@@ -69,24 +69,41 @@ impl Qwen3Asr {
     /// argmax-decode from `input_ids` until an EOS token or `max_new` tokens.
     /// Returns the generated token ids (excluding the prompt). Cache-free
     /// (recompute) — correct but O(n²); the KV-cache path is a Phase-5 optimisation.
+    /// Greedy transcription with a **KV-cache** prefill + incremental decode.
+    /// The prompt is prefilled token-by-token into the cache; at the contiguous
+    /// audio-placeholder run the projected audio embeddings are injected via
+    /// `step_embed` (no re-embedding of the placeholder id). O(n) per token
+    /// instead of the cache-free O(n²) recompute.
     pub fn transcribe(&self, input_ids: &[u32], audio_embeds: &[f32], eos: &[u32], max_new: usize) -> Vec<u32> {
-        assert_eq!(audio_embeds.len(), (self.n_audio * self.cfg.text.d_model) as usize, "audio_embeds shape");
-        self.decoder.write_img_embeds(audio_embeds);
+        let d = self.cfg.text.d_model as usize;
+        assert_eq!(audio_embeds.len(), self.n_audio as usize * d, "audio_embeds shape");
         let vocab = self.cfg.text.vocab as usize;
-        let prompt_len = input_ids.len();
-        let mut seq = input_ids.to_vec();
+        let head = self.decoder.read_weight(self.cfg.text.head_weight()); // [vocab, d]
+        let logits_of = |h: &[f32]| -> Vec<f32> {
+            (0..vocab).map(|o| head[o * d..o * d + d].iter().zip(h).map(|(a, b)| a * b).sum()).collect()
+        };
+
+        self.decoder.reset_cache();
+        let (row0, n) = (self.audio_row0 as usize, self.n_audio as usize);
+        // prefill: audio embeds at the placeholder run, token embeddings elsewhere
+        let mut hidden = Vec::new();
+        for (pos, &tok) in input_ids.iter().enumerate() {
+            hidden = if pos >= row0 && pos < row0 + n {
+                self.decoder.step_embed(&audio_embeds[(pos - row0) * d..(pos - row0 + 1) * d])
+            } else {
+                self.decoder.step(tok)
+            };
+        }
+        // incremental greedy decode
         let mut out = Vec::new();
         while out.len() < max_new {
-            let logits = self.decoder.logits_all(&seq);
-            let last = &logits[(seq.len() - 1) * vocab..seq.len() * vocab];
-            let next = argmax(last);
+            let next = argmax(&logits_of(&hidden));
             out.push(next);
             if eos.contains(&next) {
                 break;
             }
-            seq.push(next);
+            hidden = self.decoder.step(next);
         }
-        let _ = (self.audio_row0, prompt_len);
         out
     }
 }
