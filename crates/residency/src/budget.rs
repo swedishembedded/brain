@@ -69,13 +69,20 @@ impl Budgets {
     pub fn devices(&self) -> impl Iterator<Item = Device> + '_ {
         self.devices.keys().copied()
     }
+    /// The NPUs, sorted by index (deterministic placement order).
+    pub fn npus(&self) -> Vec<Device> {
+        let mut g: Vec<Device> = self.devices.keys().copied().filter(|d| matches!(d, Device::Npu(_))).collect();
+        g.sort_by_key(|d| if let Device::Npu(i) = d { *i } else { u32::MAX });
+        g
+    }
     /// The GPUs, sorted by index (deterministic placement order).
     pub fn gpus(&self) -> Vec<Device> {
         let mut g: Vec<Device> = self.devices.keys().copied().filter(|d| matches!(d, Device::Gpu(_))).collect();
         g.sort_by_key(|d| match d {
             Device::Gpu(i) => *i,
-            Device::Cpu => u32::MAX,
+            Device::Cpu | Device::Npu(_) => u32::MAX,
         });
+
         g
     }
     pub fn alloc(&mut self, device: Device, bytes: u64) {

@@ -38,6 +38,11 @@ pub enum Device {
     Gpu(u32),
     /// RAM-resident, CPU-executed (e.g. the CPU encoder path). Bounded by the RAM budget.
     Cpu,
+    /// An Intel NPU by index. A whole-graph (OpenVINO) device: an instance is a
+    /// compiled blob, not `gpu_core` buffers; its budget models the NPU's
+    /// shared-memory footprint. No NPU lane is created unless a budget is set
+    /// (boxes without the device never schedule onto it).
+    Npu(u32),
 }
 
 /// The memory footprint of a model instance when it is **Hot**.
@@ -53,11 +58,12 @@ impl MemCost {
     pub fn new(vram: u64, ram: u64) -> MemCost {
         MemCost { vram, ram }
     }
-    /// The bytes this instance occupies on `device` (VRAM on a GPU, RAM on the CPU).
+    /// The bytes this instance occupies on `device` (VRAM on a GPU, RAM on the
+    /// CPU; the NPU's compiled blob + I/O live in shared host memory → RAM).
     pub fn on(&self, device: Device) -> u64 {
         match device {
             Device::Gpu(_) => self.vram,
-            Device::Cpu => self.ram,
+            Device::Cpu | Device::Npu(_) => self.ram,
         }
     }
 }

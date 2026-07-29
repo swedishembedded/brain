@@ -92,6 +92,25 @@ pub fn pick_device(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>)
     if let Some((d, _)) = best {
         return Some(d);
     }
+    // NPUs next (whole-graph compiled instances; RAM-costed): most-free wins.
+    // Only boxes that set an NPU budget ever have entries here.
+    let mut best_npu: Option<(Device, u64)> = None;
+    for d in budgets.npus() {
+        if cost.ram == 0 || exclude.contains(&d) {
+            continue;
+        }
+        if let Some(b) = budgets.get(d) {
+            if b.fits(cost.ram) {
+                let free = b.free();
+                if best_npu.is_none_or(|(_, f)| free > f) {
+                    best_npu = Some((d, free));
+                }
+            }
+        }
+    }
+    if let Some((d, _)) = best_npu {
+        return Some(d);
+    }
     // CPU/RAM-resident model.
     if cost.ram > 0 && !exclude.contains(&Device::Cpu) {
         if let Some(b) = budgets.get(Device::Cpu) {
