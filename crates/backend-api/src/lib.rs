@@ -278,19 +278,48 @@ impl DeviceBuffer {
     }
 }
 
+/// Backend-neutral record of WHAT a dispatch computes: the kernel slot it runs
+/// and the uniform params it was recorded with. Attached by the `gpu_core`
+/// facade at `step*` time, so cost accounting (offline `cost_of`, online
+/// per-submit counters) never reaches into a backend's native dispatch record.
+/// `params` is `None` for `step_buf` dispatches — their uniform lives in a
+/// caller-owned buffer whose contents the facade cannot see.
+#[derive(Clone, Debug)]
+pub struct StepMeta {
+    /// Index into the `(name, wgsl)` kernel set the device was built with.
+    pub kernel: usize,
+    /// The `params` slice as recorded, or `None` (`step_buf`).
+    pub params: Option<Vec<u32>>,
+    /// Dispatch thread count.
+    pub threads: u32,
+}
+
 /// An opaque recorded dispatch, tagged by the backend that built it. Held by
 /// callers between `step*` and `submit`; `submit` downcasts it back.
 #[derive(Clone)]
-pub struct Step(Arc<Erased>);
+pub struct Step {
+    inner: Arc<Erased>,
+    meta: Option<Arc<StepMeta>>,
+}
 
 impl Step {
     /// Wrap a backend-native dispatch record.
     pub fn new<T: Any + ThreadSafe>(inner: T) -> Step {
-        Step(Arc::new(inner))
+        Step { inner: Arc::new(inner), meta: None }
+    }
+    /// Attach the neutral dispatch record (facade `step*` does this; backends
+    /// never need to).
+    pub fn with_meta(mut self, meta: StepMeta) -> Step {
+        self.meta = Some(Arc::new(meta));
+        self
+    }
+    /// The neutral dispatch record, if the step came through the facade.
+    pub fn meta(&self) -> Option<&StepMeta> {
+        self.meta.as_deref()
     }
     /// Recover the native dispatch record. Panics on a backend mismatch.
     pub fn downcast_ref<T: Any>(&self) -> &T {
-        self.0.downcast_ref::<T>().expect("Step/backend mismatch")
+        self.inner.downcast_ref::<T>().expect("Step/backend mismatch")
     }
 }
 
