@@ -148,6 +148,357 @@ pub fn gqa_bwd(
     ]
 }
 
+/// Bidirectional (encoder self-)attention shape over a fused qkv buffer
+/// `[b*t, stride]` whose q/k/v regions each hold `n_heads*head_dim` floats at
+/// `q_off`/`k_off`/`v_off`. MHA by construction — GQA projections are widened
+/// first with [`kv_expand_fwd`] (group replication), which is what makes these
+/// builders serve GQA encoders (LFM2.5) and plain MHA encoders (seq2seq) alike.
+#[derive(Clone, Copy)]
+pub struct Bidir {
+    pub b: u32,
+    pub t: u32,
+    pub n_heads: u32,
+    pub head_dim: u32,
+    /// Fused row width (typically `3*d_model`).
+    pub stride: u32,
+    pub q_off: u32,
+    pub k_off: u32,
+    pub v_off: u32,
+}
+
+/// Kernel-pipeline indices for the bidirectional attention family.
+#[derive(Clone, Copy)]
+pub struct BidirIds {
+    pub scores: usize,
+    pub softmax: usize,
+    pub apply: usize,
+    pub dscores: usize,
+    pub dv: usize,
+    pub dq: usize,
+    pub dk: usize,
+}
+
+impl Bidir {
+    fn d_model(&self) -> u32 {
+        self.n_heads * self.head_dim
+    }
+}
+
+/// Bidirectional attention forward: `scores = qkᵀ/√hd` (all j), `probs =
+/// softmax(scores)`, `ctx = probs·v`. `ctx` is contiguous `[b*t, d_model]`;
+/// `scores`/`probs` are `[b*n_heads*t*t]`.
+pub fn bidir_fwd(
+    g: &Gpu,
+    k: &BidirIds,
+    a: &Bidir,
+    qkv: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Vec<Step> {
+    let (b, h, t, hd) = (a.b, a.n_heads, a.t, a.head_dim);
+    vec![
+        g.step(k.scores, &[qkv, scores], &[b, h, t, hd, a.stride, a.q_off, a.k_off], b * h * t * t),
+        g.step(k.softmax, &[scores, probs], &[b, h, t], b * h * t),
+        g.step(k.apply, &[probs, qkv, ctx], &[b, h, t, hd, a.stride, a.v_off, a.d_model()], b * h * t * hd),
+    ]
+}
+
+/// Bidirectional attention backward: `d_scores` from the context grad `d_ctx`
+/// (softmax jacobian folded in), then `d_q`/`d_k`/`d_v` written into their
+/// regions of the fused `d_qkv` (disjoint assigns — no accumulation).
+pub fn bidir_bwd(
+    g: &Gpu,
+    k: &BidirIds,
+    a: &Bidir,
+    qkv: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    d_ctx: &DeviceBuffer,
+    d_scores: &DeviceBuffer,
+    d_qkv: &DeviceBuffer,
+) -> Vec<Step> {
+    let (b, h, t, hd) = (a.b, a.n_heads, a.t, a.head_dim);
+    let pv = [b, h, t, hd, a.stride, a.v_off, a.d_model()];
+    let pqk = [b, h, t, hd, a.stride, a.q_off, a.k_off];
+    vec![
+        g.step(k.dscores, &[d_ctx, qkv, probs, d_scores], &pv, b * h * t),
+        g.step(k.dv, &[probs, d_ctx, d_qkv], &pv, b * h * t * hd),
+        g.step(k.dq, &[d_scores, qkv, d_qkv], &pqk, b * h * t * hd),
+        g.step(k.dk, &[d_scores, qkv, d_qkv], &pqk, b * h * t * hd),
+    ]
+}
+
+/// Kernel-pipeline indices for the cross-attention trio (two lengths +
+/// independent strides/offsets) — the substrate of query-chunked attention.
+#[derive(Clone, Copy)]
+pub struct CrossIds {
+    pub scores: usize,
+    pub softmax: usize,
+    pub apply: usize,
+}
+
+/// Span + query-chunked bidirectional self-attention over a fused qkv buffer:
+/// for each span `(row0, len)`, queries attend that span's keys/values
+/// (non-causal); results land in `ctx` at the same absolute rows. `chunk`
+/// bounds the materialized score slab to `[heads, chunk, max_span]` — the
+/// mechanism that keeps long-context (8k+) attention inside the per-binding
+/// budget. Layout-generic: `stride` is the fused row width, `q/k/v_off` the
+/// region offsets, `d_out` the context width (`heads*head_dim`).
+#[allow(clippy::too_many_arguments)]
+pub fn chunked_bidir_fwd(
+    g: &Gpu,
+    k: &CrossIds,
+    heads: u32,
+    head_dim: u32,
+    d_out: u32,
+    qkv: &DeviceBuffer,
+    stride: u32,
+    q_off: u32,
+    k_off: u32,
+    v_off: u32,
+    ctx: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    spans: &[(u32, u32)],
+    chunk: u32,
+    steps: &mut Vec<Step>,
+) {
+    for &(row0, len) in spans {
+        let mut q0 = 0u32;
+        while q0 < len {
+            let qn = chunk.min(len - q0);
+            // q view: rows [row0+q0 ..); kv view + ctx view: rows [row0 ..).
+            let q_row_off = (row0 + q0) as u64 * stride as u64;
+            let kv_row_off = row0 as u64 * stride as u64;
+            let ctx_off = (row0 + q0) as u64 * d_out as u64;
+            steps.push(g.step_sliced(
+                k.scores,
+                &[qkv, qkv, scores],
+                &[(q_row_off, 0), (kv_row_off, 0), (0, 0)],
+                &[1, heads, qn, len, head_dim, stride, stride, q_off, k_off],
+                heads * qn * len,
+            ));
+            steps.push(g.step(k.softmax, &[scores, probs], &[1, heads, qn, len], heads * qn));
+            steps.push(g.step_sliced(
+                k.apply,
+                &[probs, qkv, ctx],
+                &[(0, 0), (kv_row_off, 0), (ctx_off, 0)],
+                &[1, heads, qn, len, head_dim, stride, v_off, d_out],
+                heads * qn * head_dim,
+            ));
+            q0 += qn;
+        }
+    }
+}
+
+/// Kernel indices for the query-chunked bidirectional backward: the cross
+/// forward pair recomputes each chunk's scores/probs (nothing T×T is cached),
+/// `dscores`/`dq` assign chunk-local rows, and the ACCUMULATING `dk_acc`/
+/// `dv_acc` twins sum each chunk's partial contribution (their `acc_flag`
+/// uniform assigns on a span's first chunk — no zero-clears to forget).
+#[derive(Clone, Copy)]
+pub struct CrossBwdIds {
+    pub dscores: usize,
+    pub dq: usize,
+    pub dk_acc: usize,
+    pub dv_acc: usize,
+}
+
+/// Backward of [`chunked_bidir_fwd`] with per-chunk score/softmax recompute —
+/// what makes long-context (8k) training fit the per-binding budget: the
+/// transient slabs stay `[heads, chunk, max_span]`. Writes `d_q`/`d_k`/`d_v`
+/// into their regions of the fused `d_qkv`.
+#[allow(clippy::too_many_arguments)]
+pub fn chunked_bidir_bwd(
+    g: &Gpu,
+    fwd: &CrossIds,
+    bwd: &CrossBwdIds,
+    heads: u32,
+    head_dim: u32,
+    d_out: u32,
+    qkv: &DeviceBuffer,
+    stride: u32,
+    q_off: u32,
+    k_off: u32,
+    v_off: u32,
+    d_ctx: &DeviceBuffer,
+    d_qkv: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    d_scores: &DeviceBuffer,
+    spans: &[(u32, u32)],
+    chunk: u32,
+    steps: &mut Vec<Step>,
+) {
+    for &(row0, len) in spans {
+        let mut q0 = 0u32;
+        while q0 < len {
+            let qn = chunk.min(len - q0);
+            let q_row_off = (row0 + q0) as u64 * stride as u64;
+            let kv_row_off = row0 as u64 * stride as u64;
+            let dc_off = (row0 + q0) as u64 * d_out as u64;
+            let p_qk = [1, heads, qn, len, head_dim, stride, stride, q_off, k_off];
+            let p_v = [1, heads, qn, len, head_dim, stride, v_off, d_out];
+            // Recompute this chunk's scores + probs from the cached qkv.
+            steps.push(g.step_sliced(fwd.scores, &[qkv, qkv, scores], &[(q_row_off, 0), (kv_row_off, 0), (0, 0)], &p_qk, heads * qn * len));
+            steps.push(g.step(fwd.softmax, &[scores, probs], &[1, heads, qn, len], heads * qn));
+            // Softmax jacobian → d_scores (chunk-local).
+            steps.push(g.step_sliced(
+                bwd.dscores,
+                &[d_ctx, qkv, probs, d_scores],
+                &[(dc_off, 0), (kv_row_off, 0), (0, 0), (0, 0)],
+                &p_v,
+                heads * qn,
+            ));
+            // d_q: chunk rows only (disjoint — plain assign into the q region).
+            steps.push(g.step_sliced(
+                bwd.dq,
+                &[d_scores, qkv, d_qkv],
+                &[(0, 0), (kv_row_off, 0), (q_row_off, 0)],
+                &p_qk,
+                heads * qn * head_dim,
+            ));
+            // d_k / d_v: sums over ALL queries — accumulate across chunks.
+            let acc = u32::from(q0 > 0);
+            let mut p_qk_acc = [0u32; 10];
+            p_qk_acc[..9].copy_from_slice(&p_qk);
+            p_qk_acc[9] = acc;
+            steps.push(g.step_sliced(
+                bwd.dk_acc,
+                &[d_scores, qkv, d_qkv],
+                &[(0, 0), (q_row_off, 0), (kv_row_off, 0)],
+                &p_qk_acc,
+                heads * len * head_dim,
+            ));
+            let mut p_v_acc = [0u32; 9];
+            p_v_acc[..8].copy_from_slice(&p_v);
+            p_v_acc[8] = acc;
+            steps.push(g.step_sliced(
+                bwd.dv_acc,
+                &[probs, d_ctx, d_qkv],
+                &[(0, 0), (dc_off, 0), (kv_row_off, 0)],
+                &p_v_acc,
+                heads * len * head_dim,
+            ));
+            q0 += qn;
+        }
+    }
+}
+
+/// GQA→MHA head replication into a fused-buffer region: dst head `ho` copies
+/// src head `ho/group` (`repeat_kv` layout). `group == 1` is a strided copy —
+/// the same dispatch places q. `src` is `[rows, (heads_out/group)*hd]`.
+#[allow(clippy::too_many_arguments)]
+pub fn kv_expand_fwd(
+    g: &Gpu,
+    idx: usize,
+    src: &DeviceBuffer,
+    dst: &DeviceBuffer,
+    rows: u32,
+    heads_out: u32,
+    group: u32,
+    hd: u32,
+    dst_stride: u32,
+    dst_off: u32,
+) -> Step {
+    let src_stride = heads_out / group * hd;
+    g.step(idx, &[src, dst], &[rows, heads_out, group, hd, src_stride, dst_stride, dst_off], rows * heads_out * hd)
+}
+
+/// Adjoint of [`kv_expand_fwd`]: group-sums the region grad back to the
+/// narrow projection grad (overwrites `d_src`).
+#[allow(clippy::too_many_arguments)]
+pub fn kv_expand_bwd(
+    g: &Gpu,
+    idx: usize,
+    d_dst: &DeviceBuffer,
+    d_src: &DeviceBuffer,
+    rows: u32,
+    heads_out: u32,
+    group: u32,
+    hd: u32,
+    dst_stride: u32,
+    dst_off: u32,
+) -> Step {
+    let src_stride = heads_out / group * hd;
+    g.step(idx, &[d_dst, d_src], &[rows, heads_out, group, hd, src_stride, dst_stride, dst_off], rows * (heads_out / group) * hd)
+}
+
+/// RMSNorm forward with a runtime epsilon (`rmsnorm_eps`); the fixed-eps
+/// [`rmsnorm_fwd`] covers the 1e-6 family (Qwen/GLM), this one models whose
+/// checkpoints carry a different eps (LFM2.5: 1e-5).
+pub fn rmsnorm_eps_fwd(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32, eps: f32) -> Step {
+    g.step(idx, &[x, w, out], &[dim, rows, f(eps)], rows)
+}
+
+/// RMSNorm backward with runtime epsilon: input grad always (`rmsnorm_dx_eps`),
+/// gain grad only when `gw` is `Some` (`rms_inv_eps` + `rmsnorm_dw`; the dw
+/// kernel is eps-free — eps enters through the per-row inverse).
+#[allow(clippy::too_many_arguments)]
+pub fn rmsnorm_eps_bwd(
+    g: &Gpu,
+    inv_idx: usize,
+    dw_idx: usize,
+    dx_idx: usize,
+    x: &DeviceBuffer,
+    w: &DeviceBuffer,
+    dy: &DeviceBuffer,
+    dx: &DeviceBuffer,
+    inv: &DeviceBuffer,
+    gw: Option<&DeviceBuffer>,
+    dim: u32,
+    rows: u32,
+    eps: f32,
+) -> Vec<Step> {
+    let mut s = Vec::new();
+    if let Some(gw) = gw {
+        s.push(g.step(inv_idx, &[x, inv], &[dim, rows, f(eps)], rows));
+        s.push(g.step(dw_idx, &[dy, x, inv, gw], &[dim, rows], dim));
+    }
+    s.push(g.step(dx_idx, &[x, w, dy, dx], &[dim, rows, f(eps)], rows));
+    s
+}
+
+/// Per-binding budget (f32 words) for tiling an embedding / lm_head over vocab,
+/// so each storage binding stays under a backend's max-binding size (e.g. 128MB
+/// on Mesa-GL). ~96 MiB; small models collapse to one tile.
+/// `BRAIN_TILE_BUDGET_WORDS` overrides it (e.g. tiny, to force tiling in tests).
+pub const TILE_BUDGET_WORDS: u64 = 24 * 1024 * 1024;
+
+pub fn tile_budget_words() -> u64 {
+    std::env::var("BRAIN_TILE_BUDGET_WORDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&w| w > 0)
+        .unwrap_or(TILE_BUDGET_WORDS)
+}
+
+/// Vocab tiles `(v0, count)` sized so a `[count, d_model]` weight slice stays
+/// within the per-binding budget. Small vocabularies yield a single tile.
+pub fn vocab_tiles(vocab: u64, d_model: u64) -> Vec<(u32, u32)> {
+    let rows = (tile_budget_words() / d_model.max(1)).max(1);
+    let mut out = Vec::new();
+    let mut v0 = 0u64;
+    while v0 < vocab {
+        let cnt = rows.min(vocab - v0);
+        out.push((v0 as u32, cnt as u32));
+        v0 += cnt;
+    }
+    out
+}
+
+/// Pick the forward GEMM kernel + dispatch thread count for `[m,k]·[n,k]ᵀ`:
+/// the register-tiled kernel (128×128 tile, 256 threads) once both output dims
+/// fill a tile, else the naive one-thread-per-output kernel. Same math either
+/// way — this only changes speed. `force_naive` lets models keep an env escape.
+pub fn pick_gemm(m: usize, n: usize, naive: usize, reg2: usize, force_naive: bool) -> (usize, u32) {
+    if force_naive || m < 128 || n < 128 {
+        (naive, (m * n) as u32)
+    } else {
+        (reg2, (m.div_ceil(128) * n.div_ceil(128) * 256) as u32)
+    }
+}
+
 /// SwiGLU activation forward: `h = SiLU(gate) * up`, elementwise over `total`.
 pub fn swiglu_fwd(g: &Gpu, k: &KernelIds, gate: &DeviceBuffer, up: &DeviceBuffer, h: &DeviceBuffer, total: u32) -> Step {
     g.step(k.silu_mul, &[gate, up, h], &[total], total)

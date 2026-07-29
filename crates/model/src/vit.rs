@@ -147,39 +147,17 @@ pub fn chunked_attn_fwd(
     chunk: u32,
     steps: &mut Vec<Step>,
 ) {
+    // Delegates to the layout-generic core in `crate::block` (vit's fused
+    // layout: [q|k|v], stride 3c, offsets 0/c/2c, ctx width c).
     let c = sh.dim;
-    let stride = 3 * c;
-    for &(row0, len) in spans {
-        let mut q0 = 0u32;
-        while q0 < len {
-            let qn = chunk.min(len - q0);
-            // q view: rows [row0+q0 ..); kv view + ctx view: rows [row0 ..).
-            let q_off = (row0 + q0) as u64 * stride as u64;
-            let kv_off = row0 as u64 * stride as u64;
-            let ctx_off = (row0 + q0) as u64 * c as u64;
-            steps.push(g.step_sliced(
-                k.attn_scores_cross,
-                &[qkv, qkv, scores],
-                &[(q_off, 0), (kv_off, 0), (0, 0)],
-                &[1, sh.heads, qn, len, sh.head_dim(), stride, stride, 0, c],
-                sh.heads * qn * len,
-            ));
-            steps.push(g.step(
-                k.attn_softmax_cross,
-                &[scores, probs],
-                &[1, sh.heads, qn, len],
-                sh.heads * qn,
-            ));
-            steps.push(g.step_sliced(
-                k.attn_apply_cross,
-                &[probs, qkv, ctx],
-                &[(0, 0), (kv_off, 0), (ctx_off, 0)],
-                &[1, sh.heads, qn, len, sh.head_dim(), stride, 2 * c, c],
-                sh.heads * qn * sh.head_dim(),
-            ));
-            q0 += qn;
-        }
-    }
+    let ids = crate::block::CrossIds {
+        scores: k.attn_scores_cross,
+        softmax: k.attn_softmax_cross,
+        apply: k.attn_apply_cross,
+    };
+    crate::block::chunked_bidir_fwd(
+        g, &ids, sh.heads, sh.head_dim(), c, qkv, 3 * c, 0, c, 2 * c, ctx, scores, probs, spans, chunk, steps,
+    );
 }
 
 /// Backward kernel ids (only needed by [`vit_block_bwd`]).

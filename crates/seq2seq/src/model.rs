@@ -553,6 +553,34 @@ impl Seq2Seq {
         self.ps.w(name)
     }
 
+    /// Kernel-index map for the shared bidirectional-attention builders.
+    fn bidir_ids() -> model::block::BidirIds {
+        model::block::BidirIds {
+            scores: ATTN_SCORES_BIDIR,
+            softmax: ATTN_SOFTMAX_BIDIR,
+            apply: ATTN_APPLY_BIDIR,
+            dscores: ATTN_DSCORES_BIDIR,
+            dv: ATTN_DV_BIDIR,
+            dq: ATTN_DQ_BIDIR,
+            dk: ATTN_DK_BIDIR,
+        }
+    }
+
+    /// Encoder self-attention shape over the fused `[q|k|v]` buffer.
+    fn enc_bidir(&self) -> model::block::Bidir {
+        let d = self.cfg.d_model;
+        model::block::Bidir {
+            b: self.b,
+            t: self.t_enc,
+            n_heads: self.cfg.n_heads,
+            head_dim: self.cfg.head_dim(),
+            stride: 3 * d,
+            q_off: 0,
+            k_off: d,
+            v_off: 2 * d,
+        }
+    }
+
     fn forward_steps(&self) -> Vec<Step> {
         let c = &self.cfg;
         let d = c.d_model;
@@ -576,10 +604,8 @@ impl Seq2Seq {
             s.push(self.gpu.step(LAYERNORM, &[&self.enc_res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out], &[d, ne, f(1e-5)], ne));
             s.push(self.gpu.step(MATMUL, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[ne, d, 3 * d], ne * 3 * d));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[ne, 3 * d], ne * 3 * d));
-            // bidir self-attn: q_off=0, k_off=d, v_off=2d
-            s.push(self.gpu.step(ATTN_SCORES_BIDIR, &[&lb.qkv, &lb.scores], &[b, h, te, hd, 3 * d, 0, d], b * h * te * te));
-            s.push(self.gpu.step(ATTN_SOFTMAX_BIDIR, &[&lb.scores, &lb.probs], &[b, h, te], b * h * te));
-            s.push(self.gpu.step(ATTN_APPLY_BIDIR, &[&lb.probs, &lb.qkv, &lb.attn_ctx], &[b, h, te, hd, 3 * d, 2 * d, d], b * h * te * hd));
+            // bidir self-attn via the shared builder: q_off=0, k_off=d, v_off=2d
+            s.extend(model::block::bidir_fwd(&self.gpu, &Self::bidir_ids(), &self.enc_bidir(), &lb.qkv, &lb.scores, &lb.probs, &lb.attn_ctx));
             s.push(self.gpu.step(MATMUL, &[&lb.attn_ctx, self.w(&p("attn.out.weight")), &lb.proj], &[ne, d, d], ne * d));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.proj, self.w(&p("attn.out.bias"))], &[ne, d], ne * d));
             s.push(self.gpu.step(ADD2, &[&self.enc_res[l], &lb.proj, &lb.xmid], &[ne * d], ne * d));
@@ -800,10 +826,10 @@ impl Seq2Seq {
             s.push(self.gpu.step(BIAS_GRAD, &[&self.enc_d_acc, g(&p("attn.out.bias"))], &[ne, d], d));
             s.push(self.gpu.step(MATMUL_DW, &[&self.enc_d_acc, &lb.attn_ctx, g(&p("attn.out.weight"))], &[ne, d, d], d * d));
             s.push(self.gpu.step(MATMUL_DX, &[&self.enc_d_acc, self.w(&p("attn.out.weight")), &self.enc_d_attn_ctx], &[ne, d, d, 0], ne * d));
-            s.push(self.gpu.step(ATTN_DSCORES_BIDIR, &[&self.enc_d_attn_ctx, &lb.qkv, &lb.probs, &self.enc_d_scores], &[b, h, te, hd, 3 * d, 2 * d, d], b * h * te));
-            s.push(self.gpu.step(ATTN_DV_BIDIR, &[&lb.probs, &self.enc_d_attn_ctx, &self.enc_d_qkv], &[b, h, te, hd, 3 * d, 2 * d, d], b * h * te * hd));
-            s.push(self.gpu.step(ATTN_DQ_BIDIR, &[&self.enc_d_scores, &lb.qkv, &self.enc_d_qkv], &[b, h, te, hd, 3 * d, 0, d], b * h * te * hd));
-            s.push(self.gpu.step(ATTN_DK_BIDIR, &[&self.enc_d_scores, &lb.qkv, &self.enc_d_qkv], &[b, h, te, hd, 3 * d, 0, d], b * h * te * hd));
+            s.extend(model::block::bidir_bwd(
+                &self.gpu, &Self::bidir_ids(), &self.enc_bidir(), &lb.qkv, &lb.probs,
+                &self.enc_d_attn_ctx, &self.enc_d_scores, &self.enc_d_qkv,
+            ));
             s.push(self.gpu.step(BIAS_GRAD, &[&self.enc_d_qkv, g(&p("attn.qkv.bias"))], &[ne, 3 * d], 3 * d));
             s.push(self.gpu.step(MATMUL_DW, &[&self.enc_d_qkv, &lb.ln1_out, g(&p("attn.qkv.weight"))], &[ne, d, 3 * d], 3 * d * d));
             s.push(self.gpu.step(MATMUL_DX, &[&self.enc_d_qkv, self.w(&p("attn.qkv.weight")), &self.enc_d_branch], &[ne, d, 3 * d, 0], ne * d));

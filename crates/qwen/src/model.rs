@@ -174,11 +174,7 @@ const PIPELINES: &[(&str, &str)] = &[
 /// speed. `BRAIN_QWEN_NAIVE_MM=1` forces the naive kernel.
 fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
-    if naive || m < 128 || n < 128 {
-        (MATMUL, (m * n) as u32)
-    } else {
-        (MATMUL_REG2, (m.div_ceil(128) * n.div_ceil(128) * 256) as u32)
-    }
+    block::pick_gemm(m, n, MATMUL, MATMUL_REG2, naive)
 }
 
 /// Backward GEMM pickers: tiled `matmul_{dx,dw}_reg` (bit-identical to naive,
@@ -191,29 +187,14 @@ fn offload_adam() -> bool {
 
 fn dx_kernel_bw(m: u32, k: u32) -> (usize, u32) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
-    if naive || m < 128 || k < 128 { (MATMUL_DX, m * k) }
-    else { (MATMUL_DX_REG, m.div_ceil(128) * k.div_ceil(128) * 256) }
+    block::pick_gemm(m as usize, k as usize, MATMUL_DX, MATMUL_DX_REG, naive)
 }
 fn dw_kernel_bw(nrows: u32, k: u32) -> (usize, u32) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
-    if naive || nrows < 128 || k < 128 { (MATMUL_DW, nrows * k) }
-    else { (MATMUL_DW_REG, nrows.div_ceil(128) * k.div_ceil(128) * 256) }
+    block::pick_gemm(nrows as usize, k as usize, MATMUL_DW, MATMUL_DW_REG, naive)
 }
 
 
-/// Per-binding budget (f32 words) for tiling the embedding / lm_head over vocab,
-/// so each storage binding stays under a backend's `max_storage_buffer_binding_
-/// size` (e.g. 128MB on Mesa-GL). ~96 MiB; small models collapse to one tile.
-/// `BRAIN_TILE_BUDGET_WORDS` overrides it (e.g. tiny, to force tiling in tests).
-const TILE_BUDGET_WORDS: u64 = 24 * 1024 * 1024;
-
-fn tile_budget_words() -> u64 {
-    std::env::var("BRAIN_TILE_BUDGET_WORDS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&w| w > 0)
-        .unwrap_or(TILE_BUDGET_WORDS)
-}
 
 /// The parameter subset a shard holds. A whole shard returns `cfg.param_list()`
 /// verbatim (so the single-device store is byte-identical). A partial shard keeps
@@ -751,20 +732,9 @@ impl Qwen {
         }
     }
 
-    /// Vocab tiles `(v0, count)` sized so a `[count, d_model]` weight slice stays
-    /// within the per-binding budget. Small vocabularies yield a single tile.
+    /// Vocab tiles for the embedding / lm_head (shared `block::vocab_tiles`).
     fn vocab_tiles(&self) -> Vec<(u32, u32)> {
-        let d = self.cfg.d_model as u64;
-        let v = self.cfg.vocab as u64;
-        let rows = (tile_budget_words() / d.max(1)).max(1);
-        let mut out = Vec::new();
-        let mut v0 = 0u64;
-        while v0 < v {
-            let cnt = rows.min(v - v0);
-            out.push((v0 as u32, cnt as u32));
-            v0 += cnt;
-        }
-        out
+        block::vocab_tiles(self.cfg.vocab as u64, self.cfg.d_model as u64)
     }
 
     fn forward_steps(&self, b_use: u32, t_use: u32) -> Vec<Step> {
