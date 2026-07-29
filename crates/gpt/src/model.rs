@@ -696,6 +696,18 @@ impl Gpt {
         self.gpu.poll_wait();
     }
 
+    /// OFFLINE FLOP/OPS cost of the recorded batch forward — walks the step
+    /// list, executes nothing. Per this device/stage (a sharded instance
+    /// reports only its own layers); see `gpu_core::cost`.
+    pub fn cost_fwd(&self) -> gpu_core::cost::CostReport {
+        self.gpu.cost_of(&self.fwd_steps)
+    }
+
+    /// OFFLINE cost of the recorded backward pass.
+    pub fn cost_bwd(&self) -> gpu_core::cost::CostReport {
+        self.gpu.cost_of(&self.bwd_steps)
+    }
+
     pub fn adamw_step(&self, t: u32, lr: f32, wd: f32, clip: Option<f32>, extra_scale: f32) {
         self.opt.step(&self.gpu, &self.ps, t, lr, wd, 0.9, 0.999, 1e-8, clip, extra_scale);
     }
@@ -1011,6 +1023,19 @@ impl model::Model for Gpt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every kernel this model can dispatch has a cost formula — pins the
+    /// FLOP/OPS accounting against silent drift when PIPELINES grows.
+    #[test]
+    fn pipelines_fully_costed() {
+        for (name, _) in PIPELINES {
+            assert!(
+                gpu_core::cost::covers(name),
+                "kernel '{name}' has no formula in gpu_core::cost::kernel_cost; \
+                 add one (its dispatches would otherwise be reported UNCOVERED)"
+            );
+        }
+    }
 
     fn gpu_disabled() -> bool {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()

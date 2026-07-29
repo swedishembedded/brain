@@ -1241,6 +1241,18 @@ impl Lfm {
         self.gpu.poll_wait();
     }
 
+    /// OFFLINE FLOP/OPS cost of the recorded forward — walks the step list,
+    /// executes nothing. Chunked-regime instances cost the recorded per-chunk
+    /// graph (what one `forward` submits); see `gpu_core::cost`.
+    pub fn cost_fwd(&self) -> gpu_core::cost::CostReport {
+        self.gpu.cost_of(&self.fwd_steps)
+    }
+
+    /// OFFLINE cost of the recorded backward (empty when built for inference).
+    pub fn cost_bwd(&self) -> gpu_core::cost::CostReport {
+        self.gpu.cost_of(&self.bwd_steps)
+    }
+
     // ---- parity / inference taps ----
 
     /// Residual stream after `l` layers (materialized regime only).
@@ -1375,5 +1387,23 @@ impl model::Model for Lfm {
     }
     fn config_json(&self) -> serde_json::Value {
         self.cfg.to_json()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PIPELINES;
+
+    /// Every kernel this model can dispatch has a cost formula — pins the
+    /// FLOP/OPS accounting against silent drift when PIPELINES grows.
+    #[test]
+    fn pipelines_fully_costed() {
+        for (name, _) in PIPELINES {
+            assert!(
+                gpu_core::cost::covers(name),
+                "kernel '{name}' has no formula in gpu_core::cost::kernel_cost; \
+                 add one (its dispatches would otherwise be reported UNCOVERED)"
+            );
+        }
     }
 }

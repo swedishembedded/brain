@@ -1469,6 +1469,19 @@ impl Qwen {
         &self.gpu
     }
 
+    /// OFFLINE FLOP/OPS cost of the recorded batch forward — walks the step
+    /// list, executes nothing. Per this device/stage: a sharded instance
+    /// reports only its own layers. The int8 path shows up as `int_ops`
+    /// (`matmul_i8_*`), fp32 as `flops`; see `gpu_core::cost`.
+    pub fn cost_fwd(&self) -> gpu_core::cost::CostReport {
+        self.gpu.cost_of(&self.fwd_steps)
+    }
+
+    /// OFFLINE cost of the recorded backward (empty when built for inference).
+    pub fn cost_bwd(&self) -> gpu_core::cost::CostReport {
+        self.gpu.cost_of(&self.bwd_steps)
+    }
+
     pub fn save(&self, path: &str) {
         self.save_with_itos(path, None);
     }
@@ -1592,6 +1605,19 @@ mod tests {
 
     fn gpu_disabled() -> bool {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    /// Every kernel this model can dispatch has a cost formula — pins the
+    /// FLOP/OPS accounting against silent drift when PIPELINES grows.
+    #[test]
+    fn pipelines_fully_costed() {
+        for (name, _) in PIPELINES {
+            assert!(
+                gpu_core::cost::covers(name),
+                "kernel '{name}' has no formula in gpu_core::cost::kernel_cost; \
+                 add one (its dispatches would otherwise be reported UNCOVERED)"
+            );
+        }
     }
 
     /// `step_embed` must be indistinguishable from `step`: feeding token t's
