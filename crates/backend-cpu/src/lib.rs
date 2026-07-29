@@ -623,6 +623,9 @@ impl Backend for CpuBackend {
     fn kind(&self) -> &'static str {
         "cpu"
     }
+    fn dump_profile(&self) {
+        CpuBackend::dump_profile(self)
+    }
     fn caps(&self) -> backend_api::DeviceCaps {
         use backend_api::{DeviceCaps, DeviceClass, NumericSupport};
         DeviceCaps {

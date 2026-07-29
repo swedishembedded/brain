@@ -429,6 +429,29 @@ from); their serving waits on full-depth import completion — in-flight work.
 No NPU hardware exists on this box, so NPU scheduling stays unverified here
 rather than faked.
 
+### Third profile pass: the resident-model blind spot, then three simple fixes
+
+Profiling a RESIDENT model was impossible by construction — both backends
+printed their tables only at drop, and a provider held in a static never
+drops. `Backend::dump_profile()` (both backends) + per-stage wall timings in
+the fastvlm provider close that. What the first readable profile showed, and
+the three deliberately-simple fixes (each gated, each measured on the P40):
+
+| Finding | Fix | Effect |
+|---|---|---|
+| 285 KV prefill positions each paid a submit+fence+readback for a hidden state nobody reads | `Qwen::prefill(&[PrefillInput])` — submit every position, read ONCE at the end; bit-identical to step-by-step (gated) | part of prefill drop below |
+| decode was 277 ms/token — the single-threaded host LM head (vocab 152k × d896) | `hostmath::matvec_par` (row-parallel via the CPU scheduler's primitives), shared by the caption loop and `generate_kv_stream` | decode 2.2 s → 0.67 s |
+| `rmsnorm` 2.16 s over 13 573 one-thread-per-row calls + per-element m=1 matmuls: `decode_at` never got the A1/A2 decode-regime kernels serve.rs got | dispatch `rmsnorm_rows`/`matmul_gemv` in KV decode where `caps.workgroup_reductions` holds (the selector's m=1 policy at the always-m=1 call site) | prefill 21.8 s → 12.0 s |
+
+Caption end-to-end: **41.8 s → 34.4 s**, identical text. The provider is also
+now compartmentalized as two Active-Object-style stages — the vision device
+and the decoder each behind their OWN lock, held only while that stage runs,
+embeddings handed off by value — so concurrent requests pipeline
+(throughput → max(stage) instead of sum(stages)) instead of serialising on
+one whole-request mutex. Remaining prefill cost is dispatch/uniform churn
+(~148k fresh uniforms+bind groups per request) — batched prefill chunks and
+uniform reuse are the next, NOT-simple levers, alongside the GPU tower.
+
 ## Still planned
 
 1. `capability::Provider` adoption by `qwen`, `yolo`, `depth`, `tts` (L) —

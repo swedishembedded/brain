@@ -312,6 +312,12 @@ mod native_facade {
             self.inner.stats()
         }
 
+        /// Print the per-kernel `BRAIN_PROFILE` table now — the resident-model
+        /// escape hatch for a profile that otherwise only prints at drop.
+        pub fn dump_profile(&self) {
+            self.inner.dump_profile()
+        }
+
         /// A weak handle for pools/fixtures — see [`WeakGpu`]. `None` when the
         /// backend has no shared state to weakly reference.
         pub fn downgrade(&self) -> Option<WeakGpu> {

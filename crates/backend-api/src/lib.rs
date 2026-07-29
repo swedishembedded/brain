@@ -395,6 +395,12 @@ pub trait Backend: Send + Sync {
     fn stats(&self) -> Option<DeviceStats> {
         None
     }
+
+    /// Print the per-kernel `BRAIN_PROFILE` timing table NOW (stderr). The
+    /// dump otherwise fires only at drop — which a RESIDENT model held in a
+    /// static never reaches, so its profile was unreadable by construction.
+    /// No-op when profiling is off or the backend does not time kernels.
+    fn dump_profile(&self) {}
 }
 
 /// Per-handle device-op counters — the queryable form of what

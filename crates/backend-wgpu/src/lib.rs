@@ -430,8 +430,11 @@ struct GpuProfile {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl Drop for WgpuBackend {
-    fn drop(&mut self) {
+impl WgpuBackend {
+    /// Print the `BRAIN_PROFILE` op counts + per-kernel timestamp table now —
+    /// what `Drop` prints, callable while a RESIDENT backend is still alive
+    /// (a static never drops, so its profile was otherwise unreadable).
+    pub fn dump_profile_now(&self) {
         use std::sync::atomic::Ordering::Relaxed;
         if self.profile {
             eprintln!(
@@ -460,6 +463,13 @@ impl Drop for WgpuBackend {
                 );
             }
         }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for WgpuBackend {
+    fn drop(&mut self) {
+        self.dump_profile_now();
     }
 }
 
@@ -1139,6 +1149,10 @@ impl Backend for WgpuBackend {
     }
     fn caps(&self) -> backend_api::DeviceCaps {
         self.shared.caps.clone()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dump_profile(&self) {
+        self.dump_profile_now()
     }
     fn stats(&self) -> Option<backend_api::DeviceStats> {
         use std::sync::atomic::Ordering::Relaxed;

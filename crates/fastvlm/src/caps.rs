@@ -54,14 +54,25 @@ pub fn manifest() -> Manifest {
     Manifest::new(MODEL, "FastVLM image captioning — fully in brain, parity-gated against HF.", vec![caption])
 }
 
-/// Everything expensive, resident per checkpoint dir: the split weight maps,
-/// the vision device + encoder params, and the tokenizer.
-struct Hot {
+/// The two pipeline stages are compartmentalized exactly as two Active
+/// Objects would be: each owns its resource (the CPU vision device; the GPU
+/// decoder) behind ITS OWN lock, held only while that stage runs, and the
+/// image embeddings hand off between them BY VALUE — the "event". Request
+/// N+1's vision therefore overlaps request N's decode; the old single
+/// whole-request mutex serialised them (measured: 3-way load = 3x serial).
+/// Each stage lazy-loads its own slice of the checkpoint independently, so
+/// there is no lock ordering between stages to get wrong (a cold start reads
+/// the safetensors twice; steady state never does).
+struct VisionStage {
     weights: String,
-    precision: String,
     gpu: Gpu,
     vision_ps: ParamStore,
     proj: HashMap<String, Vec<f32>>,
+}
+
+struct DecodeStage {
+    weights: String,
+    precision: String,
     /// The resident KV decoder (fp32 or int8 per `precision`) + the host-side
     /// head row-major table for per-token logits.
     dec: Qwen,
@@ -95,9 +106,11 @@ impl Provider for FastVlmProvider {
 
 struct CaptionAction;
 
-// One process-wide resident (the provider is registered once); keyed by the
-// checkpoint dir so switching weights swaps cleanly.
-static HOT: Mutex<Option<Hot>> = Mutex::new(None);
+// One process-wide resident per STAGE (the provider is registered once);
+// keyed by checkpoint dir (and precision for the decoder) so switching swaps
+// cleanly. Two locks, never held together.
+static VISION: Mutex<Option<VisionStage>> = Mutex::new(None);
+static DECODE: Mutex<Option<DecodeStage>> = Mutex::new(None);
 
 impl Action for CaptionAction {
     fn spec(&self) -> ActionSpec {
@@ -114,18 +127,22 @@ impl Action for CaptionAction {
         }
         let (px, w, h) = image_of(inv)?;
 
-        let mut guard = HOT.lock().map_err(|_| "fastvlm: hot lock poisoned")?;
-        if !matches!(&*guard, Some(hot) if hot.weights == dir && hot.precision == precision) {
-            *guard = None; // free the old resident weights first
-            *guard = Some(load_hot(&dir, &precision)?);
-        }
-        let hot = guard.as_ref().unwrap();
-
         // 1) pad to square + bilinear resize to the tower input, CHW.
+        let t_pre = std::time::Instant::now();
         let chw = pad_resize_chw(&px, w, h, VISION_SIDE);
+        stage_time("preprocess", t_pre);
+
+        // ---- vision stage: lock held ONLY while the tower runs ----
+        let t_tower = std::time::Instant::now();
 
         // 2) vision tower + projector → [256, 896] image embeds.
         let embeds = {
+            let mut vguard = VISION.lock().map_err(|_| "fastvlm: vision lock poisoned")?;
+            if !matches!(&*vguard, Some(v) if v.weights == dir) {
+                *vguard = None;
+                *vguard = Some(load_vision(&dir)?);
+            }
+            let hot = vguard.as_ref().unwrap();
             use crate::encoder::{ctx as ectx, kidx, Encoder};
             let gpu = &hot.gpu;
             let ctx = ectx(gpu);
@@ -154,8 +171,21 @@ impl Action for CaptionAction {
                     gpu.step(kidx("bias_add"), &[&e, &f2b], &[IMG_TOKENS, d], IMG_TOKENS * d),
                 ],
             );
-            gpu.read(&e, (IMG_TOKENS * 896) as usize)
+            let out = gpu.read(&e, (IMG_TOKENS * 896) as usize);
+            // A resident device never drops, so its BRAIN_PROFILE table would
+            // otherwise never print; surface it while the stage lock is held.
+            gpu.dump_profile();
+            out
         };
+        stage_time("vision+projector", t_tower);
+
+        // ---- decode stage: its own lock; the vision lock is already free ----
+        let mut dguard = DECODE.lock().map_err(|_| "fastvlm: decode lock poisoned")?;
+        if !matches!(&*dguard, Some(d) if d.weights == dir && d.precision == precision) {
+            *dguard = None;
+            *dguard = Some(load_decode(&dir, &precision)?);
+        }
+        let hot = dguard.as_ref().unwrap();
 
         // 3) KV-cached decode (O(T) per token, not the O(T^2) full recompute
         //    the first profile caught at 96.5% of GPU time): text tokens step
@@ -167,21 +197,16 @@ impl Action for CaptionAction {
         let vocab = hot.dec.cfg.vocab as usize;
         let eos = hot.tok.encode("<|im_end|>").first().copied();
         hot.dec.reset_cache();
-        let mut hidden = Vec::new();
-        for &t in &pre {
-            hidden = hot.dec.step(t);
-        }
-        for r in 0..IMG_TOKENS as usize {
-            hidden = hot.dec.step_embed(&embeds[r * d..(r + 1) * d]);
-        }
-        for &t in &post {
-            hidden = hot.dec.step(t);
-        }
-        let logits_of = |hidden: &[f32]| -> Vec<f32> {
-            (0..vocab)
-                .map(|o| hot.head[o * d..o * d + d].iter().zip(hidden).map(|(a, b)| a * b).sum())
-                .collect()
-        };
+        let t_prefill = std::time::Instant::now();
+        let mut inputs: Vec<qwen::model::PrefillInput> = Vec::with_capacity(pre.len() + IMG_TOKENS as usize + post.len());
+        inputs.extend(pre.iter().map(|&t| qwen::model::PrefillInput::Token(t)));
+        inputs.extend((0..IMG_TOKENS as usize).map(|r| qwen::model::PrefillInput::Embed(&embeds[r * d..(r + 1) * d])));
+        inputs.extend(post.iter().map(|&t| qwen::model::PrefillInput::Token(t)));
+        let mut hidden = hot.dec.prefill(&inputs);
+        stage_time("prefill", t_prefill);
+        let t_decode = std::time::Instant::now();
+        let logits_of =
+            |hidden: &[f32]| -> Vec<f32> { model::hostmath::matvec_par(&hot.head, hidden, vocab, d) };
         let mut out_ids = Vec::new();
         for i in 0..max_new {
             let lg = logits_of(&hidden);
@@ -198,6 +223,8 @@ impl Action for CaptionAction {
             progress(Progress { step: i as u32 + 1, total: max_new as u32, message: String::new() });
             hidden = hot.dec.step(next);
         }
+        stage_time("decode", t_decode);
+        hot.dec.gpu().dump_profile();
         let text = hot.tok.decode(&out_ids);
         Ok(Outcome::new()
             .set("tokens", serde_json::json!(out_ids.len()))
@@ -206,22 +233,17 @@ impl Action for CaptionAction {
     }
 }
 
-fn load_hot(dir: &str, precision: &str) -> Result<Hot, String> {
+fn load_vision(dir: &str) -> Result<VisionStage, String> {
     let ckpt = format!("{dir}/model.safetensors");
     let tensors = checkpoint::safetensors::read(&ckpt)
         .map_err(|e| format!("fastvlm: cannot read {ckpt}: {e}"))?;
-    let tok = data::qwen_tokenizer::QwenBpe::from_dir(dir)
-        .map_err(|e| format!("fastvlm: tokenizer: {e}"))?;
     let mut vt = Vec::new();
     let mut proj = HashMap::new();
-    let mut dec = HashMap::new();
     for t in tensors {
         if t.name.contains("vision_tower") {
             vt.push((t.name, t.data));
         } else if let Some(k) = crate::import::map_projector(&t.name) {
             proj.insert(k, t.data);
-        } else if let Some(k) = crate::import::map_decoder(&t.name) {
-            dec.insert(k, t.data);
         }
     }
     use crate::encoder::{ctx as ectx, Encoder, PIPELINES};
@@ -233,6 +255,21 @@ fn load_hot(dir: &str, precision: &str) -> Result<Hot, String> {
     let ctx = ectx(&gpu);
     let enc = Encoder::mobileclip_l(&ctx, VISION_SIDE);
     let vision_ps = ParamStore::new(&gpu, enc.param_list(), &crate::vision_import::build_vision_weights(&vt));
+    Ok(VisionStage { weights: dir.to_string(), gpu, vision_ps, proj })
+}
+
+fn load_decode(dir: &str, precision: &str) -> Result<DecodeStage, String> {
+    let ckpt = format!("{dir}/model.safetensors");
+    let tensors = checkpoint::safetensors::read(&ckpt)
+        .map_err(|e| format!("fastvlm: cannot read {ckpt}: {e}"))?;
+    let tok = data::qwen_tokenizer::QwenBpe::from_dir(dir)
+        .map_err(|e| format!("fastvlm: tokenizer: {e}"))?;
+    let mut dec = HashMap::new();
+    for t in tensors {
+        if let Some(k) = crate::import::map_decoder(&t.name) {
+            dec.insert(k, t.data);
+        }
+    }
     // Resident KV decoder, fp32 or int8 (per-channel weights + dynamic
     // activation quant through the decode-regime packed GEMV). Context sized
     // for prompt + image span + the longest caption.
@@ -247,16 +284,21 @@ fn load_hot(dir: &str, precision: &str) -> Result<Hot, String> {
         "int8" => Qwen::new_shard_i8(cfg.clone(), 1, t_max, &dec, model::shard::Shard::whole(cfg.n_layers as usize)),
         _ => Qwen::new(cfg, 1, t_max, &dec),
     };
-    Ok(Hot {
+    Ok(DecodeStage {
         weights: dir.to_string(),
         precision: precision.to_string(),
-        gpu,
-        vision_ps,
-        proj,
         dec: dec_model,
         head,
         tok,
     })
+}
+
+/// Stage wall time to stderr when `BRAIN_PROFILE` is set — the resident
+/// provider's coarse timeline above the per-kernel tables.
+fn stage_time(name: &str, since: std::time::Instant) {
+    if std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false) {
+        eprintln!("stage {name}: {:.1} ms", since.elapsed().as_secs_f64() * 1e3);
+    }
 }
 
 /// Decode the standardized image blob: raw HWC f32 `[0,1]` + `{w,h}` meta.

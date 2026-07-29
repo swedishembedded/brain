@@ -75,11 +75,9 @@ pub fn generate_kv_stream(
     let vocab = model.cfg.vocab as usize;
     let d = model.cfg.d_model as usize;
     let head = model.read_weight(model.cfg.head_weight()); // [vocab, d]
-    let logits_of = |hidden: &[f32]| -> Vec<f32> {
-        (0..vocab)
-            .map(|o| head[o * d..o * d + d].iter().zip(hidden).map(|(a, b)| a * b).sum())
-            .collect()
-    };
+    // Row-parallel: the single-threaded head was measured at hundreds of ms
+    // PER TOKEN at real vocabularies (one implementation: model::hostmath).
+    let logits_of = |hidden: &[f32]| -> Vec<f32> { model::hostmath::matvec_par(&head, hidden, vocab, d) };
     model.reset_cache();
     let mut out = Vec::with_capacity(max_new);
     // Feed the prompt; the hidden after the last prompt token gives the first

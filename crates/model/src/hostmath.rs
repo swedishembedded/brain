@@ -157,6 +157,20 @@ pub fn matvec(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
     (0..out).map(|o| w[o * inn..o * inn + inn].iter().zip(x).map(|(a, b)| a * b).sum()).collect()
 }
 
+/// [`matvec`] across all cores — the LM-head shape (one hidden row against a
+/// `[vocab, d]` table) is 100+ MFLOP per token at real vocabularies, which a
+/// single core turns into hundreds of milliseconds PER TOKEN (measured: 277
+/// ms/token in the caption decode, dominated by exactly this call). Same
+/// contract, same result, row-parallel via the CPU scheduler's primitives.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn matvec_par(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
+    assert!(w.len() >= out * inn, "matvec_par: w is {}, need {}", w.len(), out * inn);
+    assert!(x.len() >= inn, "matvec_par: x is {}, need {inn}", x.len());
+    backend_cpu::par::map_f32(out, |o| {
+        w[o * inn..o * inn + inn].iter().zip(x).map(|(a, b)| a * b).sum()
+    })
+}
+
 /// Numerically-stable softmax over a slice, in place.
 pub fn softmax(x: &mut [f32]) {
     let m = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);

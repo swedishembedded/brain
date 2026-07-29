@@ -104,6 +104,10 @@ const BIAS_ADD: usize = 49;
 const BIAS_GRAD: usize = 50;
 // Decode-regime int8 GEMV (single-barrier; the m=1 shape KV decode dispatches).
 const MATMUL_I8_GEMV: usize = 51;
+// Decode-regime fp32 kernels (A1/A2): workgroup-per-row rmsnorm and the
+// workgroup-per-column GEMV — the m=1 shapes KV decode is made of.
+const RMSNORM_ROWS: usize = 52;
+const MATMUL_GEMV: usize = 53;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -158,6 +162,8 @@ const PIPELINES: &[(&str, &str)] = &[
     ("bias_add", kernels::BIAS_ADD),
     ("bias_grad", kernels::BIAS_GRAD),
     ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS),
+    ("matmul_gemv", kernels::MATMUL_GEMV),
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
@@ -1310,6 +1316,30 @@ impl Qwen {
         hidden
     }
 
+    /// Prefill many positions with ONE readback: tokens and raw-embedding rows
+    /// interleave freely, every position's K/V lands in the cache, and only
+    /// the LAST hidden state is read back. During prefill the intermediate
+    /// hiddens are thrown away, so the per-step submit+fence+map round trip —
+    /// measured at the top of the caption profile — is pure waste.
+    pub fn prefill(&self, inputs: &[PrefillInput<'_>]) -> Vec<f32> {
+        assert!(!inputs.is_empty(), "prefill of nothing");
+        for input in inputs {
+            let pos = self.dec_pos.get();
+            match input {
+                PrefillInput::Token(t) => {
+                    self.decode_submit(Some(*t), pos);
+                }
+                PrefillInput::Embed(e) => {
+                    assert_eq!(e.len(), self.cfg.d_model as usize, "prefill wants d_model rows");
+                    self.gpu.write(&self.res[0], bytemuck::cast_slice(e));
+                    self.decode_submit(None, pos);
+                }
+            }
+            self.dec_pos.set(pos + 1);
+        }
+        self.gpu.read(&self.xn_final, self.cfg.d_model as usize)
+    }
+
     /// [`Self::step`] from a RAW embedding instead of a token id — the seam a
     /// vision-language front-end feeds image embeddings through: prefill walks
     /// text tokens via `step` and image rows via `step_embed`, and the KV cache
@@ -1328,6 +1358,12 @@ impl Qwen {
     /// Mirrors [`Self::forward_steps`] at `n = 1` (row 0 of the sized scratch),
     /// swapping the batched GQA core for the decode kernels + persistent KV cache.
     fn decode_at(&self, token_id: Option<u32>, pos: u32) -> Vec<f32> {
+        self.decode_submit(token_id, pos);
+        self.gpu.read(&self.xn_final, self.cfg.d_model as usize)
+    }
+
+    /// Record + submit one incremental decode step WITHOUT reading back.
+    fn decode_submit(&self, token_id: Option<u32>, pos: u32) {
         assert!(
             self.shard.is_whole(self.cfg.n_layers as usize),
             "KV-cache decode requires a whole (single-device) model"
@@ -1351,6 +1387,27 @@ impl Qwen {
         let ids = Self::ids();
         let g = &self.gpu;
         let w = |name: &str| self.ps.w(name);
+        // KV decode is m=1 by construction — the decode regime. Use the
+        // workgroup-cooperative kernels (A1/A2: rmsnorm_rows, matmul_gemv)
+        // wherever the device executes workgroup reductions; the per-element
+        // reference kernels run ONE thread per row here (measured: rmsnorm was
+        // 19% of prefill GPU time across 13k single-thread calls). Same policy
+        // the serving engine's selector applies, at the always-m=1 call site.
+        let fast = g.caps().workgroup_reductions;
+        let rms = |s: &mut Vec<Step>, x: &DeviceBuffer, wt: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32| {
+            if fast {
+                s.push(g.step(RMSNORM_ROWS, &[x, wt, out], &[dim, rows], rows * 64));
+            } else {
+                s.push(block::rmsnorm_fwd(g, &ids, x, wt, out, dim, rows));
+            }
+        };
+        let mm = |s: &mut Vec<Step>, x: &DeviceBuffer, wt: &DeviceBuffer, out: &DeviceBuffer, k: u32, n: u32| {
+            if fast {
+                s.push(g.step(MATMUL_GEMV, &[x, wt, out], &[1, k, n], n * 64));
+            } else {
+                s.push(g.step(MATMUL, &[x, wt, out], &[1, k, n], n));
+            }
+        };
 
         // Embed the token id into res[0] row 0 via the tied table (non-tiled
         // gather); `None` = the caller already wrote a raw embedding there
@@ -1378,16 +1435,16 @@ impl Qwen {
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
             // --- attention: project, QK-norm, RoPE-at-pos, append, decode-attend ---
-            s.push(block::rmsnorm_fwd(g, &ids, &self.res[l], w(&p("ln1.weight")), &lb.xn1, d, 1));
+            rms(&mut s, &self.res[l], w(&p("ln1.weight")), &lb.xn1, d, 1);
             let q8l = self.q8.as_ref().map(|q| (q, q.layers.get(&l).expect("q8 layer present")));
             if let Some((q8, lay)) = q8l {
                 mm8(&mut s, q8, &lay.wq, &lb.xn1, &lb.q_pre, d);
                 mm8(&mut s, q8, &lay.wk, &lb.xn1, &lb.k_pre, d);
                 mm8(&mut s, q8, &lay.wv, &lb.xn1, &lb.v, d);
             } else {
-                s.push(g.step(MATMUL, &[&lb.xn1, w(&p("attn.wq.weight")), &lb.q_pre], &[1, d, hq], hq));
-                s.push(g.step(MATMUL, &[&lb.xn1, w(&p("attn.wk.weight")), &lb.k_pre], &[1, d, hkv], hkv));
-                s.push(g.step(MATMUL, &[&lb.xn1, w(&p("attn.wv.weight")), &lb.v], &[1, d, hkv], hkv));
+                mm(&mut s, &lb.xn1, w(&p("attn.wq.weight")), &lb.q_pre, d, hq);
+                mm(&mut s, &lb.xn1, w(&p("attn.wk.weight")), &lb.k_pre, d, hkv);
+                mm(&mut s, &lb.xn1, w(&p("attn.wv.weight")), &lb.v, d, hkv);
             }
             // Qwen2-style biased projections and Qwen3-style QK-norm, gated
             // exactly as the batched forward gates them.
@@ -1398,8 +1455,8 @@ impl Qwen {
             }
             // Optional per-head QK-RMSNorm (Qwen3); Qwen2 routes q_pre/k_pre.
             let (q_buf, k_buf): (&DeviceBuffer, &DeviceBuffer) = if c.qk_norm {
-                s.push(block::rmsnorm_fwd(g, &ids, &lb.q_pre, w(&p("attn.q_norm.weight")), &lb.q, hd, nh));
-                s.push(block::rmsnorm_fwd(g, &ids, &lb.k_pre, w(&p("attn.k_norm.weight")), &lb.k, hd, nkv));
+                rms(&mut s, &lb.q_pre, w(&p("attn.q_norm.weight")), &lb.q, hd, nh);
+                rms(&mut s, &lb.k_pre, w(&p("attn.k_norm.weight")), &lb.k, hd, nkv);
                 (&lb.q, &lb.k)
             } else {
                 (&lb.q_pre, &lb.k_pre)
@@ -1414,28 +1471,32 @@ impl Qwen {
             if let Some((q8, lay)) = q8l {
                 mm8(&mut s, q8, &lay.wo, &lb.ctx, &self.proj, hq);
             } else {
-                s.push(g.step(MATMUL, &[&lb.ctx, w(&p("attn.wo.weight")), &self.proj], &[1, hq, d], d));
+                mm(&mut s, &lb.ctx, w(&p("attn.wo.weight")), &self.proj, hq, d);
             }
             s.push(g.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[d], d));
             // --- SwiGLU MLP ---
-            s.push(block::rmsnorm_fwd(g, &ids, &lb.xmid, w(&p("ln2.weight")), &lb.xn2, d, 1));
+            rms(&mut s, &lb.xmid, w(&p("ln2.weight")), &lb.xn2, d, 1);
             if let Some((q8, lay)) = q8l {
                 mm8(&mut s, q8, &lay.gate, &lb.xn2, &lb.gate_pre, d);
                 mm8(&mut s, q8, &lay.up, &lb.xn2, &lb.up, d);
                 s.push(block::swiglu_fwd(g, &ids, &lb.gate_pre, &lb.up, &lb.h, ff));
                 mm8(&mut s, q8, &lay.down, &lb.h, &self.mlp_out, ff);
             } else {
-                s.push(g.step(MATMUL, &[&lb.xn2, w(&p("mlp.gate.weight")), &lb.gate_pre], &[1, d, ff], ff));
-                s.push(g.step(MATMUL, &[&lb.xn2, w(&p("mlp.up.weight")), &lb.up], &[1, d, ff], ff));
+                mm(&mut s, &lb.xn2, w(&p("mlp.gate.weight")), &lb.gate_pre, d, ff);
+                mm(&mut s, &lb.xn2, w(&p("mlp.up.weight")), &lb.up, d, ff);
                 s.push(block::swiglu_fwd(g, &ids, &lb.gate_pre, &lb.up, &lb.h, ff));
-                s.push(g.step(MATMUL, &[&lb.h, w(&p("mlp.down.weight")), &self.mlp_out], &[1, ff, d], d));
+                mm(&mut s, &lb.h, w(&p("mlp.down.weight")), &self.mlp_out, ff, d);
             }
             s.push(g.step(ADD2, &[&lb.xmid, &self.mlp_out, &self.res[l + 1]], &[d], d));
         }
         let last = c.n_layers as usize;
-        s.push(block::rmsnorm_fwd(g, &ids, &self.res[last], w("norm.weight"), &self.xn_final, d, 1));
+        rms(&mut s, &self.res[last], w("norm.weight"), &self.xn_final, d, 1);
         g.submit(&[], &s);
-        g.read(&self.xn_final, d as usize)
+    }
+
+    /// The device this model runs on (profiling/observability).
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
     }
 
     pub fn save(&self, path: &str) {
@@ -1456,6 +1517,12 @@ impl Qwen {
         }
         checkpoint::save(path, config, &tensors);
     }
+}
+
+/// One prefill position: a token id or a raw d_model embedding row.
+pub enum PrefillInput<'a> {
+    Token(u32),
+    Embed(&'a [f32]),
 }
 
 // ---- architecture-agnostic Model seam ----
@@ -1583,6 +1650,38 @@ mod tests {
             via_embed = m2.step_embed(&emb[t as usize * d..(t as usize + 1) * d]);
         }
         assert_eq!(via_step, via_embed, "an embedding row must be a perfect stand-in for its token");
+    }
+
+    /// Batched-submission prefill must be BIT-IDENTICAL to step-by-step: it is
+    /// the same tape minus the per-step readbacks, so any difference means the
+    /// submit path depends on the read it no longer does.
+    #[test]
+    fn prefill_matches_step_by_step() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let w = crate::init::init_weights(&cfg, 7);
+        let d = cfg.d_model as usize;
+        let m = Qwen::new(cfg.clone(), 1, 16, &w);
+        m.reset_cache();
+        let emb = m.read_weight("tok.weight");
+        let mut via_steps = Vec::new();
+        for &t in &[1u32, 5, 3] {
+            via_steps = m.step(t);
+        }
+        via_steps = m.step_embed(&emb[9 * d..10 * d]);
+        let m2 = Qwen::new(cfg, 1, 16, &w);
+        m2.reset_cache();
+        let via_prefill = m2.prefill(&[
+            PrefillInput::Token(1),
+            PrefillInput::Token(5),
+            PrefillInput::Token(3),
+            PrefillInput::Embed(&emb[9 * d..10 * d]),
+        ]);
+        assert_eq!(via_steps, via_prefill);
+        // And decode continues correctly from a prefilled cache.
+        assert_eq!(m.step(2), m2.step(2));
     }
 
     /// Int8 KV decode (the packed GEMV at m=1) must track the fp32 KV decode
