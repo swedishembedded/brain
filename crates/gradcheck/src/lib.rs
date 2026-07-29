@@ -181,6 +181,31 @@ pub fn check_qwen(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Build a tiny LFM2.5 encoder (conv + attention + conv layer stack) and
+/// gradient-check it. This is the correctness gate for the bidirectional
+/// attention backward through the GQA→MHA expansion (`kv_expand_bwd`
+/// group-sum), the gated depthwise symmetric-pad conv mixer (in_proj
+/// row-thirds, `mul` gating, permute adjoints, conv1d dx/dw), the eps-aware
+/// RMSNorm family, and the tied MLM head with UNSHIFTED masked-CE targets —
+/// only some positions are supervised (the MLM label pattern), the rest are
+/// IGNORE, exercising the masking path.
+pub fn check_lfm(seed: u64) -> Report {
+    use lfm::{Lfm, LfmConfig};
+    let cfg = LfmConfig::tiny();
+    let init = lfm::init::init_weights(&cfg, seed);
+    let model = Lfm::new_train(cfg, 2, 6, &init);
+    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
+    // Unshifted MLM targets: supervise every other position with the original
+    // token (as if corrupted), IGNORE the rest.
+    let y: Vec<u32> = x
+        .iter()
+        .enumerate()
+        .map(|(i, &t)| if i % 2 == 0 { t } else { lfm::model::IGNORE })
+        .collect();
+    model.set_batch(&x, &y);
+    directional_check(&model, 5e-3, 4, seed ^ 0x1234)
+}
+
 /// Build a tiny **LoRA** Qwen3 decoder and gradient-check the adapters. The
 /// checker walks only the trainable params (`*.lora_a`/`*.lora_b`); the base
 /// weights are frozen. A few AdamW steps run first so the zero-initialised `B`
@@ -495,6 +520,23 @@ mod tests {
             return;
         }
         let report = check_gpt(7);
+        report.print();
+        // fp32 directional FD on a software GPU: combined abs+rel tolerance.
+        let (atol, rtol) = (4e-3, 8e-2);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn lfm_analytic_grads_match_finite_differences() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let report = check_lfm(7);
         report.print();
         // fp32 directional FD on a software GPU: combined abs+rel tolerance.
         let (atol, rtol) = (4e-3, 8e-2);
