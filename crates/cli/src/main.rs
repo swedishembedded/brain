@@ -31,6 +31,7 @@ mod resident;
 mod resident_lfm;
 mod resident_llm;
 mod resident_depth;
+mod resident_forecast;
 mod resident_tts;
 mod resident_asr;
 mod resident_flux2;

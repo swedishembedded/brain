@@ -75,6 +75,18 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, r
     if let Some(d) = crate::resident_depth::DepthResident::from_env() {
         models.push(Arc::new(d));
     }
+    // Time-series forecasting foundation models — each gated on its weights env
+    // var. chronos2/fincast advertise an NPU footprint (auto-placed on the NPU
+    // when budgeted); kronos serves on CPU/GPU (see resident_forecast.rs).
+    if let Some(c) = crate::resident_forecast::Chronos2Resident::from_env() {
+        models.push(Arc::new(c));
+    }
+    if let Some(f) = crate::resident_forecast::FincastResident::from_env() {
+        models.push(Arc::new(f));
+    }
+    if let Some(k) = crate::resident_forecast::KronosResident::from_env() {
+        models.push(Arc::new(k));
+    }
     // Text-to-speech (BRAIN_TTS_WEIGHTS).
     if let Some(t) = crate::resident_tts::TtsResident::from_env() {
         models.push(Arc::new(t));
