@@ -29,6 +29,20 @@ pub fn export_file(weights_path: &str, s: usize, quant: Quant, out: &str) -> Res
     Ok(())
 }
 
+/// Export to `out` with an **external-data sidecar** (`<out>.data` holding the
+/// large linears/embeddings). The full ~1 B-param FinCast core's single-protobuf
+/// ONNX exceeds protobuf's 2 GB limit, so the NPU path compiles this via
+/// [`crate::openvino::FincastSession::load_path`] rather than `load_bytes`
+/// (mirrors `lfm_export::export`).
+pub fn export_external(weights_path: &str, s: usize, quant: Quant, out: &str) -> Result<(), String> {
+    let c = checkpoint::load(weights_path);
+    let cfg = FincastConfig::from_json(&c.header["config"])?;
+    let w = c.by_role("");
+    let mut g = GraphBuilder::new("fincast");
+    build_fincast_graph_quant(&cfg, &w, s, &mut g, quant);
+    g.finish_external(out, 1 << 20).map_err(|e| format!("write {out}: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

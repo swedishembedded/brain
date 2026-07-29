@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress};
-use npu::openvino::{Chronos2Session, FincastSession, NpuConfig, NpuDevice};
+use npu::openvino::{Chronos2Session, FincastSession, KronosS1Session, KronosS2Session, NpuConfig, NpuDevice};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
@@ -84,6 +84,17 @@ fn file_ram(path: &str) -> u64 {
 
 fn npu_cfg() -> NpuConfig {
     NpuConfig { device: NpuDevice::Npu, allow_fallback: true, ..Default::default() }
+}
+
+/// Run an NPU forecast, converting a panic (e.g. an OpenVINO compile/infer
+/// failure surfaced through `.expect` in the pluggable-core closure) into a clean
+/// error. Without this, one model's NPU failure would unwind and kill the shared
+/// NPU lane thread — taking every other NPU-scheduled model down with it. A
+/// RefCell borrow held at panic time is released during unwind, so the cached
+/// sessions stay usable for the next request.
+fn guard_npu<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .map_err(|_| "NPU forecast failed (compile/infer error — see stderr)".to_string())
 }
 
 // ================================ chronos2 =================================
@@ -166,18 +177,20 @@ impl Instance for Chronos2NpuInstance {
         let (context, _shape) = decode_f32(inv, "context")?;
         let horizon = horizon_of(inv, 64);
         let d = self.model.config().d_model;
-        let (path, cfg, cache, devcell) = (&self.path, &self.cfg, &self.cache, &self.device);
-        let q = self.model.forecast_quantiles_with_core(&context, horizon, |emb, mask, n_out| {
-            let s = emb.len() / d;
-            let mut c = cache.borrow_mut();
-            let sess = c.entry((s, n_out)).or_insert_with(|| {
-                let bytes = npu::chronos2_export::export_onnx(path, s, n_out, npu::qwen_topology::Quant::F32)
-                    .expect("chronos2 NPU export");
-                Chronos2Session::load_bytes(&bytes, cfg).expect("chronos2 NPU compile")
-            });
-            *devcell.borrow_mut() = sess.device().to_string();
-            sess.run(emb, mask).expect("chronos2 NPU infer")
-        });
+        let (model, path, cfg, cache, devcell) = (&self.model, &self.path, &self.cfg, &self.cache, &self.device);
+        let q = guard_npu(|| {
+            model.forecast_quantiles_with_core(&context, horizon, |emb, mask, n_out| {
+                let s = emb.len() / d;
+                let mut c = cache.borrow_mut();
+                let sess = c.entry((s, n_out)).or_insert_with(|| {
+                    let bytes = npu::chronos2_export::export_onnx(path, s, n_out, npu::qwen_topology::Quant::F32)
+                        .expect("chronos2 NPU export");
+                    Chronos2Session::load_bytes(&bytes, cfg).expect("chronos2 NPU compile")
+                });
+                *devcell.borrow_mut() = sess.device().to_string();
+                sess.run(emb, mask).expect("chronos2 NPU infer")
+            })
+        })?;
         let dev = self.device.borrow().clone();
         Ok(chronos2_outcome(q, horizon, &dev))
     }
@@ -220,7 +233,11 @@ impl ResidentModel for FincastResident {
         InstanceKey::new("fincast", format!("h{}f{freq}", horizon_of(inv, 64)))
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        MemCost::new(0, file_ram(&self.path)).with_npu(512 << 20)
+        // NPU-eligible: the ~1 B-param core is exported with an external-data
+        // sidecar and compiled via FincastSession::load_path (the in-memory buffer
+        // path would exceed protobuf's 2 GB limit). ~1.5 GB is a generous NPU
+        // footprint bound for the compiled fp16 blob.
+        MemCost::new(0, file_ram(&self.path)).with_npu(1536 << 20)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         if let Device::Gpu(i) = device {
@@ -267,18 +284,28 @@ impl Instance for FincastNpuInstance {
         let (context, _shape) = decode_f32(inv, "context")?;
         let horizon = horizon_of(inv, 64);
         let freq = inv.get_i64("freq").unwrap_or(0).max(0) as usize;
-        let (path, cfg, cache, devcell) = (&self.path, &self.cfg, &self.cache, &self.device);
-        let out = self.model.forecast_full_with_core(&context, freq, horizon, |emb, amask| {
-            let s = (amask.len() as f64).sqrt() as usize;
-            let mut c = cache.borrow_mut();
-            let sess = c.entry(s).or_insert_with(|| {
-                let bytes = npu::fincast_export::export_onnx(path, s, npu::qwen_topology::Quant::F32)
-                    .expect("fincast NPU export");
-                FincastSession::load_bytes(&bytes, cfg).expect("fincast NPU compile")
-            });
-            *devcell.borrow_mut() = sess.device().to_string();
-            sess.run(emb, amask).expect("fincast NPU infer")
-        });
+        let (model, path, cfg, cache, devcell) = (&self.model, &self.path, &self.cfg, &self.cache, &self.device);
+        let out = guard_npu(|| {
+            model.forecast_full_with_core(&context, freq, horizon, |emb, amask| {
+                let s = (amask.len() as f64).sqrt() as usize;
+                let mut c = cache.borrow_mut();
+                let sess = c.entry(s).or_insert_with(|| {
+                    // External-data export (large model) → compile from file, then
+                    // drop the sidecar; the compiled blob owns the weights.
+                    let dir = std::env::temp_dir().join(format!("brain-fincast-{}-{s}", std::process::id()));
+                    std::fs::create_dir_all(&dir).ok();
+                    let onnx = dir.join("model.onnx");
+                    let op = onnx.to_str().expect("utf8 temp path");
+                    npu::fincast_export::export_external(path, s, npu::qwen_topology::Quant::F32, op)
+                        .expect("fincast NPU export");
+                    let sess = FincastSession::load_path(op, cfg).expect("fincast NPU compile");
+                    std::fs::remove_dir_all(&dir).ok();
+                    sess
+                });
+                *devcell.borrow_mut() = sess.device().to_string();
+                sess.run(emb, amask).expect("fincast NPU infer")
+            })
+        })?;
         let dev = self.device.borrow().clone();
         Ok(fincast_outcome(&self.model, out, horizon, &dev))
     }
@@ -331,16 +358,26 @@ impl ResidentModel for KronosResident {
         InstanceKey::new("kronos", "default")
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        // tokenizer + decoder weight dirs, resident in RAM. NPU rollout is a
-        // follow-up, so no NPU footprint yet (stays on CPU/GPU).
+        // tokenizer + decoder weight dirs resident in RAM (host embed/sample on
+        // gpu_core). NPU-eligible: activate(Npu) compiles the two decoder graphs
+        // (s1 + dep-s2) and runs the rollout on the accelerator.
         let ram = dir_ram(&self.tokenizer) + dir_ram(&self.decoder);
-        MemCost::new(0, ram)
+        MemCost::new(0, ram).with_npu(512 << 20)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         if let Device::Gpu(i) = device {
             std::env::set_var("BRAIN_GPU_INDEX", i.to_string());
         }
         let model = kronos::import::load_model(&self.tokenizer, &self.decoder)?;
+        if let Device::Npu(_) = device {
+            return Ok(Box::new(KronosNpuInstance {
+                model,
+                dec_dir: self.decoder.clone(),
+                cfg: npu_cfg(),
+                cache: RefCell::new(HashMap::new()),
+                device: RefCell::new("npu".into()),
+            }));
+        }
         Ok(Box::new(KronosInstance { model }))
     }
 }
@@ -357,50 +394,125 @@ struct KronosInstance {
     model: kronos::generate::KronosModel,
 }
 
+/// Decode the kronos context: either full OHLCV bars `[T, feat]`, or a univariate
+/// close series `[T]` / `[T,1]` expanded to bars (o=h=l=c=close; the remaining
+/// features — volume, amount — held at 1.0), so a caller can forecast from a
+/// single series exactly like chronos2/fincast. Returns `(bars, T)`.
+fn kronos_bars(inv: &Invocation, feat: usize) -> Result<(Vec<f32>, usize), String> {
+    let (raw, shape) = decode_f32(inv, "context")?;
+    if shape.len() == 2 && shape[1] == feat {
+        Ok((raw, shape[0]))
+    } else if shape.len() <= 1 || (shape.len() == 2 && shape[1] == 1) {
+        let t = raw.len();
+        let mut bars = Vec::with_capacity(t * feat);
+        for &c in &raw {
+            let mut row = vec![c; 4.min(feat)]; // o,h,l,c
+            row.resize(feat, 1.0);
+            bars.extend(row);
+        }
+        Ok((bars, t))
+    } else {
+        Err(format!("kronos: context must be [T,{feat}] OHLCV bars or a univariate [T] series; got {shape:?}"))
+    }
+}
+
+/// Calendar stamps `[T,5]` / `[horizon,5]` u32 from the client, or zeros
+/// (calendar-agnostic) when absent.
+fn kronos_stamps(inv: &Invocation, t: usize, horizon: usize) -> Result<(Vec<u32>, Vec<u32>), String> {
+    let ctx_stamp = decode_u32_opt(inv, "ctx_stamp").unwrap_or_else(|| vec![0u32; t * 5]);
+    let fut_stamp = decode_u32_opt(inv, "fut_stamp").unwrap_or_else(|| vec![0u32; horizon * 5]);
+    if ctx_stamp.len() != t * 5 {
+        return Err(format!("kronos: ctx_stamp must be [{t},5] u32, got {}", ctx_stamp.len()));
+    }
+    if fut_stamp.len() != horizon * 5 {
+        return Err(format!("kronos: fut_stamp must be [{horizon},5] u32, got {}", fut_stamp.len()));
+    }
+    Ok((ctx_stamp, fut_stamp))
+}
+
+fn kronos_opts(inv: &Invocation) -> kronos::generate::GenOpts {
+    kronos::generate::GenOpts {
+        temperature: inv.get_f64("temperature").unwrap_or(1.0) as f32,
+        argmax: inv.get_bool("argmax").unwrap_or(true),
+        seed: inv.get_i64("seed").unwrap_or(0) as u64,
+        ..Default::default()
+    }
+}
+
+fn kronos_outcome(out: Vec<f32>, horizon: usize, feat: usize, device: &str) -> Outcome {
+    Outcome::new()
+        .set("model", json!("kronos"))
+        .set("horizon", json!(horizon))
+        .set("device", json!(device))
+        .blob("forecast", encode_forecast(&out, vec![horizon, feat], "samples", &[]))
+}
+
 impl Instance for KronosInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let feat = self.model.feat();
-        let (raw, shape) = decode_f32(inv, "context")?;
-        // Accept either full OHLCV bars `[T, feat]`, or a univariate close series
-        // `[T]` / `[T,1]` which we expand to bars (o=h=l=c=close; the remaining
-        // features — volume, amount — held at 1.0) so a caller can forecast from a
-        // single series exactly like chronos2/fincast.
-        let (bars, t) = if shape.len() == 2 && shape[1] == feat {
-            (raw, shape[0])
-        } else if shape.len() <= 1 || (shape.len() == 2 && shape[1] == 1) {
-            let t = raw.len();
-            let mut bars = Vec::with_capacity(t * feat);
-            for &c in &raw {
-                let mut row = vec![c; 4.min(feat)]; // o,h,l,c
-                row.resize(feat, 1.0);
-                bars.extend(row);
-            }
-            (bars, t)
-        } else {
-            return Err(format!("kronos: context must be [T,{feat}] OHLCV bars or a univariate [T] series; got {shape:?}"));
-        };
+        let (bars, t) = kronos_bars(inv, feat)?;
         let horizon = horizon_of(inv, 64);
-        // Calendar stamps: use the client's if provided, else zeros (calendar-agnostic).
-        let ctx_stamp = decode_u32_opt(inv, "ctx_stamp").unwrap_or_else(|| vec![0u32; t * 5]);
-        let fut_stamp = decode_u32_opt(inv, "fut_stamp").unwrap_or_else(|| vec![0u32; horizon * 5]);
-        if ctx_stamp.len() != t * 5 {
-            return Err(format!("kronos: ctx_stamp must be [{t},5] u32, got {}", ctx_stamp.len()));
+        let (ctx_stamp, fut_stamp) = kronos_stamps(inv, t, horizon)?;
+        let out = self.model.forecast(&bars, &ctx_stamp, &fut_stamp, horizon, &kronos_opts(inv)); // [horizon, feat]
+        Ok(kronos_outcome(out, horizon, feat, "gpu_core"))
+    }
+}
+
+/// Kronos on the NPU: both decoder graphs (s1 + dep-s2) compiled on OpenVINO and
+/// driven by the model's `forecast_with_cores` seam — the host does normalize /
+/// tokenize / embed / sample / denormalize on gpu_core, the two transformer cores
+/// run on the accelerator. Sessions are cached per context-length `T` (the graph
+/// is fixed-shape, so the rollout uses a fixed sliding window of `T`).
+struct KronosNpuInstance {
+    model: kronos::generate::KronosModel,
+    dec_dir: String,
+    cfg: NpuConfig,
+    cache: RefCell<HashMap<usize, (KronosS1Session, KronosS2Session)>>,
+    device: RefCell<String>,
+}
+
+impl KronosNpuInstance {
+    /// Compile (once, cached) the s1 + dep-s2 graphs for context length `t`.
+    fn ensure(&self, t: usize) -> Result<(), String> {
+        if self.cache.borrow().contains_key(&t) {
+            return Ok(());
         }
-        if fut_stamp.len() != horizon * 5 {
-            return Err(format!("kronos: fut_stamp must be [{horizon},5] u32, got {}", fut_stamp.len()));
-        }
-        let opts = kronos::generate::GenOpts {
-            temperature: inv.get_f64("temperature").unwrap_or(1.0) as f32,
-            argmax: inv.get_bool("argmax").unwrap_or(true),
-            seed: inv.get_i64("seed").unwrap_or(0) as u64,
-            ..Default::default()
-        };
-        let out = self.model.forecast(&bars, &ctx_stamp, &fut_stamp, horizon, &opts); // [horizon, feat]
-        Ok(Outcome::new()
-            .set("model", json!("kronos"))
-            .set("horizon", json!(horizon))
-            .set("device", json!("gpu_core"))
-            .blob("forecast", encode_forecast(&out, vec![horizon, feat], "samples", &[])))
+        let q = npu::qwen_topology::Quant::F32;
+        let s1b = npu::kronos_export::export_onnx(&self.dec_dir, t, q)?;
+        let s2b = npu::kronos_export::export_dep_onnx(&self.dec_dir, t, q)?;
+        let s1 = KronosS1Session::load_bytes(&s1b, &self.cfg).map_err(|e| e.to_string())?;
+        let s2 = KronosS2Session::load_bytes(&s2b, &self.cfg).map_err(|e| e.to_string())?;
+        *self.device.borrow_mut() = s1.device().to_string();
+        self.cache.borrow_mut().insert(t, (s1, s2));
+        Ok(())
+    }
+}
+
+impl Instance for KronosNpuInstance {
+    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let feat = self.model.feat();
+        let (bars, t) = kronos_bars(inv, feat)?;
+        let horizon = horizon_of(inv, 64);
+        let (ctx_stamp, fut_stamp) = kronos_stamps(inv, t, horizon)?;
+        let opts = kronos_opts(inv);
+        self.ensure(t)?; // compile errors propagate cleanly (no panic)
+        let (model, cache) = (&self.model, &self.cache);
+        // The graph's window == the context length T; forecast_with_cores slides a
+        // fixed-T window and calls the two NPU sessions per step.
+        let out = guard_npu(|| {
+            model.forecast_with_cores(
+                &bars,
+                &ctx_stamp,
+                &fut_stamp,
+                horizon,
+                &opts,
+                t,
+                |x| cache.borrow_mut().get_mut(&t).expect("kronos s1 session").0.run(x).expect("kronos s1 NPU infer"),
+                |ctx, sib| cache.borrow_mut().get_mut(&t).expect("kronos s2 session").1.run(ctx, sib).expect("kronos s2 NPU infer"),
+            )
+        })?;
+        let dev = self.device.borrow().clone();
+        Ok(kronos_outcome(out, horizon, feat, &dev))
     }
 }
 

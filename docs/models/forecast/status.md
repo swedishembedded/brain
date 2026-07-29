@@ -33,8 +33,18 @@ CPU). `activate(Device::Npu)` wraps the bespoke `Chronos2Session` /
 scaler/patch/embed + head/denorm on `gpu_core`, the transformer core runs on
 OpenVINO; a compiled session is cached per context-length bucket. Every other
 device runs the identical math on `gpu_core`, so the NPU and CPU/GPU paths are
-bit-comparable. kronos (autoregressive OHLCV rollout) serves on CPU/GPU; its
-two-graph NPU rollout is the remaining follow-up.
+bit-comparable. **kronos** runs on the NPU too, via `KronosModel::forecast_with_cores`
+(the post-embedding s1/s2 core-injection seam): the host does
+normalize/tokenize/embed/sample/denormalize on `gpu_core`, the two decoder graphs
+(s1 + dep-s2, `KronosS1Session`/`KronosS2Session`, cached per context length)
+run the autoregressive rollout on the NPU. Because the NPU graph is fixed-shape,
+that rollout uses a fixed sliding window of `T` (the context length) rather than
+the growing window of the CPU `forecast`, so kronos-NPU tracks but does not
+bit-match kronos-CPU once the horizon slides the window.
+
+An NPU compile/infer failure for one model is caught (`guard_npu`) and returned
+as a per-request error, so it never unwinds and kills the shared NPU lane thread
+(which would take every other NPU-scheduled model down with it).
 
 ## Measured (2026-07-29)
 
@@ -45,7 +55,13 @@ trend+seasonality context.
 |---|---|---|---|---|
 | chronos2 | 96 | 24 | **CPU** (`--device cpu`) | `[21, 24]` quantiles; median tracks the trend |
 | chronos2 | 96 | 24 | **NPU** (`--device cpu,npu`, auto-placed) | `device=NPU`, `[21, 24]` quantiles — scheduler chose the NPU by budget |
+| fincast | 128 | 24 | CPU (`gpu_core`) | `device=gpu_core`, `[24, 10]` mean+9-quantiles (real `Vincent05R/FinCast` weights) |
+| fincast | 64 | 12 | **NPU** (`--device cpu,npu`, auto-placed) | `device=NPU`, `[12, 10]` — ~1 B-param core via the external-data export + `load_path` |
 | kronos | 96 | 24 | CPU (`gpu_core`) | `[24, 6]` OHLCV sample bars; univariate close expanded to bars server-side |
+| kronos | 64 | 8 | **NPU** (`--device cpu,npu`, auto-placed) | `device=NPU`, `[8, 6]` bars — two decoder graphs (s1 + dep-s2) compiled + rolled out on the NPU |
+
+All three foundation models were confirmed together on `--device cpu,npu`
+(`device=NPU` for each) in one server, exercising concurrent NPU-lane scheduling.
 
 - The scheduler picks the NPU with **no client change** — the client asks for
   `Run("chronos2","forecast",…)`; `place::pick_device` does the rest. The returned
@@ -55,16 +71,16 @@ trend+seasonality context.
 
 ## Remaining / caveats
 
-- **fincast**: served + structurally identical to the live-validated chronos2
-  path (same `base_forecast_spec`, same `*_with_core` NPU seam that
-  `brain npu fincast` already exercises, plus the fincast crate's own parity
-  tests). **Not** live-validated over D-Bus here for lack of a local FinCast
-  checkpoint (`BRAIN_FINCAST` unset; the repo under `resources/.../FinCast` ships
-  code, not weights). Import one with `brain forecast import --fincast <ckpt>
-  --out fincast.weights` to validate.
-- **kronos on NPU**: the two-graph autoregressive rollout (`KronosS1Session` +
-  `KronosS2Session`, the `kronos_rollout` in `npu_cli.rs`) is not yet wired into
-  the resident — kronos stays on CPU/GPU. Follow-up.
+- **fincast weights**: fetched from `Vincent05R/FinCast` (`v1.pth`, ~4 GB) to
+  `resources/time-series/checkpoints/fincast/`, converted with
+  `tools/fincast_convert.py` → `fincast.safetensors`, imported via
+  `brain forecast import --fincast <safetensors> --out out/fincast.weights`
+  (991 M params). Live-validated over D-Bus on CPU (table above).
+- **fincast on NPU**: DONE. FinCast's ~1 B-param ONNX core exceeds protobuf's
+  2 GB `read_model_from_buffer` limit, so it is exported with an external-data
+  sidecar (`fincast_export::export_external` → `finish_external`) and compiled via
+  the new `FincastSession::load_path` (the LFM pattern). fincast advertises
+  `MemCost::with_npu` and is auto-placed on the NPU (row above).
 - **Batching**: forecast `run_batch` is the sequential default. chronos2/fincast
   share a batchable transformer core (equal-shape contexts could batch one
   forward); wiring a genuine batched forward is a follow-up.

@@ -934,6 +934,20 @@ impl FincastSession {
         Self::compile(core, model, device)
     }
 
+    /// Compile from a model file — required for external-data
+    /// (`finish_external`) exports. The full ~1B-param FinCast core's single-
+    /// protobuf ONNX exceeds protobuf's 2 GB read-from-buffer limit, so the NPU
+    /// path exports with a `.data` sidecar and loads it here (mirrors
+    /// [`LfmSession::load_path`]).
+    pub fn load_path(path: &str, cfg: &NpuConfig) -> Result<Self, NpuError> {
+        let mut core = new_core()?;
+        let device = pick_device(&mut core, cfg)?;
+        let model = core
+            .read_model_from_file(path, "")
+            .map_err(|e| NpuError::Other(format!("read_model {path}: {e:?}")))?;
+        Self::compile(core, model, device)
+    }
+
     fn compile(mut core: Core, model: openvino::Model, device: DeviceType<'static>) -> Result<Self, NpuError> {
         let compiled = core
             .compile_model(&model, device.to_owned())

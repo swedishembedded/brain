@@ -210,6 +210,61 @@ impl KronosModel {
         let recon = self.tokenizer.decode(&s1[t..], &s2[t..]);
         preprocess::denormalize(&norm, &recon, pred_len, feat)
     }
+
+    /// Forecast with the transformer **cores injected** — the seam the NPU path
+    /// uses. Same host pipeline as [`forecast`] (normalize → encode context →
+    /// AR rollout with per-window calendar → decode → denormalize), but the
+    /// post-embedding s1/s2 cores are supplied by the caller and the attention
+    /// window is held at a **fixed `win`** (the compiled graph's `T`) rather than
+    /// growing to `max_context`. That fixed-shape requirement means the result
+    /// tracks but does not bit-match [`forecast`] once the rollout slides the
+    /// window. `s1_core(x[win*D]) -> (ctx[win*D], s1_logits[win*s1_vocab])`;
+    /// `s2_core(ctx[win*D], sib[win*D]) -> s2_logits[win*s2_vocab]`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forecast_with_cores<F1, F2>(
+        &self,
+        bars: &[f32],
+        ctx_stamp: &[u32],
+        fut_stamp: &[u32],
+        pred_len: usize,
+        opts: &GenOpts,
+        win: usize,
+        mut s1_core: F1,
+        mut s2_core: F2,
+    ) -> Vec<f32>
+    where
+        F1: FnMut(&[f32]) -> (Vec<f32>, Vec<f32>),
+        F2: FnMut(&[f32], &[f32]) -> Vec<f32>,
+    {
+        let feat = self.feat();
+        let t = bars.len() / feat;
+        let (norm, x) = preprocess::normalize(bars, t, feat, 5.0);
+        let (mut s1, mut s2) = self.tokenizer.encode(&x, t);
+        let mut stamp = ctx_stamp.to_vec();
+        stamp.extend_from_slice(fut_stamp);
+        let dec = &self.decoder;
+        let (vs1, vs2) = (dec.config().s1_vocab(), dec.config().s2_vocab());
+        let mut rng = SplitMix64::new(opts.seed);
+        for _ in 0..pred_len {
+            let len = s1.len();
+            let w0 = len.saturating_sub(win);
+            let (s1w, s2w) = (&s1[w0..], &s2[w0..]);
+            let ww = s1w.len();
+            let stw: Vec<u32> = (w0..len).flat_map(|i| stamp[i * 5..i * 5 + 5].to_vec()).collect();
+            let x_emb = dec.embed_tokens(s1w, s2w, &stw);
+            let (ctx, s1_logits) = s1_core(&x_emb);
+            let samp_s1 = sample(&s1_logits[(ww - 1) * vs1..ww * vs1], opts, &mut rng);
+            let mut s1_cond = s1w.to_vec();
+            *s1_cond.last_mut().unwrap() = samp_s1;
+            let sib = dec.sib_embed(&s1_cond);
+            let s2_logits = s2_core(&ctx, &sib);
+            let samp_s2 = sample(&s2_logits[(ww - 1) * vs2..ww * vs2], opts, &mut rng);
+            s1.push(samp_s1);
+            s2.push(samp_s2);
+        }
+        let recon = self.tokenizer.decode(&s1[t..], &s2[t..]);
+        preprocess::denormalize(&norm, &recon, pred_len, feat)
+    }
 }
 
 /// Sample a token id from logits per [`GenOpts`].
