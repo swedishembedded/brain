@@ -87,6 +87,17 @@ from them, keeping the gradient-check discipline.
     MTP code predictor → 12 Hz Mimi-style neural codec (RVQ + transformer +
     SEANet conv-transpose decoder); ECAPA-TDNN speaker encoder for voice cloning.
     `brain tts {import,clone,synth,design,serve,sim,finetune}`.
+13b. **ASR / speech-to-text** — two imported, parity-gated models served through the
+    full stack (capability + residency + batched `run_batch` + D-Bus
+    `StreamTranscribe` + `examples/asr/`):
+    * **Nemotron 3.5 ASR Streaming 0.6B** (`crates/nemotron`) — FastConformer
+      encoder (depthwise-sep causal subsampling, macaron FFs, Transformer-XL
+      rel-pos attention, GLU conv module) + RNN-T transducer; the *streaming* model,
+      true batched forward across concurrent windows. Fully trainable/gradchecked.
+    * **Qwen3-ASR 1.7B** (`crates/qwen-asr`) — Whisper-style audio encoder + a spliced
+      Qwen3-1.7B decoder (reuses `crates/qwen`); offline, fixed audio window.
+    Shared audio-in/text-out contract in `audio::asr_caps`. See
+    `docs/models/asr/status.md`.
 
 ### Forecasting
 
@@ -230,6 +241,7 @@ Multi-GPU scaling lives in `crates/model`:
 | Synthetic detection dataset (RGB shapes + GT boxes) | `crates/data/src/gen_detect.rs` |
 | Datasets & tokenizers | `crates/data/src/{prepare,gen_*,tokenizer,bpe,loader,binio,rng}.rs` |
 | TTS: guide / acceleration | `docs/models/tts/{readme,acceleration}.md`; `crates/{tts,codec,speaker,audio}`, `crates/cli/src/{tts_cli,tts_serve}.rs` |
+| **ASR (speech-to-text)**: status / serving / perf | `docs/models/asr/status.md`; `crates/{nemotron,qwen-asr}`, shared `audio::asr_caps`, `crates/cli/src/resident_asr.rs`, D-Bus `StreamTranscribe` (`crates/dbus`), `examples/asr/` |
 | Forecasting models + backtester | `docs/models/{chronos2,kronos,fincast}/status.md`; `crates/{forecast,fcbench,chronos2,kronos,fincast}`, `crates/cli/src/forecast_cli.rs` |
 | World models (playable) | `docs/models/world-models/{status,playbooks,fixtures}.md` + `specs/`; `crates/wm-*`, `crates/cli/src/wm_cli.rs` |
 | Z-Image / diffusion stack | `crates/{zimage,dit,diffusion,vae}` *(no docs/ entry yet)* |

@@ -33,6 +33,9 @@ pub const AUDIO_TOKEN_ID: u32 = 151676;
 pub const AUDIO_ROW0: u32 = 10;
 /// End-of-stream ids that stop greedy decoding (`<|endoftext|>`, `<|im_end|>`).
 pub const EOS: [u32; 2] = [151643, 151645];
+/// The marker the model emits between its `language <Lang>` preamble and the actual
+/// transcription; text after the last occurrence is the transcription.
+pub const ASR_TEXT_MARKER: &str = "<asr_text>";
 
 /// Prompt token ids BEFORE the audio-placeholder run — the Qwen3-ASR chat template
 /// up to and including `<|audio_bos|>` (151669). Extracted from the HF processor's
@@ -110,7 +113,11 @@ impl QwenAsrInner {
         let out = model.transcribe(&self.input_ids, &embeds, &EOS, self.max_new);
         // strip trailing EOS before detok
         let trimmed: Vec<u32> = out.iter().copied().take_while(|t| !EOS.contains(t)).collect();
-        let text = self.tok.decode(&trimmed).trim().to_string();
+        // The model emits a `language <Lang><asr_text>` preamble before the words
+        // (HF's processor strips this with return_format="transcription_only"); keep
+        // only what follows the last `<asr_text>` marker.
+        let decoded = self.tok.decode(&trimmed);
+        let text = decoded.rsplit(ASR_TEXT_MARKER).next().unwrap_or(&decoded).trim().to_string();
         Ok((text, trimmed))
     }
 }
@@ -158,5 +165,16 @@ mod tests {
         assert_eq!(pad_to_window(&[1.0, 2.0], 4), vec![1.0, 2.0, 0.0, 0.0]);
         assert_eq!(pad_to_window(&[1.0, 2.0, 3.0, 4.0, 5.0], 3), vec![1.0, 2.0, 3.0]);
         assert_eq!(manifest().model, "qwen-asr");
+    }
+
+    #[test]
+    fn strips_language_preamble() {
+        // The `language <Lang><asr_text>` preamble is dropped; only the words remain.
+        let decoded = "language English<asr_text>Mr. Quilter.";
+        let text = decoded.rsplit(ASR_TEXT_MARKER).next().unwrap_or(decoded).trim();
+        assert_eq!(text, "Mr. Quilter.");
+        // no marker → unchanged
+        let plain = "just words";
+        assert_eq!(plain.rsplit(ASR_TEXT_MARKER).next().unwrap(), "just words");
     }
 }
