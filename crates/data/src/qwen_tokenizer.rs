@@ -1,20 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen byte-level BPE tokenizer, loaded from a HuggingFace `tokenizer.json`.
+//! Byte-level BPE tokenizer for HF `tokenizer.json` checkpoints (Qwen, LFM2.5).
 //!
 //! Same byte-level BPE family as [`crate::bpe::Gpt2Bpe`] — it reuses the byte
 //! <-> unicode map and the merge loop ([`crate::bpe::bpe_merge`]) — but with
-//! Qwen's vocabulary/merges and its own pre-tokenizer. Qwen's pre-tokenizer
-//! (from `tokenizer.json`) is the cl100k-style regex
-//!   (?i:'s|'t|'re|'ve|'m|'ll|'d) | [^\r\n\p{L}\p{N}]?\p{L}+ | \p{N}
+//! the checkpoint's vocabulary/merges and a cl100k-style pre-tokenizer
+//!   (?i:'s|'t|'re|'ve|'m|'ll|'d) | [^\r\n\p{L}\p{N}]?\p{L}+ | \p{N}{1,K}
 //!     | ?[^\s\p{L}\p{N}]+[\r\n]* | \s*[\r\n]+ | \s+(?!\S) | \s+
 //! reproduced here as a hand-written scanner (no regex crate). Notable vs GPT-2:
-//! digits split **one at a time** (`\p{N}`), and a letter run may absorb a
-//! single leading non-alphanumeric char (not just a space).
+//! digits split in runs of at most K (K read from the file's own `pre_tokenizer`
+//! pattern: Qwen K=1, LFM2.5 K=3), and a letter run may absorb a single leading
+//! non-alphanumeric char (not just a space).
 //!
 //! Special/added tokens (`<|im_start|>`, `<|im_end|>`, `<|endoftext|>`, …) are
-//! matched as atomic units *before* BPE. `vocab_size()` reports the model vocab
+//! matched as atomic units *before* BPE. A `TemplateProcessing` post-processor
+//! (LFM2.5 prepends `<|startoftext|>`) is captured as [`QwenBpe::template_prefix`]
+//! — callers that want HF-equivalent single-sequence encodings prepend it;
+//! `encode()` itself stays template-free. `vocab_size()` reports the model vocab
 //! used to size the embedding table.
 
 use std::collections::HashMap;
@@ -31,6 +34,11 @@ pub struct QwenBpe {
     /// (content, id) for special/added tokens, longest content first.
     specials: Vec<(String, u32)>,
     vocab_size: usize,
+    /// Max digits per pre-token (`\p{N}{1,K}` in the pre-tokenizer pattern).
+    digit_run_max: usize,
+    /// Special-token ids a `TemplateProcessing` post-processor prepends to a
+    /// single-sequence encoding (empty when the file declares none).
+    template_prefix: Vec<u32>,
 }
 
 impl QwenBpe {
@@ -142,7 +150,32 @@ impl QwenBpe {
         // Vocab size = max id + 1 (covers added tokens beyond the base table).
         let vocab_size = decoder.keys().copied().max().map(|m| m as usize + 1).unwrap_or(0);
 
-        Ok(QwenBpe { encoder, decoder, bpe_ranks, byte_encoder, byte_decoder, specials, vocab_size })
+        let digit_run_max = digit_run_max_from(&j["pre_tokenizer"]);
+        let template_prefix = template_prefix_from(&j["post_processor"], &encoder);
+
+        Ok(QwenBpe {
+            encoder,
+            decoder,
+            bpe_ranks,
+            byte_encoder,
+            byte_decoder,
+            specials,
+            vocab_size,
+            digit_run_max,
+            template_prefix,
+        })
+    }
+
+    /// Id of a special/added token by literal content (e.g. `"<|mask|>"`).
+    pub fn special_id(&self, content: &str) -> Option<u32> {
+        self.specials.iter().find(|(c, _)| c == content).map(|(_, id)| *id)
+    }
+
+    /// Special-token ids the checkpoint's post-processor prepends to a single
+    /// sequence (LFM2.5: `[<|startoftext|>]`; Qwen: empty). `encode()` does not
+    /// apply this — callers wanting HF-equivalent encodings prepend it.
+    pub fn template_prefix(&self) -> &[u32] {
+        &self.template_prefix
     }
 
     /// Encode one pre-token (already special-free) into ids via byte-level BPE.
@@ -238,7 +271,7 @@ impl QwenBpe {
             }
             if let Some((pos, content, id)) = best {
                 if pos > 0 {
-                    for piece in qwen_pretokenize(&rest[..pos]) {
+                    for piece in pretokenize_digits(&rest[..pos], self.digit_run_max) {
                         self.encode_piece(&piece, out);
                     }
                 }
@@ -247,12 +280,55 @@ impl QwenBpe {
                 continue 'outer;
             }
             // No specials left: BPE the remainder.
-            for piece in qwen_pretokenize(rest) {
+            for piece in pretokenize_digits(rest, self.digit_run_max) {
                 self.encode_piece(&piece, out);
             }
             break;
         }
     }
+}
+
+/// Read `K` from a `\p{N}{1,K}` branch anywhere in the pre-tokenizer's Split
+/// pattern(s); a bare `\p{N}` (Qwen) — or no pattern at all — means K = 1.
+fn digit_run_max_from(pre: &serde_json::Value) -> usize {
+    let s = pre.to_string(); // JSON text of the whole pre_tokenizer subtree
+    if let Some(pos) = s.find("p{N}{1,") {
+        let rest = &s[pos + "p{N}{1,".len()..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(k) = digits.parse::<usize>() {
+            return k.max(1);
+        }
+    }
+    1
+}
+
+/// Special-token ids a `TemplateProcessing` post-processor places before the
+/// `A` sequence in its `single` template (searched recursively — the processor
+/// may sit inside a `Sequence`). Ids resolve through the vocab/added tokens.
+fn template_prefix_from(post: &serde_json::Value, encoder: &HashMap<String, u32>) -> Vec<u32> {
+    fn find_single(v: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+        if v["type"] == "TemplateProcessing" {
+            return v["single"].as_array();
+        }
+        if let Some(arr) = v["processors"].as_array() {
+            return arr.iter().find_map(find_single);
+        }
+        None
+    }
+    let mut prefix = Vec::new();
+    if let Some(single) = find_single(post) {
+        for item in single {
+            if item.get("Sequence").is_some() {
+                break; // only tokens before the `A` sequence are a prefix
+            }
+            if let Some(content) = item["SpecialToken"]["id"].as_str() {
+                if let Some(&id) = encoder.get(content) {
+                    prefix.push(id);
+                }
+            }
+        }
+    }
+    prefix
 }
 
 fn is_letter(c: char) -> bool {
@@ -279,6 +355,12 @@ fn is_symbol(c: char) -> bool {
 /// Hand-written reproduction of Qwen's pre-tokenizer regex (see module docs).
 /// Returns the list of pre-tokens, in order, reconstructing `text`.
 pub fn qwen_pretokenize(text: &str) -> Vec<String> {
+    pretokenize_digits(text, 1)
+}
+
+/// The cl100k-style scanner with a configurable digit-run cap (`\p{N}{1,K}`):
+/// Qwen K=1, LFM2.5 K=3. Everything else is identical between the two patterns.
+pub fn pretokenize_digits(text: &str, digit_run_max: usize) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     let mut toks: Vec<String> = Vec::new();
@@ -337,10 +419,14 @@ pub fn qwen_pretokenize(text: &str) -> Vec<String> {
             continue;
         }
 
-        // 3) \p{N}  (single digit)
+        // 3) \p{N}{1,K}  (digit run, greedy up to K)
         if is_digit(chars[i]) {
-            toks.push(chars[i..i + 1].iter().collect());
-            i += 1;
+            let mut j = i;
+            while j < n && j - i < digit_run_max && is_digit(chars[j]) {
+                j += 1;
+            }
+            toks.push(chars[i..j].iter().collect());
+            i = j;
             continue;
         }
 
@@ -423,6 +509,54 @@ mod tests {
         assert_eq!(t.encode("brain"), vec![53060]);
         assert_eq!(t.encode("  spaced"), vec![220, 63828]);
         assert_eq!(t.encode("def main():\n\tpass"), vec![750, 1887, 3932, 41431]);
+    }
+
+    fn lfm_tok() -> Option<QwenBpe> {
+        let path = std::env::var("LFM_TOKENIZER").ok()?;
+        QwenBpe::from_file(&path).ok()
+    }
+
+    #[test]
+    fn lfm_pinned_reference_vectors() {
+        let Some(t) = lfm_tok() else {
+            eprintln!("LFM_TOKENIZER unset; skipping");
+            return;
+        };
+        // Ground truth from HF `tokenizers` on LFM2.5-Encoder-230M/tokenizer.json
+        // (add_special_tokens=False). Digit runs group up to 3 (`\p{N}{1,3}`).
+        assert_eq!(t.encode("The capital of France is"), vec![1098, 5706, 803, 4481, 856]);
+        assert_eq!(t.encode("Hello, world"), vec![36309, 521, 2031]);
+        assert_eq!(t.encode("12345"), vec![10293, 2637]); // "123"+"45"
+        assert_eq!(t.encode("1234"), vec![10293, 529]); // "123"+"4"
+        assert_eq!(t.encode("3.14159"), vec![528, 523, 13888, 5599]);
+        assert_eq!(
+            t.encode("year 2026, price $1299.99"),
+            vec![30721, 730, 1718, 531, 521, 7264, 1058, 12936, 534, 523, 2962]
+        );
+        // Arabic-Indic digits are \p{N} too.
+        assert_eq!(t.encode("١٢٣٤٥"), vec![659, 604, 659, 605, 659, 606, 659, 607, 659, 608]);
+        assert_eq!(t.encode("  spaced"), vec![730, 56551]);
+        assert_eq!(t.encode("def main():\n\tpass"), vec![3663, 2120, 32711, 707, 9859]);
+        assert_eq!(t.encode("über café naïve"), vec![13168, 35499, 2116, 6838, 1124]);
+        assert_eq!(t.encode("日本語のテキスト"), vec![62506, 1084, 4374, 4459, 7133]);
+        for s in ["The capital of France is", "year 2026, price $1299.99", "über café naïve"] {
+            assert_eq!(t.decode(&t.encode(s)), s, "roundtrip {s:?}");
+        }
+    }
+
+    #[test]
+    fn lfm_specials_and_template() {
+        let Some(t) = lfm_tok() else {
+            return;
+        };
+        assert_eq!(t.special_id("<|mask|>"), Some(16));
+        assert_eq!(t.special_id("<|pad|>"), Some(0));
+        assert_eq!(t.special_id("<|startoftext|>"), Some(1));
+        assert_eq!(t.special_id("<|im_end|>"), Some(7));
+        // TemplateProcessing single = [<|startoftext|>, A] -> prefix [1].
+        assert_eq!(t.template_prefix(), &[1]);
+        // Specials are atomic mid-string.
+        assert_eq!(t.encode("Paris<|mask|>Lyon"), vec![41677, 16, 553, 31862]);
     }
 
     #[test]

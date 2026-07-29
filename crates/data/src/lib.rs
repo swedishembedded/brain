@@ -19,6 +19,7 @@ pub mod toolcall;
 pub mod bpe;
 pub mod episode;
 pub mod loader;
+pub mod mlm;
 pub mod qwen_tokenizer;
 pub mod rng;
 pub mod tokenizer;
