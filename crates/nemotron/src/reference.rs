@@ -285,6 +285,105 @@ pub fn encode_pooler(sub: &[f32], w: &W, cfg: &NemotronConfig, t: usize, valid: 
 }
 
 
+/// RNN-T LSTM prediction network state (2 layers).
+pub struct LstmState {
+    h: Vec<Vec<f32>>, // [layers][hidden]
+    c: Vec<Vec<f32>>,
+}
+
+impl LstmState {
+    fn new(layers: usize, hidden: usize) -> LstmState {
+        LstmState { h: vec![vec![0.0; hidden]; layers], c: vec![vec![0.0; hidden]; layers] }
+    }
+}
+
+/// One LSTM prediction step for `token`: embedding → 2-layer LSTM → decoder_projector.
+/// Updates `st` in place; returns the projected decoder output `[decoder_hidden]`.
+pub fn lstm_predict(token: u32, st: &mut LstmState, w: &W, cfg: &NemotronConfig) -> Vec<f32> {
+    let dh = cfg.decoder_hidden as usize;
+    let emb = &w["decoder.embedding.weight"][token as usize * dh..token as usize * dh + dh];
+    let mut input = emb.to_vec();
+    for layer in 0..cfg.num_decoder_layers as usize {
+        let wih = &w[&format!("decoder.lstm.weight_ih_l{layer}")]; // [4dh, dh]
+        let whh = &w[&format!("decoder.lstm.weight_hh_l{layer}")];
+        let bih = &w[&format!("decoder.lstm.bias_ih_l{layer}")]; // [4dh]
+        let bhh = &w[&format!("decoder.lstm.bias_hh_l{layer}")];
+        // gates = W_ih·input + b_ih + W_hh·h + b_hh   (PyTorch gate order i,f,g,o)
+        let gi = matmul_nt(&input, wih, 1, dh, 4 * dh);
+        let gh = matmul_nt(&st.h[layer], whh, 1, dh, 4 * dh);
+        let mut out = vec![0.0f32; dh];
+        for j in 0..dh {
+            let g = |o: usize| gi[o * dh + j] + bih[o * dh + j] + gh[o * dh + j] + bhh[o * dh + j];
+            let ii = sigmoid(g(0));
+            let ff = sigmoid(g(1));
+            let gg = g(2).tanh();
+            let oo = sigmoid(g(3));
+            let ct = ff * st.c[layer][j] + ii * gg;
+            st.c[layer][j] = ct;
+            let ht = oo * ct.tanh();
+            st.h[layer][j] = ht;
+            out[j] = ht;
+        }
+        input = out;
+    }
+    // decoder_projector: Linear(dh→dh) + bias
+    let mut dec = matmul_nt(&input, &w["decoder.decoder_projector.weight"], 1, dh, dh);
+    let db = &w["decoder.decoder_projector.bias"];
+    for j in 0..dh {
+        dec[j] += db[j];
+    }
+    dec
+}
+
+/// RNN-T joint: `head(relu(enc_t + dec_u))` → `[vocab]` logits.
+pub fn joint(enc_t: &[f32], dec_u: &[f32], w: &W, cfg: &NemotronConfig) -> Vec<f32> {
+    let dh = cfg.decoder_hidden as usize;
+    let sum: Vec<f32> = (0..dh).map(|j| (enc_t[j] + dec_u[j]).max(0.0)).collect(); // relu
+    let mut logits = matmul_nt(&sum, &w["joint.head.weight"], 1, dh, cfg.vocab as usize);
+    let jb = &w["joint.head.bias"];
+    for j in 0..cfg.vocab as usize {
+        logits[j] += jb[j];
+    }
+    logits
+}
+
+fn argmax(v: &[f32]) -> u32 {
+    let mut best = 0u32;
+    let mut bv = f32::NEG_INFINITY;
+    for (i, &x) in v.iter().enumerate() {
+        if x > bv {
+            bv = x;
+            best = i as u32;
+        }
+    }
+    best
+}
+
+/// Greedy RNN-T transducer decode over encoder frames `pooler[T, decoder_hidden]`
+/// (first `valid` frames). Returns the emitted non-blank token ids.
+pub fn rnnt_greedy(pooler: &[f32], valid: usize, w: &W, cfg: &NemotronConfig) -> Vec<u32> {
+    let dh = cfg.decoder_hidden as usize;
+    let blank = cfg.blank_token_id;
+    let mut st = LstmState::new(cfg.num_decoder_layers as usize, dh);
+    let mut dec = lstm_predict(blank, &mut st, w, cfg); // decoder_start = blank
+    let mut frame = 0usize;
+    let mut symbols = 0u32;
+    let mut emitted = Vec::new();
+    while frame < valid {
+        let logits = joint(&pooler[frame * dh..frame * dh + dh], &dec, w, cfg);
+        let token = argmax(&logits);
+        if token == blank || symbols >= cfg.max_symbols_per_step {
+            frame += 1;
+            symbols = 0; // blank: LSTM state / dec unchanged
+        } else {
+            emitted.push(token);
+            symbols += 1;
+            dec = lstm_predict(token, &mut st, w, cfg); // step LSTM for next frame's joint
+        }
+    }
+    emitted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,5 +439,28 @@ mod tests {
         let d = pool[..n].iter().zip(&ref_pool[..n]).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
         eprintln!("pooler (valid {valid}) maxdiff {d}");
         assert!(d < 5e-3, "pooler maxdiff {d}");
+    }
+
+    #[test]
+    fn rnnt_greedy_matches_reference() {
+        if !Path::new(&format!("{GOLD}/pooler.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
+            eprintln!("skipping: goldens/checkpoint absent");
+            return;
+        }
+        let cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
+        let pooler = read_f32(&format!("{GOLD}/pooler.f32")); // [T, 640]
+        let dh = cfg.decoder_hidden as usize;
+        let t = pooler.len() / dh;
+        let valid = cfg.subsampled_len(585) as usize;
+        let w = crate::import::load_tensors(Path::new(CKPT)).expect("load");
+        let emitted = rnnt_greedy(&pooler, valid.min(t), &w, &cfg);
+
+        // golden output_ids include blanks + the decoder-start; the transcript is the
+        // non-blank subsequence.
+        let ref_ids: Vec<u32> = read_f32(&format!("{GOLD}/output_ids.f32")).iter().map(|&v| v as u32).collect();
+        let ref_nonblank: Vec<u32> = ref_ids.into_iter().filter(|&x| x != cfg.blank_token_id).collect();
+        eprintln!("brain emitted ({}): {:?}", emitted.len(), &emitted[..emitted.len().min(20)]);
+        eprintln!("ref  nonblank ({}): {:?}", ref_nonblank.len(), &ref_nonblank[..ref_nonblank.len().min(20)]);
+        assert_eq!(emitted, ref_nonblank, "RNN-T non-blank token sequence must match HF");
     }
 }
