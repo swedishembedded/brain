@@ -23,10 +23,15 @@ use zimage::pipeline::{HotPipeline, Image, Paths};
 /// budgets. `gpus` is `(index, total_bytes)` per card; `reserved` bytes are kept free
 /// on each. The RAM pool bounds CPU-resident models. Falls back gracefully if a heavy
 /// model's weights are not configured (it is simply not registered).
-pub fn build_executor(gpus: &[(u32, u64)], reserved: u64, ram_total: u64, policy: Policy) -> Executor {
+pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, ram_total: u64, policy: Policy) -> Executor {
     let mut budgets = residency::budget::Budgets::new();
     for &(i, total) in gpus {
         budgets.set(Device::Gpu(i), total, reserved);
+    }
+    // NPUs get their own budget + lane; a model advertising an NPU path (MemCost.npu
+    // > 0) is then auto-placed there in preference to CPU/GPU (see place::pick_device).
+    for &(i, total) in npus {
+        budgets.set(Device::Npu(i), total, 0);
     }
     budgets.set(Device::Cpu, ram_total, 0);
 

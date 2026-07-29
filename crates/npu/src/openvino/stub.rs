@@ -60,6 +60,38 @@ pub fn bench(
     unsupported()
 }
 
+/// One named input tensor for [`NpuGraph::run`] (mirrors `real::Feed`).
+pub enum Feed<'a> {
+    F32(&'a [f32], Vec<i64>),
+    I64(&'a [i64], Vec<i64>),
+}
+
+/// A generic named-tensor OpenVINO graph. Never constructible on unsupported targets.
+pub struct NpuGraph {
+    _priv: (),
+}
+
+impl NpuGraph {
+    pub fn compile_bytes(_bytes: &[u8], _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn compile_path(_p: &Path, _cfg: &NpuConfig) -> Result<Self, NpuError> {
+        unsupported()
+    }
+    pub fn device(&self) -> &str {
+        ""
+    }
+    pub fn input_names(&self) -> &[String] {
+        &[]
+    }
+    pub fn output_names(&self) -> &[String] {
+        &[]
+    }
+    pub fn run(&mut self, _feeds: &[(&str, Feed)]) -> Result<Vec<(String, Vec<usize>, Vec<f32>)>, NpuError> {
+        unsupported()
+    }
+}
+
 /// A compiled decoder model. Never constructible on unsupported targets.
 pub struct DecoderSession {
     _priv: (),

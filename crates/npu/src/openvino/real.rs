@@ -89,12 +89,39 @@ fn ensure_openvino_on_path() {
         }
     }
     if let Some(dir) = found {
+        // The openvino-sys loader dlopens the UNVERSIONED `libopenvino_c.so`, but the
+        // pip wheel ships only versioned files (e.g. `libopenvino_c.so.2620` for
+        // 2026.2). Create the missing unversioned symlinks so the runtime resolves —
+        // best-effort (a read-only libs dir just falls through to `RuntimeNotFound`,
+        // whose message tells the user to set LD_LIBRARY_PATH / symlink manually).
+        #[cfg(unix)]
+        ensure_unversioned_solinks(&dir);
         let mut paths = vec![dir];
         if let Some(p) = std::env::var_os("LD_LIBRARY_PATH") {
             paths.extend(std::env::split_paths(&p));
         }
         if let Ok(joined) = std::env::join_paths(paths) {
             std::env::set_var("LD_LIBRARY_PATH", joined);
+        }
+    }
+}
+
+/// In an OpenVINO libs dir, create `lib<name>.so → lib<name>.so.<ver>` for each core
+/// library when the unversioned link is missing (the pip wheel omits it). Idempotent,
+/// best-effort — errors are ignored (the caller reports `RuntimeNotFound` if the
+/// runtime still cannot load).
+#[cfg(unix)]
+fn ensure_unversioned_solinks(dir: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let files: Vec<String> = rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    for base in ["libopenvino_c", "libopenvino", "libopenvino_onnx_frontend", "libopenvino_ir_frontend"] {
+        let unversioned = format!("{base}.so");
+        if files.iter().any(|f| f == &unversioned) {
+            continue; // already linked / present
+        }
+        // pick the first versioned match `libX.so.<...>`
+        if let Some(target) = files.iter().find(|f| f.starts_with(&format!("{base}.so."))) {
+            let _ = std::os::unix::fs::symlink(target, dir.join(&unversioned));
         }
     }
 }
@@ -462,6 +489,130 @@ impl DecoderSession {
         let data = out.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec();
         Ok(data)
     }
+}
+
+/// One named input tensor for [`NpuGraph::run`].
+pub enum Feed<'a> {
+    F32(&'a [f32], Vec<i64>),
+    I64(&'a [i64], Vec<i64>),
+}
+
+impl Feed<'_> {
+    fn dims(&self) -> &[i64] {
+        match self {
+            Feed::F32(_, d) | Feed::I64(_, d) => d,
+        }
+    }
+    fn elem(&self) -> ElementType {
+        match self {
+            Feed::F32(..) => ElementType::F32,
+            Feed::I64(..) => ElementType::I64,
+        }
+    }
+}
+
+/// A **generic** compiled OpenVINO graph with named multi-tensor I/O — the reuse
+/// seam behind `docs/npu-residency.md`. Any model's exported ONNX (fp16 on the NPU
+/// by default; INT8/INT4 orthogonal) compiles here once and runs via [`run`], feeding
+/// f32/i64 inputs by name and reading f32 outputs by name. This generalises the
+/// per-model bespoke sessions so a residency `NpuInstance` is model-agnostic: a model
+/// only supplies its `crate::NpuModel` (graph bytes); `NpuGraph` does compile / cache
+/// / infer / evict.
+///
+/// [`run`]: NpuGraph::run
+pub struct NpuGraph {
+    _core: Core,
+    request: openvino::InferRequest,
+    input_names: Vec<String>,
+    output_names: Vec<String>,
+    device: String,
+}
+
+impl NpuGraph {
+    /// Compile in-memory ONNX bytes (no external data).
+    pub fn compile_bytes(bytes: &[u8], cfg: &NpuConfig) -> Result<NpuGraph, NpuError> {
+        let (mut core, device) = open_device(cfg)?;
+        let model = core
+            .read_model_from_buffer(bytes, None)
+            .map_err(|e| NpuError::Other(format!("read_model (ONNX): {e:?}")))?;
+        Self::finish(core, model, device)
+    }
+
+    /// Compile an ONNX file (required for graphs with external-data sidecars).
+    pub fn compile_path(path: &Path, cfg: &NpuConfig) -> Result<NpuGraph, NpuError> {
+        let (mut core, device) = open_device(cfg)?;
+        let ps = path.to_str().ok_or_else(|| NpuError::Other("non-utf8 path".into()))?;
+        let model = core
+            .read_model_from_file(ps, "")
+            .map_err(|e| NpuError::Other(format!("read_model {}: {e:?}", path.display())))?;
+        Self::finish(core, model, device)
+    }
+
+    fn finish(mut core: Core, model: openvino::Model, device: DeviceType<'static>) -> Result<NpuGraph, NpuError> {
+        let compiled = core
+            .compile_model(&model, device.to_owned())
+            .map_err(|e| NpuError::Other(format!("compile_model on {}: {e:?}", dev_str(&device))))?;
+        let nin = compiled.get_input_size().map_err(|e| NpuError::Other(format!("get_input_size: {e:?}")))?;
+        let input_names = (0..nin)
+            .map(|i| compiled.get_input_by_index(i).and_then(|n| n.get_name()).unwrap_or_else(|_| format!("input_{i}")))
+            .collect();
+        let nout = compiled.get_output_size().map_err(|e| NpuError::Other(format!("get_output_size: {e:?}")))?;
+        let output_names = (0..nout)
+            .map(|i| compiled.get_output_by_index(i).and_then(|n| n.get_name()).unwrap_or_else(|_| format!("output_{i}")))
+            .collect();
+        let mut compiled = compiled;
+        let request = compiled
+            .create_infer_request()
+            .map_err(|e| NpuError::Other(format!("create_infer_request: {e:?}")))?;
+        Ok(NpuGraph { _core: core, request, input_names, output_names, device: dev_str(&device) })
+    }
+
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+    pub fn input_names(&self) -> &[String] {
+        &self.input_names
+    }
+    pub fn output_names(&self) -> &[String] {
+        &self.output_names
+    }
+
+    /// Run one inference. `feeds` maps input names to tensors (order-independent);
+    /// returns each output as `(name, shape, f32 data)` in graph order. A single-input
+    /// graph accepts the feed regardless of name.
+    pub fn run(&mut self, feeds: &[(&str, Feed)]) -> Result<Vec<(String, Vec<usize>, Vec<f32>)>, NpuError> {
+        for (name, feed) in feeds {
+            let shape = Shape::new(feed.dims()).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+            let mut t = Tensor::new(feed.elem(), &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;
+            match feed {
+                Feed::F32(data, _) => t.get_data_mut::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(data),
+                Feed::I64(data, _) => t.get_data_mut::<i64>().map_err(|e| NpuError::Other(format!("{e:?}")))?.copy_from_slice(data),
+            };
+            if self.input_names.len() == 1 {
+                self.request.set_input_tensor(&t).map_err(|e| NpuError::Other(format!("set input: {e:?}")))?;
+            } else {
+                self.request.set_tensor(name, &t).map_err(|e| NpuError::Other(format!("set {name}: {e:?}")))?;
+            }
+        }
+        self.request.infer().map_err(|e| NpuError::Other(format!("infer: {e:?}")))?;
+        let mut out = Vec::with_capacity(self.output_names.len());
+        for (i, name) in self.output_names.iter().enumerate() {
+            let t = self.request.get_output_tensor_by_index(i).map_err(|e| NpuError::Other(format!("get_output {i}: {e:?}")))?;
+            let sh = t.get_shape().map_err(|e| NpuError::Other(format!("{e:?}")))?.get_dimensions().iter().map(|&x| x as usize).collect();
+            let data = t.get_data::<f32>().map_err(|e| NpuError::Other(format!("{e:?}")))?.to_vec();
+            out.push((name.clone(), sh, data));
+        }
+        Ok(out)
+    }
+}
+
+/// Shared prologue: new core + resolve/apply the configured device.
+fn open_device(cfg: &NpuConfig) -> Result<(Core, DeviceType<'static>), NpuError> {
+    let mut core = new_core()?;
+    let avail: Vec<String> = core.available_devices().map_err(|e| NpuError::Other(format!("{e:?}")))?.iter().map(dev_str).collect();
+    let device = resolve_device(cfg.device, &avail, cfg.allow_fallback)?;
+    apply_properties(&mut core, &device, cfg);
+    Ok((core, device))
 }
 
 /// A compiled graph with a single f32 input `inputs_embeds:[1,T,d_in]` and a

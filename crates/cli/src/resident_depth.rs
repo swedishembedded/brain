@@ -57,19 +57,146 @@ impl ResidentModel for DepthResident {
         // via brain's engine; the Hot footprint is the weights in RAM (~1.3x the
         // checkpoint file, allowing for the f32 unpack + index overhead).
         let ram = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0).saturating_mul(13) / 10;
-        MemCost::new(0, ram)
+        // ZipDepth has an NPU path (`crates/npu` depth topology → OpenVINO). Advertising
+        // an NPU footprint (`npu > 0`) makes the scheduler auto-place depth on the NPU
+        // when one is budgeted (see `place::pick_device`). The compiled fp16 graph +
+        // activation scratch is small (~256 MB is a generous bound for the 6.1M-param net).
+        MemCost::new(0, ram).with_npu(256 << 20)
     }
-    fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
+    fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         // Auto-detect the checkpoint variant from its own tensor names, exactly like
         // `brain depth` (see `depth::cfg_for_checkpoint`), so the strict importer's
         // shapes match without the caller passing a variant.
         let cfg = depth::cfg_for_checkpoint(&self.path).unwrap_or_else(|_| ZipConfig::base());
+        let init = depth::import::load(&self.path, &cfg)?;
+
+        // Placed on the NPU → compile the ZipDepth ONNX graph ONCE (via the generic
+        // `npu::NpuModel` seam) for a fixed square input and run it through the
+        // reusable `NpuGraph`. Every other device → the existing engine path.
+        if let Device::Npu(_) = device {
+            if cfg.upsample_unfold {
+                return Err("depth on NPU needs the blend ('npu') ZipDepth checkpoint (BRAIN_DEPTH_WEIGHTS)".into());
+            }
+            let side = if cfg.input > 0 { cfg.input } else { 384 };
+            let model = DepthNpuModel { cfg: cfg.clone(), init, side };
+            let ov = npu::openvino::NpuConfig { device: npu::openvino::NpuDevice::Npu, allow_fallback: true, ..Default::default() };
+            let graph = <DepthNpuModel as npu::NpuModel>::compile(&model, &ov)?;
+            eprintln!("depth: compiled ZipDepth {side}x{side} on {}", graph.device());
+            return Ok(Box::new(DepthNpuInstance { graph, side }));
+        }
 
         // Build the engine once (honours the process backend / `--device`), and
-        // import the weights once into a host-RAM map the instance keeps resident.
+        // keep the imported weights resident in host RAM.
         let gpu = Gpu::new(depth::net::PIPELINES);
-        let init = depth::import::load(&self.path, &cfg)?;
         Ok(Box::new(DepthInstance { gpu, init, cfg }))
+    }
+}
+
+/// The ZipDepth graph as a generic [`npu::NpuModel`]: build the depth ONNX for a
+/// fixed `side × side` input. This is the *only* depth-specific NPU code — compile /
+/// cache / infer / evict all reuse `npu::openvino::NpuGraph`.
+struct DepthNpuModel {
+    cfg: ZipConfig,
+    init: HashMap<String, Vec<f32>>,
+    side: u32,
+}
+
+impl npu::NpuModel for DepthNpuModel {
+    fn build(&self, g: &mut onnx::GraphBuilder) -> Result<(), String> {
+        npu::build_depth_graph_hw(&self.cfg, &self.init, self.side, self.side, g);
+        Ok(())
+    }
+    fn cache_key(&self) -> String {
+        format!("zipdepth-{}x{}", self.side, self.side)
+    }
+}
+
+/// A depth instance running on the NPU: the compiled [`NpuGraph`] + the fixed input
+/// side. Per call: resize the image to `side×side` CHW, infer on the NPU, resize the
+/// `[1,1,2·side,2·side]` inverse-depth map back to the frame grid.
+struct DepthNpuInstance {
+    graph: npu::openvino::NpuGraph,
+    side: u32,
+}
+
+/// Bilinear resize of interleaved RGB HWC (half-pixel), matching the engine predictor.
+fn resize_hwc(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
+    let mut out = vec![0f32; (tw * th * 3) as usize];
+    let (sx, sy) = (w0 as f32 / tw as f32, h0 as f32 / th as f32);
+    for y in 0..th {
+        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, (h0 - 1) as f32);
+        let (y0, y1) = (fy.floor() as u32, (fy.floor() as u32 + 1).min(h0 - 1));
+        let wy = fy - y0 as f32;
+        for x in 0..tw {
+            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, (w0 - 1) as f32);
+            let (x0, x1) = (fx.floor() as u32, (fx.floor() as u32 + 1).min(w0 - 1));
+            let wx = fx - x0 as f32;
+            for c in 0..3 {
+                let p = |yy: u32, xx: u32| src[((yy * w0 + xx) * 3 + c) as usize];
+                let top = p(y0, x0) * (1.0 - wx) + p(y0, x1) * wx;
+                let bot = p(y1, x0) * (1.0 - wx) + p(y1, x1) * wx;
+                out[((y * tw + x) * 3 + c) as usize] = top * (1.0 - wy) + bot * wy;
+            }
+        }
+    }
+    out
+}
+
+/// Bilinear resize of a single-channel `[h0·w0]` map to `[th·tw]`.
+fn resize_map(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
+    let mut out = vec![0f32; (tw * th) as usize];
+    let (sx, sy) = (w0 as f32 / tw as f32, h0 as f32 / th as f32);
+    for y in 0..th {
+        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, (h0 - 1) as f32);
+        let (y0, y1) = (fy.floor() as u32, (fy.floor() as u32 + 1).min(h0 - 1));
+        let wy = fy - y0 as f32;
+        for x in 0..tw {
+            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, (w0 - 1) as f32);
+            let (x0, x1) = (fx.floor() as u32, (fx.floor() as u32 + 1).min(w0 - 1));
+            let wx = fx - x0 as f32;
+            let p = |yy: u32, xx: u32| src[(yy * w0 + xx) as usize];
+            let top = p(y0, x0) * (1.0 - wx) + p(y0, x1) * wx;
+            let bot = p(y1, x0) * (1.0 - wx) + p(y1, x1) * wx;
+            out[(y * tw + x) as usize] = top * (1.0 - wy) + bot * wy;
+        }
+    }
+    out
+}
+
+impl Instance for DepthNpuInstance {
+    fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        use npu::openvino::Feed;
+        let (hwc, w, h) = image_of(inv)?;
+        let s = self.side;
+        // resize to the compiled square, pack CHW
+        let resized = resize_hwc(&hwc, w, h, s, s);
+        let hw = (s * s) as usize;
+        let mut chw = vec![0f32; 3 * hw];
+        for y in 0..s as usize {
+            for x in 0..s as usize {
+                for c in 0..3 {
+                    chw[c * hw + y * s as usize + x] = resized[(y * s as usize + x) * 3 + c];
+                }
+            }
+        }
+        let out = self.graph.run(&[("input", Feed::F32(&chw, vec![1, 3, s as i64, s as i64]))]).map_err(|e| e.to_string())?;
+        let (_name, oshape, data) = out.into_iter().next().ok_or("depth NPU: no output")?;
+        // output is [1,1,H,W] inverse-depth; resize back to the frame grid.
+        let (oh, ow) = (oshape[oshape.len() - 2] as u32, oshape[oshape.len() - 1] as u32);
+        let depth = resize_map(&data, ow, oh, w, h);
+
+        let (mut mn, mut mx) = (f32::INFINITY, f32::NEG_INFINITY);
+        for &v in &depth {
+            mn = mn.min(v);
+            mx = mx.max(v);
+        }
+        let range = (mx - mn).max(1e-6);
+        let bytes: Vec<u8> = depth.iter().flat_map(|&v| ((v - mn) / range).clamp(0.0, 1.0).to_le_bytes()).collect();
+        Ok(Outcome::new()
+            .set("width", json!(w))
+            .set("height", json!(h))
+            .set("device", json!("npu"))
+            .blob("depth", Blob::new(Media::Image, bytes).with_meta(json!({"w": w, "h": h, "c": 1}))))
     }
 }
 

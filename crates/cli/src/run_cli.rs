@@ -217,15 +217,27 @@ fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64) {
     // Host RAM stays a cache/spill tier even when the CPU is not schedulable for
     // compute — `--device gpu` bounds where work runs, not where bytes may rest.
     let cpu_compute_ram = if cpu_schedulable { ram } else { 0 };
+    // Schedulable NPUs: `--device` narrows to `set.npus`; with no `--device`, any NPU
+    // present is scheduled. The Meteor-Lake-class NPU shares system RAM, so it gets a
+    // modest per-device budget. A model with an NPU path (MemCost.npu > 0) is then
+    // auto-placed on the NPU in preference to CPU/GPU (see place::pick_device).
+    let npu_indices: Vec<u32> = match set {
+        Some(s) => s.npus.clone(),
+        None if npu::openvino::npu_present() => vec![0],
+        None => vec![],
+    };
+    let npu_budget = (8u64 << 30).min(ram / 2).max(1 << 30);
+    let npus: Vec<(u32, u64)> = npu_indices.iter().map(|&i| (i, npu_budget)).collect();
     eprintln!(
-        "brain serve --dbus: compute {} | {} GPU(s) schedulable, {} GB reserved/card, {} GB RAM budget",
+        "brain serve --dbus: compute {} | {} GPU(s), {} NPU(s) schedulable, {} GB reserved/card, {} GB RAM budget",
         set.map(|s| s.to_string()).unwrap_or_else(|| "all".into()),
         gpus.len(),
+        npus.len(),
         reserve_gb,
         ram >> 30
     );
     let executor =
-        crate::resident::build_executor(&gpus, reserved, cpu_compute_ram, residency::Policy::default());
+        crate::resident::build_executor(&gpus, &npus, reserved, cpu_compute_ram, residency::Policy::default());
     let served: Vec<&str> = executor.manifests().iter().map(|m| m.model.as_str()).collect();
     eprintln!("brain serve --dbus: models: {}", served.join(", "));
     let opts = brain_dbus::DbusOpts {

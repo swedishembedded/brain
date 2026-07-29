@@ -52,18 +52,32 @@ pub struct MemCost {
     pub vram: u64,
     /// Host bytes held (warm weights, staging, or a CPU-resident model).
     pub ram: u64,
+    /// NPU device bytes held while hot on the NPU (the compiled OpenVINO graph +
+    /// weights). Non-zero **iff** the model has an NPU path — this is precisely how a
+    /// model advertises NPU-eligibility, so a CPU-only model (npu == 0) is never
+    /// placed on the NPU even when one is budgeted. `MemCost::new` keeps `npu = 0`.
+    pub npu: u64,
 }
 
 impl MemCost {
     pub fn new(vram: u64, ram: u64) -> MemCost {
-        MemCost { vram, ram }
+        MemCost { vram, ram, npu: 0 }
     }
-    /// The bytes this instance occupies on `device` (VRAM on a GPU, RAM on the
-    /// CPU; the NPU's compiled blob + I/O live in shared host memory → RAM).
+    /// Add an NPU footprint (marks the instance as NPU-placeable). The NPU's compiled
+    /// blob + I/O live in shared host memory, so this is a host-memory figure — but
+    /// kept a separate field from `ram` so NPU-eligibility is explicit (a CPU-only
+    /// model reports `ram > 0, npu == 0` and is never placed on the NPU).
+    pub fn with_npu(mut self, npu: u64) -> MemCost {
+        self.npu = npu;
+        self
+    }
+    /// The bytes this instance occupies on `device` (VRAM on a GPU, RAM on the CPU,
+    /// NPU bytes on an NPU).
     pub fn on(&self, device: Device) -> u64 {
         match device {
             Device::Gpu(_) => self.vram,
-            Device::Cpu | Device::Npu(_) => self.ram,
+            Device::Cpu => self.ram,
+            Device::Npu(_) => self.npu,
         }
     }
 }

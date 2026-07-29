@@ -55,3 +55,35 @@ pub use topology::{build_graph, WeightSource};
 pub mod depth_topology;
 pub use depth_topology::{build_depth_graph, build_depth_graph_hw};
 pub use wm_topology::{build_diamond_graph, WmSession, WmUnetConfig};
+
+/// The one per-model NPU seam (see `docs/npu-residency.md`). A model implements
+/// [`build`](NpuModel::build) — its device-heavy forward, composed from the shared
+/// `topo`/`onnx` block library — plus a [`cache_key`](NpuModel::cache_key); the
+/// generic [`openvino::NpuGraph`] and the residency NPU instance do compile / cache /
+/// infer / evict. This is what turns the NPU into a **uniform, reusable** compute
+/// target: adding a model to the NPU is implementing this trait + a thin residency
+/// adapter, not a new session or runtime code. fp16 is the NPU's native path
+/// (OpenVINO compiles the fp32 bytes to fp16, no calibration); INT8/INT4 are
+/// orthogonal opt-ins.
+pub trait NpuModel: Send + Sync {
+    /// Build the model's forward into `g`, declaring its named inputs/outputs
+    /// (`g.input_f32`/`output_f32`). Reuse the shared emitters.
+    fn build(&self, g: &mut onnx::GraphBuilder) -> Result<(), String>;
+
+    /// A stable identity for the OpenVINO compiled-blob cache (model + precision +
+    /// shape), so a residency warm-start skips recompilation.
+    fn cache_key(&self) -> String;
+
+    /// The fp32 ONNX bytes for this model (default: `build` then serialize).
+    fn onnx_bytes(&self) -> Result<Vec<u8>, String> {
+        let mut g = onnx::GraphBuilder::new(&self.cache_key());
+        self.build(&mut g)?;
+        Ok(g.finish_with(onnx::DEFAULT_OPSET, onnx::DEFAULT_IR_VERSION))
+    }
+
+    /// Compile this model onto `cfg.device` (NPU by default), returning the generic
+    /// named-tensor runner — the single call a residency NPU instance makes.
+    fn compile(&self, cfg: &openvino::NpuConfig) -> Result<openvino::NpuGraph, String> {
+        openvino::NpuGraph::compile_bytes(&self.onnx_bytes()?, cfg).map_err(|e| e.to_string())
+    }
+}

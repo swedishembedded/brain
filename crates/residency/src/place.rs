@@ -51,7 +51,7 @@ impl EvictionPolicy for CostAware {
     fn score(&self, e: &crate::lru::Entry, now: u64) -> f64 {
         // Recency decays with age in ticks; +1 keeps just-used entries finite.
         let age = now.saturating_sub(e.last_use) as f64 + 1.0;
-        let bytes = e.cost.vram.max(e.cost.ram).max(1) as f64;
+        let bytes = e.cost.vram.max(e.cost.ram).max(e.cost.npu).max(1) as f64;
         // Measured on `perf residency` (24 models, 4x overcommit, shifting
         // Zipf): this GDSF shape beats LRU on hit rate (54.3% vs 50.0%) and —
         // by construction, pinned in policy_tests — spends evictions on cheap
@@ -74,42 +74,31 @@ pub fn no_exclude() -> HashSet<Device> {
 /// in `exclude` are skipped (used by the parallel scheduler to avoid a device a lane
 /// is already running on). Returns `None` if none has room without eviction.
 pub fn pick_device(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>) -> Option<Device> {
-    // GPUs first, most-free wins (ties broken by lower index for determinism).
-    let mut best: Option<(Device, u64)> = None;
-    for d in budgets.gpus() {
-        if cost.vram == 0 || exclude.contains(&d) {
+    // Device-class preference: NPU (if the model has an NPU path) → GPU → CPU. Within
+    // an accelerator class, most-free wins (spreads load; ties by lower index). A
+    // model reports `npu > 0` only when it exports an OpenVINO graph, so a non-NPU
+    // model skips the NPU class and behaves exactly as before.
+    for (devices, need) in [(budgets.npus(), cost.npu), (budgets.gpus(), cost.vram)] {
+        if need == 0 {
             continue;
         }
-        if let Some(b) = budgets.get(d) {
-            if b.fits(cost.vram) {
-                let free = b.free();
-                if best.is_none_or(|(_, f)| free > f) {
-                    best = Some((d, free));
+        let mut best: Option<(Device, u64)> = None;
+        for d in devices {
+            if exclude.contains(&d) {
+                continue;
+            }
+            if let Some(b) = budgets.get(d) {
+                if b.fits(need) {
+                    let free = b.free();
+                    if best.is_none_or(|(_, f)| free > f) {
+                        best = Some((d, free));
+                    }
                 }
             }
         }
-    }
-    if let Some((d, _)) = best {
-        return Some(d);
-    }
-    // NPUs next (whole-graph compiled instances; RAM-costed): most-free wins.
-    // Only boxes that set an NPU budget ever have entries here.
-    let mut best_npu: Option<(Device, u64)> = None;
-    for d in budgets.npus() {
-        if cost.ram == 0 || exclude.contains(&d) {
-            continue;
+        if let Some((d, _)) = best {
+            return Some(d);
         }
-        if let Some(b) = budgets.get(d) {
-            if b.fits(cost.ram) {
-                let free = b.free();
-                if best_npu.is_none_or(|(_, f)| free > f) {
-                    best_npu = Some((d, free));
-                }
-            }
-        }
-    }
-    if let Some((d, _)) = best_npu {
-        return Some(d);
     }
     // CPU/RAM-resident model.
     if cost.ram > 0 && !exclude.contains(&Device::Cpu) {
@@ -144,60 +133,68 @@ pub fn plan_eviction(cost: &MemCost, budgets: &Budgets, residents: &Residents, k
 /// ascending score order. Pure over its inputs (`now` is the residents' tick),
 /// so policies are unit-testable without threads or a clock.
 pub fn plan_eviction_with(policy: &dyn EvictionPolicy, cost: &MemCost, budgets: &Budgets, residents: &Residents, keep: &[InstanceKey], exclude: &HashSet<Device>) -> Option<EvictionPlan> {
-    let need = cost.vram;
-    let mut best: Option<EvictionPlan> = None;
-    for d in budgets.gpus() {
-        if exclude.contains(&d) {
+    // Same class preference as `pick_device`: NPU (if the model has an NPU path) then
+    // GPU. Victim bytes are counted with the device-appropriate cost field
+    // (`entry.cost.on(d)`), so NPU eviction frees NPU bytes and GPU eviction frees
+    // VRAM. If any plan exists in the preferred class, it wins.
+    for (devices, need) in [(budgets.npus(), cost.npu), (budgets.gpus(), cost.vram)] {
+        if need == 0 {
             continue;
         }
-        let b = match budgets.get(d) {
-            Some(b) => b,
-            None => continue,
-        };
-        if b.usable() < need {
-            continue; // can never fit here, even empty
-        }
-        if b.fits(need) {
-            // Already fits with no eviction.
-            return Some(EvictionPlan { device: d, victims: Vec::new(), freed: 0 });
-        }
-        // Evict lowest-score-first until free() would cover `need`.
-        let mut deficit = need - b.free();
-        let mut victims = Vec::new();
-        let mut freed = 0u64;
-        let now = residents.now();
-        let mut candidates = residents.lru_on(d);
-        candidates.sort_by(|a, b| {
-            policy
-                .score(&a.1, now)
-                .partial_cmp(&policy.score(&b.1, now))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        for (key, entry) in candidates {
-            if keep.contains(&key) {
+        let mut best: Option<EvictionPlan> = None;
+        for d in devices {
+            if exclude.contains(&d) {
                 continue;
             }
-            victims.push(key);
-            freed += entry.cost.vram;
-            if entry.cost.vram >= deficit {
-                deficit = 0;
-                break;
+            let b = match budgets.get(d) {
+                Some(b) => b,
+                None => continue,
+            };
+            if b.usable() < need {
+                continue; // can never fit here, even empty
             }
-            deficit -= entry.cost.vram;
+            if b.fits(need) {
+                // Already fits with no eviction.
+                return Some(EvictionPlan { device: d, victims: Vec::new(), freed: 0 });
+            }
+            // Evict lowest-score-first until free() would cover `need`.
+            let mut deficit = need - b.free();
+            let mut victims = Vec::new();
+            let mut freed = 0u64;
+            let now = residents.now();
+            let mut candidates = residents.lru_on(d);
+            candidates.sort_by(|a, b| {
+                policy
+                    .score(&a.1, now)
+                    .partial_cmp(&policy.score(&b.1, now))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for (key, entry) in candidates {
+                if keep.contains(&key) {
+                    continue;
+                }
+                let vbytes = entry.cost.on(d);
+                victims.push(key);
+                freed += vbytes;
+                if vbytes >= deficit {
+                    deficit = 0;
+                    break;
+                }
+                deficit -= vbytes;
+            }
+            if deficit == 0 {
+                // This device can be made to fit; prefer the plan evicting the least.
+                let plan = EvictionPlan { device: d, victims, freed };
+                if best.as_ref().is_none_or(|p| plan.freed < p.freed) {
+                    best = Some(plan);
+                }
+            }
         }
-        if deficit == 0 {
-            // This device can be made to fit; prefer the plan evicting the least.
-            let plan = EvictionPlan { device: d, victims, freed };
-            if best.as_ref().is_none_or(|p| plan.freed < p.freed) {
-                best = Some(plan);
-            }
+        if best.is_some() {
+            return best; // a plan in the preferred class wins
         }
     }
-    best.or_else(|| {
-        // No GPU can be made to fit by eviction, but if some GPU is big enough when
-        // empty we still report it (should be covered above); otherwise None.
-        None
-    })
+    None
 }
 
 #[cfg(test)]
@@ -263,6 +260,21 @@ mod tests {
         let mut b = two_gpus();
         b.alloc(Device::Gpu(0), 15 * GB); // gpu0 has 7 free, gpu1 has 22
         assert_eq!(pick_device(&vram(6), &b, &no_exclude()), Some(Device::Gpu(1)));
+    }
+
+    #[test]
+    fn npu_capable_model_prefers_the_npu() {
+        let mut b = two_gpus();
+        b.set(Device::Npu(0), 8 * GB, 0);
+        // A model with both a GPU and an NPU path (npu > 0) is placed on the NPU,
+        // even though the GPUs are emptier — NPU is the preferred class.
+        let both = MemCost::new(6 * GB, 0).with_npu(2 * GB);
+        assert_eq!(pick_device(&both, &b, &no_exclude()), Some(Device::Npu(0)));
+        // A model without an NPU path (npu == 0) still goes to a GPU.
+        assert_eq!(pick_device(&vram(6), &b, &no_exclude()), Some(Device::Gpu(0)));
+        // If the NPU is full, an NPU-capable model falls back to a GPU.
+        b.alloc(Device::Npu(0), 8 * GB);
+        assert_eq!(pick_device(&both, &b, &no_exclude()), Some(Device::Gpu(0)));
     }
 
     #[test]
