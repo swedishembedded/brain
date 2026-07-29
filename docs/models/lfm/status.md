@@ -138,6 +138,33 @@ that; report what is measured.
   `Model`/`ModelConfig` impls → generic trainer + blanket gradcheck.
   Finetune gate (seq 1024, b=2, gpu0) running.
 
+### Optimization pass (2026-07-29, post-benchmark)
+
+Profile-driven (BRAIN_PROFILE: attn_apply_cross 51% + attn_scores_cross 24% of
+the CPU forward; GPU scaling fits isolated the same t² term):
+
+| model | device | 8k forward | before | speedup |
+|---|---|---|---|---|
+| 230M | Tesla P40 | **7.5 s** | 22.1 s | **3.0×** |
+| 230M | Xeon E5-2690v3 | **23.2 s** | 463 s | **20×** — beats the blog's 28 s modern-CPU figure on a 2015 Haswell |
+
+- CPU: backend-cpu native fast paths route the cross-attention trio through
+  the AVX2 `matmul_abt` (per-head packs) + rayon softmax.
+- GPU: `block::gemm_bidir_fwd` — per-head packed operands through
+  `matmul_reg2` (GQA replication + 1/√hd folded into `head_pack`; `kv_expand`
+  eliminated on this path) and `softmax_rows` (workgroup-per-row); gated on
+  `DeviceCaps::workgroup_reductions`. `flash_attn_bidir` measured ≈ naive here
+  (a memory escape hatch, as zimage's ledger says — not a fast path).
+- All parity/equivalence gates re-run green after each step (cosine 1.000000).
+- FLOP accounting landed (`brain flops`, `Gpu::cost_of`/`ops_counters`): 100%
+  pipeline coverage for qwen/gpt/lfm at merge; the GEMM-attention pack kernels
+  added after the registry report as UNCOVERED in GPU online counts until
+  costed (honest by construction) — follow-up.
+- Remaining headroom: ~9% of P40 peak now — next candidates are reg2 tuning
+  for K=64 shapes and conv/permute fusion. 350M re-measure and a chunked-regime
+  builder for `brain flops` (the materialized build OOMs at --block 8192) are
+  follow-ups.
+
 ## Remaining
 
 - P4: 8k training — accumulating `attn_bwd_{dk,dv}` variants + per-chunk
