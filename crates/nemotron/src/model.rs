@@ -37,10 +37,15 @@ impl NemotronAsr {
         // 2. device encoder → pooler [T, decoder_hidden]
         let g = Gpu::new_cpu(encoder_pipelines());
         let enc = Encoder::new(&g, self.cfg, &self.weights);
+        let te = std::time::Instant::now();
         let (pooler, valid) = enc.encode(&mel, t as u32, mel_valid, prompt_id);
+        if std::env::var("NEM_TIMING").is_ok() { eprintln!("  encode: {:?}", te.elapsed()); }
 
         // 3. RNN-T greedy decode (LSTM predictor host / m=1; joint head on device)
-        self.rnnt_greedy(&enc, &pooler, valid as usize)
+        let td = std::time::Instant::now();
+        let out = self.rnnt_greedy(&enc, &pooler, valid as usize);
+        if std::env::var("NEM_TIMING").is_ok() { eprintln!("  decode: {:?}", td.elapsed()); }
+        out
     }
 
     fn rnnt_greedy(&self, enc: &Encoder, pooler: &[f32], valid: usize) -> Vec<u32> {

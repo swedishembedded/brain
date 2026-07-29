@@ -214,52 +214,70 @@ impl<'g> Encoder<'g> {
         let rel_k = self.mm(&pe, &format!("{pre}.relative_k_proj.weight"), l, c, c);
         let bu = self.rw(&format!("{pre}.bias_u"));
         let bv = self.rw(&format!("{pre}.bias_v"));
+        // Per-head scoring is embarrassingly parallel; run the 8 heads across
+        // threads, each producing its own [T, hd] context slab (disjoint output).
+        let (q, k, v, rel_k) = (&q, &k, &v, &rel_k);
+        let head_ctx: Vec<Vec<f32>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..heads)
+                .map(|h| {
+                    s.spawn(move || {
+                        let (qh, kh, vh, rkh) = (
+                            |i: usize, d: usize| q[i * c + h * hd + d],
+                            |j: usize, d: usize| k[j * c + h * hd + d],
+                            |j: usize, d: usize| v[j * c + h * hd + d],
+                            |p: usize, d: usize| rel_k[p * c + h * hd + d],
+                        );
+                        let (bus, bvs) = (&bu[h * hd..h * hd + hd], &bv[h * hd..h * hd + hd]);
+                        let mut bd_raw = vec![0.0f32; t * l];
+                        for i in 0..t {
+                            for pp in 0..l {
+                                let mut acc = 0.0f32;
+                                for d in 0..hd {
+                                    acc += (qh(i, d) + bvs[d]) * rkh(pp, d);
+                                }
+                                bd_raw[i * l + pp] = acc;
+                            }
+                        }
+                        let bd = crate::kernels::rel_shift_ref(&bd_raw, 1, t, l);
+                        let mut out = vec![0.0f32; t * hd]; // [T, hd] for this head
+                        for i in 0..t {
+                            let mut sc = vec![f32::NEG_INFINITY; t];
+                            for j in 0..t {
+                                if j >= valid || !banded_ok(i, j, left, right) {
+                                    continue;
+                                }
+                                let mut ac = 0.0f32;
+                                for d in 0..hd {
+                                    ac += (qh(i, d) + bus[d]) * kh(j, d);
+                                }
+                                sc[j] = ac * scale + bd[i * l + j] * scale;
+                            }
+                            let mx = sc.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                            let mut den = 0.0f32;
+                            for sv in &mut sc {
+                                *sv = if sv.is_finite() { (*sv - mx).exp() } else { 0.0 };
+                                den += *sv;
+                            }
+                            let inv = if den > 0.0 { 1.0 / den } else { 0.0 };
+                            for d in 0..hd {
+                                let mut acc = 0.0f32;
+                                for j in 0..t {
+                                    acc += sc[j] * vh(j, d);
+                                }
+                                out[i * hd + d] = acc * inv;
+                            }
+                        }
+                        out
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        // assemble [T, heads*hd] from per-head [T, hd] slabs
         let mut ctx = vec![0.0f32; t * c];
-        for h in 0..heads {
-            let (qh, kh, vh, rkh) = (
-                |i: usize, d: usize| q[i * c + h * hd + d],
-                |j: usize, d: usize| k[j * c + h * hd + d],
-                |j: usize, d: usize| v[j * c + h * hd + d],
-                |p: usize, d: usize| rel_k[p * c + h * hd + d],
-            );
-            let (bus, bvs) = (&bu[h * hd..h * hd + hd], &bv[h * hd..h * hd + hd]);
-            let mut bd_raw = vec![0.0f32; t * l];
+        for (h, hc) in head_ctx.iter().enumerate() {
             for i in 0..t {
-                for pp in 0..l {
-                    let mut acc = 0.0f32;
-                    for d in 0..hd {
-                        acc += (qh(i, d) + bvs[d]) * rkh(pp, d);
-                    }
-                    bd_raw[i * l + pp] = acc;
-                }
-            }
-            let bd = crate::kernels::rel_shift_ref(&bd_raw, 1, t, l);
-            for i in 0..t {
-                let mut sc = vec![f32::NEG_INFINITY; t];
-                for j in 0..t {
-                    if j >= valid || !banded_ok(i, j, left, right) {
-                        continue;
-                    }
-                    let mut ac = 0.0f32;
-                    for d in 0..hd {
-                        ac += (qh(i, d) + bus[d]) * kh(j, d);
-                    }
-                    sc[j] = ac * scale + bd[i * l + j] * scale;
-                }
-                let mx = sc.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                let mut den = 0.0f32;
-                for s in &mut sc {
-                    *s = if s.is_finite() { (*s - mx).exp() } else { 0.0 };
-                    den += *s;
-                }
-                let inv = if den > 0.0 { 1.0 / den } else { 0.0 };
-                for d in 0..hd {
-                    let mut acc = 0.0f32;
-                    for j in 0..t {
-                        acc += sc[j] * vh(j, d);
-                    }
-                    ctx[i * c + h * hd + d] = acc * inv;
-                }
+                ctx[i * c + h * hd..i * c + h * hd + hd].copy_from_slice(&hc[i * hd..i * hd + hd]);
             }
         }
         self.mm(&ctx, &format!("{pre}.o_proj.weight"), t, c, c)
@@ -430,6 +448,8 @@ mod tests {
         eprintln!("subsampling maxdiff {d}");
         assert!(d < 2e-3, "subsampling maxdiff {d}");
     }
+
+
 
     #[test]
     fn device_encoder_matches_reference() {
