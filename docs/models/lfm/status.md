@@ -193,6 +193,13 @@ the CPU forward; GPU scaling fits isolated the same t² term):
 
 ## Known gaps / caveats
 
+- `tests/chunked_equiv.rs::chunked_matches_materialized` FAILS on a real GPU
+  (P40, wgpu): a bind-group buffer offset of 3200 B violates the device's
+  `min_storage_buffer_offset_alignment` of 256 — the chunked-attention path binds
+  at a row offset that is not 256-aligned. Pre-existing (verified on a clean
+  tree, 2026-07-29); passes on the CPU backend. Fix: align chunk-row offsets to
+  the device limit (pad or copy) wherever the chunked path binds mid-buffer.
+
 - Unmasked padding is unsound (bidirectional) — exact-length builds only.
 - Ragged batching not yet wired (conv mixer needs equal-length rows; spans
   exist for attention; YOLO-style length bucketing planned at the resident).
