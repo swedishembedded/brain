@@ -89,10 +89,85 @@ pub fn lstm_gates_bwd(
     steps.push(g.step(k, &[dh, dc_next, pre, c_prev, c_out, d_pre, d_cprev], &[rows, h], rows * h));
 }
 
+/// Pipeline for the on-device FF fwd/bwd gradcheck (proves the device training path
+/// with the real backward kernels).
+fn ff_bwd_pipelines() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("matmul", kernels::MATMUL),         // 0
+        ("silu", kernels::SILU),             // 1
+        ("matmul_dx", kernels::MATMUL_DX),   // 2
+        ("silu_bwd", kernels::SILU_BWD),     // 3
+        ("matmul_dw", kernels::MATMUL_DW),   // 4
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use data::rng::Rng;
+    use gpu_core::f;
+
+    /// On-device Conformer feed-forward (Linear→SiLU→Linear) forward AND backward,
+    /// gradchecked against central finite differences of the device forward — the
+    /// device training path using the real gradient kernels (matmul_dx/dw, silu_bwd).
+    #[test]
+    fn device_ff_backward_matches_finite_diff() {
+        let g = Gpu::new_cpu(ff_bwd_pipelines());
+        let (t, c, ffn) = (4u32, 6u32, 10u32);
+        let mut rng = Rng::new(13);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.6).collect::<Vec<f32>>();
+        let (xh, w1h, w2h) = (r((t * c) as usize), r((ffn * c) as usize), r((c * ffn) as usize));
+        let w1 = g.storage_init("w1", &w1h);
+        let w2 = g.storage_init("w2", &w2h);
+
+        // forward: h1 = x·w1ᵀ [t,ffn]; s = silu(h1); out = s·w2ᵀ [t,c]
+        let fwd = |xin: &[f32]| -> Vec<f32> {
+            let x = g.storage_init("x", xin);
+            let h1 = g.storage((t * ffn) as u64);
+            let s = g.storage((t * ffn) as u64);
+            let out = g.storage((t * c) as u64);
+            g.submit(&[], &[
+                g.step(0, &[&x, &w1, &h1], &[t, c, ffn], t * ffn),
+                g.step(1, &[&h1, &s], &[t * ffn], t * ffn),
+                g.step(0, &[&s, &w2, &out], &[t, ffn, c], t * c),
+            ]);
+            g.read(&out, (t * c) as usize)
+        };
+
+        // analytic d_x (loss = Σ out → d_out = 1) via device backward kernels
+        let x = g.storage_init("x", &xh);
+        let h1 = g.storage((t * ffn) as u64);
+        let s = g.storage((t * ffn) as u64);
+        let out = g.storage((t * c) as u64);
+        g.submit(&[], &[
+            g.step(0, &[&x, &w1, &h1], &[t, c, ffn], t * ffn),
+            g.step(1, &[&h1, &s], &[t * ffn], t * ffn),
+            g.step(0, &[&s, &w2, &out], &[t, ffn, c], t * c),
+        ]);
+        let d_out = g.storage_init("dout", &vec![1.0f32; (t * c) as usize]);
+        let d_s = g.storage((t * ffn) as u64);
+        let d_h1 = g.storage((t * ffn) as u64);
+        let d_x = g.storage((t * c) as u64);
+        g.submit(&[], &[
+            // d_s = d_out · w2   (matmul_dx: dx[m,k]=dy[m,n]·w[n,k]; m=t,n=c,k=ffn)
+            g.step(2, &[&d_out, &w2, &d_s], &[t, ffn, c, 0], t * ffn),
+            // d_h1 = silu'(h1) ⊙ d_s
+            g.step(3, &[&h1, &d_s, &d_h1], &[t * ffn], t * ffn),
+            // d_x = d_h1 · w1   (m=t,n=ffn,k=c)
+            g.step(2, &[&d_h1, &w1, &d_x], &[t, c, ffn, 0], t * c),
+        ]);
+        let _ = f(0.0);
+        let dxh = g.read(&d_x, (t * c) as usize);
+
+        let eps = 1e-3f32;
+        for i in 0..(t * c) as usize {
+            let (mut xp, mut xm) = (xh.clone(), xh.clone());
+            xp[i] += eps;
+            xm[i] -= eps;
+            let num = (fwd(&xp).iter().sum::<f32>() - fwd(&xm).iter().sum::<f32>()) / (2.0 * eps);
+            assert!((dxh[i] - num).abs() <= 3e-3 + 6e-2 * num.abs(), "d_x[{i}] {} vs {}", dxh[i], num);
+        }
+    }
 
     fn maxrel(a: f32, n: f32) -> bool {
         (a - n).abs() <= 3e-3 + 6e-2 * n.abs()
