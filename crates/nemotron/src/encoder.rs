@@ -465,6 +465,34 @@ mod tests {
 
 
     #[test]
+    #[ignore = "requires a real GPU: run with BRAIN_DEVICE=vulkan (Arc iGPU) or gpu"]
+    fn gpu_encoder_matches_reference() {
+        if !Path::new(&format!("{GOLD}/pooler.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
+            eprintln!("skipping: goldens/checkpoint absent");
+            return;
+        }
+        let cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
+        let mel = read_f32(&format!("{GOLD}/input_features.f32"));
+        let nmel = cfg.num_mel_bins as usize;
+        let t = (mel.len() / nmel) as u32;
+        let mel_valid = (0..t as usize).filter(|&i| mel[i * nmel..(i + 1) * nmel].iter().any(|&v| v != 0.0)).count() as u32;
+        let ref_pool = read_f32(&format!("{GOLD}/pooler.f32"));
+        let dh = cfg.decoder_hidden as usize;
+
+        let w = crate::import::load_tensors(Path::new(CKPT)).expect("load");
+        let g = Gpu::new(encoder_pipelines()); // device-resolved (BRAIN_DEVICE)
+        let enc = Encoder::new(&g, cfg, &w);
+        let _ = enc.encode(&mel, t, mel_valid, 0); // warm up (shader compile)
+        let t0 = std::time::Instant::now();
+        let (pool, valid) = enc.encode(&mel, t, mel_valid, 0);
+        let elapsed = t0.elapsed();
+        let n = valid as usize * dh;
+        let d = pool[..n].iter().zip(&ref_pool[..n]).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        eprintln!("GPU encoder pooler maxdiff {d} (valid {valid}) in {:?}", elapsed);
+        assert!(d < 1e-2, "GPU encoder maxdiff {d}");
+    }
+
+    #[test]
     fn device_encoder_matches_reference() {
         if !Path::new(&format!("{GOLD}/pooler.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
             eprintln!("skipping: goldens/checkpoint absent");
