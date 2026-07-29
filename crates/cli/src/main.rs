@@ -18,6 +18,7 @@ mod forecast_cli;
 mod args;
 mod glm_cli;
 mod gpt_cli;
+mod lfm_cli;
 mod image_io;
 mod npu_cli;
 mod perf_cli;
@@ -25,6 +26,7 @@ mod perf_engine;
 mod pid_cli;
 mod qwen_cli;
 mod resident;
+mod resident_lfm;
 mod resident_llm;
 mod resident_depth;
 mod resident_tts;
@@ -194,6 +196,17 @@ QWEN3 (dense decoder; paged continuous-batching serving)
 
 GLM-5.2 (MLA + sigmoid noaux_tc MoE)
   brain glm <train|finetune|infer|eval|import|export> ...
+
+LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
+  brain lfm import    --hf <dir> --out lfm.weights
+  brain lfm fill-mask --weights F --tokenizer T --text \"… <|mask|> …\" [--topk K]
+  brain lfm embed     --weights F --tokenizer T (--text \"…\" | --input FILE) [--seq T]
+  brain lfm data      --input corpus.txt --tokenizer T --out data/lfm
+  brain lfm finetune  --weights F --tokenizer T [--data D --steps N --batch B --seq T]
+  brain lfm eval      --weights F --tokenizer T [--data D]     # pseudo-ppl + masked-acc
+  brain npu lfm       --weights F --seq S --out model.onnx [--int8]   # OpenVINO export
+  brain do lfm <fill_mask|embed> …   # capability surface; also served over D-Bus
+  make perf/lfm                      # standalone concurrency benchmark (scheduler+residency)
 
 QWEN3-TTS (Talker + MTP + neural codec; voice cloning)
   brain tts <import|clone|synth|design|serve|sim|finetune> ...
@@ -542,6 +555,7 @@ fn main() {
         Some("gpt") => gpt_cli::run_gpt(&argv[2..]),
         Some("qwen") => qwen_cli::run_qwen(&argv[2..]),
         Some("glm") => glm_cli::run_glm(&argv[2..]),
+        Some("lfm") => lfm_cli::run_lfm(&argv[2..]),
         Some("tts") => tts_cli::run_tts(&argv[2..]),
         Some("wm") => wm_cli::run_wm(&argv[2..]),
         Some("yolo") => yolo_cli::run_yolo(&argv[2..]),

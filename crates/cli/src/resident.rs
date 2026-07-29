@@ -52,6 +52,13 @@ pub fn build_executor(gpus: &[(u32, u64)], reserved: u64, ram_total: u64, policy
     if let Some(q) = crate::resident_llm::QwenResident::from_env() {
         models.push(Arc::new(q));
     }
+    // LFM2.5-Encoder (BRAIN_LFM + BRAIN_LFM_TOKENIZER): fill-mask + embeddings
+    // with equal-length true batching (see resident_lfm.rs).
+    if let Some(l) = crate::resident_lfm::LfmResident::from_env() {
+        models.push(Arc::new(l));
+    } else {
+        eprintln!("brain: lfm not served over the scheduler (set BRAIN_LFM + BRAIN_LFM_TOKENIZER)");
+    }
     // Monocular depth (BRAIN_DEPTH_WEIGHTS).
     if let Some(d) = crate::resident_depth::DepthResident::from_env() {
         models.push(Arc::new(d));

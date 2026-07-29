@@ -157,6 +157,7 @@ pub fn run_serve(args: &[String]) {
     // Expose the generic capability providers over the event API (manifest_request
     // / action_request) — the same actions `brain do` runs, now network-reachable.
     ctrl.register_provider(std::sync::Arc::new(zimage::caps::ZImageProvider::load().expect("z-image provider")));
+    ctrl.register_provider(std::sync::Arc::new(lfm::caps::LfmProvider::new()));
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -238,7 +239,7 @@ fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64) {
 }
 
 /// Per-GPU `(index, total_bytes)` via `nvidia-smi` (empty if none/unavailable).
-fn query_gpu_mem() -> Vec<(u32, u64)> {
+pub(crate) fn query_gpu_mem() -> Vec<(u32, u64)> {
     let out = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
         .output();
@@ -253,7 +254,7 @@ fn query_gpu_mem() -> Vec<(u32, u64)> {
 }
 
 /// Total system RAM in bytes (from `/proc/meminfo`; falls back to 16 GB).
-fn query_ram_bytes() -> u64 {
+pub(crate) fn query_ram_bytes() -> u64 {
     std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|s| {

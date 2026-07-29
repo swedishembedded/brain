@@ -26,6 +26,7 @@ fn static_manifests() -> Vec<Manifest> {
     vec![
         zimage::caps::manifest(),
         qwen::caps::manifest(),
+        lfm::caps::manifest(),
         fastvlm::caps::manifest(),
         yolo::caps::manifest(),
         depth::caps::manifest(),
@@ -44,6 +45,7 @@ pub fn all_providers() -> Result<Registry, String> {
     reg.register(Arc::new(imageops::ImageOps));
     reg.register(Arc::new(zimage::caps::ZImageProvider::load()?));
     reg.register(Arc::new(qwen::caps::QwenProvider::new()));
+    reg.register(Arc::new(lfm::caps::LfmProvider::new()));
     reg.register(Arc::new(fastvlm::caps::FastVlmProvider::new()));
     reg.register(Arc::new(yolo::caps::YoloProvider::new()));
     reg.register(Arc::new(depth::caps::DepthProvider::new()));
@@ -60,6 +62,7 @@ fn build_registry(model: &str) -> Result<Registry, String> {
         "imageops" => reg.register(Arc::new(imageops::ImageOps)),
         zimage::caps::MODEL => reg.register(Arc::new(zimage::caps::ZImageProvider::load()?)),
         qwen::caps::MODEL => reg.register(Arc::new(qwen::caps::QwenProvider::new())),
+        lfm::caps::MODEL => reg.register(Arc::new(lfm::caps::LfmProvider::new())),
         fastvlm::caps::MODEL => reg.register(Arc::new(fastvlm::caps::FastVlmProvider::new())),
         yolo::caps::MODEL => reg.register(Arc::new(yolo::caps::YoloProvider::new())),
         depth::caps::MODEL => reg.register(Arc::new(depth::caps::DepthProvider::new())),
