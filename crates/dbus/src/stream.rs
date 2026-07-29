@@ -74,7 +74,10 @@ impl StreamTx {
         self.send(&json!({"type": "progress", "step": step, "total": total, "message": message}), None);
     }
 
-    /// A streaming-transcription segment: one window's decoded `text` at `index`.
+    /// A streaming-transcription segment: the `text` decoded for window `index` —
+    /// for a live `transcribe_stream` session that is the *newly emitted* delta of
+    /// one growing transcription (concatenate segments verbatim); for the offline
+    /// per-window fallback it is that window's independent transcription.
     /// `is_final` marks the last segment (the input stream reached EOF). Non-blocking
     /// like every frame — a slow subscriber drops segments rather than stalling the
     /// inference path.

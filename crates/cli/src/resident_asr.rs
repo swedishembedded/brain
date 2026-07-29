@@ -55,13 +55,17 @@ impl ResidentModel for NemotronResident {
         let cfg = nemotron::NemotronConfig::nemotron_3_5_asr_0_6b();
         let model = nemotron::model::NemotronAsr::from_hf(&self.dir, cfg)?;
         let detok = nemotron::tokenizer::Detokenizer::from_hf(&self.dir)?;
-        Ok(Box::new(NemotronInstance { model, detok }))
+        Ok(Box::new(NemotronInstance { model, detok, sessions: nemotron::caps::StreamSessions::new() }))
     }
 }
 
 struct NemotronInstance {
     model: nemotron::model::NemotronAsr,
     detok: nemotron::tokenizer::Detokenizer,
+    /// Live `transcribe_stream` sessions. They live on the instance, so evicting
+    /// the model (residency swap) drops any in-flight streams — a restarted stream
+    /// id simply begins a fresh session.
+    sessions: nemotron::caps::StreamSessions,
 }
 
 impl Instance for NemotronInstance {
@@ -69,11 +73,36 @@ impl Instance for NemotronInstance {
         self.run_batch(action, std::slice::from_ref(inv), progress).pop().unwrap()
     }
 
-    /// TRUE batched forward: decode each job's audio, group jobs by `prompt_id`, and
-    /// run one `transcribe_batch` per group (one FastConformer forward over all of
-    /// that group's windows). Results are scattered back in the original order;
-    /// per-job decode errors stay per-job.
-    fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(Progress)) -> Vec<ActionResult> {
+    /// TRUE batched forward, for both actions (the executor groups jobs per action).
+    /// `transcribe`: group by `prompt_id`, one `transcribe_batch` per group (one
+    /// FastConformer forward over all of that group's windows). `transcribe_stream`:
+    /// one batched encoder step over every concurrent stream's window
+    /// (`StreamSessions::step_batch`). Per-job decode errors stay per-job.
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(Progress)) -> Vec<ActionResult> {
+        if action != "transcribe_stream" {
+            return self.offline_batch(invs, progress);
+        }
+        let mut results: Vec<Option<ActionResult>> = vec![None; invs.len()];
+        let mut jobs: Vec<(usize, (String, Vec<f32>, usize, bool))> = Vec::new();
+        for (i, inv) in invs.iter().enumerate() {
+            match nemotron::caps::stream_job_from_inv(inv) {
+                Ok(j) => jobs.push((i, j)),
+                Err(e) => results[i] = Some(Err(e)),
+            }
+        }
+        progress(Progress { step: 0, total: 1, message: format!("stepping {} stream(s)", jobs.len()) });
+        let refs: Vec<(&str, &[f32], usize, bool)> = jobs.iter().map(|(_, (id, w, p, e))| (id.as_str(), w.as_slice(), *p, *e)).collect();
+        let outs = self.sessions.step_batch(self.model.encoder(), &self.detok, &refs);
+        for ((i, _), o) in jobs.into_iter().zip(outs) {
+            results[i] = Some(Ok(o));
+        }
+        results.into_iter().map(|r| r.unwrap()).collect()
+    }
+}
+
+impl NemotronInstance {
+    /// The offline `transcribe` batch path (whole utterances, prompt-grouped).
+    fn offline_batch(&mut self, invs: &[Invocation], progress: &mut dyn FnMut(Progress)) -> Vec<ActionResult> {
         // 1. decode audio + prompt_id per job (errors recorded, don't abort the batch).
         let mut wavs: Vec<Vec<f32>> = Vec::with_capacity(invs.len());
         let mut pids: Vec<usize> = Vec::with_capacity(invs.len());

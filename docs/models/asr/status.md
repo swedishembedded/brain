@@ -20,19 +20,50 @@ gospel."*).
 ## Serving (the contract, all five obligations met — see `docs/serving-contract.md`)
 
 - **Capability**: shared audio-in/text-out schema in `audio::asr_caps` (one
-  implementation), `nemotron::caps` / `qwen_asr::caps` providers; detok via
-  `nemotron::tokenizer` (metaspace BPE) and the Qwen BPE.
+  implementation: `transcribe` + the streaming `transcribe_stream`),
+  `nemotron::caps` / `qwen_asr::caps` providers; detok via `nemotron::tokenizer`
+  (metaspace BPE) and the Qwen BPE.
 - **Residency**: `cli::resident_asr` (`NemotronResident`, `QwenAsrResident`),
   env-gated `BRAIN_NEMOTRON` / `BRAIN_QWEN_ASR`, registered in `build_executor`.
   Build-once in `activate`.
-- **Batching**: Nemotron `run_batch` is a **true batched forward** — concurrent
-  same-prompt stream-windows encode in one FastConformer pass
-  (`Encoder::transcribe_batch`, row-concatenated per-frame matmuls, bit-identical to
-  the single-utterance path). Qwen3-ASR is offline/autoregressive → sequential
-  `run_batch` on a build-once fixed-window instance (encoder amortised).
-- **D-Bus + example**: new `StreamTranscribe(model, params, pcm_fd) -> (job, event_fd)`
-  (`crates/dbus`) windows a continuous PCM fd into executor jobs and streams `segment`
-  frames back; `examples/asr/{transcribe_mic.py, bench_streams.py}`.
+- **Batching**: Nemotron `run_batch` is a **true batched forward** for both actions —
+  concurrent same-prompt whole utterances encode in one FastConformer pass
+  (`Encoder::transcribe_batch`), and concurrent live sessions step through one
+  batched encoder pass (`Encoder::stream_push_batch`; per-frame matmuls
+  row-concatenated across streams, attention/conv per stream). Qwen3-ASR is
+  offline/autoregressive → sequential `run_batch` on a build-once fixed-window
+  instance (encoder amortised).
+- **D-Bus + example**: `StreamTranscribe(model, params, pcm_fd) -> (job, event_fd)`
+  (`crates/dbus`) reads a continuous PCM fd and streams `segment` frames back;
+  `examples/asr/{transcribe_mic.py, bench_streams.py}`.
+
+## Frame-synchronous streaming (`nemotron::stream`)
+
+The FastConformer is cache-aware by design — `chunked_limited` attention (each
+4-frame chunk sees 14 chunks of left context + itself) over causal convs — so
+`crates/nemotron/src/stream.rs` streams it *exactly*: per layer it caches the
+56-row K/V attention band and the 8-row causal-conv GLU tail; the mel front end
+(`audio::asr_frontend::NemotronMelStream`), the three subsampling stages and the
+RNN-T decoder (`DecodeState`) all carry state across pushes. A fixed 63-row
+relative-position table per layer (offsets `i-j ∈ [-3, 59]`) replaces the offline
+`[2T-1]` ladder.
+
+**Parity**: streamed output equals the offline whole-utterance forward — pooler
+frames **bit-for-bit** under `BRAIN_NO_FASTCONV=1` (shape-invariant kernels; the
+AVX2 conv fast path's documented ≤1-ulp reassociation applies otherwise) and the
+**token sequence exactly** either way, asserted by `stream::tests` (tiny
+random-weight model, ragged pushes + batched-vs-single) and two `--ignored`
+checkpoint tests (`streaming_e2e_matches_offline_transcribe`,
+`stream_sessions_deltas_match_offline` on the Mr. Quilter clip).
+
+**Serving**: `transcribe_stream` (session id + `eos`, newly-emitted text/tokens
+per window) is served by `nemotron::caps::StreamSessions` from both the direct
+`Provider` and the resident instance; `StreamTranscribe` on D-Bus auto-upgrades
+to it whenever the model's manifest advertises the action (windows share one live
+session — no per-window re-encode; `qwen-asr` keeps the offline per-window path).
+Algorithmic latency is one chunk (~0.32 s) + the front end's 16 ms lookahead;
+sessions idle >10 min are reaped. Evicting the resident instance drops its live
+sessions (a restarted id starts a fresh session).
 
 ## Performance (release, CPU backend, Core Ultra 7 155H, 22 threads; 5.86 s clip)
 
@@ -72,8 +103,12 @@ for streaming/real-time.
 
 ## Not yet
 
-- Frame-synchronous streaming (the FastConformer runs offline/windowed here; true
-  left-context-cached streaming is a follow-up).
 - Qwen3-ASR variable-length serving (fixed window today; probe-per-length or a padded
   KV scheme would generalise it).
 - NPU path (OpenVINO Conformer export); Vulkan runs bit-exact but is submit-bound.
+- Streaming-session survival across residency eviction (state is dropped with the
+  instance today; serialising `StreamState` would allow swap-out mid-stream).
+
+Done since the table above: **frame-synchronous streaming** (left-context-cached
+FastConformer + stateful RNN-T — see the section above; the "streaming" row now
+means it in the strict sense).

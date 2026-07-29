@@ -23,6 +23,22 @@ pub fn transcribe_spec() -> ActionSpec {
         .streaming()
 }
 
+/// The `transcribe_stream` action schema: one window of a live session. `stream`
+/// names the session (created on first use, per serving instance); `eos` flushes
+/// and closes it. Each call returns the session's *newly emitted* text/tokens —
+/// concatenating every segment reproduces the offline transcription. The audio
+/// blob is optional so a final `eos`-only call can flush a closed microphone.
+pub fn transcribe_stream_spec() -> ActionSpec {
+    ActionSpec::new("transcribe_stream", "frame-synchronous streaming transcription; one window of a live session")
+        .param(ParamSpec::new("stream", ParamType::Str, "session id; state persists across calls until eos"))
+        .param(ParamSpec::new("eos", ParamType::Bool, "flush and close the session after this window").default(serde_json::json!(false)))
+        .param(ParamSpec::new("prompt_id", ParamType::Int, "language-prompt id (0 = en / default); fixed at session creation").default(serde_json::json!(0)))
+        .param(ParamSpec::new("sample_rate", ParamType::Int, "input PCM sample rate; must be 16000").default(serde_json::json!(16000)))
+        .input(BlobSpec::new("audio", Media::Audio, "raw mono f32 little-endian PCM at 16 kHz (may be absent on the final eos call)"))
+        .output(BlobSpec::new("text", Media::Text, "text newly emitted by this window"))
+        .streaming()
+}
+
 /// Decode an `audio` [`Blob`] to a 16 kHz mono f32 waveform. Rejects a non-16 kHz
 /// `sample_rate` (the ASR front ends are fixed at 16 kHz) and a byte length that is
 /// not a whole number of f32 samples.

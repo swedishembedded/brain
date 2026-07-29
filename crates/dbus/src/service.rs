@@ -52,12 +52,16 @@ impl Manager {
 }
 
 /// The server-side streaming loop for [`Manager::stream_transcribe`]. Reads f32 LE
-/// PCM from `pcm` until EOF, emitting one `transcribe` job per `window_samples`
-/// window and a `segment` frame per decoded window; a final `done` carries the whole
-/// transcript. Runs on its own thread (blocking reads + a blocking wait per window),
-/// so a stream whose model keeps up (RTF < 1) stays near-real-time and the OS pipe
-/// buffer absorbs the compute gap.
-fn stream_reader(pcm: OwnedFd, executor: Executor, model: String, window_samples: usize, prompt_id: i64, stream: Arc<Mutex<StreamTx>>) {
+/// PCM from `pcm` until EOF. When the model advertises `transcribe_stream`
+/// (`session` is `Some`), every window is one step of a **live session** — the
+/// model carries encoder/decoder state across windows (frame-synchronous, no
+/// per-window re-encode) and each `segment` frame is the newly emitted text;
+/// EOF sends a final `eos` step that flushes the tail. Otherwise each window is an
+/// independent `transcribe` job (the offline fallback, e.g. qwen-asr). Runs on its
+/// own thread (blocking reads + a blocking wait per window), so a stream whose
+/// model keeps up (RTF < 1) stays near-real-time and the OS pipe buffer absorbs
+/// the compute gap.
+fn stream_reader(pcm: OwnedFd, executor: Executor, model: String, window_samples: usize, prompt_id: i64, session: Option<String>, stream: Arc<Mutex<StreamTx>>) {
     let mut file = std::fs::File::from(pcm);
     let mut carry: Vec<u8> = Vec::new();
     let mut samples: Vec<f32> = Vec::new();
@@ -76,7 +80,7 @@ fn stream_reader(pcm: OwnedFd, executor: Executor, model: String, window_samples
         carry.drain(..whole);
         while samples.len() >= window_samples {
             let window: Vec<f32> = samples.drain(..window_samples).collect();
-            emit_window(&executor, &model, &window, prompt_id, index, &stream, &mut full);
+            emit_window(&executor, &model, &window, prompt_id, index, session.as_deref(), false, &stream, &mut full);
             index += 1;
         }
         // stop early if the subscriber went away
@@ -84,9 +88,11 @@ fn stream_reader(pcm: OwnedFd, executor: Executor, model: String, window_samples
             return;
         }
     }
-    // flush a trailing partial window
-    if !samples.is_empty() {
-        emit_window(&executor, &model, &samples, prompt_id, index, &stream, &mut full);
+    // flush the tail: a session always gets a final eos step (even with no
+    // samples left — it drains the model's internal lookahead); the offline
+    // fallback only submits a non-empty trailing window.
+    if session.is_some() || !samples.is_empty() {
+        emit_window(&executor, &model, &samples, prompt_id, index, session.as_deref(), true, &stream, &mut full);
         index += 1;
     }
     if let Ok(mut s) = stream.lock() {
@@ -95,17 +101,27 @@ fn stream_reader(pcm: OwnedFd, executor: Executor, model: String, window_samples
     }
 }
 
-/// Submit one window as a `transcribe` job, block for its result, and emit a
+/// Submit one window — a `transcribe_stream` session step when `session` is set,
+/// an independent `transcribe` job otherwise — block for its result, and emit a
 /// `segment` frame (or an `error`). Appends the segment text to the running
-/// transcript.
-fn emit_window(executor: &Executor, model: &str, window: &[f32], prompt_id: i64, index: u32, stream: &Arc<Mutex<StreamTx>>, full: &mut String) {
+/// transcript: session segments are exact deltas of one growing transcription and
+/// concatenate verbatim; independent windows are joined with a space.
+#[allow(clippy::too_many_arguments)]
+fn emit_window(executor: &Executor, model: &str, window: &[f32], prompt_id: i64, index: u32, session: Option<&str>, eos: bool, stream: &Arc<Mutex<StreamTx>>, full: &mut String) {
     let bytes: Vec<u8> = window.iter().flat_map(|f| f.to_le_bytes()).collect();
     let blob = Blob::new(Media::Audio, bytes).with_meta(json!({"sample_rate": 16000}));
-    let inv = Invocation::new().set("prompt_id", json!(prompt_id)).blob("audio", blob);
+    let mut inv = Invocation::new().set("prompt_id", json!(prompt_id)).blob("audio", blob);
+    let action = match session {
+        Some(id) => {
+            inv = inv.set("stream", json!(id)).set("eos", json!(eos));
+            "transcribe_stream"
+        }
+        None => "transcribe",
+    };
     let (tx, rx) = std::sync::mpsc::channel();
     executor.submit(Job {
         model: model.to_string(),
-        action: "transcribe".into(),
+        action: action.into(),
         inv,
         on_progress: Box::new(|_| {}),
         reply: Box::new(move |r| {
@@ -114,9 +130,10 @@ fn emit_window(executor: &Executor, model: &str, window: &[f32], prompt_id: i64,
     });
     match rx.recv() {
         Ok(Ok(outcome)) => {
-            let text = outcome.outputs.get("text").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            let raw = outcome.outputs.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            let text = if session.is_some() { raw.to_string() } else { raw.trim().to_string() };
             if !text.is_empty() {
-                if !full.is_empty() {
+                if session.is_none() && !full.is_empty() {
                     full.push(' ');
                 }
                 full.push_str(&text);
@@ -238,12 +255,18 @@ impl Manager {
     }
 
     /// **Live streaming transcription.** The client writes raw mono f32 LE PCM at
-    /// 16 kHz to the returned end of `pcm` (a pipe) continuously; the server reads it,
-    /// slices it into `window_ms` windows, submits each window as a `transcribe`
-    /// [`Job`] to the shared executor (so concurrent streams **batch** and are
-    /// scheduled uniformly), and streams `segment` frames back over the returned
-    /// SEQPACKET event fd as each window decodes — ending with a `done` frame carrying
-    /// the full transcript when the input reaches EOF (client closes its write end).
+    /// 16 kHz to the returned end of `pcm` (a pipe) continuously; the server reads
+    /// it, slices it into `window_ms` windows and submits them as [`Job`]s to the
+    /// shared executor (so concurrent streams **batch** and are scheduled
+    /// uniformly), streaming `segment` frames back over the returned SEQPACKET
+    /// event fd — ending with a `done` frame carrying the full transcript when the
+    /// input reaches EOF (client closes its write end).
+    ///
+    /// A model advertising `transcribe_stream` (nemotron) is driven as **one live
+    /// session**: state carries across windows (frame-synchronous, no per-window
+    /// re-encode) and each `segment` is the newly emitted text; EOF flushes the
+    /// model's tail. Other models (qwen-asr) fall back to independent per-window
+    /// `transcribe` jobs.
     ///
     /// `params` (JSON): `{"window_ms":1000,"sample_rate":16000,"prompt_id":0}`.
     /// `model` is `"nemotron"` (the streaming model) or `"qwen-asr"`.
@@ -258,13 +281,26 @@ impl Manager {
         let window_samples = (sample_rate * window_ms / 1000) as usize;
         let prompt_id = p.get("prompt_id").and_then(|v| v.as_i64()).unwrap_or(0);
 
+        // A model advertising `transcribe_stream` gets a live session (state carried
+        // across windows — frame-synchronous); anything else falls back to
+        // independent per-window `transcribe` jobs.
+        let session = self
+            .executor
+            .manifests()
+            .iter()
+            .any(|m| m.model == model && m.actions.iter().any(|a| a.name == "transcribe_stream"))
+            .then(|| {
+                static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                format!("dbus-{}-{}", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+            });
+
         let (stream, client) = crate::stream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;
         let stream = Arc::new(Mutex::new(stream));
         let executor = self.executor.clone();
         let pcm_ofd: OwnedFd = pcm.into();
         std::thread::Builder::new()
             .name("brain-asr-stream".into())
-            .spawn(move || stream_reader(pcm_ofd, executor, model, window_samples, prompt_id, stream))
+            .spawn(move || stream_reader(pcm_ofd, executor, model, window_samples, prompt_id, session, stream))
             .map_err(|e| fdo::Error::Failed(format!("spawn stream reader: {e}")))?;
 
         let job = self.executor.stats().jobs.wrapping_add(1);

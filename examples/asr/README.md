@@ -2,17 +2,23 @@
 
 Live microphone → `brain serve --dbus` → transcription events, end to end, using the
 `StreamTranscribe` method on `com.swedishembedded.Brain1`. The client streams raw
-**16 kHz mono f32 little-endian PCM** through one pipe fd; the server windows it,
-runs each window as a `transcribe` job on the shared residency **Executor** (so
-concurrent streams batch and are scheduled uniformly), and streams back `segment`
-frames as each window decodes, then a terminal `done` with the full transcript.
+**16 kHz mono f32 little-endian PCM** through one pipe fd; the server reads it and
+streams back `segment` frames, then a terminal `done` with the full transcript.
+
+For a model that advertises the `transcribe_stream` capability (nemotron), the
+whole stream is **one live session**: every window is a frame-synchronous step of
+a stateful encoder/decoder (cached attention left-context, no per-window
+re-encode), each `segment` is the *newly emitted* text, and concurrent sessions
+batch through one encoder pass on the shared residency **Executor**. For an
+offline model (qwen-asr) each window falls back to an independent `transcribe`
+job.
 
 Two models are served:
 
 | model | what | streaming |
 |---|---|---|
-| `nemotron` | NVIDIA Nemotron 3.5 ASR Streaming 0.6B (FastConformer + RNN-T) | **yes** — the streaming model; true batched forward across concurrent windows |
-| `qwen-asr` | Qwen3-ASR 1.7B (Whisper-style encoder + Qwen3 decoder) | offline, fixed audio window |
+| `nemotron` | NVIDIA Nemotron 3.5 ASR Streaming 0.6B (FastConformer + RNN-T) | **frame-synchronous session** — stateful across windows, ~0.32 s algorithmic latency, batched across concurrent sessions |
+| `qwen-asr` | Qwen3-ASR 1.7B (Whisper-style encoder + Qwen3 decoder) | offline, fixed audio window (independent per-window jobs) |
 
 ## Run it
 
