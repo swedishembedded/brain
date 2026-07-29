@@ -236,59 +236,180 @@ fn power_frames(signal: &[f64], n_fft: usize, hop: usize, window: &[f64]) -> (Ve
 
 // ─────────────────────────── Nemotron ───────────────────────────
 
+const NEM_N_FFT: usize = 512;
+const NEM_HOP: usize = 160;
+const NEM_WIN: usize = 400;
+const NEM_SR: u32 = 16000;
+const NEM_N_MELS: usize = 128;
+const NEM_PREEMPH: f64 = 0.97;
+const NEM_LOG_GUARD: f64 = 5.960_464_477_539_063e-8; // 2^-24
+
+/// The centred 400-Hann inside a 512 buffer (torch pads the window symmetrically).
+fn nemotron_window() -> Vec<f64> {
+    let h = hann(NEM_WIN, false);
+    let off = (NEM_N_FFT - NEM_WIN) / 2; // 56
+    let mut window = vec![0.0f64; NEM_N_FFT];
+    window[off..off + NEM_WIN].copy_from_slice(&h);
+    window
+}
+
+/// One Nemotron mel frame from a 512-sample pre-emphasised segment: windowed FFT →
+/// power → slaney mel dot → `ln(x + 2^-24)`. The single implementation both the
+/// offline extractor and [`NemotronMelStream`] compute frames with, so the two are
+/// bit-identical by construction.
+fn nemotron_frame(seg: &[f64], window: &[f64], fb: &[f64], out: &mut [f32]) {
+    let bins = NEM_N_FFT / 2 + 1;
+    let mut re = vec![0.0f64; NEM_N_FFT];
+    let mut im = vec![0.0f64; NEM_N_FFT];
+    for i in 0..NEM_N_FFT {
+        re[i] = seg[i] * window[i];
+    }
+    fft_any(&mut re, &mut im);
+    let mut sp = vec![0.0f64; bins];
+    for b in 0..bins {
+        sp[b] = re[b] * re[b] + im[b] * im[b];
+    }
+    for m in 0..NEM_N_MELS {
+        let mut acc = 0.0f64;
+        let row = &fb[m * bins..m * bins + bins];
+        for b in 0..bins {
+            acc += row[b] * sp[b];
+        }
+        out[m] = (acc + NEM_LOG_GUARD).ln() as f32;
+    }
+}
+
 /// `NemotronAsrStreamingFeatureExtractor`: pre-emphasis(0.97) → STFT(n_fft 512,
 /// hop 160, 400-sample Hann centred in the 512 window, constant pad, center=True)
 /// → power → slaney mel(128, fmax 8000) → ln(x + 2^-24), no normalisation, valid
 /// frames beyond `floor((L)/hop)` zeroed. Output `[n_frames, 128]` row-major.
 pub fn nemotron_logmel(samples: &[f32]) -> (Vec<f32>, usize, usize) {
-    const N_FFT: usize = 512;
-    const HOP: usize = 160;
-    const WIN: usize = 400;
-    const SR: u32 = 16000;
-    const N_MELS: usize = 128;
-    const PREEMPH: f64 = 0.97;
-    const LOG_GUARD: f64 = 5.960_464_477_539_063e-8; // 2^-24
-
     // pre-emphasis: y[0]=x[0]; y[t]=x[t]-0.97*x[t-1]
     let n = samples.len();
     let mut x = vec![0.0f64; n];
     if n > 0 {
         x[0] = samples[0] as f64;
         for t in 1..n {
-            x[t] = samples[t] as f64 - PREEMPH * samples[t - 1] as f64;
+            x[t] = samples[t] as f64 - NEM_PREEMPH * samples[t - 1] as f64;
         }
     }
 
-    // centred 400-Hann inside a 512 buffer (torch pads window symmetrically)
-    let h = hann(WIN, false);
-    let off = (N_FFT - WIN) / 2; // 56
-    let mut window = vec![0.0f64; N_FFT];
-    window[off..off + WIN].copy_from_slice(&h);
-
-    let padded = center_pad(&x, N_FFT / 2, Pad::Constant);
-    let (spec, n_frames, bins) = power_frames(&padded, N_FFT, HOP, &window);
-
-    let fb = mel_filterbank_slaney(SR, N_FFT, N_MELS, 0.0, SR as f64 / 2.0);
+    let window = nemotron_window();
+    let padded = center_pad(&x, NEM_N_FFT / 2, Pad::Constant);
+    let n_frames = if padded.len() >= NEM_N_FFT { 1 + (padded.len() - NEM_N_FFT) / NEM_HOP } else { 0 };
+    let fb = mel_filterbank_slaney(NEM_SR, NEM_N_FFT, NEM_N_MELS, 0.0, NEM_SR as f64 / 2.0);
 
     // valid length = floor((L + 2*(n_fft//2) - n_fft) / hop) = floor(L/hop)
-    let valid = n / HOP;
+    let valid = n / NEM_HOP;
 
-    let mut out = vec![0.0f32; n_frames * N_MELS];
-    for fr in 0..n_frames {
-        if fr >= valid {
-            continue; // zeroed by the attention mask in the reference
-        }
-        for m in 0..N_MELS {
-            let mut acc = 0.0f64;
-            let row = &fb[m * bins..m * bins + bins];
-            let sp = &spec[fr * bins..fr * bins + bins];
-            for b in 0..bins {
-                acc += row[b] * sp[b];
-            }
-            out[fr * N_MELS + m] = (acc + LOG_GUARD).ln() as f32;
+    let mut out = vec![0.0f32; n_frames * NEM_N_MELS];
+    for fr in 0..n_frames.min(valid) {
+        // frames >= valid stay zero (zeroed by the attention mask in the reference)
+        nemotron_frame(&padded[fr * NEM_HOP..fr * NEM_HOP + NEM_N_FFT], &window, &fb, &mut out[fr * NEM_N_MELS..(fr + 1) * NEM_N_MELS]);
+    }
+    (out, n_frames, NEM_N_MELS)
+}
+
+/// Frame-synchronous Nemotron mel front end: push 16 kHz samples as they arrive,
+/// get complete mel frames back the moment their 512-sample window is fully
+/// covered by real samples. `finish` flushes the tail using the same right
+/// zero-padding the offline extractor applies, so the concatenation of every
+/// `push`/`finish` output is **bit-identical** to `nemotron_logmel(all_samples)`
+/// restricted to its `floor(L/hop)` valid frames (the frames the encoder consumes;
+/// the offline extractor zeroes everything past them).
+pub struct NemotronMelStream {
+    /// Pre-emphasised samples from absolute index `base` on (earlier ones consumed).
+    buf: Vec<f64>,
+    base: usize,
+    /// Last raw sample (pre-emphasis carry across pushes).
+    prev: Option<f32>,
+    /// Total raw samples received.
+    total: usize,
+    /// Next mel frame index to emit.
+    next: usize,
+    window: Vec<f64>,
+    fb: Vec<f64>,
+}
+
+impl NemotronMelStream {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> NemotronMelStream {
+        NemotronMelStream {
+            buf: Vec::new(),
+            base: 0,
+            prev: None,
+            total: 0,
+            next: 0,
+            window: nemotron_window(),
+            fb: mel_filterbank_slaney(NEM_SR, NEM_N_FFT, NEM_N_MELS, 0.0, NEM_SR as f64 / 2.0),
         }
     }
-    (out, n_frames, N_MELS)
+
+    /// Mel frames emitted so far.
+    pub fn frames(&self) -> usize {
+        self.next
+    }
+
+    /// Valid frame count if the stream ended now (`floor(total/hop)`).
+    pub fn valid(&self) -> usize {
+        self.total / NEM_HOP
+    }
+
+    /// Extract frame `fr` (needs pre-emphasised indices `fr*hop-256 .. fr*hop+255`;
+    /// out-of-range indices read the centre-pad zeros).
+    fn frame(&self, fr: usize, out: &mut [f32]) {
+        let mut seg = [0.0f64; NEM_N_FFT];
+        let start = fr as i64 * NEM_HOP as i64 - (NEM_N_FFT / 2) as i64;
+        for (i, s) in seg.iter_mut().enumerate() {
+            let idx = start + i as i64;
+            if idx >= 0 && (idx as usize) < self.total {
+                *s = self.buf[idx as usize - self.base];
+            }
+        }
+        nemotron_frame(&seg, &self.window, &self.fb, out);
+    }
+
+    /// Push raw samples; returns every newly complete mel frame, `[n, 128]` row-major.
+    pub fn push(&mut self, samples: &[f32]) -> Vec<f32> {
+        for &s in samples {
+            let y = match self.prev {
+                None => s as f64,
+                Some(p) => s as f64 - NEM_PREEMPH * p as f64,
+            };
+            self.buf.push(y);
+            self.prev = Some(s);
+        }
+        self.total += samples.len();
+        // frame fr is fully real-sample-covered once index fr*hop + 256 - 1 exists
+        let mut out = Vec::new();
+        while self.next * NEM_HOP + NEM_N_FFT / 2 <= self.total {
+            let mut row = [0.0f32; NEM_N_MELS];
+            self.frame(self.next, &mut row);
+            out.extend_from_slice(&row);
+            self.next += 1;
+        }
+        // drop samples no future frame reaches (next frame reads from next*hop - 256)
+        let need = (self.next * NEM_HOP).saturating_sub(NEM_N_FFT / 2);
+        if need > self.base {
+            self.buf.drain(..need - self.base);
+            self.base = need;
+        }
+        out
+    }
+
+    /// Flush: emit the remaining frames up to `floor(total/hop)` using the offline
+    /// extractor's right zero-padding. Returns `(frames, total_valid)`.
+    pub fn finish(&mut self) -> (Vec<f32>, usize) {
+        let valid = self.valid();
+        let mut out = Vec::new();
+        while self.next < valid {
+            let mut row = [0.0f32; NEM_N_MELS];
+            self.frame(self.next, &mut row);
+            out.extend_from_slice(&row);
+            self.next += 1;
+        }
+        (out, valid)
+    }
 }
 
 // ─────────────────────────── Qwen3-ASR ───────────────────────────
@@ -428,6 +549,43 @@ fn repo_path(rel: &str) -> String {
         assert_eq!(t * mels, refm.len(), "shape {t}x{mels} vs golden {}", refm.len());
         let d = max_abs_diff(&mel, &refm);
         assert!(d < 2e-3, "nemotron log-mel maxdiff {d}");
+    }
+
+    /// The streaming front end, fed in ragged pushes, must reproduce the offline
+    /// extractor's valid frames bit-for-bit (pure math — no fixtures needed).
+    #[test]
+    fn nemotron_mel_stream_matches_offline() {
+        // deterministic pseudo-random signal, awkward length (not a hop multiple)
+        let n = 16000 + 137;
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let wav: Vec<f32> = (0..n)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((state >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+            })
+            .collect();
+        let (mel, _t, mels) = nemotron_logmel(&wav);
+        let valid = n / 160;
+
+        let mut st = NemotronMelStream::new();
+        let mut got = Vec::new();
+        // ragged push sizes crossing every boundary kind
+        let mut i = 0;
+        for (k, &sz) in [1usize, 159, 160, 161, 512, 7, 4096, 333].iter().cycle().enumerate() {
+            if i >= n {
+                break;
+            }
+            let end = (i + sz + k % 3).min(n);
+            got.extend(st.push(&wav[i..end]));
+            i = end;
+        }
+        let (tail, v) = st.finish();
+        got.extend(tail);
+        assert_eq!(v, valid, "valid frame count");
+        assert_eq!(got.len(), valid * mels, "streamed frame count");
+        for (i, (a, b)) in got.iter().zip(&mel[..valid * mels]).enumerate() {
+            assert!(a == b, "frame {} bin {}: stream {a} != offline {b}", i / mels, i % mels);
+        }
     }
 
     #[test]
