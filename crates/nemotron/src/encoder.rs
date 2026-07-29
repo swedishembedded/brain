@@ -181,8 +181,198 @@ impl<'g> Encoder<'g> {
             self.g.step(K_BIAS_ADD, &[&lin, self.wb("encoder.subsampling.linear.bias")], &[tt, cfg.hidden], tt * cfg.hidden),
         ];
         self.g.submit(&[], &steps);
-        let _ = &self.raw;
         (self.g.read(&lin, (tt * cfg.hidden) as usize), tt)
+    }
+
+    // ---- device Conformer blocks (big matmuls on device; small ops host) ----
+
+    fn rw(&self, name: &str) -> &Vec<f32> {
+        self.raw.get(name).unwrap_or_else(|| panic!("nemotron weight missing: {name}"))
+    }
+
+    /// Device matmul `[m,k]·Wᵀ → [m,n]` using the pre-uploaded weight `wname [n,k]`.
+    fn mm(&self, x: &[f32], wname: &str, m: usize, k: usize, n: usize) -> Vec<f32> {
+        let xb = self.g.storage_init("nem.mm.x", x);
+        let ob = self.g.storage((m * n) as u64);
+        self.g.submit(&[], &[self.g.step(K_MATMUL, &[&xb, self.wb(wname), &ob], &[m as u32, k as u32, n as u32], (m * n) as u32)]);
+        self.g.read(&ob, m * n)
+    }
+
+    /// Rel-pos MHA (device projections + o_proj; per-head scoring host). Mirrors
+    /// `reference::rel_pos_attention` exactly.
+    fn attn_dev(&self, hn: &[f32], pre: &str, t: usize, valid: usize) -> Vec<f32> {
+        use crate::reference::{banded_ok, rel_pos_encoding};
+        let cfg = &self.cfg;
+        let (c, heads, hd) = (cfg.hidden as usize, cfg.n_heads as usize, cfg.head_dim() as usize);
+        let scale = 1.0 / (hd as f32).sqrt();
+        let (left, right) = ((cfg.sliding_window - 1) as usize, cfg.default_lookahead as usize);
+        let q = self.mm(hn, &format!("{pre}.q_proj.weight"), t, c, c);
+        let k = self.mm(hn, &format!("{pre}.k_proj.weight"), t, c, c);
+        let v = self.mm(hn, &format!("{pre}.v_proj.weight"), t, c, c);
+        let l = 2 * t - 1;
+        let pe = rel_pos_encoding(t, c);
+        let rel_k = self.mm(&pe, &format!("{pre}.relative_k_proj.weight"), l, c, c);
+        let bu = self.rw(&format!("{pre}.bias_u"));
+        let bv = self.rw(&format!("{pre}.bias_v"));
+        let mut ctx = vec![0.0f32; t * c];
+        for h in 0..heads {
+            let (qh, kh, vh, rkh) = (
+                |i: usize, d: usize| q[i * c + h * hd + d],
+                |j: usize, d: usize| k[j * c + h * hd + d],
+                |j: usize, d: usize| v[j * c + h * hd + d],
+                |p: usize, d: usize| rel_k[p * c + h * hd + d],
+            );
+            let (bus, bvs) = (&bu[h * hd..h * hd + hd], &bv[h * hd..h * hd + hd]);
+            let mut bd_raw = vec![0.0f32; t * l];
+            for i in 0..t {
+                for pp in 0..l {
+                    let mut acc = 0.0f32;
+                    for d in 0..hd {
+                        acc += (qh(i, d) + bvs[d]) * rkh(pp, d);
+                    }
+                    bd_raw[i * l + pp] = acc;
+                }
+            }
+            let bd = crate::kernels::rel_shift_ref(&bd_raw, 1, t, l);
+            for i in 0..t {
+                let mut sc = vec![f32::NEG_INFINITY; t];
+                for j in 0..t {
+                    if j >= valid || !banded_ok(i, j, left, right) {
+                        continue;
+                    }
+                    let mut ac = 0.0f32;
+                    for d in 0..hd {
+                        ac += (qh(i, d) + bus[d]) * kh(j, d);
+                    }
+                    sc[j] = ac * scale + bd[i * l + j] * scale;
+                }
+                let mx = sc.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                let mut den = 0.0f32;
+                for s in &mut sc {
+                    *s = if s.is_finite() { (*s - mx).exp() } else { 0.0 };
+                    den += *s;
+                }
+                let inv = if den > 0.0 { 1.0 / den } else { 0.0 };
+                for d in 0..hd {
+                    let mut acc = 0.0f32;
+                    for j in 0..t {
+                        acc += sc[j] * vh(j, d);
+                    }
+                    ctx[i * c + h * hd + d] = acc * inv;
+                }
+            }
+        }
+        self.mm(&ctx, &format!("{pre}.o_proj.weight"), t, c, c)
+    }
+
+    /// Conformer conv module (device pointwise convs; GLU/depthwise/LN/SiLU host).
+    fn conv_dev(&self, hn: &[f32], pre: &str, t: usize, valid: usize) -> Vec<f32> {
+        use crate::reference::{layernorm, sigmoid, silu};
+        let (c, k) = (self.cfg.hidden as usize, self.cfg.conv_kernel as usize);
+        let pc1 = self.mm(hn, &format!("{pre}.pointwise_conv1.weight"), t, c, 2 * c);
+        let mut glu = vec![0.0f32; t * c];
+        for i in 0..valid.min(t) {
+            for j in 0..c {
+                glu[i * c + j] = pc1[i * 2 * c + j] * sigmoid(pc1[i * 2 * c + c + j]);
+            }
+        }
+        let dw = self.rw(&format!("{pre}.depthwise_conv.weight"));
+        let mut conv = vec![0.0f32; t * c];
+        for ch in 0..c {
+            for i in 0..t {
+                let mut acc = 0.0f32;
+                for kk in 0..k {
+                    let src = i as i64 - (k as i64 - 1) + kk as i64;
+                    if src >= 0 {
+                        acc += glu[src as usize * c + ch] * dw[ch * k + kk];
+                    }
+                }
+                conv[i * c + ch] = acc;
+            }
+        }
+        let mut act = layernorm(&conv, self.rw(&format!("{pre}.norm.weight")), self.rw(&format!("{pre}.norm.bias")), t, c, self.cfg.ln_eps);
+        for v in &mut act {
+            *v = silu(*v);
+        }
+        self.mm(&act, &format!("{pre}.pointwise_conv2.weight"), t, c, c)
+    }
+
+    fn ff_dev(&self, x: &[f32], pre: &str, t: usize) -> Vec<f32> {
+        use crate::reference::silu;
+        let (c, ffn) = (self.cfg.hidden as usize, self.cfg.intermediate as usize);
+        let mut h = self.mm(x, &format!("{pre}.linear1.weight"), t, c, ffn);
+        for v in &mut h {
+            *v = silu(*v);
+        }
+        self.mm(&h, &format!("{pre}.linear2.weight"), t, ffn, c)
+    }
+
+    /// One Conformer block on device. Bit-parity with `reference::conformer_block`.
+    fn block_dev(&self, h: &[f32], b: u32, t: usize, valid: usize) -> Vec<f32> {
+        use crate::reference::layernorm;
+        let c = self.cfg.hidden as usize;
+        let pre = format!("encoder.layers.{b}");
+        let ln = |x: &[f32], n: &str| layernorm(x, self.rw(&format!("{pre}.{n}.weight")), self.rw(&format!("{pre}.{n}.bias")), t, c, self.cfg.ln_eps);
+        let mut h = h.to_vec();
+        let ff1 = self.ff_dev(&ln(&h, "norm_feed_forward1"), &format!("{pre}.feed_forward1"), t);
+        for i in 0..t * c {
+            h[i] += 0.5 * ff1[i];
+        }
+        let att = self.attn_dev(&ln(&h, "norm_self_att"), &format!("{pre}.self_attn"), t, valid);
+        for i in 0..t * c {
+            h[i] += att[i];
+        }
+        let cv = self.conv_dev(&ln(&h, "norm_conv"), &format!("{pre}.conv"), t, valid);
+        for i in 0..t * c {
+            h[i] += cv[i];
+        }
+        let ff2 = self.ff_dev(&ln(&h, "norm_feed_forward2"), &format!("{pre}.feed_forward2"), t);
+        for i in 0..t * c {
+            h[i] += 0.5 * ff2[i];
+        }
+        ln(&h, "norm_out")
+    }
+
+    /// Full encoder: mel → subsampling → 24 blocks → prompt/encoder projectors →
+    /// pooler `[T, decoder_hidden]`. `mel_valid` real mel frames, `prompt_id` language.
+    pub fn encode(&self, mel: &[f32], t: u32, mel_valid: u32, prompt_id: usize) -> (Vec<f32>, u32) {
+        let cfg = &self.cfg;
+        let (sub, tt) = self.subsampling(mel, t, mel_valid);
+        let valid = cfg.subsampled_len(mel_valid) as usize;
+        let tt = tt as usize;
+        let mut h = sub;
+        for b in 0..cfg.n_layers {
+            h = self.block_dev(&h, b, tt, valid);
+        }
+        // projectors (device matmuls + host bias/relu/one-hot)
+        let (c, np, pi, dh) = (cfg.hidden as usize, cfg.num_prompts as usize, cfg.prompt_intermediate as usize, cfg.decoder_hidden as usize);
+        let mut cat = vec![0.0f32; tt * (c + np)];
+        for i in 0..tt {
+            cat[i * (c + np)..i * (c + np) + c].copy_from_slice(&h[i * c..i * c + c]);
+            cat[i * (c + np) + c + prompt_id] = 1.0;
+        }
+        let mut f1 = self.mm(&cat, "prompt_projector.linear_1.weight", tt, c + np, pi);
+        let b1 = self.rw("prompt_projector.linear_1.bias");
+        for i in 0..tt {
+            for j in 0..pi {
+                f1[i * pi + j] = (f1[i * pi + j] + b1[j]).max(0.0);
+            }
+        }
+        let mut fused = self.mm(&f1, "prompt_projector.linear_2.weight", tt, pi, c);
+        let b2 = self.rw("prompt_projector.linear_2.bias");
+        for i in 0..tt {
+            for j in 0..c {
+                fused[i * c + j] += b2[j];
+            }
+        }
+        let mut pooler = self.mm(&fused, "encoder_projector.weight", tt, c, dh);
+        let eb = self.rw("encoder_projector.bias");
+        for i in 0..tt {
+            for j in 0..dh {
+                pooler[i * dh + j] += eb[j];
+            }
+        }
+        (pooler, valid as u32)
     }
 }
 
@@ -225,5 +415,31 @@ mod tests {
         let d = sub.iter().zip(&refsub).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
         eprintln!("subsampling maxdiff {d}");
         assert!(d < 2e-3, "subsampling maxdiff {d}");
+    }
+
+    #[test]
+    fn device_encoder_matches_reference() {
+        if !Path::new(&format!("{GOLD}/pooler.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
+            eprintln!("skipping: goldens/checkpoint absent");
+            return;
+        }
+        let cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
+        let mel = read_f32(&format!("{GOLD}/input_features.f32"));
+        let nmel = cfg.num_mel_bins as usize;
+        let t = (mel.len() / nmel) as u32;
+        let mel_valid = (0..t as usize).filter(|&i| mel[i * nmel..(i + 1) * nmel].iter().any(|&v| v != 0.0)).count() as u32;
+        let ref_pool = read_f32(&format!("{GOLD}/pooler.f32"));
+        let dh = cfg.decoder_hidden as usize;
+
+        let w = crate::import::load_tensors(Path::new(CKPT)).expect("load");
+        let g = Gpu::new_cpu(encoder_pipelines());
+        let enc = Encoder::new(&g, cfg, &w);
+        let t0 = std::time::Instant::now();
+        let (pool, valid) = enc.encode(&mel, t, mel_valid, 0);
+        let elapsed = t0.elapsed();
+        let n = valid as usize * dh;
+        let d = pool[..n].iter().zip(&ref_pool[..n]).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        eprintln!("device encoder pooler maxdiff {d} (valid {valid}) in {:?}", elapsed);
+        assert!(d < 5e-3, "device encoder maxdiff {d}");
     }
 }

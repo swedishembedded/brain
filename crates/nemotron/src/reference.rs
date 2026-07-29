@@ -16,10 +16,10 @@ use crate::config::NemotronConfig;
 
 type W = HashMap<String, Vec<f32>>;
 
-fn sigmoid(x: f32) -> f32 {
+pub(crate) fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
-fn silu(x: f32) -> f32 {
+pub(crate) fn silu(x: f32) -> f32 {
     x * sigmoid(x)
 }
 
@@ -40,7 +40,7 @@ fn matmul_nt(x: &[f32], w: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
 }
 
 /// Row-wise LayerNorm over the last dim `c` (torch nn.LayerNorm), in place-returning.
-fn layernorm(x: &[f32], g: &[f32], b: &[f32], t: usize, c: usize, eps: f32) -> Vec<f32> {
+pub(crate) fn layernorm(x: &[f32], g: &[f32], b: &[f32], t: usize, c: usize, eps: f32) -> Vec<f32> {
     let mut y = vec![0.0f32; t * c];
     for i in 0..t {
         let row = &x[i * c..i * c + c];
@@ -65,7 +65,7 @@ fn feed_forward(x: &[f32], w1: &[f32], w2: &[f32], t: usize, c: usize, ffn: usiz
 
 /// Relative positional encoding `[2T-1, C]`: interleaved sin/cos over positions
 /// `[T-1 .. -(T-1)]`, `inv_freq[i] = 10000^(-2i/C)`.
-fn rel_pos_encoding(t: usize, c: usize) -> Vec<f32> {
+pub(crate) fn rel_pos_encoding(t: usize, c: usize) -> Vec<f32> {
     let half = c / 2;
     let inv: Vec<f32> = (0..half).map(|i| (10000f32).powf(-(2.0 * i as f32) / c as f32)).collect();
     let l = 2 * t - 1;
@@ -83,7 +83,7 @@ fn rel_pos_encoding(t: usize, c: usize) -> Vec<f32> {
 
 /// `chunked_limited` validity: query `i` may attend key `j` iff
 /// `0 <= i/chunk - j/chunk <= left_ctx_chunks`, `chunk = right+1`.
-fn banded_ok(i: usize, j: usize, left: usize, right: usize) -> bool {
+pub(crate) fn banded_ok(i: usize, j: usize, left: usize, right: usize) -> bool {
     let chunk = right + 1;
     let left_chunks = left / chunk;
     let (qc, kc) = (i / chunk, j / chunk);
