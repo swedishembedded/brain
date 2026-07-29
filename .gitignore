@@ -46,3 +46,9 @@ out/depth.ppm
 
 # Test fixtures (checkpoints/goldens/audio) — populated by `make fetch/testdata`, never committed.
 /testdata/
+
+# Binary model tensors must NEVER be committed — they are multi-MB blobs that bloat
+# history irreversibly. Test goldens are regenerated/fetched, not tracked.
+*.safetensors
+*.gguf
+*.ckpt
