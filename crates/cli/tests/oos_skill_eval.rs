@@ -31,6 +31,10 @@
 //!   OOS_CTX=200  OOS_HORIZON=5  OOS_STEP=5  OOS_START=2026-01-01
 //!   OOS_NSAMPLES=16 (kronos sample count)  OOS_MAXORIG=0(=all)  OOS_WARMUP=2
 //!   OOS_LATENCY_ONLY=0  (1 = warmup + a few timed forecasts per model, no eval)
+//!   OOS_SHARD="i/n" — evaluate only names with sorted-index ≡ i (mod n); shard
+//!                     dumps merge via tools/merge_records.py --concat
+//!   KRONOS_FT     — fine-tuned decoder .weights, evaluated as model "kronos_ft"
+//!                   alongside base kronos in the same sweep (paired comparison)
 //!   BRAIN_DEVICE  — cpu|gpu|vulkan (recorded in meta; selects the backend)
 
 use forecast::{
@@ -98,6 +102,18 @@ fn build_models() -> Vec<(String, Box<dyn ForecastModel>)> {
                 eprintln!("loaded kronos from {t} + {d}");
             }
             Err(e) => eprintln!("kronos load failed: {e}"),
+        }
+        // KRONOS_FT: a fine-tuned decoder evaluated alongside the base in the
+        // SAME process/sweep — identical origins and panels by construction,
+        // so the paired per-week comparison is apples-to-apples.
+        if let Ok(ft) = std::env::var("KRONOS_FT") {
+            match kronos::KronosForecaster::load(&t, &ft) {
+                Ok(m) => {
+                    models.push(("kronos_ft".into(), Box::new(m)));
+                    eprintln!("loaded kronos_ft from {t} + {ft}");
+                }
+                Err(e) => eprintln!("kronos_ft load failed: {e}"),
+            }
         }
     }
     if let Ok(w) = std::env::var("FINCAST_WEIGHTS") {
@@ -204,6 +220,16 @@ fn oos_skill_eval() {
         .filter(|t| !t.starts_with('^') && !t.eq_ignore_ascii_case("gspc"))
         .collect();
     tickers.sort();
+    // OOS_SHARD="i/n": deterministic name-shard (index modulo after the sort)
+    // for multi-process sweeps. Records stay date-keyed, so shard dumps merge
+    // back into full cross-sections (tools/merge_records.py --concat).
+    if let Ok(shard) = std::env::var("OOS_SHARD") {
+        let p: Vec<usize> = shard.split('/').filter_map(|x| x.parse().ok()).collect();
+        assert!(p.len() == 2 && p[1] > 0 && p[0] < p[1], "OOS_SHARD must be i/n with i<n, got {shard:?}");
+        let (i, n) = (p[0], p[1]);
+        tickers = tickers.into_iter().enumerate().filter(|(j, _)| j % n == i).map(|(_, t)| t).collect();
+        eprintln!("shard {i}/{n}: {} names", tickers.len());
+    }
     let series: Vec<Series> = tickers.iter().filter_map(|t| load_csv(&format!("{data}/{t}.csv"), t)).collect();
     assert!(series.len() >= 3, "need >=3 tickers, got {}", series.len());
     eprintln!("universe: {} names; device={device}; ctx={ctx_len} horizon={horizon} step={step} nsamp={nsamples}", series.len());
@@ -335,7 +361,9 @@ fn oos_skill_eval() {
                 }
             }
         }
-        if !latency_only {
+        // Checkpoint every 10 origins (not every origin: re-serializing the full
+        // accumulated record list per origin is O(origins²) at 480-name scale).
+        if !latency_only && (oi + 1) % 10 == 0 {
             write_json(&outs, oi + 1);
         }
         eprintln!("[{}/{}] week {date} done ({:.1}s elapsed)", oi + 1, n_origins, t0.elapsed().as_secs_f32());
