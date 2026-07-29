@@ -291,6 +291,158 @@ pub fn chunked_bidir_fwd(
     }
 }
 
+/// Span-wise fused flash attention (`flash_attn_bidir`): one dispatch per
+/// span replaces the whole scores/softmax/apply chain with an online-softmax
+/// tiled kernel — O(t·hd) memory AND the tuned inner loops, where the chunked
+/// cross trio materializes `[H, chunk, t]` slabs through naive kernels.
+/// Forward-only and workgroup-cooperative: callers MUST gate on
+/// `DeviceCaps::workgroup_reductions` (false on the CPU JIT) and fall back to
+/// [`chunked_bidir_fwd`]. `head_dim` ≤ 128 (the kernel's register budget).
+#[allow(clippy::too_many_arguments)]
+pub fn flash_bidir_fwd(
+    g: &Gpu,
+    flash_idx: usize,
+    heads: u32,
+    head_dim: u32,
+    d_out: u32,
+    qkv: &DeviceBuffer,
+    stride: u32,
+    q_off: u32,
+    k_off: u32,
+    v_off: u32,
+    ctx: &DeviceBuffer,
+    spans: &[(u32, u32)],
+    steps: &mut Vec<Step>,
+) {
+    assert!(head_dim <= 128, "flash_attn_bidir: head_dim {head_dim} > 128");
+    const BR: u32 = 64; // must match BR in flash_attn_bidir.wgsl
+    for &(row0, len) in spans {
+        let nwg = heads * len.div_ceil(BR);
+        steps.push(g.step_sliced(
+            flash_idx,
+            &[qkv, ctx],
+            &[(row0 as u64 * stride as u64, 0), (row0 as u64 * d_out as u64, 0)],
+            &[1, heads, len, head_dim, stride, q_off, k_off, v_off, d_out],
+            nwg * BR,
+        ));
+    }
+}
+
+/// Kernel indices for GEMM attention (see [`gemm_bidir_fwd`]).
+#[derive(Clone, Copy)]
+pub struct GemmAttnIds {
+    pub head_pack: usize,
+    pub head_pack_t: usize,
+    pub head_unpack: usize,
+    /// `softmax_rows` — workgroup-per-row softmax over the `[H·chunk, len]`
+    /// slab (GPU-only; the GEMM path is already gated on cooperative devices).
+    pub softmax_rows: usize,
+    pub matmul: usize,
+    pub matmul_reg2: usize,
+}
+
+/// Query-chunked bidirectional attention as REAL GEMMs: per-head packed
+/// operands drive the register-tiled matmul instead of the naive
+/// one-thread-per-score kernels. Measured motivation: at t=8192 the naive
+/// trio (and the fused flash kernel — a memory escape hatch, not a fast
+/// path) left a P40 at ~2% of peak; the same insight already made the CPU
+/// fast paths 7× (they route these kernels to the native GEMM).
+///
+/// Layout: `packs` holds the three per-head-contiguous operands per span —
+/// q (scaled by 1/√hd) at 0, k at `len·d_out`, vᵀ at `2·len·d_out` — with
+/// GQA replication folded into the pack (`group` reads the NARROW k/v
+/// projections; no expanded buffer exists). Scores/probs slabs stay
+/// `[H, chunk, len]`; `ctx_pack` collects per-head context, unpacked into
+/// the row-major `[rows, d_out]` `ctx` at the end of each span.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_bidir_fwd(
+    g: &Gpu,
+    k: &GemmAttnIds,
+    heads: u32,
+    head_dim: u32,
+    group: u32,
+    q: &DeviceBuffer,
+    q_stride: u32,
+    kv: (&DeviceBuffer, &DeviceBuffer),
+    kv_stride: u32,
+    ctx: &DeviceBuffer,
+    d_out: u32,
+    packs: &DeviceBuffer,
+    ctx_pack: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    spans: &[(u32, u32)],
+    chunk: u32,
+    force_naive: bool,
+    steps: &mut Vec<Step>,
+) {
+    let hd = head_dim;
+    let scale = 1.0 / (hd as f32).sqrt();
+    let (kbuf, vbuf) = kv;
+    for &(row0, len) in spans {
+        let seg = len as u64 * d_out as u64; // one pack region, f32 words
+        let total = heads * len * hd;
+        // Pack q (scale folded), k, vᵀ for this span.
+        steps.push(g.step_sliced(
+            k.head_pack,
+            &[q, packs],
+            &[(row0 as u64 * q_stride as u64, 0), (0, 0)],
+            &[len, heads, 1, hd, q_stride, 0, f(scale)],
+            total,
+        ));
+        steps.push(g.step_sliced(
+            k.head_pack,
+            &[kbuf, packs],
+            &[(row0 as u64 * kv_stride as u64, 0), (seg, 0)],
+            &[len, heads, group, hd, kv_stride, 0, f(1.0)],
+            total,
+        ));
+        steps.push(g.step_sliced(
+            k.head_pack_t,
+            &[vbuf, packs],
+            &[(row0 as u64 * kv_stride as u64, 0), (2 * seg, 0)],
+            &[len, heads, group, hd, kv_stride, 0, f(1.0)],
+            total,
+        ));
+        let mut q0 = 0u32;
+        while q0 < len {
+            let qn = chunk.min(len - q0);
+            for h in 0..heads {
+                let (mk, mt) = pick_gemm(qn as usize, len as usize, k.matmul, k.matmul_reg2, force_naive);
+                // scores[h] = q_pack[h][q0..q0+qn] · k_pack[h]ᵀ   ([qn,hd]·[len,hd]ᵀ)
+                steps.push(g.step_sliced(
+                    mk,
+                    &[packs, packs, scores],
+                    &[((h * len + q0) as u64 * hd as u64, 0), (seg + h as u64 * len as u64 * hd as u64, 0), (h as u64 * qn as u64 * len as u64, 0)],
+                    &[qn, hd, len],
+                    mt,
+                ));
+            }
+            steps.push(g.step(k.softmax_rows, &[scores, probs], &[heads * qn, len], heads * qn * 64));
+            for h in 0..heads {
+                let (mk, mt) = pick_gemm(qn as usize, hd as usize, k.matmul, k.matmul_reg2, force_naive);
+                // ctx_pack[h][q0..] = probs[h] · V[h]   (A·Bᵀ with B = vᵀ[hd,len])
+                steps.push(g.step_sliced(
+                    mk,
+                    &[probs, packs, ctx_pack],
+                    &[(h as u64 * qn as u64 * len as u64, 0), (2 * seg + h as u64 * hd as u64 * len as u64, 0), ((h * len + q0) as u64 * hd as u64, 0)],
+                    &[qn, len, hd],
+                    mt,
+                ));
+            }
+            q0 += qn;
+        }
+        // Scatter the span's per-head context back to row-major [len, d_out].
+        steps.push(g.step_sliced(
+            k.head_unpack,
+            &[ctx_pack, ctx],
+            &[(0, 0), (row0 as u64 * d_out as u64, 0)],
+            &[len, heads, hd, d_out, 0],
+            total,
+        ));
+    }
+}
+
 /// Kernel indices for the query-chunked bidirectional backward: the cross
 /// forward pair recomputes each chunk's scores/probs (nothing T×T is cached),
 /// `dscores`/`dq` assign chunk-local rows, and the ACCUMULATING `dk_acc`/

@@ -96,6 +96,11 @@ const DQ_CROSS: usize = 47;
 const DK_CROSS_ACC: usize = 48;
 const DV_CROSS_ACC: usize = 49;
 const ROW_SCATTER: usize = 50;
+const FLASH_BIDIR: usize = 51;
+const HEAD_PACK: usize = 52;
+const HEAD_PACK_T: usize = 53;
+const HEAD_UNPACK: usize = 54;
+const SOFTMAX_ROWS: usize = 55;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed_tile", kernels::EMBED_TILE),
@@ -149,6 +154,11 @@ const PIPELINES: &[(&str, &str)] = &[
     ("attn_bwd_dk_cross_acc", kernels::ATTN_BWD_DK_CROSS_ACC),
     ("attn_bwd_dv_cross_acc", kernels::ATTN_BWD_DV_CROSS_ACC),
     ("row_scatter", kernels::ROW_SCATTER),
+    ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
+    ("head_pack", kernels::HEAD_PACK),
+    ("head_pack_t", kernels::HEAD_PACK_T),
+    ("head_unpack", kernels::HEAD_UNPACK),
+    ("softmax_rows", kernels::SOFTMAX_ROWS),
 ];
 
 fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
@@ -223,6 +233,8 @@ enum Regime {
         scores: DeviceBuffer,
         probs: DeviceBuffer,
         chunk: u32,
+        /// Per-head context accumulator for GEMM attention (`[H, t, hd]`).
+        ctx_pack: DeviceBuffer,
         probe_cap: u32,
         probe_idx: DeviceBuffer,
         probe_h: DeviceBuffer,
@@ -533,6 +545,7 @@ impl Lfm {
                         scores: st(slab),
                         probs: st(slab),
                         chunk,
+                        ctx_pack: st(n * hq),
                         probe_cap,
                         probe_idx: gpu.buffer("probe_idx", cap * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST),
                         probe_h: st(cap * d),
@@ -735,7 +748,7 @@ impl Lfm {
 
     /// Attention-mixer projections + QK-norm + RoPE + GQA→MHA expansion into
     /// the fused qkv (everything before the score/apply kernels).
-    fn emit_attn_qkv(&self, s: &mut Vec<Step>, l: usize, xn1: &DeviceBuffer, ab: &AttnBufs, b_use: u32) {
+    fn emit_attn_qkv(&self, s: &mut Vec<Step>, l: usize, xn1: &DeviceBuffer, ab: &AttnBufs, b_use: u32, build_fused: bool) {
         let c = &self.cfg;
         let n = b_use * self.t;
         let (d, hd, hq, hkv) = (c.d_model, c.head_dim, c.q_dim(), c.kv_dim());
@@ -754,10 +767,14 @@ impl Lfm {
         s.push(block::rmsnorm_eps_fwd(&self.gpu, RMSNORM_EPS, &ab.k_pre, self.w(&p("attn.k_norm.weight")), &ab.k, hd, n * nkv, eps));
         s.push(self.gpu.step(ROPE, &[&ab.q], &[n, nh, hd, hq, 0, self.t, gpu_core::f(theta)], n * nh * (hd / 2)));
         s.push(self.gpu.step(ROPE, &[&ab.k], &[n, nkv, hd, hkv, 0, self.t, gpu_core::f(theta)], n * nkv * (hd / 2)));
-        // GQA→MHA: q copies (group 1), k/v replicate (group `group`).
-        s.push(block::kv_expand_fwd(&self.gpu, KV_EXPAND, &ab.q, &ab.qkv, n, nh, 1, hd, 3 * d, 0));
-        s.push(block::kv_expand_fwd(&self.gpu, KV_EXPAND, &ab.k, &ab.qkv, n, nh, group, hd, 3 * d, d));
-        s.push(block::kv_expand_fwd(&self.gpu, KV_EXPAND, &ab.v, &ab.qkv, n, nh, group, hd, 3 * d, 2 * d));
+        // GQA→MHA fused buffer for the trio consumers; the GEMM-attention path
+        // packs straight from q/k/v (folding the replication) and reuses `qkv`
+        // as pack space, so it skips these.
+        if build_fused {
+            s.push(block::kv_expand_fwd(&self.gpu, KV_EXPAND, &ab.q, &ab.qkv, n, nh, 1, hd, 3 * d, 0));
+            s.push(block::kv_expand_fwd(&self.gpu, KV_EXPAND, &ab.k, &ab.qkv, n, nh, group, hd, 3 * d, d));
+            s.push(block::kv_expand_fwd(&self.gpu, KV_EXPAND, &ab.v, &ab.qkv, n, nh, group, hd, 3 * d, 2 * d));
+        }
     }
 
     /// Conv-mixer body: in_proj thirds, gating, depthwise conv, out into `gated`.
@@ -852,7 +869,8 @@ impl Lfm {
             match ty {
                 LayerType::Attention => {
                     let ab = attn.expect("attn bufs");
-                    self.emit_attn_qkv(&mut s, l, &common.xn1, ab, b_use);
+                    let gemm_attn = matches!(&self.regime, Regime::Chunked { .. }) && self.gpu.caps().workgroup_reductions;
+                    self.emit_attn_qkv(&mut s, l, &common.xn1, ab, b_use, !gemm_attn);
                     match &self.regime {
                         Regime::Materialized { scores, .. } => match self.train_chunk {
                             None => {
@@ -867,13 +885,34 @@ impl Lfm {
                                 );
                             }
                         },
-                        Regime::Chunked { scores, probs, chunk, .. } => {
+                        Regime::Chunked { scores, probs, chunk, ctx_pack, .. } => {
                             let spans: Vec<(u32, u32)> = (0..b_use).map(|i| (i * self.t, self.t)).collect();
-                            let ids = CrossIds { scores: SCORES_CROSS, softmax: SOFTMAX_CROSS, apply: APPLY_CROSS };
-                            block::chunked_bidir_fwd(
-                                &self.gpu, &ids, c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
-                                &ab.ctx, scores, probs, &spans, *chunk, &mut s,
-                            );
+                            // GEMM attention on cooperative devices (register-
+                            // tiled matmuls over per-head packs, GQA folded into
+                            // the pack — measured ~8x over the naive trio and the
+                            // flash kernel at 8k on a P40); the chunked cross trio
+                            // is the CPU-JIT path (its native fast paths own that
+                            // regime and read the fused qkv).
+                            if self.gpu.caps().workgroup_reductions {
+                                let ids = block::GemmAttnIds {
+                                    head_pack: HEAD_PACK,
+                                    head_pack_t: HEAD_PACK_T,
+                                    head_unpack: HEAD_UNPACK,
+                                    softmax_rows: SOFTMAX_ROWS,
+                                    matmul: MATMUL,
+                                    matmul_reg2: MATMUL_REG2,
+                                };
+                                block::gemm_bidir_fwd(
+                                    &self.gpu, &ids, c.n_heads, c.head_dim, c.group(), &ab.q, hq, (&ab.k, &ab.v),
+                                    c.kv_dim(), &ab.ctx, hq, &ab.qkv, ctx_pack, scores, probs, &spans, *chunk, false, &mut s,
+                                );
+                            } else {
+                                let ids = CrossIds { scores: SCORES_CROSS, softmax: SOFTMAX_CROSS, apply: APPLY_CROSS };
+                                block::chunked_bidir_fwd(
+                                    &self.gpu, &ids, c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d, 2 * d,
+                                    &ab.ctx, scores, probs, &spans, *chunk, &mut s,
+                                );
+                            }
                         }
                     }
                     let (mk, mt) = linear_kernel(n as usize, d as usize);

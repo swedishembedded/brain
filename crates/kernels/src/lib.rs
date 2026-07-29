@@ -338,6 +338,12 @@ pub const GRAD_SCALE: &str = include_str!("../wgsl/grad_scale.wgsl");
 pub const GRAD_SCALE_BUF: &str = include_str!("../wgsl/grad_scale_buf.wgsl");
 /// `wgsl/gradnorm_sq.wgsl`
 pub const GRADNORM_SQ: &str = include_str!("../wgsl/gradnorm_sq.wgsl");
+/// `wgsl/head_pack.wgsl`
+pub const HEAD_PACK: &str = include_str!("../wgsl/head_pack.wgsl");
+/// `wgsl/head_pack_t.wgsl`
+pub const HEAD_PACK_T: &str = include_str!("../wgsl/head_pack_t.wgsl");
+/// `wgsl/head_unpack.wgsl`
+pub const HEAD_UNPACK: &str = include_str!("../wgsl/head_unpack.wgsl");
 /// `wgsl/im2col.wgsl`
 pub const IM2COL: &str = include_str!("../wgsl/im2col.wgsl");
 /// `wgsl/kv_append.wgsl`
@@ -584,6 +590,8 @@ pub const SNAKE_BETA: &str = include_str!("../wgsl/snake_beta.wgsl");
 pub const SOFTMAX_K: &str = include_str!("../wgsl/softmax_k.wgsl");
 /// `wgsl/softmax_k_dx.wgsl`
 pub const SOFTMAX_K_DX: &str = include_str!("../wgsl/softmax_k_dx.wgsl");
+/// `wgsl/softmax_rows.wgsl`
+pub const SOFTMAX_ROWS: &str = include_str!("../wgsl/softmax_rows.wgsl");
 /// `wgsl/sort_hist.wgsl`
 pub const SORT_HIST: &str = include_str!("../wgsl/sort_hist.wgsl");
 /// `wgsl/sort_scatter.wgsl`
@@ -808,6 +816,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("grad_scale", GRAD_SCALE),
     ("grad_scale_buf", GRAD_SCALE_BUF),
     ("gradnorm_sq", GRADNORM_SQ),
+    ("head_pack", HEAD_PACK),
+    ("head_pack_t", HEAD_PACK_T),
+    ("head_unpack", HEAD_UNPACK),
     ("im2col", IM2COL),
     ("kv_append", KV_APPEND),
     ("kv_expand", KV_EXPAND),
@@ -931,6 +942,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("snake_beta", SNAKE_BETA),
     ("softmax_k", SOFTMAX_K),
     ("softmax_k_dx", SOFTMAX_K_DX),
+    ("softmax_rows", SOFTMAX_ROWS),
     ("sort_hist", SORT_HIST),
     ("sort_scatter", SORT_SCATTER),
     ("splat_bwd_count", SPLAT_BWD_COUNT),
