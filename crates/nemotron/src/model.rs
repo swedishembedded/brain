@@ -39,8 +39,32 @@ impl NemotronAsr {
         let enc = Encoder::new(&g, self.cfg, &self.weights);
         let (pooler, valid) = enc.encode(&mel, t as u32, mel_valid, prompt_id);
 
-        // 3. RNN-T greedy decode
-        crate::reference::rnnt_greedy(&pooler, valid as usize, &self.weights, &self.cfg)
+        // 3. RNN-T greedy decode (LSTM predictor host / m=1; joint head on device)
+        self.rnnt_greedy(&enc, &pooler, valid as usize)
+    }
+
+    fn rnnt_greedy(&self, enc: &Encoder, pooler: &[f32], valid: usize) -> Vec<u32> {
+        use crate::reference::{lstm_predict, LstmState};
+        let cfg = &self.cfg;
+        let dh = cfg.decoder_hidden as usize;
+        let blank = cfg.blank_token_id;
+        let mut st = LstmState::new(cfg.num_decoder_layers as usize, dh);
+        let mut dec = lstm_predict(blank, &mut st, &self.weights, cfg);
+        let (mut frame, mut symbols) = (0usize, 0u32);
+        let mut emitted = Vec::new();
+        while frame < valid {
+            let logits = enc.joint_logits(&pooler[frame * dh..frame * dh + dh], &dec);
+            let token = logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i as u32).unwrap();
+            if token == blank || symbols >= cfg.max_symbols_per_step {
+                frame += 1;
+                symbols = 0;
+            } else {
+                emitted.push(token);
+                symbols += 1;
+                dec = lstm_predict(token, &mut st, &self.weights, cfg);
+            }
+        }
+        emitted
     }
 }
 

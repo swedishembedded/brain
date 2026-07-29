@@ -333,6 +333,20 @@ impl<'g> Encoder<'g> {
         ln(&h, "norm_out")
     }
 
+    /// RNN-T joint logits for one (encoder frame, decoder state) pair, on device:
+    /// `head(relu(enc_t + dec_u))` → `[vocab]`. The head matmul (640→13088) is the
+    /// dominant RNN-T cost, so it runs on the device.
+    pub fn joint_logits(&self, enc_t: &[f32], dec_u: &[f32]) -> Vec<f32> {
+        let dh = self.cfg.decoder_hidden as usize;
+        let sum: Vec<f32> = (0..dh).map(|j| (enc_t[j] + dec_u[j]).max(0.0)).collect(); // relu
+        let mut logits = self.mm(&sum, "joint.head.weight", 1, dh, self.cfg.vocab as usize);
+        let jb = self.rw("joint.head.bias");
+        for (l, b) in logits.iter_mut().zip(jb) {
+            *l += b;
+        }
+        logits
+    }
+
     /// Full encoder: mel → subsampling → 24 blocks → prompt/encoder projectors →
     /// pooler `[T, decoder_hidden]`. `mel_valid` real mel frames, `prompt_id` language.
     pub fn encode(&self, mel: &[f32], t: u32, mel_valid: u32, prompt_id: usize) -> (Vec<f32>, u32) {

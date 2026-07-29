@@ -292,7 +292,7 @@ pub struct LstmState {
 }
 
 impl LstmState {
-    fn new(layers: usize, hidden: usize) -> LstmState {
+    pub fn new(layers: usize, hidden: usize) -> LstmState {
         LstmState { h: vec![vec![0.0; hidden]; layers], c: vec![vec![0.0; hidden]; layers] }
     }
 }
