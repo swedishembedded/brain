@@ -384,3 +384,123 @@ mod tests {
         assert_eq!(d.artifact_unit, "audio_chunk");
     }
 }
+
+// ===================== residency executor seam =====================
+
+/// Drives a [`residency::Executor`] — the scheduler + budgets + per-device
+/// lanes that production serving (D-Bus) uses — so concurrency numbers reflect
+/// brain's real batching/placement, not a synchronous provider mutex.
+///
+/// `submit` hands the job to the executor immediately (arrivals are genuinely async);
+/// emissions come back on a channel from the job callbacks: the first
+/// `Progress` marks `Admitted` (the lane started the group this job is in),
+/// the reply marks `Artifact` + `Done` (one-shot models) or `Failed`.
+/// `step` drains the channel; the executor's own threads make the progress.
+pub struct ExecutorTarget {
+    exec: residency::Executor,
+    info: TargetInfo,
+    model: String,
+    action: String,
+    build: Box<dyn Fn(&PerfRequest) -> Invocation>,
+    rx: std::sync::mpsc::Receiver<Emission>,
+    tx: std::sync::mpsc::Sender<Emission>,
+    inflight: std::collections::HashSet<ReqId>,
+    next: ReqId,
+}
+
+impl ExecutorTarget {
+    pub fn new(
+        exec: residency::Executor,
+        model: &str,
+        action: &str,
+        artifact_unit: &str,
+        info_extra: Vec<(String, serde_json::Value)>,
+        build: Box<dyn Fn(&PerfRequest) -> Invocation>,
+    ) -> ExecutorTarget {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut info = TargetInfo::new(model, artifact_unit);
+        info.config = info_extra;
+        ExecutorTarget {
+            exec,
+            info,
+            model: model.to_string(),
+            action: action.to_string(),
+            build,
+            rx,
+            tx,
+            inflight: std::collections::HashSet::new(),
+            next: 1,
+        }
+    }
+}
+
+impl PerfTarget for ExecutorTarget {
+    fn describe(&self) -> TargetInfo {
+        self.info.clone()
+    }
+
+    fn submit(&mut self, req: PerfRequest) -> ReqId {
+        let id = self.next;
+        self.next += 1;
+        self.inflight.insert(id);
+        let inv = (self.build)(&req);
+        let tx_p = self.tx.clone();
+        let tx_r = self.tx.clone();
+        let mut admitted = false;
+        self.exec.submit(residency::executor::Job {
+            model: self.model.clone(),
+            action: self.action.clone(),
+            inv,
+            on_progress: Box::new(move |_p| {
+                if !admitted {
+                    admitted = true;
+                    let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted });
+                }
+            }),
+            reply: Box::new(move |r| {
+                let at = Instant::now();
+                match r {
+                    Ok(_) => {
+                        let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Artifact });
+                        let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Done });
+                    }
+                    Err(_) => {
+                        let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Failed });
+                    }
+                }
+            }),
+        });
+        id
+    }
+
+    fn step(&mut self, out: &mut Vec<Emission>) -> bool {
+        // The executor's threads do the work; drain what they emitted. Block
+        // briefly when something is in flight so the driver doesn't spin.
+        if self.inflight.is_empty() {
+            while let Ok(e) = self.rx.try_recv() {
+                out.push(e);
+            }
+            return false;
+        }
+        match self.rx.recv_timeout(std::time::Duration::from_millis(2)) {
+            Ok(e) => {
+                if matches!(e.kind, EmissionKind::Done | EmissionKind::Failed) {
+                    self.inflight.remove(&e.id);
+                }
+                out.push(e);
+            }
+            Err(_) => {}
+        }
+        while let Ok(e) = self.rx.try_recv() {
+            if matches!(e.kind, EmissionKind::Done | EmissionKind::Failed) {
+                self.inflight.remove(&e.id);
+            }
+            out.push(e);
+        }
+        !self.inflight.is_empty()
+    }
+
+    fn busy(&self) -> bool {
+        !self.inflight.is_empty()
+    }
+}

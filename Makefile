@@ -480,6 +480,18 @@ perf: release
 perf/%: release
 	$(BRAIN) perf run $* --target $(PERF_TARGET) --workload $(PERF_WORKLOAD) --ladder $(PERF_LADDER) --seed $(SEED)
 
+# LFM2.5-Encoder concurrency benchmark, standalone: the residency-executor
+# target (real scheduler + budgets + lanes + equal-length batching) at 8k
+# context. LFM_WEIGHTS/LFM_TOKENIZER select the model (230m/350m).
+LFM_WEIGHTS ?= out/lfm-230m.weights
+LFM_TOKENIZER ?= /data/workspace/resources/lfm/LFM2.5-Encoder-230M/tokenizer.json
+LFM_INPUT ?= 8192
+perf/lfm: release
+	@set -e; for s in latency sweep; do \
+		$(BRAIN) perf run $$s --target lfm:$(LFM_WEIGHTS):$(LFM_TOKENIZER) \
+			--input $(LFM_INPUT) --output 1 --ladder $(PERF_LADDER) --seed $(SEED); \
+	done
+
 # Leaderboard over every perf artifact. Refuses to rank across artifact units,
 # excludes runs whose correctness gate failed, and warns on differing axes.
 perf/compare: release

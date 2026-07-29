@@ -435,10 +435,65 @@ fn build_target(spec: &str, workload: &str) -> Result<Box<dyn PerfTarget>, Strin
     if let Some(weights) = spec.strip_prefix("qwen:") {
         return build_qwen(weights, workload);
     }
+    if let Some(rest) = spec.strip_prefix("lfm:") {
+        return build_lfm(rest);
+    }
     Err(format!(
         "unknown --target {spec:?} \
-         (expected 'fake', 'qwen-synth:<L>x<D>x<H>[xV][:i8w]', or 'qwen:<weights>[:i8w]')"
+         (expected 'fake', 'qwen-synth:<L>x<D>x<H>[xV][:i8w]', 'qwen:<weights>[:i8w]', \
+         or 'lfm:<weights>:<tokenizer.json>')"
     ))
+}
+
+
+
+/// `lfm:<weights>:<tokenizer.json>` — the LFM2.5 encoder behind the residency
+/// EXECUTOR (scheduler + budgets + device lanes), so concurrency>1 measures
+/// brain's real batching/placement rather than a synchronous provider mutex.
+/// One-shot semantics: artifact_unit "sequence", ttfa == e2e, tpoa null.
+/// The synthetic payload realises `input_artifacts` EXACTLY via `max_tokens`
+/// truncation, so every request of a length shares one built graph.
+fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (weights, tokenizer) = rest
+        .split_once(':')
+        .ok_or("lfm target needs 'lfm:<weights>:<tokenizer.json>'")?;
+    if !std::path::Path::new(weights).exists() {
+        return Err(format!("lfm weights not found: {weights}"));
+    }
+    let resident = crate::resident_lfm::LfmResident::new(weights, tokenizer)?;
+    // Budget ONLY the schedulable devices (`--device`/BRAIN_DEVICE narrowing,
+    // exactly as `brain serve --dbus` does): budgeting an excluded GPU lets
+    // placement pick an index the process cannot see, and the lane silently
+    // falls back to a software adapter — a flattering-to-nobody 6× slowdown
+    // that must never masquerade as a GPU number.
+    let set = crate::compute_set();
+    let mut budgets = residency::budget::Budgets::new();
+    for (i, total) in crate::run_cli::query_gpu_mem() {
+        if set.as_ref().map(|s| s.gpus.contains(&i)).unwrap_or(true) {
+            budgets.set(residency::Device::Gpu(i), total, 2 << 30);
+        }
+    }
+    if set.map(|s| s.cpu_enabled()).unwrap_or(true) {
+        budgets.set(residency::Device::Cpu, crate::run_cli::query_ram_bytes(), 0);
+    }
+    let exec = residency::Executor::start(
+        vec![std::sync::Arc::new(resident)],
+        budgets,
+        residency::Policy::default(),
+    );
+    let info = vec![
+        ("weights".to_string(), serde_json::json!(weights)),
+        ("batch".to_string(), serde_json::json!(std::env::var("BRAIN_LFM_BATCH").unwrap_or_else(|_| "2".into()))),
+        ("engine".to_string(), serde_json::json!("residency-executor")),
+    ];
+    let build = Box::new(|req: &perf::target::PerfRequest| {
+        // ~2N words then truncate to exactly N tokens inside the resident.
+        let text = "word ".repeat(req.input_artifacts * 2);
+        capability::Invocation::new()
+            .set("text", serde_json::json!(text))
+            .set("max_tokens", serde_json::json!(req.input_artifacts))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "lfm", "embed", "sequence", info, build)))
 }
 
 /// Split an optional `:i8w` flag (int8 weights) off a target spec tail.
