@@ -757,6 +757,120 @@ fn argmax(v: &[f32]) -> u32 {
     best
 }
 
+/// BPTT backward of the LSTM prediction network over a token sequence. Given the
+/// grad of each step's decoder output `d_dec[steps][dh]`, returns the gradient of
+/// the embedding table rows used (`d_embed[vocab*dh]`). Exercises the full
+/// recurrent training path (lstm gate backward + W_ih/W_hh matmul bwd, chained in
+/// time). Validated by finite differences.
+pub fn predictor_sequence_backward(tokens: &[u32], w: &W, cfg: &NemotronConfig, d_dec: &[Vec<f32>]) -> Vec<f32> {
+    let dh = cfg.decoder_hidden as usize;
+    let layers = cfg.num_decoder_layers as usize;
+    let emb = &w["decoder.embedding.weight"];
+    let wih: Vec<&Vec<f32>> = (0..layers).map(|l| &w[&format!("decoder.lstm.weight_ih_l{l}")]).collect();
+    let whh: Vec<&Vec<f32>> = (0..layers).map(|l| &w[&format!("decoder.lstm.weight_hh_l{l}")]).collect();
+    let wproj = &w["decoder.decoder_projector.weight"];
+
+    // forward, caching per (step, layer): input, h_prev, c_prev, pre, c_new
+    let n = tokens.len();
+    let mut ca_input = vec![vec![vec![0.0f32; dh]; layers]; n];
+    let mut ca_hprev = vec![vec![vec![0.0f32; dh]; layers]; n];
+    let mut ca_cprev = vec![vec![vec![0.0f32; dh]; layers]; n];
+    let mut ca_pre = vec![vec![vec![0.0f32; 4 * dh]; layers]; n];
+    let mut ca_cnew = vec![vec![vec![0.0f32; dh]; layers]; n];
+    let mut ca_projin = vec![vec![0.0f32; dh]; n];
+    let (mut hs, mut cs) = (vec![vec![0.0f32; dh]; layers], vec![vec![0.0f32; dh]; layers]);
+    for (ti, &tok) in tokens.iter().enumerate() {
+        let mut input = emb[tok as usize * dh..tok as usize * dh + dh].to_vec();
+        for l in 0..layers {
+            ca_input[ti][l] = input.clone();
+            ca_hprev[ti][l] = hs[l].clone();
+            ca_cprev[ti][l] = cs[l].clone();
+            let gi = matmul_nt(&input, wih[l], 1, dh, 4 * dh);
+            let gh = matmul_nt(&hs[l], whh[l], 1, dh, 4 * dh);
+            let bih = &w[&format!("decoder.lstm.bias_ih_l{l}")];
+            let bhh = &w[&format!("decoder.lstm.bias_hh_l{l}")];
+            let mut out = vec![0.0f32; dh];
+            for j in 0..dh {
+                let pre = |o: usize| gi[o * dh + j] + bih[o * dh + j] + gh[o * dh + j] + bhh[o * dh + j];
+                for o in 0..4 {
+                    ca_pre[ti][l][o * dh + j] = pre(o);
+                }
+                let (ii, ff, gg, oo) = (sigmoid(pre(0)), sigmoid(pre(1)), pre(2).tanh(), sigmoid(pre(3)));
+                let ct = ff * cs[l][j] + ii * gg;
+                cs[l][j] = ct;
+                out[j] = oo * ct.tanh();
+            }
+            ca_cnew[ti][l] = cs[l].clone();
+            hs[l] = out.clone();
+            input = out;
+        }
+        ca_projin[ti] = input; // h[last]
+    }
+
+    // backward (BPTT)
+    let mut d_embed = vec![0.0f32; emb.len()];
+    let mut d_h = vec![vec![0.0f32; dh]; layers];
+    let mut d_c = vec![vec![0.0f32; dh]; layers];
+    for ti in (0..n).rev() {
+        // decoder_projector: dec = projin·Wprojᵀ → d_projin = d_dec·Wproj
+        let dd = &d_dec[ti];
+        let mut d_top = vec![0.0f32; dh];
+        for j in 0..dh {
+            let mut a = 0.0f32;
+            for o in 0..dh {
+                a += dd[o] * wproj[o * dh + j];
+            }
+            d_top[j] = a;
+        }
+        for j in 0..dh {
+            d_h[layers - 1][j] += d_top[j];
+        }
+        for l in (0..layers).rev() {
+            let (pre, cprev, cnew) = (&ca_pre[ti][l], &ca_cprev[ti][l], &ca_cnew[ti][l]);
+            let mut d_pre = vec![0.0f32; 4 * dh];
+            for j in 0..dh {
+                let (ii, ff, gg, oo) = (sigmoid(pre[j]), sigmoid(pre[dh + j]), pre[2 * dh + j].tanh(), sigmoid(pre[3 * dh + j]));
+                let tc = cnew[j].tanh();
+                let doo = d_h[l][j] * tc;
+                let dc = d_c[l][j] + d_h[l][j] * oo * (1.0 - tc * tc);
+                let (di, df, dg) = (dc * gg, dc * cprev[j], dc * ii);
+                d_c[l][j] = dc * ff;
+                d_pre[j] = di * ii * (1.0 - ii);
+                d_pre[dh + j] = df * ff * (1.0 - ff);
+                d_pre[2 * dh + j] = dg * (1.0 - gg * gg);
+                d_pre[3 * dh + j] = doo * oo * (1.0 - oo);
+            }
+            // d_input = W_ihᵀ·d_pre ; d_hprev = W_hhᵀ·d_pre
+            let mut d_input = vec![0.0f32; dh];
+            let mut d_hprev = vec![0.0f32; dh];
+            for j in 0..dh {
+                let mut ai = 0.0f32;
+                let mut ah = 0.0f32;
+                for o in 0..4 * dh {
+                    ai += d_pre[o] * wih[l][o * dh + j];
+                    ah += d_pre[o] * whh[l][o * dh + j];
+                }
+                d_input[j] = ai;
+                d_hprev[j] = ah;
+            }
+            for j in 0..dh {
+                d_h[l][j] = d_hprev[j];
+            }
+            if l > 0 {
+                for j in 0..dh {
+                    d_h[l - 1][j] += d_input[j];
+                }
+            } else {
+                let tok = tokens[ti] as usize;
+                for j in 0..dh {
+                    d_embed[tok * dh + j] += d_input[j];
+                }
+            }
+        }
+    }
+    d_embed
+}
+
 /// Greedy RNN-T transducer decode over encoder frames `pooler[T, decoder_hidden]`
 /// (first `valid` frames). Returns the emitted non-blank token ids.
 pub fn rnnt_greedy(pooler: &[f32], valid: usize, w: &W, cfg: &NemotronConfig) -> Vec<u32> {
@@ -780,6 +894,118 @@ pub fn rnnt_greedy(pooler: &[f32], valid: usize, w: &W, cfg: &NemotronConfig) ->
         }
     }
     emitted
+}
+
+fn logaddexp(a: f32, b: f32) -> f32 {
+    if a == f32::NEG_INFINITY {
+        return b;
+    }
+    if b == f32::NEG_INFINITY {
+        return a;
+    }
+    let m = a.max(b);
+    m + ((a - m).exp() + (b - m).exp()).ln()
+}
+
+/// RNN-T (transducer) loss over the `T×(U+1)` lattice and its gradient w.r.t. the
+/// joint logits. `logits` is `[T, U+1, vocab]` (joint output for each encoder frame
+/// t and predictor position u); `targets` are the `U` label ids. Returns
+/// `(loss, d_logits)`. Standard Graves forward/backward (alpha/beta) with the
+/// softmax backward folded in. This is the RNN-T training objective.
+pub fn rnnt_loss(logits: &[f32], t_frames: usize, targets: &[u32], blank: usize, vocab: usize) -> (f32, Vec<f32>) {
+    let u = targets.len();
+    let up1 = u + 1;
+    let at = |t: usize, uu: usize| (t * up1 + uu) * vocab;
+    // log-softmax rows + the two transition log-probs
+    let mut lsm = vec![0.0f32; t_frames * up1 * vocab]; // full log-softmax (for grad)
+    let mut lpb = vec![f32::NEG_INFINITY; t_frames * up1]; // log P(blank | t,u)
+    let mut lpl = vec![f32::NEG_INFINITY; t_frames * up1]; // log P(target_u | t,u)
+    for t in 0..t_frames {
+        for uu in 0..up1 {
+            let row = &logits[at(t, uu)..at(t, uu) + vocab];
+            let mx = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let lse = mx + row.iter().map(|&v| (v - mx).exp()).sum::<f32>().ln();
+            for v in 0..vocab {
+                lsm[at(t, uu) + v] = row[v] - lse;
+            }
+            lpb[t * up1 + uu] = lsm[at(t, uu) + blank];
+            if uu < u {
+                lpl[t * up1 + uu] = lsm[at(t, uu) + targets[uu] as usize];
+            }
+        }
+    }
+    let idx = |t: usize, uu: usize| t * up1 + uu;
+    // forward alpha
+    let mut alpha = vec![f32::NEG_INFINITY; t_frames * up1];
+    alpha[0] = 0.0;
+    for t in 0..t_frames {
+        for uu in 0..up1 {
+            if t == 0 && uu == 0 {
+                continue;
+            }
+            let mut a = f32::NEG_INFINITY;
+            if t > 0 {
+                a = logaddexp(a, alpha[idx(t - 1, uu)] + lpb[idx(t - 1, uu)]);
+            }
+            if uu > 0 {
+                a = logaddexp(a, alpha[idx(t, uu - 1)] + lpl[idx(t, uu - 1)]);
+            }
+            alpha[idx(t, uu)] = a;
+        }
+    }
+    let logz = alpha[idx(t_frames - 1, u)] + lpb[idx(t_frames - 1, u)];
+    let loss = -logz;
+    // backward beta
+    let mut beta = vec![f32::NEG_INFINITY; t_frames * up1];
+    beta[idx(t_frames - 1, u)] = lpb[idx(t_frames - 1, u)];
+    for t in (0..t_frames).rev() {
+        for uu in (0..up1).rev() {
+            if t == t_frames - 1 && uu == u {
+                continue;
+            }
+            let mut b = f32::NEG_INFINITY;
+            if t < t_frames - 1 {
+                b = logaddexp(b, beta[idx(t + 1, uu)] + lpb[idx(t, uu)]);
+            }
+            if uu < u {
+                b = logaddexp(b, beta[idx(t, uu + 1)] + lpl[idx(t, uu)]);
+            }
+            beta[idx(t, uu)] = b;
+        }
+    }
+    // grads w.r.t. the transition log-probs, then through log-softmax
+    let mut d_logits = vec![0.0f32; t_frames * up1 * vocab];
+    for t in 0..t_frames {
+        for uu in 0..up1 {
+            // d loss / d lp_blank[t,u]
+            let d_lpb = if t < t_frames - 1 {
+                -(alpha[idx(t, uu)] + lpb[idx(t, uu)] + beta[idx(t + 1, uu)] - logz).exp()
+            } else if uu == u {
+                -1.0 // terminal blank
+            } else {
+                0.0
+            };
+            let d_lpl = if uu < u {
+                -(alpha[idx(t, uu)] + lpl[idx(t, uu)] + beta[idx(t, uu + 1)] - logz).exp()
+            } else {
+                0.0
+            };
+            // through log-softmax: d logit[v] = d_lp_k·(δ_{v,k} − softmax[v])
+            let sm: Vec<f32> = (0..vocab).map(|v| lsm[at(t, uu) + v].exp()).collect();
+            let dsum = d_lpb + d_lpl;
+            for v in 0..vocab {
+                let mut g = -sm[v] * dsum;
+                if v == blank {
+                    g += d_lpb;
+                }
+                if uu < u && v == targets[uu] as usize {
+                    g += d_lpl;
+                }
+                d_logits[at(t, uu) + v] = g;
+            }
+        }
+    }
+    (loss, d_logits)
 }
 
 /// Full encoder backward from the pooler grad `d_pooler[T, decoder_hidden]` to the
@@ -1045,6 +1271,69 @@ mod tests {
             wm.get_mut("attn.bias_v").unwrap()[i] -= eps;
             let num = (loss(&hn, &wp) - loss(&hn, &wm)) / (2.0 * eps);
             assert!(ok(d_bias_v[i], num), "d_bias_v[{i}] {} vs {}", d_bias_v[i], num);
+        }
+    }
+
+    #[test]
+    fn predictor_bptt_matches_finite_diff() {
+        use data::rng::Rng;
+        // tiny 2-layer LSTM predictor: dh=4, 3 tokens, vocab=6
+        let mut cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
+        cfg.decoder_hidden = 4;
+        cfg.num_decoder_layers = 2;
+        cfg.vocab = 6;
+        let (dh, vocab) = (4usize, 6usize);
+        let tokens = vec![1u32, 3u32, 5u32];
+        let mut rng = Rng::new(71);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.5).collect::<Vec<f32>>();
+        let mut w: W = W::new();
+        w.insert("decoder.embedding.weight".into(), r(vocab * dh));
+        for l in 0..2 {
+            w.insert(format!("decoder.lstm.weight_ih_l{l}"), r(4 * dh * dh));
+            w.insert(format!("decoder.lstm.weight_hh_l{l}"), r(4 * dh * dh));
+            w.insert(format!("decoder.lstm.bias_ih_l{l}"), r(4 * dh));
+            w.insert(format!("decoder.lstm.bias_hh_l{l}"), r(4 * dh));
+        }
+        w.insert("decoder.decoder_projector.weight".into(), r(dh * dh));
+        w.insert("decoder.decoder_projector.bias".into(), r(dh));
+
+        // loss = Σ_steps Σ dec → d_dec = ones
+        let d_dec: Vec<Vec<f32>> = (0..tokens.len()).map(|_| vec![1.0f32; dh]).collect();
+        let d_embed = predictor_sequence_backward(&tokens, &w, &cfg, &d_dec);
+        let loss = |ww: &W| -> f32 {
+            let mut st = LstmState::new(2, dh);
+            tokens.iter().map(|&t| lstm_predict(t, &mut st, ww, &cfg).iter().sum::<f32>()).sum()
+        };
+        let eps = 1e-3f32;
+        // check embedding rows actually used by the tokens
+        for &i in &[1 * dh, 1 * dh + 2, 3 * dh + 1, 5 * dh, 5 * dh + 3] {
+            let (mut wp, mut wm) = (w.clone(), w.clone());
+            wp.get_mut("decoder.embedding.weight").unwrap()[i] += eps;
+            wm.get_mut("decoder.embedding.weight").unwrap()[i] -= eps;
+            let num = (loss(&wp) - loss(&wm)) / (2.0 * eps);
+            assert!((d_embed[i] - num).abs() <= 3e-3 + 6e-2 * num.abs(), "d_embed[{i}] {} vs {}", d_embed[i], num);
+        }
+    }
+
+    #[test]
+    fn rnnt_loss_gradient_matches_finite_diff() {
+        use data::rng::Rng;
+        // tiny lattice: T=4 frames, U=2 labels, V=5 (blank=4)
+        let (t_frames, targets, vocab, blank) = (4usize, vec![1u32, 3u32], 5usize, 4usize);
+        let up1 = targets.len() + 1;
+        let n = t_frames * up1 * vocab;
+        let mut rng = Rng::new(61);
+        let logits: Vec<f32> = (0..n).map(|_| (rng.next_f32() - 0.5) * 2.0).collect();
+
+        let (loss, d) = rnnt_loss(&logits, t_frames, &targets, blank, vocab);
+        assert!(loss.is_finite() && loss > 0.0, "loss {loss}");
+        let eps = 1e-3f32;
+        for &i in &[0usize, 7, 19, 33, 41, 55] {
+            let (mut lp, mut lm) = (logits.clone(), logits.clone());
+            lp[i] += eps;
+            lm[i] -= eps;
+            let num = (rnnt_loss(&lp, t_frames, &targets, blank, vocab).0 - rnnt_loss(&lm, t_frames, &targets, blank, vocab).0) / (2.0 * eps);
+            assert!((d[i] - num).abs() <= 3e-3 + 6e-2 * num.abs(), "d_logits[{i}] {} vs {}", d[i], num);
         }
     }
 
