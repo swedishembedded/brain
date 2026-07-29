@@ -418,6 +418,36 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (b, h, t, hd) = (p(0)?, p(1)?, p(2)?, p(3)?);
             f(b * h * hd * t * (2 * t + 1), 4 * (b * h * t * t + 2 * b * t * h * hd))
         }
+        // Head-major packing for GEMM attention; params [rows, heads_out, group,
+        // hd, ...]. One scale-mul + copy per packed element (head_pack_t is the
+        // transposed write of the same elements; head_unpack params are
+        // [rows, heads, hd, ...] — same element count, pure copy).
+        "head_pack" | "head_pack_t" => {
+            let (rows, ho, hd) = (p(0)?, p(1)?, p(3)?);
+            f(rows * ho * hd, 8 * rows * ho * hd)
+        }
+        "head_unpack" => {
+            let (rows, h, hd) = (p(0)?, p(1)?, p(2)?);
+            f(0, 8 * rows * h * hd)
+        }
+        // Workgroup-cooperative row softmax; params [rows, cols] — the same math
+        // as attn_softmax_* (max, exp+sum, normalize per row).
+        "softmax_rows" => {
+            let (rows, cols) = (p(0)?, p(1)?);
+            f(rows * (6 * cols + 1), 8 * rows * cols)
+        }
+        // Fused flash attention (scores -> softmax -> apply in one tiled pass);
+        // params [bsz, n_heads, t, head_dim, ...]. FLOPs are the fused trio's sum;
+        // bytes are the ideal-tiling traffic the kernel exists to achieve — the
+        // packed QKV read once, O written once, and NO materialised [T,T]
+        // scores/probs (that absence is the whole point of the kernel).
+        "flash_attn_bidir" => {
+            let (b, h, t, hd) = (p(0)?, p(1)?, p(2)?, p(3)?);
+            f(
+                b * h * t * t * (2 * hd + 1) + b * h * t * (6 * t + 1) + 2 * b * h * hd * t * t,
+                4 * (3 * b * t * h * hd + b * t * h * hd),
+            )
+        }
 
         // ---- attention, cross (t_dec × t_enc); params [b, h, td, te, hd, ...].
         "attn_scores_cross" => {
