@@ -189,6 +189,60 @@ def dump_qwen_decode():
     print("qwen decode goldens written:", json.dumps({k: v for k, v in man.items() if not isinstance(v, list)}, indent=2))
 
 
+def dump_nemotron():
+    """Nemotron 3.5 ASR on the real clip: dump input_features, per-stage encoder
+    activations (subsampling, block 0, encoder last_hidden, projected pooler),
+    the greedy output token ids and the transcription — the FastConformer/RNN-T
+    brain parity target."""
+    import numpy as np
+    import soundfile as sf
+    import torch
+    from transformers import AutoProcessor, Nemotron3_5AsrForRNNT
+
+    wav, sr = sf.read(os.path.join(RES, "audio", "librispeech_mr_quilter.wav"))
+    wav = wav.astype(np.float32)
+    assert sr == 16000
+    mid = "nvidia/nemotron-3.5-asr-streaming-0.6b"
+    proc = AutoProcessor.from_pretrained(mid)
+    model = Nemotron3_5AsrForRNNT.from_pretrained(mid, dtype=torch.float32).eval()
+
+    inputs = proc(wav, sampling_rate=16000, language="en")
+    man = {}
+    caught = {}
+    enc = model.encoder
+    h1 = enc.subsampling.register_forward_hook(lambda m, i, o: caught.__setitem__("subsampling", o.detach()))
+    h2 = enc.layers[0].register_forward_hook(lambda m, i, o: caught.__setitem__("block0", (o[0] if isinstance(o, tuple) else o).detach()))
+    h3 = enc.register_forward_hook(lambda m, i, o: caught.__setitem__("enc_last", o.last_hidden_state.detach()))
+
+    with torch.no_grad():
+        feats = model.get_audio_features(
+            input_features=inputs["input_features"].to(torch.float32),
+            attention_mask=inputs.get("attention_mask"),
+            prompt_ids=inputs["prompt_ids"],
+            num_lookahead_tokens=inputs.get("num_lookahead_tokens"),
+        )
+    for h in (h1, h2, h3):
+        h.remove()
+    save("nemotron", "input_features", inputs["input_features"][0].numpy(), man)
+    save("nemotron", "subsampling", caught["subsampling"][0].numpy(), man)
+    save("nemotron", "block0", caught["block0"][0].numpy(), man)
+    save("nemotron", "enc_last", caught["enc_last"][0].numpy(), man)
+    save("nemotron", "pooler", feats.pooler_output[0].numpy(), man)  # [T, 640]
+    man["prompt_id"] = int(inputs["prompt_ids"][0])
+    man["num_lookahead_tokens"] = int(inputs.get("num_lookahead_tokens", 3))
+
+    with torch.no_grad():
+        out = model.generate(**{k: (v if not torch.is_tensor(v) else v) for k, v in inputs.items()}, max_new_tokens=256)
+    seq = out.sequences[0] if hasattr(out, "sequences") else out[0]
+    seq = seq.cpu().numpy()
+    save("nemotron", "output_ids", seq.astype("float32"), man)
+    text = proc.batch_decode(out.sequences if hasattr(out, "sequences") else out, skip_special_tokens=True)[0]
+    man["transcription"] = text
+    with open(os.path.join(GOLD, "nemotron", "manifest.json"), "w") as f:
+        json.dump(man, f, indent=2)
+    print("nemotron goldens:", json.dumps({k: v for k, v in man.items() if not isinstance(v, list)}, indent=2))
+
+
 if __name__ == "__main__":
     stage = sys.argv[1] if len(sys.argv) > 1 else "frontend"
     if stage == "frontend":
@@ -197,5 +251,7 @@ if __name__ == "__main__":
         dump_qwen_encoder()
     elif stage == "qwen_decode":
         dump_qwen_decode()
+    elif stage == "nemotron":
+        dump_nemotron()
     else:
         raise SystemExit(f"unknown stage {stage!r}")

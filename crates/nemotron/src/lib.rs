@@ -3,7 +3,11 @@
 
 //! NVIDIA Nemotron 3.5 ASR Streaming (0.6B): a FastConformer encoder + RNN-T
 //! transducer. Built on the shared WGSL engine; parity-gated against the
-//! HuggingFace reference. Work in progress — kernels land first, then the
-//! Conformer encoder, the LSTM prediction network + joint, and greedy decode.
+//! HuggingFace reference. Kernels → encoder → RNN-T → greedy decode.
 
+pub mod config;
+pub mod encoder;
+pub mod import;
 pub mod kernels;
+
+pub use config::NemotronConfig;
