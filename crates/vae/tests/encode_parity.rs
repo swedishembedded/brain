@@ -16,7 +16,13 @@ use std::path::Path;
 
 use vae::{VaeConfig, VaeEncoder};
 
-const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/zimage_vae_encode.safetensors");
+/// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
+/// override the root with `BRAIN_TESTDATA`).
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
 
 fn load_tensors(path: &str) -> HashMap<String, (Vec<usize>, Vec<f32>)> {
     checkpoint::safetensors::read(path)
@@ -38,6 +44,11 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 
 #[test]
 fn zimage_vae_encode_matches_diffusers() {
+    let fixture = testdata("golden/vae/zimage_vae_encode.safetensors");
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
+        return;
+    }
     let vae_path = match std::env::var("BRAIN_ZIMAGE_VAE") {
         Ok(p) if !p.is_empty() => p,
         _ => {
@@ -57,7 +68,7 @@ fn zimage_vae_encode_matches_diffusers() {
     );
 
     let weights = load_tensors(&vae_path);
-    let fixture = load_tensors(FIXTURE);
+    let fixture = load_tensors(&fixture);
     let (ishape, image) = &fixture["image"];
     let (mshape, want_moments) = &fixture["moments"];
     assert_eq!(ishape, &vec![1, cfg.in_channels as usize, 64, 64], "image shape");

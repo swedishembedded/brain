@@ -15,7 +15,13 @@ use std::path::Path;
 
 use zimage::{import::import_comfy, ZImageConfig, ZImageDitI8, ZImageDitShard, ZImageModel};
 
-const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/zimage_real.safetensors");
+/// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
+/// override the root with `BRAIN_TESTDATA`).
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
@@ -39,6 +45,11 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
 
 #[test]
 fn zimage_real_dit_matches_diffusers() {
+    let fixture = testdata("golden/zimage/zimage_real.safetensors");
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
+        return;
+    }
     let dit = match std::env::var("BRAIN_ZIMAGE_DIT") {
         Ok(p) if !p.is_empty() => p,
         _ => {
@@ -50,7 +61,7 @@ fn zimage_real_dit_matches_diffusers() {
         eprintln!("SKIP: BRAIN_ZIMAGE_DIT={dit} not found");
         return;
     }
-    let fx = checkpoint::safetensors::read(GOLDEN).expect("read real golden");
+    let fx = checkpoint::safetensors::read(&fixture).expect("read real golden");
     let g = |n: &str| &fx.iter().find(|t| t.name == n).unwrap().data;
     let (latent, cap, tt, want) = (g("_latent"), g("_cap"), g("_t"), g("_out"));
 
@@ -76,6 +87,11 @@ fn zimage_real_dit_matches_diffusers() {
 /// otherwise (it allocates ~24 GB per card).
 #[test]
 fn zimage_shard_matches_diffusers() {
+    let fixture = testdata("golden/zimage/zimage_real.safetensors");
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
+        return;
+    }
     if std::env::var("BRAIN_ZIMAGE_SHARD").as_deref() != Ok("1") {
         eprintln!("SKIP: set BRAIN_ZIMAGE_SHARD=1 (+ BRAIN_ZIMAGE_DIT, 2 GPUs) to run the 2-GPU shard parity");
         return;
@@ -84,7 +100,7 @@ fn zimage_shard_matches_diffusers() {
         Ok(p) if !p.is_empty() => p,
         _ => return,
     };
-    let fx = checkpoint::safetensors::read(GOLDEN).expect("read real golden");
+    let fx = checkpoint::safetensors::read(&fixture).expect("read real golden");
     let g = |n: &str| &fx.iter().find(|t| t.name == n).unwrap().data;
     let (latent, cap, tt, want) = (g("_latent"), g("_cap"), g("_t"), g("_out"));
 
@@ -112,6 +128,11 @@ fn zimage_shard_matches_diffusers() {
 /// (structure preserved), not bit-exact. BRAIN_ZIMAGE_I8=1 + BRAIN_ZIMAGE_DIT.
 #[test]
 fn zimage_int8_matches_diffusers() {
+    let fixture = testdata("golden/zimage/zimage_real.safetensors");
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
+        return;
+    }
     if std::env::var("BRAIN_ZIMAGE_I8").as_deref() != Ok("1") {
         eprintln!("SKIP: set BRAIN_ZIMAGE_I8=1 (+ BRAIN_ZIMAGE_DIT, GPU) for the int8 parity test");
         return;
@@ -120,7 +141,7 @@ fn zimage_int8_matches_diffusers() {
         Ok(p) if !p.is_empty() => p,
         _ => return,
     };
-    let fx = checkpoint::safetensors::read(GOLDEN).expect("read real golden");
+    let fx = checkpoint::safetensors::read(&fixture).expect("read real golden");
     let g = |n: &str| &fx.iter().find(|t| t.name == n).unwrap().data;
     let (latent, cap, tt, want) = (g("_latent"), g("_cap"), g("_t"), g("_out"));
 

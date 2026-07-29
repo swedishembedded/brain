@@ -9,7 +9,13 @@ use std::collections::HashMap;
 
 use zimage::{ZImageConfig, ZImageDit};
 
-const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/zimage_model.safetensors");
+/// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
+/// override the root with `BRAIN_TESTDATA`).
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
 
 fn small_cfg() -> ZImageConfig {
     ZImageConfig {
@@ -31,7 +37,12 @@ fn small_cfg() -> ZImageConfig {
 
 #[test]
 fn zimage_dev_matches_reference_golden() {
-    let st = checkpoint::safetensors::read(GOLDEN).expect("read model golden");
+    let fixture = testdata("golden/zimage/zimage_model.safetensors");
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
+        return;
+    }
+    let st = checkpoint::safetensors::read(&fixture).expect("read model golden");
     let mut weights: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
     let mut input: HashMap<String, Vec<f32>> = HashMap::new();
     for t in st {

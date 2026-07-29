@@ -15,7 +15,13 @@ use std::collections::HashMap;
 
 use zimage::{ZImageConfig, ZImageModel};
 
-const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/zimage_model.safetensors");
+/// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
+/// override the root with `BRAIN_TESTDATA`).
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
@@ -29,7 +35,12 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 
 #[test]
 fn zimage_full_model_matches_diffusers() {
-    let st = checkpoint::safetensors::read(GOLDEN).expect("read model golden");
+    let fixture = testdata("golden/zimage/zimage_model.safetensors");
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
+        return;
+    }
+    let st = checkpoint::safetensors::read(&fixture).expect("read model golden");
     let mut weights: HashMap<String, (Vec<usize>, Vec<f32>)> = HashMap::new();
     let mut input: HashMap<String, Vec<f32>> = HashMap::new();
     for t in st {

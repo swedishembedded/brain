@@ -5,8 +5,8 @@
 //! `modeling_lfm2_bidirectional` reference, per stage (post-embedding residual,
 //! every layer output, final hidden, MLM-logit probe rows, fill-mask top-1).
 //!
-//! Golden fixtures (`tests/golden/lfm25_encoder_{230m,350m}.safetensors`,
-//! committed) are baked by `tools/lfm_dump_reference.py` from the released fp32
+//! Golden fixtures (`testdata/golden/lfm/lfm25_encoder_{230m,350m}.safetensors`,
+//! fetched via `make fetch/testdata`, never committed) are baked by `tools/lfm_dump_reference.py` from the released fp32
 //! checkpoints with FIXED token ids — tokenizer parity is tested separately in
 //! `crates/data`. The ~1–1.4 GB weights are NOT committed: set
 //! `BRAIN_LFM25_230M` / `BRAIN_LFM25_350M` to the HF checkpoint dirs; the tests
@@ -36,8 +36,12 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
     (num / den).sqrt()
 }
 
+/// Resolve a golden under the fetched `testdata/` tree (`make fetch/testdata`;
+/// override the root with `BRAIN_TESTDATA`).
 fn fixture(name: &str) -> String {
-    format!("{}/tests/golden/{name}.safetensors", env!("CARGO_MANIFEST_DIR"))
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/golden/lfm/{name}.safetensors")
 }
 
 struct Golden {
@@ -76,7 +80,12 @@ fn run_parity(env_var: &str, fixture_name: &str, cfg: LfmConfig) {
         return;
     }
 
-    let golden = Golden { tensors: checkpoint::safetensors::read(&fixture(fixture_name)).expect("read fixture") };
+    let fx_path = fixture(fixture_name);
+    if !std::path::Path::new(&fx_path).exists() {
+        eprintln!("SKIP: fixture {fx_path} absent — run `make fetch/testdata`");
+        return;
+    }
+    let golden = Golden { tensors: checkpoint::safetensors::read(&fx_path).expect("read fixture") };
     let tokens = golden.ids("tokens");
     let logit_rows = golden.ids("logit_rows");
 

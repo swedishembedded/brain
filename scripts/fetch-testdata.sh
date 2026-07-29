@@ -37,6 +37,7 @@ DEST="${BRAIN_TESTDATA:-$ROOT/testdata}"
 ASR_MIRROR="${BRAIN_ASR_MIRROR:-/data/workspace/resources/asr}"
 VL_MIRROR="${BRAIN_VL_MIRROR:-/data/workspace/resources/vl}"
 TTS_MIRROR="${BRAIN_TTS_MIRROR:-/data/workspace/tmp/qwen3-tts-resources}"
+GOLDEN_MIRROR="${BRAIN_GOLDEN_MIRROR:-/data/workspace/resources/brain-goldens}"
 
 added=0 skipped=0 missing=0
 
@@ -66,17 +67,26 @@ _link_from() {
   echo "  ✓ $sub_dst"
 }
 asr_tree() { _link_from "$ASR_MIRROR" "$1" "$2"; }
+golden_tree() { _link_from "$GOLDEN_MIRROR" "$1" "$2"; }
 vl_tree()  { _link_from "$VL_MIRROR"  "$1" "$2"; }
 tts_tree() { _link_from "$TTS_MIRROR" "$1" "$2"; }
 
 echo "brain: populating testdata at $DEST"
-echo "       mirrors: asr=$ASR_MIRROR vl=$VL_MIRROR tts=$TTS_MIRROR"
+echo "       mirrors: asr=$ASR_MIRROR vl=$VL_MIRROR tts=$TTS_MIRROR golden=$GOLDEN_MIRROR"
 
 # --- ASR (Nemotron 3.5 ASR, Qwen3-ASR) --------------------------------------
 asr_tree "nemotron/hf"     "asr/nemotron/hf"
 asr_tree "qwen3-asr/hf"    "asr/qwen-asr/hf"
 asr_tree "golden"          "asr/golden"
 asr_tree "audio"           "asr/audio"
+
+# --- Model-parity goldens (lfm / qwen encoder / vae / zimage) ----------------
+# Small dumped fixtures the staged parity tests read (regenerable from the
+# reference checkpoints via tools/*_dump_reference.py; never committed).
+golden_tree "lfm"          "golden/lfm"
+golden_tree "qwen"         "golden/qwen"
+golden_tree "vae"          "golden/vae"
+golden_tree "zimage"       "golden/zimage"
 
 # --- Vision-language (FastVLM, Moondream3, Qwen3-VL) -------------------------
 vl_tree  "fastvlm/hf"      "vl/fastvlm/hf"

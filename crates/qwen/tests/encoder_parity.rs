@@ -17,7 +17,13 @@ use std::path::Path;
 
 use qwen::{QwenConfig, Qwen};
 
-const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/qwen3_4b_encoder.safetensors");
+/// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
+/// override the root with `BRAIN_TESTDATA`).
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
@@ -41,6 +47,11 @@ fn rel_l2(got: &[f32], want: &[f32]) -> f64 {
 
 #[test]
 fn qwen3_4b_penultimate_hidden_matches_transformers() {
+    let fixture = testdata("golden/qwen/qwen3_4b_encoder.safetensors");
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata`");
+        return;
+    }
     let wpath = match std::env::var("BRAIN_QWEN3_4B") {
         Ok(p) if !p.is_empty() => p,
         _ => {
@@ -54,7 +65,7 @@ fn qwen3_4b_penultimate_hidden_matches_transformers() {
     }
 
     // Golden.
-    let fx = checkpoint::safetensors::read(FIXTURE).expect("read fixture");
+    let fx = checkpoint::safetensors::read(&fixture).expect("read fixture");
     let tokens_i: &Vec<f32> = &fx.iter().find(|t| t.name == "tokens").unwrap().data;
     let tokens: Vec<u32> = tokens_i.iter().map(|&x| x as u32).collect();
     let want = &fx.iter().find(|t| t.name == "hidden").unwrap().data;
