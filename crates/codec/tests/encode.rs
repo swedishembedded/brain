@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 //! Encode-path tests for the Qwen3-TTS 12 Hz codec (wav -> codes `[T,16]`).
 //!
 //! Gated on the real checkpoint being present (a large external artifact, not
@@ -9,14 +10,25 @@
 
 use codec::Codec;
 
-const CKPT_DIR: &str = "/data/workspace/tmp/qwen3-tts-resources/ckpt/Qwen3-TTS-Tokenizer-12Hz";
-const ENC_DUMP: &str = "/data/workspace/tmp/qwen3-tts-resources/dumps/codec_enc_ref";
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
+
 
 fn ckpt_available() -> bool {
-    std::path::Path::new(CKPT_DIR).join("model.safetensors").exists()
+        let CKPT_DIR = testdata("tts/ckpt/Qwen3-TTS-Tokenizer-12Hz");
+    std::path::Path::new(&CKPT_DIR).join("model.safetensors").exists()
 }
 
 fn import_to_temp() -> String {
+        let CKPT_DIR = testdata("tts/ckpt/Qwen3-TTS-Tokenizer-12Hz");
     static SHARED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     SHARED
         .get_or_init(|| {
@@ -24,7 +36,7 @@ fn import_to_temp() -> String {
                 .join(format!("codec_encode_{}.weights", std::process::id()))
                 .to_string_lossy()
                 .into_owned();
-            codec::import(CKPT_DIR, &out).expect("import failed");
+            codec::import(&CKPT_DIR, &out).expect("import failed");
             out
         })
         .clone()
@@ -87,8 +99,9 @@ fn round_trip_encode_decode_is_finite() {
 /// RVQ argmin can differ at a few near-tie positions; we require >= 95% match.
 #[test]
 fn encode_matches_reference_codes() {
-    let wav_p = std::path::Path::new(ENC_DUMP).join("wav.bin");
-    let codes_p = std::path::Path::new(ENC_DUMP).join("codes.bin");
+        let ENC_DUMP = testdata("tts/dumps/codec_enc_ref");
+    let wav_p = std::path::Path::new(&ENC_DUMP).join("wav.bin");
+    let codes_p = std::path::Path::new(&ENC_DUMP).join("codes.bin");
     if !ckpt_available() || !wav_p.exists() || !codes_p.exists() {
         eprintln!("skip: encode golden dump not present");
         return;

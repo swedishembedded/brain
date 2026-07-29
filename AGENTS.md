@@ -547,7 +547,10 @@ per-scenario table and the findings so far.
      **repo-relative** (`concat!(env!("CARGO_MANIFEST_DIR"), "/../../out/…")`), never
      as an absolute literal.
   Runtime weight locations come from an **env var or CLI flag**, never a baked-in
-  path. Grep gate: `grep -rn '/data/\|/home/' crates/**/*.rs` must stay empty.
+  path. Grep gate (a string literal that *starts* an absolute machine path):
+  `grep -rnE '"/(data|home|tmp|opt|mnt|root)/' crates` must stay empty. (A `/data/`
+  substring mid-string — a URL, or a torch-archive-internal `…/data/<key>` — is
+  not a filesystem path and is fine.)
 - **Evaluate honestly.** Hold the input distribution fixed; separate the metric
   (perplexity) from the task (exact-match on held-out data); see `README.md` §3.
 - **Gitignored:** `scratchpad/` (scratch weights, images, porting references),

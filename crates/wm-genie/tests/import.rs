@@ -1,21 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 //! Import the real GenieRedux tokenizer checkpoint (gitignored scratch) with
 //! full-coverage validation. Ignored by default; run manually with the file:
 //!   cargo test -p brain-wm-genie --test import -- --ignored --nocapture
 use wm_genie::import::import_tokenizer;
 
-const CK: &str = "/data/workspace/applications/edgeai/brain/scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt";
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
+
 
 #[test]
 #[ignore = "needs the 1.2GB checkpoint in scratch; run manually"]
 fn import_tokenizer_full_coverage() {
-    if !std::path::Path::new(CK).exists() {
+        let CK = repo_path("scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt");
+    if !std::path::Path::new(&CK).exists() {
         eprintln!("SKIP: {CK} absent");
         return;
     }
-    let (w, cfg) = import_tokenizer(CK).expect("import must succeed with full coverage");
+    let (w, cfg) = import_tokenizer(&CK).expect("import must succeed with full coverage");
     // spot-check structure against the fixed config
     assert_eq!(cfg.dim, 512);
     assert_eq!(w.encoder.layers.len(), cfg.enc_layers);

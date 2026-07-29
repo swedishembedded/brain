@@ -51,7 +51,7 @@ struct Job {
 }
 
 pub fn run_serve(args: &[String]) {
-    let mut socket = "/tmp/brain-tts.sock".to_string();
+    let mut socket = std::env::temp_dir().join("brain-tts.sock").to_string_lossy().into_owned();
     let mut cap_override: Option<usize> = None;
     // Talker weight precision: int8 (default), int4 (weight-compression — ~20%
     // faster on the bandwidth-bound Talker + half the graph RAM; not native on the
@@ -59,8 +59,10 @@ pub fn run_serve(args: &[String]) {
     let mut talker_quant = "int8".to_string();
     let mut engines: HashMap<String, EngineCfg> = HashMap::new();
 
-    // Per-engine flag triplets/quads. Defaults below cover the known local setup.
-    let res = "/data/workspace/resources/tts/qwen3-tts";
+    // Per-engine flag triplets/quads. The resources base comes from $BRAIN_TTS_RES
+    // (empty if unset — flags then supply the paths); never a baked-in absolute path
+    // (see AGENTS.md: no absolute paths in source).
+    let res = std::env::var("BRAIN_TTS_RES").unwrap_or_default();
     let mut clone_w = "out/tts-1b7".to_string();
     let mut clone_c = format!("{res}/ckpt/Qwen3-TTS-12Hz-1.7B-Base");
     let mut clone_ref = format!("{res}/voice-clone-example-voice.wav");

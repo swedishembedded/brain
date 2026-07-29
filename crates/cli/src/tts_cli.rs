@@ -198,7 +198,9 @@ struct CommonArgs {
 
 fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<String, String>) {
     let mut weights_dir = "out/tts".to_string();
-    let mut ckpt = "/data/workspace/tmp/qwen3-tts-resources/ckpt/Qwen3-TTS-12Hz-0.6B-Base".to_string();
+    // Checkpoint dir comes from $BRAIN_TTS_CKPT (or `--ckpt`); never a baked-in
+    // absolute path (see AGENTS.md: no absolute paths in source).
+    let mut ckpt = std::env::var("BRAIN_TTS_CKPT").unwrap_or_default();
     let mut out = "out.wav".to_string();
     let mut lang = "english".to_string();
     let mut opts = GenOpts::default();

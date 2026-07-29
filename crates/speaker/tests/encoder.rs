@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 //! ECAPA speaker-encoder tests. The import + parity tests are gated on the real
 //! Qwen3-TTS checkpoint / reference dump being present (large external
 //! artifacts). Run on the CPU backend:
@@ -11,11 +12,21 @@ use std::sync::{Mutex, OnceLock};
 
 use speaker::{SpeakerConfig, SpeakerEncoder};
 
-const CKPT_DIR: &str = "/data/workspace/tmp/qwen3-tts-resources/ckpt/Qwen3-TTS-12Hz-0.6B-Base";
-const DUMP_DIR: &str = "/data/workspace/tmp/qwen3-tts-resources/dumps/spk_ref";
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
+
 
 fn ckpt_available() -> bool {
-    std::path::Path::new(CKPT_DIR).join("model.safetensors").exists()
+        let CKPT_DIR = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
+    std::path::Path::new(&CKPT_DIR).join("model.safetensors").exists()
 }
 
 /// Import the (huge) 0.6B safetensors exactly once and share the resulting
@@ -23,6 +34,7 @@ fn ckpt_available() -> bool {
 /// entire model to f32 (~2.4 GB transient); running it once per test in parallel
 /// OOM-kills the process, so we serialise + memoise it.
 fn shared_weights() -> &'static str {
+        let CKPT_DIR = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
     static PATH: OnceLock<String> = OnceLock::new();
     static LOCK: Mutex<()> = Mutex::new(());
     let _guard = LOCK.lock().unwrap();
@@ -31,7 +43,7 @@ fn shared_weights() -> &'static str {
             .join(format!("speaker_{}.weights", std::process::id()))
             .to_string_lossy()
             .into_owned();
-        speaker::import(CKPT_DIR, &out).expect("import failed");
+        speaker::import(&CKPT_DIR, &out).expect("import failed");
         out
     })
 }
@@ -93,6 +105,7 @@ fn forward_finite_random_mel() {
 
 #[test]
 fn parity_against_reference_dump() {
+        let DUMP_DIR = testdata("tts/dumps/spk_ref");
     if !ckpt_available() {
         eprintln!("skip: checkpoint not present");
         return;

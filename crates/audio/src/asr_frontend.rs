@@ -349,6 +349,18 @@ pub fn qwen_logmel(samples: &[f32], target_samples: usize) -> (Vec<f32>, usize, 
 
 #[cfg(test)]
 mod tests {
+    #![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
+
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
     use super::*;
     use std::io::Read;
 
@@ -359,10 +371,10 @@ mod tests {
         buf.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
     }
 
-    const GOLD: &str = "/data/workspace/resources/asr/golden/frontend";
 
     fn have_goldens() -> bool {
-        std::path::Path::new(GOLD).join("waveform.f32").exists()
+        let GOLD = testdata("asr/golden/frontend");
+        std::path::Path::new(&GOLD).join("waveform.f32").exists()
     }
 
     fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
@@ -372,6 +384,7 @@ mod tests {
 
     #[test]
     fn nemotron_mel_filters_match_reference() {
+        let GOLD = testdata("asr/golden/frontend");
         if !have_goldens() {
             return;
         }
@@ -385,6 +398,7 @@ mod tests {
 
     #[test]
     fn qwen_mel_filters_match_reference() {
+        let GOLD = testdata("asr/golden/frontend");
         if !have_goldens() {
             return;
         }
@@ -404,6 +418,7 @@ mod tests {
 
     #[test]
     fn nemotron_logmel_matches_reference() {
+        let GOLD = testdata("asr/golden/frontend");
         if !have_goldens() {
             return;
         }
@@ -417,6 +432,7 @@ mod tests {
 
     #[test]
     fn qwen_logmel_matches_reference() {
+        let GOLD = testdata("asr/golden/frontend");
         if !have_goldens() {
             return;
         }

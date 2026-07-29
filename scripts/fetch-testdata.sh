@@ -47,7 +47,7 @@ _link_from() {
   local root="$1" sub_src="$2" sub_dst="$3"
   local src="$root/$sub_src" dst="$DEST/$sub_dst"
   if [ ! -d "$src" ]; then
-    echo "  · $sub_dst: mirror '$src' absent — skipping (set BRAIN_ASR_MIRROR or add a URL)"
+    echo "  · $sub_dst: mirror '$src' absent — skipping (point its BRAIN_*_MIRROR at a copy, or add a URL)"
     missing=$((missing + 1))
     return 0
   fi

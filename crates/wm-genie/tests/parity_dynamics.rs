@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 //! End-to-end dynamics (guided MaskGIT) PARITY vs the GenieRedux reference:
 //! import the tokenizer (for the use_token codebook blend) + the dynamics, run
 //! dynamics_forward on the exact input the Python reference used, and compare
@@ -11,9 +12,17 @@ use gpu_core::Gpu;
 use wm_genie::import::{import_dynamics, import_tokenizer};
 use wm_genie::{dynamics_forward, kernel_sources};
 
-const TOK: &str = "/data/workspace/applications/edgeai/brain/scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt";
-const DYN: &str = "/data/workspace/applications/edgeai/brain/scratchpad/wm-checkpoints/GenieRedux_Guided_CoinRun_80mln_v1.0.pt";
-const DIR: &str = "/data/workspace/applications/edgeai/brain/scratchpad/parity";
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
+
 
 fn read_f32(p: &str) -> Vec<f32> {
     std::fs::read(p).unwrap().chunks_exact(4).map(|c| f32::from_le_bytes([c[0],c[1],c[2],c[3]])).collect()
@@ -25,8 +34,11 @@ fn read_u32(p: &str) -> Vec<u32> {
 #[test]
 #[ignore = "needs both checkpoints + dynamics parity dump; run manually"]
 fn dynamics_parity_vs_reference() {
+        let TOK = repo_path("scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt");
+        let DYN = repo_path("scratchpad/wm-checkpoints/GenieRedux_Guided_CoinRun_80mln_v1.0.pt");
+        let DIR = repo_path("scratchpad/parity");
     let idp = format!("{DIR}/genie_dynamics_ids.u32");
-    if !std::path::Path::new(DYN).exists() || !std::path::Path::new(&idp).exists() {
+    if !std::path::Path::new(&DYN).exists() || !std::path::Path::new(&idp).exists() {
         eprintln!("SKIP: checkpoints or dynamics dump absent");
         return;
     }
@@ -35,8 +47,8 @@ fn dynamics_parity_vs_reference() {
     let actions = read_f32(&format!("{DIR}/genie_dynamics_actions.f32"));
     let ref_logits = read_f32(&format!("{DIR}/genie_dynamics_logits.f32"));
 
-    let (tw, _) = import_tokenizer(TOK).expect("import tokenizer");
-    let (dw, dc) = import_dynamics(DYN, &tw.vq).expect("import dynamics");
+    let (tw, _) = import_tokenizer(&TOK).expect("import tokenizer");
+    let (dw, dc) = import_dynamics(&DYN, &tw.vq).expect("import dynamics");
     eprintln!("imported both; running dynamics_forward...");
     let gpu = Gpu::new_cpu(&kernel_sources());
     let logits = dynamics_forward(&gpu, &ids, &actions, &dw,

@@ -30,7 +30,12 @@ use paramstore::ParamStore;
 use qwen::model::Qwen;
 
 pub const MODEL: &str = "fastvlm";
-const DEFAULT_WEIGHTS: &str = "/data/workspace/resources/vl/fastvlm/hf/FastVLM-0.5B";
+/// Default FastVLM checkpoint directory — from `$BRAIN_FASTVLM_WEIGHTS`, never a
+/// baked-in absolute path (see AGENTS.md: no absolute paths in source). Empty when
+/// unset, so the `weights` param (or the caller) must supply one.
+fn default_weights() -> String {
+    std::env::var("BRAIN_FASTVLM_WEIGHTS").unwrap_or_default()
+}
 /// The tower's input side and its output grid (1024 px → 256 tokens of 3072).
 const VISION_SIDE: u32 = 1024;
 const IMG_TOKENS: u32 = 256;
@@ -40,7 +45,7 @@ pub fn manifest() -> Manifest {
     let caption = ActionSpec::new("caption", "describe an image (MobileCLIP tower + Qwen2 decoder, greedy)")
         .param(
             ParamSpec::new("weights", ParamType::Str, "FastVLM checkpoint DIRECTORY (config.json + model.safetensors + tokenizer.json)")
-                .default(serde_json::json!(DEFAULT_WEIGHTS)),
+                .default(serde_json::json!(default_weights())),
         )
         .param(ParamSpec::new("prompt", ParamType::Str, "instruction for the model").default(serde_json::json!("Describe this image.")))
         .param(ParamSpec::new("max_new", ParamType::Int, "max caption tokens").default(serde_json::json!(48)))
@@ -118,7 +123,7 @@ impl Action for CaptionAction {
     }
 
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let dir = inv.get_str("weights").unwrap_or_else(|| DEFAULT_WEIGHTS.to_string());
+        let dir = inv.get_str("weights").filter(|s| !s.is_empty()).unwrap_or_else(default_weights);
         let prompt = inv.get_str("prompt").unwrap_or_else(|| "Describe this image.".to_string());
         let max_new = inv.get_i64("max_new").unwrap_or(48).clamp(1, 512) as usize;
         let precision = inv.get_str("precision").unwrap_or_else(|| "fp32".to_string());

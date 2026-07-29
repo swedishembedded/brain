@@ -13,6 +13,18 @@
 
 #[cfg(test)]
 mod tests {
+    #![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
+
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
     use std::collections::HashMap;
 
     use gpu_core::Gpu;
@@ -21,12 +33,9 @@ mod tests {
     use crate::decoder::{pipelines, MoondreamBlock, MoondreamDecoder};
     use crate::import::{map_text, TextTarget};
 
-    const DIR: &str = "/data/workspace/resources/vl/moondream3/hf/moondream3-preview";
-    const REF: &str = "/data/workspace/resources/vl/parity/moondream_dec_ref.bin";
-    const TOK: &str = "/data/workspace/resources/vl/parity/moondream_dec_tokens.bin";
     const N: u32 = 4; // dense blocks, must match the dump
 
-    fn read_f32(p: &str) -> Option<Vec<f32>> {
+    fn read_f32(p: impl AsRef<std::path::Path>) -> Option<Vec<f32>> {
         Some(std::fs::read(p).ok()?.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
     }
 
@@ -36,7 +45,10 @@ mod tests {
 
     #[test]
     fn moondream_decoder_partial_depth_matches_hf() {
-        let (Some(ref_logits), Some(tok_raw)) = (read_f32(REF), std::fs::read(TOK).ok()) else {
+        let DIR = testdata("vl/moondream3/hf/moondream3-preview");
+        let REF = testdata("vl/parity/moondream_dec_ref.bin");
+        let TOK = testdata("vl/parity/moondream_dec_tokens.bin");
+        let (Some(ref_logits), Some(tok_raw)) = (read_f32(&REF), std::fs::read(TOK).ok()) else {
             eprintln!("skip: Moondream decoder reference not present (run tools/moondream_decoder_dump_reference.py)");
             return;
         };

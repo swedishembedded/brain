@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 //! MaskGIT sampler parity + closed loop. Imports both checkpoints, runs
 //! maskgit_sample on the exact prime/actions the reference used (inference_steps
 //! =1 -> deterministic argmax), asserts the sampled tokens match the reference
@@ -12,9 +13,17 @@ use gpu_core::Gpu;
 use wm_genie::import::{import_dynamics, import_tokenizer};
 use wm_genie::{decode_indices, kernel_sources, maskgit_sample};
 
-const TOK: &str = "/data/workspace/applications/edgeai/brain/scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt";
-const DYN: &str = "/data/workspace/applications/edgeai/brain/scratchpad/wm-checkpoints/GenieRedux_Guided_CoinRun_80mln_v1.0.pt";
-const DIR: &str = "/data/workspace/applications/edgeai/brain/scratchpad/parity";
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
+
 
 fn read_f32(p: &str) -> Vec<f32> {
     std::fs::read(p).unwrap().chunks_exact(4).map(|c| f32::from_le_bytes([c[0],c[1],c[2],c[3]])).collect()
@@ -26,8 +35,11 @@ fn read_u32(p: &str) -> Vec<u32> {
 #[test]
 #[ignore = "needs both checkpoints + maskgit parity dump; run manually"]
 fn maskgit_sampler_parity_and_loop() {
+        let TOK = repo_path("scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt");
+        let DYN = repo_path("scratchpad/wm-checkpoints/GenieRedux_Guided_CoinRun_80mln_v1.0.pt");
+        let DIR = repo_path("scratchpad/parity");
     let pp = format!("{DIR}/genie_maskgit_prime.u32");
-    if !std::path::Path::new(DYN).exists() || !std::path::Path::new(&pp).exists() {
+    if !std::path::Path::new(&DYN).exists() || !std::path::Path::new(&pp).exists() {
         eprintln!("SKIP: checkpoints or maskgit dump absent");
         return;
     }
@@ -37,8 +49,8 @@ fn maskgit_sampler_parity_and_loop() {
     let ref_out = read_u32(&format!("{DIR}/genie_maskgit_out.u32"));
     let num_tokens = (h * w) as usize;
 
-    let (tw, _) = import_tokenizer(TOK).expect("import tokenizer");
-    let (dw, dc) = import_dynamics(DYN, &tw.vq).expect("import dynamics");
+    let (tw, _) = import_tokenizer(&TOK).expect("import tokenizer");
+    let (dw, dc) = import_dynamics(&DYN, &tw.vq).expect("import dynamics");
     eprintln!("imported; sampling...");
     let gpu = Gpu::new_cpu(&kernel_sources());
 

@@ -120,6 +120,17 @@ pub fn moe_layer_keys(layer: u32, num_experts: u32) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
     use super::*;
 
     fn cfg() -> MoondreamConfig {
@@ -161,7 +172,7 @@ mod tests {
     #[test]
     fn real_checkpoint_fully_covered() {
         use std::io::Read;
-        let path = "/data/workspace/resources/vl/moondream3/hf/moondream3-preview/model.safetensors.index.json";
+        let path = testdata("vl/moondream3/hf/moondream3-preview/model.safetensors.index.json");
         let Ok(mut f) = std::fs::File::open(path) else {
             eprintln!("skip: moondream3 index not present");
             return;

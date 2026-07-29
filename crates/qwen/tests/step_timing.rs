@@ -3,7 +3,7 @@
 
 //! One-step timing on the real imported Qwen3-0.6B (diagnose finetune speed).
 //! ```text
-//! QWEN3_DIR=/data/workspace/resources/qwen3-0.6b DISPLAY= \
+//! QWEN3_DIR=<qwen3-0.6b checkpoint dir> DISPLAY= \
 //!   cargo test --release -p brain-qwen --test step_timing -- --ignored --nocapture
 //! ```
 use std::time::Instant;

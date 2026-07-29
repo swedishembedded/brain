@@ -5,17 +5,29 @@
 //! gitignored scratch). Skipped unless the file is present. Run with:
 //!   cargo test -p brain-wm-genie --test import_inspect -- --nocapture --ignored
 #![allow(clippy::print_stderr)]
+#![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 
-const CK: &str = "/data/workspace/applications/edgeai/brain/scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt";
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
+
 
 #[test]
 #[ignore = "needs the 1.2GB checkpoint in scratch; run manually"]
 fn inspect_tokenizer_checkpoint() {
-    if !std::path::Path::new(CK).exists() {
+        let CK = repo_path("scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt");
+    if !std::path::Path::new(&CK).exists() {
         eprintln!("SKIP: {CK} absent");
         return;
     }
-    let rep = checkpoint::torchpt::read_report(CK).expect("read");
+    let rep = checkpoint::torchpt::read_report(&CK).expect("read");
     eprintln!("total tensors: {}  skipped-non-tensor: {}", rep.tensors.len(), rep.skipped_non_tensor);
     // group by top-level prefix segment
     use std::collections::BTreeMap;

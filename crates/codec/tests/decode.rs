@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 //! Decode-path tests for the Qwen3-TTS 12 Hz codec.
 //!
 //! All gated on the real checkpoint being present (it is a large external
@@ -11,14 +12,25 @@ use std::collections::HashMap;
 
 use codec::{Codec, CodecConfig};
 
-const CKPT_DIR: &str = "/data/workspace/tmp/qwen3-tts-resources/ckpt/Qwen3-TTS-Tokenizer-12Hz";
-const DUMP_DIR: &str = "/data/workspace/tmp/qwen3-tts-resources/dumps/codec_ref";
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
+
 
 fn ckpt_available() -> bool {
-    std::path::Path::new(CKPT_DIR).join("model.safetensors").exists()
+        let CKPT_DIR = testdata("tts/ckpt/Qwen3-TTS-Tokenizer-12Hz");
+    std::path::Path::new(&CKPT_DIR).join("model.safetensors").exists()
 }
 
 fn import_to_temp() -> String {
+        let CKPT_DIR = testdata("tts/ckpt/Qwen3-TTS-Tokenizer-12Hz");
     // Memoize: import the (651 MB) checkpoint ONCE and share the path across all
     // tests. Without this, parallel tests race on the same temp filename and the
     // checkpoint `rename` finalisation panics (and each test re-dequantizes the
@@ -30,7 +42,7 @@ fn import_to_temp() -> String {
                 .join(format!("codec_decode_{}.weights", std::process::id()))
                 .to_string_lossy()
                 .into_owned();
-            codec::import(CKPT_DIR, &out).expect("import failed");
+            codec::import(&CKPT_DIR, &out).expect("import failed");
             out
         })
         .clone()
@@ -124,8 +136,9 @@ fn decode_random_codes_is_finite_and_bounded() {
 /// `{codes.bin (u32 LE [T,16]), waveform.bin (f32 LE), meta.json}`.
 #[test]
 fn parity_against_golden_dump() {
-    let codes_p = std::path::Path::new(DUMP_DIR).join("codes.bin");
-    let wav_p = std::path::Path::new(DUMP_DIR).join("waveform.bin");
+        let DUMP_DIR = testdata("tts/dumps/codec_ref");
+    let codes_p = std::path::Path::new(&DUMP_DIR).join("codes.bin");
+    let wav_p = std::path::Path::new(&DUMP_DIR).join("waveform.bin");
     if !ckpt_available() || !codes_p.exists() || !wav_p.exists() {
         eprintln!("skip: golden dump not present");
         return;

@@ -12,37 +12,49 @@
 
 #[cfg(test)]
 mod tests {
+    #![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
+
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
     use std::collections::HashMap;
 
     use crate::config::FastVlmConfig;
     use crate::import::map_decoder;
     use qwen::Qwen;
 
-    const CKPT: &str = "/data/workspace/resources/vl/fastvlm/hf/FastVLM-0.5B/model.safetensors";
-    const REF: &str = "/data/workspace/resources/vl/parity/fastvlm_dec_ref.bin";
-    const TOK: &str = "/data/workspace/resources/vl/parity/fastvlm_dec_tokens.bin";
-    const GEN: &str = "/data/workspace/resources/vl/parity/fastvlm_dec_gen.bin";
 
-    fn read_i32(path: &str) -> Option<Vec<u32>> {
+    fn read_i32(path: impl AsRef<std::path::Path>) -> Option<Vec<u32>> {
         let b = std::fs::read(path).ok()?;
         Some(b.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect())
     }
 
-    fn read_f32(path: &str) -> Option<Vec<f32>> {
+    fn read_f32(path: impl AsRef<std::path::Path>) -> Option<Vec<f32>> {
         let b = std::fs::read(path).ok()?;
         Some(b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
     }
 
     #[test]
     fn fastvlm_decoder_logits_match_hf_reference() {
-        let (Some(ref_logits), Some(tok_raw)) = (read_f32(REF), std::fs::read(TOK).ok()) else {
+        let CKPT = testdata("vl/fastvlm/hf/FastVLM-0.5B/model.safetensors");
+        let REF = testdata("vl/parity/fastvlm_dec_ref.bin");
+        let TOK = testdata("vl/parity/fastvlm_dec_tokens.bin");
+        let GEN = testdata("vl/parity/fastvlm_dec_gen.bin");
+        let (Some(ref_logits), Some(tok_raw)) = (read_f32(&REF), std::fs::read(TOK).ok()) else {
             eprintln!("skip: FastVLM decoder reference dump not present (run tools/fastvlm_decoder_dump_reference.py)");
             return;
         };
         // The tied vocab table (151936×896×4 ≈ 544 MB) exceeds a typical GPU storage-
         // buffer binding limit, so run the decoder on the CPU-JIT backend.
         std::env::set_var("BRAIN_DEVICE", "cpu");
-        let Ok(tensors) = checkpoint::safetensors::read(CKPT) else {
+        let Ok(tensors) = checkpoint::safetensors::read(&CKPT) else {
             eprintln!("skip: FastVLM checkpoint not present");
             return;
         };
@@ -111,11 +123,12 @@ mod tests {
         }
     }
 
-    const VIS_PX: &str = "/data/workspace/resources/vl/parity/fastvlm_vis_px.bin";
-    const VIS_FEAT: &str = "/data/workspace/resources/vl/parity/fastvlm_vis_feat.bin";
 
     #[test]
     fn fastvlm_vision_tower_matches_hf() {
+        let CKPT = testdata("vl/fastvlm/hf/FastVLM-0.5B/model.safetensors");
+        let VIS_PX = testdata("vl/parity/fastvlm_vis_px.bin");
+        let VIS_FEAT = testdata("vl/parity/fastvlm_vis_feat.bin");
         // brain's OWN FastViTHD (Encoder::mobileclip_l) vs the HF mobileclip tower on
         // the real weights: same preprocessed pixels → the [256, 3072] features must
         // match (fully-in-brain vision, closing the loop for a native image caption).
@@ -123,7 +136,7 @@ mod tests {
             eprintln!("skip: vision reference not present (run tools/fastvlm_vision_dump_reference.py)");
             return;
         };
-        let Ok(tensors) = checkpoint::safetensors::read(CKPT) else {
+        let Ok(tensors) = checkpoint::safetensors::read(&CKPT) else {
             eprintln!("skip: FastVLM checkpoint not present");
             return;
         };
@@ -157,13 +170,14 @@ mod tests {
         assert!(cos > 0.999, "brain vision features diverge from HF: cosine={cos}");
     }
 
-    const CAP_EMB: &str = "/data/workspace/resources/vl/parity/fastvlm_cap_embeds.bin";
-    const CAP_LAYOUT: &str = "/data/workspace/resources/vl/parity/fastvlm_cap_layout.bin";
-    const CAP_IDS: &str = "/data/workspace/resources/vl/parity/fastvlm_cap_ids.bin";
-    const CAP_GEN: &str = "/data/workspace/resources/vl/parity/fastvlm_cap_gen.bin";
 
     #[test]
     fn fastvlm_full_pipeline_caption() {
+        let CKPT = testdata("vl/fastvlm/hf/FastVLM-0.5B/model.safetensors");
+        let VIS_PX = testdata("vl/parity/fastvlm_vis_px.bin");
+        let CAP_LAYOUT = testdata("vl/parity/fastvlm_cap_layout.bin");
+        let CAP_IDS = testdata("vl/parity/fastvlm_cap_ids.bin");
+        let CAP_GEN = testdata("vl/parity/fastvlm_cap_gen.bin");
         // brain does EVERYTHING on the real weights: mobileclip vision → mlp2x_gelu
         // projector → Qwen2 decoder → greedy decode. No HF tensors at inference — the
         // caption must still match HF's reference token-for-token.
@@ -173,7 +187,7 @@ mod tests {
             eprintln!("skip: FastVLM full-pipeline reference not present");
             return;
         };
-        let Ok(tensors) = checkpoint::safetensors::read(CKPT) else {
+        let Ok(tensors) = checkpoint::safetensors::read(&CKPT) else {
             eprintln!("skip: FastVLM checkpoint not present");
             return;
         };
@@ -251,6 +265,11 @@ mod tests {
 
     #[test]
     fn fastvlm_image_caption_matches_hf() {
+        let CKPT = testdata("vl/fastvlm/hf/FastVLM-0.5B/model.safetensors");
+        let CAP_EMB = testdata("vl/parity/fastvlm_cap_embeds.bin");
+        let CAP_LAYOUT = testdata("vl/parity/fastvlm_cap_layout.bin");
+        let CAP_IDS = testdata("vl/parity/fastvlm_cap_ids.bin");
+        let CAP_GEN = testdata("vl/parity/fastvlm_cap_gen.bin");
         // Full image → caption on real weights: brain's decoder consumes the 256 HF
         // image embeddings (mobileclip vision + projector — brain's own FastViTHD
         // still needs SE/head import to reach feature parity), splices them into the
@@ -264,7 +283,7 @@ mod tests {
             eprintln!("skip: FastVLM caption reference not present (run tools/fastvlm_caption_dump_reference.py)");
             return;
         };
-        let Ok(tensors) = checkpoint::safetensors::read(CKPT) else {
+        let Ok(tensors) = checkpoint::safetensors::read(&CKPT) else {
             eprintln!("skip: FastVLM checkpoint not present");
             return;
         };

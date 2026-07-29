@@ -181,6 +181,17 @@ pub fn build_vision_weights(tensors: &[(String, Vec<f32>)]) -> HashMap<String, V
 
 #[cfg(test)]
 mod tests {
+
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
     use super::*;
     use crate::encoder::{ctx, Encoder, PIPELINES};
     use gpu_core::Gpu;
@@ -189,8 +200,8 @@ mod tests {
     fn vision_import_covers_every_brain_param() {
         // Every mobileclip_l parameter brain expects must be produced by the import
         // from the real checkpoint's vision tensors (skips if the checkpoint absent).
-        let path = "/data/workspace/resources/vl/fastvlm/hf/FastVLM-0.5B/model.safetensors";
-        let Ok(tensors) = checkpoint::safetensors::read(path) else {
+        let path = testdata("vl/fastvlm/hf/FastVLM-0.5B/model.safetensors");
+        let Ok(tensors) = checkpoint::safetensors::read(&path) else {
             eprintln!("skip: FastVLM checkpoint not present");
             return;
         };

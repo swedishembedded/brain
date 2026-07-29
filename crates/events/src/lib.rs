@@ -668,7 +668,7 @@ mod tests {
                 w: 4,
                 h: 4,
                 data: None,
-                path: Some("/tmp/frame.ppm".into()),
+                path: Some(std::env::temp_dir().join("frame.ppm").to_string_lossy().into_owned()),
             },
             Event::ObjectDetected {
                 dets: vec![[1.0, 2.0, 3.0, 4.0, 0.9, 5.0], [0.0, 0.0, 1.0, 1.0, 0.5, 0.0]],

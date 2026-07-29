@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 //! Cache-free vs KV-cached generation parity (the no-voice-bug regression).
 //!
 //! Both paths are greedy+deterministic, so for the SAME prompt they MUST emit
@@ -19,37 +20,51 @@ use tts::mtp::MtpModel;
 use tts::pipeline::{generate_codes, generate_codes_cached, GenOpts};
 use tts::prompt::{self, TtsSpecials};
 
-const CKPT: &str = "/data/workspace/tmp/qwen3-tts-resources/ckpt/Qwen3-TTS-12Hz-0.6B-Base";
-const TALKER: &str = "/data/workspace/applications/edgeai/brain/out/tts/talker.weights";
-const MTP: &str = "/data/workspace/applications/edgeai/brain/out/tts/mtp.weights";
-const SPEAKER: &str = "/data/workspace/applications/edgeai/brain/out/tts/speaker.weights";
-const REF_WAV: &str = "/data/workspace/tmp/qwen3-tts-resources/voice-clone-example-voice.wav";
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
+
 
 fn maxabs(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
 }
 
 fn ready() -> bool {
+        let CKPT = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
+        let TALKER = repo_path("out/tts/talker.weights");
+        let MTP = repo_path("out/tts/mtp.weights");
     !std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
-        && std::path::Path::new(TALKER).exists()
-        && std::path::Path::new(MTP).exists()
-        && std::path::Path::new(CKPT).join("config.json").exists()
+        && std::path::Path::new(&TALKER).exists()
+        && std::path::Path::new(&MTP).exists()
+        && std::path::Path::new(&CKPT).join("config.json").exists()
 }
 
 #[test]
 fn cached_matches_cachefree() {
+        let CKPT = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
+        let TALKER = repo_path("out/tts/talker.weights");
+        let MTP = repo_path("out/tts/mtp.weights");
+        let SPEAKER = repo_path("out/tts/speaker.weights");
+        let REF_WAV = testdata("tts/voice-clone-example-voice.wav");
     if !ready() {
         eprintln!("skip: weights/checkpoint not present (or MOE_SKIP_GPU_TESTS set)");
         return;
     }
 
-    let sp = TtsSpecials::from_config_dir(CKPT).unwrap();
-    let tok = prompt::load_tokenizer(CKPT).unwrap();
+    let sp = TtsSpecials::from_config_dir(&CKPT).unwrap();
+    let tok = prompt::load_tokenizer(&CKPT).unwrap();
     let language_id = sp.language_id("english");
 
     // x-vector from the reference wav.
-    let wav = audio::wav::read(REF_WAV).unwrap();
-    let speaker = speaker::SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(speaker::model::PIPELINES), SPEAKER);
+    let wav = audio::wav::read(&REF_WAV).unwrap();
+    let speaker = speaker::SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(speaker::model::PIPELINES), &SPEAKER);
     let xvec = speaker.embed_wav(&wav.samples, wav.sample_rate);
 
     // short text via the assistant chat template (mirror pipeline::clone).
@@ -66,8 +81,8 @@ fn cached_matches_cachefree() {
         min_new: 2,
     };
 
-    let gen = TalkerGen::load_on(gpu_core::testgpu::dev(tts::gen::PIPELINES), TALKER, 16 + 32);
-    let mtp = MtpModel::load_inference_on(gpu_core::testgpu::dev(tts::mtp::PIPELINES), MTP);
+    let gen = TalkerGen::load_on(gpu_core::testgpu::dev(tts::gen::PIPELINES), &TALKER, 16 + 32);
+    let mtp = MtpModel::load_inference_on(gpu_core::testgpu::dev(tts::mtp::PIPELINES), &MTP);
     let prompt =
         prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, Some(&xvec), language_id);
 
@@ -76,7 +91,7 @@ fn cached_matches_cachefree() {
     eprintln!("prefix positions = {n_prefix}, d = {d}");
 
     // ---- (A) prefix forward: CpuTalker::forward_full vs TalkerGen::forward ----
-    let mut cpu = CpuTalker::load(TALKER);
+    let mut cpu = CpuTalker::load(&TALKER);
     let eng_hidden = gen.forward(&prompt.embeds);
     let cpu_full = cpu.forward_full(&prompt.embeds);
     let last = (n_prefix - 1) * d;
@@ -104,7 +119,7 @@ fn cached_matches_cachefree() {
         .max_by(|&a, &b| eng_logits[a].partial_cmp(&eng_logits[b]).unwrap())
         .unwrap() as u32;
     let cb0_embed = gen.codec_embed(cb0).to_vec();
-    let mut cpu_mtp = CpuMtp::load(MTP);
+    let mut cpu_mtp = CpuMtp::load(&MTP);
     let (codes_e, res_e) = mtp.generate_residuals(&past_hidden, &cb0_embed);
     let (codes_c, res_c) = cpu_mtp.generate_residuals(&past_hidden, &cb0_embed);
     eprintln!(
@@ -117,8 +132,8 @@ fn cached_matches_cachefree() {
 
     // ---- (D) full generation: cache-free vs cached, frame-by-frame ----
     let codes_free = generate_codes(&gen, &mtp, &sp, &prompt, &opts);
-    let mut cpu2 = CpuTalker::load(TALKER);
-    let mut cpu_mtp2 = CpuMtp::load(MTP);
+    let mut cpu2 = CpuTalker::load(&TALKER);
+    let mut cpu_mtp2 = CpuMtp::load(&MTP);
     let codes_cached = generate_codes_cached(&mut cpu2, &mut cpu_mtp2, &sp, &prompt, &opts);
     let tf = codes_free.len() / 16;
     let tc = codes_cached.len() / 16;
@@ -166,11 +181,17 @@ fn rms(x: &[f32]) -> f32 {
 /// Writes /tmp/verify.wav. Gated as above. Set `TTS_PROFILE=1` for stage timers.
 #[test]
 fn cached_clone_audio_quality() {
+        let CKPT = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
+        let TALKER = repo_path("out/tts/talker.weights");
+        let MTP = repo_path("out/tts/mtp.weights");
+        let SPEAKER = repo_path("out/tts/speaker.weights");
+        let REF_WAV = testdata("tts/voice-clone-example-voice.wav");
+        let CODEC = repo_path("out/tts/codec.weights");
+        let GOLD = testdata("tts/dumps/codec_ref/codes.bin");
     if !ready() {
         eprintln!("skip: weights/checkpoint not present (or MOE_SKIP_GPU_TESTS set)");
         return;
     }
-    const CODEC: &str = "/data/workspace/applications/edgeai/brain/out/tts/codec.weights";
     let paths = tts::pipeline::TtsPaths {
         talker: TALKER.to_string(),
         mtp: MTP.to_string(),
@@ -186,9 +207,8 @@ fn cached_clone_audio_quality() {
         min_new: 2,
     };
     // --- codec sanity: decode the PyTorch golden codes with our codec.weights ---
-    const GOLD: &str = "/data/workspace/tmp/qwen3-tts-resources/dumps/codec_ref/codes.bin";
-    if std::path::Path::new(GOLD).exists() {
-        let b = std::fs::read(GOLD).unwrap();
+    if std::path::Path::new(&GOLD).exists() {
+        let b = std::fs::read(&GOLD).unwrap();
         let gcodes: Vec<u32> = b[8..]
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -202,11 +222,11 @@ fn cached_clone_audio_quality() {
     }
 
     // --- build the prompt + generate codes directly so we can inspect them ---
-    let sp = TtsSpecials::from_config_dir(CKPT).unwrap();
-    let tok = prompt::load_tokenizer(CKPT).unwrap();
+    let sp = TtsSpecials::from_config_dir(&CKPT).unwrap();
+    let tok = prompt::load_tokenizer(&CKPT).unwrap();
     let language_id = sp.language_id("english");
-    let refwav = audio::wav::read(REF_WAV).unwrap();
-    let spk = speaker::SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(speaker::model::PIPELINES), SPEAKER);
+    let refwav = audio::wav::read(&REF_WAV).unwrap();
+    let spk = speaker::SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(speaker::model::PIPELINES), &SPEAKER);
     let xvec = spk.embed_wav(&refwav.samples, refwav.sample_rate);
     eprintln!(
         "x-vector: len={}, rms={:.4}, any_nan={}",
@@ -217,13 +237,13 @@ fn cached_clone_audio_quality() {
     let ids = tok.encode("<|im_start|>assistant\nTesting one two three.<|im_end|>\n<|im_start|>assistant\n");
     let role_ids = ids[..3].to_vec();
     let text_ids = ids[3..ids.len() - 5].to_vec();
-    let gen = TalkerGen::load_on(gpu_core::testgpu::dev(tts::gen::PIPELINES), TALKER, 24 + 32);
+    let gen = TalkerGen::load_on(gpu_core::testgpu::dev(tts::gen::PIPELINES), &TALKER, 24 + 32);
     let promptx =
         prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, Some(&xvec), language_id);
 
     let t0 = std::time::Instant::now();
-    let mut cpu = CpuTalker::load(TALKER);
-    let mut cpu_mtp = CpuMtp::load(MTP);
+    let mut cpu = CpuTalker::load(&TALKER);
+    let mut cpu_mtp = CpuMtp::load(&MTP);
     let codes = generate_codes_cached(&mut cpu, &mut cpu_mtp, &sp, &promptx, &opts);
     eprintln!("cached gen (24 frames) wall = {:.1}s", t0.elapsed().as_secs_f64());
     let cb0: Vec<u32> = (0..codes.len() / 16).map(|f| codes[f * 16]).collect();
@@ -231,7 +251,7 @@ fn cached_clone_audio_quality() {
     eprintln!("frame0 all 16 = {:?}", &codes[..16.min(codes.len())]);
 
     let wav = tts::pipeline::decode_codes(&paths.codec, &codes).unwrap();
-    audio::wav::write("/tmp/verify.wav", &wav, 24000).unwrap();
+    audio::wav::write(std::env::temp_dir().join("verify.wav").to_string_lossy().as_ref(), &wav, 24000).unwrap();
     let r = rms(&wav);
 
     // speaker similarity: x-vector of generated clip vs reference clip.
@@ -251,13 +271,13 @@ fn cached_clone_audio_quality() {
         seed: 0,
         min_new: 2,
     };
-    let mut cpu_s = CpuTalker::load(TALKER);
-    let mut cpu_mtp_s = CpuMtp::load(MTP);
+    let mut cpu_s = CpuTalker::load(&TALKER);
+    let mut cpu_mtp_s = CpuMtp::load(&MTP);
     let codes_s = generate_codes_cached(&mut cpu_s, &mut cpu_mtp_s, &sp, &promptx, &opts_s);
     let cb0_s: Vec<u32> = (0..codes_s.len() / 16).map(|f| codes_s[f * 16]).collect();
     eprintln!("sampled cb0 per frame = {cb0_s:?}");
     let wav_s = tts::pipeline::decode_codes(&paths.codec, &codes_s).unwrap();
-    audio::wav::write("/tmp/verify_sampled.wav", &wav_s, 24000).unwrap();
+    audio::wav::write(std::env::temp_dir().join("verify_sampled.wav").to_string_lossy().as_ref(), &wav_s, 24000).unwrap();
     let xv_s = spk.embed_wav(&wav_s, 24000);
     eprintln!(
         "VERIFY(sampled) /tmp/verify_sampled.wav: samples={}, rms={:.4}, speaker-sim={:.4}",

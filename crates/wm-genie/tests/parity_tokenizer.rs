@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 //! End-to-end tokenizer PARITY vs the GenieRedux reference: import the real
 //! checkpoint, run tokenizer_forward on the exact input the Python reference
 //! used (scripts/parity-dump/genie_tokenizer.py), and compare the reconstruction
@@ -12,8 +13,17 @@ use gpu_core::Gpu;
 use wm_genie::import::import_tokenizer;
 use wm_genie::{kernel_sources, tokenizer_forward};
 
-const CK: &str = "/data/workspace/applications/edgeai/brain/scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt";
-const DIR: &str = "/data/workspace/applications/edgeai/brain/scratchpad/parity";
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
+
 
 fn read_f32(p: &str) -> Vec<f32> {
     std::fs::read(p).unwrap().chunks_exact(4).map(|c| f32::from_le_bytes([c[0],c[1],c[2],c[3]])).collect()
@@ -25,8 +35,10 @@ fn read_u32(p: &str) -> Vec<u32> {
 #[test]
 #[ignore = "needs the checkpoint + parity dump in scratch; run manually"]
 fn tokenizer_parity_vs_reference() {
+        let CK = repo_path("scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt");
+        let DIR = repo_path("scratchpad/parity");
     let inp = format!("{DIR}/genie_tokenizer_in.f32");
-    if !std::path::Path::new(CK).exists() || !std::path::Path::new(&inp).exists() {
+    if !std::path::Path::new(&CK).exists() || !std::path::Path::new(&inp).exists() {
         eprintln!("SKIP: checkpoint or parity dump absent (run genie_tokenizer.py)");
         return;
     }
@@ -36,7 +48,7 @@ fn tokenizer_parity_vs_reference() {
     let ref_recon = read_f32(&format!("{DIR}/genie_tokenizer_recon.f32"));
     let ref_idx = read_u32(&format!("{DIR}/genie_tokenizer_idx.u32"));
 
-    let (w, cfg) = import_tokenizer(CK).expect("import");
+    let (w, cfg) = import_tokenizer(&CK).expect("import");
     eprintln!("imported; running tokenizer_forward...");
     let gpu = Gpu::new_cpu(&kernel_sources());
     let (recon, idx) = tokenizer_forward(&gpu, &video, &w,

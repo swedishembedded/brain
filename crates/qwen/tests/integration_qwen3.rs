@@ -10,7 +10,7 @@
 //! `tokenizer.json`, and `brain/qwen3-0.6b.weights`), so normal CI skips them:
 //!
 //! ```text
-//! QWEN3_DIR=/data/workspace/resources/qwen3-0.6b \
+//! QWEN3_DIR=<qwen3-0.6b checkpoint dir> \
 //!   DISPLAY= cargo test --release -p brain-qwen --test integration_qwen3 -- --ignored --nocapture
 //! ```
 //!

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+#![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 //! Talker logit-parity test vs a PyTorch golden dump.
 //!
 //! Isolates the Talker decoder + untied codec head: the reference feeds
@@ -11,8 +12,17 @@
 
 use tts::TalkerModel;
 
-const CKPT: &str = "/data/workspace/tmp/qwen3-tts-resources/ckpt/Qwen3-TTS-12Hz-0.6B-Base";
-const DUMP: &str = "/data/workspace/tmp/qwen3-tts-resources/dumps/talker_ref";
+#[allow(dead_code)]
+fn testdata(rel: &str) -> String {
+    let root = std::env::var("BRAIN_TESTDATA")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
+    format!("{root}/{rel}")
+}
+#[allow(dead_code)]
+fn repo_path(rel: &str) -> String {
+    format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
+}
+
 
 fn read_u32(path: &str) -> Option<Vec<u32>> {
     let b = std::fs::read(path).ok()?;
@@ -27,6 +37,8 @@ fn read_f32(path: &str) -> Option<Vec<f32>> {
 
 #[test]
 fn talker_logits_match_reference() {
+        let CKPT = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
+        let DUMP = testdata("tts/dumps/talker_ref");
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
@@ -36,7 +48,7 @@ fn talker_logits_match_reference() {
         eprintln!("skip: talker golden dump not present");
         return;
     };
-    if !std::path::Path::new(CKPT).join("model.safetensors").exists() {
+    if !std::path::Path::new(&CKPT).join("model.safetensors").exists() {
         eprintln!("skip: checkpoint not present");
         return;
     }
@@ -46,7 +58,7 @@ fn talker_logits_match_reference() {
 
     let out = std::env::temp_dir().join("brain_talker_parity.weights");
     let out = out.to_str().unwrap();
-    tts::import::import_talker(CKPT, out).expect("talker import");
+    tts::import::import_talker(&CKPT, out).expect("talker import");
     let model = TalkerModel::load_inference(out, 1, t as u32);
     let got = model.logits_all(&tokens);
     assert_eq!(got.len(), t * vocab);
