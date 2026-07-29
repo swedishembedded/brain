@@ -15,12 +15,44 @@ pub fn nemotron_pipelines() -> &'static [(&'static str, &'static str)] {
         ("glu_bwd", kernels::GLU_BWD),               // 1
         ("lstm_gates", kernels::LSTM_GATES),         // 2
         ("lstm_gates_bwd", kernels::LSTM_GATES_BWD), // 3
+        ("rel_shift", kernels::REL_SHIFT),           // 4
+        ("rel_shift_bwd", kernels::REL_SHIFT_BWD),   // 5
     ]
 }
 pub const K_GLU: usize = 0;
 pub const K_GLU_BWD: usize = 1;
 pub const K_LSTM_GATES: usize = 2;
 pub const K_LSTM_GATES_BWD: usize = 3;
+pub const K_REL_SHIFT: usize = 4;
+pub const K_REL_SHIFT_BWD: usize = 5;
+
+/// Transformer-XL relative shift: `out[rows,q,p]` from `x[rows,q,p]`.
+pub fn rel_shift_fwd(g: &Gpu, k: usize, x: &DeviceBuffer, out: &DeviceBuffer, rows: u32, q: u32, p: u32, steps: &mut Vec<Step>) {
+    steps.push(g.step(k, &[x, out], &[rows, q, p], rows * q * p));
+}
+
+/// rel_shift backward (caller must zero `dx` first): scatters `dy` into `dx`.
+pub fn rel_shift_bwd(g: &Gpu, k: usize, dy: &DeviceBuffer, dx: &DeviceBuffer, rows: u32, q: u32, p: u32, steps: &mut Vec<Step>) {
+    steps.push(g.step(k, &[dy, dx], &[rows, q, p], rows * q * p));
+}
+
+/// CPU oracle for `rel_shift` — the exact torch pad → reshape → drop-row op.
+pub fn rel_shift_ref(x: &[f32], rows: usize, q: usize, p: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; rows * q * p];
+    for r in 0..rows {
+        // padded [q, p+1] flattened; then viewed as [p+1, q], drop first row (q elems).
+        let mut xp = vec![0.0f32; q * (p + 1)];
+        for i in 0..q {
+            for k in 1..=p {
+                xp[i * (p + 1) + k] = x[r * q * p + i * p + (k - 1)];
+            }
+        }
+        for idx2 in 0..q * p {
+            out[r * q * p + idx2] = xp[q + idx2];
+        }
+    }
+    out
+}
 
 /// `out[outer,d,inner] = glu(x[outer,2d,inner], dim=middle)`.
 pub fn glu_fwd(g: &Gpu, glu: usize, x: &DeviceBuffer, out: &DeviceBuffer, outer: u32, d: u32, inner: u32, steps: &mut Vec<Step>) {
@@ -99,6 +131,47 @@ mod tests {
             xm[i] -= eps;
             let num = (fwd(&xp).iter().sum::<f32>() - fwd(&xm).iter().sum::<f32>()) / (2.0 * eps);
             assert!(maxrel(dxh[i], num), "dx[{i}] analytic {} vs numeric {}", dxh[i], num);
+        }
+    }
+
+    #[test]
+    fn rel_shift_matches_oracle_and_backward_is_transpose() {
+        let g = Gpu::new_cpu(nemotron_pipelines());
+        let (rows, q, p) = (2u32, 4u32, 7u32); // p = 2*L-1 style
+        let n = (rows * q * p) as usize;
+        let mut rng = Rng::new(5);
+        let xh: Vec<f32> = (0..n).map(|_| rng.next_f32() - 0.5).collect();
+
+        // forward vs oracle
+        let x = g.storage_init("x", &xh);
+        let out = g.storage(n as u64);
+        let mut s = Vec::new();
+        rel_shift_fwd(&g, K_REL_SHIFT, &x, &out, rows, q, p, &mut s);
+        g.submit(&[], &s);
+        let outh = g.read(&out, n);
+        let refh = rel_shift_ref(&xh, rows as usize, q as usize, p as usize);
+        let d = outh.iter().zip(&refh).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        assert!(d < 1e-6, "rel_shift forward vs oracle maxdiff {d}");
+
+        // backward = transpose: dx from dy (loss = sum(w·out)) must match FD
+        let mut rng2 = Rng::new(9);
+        let dyh: Vec<f32> = (0..n).map(|_| rng2.next_f32() - 0.5).collect();
+        let dy = g.storage_init("dy", &dyh);
+        let dx = g.storage_init("dx", &vec![0.0f32; n]);
+        let mut sb = Vec::new();
+        rel_shift_bwd(&g, K_REL_SHIFT_BWD, &dy, &dx, rows, q, p, &mut sb);
+        g.submit(&[], &sb);
+        let dxh = g.read(&dx, n);
+        // numeric: d/dx_i sum(dy·rel_shift(x)) via the oracle
+        let eps = 1e-3f32;
+        for i in 0..n {
+            let (mut xp, mut xm) = (xh.clone(), xh.clone());
+            xp[i] += eps;
+            xm[i] -= eps;
+            let lp: f32 = rel_shift_ref(&xp, rows as usize, q as usize, p as usize).iter().zip(&dyh).map(|(a, b)| a * b).sum();
+            let lm: f32 = rel_shift_ref(&xm, rows as usize, q as usize, p as usize).iter().zip(&dyh).map(|(a, b)| a * b).sum();
+            let num = (lp - lm) / (2.0 * eps);
+            assert!((dxh[i] - num).abs() <= 1e-3 + 1e-2 * num.abs(), "dx[{i}] {} vs {}", dxh[i], num);
         }
     }
 

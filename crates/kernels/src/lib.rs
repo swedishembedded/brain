@@ -470,6 +470,10 @@ pub const POS_BWD: &str = include_str!("../wgsl/pos_bwd.wgsl");
 pub const QUANT_PACK: &str = include_str!("../wgsl/quant_pack.wgsl");
 /// `wgsl/region_copy.wgsl`
 pub const REGION_COPY: &str = include_str!("../wgsl/region_copy.wgsl");
+/// `wgsl/rel_shift.wgsl`
+pub const REL_SHIFT: &str = include_str!("../wgsl/rel_shift.wgsl");
+/// `wgsl/rel_shift_bwd.wgsl`
+pub const REL_SHIFT_BWD: &str = include_str!("../wgsl/rel_shift_bwd.wgsl");
 /// `wgsl/relu_inplace.wgsl`
 pub const RELU_INPLACE: &str = include_str!("../wgsl/relu_inplace.wgsl");
 /// `wgsl/resize_bilinear.wgsl`
@@ -860,6 +864,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("pos_bwd", POS_BWD),
     ("quant_pack", QUANT_PACK),
     ("region_copy", REGION_COPY),
+    ("rel_shift", REL_SHIFT),
+    ("rel_shift_bwd", REL_SHIFT_BWD),
     ("relu_inplace", RELU_INPLACE),
     ("resize_bilinear", RESIZE_BILINEAR),
     ("resize_bilinear_dx", RESIZE_BILINEAR_DX),
