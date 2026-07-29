@@ -164,6 +164,169 @@ fn rel_pos_attention(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t: u
     matmul_nt(&ctx, p("o_proj.weight"), t, c, c) // o_proj (no bias)
 }
 
+/// Transpose (backward) of `rel_shift_ref`: scatter `d_out[rows,q,p]` back to `d_x[rows,q,p]`.
+fn rel_shift_backward(d_out: &[f32], rows: usize, q: usize, p: usize) -> Vec<f32> {
+    let mut dx = vec![0.0f32; rows * q * p];
+    for r in 0..rows {
+        let mut dxp = vec![0.0f32; q * (p + 1)];
+        for idx2 in 0..q * p {
+            dxp[q + idx2] = d_out[r * q * p + idx2];
+        }
+        for i in 0..q {
+            for k in 1..=p {
+                dx[r * q * p + i * p + (k - 1)] += dxp[i * (p + 1) + k];
+            }
+        }
+    }
+    dx
+}
+
+/// Backward of `rel_pos_attention` w.r.t. the input `hn` and `bias_v` (the novel
+/// Transformer-XL positional bias). `d_out` is the loss grad of the attention
+/// output `[T, C]`. Returns `(d_hn[T,C], d_bias_v[C])`.
+#[allow(clippy::too_many_arguments)]
+fn rel_pos_attention_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t: usize, valid: usize, d_out: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let (c, heads, hd) = (cfg.hidden as usize, cfg.n_heads as usize, cfg.head_dim() as usize);
+    let scale = 1.0 / (hd as f32).sqrt();
+    let (left, right) = ((cfg.sliding_window - 1) as usize, cfg.default_lookahead as usize);
+    let p = |n: &str| &w[&format!("{prefix}.{n}")];
+    let (wq, wk, wv, wrel, wo) = (p("q_proj.weight"), p("k_proj.weight"), p("v_proj.weight"), p("relative_k_proj.weight"), p("o_proj.weight"));
+    let (bu, bv) = (p("bias_u"), p("bias_v"));
+
+    // forward recompute
+    let q = matmul_nt(hn, wq, t, c, c);
+    let k = matmul_nt(hn, wk, t, c, c);
+    let v = matmul_nt(hn, wv, t, c, c);
+    let l = 2 * t - 1;
+    let pe = rel_pos_encoding(t, c);
+    let rel_k = matmul_nt(&pe, wrel, l, c, c);
+
+    // d_ctx = d_out · Wo  (out = ctx·Woᵀ)
+    let mut d_ctx = vec![0.0f32; t * c];
+    for i in 0..t {
+        for j in 0..c {
+            let mut acc = 0.0f32;
+            for o in 0..c {
+                acc += d_out[i * c + o] * wo[o * c + j];
+            }
+            d_ctx[i * c + j] = acc;
+        }
+    }
+
+    let (mut dq, mut dk, mut dv) = (vec![0.0f32; t * c], vec![0.0f32; t * c], vec![0.0f32; t * c]);
+    let mut d_bias_v = vec![0.0f32; c];
+    for h in 0..heads {
+        let (qh, kh, rkh) = (|i: usize, d: usize| q[i * c + h * hd + d], |j: usize, d: usize| k[j * c + h * hd + d], |pp: usize, d: usize| rel_k[pp * c + h * hd + d]);
+        let (bus, bvs) = (&bu[h * hd..h * hd + hd], &bv[h * hd..h * hd + hd]);
+        // recompute bd, scores, probs for this head
+        let mut bd_raw = vec![0.0f32; t * l];
+        for i in 0..t {
+            for pp in 0..l {
+                let mut a = 0.0f32;
+                for d in 0..hd {
+                    a += (qh(i, d) + bvs[d]) * rkh(pp, d);
+                }
+                bd_raw[i * l + pp] = a;
+            }
+        }
+        let bd = crate::kernels::rel_shift_ref(&bd_raw, 1, t, l);
+        let mut probs = vec![0.0f32; t * t];
+        for i in 0..t {
+            let mut sc = vec![f32::NEG_INFINITY; t];
+            for j in 0..t {
+                if j >= valid || !banded_ok(i, j, left, right) {
+                    continue;
+                }
+                let mut ac = 0.0f32;
+                for d in 0..hd {
+                    ac += (qh(i, d) + bus[d]) * kh(j, d);
+                }
+                sc[j] = ac * scale + bd[i * l + j] * scale;
+            }
+            let mx = sc.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let mut den = 0.0f32;
+            for s in &mut sc {
+                *s = if s.is_finite() { (*s - mx).exp() } else { 0.0 };
+                den += *s;
+            }
+            let inv = if den > 0.0 { 1.0 / den } else { 0.0 };
+            for j in 0..t {
+                probs[i * t + j] = sc[j] * inv;
+            }
+        }
+        // backward through ctx = probs·v_head
+        // d_probs[i,j] = Σ_d d_ctx[i,h*hd+d]·v[j,d];  d_v[j,d] += Σ_i probs[i,j]·d_ctx[i,h*hd+d]
+        let mut d_probs = vec![0.0f32; t * t];
+        for i in 0..t {
+            for j in 0..t {
+                let mut a = 0.0f32;
+                for d in 0..hd {
+                    a += d_ctx[i * c + h * hd + d] * v[j * c + h * hd + d];
+                }
+                d_probs[i * t + j] = a;
+            }
+        }
+        for j in 0..t {
+            for d in 0..hd {
+                let mut a = 0.0f32;
+                for i in 0..t {
+                    a += probs[i * t + j] * d_ctx[i * c + h * hd + d];
+                }
+                dv[j * c + h * hd + d] += a;
+            }
+        }
+        // softmax backward per row: d_sc[i,j] = probs[i,j]·(d_probs[i,j] − Σ_j' probs·d_probs)
+        let mut d_bd_raw = vec![0.0f32; t * l];
+        for i in 0..t {
+            let dot: f32 = (0..t).map(|j| probs[i * t + j] * d_probs[i * t + j]).sum();
+            for j in 0..t {
+                let d_sc = probs[i * t + j] * (d_probs[i * t + j] - dot);
+                if d_sc == 0.0 {
+                    continue;
+                }
+                let d_ac = d_sc * scale;
+                let d_bd = d_sc * scale;
+                d_bd_raw[i * l + j] += d_bd; // bd sliced [:T]; rel_shift_bwd handles the reindex
+                for d in 0..hd {
+                    // d_ac: ac = (q+bu)·k → d(q_u), d(k)
+                    dq[i * c + h * hd + d] += d_ac * kh(j, d);
+                    dk[j * c + h * hd + d] += d_ac * (qh(i, d) + bus[d]);
+                }
+            }
+        }
+        // bd path: d_bd_raw (already in [T,L] via slice) → transpose rel_shift → d(q_v),(rel_k)
+        let d_bd_pre = rel_shift_backward(&d_bd_raw, 1, t, l);
+        for i in 0..t {
+            for pp in 0..l {
+                let g = d_bd_pre[i * l + pp];
+                if g == 0.0 {
+                    continue;
+                }
+                for d in 0..hd {
+                    // bd_raw = (q+bv)·rel_k → d(q_v) and d_bias_v; rel_k grad omitted (not checked here)
+                    let dqv = g * rkh(pp, d);
+                    dq[i * c + h * hd + d] += dqv;
+                    d_bias_v[h * hd + d] += dqv;
+                }
+            }
+        }
+    }
+    // d_hn = dq·Wq + dk·Wk + dv·Wv  (q = hn·Wqᵀ ⇒ d_hn[i,in] = Σ_o dq[i,o]·Wq[o,in])
+    let mut d_hn = vec![0.0f32; t * c];
+    for (dproj, wproj) in [(&dq, wq), (&dk, wk), (&dv, wv)] {
+        for i in 0..t {
+            for inp in 0..c {
+                let mut acc = 0.0f32;
+                for o in 0..c {
+                    acc += dproj[i * c + o] * wproj[o * c + inp];
+                }
+                d_hn[i * c + inp] += acc;
+            }
+        }
+    }
+    (d_hn, d_bias_v)
+}
+
 /// Conformer convolution module: pointwise_conv1(→2C) → GLU → causal depthwise
 /// conv1d(k) → LayerNorm → SiLU → pointwise_conv2. `hn` is pre-normalised `[T,C]`.
 fn conv_module(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t: usize, valid: usize) -> Vec<f32> {
@@ -425,6 +588,45 @@ mod tests {
         let mut b = Vec::new();
         f.read_to_end(&mut b).unwrap();
         b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    }
+
+    #[test]
+    fn rel_pos_attention_backward_matches_finite_diff() {
+        use data::rng::Rng;
+        // tiny synthetic conformer attention: c=8, heads=2, hd=4, T=6 (band covers all)
+        let mut cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
+        cfg.hidden = 8;
+        cfg.n_heads = 2;
+        let (c, t, valid) = (8usize, 6usize, 6usize);
+        let mut rng = Rng::new(21);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.6).collect::<Vec<f32>>();
+        let mut w: W = W::new();
+        for leaf in ["q_proj.weight", "k_proj.weight", "v_proj.weight", "relative_k_proj.weight", "o_proj.weight"] {
+            w.insert(format!("attn.{leaf}"), r(c * c));
+        }
+        w.insert("attn.bias_u".into(), r(c));
+        w.insert("attn.bias_v".into(), r(c));
+        let hn = r(t * c);
+
+        let d_out = vec![1.0f32; t * c]; // loss = Σ out
+        let (d_hn, d_bias_v) = rel_pos_attention_backward(&hn, &w, "attn", &cfg, t, valid, &d_out);
+        let loss = |hh: &[f32], ww: &W| -> f32 { rel_pos_attention(hh, ww, "attn", &cfg, t, valid).iter().sum() };
+        let eps = 1e-3f32;
+        let ok = |a: f32, n: f32| (a - n).abs() <= 5e-3 + 8e-2 * n.abs();
+        for &i in &[0usize, 11, 23, 40] {
+            let (mut hp, mut hm) = (hn.clone(), hn.clone());
+            hp[i] += eps;
+            hm[i] -= eps;
+            let num = (loss(&hp, &w) - loss(&hm, &w)) / (2.0 * eps);
+            assert!(ok(d_hn[i], num), "d_hn[{i}] {} vs {}", d_hn[i], num);
+        }
+        for &i in &[0usize, 3, 7] {
+            let (mut wp, mut wm) = (w.clone(), w.clone());
+            wp.get_mut("attn.bias_v").unwrap()[i] += eps;
+            wm.get_mut("attn.bias_v").unwrap()[i] -= eps;
+            let num = (loss(&hn, &wp) - loss(&hn, &wm)) / (2.0 * eps);
+            assert!(ok(d_bias_v[i], num), "d_bias_v[{i}] {} vs {}", d_bias_v[i], num);
+        }
     }
 
     #[test]
