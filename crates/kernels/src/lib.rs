@@ -66,6 +66,8 @@ pub const ATTN_BWD_DK_BIAS: &str = include_str!("../wgsl/attn_bwd_dk_bias.wgsl")
 pub const ATTN_BWD_DK_BIDIR: &str = include_str!("../wgsl/attn_bwd_dk_bidir.wgsl");
 /// `wgsl/attn_bwd_dk_cross.wgsl`
 pub const ATTN_BWD_DK_CROSS: &str = include_str!("../wgsl/attn_bwd_dk_cross.wgsl");
+/// `wgsl/attn_bwd_dk_cross_acc.wgsl`
+pub const ATTN_BWD_DK_CROSS_ACC: &str = include_str!("../wgsl/attn_bwd_dk_cross_acc.wgsl");
 /// `wgsl/attn_bwd_dq.wgsl`
 pub const ATTN_BWD_DQ: &str = include_str!("../wgsl/attn_bwd_dq.wgsl");
 /// `wgsl/attn_bwd_dq_bias.wgsl`
@@ -86,6 +88,8 @@ pub const ATTN_BWD_DV: &str = include_str!("../wgsl/attn_bwd_dv.wgsl");
 pub const ATTN_BWD_DV_BIDIR: &str = include_str!("../wgsl/attn_bwd_dv_bidir.wgsl");
 /// `wgsl/attn_bwd_dv_cross.wgsl`
 pub const ATTN_BWD_DV_CROSS: &str = include_str!("../wgsl/attn_bwd_dv_cross.wgsl");
+/// `wgsl/attn_bwd_dv_cross_acc.wgsl`
+pub const ATTN_BWD_DV_CROSS_ACC: &str = include_str!("../wgsl/attn_bwd_dv_cross_acc.wgsl");
 /// `wgsl/attn_decode_apply.wgsl`
 pub const ATTN_DECODE_APPLY: &str = include_str!("../wgsl/attn_decode_apply.wgsl");
 /// `wgsl/attn_decode_scores.wgsl`
@@ -338,6 +342,10 @@ pub const GRADNORM_SQ: &str = include_str!("../wgsl/gradnorm_sq.wgsl");
 pub const IM2COL: &str = include_str!("../wgsl/im2col.wgsl");
 /// `wgsl/kv_append.wgsl`
 pub const KV_APPEND: &str = include_str!("../wgsl/kv_append.wgsl");
+/// `wgsl/kv_expand.wgsl`
+pub const KV_EXPAND: &str = include_str!("../wgsl/kv_expand.wgsl");
+/// `wgsl/kv_expand_bwd.wgsl`
+pub const KV_EXPAND_BWD: &str = include_str!("../wgsl/kv_expand_bwd.wgsl");
 /// `wgsl/l2norm_scale.wgsl`
 pub const L2NORM_SCALE: &str = include_str!("../wgsl/l2norm_scale.wgsl");
 /// `wgsl/l2norm_scale_dg.wgsl`
@@ -536,6 +544,8 @@ pub const ROUTER_GATE: &str = include_str!("../wgsl/router_gate.wgsl");
 pub const ROUTER_GATE_SIGMOID: &str = include_str!("../wgsl/router_gate_sigmoid.wgsl");
 /// `wgsl/router_gate_train.wgsl`
 pub const ROUTER_GATE_TRAIN: &str = include_str!("../wgsl/router_gate_train.wgsl");
+/// `wgsl/row_scatter.wgsl`
+pub const ROW_SCATTER: &str = include_str!("../wgsl/row_scatter.wgsl");
 /// `wgsl/scale_add.wgsl`
 pub const SCALE_ADD: &str = include_str!("../wgsl/scale_add.wgsl");
 /// `wgsl/scale_add_dexp.wgsl`
@@ -662,6 +672,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_bwd_dk_bias", ATTN_BWD_DK_BIAS),
     ("attn_bwd_dk_bidir", ATTN_BWD_DK_BIDIR),
     ("attn_bwd_dk_cross", ATTN_BWD_DK_CROSS),
+    ("attn_bwd_dk_cross_acc", ATTN_BWD_DK_CROSS_ACC),
     ("attn_bwd_dq", ATTN_BWD_DQ),
     ("attn_bwd_dq_bias", ATTN_BWD_DQ_BIAS),
     ("attn_bwd_dq_bidir", ATTN_BWD_DQ_BIDIR),
@@ -672,6 +683,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("attn_bwd_dv", ATTN_BWD_DV),
     ("attn_bwd_dv_bidir", ATTN_BWD_DV_BIDIR),
     ("attn_bwd_dv_cross", ATTN_BWD_DV_CROSS),
+    ("attn_bwd_dv_cross_acc", ATTN_BWD_DV_CROSS_ACC),
     ("attn_decode_apply", ATTN_DECODE_APPLY),
     ("attn_decode_scores", ATTN_DECODE_SCORES),
     ("attn_decode_scores_win", ATTN_DECODE_SCORES_WIN),
@@ -798,6 +810,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("gradnorm_sq", GRADNORM_SQ),
     ("im2col", IM2COL),
     ("kv_append", KV_APPEND),
+    ("kv_expand", KV_EXPAND),
+    ("kv_expand_bwd", KV_EXPAND_BWD),
     ("l2norm_scale", L2NORM_SCALE),
     ("l2norm_scale_dg", L2NORM_SCALE_DG),
     ("l2norm_scale_dx", L2NORM_SCALE_DX),
@@ -897,6 +911,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("router_gate", ROUTER_GATE),
     ("router_gate_sigmoid", ROUTER_GATE_SIGMOID),
     ("router_gate_train", ROUTER_GATE_TRAIN),
+    ("row_scatter", ROW_SCATTER),
     ("scale_add", SCALE_ADD),
     ("scale_add_dexp", SCALE_ADD_DEXP),
     ("scale_add_dgate", SCALE_ADD_DGATE),
