@@ -67,6 +67,13 @@ pub fn build_executor(gpus: &[(u32, u64)], reserved: u64, ram_total: u64, policy
     if let Some(t) = crate::resident_tts::TtsResident::from_env() {
         models.push(Arc::new(t));
     }
+    // Speech-to-text: Nemotron 3.5 ASR (BRAIN_NEMOTRON) + Qwen3-ASR (BRAIN_QWEN_ASR).
+    if let Some(a) = crate::resident_asr::NemotronResident::from_env() {
+        models.push(Arc::new(a));
+    }
+    if let Some(a) = crate::resident_asr::QwenAsrResident::from_env() {
+        models.push(Arc::new(a));
+    }
     // Stateless helpers (no weights) — always available. `demo` is the worked
     // example every transport smoke (busctl_smoke.sh) exercises.
     models.push(Arc::new(ProviderResident::stateless(Arc::new(crate::caps_cli::DemoModel))));

@@ -5,12 +5,14 @@
 //! transducer. Built on the shared WGSL engine; parity-gated against the
 //! HuggingFace reference. Kernels → encoder → RNN-T → greedy decode.
 
+pub mod caps;
 pub mod config;
 pub mod encoder;
 pub mod import;
 pub mod kernels;
 pub mod model;
 pub mod reference;
+pub mod tokenizer;
 pub mod train;
 
 pub use config::NemotronConfig;

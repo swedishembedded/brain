@@ -115,6 +115,33 @@ class BrainDBus:
         )
         yield from _read_stream(event_fd.to_raw_fd(), timeout)
 
+    def stream_transcribe(
+        self,
+        model: str,
+        pcm_read_fd: int,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout: float = 3600.0,
+    ) -> tuple[int, Iterator[tuple[dict[str, Any], list[int]]]]:
+        """Start live streaming transcription.
+
+        `pcm_read_fd` is the READ end of a pipe the caller keeps writing raw mono
+        f32-LE 16 kHz PCM to (from its WRITE end); the server reads it, windows it,
+        and streams back frames. Returns `(job_id, frames)` where `frames` is an
+        iterator of `(frame, raw_fds)` — `segment` frames as each window decodes, then
+        a terminal `done`/`error`. Consume `frames` in one thread while another writes
+        PCM; close the write end to signal EOF (the server then emits `done`).
+
+        The read fd is passed to the server (dup'd over the socket); the caller may
+        close its own copy afterward.
+        """
+        job, event_fd = self._call(
+            "StreamTranscribe",
+            "ssh",
+            (model, json.dumps(params or {}), FileDescriptor(pcm_read_fd)),
+        )
+        return job, _read_stream(event_fd.to_raw_fd(), timeout)
+
     # -- internal ------------------------------------------------------------
     def _call(self, method: str, signature: str | None = None, body: tuple = ()) -> tuple:
         msg = new_method_call(_ADDR, method, signature, body) if signature else new_method_call(_ADDR, method)

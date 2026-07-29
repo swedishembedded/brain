@@ -98,6 +98,8 @@ brain-moe = { path = "crates/moe" }
 brain-gpt = { path = "crates/gpt" }
 brain-qwen = { path = "crates/qwen" }
 brain-lfm = { path = "crates/lfm" }
+brain-nemotron = { path = "crates/nemotron" }
+brain-qwen-asr = { path = "crates/qwen-asr" }
 brain-fastvlm = { path = "crates/fastvlm" }
 brain-glm = { path = "crates/glm" }
 brain-seq2seq = { path = "crates/seq2seq" }

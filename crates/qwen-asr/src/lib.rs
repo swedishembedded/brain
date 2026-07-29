@@ -5,6 +5,7 @@
 //! spliced Qwen3-1.7B decoder (reused from `crates/qwen`). Forward parity-gated
 //! against the HuggingFace `Qwen3ASRForConditionalGeneration`.
 
+pub mod caps;
 pub mod config;
 pub mod encoder;
 pub mod import;

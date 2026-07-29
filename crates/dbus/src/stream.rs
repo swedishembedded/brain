@@ -74,6 +74,14 @@ impl StreamTx {
         self.send(&json!({"type": "progress", "step": step, "total": total, "message": message}), None);
     }
 
+    /// A streaming-transcription segment: one window's decoded `text` at `index`.
+    /// `is_final` marks the last segment (the input stream reached EOF). Non-blocking
+    /// like every frame — a slow subscriber drops segments rather than stalling the
+    /// inference path.
+    pub fn segment(&mut self, index: u32, text: &str, is_final: bool) {
+        self.send(&json!({"type": "segment", "index": index, "text": text, "final": is_final}), None);
+    }
+
     /// An output blob: JSON header + the payload as an out-of-band memfd.
     pub fn blob(&mut self, name: &str, media: &str, meta: &serde_json::Value, fd: BorrowedFd) {
         self.send(&json!({"type": "blob", "name": name, "media": media, "meta": meta}), Some(fd));

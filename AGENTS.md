@@ -531,6 +531,28 @@ per-scenario table and the findings so far.
   cross-backend gate (CPU == Vulkan == NPU).
 - **Adding a capability ≠ adding a subcommand.** Implement `capability::Action`
   and list it in a `Provider`; `brain do` and the event API pick it up.
+- **Every new model ships the full serving contract — code is not "done" until it
+  is served.** Adding a model means, in the same change:
+  1. a **`capability::Provider`** (or a manifest via its `ResidentModel`) exposing
+     its actions through the generalized interface — never a bespoke subcommand;
+  2. a **residency adapter** (`crates/cli/src/resident_*.rs`, registered in
+     `resident::build_executor`, env-gated) so it is **scheduled**, memory-budgeted,
+     and swappable by the `Executor` like every other model;
+  3. **true batching**: implement `Instance::run_batch` with a genuine batched
+     forward wherever the architecture allows (see `resident_asr`/`resident.rs`
+     yolo) — never leave concurrent same-model work on the default serial loop
+     without saying why;
+  4. **D-Bus wiring + a runnable example.** The model's actions MUST be reachable
+     over `crates/dbus` (`com.swedishembedded.Brain1`) and demonstrated by an
+     example under `examples/<domain>/` with a README. If the model's shape fits the
+     existing D-Bus surface (`Run`/`Subscribe`/`StreamTranscribe`/fd blobs), use it;
+     if it does not, **extend or refactor the surface** (add a method, generalize a
+     frame type) rather than bolting on a side channel — and update every existing
+     client/example that the change touches. The full checklist lives in
+     `docs/serving-contract.md` (linked from the Serving stack section); keep it and
+     this bullet in sync.
+  A model that trains and passes parity but cannot be discovered, scheduled, batched,
+  and driven over D-Bus is **incomplete**.
 - **No absolute paths in source — anywhere.** Never hardcode a machine-specific
   absolute path (`/data/…`, `/home/…`, `/tmp/…`) in `crates/**`: not in code, not
   in a test `const`, not as a runtime default, not in a doc comment. Two homes for

@@ -16,6 +16,7 @@ brain-audio.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
+brain-capability.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

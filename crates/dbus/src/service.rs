@@ -11,7 +11,8 @@
 //! batches, and manages residency across every front-end uniformly.
 
 use std::collections::HashMap;
-use std::os::fd::AsFd;
+use std::io::Read;
+use std::os::fd::{AsFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
 use capability::{Blob, Invocation, Media, Outcome, Progress};
@@ -21,6 +22,7 @@ use zbus::fdo;
 use zbus::zvariant::OwnedFd as ZOwnedFd;
 
 use crate::fd::{bytes_to_fd, read_fd_to_vec};
+use crate::stream::StreamTx;
 
 pub struct Manager {
     executor: Executor,
@@ -46,6 +48,89 @@ impl Manager {
             inv.blobs.insert(name, Blob { media, bytes, meta: bmeta });
         }
         Ok(inv)
+    }
+}
+
+/// The server-side streaming loop for [`Manager::stream_transcribe`]. Reads f32 LE
+/// PCM from `pcm` until EOF, emitting one `transcribe` job per `window_samples`
+/// window and a `segment` frame per decoded window; a final `done` carries the whole
+/// transcript. Runs on its own thread (blocking reads + a blocking wait per window),
+/// so a stream whose model keeps up (RTF < 1) stays near-real-time and the OS pipe
+/// buffer absorbs the compute gap.
+fn stream_reader(pcm: OwnedFd, executor: Executor, model: String, window_samples: usize, prompt_id: i64, stream: Arc<Mutex<StreamTx>>) {
+    let mut file = std::fs::File::from(pcm);
+    let mut carry: Vec<u8> = Vec::new();
+    let mut samples: Vec<f32> = Vec::new();
+    let mut buf = [0u8; 16384];
+    let mut index = 0u32;
+    let mut full = String::new();
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(0) => break, // writer closed → EOF
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        carry.extend_from_slice(&buf[..n]);
+        let whole = carry.len() / 4 * 4;
+        samples.extend(carry[..whole].chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])));
+        carry.drain(..whole);
+        while samples.len() >= window_samples {
+            let window: Vec<f32> = samples.drain(..window_samples).collect();
+            emit_window(&executor, &model, &window, prompt_id, index, &stream, &mut full);
+            index += 1;
+        }
+        // stop early if the subscriber went away
+        if stream.lock().map(|s| s.disconnected).unwrap_or(true) {
+            return;
+        }
+    }
+    // flush a trailing partial window
+    if !samples.is_empty() {
+        emit_window(&executor, &model, &samples, prompt_id, index, &stream, &mut full);
+        index += 1;
+    }
+    if let Ok(mut s) = stream.lock() {
+        s.segment(index, "", true);
+        s.done(&json!({ "text": full.trim(), "segments": index }));
+    }
+}
+
+/// Submit one window as a `transcribe` job, block for its result, and emit a
+/// `segment` frame (or an `error`). Appends the segment text to the running
+/// transcript.
+fn emit_window(executor: &Executor, model: &str, window: &[f32], prompt_id: i64, index: u32, stream: &Arc<Mutex<StreamTx>>, full: &mut String) {
+    let bytes: Vec<u8> = window.iter().flat_map(|f| f.to_le_bytes()).collect();
+    let blob = Blob::new(Media::Audio, bytes).with_meta(json!({"sample_rate": 16000}));
+    let inv = Invocation::new().set("prompt_id", json!(prompt_id)).blob("audio", blob);
+    let (tx, rx) = std::sync::mpsc::channel();
+    executor.submit(Job {
+        model: model.to_string(),
+        action: "transcribe".into(),
+        inv,
+        on_progress: Box::new(|_| {}),
+        reply: Box::new(move |r| {
+            let _ = tx.send(r);
+        }),
+    });
+    match rx.recv() {
+        Ok(Ok(outcome)) => {
+            let text = outcome.outputs.get("text").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            if !text.is_empty() {
+                if !full.is_empty() {
+                    full.push(' ');
+                }
+                full.push_str(&text);
+            }
+            if let Ok(mut s) = stream.lock() {
+                s.segment(index, &text, false);
+            }
+        }
+        Ok(Err(e)) => {
+            if let Ok(mut s) = stream.lock() {
+                s.error(&e);
+            }
+        }
+        Err(_) => {} // executor gone
     }
 }
 
@@ -148,6 +233,40 @@ impl Manager {
         });
         // A monotonically-unique-enough id for the client to correlate (the fd is the
         // real handle). The executor owns lifecycle; Cancel is phase 2.
+        let job = self.executor.stats().jobs.wrapping_add(1);
+        Ok((job, client.into()))
+    }
+
+    /// **Live streaming transcription.** The client writes raw mono f32 LE PCM at
+    /// 16 kHz to the returned end of `pcm` (a pipe) continuously; the server reads it,
+    /// slices it into `window_ms` windows, submits each window as a `transcribe`
+    /// [`Job`] to the shared executor (so concurrent streams **batch** and are
+    /// scheduled uniformly), and streams `segment` frames back over the returned
+    /// SEQPACKET event fd as each window decodes — ending with a `done` frame carrying
+    /// the full transcript when the input reaches EOF (client closes its write end).
+    ///
+    /// `params` (JSON): `{"window_ms":1000,"sample_rate":16000,"prompt_id":0}`.
+    /// `model` is `"nemotron"` (the streaming model) or `"qwen-asr"`.
+    #[zbus(out_args("job", "event_fd"))]
+    async fn stream_transcribe(&self, model: String, params: String, pcm: ZOwnedFd) -> fdo::Result<(u64, ZOwnedFd)> {
+        let p: Value = if params.trim().is_empty() { json!({}) } else { serde_json::from_str(&params).map_err(|e| fdo::Error::Failed(format!("params JSON: {e}")))? };
+        let sample_rate = p.get("sample_rate").and_then(|v| v.as_u64()).unwrap_or(16000);
+        if sample_rate != 16000 {
+            return Err(fdo::Error::Failed(format!("stream_transcribe: sample_rate must be 16000, got {sample_rate}")));
+        }
+        let window_ms = p.get("window_ms").and_then(|v| v.as_u64()).unwrap_or(1000).max(50);
+        let window_samples = (sample_rate * window_ms / 1000) as usize;
+        let prompt_id = p.get("prompt_id").and_then(|v| v.as_i64()).unwrap_or(0);
+
+        let (stream, client) = crate::stream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        let stream = Arc::new(Mutex::new(stream));
+        let executor = self.executor.clone();
+        let pcm_ofd: OwnedFd = pcm.into();
+        std::thread::Builder::new()
+            .name("brain-asr-stream".into())
+            .spawn(move || stream_reader(pcm_ofd, executor, model, window_samples, prompt_id, stream))
+            .map_err(|e| fdo::Error::Failed(format!("spawn stream reader: {e}")))?;
+
         let job = self.executor.stats().jobs.wrapping_add(1);
         Ok((job, client.into()))
     }

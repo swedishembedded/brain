@@ -31,6 +31,7 @@ mod resident_lfm;
 mod resident_llm;
 mod resident_depth;
 mod resident_tts;
+mod resident_asr;
 mod caps_cli;
 mod imageops;
 mod run_cli;

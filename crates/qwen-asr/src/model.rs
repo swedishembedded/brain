@@ -58,6 +58,41 @@ impl Qwen3Asr {
         Ok(Self::from_tensors(tensors, cfg, seq_budget, audio_row0, n_audio))
     }
 
+    /// The number of audio placeholder tokens this model is assembled for.
+    pub fn n_audio(&self) -> u32 {
+        self.n_audio
+    }
+
+    /// Load a checkpoint **for a fixed audio window**. Qwen3-ASR is offline and its
+    /// decoder is assembled for a fixed `n_audio` placement, so a served instance is
+    /// built once for a window: the audio encoder is **probed** with a
+    /// `window_samples`-long clip to discover the exact token count (the chunked
+    /// packing makes it non-analytic), then the decoder is assembled for that count.
+    /// Clips are later padded/truncated to the window (see `caps::pad_to_window`).
+    /// Reads the checkpoint once. Returns the model + its `n_audio`.
+    pub fn from_hf_windowed(dir: &str, cfg: QwenAsrConfig, window_samples: usize, audio_row0: u32, max_new: u32) -> Result<(Qwen3Asr, u32), String> {
+        let tensors = checkpoint::safetensors::read_model_dir(Path::new(dir))?;
+        let src: HashMap<String, Vec<f32>> = tensors.into_iter().map(|t| (t.name, t.data)).collect();
+        let aweights = crate::import::map_audio_encoder(&src, &cfg.audio);
+        let agpu = Gpu::new_cpu(audio_pipelines());
+        // Probe: encode a full window of silence to get the actual audio-token count.
+        let silence = vec![0.0f32; window_samples];
+        let (mel, valid, _n) = audio::asr_frontend::qwen_logmel(&silence, window_samples);
+        let enc = AudioEncoder::new(&agpu, cfg.audio, &aweights);
+        let embeds = enc.encode(&mel, valid as u32).1;
+        let n_audio = (embeds.len() / cfg.audio.output_dim as usize) as u32;
+        drop(enc);
+        // Assemble the decoder for that fixed placement.
+        let dweights = crate::import::map_decoder_weights(&src);
+        drop(src);
+        let prompt_len = crate::caps::PROMPT_PREFIX.len() as u32 + n_audio + crate::caps::PROMPT_SUFFIX.len() as u32;
+        let seq_budget = prompt_len + max_new + 4;
+        let shard = qwen::Shard::whole(cfg.text.n_layers as usize);
+        let mut decoder = Qwen::new_shard(cfg.text.clone(), 1, seq_budget, &dweights, false, shard);
+        decoder.enable_mm_splice(audio_row0, n_audio);
+        Ok((Qwen3Asr { agpu, cfg, aweights, decoder, audio_row0, n_audio }, n_audio))
+    }
+
     /// Encode a `[num_mel, T]` log-mel spectrogram (first `valid_frames` columns
     /// real audio) into `[n_audio, output_dim]` decoder-space audio embeddings.
     pub fn encode_audio(&self, mel: &[f32], valid_frames: u32) -> Vec<f32> {

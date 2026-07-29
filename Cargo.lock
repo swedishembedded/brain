@@ -214,10 +214,12 @@ dependencies = [
 name = "brain-audio"
 version = "0.1.0"
 dependencies = [
+ "brain-capability",
  "brain-data",
  "brain-gpu-core",
  "brain-kernels",
  "bytemuck",
+ "serde_json",
 ]
 
 [[package]]
@@ -359,12 +361,14 @@ dependencies = [
  "brain-mirror",
  "brain-model",
  "brain-moe",
+ "brain-nemotron",
  "brain-npu",
  "brain-onnx",
  "brain-paramstore",
  "brain-perf",
  "brain-pid",
  "brain-qwen",
+ "brain-qwen-asr",
  "brain-residency",
  "brain-runtime",
  "brain-server",
@@ -692,6 +696,7 @@ name = "brain-nemotron"
 version = "0.1.0"
 dependencies = [
  "brain-audio",
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
@@ -813,6 +818,7 @@ name = "brain-qwen-asr"
 version = "0.1.0"
 dependencies = [
  "brain-audio",
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
