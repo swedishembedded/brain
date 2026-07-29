@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use gpu_core::{DeviceBuffer, Gpu, Step};
+use gpu_core::{DeviceBuffer, Gpu};
 
 use crate::config::NemotronConfig;
 

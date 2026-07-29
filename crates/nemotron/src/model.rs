@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! Nemotron 3.5 ASR end-to-end: log-mel front end → device FastConformer encoder
+//! → RNN-T greedy transducer decode. Returns emitted (non-blank) token ids.
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use gpu_core::Gpu;
+
+use crate::config::NemotronConfig;
+use crate::encoder::{encoder_pipelines, Encoder};
+
+pub struct NemotronAsr {
+    cfg: NemotronConfig,
+    weights: HashMap<String, Vec<f32>>,
+}
+
+impl NemotronAsr {
+    pub fn from_hf(dir: &str, cfg: NemotronConfig) -> Result<NemotronAsr, String> {
+        let weights = crate::import::load_tensors(Path::new(dir))?;
+        Ok(NemotronAsr { cfg, weights })
+    }
+
+    pub fn config(&self) -> &NemotronConfig {
+        &self.cfg
+    }
+
+    /// Transcribe a 16 kHz mono waveform → emitted RNN-T token ids (non-blank).
+    /// `language` selects the prompt id (defaults to the config default / auto).
+    pub fn transcribe(&self, wav: &[f32], prompt_id: usize) -> Vec<u32> {
+        // 1. front end (matches HF: preemphasis, 512-fft/400-win, log-mel 128, no norm)
+        let (mel, t, _nmel) = audio::asr_frontend::nemotron_logmel(wav);
+        let mel_valid = wav.len() as u32 / 160; // floor(L/hop), matches the extractor's valid length
+
+        // 2. device encoder → pooler [T, decoder_hidden]
+        let g = Gpu::new_cpu(encoder_pipelines());
+        let enc = Encoder::new(&g, self.cfg, &self.weights);
+        let (pooler, valid) = enc.encode(&mel, t as u32, mel_valid, prompt_id);
+
+        // 3. RNN-T greedy decode
+        crate::reference::rnnt_greedy(&pooler, valid as usize, &self.weights, &self.cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CKPT: &str = "/data/workspace/resources/asr/nemotron/hf";
+    const WAV: &str = "/data/workspace/resources/asr/audio/librispeech_mr_quilter.wav";
+    const GOLD: &str = "/data/workspace/resources/asr/golden/nemotron";
+
+    #[test]
+    #[ignore = "loads the 0.6B checkpoint + full pipeline (~seconds)"]
+    fn transcribe_end_to_end_matches_reference() {
+        use std::io::Read;
+        if !Path::new(WAV).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
+            eprintln!("skipping: assets absent");
+            return;
+        }
+        let cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
+        let wav = audio::wav::read(WAV).expect("wav");
+        let model = NemotronAsr::from_hf(CKPT, cfg).expect("load");
+
+        let t0 = std::time::Instant::now();
+        let toks = model.transcribe(&wav.samples, 0); // prompt 0 = en
+        let dt = t0.elapsed();
+
+        let mut f = std::fs::File::open(format!("{GOLD}/output_ids.f32")).unwrap();
+        let mut b = Vec::new();
+        f.read_to_end(&mut b).unwrap();
+        let ref_ids: Vec<u32> = b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect();
+        let ref_nonblank: Vec<u32> = ref_ids.into_iter().filter(|&x| x != cfg.blank_token_id).collect();
+
+        let audio_s = wav.samples.len() as f32 / 16000.0;
+        eprintln!("transcribe: {} tokens in {:?} (audio {audio_s:.2}s, RTF {:.3})", toks.len(), dt, dt.as_secs_f32() / audio_s);
+        eprintln!("brain: {:?}", &toks[..toks.len().min(15)]);
+        assert_eq!(toks, ref_nonblank, "end-to-end token sequence must match HF");
+    }
+}

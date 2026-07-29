@@ -9,6 +9,7 @@ pub mod config;
 pub mod encoder;
 pub mod import;
 pub mod kernels;
+pub mod model;
 pub mod reference;
 
 pub use config::NemotronConfig;
