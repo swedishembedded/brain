@@ -40,6 +40,10 @@ from them, keeping the gradient-check discipline.
    biased linears; backs the WebGPU browser demo (`crates/web`).
 6. **Seq2seq** (`crates/seq2seq`) — encoder-decoder Transformer (bidirectional
    encoder + causal/cross-attention decoder), gradient-checked.
+6b. **LFM2.5-Encoder** (`crates/lfm`) — LiquidAI's bidirectional hybrid
+   short-conv/attention encoder (GQA + QK-norm + RoPE, gated depthwise conv,
+   tied MLM head, 8k context); imported 1:1, parity-gated per stage; chunked
+   long-context inference. `brain lfm {import,fill-mask,embed}`, `brain do lfm …`.
 7. **Bottleneck autoencoder** (`crates/autoencoder`) — sequence → single
    compressed representation → MLP reconstruction, MSE head; gradient-checked.
 
@@ -213,6 +217,7 @@ Multi-GPU scaling lives in `crates/model`:
 | D-Bus control surface | `crates/dbus`, `examples/dbus` |
 | Event/HFSM controller (`brain run`) | `crates/runtime/src/{lib,pump}.rs`, `crates/cli/src/run_cli.rs`, `crates/events/src/lib.rs` |
 | GLM-5.2 (MLA + MoE + DSA indexer + MTP) | `docs/models/glm/readme.md`, `docs/models/glm/npu.md`; `crates/glm`, `crates/cli/src/glm_cli.rs` |
+| LFM2.5-Encoder (bidir conv/attn hybrid, MLM, 8k) | `docs/models/lfm/{readme,status}.md`; `crates/lfm`, `crates/cli/src/lfm_cli.rs`; goldens via `tools/lfm_dump_reference.py` |
 | YOLO model / loss / inference | `crates/yolo/src/{model,head,blocks,loss,assign,infer,nms,config}.rs`; `docs/models/yolo/readme.md` |
 | YOLO → Intel NPU (export/quantize/run/bench) | `crates/npu`, `crates/onnx`, `crates/cli/src/npu_cli.rs`, `docs/models/yolo/npu.md` |
 | ZipDepth: guide / ledger (incl. GPU perf root causes) | `docs/models/depth/{readme,status}.md`; `crates/depth/src/*`, `crates/cli/src/depth_cli.rs` |
