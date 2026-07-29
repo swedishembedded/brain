@@ -1,0 +1,23 @@
+[package]
+name = "brain-lfm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LFM2.5-Encoder (LiquidAI): bidirectional hybrid short-conv/attention encoder with a tied MLM head."
+
+[lib]
+name = "lfm"
+path = "src/lib.rs"
+
+[dependencies]
+brain-checkpoint.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-paramstore.workspace = true
+brain-optim.workspace = true
+brain-audio.workspace = true
+brain-capability.workspace = true
+brain-data.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true

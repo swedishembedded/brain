@@ -22,6 +22,7 @@ default-members = [
     "crates/moe",
     "crates/gpt",
     "crates/qwen",
+    "crates/lfm",
     "crates/qwenvl",
     "crates/qwen-asr",
     "crates/nemotron",
@@ -96,6 +97,7 @@ brain-model = { path = "crates/model" }
 brain-moe = { path = "crates/moe" }
 brain-gpt = { path = "crates/gpt" }
 brain-qwen = { path = "crates/qwen" }
+brain-lfm = { path = "crates/lfm" }
 brain-fastvlm = { path = "crates/fastvlm" }
 brain-glm = { path = "crates/glm" }
 brain-seq2seq = { path = "crates/seq2seq" }

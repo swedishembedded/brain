@@ -355,6 +355,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-gradcheck",
  "brain-kronos",
+ "brain-lfm",
  "brain-mirror",
  "brain-model",
  "brain-moe",
@@ -458,6 +459,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-data",
  "brain-gpt",
+ "brain-lfm",
  "brain-speaker",
  "brain-yolo",
  "serde_json",
@@ -579,6 +581,7 @@ dependencies = [
  "brain-gpt",
  "brain-gpu-core",
  "brain-kernels",
+ "brain-lfm",
  "brain-model",
  "brain-moe",
  "brain-pid",
@@ -601,6 +604,23 @@ dependencies = [
  "brain-backend-cpu",
  "brain-checkpoint",
  "brain-forecast",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-optim",
+ "brain-paramstore",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-lfm"
+version = "0.1.0"
+dependencies = [
+ "brain-audio",
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
@@ -697,6 +717,7 @@ dependencies = [
  "brain-glm",
  "brain-gpu-core",
  "brain-kronos",
+ "brain-lfm",
  "brain-mirror",
  "brain-onnx",
  "brain-paramstore",
@@ -749,6 +770,7 @@ dependencies = [
  "brain-data",
  "brain-gpu-core",
  "brain-qwen",
+ "brain-residency",
  "serde_json",
 ]
 
