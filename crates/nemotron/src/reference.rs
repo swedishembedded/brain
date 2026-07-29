@@ -367,6 +367,111 @@ fn conv_module(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t: usize, 
     matmul_nt(&act, p("pointwise_conv2.weight"), t, c, c)
 }
 
+/// Backward of `conv_module` w.r.t. the input `hn` (loss grad `d_out[T,C]`).
+/// Composes: pc2 matmul bwd → SiLU bwd → LayerNorm bwd → causal depthwise conv1d
+/// bwd → GLU bwd → pc1 matmul bwd. Returns `d_hn[T,C]`. `valid` masks GLU rows.
+fn conv_module_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t: usize, valid: usize, d_out: &[f32]) -> Vec<f32> {
+    let (c, k) = (cfg.hidden as usize, cfg.conv_kernel as usize);
+    let eps = cfg.ln_eps;
+    let p = |n: &str| &w[&format!("{prefix}.{n}")];
+    let (wpc1, dw, gnw, gnb, wpc2) = (p("pointwise_conv1.weight"), p("depthwise_conv.weight"), p("norm.weight"), p("norm.bias"), p("pointwise_conv2.weight"));
+
+    // ---- forward recompute (need pc1, glu, conv, ln pre-silu) ----
+    let pc1 = matmul_nt(hn, wpc1, t, c, 2 * c);
+    let mut glu = vec![0.0f32; t * c];
+    for i in 0..valid.min(t) {
+        for j in 0..c {
+            glu[i * c + j] = pc1[i * 2 * c + j] * sigmoid(pc1[i * 2 * c + c + j]);
+        }
+    }
+    let mut conv = vec![0.0f32; t * c];
+    for ch in 0..c {
+        for i in 0..t {
+            let mut a = 0.0f32;
+            for kk in 0..k {
+                let s = i as i64 - (k as i64 - 1) + kk as i64;
+                if s >= 0 {
+                    a += glu[s as usize * c + ch] * dw[ch * k + kk];
+                }
+            }
+            conv[i * c + ch] = a;
+        }
+    }
+    let ln = layernorm(&conv, gnw, gnb, t, c, eps); // pre-silu
+
+    // ---- backward ----
+    // d_out → d_act via pc2 (out = act·Wpc2ᵀ): d_act[i,j] = Σ_o d_out[i,o]·Wpc2[o,j]
+    let mut d_act = vec![0.0f32; t * c];
+    for i in 0..t {
+        for j in 0..c {
+            let mut acc = 0.0f32;
+            for o in 0..c {
+                acc += d_out[i * c + o] * wpc2[o * c + j];
+            }
+            d_act[i * c + j] = acc;
+        }
+    }
+    // through SiLU: act = silu(ln); silu'(x) = sig(x)(1 + x(1-sig(x)))
+    let mut d_ln = vec![0.0f32; t * c];
+    for idx in 0..t * c {
+        let x = ln[idx];
+        let s = sigmoid(x);
+        d_ln[idx] = d_act[idx] * (s * (1.0 + x * (1.0 - s)));
+    }
+    // through LayerNorm (per row over C)
+    let mut d_conv = vec![0.0f32; t * c];
+    for i in 0..t {
+        let row = &conv[i * c..i * c + c];
+        let mu = row.iter().sum::<f32>() / c as f32;
+        let var = row.iter().map(|&v| (v - mu) * (v - mu)).sum::<f32>() / c as f32;
+        let sig = (var + eps).sqrt();
+        let dyh: Vec<f32> = (0..c).map(|j| d_ln[i * c + j] * gnw[j]).collect();
+        let mean_dyh = dyh.iter().sum::<f32>() / c as f32;
+        let mean_dyh_xhat = (0..c).map(|j| dyh[j] * (row[j] - mu) / sig).sum::<f32>() / c as f32;
+        for j in 0..c {
+            let xhat = (row[j] - mu) / sig;
+            d_conv[i * c + j] = (dyh[j] - mean_dyh - xhat * mean_dyh_xhat) / sig;
+        }
+    }
+    // through causal depthwise conv1d (transpose): d_glu[m,ch] = Σ_kk d_conv[m+8-kk,ch]·dw[ch,kk]
+    let mut d_glu = vec![0.0f32; t * c];
+    for ch in 0..c {
+        for m in 0..t {
+            let mut a = 0.0f32;
+            for kk in 0..k {
+                let i = m as i64 + (k as i64 - 1) - kk as i64;
+                if i >= 0 && (i as usize) < t {
+                    a += d_conv[i as usize * c + ch] * dw[ch * k + kk];
+                }
+            }
+            d_glu[m * c + ch] = a;
+        }
+    }
+    // through GLU → d_pc1 (both halves); masked rows contribute 0
+    let mut d_pc1 = vec![0.0f32; t * 2 * c];
+    for i in 0..valid.min(t) {
+        for j in 0..c {
+            let (a, b) = (pc1[i * 2 * c + j], pc1[i * 2 * c + c + j]);
+            let s = sigmoid(b);
+            let dg = d_glu[i * c + j];
+            d_pc1[i * 2 * c + j] = dg * s;
+            d_pc1[i * 2 * c + c + j] = dg * a * s * (1.0 - s);
+        }
+    }
+    // through pc1 (out=hn·Wpc1ᵀ): d_hn[i,in] = Σ_o d_pc1[i,o]·Wpc1[o,in]
+    let mut d_hn = vec![0.0f32; t * c];
+    for i in 0..t {
+        for inp in 0..c {
+            let mut acc = 0.0f32;
+            for o in 0..2 * c {
+                acc += d_pc1[i * 2 * c + o] * wpc1[o * c + inp];
+            }
+            d_hn[i * c + inp] = acc;
+        }
+    }
+    d_hn
+}
+
 /// One Conformer block (macaron; five LayerNorms). `h` `[T, C]` in place-returning.
 pub fn conformer_block(h: &[f32], w: &W, b: u32, cfg: &NemotronConfig, t: usize, valid: usize) -> Vec<f32> {
     let c = cfg.hidden as usize;
@@ -588,6 +693,37 @@ mod tests {
         let mut b = Vec::new();
         f.read_to_end(&mut b).unwrap();
         b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    }
+
+    #[test]
+    fn conv_module_backward_matches_finite_diff() {
+        use data::rng::Rng;
+        let mut cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
+        cfg.hidden = 8;
+        cfg.conv_kernel = 3;
+        let (c, k, t, valid) = (8usize, 3usize, 6usize, 6usize);
+        let mut rng = Rng::new(31);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.6).collect::<Vec<f32>>();
+        let mut w: W = W::new();
+        w.insert("conv.pointwise_conv1.weight".into(), r(2 * c * c));
+        w.insert("conv.depthwise_conv.weight".into(), r(c * k));
+        w.insert("conv.norm.weight".into(), r(c).iter().map(|v| 1.0 + v * 0.3).collect());
+        w.insert("conv.norm.bias".into(), r(c));
+        w.insert("conv.pointwise_conv2.weight".into(), r(c * c));
+        let hn = r(t * c);
+
+        let d_out = vec![1.0f32; t * c];
+        let d_hn = conv_module_backward(&hn, &w, "conv", &cfg, t, valid, &d_out);
+        let loss = |hh: &[f32]| -> f32 { conv_module(hh, &w, "conv", &cfg, t, valid).iter().sum() };
+        let eps = 1e-3f32;
+        let ok = |a: f32, n: f32| (a - n).abs() <= 5e-3 + 8e-2 * n.abs();
+        for &i in &[0usize, 5, 17, 30, 40] {
+            let (mut hp, mut hm) = (hn.clone(), hn.clone());
+            hp[i] += eps;
+            hm[i] -= eps;
+            let num = (loss(&hp) - loss(&hm)) / (2.0 * eps);
+            assert!(ok(d_hn[i], num), "d_hn[{i}] {} vs {}", d_hn[i], num);
+        }
     }
 
     #[test]
