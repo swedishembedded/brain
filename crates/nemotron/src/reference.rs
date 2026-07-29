@@ -63,6 +63,109 @@ fn feed_forward(x: &[f32], w1: &[f32], w2: &[f32], t: usize, c: usize, ffn: usiz
     matmul_nt(&h, w2, t, ffn, c)
 }
 
+/// Backward of `feed_forward` w.r.t. `x` (loss grad `d_out[t,c]`). Returns `d_x[t,c]`.
+fn feed_forward_backward(x: &[f32], w1: &[f32], w2: &[f32], t: usize, c: usize, ffn: usize, d_out: &[f32]) -> Vec<f32> {
+    let h1 = matmul_nt(x, w1, t, c, ffn); // pre-silu
+    let mut d_h1 = vec![0.0f32; t * ffn];
+    for i in 0..t {
+        for j in 0..ffn {
+            let mut ds = 0.0f32; // d_s = d_out · w2
+            for o in 0..c {
+                ds += d_out[i * c + o] * w2[o * ffn + j];
+            }
+            let x0 = h1[i * ffn + j];
+            let s = sigmoid(x0);
+            d_h1[i * ffn + j] = ds * (s * (1.0 + x0 * (1.0 - s))); // × silu'
+        }
+    }
+    let mut d_x = vec![0.0f32; t * c];
+    for i in 0..t {
+        for inp in 0..c {
+            let mut acc = 0.0f32;
+            for o in 0..ffn {
+                acc += d_h1[i * ffn + o] * w1[o * c + inp];
+            }
+            d_x[i * c + inp] = acc;
+        }
+    }
+    d_x
+}
+
+/// LayerNorm backward w.r.t. the input `x` (per-row over `c`). Returns `d_x`.
+pub(crate) fn layernorm_backward(d_y: &[f32], x: &[f32], gamma: &[f32], t: usize, c: usize, eps: f32) -> Vec<f32> {
+    let mut d_x = vec![0.0f32; t * c];
+    for i in 0..t {
+        let row = &x[i * c..i * c + c];
+        let mu = row.iter().sum::<f32>() / c as f32;
+        let var = row.iter().map(|&v| (v - mu) * (v - mu)).sum::<f32>() / c as f32;
+        let sig = (var + eps).sqrt();
+        let dyh: Vec<f32> = (0..c).map(|j| d_y[i * c + j] * gamma[j]).collect();
+        let mean_dyh = dyh.iter().sum::<f32>() / c as f32;
+        let mean_dyh_xhat = (0..c).map(|j| dyh[j] * (row[j] - mu) / sig).sum::<f32>() / c as f32;
+        for j in 0..c {
+            let xhat = (row[j] - mu) / sig;
+            d_x[i * c + j] = (dyh[j] - mean_dyh - xhat * mean_dyh_xhat) / sig;
+        }
+    }
+    d_x
+}
+
+/// Full Conformer-block backward w.r.t. the block input `h0` (loss grad `d_out[T,C]`).
+/// Composes the macaron structure: LN_out → FF2 → conv → attn → FF1, each residual
+/// split + LayerNorm backward. Returns `d_h0[T,C]`. The single repeating unit; the
+/// 24-layer encoder backward is this chained.
+pub fn conformer_block_backward(h0: &[f32], w: &W, b: u32, cfg: &NemotronConfig, t: usize, valid: usize, d_out: &[f32]) -> Vec<f32> {
+    let (c, ffn) = (cfg.hidden as usize, cfg.intermediate as usize);
+    let eps = cfg.ln_eps;
+    let pre = format!("encoder.layers.{b}");
+    let g = |n: &str| &w[&format!("{pre}.{n}")];
+    let add = |a: &mut [f32], x: &[f32], s: f32| a.iter_mut().zip(x).for_each(|(y, &v)| *y += s * v);
+
+    // recompute the residual-stream checkpoints h0..h3 (inputs to attn/conv/FF2)
+    let mut h1 = h0.to_vec();
+    let n1 = layernorm(&h1, g("norm_feed_forward1.weight"), g("norm_feed_forward1.bias"), t, c, eps);
+    add(&mut h1, &feed_forward(&n1, g("feed_forward1.linear1.weight"), g("feed_forward1.linear2.weight"), t, c, ffn), 0.5);
+    let mut h2 = h1.clone();
+    let na = layernorm(&h2, g("norm_self_att.weight"), g("norm_self_att.bias"), t, c, eps);
+    add(&mut h2, &rel_pos_attention(&na, w, &format!("{pre}.self_attn"), cfg, t, valid), 1.0);
+    let mut h3 = h2.clone();
+    let nc = layernorm(&h3, g("norm_conv.weight"), g("norm_conv.bias"), t, c, eps);
+    add(&mut h3, &conv_module(&nc, w, &format!("{pre}.conv"), cfg, t, valid), 1.0);
+    let mut h4 = h3.clone();
+    let n2 = layernorm(&h4, g("norm_feed_forward2.weight"), g("norm_feed_forward2.bias"), t, c, eps);
+    add(&mut h4, &feed_forward(&n2, g("feed_forward2.linear1.weight"), g("feed_forward2.linear2.weight"), t, c, ffn), 0.5);
+
+    // ---- backward ----
+    // out = LN_out(h4)
+    let mut d_h4 = layernorm_backward(d_out, &h4, g("norm_out.weight"), t, c, eps);
+    // h4 = h3 + 0.5·FF2(LN(h3))
+    let d_n2 = feed_forward_backward(&n2, g("feed_forward2.linear1.weight"), g("feed_forward2.linear2.weight"), t, c, ffn, &d_h4.iter().map(|v| 0.5 * v).collect::<Vec<_>>());
+    let mut d_h3 = layernorm_backward(&d_n2, &h3, g("norm_feed_forward2.weight"), t, c, eps);
+    for i in 0..t * c {
+        d_h3[i] += d_h4[i];
+    }
+    // h3 = h2 + conv(LN(h2))
+    let d_nc = conv_module_backward(&nc, w, &format!("{pre}.conv"), cfg, t, valid, &d_h3);
+    let mut d_h2 = layernorm_backward(&d_nc, &h2, g("norm_conv.weight"), t, c, eps);
+    for i in 0..t * c {
+        d_h2[i] += d_h3[i];
+    }
+    // h2 = h1 + attn(LN(h1))
+    let (d_na, _dbv) = rel_pos_attention_backward(&na, w, &format!("{pre}.self_attn"), cfg, t, valid, &d_h2);
+    let mut d_h1 = layernorm_backward(&d_na, &h1, g("norm_self_att.weight"), t, c, eps);
+    for i in 0..t * c {
+        d_h1[i] += d_h2[i];
+    }
+    // h1 = h0 + 0.5·FF1(LN(h0))
+    let d_n1 = feed_forward_backward(&n1, g("feed_forward1.linear1.weight"), g("feed_forward1.linear2.weight"), t, c, ffn, &d_h1.iter().map(|v| 0.5 * v).collect::<Vec<_>>());
+    let mut d_h0 = layernorm_backward(&d_n1, h0, g("norm_feed_forward1.weight"), t, c, eps);
+    for i in 0..t * c {
+        d_h0[i] += d_h1[i];
+    }
+    let _ = &mut d_h4;
+    d_h0
+}
+
 /// Relative positional encoding `[2T-1, C]`: interleaved sin/cos over positions
 /// `[T-1 .. -(T-1)]`, `inv_freq[i] = 10000^(-2i/C)`.
 pub(crate) fn rel_pos_encoding(t: usize, c: usize) -> Vec<f32> {
@@ -693,6 +796,54 @@ mod tests {
         let mut b = Vec::new();
         f.read_to_end(&mut b).unwrap();
         b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    }
+
+    #[test]
+    fn conformer_block_backward_matches_finite_diff() {
+        use data::rng::Rng;
+        // full tiny Conformer block: c=8, heads=2, ffn=16, k=3, T=6.
+        let mut cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
+        cfg.hidden = 8;
+        cfg.n_heads = 2;
+        cfg.intermediate = 16;
+        cfg.conv_kernel = 3;
+        let (c, ffn, t, valid) = (8usize, 16usize, 6usize, 6usize);
+        let mut rng = Rng::new(41);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.5).collect::<Vec<f32>>();
+        let mut w: W = W::new();
+        let pre = "encoder.layers.0";
+        for nm in ["norm_feed_forward1", "norm_self_att", "norm_conv", "norm_feed_forward2", "norm_out"] {
+            w.insert(format!("{pre}.{nm}.weight"), r(c).iter().map(|v| 1.0 + v * 0.3).collect());
+            w.insert(format!("{pre}.{nm}.bias"), r(c));
+        }
+        for ff in ["feed_forward1", "feed_forward2"] {
+            w.insert(format!("{pre}.{ff}.linear1.weight"), r(ffn * c));
+            w.insert(format!("{pre}.{ff}.linear2.weight"), r(c * ffn));
+        }
+        for leaf in ["q_proj", "k_proj", "v_proj", "relative_k_proj", "o_proj"] {
+            w.insert(format!("{pre}.self_attn.{leaf}.weight"), r(c * c));
+        }
+        w.insert(format!("{pre}.self_attn.bias_u"), r(c));
+        w.insert(format!("{pre}.self_attn.bias_v"), r(c));
+        w.insert(format!("{pre}.conv.pointwise_conv1.weight"), r(2 * c * c));
+        w.insert(format!("{pre}.conv.depthwise_conv.weight"), r(c * cfg.conv_kernel as usize));
+        w.insert(format!("{pre}.conv.norm.weight"), r(c).iter().map(|v| 1.0 + v * 0.3).collect());
+        w.insert(format!("{pre}.conv.norm.bias"), r(c));
+        w.insert(format!("{pre}.conv.pointwise_conv2.weight"), r(c * c));
+        let h0 = r(t * c);
+
+        let d_out = vec![1.0f32; t * c];
+        let d_h0 = conformer_block_backward(&h0, &w, 0, &cfg, t, valid, &d_out);
+        let loss = |hh: &[f32]| -> f32 { conformer_block(hh, &w, 0, &cfg, t, valid).iter().sum() };
+        let eps = 1e-3f32;
+        let ok = |a: f32, n: f32| (a - n).abs() <= 6e-3 + 8e-2 * n.abs();
+        for &i in &[0usize, 5, 13, 22, 31, 44] {
+            let (mut hp, mut hm) = (h0.clone(), h0.clone());
+            hp[i] += eps;
+            hm[i] -= eps;
+            let num = (loss(&hp) - loss(&hm)) / (2.0 * eps);
+            assert!(ok(d_h0[i], num), "d_h0[{i}] {} vs {}", d_h0[i], num);
+        }
     }
 
     #[test]
