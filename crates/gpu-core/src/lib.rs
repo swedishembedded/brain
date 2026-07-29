@@ -24,8 +24,13 @@
 
 pub use backend_api::{
     f, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceStats, NumericSupport, Step,
+    StepMeta,
 };
 pub use backend_api::select;
+
+/// Per-kernel FLOP/int-OPS/bytes formulas + step-list accounting (offline
+/// `Gpu::cost_of`, online `Gpu::ops_counters`).
+pub mod cost;
 
 /// File-backed persistence for measured kernel choices (S5).
 #[cfg(not(target_arch = "wasm32"))]
@@ -100,8 +105,9 @@ pub mod testgpu {
 #[cfg(not(target_arch = "wasm32"))]
 mod native_facade {
     use super::{DeviceBuffer, Step};
-    use backend_api::BufUsage;
+    use backend_api::{BufUsage, StepMeta};
     use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::{Arc, Mutex};
 
     /// Which compute backend a `Gpu` uses. A selection enum for the CLI — distinct
     /// from the [`backend_api::Backend`] *trait* the backends implement.
@@ -216,12 +222,15 @@ mod native_facade {
     /// `atexit` hook) crashes the NVIDIA driver's worker threads during
     /// teardown. Measured on the test suite: in-test drops never crash; a
     /// leaked static crashed intermittently; atexit teardown crashed every run.
-    pub struct WeakGpu(Box<dyn backend_api::WeakBackend>);
+    pub struct WeakGpu {
+        weak: Box<dyn backend_api::WeakBackend>,
+        names: Arc<Vec<String>>,
+    }
 
     impl WeakGpu {
         /// A fresh strong handle, if the device is still alive.
         pub fn upgrade(&self) -> Option<Gpu> {
-            self.0.upgrade().map(|inner| Gpu { inner })
+            self.weak.upgrade().map(|inner| Gpu::wrap(inner, self.names.clone()))
         }
     }
 
@@ -230,9 +239,24 @@ mod native_facade {
     /// never touches this type — the dispatch just forwards to `self.inner`.
     pub struct Gpu {
         inner: Box<dyn backend_api::Backend>,
+        /// Kernel names of this handle's pipeline set, index-aligned with the
+        /// `kind` passed to `step*` — what resolves a recorded step back to a
+        /// cost formula.
+        names: Arc<Vec<String>>,
+        /// Online OPS counters for THIS handle, folded in at `submit`. Handles
+        /// are per model/stage by construction (`share`/`new_like` start fresh
+        /// counters), so these are per-device, per-model numbers.
+        counters: Mutex<crate::cost::CostReport>,
     }
 
     impl Gpu {
+        fn wrap(inner: Box<dyn backend_api::Backend>, names: Arc<Vec<String>>) -> Gpu {
+            Gpu { inner, names, counters: Mutex::new(Default::default()) }
+        }
+
+        fn kernel_names(kernels: &[(&str, &str)]) -> Arc<Vec<String>> {
+            Arc::new(kernels.iter().map(|(n, _)| n.to_string()).collect())
+        }
         /// Build the default backend (see [`set_default_backend`] / `BRAIN_DEVICE`).
         /// Vulkan falls back to wgpu when no Vulkan device/ICD is present, so the
         /// build stays usable everywhere.
@@ -249,7 +273,7 @@ mod native_facade {
                 Err(e) => panic!("failed to build backend '{name}': {e}"),
             };
             record_caps(inner.as_ref());
-            Gpu { inner }
+            Gpu::wrap(inner, Self::kernel_names(kernels))
         }
 
         /// A second handle onto **this** device: same adapter, queue and compiled
@@ -266,7 +290,7 @@ mod native_facade {
         /// building a fresh device, which is correct, just not free.
         pub fn share(&self) -> Gpu {
             match self.inner.share() {
-                Some(inner) => Gpu { inner },
+                Some(inner) => Gpu::wrap(inner, self.names.clone()),
                 None => panic!(
                     "this backend cannot share a device; build a new Gpu instead"
                 ),
@@ -278,7 +302,7 @@ mod native_facade {
         /// has no shareable device; building fresh there is cheap and correct).
         pub fn share_or_new(&self, kernels: &[(&str, &str)]) -> Gpu {
             match self.inner.share() {
-                Some(inner) => Gpu { inner },
+                Some(inner) => Gpu::wrap(inner, self.names.clone()),
                 None => Gpu::new(kernels),
             }
         }
@@ -289,7 +313,7 @@ mod native_facade {
         /// which is correct and cheap there.
         pub fn new_like(&self, kernels: &[(&str, &str)]) -> Gpu {
             match self.inner.new_like(kernels) {
-                Some(inner) => Gpu { inner },
+                Some(inner) => Gpu::wrap(inner, Self::kernel_names(kernels)),
                 None => Gpu::new(kernels),
             }
         }
@@ -321,7 +345,7 @@ mod native_facade {
         /// A weak handle for pools/fixtures — see [`WeakGpu`]. `None` when the
         /// backend has no shared state to weakly reference.
         pub fn downgrade(&self) -> Option<WeakGpu> {
-            self.inner.downgrade().map(WeakGpu)
+            self.inner.downgrade().map(|weak| WeakGpu { weak, names: self.names.clone() })
         }
 
         /// Build on the native CPU backend regardless of the default selection.
@@ -329,7 +353,7 @@ mod native_facade {
             let inner: Box<dyn backend_api::Backend> =
                 Box::new(backend_cpu::CpuBackend::new(kernels));
             record_caps(inner.as_ref());
-            Gpu { inner }
+            Gpu::wrap(inner, Self::kernel_names(kernels))
         }
 
         /// Build on the wgpu backend regardless of the default selection.
@@ -337,7 +361,7 @@ mod native_facade {
             let inner: Box<dyn backend_api::Backend> =
                 Box::new(backend_wgpu::WgpuBackend::new(kernels));
             record_caps(inner.as_ref());
-            Gpu { inner }
+            Gpu::wrap(inner, Self::kernel_names(kernels))
         }
 
         /// Build `count` wgpu devices on DISTINCT physical GPUs from one adapter
@@ -345,15 +369,17 @@ mod native_facade {
         /// calls can reorder and collide on one card). Returns one [`Gpu`] per card.
         #[cfg(not(target_arch = "wasm32"))]
         pub fn new_wgpu_multi(kernels: &[(&str, &str)], count: usize) -> Vec<Gpu> {
+            let names = Self::kernel_names(kernels);
             backend_wgpu::WgpuBackend::new_multi(kernels, count)
                 .into_iter()
-                .map(|b| Gpu { inner: Box::new(b) })
+                .map(|b| Gpu::wrap(Box::new(b), names.clone()))
                 .collect()
         }
 
         /// Build on the native Vulkan backend, or `Err` if no Vulkan device is present.
         pub fn try_new_vulkan(kernels: &[(&str, &str)]) -> Result<Gpu, String> {
-            backend_vulkan::VulkanBackend::try_new(kernels).map(|g| Gpu { inner: Box::new(g) })
+            backend_vulkan::VulkanBackend::try_new(kernels)
+                .map(|g| Gpu::wrap(Box::new(g), Self::kernel_names(kernels)))
         }
 
         pub fn storage(&self, n: u64) -> DeviceBuffer {
@@ -391,18 +417,59 @@ mod native_facade {
         }
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
             crate::assert_no_output_alias(bufs);
-            self.inner.step(kind, bufs, params, threads)
+            self.inner
+                .step(kind, bufs, params, threads)
+                .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
         }
         pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
             // NB: sliced views of ONE buffer at disjoint offsets are legal and common
             // here, so no alias check — wgpu validates the concrete ranges.
-            self.inner.step_sliced(kind, bufs, offsets, params, threads)
+            self.inner
+                .step_sliced(kind, bufs, offsets, params, threads)
+                .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
         }
         pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
-            self.inner.step_buf(kind, ubuf, bufs, threads)
+            // The uniform lives in a caller-owned buffer: shape params unknown
+            // here, so the cost side gets only kernel + threads.
+            self.inner
+                .step_buf(kind, ubuf, bufs, threads)
+                .with_meta(StepMeta { kernel: kind, params: None, threads })
         }
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
+            if !steps.is_empty() {
+                let mut ctr = self.counters.lock().unwrap_or_else(|e| e.into_inner());
+                crate::cost::tally(&mut ctr, &self.names, steps);
+            }
             self.inner.submit(clears, steps)
+        }
+
+        // ---- FLOP/OPS accounting (see `gpu_core::cost`) ---------------------
+
+        /// OFFLINE cost of a recorded step list — no execution. The steps must
+        /// have been recorded through a handle of this kernel set (kernel
+        /// indices resolve through this handle's pipeline names).
+        pub fn cost_of(&self, steps: &[Step]) -> crate::cost::CostReport {
+            let mut r = crate::cost::CostReport::default();
+            crate::cost::tally(&mut r, &self.names, steps);
+            r
+        }
+
+        /// ONLINE counters: everything submitted through THIS handle since
+        /// creation (or the last [`Gpu::reset_ops_counters`]). One handle is one
+        /// device context, so a sharded pipeline reads per-stage numbers from
+        /// each stage's handle.
+        pub fn ops_counters(&self) -> crate::cost::CostReport {
+            self.counters.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+
+        /// Reset the online counters (e.g. after warm-up, before a measured run).
+        pub fn reset_ops_counters(&self) {
+            *self.counters.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+        }
+
+        /// The registered name of pipeline slot `kind` on this handle.
+        pub fn kernel_name(&self, kind: usize) -> Option<&str> {
+            self.names.get(kind).map(|s| s.as_str())
         }
     }
 }
@@ -422,18 +489,25 @@ pub use native_facade::{
 #[cfg(target_arch = "wasm32")]
 mod wasm_facade {
     use super::{DeviceBuffer, Step};
-    use backend_api::{Backend, BufUsage};
+    use backend_api::{Backend, BufUsage, StepMeta};
     use backend_wgpu::WgpuBackend;
+    use std::sync::Mutex;
 
     pub struct Gpu {
         inner: WgpuBackend,
+        names: Vec<String>,
+        counters: Mutex<crate::cost::CostReport>,
     }
 
     impl Gpu {
         /// Async device init + pipeline compile (the browser has no blocking
         /// executor, so there is no synchronous `new`).
         pub async fn new_async(kernels: &[(&str, &str)]) -> Gpu {
-            Gpu { inner: WgpuBackend::new_async(kernels).await }
+            Gpu {
+                inner: WgpuBackend::new_async(kernels).await,
+                names: kernels.iter().map(|(n, _)| n.to_string()).collect(),
+                counters: Mutex::new(Default::default()),
+            }
         }
 
         pub fn storage(&self, n: u64) -> DeviceBuffer {
@@ -454,15 +528,39 @@ mod wasm_facade {
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
             crate::assert_no_output_alias(bufs);
             Backend::step(&self.inner, kind, bufs, params, threads)
+                .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
         }
         pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
             Backend::step_sliced(&self.inner, kind, bufs, offsets, params, threads)
+                .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
         }
         pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
             Backend::step_buf(&self.inner, kind, ubuf, bufs, threads)
+                .with_meta(StepMeta { kernel: kind, params: None, threads })
         }
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
+            if !steps.is_empty() {
+                let mut ctr = self.counters.lock().unwrap_or_else(|e| e.into_inner());
+                crate::cost::tally(&mut ctr, &self.names, steps);
+            }
             Backend::submit(&self.inner, clears, steps)
+        }
+
+        /// OFFLINE cost of a recorded step list — see the native facade.
+        pub fn cost_of(&self, steps: &[Step]) -> crate::cost::CostReport {
+            let mut r = crate::cost::CostReport::default();
+            crate::cost::tally(&mut r, &self.names, steps);
+            r
+        }
+
+        /// ONLINE counters accumulated at `submit` — see the native facade.
+        pub fn ops_counters(&self) -> crate::cost::CostReport {
+            self.counters.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+
+        /// Reset the online counters.
+        pub fn reset_ops_counters(&self) {
+            *self.counters.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
         }
 
         /// Async buffer readback (browser): awaits the map callback.
