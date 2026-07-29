@@ -112,6 +112,9 @@ struct FastIdx {
     // route to the per-group GEMM / depthwise fast path.
     conv2d_gd: Option<usize>,
     conv2d_gd_reg: Option<usize>,
+    attn_scores_cross: Option<usize>,
+    attn_softmax_cross: Option<usize>,
+    attn_apply_cross: Option<usize>,
     leaky_relu: Option<usize>,
     bn_eval: Option<usize>,
     gn_stats: Option<usize>,
@@ -165,6 +168,9 @@ impl CpuBackend {
                 matmul_tiled: find("matmul_tiled"),
                 matmul_reg: find("matmul_reg"),
                 matmul_reg2: find("matmul_reg2"),
+                attn_scores_cross: find("attn_scores_cross"),
+                attn_softmax_cross: find("attn_softmax_cross"),
+                attn_apply_cross: find("attn_apply_cross"),
                 matmul_dx: find("matmul_dx"),
                 matmul_dx_reg: find("matmul_dx_reg"),
                 matmul_dw: find("matmul_dw"),
@@ -374,6 +380,45 @@ impl CpuBackend {
                 let x = std::slice::from_raw_parts(bufs[1] as *const f32, m * k);
                 let dw = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, n * k);
                 fast_ops::matmul_dw(dy, x, dw, m, k, n);
+            }
+            return;
+        }
+        // Cross-attention trio (query-chunked bidirectional attention): per-head
+        // packed GEMMs through the same AVX2 matmul_abt as the linear layers.
+        // Buffer lengths reconstruct from the uniform (sliced dispatches arrive
+        // pre-offset, so the base pointers already point at the chunk rows).
+        if Some(kind) == f.attn_scores_cross && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 9);
+                let (b, h, tq, tk, hd) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
+                let (qs, kvs, qo, ko) = (pu[5] as usize, pu[6] as usize, pu[7] as usize, pu[8] as usize);
+                let q = std::slice::from_raw_parts(bufs[0] as *const f32, b * tq * qs);
+                let kv = std::slice::from_raw_parts(bufs[1] as *const f32, b * tk * kvs);
+                let sc = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * h * tq * tk);
+                fast_ops::attn_scores_cross(q, kv, sc, b, h, tq, tk, hd, qs, kvs, qo, ko);
+            }
+            return;
+        }
+        if Some(kind) == f.attn_softmax_cross && bufs.len() >= 2 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 4);
+                let rows = (pu[0] * pu[1] * pu[2]) as usize;
+                let tk = pu[3] as usize;
+                let s = std::slice::from_raw_parts(bufs[0] as *const f32, rows * tk);
+                let p = std::slice::from_raw_parts_mut(bufs[1] as *mut f32, rows * tk);
+                fast_ops::attn_softmax_cross(s, p, rows, tk);
+            }
+            return;
+        }
+        if Some(kind) == f.attn_apply_cross && bufs.len() >= 3 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 8);
+                let (b, h, tq, tk, hd) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
+                let (kvs, vo, dm) = (pu[5] as usize, pu[6] as usize, pu[7] as usize);
+                let p = std::slice::from_raw_parts(bufs[0] as *const f32, b * h * tq * tk);
+                let kv = std::slice::from_raw_parts(bufs[1] as *const f32, b * tk * kvs);
+                let o = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * tq * dm);
+                fast_ops::attn_apply_cross(p, kv, o, b, h, tq, tk, hd, kvs, vo, dm);
             }
             return;
         }

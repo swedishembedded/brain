@@ -873,3 +873,110 @@ pub fn matmul_dw(dy: &[f32], x: &[f32], dw: &mut [f32], m: usize, k: usize, n: u
         }
     });
 }
+
+// ---------------------------------------------------------------------------
+// Cross-attention family (attn_{scores,softmax,apply}_cross.wgsl) — the
+// substrate of query-chunked bidirectional attention (`model::block::
+// chunked_bidir_fwd`). Per (batch, head) these are small GEMMs over strided
+// head slices of fused buffers; the JIT's one-invocation-per-element loops ran
+// them at ~1-2 GFLOPS (75% of an encoder forward). Packing each head's slice
+// contiguous and reusing [`matmul_abt`] (AVX2+FMA, rayon over rows) is the
+// one-implementation route to the tuned GEMM.
+// ---------------------------------------------------------------------------
+
+/// `attn_scores_cross`: scores[b,h,i,j] = (q[b,i,h,:]·kv_k[b,j,h,:]) / √hd.
+/// params = [bsz, heads, t_dec, t_enc, head_dim, q_stride, kv_stride, q_off, k_off].
+#[allow(clippy::too_many_arguments)]
+pub fn attn_scores_cross(
+    q: &[f32],
+    kv: &[f32],
+    scores: &mut [f32],
+    bsz: usize,
+    heads: usize,
+    tq: usize,
+    tk: usize,
+    hd: usize,
+    q_stride: usize,
+    kv_stride: usize,
+    q_off: usize,
+    k_off: usize,
+) {
+    let scale = 1.0 / (hd as f32).sqrt();
+    let mut qh = vec![0f32; tq * hd];
+    let mut kh = vec![0f32; tk * hd];
+    for b in 0..bsz {
+        for h in 0..heads {
+            // Pack this head's q (scale folded in) and k slices contiguous.
+            for i in 0..tq {
+                let src = (b * tq + i) * q_stride + q_off + h * hd;
+                for d in 0..hd {
+                    qh[i * hd + d] = q[src + d] * scale;
+                }
+            }
+            for j in 0..tk {
+                let src = (b * tk + j) * kv_stride + k_off + h * hd;
+                kh[j * hd..j * hd + hd].copy_from_slice(&kv[src..src + hd]);
+            }
+            let out = &mut scores[((b * heads + h) * tq) * tk..((b * heads + h) * tq + tq) * tk];
+            matmul_abt(&qh, &kh, out, tq, hd, tk);
+        }
+    }
+}
+
+/// `attn_softmax_cross`: row softmax over the key axis, scores → probs.
+/// params = [bsz, heads, t_dec, t_enc].
+pub fn attn_softmax_cross(scores: &[f32], probs: &mut [f32], rows: usize, tk: usize) {
+    use rayon::prelude::*;
+    probs.par_chunks_mut(tk).enumerate().take(rows).for_each(|(r, p)| {
+        let s = &scores[r * tk..r * tk + tk];
+        let mx = s.iter().fold(f32::NEG_INFINITY, |a, &v| a.max(v));
+        let mut sum = 0f32;
+        for (pv, &sv) in p.iter_mut().zip(s) {
+            let e = (sv - mx).exp();
+            *pv = e;
+            sum += e;
+        }
+        let inv = 1.0 / sum.max(f32::MIN_POSITIVE);
+        for pv in p.iter_mut() {
+            *pv *= inv;
+        }
+    });
+}
+
+/// `attn_apply_cross`: out[b,i,h,:] = Σ_j probs[b,h,i,j]·kv_v[b,j,h,:], written
+/// into the contiguous `[rows, d_model]` context at column h·hd.
+/// params = [bsz, heads, t_dec, t_enc, head_dim, kv_stride, v_off, d_model].
+#[allow(clippy::too_many_arguments)]
+pub fn attn_apply_cross(
+    probs: &[f32],
+    kv: &[f32],
+    out: &mut [f32],
+    bsz: usize,
+    heads: usize,
+    tq: usize,
+    tk: usize,
+    hd: usize,
+    kv_stride: usize,
+    v_off: usize,
+    d_model: usize,
+) {
+    let mut vt = vec![0f32; hd * tk]; // v transposed: vt[d, j]
+    let mut ctxh = vec![0f32; tq * hd];
+    for b in 0..bsz {
+        for h in 0..heads {
+            for j in 0..tk {
+                let src = (b * tk + j) * kv_stride + v_off + h * hd;
+                for d in 0..hd {
+                    vt[d * tk + j] = kv[src + d];
+                }
+            }
+            let p = &probs[((b * heads + h) * tq) * tk..((b * heads + h) * tq + tq) * tk];
+            // ctx[i,d] = Σ_j P[i,j]·V[j,d] = abt(P[tq,tk], Vᵀ[hd,tk]).
+            matmul_abt(p, &vt, &mut ctxh, tq, tk, hd);
+            for i in 0..tq {
+                let dst = (b * tq + i) * d_model + h * hd;
+                out[dst..dst + hd].copy_from_slice(&ctxh[i * hd..i * hd + hd]);
+            }
+        }
+    }
+}
