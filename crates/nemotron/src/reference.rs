@@ -782,6 +782,78 @@ pub fn rnnt_greedy(pooler: &[f32], valid: usize, w: &W, cfg: &NemotronConfig) ->
     emitted
 }
 
+/// Full encoder backward from the pooler grad `d_pooler[T, decoder_hidden]` to the
+/// subsampling-output grad `d_sub[T, C]`: projector backward → 24 block backwards
+/// (chained) → subsampling stack input. The model-level encoder training gradient.
+pub fn encode_pooler_backward(sub: &[f32], w: &W, cfg: &NemotronConfig, t: usize, valid: usize, prompt_id: usize, d_pooler: &[f32]) -> Vec<f32> {
+    let (c, np, pi, dh) = (cfg.hidden as usize, cfg.num_prompts as usize, cfg.prompt_intermediate as usize, cfg.decoder_hidden as usize);
+    // ---- forward, caching each block's input ----
+    let mut inputs = Vec::with_capacity(cfg.n_layers as usize + 1);
+    inputs.push(sub.to_vec());
+    for b in 0..cfg.n_layers {
+        let out = conformer_block(inputs.last().unwrap(), w, b, cfg, t, valid);
+        inputs.push(out);
+    }
+    let hidden = inputs.last().unwrap().clone();
+    // prompt_projector forward (need cat + f1 pre-relu)
+    let mut cat = vec![0.0f32; t * (c + np)];
+    for i in 0..t {
+        cat[i * (c + np)..i * (c + np) + c].copy_from_slice(&hidden[i * c..i * c + c]);
+        cat[i * (c + np) + c + prompt_id] = 1.0;
+    }
+    let mut f1pre = matmul_nt(&cat, &w["prompt_projector.linear_1.weight"], t, c + np, pi);
+    let b1 = &w["prompt_projector.linear_1.bias"];
+    for i in 0..t {
+        for j in 0..pi {
+            f1pre[i * pi + j] += b1[j];
+        }
+    }
+
+    // ---- backward ----
+    // encoder_projector: pooler = fused·Wᵀ + b → d_fused = d_pooler·W
+    let wep = &w["encoder_projector.weight"]; // [dh, c]
+    let mut d_fused = vec![0.0f32; t * c];
+    for i in 0..t {
+        for j in 0..c {
+            let mut a = 0.0f32;
+            for o in 0..dh {
+                a += d_pooler[i * dh + o] * wep[o * c + j];
+            }
+            d_fused[i * c + j] = a;
+        }
+    }
+    // linear_2: fused = f1·W2ᵀ + b → d_f1 = d_fused·W2
+    let w2 = &w["prompt_projector.linear_2.weight"]; // [c, pi]
+    let mut d_f1 = vec![0.0f32; t * pi];
+    for i in 0..t {
+        for j in 0..pi {
+            let mut a = 0.0f32;
+            for o in 0..c {
+                a += d_fused[i * c + o] * w2[o * pi + j];
+            }
+            d_f1[i * pi + j] = a * if f1pre[i * pi + j] > 0.0 { 1.0 } else { 0.0 }; // relu'
+        }
+    }
+    // linear_1: cat = [hidden, onehot] → d_hidden = (d_f1·W1)[:, :c]
+    let w1 = &w["prompt_projector.linear_1.weight"]; // [pi, c+np]
+    let mut d_hidden = vec![0.0f32; t * c];
+    for i in 0..t {
+        for j in 0..c {
+            let mut a = 0.0f32;
+            for o in 0..pi {
+                a += d_f1[i * pi + o] * w1[o * (c + np) + j];
+            }
+            d_hidden[i * c + j] = a;
+        }
+    }
+    // chain block backwards (reverse), each consuming its cached input
+    let mut d = d_hidden;
+    for b in (0..cfg.n_layers).rev() {
+        d = conformer_block_backward(&inputs[b as usize], w, b, cfg, t, valid, &d);
+    }
+    d // d_sub
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,6 +868,66 @@ mod tests {
         let mut b = Vec::new();
         f.read_to_end(&mut b).unwrap();
         b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    }
+
+    #[test]
+    fn full_encoder_backward_matches_finite_diff() {
+        use data::rng::Rng;
+        // tiny 2-layer encoder + projectors; gradcheck d_sub end-to-end.
+        let mut cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
+        cfg.hidden = 8;
+        cfg.n_heads = 2;
+        cfg.intermediate = 16;
+        cfg.conv_kernel = 3;
+        cfg.n_layers = 2;
+        cfg.num_prompts = 4;
+        cfg.prompt_intermediate = 12;
+        cfg.decoder_hidden = 6;
+        let (c, ffn, k, np, pi, dh, t, valid) = (8usize, 16usize, 3usize, 4usize, 12usize, 6usize, 6usize, 6usize);
+        let mut rng = Rng::new(51);
+        let mut r = |n: usize| (0..n).map(|_| (rng.next_f32() - 0.5) * 0.5).collect::<Vec<f32>>();
+        let mut w: W = W::new();
+        for b in 0..2u32 {
+            let pre = format!("encoder.layers.{b}");
+            for nm in ["norm_feed_forward1", "norm_self_att", "norm_conv", "norm_feed_forward2", "norm_out"] {
+                w.insert(format!("{pre}.{nm}.weight"), r(c).iter().map(|v| 1.0 + v * 0.3).collect());
+                w.insert(format!("{pre}.{nm}.bias"), r(c));
+            }
+            for ff in ["feed_forward1", "feed_forward2"] {
+                w.insert(format!("{pre}.{ff}.linear1.weight"), r(ffn * c));
+                w.insert(format!("{pre}.{ff}.linear2.weight"), r(c * ffn));
+            }
+            for leaf in ["q_proj", "k_proj", "v_proj", "relative_k_proj", "o_proj"] {
+                w.insert(format!("{pre}.self_attn.{leaf}.weight"), r(c * c));
+            }
+            w.insert(format!("{pre}.self_attn.bias_u"), r(c));
+            w.insert(format!("{pre}.self_attn.bias_v"), r(c));
+            w.insert(format!("{pre}.conv.pointwise_conv1.weight"), r(2 * c * c));
+            w.insert(format!("{pre}.conv.depthwise_conv.weight"), r(c * k));
+            w.insert(format!("{pre}.conv.norm.weight"), r(c).iter().map(|v| 1.0 + v * 0.3).collect());
+            w.insert(format!("{pre}.conv.norm.bias"), r(c));
+            w.insert(format!("{pre}.conv.pointwise_conv2.weight"), r(c * c));
+        }
+        w.insert("prompt_projector.linear_1.weight".into(), r(pi * (c + np)));
+        w.insert("prompt_projector.linear_1.bias".into(), r(pi));
+        w.insert("prompt_projector.linear_2.weight".into(), r(c * pi));
+        w.insert("prompt_projector.linear_2.bias".into(), r(c));
+        w.insert("encoder_projector.weight".into(), r(dh * c));
+        w.insert("encoder_projector.bias".into(), r(dh));
+        let sub = r(t * c);
+
+        let d_pool = vec![1.0f32; t * dh];
+        let d_sub = encode_pooler_backward(&sub, &w, &cfg, t, valid, 0, &d_pool);
+        let loss = |ss: &[f32]| -> f32 { encode_pooler(ss, &w, &cfg, t, valid, 0).iter().sum() };
+        let eps = 1e-3f32;
+        let ok = |a: f32, n: f32| (a - n).abs() <= 6e-3 + 1e-1 * n.abs();
+        for &i in &[0usize, 7, 19, 33, 45] {
+            let (mut sp, mut sm) = (sub.clone(), sub.clone());
+            sp[i] += eps;
+            sm[i] -= eps;
+            let num = (loss(&sp) - loss(&sm)) / (2.0 * eps);
+            assert!(ok(d_sub[i], num), "d_sub[{i}] {} vs {}", d_sub[i], num);
+        }
     }
 
     #[test]
