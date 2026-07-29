@@ -296,6 +296,10 @@ pub const GELU_BWD: &str = include_str!("../wgsl/gelu_bwd.wgsl");
 pub const GELU_ERF: &str = include_str!("../wgsl/gelu_erf.wgsl");
 /// `wgsl/gelu_erf_bwd.wgsl`
 pub const GELU_ERF_BWD: &str = include_str!("../wgsl/gelu_erf_bwd.wgsl");
+/// `wgsl/glu.wgsl`
+pub const GLU: &str = include_str!("../wgsl/glu.wgsl");
+/// `wgsl/glu_bwd.wgsl`
+pub const GLU_BWD: &str = include_str!("../wgsl/glu_bwd.wgsl");
 /// `wgsl/gn_apply.wgsl`
 pub const GN_APPLY: &str = include_str!("../wgsl/gn_apply.wgsl");
 /// `wgsl/gn_dbeta.wgsl`
@@ -360,6 +364,10 @@ pub const LN_HEAD_DGB: &str = include_str!("../wgsl/ln_head_dgb.wgsl");
 pub const LN_HEAD_DX: &str = include_str!("../wgsl/ln_head_dx.wgsl");
 /// `wgsl/ln_stats.wgsl`
 pub const LN_STATS: &str = include_str!("../wgsl/ln_stats.wgsl");
+/// `wgsl/lstm_gates.wgsl`
+pub const LSTM_GATES: &str = include_str!("../wgsl/lstm_gates.wgsl");
+/// `wgsl/lstm_gates_bwd.wgsl`
+pub const LSTM_GATES_BWD: &str = include_str!("../wgsl/lstm_gates_bwd.wgsl");
 /// `wgsl/masked_l1.wgsl`
 pub const MASKED_L1: &str = include_str!("../wgsl/masked_l1.wgsl");
 /// `wgsl/masked_l1_grad.wgsl`
@@ -765,6 +773,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("gelu_bwd", GELU_BWD),
     ("gelu_erf", GELU_ERF),
     ("gelu_erf_bwd", GELU_ERF_BWD),
+    ("glu", GLU),
+    ("glu_bwd", GLU_BWD),
     ("gn_apply", GN_APPLY),
     ("gn_dbeta", GN_DBETA),
     ("gn_dgamma", GN_DGAMMA),
@@ -797,6 +807,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("ln_head_dgb", LN_HEAD_DGB),
     ("ln_head_dx", LN_HEAD_DX),
     ("ln_stats", LN_STATS),
+    ("lstm_gates", LSTM_GATES),
+    ("lstm_gates_bwd", LSTM_GATES_BWD),
     ("masked_l1", MASKED_L1),
     ("masked_l1_grad", MASKED_L1_GRAD),
     ("matmul", MATMUL),

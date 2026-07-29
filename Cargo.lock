@@ -668,6 +668,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-nemotron"
+version = "0.1.0"
+dependencies = [
+ "brain-audio",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-npu"
 version = "0.1.0"
 dependencies = [
