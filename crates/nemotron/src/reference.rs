@@ -285,6 +285,33 @@ pub fn encode_pooler(sub: &[f32], w: &W, cfg: &NemotronConfig, t: usize, valid: 
 }
 
 
+/// RNN-T joint-network backward. Given the loss grad `d_logits[vocab]` and the
+/// forward inputs, returns `(d_enc[dh], d_dec[dh], d_head[vocab*dh], d_bias[vocab])`.
+/// joint = head·relu(enc+dec) + bias, so d_enc = d_dec = relu'(enc+dec) ⊙ (headᵀ·d_logits).
+pub fn joint_backward(enc: &[f32], dec: &[f32], d_logits: &[f32], w: &W, cfg: &NemotronConfig) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    let (dh, vocab) = (cfg.decoder_hidden as usize, cfg.vocab as usize);
+    let head = &w["joint.head.weight"]; // [vocab, dh]
+    let sum: Vec<f32> = (0..dh).map(|j| (enc[j] + dec[j]).max(0.0)).collect(); // relu(enc+dec)
+    let relu_mask: Vec<f32> = (0..dh).map(|j| if enc[j] + dec[j] > 0.0 { 1.0 } else { 0.0 }).collect();
+    let d_bias = d_logits.to_vec();
+    let mut d_head = vec![0.0f32; vocab * dh];
+    for o in 0..vocab {
+        for j in 0..dh {
+            d_head[o * dh + j] = d_logits[o] * sum[j];
+        }
+    }
+    // d_sum = headᵀ · d_logits, then through relu
+    let mut d_ed = vec![0.0f32; dh];
+    for j in 0..dh {
+        let mut acc = 0.0f32;
+        for o in 0..vocab {
+            acc += d_logits[o] * head[o * dh + j];
+        }
+        d_ed[j] = acc * relu_mask[j];
+    }
+    (d_ed.clone(), d_ed, d_head, d_bias)
+}
+
 /// RNN-T LSTM prediction network state (2 layers).
 pub struct LstmState {
     h: Vec<Vec<f32>>, // [layers][hidden]
@@ -398,6 +425,44 @@ mod tests {
         let mut b = Vec::new();
         f.read_to_end(&mut b).unwrap();
         b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    }
+
+    #[test]
+    fn joint_backward_matches_finite_diff() {
+        // Tiny synthetic joint network (no checkpoint needed): gradcheck the
+        // transducer joint backward (relu + head matmul) vs central differences.
+        use data::rng::Rng;
+        let mut cfg = NemotronConfig::nemotron_3_5_asr_0_6b();
+        cfg.decoder_hidden = 6;
+        cfg.vocab = 5;
+        let (dh, vocab) = (cfg.decoder_hidden as usize, cfg.vocab as usize);
+        let mut rng = Rng::new(3);
+        let mut r = |n: usize| (0..n).map(|_| rng.next_f32() - 0.5).collect::<Vec<f32>>();
+        let (enc, dec, head, bias) = (r(dh), r(dh), r(vocab * dh), r(vocab));
+        let dlog: Vec<f32> = r(vocab); // arbitrary upstream grad (loss = Σ dlog·logits)
+        let w: W = [("joint.head.weight".to_string(), head.clone()), ("joint.head.bias".to_string(), bias.clone())].into_iter().collect();
+
+        let (d_enc, _d_dec, d_head, _d_bias) = joint_backward(&enc, &dec, &dlog, &w, &cfg);
+        let loss = |e: &[f32], hd: &[f32]| -> f32 {
+            let ww: W = [("joint.head.weight".to_string(), hd.to_vec()), ("joint.head.bias".to_string(), bias.clone())].into_iter().collect();
+            joint(e, &dec, &ww, &cfg).iter().zip(&dlog).map(|(a, b)| a * b).sum()
+        };
+        let eps = 1e-3f32;
+        let ok = |a: f32, n: f32| (a - n).abs() <= 3e-3 + 6e-2 * n.abs();
+        for &i in &[0usize, 3, 5] {
+            let (mut ep, mut em) = (enc.clone(), enc.clone());
+            ep[i] += eps;
+            em[i] -= eps;
+            let num = (loss(&ep, &head) - loss(&em, &head)) / (2.0 * eps);
+            assert!(ok(d_enc[i], num), "d_enc[{i}] {} vs {}", d_enc[i], num);
+        }
+        for &i in &[0usize, 7, 20] {
+            let (mut hp, mut hm) = (head.clone(), head.clone());
+            hp[i] += eps;
+            hm[i] -= eps;
+            let num = (loss(&enc, &hp) - loss(&enc, &hm)) / (2.0 * eps);
+            assert!(ok(d_head[i], num), "d_head[{i}] {} vs {}", d_head[i], num);
+        }
     }
 
     #[test]
