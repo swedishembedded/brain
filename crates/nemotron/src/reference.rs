@@ -91,6 +91,72 @@ fn feed_forward_backward(x: &[f32], w1: &[f32], w2: &[f32], t: usize, c: usize, 
     d_x
 }
 
+/// LayerNorm backward returning `(d_x, d_gamma, d_beta)`.
+pub(crate) fn layernorm_grads(d_y: &[f32], x: &[f32], gamma: &[f32], t: usize, c: usize, eps: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let d_x = layernorm_backward(d_y, x, gamma, t, c, eps);
+    let (mut d_g, mut d_b) = (vec![0.0f32; c], vec![0.0f32; c]);
+    for i in 0..t {
+        let row = &x[i * c..i * c + c];
+        let mu = row.iter().sum::<f32>() / c as f32;
+        let var = row.iter().map(|&v| (v - mu) * (v - mu)).sum::<f32>() / c as f32;
+        let inv = 1.0 / (var + eps).sqrt();
+        for j in 0..c {
+            d_g[j] += d_y[i * c + j] * (row[j] - mu) * inv;
+            d_b[j] += d_y[i * c + j];
+        }
+    }
+    (d_x, d_g, d_b)
+}
+
+/// Feed-forward backward returning `(d_x, d_w1, d_w2)`.
+fn feed_forward_grads(x: &[f32], w1: &[f32], w2: &[f32], t: usize, c: usize, ffn: usize, d_out: &[f32]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let h1 = matmul_nt(x, w1, t, c, ffn);
+    let s: Vec<f32> = h1.iter().map(|&x0| silu(x0)).collect();
+    let mut d_h1 = vec![0.0f32; t * ffn];
+    for i in 0..t {
+        for j in 0..ffn {
+            let mut ds = 0.0f32;
+            for o in 0..c {
+                ds += d_out[i * c + o] * w2[o * ffn + j];
+            }
+            let (x0, sg) = (h1[i * ffn + j], sigmoid(h1[i * ffn + j]));
+            d_h1[i * ffn + j] = ds * (sg * (1.0 + x0 * (1.0 - sg)));
+        }
+    }
+    // d_w2 = d_outᵀ·s [c,ffn]; d_w1 = d_h1ᵀ·x [ffn,c]; d_x = d_h1·w1
+    let mut d_w2 = vec![0.0f32; c * ffn];
+    for o in 0..c {
+        for j in 0..ffn {
+            let mut a = 0.0f32;
+            for i in 0..t {
+                a += d_out[i * c + o] * s[i * ffn + j];
+            }
+            d_w2[o * ffn + j] = a;
+        }
+    }
+    let mut d_w1 = vec![0.0f32; ffn * c];
+    for o in 0..ffn {
+        for j in 0..c {
+            let mut a = 0.0f32;
+            for i in 0..t {
+                a += d_h1[i * ffn + o] * x[i * c + j];
+            }
+            d_w1[o * c + j] = a;
+        }
+    }
+    let mut d_x = vec![0.0f32; t * c];
+    for i in 0..t {
+        for inp in 0..c {
+            let mut a = 0.0f32;
+            for o in 0..ffn {
+                a += d_h1[i * ffn + o] * w1[o * c + inp];
+            }
+            d_x[i * c + inp] = a;
+        }
+    }
+    (d_x, d_w1, d_w2)
+}
+
 /// LayerNorm backward w.r.t. the input `x` (per-row over `c`). Returns `d_x`.
 pub(crate) fn layernorm_backward(d_y: &[f32], x: &[f32], gamma: &[f32], t: usize, c: usize, eps: f32) -> Vec<f32> {
     let mut d_x = vec![0.0f32; t * c];
@@ -284,11 +350,18 @@ fn rel_shift_backward(d_out: &[f32], rows: usize, q: usize, p: usize) -> Vec<f32
     dx
 }
 
-/// Backward of `rel_pos_attention` w.r.t. the input `hn` and `bias_v` (the novel
-/// Transformer-XL positional bias). `d_out` is the loss grad of the attention
-/// output `[T, C]`. Returns `(d_hn[T,C], d_bias_v[C])`.
+/// Backward of `rel_pos_attention` w.r.t. `hn` and `bias_v` (thin wrapper over
+/// [`rel_pos_attention_grads`]).
 #[allow(clippy::too_many_arguments)]
 fn rel_pos_attention_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t: usize, valid: usize, d_out: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let (d_hn, g) = rel_pos_attention_grads(hn, w, prefix, cfg, t, valid, d_out);
+    (d_hn, g[&format!("{prefix}.bias_v")].clone())
+}
+
+/// Full rel-pos attention backward: `(d_hn, weight_grads)` — grads for
+/// `{prefix}.{q,k,v,o,relative_k}_proj.weight` and `{prefix}.bias_{u,v}`.
+#[allow(clippy::too_many_arguments)]
+fn rel_pos_attention_grads(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t: usize, valid: usize, d_out: &[f32]) -> (Vec<f32>, W) {
     let (c, heads, hd) = (cfg.hidden as usize, cfg.n_heads as usize, cfg.head_dim() as usize);
     let scale = 1.0 / (hd as f32).sqrt();
     let (left, right) = ((cfg.sliding_window - 1) as usize, cfg.default_lookahead as usize);
@@ -318,6 +391,9 @@ fn rel_pos_attention_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronCon
 
     let (mut dq, mut dk, mut dv) = (vec![0.0f32; t * c], vec![0.0f32; t * c], vec![0.0f32; t * c]);
     let mut d_bias_v = vec![0.0f32; c];
+    let mut d_bias_u = vec![0.0f32; c];
+    let mut d_rel_k = vec![0.0f32; (2 * t - 1) * c];
+    let mut ctx = vec![0.0f32; t * c];
     for h in 0..heads {
         let (qh, kh, rkh) = (|i: usize, d: usize| q[i * c + h * hd + d], |j: usize, d: usize| k[j * c + h * hd + d], |pp: usize, d: usize| rel_k[pp * c + h * hd + d]);
         let (bus, bvs) = (&bu[h * hd..h * hd + hd], &bv[h * hd..h * hd + hd]);
@@ -357,6 +433,16 @@ fn rel_pos_attention_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronCon
                 probs[i * t + j] = sc[j] * inv;
             }
         }
+        // ctx = probs · v_head (recomputed for d_Wo)
+        for i in 0..t {
+            for d in 0..hd {
+                let mut a = 0.0f32;
+                for j in 0..t {
+                    a += probs[i * t + j] * v[j * c + h * hd + d];
+                }
+                ctx[i * c + h * hd + d] = a;
+            }
+        }
         // backward through ctx = probs·v_head
         // d_probs[i,j] = Σ_d d_ctx[i,h*hd+d]·v[j,d];  d_v[j,d] += Σ_i probs[i,j]·d_ctx[i,h*hd+d]
         let mut d_probs = vec![0.0f32; t * t];
@@ -391,8 +477,9 @@ fn rel_pos_attention_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronCon
                 let d_bd = d_sc * scale;
                 d_bd_raw[i * l + j] += d_bd; // bd sliced [:T]; rel_shift_bwd handles the reindex
                 for d in 0..hd {
-                    // d_ac: ac = (q+bu)·k → d(q_u), d(k)
+                    // d_ac: ac = (q+bu)·k → d(q_u), d(k); bias_u grad
                     dq[i * c + h * hd + d] += d_ac * kh(j, d);
+                    d_bias_u[h * hd + d] += d_ac * kh(j, d);
                     dk[j * c + h * hd + d] += d_ac * (qh(i, d) + bus[d]);
                 }
             }
@@ -406,10 +493,11 @@ fn rel_pos_attention_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronCon
                     continue;
                 }
                 for d in 0..hd {
-                    // bd_raw = (q+bv)·rel_k → d(q_v) and d_bias_v; rel_k grad omitted (not checked here)
+                    // bd_raw = (q+bv)·rel_k → d(q_v), d_bias_v, and d(rel_k)
                     let dqv = g * rkh(pp, d);
                     dq[i * c + h * hd + d] += dqv;
                     d_bias_v[h * hd + d] += dqv;
+                    d_rel_k[pp * c + h * hd + d] += g * (qh(i, d) + bvs[d]);
                 }
             }
         }
@@ -427,7 +515,29 @@ fn rel_pos_attention_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronCon
             }
         }
     }
-    (d_hn, d_bias_v)
+    // weight grads d_W[o,in] = Σ_i dproj[i,o]·input[i,in]
+    let dw = |dproj: &[f32], input: &[f32], m: usize, kk: usize, n: usize| -> Vec<f32> {
+        let mut r = vec![0.0f32; n * kk];
+        for o in 0..n {
+            for j in 0..kk {
+                let mut a = 0.0f32;
+                for i in 0..m {
+                    a += dproj[i * n + o] * input[i * kk + j];
+                }
+                r[o * kk + j] = a;
+            }
+        }
+        r
+    };
+    let mut grads: W = W::new();
+    grads.insert(format!("{prefix}.q_proj.weight"), dw(&dq, hn, t, c, c));
+    grads.insert(format!("{prefix}.k_proj.weight"), dw(&dk, hn, t, c, c));
+    grads.insert(format!("{prefix}.v_proj.weight"), dw(&dv, hn, t, c, c));
+    grads.insert(format!("{prefix}.o_proj.weight"), dw(d_out, &ctx, t, c, c));
+    grads.insert(format!("{prefix}.relative_k_proj.weight"), dw(&d_rel_k, &pe, 2 * t - 1, c, c));
+    grads.insert(format!("{prefix}.bias_u"), d_bias_u);
+    grads.insert(format!("{prefix}.bias_v"), d_bias_v);
+    (d_hn, grads)
 }
 
 /// Conformer convolution module: pointwise_conv1(→2C) → GLU → causal depthwise
@@ -470,10 +580,14 @@ fn conv_module(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t: usize, 
     matmul_nt(&act, p("pointwise_conv2.weight"), t, c, c)
 }
 
-/// Backward of `conv_module` w.r.t. the input `hn` (loss grad `d_out[T,C]`).
-/// Composes: pc2 matmul bwd → SiLU bwd → LayerNorm bwd → causal depthwise conv1d
-/// bwd → GLU bwd → pc1 matmul bwd. Returns `d_hn[T,C]`. `valid` masks GLU rows.
+/// Backward of `conv_module` w.r.t. `hn` (thin wrapper over [`conv_module_grads`]).
 fn conv_module_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t: usize, valid: usize, d_out: &[f32]) -> Vec<f32> {
+    conv_module_grads(hn, w, prefix, cfg, t, valid, d_out).0
+}
+
+/// Full conv-module backward: `(d_hn, weight_grads)` — grads for
+/// `{prefix}.{pointwise_conv1,pointwise_conv2,depthwise_conv}.weight` and `{prefix}.norm.{weight,bias}`.
+fn conv_module_grads(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t: usize, valid: usize, d_out: &[f32]) -> (Vec<f32>, W) {
     let (c, k) = (cfg.hidden as usize, cfg.conv_kernel as usize);
     let eps = cfg.ln_eps;
     let p = |n: &str| &w[&format!("{prefix}.{n}")];
@@ -514,6 +628,18 @@ fn conv_module_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t
             d_act[i * c + j] = acc;
         }
     }
+    // d_Wpc2 = d_outᵀ · act  (act = silu(ln))
+    let act: Vec<f32> = ln.iter().map(|&x| silu(x)).collect();
+    let mut d_wpc2 = vec![0.0f32; c * c];
+    for o in 0..c {
+        for j in 0..c {
+            let mut a = 0.0f32;
+            for i in 0..t {
+                a += d_out[i * c + o] * act[i * c + j];
+            }
+            d_wpc2[o * c + j] = a;
+        }
+    }
     // through SiLU: act = silu(ln); silu'(x) = sig(x)(1 + x(1-sig(x)))
     let mut d_ln = vec![0.0f32; t * c];
     for idx in 0..t * c {
@@ -521,8 +647,9 @@ fn conv_module_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t
         let s = sigmoid(x);
         d_ln[idx] = d_act[idx] * (s * (1.0 + x * (1.0 - s)));
     }
-    // through LayerNorm (per row over C)
+    // through LayerNorm (per row over C) + norm gamma/beta grads
     let mut d_conv = vec![0.0f32; t * c];
+    let (mut d_gnw, mut d_gnb) = (vec![0.0f32; c], vec![0.0f32; c]);
     for i in 0..t {
         let row = &conv[i * c..i * c + c];
         let mu = row.iter().sum::<f32>() / c as f32;
@@ -534,6 +661,8 @@ fn conv_module_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t
         for j in 0..c {
             let xhat = (row[j] - mu) / sig;
             d_conv[i * c + j] = (dyh[j] - mean_dyh - xhat * mean_dyh_xhat) / sig;
+            d_gnw[j] += d_ln[i * c + j] * xhat;
+            d_gnb[j] += d_ln[i * c + j];
         }
     }
     // through causal depthwise conv1d (transpose): d_glu[m,ch] = Σ_kk d_conv[m+8-kk,ch]·dw[ch,kk]
@@ -561,6 +690,31 @@ fn conv_module_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t
             d_pc1[i * 2 * c + c + j] = dg * a * s * (1.0 - s);
         }
     }
+    // depthwise weight grad: d_dw[ch,kk] = Σ_i d_conv[i,ch]·glu[i-(k-1)+kk, ch]
+    let mut d_dw = vec![0.0f32; c * k];
+    for ch in 0..c {
+        for kk in 0..k {
+            let mut a = 0.0f32;
+            for i in 0..t {
+                let s = i as i64 - (k as i64 - 1) + kk as i64;
+                if s >= 0 {
+                    a += d_conv[i * c + ch] * glu[s as usize * c + ch];
+                }
+            }
+            d_dw[ch * k + kk] = a;
+        }
+    }
+    // pc1 weight grad: d_Wpc1[o,in] = Σ_i d_pc1[i,o]·hn[i,in]  [2C, C]
+    let mut d_wpc1 = vec![0.0f32; 2 * c * c];
+    for o in 0..2 * c {
+        for inp in 0..c {
+            let mut a = 0.0f32;
+            for i in 0..t {
+                a += d_pc1[i * 2 * c + o] * hn[i * c + inp];
+            }
+            d_wpc1[o * c + inp] = a;
+        }
+    }
     // through pc1 (out=hn·Wpc1ᵀ): d_hn[i,in] = Σ_o d_pc1[i,o]·Wpc1[o,in]
     let mut d_hn = vec![0.0f32; t * c];
     for i in 0..t {
@@ -572,7 +726,13 @@ fn conv_module_backward(hn: &[f32], w: &W, prefix: &str, cfg: &NemotronConfig, t
             d_hn[i * c + inp] = acc;
         }
     }
-    d_hn
+    let mut grads: W = W::new();
+    grads.insert(format!("{prefix}.pointwise_conv1.weight"), d_wpc1);
+    grads.insert(format!("{prefix}.pointwise_conv2.weight"), d_wpc2);
+    grads.insert(format!("{prefix}.depthwise_conv.weight"), d_dw);
+    grads.insert(format!("{prefix}.norm.weight"), d_gnw);
+    grads.insert(format!("{prefix}.norm.bias"), d_gnb);
+    (d_hn, grads)
 }
 
 /// One Conformer block (macaron; five LayerNorms). `h` `[T, C]` in place-returning.
@@ -1042,6 +1202,94 @@ pub fn rnnt_loss(logits: &[f32], t_frames: usize, targets: &[u32], blank: usize,
     (loss, d_logits)
 }
 
+/// Full Conformer-block backward returning `(d_h0, block_weight_grads)` — every
+/// parameter of the block keyed `encoder.layers.{b}.<leaf>`.
+pub fn conformer_block_grads(h0: &[f32], w: &W, b: u32, cfg: &NemotronConfig, t: usize, valid: usize, d_out: &[f32]) -> (Vec<f32>, W) {
+    let (c, ffn, eps) = (cfg.hidden as usize, cfg.intermediate as usize, cfg.ln_eps);
+    let pre = format!("encoder.layers.{b}");
+    let g = |n: &str| &w[&format!("{pre}.{n}")];
+    let mut gr: W = W::new();
+    // recompute residual checkpoints + the normalized inputs
+    let mut h1 = h0.to_vec();
+    let n1 = layernorm(&h1, g("norm_feed_forward1.weight"), g("norm_feed_forward1.bias"), t, c, eps);
+    let ff1 = feed_forward(&n1, g("feed_forward1.linear1.weight"), g("feed_forward1.linear2.weight"), t, c, ffn);
+    for i in 0..t * c {
+        h1[i] += 0.5 * ff1[i];
+    }
+    let mut h2 = h1.clone();
+    let na = layernorm(&h2, g("norm_self_att.weight"), g("norm_self_att.bias"), t, c, eps);
+    let att = rel_pos_attention(&na, w, &format!("{pre}.self_attn"), cfg, t, valid);
+    for i in 0..t * c {
+        h2[i] += att[i];
+    }
+    let mut h3 = h2.clone();
+    let nc = layernorm(&h3, g("norm_conv.weight"), g("norm_conv.bias"), t, c, eps);
+    let cv = conv_module(&nc, w, &format!("{pre}.conv"), cfg, t, valid);
+    for i in 0..t * c {
+        h3[i] += cv[i];
+    }
+    let mut h4 = h3.clone();
+    let n2 = layernorm(&h4, g("norm_feed_forward2.weight"), g("norm_feed_forward2.bias"), t, c, eps);
+    let ff2 = feed_forward(&n2, g("feed_forward2.linear1.weight"), g("feed_forward2.linear2.weight"), t, c, ffn);
+    for i in 0..t * c {
+        h4[i] += 0.5 * ff2[i];
+    }
+
+    let half = |d: &[f32]| -> Vec<f32> { d.iter().map(|v| 0.5 * v).collect() };
+    // LN_out
+    let (mut d_h4, dg, db) = layernorm_grads(d_out, &h4, g("norm_out.weight"), t, c, eps);
+    gr.insert(format!("{pre}.norm_out.weight"), dg);
+    gr.insert(format!("{pre}.norm_out.bias"), db);
+    // FF2
+    let (d_n2, dw1, dw2) = feed_forward_grads(&n2, g("feed_forward2.linear1.weight"), g("feed_forward2.linear2.weight"), t, c, ffn, &half(&d_h4));
+    gr.insert(format!("{pre}.feed_forward2.linear1.weight"), dw1);
+    gr.insert(format!("{pre}.feed_forward2.linear2.weight"), dw2);
+    let (d_h3ln, dg, db) = layernorm_grads(&d_n2, &h3, g("norm_feed_forward2.weight"), t, c, eps);
+    gr.insert(format!("{pre}.norm_feed_forward2.weight"), dg);
+    gr.insert(format!("{pre}.norm_feed_forward2.bias"), db);
+    let mut d_h3 = d_h3ln;
+    for i in 0..t * c {
+        d_h3[i] += d_h4[i];
+    }
+    // conv
+    let (d_nc, cvg) = conv_module_grads(&nc, w, &format!("{pre}.conv"), cfg, t, valid, &d_h3);
+    for (kk, vv) in cvg {
+        gr.insert(kk, vv);
+    }
+    let (d_h2ln, dg, db) = layernorm_grads(&d_nc, &h2, g("norm_conv.weight"), t, c, eps);
+    gr.insert(format!("{pre}.norm_conv.weight"), dg);
+    gr.insert(format!("{pre}.norm_conv.bias"), db);
+    let mut d_h2 = d_h2ln;
+    for i in 0..t * c {
+        d_h2[i] += d_h3[i];
+    }
+    // attention
+    let (d_na, atg) = rel_pos_attention_grads(&na, w, &format!("{pre}.self_attn"), cfg, t, valid, &d_h2);
+    for (kk, vv) in atg {
+        gr.insert(kk, vv);
+    }
+    let (d_h1ln, dg, db) = layernorm_grads(&d_na, &h1, g("norm_self_att.weight"), t, c, eps);
+    gr.insert(format!("{pre}.norm_self_att.weight"), dg);
+    gr.insert(format!("{pre}.norm_self_att.bias"), db);
+    let mut d_h1 = d_h1ln;
+    for i in 0..t * c {
+        d_h1[i] += d_h2[i];
+    }
+    // FF1
+    let (d_n1, dw1, dw2) = feed_forward_grads(&n1, g("feed_forward1.linear1.weight"), g("feed_forward1.linear2.weight"), t, c, ffn, &half(&d_h1));
+    gr.insert(format!("{pre}.feed_forward1.linear1.weight"), dw1);
+    gr.insert(format!("{pre}.feed_forward1.linear2.weight"), dw2);
+    let (d_h0ln, dg, db) = layernorm_grads(&d_n1, h0, g("norm_feed_forward1.weight"), t, c, eps);
+    gr.insert(format!("{pre}.norm_feed_forward1.weight"), dg);
+    gr.insert(format!("{pre}.norm_feed_forward1.bias"), db);
+    let mut d_h0 = d_h0ln;
+    for i in 0..t * c {
+        d_h0[i] += d_h1[i];
+    }
+    let _ = &mut d_h4;
+    (d_h0, gr)
+}
+
 /// Full encoder backward from the pooler grad `d_pooler[T, decoder_hidden]` to the
 /// subsampling-output grad `d_sub[T, C]`: projector backward → 24 block backwards
 /// (chained) → subsampling stack input. The model-level encoder training gradient.
@@ -1112,6 +1360,94 @@ pub fn encode_pooler_backward(sub: &[f32], w: &W, cfg: &NemotronConfig, t: usize
         d = conformer_block_backward(&inputs[b as usize], w, b, cfg, t, valid, &d);
     }
     d // d_sub
+}
+
+/// Full encoder weight gradients: `(d_sub, encoder_grads)` — every encoder
+/// parameter (all block params + prompt/encoder projectors) from the pooler grad.
+pub fn encode_pooler_grads(sub: &[f32], w: &W, cfg: &NemotronConfig, t: usize, valid: usize, prompt_id: usize, d_pooler: &[f32]) -> (Vec<f32>, W) {
+    let (c, np, pi, dh) = (cfg.hidden as usize, cfg.num_prompts as usize, cfg.prompt_intermediate as usize, cfg.decoder_hidden as usize);
+    // forward cache: block inputs + projector intermediates
+    let mut inputs = vec![sub.to_vec()];
+    for b in 0..cfg.n_layers {
+        let out = conformer_block(inputs.last().unwrap(), w, b, cfg, t, valid);
+        inputs.push(out);
+    }
+    let hidden = inputs.last().unwrap().clone();
+    let mut cat = vec![0.0f32; t * (c + np)];
+    for i in 0..t {
+        cat[i * (c + np)..i * (c + np) + c].copy_from_slice(&hidden[i * c..i * c + c]);
+        cat[i * (c + np) + c + prompt_id] = 1.0;
+    }
+    let mut f1pre = matmul_nt(&cat, &w["prompt_projector.linear_1.weight"], t, c + np, pi);
+    let b1 = &w["prompt_projector.linear_1.bias"];
+    for i in 0..t {
+        for j in 0..pi {
+            f1pre[i * pi + j] += b1[j];
+        }
+    }
+    let f1: Vec<f32> = f1pre.iter().map(|&x| x.max(0.0)).collect();
+    let mut fused = matmul_nt(&f1, &w["prompt_projector.linear_2.weight"], t, pi, c);
+    let b2 = &w["prompt_projector.linear_2.bias"];
+    for i in 0..t {
+        for j in 0..c {
+            fused[i * c + j] += b2[j];
+        }
+    }
+
+    let mut gr: W = W::new();
+    let dwt = |dproj: &[f32], input: &[f32], m: usize, kk: usize, n: usize| {
+        let mut r = vec![0.0f32; n * kk];
+        for o in 0..n {
+            for j in 0..kk {
+                let mut a = 0.0f32;
+                for i in 0..m {
+                    a += dproj[i * n + o] * input[i * kk + j];
+                }
+                r[o * kk + j] = a;
+            }
+        }
+        r
+    };
+    let dxt = |dproj: &[f32], wt: &[f32], m: usize, kk: usize, n: usize| {
+        let mut r = vec![0.0f32; m * kk];
+        for i in 0..m {
+            for j in 0..kk {
+                let mut a = 0.0f32;
+                for o in 0..n {
+                    a += dproj[i * n + o] * wt[o * kk + j];
+                }
+                r[i * kk + j] = a;
+            }
+        }
+        r
+    };
+    // encoder_projector: pooler = fused·Wepᵀ + bep
+    gr.insert("encoder_projector.weight".into(), dwt(d_pooler, &fused, t, c, dh));
+    gr.insert("encoder_projector.bias".into(), (0..dh).map(|o| (0..t).map(|i| d_pooler[i * dh + o]).sum()).collect());
+    let d_fused = dxt(d_pooler, &w["encoder_projector.weight"], t, c, dh);
+    // prompt_projector linear_2
+    gr.insert("prompt_projector.linear_2.weight".into(), dwt(&d_fused, &f1, t, pi, c));
+    gr.insert("prompt_projector.linear_2.bias".into(), (0..c).map(|o| (0..t).map(|i| d_fused[i * c + o]).sum()).collect());
+    let d_f1 = dxt(&d_fused, &w["prompt_projector.linear_2.weight"], t, pi, c);
+    // relu' then linear_1
+    let d_f1pre: Vec<f32> = (0..t * pi).map(|i| if f1pre[i] > 0.0 { d_f1[i] } else { 0.0 }).collect();
+    gr.insert("prompt_projector.linear_1.weight".into(), dwt(&d_f1pre, &cat, t, c + np, pi));
+    gr.insert("prompt_projector.linear_1.bias".into(), (0..pi).map(|o| (0..t).map(|i| d_f1pre[i * pi + o]).sum()).collect());
+    let d_cat = dxt(&d_f1pre, &w["prompt_projector.linear_1.weight"], t, pi, c + np);
+    // d_hidden = d_cat[:, :c]
+    let mut d = vec![0.0f32; t * c];
+    for i in 0..t {
+        d[i * c..i * c + c].copy_from_slice(&d_cat[i * (c + np)..i * (c + np) + c]);
+    }
+    // chain block backwards (reverse), merging block grads
+    for b in (0..cfg.n_layers).rev() {
+        let (d_in, bg) = conformer_block_grads(&inputs[b as usize], w, b, cfg, t, valid, &d);
+        for (k, v) in bg {
+            gr.insert(k, v);
+        }
+        d = d_in;
+    }
+    (d, gr)
 }
 
 #[cfg(test)]
@@ -1188,6 +1524,22 @@ mod tests {
             let num = (loss(&sp) - loss(&sm)) / (2.0 * eps);
             assert!(ok(d_sub[i], num), "d_sub[{i}] {} vs {}", d_sub[i], num);
         }
+        // encoder weight grads (blocks + projectors), end-to-end
+        let lossw = |ww: &W| -> f32 { encode_pooler(&sub, ww, &cfg, t, valid, 0).iter().sum() };
+        let (_ds, eg) = encode_pooler_grads(&sub, &w, &cfg, t, valid, 0, &vec![1.0f32; t * cfg.decoder_hidden as usize]);
+        for (param, j) in [
+            ("encoder_projector.weight", 3usize),
+            ("prompt_projector.linear_1.weight", 5),
+            ("encoder.layers.1.self_attn.o_proj.weight", 7),
+            ("encoder.layers.0.conv.pointwise_conv2.weight", 10),
+            ("encoder.layers.1.feed_forward2.linear2.weight", 4),
+        ] {
+            let (mut wp, mut wm) = (w.clone(), w.clone());
+            wp.get_mut(param).unwrap()[j] += eps;
+            wm.get_mut(param).unwrap()[j] -= eps;
+            let num = (lossw(&wp) - lossw(&wm)) / (2.0 * eps);
+            assert!(ok(eg[param][j], num), "d {param}[{j}] {} vs {}", eg[param][j], num);
+        }
     }
 
     #[test]
@@ -1236,6 +1588,24 @@ mod tests {
             let num = (loss(&hp) - loss(&hm)) / (2.0 * eps);
             assert!(ok(d_h0[i], num), "d_h0[{i}] {} vs {}", d_h0[i], num);
         }
+        // block weight grads across all module types
+        let lossw = |ww: &W| -> f32 { conformer_block(&h0, ww, 0, &cfg, t, valid).iter().sum() };
+        let (_dh, bg) = conformer_block_grads(&h0, &w, 0, &cfg, t, valid, &d_out);
+        for (param, j) in [
+            ("encoder.layers.0.feed_forward1.linear1.weight", 3usize),
+            ("encoder.layers.0.self_attn.q_proj.weight", 11),
+            ("encoder.layers.0.self_attn.bias_u", 2),
+            ("encoder.layers.0.conv.pointwise_conv1.weight", 20),
+            ("encoder.layers.0.conv.depthwise_conv.weight", 5),
+            ("encoder.layers.0.norm_out.weight", 4),
+            ("encoder.layers.0.norm_conv.bias", 1),
+        ] {
+            let (mut wp, mut wm) = (w.clone(), w.clone());
+            wp.get_mut(param).unwrap()[j] += eps;
+            wm.get_mut(param).unwrap()[j] -= eps;
+            let num = (lossw(&wp) - lossw(&wm)) / (2.0 * eps);
+            assert!(ok(bg[param][j], num), "d {param}[{j}] {} vs {}", bg[param][j], num);
+        }
     }
 
     #[test]
@@ -1266,6 +1636,23 @@ mod tests {
             hm[i] -= eps;
             let num = (loss(&hp) - loss(&hm)) / (2.0 * eps);
             assert!(ok(d_hn[i], num), "d_hn[{i}] {} vs {}", d_hn[i], num);
+        }
+        // conv-module weight grads
+        let lossw = |ww: &W| -> f32 { conv_module(&hn, ww, "conv", &cfg, t, valid).iter().sum() };
+        let (_dh, wg) = conv_module_grads(&hn, &w, "conv", &cfg, t, valid, &d_out);
+        for (param, idxs) in [
+            ("conv.pointwise_conv1.weight", [0usize, 20, 60]),
+            ("conv.pointwise_conv2.weight", [1, 22, 50]),
+            ("conv.depthwise_conv.weight", [0, 5, 10]),
+            ("conv.norm.weight", [0, 3, 7]),
+        ] {
+            for &j in &idxs {
+                let (mut wp, mut wm) = (w.clone(), w.clone());
+                wp.get_mut(param).unwrap()[j] += eps;
+                wm.get_mut(param).unwrap()[j] -= eps;
+                let num = (lossw(&wp) - lossw(&wm)) / (2.0 * eps);
+                assert!(ok(wg[param][j], num), "d {param}[{j}] {} vs {}", wg[param][j], num);
+            }
         }
     }
 
@@ -1305,6 +1692,22 @@ mod tests {
             wm.get_mut("attn.bias_v").unwrap()[i] -= eps;
             let num = (loss(&hn, &wp) - loss(&hn, &wm)) / (2.0 * eps);
             assert!(ok(d_bias_v[i], num), "d_bias_v[{i}] {} vs {}", d_bias_v[i], num);
+        }
+        // NEW: all attention weight grads
+        let (_dh2, wg) = rel_pos_attention_grads(&hn, &w, "attn", &cfg, t, valid, &d_out);
+        for (param, idxs) in [
+            ("attn.q_proj.weight", [0usize, 11, 40]),
+            ("attn.o_proj.weight", [1, 22, 50]),
+            ("attn.relative_k_proj.weight", [2, 30, 60]),
+            ("attn.bias_u", [0, 3, 7]),
+        ] {
+            for &j in &idxs {
+                let (mut wp, mut wm) = (w.clone(), w.clone());
+                wp.get_mut(param).unwrap()[j] += eps;
+                wm.get_mut(param).unwrap()[j] -= eps;
+                let num = (loss(&hn, &wp) - loss(&hn, &wm)) / (2.0 * eps);
+                assert!(ok(wg[param][j], num), "d {param}[{j}] {} vs {}", wg[param][j], num);
+            }
         }
     }
 
