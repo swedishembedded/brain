@@ -21,9 +21,30 @@ Implement `capability::Action` for each action and advertise them in a
 - Reference: `crates/capability/src/lib.rs`; ASR: `crates/nemotron/src/caps.rs`,
   `crates/qwen-asr/src/caps.rs`; shared audio-in/text-out contract in
   `crates/audio/src/asr_caps.rs` (one implementation, both models).
-- Blob conventions are shared and typed (`capability::Media`): images = raw HWC f32 +
-  `{w,h}`; audio = raw mono f32 LE 16 kHz + `{sample_rate}`. Reuse them; don't invent
-  a per-model encoding.
+- Blob conventions are shared and typed (`capability::Media`): images = raw
+  interleaved HWC f32 in `[0,1]`, little-endian, meta `{"w","h","c"}`; audio = raw
+  mono f32 LE 16 kHz + `{sample_rate}`. Reuse them; don't invent a per-model encoding.
+- The image codec has ONE implementation: **`capability::blob`**
+  (`image_blob` to encode; `decode_hwc` / `decode_image` / `decode_plane` to decode,
+  with media + `{w,h}` + payload-size validation). Providers and resident adapters
+  call it directly — never a local copy or a local alias.
+- **Training actions return their artifact as a blob.** An action that writes a
+  trained artifact server-side (a `save` path param) must ALSO declare an output
+  `BlobSpec` and attach the saved bytes to the `Outcome`
+  (`.blob("adapter", Blob::new(Media::Bytes, bytes).with_meta(json!({"path": save})))`)
+  — a remote client has no access to the server's filesystem, and the D-Bus layer
+  already turns outcome blobs into result fds for free. Reference:
+  `zimage::caps` `lora_train`.
+- **Long-running actions must be cancellable.** Every [`Invocation`] carries a
+  `capability::CancelToken` (`inv.cancel`; the `Default` token is unarmed and never
+  fires, so short actions can ignore it). An action whose run is longer than a few
+  seconds — multi-minute generation, multi-hour training — polls
+  `inv.cancel.is_cancelled()` between steps (once per denoising step / training
+  step; the check is one relaxed atomic load) and returns `Err("cancelled".into())`.
+  Front-ends arm the token (the D-Bus `Cancel` method flips it); the token rides
+  inside the `Invocation` through the executor, so `residency::Job` needs nothing.
+  Reference: `zimage::caps` `text2image` + `lora_train`
+  (`pipeline::HotPipeline::generate`, `finetune::run`).
 
 ### 2. Residency — be scheduled, budgeted, swappable
 Add a `residency::ResidentModel` adapter under `crates/cli/src/resident_*.rs` and
@@ -52,6 +73,11 @@ demonstrated by an example under `examples/<domain>/` with a README.
 - **Fit first.** If the model's shape matches the existing surface, use it as-is:
   - `Run` — one-shot request → result + output fds (memfd/dmabuf).
   - `Subscribe` — a job that streams progress/blob/done frames out over a SEQPACKET.
+  - `Cancel(job)` — cooperative cancel of a `Subscribe` job: arms nothing new, it
+    flips the `CancelToken` the server registered under the returned job id; the
+    action aborts at its next poll and the stream ends with an `error` frame
+    (`"cancelled"`). Returns `true` iff the job was found still in flight. The
+    `ActiveJobs` property counts in-flight `Run`/`Subscribe` jobs.
   - `StreamTranscribe` — a *continuous input* fd (the client keeps writing) that the
     server windows into executor jobs and answers with `segment`/`done` frames. This
     is the pattern for any live-input model, not just ASR.

@@ -180,8 +180,17 @@ impl HotPipeline {
         let qcfg = QwenConfig::qwen3_4b();
         let qtensors = checkpoint::safetensors::read(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
         let qinit = qwen::import::brain_init_from_hf(qtensors, &qcfg)?;
-        let enc_gpu = std::env::var("BRAIN_ZIMAGE_ENCODER_GPU").ok().filter(|s| !s.is_empty());
-        let dit_gpu = std::env::var("BRAIN_GPU_INDEX").ok().unwrap_or_else(|| "0".to_string()); // the DiT/VAE card
+        // User env input, parsed to canonical card indices at this edge; all
+        // placement below goes through the device registry (explicit Shard
+        // indices / scoped `with_gpu`), never env mutation.
+        let enc_gpu: Option<u32> = std::env::var("BRAIN_ZIMAGE_ENCODER_GPU")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse::<u32>().map_err(|_| format!("bad BRAIN_ZIMAGE_ENCODER_GPU {s:?}")))
+            .transpose()?;
+        // The DiT/VAE card: the ambient selection (`--device gpu<i>`, the
+        // residency-assigned scope, or BRAIN_GPU_INDEX), canonical card 0 otherwise.
+        let dit_gpu: u32 = gpu_core::devices::current_gpu().unwrap_or(0);
 
         // For the 2-card encoder split we interleave the builds: bulk shard on the
         // empty GPU `bulk`, THEN the DiT on GPU `dit_gpu` (while that card is still
@@ -189,8 +198,8 @@ impl HotPipeline {
         // thin tail shard packed on top of the DiT. Building the tail last is what
         // makes GPU `dit_gpu` fit — the DiT's peak staging never overlaps the tail's
         // resident bytes. `split` carries the params needed to finish after the DiT.
-        let mut split: Option<(Qwen, usize, usize, usize)> = None; // (s0, cut, n, di)
-        let enc_cpu = match (&enc_gpu, hifi) {
+        let mut split: Option<(Qwen, usize, usize, u32)> = None; // (s0, cut, n, di)
+        let enc_cpu = match (enc_gpu, hifi) {
             (Some(bulk), false) if std::env::var("BRAIN_ZIMAGE_ENCODER_FP32SPLIT").ok().as_deref() == Some("1") => {
                 let n = qcfg.n_layers as usize;
                 // fp32 2-card split (opt-in; needs a large-binding / ReBAR card — it
@@ -201,12 +210,10 @@ impl HotPipeline {
                 // (≈ embed + ⅔ of the layers). `BRAIN_ZIMAGE_ENCODER_CUT` overrides.
                 let cut = std::env::var("BRAIN_ZIMAGE_ENCODER_CUT").ok().and_then(|s| s.parse().ok()).unwrap_or((n * 2) / 3).min(n - 1);
                 progress(&format!("building Qwen-4B encoder bulk (fp32 split @{cut}: GPU {bulk} + GPU {dit_gpu})"));
-                let (bi, di) = (bulk.parse().unwrap_or(1), dit_gpu.parse().unwrap_or(0));
                 // Bulk shard: embedding + layers 0..cut on the (empty) bulk card.
-                std::env::set_var("BRAIN_GPU_INDEX", bulk);
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
-                let s0 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard { start: 0, end: cut, embed: true, head: false, gpu_index: bi });
-                split = Some((s0, cut, n, di));
+                let s0 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard { start: 0, end: cut, embed: true, head: false, gpu_index: bulk as usize });
+                split = Some((s0, cut, n, dit_gpu));
                 None // tail (and thus Encoder::Split) assembled after the DiT below
             }
             (Some(bulk), false) => {
@@ -215,11 +222,9 @@ impl HotPipeline {
                 // card. `end: n-1` skips the unused last layer (encode reads the
                 // penultimate hidden). This is the robust superfast path.
                 let n = qcfg.n_layers as usize;
-                let bi = bulk.parse().unwrap_or(1);
                 progress(&format!("building Qwen-4B encoder (int8 DP4A, GPU {bulk})"));
-                std::env::set_var("BRAIN_GPU_INDEX", bulk);
                 gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
-                let e = Qwen::new_shard_i8(qcfg.clone(), 1, cap_len, &qinit, Shard { start: 0, end: n - 1, embed: true, head: false, gpu_index: bi });
+                let e = Qwen::new_shard_i8(qcfg.clone(), 1, cap_len, &qinit, Shard { start: 0, end: n - 1, embed: true, head: false, gpu_index: bulk as usize });
                 Some(Encoder::Gpu8(e))
             }
             _ => {
@@ -230,8 +235,6 @@ impl HotPipeline {
                 Some(Encoder::Cpu(e))
             }
         };
-        // Ensure the DiT/VAE build lands on the DiT card regardless of the branch.
-        std::env::set_var("BRAIN_GPU_INDEX", &dit_gpu);
         gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
 
         progress(if hifi { "building DiT (fp32, 2×GPU)" } else { "building DiT (int8, GPU)" });
@@ -242,7 +245,8 @@ impl HotPipeline {
             let tcfg = crate::finetune::train_cfg(&zcfg, lh, lw, cap_len);
             crate::finetune::load_adapter_folded(ap, &tcfg, &mut weights)?;
         }
-        let dit = DitEngine::build(hifi, zcfg, weights, lh, lw, cap_len);
+        // The DiT/VAE build lands on the DiT card regardless of the branch above.
+        let dit = gpu_core::devices::with_gpu(dit_gpu, || DitEngine::build(hifi, zcfg, weights, lh, lw, cap_len))?;
 
         // Now the DiT is resident and its staging is reclaimed — pack the thin
         // encoder tail on top of it (GPU `dit_gpu`), then assemble Encoder::Split.
@@ -250,8 +254,7 @@ impl HotPipeline {
             (Some(e), _) => e,
             (None, Some((s0, cut, n, di))) => {
                 progress(&format!("building Qwen-4B encoder tail (layers {cut}..{})", n - 1));
-                std::env::set_var("BRAIN_GPU_INDEX", &dit_gpu);
-                let s1 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard { start: cut, end: n - 1, embed: false, head: false, gpu_index: di });
+                let s1 = Qwen::new_shard(qcfg.clone(), 1, cap_len, &qinit, false, Shard { start: cut, end: n - 1, embed: false, head: false, gpu_index: di as usize });
                 Encoder::Split { s0, s1, cap_len }
             }
             (None, None) => unreachable!("encoder neither CPU nor split"),
@@ -265,21 +268,24 @@ impl HotPipeline {
         // crosses DiT→VAE through host memory already, so no cross-device GPU copy.
         // CPU/fp32-split encoders keep the VAE on the DiT card (unchanged).
         let vae_card = match &enc {
-            Encoder::Gpu8(_) => enc_gpu.clone().unwrap_or_else(|| dit_gpu.clone()),
-            _ => dit_gpu.clone(),
+            Encoder::Gpu8(_) => enc_gpu.unwrap_or(dit_gpu),
+            _ => dit_gpu,
         };
         progress(&format!("building VAE decoder (GPU {vae_card})"));
-        std::env::set_var("BRAIN_GPU_INDEX", &vae_card);
         gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
         let vtensors = tensors_map(checkpoint::safetensors::read(&paths.vae).map_err(|e| format!("read vae: {e}"))?);
-        let vae = VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu"));
+        let vae = gpu_core::devices::with_gpu(vae_card, || {
+            VaeDecoder::from_diffusers(zimage_vae_config(), &vtensors, lh, lw, Some("gpu"))
+        })?;
 
         Ok(HotPipeline { tok, enc, dit, vae, cap_len, lh, lw, width, height, hifi })
     }
 
     /// Tokenize `prompt`, pad/truncate to `cap_len`, and run encode → DiT sampling
     /// → VAE decode — all on the resident models. Fast (no weight loads).
-    pub fn generate(&self, prompt: &str, seed: u64, steps: u32, mut progress: impl FnMut(u32, u32, &str)) -> Image {
+    /// `cancel` is polled between sampling steps: a cancelled token aborts with
+    /// `Err("cancelled")` (pass an unarmed `Default` token to run uninterrupted).
+    pub fn generate(&self, prompt: &str, seed: u64, steps: u32, cancel: &capability::CancelToken, mut progress: impl FnMut(u32, u32, &str)) -> Result<Image, String> {
         let steps = steps.max(1);
         let total = steps + 2;
 
@@ -308,6 +314,9 @@ impl HotPipeline {
 
         // 3. flow-match sampling on the resident DiT.
         for i in 0..steps as usize {
+            if cancel.is_cancelled() {
+                return Err("cancelled".into());
+            }
             progress(2 + i as u32, total, if self.hifi { "sampling (fp32, 2×GPU)" } else { "sampling" });
             let t_dit = (1000.0 - ts[i]) / 1000.0;
             let v: Vec<f32> = self.dit.forward(&lat, &cap, t_dit).iter().map(|&x| -x).collect();
@@ -330,7 +339,7 @@ impl HotPipeline {
                 }
             }
         }
-        Image { hwc, w, h }
+        Ok(Image { hwc, w, h })
     }
 }
 
@@ -363,24 +372,7 @@ pub struct Init<'a> {
 /// Deterministic standard-normal samples via xorshift64* + Box–Muller — a fixed
 /// seed always yields the same latent (so generation is reproducible).
 fn randn(n: usize, seed: u64) -> Vec<f32> {
-    let mut s = seed ^ 0x9E37_79B9_7F4A_7C15;
-    let mut next = || {
-        s ^= s << 13;
-        s ^= s >> 7;
-        s ^= s << 17;
-        // to (0,1)
-        ((s >> 11) as f64 / (1u64 << 53) as f64).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON)
-    };
-    let mut out = Vec::with_capacity(n);
-    while out.len() < n {
-        let (u1, u2) = (next(), next());
-        let r = (-2.0 * u1.ln()).sqrt();
-        out.push((r * (std::f64::consts::TAU * u2).cos()) as f32);
-        if out.len() < n {
-            out.push((r * (std::f64::consts::TAU * u2).sin()) as f32);
-        }
-    }
-    out
+    model::hostmath::randn(n, seed)
 }
 
 /// diffusers `calculate_shift` for Z-Image (base_seq 256, max 4096, shifts 0.5..1.15).
@@ -412,6 +404,10 @@ pub(crate) fn zimage_vae_config() -> VaeConfig {
         mid_block_add_attention: true,
         scaling_factor: 0.3611,
         shift_factor: 0.1159,
+        use_quant_conv: false,
+        use_post_quant_conv: false,
+        patch_size: [1, 1],
+        batch_norm_eps: 1e-4,
     }
 }
 

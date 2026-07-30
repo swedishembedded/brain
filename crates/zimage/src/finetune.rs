@@ -132,6 +132,7 @@ fn tokenize_pad(tok: &QwenBpe, prompt: &str, cap_len: usize) -> Vec<u32> {
 /// the trainer, so their VRAM is reclaimed (sequential residency). `enc_gpu` is the
 /// card for the int8 Qwen encoder (fast, ~2 s/caption); `size` is the square image
 /// size (latent = size/8). `progress(done, total, stage)` streams per-item progress.
+/// `cancel` is polled per item so a cancelled job aborts during this phase too.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_samples(
     paths: &Paths,
@@ -139,6 +140,7 @@ pub fn encode_samples(
     size: u32,
     cap_len: u32,
     enc_gpu: &str,
+    cancel: &capability::CancelToken,
     mut progress: impl FnMut(usize, usize, &str),
 ) -> Result<Vec<Encoded>, String> {
     let n = samples.len();
@@ -149,13 +151,17 @@ pub fn encode_samples(
         let qcfg = QwenConfig::qwen3_4b();
         let qtensors = checkpoint::safetensors::read(&paths.qwen).map_err(|e| format!("read qwen: {e}"))?;
         let qinit = qwen::import::brain_init_from_hf(qtensors, &qcfg)?;
-        std::env::set_var("BRAIN_GPU_INDEX", enc_gpu);
         gpu_core::set_default_backend(gpu_core::Backend::Wgpu);
         let nl = qcfg.n_layers as usize;
+        // `enc_gpu` is user input; the canonical index in the shard is what
+        // places the build (device registry), not env mutation.
         let bi = enc_gpu.parse().unwrap_or(1);
         let enc = Qwen::new_shard_i8(qcfg, 1, cap_len, &qinit, Shard { start: 0, end: nl - 1, embed: true, head: false, gpu_index: bi });
         let mut out = Vec::with_capacity(n);
         for (i, s) in samples.iter().enumerate() {
+            if cancel.is_cancelled() {
+                return Err("cancelled".into());
+            }
             progress(i, n, "encoding captions (Qwen-4B int8)");
             let tokens = tokenize_pad(&tok, &s.prompt, cap_len as usize);
             out.push(enc.encode(&tokens).iter().map(|&x| x as f64).collect());
@@ -169,6 +175,9 @@ pub fn encode_samples(
     let venc = VaeEncoder::from_diffusers(crate::pipeline::zimage_vae_config(), &vtensors, size, size, Some("gpu"));
     let mut encoded = Vec::with_capacity(n);
     for (i, (s, cap)) in samples.iter().zip(caps).enumerate() {
+        if cancel.is_cancelled() {
+            return Err("cancelled".into());
+        }
         progress(i, n, "encoding images (VAE)");
         // HWC [0,1] → CHW [-1,1] (the VAE encoder's expected input range).
         let (h, w) = (size as usize, size as usize);
@@ -224,11 +233,14 @@ pub struct TrainOpts {
 
 /// Fine-tune a LoRA adapter on `dir` (a captioned-image folder). Returns the adapter
 /// as `(name, shape, data)` tensors ready to save. `progress(step, total, msg)`
-/// streams encoding + per-step loss so a long run is not a black box.
+/// streams encoding + per-step loss so a long run is not a black box. `cancel` is
+/// polled every step (a multi-hour job must be abortable): a cancelled token
+/// returns `Err("cancelled")` — periodic checkpoints already written remain.
 pub fn run(
     paths: &Paths,
     dir: &Path,
     opts: &TrainOpts,
+    cancel: &capability::CancelToken,
     mut progress: impl FnMut(u32, u32, String),
 ) -> Result<Vec<(String, Vec<usize>, Vec<f32>)>, String> {
     if opts.size % 16 != 0 {
@@ -241,7 +253,7 @@ pub fn run(
     // 2. encode (encoders dropped before the trainer is built)
     let enc_gpu = std::env::var("BRAIN_ZIMAGE_ENCODER_GPU").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "1".to_string());
     let n_samples = samples.len();
-    let encoded = encode_samples(paths, &samples, opts.size, opts.cap_len, &enc_gpu, |i, tot, stage| {
+    let encoded = encode_samples(paths, &samples, opts.size, opts.cap_len, &enc_gpu, cancel, |i, tot, stage| {
         progress(0, opts.steps + 1, format!("{stage} {}/{tot}", i + 1))
     })?;
     drop(samples);
@@ -265,6 +277,9 @@ pub fn run(
     // 5. flow-matching loop
     let alpha = adapter.alpha();
     for step in 0..opts.steps {
+        if cancel.is_cancelled() {
+            return Err("cancelled".into());
+        }
         let s = &encoded[step as usize % n_samples];
         let sigma = uniform01(&mut rng).clamp(1e-3, 1.0) as f64;
         let noise: Vec<f64> = (0..s.latent.len()).map(|_| gauss(&mut rng)).collect();

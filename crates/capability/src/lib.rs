@@ -22,9 +22,12 @@
 //! the point: one generalized interface, every model, every action.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
+
+pub mod blob;
 
 // ===================== descriptors (the self-describing schema) =====================
 
@@ -219,7 +222,7 @@ impl ActionSpec {
                 return Err(format!("unknown input '{k}' for action '{}'", self.name));
             }
         }
-        Ok(Invocation { params: Value::Object(params), blobs: inv.blobs })
+        Ok(Invocation { params: Value::Object(params), blobs: inv.blobs, cancel: inv.cancel })
     }
 }
 
@@ -276,16 +279,43 @@ impl Blob {
     }
 }
 
+/// A cooperative cancellation flag riding in an [`Invocation`]. A `Default` token
+/// is unarmed and never cancelled, so existing construction sites are unaffected.
+/// A front-end that wants to abort arms one ([`CancelToken::armed`]), puts it in
+/// the invocation, keeps a clone, and later calls [`CancelToken::cancel`].
+/// Long-running actions poll [`CancelToken::is_cancelled`] between steps and
+/// return `Err("cancelled".into())`.
+#[derive(Clone, Debug, Default)]
+pub struct CancelToken(Option<Arc<AtomicBool>>);
+
+impl CancelToken {
+    /// An armed token: any clone can request — and observe — cancellation.
+    pub fn armed() -> CancelToken {
+        CancelToken(Some(Arc::new(AtomicBool::new(false))))
+    }
+    /// Request cancellation (a no-op on an unarmed `Default` token).
+    pub fn cancel(&self) {
+        if let Some(f) = &self.0 {
+            f.store(true, Ordering::Relaxed);
+        }
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.0.as_ref().map(|f| f.load(Ordering::Relaxed)).unwrap_or(false)
+    }
+}
+
 /// The inputs to one action call.
 #[derive(Clone, Debug, Default)]
 pub struct Invocation {
     pub params: Value,
     pub blobs: BTreeMap<String, Blob>,
+    /// Cooperative cancellation; `Default` (unarmed) is never cancelled.
+    pub cancel: CancelToken,
 }
 
 impl Invocation {
     pub fn new() -> Invocation {
-        Invocation { params: json!({}), blobs: BTreeMap::new() }
+        Invocation { params: json!({}), blobs: BTreeMap::new(), cancel: CancelToken::default() }
     }
     pub fn set(mut self, key: &str, v: Value) -> Invocation {
         self.params.as_object_mut().expect("params must be an object").insert(key.into(), v);
@@ -451,6 +481,70 @@ mod tests {
         assert!(spec.validate(Invocation::new().set("text", json!("x")).set("mode", json!("weird"))).is_err());
         // wrong type
         assert!(spec.validate(Invocation::new().set("text", json!(5))).is_err());
+    }
+
+    /// A "long-running" action that polls the invocation's cancel token each step.
+    struct Poller;
+    impl Action for Poller {
+        fn spec(&self) -> ActionSpec {
+            ActionSpec::new("poll", "polls the cancel token per step").streaming()
+        }
+        fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+            for step in 0..100 {
+                if inv.cancel.is_cancelled() {
+                    return Err("cancelled".into());
+                }
+                progress(Progress { step, total: 100, message: "step".into() });
+            }
+            Ok(Outcome::new())
+        }
+    }
+
+    #[test]
+    fn cancel_token_default_is_never_cancelled() {
+        let t = CancelToken::default();
+        assert!(!t.is_cancelled());
+        t.cancel(); // a no-op on an unarmed token
+        assert!(!t.is_cancelled());
+        // an invocation's default token is likewise inert
+        assert!(!Invocation::new().cancel.is_cancelled());
+    }
+
+    #[test]
+    fn armed_token_cancels_across_clones_and_validate() {
+        let t = CancelToken::armed();
+        let handle = t.clone();
+        assert!(!t.is_cancelled());
+        handle.cancel();
+        assert!(t.is_cancelled());
+        // validate() carries the token through to the normalized invocation
+        let mut inv = Invocation::new();
+        inv.cancel = t;
+        let inv = Poller.spec().validate(inv).unwrap();
+        assert!(inv.cancel.is_cancelled());
+    }
+
+    #[test]
+    fn polling_action_aborts_when_cancelled() {
+        // uncancelled: runs to completion
+        let inv = Poller.spec().validate(Invocation::new()).unwrap();
+        assert!(Poller.run(&inv, &mut |_| {}).is_ok());
+        // cancelled mid-run (from the progress callback, as a client would over a stream)
+        let mut inv = Invocation::new();
+        inv.cancel = CancelToken::armed();
+        let handle = inv.cancel.clone();
+        let inv = Poller.spec().validate(inv).unwrap();
+        let mut steps = 0u32;
+        let err = Poller
+            .run(&inv, &mut |p| {
+                steps += 1;
+                if p.step == 3 {
+                    handle.cancel();
+                }
+            })
+            .unwrap_err();
+        assert_eq!(err, "cancelled");
+        assert!(steps < 100, "action must abort early, ran {steps} steps");
     }
 
     #[test]

@@ -73,7 +73,8 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("steps", ParamType::Int, "training steps").default(json!(500)))
         .param(ParamSpec::new("size", ParamType::Int, "training square size, px").default(json!(512)))
         .param(ParamSpec::new("lr", ParamType::Float, "learning rate").default(json!(1e-4)))
-        .param(ParamSpec::new("one_gpu", ParamType::Bool, "train on a single GPU (default: shard the 6B across both)").default(json!(false)));
+        .param(ParamSpec::new("one_gpu", ParamType::Bool, "train on a single GPU (default: shard the 6B across both)").default(json!(false)))
+        .output(BlobSpec::new("adapter", Media::Bytes, "the trained LoRA adapter checkpoint"));
 
     Manifest::new(
         MODEL,
@@ -160,17 +161,17 @@ impl Action for ZAction {
                     *guard = Some((key, pipe));
                 }
                 let pipe = &guard.as_ref().unwrap().1;
-                emit(pipe.generate(&prompt, seed, steps, &mut on))
+                emit(pipe.generate(&prompt, seed, steps, &inv.cancel, &mut on)?)
             }
             "image2image" => {
-                let (image, w, h) = blob_image(inv, "image")?;
+                let (image, w, h) = capability::blob::decode_image(inv, "image")?;
                 let opts = opts_from(inv, w, h); // output matches the input image
                 let init = crate::pipeline::Init { image: &image, strength: inv.get_f64("strength").unwrap_or(0.55) as f32, mask: None, feather: 0 };
                 emit(crate::pipeline::generate_img(&prompt, &opts, &paths, init, &mut on)?)
             }
             "inpaint" => {
-                let (image, w, h) = blob_image(inv, "image")?;
-                let (mask, mw, mh) = blob_plane(inv, "mask")?;
+                let (image, w, h) = capability::blob::decode_image(inv, "image")?;
+                let (mask, mw, mh) = capability::blob::decode_plane(inv, "mask")?;
                 if (mw, mh) != (w, h) {
                     return Err(format!("mask is {mw}×{mh} but image is {w}×{h}; they must match"));
                 }
@@ -179,7 +180,7 @@ impl Action for ZAction {
                 emit(crate::pipeline::generate_img(&prompt, &opts, &paths, init, &mut on)?)
             }
             "outpaint" => {
-                let (image, w, h) = blob_image(inv, "image")?;
+                let (image, w, h) = capability::blob::decode_image(inv, "image")?;
                 let g = |k: &str| inv.get_i64(k).unwrap_or(0).max(0) as usize;
                 let (canvas, mask, nw, nh) = build_outpaint_canvas(&image, w as usize, h as usize, g("left"), g("right"), g("top"), g("bottom"));
                 let opts = opts_from(inv, nw as u32, nh as u32);
@@ -189,7 +190,6 @@ impl Action for ZAction {
                 emit(crate::pipeline::generate_img(&prompt, &opts, &paths, init, &mut on)?)
             }
             "lora_train" => {
-                use capability::Outcome;
                 let dir = inv.get_str("data").ok_or("lora_train: 'data' folder is required")?;
                 let save = inv.get_str("save").ok_or("lora_train: 'save' path is required")?;
                 let opts = crate::finetune::TrainOpts {
@@ -204,8 +204,16 @@ impl Action for ZAction {
                     ckpt_every: 100,
                 };
                 let mut prog = |step: u32, total: u32, message: String| progress(Progress { step, total, message });
-                let tensors = crate::finetune::run(&paths, std::path::Path::new(&dir), &opts, &mut prog)?;
-                Ok(Outcome::new().set("adapter", json!(save)).set("steps", json!(opts.steps)).set("tensors", json!(tensors.len())))
+                let tensors = crate::finetune::run(&paths, std::path::Path::new(&dir), &opts, &inv.cancel, &mut prog)?;
+                // Return the trained artifact itself, not just its server-side path —
+                // a remote client has no filesystem access to `save`.
+                use capability::Blob;
+                let bytes = std::fs::read(&save).map_err(|e| format!("read trained adapter '{save}': {e}"))?;
+                Ok(Outcome::new()
+                    .set("adapter", json!(save))
+                    .set("steps", json!(opts.steps))
+                    .set("tensors", json!(tensors.len()))
+                    .blob("adapter", Blob::new(Media::Bytes, bytes).with_meta(json!({"path": save}))))
             }
             other => Err(format!("z-image '{other}': unknown action")),
         }
@@ -224,40 +232,13 @@ fn opts_from(inv: &Invocation, width: u32, height: u32) -> crate::pipeline::Opts
     }
 }
 
-/// Wrap a generated [`crate::pipeline::Image`] as an image-output [`Outcome`].
+/// Wrap a generated [`crate::pipeline::Image`] as an image-output [`Outcome`]
+/// (the shared `capability::blob` wire format).
 fn emit(img: crate::pipeline::Image) -> ActionResult {
-    use capability::{Blob, Media, Outcome};
-    let bytes: Vec<u8> = img.hwc.iter().flat_map(|f| f.to_le_bytes()).collect();
     Ok(Outcome::new()
         .set("width", json!(img.w))
         .set("height", json!(img.h))
-        .blob("image", Blob::new(Media::Image, bytes).with_meta(json!({"w": img.w, "h": img.h, "c": 3}))))
-}
-
-/// Decode an RGB image blob to HWC f32 `[0,1]` + its `w,h`. Errors if `c ≠ 3`.
-fn blob_image(inv: &Invocation, name: &str) -> Result<(Vec<f32>, u32, u32), String> {
-    let (hwc, w, h, c) = blob_hwc(inv, name)?;
-    if c != 3 {
-        return Err(format!("'{name}' must be a 3-channel RGB image (got {c} channels)"));
-    }
-    Ok((hwc, w, h))
-}
-
-/// Decode a mask blob to a single-channel plane `[h·w]` in `[0,1]` (channel 0).
-fn blob_plane(inv: &Invocation, name: &str) -> Result<(Vec<f32>, u32, u32), String> {
-    let (hwc, w, h, c) = blob_hwc(inv, name)?;
-    let plane: Vec<f32> = (0..(w as usize * h as usize)).map(|i| hwc[i * c]).collect();
-    Ok((plane, w, h))
-}
-
-/// Read a named blob's raw HWC f32 payload + `{w,h,c}` metadata.
-fn blob_hwc(inv: &Invocation, name: &str) -> Result<(Vec<f32>, u32, u32, usize), String> {
-    let b = inv.get_blob(name).ok_or_else(|| format!("missing required input '{name}'"))?;
-    let w = b.meta["w"].as_u64().ok_or_else(|| format!("'{name}' blob missing w"))? as u32;
-    let h = b.meta["h"].as_u64().ok_or_else(|| format!("'{name}' blob missing h"))? as u32;
-    let hwc: Vec<f32> = b.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
-    let c = hwc.len() / (w as usize * h as usize);
-    Ok((hwc, w, h, c))
+        .blob("image", capability::blob::image_blob(&img.hwc, img.w as u32, img.h as u32, 3)))
 }
 
 /// Assemble an outpaint canvas: the input placed with `l/r/t/b` px borders
@@ -305,6 +286,9 @@ mod tests {
         // inpaint requires both image and mask.
         let inp = m.actions.iter().find(|a| a.name == "inpaint").unwrap();
         assert!(inp.inputs.iter().any(|b| b.name == "mask" && b.media == Media::Mask && b.required));
+        // lora_train declares the trained adapter as a retrievable output blob.
+        let lt = m.actions.iter().find(|a| a.name == "lora_train").unwrap();
+        assert!(lt.outputs.iter().any(|b| b.name == "adapter" && b.media == Media::Bytes));
         // the whole manifest round-trips to JSON for discovery.
         let j = m.to_json();
         assert_eq!(j["actions"].as_array().unwrap().len(), 5);

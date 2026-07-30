@@ -108,12 +108,37 @@ class BrainDBus:
         timeout: float = 600.0,
     ) -> Iterator[tuple[dict[str, Any], list[int]]]:
         """Run a streaming action; yield `(frame, raw_fds)` until done/error."""
-        _job, event_fd = self._call(
+        _job, frames = self.subscribe_with_job(
+            model, action, params, in_fds=in_fds, in_meta=in_meta, timeout=timeout
+        )
+        yield from frames
+
+    def subscribe_with_job(
+        self,
+        model: str,
+        action: str,
+        params: dict[str, Any] | None = None,
+        *,
+        in_fds: Fds | None = None,
+        in_meta: dict[str, Any] | None = None,
+        timeout: float = 600.0,
+    ) -> tuple[int, Iterator[tuple[dict[str, Any], list[int]]]]:
+        """Like `subscribe`, but also return the job id so `cancel(job)` works."""
+        job, event_fd = self._call(
             "Subscribe",
             "sssa{sh}s",
             (model, action, json.dumps(params or {}), in_fds or {}, json.dumps(in_meta or {})),
         )
-        yield from _read_stream(event_fd.to_raw_fd(), timeout)
+        return int(job), _read_stream(event_fd.to_raw_fd(), timeout)
+
+    def cancel(self, job: int) -> bool:
+        """Cooperatively cancel a running job (the id from `subscribe`).
+
+        Flips the job's cancel token; the action aborts at its next poll and the
+        stream ends with an `error` frame (`"cancelled"`). Returns True if the job
+        was found still in flight, False for an unknown or finished id.
+        """
+        return bool(self._call("Cancel", "t", (job,))[0])
 
     def stream_transcribe(
         self,

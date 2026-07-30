@@ -13,9 +13,10 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::os::fd::{AsFd, OwnedFd};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use capability::{Blob, Invocation, Media, Outcome, Progress};
+use capability::{Blob, CancelToken, Invocation, Media, Outcome, Progress};
 use residency::{Executor, Job};
 use serde_json::{json, Value};
 use zbus::fdo;
@@ -24,21 +25,39 @@ use zbus::zvariant::OwnedFd as ZOwnedFd;
 use crate::fd::{bytes_to_fd, read_fd_to_vec};
 use crate::stream::StreamTx;
 
+/// Armed cancel tokens for in-flight jobs, keyed by job id. An entry lives from
+/// submission until the job's reply fires, so `Cancel` can find any running job.
+type JobRegistry = Arc<Mutex<HashMap<u64, CancelToken>>>;
+
 pub struct Manager {
     executor: Executor,
     version: String,
+    jobs: JobRegistry,
+    next_job: AtomicU64,
 }
 
 impl Manager {
     pub fn new(executor: Executor) -> Manager {
-        Manager { executor, version: env!("CARGO_PKG_VERSION").to_string() }
+        Manager { executor, version: env!("CARGO_PKG_VERSION").to_string(), jobs: Arc::new(Mutex::new(HashMap::new())), next_job: AtomicU64::new(0) }
+    }
+
+    /// Arm `inv` with a fresh [`CancelToken`] and register it under a new job id.
+    /// The caller must remove the entry (via [`finish_job`]) when the reply fires.
+    fn register_job(&self, inv: &mut Invocation) -> u64 {
+        let token = CancelToken::armed();
+        inv.cancel = token.clone();
+        let job = self.next_job.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Ok(mut m) = self.jobs.lock() {
+            m.insert(job, token);
+        }
+        job
     }
 
     /// Assemble an [`Invocation`] from params JSON, input fds, and per-fd metadata.
     fn build_inv(&self, params: &str, in_fds: HashMap<String, ZOwnedFd>, in_meta: &str) -> Result<Invocation, String> {
         let params: Value = if params.trim().is_empty() { json!({}) } else { serde_json::from_str(params).map_err(|e| format!("params JSON: {e}"))? };
         let meta: Value = if in_meta.trim().is_empty() { json!({}) } else { serde_json::from_str(in_meta).map_err(|e| format!("in_meta JSON: {e}"))? };
-        let mut inv = Invocation { params, blobs: Default::default() };
+        let mut inv = Invocation { params, blobs: Default::default(), cancel: Default::default() };
         for (name, zfd) in in_fds {
             let ofd: std::os::fd::OwnedFd = zfd.into();
             let bytes = read_fd_to_vec(ofd.as_fd()).map_err(|e| format!("reading input fd '{name}': {e}"))?;
@@ -151,6 +170,13 @@ fn emit_window(executor: &Executor, model: &str, window: &[f32], prompt_id: i64,
     }
 }
 
+/// Drop a finished job's cancel token from the registry.
+fn finish_job(jobs: &JobRegistry, job: u64) {
+    if let Ok(mut m) = jobs.lock() {
+        m.remove(&job);
+    }
+}
+
 /// Convert an [`Outcome`]'s blobs to fds (memfd, or best-effort dmabuf) + the
 /// `out_meta` JSON describing each. Errors propagate as a D-Bus failure.
 fn outcome_to_fds(outcome: &Outcome, want_dmabuf: bool) -> Result<(HashMap<String, ZOwnedFd>, Value), String> {
@@ -190,7 +216,11 @@ impl Manager {
         in_meta: String,
         transport: String,
     ) -> fdo::Result<(String, HashMap<String, ZOwnedFd>, String)> {
-        let inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
+        let mut inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
+        // Armed so ActiveJobs counts it; a Run has no client-visible job id, so its
+        // token is only ever dropped here (the reply), never cancelled by Cancel.
+        let job = self.register_job(&mut inv);
+        let jobs = self.jobs.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.executor.submit(Job {
             model,
@@ -198,6 +228,7 @@ impl Manager {
             inv,
             on_progress: Box::new(|_| {}), // Run is one-shot; no streaming
             reply: Box::new(move |r| {
+                finish_job(&jobs, job);
                 let _ = tx.send(r);
             }),
         });
@@ -218,7 +249,11 @@ impl Manager {
         in_fds: HashMap<String, ZOwnedFd>,
         in_meta: String,
     ) -> fdo::Result<(u64, ZOwnedFd)> {
-        let inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
+        let mut inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
+        // Arm a cancel token under the returned job id: `Cancel(job)` flips it and
+        // the running action aborts at its next poll (see docs/serving-contract.md).
+        let job = self.register_job(&mut inv);
+        let jobs = self.jobs.clone();
         let (stream, client) = crate::stream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;
         let stream = Arc::new(Mutex::new(stream));
         let (sp, sr) = (stream.clone(), stream.clone());
@@ -232,6 +267,7 @@ impl Manager {
                 }
             }),
             reply: Box::new(move |r| {
+                finish_job(&jobs, job);
                 if let Ok(mut s) = sr.lock() {
                     match r {
                         Ok(outcome) => {
@@ -248,9 +284,6 @@ impl Manager {
                 }
             }),
         });
-        // A monotonically-unique-enough id for the client to correlate (the fd is the
-        // real handle). The executor owns lifecycle; Cancel is phase 2.
-        let job = self.executor.stats().jobs.wrapping_add(1);
         Ok((job, client.into()))
     }
 
@@ -303,7 +336,9 @@ impl Manager {
             .spawn(move || stream_reader(pcm_ofd, executor, model, window_samples, prompt_id, session, stream))
             .map_err(|e| fdo::Error::Failed(format!("spawn stream reader: {e}")))?;
 
-        let job = self.executor.stats().jobs.wrapping_add(1);
+        // Correlation id only: the stream's windows are internal executor jobs, so
+        // this id is not in the cancel registry — end a stream by closing the pipe.
+        let job = self.next_job.fetch_add(1, Ordering::Relaxed) + 1;
         Ok((job, client.into()))
     }
 
@@ -318,8 +353,15 @@ impl Manager {
         .to_string()
     }
 
-    async fn cancel(&self, _job: u64) -> bool {
-        false // phase 2
+    /// Cooperatively cancel a job (from `Subscribe`) by id: flips its token so the
+    /// running action aborts at its next poll (`Err("cancelled")` arrives as an
+    /// `error` frame). Returns `true` if the job was found still in flight,
+    /// `false` for an unknown or already-finished id.
+    async fn cancel(&self, job: u64) -> bool {
+        match self.jobs.lock() {
+            Ok(m) => m.get(&job).map(|t| t.cancel()).is_some(),
+            Err(_) => false,
+        }
     }
 
     #[zbus(property)]
@@ -327,9 +369,10 @@ impl Manager {
         self.version.clone()
     }
 
+    /// Jobs currently in flight (submitted via `Run`/`Subscribe`, reply not yet fired).
     #[zbus(property)]
     async fn active_jobs(&self) -> u32 {
-        self.executor.stats().resident as u32
+        self.jobs.lock().map(|m| m.len()).unwrap_or(0) as u32
     }
 
     #[zbus(property)]

@@ -52,14 +52,35 @@ impl Action for CatAction {
     }
 }
 
+/// `slow` — a long-running action that polls the invocation's cancel token each
+/// step, so `Cancel(job)` can be verified end-to-end: uncancelled it takes ~10 s,
+/// cancelled it aborts within one 20 ms step.
+struct SlowAction;
+impl Action for SlowAction {
+    fn spec(&self) -> ActionSpec {
+        ActionSpec::new("slow", "sleep in steps, polling the cancel token").streaming()
+    }
+    fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        for step in 0..500 {
+            if inv.cancel.is_cancelled() {
+                return Err("cancelled".into());
+            }
+            progress(Progress { step, total: 500, message: "working".into() });
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Ok(Outcome::new())
+    }
+}
+
 impl Provider for RevProvider {
     fn manifest(&self) -> Manifest {
-        Manifest::new("rev", "byte reverser (test provider)", vec![RevAction.spec(), CatAction.spec()])
+        Manifest::new("rev", "byte reverser (test provider)", vec![RevAction.spec(), CatAction.spec(), SlowAction.spec()])
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
         match name {
             "reverse" => Some(Arc::new(RevAction) as Arc<dyn Action>),
             "cat" => Some(Arc::new(CatAction) as Arc<dyn Action>),
+            "slow" => Some(Arc::new(SlowAction) as Arc<dyn Action>),
             _ => None,
         }
     }
@@ -131,5 +152,29 @@ fn run_roundtrips_a_result_over_an_fd() {
         let echoed = brain_dbus::fd::read_owned_to_vec(out_fds2.get("out").expect("out fd")).unwrap();
         assert_eq!(echoed, payload, "input fd not echoed correctly");
         eprintln!("roundtrip ok: Run(rev.cat) input-fd -> output-fd -> {:?}", String::from_utf8_lossy(&echoed));
+
+        // ---- Cancel: bogus id -> false; a live Subscribe job -> true, and the
+        // polling action must actually abort (its registry entry drains long before
+        // the 10 s an uncancelled run would take). ----
+        let bogus: bool = proxy.call("Cancel", &(u64::MAX,)).await.unwrap();
+        assert!(!bogus, "Cancel on a bogus job id must return false");
+
+        let empty2: HashMap<String, ZOwnedFd> = HashMap::new();
+        let (job, _event_fd): (u64, ZOwnedFd) = proxy.call("Subscribe", &("rev", "slow", "{}", empty2, "")).await.unwrap();
+        // Give the executor a moment to start the action, then cancel it.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let hit: bool = proxy.call("Cancel", &(job,)).await.unwrap();
+        assert!(hit, "Cancel on a live job id must return true");
+        // The job leaves the registry when its (cancelled) reply fires.
+        let t0 = std::time::Instant::now();
+        loop {
+            let still: bool = proxy.call("Cancel", &(job,)).await.unwrap();
+            if !still {
+                break;
+            }
+            assert!(t0.elapsed() < std::time::Duration::from_secs(5), "cancelled action did not abort");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        eprintln!("cancel ok: Subscribe(rev.slow) aborted in {:?}", t0.elapsed());
     });
 }

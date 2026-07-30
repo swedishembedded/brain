@@ -418,6 +418,19 @@ mod tests {
     }
 
     #[test]
+    fn stateless_zero_cost_model_is_schedulable_on_a_gpu_only_budget() {
+        // Regression: a zero-cost instance (MemCost::default(), e.g. a stateless
+        // ProviderResident like `demo`) must be placeable even when only GPU
+        // budgets exist — this is exactly how the D-Bus roundtrip test wires up.
+        let builds = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Slow { name: "free".into(), vram: 0, ms: 1, builds })];
+        let exec = Executor::start(models, budgets, Policy::default());
+        assert!(exec.run_blocking("free", "run", Invocation::new(), |_| {}).is_ok());
+    }
+
+    #[test]
     fn unknown_model_replies_error() {
         let exec = Executor::start(vec![], Budgets::new(), Policy::default());
         assert!(exec.run_blocking("nope", "x", Invocation::new(), |_| {}).is_err());

@@ -74,6 +74,16 @@ pub fn no_exclude() -> HashSet<Device> {
 /// in `exclude` are skipped (used by the parallel scheduler to avoid a device a lane
 /// is already running on). Returns `None` if none has room without eviction.
 pub fn pick_device(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>) -> Option<Device> {
+    // A zero-cost (stateless) instance holds no memory on any device, so every
+    // class below would skip it (`need == 0`) and it would be unplaceable. Place it
+    // on any budgeted device — the CPU by preference (stateless providers are host
+    // glue), else whatever is free — so `demo`/`imageops` run under any budget.
+    if cost.vram == 0 && cost.ram == 0 && cost.npu == 0 {
+        if !exclude.contains(&Device::Cpu) && budgets.get(Device::Cpu).is_some() {
+            return Some(Device::Cpu);
+        }
+        return budgets.gpus().into_iter().chain(budgets.npus()).find(|d| !exclude.contains(d));
+    }
     // Device-class preference: NPU (if the model has an NPU path) → GPU → CPU. Within
     // an accelerator class, most-free wins (spreads load; ties by lower index). A
     // model reports `npu > 0` only when it exports an OpenVINO graph, so a non-NPU

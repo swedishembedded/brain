@@ -57,4 +57,9 @@ echo; echo "== Run demo.echo (result returned as an fd) =="
 busctl --user call "$BUS" "$OBJ" "$IFACE" Run sssa{sh}ss \
   demo echo '{"text":"brain-over-dbus ","times":3,"mode":"upper"}' 0 '' memfd
 
-echo; echo "== OK: surface + FD-returning Run validated =="
+echo; echo "== Cancel on a bogus job id (expect: b false) =="
+CANCELLED=$(busctl --user call "$BUS" "$OBJ" "$IFACE" Cancel t 999999999)
+echo "$CANCELLED"
+[[ "$CANCELLED" == "b false" ]] || { echo "Cancel(bogus) returned '$CANCELLED', want 'b false'" >&2; exit 1; }
+
+echo; echo "== OK: surface + FD-returning Run + Cancel validated =="

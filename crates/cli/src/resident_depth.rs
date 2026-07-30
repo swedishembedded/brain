@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress};
+use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress};
 use depth::{Predictor, ZipConfig};
 use gpu_core::Gpu;
 use paramstore::ParamStore;
@@ -166,7 +166,7 @@ fn resize_map(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
 impl Instance for DepthNpuInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         use npu::openvino::Feed;
-        let (hwc, w, h) = image_of(inv)?;
+        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
         let s = self.side;
         // resize to the compiled square, pack CHW
         let resized = resize_hwc(&hwc, w, h, s, s);
@@ -191,12 +191,12 @@ impl Instance for DepthNpuInstance {
             mx = mx.max(v);
         }
         let range = (mx - mn).max(1e-6);
-        let bytes: Vec<u8> = depth.iter().flat_map(|&v| ((v - mn) / range).clamp(0.0, 1.0).to_le_bytes()).collect();
+        let norm: Vec<f32> = depth.iter().map(|&v| ((v - mn) / range).clamp(0.0, 1.0)).collect();
         Ok(Outcome::new()
             .set("width", json!(w))
             .set("height", json!(h))
             .set("device", json!("npu"))
-            .blob("depth", Blob::new(Media::Image, bytes).with_meta(json!({"w": w, "h": h, "c": 1}))))
+            .blob("depth", capability::blob::image_blob(&norm, w, h, 1)))
     }
 }
 
@@ -209,19 +209,9 @@ struct DepthInstance {
     cfg: ZipConfig,
 }
 
-/// Decode an image blob (HWC f32 + `{w,h}` meta) into `(pixels, w, h)` — the same
-/// contract yolo's input uses.
-fn image_of(inv: &Invocation) -> Result<(Vec<f32>, u32, u32), String> {
-    let blob = inv.get_blob("image").ok_or("depth: missing input 'image'")?;
-    let w = blob.meta.get("w").and_then(|v| v.as_u64()).ok_or("depth: image meta needs w")? as u32;
-    let h = blob.meta.get("h").and_then(|v| v.as_u64()).ok_or("depth: image meta needs h")? as u32;
-    let hwc: Vec<f32> = blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
-    Ok((hwc, w, h))
-}
-
 impl Instance for DepthInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let (hwc, w, h) = image_of(inv)?;
+        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
 
         // Optional smaller input (shorter side): the net is fully convolutional, so
         // any x32 input is valid and faster — the predictor rounds it. 0 keeps native.
@@ -252,11 +242,11 @@ impl Instance for DepthInstance {
             }
         }
         let range = (mx - mn).max(1e-6);
-        let bytes: Vec<u8> = depth.iter().flat_map(|&v| ((v - mn) / range).clamp(0.0, 1.0).to_le_bytes()).collect();
+        let norm: Vec<f32> = depth.iter().map(|&v| ((v - mn) / range).clamp(0.0, 1.0)).collect();
 
         Ok(Outcome::new()
             .set("width", json!(w))
             .set("height", json!(h))
-            .blob("depth", Blob::new(Media::Image, bytes).with_meta(json!({"w": w, "h": h, "c": 1}))))
+            .blob("depth", capability::blob::image_blob(&norm, w, h, 1)))
     }
 }

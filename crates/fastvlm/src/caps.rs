@@ -130,7 +130,7 @@ impl Action for CaptionAction {
         if precision != "fp32" && precision != "int8" {
             return Err(format!("fastvlm caption: precision must be fp32 or int8, got {precision:?}"));
         }
-        let (px, w, h) = image_of(inv)?;
+        let (px, w, h) = capability::blob::decode_image(inv, "image")?;
 
         // 1) pad to square + bilinear resize to the tower input, CHW.
         let t_pre = std::time::Instant::now();
@@ -304,18 +304,6 @@ fn stage_time(name: &str, since: std::time::Instant) {
     if std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false) {
         eprintln!("stage {name}: {:.1} ms", since.elapsed().as_secs_f64() * 1e3);
     }
-}
-
-/// Decode the standardized image blob: raw HWC f32 `[0,1]` + `{w,h}` meta.
-fn image_of(inv: &Invocation) -> Result<(Vec<f32>, u32, u32), String> {
-    let blob = inv.get_blob("image").ok_or("fastvlm caption: missing input 'image'")?;
-    let w = blob.meta.get("w").and_then(|v| v.as_u64()).ok_or("fastvlm caption: image meta needs w")? as u32;
-    let h = blob.meta.get("h").and_then(|v| v.as_u64()).ok_or("fastvlm caption: image meta needs h")? as u32;
-    let px: &[f32] = bytemuck::cast_slice(&blob.bytes);
-    if px.len() != (w * h * 3) as usize {
-        return Err(format!("fastvlm caption: expected {}x{}x3 f32, got {} values", w, h, px.len()));
-    }
-    Ok((px.to_vec(), w, h))
 }
 
 /// `image_aspect_ratio: "pad"`: letterbox to square with the 0.5 grey fill the

@@ -63,16 +63,6 @@ struct DetectAction {
     hot: Arc<Mutex<Option<(String, Yolo)>>>,
 }
 
-/// Decode an image blob (raw HWC f32 + `{w,h}` meta) into `(pixels, w, h)` —
-/// the shared blob convention (`brain do --in image=…` produces exactly this).
-fn image_of(inv: &Invocation) -> Result<(Vec<f32>, u32, u32), String> {
-    let blob = inv.get_blob("image").ok_or("yolo detect: missing input 'image'")?;
-    let w = blob.meta.get("w").and_then(|v| v.as_u64()).ok_or("yolo detect: image meta needs w")? as u32;
-    let h = blob.meta.get("h").and_then(|v| v.as_u64()).ok_or("yolo detect: image meta needs h")? as u32;
-    let hwc: Vec<f32> = blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
-    Ok((hwc, w, h))
-}
-
 impl Action for DetectAction {
     fn spec(&self) -> ActionSpec {
         manifest().actions.into_iter().find(|a| a.name == "detect").expect("known action")
@@ -85,7 +75,7 @@ impl Action for DetectAction {
         }
         let conf = inv.get_f64("conf").unwrap_or(0.25) as f32;
         let iou = inv.get_f64("iou").unwrap_or(0.45) as f32;
-        let (hwc, w, h) = image_of(inv)?;
+        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
 
         // Hot path: keep the loaded model resident; rebuild only on a new path.
         let mut guard = self.hot.lock().map_err(|_| "yolo: hot model lock poisoned")?;

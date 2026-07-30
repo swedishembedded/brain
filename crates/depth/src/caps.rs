@@ -76,15 +76,6 @@ struct InferAction {
     hot: Arc<Mutex<Option<Hot>>>,
 }
 
-/// Decode an image blob (raw HWC f32 + `{w,h}` meta) into `(pixels, w, h)`.
-fn image_of(inv: &Invocation) -> Result<(Vec<f32>, u32, u32), String> {
-    let blob = inv.get_blob("image").ok_or("depth infer: missing input 'image'")?;
-    let w = blob.meta.get("w").and_then(|v| v.as_u64()).ok_or("depth infer: image meta needs w")? as u32;
-    let h = blob.meta.get("h").and_then(|v| v.as_u64()).ok_or("depth infer: image meta needs h")? as u32;
-    let hwc: Vec<f32> = blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
-    Ok((hwc, w, h))
-}
-
 impl Action for InferAction {
     fn spec(&self) -> ActionSpec {
         manifest().actions.into_iter().find(|a| a.name == "infer").expect("known action")
@@ -92,7 +83,7 @@ impl Action for InferAction {
 
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let weights = inv.get_str("weights").ok_or("depth infer: missing required param 'weights'")?;
-        let (hwc, w, h) = image_of(inv)?;
+        let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
 
         // Hot path: engine + imported weight map resident per checkpoint path.
         let mut guard = self.hot.lock().map_err(|_| "depth: hot model lock poisoned")?;
