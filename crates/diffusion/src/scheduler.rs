@@ -126,3 +126,59 @@ impl FlowMatchEulerScheduler {
         prev
     }
 }
+
+// ---- FLUX.2 dynamic (resolution- and step-count-dependent) shift ------------
+
+/// FLUX.2's empirical `mu`: the exponential-shift strength as a function of
+/// the generated-image token count and the step count (BFL
+/// `compute_empirical_mu`, duplicated verbatim in the diffusers pipeline).
+/// Below 4300 tokens the two empirical lines (fit at 10 and 200 steps) are
+/// linearly interpolated in `num_steps` — a 4-step klein run gets a genuinely
+/// different schedule than a 50-step base run at the same resolution.
+pub fn empirical_mu(image_seq_len: usize, num_steps: usize) -> f32 {
+    const A1: f64 = 8.73809524e-05;
+    const B1: f64 = 1.89833333;
+    const A2: f64 = 0.00016927;
+    const B2: f64 = 0.45666666;
+    let seq = image_seq_len as f64;
+    if image_seq_len > 4300 {
+        return (A2 * seq + B2) as f32;
+    }
+    let m200 = A2 * seq + B2;
+    let m10 = A1 * seq + B1;
+    let a = (m200 - m10) / 190.0;
+    let b = m200 - 200.0 * a;
+    (a * num_steps as f64 + b) as f32
+}
+
+/// Exponential time shift: `σ' = e^mu / (e^mu + (1/σ - 1))`, with `σ = 0`
+/// mapping to 0. This is diffusers' `_time_shift_exponential` (sigma
+/// exponent 1.0) and the same map Z-Image's `dynamic_shift` applies.
+pub fn time_shift_exponential(mu: f32, sigmas: &[f32]) -> Vec<f32> {
+    let e = (mu as f64).exp();
+    sigmas
+        .iter()
+        .map(|&s| {
+            if s <= 0.0 {
+                0.0
+            } else {
+                (e / (e + (1.0 / s as f64 - 1.0))) as f32
+            }
+        })
+        .collect()
+}
+
+/// The FLUX.2 Klein sigma schedule: `linspace(1, 1/N, N)` exponentially
+/// shifted by [`empirical_mu`], with the terminal 0 appended (`N+1` entries) —
+/// feed straight into [`FlowMatchEulerScheduler::set_timesteps`] with
+/// `shift: 1.0` (the shift is already applied).
+pub fn klein_sigmas(num_steps: usize, image_seq_len: usize) -> Vec<f32> {
+    let n = num_steps;
+    let mu = empirical_mu(image_seq_len, n);
+    let base: Vec<f32> = (0..n)
+        .map(|i| 1.0 - i as f32 * (1.0 - 1.0 / n as f32) / (n.max(2) - 1).max(1) as f32)
+        .collect();
+    let mut out = time_shift_exponential(mu, &base);
+    out.push(0.0);
+    out
+}

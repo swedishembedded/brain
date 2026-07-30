@@ -362,3 +362,29 @@ mod tests {
         }
     }
 }
+
+/// Seeded standard-normal samples (xorshift64* + Box-Muller) — the shared
+/// diffusion latent-noise source (Z-Image, FLUX.2). Deterministic per seed;
+/// NOT the torch Philox stream, so cross-framework runs are statistically
+/// equivalent rather than bit-identical.
+pub fn randn(n: usize, seed: u64) -> Vec<f32> {
+    let mut s = seed ^ 0x9E37_79B9_7F4A_7C15;
+    let mut next = || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        // to (0,1)
+        ((s >> 11) as f64 / (1u64 << 53) as f64).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON)
+    };
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        let (u1, u2) = (next(), next());
+        let r = (-2.0 * u1.ln()).sqrt();
+        out.push((r * (std::f64::consts::TAU * u2).cos()) as f32);
+        if out.len() < n {
+            out.push((r * (std::f64::consts::TAU * u2).sin()) as f32);
+        }
+    }
+    out
+}
+
