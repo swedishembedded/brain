@@ -344,6 +344,7 @@ impl KronosResident {
             .param(ParamSpec::new("temperature", ParamType::Float, "sampling temperature (0 or argmax=true => deterministic)").default(json!(1.0)))
             .param(ParamSpec::new("argmax", ParamType::Bool, "deterministic argmax decode").default(json!(true)))
             .param(ParamSpec::new("seed", ParamType::Int, "RNG seed when sampling").default(json!(0)))
+            .param(ParamSpec::new("samples", ParamType::Int, "sampled paths sharing one prefill (out [N,horizon,feat])").default(json!(1)))
             .param(ParamSpec::new("checkpoint", ParamType::Str,
                 "decoder checkpoint path override (.weights file or HF dir); \
                  empty = the boot decoder. Instances are keyed on (path, mtime, \
@@ -497,7 +498,23 @@ impl Instance for KronosInstance {
         let (bars, t) = kronos_bars(inv, feat)?;
         let horizon = horizon_of(inv, 64);
         let (ctx_stamp, fut_stamp) = kronos_stamps(inv, t, horizon)?;
-        let out = self.model.forecast(&bars, &ctx_stamp, &fut_stamp, horizon, &kronos_opts(inv)); // [horizon, feat]
+        // Fast path: the KV-cached rollout (dep-KV cache + AVX matvec) — identical
+        // result to `forecast` (cosine >0.999, tests/kvcache_parity) but O(T²)
+        // prefill + O(T)/step instead of O(T²)/step. `--samples N` shares one
+        // prefill across N sampled paths (returned as [N, horizon, feat]).
+        let opts = kronos_opts(inv);
+        let samples = inv.get_i64("samples").unwrap_or(1).max(1) as usize;
+        if samples > 1 {
+            let outs = self.model.forecast_cached_samples(&bars, &ctx_stamp, &fut_stamp, horizon, samples, &opts);
+            let flat: Vec<f32> = outs.into_iter().flatten().collect();
+            return Ok(Outcome::new()
+                .set("model", json!("kronos"))
+                .set("horizon", json!(horizon))
+                .set("samples", json!(samples))
+                .set("device", json!("gpu_core"))
+                .blob("forecast", encode_forecast(&flat, vec![samples, horizon, feat], "samples", &[])));
+        }
+        let out = self.model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, horizon, &opts); // [horizon, feat]
         Ok(kronos_outcome(out, horizon, feat, "gpu_core"))
     }
 }

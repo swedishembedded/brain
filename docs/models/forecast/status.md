@@ -84,7 +84,26 @@ All three foundation models were confirmed together on `--device cpu,npu`
 - **Batching**: forecast `run_batch` is the sequential default. chronos2/fincast
   share a batchable transformer core (equal-shape contexts could batch one
   forward); wiring a genuine batched forward is a follow-up.
-- **Host GPU on this box**: `brain serve --dbus` with no `--device` faults in the
-  wgpu backend (integrated-only GPU + an unrelated uncommitted `backend-wgpu`
-  change). Use `--device cpu` or `--device cpu,npu` — the latter gives CPU
-  host-compute + an NPU lane, which is how the NPU number above was measured.
+- **Host GPU on this box**: `brain serve --dbus` with no `--device` now works —
+  `backend-wgpu` selects the Intel Arc iGPU (Vulkan) when there's no discrete card
+  (was a panic before; fixed in `cbb0998`). `--device cpu,npu` still gives CPU
+  host-compute + an NPU lane.
+
+## Inference optimization pass — kronos host KV path (2026-07-30)
+
+Profile-driven (bench: `crates/kronos/tests/bench_cpu.rs`, min-of-N; a single
+forecast is ~72–94% prefill, decode was dominated by re-projected dep-K/V). All
+parity-gated (`tests/kvcache_parity.rs` cosine 1.000000 after each).
+
+| optimization | effect | parity |
+|---|---|---|
+| **AVX2+FMA matvec** (`fast_ops::matmul_abt` for host matvecs, `21bbdb1`) | forecast 3128 → 2129 ms (**1.47×**) | cosine 1.0 |
+| **dep-KV cache** (`dep_step_cached`, `f5ccc7f`) | decode 36.6 → 15.8 ms/step (**≥2.3×**) | cosine 1.0 |
+| **shared-prefill sampling** (`forecast_cached_samples`, `bbbd8e8`) | nsamp=4: 3189 vs 10916 ms (**3.42×**) | **bit-identical** per seed |
+| **serving uses the cached path** | the D-Bus kronos resident now calls `forecast_cached` (was the O(T²)/step `forecast`) + a `samples` param | cosine >0.999 |
+
+Net: one kronos forecast ≈ **3.1 s → ~1.3 s**; a samples=N request pays one
+prefill. These compound with the fine-tuned-`.weights` NPU path (`load_decoder`
+takes a file or dir). Remaining (see repo tasks): batched cross-sectional forward
+(the sweep multiplier; needs a host BSQ tokenizer for rayon-over-names), and the
+training-side batch + Vulkan-OOM streaming.
