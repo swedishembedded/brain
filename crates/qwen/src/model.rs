@@ -1433,7 +1433,7 @@ impl Qwen {
         let fast = g.caps().workgroup_reductions;
         let rms = |s: &mut Vec<Step>, x: &DeviceBuffer, wt: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32| {
             if fast {
-                s.push(g.step(RMSNORM_ROWS, &[x, wt, out], &[dim, rows], rows * 64));
+                s.push(g.step(RMSNORM_ROWS, &[x, wt, out], &[dim, rows, gpu_core::f(1e-6)], rows * 64));
             } else {
                 s.push(block::rmsnorm_fwd(g, &ids, x, wt, out, dim, rows));
             }

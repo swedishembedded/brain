@@ -26,6 +26,8 @@ engine's stage split and the real GPU adapter line.
 | CPU: WGSL→scalar-JIT vs WGSL→SIMD | 6715 ms | 368 ms | the AVX2 fast path (**18×**, same WGSL) |
 | **GPU** (Intel Arc, integrated, Vulkan) | 2749 ms | ~630 ms | kill readback syncs + one pass + register-tiled conv |
 | GPU conv `forward` stage | 1218 ms (naive) | 545 ms | register tiling (then coalescing) |
+| **FLUX.2 klein-4B DiT forward** (1×P40, 1536 tokens) | 12.87 s (6.7% peak) | **2.76 s (35.7% peak)** | lane-split flash attention (29×) + coalesced QK-norm (19×) + conflict-free GEMM |
+| FLUX.2 512² 4-step image (2×P40) | 59.8 s | **18.3 s** | the above |
 
 Numbers are noisy on shared boxes (thermal/contention); the stable signals are
 the **min-of-N GFLOP/s microbench** (CPU) and the **`forward` stage** (GPU).
@@ -166,6 +168,91 @@ hands these kernels workgroup-aligned chunks. Validated: the tiled conv compiles
 and matches the scalar reference, and runs the *full* yolov8n correctly through
 the JIT work-group path. This is the foundation for a future input+weight tiled
 GEMM that serves GPU and CPU from one kernel.
+
+---
+
+## Cross-model finding: `var<function>` arrays are LOCAL memory, not registers
+
+Found while profiling the FLUX.2 DiT (`docs/models/flux2/status.md` P9), but it
+is a rule about the engine, not about FLUX.2 — and it cost **81 % of that
+model's whole forward**.
+
+A WGSL `var<function> arr: array<f32, N>` is only a register file if the
+compiler can prove every index. When the loop bound is a **runtime uniform**
+(`for d in 0..p.head_dim`) it cannot unroll, so the array is placed in *local
+memory* — which on every GPU brain targets is backed by global memory. The
+kernel then runs at memory bandwidth no matter how good its blocking looks.
+
+`flash_attn_bidir` held `q[128]` + `o[128]` per thread this way: ~3
+local-memory accesses per 2 FLOP = 6 bytes/FLOP, a 58 GFLOP/s roof on a P40's
+346 GB/s. Measured: **70 GFLOP/s = 0.6 % of the card's fp32 peak**. The header
+comment's own "one small spill on Pascal" was the tell — the spill was total.
+
+**The pattern that fixes it** (`flash_attn_bidir_split.wgsl`): split the wide
+axis across a *lane group* of threads so each thread's array is small AND its
+trip count is a compile-time constant, then recombine through shared memory
+once per tile rather than per element. Measured **29× at head_dim 128** and a
+win at *every* head_dim down to 32, cosine 1.00000000 against the original.
+
+**How to spot it:** an array whose declared size exceeds ~32 f32, indexed by a
+loop whose bound comes from `Params`. Grep the kernel tree for
+`var<function>`-scope arrays before writing a new one.
+
+Both diffusion DiTs (`flux2`, `zimage`) now dispatch through
+`model::block::flash_bidir_step`, which picks the variant from the device's
+**queried** `max_workgroup_size`.
+
+## Cross-model finding: one thread per row is a COALESCING bug, not a decode-regime one
+
+The other half of the same profile. The per-element norm kernels give thread
+*t* row *t*, so a warp's 32 loads are one row-width apart and each 32-byte
+sector fetched serves **one useful float** — 8× read and write amplification.
+The workgroup-per-row variants (`rmsnorm_rows`, `softmax_rows`) walk one row
+with 64 threads and are coalesced by construction.
+
+`backend_api::select` gated the cooperative RMSNorm on `m <= 32`
+(`DECODE_REGIME_MAX_ROWS`) — the reasoning being that large M saturates the
+device anyway. That reasoning is wrong, because the loss is per-access
+efficiency, not thread count. Measured on a P40 at a fixed 4.7 M elements:
+
+| rows | width | per-element | workgroup-per-row | speedup |
+|---:|---:|---:|---:|---:|
+| 36 864 | 128 | 3.85 ms (10 GB/s) | 0.20 ms (190 GB/s) | **19.4×** |
+| 18 432 | 256 | 4.64 ms | 0.21 ms | 22.6× |
+| 4 608 | 1 024 | 0.73 ms | 0.29 ms | 2.5× |
+| 1 536 | 3 072 | 1.27 ms | 0.30 ms | 4.2× |
+| 512 | 9 216 | 3.02 ms | 0.27 ms | 11.2× |
+
+The cooperative kernel wins at **every** row count and width, so the policy is
+now "prefer it whenever the device has workgroup barriers", with a unit test
+that fails if the `m <= 32` gate comes back. Narrow rows (QK-norm at
+head_dim 128) are the worst case and the most common one.
+
+**`layernorm` has the same shape of bug and no cooperative variant yet** — it
+is 2.3 % of the FLUX.2 forward after the RMSNorm fix, and the same 4-20× is
+sitting there for every model that uses LayerNorm (`gpt`, `pid`, `seq2seq`,
+`flux2`, the ViT trunk).
+
+## Cross-model finding: shared-memory bank conflicts in `matmul_reg2`
+
+`matmul_reg2` gives each thread 8 **contiguous** columns, so it reads
+`Bs[kk*128 + tx*8 + j]`; across a warp `(8·tx) mod 32` takes 4 distinct values,
+putting 16 addresses on 4 banks — a **4-way conflict on half of every chunk's
+shared loads**. Its staging store is an 8-way conflict for the same reason.
+
+`matmul_reg3.wgsl` fixes both with layout only — *interleaved* (stride-16)
+register tiling plus a 128→129 padded tile stride — leaving the K accumulation
+order untouched, so its output is **bit-identical by construction** (measured
+max_abs 0.0 across 12 shapes). It is 1.05× on the FLUX.2 shape mix, 1.10-1.49×
+on shapes with n = 3072 or a narrow K, and never more than 1 % slower.
+
+It is **added alongside**: FLUX.2 uses it, `matmul_reg2` remains the default
+for `zimage`/`qwen`/`gpt`/`vision` until each measures its own shapes. The
+n = 9216 shapes do not move, which locates the next ceiling: at one shared word
+per FMA the kernel is shared-*throughput* bound around 40-50 % of peak, and
+getting past that needs vec4 shared loads or a larger register block — not
+deeper K-blocking. **Deeper K-blocking cannot help at all**: arithmetic
+intensity is `2·BM·BN·BK / ((BM+BN)·BK·4)`, and BK cancels.
 
 ---
 

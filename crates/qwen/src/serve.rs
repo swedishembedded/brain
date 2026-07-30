@@ -710,7 +710,7 @@ impl Engine {
         let g = &self.gpu;
         let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
         match self.selector.select(Op::RmsNorm, shape, &self.caps) {
-            KernelVariant::WorkgroupPerOutput => g.step(RMSNORM_ROWS, &[x, w, out], &[d, rows], rows * 64),
+            KernelVariant::WorkgroupPerOutput => g.step(RMSNORM_ROWS, &[x, w, out], &[d, rows, gpu_core::f(1e-6)], rows * 64),
             _ => g.step(RMSNORM, &[x, w, out], &[d, rows], rows),
         }
     }

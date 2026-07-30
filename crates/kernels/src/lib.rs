@@ -280,6 +280,8 @@ pub const FILM_ROW_DSB: &str = include_str!("../wgsl/film_row_dsb.wgsl");
 pub const FILM_ROW_DX: &str = include_str!("../wgsl/film_row_dx.wgsl");
 /// `wgsl/flash_attn_bidir.wgsl`
 pub const FLASH_ATTN_BIDIR: &str = include_str!("../wgsl/flash_attn_bidir.wgsl");
+/// `wgsl/flash_attn_bidir_split.wgsl`
+pub const FLASH_ATTN_BIDIR_SPLIT: &str = include_str!("../wgsl/flash_attn_bidir_split.wgsl");
 /// `wgsl/gate_row.wgsl`
 pub const GATE_ROW: &str = include_str!("../wgsl/gate_row.wgsl");
 /// `wgsl/gate_row_dg.wgsl`
@@ -410,6 +412,8 @@ pub const MATMUL_I8_GEMV: &str = include_str!("../wgsl/matmul_i8_gemv.wgsl");
 pub const MATMUL_REG: &str = include_str!("../wgsl/matmul_reg.wgsl");
 /// `wgsl/matmul_reg2.wgsl`
 pub const MATMUL_REG2: &str = include_str!("../wgsl/matmul_reg2.wgsl");
+/// `wgsl/matmul_reg3.wgsl`
+pub const MATMUL_REG3: &str = include_str!("../wgsl/matmul_reg3.wgsl");
 /// `wgsl/matmul_rows.wgsl`
 pub const MATMUL_ROWS: &str = include_str!("../wgsl/matmul_rows.wgsl");
 /// `wgsl/matmul_tile.wgsl`
@@ -789,6 +793,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("film_row_dsb", FILM_ROW_DSB),
     ("film_row_dx", FILM_ROW_DX),
     ("flash_attn_bidir", FLASH_ATTN_BIDIR),
+    ("flash_attn_bidir_split", FLASH_ATTN_BIDIR_SPLIT),
     ("gate_row", GATE_ROW),
     ("gate_row_dg", GATE_ROW_DG),
     ("gate_row_dh", GATE_ROW_DH),
@@ -854,6 +859,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_i8_gemv", MATMUL_I8_GEMV),
     ("matmul_reg", MATMUL_REG),
     ("matmul_reg2", MATMUL_REG2),
+    ("matmul_reg3", MATMUL_REG3),
     ("matmul_rows", MATMUL_ROWS),
     ("matmul_tile", MATMUL_TILE),
     ("matmul_tiled", MATMUL_TILED),

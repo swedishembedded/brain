@@ -319,17 +319,73 @@ pub fn chunked_bidir_fwd(
     }
 }
 
-/// Span-wise fused flash attention (`flash_attn_bidir`): one dispatch per
-/// span replaces the whole scores/softmax/apply chain with an online-softmax
-/// tiled kernel — O(t·hd) memory AND the tuned inner loops, where the chunked
-/// cross trio materializes `[H, chunk, t]` slabs through naive kernels.
-/// Forward-only and workgroup-cooperative: callers MUST gate on
-/// `DeviceCaps::workgroup_reductions` (false on the CPU JIT) and fall back to
-/// [`chunked_bidir_fwd`]. `head_dim` ≤ 128 (the kernel's register budget).
+/// The two interchangeable bidirectional flash-attention kernels, as a model's
+/// own pipeline indices. `split` is optional (`None` = the model only registered
+/// the baseline), which keeps this additive for callers that have not adopted it.
+///
+/// `flash_attn_bidir_split` computes the same thing as `flash_attn_bidir` to
+/// cosine 1.00000000 and is faster at every head_dim measured on a P40
+/// (29× at hd=128, 4.4× at hd=32 — see the kernel header for the table),
+/// because the baseline's per-thread `q[128]`/`o[128]` arrays cannot live in
+/// registers and its inner loop therefore runs at local-memory bandwidth. The
+/// split kernel needs `@workgroup_size(256)`, so selection is gated on the
+/// device's queried `max_workgroup_size`, never assumed.
+#[derive(Clone, Copy)]
+pub struct FlashIds {
+    pub bidir: usize,
+    pub split: Option<usize>,
+}
+
+/// The flash variant to dispatch on this device: `(kernel index, workgroup
+/// size)`. Pure in its inputs — `caps` comes from `DeviceCaps`, so no backend
+/// name is consulted.
+pub fn flash_bidir_variant(ids: FlashIds, caps: &gpu_core::DeviceCaps) -> (usize, u32) {
+    match ids.split {
+        Some(i) if caps.max_workgroup_size >= 256 => (i, 256),
+        _ => (ids.bidir, 64),
+    }
+}
+
+/// One fused bidirectional flash-attention dispatch over `t` rows of a packed
+/// qkv slab — the variant chosen by [`flash_bidir_variant`]. Both kernels take
+/// the SAME Params and produce the SAME output layout, so only the pipeline
+/// index and the per-workgroup thread count differ; the workgroup still owns
+/// BR = 64 query rows in both.
+#[allow(clippy::too_many_arguments)]
+pub fn flash_bidir_step(
+    g: &Gpu,
+    ids: FlashIds,
+    heads: u32,
+    t: u32,
+    head_dim: u32,
+    d_model: u32,
+    qkv: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Step {
+    assert!(head_dim <= 128, "flash_attn_bidir: head_dim {head_dim} > 128");
+    const BR: u32 = 64; // query rows per workgroup — the same in both kernels
+    let (kind, ws) = flash_bidir_variant(ids, &g.caps());
+    let nwg = heads * t.div_ceil(BR);
+    g.step(
+        kind,
+        &[qkv, ctx],
+        &[1, heads, t, head_dim, 3 * d_model, 0, d_model, 2 * d_model, d_model],
+        nwg * ws,
+    )
+}
+
+/// Span-wise fused flash attention: one dispatch per span replaces the whole
+/// scores/softmax/apply chain with an online-softmax tiled kernel — O(t·hd)
+/// memory AND the tuned inner loops, where the chunked cross trio materializes
+/// `[H, chunk, t]` slabs through naive kernels. Picks the kernel through
+/// [`flash_bidir_variant`], so a caller that registers `flash_attn_bidir_split`
+/// gets it here too. Forward-only and workgroup-cooperative: callers MUST gate
+/// on `DeviceCaps::workgroup_reductions` (false on the CPU JIT) and fall back
+/// to [`chunked_bidir_fwd`]. `head_dim` ≤ 128.
 #[allow(clippy::too_many_arguments)]
 pub fn flash_bidir_fwd(
     g: &Gpu,
-    flash_idx: usize,
+    ids: FlashIds,
     heads: u32,
     head_dim: u32,
     d_out: u32,
@@ -343,15 +399,16 @@ pub fn flash_bidir_fwd(
     steps: &mut Vec<Step>,
 ) {
     assert!(head_dim <= 128, "flash_attn_bidir: head_dim {head_dim} > 128");
-    const BR: u32 = 64; // must match BR in flash_attn_bidir.wgsl
+    const BR: u32 = 64; // query rows per workgroup — the same in both kernels
+    let (kind, ws) = flash_bidir_variant(ids, &g.caps());
     for &(row0, len) in spans {
         let nwg = heads * len.div_ceil(BR);
         steps.push(g.step_sliced(
-            flash_idx,
+            kind,
             &[qkv, ctx],
             &[(row0 as u64 * stride as u64, 0), (row0 as u64 * d_out as u64, 0)],
             &[1, heads, len, head_dim, stride, q_off, k_off, v_off, d_out],
-            nwg * BR,
+            nwg * ws,
         ));
     }
 }

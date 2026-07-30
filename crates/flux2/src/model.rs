@@ -30,13 +30,16 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("layernorm", kernels::LAYERNORM),
     ("matmul", kernels::MATMUL),
     ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_reg3", kernels::MATMUL_REG3),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
     ("pack_qkv", kernels::PACK_QKV),
     ("attn_scores_bidir", kernels::ATTN_SCORES_BIDIR),
     ("attn_softmax_bidir", kernels::ATTN_SOFTMAX_BIDIR),
     ("attn_apply_bidir", kernels::ATTN_APPLY_BIDIR),
     ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
+    ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
     ("silu_mul", kernels::SILU_MUL),
     ("gate_row", kernels::GATE_ROW),
     // int8 DP4A path (GPU only): per-token activation quant + DP4A GEMM.
@@ -48,18 +51,21 @@ pub const KERNELS: &[(&str, &str)] = &[
 const K_LN: usize = 0;
 const K_MATMUL: usize = 1;
 const K_MATMUL_REG2: usize = 2;
-const K_RMSNORM: usize = 3;
-const K_ROPE: usize = 4;
-const K_PACK: usize = 5;
-const K_SCORES: usize = 6;
-const K_SOFTMAX: usize = 7;
-const K_APPLY: usize = 8;
-const K_FLASH: usize = 9;
-const K_SILU_MUL: usize = 10;
-const K_GATE: usize = 11;
-const K_MAXABS: usize = 12;
-const K_QUANT: usize = 13;
-const K_MATMUL_I8: usize = 14;
+const K_MATMUL_REG3: usize = 3;
+const K_RMSNORM: usize = 4;
+const K_RMSNORM_ROWS: usize = 5;
+const K_ROPE: usize = 6;
+const K_PACK: usize = 7;
+const K_SCORES: usize = 8;
+const K_SOFTMAX: usize = 9;
+const K_APPLY: usize = 10;
+const K_FLASH: usize = 11;
+const K_FLASH_SPLIT: usize = 12;
+const K_SILU_MUL: usize = 13;
+const K_GATE: usize = 14;
+const K_MAXABS: usize = 15;
+const K_QUANT: usize = 16;
+const K_MATMUL_I8: usize = 17;
 
 const EPS: f32 = 1e-6;
 
@@ -486,9 +492,20 @@ impl Flux2Model {
         wf(&self.modb.beta[5], &m_fin[..d]);
     }
 
+    /// The register-tiled GEMM this model dispatches. `matmul_reg3` is
+    /// `matmul_reg2` with the shared-memory bank conflicts removed: same tiling,
+    /// same K accumulation order, therefore BIT-IDENTICAL output (verified
+    /// max_abs 0.0 across all 12 of this graph's shapes), and 1.05x on the
+    /// klein-4B mix — up to 1.49x on the narrow-K boundary linears, never more
+    /// than 1% slower. `matmul_reg2` stays the default everywhere else in the
+    /// workspace until each model measures its own shapes.
+    fn mm_kernel(&self) -> usize {
+        K_MATMUL_REG3
+    }
+
     fn mm(&self, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
         if self.fast {
-            self.gpu.step(K_MATMUL_REG2, &[x, w, o], &[m, k, n], m.div_ceil(128) * n.div_ceil(128) * 256)
+            self.gpu.step(self.mm_kernel(), &[x, w, o], &[m, k, n], m.div_ceil(128) * n.div_ceil(128) * 256)
         } else {
             self.gpu.step(K_MATMUL, &[x, w, o], &[m, k, n], m * n)
         }
@@ -502,7 +519,7 @@ impl Flux2Model {
         let xo = (r0 as u64 * k as u64, m as u64 * k as u64);
         let oo = (r0 as u64 * n as u64, m as u64 * n as u64);
         if self.fast {
-            self.gpu.step_sliced(K_MATMUL_REG2, &[x, w, o], &[xo, (0, 0), oo], &[m, k, n], m.div_ceil(128) * n.div_ceil(128) * 256)
+            self.gpu.step_sliced(self.mm_kernel(), &[x, w, o], &[xo, (0, 0), oo], &[m, k, n], m.div_ceil(128) * n.div_ceil(128) * 256)
         } else {
             self.gpu.step_sliced(K_MATMUL, &[x, w, o], &[xo, (0, 0), oo], &[m, k, n], m * n)
         }
@@ -604,19 +621,39 @@ impl Flux2Model {
     }
 
     /// QK-RMSNorm over rows `r0..r1` (per-head rows of length `head_dim`).
+    ///
+    /// `head_dim` is 128, so the per-element kernel's one-thread-per-row layout
+    /// makes every warp read 32 rows that are 128 floats apart — one useful
+    /// float per 32-byte sector. The workgroup-per-row kernel is coalesced and
+    /// measured 19x faster at exactly this shape (36864 rows x 128:
+    /// 3.85 ms -> 0.20 ms on a P40); the selection rule lives in
+    /// `backend_api::select` (`Op::RmsNorm`), which now prefers it at EVERY
+    /// row count on a device with workgroup barriers.
     fn qknorm_rows(&self, x: &DeviceBuffer, scale: &DeviceBuffer, o: &DeviceBuffer, r0: u32, r1: u32) -> Step {
+        use gpu_core::select::{Dtype, KernelSelector, Op, OpShape};
         let d = self.cfg.hidden as u32;
         let hd = self.cfg.head_dim() as u32;
         let nh = self.cfg.n_heads as u32;
         let m = r1 - r0;
         let off = (r0 as u64 * d as u64, m as u64 * d as u64);
-        self.gpu.step_sliced(
-            K_RMSNORM,
-            &[x, scale, o],
-            &[off, (0, 0), off],
-            &[hd, m * nh, f(EPS)],
-            m * nh,
-        )
+        let rows = m * nh;
+        let shape = OpShape { m: rows, n: hd, k: 0, dtype: Dtype::F32 };
+        match gpu_core::select::DefaultSelector.select(Op::RmsNorm, shape, &self.gpu.caps()) {
+            gpu_core::select::KernelVariant::WorkgroupPerOutput => self.gpu.step_sliced(
+                K_RMSNORM_ROWS,
+                &[x, scale, o],
+                &[off, (0, 0), off],
+                &[hd, rows, f(EPS)],
+                rows * 64,
+            ),
+            _ => self.gpu.step_sliced(
+                K_RMSNORM,
+                &[x, scale, o],
+                &[off, (0, 0), off],
+                &[hd, rows, f(EPS)],
+                rows,
+            ),
+        }
     }
 
     fn push_attention(&self, s: &mut Vec<Step>, n: u32) {
@@ -625,9 +662,19 @@ impl Flux2Model {
         let dim = self.cfg.hidden as u32;
         let scr = &self.scr;
         if self.fast {
-            let br = 64u32; // must match BR in flash_attn_bidir.wgsl
-            let nwg = nh * n.div_ceil(br);
-            s.push(self.gpu.step(K_FLASH, &[&scr.qkv, &scr.ctx], &[1, nh, n, hd, 3 * dim, 0, dim, 2 * dim, dim], nwg * br));
+            // The lane-split flash kernel where the device's workgroup limit
+            // allows it (29x the baseline at hd=128 on a P40 — see
+            // `model::block::FlashIds`), else the baseline.
+            s.push(model::block::flash_bidir_step(
+                &self.gpu,
+                model::block::FlashIds { bidir: K_FLASH, split: Some(K_FLASH_SPLIT) },
+                nh,
+                n,
+                hd,
+                dim,
+                &scr.qkv,
+                &scr.ctx,
+            ));
         } else {
             s.push(self.gpu.step(K_SCORES, &[&scr.qkv, &scr.scores], &[1, nh, n, hd, 3 * dim, 0, dim], nh * n * n));
             s.push(self.gpu.step(K_SOFTMAX, &[&scr.scores, &scr.probs], &[1, nh, n], nh * n));
@@ -695,7 +742,7 @@ impl Flux2Model {
                 let xo = (0u64, ni as u64 * cin as u64);
                 let oo = (nt as u64 * d as u64, ni as u64 * d as u64);
                 let st = if self.fast {
-                    self.gpu.step_sliced(K_MATMUL_REG2, &[&scr.tok_in, wb, &scr.x0], &[xo, (0, 0), oo], &[ni, cin, d], ni.div_ceil(128) * d.div_ceil(128) * 256)
+                    self.gpu.step_sliced(self.mm_kernel(), &[&scr.tok_in, wb, &scr.x0], &[xo, (0, 0), oo], &[ni, cin, d], ni.div_ceil(128) * d.div_ceil(128) * 256)
                 } else {
                     self.gpu.step_sliced(K_MATMUL, &[&scr.tok_in, wb, &scr.x0], &[xo, (0, 0), oo], &[ni, cin, d], ni * d)
                 };
@@ -806,7 +853,7 @@ impl Flux2Model {
                 let oo = (0u64, n_pred as u64 * cin as u64);
                 let m = n_pred as u32;
                 let st = if self.fast {
-                    self.gpu.step_sliced(K_MATMUL_REG2, &[&scr.n1, wb, &scr.out], &[xo, (0, 0), oo], &[m, d, cin], m.div_ceil(128) * cin.div_ceil(128) * 256)
+                    self.gpu.step_sliced(self.mm_kernel(), &[&scr.n1, wb, &scr.out], &[xo, (0, 0), oo], &[m, d, cin], m.div_ceil(128) * cin.div_ceil(128) * 256)
                 } else {
                     self.gpu.step_sliced(K_MATMUL, &[&scr.n1, wb, &scr.out], &[xo, (0, 0), oo], &[m, d, cin], m * cin)
                 };

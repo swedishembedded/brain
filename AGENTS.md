@@ -11,7 +11,7 @@ It is a self-contained Cargo **workspace** of ~60 crates under `crates/` — no
 Python in the build/test path; backprop correctness is gated by an in-repo
 finite-difference gradient checker (`crates/gradcheck`), not a PyTorch oracle.
 
-The engine is **architecture-agnostic**: the 281 WGSL kernels (`crates/kernels`)
+The engine is **architecture-agnostic**: the 320 WGSL kernels (`crates/kernels`)
 are reusable building blocks, not a fixed model. New architectures are composed
 from them, keeping the gradient-check discipline.
 
@@ -165,7 +165,7 @@ Multi-GPU scaling lives in `crates/model`:
 
 | Crate | Responsibility |
 |---|---|
-| `kernels` | all 281 WGSL kernels (the source of truth) as consts + `src()` |
+| `kernels` | all 320 WGSL kernels (the source of truth) as consts + `src()` |
 | `gpu-core` | compute-device facade: selects and forwards to an eager `Backend` |
 | `backend-api` | `Backend`/`GraphBackend` traits, neutral buffer/step handles, registry — a new backend depends only on this |
 | `backend-wgpu` | wgpu (Vulkan/Metal/DX12/GL/WebGPU) eager backend — **the default** |
@@ -536,9 +536,18 @@ per-scenario table and the findings so far.
   buffers/kernel** (the WebGPU guarantee; the splat backward kernels bind 8),
   **no atomics, no subgroups, no f16** (the only mentions of those in the kernel
   tree are comments asserting their absence). `@workgroup_size(64)` is the rule;
-  the six register-tiled matmuls (`matmul_reg*.wgsl`, `matmul_dw_reg.wgsl`,
-  `matmul_dx_reg.wgsl`, `matmul_i8*.wgsl`) use 256. This is what keeps the engine
-  portable to old GPUs and WebGPU.
+  the register-tiled matmuls (`matmul_reg*.wgsl`, `matmul_dw_reg.wgsl`,
+  `matmul_dx_reg.wgsl`, `matmul_i8*.wgsl`) and `flash_attn_bidir_split.wgsl`
+  use 256 — every one of them because a thread cooperates over a tile, and each
+  must be gated on the device's **queried** `DeviceCaps::max_workgroup_size`
+  (256 is the WebGPU floor, so a 64-thread fallback stays selectable).
+  This is what keeps the engine portable to old GPUs and WebGPU.
+- **Never put a large `var<function>` array behind a runtime loop bound.** WGSL
+  function-scope arrays only become registers if the compiler can unroll every
+  index; bound the loop by a `Params` field and the array lands in *local*
+  memory (global-backed), and the kernel silently runs at memory bandwidth.
+  This cost the FLUX.2 DiT 81 % of its forward — see
+  `docs/performance/overview.md` for the pattern and the fix.
 - **Three backends, one build, one API.** `gpu-core` exposes a single
   `Gpu`/`DeviceBuffer`/`Step` surface; every model is written once against it.
   The accelerator is the *only* thing abstracted — there is no per-backend model

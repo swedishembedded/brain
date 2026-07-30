@@ -136,8 +136,19 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
             }
             Dtype::F32 => vec![Reference],
         },
+        // RmsNorm's crossover is NOT a row count. The per-element kernel gives
+        // thread t row t, so a warp's loads are `n` floats apart and each
+        // 32-byte sector fetched serves one useful float; the cooperative
+        // kernel walks a row with 64 threads and is coalesced by construction.
+        // That penalty does not go away as rows grow — measured on a P40 at a
+        // fixed 4.7M elements, the cooperative variant wins at EVERY width
+        // (19.4x at n=128/m=36864, 2.5x at n=1024, 11.2x at n=9216; see
+        // `rmsnorm_rows.wgsl`). The old `m <= DECODE_REGIME_MAX_ROWS` gate was
+        // therefore leaving 2-20x on the table for every prefill/encoder shape.
+        // Reference stays in the list (and first without workgroup barriers)
+        // because the CPU JIT cannot run the barrier.
         Op::RmsNorm => {
-            if shape.m <= DECODE_REGIME_MAX_ROWS && caps.workgroup_reductions {
+            if caps.workgroup_reductions {
                 vec![WorkgroupPerOutput, Reference]
             } else {
                 vec![Reference]
@@ -338,14 +349,29 @@ mod tests {
         assert_eq!(s.select(Op::RmsNorm, decode, &cpu_caps()), KernelVariant::Reference);
     }
 
-    /// Training-sized M keeps the reference kernels — the regime boundary is
-    /// the whole point of having a shape input.
+    /// Training-sized M keeps the reference MatMul — for a GEMM the regime
+    /// boundary really is a row count (the 128x128 tile is idle at m<=32).
     #[test]
-    fn large_m_keeps_reference() {
+    fn large_m_keeps_reference_matmul() {
         let s = DefaultSelector;
         let train = shape(4096, 512, 512, Dtype::F32);
         assert_eq!(s.select(Op::MatMul, train, &gpu_caps()), KernelVariant::Reference);
-        assert_eq!(s.select(Op::RmsNorm, train, &gpu_caps()), KernelVariant::Reference);
+    }
+
+    /// …but RmsNorm does NOT: the per-element kernel's loss is uncoalesced
+    /// global reads, which large M does not fix. Measured 2.5-22x for the
+    /// cooperative kernel at every width on a P40 (see `rmsnorm_rows.wgsl`),
+    /// so it is the choice at prefill/encoder row counts too — the regression
+    /// this test exists to prevent is silently reverting to `m <= 32`.
+    #[test]
+    fn rmsnorm_prefers_cooperative_at_every_row_count() {
+        let s = DefaultSelector;
+        for m in [1u32, 32, 1536, 36864] {
+            let sh = shape(m, 128, 0, Dtype::F32);
+            assert_eq!(s.select(Op::RmsNorm, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}");
+            // No workgroup barriers (the CPU JIT) -> the reference, always.
+            assert_eq!(s.select(Op::RmsNorm, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
+        }
     }
 
     /// Int8 selects the packed kernels only where they execute — and splits

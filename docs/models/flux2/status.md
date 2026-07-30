@@ -182,6 +182,11 @@ per-token scale: 0.995 → 0.984 if quantized), `img_in` + `final_layer.linear`
 | int8 DiT + int8 TE, **one card** | 11.654 s | **54.5 s** | **5.6 GiB** |
 | speedup | **1.10×** | 1.10× | 5.5× smaller |
 
+> **Superseded by P9.** Every timing in this section predates the attention
+> fix; the fp32 forward is now 2.757 s and the fp32 512² image 18.3 s. The
+> *analysis* below stands and is what P9 acted on — read it as the diagnosis
+> that led there, not as current numbers.
+
 DP4A promises ~4×; we measured 1.10×. Cause: **neither path is
 arithmetic-bound.** The forward is 10.17 TFLOP; fp32 achieves 0.79 TFLOPS =
 **6.7 % of the P40's 11.8 TFLOPS**, int8 0.87 TOPS = **1.9 % of its 47 TOPS**.
@@ -200,6 +205,206 @@ gives an arithmetic intensity ≈32 FLOP/byte against the P40's ridge point
 compute-bound territory. But 6.7 % is far below even the bandwidth-bound
 ceiling, so a per-kernel profile must name the dominant cost before tuning.
 
+## P9 (2026-07-30) — profiling the DiT forward: the limiter was ATTENTION, not the GEMMs
+
+P8 left the forward at **6.7 % of the P40's fp32 peak** and named
+`matmul_reg2`'s tiling as the first hypothesis. A per-kernel profile killed
+that hypothesis and found a different, much larger one.
+
+### The harness
+
+`crates/flux2/src/bin/flux2_bench.rs` (modelled on `zimage_bench train`): the
+DiT graph's cost depends only on *shape*, so the bench replays the exact
+dispatch sequence of `Flux2Model::forward` over correctly-shaped scratch — no
+15.5 GiB checkpoint, profile in seconds, and each shape class timeable in
+isolation. Modes: `mm` / `mm3` (standalone GEMM per shape), `floor`
+(per-dispatch cost), `norm`, `flash`, `replay` (the whole graph, per group).
+Its analytic FLOP total reproduces the real graph's **10 173 GFLOP**, and its
+single-submit wall time reproduces the real forward to 1 % (12.766 s replay vs
+12.873 s measured), so the replay is a faithful stand-in.
+
+Per-group numbers drain the queue between groups; the drain costs one queue
+round-trip each (0.073 ms), and the 284 groups sum to 12.742 s against 12.766 s
+for the same steps in one submit — i.e. **the instrumentation overhead is 0.2 %**
+and the per-group split is trustworthy.
+
+### Profile BEFORE (klein-4B, 1536 joint tokens = 512 txt + 1024 img, 1×P40)
+
+| kind | dispatches | ms | % of forward |
+|---|---:|---:|---:|
+| **`flash_attn_bidir`** | 25 | **10 352.8** | **81.2 %** |
+| `matmul_reg2` | 213 | 2 075.4 | 16.3 % |
+| `rmsnorm_eps` (QK-norm) | 60 | 187.8 | 1.5 % |
+| `layernorm` | 41 | 58.1 | 0.5 % |
+| rope + `pack_qkv` | 75 | 25.1 | 0.2 % |
+| `silu_mul` | 25 | 22.3 | 0.2 % |
+| `gate_row` | 60 | 20.7 | 0.2 % |
+| **whole graph, one submit** | **499** | **12 766** | 798 GFLOP/s = **6.8 % of peak** |
+
+Attention is 725 GFLOP of the 10 173, and it was taking **10.35 s → 70 GFLOP/s
+= 0.6 % of peak**. The GEMMs — the thing P8 suspected — were already at
+**35.8 % of peak** and accounted for only 16 % of the time.
+
+### Diagnosis
+
+`flash_attn_bidir` gives every thread one query row and holds that row's
+`q[128]` and output accumulator `o[128]` in `var<function>` arrays. 256 f32 per
+thread cannot fit Pascal's 255-register file, and both loops are bounded by the
+**runtime** `p.head_dim`, so they cannot be unrolled either — naga/the driver
+place both arrays in **local memory, which is global-memory backed**. The inner
+loop then performs ~3 local-memory accesses (`q[d]`, `o[d]` read, `o[d]` write)
+per 2 FLOP = 6 bytes/FLOP. At the P40's 346 GB/s that is a **58 GFLOP/s roof**,
+and the kernel measured 70 GFLOP/s — it was running at local-memory bandwidth,
+exactly as the arithmetic predicts. This is also why int8 bought only 1.10× in
+P8: 81 % of the forward was a kernel no GEMM precision can touch.
+
+### Hypotheses tested and REJECTED (with the numbers that killed them)
+
+1. **`matmul_reg2` tiling / arithmetic intensity (P8's first hypothesis).**
+   Wrong on its own terms: AI = `2·BM·BN·BK / ((BM+BN)·BK·4)` — **BK cancels**,
+   so AI is 32 FLOP/byte for *any* K-block depth and deeper K-blocking cannot
+   change it. And 32 FLOP/byte × 346 GB/s = an 11.1 TFLOP/s roof ≈ the card's
+   peak, while the kernel achieves 4.2 TFLOP/s using only ~131 GB/s = 38 % of
+   the card's bandwidth. The GEMM was never bandwidth-bound.
+2. **Dispatch/submit overhead.** Measured floor: 0.0065 ms per dispatch
+   (500 in one submit). The forward's 499 dispatches cost **3.3 ms = 0.03 %**.
+3. **Sliced views (`step_sliced` txt-rows-then-img-rows = 2 dispatches).**
+   The double-block pair m=512 (2.414 ms) + m=1024 (4.666 ms) = 7.08 ms; the
+   merged m=1536 GEMM is 7.016 ms. Merging would save **0.9 %** of the double
+   blocks' GEMM time, i.e. ~0.06 ms per pair.
+4. **Occupancy on small-m dispatches.** m=512 reaches 34.0 % of peak vs 35.1 %
+   at m=1536 — a 3 % effect, not the missing 93 %.
+
+### Fixes
+
+**1. `flash_attn_bidir_split.wgsl` — lane-split flash attention (new kernel).**
+Splits `head_dim` across LANES=4 threads so each thread owns 32 channels
+indexed by a *compile-time* trip count → real registers. The per-key dot
+product becomes a partial per lane, summed through a small shared buffer once
+per key tile; the `o` rescale moves out of the per-key loop to once per tile.
+Shared layouts are bank-conflict-free by construction (lanes own *interleaved*
+channels, so the 4 lanes of a row touch 4 consecutive banks; `part` is indexed
+`[j][row][lane]` so a warp spans all 32 banks exactly once). `@workgroup_size(256)`
+= BR 64 × LANES 4, gated on the device's **queried** `max_workgroup_size`.
+
+| head_dim | `flash_attn_bidir` | split | speedup |
+|---:|---:|---:|---:|
+| 128 | 411.7 ms | **14.2 ms** | **29.0×** |
+| 96 | 406.6 ms | 18.6 ms | 21.9× |
+| 64 | 400.7 ms | 27.8 ms | 14.4× |
+| 32 | 235.1 ms | 54.0 ms | 4.4× |
+
+Agreement with the baseline: **cosine 1.00000000, max_abs 1.3e-6**. It wins at
+every head_dim, so it is a general replacement, not a wide-head special case;
+selection lives in `model::block::{FlashIds, flash_bidir_step}` and both
+`flux2` and `zimage` now go through it. **Forward 12.766 s → 2.699 s.**
+
+**2. QK-norm: the existing `rmsnorm_rows`, not `rmsnorm_eps`.** No new kernel —
+a dispatch-choice bug. `rmsnorm_eps` gives thread *t* row *t*, so a warp's 32
+loads are `head_dim`=128 floats apart and each 32-byte sector fetched serves
+one useful float. At the QK-norm shape (36 864 rows × 128): **3.85 ms →
+0.20 ms, 10 GB/s → 190 GB/s, 19.4×** (max_abs 8.3e-7 — reduction order only).
+`rmsnorm_rows` gained the runtime `eps` its `rmsnorm_eps` twin already had so
+there is still ONE workgroup-per-row RMSNorm; its two qwen callers pass 1e-6
+explicitly. **QK-norm 187.8 ms → 12.5 ms.**
+
+**3. `matmul_reg3.wgsl` — `matmul_reg2` with its bank conflicts removed.**
+Two layout-only changes: threads own *interleaved* rows/columns (stride 16)
+instead of contiguous 8-blocks, which turns the B-tile read from a 4-way
+conflict into a conflict-free access and makes the epilogue's stores
+coalesced; and the tile stride is padded 128→129 so the staging store's bank
+index is `(kk+r) mod 32` rather than `r mod 32` (8-way → ~3-way). The K
+accumulation order is untouched, so the output is **bit-identical** — measured
+max_abs **0.0** across all 12 of the graph's shapes. Added alongside;
+`matmul_reg2` remains the default for every other model.
+
+| shape (m×k×n) | count | reg2 | reg3 | speedup |
+|---|---:|---:|---:|---:|
+| 1536×3072×3072 (sgl qkv/wo_a) | 80 | 7.016 ms | 6.535 ms | 1.07× |
+| 1536×3072×9216 (sgl w1/w3) | 40 | 19.774 ms | 19.880 ms | 0.99× |
+| 1536×9216×3072 (sgl wo_b) | 20 | 17.341 ms | 15.745 ms | 1.10× |
+| 1024×3072×3072 (dbl img) | 20 | 4.666 ms | 3.950 ms | 1.18× |
+| 1024×9216×3072 (dbl img w2) | 5 | 13.653 ms | 11.643 ms | 1.17× |
+| 512×3072×3072 (dbl txt) | 20 | 2.414 ms | 2.170 ms | 1.11× |
+| 512×7680×3072 (txt_in) | 1 | 5.827 ms | 5.308 ms | 1.10× |
+| 1024×128×3072 (img_in) | 1 | 0.369 ms | 0.248 ms | 1.49× |
+| **whole forward's GEMMs** | 213 | **2151 ms (37.4 %)** | **2050 ms (39.2 %)** | **1.05×** |
+
+The n=9216 shapes (the bulk) do not move — at that width the kernel is limited
+by shared-memory *throughput*, not conflicts. Going past ~40 % needs vec4
+shared loads or a bigger register block; that is the next GEMM step, not this
+one.
+
+### Profile AFTER
+
+| kind | dispatches | ms | % of forward |
+|---|---:|---:|---:|
+| `matmul_reg3` | 213 | 1 987.3 | 80.0 % |
+| `flash_attn_bidir_split` | 25 | 359.2 | 14.5 % |
+| `layernorm` | 41 | 57.5 | 2.3 % |
+| rope + `pack_qkv` | 75 | 24.6 | 1.0 % |
+| `silu_mul` | 25 | 21.9 | 0.9 % |
+| `gate_row` | 60 | 20.2 | 0.8 % |
+| `rmsnorm_rows` (QK-norm) | 60 | 12.5 | 0.5 % |
+| **whole graph, one submit** | **499** | **2 421** | 4202 GFLOP/s = **35.7 % of peak** |
+
+### Measured on the real model (not the replay)
+
+| | before | after | speedup |
+|---|---:|---:|---:|
+| fp32 forward @1536 joint tokens | 12.873 s | **2.757 s** | **4.67×** |
+| int8 (DP4A) forward | 11.654 s | **1.532 s** | **7.61×** |
+| fp32 → int8 ratio | 1.10× | **1.80×** | — |
+| fraction of fp32 peak | 6.7 % | **35.7 %** | 5.3× |
+
+The int8 ratio moving from 1.10× to 1.80× is the diagnosis confirming itself:
+DP4A could not show up while a memory-bound attention kernel owned 81 % of the
+forward. int8 is now a speed win as well as the capacity win P8 documented.
+
+### End to end
+
+`brain flux2 generate --width 512 --height 512` (klein-4B, 4 steps, fp32 DiT on
+gpu0 + fp32 Qwen3-4B text encoder on gpu1 — the same two-card placement the
+59.8 s baseline used):
+
+| | before | after |
+|---|---:|---:|
+| 512² 4-step image, wall clock | 59.8 s | **18.3 s** (3.27×) |
+| ...of which the 4 DiT forwards | 51.5 s | **11.0 s** |
+| ...of which text encode + VAE decode | ~8.3 s | ~7.3 s (untouched) |
+
+The DiT is no longer the majority of the wall clock. Reaching the 8-12 s target
+now requires profiling the **text-encoder + VAE** half, which this pass did not
+touch: at 7.3 s it is 40 % of the remaining time. (A cheap-looking lead was
+ruled out by estimate rather than left implied — qwen's prefill forward still
+uses the per-element RMSNorm that P9 replaced in the DiT, but at the TE's
+shapes that is worth only ~145 ms of the 7.3 s, so the cost is elsewhere and
+the TE needs its own profile.)
+
+Gates: `dit_parity` **cosine 1.000000** (t2i and edit fixtures, unchanged);
+`int8_parity` cosine 0.998232 vs both fp32 and the golden (gate ≥ 0.998; was
+0.998950 — the split kernel's reduction order differs, fp32 parity is
+unaffected at 1.000000, and the shift is int8 quantisation noise landing
+differently, so the margin narrowed from 9.5e-4 to 2.3e-4 while staying green);
+`make gradcheck` OK (29 tensors); the crates this change touches
+(`kernels`, `backend-api`, `gpu-core`, `model`, `qwen`, `zimage`, `flux2`)
+all green — including zimage's block/model/dev/real parity tests, which is the
+regression evidence for the shared `flash_bidir_step` seam. (Those tests run at
+toy dims where zimage takes the materialised-trio branch, so the equivalence
+evidence for the flash path itself is the kernel-level A/B above: cosine
+1.00000000 at four head_dims.)
+
+**Pre-existing failure found, not introduced here:**
+`flux2 --test host_forward_parity` panics on a GPU backend with
+`Buffer offset 192 does not respect min_storage_buffer_offset_alignment 256`.
+Verified identical on the parent commit with these changes stashed; it passes
+on `BRAIN_DEVICE=cpu` (no offset rule there), which is how it has been running.
+It is the fp32 face of the constraint `new_with` already asserts for int8
+("every sliced row offset is 0 or txt_len rows, so widths and txt_len must be
+multiples of 64") — the test's toy dims put a `step_sliced` row offset at 48
+floats. The fix is to give the test int8-legal dims, or to assert the
+alignment in `mm_rows` so it fails with a readable message; tracked below.
+
 ## Known gaps / remaining
 
 - Serving landed (P5), perf target + first CPU measurement landed (P6 above);
@@ -207,11 +412,26 @@ ceiling, so a per-kernel profile must name the dominant cost before tuning.
   `run_batch` is a follow-up (see P5 batching bullet). A GPU perf run and a
   `sweep` ladder (concurrency behaviour under the sequential-`run_batch`
   scheduler) wait on the GPU path being measured at all.
-- **Kernel efficiency is the open problem**: 6.7 % of fp32 peak / 1.9 % of
-  int8 peak (P8 above). Per-kernel profiling + autotune at Klein shapes is the
-  critical path to the 8–12 s (fp32) / 3–5 s (int8) realistic floors.
+- **Kernel efficiency** (was the open problem at P8) is now 35.7 % of fp32
+  peak after P9. What remains, in profile order:
+  - the GEMMs are 80 % of the forward at 39 % of peak; the ceiling for the
+    current shared-memory scheme is ~50 % (one shared word per FMA), so the
+    next step is vec4 shared loads or a larger register block, not tiling depth;
+  - `layernorm` (57.5 ms, 2.3 %) still has the one-thread-per-row coalescing
+    problem P9 fixed for RMSNorm — there is no workgroup-per-row LayerNorm
+    kernel yet, and adding one is the same 4-20× shaped win;
+  - `flash_attn_bidir_split` is at 17 % of peak, itself shared-memory bound at
+    one shared word per FMA; two query rows per thread would double its roof.
 - True batched `run_batch` still to come; the kernels already carry the hooks
   (attention `bsz`, `film_row`/`gate_row` `rows_per_cond` groups), so
   mixed-progress continuous batching needs no new WGSL.
 - Klein-9B-KV cached-ref attention variant: out of scope (needs per-token
   modulation blend, breaks the LN fold).
+- `tests/host_forward_parity.rs` cannot run on a GPU backend: its toy dims put a
+  `step_sliced` row offset at 48 floats, under the 256-byte
+  `min_storage_buffer_offset_alignment`. Pre-existing (see P9); pick dims that
+  are multiples of 64, and assert the alignment in `Flux2Model::mm_rows` so the
+  next occurrence names itself instead of surfacing as a wgpu validation error.
+- The **text encoder + VAE** half is now 40 % of a 512² generation (7.3 s of
+  18.3 s) and has never been profiled. That, not the DiT, is what stands
+  between this model and the 8-12 s target.

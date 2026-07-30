@@ -38,8 +38,9 @@ pub(crate) const K_QUANT_PACK: usize = 10;
 pub(crate) const K_MATMUL_I8: usize = 11;
 pub(crate) const K_MAX_ABS_ROW: usize = 12;
 pub(crate) const K_FLASH: usize = 13;
+pub(crate) const K_FLASH_SPLIT: usize = 14;
 
-pub(crate) const KERNELS: [(&str, &str); 14] = [
+pub(crate) const KERNELS: [(&str, &str); 15] = [
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("matmul", kernels::MATMUL),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
@@ -59,6 +60,7 @@ pub(crate) const KERNELS: [(&str, &str); 14] = [
     // Flash attention: fused scores/softmax/apply with online softmax, O(T·hd)
     // memory (no materialised [nh·T·T]). Enables high-resolution latents.
     ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
+    ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
 ];
 
 /// Host tensors by name → `(shape, row-major f32 data)`.
@@ -281,9 +283,16 @@ pub(crate) fn use_flash(gpu: &Gpu, nh: u32, t: u32) -> bool {
 /// O(t·hd) memory; otherwise the materialised trio.
 pub(crate) fn push_attention(gpu: &Gpu, s: &mut Vec<Step>, scr: &Scratch, nh: u32, t: u32, hd: u32, dim: u32, flash: bool) {
     if flash {
-        let br = 64u32; // must match BR in flash_attn_bidir.wgsl
-        let nwg = nh * t.div_ceil(br);
-        s.push(gpu.step(K_FLASH, &[&scr.qkv, &scr.ctx], &[1, nh, t, hd, 3 * dim, 0, dim, 2 * dim, dim], nwg * br));
+        s.push(model::block::flash_bidir_step(
+            gpu,
+            model::block::FlashIds { bidir: K_FLASH, split: Some(K_FLASH_SPLIT) },
+            nh,
+            t,
+            hd,
+            dim,
+            &scr.qkv,
+            &scr.ctx,
+        ));
     } else {
         s.push(gpu.step(K_SCORES, &[&scr.qkv, &scr.scores], &[1, nh, t, hd, 3 * dim, 0, dim], nh * t * t));
         s.push(gpu.step(K_SOFTMAX, &[&scr.scores, &scr.probs], &[1, nh, t], nh * t));
