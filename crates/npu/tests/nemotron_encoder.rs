@@ -177,3 +177,45 @@ fn encoder_head_matches_reference_on_cpu() {
     assert!(cosine > 0.999, "encoder-head parity cosine {cosine} too low");
     assert!(maxdiff < 5e-2, "encoder-head parity maxdiff {maxdiff} too high");
 }
+
+/// Structural gate (no OpenVINO): the FULL encoder graph (subsampling → 24 blocks
+/// → projectors) decodes to a well-formed ONNX model with the `mel` input, the
+/// `pooler` output, and one attention Softmax per Conformer block — i.e. the
+/// stage-1 (validated by nemotron_subsampling) and stage-2/3 (validated above)
+/// composition wires up.
+#[test]
+fn full_encoder_graph_is_well_formed() {
+    let (cfg, topo, _t, _v, prompt_id) = tiny();
+    let mut w = weights(&cfg);
+    // stage-1 (subsampling) weights
+    let (ch, k, hidden) = (topo.subsampling_channels as usize, topo.subsampling_kernel as usize, topo.hidden as usize);
+    let mut seed = 9000u64;
+    let mut put = |w: &mut HashMap<String, Vec<f32>>, name: String, n: usize| {
+        seed += 1;
+        w.insert(name, fill(seed, n, 0.05));
+    };
+    put(&mut w, "encoder.subsampling.conv_in.weight".into(), ch * k * k);
+    put(&mut w, "encoder.subsampling.conv_in.bias".into(), ch);
+    for i in 0..(topo.subsampling_stages as usize - 1) {
+        put(&mut w, format!("encoder.subsampling.layers.{i}.depthwise_conv.weight"), ch * k * k);
+        put(&mut w, format!("encoder.subsampling.layers.{i}.depthwise_conv.bias"), ch);
+        put(&mut w, format!("encoder.subsampling.layers.{i}.pointwise_conv.weight"), ch * ch);
+        put(&mut w, format!("encoder.subsampling.layers.{i}.pointwise_conv.bias"), ch);
+    }
+    let flat = ch * topo.out_freq() as usize;
+    put(&mut w, "encoder.subsampling.linear.weight".into(), hidden * flat);
+    put(&mut w, "encoder.subsampling.linear.bias".into(), hidden);
+
+    let (mel_t, mel_valid) = (32u32, 24u32);
+    let bytes = npu::nemotron_export::build_nemotron_bytes(&w, &topo, mel_t, mel_valid, prompt_id);
+    let model = onnx::decode_model(&bytes).expect("valid ONNX ModelProto");
+    let g = model.graph.expect("model has a graph");
+    assert!(g.input.iter().any(|v| v.name == "mel"), "missing mel input");
+    assert!(g.output.iter().any(|v| v.name == "pooler"), "missing pooler output");
+    let ops: Vec<&str> = g.node.iter().map(|n| n.op_type.as_str()).collect();
+    for op in ["Conv", "MatMul", "Softmax", "Sigmoid", "Relu", "Pad", "Slice", "Transpose", "Concat"] {
+        assert!(ops.contains(&op), "expected a {op} node in the full encoder");
+    }
+    let softmaxes = ops.iter().filter(|&&o| o == "Softmax").count();
+    assert_eq!(softmaxes, topo.n_layers as usize, "one attention Softmax per Conformer block");
+}

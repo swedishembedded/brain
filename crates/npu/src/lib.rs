@@ -40,6 +40,7 @@ pub mod topology;
 pub mod wm_topology;
 pub mod mirror_topology;
 pub mod nemotron_topology;
+pub mod nemotron_export;
 
 // OpenVINO runtime seam (real on x86_64 linux/windows, stub elsewhere).
 pub mod openvino;
