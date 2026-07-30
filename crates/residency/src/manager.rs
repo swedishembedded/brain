@@ -27,6 +27,45 @@ use crate::{Device, Instance, InstanceKey, ResidentModel, Tier};
 /// The scheduler runs it outside the manager lock; the key stays pinned meanwhile.
 pub type InstanceHandle = Arc<Mutex<Box<dyn Instance>>>;
 
+/// Why a claim could not produce a runnable instance. The executor MUST treat
+/// these differently: `NoCapacity` is transient (retry when a lane frees a
+/// device); `Activate` is permanent for the key — the queued jobs must be
+/// failed, or they wait forever and wedge the group.
+#[derive(Debug)]
+pub enum ClaimError {
+    /// No free device can host the instance right now.
+    NoCapacity(String),
+    /// The model/instance itself is unusable (unknown model, activation error).
+    Activate(String),
+}
+
+impl std::fmt::Display for ClaimError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClaimError::NoCapacity(e) | ClaimError::Activate(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<ClaimError> for String {
+    fn from(e: ClaimError) -> String {
+        e.to_string()
+    }
+}
+
+/// What a successful claim yields: an already-hot instance, or a placed,
+/// pre-accounted, pinned slot whose **build is deferred to the caller's
+/// thread**. Deferring matters: `activate()` can take seconds (weight load,
+/// NPU graph compile) or hang outright, and it must never run on the
+/// dispatcher thread where it would freeze ALL scheduling. The caller runs
+/// [`ResidentModel::activate`] and then reports
+/// [`ResidencyManager::adopt`] (success) or
+/// [`ResidencyManager::build_failed`] (unwind the accounting).
+pub enum Claimed {
+    Hot(InstanceHandle),
+    Build(Arc<dyn ResidentModel>),
+}
+
 /// Owns the resident model instances, their budgets, and the LRU. Not thread-safe by
 /// itself — the scheduler owns one behind its worker(s).
 pub struct ResidencyManager {
@@ -46,9 +85,11 @@ impl ResidencyManager {
         ResidencyManager { models: HashMap::new(), budgets, residents: Residents::new(), instances: HashMap::new(), events: Vec::new(), builds: 0, evictions: 0 }
     }
 
-    /// Number of currently-hot instances.
+    /// Number of resident (budget-accounted) instances. Counted from the
+    /// accounting map, not the built-instance map: a deferred build is already
+    /// resident (placed, budgeted, pinned) while its lane is still activating.
     pub fn resident_count(&self) -> usize {
-        self.instances.len()
+        self.residents.iter().count()
     }
 
     pub fn register(&mut self, model: Arc<dyn ResidentModel>) {
@@ -98,33 +139,102 @@ impl ResidencyManager {
 
     /// Ensure the instance for `(model, action, inv)` is Hot, then run the action.
     /// Promotes (evicting LRU as needed) automatically. Pins the instance while it
-    /// runs so a concurrent request can't evict it mid-job.
+    /// runs so a concurrent request can't evict it mid-job. (Synchronous path —
+    /// deferred builds run inline on this thread.)
     pub fn run(&mut self, model: &str, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let (handle, _device, key) = self.claim(model, action, inv, &no_exclude())?;
+        let (handle, key) = self.claim_built(model, action, inv)?;
         let out = handle.lock().unwrap().run(action, inv, progress);
         self.release(&key);
         out
     }
 
-    /// Ensure the instance for `(model, action, inv)` is Hot and **pin** it, returning
-    /// a runnable handle + its device. The caller runs the handle (outside the manager
-    /// lock, so other lanes proceed) and MUST call [`release`](Self::release) after.
-    /// `exclude` names devices a concurrent lane is already using (so this placement
-    /// avoids them).
+    /// [`claim`](Self::claim) + build inline when needed — for synchronous callers
+    /// that are not a scheduler dispatcher.
+    fn claim_built(&mut self, model: &str, action: &str, inv: &Invocation) -> Result<(InstanceHandle, InstanceKey), String> {
+        let (claimed, device, key) = self.claim(model, action, inv, &no_exclude()).map_err(String::from)?;
+        let handle = match claimed {
+            Claimed::Hot(h) => h,
+            Claimed::Build(m) => match m.activate(&key, device) {
+                Ok(inst) => self.adopt(&key, Arc::new(Mutex::new(inst))),
+                Err(e) => {
+                    self.build_failed(&key);
+                    return Err(e);
+                }
+            },
+        };
+        Ok((handle, key))
+    }
+
+    /// Place + **pin** the instance for `(model, action, inv)`, returning either a
+    /// hot handle or a deferred build (see [`Claimed`]). The caller runs the handle
+    /// (outside the manager lock, so other lanes proceed) and MUST call
+    /// [`release`](Self::release) after — or, for a deferred build,
+    /// [`adopt`](Self::adopt) / [`build_failed`](Self::build_failed) first.
+    /// `exclude` names devices a concurrent lane is already using (so this
+    /// placement avoids them).
     pub fn claim(
         &mut self,
         model: &str,
         action: &str,
         inv: &Invocation,
         exclude: &HashSet<Device>,
-    ) -> Result<(InstanceHandle, Device, InstanceKey), String> {
-        let m = self.models.get(model).ok_or_else(|| format!("no model '{model}'"))?.clone();
+    ) -> Result<(Claimed, Device, InstanceKey), ClaimError> {
+        let m = self
+            .models
+            .get(model)
+            .ok_or_else(|| ClaimError::Activate(format!("no model '{model}'")))?
+            .clone();
         let key = m.instance_key(action, inv);
-        self.ensure_hot(&key, &m, exclude)?;
+        if self.instances.contains_key(&key) {
+            self.residents.touch(&key);
+            self.residents.set_pinned(&key, true);
+            let handle = self.instances.get(&key).expect("hot").clone();
+            let device = self.residents.get(&key).expect("resident").device;
+            return Ok((Claimed::Hot(handle), device, key));
+        }
+        // Cold: place + pre-account + pin NOW (so nothing steals the budget or
+        // evicts the slot), but defer the potentially slow/hanging activate() to
+        // the caller's thread.
+        let cost = m.estimate(&key);
+        let device = match pick_device(&cost, &self.budgets, exclude) {
+            Some(d) => d,
+            None => {
+                let plan = plan_eviction(&cost, &self.budgets, &self.residents, &[key.clone()], exclude)
+                    .ok_or_else(|| {
+                        ClaimError::NoCapacity(format!(
+                            "{key} ({} MiB) is too large for any available device",
+                            cost.vram >> 20
+                        ))
+                    })?;
+                for victim in &plan.victims {
+                    self.evict(victim);
+                }
+                plan.device
+            }
+        };
+        self.budgets.alloc(device, cost.on(device));
+        self.residents.insert(key.clone(), cost, device);
         self.residents.set_pinned(&key, true);
-        let handle = self.instances.get(&key).expect("hot").clone();
-        let device = self.residents.get(&key).expect("resident").device;
-        Ok((handle, device, key))
+        self.events.push(format!("promote {key} -> {device:?} (building)"));
+        Ok((Claimed::Build(m), device, key))
+    }
+
+    /// A deferred build succeeded: adopt the instance so later claims find it hot.
+    pub fn adopt(&mut self, key: &InstanceKey, handle: InstanceHandle) -> InstanceHandle {
+        self.instances.insert(key.clone(), handle.clone());
+        self.builds += 1;
+        self.events.push(format!("built {key}"));
+        handle
+    }
+
+    /// A deferred build failed: unwind the pre-accounted budget + resident slot.
+    /// The claim is over — do NOT also call [`release`](Self::release).
+    pub fn build_failed(&mut self, key: &InstanceKey) {
+        if let Some(entry) = self.residents.remove(key) {
+            self.budgets.release(entry.device, entry.cost.on(entry.device));
+        }
+        self.instances.remove(key);
+        self.events.push(format!("build-failed {key}"));
     }
 
     /// Unpin an instance after a run and mark it most-recently-used.
@@ -139,38 +249,10 @@ impl ResidencyManager {
     /// them (a model with real batch support does one forward; others loop).
     pub fn run_batch(&mut self, model: &str, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(Progress)) -> Result<Vec<ActionResult>, String> {
         let first = invs.first().ok_or("empty batch")?;
-        let (handle, _device, key) = self.claim(model, action, first, &no_exclude())?;
+        let (handle, key) = self.claim_built(model, action, first)?;
         let out = handle.lock().unwrap().run_batch(action, invs, progress);
         self.release(&key);
         Ok(out)
-    }
-
-    /// Promote `key` to Hot if not already: pick a device (evicting LRU victims when
-    /// nothing fits), build the instance, and account its budget.
-    pub fn ensure_hot(&mut self, key: &InstanceKey, m: &Arc<dyn ResidentModel>, exclude: &HashSet<Device>) -> Result<(), String> {
-        if self.instances.contains_key(key) {
-            self.residents.touch(key);
-            return Ok(());
-        }
-        let cost = m.estimate(key);
-        let device = match pick_device(&cost, &self.budgets, exclude) {
-            Some(d) => d,
-            None => {
-                let plan = plan_eviction(&cost, &self.budgets, &self.residents, &[key.clone()], exclude)
-                    .ok_or_else(|| format!("{key} ({} MiB) is too large for any available device", cost.vram >> 20))?;
-                for victim in &plan.victims {
-                    self.evict(victim);
-                }
-                plan.device
-            }
-        };
-        let inst = m.activate(key, device)?;
-        self.budgets.alloc(device, cost.on(device));
-        self.residents.insert(key.clone(), cost, device);
-        self.instances.insert(key.clone(), Arc::new(Mutex::new(inst)));
-        self.builds += 1;
-        self.events.push(format!("promote {key} -> {device:?}"));
-        Ok(())
     }
 
     /// Demote (drop) an instance, freeing its device memory.

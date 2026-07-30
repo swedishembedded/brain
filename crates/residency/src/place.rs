@@ -118,6 +118,21 @@ pub fn pick_device(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>)
             }
         }
     }
+    // Zero-cost (stateless) instance: fits anywhere by definition. Prefer the
+    // CPU so it never ties up an accelerator lane; fall back to any free
+    // device. (Without this branch a stateless model — demo, imageops — was
+    // UNPLACEABLE: every class loop skips on need == 0 and the CPU branch
+    // requires ram > 0, so its jobs sat in the queue forever, silently.)
+    if cost.npu == 0 && cost.vram == 0 && cost.ram == 0 {
+        if !exclude.contains(&Device::Cpu) && budgets.get(Device::Cpu).is_some() {
+            return Some(Device::Cpu);
+        }
+        for d in budgets.devices() {
+            if !exclude.contains(&d) {
+                return Some(d);
+            }
+        }
+    }
     None
 }
 

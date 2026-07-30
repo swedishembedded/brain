@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
 
-use crate::manager::InstanceHandle;
+use crate::manager::{ClaimError, Claimed, InstanceHandle};
 use crate::scheduler::{choose_next, Group, Policy};
 use crate::{Device, InstanceKey, ResidencyManager, ResidentModel};
 
@@ -61,15 +61,22 @@ pub struct Stats {
     pub max_parallel: usize,
 }
 
-/// A message to the dispatcher: a new job, or a lane finishing a group.
+/// A message to the dispatcher: a new job, a lane adopting a freshly built
+/// instance, or a lane finishing a group (`failed` = the deferred activate
+/// errored; the lane already replied to the jobs, the manager must unwind).
 enum Msg {
     Submit(Box<Job>),
-    Done { key: InstanceKey, device: Device, batch: usize },
+    Built { key: InstanceKey, handle: InstanceHandle },
+    Done { key: InstanceKey, device: Device, batch: usize, failed: bool },
 }
 
-/// A group of same-key jobs handed to a device lane to run.
+/// A group of same-key jobs handed to a device lane to run. `work` is either a
+/// hot handle or a deferred build the LANE performs — activation (weight load,
+/// NPU graph compile) can take seconds or hang, and on the dispatcher thread
+/// that froze every model on the server; on the lane it can only stall its own
+/// device.
 struct RunReq {
-    handle: InstanceHandle,
+    work: Claimed,
     action: String,
     jobs: Vec<Pending>,
     key: InstanceKey,
@@ -184,8 +191,15 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
             }
             None => (job.reply)(Err(format!("no model '{}'", job.model))),
         },
-        Msg::Done { key, device, batch } => {
-            mgr.release(&key);
+        Msg::Built { key, handle } => {
+            mgr.adopt(&key, handle);
+        }
+        Msg::Done { key, device, batch, failed } => {
+            if failed {
+                mgr.build_failed(&key); // unwind budget + slot; jobs already failed
+            } else {
+                mgr.release(&key);
+            }
             running.remove(&key);
             busy.remove(&device);
             let mut s = stats.lock().unwrap();
@@ -215,8 +229,12 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
             Some(x) => x,
             None => break, // nothing runnable right now
         };
-        // `placeable`'s ids index into itself; map back to the row it came from.
-        let chosen = placeable[gid].id; // == the row index in `rows`
+        // choose_next returns the group's `id` FIELD — which group_rows numbered
+        // as its index into `rows` — never an index into the filtered
+        // `placeable` slice. (Indexing `placeable[gid]` here panicked the
+        // dispatcher with index-out-of-bounds the moment any group was filtered
+        // out as unplaceable, killing scheduling for the whole server.)
+        let chosen = gid; // == the row index in `rows`
         let (key, model, action) = (rows[chosen].key.clone(), rows[chosen].model.clone(), rows[chosen].action.clone());
 
         // Claim (promote/evict, pin) on a non-busy device.
@@ -225,9 +243,26 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
             Some(i) => i,
             None => break,
         };
-        let (handle, device, ckey) = match mgr.claim(&model, &action, &inv, busy) {
+        let (work, device, ckey) = match mgr.claim(&model, &action, &inv, busy) {
             Ok(c) => c,
-            Err(_) => break, // could not place on a free device this round
+            Err(ClaimError::NoCapacity(_)) => break, // wait for a lane to free a device
+            Err(ClaimError::Activate(e)) => {
+                // Permanent for this group: FAIL its queued jobs now and keep
+                // scheduling the others. (The old code broke out of the whole
+                // round here — the jobs waited forever and every other group
+                // starved behind them.)
+                let msg = format!("{model}/{action}: {e}");
+                let mut i = 0;
+                while i < queue.len() {
+                    if queue[i].key == key && queue[i].action == action {
+                        let p = queue.remove(i);
+                        (p.reply)(Err(msg.clone()));
+                    } else {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
         };
         running.insert(ckey.clone());
         busy.insert(device);
@@ -248,8 +283,8 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
             s.resident = mgr.resident_count();
             s.max_parallel = s.max_parallel.max(busy.len());
         }
-        // Hand to the device's lane.
-        let _ = lanes[&device].send(RunReq { handle, action, jobs, key: ckey, device });
+        // Hand to the device's lane (which builds the instance first when cold).
+        let _ = lanes[&device].send(RunReq { work, action, jobs, key: ckey, device });
     }
 }
 
@@ -290,8 +325,30 @@ fn group_rows(queue: &[Pending], now: Instant, running: &HashSet<InstanceKey>) -
 fn lane_loop(rx: Receiver<RunReq>, done: Sender<Msg>) {
     while let Ok(req) = rx.recv() {
         let batch = req.jobs.len();
-        run_group(&req.handle, &req.action, req.jobs);
-        let _ = done.send(Msg::Done { key: req.key, device: req.device, batch });
+        let handle = match req.work {
+            Claimed::Hot(h) => h,
+            // Deferred activation happens HERE, on the device's own lane: a slow
+            // or wedged build stalls this device only, never the dispatcher.
+            Claimed::Build(m) => match m.activate(&req.key, req.device) {
+                Ok(inst) => {
+                    let h: InstanceHandle = Arc::new(Mutex::new(inst));
+                    let _ = done.send(Msg::Built { key: req.key.clone(), handle: h.clone() });
+                    h
+                }
+                Err(e) => {
+                    // Activation failed: every job in the group gets the error
+                    // (never silence), and the dispatcher unwinds the claim.
+                    let msg = format!("activate {}: {e}", req.key);
+                    for p in req.jobs {
+                        (p.reply)(Err(msg.clone()));
+                    }
+                    let _ = done.send(Msg::Done { key: req.key, device: req.device, batch, failed: true });
+                    continue;
+                }
+            },
+        };
+        run_group(&handle, &req.action, req.jobs);
+        let _ = done.send(Msg::Done { key: req.key, device: req.device, batch, failed: false });
     }
 }
 
@@ -434,5 +491,169 @@ mod tests {
     fn unknown_model_replies_error() {
         let exec = Executor::start(vec![], Budgets::new(), Policy::default());
         assert!(exec.run_blocking("nope", "x", Invocation::new(), |_| {}).is_err());
+    }
+
+    /// A model whose activation always fails.
+    struct BadActivate;
+    impl ResidentModel for BadActivate {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("bad", "always fails to activate", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new("bad", "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(GB, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+            Err("checkpoint not found: /nope.weights".into())
+        }
+    }
+
+    /// REGRESSION (2026-07-30 wedge): an activation failure must (1) reply the
+    /// error to every queued job of the group — never silence — and (2) leave the
+    /// scheduler fully alive for other models. The old code broke out of the
+    /// assign round on any claim error: the jobs waited forever and every later
+    /// Run on ANY model queued behind them.
+    #[test]
+    fn activation_failure_replies_errors_and_does_not_wedge_the_executor() {
+        let builds = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let models: Vec<Arc<dyn ResidentModel>> = vec![
+            Arc::new(BadActivate),
+            Arc::new(Slow { name: "good".into(), vram: GB, ms: 5, builds: builds.clone() }),
+        ];
+        let exec = Executor::start(models, budgets, Policy::default());
+
+        // several queued jobs on the failing model: ALL get the error
+        let (tx, rx) = channel();
+        for _ in 0..3 {
+            let tx = tx.clone();
+            exec.submit(Job { model: "bad".into(), action: "run".into(), inv: Invocation::new(), on_progress: Box::new(|_| {}), reply: Box::new(move |r| { let _ = tx.send(r); }) });
+        }
+        for _ in 0..3 {
+            let r = rx.recv_timeout(Duration::from_secs(5)).expect("reply must arrive, not hang");
+            let e = r.expect_err("activation failure must surface");
+            assert!(e.contains("checkpoint not found"), "err: {e}");
+        }
+        // the executor is still alive: a good model runs fine afterwards
+        let ok = exec.run_blocking("good", "run", Invocation::new(), |_| {});
+        assert!(ok.is_ok(), "executor wedged after activation failure: {ok:?}");
+        // and the failed claim's budget was unwound (nothing resident from `bad`)
+        assert_eq!(exec.stats().resident, 1, "only the good instance is resident");
+        // budget really freed: `bad` can be retried and fails cleanly again
+        assert!(exec.run_blocking("bad", "run", Invocation::new(), |_| {}).is_err());
+    }
+
+    /// A model whose activation is SLOW (weight load / NPU graph compile).
+    struct SlowActivate {
+        ms: u64,
+    }
+    impl ResidentModel for SlowActivate {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("slowboot", "slow activation", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new("slowboot", "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(GB, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+            std::thread::sleep(Duration::from_millis(self.ms));
+            Ok(Box::new(SlowInst { ms: 1 }))
+        }
+    }
+
+    /// REGRESSION: a ZERO-cost (stateless) model must be schedulable. demo/
+    /// imageops have MemCost::default() == 0/0/0; the old pick_device had no
+    /// branch for that, so their jobs were unplaceable and hung forever.
+    #[test]
+    fn zero_cost_stateless_model_is_schedulable() {
+        struct Free;
+        struct FreeInst;
+        impl ResidentModel for Free {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("free", "stateless", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("free", "stateless")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::default() // 0 vram / 0 ram / 0 npu — the demo case
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                Ok(Box::new(FreeInst))
+            }
+        }
+        impl Instance for FreeInst {
+            fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![7])))
+            }
+        }
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Cpu, 8 * GB, 0);
+        let exec = Executor::start(vec![Arc::new(Free)], budgets, Policy::default());
+        let r = exec.run_blocking("free", "run", Invocation::new(), |_| {});
+        assert!(r.is_ok(), "stateless model must run, got {r:?}");
+    }
+
+    /// REGRESSION (dispatcher panic, 2026-07-30): `choose_next` returns a group
+    /// **id** (an index into `rows`), not an index into the FILTERED `placeable`
+    /// slice. With one group unplaceable (here: `b` only fits the busy GPU 0),
+    /// the old `placeable[gid]` was out of bounds — the dispatcher died and every
+    /// later call on any model got "executor worker gone".
+    #[test]
+    fn filtered_unplaceable_group_does_not_kill_the_dispatcher() {
+        let builds = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 8 * GB, 0);
+        let models: Vec<Arc<dyn ResidentModel>> = vec![
+            Arc::new(Slow { name: "a".into(), vram: 10 * GB, ms: 250, builds: builds.clone() }),
+            Arc::new(Slow { name: "b".into(), vram: 20 * GB, ms: 5, builds: builds.clone() }),
+            Arc::new(Slow { name: "c".into(), vram: 4 * GB, ms: 5, builds: builds.clone() }),
+        ];
+        let exec = Executor::start(models, budgets, Policy::default());
+        let (tx, rx) = channel();
+        // a occupies GPU 0; while it runs, b (only fits the busy GPU 0) is
+        // unplaceable and filtered; c (fits GPU 1) must still be scheduled.
+        for m in ["a", "b", "c"] {
+            let tx = tx.clone();
+            exec.submit(Job { model: m.into(), action: "run".into(), inv: Invocation::new(), on_progress: Box::new(|_| {}), reply: Box::new(move |r| { let _ = tx.send(r); }) });
+        }
+        for _ in 0..3 {
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("all three must complete (dispatcher alive)")
+                .unwrap();
+        }
+    }
+
+    /// REGRESSION: activation runs on the device's LANE, never the dispatcher.
+    /// While one model's activation grinds (or hangs), models on other devices
+    /// must keep dispatching. The old code activated inside the dispatcher's
+    /// claim, freezing ALL scheduling for the duration.
+    #[test]
+    fn slow_activation_only_stalls_its_own_device() {
+        let builds = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let models: Vec<Arc<dyn ResidentModel>> = vec![
+            Arc::new(SlowActivate { ms: 600 }),
+            Arc::new(Slow { name: "fast".into(), vram: GB, ms: 5, builds: builds.clone() }),
+        ];
+        let exec = Executor::start(models, budgets, Policy::default());
+
+        let (stx, srx) = channel();
+        exec.submit(Job { model: "slowboot".into(), action: "run".into(), inv: Invocation::new(), on_progress: Box::new(|_| {}), reply: Box::new(move |r| { let _ = stx.send(r); }) });
+        // While slowboot activates on its lane, `fast` must complete quickly.
+        let t = Instant::now();
+        let ok = exec.run_blocking("fast", "run", Invocation::new(), |_| {});
+        let fast_elapsed = t.elapsed();
+        assert!(ok.is_ok());
+        assert!(fast_elapsed < Duration::from_millis(300),
+                "fast model blocked behind another model's activation: {fast_elapsed:?}");
+        // and slowboot itself still completes
+        assert!(srx.recv_timeout(Duration::from_secs(5)).expect("slowboot reply").is_ok());
     }
 }
