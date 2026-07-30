@@ -262,6 +262,73 @@ impl KronosModel {
             .collect()
     }
 
+    /// Cross-sectional batch: forecast N series in one call, running the expensive
+    /// host KV rollouts on a **rayon pool** (the rollout is pure math over the
+    /// immutable `&HostW`, hence `Sync`), while the cheap BSQ tokenize/detokenize
+    /// stay serial on the shared device. Result `i` is bit-identical to
+    /// `forecast_cached` for series `i` — this is the cross-section speedup for a
+    /// universe of same-model names (the eval / ranking workload) with one weight
+    /// copy and warm caches.
+    pub fn forecast_cached_batch(
+        &self,
+        bars_list: &[Vec<f32>],
+        ctx_stamps: &[Vec<u32>],
+        fut_stamps: &[Vec<u32>],
+        pred_len: usize,
+        opts: &GenOpts,
+    ) -> Vec<Vec<f32>> {
+        use rayon::prelude::*;
+        let feat = self.feat();
+        // 1. serial (device): normalize + BSQ-encode each series.
+        let prepped: Vec<(preprocess::Norm, Vec<u32>, Vec<u32>, Vec<u32>, usize)> = bars_list
+            .iter()
+            .zip(ctx_stamps)
+            .zip(fut_stamps)
+            .map(|((bars, cs), fs)| {
+                let t = bars.len() / feat;
+                let (norm, x) = preprocess::normalize(bars, t, feat, 5.0);
+                let (s1, s2) = self.tokenizer.encode(&x, t);
+                let mut stamp = cs.clone();
+                stamp.extend_from_slice(fs);
+                (norm, s1, s2, stamp, t)
+            })
+            .collect();
+        // 2. parallel (host): KV rollout per series over the shared &HostW.
+        let hw = self.decoder.host_weights();
+        let gens: Vec<(Vec<u32>, Vec<u32>)> = prepped
+            .par_iter()
+            .map(|(_norm, s1_ctx, s2_ctx, stamp, t)| {
+                let t = *t;
+                let mut cache = hw.new_cache();
+                let (mut s1, mut s2) = (s1_ctx.clone(), s2_ctx.clone());
+                let mut last = Vec::new();
+                for p in 0..t {
+                    last = hw.step_token(s1[p], s2[p], &stamp[p * 5..p * 5 + 5], p, &mut cache);
+                }
+                let mut rng = SplitMix64::new(opts.seed);
+                for step in 0..pred_len {
+                    let a = sample(&last, opts, &mut rng);
+                    let s2_logits = hw.dep_step_cached(a, &mut cache);
+                    let b = sample(&s2_logits, opts, &mut rng);
+                    s1.push(a);
+                    s2.push(b);
+                    let ppos = t + step;
+                    last = hw.step_token(a, b, &stamp[ppos * 5..ppos * 5 + 5], ppos, &mut cache);
+                }
+                (s1[t..].to_vec(), s2[t..].to_vec())
+            })
+            .collect();
+        // 3. serial (device): detokenize + denormalize.
+        prepped
+            .iter()
+            .zip(gens)
+            .map(|((norm, _, _, _, _), (g1, g2))| {
+                let recon = self.tokenizer.decode(&g1, &g2);
+                preprocess::denormalize(norm, &recon, pred_len, feat)
+            })
+            .collect()
+    }
+
     /// Forecast with the transformer **cores injected** — the seam the NPU path
     /// uses. Same host pipeline as [`forecast`] (normalize → encode context →
     /// AR rollout with per-window calendar → decode → denormalize), but the

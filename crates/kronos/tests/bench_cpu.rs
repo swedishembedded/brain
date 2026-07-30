@@ -129,3 +129,61 @@ fn shared_prefill_parity_and_speed() {
         indep_ms / shared_ms
     );
 }
+
+/// Cross-sectional batch: forecasting N names via the rayon-over-names batch must
+/// be BIT-IDENTICAL to N serial `forecast_cached` calls, and much faster.
+#[test]
+#[ignore]
+fn crosssection_batch_parity_and_speed() {
+    let (Some(tok), Some(dec)) = (env("BRAIN_KRONOS_TOKENIZER"), env("BRAIN_KRONOS_DECODER")) else {
+        eprintln!("SKIP: set BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER");
+        return;
+    };
+    let model = kronos::import::load_model(&tok, &dec).expect("load kronos");
+    let feat = model.feat();
+    let (t, h, n) = (96usize, 5usize, 32usize);
+    let opts = kronos::generate::GenOpts::default(); // argmax → deterministic
+    let bars_list: Vec<Vec<f32>> = (0..n)
+        .map(|k| {
+            let mut b = synth_bars(t, feat);
+            for v in b.iter_mut() {
+                *v += k as f32 * 0.017; // distinct series per name
+            }
+            b
+        })
+        .collect();
+    let ctx_stamps: Vec<Vec<u32>> = (0..n).map(|_| vec![0u32; t * 5]).collect();
+    let fut_stamps: Vec<Vec<u32>> = (0..n).map(|_| vec![0u32; h * 5]).collect();
+
+    let batch = model.forecast_cached_batch(&bars_list, &ctx_stamps, &fut_stamps, h, &opts);
+    assert_eq!(batch.len(), n);
+    for i in 0..n {
+        let single = model.forecast_cached(&bars_list[i], &ctx_stamps[i], &fut_stamps[i], h, &opts);
+        assert_eq!(batch[i], single, "crosssection batch[{i}] != serial forecast_cached");
+    }
+
+    let batch_ms = {
+        let mut m = f64::INFINITY;
+        for _ in 0..3 {
+            let t0 = Instant::now();
+            let _ = model.forecast_cached_batch(&bars_list, &ctx_stamps, &fut_stamps, h, &opts);
+            m = m.min(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        m
+    };
+    let serial_ms = {
+        let mut m = f64::INFINITY;
+        for _ in 0..3 {
+            let t0 = Instant::now();
+            for i in 0..n {
+                let _ = model.forecast_cached(&bars_list[i], &ctx_stamps[i], &fut_stamps[i], h, &opts);
+            }
+            m = m.min(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        m
+    };
+    eprintln!(
+        "BENCH crosssection N={n} ctx={t} H={h}: batch(rayon) {batch_ms:.0} ms vs serial {serial_ms:.0} ms = {:.2}x",
+        serial_ms / batch_ms
+    );
+}
