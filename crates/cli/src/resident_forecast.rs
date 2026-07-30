@@ -109,6 +109,10 @@ impl Chronos2Resident {
     pub fn from_env() -> Option<Chronos2Resident> {
         std::env::var("BRAIN_CHRONOS2").ok().filter(|p| !p.is_empty()).map(|path| Chronos2Resident { path })
     }
+    /// Explicit `.weights` path (the `brain perf` target and non-env callers).
+    pub fn new(path: &str) -> Chronos2Resident {
+        Chronos2Resident { path: path.to_string() }
+    }
 }
 
 impl ResidentModel for Chronos2Resident {
@@ -221,6 +225,10 @@ pub struct FincastResident {
 impl FincastResident {
     pub fn from_env() -> Option<FincastResident> {
         std::env::var("BRAIN_FINCAST").ok().filter(|p| !p.is_empty()).map(|path| FincastResident { path })
+    }
+    /// Explicit `.weights` path (the `brain perf` target and non-env callers).
+    pub fn new(path: &str) -> FincastResident {
+        FincastResident { path: path.to_string() }
     }
     fn spec() -> ActionSpec {
         base_forecast_spec("financial forecast; forecast blob is [horizon, 1+levels] (col 0 mean)")
