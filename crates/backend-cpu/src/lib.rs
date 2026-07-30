@@ -16,7 +16,7 @@
 //! delegates to them.
 
 mod fast_conv;
-mod fast_ops;
+pub mod fast_ops;
 
 use backend_api::{Backend, BufUsage, DeviceBuffer, Step};
 pub mod par;

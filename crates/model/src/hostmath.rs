@@ -154,21 +154,31 @@ pub fn rope_neox_row(buf: &mut [f32], heads: usize, hd: usize, pos: usize, theta
 pub fn matvec(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
     assert!(w.len() >= out * inn, "matvec: w is {}, need {}", w.len(), out * inn);
     assert!(x.len() >= inn, "matvec: x is {}, need {inn}", x.len());
-    (0..out).map(|o| w[o * inn..o * inn + inn].iter().zip(x).map(|(a, b)| a * b).sum()).collect()
+    // Native: the AVX2+FMA `matmul_abt` kernel — `y[o] = W[o]·x` mapped as
+    // C[out,1] = A[out,inn]·B[1,inn]ᵀ, so it parallelises over `out` rows (rayon)
+    // AND vectorises each dot (8-wide FMA). Strictly beats both the scalar loop
+    // and the rayon-scalar `matvec_par`. fp reassociation vs the scalar order is
+    // within the models' cosine gates.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut y = vec![0f32; out];
+        backend_cpu::fast_ops::matmul_abt(w, &x[..inn], &mut y, out, inn, 1);
+        y
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        (0..out).map(|o| w[o * inn..o * inn + inn].iter().zip(x).map(|(a, b)| a * b).sum()).collect()
+    }
 }
 
-/// [`matvec`] across all cores — the LM-head shape (one hidden row against a
-/// `[vocab, d]` table) is 100+ MFLOP per token at real vocabularies, which a
-/// single core turns into hundreds of milliseconds PER TOKEN (measured: 277
-/// ms/token in the caption decode, dominated by exactly this call). Same
-/// contract, same result, row-parallel via the CPU scheduler's primitives.
+/// [`matvec`] — since [`matvec`] is now the AVX2+FMA `matmul_abt` (rayon over
+/// output rows + vectorised dots), this is an alias kept for call-site clarity at
+/// the big LM-head shape (one hidden row against a `[vocab, d]` table), which a
+/// scalar single core turned into hundreds of ms per token (measured: 277
+/// ms/token in the caption decode).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn matvec_par(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
-    assert!(w.len() >= out * inn, "matvec_par: w is {}, need {}", w.len(), out * inn);
-    assert!(x.len() >= inn, "matvec_par: x is {}, need {inn}", x.len());
-    backend_cpu::par::map_f32(out, |o| {
-        w[o * inn..o * inn + inn].iter().zip(x).map(|(a, b)| a * b).sum()
-    })
+    matvec(w, x, out, inn)
 }
 
 /// Numerically-stable softmax over a slice, in place.

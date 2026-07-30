@@ -194,26 +194,17 @@ use backend_cpu::par;
 use model::hostmath;
 
 
-/// Above this many MACs a matvec fans out across the rayon pool; below it the
-/// per-call fan-out costs more than it saves.
-const PAR_THRESH: usize = 1 << 16;
-
 /// `y[o] = sum_i x[i]*W[o*inp+i] + b[o]` (PyTorch `nn.Linear`, `W` is `[out,inp]`).
-/// Parallelised over output rows for large projections.
+/// The projection is the AVX2+FMA `matmul_abt` kernel (`C[out,1] = W[out,inp] ·
+/// x[1,inp]ᵀ`): rayon over output rows AND an 8-wide vectorised dot per row — the
+/// host KV rollout is a stack of these, so this is the CPU hot path.
 fn linear(x: &[f32], w: &[f32], b: &[f32], out: usize, inp: usize) -> Vec<f32> {
-    let row = |o: usize| {
-        let base = o * inp;
-        let mut acc = b[o];
-        for i in 0..inp {
-            acc += x[i] * w[base + i];
-        }
-        acc
-    };
-    if out * inp >= PAR_THRESH {
-        par::map_f32(out, row)
-    } else {
-        (0..out).map(row).collect()
+    let mut y = vec![0f32; out];
+    backend_cpu::fast_ops::matmul_abt(w, &x[..inp], &mut y, out, inp, 1);
+    for (yo, &bo) in y.iter_mut().zip(b) {
+        *yo += bo;
     }
+    y
 }
 
 
