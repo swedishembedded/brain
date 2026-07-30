@@ -371,6 +371,69 @@ mod tests {
         assert_eq!(out.iter().filter(|e| e.kind == EmissionKind::Failed).count(), 1);
     }
 
+    /// A resident model whose action streams flux2-shaped progress: one
+    /// "encoding" callback, N "denoising" steps, one "decoding" callback.
+    struct Diffuser;
+    struct DiffuserInst;
+    impl residency::ResidentModel for Diffuser {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("diffuser", "test", vec![ActionSpec::new("gen", "denoise").streaming()])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> residency::InstanceKey {
+            residency::InstanceKey::new("diffuser", "default")
+        }
+        fn estimate(&self, _k: &residency::InstanceKey) -> residency::MemCost {
+            residency::MemCost::new(0, 1 << 20)
+        }
+        fn activate(
+            &self,
+            _k: &residency::InstanceKey,
+            _d: residency::Device,
+        ) -> Result<Box<dyn residency::Instance>, String> {
+            Ok(Box::new(DiffuserInst))
+        }
+    }
+    impl residency::Instance for DiffuserInst {
+        fn run(&mut self, _a: &str, _i: &Invocation, p: &mut dyn FnMut(Progress)) -> ActionResult {
+            p(Progress { step: 0, total: 5, message: "encoding prompt".into() });
+            for i in 0..3u32 {
+                p(Progress { step: i + 1, total: 5, message: "denoising".into() });
+            }
+            p(Progress { step: 5, total: 5, message: "decoding".into() });
+            Ok(Outcome::new())
+        }
+    }
+
+    /// The streaming executor path: only the accepted `Progress` callbacks are
+    /// artifacts — bookkeeping callbacks (encode/decode) never inflate the
+    /// output count, and the reply does not double-count a streamed run.
+    #[test]
+    fn streaming_executor_target_counts_only_accepted_progress_as_artifacts() {
+        let mut budgets = residency::budget::Budgets::new();
+        budgets.set(residency::Device::Cpu, 1 << 30, 0);
+        let exec = residency::Executor::start(
+            vec![Arc::new(Diffuser)],
+            budgets,
+            residency::Policy::default(),
+        );
+        let mut t = ExecutorTarget::new_streaming(
+            exec,
+            "diffuser",
+            "gen",
+            TargetInfo::new("diffuser", "denoise_step"),
+            Box::new(|_| Invocation::new()),
+            Arc::new(|p: &Progress| p.message == "denoising"),
+        );
+        t.submit(req(3));
+        let mut out = Vec::new();
+        while t.step(&mut out) {}
+        t.step(&mut out); // drain anything raced past the last busy poll
+        let arts = out.iter().filter(|e| e.kind == EmissionKind::Artifact).count();
+        assert_eq!(arts, 3, "exactly the denoise-step callbacks are artifacts");
+        assert_eq!(out.iter().filter(|e| e.kind == EmissionKind::Admitted).count(), 1);
+        assert_eq!(out.iter().filter(|e| e.kind == EmissionKind::Done).count(), 1);
+    }
+
     #[test]
     fn capability_target_reports_the_model_and_unit() {
         let t = CapabilityTarget::new(
@@ -396,12 +459,21 @@ mod tests {
 /// `Progress` marks `Admitted` (the lane started the group this job is in),
 /// the reply marks `Artifact` + `Done` (one-shot models) or `Failed`.
 /// `step` drains the channel; the executor's own threads make the progress.
+///
+/// For a **streaming** resident action ([`ExecutorTarget::new_streaming`]) the
+/// in-flight `Progress` callbacks themselves are the artifact timeline — the
+/// same contract [`CapabilityTarget`] gives a `Provider` — filtered by a
+/// predicate so bookkeeping callbacks ("encoding", "decoding") never count as
+/// output units.
 pub struct ExecutorTarget {
     exec: residency::Executor,
     info: TargetInfo,
     model: String,
     action: String,
     build: Box<dyn Fn(&PerfRequest) -> Invocation>,
+    /// `Some` = streaming: a `Progress` this predicate accepts is timestamped
+    /// as one `Artifact`. `None` = one-shot: the reply is the single artifact.
+    is_artifact: Option<Arc<dyn Fn(&Progress) -> bool + Send + Sync>>,
     rx: std::sync::mpsc::Receiver<Emission>,
     tx: std::sync::mpsc::Sender<Emission>,
     inflight: std::collections::HashSet<ReqId>,
@@ -417,15 +489,45 @@ impl ExecutorTarget {
         info_extra: Vec<(String, serde_json::Value)>,
         build: Box<dyn Fn(&PerfRequest) -> Invocation>,
     ) -> ExecutorTarget {
-        let (tx, rx) = std::sync::mpsc::channel();
         let mut info = TargetInfo::new(model, artifact_unit);
         info.config = info_extra;
+        ExecutorTarget::build(exec, model, action, info, build, None)
+    }
+
+    /// Streaming variant: every `Progress` accepted by `is_artifact` becomes an
+    /// `Artifact` emission at its callback time, so a multi-step resident model
+    /// (diffusion denoise steps, TTS chunks) yields a real TTFA/IAL timeline
+    /// through the real scheduler. `job_model` routes to the resident's
+    /// manifest id; `info.model` may name the variant more precisely. An action
+    /// that streams no accepted progress still records its reply as one
+    /// artifact (one-shot collapse, as [`CapabilityTarget`] does).
+    pub fn new_streaming(
+        exec: residency::Executor,
+        job_model: &str,
+        action: &str,
+        info: TargetInfo,
+        build: Box<dyn Fn(&PerfRequest) -> Invocation>,
+        is_artifact: Arc<dyn Fn(&Progress) -> bool + Send + Sync>,
+    ) -> ExecutorTarget {
+        ExecutorTarget::build(exec, job_model, action, info, build, Some(is_artifact))
+    }
+
+    fn build(
+        exec: residency::Executor,
+        job_model: &str,
+        action: &str,
+        info: TargetInfo,
+        build: Box<dyn Fn(&PerfRequest) -> Invocation>,
+        is_artifact: Option<Arc<dyn Fn(&Progress) -> bool + Send + Sync>>,
+    ) -> ExecutorTarget {
+        let (tx, rx) = std::sync::mpsc::channel();
         ExecutorTarget {
             exec,
             info,
-            model: model.to_string(),
+            model: job_model.to_string(),
             action: action.to_string(),
             build,
+            is_artifact,
             rx,
             tx,
             inflight: std::collections::HashSet::new(),
@@ -447,21 +549,34 @@ impl PerfTarget for ExecutorTarget {
         let tx_p = self.tx.clone();
         let tx_r = self.tx.clone();
         let mut admitted = false;
+        let is_artifact = self.is_artifact.clone();
+        // Shared between the two callbacks: how many artifacts streamed, so the
+        // reply knows whether it must stand in as the single artifact.
+        let streamed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let streamed_r = streamed.clone();
         self.exec.submit(residency::executor::Job {
             model: self.model.clone(),
             action: self.action.clone(),
             inv,
-            on_progress: Box::new(move |_p| {
+            on_progress: Box::new(move |p| {
                 if !admitted {
                     admitted = true;
                     let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted });
+                }
+                if let Some(accept) = &is_artifact {
+                    if accept(&p) {
+                        streamed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Artifact });
+                    }
                 }
             }),
             reply: Box::new(move |r| {
                 let at = Instant::now();
                 match r {
                     Ok(_) => {
-                        let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Artifact });
+                        if streamed_r.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                            let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Artifact });
+                        }
                         let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Done });
                     }
                     Err(_) => {

@@ -19,10 +19,15 @@ Design: [`benchmarking.md`](benchmarking.md). This file tracks what is built.
 | `scenarios` | `latency`, `throughput`, `serve`, `sweep` + `Options` |
 | `targets` | `CapabilityTarget` (any `capability::Provider`) and `PagedLlmTarget` (paged serving engine) |
 
-Three CLI targets: `fake` (harness self-check), **`qwen-synth:<L>x<D>x<H>[xV]`**
+Five CLI targets: `fake` (harness self-check), **`qwen-synth:<L>x<D>x<H>[xV]`**
 (the real paged engine on random weights — same kernels/KV/batching, no
-checkpoint needed, so hardware comparison works on any machine), and
-`qwen:<weights>` (a real checkpoint).
+checkpoint needed, so hardware comparison works on any machine),
+`qwen:<weights>` (a real checkpoint), `lfm:<weights>:<tokenizer.json>` (the
+LFM2.5 encoder behind the residency executor; unit `sequence`), and
+`flux2[:<W>x<H>x<steps>]` (FLUX.2 Klein behind the residency executor, weights
+from the `BRAIN_FLUX2_*` env; unit `denoise_step` — `ExecutorTarget`'s
+streaming mode timestamps each in-flight "denoising" `Progress` as one
+artifact; measured numbers in `docs/models/flux2/status.md`).
 
 **CLI** `brain perf {list,run,compare}` (`crates/cli/src/perf_cli.rs`).
 **Make** `perf`, `perf/<scenario>`, `perf/compare`, `perf/smoke`.

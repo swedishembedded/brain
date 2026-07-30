@@ -47,6 +47,12 @@ OPTIONS
                                                    comparison, useless for quality.
                           qwen:<weights.brain>     the paged serving engine on a
                                                    real checkpoint
+                          lfm:<weights>:<tok.json> the LFM2.5 encoder behind the
+                                                   residency executor (unit: sequence)
+                          flux2[:<W>x<H>x<steps>]  FLUX.2 Klein (klein-4b) behind the
+                                                   residency executor; weights from
+                                                   BRAIN_FLUX2_* env. Default
+                                                   512x512x4; unit: denoise_step.
   --workload <name>     interactive | chat | rag | rag_long | agent |
                         decode_heavy | prefill_heavy | shared_prefix   (default chat)
   --concurrency <N>     fixed level for latency/serve (default 8)
@@ -78,9 +84,21 @@ NOTES
     reports label them. Do not report them as GPU numbers.
 ";
 
+/// Target specs are a CLI concern (the perf crate only sees `PerfTarget`s), so
+/// `perf list` appends them here rather than in `perf::list()`.
+const TARGET_LIST: &str = "
+targets (--target):
+  fake                               synthetic harness self-check (numbers meaningless)
+  qwen-synth:<L>x<D>x<H>[xV][:i8w]   the real paged serving engine on random weights
+  qwen:<weights.brain>[:i8w]         the paged serving engine on a real checkpoint
+  lfm:<weights>:<tokenizer.json>     LFM2.5 encoder via the residency executor (unit: sequence)
+  flux2[:<W>x<H>x<steps>]            FLUX.2 Klein via the residency executor (unit: denoise_step;
+                                     weights from BRAIN_FLUX2_* env; default 512x512x4)
+";
+
 pub fn run_perf(args: &[String]) {
     match args.first().map(|s| s.as_str()) {
-        Some("list") => print!("{}", perf::list()),
+        Some("list") => print!("{}{}", perf::list(), TARGET_LIST),
         Some("run") => run(&args[1..]),
         Some("compare") => compare(&args[1..]),
         Some("gate") => gate(&args[1..]),
@@ -438,10 +456,16 @@ fn build_target(spec: &str, workload: &str) -> Result<Box<dyn PerfTarget>, Strin
     if let Some(rest) = spec.strip_prefix("lfm:") {
         return build_lfm(rest);
     }
+    if spec == "flux2" {
+        return build_flux2("");
+    }
+    if let Some(rest) = spec.strip_prefix("flux2:") {
+        return build_flux2(rest);
+    }
     Err(format!(
         "unknown --target {spec:?} \
          (expected 'fake', 'qwen-synth:<L>x<D>x<H>[xV][:i8w]', 'qwen:<weights>[:i8w]', \
-         or 'lfm:<weights>:<tokenizer.json>')"
+         'lfm:<weights>:<tokenizer.json>', or 'flux2[:<W>x<H>x<steps>]')"
     ))
 }
 
@@ -494,6 +518,100 @@ fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
             .set("max_tokens", serde_json::json!(req.input_artifacts))
     });
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "lfm", "embed", "sequence", info, build)))
+}
+
+/// `flux2[:<W>x<H>x<steps>]` — FLUX.2 Klein (klein-4b, weights from the
+/// `BRAIN_FLUX2_*` env like the rest of the flux2 stack) behind the residency
+/// EXECUTOR (scheduler + budgets + device lanes), running [`crate::resident_flux2::Flux2Resident`]
+/// — so concurrency measures brain's real scheduler, not a bare provider.
+///
+/// Streaming semantics: `flux2::Pipeline::generate` reports one `Progress` per
+/// denoise step (message `"denoising"`, emitted at step START), plus
+/// "encoding"/"decoding" bookkeeping callbacks. `ExecutorTarget::new_streaming`
+/// timestamps exactly the denoising callbacks as artifacts, so
+/// `artifact_unit = "denoise_step"`: TTFA = queue + prompt encode, each IAL gap
+/// = one denoise step, and the final step + VAE decode land between the last
+/// artifact and Done (inside e2e). All requests of one size share one resident
+/// pipeline instance (the instance key is `{variant}:{w}x{h}:{nref}`), so
+/// weights load once — put it in the warmup request.
+fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (w, h, steps) = if rest.is_empty() {
+        (512u32, 512u32, 4u32)
+    } else {
+        let p: Vec<u32> = rest.split('x').map(|s| s.trim().parse().unwrap_or(0)).collect();
+        if p.len() != 3 || p.iter().any(|&v| v == 0) {
+            return Err(format!("bad flux2 spec {rest:?}, expected <W>x<H>x<steps> (e.g. 512x512x4)"));
+        }
+        (p[0], p[1], p[2])
+    };
+    if w % 16 != 0 || h % 16 != 0 {
+        return Err(format!("flux2: width/height must be multiples of 16 (got {w}x{h})"));
+    }
+    // Fail before the run starts, naming what is missing — not at first activation.
+    let paths = flux2::Paths::from_env()
+        .map_err(|e| format!("flux2 target needs BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER: {e}"))?;
+    for (var, p) in [
+        ("BRAIN_FLUX2_DIT", &paths.dit),
+        ("BRAIN_FLUX2_VAE", &paths.vae),
+        ("BRAIN_FLUX2_TE", &paths.te),
+        ("BRAIN_FLUX2_TOKENIZER", &paths.tokenizer),
+    ] {
+        if !std::path::Path::new(p).exists() {
+            return Err(format!("flux2: {var} not found: {p}"));
+        }
+    }
+    let resident = crate::resident_flux2::Flux2Resident::from_env()
+        .ok_or("flux2: BRAIN_FLUX2_* env incomplete")?;
+    // Budget ONLY the schedulable devices — same guard as `build_lfm` (its
+    // ledger records a silent 6× llvmpipe regression from budgeting a GPU the
+    // process could not see; the lane fell back to a software adapter and the
+    // run masqueraded as a GPU number).
+    let set = crate::compute_set();
+    let mut budgets = residency::budget::Budgets::new();
+    for (i, total) in crate::run_cli::query_gpu_mem() {
+        if set.as_ref().map(|s| s.gpus.contains(&i)).unwrap_or(true) {
+            budgets.set(residency::Device::Gpu(i), total, 2 << 30);
+        }
+    }
+    if set.map(|s| s.cpu_enabled()).unwrap_or(true) {
+        budgets.set(residency::Device::Cpu, crate::run_cli::query_ram_bytes(), 0);
+    }
+    let exec = residency::Executor::start(
+        vec![std::sync::Arc::new(resident)],
+        budgets,
+        residency::Policy::default(),
+    );
+    let variant = "klein-4b";
+    let cfg = flux2::Flux2Config::from_name(variant)?;
+    let mut info = TargetInfo::new(&format!("flux2-{variant}"), "denoise_step");
+    // The 4B MMDiT — the component a denoise step runs; TE/VAE cost sits in
+    // TTFA/e2e, not in the per-step rate.
+    info.params = Some(3_870_000_000);
+    info.quant = Some("fp32".into());
+    let info = info
+        .with("width", w.into())
+        .with("height", h.into())
+        .with("steps", steps.into())
+        .with("txt_len", (cfg.txt_len as u32).into())
+        .with("engine", "residency-executor".into());
+    let build = Box::new(move |req: &perf::target::PerfRequest| {
+        // Prompt values do not change the cost: text conditioning is padded to
+        // the fixed txt_len. The per-request seed keeps noise deterministic.
+        capability::Invocation::new()
+            .set("prompt", serde_json::json!("a lighthouse on a rocky coast at sunset"))
+            .set("width", serde_json::json!(w))
+            .set("height", serde_json::json!(h))
+            .set("steps", serde_json::json!(steps))
+            .set("seed", serde_json::json!(req.seed))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new_streaming(
+        exec,
+        flux2::caps::MODEL,
+        "text2image",
+        info,
+        build,
+        std::sync::Arc::new(|p: &capability::Progress| p.message == "denoising"),
+    )))
 }
 
 /// Split an optional `:i8w` flag (int8 weights) off a target spec tail.
