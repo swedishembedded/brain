@@ -75,8 +75,9 @@ pub struct HostW {
 const THETA: f32 = 10000.0;
 const EPS: f32 = 1e-6;
 
-/// Growing per-layer K/V + context caches for one rollout.
-#[derive(Default)]
+/// Growing per-layer K/V + context caches for one rollout. `Clone` so a prefilled
+/// context can be **forked** into N sampling branches (shared-prefill sampling).
+#[derive(Default, Clone)]
 pub struct Cache {
     pub k: Vec<Vec<f32>>, // [nl][len*d] RoPE'd keys
     pub v: Vec<Vec<f32>>, // [nl][len*d]
@@ -199,12 +200,13 @@ impl HostW {
     /// `O(window)` projections (the whole context, re-projected every step) into
     /// `O(1)` new projections + attention. Numerically identical to [`dep_step`]
     /// (parity gate: `tests/kvcache_parity.rs`).
-    pub fn dep_step_cached(&self, sampled_s1: u32, cache: &mut Cache) -> Vec<f32> {
+    /// Extend the dep K/V cache to cover every `ctx` position (RoPE'd at its
+    /// absolute index). Idempotent; call once after prefill to share the dep K/V
+    /// across sampling forks, or per decode step for the single new position.
+    pub fn ensure_dep_kv(&self, cache: &mut Cache) {
         let d = self.d;
         let (heads, hd) = (self.dep_heads, self.dep_hd);
         let len = cache.ctx.len() / d;
-        // Extend the dep K/V cache to cover every ctx position (usually +1/step;
-        // the whole prefill context on the first decode step).
         let have = cache.dep_k.len() / d;
         for j in have..len {
             let cj = &cache.ctx[j * d..j * d + d];
@@ -214,6 +216,13 @@ impl HostW {
             cache.dep_k.extend_from_slice(&kj);
             cache.dep_v.extend_from_slice(&vj);
         }
+    }
+
+    pub fn dep_step_cached(&self, sampled_s1: u32, cache: &mut Cache) -> Vec<f32> {
+        let d = self.d;
+        let (heads, hd) = (self.dep_heads, self.dep_hd);
+        self.ensure_dep_kv(cache);
+        let len = cache.ctx.len() / d;
         let w0 = len.saturating_sub(self.max_ctx);
         let pos_last = len - 1;
         let scale = 1.0 / (hd as f32).sqrt();

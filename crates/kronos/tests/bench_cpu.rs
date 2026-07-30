@@ -76,3 +76,56 @@ fn bench_forecast_cached() {
     let last = model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, h, &opts);
     assert_eq!(last, warm, "argmax forecast must be deterministic across runs");
 }
+
+/// Shared-prefill sampling: N sampled forecasts forking one prefill must be
+/// BIT-IDENTICAL to N independent rollouts (seed i), and faster. Small + quick.
+#[test]
+#[ignore]
+fn shared_prefill_parity_and_speed() {
+    let (Some(tok), Some(dec)) = (env("BRAIN_KRONOS_TOKENIZER"), env("BRAIN_KRONOS_DECODER")) else {
+        eprintln!("SKIP: set BRAIN_KRONOS_TOKENIZER + BRAIN_KRONOS_DECODER");
+        return;
+    };
+    let model = kronos::import::load_model(&tok, &dec).expect("load kronos");
+    let feat = model.feat();
+    let (t, h, nsamp) = (96usize, 5usize, 4usize);
+    let bars = synth_bars(t, feat);
+    let (ctx_stamp, fut_stamp) = (vec![0u32; t * 5], vec![0u32; h * 5]);
+    let opts = kronos::generate::GenOpts { argmax: false, temperature: 1.0, top_k: 0, top_p: 1.0, seed: 42 };
+
+    // Parity: shared[i] == independent rollout with seed 42+i, bit-for-bit.
+    let shared = model.forecast_cached_samples(&bars, &ctx_stamp, &fut_stamp, h, nsamp, &opts);
+    assert_eq!(shared.len(), nsamp);
+    for (i, s) in shared.iter().enumerate() {
+        let oi = kronos::generate::GenOpts { seed: 42 + i as u64, ..opts.clone() };
+        let indep = model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, h, &oi);
+        assert_eq!(*s, indep, "shared-prefill sample {i} != independent rollout");
+    }
+
+    // Speed (small): N-sample shared vs N independent, min-of-3.
+    let shared_ms = {
+        let mut b = f64::INFINITY;
+        for _ in 0..3 {
+            let t0 = Instant::now();
+            let _ = model.forecast_cached_samples(&bars, &ctx_stamp, &fut_stamp, h, nsamp, &opts);
+            b = b.min(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        b
+    };
+    let indep_ms = {
+        let mut b = f64::INFINITY;
+        for _ in 0..3 {
+            let t0 = Instant::now();
+            for i in 0..nsamp {
+                let oi = kronos::generate::GenOpts { seed: 42 + i as u64, ..opts.clone() };
+                let _ = model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, h, &oi);
+            }
+            b = b.min(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        b
+    };
+    eprintln!(
+        "BENCH shared-prefill nsamp={nsamp} ctx={t} H={h}: shared {shared_ms:.1} ms vs independent {indep_ms:.1} ms = {:.2}x",
+        indep_ms / shared_ms
+    );
+}

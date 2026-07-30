@@ -211,6 +211,57 @@ impl KronosModel {
         preprocess::denormalize(&norm, &recon, pred_len, feat)
     }
 
+    /// `n_samples` sampled forecasts that **share one prefill**. The `O(T²)`
+    /// prefill + dep-K/V are computed once, then the KV cache is forked per sample
+    /// and only the `pred_len` decode steps differ (seed `opts.seed + i`). Result
+    /// `i` is bit-identical to `forecast_cached` with `seed = opts.seed + i`, so a
+    /// samples=N eval drops from N prefills to one — the dominant cost on the
+    /// cross-section. `argmax` makes all samples equal (kept for API symmetry).
+    pub fn forecast_cached_samples(
+        &self,
+        bars: &[f32],
+        ctx_stamp: &[u32],
+        fut_stamp: &[u32],
+        pred_len: usize,
+        n_samples: usize,
+        opts: &GenOpts,
+    ) -> Vec<Vec<f32>> {
+        let feat = self.feat();
+        let t = bars.len() / feat;
+        let (norm, x) = preprocess::normalize(bars, t, feat, 5.0);
+        let (s1_ctx, s2_ctx) = self.tokenizer.encode(&x, t);
+        let mut stamp = ctx_stamp.to_vec();
+        stamp.extend_from_slice(fut_stamp);
+
+        let hw = self.decoder.host_weights();
+        let mut base = hw.new_cache();
+        let mut last0 = Vec::new();
+        for p in 0..t {
+            last0 = hw.step_token(s1_ctx[p], s2_ctx[p], &stamp[p * 5..p * 5 + 5], p, &mut base);
+        }
+        hw.ensure_dep_kv(&mut base); // fill dep K/V once so forks share it
+
+        (0..n_samples)
+            .map(|i| {
+                let mut cache = base.clone(); // fork the prefilled context
+                let (mut s1, mut s2) = (s1_ctx.clone(), s2_ctx.clone());
+                let mut rng = SplitMix64::new(opts.seed.wrapping_add(i as u64));
+                let mut last = last0.clone();
+                for step in 0..pred_len {
+                    let samp_s1 = sample(&last, opts, &mut rng);
+                    let s2_logits = hw.dep_step_cached(samp_s1, &mut cache);
+                    let samp_s2 = sample(&s2_logits, opts, &mut rng);
+                    s1.push(samp_s1);
+                    s2.push(samp_s2);
+                    let ppos = t + step;
+                    last = hw.step_token(samp_s1, samp_s2, &stamp[ppos * 5..ppos * 5 + 5], ppos, &mut cache);
+                }
+                let recon = self.tokenizer.decode(&s1[t..], &s2[t..]);
+                preprocess::denormalize(&norm, &recon, pred_len, feat)
+            })
+            .collect()
+    }
+
     /// Forecast with the transformer **cores injected** — the seam the NPU path
     /// uses. Same host pipeline as [`forecast`] (normalize → encode context →
     /// AR rollout with per-window calendar → decode → denormalize), but the
