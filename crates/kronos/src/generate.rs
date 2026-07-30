@@ -199,7 +199,7 @@ impl KronosModel {
 
         for step in 0..pred_len {
             let samp_s1 = sample(&last_s1_logits, opts, &mut rng);
-            let s2_logits = hw.dep_step(samp_s1, &cache.ctx);
+            let s2_logits = hw.dep_step_cached(samp_s1, &mut cache);
             let samp_s2 = sample(&s2_logits, opts, &mut rng);
             s1.push(samp_s1);
             s2.push(samp_s2);

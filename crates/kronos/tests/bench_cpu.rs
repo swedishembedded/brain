@@ -46,24 +46,29 @@ fn bench_forecast_cached() {
     let warm = model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, h, &opts);
     assert_eq!(warm.len(), h * feat);
 
+    // Min-of-N: the minimum is the least-contended sample, robust to the box's
+    // background load (mean/two-point derivations went negative under contention).
     let time = |h: usize, iters: usize| -> f64 {
         let fut = vec![0u32; h * 5];
-        let t0 = Instant::now();
+        let mut best = f64::INFINITY;
         for _ in 0..iters {
+            let t0 = Instant::now();
             let _ = model.forecast_cached(&bars, &ctx_stamp, &fut, h, &opts);
+            best = best.min(t0.elapsed().as_secs_f64() * 1e3);
         }
-        t0.elapsed().as_secs_f64() * 1e3 / iters as f64
+        best
     };
 
-    let ms_h5 = time(h, 8);
-    let ms_h1 = time(1, 8);
-    // t_Hn = prefill(T) + n·decode_step  ⇒  solve the two points.
-    let decode_step = (ms_h5 - ms_h1) / (h as f64 - 1.0);
+    // Wide H spread so the decode slope is robust: decode_step = (t_H21 − t_H1)/20.
+    let ms_h5 = time(h, 6);
+    let ms_h1 = time(1, 6);
+    let ms_h21 = time(21, 4);
+    let decode_step = (ms_h21 - ms_h1) / 20.0;
     let prefill = ms_h1 - decode_step;
     eprintln!(
-        "BENCH kronos forecast_cached ctx={t} H={h} feat={feat}: {ms_h5:.1} ms/forecast | \
-         prefill(T={t}) {prefill:.1} ms ({:.3} ms/ctx-token) | decode {decode_step:.2} ms/step | \
-         prefill is {:.0}% of forecast",
+        "BENCH kronos forecast_cached ctx={t} feat={feat} (min-of-N): \
+         H={h} {ms_h5:.1} ms/forecast | prefill(T={t}) {prefill:.1} ms ({:.3} ms/ctx-token) | \
+         decode {decode_step:.2} ms/step | prefill {:.0}% of an H={h} forecast",
         prefill / t as f64,
         100.0 * prefill / ms_h5
     );

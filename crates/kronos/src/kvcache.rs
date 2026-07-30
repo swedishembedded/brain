@@ -81,11 +81,24 @@ pub struct Cache {
     pub k: Vec<Vec<f32>>, // [nl][len*d] RoPE'd keys
     pub v: Vec<Vec<f32>>, // [nl][len*d]
     pub ctx: Vec<f32>,    // [len*d] decode_s1 final-norm output per position
+    /// Dependency (cross-attention, S2) K/V, RoPE'd at each ctx position's
+    /// absolute index and grown incrementally alongside `ctx`. Lets
+    /// `dep_step_cached` project each position's dep K/V **once** instead of
+    /// re-projecting the whole window every decode step. Valid across window
+    /// slides by the same RoPE shift-invariance as the main K cache.
+    pub dep_k: Vec<f32>,
+    pub dep_v: Vec<f32>,
 }
 
 impl HostW {
     pub fn new_cache(&self) -> Cache {
-        Cache { k: vec![Vec::new(); self.nl], v: vec![Vec::new(); self.nl], ctx: Vec::new() }
+        Cache {
+            k: vec![Vec::new(); self.nl],
+            v: vec![Vec::new(); self.nl],
+            ctx: Vec::new(),
+            dep_k: Vec::new(),
+            dep_v: Vec::new(),
+        }
     }
 
     /// Process one token (id `s1`,`s2`; calendar `stamp` = 5 indices; absolute
@@ -175,6 +188,44 @@ impl HostW {
         let mut sum = vec![0f32; d];
         for i in 0..d {
             sum[i] = ctx[pos_last * d + i] + o[i];
+        }
+        let normed = hostmath::rmsnorm(&sum, &self.dnorm, EPS);
+        linear(&normed, &self.ps2w, &self.ps2b, self.s2v, d)
+    }
+
+    /// KV-cached [`dep_step`]: project each **new** ctx position's dependency K/V
+    /// once (RoPE'd at its absolute index) into `cache.dep_k/dep_v`, then do a
+    /// single windowed cross-attention. Turns the per-decode-step cost from
+    /// `O(window)` projections (the whole context, re-projected every step) into
+    /// `O(1)` new projections + attention. Numerically identical to [`dep_step`]
+    /// (parity gate: `tests/kvcache_parity.rs`).
+    pub fn dep_step_cached(&self, sampled_s1: u32, cache: &mut Cache) -> Vec<f32> {
+        let d = self.d;
+        let (heads, hd) = (self.dep_heads, self.dep_hd);
+        let len = cache.ctx.len() / d;
+        // Extend the dep K/V cache to cover every ctx position (usually +1/step;
+        // the whole prefill context on the first decode step).
+        let have = cache.dep_k.len() / d;
+        for j in have..len {
+            let cj = &cache.ctx[j * d..j * d + d];
+            let mut kj = linear(cj, &self.dkw, &self.dkb, d, d);
+            hostmath::rope_neox_row(&mut kj, heads, hd, j, THETA);
+            let vj = linear(cj, &self.dvw, &self.dvb, d, d);
+            cache.dep_k.extend_from_slice(&kj);
+            cache.dep_v.extend_from_slice(&vj);
+        }
+        let w0 = len.saturating_sub(self.max_ctx);
+        let pos_last = len - 1;
+        let scale = 1.0 / (hd as f32).sqrt();
+        let sib = &self.emb_s1[sampled_s1 as usize * d..sampled_s1 as usize * d + d];
+        let mut q = linear(sib, &self.dqw, &self.dqb, d, d);
+        hostmath::rope_neox_row(&mut q, heads, hd, pos_last, THETA);
+        let win = len - w0;
+        let attn = attend(&q, &cache.dep_k[w0 * d..len * d], &cache.dep_v[w0 * d..len * d], 0, win, heads, hd, d, scale);
+        let o = linear(&attn, &self.dow, &self.dob, d, d);
+        let mut sum = vec![0f32; d];
+        for i in 0..d {
+            sum[i] = cache.ctx[pos_last * d + i] + o[i];
         }
         let normed = hostmath::rmsnorm(&sum, &self.dnorm, EPS);
         linear(&normed, &self.ps2w, &self.ps2b, self.s2v, d)
