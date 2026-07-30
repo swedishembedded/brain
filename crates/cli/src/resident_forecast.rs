@@ -344,6 +344,11 @@ impl KronosResident {
         let decoder = std::env::var("BRAIN_KRONOS_DECODER").ok().filter(|p| !p.is_empty())?;
         Some(KronosResident { tokenizer, decoder })
     }
+    /// Explicit tokenizer + decoder checkpoint dirs (the `brain perf` target and
+    /// any caller that isn't env-driven).
+    pub fn new(tokenizer: &str, decoder: &str) -> KronosResident {
+        KronosResident { tokenizer: tokenizer.to_string(), decoder: decoder.to_string() }
+    }
     fn spec() -> ActionSpec {
         base_forecast_spec("OHLCV forecast; context is [T, feat] bars, forecast is [horizon, feat] samples")
             .param(ParamSpec::new("temperature", ParamType::Float, "sampling temperature (0 or argmax=true => deterministic)").default(json!(1.0)))

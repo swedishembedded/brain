@@ -96,6 +96,9 @@ targets (--target):
   qwen-synth:<L>x<D>x<H>[xV][:i8w]   the real paged serving engine on random weights
   qwen:<weights.brain>[:i8w]         the paged serving engine on a real checkpoint
   lfm:<weights>:<tokenizer.json>     LFM2.5 encoder via the residency executor (unit: sequence)
+  kronos:<tokenizer-dir>:<decoder-dir>  Kronos OHLCV forecaster via the residency executor
+                                     (unit: forecast; input_artifacts = context bars; horizon/
+                                     samples from BRAIN_FORECAST_HORIZON/BRAIN_FORECAST_SAMPLES)
   flux2[:<W>x<H>x<steps>[:<prec>]]   FLUX.2 Klein via the residency executor (unit: denoise_step;
                                      weights from BRAIN_FLUX2_* env; default 512x512x4:fp32;
                                      prec = fp32|int8; batches concurrent same-key requests)
@@ -461,6 +464,9 @@ fn build_target(spec: &str, workload: &str) -> Result<Box<dyn PerfTarget>, Strin
     if let Some(rest) = spec.strip_prefix("lfm:") {
         return build_lfm(rest);
     }
+    if let Some(rest) = spec.strip_prefix("kronos:") {
+        return build_kronos(rest);
+    }
     if spec == "flux2" {
         return build_flux2("");
     }
@@ -470,7 +476,8 @@ fn build_target(spec: &str, workload: &str) -> Result<Box<dyn PerfTarget>, Strin
     Err(format!(
         "unknown --target {spec:?} \
          (expected 'fake', 'qwen-synth:<L>x<D>x<H>[xV][:i8w]', 'qwen:<weights>[:i8w]', \
-         'lfm:<weights>:<tokenizer.json>', or 'flux2[:<W>x<H>x<steps>[:<precision>]]')"
+         'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
+         or 'flux2[:<W>x<H>x<steps>[:<precision>]]')"
     ))
 }
 
@@ -523,6 +530,71 @@ fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
             .set("max_tokens", serde_json::json!(req.input_artifacts))
     });
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "lfm", "embed", "sequence", info, build)))
+}
+
+/// `kronos:<tokenizer-dir>:<decoder-dir>` — the Kronos OHLCV forecaster behind the
+/// residency EXECUTOR (scheduler + budgets + device lanes), so concurrency>1 and
+/// device placement (CPU/iGPU/NPU) are measured through brain's real serving path.
+/// One forecast per request (`artifact_unit` "forecast"); `input_artifacts` is the
+/// context length in bars, so a prefill/decode sweep is `--ladder` over input size.
+/// The synthetic context is a trend+seasonal close series realised to the request's
+/// length — every request of a length shares one compiled session bucket.
+fn build_kronos(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (tokenizer, decoder) = rest
+        .split_once(':')
+        .ok_or("kronos target needs 'kronos:<tokenizer-dir>:<decoder-dir>'")?;
+    if !std::path::Path::new(tokenizer).exists() {
+        return Err(format!("kronos tokenizer dir not found: {tokenizer}"));
+    }
+    if !std::path::Path::new(decoder).exists() {
+        return Err(format!("kronos decoder dir not found: {decoder}"));
+    }
+    let resident = crate::resident_forecast::KronosResident::new(tokenizer, decoder);
+    // Budget ONLY the schedulable devices (same rule as `build_lfm` / serve --dbus):
+    // never budget an excluded GPU, or placement silently drops to a software adapter.
+    let set = crate::compute_set();
+    let mut budgets = residency::budget::Budgets::new();
+    for (i, total) in crate::run_cli::query_gpu_mem() {
+        if set.as_ref().map(|s| s.gpus.contains(&i)).unwrap_or(true) {
+            budgets.set(residency::Device::Gpu(i), total, 2 << 30);
+        }
+    }
+    if set.map(|s| s.cpu_enabled()).unwrap_or(true) {
+        budgets.set(residency::Device::Cpu, crate::run_cli::query_ram_bytes(), 0);
+    }
+    let exec = residency::Executor::start(
+        vec![std::sync::Arc::new(resident)],
+        budgets,
+        residency::Policy::default(),
+    );
+    let horizon: i64 =
+        std::env::var("BRAIN_FORECAST_HORIZON").ok().and_then(|s| s.parse().ok()).filter(|&h| h > 0).unwrap_or(64);
+    let samples: i64 =
+        std::env::var("BRAIN_FORECAST_SAMPLES").ok().and_then(|s| s.parse().ok()).filter(|&s| s > 0).unwrap_or(1);
+    let info = vec![
+        ("tokenizer".to_string(), serde_json::json!(tokenizer)),
+        ("decoder".to_string(), serde_json::json!(decoder)),
+        ("horizon".to_string(), serde_json::json!(horizon)),
+        ("samples".to_string(), serde_json::json!(samples)),
+        ("engine".to_string(), serde_json::json!("residency-executor")),
+    ];
+    let build = Box::new(move |req: &perf::target::PerfRequest| {
+        let ctxlen = req.input_artifacts.max(2);
+        // deterministic trend + seasonal close series of exactly `ctxlen` bars.
+        let series: Vec<f32> = (0..ctxlen)
+            .map(|i| {
+                let x = i as f32;
+                100.0 + (x * 0.1).sin() * 5.0 + (x * 0.02).cos() * 2.0 + x * 0.01
+            })
+            .collect();
+        let bytes: Vec<u8> = series.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let blob = capability::Blob::new(capability::Media::Bytes, bytes).with_meta(serde_json::json!({ "shape": [ctxlen] }));
+        capability::Invocation::new()
+            .blob("context", blob)
+            .set("horizon", serde_json::json!(horizon))
+            .set("samples", serde_json::json!(samples))
+    });
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "kronos", "forecast", "forecast", info, build)))
 }
 
 /// `flux2[:<W>x<H>x<steps>[:<precision>]]` — FLUX.2 Klein (klein-4b, weights from the
