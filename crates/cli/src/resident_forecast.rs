@@ -344,35 +344,74 @@ impl KronosResident {
             .param(ParamSpec::new("temperature", ParamType::Float, "sampling temperature (0 or argmax=true => deterministic)").default(json!(1.0)))
             .param(ParamSpec::new("argmax", ParamType::Bool, "deterministic argmax decode").default(json!(true)))
             .param(ParamSpec::new("seed", ParamType::Int, "RNG seed when sampling").default(json!(0)))
+            .param(ParamSpec::new("checkpoint", ParamType::Str,
+                "decoder checkpoint path override (.weights file or HF dir); \
+                 empty = the boot decoder. Instances are keyed on (path, mtime, \
+                 size), so per-request checkpoints stay warm side by side and an \
+                 overwritten file hot-reloads — checkpoint selection is request \
+                 state, not server state.").default(json!("")))
             .input(BlobSpec::new("ctx_stamp", Media::Bytes, "optional context calendar stamps [T,5] u32-LE"))
             .input(BlobSpec::new("fut_stamp", Media::Bytes, "optional future calendar stamps [horizon,5] u32-LE"))
     }
+
+    /// The decoder a request selects: the `checkpoint` param when non-empty,
+    /// else the boot decoder from the env.
+    fn decoder_for(&self, inv: &Invocation) -> String {
+        inv.get_str("checkpoint").filter(|p| !p.is_empty()).unwrap_or_else(|| self.decoder.clone())
+    }
+}
+
+/// `"path|mtime|size"` — the identity the residency cache keys a decoder
+/// instance on. mtime+size in the key means overwriting a checkpoint file
+/// (a new fine-tune) transparently activates a fresh instance; the stale one
+/// ages out via normal eviction. `|` cannot appear in the sortable fields, so
+/// the path (which may contain `|` only pathologically) parses back out with
+/// rsplitn.
+fn decoder_key(path: &str) -> String {
+    match std::fs::metadata(path) {
+        Ok(m) => {
+            let mtime = m.modified().ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()).unwrap_or(0);
+            format!("{path}|{mtime}|{}", m.len())
+        }
+        Err(_) => format!("{path}|missing|0"),
+    }
+}
+
+fn decoder_from_key(config: &str) -> &str {
+    // strip the two identity fields appended by decoder_key
+    config.rsplitn(3, '|').nth(2).unwrap_or(config)
 }
 
 impl ResidentModel for KronosResident {
     fn manifest(&self) -> Manifest {
         Manifest::new("kronos", "autoregressive OHLCV forecasting (Kronos)", vec![Self::spec()])
     }
-    fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        // The AR decoder handles any horizon on one hot instance.
-        InstanceKey::new("kronos", "default")
+    fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
+        // One hot instance per decoder checkpoint (any horizon); see decoder_key.
+        InstanceKey::new("kronos", decoder_key(&self.decoder_for(inv)))
     }
-    fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        // tokenizer + decoder weight dirs resident in RAM (host embed/sample on
-        // gpu_core). NPU-eligible: activate(Npu) compiles the two decoder graphs
-        // (s1 + dep-s2) and runs the rollout on the accelerator.
-        let ram = dir_ram(&self.tokenizer) + dir_ram(&self.decoder);
+    fn estimate(&self, key: &InstanceKey) -> MemCost {
+        // tokenizer + the requested decoder resident in RAM (host embed/sample
+        // on gpu_core). NPU-eligible: activate(Npu) compiles the two decoder
+        // graphs (s1 + dep-s2) and runs the rollout on the accelerator.
+        let ram = path_ram(&self.tokenizer) + path_ram(decoder_from_key(&key.config));
         MemCost::new(0, ram).with_npu(512 << 20)
     }
-    fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+    fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         if let Device::Gpu(i) = device {
             std::env::set_var("BRAIN_GPU_INDEX", i.to_string());
         }
-        let model = kronos::import::load_model(&self.tokenizer, &self.decoder)?;
+        let decoder = decoder_from_key(&key.config).to_string();
+        if !std::path::Path::new(&decoder).exists() {
+            return Err(format!("kronos checkpoint not found: {decoder}"));
+        }
+        let model = kronos::import::load_model(&self.tokenizer, &decoder)?;
         if let Device::Npu(_) = device {
             return Ok(Box::new(KronosNpuInstance {
                 model,
-                dec_dir: self.decoder.clone(),
+                dec_dir: decoder,
                 cfg: npu_cfg(),
                 cache: RefCell::new(HashMap::new()),
                 device: RefCell::new("npu".into()),
@@ -382,12 +421,17 @@ impl ResidentModel for KronosResident {
     }
 }
 
-fn dir_ram(dir: &str) -> u64 {
-    std::fs::read_dir(dir)
-        .map(|rd| rd.flatten().filter_map(|e| e.metadata().ok().map(|m| m.len())).sum::<u64>())
-        .unwrap_or(0)
-        .saturating_mul(13)
-        / 10
+/// Resident bytes for a checkpoint path: a `.weights` file's own size, or the
+/// summed size of an HF checkpoint dir. (+30% working overhead.)
+fn path_ram(path: &str) -> u64 {
+    let meta = std::fs::metadata(path);
+    let raw = match meta {
+        Ok(m) if m.is_file() => m.len(),
+        _ => std::fs::read_dir(path)
+            .map(|rd| rd.flatten().filter_map(|e| e.metadata().ok().map(|m| m.len())).sum::<u64>())
+            .unwrap_or(0),
+    };
+    raw.saturating_mul(13) / 10
 }
 
 struct KronosInstance {
