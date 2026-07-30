@@ -229,7 +229,8 @@ Multi-GPU scaling lives in `crates/model`:
 | Prompt-prefix cache (paged block reuse across requests) | `model::paged::PrefixCache`; adoption in `qwen::serve::Engine::prefill` |
 | Int8 serving weights + on-device decode window | `qwen::serve` (`--weights-int8` / target suffix `:i8w`; `DECODE_WINDOW`) |
 | Engine internals | `docs/engine/{overview,training,vulkan,web}.md` |
-| Add/adjust a WGSL kernel | `crates/kernels/wgsl/*.wgsl`, then **`make kernels-regen`** |
+| **Add/adjust/dispatch a WGSL kernel** | **`docs/kernel-checklist.md`** — read BEFORE writing or dispatching one; then `crates/kernels/wgsl/*.wgsl` + **`make kernels-regen`** |
+| **Something is slow (model, kernel, training step)** | **`docs/kernel-checklist.md` §E** (measure-first rules + the five killed hypotheses), `docs/porting-playbook.md` §10 (the performance ladder), case studies in `docs/performance/overview.md` |
 | MoE toy task / honest eval methodology | `README.md` |
 | Federated MoE pipeline (done vs remaining) | `docs/federated.md`; `crates/federated/src/{shard,sha256}.rs` |
 | GPT model / training / sampling | `crates/gpt/src/{model,train,sample,init}.rs` |
@@ -576,6 +577,15 @@ per-scenario table and the findings so far.
   (`crates/npu`), not a per-op backend. The default build stays free of OpenVINO
   at the source level; the runtime is loaded at run time (`runtime-linking`), so
   `make build`/`make test` stay green with no OpenVINO installed.
+- **Kernels follow `docs/kernel-checklist.md`** — before writing one, check for
+  an existing fast sibling (`_rows`/`_wg`/`_reg*`/`_tiled`) and put the fix in
+  *selection*, not a new copy: the single most expensive defect class here is a
+  fast kernel a later model never learned about (`gn_stats`, fixed in 2025,
+  re-cost 159× in `vae`). Before dispatching one, read its `Params` struct and
+  copy a working call site — a mismatched param list is silently wrong, not a
+  crash (`silu_mul` → cosine 0.504). Before optimizing, profile per kernel-kind
+  and publish the table: every confident hypothesis on this engine has been
+  wrong, and the profile has been right.
 - **New model ports follow `docs/porting-playbook.md`** — reference goldens
   dumped FIRST (transformer I/O captured via forward hooks, replayed in the
   parity test), two-way import coverage, kernel Params read before dispatch,

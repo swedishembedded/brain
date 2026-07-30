@@ -150,3 +150,44 @@ differentiate the **unfolded** reference form, not the folded trick.
   exit 0 — always compare against the remote `x-linked-size`; the `hf`
   CLI silently reinterprets extra positional args after `--include`
   (verify the file list landed).
+
+## 10. Then the PERFORMANCE ladder — a separate climb, same discipline
+
+Parity proves the model is right. It says nothing about whether it is fast, and
+the first working version will not be: FLUX.2 Klein was **correct at cosine
+1.000000 and running at 6.7% of the P40's peak** — 790 s per image on CPU,
+59.8 s on two GPUs. Three profile-driven rounds took it to **7.6 s on one
+card (104×)** without moving parity by a digit.
+
+Read **`docs/kernel-checklist.md` §E** before optimizing anything; the rules are
+there, the ladder is here:
+
+1. **Get it correct first, then freeze it.** Every speed change is gated by
+   re-running the parity test — which only exists because rung 3–5 of §5 built
+   it. Optimizing before parity means you cannot tell a speedup from a bug.
+2. **Profile per kernel-kind and publish the table before touching code.**
+   Every confident guess made on this engine was wrong (§E has the five, with
+   the numbers that killed them). Copy `crates/flux2/src/bin/flux2_bench.rs`:
+   it replays the dispatch sequence over shape-correct scratch, so it needs no
+   weights and reproduces the real forward to ~1%.
+3. **Attack by share of time, not by suspicion.** The GEMMs *looked* like the
+   problem; attention was 81%. The "text encoder + VAE" was assumed to be
+   evenly split; the VAE was 88% of it.
+4. **Re-profile after every fix — the bottleneck moves.** DiT: 81% attention →
+   80% GEMM. Then the VAE became the dominant phase. Then the optimizer
+   (`gradnorm_sq`, 82% of training). A 5.5× win on yesterday's bottleneck was
+   worth 0.6% of the step.
+5. **Separate a bug from a ceiling.** Achieved vs peak decides it: <5% of both
+   the FLOP and bandwidth rooflines is a defect; a kernel flat at its byte/FLOP
+   ratio across every shape is structural and needs an algorithmic change
+   (conv → im2col+GEMM), not tuning.
+6. **A precision change is not a speed change.** int8 (4× the arithmetic peak)
+   bought **1.10×** here, because 81% of the forward was a kernel no GEMM
+   precision could touch. Quantization pays for *capacity* (single-card
+   residency, freeing a second GPU) and only pays for speed once the profile
+   says arithmetic is the limiter. After the kernel fixes, the same int8 path
+   went to 1.80×.
+7. **Ledger it** in `docs/models/<m>/status.md` with before/after tables, the
+   hardware named exactly, and the hypotheses you killed with their numbers.
+   Negative results are the deliverable that stops the next person re-running
+   the same dead end.
