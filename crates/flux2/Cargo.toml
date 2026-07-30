@@ -1,0 +1,24 @@
+[package]
+name = "brain-flux2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FLUX.2 Klein (4B/9B) text-to-image + image-editing: MMDiT double/single-stream diffusion transformer over the FLUX.2 128-channel VAE latent with Qwen3 multi-layer text conditioning, assembled from the shared dit/vae/diffusion crates. Forward-first; training (backward + LoRA) builds on it."
+
+[lib]
+name = "flux2"
+path = "src/lib.rs"
+
+[dependencies]
+brain-capability.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-checkpoint.workspace = true
+brain-dit.workspace = true
+brain-model.workspace = true
+brain-vae.workspace = true
+brain-qwen.workspace = true
+brain-data.workspace = true
+brain-diffusion.workspace = true
+serde_json.workspace = true
+bytemuck.workspace = true
