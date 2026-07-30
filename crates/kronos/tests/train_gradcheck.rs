@@ -257,7 +257,7 @@ fn milestone_e_promotion_gate() {
     let init = init_weights(&cfg, 3);
 
     // (1) trained → should beat base and be PROMOTED (weights returned).
-    let opts = FinetuneOpts { epochs: 80, lr: 5e-3, wd: 0.0, clip: 3.0, lora: None, progress: false };
+    let opts = FinetuneOpts { epochs: 80, lr: 5e-3, wd: 0.0, clip: 3.0, lora: None, batch: 2, progress: false };
     let (rep, w) = finetune(cfg.clone(), t, &init, &train, &val, &opts);
     eprintln!("gate(train): base_val {:.3} ft_val {:.3} promoted {}", rep.base_val, rep.ft_val, rep.promoted);
     assert!(rep.ft_val < rep.base_val, "fine-tune did not beat base on held-out");
@@ -267,7 +267,7 @@ fn milestone_e_promotion_gate() {
     // Weights still come back — the contract returns them unconditionally so a
     // caller can evaluate generalization on a rejected candidate; the GATE
     // decision is `promoted`, and the caller saves iff it is true.
-    let opts0 = FinetuneOpts { epochs: 0, lr: 5e-3, wd: 0.0, clip: 3.0, lora: Some(LoraCfg::attn(4, 8.0)), progress: false };
+    let opts0 = FinetuneOpts { epochs: 0, lr: 5e-3, wd: 0.0, clip: 3.0, lora: Some(LoraCfg::attn(4, 8.0)), batch: 1, progress: false };
     let (rep0, w0) = finetune(cfg, t, &init, &train, &val, &opts0);
     eprintln!("gate(noop): base_val {:.3} ft_val {:.3} promoted {}", rep0.base_val, rep0.ft_val, rep0.promoted);
     assert!(!rep0.promoted, "gate must reject a non-improvement");
@@ -318,4 +318,152 @@ fn milestone_d_lora_merge_matches_adapted_forward() {
     eprintln!("merge: base {base_loss:.4}  lora {l_lora:.4}  merged {l_merged:.4}");
     assert!((l_lora - l_merged).abs() < 2e-3, "merged forward {l_merged} != adapted {l_lora}");
     assert!((l_lora - base_loss).abs() > 1e-3, "adaptation had no effect (merge/base identical)");
+}
+
+/// Generate one random single-sequence [`Batch`] of length `t`.
+fn gen_seq(r: &mut Rng, cfg: &KronosConfig, t: u32) -> Batch {
+    let s1: Vec<u32> = (0..t).map(|_| r.below(cfg.s1_vocab() as u32)).collect();
+    let s2: Vec<u32> = (0..t).map(|_| r.below(cfg.s2_vocab() as u32)).collect();
+    let cal: [Vec<u32>; 5] = std::array::from_fn(|c| (0..t).map(|_| r.below(CAL[c].1 as u32)).collect());
+    let sampled_s1: Vec<u32> = (0..t).map(|_| r.below(cfg.s1_vocab() as u32)).collect();
+    let targets: Vec<u32> = (0..t).map(|_| r.below(cfg.s1_vocab() as u32)).collect();
+    let s2_targets: Vec<u32> = (0..t).map(|_| r.below(cfg.s2_vocab() as u32)).collect();
+    Batch { s1, s2, cal, sampled_s1, targets, s2_targets }
+}
+
+/// Concatenate `b` single-sequence batches batch-major into one `Batch` of `b*t`
+/// rows (what the batched trainer expects).
+fn concat_batches(seqs: &[Batch]) -> Batch {
+    let cat = |f: &dyn Fn(&Batch) -> &Vec<u32>| -> Vec<u32> { seqs.iter().flat_map(|s| f(s).iter().copied()).collect() };
+    Batch {
+        s1: cat(&|s| &s.s1),
+        s2: cat(&|s| &s.s2),
+        cal: std::array::from_fn(|c| seqs.iter().flat_map(|s| s.cal[c].iter().copied()).collect()),
+        sampled_s1: cat(&|s| &s.sampled_s1),
+        targets: cat(&|s| &s.targets),
+        s2_targets: cat(&|s| &s.s2_targets),
+    }
+}
+
+/// The whole batched forward+backward graph (`b` sequences per step) must be
+/// gradient-faithful: a directional finite-difference check on every trainable
+/// param, identical discipline to the b=1 `milestone_c` gate.
+#[test]
+fn batched_gradcheck_every_trainable_param() {
+    if skip() {
+        return;
+    }
+    let cfg = KronosConfig::tiny();
+    let (t, b) = (6u32, 2u32);
+    let m = KronosTrain::new_batch(cfg.clone(), t, b, &init_weights(&cfg, 4321));
+    let mut r = Rng(4321 ^ 0xABCD);
+    let seqs: Vec<Batch> = (0..b).map(|_| gen_seq(&mut r, &cfg, t)).collect();
+    concat_batches(&seqs).set(&m);
+    m.zero_grads();
+    let _ = m.forward();
+    m.backward();
+    m.poll_wait();
+
+    let eps = 5e-3f32;
+    let (atol, rtol) = (4e-3f32, 8e-2f32);
+    let mut rng = Rng(555);
+    let mut checked = 0usize;
+    for name in m.param_names() {
+        let w0 = m.read_weight(&name);
+        let g = m.read_grad(&name);
+        let mut best: Option<(f32, f32)> = None;
+        for _ in 0..4 {
+            let v: Vec<f32> = (0..w0.len()).map(|_| if rng.u64() & 1 == 0 { 1.0 } else { -1.0 }).collect();
+            let analytic: f32 = g.iter().zip(&v).map(|(a, b)| a * b).sum();
+            let wp: Vec<f32> = w0.iter().zip(&v).map(|(a, b)| a + eps * b).collect();
+            m.write_weight(&name, &wp);
+            let lp = m.forward();
+            let wm: Vec<f32> = w0.iter().zip(&v).map(|(a, b)| a - eps * b).collect();
+            m.write_weight(&name, &wm);
+            let lm = m.forward();
+            m.write_weight(&name, &w0);
+            let numeric = (lp - lm) / (2.0 * eps);
+            if best.map(|(_, nn)| numeric.abs() > nn.abs()).unwrap_or(true) {
+                best = Some((analytic, numeric));
+            }
+        }
+        let (a, n) = best.unwrap();
+        let err = (a - n).abs();
+        let tol = atol + rtol * a.abs().max(n.abs());
+        assert!(err <= tol, "batched gradcheck FAIL {name}: analytic {a:.5} vs numeric {n:.5} (err {err:.5} > tol {tol:.5})");
+        checked += 1;
+    }
+    eprintln!("batched gradcheck OK (b={b}, t={t}): {checked} trainable params");
+    assert!(checked >= 20);
+}
+
+/// A `b`-batched step must equal the `b` single-sequence steps combined: the CE
+/// loss is the mean of the singles' losses, and each weight-grad is the mean of
+/// the singles' grads (both normalise by the total non-ignored token count). This
+/// is the parity gate that says "batching changes throughput, not the math".
+#[test]
+fn batched_step_equals_mean_of_singles() {
+    if skip() {
+        return;
+    }
+    let cfg = KronosConfig::tiny();
+    let (t, b) = (6u32, 3u32);
+    let init = init_weights(&cfg, 2024);
+    let mut r = Rng(2024 ^ 0x1111);
+    let seqs: Vec<Batch> = (0..b).map(|_| gen_seq(&mut r, &cfg, t)).collect();
+
+    // b single-sequence steps: accumulate loss + grads.
+    let ms = KronosTrain::new(cfg.clone(), t, &init);
+    let names = ms.param_names();
+    let mut g_sum: HashMap<String, Vec<f32>> = names.iter().map(|n| (n.clone(), vec![0.0f32; ms.read_grad(n).len()])).collect();
+    let mut loss_sum = 0.0f32;
+    for seq in &seqs {
+        ms.zero_grads();
+        seq.set(&ms);
+        loss_sum += ms.forward();
+        ms.backward();
+        ms.poll_wait();
+        for name in &names {
+            let g = ms.read_grad(name);
+            for (acc, x) in g_sum.get_mut(name).unwrap().iter_mut().zip(&g) {
+                *acc += x;
+            }
+        }
+    }
+
+    // one b-batched step.
+    let mb = KronosTrain::new_batch(cfg.clone(), t, b, &init);
+    mb.zero_grads();
+    concat_batches(&seqs).set(&mb);
+    let loss_batch = mb.forward();
+    mb.backward();
+    mb.poll_wait();
+
+    // loss: batched == mean of singles (equal counts → count-weighting is a mean).
+    let loss_mean = loss_sum / b as f32;
+    assert!(
+        (loss_batch - loss_mean).abs() < 1e-4,
+        "batched loss {loss_batch:.6} != mean-of-singles {loss_mean:.6}"
+    );
+
+    // grads: batched[p] == mean of singles[p], EXACTLY as functions of the shared
+    // weights (L_batch = (1/b)·Σ L_single_i, so ∇ is the mean too). Only fp32
+    // reduction order differs (b·t rows summed at once vs t rows summed b times),
+    // so gate elementwise-allclose with an absolute floor — some grads are ~0 by
+    // design (a key-bias has no gradient through attention: softmax is invariant
+    // to a constant added to every key), where a relative/cosine gate is noise.
+    let (atol, rtol) = (2e-5f32, 5e-3f32);
+    let mut worst = 0.0f32;
+    for name in &names {
+        let gb = mb.read_grad(name);
+        let mean: Vec<f32> = g_sum[name].iter().map(|x| x / b as f32).collect();
+        let scale = mean.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        for (i, (a, e)) in gb.iter().zip(&mean).enumerate() {
+            let d = (a - e).abs();
+            let tol = atol + rtol * scale;
+            worst = worst.max(d - tol);
+            assert!(d <= tol, "batched grad != mean-of-singles for {name}[{i}]: {a:.6} vs {e:.6} (|Δ| {d:.6} > tol {tol:.6})");
+        }
+    }
+    eprintln!("batch-parity OK (b={b}, t={t}): loss {loss_batch:.6} vs mean {loss_mean:.6}; grads allclose (worst margin {worst:.2e})");
 }

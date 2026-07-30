@@ -181,6 +181,7 @@ pub struct KronosTrain {
     ps: ParamStore,
     opt: Optim,
     t: u32,
+    b: u32,
     count: Cell<f32>,
     sqrt_d: f32,
     lora: Option<LoraCfg>,
@@ -355,6 +356,30 @@ impl KronosTrain {
     /// Build on an existing device handle (`gpu_core::Gpu::share`) — one device
     /// per process, however many trainers/evaluators a run constructs.
     pub fn with_lora_on(gpu: Gpu, cfg: KronosConfig, t: u32, init: &HashMap<String, Vec<f32>>, lora: Option<LoraCfg>) -> KronosTrain {
+        Self::with_lora_batch_on(gpu, cfg, t, 1, init, lora)
+    }
+
+    /// Full-backprop batched trainer (`b` sequences of length `t` per step).
+    pub fn new_batch(cfg: KronosConfig, t: u32, b: u32, init: &HashMap<String, Vec<f32>>) -> KronosTrain {
+        Self::with_lora_batch_on(Gpu::new(PIPELINES), cfg, t, b, init, None)
+    }
+
+    /// LoRA (or full, `lora = None`) batched trainer — the weekly-fine-tune path
+    /// with `b` windows per step.
+    pub fn with_lora_batch(cfg: KronosConfig, t: u32, b: u32, init: &HashMap<String, Vec<f32>>, lora: Option<LoraCfg>) -> KronosTrain {
+        Self::with_lora_batch_on(Gpu::new(PIPELINES), cfg, t, b, init, lora)
+    }
+
+    /// Batched full/LoRA constructor: `b` independent sequences of length `t` are
+    /// trained per step (their tokens are uploaded batch-major — all `t` of
+    /// sequence 0, then sequence 1, …). Activation buffers scale by `b` (rows =
+    /// `b*t`); the per-sequence attention (main GQA + the dep bidir head) keeps a
+    /// `t×t` score matrix *per batch element* (`b*heads*t*t`), so sequences never
+    /// attend across the batch. Every weight-grad accumulates over the whole
+    /// `b*t` token set and the CE loss is the mean over all non-ignored tokens —
+    /// so a `b`-batched step equals the sum of `b` single-sequence steps'
+    /// gradients (validated bit-close by the batch-parity gate + gradcheck).
+    pub fn with_lora_batch_on(gpu: Gpu, cfg: KronosConfig, t: u32, b: u32, init: &HashMap<String, Vec<f32>>, lora: Option<LoraCfg>) -> KronosTrain {
         let d = cfg.d_model;
         // build the internal init (fusion split) then the ParamStore.
         let mut init2 = init.clone();
@@ -389,10 +414,15 @@ impl KronosTrain {
         let ff = cfg.ff_dim as u64;
         let s1v = cfg.s1_vocab() as u64;
         let s2v = cfg.s2_vocab() as u64;
-        let n = t as u64; // b = 1
+        let bb = b as u64;
+        let tt = t as u64;
+        let n = bb * tt; // total rows across the batch (batch-major: b sequences of t)
         let heads = cfg.n_heads as u64;
         let heads_dep = cfg.dep_n_heads as u64;
-        let hh = heads * n * n;
+        // Attention scores/probs are per-batch-element t×t (sequences do not attend
+        // across the batch), so scale by b — NOT by n=b*t squared.
+        let hh = bb * heads * tt * tt;
+        let dep_hh = bb * heads_dep * tt * tt;
         let st = |x: u64| gpu.storage(x);
         let idbuf = |name: &str| gpu.buffer(name, n * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST);
 
@@ -413,6 +443,7 @@ impl KronosTrain {
         let mut m = KronosTrain {
             cfg,
             t,
+            b,
             count: Cell::new(1.0),
             sqrt_d: (d as f32).sqrt(),
             lora,
@@ -432,11 +463,11 @@ impl KronosTrain {
             s2_targets: idbuf("s2_targets"),
             sib: st(n * d), dep_q: st(n * d), dep_k: st(n * d), dep_v: st(n * d),
             qk: st(n * 2 * d), qkv: st(n * 3 * d),
-            dep_scores: st(heads_dep * n * n), dep_probs: st(heads_dep * n * n),
+            dep_scores: st(dep_hh), dep_probs: st(dep_hh),
             dep_ctxo: st(n * d), dep_sum: st(n * d), dep_normed: st(n * d),
             s2_logits: st(n * s2v), ce_buf2: st(n), ce_grad_uni2: gpu.uniform_dynamic(4),
             d_s2logits: st(n * s2v), d_normed: st(n * d), d_sum: st(n * d),
-            d_ctxo: st(n * d), d_dscores: st(heads_dep * n * n), d_qkv: st(n * 3 * d),
+            d_ctxo: st(n * d), d_dscores: st(dep_hh), d_qkv: st(n * 3 * d),
             d_dq: st(n * d), d_dk: st(n * d), d_dv: st(n * d), d_sib: st(n * d),
             d_xn2: st(n * d),
             res,
@@ -483,7 +514,7 @@ impl KronosTrain {
     }
     fn gqa(&self) -> Gqa {
         let hd = (self.cfg.d_model / self.cfg.n_heads) as u32;
-        Gqa { b: 1, t: self.t, n_heads: self.cfg.n_heads as u32, n_kv_heads: self.cfg.n_heads as u32, head_dim: hd }
+        Gqa { b: self.b, t: self.t, n_heads: self.cfg.n_heads as u32, n_kv_heads: self.cfg.n_heads as u32, head_dim: hd }
     }
     fn w(&self, name: &str) -> &DeviceBuffer {
         self.ps.w(name)
@@ -560,7 +591,9 @@ impl KronosTrain {
         let c = &self.cfg;
         let d = c.d_model as u32;
         let ff = c.ff_dim as u32;
-        let n = self.t;
+        let t = self.t; // per-sequence length (rope period + attention time dim)
+        let b = self.b;
+        let n = b * t; // total rows (batch-major)
         let s1v = c.s1_vocab() as u32;
         let heads = c.n_heads as u32;
         let hd = d / heads;
@@ -600,8 +633,8 @@ impl KronosTrain {
             self.matmul(&mut s, &lb.xn1, &p("self_attn.v_proj.weight"), &lb.v, n, d, d);
             self.bias(&mut s, &lb.v, &p("self_attn.v_proj.bias"), n, d);
             self.lora_fwd(&mut s, &p("self_attn.v_proj.weight"), &lb.xn1, &lb.v, n, d, d);
-            s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, heads, hd, d, n, ROPE_THETA));
-            s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, heads, hd, d, n, ROPE_THETA));
+            s.push(block::rope_fwd(&self.gpu, &ids, &lb.q, n, heads, hd, d, t, ROPE_THETA));
+            s.push(block::rope_fwd(&self.gpu, &ids, &lb.k, n, heads, hd, d, t, ROPE_THETA));
             s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &self.scores, &lb.probs, &lb.ctx));
             self.matmul(&mut s, &lb.ctx, &p("self_attn.out_proj.weight"), &self.proj, n, d, d);
             self.bias(&mut s, &self.proj, &p("self_attn.out_proj.bias"), n, d);
@@ -635,15 +668,15 @@ impl KronosTrain {
         self.bias(&mut s, &self.dep_k, &dp("k_proj.bias"), n, d);
         self.matmul(&mut s, &self.xn_final, &dp("v_proj.weight"), &self.dep_v, n, d, d);
         self.bias(&mut s, &self.dep_v, &dp("v_proj.bias"), n, d);
-        s.push(block::rope_fwd(&self.gpu, &ids, &self.dep_q, n, dep_h, dep_hd, d, n, ROPE_THETA));
-        s.push(block::rope_fwd(&self.gpu, &ids, &self.dep_k, n, dep_h, dep_hd, d, n, ROPE_THETA));
+        s.push(block::rope_fwd(&self.gpu, &ids, &self.dep_q, n, dep_h, dep_hd, d, t, ROPE_THETA));
+        s.push(block::rope_fwd(&self.gpu, &ids, &self.dep_k, n, dep_h, dep_hd, d, t, ROPE_THETA));
         // pack q,k,v → fused qkv[n,3d]
         s.push(self.gpu.step(CONCAT2, &[&self.dep_q, &self.dep_k, &self.qk], &[n, d, d, 1, 1], n * 2 * d));
         s.push(self.gpu.step(CONCAT2, &[&self.qk, &self.dep_v, &self.qkv], &[n, 2 * d, d, 1, 1], n * 3 * d));
-        // non-causal attention
-        s.push(self.gpu.step(SC_BIDIR, &[&self.qkv, &self.dep_scores], &[1, dep_h, n, dep_hd, s3, 0, d], dep_h * n * n));
-        s.push(self.gpu.step(SM_BIDIR, &[&self.dep_scores, &self.dep_probs], &[1, dep_h, n], dep_h * n));
-        s.push(self.gpu.step(AP_BIDIR, &[&self.dep_probs, &self.qkv, &self.dep_ctxo], &[1, dep_h, n, dep_hd, s3, 2 * d, d], dep_h * n * dep_hd));
+        // non-causal attention — per-batch-element t×t (leading dim = b)
+        s.push(self.gpu.step(SC_BIDIR, &[&self.qkv, &self.dep_scores], &[b, dep_h, t, dep_hd, s3, 0, d], b * dep_h * t * t));
+        s.push(self.gpu.step(SM_BIDIR, &[&self.dep_scores, &self.dep_probs], &[b, dep_h, t], b * dep_h * t));
+        s.push(self.gpu.step(AP_BIDIR, &[&self.dep_probs, &self.qkv, &self.dep_ctxo], &[b, dep_h, t, dep_hd, s3, 2 * d, d], b * dep_h * t * dep_hd));
         // out proj (reuse mlp_out scratch as dep_o), residual with ctx, norm, s2 head
         self.matmul(&mut s, &self.dep_ctxo, &dp("out_proj.weight"), &self.mlp_out, n, d, d);
         self.bias(&mut s, &self.mlp_out, &dp("out_proj.bias"), n, d);
@@ -659,7 +692,9 @@ impl KronosTrain {
         let c = &self.cfg;
         let d = c.d_model as u32;
         let ff = c.ff_dim as u32;
-        let n = self.t;
+        let t = self.t; // per-sequence length (rope period + attention time dim)
+        let b = self.b;
+        let n = b * t; // total rows (batch-major)
         let s1v = c.s1_vocab() as u32;
         let s2v = c.s2_vocab() as u32;
         let heads = c.n_heads as u32;
@@ -669,7 +704,6 @@ impl KronosTrain {
         let mut s: Vec<Step> = Vec::new();
 
         let last = c.n_layers;
-        let s2v = c.s2_vocab() as u32;
         let dep_h = c.dep_n_heads as u32;
         let dep_hd = d / dep_h;
         let s3 = 3 * d;
@@ -684,16 +718,16 @@ impl KronosTrain {
         // dep out_proj bwd (d_o = d_sum) → d_ctxo
         self.proj_bwd(&mut s, &self.d_sum, &self.dep_ctxo, &dp("out_proj.weight"), &dp("out_proj.bias"), &self.d_ctxo, n, d, d, 0);
         // non-causal attention backward → d_qkv (fused; disjoint q/k/v slices)
-        s.push(self.gpu.step(DSC_BIDIR, &[&self.d_ctxo, &self.qkv, &self.dep_probs, &self.d_dscores], &[1, dep_h, n, dep_hd, s3, 2 * d, d], dep_h * n * n));
-        s.push(self.gpu.step(DQ_BIDIR, &[&self.d_dscores, &self.qkv, &self.d_qkv], &[1, dep_h, n, dep_hd, s3, 0, d], dep_h * n * dep_hd));
-        s.push(self.gpu.step(DK_BIDIR, &[&self.d_dscores, &self.qkv, &self.d_qkv], &[1, dep_h, n, dep_hd, s3, 0, d], dep_h * n * dep_hd));
-        s.push(self.gpu.step(DV_BIDIR, &[&self.dep_probs, &self.d_ctxo, &self.d_qkv], &[1, dep_h, n, dep_hd, s3, 2 * d, d], dep_h * n * dep_hd));
+        s.push(self.gpu.step(DSC_BIDIR, &[&self.d_ctxo, &self.qkv, &self.dep_probs, &self.d_dscores], &[b, dep_h, t, dep_hd, s3, 2 * d, d], b * dep_h * t * t));
+        s.push(self.gpu.step(DQ_BIDIR, &[&self.d_dscores, &self.qkv, &self.d_qkv], &[b, dep_h, t, dep_hd, s3, 0, d], b * dep_h * t * dep_hd));
+        s.push(self.gpu.step(DK_BIDIR, &[&self.d_dscores, &self.qkv, &self.d_qkv], &[b, dep_h, t, dep_hd, s3, 0, d], b * dep_h * t * dep_hd));
+        s.push(self.gpu.step(DV_BIDIR, &[&self.dep_probs, &self.d_ctxo, &self.d_qkv], &[b, dep_h, t, dep_hd, s3, 2 * d, d], b * dep_h * t * dep_hd));
         // unpack d_qkv → d_dq/d_dk/d_dv
         s.push(self.gpu.step(CONCAT_SPLIT, &[&self.d_qkv, &self.d_dq], &[n, s3, d, 0, 1, 1], n * d));
         s.push(self.gpu.step(CONCAT_SPLIT, &[&self.d_qkv, &self.d_dk], &[n, s3, d, d, 1, 1], n * d));
         s.push(self.gpu.step(CONCAT_SPLIT, &[&self.d_qkv, &self.d_dv], &[n, s3, d, 2 * d, 1, 1], n * d));
-        s.push(block::rope_bwd(&self.gpu, &ids, &self.d_dq, n, dep_h, dep_hd, d, n, ROPE_THETA));
-        s.push(block::rope_bwd(&self.gpu, &ids, &self.d_dk, n, dep_h, dep_hd, d, n, ROPE_THETA));
+        s.push(block::rope_bwd(&self.gpu, &ids, &self.d_dq, n, dep_h, dep_hd, d, t, ROPE_THETA));
+        s.push(block::rope_bwd(&self.gpu, &ids, &self.d_dk, n, dep_h, dep_hd, d, t, ROPE_THETA));
         // q proj bwd → d_sib (grad to the sibling embedding); k/v proj bwd → d_xn
         self.proj_bwd(&mut s, &self.d_dq, &self.sib, &dp("q_proj.weight"), &dp("q_proj.bias"), &self.d_sib, n, d, d, 0);
         self.proj_bwd(&mut s, &self.d_dk, &self.xn_final, &dp("k_proj.weight"), &dp("k_proj.bias"), &self.d_xn, n, d, d, 0);
@@ -726,8 +760,8 @@ impl KronosTrain {
             // attention backward (input grad = dxmid)
             self.proj_bwd(&mut s, &self.dxmid, &lb.ctx, &p("self_attn.out_proj.weight"), &p("self_attn.out_proj.bias"), &self.d_ctx, n, d, d, 0);
             s.extend(block::gqa_bwd(&self.gpu, &ids, &ga, &lb.q, &lb.k, &lb.v, &lb.probs, &self.d_ctx, &self.d_scores, &self.d_q, &self.d_k, &self.d_v));
-            s.push(block::rope_bwd(&self.gpu, &ids, &self.d_q, n, heads, hd, d, n, ROPE_THETA));
-            s.push(block::rope_bwd(&self.gpu, &ids, &self.d_k, n, heads, hd, d, n, ROPE_THETA));
+            s.push(block::rope_bwd(&self.gpu, &ids, &self.d_q, n, heads, hd, d, t, ROPE_THETA));
+            s.push(block::rope_bwd(&self.gpu, &ids, &self.d_k, n, heads, hd, d, t, ROPE_THETA));
             self.proj_bwd(&mut s, &self.d_v, &lb.xn1, &p("self_attn.v_proj.weight"), &p("self_attn.v_proj.bias"), &self.d_xn, n, d, d, 0);
             self.proj_bwd(&mut s, &self.d_k, &lb.xn1, &p("self_attn.k_proj.weight"), &p("self_attn.k_proj.bias"), &self.d_xn, n, d, d, 1);
             self.proj_bwd(&mut s, &self.d_q, &lb.xn1, &p("self_attn.q_proj.weight"), &p("self_attn.q_proj.bias"), &self.d_xn, n, d, d, 1);
@@ -768,7 +802,8 @@ impl KronosTrain {
     /// exposure-bias recipe), and the s1/s2 CE targets `[t]`.
     #[allow(clippy::too_many_arguments)]
     pub fn set_batch(&self, s1: &[u32], s2: &[u32], cal: &[&[u32]; 5], sampled_s1: &[u32], s1_targets: &[u32], s2_targets: &[u32]) {
-        let t = self.t as usize;
+        // Batch-major: b sequences of t tokens concatenated → b*t total rows.
+        let t = (self.b * self.t) as usize;
         assert!(s1.len() == t && s2.len() == t && s1_targets.len() == t && s2_targets.len() == t && sampled_s1.len() == t);
         self.gpu.write(&self.s1_ids, s1);
         self.gpu.write(&self.s2_ids, s2);
@@ -786,7 +821,7 @@ impl KronosTrain {
     /// The combined objective `(CE_s1 + CE_s2) / 2`, mean over non-ignored positions.
     pub fn forward(&self) -> f32 {
         self.gpu.submit(&[], &self.fwd_steps);
-        let t = self.t as usize;
+        let t = (self.b * self.t) as usize;
         let l1: f32 = self.gpu.read(&self.ce_buf, t).iter().sum();
         let l2: f32 = self.gpu.read(&self.ce_buf2, t).iter().sum();
         (l1 + l2) / (2.0 * self.count.get())
@@ -794,8 +829,9 @@ impl KronosTrain {
     pub fn backward(&self) {
         // 2·count folds the /2 of (CE_s1+CE_s2)/2 into both grad scalings.
         let c2 = f(2.0 * self.count.get());
-        self.gpu.write(&self.ce_grad_uni, &[self.t, self.cfg.s1_vocab() as u32, IGNORE, c2]);
-        self.gpu.write(&self.ce_grad_uni2, &[self.t, self.cfg.s2_vocab() as u32, IGNORE, c2]);
+        let rows = self.b * self.t;
+        self.gpu.write(&self.ce_grad_uni, &[rows, self.cfg.s1_vocab() as u32, IGNORE, c2]);
+        self.gpu.write(&self.ce_grad_uni2, &[rows, self.cfg.s2_vocab() as u32, IGNORE, c2]);
         self.gpu.submit(&[], &self.bwd_steps);
     }
     pub fn zero_grads(&self) {
@@ -809,6 +845,14 @@ impl KronosTrain {
     }
     pub fn config(&self) -> &KronosConfig {
         &self.cfg
+    }
+    /// Per-sequence context length `t`.
+    pub fn seq_len(&self) -> u32 {
+        self.t
+    }
+    /// Number of sequences trained per step (batch dimension `b`).
+    pub fn batch(&self) -> u32 {
+        self.b
     }
     pub fn param_names(&self) -> Vec<String> {
         let mut v: Vec<String> = self.ps.grad.keys().cloned().collect();
@@ -844,6 +888,22 @@ impl KronosTrain {
     pub fn set(&self, b: &TokenBatch) {
         let calr: [&[u32]; 5] = [&b.cal[0], &b.cal[1], &b.cal[2], &b.cal[3], &b.cal[4]];
         self.set_batch(&b.s1, &b.s2, &calr, &b.sampled_s1, &b.s1_targets, &b.s2_targets);
+    }
+
+    /// Upload `b` [`TokenBatch`]es batch-major (all `t` of window 0, then window
+    /// 1, …) — the batched training step. `batches.len()` must equal the trainer's
+    /// batch dim `b` and every window must have the trainer's length `t`.
+    pub fn set_many(&self, batches: &[TokenBatch]) {
+        assert_eq!(batches.len(), self.b as usize, "set_many expects exactly b={} windows", self.b);
+        let cat = |f: &dyn Fn(&TokenBatch) -> &Vec<u32>| -> Vec<u32> { batches.iter().flat_map(|w| f(w).iter().copied()).collect() };
+        let s1 = cat(&|w| &w.s1);
+        let s2 = cat(&|w| &w.s2);
+        let sampled_s1 = cat(&|w| &w.sampled_s1);
+        let s1_targets = cat(&|w| &w.s1_targets);
+        let s2_targets = cat(&|w| &w.s2_targets);
+        let cal: [Vec<u32>; 5] = std::array::from_fn(|c| batches.iter().flat_map(|w| w.cal[c].iter().copied()).collect());
+        let calr: [&[u32]; 5] = [&cal[0], &cal[1], &cal[2], &cal[3], &cal[4]];
+        self.set_batch(&s1, &s2, &calr, &sampled_s1, &s1_targets, &s2_targets);
     }
     /// Mean forward loss over a set of batches (no gradient) — the held-out metric
     /// the promotion gate compares.
@@ -922,13 +982,19 @@ pub struct FinetuneOpts {
     pub wd: f32,
     pub clip: f32,
     pub lora: Option<LoraCfg>,
+    /// Windows trained per optimizer step (the batch dim `b`). `1` = the original
+    /// one-window-per-step path. Higher `b` amortises the per-step overhead and
+    /// fills the AVX/GPU lanes; the step is mathematically the mean of the `b`
+    /// single steps (validated by the batch-parity gate). Uses drop_last — a
+    /// trailing partial group of `< b` windows is skipped each epoch.
+    pub batch: u32,
     /// Print per-batch progress (epoch, step/total, running loss, elapsed + ETA).
     pub progress: bool,
 }
 
 impl Default for FinetuneOpts {
     fn default() -> Self {
-        FinetuneOpts { epochs: 8, lr: 4e-5, wd: 0.1, clip: 3.0, lora: None, progress: false }
+        FinetuneOpts { epochs: 8, lr: 4e-5, wd: 0.1, clip: 3.0, lora: None, batch: 1, progress: false }
     }
 }
 
@@ -966,16 +1032,26 @@ pub fn finetune(
         eprintln!("  [finetune] base held-out loss {base_val:.4} · {} train / {} val windows · {} epoch(s)",
             train.len(), val.len(), opts.epochs);
     }
-    let ft = KronosTrain::with_lora_on(dev, cfg, t, base_init, opts.lora.clone());
-    let total = (opts.epochs as usize * train.len()).max(1);
+    // Batch `bsz` windows per step. `bsz` is clamped to the window count so a
+    // small universe still trains (never zero steps); a trailing partial group is
+    // dropped each epoch (a fixed-`b` trainer can't take a short group).
+    let bsz = opts.batch.max(1).min(train.len().max(1) as u32);
+    let ft = KronosTrain::with_lora_batch_on(dev, cfg.clone(), t, bsz, base_init, opts.lora.clone());
+    let groups = train.chunks_exact(bsz as usize);
+    let dropped = train.len() % bsz as usize;
+    let per_epoch = train.len() / bsz as usize;
+    if opts.progress && bsz > 1 {
+        eprintln!("  [finetune] batch={bsz} → {per_epoch} step(s)/epoch ({dropped} window(s) dropped/epoch by drop_last)");
+    }
+    let total = (opts.epochs as usize * per_epoch).max(1);
     let every = (total / 40).max(1);
     let t0 = std::time::Instant::now();
     let (mut run, mut cnt) = (0.0f32, 0u32);
     let mut step = 0u32;
     for ep in 0..opts.epochs {
-        for b in train {
+        for group in groups.clone() {
             step += 1;
-            ft.set(b);
+            ft.set_many(group);
             ft.zero_grads();
             let l = ft.forward();
             ft.backward();
@@ -995,9 +1071,18 @@ pub fn finetune(
             }
         }
     }
-    let ft_val = ft.mean_loss(val);
+    let ft_weights = ft.to_reference_weights();
+    // Held-out eval: a batched trainer (b>1) has buffers sized for b*t tokens and
+    // can't score single val windows, so evaluate on a fresh b=1 model of the
+    // fine-tuned weights (identical to the base_val path). For b=1 the live trainer
+    // scores directly, preserving the original gate value exactly.
+    let ft_val = if bsz == 1 {
+        ft.mean_loss(val)
+    } else {
+        KronosTrain::with_lora_on(Gpu::new(PIPELINES), cfg, t, &ft_weights, None).mean_loss(val)
+    };
     let promoted = ft_val.is_finite() && base_val.is_finite() && ft_val < base_val;
     // Return the fine-tuned weights unconditionally so the caller can also evaluate
     // generalization (held-out names); the caller saves iff `promoted`.
-    (FinetuneReport { promoted, base_val, ft_val, steps: step }, Some(ft.to_reference_weights()))
+    (FinetuneReport { promoted, base_val, ft_val, steps: step }, Some(ft_weights))
 }

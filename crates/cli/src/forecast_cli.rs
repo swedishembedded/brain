@@ -274,10 +274,11 @@ fn finetune(args: &[String]) {
     let lr = a.f32_or("--lr", 4e-5);
     let lora_rank = a.usize_or("--lora", 0);
     let embargo = a.usize_or("--embargo", horizon);
+    let batch = a.usize_or("--batch", 1).max(1) as u32;
     a.finish();
     if tok.is_empty() || dec.is_empty() || data.is_empty() {
         eprintln!("usage: brain forecast finetune --kronos-tokenizer <dir> --kronos-decoder <dir> --data <csv-dir> \\");
-        eprintln!("         [--out <ckpt>] [--context 180] [--horizon 5] [--epochs 8] [--lr 4e-5] [--lora RANK] [--embargo N]");
+        eprintln!("         [--out <ckpt>] [--context 180] [--horizon 5] [--epochs 8] [--lr 4e-5] [--lora RANK] [--embargo N] [--batch B]");
         return;
     }
     let (cfg, base) = match kronos::import::load_decoder(&dec) {
@@ -296,7 +297,7 @@ fn finetune(args: &[String]) {
         series.len(), if lora_rank > 0 { format!(" · LoRA r{lora_rank}") } else { " · full".into() });
     let split = forecast::train_data::SplitConfig { train_frac: 0.7, val_frac: 0.15, embargo };
     let lora = (lora_rank > 0).then(|| kronos::train::LoraCfg::attn(lora_rank, (lora_rank * 2) as f32));
-    let opts = kronos::train::FinetuneOpts { epochs, lr, wd: 0.1, clip: 3.0, lora, progress: true };
+    let opts = kronos::train::FinetuneOpts { epochs, lr, wd: 0.1, clip: 3.0, lora, batch, progress: true };
     let (rep, weights) = kronos::finetune::finetune_universe(&model, &base, &series, context, horizon, split, &opts);
     println!(
         "\ngate (INCLUDED names, held-out future): base_val {:.4} → ft_val {:.4}  ({} steps)  ⇒  {}",
