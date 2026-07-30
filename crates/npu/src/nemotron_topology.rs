@@ -309,7 +309,7 @@ fn attn_mask_host(topo: &NemotronTopo, t: usize, valid: usize) -> Vec<f32> {
 
 /// A linear `x @ W^T` with NO bias, returning the output tensor name. Weight
 /// stored `[out, in]`, transposed into the graph as `[in, out]`.
-fn linear_nb(g: &mut GraphBuilder, w: &dyn WeightSource, x: &str, wname: &str, out: u32, inn: u32, tag: &str) -> String {
+pub(crate) fn linear_nb(g: &mut GraphBuilder, w: &dyn WeightSource, x: &str, wname: &str, out: u32, inn: u32, tag: &str) -> String {
     let wt = transpose_2d(&w.get(wname), out as usize, inn as usize);
     let wn = format!("{tag}.wT");
     g.init_f32(&wn, &[inn as i64, out as i64], wt);
@@ -318,7 +318,7 @@ fn linear_nb(g: &mut GraphBuilder, w: &dyn WeightSource, x: &str, wname: &str, o
     mm
 }
 
-fn reshape(g: &mut GraphBuilder, x: &str, dims: &[i64], tag: &str) -> String {
+pub(crate) fn reshape(g: &mut GraphBuilder, x: &str, dims: &[i64], tag: &str) -> String {
     let shp = format!("{tag}.shape");
     g.init_i64(&shp, &[dims.len() as i64], dims.iter().copied().collect());
     let out = format!("{tag}.rs");
@@ -326,20 +326,20 @@ fn reshape(g: &mut GraphBuilder, x: &str, dims: &[i64], tag: &str) -> String {
     out
 }
 
-fn transpose(g: &mut GraphBuilder, x: &str, perm: &[i64], tag: &str) -> String {
+pub(crate) fn transpose(g: &mut GraphBuilder, x: &str, perm: &[i64], tag: &str) -> String {
     let out = format!("{tag}.tp");
     g.add(Node::new("Transpose", &[x], &[&out]).name(&format!("{tag}.transpose")).attr_ints("perm", perm));
     out
 }
 
-fn add_t(g: &mut GraphBuilder, a: &str, b: &str, tag: &str) -> String {
+pub(crate) fn add_t(g: &mut GraphBuilder, a: &str, b: &str, tag: &str) -> String {
     let out = format!("{tag}.add");
     g.add(Node::new("Add", &[a, b], &[&out]).name(&format!("{tag}.add")));
     out
 }
 
 /// LayerNorm over the last axis (opset-13 primitives), `(x-µ)·rsqrt(var+eps)·γ + β`.
-fn layernorm_onnx(g: &mut GraphBuilder, w: &dyn WeightSource, x: &str, gname: &str, bname: &str, c: u32, eps: f32, tag: &str) -> String {
+pub(crate) fn layernorm_onnx(g: &mut GraphBuilder, w: &dyn WeightSource, x: &str, gname: &str, bname: &str, c: u32, eps: f32, tag: &str) -> String {
     let mean = format!("{tag}.mean");
     g.add(Node::new("ReduceMean", &[x], &[&mean]).name(&format!("{tag}.mean")).attr_ints("axes", &[-1]).attr_int("keepdims", 1));
     let xc = format!("{tag}.xc");

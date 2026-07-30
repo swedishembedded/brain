@@ -49,3 +49,4 @@ brain-wm-diamond.workspace = true
 brain-gpu-core.workspace = true
 brain-paramstore.workspace = true
 brain-nemotron.workspace = true
+brain-qwen-asr.workspace = true

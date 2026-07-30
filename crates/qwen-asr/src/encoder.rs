@@ -124,18 +124,29 @@ impl<'g> AudioEncoder<'g> {
             }
         }
         let n_audio = (packed.len() / hidden as usize) as u32;
+        let spans = self.cu_seqlens(valid_frames, &chunk_valid);
+        self.encode_packed(&packed, n_audio, &spans)
+    }
+
+    /// The windowed transformer + `ln_post` + projector over already-packed,
+    /// pos-added tokens `[n_audio, d_model]` with block-diagonal `spans`
+    /// (`(row0, len)`). Returns `(encoder_out [n_audio, d_model], audio_embeds
+    /// [n_audio, output_dim])`. This is the NPU-portable head — `crates/npu` builds
+    /// an ONNX graph parity-gated against it; `encode` = conv stem + pack + this.
+    pub fn encode_packed(&self, packed: &[f32], n_audio: u32, spans: &[(u32, u32)]) -> (Vec<f32>, Vec<f32>) {
+        let c = &self.cfg;
+        let hidden = c.d_model;
         if n_audio == 0 {
             return (Vec::new(), Vec::new());
         }
 
         // ---- windowed transformer blocks (device) ----
-        let spans = self.cu_seqlens(valid_frames, &chunk_valid);
         let max_span = spans.iter().map(|&(_, l)| l).max().unwrap_or(n_audio);
         let sh = VitShape { dim: hidden, heads: c.n_heads, mlp: c.ffn_dim, eps: c.eps };
         let ids = vit_ids();
         let scr = VitScratch::new(self.gpu, &sh, n_audio, max_span, max_span);
 
-        let x = self.gpu.storage_init("asr.x", &packed);
+        let x = self.gpu.storage_init("asr.x", packed);
         let mut steps: Vec<Step> = Vec::new();
         for b in 0..c.n_layers {
             let p = |leaf: &str| self.wb(&format!("blocks.{b}.{leaf}"));
@@ -157,7 +168,7 @@ impl<'g> AudioEncoder<'g> {
                 fc2_b: p("fc2.bias"),
                 ls2: None,
             };
-            vit_block_fwd(self.gpu, &ids, &sh, &bw, &x, n_audio, &spans, max_span, &scr, &mut steps);
+            vit_block_fwd(self.gpu, &ids, &sh, &bw, &x, n_audio, spans, max_span, &scr, &mut steps);
         }
         // ln_post
         let enc = self.gpu.storage((n_audio * hidden) as u64);
