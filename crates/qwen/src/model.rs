@@ -108,6 +108,8 @@ const MATMUL_I8_GEMV: usize = 51;
 // workgroup-per-column GEMV — the m=1 shapes KV decode is made of.
 const RMSNORM_ROWS: usize = 52;
 const MATMUL_GEMV: usize = 53;
+// Encoder right-padding key mask (FLUX.2 text-encoder parity).
+const GQA_SCORES_KMASK: usize = 54;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -164,6 +166,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("matmul_gemv", kernels::MATMUL_GEMV),
+    ("gqa_scores_kmask", kernels::GQA_SCORES_KMASK),
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
@@ -282,6 +285,10 @@ pub struct Qwen {
     proj: DeviceBuffer,
     mlp_out: DeviceBuffer,
     scores: DeviceBuffer,
+    // Additive per-key attention mask ([t] f32; 0 live / -3.4e38 excluded) and
+    // its arming flag — the padded-encoder path (`encode_hiddens_padded`).
+    kmask: DeviceBuffer,
+    kmask_on: Cell<bool>,
     xn_final: DeviceBuffer,
     logits: DeviceBuffer,
     ce_buf: DeviceBuffer,
@@ -364,9 +371,9 @@ impl Qwen {
 
     /// Build a single pipeline **stage**: only the layers (and endpoint weights)
     /// in `shard` are allocated on this device. `train` selects the parameter
-    /// roles (offload/LoRA/frozen) exactly as the whole-model path does. The
-    /// caller ([`crate::shard::Pipeline`]) selects the physical GPU by setting
-    /// `BRAIN_GPU_INDEX` before this call.
+    /// roles (offload/LoRA/frozen) exactly as the whole-model path does.
+    /// `shard.gpu_index` names the canonical physical card (device registry);
+    /// `Shard::ANY_GPU` keeps the ambient selection.
     pub fn new_shard(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool, shard: Shard) -> Qwen {
         Qwen::new_impl(cfg, b, t, init, train, shard, false)
     }
@@ -381,7 +388,15 @@ impl Qwen {
 
     fn new_impl(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool, shard: Shard, i8: bool) -> Qwen {
         assert!(!(i8 && train), "int8 path is inference-only");
-        let gpu = Gpu::new(PIPELINES);
+        // An explicitly-placed shard binds its canonical card through the
+        // device registry; `Shard::ANY_GPU` (the `Shard::whole` default) keeps
+        // the ambient selection (`--device` / scoped `with_gpu`).
+        let gpu = if shard.gpu_index == Shard::ANY_GPU {
+            Gpu::new(PIPELINES)
+        } else {
+            Gpu::new_on_index(shard.gpu_index as u32, PIPELINES)
+                .unwrap_or_else(|e| panic!("qwen shard placement: {e}"))
+        };
         // The parameter set this stage actually holds: the whole list for a whole
         // shard (byte-identical to before), or just this stage's slice otherwise.
         // In int8 mode the 7 per-layer linears live in `q8` (packed int8), NOT the
@@ -566,6 +581,8 @@ impl Qwen {
             proj: st(n * d),
             mlp_out: st(n * d),
             scores: st(bht2),
+            kmask: st(t as u64),
+            kmask_on: Cell::new(false),
             xn_final: hd_v(n * d),
             logits: hd_v(n * v),
             ce_buf: hd_v(n),
@@ -822,7 +839,11 @@ impl Qwen {
                 s.push(block::rope_fwd(&self.gpu, &ids, q_buf, n, nh, hd, hq, t_use, theta));
                 s.push(block::rope_fwd(&self.gpu, &ids, k_buf, n, nkv, hd, hkv, t_use, theta));
             }
-            s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx));
+            if self.kmask_on.get() {
+                s.extend(block::gqa_fwd_kmask(&self.gpu, GQA_SCORES_KMASK, &ids, &ga, q_buf, k_buf, &self.kmask, &lb.v, &self.scores, &lb.probs, &lb.ctx));
+            } else {
+                s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx));
+            }
             if let Some((q8, ql)) = q8l {
                 q8.quant(&self.gpu, &mut s, &lb.ctx, hq, n);
                 q8.mm8(&self.gpu, &mut s, &ql.wo, &self.proj, n);
@@ -1253,6 +1274,52 @@ impl Qwen {
     /// `text_encoder(...).hidden_states[-2]`). Returns row-major `[len·d_model]`.
     pub fn encode(&self, tokens: &[u32]) -> Vec<f32> {
         self.encode_hidden(tokens, self.cfg.n_layers as usize - 1)
+    }
+
+    /// [`Self::encode_hiddens`] over a **right-padded** sequence, reproducing
+    /// the HF `attention_mask` semantics: tokens `content_len..` are pad
+    /// queries with real outputs (they rope at their own positions and attend
+    /// the content), but are **excluded as keys** for every query. Without
+    /// this, pad-row features diverge wildly from the reference (the FLUX.2
+    /// text encoder feeds all 512 rows — pads included — to the DiT unmasked,
+    /// so parity requires the masked values).
+    pub fn encode_hiddens_padded(
+        &self,
+        tokens: &[u32],
+        content_len: usize,
+        layers: &[usize],
+    ) -> Vec<Vec<f32>> {
+        assert!(content_len <= tokens.len());
+        let mut mask = vec![0.0f32; self.t as usize];
+        for m in mask[content_len..tokens.len()].iter_mut() {
+            *m = -3.4e38;
+        }
+        self.gpu.write(&self.kmask, bytemuck::cast_slice(&mask));
+        self.kmask_on.set(true);
+        let out = self.encode_hiddens(tokens, layers);
+        self.kmask_on.set(false);
+        out
+    }
+
+    /// Several hidden-state taps from **one** forward, each row-major
+    /// `[len·d_model]` in the order requested. FLUX.2 Klein concatenates
+    /// `hidden_states[9|18|27]` per token — with [`Self::encode_hidden`] that
+    /// would be three full forwards; every `res[l]` buffer is live after a
+    /// single pass, so this reads them all.
+    pub fn encode_hiddens(&self, tokens: &[u32], layers: &[usize]) -> Vec<Vec<f32>> {
+        let t_use = tokens.len() as u32;
+        assert!(t_use <= self.t && self.b == 1, "qwen decoder sized too small");
+        for &l in layers {
+            assert!(l <= self.cfg.n_layers as usize, "layer {l} > n_layers");
+        }
+        let ignore = vec![IGNORE; t_use as usize];
+        self.set_batch(tokens, &ignore);
+        let s = self.forward_steps(1, t_use);
+        self.gpu.submit(&[], &s);
+        layers
+            .iter()
+            .map(|&l| self.gpu.read(&self.res[l], (t_use * self.cfg.d_model) as usize))
+            .collect()
     }
 
     // ---- incremental KV-cache decode (the O(T)/token twin of the O(T²) forward) ----

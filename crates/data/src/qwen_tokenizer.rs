@@ -210,6 +210,16 @@ impl QwenBpe {
         }
         s
     }
+
+    /// The Qwen3 template with `enable_thinking=false`: the generation prompt
+    /// ends with an empty `<think>` block. This is the exact rendering FLUX.2
+    /// Klein feeds its text encoder — the suffix is part of the conditioning
+    /// and must not be dropped.
+    pub fn apply_chat_template_no_think(&self, msgs: &[(&str, &str)]) -> String {
+        let mut s = self.apply_chat_template(msgs, true);
+        s.push_str("<think>\n\n</think>\n\n");
+        s
+    }
 }
 
 impl Tokenizer for QwenBpe {

@@ -145,6 +145,29 @@ impl QwenConfig {
         }
     }
 
+
+    /// The published Qwen3-8B shape (from its `config.json`) — the text encoder
+    /// used by FLUX.2 Klein 9B (`hidden_size` 4096, 36 layers, GQA 32/8,
+    /// `head_dim` 128, SwiGLU `d_ff` 12288, untied `lm_head`).
+    pub fn qwen3_8b() -> QwenConfig {
+        QwenConfig {
+            vocab: 151936,
+            block_size: 1024,
+            n_layers: 36,
+            d_model: 4096,
+            n_heads: 32,
+            n_kv_heads: 8,
+            head_dim: 128,
+            d_ff: 12288,
+            rope_theta: 1.0e6,
+            rms_eps: 1e-6,
+            tie_embeddings: false,
+            qk_norm: true,
+            attn_bias: false,
+            lora: None,
+        }
+    }
+
     /// Apply derived defaults (head_dim = d_model/n_heads when unset).
     pub fn with_defaults(mut self) -> Self {
         if self.head_dim == 0 {
