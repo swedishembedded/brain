@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use capability::{ActionResult, Blob, Invocation, Manifest, Media, Outcome, Progress};
+use capability::{ActionResult, Invocation, Manifest, Media, Outcome, Progress};
 use residency::bridge::ProviderResident;
 use residency::{Device, Executor, Instance, InstanceKey, MemCost, Policy, ResidentModel};
 use serde_json::{json, Value};
@@ -63,6 +63,13 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, r
         models.push(Arc::new(l));
     } else {
         eprintln!("brain: lfm not served over the scheduler (set BRAIN_LFM + BRAIN_LFM_TOKENIZER)");
+    }
+    // FLUX.2 Klein (BRAIN_FLUX2_{DIT,VAE,TE,TOKENIZER}): text-to-image,
+    // reference-image editing, LoRA training (see resident_flux2.rs).
+    if let Some(f) = crate::resident_flux2::Flux2Resident::from_env() {
+        models.push(Arc::new(f));
+    } else {
+        eprintln!("brain: flux2-klein not served over the scheduler (set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER)");
     }
     // Monocular depth (BRAIN_DEPTH_WEIGHTS).
     if let Some(d) = crate::resident_depth::DepthResident::from_env() {
@@ -151,15 +158,6 @@ struct YoloInstance {
     batch: usize,
 }
 
-/// Decode an image blob (HWC f32 + `{w,h}` meta) into `(pixels, w, h)`.
-fn image_of(inv: &Invocation) -> Result<(Vec<f32>, u32, u32), String> {
-    let blob = inv.get_blob("image").ok_or("yolo detect: missing input 'image'")?;
-    let w = blob.meta.get("w").and_then(|v| v.as_u64()).ok_or("yolo detect: image meta needs w")? as u32;
-    let h = blob.meta.get("h").and_then(|v| v.as_u64()).ok_or("yolo detect: image meta needs h")? as u32;
-    let hwc: Vec<f32> = blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
-    Ok((hwc, w, h))
-}
-
 fn detections_outcome(dets: &[[f32; 6]]) -> Outcome {
     let objects: Vec<Value> = dets
         .iter()
@@ -187,7 +185,7 @@ impl Instance for YoloInstance {
             let mut imgs: Vec<(Vec<f32>, u32, u32)> = Vec::with_capacity(chunk.len());
             let mut errs: Vec<Option<String>> = Vec::with_capacity(chunk.len());
             for inv in chunk {
-                match image_of(inv) {
+                match capability::blob::decode_image(inv, "image") {
                     Ok(im) => {
                         imgs.push(im);
                         errs.push(None);
@@ -274,18 +272,18 @@ impl ResidentModel for ZImageResident {
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        if let Device::Gpu(i) = device {
-            // Place the DiT on the assigned card; the encoder card is z-image's own
-            // (BRAIN_ZIMAGE_ENCODER_GPU) and left as configured.
-            std::env::set_var("BRAIN_GPU_INDEX", i.to_string());
-        }
         if key.config.starts_with("edit:") {
             // No persistent pipeline — the provider builds fresh per call.
             return Ok(Box::new(ZImageInstance { pipe: None, provider: self.provider.clone() }));
         }
         let (w, h, hifi, adapter) = parse_key(&key.config);
         let adapter = if adapter.is_empty() { None } else { Some(adapter.as_str()) };
-        let pipe = HotPipeline::build_adapted(&self.paths, w, h, 64, hifi, adapter, |_| {})?;
+        // Place the DiT on the assigned card (scoped registry selection); the
+        // encoder card is z-image's own (BRAIN_ZIMAGE_ENCODER_GPU) and left as
+        // configured.
+        let pipe = crate::resident_llm::on_device(device, || {
+            HotPipeline::build_adapted(&self.paths, w, h, 64, hifi, adapter, |_| {})
+        })??;
         Ok(Box::new(ZImageInstance { pipe: Some(pipe), provider: self.provider.clone() }))
     }
 }
@@ -304,7 +302,7 @@ impl Instance for ZImageInstance {
             let prompt = inv.get_str("prompt").unwrap_or_default();
             let seed = inv.get_i64("seed").unwrap_or(42).max(0) as u64;
             let steps = inv.get_i64("steps").unwrap_or(8).max(1) as u32;
-            let img = pipe.generate(&prompt, seed, steps, |s, t, m| progress(Progress { step: s, total: t, message: m.to_string() }));
+            let img = pipe.generate(&prompt, seed, steps, &inv.cancel, |s, t, m| progress(Progress { step: s, total: t, message: m.to_string() }))?;
             return Ok(emit_image(img));
         }
         // Editing / training: delegate to the provider's action (fresh build).
@@ -325,11 +323,11 @@ fn parse_key(config: &str) -> (u32, u32, bool, String) {
     (w.parse().unwrap_or(1024), h.parse().unwrap_or(1024), prec == "fp32", adapter)
 }
 
-/// Wrap a generated [`Image`] as an image-output [`Outcome`] (raw HWC f32 + `{w,h,c}`).
+/// Wrap a generated [`Image`] as an image-output [`Outcome`] (the shared
+/// `capability::blob` wire format).
 fn emit_image(img: Image) -> Outcome {
-    let bytes: Vec<u8> = img.hwc.iter().flat_map(|f| f.to_le_bytes()).collect();
     Outcome::new()
         .set("width", json!(img.w))
         .set("height", json!(img.h))
-        .blob("image", Blob::new(Media::Image, bytes).with_meta(json!({"w": img.w, "h": img.h, "c": 3})))
+        .blob("image", capability::blob::image_blob(&img.hwc, img.w as u32, img.h as u32, 3))
 }

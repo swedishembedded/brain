@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 fn static_manifests() -> Vec<Manifest> {
     vec![
         zimage::caps::manifest(),
+        flux2::caps::manifest(),
         qwen::caps::manifest(),
         lfm::caps::manifest(),
         fastvlm::caps::manifest(),
@@ -44,6 +45,7 @@ pub fn all_providers() -> Result<Registry, String> {
     reg.register(Arc::new(DemoModel));
     reg.register(Arc::new(imageops::ImageOps));
     reg.register(Arc::new(zimage::caps::ZImageProvider::load()?));
+    reg.register(Arc::new(flux2::caps::Flux2Provider::new()));
     reg.register(Arc::new(qwen::caps::QwenProvider::new()));
     reg.register(Arc::new(lfm::caps::LfmProvider::new()));
     reg.register(Arc::new(fastvlm::caps::FastVlmProvider::new()));
@@ -61,6 +63,7 @@ fn build_registry(model: &str) -> Result<Registry, String> {
         "demo" => reg.register(Arc::new(DemoModel)),
         "imageops" => reg.register(Arc::new(imageops::ImageOps)),
         zimage::caps::MODEL => reg.register(Arc::new(zimage::caps::ZImageProvider::load()?)),
+        flux2::caps::MODEL => reg.register(Arc::new(flux2::caps::Flux2Provider::new())),
         qwen::caps::MODEL => reg.register(Arc::new(qwen::caps::QwenProvider::new())),
         lfm::caps::MODEL => reg.register(Arc::new(lfm::caps::LfmProvider::new())),
         fastvlm::caps::MODEL => reg.register(Arc::new(fastvlm::caps::FastVlmProvider::new())),

@@ -21,6 +21,7 @@
 //! fused checkpoint layout) → [`finetune`] (captioned-image folder →
 //! trained adapter, host f32 trainer).
 
+pub mod caps;
 pub mod config;
 pub mod finetune;
 pub mod grad;
