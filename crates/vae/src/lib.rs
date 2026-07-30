@@ -18,6 +18,7 @@
 
 pub mod config;
 pub mod decoder;
+pub mod latent;
 
 pub use config::VaeConfig;
 pub use decoder::{Tensors, VaeDecoder, VaeEncoder};

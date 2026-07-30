@@ -3,9 +3,10 @@
 
 //! `AutoencoderKL` decoder as a pre-recorded brain kernel graph.
 //!
-//! Mirrors the diffusers `Decoder`: `conv_in` → mid block (resnet, self-attn,
-//! resnet) → up blocks (`layers_per_block+1` resnets each, nearest-2× upsample
-//! + conv on all but the last block) → `conv_norm_out` → SiLU → `conv_out`.
+//! Mirrors the diffusers `Decoder`: [1×1 `post_quant_conv` when the config
+//! enables it — FLUX.2] → `conv_in` → mid block (resnet, self-attn, resnet) →
+//! up blocks (`layers_per_block+1` resnets each, nearest-2× upsample + conv on
+//! all but the last block) → `conv_norm_out` → SiLU → `conv_out`.
 //! The graph is built once for a fixed input `[latent_ch, h, w]`; `decode`
 //! uploads the latent, submits, and reads the image `[out_ch, H, W]`.
 //!
@@ -348,10 +349,27 @@ impl VaeDecoder {
         let rc = cfg.reversed_channels();
         let mid_c = *cfg.block_out_channels.last().unwrap();
 
+        // FLUX.2 post_quant_conv: 1×1 latent→latent ahead of conv_in. The shipped
+        // diffusers checkpoint stores it top-level (`post_quant_conv.weight`); the
+        // BFL-native layout nests it (`decoder.post_quant_conv.*`). Accept both;
+        // a checkpoint with neither fails loudly in `Builder::get`.
+        let zc = cfg.latent_channels;
+        let pq = cfg.use_post_quant_conv.then(|| {
+            let p = if tensors.contains_key("post_quant_conv.weight") {
+                "post_quant_conv"
+            } else {
+                "decoder.post_quant_conv"
+            };
+            b.conv(p, zc, zc, 1, 0, h, w, &z_in)
+        });
+
         // conv_in: latent → highest block channel. `z_in` is the persistent input,
         // never freed; `xlen` tracks the current `x` length so the previous `x` can
         // be returned to the pool once the next op has consumed it.
-        let mut x = b.conv("decoder.conv_in", cfg.latent_channels, mid_c, 3, 1, h, w, &z_in);
+        let mut x = b.conv("decoder.conv_in", zc, mid_c, 3, 1, h, w, pq.as_ref().unwrap_or(&z_in));
+        if let Some(p) = pq {
+            b.free((zc * h * w) as u64, p); // last read was conv_in above
+        }
         let mut xlen = (mid_c * h * w) as u64;
         b.tap("conv_in".into(), &x, mid_c * h * w);
 
@@ -435,9 +453,10 @@ impl VaeDecoder {
 
 /// An `AutoencoderKL` **encoder** graph for a fixed image size, weights resident.
 /// Mirrors [`VaeDecoder`]: `image[3,H,W] → moments[2·latent, H/8, W/8]` (mean ‖
-/// logvar). This VAE has no `quant_conv`, so `conv_out` yields the moments
-/// directly. Reuses the shared [`Builder`] blocks (conv/resnet/gn/silu/attn) and
-/// the strided [`Builder::conv_down`] for the diffusers `Downsample2D`.
+/// logvar). `conv_out` yields the moments directly unless the config enables the
+/// FLUX.2 1×1 `quant_conv`, which then maps them in place. Reuses the shared
+/// [`Builder`] blocks (conv/resnet/gn/silu/attn) and the strided
+/// [`Builder::conv_down`] for the diffusers `Downsample2D`.
 pub struct VaeEncoder {
     gpu: Gpu,
     cfg: VaeConfig,
@@ -500,6 +519,19 @@ impl VaeEncoder {
         let hs = b.silu(mid_c * cur_h * cur_w, &hn);
         let moments = 2 * cfg.latent_channels;
         let out = b.conv("encoder.conv_out", mid_c, moments, 3, 1, cur_h, cur_w, &hs);
+        // FLUX.2 quant_conv: 1×1 moments→moments after conv_out. Top-level
+        // (`quant_conv.weight`, diffusers export) or nested (`encoder.quant_conv.*`,
+        // BFL-native); a checkpoint with neither fails loudly in `Builder::get`.
+        let out = if cfg.use_quant_conv {
+            let p = if tensors.contains_key("quant_conv.weight") {
+                "quant_conv"
+            } else {
+                "encoder.quant_conv"
+            };
+            b.conv(p, moments, moments, 1, 0, cur_h, cur_w, &out)
+        } else {
+            out
+        };
         let out_len = (moments * cur_h * cur_w) as usize;
 
         let Builder { steps, taps, .. } = b;

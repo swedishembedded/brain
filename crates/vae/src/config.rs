@@ -6,6 +6,10 @@
 /// The subset of the diffusers `AutoencoderKL` config that determines the
 /// decoder graph. Z-Image / FLUX-dev VAE: 16 latent channels, `[128,256,512,
 /// 512]` block channels (→ 8× spatial), 2 layers/block, 32 groups, `silu`.
+/// FLUX.2 (`AutoencoderKLFlux2`) keeps the conv net and adds: 32 latent
+/// channels, 1×1 `quant_conv`/`post_quant_conv` at the latent boundary, and a
+/// 2×2 latent pixel-unshuffle normalized by frozen BatchNorm stats
+/// (`crate::latent`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct VaeConfig {
     pub in_channels: u32,
@@ -21,6 +25,18 @@ pub struct VaeConfig {
     pub mid_block_add_attention: bool,
     pub scaling_factor: f32,
     pub shift_factor: f32,
+    /// 1×1 `quant_conv` (2·latent → 2·latent) after the encoder `conv_out`
+    /// (FLUX.2: true; Z-Image/FLUX.1: false).
+    pub use_quant_conv: bool,
+    /// 1×1 `post_quant_conv` (latent → latent) before the decoder `conv_in`
+    /// (FLUX.2: true; Z-Image/FLUX.1: false).
+    pub use_post_quant_conv: bool,
+    /// Latent pixel-unshuffle patch `[pi, pj]` (FLUX.2: `[2,2]` → the DiT sees
+    /// `prod(patch)·latent` channels). `[1,1]` = no packing.
+    pub patch_size: [u32; 2],
+    /// Eval-mode BatchNorm epsilon for the packed-latent normalization
+    /// (FLUX.2: 1e-4). Unused when `patch_size == [1,1]`.
+    pub batch_norm_eps: f32,
 }
 
 impl VaeConfig {
@@ -48,6 +64,43 @@ impl VaeConfig {
                 .unwrap_or(true),
             scaling_factor: f("scaling_factor", 0.3611),
             shift_factor: f("shift_factor", 0.1159),
+            use_quant_conv: v.get("use_quant_conv").and_then(|x| x.as_bool()).unwrap_or(false),
+            use_post_quant_conv: v
+                .get("use_post_quant_conv")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
+            patch_size: v
+                .get("patch_size")
+                .and_then(|x| x.as_array())
+                .and_then(|a| match a.as_slice() {
+                    [i, j] => Some([i.as_u64()? as u32, j.as_u64()? as u32]),
+                    _ => None,
+                })
+                .unwrap_or([1, 1]),
+            batch_norm_eps: f("batch_norm_eps", 1e-4),
+        }
+    }
+
+    /// FLUX.2 (Klein/dev) `AutoencoderKLFlux2` preset: 32 latent channels,
+    /// quant/post-quant 1×1 convs, 2×2 latent packing with BatchNorm-stat
+    /// normalization (eps 1e-4). Latent scale/shift are identity — FLUX.2
+    /// normalizes via the checkpoint's `bn.running_{mean,var}` instead.
+    pub fn flux2() -> VaeConfig {
+        VaeConfig {
+            in_channels: 3,
+            out_channels: 3,
+            latent_channels: 32,
+            block_out_channels: vec![128, 256, 512, 512],
+            layers_per_block: 2,
+            norm_num_groups: 32,
+            norm_eps: 1e-6,
+            mid_block_add_attention: true,
+            scaling_factor: 1.0,
+            shift_factor: 0.0,
+            use_quant_conv: true,
+            use_post_quant_conv: true,
+            patch_size: [2, 2],
+            batch_norm_eps: 1e-4,
         }
     }
 
