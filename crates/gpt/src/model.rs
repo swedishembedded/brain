@@ -99,6 +99,22 @@ const ATTN_DECODE_SCORES: usize = 37;
 const DECODE_SOFTMAX: usize = 38;
 const ATTN_DECODE_APPLY: usize = 39;
 const KV_APPEND: usize = 40;
+// Workgroup-per-row LayerNorm (2.3-9.1x the per-element kernels on a P40 — see
+// `model::block::LayerNormIds`). Appended, so every index above is unchanged.
+const LAYERNORM_ROWS: usize = 41;
+const LN_STATS_ROWS: usize = 42;
+const LN_DX_ROWS: usize = 43;
+
+/// The LayerNorm family this model dispatches through `model::block`, which
+/// picks the coalesced variant per device (`backend_api::select`).
+const LN_IDS: model::block::LayerNormIds = model::block::LayerNormIds {
+    layernorm: LAYERNORM,
+    layernorm_rows: Some(LAYERNORM_ROWS),
+    ln_stats: LN_STATS,
+    ln_stats_rows: Some(LN_STATS_ROWS),
+    layernorm_dx: LN_DX,
+    layernorm_dx_rows: Some(LN_DX_ROWS),
+};
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -142,6 +158,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("decode_softmax", kernels::DECODE_SOFTMAX),
     ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
     ("kv_append", kernels::KV_APPEND),
+    ("layernorm_rows", kernels::LAYERNORM_ROWS),
+    ("ln_stats_rows", kernels::LN_STATS_ROWS),
+    ("layernorm_dx_rows", kernels::LAYERNORM_DX_ROWS),
 ];
 
 /// Pick the forward-linear GEMM kernel + its dispatch thread count for an
@@ -532,7 +551,7 @@ impl Gpt {
             let lb = &self.layers[l];
             let p = |name: &str| format!("blocks.{l}.{name}");
             // attention
-            s.push(self.gpu.step(LAYERNORM, &[&self.res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out], &[d, n, f(1e-5)], n));
+            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out, d, n, 1e-5));
             let (mk, mt) = linear_kernel(n as usize, (3 * d) as usize);
             s.push(self.gpu.step(mk, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[n, d, 3 * d], mt));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[n, 3 * d], n * 3 * d));
@@ -544,7 +563,7 @@ impl Gpt {
             s.push(self.gpu.step(BIAS_ADD, &[&self.proj, self.w(&p("attn.out.bias"))], &[n, d], n * d));
             s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
             // MLP: fc -> GELU -> proj
-            s.push(self.gpu.step(LAYERNORM, &[&lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out], &[d, n, f(1e-5)], n));
+            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out, d, n, 1e-5));
             let (mk, mt) = linear_kernel(n as usize, ff as usize);
             s.push(self.gpu.step(mk, &[&lb.ln2_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[n, d, ff], mt));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.fc, self.w(&p("mlp.fc.bias"))], &[n, ff], n * ff));
@@ -560,7 +579,7 @@ impl Gpt {
             return s;
         }
         let last = c.n_layers as usize;
-        s.push(self.gpu.step(LAYERNORM, &[&self.res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final], &[d, n, f(1e-5)], n));
+        s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final, d, n, 1e-5));
         let (mk, mt) = linear_kernel(n as usize, v as usize);
         s.push(self.gpu.step(mk, &[&self.xn_final, self.w("lm_head.weight"), &self.logits], &[n, d, v], mt));
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.targets, &self.ce_buf], &[n, v, IGNORE], n));
@@ -639,10 +658,10 @@ impl Gpt {
             let (bk, bt) = dx_kernel(n as usize, d as usize);
             s.push(self.gpu.step(bk, &[&self.d_logits, self.w("lm_head.weight"), &self.d_xn], &[n, d, v, 0], bt));
             let last = c.n_layers as usize;
-            s.push(self.gpu.step(LN_STATS, &[&self.res[last], &self.ln_mean, &self.ln_inv], &[d, n, f(1e-5)], n));
+            s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &self.res[last], &self.ln_mean, &self.ln_inv, d, n, 1e-5));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_xn, &self.res[last], &self.ln_mean, &self.ln_inv, g("ln.weight")], &[d, n], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.d_xn, g("ln.bias")], &[d, n], d));
-            s.push(self.gpu.step(LN_DX, &[&self.res[last], self.w("ln.weight"), &self.d_xn, &self.dres[last]], &[d, n, f(1e-5)], n));
+            s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.res[last], self.w("ln.weight"), &self.d_xn, &self.dres[last], d, n, 1e-5));
         }
 
         for l in (self.shard.start..self.shard.end).rev() {
@@ -659,10 +678,10 @@ impl Gpt {
             s.push(self.gpu.step(bk, &[&self.d_fc, &lb.ln2_out, g(&p(l, "mlp.fc.weight"))], &[n, d, ff], bt));
             let (bk, bt) = dx_kernel(n as usize, d as usize);
             s.push(self.gpu.step(bk, &[&self.d_fc, self.w(&p(l, "mlp.fc.weight")), &self.d_branch], &[n, d, ff, 0], bt));
-            s.push(self.gpu.step(LN_STATS, &[&lb.xmid, &self.ln_mean, &self.ln_inv], &[d, n, f(1e-5)], n));
+            s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &lb.xmid, &self.ln_mean, &self.ln_inv, d, n, 1e-5));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_branch, &lb.xmid, &self.ln_mean, &self.ln_inv, g(&p(l, "ln2.weight"))], &[d, n], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p(l, "ln2.bias"))], &[d, n], d));
-            s.push(self.gpu.step(LN_DX, &[&lb.xmid, self.w(&p(l, "ln2.weight")), &self.d_branch, &self.d_tmp], &[d, n, f(1e-5)], n));
+            s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &lb.xmid, self.w(&p(l, "ln2.weight")), &self.d_branch, &self.d_tmp, d, n, 1e-5));
             s.push(self.gpu.step(ADD2, &[&self.dres[l + 1], &self.d_tmp, &self.dxmid], &[n * d], n * d));
 
             // attention backward (input grad = dxmid)
@@ -680,10 +699,10 @@ impl Gpt {
             s.push(self.gpu.step(bk, &[&self.d_qkv, &lb.ln1_out, g(&p(l, "attn.qkv.weight"))], &[n, d, 3 * d], bt));
             let (bk, bt) = dx_kernel(n as usize, d as usize);
             s.push(self.gpu.step(bk, &[&self.d_qkv, self.w(&p(l, "attn.qkv.weight")), &self.d_branch], &[n, d, 3 * d, 0], bt));
-            s.push(self.gpu.step(LN_STATS, &[&self.res[l], &self.ln_mean, &self.ln_inv], &[d, n, f(1e-5)], n));
+            s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &self.res[l], &self.ln_mean, &self.ln_inv, d, n, 1e-5));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_branch, &self.res[l], &self.ln_mean, &self.ln_inv, g(&p(l, "ln1.weight"))], &[d, n], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p(l, "ln1.bias"))], &[d, n], d));
-            s.push(self.gpu.step(LN_DX, &[&self.res[l], self.w(&p(l, "ln1.weight")), &self.d_branch, &self.d_tmp], &[d, n, f(1e-5)], n));
+            s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.res[l], self.w(&p(l, "ln1.weight")), &self.d_branch, &self.d_tmp, d, n, 1e-5));
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
         }
 
@@ -859,7 +878,7 @@ impl Gpt {
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
             // --- attention: LN -> fused-QKV (as three contiguous slices) -> attend ---
-            s.push(g.step(LAYERNORM, &[&dec.res[l], w(&p("ln1.weight")), w(&p("ln1.bias")), &dec.xn1], &[d, 1, f(1e-5)], 1));
+            s.push(model::block::layernorm_fwd(&g, &LN_IDS, &dec.res[l], w(&p("ln1.weight")), w(&p("ln1.bias")), &dec.xn1, d, 1, 1e-5));
             // q/k/v via the fused `attn.qkv.weight [3d,d]` sliced by output-row block
             // (offsets d*d, 2*d*d are large + 256B-aligned) -> contiguous [d] buffers.
             let dw = d * d;
@@ -880,7 +899,7 @@ impl Gpt {
             s.push(g.step(BIAS_ADD, &[&dec.proj, w(&p("attn.out.bias"))], &[1, d], d));
             s.push(g.step(ADD2, &[&dec.res[l], &dec.proj, &dec.xmid], &[d], d));
             // --- MLP: LN -> fc -> GELU -> proj ---
-            s.push(g.step(LAYERNORM, &[&dec.xmid, w(&p("ln2.weight")), w(&p("ln2.bias")), &dec.ln2_out], &[d, 1, f(1e-5)], 1));
+            s.push(model::block::layernorm_fwd(&g, &LN_IDS, &dec.xmid, w(&p("ln2.weight")), w(&p("ln2.bias")), &dec.ln2_out, d, 1, 1e-5));
             s.push(g.step(MATMUL, &[&dec.ln2_out, w(&p("mlp.fc.weight")), &dec.fc], &[1, d, ff], ff));
             s.push(g.step(BIAS_ADD, &[&dec.fc, w(&p("mlp.fc.bias"))], &[1, ff], ff));
             s.push(g.step(GELU, &[&dec.fc, &dec.gelu], &[ff], ff));
@@ -889,7 +908,7 @@ impl Gpt {
             s.push(g.step(ADD2, &[&dec.xmid, &dec.ffn_out, &dec.res[l + 1]], &[d], d));
         }
         let last = c.n_layers as usize;
-        s.push(g.step(LAYERNORM, &[&dec.res[last], w("ln.weight"), w("ln.bias"), &dec.xn_final], &[d, 1, f(1e-5)], 1));
+        s.push(model::block::layernorm_fwd(&g, &LN_IDS, &dec.res[last], w("ln.weight"), w("ln.bias"), &dec.xn_final, d, 1, 1e-5));
         g.submit(&[], &s);
         g.read(&dec.xn_final, dd)
     }

@@ -548,6 +548,21 @@ per-scenario table and the findings so far.
   memory (global-backed), and the kernel silently runs at memory bandwidth.
   This cost the FLUX.2 DiT 81 % of its forward — see
   `docs/performance/overview.md` for the pattern and the fix.
+- **One thread per row is a COALESCING bug, at every row count.** A per-element
+  norm/reduction kernel that gives thread *t* row *t* makes a warp's 32 loads
+  `d` floats apart, so each 32-byte sector fetched serves ONE useful float — 8×
+  read and write amplification that more rows do not fix (the loss is
+  per-access efficiency, not thread count). The cooperative `*_rows` family
+  (`rmsnorm_rows`, `softmax_rows`, and now `layernorm_rows` / `ln_stats_rows` /
+  `layernorm_dx_rows`) walks one row with a 64-thread workgroup and is coalesced
+  by construction: measured **19.4×** for QK-norm and **2.3–9.1×** for the
+  LayerNorm family on a P40. `backend_api::select` (`Op::RmsNorm`,
+  `Op::LayerNorm`) picks them wherever the queried
+  `DeviceCaps::workgroup_reductions` holds, and `model::block`'s
+  `layernorm_fwd` / `ln_stats_fwd` / `layernorm_dx_bwd` are the dispatch seam.
+  Each carries exactly **one** top-level `workgroupBarrier()` — the CPU JIT
+  splits a body at one barrier and no more, which is why they use a *shifted*
+  single-pass mean/variance instead of the textbook two-pass.
 - **Three backends, one build, one API.** `gpu-core` exposes a single
   `Gpu`/`DeviceBuffer`/`Step` surface; every model is written once against it.
   The accelerator is the *only* thing abstracted — there is no per-backend model

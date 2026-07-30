@@ -370,6 +370,10 @@ pub const LAYERNORM_DBETA: &str = include_str!("../wgsl/layernorm_dbeta.wgsl");
 pub const LAYERNORM_DGAMMA: &str = include_str!("../wgsl/layernorm_dgamma.wgsl");
 /// `wgsl/layernorm_dx.wgsl`
 pub const LAYERNORM_DX: &str = include_str!("../wgsl/layernorm_dx.wgsl");
+/// `wgsl/layernorm_dx_rows.wgsl`
+pub const LAYERNORM_DX_ROWS: &str = include_str!("../wgsl/layernorm_dx_rows.wgsl");
+/// `wgsl/layernorm_rows.wgsl`
+pub const LAYERNORM_ROWS: &str = include_str!("../wgsl/layernorm_rows.wgsl");
 /// `wgsl/leaky_relu.wgsl`
 pub const LEAKY_RELU: &str = include_str!("../wgsl/leaky_relu.wgsl");
 /// `wgsl/leaky_relu_bwd.wgsl`
@@ -382,6 +386,8 @@ pub const LN_HEAD_DGB: &str = include_str!("../wgsl/ln_head_dgb.wgsl");
 pub const LN_HEAD_DX: &str = include_str!("../wgsl/ln_head_dx.wgsl");
 /// `wgsl/ln_stats.wgsl`
 pub const LN_STATS: &str = include_str!("../wgsl/ln_stats.wgsl");
+/// `wgsl/ln_stats_rows.wgsl`
+pub const LN_STATS_ROWS: &str = include_str!("../wgsl/ln_stats_rows.wgsl");
 /// `wgsl/lstm_gates.wgsl`
 pub const LSTM_GATES: &str = include_str!("../wgsl/lstm_gates.wgsl");
 /// `wgsl/lstm_gates_bwd.wgsl`
@@ -838,12 +844,15 @@ pub const ALL: &[(&str, &str)] = &[
     ("layernorm_dbeta", LAYERNORM_DBETA),
     ("layernorm_dgamma", LAYERNORM_DGAMMA),
     ("layernorm_dx", LAYERNORM_DX),
+    ("layernorm_dx_rows", LAYERNORM_DX_ROWS),
+    ("layernorm_rows", LAYERNORM_ROWS),
     ("leaky_relu", LEAKY_RELU),
     ("leaky_relu_bwd", LEAKY_RELU_BWD),
     ("ln_head", LN_HEAD),
     ("ln_head_dgb", LN_HEAD_DGB),
     ("ln_head_dx", LN_HEAD_DX),
     ("ln_stats", LN_STATS),
+    ("ln_stats_rows", LN_STATS_ROWS),
     ("lstm_gates", LSTM_GATES),
     ("lstm_gates_bwd", LSTM_GATES_BWD),
     ("masked_l1", MASKED_L1),

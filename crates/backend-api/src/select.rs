@@ -33,6 +33,10 @@ use crate::DeviceCaps;
 pub enum Op {
     MatMul,
     RmsNorm,
+    /// LayerNorm (forward `layernorm`, and the backward helpers `ln_stats` /
+    /// `layernorm_dx` that share its row mapping). Selected by the same rule as
+    /// [`Op::RmsNorm`] — see [`candidates`].
+    LayerNorm,
     ArgMaxRow,
 }
 
@@ -100,6 +104,15 @@ pub const ARGMAX_SPLIT_MIN_VOCAB: u32 = 4096;
 /// owns refining this boundary.
 pub const I8_GEMV_MAX_ROWS: u32 = 8;
 
+/// `BRAIN_NO_COOP_LN=1` pins LayerNorm to the per-element kernels — the A/B
+/// switch the end-to-end speedup was measured with, and the fallback if a
+/// driver ever mishandles the cooperative variant. Read once (the policy must
+/// stay a pure function of its inputs for a given process).
+fn no_coop_layernorm() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("BRAIN_NO_COOP_LN").map(|v| v != "0").unwrap_or(false))
+}
+
 /// Every variant that can EXECUTE for `(op, shape)` on this device, with the
 /// static best guess FIRST. Never empty: `Reference` is always executable.
 ///
@@ -147,8 +160,20 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // therefore leaving 2-20x on the table for every prefill/encoder shape.
         // Reference stays in the list (and first without workgroup barriers)
         // because the CPU JIT cannot run the barrier.
+        // LayerNorm is the same kernel family with the same bug: `layernorm`,
+        // `ln_stats` and `layernorm_dx` all give thread t row t (and
+        // `layernorm_dx` walks its row FOUR times that way). The `*_rows`
+        // variants walk a row with 64 threads. Measured on a P40 — see
+        // `layernorm_rows.wgsl` and `brain-gpu-core`'s `bench_layernorm`.
         Op::RmsNorm => {
             if caps.workgroup_reductions {
+                vec![WorkgroupPerOutput, Reference]
+            } else {
+                vec![Reference]
+            }
+        }
+        Op::LayerNorm => {
+            if caps.workgroup_reductions && !no_coop_layernorm() {
                 vec![WorkgroupPerOutput, Reference]
             } else {
                 vec![Reference]
@@ -374,6 +399,31 @@ mod tests {
         }
     }
 
+    /// LayerNorm inherits RmsNorm's rule, for the same measured reason: the
+    /// loss is per-access efficiency, not thread count, so no row count makes
+    /// the per-element kernel competitive. The regression this prevents is
+    /// someone re-introducing a `m <= 32` gate for LayerNorm.
+    #[test]
+    fn layernorm_prefers_cooperative_at_every_row_count() {
+        let s = DefaultSelector;
+        for m in [1u32, 32, 512, 2048, 36864] {
+            for n in [128u32, 768, 3072] {
+                let sh = shape(m, n, 0, Dtype::F32);
+                assert_eq!(
+                    s.select(Op::LayerNorm, sh, &gpu_caps()),
+                    KernelVariant::WorkgroupPerOutput,
+                    "m={m} n={n}"
+                );
+                // No workgroup barriers (the CPU JIT) -> the reference, always.
+                assert_eq!(
+                    s.select(Op::LayerNorm, sh, &cpu_caps()),
+                    KernelVariant::Reference,
+                    "m={m} n={n}"
+                );
+            }
+        }
+    }
+
     /// Int8 selects the packed kernels only where they execute — and splits
     /// by regime exactly like fp32: the packed GEMV at decode row counts (a
     /// 128x128 tile is mostly idle at m=8), the tile GEMM at prefill shapes.
@@ -411,7 +461,7 @@ mod tests {
     fn candidates_head_is_the_default_policy() {
         let s = DefaultSelector;
         for caps in [gpu_caps(), cpu_caps()] {
-            for op in [Op::MatMul, Op::RmsNorm, Op::ArgMaxRow] {
+            for op in [Op::MatMul, Op::RmsNorm, Op::LayerNorm, Op::ArgMaxRow] {
                 for m in [1u32, 8, 9, 33, 4096] {
                     for dtype in [Dtype::F32, Dtype::I8] {
                         let sh = shape(m, 8192, 512, dtype);

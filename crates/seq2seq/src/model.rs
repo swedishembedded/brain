@@ -97,6 +97,23 @@ const GRAD_SCALE: usize = 41;
 const ADAMW: usize = 42;
 const CLIP_COEF: usize = 43;
 const GRAD_SCALE_BUF: usize = 44;
+// Workgroup-per-row LayerNorm (2.3-9.1x the per-element kernels on a P40 — see
+// `model::block::LayerNormIds`). Appended, so every index above is unchanged.
+const LAYERNORM_ROWS: usize = 45;
+const LN_STATS_ROWS: usize = 46;
+const LN_DX_ROWS: usize = 47;
+
+/// The LayerNorm family this model dispatches through `model::block`, which
+/// picks the coalesced variant per device (`backend_api::select`).
+const LN_IDS: model::block::LayerNormIds = model::block::LayerNormIds {
+    layernorm: LAYERNORM,
+    layernorm_rows: Some(LAYERNORM_ROWS),
+    ln_stats: LN_STATS,
+    ln_stats_rows: Some(LN_STATS_ROWS),
+    layernorm_dx: LN_DX,
+    layernorm_dx_rows: Some(LN_DX_ROWS),
+};
+
 
 pub const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -144,6 +161,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("adamw", kernels::ADAMW),
     ("clip_coef", kernels::CLIP_COEF),
     ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
+    ("layernorm_rows", kernels::LAYERNORM_ROWS),
+    ("ln_stats_rows", kernels::LN_STATS_ROWS),
+    ("layernorm_dx_rows", kernels::LAYERNORM_DX_ROWS),
 ];
 
 /// Encoder-decoder configuration. `vocab`/`block_size` follow the `ModelConfig`
@@ -601,7 +621,7 @@ impl Seq2Seq {
         for l in 0..c.n_enc as usize {
             let lb = &self.enc_layers[l];
             let p = |name: &str| format!("enc.blocks.{l}.{name}");
-            s.push(self.gpu.step(LAYERNORM, &[&self.enc_res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out], &[d, ne, f(1e-5)], ne));
+            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.enc_res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out, d, ne, 1e-5));
             s.push(self.gpu.step(MATMUL, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[ne, d, 3 * d], ne * 3 * d));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[ne, 3 * d], ne * 3 * d));
             // bidir self-attn via the shared builder: q_off=0, k_off=d, v_off=2d
@@ -610,7 +630,7 @@ impl Seq2Seq {
             s.push(self.gpu.step(BIAS_ADD, &[&lb.proj, self.w(&p("attn.out.bias"))], &[ne, d], ne * d));
             s.push(self.gpu.step(ADD2, &[&self.enc_res[l], &lb.proj, &lb.xmid], &[ne * d], ne * d));
             // MLP
-            s.push(self.gpu.step(LAYERNORM, &[&lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out], &[d, ne, f(1e-5)], ne));
+            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xmid, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out, d, ne, 1e-5));
             s.push(self.gpu.step(MATMUL, &[&lb.ln2_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[ne, d, ff], ne * ff));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.fc, self.w(&p("mlp.fc.bias"))], &[ne, ff], ne * ff));
             s.push(self.gpu.step(GELU, &[&lb.fc, &lb.gelu], &[ne * ff], ne * ff));
@@ -627,7 +647,7 @@ impl Seq2Seq {
             let lb = &self.dec_layers[l];
             let p = |name: &str| format!("dec.blocks.{l}.{name}");
             // causal self-attention
-            s.push(self.gpu.step(LAYERNORM, &[&self.dec_res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out], &[d, nd, f(1e-5)], nd));
+            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.dec_res[l], self.w(&p("ln1.weight")), self.w(&p("ln1.bias")), &lb.ln1_out, d, nd, 1e-5));
             s.push(self.gpu.step(MATMUL, &[&lb.ln1_out, self.w(&p("attn.qkv.weight")), &lb.qkv], &[nd, d, 3 * d], nd * 3 * d));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.qkv, self.w(&p("attn.qkv.bias"))], &[nd, 3 * d], nd * 3 * d));
             s.push(self.gpu.step(ATTN_SCORES, &[&lb.qkv, &lb.scores], &[b, h, td, hd, 3 * d, 0, d], b * h * td * td));
@@ -638,7 +658,7 @@ impl Seq2Seq {
             s.push(self.gpu.step(ADD2, &[&self.dec_res[l], &lb.sa_proj, &lb.xa], &[nd * d], nd * d));
 
             // cross-attention to encoder memory
-            s.push(self.gpu.step(LAYERNORM, &[&lb.xa, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out], &[d, nd, f(1e-5)], nd));
+            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xa, self.w(&p("ln2.weight")), self.w(&p("ln2.bias")), &lb.ln2_out, d, nd, 1e-5));
             // q = ln2_out @ Wq + bq  -> contiguous [nd, d] (q_stride=d)
             s.push(self.gpu.step(MATMUL, &[&lb.ln2_out, self.w(&p("cross.q.weight")), &lb.cq], &[nd, d, d], nd * d));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.cq, self.w(&p("cross.q.bias"))], &[nd, d], nd * d));
@@ -654,7 +674,7 @@ impl Seq2Seq {
             s.push(self.gpu.step(ADD2, &[&lb.xa, &lb.ca_proj, &lb.xc], &[nd * d], nd * d));
 
             // MLP
-            s.push(self.gpu.step(LAYERNORM, &[&lb.xc, self.w(&p("ln3.weight")), self.w(&p("ln3.bias")), &lb.ln3_out], &[d, nd, f(1e-5)], nd));
+            s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &lb.xc, self.w(&p("ln3.weight")), self.w(&p("ln3.bias")), &lb.ln3_out, d, nd, 1e-5));
             s.push(self.gpu.step(MATMUL, &[&lb.ln3_out, self.w(&p("mlp.fc.weight")), &lb.fc], &[nd, d, ff], nd * ff));
             s.push(self.gpu.step(BIAS_ADD, &[&lb.fc, self.w(&p("mlp.fc.bias"))], &[nd, ff], nd * ff));
             s.push(self.gpu.step(GELU, &[&lb.fc, &lb.gelu], &[nd * ff], nd * ff));
@@ -664,7 +684,7 @@ impl Seq2Seq {
         }
 
         let last = c.n_dec as usize;
-        s.push(self.gpu.step(LAYERNORM, &[&self.dec_res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final], &[d, nd, f(1e-5)], nd));
+        s.push(model::block::layernorm_fwd(&self.gpu, &LN_IDS, &self.dec_res[last], self.w("ln.weight"), self.w("ln.bias"), &self.xn_final, d, nd, 1e-5));
         s.push(self.gpu.step(MATMUL, &[&self.xn_final, self.w("lm_head.weight"), &self.logits], &[nd, d, v], nd * v));
         s.push(self.gpu.step(CE_VALUE, &[&self.logits, &self.labels, &self.ce_buf], &[nd, v, IGNORE], nd));
         s
@@ -719,10 +739,10 @@ impl Seq2Seq {
         s.push(self.gpu.step(MATMUL_DW, &[&self.d_logits, &self.xn_final, g("lm_head.weight")], &[nd, d, v], v * d));
         s.push(self.gpu.step(MATMUL_DX, &[&self.d_logits, self.w("lm_head.weight"), &self.d_xn], &[nd, d, v, 0], nd * d));
         let last = c.n_dec as usize;
-        s.push(self.gpu.step(LN_STATS, &[&self.dec_res[last], &self.ln_mean, &self.ln_inv], &[d, nd, f(1e-5)], nd));
+        s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &self.dec_res[last], &self.ln_mean, &self.ln_inv, d, nd, 1e-5));
         s.push(self.gpu.step(LN_DGAMMA, &[&self.d_xn, &self.dec_res[last], &self.ln_mean, &self.ln_inv, g("ln.weight")], &[d, nd], d));
         s.push(self.gpu.step(LN_DBETA, &[&self.d_xn, g("ln.bias")], &[d, nd], d));
-        s.push(self.gpu.step(LN_DX, &[&self.dec_res[last], self.w("ln.weight"), &self.d_xn, &self.dec_dres[last]], &[d, nd, f(1e-5)], nd));
+        s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.dec_res[last], self.w("ln.weight"), &self.d_xn, &self.dec_dres[last], d, nd, 1e-5));
 
         // ---- DECODER blocks (reverse) ----
         // d_enc_mem accumulates cross-attn K/V grads from every decoder layer; it
@@ -739,10 +759,10 @@ impl Seq2Seq {
             s.push(self.gpu.step(BIAS_GRAD, &[&self.d_fc, g(&p("mlp.fc.bias"))], &[nd, ff], ff));
             s.push(self.gpu.step(MATMUL_DW, &[&self.d_fc, &lb.ln3_out, g(&p("mlp.fc.weight"))], &[nd, d, ff], ff * d));
             s.push(self.gpu.step(MATMUL_DX, &[&self.d_fc, self.w(&p("mlp.fc.weight")), &self.d_branch], &[nd, d, ff, 0], nd * d));
-            s.push(self.gpu.step(LN_STATS, &[&lb.xc, &self.ln_mean, &self.ln_inv], &[d, nd, f(1e-5)], nd));
+            s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &lb.xc, &self.ln_mean, &self.ln_inv, d, nd, 1e-5));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_branch, &lb.xc, &self.ln_mean, &self.ln_inv, g(&p("ln3.weight"))], &[d, nd], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p("ln3.bias"))], &[d, nd], d));
-            s.push(self.gpu.step(LN_DX, &[&lb.xc, self.w(&p("ln3.weight")), &self.d_branch, &self.d_tmp], &[d, nd, f(1e-5)], nd));
+            s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &lb.xc, self.w(&p("ln3.weight")), &self.d_branch, &self.d_tmp, d, nd, 1e-5));
             // grad into xc residual = dec_dres[l+1] + d_tmp
             s.push(self.gpu.step(ADD2, &[&self.dec_dres[l + 1], &self.d_tmp, &self.d_acc], &[nd * d], nd * d));
 
@@ -759,10 +779,10 @@ impl Seq2Seq {
             s.push(self.gpu.step(BIAS_GRAD, &[&self.d_cq, g(&p("cross.q.bias"))], &[nd, d], d));
             s.push(self.gpu.step(MATMUL_DW, &[&self.d_cq, &lb.ln2_out, g(&p("cross.q.weight"))], &[nd, d, d], d * d));
             s.push(self.gpu.step(MATMUL_DX, &[&self.d_cq, self.w(&p("cross.q.weight")), &self.d_branch], &[nd, d, d, 0], nd * d));
-            s.push(self.gpu.step(LN_STATS, &[&lb.xa, &self.ln_mean, &self.ln_inv], &[d, nd, f(1e-5)], nd));
+            s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &lb.xa, &self.ln_mean, &self.ln_inv, d, nd, 1e-5));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_branch, &lb.xa, &self.ln_mean, &self.ln_inv, g(&p("ln2.weight"))], &[d, nd], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p("ln2.bias"))], &[d, nd], d));
-            s.push(self.gpu.step(LN_DX, &[&lb.xa, self.w(&p("ln2.weight")), &self.d_branch, &self.d_tmp], &[d, nd, f(1e-5)], nd));
+            s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &lb.xa, self.w(&p("ln2.weight")), &self.d_branch, &self.d_tmp, d, nd, 1e-5));
             // grad into xa residual = d_acc + d_tmp (self-attn-branch input grad).
             // Out-of-place into d_acc2 (avoid binding d_acc as read + read_write).
             s.push(self.gpu.step(ADD2, &[&self.d_acc, &self.d_tmp, &self.d_acc2], &[nd * d], nd * d));
@@ -786,10 +806,10 @@ impl Seq2Seq {
             s.push(self.gpu.step(BIAS_GRAD, &[&self.d_qkv, g(&p("attn.qkv.bias"))], &[nd, 3 * d], 3 * d));
             s.push(self.gpu.step(MATMUL_DW, &[&self.d_qkv, &lb.ln1_out, g(&p("attn.qkv.weight"))], &[nd, d, 3 * d], 3 * d * d));
             s.push(self.gpu.step(MATMUL_DX, &[&self.d_qkv, self.w(&p("attn.qkv.weight")), &self.d_branch], &[nd, d, 3 * d, 0], nd * d));
-            s.push(self.gpu.step(LN_STATS, &[&self.dec_res[l], &self.ln_mean, &self.ln_inv], &[d, nd, f(1e-5)], nd));
+            s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &self.dec_res[l], &self.ln_mean, &self.ln_inv, d, nd, 1e-5));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.d_branch, &self.dec_res[l], &self.ln_mean, &self.ln_inv, g(&p("ln1.weight"))], &[d, nd], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.d_branch, g(&p("ln1.bias"))], &[d, nd], d));
-            s.push(self.gpu.step(LN_DX, &[&self.dec_res[l], self.w(&p("ln1.weight")), &self.d_branch, &self.d_tmp], &[d, nd, f(1e-5)], nd));
+            s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.dec_res[l], self.w(&p("ln1.weight")), &self.d_branch, &self.d_tmp, d, nd, 1e-5));
             // grad into dec_res[l] = d_acc2 + d_tmp
             s.push(self.gpu.step(ADD2, &[&self.d_acc2, &self.d_tmp, &self.dec_dres[l]], &[nd * d], nd * d));
         }
@@ -816,10 +836,10 @@ impl Seq2Seq {
             s.push(self.gpu.step(BIAS_GRAD, &[&self.enc_d_fc, g(&p("mlp.fc.bias"))], &[ne, ff], ff));
             s.push(self.gpu.step(MATMUL_DW, &[&self.enc_d_fc, &lb.ln2_out, g(&p("mlp.fc.weight"))], &[ne, d, ff], ff * d));
             s.push(self.gpu.step(MATMUL_DX, &[&self.enc_d_fc, self.w(&p("mlp.fc.weight")), &self.enc_d_branch], &[ne, d, ff, 0], ne * d));
-            s.push(self.gpu.step(LN_STATS, &[&lb.xmid, &self.enc_ln_mean, &self.enc_ln_inv], &[d, ne, f(1e-5)], ne));
+            s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &lb.xmid, &self.enc_ln_mean, &self.enc_ln_inv, d, ne, 1e-5));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.enc_d_branch, &lb.xmid, &self.enc_ln_mean, &self.enc_ln_inv, g(&p("ln2.weight"))], &[d, ne], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.enc_d_branch, g(&p("ln2.bias"))], &[d, ne], d));
-            s.push(self.gpu.step(LN_DX, &[&lb.xmid, self.w(&p("ln2.weight")), &self.enc_d_branch, &self.enc_d_tmp], &[d, ne, f(1e-5)], ne));
+            s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &lb.xmid, self.w(&p("ln2.weight")), &self.enc_d_branch, &self.enc_d_tmp, d, ne, 1e-5));
             s.push(self.gpu.step(ADD2, &[upstream, &self.enc_d_tmp, &self.enc_d_acc], &[ne * d], ne * d));
 
             // bidir self-attention backward; input grad = enc_d_acc
@@ -833,10 +853,10 @@ impl Seq2Seq {
             s.push(self.gpu.step(BIAS_GRAD, &[&self.enc_d_qkv, g(&p("attn.qkv.bias"))], &[ne, 3 * d], 3 * d));
             s.push(self.gpu.step(MATMUL_DW, &[&self.enc_d_qkv, &lb.ln1_out, g(&p("attn.qkv.weight"))], &[ne, d, 3 * d], 3 * d * d));
             s.push(self.gpu.step(MATMUL_DX, &[&self.enc_d_qkv, self.w(&p("attn.qkv.weight")), &self.enc_d_branch], &[ne, d, 3 * d, 0], ne * d));
-            s.push(self.gpu.step(LN_STATS, &[&self.enc_res[l], &self.enc_ln_mean, &self.enc_ln_inv], &[d, ne, f(1e-5)], ne));
+            s.push(model::block::ln_stats_fwd(&self.gpu, &LN_IDS, &self.enc_res[l], &self.enc_ln_mean, &self.enc_ln_inv, d, ne, 1e-5));
             s.push(self.gpu.step(LN_DGAMMA, &[&self.enc_d_branch, &self.enc_res[l], &self.enc_ln_mean, &self.enc_ln_inv, g(&p("ln1.weight"))], &[d, ne], d));
             s.push(self.gpu.step(LN_DBETA, &[&self.enc_d_branch, g(&p("ln1.bias"))], &[d, ne], d));
-            s.push(self.gpu.step(LN_DX, &[&self.enc_res[l], self.w(&p("ln1.weight")), &self.enc_d_branch, &self.enc_d_tmp], &[d, ne, f(1e-5)], ne));
+            s.push(model::block::layernorm_dx_bwd(&self.gpu, &LN_IDS, &self.enc_res[l], self.w(&p("ln1.weight")), &self.enc_d_branch, &self.enc_d_tmp, d, ne, 1e-5));
             s.push(self.gpu.step(ADD2, &[&self.enc_d_acc, &self.enc_d_tmp, &self.enc_dres[l]], &[ne * d], ne * d));
         }
 

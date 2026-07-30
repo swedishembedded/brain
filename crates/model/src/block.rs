@@ -696,6 +696,135 @@ pub fn rmsnorm_eps_bwd(
     s
 }
 
+/// LayerNorm kernel indices, with the workgroup-per-row variants **optional**
+/// so a model can adopt them one at a time (and a model that has not registered
+/// them keeps working unchanged). Added alongside [`KernelIds`] rather than
+/// inside it, so no existing struct literal has to change.
+///
+/// The per-element kernels (`layernorm`, `ln_stats`, `layernorm_dx`) give
+/// thread *t* row *t*: a warp's 32 loads are `d_model` floats apart, so each
+/// 32-byte sector fetched serves one useful float. `layernorm_dx` walks its row
+/// four times that way. The `*_rows` kernels give a whole 64-thread workgroup
+/// to one row and are coalesced by construction — measured 2.3-9.1x on a P40
+/// across d_model 768-3072 x 512-2048 rows (`brain-gpu-core`'s
+/// `bench_layernorm`), winning at every shape including the 1-row decode case.
+#[derive(Clone, Copy)]
+pub struct LayerNormIds {
+    pub layernorm: usize,
+    pub layernorm_rows: Option<usize>,
+    pub ln_stats: usize,
+    pub ln_stats_rows: Option<usize>,
+    pub layernorm_dx: usize,
+    pub layernorm_dx_rows: Option<usize>,
+}
+
+impl LayerNormIds {
+    /// Reference indices supplied by the model; the `*_rows` variants resolved
+    /// **by name** from this handle's pipeline list.
+    ///
+    /// This is how a model adopts the coalesced kernels without every
+    /// `KernelIds`-style struct literal in the workspace growing a field: add
+    /// `layernorm_rows` / `ln_stats_rows` / `layernorm_dx_rows` to its
+    /// PIPELINES and it is opted in; leave them out and it keeps the reference
+    /// kernels. A model with its own fixed indices should build the struct
+    /// literally instead (cheaper, and the indices stay greppable).
+    pub fn resolve(g: &Gpu, layernorm: usize, ln_stats: usize, layernorm_dx: usize) -> LayerNormIds {
+        LayerNormIds {
+            layernorm,
+            layernorm_rows: g.kernel_index("layernorm_rows"),
+            ln_stats,
+            ln_stats_rows: g.kernel_index("ln_stats_rows"),
+            layernorm_dx,
+            layernorm_dx_rows: g.kernel_index("layernorm_dx_rows"),
+        }
+    }
+
+    /// [`LayerNormIds::resolve`] for a forward-only path: the LN backward
+    /// helpers are never dispatched, so their slots mirror the forward kernel.
+    pub fn resolve_fwd(g: &Gpu, layernorm: usize) -> LayerNormIds {
+        LayerNormIds {
+            layernorm,
+            layernorm_rows: g.kernel_index("layernorm_rows"),
+            ln_stats: layernorm,
+            ln_stats_rows: None,
+            layernorm_dx: layernorm,
+            layernorm_dx_rows: None,
+        }
+    }
+}
+
+/// `(kernel index, dispatch threads)` for one LayerNorm-family op: the
+/// cooperative kernel where the model registered it and the device can run a
+/// workgroup reduction, else the reference.
+///
+/// The policy itself lives in `backend_api::select` (`Op::LayerNorm`) and is
+/// keyed on `DeviceCaps`, never a backend name. The `*_rows` kernels are
+/// `@workgroup_size(64)` — at or below the WebGPU floor of 256 — so no
+/// `max_workgroup_size` gate is needed on top of it.
+fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32) -> (usize, u32) {
+    use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
+    let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
+    match coop {
+        Some(i)
+            if gpu_core::select::DefaultSelector.select(Op::LayerNorm, shape, &g.caps())
+                == KernelVariant::WorkgroupPerOutput =>
+        {
+            (i, rows * 64)
+        }
+        _ => (reference, rows),
+    }
+}
+
+/// LayerNorm forward: `y = (x-mean)/sqrt(var+eps) * gamma + beta` over `rows`
+/// rows of `d` elements. Same math and Params either variant.
+#[allow(clippy::too_many_arguments)]
+pub fn layernorm_fwd(
+    g: &Gpu,
+    k: &LayerNormIds,
+    x: &DeviceBuffer,
+    gamma: &DeviceBuffer,
+    beta: &DeviceBuffer,
+    out: &DeviceBuffer,
+    d: u32,
+    rows: u32,
+    eps: f32,
+) -> Step {
+    let (kind, threads) = ln_variant(g, k.layernorm, k.layernorm_rows, rows, d);
+    g.step(kind, &[x, gamma, beta, out], &[d, rows, f(eps)], threads)
+}
+
+/// Per-row `mean` + `1/sqrt(var+eps)` (feeds `layernorm_dgamma`).
+pub fn ln_stats_fwd(
+    g: &Gpu,
+    k: &LayerNormIds,
+    x: &DeviceBuffer,
+    mean: &DeviceBuffer,
+    inv: &DeviceBuffer,
+    d: u32,
+    rows: u32,
+    eps: f32,
+) -> Step {
+    let (kind, threads) = ln_variant(g, k.ln_stats, k.ln_stats_rows, rows, d);
+    g.step(kind, &[x, mean, inv], &[d, rows, f(eps)], threads)
+}
+
+/// LayerNorm backward w.r.t. `x` (mean/inv recomputed from `x`).
+#[allow(clippy::too_many_arguments)]
+pub fn layernorm_dx_bwd(
+    g: &Gpu,
+    k: &LayerNormIds,
+    x: &DeviceBuffer,
+    gamma: &DeviceBuffer,
+    dy: &DeviceBuffer,
+    dx: &DeviceBuffer,
+    d: u32,
+    rows: u32,
+    eps: f32,
+) -> Step {
+    let (kind, threads) = ln_variant(g, k.layernorm_dx, k.layernorm_dx_rows, rows, d);
+    g.step(kind, &[x, gamma, dy, dx], &[d, rows, f(eps)], threads)
+}
+
 /// Per-binding budget (f32 words) for tiling an embedding / lm_head over vocab,
 /// so each storage binding stays under a backend's max-binding size (e.g. 128MB
 /// on Mesa-GL). ~96 MiB; small models collapse to one tile.

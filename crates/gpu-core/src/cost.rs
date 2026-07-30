@@ -313,15 +313,18 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(3 * rows * d + d, 4 * (2 * rows * d + rows + 2 * d))
         }
         // params [d_model, n_rows, eps].
-        "layernorm" => {
+        // `*_rows` are the workgroup-per-row variants: same math, same traffic,
+        // only the thread mapping differs — so they cost the same (mirrors
+        // `rmsnorm` / `rmsnorm_rows` above).
+        "layernorm" | "layernorm_rows" => {
             let (d, rows) = (p(0)?, p(1)?);
             f(rows * (8 * d + 5), 4 * (2 * rows * d + 2 * d))
         }
-        "ln_stats" => {
+        "ln_stats" | "ln_stats_rows" => {
             let (d, rows) = (p(0)?, p(1)?);
             f(rows * (4 * d + 3), 4 * (rows * d + 2 * rows))
         }
-        "layernorm_dx" => {
+        "layernorm_dx" | "layernorm_dx_rows" => {
             let (d, rows) = (p(0)?, p(1)?);
             f(rows * (15 * d + 8), 4 * (4 * rows * d + d))
         }

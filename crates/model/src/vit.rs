@@ -237,11 +237,14 @@ pub fn vit_block_fwd(
     steps: &mut Vec<Step>,
 ) {
     let c = sh.dim;
+    // The coalesced workgroup-per-row LayerNorm where the model registered
+    // it (2.3-9.1x on a P40); reference otherwise. See `block::LayerNormIds`.
+    let ln = crate::block::LayerNormIds::resolve_fwd(g, k.layernorm);
     let hd = sh.head_dim();
     let stride = 3 * c;
 
     // ---- attention half ----
-    steps.push(g.step(k.layernorm, &[x, w.norm1_w, w.norm1_b, &scr.ln], &[c, rows, f(sh.eps)], rows));
+    steps.push(crate::block::layernorm_fwd(g, &ln, x, w.norm1_w, w.norm1_b, &scr.ln, c, rows, sh.eps));
     steps.push(g.step(k.matmul_rows, &[&scr.ln, w.qkv_w, &scr.qkv], &[rows, c, stride], rows.div_ceil(8) * stride));
     steps.push(g.step(k.bias_add, &[&scr.qkv, w.qkv_b], &[rows, stride], rows * stride));
     if let Some(qk) = &w.qk_norm {
@@ -265,7 +268,7 @@ pub fn vit_block_fwd(
     steps.push(g.step(k.add2, &[x, branch, &scr.res], &[rows * c], rows * c));
 
     // ---- MLP half ----
-    steps.push(g.step(k.layernorm, &[&scr.res, w.norm2_w, w.norm2_b, &scr.ln], &[c, rows, f(sh.eps)], rows));
+    steps.push(crate::block::layernorm_fwd(g, &ln, &scr.res, w.norm2_w, w.norm2_b, &scr.ln, c, rows, sh.eps));
     steps.push(g.step(k.matmul_rows, &[&scr.ln, w.fc1_w, &scr.h], &[rows, c, sh.mlp], rows.div_ceil(8) * sh.mlp));
     steps.push(g.step(k.bias_add, &[&scr.h, w.fc1_b], &[rows, sh.mlp], rows * sh.mlp));
     steps.push(g.step(k.gelu_erf, &[&scr.h, &scr.h2], &[rows * sh.mlp], rows * sh.mlp));
@@ -362,11 +365,12 @@ pub fn vit_block_fwd_cached(
     steps: &mut Vec<Step>,
 ) {
     let c = sh.dim;
+    let ln = crate::block::LayerNormIds::resolve(g, k.layernorm, kb.ln_stats, kb.layernorm_dx);
     let hd = sh.head_dim();
     let stride = 3 * c;
     let _ = kb;
 
-    steps.push(g.step(k.layernorm, &[&cache.x_in, w.norm1_w, w.norm1_b, &cache.ln1], &[c, rows, f(sh.eps)], rows));
+    steps.push(crate::block::layernorm_fwd(g, &ln, &cache.x_in, w.norm1_w, w.norm1_b, &cache.ln1, c, rows, sh.eps));
     steps.push(g.step(k.matmul, &[&cache.ln1, w.qkv_w, &cache.qkv_pre], &[rows, c, stride], rows * stride));
     steps.push(g.step(k.bias_add, &[&cache.qkv_pre, w.qkv_b], &[rows, stride], rows * stride));
     steps.push(g.step(kb.axpy, &[&cache.qkv, &cache.qkv_pre], &[rows * stride, f(1.0)], rows * stride));
@@ -415,7 +419,7 @@ pub fn vit_block_fwd_cached(
     };
     steps.push(g.step(k.add2, &[&cache.x_in, branch, &cache.res_mid], &[rows * c], rows * c));
 
-    steps.push(g.step(k.layernorm, &[&cache.res_mid, w.norm2_w, w.norm2_b, &cache.ln2], &[c, rows, f(sh.eps)], rows));
+    steps.push(crate::block::layernorm_fwd(g, &ln, &cache.res_mid, w.norm2_w, w.norm2_b, &cache.ln2, c, rows, sh.eps));
     steps.push(g.step(k.matmul, &[&cache.ln2, w.fc1_w, &cache.h], &[rows, c, sh.mlp], rows * sh.mlp));
     steps.push(g.step(k.bias_add, &[&cache.h, w.fc1_b], &[rows, sh.mlp], rows * sh.mlp));
     steps.push(g.step(k.gelu_erf, &[&cache.h, &cache.h2], &[rows * sh.mlp], rows * sh.mlp));
@@ -453,6 +457,7 @@ pub fn vit_block_bwd(
     steps: &mut Vec<Step>,
 ) {
     let c = sh.dim;
+    let ln = crate::block::LayerNormIds::resolve(g, k.layernorm, kb.ln_stats, kb.layernorm_dx);
     let hd = sh.head_dim();
     let stride = 3 * c;
     let m = sh.mlp;
@@ -472,10 +477,10 @@ pub fn vit_block_bwd(
     steps.push(g.step(kb.matmul_dx, &[&sb.d_h, w.fc1_w, &sb.d_ln], &[rows, c, m, 0], rows * c));
     steps.push(g.step(kb.matmul_dw, &[&sb.d_h, &cache.ln2, gr.fc1_w], &[rows, c, m], m * c));
     steps.push(g.step(kb.bias_grad, &[&sb.d_h, gr.fc1_b], &[rows, m], m));
-    steps.push(g.step(kb.ln_stats, &[&cache.res_mid, &sb.mean, &sb.inv], &[c, rows, f(sh.eps)], rows));
+    steps.push(crate::block::ln_stats_fwd(g, &ln, &cache.res_mid, &sb.mean, &sb.inv, c, rows, sh.eps));
     steps.push(g.step(kb.ln_dgamma, &[&sb.d_ln, &cache.res_mid, &sb.mean, &sb.inv, gr.norm2_w], &[c, rows], c));
     steps.push(g.step(kb.ln_dbeta, &[&sb.d_ln, gr.norm2_b], &[c, rows], c));
-    steps.push(g.step(kb.layernorm_dx, &[&cache.res_mid, w.norm2_w, &sb.d_ln, &sb.tmp], &[c, rows, f(sh.eps)], rows));
+    steps.push(crate::block::layernorm_dx_bwd(g, &ln, &cache.res_mid, w.norm2_w, &sb.d_ln, &sb.tmp, c, rows, sh.eps));
     steps.push(g.step(k.add2, &[d_out, &sb.tmp, &sb.d_res], &[rows * c], rows * c));
 
     // ---- attention half (upstream sb.d_res) ----
@@ -541,9 +546,9 @@ pub fn vit_block_bwd(
     steps.push(g.step(kb.matmul_dx, &[d_lin, w.qkv_w, &sb.d_ln], &[rows, c, stride, 0], rows * c));
     steps.push(g.step(kb.matmul_dw, &[d_lin, &cache.ln1, gr.qkv_w], &[rows, c, stride], stride * c));
     steps.push(g.step(kb.bias_grad, &[d_lin, gr.qkv_b], &[rows, stride], stride));
-    steps.push(g.step(kb.ln_stats, &[&cache.x_in, &sb.mean, &sb.inv], &[c, rows, f(sh.eps)], rows));
+    steps.push(crate::block::ln_stats_fwd(g, &ln, &cache.x_in, &sb.mean, &sb.inv, c, rows, sh.eps));
     steps.push(g.step(kb.ln_dgamma, &[&sb.d_ln, &cache.x_in, &sb.mean, &sb.inv, gr.norm1_w], &[c, rows], c));
     steps.push(g.step(kb.ln_dbeta, &[&sb.d_ln, gr.norm1_b], &[c, rows], c));
-    steps.push(g.step(kb.layernorm_dx, &[&cache.x_in, w.norm1_w, &sb.d_ln, &sb.tmp], &[c, rows, f(sh.eps)], rows));
+    steps.push(crate::block::layernorm_dx_bwd(g, &ln, &cache.x_in, w.norm1_w, &sb.d_ln, &sb.tmp, c, rows, sh.eps));
     steps.push(g.step(k.add2, &[&sb.d_res, &sb.tmp, d_x_in], &[rows * c], rows * c));
 }

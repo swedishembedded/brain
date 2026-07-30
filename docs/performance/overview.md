@@ -28,6 +28,7 @@ engine's stage split and the real GPU adapter line.
 | GPU conv `forward` stage | 1218 ms (naive) | 545 ms | register tiling (then coalescing) |
 | **FLUX.2 klein-4B DiT forward** (1×P40, 1536 tokens) | 12.87 s (6.7% peak) | **2.76 s (35.7% peak)** | lane-split flash attention (29×) + coalesced QK-norm (19×) + conflict-free GEMM |
 | FLUX.2 512² 4-step image (2×P40) | 59.8 s | **18.3 s** | the above |
+| **GPT decode** GPU kernel time (`gpt gen`, 6×768, 200 tok, 1×P40) | 1259 ms | **996 ms** | coalesced LayerNorm (10.3× on the kernel; 22.9% → 2.8% of the step) |
 
 Numbers are noisy on shared boxes (thermal/contention); the stable signals are
 the **min-of-N GFLOP/s microbench** (CPU) and the **`forward` stage** (GPU).
@@ -228,10 +229,94 @@ now "prefer it whenever the device has workgroup barriers", with a unit test
 that fails if the `m <= 32` gate comes back. Narrow rows (QK-norm at
 head_dim 128) are the worst case and the most common one.
 
-**`layernorm` has the same shape of bug and no cooperative variant yet** — it
-is 2.3 % of the FLUX.2 forward after the RMSNorm fix, and the same 4-20× is
-sitting there for every model that uses LayerNorm (`gpt`, `pid`, `seq2seq`,
-`flux2`, the ViT trunk).
+### LayerNorm: the same fix, measured (was predicted 4-20×, landed at 2.8-10×)
+
+`layernorm`, `ln_stats` and `layernorm_dx` had the identical bug — and
+`layernorm_dx` was the worst offender in the tree, walking its row **four**
+times from one thread. `layernorm_rows` / `ln_stats_rows` / `layernorm_dx_rows`
+give each row a 64-thread workgroup.
+
+One barrier, not two: the CPU JIT splits a kernel body at exactly one
+top-level `workgroupBarrier()`, so the textbook two-pass (mean, then squared
+deviations) is unavailable. All three use the **shifted** one-pass form with
+`K = x[row, 0]`: `mean = K + S1/d`, `var = S2/d - (S1/d)²`. The shift is what
+keeps that subtraction free of the cancellation that makes naive
+`E[x²] - E[x]²` unusable. `layernorm_dx` needs four reductions that *look*
+sequentially dependent (mean/inv feed `mean(g·x̂)`); in the shifted frame
+`mean(g·x̂) = inv·(S4 - moff·S3)/d`, so all four accumulate in one pass behind
+the one barrier.
+
+Kernel microbenchmark on a P40 (`cargo test -p brain-gpu-core --test
+bench_layernorm -- --ignored`), min-of-8 per dispatch, at the shapes these
+models dispatch:
+
+| shape (rows × d) | `layernorm` | `layernorm_rows` | dx: `layernorm_dx` | `layernorm_dx_rows` |
+|---:|---:|---:|---:|---:|
+| 512 × 768 | 0.270 ms (12 GB/s) | 0.045 ms (70) — **6.0×** | 0.425 ms | 0.075 ms — **5.7×** |
+| 2048 × 768 | 0.417 (30) | 0.109 (116) — 3.8× | 0.650 | 0.159 — 4.1× |
+| 512 × 2048 | 0.710 (12) | 0.089 (94) — 8.0× | 1.067 | 0.144 — 7.4× |
+| 2048 × 2048 | 0.874 (38) | 0.244 (138) — 3.6× | 1.247 | 0.389 — 3.2× |
+| 512 × 3072 | 1.077 (12) | 0.148 (85) — 7.3× | 1.648 | 0.182 — **9.1×** |
+| 2048 × 3072 | 1.574 (32) | 0.355 (142) — 4.4× | 2.561 | 0.534 — 4.8× |
+| 1 × 768 (decode) | 0.142 | 0.043 — 3.3× | 0.262 | 0.071 — 3.7× |
+
+The cooperative kernel wins at **every** shape, small rows included, so the
+selector rule is RMSNorm's: prefer it whenever `workgroup_reductions` holds,
+with a unit test against a row-count gate creeping back. `ln_stats` tracks the
+same 2.4-9.0×. Agreement with the reference is ≤ 4.3e-6 relative. (Per-shape
+speedups move ±15 % run to run on a shared box; the band is the signal, not
+any single cell.)
+
+Two things this does NOT say. First, the per-element kernel only reached
+10-40 GB/s of 346, but the cooperative one tops out around 140-200 GB/s, not
+346 — LayerNorm reads `x` twice (reduce, then normalise), and caching the row
+is exactly the `var<function>`-array trap above, so the second read stays.
+Second, the microbench understates the narrow shapes: at ~0.04 ms the
+cooperative kernel is at the single-dispatch launch floor, not its own limit
+(in situ, batched, the 1-row case measures 10×, not 3.3×).
+
+**In situ, `gpt` training** (6 layers × d 768, batch 8 × block 256 = 2048 rows,
+`BRAIN_PROFILE=1`, 5 steps, P40) — `BRAIN_NO_COOP_LN=1` is the A/B switch:
+
+| kernel | per-element | workgroup-per-row | speedup |
+|---|---:|---:|---:|
+| `layernorm` (130 calls) | 49.8 ms | 9.3 ms | 5.4× |
+| `layernorm_dx` (65) | 38.8 ms | 7.0 ms | 5.5× |
+| `ln_stats` (65) | 12.3 ms | 2.2 ms | 5.6× |
+| **LayerNorm family** | **100.9 ms** | **18.5 ms** | **5.5×** |
+
+`layernorm_dgamma`/`dbeta` are unchanged by design: they are *column*
+reductions (thread `c` walks column `c`), so adjacent threads already read
+adjacent addresses — they never had the bug.
+
+**End-to-end, honestly:** that 82 ms is **0.6 % of the GPT training step**, and
+wall clock agrees (256.3 s vs 257.3 s over 100 steps). Not because the kernel
+win is fake, but because **`gradnorm_sq` is 82.3 % of GPT's GPU training time**
+(10 768 ms of 13 092 ms over 5 steps, 385 calls — one serial reduction per
+parameter tensor). That is the next thing to fix in `gpt`, and it is the same
+class of bug one level up; it is out of scope here and untouched.
+
+Where LayerNorm is not hidden behind that, the win shows up directly.
+**`brain gpt gen`** (KV-cache decode, 6 × 768, 200 tokens):
+
+| | per-element | workgroup-per-row |
+|---|---:|---:|
+| `layernorm` (2665 calls) | 287.7 ms (**22.9 %** of GPU kernel time) | 28.0 ms (2.8 %) — **10.3×** |
+| total GPU kernel time | 1258.6 ms | **996.0 ms** — **1.26×** |
+| wall (min of 3) | 6.66 s | 6.33 s |
+
+The wall delta is smaller than the GPU delta because a `gpt gen` process spends
+~4-5 s loading a 171 MB checkpoint, initialising the device and compiling
+shaders before it decodes anything. `val_perplexity 13.2239` on both sides —
+identical, not merely close.
+
+Adopted by `gpt`, `pid`, `seq2seq` (explicit indices) and `model::vit` (which
+resolves the variants **by name** through `Gpu::kernel_index`, so a ViT model
+opts in by adding three kernels to its PIPELINES and no `VitKernelIds` literal
+in any model crate changes). `flux2` can adopt the same
+`model::block::layernorm_fwd` seam whenever it wants it; its LayerNorm is
+~2.4 % of its forward after the DiT work, so it was deliberately left alone
+here.
 
 ## Cross-model finding: shared-memory bank conflicts in `matmul_reg2`
 

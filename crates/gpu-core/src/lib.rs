@@ -560,6 +560,20 @@ mod native_facade {
         pub fn kernel_name(&self, kind: usize) -> Option<&str> {
             self.names.get(kind).map(|s| s.as_str())
         }
+
+        /// The pipeline slot a kernel name occupies on this handle, or `None`
+        /// if this model did not register it.
+        ///
+        /// The inverse of [`Gpu::kernel_name`], for **shared block builders**
+        /// that want to use an optional faster kernel variant without forcing
+        /// every model's `KernelIds` literal to grow a field: the builder asks
+        /// whether the variant is present and falls back when it is not, so a
+        /// model opts in purely by adding the kernel to its PIPELINES list.
+        /// A model with fixed indices should still pass them explicitly — this
+        /// is for the shared builders, not for hot per-element lookups.
+        pub fn kernel_index(&self, name: &str) -> Option<usize> {
+            self.names.iter().position(|n| n == name)
+        }
     }
 }
 
@@ -660,6 +674,18 @@ mod wasm_facade {
         /// Device capabilities (the browser floor plus whatever WebGPU reports).
         pub fn caps(&self) -> backend_api::DeviceCaps {
             Backend::caps(&self.inner)
+        }
+
+        /// The registered name of pipeline slot `kind` on this handle.
+        pub fn kernel_name(&self, kind: usize) -> Option<&str> {
+            self.names.get(kind).map(|s| s.as_str())
+        }
+
+        /// The pipeline slot a kernel name occupies — see the native facade's
+        /// `kernel_index`; shared block builders use it to pick an optional
+        /// kernel variant without changing every model's `KernelIds`.
+        pub fn kernel_index(&self, name: &str) -> Option<usize> {
+            self.names.iter().position(|n| n == name)
         }
     }
 }
