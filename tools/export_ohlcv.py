@@ -36,19 +36,28 @@ def main():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_stock_ticker ON stock_data(Ticker)")
     con.commit()
 
-    # One grouped scan: per-ticker bar count + last date.
-    meta = {t: (c, m) for t, c, m in cur.execute("SELECT Ticker, COUNT(*), MAX(Date) FROM stock_data GROUP BY Ticker")}
-    latest = max(m for _, m in meta.values())
+    # One grouped scan: per-ticker VALID bar count + last valid date. NULL-price
+    # rows and thin partial intraday bars (a mid-session Yahoo fetch leaves both)
+    # must not drive freshness, so "latest" is the newest date on which a majority
+    # of names have a real bar — not the global MAX(Date).
+    meta = {t: (c, m) for t, c, m in cur.execute(
+        "SELECT Ticker, COUNT(*), MAX(Date) FROM stock_data WHERE Close IS NOT NULL GROUP BY Ticker")}
+    counts = cur.execute(
+        "SELECT Date, COUNT(DISTINCT Ticker) FROM stock_data "
+        "WHERE Close IS NOT NULL GROUP BY Date ORDER BY Date DESC LIMIT 30").fetchall()
+    need = max(1, len(meta) // 2)
+    latest = next((d for d, n in counts if n >= need), counts[0][0])
     cand = [
         t for t, (c, m) in meta.items()
-        if not t.startswith("^") and not t.endswith("-usd") and c >= args.min_history and (not args.fresh_only or m == latest)
+        if not t.startswith("^") and not t.endswith("-usd") and c >= args.min_history and (not args.fresh_only or m >= latest)
     ]
     # Recent dollar-volume per candidate (indexed → fast) for the liquidity ranking.
     rows = []
     for t in cand:
         r = cur.execute(
-            "SELECT AVG(Close*Volume) FROM (SELECT Close, Volume FROM stock_data WHERE Ticker=? ORDER BY Date DESC LIMIT 20)",
-            (t,),
+            "SELECT AVG(Close*Volume) FROM (SELECT Close, Volume FROM stock_data "
+            "WHERE Ticker=? AND Date<=? AND Close IS NOT NULL ORDER BY Date DESC LIMIT 20)",
+            (t, latest),
         ).fetchone()[0]
         if r:
             rows.append((t, r))
@@ -59,8 +68,9 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     for t, _ in rows:
         recs = cur.execute(
-            "SELECT Date, Open, High, Low, Close, Volume FROM stock_data WHERE Ticker=? ORDER BY Date ASC",
-            (t,),
+            "SELECT Date, Open, High, Low, Close, Volume FROM stock_data "
+            "WHERE Ticker=? AND Date<=? ORDER BY Date ASC",
+            (t, latest),
         ).fetchall()
         with open(os.path.join(args.out, f"{t.upper()}.csv"), "w") as f:
             f.write("Date,open,high,low,close,volume\n")
