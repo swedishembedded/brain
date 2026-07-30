@@ -498,6 +498,21 @@ perf/lfm: release
 			--input $(LFM_INPUT) --output 1 --ladder $(PERF_LADDER) --seed $(SEED); \
 	done
 
+# FLUX.2 Klein denoise-step benchmark, standalone: the residency-executor
+# target (real scheduler + budgets + lanes) on klein-4b; weights from the
+# BRAIN_FLUX2_* env (same as flux2/generate). One denoise step is MINUTES on a
+# CPU backend, so the request count is a knob and defaults tiny — size the run,
+# don't let it size you. FLUX2_SIZE is <W>x<H>x<steps>; --output mirrors the
+# step count so the workload's requested artifacts match what a request emits.
+FLUX2_SIZE ?= 512x512x4
+FLUX2_REQUESTS ?= 2
+FLUX2_WARMUP ?= 1
+perf/flux2: release
+	@test -n "$(BRAIN_FLUX2_DIT)" || (echo "set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER"; exit 2)
+	$(BRAIN) perf run latency --target flux2:$(FLUX2_SIZE) \
+		--concurrency 1 --requests $(FLUX2_REQUESTS) --warmup $(FLUX2_WARMUP) \
+		--input 1 --output $(word 3,$(subst x, ,$(FLUX2_SIZE))) --seed $(SEED)
+
 # Leaderboard over every perf artifact. Refuses to rank across artifact units,
 # excludes runs whose correctness gate failed, and warns on differing axes.
 perf/compare: release
@@ -517,3 +532,12 @@ perf/smoke: release
 .PHONY: docs
 docs:
 	python3 docs/pandoc/build-docs.py
+
+# ---- FLUX.2 Klein (crates/flux2; weights via BRAIN_FLUX2_* env) ----
+flux2/generate: release
+	@test -n "$(BRAIN_FLUX2_DIT)" || (echo "set BRAIN_FLUX2_DIT/_VAE/_TE/_TOKENIZER"; exit 2)
+	$(BRAIN) flux2 generate --prompt "$(PROMPT)" --out out/flux2.ppm $(FLUX2_FLAGS)
+
+flux2/edit: release
+	@test -n "$(FLUX2_REF)" || (echo "set FLUX2_REF=<ref.ppm> PROMPT=..."; exit 2)
+	$(BRAIN) flux2 generate --prompt "$(PROMPT)" --ref $(FLUX2_REF) --out out/flux2-edit.ppm $(FLUX2_FLAGS)
