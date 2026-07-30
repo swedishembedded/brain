@@ -277,7 +277,6 @@ impl KronosModel {
         pred_len: usize,
         opts: &GenOpts,
     ) -> Vec<Vec<f32>> {
-        use rayon::prelude::*;
         let feat = self.feat();
         // 1. serial (device): normalize + BSQ-encode each series.
         let prepped: Vec<(preprocess::Norm, Vec<u32>, Vec<u32>, Vec<u32>, usize)> = bars_list
@@ -293,11 +292,13 @@ impl KronosModel {
                 (norm, s1, s2, stamp, t)
             })
             .collect();
-        // 2. parallel (host): KV rollout per series over the shared &HostW.
+        // 2. parallel (host): KV rollout per series over the shared &HostW. Runs
+        // on backend-cpu's pool (the one `--device cpuN` governs) — never a direct
+        // rayon dep — and fans out over the machine's cores automatically.
         let hw = self.decoder.host_weights();
-        let gens: Vec<(Vec<u32>, Vec<u32>)> = prepped
-            .par_iter()
-            .map(|(_norm, s1_ctx, s2_ctx, stamp, t)| {
+        let gens: Vec<(Vec<u32>, Vec<u32>)> = backend_cpu::par::map(prepped.len(), |i| {
+            let (_norm, s1_ctx, s2_ctx, stamp, t) = &prepped[i];
+            {
                 let t = *t;
                 let mut cache = hw.new_cache();
                 let (mut s1, mut s2) = (s1_ctx.clone(), s2_ctx.clone());
@@ -316,8 +317,8 @@ impl KronosModel {
                     last = hw.step_token(a, b, &stamp[ppos * 5..ppos * 5 + 5], ppos, &mut cache);
                 }
                 (s1[t..].to_vec(), s2[t..].to_vec())
-            })
-            .collect();
+            }
+        });
         // 3. serial (device): detokenize + denormalize.
         prepped
             .iter()

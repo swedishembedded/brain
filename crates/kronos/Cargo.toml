@@ -12,7 +12,6 @@ path = "src/lib.rs"
 [dependencies]
 brain-gpu-core.workspace = true
 brain-backend-cpu.workspace = true
-rayon = "1"
 brain-model.workspace = true
 brain-paramstore.workspace = true
 brain-optim.workspace = true

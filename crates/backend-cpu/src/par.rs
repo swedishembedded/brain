@@ -46,6 +46,17 @@ pub fn flat_map_f32(n: usize, f: impl Fn(usize) -> Vec<f32> + Sync + Send) -> Ve
     (0..n).into_par_iter().map(f).flatten().collect()
 }
 
+/// `(0..n).map(f)` in parallel, index-ordered, returning any `Send` value — the
+/// shape of a fan-out over independent work items (one forecast per name, one
+/// window per training row). Generalises [`map_f32`] to non-`f32` results so a
+/// caller never reaches for a direct `rayon` dependency (the whole point of this
+/// module: one pool, one policy). The pool is the scheduler's, so `--device
+/// cpuN` sizing/affinity still governs it, and it fans out over the machine's
+/// cores automatically at runtime.
+pub fn map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync + Send) -> Vec<T> {
+    (0..n).into_par_iter().map(f).collect()
+}
+
 /// Sum of squares over a set of tensors, accumulated in `f64` — the global
 /// grad-norm reduction. `f64` accumulation is part of the contract: summing
 /// millions of squares in `f32` loses the low bits the clip threshold needs.
@@ -94,6 +105,12 @@ mod tests {
             vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0],
             "flat_map must keep per-index blocks in order despite parallelism"
         );
+    }
+
+    #[test]
+    fn map_generic_preserves_order() {
+        assert_eq!(map(4, |i| (i, i * i)), vec![(0, 0), (1, 1), (2, 4), (3, 9)]);
+        assert_eq!(map(3, |i| vec![i as u32; i]), vec![vec![], vec![1], vec![2, 2]]);
     }
 
     #[test]
