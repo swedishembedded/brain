@@ -56,7 +56,7 @@ pub use topology::{build_graph, WeightSource};
 pub mod depth_topology;
 pub use depth_topology::{build_depth_graph, build_depth_graph_hw};
 pub use wm_topology::{build_diamond_graph, WmSession, WmUnetConfig};
-pub use nemotron_topology::{build_subsampling, NemotronTopo};
+pub use nemotron_topology::{build_nemotron_encoder, build_nemotron_head, build_subsampling, NemotronTopo};
 
 /// The one per-model NPU seam (see `docs/npu-residency.md`). A model implements
 /// [`build`](NpuModel::build) — its device-heavy forward, composed from the shared
