@@ -108,6 +108,39 @@ parity-gated (`tests/kvcache_parity.rs` cosine 1.000000 after each).
 
 Net: one kronos forecast ≈ **3.1 s → ~1.3 s**; a samples=N request pays one
 prefill. These compound with the fine-tuned-`.weights` NPU path (`load_decoder`
-takes a file or dir). Remaining (see repo tasks): batched cross-sectional forward
-(the sweep multiplier; needs a host BSQ tokenizer for rayon-over-names), and the
-training-side batch + Vulkan-OOM streaming.
+takes a file or dir).
+
+## Training optimization pass — batched decoder fine-tune (2026-07-30)
+
+`KronosTrain` was a batch-of-one trainer (one window per forward/backward). It is
+now parameterized by a batch dim `b`: activation buffers scale to `b*t` rows
+(batch-major), attention keeps a per-sequence `t×t` score matrix (`b·heads·t·t`,
+so sequences never attend across the batch), and every weight-grad accumulates
+over all `b·t` tokens. No kernel changes were needed — the GQA and `*_bidir`
+kernels already carry a leading `bsz` dim. `FinetuneOpts.batch` (CLI
+`brain forecast finetune --batch B`) groups training windows into chunks of `b`
+(drop_last); held-out eval falls back to a b=1 model of the fine-tuned weights.
+
+Correctness (`crates/kronos/tests/train_gradcheck.rs`):
+
+| gate | result |
+|---|---|
+| **batched gradcheck** (b=2) | full fwd/bwd finite-diff check, 50 params pass |
+| **batch == mean-of-singles** (b=3) | loss to 6 digits; grads elementwise-allclose (worst margin 0.0) |
+| **promotion gate + universe** (b=2) | fine-tune promotes end-to-end (base 2.79 → ft 1.32) |
+
+Throughput (`bench_cpu.rs::finetune_step_batch_scaling`, 22-thread CPU,
+d_model=128 / 4 layers / t=64, min-of-5, ms/window):
+
+| batch | ms/step | ms/window | vs b=1 |
+|---|---|---|---|
+| 1 | 60.4 | 60.40 | 1.00× |
+| 2 | 111.4 | 55.68 | 1.08× |
+| 4 | 176.7 | 44.19 | 1.37× |
+| 8 | 231.5 | **28.94** | **2.09×** |
+
+The per-window cost more than halves at b=8 — the step amortises per-submit
+overhead and fills the AVX matmul rows, with the math held identical by the
+parity gate. Remaining (see repo tasks): batched cross-sectional forward already
+landed for inference; the Vulkan-OOM streaming for very long training contexts is
+the last training-side item.
