@@ -27,6 +27,9 @@ pub const MODEL: &str = "flux2-klein";
 /// The variant enum, in manifest order.
 const VARIANTS: [&str; 4] = ["klein-4b", "klein-9b", "base-4b", "base-9b"];
 
+/// The DiT numeric-tier enum ([`crate::Precision`] names, fp32 first).
+const PRECISIONS: [&str; 2] = ["fp32", "int8"];
+
 /// Optional extra reference-image blob names accepted by `edit` (the primary
 /// is `image`; the manifest must declare every accepted name — validation
 /// rejects undeclared blobs).
@@ -41,6 +44,7 @@ fn gen_params(spec: ActionSpec) -> ActionSpec {
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for 0)"))
         .param(ParamSpec::new("guidance", ParamType::Float, "CFG scale — base variants only (klein is guidance-distilled)").default(json!(4.0)))
         .param(ParamSpec::new("variant", ParamType::Enum(VARIANTS.iter().map(|s| s.to_string()).collect()), "model variant; 9B needs BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)").default(json!("klein-4b")))
+        .param(ParamSpec::new("precision", ParamType::Enum(PRECISIONS.iter().map(|s| s.to_string()).collect()), "DiT numeric tier: fp32 (parity reference) or int8 (DP4A, ~4x smaller weights; GPU only)").default(json!("fp32")))
         .param(ParamSpec::new("adapter", ParamType::Str, "server-side path to a trained LoRA adapter (from lora_train) to apply"))
 }
 
@@ -94,6 +98,8 @@ pub struct GenParams {
     pub variant: String,
     pub opts: GenOpts,
     pub adapter: Option<String>,
+    /// DiT numeric tier (fp32 default; int8 = DP4A, GPU only).
+    pub precision: crate::Precision,
 }
 
 /// Decode + validate the shared generation params from an invocation.
@@ -101,6 +107,9 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
     let variant = inv.get_str("variant").unwrap_or_else(|| "klein-4b".into());
     let cfg = Flux2Config::from_name(&variant)?;
     check_license(&variant)?;
+    let precision = crate::Precision::from_name(
+        &inv.get_str("precision").unwrap_or_else(|| "fp32".into()),
+    )?;
     let width = inv.get_i64("width").unwrap_or(512).max(16) as u32;
     let height = inv.get_i64("height").unwrap_or(512).max(16) as u32;
     if width % 16 != 0 || height % 16 != 0 {
@@ -114,7 +123,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         guidance: inv.get_f64("guidance").unwrap_or(4.0) as f32,
         seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,
     };
-    Ok(GenParams { cfg, variant, adapter: inv.get_str("adapter").filter(|s| !s.is_empty()), opts })
+    Ok(GenParams { cfg, variant, adapter: inv.get_str("adapter").filter(|s| !s.is_empty()), opts, precision })
 }
 
 /// The 9B weights are released under the FLUX.2 \[Non-Commercial\] License —
@@ -218,8 +227,9 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
 // ===================== execution (hot-pipeline provider) =====================
 
 /// Cache key for a resident pipeline: everything that fixes the built graphs —
-/// (variant, width, height, reference latent tokens) plus the folded adapter.
-type HotKey = (String, u32, u32, u32, Option<String>);
+/// (variant, precision, width, height, reference latent tokens) plus the
+/// folded adapter.
+type HotKey = (String, &'static str, u32, u32, u32, Option<String>);
 
 /// The executable FLUX.2 model behind the manifest. Holds a **hot pipeline
 /// cache** so a long-lived process (`brain run` / the event server) loads the
@@ -275,13 +285,13 @@ impl Action for Flux2Action {
                 let refs = refs_from(inv, self.name == "edit")?;
                 let n_gen = (p.opts.height / 16) * (p.opts.width / 16);
                 let n_ref = ref_tokens(&refs);
-                let key: HotKey = (p.variant.clone(), p.opts.width, p.opts.height, n_ref, p.adapter.clone());
+                let key: HotKey = (p.variant.clone(), p.precision.name(), p.opts.width, p.opts.height, n_ref, p.adapter.clone());
 
                 let mut guard = self.hot.lock().map_err(|_| "hot pipeline lock poisoned")?;
                 if !matches!(&*guard, Some((k, _)) if *k == key) {
                     *guard = None; // free the old resident weights before building new
                     progress(Progress { step: 0, total: 1, message: "loading weights (first call for this variant/size)".into() });
-                    let pipe = Pipeline::build_adapted(&p.cfg, &paths, n_gen + n_ref, p.adapter.as_deref())?;
+                    let pipe = Pipeline::build_with(&p.cfg, &paths, n_gen + n_ref, p.adapter.as_deref(), p.precision)?;
                     *guard = Some((key, pipe));
                 }
                 generate_on(&guard.as_ref().unwrap().1, inv, &refs, &p.opts, progress)
@@ -315,6 +325,9 @@ mod tests {
         let variant = t2i.params.iter().find(|p| p.name == "variant").unwrap();
         assert_eq!(variant.default, Some(json!("klein-4b")));
         assert!(matches!(&variant.ty, ParamType::Enum(v) if v == &VARIANTS.map(String::from).to_vec()));
+        let precision = t2i.params.iter().find(|p| p.name == "precision").unwrap();
+        assert_eq!(precision.default, Some(json!("fp32")));
+        assert!(matches!(&precision.ty, ParamType::Enum(v) if v == &PRECISIONS.map(String::from).to_vec()));
         assert!(t2i.streaming);
         assert_eq!(t2i.outputs[0].media, Media::Image);
         // edit requires the primary reference image and accepts extra refs.

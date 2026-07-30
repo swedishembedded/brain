@@ -159,6 +159,47 @@ Chronological, measured-only. Reference material + the phased plan live in
   (amortizes the build), int8 DiT (zimage `int8.rs` pattern, single-card
   DiT+TE), recorded phase graphs.
 
+## P8 (2026-07-30) — int8 (DP4A) path: a capacity win, NOT a speed win
+
+Quantizer hoisted to `model::int8` — zimage and qwen now delegate to the one
+engine-wide implementation (net −48 lines, two duplicates retired).
+
+**Parity** (P40, replayed golden inputs, `tests/int8_parity.rs`):
+int8 vs fp32 **cosine 0.998950**, max_abs 0.81; int8 vs the diffusers golden
+identical to 6 dp. Generated image vs fp32 at the same seed: mean pixel
+delta 4 %, visually indistinguishable. Three-and-a-half tensor families stay
+fp32, each chosen by a measured bisection (`int8_bisect_keep_f32_families`,
+`#[ignore]`d as a tool): `txt_in` (raw Qwen3 hidden-state outliers crush a
+per-token scale: 0.995 → 0.984 if quantized), `img_in` + `final_layer.linear`
+(3 MB of boundary insurance), double-block `*_mlp.2` (0.9965 → 0.9989 for
+~850 MB).
+
+**Speed — the headline negative result:**
+
+| config | single forward @1536 tok | 512² 4-step image | VRAM |
+|---|---|---|---|
+| fp32, two cards (DiT gpu0 + TE gpu1) | 12.873 s | 59.8 s | 14.7 + 16.3 GiB |
+| int8 DiT + int8 TE, **one card** | 11.654 s | **54.5 s** | **5.6 GiB** |
+| speedup | **1.10×** | 1.10× | 5.5× smaller |
+
+DP4A promises ~4×; we measured 1.10×. Cause: **neither path is
+arithmetic-bound.** The forward is 10.17 TFLOP; fp32 achieves 0.79 TFLOPS =
+**6.7 % of the P40's 11.8 TFLOPS**, int8 0.87 TOPS = **1.9 % of its 47 TOPS**.
+Quadrupling arithmetic throughput cannot help when 93 % of the arithmetic
+already sits idle. (This corrects an earlier roofline note in this ledger that
+called the batch-1 forward compute-bound: arithmetic *intensity* is high, but
+the achieved rate says the limiter is elsewhere.)
+
+So int8's real value is **capacity**: the whole model on one 24 GB card,
+freeing the second P40 for a parallel replica (≈2× throughput even at
+unchanged latency). Speed must come from kernel efficiency instead.
+
+First hypothesis for the profiling work: `matmul_reg2`'s 128×128×BK8 tiling
+gives an arithmetic intensity ≈32 FLOP/byte against the P40's ridge point
+≈33 — right at the bandwidth boundary, so a deeper K-block should move it into
+compute-bound territory. But 6.7 % is far below even the bandwidth-bound
+ceiling, so a per-kernel profile must name the dominant cost before tuning.
+
 ## Known gaps / remaining
 
 - Serving landed (P5), perf target + first CPU measurement landed (P6 above);
@@ -166,10 +207,11 @@ Chronological, measured-only. Reference material + the phased plan live in
   `run_batch` is a follow-up (see P5 batching bullet). A GPU perf run and a
   `sweep` ladder (concurrency behaviour under the sequential-`run_batch`
   scheduler) wait on the GPU path being measured at all.
-- Text encoder placement: pipeline builds it on the ambient device; fp32
-  DiT (15.5 GB) + fp32 TE (16 GB) exceed one 24 GB card — per-component
-  device selection / int8 encoder is future work (zimage's `Encoder` pattern).
-- GPU (P40) forward validated only via kernel reuse so far; the flash/reg2
-  fast path needs a measured GPU parity run.
+- **Kernel efficiency is the open problem**: 6.7 % of fp32 peak / 1.9 % of
+  int8 peak (P8 above). Per-kernel profiling + autotune at Klein shapes is the
+  critical path to the 8–12 s (fp32) / 3–5 s (int8) realistic floors.
+- True batched `run_batch` still to come; the kernels already carry the hooks
+  (attention `bsz`, `film_row`/`gate_row` `rows_per_cond` groups), so
+  mixed-progress continuous batching needs no new WGSL.
 - Klein-9B-KV cached-ref attention variant: out of scope (needs per-token
   modulation blend, breaks the LN fold).

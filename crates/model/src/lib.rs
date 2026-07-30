@@ -22,6 +22,7 @@ pub mod paged;
 pub mod distributed;
 pub mod grid;
 pub mod hostmath;
+pub mod int8;
 pub mod netcollective;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod parallel;

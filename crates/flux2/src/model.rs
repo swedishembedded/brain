@@ -39,6 +39,11 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR),
     ("silu_mul", kernels::SILU_MUL),
     ("gate_row", kernels::GATE_ROW),
+    // int8 DP4A path (GPU only): per-token activation quant + DP4A GEMM.
+    // Listing them is harmless off-GPU — only dispatched under Precision::Int8.
+    ("max_abs_row", kernels::MAX_ABS_ROW),
+    ("quant_pack", kernels::QUANT_PACK),
+    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
 ];
 const K_LN: usize = 0;
 const K_MATMUL: usize = 1;
@@ -52,6 +57,9 @@ const K_APPLY: usize = 8;
 const K_FLASH: usize = 9;
 const K_SILU_MUL: usize = 10;
 const K_GATE: usize = 11;
+const K_MAXABS: usize = 12;
+const K_QUANT: usize = 13;
+const K_MATMUL_I8: usize = 14;
 
 const EPS: f32 = 1e-6;
 
@@ -64,30 +72,72 @@ fn rows(data: &[f32], cols: usize, r0: usize, r1: usize) -> &[f32] {
     &data[r0 * cols..r1 * cols]
 }
 
+/// DiT numeric tier: fp32 is the parity reference; int8 quantizes every linear
+/// (per-channel symmetric weights + dynamic per-token activation quant, DP4A
+/// GEMM — GPU only). Norms/RoPE/attention/SwiGLU always stay f32.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Precision {
+    F32,
+    Int8,
+}
+
+impl Precision {
+    /// The CLI/capability enum (`fp32 | int8`) — the ONE name→tier map.
+    pub fn from_name(s: &str) -> Result<Precision, String> {
+        match s {
+            "fp32" => Ok(Precision::F32),
+            "int8" => Ok(Precision::Int8),
+            other => Err(format!("unknown precision {other} (fp32|int8)")),
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Precision::F32 => "fp32",
+            Precision::Int8 => "int8",
+        }
+    }
+}
+
+/// One linear's resident weight: fp32, or int8 (packed `[n, k/4]` u32 +
+/// per-channel scale `[n]` — `model::int8::quantize_weight` layout).
+enum Lin {
+    F32(DeviceBuffer),
+    I8(DeviceBuffer, DeviceBuffer),
+}
+
+impl Lin {
+    /// Whether this linear consumes the packed int8 activation (i.e. its
+    /// activation must be quantized before it runs).
+    fn is_i8(&self) -> bool {
+        matches!(self, Lin::I8(..))
+    }
+}
+
 /// One attention/MLP weight set (a double block holds two: img and txt).
 struct StreamW {
-    wq: DeviceBuffer,
-    wk: DeviceBuffer,
-    wv: DeviceBuffer,
+    wq: Lin,
+    wk: Lin,
+    wv: Lin,
     nq: DeviceBuffer,
     nk: DeviceBuffer,
-    wo: DeviceBuffer,
-    w1: DeviceBuffer,
-    w3: DeviceBuffer,
-    w2: DeviceBuffer,
+    wo: Lin,
+    w1: Lin,
+    w3: Lin,
+    w2: Lin,
 }
 
 struct SingleW {
-    wq: DeviceBuffer,
-    wk: DeviceBuffer,
-    wv: DeviceBuffer,
+    wq: Lin,
+    wk: Lin,
+    wv: Lin,
     nq: DeviceBuffer,
     nk: DeviceBuffer,
-    w1: DeviceBuffer,
-    w3: DeviceBuffer,
+    w1: Lin,
+    w3: Lin,
     /// linear2 column-split: `out = wo_a @ attn_ctx + wo_b @ mlp_act`.
-    wo_a: DeviceBuffer,
-    wo_b: DeviceBuffer,
+    wo_a: Lin,
+    wo_b: Lin,
 }
 
 /// The six modulated-LN sites and five gates, in upload order.
@@ -124,17 +174,33 @@ struct Scratch {
     ctx_in: DeviceBuffer,
 }
 
+/// Int8 activation-quantization scratch (allocated only under
+/// [`Precision::Int8`]): the per-token dynamic scale and one packed-activation
+/// buffer per contraction width. One quant feeds every linear reading that
+/// activation (n1 → q/k/v and w1/w3, ctx → wo, hs → w2/wo_b). The boundary
+/// linears (img_in/txt_in/final_layer) stay fp32, so only the two in-block
+/// widths (hidden, mlp) need packed buffers.
+struct I8Scratch {
+    /// `[n_max]` per-token activation scale (`max_abs_row` output).
+    sx: DeviceBuffer,
+    /// packed activations, keyed by K: hidden and mlp width.
+    xq_d: DeviceBuffer,
+    xq_mlp: DeviceBuffer,
+}
+
 pub struct Flux2Model {
     pub cfg: Flux2Config,
     gpu: Gpu,
     /// max joint rows (txt + img + refs) the scratch is sized for
     n_max: u32,
     fast: bool,
+    precision: Precision,
+    i8scr: Option<I8Scratch>,
     dbl: Vec<(StreamW, StreamW)>,
     sgl: Vec<SingleW>,
-    img_in: DeviceBuffer,
-    txt_in: DeviceBuffer,
-    final_w: DeviceBuffer,
+    img_in: Lin,
+    txt_in: Lin,
+    final_w: Lin,
     modb: ModBufs,
     scr: Scratch,
     // host-side conditioning weights
@@ -148,13 +214,34 @@ pub struct Flux2Model {
 
 impl Flux2Model {
     /// Build device state from imported (BFL-named) tensors, sized for at most
-    /// `n_max` joint tokens (txt_len + image + reference tokens).
+    /// `n_max` joint tokens (txt_len + image + reference tokens). fp32 — the
+    /// parity reference.
     pub fn new(cfg: &Flux2Config, ts: &Tensors, gpu: Gpu, n_max: u32) -> Flux2Model {
+        Flux2Model::new_with(cfg, ts, gpu, n_max, Precision::F32)
+    }
+
+    /// [`Flux2Model::new`] with a numeric tier. [`Precision::Int8`] uploads
+    /// every linear as packed int8 + per-channel scales (~4× smaller — the 4B
+    /// DiT drops from ~15.5 GiB to ~3.9 GiB resident) and the forward runs the
+    /// quant→DP4A sequence per linear. GPU only (DP4A + workgroup barriers).
+    pub fn new_with(cfg: &Flux2Config, ts: &Tensors, gpu: Gpu, n_max: u32, precision: Precision) -> Flux2Model {
         assert!(!cfg.guidance_embed, "guidance-embedded variants not supported");
         let d = cfg.hidden;
         let mlp = cfg.mlp_hidden();
         let hd = cfg.head_dim();
         let nh = cfg.n_heads as u32;
+        let fast = gpu.caps().workgroup_reductions;
+        if precision == Precision::Int8 {
+            assert!(
+                fast,
+                "flux2 int8 needs a GPU backend (DP4A + workgroup barriers); use fp32 on the {} backend",
+                gpu.kind()
+            );
+            // step_sliced binds sub-ranges at BYTE offset elem*4; storage
+            // bindings must be 256-byte aligned. Every sliced row offset here is
+            // 0 or txt_len rows, so widths and txt_len must be multiples of 64.
+            assert!(cfg.txt_len % 64 == 0 && d % 64 == 0 && mlp % 64 == 0, "int8 slicing alignment");
+        }
         let get = |name: &str| -> &(Vec<usize>, Vec<f32>) {
             ts.get(name).unwrap_or_else(|| panic!("flux2: missing tensor {name}"))
         };
@@ -164,36 +251,72 @@ impl Flux2Model {
         // 22 GiB for 15.5 GiB of weights on a P40 — zimage's dev.rs documents
         // the same). Flush roughly every GiB.
         let uploaded = std::cell::Cell::new(0u64);
-        let upv = |w: &[f32]| -> DeviceBuffer {
-            let b = gpu.storage(w.len() as u64);
-            gpu.write(&b, bytemuck::cast_slice(w));
-            uploaded.set(uploaded.get() + 4 * w.len() as u64);
+        let flush = |b: &DeviceBuffer, words: usize| {
+            uploaded.set(uploaded.get() + 4 * words as u64);
             if uploaded.get() > (1 << 30) {
                 // force a real flush: a readback drains the queue (an empty
                 // submit records nothing) and the poll reclaims the staging
                 // wgpu holds per write — without this a non-ReBAR card OOMs
                 // at ~22 GiB for 15.5 GiB of weights
-                let _ = gpu.read(&b, 1);
+                let _ = gpu.read(b, 1);
                 uploaded.set(0);
             }
+        };
+        let upv = |w: &[f32]| -> DeviceBuffer {
+            let b = gpu.storage(w.len() as u64);
+            gpu.write(&b, bytemuck::cast_slice(w));
+            flush(&b, w.len());
             b
         };
         let up = |name: &str| -> DeviceBuffer { upv(&get(name).1) };
+        // One linear `[n_out, k]`, uploaded at the requested tier.
+        let lin_v = |w: &[f32], n_out: usize, k: usize| -> Lin {
+            match precision {
+                Precision::F32 => Lin::F32(upv(w)),
+                Precision::Int8 => {
+                    let (packed, sw) = model::int8::quantize_weight(w, n_out, k);
+                    let pb = gpu.storage(packed.len() as u64);
+                    gpu.write(&pb, &packed);
+                    flush(&pb, packed.len());
+                    let sb = gpu.storage(sw.len() as u64);
+                    gpu.write(&sb, bytemuck::cast_slice(&sw));
+                    Lin::I8(pb, sb)
+                }
+            }
+        };
+        // Debug aid (parity bisection): BRAIN_FLUX2_I8_KEEP_F32=sub1,sub2 keeps
+        // every linear whose name contains a listed substring at fp32.
+        let keep_f32 = std::env::var("BRAIN_FLUX2_I8_KEEP_F32").unwrap_or_default();
+        let keeps: Vec<String> = keep_f32.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect();
+        let lin_n = |name: &str, w: &[f32], n_out: usize, k: usize| -> Lin {
+            if keeps.iter().any(|s| name.contains(s.as_str())) {
+                Lin::F32(upv(w))
+            } else {
+                lin_v(w, n_out, k)
+            }
+        };
+        let lin = |name: &str, n_out: usize, k: usize| -> Lin { lin_n(name, &get(name).1, n_out, k) };
 
         let stream = |p: &str| -> StreamW {
             let (_, qkv) = get(&format!("{p}_attn.qkv.weight"));
             let (_, m0) = get(&format!("{p}_mlp.0.weight"));
             StreamW {
-                wq: upv(rows(qkv, d, 0, d)),
-                wk: upv(rows(qkv, d, d, 2 * d)),
-                wv: upv(rows(qkv, d, 2 * d, 3 * d)),
+                wq: lin_n(&format!("{p}_attn.qkv"), rows(qkv, d, 0, d), d, d),
+                wk: lin_n(&format!("{p}_attn.qkv"), rows(qkv, d, d, 2 * d), d, d),
+                wv: lin_n(&format!("{p}_attn.qkv"), rows(qkv, d, 2 * d, 3 * d), d, d),
                 nq: up(&format!("{p}_attn.norm.query_norm.scale")),
                 nk: up(&format!("{p}_attn.norm.key_norm.scale")),
-                wo: up(&format!("{p}_attn.proj.weight")),
+                wo: lin(&format!("{p}_attn.proj.weight"), d, d),
                 // SwiGLU chunk order: x1 (silu-gated) is the FIRST half
-                w1: upv(rows(m0, d, 0, mlp)),
-                w3: upv(rows(m0, d, mlp, 2 * mlp)),
-                w2: up(&format!("{p}_mlp.2.weight")),
+                w1: lin_n(&format!("{p}_mlp.0"), rows(m0, d, 0, mlp), mlp, d),
+                w3: lin_n(&format!("{p}_mlp.0"), rows(m0, d, mlp, 2 * mlp), mlp, d),
+                // The double-block mlp-down stays fp32 (~850 MB over the 10
+                // streams): its input is the SwiGLU activation, whose per-token
+                // outliers early in the stack cost the most int8 parity —
+                // measured cosine 0.9965 (int8 w2) → 0.9989 (fp32 w2) on the
+                // parity fixture. The single-block hs consumer (wo_b) measured
+                // insensitive (+0.0002 for 3 GB) and stays int8.
+                w2: Lin::F32(up(&format!("{p}_mlp.2.weight"))),
             }
         };
         let dbl: Vec<(StreamW, StreamW)> = (0..cfg.depth_double)
@@ -215,15 +338,15 @@ impl Flux2Model {
                     wo_b.extend_from_slice(&l2[r * (d + mlp) + d..(r + 1) * (d + mlp)]);
                 }
                 SingleW {
-                    wq: upv(rows(l1, d, 0, d)),
-                    wk: upv(rows(l1, d, d, 2 * d)),
-                    wv: upv(rows(l1, d, 2 * d, 3 * d)),
+                    wq: lin_n(&format!("{p}.linear1"), rows(l1, d, 0, d), d, d),
+                    wk: lin_n(&format!("{p}.linear1"), rows(l1, d, d, 2 * d), d, d),
+                    wv: lin_n(&format!("{p}.linear1"), rows(l1, d, 2 * d, 3 * d), d, d),
                     nq: up(&format!("{p}.norm.query_norm.scale")),
                     nk: up(&format!("{p}.norm.key_norm.scale")),
-                    w1: upv(rows(l1, d, 3 * d, 3 * d + mlp)),
-                    w3: upv(rows(l1, d, 3 * d + mlp, 3 * d + 2 * mlp)),
-                    wo_a: upv(&wo_a),
-                    wo_b: upv(&wo_b),
+                    w1: lin_n(&format!("{p}.linear1"), rows(l1, d, 3 * d, 3 * d + mlp), mlp, d),
+                    w3: lin_n(&format!("{p}.linear1"), rows(l1, d, 3 * d + mlp, 3 * d + 2 * mlp), mlp, d),
+                    wo_a: lin_n(&format!("{p}.linear2"), &wo_a, d, d),
+                    wo_b: lin_n(&format!("{p}.linear2"), &wo_b, d, mlp),
                 }
             })
             .collect();
@@ -231,7 +354,11 @@ impl Flux2Model {
         let n = n_max as u64;
         let du = d as u64;
         let mlpu = mlp as u64;
-        let fast = gpu.caps().workgroup_reductions;
+        // Attention stays flash under `fast` at BOTH tiers: the materialised
+        // scores→softmax→apply trio was measured SLOWER here (int8 @1536
+        // joint tokens: 14.8 s vs flash 11.6 s on the P40 — the untiled
+        // scores/apply kernels are bandwidth-bound at hd=128), unlike
+        // zimage's dims where the trio wins.
         let attn_mat = if fast { 1 } else { (nh as u64) * n * n };
         let a = |len: u64| gpu.storage(len);
         let scr = Scratch {
@@ -265,16 +392,30 @@ impl Flux2Model {
             beta: (0..6).map(|_| a(du)).collect(),
             gate: (0..5).map(|_| a(du)).collect(),
         };
+        let i8scr = (precision == Precision::Int8).then(|| I8Scratch {
+            sx: a(n),
+            xq_d: a(n * du / 4),
+            xq_mlp: a(n * mlpu / 4),
+        });
 
         Flux2Model {
             cfg: cfg.clone(),
             n_max,
             fast,
+            precision,
+            i8scr,
             dbl,
             sgl,
-            img_in: up("img_in.weight"),
-            txt_in: up("txt_in.weight"),
-            final_w: up("final_layer.linear.weight"),
+            // The three boundary linears stay fp32 at every tier (~97 MB —
+            // negligible). Measured on the parity fixture (t2i, 1536 tokens):
+            // quantizing txt_in costs cosine 0.9946 → 0.9843 alone — its input
+            // is raw concatenated Qwen3 hidden states whose channel outliers
+            // (the ~6e3 magnitudes the masking experiment measured) crush a
+            // per-token int8 scale. img_in/final_layer are cheap insurance at
+            // the in/out boundaries (0.9946 → 0.9955 together).
+            img_in: Lin::F32(up("img_in.weight")),
+            txt_in: Lin::F32(up("txt_in.weight")),
+            final_w: Lin::F32(up("final_layer.linear.weight")),
             modb,
             scr,
             time_in_a: get("time_in.in_layer.weight").1.clone(),
@@ -285,6 +426,11 @@ impl Flux2Model {
             final_adaln: get("final_layer.adaLN_modulation.1.weight").1.clone(),
             gpu,
         }
+    }
+
+    /// The numeric tier this model was built at.
+    pub fn precision(&self) -> Precision {
+        self.precision
     }
 
     /// `timestep_embedding(t·1000, 256)`: 128 freqs, **cos first**, then sin.
@@ -359,6 +505,73 @@ impl Flux2Model {
             self.gpu.step_sliced(K_MATMUL_REG2, &[x, w, o], &[xo, (0, 0), oo], &[m, k, n], m.div_ceil(128) * n.div_ceil(128) * 256)
         } else {
             self.gpu.step_sliced(K_MATMUL, &[x, w, o], &[xo, (0, 0), oo], &[m, k, n], m * n)
+        }
+    }
+
+    /// Int8 only: which packed-activation scratch holds a K-wide activation.
+    /// The widths are distinct in every variant, so K keys the buffer.
+    fn xq_for(&self, k: u32) -> &DeviceBuffer {
+        let i8s = self.i8scr.as_ref().expect("int8 scratch");
+        let c = &self.cfg;
+        if k == c.hidden as u32 {
+            &i8s.xq_d
+        } else if k == c.mlp_hidden() as u32 {
+            &i8s.xq_mlp
+        } else {
+            panic!("no int8 activation scratch for K={k}")
+        }
+    }
+
+    /// Int8 only (no-op under fp32): quantize rows `r0..r1` of `x` `[.., k]`
+    /// into the K-matched packed scratch with fresh per-token scales
+    /// (`max_abs_row` → `quant_pack`). ONE quant feeds every linear reading
+    /// that activation (n1 → q/k/v and w1/w3, ctx → wo, hs → w2).
+    fn quant_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, r0: u32, r1: u32, k: u32) {
+        let Some(i8s) = self.i8scr.as_ref() else { return };
+        let m = r1 - r0;
+        let xo = (r0 as u64 * k as u64, m as u64 * k as u64);
+        let so = (r0 as u64, m as u64);
+        let qo = (r0 as u64 * (k as u64 / 4), m as u64 * (k as u64 / 4));
+        let xq = self.xq_for(k);
+        s.push(self.gpu.step_sliced(K_MAXABS, &[x, &i8s.sx], &[xo, so], &[m, k], m));
+        s.push(self.gpu.step_sliced(K_QUANT, &[x, &i8s.sx, xq], &[xo, so, qo], &[m, k], m * k / 4));
+    }
+
+    /// Int8 DP4A matmul over pre-quantized rows `xr0..xr0+m` of the K-matched
+    /// packed scratch, writing rows `or0..or0+m` of `o` `[.., n]`. Dequantizes
+    /// with the per-token `sx` (sliced at `xr0`) × per-channel `sw`.
+    #[allow(clippy::too_many_arguments)]
+    fn mm8(&self, wq: &DeviceBuffer, sw: &DeviceBuffer, o: &DeviceBuffer, xr0: u32, or0: u32, m: u32, k: u32, n: u32) -> Step {
+        let i8s = self.i8scr.as_ref().expect("int8 scratch");
+        let kg = k as u64 / 4;
+        let xo = (xr0 as u64 * kg, m as u64 * kg);
+        let so = (xr0 as u64, m as u64);
+        let oo = (or0 as u64 * n as u64, m as u64 * n as u64);
+        self.gpu.step_sliced(
+            K_MATMUL_I8,
+            &[self.xq_for(k), wq, &i8s.sx, sw, o],
+            &[xo, (0, 0), so, (0, 0), oo],
+            &[m, k / 4, n],
+            m.div_ceil(128) * n.div_ceil(128) * 256,
+        )
+    }
+
+    /// One linear over rows `r0..r1` at the model's tier: fp32 [`Self::mm_rows`]
+    /// or the DP4A GEMM over the activation [`Self::quant_rows`] pre-packed.
+    #[allow(clippy::too_many_arguments)]
+    fn lin_rows(&self, x: &DeviceBuffer, w: &Lin, o: &DeviceBuffer, r0: u32, r1: u32, k: u32, n: u32) -> Step {
+        match w {
+            Lin::F32(wb) => self.mm_rows(x, wb, o, r0, r1, k, n),
+            Lin::I8(wq, sw) => self.mm8(wq, sw, o, r0, r0, r1 - r0, k, n),
+        }
+    }
+
+    /// Whole-slab linear (`m` rows from row 0) at the model's tier — the fp32
+    /// arm is the plain unsliced [`Self::mm`] (byte-identical to before).
+    fn lin_full(&self, x: &DeviceBuffer, w: &Lin, o: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
+        match w {
+            Lin::F32(wb) => self.mm(x, wb, o, m, k, n),
+            Lin::I8(wq, sw) => self.mm8(wq, sw, o, 0, 0, m, k, n),
         }
     }
 
@@ -473,18 +686,22 @@ impl Flux2Model {
 
         let scr = &self.scr;
         let mut s: Vec<Step> = Vec::new();
-        // embed both streams into the joint residual slab x0 = [txt | img]
-        s.push(self.mm_rows(&scr.ctx_in, &self.txt_in, &scr.x0, 0, nt, cfg.context_in_dim as u32, d));
+        // embed both streams into the joint residual slab x0 = [txt | img].
+        // The embeds are fp32 at every tier (see `new_with`), so no quant here.
+        s.push(self.lin_rows(&scr.ctx_in, &self.txt_in, &scr.x0, 0, nt, cfg.context_in_dim as u32, d));
         // img rows: input read starts at tok_in row 0, output lands at row nt
-        {
-            let xo = (0u64, ni as u64 * cin as u64);
-            let oo = (nt as u64 * d as u64, ni as u64 * d as u64);
-            let st = if self.fast {
-                self.gpu.step_sliced(K_MATMUL_REG2, &[&scr.tok_in, &self.img_in, &scr.x0], &[xo, (0, 0), oo], &[ni, cin, d], ni.div_ceil(128) * d.div_ceil(128) * 256)
-            } else {
-                self.gpu.step_sliced(K_MATMUL, &[&scr.tok_in, &self.img_in, &scr.x0], &[xo, (0, 0), oo], &[ni, cin, d], ni * d)
-            };
-            s.push(st);
+        match &self.img_in {
+            Lin::F32(wb) => {
+                let xo = (0u64, ni as u64 * cin as u64);
+                let oo = (nt as u64 * d as u64, ni as u64 * d as u64);
+                let st = if self.fast {
+                    self.gpu.step_sliced(K_MATMUL_REG2, &[&scr.tok_in, wb, &scr.x0], &[xo, (0, 0), oo], &[ni, cin, d], ni.div_ceil(128) * d.div_ceil(128) * 256)
+                } else {
+                    self.gpu.step_sliced(K_MATMUL, &[&scr.tok_in, wb, &scr.x0], &[xo, (0, 0), oo], &[ni, cin, d], ni * d)
+                };
+                s.push(st);
+            }
+            Lin::I8(wq, sw) => s.push(self.mm8(wq, sw, &scr.x0, 0, nt, ni, cin, d)),
         }
 
         let (mut xa, mut xb) = (&scr.x0, &scr.x1);
@@ -492,54 +709,83 @@ impl Flux2Model {
         for (img_w, txt_w) in &self.dbl {
             // attention halves of both streams into the joint q/k/v
             s.push(self.ln_rows(xa, 2, &scr.n1, 0, nt)); // txt norm1
-            s.push(self.mm_rows(&scr.n1, &txt_w.wq, &scr.q, 0, nt, d, d));
-            s.push(self.mm_rows(&scr.n1, &txt_w.wk, &scr.k, 0, nt, d, d));
-            s.push(self.mm_rows(&scr.n1, &txt_w.wv, &scr.v, 0, nt, d, d));
+            if txt_w.wq.is_i8() {
+                self.quant_rows(&mut s, &scr.n1, 0, nt, d);
+            }
+            s.push(self.lin_rows(&scr.n1, &txt_w.wq, &scr.q, 0, nt, d, d));
+            s.push(self.lin_rows(&scr.n1, &txt_w.wk, &scr.k, 0, nt, d, d));
+            s.push(self.lin_rows(&scr.n1, &txt_w.wv, &scr.v, 0, nt, d, d));
             s.push(self.ln_rows(xa, 0, &scr.n1, nt, n)); // img norm1
-            s.push(self.mm_rows(&scr.n1, &img_w.wq, &scr.q, nt, n, d, d));
-            s.push(self.mm_rows(&scr.n1, &img_w.wk, &scr.k, nt, n, d, d));
-            s.push(self.mm_rows(&scr.n1, &img_w.wv, &scr.v, nt, n, d, d));
+            if img_w.wq.is_i8() {
+                self.quant_rows(&mut s, &scr.n1, nt, n, d);
+            }
+            s.push(self.lin_rows(&scr.n1, &img_w.wq, &scr.q, nt, n, d, d));
+            s.push(self.lin_rows(&scr.n1, &img_w.wk, &scr.k, nt, n, d, d));
+            s.push(self.lin_rows(&scr.n1, &img_w.wv, &scr.v, nt, n, d, d));
             s.push(self.qknorm_rows(&scr.q, &txt_w.nq, &scr.qn, 0, nt));
             s.push(self.qknorm_rows(&scr.k, &txt_w.nk, &scr.kn, 0, nt));
             s.push(self.qknorm_rows(&scr.q, &img_w.nq, &scr.qn, nt, n));
             s.push(self.qknorm_rows(&scr.k, &img_w.nk, &scr.kn, nt, n));
             self.push_attn_core(&mut s, n);
-            // per-stream projection + gated residual
-            s.push(self.mm_rows(&scr.ctx, &txt_w.wo, &scr.proj, 0, nt, d, d));
-            s.push(self.mm_rows(&scr.ctx, &img_w.wo, &scr.proj, nt, n, d, d));
+            // per-stream projection + gated residual (ONE ctx quant, two GEMMs)
+            if txt_w.wo.is_i8() || img_w.wo.is_i8() {
+                self.quant_rows(&mut s, &scr.ctx, 0, n, d);
+            }
+            s.push(self.lin_rows(&scr.ctx, &txt_w.wo, &scr.proj, 0, nt, d, d));
+            s.push(self.lin_rows(&scr.ctx, &img_w.wo, &scr.proj, nt, n, d, d));
             s.push(self.gate_rows(xa, 2, &scr.proj, xb, 0, nt));
             s.push(self.gate_rows(xa, 0, &scr.proj, xb, nt, n));
             std::mem::swap(&mut xa, &mut xb);
             // MLP halves
             s.push(self.ln_rows(xa, 3, &scr.n1, 0, nt)); // txt norm2
-            s.push(self.mm_rows(&scr.n1, &txt_w.w1, &scr.h1, 0, nt, d, mlp));
-            s.push(self.mm_rows(&scr.n1, &txt_w.w3, &scr.h2, 0, nt, d, mlp));
+            if txt_w.w1.is_i8() {
+                self.quant_rows(&mut s, &scr.n1, 0, nt, d);
+            }
+            s.push(self.lin_rows(&scr.n1, &txt_w.w1, &scr.h1, 0, nt, d, mlp));
+            s.push(self.lin_rows(&scr.n1, &txt_w.w3, &scr.h2, 0, nt, d, mlp));
             s.push(self.ln_rows(xa, 1, &scr.n1, nt, n)); // img norm2
-            s.push(self.mm_rows(&scr.n1, &img_w.w1, &scr.h1, nt, n, d, mlp));
-            s.push(self.mm_rows(&scr.n1, &img_w.w3, &scr.h2, nt, n, d, mlp));
+            if img_w.w1.is_i8() {
+                self.quant_rows(&mut s, &scr.n1, nt, n, d);
+            }
+            s.push(self.lin_rows(&scr.n1, &img_w.w1, &scr.h1, nt, n, d, mlp));
+            s.push(self.lin_rows(&scr.n1, &img_w.w3, &scr.h2, nt, n, d, mlp));
             s.push(self.gpu.step(K_SILU_MUL, &[&scr.h1, &scr.h2, &scr.hs], &[n * mlp], n * mlp));
-            s.push(self.mm_rows(&scr.hs, &txt_w.w2, &scr.mlp, 0, nt, mlp, d));
-            s.push(self.mm_rows(&scr.hs, &img_w.w2, &scr.mlp, nt, n, mlp, d));
+            if txt_w.w2.is_i8() || img_w.w2.is_i8() {
+                self.quant_rows(&mut s, &scr.hs, 0, n, mlp);
+            }
+            s.push(self.lin_rows(&scr.hs, &txt_w.w2, &scr.mlp, 0, nt, mlp, d));
+            s.push(self.lin_rows(&scr.hs, &img_w.w2, &scr.mlp, nt, n, mlp, d));
             s.push(self.gate_rows(xa, 3, &scr.mlp, xb, 0, nt));
             s.push(self.gate_rows(xa, 1, &scr.mlp, xb, nt, n));
             std::mem::swap(&mut xa, &mut xb);
         }
 
         for w in &self.sgl {
-            // parallel attn ‖ MLP over one shared modulated norm
+            // parallel attn ‖ MLP over one shared modulated norm — ONE n1 quant
+            // feeds q/k/v AND w1/w3 (attention touches no d-width quant state).
             s.push(self.ln_rows(xa, 4, &scr.n1, 0, n));
-            s.push(self.mm(&scr.n1, &w.wq, &scr.q, n, d, d));
-            s.push(self.mm(&scr.n1, &w.wk, &scr.k, n, d, d));
-            s.push(self.mm(&scr.n1, &w.wv, &scr.v, n, d, d));
+            if w.wq.is_i8() || w.w1.is_i8() {
+                self.quant_rows(&mut s, &scr.n1, 0, n, d);
+            }
+            s.push(self.lin_full(&scr.n1, &w.wq, &scr.q, n, d, d));
+            s.push(self.lin_full(&scr.n1, &w.wk, &scr.k, n, d, d));
+            s.push(self.lin_full(&scr.n1, &w.wv, &scr.v, n, d, d));
             s.push(self.qknorm_rows(&scr.q, &w.nq, &scr.qn, 0, n));
             s.push(self.qknorm_rows(&scr.k, &w.nk, &scr.kn, 0, n));
             self.push_attn_core(&mut s, n);
-            s.push(self.mm(&scr.n1, &w.w1, &scr.h1, n, d, mlp));
-            s.push(self.mm(&scr.n1, &w.w3, &scr.h2, n, d, mlp));
+            s.push(self.lin_full(&scr.n1, &w.w1, &scr.h1, n, d, mlp));
+            s.push(self.lin_full(&scr.n1, &w.w3, &scr.h2, n, d, mlp));
             s.push(self.gpu.step(K_SILU_MUL, &[&scr.h1, &scr.h2, &scr.hs], &[n * mlp], n * mlp));
-            // linear2 over cat(attn, mlp): two column-split matmuls, summed
-            s.push(self.mm(&scr.ctx, &w.wo_a, &scr.proj, n, d, d));
-            s.push(self.mm(&scr.hs, &w.wo_b, &scr.mlp, n, mlp, d));
+            // linear2 over cat(attn, mlp): two column-split matmuls, summed.
+            // ctx is quantized only now — after w1/w3 consumed the n1 packing.
+            if w.wo_a.is_i8() {
+                self.quant_rows(&mut s, &scr.ctx, 0, n, d);
+            }
+            s.push(self.lin_full(&scr.ctx, &w.wo_a, &scr.proj, n, d, d));
+            if w.wo_b.is_i8() {
+                self.quant_rows(&mut s, &scr.hs, 0, n, mlp);
+            }
+            s.push(self.lin_full(&scr.hs, &w.wo_b, &scr.mlp, n, mlp, d));
             // y = x + gate ⊙ proj ; then y += gate ⊙ mlp (two gated adds)
             s.push(self.gate_rows(xa, 4, &scr.proj, xb, 0, n));
             std::mem::swap(&mut xa, &mut xb);
@@ -551,16 +797,22 @@ impl Flux2Model {
         let p0 = nt;
         let p1 = nt + n_pred as u32;
         s.push(self.ln_rows(xa, 5, &scr.n1, p0, p1));
-        {
-            let xo = (p0 as u64 * d as u64, n_pred as u64 * d as u64);
-            let oo = (0u64, n_pred as u64 * cin as u64);
-            let m = n_pred as u32;
-            let st = if self.fast {
-                self.gpu.step_sliced(K_MATMUL_REG2, &[&scr.n1, &self.final_w, &scr.out], &[xo, (0, 0), oo], &[m, d, cin], m.div_ceil(128) * cin.div_ceil(128) * 256)
-            } else {
-                self.gpu.step_sliced(K_MATMUL, &[&scr.n1, &self.final_w, &scr.out], &[xo, (0, 0), oo], &[m, d, cin], m * cin)
-            };
-            s.push(st);
+        if matches!(self.final_w, Lin::I8(..)) {
+            self.quant_rows(&mut s, &scr.n1, p0, p1, d);
+        }
+        match &self.final_w {
+            Lin::F32(wb) => {
+                let xo = (p0 as u64 * d as u64, n_pred as u64 * d as u64);
+                let oo = (0u64, n_pred as u64 * cin as u64);
+                let m = n_pred as u32;
+                let st = if self.fast {
+                    self.gpu.step_sliced(K_MATMUL_REG2, &[&scr.n1, wb, &scr.out], &[xo, (0, 0), oo], &[m, d, cin], m.div_ceil(128) * cin.div_ceil(128) * 256)
+                } else {
+                    self.gpu.step_sliced(K_MATMUL, &[&scr.n1, wb, &scr.out], &[xo, (0, 0), oo], &[m, d, cin], m * cin)
+                };
+                s.push(st);
+            }
+            Lin::I8(wq, sw) => s.push(self.mm8(wq, sw, &scr.out, p0, 0, n_pred as u32, d, cin)),
         }
 
         // debug aid: SMOKE_STEPS=k submits only the first k steps

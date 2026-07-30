@@ -22,6 +22,9 @@ export BRAIN_FLUX2_TOKENIZER=…/FLUX.2-klein-4B/tokenizer/tokenizer.json
 brain flux2 generate --prompt "a red fox on a mossy rock" --out fox.ppm \
     --width 512 --height 512 --seed 7            # 4 steps, no CFG (klein)
 brain flux2 generate --prompt "make it snow" --ref fox.ppm --out snow.ppm  # editing
+
+# int8 (DP4A) DiT — ~4x smaller weights, GPU only; see the int8 section
+brain flux2 generate --prompt "…" --out x.ppm --precision int8
 ```
 
 ## Architecture (as brain sees it)
@@ -61,6 +64,34 @@ the text encoder **with** key masking — brain reproduces this via
   (multi-layer masked-pad encoder), `checkpoint` (safetensors + GGUF).
 - Kernels: composed entirely from pre-existing WGSL except one addition,
   `gqa_scores_kmask` (additive key mask for padded encoder batches).
+
+## Int8 (DP4A) inference
+
+`--precision int8` (CLI), the `precision` capability param, or
+`Pipeline::build_with(…, Precision::Int8)` builds the DiT with every block
+linear quantized to int8: per-channel symmetric weights
+(`model::int8::quantize_weight` — the ONE engine-wide implementation, shared
+with zimage and qwen), dynamic per-token activation quant on-device
+(`max_abs_row` → `quant_pack`), and the DP4A GEMM (`matmul_i8_dyn`).
+Norms/RoPE/attention/SwiGLU stay f32. One activation quant feeds every linear
+reading it (row-range slicing included — sliced `step_sliced` views work for
+the packed buffers because every row offset is 0 or `txt_len` rows, 256-byte
+aligned for all variants).
+
+Three-and-a-half things stay fp32, each justified by a measured bisection on
+the parity fixture (`docs/models/flux2/status.md` has the table): `txt_in`
+(its input is raw Qwen3 hidden states whose channel outliers crush a per-token
+int8 scale — quantizing it alone costs cosine 0.995 → 0.984), `img_in` +
+`final_layer.linear` (boundary insurance, 3 MB), and the double-block mlp-down
+(`*_mlp.2`, SwiGLU-activation outliers early in the stack: 0.9965 → 0.9989 for
+~850 MB). Everything else — double-block qkv/proj/mlp-up, the whole
+single-block `linear1`/`linear2` — is int8. Weights drop ~15.5 GiB → ~4.8 GiB
+(int8 DiT ~5.1 GiB resident on the P40 vs 14.7 GiB fp32).
+
+The text encoder has its own tier: `BRAIN_FLUX2_TE_DEVICE=gpu<i>` places the
+truncated fp32 shard (layers 0..=27, ~16 GiB resident on a non-ReBAR P40);
+`gpu<i>:i8` uses `Qwen::new_shard_i8` instead so **int8 DiT + int8 TE fit one
+24 GB card**. Parity + timing tables: `status.md` §P8.
 
 ## Parity (the gate)
 

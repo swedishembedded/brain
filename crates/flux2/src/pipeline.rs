@@ -119,6 +119,14 @@ impl Pipeline {
     /// model is built — a plain generation run then produces
     /// adapter-conditioned images with no model change.
     pub fn build_adapted(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&str>) -> Result<Pipeline, String> {
+        Pipeline::build_with(cfg, paths, n_img_max, adapter, crate::Precision::F32)
+    }
+
+    /// [`Pipeline::build_adapted`] with a DiT numeric tier: `Precision::Int8`
+    /// builds the DP4A DiT (~3.9 GiB of weights instead of ~15.5 GiB — DiT +
+    /// int8 TE fit ONE 24 GB card). A LoRA adapter (if any) is folded into the
+    /// f32 tensors BEFORE quantization, so adapters work at either tier.
+    pub fn build_with(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&str>, precision: crate::Precision) -> Result<Pipeline, String> {
         let mut dit_ts = read_dit_tensors(&paths.dit, cfg)?;
         if let Some(ap) = adapter {
             // The adapter's tensor shapes depend only on the architecture, not
@@ -128,7 +136,7 @@ impl Pipeline {
             ad.fold_into_tensors(&mut dit_ts)?;
         }
         let gpu = gpu_core::Gpu::new(crate::model::KERNELS);
-        let model = Flux2Model::new(cfg, &dit_ts, gpu, cfg.txt_len as u32 + n_img_max);
+        let model = Flux2Model::new_with(cfg, &dit_ts, gpu, cfg.txt_len as u32 + n_img_max, precision);
         drop(dit_ts);
 
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&paths.tokenizer)?;
@@ -142,24 +150,29 @@ impl Pipeline {
         // TE placement: default = ambient device; `BRAIN_FLUX2_TE_DEVICE=gpu<i>`
         // builds a truncated fp32 shard on that card (layers 0..=deepest tap —
         // res[27] needs no more; drops 9 layers + the head, ~12 GiB resident,
-        // so the DiT can own the other card whole). The masked-pad kmask path
-        // is shared by the shard graph, so parity is unchanged.
+        // so the DiT can own the other card whole). A `:i8` suffix
+        // (`gpu<i>:i8`) uses the int8 (DP4A) shard instead (~4× smaller —
+        // truncated TE ~4.4 GiB resident, so int8 DiT + int8 TE share ONE
+        // card). The masked-pad kmask path is shared by both shard graphs, so
+        // parity is unchanged (int8 is the lossy tier, gated in its own test).
         let deepest = *TAP_LAYERS.iter().max().unwrap();
-        // `BRAIN_FLUX2_TE_DEVICE=gpu<i>` is user input, parsed to a canonical
-        // card index at this edge; the shard's gpu_index is what places the
-        // build (device registry) — later device creation (VAE) stays on the
-        // ambient card beside the DiT.
+        // `BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8]` is user input, parsed to a
+        // canonical card index at this edge; the shard's gpu_index is what
+        // places the build (device registry) — later device creation (VAE)
+        // stays on the ambient card beside the DiT.
         let te = match std::env::var("BRAIN_FLUX2_TE_DEVICE").ok().as_deref() {
             Some(s) if s.starts_with("gpu") => {
-                let idx: usize = s[3..].parse().map_err(|_| format!("bad BRAIN_FLUX2_TE_DEVICE {s}"))?;
-                qwen::Qwen::new_shard(
-                    te_cfg,
-                    1,
-                    cfg.txt_len as u32,
-                    &init,
-                    false,
-                    qwen::Shard { start: 0, end: deepest, embed: true, head: false, gpu_index: idx },
-                )
+                let (idx_s, te_i8) = match s[3..].strip_suffix(":i8") {
+                    Some(p) => (p, true),
+                    None => (&s[3..], false),
+                };
+                let idx: usize = idx_s.parse().map_err(|_| format!("bad BRAIN_FLUX2_TE_DEVICE {s} (gpu<i>[:i8])"))?;
+                let shard = qwen::Shard { start: 0, end: deepest, embed: true, head: false, gpu_index: idx };
+                if te_i8 {
+                    qwen::Qwen::new_shard_i8(te_cfg, 1, cfg.txt_len as u32, &init, shard)
+                } else {
+                    qwen::Qwen::new_shard(te_cfg, 1, cfg.txt_len as u32, &init, false, shard)
+                }
             }
             _ => qwen::Qwen::new(te_cfg, 1, cfg.txt_len as u32, &init),
         };

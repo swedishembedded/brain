@@ -22,36 +22,11 @@ use std::collections::HashMap;
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
-/// Per-CHANNEL symmetric int8 quantization of an `[n, k]` weight (one scale per
-/// output row `n`), packed into `[n, k/4]` `u32` (4 int8 per word, little-endian
-/// along K). Returns `(packed, scales[n])` with `scales[r] = max|w[r,:]|/127`.
-/// Per-channel (not per-tensor) keeps a deep stack accurate — one outlier row no
-/// longer crushes the whole matrix's resolution. `k` must be a multiple of 4.
-/// (Mirrors `zimage::int8::quantize_weight`; the packed layout is what
-/// `matmul_i8.wgsl` consumes.)
-pub fn quantize_weight(w: &[f32], n: usize, k: usize) -> (Vec<u32>, Vec<f32>) {
-    assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
-    assert_eq!(w.len(), n * k, "weight len {} != n*k {}", w.len(), n * k);
-    let kg = k / 4;
-    let mut sw = vec![0f32; n];
-    let mut packed = vec![0u32; n * kg];
-    for r in 0..n {
-        let row = &w[r * k..r * k + k];
-        let amax = row.iter().fold(0f32, |m, &v| m.max(v.abs()));
-        let s = amax.max(1e-8) / 127.0;
-        sw[r] = s;
-        let inv = 1.0 / s;
-        for g in 0..kg {
-            let mut word = 0u32;
-            for bb in 0..4 {
-                let q = (row[g * 4 + bb] * inv).round().clamp(-127.0, 127.0) as i32;
-                word |= ((q as u8) as u32) << (8 * bb);
-            }
-            packed[r * kg + g] = word;
-        }
-    }
-    (packed, sw)
-}
+/// Per-channel symmetric int8 weight quantization — the engine-wide shared
+/// implementation (`model::int8`, also used by `zimage` and `flux2`),
+/// re-exported so `q8::quantize_weight` callers keep their path. The packed
+/// layout is what `matmul_i8*.wgsl` consume.
+pub use model::int8::quantize_weight;
 
 /// One int8 linear: packed int8 weight (`[n, k/4]` u32) + per-channel scale `[n]`.
 pub struct Lin8 {

@@ -11,8 +11,10 @@ use flux2::{Flux2Config, GenOpts, Paths, Pipeline};
 const HELP: &str = "brain flux2 <cmd>
   generate --prompt <text> --out <out.ppm> [--width W] [--height H]
            [--steps N] [--seed S] [--guidance G] [--variant klein-4b|klein-9b|base-4b|base-9b]
+           [--precision fp32|int8]  # int8 = DP4A DiT (~4x smaller, GPU only)
            [--ref <in.ppm>]...      # reference images => editing mode
-Weights (env): BRAIN_FLUX2_DIT, BRAIN_FLUX2_VAE, BRAIN_FLUX2_TE, BRAIN_FLUX2_TOKENIZER";
+Weights (env): BRAIN_FLUX2_DIT, BRAIN_FLUX2_VAE, BRAIN_FLUX2_TE, BRAIN_FLUX2_TOKENIZER
+Text-encoder placement (env): BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8] (truncated shard on that card)";
 
 pub fn run_flux2(args: &[String]) {
     if args.is_empty() || args[0] == "--help" {
@@ -38,6 +40,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     let mut out = None;
     let mut o = GenOpts { width: 512, height: 512, ..GenOpts::default() };
     let mut variant_name = "klein-4b".to_string();
+    let mut precision = flux2::Precision::F32;
     let mut refs: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -53,6 +56,7 @@ fn generate(args: &[String]) -> Result<(), String> {
             "--seed" => o.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
             "--guidance" => o.guidance = need(i)?.parse().map_err(|e| format!("--guidance: {e}"))?,
             "--variant" => variant_name = need(i)?.clone(),
+            "--precision" => precision = flux2::Precision::from_name(need(i)?)?,
             "--ref" => refs.push(need(i)?.clone()),
             other => return Err(format!("unknown flag {other}\n{HELP}")),
         }
@@ -75,7 +79,7 @@ fn generate(args: &[String]) -> Result<(), String> {
     let n_gen = (o.height / 16) * (o.width / 16);
     let n_ref: u32 = ref_imgs.iter().map(|(_, h, w)| (h / 16) * (w / 16)).sum();
     eprintln!("flux2: building pipeline ({} + {} tokens) ...", n_gen, n_ref);
-    let pipe = Pipeline::build(&variant, &paths, n_gen + n_ref)?;
+    let pipe = Pipeline::build_with(&variant, &paths, n_gen + n_ref, None, precision)?;
     let t0 = std::time::Instant::now();
     // The CLI has no cancel front-end — an unarmed Default token never fires.
     let (rgb, w, h) = pipe.generate(&prompt, &ref_imgs, &o, &Default::default(), |step, total, msg| {

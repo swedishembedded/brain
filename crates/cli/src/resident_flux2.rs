@@ -51,33 +51,40 @@ impl ResidentModel for Flux2Resident {
         if action == "lora_train" {
             return InstanceKey::new(flux2::caps::MODEL, format!("train:{variant}"));
         }
+        let precision = inv.get_str("precision").unwrap_or_else(|| "fp32".into());
         let w = inv.get_i64("width").unwrap_or(512);
         let h = inv.get_i64("height").unwrap_or(512);
         let nref = ref_tokens_from_meta(inv);
-        // "{variant}:{w}x{h}:{nref}" fixes the built graphs; a folded LoRA
-        // changes the weights, so it is appended when present.
+        // "{variant}:{precision}:{w}x{h}:{nref}" fixes the built graphs; a
+        // folded LoRA changes the weights, so it is appended when present.
         let adapter = inv.get_str("adapter").filter(|s| !s.is_empty());
         let config = match adapter {
-            Some(a) => format!("{variant}:{w}x{h}:{nref}:{a}"),
-            None => format!("{variant}:{w}x{h}:{nref}"),
+            Some(a) => format!("{variant}:{precision}:{w}x{h}:{nref}:{a}"),
+            None => format!("{variant}:{precision}:{w}x{h}:{nref}"),
         };
         InstanceKey::new(flux2::caps::MODEL, config)
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
-        // Measured-single-run placeholders (fp32, 512×512 t2i on the dev box) —
-        // TODO: re-measure via `brain perf run sweep --target flux2 …` once the
-        // perf target lands and replace with per-variant curves.
+        // Measured-single-run placeholders (512×512 t2i on the dev box, two
+        // P40s) — TODO: re-measure via `brain perf run sweep --target flux2 …`
+        // once the perf target lands and replace with per-variant curves.
         if key.config.starts_with("train:") {
             // The LoRA trainer is host f32 (model::hostmath) — RAM, not VRAM.
             return MemCost::new(0, 20u64 << 30);
         }
-        let vram = if key.config.starts_with("klein-9b") || key.config.starts_with("base-9b") {
+        let nine_b = key.config.starts_with("klein-9b") || key.config.starts_with("base-9b");
+        let int8 = key.config.contains(":int8:");
+        let vram = match (nine_b, int8) {
             // 9B fp32 DiT + Qwen3-8B encoder — roughly 2× the 4B build.
-            36u64 << 30
-        } else {
+            (true, false) => 36u64 << 30,
+            // int8 9B DiT ≈ 8.8 GiB + encoder — unmeasured, scaled from 4B.
+            (true, true) => 16u64 << 30,
             // 4B fp32: ~15.5 GB DiT + encoder/VAE working set ≈ 18 GiB.
-            18u64 << 30
+            (false, false) => 18u64 << 30,
+            // 4B int8 DiT ≈ 3.9 GiB weights (~6 GiB resident with scratch/VAE;
+            // the TE is placed separately via BRAIN_FLUX2_TE_DEVICE).
+            (false, true) => 6u64 << 30,
         };
         MemCost::new(vram, 2u64 << 30)
     }
@@ -89,9 +96,11 @@ impl ResidentModel for Flux2Resident {
             // run — no resident pipeline to hold.
             return Ok(Box::new(Flux2Instance { pipe: None, paths: clone_paths(&self.paths) }));
         }
-        // "{variant}:{w}x{h}:{nref}[:{adapter}]" — adapter may contain ':'.
-        let mut it = key.config.splitn(4, ':');
+        // "{variant}:{precision}:{w}x{h}:{nref}[:{adapter}]" — adapter may
+        // contain ':'.
+        let mut it = key.config.splitn(5, ':');
         let variant = it.next().ok_or("flux2: bad instance key")?;
+        let precision = flux2::Precision::from_name(it.next().ok_or("flux2: bad instance key")?)?;
         let wh = it.next().ok_or("flux2: bad instance key")?;
         let nref: u32 = it.next().and_then(|s| s.parse().ok()).ok_or("flux2: bad instance key")?;
         let adapter = it.next().filter(|s| !s.is_empty());
@@ -103,7 +112,7 @@ impl ResidentModel for Flux2Resident {
         // Place the pipeline on the assigned card (scoped registry selection;
         // the TE card is flux2's own BRAIN_FLUX2_TE_DEVICE and left as configured).
         let pipe = crate::resident_llm::on_device(device, || {
-            flux2::Pipeline::build_adapted(&cfg, &self.paths, n_gen + nref, adapter)
+            flux2::Pipeline::build_with(&cfg, &self.paths, n_gen + nref, adapter, precision)
         })??;
         Ok(Box::new(Flux2Instance { pipe: Some(pipe), paths: clone_paths(&self.paths) }))
     }
