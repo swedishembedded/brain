@@ -14,10 +14,20 @@
 //! Canonical tensor names are the BFL reference names (`double_blocks.N.…`,
 //! `single_blocks.N.…`); the diffusers `transformer/` layout is remapped onto
 //! them at import ([`import::import_diffusers`]).
+//!
+//! Training: [`grad`] (FD-gradchecked block fwd+bwd reference) → [`modelgrad`]
+//! (whole-model host fwd+bwd under the rectified-flow velocity-MSE loss, incl.
+//! the conditioning path) → [`lora`] (frozen-base low-rank adapters over the
+//! fused checkpoint layout) → [`finetune`] (captioned-image folder →
+//! trained adapter, host f32 trainer).
 
 pub mod config;
+pub mod finetune;
+pub mod grad;
 pub mod import;
+pub mod lora;
 pub mod model;
+pub mod modelgrad;
 pub mod pipeline;
 
 pub use config::Flux2Config;

@@ -11,8 +11,10 @@ path = "src/lib.rs"
 
 [dependencies]
 serde_json.workspace = true
-# Synthetic object-detection scene rendering (gen_detect). We only draw shapes
-# into in-memory RGB buffers, so `image` runs with default features off (no
-# codec/format dependencies); `imageproc` supplies the shape-drawing primitives.
-image = { version = "0.25", default-features = false }
+# Synthetic object-detection scene rendering (gen_detect) draws shapes into
+# in-memory RGB buffers; the captioned-image dataset loader (imageset, hoisted
+# from zimage) additionally decodes JPEG/PNG/PPM training images — so exactly
+# those three codecs are enabled and nothing else. `imageproc` supplies the
+# shape-drawing primitives.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "pnm"] }
 imageproc = { version = "0.25", default-features = false }

@@ -492,6 +492,65 @@ pub fn check_seq2seq(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
+/// Gradient-check the FLUX.2 Klein **host** training reference at tiny dims:
+/// the f64 instantiation of `flux2::modelgrad` (double + single block stacks,
+/// joint attention, QK-RMSNorm, interleaved RoPE, SwiGLU, and the whole
+/// conditioning path — timestep MLP → three global modulation linears + final
+/// adaLN, with site grads accumulated across the block stack). Unlike the
+/// device models above, flux2's trainer IS the host path (the f32
+/// instantiation of the same code; a device trainer is future work), so the
+/// FD check runs directly against the host forward under the rectified-flow
+/// velocity-MSE loss — same directional-derivative recipe as
+/// [`directional_check`], in f64.
+pub fn check_flux2(seed: u64) -> Report {
+    use flux2::modelgrad::{backward, forward, grad_views, init_model, loss, make_flow_batch, params_mut, Cfg};
+    let cfg = Cfg::tiny();
+    let w0 = init_model::<f64>(&cfg, seed);
+    let mut rng = Rng::new(seed ^ 0xF1u64);
+    let mut rf = || rng.next_f64() - 0.5;
+    let x0: Vec<f64> = (0..cfg.n_img() * cfg.in_channels).map(|_| rf()).collect();
+    let ctx: Vec<f64> = (0..cfg.txt_len * cfg.context_in_dim).map(|_| rf()).collect();
+    let noise: Vec<f64> = (0..x0.len()).map(|_| rf()).collect();
+    let b = make_flow_batch(&cfg, &x0, &ctx, 0.45, &noise);
+
+    let run_loss = |w: &flux2::modelgrad::ModelWeights<f64>| -> f64 {
+        let (pred, _) = forward(&cfg, w, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+        loss(&pred, &b.target).0
+    };
+    let (pred, cache) = forward(&cfg, &w0, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
+    let (_l, dpred) = loss(&pred, &b.target);
+    let g = backward(&cfg, &w0, &cache, &dpred);
+    let analytic: Vec<(String, Vec<f64>)> = grad_views(&g).into_iter().map(|(n, v)| (n, v.clone())).collect();
+
+    let eps = 1e-5;
+    let mut checks = Vec::new();
+    for (pi, (name, ga)) in analytic.iter().enumerate() {
+        let v: Vec<f64> = (0..ga.len()).map(|_| if rng.next_f64() < 0.5 { -1.0 } else { 1.0 }).collect();
+        let an: f64 = ga.iter().zip(&v).map(|(&gi, &vi)| gi * vi).sum();
+        let mut wp = w0.clone();
+        for (p, &vi) in params_mut(&mut wp)[pi].1.iter_mut().zip(&v) {
+            *p += eps * vi;
+        }
+        let lp = run_loss(&wp);
+        let mut wm = w0.clone();
+        for (p, &vi) in params_mut(&mut wm)[pi].1.iter_mut().zip(&v) {
+            *p -= eps * vi;
+        }
+        let lm = run_loss(&wm);
+        let numeric = (lp - lm) / (2.0 * eps);
+        let abs_err = (an - numeric).abs();
+        let denom = an.abs().max(numeric.abs()).max(1e-3);
+        checks.push(Check {
+            param: name.clone(),
+            analytic: an as f32,
+            numeric: numeric as f32,
+            abs_err: abs_err as f32,
+            rel_err: (abs_err / denom) as f32,
+        });
+    }
+    Report { checks }
+}
+
 /// Build a tiny bottleneck autoencoder, set a fixed float batch, and
 /// gradient-check it. This is the correctness gate for the `Regression` head
 /// (ADR §6, PR-10): it validates the new `mse_value`/`mse_grad` loss kernels and
@@ -709,6 +768,21 @@ mod tests {
         assert!(
             fails.is_empty(),
             "gradient check failed for {:?}",
+            fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn flux2_analytic_grads_match_finite_differences() {
+        // Pure host f64 — no GPU, so no MOE_SKIP_GPU_TESTS gate.
+        let report = check_flux2(7);
+        report.print();
+        // f64 central differences on the host reference are tight.
+        let (atol, rtol) = (1e-6, 1e-4);
+        let fails = report.failures(atol, rtol);
+        assert!(
+            fails.is_empty(),
+            "FLUX.2 gradient check failed for {:?}",
             fails.iter().map(|c| (&c.param, c.abs_err, c.rel_err)).collect::<Vec<_>>()
         );
     }

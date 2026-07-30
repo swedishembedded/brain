@@ -18,6 +18,7 @@ pub mod chat;
 pub mod toolcall;
 pub mod bpe;
 pub mod episode;
+pub mod imageset;
 pub mod loader;
 pub mod mlm;
 pub mod qwen_tokenizer;

@@ -19,6 +19,7 @@ brain-moe.workspace = true
 brain-pid.workspace = true
 brain-seq2seq.workspace = true
 brain-autoencoder.workspace = true
+brain-flux2.workspace = true
 brain-data.workspace = true
 
 [dev-dependencies]
