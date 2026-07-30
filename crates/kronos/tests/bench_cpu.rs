@@ -46,18 +46,28 @@ fn bench_forecast_cached() {
     let warm = model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, h, &opts);
     assert_eq!(warm.len(), h * feat);
 
-    let iters = 8;
-    let t0 = Instant::now();
-    let mut last = Vec::new();
-    for _ in 0..iters {
-        last = model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, h, &opts);
-    }
-    let ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+    let time = |h: usize, iters: usize| -> f64 {
+        let fut = vec![0u32; h * 5];
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            let _ = model.forecast_cached(&bars, &ctx_stamp, &fut, h, &opts);
+        }
+        t0.elapsed().as_secs_f64() * 1e3 / iters as f64
+    };
+
+    let ms_h5 = time(h, 8);
+    let ms_h1 = time(1, 8);
+    // t_Hn = prefill(T) + n·decode_step  ⇒  solve the two points.
+    let decode_step = (ms_h5 - ms_h1) / (h as f64 - 1.0);
+    let prefill = ms_h1 - decode_step;
     eprintln!(
-        "BENCH kronos forecast_cached ctx={t} H={h} feat={feat}: {ms:.1} ms/forecast, {:.3} ms/token ({} tokens)",
-        ms / (t + h) as f64,
-        t + h
+        "BENCH kronos forecast_cached ctx={t} H={h} feat={feat}: {ms_h5:.1} ms/forecast | \
+         prefill(T={t}) {prefill:.1} ms ({:.3} ms/ctx-token) | decode {decode_step:.2} ms/step | \
+         prefill is {:.0}% of forecast",
+        prefill / t as f64,
+        100.0 * prefill / ms_h5
     );
     // Determinism check for the parity harness: argmax must be stable.
+    let last = model.forecast_cached(&bars, &ctx_stamp, &fut_stamp, h, &opts);
     assert_eq!(last, warm, "argmax forecast must be deterministic across runs");
 }
