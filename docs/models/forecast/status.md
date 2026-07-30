@@ -138,6 +138,20 @@ full-window graphs over the growing context — **cosine 1.000000** on ctx / s1 
 s2 logits at every position. The NPU forecast is now the KV-cache path (O(cap)
 per step, one prefill per samples=N request), not the O(T²) full-window re-run.
 
+Measured live (`brain serve --dbus` in a private session on the Intel NPU,
+context 96 / horizon 32, kronos-small, best of 4 steady-state requests):
+
+| path | steady-state | device |
+|---|---|---|
+| **NPU (cached)** | **~640 ms** | NPU |
+| CPU (host cached) | ~1373 ms | gpu_core |
+
+The NPU is now **~2.1× faster than CPU** — before this pass the NPU (full-window,
+O(T²)/step) was ~4.4× *slower*. First request per `(t, cap)` pays a one-time
+OpenVINO compile of the four graphs (~10 s); the instance stays resident, so
+steady-state serving amortises it. `MemCost::with_npu` can now keep kronos on the
+NPU by default without penalty.
+
 ## Training optimization pass — batched decoder fine-tune (2026-07-30)
 
 `KronosTrain` was a batch-of-one trainer (one window per forward/backward). It is
