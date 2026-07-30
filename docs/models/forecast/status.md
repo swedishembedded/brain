@@ -144,3 +144,19 @@ overhead and fills the AVX matmul rows, with the math held identical by the
 parity gate. Remaining (see repo tasks): batched cross-sectional forward already
 landed for inference; the Vulkan-OOM streaming for very long training contexts is
 the last training-side item.
+
+## Perf harness + regression gate (2026-07-30)
+
+All three forecasters are first-class `brain perf` targets, measured through the
+residency executor (scheduler + budgets + device lanes — the real serving path),
+so the optimizations above get a defended baseline:
+
+- `brain perf run <latency|throughput|sweep> --target kronos:<tok-dir>:<dec-dir>`
+- `… --target chronos2:<weights>` · `… --target fincast:<weights>`
+
+`artifact_unit` is `forecast`; `input_artifacts` = context length in bars (so a
+prefill/decode sweep is `--ladder`/`--input` over context), horizon/samples from
+`BRAIN_FORECAST_HORIZON`/`_SAMPLES`. Reports feed the existing hard-floor gate:
+`brain perf gate <cand.json> --baseline <b.json> --floor 0.85` (exit 1 on
+regression). Live-validated: kronos (`--input 64`) and chronos2 (`--warmup 1
+--input 96` → 1.59 forecasts/s, e2e p50 1258 ms) both emit gate-passing JSON.
