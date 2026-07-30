@@ -80,6 +80,17 @@ from them, keeping the gradient-check discipline.
     backward (`grad.rs`/`devgrad.rs`/`modelgrad.rs`) alongside. Assembled from
     the shared `dit` / `diffusion` / `vae` / `qwen` crates.
 
+12b. **FLUX.2 Klein** (`crates/flux2`) — BFL's 4B/9B MMDiT text-to-image +
+    image-editing family: double-stream img/txt blocks (joint attention) +
+    single-stream parallel blocks, **3 global modulation linears** folded into
+    LayerNorm affine params, 4-axis interleaved RoPE (theta 2000), Qwen3
+    multi-layer masked-pad text conditioning ([9,18,27] concat), FLUX.2 VAE
+    (128-ch latent = 32ch × 2×2 unshuffle + eval-BatchNorm). Klein = 4-step
+    distilled, no CFG; `base` variants = 50 steps + CFG, same tensors.
+    Parity-gated per stage (forward cosine 1.000000 vs diffusers).
+    `brain flux2 generate` (t2i + `--ref` editing). 9B weights are
+    NC-licensed — see `docs/models/flux2/readme.md`.
+
 ### Audio / speech
 
 13. **Qwen3-TTS** (`crates/tts` + `crates/codec` + `crates/speaker` +
@@ -206,11 +217,13 @@ Multi-GPU scaling lives in `crates/model`:
 |---|---|
 | Architecture & crate graph | `docs/architecture.md` *(crate graph is stale — see Doc gaps)* |
 | Testing strategy + gradient-check gate | `docs/testing.md` |
+| **Porting a new model** (goldens → import → kernel contracts → parity ladder → training) | **`docs/porting-playbook.md`** — read BEFORE starting any port |
 | Multi-GPU scaling (data / pipeline / tensor parallel) | `docs/scaling/*.md`; `crates/model/src/{distributed,parallel,collective,shard,plan,grid}.rs` |
 | Performance: CPU/GPU inference optimizations (what sped things up + why) | `docs/performance/overview.md`, `docs/performance/p40.md` |
 | **Performance benchmarking** (`brain perf`): design / ledger | `docs/performance/benchmarking.md`, `docs/performance/status.md`; `crates/perf`, `crates/cli/src/perf_cli.rs` |
 | Perf regression gate (hard floors vs a committed baseline) | `brain perf gate`; `crates/perf/src/gate.rs` |
 | Device capabilities (class/limits/numeric tiers, queried never assumed) | `backend_api::DeviceCaps`; filled per backend, `Gpu::caps()` |
+| Canonical GPU registry / placement (`brain devices`, `Gpu::new_on`, `with_gpu`) | `docs/engine/devices.md`; `crates/gpu-core/src/devices.rs` |
 | Kernel selection policy + autotuner (which variant runs, measured per device) | `backend_api::select` (`candidates`/`DefaultSelector`/`AutoTuner`), `gpu_core::tune`; `BRAIN_NO_AUTOTUNE=1` forces static |
 | Kernel specialisation (one WGSL source, tunable constants) | `kernels::template` |
 | Prompt-prefix cache (paged block reuse across requests) | `model::paged::PrefixCache`; adoption in `qwen::serve::Engine::prefill` |
@@ -245,6 +258,7 @@ Multi-GPU scaling lives in `crates/model`:
 | Forecasting models + backtester | `docs/models/{chronos2,kronos,fincast}/status.md`; `crates/{forecast,fcbench,chronos2,kronos,fincast}`, `crates/cli/src/forecast_cli.rs` |
 | World models (playable) | `docs/models/world-models/{status,playbooks,fixtures}.md` + `specs/`; `crates/wm-*`, `crates/cli/src/wm_cli.rs` |
 | Z-Image / diffusion stack | `crates/{zimage,dit,diffusion,vae}` *(no docs/ entry yet)* |
+| FLUX.2 Klein: guide / ledger | `docs/models/flux2/{readme,status}.md`; `crates/flux2`, `crates/cli/src/flux2_cli.rs`; goldens via `tools/flux2_dump_reference.py` |
 | Finetuning guides | `docs/guides/finetune/{plan,datasets}.md` |
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
 
@@ -308,9 +322,17 @@ Parsing/resolution live in `crates/gpu-core/src/devices.rs`.
 | `gpu1,cpu0-3` | one card plus four cores |
 
 An indexed CPU selection **pins process affinity** (`sched_setaffinity`) and
-sizes the rayon pool to match, so `cpu21` is genuinely one core. A single GPU
-selection pins `BRAIN_GPU_INDEX` to that card. Out-of-range indices are errors,
-never silent clamps.
+sizes the rayon pool to match, so `cpu21` is genuinely one core. GPU indices are
+**canonical**: the process-wide device registry (`gpu_core::devices`) enumerates
+physical cards once with stable identity (PCI bus id → Vulkan deviceUUID →
+vendor:device+ordinal) and orders them by PCI bus id, so `gpu0`/`gpu1` name the
+same physical cards everywhere — `--device`, `Shard.gpu_index`,
+`residency::Device::Gpu(i)` — and nvidia-smi order maps to them via PCI, not by
+assumption. `brain devices` prints the table. Placement is explicit
+(`Gpu::new_on`, scoped `devices::with_gpu`) — never env mutation;
+`BRAIN_GPU_INDEX` remains user *input* only, parsed once at first registry use.
+Out-of-range indices are errors, never silent clamps. See
+`docs/engine/devices.md`.
 
 This bounds where work **executes** — host RAM and disk stay available as
 cache/spill tiers, so `--device gpu` still uses RAM for weight caching.
@@ -530,6 +552,12 @@ per-scenario table and the findings so far.
   (`crates/npu`), not a per-op backend. The default build stays free of OpenVINO
   at the source level; the runtime is loaded at run time (`runtime-linking`), so
   `make build`/`make test` stay green with no OpenVINO installed.
+- **New model ports follow `docs/porting-playbook.md`** — reference goldens
+  dumped FIRST (transformer I/O captured via forward hooks, replayed in the
+  parity test), two-way import coverage, kernel Params read before dispatch,
+  tiny-config smoke with step bisection, then the parity ladder
+  (stage → forward → composed loop → real run). It encodes the exact failure
+  modes already paid for; do not rediscover them.
 - **Backprop is gated by `gradcheck`** (finite differences) — run it after any
   fwd/bwd math change. Entry points today: `check_gpt`, `check_qwen`,
   `check_qwen_lora`, `check_moe`, `check_glm`, `check_glm_mtp`, `check_pid`,
