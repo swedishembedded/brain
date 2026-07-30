@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress};
-use npu::openvino::{Chronos2Session, FincastSession, KronosS1Session, KronosS2Session, NpuConfig, NpuDevice};
+use npu::openvino::{Chronos2Session, Feed, FincastSession, NpuConfig, NpuDevice, NpuGraph};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
@@ -432,7 +432,7 @@ impl ResidentModel for KronosResident {
                 model,
                 dec_dir: decoder,
                 cfg: npu_cfg(),
-                cache: RefCell::new(HashMap::new()),
+                cached: RefCell::new(HashMap::new()),
                 device: RefCell::new("npu".into()),
             }));
         }
@@ -546,23 +546,23 @@ struct KronosNpuInstance {
     model: kronos::generate::KronosModel,
     dec_dir: String,
     cfg: NpuConfig,
-    cache: RefCell<HashMap<usize, (KronosS1Session, KronosS2Session)>>,
+    /// One compiled KV-cache backend per (context length `t`, cache capacity `cap`).
+    cached: RefCell<HashMap<(usize, usize), KronosCachedNpu>>,
     device: RefCell<String>,
 }
 
 impl KronosNpuInstance {
-    /// Compile (once, cached) the s1 + dep-s2 graphs for context length `t`.
-    fn ensure(&self, t: usize) -> Result<(), String> {
-        if self.cache.borrow().contains_key(&t) {
+    /// Compile (once, cached) the four KV-cache graphs for `(t, cap)`.
+    fn ensure(&self, t: usize, cap: usize) -> Result<(), String> {
+        if self.cached.borrow().contains_key(&(t, cap)) {
             return Ok(());
         }
         let q = npu::qwen_topology::Quant::F32;
-        let s1b = npu::kronos_export::export_onnx(&self.dec_dir, t, q)?;
-        let s2b = npu::kronos_export::export_dep_onnx(&self.dec_dir, t, q)?;
-        let s1 = KronosS1Session::load_bytes(&s1b, &self.cfg).map_err(|e| e.to_string())?;
-        let s2 = KronosS2Session::load_bytes(&s2b, &self.cfg).map_err(|e| e.to_string())?;
-        *self.device.borrow_mut() = s1.device().to_string();
-        self.cache.borrow_mut().insert(t, (s1, s2));
+        let (s1p, s1d, depp, depd) = npu::kronos_export::export_cached_onnx(&self.dec_dir, t, cap, q)?;
+        let mk = |b: &[u8]| NpuGraph::compile_bytes(b, &self.cfg).map_err(|e| e.to_string());
+        let core = KronosCachedNpu::new(self.model.decoder_config(), cap, mk(&s1p)?, mk(&s1d)?, mk(&depp)?, mk(&depd)?);
+        *self.device.borrow_mut() = core.s1_decode.device().to_string();
+        self.cached.borrow_mut().insert((t, cap), core);
         Ok(())
     }
 }
@@ -574,24 +574,210 @@ impl Instance for KronosNpuInstance {
         let horizon = horizon_of(inv, 64);
         let (ctx_stamp, fut_stamp) = kronos_stamps(inv, t, horizon)?;
         let opts = kronos_opts(inv);
-        self.ensure(t)?; // compile errors propagate cleanly (no panic)
-        let (model, cache) = (&self.model, &self.cache);
-        // The graph's window == the context length T; forecast_with_cores slides a
-        // fixed-T window and calls the two NPU sessions per step.
+        let cap = t + horizon;
+        self.ensure(t, cap)?; // compile errors propagate cleanly (no panic)
+        let model = &self.model;
+        let cached = &self.cached;
+        // KV-cached rollout: one prefill fills the cache, then O(cap)/step decode
+        // (the same optimization as the host `forecast_cached`), not the old
+        // O(T²)/step full-window re-run.
         let out = guard_npu(|| {
-            model.forecast_with_cores(
-                &bars,
-                &ctx_stamp,
-                &fut_stamp,
-                horizon,
-                &opts,
-                t,
-                |x| cache.borrow_mut().get_mut(&t).expect("kronos s1 session").0.run(x).expect("kronos s1 NPU infer"),
-                |ctx, sib| cache.borrow_mut().get_mut(&t).expect("kronos s2 session").1.run(ctx, sib).expect("kronos s2 NPU infer"),
-            )
+            let mut map = cached.borrow_mut();
+            let core = map.get_mut(&(t, cap)).expect("kronos cached graphs");
+            model.forecast_cached_with_cores(&bars, &ctx_stamp, &fut_stamp, horizon, &opts, core)
         })?;
         let dev = self.device.borrow().clone();
         Ok(kronos_outcome(out, horizon, feat, &dev))
+    }
+}
+
+/// The NPU KV-cache backend for one `(t, cap)`: the four compiled graphs plus the
+/// host-side K/V cache buffers. Implements [`kronos::generate::CachedCores`] — the
+/// driver stays in kronos, this owns the graph runs + cache. Buffer slots beyond
+/// the written prefix are masked out each step, so `prefill` fully re-initialises
+/// the logical state (positions/valid counts) and the backend is reused across
+/// forecasts of the same shape.
+struct KronosCachedNpu {
+    s1_prefill: NpuGraph,
+    s1_decode: NpuGraph,
+    dep_prefill: NpuGraph,
+    dep_decode: NpuGraph,
+    d: usize,
+    nl: usize,
+    heads: usize,
+    hd: usize,
+    dep_heads: usize,
+    dep_hd: usize,
+    cap: usize,
+    s1v: usize,
+    // per-rollout state (reset by `prefill`)
+    pk: Vec<Vec<f32>>, // [nl][heads*cap*hd] RoPE'd keys
+    pv: Vec<Vec<f32>>,
+    dk: Vec<f32>, // [dep_heads*cap*dep_hd] RoPE'd dep keys
+    dv: Vec<f32>,
+    ctx_last: Vec<f32>, // [d] most recent s1 context row (dep residual + self)
+    s1_pos: usize,      // next s1 absolute position to write
+    dep_valid: usize,   // number of dep positions in the cache (past extent)
+}
+
+/// Look up a named output tensor from an [`NpuGraph::run`] result.
+fn named<'a>(out: &'a [(String, Vec<usize>, Vec<f32>)], name: &str) -> &'a [f32] {
+    &out.iter().find(|(n, _, _)| n == name).unwrap_or_else(|| panic!("missing NPU output {name}")).2
+}
+
+/// Half-width RoPE cos/sin tables for one absolute position (θ=10000, NeoX split).
+fn rope_tables(pos: usize, half: usize, hd: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut cos = vec![0f32; half];
+    let mut sin = vec![0f32; half];
+    for j in 0..half {
+        let ang = pos as f32 * 10000f32.powf(-(2.0 * j as f32) / hd as f32);
+        cos[j] = ang.cos();
+        sin[j] = ang.sin();
+    }
+    (cos, sin)
+}
+
+impl KronosCachedNpu {
+    fn new(cfg: &kronos::config::KronosConfig, cap: usize, s1_prefill: NpuGraph, s1_decode: NpuGraph, dep_prefill: NpuGraph, dep_decode: NpuGraph) -> KronosCachedNpu {
+        let d = cfg.d_model;
+        let (heads, dep_heads) = (cfg.n_heads, cfg.dep_n_heads);
+        let (hd, dep_hd) = (d / heads, d / dep_heads);
+        let nl = cfg.n_layers;
+        KronosCachedNpu {
+            s1_prefill,
+            s1_decode,
+            dep_prefill,
+            dep_decode,
+            d,
+            nl,
+            heads,
+            hd,
+            dep_heads,
+            dep_hd,
+            cap,
+            s1v: cfg.s1_vocab(),
+            pk: vec![vec![0.0; heads * cap * hd]; nl],
+            pv: vec![vec![0.0; heads * cap * hd]; nl],
+            dk: vec![0.0; dep_heads * cap * dep_hd],
+            dv: vec![0.0; dep_heads * cap * dep_hd],
+            ctx_last: vec![0.0; d],
+            s1_pos: 0,
+            dep_valid: 0,
+        }
+    }
+}
+
+impl kronos::generate::CachedCores for KronosCachedNpu {
+    fn prefill(&mut self, x_ctx: &[f32], t: usize) -> Vec<f32> {
+        let (d, nl, heads, hd, cap) = (self.d, self.nl, self.heads, self.hd, self.cap);
+        // s1 prefill: x[1,t,d] → ctx[1,t,d], s1_logits, k_l/v_l[heads,t,hd].
+        let out = self.s1_prefill.run(&[("x", Feed::F32(x_ctx, vec![1, t as i64, d as i64]))]).expect("kronos s1 prefill");
+        let ctx = named(&out, "ctx").to_vec();
+        let s1_logits = named(&out, "s1_logits").to_vec();
+        for l in 0..nl {
+            let kl = named(&out, &format!("k_{l}"));
+            let vl = named(&out, &format!("v_{l}"));
+            for h in 0..heads {
+                for p in 0..t {
+                    for j in 0..hd {
+                        self.pk[l][(h * cap + p) * hd + j] = kl[(h * t + p) * hd + j];
+                        self.pv[l][(h * cap + p) * hd + j] = vl[(h * t + p) * hd + j];
+                    }
+                }
+            }
+        }
+        // dep prefill over ctx[0..t-1] fills dep positions 0..t-2 (the last, t-1,
+        // is self-projected by the first dep_step). t==1 → no dep prefill.
+        let (dep_heads, dep_hd) = (self.dep_heads, self.dep_hd);
+        if t >= 2 {
+            let tp = t - 1;
+            let dout = self.dep_prefill.run(&[("ctx", Feed::F32(&ctx[..tp * d], vec![1, tp as i64, d as i64]))]).expect("kronos dep prefill");
+            let dk = named(&dout, "dep_k").to_vec();
+            let dv = named(&dout, "dep_v").to_vec();
+            for h in 0..dep_heads {
+                for p in 0..tp {
+                    for j in 0..dep_hd {
+                        self.dk[(h * cap + p) * dep_hd + j] = dk[(h * tp + p) * dep_hd + j];
+                        self.dv[(h * cap + p) * dep_hd + j] = dv[(h * tp + p) * dep_hd + j];
+                    }
+                }
+            }
+            self.dep_valid = tp;
+        } else {
+            self.dep_valid = 0;
+        }
+        self.ctx_last = ctx[(t - 1) * d..t * d].to_vec();
+        self.s1_pos = t;
+        let s1v = self.s1v;
+        s1_logits[(t - 1) * s1v..t * s1v].to_vec()
+    }
+
+    fn dep_step(&mut self, sib: &[f32]) -> Vec<f32> {
+        let (d, cap, dep_heads, dep_hd) = (self.d, self.cap, self.dep_heads, self.dep_hd);
+        let half = dep_hd / 2;
+        let pos = self.s1_pos - 1; // the ctx_last (self) absolute position
+        let (cos, sin) = rope_tables(pos, half, dep_hd);
+        let mask: Vec<f32> = (0..cap).map(|j| if j < self.dep_valid { 0.0 } else { -1e9 }).collect();
+        let ctx_last = std::mem::take(&mut self.ctx_last);
+        let out = {
+            let feeds: Vec<(&str, Feed)> = vec![
+                ("sib", Feed::F32(sib, vec![1, 1, d as i64])),
+                ("ctx_last", Feed::F32(&ctx_last, vec![1, 1, d as i64])),
+                ("rope_cos", Feed::F32(&cos, vec![1, 1, 1, half as i64])),
+                ("rope_sin", Feed::F32(&sin, vec![1, 1, 1, half as i64])),
+                ("dep_mask", Feed::F32(&mask, vec![1, 1, 1, cap as i64])),
+                ("past_dep_k", Feed::F32(&self.dk, vec![1, dep_heads as i64, cap as i64, dep_hd as i64])),
+                ("past_dep_v", Feed::F32(&self.dv, vec![1, dep_heads as i64, cap as i64, dep_hd as i64])),
+            ];
+            self.dep_decode.run(&feeds).expect("kronos dep decode")
+        };
+        self.ctx_last = ctx_last;
+        let p = self.dep_valid;
+        let nk = named(&out, "new_dep_k").to_vec();
+        let nv = named(&out, "new_dep_v").to_vec();
+        for h in 0..dep_heads {
+            for j in 0..dep_hd {
+                self.dk[(h * cap + p) * dep_hd + j] = nk[h * dep_hd + j];
+                self.dv[(h * cap + p) * dep_hd + j] = nv[h * dep_hd + j];
+            }
+        }
+        self.dep_valid += 1;
+        named(&out, "s2_logits").to_vec()
+    }
+
+    fn s1_step(&mut self, x: &[f32]) -> Vec<f32> {
+        let (d, nl, heads, hd, cap) = (self.d, self.nl, self.heads, self.hd, self.cap);
+        let half = hd / 2;
+        let pos = self.s1_pos;
+        let (cos, sin) = rope_tables(pos, half, hd);
+        let mask: Vec<f32> = (0..cap).map(|j| if j < pos { 0.0 } else { -1e9 }).collect();
+        let keys: Vec<(String, String)> = (0..nl).map(|l| (format!("past_k_{l}"), format!("past_v_{l}"))).collect();
+        let out = {
+            let mut feeds: Vec<(&str, Feed)> = vec![
+                ("x", Feed::F32(x, vec![1, 1, d as i64])),
+                ("rope_cos", Feed::F32(&cos, vec![1, 1, 1, half as i64])),
+                ("rope_sin", Feed::F32(&sin, vec![1, 1, 1, half as i64])),
+                ("past_mask", Feed::F32(&mask, vec![1, 1, 1, cap as i64])),
+            ];
+            for l in 0..nl {
+                feeds.push((keys[l].0.as_str(), Feed::F32(&self.pk[l], vec![1, heads as i64, cap as i64, hd as i64])));
+                feeds.push((keys[l].1.as_str(), Feed::F32(&self.pv[l], vec![1, heads as i64, cap as i64, hd as i64])));
+            }
+            self.s1_decode.run(&feeds).expect("kronos s1 decode")
+        };
+        for l in 0..nl {
+            let nk = named(&out, &format!("new_k_{l}")).to_vec();
+            let nv = named(&out, &format!("new_v_{l}")).to_vec();
+            for h in 0..heads {
+                for j in 0..hd {
+                    self.pk[l][(h * cap + pos) * hd + j] = nk[h * hd + j];
+                    self.pv[l][(h * cap + pos) * hd + j] = nv[h * hd + j];
+                }
+            }
+        }
+        self.ctx_last = named(&out, "ctx").to_vec();
+        self.s1_pos += 1;
+        named(&out, "s1_logits").to_vec()
     }
 }
 

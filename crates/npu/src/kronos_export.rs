@@ -8,8 +8,44 @@
 
 use onnx::builder::GraphBuilder;
 
-use crate::kronos_topology::{build_kronos_decoder_graph_quant, build_kronos_dep_graph_quant};
+use crate::kronos_topology::{
+    build_kronos_decoder_graph_quant, build_kronos_dep_decode_graph_quant, build_kronos_dep_graph_quant,
+    build_kronos_dep_prefill_graph_quant, build_kronos_s1_decode_graph_quant, build_kronos_s1_prefill_graph_quant,
+};
 use crate::qwen_topology::Quant;
+
+/// Build the four KV-cached Kronos graphs from one checkpoint load, for a fixed
+/// context length `t` and cache capacity `cap` (>= `t + horizon`). Returns their
+/// ONNX bytes as `(s1_prefill @T=t, s1_decode @cap, dep_prefill @T=t-1,
+/// dep_decode @cap)` — the s1/dep prefill seed the cache, the decode graphs append
+/// one token per step (the NPU's KV-cache path; see `KronosModel::
+/// forecast_cached_with_cores`). `dep_prefill` fills context positions `0..t-1`,
+/// leaving the last (`t-1`) for the first `dep_decode` self-projection.
+#[allow(clippy::type_complexity)]
+pub fn export_cached_onnx(decoder_dir: &str, t: usize, cap: usize, quant: Quant) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>), String> {
+    let (cfg, w) = kronos::import::load_decoder(decoder_dir)?;
+    let s1_prefill = {
+        let mut g = GraphBuilder::new("kronos_s1_prefill");
+        build_kronos_s1_prefill_graph_quant(&cfg, &w, t, &mut g, quant);
+        g.finish()
+    };
+    let s1_decode = {
+        let mut g = GraphBuilder::new("kronos_s1_decode");
+        build_kronos_s1_decode_graph_quant(&cfg, &w, cap, &mut g, quant);
+        g.finish()
+    };
+    let dep_prefill = {
+        let mut g = GraphBuilder::new("kronos_dep_prefill");
+        build_kronos_dep_prefill_graph_quant(&cfg, &w, (t - 1).max(1), &mut g, quant);
+        g.finish()
+    };
+    let dep_decode = {
+        let mut g = GraphBuilder::new("kronos_dep_decode");
+        build_kronos_dep_decode_graph_quant(&cfg, &w, cap, &mut g, quant);
+        g.finish()
+    };
+    Ok((s1_prefill, s1_decode, dep_prefill, dep_decode))
+}
 
 /// Build the Kronos `decode_s1` decoder-core ONNX bytes from an HF checkpoint
 /// dir, for a fixed context length `t`.

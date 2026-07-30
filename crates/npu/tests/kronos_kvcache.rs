@@ -240,3 +240,165 @@ fn dep_cached_rollout_matches_full_window() {
     }
     eprintln!("dep cached rollout vs full window: worst cosine {worst:.6} (cap={cap}, ctx={t_ctx})");
 }
+
+/// End-to-end driver logic: the interleaved cached rollout (prefill, then per step
+/// dep_decode using the latest s1 ctx, then s1_decode) must match the full-window
+/// s1 + dep graphs run over the growing context — i.e. the ctx threading + position
+/// / dep_valid counters in `KronosCachedNpu` are correct. Mirrors that struct's
+/// logic with the graphs directly (no tokenizer/checkpoint needed).
+#[test]
+fn cached_rollout_driver_matches_full_window() {
+    if available_devices().map(|d| d.is_empty()).unwrap_or(true) {
+        eprintln!("skip: no OpenVINO runtime");
+        return;
+    }
+    let cfg = KronosConfig::tiny();
+    let w = rand_weights(&cfg);
+    let (d, s1v, s2v, nl) = (cfg.d_model, cfg.s1_vocab(), cfg.s2_vocab(), cfg.n_layers);
+    let (heads, dep_heads) = (cfg.n_heads, cfg.dep_n_heads);
+    let (hd, dhd) = (d / heads, d / dep_heads);
+    let (half, dhalf) = (hd / 2, dhd / 2);
+    let (cap, t) = (8usize, 5usize);
+    let x: Vec<f32> = (0..cap * d).map(|i| ((i as f32) * 0.017).sin() * 0.5).collect();
+    let sibs: Vec<f32> = (0..cap * d).map(|i| ((i as f32) * 0.021 + 0.3).cos() * 0.5).collect();
+
+    // full-window references: s1 over all x, and dep over the growing s1 ctx.
+    let mut gf = GraphBuilder::new("s1_full");
+    build_kronos_decoder_graph(&cfg, &w, cap, &mut gf);
+    let mut full = NpuGraph::compile_bytes(&gf.finish(), &cpu()).expect("compile s1 full");
+    let fout = full.run(&[("x", Feed::F32(&x, vec![1, cap as i64, d as i64]))]).expect("run s1 full");
+    let ctx_full = get(&fout, "ctx").to_vec();
+    let s1lg_full = get(&fout, "s1_logits").to_vec();
+    let dep_ref = |m: usize| -> Vec<f32> {
+        let tref = m + 1;
+        let mut gr = GraphBuilder::new("dep_full");
+        build_kronos_dep_graph(&cfg, &w, tref, &mut gr);
+        let mut refg = NpuGraph::compile_bytes(&gr.finish(), &cpu()).expect("compile dep full");
+        let rout = refg
+            .run(&[
+                ("ctx", Feed::F32(&ctx_full[..tref * d], vec![1, tref as i64, d as i64])),
+                ("sib", Feed::F32(&sibs[..tref * d], vec![1, tref as i64, d as i64])),
+            ])
+            .expect("run dep full");
+        get(&rout, "s2_logits")[m * s2v..(m + 1) * s2v].to_vec()
+    };
+
+    // cached backend (mirrors KronosCachedNpu).
+    let mut s1p = GraphBuilder::new("s1p");
+    build_kronos_s1_prefill_graph(&cfg, &w, t, &mut s1p);
+    let mut s1_prefill = NpuGraph::compile_bytes(&s1p.finish(), &cpu()).expect("s1p");
+    let mut s1d = GraphBuilder::new("s1d");
+    build_kronos_s1_decode_graph(&cfg, &w, cap, &mut s1d);
+    let mut s1_decode = NpuGraph::compile_bytes(&s1d.finish(), &cpu()).expect("s1d");
+    let mut dpp = GraphBuilder::new("dpp");
+    build_kronos_dep_prefill_graph(&cfg, &w, t - 1, &mut dpp);
+    let mut dep_prefill = NpuGraph::compile_bytes(&dpp.finish(), &cpu()).expect("dpp");
+    let mut dpd = GraphBuilder::new("dpd");
+    build_kronos_dep_decode_graph(&cfg, &w, cap, &mut dpd);
+    let mut dep_decode = NpuGraph::compile_bytes(&dpd.finish(), &cpu()).expect("dpd");
+
+    let rope = |pos: usize, hf: usize, h: usize| -> (Vec<f32>, Vec<f32>) {
+        let c = (0..hf).map(|j| (pos as f32 * 10000f32.powf(-(2.0 * j as f32) / h as f32)).cos()).collect();
+        let s = (0..hf).map(|j| (pos as f32 * 10000f32.powf(-(2.0 * j as f32) / h as f32)).sin()).collect();
+        (c, s)
+    };
+
+    // prefill
+    let pout = s1_prefill.run(&[("x", Feed::F32(&x[..t * d], vec![1, t as i64, d as i64]))]).expect("run s1p");
+    let mut pk = vec![vec![0.0f32; heads * cap * hd]; nl];
+    let mut pv = pk.clone();
+    for l in 0..nl {
+        let (kl, vl) = (get(&pout, &format!("k_{l}")), get(&pout, &format!("v_{l}")));
+        for h in 0..heads {
+            for p in 0..t {
+                for j in 0..hd {
+                    pk[l][(h * cap + p) * hd + j] = kl[(h * t + p) * hd + j];
+                    pv[l][(h * cap + p) * hd + j] = vl[(h * t + p) * hd + j];
+                }
+            }
+        }
+    }
+    let dpre = dep_prefill.run(&[("ctx", Feed::F32(&get(&pout, "ctx")[..(t - 1) * d], vec![1, (t - 1) as i64, d as i64]))]).expect("run dpp");
+    let mut dk = vec![0.0f32; dep_heads * cap * dhd];
+    let mut dv = dk.clone();
+    for (buf, nm) in [(&mut dk, "dep_k"), (&mut dv, "dep_v")] {
+        let src = get(&dpre, nm);
+        for h in 0..dep_heads {
+            for p in 0..(t - 1) {
+                for j in 0..dhd {
+                    buf[(h * cap + p) * dhd + j] = src[(h * (t - 1) + p) * dhd + j];
+                }
+            }
+        }
+    }
+    let mut ctx_last = get(&pout, "ctx")[(t - 1) * d..t * d].to_vec();
+    let mut s1_pos = t;
+    let mut dep_valid = t - 1;
+    let mut worst = 1.0f32;
+
+    for k in 0..(cap - t) {
+        // dep_step at position s1_pos-1 using ctx_last.
+        let mdep = s1_pos - 1;
+        let (dc, ds) = rope(mdep, dhalf, dhd);
+        let dmask: Vec<f32> = (0..cap).map(|j| if j < dep_valid { 0.0 } else { -1e9 }).collect();
+        let dout = {
+            let feeds: Vec<(&str, Feed)> = vec![
+                ("sib", Feed::F32(&sibs[mdep * d..(mdep + 1) * d], vec![1, 1, d as i64])),
+                ("ctx_last", Feed::F32(&ctx_last, vec![1, 1, d as i64])),
+                ("rope_cos", Feed::F32(&dc, vec![1, 1, 1, dhalf as i64])),
+                ("rope_sin", Feed::F32(&ds, vec![1, 1, 1, dhalf as i64])),
+                ("dep_mask", Feed::F32(&dmask, vec![1, 1, 1, cap as i64])),
+                ("past_dep_k", Feed::F32(&dk, vec![1, dep_heads as i64, cap as i64, dhd as i64])),
+                ("past_dep_v", Feed::F32(&dv, vec![1, dep_heads as i64, cap as i64, dhd as i64])),
+            ];
+            dep_decode.run(&feeds).expect("run dpd")
+        };
+        let c_s2 = cosine(get(&dout, "s2_logits"), &dep_ref(mdep));
+        worst = worst.min(c_s2);
+        assert!(c_s2 > 0.999, "driver dep at pos {mdep} diverged: {c_s2}");
+        for (buf, nm) in [(&mut dk, "new_dep_k"), (&mut dv, "new_dep_v")] {
+            let nn = get(&dout, nm);
+            for h in 0..dep_heads {
+                for j in 0..dhd {
+                    buf[(h * cap + dep_valid) * dhd + j] = nn[h * dhd + j];
+                }
+            }
+        }
+        dep_valid += 1;
+
+        // s1_step at position s1_pos.
+        let pos = s1_pos;
+        let (sc, ss) = rope(pos, half, hd);
+        let smask: Vec<f32> = (0..cap).map(|j| if j < pos { 0.0 } else { -1e9 }).collect();
+        let keys: Vec<(String, String)> = (0..nl).map(|l| (format!("past_k_{l}"), format!("past_v_{l}"))).collect();
+        let sout = {
+            let mut feeds: Vec<(&str, Feed)> = vec![
+                ("x", Feed::F32(&x[pos * d..(pos + 1) * d], vec![1, 1, d as i64])),
+                ("rope_cos", Feed::F32(&sc, vec![1, 1, 1, half as i64])),
+                ("rope_sin", Feed::F32(&ss, vec![1, 1, 1, half as i64])),
+                ("past_mask", Feed::F32(&smask, vec![1, 1, 1, cap as i64])),
+            ];
+            for l in 0..nl {
+                feeds.push((keys[l].0.as_str(), Feed::F32(&pk[l], vec![1, heads as i64, cap as i64, hd as i64])));
+                feeds.push((keys[l].1.as_str(), Feed::F32(&pv[l], vec![1, heads as i64, cap as i64, hd as i64])));
+            }
+            s1_decode.run(&feeds).expect("run s1d")
+        };
+        let c_s1 = cosine(get(&sout, "s1_logits"), &s1lg_full[pos * s1v..(pos + 1) * s1v]);
+        worst = worst.min(c_s1);
+        assert!(c_s1 > 0.999, "driver s1 at pos {pos} diverged: {c_s1}");
+        for l in 0..nl {
+            let (nk, nv) = (get(&sout, &format!("new_k_{l}")), get(&sout, &format!("new_v_{l}")));
+            for h in 0..heads {
+                for j in 0..hd {
+                    pk[l][(h * cap + pos) * hd + j] = nk[h * hd + j];
+                    pv[l][(h * cap + pos) * hd + j] = nv[h * hd + j];
+                }
+            }
+        }
+        ctx_last = get(&sout, "ctx").to_vec();
+        s1_pos += 1;
+        eprintln!("step k={k}: dep@{mdep} cos {c_s2:.6}, s1@{pos} cos {c_s1:.6}");
+    }
+    eprintln!("cached-rollout DRIVER vs full window: worst cosine {worst:.6}");
+}

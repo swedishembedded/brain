@@ -386,6 +386,69 @@ impl KronosModel {
     }
 }
 
+/// A KV-cached rollout backend (e.g. the NPU cached graphs). The host driver
+/// [`KronosModel::forecast_cached_with_cores`] owns the tokenize / embed / sample /
+/// detokenize (identical to [`KronosModel::forecast_cached`]); the implementer owns
+/// the per-position graph runs and the K/V cache. It is the cached analogue of the
+/// full-window [`KronosModel::forecast_with_cores`] cores.
+pub trait CachedCores {
+    /// Prefill the `t` context positions from their fused embeddings `x_ctx:[t*d]`:
+    /// seed the s1 KV cache (and the dep K/V cache), and return the last context
+    /// position's s1 logits `[s1_vocab]`.
+    fn prefill(&mut self, x_ctx: &[f32], t: usize) -> Vec<f32>;
+    /// s2 logits `[s2_vocab]` for the current position from the sampled-s1 sibling
+    /// embedding `sib:[d]` (RAW `emb_s1`), cross-attending the cached context.
+    fn dep_step(&mut self, sib: &[f32]) -> Vec<f32>;
+    /// Append one token (fused embedding `x:[d]`) to the s1 cache and return its s1
+    /// logits `[s1_vocab]`; advances the context (its ctx row feeds the next
+    /// `dep_step`).
+    fn s1_step(&mut self, x: &[f32]) -> Vec<f32>;
+}
+
+impl KronosModel {
+    /// KV-cached autoregressive forecast driven by a [`CachedCores`] backend —
+    /// structurally identical to [`forecast_cached`](Self::forecast_cached) (same
+    /// tokenize/embed/sample/detokenize), but the O(T²)/step full-window graph runs
+    /// are replaced by O(cap)/step cached steps. This is the NPU's KV-cache path.
+    pub fn forecast_cached_with_cores(
+        &self,
+        bars: &[f32],
+        ctx_stamp: &[u32],
+        fut_stamp: &[u32],
+        pred_len: usize,
+        opts: &GenOpts,
+        cores: &mut dyn CachedCores,
+    ) -> Vec<f32> {
+        let feat = self.feat();
+        let t = bars.len() / feat;
+        let (norm, x) = preprocess::normalize(bars, t, feat, 5.0);
+        let (mut s1, mut s2) = self.tokenizer.encode(&x, t);
+        let mut stamp = ctx_stamp.to_vec();
+        stamp.extend_from_slice(fut_stamp);
+        let dec = &self.decoder;
+        let mut rng = SplitMix64::new(opts.seed);
+
+        // prefill the context (absolute positions 0..t) via the cached backend.
+        let x_ctx = dec.embed_tokens(&s1, &s2, &stamp[..t * 5]);
+        let mut last_s1_logits = cores.prefill(&x_ctx, t);
+
+        for step in 0..pred_len {
+            let samp_s1 = sample(&last_s1_logits, opts, &mut rng);
+            let sib = dec.sib_embed(&[samp_s1]);
+            let s2_logits = cores.dep_step(&sib);
+            let samp_s2 = sample(&s2_logits, opts, &mut rng);
+            s1.push(samp_s1);
+            s2.push(samp_s2);
+            let ppos = t + step;
+            let x1 = dec.embed_tokens(&[samp_s1], &[samp_s2], &stamp[ppos * 5..ppos * 5 + 5]);
+            last_s1_logits = cores.s1_step(&x1);
+        }
+
+        let recon = self.tokenizer.decode(&s1[t..], &s2[t..]);
+        preprocess::denormalize(&norm, &recon, pred_len, feat)
+    }
+}
+
 /// Sample a token id from logits per [`GenOpts`].
 fn sample(logits: &[f32], opts: &GenOpts, rng: &mut SplitMix64) -> u32 {
     if opts.argmax {
