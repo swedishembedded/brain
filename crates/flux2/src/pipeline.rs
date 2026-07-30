@@ -127,6 +127,14 @@ impl Pipeline {
     /// int8 TE fit ONE 24 GB card). A LoRA adapter (if any) is folded into the
     /// f32 tensors BEFORE quantization, so adapters work at either tier.
     pub fn build_with(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&str>, precision: crate::Precision) -> Result<Pipeline, String> {
+        Pipeline::build_batched(cfg, paths, n_img_max, adapter, precision, 1)
+    }
+
+    /// [`Pipeline::build_with`] sized for up to `max_batch` concurrent
+    /// generations sharing one denoise loop ([`Pipeline::generate_batch`]).
+    /// Only the DiT activation scratch grows (~0.5 GiB per extra sample at
+    /// 512² klein-4B); the text encoder and VAE stay single-stream.
+    pub fn build_batched(cfg: &Flux2Config, paths: &Paths, n_img_max: u32, adapter: Option<&str>, precision: crate::Precision, max_batch: u32) -> Result<Pipeline, String> {
         let mut dit_ts = read_dit_tensors(&paths.dit, cfg)?;
         if let Some(ap) = adapter {
             // The adapter's tensor shapes depend only on the architecture, not
@@ -136,7 +144,7 @@ impl Pipeline {
             ad.fold_into_tensors(&mut dit_ts)?;
         }
         let gpu = gpu_core::Gpu::new(crate::model::KERNELS);
-        let model = Flux2Model::new_with(cfg, &dit_ts, gpu, cfg.txt_len as u32 + n_img_max, precision);
+        let model = Flux2Model::new_batched(cfg, &dit_ts, gpu, cfg.txt_len as u32 + n_img_max, max_batch.max(1), precision);
         drop(dit_ts);
 
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&paths.tokenizer)?;
@@ -279,11 +287,21 @@ impl Pipeline {
         Ok(out)
     }
 
+    /// The largest batch [`Pipeline::generate_batch`] can put in one DiT
+    /// forward (what the model's scratch was sized for at build time).
+    pub fn max_batch(&self) -> u32 {
+        self.model.max_batch()
+    }
+
     /// Text-to-image (optionally with reference images for editing).
     /// `refs`: RGB `[-1,1]` CHW images, each with its (h, w) — pre-cropped to
     /// multiples of 16 (see [`ref_from_hwc`]). Returns (rgb8 HWC, width,
     /// height). `cancel` is polled once per denoise step (multi-minute CPU
     /// runs must be abortable); a `Default` token never fires.
+    ///
+    /// This is [`Pipeline::generate_batch`] with one request — the two share
+    /// one denoise loop, so there is no second sampling implementation to
+    /// drift.
     pub fn generate(
         &self,
         prompt: &str,
@@ -292,58 +310,225 @@ impl Pipeline {
         cancel: &capability::CancelToken,
         mut progress: impl FnMut(u32, u32, &str),
     ) -> Result<(Vec<u8>, u32, u32), String> {
-        let cfg = &self.cfg;
-        assert!(o.width % 16 == 0 && o.height % 16 == 0, "H,W must be /16");
+        let req = BatchRequest { prompt: prompt.to_string(), refs: refs.to_vec(), opts: o.clone(), cancel: cancel.clone() };
+        self.generate_batch(std::slice::from_ref(&req), &mut progress)
+            .pop()
+            .expect("one request in, one result out")
+    }
+
+    /// Generate `reqs.len()` images through ONE denoise loop: at every step the
+    /// still-running requests are packed into a single batched DiT forward
+    /// ([`Flux2Model::forward_batch`]).
+    ///
+    /// Per-request **seed, steps, guidance and prompt** are all honoured:
+    ///
+    /// * the seed only picks the initial latent, which is per-sample anyway;
+    /// * different `steps` mean different sigma schedules, so at loop index `i`
+    ///   two samples sit at *different timesteps* — which costs nothing because
+    ///   modulation is a per-sample condition group. A request that runs out of
+    ///   steps simply leaves the batch, which shrinks for the remainder;
+    /// * CFG (undistilled `base` variants) enters as a **second slot** in the
+    ///   same batch — the conditional and unconditional evaluations of one
+    ///   request are two samples at the same timestep with different `ctx`,
+    ///   which used to be two sequential forwards;
+    /// * `cancel` is polled per request per step; a cancelled request leaves
+    ///   the batch immediately with `Err("cancelled")` and the others continue.
+    ///
+    /// Requests whose **position ids** differ (a different reference-image
+    /// layout at the same total token count) cannot share a slab, so they are
+    /// partitioned into id-groups and the groups run one after another. The
+    /// text encoder and the VAE stay per request (they are separate models with
+    /// their own single-sequence graphs) — only the DiT, which is the whole
+    /// denoise cost, batches.
+    ///
+    /// Results are returned in request order.
+    pub fn generate_batch(
+        &self,
+        reqs: &[BatchRequest],
+        progress: &mut dyn FnMut(u32, u32, &str),
+    ) -> Vec<Result<(Vec<u8>, u32, u32), String>> {
+        let mut out: Vec<Result<(Vec<u8>, u32, u32), String>> = (0..reqs.len()).map(|_| Err("not run".to_string())).collect();
+        // Partition by position ids: one slab layout per group.
+        let mut groups: Vec<(Vec<u32>, Vec<usize>)> = Vec::new();
+        for (i, r) in reqs.iter().enumerate() {
+            match self.plan(r) {
+                Err(e) => out[i] = Err(e),
+                Ok(ids) => match groups.iter_mut().find(|(g, _)| *g == ids) {
+                    Some((_, v)) => v.push(i),
+                    None => groups.push((ids, vec![i])),
+                },
+            }
+        }
+        for (ids, members) in groups {
+            self.denoise_group(reqs, &ids, &members, &mut out, progress);
+        }
+        out
+    }
+
+    /// Validate one request and return its joint position ids (the key that
+    /// decides which requests can share a batched forward).
+    fn plan(&self, r: &BatchRequest) -> Result<Vec<u32>, String> {
+        let o = &r.opts;
+        if o.width % 16 != 0 || o.height % 16 != 0 {
+            return Err(format!("width/height must be multiples of 16 (got {}×{})", o.width, o.height));
+        }
         let (lh, lw) = ((o.height / 16) as usize, (o.width / 16) as usize);
-        let n_gen = lh * lw;
-        let steps = o.steps.unwrap_or(if cfg.distilled { 4 } else { 50 }) as usize;
-        let cf = !cfg.distilled && o.guidance > 1.0;
+        let ref_dims: Vec<(usize, usize)> = r.refs.iter().map(|(_, rh, rw)| ((rh / 16) as usize, (rw / 16) as usize)).collect();
+        Ok(position_ids(self.cfg.txt_len, lh, lw, &ref_dims))
+    }
 
-        progress(0, steps as u32 + 2, "encoding prompt");
-        let ctx = self.encode_prompt(prompt);
-        let ctx_uncond = if cf { Some(self.encode_prompt("")) } else { None };
-
-        // reference images -> tokens + ids
-        let mut ref_tokens: Vec<f32> = Vec::new();
-        let mut ref_dims: Vec<(usize, usize)> = Vec::new();
-        for (chw, rh, rw) in refs {
-            progress(0, steps as u32 + 2, "encoding reference");
-            ref_tokens.extend(self.encode_image(chw, *rh, *rw)?);
-            ref_dims.push(((rh / 16) as usize, (rw / 16) as usize));
+    /// One id-group's shared denoise loop.
+    fn denoise_group(
+        &self,
+        reqs: &[BatchRequest],
+        ids: &[u32],
+        members: &[usize],
+        out: &mut [Result<(Vec<u8>, u32, u32), String>],
+        progress: &mut dyn FnMut(u32, u32, &str),
+    ) {
+        let cfg = &self.cfg;
+        // Per-member state; a member that fails to encode drops out here.
+        struct Lane {
+            idx: usize,
+            lh: usize,
+            lw: usize,
+            n_gen: usize,
+            steps: usize,
+            guidance: f32,
+            ctx: Vec<f32>,
+            ctx_uncond: Option<Vec<f32>>,
+            ref_tokens: Vec<f32>,
+            sigmas: Vec<f32>,
+            lat: Vec<f32>,
         }
-        let ids = position_ids(cfg.txt_len, lh, lw, &ref_dims);
-
-        let sigmas = diffusion::scheduler::klein_sigmas(steps, n_gen);
-        let mut lat = model::hostmath::randn(n_gen * cfg.in_channels, o.seed);
-
-        for i in 0..steps {
-            if cancel.is_cancelled() {
-                return Err("cancelled".into());
-            }
-            progress(i as u32 + 1, steps as u32 + 2, "denoising");
-            let t = sigmas[i];
-            let dt = sigmas[i + 1] - sigmas[i];
-            let mut joint: Vec<f32> = Vec::with_capacity((n_gen + ref_tokens.len() / cfg.in_channels) * cfg.in_channels);
-            joint.extend_from_slice(&lat);
-            joint.extend_from_slice(&ref_tokens);
-            let pred = self.model.forward(&joint, &ctx, t, &ids, n_gen);
-            let pred = match &ctx_uncond {
-                None => pred,
-                Some(cu) => {
-                    let pu = self.model.forward(&joint, cu, t, &ids, n_gen);
-                    pred.iter()
-                        .zip(&pu)
-                        .map(|(&c, &u)| u + o.guidance * (c - u))
-                        .collect()
+        let max_steps_hint = members.iter().map(|&i| reqs[i].steps_for(cfg.distilled)).max().unwrap_or(0) as u32;
+        let mut lanes: Vec<Lane> = Vec::new();
+        for &i in members {
+            let r = &reqs[i];
+            let o = &r.opts;
+            let (lh, lw) = ((o.height / 16) as usize, (o.width / 16) as usize);
+            let n_gen = lh * lw;
+            let steps = r.steps_for(cfg.distilled);
+            progress(0, max_steps_hint + 2, "encoding prompt");
+            let ctx = self.encode_prompt(&r.prompt);
+            let cf = !cfg.distilled && o.guidance > 1.0;
+            let ctx_uncond = if cf { Some(self.encode_prompt("")) } else { None };
+            let mut ref_tokens: Vec<f32> = Vec::new();
+            let mut failed = None;
+            for (chw, rh, rw) in &r.refs {
+                progress(0, max_steps_hint + 2, "encoding reference");
+                match self.encode_image(chw, *rh, *rw) {
+                    Ok(t) => ref_tokens.extend(t),
+                    Err(e) => failed = Some(e),
                 }
-            };
-            for (x, v) in lat.iter_mut().zip(&pred) {
-                *x += dt * v;
+            }
+            if let Some(e) = failed {
+                out[i] = Err(e);
+                continue;
+            }
+            lanes.push(Lane {
+                idx: i,
+                lh,
+                lw,
+                n_gen,
+                steps,
+                guidance: o.guidance,
+                ctx,
+                ctx_uncond,
+                ref_tokens,
+                sigmas: diffusion::scheduler::klein_sigmas(steps, n_gen),
+                lat: model::hostmath::randn(n_gen * cfg.in_channels, o.seed),
+            });
+        }
+        if lanes.is_empty() {
+            return;
+        }
+        let max_steps = lanes.iter().map(|l| l.steps).max().unwrap_or(0);
+        let cap = self.model.max_batch() as usize;
+
+        for i in 0..max_steps {
+            // Cancellation is per request: a cancelled lane leaves the batch and
+            // the others keep going (the scheduler handed us N independent jobs).
+            lanes.retain(|l| {
+                if reqs[l.idx].cancel.is_cancelled() {
+                    out[l.idx] = Err("cancelled".into());
+                    false
+                } else {
+                    true
+                }
+            });
+            let active: Vec<usize> = (0..lanes.len()).filter(|&k| i < lanes[k].steps).collect();
+            if active.is_empty() {
+                break;
+            }
+            progress(i as u32 + 1, max_steps as u32 + 2, "denoising");
+
+            // Build one slot per DiT evaluation: (lane, ctx, t). CFG adds the
+            // unconditional pass as a second slot at the same timestep.
+            let mut joints: Vec<Vec<f32>> = Vec::with_capacity(active.len());
+            let mut slots: Vec<(usize, bool, f32)> = Vec::new(); // (active index, is_uncond, t)
+            for (a, &k) in active.iter().enumerate() {
+                let l = &lanes[k];
+                let mut joint = Vec::with_capacity(l.lat.len() + l.ref_tokens.len());
+                joint.extend_from_slice(&l.lat);
+                joint.extend_from_slice(&l.ref_tokens);
+                joints.push(joint);
+                slots.push((a, false, l.sigmas[i]));
+                if l.ctx_uncond.is_some() {
+                    slots.push((a, true, l.sigmas[i]));
+                }
+            }
+            // One forward per chunk of at most `max_batch` slots.
+            let mut preds: Vec<Vec<f32>> = Vec::with_capacity(slots.len());
+            for chunk in slots.chunks(cap) {
+                let samples: Vec<crate::model::Sample<'_>> = chunk
+                    .iter()
+                    .map(|&(a, unc, t)| {
+                        let l = &lanes[active[a]];
+                        let ctx = if unc { l.ctx_uncond.as_ref().unwrap() } else { &l.ctx };
+                        crate::model::Sample { img_tokens: &joints[a], ctx, t }
+                    })
+                    .collect();
+                preds.extend(self.model.forward_batch(&samples, ids, lanes[active[0]].n_gen));
+            }
+            // Fold CFG and take the Euler step, per lane.
+            for (a, &k) in active.iter().enumerate() {
+                let cond = slots.iter().position(|&(sa, unc, _)| sa == a && !unc).expect("cond slot");
+                let pred: Vec<f32> = match slots.iter().position(|&(sa, unc, _)| sa == a && unc) {
+                    None => preds[cond].clone(),
+                    Some(u) => preds[cond].iter().zip(&preds[u]).map(|(&c, &un)| un + lanes[k].guidance * (c - un)).collect(),
+                };
+                let dt = lanes[k].sigmas[i + 1] - lanes[k].sigmas[i];
+                for (x, v) in lanes[k].lat.iter_mut().zip(&pred) {
+                    *x += dt * v;
+                }
             }
         }
-        progress(steps as u32 + 2, steps as u32 + 2, "decoding");
-        let rgb = self.decode_tokens(&lat, lh, lw)?;
-        Ok((rgb, o.width, o.height))
+
+        progress(max_steps as u32 + 2, max_steps as u32 + 2, "decoding");
+        for l in &lanes {
+            let o = &reqs[l.idx].opts;
+            out[l.idx] = self.decode_tokens(&l.lat, l.lh, l.lw).map(|rgb| (rgb, o.width, o.height));
+        }
+    }
+}
+
+/// One generation in a [`Pipeline::generate_batch`] call: everything
+/// `Pipeline::generate` takes, owned, plus its cancellation token.
+#[derive(Clone)]
+pub struct BatchRequest {
+    pub prompt: String,
+    /// RGB `[-1,1]` CHW reference images with their (h, w), pre-cropped to /16.
+    pub refs: Vec<(Vec<f32>, u32, u32)>,
+    pub opts: GenOpts,
+    /// Polled once per denoise step; a `Default` token never fires.
+    pub cancel: capability::CancelToken,
+}
+
+impl BatchRequest {
+    /// Resolved step count (`opts.steps` or the variant default).
+    fn steps_for(&self, distilled: bool) -> usize {
+        self.opts.steps.unwrap_or(if distilled { 4 } else { 50 }) as usize
     }
 }
 

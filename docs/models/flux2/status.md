@@ -75,12 +75,19 @@ Chronological, measured-only. Reference material + the phased plan live in
   placeholders (4B fp32 ≈ 18 GiB VRAM + 2 GiB RAM; 9B ≈ 36 GiB; train
   20 GiB RAM — host f32 trainer) — re-measure via `brain perf` when the perf
   target lands.
-- **Batching = documented-sequential** (the contract's explicit-reason
-  path) — `run_batch` is a sequential loop with the reason in the comment: a
-  true batched MMDiT forward needs the joint-sequence device graphs rebuilt
-  for N latents and per-request seeds/steps/CFG diverge the trajectories; the
-  scheduler already groups same-key jobs, so the follow-up touches only
-  `Flux2Instance::run_batch`.
+- **Batching = TRUE batched forward ✓** *(was "documented-sequential" at P5;
+  closed in P11 below).* `Flux2Instance::run_batch` groups the scheduler's
+  same-key jobs into ONE `Pipeline::generate_batch` denoise loop, each step of
+  which is a single batched MMDiT forward (`Flux2Model::forward_batch`) over all
+  their latents — **bit-identical to N single forwards** at fp32 and int8
+  (`crates/flux2/tests/batch_parity.rs`, max_abs 0.0). Per-request seed, steps,
+  guidance/CFG, prompt and `inv.cancel` are all honoured inside the batch; CFG
+  rides as a second sample. Cap: `BRAIN_FLUX2_MAX_BATCH` (default 4), included
+  in `estimate`. `lora_train` remains the sequential loop (one trainer, one
+  dataset, one adapter — nothing to batch). **Not** implemented: admitting a new
+  request into an already-running batch — `residency::Executor` hands a lane a
+  fixed `&[Invocation]` and marks the key `running` for the whole call, so that
+  needs an executor change, not a flux2 one (P11).
 - **D-Bus + examples ✓** — reachable over the existing
   `Run`/`Subscribe`/`Cancel` surface (no surface change needed);
   `examples/imagegen/`: `generate.py` (streaming t2i → PPM), `edit_image.py`
@@ -687,13 +694,264 @@ is why the test has been a CPU test.)
 `Buffer offset 192 does not respect min_storage_buffer_offset_alignment 256` —
 the pre-existing P9 finding, unchanged, green on `BRAIN_DEVICE=cpu`.
 
+## P11 (2026-07-30) — TRUE batched inference: bit-identical, and worth 4.4 %
+
+P5 signed the serving contract off with `run_batch` on the "documented-sequential"
+escape hatch. This pass closed it: `Flux2Model::forward_batch` runs B samples in
+one device pass, `Pipeline::generate_batch` runs their denoise loops together,
+and `Flux2Instance::run_batch` is a real batched generate. Then it measured
+what that bought, which is the interesting part.
+
+### What batches, and why no new WGSL was needed
+
+The kernels were already shaped for this — the payoff of composing from the
+shared library rather than writing model-private ones. Each contract was
+re-read (`docs/kernel-checklist.md` §B) before being relied on:
+
+| kernel | the hook | verified |
+|---|---|---|
+| `attn_scores_bidir` / `attn_softmax_bidir` / `attn_apply_bidir` / `flash_attn_bidir{,_split}` | first Param is **`bsz`**; every read is `qkv[(b·T + j)·stride + …]` and one workgroup owns one `(b, head, query-tile)` | samples cannot attend across each other **by construction**; batching = raise `bsz`, nothing else |
+| `gate_row` | **`rows_per_cond`** condition groups, `g[NC, D]`, `k = r / rows_per_cond` | per-sample gates for the single blocks in ONE dispatch, `NC = B` |
+| `matmul_reg3` / `matmul_i8_dyn` | `row0 = (wg / tiles_n)·BM`, K accumulated inside a fixed 128×128 tile | more `M` = more tiles, never a different summation order |
+| `layernorm` | takes ONE `[D]` gamma/beta pair — **no group support** | the one place the hook was missing; per-sample modulation is a `(b·D, D)` **binding slice**, so it is B dispatches of the same size instead of one, not a new kernel |
+| `rope_interleave_table`, `rmsnorm_rows`, `silu_mul`, `max_abs_row`, `quant_pack` | row-local | whole-slab dispatch, one per block |
+
+Layout: the joint residual slab becomes `[B·n, D]` **sample-major** (sample `b`
+at rows `[b·n, (b+1)·n)`), which is the layout joint attention requires.
+
+* **Single-stream blocks (20 of klein-4B's 25) batch completely** — every GEMM
+  becomes one dispatch at `M = B·1536`, both gated residuals become one
+  `rows_per_cond = n` dispatch, QK-norm and SwiGLU span the slab.
+* **Double-stream blocks (5 of 25) stay per-sample.** A stream owns `nt` (or
+  `ni`) rows *inside* each sample's block, so in a sample-major slab a stream's
+  rows are `n`-strided and no single sliced dispatch covers them. Making them
+  contiguous would need a group-major slab plus a gather before every attention
+  — 5/25 of the block FLOPs to chase a win the GEMM probe below says is zero.
+* **RoPE tables are built once and replicated**, not recomputed B times: the ids
+  are shared by construction (a batch is one resolution + one reference layout;
+  `generate_batch` partitions by ids and runs mismatched groups separately).
+* **Host modulation is deduplicated by timestep.** Each distinct `t` costs four
+  host mat-vecs (≈132 MFLOP); a lockstep batch pays for one, a mixed-progress
+  batch for B. Measured: 15–22 ms for one, 105–157 ms for eight.
+
+### Parity: bit-identical, not "close"
+
+`crates/flux2/tests/batch_parity.rs` (weight-free, toy dims chosen so every
+per-sample binding offset is a multiple of 64 floats — the 256-byte
+`min_storage_buffer_offset_alignment`), on the pooled test device:
+
+| case | result |
+|---|---|
+| batch of 3, different latents **and different timesteps**, vs 3 single forwards | **max_abs 0.0**, cosine 1.000000000 (all three) |
+| batch of 1 on a `b_max = 4` model vs the unbatched forward | **max_abs 0.0** |
+| batch of 2 at a shared timestep (exercises the host dedup) | **max_abs 0.0** |
+| batch of 2 at **`Precision::Int8`** (per-token scales + DP4A) | **max_abs 0.0** |
+
+Bit-identity is assertable because no reduction order moves: see the table
+above. The test states the argument so that a future kernel change that breaks
+it fails here instead of silently drifting served images away from the latency
+path. `Flux2Model::forward_batch` also carries an alignment guard that **names
+the offending stride** rather than surfacing as a wgpu validation error (the
+open P9 item).
+
+### Continuous batching in the pipeline
+
+`Pipeline::generate_batch` runs one denoise loop over N requests; `generate` is
+now that function with one request, so there is no second sampling
+implementation to drift. Honoured per request, inside the batch:
+
+* **seed** — only picks the initial latent, per-sample anyway;
+* **steps** — a different sigma schedule means a *different timestep at the same
+  loop index*, which is exactly what per-sample modulation groups make free. A
+  request that runs out of steps leaves the batch and it shrinks;
+* **guidance / CFG** — the conditional and unconditional evaluations become
+  **two samples of the same batch** at one timestep with different `ctx`; two
+  sequential forwards before;
+* **adapter / variant / precision / size** — fixed by the instance key, so a
+  batch shares weights by construction;
+* **cancellation** — `inv.cancel` is polled per request per step; a cancelled
+  request leaves with `Err("cancelled")` and the rest continue.
+
+**Mixed-progress admission (a new request joining a running batch) is NOT
+implemented, and the blocker is structural, not in this crate:**
+`residency::Executor` hands a lane `run_batch(action, &[Invocation])` — a fixed
+slice — and marks the instance key `running` for the whole call, so no further
+job can reach an instance that is already denoising. Admitting mid-flight needs
+the executor to grow a way to push jobs into a running group (a channel on the
+`Instance`, or an `Instance::admit` the lane polls between groups). What IS
+implemented is the useful half: a batch that *shrinks* as members finish, so
+short and long requests can ride together from the start.
+
+### Measurement 1 — the DiT batch ladder (real weights, int8, 512²)
+
+`crates/flux2/tests/batch_time.rs` (ignored by default), min-of-4 per point,
+1×P40, 1536 joint tokens per sample:
+
+| B | mixed-t ms/forward | ms/image | lockstep ms/forward | ms/image | speedup vs B=1 |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 1295.5 | 1295.5 | 1300.0 | 1300.0 | 1.000× |
+| 2 | 2547.3 | 1273.6 | 2544.3 | 1272.1 | 1.014× |
+| 4 | 5023.4 | 1255.8 | 5000.6 | 1250.2 | 1.032× / 1.040× |
+| 8 | 9928.5 | 1241.1 | 9867.4 | 1233.4 | **1.044× / 1.054×** |
+
+**Batching the DiT is worth 4.4 %.** Two independent uncontended runs agree to
+0.5 %. The host/device split (`BRAIN_FLUX2_TIME_FORWARD=1`) says why there is no
+more to get: at B=1 the forward is modulation 20 ms + upload 25 ms + record
+6 ms + **device 1236 ms** — 95 % device. Batching can only amortise the 5 %.
+
+### Measurement 2 — why: the GEMM is already at its plateau at M = 1536
+
+The roofline probe (`gemm_throughput_vs_batch_rows`, weight-free) on klein-4B's
+two hot single-block shapes, 1×P40:
+
+| shape (K × N) | M=1536 | 3072 | 4608 | 6144 | 9216 | 12288 |
+|---|---:|---:|---:|---:|---:|---:|
+| 3072 × 9216 GFLOP/s | 3984 | 3598 | 4184 | 4112 | 3981 | 3944 |
+| 9216 × 3072 GFLOP/s | 5445 | 5497 | 5509 | 5605 | 5713 | 5671 |
+
+**Flat.** A single 512² sample already presents 1536 rows — 12 × 72 = 864
+128×128 tiles for the wide shape, ~29 workgroups per SM. The GPU is saturated
+before the batch dimension exists. This is the whole story: 80 % of the forward
+is GEMM (P9), the GEMM does not care about M, so batching cannot pay.
+
+*Corollary for the double blocks:* their `M` is 512/1024 rather than 1536, i.e.
+further down the same flat curve — which is why leaving them per-sample costs
+nothing measurable and why the group-major-slab-plus-gather rewrite was not
+done.
+
+### Measurement 3 — the concurrency ladder, and the thermal trap it hides
+
+The first attempt, `brain perf run sweep --target flux2:512x512x4:int8 --ladder
+1,2,4,8 --requests 8 --warmup 2` (residency executor, 1×P40, `BRAIN_DEVICE=gpu0`,
+`BRAIN_FLUX2_MAX_BATCH=8`), produced a clean, plausible, **completely wrong**
+answer — throughput falling monotonically with concurrency:
+
+| concurrency | out/s (denoise_step) | req/s | e2e p50 | ial p50 | `sched_max_batch` |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 0.545 | 0.136 | 7.3 s | 1318 ms | 1 |
+| 2 | 0.448 | 0.112 | 17.8 s | 3223 ms | 2 |
+| 4 | 0.352 | 0.088 | 36.1 s | 6606 ms | 4 |
+| 8 | 0.353 | 0.088 | 72.3 s | 13175 ms | **8** |
+
+Batching demonstrably happened — `Executor::stats()` now rides in the artifact's
+`memory` block (`sched_batches` / `sched_jobs` / `sched_max_batch` /
+`sched_mean_batch` / `sched_queue_peak`), and it reports `sched_max_batch = 8`,
+`sched_builds = 1` — but the result contradicts Measurement 1. Running the same
+ladder **reversed** is the control, and it inverts:
+
+| ladder order | c=1 ial p50 | c=8 ial p50 (per image) |
+|---|---:|---:|
+| `1,2,4,8` (c=1 first) | 1318 ms | 13175/8 = 1647 ms |
+| `8,4,2,1` (c=8 first) | **1734 ms** | 9870/8 = **1234 ms** |
+
+Whichever level runs *last* is ~1.32× slower. `nvidia-smi` through the sweep:
+**83 → 90 °C, SM clock 1531 → 923 MHz (582 MHz at the worst),
+`clocks_throttle_reasons.active = 0x20` (SW thermal slowdown)**. These are
+passively-cooled datacentre P40s in a workstation; a multi-minute continuous
+sweep is a thermal ramp, and the ramp is **larger than every effect the sweep
+exists to measure**. Filed as a cross-model rule in
+`docs/performance/overview.md`; `brain perf` recording no thermal state per
+level is a real gap (see Known gaps).
+
+### Measurement 3b — the ladder, thermally matched
+
+Re-run as four separate `perf run serve` processes, each **gated on
+`temperature.gpu ≤ 68 °C`** before it starts, `--requests 8 --warmup <c>`,
+`BRAIN_FLUX2_MAX_BATCH = c`:
+
+| conc = batch | goodput (images/min) | e2e p50 | e2e p99 | ial p50 (one batched denoise step) | **per image** | `sched` | peak VRAM (process) |
+|---:|---:|---:|---:|---:|---:|---|---:|
+| 1 | **8.28** | 7.24 s | 7.27 s | 1317 ms | 1317 ms | max 1 | 18 332 MiB |
+| 2 | **8.46** | 14.18 s | 14.29 s | 2553 ms | **1277 ms** | max 2, mean 2.0 | 19 021 MiB |
+| 4 | **8.40** | 27.93 s | 29.04 s | 5006 ms | **1252 ms** | max 4, mean 4.0 | 19 685 MiB |
+| 8 | 7.68 | 36.64 s | **62.44 s** | 6186 ms | *(split batch)* | max 8, **mean 5.3** | 21 649 MiB |
+
+Read it as three separate facts:
+
+1. **The DiT step per image improves exactly as Measurement 1 predicted**:
+   1317 → 1277 → 1252 ms, i.e. **1.052× at B=4** against the isolated ladder's
+   1.032–1.040×. The batched forward works and the scheduler feeds it.
+2. **End-to-end goodput is flat at ~8.4 images/min.** Batching the DiT cannot
+   move it, because the DiT is only 70 % of a generation: the **text encoder
+   (0.82 s) and the VAE decode (1.41 s) are per request and do not batch** —
+   they are separate models with their own single-sequence graphs. 2.23 s of
+   7.24 s un-batchable caps the achievable end-to-end speedup at **1.44×** even
+   with a free DiT, and the DiT itself only offers 1.05×. Amdahl, measured:
+   `1 / (0.308 + 0.692/1.052) = 1.036×`, against 8.46/8.28 = **1.022×** observed.
+3. **Latency degrades linearly with the batch, and p99 falls apart past B=4.**
+   e2e p50 is 7.2 → 14.2 → 27.9 s: a batch of N finishes together, so the *last*
+   request's latency is roughly N × the single-request time. At c = 8 the
+   executor split the 8 queued jobs into groups of 5 and 3 (`sched_mean_batch`
+   5.3, 3 groups for 16 jobs) — the second group waits for the first, which is
+   the 62 s p99 and the goodput dip. **B = 4 is the useful ceiling here**, and
+   it is a *latency* ceiling, not a memory one.
+
+**VRAM.** The DiT's own footprint, measured alone (`batch_time`, no TE/VAE):
+**5 662 MiB at b_max = 1 → 8 979 MiB at b_max = 8**, i.e. **+474 MiB per batch
+slot**, which matches the analytic scratch exactly (`n · (16·hidden + 3·mlp) · 4`
+= 1536 × 77 184 × 4 B at 512²; only activations scale, weights are shared).
+The whole-process peaks in the table are higher and grow with the number of
+requests served, not just with B — `decode_tokens` rebuilds the VAE decoder and
+re-uploads its weights on **every** call (a known P10 item), so the process peak
+is not a clean function of batch size. On the batch-size axis alone,
+`24 GiB / 0.474 GiB` puts saturation near **B ≈ 25** with the text encoder on
+the other card, or **B ≈ 11** with the int8 TE shard co-resident as measured
+here — in both cases far beyond the B = 4 the latency curve already rules out.
+
+### Gates
+
+| gate | result |
+|---|---|
+| `brain-flux2 --test dit_parity` (GPU, real weights) | **cosine 1.000000** on both fixtures — **unchanged**, max_abs 0.0001 / 0.0002 |
+| `brain-flux2 --test batch_parity` (new) | 4/4 — **max_abs 0.0** on batch-of-3 mixed-timestep, batch-of-1-on-a-batched-model, shared-timestep, and **int8** |
+| `brain-flux2 --test int8_parity` (GPU) | cosine **0.998130** ≥ 0.998, unchanged; fp32 2.488 s vs int8 1.326 s (1.88×) |
+| `brain-flux2 --test e2e_parity` | ok |
+| `BRAIN_DEVICE=cpu make gradcheck` | **OK (29 tensors)** |
+| `make build` | OK |
+| `brain flux2 generate` 512², int8, one card, from 55 °C | **7.6 s total** (encode 0.91 / denoise 5.28 / decode 1.42) — the P10 number to the digit, **no B=1 regression** |
+| `cargo test -p brain-flux2` | all green except the pre-existing GPU-only `host_forward_parity` (`Buffer offset 192 does not respect min_storage_buffer_offset_alignment 256` — the unchanged P9 finding; green on `BRAIN_DEVICE=cpu`) |
+| `cargo test -p brain-cli -p brain-perf -p brain-residency` | green (153 perf + 23 residency + cli) |
+| `cargo test -p brain-zimage -p brain-model` | green (the `flash_bidir_step` signature change's other caller) |
+
+### Verdict
+
+Batched inference for FLUX.2 Klein is **correct, bit-identical, and worth
+1.05× on the DiT / 1.02× end-to-end on this hardware.** It is a *capacity and
+correctness* feature — one resident weight set serving N concurrent requests
+with per-request seeds, step counts, CFG and cancellation, and no numerical
+divergence from the single-request path — not the throughput multiplier the
+work was framed as. The multiplier is not there to be had, because the GEMM
+that is 80 % of the forward is already at its M-independent plateau at one
+sample (Measurement 2). The remaining throughput levers, in order of measured
+size, are: the un-batched **VAE decode** (1.41 s/image, 19 % of e2e, and it
+rebuilds its graph per call), the un-batched **text encoder** (0.82 s, 11 %),
+and **thermals** (1.32 ×, larger than all of it).
+
 ## Known gaps / remaining
 
-- Serving landed (P5), perf target + first CPU measurement landed (P6 above);
-  training completion tracked as P7–P8 of the execution plan. True batched
-  `run_batch` is a follow-up (see P5 batching bullet). A GPU perf run and a
-  `sweep` ladder (concurrency behaviour under the sequential-`run_batch`
-  scheduler) wait on the GPU path being measured at all.
+- Serving landed (P5), perf target + first CPU measurement landed (P6 above),
+  **true batched `run_batch` + the concurrency ladder landed (P11)**; training
+  completion tracked as P7–P8 of the execution plan.
+- **Mixed-progress admission** (a request joining an already-running batch) is
+  the one batching feature not built, and the blocker is in `crates/residency`,
+  not here: `Executor` hands a lane `run_batch(action, &[Invocation])` — a fixed
+  slice — and holds the instance key `running` until it returns. Growing an
+  `Instance::admit` (or a channel the lane drains between denoise steps) would
+  let `Pipeline::generate_batch`'s loop pick up new lanes at a step boundary;
+  the loop is already written to add and drop lanes per step. Worth ~nothing on
+  a P40 (see P11), worth real latency on hardware where the DiT is not
+  saturated by one sample.
+- **`brain perf` records no thermal state.** A multi-level `sweep` on these
+  passively-cooled P40s measures its own thermal ramp (1.32×, P11) unless every
+  level is started from a matched temperature by hand. `temperature.gpu`,
+  `clocks.sm` and `clocks_throttle_reasons.active` per level in the artifact's
+  environment block would make the confound visible instead of silent.
+- **The un-batched half is now the throughput ceiling**: the text encoder
+  (0.82 s/image) and the VAE decode (1.41 s/image) are 31 % of a generation and
+  run per request. Batching them means batched `Qwen::encode_hiddens_padded`
+  (its graphs are built for one 512-token sequence) and a batched
+  `vae::VaeDecoder` — and, cheaper than either, caching the built `VaeDecoder`
+  per (lh, lw) so `decode_tokens` stops rebuilding it every call.
 - **Kernel efficiency** (was the open problem at P8) is now 35.7 % of fp32
   peak after P9. What remains, in profile order:
   - the GEMMs are 80 % of the forward at 39 % of peak; the ceiling for the
@@ -704,9 +962,13 @@ the pre-existing P9 finding, unchanged, green on `BRAIN_DEVICE=cpu`.
     kernel yet, and adding one is the same 4-20× shaped win;
   - `flash_attn_bidir_split` is at 17 % of peak, itself shared-memory bound at
     one shared word per FMA; two query rows per thread would double its roof.
-- True batched `run_batch` still to come; the kernels already carry the hooks
-  (attention `bsz`, `film_row`/`gate_row` `rows_per_cond` groups), so
-  mixed-progress continuous batching needs no new WGSL.
+- ~~True batched `run_batch` still to come~~ — **done (P11)**, and the prediction
+  held: the attention `bsz` Param and `film_row`/`gate_row`'s `rows_per_cond`
+  groups meant **no new WGSL at all**. The one hook that turned out to be
+  missing is a grouped `layernorm` (it takes a single `[D]` gamma/beta pair), so
+  the per-sample modulated-LN sites are B binding-sliced dispatches instead of
+  one — correct and bit-identical, but the obvious generalisation for the next
+  modulated model.
 - Klein-9B-KV cached-ref attention variant: out of scope (needs per-token
   modulation blend, breaks the LN fold).
 - `tests/host_forward_parity.rs` cannot run on a GPU backend: its toy dims put a

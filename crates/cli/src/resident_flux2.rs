@@ -27,6 +27,31 @@ impl Flux2Resident {
     }
 }
 
+/// How many concurrent same-key generations one instance batches into a single
+/// denoise loop (`BRAIN_FLUX2_MAX_BATCH`, default 4). Only the DiT activation
+/// scratch scales with it — see `docs/models/flux2/status.md` for the measured
+/// VRAM per sample and the point where latency stops paying for throughput.
+/// The scheduler's own `Policy::max_batch` caps the group size on top of this.
+pub fn max_batch() -> u32 {
+    std::env::var("BRAIN_FLUX2_MAX_BATCH")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(4)
+        .max(1)
+}
+
+/// Image + reference latent tokens from an instance key
+/// (`"{variant}:{precision}:{w}x{h}:{nref}[:{adapter}]"`), for the memory
+/// estimate. 0 if the key does not parse (an unknown key costs nothing extra).
+fn tokens_from_key(config: &str) -> u64 {
+    let mut it = config.splitn(5, ':');
+    let (_, _) = (it.next(), it.next());
+    let Some((w, h)) = it.next().and_then(|wh| wh.split_once('x')) else { return 0 };
+    let (Ok(w), Ok(h)) = (w.parse::<u64>(), h.parse::<u64>()) else { return 0 };
+    let nref: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (w / 16) * (h / 16) + nref
+}
+
 /// Reference latent tokens declared by an invocation's input blobs, from their
 /// `{w,h}` metadata after the /16 center-crop — used for the instance key
 /// without decoding any pixels.
@@ -86,7 +111,19 @@ impl ResidentModel for Flux2Resident {
             // the TE is placed separately via BRAIN_FLUX2_TE_DEVICE).
             (false, true) => 6u64 << 30,
         };
-        MemCost::new(vram, 2u64 << 30)
+        // A batched instance holds one activation slab per batch slot; the
+        // weights are shared. The DiT scratch is 16 [n, hidden] + 3 [n, mlp]
+        // f32 buffers (+ a quarter of that again for the int8 packed
+        // activations), n = txt_len + image/reference tokens — 472 MiB per slot
+        // at 512² klein-4B, which the estimates above already include for slot
+        // 0. Only the EXTRA slots are added here.
+        let (hidden, mlp, txt_len) = if nine_b { (4096u64, 12288u64, 512u64) } else { (3072u64, 9216u64, 512u64) };
+        let n_joint = txt_len + tokens_from_key(&key.config);
+        let mut per_slot = n_joint * (16 * hidden + 3 * mlp) * 4;
+        if int8 {
+            per_slot += n_joint * (hidden + mlp); // packed int8 activations
+        }
+        MemCost::new(vram + per_slot * (max_batch() as u64 - 1), 2u64 << 30)
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
@@ -112,7 +149,7 @@ impl ResidentModel for Flux2Resident {
         // Place the pipeline on the assigned card (scoped registry selection;
         // the TE card is flux2's own BRAIN_FLUX2_TE_DEVICE and left as configured).
         let pipe = crate::resident_llm::on_device(device, || {
-            flux2::Pipeline::build_with(&cfg, &self.paths, n_gen + nref, adapter, precision)
+            flux2::Pipeline::build_batched(&cfg, &self.paths, n_gen + nref, adapter, precision, max_batch())
         })??;
         Ok(Box::new(Flux2Instance { pipe: Some(pipe), paths: clone_paths(&self.paths) }))
     }
@@ -144,14 +181,64 @@ impl Instance for Flux2Instance {
         }
     }
 
-    /// Documented-sequential (serving-contract §3, explicit-reason path): a
-    /// TRUE batched forward would run one joint MMDiT forward over N latents,
-    /// but the pipeline's device graphs are built for a single joint sequence
-    /// (txt+img slab layout) and per-request seeds/steps/CFG make the denoise
-    /// trajectories diverge — batching the DiT forward is a separate change to
-    /// `flux2::model`. The scheduler already groups same-key jobs into one
-    /// `run_batch` call, so that follow-up only touches this method.
+    /// TRUE batched generation (serving-contract §3): the N same-key jobs the
+    /// scheduler grouped share ONE denoise loop, each step of which is a single
+    /// batched MMDiT forward over all their latents
+    /// (`flux2::Flux2Model::forward_batch`, bit-identical to N single
+    /// forwards — `crates/flux2/tests/batch_parity.rs`).
+    ///
+    /// Per-request **seed, steps, guidance and prompt** are honoured inside the
+    /// batch: the instance key already fixes variant/precision/size/refs/adapter
+    /// (so the weights and the slab layout are shared), and differing step
+    /// counts simply put samples at different timesteps — free, because
+    /// modulation is a per-sample condition group. CFG rides as a second sample.
+    /// `inv.cancel` is polled per request per step; a cancelled request leaves
+    /// the batch and the rest continue.
+    ///
+    /// `lora_train` has no batchable form (one host trainer, one dataset, one
+    /// adapter out), so it stays the sequential loop.
     fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(Progress)) -> Vec<ActionResult> {
-        invs.iter().map(|inv| self.run(action, inv, progress)).collect()
+        if action == "lora_train" || invs.len() < 2 {
+            return invs.iter().map(|inv| self.run(action, inv, progress)).collect();
+        }
+        let Some(pipe) = self.pipe.as_ref() else {
+            return invs.iter().map(|_| Err("flux2: generation on a training instance".to_string())).collect();
+        };
+        // Decode every request first; a request that fails validation reports
+        // its own error and does not sink the batch.
+        let mut reqs: Vec<Option<flux2::BatchRequest>> = Vec::with_capacity(invs.len());
+        let mut out: Vec<ActionResult> = Vec::with_capacity(invs.len());
+        for inv in invs {
+            out.push(Err("not run".to_string()));
+            reqs.push(match build_request(action, inv) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    *out.last_mut().unwrap() = Err(e);
+                    None
+                }
+            });
+        }
+        let live: Vec<usize> = reqs.iter().enumerate().filter_map(|(i, r)| r.is_some().then_some(i)).collect();
+        if live.is_empty() {
+            return out;
+        }
+        // `take`, not `clone` — a request's reference images are megabytes.
+        let batch: Vec<flux2::BatchRequest> = live.iter().map(|&i| reqs[i].take().unwrap()).collect();
+        let mut prog = |step: u32, total: u32, msg: &str| progress(Progress { step, total, message: msg.to_string() });
+        let results = pipe.generate_batch(&batch, &mut prog);
+        for (&i, r) in live.iter().zip(results) {
+            out[i] = r.map(|(rgb, w, h)| flux2::caps::image_outcome(&rgb, w, h));
+        }
+        out
     }
+}
+
+/// One invocation → a [`flux2::BatchRequest`] (params + references + its cancel
+/// token), through the same shared `flux2::caps` decoders the single-request
+/// path uses — no second copy of the param contract.
+fn build_request(action: &str, inv: &Invocation) -> Result<flux2::BatchRequest, String> {
+    let p = flux2::caps::gen_params_from(inv)?;
+    let refs = flux2::caps::refs_from(inv, action == "edit")?;
+    let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
+    Ok(flux2::BatchRequest { prompt, refs, opts: p.opts, cancel: inv.cancel.clone() })
 }

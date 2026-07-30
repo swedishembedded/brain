@@ -708,6 +708,106 @@ it is under ~3×, the tile is a pessimisation.
 
 ---
 
+## Cross-model finding: a batch dimension is free in the kernels — and pays nothing once a kernel is at its plateau
+
+FLUX.2 Klein's DiT was made batched (`Flux2Model::forward_batch`, B samples in
+one device pass) with **no new WGSL at all**, because the shared kernel library
+already carries the two hooks any modulated transformer needs:
+
+| hook | kernels | what it gives |
+|---|---|---|
+| **`bsz` Param** + `x[(b·T + j)·stride]` addressing | `attn_scores_bidir`, `attn_softmax_bidir`, `attn_apply_bidir`, `flash_attn_bidir`, `flash_attn_bidir_split` | a **sample-major** slab batches by raising one Param; one workgroup owns one `(b, head, query-tile)`, so samples cannot attend across each other by construction |
+| **`rows_per_cond` condition groups** | `film_row`, `gate_row` | per-sample adaLN/FiLM modulation in ONE dispatch (`NC = B`) — so **different timesteps per batch member cost nothing**, which is what makes continuous batching of a diffusion model possible |
+
+Row-concatenation does the rest: the register-tiled GEMMs accumulate over K
+inside a fixed 128×128 output tile, so a larger `M` adds tiles and never
+reorders a sum; the per-row norms, SwiGLU and int8 quantizers are row-local.
+The consequence worth writing down is that **a batched forward can be
+bit-identical to N single forwards** — `crates/flux2/tests/batch_parity.rs`
+asserts `max_abs == 0.0` at fp32 *and* int8 — so batching is not a numerical
+risk that needs a cosine tolerance, and a future kernel change that breaks the
+property fails a test instead of silently drifting served output away from the
+single-request path.
+
+The one hook that is **missing**: `layernorm` takes a single `[D]` gamma/beta
+pair, with no `rows_per_cond` twin. FLUX.2 works around it with a `(b·D, D)`
+binding slice per sample — B dispatches of unchanged size, correct and
+bit-identical, but B× the launches. A `layernorm_group` (or teaching the
+existing kernel `rows_per_cond`) is the obvious generalisation the next
+modulated model will want.
+
+### …and now the negative result, which is the useful half
+
+**Batching bought 4.4 %.** klein-4B int8 at 512², 1×P40, min-of-4:
+
+| B | ms/image | speedup |
+|---:|---:|---:|
+| 1 | 1295.5 | 1.000× |
+| 2 | 1273.6 | 1.014× |
+| 4 | 1255.8 | 1.032× |
+| 8 | 1241.1 | **1.044×** |
+
+End to end, behind the residency executor at matched GPU temperature, that is
+1.02×: 8.28 → 8.46 images/min from concurrency 1 to 2, flat to concurrency 4,
+because the un-batched text encoder + VAE are 31 % of a generation and cap the
+achievable speedup at 1.44× regardless.
+
+The reason is one measurement, and it is the one to take before implementing
+batching anywhere: **GFLOP/s of the dominant GEMM as a function of M.**
+
+| shape (K × N) | M=1536 | 3072 | 4608 | 6144 | 9216 | 12288 |
+|---|---:|---:|---:|---:|---:|---:|
+| 3072 × 9216 | 3984 | 3598 | 4184 | 4112 | 3981 | 3944 |
+| 9216 × 3072 | 5445 | 5497 | 5509 | 5605 | 5713 | 5671 |
+
+Flat. One 512² image is already 1536 rows = 864 output tiles ≈ 29 workgroups
+per SM; the card is saturated before a batch dimension exists. Batching helps a
+model whose per-request `M` is *small* (a decoder's `m = 1` decode step — where
+brain's paged engine gets its real continuous-batching win) and helps a model
+whose per-request work is *host*-bound. It does not help a vision/diffusion
+forward that already presents thousands of rows: there, the 95 % of the forward
+that is device time was already saturated, and only the 5 % of host conditioning
+can be amortised.
+
+*Rule:* before building batching for throughput, plot the hot kernel's
+achieved GFLOP/s against `M` at the sizes you would batch to. If it is flat at
+`M = 1`-request, batching is a **latency-neutral capacity feature** (one
+resident weight set serving N requests), not a throughput multiplier — say so
+in the ledger rather than reporting the 4 %.
+
+---
+
+## Cross-model finding: a concurrency ladder on a passively-cooled card measures its own cooling curve
+
+Measuring FLUX.2's concurrency ladder as one continuous `brain perf run sweep`
+produced a clean, plausible, **completely wrong** result: throughput falling
+monotonically with concurrency (0.545 → 0.353 denoise_steps/s from c=1 to c=8),
+exactly contradicting the controlled per-forward measurement above.
+
+Running the same ladder **reversed** is the control, and it inverts:
+
+| ladder order | c=1 ial p50 | c=8 ial p50 (per image) |
+|---|---:|---:|
+| `1,2,4,8` (c=1 first) | 1318 ms | 1647 ms |
+| `8,4,2,1` (c=8 first) | **1734 ms** | **1234 ms** |
+
+Whichever level runs *last* is ~1.32× slower. `nvidia-smi` during the sweep:
+**83 → 90 °C, SM clock 1531 → 923 MHz (582 MHz at the worst),
+`clocks_throttle_reasons.active = 0x20` (SW thermal slowdown)**. The Tesla P40s
+in this box are passively cooled datacentre cards in a workstation chassis; a
+multi-minute sustained sweep is a thermal ramp, and the ramp is **larger than
+every effect the sweep was built to measure**.
+
+*Rule:* any multi-level sweep on this hardware must either start every level
+from a matched GPU temperature (poll `temperature.gpu` and wait), or be run in
+both directions with the difference reported. A single-direction ladder is not
+evidence. `brain perf` has no thermal instrumentation today — recording
+`temperature.gpu` / `clocks.sm` / `clocks_throttle_reasons.active` per level in
+the artifact's environment block is a real gap, and the reason a "2× throughput
+regression" was nearly attributed to a batching change.
+
+---
+
 ## Tooling / diagnostics added
 
 - **`BRAIN_PROFILE=1`**: CPU per-kernel timing; GPU op counters (uniforms /

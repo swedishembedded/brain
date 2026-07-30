@@ -286,6 +286,7 @@ pub(crate) fn push_attention(gpu: &Gpu, s: &mut Vec<Step>, scr: &Scratch, nh: u3
         s.push(model::block::flash_bidir_step(
             gpu,
             model::block::FlashIds { bidir: K_FLASH, split: Some(K_FLASH_SPLIT) },
+            1, // Z-Image's S³-DiT graph is built for a single joint sequence
             nh,
             t,
             hd,

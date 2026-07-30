@@ -187,11 +187,19 @@ pub fn generate_on(
     let (rgb, w, h) = pipe.generate(&prompt, refs, opts, &inv.cancel, |step, total, msg| {
         progress(Progress { step, total, message: msg.to_string() })
     })?;
+    Ok(image_outcome(&rgb, w, h))
+}
+
+/// Wrap a generated RGB8 HWC image as an image-output [`Outcome`] (the shared
+/// `capability::blob` wire format) — ONE implementation, shared by the
+/// single-request path above and the batched
+/// `resident_flux2::Flux2Instance::run_batch`.
+pub fn image_outcome(rgb: &[u8], w: u32, h: u32) -> Outcome {
     let hwc: Vec<f32> = rgb.iter().map(|&b| b as f32 / 255.0).collect();
-    Ok(Outcome::new()
+    Outcome::new()
         .set("width", json!(w))
         .set("height", json!(h))
-        .blob("image", capability::blob::image_blob(&hwc, w, h, 3)))
+        .blob("image", capability::blob::image_blob(&hwc, w, h, 3))
 }
 
 /// Run `lora_train` from an invocation: train via [`crate::finetune::run`]

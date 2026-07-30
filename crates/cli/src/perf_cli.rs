@@ -49,10 +49,14 @@ OPTIONS
                                                    real checkpoint
                           lfm:<weights>:<tok.json> the LFM2.5 encoder behind the
                                                    residency executor (unit: sequence)
-                          flux2[:<W>x<H>x<steps>]  FLUX.2 Klein (klein-4b) behind the
+                          flux2[:<W>x<H>x<steps>[:<precision>]]
+                                                   FLUX.2 Klein (klein-4b) behind the
                                                    residency executor; weights from
                                                    BRAIN_FLUX2_* env. Default
-                                                   512x512x4; unit: denoise_step.
+                                                   512x512x4:fp32; unit: denoise_step.
+                                                   Concurrent same-size requests share
+                                                   one batched denoise loop (cap:
+                                                   BRAIN_FLUX2_MAX_BATCH, default 4).
   --workload <name>     interactive | chat | rag | rag_long | agent |
                         decode_heavy | prefill_heavy | shared_prefix   (default chat)
   --concurrency <N>     fixed level for latency/serve (default 8)
@@ -92,8 +96,9 @@ targets (--target):
   qwen-synth:<L>x<D>x<H>[xV][:i8w]   the real paged serving engine on random weights
   qwen:<weights.brain>[:i8w]         the paged serving engine on a real checkpoint
   lfm:<weights>:<tokenizer.json>     LFM2.5 encoder via the residency executor (unit: sequence)
-  flux2[:<W>x<H>x<steps>]            FLUX.2 Klein via the residency executor (unit: denoise_step;
-                                     weights from BRAIN_FLUX2_* env; default 512x512x4)
+  flux2[:<W>x<H>x<steps>[:<prec>]]   FLUX.2 Klein via the residency executor (unit: denoise_step;
+                                     weights from BRAIN_FLUX2_* env; default 512x512x4:fp32;
+                                     prec = fp32|int8; batches concurrent same-key requests)
 ";
 
 pub fn run_perf(args: &[String]) {
@@ -465,7 +470,7 @@ fn build_target(spec: &str, workload: &str) -> Result<Box<dyn PerfTarget>, Strin
     Err(format!(
         "unknown --target {spec:?} \
          (expected 'fake', 'qwen-synth:<L>x<D>x<H>[xV][:i8w]', 'qwen:<weights>[:i8w]', \
-         'lfm:<weights>:<tokenizer.json>', or 'flux2[:<W>x<H>x<steps>]')"
+         'lfm:<weights>:<tokenizer.json>', or 'flux2[:<W>x<H>x<steps>[:<precision>]]')"
     ))
 }
 
@@ -520,7 +525,7 @@ fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "lfm", "embed", "sequence", info, build)))
 }
 
-/// `flux2[:<W>x<H>x<steps>]` — FLUX.2 Klein (klein-4b, weights from the
+/// `flux2[:<W>x<H>x<steps>[:<precision>]]` — FLUX.2 Klein (klein-4b, weights from the
 /// `BRAIN_FLUX2_*` env like the rest of the flux2 stack) behind the residency
 /// EXECUTOR (scheduler + budgets + device lanes), running [`crate::resident_flux2::Flux2Resident`]
 /// — so concurrency measures brain's real scheduler, not a bare provider.
@@ -535,12 +540,19 @@ fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
 /// pipeline instance (the instance key is `{variant}:{w}x{h}:{nref}`), so
 /// weights load once — put it in the warmup request.
 fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
+    // optional `:<precision>` tail — the DiT numeric tier the requests ask for.
+    // int8 is the single-card configuration (weights ~4x smaller), so it is the
+    // one a concurrency ladder can actually reach batch 8 on.
+    let (rest, precision) = match rest.rsplit_once(':') {
+        Some((head, p)) if flux2::Precision::from_name(p).is_ok() => (head, p.to_string()),
+        _ => (rest, "fp32".to_string()),
+    };
     let (w, h, steps) = if rest.is_empty() {
         (512u32, 512u32, 4u32)
     } else {
         let p: Vec<u32> = rest.split('x').map(|s| s.trim().parse().unwrap_or(0)).collect();
         if p.len() != 3 || p.iter().any(|&v| v == 0) {
-            return Err(format!("bad flux2 spec {rest:?}, expected <W>x<H>x<steps> (e.g. 512x512x4)"));
+            return Err(format!("bad flux2 spec {rest:?}, expected <W>x<H>x<steps>[:<precision>] (e.g. 512x512x4:int8)"));
         }
         (p[0], p[1], p[2])
     };
@@ -587,12 +599,16 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     // The 4B MMDiT — the component a denoise step runs; TE/VAE cost sits in
     // TTFA/e2e, not in the per-step rate.
     info.params = Some(3_870_000_000);
-    info.quant = Some("fp32".into());
+    info.quant = Some(precision.clone());
     let info = info
         .with("width", w.into())
         .with("height", h.into())
         .with("steps", steps.into())
         .with("txt_len", (cfg.txt_len as u32).into())
+        .with("precision", precision.clone().into())
+        // What the instance batches into one denoise loop; `Executor::stats()`
+        // reports the batch sizes actually reached.
+        .with("max_batch", crate::resident_flux2::max_batch().into())
         .with("engine", "residency-executor".into());
     let build = Box::new(move |req: &perf::target::PerfRequest| {
         // Prompt values do not change the cost: text conditioning is padded to
@@ -602,6 +618,7 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
             .set("width", serde_json::json!(w))
             .set("height", serde_json::json!(h))
             .set("steps", serde_json::json!(steps))
+            .set("precision", serde_json::json!(precision))
             .set("seed", serde_json::json!(req.seed))
     });
     Ok(Box::new(perf::targets::ExecutorTarget::new_streaming(

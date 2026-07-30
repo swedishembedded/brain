@@ -346,15 +346,22 @@ pub fn flash_bidir_variant(ids: FlashIds, caps: &gpu_core::DeviceCaps) -> (usize
     }
 }
 
-/// One fused bidirectional flash-attention dispatch over `t` rows of a packed
-/// qkv slab — the variant chosen by [`flash_bidir_variant`]. Both kernels take
-/// the SAME Params and produce the SAME output layout, so only the pipeline
-/// index and the per-workgroup thread count differ; the workgroup still owns
-/// BR = 64 query rows in both.
+/// One fused bidirectional flash-attention dispatch over `bsz` samples of `t`
+/// rows each in a packed qkv slab — the variant chosen by
+/// [`flash_bidir_variant`]. Both kernels take the SAME Params and produce the
+/// SAME output layout, so only the pipeline index and the per-workgroup thread
+/// count differ; the workgroup still owns BR = 64 query rows in both.
+///
+/// `bsz > 1` is a **sample-major** slab: sample `b` occupies rows
+/// `[b·t, (b+1)·t)` of `qkv` (`[bsz·t, 3·d_model]`) and of `ctx`
+/// (`[bsz·t, d_model]`). One workgroup owns one `(b, head, query-tile)`, so
+/// samples never mix and the per-query arithmetic is unchanged — a batched
+/// dispatch is bit-identical to `bsz` separate ones.
 #[allow(clippy::too_many_arguments)]
 pub fn flash_bidir_step(
     g: &Gpu,
     ids: FlashIds,
+    bsz: u32,
     heads: u32,
     t: u32,
     head_dim: u32,
@@ -365,11 +372,11 @@ pub fn flash_bidir_step(
     assert!(head_dim <= 128, "flash_attn_bidir: head_dim {head_dim} > 128");
     const BR: u32 = 64; // query rows per workgroup — the same in both kernels
     let (kind, ws) = flash_bidir_variant(ids, &g.caps());
-    let nwg = heads * t.div_ceil(BR);
+    let nwg = bsz * heads * t.div_ceil(BR);
     g.step(
         kind,
         &[qkv, ctx],
-        &[1, heads, t, head_dim, 3 * d_model, 0, d_model, 2 * d_model, d_model],
+        &[bsz, heads, t, head_dim, 3 * d_model, 0, d_model, 2 * d_model, d_model],
         nwg * ws,
     )
 }

@@ -618,4 +618,24 @@ impl PerfTarget for ExecutorTarget {
     fn busy(&self) -> bool {
         !self.inflight.is_empty()
     }
+
+    /// The scheduler's own counters — **the proof that batching happened**.
+    /// `sched_max_batch > 1` means concurrent same-key jobs really were handed
+    /// to one `Instance::run_batch` call; `sched_jobs / sched_batches` is the
+    /// mean group size the model actually saw. Without these, a throughput
+    /// number cannot distinguish "the model batched" from "the scheduler ran
+    /// them one at a time and the GPU happened to be idle".
+    fn counters(&self) -> Vec<(String, serde_json::Value)> {
+        let s = self.exec.stats();
+        vec![
+            ("sched_batches".into(), s.batches.into()),
+            ("sched_jobs".into(), s.jobs.into()),
+            ("sched_max_batch".into(), s.max_batch.into()),
+            ("sched_mean_batch".into(), serde_json::json!(if s.batches > 0 { s.jobs as f64 / s.batches as f64 } else { 0.0 })),
+            ("sched_queue_peak".into(), s.queue_peak.into()),
+            ("sched_max_parallel".into(), s.max_parallel.into()),
+            ("sched_builds".into(), s.builds.into()),
+            ("sched_evictions".into(), s.evictions.into()),
+        ]
+    }
 }

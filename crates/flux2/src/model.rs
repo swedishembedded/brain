@@ -14,12 +14,29 @@
 //! Klein-9B-KV blended per-token modulation path would break this fold; it is
 //! deliberately out of scope here.)
 //!
-//! Layout: one joint residual slab `[n, D]`, text rows first (`0..nt`), image
-//! (+ reference) rows after — the reference's `[txt, img, refs]` order. Stream-
-//! specific ops run on row ranges via `step_sliced`; joint attention reads the
-//! whole slab. Fused checkpoint weights (`qkv`, `mlp.0`, `linear1`, `linear2`)
-//! are split at build time into per-projection device buffers so every matmul
-//! is a plain full-buffer dispatch.
+//! Layout: one joint residual slab `[B·n, D]`, **sample-major** — sample `b`
+//! owns rows `[b·n, (b+1)·n)`, text rows first (`0..nt`) then image (+
+//! reference) rows, the reference's `[txt, img, refs]` order. Stream-specific
+//! ops run on row ranges via `step_sliced`; joint attention reads the whole
+//! slab with `bsz = B` (the bidirectional kernels index `qkv[(b·T + j)·stride]`,
+//! so samples cannot attend across each other by construction). Fused
+//! checkpoint weights (`qkv`, `mlp.0`, `linear1`, `linear2`) are split at build
+//! time into per-projection device buffers so every matmul is a plain
+//! full-buffer dispatch.
+//!
+//! **Batching** (`forward_batch`): B samples with independent timesteps, text
+//! conditioning and latents share one forward. The single-stream blocks (20 of
+//! klein-4B's 25) become one GEMM at `M = B·n`; the double-stream blocks stay
+//! per-sample because a stream's rows are `n`-strided in a sample-major slab
+//! (the layout joint attention requires). Modulation is per-sample: the six
+//! (gamma, beta) pairs and five gates are uploaded as `[B, D]` and indexed by
+//! the sample — `gate_row`'s `rows_per_cond` condition groups do this in ONE
+//! dispatch for the single blocks, and the per-sample LayerNorm sites bind
+//! their own `[D]` slice. **No new WGSL is needed for any of it.** Because
+//! every kernel's per-output reduction order is independent of `M`/`bsz`, a
+//! batch-of-N forward is *bit-identical* to N single forwards
+//! (`tests/batch_parity.rs`), and B=1 records exactly the dispatch sequence it
+//! did before batching existed.
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
@@ -146,11 +163,21 @@ struct SingleW {
     wo_b: Lin,
 }
 
-/// The six modulated-LN sites and five gates, in upload order.
+/// The six modulated-LN sites and five gates, in upload order. Each buffer is
+/// `[b_max, D]` — sample `b`'s vector at row `b`, which is what makes different
+/// timesteps per batch member free (`gate_row`'s `rows_per_cond` groups for the
+/// single blocks; a `(b·D, D)` binding slice for the per-sample LN sites).
 struct ModBufs {
     gamma: Vec<DeviceBuffer>, // [img1, img2, txt1, txt2, single, final]
     beta: Vec<DeviceBuffer>,
     gate: Vec<DeviceBuffer>, // [img1, img2, txt1, txt2, single]
+}
+
+/// One sample's folded modulation (host side), in [`ModBufs`] site order.
+struct ModVals {
+    gamma: [Vec<f32>; 6],
+    beta: [Vec<f32>; 6],
+    gate: [Vec<f32>; 5],
 }
 
 struct Scratch {
@@ -197,8 +224,10 @@ struct I8Scratch {
 pub struct Flux2Model {
     pub cfg: Flux2Config,
     gpu: Gpu,
-    /// max joint rows (txt + img + refs) the scratch is sized for
+    /// max joint rows (txt + img + refs) PER SAMPLE the scratch is sized for
     n_max: u32,
+    /// max samples per [`Flux2Model::forward_batch`] the scratch is sized for
+    b_max: u32,
     fast: bool,
     precision: Precision,
     i8scr: Option<I8Scratch>,
@@ -231,6 +260,17 @@ impl Flux2Model {
     /// DiT drops from ~15.5 GiB to ~3.9 GiB resident) and the forward runs the
     /// quant→DP4A sequence per linear. GPU only (DP4A + workgroup barriers).
     pub fn new_with(cfg: &Flux2Config, ts: &Tensors, gpu: Gpu, n_max: u32, precision: Precision) -> Flux2Model {
+        Flux2Model::new_batched(cfg, ts, gpu, n_max, 1, precision)
+    }
+
+    /// [`Flux2Model::new_with`] sized for up to `b_max` samples per forward
+    /// ([`Flux2Model::forward_batch`]). Only the activation scratch grows —
+    /// weights are shared — so the extra cost is `(b_max − 1) × ` the per-sample
+    /// working set (≈ 0.5 GiB at 512² for klein-4B; see
+    /// `docs/models/flux2/status.md`). `b_max = 1` allocates exactly what the
+    /// unbatched model always did.
+    pub fn new_batched(cfg: &Flux2Config, ts: &Tensors, gpu: Gpu, n_max: u32, b_max: u32, precision: Precision) -> Flux2Model {
+        assert!(b_max >= 1, "b_max must be >= 1");
         assert!(!cfg.guidance_embed, "guidance-embedded variants not supported");
         let d = cfg.hidden;
         let mlp = cfg.mlp_hidden();
@@ -357,7 +397,8 @@ impl Flux2Model {
             })
             .collect();
 
-        let n = n_max as u64;
+        // Scratch spans the whole batch slab: b_max samples of n_max joint rows.
+        let n = n_max as u64 * b_max as u64;
         let du = d as u64;
         let mlpu = mlp as u64;
         // Attention stays flash under `fast` at BOTH tiers: the materialised
@@ -365,7 +406,8 @@ impl Flux2Model {
         // joint tokens: 14.8 s vs flash 11.6 s on the P40 — the untiled
         // scores/apply kernels are bandwidth-bound at hd=128), unlike
         // zimage's dims where the trio wins.
-        let attn_mat = if fast { 1 } else { (nh as u64) * n * n };
+        // [B, H, T, T] — per SAMPLE T, not the whole slab (samples never mix).
+        let attn_mat = if fast { 1 } else { b_max as u64 * nh as u64 * n_max as u64 * n_max as u64 };
         let a = |len: u64| gpu.storage(len);
         let scr = Scratch {
             x0: a(n * du),
@@ -391,12 +433,13 @@ impl Flux2Model {
             cos: a(n * (hd as u64 / 2)),
             sin: a(n * (hd as u64 / 2)),
             tok_in: a(n * cfg.in_channels as u64),
-            ctx_in: a(cfg.txt_len as u64 * cfg.context_in_dim as u64),
+            ctx_in: a(b_max as u64 * cfg.txt_len as u64 * cfg.context_in_dim as u64),
         };
+        let bd = b_max as u64 * du;
         let modb = ModBufs {
-            gamma: (0..6).map(|_| a(du)).collect(),
-            beta: (0..6).map(|_| a(du)).collect(),
-            gate: (0..5).map(|_| a(du)).collect(),
+            gamma: (0..6).map(|_| a(bd)).collect(),
+            beta: (0..6).map(|_| a(bd)).collect(),
+            gate: (0..5).map(|_| a(bd)).collect(),
         };
         let i8scr = (precision == Precision::Int8).then(|| I8Scratch {
             sx: a(n),
@@ -407,6 +450,7 @@ impl Flux2Model {
         Flux2Model {
             cfg: cfg.clone(),
             n_max,
+            b_max,
             fast,
             precision,
             i8scr,
@@ -439,6 +483,17 @@ impl Flux2Model {
         self.precision
     }
 
+    /// The largest batch [`Flux2Model::forward_batch`] accepts (the scratch was
+    /// sized for it at build time).
+    pub fn max_batch(&self) -> u32 {
+        self.b_max
+    }
+
+    /// Max joint tokens (txt + img + refs) per sample.
+    pub fn max_tokens(&self) -> u32 {
+        self.n_max
+    }
+
     /// `timestep_embedding(t·1000, 256)`: 128 freqs, **cos first**, then sin.
     fn timestep_embedding(t: f32) -> Vec<f32> {
         let half = 128usize;
@@ -453,9 +508,10 @@ impl Flux2Model {
         emb
     }
 
-    /// Host conditioning: timestep MLP + the three global modulation linears,
-    /// folded into (gamma, beta, gate) vectors and uploaded.
-    fn upload_modulation(&self, t: f32) {
+    /// Host conditioning for ONE timestep: the timestep MLP + the three global
+    /// modulation linears, folded into the six (gamma, beta) LN pairs and five
+    /// gate vectors. Pure — the device write is [`Self::upload_modulation`].
+    fn modulation_for(&self, t: f32) -> ModVals {
         let d = self.cfg.hidden;
         use model::hostmath::{matvec_par, silu_slice};
         let emb = Self::timestep_embedding(t);
@@ -469,27 +525,54 @@ impl Flux2Model {
         let m_fin = matvec_par(&self.final_adaln, &sv, 2 * d, d);
 
         // chunk order per triple: (shift, scale, gate); final layer: (shift, scale)
-        let wf = |buf: &DeviceBuffer, v: &[f32]| self.gpu.write(buf, bytemuck::cast_slice(v));
         let gamma = |m: &[f32], c: usize| -> Vec<f32> {
             m[(3 * c + 1) * d..(3 * c + 2) * d].iter().map(|s| 1.0 + s).collect()
         };
         let beta = |m: &[f32], c: usize| m[3 * c * d..(3 * c + 1) * d].to_vec();
         let gate = |m: &[f32], c: usize| m[(3 * c + 2) * d..(3 * c + 3) * d].to_vec();
 
-        for (i, m) in [&m_img, &m_txt].iter().enumerate() {
-            wf(&self.modb.gamma[2 * i], &gamma(m, 0));
-            wf(&self.modb.beta[2 * i], &beta(m, 0));
-            wf(&self.modb.gate[2 * i], &gate(m, 0));
-            wf(&self.modb.gamma[2 * i + 1], &gamma(m, 1));
-            wf(&self.modb.beta[2 * i + 1], &beta(m, 1));
-            wf(&self.modb.gate[2 * i + 1], &gate(m, 1));
+        // sites: 0=img1 1=img2 2=txt1 3=txt2 4=single 5=final; gates likewise
+        ModVals {
+            gamma: [gamma(&m_img, 0), gamma(&m_img, 1), gamma(&m_txt, 0), gamma(&m_txt, 1), gamma(&m_sgl, 0), m_fin[d..2 * d].iter().map(|s| 1.0 + s).collect()],
+            beta: [beta(&m_img, 0), beta(&m_img, 1), beta(&m_txt, 0), beta(&m_txt, 1), beta(&m_sgl, 0), m_fin[..d].to_vec()],
+            gate: [gate(&m_img, 0), gate(&m_img, 1), gate(&m_txt, 0), gate(&m_txt, 1), gate(&m_sgl, 0)],
         }
-        wf(&self.modb.gamma[4], &gamma(&m_sgl, 0));
-        wf(&self.modb.beta[4], &beta(&m_sgl, 0));
-        wf(&self.modb.gate[4], &gate(&m_sgl, 0));
-        let fin_gamma: Vec<f32> = m_fin[d..2 * d].iter().map(|s| 1.0 + s).collect();
-        wf(&self.modb.gamma[5], &fin_gamma);
-        wf(&self.modb.beta[5], &m_fin[..d]);
+    }
+
+    /// Upload the per-sample modulation for a whole batch: each site's buffer
+    /// becomes `[B, D]` with sample `b`'s vector at row `b`. Timesteps repeat
+    /// whenever a batch steps in lockstep, so identical `t` values are computed
+    /// once (the four host mat-vecs are ~132 MFLOP each at klein-4B).
+    fn upload_modulation(&self, ts: &[f32]) {
+        let d = self.cfg.hidden;
+        let mut uniq: Vec<(u32, ModVals)> = Vec::new();
+        let mut order: Vec<usize> = Vec::with_capacity(ts.len());
+        for &t in ts {
+            let key = t.to_bits();
+            let at = match uniq.iter().position(|(k, _)| *k == key) {
+                Some(i) => i,
+                None => {
+                    uniq.push((key, self.modulation_for(t)));
+                    uniq.len() - 1
+                }
+            };
+            order.push(at);
+        }
+        let mut buf = Vec::with_capacity(ts.len() * d);
+        let mut wf = |dst: &DeviceBuffer, pick: &dyn Fn(&ModVals) -> &[f32]| {
+            buf.clear();
+            for &i in &order {
+                buf.extend_from_slice(pick(&uniq[i].1));
+            }
+            self.gpu.write(dst, bytemuck::cast_slice(&buf));
+        };
+        for site in 0..6 {
+            wf(&self.modb.gamma[site], &|m: &ModVals| m.gamma[site].as_slice());
+            wf(&self.modb.beta[site], &|m: &ModVals| m.beta[site].as_slice());
+            if site < 5 {
+                wf(&self.modb.gate[site], &|m: &ModVals| m.gate[site].as_slice());
+            }
+        }
     }
 
     /// The register-tiled GEMM this model dispatches. `matmul_reg3` is
@@ -511,13 +594,15 @@ impl Flux2Model {
         }
     }
 
-    /// Sliced matmul: read rows `r0..r1` of `x`, write rows `r0..r1` of `o`
-    /// (both `[.., k]` / `[.., n]` row-major).
+    /// Sliced matmul: read rows `xr0..xr0+m` of `x`, write rows `or0..or0+m` of
+    /// `o` (both row-major, `[.., k]` / `[.., n]`). Independent input/output row
+    /// bases are what a sample-major batch slab needs — an embedding reads its
+    /// sample's block of a compact `[B·rows, k]` input and writes into the
+    /// sample's window of the joint slab.
     #[allow(clippy::too_many_arguments)]
-    fn mm_rows(&self, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, r0: u32, r1: u32, k: u32, n: u32) -> Step {
-        let m = r1 - r0;
-        let xo = (r0 as u64 * k as u64, m as u64 * k as u64);
-        let oo = (r0 as u64 * n as u64, m as u64 * n as u64);
+    fn mm_rows_at(&self, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, xr0: u32, or0: u32, m: u32, k: u32, n: u32) -> Step {
+        let xo = (xr0 as u64 * k as u64, m as u64 * k as u64);
+        let oo = (or0 as u64 * n as u64, m as u64 * n as u64);
         if self.fast {
             self.gpu.step_sliced(self.mm_kernel(), &[x, w, o], &[xo, (0, 0), oo], &[m, k, n], m.div_ceil(128) * n.div_ceil(128) * 256)
         } else {
@@ -577,9 +662,16 @@ impl Flux2Model {
     /// or the DP4A GEMM over the activation [`Self::quant_rows`] pre-packed.
     #[allow(clippy::too_many_arguments)]
     fn lin_rows(&self, x: &DeviceBuffer, w: &Lin, o: &DeviceBuffer, r0: u32, r1: u32, k: u32, n: u32) -> Step {
+        self.lin_rows_at(x, w, o, r0, r0, r1 - r0, k, n)
+    }
+
+    /// [`Self::lin_rows`] with independent input/output row bases
+    /// ([`Self::mm_rows_at`]).
+    #[allow(clippy::too_many_arguments)]
+    fn lin_rows_at(&self, x: &DeviceBuffer, w: &Lin, o: &DeviceBuffer, xr0: u32, or0: u32, m: u32, k: u32, n: u32) -> Step {
         match w {
-            Lin::F32(wb) => self.mm_rows(x, wb, o, r0, r1, k, n),
-            Lin::I8(wq, sw) => self.mm8(wq, sw, o, r0, r0, r1 - r0, k, n),
+            Lin::F32(wb) => self.mm_rows_at(x, wb, o, xr0, or0, m, k, n),
+            Lin::I8(wq, sw) => self.mm8(wq, sw, o, xr0, or0, m, k, n),
         }
     }
 
@@ -592,31 +684,55 @@ impl Flux2Model {
         }
     }
 
-    /// Modulated LayerNorm over rows `r0..r1`: `LN_noaffine·gamma + beta`.
-    fn ln_rows(&self, x: &DeviceBuffer, site: usize, o: &DeviceBuffer, r0: u32, r1: u32) -> Step {
+    /// Modulated LayerNorm over rows `r0..r1` under sample `b`'s modulation:
+    /// `LN_noaffine·gamma[b] + beta[b]`. `layernorm` takes ONE `[D]` gamma/beta
+    /// pair, so the sample selection is a binding slice — at `b = 0` this is the
+    /// same binding the unbatched model made (its buffers were exactly `[D]`).
+    fn ln_rows(&self, x: &DeviceBuffer, site: usize, o: &DeviceBuffer, b: u32, r0: u32, r1: u32) -> Step {
         let d = self.cfg.hidden as u32;
         let m = r1 - r0;
         let off = (r0 as u64 * d as u64, m as u64 * d as u64);
+        let mo = (b as u64 * d as u64, d as u64);
         self.gpu.step_sliced(
             K_LN,
             &[x, &self.modb.gamma[site], &self.modb.beta[site], o],
-            &[off, (0, 0), (0, 0), off],
+            &[off, mo, mo, off],
             &[d, m, f(EPS)],
             m,
         )
     }
 
-    /// Gated residual over rows `r0..r1`: `y = x + gate ⊙ h` (whole-range cond).
-    fn gate_rows(&self, x: &DeviceBuffer, gi: usize, h: &DeviceBuffer, y: &DeviceBuffer, r0: u32, r1: u32) -> Step {
+    /// Gated residual over rows `r0..r1`: `y = x + gate[b] ⊙ h` (one condition
+    /// group — the whole range belongs to sample `b`).
+    fn gate_rows(&self, x: &DeviceBuffer, gi: usize, h: &DeviceBuffer, y: &DeviceBuffer, b: u32, r0: u32, r1: u32) -> Step {
         let d = self.cfg.hidden as u32;
         let m = r1 - r0;
         let off = (r0 as u64 * d as u64, m as u64 * d as u64);
+        let go = (b as u64 * d as u64, d as u64);
+        self.gpu.step_sliced(
+            K_GATE,
+            &[x, &self.modb.gate[gi], h, y],
+            &[off, go, off, off],
+            &[m, d, m],
+            m * d,
+        )
+    }
+
+    /// Gated residual over the WHOLE batch slab in ONE dispatch:
+    /// `y[r] = x[r] + gate[r / rows_per_cond] ⊙ h[r]`. This is `gate_row`'s
+    /// `rows_per_cond` condition-group contract (`NC = B`) doing per-sample
+    /// modulation with no new kernel and no extra dispatch — the reason
+    /// different timesteps per batch member are free. At `B = 1`,
+    /// `rows_per_cond == rows` and the params equal [`Self::gate_rows`]'s.
+    fn gate_grouped(&self, x: &DeviceBuffer, gi: usize, h: &DeviceBuffer, y: &DeviceBuffer, rows: u32, rows_per_cond: u32) -> Step {
+        let d = self.cfg.hidden as u32;
+        let off = (0u64, rows as u64 * d as u64);
         self.gpu.step_sliced(
             K_GATE,
             &[x, &self.modb.gate[gi], h, y],
             &[off, (0, 0), off, off],
-            &[m, d, m],
-            m * d,
+            &[rows, d, rows_per_cond],
+            rows * d,
         )
     }
 
@@ -656,7 +772,11 @@ impl Flux2Model {
         }
     }
 
-    fn push_attention(&self, s: &mut Vec<Step>, n: u32) {
+    /// Joint attention over `bsz` samples of `n` rows each. Both the flash and
+    /// the materialised trio take **`bsz` as their first Param** and index
+    /// `qkv[(b·T + j)·stride]`, so a sample-major slab is batched by raising
+    /// `bsz` alone: no sample can attend to another's tokens, by construction.
+    fn push_attention(&self, s: &mut Vec<Step>, bsz: u32, n: u32) {
         let nh = self.cfg.n_heads as u32;
         let hd = self.cfg.head_dim() as u32;
         let dim = self.cfg.hidden as u32;
@@ -668,6 +788,7 @@ impl Flux2Model {
             s.push(model::block::flash_bidir_step(
                 &self.gpu,
                 model::block::FlashIds { bidir: K_FLASH, split: Some(K_FLASH_SPLIT) },
+                bsz,
                 nh,
                 n,
                 hd,
@@ -676,24 +797,29 @@ impl Flux2Model {
                 &scr.ctx,
             ));
         } else {
-            s.push(self.gpu.step(K_SCORES, &[&scr.qkv, &scr.scores], &[1, nh, n, hd, 3 * dim, 0, dim], nh * n * n));
-            s.push(self.gpu.step(K_SOFTMAX, &[&scr.scores, &scr.probs], &[1, nh, n], nh * n));
-            s.push(self.gpu.step(K_APPLY, &[&scr.probs, &scr.qkv, &scr.ctx], &[1, nh, n, hd, 3 * dim, 2 * dim, dim], nh * n * hd));
+            s.push(self.gpu.step(K_SCORES, &[&scr.qkv, &scr.scores], &[bsz, nh, n, hd, 3 * dim, 0, dim], bsz * nh * n * n));
+            s.push(self.gpu.step(K_SOFTMAX, &[&scr.scores, &scr.probs], &[bsz, nh, n], bsz * nh * n));
+            s.push(self.gpu.step(K_APPLY, &[&scr.probs, &scr.qkv, &scr.ctx], &[bsz, nh, n, hd, 3 * dim, 2 * dim, dim], bsz * nh * n * hd));
         }
     }
 
     /// Attention core shared by both block kinds: qkv is already in
-    /// `scr.q/k/v` (rope'd + packed here), result lands in `scr.ctx`.
-    fn push_attn_core(&self, s: &mut Vec<Step>, n: u32) {
+    /// `scr.q/k/v` (rope'd + packed here), result lands in `scr.ctx`. RoPE,
+    /// packing and QK-norm are per-row ops, so they run over the whole `B·n`
+    /// slab in one dispatch each; the cos/sin tables are the SAME table
+    /// replicated per sample (same resolution ⇒ same ids), computed once on the
+    /// host in [`Self::forward_batch`].
+    fn push_attn_core(&self, s: &mut Vec<Step>, bsz: u32, n: u32) {
         let d = self.cfg.hidden as u32;
         let hd = self.cfg.head_dim() as u32;
         let nh = self.cfg.n_heads as u32;
         let half = hd / 2;
+        let rows = bsz * n;
         let scr = &self.scr;
-        s.push(self.gpu.step(K_ROPE, &[&scr.qn, &scr.cos, &scr.sin, &scr.qr], &[n, nh, hd, half], n * nh * half));
-        s.push(self.gpu.step(K_ROPE, &[&scr.kn, &scr.cos, &scr.sin, &scr.kr], &[n, nh, hd, half], n * nh * half));
-        s.push(self.gpu.step(K_PACK, &[&scr.qr, &scr.kr, &scr.v, &scr.qkv], &[n, d], n * 3 * d));
-        self.push_attention(s, n);
+        s.push(self.gpu.step(K_ROPE, &[&scr.qn, &scr.cos, &scr.sin, &scr.qr], &[rows, nh, hd, half], rows * nh * half));
+        s.push(self.gpu.step(K_ROPE, &[&scr.kn, &scr.cos, &scr.sin, &scr.kr], &[rows, nh, hd, half], rows * nh * half));
+        s.push(self.gpu.step(K_PACK, &[&scr.qr, &scr.kr, &scr.v, &scr.qkv], &[rows, d], rows * 3 * d));
+        self.push_attention(s, bsz, n);
     }
 
     /// Forward one denoising evaluation.
@@ -703,170 +829,285 @@ impl Flux2Model {
     /// `[txt_len, context_in_dim]`. `ids`: joint 4-axis position ids, **text
     /// rows first** then image/ref rows (`(txt_len + n_img) * 4`). Returns the
     /// prediction for the first `n_pred` image tokens `[n_pred, in_channels]`.
+    ///
+    /// This is [`Self::forward_batch`] at B = 1 and records exactly the same
+    /// dispatch sequence it always did — the latency path is untouched.
     pub fn forward(&self, img_tokens: &[f32], ctx: &[f32], t: f32, ids: &[u32], n_pred: usize) -> Vec<f32> {
+        let mut out = self.forward_batch(&[Sample { img_tokens, ctx, t }], ids, n_pred);
+        out.pop().expect("one sample in, one out")
+    }
+
+    /// Forward `B = samples.len()` denoising evaluations in ONE device pass.
+    ///
+    /// Every sample carries its own latents, text conditioning and **timestep**;
+    /// they share `ids` (hence the resolution and reference layout), which is
+    /// what lets the RoPE tables be computed once and replicated. Returns one
+    /// `[n_pred, in_channels]` prediction per sample, in input order.
+    ///
+    /// Bit-identical to running the samples one at a time: every kernel's
+    /// per-output reduction order is independent of `M` (the register-tiled
+    /// GEMMs accumulate over K within a fixed 128×128 tile) and of `bsz` (the
+    /// attention kernels give each `(b, h, query-tile)` its own workgroup), and
+    /// the per-row norms/quantizers are row-local. `tests/batch_parity.rs`
+    /// asserts max_abs == 0.
+    pub fn forward_batch(&self, samples: &[Sample<'_>], ids: &[u32], n_pred: usize) -> Vec<Vec<f32>> {
         let cfg = &self.cfg;
         let d = cfg.hidden as u32;
         let mlp = cfg.mlp_hidden() as u32;
         let cin = cfg.in_channels as u32;
         let nt = cfg.txt_len as u32;
-        let ni = (img_tokens.len() / cfg.in_channels) as u32;
+        let bsz = samples.len() as u32;
+        assert!(bsz >= 1, "forward_batch needs at least one sample");
+        assert!(bsz <= self.b_max, "sized for batch {}, got {bsz}", self.b_max);
+        let ni = (samples[0].img_tokens.len() / cfg.in_channels) as u32;
         let n = nt + ni;
         assert!(n <= self.n_max, "sized for {} joint tokens, got {n}", self.n_max);
-        assert_eq!(ctx.len(), cfg.txt_len * cfg.context_in_dim);
         assert_eq!(ids.len() as u32, n * 4);
         assert!(n_pred as u32 <= ni);
+        for (i, s) in samples.iter().enumerate() {
+            assert_eq!(s.img_tokens.len(), (ni * cin) as usize, "sample {i}: latent length differs from sample 0");
+            assert_eq!(s.ctx.len(), cfg.txt_len * cfg.context_in_dim, "sample {i}: ctx length");
+        }
+        // Every per-sample buffer slice is bound at a byte offset, and storage
+        // bindings must respect `min_storage_buffer_offset_alignment` (256 B =
+        // 64 floats on the P40). Name the offending stride here rather than let
+        // it surface as a wgpu validation error (P9 finding, status.md).
+        if bsz > 1 && self.fast {
+            let al = |what: &str, v: u64| {
+                assert!(v % 64 == 0, "flux2 batched forward: {what} = {v} floats is not a multiple of 64 (256-byte storage-binding alignment); use B=1 at these dims");
+            };
+            al("hidden", d as u64);
+            al("mlp_hidden", mlp as u64);
+            al("txt_len * context_in_dim", nt as u64 * cfg.context_in_dim as u64);
+            al("n_img * in_channels", ni as u64 * cin as u64);
+            al("n_pred * in_channels", n_pred as u64 * cin as u64);
+            if self.precision == Precision::Int8 {
+                al("joint tokens (int8 per-token scale offset)", n as u64);
+            }
+        }
 
-        self.upload_modulation(t);
+        // Debug aid (batch profiling): BRAIN_FLUX2_TIME_FORWARD=1 splits the
+        // forward into host conditioning / input upload / step recording /
+        // device execution, which is how the B≥4 plateau in
+        // `docs/models/flux2/status.md` was attributed.
+        let timed = std::env::var("BRAIN_FLUX2_TIME_FORWARD").is_ok();
+        let t_start = std::time::Instant::now();
 
-        // RoPE tables from the joint ids (t, h, w, l), interleaved pairs.
+        let ts: Vec<f32> = samples.iter().map(|s| s.t).collect();
+        self.upload_modulation(&ts);
+        let t_mod = t_start.elapsed();
+
+        // RoPE tables from the joint ids (t, h, w, l), interleaved pairs. The
+        // ids are shared, so the (expensive) host table build happens ONCE and
+        // the result is replicated per sample — the kernel indexes the table by
+        // absolute slab row.
         let rc = dit::rope::RopeConfig {
             axes_dims: cfg.axes_dim.iter().map(|&a| a as u32).collect(),
             axes_lens: vec![4096, 4096, 4096, 4096],
             theta: cfg.rope_theta,
         };
         let tables = dit::rope::tables_for_ids(&rc, ids, 4);
-        self.gpu.write(&self.scr.cos, bytemuck::cast_slice(&tables.cos));
-        self.gpu.write(&self.scr.sin, bytemuck::cast_slice(&tables.sin));
-
-        self.gpu.write(&self.scr.tok_in, bytemuck::cast_slice(img_tokens));
-        self.gpu.write(&self.scr.ctx_in, bytemuck::cast_slice(ctx));
-
-        let scr = &self.scr;
-        let mut s: Vec<Step> = Vec::new();
-        // embed both streams into the joint residual slab x0 = [txt | img].
-        // The embeds are fp32 at every tier (see `new_with`), so no quant here.
-        s.push(self.lin_rows(&scr.ctx_in, &self.txt_in, &scr.x0, 0, nt, cfg.context_in_dim as u32, d));
-        // img rows: input read starts at tok_in row 0, output lands at row nt
-        match &self.img_in {
-            Lin::F32(wb) => {
-                let xo = (0u64, ni as u64 * cin as u64);
-                let oo = (nt as u64 * d as u64, ni as u64 * d as u64);
-                let st = if self.fast {
-                    self.gpu.step_sliced(self.mm_kernel(), &[&scr.tok_in, wb, &scr.x0], &[xo, (0, 0), oo], &[ni, cin, d], ni.div_ceil(128) * d.div_ceil(128) * 256)
-                } else {
-                    self.gpu.step_sliced(K_MATMUL, &[&scr.tok_in, wb, &scr.x0], &[xo, (0, 0), oo], &[ni, cin, d], ni * d)
-                };
-                s.push(st);
+        let tile = |v: &[f32]| -> Vec<f32> {
+            let mut out = Vec::with_capacity(v.len() * bsz as usize);
+            for _ in 0..bsz {
+                out.extend_from_slice(v);
             }
-            Lin::I8(wq, sw) => s.push(self.mm8(wq, sw, &scr.x0, 0, nt, ni, cin, d)),
+            out
+        };
+        if bsz == 1 {
+            self.gpu.write(&self.scr.cos, bytemuck::cast_slice(&tables.cos));
+            self.gpu.write(&self.scr.sin, bytemuck::cast_slice(&tables.sin));
+        } else {
+            self.gpu.write(&self.scr.cos, bytemuck::cast_slice(&tile(&tables.cos)));
+            self.gpu.write(&self.scr.sin, bytemuck::cast_slice(&tile(&tables.sin)));
+        }
+
+        // Inputs concatenate sample-major, matching the slab.
+        if bsz == 1 {
+            self.gpu.write(&self.scr.tok_in, bytemuck::cast_slice(samples[0].img_tokens));
+            self.gpu.write(&self.scr.ctx_in, bytemuck::cast_slice(samples[0].ctx));
+        } else {
+            let mut toks = Vec::with_capacity(samples[0].img_tokens.len() * bsz as usize);
+            let mut ctxs = Vec::with_capacity(samples[0].ctx.len() * bsz as usize);
+            for s in samples {
+                toks.extend_from_slice(s.img_tokens);
+                ctxs.extend_from_slice(s.ctx);
+            }
+            self.gpu.write(&self.scr.tok_in, bytemuck::cast_slice(&toks));
+            self.gpu.write(&self.scr.ctx_in, bytemuck::cast_slice(&ctxs));
+        }
+
+        let t_up = t_start.elapsed();
+        let scr = &self.scr;
+        let rows = bsz * n; // whole-slab row count
+        let mut s: Vec<Step> = Vec::new();
+        // Embed both streams into the joint residual slab x0 = [txt | img] per
+        // sample. The embeds are fp32 at every tier (see `new_with`), so no
+        // quant here. Both are per-sample because the destination rows are
+        // n-strided (sample-major slab).
+        for b in 0..bsz {
+            let base = b * n;
+            let ctx_r0 = b * nt; // ctx_in is [B*txt_len, context_in_dim]
+            s.push(self.lin_rows_at(&scr.ctx_in, &self.txt_in, &scr.x0, ctx_r0, base, nt, cfg.context_in_dim as u32, d));
+            s.push(self.lin_rows_at(&scr.tok_in, &self.img_in, &scr.x0, b * ni, base + nt, ni, cin, d));
         }
 
         let (mut xa, mut xb) = (&scr.x0, &scr.x1);
         // sites: 0=img1 1=img2 2=txt1 3=txt2; gates likewise
         for (img_w, txt_w) in &self.dbl {
             // attention halves of both streams into the joint q/k/v
-            s.push(self.ln_rows(xa, 2, &scr.n1, 0, nt)); // txt norm1
-            if txt_w.wq.is_i8() {
-                self.quant_rows(&mut s, &scr.n1, 0, nt, d);
+            for b in 0..bsz {
+                let (t0, t1) = (b * n, b * n + nt);
+                let (i0, i1) = (b * n + nt, (b + 1) * n);
+                s.push(self.ln_rows(xa, 2, &scr.n1, b, t0, t1)); // txt norm1
+                if txt_w.wq.is_i8() {
+                    self.quant_rows(&mut s, &scr.n1, t0, t1, d);
+                }
+                s.push(self.lin_rows(&scr.n1, &txt_w.wq, &scr.q, t0, t1, d, d));
+                s.push(self.lin_rows(&scr.n1, &txt_w.wk, &scr.k, t0, t1, d, d));
+                s.push(self.lin_rows(&scr.n1, &txt_w.wv, &scr.v, t0, t1, d, d));
+                s.push(self.ln_rows(xa, 0, &scr.n1, b, i0, i1)); // img norm1
+                if img_w.wq.is_i8() {
+                    self.quant_rows(&mut s, &scr.n1, i0, i1, d);
+                }
+                s.push(self.lin_rows(&scr.n1, &img_w.wq, &scr.q, i0, i1, d, d));
+                s.push(self.lin_rows(&scr.n1, &img_w.wk, &scr.k, i0, i1, d, d));
+                s.push(self.lin_rows(&scr.n1, &img_w.wv, &scr.v, i0, i1, d, d));
+                s.push(self.qknorm_rows(&scr.q, &txt_w.nq, &scr.qn, t0, t1));
+                s.push(self.qknorm_rows(&scr.k, &txt_w.nk, &scr.kn, t0, t1));
+                s.push(self.qknorm_rows(&scr.q, &img_w.nq, &scr.qn, i0, i1));
+                s.push(self.qknorm_rows(&scr.k, &img_w.nk, &scr.kn, i0, i1));
             }
-            s.push(self.lin_rows(&scr.n1, &txt_w.wq, &scr.q, 0, nt, d, d));
-            s.push(self.lin_rows(&scr.n1, &txt_w.wk, &scr.k, 0, nt, d, d));
-            s.push(self.lin_rows(&scr.n1, &txt_w.wv, &scr.v, 0, nt, d, d));
-            s.push(self.ln_rows(xa, 0, &scr.n1, nt, n)); // img norm1
-            if img_w.wq.is_i8() {
-                self.quant_rows(&mut s, &scr.n1, nt, n, d);
-            }
-            s.push(self.lin_rows(&scr.n1, &img_w.wq, &scr.q, nt, n, d, d));
-            s.push(self.lin_rows(&scr.n1, &img_w.wk, &scr.k, nt, n, d, d));
-            s.push(self.lin_rows(&scr.n1, &img_w.wv, &scr.v, nt, n, d, d));
-            s.push(self.qknorm_rows(&scr.q, &txt_w.nq, &scr.qn, 0, nt));
-            s.push(self.qknorm_rows(&scr.k, &txt_w.nk, &scr.kn, 0, nt));
-            s.push(self.qknorm_rows(&scr.q, &img_w.nq, &scr.qn, nt, n));
-            s.push(self.qknorm_rows(&scr.k, &img_w.nk, &scr.kn, nt, n));
-            self.push_attn_core(&mut s, n);
+            self.push_attn_core(&mut s, bsz, n);
             // per-stream projection + gated residual (ONE ctx quant, two GEMMs)
             if txt_w.wo.is_i8() || img_w.wo.is_i8() {
-                self.quant_rows(&mut s, &scr.ctx, 0, n, d);
+                self.quant_rows(&mut s, &scr.ctx, 0, rows, d);
             }
-            s.push(self.lin_rows(&scr.ctx, &txt_w.wo, &scr.proj, 0, nt, d, d));
-            s.push(self.lin_rows(&scr.ctx, &img_w.wo, &scr.proj, nt, n, d, d));
-            s.push(self.gate_rows(xa, 2, &scr.proj, xb, 0, nt));
-            s.push(self.gate_rows(xa, 0, &scr.proj, xb, nt, n));
+            for b in 0..bsz {
+                let (t0, t1) = (b * n, b * n + nt);
+                let (i0, i1) = (b * n + nt, (b + 1) * n);
+                s.push(self.lin_rows(&scr.ctx, &txt_w.wo, &scr.proj, t0, t1, d, d));
+                s.push(self.lin_rows(&scr.ctx, &img_w.wo, &scr.proj, i0, i1, d, d));
+                s.push(self.gate_rows(xa, 2, &scr.proj, xb, b, t0, t1));
+                s.push(self.gate_rows(xa, 0, &scr.proj, xb, b, i0, i1));
+            }
             std::mem::swap(&mut xa, &mut xb);
             // MLP halves
-            s.push(self.ln_rows(xa, 3, &scr.n1, 0, nt)); // txt norm2
-            if txt_w.w1.is_i8() {
-                self.quant_rows(&mut s, &scr.n1, 0, nt, d);
+            for b in 0..bsz {
+                let (t0, t1) = (b * n, b * n + nt);
+                let (i0, i1) = (b * n + nt, (b + 1) * n);
+                s.push(self.ln_rows(xa, 3, &scr.n1, b, t0, t1)); // txt norm2
+                if txt_w.w1.is_i8() {
+                    self.quant_rows(&mut s, &scr.n1, t0, t1, d);
+                }
+                s.push(self.lin_rows(&scr.n1, &txt_w.w1, &scr.h1, t0, t1, d, mlp));
+                s.push(self.lin_rows(&scr.n1, &txt_w.w3, &scr.h2, t0, t1, d, mlp));
+                s.push(self.ln_rows(xa, 1, &scr.n1, b, i0, i1)); // img norm2
+                if img_w.w1.is_i8() {
+                    self.quant_rows(&mut s, &scr.n1, i0, i1, d);
+                }
+                s.push(self.lin_rows(&scr.n1, &img_w.w1, &scr.h1, i0, i1, d, mlp));
+                s.push(self.lin_rows(&scr.n1, &img_w.w3, &scr.h2, i0, i1, d, mlp));
             }
-            s.push(self.lin_rows(&scr.n1, &txt_w.w1, &scr.h1, 0, nt, d, mlp));
-            s.push(self.lin_rows(&scr.n1, &txt_w.w3, &scr.h2, 0, nt, d, mlp));
-            s.push(self.ln_rows(xa, 1, &scr.n1, nt, n)); // img norm2
-            if img_w.w1.is_i8() {
-                self.quant_rows(&mut s, &scr.n1, nt, n, d);
-            }
-            s.push(self.lin_rows(&scr.n1, &img_w.w1, &scr.h1, nt, n, d, mlp));
-            s.push(self.lin_rows(&scr.n1, &img_w.w3, &scr.h2, nt, n, d, mlp));
-            s.push(self.gpu.step(K_SILU_MUL, &[&scr.h1, &scr.h2, &scr.hs], &[n * mlp], n * mlp));
+            s.push(self.gpu.step(K_SILU_MUL, &[&scr.h1, &scr.h2, &scr.hs], &[rows * mlp], rows * mlp));
             if txt_w.w2.is_i8() || img_w.w2.is_i8() {
-                self.quant_rows(&mut s, &scr.hs, 0, n, mlp);
+                self.quant_rows(&mut s, &scr.hs, 0, rows, mlp);
             }
-            s.push(self.lin_rows(&scr.hs, &txt_w.w2, &scr.mlp, 0, nt, mlp, d));
-            s.push(self.lin_rows(&scr.hs, &img_w.w2, &scr.mlp, nt, n, mlp, d));
-            s.push(self.gate_rows(xa, 3, &scr.mlp, xb, 0, nt));
-            s.push(self.gate_rows(xa, 1, &scr.mlp, xb, nt, n));
+            for b in 0..bsz {
+                let (t0, t1) = (b * n, b * n + nt);
+                let (i0, i1) = (b * n + nt, (b + 1) * n);
+                s.push(self.lin_rows(&scr.hs, &txt_w.w2, &scr.mlp, t0, t1, mlp, d));
+                s.push(self.lin_rows(&scr.hs, &img_w.w2, &scr.mlp, i0, i1, mlp, d));
+                s.push(self.gate_rows(xa, 3, &scr.mlp, xb, b, t0, t1));
+                s.push(self.gate_rows(xa, 1, &scr.mlp, xb, b, i0, i1));
+            }
             std::mem::swap(&mut xa, &mut xb);
         }
 
         for w in &self.sgl {
             // parallel attn ‖ MLP over one shared modulated norm — ONE n1 quant
             // feeds q/k/v AND w1/w3 (attention touches no d-width quant state).
-            s.push(self.ln_rows(xa, 4, &scr.n1, 0, n));
-            if w.wq.is_i8() || w.w1.is_i8() {
-                self.quant_rows(&mut s, &scr.n1, 0, n, d);
+            // Everything but the LN is stream-agnostic, so the whole B·n slab
+            // goes through in ONE dispatch each: this is where batching buys the
+            // GEMM its extra rows (20 of klein-4B's 25 blocks).
+            for b in 0..bsz {
+                s.push(self.ln_rows(xa, 4, &scr.n1, b, b * n, (b + 1) * n));
             }
-            s.push(self.lin_full(&scr.n1, &w.wq, &scr.q, n, d, d));
-            s.push(self.lin_full(&scr.n1, &w.wk, &scr.k, n, d, d));
-            s.push(self.lin_full(&scr.n1, &w.wv, &scr.v, n, d, d));
-            s.push(self.qknorm_rows(&scr.q, &w.nq, &scr.qn, 0, n));
-            s.push(self.qknorm_rows(&scr.k, &w.nk, &scr.kn, 0, n));
-            self.push_attn_core(&mut s, n);
-            s.push(self.lin_full(&scr.n1, &w.w1, &scr.h1, n, d, mlp));
-            s.push(self.lin_full(&scr.n1, &w.w3, &scr.h2, n, d, mlp));
-            s.push(self.gpu.step(K_SILU_MUL, &[&scr.h1, &scr.h2, &scr.hs], &[n * mlp], n * mlp));
+            if w.wq.is_i8() || w.w1.is_i8() {
+                self.quant_rows(&mut s, &scr.n1, 0, rows, d);
+            }
+            s.push(self.lin_full(&scr.n1, &w.wq, &scr.q, rows, d, d));
+            s.push(self.lin_full(&scr.n1, &w.wk, &scr.k, rows, d, d));
+            s.push(self.lin_full(&scr.n1, &w.wv, &scr.v, rows, d, d));
+            s.push(self.qknorm_rows(&scr.q, &w.nq, &scr.qn, 0, rows));
+            s.push(self.qknorm_rows(&scr.k, &w.nk, &scr.kn, 0, rows));
+            self.push_attn_core(&mut s, bsz, n);
+            s.push(self.lin_full(&scr.n1, &w.w1, &scr.h1, rows, d, mlp));
+            s.push(self.lin_full(&scr.n1, &w.w3, &scr.h2, rows, d, mlp));
+            s.push(self.gpu.step(K_SILU_MUL, &[&scr.h1, &scr.h2, &scr.hs], &[rows * mlp], rows * mlp));
             // linear2 over cat(attn, mlp): two column-split matmuls, summed.
             // ctx is quantized only now — after w1/w3 consumed the n1 packing.
             if w.wo_a.is_i8() {
-                self.quant_rows(&mut s, &scr.ctx, 0, n, d);
+                self.quant_rows(&mut s, &scr.ctx, 0, rows, d);
             }
-            s.push(self.lin_full(&scr.ctx, &w.wo_a, &scr.proj, n, d, d));
+            s.push(self.lin_full(&scr.ctx, &w.wo_a, &scr.proj, rows, d, d));
             if w.wo_b.is_i8() {
-                self.quant_rows(&mut s, &scr.hs, 0, n, mlp);
+                self.quant_rows(&mut s, &scr.hs, 0, rows, mlp);
             }
-            s.push(self.lin_full(&scr.hs, &w.wo_b, &scr.mlp, n, mlp, d));
-            // y = x + gate ⊙ proj ; then y += gate ⊙ mlp (two gated adds)
-            s.push(self.gate_rows(xa, 4, &scr.proj, xb, 0, n));
+            s.push(self.lin_full(&scr.hs, &w.wo_b, &scr.mlp, rows, mlp, d));
+            // y = x + gate ⊙ proj ; then y += gate ⊙ mlp (two gated adds), each
+            // one dispatch over the batch via `rows_per_cond = n` groups.
+            s.push(self.gate_grouped(xa, 4, &scr.proj, xb, rows, n));
             std::mem::swap(&mut xa, &mut xb);
-            s.push(self.gate_rows(xa, 4, &scr.mlp, xb, 0, n));
+            s.push(self.gate_grouped(xa, 4, &scr.mlp, xb, rows, n));
             std::mem::swap(&mut xa, &mut xb);
         }
 
-        // final layer on the predicted image rows only
-        let p0 = nt;
-        let p1 = nt + n_pred as u32;
-        s.push(self.ln_rows(xa, 5, &scr.n1, p0, p1));
-        if matches!(self.final_w, Lin::I8(..)) {
-            self.quant_rows(&mut s, &scr.n1, p0, p1, d);
-        }
-        match &self.final_w {
-            Lin::F32(wb) => {
-                let xo = (p0 as u64 * d as u64, n_pred as u64 * d as u64);
-                let oo = (0u64, n_pred as u64 * cin as u64);
-                let m = n_pred as u32;
-                let st = if self.fast {
-                    self.gpu.step_sliced(self.mm_kernel(), &[&scr.n1, wb, &scr.out], &[xo, (0, 0), oo], &[m, d, cin], m.div_ceil(128) * cin.div_ceil(128) * 256)
-                } else {
-                    self.gpu.step_sliced(K_MATMUL, &[&scr.n1, wb, &scr.out], &[xo, (0, 0), oo], &[m, d, cin], m * cin)
-                };
-                s.push(st);
+        // final layer on each sample's predicted image rows only
+        for b in 0..bsz {
+            let p0 = b * n + nt;
+            let p1 = p0 + n_pred as u32;
+            s.push(self.ln_rows(xa, 5, &scr.n1, b, p0, p1));
+            if matches!(self.final_w, Lin::I8(..)) {
+                self.quant_rows(&mut s, &scr.n1, p0, p1, d);
             }
-            Lin::I8(wq, sw) => s.push(self.mm8(wq, sw, &scr.out, p0, 0, n_pred as u32, d, cin)),
+            s.push(self.lin_rows_at(&scr.n1, &self.final_w, &scr.out, p0, b * n_pred as u32, n_pred as u32, d, cin));
         }
 
         // debug aid: SMOKE_STEPS=k submits only the first k steps
         let take = std::env::var("SMOKE_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(s.len());
+        let t_rec = t_start.elapsed();
+        let nsteps = s.len();
         self.gpu.submit(&[], &s[..take.min(s.len())]);
-        self.gpu.read(&self.scr.out, n_pred * cfg.in_channels)
+        let flat = self.gpu.read(&self.scr.out, bsz as usize * n_pred * cfg.in_channels);
+        if timed {
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+            eprintln!(
+                "flux2 forward B={bsz} n={n} steps={nsteps}: modulation {:.1} ms, upload {:.1} ms, record {:.1} ms, device {:.1} ms, total {:.1} ms",
+                ms(t_mod),
+                ms(t_up - t_mod),
+                ms(t_rec - t_up),
+                ms(t_start.elapsed() - t_rec),
+                ms(t_start.elapsed())
+            );
+        }
+        flat.chunks(n_pred * cfg.in_channels).map(<[f32]>::to_vec).collect()
     }
+}
+
+/// One sample of a batched DiT forward ([`Flux2Model::forward_batch`]).
+///
+/// The batch shares position ids (resolution + reference layout) and therefore
+/// the RoPE tables; everything else — latents, text conditioning and the
+/// **timestep** — is per sample, which is what lets requests with different
+/// seeds, step counts and CFG settings ride in one forward.
+pub struct Sample<'a> {
+    /// packed latent tokens `[n_img, in_channels]` (noise image, then refs)
+    pub img_tokens: &'a [f32],
+    /// text conditioning `[txt_len, context_in_dim]`
+    pub ctx: &'a [f32],
+    /// this sample's sigma / timestep
+    pub t: f32,
 }
 
 /// Joint 4-axis position ids in the reference layout, text rows first.
