@@ -154,6 +154,131 @@ fn s1_stack(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder, quant: Qu
     tp.linear_biased_to("ctx", "head.proj_s1", w, s1v, d, "s1_logits");
 }
 
+/// dep PREFILL: project the whole context `ctx:[1,T,D]` to the cross-attention
+/// K/V once, `dep_k`/`dep_v:[1,dep_heads,T,dep_hd]` (K RoPE'd at each position),
+/// seeding the dep decode cache — mirrors host `ensure_dep_kv`.
+pub fn build_kronos_dep_prefill_graph(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder) {
+    build_kronos_dep_prefill_graph_quant(cfg, w, t, g, Quant::F32);
+}
+pub fn build_kronos_dep_prefill_graph_quant(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder, quant: Quant) {
+    let d = cfg.d_model;
+    let heads = cfg.dep_n_heads;
+    let hd = d / heads;
+    let half = hd / 2;
+    let ti = t as i64;
+    let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant };
+
+    tp.g.input_f32("ctx", &[1, ti, d as i64]);
+    tp.g.output_f32("dep_k", &[1, heads as i64, ti, hd as i64]);
+    tp.g.output_f32("dep_v", &[1, heads as i64, ti, hd as i64]);
+
+    let (mut cos, mut sin) = (vec![0f32; t * half], vec![0f32; t * half]);
+    for p in 0..t {
+        for j in 0..half {
+            let ang = p as f32 * 10000f32.powf(-(2.0 * j as f32) / hd as f32);
+            cos[p * half + j] = ang.cos();
+            sin[p * half + j] = ang.sin();
+        }
+    }
+    tp.f32("rope_cos", &[1, ti, 1, half as i64], cos);
+    tp.f32("rope_sin", &[1, ti, 1, half as i64], sin);
+    tp.i64("sh_heads", &[4], vec![1, ti, heads as i64, hd as i64]);
+    tp.i64("h_lo0", &[1], vec![0]);
+    tp.i64("h_hi0", &[1], vec![half as i64]);
+    tp.i64("h_lo1", &[1], vec![half as i64]);
+    tp.i64("h_hi1", &[1], vec![hd as i64]);
+    tp.i64("h_ax", &[1], vec![3]);
+    tp.i64("h_st", &[1], vec![1]);
+
+    let cx = "dep_layer.cross_attn";
+    let k = tp.linear_biased("ctx", &format!("{cx}.k_proj"), w, d, d);
+    let v = tp.linear_biased("ctx", &format!("{cx}.v_proj"), w, d, d);
+    let k4 = tp.reshape(&k, "sh_heads");
+    let v4 = tp.reshape(&v, "sh_heads");
+    let k4 = tp.rope_neox(&k4);
+    tp.g.add(Node::new("Transpose", &[&k4], &["dep_k"]).attr_ints("perm", &[0, 2, 1, 3]));
+    tp.g.add(Node::new("Transpose", &[&v4], &["dep_v"]).attr_ints("perm", &[0, 2, 1, 3]));
+}
+
+/// dep DECODE (single token): `sib:[1,1,D]` (RAW emb_s1 of the sampled s1) +
+/// `ctx_last:[1,1,D]` (this position's s1 context) + `rope_cos`/`rope_sin:
+/// [1,1,1,dep_hd/2]` + `dep_mask:[1,1,1,cap]` + `past_dep_k`/`past_dep_v:
+/// [1,dep_heads,cap,dep_hd]` → `new_dep_k`/`new_dep_v:[1,dep_heads,1,dep_hd]`,
+/// `s2_logits:[1,1,s2v]`. The dep cross-attn is non-causal but during the rollout
+/// only positions `0..=pos` exist, so `dep_mask` (0 on filled slots) + the self
+/// score attends exactly the same set the full-window dep graph would.
+pub fn build_kronos_dep_decode_graph(cfg: &KronosConfig, w: &W, cap: usize, g: &mut GraphBuilder) {
+    build_kronos_dep_decode_graph_quant(cfg, w, cap, g, Quant::F32);
+}
+pub fn build_kronos_dep_decode_graph_quant(cfg: &KronosConfig, w: &W, cap: usize, g: &mut GraphBuilder, quant: Quant) {
+    let d = cfg.d_model;
+    let heads = cfg.dep_n_heads;
+    let hd = d / heads;
+    let half = hd / 2;
+    let s2v = cfg.s2_vocab();
+    let ci = cap as i64;
+    let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant };
+
+    tp.g.input_f32("sib", &[1, 1, d as i64]);
+    tp.g.input_f32("ctx_last", &[1, 1, d as i64]);
+    tp.g.input_f32("rope_cos", &[1, 1, 1, half as i64]);
+    tp.g.input_f32("rope_sin", &[1, 1, 1, half as i64]);
+    tp.g.input_f32("dep_mask", &[1, 1, 1, ci]);
+    tp.g.input_f32("past_dep_k", &[1, heads as i64, ci, hd as i64]);
+    tp.g.input_f32("past_dep_v", &[1, heads as i64, ci, hd as i64]);
+    tp.g.output_f32("new_dep_k", &[1, heads as i64, 1, hd as i64]);
+    tp.g.output_f32("new_dep_v", &[1, heads as i64, 1, hd as i64]);
+    tp.g.output_f32("s2_logits", &[1, 1, s2v as i64]);
+
+    tp.f32("c_eps", &[1], vec![1e-5]);
+    tp.f32("c_scale", &[1], vec![1.0 / (hd as f32).sqrt()]);
+    tp.i64("sh_heads1", &[4], vec![1, 1, heads as i64, hd as i64]);
+    tp.i64("sh_flat1", &[3], vec![1, 1, d as i64]);
+    tp.i64("h_lo0", &[1], vec![0]);
+    tp.i64("h_hi0", &[1], vec![half as i64]);
+    tp.i64("h_lo1", &[1], vec![half as i64]);
+    tp.i64("h_hi1", &[1], vec![hd as i64]);
+    tp.i64("h_ax", &[1], vec![3]);
+    tp.i64("h_st", &[1], vec![1]);
+    tp.i64("sl_ax", &[1], vec![3]);
+    tp.i64("sl_0", &[1], vec![0]);
+    tp.i64("sl_cap", &[1], vec![ci]);
+    tp.i64("sl_cap1", &[1], vec![ci + 1]);
+
+    let cx = "dep_layer.cross_attn";
+    let q = tp.linear_biased("sib", &format!("{cx}.q_proj"), w, d, d);
+    let k = tp.linear_biased("ctx_last", &format!("{cx}.k_proj"), w, d, d);
+    let v = tp.linear_biased("ctx_last", &format!("{cx}.v_proj"), w, d, d);
+    let q4 = tp.reshape(&q, "sh_heads1");
+    let k4 = tp.reshape(&k, "sh_heads1");
+    let v4 = tp.reshape(&v, "sh_heads1");
+    let q4 = tp.rope_neox(&q4);
+    let k4 = tp.rope_neox(&k4);
+    let qt = tp.transpose(&q4, &[0, 2, 1, 3]); // [1,heads,1,hd]
+    tp.g.add(Node::new("Transpose", &[&k4], &["new_dep_k"]).attr_ints("perm", &[0, 2, 1, 3]));
+    tp.g.add(Node::new("Transpose", &[&v4], &["new_dep_v"]).attr_ints("perm", &[0, 2, 1, 3]));
+    let pkt = tp.transpose("past_dep_k", &[0, 1, 3, 2]);
+    let sp = tp.matmul(&qt, &pkt);
+    let sp = tp.mul(&sp, "c_scale");
+    let sp = tp.add(&sp, "dep_mask");
+    let nkt = tp.transpose("new_dep_k", &[0, 1, 3, 2]);
+    let ss = tp.matmul(&qt, &nkt);
+    let ss = tp.mul(&ss, "c_scale");
+    let scores = tp.concat2(&sp, &ss, 3);
+    let probs = tp.softmax(&scores, -1);
+    let pp = tp.slice(&probs, "sl_0", "sl_cap", "sl_ax");
+    let ps = tp.slice(&probs, "sl_cap", "sl_cap1", "sl_ax");
+    let cp = tp.matmul(&pp, "past_dep_v");
+    let cs = tp.matmul(&ps, "new_dep_v");
+    let ctxa = tp.add_t(&cp, &cs);
+    let ctxa = tp.transpose(&ctxa, &[0, 2, 1, 3]);
+    let ctxa = tp.reshape(&ctxa, "sh_flat1");
+    let o = tp.linear_biased(&ctxa, &format!("{cx}.out_proj"), w, d, d);
+    let sum = tp.add_t("ctx_last", &o);
+    tp.rmsnorm_to(&sum, "dep_layer.norm.weight", w, d, "s2_normed");
+    tp.linear_biased_to("s2_normed", "head.proj_s2", w, s2v, d, "s2_logits");
+}
+
 /// Assemble the Kronos `decode_s2` dependency-layer graph into `g` (fp32).
 pub fn build_kronos_dep_graph(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder) {
     build_kronos_dep_graph_quant(cfg, w, t, g, Quant::F32);

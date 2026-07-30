@@ -12,7 +12,10 @@
 use std::collections::HashMap;
 
 use kronos::KronosConfig;
-use npu::kronos_topology::{build_kronos_decoder_graph, build_kronos_s1_decode_graph, build_kronos_s1_prefill_graph};
+use npu::kronos_topology::{
+    build_kronos_dep_decode_graph, build_kronos_dep_graph, build_kronos_dep_prefill_graph, build_kronos_decoder_graph,
+    build_kronos_s1_decode_graph, build_kronos_s1_prefill_graph,
+};
 use npu::openvino::{available_devices, Feed, NpuConfig, NpuDevice, NpuGraph, PerfHint};
 use onnx::GraphBuilder;
 
@@ -149,4 +152,91 @@ fn s1_cached_rollout_matches_full_window() {
         }
     }
     eprintln!("s1 cached rollout vs full window: worst cosine {worst:.6} (cap={cap}, ctx={t_ctx})");
+}
+
+#[test]
+fn dep_cached_rollout_matches_full_window() {
+    if available_devices().map(|d| d.is_empty()).unwrap_or(true) {
+        eprintln!("skip: no OpenVINO runtime");
+        return;
+    }
+    let cfg = KronosConfig::tiny();
+    let w = rand_weights(&cfg);
+    let (d, s2v) = (cfg.d_model, cfg.s2_vocab());
+    let heads = cfg.dep_n_heads;
+    let hd = d / heads;
+    let half = hd / 2;
+    let (cap, t_ctx) = (8usize, 5usize);
+
+    // random s1 context + per-position sibling embeddings [cap, d].
+    let ctx: Vec<f32> = (0..cap * d).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+    let sib: Vec<f32> = (0..cap * d).map(|i| ((i as f32) * 0.019 + 1.0).cos() * 0.5).collect();
+
+    // dep prefill over 0..t_ctx → cache [heads, cap, hd].
+    let mut gp = GraphBuilder::new("dep_prefill");
+    build_kronos_dep_prefill_graph(&cfg, &w, t_ctx, &mut gp);
+    let mut pre = NpuGraph::compile_bytes(&gp.finish(), &cpu()).expect("compile dep prefill");
+    let pout = pre.run(&[("ctx", Feed::F32(&ctx[..t_ctx * d], vec![1, t_ctx as i64, d as i64]))]).expect("run dep prefill");
+    let mut dk = vec![0.0f32; heads * cap * hd];
+    let mut dv = vec![0.0f32; heads * cap * hd];
+    for (buf, name) in [(&mut dk, "dep_k"), (&mut dv, "dep_v")] {
+        let src = get(&pout, name); // [heads, t_ctx, hd]
+        for h in 0..heads {
+            for p in 0..t_ctx {
+                for j in 0..hd {
+                    buf[(h * cap + p) * hd + j] = src[(h * t_ctx + p) * hd + j];
+                }
+            }
+        }
+    }
+
+    let mut gd = GraphBuilder::new("dep_decode");
+    build_kronos_dep_decode_graph(&cfg, &w, cap, &mut gd);
+    let mut dec = NpuGraph::compile_bytes(&gd.finish(), &cpu()).expect("compile dep decode");
+
+    let mut worst = 1.0f32;
+    for p in t_ctx..cap {
+        // reference: the full dep graph over the growing context 0..p+1, last row.
+        let tref = p + 1;
+        let mut gr = GraphBuilder::new("dep_full");
+        build_kronos_dep_graph(&cfg, &w, tref, &mut gr);
+        let mut refg = NpuGraph::compile_bytes(&gr.finish(), &cpu()).expect("compile dep full");
+        let rout = refg
+            .run(&[
+                ("ctx", Feed::F32(&ctx[..tref * d], vec![1, tref as i64, d as i64])),
+                ("sib", Feed::F32(&sib[..tref * d], vec![1, tref as i64, d as i64])),
+            ])
+            .expect("run dep full");
+        let ref_last = &get(&rout, "s2_logits")[p * s2v..(p + 1) * s2v];
+
+        let cos_t: Vec<f32> = (0..half).map(|j| (p as f32 * 10000f32.powf(-(2.0 * j as f32) / hd as f32)).cos()).collect();
+        let sin_t: Vec<f32> = (0..half).map(|j| (p as f32 * 10000f32.powf(-(2.0 * j as f32) / hd as f32)).sin()).collect();
+        let mask: Vec<f32> = (0..cap).map(|j| if j < p { 0.0 } else { -1e9 }).collect();
+        let dout = {
+            let feeds: Vec<(&str, Feed)> = vec![
+                ("sib", Feed::F32(&sib[p * d..(p + 1) * d], vec![1, 1, d as i64])),
+                ("ctx_last", Feed::F32(&ctx[p * d..(p + 1) * d], vec![1, 1, d as i64])),
+                ("rope_cos", Feed::F32(&cos_t, vec![1, 1, 1, half as i64])),
+                ("rope_sin", Feed::F32(&sin_t, vec![1, 1, 1, half as i64])),
+                ("dep_mask", Feed::F32(&mask, vec![1, 1, 1, cap as i64])),
+                ("past_dep_k", Feed::F32(&dk, vec![1, heads as i64, cap as i64, hd as i64])),
+                ("past_dep_v", Feed::F32(&dv, vec![1, heads as i64, cap as i64, hd as i64])),
+            ];
+            dec.run(&feeds).expect("run dep decode")
+        };
+        let c_lg = cosine(get(&dout, "s2_logits"), ref_last);
+        worst = worst.min(c_lg);
+        eprintln!("pos {p}: s2_logits cosine {c_lg:.6}");
+        assert!(c_lg > 0.999, "cached dep decode diverged at pos {p}: {c_lg}");
+        // append this position's dep K/V to the cache.
+        for (buf, name) in [(&mut dk, "new_dep_k"), (&mut dv, "new_dep_v")] {
+            let nn = get(&dout, name); // [heads,1,hd]
+            for h in 0..heads {
+                for j in 0..hd {
+                    buf[(h * cap + p) * hd + j] = nn[h * hd + j];
+                }
+            }
+        }
+    }
+    eprintln!("dep cached rollout vs full window: worst cosine {worst:.6} (cap={cap}, ctx={t_ctx})");
 }
