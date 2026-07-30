@@ -93,6 +93,35 @@ truncated fp32 shard (layers 0..=27, ~16 GiB resident on a non-ReBAR P40);
 `gpu<i>:i8` uses `Qwen::new_shard_i8` instead so **int8 DiT + int8 TE fit one
 24 GB card**. Parity + timing tables: `status.md` §P8.
 
+## Prompting the edit path (measured)
+
+Klein is an *instruction*-trained editor. Prompt format materially changes the
+result — measured on a B&W photo at 768×1056, `luma-corr` = structural fidelity
+to the source, `sat` = mean saturation (did it actually add colour):
+
+| prompt / mode | luma-corr | sat |
+|---|---:|---:|
+| long scene description, from noise | 0.657 | 0.511 |
+| **`"Colorize this photograph."` (instruction), from noise** | **0.853** | **0.414** |
+| description **or** instruction + `--strength` (img2img init) | 0.999 | **0.011** |
+
+Two rules follow:
+
+1. **Use short imperative instructions referring to the image**
+   (`"Colorize this photograph."`, `"Make it snow."`), not a description of the
+   scene you want. Same model, same seed: fidelity 0.657 → 0.853 with colour
+   retained. A description is a text-to-image prompt and the model treats it
+   as one.
+2. **`--strength` (img2img) and colour changes are mutually exclusive.** The
+   init latent reconstructs the source *including its greyness* — even at
+   strength 0.9, saturation stays 0.011. Klein is guidance-distilled, so there
+   is no CFG to weight the prompt against the image evidence. Use `--strength`
+   for structure-preserving *tonal/texture* edits; use reference-only (from
+   noise) when the edit must change colour or content, and accept ~0.85
+   structural fidelity. Faithful colorization needs CFG (the undistilled
+   `base-4b`), a colorization LoRA (`brain flux2` can train one), or a
+   purpose-built model.
+
 ## Parity (the gate)
 
 Stage-by-stage vs the diffusers/BFL reference on dumped goldens
