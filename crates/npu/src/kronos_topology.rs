@@ -38,13 +38,21 @@ pub fn build_kronos_decoder_graph(cfg: &KronosConfig, w: &W, t: usize, g: &mut G
 }
 
 /// As [`build_kronos_decoder_graph`] with a weight-quantization mode.
-pub fn build_kronos_decoder_graph_quant(
-    cfg: &KronosConfig,
-    w: &W,
-    t: usize,
-    g: &mut GraphBuilder,
-    quant: Quant,
-) {
+pub fn build_kronos_decoder_graph_quant(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder, quant: Quant) {
+    s1_stack(cfg, w, t, g, quant, false);
+}
+
+/// s1 PREFILL: the full-window decoder, additionally emitting per-layer RoPE'd
+/// `k_{l}`/`v_{l}` `[1,heads,T,hd]` — these seed the single-token decode's KV cache
+/// (`build_kronos_s1_decode_graph`). Same math as the plain decoder graph.
+pub fn build_kronos_s1_prefill_graph_quant(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder, quant: Quant) {
+    s1_stack(cfg, w, t, g, quant, true);
+}
+pub fn build_kronos_s1_prefill_graph(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder) {
+    s1_stack(cfg, w, t, g, Quant::F32, true);
+}
+
+fn s1_stack(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder, quant: Quant, emit_kv: bool) {
     let d = cfg.d_model;
     let heads = cfg.n_heads;
     let hd = d / heads;
@@ -107,8 +115,19 @@ pub fn build_kronos_decoder_graph_quant(
         let q4 = tp.rope_neox(&q4);
         let k4 = tp.rope_neox(&k4);
         let qt = tp.transpose(&q4, &[0, 2, 1, 3]); // [1,heads,T,hd]
-        let kt = tp.transpose(&k4, &[0, 2, 1, 3]);
-        let vt = tp.transpose(&v4, &[0, 2, 1, 3]);
+        // When seeding the decode cache, the RoPE'd K/V transposes write directly to
+        // the graph outputs `k_{b}`/`v_{b}` (a declared output can still be consumed
+        // downstream — writing via an Identity lets OpenVINO fold+drop the output).
+        let (kt, vt) = if emit_kv {
+            let (kn, vn) = (format!("k_{b}"), format!("v_{b}"));
+            tp.g.output_f32(&kn, &[1, heads as i64, t as i64, hd as i64]);
+            tp.g.output_f32(&vn, &[1, heads as i64, t as i64, hd as i64]);
+            tp.g.add(Node::new("Transpose", &[&k4], &[&kn]).attr_ints("perm", &[0, 2, 1, 3]));
+            tp.g.add(Node::new("Transpose", &[&v4], &[&vn]).attr_ints("perm", &[0, 2, 1, 3]));
+            (kn, vn)
+        } else {
+            (tp.transpose(&k4, &[0, 2, 1, 3]), tp.transpose(&v4, &[0, 2, 1, 3]))
+        };
         let ktt = tp.transpose(&kt, &[0, 1, 3, 2]);
         let scores = tp.matmul(&qt, &ktt);
         let scores = tp.mul(&scores, "c_scale"); // 1/sqrt(hd)
@@ -208,6 +227,112 @@ pub fn build_kronos_dep_graph_quant(
     let sum = tp.add_t("ctx", &o);
     tp.rmsnorm_to(&sum, "dep_layer.norm.weight", w, d, "s2_normed");
     tp.linear_biased_to("s2_normed", "head.proj_s2", w, s2v, d, "s2_logits");
+}
+
+// ============================ cached rollout graphs ============================
+//
+// The full-window graphs above recompute all T positions every decode step
+// (O(T²)/step). These give the NPU the same KV-cache + shared-prefill the host
+// `forecast_cached` has: a PREFILL graph seeds a fixed-`cap` KV cache over the
+// context, then a single-token DECODE graph appends one token, attending the
+// cached K/V (O(cap)/step). Mirrors qwen's build_talker_{prefill,decode}_graph.
+// RoPE is shift-invariant (`q_i·k_j` depends only on `i−j`), so keys cached at
+// absolute positions stay valid — the same property the qwen decode graph uses.
+
+/// s1 DECODE (single token): `x:[1,1,D]` + per-layer `past_k_{l}`/`past_v_{l}:
+/// [1,heads,cap,hd]` + `rope_cos`/`rope_sin:[1,1,1,hd/2]` (this token's absolute
+/// position) + `past_mask:[1,1,1,cap]` (additive, 0 on filled slots) → per-layer
+/// `new_k_{l}`/`new_v_{l}:[1,heads,1,hd]`, `ctx:[1,1,D]`, `s1_logits:[1,1,s1v]`.
+pub fn build_kronos_s1_decode_graph(cfg: &KronosConfig, w: &W, cap: usize, g: &mut GraphBuilder) {
+    build_kronos_s1_decode_graph_quant(cfg, w, cap, g, Quant::F32);
+}
+pub fn build_kronos_s1_decode_graph_quant(cfg: &KronosConfig, w: &W, cap: usize, g: &mut GraphBuilder, quant: Quant) {
+    let d = cfg.d_model;
+    let heads = cfg.n_heads;
+    let hd = d / heads;
+    let half = hd / 2;
+    let ff = cfg.ff_dim;
+    let s1v = cfg.s1_vocab();
+    let ci = cap as i64;
+    let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant };
+
+    tp.g.input_f32("x", &[1, 1, d as i64]);
+    tp.g.input_f32("rope_cos", &[1, 1, 1, half as i64]);
+    tp.g.input_f32("rope_sin", &[1, 1, 1, half as i64]);
+    tp.g.input_f32("past_mask", &[1, 1, 1, ci]);
+    for b in 0..cfg.n_layers {
+        tp.g.input_f32(&format!("past_k_{b}"), &[1, heads as i64, ci, hd as i64]);
+        tp.g.input_f32(&format!("past_v_{b}"), &[1, heads as i64, ci, hd as i64]);
+        tp.g.output_f32(&format!("new_k_{b}"), &[1, heads as i64, 1, hd as i64]);
+        tp.g.output_f32(&format!("new_v_{b}"), &[1, heads as i64, 1, hd as i64]);
+    }
+    tp.g.output_f32("ctx", &[1, 1, d as i64]);
+    tp.g.output_f32("s1_logits", &[1, 1, s1v as i64]);
+
+    tp.f32("c_eps", &[1], vec![1e-5]);
+    tp.f32("c_scale", &[1], vec![1.0 / (hd as f32).sqrt()]);
+    tp.i64("sh_heads1", &[4], vec![1, 1, heads as i64, hd as i64]);
+    tp.i64("sh_flat1", &[3], vec![1, 1, d as i64]);
+    tp.i64("h_lo0", &[1], vec![0]);
+    tp.i64("h_hi0", &[1], vec![half as i64]);
+    tp.i64("h_lo1", &[1], vec![half as i64]);
+    tp.i64("h_hi1", &[1], vec![hd as i64]);
+    tp.i64("h_ax", &[1], vec![3]);
+    tp.i64("h_st", &[1], vec![1]);
+    // probs split (axis 3): past [0,cap), self [cap,cap+1).
+    tp.i64("sl_ax", &[1], vec![3]);
+    tp.i64("sl_0", &[1], vec![0]);
+    tp.i64("sl_cap", &[1], vec![ci]);
+    tp.i64("sl_cap1", &[1], vec![ci + 1]);
+
+    let mut x = "x".to_string();
+    for b in 0..cfg.n_layers {
+        let pre = format!("transformer.{b}");
+        let h = tp.rmsnorm(&x, &format!("{pre}.norm1.weight"), w, d);
+        let q = tp.linear_biased(&h, &format!("{pre}.self_attn.q_proj"), w, d, d);
+        let k = tp.linear_biased(&h, &format!("{pre}.self_attn.k_proj"), w, d, d);
+        let v = tp.linear_biased(&h, &format!("{pre}.self_attn.v_proj"), w, d, d);
+        let q4 = tp.reshape(&q, "sh_heads1");
+        let k4 = tp.reshape(&k, "sh_heads1");
+        let v4 = tp.reshape(&v, "sh_heads1");
+        let q4 = tp.rope_neox(&q4);
+        let k4 = tp.rope_neox(&k4);
+        let qt = tp.transpose(&q4, &[0, 2, 1, 3]); // [1,heads,1,hd]
+        // this token's k/v → [1,heads,1,hd]: graph outputs, host appends to the cache.
+        let new_k = format!("new_k_{b}");
+        let new_v = format!("new_v_{b}");
+        tp.g.add(Node::new("Transpose", &[&k4], &[&new_k]).attr_ints("perm", &[0, 2, 1, 3]));
+        tp.g.add(Node::new("Transpose", &[&v4], &[&new_v]).attr_ints("perm", &[0, 2, 1, 3]));
+        // scores: [ q·pastᵀ·scale + mask | q·newᵀ·scale ] → softmax over cap+1.
+        let pkt = tp.transpose(&format!("past_k_{b}"), &[0, 1, 3, 2]); // [1,heads,hd,cap]
+        let sp = tp.matmul(&qt, &pkt);
+        let sp = tp.mul(&sp, "c_scale");
+        let sp = tp.add(&sp, "past_mask");
+        let nkt = tp.transpose(&new_k, &[0, 1, 3, 2]); // [1,heads,hd,1]
+        let ss = tp.matmul(&qt, &nkt);
+        let ss = tp.mul(&ss, "c_scale");
+        let scores = tp.concat2(&sp, &ss, 3); // [1,heads,1,cap+1]
+        let probs = tp.softmax(&scores, -1);
+        let pp = tp.slice(&probs, "sl_0", "sl_cap", "sl_ax"); // [1,heads,1,cap]
+        let ps = tp.slice(&probs, "sl_cap", "sl_cap1", "sl_ax"); // [1,heads,1,1]
+        let cp = tp.matmul(&pp, &format!("past_v_{b}")); // [1,heads,1,hd]
+        let cs = tp.matmul(&ps, &new_v);
+        let ctxh = tp.add_t(&cp, &cs);
+        let ctxh = tp.transpose(&ctxh, &[0, 2, 1, 3]); // [1,1,heads,hd]
+        let ctxh = tp.reshape(&ctxh, "sh_flat1"); // [1,1,D]
+        let o = tp.linear_biased(&ctxh, &format!("{pre}.self_attn.out_proj"), w, d, d);
+        x = tp.add_t(&x, &o);
+        // SwiGLU FFN (no bias)
+        let h2 = tp.rmsnorm(&x, &format!("{pre}.norm2.weight"), w, d);
+        let a = tp.linear(&h2, &format!("{pre}.ffn.w1.weight"), w, ff, d);
+        let bb = tp.linear(&h2, &format!("{pre}.ffn.w3.weight"), w, ff, d);
+        let sa = tp.silu(&a);
+        let g_ = tp.mul_t(&sa, &bb);
+        let ffo = tp.linear(&g_, &format!("{pre}.ffn.w2.weight"), w, d, ff);
+        x = tp.add_t(&x, &ffo);
+    }
+    tp.rmsnorm_to(&x, "norm.weight", w, d, "ctx");
+    tp.linear_biased_to("ctx", "head.proj_s1", w, s1v, d, "s1_logits");
 }
 
 /// ONNX assembly helper (mirrors the Chronos-2 topology's `Topo`, extended with
