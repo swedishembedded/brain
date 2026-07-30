@@ -11,6 +11,9 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-backend-api.workspace = true
+# Pure string data (no deps, no GPU): the WGSL for the drop-in fast kernels the
+# `upgrade` table swaps in for a model's registered one.
+brain-kernels.workspace = true
 
 # Native builds carry all three eager backends; the active one is chosen at
 # runtime per `Gpu` instance (registry lookup by name). wasm keeps only the
@@ -22,9 +25,6 @@ brain-backend-vulkan.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 brain-backend-wgpu.workspace = true
-
-[dev-dependencies]
-brain-kernels.workspace = true
 
 # Linux CPU affinity for `--device cpu<N>` (pure Rust; no bindgen/libclang in the
 # build path, and already transitively present via cranelift-jit / wgpu-hal).

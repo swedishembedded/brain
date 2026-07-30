@@ -434,10 +434,10 @@ symmetry.
 **The siblings in the step were already fine**, and the profile says so rather
 than the code: `grad_scale_buf` (3.9 ms/step, 246 GB/s) and `adamw` (12.2 ms/step,
 275 GB/s) are one-element-per-thread kernels — adjacent threads read adjacent
-addresses, so they never had the bug. (`max_abs_row` *does* have it — one thread
+addresses, so they never had the bug. (`max_abs_row` *did* have it — one thread
 per row — but it is on the int8 activation-quantisation path, not the optimiser,
-and does not appear in any training profile. Left for whoever profiles int8
-serving.)
+so it does not appear in any training profile. Fixed in its own section below,
+2.1-13.5×.)
 
 **Who inherits this with no change of their own.** `optim::Optim` resolves the
 two kernels **by name** through `Gpu::kernel_index`, and the policy lives in
@@ -450,15 +450,162 @@ set by how many parameters it clips, not by its architecture — `yolo` (3 M
 params) gains far less in absolute terms than `qwen` (0.6–4 B), but the *ratio*
 is the same 3 orders of magnitude on any tensor over ~1 M elements.
 `zimage`/`flux2`/`tts`/`nemotron` run their own host-side optimisers and are
-untouched; so is `model::parallel`, whose multi-GPU path already computes the
-grad-norm on the host with rayon **precisely to dodge this kernel** — that
-workaround can now be revisited.
+untouched; so is `model::parallel`. Its multi-GPU path computes the grad-norm on
+the host, and this section's first draft called that "a workaround for this
+kernel, now revisitable". **It was revisited and that claim was wrong** — see
+"the host grad-norm that is NOT a workaround" below.
 
 There is no size gate, and `select.rs` carries a unit test that fails if one
 creeps back. A `numel <= X` fallback to `gradnorm_sq` would be the exact mistake
 `Op::RmsNorm`'s old `m <= 32` gate made: the serial kernel costs the same single
 dispatch as the cooperative one, so even a 768-element bias is 2.2× faster with
 64 lanes than with 1.
+
+## Cross-model finding: the int8 quant's `max_abs_row` had it too (2.1–13.5×)
+
+The section above found `max_abs_row` while profiling the optimiser and left
+it: it is on the **int8 dynamic-activation-quant** path, so it cannot show up in
+a training profile. It shows up in an inference one. In the FLUX.2 int8
+text-encoder forward it was **43.6 ms of 668 ms (6.5%)**, and it runs once per
+quantized activation in `qwen::q8`, `zimage::int8`/`block`, and the FLUX.2 int8
+DiT — every int8 linear quantizes through `max_abs_row` → `quant_pack` →
+`matmul_i8_dyn`.
+
+The kernel is trap C2 verbatim: `sx[m] = max|x[m,:]| / 127` computed from **one
+invocation per row**, which is both an 8×-amplified read (a warp's 32 loads are
+`k` floats apart) and a serial chain of `k` dependent loads.
+
+**A fast sibling did NOT already exist** — worth stating, because checklist §A
+says to look first. `max_abs_part` + `max_abs_final` *are* a cooperative
+two-pass max, but they reduce a whole buffer to **one** scale (per-tensor
+quant). Per-token scales are why the deep int8 stacks stay accurate — one
+outlier token must not crush every other token's resolution — so they are a
+different op, not a faster form of this one. `max_abs_rows.wgsl` is new:
+`rmsnorm_rows`' shape, 64 threads per row, one barrier, lane 0 folds the 64
+partials.
+
+Kernel microbenchmark on a P40 (`cargo test --release -p brain-gpu-core --test
+bench_max_abs_row -- --ignored`), min-of-8, at the shapes the int8 paths
+actually quantize:
+
+| rows × k | `max_abs_row` | GB/s | `max_abs_rows` | GB/s | speedup |
+|---:|---:|---:|---:|---:|---:|
+| 512 × 1024 | 0.108 ms | 19.4 | 0.030 ms | 70.2 | 3.6× |
+| 512 × 3072 | 0.314 | 20.0 | 0.049 | 127.2 | 6.4× |
+| 512 × 9216 | 0.887 | 21.3 | 0.109 | 172.9 | **8.1×** |
+| 1024 × 1024 | 0.147 | 28.6 | 0.051 | 83.1 | 2.9× |
+| 1024 × 3072 | 0.352 | 35.7 | 0.093 | 135.2 | 3.8× |
+| 2048 × 1024 | 0.167 | 50.2 | 0.079 | 106.8 | **2.1×** |
+| 2048 × 3072 | 0.457 | 55.1 | 0.133 | 189.6 | 3.4× |
+| 4096 × 1024 | 0.209 | 80.5 | 0.098 | 172.0 | 2.1× |
+| 77 × 3584 | 0.290 | 3.8 | 0.041 | 27.1 | 7.1× |
+| 77 × 12288 | 1.138 | 3.3 | 0.084 | 45.1 | **13.5×** |
+| 8 × 3072 | 0.226 | 0.4 | 0.054 | 1.8 | 4.2× |
+| 1 × 3072 | 0.196 | 0.1 | 0.042 | 0.3 | 4.7× |
+
+It wins at **every** shape (worst 2.1×), so the policy is RMSNorm's again —
+prefer it whenever `workgroup_reductions` holds, no row-count gate, with a unit
+test in `select.rs` against one creeping back. The shape of the curve is the
+tell: the reference kernel's throughput *rises* with row count (19 → 80 GB/s
+from 512 to 4096 rows, because more rows means more lanes) and *falls* with row
+width — exactly what a per-row serial walk looks like. The cooperative kernel is
+flat in rows and rises with width, topping out at 190 GB/s, which is the
+coalesced-read answer.
+
+**The numerics do not move at all, and that is provable rather than measured.**
+`max` is associative *and exact* on floats, so splitting a row across 64 lanes
+and re-folding gives the identical bits — unlike the grad-norm's sum, which
+reassociates (and became 4 orders of magnitude *more* accurate as a result). The
+benchmark asserts `assert_eq!` on the raw scales at every shape, not a
+tolerance. Every downstream int8 activation is therefore bit-unchanged by
+construction — the only reason a quant-scale kernel is safe to swap
+transparently at all.
+
+### The seam: a fast kernel models inherit without editing a dispatch site
+
+The `gn_stats`/`vae` disaster (§A of the checklist: 2262 ms of a 6.5 s decode
+lost to a kernel that had already been fixed) says the fix belongs in
+*selection*. But both existing selection seams — `backend_api::select` +
+`KernelVariant`, and by-name `Gpu::kernel_index` — still require **editing every
+dispatch site**, which is precisely the step the next model forgets. Three
+models plus a benchmark dispatch `max_abs_row` today, and `crates/flux2` was
+owned by a concurrent agent during this work and could not be touched at all.
+
+So the fix went one level lower, in `gpu_core::upgrade`: a small table of
+**drop-in** replacements (same `Params`, same bindings, same result, different
+thread count). `Gpu` appends the fast kernel to whatever pipeline set a model
+registers — at the end, so no existing index moves — and `Gpu::step` /
+`step_sliced` / `step_buf` rewrite `(kind, threads)` when `backend_api::select`
+(`Op::MaxAbsRow`) says this device wants it. A model that wrote
+`gpu.step(K_MAX_ABS_ROW, .., threads = m)` gets 64 threads per row and `m × 64`
+invocations, unchanged.
+
+**It worked**, and the proof is `crates/flux2`, whose whole subtree was owned
+by another agent and never touched. `flux2_bench tei8 3` on a P40 (the Qwen3-4B
+28-layer 512-token INT8 prefill; `BRAIN_NO_KERNEL_UPGRADE=1` is the A/B):
+
+| | reference | upgraded |
+|---|---:|---:|
+| `max_abs_row` slot (112 dispatches) | 43.5 ms (**6.4%** of the forward) | **4.6 ms** (0.7%) — **9.4×** |
+| whole graph, single submit | 0.676 s | **0.635 s** — 1.065× |
+| effective rate | 4371 GFLOP/s (37.2% of peak) | 4648 GFLOP/s (39.5%) |
+
+`crates/qwen`, `crates/zimage` and `crates/zimage/tests/int8_matmul.rs` inherited
+it the same way (int8 DP4A parity `cosine=0.999985 rel_l2=0.0056` — the *same
+digits* on both sides of the A/B, as bit-identical scales require).
+`gpu-core/tests/kernel_upgrade.rs` is the regression test, written from the
+consumer's side: register only the slow kernel, dispatch the old thread count,
+demand the right answer.
+
+**One thing the seam must not do, learned by breaking it.** The first version
+put the *appended* pipeline slot into the recorded `StepMeta.kernel`. That
+panicked `flux2_bench` — profilers and cost harnesses index `meta.kernel`
+through **their own** kernel list, and slot 14 runs off the end of a 14-entry
+array. Transparent means transparent: `meta` records the `kind` and `threads`
+the **caller** asked for, and only the dispatch moves. Which kernel physically
+ran is the backend's record (`BRAIN_PROFILE=1` names the real pipeline). The
+table above reads `max_abs_row: 4.6 ms` for exactly that reason, and it is the
+more useful A/B for it.
+
+The bar for adding a row to that table is deliberately high, because it is
+invisible machinery: identical contract, *identical* results (not "close"), wins
+at every shape, capability-gated through `select`. A sum reduction fails rule 2
+and belongs in the explicit seams, where the trajectory gate is visible at the
+call site. `BRAIN_NO_KERNEL_UPGRADE=1` is the A/B switch every number above was
+taken with.
+
+## Cross-model finding: the host grad-norm that is NOT a workaround
+
+`model::parallel`'s multi-GPU `adamw_step` computes the global grad-norm on the
+host, and the optimiser section above assumed that was a workaround for the
+serial `gradnorm_sq` — so deleting it looked like free follow-up work once
+`gradnorm_part` landed. Reading the code killed that:
+
+1. The clip is over the **summed** gradient, and the sum exists only in host
+   RAM. The fused optimiser pulls every replica's gradients to the host anyway
+   (that is the design that turns data-parallel from 0.75× into 1.34–1.58×) and
+   adds them there. No card holds `Σ_r g_r` at any point.
+2. The norm does **not** decompose over replicas: `‖Σ_r g_r‖ ≠ f(‖g_r‖)`.
+   "Device norm per rank, reduce the scalars" is a *different number*, and would
+   silently change every data-parallel run's clip coefficient. There is no
+   per-rank local norm here to replace.
+3. Running the device pair would mean **uploading the summed gradient back**
+   (2.4 GB for the 0.6B Qwen) onto the PCIe leg that already *is* the cost of a
+   step (~5.3 s/step, fixed) — to save a host reduction over buffers still warm
+   in cache from the summation.
+
+`model::shard`'s fused optimiser and `model::distributed`'s `Adam` clip a
+host-resident gradient for the same reason. The on-device pair is right exactly
+where `optim::Optim` uses it: the gradient is on the card and never leaves.
+
+It does not violate the rayon rule either — `parallel.rs` goes through
+`backend_cpu::par` (`sum_sq_f64`, `zip_each`), and `backend-cpu` is still the
+only crate in the workspace with a `rayon` dependency.
+
+The stale thing was the *comment*, not the code, and it was load-bearing: it is
+what made a wrong cleanup look like an obvious one. Both it and this page now
+state the structural reason. **A "workaround for X" comment must say what breaks
+if X goes away** — otherwise the next reader deletes the code when X is fixed.
 
 ## Cross-model finding: shared-memory bank conflicts in `matmul_reg2`
 

@@ -22,9 +22,32 @@
 //! every gradient off the cards, so it **sums** the replicas there, runs **one**
 //! AdamW update (shared state — all replicas are identical), and broadcasts the
 //! new weights back. Reading grads once and updating once, with both cards'
-//! transfers overlapped, is what turns a slowdown into a speedup. Computing the
-//! grad-norm on the host (rayon) also sidesteps the single-threaded on-GPU
-//! `gradnorm_sq`, which is catastrophic over a large tied embedding.
+//! transfers overlapped, is what turns a slowdown into a speedup (0.75× → 1.34-1.58×,
+//! `qwen::tests::integration_qwen3::qwen3_dataparallel_speedup`).
+//!
+//! ## Why the grad-norm is on the host too — and why the on-GPU one cannot replace it
+//!
+//! It is **not** a workaround for the old serial `gradnorm_sq` (87.2% of GPT's
+//! training GPU time until `gradnorm_part` + `clip_coef_wg` made it 2122×
+//! faster; see `docs/performance/overview.md`). That kernel was one reason
+//! *this design was reachable*, but it is not what keeps the norm here:
+//!
+//! * The clip is over the **summed** gradient, and the sum exists only in host
+//!   RAM. Phase 1 pulls each replica's grads off its card because the fused
+//!   optimiser needs them here anyway; Phase 2 adds them. No single card holds
+//!   `Σ_r g_r` at any point.
+//! * The norm does not decompose over replicas — `‖Σ_r g_r‖ ≠ f(‖g_r‖)` — so
+//!   "device norm per rank, reduce the scalars" computes a *different* clip
+//!   coefficient and silently changes every data-parallel training run. There
+//!   is no per-rank local norm here to swap out.
+//! * Running the device kernels would therefore mean **uploading the summed
+//!   gradient back** (2.4 GB for the 0.6B Qwen) onto the PCIe leg that is
+//!   already the whole cost of a step (~5.3 s/step, fixed) — to save a host
+//!   reduction over buffers that are already in cache from Phase 2.
+//!
+//! `model::shard`'s fused optimiser and `model::distributed`'s `Adam` clip on a
+//! host-resident gradient for the same reason. The on-device pair is what
+//! `optim::Optim` uses, where the gradient lives on the card and never leaves it.
 
 use std::collections::HashMap;
 
@@ -160,7 +183,11 @@ impl<M: Model + Send> DataParallel<M> {
             self.fused = Some(FusedAdam { state });
         }
 
-        // Phase 3: global grad-norm -> clip coefficient (rayon, not on-GPU).
+        // Phase 3: global grad-norm -> clip coefficient, over the host-resident
+        // SUM `g`. Not a `gradnorm_sq` workaround — see the module header: the
+        // summed gradient is on no card, and ‖Σ_r g_r‖ does not decompose into
+        // per-rank norms, so the device pair (`gradnorm_part` + `clip_coef_wg`)
+        // cannot compute this number without a 2.4 GB upload first.
         let gscale = if extra_scale != 0.0 { 1.0 / extra_scale } else { 1.0 };
         let scale = if let Some(max_norm) = clip {
             let sq: f64 = par::sum_sq_f64(&g);

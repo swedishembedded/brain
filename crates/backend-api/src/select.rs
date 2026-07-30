@@ -42,6 +42,10 @@ pub enum Op {
     /// (`gradnorm_sq` vs `gradnorm_part` + `clip_coef_wg`). Shape is `m = 1`
     /// row of `n = numel` — see [`candidates`] for why `n` does not gate it.
     GradNorm,
+    /// Per-row max|x| for the int8 dynamic activation quant (`max_abs_row` vs
+    /// `max_abs_rows`). `m` rows of `n = k` — see [`candidates`] for why
+    /// neither gates it.
+    MaxAbsRow,
 }
 
 /// Element type an op runs over.
@@ -207,6 +211,22 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         Op::GradNorm => {
             if caps.workgroup_reductions && !no_coop_gradnorm() {
                 vec![SplitReduction, Reference]
+            } else {
+                vec![Reference]
+            }
+        }
+        // The int8 activation quant's per-row max. `max_abs_row` is
+        // `Op::RmsNorm`'s bug verbatim — thread `t` owns row `t` and walks the
+        // whole row — so it takes RmsNorm's rule, and for the same measured
+        // reason: the loss is per-access efficiency (each 32-byte sector serves
+        // one useful float) plus a serial chain of `k` dependent loads, and
+        // neither is fixed by having more rows. `max_abs_rows` is BIT-identical
+        // (max is exact under reassociation), so there is no accuracy side to
+        // trade either. `workgroup_reductions` is the correctness gate: the CPU
+        // JIT mis-executes the barrier.
+        Op::MaxAbsRow => {
+            if caps.workgroup_reductions {
+                vec![WorkgroupPerOutput, Reference]
             } else {
                 vec![Reference]
             }
@@ -509,13 +529,41 @@ mod tests {
         }
     }
 
+    /// The int8 activation quant's per-row max has NO shape gate either: it is
+    /// `Op::RmsNorm`'s one-thread-per-row bug on the int8 path, so neither the
+    /// row count nor the row width can make the per-element kernel win. This
+    /// test exists so an `m <= 32` gate cannot creep in the way `Op::RmsNorm`'s
+    /// did.
+    #[test]
+    fn max_abs_row_is_cooperative_at_every_shape() {
+        let s = DefaultSelector;
+        for m in [1u32, 8, 32, 512, 4096, 36864] {
+            for n in [128u32, 1024, 3072, 12288] {
+                let sh = shape(m, n, 0, Dtype::F32);
+                assert_eq!(
+                    s.select(Op::MaxAbsRow, sh, &gpu_caps()),
+                    KernelVariant::WorkgroupPerOutput,
+                    "m={m} k={n}"
+                );
+                // The CPU JIT cannot execute the barrier — a correctness gate.
+                assert_eq!(
+                    s.select(Op::MaxAbsRow, sh, &cpu_caps()),
+                    KernelVariant::Reference,
+                    "m={m} k={n}"
+                );
+            }
+        }
+    }
+
     /// The candidate list is never empty and its head IS the default policy —
     /// one list, so the static choice and the tuner's probe set cannot drift.
     #[test]
     fn candidates_head_is_the_default_policy() {
         let s = DefaultSelector;
         for caps in [gpu_caps(), cpu_caps()] {
-            for op in [Op::MatMul, Op::RmsNorm, Op::LayerNorm, Op::ArgMaxRow, Op::GradNorm] {
+            for op in
+                [Op::MatMul, Op::RmsNorm, Op::LayerNorm, Op::ArgMaxRow, Op::GradNorm, Op::MaxAbsRow]
+            {
                 for m in [1u32, 8, 9, 33, 4096] {
                     for dtype in [Dtype::F32, Dtype::I8] {
                         let sh = shape(m, 8192, 512, dtype);

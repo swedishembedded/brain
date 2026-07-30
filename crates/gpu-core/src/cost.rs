@@ -252,8 +252,10 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (m, k) = (p(0)?, p(1)?);
             f(3 * m * k, 5 * m * k + 4 * m)
         }
-        // Per-row max|x| scale: params [m, k].
-        "max_abs_row" => {
+        // Per-row max|x| scale: params [m, k]. `max_abs_rows` is the
+        // cooperative (workgroup-per-row) variant of the same op — same reads,
+        // same writes, only the thread mapping differs.
+        "max_abs_row" | "max_abs_rows" => {
             let (m, k) = (p(0)?, p(1)?);
             f(m * k, 4 * (m * k + m))
         }

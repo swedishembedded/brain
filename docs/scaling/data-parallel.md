@@ -34,11 +34,17 @@ Naive data-parallel (separate all-reduce, then a per-replica optimiser) is
 *slower* than one GPU here — the 2.4 GB gradient sync and the optimiser dominate.
 Two findings shaped the working design:
 
-1. **Never clip on-GPU for a 152k-vocab tied model.** The on-GPU AdamW's grad
-   clip uses `gradnorm_sq`, a single-threaded reduction over the 155M-row
-   `tok.weight` gradient — **~30 s/step**. The offload optimiser computes the same
-   norm on the host with rayon in a fraction of that. So the replicas hold only
-   **weight+grad** on-GPU (`Role::Offload`); the moments live in host RAM.
+1. **Keep the optimiser state off the cards.** The replicas hold only
+   **weight+grad** on-GPU (`Role::Offload`); the moments live in host RAM, which
+   is what makes a 0.6B model fit two 24 GB P40s at block 512 alongside its
+   activations. (Historically this was also how the design dodged `gradnorm_sq`,
+   a single-threaded on-GPU reduction that cost **~30 s/step** over the 155M-row
+   `tok.weight` gradient. That kernel is fixed — `gradnorm_part` +
+   `clip_coef_wg`, 2122× — so it is no longer a reason for anything. The
+   grad-norm nevertheless stays on the host, for the structural reason in 2:
+   the clip is over the cross-replica **sum**, which exists only in host RAM,
+   and `‖Σ_r g_r‖` does not decompose into per-rank norms. See
+   `crates/model/src/parallel.rs`' module header.)
 
 2. **Fuse the all-reduce into the optimiser.** Because the optimiser already
    pulls every gradient to the host, do the cross-replica **sum there**, run

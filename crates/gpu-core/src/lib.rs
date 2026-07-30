@@ -36,6 +36,9 @@ pub mod cost;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tune;
 
+/// Drop-in fast kernels a model inherits without editing its dispatch sites.
+mod upgrade;
+
 /// `--device` parsing and resolution: which compute is *schedulable*.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod devices;
@@ -258,15 +261,35 @@ mod native_facade {
         /// are per model/stage by construction (`share`/`new_like` start fresh
         /// counters), so these are per-device, per-model numbers.
         counters: Mutex<crate::cost::CostReport>,
+        /// Active transparent kernel upgrades for THIS device:
+        /// `(registered slot, faster slot, thread multiplier)`. Usually empty;
+        /// see [`crate::upgrade`] for what qualifies and why the seam exists.
+        upgrades: Vec<(usize, usize, u32)>,
     }
 
     impl Gpu {
         fn wrap(inner: Box<dyn backend_api::Backend>, names: Arc<Vec<String>>) -> Gpu {
-            Gpu { inner, names, counters: Mutex::new(Default::default()) }
+            // Per handle, once: the policy is a pure function of names + caps,
+            // so `step` costs one compare against a usually-empty list.
+            let upgrades = crate::upgrade::resolve(&names, &inner.caps());
+            Gpu { inner, names, counters: Mutex::new(Default::default()), upgrades }
         }
 
         fn kernel_names(kernels: &[(&str, &str)]) -> Arc<Vec<String>> {
             Arc::new(kernels.iter().map(|(n, _)| n.to_string()).collect())
+        }
+
+        /// The caller's kernel list with any drop-in fast variants **appended**
+        /// (see [`crate::upgrade`]). Every constructor funnels through this, so
+        /// a model inherits the faster kernel by registering the slow one —
+        /// which is what `docs/kernel-checklist.md` §A asks for and what
+        /// `crates/vae` did not get when `gn_stats` was fixed for DIAMOND.
+        /// Returns a borrowed view when there is nothing to add.
+        fn expanded<'a>(kernels: &'a [(&'a str, &'a str)]) -> std::borrow::Cow<'a, [(&'a str, &'a str)]> {
+            match crate::upgrade::expand(kernels) {
+                Some(v) => std::borrow::Cow::Owned(v),
+                None => std::borrow::Cow::Borrowed(kernels),
+            }
         }
         /// Build the default backend (see [`set_default_backend`] / `BRAIN_DEVICE`).
         /// Vulkan falls back to wgpu when no Vulkan device/ICD is present, so the
@@ -277,6 +300,7 @@ mod native_facade {
         /// `--device gpu<i>` pin, else `BRAIN_GPU_INDEX` (user input, parsed
         /// once), else canonical card 0. Explicit placement uses [`Gpu::new_on`].
         pub fn new(kernels: &[(&str, &str)]) -> Gpu {
+            let kernels = &Self::expanded(kernels);
             register_builtins();
             let name = resolve_backend_name();
             let inner: Box<dyn backend_api::Backend> = match name {
@@ -322,6 +346,7 @@ mod native_facade {
         /// backend (there is one CPU; the card is moot), so device-plumbing
         /// call sites work unchanged on CPU-only runs.
         pub fn new_on(dev: &crate::devices::DeviceId, kernels: &[(&str, &str)]) -> Gpu {
+            let kernels = &Self::expanded(kernels);
             register_builtins();
             let inner: Box<dyn backend_api::Backend> = match resolve_backend_name() {
                 "cpu" => Box::new(backend_cpu::CpuBackend::new(kernels)),
@@ -386,6 +411,7 @@ mod native_facade {
         /// device (the CPU JIT compiles per kernel set anyway) just build fresh,
         /// which is correct and cheap there.
         pub fn new_like(&self, kernels: &[(&str, &str)]) -> Gpu {
+            let kernels = &Self::expanded(kernels);
             match self.inner.new_like(kernels) {
                 Some(inner) => Gpu::wrap(inner, Self::kernel_names(kernels)),
                 None => Gpu::new(kernels),
@@ -424,6 +450,7 @@ mod native_facade {
 
         /// Build on the native CPU backend regardless of the default selection.
         pub fn new_cpu(kernels: &[(&str, &str)]) -> Gpu {
+            let kernels = &Self::expanded(kernels);
             let inner: Box<dyn backend_api::Backend> =
                 Box::new(backend_cpu::CpuBackend::new(kernels));
             record_caps(inner.as_ref());
@@ -433,6 +460,7 @@ mod native_facade {
         /// Build on the wgpu backend regardless of the default selection.
         /// Placement is ambient (registry-resolved), like [`Gpu::new`].
         pub fn new_wgpu(kernels: &[(&str, &str)]) -> Gpu {
+            let kernels = &Self::expanded(kernels);
             let inner = Self::build_wgpu(kernels, crate::devices::selected_device());
             record_caps(inner.as_ref());
             Gpu::wrap(inner, Self::kernel_names(kernels))
@@ -446,6 +474,7 @@ mod native_facade {
         /// its "need N GPUs" assertion still reports honestly.
         #[cfg(not(target_arch = "wasm32"))]
         pub fn new_wgpu_multi(kernels: &[(&str, &str)], count: usize) -> Vec<Gpu> {
+            let kernels = &Self::expanded(kernels);
             let names = Self::kernel_names(kernels);
             let devs = crate::devices::gpus();
             if devs.len() >= count {
@@ -467,6 +496,7 @@ mod native_facade {
 
         /// Build on the native Vulkan backend, or `Err` if no Vulkan device is present.
         pub fn try_new_vulkan(kernels: &[(&str, &str)]) -> Result<Gpu, String> {
+            let kernels = &Self::expanded(kernels);
             backend_vulkan::VulkanBackend::try_new(kernels)
                 .map(|g| Gpu::wrap(Box::new(g), Self::kernel_names(kernels)))
         }
@@ -504,24 +534,40 @@ mod native_facade {
         pub fn flush(&self) {
             self.inner.flush()
         }
+        /// Record one dispatch of pipeline `kind`.
+        ///
+        /// `kind`/`threads` pass through [`crate::upgrade`] first: where a
+        /// contract-identical faster kernel is registered and this device wants
+        /// it, the *dispatch* is redirected and its thread count scaled.
+        ///
+        /// The recorded [`StepMeta`] deliberately keeps the CALLER's `kind` and
+        /// `threads`. The upgrade is transparent by definition, so it must not
+        /// leak into the caller's index space: profilers and cost harnesses map
+        /// `meta.kernel` through *their own* kernel list (`flux2_bench` does
+        /// exactly that), and an appended pipeline slot would index past the end
+        /// of it. Which kernel physically ran is the backend's record —
+        /// `BRAIN_PROFILE=1` names the real pipeline.
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
             crate::assert_no_output_alias(bufs);
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, threads);
             self.inner
-                .step(kind, bufs, params, threads)
+                .step(k, bufs, params, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
         }
         pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
             // NB: sliced views of ONE buffer at disjoint offsets are legal and common
             // here, so no alias check — wgpu validates the concrete ranges.
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, threads);
             self.inner
-                .step_sliced(kind, bufs, offsets, params, threads)
+                .step_sliced(k, bufs, offsets, params, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
         }
         pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
             // The uniform lives in a caller-owned buffer: shape params unknown
             // here, so the cost side gets only kernel + threads.
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, threads);
             self.inner
-                .step_buf(kind, ubuf, bufs, threads)
+                .step_buf(k, ubuf, bufs, t)
                 .with_meta(StepMeta { kernel: kind, params: None, threads })
         }
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
@@ -600,17 +646,20 @@ mod wasm_facade {
         inner: WgpuBackend,
         names: Vec<String>,
         counters: Mutex<crate::cost::CostReport>,
+        /// See the native facade / [`crate::upgrade`].
+        upgrades: Vec<(usize, usize, u32)>,
     }
 
     impl Gpu {
         /// Async device init + pipeline compile (the browser has no blocking
         /// executor, so there is no synchronous `new`).
         pub async fn new_async(kernels: &[(&str, &str)]) -> Gpu {
-            Gpu {
-                inner: WgpuBackend::new_async(kernels).await,
-                names: kernels.iter().map(|(n, _)| n.to_string()).collect(),
-                counters: Mutex::new(Default::default()),
-            }
+            let expanded = crate::upgrade::expand(kernels);
+            let kernels: &[(&str, &str)] = expanded.as_deref().unwrap_or(kernels);
+            let inner = WgpuBackend::new_async(kernels).await;
+            let names: Vec<String> = kernels.iter().map(|(n, _)| n.to_string()).collect();
+            let upgrades = crate::upgrade::resolve(&names, &Backend::caps(&inner));
+            Gpu { inner, names, counters: Mutex::new(Default::default()), upgrades }
         }
 
         pub fn storage(&self, n: u64) -> DeviceBuffer {
@@ -630,15 +679,18 @@ mod wasm_facade {
         }
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
             crate::assert_no_output_alias(bufs);
-            Backend::step(&self.inner, kind, bufs, params, threads)
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, threads);
+            Backend::step(&self.inner, k, bufs, params, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
         }
         pub fn step_sliced(&self, kind: usize, bufs: &[&DeviceBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> Step {
-            Backend::step_sliced(&self.inner, kind, bufs, offsets, params, threads)
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, threads);
+            Backend::step_sliced(&self.inner, k, bufs, offsets, params, t)
                 .with_meta(StepMeta { kernel: kind, params: Some(params.to_vec()), threads })
         }
         pub fn step_buf(&self, kind: usize, ubuf: &DeviceBuffer, bufs: &[&DeviceBuffer], threads: u32) -> Step {
-            Backend::step_buf(&self.inner, kind, ubuf, bufs, threads)
+            let (k, t) = crate::upgrade::apply(&self.upgrades, kind, threads);
+            Backend::step_buf(&self.inner, k, ubuf, bufs, t)
                 .with_meta(StepMeta { kernel: kind, params: None, threads })
         }
         pub fn submit(&self, clears: &[&DeviceBuffer], steps: &[Step]) {
