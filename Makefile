@@ -50,7 +50,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo \
         export/yolo-onnx quantize/yolo sim/yolo-int8 run/yolo-npu bench/yolo-npu \
-        web/dev web/build forecast/compare forecast/serve fetch/testdata
+        web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate fetch/testdata
 
 help:
 	@echo "brain targets:"
@@ -196,6 +196,17 @@ wm/play: release
 # direct CPU-vs-GPU forward parity + TTS NPU codec vs CPU reference).
 parity:
 	scripts/parity-gate.sh
+
+# Forecasting correctness gate: every time-series optimization stays fp32-exact
+# (kronos KV-cache/shared-prefill/cross-section + batched-training parity).
+forecast/parity:
+	scripts/forecast-parity-gate.sh
+
+# Forecasting latency regression gate: each forecaster through `brain perf run`
+# vs the committed baseline (scripts/forecast-perf-baselines/, `--update` to
+# refresh). Weights via env (BRAIN_KRONOS_*/BRAIN_CHRONOS2/BRAIN_FINCAST).
+forecast/perf-gate: release
+	scripts/forecast-perf-gate.sh
 
 # ---- data generation ------------------------------------------------------
 data/calculator data/reverser data/wordcalc: release
