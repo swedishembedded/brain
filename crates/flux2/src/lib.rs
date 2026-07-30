@@ -17,6 +17,8 @@
 
 pub mod config;
 pub mod import;
+pub mod model;
 
 pub use config::Flux2Config;
 pub use import::{import_bfl, import_diffusers, Tensors};
+pub use model::{position_ids, Flux2Model, KERNELS};
