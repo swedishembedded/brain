@@ -127,7 +127,11 @@ impl ResidentModel for Chronos2Resident {
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         // Weights in RAM for the gpu_core path; a compiled fp16 core graph on the
         // NPU (npu > 0 => NPU-eligible; place::pick_device schedules it there).
-        MemCost::new(0, file_ram(&self.path)).with_npu(512 << 20)
+        // vram == ram: the transformer core runs on gpu_core, so it is placeable
+        // on a GPU (incl. the integrated GPU) as well as CPU; NPU stays preferred
+        // (place::pick_device tries NPU, then GPU, then CPU).
+        let r = file_ram(&self.path);
+        MemCost::new(r, r).with_npu(512 << 20)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         if let Device::Gpu(i) = device {
@@ -237,7 +241,8 @@ impl ResidentModel for FincastResident {
         // sidecar and compiled via FincastSession::load_path (the in-memory buffer
         // path would exceed protobuf's 2 GB limit). ~1.5 GB is a generous NPU
         // footprint bound for the compiled fp16 blob.
-        MemCost::new(0, file_ram(&self.path)).with_npu(1536 << 20)
+        let r = file_ram(&self.path);
+        MemCost::new(r, r).with_npu(1536 << 20)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         if let Device::Gpu(i) = device {

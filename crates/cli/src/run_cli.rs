@@ -199,7 +199,24 @@ fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64) {
     // Discover the GPUs' capacity so the scheduler can budget/evict against real VRAM,
     // then narrow to what `--device` made schedulable. With no `--device` the set is
     // every device, which is exactly the "use all the hardware wisely" default.
-    let all_gpus = query_gpu_mem();
+    let mut all_gpus = query_gpu_mem();
+    // No NVIDIA GPU, but the wgpu backend can drive an integrated GPU (e.g. Intel
+    // Arc on Meteor Lake): budget it as a schedulable `Gpu` lane. Integrated GPUs
+    // have no dedicated VRAM — they share system RAM — so size the budget like the
+    // NPU (a modest fraction of RAM). This is what makes `--device gpu` (and the
+    // all-devices default) actually schedule onto the iGPU on such boxes.
+    if all_gpus.is_empty() {
+        let n = gpu_core::discrete_gpu_count();
+        if n > 0 {
+            let ram = query_ram_bytes();
+            let vram = (8u64 << 30).min(ram / 2).max(1 << 30);
+            all_gpus = (0..n as u32).map(|i| (i, vram)).collect();
+            eprintln!(
+                "brain serve --dbus: no NVIDIA GPU; budgeting {n} integrated GPU(s) at {} GB shared RAM (schedulable)",
+                vram >> 30
+            );
+        }
+    }
     let set = crate::compute_set();
     let gpus: Vec<(u32, u64)> = match set {
         Some(s) => all_gpus.iter().copied().filter(|(i, _)| s.gpus.contains(i)).collect(),
