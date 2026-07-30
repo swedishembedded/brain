@@ -122,6 +122,34 @@ pub fn gqa_fwd(
     ]
 }
 
+/// [`gqa_fwd`] with an additive per-key mask on the scores (the
+/// `gqa_scores_kmask` kernel): `kmask[j]` is 0 for live keys, -3.4e38 for
+/// excluded ones — right-padded encoder batches where pad tokens are queries
+/// but must not be attended as keys. The kmask pipeline id is passed
+/// explicitly so [`KernelIds`] (a struct literal at every call site in the
+/// workspace) stays unchanged for models that never mask.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_fwd_kmask(
+    g: &Gpu,
+    kmask_kernel: usize,
+    k: &KernelIds,
+    a: &Gqa,
+    q: &DeviceBuffer,
+    kbuf: &DeviceBuffer,
+    kmask: &DeviceBuffer,
+    v: &DeviceBuffer,
+    scores: &DeviceBuffer,
+    probs: &DeviceBuffer,
+    ctx: &DeviceBuffer,
+) -> Vec<Step> {
+    let p = a.params();
+    vec![
+        g.step(kmask_kernel, &[q, kbuf, kmask, scores], &p, a.b * a.n_heads * a.t * a.t),
+        g.step(k.attn_softmax, &[scores, probs], &[a.b, a.n_heads, a.t], a.b * a.n_heads * a.t),
+        g.step(k.gqa_apply, &[probs, v, ctx], &p, a.b * a.n_heads * a.t * a.head_dim),
+    ]
+}
+
 /// GQA attention backward: produces `d_scores`, `d_v`, `d_q`, `d_k` from the
 /// context grad `d_ctx` and the cached `q`/`k`/`v`/`probs`.
 #[allow(clippy::too_many_arguments)]

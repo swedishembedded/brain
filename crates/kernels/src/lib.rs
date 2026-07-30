@@ -332,6 +332,8 @@ pub const GQA_BWD_DSCORES: &str = include_str!("../wgsl/gqa_bwd_dscores.wgsl");
 pub const GQA_BWD_DV: &str = include_str!("../wgsl/gqa_bwd_dv.wgsl");
 /// `wgsl/gqa_scores.wgsl`
 pub const GQA_SCORES: &str = include_str!("../wgsl/gqa_scores.wgsl");
+/// `wgsl/gqa_scores_kmask.wgsl`
+pub const GQA_SCORES_KMASK: &str = include_str!("../wgsl/gqa_scores_kmask.wgsl");
 /// `wgsl/grad_scale.wgsl`
 pub const GRAD_SCALE: &str = include_str!("../wgsl/grad_scale.wgsl");
 /// `wgsl/grad_scale_buf.wgsl`
@@ -813,6 +815,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("gqa_bwd_dscores", GQA_BWD_DSCORES),
     ("gqa_bwd_dv", GQA_BWD_DV),
     ("gqa_scores", GQA_SCORES),
+    ("gqa_scores_kmask", GQA_SCORES_KMASK),
     ("grad_scale", GRAD_SCALE),
     ("grad_scale_buf", GRAD_SCALE_BUF),
     ("gradnorm_sq", GRADNORM_SQ),

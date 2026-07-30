@@ -349,12 +349,19 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
 
         // ---- attention, causal (t(t+1)/2 pairs) -----------------------------
         // GQA params [b, h, hkv, t, hd, group]; dense params [b, h, t, hd, ...].
-        "gqa_scores" | "attn_scores" => {
-            let gqa = base == "gqa_scores";
+        // `gqa_scores_kmask` = gqa_scores + one additive per-key mask read/add
+        // per causal pair (params identical).
+        "gqa_scores" | "attn_scores" | "gqa_scores_kmask" => {
+            let gqa = base != "attn_scores";
+            let kmask = base == "gqa_scores_kmask";
             let (b, h) = (p(0)?, p(1)?);
             let (t, hd) = if gqa { (p(3)?, p(4)?) } else { (p(2)?, p(3)?) };
             let kvh = if gqa { p(2)? } else { h };
-            f(b * h * tri(t) * (2 * hd + 1), 4 * (b * h * t * t + b * t * hd * (h + kvh)))
+            let extra = if kmask { b * h * tri(t) } else { 0 };
+            f(
+                b * h * tri(t) * (2 * hd + 1) + extra,
+                4 * (b * h * t * t + b * t * hd * (h + kvh)) + if kmask { 4 * t } else { 0 },
+            )
         }
         // params [b, h, t]: per row i — max, exp-sum, and the exp·inv writes.
         "attn_softmax" => {
