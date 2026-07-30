@@ -180,6 +180,8 @@ pub const CIOU: &str = include_str!("../wgsl/ciou.wgsl");
 pub const CIOU_GRAD: &str = include_str!("../wgsl/ciou_grad.wgsl");
 /// `wgsl/clip_coef.wgsl`
 pub const CLIP_COEF: &str = include_str!("../wgsl/clip_coef.wgsl");
+/// `wgsl/clip_coef_wg.wgsl`
+pub const CLIP_COEF_WG: &str = include_str!("../wgsl/clip_coef_wg.wgsl");
 /// `wgsl/concat2.wgsl`
 pub const CONCAT2: &str = include_str!("../wgsl/concat2.wgsl");
 /// `wgsl/concat_split.wgsl`
@@ -342,6 +344,8 @@ pub const GQA_SCORES_KMASK: &str = include_str!("../wgsl/gqa_scores_kmask.wgsl")
 pub const GRAD_SCALE: &str = include_str!("../wgsl/grad_scale.wgsl");
 /// `wgsl/grad_scale_buf.wgsl`
 pub const GRAD_SCALE_BUF: &str = include_str!("../wgsl/grad_scale_buf.wgsl");
+/// `wgsl/gradnorm_part.wgsl`
+pub const GRADNORM_PART: &str = include_str!("../wgsl/gradnorm_part.wgsl");
 /// `wgsl/gradnorm_sq.wgsl`
 pub const GRADNORM_SQ: &str = include_str!("../wgsl/gradnorm_sq.wgsl");
 /// `wgsl/head_pack.wgsl`
@@ -755,6 +759,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("ciou", CIOU),
     ("ciou_grad", CIOU_GRAD),
     ("clip_coef", CLIP_COEF),
+    ("clip_coef_wg", CLIP_COEF_WG),
     ("concat2", CONCAT2),
     ("concat_split", CONCAT_SPLIT),
     ("conv1d", CONV1D),
@@ -836,6 +841,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("gqa_scores_kmask", GQA_SCORES_KMASK),
     ("grad_scale", GRAD_SCALE),
     ("grad_scale_buf", GRAD_SCALE_BUF),
+    ("gradnorm_part", GRADNORM_PART),
     ("gradnorm_sq", GRADNORM_SQ),
     ("head_pack", HEAD_PACK),
     ("head_pack_t", HEAD_PACK_T),

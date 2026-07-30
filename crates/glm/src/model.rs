@@ -206,6 +206,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("attn_decode_apply", kernels::ATTN_DECODE_APPLY),
     ("mla_decode_scores", MLA_DECODE_SCORES_WGSL),
     ("rope_train_at", ROPE_TRAIN_AT_WGSL),
+    // Cooperative grad-norm (optimiser): `gradnorm_part` + `clip_coef_wg` replace
+    // the single-threaded `gradnorm_sq`/`clip_coef` walk. `optim::Optim` resolves
+    // them BY NAME, so appending them here (and only here) is the whole opt-in.
+    ("gradnorm_part", kernels::GRADNORM_PART),
+    ("clip_coef_wg", kernels::CLIP_COEF_WG),
 ];
 
 /// MLP variant per layer (cached activations for backprop).

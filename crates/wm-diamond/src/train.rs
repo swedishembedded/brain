@@ -61,7 +61,7 @@ const K_GRAD_SCALE: usize = 30;
 const K_CLIP_COEF: usize = 31;
 const K_GRAD_SCALE_BUF: usize = 32;
 
-const KERNELS: [(&str, &str); 33] = [
+const KERNELS: [(&str, &str); 35] = [
     ("conv_bias_reg", kernels::CONV_BIAS_REG),
     ("conv2d_dx", kernels::CONV2D_DX),
     ("conv2d_dw", kernels::CONV2D_DW),
@@ -95,6 +95,11 @@ const KERNELS: [(&str, &str); 33] = [
     ("grad_scale", kernels::GRAD_SCALE),
     ("clip_coef", kernels::CLIP_COEF),
     ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
+    // Cooperative grad-norm (optimiser): `gradnorm_part` + `clip_coef_wg` replace
+    // the single-threaded `gradnorm_sq`/`clip_coef` walk. `optim::Optim` resolves
+    // them BY NAME, so appending them here (and only here) is the whole opt-in.
+    ("gradnorm_part", kernels::GRADNORM_PART),
+    ("clip_coef_wg", kernels::CLIP_COEF_WG),
 ];
 
 const GN_EPS: f32 = 1e-5;

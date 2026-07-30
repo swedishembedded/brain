@@ -178,6 +178,11 @@ const PIPELINES: &[(&str, &str)] = &[
     ("gqa_scores_kmask", kernels::GQA_SCORES_KMASK),
     ("softmax_rows", kernels::SOFTMAX_ROWS),
     ("matmul_reg3", kernels::MATMUL_REG3),
+    // Cooperative grad-norm (optimiser): `gradnorm_part` + `clip_coef_wg` replace
+    // the single-threaded `gradnorm_sq`/`clip_coef` walk. `optim::Optim` resolves
+    // them BY NAME, so appending them here (and only here) is the whole opt-in.
+    ("gradnorm_part", kernels::GRADNORM_PART),
+    ("clip_coef_wg", kernels::CLIP_COEF_WG),
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear

@@ -112,6 +112,11 @@ pub(crate) const PIPELINES: &[(&str, &str)] = &[
     ("concat2", kernels::CONCAT2),
     ("concat_split", kernels::CONCAT_SPLIT),
     ("axpy", kernels::AXPY),
+    // Cooperative grad-norm (optimiser): `gradnorm_part` + `clip_coef_wg` replace
+    // the single-threaded `gradnorm_sq`/`clip_coef` walk. `optim::Optim` resolves
+    // them BY NAME, so appending them here (and only here) is the whole opt-in.
+    ("gradnorm_part", kernels::GRADNORM_PART),
+    ("clip_coef_wg", kernels::CLIP_COEF_WG),
 ];
 
 /// LoRA fine-tuning config: rank-`r` adapters (scale `alpha/r`) on the linear

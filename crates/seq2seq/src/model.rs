@@ -164,6 +164,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("layernorm_rows", kernels::LAYERNORM_ROWS),
     ("ln_stats_rows", kernels::LN_STATS_ROWS),
     ("layernorm_dx_rows", kernels::LAYERNORM_DX_ROWS),
+    // Cooperative grad-norm (optimiser): `gradnorm_part` + `clip_coef_wg` replace
+    // the single-threaded `gradnorm_sq`/`clip_coef` walk. `optim::Optim` resolves
+    // them BY NAME, so appending them here (and only here) is the whole opt-in.
+    ("gradnorm_part", kernels::GRADNORM_PART),
+    ("clip_coef_wg", kernels::CLIP_COEF_WG),
 ];
 
 /// Encoder-decoder configuration. `vocab`/`block_size` follow the `ModelConfig`

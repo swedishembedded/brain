@@ -134,6 +134,11 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("im2col", kernels::IM2COL),
     ("matmul_reg2", kernels::MATMUL_REG2),
     ("conv_epilogue", kernels::CONV_EPILOGUE),
+    // Cooperative grad-norm (optimiser): `gradnorm_part` + `clip_coef_wg` replace
+    // the single-threaded `gradnorm_sq`/`clip_coef` walk. `optim::Optim` resolves
+    // them BY NAME, so appending them here (and only here) is the whole opt-in.
+    ("gradnorm_part", kernels::GRADNORM_PART),
+    ("clip_coef_wg", kernels::CLIP_COEF_WG),
 ];
 
 /// Kernel indices for the shared [`vision`] conv blocks, resolved BY NAME against

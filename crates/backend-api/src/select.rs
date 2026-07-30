@@ -38,6 +38,10 @@ pub enum Op {
     /// [`Op::RmsNorm`] — see [`candidates`].
     LayerNorm,
     ArgMaxRow,
+    /// Per-parameter sum-of-squares for the optimiser's global grad-norm clip
+    /// (`gradnorm_sq` vs `gradnorm_part` + `clip_coef_wg`). Shape is `m = 1`
+    /// row of `n = numel` — see [`candidates`] for why `n` does not gate it.
+    GradNorm,
 }
 
 /// Element type an op runs over.
@@ -113,6 +117,15 @@ fn no_coop_layernorm() -> bool {
     *V.get_or_init(|| std::env::var("BRAIN_NO_COOP_LN").map(|v| v != "0").unwrap_or(false))
 }
 
+/// `BRAIN_NO_COOP_GRADNORM=1` pins the optimiser's grad-norm to the
+/// single-threaded `gradnorm_sq` — the A/B switch the speedup and the
+/// trajectory-equivalence run were measured with, and the fallback if a driver
+/// ever mishandles the cooperative reduction. Read once (see above).
+fn no_coop_gradnorm() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("BRAIN_NO_COOP_GRADNORM").map(|v| v != "0").unwrap_or(false))
+}
+
 /// Every variant that can EXECUTE for `(op, shape)` on this device, with the
 /// static best guess FIRST. Never empty: `Reference` is always executable.
 ///
@@ -175,6 +188,25 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         Op::LayerNorm => {
             if caps.workgroup_reductions && !no_coop_layernorm() {
                 vec![WorkgroupPerOutput, Reference]
+            } else {
+                vec![Reference]
+            }
+        }
+        // The optimiser's grad-norm. `gradnorm_sq` is not merely uncoalesced —
+        // it runs the WHOLE tensor on ONE invocation, so its cost is
+        // `numel` dependent scalar loads however big the device is. There is
+        // therefore NO tensor size at which the reference wins: even a
+        // 768-element bias costs the same single dispatch either way, and the
+        // cooperative variant does it with 64 lanes instead of 1. Measured on
+        // a P40 the split reduction wins at every size in the GPT/Qwen
+        // distribution (see `bench_gradnorm`), so `n` must never gate this —
+        // exactly the mistake `Op::RmsNorm`'s old `m <= 32` gate made.
+        // `workgroup_reductions` is a correctness gate, not a preference: the
+        // CPU JIT mis-executes the barrier, and its native fast paths own that
+        // regime.
+        Op::GradNorm => {
+            if caps.workgroup_reductions && !no_coop_gradnorm() {
+                vec![SplitReduction, Reference]
             } else {
                 vec![Reference]
             }
@@ -455,13 +487,35 @@ mod tests {
         }
     }
 
+    /// The grad-norm has NO size gate. `gradnorm_sq` walks the whole tensor on
+    /// one invocation, so there is no tensor small enough for it to win; the
+    /// only thing that can deselect the cooperative variant is a device that
+    /// cannot execute a workgroup barrier. This test exists so a `numel <= X`
+    /// gate cannot creep back the way `Op::RmsNorm`'s `m <= 32` one did.
+    #[test]
+    fn gradnorm_is_cooperative_at_every_size() {
+        let s = DefaultSelector;
+        for numel in [1u32, 64, 768, 8192, 1_769_472, 38_597_376] {
+            assert_eq!(
+                s.select(Op::GradNorm, shape(1, numel, 0, Dtype::F32), &gpu_caps()),
+                KernelVariant::SplitReduction,
+                "grad-norm at numel {numel} must not fall back to the serial walk"
+            );
+            // The CPU JIT cannot execute the barrier — a correctness gate.
+            assert_eq!(
+                s.select(Op::GradNorm, shape(1, numel, 0, Dtype::F32), &cpu_caps()),
+                KernelVariant::Reference
+            );
+        }
+    }
+
     /// The candidate list is never empty and its head IS the default policy —
     /// one list, so the static choice and the tuner's probe set cannot drift.
     #[test]
     fn candidates_head_is_the_default_policy() {
         let s = DefaultSelector;
         for caps in [gpu_caps(), cpu_caps()] {
-            for op in [Op::MatMul, Op::RmsNorm, Op::LayerNorm, Op::ArgMaxRow] {
+            for op in [Op::MatMul, Op::RmsNorm, Op::LayerNorm, Op::ArgMaxRow, Op::GradNorm] {
                 for m in [1u32, 8, 9, 33, 4096] {
                     for dtype in [Dtype::F32, Dtype::I8] {
                         let sh = shape(m, 8192, 512, dtype);

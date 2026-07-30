@@ -28,6 +28,24 @@ pub enum Role {
     Offload,
 }
 
+/// Elements one workgroup of the cooperative grad-norm reduction
+/// (`gradnorm_part`) covers. Small enough that a 1.8 M-element tensor still
+/// gets hundreds of workgroups (a P40 wants ≥ ~2 k threads to be busy), large
+/// enough that a 768-element bias gets exactly one.
+pub const GRADNORM_ELEMS_PER_WG: usize = 8192;
+/// Cap on workgroups per tensor. Past this the reduction is already at memory
+/// bandwidth and every extra workgroup is one more f32 for the second pass to
+/// fold; 512 workgroups = 32 768 threads, ~8.5× a P40's core count.
+pub const GRADNORM_MAX_WG: usize = 512;
+
+/// Workgroups — equivalently, partial sums — `gradnorm_part` uses for a tensor
+/// of `numel` elements. The single place this policy is written down; the
+/// buffer sizing (`ParamStore::norms`) and the dispatch (`optim::Optim`) both
+/// read it, so they cannot disagree.
+pub fn gradnorm_parts(numel: usize) -> u32 {
+    numel.div_ceil(GRADNORM_ELEMS_PER_WG).clamp(1, GRADNORM_MAX_WG) as u32
+}
+
 pub struct ParamStore {
     /// Every parameter (name, numel), trainable or frozen — the full save set.
     pub params: Vec<(String, usize)>,
@@ -38,7 +56,11 @@ pub struct ParamStore {
     pub grad: HashMap<String, gpu_core::DeviceBuffer>,
     pub adam_m: HashMap<String, gpu_core::DeviceBuffer>,
     pub adam_v: HashMap<String, gpu_core::DeviceBuffer>,
-    pub norms: gpu_core::DeviceBuffer,     // [n_trainable] sum-of-squares scratch for grad clipping
+    /// Sum-of-squares scratch for grad clipping. Sized for the LARGER of the
+    /// two reductions that write it: `gradnorm_sq` needs one f32 per trainable
+    /// tensor, the cooperative `gradnorm_part` needs one per workgroup per
+    /// tensor (see [`gradnorm_parts`]).
+    pub norms: gpu_core::DeviceBuffer,
     pub clip_coef: gpu_core::DeviceBuffer, // [1] device-resident clip coefficient
     /// Params optimised off-device (grad on GPU, moments in RAM). Disjoint from
     /// `trainable`; the GPU optimiser skips these, `OffloadAdam` handles them.
@@ -119,9 +141,23 @@ impl ParamStore {
             }
             params.push((name.clone(), *numel));
         }
-        let norms = gpu.storage(trainable.len().max(1) as u64);
+        let n_parts: u64 = trainable.iter().map(|(_, n)| gradnorm_parts(*n) as u64).sum();
+        let norms = gpu.storage(n_parts.max(trainable.len() as u64).max(1));
         let clip_coef = gpu.storage(1);
         ParamStore { params, trainable, weight, grad, adam_m, adam_v, norms, clip_coef, offload }
+    }
+
+    /// Partial-sum layout of [`Self::norms`] for the cooperative grad-norm:
+    /// `(offset per trainable tensor, total partials)`. Tensor `i` owns
+    /// `norms[off[i] .. off[i] + gradnorm_parts(numel_i)]`.
+    pub fn gradnorm_layout(&self) -> (Vec<u32>, u32) {
+        let mut off = Vec::with_capacity(self.trainable.len());
+        let mut cur = 0u32;
+        for (_, numel) in &self.trainable {
+            off.push(cur);
+            cur += gradnorm_parts(*numel);
+        }
+        (off, cur)
     }
 
     /// The optimised parameter list (grad/Adam present) — what the optimiser and

@@ -552,8 +552,13 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "adamw" => f(12 * p(0)?, 28 * p(0)?),
         // params [numel, slot].
         "gradnorm_sq" => f(2 * p(0)?, 4 * p(0)?),
+        // params [numel, out_off, n_wg] — same work as gradnorm_sq, spread over
+        // n_wg workgroups; the n_wg partials it writes are the only extra bytes.
+        "gradnorm_part" => f(2 * p(0)?, 4 * p(0)? + 4 * p(2)?),
         // params [n_params, max_norm, extra_scale].
         "clip_coef" => f(p(0)? + 5, 4 * p(0)?),
+        // params [n_parts, max_norm, extra_scale] — same fold, 64 threads.
+        "clip_coef_wg" => f(p(0)? + 5, 4 * p(0)?),
 
         // ---- conv1d family: params [N, Cin, L, Cout, K, stride, pad, dil, G, Lo].
         "conv1d" => {

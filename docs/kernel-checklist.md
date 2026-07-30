@@ -74,10 +74,18 @@ existing caller. Assume nothing about units.
    `d_model`/`H*W`/`T` inside one invocation, it is leaving 3–150× on the
    floor.*
 
-3. **One dispatch per tensor to produce one scalar.** `gradnorm_sq` ran 385
-   serial reductions per optimizer step = **82.3% of GPT's training GPU time**.
-   *Reductions want a cooperative tree plus a second small pass — and ideally
-   one fused dispatch over an offset table, not one per tensor.*
+3. **A kernel that discards every invocation but one.** `gradnorm_sq` opened with
+   `if (gidx != 0u) { return; }` and was dispatched with `threads = 1`, so each
+   parameter tensor's sum-of-squares was `numel` *dependent scalar loads on one
+   lane* — **0.08 GB/s, 0.023% of the P40's 346 GB/s**, and **87.2% of GPT's
+   training GPU time**. Fixed by `gradnorm_part` (cooperative tree, one partial
+   per workgroup) + `clip_coef_wg` (one small second pass over every tensor's
+   partials): **2 122× in situ**, 8.2× on the whole training step, and the tree
+   is also 4 orders of magnitude more *accurate* than the serial accumulator.
+   *Reductions want a cooperative tree plus a second small pass. Fusing the
+   per-tensor dispatches on top of that was measured and rejected — 77 launches
+   are <0.25% of a step once each one is parallel; see
+   `docs/performance/overview.md`.*
 
 4. **A workgroup tile pays only where the amplification is large.** Adding a
    shared-memory tile to `im2col_at` made it **slower (273 → 311 ms)**: its
@@ -121,6 +129,8 @@ was wrong and the profile was right.** Killed, with the number that killed it:
 | the GEMMs are the bottleneck | attention was **81%**; GEMMs 16% |
 | the text encoder is the unprofiled half worth attacking | it was **1.23 s of 7.3 s**; the VAE was 88% |
 | `conv_bias_reg` has a coalescing bug | flat ~700 GFLOP/s across **all 15 shapes** = its structural 0.75 byte/FLOP ceiling, not a fault |
+| the optimizer's 385 grad-norm dispatches need fusing over an offset table | 385 was 77 tensors × **5 steps**; once each is a cooperative tree the whole grad-norm is **2.84 ms of a 840 ms step** and fusing buys <0.25% for a ParamStore relayout |
+| `clip_coef` on one thread is fine, it sums a handful of numbers | true at 77 inputs (0.047 ms), **false at 11 586** (0.475 ms) — the cooperative reduction's own partials made a second cooperative kernel mandatory |
 
 So:
 

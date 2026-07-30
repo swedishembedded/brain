@@ -33,6 +33,7 @@ engine's stage split and the real GPU adapter line.
 | FLUX.2 512² 4-step image (2×P40, fp32) | 18.4 s | **12.7 s** | the two above |
 | FLUX.2 512² 4-step image (**1**×P40, int8) | 13.4 s | **7.6 s** | the two above |
 | **GPT decode** GPU kernel time (`gpt gen`, 6×768, 200 tok, 1×P40) | 1259 ms | **996 ms** | coalesced LayerNorm (10.3× on the kernel; 22.9% → 2.8% of the step) |
+| **GPT training step** (`gpt train`, 6×768, 2048 rows, 1×P40) | 6.90 s | **0.84 s** | cooperative optimiser grad-norm (2122× on the kernel; 87.2% → 0.3% of the step) — **every model that uses `optim::Optim`** |
 
 Numbers are noisy on shared boxes (thermal/contention); the stable signals are
 the **min-of-N GFLOP/s microbench** (CPU) and the **`forward` stage** (GPU).
@@ -297,8 +298,9 @@ adjacent addresses — they never had the bug.
 wall clock agrees (256.3 s vs 257.3 s over 100 steps). Not because the kernel
 win is fake, but because **`gradnorm_sq` is 82.3 % of GPT's GPU training time**
 (10 768 ms of 13 092 ms over 5 steps, 385 calls — one serial reduction per
-parameter tensor). That is the next thing to fix in `gpt`, and it is the same
-class of bug one level up; it is out of scope here and untouched.
+parameter tensor). That is the same class of bug one level up; it was out of
+scope there and is **fixed in the next section**, which is what finally makes
+the LayerNorm win visible in the training step.
 
 Where LayerNorm is not hidden behind that, the win shows up directly.
 **`brain gpt gen`** (KV-cache decode, 6 × 768, 200 tokens):
@@ -321,6 +323,142 @@ in any model crate changes). `flux2` can adopt the same
 `model::block::layernorm_fwd` seam whenever it wants it; its LayerNorm is
 ~2.4 % of its forward after the DiT work, so it was deliberately left alone
 here.
+
+## Cross-model finding: the OPTIMISER was the training step (`gradnorm_sq`, 2122×)
+
+The previous section ends with the number that made it necessary: after
+LayerNorm, **`gradnorm_sq` was 87.2 % of all GPU time in `brain gpt train`**
+(30 133 ms of 34 545 ms over 5 steps, 6 layers × d 768, batch 8 × block 256).
+It lives in `crates/optim` — the AdamW + global-grad-norm-clip path that
+**every** trainable model in the repo drives — so this is not a `gpt` finding.
+
+It is a worse bug than the two before it. `flash_attn_bidir` was a
+*local-memory* bug and `layernorm`/`gn_stats` were *coalescing* bugs (8× read
+amplification). `gradnorm_sq.wgsl` dispatched **one invocation** per parameter
+tensor —
+
+```wgsl
+if (gidx != 0u) { return; }
+for (var i = 0u; i < p.numel; i = i + 1u) { acc = acc + grad[i]*grad[i]; }
+```
+
+— and the host dispatched it with `threads = 1`. A 38.6 M-element embedding
+gradient is 38.6 M *dependent scalar loads on one lane* of a 3840-core card:
+measured **0.08 GB/s, 0.023 % of the P40's 346 GB/s**. Not a fraction of peak —
+three orders of magnitude below it. Grep rule, as a companion to "one thread per
+row": **a kernel whose first statement discards every invocation but one is a
+reduction that never got written.**
+
+**The fix** is the `gn_part`/`gn_stats2` shape one level up: `gradnorm_part`
+gives each tensor `n_wg = clamp(ceil(numel/8192), 1, 512)` workgroups that
+grid-stride the buffer (so the whole dispatch reads consecutive words),
+reduce through 64 f32 of workgroup memory behind **one** barrier (the CPU JIT's
+limit), and write one partial each; `clip_coef_wg` folds *every* tensor's
+partials into the clip coefficient in one 64-thread second pass. No atomics, no
+subgroups — the cross-workgroup combine **is** the second dispatch.
+
+Kernel microbenchmark on a P40 (`cargo test --release -p brain-optim --test
+bench_gradnorm -- --ignored`), at the real per-model size distribution — param
+*count* and size *skew* both matter, so the table is weighted by how many
+tensors of each size the model has:
+
+| numel | ×count | `gradnorm_sq` | GB/s | `gradnorm_part` | GB/s | speedup |
+|---:|---:|---:|---:|---:|---:|---:|
+| 768 | 74 | 0.056 ms | 0.1 | 0.025 ms | 0.1 | 2.2× |
+| 3 072 | 12 | 0.150 | 0.1 | 0.032 | 0.4 | 4.6× |
+| 589 824 | 12 | 22.271 | 0.1 | 0.049 | 48.5 | 457× |
+| 1 769 472 | 12 | 89.042 | 0.1 | 0.084 | 83.8 | 1 055× |
+| 2 359 296 | 24 | 118.289 | 0.1 | 0.087 | 109.1 | 1 367× |
+| 38 597 376 | 2 | 1 931.590 | 0.1 | **0.611** | **252.6** | **3 160×** |
+| **whole grad-norm, GPT-2-small** | 148 | **8 080 ms** | 0.1 | **7.6 ms** | 85.5 | **1 059×** |
+| **whole grad-norm, Qwen3-0.6B** | 311 | **29 885 ms** | 0.1 | **24.3 ms** | 98.3 | **1 232×** |
+
+The large tensors reach **252–277 GB/s = 73–80 % of the 346 GB/s ceiling** — for
+a pure read-and-reduce that is the right answer. The *aggregate* rows sit at
+85–98 GB/s only because dozens of 768-element tensors each cost one dispatch;
+at 0.025 ms those are at this harness's submit+poll floor, not the kernel's.
+
+**In situ, `gpt` training** (same shape, `BRAIN_PROFILE=1`, 5 steps, P40;
+`BRAIN_NO_COOP_GRADNORM=1` is the A/B switch):
+
+| kernel | serial | cooperative | |
+|---|---:|---:|---|
+| `gradnorm_sq` → `gradnorm_part` (385 calls) | 30 133.0 ms | **14.2 ms** | **2 122×** |
+| `clip_coef` → `clip_coef_wg` (5) | 0.0 | 0.1 | — |
+| share of GPU training time | **87.2 %** | **0.3 %** | |
+| total GPU kernel time | 34 545.4 ms | **4 416.3 ms** | **7.8×** |
+| wall, 100 steps | 689.6 s (6.90 s/step) | **83.9 s (0.84 s/step)** | **8.2×** |
+
+479.7 MB of gradient per step in 2.84 ms is **169 GB/s (49 % of peak)** in situ —
+below the microbench's 253 GB/s because ~50 of the 77 dispatches are tiny
+tensors, and because `BRAIN_PROFILE` puts each dispatch in its own compute pass.
+The top kernel is now `emb_bwd` (26.8 %), then `matmul_reg2` (17.7 %) and
+`attn_bwd_dscores` (16.1 %) — the step is finally *arithmetic*.
+
+**Trajectory equivalence** (100 steps, seed 1337, same binary, A/B by env):
+
+| step | train (coop / serial) | eval (coop / serial) |
+|---:|---|---|
+| 20 | 8.7030 / 8.7030 | 8.3850 / 8.3849 |
+| 40 | 6.9996 / 6.9995 | 6.8814 / 6.8813 |
+| 60 | 6.1074 / 6.1072 | 6.1173 / 6.1173 |
+| 80 | 5.4573 / 5.4579 | 5.8493 / 5.8485 |
+| 100 | **5.5391 / 5.5387** | 5.7005 / 5.7019 |
+
+Max divergence 1.4e-3 absolute (2.5e-4 relative) at step 100 — fp32 noise, and
+**the new side is the more correct one**. Against an f64 oracle, the serial walk
+keeps one fp32 accumulator across millions of sequential adds and loses the
+small terms: at 4.19 M elements it is **2.34e-3** relative off the exact
+sum-of-squares while the tree is **2.40e-7** — four orders of magnitude. The
+clip coefficient is not merely cheaper now, it is right.
+
+**Two hypotheses the numbers killed.**
+
+*"385 dispatches for one scalar is the deeper problem; fuse them."* — 385 is
+77 tensors × **5 steps**, i.e. 77 per step, not 385. After the fix the entire
+grad-norm is 2.84 ms of a 840 ms step; a fused pass over a concatenated view
+could recover at most the ~50 tiny-tensor launches, under 0.25 % of the step.
+It would also require relayouting `ParamStore` from one buffer per parameter
+name into an arena — every model binds `ps.g(name)` directly in its backward and
+`DeviceBuffer` carries no offset (the same infrastructure gap the concat-fusion
+section describes) — so it is a ~10-site change for <0.25 %. Deliberately not
+done; the per-tensor cooperative version is the whole win.
+
+*"`clip_coef` on one thread is fine, it only sums a few numbers."* — true of the
+old layout (77 tensors, 0.047 ms), false of the new one: the cooperative pass
+produces 11 586 partials for GPT-2-small and 54 385 for Qwen3-0.6B, and the
+serial fold over those costs 0.475 ms / 1.97 ms versus `clip_coef_wg`'s
+0.054 ms / 0.087 ms. Adding the second cooperative kernel was necessary, not
+symmetry.
+
+**The siblings in the step were already fine**, and the profile says so rather
+than the code: `grad_scale_buf` (3.9 ms/step, 246 GB/s) and `adamw` (12.2 ms/step,
+275 GB/s) are one-element-per-thread kernels — adjacent threads read adjacent
+addresses, so they never had the bug. (`max_abs_row` *does* have it — one thread
+per row — but it is on the int8 activation-quantisation path, not the optimiser,
+and does not appear in any training profile. Left for whoever profiles int8
+serving.)
+
+**Who inherits this with no change of their own.** `optim::Optim` resolves the
+two kernels **by name** through `Gpu::kernel_index`, and the policy lives in
+`backend_api::select` (`Op::GradNorm`), so a model opts in by appending
+`gradnorm_part` + `clip_coef_wg` to its PIPELINES — indices do not move and no
+`Optim::new` call site changes. Done here for all twelve crates that construct
+an `Optim`: **`gpt`, `qwen`, `glm`, `moe`, `pid`, `seq2seq`, `autoencoder`,
+`lfm`, `yolo`, `depth`, `kronos`, `wm-diamond`**. The size of each one's win is
+set by how many parameters it clips, not by its architecture — `yolo` (3 M
+params) gains far less in absolute terms than `qwen` (0.6–4 B), but the *ratio*
+is the same 3 orders of magnitude on any tensor over ~1 M elements.
+`zimage`/`flux2`/`tts`/`nemotron` run their own host-side optimisers and are
+untouched; so is `model::parallel`, whose multi-GPU path already computes the
+grad-norm on the host with rayon **precisely to dodge this kernel** — that
+workaround can now be revisited.
+
+There is no size gate, and `select.rs` carries a unit test that fails if one
+creeps back. A `numel <= X` fallback to `gradnorm_sq` would be the exact mistake
+`Op::RmsNorm`'s old `m <= 32` gate made: the serial kernel costs the same single
+dispatch as the cooperative one, so even a 768-element bias is 2.2× faster with
+64 lanes than with 1.
 
 ## Cross-model finding: shared-memory bank conflicts in `matmul_reg2`
 
