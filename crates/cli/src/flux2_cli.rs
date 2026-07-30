@@ -81,11 +81,33 @@ fn generate(args: &[String]) -> Result<(), String> {
     eprintln!("flux2: building pipeline ({} + {} tokens) ...", n_gen, n_ref);
     let pipe = Pipeline::build_with(&variant, &paths, n_gen + n_ref, None, precision)?;
     let t0 = std::time::Instant::now();
+    // Per-phase wall clock: the callback fires immediately BEFORE each phase,
+    // so the gap between two calls is the previous phase's duration. Text
+    // encode / denoise / VAE decode are the three costs a generation is made
+    // of, and the split is what any perf claim has to be argued from.
+    let mut phase = std::cell::RefCell::new((std::time::Instant::now(), String::new(), std::collections::BTreeMap::<String, f32>::new()));
     // The CLI has no cancel front-end — an unarmed Default token never fires.
     let (rgb, w, h) = pipe.generate(&prompt, &ref_imgs, &o, &Default::default(), |step, total, msg| {
+        let mut p = phase.borrow_mut();
+        let dt = p.0.elapsed().as_secs_f32();
+        if !p.1.is_empty() {
+            let key = p.1.clone();
+            *p.2.entry(key).or_default() += dt;
+        }
+        p.0 = std::time::Instant::now();
+        p.1 = msg.to_string();
         eprint!("\rflux2 [{step}/{total}] {msg}          ");
     })?;
-    eprintln!("\nflux2: {:.1}s", t0.elapsed().as_secs_f32());
+    {
+        let p = phase.get_mut();
+        let last = p.1.clone();
+        let dt = p.0.elapsed().as_secs_f32();
+        *p.2.entry(last).or_default() += dt;
+        eprintln!("\nflux2: {:.1}s total", t0.elapsed().as_secs_f32());
+        for (k, v) in &p.2 {
+            eprintln!("  {k:<20} {v:>7.2}s");
+        }
+    }
     let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
     ppm.extend_from_slice(&rgb);
     std::fs::write(&out, ppm).map_err(|e| format!("writing {out}: {e}"))?;

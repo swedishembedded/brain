@@ -74,7 +74,23 @@ fn klein_text_conditioning_matches_reference() {
     let tensors =
         checkpoint::safetensors::read_model_dir(std::path::Path::new(&te_dir)).expect("read TE");
     let init = qwen::import::brain_init_from_hf(tensors, &cfg).expect("brain_init_from_hf");
-    let model = Qwen::new(cfg.clone(), 1, ids.len() as u32, &init);
+    // `BRAIN_QWEN_TE_SHARD=1` builds the layer-truncated shard the FLUX.2
+    // pipeline actually runs (layers 0..=deepest tap, no head). The whole fp32
+    // 4B model is ~16 GB of weights, which with Pascal's non-ReBAR resident
+    // overhead does not fit a 24 GB P40 — so this is the only way to gate the
+    // GPU kernel selection (cooperative RMSNorm / softmax) against the golden.
+    let model = if std::env::var("BRAIN_QWEN_TE_SHARD").as_deref() == Ok("1") {
+        let shard = qwen::Shard {
+            start: 0,
+            end: *TAPS.iter().max().unwrap(),
+            embed: true,
+            head: false,
+            gpu_index: qwen::Shard::ANY_GPU,
+        };
+        Qwen::new_shard(cfg.clone(), 1, ids.len() as u32, &init, false, shard)
+    } else {
+        Qwen::new(cfg.clone(), 1, ids.len() as u32, &init)
+    };
     let taps = model.encode_hiddens_padded(&ids, content_len, &TAPS);
 
     let d = cfg.d_model as usize;

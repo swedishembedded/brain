@@ -28,6 +28,10 @@ engine's stage split and the real GPU adapter line.
 | GPU conv `forward` stage | 1218 ms (naive) | 545 ms | register tiling (then coalescing) |
 | **FLUX.2 klein-4B DiT forward** (1×P40, 1536 tokens) | 12.87 s (6.7% peak) | **2.76 s (35.7% peak)** | lane-split flash attention (29×) + coalesced QK-norm (19×) + conflict-free GEMM |
 | FLUX.2 512² 4-step image (2×P40) | 59.8 s | **18.3 s** | the above |
+| **FLUX.2 VAE decode** (64² latent → 512², 1×P40) | 6.47 s | **0.87 s** | parallel GroupNorm stats (159×) + attention as GEMM (80×) + conv as GEMM (3.8×) |
+| FLUX.2 Qwen3-4B text encode (512 tok, 28 layers) | 1.23 s | **1.06 s** | coalesced RMSNorm (11.4×) + softmax (4.0×) + `matmul_reg3` |
+| FLUX.2 512² 4-step image (2×P40, fp32) | 18.4 s | **12.7 s** | the two above |
+| FLUX.2 512² 4-step image (**1**×P40, int8) | 13.4 s | **7.6 s** | the two above |
 | **GPT decode** GPU kernel time (`gpt gen`, 6×768, 200 tok, 1×P40) | 1259 ms | **996 ms** | coalesced LayerNorm (10.3× on the kernel; 22.9% → 2.8% of the step) |
 
 Numbers are noisy on shared boxes (thermal/contention); the stable signals are
@@ -338,6 +342,84 @@ per FMA the kernel is shared-*throughput* bound around 40-50 % of peak, and
 getting past that needs vec4 shared loads or a larger register block — not
 deeper K-blocking. **Deeper K-blocking cannot help at all**: arithmetic
 intensity is `2·BM·BN·BK / ((BM+BN)·BK·4)`, and BK cancels.
+
+## Cross-model finding: a kernel fix does not propagate to models written later
+
+`gn_stats` — one invocation per (n, group), each serially walking its group —
+was found and fixed for the DIAMOND UNet in 2025 (it was **77.6 % of a frame**;
+see the world-models section below, which adds `gn_part` + `gn_stats2`). The
+`vae` crate was written afterwards, against the same kernel set, and reached for
+`gn_stats` because that is what the GroupNorm primitive is called. On the FLUX.2
+VAE decode it was **2 262 ms of a 6 466 ms decode (35 %)**: 32 threads for
+33 M elements.
+
+The lesson is not about GroupNorm. **A "fixed" kernel that is fixed by adding a
+faster sibling stays broken for every future caller**, because the obvious name
+still points at the slow one. Two things make the fix stick:
+
+* make the **selection**, not the kernel, the shared thing — a `*_step` helper
+  that picks the variant from `DeviceCaps` (`model::block::flash_bidir_step`,
+  `qwen::Qwen::rms_step`, `vae::Builder::coop`), so a new caller gets the fast
+  path by construction; and
+* when you profile any model, **grep the profile for the reference kernel
+  names** (`gn_stats`, `rmsnorm`, `layernorm`, `attn_softmax*`, `max_abs_row`,
+  `ln_stats`) before theorising. Every one of them is a one-thread-per-row
+  kernel with a cooperative twin, and finding one in a top-3 line is the cheap
+  half of any profile.
+
+FLUX.2's VAE hit `gn_stats`, `attn_scores_bidir` AND `attn_softmax_bidir`; its
+text encoder hit `rmsnorm` and `attn_softmax`. Five instances of one pattern in
+one model, all of them already solved elsewhere in the tree.
+
+## Cross-model finding: conv as GEMM needs the TRANSPOSED orientation to be chunkable
+
+`docs/performance/p40.md` established im2col + `matmul_reg2` as the conv lowering
+for a compute-bound discrete GPU (2.1-2.4× on YOLOv8n@640). The FLUX.2 VAE is
+the same trade at a much larger spatial size — `conv_bias_reg` measured a flat
+**~700 GFLOP/s (6.0 % of peak) across all 15 of its shapes**, which is its
+structural 0.75 byte/FLOP ceiling, not a bug — and it hits a wall the YOLO
+shapes never did:
+
+> the im2col operand for a 512×512 conv with Cin=256, K=3 is `[262144, 2304]`
+> f32 = **2.4 GB**, past the P40's 2047 MiB `max_storage_buffer_binding_size`.
+> The whole-image lowering is not merely expensive, it is **unbindable**.
+
+The fix is an orientation choice. YOLO's lowering computes `y[Cout, HW] =
+W · colᵀ` (positions are GEMM *columns*); chunking columns is not expressible,
+because a column chunk of the output is a strided region of every row. Compute
+`y[HW, Cout] = col · Wᵀ` instead — positions as GEMM **rows** — and a spatial
+chunk is a contiguous row range of *both* operands, so both bindings are plain
+`step_sliced` sub-ranges and one bounded scratch serves every conv in the graph.
+It also *lowers* traffic: with `Cout ≤ 128` the col is read exactly once,
+whereas the column-oriented form re-reads it `Cout/128` times.
+
+The cost is that the output lands in NHWC, so a permutation pass is needed
+(`nlc_bias_nchw`, which folds the conv bias into it). On the FLUX.2 VAE that
+whole path — `im2col_at` + `matmul_reg3` + `nlc_bias_nchw` — is **3 546 → 930 ms
+(3.8×)**, with the GEMM itself at **5 126 GFLOP/s = 43.6 % of peak**. Convs with
+`Cout < 128` stay on the direct kernel: they would pay for a full 128-wide
+column tile (the VAE's `conv_out` at Cout = 3 is 42× wasted).
+
+## Cross-model finding: a workgroup tile pays only where the amplification is large
+
+Both `nlc_bias_nchw` (a transpose) and `im2col_at` (a transpose in disguise) have
+the same shape of problem — whichever index the thread follows, the other side
+is strided — and the same textbook fix: stage a 64×64 tile in workgroup memory,
+pad the row stride to 65 so the column read hits 32 distinct banks. Measured on
+the same graph, same card, same session:
+
+| kernel | element-indexed | 64×64 workgroup tile | |
+|---|---:|---:|---|
+| `nlc_bias_nchw` | 158 ms | **36 ms** | 4.4× |
+| `im2col_at` | **275 ms** | 311 ms | 0.88× — *slower* |
+
+The difference is how bad the uncoalesced side actually is. The transpose's
+strided side fetches a 32-byte sector per useful float (8×), so removing it is
+worth far more than the occupancy the 16.6 KB of workgroup memory costs (5
+blocks per SM instead of the shared-memory-free maximum). im2col's gather lands
+**three consecutive taps in one sector** (~2.7×), and there the same trade
+loses. Estimate the amplification factor before paying occupancy for a tile; if
+it is under ~3×, the tile is a pessimisation.
 
 ---
 

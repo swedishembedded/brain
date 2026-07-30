@@ -73,6 +73,9 @@ const GRAD_SCALE_BUF: usize = 28;
 const AXPY: usize = 29;
 const EMBED_TILE: usize = 30;
 const MATMUL_TILE: usize = 31;
+// Kept registered (and A/B-able) though `linear_kernel` now picks its
+// bit-identical, conflict-free twin `matmul_reg3`.
+#[allow(dead_code)]
 const MATMUL_REG2: usize = 32;
 const MATMUL_DX_REG: usize = 33;
 const MATMUL_DW_REG: usize = 34;
@@ -110,6 +113,12 @@ const RMSNORM_ROWS: usize = 52;
 const MATMUL_GEMV: usize = 53;
 // Encoder right-padding key mask (FLUX.2 text-encoder parity).
 const GQA_SCORES_KMASK: usize = 54;
+// Workgroup-per-row softmax over the [B*H*T, T] score slab — the coalesced twin
+// of `attn_softmax` (see the kmask attention below).
+const SOFTMAX_ROWS: usize = 55;
+// `matmul_reg2` with its shared-memory bank conflicts removed; bit-identical
+// output, so it is a pure speed swap (see `linear_kernel`).
+const MATMUL_REG3: usize = 56;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -167,6 +176,8 @@ const PIPELINES: &[(&str, &str)] = &[
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("matmul_gemv", kernels::MATMUL_GEMV),
     ("gqa_scores_kmask", kernels::GQA_SCORES_KMASK),
+    ("softmax_rows", kernels::SOFTMAX_ROWS),
+    ("matmul_reg3", kernels::MATMUL_REG3),
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
@@ -177,7 +188,12 @@ const PIPELINES: &[(&str, &str)] = &[
 /// speed. `BRAIN_QWEN_NAIVE_MM=1` forces the naive kernel.
 fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
     let naive = std::env::var("BRAIN_QWEN_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
-    block::pick_gemm(m, n, MATMUL, MATMUL_REG2, naive)
+    // `matmul_reg3` = `matmul_reg2` with the shared-memory bank conflicts
+    // removed: identical tiling and identical K accumulation order, therefore
+    // BIT-IDENTICAL output (measured max_abs 0.0), and 1.11x on the FLUX.2 text
+    // encoder's prefill shapes (772 -> 695 ms for 196 GEMMs at 512 tokens).
+    // Same dispatch geometry, and the CPU backend routes both to one AVX2 GEMM.
+    block::pick_gemm(m, n, MATMUL, MATMUL_REG3, naive)
 }
 
 /// Backward GEMM pickers: tiled `matmul_{dx,dw}_reg` (bit-identical to naive,
@@ -289,6 +305,11 @@ pub struct Qwen {
     // its arming flag — the padded-encoder path (`encode_hiddens_padded`).
     kmask: DeviceBuffer,
     kmask_on: Cell<bool>,
+    /// The device runs workgroup-cooperative reductions (barriers). Selects the
+    /// coalesced workgroup-per-row RMSNorm / softmax; false on the CPU JIT,
+    /// which keeps the per-element reference kernels (whose native AVX2 fast
+    /// paths are the fast CPU route anyway).
+    coop: bool,
     xn_final: DeviceBuffer,
     logits: DeviceBuffer,
     ce_buf: DeviceBuffer,
@@ -583,6 +604,7 @@ impl Qwen {
             scores: st(bht2),
             kmask: st(t as u64),
             kmask_on: Cell::new(false),
+            coop: gpu.caps().workgroup_reductions,
             xn_final: hd_v(n * d),
             logits: hd_v(n * v),
             ce_buf: hd_v(n),
@@ -662,6 +684,59 @@ impl Qwen {
             silu_da: SILU_DA,
             silu_db: SILU_DB,
         }
+    }
+
+    /// RMSNorm, choosing the workgroup-per-row kernel wherever the device runs
+    /// workgroup reductions. `rmsnorm.wgsl` gives thread *t* row *t*, so a
+    /// warp's 32 loads are `dim` floats apart and each 32-byte sector fetched
+    /// serves ONE useful float; `rmsnorm_rows` walks a row with 64 threads and
+    /// is coalesced by construction. That penalty is per-access, not per-thread,
+    /// so it does not go away at prefill row counts — measured on the FLUX.2
+    /// text encoder (512 tokens, 28 layers, 112 dispatches): **72.0 -> 6.3 ms**.
+    /// The reference kernel's epsilon is a hard-coded 1e-6, which is what the
+    /// runtime-eps twin is handed here.
+    fn rms_step(&self, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, dim: u32, rows: u32) -> Step {
+        if self.coop {
+            self.gpu.step(RMSNORM_ROWS, &[x, w, out], &[dim, rows, f(1e-6)], rows * 64)
+        } else {
+            block::rmsnorm_fwd(&self.gpu, &Self::ids(), x, w, out, dim, rows)
+        }
+    }
+
+    /// Masked-pad GQA attention (the FLUX.2 text-encoder path): scores with an
+    /// additive per-key mask, row softmax, context. `block::gqa_fwd_kmask`'s
+    /// shape, with the softmax choosing the workgroup-per-row kernel where the
+    /// device runs workgroup reductions.
+    ///
+    /// `softmax_rows` normalises the WHOLE row while `attn_softmax` normalises
+    /// `j <= i`, and here the two are identical: `gqa_scores_kmask` already
+    /// writes `-3.4e38` into every `j > i` slot, so those terms exponentiate to
+    /// 0 and cannot move the max or the sum. (No row is ever fully masked: a
+    /// query at position `i` always sees the content keys at `j <= i`, pad
+    /// queries included.) One thread per row vs 64 cooperating on one row, at
+    /// [B*H*T = 16384, T = 512]: **33.6 -> 8.6 ms** over the encoder's 28
+    /// layers.
+    fn gqa_kmask_steps(
+        &self,
+        a: &block::Gqa,
+        q: &DeviceBuffer,
+        k: &DeviceBuffer,
+        v: &DeviceBuffer,
+        probs: &DeviceBuffer,
+        ctx: &DeviceBuffer,
+    ) -> Vec<Step> {
+        let rows = a.b * a.n_heads * a.t;
+        let p = [a.b, a.n_heads, a.n_kv_heads, a.t, a.head_dim, a.group()];
+        let softmax = if self.coop {
+            self.gpu.step(SOFTMAX_ROWS, &[&self.scores, probs], &[rows, a.t], rows * 64)
+        } else {
+            self.gpu.step(ATTN_SOFTMAX, &[&self.scores, probs], &[a.b, a.n_heads, a.t], rows)
+        };
+        vec![
+            self.gpu.step(GQA_SCORES_KMASK, &[q, k, &self.kmask, &self.scores], &p, rows * a.t),
+            softmax,
+            self.gpu.step(GQA_APPLY, &[probs, v, ctx], &p, rows * a.head_dim),
+        ]
     }
 
     /// GQA shape for `b`×`t` (the buffers are sized for the max `b`/`t`).
@@ -799,7 +874,7 @@ impl Qwen {
             let q8l = self.q8.as_ref().map(|q| (q, q.layers.get(&l).expect("q8 layer present")));
             // --- attention --- (projections stay here: they carry LoRA/bias;
             // norms/RoPE/attention-core come from the shared block builders)
-            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[l], self.w(&p("ln1.weight")), &lb.xn1, d, n));
+            s.push(self.rms_step(&self.res[l], self.w(&p("ln1.weight")), &lb.xn1, d, n));
             if let Some((q8, ql)) = q8l {
                 // xn1 quantized once, shared by q/k/v (DP4A GEMM per projection).
                 q8.quant(&self.gpu, &mut s, &lb.xn1, d, n);
@@ -825,8 +900,8 @@ impl Qwen {
             }
             // Optional per-head QK-RMSNorm (Qwen3); Qwen2 uses q_pre/k_pre directly.
             let (q_buf, k_buf): (&DeviceBuffer, &DeviceBuffer) = if self.cfg.qk_norm {
-                s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.q_pre, self.w(&p("attn.q_norm.weight")), &lb.q, hd, n * nh));
-                s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.k_pre, self.w(&p("attn.k_norm.weight")), &lb.k, hd, n * nkv));
+                s.push(self.rms_step(&lb.q_pre, self.w(&p("attn.q_norm.weight")), &lb.q, hd, n * nh));
+                s.push(self.rms_step(&lb.k_pre, self.w(&p("attn.k_norm.weight")), &lb.k, hd, n * nkv));
                 (&lb.q, &lb.k)
             } else {
                 (&lb.q_pre, &lb.k_pre)
@@ -840,7 +915,7 @@ impl Qwen {
                 s.push(block::rope_fwd(&self.gpu, &ids, k_buf, n, nkv, hd, hkv, t_use, theta));
             }
             if self.kmask_on.get() {
-                s.extend(block::gqa_fwd_kmask(&self.gpu, GQA_SCORES_KMASK, &ids, &ga, q_buf, k_buf, &self.kmask, &lb.v, &self.scores, &lb.probs, &lb.ctx));
+                s.extend(self.gqa_kmask_steps(&ga, q_buf, k_buf, &lb.v, &lb.probs, &lb.ctx));
             } else {
                 s.extend(block::gqa_fwd(&self.gpu, &ids, &ga, q_buf, k_buf, &lb.v, &self.scores, &lb.probs, &lb.ctx));
             }
@@ -854,7 +929,7 @@ impl Qwen {
             }
             s.push(self.gpu.step(ADD2, &[&self.res[l], &self.proj, &lb.xmid], &[n * d], n * d));
             // --- SwiGLU MLP ---
-            s.push(block::rmsnorm_fwd(&self.gpu, &ids, &lb.xmid, self.w(&p("ln2.weight")), &lb.xn2, d, n));
+            s.push(self.rms_step(&lb.xmid, self.w(&p("ln2.weight")), &lb.xn2, d, n));
             if let Some((q8, ql)) = q8l {
                 // xn2 quantized once, shared by gate/up.
                 q8.quant(&self.gpu, &mut s, &lb.xn2, d, n);
@@ -892,7 +967,7 @@ impl Qwen {
             return s;
         }
         let last = c.n_layers as usize;
-        s.push(block::rmsnorm_fwd(&self.gpu, &ids, &self.res[last], self.w("norm.weight"), &self.xn_final, d, n));
+        s.push(self.rms_step(&self.res[last], self.w("norm.weight"), &self.xn_final, d, n));
         // lm_head. When the whole vocab fits one tile (v0=0, cnt=v — the common
         // case for a small vocab like the TTS Talker's 3072), it is a plain
         // `[n,d]·[v,d]ᵀ` matmul, so dispatch the size-adaptive fast kernel

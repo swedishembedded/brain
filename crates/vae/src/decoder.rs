@@ -36,8 +36,14 @@ const K_NLC_NCHW: usize = 7;
 const K_ATTN_SCORES: usize = 8;
 const K_ATTN_SOFTMAX: usize = 9;
 const K_ATTN_APPLY: usize = 10;
+const K_GN_STATS_WG: usize = 11;
+const K_MATMUL: usize = 12;
+const K_IM2COL_AT: usize = 13;
+const K_NLC_BIAS_NCHW: usize = 14;
 
-const KERNELS: [(&str, &str); 11] = [
+/// The decoder/encoder graph's kernel set, in slot order. Public so a profiler
+/// can name the kernel behind each recorded [`Step`] (`flux2_bench vae`).
+pub const KERNELS: [(&str, &str); 15] = [
     ("conv_bias_reg", kernels::CONV_BIAS_REG),
     ("gn_stats", kernels::GN_STATS),
     ("gn_apply", kernels::GN_APPLY),
@@ -49,6 +55,10 @@ const KERNELS: [(&str, &str); 11] = [
     ("attn_scores_bidir", kernels::ATTN_SCORES_BIDIR),
     ("attn_softmax_bidir", kernels::ATTN_SOFTMAX_BIDIR),
     ("attn_apply_bidir", kernels::ATTN_APPLY_BIDIR),
+    ("gn_stats_wg", kernels::GN_STATS_WG),
+    ("matmul_reg3", kernels::MATMUL_REG3),
+    ("im2col_at", kernels::IM2COL_AT),
+    ("nlc_bias_nchw", kernels::NLC_BIAS_NCHW),
 ];
 
 /// Host tensors by name (diffusers key, e.g. `decoder.conv_in.weight`) →
@@ -86,7 +96,33 @@ struct Builder<'a> {
     /// Record intermediate taps (for parity debugging via `read_tap`). Off by
     /// default — pins buffers and defeats pooling. Enable with `BRAIN_VAE_TAPS=1`.
     taps_on: bool,
+    /// The device executes workgroup-cooperative reductions (barriers): pick the
+    /// workgroup-per-group GroupNorm statistics kernel and the conv/attention
+    /// GEMM lowerings. False on the CPU JIT, which keeps the reference kernels
+    /// (whose native AVX2 fast paths are the fast CPU route anyway).
+    coop: bool,
+    /// The single im2col scratch (`length, buffer`) shared by every lowered
+    /// conv, grown on demand. Bounded by [`COL_BUDGET_FLOATS`] — a whole-image
+    /// im2col operand exceeds the P40's 2047 MiB binding limit, so the GEMM is
+    /// chunked over spatial positions instead (see `im2col_at.wgsl`).
+    col: Option<(u64, DeviceBuffer)>,
 }
+
+/// Ceiling on the im2col scratch, in f32 words (512 MiB). The lowered conv
+/// processes `floor(budget / CinKK)` output positions per GEMM, so this trades
+/// scratch for the number of chunks; at 512² the largest operand would be
+/// 2.4 GB unchunked, which is both unbindable and hostile to a card shared with
+/// a resident DiT. Override with `BRAIN_VAE_COL_MIB`.
+fn col_budget_floats() -> u64 {
+    let mib: u64 = std::env::var("BRAIN_VAE_COL_MIB").ok().and_then(|v| v.parse().ok()).unwrap_or(512);
+    mib * 1024 * 1024 / 4
+}
+
+/// Minimum output channels for the lowered conv: `matmul_reg3` computes a
+/// 128-wide column tile, so a conv with fewer output channels pays for a full
+/// tile and wins nothing (the FLUX.2 `conv_out`, Cout = 3, is 42x wasted). It
+/// stays on the direct register-tiled conv.
+const GEMM_CONV_MIN_COUT: u32 = 128;
 
 impl<'a> Builder<'a> {
     fn get(&self, name: &str) -> &(Vec<usize>, Vec<f32>) {
@@ -132,37 +168,112 @@ impl<'a> Builder<'a> {
     ) -> DeviceBuffer {
         let ho = (h + 2 * pad - k) + 1;
         let wo = (w + 2 * pad - k) + 1;
-        let wgt = self.dev(&format!("{prefix}.weight"));
-        let bias = self.dev(&format!("{prefix}.bias"));
-        let y = self.act((cout * ho * wo) as u64);
-        let threads = cout.div_ceil(8) * (ho * wo).div_ceil(4);
-        let step = self.gpu.step(
-            K_CONV,
-            &[x, &wgt, &bias, &y],
-            &[1, cin, h, w, cout, k, 1, pad, ho, wo],
-            threads,
-        );
-        self.steps.push(step);
-        y
+        self.conv_s(prefix, cin, cout, k, 1, pad, h, w, ho, wo, x)
     }
 
     /// diffusers `Downsample2D` (`use_conv`, `padding=0`): F.pad(x,(0,1,0,1)) then
     /// a stride-2, k=3, pad=0 conv → `[c, h/2, w/2]`. The right/bottom zero-pad is
-    /// reproduced by forcing `ho=wo=h/2` with `pad=0`: the kernel bounds-checks its
-    /// reads, so the extra bottom/right taps read 0 — exactly the asymmetric pad.
+    /// reproduced by forcing `ho=wo=h/2` with `pad=0`: the kernels bounds-check
+    /// their reads, so the extra bottom/right taps read 0 — exactly the
+    /// asymmetric pad.
     fn conv_down(&mut self, prefix: &str, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
-        let (ho, wo) = (h / 2, w / 2);
+        self.conv_s(prefix, c, c, 3, 2, 0, h, w, h / 2, w / 2, x)
+    }
+
+    /// The im2col scratch, grown on demand and shared by every lowered conv.
+    /// An outgrown buffer goes back to the activation pool (its last read is
+    /// already recorded, which is exactly the pool's reuse contract).
+    fn col_buf(&mut self, need: u64) -> DeviceBuffer {
+        if let Some((len, b)) = &self.col {
+            if *len >= need {
+                return b.clone();
+            }
+        }
+        if let Some((len, b)) = self.col.take() {
+            self.free(len, b);
+        }
+        let b = self.act(need);
+        self.col = Some((need, b.clone()));
+        b
+    }
+
+    /// Conv with an explicit stride and output size. Two lowerings:
+    ///
+    /// * **direct** — `conv_bias_reg`, the 8x4 register-tiled kernel. Measured
+    ///   on a P40 across every FLUX.2 VAE decode shape: a flat **~700 GFLOP/s,
+    ///   6% of the card's fp32 peak**, and it was 3535 ms of a 3600 ms decode.
+    ///   Its ceiling is structural — 12 global loads per 32 FMAs is
+    ///   0.75 byte/FLOP, a 461 GFLOP/s roofline that caching stretches to ~700.
+    /// * **lowered** (`self.coop`, `cout >= GEMM_CONV_MIN_COUT`) — `im2col_at` +
+    ///   `matmul_reg3` + `nlc_bias_nchw`, i.e. `y[HW, Cout] = col[HW, CinKK] ·
+    ///   Wᵀ`, which runs at the GEMM's ~34% of peak. This is the trade
+    ///   `docs/performance/overview.md` scoped to "a compute-bound discrete
+    ///   GPU" and `docs/performance/p40.md` already took for YOLO's convs; the
+    ///   P40 is that GPU. The transposed orientation (positions as GEMM ROWS)
+    ///   is what makes it chunkable: a spatial chunk is a contiguous row range
+    ///   of both `col` and the output, so the 2.4 GB whole-image operand
+    ///   becomes a bounded scratch (see `im2col_at.wgsl`).
+    #[allow(clippy::too_many_arguments)]
+    fn conv_s(
+        &mut self,
+        prefix: &str,
+        cin: u32,
+        cout: u32,
+        k: u32,
+        stride: u32,
+        pad: u32,
+        h: u32,
+        w: u32,
+        ho: u32,
+        wo: u32,
+        x: &DeviceBuffer,
+    ) -> DeviceBuffer {
         let wgt = self.dev(&format!("{prefix}.weight"));
         let bias = self.dev(&format!("{prefix}.bias"));
-        let y = self.act((c * ho * wo) as u64);
-        let threads = c.div_ceil(8) * (ho * wo).div_ceil(4);
-        let step = self.gpu.step(
-            K_CONV,
-            &[x, &wgt, &bias, &y],
-            &[1, c, h, w, c, 3, 2, 0, ho, wo], // stride 2, pad 0, k 3
-            threads,
-        );
-        self.steps.push(step);
+        let y = self.act((cout * ho * wo) as u64);
+        let hw = ho * wo;
+        let cinkk = cin * k * k;
+        if self.coop && cout >= GEMM_CONV_MIN_COUT && hw >= 128 {
+            // Positions per GEMM: a multiple of the 128-row tile, inside the
+            // scratch budget, at least one tile.
+            let budget = col_budget_floats();
+            let chunk = (((budget / cinkk as u64) / 128) * 128).clamp(128, hw as u64) as u32;
+            let col = self.col_buf(chunk as u64 * cinkk as u64);
+            let nhwc = self.act((hw * cout) as u64);
+            let mut pos = 0u32;
+            while pos < hw {
+                let cnt = chunk.min(hw - pos);
+                self.steps.push(self.gpu.step(
+                    K_IM2COL_AT,
+                    &[x, &col],
+                    &[cin, h, w, k, stride, pad, ho, wo, cinkk, pos, cnt],
+                    cnt * cinkk,
+                ));
+                self.steps.push(self.gpu.step_sliced(
+                    K_MATMUL,
+                    &[&col, &wgt, &nhwc],
+                    &[(0, 0), (0, 0), (pos as u64 * cout as u64, cnt as u64 * cout as u64)],
+                    &[cnt, cinkk, cout],
+                    cnt.div_ceil(128) * cout.div_ceil(128) * 256,
+                ));
+                pos += cnt;
+            }
+            self.steps.push(self.gpu.step(
+                K_NLC_BIAS_NCHW,
+                &[&nhwc, &bias, &y],
+                &[hw * cout, cout, hw],
+                cout.div_ceil(64) * hw.div_ceil(64) * 64,
+            ));
+            self.free((hw * cout) as u64, nhwc);
+        } else {
+            let threads = cout.div_ceil(8) * hw.div_ceil(4);
+            self.steps.push(self.gpu.step(
+                K_CONV,
+                &[x, &wgt, &bias, &y],
+                &[1, cin, h, w, cout, k, stride, pad, ho, wo],
+                threads,
+            ));
+        }
         y
     }
 
@@ -177,12 +288,27 @@ impl<'a> Builder<'a> {
         let g = self.groups;
         let stats = self.act(2 * g as u64);
         let y = self.act((c * h * w) as u64);
-        self.steps.push(self.gpu.step(
-            K_GN_STATS,
-            &[x, &stats],
-            &[1, c, h, w, g, f(self.eps)],
-            g,
-        ));
+        // Statistics: one WORKGROUP per group where the device can run a
+        // workgroup reduction (`gn_stats_wg`), else the per-group reference
+        // kernel. `gn_stats` dispatches `g` = 32 *invocations* for up to 33 M
+        // elements — measured at 35% of a 512² FLUX.2 VAE decode; the
+        // cooperative kernel is the same two-pass math, coalesced and 32-way
+        // parallel (see `gn_stats_wg.wgsl`).
+        if self.coop {
+            self.steps.push(self.gpu.step(
+                K_GN_STATS_WG,
+                &[x, &stats],
+                &[1, c, h, w, g, f(self.eps)],
+                g * 256,
+            ));
+        } else {
+            self.steps.push(self.gpu.step(
+                K_GN_STATS,
+                &[x, &stats],
+                &[1, c, h, w, g, f(self.eps)],
+                g,
+            ));
+        }
         self.steps.push(self.gpu.step(
             K_GN_APPLY,
             &[x, &stats, &gb, &y],
@@ -275,6 +401,20 @@ impl<'a> Builder<'a> {
         qkv_b.extend_from_slice(qb);
         qkv_b.extend_from_slice(kb);
         qkv_b.extend_from_slice(vb);
+        // GEMM path (below): the 1/√C attention scale lives in
+        // `attn_scores_bidir`'s epilogue, and a plain GEMM has no epilogue — so
+        // fold it into `to_q` instead. `q = (Wx+b)/√C = (W/√C)x + b/√C`
+        // exactly; only the fp32 rounding of the two orders differs (≈1 ulp on
+        // a score of O(1), invisible through the softmax).
+        if self.coop {
+            let sc = 1.0f32 / (c as f32).sqrt();
+            for v in qkv_w[..qw.len()].iter_mut() {
+                *v *= sc;
+            }
+            for v in qkv_b[..qb.len()].iter_mut() {
+                *v *= sc;
+            }
+        }
         let qkv_wd = self.gpu.storage_init(&format!("{prefix}.qkv.w"), &qkv_w);
         let qkv_bd = self.gpu.storage_init(&format!("{prefix}.qkv.b"), &qkv_b);
 
@@ -287,31 +427,85 @@ impl<'a> Builder<'a> {
             (3 * c).div_ceil(8) * t.div_ceil(4),
         ));
         self.free((c * t) as u64, normed); // last read was the qkv conv
-        // NCHW [3C,h,w] → NLC rows [T, 3C].
-        let qkv = self.act((3 * c * t) as u64);
-        self.steps.push(self.gpu.step(K_NCHW_NLC, &[&qkv_chw, &qkv], &[3 * c * t, 3 * c, t], 3 * c * t));
-        self.free((3 * c * t) as u64, qkv_chw);
 
-        // Single head, head_dim = C, scale 1/√C (applied in the kernel).
-        let scores = self.act((t * t) as u64);
-        self.steps.push(self.gpu.step(
-            K_ATTN_SCORES,
-            &[&qkv, &scores],
-            &[1, 1, t, c, 3 * c, 0, c],
-            t * t,
-        ));
-        let probs = self.act((t * t) as u64);
-        self.steps.push(self.gpu.step(K_ATTN_SOFTMAX, &[&scores, &probs], &[1, 1, t], t));
-        self.free((t * t) as u64, scores);
-        let attn_rows = self.act((t * c) as u64);
-        self.steps.push(self.gpu.step(
-            K_ATTN_APPLY,
-            &[&probs, &qkv, &attn_rows], // last read of both probs and qkv
-            &[1, 1, t, c, 3 * c, 2 * c, c],
-            t * c,
-        ));
-        self.free((t * t) as u64, probs);
-        self.free((3 * c * t) as u64, qkv);
+        let attn_rows = if self.coop {
+            // ---- attention as two GEMMs -----------------------------------
+            // The per-element trio gives one thread per (i,j) score, each
+            // looping head_dim with its `k` reads a whole row apart: at the
+            // FLUX.2 mid block (T = 4096, C = 512) `attn_scores_bidir`
+            // measured **562 ms = 13% of a 512² decode** for 17 GFLOP =
+            // 30 GFLOP/s, 0.26% of the P40's peak. Both contractions are plain
+            // matmuls at shapes `matmul_reg3` runs at ~34% of peak, so express
+            // them as such. The qkv conv already emits **channel-major**
+            // [3C, T], which is qᵀ/kᵀ/vᵀ — so `v` needs no transpose at all
+            // (it is directly the `[n, k]` operand of the apply GEMM), and
+            // q/k need one cheap `nchw_nlc` each.
+            let q_nlc = self.act((c * t) as u64);
+            let k_nlc = self.act((c * t) as u64);
+            for (i, dst) in [&q_nlc, &k_nlc].into_iter().enumerate() {
+                let off = (i as u64) * (c * t) as u64;
+                self.steps.push(self.gpu.step_sliced(
+                    K_NCHW_NLC,
+                    &[&qkv_chw, dst],
+                    &[(off, (c * t) as u64), (0, 0)],
+                    &[c * t, c, t],
+                    c * t,
+                ));
+            }
+            // scores[T,T] = q[T,C] · k[T,C]ᵀ  (the 1/√C is folded into to_q)
+            let scores = self.act((t * t) as u64);
+            self.steps.push(self.gpu.step(
+                K_MATMUL,
+                &[&q_nlc, &k_nlc, &scores],
+                &[t, c, t],
+                t.div_ceil(128) * t.div_ceil(128) * 256,
+            ));
+            self.free((c * t) as u64, q_nlc);
+            self.free((c * t) as u64, k_nlc);
+            let probs = self.act((t * t) as u64);
+            self.steps.push(self.gpu.step(K_ATTN_SOFTMAX, &[&scores, &probs], &[1, 1, t], t));
+            self.free((t * t) as u64, scores);
+            // ctx[T,C] = probs[T,T] · v[T,C], with vᵀ = the third channel block
+            // of the conv output, read in place as the [n=C, k=T] operand.
+            let rows = self.act((t * c) as u64);
+            self.steps.push(self.gpu.step_sliced(
+                K_MATMUL,
+                &[&probs, &qkv_chw, &rows],
+                &[(0, 0), (2 * (c * t) as u64, (c * t) as u64), (0, 0)],
+                &[t, t, c],
+                t.div_ceil(128) * c.div_ceil(128) * 256,
+            ));
+            self.free((t * t) as u64, probs);
+            self.free((3 * c * t) as u64, qkv_chw);
+            rows
+        } else {
+            // NCHW [3C,h,w] → NLC rows [T, 3C].
+            let qkv = self.act((3 * c * t) as u64);
+            self.steps.push(self.gpu.step(K_NCHW_NLC, &[&qkv_chw, &qkv], &[3 * c * t, 3 * c, t], 3 * c * t));
+            self.free((3 * c * t) as u64, qkv_chw);
+
+            // Single head, head_dim = C, scale 1/√C (applied in the kernel).
+            let scores = self.act((t * t) as u64);
+            self.steps.push(self.gpu.step(
+                K_ATTN_SCORES,
+                &[&qkv, &scores],
+                &[1, 1, t, c, 3 * c, 0, c],
+                t * t,
+            ));
+            let probs = self.act((t * t) as u64);
+            self.steps.push(self.gpu.step(K_ATTN_SOFTMAX, &[&scores, &probs], &[1, 1, t], t));
+            self.free((t * t) as u64, scores);
+            let rows = self.act((t * c) as u64);
+            self.steps.push(self.gpu.step(
+                K_ATTN_APPLY,
+                &[&probs, &qkv, &rows], // last read of both probs and qkv
+                &[1, 1, t, c, 3 * c, 2 * c, c],
+                t * c,
+            ));
+            self.free((t * t) as u64, probs);
+            self.free((3 * c * t) as u64, qkv);
+            rows
+        };
         // NLC rows [T, C] → NCHW [C,h,w].
         let attn_chw = self.act((c * t) as u64);
         self.steps.push(self.gpu.step(K_NLC_NCHW, &[&attn_rows, &attn_chw], &[c * t, c, t], c * t));
@@ -343,6 +537,8 @@ impl VaeDecoder {
             taps: vec![],
             pool: std::collections::HashMap::new(),
             taps_on: std::env::var("BRAIN_VAE_TAPS").is_ok(),
+            coop: gpu.caps().workgroup_reductions,
+            col: None,
         };
 
         let z_in = gpu.storage((cfg.latent_channels * h * w) as u64);
@@ -447,6 +643,17 @@ impl VaeDecoder {
     pub fn config(&self) -> &VaeConfig {
         &self.cfg
     }
+
+    /// The device the graph was built on (profiling / benches).
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
+    }
+
+    /// The pre-recorded decode dispatch sequence (profiling / benches). Each
+    /// [`Step`]'s `meta()` names its slot in [`KERNELS`].
+    pub fn steps(&self) -> &[Step] {
+        &self.steps
+    }
 }
 
 // ===================== encoder =====================
@@ -477,7 +684,7 @@ impl VaeEncoder {
             Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
             _ => Gpu::new(&KERNELS),
         };
-        let mut b = Builder { gpu: &gpu, t: tensors, eps: cfg.norm_eps, groups: cfg.norm_num_groups, steps: vec![], taps: vec![], pool: std::collections::HashMap::new(), taps_on: std::env::var("BRAIN_VAE_TAPS").is_ok() };
+        let mut b = Builder { gpu: &gpu, t: tensors, eps: cfg.norm_eps, groups: cfg.norm_num_groups, steps: vec![], taps: vec![], pool: std::collections::HashMap::new(), taps_on: std::env::var("BRAIN_VAE_TAPS").is_ok(), coop: gpu.caps().workgroup_reductions, col: None };
 
         let img_in = gpu.storage((cfg.in_channels * h * w) as u64);
         let ch = &cfg.block_out_channels;

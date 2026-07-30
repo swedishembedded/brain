@@ -223,7 +223,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
 
     match base {
         // ---- GEMMs: out = x[m,k] @ w[n,k]ᵀ (contraction MACs only) ----------
-        "matmul" | "matmul_reg" | "matmul_reg2" | "matmul_gemv" => {
+        "matmul" | "matmul_reg" | "matmul_reg2" | "matmul_reg3" | "matmul_gemv" => {
             let (m, k, n) = (p(0)?, p(1)?, p(2)?);
             f(2 * m * k * n, 4 * (m * k + n * k + m * n))
         }

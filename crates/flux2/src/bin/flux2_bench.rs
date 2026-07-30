@@ -15,6 +15,12 @@
 //!   flux2_bench mm      [reps]        standalone matmul at the DiT's shapes
 //!   flux2_bench floor   [n]           per-dispatch floor (tiny kernel × n)
 //!   flux2_bench replay  [reps] [h w]  the whole DiT graph, per shape + kind
+//!   flux2_bench te      [reps]        the Qwen3-4B 512-token TE prefill, per kind
+//!   flux2_bench tei8    [reps]        ...the INT8 (DP4A) shard of the same
+//!   flux2_bench vae     [reps] [h w]  the FLUX.2 VAE decode graph, per kind
+//!
+//! `BRAIN_FLUX2_BENCH_BASELINE=1` profiles the PRE-optimization kernel set
+//! (`replay` and `te`/`tei8`), so before/after come from one binary in one run.
 //!
 //! `BRAIN_GPU_INDEX=0` selects a card. Per-group timings drain the queue with a
 //! `poll_wait` between groups; that adds one queue round-trip (~the `floor`
@@ -446,9 +452,298 @@ fn bench_replay(gpu: &Gpu, reps: usize, lh: u32, lw: u32) {
     }
 }
 
+// ---------------------------------------------------------- profiler ------
+
+/// Per-kernel-kind profile of an arbitrary recorded graph.
+///
+/// Every `Step` built through the `gpu_core` facade carries a `StepMeta` naming
+/// the kernel slot it dispatches, so the table below is derived from the graph
+/// itself instead of being hand-annotated (as `bench_replay`'s `grp!` groups
+/// are). Each kind is timed by submitting *only* its steps: one queue
+/// round-trip per kind instead of one per group, and the isolation is sound
+/// because a dispatch's cost depends on its shape, not on what ran before it.
+/// The whole graph in one submit is timed too, so the sum-vs-whole gap bounds
+/// the instrumentation error.
+fn profile_kinds(gpu: &Gpu, steps: &[Step], names: &[(&str, &str)], reps: usize, flop: f64, bytes: f64) {
+    let whole = time_steps(gpu, steps, reps);
+    println!("\nwhole graph, single submit: {:.3} s ({} dispatches)", whole, steps.len());
+    if flop > 0.0 {
+        println!(
+            "work: {:.0} GFLOP -> {:.0} GFLOP/s ({:.1}% of P40 fp32 peak)",
+            flop / 1e9,
+            flop / 1e9 / whole,
+            pct(flop / 1e9 / whole)
+        );
+    }
+    if bytes > 0.0 {
+        println!("minimum traffic: {:.1} GB -> {:.0} GB/s of the P40's 346", bytes / 1e9, bytes / whole / 1e9);
+    }
+
+    let mut by_kind: std::collections::BTreeMap<usize, Vec<Step>> = Default::default();
+    for s in steps {
+        let k = s.meta().expect("step built through the facade").kernel;
+        by_kind.entry(k).or_default().push(s.clone());
+    }
+    let mut rows: Vec<(usize, usize, f64)> = Vec::new();
+    let mut sum = 0.0;
+    for (k, v) in &by_kind {
+        let t = time_steps(gpu, v, reps);
+        sum += t;
+        rows.push((*k, v.len(), t));
+    }
+    rows.sort_by(|a, b| b.2.total_cmp(&a.2));
+    println!("\n{:<24} {:>6} {:>10} {:>8}", "kernel", "disp", "ms", "% phase");
+    for (k, c, t) in &rows {
+        println!("{:<24} {c:>6} {:>10.1} {:>7.1}%", names[*k].0, t * 1e3, 100.0 * t / sum);
+    }
+    println!("sum of kinds: {:.3} s (vs {:.3} s in one submit)", sum, whole);
+
+    // The dominant kind again, split by uniform params (= by shape): which
+    // instance of it is the cost, not just which kernel.
+    if let Some((top, _, _)) = rows.first() {
+        let mut by_shape: std::collections::BTreeMap<Vec<u32>, Vec<Step>> = Default::default();
+        for s in &by_kind[top] {
+            let m = s.meta().unwrap();
+            by_shape.entry(m.params.clone().unwrap_or_default()).or_default().push(s.clone());
+        }
+        let mut sh: Vec<(String, usize, f64)> = by_shape
+            .iter()
+            .map(|(p, v)| (format!("{p:?}"), v.len(), time_steps(gpu, v, reps)))
+            .collect();
+        sh.sort_by(|a, b| b.2.total_cmp(&a.2));
+        println!("\n{} by shape (params):", names[*top].0);
+        for (p, c, t) in &sh {
+            println!("  {p:<48} {c:>4} {:>9.1} ms", t * 1e3);
+        }
+    }
+}
+
+// ------------------------------------------------------------- te ---------
+
+/// Kernel slots for the Qwen3 text-encoder prefill replay. Order is this
+/// bench's own; the *names* are what the profile prints.
+const TE_KERNELS: &[(&str, &str)] = &[
+    ("rmsnorm", kernels::RMSNORM),
+    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("rope_base", kernels::ROPE_BASE),
+    ("gqa_scores_kmask", kernels::GQA_SCORES_KMASK),
+    ("attn_softmax", kernels::ATTN_SOFTMAX),
+    ("gqa_apply", kernels::GQA_APPLY),
+    ("silu_mul", kernels::SILU_MUL),
+    ("add2", kernels::ADD2),
+    ("max_abs_row", kernels::MAX_ABS_ROW),
+    ("quant_pack", kernels::QUANT_PACK),
+    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
+    ("rmsnorm_rows", kernels::RMSNORM_ROWS),
+    ("softmax_rows", kernels::SOFTMAX_ROWS),
+    ("matmul_reg3", kernels::MATMUL_REG3),
+];
+const T_RMS: usize = 0;
+const T_MM: usize = 1;
+const T_ROPE: usize = 2;
+const T_SCORES: usize = 3;
+const T_SOFTMAX: usize = 4;
+const T_APPLY: usize = 5;
+const T_SILU: usize = 6;
+const T_ADD: usize = 7;
+const T_MAXABS: usize = 8;
+const T_QPACK: usize = 9;
+const T_MM8: usize = 10;
+const T_RMS_ROWS: usize = 11;
+const T_SM_ROWS: usize = 12;
+const T_MM3: usize = 13;
+
+/// Replay of `Qwen::forward_steps` for the FLUX.2 text encoder: ONE 512-token
+/// prefill of the layer-27-truncated Qwen3-4B, masked-pad (`gqa_scores_kmask`),
+/// no head. Shapes only — no weights — exactly as `build_replay` does for the
+/// DiT.
+///
+/// `i8` swaps the 7 per-layer linears for the DP4A path (`max_abs_row` +
+/// `quant_pack` + `matmul_i8_dyn`), matching `Qwen::new_shard_i8`.
+/// `base` selects the PRE-fix kernel set (`rmsnorm` + `attn_softmax` +
+/// `matmul_reg2`) instead of the one qwen now dispatches, so the before and
+/// after tables come from one binary on one device in one run — the same
+/// `BRAIN_FLUX2_BENCH_BASELINE` convention the DiT replay uses.
+fn build_te_replay(gpu: &Gpu, layers: u32, t: u32, i8: bool, base: bool) -> (Vec<Step>, f64) {
+    let (d, ff, hd, nh, nkv) = (2560u32, 9728u32, 128u32, 32u32, 8u32);
+    let (hq, hkv) = (nh * hd, nkv * hd);
+    let group = nh / nkv;
+    let n = t;
+    let a = |len: u64| gpu.storage(len);
+    let (du, ffu, nu) = (d as u64, ff as u64, n as u64);
+
+    let res = a(nu * du);
+    let xn = a(nu * du);
+    let q_pre = a(nu * hq as u64);
+    let k_pre = a(nu * hkv as u64);
+    let v = a(nu * hkv as u64);
+    let q = a(nu * hq as u64);
+    let k = a(nu * hkv as u64);
+    let scores = a(nh as u64 * t as u64 * t as u64);
+    let probs = a(nh as u64 * t as u64 * t as u64);
+    let ctx = a(nu * hq as u64);
+    let proj = a(nu * du);
+    let xmid = a(nu * du);
+    let gate = a(nu * ffu);
+    let up = a(nu * ffu);
+    let hbuf = a(nu * ffu);
+    let mlp_out = a(nu * du);
+    let kmask = a(t as u64);
+    let gain_d = a(du);
+    let gain_hd = a(hd as u64);
+    // fp32 weights, one buffer per distinct (n_out, k).
+    let w_q = a(hq as u64 * du);
+    let w_kv = a(hkv as u64 * du);
+    let w_o = a(du * hq as u64);
+    let w_ff = a(ffu * du);
+    let w_down = a(du * ffu);
+    // int8 weights: packed [n, k/4] u32 + per-channel scale [n].
+    let p_q = a(hq as u64 * du / 4);
+    let p_kv = a(hkv as u64 * du / 4);
+    let p_o = a(du * hq as u64 / 4);
+    let p_ff = a(ffu * du / 4);
+    let p_down = a(du * ffu / 4);
+    let s_q = a(hq as u64);
+    let s_kv = a(hkv as u64);
+    let s_o = a(du);
+    let s_ff = a(ffu);
+    let s_down = a(du);
+    let sx = a(nu);
+    let xq = a(nu * ffu / 4);
+
+    let kmm = if base { T_MM } else { T_MM3 };
+    let mut s: Vec<Step> = Vec::new();
+    let mut flop = 0.0f64;
+    let mm = |s: &mut Vec<Step>, flop: &mut f64, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, kk: u32, nn: u32| {
+        s.push(gpu.step(kmm, &[x, w, o], &[n, kk, nn], n.div_ceil(128) * nn.div_ceil(128) * 256));
+        *flop += 2.0 * n as f64 * kk as f64 * nn as f64;
+    };
+    let quant = |s: &mut Vec<Step>, x: &DeviceBuffer, kk: u32| {
+        s.push(gpu.step(T_MAXABS, &[x, &sx], &[n, kk], n));
+        s.push(gpu.step(T_QPACK, &[x, &sx, &xq], &[n, kk], n * kk / 4));
+    };
+    let mm8 = |s: &mut Vec<Step>, flop: &mut f64, pw: &DeviceBuffer, sw: &DeviceBuffer, o: &DeviceBuffer, kk: u32, nn: u32| {
+        s.push(gpu.step(T_MM8, &[&xq, pw, &sx, sw, o], &[n, kk / 4, nn], n.div_ceil(128) * nn.div_ceil(128) * 256));
+        *flop += 2.0 * n as f64 * kk as f64 * nn as f64;
+    };
+    let rms = |s: &mut Vec<Step>, x: &DeviceBuffer, g: &DeviceBuffer, o: &DeviceBuffer, dim: u32, rows: u32| {
+        if base {
+            s.push(gpu.step(T_RMS, &[x, g, o], &[dim, rows], rows));
+        } else {
+            s.push(gpu.step(T_RMS_ROWS, &[x, g, o], &[dim, rows, f(1e-6)], rows * 64));
+        }
+    };
+
+    for _ in 0..layers {
+        rms(&mut s, &res, &gain_d, &xn, d, n);
+        if i8 {
+            quant(&mut s, &xn, d);
+            mm8(&mut s, &mut flop, &p_q, &s_q, &q_pre, d, hq);
+            mm8(&mut s, &mut flop, &p_kv, &s_kv, &k_pre, d, hkv);
+            mm8(&mut s, &mut flop, &p_kv, &s_kv, &v, d, hkv);
+        } else {
+            mm(&mut s, &mut flop, &xn, &w_q, &q_pre, d, hq);
+            mm(&mut s, &mut flop, &xn, &w_kv, &k_pre, d, hkv);
+            mm(&mut s, &mut flop, &xn, &w_kv, &v, d, hkv);
+        }
+        rms(&mut s, &q_pre, &gain_hd, &q, hd, n * nh);
+        rms(&mut s, &k_pre, &gain_hd, &k, hd, n * nkv);
+        let half = hd / 2;
+        s.push(gpu.step(T_ROPE, &[&q], &[n, nh, hd, hq, 0, t, f(1.0e6)], n * nh * half));
+        s.push(gpu.step(T_ROPE, &[&k], &[n, nkv, hd, hkv, 0, t, f(1.0e6)], n * nkv * half));
+        let ap = [1, nh, nkv, t, hd, group];
+        s.push(gpu.step(T_SCORES, &[&q, &k, &kmask, &scores], &ap, nh * t * t));
+        if base {
+            s.push(gpu.step(T_SOFTMAX, &[&scores, &probs], &[1, nh, t], nh * t));
+        } else {
+            s.push(gpu.step(T_SM_ROWS, &[&scores, &probs], &[nh * t, t], nh * t * 64));
+        }
+        s.push(gpu.step(T_APPLY, &[&probs, &v, &ctx], &ap, nh * t * hd));
+        // scores+apply FLOP (causal: t(t+1)/2 pairs, 2 FLOP each, both passes).
+        flop += 2.0 * 2.0 * nh as f64 * (t as f64 * (t as f64 + 1.0) / 2.0) * hd as f64;
+        if i8 {
+            quant(&mut s, &ctx, hq);
+            mm8(&mut s, &mut flop, &p_o, &s_o, &proj, hq, d);
+        } else {
+            mm(&mut s, &mut flop, &ctx, &w_o, &proj, hq, d);
+        }
+        s.push(gpu.step(T_ADD, &[&res, &proj, &xmid], &[n * d], n * d));
+        rms(&mut s, &xmid, &gain_d, &xn, d, n);
+        if i8 {
+            quant(&mut s, &xn, d);
+            mm8(&mut s, &mut flop, &p_ff, &s_ff, &gate, d, ff);
+            mm8(&mut s, &mut flop, &p_ff, &s_ff, &up, d, ff);
+        } else {
+            mm(&mut s, &mut flop, &xn, &w_ff, &gate, d, ff);
+            mm(&mut s, &mut flop, &xn, &w_ff, &up, d, ff);
+        }
+        s.push(gpu.step(T_SILU, &[&gate, &up, &hbuf], &[n * ff], n * ff));
+        if i8 {
+            quant(&mut s, &hbuf, ff);
+            mm8(&mut s, &mut flop, &p_down, &s_down, &mlp_out, ff, d);
+        } else {
+            mm(&mut s, &mut flop, &hbuf, &w_down, &mlp_out, ff, d);
+        }
+        s.push(gpu.step(T_ADD, &[&xmid, &mlp_out, &res], &[n * d], n * d));
+    }
+    std::mem::forget((res, xn, q_pre, k_pre, v, q, k, scores, probs, ctx));
+    std::mem::forget((proj, xmid, gate, up, hbuf, mlp_out, kmask, gain_d, gain_hd));
+    std::mem::forget((w_q, w_kv, w_o, w_ff, w_down));
+    std::mem::forget((p_q, p_kv, p_o, p_ff, p_down, s_q, s_kv, s_o, s_ff, s_down, sx, xq));
+    (s, flop)
+}
+
+fn bench_te(reps: usize, i8: bool, base: bool) {
+    let gpu = Gpu::new_wgpu(TE_KERNELS);
+    eprintln!("device: {} max_wg={}", gpu.kind(), gpu.caps().max_workgroup_size);
+    let (layers, t) = (28u32, 512u32);
+    let (steps, flop) = build_te_replay(&gpu, layers, t, i8, base);
+    println!(
+        "\n=== FLUX.2 text encoder: Qwen3-4B {layers}-layer prefill, {t} tokens{}{} ===",
+        if i8 { ", INT8 (DP4A)" } else { ", fp32" },
+        if base { ", PRE-FIX kernel set" } else { "" }
+    );
+    profile_kinds(&gpu, &steps, TE_KERNELS, reps, flop, 0.0);
+}
+
+// ------------------------------------------------------------ vae ---------
+
+/// Profile the FLUX.2 VAE decode graph. Needs the real checkpoint (the graph is
+/// built from its tensors), pointed at by `BRAIN_FLUX2_VAE`; the *timing* still
+/// depends only on shape.
+fn bench_vae(reps: usize, lh: u32, lw: u32) {
+    let path = std::env::var("BRAIN_FLUX2_VAE").expect("set BRAIN_FLUX2_VAE to the vae dir");
+    let vp = std::path::Path::new(&path);
+    let (file, json) = if vp.is_dir() {
+        (vp.join("diffusion_pytorch_model.safetensors"), std::fs::read_to_string(vp.join("config.json")).ok())
+    } else {
+        (vp.to_path_buf(), None)
+    };
+    let cfg = match json {
+        Some(j) => vae::VaeConfig::from_json(&serde_json::from_str(&j).unwrap()),
+        None => vae::VaeConfig::flux2(),
+    };
+    let mut map = std::collections::HashMap::new();
+    for t in checkpoint::safetensors::read(file.to_str().unwrap()).expect("read vae") {
+        map.insert(t.name, (t.shape, t.data));
+    }
+    let dec = vae::VaeDecoder::from_diffusers(cfg, &map, lh, lw, Some("gpu"));
+    drop(map);
+    println!("\n=== FLUX.2 VAE decode: [32,{lh},{lw}] latent -> [3,{},{}] image ===", lh * 8, lw * 8);
+    profile_kinds(dec.gpu(), dec.steps(), &vae::decoder::KERNELS, reps, 0.0, 0.0);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode = args.get(1).map(|s| s.as_str()).unwrap_or("replay");
+    let arg = |i: usize, d: usize| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);
+    let base = std::env::var("BRAIN_FLUX2_BENCH_BASELINE").as_deref() == Ok("1");
+    match mode {
+        "te" => return bench_te(arg(2, 3), false, base),
+        "tei8" => return bench_te(arg(2, 3), true, base),
+        "vae" => return bench_vae(arg(2, 3), arg(3, 64) as u32, arg(4, 64) as u32),
+        _ => {}
+    }
     let gpu = Gpu::new_wgpu(KERNELS);
     let c = gpu.caps();
     eprintln!(

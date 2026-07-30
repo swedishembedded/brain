@@ -94,6 +94,7 @@ struct FastIdx {
     matmul_tiled: Option<usize>,
     matmul_reg: Option<usize>,
     matmul_reg2: Option<usize>,
+    matmul_reg3: Option<usize>,
     matmul_dx: Option<usize>,
     matmul_dx_reg: Option<usize>,
     matmul_dw: Option<usize>,
@@ -168,6 +169,7 @@ impl CpuBackend {
                 matmul_tiled: find("matmul_tiled"),
                 matmul_reg: find("matmul_reg"),
                 matmul_reg2: find("matmul_reg2"),
+                matmul_reg3: find("matmul_reg3"),
                 attn_scores_cross: find("attn_scores_cross"),
                 attn_softmax_cross: find("attn_softmax_cross"),
                 attn_apply_cross: find("attn_apply_cross"),
@@ -340,10 +342,16 @@ impl CpuBackend {
         // matmul{,_tiled,_reg}.wgsl: out[M,N] = A[M,K] @ B[N,K]^T.
         // params = [m, k, n]; bufs = [A, B, out]. Same math for all three; the
         // tiled/register-tiled kernels are GPU-only (multi-barrier work-group
-        // structure the JIT does not compile), so on CPU all three route to the
+        // structure the JIT does not compile), so on CPU all of them route to the
         // AVX2 gemm. That is the one-graph rule: a model may pick whichever
-        // variant suits its shapes without forking its CPU path.
-        if (Some(kind) == f.matmul || Some(kind) == f.matmul_tiled || Some(kind) == f.matmul_reg || Some(kind) == f.matmul_reg2)
+        // variant suits its shapes without forking its CPU path. `matmul_reg3`
+        // (reg2 with the bank conflicts removed) is bit-identical to reg2 by
+        // construction, so it belongs to exactly the same equivalence class.
+        if (Some(kind) == f.matmul
+            || Some(kind) == f.matmul_tiled
+            || Some(kind) == f.matmul_reg
+            || Some(kind) == f.matmul_reg2
+            || Some(kind) == f.matmul_reg3)
             && bufs.len() >= 3
         {
             unsafe {

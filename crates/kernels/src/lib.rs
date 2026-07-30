@@ -322,6 +322,8 @@ pub const GN_PART: &str = include_str!("../wgsl/gn_part.wgsl");
 pub const GN_STATS: &str = include_str!("../wgsl/gn_stats.wgsl");
 /// `wgsl/gn_stats2.wgsl`
 pub const GN_STATS2: &str = include_str!("../wgsl/gn_stats2.wgsl");
+/// `wgsl/gn_stats_wg.wgsl`
+pub const GN_STATS_WG: &str = include_str!("../wgsl/gn_stats_wg.wgsl");
 /// `wgsl/gqa_apply.wgsl`
 pub const GQA_APPLY: &str = include_str!("../wgsl/gqa_apply.wgsl");
 /// `wgsl/gqa_bwd_dk.wgsl`
@@ -350,6 +352,8 @@ pub const HEAD_PACK_T: &str = include_str!("../wgsl/head_pack_t.wgsl");
 pub const HEAD_UNPACK: &str = include_str!("../wgsl/head_unpack.wgsl");
 /// `wgsl/im2col.wgsl`
 pub const IM2COL: &str = include_str!("../wgsl/im2col.wgsl");
+/// `wgsl/im2col_at.wgsl`
+pub const IM2COL_AT: &str = include_str!("../wgsl/im2col_at.wgsl");
 /// `wgsl/kv_append.wgsl`
 pub const KV_APPEND: &str = include_str!("../wgsl/kv_append.wgsl");
 /// `wgsl/kv_expand.wgsl`
@@ -460,6 +464,8 @@ pub const MSE_VALUE_W: &str = include_str!("../wgsl/mse_value_w.wgsl");
 pub const MUL: &str = include_str!("../wgsl/mul.wgsl");
 /// `wgsl/nchw_nlc.wgsl`
 pub const NCHW_NLC: &str = include_str!("../wgsl/nchw_nlc.wgsl");
+/// `wgsl/nlc_bias_nchw.wgsl`
+pub const NLC_BIAS_NCHW: &str = include_str!("../wgsl/nlc_bias_nchw.wgsl");
 /// `wgsl/nlc_nchw.wgsl`
 pub const NLC_NCHW: &str = include_str!("../wgsl/nlc_nchw.wgsl");
 /// `wgsl/pack_qkv.wgsl`
@@ -820,6 +826,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("gn_part", GN_PART),
     ("gn_stats", GN_STATS),
     ("gn_stats2", GN_STATS2),
+    ("gn_stats_wg", GN_STATS_WG),
     ("gqa_apply", GQA_APPLY),
     ("gqa_bwd_dk", GQA_BWD_DK),
     ("gqa_bwd_dq", GQA_BWD_DQ),
@@ -834,6 +841,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("head_pack_t", HEAD_PACK_T),
     ("head_unpack", HEAD_UNPACK),
     ("im2col", IM2COL),
+    ("im2col_at", IM2COL_AT),
     ("kv_append", KV_APPEND),
     ("kv_expand", KV_EXPAND),
     ("kv_expand_bwd", KV_EXPAND_BWD),
@@ -889,6 +897,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("mse_value_w", MSE_VALUE_W),
     ("mul", MUL),
     ("nchw_nlc", NCHW_NLC),
+    ("nlc_bias_nchw", NLC_BIAS_NCHW),
     ("nlc_nchw", NLC_NCHW),
     ("pack_qkv", PACK_QKV),
     ("pad2d", PAD2D),
