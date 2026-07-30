@@ -85,8 +85,12 @@ All three foundation models were confirmed together on `--device cpu,npu`
   share a batchable transformer core (equal-shape contexts could batch one
   forward); wiring a genuine batched forward is a follow-up.
 - **Host GPU on this box**: `brain serve --dbus` with no `--device` now works —
-  `backend-wgpu` selects the Intel Arc iGPU (Vulkan) when there's no discrete card
-  (was a panic before; fixed in `cbb0998`). `--device cpu,npu` still gives CPU
+  the canonical device registry (`gpu_core::devices::gpus()`) enumerates the Intel
+  Arc iGPU (Vulkan `INTEGRATED_GPU`) and reports its shared DEVICE_LOCAL heap as
+  `vram_bytes`, so `query_gpu_mem` budgets it as a schedulable `Gpu` lane (no
+  discrete card required; was a panic before). `run_dbus` keeps a fallback that
+  budgets a `discrete_gpu_count()`-sized lane at a modest shared-RAM fraction for
+  the case the registry yields no VRAM. `--device cpu,npu` still gives CPU
   host-compute + an NPU lane.
 
 ## Inference optimization pass — kronos host KV path (2026-07-30)
