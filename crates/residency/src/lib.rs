@@ -34,7 +34,8 @@ pub use scheduler::Policy;
 /// A device that can hold a hot model instance.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Device {
-    /// A GPU by index (the physical card `BRAIN_GPU_INDEX` selects).
+    /// A GPU by canonical index — the physical card `gpu<i>` names in the
+    /// device registry (`gpu_core::devices`, PCI-bus order).
     Gpu(u32),
     /// RAM-resident, CPU-executed (e.g. the CPU encoder path). Bounded by the RAM budget.
     Cpu,

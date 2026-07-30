@@ -38,8 +38,8 @@ Bus `com.swedishembedded.Brain1`, object `/com/swedishembedded/Brain1`, interfac
 | `ListModels()` | `→ as` | served model names |
 | `Run(model, action, params, in_fds, in_meta, transport)` | `sssa{sh}ss → sa{sh}s` | one-shot: `(result_json, out_fds, out_meta_json)` |
 | `Subscribe(model, action, params, in_fds, in_meta)` | `sssa{sh}s → th` | streaming: `(job, event_fd)` |
-| `Cancel(job)` | `t → b` | cooperative cancel (phase 2) |
-| props | `Version s`, `ActiveJobs u`, `Models as` | |
+| `Cancel(job)` | `t → b` | cooperative cancel of a `Subscribe` job (`true` iff found in flight) |
+| props | `Version s`, `ActiveJobs u` (in-flight `Run`/`Subscribe` jobs), `Models as` | |
 
 - `params` / `in_meta` / `out_meta` are JSON strings.
 - `in_fds` / `out_fds` are `a{sh}` — a map from **blob name** to a Unix fd.
@@ -69,6 +69,16 @@ carries its payload as an out-of-band memfd via `SCM_RIGHTS`:
 
 Sends are non-blocking: a slow subscriber's frames are dropped rather than stalling
 inference (`SEQPACKET` preserves message boundaries).
+
+### `Cancel` — cooperative cancellation
+
+`Cancel(job)` takes the job id `Subscribe` returned and flips the cancel token the
+server armed in that job's invocation. A long-running action polls the token between
+steps (denoising steps, training steps) and aborts with `"cancelled"`, which arrives
+as the stream's terminal `error` frame. Returns `true` if the job was still in
+flight, `false` for an unknown or already-finished id. Cancellation is cooperative:
+an action that never polls (or a step already on the GPU) finishes its current step
+first. Python: `BrainDBus.cancel(job)`.
 
 ## Examples in this directory
 

@@ -42,6 +42,199 @@
 
 use std::fmt;
 
+pub use backend_api::GpuIdentity;
+
+// ---- canonical device registry ---------------------------------------------
+//
+// THE process-wide enumeration of physical GPUs, performed once, with stable
+// identity. Canonical index = position after sorting by PCI bus id (stable
+// across boots and shared with NVML/nvidia-smi), so `gpu0`/`gpu1` in --device,
+// `Shard.gpu_index`, and `residency::Device::Gpu(i)` all name the same physical
+// card — and nvidia-smi order maps to it via PCI bus id, never by assumption.
+//
+// Identity comes from the ash (native Vulkan) enumeration when an ICD is
+// present: PCI bus id (VK_EXT_pci_bus_info) and deviceUUID (Vulkan 1.1 core;
+// equals the NVML GPU UUID on NVIDIA). Without an ICD the wgpu enumeration
+// fills in, with identity read through the `Adapter::as_hal` escape hatch where
+// its backend is Vulkan and the fallback key (vendor:device, ordinal) elsewhere.
+// Backends select adapters by matching these identities — never by enumeration
+// position across independent enumerations, and never via env mutation.
+
+/// One physical GPU in the canonical registry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeviceId {
+    /// Canonical index — what `gpu<i>` means everywhere in brain.
+    pub index: u32,
+    pub identity: GpuIdentity,
+}
+
+pub struct DeviceRegistry {
+    devices: Vec<DeviceId>,
+    /// Which enumeration established identity: `"vulkan"` (ash) or `"wgpu"`.
+    source: &'static str,
+}
+
+static REGISTRY: std::sync::OnceLock<DeviceRegistry> = std::sync::OnceLock::new();
+
+/// The registry, enumerated on first use.
+pub fn registry() -> &'static DeviceRegistry {
+    REGISTRY.get_or_init(|| {
+        let (ids, source) = match backend_vulkan::enumerate_physical_gpus() {
+            Ok(v) if !v.is_empty() => (v, "vulkan"),
+            _ => (backend_wgpu::enumerate_gpus(), "wgpu"),
+        };
+        DeviceRegistry::from_identities(ids, source)
+    })
+}
+
+impl DeviceRegistry {
+    fn from_identities(mut ids: Vec<GpuIdentity>, source: &'static str) -> DeviceRegistry {
+        use backend_api::DeviceClass;
+        // Physical cards only: a software rasteriser (llvmpipe) is not a card
+        // and must never occupy a canonical index.
+        ids.retain(|d| d.class != DeviceClass::Cpu);
+        // When any discrete GPU exists, indices cover only discrete cards —
+        // the set `--device gpu` schedules and `Inventory::probe` counts.
+        if ids.iter().any(|d| d.class == DeviceClass::DiscreteGpu) {
+            ids.retain(|d| d.class == DeviceClass::DiscreteGpu);
+        }
+        // Canonical order: PCI bus id when every card reports one (stable
+        // across boots and driver updates); otherwise the enumeration order,
+        // whose per-(vendor,device) ordinals are at least stable per boot.
+        if !ids.is_empty() && ids.iter().all(|d| d.pci_bus.is_some()) {
+            ids.sort_by(|a, b| a.pci_bus.cmp(&b.pci_bus));
+        }
+        DeviceRegistry {
+            devices: ids
+                .into_iter()
+                .enumerate()
+                .map(|(i, identity)| DeviceId { index: i as u32, identity })
+                .collect(),
+            source,
+        }
+    }
+
+    pub fn devices(&self) -> &[DeviceId] {
+        &self.devices
+    }
+    pub fn source(&self) -> &'static str {
+        self.source
+    }
+}
+
+/// Every physical GPU, in canonical (PCI-bus) order.
+pub fn gpus() -> &'static [DeviceId] {
+    registry().devices()
+}
+
+/// The card behind canonical index `index`. Out-of-range is an error, never a
+/// silent clamp.
+pub fn device(index: u32) -> Result<&'static DeviceId, String> {
+    let devs = gpus();
+    devs.get(index as usize)
+        .ok_or_else(|| format!("gpu{index} requested but this machine has {} GPU(s)", devs.len()))
+}
+
+/// The registry entry whose PCI bus id matches `pci` (case-insensitive,
+/// tolerant of nvidia-smi's `00000000:81:00.0` zero-padding).
+pub fn device_by_pci(pci: &str) -> Option<&'static DeviceId> {
+    let norm = |s: &str| -> String {
+        // "domain:bus:dev.fn" hex fields, minus leading zeros per field.
+        s.to_ascii_lowercase()
+            .split([':', '.'])
+            .map(|f| f.trim_start_matches('0').to_string())
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    let want = norm(pci);
+    gpus().iter().find(|d| d.identity.pci_bus.as_deref().map(|p| norm(p) == want).unwrap_or(false))
+}
+
+// ---- ambient + scoped selection --------------------------------------------
+//
+// Placement inputs, strongest first:
+//   1. a scoped selection (`with_gpu`) — thread-local, race-free; what the
+//      residency executor and the multi-GPU helpers use;
+//   2. the pin `ComputeSet::apply` recorded from `--device gpu<i>`;
+//   3. `BRAIN_GPU_INDEX` — user input only, parsed ONCE at first use;
+//   4. none: canonical device 0 when the registry has cards, else the
+//      backend's own default (the software-rasteriser fallback path).
+
+static AMBIENT_PIN: std::sync::Mutex<Option<Option<u32>>> = std::sync::Mutex::new(None);
+static ENV_AMBIENT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+
+std::thread_local! {
+    static SCOPED: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record the `--device` pin (`Some(i)` for a single-card selection, `None` to
+/// clear an inherited `BRAIN_GPU_INDEX`). Called by [`ComputeSet::apply`].
+pub fn set_ambient_gpu(pin: Option<u32>) {
+    *AMBIENT_PIN.lock().unwrap_or_else(|e| e.into_inner()) = Some(pin);
+}
+
+fn env_ambient() -> Option<u32> {
+    *ENV_AMBIENT.get_or_init(|| {
+        std::env::var("BRAIN_GPU_INDEX").ok().and_then(|v| v.parse::<u32>().ok())
+    })
+}
+
+/// The ambient canonical index (pin > env), before any scoped override.
+pub fn ambient_gpu() -> Option<u32> {
+    match *AMBIENT_PIN.lock().unwrap_or_else(|e| e.into_inner()) {
+        Some(pin) => pin,
+        None => env_ambient(),
+    }
+}
+
+/// Run `f` with GPU `index` as this thread's device selection: every
+/// `Gpu::new` under it lands on that card. Thread-local, so concurrent scopes
+/// on other threads (residency lanes) cannot race. Errors on an out-of-range
+/// index when the machine has cards; on a GPU-less/CPU-backend run the scope is
+/// recorded but placement is moot.
+pub fn with_gpu<R>(index: u32, f: impl FnOnce() -> R) -> Result<R, String> {
+    if !gpus().is_empty() {
+        device(index)?; // validate, never clamp
+    }
+    SCOPED.with(|s| s.borrow_mut().push(index));
+    struct Pop;
+    impl Drop for Pop {
+        fn drop(&mut self) {
+            SCOPED.with(|s| {
+                s.borrow_mut().pop();
+            });
+        }
+    }
+    let _pop = Pop;
+    Ok(f())
+}
+
+/// The selection a `Gpu::new` on this thread resolves to (scoped > pin > env).
+pub fn current_gpu() -> Option<u32> {
+    SCOPED.with(|s| s.borrow().last().copied()).or_else(ambient_gpu)
+}
+
+/// The registry entry a `Gpu::new` on this thread builds on, or `None` when no
+/// physical card exists (backend default / software fallback applies). Panics
+/// on an out-of-range explicit selection — never a silent clamp.
+pub fn selected_device() -> Option<&'static DeviceId> {
+    let devs = gpus();
+    match current_gpu() {
+        Some(i) => {
+            if devs.is_empty() {
+                // Preserve the old forced-selection strictness on GPU-less
+                // boxes: an explicit index cannot be honoured there. The CPU
+                // backend never consults this, so pure-CPU runs are unaffected.
+                return None;
+            }
+            Some(devs.get(i as usize).unwrap_or_else(|| {
+                panic!("gpu{i} selected but this machine has {} GPU(s)", devs.len())
+            }))
+        }
+        None => devs.first(),
+    }
+}
+
 /// One requested class of compute, before it is resolved against real hardware.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -343,8 +536,8 @@ impl ComputeSet {
     pub fn cpu_pinned(&self, total_cores: usize) -> bool {
         self.cpu_enabled() && self.cpu_cores.len() < total_cores
     }
-    /// A single GPU index when exactly one is schedulable — what pins
-    /// `BRAIN_GPU_INDEX`.
+    /// A single GPU index when exactly one is schedulable — what pins the
+    /// registry's ambient device selection (see [`set_ambient_gpu`]).
     pub fn single_gpu(&self) -> Option<u32> {
         (self.gpus.len() == 1).then(|| self.gpus[0])
     }
@@ -357,8 +550,8 @@ impl ComputeSet {
     /// `Gpu::new()` and every rayon pool observes it:
     ///
     /// * selects the host backend;
-    /// * pins `BRAIN_GPU_INDEX` when exactly one GPU is schedulable, so the wgpu
-    ///   backend binds that physical card;
+    /// * pins the registry's ambient GPU selection when exactly one card is
+    ///   schedulable, so every later `Gpu::new` binds that physical card;
     /// * sizes the rayon pool to the selected core count and pins the process's
     ///   CPU affinity to those cores, so `cpu21` really is one core rather than
     ///   one core's worth of threads spread over the machine.
@@ -373,12 +566,10 @@ impl ComputeSet {
             Backend::Vulkan => crate::Backend::Vulkan,
         });
 
-        match self.single_gpu() {
-            // One card selected: bind it. Multi-GPU scheduling picks cards per
-            // job instead, so a global pin would be wrong there.
-            Some(i) => std::env::set_var("BRAIN_GPU_INDEX", i.to_string()),
-            None => std::env::remove_var("BRAIN_GPU_INDEX"),
-        }
+        // One card selected: pin it in the registry's ambient selection. Multi-
+        // GPU scheduling picks cards per job (scoped `with_gpu`) instead, so
+        // the pin is cleared there — including an inherited BRAIN_GPU_INDEX.
+        set_ambient_gpu(self.single_gpu());
 
         if self.cpu_enabled() {
             // Only override when the user narrowed the CPU; otherwise respect an
@@ -621,5 +812,93 @@ mod tests {
     fn source_is_recorded_for_the_artifact() {
         assert_eq!(resolve("gpu0", inv(1, 4, 0)).unwrap().source, "gpu0");
         assert_eq!(resolve("", inv(1, 4, 0)).unwrap().source, "all");
+    }
+
+    // ---- registry (pure parts) ----------------------------------------------
+
+    fn ident(name: &str, pci: Option<&str>, ordinal: usize, class: backend_api::DeviceClass) -> GpuIdentity {
+        GpuIdentity {
+            name: name.into(),
+            vendor_id: 0x10de,
+            device_id: 0x1b38,
+            uuid: None,
+            pci_bus: pci.map(|s| s.to_string()),
+            ordinal,
+            vram_bytes: 24 << 30,
+            class,
+        }
+    }
+
+    #[test]
+    fn canonical_order_is_pci_sorted() {
+        use backend_api::DeviceClass::DiscreteGpu;
+        // Enumeration order deliberately reversed vs PCI order.
+        let reg = DeviceRegistry::from_identities(
+            vec![
+                ident("B", Some("0000:82:00.0"), 0, DiscreteGpu),
+                ident("A", Some("0000:04:00.0"), 1, DiscreteGpu),
+            ],
+            "vulkan",
+        );
+        let d = reg.devices();
+        assert_eq!(d[0].identity.name, "A");
+        assert_eq!(d[0].index, 0);
+        assert_eq!(d[1].identity.name, "B");
+        assert_eq!(d[1].index, 1);
+    }
+
+    #[test]
+    fn software_rasterisers_never_get_an_index() {
+        use backend_api::DeviceClass::{Cpu, DiscreteGpu};
+        let reg = DeviceRegistry::from_identities(
+            vec![ident("llvmpipe", None, 0, Cpu), ident("P40", Some("0000:04:00.0"), 0, DiscreteGpu)],
+            "vulkan",
+        );
+        assert_eq!(reg.devices().len(), 1);
+        assert_eq!(reg.devices()[0].identity.name, "P40");
+    }
+
+    #[test]
+    fn discrete_cards_shadow_integrated_ones() {
+        use backend_api::DeviceClass::{DiscreteGpu, IntegratedGpu};
+        let reg = DeviceRegistry::from_identities(
+            vec![
+                ident("iGPU", Some("0000:00:02.0"), 0, IntegratedGpu),
+                ident("dGPU", Some("0000:04:00.0"), 0, DiscreteGpu),
+            ],
+            "vulkan",
+        );
+        assert_eq!(reg.devices().len(), 1, "--device gpu means discrete when one exists");
+        assert_eq!(reg.devices()[0].identity.name, "dGPU");
+    }
+
+    #[test]
+    fn missing_pci_keeps_enumeration_order() {
+        use backend_api::DeviceClass::DiscreteGpu;
+        let reg = DeviceRegistry::from_identities(
+            vec![ident("first", None, 0, DiscreteGpu), ident("second", None, 1, DiscreteGpu)],
+            "wgpu",
+        );
+        assert_eq!(reg.devices()[0].identity.name, "first");
+        assert_eq!(reg.devices()[1].identity.name, "second");
+    }
+
+    #[test]
+    fn identity_matching_prefers_strongest_key() {
+        use backend_api::DeviceClass::DiscreteGpu;
+        let mut a = ident("P40", Some("0000:04:00.0"), 0, DiscreteGpu);
+        let mut b = ident("P40", Some("0000:82:00.0"), 1, DiscreteGpu);
+        // Twins: same (vendor,device), different PCI — must not match.
+        assert!(!a.same_device(&b));
+        // UUID wins over PCI when both sides carry one.
+        a.uuid = Some([1; 16]);
+        b.uuid = Some([1; 16]);
+        assert!(a.same_device(&b));
+        // Fallback key: (vendor:device, ordinal) when neither uuid nor pci.
+        let c = ident("P40", None, 1, DiscreteGpu);
+        let d = ident("P40", None, 1, DiscreteGpu);
+        let e = ident("P40", None, 0, DiscreteGpu);
+        assert!(c.same_device(&d));
+        assert!(!c.same_device(&e));
     }
 }

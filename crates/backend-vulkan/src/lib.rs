@@ -131,12 +131,149 @@ unsafe impl Sync for VulkanBackend {}
 
 const POOL_MAX_SETS: u32 = 16384;
 
+// ---- physical-GPU identity (the canonical registry's enumeration) -----------
+
+/// Map a Vulkan device type onto the backend-neutral class vocabulary.
+fn class_of(t: vk::PhysicalDeviceType) -> backend_api::DeviceClass {
+    use backend_api::DeviceClass;
+    match t {
+        vk::PhysicalDeviceType::DISCRETE_GPU => DeviceClass::DiscreteGpu,
+        vk::PhysicalDeviceType::CPU => DeviceClass::Cpu,
+        _ => DeviceClass::IntegratedGpu,
+    }
+}
+
+/// Identity of one enumerated physical device. `ordinal` is this device's
+/// position among devices sharing its (vendor, device) pair, in
+/// `vkEnumeratePhysicalDevices` order — the tiebreaker for identical twins
+/// when UUID and PCI are both unavailable.
+///
+/// # Safety
+/// `instance` must be valid and `pd` one of its enumerated physical devices.
+unsafe fn pd_identity(instance: &ash::Instance, pd: vk::PhysicalDevice, ordinal: usize) -> backend_api::GpuIdentity {
+    let props = instance.get_physical_device_properties(pd);
+    let name = std::ffi::CStr::from_ptr(props.device_name.as_ptr()).to_string_lossy().into_owned();
+
+    // deviceUUID (Vulkan 1.1 core; == the NVML GPU UUID on NVIDIA).
+    let mut idp = vk::PhysicalDeviceIDProperties::default();
+    let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut idp);
+    instance.get_physical_device_properties2(pd, &mut p2);
+    let uuid = (idp.device_uuid != [0u8; 16]).then_some(idp.device_uuid);
+
+    // PCI bus id via VK_EXT_pci_bus_info — only queried where the device
+    // advertises the extension (chaining an unsupported struct is UB per spec).
+    let has_pci = instance
+        .enumerate_device_extension_properties(pd)
+        .map(|exts| {
+            exts.iter().any(|e| {
+                std::ffi::CStr::from_ptr(e.extension_name.as_ptr())
+                    == ash::ext::pci_bus_info::NAME
+            })
+        })
+        .unwrap_or(false);
+    let pci_bus = has_pci.then(|| {
+        let mut pci = vk::PhysicalDevicePCIBusInfoPropertiesEXT::default();
+        let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut pci);
+        instance.get_physical_device_properties2(pd, &mut p2);
+        format!(
+            "{:04x}:{:02x}:{:02x}.{:x}",
+            pci.pci_domain, pci.pci_bus, pci.pci_device, pci.pci_function
+        )
+    });
+
+    let mem = instance.get_physical_device_memory_properties(pd);
+    let vram_bytes = mem.memory_heaps[..mem.memory_heap_count as usize]
+        .iter()
+        .filter(|h| h.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+        .map(|h| h.size)
+        .max()
+        .unwrap_or(0);
+
+    backend_api::GpuIdentity {
+        name,
+        vendor_id: props.vendor_id,
+        device_id: props.device_id,
+        uuid,
+        pci_bus,
+        ordinal,
+        vram_bytes,
+        class: class_of(props.device_type),
+    }
+}
+
+/// Enumerate every Vulkan physical device with stable identity — the canonical
+/// enumeration `gpu_core::devices` builds the process-wide registry from. A
+/// minimal instance is created and destroyed here; no logical device, no
+/// pipelines. `Err` when no loader/ICD is present (the registry then falls back
+/// to the wgpu enumeration).
+pub fn enumerate_physical_gpus() -> Result<Vec<backend_api::GpuIdentity>, String> {
+    unsafe {
+        let entry = ash::Entry::load().map_err(|e| format!("failed to load Vulkan loader: {e}"))?;
+        // 1.1 for VkPhysicalDeviceIDProperties / properties2.
+        let app_info = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_1);
+        let info = vk::InstanceCreateInfo::default().application_info(&app_info);
+        let instance = entry
+            .create_instance(&info, None)
+            .map_err(|e| format!("vkCreateInstance failed: {e}"))?;
+        let pds = match instance.enumerate_physical_devices() {
+            Ok(v) => v,
+            Err(e) => {
+                instance.destroy_instance(None);
+                return Err(format!("enumerate_physical_devices failed: {e}"));
+            }
+        };
+        let mut ordinals: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+        let ids = pds
+            .iter()
+            .map(|&pd| {
+                let props = instance.get_physical_device_properties(pd);
+                let ord = ordinals.entry((props.vendor_id, props.device_id)).or_insert(0);
+                let id = pd_identity(&instance, pd, *ord);
+                *ord += 1;
+                id
+            })
+            .collect();
+        instance.destroy_instance(None);
+        Ok(ids)
+    }
+}
+
 impl VulkanBackend {
     /// Try to build the Vulkan backend, compiling every kernel to a pipeline.
     /// Returns `Err` (so the caller can fall back to wgpu) if no Vulkan device is
     /// available or a kernel fails to compile.
     pub fn try_new(kernels: &[(&str, &str)]) -> Result<VulkanBackend, String> {
-        let ctx = VkContext::new()?;
+        Self::try_new_impl(kernels, None)
+    }
+
+    /// [`VulkanBackend::try_new`] on the specific physical card `target`,
+    /// selected by identity (UUID → PCI → (vendor:device, ordinal)) — the
+    /// registry-resolved placement path.
+    pub fn try_new_on(kernels: &[(&str, &str)], target: &backend_api::GpuIdentity) -> Result<VulkanBackend, String> {
+        Self::try_new_impl(kernels, Some(target))
+    }
+
+    fn try_new_impl(kernels: &[(&str, &str)], target: Option<&backend_api::GpuIdentity>) -> Result<VulkanBackend, String> {
+        let ctx = match target {
+            None => VkContext::new()?,
+            Some(t) => VkContext::new_select(&|instance, pds| {
+                let mut ordinals: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+                for (i, &pd) in pds.iter().enumerate() {
+                    // SAFETY: instance/pd come from VkContext's own enumeration.
+                    let id = unsafe {
+                        let props = instance.get_physical_device_properties(pd);
+                        let ord = ordinals.entry((props.vendor_id, props.device_id)).or_insert(0);
+                        let id = pd_identity(instance, pd, *ord);
+                        *ord += 1;
+                        id
+                    };
+                    if t.same_device(&id) {
+                        return Ok(i);
+                    }
+                }
+                Err(format!("physical GPU {:?} (pci {:?}) not found by the Vulkan ICD", t.name, t.pci_bus))
+            })?,
+        };
         log_adapter(&ctx.adapter_name);
         let dev = &ctx.device;
 

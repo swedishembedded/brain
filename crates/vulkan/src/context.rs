@@ -159,10 +159,22 @@ impl VkContext {
     /// Wraps unsafe ash FFI; the returned object owns all handles and frees them
     /// in `Drop`. Returns `Err` (rather than panicking) so callers can fall back.
     pub fn new() -> Result<VkContext, String> {
-        unsafe { Self::new_inner() }
+        unsafe { Self::new_inner(None) }
     }
 
-    unsafe fn new_inner() -> Result<VkContext, String> {
+    /// Like [`VkContext::new`], but the physical device is chosen by `select`
+    /// (an index into the enumerated list) instead of the built-in ranking —
+    /// how `backend-vulkan` binds the card the canonical device registry
+    /// resolved, by identity rather than position.
+    pub fn new_select(
+        select: &dyn Fn(&ash::Instance, &[vk::PhysicalDevice]) -> Result<usize, String>,
+    ) -> Result<VkContext, String> {
+        unsafe { Self::new_inner(Some(select)) }
+    }
+
+    unsafe fn new_inner(
+        select: Option<&dyn Fn(&ash::Instance, &[vk::PhysicalDevice]) -> Result<usize, String>>,
+    ) -> Result<VkContext, String> {
         let entry = ash::Entry::load().map_err(|e| format!("failed to load Vulkan loader: {e}"))?;
 
         let app_name = CString::new("moe-rs-vk").unwrap();
@@ -268,13 +280,27 @@ impl VkContext {
             }
         };
         let forced = std::env::var("BRAIN_VK_DEVICE").ok().and_then(|s| s.parse::<usize>().ok());
-        let physical_device = match forced {
-            Some(i) if i < physical_devices.len() => physical_devices[i],
-            _ => physical_devices
-                .iter()
-                .copied()
-                .max_by_key(|&pd| rank(instance.get_physical_device_properties(pd).device_type))
-                .unwrap_or(physical_devices[0]),
+        let physical_device = if let Some(select) = select {
+            match select(&instance, &physical_devices) {
+                Ok(i) if i < physical_devices.len() => physical_devices[i],
+                Ok(i) => {
+                    instance.destroy_instance(None);
+                    return Err(format!("device selector returned out-of-range index {i}"));
+                }
+                Err(e) => {
+                    instance.destroy_instance(None);
+                    return Err(e);
+                }
+            }
+        } else {
+            match forced {
+                Some(i) if i < physical_devices.len() => physical_devices[i],
+                _ => physical_devices
+                    .iter()
+                    .copied()
+                    .max_by_key(|&pd| rank(instance.get_physical_device_properties(pd).device_type))
+                    .unwrap_or(physical_devices[0]),
+            }
         };
 
         let props = instance.get_physical_device_properties(physical_device);

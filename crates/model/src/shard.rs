@@ -38,8 +38,14 @@ pub struct Shard {
 }
 
 impl Shard {
+    /// Placement wildcard: "wherever the ambient device selection lands".
+    /// [`Shard::whole`] uses it so single-device construction keeps following
+    /// `--device` / scoped placement; an explicit index pins that canonical
+    /// physical card (see `gpu_core::devices`).
+    pub const ANY_GPU: usize = usize::MAX;
+
     pub fn whole(n_layers: usize) -> Shard {
-        Shard { start: 0, end: n_layers, embed: true, head: true, gpu_index: 0 }
+        Shard { start: 0, end: n_layers, embed: true, head: true, gpu_index: Shard::ANY_GPU }
     }
     pub fn owns(&self, l: usize) -> bool {
         l >= self.start && l < self.end
@@ -173,17 +179,21 @@ impl<M: Shardable> Pipeline<M> {
 
     /// Build with explicit shards (bypasses [`plan_balanced`]).
     pub fn with_shards(cfg: M::Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shards: Vec<Shard>) -> Pipeline<M> {
-        let prev_gpu = std::env::var("BRAIN_GPU_INDEX").ok();
         let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
         std::env::set_var("BRAIN_OFFLOAD_ADAM", "1"); // stages keep weight+grad on GPU; moments in RAM
         let mut stages = Vec::with_capacity(shards.len());
         for sh in &shards {
-            std::env::set_var("BRAIN_GPU_INDEX", sh.gpu_index.to_string());
-            stages.push(M::new_shard(cfg.clone(), b, t, init, sh.clone()));
-        }
-        match prev_gpu {
-            Some(v) => std::env::set_var("BRAIN_GPU_INDEX", v),
-            None => std::env::remove_var("BRAIN_GPU_INDEX"),
+            // Scoped (thread-local, race-free) placement on the shard's card;
+            // an ANY_GPU shard keeps the ambient selection.
+            let stage = if sh.gpu_index == Shard::ANY_GPU {
+                M::new_shard(cfg.clone(), b, t, init, sh.clone())
+            } else {
+                gpu_core::devices::with_gpu(sh.gpu_index as u32, || {
+                    M::new_shard(cfg.clone(), b, t, init, sh.clone())
+                })
+                .unwrap_or_else(|e| panic!("pipeline stage placement: {e}"))
+            };
+            stages.push(stage);
         }
         match prev_off {
             Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),

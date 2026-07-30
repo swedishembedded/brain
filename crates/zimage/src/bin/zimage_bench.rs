@@ -35,13 +35,14 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let device = args.get(1).map(|s| s.as_str()).unwrap_or("cpu");
 
-    // `probe`: allocate ~Ngb GB on BRAIN_GPU_INDEX, hold it, so nvidia-smi shows
-    // which physical card the index selected + how much fits before OOM.
+    // `probe`: allocate ~Ngb GB on the ambient card (registry-resolved:
+    // `--device gpu<i>` / BRAIN_GPU_INDEX), hold it, so nvidia-smi shows which
+    // physical card the canonical index selected + how much fits before OOM.
     if device == "probe" {
         use gpu_core::Gpu;
         let gb: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8);
-        let idx = std::env::var("BRAIN_GPU_INDEX").unwrap_or_default();
-        eprintln!("probe: BRAIN_GPU_INDEX={idx}, allocating {gb} × 1 GB…");
+        let idx = gpu_core::devices::current_gpu().map(|i| i.to_string()).unwrap_or_else(|| "0 (default)".into());
+        eprintln!("probe: gpu{idx}, allocating {gb} × 1 GB…");
         let gpu = Gpu::new_wgpu(&[("add2", kernels::ADD2)]);
         let mut bufs = Vec::new();
         for i in 0..gb {

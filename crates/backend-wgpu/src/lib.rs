@@ -100,26 +100,124 @@ pub fn adapter_desc() -> Option<AdapterDesc> {
     ADAPTER.get().cloned()
 }
 
-/// How many **distinct physical discrete GPUs** this machine exposes.
+// ---- adapter identity (canonical-registry matching) -------------------------
+
+/// Identity of one wgpu adapter. `wgpu::AdapterInfo` exposes neither the PCI
+/// bus id nor the device UUID, so for Vulkan-backed adapters both are read off
+/// the raw `VkPhysicalDevice` through the `Adapter::as_hal` escape hatch
+/// (wgpu-hal and this crate share the same `ash` 0.38, so the types line up).
+/// Non-Vulkan adapters carry only the fallback key (vendor:device + ordinal).
 ///
-/// Counted the same way the multi-GPU paths select cards: discrete adapters,
-/// narrowed to one graphics backend (Vulkan when present) so a single card
-/// enumerated once per backend is not counted twice.
+/// The property-query sequence intentionally mirrors `backend-vulkan`'s
+/// `pd_identity` rather than calling it: backends depend only on
+/// `brain-backend-api` (a cross-backend dependency would break that layering),
+/// and both sides must fill `GpuIdentity` identically for `same_device` to
+/// match across enumerations — the contract `backend_api::GpuIdentity` states.
 ///
-/// Multi-GPU tests use this to *skip* rather than fault: without it they assume
-/// cards 0 and 1 exist and die inside the driver on any single-GPU or GPU-less
-/// box, which reads as a real failure and hides actual regressions.
+/// `ordinal` is the position among adapters with the same (vendor, device) pair
+/// in the caller's enumeration order — for Vulkan adapters that order is
+/// `vkEnumeratePhysicalDevices` (the same ICD order the ash enumeration in
+/// `backend-vulkan` sees), which is what makes the fallback key match across
+/// the two enumerations.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn discrete_gpu_count() -> usize {
+fn adapter_identity(adapter: &wgpu::Adapter, ordinal: usize) -> backend_api::GpuIdentity {
+    use ash::vk;
+    let info = adapter.get_info();
+    let (mut uuid, mut pci_bus, mut vram_bytes) = (None, None, 0u64);
+    if info.backend == wgpu::Backend::Vulkan {
+        // SAFETY: the guard is only dereferenced, never destroyed; the raw
+        // handles are used for read-only property queries.
+        if let Some(hal) = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() } {
+            let instance = hal.shared_instance().raw_instance();
+            let pd = hal.raw_physical_device();
+            unsafe {
+                let mut idp = vk::PhysicalDeviceIDProperties::default();
+                let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut idp);
+                instance.get_physical_device_properties2(pd, &mut p2);
+                uuid = (idp.device_uuid != [0u8; 16]).then_some(idp.device_uuid);
+                let has_pci = instance
+                    .enumerate_device_extension_properties(pd)
+                    .map(|exts| {
+                        exts.iter().any(|e| {
+                            std::ffi::CStr::from_ptr(e.extension_name.as_ptr())
+                                == ash::ext::pci_bus_info::NAME
+                        })
+                    })
+                    .unwrap_or(false);
+                if has_pci {
+                    let mut pci = vk::PhysicalDevicePCIBusInfoPropertiesEXT::default();
+                    let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut pci);
+                    instance.get_physical_device_properties2(pd, &mut p2);
+                    pci_bus = Some(format!(
+                        "{:04x}:{:02x}:{:02x}.{:x}",
+                        pci.pci_domain, pci.pci_bus, pci.pci_device, pci.pci_function
+                    ));
+                }
+                let mem = instance.get_physical_device_memory_properties(pd);
+                vram_bytes = mem.memory_heaps[..mem.memory_heap_count as usize]
+                    .iter()
+                    .filter(|h| h.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+                    .map(|h| h.size)
+                    .max()
+                    .unwrap_or(0);
+            }
+        }
+    }
+    backend_api::GpuIdentity {
+        name: info.name.clone(),
+        vendor_id: info.vendor,
+        device_id: info.device,
+        uuid,
+        pci_bus,
+        ordinal,
+        vram_bytes,
+        class: match info.device_type {
+            wgpu::DeviceType::DiscreteGpu => backend_api::DeviceClass::DiscreteGpu,
+            wgpu::DeviceType::Cpu => backend_api::DeviceClass::Cpu,
+            _ => backend_api::DeviceClass::IntegratedGpu,
+        },
+    }
+}
+
+/// The physical-GPU adapter list this backend selects cards from: real GPUs
+/// only (no software rasteriser), narrowed to one graphics backend — Vulkan
+/// when present — so a card enumerated once per backend appears once.
+#[cfg(not(target_arch = "wasm32"))]
+async fn physical_adapters(instance: &wgpu::Instance) -> Vec<wgpu::Adapter> {
+    let mut adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY).await;
+    adapters.retain(|a| {
+        matches!(
+            a.get_info().device_type,
+            wgpu::DeviceType::DiscreteGpu | wgpu::DeviceType::IntegratedGpu
+        )
+    });
+    if adapters.iter().any(|a| a.get_info().backend == wgpu::Backend::Vulkan) {
+        adapters.retain(|a| a.get_info().backend == wgpu::Backend::Vulkan);
+    }
+    adapters
+}
+
+/// Identities of the physical-GPU adapters, in enumeration order — the
+/// registry's FALLBACK enumeration for machines where the ash path has no
+/// loader/ICD. Where the ash enumeration works it is canonical instead, and
+/// this list matches it card-for-card (same ICD order, same identity keys).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn enumerate_gpus() -> Vec<backend_api::GpuIdentity> {
     let _guard = init_lock();
     pollster::block_on(async {
         let instance = wgpu::Instance::new(instance_descriptor());
-        let mut adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY).await;
-        adapters.retain(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
-        if adapters.iter().any(|a| a.get_info().backend == wgpu::Backend::Vulkan) {
-            adapters.retain(|a| a.get_info().backend == wgpu::Backend::Vulkan);
-        }
-        adapters.len()
+        let adapters = physical_adapters(&instance).await;
+        let mut ordinals: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+        adapters
+            .iter()
+            .map(|a| {
+                let info = a.get_info();
+                let ord = ordinals.entry((info.vendor, info.device)).or_insert(0);
+                let id = adapter_identity(a, *ord);
+                *ord += 1;
+                id
+            })
+            .collect()
     })
 }
 
@@ -540,44 +638,13 @@ impl WgpuBackend {
     /// Async device init + pipeline compile. This is the portable core used on
     /// both targets: native wraps it in `pollster::block_on` (see `new`), wasm
     /// awaits it from the wasm-bindgen entry point.
+    ///
+    /// Card selection does NOT happen here: the canonical device registry
+    /// (`gpu_core::devices`) resolves placement and calls [`Self::new_on`]. This
+    /// path takes wgpu's high-performance default — the software-rasteriser
+    /// fallback on GPU-less boxes, and the only path that exists on wasm.
     pub async fn new_async(kernels: &[(&str, &str)]) -> WgpuBackend {
         let instance = wgpu::Instance::new(instance_descriptor());
-        // `BRAIN_GPU_INDEX=<i>` pins a specific physical GPU (the box has two
-        // Tesla P40s); without it the high-performance default is used. This is
-        // what lets one process drive card 0 and another card 1, and is the hook
-        // multi-GPU data-parallel / sharding builds on.
-        let forced = std::env::var("BRAIN_GPU_INDEX").ok().and_then(|v| v.parse::<usize>().ok());
-        #[cfg(not(target_arch = "wasm32"))]
-        let adapter = match forced {
-            Some(i) => {
-                let mut adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY).await;
-                // Prefer discrete GPUs, stable order, then index into them.
-                adapters.retain(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
-                // `enumerate_adapters(all())` lists each physical card ONCE PER
-                // graphics backend (Vulkan, GL, …), so indexing across the mixed
-                // list can select the same card via a different backend
-                // (`BRAIN_GPU_INDEX=1` landing back on card 0). Narrow to a single
-                // backend (prefer Vulkan on this Pascal/Linux box) so the index
-                // maps to distinct physical cards — the invariant multi-GPU
-                // sharding / data-parallel relies on.
-                if adapters.iter().any(|a| a.get_info().backend == wgpu::Backend::Vulkan) {
-                    adapters.retain(|a| a.get_info().backend == wgpu::Backend::Vulkan);
-                }
-                if adapters.is_empty() {
-                    panic!("BRAIN_GPU_INDEX set but no discrete GPU adapters enumerated");
-                }
-                adapters.into_iter().nth(i).unwrap_or_else(|| panic!("BRAIN_GPU_INDEX={i} out of range"))
-            }
-            None => instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    compatible_surface: None,
-                    force_fallback_adapter: false,
-                })
-                .await
-                .expect("no suitable GPU adapter found"),
-        };
-        #[cfg(target_arch = "wasm32")]
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -589,6 +656,40 @@ impl WgpuBackend {
         Self::from_adapter(&adapter, kernels).await
     }
 
+    /// Blocking [`Self::new_on_async`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_on(kernels: &[(&str, &str)], target: &backend_api::GpuIdentity) -> WgpuBackend {
+        let _guard = init_lock();
+        pollster::block_on(WgpuBackend::new_on_async(kernels, target))
+    }
+
+    /// Build on the specific physical card `target`, matched by identity
+    /// (UUID → PCI → (vendor:device, ordinal)) against a fresh enumeration.
+    /// Identity matching is what makes concurrent/repeated builds land on the
+    /// intended card even when wgpu reorders its adapter list between
+    /// enumerations (observed on the 2×P40 box).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn new_on_async(kernels: &[(&str, &str)], target: &backend_api::GpuIdentity) -> WgpuBackend {
+        let instance = wgpu::Instance::new(instance_descriptor());
+        let adapters = physical_adapters(&instance).await;
+        let mut ordinals: std::collections::HashMap<(u32, u32), usize> = std::collections::HashMap::new();
+        for a in &adapters {
+            let info = a.get_info();
+            let ord = ordinals.entry((info.vendor, info.device)).or_insert(0);
+            let id = adapter_identity(a, *ord);
+            *ord += 1;
+            if target.same_device(&id) {
+                return Self::from_adapter(a, kernels).await;
+            }
+        }
+        panic!(
+            "physical GPU {:?} (pci {:?}) not found among {} wgpu adapter(s)",
+            target.name,
+            target.pci_bus,
+            adapters.len()
+        );
+    }
+
     /// Create `count` backends on DISTINCT physical cards from ONE adapter
     /// enumeration (Vulkan discrete GPUs, in enumerated order). This is the
     /// reliable multi-GPU path: two separate `new_async` calls each re-enumerate
@@ -598,11 +699,8 @@ impl WgpuBackend {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn new_multi_async(kernels: &[(&str, &str)], count: usize) -> Vec<WgpuBackend> {
         let instance = wgpu::Instance::new(instance_descriptor());
-        let mut adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY).await;
+        let mut adapters = physical_adapters(&instance).await;
         adapters.retain(|a| a.get_info().device_type == wgpu::DeviceType::DiscreteGpu);
-        if adapters.iter().any(|a| a.get_info().backend == wgpu::Backend::Vulkan) {
-            adapters.retain(|a| a.get_info().backend == wgpu::Backend::Vulkan);
-        }
         assert!(adapters.len() >= count, "need {count} discrete GPUs, found {}", adapters.len());
         let mut out = Vec::with_capacity(count);
         for a in adapters.iter().take(count) {

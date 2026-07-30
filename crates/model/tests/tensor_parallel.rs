@@ -174,23 +174,19 @@ fn tensor_parallel_mlp_matches_single_gpu() {
     let w_proj: Vec<f32> = (0..d * ff).map(|i| ((i * 3 % 11) as f32 / 11.0) - 0.5).collect(); // [d, ff]
 
     // --- single-GPU reference: Z = GeLU(X·Wfc^T) · Wproj^T ---
-    std::env::remove_var("BRAIN_GPU_INDEX");
     let g0 = Gpu::new(&kernels());
     let y = matmul(&g0, &x, &w_fc, m, d, ff, true); // [m, ff]
     let z_single = matmul(&g0, &y, &w_proj, m, ff, d, false); // [m, d]
     drop(g0);
 
-    // Build one Gpu per rank **sequentially** (BRAIN_GPU_INDEX is process-global
-    // and wgpu device init is not concurrency-safe — the Pipeline/DataParallel do
-    // the same). Then the threads only compute + collective, never touch env.
+    // Build one Gpu per rank **sequentially** (wgpu device init is not
+    // concurrency-safe — the Pipeline/DataParallel do the same), each pinned to
+    // its canonical card through the device registry. The threads then only
+    // compute + collective.
     let rank_gpus: Vec<Gpu> = gpus
         .iter()
-        .map(|&gi| {
-            std::env::set_var("BRAIN_GPU_INDEX", gi.to_string());
-            Gpu::new(&kernels())
-        })
+        .map(|&gi| Gpu::new_on_index(gi as u32, &kernels()).expect("rank placement"))
         .collect();
-    std::env::remove_var("BRAIN_GPU_INDEX");
 
     // --- tensor-parallel across `world` ranks ---
     let coll = HostCollective::new(world);
@@ -249,19 +245,14 @@ fn tensor_parallel_mlp_training_matches_single_gpu() {
     let dz: Vec<f32> = (0..m * d).map(|i| ((i * 2 % 7) as f32 / 7.0) - 0.5).collect(); // upstream grad
 
     // --- single-GPU reference gradients ---
-    std::env::remove_var("BRAIN_GPU_INDEX");
     let g0 = Gpu::new(&bwd_kernels());
     let (_z0, dx0, dwfc0, dwproj0) = mlp_fwd_bwd(&g0, &x, &w_fc, &w_proj, &dz, m, d, ff);
     drop(g0);
 
     let rank_gpus: Vec<Gpu> = gpus
         .iter()
-        .map(|&gi| {
-            std::env::set_var("BRAIN_GPU_INDEX", gi.to_string());
-            Gpu::new(&bwd_kernels())
-        })
+        .map(|&gi| Gpu::new_on_index(gi as u32, &bwd_kernels()).expect("rank placement"))
         .collect();
-    std::env::remove_var("BRAIN_GPU_INDEX");
 
     // --- tensor-parallel forward+backward ---
     let coll = HostCollective::new(world);
@@ -335,7 +326,6 @@ fn tensor_parallel_attention_matches_single_gpu() {
     let w_o: Vec<f32> = (0..d * d).map(|i| ((i * 3 % 11) as f32 / 11.0) - 0.5).collect(); // [d, d]
 
     // --- single-GPU reference: MHA then output projection ---
-    std::env::remove_var("BRAIN_GPU_INDEX");
     let g0 = Gpu::new(&attn_kernels());
     let ctx = attn_ctx(&g0, &x, &w_qkv, b, t, d, nh, hd); // [m, d]
     let z_single = matmul(&g0, &ctx, &w_o, m, d, d, false); // [m, d]
@@ -343,12 +333,8 @@ fn tensor_parallel_attention_matches_single_gpu() {
 
     let rank_gpus: Vec<Gpu> = gpus
         .iter()
-        .map(|&gi| {
-            std::env::set_var("BRAIN_GPU_INDEX", gi.to_string());
-            Gpu::new(&attn_kernels())
-        })
+        .map(|&gi| Gpu::new_on_index(gi as u32, &attn_kernels()).expect("rank placement"))
         .collect();
-    std::env::remove_var("BRAIN_GPU_INDEX");
 
     // --- tensor-parallel: split heads; row-parallel output proj + all-reduce ---
     let coll = HostCollective::new(world);

@@ -11,7 +11,8 @@
 //! `--device` was chosen), these models load through `gpu_core::Gpu::new`, i.e.
 //! the process-default backend — **wgpu (GPU) unless `BRAIN_DEVICE=cpu`**. So the
 //! resident instance holds the model on a GPU (VRAM); dropping it frees the card.
-//! `activate` pins the assigned card via `BRAIN_GPU_INDEX`, exactly like z-image.
+//! `activate` places the build on the assigned card via a scoped device-registry
+//! selection ([`on_device`]), exactly like z-image.
 //!
 //! Config is env-only: `BRAIN_GPT_WEIGHTS`, `BRAIN_GLM_WEIGHTS`,
 //! `BRAIN_QWEN_WEIGHTS` + `BRAIN_QWEN_TOKENIZER` (and an optional
@@ -61,10 +62,14 @@ fn est_vram(path: &str) -> MemCost {
     MemCost::new(bytes, 0)
 }
 
-/// Pin the physical GPU (`BRAIN_GPU_INDEX`) the model's `Gpu::new` will select.
-fn pin_gpu(device: Device) {
-    if let Device::Gpu(i) = device {
-        std::env::set_var("BRAIN_GPU_INDEX", i.to_string());
+/// Run `f` placed on the residency-assigned device: a GPU assignment becomes a
+/// scoped (thread-local) selection in the canonical device registry, so every
+/// `Gpu::new` inside `f` binds that physical card — race-free across the
+/// executor's concurrent activation lanes. Shared by the resident adapters.
+pub(crate) fn on_device<R>(device: Device, f: impl FnOnce() -> R) -> Result<R, String> {
+    match device {
+        Device::Gpu(i) => gpu_core::devices::with_gpu(i, f),
+        _ => Ok(f()),
     }
 }
 
@@ -93,12 +98,11 @@ impl ResidentModel for GptResident {
         est_vram(&self.path)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        pin_gpu(device);
         let itos = gpt::model::Gpt::load_itos(&self.path)
             .ok_or("gpt: checkpoint has no embedded char vocab (BRAIN_GPT_WEIGHTS)")?;
         let tok = CharTokenizer::from_itos(itos);
         let block = gpt::GptConfig::from_json(&checkpoint::load(&self.path).header["config"]).block_size;
-        let model = gpt::model::Gpt::load(&self.path, 1, block);
+        let model = on_device(device, || gpt::model::Gpt::load(&self.path, 1, block))?;
         Ok(Box::new(GptInstance { model, tok }))
     }
 }
@@ -148,12 +152,11 @@ impl ResidentModel for GlmResident {
         est_vram(&self.path)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        pin_gpu(device);
         let itos = glm::model::Glm::load_itos(&self.path)
             .ok_or("glm: checkpoint has no embedded char vocab (BRAIN_GLM_WEIGHTS)")?;
         let tok = CharTokenizer::from_itos(itos);
         let block = glm::config::GlmConfig::from_json(&checkpoint::load(&self.path).header["config"]).block_size;
-        let model = glm::model::Glm::load_inference(&self.path, 1, block);
+        let model = on_device(device, || glm::model::Glm::load_inference(&self.path, 1, block))?;
         Ok(Box::new(GlmInstance { model, tok }))
     }
 }
@@ -211,13 +214,12 @@ impl ResidentModel for QwenResident {
         est_vram(&self.path)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        pin_gpu(device);
         if self.tokenizer.is_empty() {
             return Err("qwen: set BRAIN_QWEN_TOKENIZER to the tokenizer.json path".to_string());
         }
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&self.tokenizer)?;
         let eos = tok.encode("<|im_end|>").first().copied();
-        let model = qwen::model::Qwen::load_inference(&self.path, 1, Self::ctx());
+        let model = on_device(device, || qwen::model::Qwen::load_inference(&self.path, 1, Self::ctx()))?;
         Ok(Box::new(QwenInstance { model, tok, eos }))
     }
 }

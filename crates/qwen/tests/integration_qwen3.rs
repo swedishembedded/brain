@@ -357,7 +357,6 @@ fn qwen3_microbatch_pipeline_throughput() {
     use std::time::Instant;
     let Some(d) = dir() else { eprintln!("QWEN3_DIR unset; skipping"); return; };
     setup();
-    std::env::remove_var("BRAIN_GPU_INDEX");
     let path = weights_ft(&d);
     let c = checkpoint::load(path.to_str().unwrap());
     let cfg = QwenConfig::from_json(&c.header["config"]);
@@ -416,7 +415,6 @@ fn qwen3_dataparallel_speedup() {
     use std::time::Instant;
     let Some(d) = dir() else { eprintln!("QWEN3_DIR unset; skipping"); return; };
     setup();
-    std::env::remove_var("BRAIN_GPU_INDEX");
     let path = weights_ft(&d);
     let ps = path.to_str().unwrap();
     let c = checkpoint::load(ps);
@@ -519,7 +517,6 @@ use qwen::DataParallel;
 fn qwen3_shard_real_2gpu() {
     let Some(d) = dir() else { eprintln!("QWEN3_DIR unset; skipping"); return; };
     setup();
-    std::env::remove_var("BRAIN_GPU_INDEX");
     let path = weights_ft(&d);
     let ps = path.to_str().unwrap();
     let c = checkpoint::load(ps);

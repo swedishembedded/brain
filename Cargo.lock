@@ -271,6 +271,7 @@ dependencies = [
 name = "brain-backend-wgpu"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "brain-backend-api",
  "brain-kernels",
  "bytemuck",
@@ -351,6 +352,7 @@ dependencies = [
  "brain-fcbench",
  "brain-federated",
  "brain-fincast",
+ "brain-flux2",
  "brain-forecast",
  "brain-glm",
  "brain-gpt",
@@ -448,6 +450,7 @@ dependencies = [
 name = "brain-diffusion"
 version = "0.1.0"
 dependencies = [
+ "brain-checkpoint",
  "serde_json",
 ]
 
@@ -525,6 +528,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-flux2"
+version = "0.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-data",
+ "brain-diffusion",
+ "brain-dit",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
+ "brain-qwen",
+ "brain-vae",
+ "bytemuck",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-forecast"
 version = "0.1.0"
 dependencies = [
@@ -581,6 +602,7 @@ version = "0.1.0"
 dependencies = [
  "brain-autoencoder",
  "brain-data",
+ "brain-flux2",
  "brain-glm",
  "brain-gpt",
  "brain-gpu-core",
@@ -1075,7 +1097,6 @@ dependencies = [
  "brain-model",
  "brain-qwen",
  "brain-vae",
- "image",
  "serde_json",
 ]
 

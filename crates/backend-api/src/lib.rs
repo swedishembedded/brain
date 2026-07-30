@@ -228,6 +228,47 @@ impl DeviceCaps {
     }
 }
 
+/// Stable identity of one physical GPU, established by the canonical device
+/// registry (`gpu_core::devices`) and consumed by backends to select the same
+/// card by *identity*, never by enumeration position or a process-global env
+/// var. Identity key priority: PCI bus id (stable across boots and shared with
+/// NVML/nvidia-smi) → Vulkan `deviceUUID` (== the NVML GPU UUID on NVIDIA) →
+/// `(vendor:device, ordinal)` where `ordinal` counts devices with the same
+/// vendor:device pair in `vkEnumeratePhysicalDevices` order (the tiebreaker for
+/// identical twins when neither PCI nor UUID is available).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuIdentity {
+    pub name: String,
+    pub vendor_id: u32,
+    pub device_id: u32,
+    /// `VkPhysicalDeviceIDProperties::deviceUUID` (Vulkan 1.1 core).
+    pub uuid: Option<[u8; 16]>,
+    /// `"domain:bus:device.function"` lowercase hex (`VK_EXT_pci_bus_info`).
+    pub pci_bus: Option<String>,
+    /// Ordinal within this identity's `(vendor_id, device_id)` pair, in the
+    /// source enumeration order.
+    pub ordinal: usize,
+    /// Largest DEVICE_LOCAL heap, bytes (0 = unknown).
+    pub vram_bytes: u64,
+    pub class: DeviceClass,
+}
+
+impl GpuIdentity {
+    /// Whether `other` names the same physical card, using the strongest key
+    /// both sides carry: UUID, else PCI bus, else (vendor, device, ordinal).
+    pub fn same_device(&self, other: &GpuIdentity) -> bool {
+        if let (Some(a), Some(b)) = (self.uuid, other.uuid) {
+            return a == b;
+        }
+        if let (Some(a), Some(b)) = (&self.pci_bus, &other.pci_bus) {
+            return a == b;
+        }
+        self.vendor_id == other.vendor_id
+            && self.device_id == other.device_id
+            && self.ordinal == other.ordinal
+    }
+}
+
 /// Backend-neutral buffer usage flags. Mirrors the subset of `wgpu::BufferUsages`
 /// the kernels need; the wgpu backend maps it back to `wgpu::BufferUsages`, the
 /// CPU backend ignores it (all allocations are plain host memory).

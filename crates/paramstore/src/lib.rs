@@ -67,6 +67,8 @@ impl ParamStore {
         let mut params = Vec::with_capacity(params_roles.len());
         let mut trainable = Vec::new();
         let mut offload = Vec::new();
+        // Bytes written since the last FORCED flush (see below).
+        let mut uploaded = 0u64;
         for (name, numel, role) in &params_roles {
             let data = init
                 .get(name)
@@ -87,6 +89,17 @@ impl ParamStore {
             // Peak staging is then just this one tensor. (The DiT does the same via
             // poll_wait per block.)
             gpu.poll_wait();
+            // poll_wait alone is not always enough: with no submitted compute the
+            // poll can be a no-op and wgpu keeps holding the write_buffer staging
+            // (observed OOM on a non-ReBAR P40 at ~14 GiB uploaded of a ~12 GiB
+            // shard). A 1-element readback forces a real submit + drain, which is
+            // what reclaims the staging — the same pattern as flux2's
+            // Flux2Model::new upload. ~Every GiB keeps the cost negligible.
+            uploaded += 4 * *numel as u64;
+            if uploaded > (1 << 30) {
+                let _ = gpu.read(&wbuf, 1);
+                uploaded = 0;
+            }
             weight.insert(name.clone(), wbuf);
             match role {
                 Role::Trainable => {

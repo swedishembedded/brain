@@ -115,10 +115,9 @@ impl ResidentModel for LfmResident {
             .and_then(|s| s.parse().ok())
             .filter(|&t| t > 0)
             .ok_or_else(|| format!("lfm: bad instance key '{}' (empty/untokenizable input)", key.config))?;
-        if let Device::Gpu(i) = device {
-            std::env::set_var("BRAIN_GPU_INDEX", i.to_string());
-        }
-        let model = Lfm::load_inference_chunked(&self.weights, self.batch, t, SLAB_BUDGET, PROBE_CAP);
+        let model = crate::resident_llm::on_device(device, || {
+            Lfm::load_inference_chunked(&self.weights, self.batch, t, SLAB_BUDGET, PROBE_CAP)
+        })?;
         Ok(Box::new(LfmInstance { model, tok: self.tok.clone(), tokenizer_path: self.tokenizer_path.clone(), t, batch: self.batch as usize }))
     }
 }

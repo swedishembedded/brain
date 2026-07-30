@@ -154,9 +154,20 @@ mod native_facade {
     /// How many distinct physical discrete GPUs this machine has. `0` on a
     /// GPU-less box (where `--device gpu` still works, via a software
     /// rasteriser). Multi-GPU tests gate on this so they skip instead of
-    /// faulting inside the driver.
+    /// faulting inside the driver. Answered by the canonical device registry —
+    /// one enumeration, cached.
     pub fn discrete_gpu_count() -> usize {
-        backend_wgpu::discrete_gpu_count()
+        crate::devices::gpus()
+            .iter()
+            .filter(|d| d.identity.class == backend_api::DeviceClass::DiscreteGpu)
+            .count()
+    }
+
+    /// Identities of the physical GPUs the wgpu backend can bind, in its own
+    /// enumeration order — for `brain devices` to report per-card backend
+    /// visibility against the canonical registry (matched by identity).
+    pub fn wgpu_visible_gpus() -> Vec<backend_api::GpuIdentity> {
+        backend_wgpu::enumerate_gpus()
     }
 
     /// The wgpu adapter this process selected, if a wgpu backend was built:
@@ -260,20 +271,83 @@ mod native_facade {
         /// Build the default backend (see [`set_default_backend`] / `BRAIN_DEVICE`).
         /// Vulkan falls back to wgpu when no Vulkan device/ICD is present, so the
         /// build stays usable everywhere.
+        ///
+        /// GPU placement is ambient, resolved through the canonical device
+        /// registry: a scoped [`crate::devices::with_gpu`] selection, else the
+        /// `--device gpu<i>` pin, else `BRAIN_GPU_INDEX` (user input, parsed
+        /// once), else canonical card 0. Explicit placement uses [`Gpu::new_on`].
         pub fn new(kernels: &[(&str, &str)]) -> Gpu {
             register_builtins();
             let name = resolve_backend_name();
-            let inner = match backend_api::create_backend(name, kernels) {
-                Ok(inner) => inner,
-                Err(e) if name == "vulkan" => {
-                    eprintln!("brain: Vulkan backend unavailable ({e}); falling back to wgpu");
-                    backend_api::create_backend("wgpu", kernels)
-                        .expect("wgpu backend must be available")
+            let inner: Box<dyn backend_api::Backend> = match name {
+                "wgpu" => Self::build_wgpu(kernels, crate::devices::selected_device()),
+                "vulkan" => {
+                    let dev = crate::devices::selected_device();
+                    let built = match dev {
+                        Some(d) => backend_vulkan::VulkanBackend::try_new_on(kernels, &d.identity),
+                        None => backend_vulkan::VulkanBackend::try_new(kernels),
+                    };
+                    match built {
+                        Ok(b) => Box::new(b),
+                        Err(e) => {
+                            eprintln!("brain: Vulkan backend unavailable ({e}); falling back to wgpu");
+                            Self::build_wgpu(kernels, dev)
+                        }
+                    }
                 }
-                Err(e) => panic!("failed to build backend '{name}': {e}"),
+                _ => match backend_api::create_backend(name, kernels) {
+                    Ok(inner) => inner,
+                    Err(e) => panic!("failed to build backend '{name}': {e}"),
+                },
             };
             record_caps(inner.as_ref());
             Gpu::wrap(inner, Self::kernel_names(kernels))
+        }
+
+        /// wgpu backend on `dev` (identity-matched) or wgpu's own default when
+        /// no physical card exists (the software-rasteriser fallback).
+        fn build_wgpu(
+            kernels: &[(&str, &str)],
+            dev: Option<&crate::devices::DeviceId>,
+        ) -> Box<dyn backend_api::Backend> {
+            Box::new(match dev {
+                Some(d) => backend_wgpu::WgpuBackend::new_on(kernels, &d.identity),
+                None => backend_wgpu::WgpuBackend::new(kernels),
+            })
+        }
+
+        /// Build on the specific physical card `dev` — explicit placement, no
+        /// ambient/env input consulted. Respects the selected backend *class*:
+        /// under `--device cpu` / `BRAIN_DEVICE=cpu` this still builds the CPU
+        /// backend (there is one CPU; the card is moot), so device-plumbing
+        /// call sites work unchanged on CPU-only runs.
+        pub fn new_on(dev: &crate::devices::DeviceId, kernels: &[(&str, &str)]) -> Gpu {
+            register_builtins();
+            let inner: Box<dyn backend_api::Backend> = match resolve_backend_name() {
+                "cpu" => Box::new(backend_cpu::CpuBackend::new(kernels)),
+                "vulkan" => match backend_vulkan::VulkanBackend::try_new_on(kernels, &dev.identity) {
+                    Ok(b) => Box::new(b),
+                    Err(e) => {
+                        eprintln!("brain: Vulkan backend unavailable ({e}); falling back to wgpu");
+                        Box::new(backend_wgpu::WgpuBackend::new_on(kernels, &dev.identity))
+                    }
+                },
+                _ => Box::new(backend_wgpu::WgpuBackend::new_on(kernels, &dev.identity)),
+            };
+            record_caps(inner.as_ref());
+            Gpu::wrap(inner, Self::kernel_names(kernels))
+        }
+
+        /// [`Gpu::new_on`] by canonical index — the common call shape where the
+        /// index came from a `Shard`, `residency::Device::Gpu(i)`, or a parsed
+        /// user string. Errors on an out-of-range index when the machine has
+        /// cards; on a GPU-less box it falls back to [`Gpu::new`] (the CPU or
+        /// software path — placement is moot there).
+        pub fn new_on_index(index: u32, kernels: &[(&str, &str)]) -> Result<Gpu, String> {
+            if crate::devices::gpus().is_empty() {
+                return Ok(Gpu::new(kernels));
+            }
+            Ok(Gpu::new_on(crate::devices::device(index)?, kernels))
         }
 
         /// A second handle onto **this** device: same adapter, queue and compiled
@@ -357,19 +431,34 @@ mod native_facade {
         }
 
         /// Build on the wgpu backend regardless of the default selection.
+        /// Placement is ambient (registry-resolved), like [`Gpu::new`].
         pub fn new_wgpu(kernels: &[(&str, &str)]) -> Gpu {
-            let inner: Box<dyn backend_api::Backend> =
-                Box::new(backend_wgpu::WgpuBackend::new(kernels));
+            let inner = Self::build_wgpu(kernels, crate::devices::selected_device());
             record_caps(inner.as_ref());
             Gpu::wrap(inner, Self::kernel_names(kernels))
         }
 
-        /// Build `count` wgpu devices on DISTINCT physical GPUs from one adapter
-        /// enumeration — the reliable multi-GPU path (two separate `new_wgpu`
-        /// calls can reorder and collide on one card). Returns one [`Gpu`] per card.
+        /// Build `count` wgpu devices on DISTINCT physical GPUs — canonical
+        /// cards `0..count`, each selected by identity through the registry
+        /// (identity matching is what makes repeated builds collision-free;
+        /// position-indexed enumeration was observed to reorder between calls).
+        /// GPU-less boxes fall back to the single-enumeration position path so
+        /// its "need N GPUs" assertion still reports honestly.
         #[cfg(not(target_arch = "wasm32"))]
         pub fn new_wgpu_multi(kernels: &[(&str, &str)], count: usize) -> Vec<Gpu> {
             let names = Self::kernel_names(kernels);
+            let devs = crate::devices::gpus();
+            if devs.len() >= count {
+                return devs[..count]
+                    .iter()
+                    .map(|d| {
+                        let inner: Box<dyn backend_api::Backend> =
+                            Box::new(backend_wgpu::WgpuBackend::new_on(kernels, &d.identity));
+                        record_caps(inner.as_ref());
+                        Gpu::wrap(inner, names.clone())
+                    })
+                    .collect();
+            }
             backend_wgpu::WgpuBackend::new_multi(kernels, count)
                 .into_iter()
                 .map(|b| Gpu::wrap(Box::new(b), names.clone()))
@@ -477,7 +566,7 @@ mod native_facade {
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_facade::{
     adapter_info, backend_name, backend_selected, device_caps, discrete_gpu_count,
-    set_default_backend, Backend, Gpu, WeakGpu,
+    set_default_backend, wgpu_visible_gpus, Backend, Gpu, WeakGpu,
 };
 
 // ---- wasm facade ------------------------------------------------------------

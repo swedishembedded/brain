@@ -58,7 +58,9 @@ fn even_shards(n_layers: usize, n: usize) -> Vec<Shard> {
             end: (s + 1) * n_layers / n,
             embed: s == 0,
             head: s == n - 1,
-            gpu_index: s,
+            // Cost analysis, not placement: every stage builds on the ambient
+            // device (`--device`), whatever the stage count.
+            gpu_index: Shard::ANY_GPU,
         })
         .collect()
 }

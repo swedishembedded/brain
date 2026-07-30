@@ -385,10 +385,17 @@ impl Gpt {
 
     /// Build a single pipeline **stage**: only `shard`'s layers (and endpoint
     /// weights) are allocated on this device. `Shard::whole` is the single-device
-    /// path, byte-for-byte unchanged. The physical GPU is selected via
-    /// `BRAIN_GPU_INDEX` (set by the caller before this call).
+    /// path, byte-for-byte unchanged. `shard.gpu_index` names the canonical
+    /// physical card (device registry); `Shard::ANY_GPU` keeps the ambient
+    /// selection.
     pub fn new_shard(cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Gpt {
-        Gpt::new_shard_on(Gpu::new(PIPELINES), cfg, b, t, init, shard)
+        let gpu = if shard.gpu_index == Shard::ANY_GPU {
+            Gpu::new(PIPELINES)
+        } else {
+            Gpu::new_on_index(shard.gpu_index as u32, PIPELINES)
+                .unwrap_or_else(|e| panic!("gpt shard placement: {e}"))
+        };
+        Gpt::new_shard_on(gpu, cfg, b, t, init, shard)
     }
 
     pub(crate) fn new_shard_on(gpu: Gpu, cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Gpt {

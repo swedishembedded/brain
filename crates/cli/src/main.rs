@@ -13,6 +13,7 @@
 //! Run `brain help` for the full usage with examples.
 
 mod data_cli;
+mod devices_cli;
 mod federated_cli;
 mod flops_cli;
 mod forecast_cli;
@@ -32,6 +33,7 @@ mod resident_llm;
 mod resident_depth;
 mod resident_tts;
 mod resident_asr;
+mod resident_flux2;
 mod caps_cli;
 mod imageops;
 mod run_cli;
@@ -40,6 +42,7 @@ mod tts_serve;
 mod wm_cli;
 mod yolo_cli;
 mod depth_cli;
+mod flux2_cli;
 mod mirror_cli;
 mod splat_cli;
 
@@ -77,6 +80,14 @@ Indexed CPU selections pin process affinity and size the thread pool to match.
 This bounds where work EXECUTES; host RAM and disk remain available as cache and
 spill tiers regardless, so --device gpu still uses RAM for weight caching.
 
+GPU indices are CANONICAL: physical cards sorted by PCI bus id (stable across
+boots), shared by --device gpuN, shard placement and residency budgets.
+`brain devices` prints the table (index, PCI bus, UUID, VRAM, backends) and what
+the ambient selection resolves to.
+
+DEVICES
+  brain devices                     # canonical GPU table + ambient selection
+
 DATA
   brain data gen <name> [--out DIR --n N --seed S]
       names: calculator | reverser | wordcalc | timeseries | shakespeare_char | gpt
@@ -87,6 +98,16 @@ GPT (dense baseline)
   brain gpt eval  --weights F --data <dir> [--batches N --samples M]
   brain gpt gen   --weights F [--data <dir>] [--prompt \"...\" --max-new N --temp X --top-k K]
                               (vocab is read from the checkpoint; --data only for old ones)
+
+FLUX.2 Klein (text-to-image + image editing; 4-step distilled flow matching)
+  brain flux2 generate --prompt \"...\" --out out.ppm [--width W --height H]
+      [--steps N --seed S --variant klein-4b|klein-9b|base-4b|base-9b]
+      [--guidance G]              # CFG, base variants only
+      [--ref in.ppm]...           # reference images => editing mode
+      weights via env: BRAIN_FLUX2_DIT, BRAIN_FLUX2_VAE, BRAIN_FLUX2_TE, BRAIN_FLUX2_TOKENIZER
+      served generically as model `flux2-klein`: brain caps flux2-klein,
+      brain do flux2-klein text2image|edit|lora_train, and D-Bus (examples/imagegen);
+      9B variants need BRAIN_FLUX2_ALLOW_NC=1 (FLUX Non-Commercial license)
 
 World models (playable action-conditioned video models; docs/models/world-models/)
   brain wm play  --model fake|diamond [--weights F --device cpu|gpu|npu --onnx M]   # SDL window
@@ -562,6 +583,7 @@ fn main() {
     let argv = select_backend(std::env::args().collect());
     match argv.get(1).map(|s| s.as_str()) {
         Some("data") => data_cli::run_data(&argv[2..]),
+        Some("devices") => devices_cli::run_devices(&argv[2..]),
         Some("gpt") => gpt_cli::run_gpt(&argv[2..]),
         Some("qwen") => qwen_cli::run_qwen(&argv[2..]),
         Some("glm") => glm_cli::run_glm(&argv[2..]),
@@ -570,6 +592,7 @@ fn main() {
         Some("wm") => wm_cli::run_wm(&argv[2..]),
         Some("yolo") => yolo_cli::run_yolo(&argv[2..]),
         Some("depth") => depth_cli::run_depth(&argv[2..]),
+        Some("flux2") => flux2_cli::run_flux2(&argv[2..]),
         Some("mirror") => mirror_cli::run_mirror(&argv[2..]),
         Some("splat") => splat_cli::run_splat(&argv[2..]),
         Some("npu") => npu_cli::run_npu(&argv[2..]),

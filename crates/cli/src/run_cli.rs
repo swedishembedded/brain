@@ -250,19 +250,38 @@ fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64) {
     }
 }
 
-/// Per-GPU `(index, total_bytes)` via `nvidia-smi` (empty if none/unavailable).
+/// Per-GPU `(canonical index, total_bytes)`.
+///
+/// Capacities come from `nvidia-smi` (NVML), but NVML enumeration order is not
+/// the placement order — budgets are keyed by **PCI bus id** through the device
+/// registry, so `Device::Gpu(i)` budgets provably describe the same physical
+/// card `gpu<i>` placement binds. Cards nvidia-smi does not report (or a
+/// missing nvidia-smi) fall back to the registry's own VRAM size; with no
+/// registry entries either (no GPU) the list is empty.
 pub(crate) fn query_gpu_mem() -> Vec<(u32, u64)> {
+    let mut mem: Vec<(u32, u64)> =
+        gpu_core::devices::gpus().iter().map(|d| (d.index, d.identity.vram_bytes)).collect();
     let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .args(["--query-gpu=pci.bus_id,memory.total", "--format=csv,noheader,nounits"])
         .output();
-    match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .enumerate()
-            .filter_map(|(i, l)| l.trim().parse::<u64>().ok().map(|mib| (i as u32, mib << 20)))
-            .collect(),
-        _ => Vec::new(),
+    if let Ok(o) = out {
+        if o.status.success() {
+            for l in String::from_utf8_lossy(&o.stdout).lines() {
+                let mut it = l.split(',').map(str::trim);
+                let (Some(pci), Some(mib)) = (it.next(), it.next().and_then(|m| m.parse::<u64>().ok()))
+                else {
+                    continue;
+                };
+                if let Some(d) = gpu_core::devices::device_by_pci(pci) {
+                    if let Some(slot) = mem.iter_mut().find(|(i, _)| *i == d.index) {
+                        slot.1 = mib << 20;
+                    }
+                }
+            }
+        }
     }
+    mem.retain(|&(_, bytes)| bytes > 0);
+    mem
 }
 
 /// Total system RAM in bytes (from `/proc/meminfo`; falls back to 16 GB).
