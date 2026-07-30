@@ -403,6 +403,11 @@ pub trait CachedCores {
     /// logits `[s1_vocab]`; advances the context (its ctx row feeds the next
     /// `dep_step`).
     fn s1_step(&mut self, x: &[f32]) -> Vec<f32>;
+    /// Save the current cache state (after a prefill) so the decode can be re-run
+    /// per sample — the NPU analogue of `Cache::clone()` in shared-prefill sampling.
+    fn snapshot(&mut self);
+    /// Restore the cache to the last [`snapshot`](Self::snapshot).
+    fn restore(&mut self);
 }
 
 impl KronosModel {
@@ -446,6 +451,56 @@ impl KronosModel {
 
         let recon = self.tokenizer.decode(&s1[t..], &s2[t..]);
         preprocess::denormalize(&norm, &recon, pred_len, feat)
+    }
+
+    /// `n_samples` sampled forecasts sharing one prefill via a [`CachedCores`]
+    /// backend — the cached analogue of [`forecast_cached_samples`](Self::
+    /// forecast_cached_samples). One prefill, then the cache is snapshotted and
+    /// restored per sample so only the `pred_len` decode steps differ (seed
+    /// `opts.seed + i`). Result `[n_samples][pred_len*feat]`.
+    pub fn forecast_cached_samples_with_cores(
+        &self,
+        bars: &[f32],
+        ctx_stamp: &[u32],
+        fut_stamp: &[u32],
+        pred_len: usize,
+        n_samples: usize,
+        opts: &GenOpts,
+        cores: &mut dyn CachedCores,
+    ) -> Vec<Vec<f32>> {
+        let feat = self.feat();
+        let t = bars.len() / feat;
+        let (norm, x) = preprocess::normalize(bars, t, feat, 5.0);
+        let (s1_ctx, s2_ctx) = self.tokenizer.encode(&x, t);
+        let mut stamp = ctx_stamp.to_vec();
+        stamp.extend_from_slice(fut_stamp);
+        let dec = &self.decoder;
+
+        let x_ctx = dec.embed_tokens(&s1_ctx, &s2_ctx, &stamp[..t * 5]);
+        let last0 = cores.prefill(&x_ctx, t);
+        cores.snapshot(); // seed once, fork per sample
+
+        (0..n_samples)
+            .map(|i| {
+                cores.restore();
+                let (mut s1, mut s2) = (s1_ctx.clone(), s2_ctx.clone());
+                let mut rng = SplitMix64::new(opts.seed.wrapping_add(i as u64));
+                let mut last = last0.clone();
+                for step in 0..pred_len {
+                    let samp_s1 = sample(&last, opts, &mut rng);
+                    let sib = dec.sib_embed(&[samp_s1]);
+                    let s2_logits = cores.dep_step(&sib);
+                    let samp_s2 = sample(&s2_logits, opts, &mut rng);
+                    s1.push(samp_s1);
+                    s2.push(samp_s2);
+                    let ppos = t + step;
+                    let x1 = dec.embed_tokens(&[samp_s1], &[samp_s2], &stamp[ppos * 5..ppos * 5 + 5]);
+                    last = cores.s1_step(&x1);
+                }
+                let recon = self.tokenizer.decode(&s1[t..], &s2[t..]);
+                preprocess::denormalize(&norm, &recon, pred_len, feat)
+            })
+            .collect()
     }
 }
 

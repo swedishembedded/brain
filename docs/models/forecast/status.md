@@ -110,6 +110,34 @@ Net: one kronos forecast ≈ **3.1 s → ~1.3 s**; a samples=N request pays one
 prefill. These compound with the fine-tuned-`.weights` NPU path (`load_decoder`
 takes a file or dir).
 
+## NPU KV-cache pass — kronos cached rollout (2026-07-30)
+
+The NPU rollout used to re-run the full-window s1/s2 graphs every decode step
+(`forecast_with_cores`, O(T²)/step) — so once the host path got the KV-cache +
+AVX work, the optimized CPU path overtook the NPU (~4.4×). Ported the same
+KV-cache to the NPU: a **prefill** graph seeds a fixed-`cap` K/V cache, then a
+**single-token decode** graph appends one token attending the cache (O(cap)/step),
+mirroring qwen's `build_talker_{prefill,decode}_graph`.
+
+- Graphs (`crates/npu/src/kronos_topology.rs`): `build_kronos_s1_{prefill,decode}_
+  graph` (causal, per-layer `past_k/past_v[1,heads,cap,hd]` + `past_mask` +
+  per-position RoPE → `new_k/new_v`, `ctx`, `s1_logits`) and `build_kronos_dep_
+  {prefill,decode}_graph` (the s2 cross-attn, its K/V a projection of `ctx` cached
+  like host `ensure_dep_kv`). `export_cached_onnx` builds all four from one load.
+- Driver (`kronos::generate`): a `CachedCores` trait + `forecast_cached_with_cores`
+  / `forecast_cached_samples_with_cores` — structurally identical to
+  `forecast_cached` / `_samples`, so the tokenize/embed/sample/detokenize is
+  shared and only the per-step graph math changes. Shared-prefill snapshots the
+  cache after prefill and forks per sample.
+- Backend (`cli::resident_forecast::KronosCachedNpu`): the four `NpuGraph`s +
+  host-side cache buffers, cached per `(t, cap)`; `KronosNpuInstance` drives it.
+
+Parity (`crates/npu/tests/kronos_kvcache.rs`, OpenVINO CPU): s1 cached rollout,
+dep cached rollout, and the full interleaved driver rollout each match the
+full-window graphs over the growing context — **cosine 1.000000** on ctx / s1 /
+s2 logits at every position. The NPU forecast is now the KV-cache path (O(cap)
+per step, one prefill per samples=N request), not the O(T²) full-window re-run.
+
 ## Training optimization pass — batched decoder fine-tune (2026-07-30)
 
 `KronosTrain` was a batch-of-one trainer (one window per forward/backward). It is

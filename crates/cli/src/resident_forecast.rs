@@ -574,19 +574,34 @@ impl Instance for KronosNpuInstance {
         let horizon = horizon_of(inv, 64);
         let (ctx_stamp, fut_stamp) = kronos_stamps(inv, t, horizon)?;
         let opts = kronos_opts(inv);
+        let samples = inv.get_i64("samples").unwrap_or(1).max(1) as usize;
         let cap = t + horizon;
         self.ensure(t, cap)?; // compile errors propagate cleanly (no panic)
         let model = &self.model;
         let cached = &self.cached;
+        let dev = self.device.borrow().clone();
         // KV-cached rollout: one prefill fills the cache, then O(cap)/step decode
         // (the same optimization as the host `forecast_cached`), not the old
-        // O(T²)/step full-window re-run.
+        // O(T²)/step full-window re-run. `--samples N` shares one prefill.
+        if samples > 1 {
+            let outs = guard_npu(|| {
+                let mut map = cached.borrow_mut();
+                let core = map.get_mut(&(t, cap)).expect("kronos cached graphs");
+                model.forecast_cached_samples_with_cores(&bars, &ctx_stamp, &fut_stamp, horizon, samples, &opts, core)
+            })?;
+            let flat: Vec<f32> = outs.into_iter().flatten().collect();
+            return Ok(Outcome::new()
+                .set("model", json!("kronos"))
+                .set("horizon", json!(horizon))
+                .set("samples", json!(samples))
+                .set("device", json!(dev))
+                .blob("forecast", encode_forecast(&flat, vec![samples, horizon, feat], "samples", &[])));
+        }
         let out = guard_npu(|| {
             let mut map = cached.borrow_mut();
             let core = map.get_mut(&(t, cap)).expect("kronos cached graphs");
             model.forecast_cached_with_cores(&bars, &ctx_stamp, &fut_stamp, horizon, &opts, core)
         })?;
-        let dev = self.device.borrow().clone();
         Ok(kronos_outcome(out, horizon, feat, &dev))
     }
 }
@@ -618,6 +633,20 @@ struct KronosCachedNpu {
     ctx_last: Vec<f32>, // [d] most recent s1 context row (dep residual + self)
     s1_pos: usize,      // next s1 absolute position to write
     dep_valid: usize,   // number of dep positions in the cache (past extent)
+    snap: Option<KronosCacheSnap>, // post-prefill state, for shared-prefill sampling
+}
+
+/// A post-prefill cache snapshot (the buffers the decode loop mutates), so a
+/// samples=N forecast forks from one prefill (mirrors `Cache::clone()`).
+#[derive(Clone)]
+struct KronosCacheSnap {
+    pk: Vec<Vec<f32>>,
+    pv: Vec<Vec<f32>>,
+    dk: Vec<f32>,
+    dv: Vec<f32>,
+    ctx_last: Vec<f32>,
+    s1_pos: usize,
+    dep_valid: usize,
 }
 
 /// Look up a named output tensor from an [`NpuGraph::run`] result.
@@ -663,6 +692,7 @@ impl KronosCachedNpu {
             ctx_last: vec![0.0; d],
             s1_pos: 0,
             dep_valid: 0,
+            snap: None,
         }
     }
 }
@@ -778,6 +808,29 @@ impl kronos::generate::CachedCores for KronosCachedNpu {
         self.ctx_last = named(&out, "ctx").to_vec();
         self.s1_pos += 1;
         named(&out, "s1_logits").to_vec()
+    }
+
+    fn snapshot(&mut self) {
+        self.snap = Some(KronosCacheSnap {
+            pk: self.pk.clone(),
+            pv: self.pv.clone(),
+            dk: self.dk.clone(),
+            dv: self.dv.clone(),
+            ctx_last: self.ctx_last.clone(),
+            s1_pos: self.s1_pos,
+            dep_valid: self.dep_valid,
+        });
+    }
+
+    fn restore(&mut self) {
+        let s = self.snap.as_ref().expect("restore before snapshot");
+        self.pk.clone_from(&s.pk);
+        self.pv.clone_from(&s.pv);
+        self.dk.clone_from(&s.dk);
+        self.dv.clone_from(&s.dv);
+        self.ctx_last.clone_from(&s.ctx_last);
+        self.s1_pos = s.s1_pos;
+        self.dep_valid = s.dep_valid;
     }
 }
 
