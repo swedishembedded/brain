@@ -85,7 +85,7 @@ impl Q8 {
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         gpu: &Gpu,
-        init: &HashMap<String, Vec<f32>>,
+        source: &dyn checkpoint::TensorSource,
         owned: impl Iterator<Item = usize>,
         dims: impl Fn(&str) -> (usize, usize),
         n_tokens: u32,
@@ -95,17 +95,25 @@ impl Q8 {
         k_matmul_i8: usize,
     ) -> Q8 {
         let mk = |name: &str| -> Lin8 {
-            let raw = init.get(name).unwrap_or_else(|| panic!("q8: missing init weight {name}"));
             let leaf = name.strip_prefix("blocks.").and_then(|r| r.split_once('.')).map(|(_, l)| l).unwrap_or(name);
             let (n, k) = dims(leaf);
-            let (packed, sw) = quantize_weight(raw, n, k);
-            let pb = gpu.storage(packed.len() as u64);
-            gpu.write(&pb, &packed);
-            gpu.poll_wait(); // reclaim staging before the next weight (see paramstore)
-            let sb = gpu.storage(sw.len() as u64);
-            gpu.write(&sb, &sw.iter().map(|v| v.to_bits()).collect::<Vec<u32>>());
-            gpu.poll_wait();
-            Lin8 { packed: pb, scale: sb, k: k as u32, n: n as u32 }
+            // Pull, quantize+upload, and drop this weight before the next — one
+            // tensor of host f32 at a time, whatever the source.
+            let mut lin: Option<Lin8> = None;
+            let found = source.with_tensor(name, &mut |raw| {
+                let (packed, sw) = quantize_weight(raw, n, k);
+                let pb = gpu.storage(packed.len() as u64);
+                gpu.write(&pb, &packed);
+                gpu.poll_wait(); // reclaim staging before the next weight (see paramstore)
+                let sb = gpu.storage(sw.len() as u64);
+                gpu.write(&sb, &sw.iter().map(|v| v.to_bits()).collect::<Vec<u32>>());
+                gpu.poll_wait();
+                lin = Some(Lin8 { packed: pb, scale: sb, k: k as u32, n: n as u32 });
+            });
+            if !found {
+                panic!("q8: missing init weight {name}");
+            }
+            lin.unwrap()
         };
         let mut layers = HashMap::new();
         for l in owned {

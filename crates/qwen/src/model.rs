@@ -375,6 +375,16 @@ impl Qwen {
         Self::load_inference_with(path, b, t, false)
     }
 
+    /// Streaming inference load: build from a mmap-backed [`WeightReader`],
+    /// uploading one tensor at a time (peak host ≈ one tensor of f32) — never the
+    /// `checkpoint::load` + `by_role("")` whole-model host copy. Numerically
+    /// identical to [`Qwen::load_inference`]; used by the resident serve path.
+    pub fn from_reader_inference(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Qwen {
+        let cfg = QwenConfig::from_json(&reader.config());
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen::new_impl(cfg, b, t, reader, false, shard, false)
+    }
+
     /// [`Self::load_inference`] with the int8 numeric tier: per-channel weight
     /// quantisation + dynamic activation quant, for both batched forwards and
     /// KV-cache decode (the m=1 packed GEMV).
@@ -412,7 +422,7 @@ impl Qwen {
         Qwen::new_impl(cfg, b, t, init, false, shard, true)
     }
 
-    fn new_impl(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool, shard: Shard, i8: bool) -> Qwen {
+    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, i8: bool) -> Qwen {
         assert!(!(i8 && train), "int8 path is inference-only");
         // An explicitly-placed shard binds its canonical card through the
         // device registry; `Shard::ANY_GPU` (the `Shard::whole` default) keeps
@@ -440,7 +450,7 @@ impl Qwen {
                 .into_iter()
                 .map(|(n, c)| (n, c, paramstore::Role::Frozen))
                 .collect();
-            ParamStore::new_with_roles(&gpu, roles, init)
+            ParamStore::new_with_roles_src(&gpu, roles, src)
         } else if cfg.lora.is_some() {
             let roles = plist
                 .into_iter()
@@ -453,7 +463,7 @@ impl Qwen {
                     (n, c, role)
                 })
                 .collect();
-            ParamStore::new_with_roles(&gpu, roles, init)
+            ParamStore::new_with_roles_src(&gpu, roles, src)
         } else if offload_adam() {
             // Full fine-tuning with the AdamW moments in system RAM (Role::Offload):
             // GPU holds only weight+grad (2×model) instead of 4×model.
@@ -461,9 +471,9 @@ impl Qwen {
                 .into_iter()
                 .map(|(n, c)| (n, c, paramstore::Role::Offload))
                 .collect();
-            ParamStore::new_with_roles(&gpu, roles, init)
+            ParamStore::new_with_roles_src(&gpu, roles, src)
         } else {
-            ParamStore::new(&gpu, plist, init)
+            ParamStore::new_src(&gpu, plist, src)
         };
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
         // Lazily-built host optimiser for the offloaded params (None unless any
@@ -560,7 +570,7 @@ impl Qwen {
             };
             Some(crate::q8::Q8::build(
                 &gpu,
-                init,
+                src,
                 shard.start..shard.end,
                 dims,
                 n as u32,
@@ -1752,6 +1762,37 @@ mod tests {
 
     fn gpu_disabled() -> bool {
         std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    }
+
+    /// The streaming mmap load (`from_reader_inference`) uploads byte-identical
+    /// device weights to the eager whole-model-host-map load (`Qwen::new` over
+    /// `by_role("")`) — proving equivalence, not merely that it compiles. Also
+    /// pins both to the source init exactly. GPU-gated (testgpu / MOE_SKIP_GPU).
+    #[test]
+    fn streaming_load_matches_eager() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let cfg_json = cfg.to_json();
+        let init = crate::init::init_weights(&cfg, 5);
+        // Persist as safetensors — flat 1-D tensors (only the values matter here).
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+            init.iter().map(|(n, v)| (n.clone(), vec![v.len() as u64], v.clone())).collect();
+        let path = std::env::temp_dir().join(format!("qwen-stream-parity-{}.st", std::process::id()));
+        let p = path.to_str().unwrap();
+        checkpoint::st::save_safetensors(p, &tensors, &cfg_json, None).unwrap();
+
+        // Eager: whole-model host map -> Qwen::new. Streaming: mmap WeightReader.
+        let eager = Qwen::new(cfg, 1, 8, &checkpoint::load(p).by_role(""));
+        let reader = checkpoint::weightio::WeightReader::open(p).unwrap();
+        let streamed = Qwen::from_reader_inference(&reader, 1, 8);
+
+        for (name, _) in &eager.ps.params {
+            assert_eq!(eager.read_weight(name), streamed.read_weight(name), "weight {name}");
+            assert_eq!(&streamed.read_weight(name), &init[name], "streamed {name} vs source");
+        }
+        std::fs::remove_file(&path).ok();
     }
 
     /// Every kernel this model can dispatch has a cost formula — pins the

@@ -98,11 +98,15 @@ impl ResidentModel for GptResident {
         est_vram(&self.path)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let itos = gpt::model::Gpt::load_itos(&self.path)
+        // Stream weights from the mmap: peak host allocation is ~one tensor, not
+        // a whole-model f32 copy on top of the device weights. One reader serves
+        // the vocab, the config, and the tensor upload.
+        let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("gpt: {e}"))?;
+        let itos = gpt::model::Gpt::itos_from_config(&reader.config())
             .ok_or("gpt: checkpoint has no embedded char vocab (BRAIN_GPT_WEIGHTS)")?;
         let tok = CharTokenizer::from_itos(itos);
-        let block = gpt::GptConfig::from_json(&checkpoint::load(&self.path).header["config"]).block_size;
-        let model = on_device(device, || gpt::model::Gpt::load(&self.path, 1, block))?;
+        let block = gpt::GptConfig::from_json(&reader.config()).block_size;
+        let model = on_device(device, || gpt::model::Gpt::from_reader(&reader, 1, block))?;
         Ok(Box::new(GptInstance { model, tok }))
     }
 }
@@ -152,11 +156,13 @@ impl ResidentModel for GlmResident {
         est_vram(&self.path)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let itos = glm::model::Glm::load_itos(&self.path)
+        // Stream weights from the mmap (see GptResident::activate).
+        let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("glm: {e}"))?;
+        let itos = glm::model::Glm::itos_from_config(&reader.config())
             .ok_or("glm: checkpoint has no embedded char vocab (BRAIN_GLM_WEIGHTS)")?;
         let tok = CharTokenizer::from_itos(itos);
-        let block = glm::config::GlmConfig::from_json(&checkpoint::load(&self.path).header["config"]).block_size;
-        let model = on_device(device, || glm::model::Glm::load_inference(&self.path, 1, block))?;
+        let block = glm::config::GlmConfig::from_json(&reader.config()).block_size;
+        let model = on_device(device, || glm::model::Glm::from_reader_inference(&reader, 1, block))?;
         Ok(Box::new(GlmInstance { model, tok }))
     }
 }
@@ -219,7 +225,9 @@ impl ResidentModel for QwenResident {
         }
         let tok = data::qwen_tokenizer::QwenBpe::from_file(&self.tokenizer)?;
         let eos = tok.encode("<|im_end|>").first().copied();
-        let model = on_device(device, || qwen::model::Qwen::load_inference(&self.path, 1, Self::ctx()))?;
+        // Stream weights from the mmap (see GptResident::activate).
+        let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("qwen: {e}"))?;
+        let model = on_device(device, || qwen::model::Qwen::from_reader_inference(&reader, 1, Self::ctx()))?;
         Ok(Box::new(QwenInstance { model, tok, eos }))
     }
 }

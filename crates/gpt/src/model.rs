@@ -400,6 +400,16 @@ impl Gpt {
         Gpt::new_shard(cfg, b, t, init, shard)
     }
 
+    /// Streaming load: build directly from a mmap-backed [`WeightReader`],
+    /// uploading one tensor at a time (peak host ≈ one tensor of f32) — the
+    /// `checkpoint::load` + `by_role("")` whole-model host copy is never built.
+    /// Numerically identical to [`Gpt::load`]; used by the resident serve path.
+    pub fn from_reader(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Gpt {
+        let cfg = GptConfig::from_json(&reader.config());
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Gpt::new_shard(cfg, b, t, reader, shard)
+    }
+
     /// Build on an existing device handle (see `gpu_core::Gpu::share`) so a
     /// process holds ONE device however many components it loads.
     pub fn new_on(gpu: Gpu, cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Gpt {
@@ -412,18 +422,18 @@ impl Gpt {
     /// path, byte-for-byte unchanged. `shard.gpu_index` names the canonical
     /// physical card (device registry); `Shard::ANY_GPU` keeps the ambient
     /// selection.
-    pub fn new_shard(cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Gpt {
+    pub fn new_shard(cfg: GptConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, shard: Shard) -> Gpt {
         let gpu = if shard.gpu_index == Shard::ANY_GPU {
             Gpu::new(PIPELINES)
         } else {
             Gpu::new_on_index(shard.gpu_index as u32, PIPELINES)
                 .unwrap_or_else(|e| panic!("gpt shard placement: {e}"))
         };
-        Gpt::new_shard_on(gpu, cfg, b, t, init, shard)
+        Gpt::new_shard_on(gpu, cfg, b, t, src, shard)
     }
 
-    pub(crate) fn new_shard_on(gpu: Gpu, cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Gpt {
-        let ps = ParamStore::new(&gpu, shard_param_list(&cfg, &shard), init);
+    pub(crate) fn new_shard_on(gpu: Gpu, cfg: GptConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, shard: Shard) -> Gpt {
+        let ps = ParamStore::new_src(&gpu, shard_param_list(&cfg, &shard), src);
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         let n = (b * t) as u64;
@@ -940,16 +950,21 @@ impl Gpt {
         checkpoint::save(path, config, &tensors);
     }
 
-    /// The embedded char-tokenizer vocab from a checkpoint, if it was trained on
-    /// a char-level dataset (else `None`, e.g. BPE checkpoints).
-    pub fn load_itos(path: &str) -> Option<Vec<char>> {
-        let c = checkpoint::load(path);
-        let arr = c.header["config"].get("itos")?.as_array()?;
+    /// The embedded char-tokenizer vocab from a config object, if it was trained
+    /// on a char-level dataset (else `None`, e.g. BPE checkpoints).
+    pub fn itos_from_config(cfg: &Value) -> Option<Vec<char>> {
+        let arr = cfg.get("itos")?.as_array()?;
         Some(
             arr.iter()
                 .filter_map(|v| v.as_str().and_then(|s| s.chars().next()))
                 .collect(),
         )
+    }
+
+    /// The embedded char-tokenizer vocab from a checkpoint. Reads only the
+    /// mmap'd header/config (no tensor data is faulted in).
+    pub fn load_itos(path: &str) -> Option<Vec<char>> {
+        Self::itos_from_config(&checkpoint::weightio::WeightReader::open(path).ok()?.config())
     }
 }
 

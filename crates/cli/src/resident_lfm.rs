@@ -115,8 +115,11 @@ impl ResidentModel for LfmResident {
             .and_then(|s| s.parse().ok())
             .filter(|&t| t > 0)
             .ok_or_else(|| format!("lfm: bad instance key '{}' (empty/untokenizable input)", key.config))?;
+        // Stream weights from the mmap: peak host allocation is ~one tensor, not
+        // a whole-model f32 copy on top of the device weights.
+        let reader = checkpoint::weightio::WeightReader::open(&self.weights).map_err(|e| format!("lfm: {e}"))?;
         let model = crate::resident_llm::on_device(device, || {
-            Lfm::load_inference_chunked(&self.weights, self.batch, t, SLAB_BUDGET, PROBE_CAP)
+            Lfm::from_reader_chunked(&reader, self.batch, t, SLAB_BUDGET, PROBE_CAP)
         })?;
         Ok(Box::new(LfmInstance { model, tok: self.tok.clone(), tokenizer_path: self.tokenizer_path.clone(), t, batch: self.batch as usize }))
     }

@@ -369,6 +369,15 @@ impl Glm {
         Glm::new_impl(cfg, b, t, &c.by_role(""), false)
     }
 
+    /// Streaming inference load: build from a mmap-backed [`WeightReader`],
+    /// uploading one tensor at a time (peak host ≈ one tensor of f32) — never the
+    /// `checkpoint::load` + `by_role("")` whole-model host copy. Numerically
+    /// identical to [`Glm::load_inference`]; used by the resident serve path.
+    pub fn from_reader_inference(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Glm {
+        let cfg = GlmConfig::from_json(&reader.config());
+        Glm::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, reader, false)
+    }
+
     pub fn new(cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Glm {
         Glm::new_impl(cfg, b, t, init, true)
     }
@@ -382,7 +391,7 @@ impl Glm {
         Glm::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, init, train)
     }
 
-    fn new_impl_on(gpu: Gpu, cfg: GlmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool) -> Glm {
+    fn new_impl_on(gpu: Gpu, cfg: GlmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool) -> Glm {
         // Roles: inference => all Frozen; training => all Trainable EXCEPT the
         // router selection bias (`e_score_correction_bias`), which is never
         // updated by backprop (matches the reference — a load-balance heuristic
@@ -402,7 +411,7 @@ impl Glm {
                 (n, c, role)
             })
             .collect();
-        let ps = ParamStore::new_with_roles(&gpu, roles, init);
+        let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
         let opt = Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF);
 
         let n = (b * t) as u64;
@@ -1163,10 +1172,15 @@ impl Glm {
     /// Read the char tokenizer vocab (`itos`) embedded in a checkpoint at train
     /// time (char datasets), so inference needs no dataset. `None` for token-id
     /// (BPE) checkpoints that carry no char vocab.
-    pub fn load_itos(path: &str) -> Option<Vec<char>> {
-        let c = checkpoint::load(path);
-        let arr = c.header["config"]["itos"].as_array()?;
+    /// Char vocab (`itos`) from a config object, if present (else `None`).
+    pub fn itos_from_config(cfg: &serde_json::Value) -> Option<Vec<char>> {
+        let arr = cfg.get("itos")?.as_array()?;
         Some(arr.iter().filter_map(|x| x.as_str().and_then(|s| s.chars().next())).collect())
+    }
+
+    pub fn load_itos(path: &str) -> Option<Vec<char>> {
+        // Header/config only — no tensor data is faulted in.
+        Self::itos_from_config(&checkpoint::weightio::WeightReader::open(path).ok()?.config())
     }
 
     /// One DSA-indexer **distillation** step (host-side): train the `idx.*` params

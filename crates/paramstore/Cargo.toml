@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
+brain-checkpoint.workspace = true
 bytemuck.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

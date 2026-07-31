@@ -113,6 +113,20 @@ impl WeightReader {
     }
 }
 
+impl crate::TensorSource for WeightReader {
+    /// Streaming source: decode exactly one tensor from the mmap, lend it to
+    /// `f`, drop it on return (peak host ≈ one tensor's fp32 expansion).
+    fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self.tensor(name) {
+            Some(v) => {
+                f(&v);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 fn usize_to_u64(s: &[usize]) -> Vec<u64> {
     s.iter().map(|&d| d as u64).collect()
 }
@@ -480,6 +494,44 @@ mod tests {
         );
         assert!(peak_stream < peak_eager / 2);
 
+        std::fs::remove_file(&p).ok();
+    }
+
+    /// The streaming [`crate::TensorSource`] (a `WeightReader`) yields, for every
+    /// tensor, byte-identical f32 data to the eager whole-model `by_role("")`
+    /// map — the numeric-parity guarantee the streaming model-load path relies on
+    /// (equal weights in ⇒ identical device weights ⇒ identical numerics). No GPU.
+    #[test]
+    fn tensor_source_streaming_matches_eager() {
+        use crate::TensorSource;
+        let p = scratch("srcparity");
+        let cfg = serde_json::json!({"d_model": 4, "n_layers": 2});
+        let tensors = vec![
+            ("tok.weight".to_string(), vec![3u64, 4], (0..12).map(|i| i as f32 * 0.5 - 1.0).collect::<Vec<f32>>()),
+            ("blocks.0.w".to_string(), vec![4u64, 4], (0..16).map(|i| (i as f32).sin()).collect::<Vec<f32>>()),
+            ("blocks.1.b".to_string(), vec![4u64], vec![-2.0f32, 0.0, 3.5, 7.25]),
+        ];
+        crate::st::save_safetensors(&p, &tensors, &cfg, None).unwrap();
+
+        // Eager whole-model host copy (what the old load path built).
+        let eager = crate::load(&p).by_role("");
+        // Streaming source over the same file.
+        let reader = WeightReader::open(&p).unwrap();
+
+        assert_eq!(reader.config(), cfg);
+        for (name, _shape, data) in &tensors {
+            // HashMap source == the raw data.
+            let mut from_map: Option<Vec<f32>> = None;
+            assert!(eager.with_tensor(name, &mut |v| from_map = Some(v.to_vec())));
+            assert_eq!(from_map.as_ref().unwrap(), data, "{name} eager");
+            // WeightReader source == the raw data, byte-for-byte.
+            let mut from_reader: Option<Vec<f32>> = None;
+            assert!(reader.with_tensor(name, &mut |v| from_reader = Some(v.to_vec())));
+            assert_eq!(from_reader.as_ref().unwrap(), data, "{name} streamed");
+        }
+        // Absent name: both report not-found without invoking the callback.
+        assert!(!reader.with_tensor("nope", &mut |_| panic!("must not call")));
+        assert!(!eager.with_tensor("nope", &mut |_| panic!("must not call")));
         std::fs::remove_file(&p).ok();
     }
 

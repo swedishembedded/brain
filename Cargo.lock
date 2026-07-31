@@ -830,6 +830,7 @@ dependencies = [
 name = "brain-paramstore"
 version = "0.1.0"
 dependencies = [
+ "brain-checkpoint",
  "brain-gpu-core",
  "brain-kernels",
  "bytemuck",

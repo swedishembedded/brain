@@ -70,9 +70,16 @@ pub struct ParamStore {
 impl ParamStore {
     /// All-trainable store (every parameter gets grad + AdamW moments).
     pub fn new(gpu: &Gpu, params: Vec<(String, usize)>, init: &HashMap<String, Vec<f32>>) -> ParamStore {
+        Self::new_src(gpu, params, init)
+    }
+
+    /// [`Self::new`] over any [`checkpoint::TensorSource`] — the eager `HashMap`
+    /// (coerces here) or a streaming `WeightReader` (uploads one tensor at a
+    /// time, never a whole-model host copy).
+    pub fn new_src(gpu: &Gpu, params: Vec<(String, usize)>, source: &dyn checkpoint::TensorSource) -> ParamStore {
         let roles: Vec<(String, usize, Role)> =
             params.into_iter().map(|(n, c)| (n, c, Role::Trainable)).collect();
-        Self::new_with_roles(gpu, roles, init)
+        Self::new_with_roles_src(gpu, roles, source)
     }
 
     /// Role-aware store: `Frozen` parameters allocate weights only. Used for
@@ -81,6 +88,20 @@ impl ParamStore {
         gpu: &Gpu,
         params_roles: Vec<(String, usize, Role)>,
         init: &HashMap<String, Vec<f32>>,
+    ) -> ParamStore {
+        Self::new_with_roles_src(gpu, params_roles, init)
+    }
+
+    /// [`Self::new_with_roles`] over a streaming [`checkpoint::TensorSource`].
+    /// Each weight is fetched by name, converted to bits, uploaded to the device,
+    /// and the host f32/u32 buffers are dropped before the next — so peak host
+    /// allocation is ONE tensor, whatever the source (a `WeightReader` never
+    /// holds the whole model as f32; the `&HashMap` overload keeps the caller's
+    /// map but adds no second copy).
+    pub fn new_with_roles_src(
+        gpu: &Gpu,
+        params_roles: Vec<(String, usize, Role)>,
+        source: &dyn checkpoint::TensorSource,
     ) -> ParamStore {
         let mut weight = HashMap::new();
         let mut grad = HashMap::new();
@@ -92,10 +113,6 @@ impl ParamStore {
         // Bytes written since the last FORCED flush (see below).
         let mut uploaded = 0u64;
         for (name, numel, role) in &params_roles {
-            let data = init
-                .get(name)
-                .unwrap_or_else(|| panic!("missing init weight {name}"));
-            assert_eq!(data.len(), *numel, "size mismatch for {name}");
             // storage()+write() (plain DEVICE_LOCAL + transient staging) instead of
             // storage_init(): create_buffer_init's mapped-at-creation path forces
             // weights into an inefficient memory type on a non-ReBAR GPU, ballooning
@@ -103,8 +120,19 @@ impl ParamStore {
             // tightly — the difference between the Qwen encoder fitting a 24 GB card
             // or not. (Same fix as zimage's BlockWeights::upload.)
             let wbuf = gpu.storage(*numel as u64);
-            let bits: Vec<u32> = data.iter().map(|v| v.to_bits()).collect();
-            gpu.write(&wbuf, &bits);
+            // Pull exactly this tensor from the source, upload it, and let the host
+            // f32 (a streaming WeightReader's per-tensor decode) drop on return —
+            // never a whole-model host map. Numerics are byte-identical to before.
+            let mut found = false;
+            source.with_tensor(name, &mut |data| {
+                assert_eq!(data.len(), *numel, "size mismatch for {name}");
+                let bits: Vec<u32> = data.iter().map(|v| v.to_bits()).collect();
+                gpu.write(&wbuf, &bits);
+                found = true;
+            });
+            if !found {
+                panic!("missing init weight {name}");
+            }
             // Reclaim the write_buffer staging NOW, before the next weight — else it
             // accrues (wgpu only frees it on poll_wait), so a 16.8 GB model uploads
             // ~16.8 GB of extra staging on top of the weights and OOMs a 24 GB card.

@@ -20,6 +20,33 @@ pub mod weightio;
 pub mod torchpt;
 pub mod zipread;
 
+/// A by-name source of f32 tensor data for **streaming** model construction.
+/// Both the eager `HashMap<String, Vec<f32>>` (a whole-model host copy) and the
+/// mmap-backed [`weightio::WeightReader`] (one tensor decoded on demand)
+/// implement it, so a builder can pull each weight, upload it to the device, and
+/// drop it — peak host allocation ≈ one tensor of f32 — without ever holding the
+/// entire model as a map (the second host copy the eager `by_role("")` load kept
+/// alongside the device weights).
+pub trait TensorSource {
+    /// Invoke `f` with tensor `name`'s f32 data if present; returns whether it
+    /// was found. The slice is valid only for the call — a `WeightReader`
+    /// decodes into a temporary that is dropped on return (streaming), a
+    /// `HashMap` lends its stored vec (no copy).
+    fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool;
+}
+
+impl TensorSource for HashMap<String, Vec<f32>> {
+    fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self.get(name) {
+            Some(v) => {
+                f(v);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 /// One tensor read from a container (role is "" if the header omits it).
 pub struct LoadedTensor {
     pub name: String,

@@ -364,6 +364,16 @@ impl Lfm {
         Lfm::new_chunked(cfg, b, t, &init, slab_budget_bytes, probe_cap)
     }
 
+    /// Streaming chunked-inference load: build from a mmap-backed
+    /// [`WeightReader`], uploading one tensor at a time (peak host ≈ one tensor
+    /// of f32) — never the `checkpoint::load` + `by_role("")` whole-model host
+    /// copy. Numerically identical to [`Lfm::load_inference_chunked`]; used by
+    /// the resident serve path.
+    pub fn from_reader_chunked(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32, slab_budget_bytes: u64, probe_cap: u32) -> Lfm {
+        let cfg = LfmConfig::from_json(&reader.config());
+        Lfm::new_impl(cfg, b, t, reader, Some((slab_budget_bytes, probe_cap)), false)
+    }
+
     fn load_ckpt(path: &str) -> (LfmConfig, HashMap<String, Vec<f32>>) {
         let c = checkpoint::load(path);
         let cfg = LfmConfig::from_json(&c.header["config"]);
@@ -451,9 +461,9 @@ impl Lfm {
         m
     }
 
-    fn new_impl(cfg: LfmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, chunked: Option<(u64, u32)>, train: bool) -> Lfm {
+    fn new_impl(cfg: LfmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, chunked: Option<(u64, u32)>, train: bool) -> Lfm {
         assert!(!(train && chunked.is_some()), "chunked-INFERENCE regime is frozen; long-context training uses new_train_chunked");
-        let mut m = Lfm::new_impl_alloc_inner(cfg, b, t, init, chunked, train, false);
+        let mut m = Lfm::new_impl_alloc_inner(cfg, b, t, src, chunked, train, false);
         m.fwd_steps = m.forward_steps();
         if matches!(m.regime, Regime::Chunked { .. }) && b > 1 {
             m.fwd_variants = (1..=b).map(|bu| m.forward_steps_for(bu)).collect();
@@ -471,7 +481,7 @@ impl Lfm {
         Lfm::new_impl_alloc_inner(cfg, b, t, init, None, train, tiny_probs)
     }
 
-    fn new_impl_alloc_inner(cfg: LfmConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, chunked: Option<(u64, u32)>, train: bool, tiny_probs: bool) -> Lfm {
+    fn new_impl_alloc_inner(cfg: LfmConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, chunked: Option<(u64, u32)>, train: bool, tiny_probs: bool) -> Lfm {
         let gpu = Gpu::new(PIPELINES);
         let role = if train { paramstore::Role::Trainable } else { paramstore::Role::Frozen };
         let roles = cfg
@@ -479,7 +489,7 @@ impl Lfm {
             .into_iter()
             .map(|(n, c)| (n, c, role))
             .collect();
-        let ps = ParamStore::new_with_roles(&gpu, roles, init);
+        let ps = ParamStore::new_with_roles_src(&gpu, roles, src);
         let opt = train.then(|| optim::Optim::new(ADAMW, GRADNORM_SQ, GRAD_SCALE, CLIP_COEF, GRAD_SCALE_BUF));
 
         let n = (b * t) as u64;
