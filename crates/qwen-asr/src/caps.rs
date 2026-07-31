@@ -101,6 +101,16 @@ impl QwenAsrProvider {
     pub fn transcribe(&self, wav: &[f32]) -> Result<(String, Vec<u32>), String> {
         self.inner.transcribe(wav)
     }
+
+    /// [`transcribe`](Self::transcribe) with the audio-encoder HEAD run by a closure
+    /// — the seam the NPU resident uses to run the audio-tower ONNX head on the
+    /// Intel NPU while the conv stem + Qwen decoder stay on the device backend.
+    pub fn transcribe_with_head<F>(&self, wav: &[f32], head: F) -> Result<(String, Vec<u32>), String>
+    where
+        F: FnOnce(&[f32], u32, &[(u32, u32)]) -> (Vec<f32>, Vec<f32>),
+    {
+        self.inner.transcribe_with_head(wav, head)
+    }
 }
 
 impl QwenAsrInner {
@@ -110,7 +120,28 @@ impl QwenAsrInner {
         let (mel, valid, _n) = audio::asr_frontend::qwen_logmel(&padded, self.window_samples);
         let model = self.model.lock().map_err(|_| "qwen-asr: model lock poisoned")?;
         let embeds = model.encode_audio(&mel, valid as u32);
-        let out = model.transcribe(&self.input_ids, &embeds, &EOS, self.max_new);
+        self.decode(&model, &embeds)
+    }
+
+    /// [`transcribe`](Self::transcribe) with the audio-encoder head supplied by a
+    /// closure (the NPU path); everything else — window padding, frontend, decoder,
+    /// detok — is identical.
+    pub fn transcribe_with_head<F>(&self, wav: &[f32], head: F) -> Result<(String, Vec<u32>), String>
+    where
+        F: FnOnce(&[f32], u32, &[(u32, u32)]) -> (Vec<f32>, Vec<f32>),
+    {
+        let padded = pad_to_window(wav, self.window_samples);
+        let (mel, valid, _n) = audio::asr_frontend::qwen_logmel(&padded, self.window_samples);
+        let model = self.model.lock().map_err(|_| "qwen-asr: model lock poisoned")?;
+        let embeds = model.encode_audio_with_head(&mel, valid as u32, head);
+        self.decode(&model, &embeds)
+    }
+
+    /// Splice the audio embeds into the Qwen decoder, greedy-decode, and detok —
+    /// the tail shared by [`transcribe`](Self::transcribe) and
+    /// [`transcribe_with_head`](Self::transcribe_with_head).
+    fn decode(&self, model: &crate::model::Qwen3Asr, embeds: &[f32]) -> Result<(String, Vec<u32>), String> {
+        let out = model.transcribe(&self.input_ids, embeds, &EOS, self.max_new);
         // strip trailing EOS before detok
         let trimmed: Vec<u32> = out.iter().copied().take_while(|t| !EOS.contains(t)).collect();
         // The model emits a `language <Lang><asr_text>` preamble before the words

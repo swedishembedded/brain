@@ -569,6 +569,23 @@ impl Encoder {
         out
     }
 
+    /// [`transcribe`](Self::transcribe) with the FastConformer encoder supplied by
+    /// a closure — the seam the NPU resident uses to run the encoder ONNX on the
+    /// Intel NPU (`mel, t, mel_valid, prompt_id → (pooler[T'·dh], valid_T')`), while
+    /// the frontend + RNN-T decode stay host-side. Bit-identical to `transcribe`
+    /// when the closure reproduces `encode` (the ONNX graph is parity-gated to
+    /// cosine 1.0 vs the device encoder), so `brain serve --dbus --device …,npu`
+    /// gives the same tokens on the NPU.
+    pub fn transcribe_with_encoder<F>(&self, wav: &[f32], prompt_id: usize, encode: F) -> Vec<u32>
+    where
+        F: FnOnce(&[f32], u32, u32, usize) -> (Vec<f32>, u32),
+    {
+        let (mel, t, _nmel) = audio::asr_frontend::nemotron_logmel(wav);
+        let mel_valid = wav.len() as u32 / 160;
+        let (pooler, valid) = encode(&mel, t as u32, mel_valid, prompt_id);
+        self.rnnt_greedy(&pooler, valid as usize)
+    }
+
     /// RNN-T greedy transducer decode over an encoded `pooler` `[T, decoder_hidden]`.
     /// LSTM prediction net runs host-side (m=1 steps); the joint head is on device.
     /// One implementation with the streaming path: a fresh [`DecodeState`] stepped

@@ -100,6 +100,18 @@ impl Qwen3Asr {
         enc.encode(mel, valid_frames).1
     }
 
+    /// [`encode_audio`](Self::encode_audio) with the windowed-transformer HEAD run
+    /// by a closure — the seam the NPU resident uses to run the audio-encoder ONNX
+    /// head on the Intel NPU (conv stem + packing stay host-side). Returns the
+    /// projected audio embeddings `[n_audio·output_dim]`.
+    pub fn encode_audio_with_head<F>(&self, mel: &[f32], valid_frames: u32, head: F) -> Vec<f32>
+    where
+        F: FnOnce(&[f32], u32, &[(u32, u32)]) -> (Vec<f32>, Vec<f32>),
+    {
+        let enc = AudioEncoder::new(&self.agpu, self.cfg.audio, &self.aweights);
+        enc.encode_with_head(mel, valid_frames, head).1
+    }
+
     /// Greedy transcription: splice `audio_embeds` at the placeholder run, then
     /// argmax-decode from `input_ids` until an EOS token or `max_new` tokens.
     /// Returns the generated token ids (excluding the prompt). Cache-free

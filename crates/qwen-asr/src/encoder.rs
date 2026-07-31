@@ -98,6 +98,29 @@ impl<'g> AudioEncoder<'g> {
     /// encoder output `[n_audio, d_model]` and the projected audio embeddings
     /// `[n_audio, output_dim]`.
     pub fn encode(&self, mel: &[f32], valid_frames: u32) -> (Vec<f32>, Vec<f32>) {
+        let (packed, n_audio, spans) = self.prepare_packed(mel, valid_frames);
+        self.encode_packed(&packed, n_audio, &spans)
+    }
+
+    /// [`encode`](Self::encode) with the windowed-transformer HEAD supplied by a
+    /// closure — the seam the NPU resident uses to run the audio-encoder ONNX head
+    /// (`packed[n_audio·d], n_audio, spans → (encoder_out, audio_embeds)`) on the
+    /// Intel NPU, while the conv stem + valid-position packing stay host-side.
+    /// Bit-identical to `encode` when the closure reproduces `encode_packed` (the
+    /// ONNX head is parity-gated to cosine 1.0 vs the device head).
+    pub fn encode_with_head<F>(&self, mel: &[f32], valid_frames: u32, head: F) -> (Vec<f32>, Vec<f32>)
+    where
+        F: FnOnce(&[f32], u32, &[(u32, u32)]) -> (Vec<f32>, Vec<f32>),
+    {
+        let (packed, n_audio, spans) = self.prepare_packed(mel, valid_frames);
+        head(&packed, n_audio, &spans)
+    }
+
+    /// Conv stem + sinusoidal-pos add + valid-position packing → the packed
+    /// post-CNN tokens `[n_audio, d_model]`, `n_audio`, and the block-diagonal
+    /// `cu_seqlens` attention spans. The host part shared by `encode` /
+    /// `encode_with_head`.
+    fn prepare_packed(&self, mel: &[f32], valid_frames: u32) -> (Vec<f32>, u32, Vec<(u32, u32)>) {
         let c = &self.cfg;
         let (nm, chunk_len) = (c.num_mel_bins as usize, c.chunk_len() as usize);
         let t = mel.len() / nm;
@@ -105,11 +128,9 @@ impl<'g> AudioEncoder<'g> {
         let num_chunks = (t / chunk_len) as u32;
         let hidden = c.d_model;
 
-        // ---- conv stem (device) ----
         let conv_tokens = self.conv_stem(mel, num_chunks); // [num_chunks*13, hidden]
         let tpc = c.post_cnn_len(c.chunk_len()); // time-positions per full chunk (13)
 
-        // ---- + sinusoidal pos, then pack valid positions (host) ----
         let mut packed: Vec<f32> = Vec::new();
         let mut chunk_valid = Vec::new();
         for ch in 0..num_chunks {
@@ -125,7 +146,7 @@ impl<'g> AudioEncoder<'g> {
         }
         let n_audio = (packed.len() / hidden as usize) as u32;
         let spans = self.cu_seqlens(valid_frames, &chunk_valid);
-        self.encode_packed(&packed, n_audio, &spans)
+        (packed, n_audio, spans)
     }
 
     /// The windowed transformer + `ln_post` + projector over already-packed,
