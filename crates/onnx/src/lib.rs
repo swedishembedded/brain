@@ -9,7 +9,10 @@
 //! via `brain-npu`). Only the **export/serialize** direction is implemented; the
 //! owned [`graph`] model is deliberately decoupled from the wire types so a
 //! future ONNX *import* frontend could add a `from_proto` without reshaping the
-//! crate.
+//! crate. The **import** direction now exists in part: [`read`] decodes a
+//! serialized model back into tensors + nodes (used by `crates/facenet`, whose
+//! reference release ships ONNX only). It stops short of a `Graph::from_proto`
+//! — see that module for why.
 //!
 //! The only dependency is the `prost` runtime crate. The protobuf bindings in
 //! [`onnx`] are vendored (generated offline from `proto/onnx.proto`), so no
@@ -29,10 +32,12 @@ pub mod builder;
 pub mod conv;
 pub mod graph;
 pub mod onnx;
+pub mod read;
 
 pub use builder::{GraphBuilder, DEFAULT_IR_VERSION, DEFAULT_OPSET};
 pub use conv::{conv_transpose1d_ref, conv_transpose_node, ConvTranspose1d};
 pub use graph::{Attr, AttrVal, Elem, Graph, Node, Tensor, TensorData, ValueInfo};
+pub use read::{initializers, read_file, OnnxTensor};
 
 /// Decode serialized ONNX bytes back into a [`onnx::ModelProto`] (for inspection
 /// / tests). Keeps `prost` an implementation detail of this crate.
