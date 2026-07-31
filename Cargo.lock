@@ -611,6 +611,7 @@ dependencies = [
  "anyhow",
  "brain-capability",
  "brain-residency",
+ "brain-stats",
  "nix",
  "serde_json",
  "tokio",
@@ -1171,6 +1172,16 @@ dependencies = [
  "brain-gpu-core",
  "brain-kernels",
  "bytemuck",
+ "serde_json",
+]
+
+[[package]]
+name = "brain-stats"
+version = "0.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-residency",
+ "serde",
  "serde_json",
 ]
 

@@ -193,13 +193,50 @@ The recent workstream (P7.x) is concurrent LLM serving. Key pieces:
 | Residency | `crates/residency` | tiers model weights GPU/RAM/disk by LRU within a memory budget; schedules jobs (batch-by-model, queue-age-aware, parallel lanes) |
 | Capability interface | `crates/capability` | models advertise a `Manifest` of typed `ActionSpec`s; CLI (`brain caps` / `brain do`) and the event API dispatch generically — adding a capability = implementing `Action`, no new subcommand or event variant |
 | Transports | `crates/server` | one JSONL protocol over **stdio, TCP, and Unix socket**; thread-per-connection, bounded, panic-isolated |
-| D-Bus surface | `crates/dbus` | exposes `capability::Registry` over `com.swedishembedded.Brain1`, passing images/streams via fd (memfd/mmap + dmabuf). Example client: `examples/dbus` |
+| D-Bus surface | `crates/dbus` | exposes `capability::Registry` over `com.swedishembedded.Brain1`, passing images/streams via fd (memfd/mmap + dmabuf). Example client: `examples/dbus`. Also serves the stats snapshot (`StatsSnapshot` method + `StatsStream` signal) |
+| Stats subsystem | `crates/stats` (`brain-stats`) | self-describing, hierarchical JSON `StatsSnapshot` (accelerators/models/executor/requests/connections + open `extra`), assembled from `StatsSource` contributors; `braintop` renders it |
 | Event HFSM | `crates/runtime`, `crates/events`, `crates/hfsm` | `camera_frame`→`object_detected`, `user_text`→`brain_text_chunk` |
 | Python client | `brain-py/` | drives the `brain` binary as an event-driven subprocess (not in the build/test path) |
 
 Multi-GPU scaling lives in `crates/model`:
 `{distributed,parallel,collective,netcollective,shard,plan,grid}.rs` — see
 `docs/scaling/`.
+
+### Stats & braintop
+
+`crates/stats` (`brain-stats`) is the **data-driven contract** a live-monitoring
+TUI (`braintop`, and `braintop --cli`) renders from. `StatsSnapshot` is a
+hierarchical tree of typed sections — each a **collection keyed by `id`**
+(`accelerators`, `models` with per-instance residency, `executor`, `requests`,
+`connections`) — plus an open `extra: BTreeMap<String, Value>` at every level.
+
+**To add a metric:** add a field to the relevant typed section in
+`crates/stats/src/snapshot.rs` (or, for something with no typed home yet, emit
+into an `extra` map). It flows through the JSON snapshot and braintop renders it
+automatically — typed views for known sections, a generic tree view for `extra`;
+no schema migration for the `extra` path. **Never hardcode a count** — N
+accelerators / N models / N instances all render from the data (one GPU or eight,
+zero models or fifty).
+
+**How it's assembled:** a `StatsSource` contributes into a snapshot; an
+`Assembler` walks all registered sources (no central switchboard). The live wiring
+is `build::ExecutorSource`, which reads one residency `Executor` clone — its
+counters (`Executor::stats`), its manifest catalog (`Executor::manifests`), and
+its residency + budget report (`Executor::residency`, backed by
+`ResidencyManager::report` via a dispatcher `Msg::Report` round-trip) — to fill
+accelerators (one row per budgeted device), models (catalog joined with
+placement), and the executor section. `requests`/`connections` are left to
+dedicated sources (a `JobRegistry`-backed request source can be layered in without
+touching `ExecutorSource`).
+
+**Surface:** the D-Bus `Manager` (`crates/dbus/src/service.rs`) exposes a
+`StatsSnapshot() -> String` method and emits a `StatsStream` signal carrying the
+same JSON at ≥2 Hz (`service::STATS_INTERVAL`, 500 ms) from a background task;
+braintop subscribes there instead of polling.
+
+`crates/stats` is serde + assembly only — it pulls no GPU/model/engine code (just
+`brain-residency` and `brain-capability`), so it stays light enough for any
+front-end to depend on.
 
 ---
 
@@ -251,7 +288,7 @@ Multi-GPU scaling lives in `crates/model`:
 | `onnx` | pure-Rust ONNX graph model + serializer (export), plus an import-side **reader** (`read`: initializers/nodes/attributes) used by `facenet`; vendored `prost`, no `protoc` |
 | `npu` | YOLO/depth → ONNX export + BN fold + brain-native INT8 PTQ + fake-quant simulator + OpenVINO **Intel NPU** runtime (`runtime-linking`) |
 | `capture` | V4L2 webcam (hand-rolled ioctl FFI, YUYV→RGB, latest-frame slot) |
-| `capability` / `residency` / `server` / `dbus` / `runtime` / `events` / `hfsm` | the serving/runtime stack (table above) |
+| `capability` / `residency` / `stats` / `server` / `dbus` / `runtime` / `events` / `hfsm` | the serving/runtime stack (table above) |
 
 ---
 
@@ -284,6 +321,7 @@ Multi-GPU scaling lives in `crates/model`:
 | Capability manifests + generic dispatch (`brain caps` / `brain do`) | `crates/capability/src/lib.rs`, `crates/cli/src/caps_cli.rs` |
 | JSONL transports (stdio / TCP / unix) | `crates/server/src/{transport,controller_session}.rs` |
 | D-Bus control surface | `crates/dbus`, `examples/dbus` |
+| **Stats snapshot / braintop contract** (add a metric, data-driven sections) | `crates/stats/src/{snapshot,source,build}.rs`; D-Bus `StatsSnapshot`/`StatsStream` in `crates/dbus/src/service.rs`; `Executor::residency` in `crates/residency/src/{executor,manager}.rs` |
 | Event/HFSM controller (`brain run`) | `crates/runtime/src/{lib,pump}.rs`, `crates/cli/src/run_cli.rs`, `crates/events/src/lib.rs` |
 | GLM-5.2 (MLA + MoE + DSA indexer + MTP) | `docs/models/glm/readme.md`, `docs/models/glm/npu.md`; `crates/glm`, `crates/cli/src/glm_cli.rs` |
 | LFM2.5-Encoder (bidir conv/attn hybrid, MLM, 8k) | `docs/models/lfm/{readme,status}.md`; `crates/lfm`, `crates/cli/src/lfm_cli.rs`; goldens via `tools/lfm_dump_reference.py` |

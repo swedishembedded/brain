@@ -20,6 +20,7 @@ use capability::{Blob, CancelToken, Invocation, Media, Outcome, Progress};
 use residency::{Executor, Job};
 use serde_json::{json, Value};
 use zbus::fdo;
+use zbus::object_server::SignalEmitter;
 use zbus::zvariant::OwnedFd as ZOwnedFd;
 
 use crate::fd::{bytes_to_fd, read_fd_to_vec};
@@ -340,6 +341,21 @@ impl Manager {
         .to_string()
     }
 
+    /// The full **self-describing stats snapshot** as JSON — the hierarchical tree
+    /// braintop renders (accelerators / models with per-instance residency /
+    /// executor counters / requests / connections, plus open `extra` maps). Built
+    /// from the live executor via `brain-stats`. One-shot pull; `StatsStream`
+    /// pushes the same document live at >=2 Hz.
+    async fn stats_snapshot(&self) -> String {
+        brain_stats::snapshot_from_executor(&self.executor).to_json_string()
+    }
+
+    /// Live stats: the same JSON document as `StatsSnapshot`, emitted on a timer by
+    /// the background task ([`run_stats_stream`]) so braintop can subscribe instead
+    /// of polling. Declared here so it belongs to this interface/object path.
+    #[zbus(signal)]
+    async fn stats_stream(emitter: &SignalEmitter<'_>, snapshot: String) -> zbus::Result<()>;
+
     /// Cooperatively cancel a job (from `Subscribe`) by id: flips its token so the
     /// running action aborts at its next poll (`Err("cancelled")` arrives as an
     /// `error` frame). Returns `true` if the job was found still in flight,
@@ -365,5 +381,55 @@ impl Manager {
     #[zbus(property)]
     async fn models(&self) -> Vec<String> {
         self.list_models().await
+    }
+}
+
+/// How often the `StatsStream` signal fires. 500 ms == 2 Hz — the floor a live
+/// braintop view needs. Kept a const so the cadence is one obvious knob.
+pub const STATS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Background task that pushes the stats snapshot: every [`STATS_INTERVAL`] it
+/// builds a fresh snapshot from `executor` and emits it as the `StatsStream`
+/// signal on the `Manager` served at `path`. Reuses the existing interface/object
+/// path (braintop subscribes there). Returns when the connection is gone.
+pub async fn run_stats_stream(conn: zbus::Connection, executor: Executor, path: &'static str) {
+    let mut tick = tokio::time::interval(STATS_INTERVAL);
+    loop {
+        tick.tick().await;
+        // Fetch the served interface fresh each tick: if it is not yet registered
+        // (startup race) skip this tick rather than give up the whole stream.
+        let iface = match conn.object_server().interface::<_, Manager>(path).await {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        let json = brain_stats::snapshot_from_executor(&executor).to_json_string();
+        if Manager::stats_stream(iface.signal_emitter(), json).await.is_err() {
+            return; // connection dropped — stop emitting
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use residency::budget::Budgets;
+    use residency::{Device, Executor, Policy};
+
+    const GB: u64 = 1 << 30;
+
+    /// The `StatsSnapshot`/`StatsStream` payload is built by `brain-stats` from the
+    /// executor. Verify the wiring end-to-end (executor -> stats -> JSON): the
+    /// accelerators enumerate from the device budgets and the document round-trips.
+    #[test]
+    fn stats_snapshot_json_is_well_formed_from_the_executor() {
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 2 * GB).set(Device::Cpu, 16 * GB, 0);
+        let exec = Executor::start(vec![], budgets, Policy::default());
+        let json = brain_stats::snapshot_from_executor(&exec).to_json_string();
+        let snap = brain_stats::StatsSnapshot::from_json_str(&json).expect("valid snapshot JSON");
+        // Two budgeted devices → two accelerator rows, data-driven from the executor.
+        assert_eq!(snap.accelerators.len(), 2);
+        assert!(snap.accelerators.iter().any(|a| a.id == "cpu"));
+        assert!(snap.accelerators.iter().any(|a| a.id == "gpu0" && a.mem_total == 24 * GB));
+        assert!(snap.models.is_empty());
     }
 }

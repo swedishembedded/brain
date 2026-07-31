@@ -93,6 +93,10 @@ enum Msg {
     Submit(Box<Job>),
     Built { key: InstanceKey, handle: InstanceHandle },
     Done { key: InstanceKey, device: Device, batch: usize, failed: bool },
+    /// A stats query: the dispatcher (the sole owner of the [`ResidencyManager`])
+    /// replies with a residency + budget snapshot. Mirrors how [`Stats`] is
+    /// exposed, but read straight from the manager rather than the counters.
+    Report(Sender<crate::ResidencyReport>),
 }
 
 /// A group of same-key jobs handed to a device lane to run. `work` is either a
@@ -167,6 +171,19 @@ impl Executor {
         self.stats.lock().unwrap().clone()
     }
 
+    /// A live residency + budget snapshot (which model is Hot on which device, at
+    /// what memory cost, plus every device's budget). Round-trips a query through
+    /// the dispatcher — the only thread that owns the [`ResidencyManager`] — so it
+    /// is always consistent with scheduling. Returns an empty report if the
+    /// dispatcher is gone. Mirrors [`stats`](Self::stats).
+    pub fn residency(&self) -> crate::ResidencyReport {
+        let (tx, rx) = channel();
+        if self.tx.send(Msg::Report(tx)).is_err() {
+            return crate::ResidencyReport::default();
+        }
+        rx.recv().unwrap_or_default()
+    }
+
     pub fn manifests(&self) -> &[Manifest] {
         &self.manifests
     }
@@ -213,6 +230,9 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
         },
         Msg::Built { key, handle } => {
             mgr.adopt(&key, handle);
+        }
+        Msg::Report(tx) => {
+            let _ = tx.send(mgr.report());
         }
         Msg::Done { key, device, batch, failed } => {
             if failed {
@@ -574,6 +594,35 @@ mod tests {
         assert_eq!(exec.stats().resident, 1, "only the good instance is resident");
         // budget really freed: `bad` can be retried and fails cleanly again
         assert!(exec.run_blocking("bad", "run", Invocation::new(), |_| {}).is_err());
+    }
+
+    /// The residency accessor (`Executor::residency`) round-trips a query through
+    /// the dispatcher and reports every placed instance + every device budget. After
+    /// a run the instance stays resident (released, not evicted), so it must appear
+    /// in the report with its device, tier, and memory cost, and its bytes must be
+    /// accounted against the placed device's budget.
+    #[test]
+    fn residency_accessor_reports_placed_instances_and_budgets() {
+        let builds = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 2 * GB).set(Device::Cpu, 8 * GB, 0);
+        let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Slow { name: "a".into(), vram: 10 * GB, ms: 3, builds })];
+        let exec = Executor::start(models, budgets, Policy::default());
+        exec.run_blocking("a", "run", Invocation::new(), |_| {}).unwrap();
+
+        let report = exec.residency();
+        // The placed instance is reported on GPU 0 at its 10 GB cost, Hot.
+        let p = report.placements.iter().find(|p| p.key.model == "a").expect("instance 'a' resident");
+        assert_eq!(p.device, Device::Gpu(0));
+        assert_eq!(p.tier, crate::Tier::Hot);
+        assert_eq!(p.mem, 10 * GB);
+        // Budgets cover every device, deterministically ordered (CPU first), with the
+        // 10 GB accounted against GPU 0's `used`.
+        assert_eq!(report.budgets.first().map(|b| b.device), Some(Device::Cpu));
+        let gpu = report.budgets.iter().find(|b| b.device == Device::Gpu(0)).expect("gpu budget");
+        assert_eq!(gpu.total, 24 * GB);
+        assert_eq!(gpu.reserved, 2 * GB);
+        assert!(gpu.used >= 10 * GB, "used={} should include the resident instance", gpu.used);
     }
 
     /// A model whose activation is SLOW (weight load / NPU graph compile).

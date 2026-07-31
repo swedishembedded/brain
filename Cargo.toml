@@ -76,6 +76,7 @@ default-members = [
     "crates/cli",
     "crates/dbus",
     "crates/residency",
+    "crates/stats",
     "crates/apiserve",
     "crates/web",
 ]
@@ -128,6 +129,7 @@ brain-perf = { path = "crates/perf" }
 brain-gradcheck = { path = "crates/gradcheck" }
 brain-capability = { path = "crates/capability" }
 brain-residency = { path = "crates/residency" }
+brain-stats = { path = "crates/stats" }
 brain-dbus = { path = "crates/dbus" }
 brain-apiserve = { path = "crates/apiserve" }
 brain-events = { path = "crates/events" }

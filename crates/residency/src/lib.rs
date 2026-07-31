@@ -27,7 +27,7 @@ pub mod place;
 pub mod scheduler;
 
 pub use executor::{Executor, Job};
-pub use manager::ResidencyManager;
+pub use manager::{DeviceBudget, InstancePlacement, ResidencyManager, ResidencyReport};
 pub use model::{Instance, ResidentModel};
 pub use scheduler::Policy;
 

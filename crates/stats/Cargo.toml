@@ -1,0 +1,16 @@
+[package]
+name = "brain-stats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Self-describing, hierarchical JSON stats for brain: a data-driven StatsSnapshot tree (accelerators / models / executor / requests / connections + an open `extra` map) assembled from registered StatsSource contributors. Serde-only data + assembly plus live sources that read the residency Executor — the contract braintop renders."
+
+[lib]
+name = "brain_stats"
+path = "src/lib.rs"
+
+[dependencies]
+brain-residency.workspace = true
+brain-capability.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true

@@ -66,6 +66,48 @@ pub enum Claimed {
     Build(Arc<dyn ResidentModel>),
 }
 
+/// One resident instance's placement — the per-model residency the stats
+/// subsystem renders (which model is Hot, on which device, at what memory cost).
+#[derive(Clone, Debug)]
+pub struct InstancePlacement {
+    pub key: InstanceKey,
+    pub device: Device,
+    pub tier: Tier,
+    /// Bytes this instance occupies **on its device** (VRAM/RAM/NPU as applicable).
+    pub mem: u64,
+}
+
+/// One device's live budget (total capacity, reserved headroom, bytes in use) —
+/// the accelerator memory picture the stats subsystem renders (nvidia-smi-like).
+#[derive(Clone, Copy, Debug)]
+pub struct DeviceBudget {
+    pub device: Device,
+    pub total: u64,
+    pub reserved: u64,
+    pub used: u64,
+}
+
+/// A point-in-time residency + budget snapshot: every placed instance plus every
+/// device's budget. Produced by [`ResidencyManager::report`] and surfaced through
+/// the [`Executor`](crate::Executor) residency accessor so callers outside the
+/// dispatcher thread (stats, D-Bus) can render the live memory/residency tree
+/// without reaching into the manager's internals. Deterministically ordered.
+#[derive(Clone, Debug, Default)]
+pub struct ResidencyReport {
+    pub placements: Vec<InstancePlacement>,
+    pub budgets: Vec<DeviceBudget>,
+}
+
+/// Total order over devices for deterministic reporting: CPU, then GPUs by index,
+/// then NPUs by index (HashMap iteration order is otherwise unstable).
+fn device_order(d: Device) -> (u8, u32) {
+    match d {
+        Device::Cpu => (0, 0),
+        Device::Gpu(i) => (1, i),
+        Device::Npu(i) => (2, i),
+    }
+}
+
 /// Owns the resident model instances, their budgets, and the LRU. Not thread-safe by
 /// itself — the scheduler owns one behind its worker(s).
 pub struct ResidencyManager {
@@ -131,6 +173,28 @@ impl ResidencyManager {
     /// Current tier of each resident instance (for `Residency` reporting).
     pub fn residency(&self) -> Vec<(InstanceKey, Device, Tier)> {
         self.residents.iter().map(|(k, e)| (k.clone(), e.device, Tier::Hot)).collect()
+    }
+
+    /// A full residency + budget snapshot for stats/reporting: every placed
+    /// instance (with its device-memory cost) plus every device's budget,
+    /// deterministically ordered. This is the data-source the stats subsystem and
+    /// the D-Bus `StatsSnapshot`/`StatsStream` surface render from — it is
+    /// computed inside the dispatcher thread (which owns the manager) and shipped
+    /// out via the [`Executor`](crate::Executor) residency accessor.
+    pub fn report(&self) -> ResidencyReport {
+        let mut placements: Vec<InstancePlacement> = self
+            .residents
+            .iter()
+            .map(|(k, e)| InstancePlacement { key: k.clone(), device: e.device, tier: Tier::Hot, mem: e.cost.on(e.device) })
+            .collect();
+        placements.sort_by(|a, b| (a.key.model.clone(), a.key.config.clone(), device_order(a.device)).cmp(&(b.key.model.clone(), b.key.config.clone(), device_order(b.device))));
+        let mut budgets: Vec<DeviceBudget> = self
+            .budgets
+            .devices()
+            .filter_map(|d| self.budgets.get(d).map(|b| DeviceBudget { device: d, total: b.total, reserved: b.reserved, used: b.used }))
+            .collect();
+        budgets.sort_by_key(|b| device_order(b.device));
+        ResidencyReport { placements, budgets }
     }
 
     pub fn budgets(&self) -> &Budgets {

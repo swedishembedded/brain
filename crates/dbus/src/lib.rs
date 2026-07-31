@@ -56,6 +56,9 @@ pub const OBJECT_PATH: &str = "/com/swedishembedded/Brain1";
 pub fn serve(executor: Executor, opts: DbusOpts) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
+        // A cheap executor clone drives the background stats stream, so the
+        // snapshot source is independent of the served `Manager` instance.
+        let stats_executor = executor.clone();
         let manager = service::Manager::new(executor);
         let builder = match opts.bus {
             BusKind::Session => zbus::connection::Builder::session()?,
@@ -67,6 +70,10 @@ pub fn serve(executor: Executor, opts: DbusOpts) -> anyhow::Result<()> {
             .build()
             .await?;
         eprintln!("brain: serving {} on the {:?} bus at {OBJECT_PATH}", opts.name, opts.bus);
+        // Push the self-describing stats snapshot as the `StatsStream` signal at
+        // >=2 Hz (see `service::STATS_INTERVAL`), so braintop subscribes instead of
+        // polling. Detached; it stops when the connection drops.
+        tokio::spawn(service::run_stats_stream(conn.clone(), stats_executor, OBJECT_PATH));
         // Run until interrupted; graceful shutdown releases the name cleanly.
         tokio::signal::ctrl_c().await?;
         eprintln!("brain: shutting down D-Bus service");
