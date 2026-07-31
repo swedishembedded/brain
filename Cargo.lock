@@ -503,7 +503,10 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-onnx",
+ "brain-paramstore",
  "brain-vision",
+ "bytemuck",
 ]
 
 [[package]]

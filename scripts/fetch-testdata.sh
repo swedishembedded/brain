@@ -39,6 +39,7 @@ VL_MIRROR="${BRAIN_VL_MIRROR:-/data/workspace/resources/vl}"
 TTS_MIRROR="${BRAIN_TTS_MIRROR:-/data/workspace/tmp/qwen3-tts-resources}"
 GOLDEN_MIRROR="${BRAIN_GOLDEN_MIRROR:-/data/workspace/resources/brain-goldens}"
 SAM2_MIRROR="${BRAIN_SAM2_MIRROR:-/data/workspace/resources/sam2}"
+IDENTITY_MIRROR="${BRAIN_IDENTITY_MIRROR:-/data/workspace/resources/identity}"
 
 added=0 skipped=0 missing=0
 
@@ -67,6 +68,34 @@ _link_from() {
   done < <(find "$src" -type f -print0)
   echo "  ✓ $sub_dst"
 }
+# _link_files <mirror-root> <mirror-subdir> <dest-subdir> <file>… — same as
+# _link_from but for a NAMED subset, used where the mirror holds more models
+# than a test needs (antelopev2 ships five .onnx; facenet reads two).
+_link_files() {
+  local root="$1" sub_src="$2" sub_dst="$3"
+  shift 3
+  local src="$root/$sub_src" dst="$DEST/$sub_dst"
+  if [ ! -d "$src" ]; then
+    echo "  · $sub_dst: mirror '$src' absent — skipping (point its BRAIN_*_MIRROR at a copy, or add a URL)"
+    missing=$((missing + 1))
+    return 0
+  fi
+  mkdir -p "$dst"
+  for rel in "$@"; do
+    if [ ! -e "$src/$rel" ]; then
+      echo "  · $sub_dst/$rel: not in mirror — skipping"
+      missing=$((missing + 1))
+      continue
+    fi
+    if [ -e "$dst/$rel" ]; then
+      skipped=$((skipped + 1))
+      continue
+    fi
+    ln "$src/$rel" "$dst/$rel" 2>/dev/null || cp "$src/$rel" "$dst/$rel"
+    added=$((added + 1))
+  done
+  echo "  ✓ $sub_dst"
+}
 asr_tree() { _link_from "$ASR_MIRROR" "$1" "$2"; }
 golden_tree() { _link_from "$GOLDEN_MIRROR" "$1" "$2"; }
 vl_tree()  { _link_from "$VL_MIRROR"  "$1" "$2"; }
@@ -74,7 +103,7 @@ tts_tree() { _link_from "$TTS_MIRROR" "$1" "$2"; }
 sam2_tree() { _link_from "$SAM2_MIRROR" "$1" "$2"; }
 
 echo "brain: populating testdata at $DEST"
-echo "       mirrors: asr=$ASR_MIRROR vl=$VL_MIRROR tts=$TTS_MIRROR golden=$GOLDEN_MIRROR sam2=$SAM2_MIRROR"
+echo "       mirrors: asr=$ASR_MIRROR vl=$VL_MIRROR tts=$TTS_MIRROR golden=$GOLDEN_MIRROR sam2=$SAM2_MIRROR identity=$IDENTITY_MIRROR"
 
 # --- ASR (Nemotron 3.5 ASR, Qwen3-ASR) --------------------------------------
 asr_tree "nemotron/hf"     "asr/nemotron/hf"
@@ -101,6 +130,17 @@ golden_tree "zimage"       "golden/zimage"
 # `crates/sam2/tests/parity.rs` skips itself while they are absent.
 sam2_tree "weights/sam2.1-hiera-large" "sam2/hiera-large"
 sam2_tree "weights/sam2.1-hiera-tiny"  "sam2/hiera-tiny"
+
+# --- Face recognition (insightface antelopev2: SCRFD + ArcFace) --------------
+# The two released ONNX files `crates/facenet` imports. The stage goldens
+# (`{arcface,arcface_blocks,scrfd,align,e2e}.safetensors` + `manifest.json`) are
+# NOT mirrored — regenerate them next to the weights with
+#   python3 tools/arcface_dump_reference.py \
+#       --weights testdata/face/antelopev2 --out testdata/face/antelopev2 \
+#       [--photos a.jpg b.jpg c.jpg]
+# `crates/facenet/tests/parity.rs` skips itself while they are absent.
+_link_files "$IDENTITY_MIRROR" "weights/antelopev2" "face/antelopev2" \
+  glintr100.onnx scrfd_10g_bnkps.onnx
 
 # --- Vision-language (FastVLM, Moondream3, Qwen3-VL) -------------------------
 vl_tree  "fastvlm/hf"      "vl/fastvlm/hf"

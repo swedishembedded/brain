@@ -15,4 +15,14 @@ brain-kernels.workspace = true
 brain-model.workspace = true
 brain-vision.workspace = true
 brain-imaging.workspace = true
+brain-paramstore.workspace = true
+# The reference release (insightface antelopev2) ships ONNX and only ONNX, so
+# import reads the protobuf. The reader lives in `crates/onnx` — a private one
+# here would be a second decoder of the same wire format.
+brain-onnx.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+# The parity test replays goldens dumped as safetensors; nothing in the library
+# reads a checkpoint (weights arrive through `import_dir`).
 brain-checkpoint.workspace = true

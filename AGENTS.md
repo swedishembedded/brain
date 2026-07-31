@@ -60,6 +60,16 @@ from them, keeping the gradient-check discipline.
    CPU/GPU/Vulkan and the Intel NPU (ONNX/OpenVINO, cosine 0.99998).
    *(Depth Anything 3 was planned as a second arch behind the same contract and
    is **dropped** — see `crates/depth/src/lib.rs`.)*
+9b. **Face recognition** (`crates/facenet`) — the insightface *antelopev2* stack:
+    **SCRFD-10GF** detector (ResNet-D backbone + PAFPN + 3-stride anchor head) →
+    **5-point similarity alignment** (Umeyama solve on the host, applied with the
+    `grid_sample` kernel) → the **ArcFace IResNet-100** 512-d embedding (PReLU
+    with learned per-channel slopes; BatchNorm folded into the convs by the
+    release). Imported from **ONNX** — the first import in the repo to read the
+    protobuf, via the new `onnx::read` — with two-way coverage (462 / 119
+    tensors). Forward-parity-gated per stage at cosine 1.000000.
+    See `docs/models/face/status.md`. *(Forward only: backward/gradcheck and the
+    serving contract are deferred and listed in that ledger.)*
 9c. **SAM 2.1 promptable segmentation** (`crates/sam2`) — the **image path** of
     Meta's SAM 2.1: Hiera trunk (windowed attention with a per-block window
     schedule + `q_pool` stride stages) → FPN neck → prompt encoder (points, boxes
@@ -202,7 +212,7 @@ Multi-GPU scaling lives in `crates/model`:
 | `gpt` / `qwen` / `moe` / `glm` / `pid` | decoder LMs (see Models) |
 | `seq2seq` / `autoencoder` / `timeseries` | encoder-decoder / bottleneck AE / placeholder |
 | `federated` | vertical expert split/assemble, hash-verified manifests, train-scope |
-| `yolo` / `vision` | detector; shared conv-net blocks (spec-driven `Conv` incl. fused/register-tiled eval paths, `BatchNorm`, `SPPF`, bottlenecks, `fold_bn`) |
+| `yolo` / `vision` | detector; shared conv-net blocks (spec-driven `Conv` incl. fused/register-tiled eval paths, `BatchNorm`, `PReLU`, `MaxPool`/`AvgPool`, `SPPF`, bottlenecks, `fold_bn`) |
 | `depth` | ZipDepth: model/blocks/import/fuse, `Predictor`, viz/stereo/effects, INT8 calib |
 | `mirror` / `splat` | WorldMirror-2; 3DGS rasterizer + PLY IO + `fit` + viewer |
 | `diffusion` / `dit` / `vae` / `zimage` | flow-matching core; shared DiT blocks; AutoencoderKL; Z-Image |
@@ -214,7 +224,7 @@ Multi-GPU scaling lives in `crates/model`:
 
 | Crate | Responsibility |
 |---|---|
-| `onnx` | pure-Rust ONNX graph model + serializer (export only; vendored `prost`, no `protoc`) |
+| `onnx` | pure-Rust ONNX graph model + serializer (export), plus an import-side **reader** (`read`: initializers/nodes/attributes) used by `facenet`; vendored `prost`, no `protoc` |
 | `npu` | YOLO/depth → ONNX export + BN fold + brain-native INT8 PTQ + fake-quant simulator + OpenVINO **Intel NPU** runtime (`runtime-linking`) |
 | `capture` | V4L2 webcam (hand-rolled ioctl FFI, YUYV→RGB, latest-frame slot) |
 | `capability` / `residency` / `server` / `dbus` / `runtime` / `events` / `hfsm` | the serving/runtime stack (table above) |
@@ -256,6 +266,8 @@ Multi-GPU scaling lives in `crates/model`:
 | YOLO model / loss / inference | `crates/yolo/src/{model,head,blocks,loss,assign,infer,nms,config}.rs`; `docs/models/yolo/readme.md` |
 | YOLO → Intel NPU (export/quantize/run/bench) | `crates/npu`, `crates/onnx`, `crates/cli/src/npu_cli.rs`, `docs/models/yolo/npu.md` |
 | ZipDepth: guide / ledger (incl. GPU perf root causes) | `docs/models/depth/{readme,status}.md`; `crates/depth/src/*`, `crates/cli/src/depth_cli.rs` |
+| Face recognition (SCRFD + alignment + ArcFace) | `docs/models/face/status.md`; `crates/facenet/src/{config,import,model,align,detect}.rs`; goldens via `tools/arcface_dump_reference.py` |
+| **Read an ONNX file** (initializers, nodes, attributes) | `crates/onnx/src/read.rs` — the import front-end; `crates/onnx` is otherwise export-only |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
 | SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/sam2_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
 | WorldMirror-2 (photos → 3DGS scene) | `docs/models/mirror/{readme,status}.md`; `crates/mirror`, `crates/cli/src/mirror_cli.rs` |
