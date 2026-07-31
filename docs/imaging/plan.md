@@ -135,7 +135,7 @@ Genuinely missing, in dependency order:
 | 2 | `convtr2d` + `_dw` + `_dx` | SAM 2 mask decoder, VQGAN/CodeFormer decoder | **DONE.** Built on the `convtr1d` shape template; same 12-word `Params` as `conv2d_gd` (square K, symmetric pad, bias-free) |
 | 3 | `prelu` + `_bwd` | ArcFace IResNet | `leaky_relu` has a *fixed* slope; PReLU's is a learned per-channel parameter needing its own grad |
 | 4 | `grid_sample` + `_dx` + `_dgrid` | face alignment (similarity warp), ROI align | **DONE.** Bilinear gather, `padding_mode='zeros'`, both `align_corners`. The backward is split in two (different parallelization, different bindings) rather than one `_bwd`, matching `conv2d_gd_dx`/`_dw` |
-| 5 | `resize_bicubic` + `_dx` | SAM 2 `pos_embed` interpolation | joins `resize_bilinear`/`resize_nearest` |
+| 5 | `resize_bicubic` + `_dx` | SAM 2 `pos_embed` interpolation | **DONE.** Joins `resize_bilinear`/`resize_nearest`, byte-identical `Params`. NOT the same function as `mirror::preprocess::resize_bicubic_torch` (that one is `antialias=True`); antialiased downsampling still has no kernel |
 
 **Measure before adding two more.** Per `docs/kernel-checklist.md`, the rule is
 to fix *selection*, not add copies:

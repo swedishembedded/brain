@@ -526,6 +526,10 @@ pub const REL_SHIFT: &str = include_str!("../wgsl/rel_shift.wgsl");
 pub const REL_SHIFT_BWD: &str = include_str!("../wgsl/rel_shift_bwd.wgsl");
 /// `wgsl/relu_inplace.wgsl`
 pub const RELU_INPLACE: &str = include_str!("../wgsl/relu_inplace.wgsl");
+/// `wgsl/resize_bicubic.wgsl`
+pub const RESIZE_BICUBIC: &str = include_str!("../wgsl/resize_bicubic.wgsl");
+/// `wgsl/resize_bicubic_dx.wgsl`
+pub const RESIZE_BICUBIC_DX: &str = include_str!("../wgsl/resize_bicubic_dx.wgsl");
 /// `wgsl/resize_bilinear.wgsl`
 pub const RESIZE_BILINEAR: &str = include_str!("../wgsl/resize_bilinear.wgsl");
 /// `wgsl/resize_bilinear_dx.wgsl`
@@ -946,6 +950,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("rel_shift", REL_SHIFT),
     ("rel_shift_bwd", REL_SHIFT_BWD),
     ("relu_inplace", RELU_INPLACE),
+    ("resize_bicubic", RESIZE_BICUBIC),
+    ("resize_bicubic_dx", RESIZE_BICUBIC_DX),
     ("resize_bilinear", RESIZE_BILINEAR),
     ("resize_bilinear_dx", RESIZE_BILINEAR_DX),
     ("resize_nearest", RESIZE_NEAREST),
