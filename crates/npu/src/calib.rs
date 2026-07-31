@@ -81,7 +81,7 @@ pub fn load_calib_images(dir: &str, input: u32, max_n: usize) -> std::io::Result
         let stride = ds.image_stride();
         for i in 0..ds.n.min(max_n) {
             let chw = &ds.images[i * stride..(i + 1) * stride];
-            let hwc = chw_to_hwc(chw, ds.h as usize, ds.w as usize);
+            let hwc = imaging::pixels::chw_to_hwc(chw, 3, ds.h as usize, ds.w as usize);
             let (lbchw, _) = yolo::boxmath::letterbox_rgb(&hwc, ds.w, ds.h, input, 114.0 / 255.0);
             out.push(lbchw);
         }
@@ -102,15 +102,4 @@ pub fn load_calib_images(dir: &str, input: u32, max_n: usize) -> std::io::Result
         }
     }
     Ok(out)
-}
-
-/// CHW `[3,H,W]` → HWC interleaved `[H*W*3]`.
-fn chw_to_hwc(chw: &[f32], h: usize, w: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; h * w * 3];
-    for c in 0..3 {
-        for p in 0..h * w {
-            out[p * 3 + c] = chw[c * h * w + p];
-        }
-    }
-    out
 }

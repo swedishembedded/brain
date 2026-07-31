@@ -24,6 +24,7 @@ brain-codec.workspace = true
 brain-vision.workspace = true
 brain-depth.workspace = true
 brain-yolo.workspace = true
+brain-imaging.workspace = true
 brain-mirror.workspace = true
 brain-data.workspace = true
 brain-eval.workspace = true

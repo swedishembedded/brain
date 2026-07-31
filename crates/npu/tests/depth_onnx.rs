@@ -61,7 +61,7 @@ fn export_and_run(device: NpuDevice) {
     };
     // The ONNX input is CHW; predict() letterboxes internally, but for a square
     // sz×sz frame the letterbox is identity, so feed the same CHW the model saw.
-    let chw = hwc_to_chw(&hwc, sz, sz);
+    let chw = imaging::pixels::hwc_to_chw(&hwc, 3, sz as usize, sz as usize);
     let out = sess.run(&chw, [1, 3, sz as usize, sz as usize]).expect("inference");
     let (_, shape, data) = &out.tensors[0];
     assert_eq!(shape, &vec![1, 1, sz as usize, sz as usize], "output must be [1,1,H,W]");
@@ -74,18 +74,6 @@ fn export_and_run(device: NpuDevice) {
         sess.device()
     );
     assert!(cos > 0.999, "{device:?}: exported graph diverges from brain's forward (cosine {cos:.5})");
-}
-
-fn hwc_to_chw(hwc: &[f32], w: u32, h: u32) -> Vec<f32> {
-    let mut chw = vec![0f32; hwc.len()];
-    for y in 0..h as usize {
-        for x in 0..w as usize {
-            for c in 0..3 {
-                chw[c * (h * w) as usize + y * w as usize + x] = hwc[(y * w as usize + x) * 3 + c];
-            }
-        }
-    }
-    chw
 }
 
 /// OpenVINO CPU: always available where OpenVINO is installed. Isolates "is the

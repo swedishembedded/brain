@@ -134,7 +134,7 @@ pub fn simulate_map(weights_path: &str, dataset_dir: &str, quant: &Quant, conf: 
     let mut gts = Vec::new();
     for i in 0..ds.n {
         let chw = &ds.images[i * stride..(i + 1) * stride];
-        let hwc = chw_to_hwc(chw, ds.h as usize, ds.w as usize);
+        let hwc = imaging::pixels::chw_to_hwc(chw, 3, ds.h as usize, ds.w as usize);
         let (lbchw, lb) = letterbox_rgb(&hwc, ds.w, ds.h, input, 114.0 / 255.0);
 
         let f = decode_one(&ref_model, &lbchw, &lb, ds.w, ds.h, &cfg, conf, iou, None);
@@ -193,14 +193,4 @@ fn decode_one(
 fn checkpoint_cfg(weights_path: &str) -> yolo::YoloConfig {
     let c = checkpoint::load(weights_path);
     yolo::YoloConfig::from_json(&c.header["config"])
-}
-
-fn chw_to_hwc(chw: &[f32], h: usize, w: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; h * w * 3];
-    for c in 0..3 {
-        for p in 0..h * w {
-            out[p * 3 + c] = chw[c * h * w + p];
-        }
-    }
-    out
 }
