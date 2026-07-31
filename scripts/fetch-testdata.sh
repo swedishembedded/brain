@@ -38,6 +38,7 @@ ASR_MIRROR="${BRAIN_ASR_MIRROR:-/data/workspace/resources/asr}"
 VL_MIRROR="${BRAIN_VL_MIRROR:-/data/workspace/resources/vl}"
 TTS_MIRROR="${BRAIN_TTS_MIRROR:-/data/workspace/tmp/qwen3-tts-resources}"
 GOLDEN_MIRROR="${BRAIN_GOLDEN_MIRROR:-/data/workspace/resources/brain-goldens}"
+SAM2_MIRROR="${BRAIN_SAM2_MIRROR:-/data/workspace/resources/sam2}"
 
 added=0 skipped=0 missing=0
 
@@ -70,9 +71,10 @@ asr_tree() { _link_from "$ASR_MIRROR" "$1" "$2"; }
 golden_tree() { _link_from "$GOLDEN_MIRROR" "$1" "$2"; }
 vl_tree()  { _link_from "$VL_MIRROR"  "$1" "$2"; }
 tts_tree() { _link_from "$TTS_MIRROR" "$1" "$2"; }
+sam2_tree() { _link_from "$SAM2_MIRROR" "$1" "$2"; }
 
 echo "brain: populating testdata at $DEST"
-echo "       mirrors: asr=$ASR_MIRROR vl=$VL_MIRROR tts=$TTS_MIRROR golden=$GOLDEN_MIRROR"
+echo "       mirrors: asr=$ASR_MIRROR vl=$VL_MIRROR tts=$TTS_MIRROR golden=$GOLDEN_MIRROR sam2=$SAM2_MIRROR"
 
 # --- ASR (Nemotron 3.5 ASR, Qwen3-ASR) --------------------------------------
 asr_tree "nemotron/hf"     "asr/nemotron/hf"
@@ -87,6 +89,18 @@ golden_tree "lfm"          "golden/lfm"
 golden_tree "qwen"         "golden/qwen"
 golden_tree "vae"          "golden/vae"
 golden_tree "zimage"       "golden/zimage"
+
+# --- SAM 2.1 (promptable segmentation, image path) ---------------------------
+# The reference CHECKPOINTS (+ their hydra yaml) only. The stage goldens
+# (`{input,trunk,neck,case_*}.safetensors`, ~1 GB per variant) are NOT mirrored:
+# regenerate them next to the checkpoint with
+#   python3 tools/sam2_dump_reference.py --code <sam2 repo> \
+#       --config testdata/sam2/hiera-tiny/sam2.1_hiera_t.yaml \
+#       --ckpt   testdata/sam2/hiera-tiny/sam2.1_hiera_tiny.pt \
+#       --out    testdata/sam2/hiera-tiny
+# `crates/sam2/tests/parity.rs` skips itself while they are absent.
+sam2_tree "weights/sam2.1-hiera-large" "sam2/hiera-large"
+sam2_tree "weights/sam2.1-hiera-tiny"  "sam2/hiera-tiny"
 
 # --- Vision-language (FastVLM, Moondream3, Qwen3-VL) -------------------------
 vl_tree  "fastvlm/hf"      "vl/fastvlm/hf"

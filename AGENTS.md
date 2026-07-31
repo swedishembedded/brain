@@ -60,6 +60,16 @@ from them, keeping the gradient-check discipline.
    CPU/GPU/Vulkan and the Intel NPU (ONNX/OpenVINO, cosine 0.99998).
    *(Depth Anything 3 was planned as a second arch behind the same contract and
    is **dropped** — see `crates/depth/src/lib.rs`.)*
+9c. **SAM 2.1 promptable segmentation** (`crates/sam2`) — the **image path** of
+    Meta's SAM 2.1: Hiera trunk (windowed attention with a per-block window
+    schedule + `q_pool` stride stages) → FPN neck → prompt encoder (points, boxes
+    and a mask prompt, over a random-Fourier positional encoding) → the two-way
+    mask decoder (4 mask tokens + IoU head + object-score token). Both released
+    variants (`hiera_tiny`, `hiera_large`) imported with two-way coverage and
+    **forward-parity-gated per stage at cosine ≥0.9999999999** over 283
+    comparisons. Composes `model::vit`'s windowed spans and `vision::blocks`;
+    adds no kernel. *(Forward only: the video memory bank, backward/gradcheck and
+    the serving contract are deferred — see `docs/imaging/plan.md` §4.)*
 10. **WorldMirror-2 multi-view 3D reconstruction** (`crates/mirror`) — the
     HY-World 2.0 1.26B feed-forward model: per-frame DINOv2 ViT-L/14 encoding,
     24 alternating frame/global attention levels (QK-norm + normalized 2D RoPE),
@@ -247,6 +257,7 @@ Multi-GPU scaling lives in `crates/model`:
 | YOLO → Intel NPU (export/quantize/run/bench) | `crates/npu`, `crates/onnx`, `crates/cli/src/npu_cli.rs`, `docs/models/yolo/npu.md` |
 | ZipDepth: guide / ledger (incl. GPU perf root causes) | `docs/models/depth/{readme,status}.md`; `crates/depth/src/*`, `crates/cli/src/depth_cli.rs` |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
+| SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/sam2_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
 | WorldMirror-2 (photos → 3DGS scene) | `docs/models/mirror/{readme,status}.md`; `crates/mirror`, `crates/cli/src/mirror_cli.rs` |
 | 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat/{readme,status}.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
 | Shared ViT block builder (DINOv2/trunk/camera-head) | `crates/model/src/vit.rs` |

@@ -937,7 +937,9 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-paramstore",
  "brain-vision",
+ "bytemuck",
 ]
 
 [[package]]
