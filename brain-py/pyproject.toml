@@ -4,15 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brain-py"
-version = "0.1.0"
-description = "Event-driven Python driver for the `brain` edge-AI executable: send an image, get detected boxes back."
+version = "0.2.0"
+description = "Python client for the `brain` edge-AI runtime: D-Bus by default (com.swedishembedded.Brain1), with a JSONL-over-stdio transport too."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["pillow>=10"]
-
-# The D-Bus client (brain_py.dbus) needs jeepney; install with `pip install brain-py[dbus]`.
-[project.optional-dependencies]
-dbus = ["jeepney>=0.8"]
+# jeepney is required: D-Bus is the default transport. Pillow decodes image blobs.
+# The JSONL-over-stdio transport (brain_py.client.BrainStdio) needs neither beyond
+# these, and adds no extra dependency of its own.
+dependencies = ["pillow>=10", "jeepney>=0.8"]
 
 [project.scripts]
 brain-detect-image = "brain_py.examples.detect_image:main"

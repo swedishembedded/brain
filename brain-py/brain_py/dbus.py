@@ -1,21 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""A small, reusable client for brain's D-Bus control surface.
+"""brain's D-Bus client — the **default** transport.
 
-`com.swedishembedded.Brain1` exchanges bulk data (images, results, streams) as Unix
-file descriptors, so this wraps jeepney with FD passing enabled and exposes a clean
-API:
+`com.swedishembedded.Brain1` is the local control surface `brain serve --dbus`
+exposes. Bulk data (images, audio, results) crosses as Unix **file descriptors**
+(sealed memfds / a SEQPACKET event socket), so this wraps `jeepney` with fd
+passing enabled.
 
-    with BrainDBus() as brain:
+:class:`BrainDBus` is a full :class:`~brain_py.base.BrainBase`: the high-level
+capability API (:meth:`run`, :meth:`subscribe`, and the
+:meth:`~brain_py.base.BrainBase.generate` / ``embed`` / ``text2image`` wrappers)
+returns materialised :class:`~brain_py.base.Outcome`\\ s — the fds are read and
+closed for you. The low-level fd-returning primitives (:meth:`run_fds`,
+:meth:`stream_frames`, :meth:`stream_transcribe`) stay available for zero-copy or
+live-audio use.
+
+    from brain_py import Brain            # D-Bus by default
+    with Brain() as brain:
         print(brain.models())
-        out = brain.run("imageops", "gradient", {"width": 128, "height": 128})
-        img = read_fd(out.fds["image"])
-        for frame, fds in brain.subscribe("z-image", "text2image", {"prompt": "a cat"}):
-            ...
-
-FD passing requires `enable_fds=True`; received fds arrive as jeepney
-`FileDescriptor` objects (consume them with `read_fd`).
+        print(brain.generate(prompt="hello", model="mock"))
+        img = brain.text2image("a red cube", model="mock")
 """
 from __future__ import annotations
 
@@ -27,11 +32,13 @@ import socket
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
-from jeepney import DBusAddress, new_method_call
+from jeepney import DBusAddress, Properties, new_method_call
 from jeepney.fds import FileDescriptor
 from jeepney.io.blocking import open_dbus_connection
+
+from .base import BrainBase, Outcome, OnProgress
 
 BUS_NAME = "com.swedishembedded.Brain1"
 OBJECT_PATH = "/com/swedishembedded/Brain1"
@@ -46,15 +53,16 @@ Fds = dict[str, FileDescriptor]
 
 @dataclass
 class RunResult:
-    """The outcome of a `Run`: scalar result, output fds, and their metadata."""
+    """The raw outcome of a low-level :meth:`BrainDBus.run_fds`: scalar result,
+    still-open output fds, and their metadata. Consume each fd with :func:`read_fd`."""
 
     result: dict[str, Any]
     fds: Fds
     meta: dict[str, Any]
 
 
-class BrainDBus:
-    """Blocking client for the Manager interface (one bus connection)."""
+class BrainDBus(BrainBase):
+    """Blocking client for the `Manager` interface (one bus connection)."""
 
     def __init__(self, bus: str = "SESSION") -> None:
         self._conn = open_dbus_connection(bus=bus, enable_fds=True)
@@ -72,15 +80,129 @@ class BrainDBus:
     def manifests(self) -> list[dict[str, Any]]:
         return json.loads(self._call("Manifests")[0])
 
-    def models(self) -> list[str]:
-        return [m["model"] for m in self.manifests()]
-
     def stats(self) -> dict[str, int]:
         """Scheduler counters: builds, evictions, batches, max_batch, resident, …."""
         return json.loads(self._call("Stats")[0])
 
-    # -- execution -----------------------------------------------------------
+    def stats_snapshot(self) -> dict[str, Any]:
+        """The full self-describing stats document (what braintop renders)."""
+        return json.loads(self._call("StatsSnapshot")[0])
+
+    def version(self) -> str:
+        """The server's version string (D-Bus property)."""
+        return self._get_prop("Version")
+
+    def active_jobs(self) -> int:
+        """Jobs currently in flight on the server (D-Bus property)."""
+        return int(self._get_prop("ActiveJobs"))
+
+    # -- high-level capability API (returns materialised Outcomes) -----------
     def run(
+        self,
+        model: str,
+        action: str,
+        params: Optional[dict] = None,
+        *,
+        blobs: Optional[dict] = None,
+        meta: Optional[dict] = None,
+        timeout: float = 1800.0,
+    ) -> Outcome:
+        """Run one action and return a materialised :class:`Outcome`.
+
+        ``blobs`` maps input names to raw ``bytes`` (sealed into memfds for you);
+        ``meta`` optionally maps names to ``{"media": …, "meta": {…}}``. Output fds
+        are read into ``bytes`` and closed. ``timeout`` is accepted for API parity
+        (the blocking D-Bus reply governs the real wait).
+        """
+        rr = self.run_fds(model, action, params, in_fds=self._in_fds(blobs), in_meta=self._in_meta(blobs, meta))
+        out_blobs = {name: read_fd(fd) for name, fd in rr.fds.items()}
+        return Outcome(outputs=rr.result, blobs=out_blobs, meta=rr.meta)
+
+    def subscribe(
+        self,
+        model: str,
+        action: str,
+        params: Optional[dict] = None,
+        *,
+        blobs: Optional[dict] = None,
+        meta: Optional[dict] = None,
+        on_progress: Optional[OnProgress] = None,
+        timeout: float = 1800.0,
+    ) -> Outcome:
+        """Run a streaming action, invoking ``on_progress(step, total, message)`` as
+        it advances, and return the final :class:`Outcome`. Raises on an error frame."""
+        _job, frames = self.stream_frames_with_job(
+            model, action, params, in_fds=self._in_fds(blobs), in_meta=self._in_meta(blobs, meta), timeout=timeout
+        )
+        outputs: dict[str, Any] = {}
+        out_blobs: dict[str, bytes] = {}
+        out_meta: dict[str, Any] = {}
+        for frame, raw_fds in frames:
+            kind = frame.get("type")
+            if kind == "progress":
+                if on_progress is not None:
+                    on_progress(int(frame.get("step", 0)), int(frame.get("total", 0)), frame.get("message", ""))
+            elif kind == "blob":
+                name = frame.get("name", "blob")
+                out_meta[name] = {"media": frame.get("media"), "meta": frame.get("meta")}
+                out_blobs[name] = read_fd(raw_fds[0]) if raw_fds else b""
+            elif kind == "done":
+                outputs = frame.get("result") or {}
+            elif kind == "error":
+                raise RuntimeError(f"{model}.{action} failed: {frame.get('message')}")
+        return Outcome(outputs=outputs, blobs=out_blobs, meta=out_meta)
+
+    # -- audio: live streaming transcription ---------------------------------
+    def transcribe(
+        self,
+        audio: bytes,
+        *,
+        model: Optional[str] = None,
+        window_ms: int = 1000,
+        on_segment: Optional[Any] = None,
+        timeout: float = 3600.0,
+        **params: Any,
+    ) -> str:
+        """Transcribe raw mono **f32-LE 16 kHz** PCM ``audio`` and return the transcript.
+
+        Feeds the bytes through a pipe into :meth:`stream_transcribe` on a writer
+        thread, consumes the ``segment`` frames (calling ``on_segment(text, final)``
+        if given), and returns the full transcript from the terminal ``done`` frame.
+        ``model`` defaults to the first model advertising ``transcribe``.
+        """
+        import threading
+
+        model = model or self.model_for("transcribe")
+        p = {"window_ms": window_ms, **params}
+        rfd, wfd = os.pipe()
+
+        def _feed() -> None:
+            try:
+                os.write(wfd, audio)
+            finally:
+                os.close(wfd)
+
+        writer = threading.Thread(target=_feed, daemon=True)
+        writer.start()
+        try:
+            _job, frames = self.stream_transcribe(model, rfd, p, timeout=timeout)
+        finally:
+            os.close(rfd)  # the server dup'd its own copy
+        transcript = ""
+        for frame, _fds in frames:
+            kind = frame.get("type")
+            if kind == "segment":
+                if on_segment is not None:
+                    on_segment(frame.get("text", ""), bool(frame.get("final")))
+            elif kind == "done":
+                transcript = (frame.get("result") or {}).get("text", transcript)
+            elif kind == "error":
+                raise RuntimeError(f"transcribe failed: {frame.get('message')}")
+        writer.join(timeout=5)
+        return transcript
+
+    # -- low-level fd primitives ---------------------------------------------
+    def run_fds(
         self,
         model: str,
         action: str,
@@ -90,6 +212,10 @@ class BrainDBus:
         in_meta: dict[str, Any] | None = None,
         transport: str = "memfd",
     ) -> RunResult:
+        """Run one action, returning the result with output fds STILL OPEN.
+
+        The low-level counterpart to :meth:`run`: consume each fd in ``.fds`` with
+        :func:`read_fd`. ``transport`` requests ``"memfd"`` (default) or ``"dmabuf"``."""
         result, fds, meta = self._call(
             "Run",
             "sssa{sh}ss",
@@ -97,7 +223,7 @@ class BrainDBus:
         )
         return RunResult(json.loads(result), fds, json.loads(meta))
 
-    def subscribe(
+    def stream_frames(
         self,
         model: str,
         action: str,
@@ -107,13 +233,13 @@ class BrainDBus:
         in_meta: dict[str, Any] | None = None,
         timeout: float = 600.0,
     ) -> Iterator[tuple[dict[str, Any], list[int]]]:
-        """Run a streaming action; yield `(frame, raw_fds)` until done/error."""
-        _job, frames = self.subscribe_with_job(
+        """Run a streaming action; yield raw `(frame, raw_fds)` until done/error."""
+        _job, frames = self.stream_frames_with_job(
             model, action, params, in_fds=in_fds, in_meta=in_meta, timeout=timeout
         )
         yield from frames
 
-    def subscribe_with_job(
+    def stream_frames_with_job(
         self,
         model: str,
         action: str,
@@ -123,7 +249,7 @@ class BrainDBus:
         in_meta: dict[str, Any] | None = None,
         timeout: float = 600.0,
     ) -> tuple[int, Iterator[tuple[dict[str, Any], list[int]]]]:
-        """Like `subscribe`, but also return the job id so `cancel(job)` works."""
+        """Like :meth:`stream_frames`, but also return the job id so :meth:`cancel` works."""
         job, event_fd = self._call(
             "Subscribe",
             "sssa{sh}s",
@@ -132,7 +258,7 @@ class BrainDBus:
         return int(job), _read_stream(event_fd.to_raw_fd(), timeout)
 
     def cancel(self, job: int) -> bool:
-        """Cooperatively cancel a running job (the id from `subscribe`).
+        """Cooperatively cancel a running job (the id from :meth:`stream_frames_with_job`).
 
         Flips the job's cancel token; the action aborts at its next poll and the
         stream ends with an `error` frame (`"cancelled"`). Returns True if the job
@@ -148,17 +274,13 @@ class BrainDBus:
         *,
         timeout: float = 3600.0,
     ) -> tuple[int, Iterator[tuple[dict[str, Any], list[int]]]]:
-        """Start live streaming transcription.
+        """Start live streaming transcription (low-level; see :meth:`transcribe`).
 
         `pcm_read_fd` is the READ end of a pipe the caller keeps writing raw mono
-        f32-LE 16 kHz PCM to (from its WRITE end); the server reads it, windows it,
-        and streams back frames. Returns `(job_id, frames)` where `frames` is an
-        iterator of `(frame, raw_fds)` — `segment` frames as each window decodes, then
-        a terminal `done`/`error`. Consume `frames` in one thread while another writes
-        PCM; close the write end to signal EOF (the server then emits `done`).
-
-        The read fd is passed to the server (dup'd over the socket); the caller may
-        close its own copy afterward.
+        f32-LE 16 kHz PCM to; the server reads it, windows it, and streams back
+        frames. Returns `(job_id, frames)` — `segment` frames as each window decodes,
+        then a terminal `done`/`error`. Consume `frames` in one thread while another
+        writes PCM; close the write end to signal EOF.
         """
         job, event_fd = self._call(
             "StreamTranscribe",
@@ -171,6 +293,22 @@ class BrainDBus:
     def _call(self, method: str, signature: str | None = None, body: tuple = ()) -> tuple:
         msg = new_method_call(_ADDR, method, signature, body) if signature else new_method_call(_ADDR, method)
         return self._conn.send_and_get_reply(msg).body
+
+    def _get_prop(self, name: str) -> Any:
+        msg = Properties(_ADDR).get(name)
+        variant = self._conn.send_and_get_reply(msg).body[0]
+        return variant[1]  # (signature, value)
+
+    @staticmethod
+    def _in_fds(blobs: Optional[dict]) -> Fds:
+        """Seal each input `name -> bytes` into a memfd ready to pass over the bus."""
+        return {name: sealed_memfd(data, name=name) for name, data in (blobs or {}).items()}
+
+    @staticmethod
+    def _in_meta(blobs: Optional[dict], meta: Optional[dict]) -> dict[str, Any]:
+        """Per-fd metadata for the input blobs (only names present in `blobs`)."""
+        meta = meta or {}
+        return {name: meta[name] for name in (blobs or {}) if name in meta}
 
 
 def _read_stream(raw_fd: int, timeout: float) -> Iterator[tuple[dict[str, Any], list[int]]]:

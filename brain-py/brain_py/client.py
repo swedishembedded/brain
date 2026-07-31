@@ -1,7 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-"""``BrainClient`` — an event-driven driver for the ``brain run`` subprocess.
+"""``BrainStdio`` — an event-driven driver for the ``brain run`` subprocess.
+
+This is the **JSONL-on-stdio** transport (select it with ``Brain(transport=
+"jsonl")`` or by constructing :class:`BrainStdio` directly). The default
+transport is D-Bus (:class:`~brain_py.dbus.BrainDBus`); both speak the same
+capability model, so the high-level API (:meth:`run` / :meth:`subscribe` and the
+:class:`~brain_py.base.BrainBase` wrappers ``generate`` / ``embed`` /
+``text2image``) is identical — only the wire underneath differs. On top of that,
+``BrainStdio`` keeps the ``brain run`` legacy verbs :meth:`detect`,
+:meth:`converse`, :meth:`forecast` and :meth:`backtest`.
 
 Design
 ------
@@ -9,7 +18,7 @@ Design
 line) on stdout; stderr carries logs. Every request may carry a top-level
 ``"req_id"`` which the runtime echoes onto every response event for that request.
 
-``BrainClient`` wraps this as a request/response API safe for multiple in-flight
+``BrainStdio`` wraps this as a request/response API safe for multiple in-flight
 requests over the single stdio stream:
 
 * A **background reader thread** (:meth:`_reader`) blocks on ``stdout.readline``,
@@ -23,7 +32,7 @@ requests over the single stdio stream:
   ``done: true``.
 
 This decouples the order brain emits events from the order callers ask for them,
-so :meth:`detect` and :meth:`chat` can be issued concurrently and demuxed by id.
+so :meth:`detect` and :meth:`converse` can be issued concurrently and demuxed by id.
 """
 
 from __future__ import annotations
@@ -37,8 +46,9 @@ import socket as _socket
 import subprocess
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
+from .base import BrainBase, OnProgress, Outcome
 from .forecast import Forecast, Panel
 
 try:
@@ -120,7 +130,22 @@ class _Pending:
         self.error: Optional[str] = None
 
 
-class BrainClient:
+def _wire_blobs(blobs: Optional[dict], meta: Optional[dict]) -> list[dict]:
+    """Turn ``{name: bytes}`` (+ optional per-name meta) into JSONL WireBlobs."""
+    meta = meta or {}
+    out = []
+    for name, data in (blobs or {}).items():
+        m = meta.get(name, {})
+        out.append({
+            "name": name,
+            "media": m.get("media", "bytes"),
+            "b64": base64.b64encode(data).decode("ascii"),
+            "meta": m.get("meta", {}),
+        })
+    return out
+
+
+class BrainStdio(BrainBase):
     """Spawn ``brain run`` and drive it over its JSONL event protocol."""
 
     def __init__(
@@ -139,7 +164,7 @@ class BrainClient:
         With ``forecast=True`` the client launches ``brain forecast serve`` (the
         statistical baselines registered, foundation models added as they land)
         so :meth:`forecast`, :meth:`backtest` and :meth:`capabilities` work.
-        Otherwise it launches ``brain run`` for :meth:`chat` / :meth:`detect`.
+        Otherwise it launches ``brain run`` for :meth:`converse` / :meth:`detect`.
         """
         self._binary = _find_brain_binary(brain_bin)
         if forecast:
@@ -179,7 +204,7 @@ class BrainClient:
         host: Optional[str] = None,
         port: Optional[int] = None,
         ready_timeout: float = 30.0,
-    ) -> "BrainClient":
+    ) -> "BrainStdio":
         """Connect to an ALREADY-RUNNING ``brain forecast serve`` over a socket.
 
         Unlike the constructor (which spawns its own stdio subprocess), this
@@ -358,23 +383,24 @@ class BrainClient:
             out.append(Detection(x1, y1, x2, y2, float(c), cls_i, label))
         return out
 
-    # -- generic capability API (image generation &c.) -----------------------
+    # -- generic capability API (the transport-agnostic model) ----------------
 
-    def manifests(self, timeout: float = 30.0) -> dict:
-        """Discover every generic capability provider (Z-Image &c.): returns
-        ``{model_name: manifest_dict}`` via a ``manifest_request``."""
+    def manifests(self, timeout: float = 30.0) -> list[dict]:
+        """Every served model's manifest, as a list (matches the D-Bus transport),
+        via a ``manifest_request``. Discovery for :meth:`run` / :meth:`subscribe`
+        and the :class:`~brain_py.base.BrainBase` capability wrappers."""
         rid = self._next_id()
         self._send({"req_id": rid, "event": "manifest_request"})
         p = self._wait_for(rid, timeout)
         evt = next((e for e in p.events if e.get("event") == "manifest_result"), None)
-        mans = (evt or {}).get("manifests", []) or []
-        return {m.get("model", m.get("name", str(i))): m for i, m in enumerate(mans)}
+        return list((evt or {}).get("manifests", []) or [])
 
     def action(self, model: str, action: str, params: Optional[dict] = None,
                blobs: Optional[list] = None, timeout: float = 1800.0,
                req_id: Optional[str] = None) -> dict:
-        """Run a generic ``action_request`` and return the ``action_result``
-        (``{"outputs": {...}, "blobs": [...]}``). Raises on an ``error`` event."""
+        """Low-level ``action_request`` → the raw ``action_result`` event
+        (``{"outputs": {...}, "blobs": [WireBlob, ...]}``). Raises on ``error``.
+        Prefer :meth:`run`, which returns a materialised :class:`Outcome`."""
         rid = req_id or self._next_id()
         self._send({
             "req_id": rid,
@@ -392,40 +418,44 @@ class BrainClient:
             raise RuntimeError(f"{model}.{action}: no action_result (events: {[e.get('event') for e in p.events]})")
         return res
 
-    def text2image(self, prompt: str, width: int = 512, height: int = 512,
-                   steps: int = 8, seed: int = 42, precision: str = "int8",
-                   model: str = "z-image", timeout: float = 1800.0):
-        """Generate an image from ``prompt`` and return a PIL ``Image``.
+    def run(self, model: str, action: str, params: Optional[dict] = None, *,
+            blobs: Optional[dict] = None, meta: Optional[dict] = None,
+            timeout: float = 1800.0) -> Outcome:
+        """Run one action and return a materialised :class:`Outcome` — the same
+        shape as the D-Bus transport. ``blobs`` maps input names to raw ``bytes``
+        (base64'd into the request); output blobs are decoded into ``bytes``."""
+        res = self.action(model, action, params, blobs=_wire_blobs(blobs, meta), timeout=timeout)
+        out_blobs: dict[str, bytes] = {}
+        out_meta: dict[str, Any] = {}
+        for b in res.get("blobs", []) or []:
+            name = b.get("name", "blob")
+            out_blobs[name] = base64.b64decode(b.get("b64", "") or "")
+            out_meta[name] = {"media": b.get("media"), "meta": b.get("meta")}
+        return Outcome(outputs=res.get("outputs", {}) or {}, blobs=out_blobs, meta=out_meta)
 
-        Over a persistent connection (``BrainClient()`` stays alive), the server
-        loads the ~20 GB of weights on the FIRST call for a given size/precision
-        and reuses them — subsequent calls are fast. The image blob is raw HWC
-        float32 in ``[0,1]``; we decode it to RGB8.
-        """
-        if Image is None:
-            raise RuntimeError("Pillow is required for text2image()")
-        res = self.action(model, "text2image", {
-            "prompt": prompt, "width": width, "height": height,
-            "steps": steps, "seed": seed, "precision": precision,
-        }, timeout=timeout)
-        blob = next((b for b in res.get("blobs", []) if b.get("name") == "image"), None)
-        if blob is None:
-            raise RuntimeError("action_result carried no 'image' blob")
-        meta = blob.get("meta") or {}
-        w = int(meta.get("w", width))
-        h = int(meta.get("h", height))
-        c = int(meta.get("c", 3))
-        raw = base64.b64decode(blob["b64"])
-        import array
-        f = array.array("f")
-        f.frombytes(raw)
-        # HWC float32 [0,1] -> RGB8. (array is little-endian on our platforms.)
-        px = bytes(max(0, min(255, int(v * 255.0 + 0.5))) for v in f)
-        return Image.frombytes("RGB", (w, h), px) if c == 3 else Image.frombytes("L", (w, h), px[::c])
+    def subscribe(self, model: str, action: str, params: Optional[dict] = None, *,
+                  blobs: Optional[dict] = None, meta: Optional[dict] = None,
+                  on_progress: Optional[OnProgress] = None,
+                  timeout: float = 1800.0) -> Outcome:
+        """Streaming counterpart to :meth:`run`. ``brain run``'s generic action
+        interface delivers a single ``action_result`` (no intermediate frames), so
+        this runs the action and, if ``on_progress`` is given, ticks it once on
+        completion. For token/step streaming use the D-Bus transport."""
+        out = self.run(model, action, params, blobs=blobs, meta=meta, timeout=timeout)
+        if on_progress is not None:
+            on_progress(1, 1, "done")
+        return out
 
-    def chat(self, text: str, timeout: float = 120.0,
-             req_id: Optional[str] = None) -> str:
-        """Send user text, collect streamed chunks by req_id, return joined text."""
+    # -- legacy `brain run` conversational path -------------------------------
+
+    def converse(self, text: str, timeout: float = 120.0,
+                 req_id: Optional[str] = None) -> str:
+        """Send ``user_text`` to ``brain run`` and return the streamed reply.
+
+        This is the ``brain run`` conversational path (``user_text`` →
+        ``brain_text_chunk`` stream), distinct from the capability
+        :meth:`~brain_py.base.BrainBase.generate` (the ``generate`` action). Use
+        :meth:`~brain_py.base.BrainBase.chat` / ``generate`` for the portable API."""
         rid = req_id or self._next_id()
         self._send({"req_id": rid, "event": "user_text", "text": text})
         p = self._wait_for(rid, timeout)
@@ -549,8 +579,12 @@ class BrainClient:
         if reader is not None and reader.is_alive():
             reader.join(timeout=5)
 
-    def __enter__(self) -> "BrainClient":
+    def __enter__(self) -> "BrainStdio":
         return self
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+# Backwards-friendly alias: the JSONL client used to be the primary entry point.
+BrainClient = BrainStdio
