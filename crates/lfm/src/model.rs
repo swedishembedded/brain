@@ -96,6 +96,20 @@ const DQ_CROSS: usize = 47;
 const DK_CROSS_ACC: usize = 48;
 const DV_CROSS_ACC: usize = 49;
 const ROW_SCATTER: usize = 50;
+// Slot 51 (`flash_attn_bidir`, registered below) is compiled but NOT yet
+// dispatched: the chunked GPU path runs `block::gemm_bidir_fwd`, which measured
+// ~8x the naive trio AND the *baseline* flash kernel at 8k on a P40
+// (`docs/models/lfm/status.md`). That comparison is stale — it predates
+// `flash_attn_bidir_split` (same Params, same output layout, cosine 1.00000000,
+// 14.4x the baseline at head_dim 64, which is lfm's config). Kept, not deleted,
+// because the A/B is a named open item in the ledger ("flash_attn_bidir
+// autoselect"). Wiring it requires three things this const cannot carry:
+// register `kernels::FLASH_ATTN_BIDIR_SPLIT` as a second slot, dispatch through
+// `block::flash_bidir_fwd` with `FlashIds { bidir: FLASH_BIDIR, split: Some(..) }`
+// on the `workgroup_reductions` path, and re-enable the three `kv_expand`
+// dispatches (`emit_attn_qkv(build_fused = true)`) that the GEMM path skips —
+// then measure vs `gemm_bidir_fwd` at 8k/hd=64 on a P40 and record the number.
+#[allow(dead_code)]
 const FLASH_BIDIR: usize = 51;
 const HEAD_PACK: usize = 52;
 const HEAD_PACK_T: usize = 53;
@@ -597,7 +611,7 @@ impl Lfm {
             }
         });
 
-        let mut m = Lfm {
+        Lfm {
             cfg,
             b,
             t,
@@ -623,8 +637,7 @@ impl Lfm {
             fwd_steps: Vec::new(),
             fwd_variants: Vec::new(),
             gpu,
-        };
-        m
+        }
     }
 
     /// Set the input tokens and (unshifted) targets; `IGNORE` masks a position
