@@ -268,7 +268,9 @@ pub(crate) unsafe fn exp256_ps(x: std::arch::x86_64::__m256) -> std::arch::x86_6
     use std::arch::x86_64::*;
     let hi = _mm256_set1_ps(88.3762626647949);
     let lo = _mm256_set1_ps(-88.3762626647949);
-    let log2ef = _mm256_set1_ps(1.44269504088896341);
+    // log2(e). The std constant rounds to the SAME f32 as the Cephes literal
+    // `1.44269504088896341`, so this is bit-identical and not a retune.
+    let log2ef = _mm256_set1_ps(std::f32::consts::LOG2_E);
     let half = _mm256_set1_ps(0.5);
     let ln2hi = _mm256_set1_ps(0.693359375);
     let ln2lo = _mm256_set1_ps(-2.12194440e-4);
