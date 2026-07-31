@@ -138,7 +138,7 @@ fn qwen3_inference_coherent() {
     let prompt = "The capital of France is the city of";
     let ids = t.encode(prompt);
     let mut rng = data::rng::Rng::new(0);
-    let out = qwen::sample::generate(&m, &ids, 4, 0.0, 0, None, &mut rng); // greedy
+    let out = qwen::sample::generate(&m, &ids, 4, 0.0, 0, 1.0, None, &mut rng); // greedy
     let text = t.decode(&out);
     println!("inference: {prompt:?} -> {text:?}");
     assert!(text.to_lowercase().contains("paris"), "base model failed a basic factual completion: {text:?}");

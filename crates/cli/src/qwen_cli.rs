@@ -263,7 +263,7 @@ fn infer(args: &[String]) {
     let eos = tok.encode("<|im_end|>").first().copied();
     let mut rng = Rng::new(seed);
     let t_gen = std::time::Instant::now();
-    let gen = qwen::sample::generate_kv(&model, &ids, max_new, temp, top_k, eos, &mut rng);
+    let gen = qwen::sample::generate_kv(&model, &ids, max_new, temp, top_k, 1.0, eos, &mut rng);
     let gen_ms = t_gen.elapsed().as_secs_f64() * 1e3;
     eprintln!("qwen-timing load_ms={load_ms:.1} gen_ms={gen_ms:.1} tokens={}", gen.len());
     print!("{prompt}");

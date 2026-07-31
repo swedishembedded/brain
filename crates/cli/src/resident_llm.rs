@@ -29,7 +29,9 @@ use data::tokenizer::{CharTokenizer, Tokenizer};
 
 // ---------------------------------------------------------------- shared
 
-/// The shared `"generate"` action spec. `chat` adds Qwen's chat-template toggle.
+/// The shared `"generate"` action spec. `chat` adds Qwen's chat contract: the
+/// chat-template toggle plus `messages`/`system`/`top_p`/`stop` and per-token
+/// streaming (one `Progress::token` delta each accepted token).
 fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
     let mut s = ActionSpec::new("generate", summary)
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
@@ -38,9 +40,61 @@ fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (0 = disabled)").default(json!(40)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)));
     if chat {
-        s = s.param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template to the prompt").default(json!(true)));
+        s = s
+            .streaming()
+            .param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template to the prompt").default(json!(true)))
+            .param(ParamSpec::new("messages", ParamType::Str, "JSON array of {role,content} chat turns (overrides prompt)"))
+            .param(ParamSpec::new("system", ParamType::Str, "optional system prompt prepended to the chat"))
+            .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)))
+            .param(ParamSpec::new("stop", ParamType::Str, "JSON array of stop strings"));
     }
     s.output(BlobSpec::new("text", Media::Text, "the generated text"))
+}
+
+/// Parse the `messages` param (a JSON array of `{"role","content"}`) into role/
+/// content pairs, prepending a leading `system` turn when one is supplied.
+fn parse_messages(raw: &str, system: Option<&str>) -> Result<Vec<(String, String)>, String> {
+    let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("qwen: messages JSON: {e}"))?;
+    let arr = v.as_array().ok_or("qwen: messages must be a JSON array")?;
+    let mut out = Vec::with_capacity(arr.len() + 1);
+    if let Some(s) = system.filter(|s| !s.is_empty()) {
+        out.push(("system".to_string(), s.to_string()));
+    }
+    for m in arr {
+        let role = m.get("role").and_then(|r| r.as_str()).ok_or("qwen: message.role missing")?;
+        let content = m.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        out.push((role.to_string(), content.to_string()));
+    }
+    Ok(out)
+}
+
+/// Parse the `stop` param (a JSON array of strings) into non-empty stop strings.
+fn parse_stops(raw: Option<&str>) -> Result<Vec<String>, String> {
+    let Some(raw) = raw.filter(|s| !s.is_empty()) else { return Ok(Vec::new()) };
+    let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("qwen: stop JSON: {e}"))?;
+    let arr = v.as_array().ok_or("qwen: stop must be a JSON array")?;
+    Ok(arr.iter().filter_map(|s| s.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+}
+
+/// Split the freshly-decoded `full` text into the fragment safe to emit now and
+/// the new "printed" prefix, holding back a trailing replacement char (an
+/// incomplete multi-byte UTF-8 sequence awaiting the next token). `full` always
+/// extends `printed`, so concatenating every emitted fragment — plus a final
+/// flush of any held-back tail — reproduces `full` byte-for-byte.
+fn stream_delta(printed: &str, full: &str) -> (String, String) {
+    let safe = full.strip_suffix('\u{FFFD}').unwrap_or(full);
+    let delta = safe.get(printed.len()..).unwrap_or("").to_string();
+    (delta, safe.to_string())
+}
+
+/// If `text` ends with any stop string, the byte index where the earliest such
+/// match begins (so `text[..idx]` is the truncated output); else `None`.
+fn find_stop(text: &str, stops: &[String]) -> Option<usize> {
+    stops
+        .iter()
+        .filter(|s| text.ends_with(s.as_str()))
+        .map(|s| text.len() - s.len())
+        .min()
 }
 
 /// Read the four shared sampling params (with the spec defaults).
@@ -267,22 +321,152 @@ struct QwenInstance {
 impl Instance for QwenInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let (max_new, temp, top_k, seed) = sampling_params(inv);
-        let chat = inv.get_bool("chat").unwrap_or(true);
-        let prompt = inv.get_str("prompt").unwrap_or_default();
-        let text = if chat {
-            self.tok.apply_chat_template(&[("user", &prompt)], true)
-        } else {
-            prompt
+        let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
+        // Build the prompt text: `messages` (chat template) wins; else the legacy
+        // single-`prompt` (+ `chat`) path, preserving existing numerics.
+        let text = match inv.get_str("messages").filter(|s| !s.is_empty()) {
+            Some(raw) => {
+                let msgs = parse_messages(&raw, inv.get_str("system").as_deref())?;
+                let refs: Vec<(&str, &str)> = msgs.iter().map(|(r, c)| (r.as_str(), c.as_str())).collect();
+                self.tok.apply_chat_template(&refs, true)
+            }
+            None => {
+                let prompt = inv.get_str("prompt").unwrap_or_default();
+                if inv.get_bool("chat").unwrap_or(true) {
+                    self.tok.apply_chat_template(&[("user", &prompt)], true)
+                } else {
+                    prompt
+                }
+            }
         };
         let ids = self.tok.encode(&text);
         if ids.is_empty() {
             return Err("qwen: empty prompt".to_string());
         }
+        let stops = parse_stops(inv.get_str("stop").as_deref())?;
+
         let mut rng = Rng::new(seed);
-        progress(Progress::step(0, max_new as u32, "generating"));
-        let gen = qwen::sample::generate(&self.model, &ids, max_new, temp, top_k, self.eos, &mut rng);
-        let out = self.tok.decode(&gen);
-        progress(Progress::step(max_new as u32, max_new as u32, "done"));
-        Ok(text_outcome(out))
+        let total = max_new as u32;
+        progress(Progress::step(0, total, "generating"));
+
+        // Stream: decode each accepted token to its human-visible delta, honour
+        // stop-strings and cancellation, and track usage.
+        let tok = &self.tok;
+        let cancel = inv.cancel.clone();
+        let mut ids_out: Vec<u32> = Vec::with_capacity(max_new);
+        let mut printed = String::new();
+        let mut stop_at: Option<usize> = None;
+        let mut cancelled = false;
+        let gen = qwen::sample::generate_kv_stream(
+            &self.model,
+            &ids,
+            max_new,
+            temp,
+            top_k,
+            top_p,
+            self.eos,
+            &mut rng,
+            &mut |i, t| {
+                ids_out.push(t);
+                let full = tok.decode(&ids_out);
+                let (delta, new_printed) = stream_delta(&printed, &full);
+                printed = new_printed;
+                if !delta.is_empty() {
+                    progress(Progress::token(i as u32 + 1, total, delta));
+                }
+                if let Some(idx) = find_stop(&printed, &stops) {
+                    stop_at = Some(idx);
+                    return false;
+                }
+                if cancel.is_cancelled() {
+                    cancelled = true;
+                    return false;
+                }
+                true
+            },
+        );
+
+        // Final text + finish reason. A stop-string truncates the visible text; a
+        // clean end flushes any held-back tail so the deltas reconstruct it.
+        let (text, finish) = if let Some(idx) = stop_at {
+            (printed[..idx].to_string(), "stop_sequence")
+        } else {
+            let full = self.tok.decode(&ids_out);
+            if full.len() > printed.len() {
+                progress(Progress::token(ids_out.len() as u32, total, full[printed.len()..].to_string()));
+            }
+            let reason = if cancelled {
+                "stop"
+            } else if gen.len() >= max_new {
+                "length"
+            } else {
+                "stop" // eos
+            };
+            (full, reason)
+        };
+        progress(Progress::step(total, total, "done"));
+
+        let mut out = text_outcome(text);
+        out = out
+            .set("prompt_tokens", json!(ids.len() as i64))
+            .set("completion_tokens", json!(gen.len() as i64))
+            .set("finish_reason", json!(finish));
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn messages_parse_with_and_without_system() {
+        let raw = r#"[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]"#;
+        let m = parse_messages(raw, None).unwrap();
+        assert_eq!(m, vec![("user".into(), "hi".into()), ("assistant".into(), "yo".into())]);
+        let m = parse_messages(raw, Some("be terse")).unwrap();
+        assert_eq!(m[0], ("system".to_string(), "be terse".to_string()));
+        assert_eq!(m.len(), 3);
+        // an empty system turn is dropped; malformed JSON is a clean error.
+        assert_eq!(parse_messages(raw, Some("")).unwrap().len(), 2);
+        assert!(parse_messages("not json", None).is_err());
+        assert!(parse_messages("{}", None).is_err());
+    }
+
+    #[test]
+    fn stops_parse_and_match() {
+        assert_eq!(parse_stops(None).unwrap(), Vec::<String>::new());
+        assert_eq!(parse_stops(Some(r#"["\n\n","END"]"#)).unwrap(), vec!["\n\n".to_string(), "END".to_string()]);
+        assert!(parse_stops(Some("nope")).is_err());
+        let stops = vec!["END".to_string(), "STOP".to_string()];
+        assert_eq!(find_stop("all done END", &stops), Some(9));
+        assert_eq!(find_stop("mid END dle", &stops), None); // only a trailing match
+        assert_eq!(find_stop("nothing here", &stops), None);
+        // earliest boundary wins when stops overlap at the tail.
+        let overlap = vec!["done".to_string(), "all done".to_string()];
+        assert_eq!(find_stop("all done", &overlap), Some(0));
+    }
+
+    /// The delta bookkeeping used by `run`: concatenated per-token deltas (plus a
+    /// final flush of a held-back tail) must reproduce the full decoded text —
+    /// even when a multi-byte char is split across two tokens (transient U+FFFD).
+    #[test]
+    fn stream_deltas_reconstruct_full_text() {
+        // Simulated per-step `decode(ids_out)` outputs, incl. a split euro sign.
+        let steps = ["Hi", "Hi\u{FFFD}", "Hi€", "Hi€!"];
+        let mut printed = String::new();
+        let mut concat = String::new();
+        for full in steps {
+            let (delta, np) = stream_delta(&printed, full);
+            concat.push_str(&delta);
+            printed = np;
+        }
+        let full = *steps.last().unwrap();
+        if full.len() > printed.len() {
+            concat.push_str(&full[printed.len()..]); // final flush
+        }
+        assert_eq!(concat, "Hi€!");
+        // No replacement char ever escapes into an emitted fragment.
+        assert!(!concat.contains('\u{FFFD}'));
     }
 }

@@ -39,6 +39,7 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(32)))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.0)))
         .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (0 = disabled)").default(json!(0)))
+        .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)))
         .param(
             ParamSpec::new("precision", ParamType::Str, "model precision: fp32, or int8 (per-channel weights + dynamic activation quant)")
@@ -100,6 +101,7 @@ impl Action for GenerateAction {
         let max_new = inv.get_i64("max_new").unwrap_or(32).max(0) as usize;
         let temp = inv.get_f64("temp").unwrap_or(0.0) as f32;
         let top_k = inv.get_i64("top_k").unwrap_or(0).max(0) as usize;
+        let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
         let seed = inv.get_i64("seed").unwrap_or(0).max(0) as u64;
         let chat = inv.get_bool("chat").unwrap_or(false);
 
@@ -154,8 +156,9 @@ impl Action for GenerateAction {
         // The one decode loop `brain qwen infer` uses, with a per-token stream.
         let mut rng = Rng::new(seed);
         let total = max_new as u32;
-        let gen = crate::sample::generate_kv_stream(model, &ids, max_new, temp, top_k, eos, &mut rng, &mut |i, _t| {
+        let gen = crate::sample::generate_kv_stream(model, &ids, max_new, temp, top_k, top_p, eos, &mut rng, &mut |i, _t| {
             progress(Progress::step(i as u32 + 1, total, "token"));
+            true
         });
 
         let text = match &tok {

@@ -1771,8 +1771,8 @@ mod tests {
         let p1 = vec![7u32, 2, 4];
         let mut r0 = Rng::new(0);
         let mut r1 = Rng::new(0);
-        let ref0 = crate::sample::generate_kv(&model, &p0, 12, 0.0, 0, None, &mut r0);
-        let ref1 = crate::sample::generate_kv(&model, &p1, 12, 0.0, 0, None, &mut r1);
+        let ref0 = crate::sample::generate_kv(&model, &p0, 12, 0.0, 0, 1.0, None, &mut r0);
+        let ref1 = crate::sample::generate_kv(&model, &p1, 12, 0.0, 0, 1.0, None, &mut r1);
 
         // Engine: run both prompts concurrently (batched paged).
         let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, bs, num_blocks, max_batch, mbt, 32, false, false);
@@ -2246,7 +2246,7 @@ mod tests {
             .zip(maxn)
             .map(|(p, n)| {
                 let mut r = Rng::new(0);
-                crate::sample::generate_kv(&model, p, n, 0.0, 0, None, &mut r)
+                crate::sample::generate_kv(&model, p, n, 0.0, 0, 1.0, None, &mut r)
             })
             .collect();
 
