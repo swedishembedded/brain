@@ -44,6 +44,7 @@ brain-mirror.workspace = true
 brain-splat.workspace = true
 brain-paramstore.workspace = true
 brain-vision.workspace = true
+brain-imaging.workspace = true
 brain-capture.workspace = true
 brain-model.workspace = true
 brain-data.workspace = true

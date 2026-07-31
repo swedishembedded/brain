@@ -28,9 +28,7 @@ fn write_ppm(path: &str, w: u32, h: u32) {
             px.push(128);
         }
     }
-    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
-    out.extend_from_slice(&px);
-    std::fs::write(path, out).unwrap();
+    imaging::save_ppm(path, &imaging::Rgb8::new(w, h, px).unwrap()).unwrap();
 }
 
 #[test]

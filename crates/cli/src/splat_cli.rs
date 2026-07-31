@@ -444,12 +444,12 @@ fn fit_cmd(argv: &[String]) {
         .iter()
         .zip(&cams)
         .map(|(pth, cam)| {
-            let img = mirror::preprocess::load_ppm(pth).unwrap_or_else(|e| {
+            let img = imaging::load(pth).unwrap_or_else(|e| {
                 eprintln!("{e}");
                 std::process::exit(1);
             });
-            assert_eq!((img.w as u32, img.h as u32), (cam.width, cam.height), "{pth}: size vs camera");
-            let rgb: Vec<f32> = img.rgb.iter().map(|&b| b as f32 / 255.0).collect();
+            assert_eq!((img.w, img.h), (cam.width, cam.height), "{pth}: size vs camera");
+            let rgb = img.to_hwc_unit();
             TargetView { cam: *cam, rgb }
         })
         .collect();
@@ -468,17 +468,17 @@ fn fit_cmd(argv: &[String]) {
 
 /// Tight RGB24 bytes → P6.
 pub fn write_ppm_rgb(path: &str, rgb: &[u8], w: usize, h: usize) {
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let hdr = format!("P6\n{w} {h}\n255\n");
-    let mut f = Vec::with_capacity(hdr.len() + rgb.len());
-    f.extend_from_slice(hdr.as_bytes());
-    f.extend_from_slice(rgb);
-    std::fs::write(path, f).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
+    let img = imaging::Rgb8::new(w as u32, h as u32, rgb.to_vec())
+        .unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
+    imaging::save_ppm(path, &img).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
 }
 
 /// RGBA f32 → P6. Depth views are min-max normalized for visibility.
+///
+/// The normalization is the part that is genuinely local: it rescales only over
+/// the pixels the rasterizer actually covered (`alpha > 1e-6`), which is a splat
+/// viewer concern and has no second copy. The RGBA→RGB8 quantisation and the P6
+/// header both come from `imaging`.
 pub fn write_ppm(path: &str, rgba: &[f32], w: usize, h: usize, normalize: bool) {
     let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
     if normalize {
@@ -493,19 +493,13 @@ pub fn write_ppm(path: &str, rgba: &[f32], w: usize, h: usize, normalize: bool) 
             hi = 1.0;
         }
     }
-    let mut buf = Vec::with_capacity(w * h * 3);
+    let mut hwc = Vec::with_capacity(w * h * 3);
     for px in rgba.chunks_exact(4) {
         for k in 0..3 {
-            let v = if normalize { (px[k] - lo) / (hi - lo) } else { px[k] };
-            buf.push((v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            hwc.push(if normalize { (px[k] - lo) / (hi - lo) } else { px[k] });
         }
     }
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let hdr = format!("P6\n{w} {h}\n255\n");
-    let mut f = Vec::with_capacity(hdr.len() + buf.len());
-    f.extend_from_slice(hdr.as_bytes());
-    f.extend_from_slice(&buf);
-    std::fs::write(path, f).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
+    let img = imaging::pixels::hwc_to_rgb8(&hwc, w as u32, h as u32, 3, imaging::ChannelPolicy::RequireRgb)
+        .unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
+    imaging::save_ppm(path, &img).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
 }

@@ -301,7 +301,7 @@ fn eval(args: &[String]) {
         let off = (k as f32) * (data.w as f32 + 16.0);
         // CHW -> HWC for detect (it expects interleaved RGB).
         let chw = &data.images[i * stride..(i + 1) * stride];
-        let hwc = crate::image_io::chw_to_hwc(chw, 3, data.h as usize, data.w as usize);
+        let hwc = imaging::pixels::chw_to_hwc(chw, 3, data.h as usize, data.w as usize);
         let dets = model.detect(&hwc, data.w, data.h, conf, iou);
         for mut d in dets {
             d[0] += off;

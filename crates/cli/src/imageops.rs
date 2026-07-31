@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use capability::{Action, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
+use capability::{Action, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use serde_json::json;
 
 pub const MODEL: &str = "imageops";
@@ -49,11 +49,6 @@ impl Provider for ImageOps {
     }
 }
 
-fn img_blob(media: Media, hwc: Vec<f32>, w: usize, h: usize, c: usize) -> Blob {
-    let bytes: Vec<u8> = hwc.iter().flat_map(|f| f.to_le_bytes()).collect();
-    Blob::new(media, bytes).with_meta(json!({"w": w, "h": h, "c": c}))
-}
-
 struct MaskRect;
 impl Action for MaskRect {
     fn spec(&self) -> ActionSpec {
@@ -70,7 +65,7 @@ impl Action for MaskRect {
                 m[row * wd + col] = 1.0;
             }
         }
-        Ok(Outcome::new().set("white_px", json!(rw.min(wd) * rh.min(ht))).blob("mask", img_blob(Media::Mask, m, wd, ht, 1)))
+        Ok(Outcome::new().set("white_px", json!(rw.min(wd) * rh.min(ht))).blob("mask", capability::blob::image_blob(&m, wd as u32, ht as u32, 1).with_media(Media::Mask)))
     }
 }
 
@@ -106,7 +101,7 @@ impl Action for Gradient {
                 }
             }
         }
-        Ok(Outcome::new().set("style", json!(style)).blob("image", img_blob(Media::Image, img, wd, ht, 3)))
+        Ok(Outcome::new().set("style", json!(style)).blob("image", capability::blob::image_blob(&img, wd as u32, ht as u32, 3)))
     }
 }
 

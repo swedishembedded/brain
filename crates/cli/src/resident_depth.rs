@@ -119,57 +119,13 @@ struct DepthNpuInstance {
     side: u32,
 }
 
-/// Bilinear resize of interleaved RGB HWC (half-pixel), matching the engine predictor.
-fn resize_hwc(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
-    let mut out = vec![0f32; (tw * th * 3) as usize];
-    let (sx, sy) = (w0 as f32 / tw as f32, h0 as f32 / th as f32);
-    for y in 0..th {
-        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, (h0 - 1) as f32);
-        let (y0, y1) = (fy.floor() as u32, (fy.floor() as u32 + 1).min(h0 - 1));
-        let wy = fy - y0 as f32;
-        for x in 0..tw {
-            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, (w0 - 1) as f32);
-            let (x0, x1) = (fx.floor() as u32, (fx.floor() as u32 + 1).min(w0 - 1));
-            let wx = fx - x0 as f32;
-            for c in 0..3 {
-                let p = |yy: u32, xx: u32| src[((yy * w0 + xx) * 3 + c) as usize];
-                let top = p(y0, x0) * (1.0 - wx) + p(y0, x1) * wx;
-                let bot = p(y1, x0) * (1.0 - wx) + p(y1, x1) * wx;
-                out[((y * tw + x) * 3 + c) as usize] = top * (1.0 - wy) + bot * wy;
-            }
-        }
-    }
-    out
-}
-
-/// Bilinear resize of a single-channel `[h0·w0]` map to `[th·tw]`.
-fn resize_map(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
-    let mut out = vec![0f32; (tw * th) as usize];
-    let (sx, sy) = (w0 as f32 / tw as f32, h0 as f32 / th as f32);
-    for y in 0..th {
-        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, (h0 - 1) as f32);
-        let (y0, y1) = (fy.floor() as u32, (fy.floor() as u32 + 1).min(h0 - 1));
-        let wy = fy - y0 as f32;
-        for x in 0..tw {
-            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, (w0 - 1) as f32);
-            let (x0, x1) = (fx.floor() as u32, (fx.floor() as u32 + 1).min(w0 - 1));
-            let wx = fx - x0 as f32;
-            let p = |yy: u32, xx: u32| src[(yy * w0 + xx) as usize];
-            let top = p(y0, x0) * (1.0 - wx) + p(y0, x1) * wx;
-            let bot = p(y1, x0) * (1.0 - wx) + p(y1, x1) * wx;
-            out[(y * tw + x) as usize] = top * (1.0 - wy) + bot * wy;
-        }
-    }
-    out
-}
-
 impl Instance for DepthNpuInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         use npu::openvino::Feed;
         let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
         let s = self.side;
         // resize to the compiled square, pack CHW
-        let resized = resize_hwc(&hwc, w, h, s, s);
+        let resized = imaging::resize_bilinear_hwc(&hwc, 3, w, h, s, s);
         let hw = (s * s) as usize;
         let mut chw = vec![0f32; 3 * hw];
         for y in 0..s as usize {
@@ -183,7 +139,7 @@ impl Instance for DepthNpuInstance {
         let (_name, oshape, data) = out.into_iter().next().ok_or("depth NPU: no output")?;
         // output is [1,1,H,W] inverse-depth; resize back to the frame grid.
         let (oh, ow) = (oshape[oshape.len() - 2] as u32, oshape[oshape.len() - 1] as u32);
-        let depth = resize_map(&data, ow, oh, w, h);
+        let depth = imaging::resize_bilinear_hwc(&data, 1, ow, oh, w, h);
 
         let (mut mn, mut mx) = (f32::INFINITY, f32::NEG_INFINITY);
         for &v in &depth {

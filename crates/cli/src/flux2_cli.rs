@@ -111,9 +111,7 @@ fn generate(args: &[String]) -> Result<(), String> {
             eprintln!("  {k:<20} {v:>7.2}s");
         }
     }
-    let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
-    ppm.extend_from_slice(&rgb);
-    std::fs::write(&out, ppm).map_err(|e| format!("writing {out}: {e}"))?;
+    imaging::save_ppm(&out, &imaging::Rgb8::new(w, h, rgb)?)?;
     eprintln!("flux2: wrote {out} ({w}x{h})");
     Ok(())
 }

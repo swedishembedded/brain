@@ -269,16 +269,11 @@ fn save_blob(b: &Blob, path: &str) -> Result<(), String> {
             let h = b.meta["h"].as_u64().ok_or("image blob missing h")? as u32;
             let c = b.meta["c"].as_u64().unwrap_or(3) as usize;
             let hwc: Vec<f32> = b.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
-            // to interleaved u8 RGB (replicate grayscale to 3 channels for P6).
-            let n = w as usize * h as usize;
-            let mut rgb = vec![0u8; n * 3];
-            for i in 0..n {
-                for ch in 0..3 {
-                    let v = if c >= 3 { hwc[i * c + ch] } else { hwc[i * c] };
-                    rgb[i * 3 + ch] = (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-                }
-            }
-            std::fs::write(path, events::ppm::encode_p6(&rgb, w, h)).map_err(|e| e.to_string())
+            // A depth map or a mask is one channel; the CLI's policy is to render
+            // it as visible grey rather than refuse to save it. That is a real
+            // choice, so it is spelled out rather than implied by the code.
+            let img = imaging::pixels::hwc_to_rgb8(&hwc, w, h, c, imaging::ChannelPolicy::ReplicateFirst)?;
+            imaging::save_ppm(path, &img)
         }
         _ => std::fs::write(path, &b.bytes).map_err(|e| e.to_string()),
     }

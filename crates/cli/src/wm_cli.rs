@@ -12,9 +12,9 @@ use wm_core::{FakeWorldModel, WorldModel};
 use wm_diamond::DiamondWorldModel;
 use wm_display::keymap::{Key, KeyChordMap, KeySet};
 use wm_display::pacing::{FixedTimestep, WallClock};
-use wm_display::record::{rgb8_to_chw, RecorderSink};
+use wm_display::record::RecorderSink;
 use wm_display::sink::{fnv1a, FrameSink, HashSink, HeadlessSink, Hud, PpmDirSink, TeeSink};
-use wm_display::{chw_to_rgb8, play_loop, PlayReport, ScriptInput, SplitIo};
+use wm_display::{play_loop, PlayReport, ScriptInput, SplitIo};
 
 pub fn run_wm(args: &[String]) {
     match args.first().map(String::as_str) {
@@ -237,17 +237,16 @@ fn load_seed_context(dir: &str, c: u32, h: u32, w: u32) -> Vec<f32> {
     let mut out = vec![];
     for p in paths {
         let bytes = std::fs::read(&p).unwrap();
-        let (px, fw, fh) = events::ppm::decode_p6(&bytes).unwrap_or_else(|e| panic!("{p:?}: {e}"));
-        assert_eq!((fw, fh), (w, h), "{p:?}: expected {w}x{h}");
-        // HWC u8 -> CHW f32 [0,1].
-        let plane = (h * w) as usize;
-        let mut chw = vec![0.0f32; (c * h * w) as usize];
-        for i in 0..plane {
-            for ch in 0..(c as usize).min(3) {
-                chw[ch * plane + i] = px[i * 3 + ch] as f32 / 255.0;
-            }
-        }
-        out.extend(chw);
+        let img = imaging::decode(&bytes).unwrap_or_else(|e| panic!("{p:?}: {e}"));
+        assert_eq!((img.w, img.h), (w, h), "{p:?}: expected {w}x{h}");
+        // HWC u8 -> CHW f32 [0,1]: the cast and the permutation are separate
+        // steps in `imaging` precisely so neither hides inside the other.
+        let chw = imaging::pixels::hwc_to_chw(&img.to_hwc_unit(), 3, h as usize, w as usize);
+        // Frames are RGB; a model configured for more channels leaves the rest zero.
+        let mut padded = vec![0.0f32; (c * h * w) as usize];
+        let n = chw.len().min(padded.len());
+        padded[..n].copy_from_slice(&chw[..n]);
+        out.extend(padded);
     }
     out
 }
@@ -565,7 +564,10 @@ fn run_replay(rest: &[String]) {
     for i in context..ds.n {
         let f = model.step(actions[i]);
         // The exact conversion the recorder applied: f32 -> RGB8 -> CHW u8.
-        let got = rgb8_to_chw(&chw_to_rgb8(&f, c, h, w), w, h);
+        let rgb = imaging::pixels::chw_to_rgb8(&f, w, h, c as usize, imaging::ChannelPolicy::RequireRgb)
+            .unwrap_or_else(|e| die(e))
+            .px;
+        let got = imaging::pixels::hwc_to_chw(&rgb, 3, h as usize, w as usize);
         let want = ds.frame(i).unwrap_or_else(|e| die(e));
         let sum: u64 = got
             .iter()

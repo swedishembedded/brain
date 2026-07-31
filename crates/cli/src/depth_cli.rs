@@ -334,13 +334,10 @@ fn run_image(args: &[String]) {
     if o.headless {
         let (cw, ch) = mode.canvas(w, h);
         let canvas = render(mode, colormap);
-        let dir = std::path::Path::new(&o.out).parent();
-        if let Some(d) = dir {
-            let _ = std::fs::create_dir_all(d);
-        }
-        let ppm = events::ppm::encode_p6(&canvas, cw, ch);
-        std::fs::write(&o.out, &ppm).unwrap_or_else(|e| {
-            eprintln!("brain depth: writing {}: {e}", o.out);
+        // `imaging::save_ppm` creates the parent directory itself.
+        let img = imaging::Rgb8::new(cw, ch, canvas.clone()).expect("canvas is cw*ch*3");
+        imaging::save_ppm(&o.out, &img).unwrap_or_else(|e| {
+            eprintln!("brain depth: {e}");
             std::process::exit(1);
         });
         let hash = fnv1a(&canvas);
@@ -432,7 +429,8 @@ Forces YUYV — an MJPEG-only camera is rejected (no JPEG decoder).
 
 #[cfg(target_os = "linux")]
 fn run_camera(args: &[String]) {
-    use capture::{yuyv_to_rgb, Device, Frame, FrameSlot};
+    use capture::{Device, Frame, FrameSlot};
+    use imaging::color::yuyv_to_rgb;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -845,34 +843,18 @@ fn load_calib_chw(dir: &str, size: u32, max_n: usize) -> Vec<Vec<f32>> {
         }
         let Ok((px, w, h)) = events::ppm::decode_p6(&bytes) else { continue };
         let hwc: Vec<f32> = px.iter().map(|&b| b as f32 / 255.0).collect();
-        out.push(letterbox_chw(&hwc, w, h, size));
+        // `pad = 0.5` reproduces this path bit-for-bit. NOTE (survey §6.2): the
+        // predictor does NOT letterbox — it does an aspect-preserving bilinear
+        // resize to a multiple of 32 with no pad (`depth::predict::target_size`).
+        // So calibration still collects activation ranges under a transform the
+        // model never sees at inference. Keeping the exact fill/geometry here
+        // keeps today's INT8 scales stable; fixing the mismatch changes them and
+        // is a separate, separately-gated change.
+        out.push(imaging::letterbox_rgb(&hwc, w, h, size, 0.5).0);
     }
     out
 }
 
-/// Aspect-preserving letterbox of an HWC `[0,1]` image into a `[3,size,size]` CHW
-/// tensor, grey pad — the same transform the predictor uses at inference.
-fn letterbox_chw(hwc: &[f32], w0: u32, h0: u32, size: u32) -> Vec<f32> {
-    let scale = (size as f32 / w0 as f32).min(size as f32 / h0 as f32);
-    let new_w = (w0 as f32 * scale).round() as usize;
-    let new_h = (h0 as f32 * scale).round() as usize;
-    let pad_x = ((size as f32 - new_w as f32) * 0.5) as usize;
-    let pad_y = ((size as f32 - new_h as f32) * 0.5) as usize;
-    let sz = size as usize;
-    let inv = 1.0 / scale;
-    let mut chw = vec![0.5f32; 3 * sz * sz];
-    for yi in 0..new_h {
-        let sy = (((yi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, h0 as f32 - 1.0)) as usize;
-        for xi in 0..new_w {
-            let sx = (((xi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, w0 as f32 - 1.0)) as usize;
-            let sbase = (sy * w0 as usize + sx) * 3;
-            for c in 0..3 {
-                chw[c * sz * sz + (yi + pad_y) * sz + (xi + pad_x)] = hwc[sbase + c];
-            }
-        }
-    }
-    chw
-}
 
 // ---------------------------------------------------------------------------
 // NPU inference: export ZipDepth to ONNX, compile on the Intel NPU, run.
@@ -909,7 +891,7 @@ fn predict_npu(weights: &str, cfg: &ZipConfig, hwc: &[f32], w0: u32, h0: u32) ->
 /// to (th,tw), infer, resize the depth back to the frame grid. Matches the engine
 /// predictor's preprocessing (which matches the reference).
 fn run_npu_session(sess: &mut npu::openvino::NpuSession, hwc: &[f32], w0: u32, h0: u32, th: u32, tw: u32) -> Vec<f32> {
-    let resized = resize_hwc(hwc, w0, h0, tw, th);
+    let resized = imaging::resize_bilinear_hwc(hwc, 3, w0, h0, tw, th);
     let hw = (th * tw) as usize;
     let mut chw = vec![0f32; 3 * hw];
     for y in 0..th as usize {
@@ -923,49 +905,5 @@ fn run_npu_session(sess: &mut npu::openvino::NpuSession, hwc: &[f32], w0: u32, h
         eprintln!("brain depth: NPU inference failed: {e}");
         std::process::exit(1);
     });
-    resize_map(&out.tensors[0].2, tw, th, w0, h0)
-}
-
-/// Host bilinear resize of interleaved RGB HWC (half_pixel), matching the predictor.
-fn resize_hwc(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
-    let mut out = vec![0f32; (tw * th * 3) as usize];
-    let (sx, sy) = (w0 as f32 / tw as f32, h0 as f32 / th as f32);
-    for y in 0..th {
-        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, h0 as f32 - 1.0);
-        let (y0, ty) = (fy.floor() as u32, fy - fy.floor());
-        let y1 = (y0 + 1).min(h0 - 1);
-        for x in 0..tw {
-            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, w0 as f32 - 1.0);
-            let (x0, tx) = (fx.floor() as u32, fx - fx.floor());
-            let x1 = (x0 + 1).min(w0 - 1);
-            for c in 0..3u32 {
-                let p = |xx: u32, yy: u32| src[((yy * w0 + xx) * 3 + c) as usize];
-                let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
-                let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
-                out[((y * tw + x) * 3 + c) as usize] = top * (1.0 - ty) + bot * ty;
-            }
-        }
-    }
-    out
-}
-
-/// Host bilinear resize of a single-channel map.
-fn resize_map(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
-    let mut out = vec![0f32; (tw * th) as usize];
-    let (sx, sy) = (w0 as f32 / tw as f32, h0 as f32 / th as f32);
-    for y in 0..th {
-        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, h0 as f32 - 1.0);
-        let (y0, ty) = (fy.floor() as u32, fy - fy.floor());
-        let y1 = (y0 + 1).min(h0 - 1);
-        for x in 0..tw {
-            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, w0 as f32 - 1.0);
-            let (x0, tx) = (fx.floor() as u32, fx - fx.floor());
-            let x1 = (x0 + 1).min(w0 - 1);
-            let p = |xx: u32, yy: u32| src[(yy * w0 + xx) as usize];
-            let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
-            let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
-            out[(y * tw + x) as usize] = top * (1.0 - ty) + bot * ty;
-        }
-    }
-    out
+    imaging::resize_bilinear_hwc(&out.tensors[0].2, 1, tw, th, w0, h0)
 }

@@ -60,19 +60,20 @@ fn load_frames(spec: &str, cfg: &MirrorConfig) -> (Vec<f32>, usize, usize, usize
     let mut all = Vec::new();
     let mut grid = None;
     for path in &paths {
-        let img = preprocess::load_ppm(path).unwrap_or_else(|e| {
+        let img = imaging::load(path).unwrap_or_else(|e| {
             eprintln!("{e}");
             std::process::exit(1);
         });
-        let target = preprocess::adaptive_target(img.w, img.h, cfg.img, cfg.patch);
-        let (nw, nh) = preprocess::resize_dims(img.w, img.h, target, cfg.patch);
+        let (iw, ih) = (img.w as usize, img.h as usize);
+        let target = preprocess::adaptive_target(iw, ih, cfg.img, cfg.patch);
+        let (nw, nh) = preprocess::resize_dims(iw, ih, target, cfg.patch);
         let resized = preprocess::resize_bicubic(&img, nw, nh);
         let (cw, ch) = (nw.min(target), nh.min(target));
         let (x0, y0) = ((nw - cw) / 2, (nh - ch) / 2);
         for c in 0..3 {
             for y in 0..ch {
                 for x in 0..cw {
-                    all.push(resized.rgb[((y0 + y) * nw + x0 + x) * 3 + c] as f32 / 255.0);
+                    all.push(resized.px[((y0 + y) * nw + x0 + x) * 3 + c] as f32 / 255.0);
                 }
             }
         }
