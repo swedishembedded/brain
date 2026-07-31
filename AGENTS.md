@@ -485,6 +485,16 @@ per-scenario table and the findings so far.
 
 ## Conventions & invariants
 
+- **Zero compile warnings. Always.** A build that emits warnings is not done.
+  Fix every warning the build reports — **including ones your change did not
+  cause**. "Pre-existing" is not an exemption: warnings are only ever pre-existing
+  because someone before you applied that exemption, and a noisy build is how a
+  real defect hides in the scroll-back. Fix them **properly** — delete the dead
+  code, use the unused binding, remove the stale `mut`, handle the ignored
+  `Result`. Silencing with `#[allow(...)]`, `let _ =`, or an `_`-prefixed name is
+  acceptable ONLY when the construct is genuinely intentional, and then it carries
+  a comment saying why. Never suppress a warning to make a build quiet.
+
 - **One implementation. Never re-implement anything that already exists in this
   workspace — no matter what it is.** This is the rule that most needs enforcing:
   before writing a function, search for it. `rmsnorm` once existed **seven**
@@ -533,10 +543,18 @@ per-scenario table and the findings so far.
   embedded as consts; no kernel text is duplicated. After adding/removing a
   `.wgsl`, run **`make kernels-regen`** (`scripts/kernels-regen.sh`) to
   regenerate the const block + `ALL` registry in `crates/kernels/src/lib.rs`.
-- **fp32 only, core compute only** — single bind group, **≤8 storage
+- **fp32 arithmetic only, core compute only** — single bind group, **≤8 storage
   buffers/kernel** (the WebGPU guarantee; the splat backward kernels bind 8),
   **no atomics, no subgroups, no f16** (the only mentions of those in the kernel
-  tree are comments asserting their absence). `@workgroup_size(64)` is the rule;
+  tree are comments asserting their absence).
+  *This is a rule about the arithmetic datatype, NOT about storage precision —
+  do not read it as "brain is fp32-only".* brain has a full **INT8** path:
+  per-channel symmetric weights packed 4-per-`u32` (`model::int8`), DP4A GEMMs
+  (`matmul_i8`, `matmul_i8_dyn`, `matmul_i8_gemv`, ~4× the fp32 rate on Pascal),
+  dynamic per-token activation scales (`max_abs_row` → `quant_pack`), and int8
+  paged KV. Norms/RoPE/attention stay fp32. Quantizing is the FIRST tool for
+  fitting a large model on a card (`zimage::int8` for a DiT, `qwen::q8` for an
+  encoder: ~16 GB → ~4.8 GB), ahead of sharding. `@workgroup_size(64)` is the rule;
   the register-tiled matmuls (`matmul_reg*.wgsl`, `matmul_dw_reg.wgsl`,
   `matmul_dx_reg.wgsl`, `matmul_i8*.wgsl`) and `flash_attn_bidir_split.wgsl`
   use 256 — every one of them because a thread cooperates over a tile, and each

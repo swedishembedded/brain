@@ -242,21 +242,38 @@ parallel with the download.
 
 ### VRAM budget (24–48 GB target)
 
-FLUX.1 at bf16 is 23.8 GB of weights — brain is **fp32-only**, so a naive
-resident copy is ~47.6 GB and does *not* fit one P40. Three existing mechanisms
-apply, in order: INT8 weights (`model::int8`, `qwen::q8` pattern) → ~12 GB;
-tensor/expert sharding across the two P40s (`model::shard`/`plan`); and
-`crates/residency` tiering so the text encoder is evicted after conditioning is
-computed (T5-XXL is only needed once per generation). SAM 2, ArcFace, CodeFormer
-and BiRefNet are all <1 GB and can stay resident together.
+brain's **kernel arithmetic** is fp32 (no f16/bf16 datatypes — that is what keeps
+it portable to old GPUs and WebGPU), but that is not the same as fp32 storage:
+brain has a full **INT8 path** — per-channel symmetric weights packed 4-per-`u32`
+(`model::int8::quantize_weight`), DP4A GEMMs (`matmul_i8`, `matmul_i8_dyn`,
+`matmul_i8_gemv`, ~4× the fp32 rate on Pascal), dynamic per-token activation
+scales (`max_abs_row` → `quant_pack`), and int8 paged KV. Norms, RoPE and
+attention stay fp32.
+
+So INT8 is the **primary** residency mechanism here, not a fallback, and there is
+direct precedent for exactly this shape of model: `zimage::int8` quantizes a DiT
+and `qwen::q8` takes the Qwen3-4B encoder from ~16 GB fp32 to ~4.8 GB so it fits
+one P40.
+
+| Model | fp32 weights | INT8 linears | Fits |
+|---|---|---|---|
+| FLUX.1 Kontext DiT (12 B) | ~47.6 GB | **~12 GB** | one P40 |
+| T5-XXL encoder (4.8 B) | ~19 GB | ~5 GB | one P40, and evictable after conditioning |
+| SDXL UNet + both text encoders (3.5 B) | ~14 GB | ~4 GB | one P40 **without** INT8 |
+| ControlNet (SDXL) | ~5 GB | ~1.4 GB | alongside the UNet |
+| SAM 2 / ArcFace / CodeFormer / BiRefNet | <1 GB each | — | all resident together |
+
+Layered on top, in order of preference: INT8 weights → `crates/residency`
+tiering (T5-XXL is needed once per generation, so it is evicted after
+conditioning) → tensor sharding across the two P40s (`model::shard`/`plan`) only
+if the first two are not enough.
 
 ---
 
-SDXL is far kinder to the VRAM target than FLUX.1: UNet 2.6 B + both text
-encoders ≈ 3.5 B params, so ~14 GB at fp32 — it fits **one** P40 with no INT8 and
-no sharding, and a ControlNet adds ~1.3 B (~5 GB). That makes phases 4b/4c the
+SDXL is the kinder starting point: UNet 2.6 B + both text encoders ≈ 3.5 B, so
+~14 GB at fp32 — one P40 with no INT8 at all. That makes phases 4b/4c the
 practical place to get the identity pipeline working end to end first, with
-FLUX.1/Kontext as the higher-quality path behind INT8 + 2-GPU sharding.
+FLUX.1 Kontext as the higher-quality path behind INT8 (~12 GB, also one card).
 
 ## 5. Open decisions
 
