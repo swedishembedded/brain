@@ -12,7 +12,10 @@
 //! - [`error`] — provider-shaped error bodies.
 //! - [`catalog`] — deriving API capabilities from a manifest; the `/models` filter.
 //! - [`models`] — the `/models` catalog handlers.
-//! - [`anthropic`]/[`openai`]/[`openrouter`] — the per-dialect routes (P4: 501 stubs).
+//! - [`bridge`] — the async→sync seam to the shared executor (submit/stream + the
+//!   cancel-on-disconnect guard) that the chat handlers dispatch through.
+//! - [`anthropic`]/[`openai`]/[`openrouter`] — the per-dialect routes: real chat
+//!   (non-stream + SSE token streaming); embeddings/images still 501.
 //!
 //! Every path submits [`residency::Job`]s to the ONE shared [`residency::Executor`],
 //! so scheduling/residency/batching stay uniform across the D-Bus surface, the CLI,
@@ -20,6 +23,7 @@
 
 pub mod anthropic;
 pub mod auth;
+pub mod bridge;
 pub mod catalog;
 pub mod error;
 pub mod models;

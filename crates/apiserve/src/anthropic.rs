@@ -1,19 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The Anthropic Messages surface. P4 registers the routes and returns a
-//! spec-valid `not_implemented` error; the request→[`capability::Invocation`] and
-//! [`capability::Outcome`]→response mappings are stubbed with real signatures to
-//! be filled in P5+.
+//! The Anthropic Messages surface: `POST /v1/messages` (non-streaming + SSE event
+//! streaming) and `POST /v1/messages/count_tokens`. Chat dispatches to the shared
+//! executor's `generate` action via [`crate::bridge`]; the streaming event order
+//! follows Anthropic's `message_start → content_block_start → content_block_delta*
+//! → content_block_stop → message_delta → message_stop` sequence.
 
+use axum::body::Bytes;
 use axum::extract::State;
+use axum::response::sse::{Event, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use axum::Router;
-use capability::{Invocation, Outcome};
+use axum::{Json, Router};
+use capability::Invocation;
 use serde_json::{json, Value};
+use std::convert::Infallible;
+use uuid::Uuid;
 
+use crate::bridge::{self, StreamMsg};
+use crate::catalog;
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::surface::Provider;
+
+const PROVIDER: Provider = Provider::Anthropic;
 
 /// Anthropic-specific routes (merged onto the shared `/models` router).
 pub fn routes() -> Router<AppState> {
@@ -22,26 +33,217 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/messages/count_tokens", post(count_tokens))
 }
 
-/// `POST /v1/messages` — 501 until P5 wires generation onto the executor.
-async fn messages(State(state): State<AppState>) -> ApiError {
-    ApiError::not_implemented(state.provider, "POST /v1/messages is not implemented yet")
+/// `POST /v1/messages` — real chat (non-stream + SSE) on the Anthropic dialect.
+async fn messages(State(state): State<AppState>, body: Bytes) -> Response {
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return ApiError::invalid_request(PROVIDER, format!("invalid JSON body: {e}")).into_response(),
+    };
+    let (model, inv, stream) = match to_invocation(&body) {
+        Ok(x) => x,
+        Err(e) => return e.into_response(),
+    };
+    if !catalog::resolve_chat(&state.exec, &model) {
+        return ApiError::model_not_found(PROVIDER, &model).into_response();
+    }
+    if stream {
+        let est_input = heuristic_tokens(&request_text(&body));
+        stream_messages(state, model, inv, est_input).into_response()
+    } else {
+        match bridge::submit(&state, &model, "generate", inv).await {
+            Ok(outcome) => {
+                let (text, prompt, completion, finish) = bridge::read_outcome(&outcome);
+                Json(from_outcome(&model, &text, prompt, completion, &finish)).into_response()
+            }
+            Err(e) => e.into_response(),
+        }
+    }
 }
 
-/// `POST /v1/messages/count_tokens` — 501 for now.
-async fn count_tokens(State(state): State<AppState>) -> ApiError {
-    ApiError::not_implemented(state.provider, "POST /v1/messages/count_tokens is not implemented yet")
+/// `POST /v1/messages/count_tokens` — an APPROXIMATE input-token count.
+///
+/// NOTE: this is a heuristic (total content chars / 4), NOT a real tokenizer count.
+/// Replace with the served model's actual tokenizer once chat tokenization is wired.
+async fn count_tokens(State(_state): State<AppState>, body: Bytes) -> Response {
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return ApiError::invalid_request(PROVIDER, format!("invalid JSON body: {e}")).into_response(),
+    };
+    Json(json!({ "input_tokens": heuristic_tokens(&request_text(&body)) })).into_response()
 }
 
-/// Map an Anthropic Messages request body to `(model, action, invocation)` for the
-/// executor. Filled in P5. Returns the model id, the capability action name, and
-/// the built invocation.
-pub fn to_invocation(_body: &Value) -> Result<(String, String, Invocation), ApiError> {
-    todo!("P5: map Anthropic Messages request -> capability::Invocation")
+/// Parse + validate an Anthropic Messages request into `(model, invocation, stream)`.
+/// Enforces `model`/`messages`/`max_tokens` present; builds the contract `generate`
+/// invocation (Anthropic's top-level `system` maps to the `system` param).
+pub fn to_invocation(body: &Value) -> Result<(String, Invocation, bool), ApiError> {
+    let model = body.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).ok_or_else(|| ApiError::invalid_request(PROVIDER, "'model' is required"))?;
+    let messages = body.get("messages").and_then(|v| v.as_array()).filter(|a| !a.is_empty()).ok_or_else(|| ApiError::invalid_request(PROVIDER, "'messages' must be a non-empty array"))?;
+    let max_tokens = body.get("max_tokens").and_then(|v| v.as_i64()).ok_or_else(|| ApiError::invalid_request(PROVIDER, "'max_tokens' is required"))?;
+    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let msgs: Vec<Value> = messages.iter().map(flatten_message).collect();
+    let mut inv = Invocation::new()
+        .set("messages", json!(serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".into())))
+        .set("max_new", json!(max_tokens))
+        .set("temp", json!(body.get("temperature").and_then(|v| v.as_f64()).unwrap_or(1.0)))
+        .set("top_p", json!(body.get("top_p").and_then(|v| v.as_f64()).unwrap_or(1.0)))
+        .set("top_k", json!(body.get("top_k").and_then(|v| v.as_i64()).unwrap_or(0)))
+        .set("seed", json!(body.get("seed").and_then(|v| v.as_i64()).unwrap_or(0)));
+    let system = system_text(body.get("system"));
+    if !system.is_empty() {
+        inv = inv.set("system", json!(system));
+    }
+    if let Some(stops) = body.get("stop_sequences").and_then(|v| v.as_array()).filter(|a| !a.is_empty()) {
+        inv = inv.set("stop", json!(serde_json::to_string(stops).unwrap_or_default()));
+    }
+    Ok((model.to_string(), inv, stream))
 }
 
-/// Map an executor [`Outcome`] back to an Anthropic Messages response body. Filled
-/// in P5.
-pub fn from_outcome(_o: &Outcome, _model: &str) -> Value {
-    let _ = json!({});
-    todo!("P5: map capability::Outcome -> Anthropic Messages response")
+/// One Anthropic message → the contract `{role, content}` (blocks flattened to text).
+fn flatten_message(m: &Value) -> Value {
+    let role = match m.get("role").and_then(|v| v.as_str()).unwrap_or("user") {
+        "assistant" => "assistant",
+        _ => "user",
+    };
+    json!({ "role": role, "content": content_text(m.get("content")) })
+}
+
+/// Flatten Anthropic content (string, or an array of blocks) to its text.
+fn content_text(c: Option<&Value>) -> String {
+    match c {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
+}
+
+/// Flatten the top-level `system` (string, or an array of text blocks) to text.
+fn system_text(s: Option<&Value>) -> String {
+    match s {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(_)) => content_text(s),
+        _ => String::new(),
+    }
+}
+
+/// All request text (every message's content + system) — the input to the
+/// approximate token count.
+fn request_text(body: &Value) -> String {
+    let mut acc = system_text(body.get("system"));
+    if let Some(msgs) = body.get("messages").and_then(|v| v.as_array()) {
+        for m in msgs {
+            acc.push('\n');
+            acc.push_str(&content_text(m.get("content")));
+        }
+    }
+    acc
+}
+
+/// Approximate token count: total chars / 4 (min 1 for non-empty text). NOTE: a
+/// placeholder for a real tokenizer.
+fn heuristic_tokens(text: &str) -> i64 {
+    let n = text.chars().count();
+    if n == 0 {
+        0
+    } else {
+        (n as i64 / 4).max(1)
+    }
+}
+
+/// Map the contract `finish_reason` to Anthropic's `stop_reason` enum.
+fn stop_reason(fr: &str) -> &'static str {
+    match fr {
+        "length" => "max_tokens",
+        "stop_sequence" => "stop_sequence",
+        _ => "end_turn",
+    }
+}
+
+/// The non-streaming `Message` response body.
+pub fn from_outcome(model: &str, text: &str, prompt: i64, completion: i64, finish: &str) -> Value {
+    json!({
+        "id": format!("msg_{}", Uuid::new_v4().simple()),
+        "type": "message",
+        "role": "assistant",
+        "content": [ { "type": "text", "text": text } ],
+        "model": model,
+        "stop_reason": stop_reason(finish),
+        "stop_sequence": Value::Null,
+        "usage": { "input_tokens": prompt, "output_tokens": completion },
+    })
+}
+
+/// The SSE Messages event stream in Anthropic's fixed order. `est_input` is the
+/// approximate input-token count surfaced in `message_start` (the real prompt-token
+/// count is not known until generation completes).
+fn stream_messages(state: AppState, model: String, inv: Invocation, est_input: i64) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    use futures::StreamExt;
+    let id = format!("msg_{}", Uuid::new_v4().simple());
+    let events = async_stream::stream! {
+        // message_start: an empty-content Message carrying the input-token usage.
+        let start = json!({
+            "type": "message_start",
+            "message": {
+                "id": id,
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": model,
+                "stop_reason": Value::Null,
+                "stop_sequence": Value::Null,
+                "usage": { "input_tokens": est_input, "output_tokens": 0 },
+            },
+        });
+        yield Ok(Event::default().event("message_start").data(start.to_string()));
+
+        // content_block_start: the single text block.
+        yield Ok(Event::default().event("content_block_start").data(json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": { "type": "text", "text": "" },
+        }).to_string()));
+
+        let mut src = bridge::stream(&state, &model, "generate", inv);
+        let mut finish = String::from("stop");
+        let mut completion = 0i64;
+        while let Some(msg) = src.next().await {
+            match msg {
+                StreamMsg::Delta(piece) => {
+                    yield Ok(Event::default().event("content_block_delta").data(json!({
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": { "type": "text_delta", "text": piece },
+                    }).to_string()));
+                }
+                StreamMsg::Done(outcome) => {
+                    let (_t, _p, c, fr) = bridge::read_outcome(&outcome);
+                    completion = c;
+                    finish = fr;
+                }
+                StreamMsg::Err(e) => {
+                    yield Ok(Event::default().event("error").data(json!({
+                        "type": "error",
+                        "error": e.body().get("error").cloned().unwrap_or(Value::Null),
+                    }).to_string()));
+                    return;
+                }
+            }
+        }
+
+        // content_block_stop → message_delta (stop_reason + cumulative output) → message_stop.
+        yield Ok(Event::default().event("content_block_stop").data(json!({
+            "type": "content_block_stop", "index": 0,
+        }).to_string()));
+        yield Ok(Event::default().event("message_delta").data(json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": stop_reason(&finish), "stop_sequence": Value::Null },
+            "usage": { "output_tokens": completion },
+        }).to_string()));
+        yield Ok(Event::default().event("message_stop").data(json!({ "type": "message_stop" }).to_string()));
+    };
+    Sse::new(events.boxed())
 }

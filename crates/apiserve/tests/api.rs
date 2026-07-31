@@ -13,7 +13,7 @@ use apiserve::{router, AppState, Provider};
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
-use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType, Progress};
+use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress};
 use residency::budget::Budgets;
 use residency::{Device, Executor, Instance, InstanceKey, MemCost, Policy, ResidentModel};
 use serde_json::{json, Value};
@@ -74,6 +74,54 @@ fn executor() -> Executor {
     Executor::start(models, budgets, Policy::default())
 }
 
+/// A runnable fake chat model: `generate` emits two token deltas ("Hello", " world")
+/// then returns a canned outcome — text blob "Hello world" + prompt/completion
+/// counts + finish_reason "stop". Zero-cost so it schedules on a CPU-only budget.
+struct FakeChat;
+struct FakeChatInst;
+impl ResidentModel for FakeChat {
+    fn manifest(&self) -> Manifest {
+        chat_manifest()
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-chat", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(FakeChatInst))
+    }
+}
+impl Instance for FakeChatInst {
+    fn run(&mut self, _a: &str, _i: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        for (i, piece) in ["Hello", " world"].iter().enumerate() {
+            progress(Progress::step(i as u32, 2, "phase")); // coarse step: ignored by SSE
+            progress(Progress::token(i as u32, 2, *piece));
+        }
+        Ok(Outcome::new()
+            .set("prompt_tokens", json!(5))
+            .set("completion_tokens", json!(2))
+            .set("finish_reason", json!("stop"))
+            .blob("text", Blob::new(Media::Text, b"Hello world".to_vec())))
+    }
+}
+
+/// An executor whose chat model is the RUNNABLE [`FakeChat`], plus a carded (never
+/// run) embed model so "non-chat model -> 404" can be exercised.
+fn chat_executor() -> Executor {
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(FakeChat), Arc::new(Carded(embed_manifest()))];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    Executor::start(models, budgets, Policy::default())
+}
+
+fn chat_app(provider: Provider) -> (Router, String) {
+    let key = "sk-brain-test-key".to_string();
+    let state = AppState::new(chat_executor(), key.clone(), provider);
+    (router(state), key)
+}
+
 fn build_app(provider: Provider) -> (Router, String) {
     let key = "sk-brain-test-key".to_string();
     let state = AppState::new(executor(), key.clone(), provider);
@@ -103,7 +151,65 @@ const ALL: [Provider; 3] = [Provider::OpenAI, Provider::Anthropic, Provider::Ope
 
 fn spec(file: &str) -> Value {
     let p: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/specs").join(file);
-    serde_json::from_slice(&std::fs::read(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))).unwrap()
+    let mut root: Value = serde_json::from_slice(&std::fs::read(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))).unwrap();
+    sanitize(&mut root);
+    root
+}
+
+/// Make a vendored OpenAPI 3.x spec compile + validate under strict Draft 2020-12:
+/// the vendored docs use OpenAPI's `nullable: true` (which 2020-12 ignores, so a
+/// legitimately-null value like a streaming `finish_reason` would be rejected) and
+/// one carries an invalid `"type": null` (Anthropic's `Model`, which won't even
+/// compile). Rewrite both into standard 2020-12 (widen `type`/`enum` to admit null,
+/// wrap a nullable `$ref`, drop the bad `type`).
+fn sanitize(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            if map.get("type") == Some(&Value::Null) {
+                map.remove("type");
+            }
+            let nullable = map.remove("nullable") == Some(Value::Bool(true));
+            if nullable {
+                allow_null(map);
+            }
+            for child in map.values_mut() {
+                sanitize(child);
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(sanitize),
+        _ => {}
+    }
+}
+
+/// Extend a schema object so JSON `null` is a valid instance.
+fn allow_null(map: &mut serde_json::Map<String, Value>) {
+    if let Some(Value::Array(e)) = map.get_mut("enum") {
+        if !e.iter().any(Value::is_null) {
+            e.push(Value::Null);
+        }
+    }
+    match map.get("type").cloned() {
+        Some(Value::String(s)) => {
+            map.insert("type".into(), json!([s, "null"]));
+        }
+        Some(Value::Array(mut arr)) => {
+            if !arr.iter().any(|x| x == &json!("null")) {
+                arr.push(json!("null"));
+            }
+            map.insert("type".into(), Value::Array(arr));
+        }
+        _ if map.contains_key("$ref") => {
+            let r = map.remove("$ref").unwrap();
+            map.insert("anyOf".into(), json!([{ "$ref": r }, { "type": "null" }]));
+        }
+        _ => {
+            if let Some(Value::Array(a)) = map.get_mut("anyOf") {
+                a.push(json!({ "type": "null" }));
+            } else if let Some(Value::Array(a)) = map.get_mut("oneOf") {
+                a.push(json!({ "type": "null" }));
+            }
+        }
+    }
 }
 
 /// Validate `instance` against `#/components/schemas/<schema>` of vendored `file`
@@ -209,17 +315,14 @@ async fn get_model_by_id_and_404_when_not_exposed() {
 }
 
 #[tokio::test]
-async fn chat_embeddings_images_are_501_with_spec_valid_bodies() {
-    // (provider, path)
+async fn embeddings_images_are_501_with_spec_valid_bodies() {
+    // Chat (and Anthropic count_tokens) are now implemented; embeddings + image
+    // generation remain 501. (provider, path)
     let cases = [
-        (Provider::OpenAI, "/v1/chat/completions"),
         (Provider::OpenAI, "/v1/embeddings"),
         (Provider::OpenAI, "/v1/images/generations"),
-        (Provider::OpenRouter, "/chat/completions"),
         (Provider::OpenRouter, "/embeddings"),
         (Provider::OpenRouter, "/images/generations"),
-        (Provider::Anthropic, "/v1/messages"),
-        (Provider::Anthropic, "/v1/messages/count_tokens"),
     ];
     for (p, path) in cases {
         let (app, key) = build_app(p);
@@ -246,4 +349,277 @@ fn api_caps_derives_from_manifest_shape() {
     assert!(chat.chat && !chat.embeddings && !chat.image);
     let embed = apiserve::api_caps(&embed_manifest());
     assert!(embed.embeddings && !embed.chat && !embed.image);
+}
+
+// ---------------------------------------------------------------- chat helpers
+
+/// POST `path` with a JSON `body` (auth for `p`), returning `(status, text)`.
+async fn post_text(app: &Router, p: Provider, key: &str, path: &str, body: &Value) -> (StatusCode, String) {
+    let req = auth(Request::builder().method(Method::POST).uri(path), p, key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// POST `path` with a JSON `body`, returning `(status, json)`.
+async fn post_json(app: &Router, p: Provider, key: &str, path: &str, body: &Value) -> (StatusCode, Value) {
+    let (st, text) = post_text(app, p, key, path, body).await;
+    let v = if text.is_empty() { Value::Null } else { serde_json::from_str(&text).unwrap() };
+    (st, v)
+}
+
+/// The `data:` payloads of an SSE body, in order (`event:` names dropped).
+fn sse_data(body: &str) -> Vec<String> {
+    body.lines().filter_map(|l| l.strip_prefix("data: ").map(|s| s.to_string())).collect()
+}
+
+/// `(event, data)` pairs of an SSE body, in order.
+fn sse_events(body: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut ev = String::new();
+    for l in body.lines() {
+        if let Some(e) = l.strip_prefix("event: ") {
+            ev = e.to_string();
+        } else if let Some(d) = l.strip_prefix("data: ") {
+            out.push((ev.clone(), d.to_string()));
+        }
+    }
+    out
+}
+
+// ----------------------------------------------------------- chat: non-stream
+
+#[tokio::test]
+async fn openai_chat_nonstream_validates_usage_and_finish() {
+    let (app, key) = chat_app(Provider::OpenAI);
+    let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_valid("openai.json", "CreateChatCompletionResponse", &v);
+    assert_eq!(v["object"], "chat.completion");
+    assert!(v["id"].as_str().unwrap().starts_with("chatcmpl-"));
+    assert_eq!(v["choices"][0]["message"]["content"], "Hello world");
+    assert_eq!(v["choices"][0]["message"]["role"], "assistant");
+    assert_eq!(v["choices"][0]["finish_reason"], "stop");
+    assert_eq!(v["usage"]["prompt_tokens"], 5);
+    assert_eq!(v["usage"]["completion_tokens"], 2);
+    assert_eq!(v["usage"]["total_tokens"], 7);
+}
+
+#[tokio::test]
+async fn anthropic_messages_nonstream_validates_and_maps_stop_reason() {
+    let (app, key) = chat_app(Provider::Anthropic);
+    let body = json!({"model": "brain-chat", "max_tokens": 64, "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_valid("anthropic.json", "Message", &v);
+    assert_eq!(v["type"], "message");
+    assert!(v["id"].as_str().unwrap().starts_with("msg_"));
+    assert_eq!(v["content"][0]["type"], "text");
+    assert_eq!(v["content"][0]["text"], "Hello world");
+    assert_eq!(v["stop_reason"], "end_turn"); // contract "stop" -> anthropic "end_turn"
+    assert_eq!(v["usage"]["input_tokens"], 5);
+    assert_eq!(v["usage"]["output_tokens"], 2);
+}
+
+#[tokio::test]
+async fn openrouter_chat_nonstream_validates_and_has_native_finish_reason() {
+    let (app, key) = chat_app(Provider::OpenRouter);
+    let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_valid("openrouter.json", "ChatResult", &v);
+    assert_eq!(v["choices"][0]["message"]["content"], "Hello world");
+    assert_eq!(v["choices"][0]["finish_reason"], "stop");
+    assert_eq!(v["choices"][0]["native_finish_reason"], "stop"); // mirrors finish_reason
+}
+
+#[tokio::test]
+async fn anthropic_count_tokens_returns_input_tokens_approximation() {
+    let (app, key) = chat_app(Provider::Anthropic);
+    // 40 chars of content -> heuristic ~ chars/4.
+    let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "0123456789012345678901234567890123456789"}]});
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages/count_tokens", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_valid("anthropic.json", "BetaCountMessageTokensResponse", &v);
+    assert!(v["input_tokens"].as_i64().unwrap() > 0, "approx count must be positive: {v}");
+}
+
+// -------------------------------------------------------------- chat: errors
+
+#[tokio::test]
+async fn chat_unknown_and_non_chat_models_are_404() {
+    // OpenAI: unknown model id -> 404.
+    let (app, key) = chat_app(Provider::OpenAI);
+    let body = json!({"model": "nope", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "unknown model must 404");
+    assert_valid("openai.json", "ErrorResponse", &v);
+
+    // OpenAI: an existing but non-chat (embed-only) model -> 404.
+    let body = json!({"model": "brain-embed", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, _) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "non-chat model must 404");
+
+    // Anthropic: same, on /v1/messages.
+    let (app, key) = chat_app(Provider::Anthropic);
+    let body = json!({"model": "nope", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_valid("anthropic.json", "ErrorResponse", &v);
+}
+
+#[tokio::test]
+async fn chat_bad_bodies_are_400() {
+    // OpenAI: malformed JSON, missing model, missing messages, n > 1.
+    let (app, key) = chat_app(Provider::OpenAI);
+    let cases: [Value; 3] = [
+        json!({"messages": [{"role": "user", "content": "hi"}]}),   // no model
+        json!({"model": "brain-chat"}),                              // no messages
+        json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}], "n": 2}), // n > 1
+    ];
+    for body in cases {
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "must 400: {body}");
+        assert_valid("openai.json", "ErrorResponse", &v);
+    }
+    // Malformed JSON body.
+    let req = auth(Request::builder().method(Method::POST).uri("/v1/chat/completions"), Provider::OpenAI, &key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{ not json"))
+        .unwrap();
+    let (st, _) = send(&app, req).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // Anthropic requires max_tokens.
+    let (app, key) = chat_app(Provider::Anthropic);
+    let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, _) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "anthropic must 400 without max_tokens");
+}
+
+// -------------------------------------------------------------- chat: SSE
+
+#[tokio::test]
+async fn openai_chat_stream_orders_chunks_and_concatenates() {
+    let (app, key) = chat_app(Provider::OpenAI);
+    let body = json!({
+        "model": "brain-chat",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true,
+        "stream_options": {"include_usage": true},
+    });
+    let (st, text) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let datas = sse_data(&text);
+    assert_eq!(datas.last().map(String::as_str), Some("[DONE]"), "stream must terminate with [DONE]");
+
+    // First chunk announces the assistant role.
+    let first: Value = serde_json::from_str(&datas[0]).unwrap();
+    assert_eq!(first["choices"][0]["delta"]["role"], "assistant");
+
+    let mut content = String::new();
+    let mut saw_finish = false;
+    let mut saw_usage = false;
+    for d in datas.iter().filter(|d| d.as_str() != "[DONE]") {
+        let v: Value = serde_json::from_str(d).unwrap();
+        assert_valid("openai.json", "CreateChatCompletionStreamResponse", &v);
+        assert_eq!(v["object"], "chat.completion.chunk");
+        if let Some(c) = v["choices"][0]["delta"]["content"].as_str() {
+            content.push_str(c);
+        }
+        if v["choices"][0]["finish_reason"].as_str() == Some("stop") {
+            saw_finish = true;
+        }
+        if v.get("usage").map(|u| !u.is_null()).unwrap_or(false) {
+            saw_usage = true;
+            assert_eq!(v["usage"]["total_tokens"], 7);
+        }
+    }
+    assert_eq!(content, "Hello world", "concatenated deltas must equal the full text");
+    assert!(saw_finish, "a terminal chunk must carry finish_reason=stop");
+    assert!(saw_usage, "include_usage must emit a usage chunk");
+}
+
+#[tokio::test]
+async fn anthropic_messages_stream_orders_events_and_concatenates() {
+    let (app, key) = chat_app(Provider::Anthropic);
+    let body = json!({
+        "model": "brain-chat",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true,
+    });
+    let (st, text) = post_text(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let events = sse_events(&text);
+    let names: Vec<&str> = events.iter().map(|(e, _)| e.as_str()).collect();
+
+    // Exact terminal + presence of each phase.
+    assert_eq!(names.first(), Some(&"message_start"));
+    assert_eq!(names.last(), Some(&"message_stop"));
+    let pos = |name: &str| names.iter().position(|n| *n == name).unwrap_or_else(|| panic!("missing event {name}: {names:?}"));
+    // Ordering: start < block_start < first delta < block_stop < message_delta < stop.
+    assert!(pos("message_start") < pos("content_block_start"));
+    assert!(pos("content_block_start") < pos("content_block_delta"));
+    assert!(pos("content_block_delta") < pos("content_block_stop"));
+    assert!(pos("content_block_stop") < pos("message_delta"));
+    assert!(pos("message_delta") < pos("message_stop"));
+
+    // Each event validates against its schema.
+    for (e, d) in &events {
+        let v: Value = serde_json::from_str(d).unwrap();
+        let schema = match e.as_str() {
+            "message_start" => "MessageStartEvent",
+            "content_block_start" => "ContentBlockStartEvent",
+            "content_block_delta" => "ContentBlockDeltaEvent",
+            "content_block_stop" => "ContentBlockStopEvent",
+            "message_delta" => "MessageDeltaEvent",
+            "message_stop" => "MessageStopEvent",
+            other => panic!("unexpected event {other}"),
+        };
+        assert_valid("anthropic.json", schema, &v);
+    }
+
+    // Concatenated text_delta pieces == the full text.
+    let cat: String = events
+        .iter()
+        .filter(|(e, _)| e == "content_block_delta")
+        .map(|(_, d)| serde_json::from_str::<Value>(d).unwrap()["delta"]["text"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(cat, "Hello world");
+
+    // message_delta carries the mapped stop_reason + cumulative output tokens.
+    let (_, md) = events.iter().find(|(e, _)| e == "message_delta").unwrap();
+    let v: Value = serde_json::from_str(md).unwrap();
+    assert_eq!(v["delta"]["stop_reason"], "end_turn");
+    assert_eq!(v["usage"]["output_tokens"], 2);
+}
+
+#[tokio::test]
+async fn openrouter_chat_stream_validates_and_carries_native_finish_reason() {
+    let (app, key) = chat_app(Provider::OpenRouter);
+    let body = json!({
+        "model": "brain-chat",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true,
+    });
+    let (st, text) = post_text(&app, Provider::OpenRouter, &key, "/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let datas = sse_data(&text);
+    assert_eq!(datas.last().map(String::as_str), Some("[DONE]"));
+    let mut saw_native = false;
+    for d in datas.iter().filter(|d| d.as_str() != "[DONE]") {
+        let v: Value = serde_json::from_str(d).unwrap();
+        assert_valid("openrouter.json", "ChatStreamChunk", &v);
+        if v["choices"][0]["finish_reason"].as_str() == Some("stop") {
+            assert_eq!(v["choices"][0]["native_finish_reason"], "stop");
+            saw_native = true;
+        }
+    }
+    assert!(saw_native, "final chunk must carry native_finish_reason");
 }

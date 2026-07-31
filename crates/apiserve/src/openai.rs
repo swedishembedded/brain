@@ -1,19 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The OpenAI-compatible surface. P4 registers routes and returns a spec-valid
-//! `not_implemented` error; mappings are stubbed for P5+. Unsupported OpenAI
-//! surfaces (files, fine-tuning, responses, batches, …) are not routed and so fall
-//! through to the shared 404 fallback.
+//! The OpenAI-compatible surface: `POST /chat/completions` (non-streaming and SSE
+//! token streaming), plus the still-stubbed embeddings/image routes. Chat dispatches
+//! to the shared executor's `generate` action via [`crate::bridge`]. The OpenRouter
+//! surface reuses [`handle_chat`] with `native = true` (adds `native_finish_reason`
+//! + `system_fingerprint`).
 
+use axum::body::Bytes;
 use axum::extract::State;
+use axum::response::sse::{Event, Sse};
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use axum::Router;
-use capability::{Invocation, Outcome};
+use axum::{Json, Router};
+use capability::Invocation;
 use serde_json::{json, Value};
+use std::convert::Infallible;
+use uuid::Uuid;
 
+use crate::bridge::{self, StreamMsg};
+use crate::catalog;
 use crate::error::ApiError;
+use crate::models::CREATED_UNIX;
 use crate::state::AppState;
+use crate::surface::Provider;
 
 /// OpenAI chat/embeddings/image routes (merged onto the shared `/models` router).
 pub fn routes() -> Router<AppState> {
@@ -26,29 +36,215 @@ pub fn routes() -> Router<AppState> {
         .route("/images/generations", post(images_generations))
 }
 
-/// `POST /v1/chat/completions` — 501 until P5.
-async fn chat_completions(State(state): State<AppState>) -> ApiError {
-    ApiError::not_implemented(state.provider, "POST /chat/completions is not implemented yet")
+/// `POST /chat/completions` — real chat (non-stream + SSE) on the OpenAI dialect.
+async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Response {
+    handle_chat(state, body, false).await
 }
 
-/// `POST /v1/embeddings` — 501 until P5.
+/// `POST /v1/embeddings` — 501 until a later phase.
 async fn embeddings(State(state): State<AppState>) -> ApiError {
     ApiError::not_implemented(state.provider, "POST /embeddings is not implemented yet")
 }
 
-/// `POST /v1/images/generations` — 501 until P5.
+/// `POST /v1/images/generations` — 501 until a later phase.
 async fn images_generations(State(state): State<AppState>) -> ApiError {
     ApiError::not_implemented(state.provider, "POST /images/generations is not implemented yet")
 }
 
-/// Map an OpenAI chat/embeddings request body to `(model, action, invocation)`.
-/// Filled in P5.
-pub fn to_invocation(_body: &Value) -> Result<(String, String, Invocation), ApiError> {
-    todo!("P5: map OpenAI request -> capability::Invocation")
+/// The chat handler shared by the OpenAI and OpenRouter surfaces. `native` adds
+/// OpenRouter's `native_finish_reason` (mirroring `finish_reason`) and the
+/// `system_fingerprint` its `ChatResult` requires.
+pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response {
+    let provider = state.provider;
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return ApiError::invalid_request(provider, format!("invalid JSON body: {e}")).into_response(),
+    };
+    let (model, inv, stream) = match to_invocation(provider, &body) {
+        Ok(x) => x,
+        Err(e) => return e.into_response(),
+    };
+    // Resolve the model against the chat-capable manifests before dispatching.
+    if !catalog::resolve_chat(&state.exec, &model) {
+        return ApiError::model_not_found(provider, &model).into_response();
+    }
+    if stream {
+        let want_usage = body.get("stream_options").and_then(|o| o.get("include_usage")).and_then(|v| v.as_bool()).unwrap_or(false);
+        stream_chat(state, model, inv, native, want_usage).into_response()
+    } else {
+        match bridge::submit(&state, &model, "generate", inv).await {
+            Ok(outcome) => {
+                let (text, prompt, completion, finish) = bridge::read_outcome(&outcome);
+                Json(non_stream_body(&model, &text, prompt, completion, &finish, native)).into_response()
+            }
+            Err(e) => e.into_response(),
+        }
+    }
 }
 
-/// Map an executor [`Outcome`] back to an OpenAI response body. Filled in P5.
-pub fn from_outcome(_o: &Outcome, _model: &str) -> Value {
-    let _ = json!({});
-    todo!("P5: map capability::Outcome -> OpenAI response")
+/// Parse + validate an OpenAI chat request into `(model, invocation, stream)`.
+/// Enforces `model`/`messages` present and rejects `n > 1`; builds the contract
+/// `generate` invocation.
+pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invocation, bool), ApiError> {
+    let model = body.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).ok_or_else(|| ApiError::invalid_request(provider, "'model' is required"))?;
+    let messages = body.get("messages").and_then(|v| v.as_array()).filter(|a| !a.is_empty()).ok_or_else(|| ApiError::invalid_request(provider, "'messages' must be a non-empty array"))?;
+    if body.get("n").and_then(|v| v.as_i64()).unwrap_or(1) > 1 {
+        return Err(ApiError::invalid_request(provider, "'n' > 1 is not supported"));
+    }
+    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Flatten each message to the contract shape {role, content(text)}.
+    let msgs: Vec<Value> = messages.iter().map(flatten_message).collect();
+    let mut inv = Invocation::new()
+        .set("messages", json!(serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".into())))
+        .set("max_new", json!(max_new(body)))
+        .set("temp", json!(body.get("temperature").and_then(|v| v.as_f64()).unwrap_or(1.0)))
+        .set("top_p", json!(body.get("top_p").and_then(|v| v.as_f64()).unwrap_or(1.0)))
+        .set("top_k", json!(body.get("top_k").and_then(|v| v.as_i64()).unwrap_or(0)))
+        .set("seed", json!(body.get("seed").and_then(|v| v.as_i64()).unwrap_or(0)));
+    if let Some(stop) = normalize_stop(body.get("stop")) {
+        inv = inv.set("stop", json!(stop));
+    }
+    Ok((model.to_string(), inv, stream))
+}
+
+/// `max_tokens` (or the newer `max_completion_tokens`), defaulting to 1024.
+fn max_new(body: &Value) -> i64 {
+    body.get("max_completion_tokens").and_then(|v| v.as_i64()).or_else(|| body.get("max_tokens").and_then(|v| v.as_i64())).unwrap_or(1024)
+}
+
+/// Normalize OpenAI `stop` (string | array | null) to a JSON-array string, or `None`.
+fn normalize_stop(v: Option<&Value>) -> Option<String> {
+    match v {
+        Some(Value::String(s)) => Some(serde_json::to_string(&vec![s.clone()]).unwrap_or_default()),
+        Some(Value::Array(a)) if !a.is_empty() => Some(serde_json::to_string(a).unwrap_or_default()),
+        _ => None,
+    }
+}
+
+/// One OpenAI message → the contract `{role, content}` (content flattened to text).
+fn flatten_message(m: &Value) -> Value {
+    let role = match m.get("role").and_then(|v| v.as_str()).unwrap_or("user") {
+        "system" | "developer" => "system",
+        "assistant" => "assistant",
+        // tool results and anything else fold into the user turn.
+        _ => "user",
+    };
+    json!({ "role": role, "content": content_text(m.get("content")) })
+}
+
+/// Flatten OpenAI message content (a string, or an array of typed parts) to text.
+fn content_text(c: Option<&Value>) -> String {
+    match c {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
+}
+
+/// Map the contract `finish_reason` to OpenAI's enum. There is no `stop_sequence`
+/// in OpenAI; a stop-sequence hit is reported as `stop`.
+fn finish_openai(fr: &str) -> &'static str {
+    match fr {
+        "length" => "length",
+        _ => "stop",
+    }
+}
+
+/// The non-streaming `chat.completion` body.
+fn non_stream_body(model: &str, text: &str, prompt: i64, completion: i64, finish: &str, native: bool) -> Value {
+    let fr = finish_openai(finish);
+    let mut choice = json!({
+        "index": 0,
+        "message": { "role": "assistant", "content": text, "refusal": Value::Null },
+        "finish_reason": fr,
+        "logprobs": Value::Null,
+    });
+    if native {
+        choice["native_finish_reason"] = json!(fr);
+    }
+    let mut body = json!({
+        "id": format!("chatcmpl-{}", Uuid::new_v4().simple()),
+        "object": "chat.completion",
+        "created": CREATED_UNIX,
+        "model": model,
+        "choices": [choice],
+        "usage": { "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion },
+    });
+    if native {
+        // OpenRouter's ChatResult requires system_fingerprint (nullable).
+        body["system_fingerprint"] = Value::Null;
+    }
+    body
+}
+
+/// One streaming `chat.completion.chunk`.
+fn chunk(id: &str, model: &str, delta: Value, finish: Option<&str>, native: bool) -> Value {
+    let mut choice = json!({ "index": 0, "delta": delta, "finish_reason": finish });
+    if native {
+        choice["native_finish_reason"] = json!(finish);
+    }
+    json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": CREATED_UNIX,
+        "model": model,
+        "choices": [choice],
+    })
+}
+
+/// The SSE `chat.completion.chunk` stream: a role chunk, one content chunk per token
+/// delta, a terminal chunk carrying `finish_reason`, an optional usage-only chunk
+/// (when `stream_options.include_usage`), then `data: [DONE]`.
+fn stream_chat(state: AppState, model: String, inv: Invocation, native: bool, want_usage: bool) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    use futures::StreamExt;
+    let id = format!("chatcmpl-{}", Uuid::new_v4().simple());
+    let events = async_stream::stream! {
+        // First chunk: announce the assistant role.
+        yield Ok(Event::default().data(chunk(&id, &model, json!({ "role": "assistant", "content": "" }), None, native).to_string()));
+
+        let mut src = bridge::stream(&state, &model, "generate", inv);
+        let mut finish = String::from("stop");
+        let (mut prompt, mut completion) = (0i64, 0i64);
+        while let Some(msg) = src.next().await {
+            match msg {
+                StreamMsg::Delta(piece) => {
+                    yield Ok(Event::default().data(chunk(&id, &model, json!({ "content": piece }), None, native).to_string()));
+                }
+                StreamMsg::Done(outcome) => {
+                    let (_t, p, c, fr) = bridge::read_outcome(&outcome);
+                    prompt = p;
+                    completion = c;
+                    finish = fr;
+                }
+                StreamMsg::Err(e) => {
+                    // Surface the error as an OpenAI error frame, then terminate.
+                    yield Ok(Event::default().data(e.body().to_string()));
+                    yield Ok(Event::default().data("[DONE]"));
+                    return;
+                }
+            }
+        }
+        // Terminal chunk: empty delta + finish_reason.
+        let fr = finish_openai(&finish);
+        yield Ok(Event::default().data(chunk(&id, &model, json!({}), Some(fr), native).to_string()));
+
+        if want_usage {
+            let usage_chunk = json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "created": CREATED_UNIX,
+                "model": model,
+                "choices": [],
+                "usage": { "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion },
+            });
+            yield Ok(Event::default().data(usage_chunk.to_string()));
+        }
+        yield Ok(Event::default().data("[DONE]"));
+    };
+    Sse::new(events.boxed())
 }

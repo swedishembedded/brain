@@ -1,18 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The OpenRouter-compatible surface. Same request grammar as OpenAI (chat /
-//! embeddings / images) with OpenRouter's richer model cards and error envelope.
-//! P4 registers routes and returns a spec-valid `not_implemented` error; mappings
-//! are stubbed for P5+.
+//! The OpenRouter-compatible surface. Same request grammar and chat handler as
+//! OpenAI (it reuses [`crate::openai::handle_chat`]) with `native = true`, which
+//! adds OpenRouter's `native_finish_reason` (mirroring `finish_reason`) and the
+//! `system_fingerprint` its `ChatResult` requires. Embeddings/images stay 501.
 
+use axum::body::Bytes;
 use axum::extract::State;
+use axum::response::Response;
 use axum::routing::post;
 use axum::Router;
-use capability::{Invocation, Outcome};
-use serde_json::{json, Value};
 
 use crate::error::ApiError;
+use crate::openai;
 use crate::state::AppState;
 
 /// OpenRouter chat/embeddings/image routes (merged onto the shared `/models` router).
@@ -26,28 +27,18 @@ pub fn routes() -> Router<AppState> {
         .route("/images/generations", post(images_generations))
 }
 
-/// `POST /chat/completions` — 501 until P5.
-async fn chat_completions(State(state): State<AppState>) -> ApiError {
-    ApiError::not_implemented(state.provider, "POST /chat/completions is not implemented yet")
+/// `POST /chat/completions` — the OpenAI chat handler with OpenRouter's response
+/// extras (`native_finish_reason`, `system_fingerprint`).
+async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Response {
+    openai::handle_chat(state, body, true).await
 }
 
-/// `POST /embeddings` — 501 until P5.
+/// `POST /embeddings` — 501 until a later phase.
 async fn embeddings(State(state): State<AppState>) -> ApiError {
     ApiError::not_implemented(state.provider, "POST /embeddings is not implemented yet")
 }
 
-/// `POST /images/generations` — 501 until P5.
+/// `POST /images/generations` — 501 until a later phase.
 async fn images_generations(State(state): State<AppState>) -> ApiError {
     ApiError::not_implemented(state.provider, "POST /images/generations is not implemented yet")
-}
-
-/// Map an OpenRouter request body to `(model, action, invocation)`. Filled in P5.
-pub fn to_invocation(_body: &Value) -> Result<(String, String, Invocation), ApiError> {
-    todo!("P5: map OpenRouter request -> capability::Invocation")
-}
-
-/// Map an executor [`Outcome`] back to an OpenRouter response body. Filled in P5.
-pub fn from_outcome(_o: &Outcome, _model: &str) -> Value {
-    let _ = json!({});
-    todo!("P5: map capability::Outcome -> OpenRouter response")
 }
