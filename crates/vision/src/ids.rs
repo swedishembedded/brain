@@ -40,12 +40,25 @@ pub struct ConvKernelIds {
     pub conv2d_gd_dx: usize,
     pub conv2d_gd_dw: usize,
     pub conv2d_tiled: usize,
+    // ---- transposed conv (decoder upsampling: SAM 2's mask decoder, the
+    // VQGAN/CodeFormer decoder). The weight layout is torch's
+    // `[Cin, Cout/G, K, K]` — the TRANSPOSE of conv2d_gd's `[Cout, Cin/G, K, K]`.
+    // Both hold Cin*Cout/G elements, so a conv2d_gd-layout weight always binds
+    // and simply computes a different operator; see `ConvTranspose`.
+    pub convtr2d: usize,
+    pub convtr2d_dx: usize,
+    pub convtr2d_dw: usize,
     pub conv_bias: usize,
     /// Register-tiled `conv_bias` (8x4 tile, `conv_act_reg`'s dispatch shape).
     /// Same math; CPU routes both to the same fast path.
     pub conv_bias_reg: usize,
     pub bias_add: usize,
     pub bias_grad: usize,
+    /// `out[n,c,hw] += v[c]` over NCHW — the per-channel bias add for the units
+    /// the FUSED `conv_bias` kernel cannot serve, because its uniform carries no
+    /// groups/dilation and it has no transposed form: a grouped/dilated biased
+    /// conv, and every biased [`crate::ConvTranspose`].
+    pub add_chan_inplace: usize,
     // ---- batchnorm ----
     pub bn_stats: usize,
     pub bn_running: usize,
@@ -63,6 +76,25 @@ pub struct ConvKernelIds {
     pub leaky_relu_bwd: usize,
     pub sigmoid: usize,
     pub sigmoid_bwd: usize,
+    /// GELU, tanh approximation (GPT-2 style) — `Act::Gelu`.
+    pub gelu: usize,
+    pub gelu_bwd: usize,
+    /// GELU, exact erf form — torch's default `nn.GELU()`, so this is what
+    /// ConvNeXt / SAM 2 checkpoints were trained with (`Act::GeluErf`). A
+    /// DIFFERENT function from `gelu`, not a faster spelling of it.
+    pub gelu_erf: usize,
+    pub gelu_erf_bwd: usize,
+    // ---- LayerNorm over the channel axis (channels-first `LayerNorm2d`).
+    // Only the REFERENCE kernels live here: the coalesced `*_rows` variants are
+    // resolved by name inside `model::block::LayerNormIds::resolve`, which is the
+    // one place in the workspace that decides between them (on the queried
+    // `DeviceCaps`, via `backend_api::select`). Mirroring them here would be a
+    // second selection site that could drift from it.
+    pub layernorm: usize,
+    pub ln_stats: usize,
+    pub layernorm_dx: usize,
+    pub layernorm_dgamma: usize,
+    pub layernorm_dbeta: usize,
     // ---- fused conv -> affine -> act (inference only) ----
     pub conv_act: usize,
     pub conv_act_tiled: usize,
@@ -101,6 +133,13 @@ pub struct ConvKernelIds {
     // ---- elementwise / plumbing ----
     pub mul: usize,
     pub scale_chan: usize,
+    /// `dscale[c] += sum x*dy` — `scale_chan`'s gain gradient (ConvNeXt LayerScale).
+    pub scale_chan_dg: usize,
+    // ---- layout permutation NCHW <-> NLC. Each is the other's inverse AND its
+    // adjoint, so the backward of one is a dispatch of the other. Used by
+    // `LayerNorm2d` to feed the row-oriented LayerNorm family.
+    pub nchw_nlc: usize,
+    pub nlc_nchw: usize,
     pub concat2: usize,
     pub concat_split: usize,
     pub chan_place: usize,
@@ -128,10 +167,14 @@ impl ConvKernelIds {
             conv2d_gd_dx: k("conv2d_gd_dx"),
             conv2d_gd_dw: k("conv2d_gd_dw"),
             conv2d_tiled: k("conv2d_tiled"),
+            convtr2d: k("convtr2d"),
+            convtr2d_dx: k("convtr2d_dx"),
+            convtr2d_dw: k("convtr2d_dw"),
             conv_bias: k("conv_bias"),
             conv_bias_reg: k("conv_bias_reg"),
             bias_add: k("bias_add"),
             bias_grad: k("bias_grad"),
+            add_chan_inplace: k("add_chan_inplace"),
             bn_stats: k("bn_stats"),
             bn_running: k("bn_running"),
             bn_train: k("bn_train"),
@@ -146,6 +189,15 @@ impl ConvKernelIds {
             leaky_relu_bwd: k("leaky_relu_bwd"),
             sigmoid: k("sigmoid"),
             sigmoid_bwd: k("sigmoid_bwd"),
+            gelu: k("gelu"),
+            gelu_bwd: k("gelu_bwd"),
+            gelu_erf: k("gelu_erf"),
+            gelu_erf_bwd: k("gelu_erf_bwd"),
+            layernorm: k("layernorm"),
+            ln_stats: k("ln_stats"),
+            layernorm_dx: k("layernorm_dx"),
+            layernorm_dgamma: k("layernorm_dgamma"),
+            layernorm_dbeta: k("layernorm_dbeta"),
             conv_act: k("conv_act"),
             conv_act_tiled: k("conv_act_tiled"),
             conv_act_reg: k("conv_act_reg"),
@@ -178,6 +230,9 @@ impl ConvKernelIds {
             convex_upsample_dd: k("convex_upsample_dd"),
             mul: k("mul"),
             scale_chan: k("scale_chan"),
+            scale_chan_dg: k("scale_chan_dg"),
+            nchw_nlc: k("nchw_nlc"),
+            nlc_nchw: k("nlc_nchw"),
             concat2: k("concat2"),
             concat_split: k("concat_split"),
             chan_place: k("chan_place"),

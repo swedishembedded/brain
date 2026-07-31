@@ -40,9 +40,15 @@
 //! module's invariant. `crates/model` is also a dependency of 14 crates, none of
 //! which will ever dispatch a conv.
 //!
-//! This crate deliberately does **not** depend on `brain-model`: the blocks do
-//! not implement `Model`, and keeping the trainer out means `brain-npu` can use
-//! the vision layer without pulling it in.
+//! The blocks do not implement `Model` and never touch the trainer. The one
+//! thing this crate takes from `crates/model` is `model::block`'s **LayerNorm
+//! dispatch seam** (`LayerNormIds` + `layernorm_fwd` / `ln_stats_fwd` /
+//! `layernorm_dx_bwd`), used by [`blocks::LayerNorm2d`]: that seam is the single
+//! place in the workspace that decides between the reference LayerNorm kernels
+//! and the coalesced `*_rows` twins, keyed on the queried `DeviceCaps` via
+//! `backend_api::select`. Re-deriving the choice here would be a second
+//! selection site, free to drift from it — exactly the failure AGENTS.md names
+//! ("a fast kernel a later model never learned about").
 
 pub mod blocks;
 pub mod bn;
@@ -51,7 +57,10 @@ pub mod ids;
 pub mod net;
 pub mod plumbing;
 
-pub use blocks::{Act, Bottleneck, Conv, ConvNames, ConvSpec, NameStyle, Norm, SppfSpec, C2f, SPPF};
+pub use blocks::{
+    Act, Bottleneck, Conv, ConvNames, ConvSpec, ConvTrSpec, ConvTranspose, CxSpec, CXBlock,
+    LayerNorm2d, Ln2dNames, MaxPool, NameStyle, Norm, PoolSpec, SppfSpec, C2f, SPPF,
+};
 pub use bn::{BatchNorm, BnNames};
 pub use fold::{fold_bn, BN_EPS};
 pub use ids::{ConvKernelIds, NONE};

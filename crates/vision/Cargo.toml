@@ -10,8 +10,19 @@ name = "vision"
 path = "src/lib.rs"
 
 [dependencies]
-# Deliberately NOT brain-model: the blocks do not implement `Model`, and keeping
-# the trainer out means brain-npu can use the vision layer without pulling it in.
 brain-gpu-core.workspace = true
 brain-paramstore.workspace = true
+# `model::block` ONLY, and only for the LayerNorm dispatch seam
+# (`LayerNormIds` / `layernorm_fwd` / `ln_stats_fwd` / `layernorm_dx_bwd`), which
+# is the single place in the workspace that chooses between the reference
+# LayerNorm kernels and the coalesced `*_rows` twins. `LayerNorm2d` needs that
+# choice; re-deriving it here would be a second selection site free to drift
+# from `backend_api::select`. The blocks still do not implement `Model` and the
+# trainer is not used. (This edge is not new in the dependency GRAPH: every
+# crate that consumes `vision` — yolo, depth, mirror, fastvlm, cli — already
+# depends on brain-model, and brain-npu pulls it in transitively via brain-qwen.)
+brain-model.workspace = true
 bytemuck.workspace = true
+
+[dev-dependencies]
+brain-kernels.workspace = true

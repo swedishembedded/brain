@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! YOLOv8 convolutional building blocks (P2): `Conv`, `Bottleneck`, `C2f`,
-//! `SPPF`. NCHW throughout.
+//! Shared convolutional building blocks. NCHW throughout.
+//!
+//! * conv family — [`Conv`] (spec-driven: grouped/dilated/biased, fused and
+//!   register-tiled eval paths), [`ConvTranspose`].
+//! * composites — [`Bottleneck`], [`C2f`], [`SPPF`], [`CXBlock`] (ConvNeXt).
+//! * stages — [`MaxPool`], [`LayerNorm2d`] (channels-first, composed).
 //!
 //! ## Block abstraction (the pattern, mirroring `gpt::Gpt`)
 //!
@@ -42,6 +46,7 @@
 //! This matches Ultralytics' `cv1`/`cv2`/`m` naming for later string-mapping.
 
 use gpu_core::{f, DeviceBuffer};
+use model::block as mblock;
 use paramstore::ParamStore;
 
 use crate::net::{Ctx, Shape};
@@ -107,6 +112,131 @@ pub enum Act {
     /// ZipDepth's `StripPoolingAttention` ends `Conv->BN->Sigmoid` and multiplies
     /// the result into `x`. Never fuses (the fused kernel is SiLU-only).
     Sigmoid,
+    /// GELU, **tanh approximation** (`0.5x(1+tanh(k(x+0.044715x^3)))`) — the
+    /// GPT-2 spelling. Not the same function as [`Act::GeluErf`]; picking the
+    /// wrong one is a silent ~1e-3 output shift, not an error.
+    Gelu,
+    /// GELU, **exact erf form** (`0.5x(1+erf(x/sqrt 2))`) — torch's default
+    /// `nn.GELU()`, and therefore what ConvNeXt / SAM 2 / VQGAN checkpoints were
+    /// trained with. The default for [`CXBlock`].
+    GeluErf,
+}
+
+impl Act {
+    /// The FUSED kernels' activation selector — `conv_act*`'s and `bn_eval`'s
+    /// `p.act` — or `None` for an activation those kernels do not implement.
+    ///
+    /// `None` is load-bearing, not a formality. Their WGSL branches on exactly
+    /// `1u`/`2u`/`3u` and falls through to the IDENTITY otherwise, so pushing a
+    /// `4` for GELU would produce a conv whose activation silently vanished:
+    /// plausible numbers, wrong model. Everything that consults this must treat
+    /// `None` as "take the unfused path", never as "use 0".
+    pub fn fused_code(self) -> Option<u32> {
+        match self {
+            Act::None => Some(0),
+            Act::Relu => Some(1),
+            Act::Silu => Some(2),
+            Act::Sigmoid => Some(3),
+            Act::Gelu | Act::GeluErf => None,
+        }
+    }
+}
+
+/// The unfused activation's `(forward, backward)` kernel pair, or `None` for
+/// [`Act::None`]. ReLU maps to `leaky_relu` at slope 0 — identical in both
+/// directions — so it needs no kernel of its own.
+///
+/// A free function rather than a method: `Conv`, [`ConvTranspose`] and
+/// [`CXBlock`]'s pointwise stage all need the same pairing, and a second copy is
+/// how the ReLU-is-leaky_relu-at-slope-0 trick drifts.
+fn act_pair(ctx: &Ctx, act: Act) -> Option<(usize, usize)> {
+    match act {
+        Act::None => None,
+        Act::Silu => Some((ctx.ids.need(ctx.ids.silu, "silu"), ctx.ids.need(ctx.ids.silu_bwd, "silu_bwd"))),
+        Act::Relu => Some((
+            ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"),
+            ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"),
+        )),
+        Act::Sigmoid => {
+            Some((ctx.ids.need(ctx.ids.sigmoid, "sigmoid"), ctx.ids.need(ctx.ids.sigmoid_bwd, "sigmoid_bwd")))
+        }
+        Act::Gelu => Some((ctx.ids.need(ctx.ids.gelu, "gelu"), ctx.ids.need(ctx.ids.gelu_bwd, "gelu_bwd"))),
+        Act::GeluErf => {
+            Some((ctx.ids.need(ctx.ids.gelu_erf, "gelu_erf"), ctx.ids.need(ctx.ids.gelu_erf_bwd, "gelu_erf_bwd")))
+        }
+    }
+}
+
+/// The activation kernels' uniform stream. `leaky_relu`'s is `[total, slope]`
+/// with `slope` a bit-cast f32; every other one's is `[total]`. Slope 0 makes
+/// `leaky_relu` exactly ReLU.
+fn act_params(act: Act, n: u32) -> Vec<u32> {
+    match act {
+        Act::Relu => vec![n, f(0.0)],
+        _ => vec![n],
+    }
+}
+
+/// Accumulate a per-output-channel bias gradient from `d_out`, the grad wrt the
+/// biased unit's output: `dbias[c] = sum over n,h,w of d_out[n,c,h,w]`.
+///
+/// The `bias_grad` kernel is `[M,N]` row-major and reduces over M, so `d_out` is
+/// viewed as `[M=N, N=C*HW]`: element `(n, c*HW+p)` IS `d_out[n,c,h,w]`, and the
+/// kernel gives `dbcast[c*HW+p] = sum_n d_out[n,c,h,w]`. The remaining spatial
+/// sum is done on the host — the same host-reduce split `gradnorm_sq` uses.
+///
+/// Shared by [`Conv`] and [`ConvTranspose`]: the reduction is a property of the
+/// NCHW layout, not of which convolution produced it.
+///
+/// Must run AFTER the caller's submit — it reads `d_out` back.
+fn accumulate_bias_grad(
+    ctx: &Ctx,
+    ps: &ParamStore,
+    name: &str,
+    dbcast: &DeviceBuffer,
+    shape: Shape,
+    d_out: &DeviceBuffer,
+) {
+    let (cout, hw) = (shape.c, shape.h * shape.w);
+    let n = cout * hw;
+    // bias_grad ACCUMULATES into its output, and `dbcast` persists across
+    // backward passes -> it must be zeroed first (submit's clear list).
+    let s = ctx.step(ctx.ids.need(ctx.ids.bias_grad, "bias_grad"), &[d_out, dbcast], &[shape.n, n], n);
+    ctx.gpu.submit(&[dbcast], &[s]);
+    let host = ctx.gpu.read(dbcast, n as usize);
+    let cur = ctx.gpu.read(ps.g(name), cout as usize);
+    let merged: Vec<f32> = (0..cout as usize)
+        .map(|ch| cur[ch] + host[ch * hw as usize..(ch + 1) * hw as usize].iter().sum::<f32>())
+        .collect();
+    ctx.gpu.write(ps.g(name), bytemuck::cast_slice(&merged));
+}
+
+/// Read a unit's input to the host, let an installed [`crate::ActTap`] observe
+/// (and optionally rewrite in place — quant->dequant) it keyed by `prefix`, and
+/// return a device copy of the tapped bytes. `None` when no tap is installed
+/// (every normal inference), so the caller convolves its input directly and pays
+/// zero cost.
+///
+/// Fires ONCE per unit at the unit's input — the same point the exported ONNX
+/// graph inserts its Q/DQ pair. `scratch` is the caller's lazily-allocated
+/// staging buffer, reused across frames.
+fn apply_tap(
+    ctx: &Ctx,
+    prefix: &str,
+    in_numel: usize,
+    scratch: &std::cell::RefCell<Option<DeviceBuffer>>,
+    x_in: &DeviceBuffer,
+) -> Option<DeviceBuffer> {
+    let tap = ctx.tap?;
+    let mut h = ctx.gpu.read(x_in, in_numel);
+    tap.tap(prefix, &mut h);
+    if scratch.borrow().is_none() {
+        *scratch.borrow_mut() = Some(ctx.gpu.storage(in_numel as u64));
+    }
+    let q = scratch.borrow();
+    let qbuf = q.as_ref().unwrap().clone();
+    ctx.gpu.write(&qbuf, bytemuck::cast_slice(&h));
+    Some(qbuf)
 }
 
 /// Whether a conv unit carries its own BatchNorm.
@@ -136,9 +266,14 @@ pub struct ConvSpec {
     pub act: Act,
     /// A learned per-output-channel bias (`nn.Conv2d(.., bias=True)`).
     ///
-    /// Dispatched as the FUSED `conv_bias` kernel, which is DENSE-only — its
-    /// uniform has no groups/dilation — so `bias` requires `is_dense()`, asserted
-    /// in the ctor. Every biased conv in ZipDepth is dense.
+    /// TWO dispatch paths, picked by [`ConvSpec::is_dense`]:
+    ///   * dense -> the FUSED `conv_bias` / `conv_bias_reg` kernel, one pass.
+    ///   * grouped/dilated -> `conv2d_gd` followed by `add_chan_inplace`
+    ///     (`out[n,c,hw] += bias[c]`), because `conv_bias`'s uniform carries no
+    ///     groups/dilation and would silently convolve as if dense.
+    /// The second path exists for ConvNeXt: [`CXBlock`]'s 7x7 depthwise conv is
+    /// grouped AND biased. Every biased conv in ZipDepth is dense and keeps the
+    /// fused path unchanged.
     ///
     /// `bias` is independent of `norm`: ZipDepth's `GlobalContextBlock.transform.0`
     /// is a biased conv followed by BN, where the bias is mathematically redundant
@@ -156,9 +291,12 @@ impl ConvSpec {
     pub const fn relu(cout: u32, k: u32, stride: u32, pad: u32) -> ConvSpec {
         ConvSpec { cout, k, stride, pad, groups: 1, dilation: 1, norm: Norm::Bn, act: Act::Relu, bias: false }
     }
-    /// Add a learned per-channel bias. Requires the unit to be dense (`conv_bias`
-    /// has no grouped form) — asserted at construction, not here, so the const fn
-    /// stays usable in a spec table.
+    /// Add a learned per-channel bias.
+    ///
+    /// No longer restricted to dense units: a grouped/dilated biased conv runs
+    /// `conv2d_gd -> add_chan_inplace` (ConvNeXt's 7x7 depthwise conv is grouped
+    /// AND biased). Dense units keep the fused `conv_bias` / `conv_bias_reg`
+    /// single pass unchanged — see [`ConvSpec::bias`].
     pub const fn with_bias(self) -> ConvSpec {
         ConvSpec { bias: true, ..self }
     }
@@ -194,7 +332,13 @@ impl ConvSpec {
 }
 
 
-/// The five tensor names a `Conv` unit owns.
+/// The six tensor names a conv-shaped unit owns.
+///
+/// Shared by [`Conv`] and [`ConvTranspose`] — a transposed conv spells its
+/// weight and bias exactly like a forward one; only the tensor LAYOUT differs,
+/// and that is the spec's business, not the name's. A norm-free unit
+/// (`Norm::None`, and every `ConvTranspose`) simply never reads the four
+/// BatchNorm names.
 ///
 /// A property of WHERE THE WEIGHTS CAME FROM, not of the block — which is why it
 /// is data rather than a hardcoded `format!`. Two models share this block and
@@ -244,6 +388,30 @@ impl ConvNames {
             run_var: format!("{prefix}.bn.running_var"),
         }
     }
+    /// A BARE torch conv module at path `P`: `P.weight` + `P.bias`, with no
+    /// `.conv`/`.bn` infix at all.
+    ///
+    /// This is the shape every `nn.ConvTranspose2d` and every `nn.Linear`-as-1x1
+    /// takes, and it covers the positional case too because the caller owns the
+    /// prefix: SAM 2's mask decoder is
+    /// `nn.Sequential(ConvTranspose2d, LayerNorm2d, GELU, ConvTranspose2d, GELU)`,
+    /// so its first deconv is `torch_flat("output_upscaling.0")`, while a
+    /// VQGAN/CodeFormer decoder names the same module `…up.3.upsample.conv`.
+    /// One convention, two checkpoints, no translation table.
+    ///
+    /// The BatchNorm names are filled with torch's `P.bn.*` spelling so a unit
+    /// that later gains a `Norm::Bn` gets sane names for free; a `ConvTranspose`
+    /// never reads them.
+    pub fn torch_flat(prefix: &str) -> ConvNames {
+        ConvNames {
+            bias: format!("{prefix}.bias"),
+            weight: format!("{prefix}.weight"),
+            gamma: format!("{prefix}.bn.weight"),
+            beta: format!("{prefix}.bn.bias"),
+            run_mean: format!("{prefix}.bn.running_mean"),
+            run_var: format!("{prefix}.bn.running_var"),
+        }
+    }
     /// A torch `nn.Sequential(Conv2d, BatchNorm2d)` (ZipDepth's QARepBlock
     /// branches, gate_conv, transform, mask_pred): children are indexed by
     /// POSITION, so `P.{ci}.weight` + `P.{bi}.{weight,bias,running_mean,running_var}`.
@@ -271,6 +439,8 @@ pub enum NameStyle {
     Brain,
     /// torch `ConvBN`-style module: `P.conv.weight` + `P.bn.{weight,bias,running_*}`.
     TorchConvBn,
+    /// A bare torch conv/deconv module: `P.weight` + `P.bias`.
+    TorchFlat,
 }
 
 impl NameStyle {
@@ -278,6 +448,7 @@ impl NameStyle {
         match self {
             NameStyle::Brain => ConvNames::brain(prefix),
             NameStyle::TorchConvBn => ConvNames::torch_conv_bn(prefix),
+            NameStyle::TorchFlat => ConvNames::torch_flat(prefix),
         }
     }
 }
@@ -355,8 +526,10 @@ pub struct Conv {
 }
 
 impl Conv {
-    #[allow(clippy::too_many_arguments)]
     /// yolo's ctor, unchanged: dense conv + BN + SiLU.
+    // The 8 positional args ARE this ctor's contract (yolo's call sites are
+    // frozen by its checkpoint layout); the spec-driven `with_spec` is the
+    // non-positional alternative.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         ctx: &Ctx,
@@ -389,10 +562,6 @@ impl Conv {
         let (cout, k, stride, pad) = (spec.cout, spec.k, spec.stride, spec.pad);
         assert_eq!(in_shape.c % spec.groups, 0, "cin {} not divisible by groups {}", in_shape.c, spec.groups);
         assert_eq!(cout % spec.groups, 0, "cout {cout} not divisible by groups {}", spec.groups);
-        // `conv_bias` is the DENSE fused kernel — its uniform carries no
-        // groups/dilation, so a grouped biased conv would silently convolve as if
-        // dense. Fail loudly instead; no ZipDepth unit needs it.
-        assert!(spec.is_dense() || !spec.bias, "a biased conv must be dense: conv_bias has no grouped form");
         let out_shape = spec.out_shape(in_shape);
         let on = out_shape.numel();
         let c = cout;
@@ -538,12 +707,16 @@ impl Conv {
     /// this — the raw-conv path, the train path and the unfused-eval path — so a
     /// biased unit cannot silently lose its bias on one of the three.
     ///
+    /// Returns one step for the dense cases and TWO for a grouped/dilated biased
+    /// unit, which has no fused kernel. The caller must submit them **in order**:
+    /// the second reads what the first wrote.
+    ///
     /// `conv_bias` fuses the per-channel NCHW add into the conv's own pass. It is
     /// NOT `bias_add`, which is an [M,N] LINEAR-layer bias (`out[idx] += b[idx % N]`,
     /// biased dim TRAILING) and indexes garbage in NCHW.
-    fn conv_step(&self, ctx: &Ctx, ps: &ParamStore, src: &DeviceBuffer, dst: &DeviceBuffer) -> gpu_core::Step {
+    fn conv_steps(&self, ctx: &Ctx, ps: &ParamStore, src: &DeviceBuffer, dst: &DeviceBuffer) -> Vec<gpu_core::Step> {
         let on = self.out_shape.numel();
-        if self.spec.bias {
+        if self.spec.bias && self.spec.is_dense() {
             // Register-tiled variant when registered: same math, ~8x less input
             // traffic on the GPU (`conv_bias` is dense-only, so the reg tiling
             // always applies). CPU routes both names to the same fast path.
@@ -552,13 +725,14 @@ impl Conv {
             } else {
                 (ctx.ids.need(ctx.ids.conv_bias, "conv_bias"), on)
             };
-            ctx.step(
+            return vec![ctx.step(
                 kind,
                 &[src, ps.w(&self.names.weight), ps.w(&self.names.bias), dst],
                 &self.conv_params(),
                 threads,
-            )
-        } else if !self.spec.is_dense() && ctx.ids.conv2d_gd_reg != crate::NONE {
+            )];
+        }
+        let conv = if !self.spec.is_dense() && ctx.ids.conv2d_gd_reg != crate::NONE {
             // Grouped/dilated register-tiled variant: group-aligned 8x4 tile,
             // ~8x less input traffic for the grouped 1x1 projections. Same math
             // as conv2d_gd (CPU routes both names to one fast path).
@@ -570,7 +744,22 @@ impl Conv {
             )
         } else {
             ctx.step(self.conv_kind(ctx), &[src, ps.w(&self.names.weight), dst], &self.conv_params(), on)
+        };
+        let mut v = vec![conv];
+        if self.spec.bias {
+            // Grouped/dilated + bias: `conv_bias` has no grouped form, so the
+            // per-channel add is a second pass. `add_chan_inplace`'s uniform is
+            // [total, C, HW] with a SINGLE read_write output binding — it is the
+            // NCHW form; `bias_add` is the [M,N] linear one and would index
+            // garbage here.
+            v.push(ctx.step(
+                ctx.ids.need(ctx.ids.add_chan_inplace, "add_chan_inplace"),
+                &[dst, ps.w(&self.names.bias)],
+                &[on, self.out_shape.c, self.out_shape.h * self.out_shape.w],
+                on,
+            ));
         }
+        v
     }
     fn conv_dx_kind(&self, ctx: &Ctx) -> usize {
         if self.spec.is_dense() {
@@ -588,9 +777,10 @@ impl Conv {
     }
     /// Can this unit take the fused conv->BN(eval)->act path?
     ///
-    /// Any activation fuses — the `conv_act*` kernels take the act selector in
-    /// their uniform (0 identity, 1 relu, 2 silu, 3 sigmoid), so a ReLU model
-    /// (ZipDepth) fuses exactly like a SiLU one (yolo). What still can't fuse:
+    /// Any activation the `conv_act*` kernels implement fuses — they take the act
+    /// selector in their uniform (0 identity, 1 relu, 2 silu, 3 sigmoid), so a
+    /// ReLU model (ZipDepth) fuses exactly like a SiLU one (yolo). What still
+    /// can't fuse: GELU (no selector code — see [`Act::fused_code`]),
     /// grouped/dilated convs (the fused kernels and the CPU fast path they route
     /// to are dense — binding a grouped unit would silently ignore `groups`),
     /// and biased units (`conv_bias` is its own kernel). Those run the unfused
@@ -604,51 +794,17 @@ impl Conv {
         self.spec.norm == Norm::Bn
             && !self.spec.bias
             && self.spec.is_dense()
+            && self.spec.act.fused_code().is_some()
             && ctx.ids.conv_act_reg != crate::NONE
     }
 
-    /// The fused kernels' activation selector (WGSL `p.act` / the CPU fast
-    /// path's `act`).
-    fn act_code(&self) -> u32 {
-        match self.spec.act {
-            Act::None => 0,
-            Act::Relu => 1,
-            Act::Silu => 2,
-            Act::Sigmoid => 3,
-        }
-    }
-
     /// `conv_params()` + the act selector — the 11-u32 uniform stream of the
-    /// fused `conv_act*` kernels.
+    /// fused `conv_act*` kernels. Only reachable when [`Conv::can_fuse`] holds,
+    /// which is what guarantees the selector exists.
     fn fused_params(&self) -> Vec<u32> {
         let mut v = self.conv_params();
-        v.push(self.act_code());
+        v.push(self.spec.act.fused_code().expect("can_fuse() gates this on a selector existing"));
         v
-    }
-
-    /// The unfused activation's (forward, backward) kernel pair, or `None` for
-    /// `Act::None`. ReLU maps to `leaky_relu` at slope 0 — identical in both
-    /// directions — so it needs no kernel of its own.
-    fn act_pair(&self, ctx: &Ctx) -> Option<(usize, usize)> {
-        match self.spec.act {
-            Act::None => None,
-            Act::Silu => Some((ctx.ids.need(ctx.ids.silu, "silu"), ctx.ids.need(ctx.ids.silu_bwd, "silu_bwd"))),
-            Act::Relu => Some((
-                ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"),
-                ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"),
-            )),
-            Act::Sigmoid => {
-                Some((ctx.ids.need(ctx.ids.sigmoid, "sigmoid"), ctx.ids.need(ctx.ids.sigmoid_bwd, "sigmoid_bwd")))
-            }
-        }
-    }
-    /// `leaky_relu`'s uniform is `[total, slope]` with slope a bit-cast f32;
-    /// `silu`'s and `sigmoid`'s are `[total]`. Slope 0 makes leaky_relu exactly relu.
-    fn act_params(&self, n: u32) -> Vec<u32> {
-        match self.spec.act {
-            Act::Relu => vec![n, f(0.0)],
-            _ => vec![n],
-        }
     }
     /// Invocation count for the register-tiled conv kernels (`conv_act_reg`,
     /// `conv_bias_reg`): one invocation per 8-channel x 4-position tile.
@@ -693,7 +849,6 @@ impl Conv {
     pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
         let on = self.out_shape.numel();
         let c = self.out_shape.c;
-        let _ = c;
 
         if self.spec.norm == Norm::None {
             // Raw conv -> act. No stats, no host interleave, no mode distinction:
@@ -702,13 +857,13 @@ impl Conv {
             // DECODER convs (the fusion projections, the head, SE, GCB's raw
             // convs) are Norm::None, and those are exactly the layers QuartDepth
             // flags as quant-sensitive, so skipping them would blind the report.
-            let tapped = self.apply_tap(ctx, x_in);
+            let tapped = self.tap_input(ctx, x_in);
             let src = tapped.as_ref().unwrap_or(x_in);
-            let s_conv = self.conv_step(ctx, ps, src, &self.conv_out);
-            ctx.gpu.submit(&[], &[s_conv]);
+            let s_conv = self.conv_steps(ctx, ps, src, &self.conv_out);
+            ctx.gpu.submit(&[], &s_conv);
             // Act::None: `out()` aliases `conv_out` — no copy dispatch.
-            if let Some((fwd, _)) = self.act_pair(ctx) {
-                let s_act = ctx.step(fwd, &[&self.conv_out, &self.act], &self.act_params(on), on);
+            if let Some((fwd, _)) = act_pair(ctx, self.spec.act) {
+                let s_act = ctx.step(fwd, &[&self.conv_out, &self.act], &act_params(self.spec.act, on), on);
                 ctx.gpu.submit(&[], &[s_act]);
             }
             return;
@@ -760,30 +915,16 @@ impl Conv {
             };
             // Calibration / fake-quant tap (NPU INT8): route the conv input
             // through the host so the tap can read its range and/or rewrite it
-            // (quant→dequant), then convolve the tapped copy. Only taken when a
-            // tap is installed; the normal inference path skips this entirely.
-            if let Some(tap) = ctx.tap {
-                let in_n = self.in_shape.numel() as usize;
-                let mut h = ctx.gpu.read(x_in, in_n);
-                tap.tap(&self.prefix, &mut h);
-                if self.q_in.borrow().is_none() {
-                    *self.q_in.borrow_mut() = Some(ctx.gpu.storage(in_n as u64));
-                }
-                let q = self.q_in.borrow();
-                let qbuf = q.as_ref().unwrap();
-                ctx.gpu.write(qbuf, bytemuck::cast_slice(&h));
-                let s = ctx.step(
-                    kind,
-                    &[qbuf, ps.w(&self.names.weight), &self.sb, &self.act],
-                    &self.fused_params(),
-                    threads,
-                );
-                ctx.gpu.submit(&[], &[s]);
-                return;
-            }
+            // (quant→dequant), then convolve the tapped copy. `tap_input` is the
+            // ONE tap implementation — the raw-conv and unfused-eval paths call
+            // the same one, so a tap can never fire on two of the three and be
+            // silently skipped on the third. `None` on every untapped forward,
+            // which then convolves `x_in` directly at zero cost.
+            let tapped = self.tap_input(ctx, x_in);
+            let src = tapped.as_ref().unwrap_or(x_in);
             let s = ctx.step(
                 kind,
-                &[x_in, ps.w(&self.names.weight), &self.sb, &self.act],
+                &[src, ps.w(&self.names.weight), &self.sb, &self.act],
                 &self.fused_params(),
                 threads,
             );
@@ -793,9 +934,8 @@ impl Conv {
 
         // Train mode: conv -> bn_stats, host-pack mv/mvg, then bn_train -> silu.
         self.pack_gb(ctx, ps);
-        let s_conv = self.conv_step(ctx, ps, x_in, &self.conv_out);
-        let s_stats = ctx.step(ctx.ids.bn_stats, &[&self.conv_out, &self.mean, &self.var], &self.nchw(), c);
-        let mut pre = vec![s_conv, s_stats];
+        let mut pre = self.conv_steps(ctx, ps, x_in, &self.conv_out);
+        pre.push(ctx.step(ctx.ids.bn_stats, &[&self.conv_out, &self.mean, &self.var], &self.nchw(), c));
         if self.update_running.get() {
             pre.push(ctx.step(
                 ctx.ids.bn_running,
@@ -807,8 +947,8 @@ impl Conv {
         ctx.gpu.submit(&[], &pre);
         self.pack_stats_host(ctx, ps);
         let s_train = ctx.step(ctx.ids.bn_train, &[&self.conv_out, &self.mv, &self.gb, &self.bn_out], &self.nchw(), on);
-        let s_act = match self.act_pair(ctx) {
-            Some((fwd, _)) => ctx.step(fwd, &[&self.bn_out, &self.act], &self.act_params(on), on),
+        let s_act = match act_pair(ctx, self.spec.act) {
+            Some((fwd, _)) => ctx.step(fwd, &[&self.bn_out, &self.act], &act_params(self.spec.act, on), on),
             // Act::None: the block's output IS the BN output. Copying via a
             // slope-1 leaky_relu would be a wasted dispatch, so alias instead.
             None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu, "leaky_relu"), &[&self.bn_out, &self.act], &[on, f(1.0)], on),
@@ -816,44 +956,11 @@ impl Conv {
         ctx.gpu.submit(&[], &[s_train, s_act]);
     }
 
-    /// Unfused eval: `conv -> bn_eval -> act`.
-    ///
-    /// Taken by every unit the fused path cannot serve — any ReLU unit, and any
-    /// grouped/dilated one (i.e. all of ZipDepth). The fused `conv_act*` kernels
-    /// hardcode SiLU in their WGSL body, and the dense conv they route to on CPU
-    /// ignores `groups`, so fusing here would be wrong rather than merely slower.
-    ///
-    /// This is what finally gives `bn_eval` a consumer: it has been registered and
-    /// tested since P2 but nothing dispatched it, because yolo always fused. Its
-    /// eps (`1e-5`) matches `pack_sb`'s, so the fused and unfused paths agree
-    /// numerically by construction rather than by coincidence.
-    ///
-    /// NOTE `bn_eval` takes the SAME four buffers as `bn_train` — `x, mv, gb,
-    /// out` — with the RUNNING mean|var in `mv`, not the collapsed `scale|bias`
-    /// in `sb`. `sb` exists only for the fused `conv_act*` kernels. Binding `sb`
-    /// here instead reads binding 3 out of bounds and, since the CPU JIT compiles
-    /// with `MemFlags::trusted()` (no bounds checks), SEGFAULTS rather than
-    /// erroring. The per-channel packing is still cached across frames via
-    /// `sb_ready`, which now gates `mv`+`gb` instead.
-    /// Read the conv input to the host, let an installed [`crate::ActTap`] observe
-    /// (and optionally rewrite in place — quant->dequant) it keyed by `self.prefix`,
-    /// and return a device copy of the tapped bytes. `None` when no tap is
-    /// installed (every normal inference), so the caller convolves `x_in` directly
-    /// and pays zero cost. Fires ONCE per conv at the conv's input, the same point
-    /// the exported ONNX graph inserts its Q/DQ pair — every conv variant routes
-    /// through here so the calibrator sees a complete, consistent set of tensors.
-    fn apply_tap(&self, ctx: &Ctx, x_in: &DeviceBuffer) -> Option<DeviceBuffer> {
-        let tap = ctx.tap?;
-        let in_n = self.in_shape.numel() as usize;
-        let mut h = ctx.gpu.read(x_in, in_n);
-        tap.tap(&self.prefix, &mut h);
-        if self.q_in.borrow().is_none() {
-            *self.q_in.borrow_mut() = Some(ctx.gpu.storage(in_n as u64));
-        }
-        let q = self.q_in.borrow();
-        let qbuf = q.as_ref().unwrap().clone();
-        ctx.gpu.write(&qbuf, bytemuck::cast_slice(&h));
-        Some(qbuf)
+    /// This conv's calibration / fake-quant tap — see [`apply_tap`]. Every conv
+    /// variant routes through here so the calibrator sees a complete, consistent
+    /// set of tensors.
+    fn tap_input(&self, ctx: &Ctx, x_in: &DeviceBuffer) -> Option<DeviceBuffer> {
+        apply_tap(ctx, &self.prefix, self.in_shape.numel() as usize, &self.q_in, x_in)
     }
 
     /// Eligible for the conv-as-GEMM eval path (see the call site).
@@ -901,6 +1008,26 @@ impl Conv {
         ctx.gpu.submit(&[], &[s_col, s_gemm, s_epi]);
     }
 
+    /// Unfused eval: `conv -> bn_eval(+act)`.
+    ///
+    /// Taken by every unit the fused path cannot serve — any grouped/dilated one
+    /// (i.e. all of ZipDepth), any biased one, and any whose activation has no
+    /// selector code (GELU). The fused `conv_act*` kernels' uniform carries no
+    /// groups/dilation and the dense conv they route to on CPU ignores `groups`,
+    /// so fusing those would be wrong rather than merely slower.
+    ///
+    /// This is what gives `bn_eval` a consumer: it has been registered and tested
+    /// since P2 but nothing dispatched it, because yolo always fused. Its eps
+    /// (`1e-5`) matches `pack_sb`'s, so the fused and unfused paths agree
+    /// numerically by construction rather than by coincidence.
+    ///
+    /// NOTE `bn_eval` takes the SAME four buffers as `bn_train` — `x, mv, gb,
+    /// out` — with the RUNNING mean|var in `mv`, not the collapsed `scale|bias`
+    /// in `sb`. `sb` exists only for the fused `conv_act*` kernels. Binding `sb`
+    /// here instead reads binding 3 out of bounds and, since the CPU JIT compiles
+    /// with `MemFlags::trusted()` (no bounds checks), SEGFAULTS rather than
+    /// erroring. The per-channel packing is still cached across frames via
+    /// `sb_ready`, which here gates `mv`+`gb` instead.
     fn forward_eval_unfused(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
         if self.spec.norm == Norm::None {
             // Handled by the shared raw-conv path in `forward`.
@@ -912,23 +1039,42 @@ impl Conv {
             self.sb_ready.set(true);
         }
         let on = self.out_shape.numel();
-        let tapped = self.apply_tap(ctx, x_in);
+        let tapped = self.tap_input(ctx, x_in);
         let src = tapped.as_ref().unwrap_or(x_in);
 
-        // conv -> bn_eval(+act): the activation rides in bn_eval's act
-        // selector, straight into `self.act` — one dispatch (and one full
-        // memory pass) fewer than conv -> bn -> act. Eval-only, so nothing
-        // reads the pre-activation `bn_out` cache this path no longer writes.
-        let s_conv = self.conv_step(ctx, ps, src, &self.conv_out);
+        // conv -> bn_eval(+act): where `bn_eval`'s selector covers the
+        // activation it rides along, straight into `self.act` — one dispatch
+        // (and one full memory pass) fewer than conv -> bn -> act. Eval-only, so
+        // nothing reads the pre-activation `bn_out` cache that path skips.
+        //
+        // GELU has NO selector code (see `Act::fused_code`), so it must run
+        // `bn_eval` at act=0 into `bn_out` and then its own kernel. Pushing a
+        // fabricated code would silently drop the activation.
+        let mut steps = self.conv_steps(ctx, ps, src, &self.conv_out);
         let mut bn_params = self.nchw().to_vec();
-        bn_params.push(self.act_code());
-        let s_bn = ctx.step(
-            ctx.ids.need(ctx.ids.bn_eval, "bn_eval"),
-            &[&self.conv_out, &self.mv, &self.gb, &self.act],
-            &bn_params,
-            on,
-        );
-        ctx.gpu.submit(&[], &[s_conv, s_bn]);
+        match self.spec.act.fused_code() {
+            Some(code) => {
+                bn_params.push(code);
+                steps.push(ctx.step(
+                    ctx.ids.need(ctx.ids.bn_eval, "bn_eval"),
+                    &[&self.conv_out, &self.mv, &self.gb, &self.act],
+                    &bn_params,
+                    on,
+                ));
+            }
+            None => {
+                bn_params.push(0);
+                steps.push(ctx.step(
+                    ctx.ids.need(ctx.ids.bn_eval, "bn_eval"),
+                    &[&self.conv_out, &self.mv, &self.gb, &self.bn_out],
+                    &bn_params,
+                    on,
+                ));
+                let (fwd, _) = act_pair(ctx, self.spec.act).expect("fused_code()==None implies a real activation");
+                steps.push(ctx.step(fwd, &[&self.bn_out, &self.act], &act_params(self.spec.act, on), on));
+            }
+        }
+        ctx.gpu.submit(&[], &steps);
     }
 
     /// Interleave the RUNNING mean/var into `mv` for `bn_eval` (which shares
@@ -955,7 +1101,11 @@ impl Conv {
         let rvar = ctx.gpu.read(ps.w(&self.names.run_var), c);
         let mut sb = Vec::with_capacity(2 * c);
         for i in 0..c {
-            let scale = gamma[i] / (rvar[i] + 1e-5).sqrt();
+            // `crate::fold::BN_EPS`, not a `1e-5` literal: `fold.rs` is the one
+            // place this constant is stated, and its own doc names `pack_sb` as
+            // a consumer. A second literal is how the folded ONNX export and the
+            // fused eval path drift apart by an epsilon nothing compares.
+            let scale = gamma[i] / (rvar[i] + crate::fold::BN_EPS).sqrt();
             sb.push(scale);
             sb.push(beta[i] - rmean[i] * scale);
         }
@@ -980,36 +1130,16 @@ impl Conv {
         ctx.gpu.write(&self.mvg, bytemuck::cast_slice(&mvg));
     }
 
-    /// Accumulate this unit's bias gradient from `d_conv` (the grad wrt the conv+bias
-    /// output). No-op for an unbiased unit.
+    /// Accumulate this unit's bias gradient from `d_conv` (the grad wrt the
+    /// conv+bias output) via [`accumulate_bias_grad`]. No-op for an unbiased unit.
     ///
-    /// `dbias[c] = sum over n,h,w of d_conv[n,c,h,w]`. The `bias_grad` kernel is
-    /// [M,N] row-major and reduces over M, so view `d_conv` as `[M=N, N=C*HW]`:
-    /// element `(n, c*HW+p)` IS `d_conv[n,c,h,w]`, and the kernel gives
-    /// `dbcast[c*HW+p] = sum_n d_conv[n,c,h,w]`. The remaining spatial sum is done
-    /// on the host — the same host-reduce split `gradnorm_sq` uses, and exactly what
-    /// yolo's head does by hand (`yolo/src/head.rs:177-201`).
-    ///
-    /// Must run AFTER the caller's submit: it reads the conv-output grad back.
     /// `d_conv` is passed in rather than read from `self.d_conv` because the
     /// Act::None raw path binds the caller's `d_out` DIRECTLY (no act-backward
     /// copy dispatch) — reading `self.d_conv` there would reduce a buffer that
     /// was never written.
     fn bias_backward(&self, ctx: &Ctx, ps: &ParamStore, d_conv: &DeviceBuffer) {
         let Some(dbcast) = self.dbcast.as_ref() else { return };
-        let cout = self.out_shape.c;
-        let hw = self.out_shape.h * self.out_shape.w;
-        let n = cout * hw;
-        // bias_grad ACCUMULATES into its output, and dbcast persists across
-        // backward passes -> it must be zeroed first.
-        let s = ctx.step(ctx.ids.need(ctx.ids.bias_grad, "bias_grad"), &[d_conv, dbcast], &[self.out_shape.n, n], n);
-        ctx.gpu.submit(&[dbcast], &[s]);
-        let host = ctx.gpu.read(dbcast, n as usize);
-        let cur = ctx.gpu.read(ps.g(&self.names.bias), cout as usize);
-        let merged: Vec<f32> = (0..cout as usize)
-            .map(|ch| cur[ch] + host[ch * hw as usize..(ch + 1) * hw as usize].iter().sum::<f32>())
-            .collect();
-        ctx.gpu.write(ps.g(&self.names.bias), bytemuck::cast_slice(&merged));
+        accumulate_bias_grad(ctx, ps, &self.names.bias, dbcast, self.out_shape, d_conv);
     }
 
     /// Backward. `d_out` = grad wrt this block's output; `d_in` receives the grad
@@ -1031,8 +1161,8 @@ impl Conv {
             // Raw conv: act backward straight into d_conv, then the conv
             // adjoints. Act::None needs no act backward at all — `out()`
             // aliases `conv_out`, so `d_out` IS d(conv_out); bind it directly.
-            let d_conv: &DeviceBuffer = if let Some((_, bwd)) = self.act_pair(ctx) {
-                let s_a = ctx.step(bwd, &[&self.conv_out, d_out, &self.d_conv], &self.act_params(on), on);
+            let d_conv: &DeviceBuffer = if let Some((_, bwd)) = act_pair(ctx, self.spec.act) {
+                let s_a = ctx.step(bwd, &[&self.conv_out, d_out, &self.d_conv], &act_params(self.spec.act, on), on);
                 ctx.gpu.submit(&[], &[s_a]);
                 &self.d_conv
             } else {
@@ -1045,8 +1175,8 @@ impl Conv {
             self.bias_backward(ctx, ps, d_conv);
             return;
         }
-        let s_act = match self.act_pair(ctx) {
-            Some((_, bwd)) => ctx.step(bwd, &[&self.bn_out, d_out, &self.d_bn], &self.act_params(on), on),
+        let s_act = match act_pair(ctx, self.spec.act) {
+            Some((_, bwd)) => ctx.step(bwd, &[&self.bn_out, d_out, &self.d_bn], &act_params(self.spec.act, on), on),
             None => ctx.step(ctx.ids.need(ctx.ids.leaky_relu_bwd, "leaky_relu_bwd"), &[&self.bn_out, d_out, &self.d_bn], &[on, f(1.0)], on),
         };
         let s_dstats = ctx.step(ctx.ids.bn_dstats, &[&self.conv_out, &self.d_bn, &self.mvg, &self.bp], &self.nchw(), c);
@@ -1385,21 +1515,20 @@ impl C2f {
 
 /// Spatial-Pyramid-Pooling-Fast. A 1x1 conv, three chained 5x5 maxpools, a
 /// channel-concat of `[x, m1, m2, m3]` (4*c channels), and a final 1x1 conv.
+///
+/// The pools are [`MaxPool`] units, not an inline `maxpool2d` dispatch: there is
+/// ONE max-pool in this crate and this block composes it.
 pub struct SPPF {
     pub cv1: Conv,
     pub cv2: Conv,
+    /// The three chained pools, `m[0] = pool(cv1.out)`, `m[i] = pool(m[i-1])`.
+    pub m: Vec<MaxPool>,
     pub in_shape: Shape,
     pub out_shape: Shape,
     c: u32,
     sh: Shape, // [n,c,h,w] of the inner maps
 
     // forward caches
-    m1: DeviceBuffer,
-    m2: DeviceBuffer,
-    m3: DeviceBuffer,
-    am1: DeviceBuffer,
-    am2: DeviceBuffer,
-    am3: DeviceBuffer,
     cat1: DeviceBuffer, // [x,m1]            -> 2c
     cat2: DeviceBuffer, // [x,m1,m2]         -> 3c
     concat: DeviceBuffer, // [x,m1,m2,m3]    -> 4c
@@ -1412,7 +1541,6 @@ pub struct SPPF {
     d_m3: DeviceBuffer,
     d_m1_cat: DeviceBuffer,
     d_m2_cat: DeviceBuffer,
-    d_tmp: DeviceBuffer, // scratch for maxpool dx contributions
 }
 
 impl SPPF {
@@ -1457,19 +1585,19 @@ impl SPPF {
         let cv2 = Conv::with_names(ctx, &p2, style.names(&p2), cat_shape, cspec(c_out), train);
         let out_shape = cv2.out_shape;
         let n1 = sh.numel();
+        // K=5/stride=1/pad=2 is shape-preserving (Ho = (H + 2*2 - 5)/1 + 1 = H),
+        // which is what the 4-way concat below depends on. `PoolSpec::out_shape`
+        // states it once; the pools then all share `sh`.
+        let m: Vec<MaxPool> = (0..3).map(|_| MaxPool::new(ctx, sh, PoolSpec::same5())).collect();
+        assert_eq!(m[0].out_shape, sh, "SPPF's pools must be shape-preserving for the concat to line up");
         SPPF {
             cv1,
             cv2,
+            m,
             in_shape,
             out_shape,
             c,
             sh,
-            m1: ctx.act(n1),
-            m2: ctx.act(n1),
-            m3: ctx.act(n1),
-            am1: ctx.act(n1),
-            am2: ctx.act(n1),
-            am3: ctx.act(n1),
             cat1: ctx.act(2 * n1),
             cat2: ctx.act(3 * n1),
             concat: ctx.act(4 * n1),
@@ -1480,7 +1608,6 @@ impl SPPF {
             d_m3: ctx.act(n1),
             d_m1_cat: ctx.act(n1),
             d_m2_cat: ctx.act(n1),
-            d_tmp: ctx.act(n1),
         }
     }
 
@@ -1506,35 +1633,25 @@ impl SPPF {
         v
     }
 
-    fn pool_params(&self) -> [u32; 9] {
-        // maxpool2d ABI: [N, C, H, W, K, stride, pad, Ho, Wo].
-        // SPPF is K=5, stride=1, pad=2, so Ho=H and Wo=W — the same-size output
-        // the concat below depends on. Recomputing it here rather than writing
-        // `sh.h` twice would hide the assumption; state it instead:
-        //   Ho = (H + 2*2 - 5)/1 + 1 = H.
-        [self.sh.n, self.c, self.sh.h, self.sh.w, 5, 1, 2, self.sh.h, self.sh.w]
-    }
-
     pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
         self.cv1.forward(ctx, ps, x_in);
         let x = self.cv1.out();
         let n1 = self.sh.numel();
         // m1 = pool(x); m2 = pool(m1); m3 = pool(m2). Sequential dependency.
-        let s1 = ctx.step(ctx.ids.maxpool2d, &[x, &self.m1, &self.am1], &self.pool_params(), n1);
-        ctx.gpu.submit(&[], &[s1]);
-        let s2 = ctx.step(ctx.ids.maxpool2d, &[&self.m1, &self.m2, &self.am2], &self.pool_params(), n1);
-        ctx.gpu.submit(&[], &[s2]);
-        let s3 = ctx.step(ctx.ids.maxpool2d, &[&self.m2, &self.m3, &self.am3], &self.pool_params(), n1);
-        ctx.gpu.submit(&[], &[s3]);
+        let mut prev = x;
+        for p in &self.m {
+            p.forward(ctx, prev);
+            prev = p.out();
+        }
 
         // concat [x, m1, m2, m3] via left-fold.
         let c = self.c;
         let (h, w, n) = (self.sh.h, self.sh.w, self.sh.n);
-        let sc1 = ctx.step(ctx.ids.concat2, &[x, &self.m1, &self.cat1], &[n, c, c, h, w], 2 * n1);
+        let sc1 = ctx.step(ctx.ids.concat2, &[x, self.m[0].out(), &self.cat1], &[n, c, c, h, w], 2 * n1);
         ctx.gpu.submit(&[], &[sc1]);
-        let sc2 = ctx.step(ctx.ids.concat2, &[&self.cat1, &self.m2, &self.cat2], &[n, 2 * c, c, h, w], 3 * n1);
+        let sc2 = ctx.step(ctx.ids.concat2, &[&self.cat1, self.m[1].out(), &self.cat2], &[n, 2 * c, c, h, w], 3 * n1);
         ctx.gpu.submit(&[], &[sc2]);
-        let sc3 = ctx.step(ctx.ids.concat2, &[&self.cat2, &self.m3, &self.concat], &[n, 3 * c, c, h, w], 4 * n1);
+        let sc3 = ctx.step(ctx.ids.concat2, &[&self.cat2, self.m[2].out(), &self.concat], &[n, 3 * c, c, h, w], 4 * n1);
         ctx.gpu.submit(&[], &[sc3]);
 
         self.cv2.forward(ctx, ps, &self.concat);
@@ -1572,25 +1689,880 @@ impl SPPF {
         ctx.gpu.submit(&[], &[sx, s1, s2, s3]);
 
         // Backprop the maxpool chain. m3 = pool(m2): grad wrt m2 from m3.
-        // d_m2 = d_m2_cat + maxpool_dx(d_m3 -> via am3)
-        let sd3 = ctx.step(ctx.ids.maxpool2d_dx, &[&self.d_m3, &self.am3, &self.d_tmp], &self.pool_params(), n1);
-        ctx.gpu.submit(&[], &[sd3]);
-        let a3 = ctx.step(ctx.ids.add2, &[&self.d_m2_cat, &self.d_tmp, &self.d_m2], &[n1], n1);
+        // d_m2 = d_m2_cat + maxpool_dx(d_m3)
+        self.m[2].backward(ctx, &self.d_m3);
+        let a3 = ctx.step(ctx.ids.add2, &[&self.d_m2_cat, self.m[2].d_in(), &self.d_m2], &[n1], n1);
         ctx.gpu.submit(&[], &[a3]);
 
-        // m2 = pool(m1): grad wrt m1 = d_m1_cat + maxpool_dx(d_m2 -> via am2)
-        let sd2 = ctx.step(ctx.ids.maxpool2d_dx, &[&self.d_m2, &self.am2, &self.d_tmp], &self.pool_params(), n1);
-        ctx.gpu.submit(&[], &[sd2]);
-        let a2 = ctx.step(ctx.ids.add2, &[&self.d_m1_cat, &self.d_tmp, &self.d_m1], &[n1], n1);
+        // m2 = pool(m1): grad wrt m1 = d_m1_cat + maxpool_dx(d_m2)
+        self.m[1].backward(ctx, &self.d_m2);
+        let a2 = ctx.step(ctx.ids.add2, &[&self.d_m1_cat, self.m[1].d_in(), &self.d_m1], &[n1], n1);
         ctx.gpu.submit(&[], &[a2]);
 
-        // m1 = pool(x): grad wrt x = d_x_cat + maxpool_dx(d_m1 -> via am1)
-        let sd1 = ctx.step(ctx.ids.maxpool2d_dx, &[&self.d_m1, &self.am1, &self.d_tmp], &self.pool_params(), n1);
-        ctx.gpu.submit(&[], &[sd1]);
-        let a1 = ctx.step(ctx.ids.add2, &[&self.d_x_cat, &self.d_tmp, &self.d_x], &[n1], n1);
+        // m1 = pool(x): grad wrt x = d_x_cat + maxpool_dx(d_m1)
+        self.m[0].backward(ctx, &self.d_m1);
+        let a1 = ctx.step(ctx.ids.add2, &[&self.d_x_cat, self.m[0].d_in(), &self.d_x], &[n1], n1);
         ctx.gpu.submit(&[], &[a1]);
 
         // cv1 backward -> d_in.
         self.cv1.backward(ctx, ps, x_in, &self.d_x, d_in);
+    }
+}
+
+// ===========================================================================
+// ConvTranspose = convtr2d (+ optional bias) -> optional activation
+// ===========================================================================
+
+/// Everything that varies between transposed-conv units.
+///
+/// Deliberately NOT a flag on [`ConvSpec`]. A transposed conv is a different
+/// operator with a different WEIGHT LAYOUT (`[Cin, Cout/G, K, K]`, the transpose
+/// of `conv2d_gd`'s `[Cout, Cin/G, K, K]`), a different output-shape formula,
+/// and one hyperparameter a forward conv does not have (`out_pad`). Both layouts
+/// hold exactly `Cin*Cout/G` elements, so a mis-specified unit ALWAYS binds and
+/// silently computes the wrong operator — a separate type is what makes that
+/// unrepresentable.
+///
+/// No `norm` field: nothing that needs a transposed conv in brain's imaging
+/// models pairs it with BatchNorm (SAM 2's mask decoder follows it with
+/// [`LayerNorm2d`], VQGAN's decoder with GroupNorm), and [`crate::BatchNorm`]
+/// already exists as a standalone unit for anything that does. Welding a second
+/// BN implementation in here would be the duplicate, not the convenience.
+#[derive(Clone, Copy, Debug)]
+pub struct ConvTrSpec {
+    pub cout: u32,
+    pub k: u32,
+    pub stride: u32,
+    pub pad: u32,
+    /// torch's `output_padding`. It only WIDENS `Ho`/`Wo`; it is not zero-fill.
+    ///
+    /// At `stride > 1` the far-side `pad` crop hides output positions that
+    /// genuinely receive input, and `output_padding` is exactly what un-crops
+    /// them — which is why torch documents it as resolving a strided conv's
+    /// output-shape ambiguity rather than as padding. Verified against PyTorch:
+    /// the extra bottom/right band is NOT zeros.
+    pub out_pad: u32,
+    pub dilation: u32,
+    pub groups: u32,
+    pub act: Act,
+    /// `nn.ConvTranspose2d(.., bias=True)` — torch's default, so this defaults
+    /// to `true`. There is no fused `convtr2d_bias` kernel, so the bias is a
+    /// second `add_chan_inplace` pass over the output.
+    pub bias: bool,
+}
+
+impl ConvTrSpec {
+    /// A plain `nn.ConvTranspose2d(cin, cout, k, stride, pad)`: dense, biased,
+    /// no activation — torch's defaults.
+    pub const fn new(cout: u32, k: u32, stride: u32, pad: u32) -> ConvTrSpec {
+        ConvTrSpec { cout, k, stride, pad, out_pad: 0, dilation: 1, groups: 1, act: Act::None, bias: true }
+    }
+    pub const fn with_act(self, act: Act) -> ConvTrSpec {
+        ConvTrSpec { act, ..self }
+    }
+    pub const fn with_groups(self, groups: u32) -> ConvTrSpec {
+        ConvTrSpec { groups, ..self }
+    }
+    pub const fn with_dilation(self, dilation: u32) -> ConvTrSpec {
+        ConvTrSpec { dilation, ..self }
+    }
+    pub const fn with_out_pad(self, out_pad: u32) -> ConvTrSpec {
+        ConvTrSpec { out_pad, ..self }
+    }
+    /// Drop the learned bias (`bias=False`).
+    pub const fn bias_free(self) -> ConvTrSpec {
+        ConvTrSpec { bias: false, ..self }
+    }
+    /// `Ho = (H-1)*stride - 2*pad + dilation*(K-1) + out_pad + 1`, likewise `Wo`.
+    ///
+    /// The kernel takes `Ho`/`Wo` as Params words and never recomputes them, so
+    /// this formula is the single place the shape is decided — a caller that
+    /// passes a `Ho` from the FORWARD conv formula gets a kernel that runs and
+    /// gathers out of the map it meant to.
+    pub fn out_shape(&self, x: Shape) -> Shape {
+        let ext = self.dilation * (self.k - 1);
+        let (nh, nw) = (
+            (x.h - 1) * self.stride + ext + self.out_pad + 1,
+            (x.w - 1) * self.stride + ext + self.out_pad + 1,
+        );
+        // These are u32: an over-large `pad` would WRAP to a ~4-billion extent and
+        // the block would try to allocate it, rather than reporting the bad spec.
+        assert!(
+            nh > 2 * self.pad && nw > 2 * self.pad,
+            "ConvTranspose pad {} crops the entire output of a {}x{} input (k={}, stride={}, dilation={})",
+            self.pad,
+            x.h,
+            x.w,
+            self.k,
+            self.stride,
+            self.dilation
+        );
+        Shape::new(x.n, self.cout, nh - 2 * self.pad, nw - 2 * self.pad)
+    }
+}
+
+/// A transposed-convolution unit: `convtr2d` (+ optional per-channel bias) and
+/// an optional activation. NCHW, SSA.
+///
+/// Decoder upsampling — SAM 2's mask decoder (2x twice), the VQGAN/CodeFormer
+/// decoder. Naming is [`ConvNames`], the same data-driven scheme [`Conv`] uses,
+/// because the two checkpoints spell the module differently
+/// (`output_upscaling.0.weight` vs `…upsample.conv.weight`).
+pub struct ConvTranspose {
+    /// The ActTap key — MUST equal the exported ONNX node name (see [`Conv`]).
+    prefix: String,
+    names: ConvNames,
+    pub in_shape: Shape,
+    pub out_shape: Shape,
+    pub spec: ConvTrSpec,
+
+    pre: DeviceBuffer,  // convtr2d output (+ bias), pre-activation [out]
+    act: DeviceBuffer,  // activation output [out]; unused for Act::None
+    d_pre: DeviceBuffer,// grad wrt `pre` [out]
+    /// `bias_grad`'s output before the host spatial reduce, `[C*HW]`. Allocated
+    /// only for a biased unit.
+    dbcast: Option<DeviceBuffer>,
+    q_in: std::cell::RefCell<Option<DeviceBuffer>>,
+}
+
+impl ConvTranspose {
+    /// brain-style names (`P.conv.weight`), for a unit brain owns end to end.
+    pub fn with_spec(ctx: &Ctx, prefix: &str, in_shape: Shape, spec: ConvTrSpec) -> ConvTranspose {
+        ConvTranspose::with_names(ctx, prefix, ConvNames::brain(prefix), in_shape, spec)
+    }
+
+    /// A bare torch `nn.ConvTranspose2d` at `prefix`: `P.weight` + `P.bias`.
+    pub fn torch(ctx: &Ctx, prefix: &str, in_shape: Shape, spec: ConvTrSpec) -> ConvTranspose {
+        ConvTranspose::with_names(ctx, prefix, ConvNames::torch_flat(prefix), in_shape, spec)
+    }
+
+    /// The fully general ctor: the caller supplies the tensor names, so each
+    /// model's param list mirrors its own checkpoint.
+    pub fn with_names(
+        ctx: &Ctx,
+        prefix: &str,
+        names: ConvNames,
+        in_shape: Shape,
+        spec: ConvTrSpec,
+    ) -> ConvTranspose {
+        assert_eq!(in_shape.c % spec.groups, 0, "cin {} not divisible by groups {}", in_shape.c, spec.groups);
+        assert_eq!(spec.cout % spec.groups, 0, "cout {} not divisible by groups {}", spec.cout, spec.groups);
+        let out_shape = spec.out_shape(in_shape);
+        let on = out_shape.numel();
+        ConvTranspose {
+            prefix: prefix.to_string(),
+            names,
+            in_shape,
+            out_shape,
+            spec,
+            pre: ctx.act(on),
+            // Act::None never writes `act` (`out()` aliases `pre`), but a
+            // zero-sized buffer is a hard error on wgpu — allocate one element.
+            act: ctx.act(if spec.act == Act::None { 1 } else { on }),
+            d_pre: ctx.act(on),
+            dbcast: if spec.bias { Some(ctx.act(spec.cout * out_shape.h * out_shape.w)) } else { None },
+            q_in: std::cell::RefCell::new(None),
+        }
+    }
+
+    /// This unit's tensor names — read-only, for importers and fusions.
+    pub fn names(&self) -> &ConvNames {
+        &self.names
+    }
+
+    pub fn out(&self) -> &DeviceBuffer {
+        // Act::None: the block's output IS the (biased) convtr output. Copying it
+        // through a slope-1 leaky_relu would be a wasted full memory pass.
+        if self.spec.act == Act::None {
+            &self.pre
+        } else {
+            &self.act
+        }
+    }
+
+    /// Weight `[Cin, Cout/G, K, K]` — torch's `ConvTranspose2d` layout, with the
+    /// INPUT channel outermost. This is the transpose of [`Conv::param_list`]'s
+    /// `[Cout, Cin/G, K, K]` and holds the same number of elements, so a weight
+    /// stored in the wrong one never fails a size check.
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let cin = self.in_shape.c as usize;
+        let cout_g = (self.spec.cout / self.spec.groups) as usize;
+        let k = self.spec.k as usize;
+        let mut v = vec![(self.names.weight.clone(), cin * cout_g * k * k)];
+        if self.spec.bias {
+            v.push((self.names.bias.clone(), self.spec.cout as usize));
+        }
+        v
+    }
+
+    /// convtr2d's 12-u32 uniform: `[N, Cin, H, W, Cout, K, stride, pad, dilation,
+    /// groups, Ho, Wo]` — byte-identical to `conv2d_gd`'s, and shared by
+    /// `convtr2d`, `convtr2d_dw` and `convtr2d_dx`.
+    fn params(&self) -> [u32; 12] {
+        [
+            self.in_shape.n,
+            self.in_shape.c,
+            self.in_shape.h,
+            self.in_shape.w,
+            self.spec.cout,
+            self.spec.k,
+            self.spec.stride,
+            self.spec.pad,
+            self.spec.dilation,
+            self.spec.groups,
+            self.out_shape.h,
+            self.out_shape.w,
+        ]
+    }
+
+    pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
+        let on = self.out_shape.numel();
+        let tapped = apply_tap(ctx, &self.prefix, self.in_shape.numel() as usize, &self.q_in, x_in);
+        let src = tapped.as_ref().unwrap_or(x_in);
+        // One invocation per OUTPUT element: the forward is a gather over the
+        // INVERTED forward map.
+        let mut steps = vec![ctx.step(
+            ctx.ids.need(ctx.ids.convtr2d, "convtr2d"),
+            &[src, ps.w(&self.names.weight), &self.pre],
+            &self.params(),
+            on,
+        )];
+        if self.spec.bias {
+            steps.push(ctx.step(
+                ctx.ids.need(ctx.ids.add_chan_inplace, "add_chan_inplace"),
+                &[&self.pre, ps.w(&self.names.bias)],
+                &[on, self.spec.cout, self.out_shape.h * self.out_shape.w],
+                on,
+            ));
+        }
+        if let Some((fwd, _)) = act_pair(ctx, self.spec.act) {
+            steps.push(ctx.step(fwd, &[&self.pre, &self.act], &act_params(self.spec.act, on), on));
+        }
+        ctx.gpu.submit(&[], &steps);
+    }
+
+    /// `d_out` = grad wrt this unit's output; `d_in` receives the grad wrt
+    /// `x_in` (overwritten). Weight/bias grads ACCUMULATE into the ParamStore —
+    /// `convtr2d_dw` composes with a prior `dw`, so the caller's `zero_grads`
+    /// must have cleared it.
+    pub fn backward(
+        &self,
+        ctx: &Ctx,
+        ps: &ParamStore,
+        x_in: &DeviceBuffer,
+        d_out: &DeviceBuffer,
+        d_in: &DeviceBuffer,
+    ) {
+        let on = self.out_shape.numel();
+        // Act::None: `out()` aliases `pre`, so `d_out` IS d(pre) — bind it
+        // directly rather than paying a copy dispatch.
+        let d_pre: &DeviceBuffer = if let Some((_, bwd)) = act_pair(ctx, self.spec.act) {
+            let s = ctx.step(bwd, &[&self.pre, d_out, &self.d_pre], &act_params(self.spec.act, on), on);
+            ctx.gpu.submit(&[], &[s]);
+            &self.d_pre
+        } else {
+            d_out
+        };
+        let dw_n = self.in_shape.c * (self.spec.cout / self.spec.groups) * self.spec.k * self.spec.k;
+        // _dw: one invocation per WEIGHT element (it owns the sum over n,hi,wi
+        // instead of needing an atomic). _dx: one per INPUT element.
+        let s_dw = ctx.step(
+            ctx.ids.need(ctx.ids.convtr2d_dw, "convtr2d_dw"),
+            &[d_pre, x_in, ps.g(&self.names.weight)],
+            &self.params(),
+            dw_n,
+        );
+        let s_dx = ctx.step(
+            ctx.ids.need(ctx.ids.convtr2d_dx, "convtr2d_dx"),
+            &[d_pre, ps.w(&self.names.weight), d_in],
+            &self.params(),
+            self.in_shape.numel(),
+        );
+        ctx.gpu.submit(&[], &[s_dw, s_dx]);
+        if let Some(dbcast) = self.dbcast.as_ref() {
+            accumulate_bias_grad(ctx, ps, &self.names.bias, dbcast, self.out_shape, d_pre);
+        }
+    }
+}
+
+// ===========================================================================
+// MaxPool = maxpool2d (+ maxpool2d_dx)
+// ===========================================================================
+
+/// A max-pool's geometry. Square window, square stride, symmetric zero pad —
+/// the shape `maxpool2d` covers.
+#[derive(Clone, Copy, Debug)]
+pub struct PoolSpec {
+    pub k: u32,
+    pub stride: u32,
+    pub pad: u32,
+}
+
+impl PoolSpec {
+    pub const fn new(k: u32, stride: u32, pad: u32) -> PoolSpec {
+        PoolSpec { k, stride, pad }
+    }
+    /// SPPF's / Hiera's shape-preserving pool: K=5, stride 1, pad 2.
+    pub const fn same5() -> PoolSpec {
+        PoolSpec { k: 5, stride: 1, pad: 2 }
+    }
+    /// Hiera's `q_pool` / SCRFD's downsampling pool: K=stride=2, no pad.
+    pub const fn half() -> PoolSpec {
+        PoolSpec { k: 2, stride: 2, pad: 0 }
+    }
+    /// `Ho = (H + 2*pad - K)/stride + 1`. Identical to a conv's output formula
+    /// at `dilation = 1` with the channel count carried through, so it reuses
+    /// [`Shape::conv_out`] rather than restating the arithmetic.
+    pub fn out_shape(&self, x: Shape) -> Shape {
+        x.conv_out(x.c, self.k, self.stride, self.pad)
+    }
+}
+
+/// A generic max-pool stage (forward + backward), SSA. Owns its output, its
+/// `argmax` side-output and its input-gradient buffer, in the shape of
+/// [`crate::Up`].
+///
+/// One max-pool, not two: `maxpool2d` replaced the stride-pinned `maxpool5`, and
+/// [`SPPF`] composes THIS unit rather than dispatching the kernel a second time.
+pub struct MaxPool {
+    pub in_shape: Shape,
+    pub out_shape: Shape,
+    pub spec: PoolSpec,
+    out: DeviceBuffer,
+    /// The winning tap's INPUT flat index per output element, stored as f32 —
+    /// the forward's side-output that makes the backward a gather. Exact while
+    /// `N*C*H*W < 2^24`.
+    argmax: DeviceBuffer,
+    d_in: DeviceBuffer,
+}
+
+impl MaxPool {
+    pub fn new(ctx: &Ctx, in_shape: Shape, spec: PoolSpec) -> MaxPool {
+        let out_shape = spec.out_shape(in_shape);
+        MaxPool {
+            in_shape,
+            out_shape,
+            spec,
+            out: ctx.act(out_shape.numel()),
+            argmax: ctx.act(out_shape.numel()),
+            d_in: ctx.act(in_shape.numel()),
+        }
+    }
+
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.out
+    }
+    /// The grad wrt this stage's input, valid after [`MaxPool::backward`].
+    pub fn d_in(&self) -> &DeviceBuffer {
+        &self.d_in
+    }
+
+    /// `maxpool2d` / `maxpool2d_dx` ABI: `[N, C, H, W, K, stride, pad, Ho, Wo]`.
+    /// `stride` sits BEFORE `pad`, matching `conv2d_gd`'s hyperparameter order —
+    /// this is NOT the old `maxpool5` `[N,C,H,W,K,pad]` list with words appended.
+    /// `Ho`/`Wo` are passed in and never recomputed by the kernel.
+    fn params(&self) -> [u32; 9] {
+        [
+            self.in_shape.n,
+            self.in_shape.c,
+            self.in_shape.h,
+            self.in_shape.w,
+            self.spec.k,
+            self.spec.stride,
+            self.spec.pad,
+            self.out_shape.h,
+            self.out_shape.w,
+        ]
+    }
+
+    /// One invocation per OUTPUT element.
+    pub fn forward(&self, ctx: &Ctx, x: &DeviceBuffer) {
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.maxpool2d, "maxpool2d"),
+            &[x, &self.out, &self.argmax],
+            &self.params(),
+            self.out_shape.numel(),
+        );
+        ctx.gpu.submit(&[], &[s]);
+    }
+
+    /// `d_out` -> [`MaxPool::d_in`]. One invocation per INPUT element (gather
+    /// form: every `d_in` element is written by exactly one invocation, so no
+    /// pre-zeroing and no atomics).
+    pub fn backward(&self, ctx: &Ctx, d_out: &DeviceBuffer) {
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.maxpool2d_dx, "maxpool2d_dx"),
+            &[d_out, &self.argmax, &self.d_in],
+            &self.params(),
+            self.in_shape.numel(),
+        );
+        ctx.gpu.submit(&[], &[s]);
+    }
+}
+
+// ===========================================================================
+// LayerNorm2d = channels-first LayerNorm, COMPOSED (nchw_nlc -> LN -> nlc_nchw)
+// ===========================================================================
+
+/// The two tensor names a [`LayerNorm2d`] owns.
+#[derive(Clone, Debug)]
+pub struct Ln2dNames {
+    pub gamma: String,
+    pub beta: String,
+}
+
+impl Ln2dNames {
+    /// torch's `nn.LayerNorm` / the SAM 2 & ConvNeXt `LayerNorm2d` module:
+    /// `P.{weight,bias}`.
+    pub fn torch(prefix: &str) -> Ln2dNames {
+        Ln2dNames { gamma: format!("{prefix}.weight"), beta: format!("{prefix}.bias") }
+    }
+    /// brain's spelling: `P.{gamma,beta}`.
+    pub fn brain(prefix: &str) -> Ln2dNames {
+        Ln2dNames { gamma: format!("{prefix}.gamma"), beta: format!("{prefix}.beta") }
+    }
+}
+
+/// Channels-first LayerNorm over an NCHW map: each spatial position is
+/// normalized across its C channels, then scaled by `gamma[c]` and shifted by
+/// `beta[c]`.
+///
+/// ## Why this is COMPOSED and not a fused `layernorm2d` kernel
+///
+/// A fused channels-first kernel has to give one thread the C-strided walk over
+/// a position's channels — i.e. **one thread per row**, which is the documented
+/// coalescing trap: a warp's 32 loads land `H*W` floats apart, each 32-byte
+/// sector fetched serves ONE useful float, and the kernel runs at ~1/8 of memory
+/// bandwidth no matter how many positions there are. `layernorm_rows` is the
+/// kernel that already fixed exactly this (a 64-thread workgroup walks one row;
+/// measured 2.3-9.1x over the per-element form on a P40), and it wants its rows
+/// contiguous.
+///
+/// So: permute NCHW -> NLC (`nchw_nlc`), which makes each position's C channels
+/// a contiguous row, run the row-oriented LayerNorm family, permute back
+/// (`nlc_nchw`). The two permutations are each other's inverse AND adjoint, so
+/// the backward is the same pair swapped — no extra kernel in either direction.
+///
+/// **Measured** (Tesla P40, wgpu/Vulkan, release,
+/// `crates/vision/tests/imaging_blocks.rs::layernorm2d_composition_cost`, SAM 2
+/// Hiera-B+ @1024 feature-map shapes; every timed region bracketed by
+/// `Gpu::poll_wait` — `Gpu::submit` alone only appends to a pending list and
+/// times the HOST):
+///
+/// | shape | bytes | total | 2 permutes | permute GB/s | norm |
+/// |---|---|---|---|---|---|
+/// | 1x112x256x256 | 28.0 MiB | 2.789 ms | 2.442 ms (88%) |  48 | 0.348 ms |
+/// | 1x224x128x128 | 14.0 MiB | 0.793 ms | 0.687 ms (87%) |  86 | 0.107 ms |
+/// | 1x448x64x64   |  7.0 MiB | 0.333 ms | 0.240 ms (72%) | 122 | 0.093 ms |
+/// | 1x896x32x32   |  3.5 MiB | 0.179 ms | 0.110 ms (61%) | 133 | 0.069 ms |
+/// | 1x96x64x64    |  1.5 MiB | 0.124 ms | 0.079 ms (63%) |  80 | 0.046 ms |
+///
+/// (Run-to-run spread is ~10-20 %; a second run gave 56-84 % and 46-113 GB/s.
+/// Nothing below turns on a figure that tight.)
+///
+/// **Read this table the way it actually reads.** The permutes are ~60-88 % of
+/// the composed cost and they run at 46-133 GB/s on a ~346 GB/s card — they are
+/// NOT at the memory roof. That is not a surprise once the kernels are read:
+/// `nchw_nlc` writes coalesced but *gathers* `x[(n*C+ch)*HW + l]` with `ch`
+/// varying fastest, so a warp's 32 loads land `H*W` floats apart; `nlc_nchw` is
+/// the mirror image. Both permutes already pay the sector amplification that a
+/// fused channels-first kernel is usually rejected for, and the amplification
+/// gets *worse* as `H*W` grows (48 GB/s at `HW = 65536`, 133 GB/s at
+/// `HW = 1024`). The row-oriented LayerNorm in the middle, by contrast, moves
+/// 2n floats at ~169 GB/s at the largest shape — it is the only coalesced stage
+/// here.
+///
+/// So this composition is the right FIRST implementation — it is correct, it
+/// reuses the one selection site for the coalesced `*_rows` family, and it adds
+/// no kernel — but the measurement does **not** establish that a fused
+/// `layernorm2d` would be slower. It points the other way: a fused kernel would
+/// do ~2 strided passes where the composition does ~6 (of which 4 are strided),
+/// so it is the leading candidate for the next optimisation, not a rejected one.
+/// The earlier version of this comment claimed the permutes ran at "377 GB/s,
+/// at the memory roof" — that number came from a timing loop of bare `submit`s
+/// that never reached the device, and 377 GB/s on a 346 GB/s card is
+/// self-refuting. **Anyone adding the kernel must re-run the test above and
+/// show the fused numbers next to these; anyone NOT adding it should not cite
+/// this table as proof that it cannot win.**
+///
+/// Which LayerNorm kernel actually runs is decided by `model::block`'s
+/// `LayerNormIds` seam on the queried `DeviceCaps` — the one selection site in
+/// the workspace, so this block picks up `layernorm_rows` wherever the owning
+/// model registered it, with no per-model wiring.
+pub struct LayerNorm2d {
+    names: Ln2dNames,
+    pub shape: Shape,
+    eps: f32,
+    ln: mblock::LayerNormIds,
+
+    xt: DeviceBuffer,   // NLC view of the input  [N*HW, C] — the backward's cache
+    yt: DeviceBuffer,   // NLC normalized output
+    out: DeviceBuffer,  // NCHW output
+    dyt: DeviceBuffer,  // NLC view of d_out
+    dxt: DeviceBuffer,  // NLC grad wrt xt
+    mean: DeviceBuffer, // per-row mean [N*HW]
+    inv: DeviceBuffer,  // per-row 1/sqrt(var+eps) [N*HW]
+}
+
+impl LayerNorm2d {
+    /// `eps` is a parameter and not a constant: torch's `nn.LayerNorm` defaults
+    /// to `1e-5`, but ConvNeXt's and SAM 2's `LayerNorm2d` are constructed with
+    /// `1e-6`, and the difference is visible in a parity comparison.
+    pub fn new(ctx: &Ctx, names: Ln2dNames, shape: Shape, eps: f32) -> LayerNorm2d {
+        let rows = shape.n * shape.h * shape.w;
+        let total = shape.numel();
+        LayerNorm2d {
+            names,
+            shape,
+            eps,
+            ln: mblock::LayerNormIds::resolve(
+                ctx.gpu,
+                ctx.ids.need(ctx.ids.layernorm, "layernorm"),
+                ctx.ids.need(ctx.ids.ln_stats, "ln_stats"),
+                ctx.ids.need(ctx.ids.layernorm_dx, "layernorm_dx"),
+            ),
+            xt: ctx.act(total),
+            yt: ctx.act(total),
+            out: ctx.act(total),
+            dyt: ctx.act(total),
+            dxt: ctx.act(total),
+            mean: ctx.act(rows),
+            inv: ctx.act(rows),
+        }
+    }
+
+    /// torch-named (`P.weight` / `P.bias`) at `eps = 1e-6` — ConvNeXt / SAM 2.
+    pub fn torch(ctx: &Ctx, prefix: &str, shape: Shape) -> LayerNorm2d {
+        LayerNorm2d::new(ctx, Ln2dNames::torch(prefix), shape, 1e-6)
+    }
+
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.out
+    }
+
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let c = self.shape.c as usize;
+        vec![(self.names.gamma.clone(), c), (self.names.beta.clone(), c)]
+    }
+
+    /// `nchw_nlc` / `nlc_nchw` ABI: `[total, C, HW]`, one invocation per element.
+    /// `hw` is the L axis — a call site that passes `rows = N*HW` here instead
+    /// permutes a different tensor and still runs.
+    fn perm_params(&self) -> [u32; 3] {
+        [self.shape.numel(), self.shape.c, self.shape.h * self.shape.w]
+    }
+    /// Rows the LayerNorm sees: one per (image, spatial position).
+    fn rows(&self) -> u32 {
+        self.shape.n * self.shape.h * self.shape.w
+    }
+
+    pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer) {
+        let (total, c, rows) = (self.shape.numel(), self.shape.c, self.rows());
+        let s_in = ctx.step(ctx.ids.need(ctx.ids.nchw_nlc, "nchw_nlc"), &[x, &self.xt], &self.perm_params(), total);
+        let s_ln = mblock::layernorm_fwd(
+            ctx.gpu,
+            &self.ln,
+            &self.xt,
+            ps.w(&self.names.gamma),
+            ps.w(&self.names.beta),
+            &self.yt,
+            c,
+            rows,
+            self.eps,
+        );
+        let s_out =
+            ctx.step(ctx.ids.need(ctx.ids.nlc_nchw, "nlc_nchw"), &[&self.yt, &self.out], &self.perm_params(), total);
+        // Strictly sequential: each step reads what the previous wrote. Steps
+        // within one submit execute in the order given.
+        ctx.gpu.submit(&[], &[s_in, s_ln, s_out]);
+    }
+
+    /// `d_out` (NCHW) -> `d_in` (NCHW, overwritten); `gamma`/`beta` grads
+    /// ACCUMULATE into the ParamStore.
+    ///
+    /// Takes no `x_in`: the forward cached the NLC image of the input in `xt`,
+    /// which is what every backward kernel here reads.
+    pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
+        let (total, c, rows) = (self.shape.numel(), self.shape.c, self.rows());
+        let steps = [
+            // The adjoint of nlc_nchw is nchw_nlc — the same permutation matrix
+            // transposed, which for a permutation IS its inverse.
+            ctx.step(ctx.ids.need(ctx.ids.nchw_nlc, "nchw_nlc"), &[d_out, &self.dyt], &self.perm_params(), total),
+            // dgamma/dbeta need mean + 1/sqrt(var+eps) recomputed from the cache.
+            mblock::ln_stats_fwd(ctx.gpu, &self.ln, &self.xt, &self.mean, &self.inv, c, rows, self.eps),
+            ctx.step(
+                ctx.ids.need(ctx.ids.layernorm_dgamma, "layernorm_dgamma"),
+                &[&self.dyt, &self.xt, &self.mean, &self.inv, ps.g(&self.names.gamma)],
+                &[c, rows],
+                c,
+            ),
+            ctx.step(
+                ctx.ids.need(ctx.ids.layernorm_dbeta, "layernorm_dbeta"),
+                &[&self.dyt, ps.g(&self.names.beta)],
+                &[c, rows],
+                c,
+            ),
+            mblock::layernorm_dx_bwd(
+                ctx.gpu,
+                &self.ln,
+                &self.xt,
+                ps.w(&self.names.gamma),
+                &self.dyt,
+                &self.dxt,
+                c,
+                rows,
+                self.eps,
+            ),
+            ctx.step(ctx.ids.need(ctx.ids.nlc_nchw, "nlc_nchw"), &[&self.dxt, d_in], &self.perm_params(), total),
+        ];
+        ctx.gpu.submit(&[], &steps);
+    }
+}
+
+// ===========================================================================
+// CXBlock = ConvNeXt block
+// ===========================================================================
+
+/// Everything that varies between ConvNeXt blocks.
+#[derive(Clone, Copy, Debug)]
+pub struct CxSpec {
+    /// Depthwise kernel size (7) and its `same` padding (3). `conv2d_gd` is
+    /// fully general over K/stride/pad/dilation/groups, so 7x7 depthwise needs
+    /// no kernel of its own.
+    pub k: u32,
+    pub pad: u32,
+    /// Hidden width of the inverted bottleneck as a multiple of `dim` (4).
+    pub mlp_ratio: u32,
+    /// The `LayerNorm2d` epsilon — `1e-6` in ConvNeXt and SAM 2, not torch's
+    /// `1e-5` default.
+    pub eps: f32,
+    /// `use_dwconv=False` makes the first conv DENSE (ConvNeXt's ablation, and
+    /// SAM 2's `CXBlock(use_dwconv=...)` argument).
+    pub depthwise: bool,
+    /// Whether the block carries LayerScale (`layer_scale_init_value > 0`). When
+    /// off there is no `gamma` tensor at all, and a strict checkpoint load would
+    /// fail on a spurious one.
+    pub layer_scale: bool,
+    /// The activation between the two pointwise stages. Defaults to
+    /// [`Act::GeluErf`] — torch's `nn.GELU()` — because that is what the
+    /// checkpoints were trained with; [`Act::Gelu`] is the tanh approximation
+    /// and a different function.
+    pub act: Act,
+}
+
+impl CxSpec {
+    /// ConvNeXt's / SAM 2's defaults: 7x7 depthwise, pad 3, 4x MLP, eps 1e-6,
+    /// LayerScale on, exact GELU.
+    pub const fn new() -> CxSpec {
+        CxSpec { k: 7, pad: 3, mlp_ratio: 4, eps: 1e-6, depthwise: true, layer_scale: true, act: Act::GeluErf }
+    }
+    pub const fn with_act(self, act: Act) -> CxSpec {
+        CxSpec { act, ..self }
+    }
+    pub const fn dense(self) -> CxSpec {
+        CxSpec { depthwise: false, ..self }
+    }
+    pub const fn without_layer_scale(self) -> CxSpec {
+        CxSpec { layer_scale: false, ..self }
+    }
+}
+
+impl Default for CxSpec {
+    fn default() -> CxSpec {
+        CxSpec::new()
+    }
+}
+
+/// A ConvNeXt block: `KxK depthwise conv -> LayerNorm2d -> pointwise(dim -> r*dim)
+/// -> GELU -> pointwise(r*dim -> dim) -> LayerScale -> + input`.
+///
+/// Channel-preserving and spatially shape-preserving, so it drops into a trunk
+/// or a neck anywhere.
+///
+/// **The two pointwise stages are `nn.Linear` in the reference**, applied to a
+/// channels-last view. They are built here as 1x1 [`Conv`] units with
+/// `Norm::None` and a bias, which is the same operator: a 1x1 conv weight
+/// `[Cout, Cin, 1, 1]` has byte-identical flat layout to a Linear's
+/// `[Cout, Cin]`, so the checkpoint tensor loads unchanged and no permutation
+/// is needed. Building them as convs also means brain's fused/register-tiled
+/// conv paths apply to them for free.
+pub struct CXBlock {
+    pub dwconv: Conv,
+    pub norm: LayerNorm2d,
+    pub pwconv1: Conv,
+    pub pwconv2: Conv,
+    /// The LayerScale tensor name, `None` when `spec.layer_scale` is off.
+    gamma: Option<String>,
+    pub spec: CxSpec,
+    pub shape: Shape,
+
+    scaled: DeviceBuffer, // gamma * pwconv2.out  [shape]
+    sum: DeviceBuffer,    // input + scaled       [shape]
+    d_scaled: DeviceBuffer,
+    d_pw1: DeviceBuffer,
+    d_norm: DeviceBuffer,
+    d_dw: DeviceBuffer,
+}
+
+impl CXBlock {
+    /// torch-named, matching the reference module: `P.dwconv.{weight,bias}`,
+    /// `P.norm.{weight,bias}`, `P.pwconv1.{weight,bias}`, `P.pwconv2.{weight,bias}`,
+    /// `P.gamma`.
+    pub fn new(ctx: &Ctx, prefix: &str, shape: Shape, spec: CxSpec, train: bool) -> CXBlock {
+        let dim = shape.c;
+        let hidden = dim * spec.mlp_ratio;
+        // dwconv: KxK, stride 1, `same` pad, groups = dim (or 1 when dense), BIASED,
+        // no norm, no activation. Grouped + biased routes through
+        // `conv2d_gd -> add_chan_inplace`; there is no fused grouped-bias kernel.
+        let dw_spec = ConvSpec {
+            cout: dim,
+            k: spec.k,
+            stride: 1,
+            pad: spec.pad,
+            groups: if spec.depthwise { dim } else { 1 },
+            dilation: 1,
+            norm: Norm::None,
+            act: Act::None,
+            bias: true,
+        };
+        let dwp = format!("{prefix}.dwconv");
+        let dwconv = Conv::with_names(ctx, &dwp, ConvNames::torch_flat(&dwp), shape, dw_spec, train);
+        let norm = LayerNorm2d::new(ctx, Ln2dNames::torch(&format!("{prefix}.norm")), shape, spec.eps);
+        let pw = |cin_shape: Shape, cout: u32, act: Act, name: String| {
+            let s = ConvSpec {
+                cout,
+                k: 1,
+                stride: 1,
+                pad: 0,
+                groups: 1,
+                dilation: 1,
+                norm: Norm::None,
+                act,
+                bias: true,
+            };
+            Conv::with_names(ctx, &name, ConvNames::torch_flat(&name), cin_shape, s, train)
+        };
+        let pwconv1 = pw(shape, hidden, spec.act, format!("{prefix}.pwconv1"));
+        let pwconv2 = pw(pwconv1.out_shape, dim, Act::None, format!("{prefix}.pwconv2"));
+        let n = shape.numel();
+        let hidden_n = pwconv1.out_shape.numel();
+        CXBlock {
+            dwconv,
+            norm,
+            pwconv1,
+            pwconv2,
+            gamma: spec.layer_scale.then(|| format!("{prefix}.gamma")),
+            spec,
+            shape,
+            // Unused without LayerScale, but never zero-sized: wgpu rejects a
+            // zero-length buffer outright.
+            scaled: ctx.act(if spec.layer_scale { n } else { 1 }),
+            sum: ctx.act(n),
+            d_scaled: ctx.act(if spec.layer_scale { n } else { 1 }),
+            d_pw1: ctx.act(hidden_n),
+            d_norm: ctx.act(n),
+            d_dw: ctx.act(n),
+        }
+    }
+
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.sum
+    }
+
+    /// In the reference module's declaration order — `dwconv`, `norm`, `pwconv1`,
+    /// `pwconv2`, `gamma` — so a checkpoint's key order matches 1:1.
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        let mut v = self.dwconv.param_list();
+        v.extend(self.norm.param_list());
+        v.extend(self.pwconv1.param_list());
+        v.extend(self.pwconv2.param_list());
+        if let Some(g) = &self.gamma {
+            v.push((g.clone(), self.shape.c as usize));
+        }
+        v
+    }
+
+    /// Propagate the eval/train BN toggle. All three convs are `Norm::None`, so
+    /// this is a no-op today — kept so a composite that owns `CXBlock`s can call
+    /// it uniformly and so a future normed variant cannot forget it.
+    pub fn set_eval(&self, eval: bool) {
+        self.dwconv.set_eval(eval);
+        self.pwconv1.set_eval(eval);
+        self.pwconv2.set_eval(eval);
+    }
+
+    /// `scale_chan` / `scale_chan_dg` ABI: `[total, C, inner]` with the channel
+    /// read as `(idx / inner) % C`. For NCHW that is `inner = H*W`, which makes
+    /// the gain SHARED across the batch — correct here, because LayerScale is a
+    /// learned parameter, not a per-image gate. (An `[N,C]` per-image gate needs
+    /// `film_chan`/`add_chan_bcast` instead; using `scale_chan` for one applies
+    /// image 0's values to the whole batch.)
+    fn ls_params(&self) -> [u32; 3] {
+        [self.shape.numel(), self.shape.c, self.shape.h * self.shape.w]
+    }
+
+    pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
+        self.dwconv.forward(ctx, ps, x_in);
+        self.norm.forward(ctx, ps, self.dwconv.out());
+        self.pwconv1.forward(ctx, ps, self.norm.out());
+        self.pwconv2.forward(ctx, ps, self.pwconv1.out());
+        let n = self.shape.numel();
+        let branch: &DeviceBuffer = match &self.gamma {
+            Some(g) => {
+                let s = ctx.step(
+                    ctx.ids.need(ctx.ids.scale_chan, "scale_chan"),
+                    &[self.pwconv2.out(), ps.w(g), &self.scaled],
+                    &self.ls_params(),
+                    n,
+                );
+                ctx.gpu.submit(&[], &[s]);
+                &self.scaled
+            }
+            None => self.pwconv2.out(),
+        };
+        let s = ctx.step(ctx.ids.need(ctx.ids.add2, "add2"), &[x_in, branch, &self.sum], &[n], n);
+        ctx.gpu.submit(&[], &[s]);
+    }
+
+    /// `d_out` -> `d_in` (grad wrt `x_in`, overwritten). The residual means
+    /// `d_in` receives the branch gradient AND `d_out` itself, accumulated last.
+    pub fn backward(
+        &self,
+        ctx: &Ctx,
+        ps: &ParamStore,
+        x_in: &DeviceBuffer,
+        d_out: &DeviceBuffer,
+        d_in: &DeviceBuffer,
+    ) {
+        let n = self.shape.numel();
+        // sum = x_in + scaled  =>  d(scaled) = d_out and d(x_in) += d_out.
+        let d_branch: &DeviceBuffer = match &self.gamma {
+            Some(g) => {
+                // dgamma ACCUMULATES (like every *_dw kernel), so the caller's
+                // zero_grads must have cleared it. dx is scale_chan with the
+                // same gain — no separate kernel.
+                let s_dg = ctx.step(
+                    ctx.ids.need(ctx.ids.scale_chan_dg, "scale_chan_dg"),
+                    &[self.pwconv2.out(), d_out, ps.g(g)],
+                    &self.ls_params(),
+                    self.shape.c,
+                );
+                let s_dx = ctx.step(
+                    ctx.ids.need(ctx.ids.scale_chan, "scale_chan"),
+                    &[d_out, ps.w(g), &self.d_scaled],
+                    &self.ls_params(),
+                    n,
+                );
+                ctx.gpu.submit(&[], &[s_dg, s_dx]);
+                &self.d_scaled
+            }
+            None => d_out,
+        };
+        self.pwconv2.backward(ctx, ps, self.pwconv1.out(), d_branch, &self.d_pw1);
+        self.pwconv1.backward(ctx, ps, self.norm.out(), &self.d_pw1, &self.d_norm);
+        self.norm.backward(ctx, ps, &self.d_norm, &self.d_dw);
+        self.dwconv.backward(ctx, ps, x_in, &self.d_dw, d_in);
+        let s = ctx.step(ctx.ids.need(ctx.ids.add_inplace, "add_inplace"), &[d_in, d_out], &[n], n);
+        ctx.gpu.submit(&[], &[s]);
     }
 }
