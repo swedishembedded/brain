@@ -354,6 +354,12 @@ pub const GRAD_SCALE_BUF: &str = include_str!("../wgsl/grad_scale_buf.wgsl");
 pub const GRADNORM_PART: &str = include_str!("../wgsl/gradnorm_part.wgsl");
 /// `wgsl/gradnorm_sq.wgsl`
 pub const GRADNORM_SQ: &str = include_str!("../wgsl/gradnorm_sq.wgsl");
+/// `wgsl/grid_sample.wgsl`
+pub const GRID_SAMPLE: &str = include_str!("../wgsl/grid_sample.wgsl");
+/// `wgsl/grid_sample_dgrid.wgsl`
+pub const GRID_SAMPLE_DGRID: &str = include_str!("../wgsl/grid_sample_dgrid.wgsl");
+/// `wgsl/grid_sample_dx.wgsl`
+pub const GRID_SAMPLE_DX: &str = include_str!("../wgsl/grid_sample_dx.wgsl");
 /// `wgsl/head_pack.wgsl`
 pub const HEAD_PACK: &str = include_str!("../wgsl/head_pack.wgsl");
 /// `wgsl/head_pack_t.wgsl`
@@ -854,6 +860,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("grad_scale_buf", GRAD_SCALE_BUF),
     ("gradnorm_part", GRADNORM_PART),
     ("gradnorm_sq", GRADNORM_SQ),
+    ("grid_sample", GRID_SAMPLE),
+    ("grid_sample_dgrid", GRID_SAMPLE_DGRID),
+    ("grid_sample_dx", GRID_SAMPLE_DX),
     ("head_pack", HEAD_PACK),
     ("head_pack_t", HEAD_PACK_T),
     ("head_unpack", HEAD_UNPACK),
