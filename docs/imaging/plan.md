@@ -132,7 +132,7 @@ Genuinely missing, in dependency order:
 | # | Kernel | Needed by | Notes |
 |---|---|---|---|
 | 1 | `maxpool2d` + `_dx` | Hiera `q_pool`, SCRFD | **DONE.** Generalized `maxpool5` (added `stride` + explicit `Ho`/`Wo`); `maxpool5{,_dx}` deleted and SPPF migrated, so there is one max-pool, not two |
-| 2 | `convtr2d` + `_dw` + `_dx` | SAM 2 mask decoder, VQGAN/CodeFormer decoder | **DONE.** Built on the `convtr1d` shape template; same 12-word `Params` as `conv2d_gd` (square K, symmetric pad, bias-free) |
+| 2 | `convtr2d` + `_dw` + `_dx` | SAM 2 mask decoder (~~VQGAN/CodeFormer decoder~~ — see note) | **DONE.** Built on the `convtr1d` shape template; same 12-word `Params` as `conv2d_gd` (square K, symmetric pad, bias-free). **Correction:** the VQGAN/CodeFormer generator does NOT use a transposed convolution — `vqgan_arch.py`'s `Upsample` is `F.interpolate(scale_factor=2, mode='nearest')` followed by `Conv2d(k3,s1,p1)`, which is the existing `upsample2` + conv path. `crates/vqgan` dispatches no `convtr2d` |
 | 3 | `prelu` + `_bwd` + `_bwd_wg` | ArcFace IResNet | **DONE.** `leaky_relu` has a *fixed* slope; PReLU's is a learned per-channel parameter needing its own grad. Ships as a barrier-free reference (`prelu_bwd`, dispatch `C`) **plus** a cooperative twin (`prelu_bwd_wg`, dispatch `C*64`), the `gn_stats`/`gn_stats_wg` pairing. Selecting between them on the queried `DeviceCaps::workgroup_reductions` is a **correctness gate, not a perf tweak** — `backend-cpu` reports it false, and a barrier-only version returned `da` ALL ZEROS there with no error, i.e. a PReLU whose slopes never move |
 | 4 | `grid_sample` + `_dx` + `_dgrid` | face alignment (similarity warp), ROI align | **DONE.** Bilinear gather, `padding_mode='zeros'`, both `align_corners`. The backward is split in two (different parallelization, different bindings) rather than one `_bwd`, matching `conv2d_gd_dx`/`_dw` |
 | 5 | `resize_bicubic` + `_dx` | SAM 2 `pos_embed` interpolation | **DONE.** Joins `resize_bilinear`/`resize_nearest`, byte-identical `Params`. NOT the same function as `mirror::preprocess::resize_bicubic_torch` (that one is `antialias=True`); antialiased downsampling still has no kernel |
@@ -228,12 +228,70 @@ New capability belongs in existing shared homes, not per-model copies:
   composes the new `MaxPool` (one max-pool dispatch site in the crate).
   Still owed for finetuning: `CXBlock` does not model **DropPath** (identity at
   eval, so parity is unaffected).
-- **`crates/facenet`** *(new)* — ArcFace IResNet-100 + SCRFD detection + the
-  5-point similarity-transform alignment. This mirrors `crates/speaker`
-  (ECAPA-TDNN) exactly: an embedding model consumed by a generative one. The
-  request already noted the pattern is familiar; make it structurally identical.
-- **`crates/vqgan`** *(new, small)* — the VQ encoder/decoder/codebook shared by
-  CodeFormer, reusing `crates/vae`'s conv/attention blocks and `vq_argmin`.
+- **`crates/sam2`** *(new)* — **FORWARD DONE.** Hiera trunk → FPN neck → prompt
+  encoder → two-way mask decoder, image path only. Both released variants
+  (`sam2.1_hiera_tiny`, `sam2.1_hiera_large`) are parity-gated stage by stage
+  against a hooked `sam2.modeling.sam2_base.SAM2Base`; measured numbers in
+  §"Phases 1–3b gate" below. No block or kernel is private to the crate: the
+  trunk composes `model::vit`'s windowed spans + `q_pool`, the neck and decoder
+  compose `vision::blocks`, and the ImageNet constants come from
+  `imaging::{IMAGENET_MEAN, IMAGENET_STD}`. Genuinely model-local and justified:
+  the host-side positional encoding (`hostpe`: 2D sinusoidal `sine`, the random
+  Fourier `pe_encode`/`dense_pe`, `tile_chw`) — nothing else in the tree has a 2D
+  sinusoidal PE — and the two-way decoder's cross trio, which needs `k` from
+  `queries+pe` and `v` from `queries`, a split `vit::cross_q_fwd`'s single fused
+  kv buffer cannot express.
+- **`crates/facenet`** *(new)* — **FORWARD DONE.** ArcFace IResNet-100 + SCRFD
+  detection + the 5-point similarity-transform alignment. This mirrors
+  `crates/speaker` (ECAPA-TDNN) exactly: an embedding model consumed by a
+  generative one. Measured numbers in §"Phases 1–3b gate" below; ledger:
+  `docs/models/face/status.md`.
+
+  This is the **first ONNX import in the repo** — the insightface `antelopev2`
+  release ships ONNX and only ONNX. The protobuf reader was therefore put in
+  `crates/onnx` (`onnx::read`, built on the existing `decode_model`), not in the
+  model crate: a private decoder inside `facenet` would be a second reader of the
+  same wire format that nothing compares against the first. Three hoists came out
+  of the port rather than staying local — `vision::blocks::AvgPool` (the sibling
+  of `MaxPool`; SCRFD's ResNet-D shortcut is `AveragePool(2,2)→conv1×1`, and
+  spelling it as a strided 1×1 gives the right shape and a half-pixel shift in
+  every feature), `vision::blocks::PReLU` (a *learned* per-channel slope, so a
+  block with a parameter and a gradient, not an `Act` variant), and
+  `model::hostmath::{cosine, l2_normalize}`.
+- **`crates/vqgan`** *(new, small)* — **FORWARD DONE.** The VQ
+  encoder/decoder/codebook shared by CodeFormer. Forward parity vs the
+  `basicsr` reference is cosine 1.000000000 on every one of the 25+25 blocks at
+  128², on the 512² end-to-end (synthetic + real face), and on the quantizer
+  unit — with **zero** code-index disagreements — for **both** checkpoints
+  (`codeformer.pth`, `vqgan_code1024.pth`). Backward/gradcheck, the CodeFormer
+  transformer + fidelity dial, and the serving contract are follow-ups.
+
+  Reuse was made real by **hoisting**, not copying: `crates/vae`'s private
+  `Builder` is now the public `vae::blocks::Builder` (parameterised by
+  `BlockNames`, so `conv_shortcut`/`to_q…` and `conv_out`/`q…` are the same
+  block), and `AutoencoderKL` was migrated onto it in the same change.
+  `vqgan` adds **no kernel and no block**: `vq_argmin` (via `wm_core::vq::Vq`)
+  for the assignment and `embed` for the lookup. Ledger (measured numbers,
+  findings, what the deferred work needs): `docs/models/vqgan/status.md`.
+- **`crates/clip`** *(new)* — **FORWARD DONE.** One config-driven graph serving
+  all three towers the workstream needs: CLIP-L and OpenCLIP-bigG/14 text (SDXL
+  conditioning, and CLIP-L again for FLUX.1) plus the EVA-CLIP-L/336 image tower
+  (PuLID). Measured numbers in §"Phases 1–3b gate" below. The EVA attention
+  dispatches through `model::block::bidir_fwd` rather than a hand-written param
+  list — the `docs/kernel-checklist.md` §B surface — with the backward slots set
+  to `usize::MAX` sentinels so a forward-only tower panics loudly instead of
+  running a silently-wrong kernel. One new kernel: `quick_gelu` (`x·σ(1.702x)`),
+  which is genuinely absent from the tree and is **not** `silu` (`x·σ(x)`); the
+  factor is the whole difference and mixing them cost cosine 0.504 before it was
+  added. `vit::vit_block_fwd` deliberately does not fit (no `inner_ln` hook, an
+  `fc1/act/fc2` MLP rather than SwiGLU, and it is non-SSA so the per-stage taps
+  could not exist through it).
+
+  The CLIP **BPE tokenizer is not implemented** — it belongs in `crates/data`
+  next to the GPT-2 and Qwen BPEs, and the parity tests feed token ids from the
+  goldens. Preprocessing (decode → bicubic 336 → normalize) is likewise absent;
+  its goldens (`image_raw`/`image_mean`/`image_std`) are already dumped and are
+  the gate for wiring `crates/imaging` to it.
 - **`crates/imaging`** *(new)* — **DONE.** The image substrate that was ~60 sites
   across 24 crates: decode/encode, a device `Ctx` (resize/crop/pad/affine over
   the kernels), mask algebra (union, feather, dilate, composite, IoU), tiling for
@@ -322,10 +380,10 @@ Each phase ends at a validation gate and is independently committable.
 | Phase | Content | Gate |
 |---|---|---|
 | **0. Foundations** ✅ **DONE** | kernels 1–5 + `crates/imaging` + `vision::blocks` additions + `model::vit` windowed spans | `make kernels-regen`, `make test`, per-kernel parity vs a CPU reference — **met**, see below |
-| **1. SAM 2** | Hiera trunk → FPN neck → prompt encoder → two-way mask decoder; image path only (no video memory bank) | parity vs dumped goldens; `check_sam2`; capability + D-Bus + example |
-| **2. Face recognition** | `crates/facenet`: SCRFD + IResNet-100 + alignment | cosine ≥0.999 vs insightface goldens; `check_arcface` |
-| **3. CodeFormer** | `crates/vqgan` + restorer, identity-fidelity dial `w` | parity goldens; `check_codeformer` |
-| **3b. Text encoders** | `crates/clip`: CLIP-L + OpenCLIP-bigG + EVA-CLIP-L/336 behind one config-driven graph | cosine ≥0.9999 vs HF per encoder; `check_clip` |
+| **1. SAM 2** ◑ **FORWARD DONE** | Hiera trunk → FPN neck → prompt encoder → two-way mask decoder; image path only (no video memory bank) | parity vs dumped goldens — **met** (283/283, see below); `check_sam2`, capability + D-Bus + example **still owed** |
+| **2. Face recognition** ◑ **FORWARD DONE** | `crates/facenet`: SCRFD + IResNet-100 + alignment | cosine ≥0.999 vs insightface goldens — **met** (1.0000000 on every tap, see below); `check_arcface` **still owed** |
+| **3. CodeFormer** ◑ **VQGAN FORWARD DONE** | `crates/vqgan` + restorer, identity-fidelity dial `w` | VQ encoder/decoder/codebook parity — **met** (see below); the CodeFormer **transformer + dial `w` are not implemented**; `check_codeformer` **still owed** |
+| **3b. Text encoders** ◑ **FORWARD DONE** | `crates/clip`: CLIP-L + OpenCLIP-bigG + EVA-CLIP-L/336 behind one config-driven graph | cosine ≥0.9999 vs HF per encoder — **met** (see below); the **BPE tokenizer and image preprocessing are not implemented**; `check_clip` **still owed** |
 | **4. FLUX.1** | `crates/flux1` reusing `dit`/`vae`/`diffusion`; T5-XXL encoder + phase-3b CLIP-L; Kontext edit path | forward cosine vs diffusers; `check_flux1` |
 | **4b. UNet family** | `crates/unet` (SDXL `UNet2DConditionModel`) + discrete schedulers (DDIM/Euler-a/DPM++, ε and v-pred) in `crates/diffusion` | forward cosine vs diffusers SDXL; `check_unet` |
 | **4c. ControlNet** | `crates/controlnet`: backbone-agnostic `ControlAdapter` over named injection points; SDXL impl first, FLUX impl second; depth conditioning fed by brain's own ZipDepth | residual parity vs diffusers ControlNet; `check_controlnet` |
@@ -358,6 +416,41 @@ and returns owned buffers, so phase 1's `resize_bicubic` inside SAM 2's
 pos-embed path must dispatch directly rather than through `Ctx`; and
 `fastvlm/src/encoder.rs` still hand-rolls the per-span cross-attention backward
 trio that `model::vit` now owns.
+
+#### Phases 1–3b gate — what was actually run
+
+**Scope of this gate is goldens → import → FORWARD parity, nothing else.**
+Backward/gradcheck (`check_sam2`, `check_arcface`, `check_codeformer`,
+`check_clip`) and the serving contract (`Provider`, residency adapter, a real
+`run_batch`, D-Bus, `examples/`) are **deliberately deferred** and are not
+claimed by any number below.
+
+Tesla P40 (wgpu/Vulkan), `--release`, run as four targeted
+`cargo test --release -p <crate>` invocations (never a workspace
+`--tests --examples` build). Workspace `cargo build` (lib+bin): **zero rustc
+warnings** — verified with
+`cargo build --message-format=short 2>&1 | grep -E '^[^ ]+\.rs:[0-9]+:[0-9]+: warning:'`
+returning nothing; the two remaining `cargo:warning` lines are the
+`brain-vulkan`/`brain-npu` build-script notes about an absent glslc / OpenVINO
+and are not code warnings.
+
+| suite | tests | measured |
+|---|---|---|
+| `brain-sam2` | 11 lib + 2 parity, 0 failed (25.4 s) | **283/283 stage comparisons, worst cosine 0.9999999999.** hiera-tiny: import 471 source → 317 image-path + 153 video-only skipped; encoder 31 stages, worst 1.0000000000 (`trunk_feat3`); 5 prompt cases × 22 stages, worst 1.0000000000. hiera-large: import 903 → 749 + 153 skipped; encoder 32 stages, worst 1.0000000000 (`lateral_level2`); 5 × 22 stages, worst **0.9999999999** (`point2_negpos/final_attn_out`) |
+| `brain-facenet` | 16 lib + 7 parity, 0 failed (7.9 s) | ArcFace: every tap **cosine 1.0000000** — `blob`/`stem`/20 stage internals/`layer1..4`, `block00..48` (49 residual adds, worst max_abs 4.768e-7), `bn2` 1.147e-6, `fc` 1.460e-6, `embedding` 9.418e-6, `embedding_normed` 7.898e-7. E2E on 4 photos: all 1.0000000; **cosine matrix max \|Δ\| 2.384e-7**. Alignment: `M` ≤1.478e-5, `grid` ≤4.768e-7, `warp_gs` ≤1.159e-2 — vs **cv2** deliberately loose (cos 0.9999972, max_abs 0.5001: cv2's 5-bit fixed-point weights vs fp32 bilinear). SCRFD: 41 taps 1.0000000; decode+NMS on 4 photos, box ≤6.104e-5 px, kps ≤1.221e-4 px, scores exact to 6 digits (0.821795 / 0.833756 / 0.891094 / 0.817362) |
+| `brain-vqgan` | 9 lib + 9 parity, 0 failed (12.1 s) | **cosine 1.000000000 everywhere; 0 code-index mismatches everywhere.** `stages_128` (25 enc + 25 gen + 11 sub-taps): codeformer worst `enc.21` 1−cos **1.84e-11** / relL2 6.262e-6; vqgan_code1024 worst `gen.19` 1−cos **1.08e-11** / relL2 4.619e-6; 0/16 indices each. `e2e_512_face`: codeformer worst `vq.min_dist` 1−cos **1.62e-10** / relL2 1.799e-5, `output` max\|Δ\| 1.955e-5; vqgan_code1024 1−cos **1.63e-10** / relL2 1.804e-5, `output` 1.687e-5; 0/256 each. `e2e_512_synth`: 1−cos **4.37e-11**, 0/256. Quantizer unit: 1−cos 4.25e-14 / 4.60e-14, 0 mismatches. `generate(z_q)` reproduces `decode` **bit-identically** (max\|Δ\| 0.0), and the pooled (`taps=false`) production graph is **bit-identical** to the tapped one on both checkpoints |
+| `brain-clip` | 8 lib + 2 parity, 0 failed (21.8 s) | **148 stage checks, 0 failed.** CLIP-L text 32 stages, all cosine 1.00000000, worst relL2 `layer11_out` 1.541e-6 (max_abs 1.648e-3), `last_hidden_state` 1.723e-6, `pooled` 2.009e-6. OpenCLIP-bigG text 53 stages, all 1.00000000, `layer31_out` 3.088e-6, `last_hidden_state` 3.442e-6, `text_embeds` 1.984e-6. SDXL conditioning: `prompt_embeds` 1.638e-6, `pooled_prompt_embeds` 1.984e-6. EVA-CLIP-L/336 image 49 stages: worst **cosine 0.99999999** at `block22_out`/`block23_out`/`norm_out` (relL2 1.029e-4 / 1.027e-4 / 1.129e-4), collapsing to `cls_embed_l2norm` 1.00000000 / relL2 7.901e-6 through the head. B=2 batched replay 12 stages, both rows identical to the B=1 golden |
+| shared homes touched | `brain-vision` 8+13, `brain-model` 60+22, `brain-onnx` 9+3, `brain-backend-cpu` 20+1, `brain-vae` 2+3 — 0 failed | the `vae::blocks` hoist did **not** regress its first user: **FLUX.2 VAE encode and decode parity still cosine 1.000000** on the P40, `pack` max_abs 0.0 |
+
+**Not measured by this gate, and therefore not claimed:** the CPU-JIT backend
+legs (`BRAIN_DEVICE=cpu`) were run by the porting agents but not re-run here; the
+SAM 2 no-object path (`NO_OBJ_SCORE = -1024` / `no_obj_ptr`) has no golden and
+has never executed; the antialiased 1024→256 mask-prompt downsample is not
+implemented; and every fixture in this gate came from the local mirrors, so
+`scripts/fetch-testdata.sh` provisioning was verified for the sam2 checkpoints
+and the two antelopev2 `.onnx` only — the ~1 GB of stage goldens per model are
+regenerated from the `tools/*_dump_reference.py` commands recorded in that
+script, not mirrored.
 
 **Phase 4 is the long pole and it is also disk- and bandwidth-bound** (34 GB at
 ~1.5 MB/s ≈ 6 h). Phases 0–3 need no Kontext weights, so they proceed in
