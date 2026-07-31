@@ -273,6 +273,13 @@ impl Blob {
     pub fn new(media: Media, bytes: Vec<u8>) -> Blob {
         Blob { media, bytes, meta: Value::Null }
     }
+    /// Re-tag the media kind. `blob::image_blob` encodes brain's ONE image wire
+    /// format and tags it [`Media::Image`]; a mask uses the identical format and
+    /// differs only in the tag, so it is a re-tag rather than a second encoder.
+    pub fn with_media(mut self, media: Media) -> Blob {
+        self.media = media;
+        self
+    }
     pub fn with_meta(mut self, meta: Value) -> Blob {
         self.meta = meta;
         self
