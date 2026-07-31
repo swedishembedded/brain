@@ -10,12 +10,13 @@
 //! values are byte-identical to [`crate::safetensors::parse`] (same F32/F16/BF16/int
 //! decoding); the only difference is *when* the bytes are read.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use serde_json::Value;
 
 use crate::safetensors::{bf16_to_f32, f16_to_f32, StTensor};
+use crate::st::{ModelCard, CONFIG_KEY};
 
 /// Header metadata for one tensor (byte range is relative to the tensor blob).
 #[derive(Clone, Debug)]
@@ -32,6 +33,8 @@ pub struct MmapSafetensors {
     blob_start: usize,
     index: HashMap<String, TensorMeta>,
     order: Vec<String>,
+    /// The file's `__metadata__` string map (holds `brain.config`, card fields).
+    metadata: BTreeMap<String, String>,
 }
 
 impl MmapSafetensors {
@@ -53,8 +56,16 @@ impl MmapSafetensors {
         let obj = header.as_object().ok_or("safetensors: header is not an object")?;
         let mut index = HashMap::new();
         let mut order = Vec::new();
+        let mut metadata = BTreeMap::new();
         for (name, meta) in obj {
             if name == "__metadata__" {
+                if let Some(m) = meta.as_object() {
+                    for (k, v) in m {
+                        if let Some(s) = v.as_str() {
+                            metadata.insert(k.clone(), s.to_string());
+                        }
+                    }
+                }
                 continue;
             }
             let dtype = meta["dtype"].as_str().ok_or("safetensors: missing dtype")?.to_string();
@@ -66,7 +77,7 @@ impl MmapSafetensors {
             order.push(name.clone());
         }
         order.sort(); // deterministic; callers remap by name
-        Ok(MmapSafetensors { mmap, blob_start: hend, index, order })
+        Ok(MmapSafetensors { mmap, blob_start: hend, index, order, metadata })
     }
 
     /// Tensor names, sorted (deterministic).
@@ -77,6 +88,29 @@ impl MmapSafetensors {
     /// A tensor's shape, if present.
     pub fn shape(&self, name: &str) -> Option<&[usize]> {
         self.index.get(name).map(|m| m.shape.as_slice())
+    }
+
+    /// A tensor's dtype string (`F32`/`F16`/`BF16`/…), if present.
+    pub fn dtype(&self, name: &str) -> Option<&str> {
+        self.index.get(name).map(|m| m.dtype.as_str())
+    }
+
+    /// The raw `__metadata__` string map.
+    pub fn metadata(&self) -> &BTreeMap<String, String> {
+        &self.metadata
+    }
+
+    /// The model config parsed from `brain.config` (or `Null` if absent).
+    pub fn config(&self) -> Value {
+        self.metadata
+            .get(CONFIG_KEY)
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(Value::Null)
+    }
+
+    /// The [`ModelCard`], if one was stored.
+    pub fn card(&self) -> Option<ModelCard> {
+        ModelCard::from_metadata(&self.metadata)
     }
 
     /// Total tensor bytes on disk (the resident footprint of the cold mapping when

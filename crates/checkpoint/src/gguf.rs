@@ -107,37 +107,39 @@ impl GgufModel {
     /// to `None`; `general.architecture` fills both family and architecture,
     /// `general.name` fills id and display_name.
     pub fn model_card(&self) -> ModelCard {
-        let s = |k: &str| self.kv.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
-        let arch = s("general.architecture");
-        let name = s("general.name");
-        let id = name.clone().or_else(|| arch.clone()).unwrap_or_else(|| "gguf".into());
-        let family = arch.clone().unwrap_or_else(|| "gguf".into());
-
-        let mut card = ModelCard::new(id, family);
-        card.display_name = name;
-        card.architecture = arch.clone();
-        card.license = s("general.license");
-        card.tokenizer = s("tokenizer.ggml.model");
-        card.quant = self.quant_label();
-        card.param_count = Some(self.param_count());
-        if let Some(a) = &arch {
-            card.context_length =
-                self.kv.get(&format!("{a}.context_length")).and_then(|v| v.as_u64());
-        }
-        card
+        card_from_kv(&self.kv, self.param_count())
     }
+}
 
-    /// A human label for the file's quantization, from `general.file_type` if
-    /// present, else `general.quantization_version`.
-    fn quant_label(&self) -> Option<String> {
-        if let Some(ft) = self.kv.get("general.file_type").and_then(|v| v.as_u64()) {
-            return Some(file_type_name(ft as u32).to_string());
-        }
-        self.kv
-            .get("general.quantization_version")
-            .and_then(|v| v.as_u64())
-            .map(|v| format!("qver{v}"))
+/// Build a [`ModelCard`] from a GGUF KV map plus a precomputed param count.
+/// Shared by [`GgufModel::model_card`] and [`MmapGguf::model_card`].
+fn card_from_kv(kv: &BTreeMap<String, GgufValue>, param_count: u64) -> ModelCard {
+    let s = |k: &str| kv.get(k).and_then(|v| v.as_str()).map(|s| s.to_string());
+    let arch = s("general.architecture");
+    let name = s("general.name");
+    let id = name.clone().or_else(|| arch.clone()).unwrap_or_else(|| "gguf".into());
+    let family = arch.clone().unwrap_or_else(|| "gguf".into());
+
+    let mut card = ModelCard::new(id, family);
+    card.display_name = name;
+    card.architecture = arch.clone();
+    card.license = s("general.license");
+    card.tokenizer = s("tokenizer.ggml.model");
+    card.quant = quant_label(kv);
+    card.param_count = Some(param_count);
+    if let Some(a) = &arch {
+        card.context_length = kv.get(&format!("{a}.context_length")).and_then(|v| v.as_u64());
     }
+    card
+}
+
+/// A human label for the file's quantization, from `general.file_type` if
+/// present, else `general.quantization_version`.
+fn quant_label(kv: &BTreeMap<String, GgufValue>) -> Option<String> {
+    if let Some(ft) = kv.get("general.file_type").and_then(|v| v.as_u64()) {
+        return Some(file_type_name(ft as u32).to_string());
+    }
+    kv.get("general.quantization_version").and_then(|v| v.as_u64()).map(|v| format!("qver{v}"))
 }
 
 /// Map a `general.file_type` enum value to its conventional name.
@@ -673,6 +675,117 @@ fn deq_q8_k(b: &[u8], out: &mut Vec<f32>) {
     let d = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
     for j in 0..QK_K {
         out.push(b[4 + j] as i8 as f32 * d);
+    }
+}
+
+/// A memory-mapped GGUF file with an on-demand, per-tensor dequant accessor.
+///
+/// [`open`](MmapGguf::open) mmaps the file and parses only the header (KV +
+/// tensor infos); no tensor data is read. [`tensor`](MmapGguf::tensor)
+/// dequantizes exactly one tensor's block range from the mmap, so peak host
+/// memory is bounded by a single tensor's fp32 expansion — never the whole
+/// model. Values are byte-identical to the eager [`parse_gguf`].
+#[cfg(not(target_arch = "wasm32"))]
+pub struct MmapGguf {
+    mmap: memmap2::Mmap,
+    kv: BTreeMap<String, GgufValue>,
+    /// name → (ggml type, absolute byte start, on-disk byte length, element count).
+    index: HashMap<String, (u32, usize, usize, usize)>,
+    shapes: BTreeMap<String, Vec<usize>>,
+    order: Vec<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MmapGguf {
+    /// Open + mmap `path` and parse only its header (no tensor bytes are read).
+    pub fn open(path: &str) -> Result<MmapGguf, String> {
+        let file = std::fs::File::open(path).map_err(|e| format!("gguf: open {path}: {e}"))?;
+        // SAFETY: weight files are treated as immutable for the mapping's lifetime.
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| format!("gguf: mmap {path}: {e}"))?;
+        let (kv, infos, data_start) = parse_header(&mmap)?;
+        let mut index = HashMap::with_capacity(infos.len());
+        let mut shapes = BTreeMap::new();
+        let mut order = Vec::with_capacity(infos.len());
+        for info in infos {
+            let numel: usize = info.shape.iter().product();
+            let start = data_start
+                .checked_add(info.offset as usize)
+                .ok_or("gguf: tensor offset overflow")?;
+            let nbytes = tensor_nbytes(info.ty, numel)
+                .ok_or_else(|| format!("gguf: {} unknown type {}", info.name, info.ty))?;
+            if start + nbytes > mmap.len() {
+                return Err(format!("gguf: {} data out of range", info.name));
+            }
+            index.insert(info.name.clone(), (info.ty, start, nbytes, numel));
+            shapes.insert(info.name.clone(), info.shape);
+            order.push(info.name);
+        }
+        Ok(MmapGguf { mmap, kv, index, shapes, order })
+    }
+
+    /// Tensor names, in the file's declared order.
+    pub fn names(&self) -> &[String] {
+        &self.order
+    }
+
+    /// A tensor's shape (torch order), if present.
+    pub fn shape(&self, name: &str) -> Option<&[usize]> {
+        self.shapes.get(name).map(|s| s.as_slice())
+    }
+
+    /// The full KV metadata map.
+    pub fn kv(&self) -> &BTreeMap<String, GgufValue> {
+        &self.kv
+    }
+
+    /// Total tensor element count (summed over shapes).
+    pub fn param_count(&self) -> u64 {
+        self.shapes.values().map(|s| s.iter().product::<usize>() as u64).sum()
+    }
+
+    /// The KV metadata as a JSON object (every key preserved; arrays recurse).
+    pub fn config(&self) -> serde_json::Value {
+        let mut m = serde_json::Map::new();
+        for (k, v) in &self.kv {
+            m.insert(k.clone(), gval_json(v));
+        }
+        serde_json::Value::Object(m)
+    }
+
+    /// The [`ModelCard`] derived from the standardized GGUF keys.
+    pub fn model_card(&self) -> ModelCard {
+        card_from_kv(&self.kv, self.param_count())
+    }
+
+    /// Dequantize exactly one tensor to fp32, decoding on access from the mmap.
+    /// `None` if the name is unknown; `Some(Err)` if the tensor exists but its
+    /// quant type is unsupported (IQ/TQ/MXFP4 codebooks). Byte-identical to the
+    /// eager [`parse_gguf`] for the same tensor.
+    pub fn tensor(&self, name: &str) -> Option<Result<Vec<f32>, String>> {
+        let &(ty, start, nbytes, numel) = self.index.get(name)?;
+        let raw = &self.mmap[start..start + nbytes];
+        Some(dequantize(ty, raw, numel).map_err(|e| format!("gguf: {name}: {e}")))
+    }
+}
+
+/// Convert one GGUF metadata value to `serde_json::Value` (arrays recurse).
+#[cfg(not(target_arch = "wasm32"))]
+fn gval_json(v: &GgufValue) -> serde_json::Value {
+    use serde_json::json;
+    match v {
+        GgufValue::U8(x) => json!(x),
+        GgufValue::I8(x) => json!(x),
+        GgufValue::U16(x) => json!(x),
+        GgufValue::I16(x) => json!(x),
+        GgufValue::U32(x) => json!(x),
+        GgufValue::I32(x) => json!(x),
+        GgufValue::F32(x) => json!(x),
+        GgufValue::Bool(x) => json!(x),
+        GgufValue::String(x) => json!(x),
+        GgufValue::U64(x) => json!(x),
+        GgufValue::I64(x) => json!(x),
+        GgufValue::F64(x) => json!(x),
+        GgufValue::Array(a) => serde_json::Value::Array(a.iter().map(gval_json).collect()),
     }
 }
 

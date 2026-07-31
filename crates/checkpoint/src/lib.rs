@@ -15,6 +15,8 @@ pub mod st;
 pub mod gguf;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mmap;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod weightio;
 pub mod torchpt;
 pub mod zipread;
 
