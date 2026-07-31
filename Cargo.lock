@@ -358,6 +358,7 @@ dependencies = [
  "brain-gpt",
  "brain-gpu-core",
  "brain-gradcheck",
+ "brain-imaging",
  "brain-kronos",
  "brain-lfm",
  "brain-mirror",
@@ -437,6 +438,7 @@ dependencies = [
  "brain-data",
  "brain-gpu-core",
  "brain-gradcheck",
+ "brain-imaging",
  "brain-kernels",
  "brain-model",
  "brain-optim",
@@ -620,6 +622,18 @@ name = "brain-hfsm"
 version = "0.1.0"
 
 [[package]]
+name = "brain-imaging"
+version = "0.1.0"
+dependencies = [
+ "brain-backend-cpu",
+ "brain-events",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-vision",
+ "image",
+]
+
+[[package]]
 name = "brain-kernels"
 version = "0.1.0"
 
@@ -662,6 +676,7 @@ version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
+ "brain-imaging",
  "brain-kernels",
  "brain-model",
  "brain-paramstore",
@@ -743,6 +758,7 @@ dependencies = [
  "brain-fincast",
  "brain-glm",
  "brain-gpu-core",
+ "brain-imaging",
  "brain-kronos",
  "brain-lfm",
  "brain-mirror",
@@ -981,6 +997,8 @@ name = "brain-vision"
 version = "0.1.0"
 dependencies = [
  "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
  "brain-paramstore",
  "bytemuck",
 ]
@@ -1053,6 +1071,7 @@ name = "brain-wm-display"
 version = "0.1.0"
 dependencies = [
  "brain-data",
+ "brain-imaging",
  "brain-wm-core",
 ]
 
@@ -1076,6 +1095,7 @@ dependencies = [
  "brain-eval",
  "brain-gpu-core",
  "brain-gradcheck",
+ "brain-imaging",
  "brain-kernels",
  "brain-model",
  "brain-optim",
