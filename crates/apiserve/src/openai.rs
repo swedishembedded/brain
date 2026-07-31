@@ -145,13 +145,17 @@ pub async fn handle_embeddings(state: AppState, body: Bytes) -> Response {
         Ok(v) => v,
         Err(e) => return ApiError::invalid_request(provider, format!("invalid JSON body: {e}")).into_response(),
     };
-    let req = match parse_embedding_request(provider, &body) {
+    let mut req = match parse_embedding_request(provider, &body) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    // Resolve the model against the embeddings-capable manifests before dispatching.
-    if !catalog::resolve_embed(&state.exec, &req.model) {
-        return ApiError::model_not_found(provider, &req.model).into_response();
+    // Resolve the model against the embeddings-capable manifests before dispatching. On
+    // the OpenRouter surface this also strips a `"<provider>/"` prefix and walks a
+    // `models` fallback array; OpenAI is exact-match only. The resolved local id
+    // replaces the requested one for dispatch and the echoed response `model`.
+    match catalog::resolve_model(provider, &body, |id| catalog::resolve_embed(&state.exec, id).then_some(())) {
+        Some((id, ())) => req.model = id,
+        None => return ApiError::model_not_found(provider, &req.model).into_response(),
     }
 
     let mut data: Vec<Value> = Vec::with_capacity(req.inputs.len());
@@ -209,14 +213,17 @@ pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response
         Ok(v) => v,
         Err(e) => return ApiError::invalid_request(provider, format!("invalid JSON body: {e}")).into_response(),
     };
-    let (model, inv, stream) = match to_invocation(provider, &body) {
+    let (requested, inv, stream) = match to_invocation(provider, &body) {
         Ok(x) => x,
         Err(e) => return e.into_response(),
     };
-    // Resolve the model against the chat-capable manifests before dispatching.
-    if !catalog::resolve_chat(&state.exec, &model) {
-        return ApiError::model_not_found(provider, &model).into_response();
-    }
+    // Resolve the model against the chat-capable manifests before dispatching. On the
+    // OpenRouter surface this also strips a `"<provider>/"` prefix and walks a `models`
+    // fallback array (see [`catalog::resolve_model`]); OpenAI is exact-match only.
+    let model = match catalog::resolve_model(provider, &body, |id| catalog::resolve_chat(&state.exec, id).then_some(())) {
+        Some((id, ())) => id,
+        None => return ApiError::model_not_found(provider, &requested).into_response(),
+    };
     if stream {
         let want_usage = body.get("stream_options").and_then(|o| o.get("include_usage")).and_then(|v| v.as_bool()).unwrap_or(false);
         stream_chat(state, model, inv, native, want_usage).await
@@ -495,13 +502,19 @@ pub async fn handle_images(state: AppState, body: Bytes) -> Response {
         Ok(v) => v,
         Err(e) => return ApiError::invalid_request(provider, format!("invalid JSON body: {e}")).into_response(),
     };
-    let req = match parse_image_request(provider, &body) {
+    let mut req = match parse_image_request(provider, &body) {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
     // Resolve the model → the text-to-image action to dispatch (404 if unknown/non-image).
-    let action = match catalog::resolve_image(&state.exec, &req.model) {
-        Some(a) => a,
+    // On the OpenRouter surface this also strips a `"<provider>/"` prefix and walks a
+    // `models` fallback array; OpenAI is exact-match only. The resolved local id
+    // replaces the requested one for dispatch.
+    let action = match catalog::resolve_model(provider, &body, |id| catalog::resolve_image(&state.exec, id)) {
+        Some((id, action)) => {
+            req.model = id;
+            action
+        }
         None => return ApiError::model_not_found(provider, &req.model).into_response(),
     };
 

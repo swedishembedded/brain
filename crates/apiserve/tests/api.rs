@@ -980,6 +980,100 @@ async fn openai_images_stream_emits_partials_and_final_image() {
     assert_eq!(bytes, apiserve::png::encode_rgb8(&FAKE_IMG_RGB8, 2, 2), "completed event carries the model's PNG");
 }
 
+// ------------------------------------------- P11: OpenRouter model-id resolution
+
+/// OpenRouter strips a leading `"<provider>/"` namespace: a request for
+/// `anything/brain-chat` resolves to the local `brain-chat` and returns a spec-valid
+/// 200 (whereas the exact id is not in the catalog).
+#[tokio::test]
+async fn openrouter_chat_strips_provider_prefix() {
+    let (app, key) = chat_app(Provider::OpenRouter);
+    let body = json!({"model": "anything/brain-chat", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "prefixed model must resolve + 200: {v}");
+    assert_valid("openrouter.json", "ChatResult", &v);
+    assert_eq!(v["choices"][0]["message"]["content"], "Hello world");
+}
+
+/// OpenRouter honours the `models` fallback array: the primary `model` and the first
+/// fallback entry don't resolve, but the second (`prefix/brain-chat`) does after prefix
+/// stripping — so the request succeeds via that entry.
+#[tokio::test]
+async fn openrouter_chat_models_fallback_array_resolves_second() {
+    let (app, key) = chat_app(Provider::OpenRouter);
+    let body = json!({
+        "model": "does/not-exist",
+        "models": ["nope/x", "prefix/brain-chat"],
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+    let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "second fallback entry must resolve + 200: {v}");
+    assert_valid("openrouter.json", "ChatResult", &v);
+    assert_eq!(v["choices"][0]["message"]["content"], "Hello world");
+}
+
+/// OpenRouter tolerates its own extra request fields (`provider`, `route`,
+/// `transforms`, `plugins`): they parse and are ignored, so the request still 200s
+/// instead of 400-ing on the unknown keys.
+#[tokio::test]
+async fn openrouter_chat_tolerates_or_only_fields() {
+    let (app, key) = chat_app(Provider::OpenRouter);
+    let body = json!({
+        "model": "brain-chat",
+        "messages": [{"role": "user", "content": "hi"}],
+        "provider": {"order": ["brain"], "allow_fallbacks": false},
+        "route": "fallback",
+        "transforms": ["middle-out"],
+        "plugins": [{"id": "web"}],
+    });
+    let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "OpenRouter-only extras must not 400: {v}");
+    assert_valid("openrouter.json", "ChatResult", &v);
+}
+
+/// The prefix-strip + fallback behaviour is OpenRouter-only: on the OpenAI surface a
+/// slashed model id is NOT stripped and a `models` array is ignored, so a request for a
+/// prefixed id that only matches after stripping still 404s.
+#[tokio::test]
+async fn openai_chat_does_not_strip_prefix_or_use_models_fallback() {
+    let (app, key) = chat_app(Provider::OpenAI);
+    // Slashed id: OpenAI must not strip -> 404.
+    let body = json!({"model": "anything/brain-chat", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "OpenAI must not strip a slashed model: {v}");
+    assert_valid("openai.json", "ErrorResponse", &v);
+
+    // `models` fallback array is an OpenRouter-only field: ignored on OpenAI, so an
+    // unresolvable primary `model` still 404s even if a `models` entry would resolve.
+    let body = json!({
+        "model": "does/not-exist",
+        "models": ["brain-chat"],
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+    let (st, _) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "OpenAI must ignore the models fallback array");
+}
+
+/// The prefix strip + `models` fallback apply to OpenRouter embeddings and images too
+/// (shared resolution): a prefixed embeddings id resolves, and an images `models`
+/// fallback entry resolves after stripping.
+#[tokio::test]
+async fn openrouter_embeddings_and_images_resolve_prefix_and_fallback() {
+    // Embeddings: prefixed id strips to the local embed model.
+    let (app, key) = embed_app(Provider::OpenRouter);
+    let body = json!({"model": "any/brain-embed", "input": "hi"});
+    let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/embeddings", &body).await;
+    assert_eq!(st, StatusCode::OK, "prefixed embeddings model must resolve: {v}");
+    assert_valid("openai.json", "CreateEmbeddingResponse", &v);
+
+    // Images: primary doesn't resolve, fallback entry strips to the local image model.
+    let (app, key) = image_app(Provider::OpenRouter);
+    let body = json!({"model": "nope/x", "models": ["vendor/brain-image"], "prompt": "a dog"});
+    let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/images/generations", &body).await;
+    assert_eq!(st, StatusCode::OK, "images fallback entry must resolve: {v}");
+    assert_valid("openai.json", "ImagesResponse", &v);
+}
+
 // ------------------------------------------------- P6: admission + backpressure
 
 /// A shared gate the test uses to (a) pin the single CPU lane and (b) count how

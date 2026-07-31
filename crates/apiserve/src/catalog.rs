@@ -15,6 +15,7 @@
 
 use capability::{Manifest, Media};
 use residency::Executor;
+use serde_json::Value;
 
 use crate::surface::Provider;
 
@@ -99,6 +100,59 @@ pub fn resolve_embed(exec: &Executor, model: &str) -> bool {
 /// it `text2image`).
 pub fn resolve_image(exec: &Executor, model: &str) -> Option<String> {
     exec.manifests().iter().find(|m| m.model == model && api_caps(m).image).and_then(|m| text2image_action(&m))
+}
+
+/// Strip a leading `"<segment>/"` provider namespace from an OpenRouter-style model
+/// id: `anything/qwen3-4b` -> `Some("qwen3-4b")`, `openai/gpt-4o` -> `Some("gpt-4o")`.
+/// Only the FIRST segment is removed (`a/b/c` -> `b/c`). Returns `None` when there is
+/// no `'/'` or the remainder would be empty (so `qwen3-4b` and `foo/` both yield None).
+pub fn strip_provider_prefix(model: &str) -> Option<&str> {
+    model.split_once('/').map(|(_, rest)| rest).filter(|s| !s.is_empty())
+}
+
+/// The ordered list of candidate local model ids to try for `provider` + request
+/// `body`. On OpenAI/Anthropic this is exactly the primary `model` (exact match only).
+/// On OpenRouter it is, in order:
+/// - the primary `model`, then its prefix-stripped form;
+/// - then, if a `models` fallback array is present, each entry followed by its
+///   prefix-stripped form.
+/// Exact match always precedes the stripped form of the same id, and the primary
+/// `model` (both forms) is always tried before any `models` fallback entry.
+fn candidates(provider: Provider, body: &Value) -> Vec<String> {
+    let openrouter = provider == Provider::OpenRouter;
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |id: &str| {
+        if id.is_empty() {
+            return;
+        }
+        out.push(id.to_string());
+        if openrouter {
+            if let Some(stripped) = strip_provider_prefix(id) {
+                out.push(stripped.to_string());
+            }
+        }
+    };
+    if let Some(m) = body.get("model").and_then(|v| v.as_str()) {
+        push(m);
+    }
+    if openrouter {
+        if let Some(arr) = body.get("models").and_then(|v| v.as_array()) {
+            for m in arr.iter().filter_map(|v| v.as_str()) {
+                push(m);
+            }
+        }
+    }
+    out
+}
+
+/// Resolve a request's `model` to a concrete local catalog id using `resolve` (the
+/// per-capability lookup, returning `Some(extra)` on a hit — `()` for chat/embeddings,
+/// the text-to-image action name for images). Walks [`candidates`] in order and
+/// returns the first `(resolved_id, extra)` that resolves, or `None` (a
+/// `model_not_found`). This is where OpenRouter's prefix-strip + `models` fallback
+/// live; OpenAI/Anthropic reduce to a single exact-match lookup of the primary `model`.
+pub fn resolve_model<T, F: Fn(&str) -> Option<T>>(provider: Provider, body: &Value, resolve: F) -> Option<(String, T)> {
+    candidates(provider, body).into_iter().find_map(|id| resolve(&id).map(|extra| (id, extra)))
 }
 
 /// The pure text-to-image action of an image manifest: emits an `Image` output,
