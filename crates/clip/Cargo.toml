@@ -13,6 +13,7 @@ path = "src/lib.rs"
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-model.workspace = true
+brain-paramstore.workspace = true
 brain-vision.workspace = true
 brain-imaging.workspace = true
 brain-checkpoint.workspace = true

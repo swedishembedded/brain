@@ -122,6 +122,19 @@ from them, keeping the gradient-check discipline.
     CodeFormer **transformer and the fidelity dial `w` are not implemented**;
     backward/gradcheck and the serving contract are deferred.)*
 
+12d. **CLIP text + image towers** (`crates/clip`) — one config-driven graph for
+    the three encoders the imaging workstream needs: **CLIP-L** and
+    **OpenCLIP-bigG/14** text (SDXL conditioning; CLIP-L again for FLUX.1) and
+    the **EVA-CLIP-L/336** image tower (PuLID), the latter with 2D RoPE on q/k
+    excluding cls, subln attention and naive SwiGLU. Imported from the SDXL
+    `text_encoder{,_2}` safetensors and the EVA `.pt`, two-way covered, and
+    forward-parity-gated per stage vs `transformers`/`open_clip` (cross-checked
+    against `diffusers.encode_prompt` for the SDXL conditioning pair).
+    *(Forward only: the **CLIP BPE tokenizer** belongs in `crates/data` next to
+    the GPT-2/Qwen BPEs and is **not implemented**, image preprocessing is not
+    implemented, and backward/gradcheck + the serving contract are deferred —
+    see `docs/imaging/plan.md` §4.)*
+
 ### Audio / speech
 
 13. **Qwen3-TTS** (`crates/tts` + `crates/codec` + `crates/speaker` +
@@ -280,6 +293,7 @@ Multi-GPU scaling lives in `crates/model`:
 | Face recognition (SCRFD + alignment + ArcFace) | `docs/models/face/status.md`; `crates/facenet/src/{config,import,model,align,detect}.rs`; goldens via `tools/arcface_dump_reference.py` |
 | **Read an ONNX file** (initializers, nodes, attributes) | `crates/onnx/src/read.rs` — the import front-end; `crates/onnx` is otherwise export-only |
 | VQGAN / CodeFormer VQ autoencoder | `docs/models/vqgan/status.md`; `crates/vqgan/src/{config,import,model}.rs` over `crates/vae/src/blocks.rs`; goldens via `tools/codeformer_dump_reference.py` |
+| CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers | `crates/clip/src/{config,import,model}.rs`; goldens via `tools/clip_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
 | SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/sam2_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
 | WorldMirror-2 (photos → 3DGS scene) | `docs/models/mirror/{readme,status}.md`; `crates/mirror`, `crates/cli/src/mirror_cli.rs` |
