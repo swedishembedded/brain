@@ -350,18 +350,26 @@ pub struct Lfm {
 
 impl Lfm {
     /// Load an inference-only model (frozen weights, materialized attention —
-    /// intended for short contexts / parity work).
+    /// intended for short contexts / parity work). Streams the weights one tensor
+    /// at a time off a mmap-backed
+    /// [`WeightReader`](checkpoint::weightio::WeightReader) — peak host ≈ one
+    /// tensor of f32, never the whole-model `checkpoint::load` + `by_role("")`
+    /// host copy on top of the device copy.
     pub fn load_inference(path: &str, b: u32, t: u32) -> Lfm {
-        let (cfg, init) = Self::load_ckpt(path);
-        Lfm::new_impl(cfg, b, t, &init, None, false)
+        let reader = checkpoint::weightio::WeightReader::open(path)
+            .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
+        let cfg = LfmConfig::from_json(&reader.config());
+        Lfm::new_impl(cfg, b, t, &reader, None, false)
     }
 
     /// Load an inference-only model on the chunked long-context path: attention
     /// scratch bounded by `slab_budget_bytes`, MLM head evaluated at up to
-    /// `probe_cap` gathered rows (0 = hidden-states only).
+    /// `probe_cap` gathered rows (0 = hidden-states only). Streaming — see
+    /// [`Lfm::from_reader_chunked`].
     pub fn load_inference_chunked(path: &str, b: u32, t: u32, slab_budget_bytes: u64, probe_cap: u32) -> Lfm {
-        let (cfg, init) = Self::load_ckpt(path);
-        Lfm::new_chunked(cfg, b, t, &init, slab_budget_bytes, probe_cap)
+        let reader = checkpoint::weightio::WeightReader::open(path)
+            .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
+        Lfm::from_reader_chunked(&reader, b, t, slab_budget_bytes, probe_cap)
     }
 
     /// Streaming chunked-inference load: build from a mmap-backed
@@ -404,13 +412,26 @@ impl Lfm {
         m
     }
 
-    /// Load a trainable model from a checkpoint (fine-tuning).
+    /// Load a trainable model from a checkpoint (fine-tuning). Streaming: the
+    /// materialized-regime builder ([`new_impl`](Lfm::new_impl)) already takes a
+    /// [`TensorSource`](checkpoint::TensorSource), so the mmap-backed
+    /// [`WeightReader`](checkpoint::weightio::WeightReader) uploads one tensor at
+    /// a time (AdamW moments are device zero-init, not read from disk) — peak
+    /// host ≈ one tensor of f32, byte-identical to the former eager path.
     pub fn load_train(path: &str, b: u32, t: u32) -> Lfm {
-        let (cfg, init) = Self::load_ckpt(path);
-        Lfm::new_impl(cfg, b, t, &init, None, true)
+        let reader = checkpoint::weightio::WeightReader::open(path)
+            .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
+        let cfg = LfmConfig::from_json(&reader.config());
+        Lfm::new_impl(cfg, b, t, &reader, None, true)
     }
 
     /// Load a long-context trainable model (see [`Lfm::new_train_chunked`]).
+    /// LEFT EAGER: the chunked-training builder threads the init through the
+    /// public `new_train_chunked` → `new_impl_chunkedtrain` → `new_impl_alloc`
+    /// chain, all typed on `&HashMap` (they wire the gathered-head + slab
+    /// optimizer allocation after alloc); the streaming `TensorSource` only
+    /// reaches `new_impl_alloc_inner`, so migrating here would mean changing that
+    /// public training-facing signature — out of this inference-load chunk.
     pub fn load_train_chunked(path: &str, b: u32, t: u32, slab_budget_bytes: u64, head_cap: u32) -> Lfm {
         let (cfg, init) = Self::load_ckpt(path);
         Lfm::new_train_chunked(cfg, b, t, &init, slab_budget_bytes, head_cap)
@@ -1420,7 +1441,7 @@ impl model::Model for Lfm {
 
 #[cfg(test)]
 mod tests {
-    use super::PIPELINES;
+    use super::{Lfm, LfmConfig, PIPELINES};
 
     /// Every kernel this model can dispatch has a cost formula — pins the
     /// FLOP/OPS accounting against silent drift when PIPELINES grows.
@@ -1433,5 +1454,33 @@ mod tests {
                  add one (its dispatches would otherwise be reported UNCOVERED)"
             );
         }
+    }
+
+    /// The streaming `Lfm::load_inference` (mmap `WeightReader`, one tensor
+    /// uploaded at a time) yields byte-identical device weights to the eager
+    /// whole-model-host-map path (`Lfm::new` over `by_role("")`), and both match
+    /// the source init exactly. GPU-gated (testgpu / MOE_SKIP_GPU).
+    #[test]
+    fn streaming_load_matches_eager() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let cfg = LfmConfig::tiny();
+        let cfg_json = cfg.to_json();
+        let init = crate::init::init_weights(&cfg, 5);
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+            init.iter().map(|(n, v)| (n.clone(), vec![v.len() as u64], v.clone())).collect();
+        let path = std::env::temp_dir().join(format!("lfm-stream-parity-{}.st", std::process::id()));
+        let p = path.to_str().unwrap();
+        checkpoint::st::save_safetensors(p, &tensors, &cfg_json, None).unwrap();
+
+        let eager = Lfm::new(cfg.clone(), 1, 8, &checkpoint::load(p).by_role(""));
+        let streamed = Lfm::load_inference(p, 1, 8);
+
+        for (name, _) in cfg.param_list() {
+            assert_eq!(eager.read_weight(&name), streamed.read_weight(&name), "weight {name}");
+            assert_eq!(&streamed.read_weight(&name), &init[&name], "streamed {name} vs source");
+        }
+        std::fs::remove_file(&path).ok();
     }
 }

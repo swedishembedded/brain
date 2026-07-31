@@ -388,11 +388,14 @@ struct Decode {
 
 impl Gpt {
     /// Load a model from a `.safetensors` checkpoint, sized for batch `b` × seq `t`.
+    /// Streams the weights one tensor at a time off a mmap-backed
+    /// [`WeightReader`](checkpoint::weightio::WeightReader) — peak host ≈ one
+    /// tensor of f32, never the whole-model `checkpoint::load` + `by_role("")`
+    /// host copy on top of the device copy. See [`Gpt::from_reader`].
     pub fn load(path: &str, b: u32, t: u32) -> Gpt {
-        let c = checkpoint::load(path);
-        let cfg = GptConfig::from_json(&c.header["config"]);
-        let init = c.by_role("");
-        Gpt::new(cfg, b, t, &init)
+        let reader = checkpoint::weightio::WeightReader::open(path)
+            .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
+        Gpt::from_reader(&reader, b, t)
     }
 
     pub fn new(cfg: GptConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Gpt {
@@ -1089,6 +1092,34 @@ mod tests {
 
     fn maxabs(a: &[f32], b: &[f32]) -> f32 {
         a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// The streaming `Gpt::load` (mmap `WeightReader`, one tensor uploaded at a
+    /// time) yields byte-identical device weights to the eager whole-model-host-
+    /// map path (`Gpt::new` over `by_role("")`), and both match the source init
+    /// exactly. GPU-gated (testgpu / MOE_SKIP_GPU).
+    #[test]
+    fn streaming_load_matches_eager() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = GptConfig::tiny();
+        let cfg_json = cfg.to_json();
+        let init = crate::init::init_weights(&cfg, 5);
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+            init.iter().map(|(n, v)| (n.clone(), vec![v.len() as u64], v.clone())).collect();
+        let path = std::env::temp_dir().join(format!("gpt-stream-parity-{}.st", std::process::id()));
+        let p = path.to_str().unwrap();
+        checkpoint::st::save_safetensors(p, &tensors, &cfg_json, None).unwrap();
+
+        let eager = Gpt::new(cfg, 1, 8, &checkpoint::load(p).by_role(""));
+        let streamed = Gpt::load(p, 1, 8);
+
+        for (name, _) in &eager.ps.params {
+            assert_eq!(eager.read_weight(name), streamed.read_weight(name), "weight {name}");
+            assert_eq!(&streamed.read_weight(name), &init[name], "streamed {name} vs source");
+        }
+        std::fs::remove_file(&path).ok();
     }
 
     /// The incremental KV-cache `step` must reproduce the `O(T²)` full-recompute

@@ -357,16 +357,24 @@ pub struct Glm {
 }
 
 impl Glm {
+    /// Trainable load, streaming: build directly off a mmap-backed
+    /// [`WeightReader`](checkpoint::weightio::WeightReader), uploading one tensor
+    /// at a time — peak host ≈ one tensor of f32, never the whole-model
+    /// `checkpoint::load` + `by_role("")` host copy. AdamW moments are device
+    /// zero-init (not read from the checkpoint), so streaming is byte-identical
+    /// to the former eager path.
     pub fn load(path: &str, b: u32, t: u32) -> Glm {
-        let c = checkpoint::load(path);
-        let cfg = GlmConfig::from_json(&c.header["config"]);
-        Glm::new_impl(cfg, b, t, &c.by_role(""), true)
+        let reader = checkpoint::weightio::WeightReader::open(path)
+            .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
+        let cfg = GlmConfig::from_json(&reader.config());
+        Glm::new_impl_on(Gpu::new(PIPELINES), cfg, b, t, &reader, true)
     }
 
+    /// Inference load, streaming — see [`Glm::from_reader_inference`].
     pub fn load_inference(path: &str, b: u32, t: u32) -> Glm {
-        let c = checkpoint::load(path);
-        let cfg = GlmConfig::from_json(&c.header["config"]);
-        Glm::new_impl(cfg, b, t, &c.by_role(""), false)
+        let reader = checkpoint::weightio::WeightReader::open(path)
+            .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
+        Glm::from_reader_inference(&reader, b, t)
     }
 
     /// Streaming inference load: build from a mmap-backed [`WeightReader`],
@@ -1362,6 +1370,34 @@ mod kv_step_tests {
 
     fn maxabs(a: &[f32], b: &[f32]) -> f32 {
         a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// The streaming `Glm::load_inference` (mmap `WeightReader`, one tensor
+    /// uploaded at a time) yields byte-identical device weights to the eager
+    /// whole-model-host-map path (`Glm::new` over `by_role("")`), and both match
+    /// the source init exactly. GPU-gated (testgpu / MOE_SKIP_GPU).
+    #[test]
+    fn streaming_load_matches_eager() {
+        if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+            return;
+        }
+        let cfg = GlmConfig::tiny();
+        let cfg_json = cfg.to_json();
+        let init = crate::init::init_weights(&cfg, 5);
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+            init.iter().map(|(n, v)| (n.clone(), vec![v.len() as u64], v.clone())).collect();
+        let path = std::env::temp_dir().join(format!("glm-stream-parity-{}.st", std::process::id()));
+        let p = path.to_str().unwrap();
+        checkpoint::st::save_safetensors(p, &tensors, &cfg_json, None).unwrap();
+
+        let eager = Glm::new(cfg, 1, 8, &checkpoint::load(p).by_role(""));
+        let streamed = Glm::load_inference(p, 1, 8);
+
+        for name in eager.param_names() {
+            assert_eq!(eager.read_weight(&name), streamed.read_weight(&name), "weight {name}");
+            assert_eq!(&streamed.read_weight(&name), &init[&name], "streamed {name} vs source");
+        }
+        std::fs::remove_file(&path).ok();
     }
 
     /// lm_head applied on the host to a single final-norm hidden row, so the KV

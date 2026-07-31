@@ -361,11 +361,17 @@ pub struct Qwen {
 
 impl Qwen {
     /// Load a trainable model (weights + grad + AdamW moments) from a checkpoint.
+    /// Streams the weights one tensor at a time off a mmap-backed
+    /// [`WeightReader`](checkpoint::weightio::WeightReader) — peak host ≈ one
+    /// tensor of f32, never the whole-model `checkpoint::load` + `by_role("")`
+    /// host copy. AdamW moments are device zero-init (not read from disk), so
+    /// this is byte-identical to the former eager path.
     pub fn load(path: &str, b: u32, t: u32) -> Qwen {
-        let c = checkpoint::load(path);
-        let cfg = QwenConfig::from_json(&c.header["config"]);
-        let init = c.by_role("");
-        Qwen::new(cfg, b, t, &init)
+        let reader = checkpoint::weightio::WeightReader::open(path)
+            .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
+        let cfg = QwenConfig::from_json(&reader.config());
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen::new_impl(cfg, b, t, &reader, true, shard, false)
     }
 
     /// Load an **inference-only** model: parameters are frozen (weights only, no
@@ -392,12 +398,19 @@ impl Qwen {
         Self::load_inference_with(path, b, t, true)
     }
 
+    /// Streaming inference load shared by [`Self::load_inference`] and
+    /// [`Self::load_inference_i8`]: drive the builder straight off a mmap-backed
+    /// [`WeightReader`](checkpoint::weightio::WeightReader), uploading one tensor
+    /// at a time — peak host ≈ one tensor of f32, never the whole-model
+    /// `checkpoint::load` + `by_role("")` host copy on top of the device copy.
+    /// The int8 tier reads + quantizes one linear at a time (the reader is passed
+    /// to `Q8::build` as the [`TensorSource`](checkpoint::TensorSource)).
     fn load_inference_with(path: &str, b: u32, t: u32, i8: bool) -> Qwen {
-        let c = checkpoint::load(path);
-        let cfg = QwenConfig::from_json(&c.header["config"]);
-        let init = c.by_role("");
+        let reader = checkpoint::weightio::WeightReader::open(path)
+            .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
+        let cfg = QwenConfig::from_json(&reader.config());
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &init, false, shard, i8)
+        Qwen::new_impl(cfg, b, t, &reader, false, shard, i8)
     }
 
     pub fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen {
@@ -1783,10 +1796,10 @@ mod tests {
         let p = path.to_str().unwrap();
         checkpoint::st::save_safetensors(p, &tensors, &cfg_json, None).unwrap();
 
-        // Eager: whole-model host map -> Qwen::new. Streaming: mmap WeightReader.
+        // Eager: whole-model host map -> Qwen::new. Streaming: the `::load_inference`
+        // entrypoint (opens a mmap WeightReader, uploads one tensor at a time).
         let eager = Qwen::new(cfg, 1, 8, &checkpoint::load(p).by_role(""));
-        let reader = checkpoint::weightio::WeightReader::open(p).unwrap();
-        let streamed = Qwen::from_reader_inference(&reader, 1, 8);
+        let streamed = Qwen::load_inference(p, 1, 8);
 
         for (name, _) in &eager.ps.params {
             assert_eq!(eager.read_weight(name), streamed.read_weight(name), "weight {name}");
