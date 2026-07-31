@@ -111,6 +111,17 @@ from them, keeping the gradient-check discipline.
     `brain flux2 generate` (t2i + `--ref` editing). 9B weights are
     NC-licensed — see `docs/models/flux2/readme.md`.
 
+12c. **VQGAN / CodeFormer VQ autoencoder** (`crates/vqgan`) — the VQ
+    encoder/codebook/generator that CodeFormer's face restoration is built on:
+    a 25-block encoder and a 25-block generator over `vae::blocks` (conv,
+    GroupNorm, self-attention, ResNet, nearest-upsample), with `vq_argmin` for
+    the codebook assignment and `embed` for the lookup. Adds **no kernel and no
+    block**. Both released checkpoints (`codeformer.pth`, `vqgan_code1024.pth`)
+    imported and forward-parity-gated at cosine 1.000000000 with **zero**
+    code-index disagreements. See `docs/models/vqgan/status.md`. *(The
+    CodeFormer **transformer and the fidelity dial `w` are not implemented**;
+    backward/gradcheck and the serving contract are deferred.)*
+
 ### Audio / speech
 
 13. **Qwen3-TTS** (`crates/tts` + `crates/codec` + `crates/speaker` +
@@ -268,6 +279,7 @@ Multi-GPU scaling lives in `crates/model`:
 | ZipDepth: guide / ledger (incl. GPU perf root causes) | `docs/models/depth/{readme,status}.md`; `crates/depth/src/*`, `crates/cli/src/depth_cli.rs` |
 | Face recognition (SCRFD + alignment + ArcFace) | `docs/models/face/status.md`; `crates/facenet/src/{config,import,model,align,detect}.rs`; goldens via `tools/arcface_dump_reference.py` |
 | **Read an ONNX file** (initializers, nodes, attributes) | `crates/onnx/src/read.rs` — the import front-end; `crates/onnx` is otherwise export-only |
+| VQGAN / CodeFormer VQ autoencoder | `docs/models/vqgan/status.md`; `crates/vqgan/src/{config,import,model}.rs` over `crates/vae/src/blocks.rs`; goldens via `tools/codeformer_dump_reference.py` |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
 | SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/sam2_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
 | WorldMirror-2 (photos → 3DGS scene) | `docs/models/mirror/{readme,status}.md`; `crates/mirror`, `crates/cli/src/mirror_cli.rs` |

@@ -1050,10 +1050,9 @@ version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
- "brain-imaging",
  "brain-kernels",
- "brain-model",
- "brain-vision",
+ "brain-vae",
+ "brain-wm-core",
 ]
 
 [[package]]

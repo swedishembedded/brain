@@ -3,7 +3,7 @@ name = "brain-vqgan"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "VQ encoder/decoder/codebook shared by CodeFormer and other VQ-latent models, built on crates/vae's conv blocks and the vq_argmin kernel."
+description = "VQ encoder/decoder/codebook shared by CodeFormer and other VQ-latent models, built on crates/vae's shared conv block builder and the vq_argmin kernel."
 
 [lib]
 name = "vqgan"
@@ -12,7 +12,8 @@ path = "src/lib.rs"
 [dependencies]
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
-brain-model.workspace = true
-brain-vision.workspace = true
-brain-imaging.workspace = true
+brain-vae.workspace = true
+brain-wm-core.workspace = true
 brain-checkpoint.workspace = true
+# No [dev-dependencies]: cargo already links every [dependencies] entry into
+# tests/, and the parity test needs nothing beyond gpu-core, checkpoint and vae.
