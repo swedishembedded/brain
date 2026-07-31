@@ -41,14 +41,19 @@ pub fn read_outcome(o: &Outcome) -> (String, i64, i64, String) {
 }
 
 /// Map an executor reply error string to a provider-shaped [`ApiError`]. An unknown
-/// model/action surfaces as `model_not_found`; everything else (activation failure,
-/// runtime error) is an `invalid_request`. (Model resolution already happens in the
-/// handler, so this is the runtime-failure fallback.)
+/// model/action surfaces as `model_not_found` (model resolution already happens in the
+/// handler, so this is a belt-and-braces fallback). Every *other* reply error is a
+/// server-side runtime/activation failure (backend/device errors, and potentially
+/// on-disk model paths in the message): its raw text is NEVER reflected to the client.
+/// The detail is logged for the operator; the client gets a generic message.
 pub fn map_reply_err(provider: Provider, model: &str, e: &str) -> ApiError {
     if e.starts_with("no model") || e.contains("no action") {
         ApiError::model_not_found(provider, model)
     } else {
-        ApiError::invalid_request(provider, e.to_string())
+        // Do not leak internal error strings (paths, panic text, backend internals)
+        // to callers; log server-side, return a generic message.
+        eprintln!("apiserve: model '{model}' request failed: {e}");
+        ApiError::invalid_request(provider, "the model failed to process the request")
     }
 }
 

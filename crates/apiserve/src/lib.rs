@@ -35,7 +35,7 @@ pub mod state;
 pub mod surface;
 
 use axum::error_handling::HandleErrorLayer;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::response::IntoResponse;
 use axum::Router;
 use tower::limit::GlobalConcurrencyLimitLayer;
@@ -56,6 +56,13 @@ use residency::Executor;
 /// queued, so a saturated server sheds fast instead of building unbounded latency.
 /// Well above the executor's lane count — this guards the HTTP edge, not the lanes.
 pub const EDGE_CONCURRENCY: usize = 256;
+
+/// The maximum accepted request-body size (8 MiB). Sized well above the largest
+/// legitimate body (a chat/embeddings request, or a batch of `input` strings) yet
+/// bounded so a single huge body cannot be buffered into an OOM. A body over this
+/// limit is rejected with `413 Payload Too Large` before any handler runs. This is
+/// an explicit ceiling rather than relying on axum's smaller implicit default.
+pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Build the axum [`Router`] for one provider surface — the shared `/models`
 /// routes plus this provider's dialect routes, all behind the key-enforcing
@@ -92,6 +99,9 @@ pub fn router(state: AppState) -> Router {
         // Auth wraps everything (incl. the fallback): an unauthenticated caller
         // never learns which routes exist.
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth::require_key))
+        // Bound the request body BEFORE it is buffered by any handler's `Bytes`
+        // extractor: a body over `MAX_BODY_BYTES` is a 413, not an OOM.
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)

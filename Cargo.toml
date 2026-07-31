@@ -189,6 +189,7 @@ futures = "0.3"
 async-stream = "0.3"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
+subtle = "2"
 bytes = "1"
 anyhow = "1"
 jsonschema = "0.49"

@@ -26,6 +26,7 @@ futures.workspace = true
 async-stream.workspace = true
 uuid.workspace = true
 rand.workspace = true
+subtle.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]

@@ -374,6 +374,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
+ "subtle",
  "tokio",
  "tokio-stream",
  "tower",

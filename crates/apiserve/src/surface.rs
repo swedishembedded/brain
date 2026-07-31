@@ -92,8 +92,23 @@ pub fn keys_json(surfaces: &[Surface]) -> Value {
 }
 
 /// Write the `{provider: key}` JSON for `surfaces` to `path` (the `--api-keys-out`
-/// file). Pretty-printed so it is greppable.
+/// file). Pretty-printed so it is greppable. The file holds live API keys, so on Unix
+/// it is created (and, if it pre-existed, re-tightened) with owner-only `0600`
+/// permissions — never world-readable.
 pub fn write_keys(surfaces: &[Surface], path: &Path) -> std::io::Result<()> {
     let body = serde_json::to_string_pretty(&keys_json(surfaces)).unwrap_or_else(|_| "{}".into());
-    std::fs::write(path, body)
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        // `mode(0o600)` applies on creation; `set_permissions` re-tightens a file that
+        // already existed with looser bits before we write the secret into it.
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        f.write_all(body.as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, body)
+    }
 }

@@ -1225,3 +1225,125 @@ async fn admit_deadline_sheds_saturated_lane_with_429_and_cancels() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(gate.started(), 1, "a timed-out (cancelled) job must not run after the lane frees");
 }
+
+// ------------------------------------------------------------ security (P17)
+
+/// A chat model whose `generate` always fails with an internal error string that
+/// embeds a filesystem path — the kind of detail that must NEVER reach a client.
+struct Failing;
+struct FailingInst;
+impl ResidentModel for Failing {
+    fn manifest(&self) -> Manifest {
+        chat_manifest()
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-chat", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(FailingInst))
+    }
+}
+impl Instance for FailingInst {
+    fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        Err("backend panic at /home/secret/models/weights.gguf: kernel exploded".into())
+    }
+}
+
+fn failing_chat_app(provider: Provider) -> (Router, String) {
+    let key = "sk-brain-test-key".to_string();
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Failing)];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let state = AppState::new(Executor::start(models, budgets, Policy::default()), key.clone(), provider);
+    (router(state), key)
+}
+
+/// An UNAUTHENTICATED request to an unknown path must be 401 (not 404): the key layer
+/// wraps the fallback, so a caller with no key cannot even enumerate which routes
+/// exist. (Regression for "auth covers every route incl. fallback".)
+#[tokio::test]
+async fn unauthenticated_unknown_path_is_401_not_404() {
+    for p in ALL {
+        let (app, _key) = build_app(p);
+        // No auth header at all, unknown path.
+        let (st, _) = send(&app, Request::builder().uri("/no/such/route").body(Body::empty()).unwrap()).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{p}: unauth unknown path must 401, not reveal 404");
+        // A known route, still unauthenticated, is also 401 — no route is outside auth.
+        let (st, _) = send(&app, Request::builder().method(Method::POST).uri("/v1/chat/completions").body(Body::empty()).unwrap()).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{p}: unauth known route must 401");
+    }
+}
+
+/// A wrong key with the SAME byte length as the real key is rejected, and the correct
+/// key is accepted. Exercises the constant-time comparison on the equal-length path
+/// (a plain `==` and a constant-time compare must agree on the RESULT).
+#[tokio::test]
+async fn wrong_key_of_equal_length_is_401_correct_is_200() {
+    for p in ALL {
+        let (app, key) = build_app(p);
+        let mut wrong: Vec<u8> = key.clone().into_bytes();
+        *wrong.last_mut().unwrap() ^= 0x01; // flip one byte; length unchanged
+        let wrong = String::from_utf8(wrong).unwrap();
+        assert_eq!(wrong.len(), key.len(), "constructed wrong key must match length");
+
+        let (st, _) = send(&app, auth(Request::builder().uri("/models"), p, &wrong).body(Body::empty()).unwrap()).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{p}: equal-length wrong key must 401");
+        let (st, _) = send(&app, auth(Request::builder().uri("/models"), p, &key).body(Body::empty()).unwrap()).await;
+        assert_eq!(st, StatusCode::OK, "{p}: correct key must 200");
+    }
+}
+
+/// A request body larger than `MAX_BODY_BYTES` is rejected (413) before any handler
+/// buffers it — the explicit body-size ceiling that prevents an OOM.
+#[tokio::test]
+async fn oversized_request_body_is_413() {
+    let (app, key) = chat_app(Provider::OpenAI);
+    let huge = "a".repeat(apiserve::MAX_BODY_BYTES + 1024);
+    let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": huge}]});
+    let req = auth(Request::builder().method(Method::POST).uri("/v1/chat/completions"), Provider::OpenAI, &key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "an over-limit body must 413");
+}
+
+/// An internal runtime/activation error string from the executor must NOT be
+/// reflected into the client-facing error body (no paths / panic text). The client
+/// gets a generic message; the detail is only logged server-side.
+#[tokio::test]
+async fn runtime_error_is_not_reflected_to_client() {
+    let (app, key) = failing_chat_app(Provider::OpenAI);
+    let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a runtime failure surfaces as a 4xx: {v}");
+    assert_valid("openai.json", "ErrorResponse", &v);
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert!(!msg.contains("secret"), "internal path must not leak to client: {msg}");
+    assert!(!msg.contains("weights.gguf"), "internal path must not leak to client: {msg}");
+    assert!(!msg.contains("panic"), "internal panic text must not leak to client: {msg}");
+    assert_eq!(msg, "the model failed to process the request", "client gets the generic message");
+}
+
+/// `--api-keys-out` writes the key file with owner-only (0600) permissions — never
+/// world- or group-readable.
+#[cfg(unix)]
+#[tokio::test]
+async fn write_keys_file_is_owner_only_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let addr = "127.0.0.1:0".parse().unwrap();
+    let surfaces = vec![apiserve::Surface::new(Provider::OpenAI, addr, "sk-brain-deadbeef")];
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let path = std::env::temp_dir().join(format!("brain-keys-{}-{}.json", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    // Pre-create the file world-readable to prove write_keys RE-tightens it.
+    std::fs::write(&path, "{}").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    apiserve::write_keys(&surfaces, &path).unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(mode, 0o600, "keys file must be owner-only 0600, got {mode:o}");
+}
