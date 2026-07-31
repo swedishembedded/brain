@@ -16,12 +16,12 @@
 //! Expert tensors are those whose name matches `blocks.<L>.moe.experts.<E>.…`;
 //! `<E>` is the (vertical) expert id, spanning every layer.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use checkpoint::Container;
+use checkpoint::weightio::{StWriter, WeightReader};
 use serde_json::Value;
 
 use crate::sha256;
@@ -83,14 +83,6 @@ pub fn config_hash(config: &Value) -> String {
     sha256::hex(serde_json::to_string(config).unwrap_or_default().as_bytes())
 }
 
-fn tensors_named<'a>(c: &'a Container, want: impl Fn(&str) -> bool) -> Vec<(String, Vec<u64>, Vec<f32>)> {
-    c.tensors
-        .iter()
-        .filter(|t| want(&t.name))
-        .map(|t| (t.name.clone(), vec![t.data.len() as u64], t.data.clone()))
-        .collect()
-}
-
 /// Split a full MoE `.safetensors` checkpoint into a shard directory (all experts).
 pub fn split(base_weights: &str, out_dir: &Path) -> io::Result<Manifest> {
     split_filtered(base_weights, out_dir, None)
@@ -101,32 +93,67 @@ pub fn split(base_weights: &str, out_dir: &Path) -> io::Result<Manifest> {
 /// **overlay** directory ready to pass to [`assemble`] — this is what a
 /// federated worker returns after training one expert.
 pub fn split_filtered(base_weights: &str, out_dir: &Path, keep: Option<&[u32]>) -> io::Result<Manifest> {
-    let c = checkpoint::load(base_weights);
-    let config = c.header["config"].clone();
+    let reader = WeightReader::open(base_weights)?;
+    let config = reader.config();
     fs::create_dir_all(out_dir.join("experts"))?;
 
-    // shared = every non-expert tensor.
-    let shared = tensors_named(&c, |n| expert_id(n).is_none());
-    let shared_path = out_dir.join("shared.safetensors");
-    checkpoint::save(shared_path.to_str().unwrap(), config.clone(), &shared);
+    // Header-only pass: group planned (name, shape) by destination without touching tensor data.
+    let mut shared_plan: Vec<(String, Vec<u64>)> = Vec::new();
+    let mut expert_plan: BTreeMap<u32, Vec<(String, Vec<u64>)>> = BTreeMap::new();
+    for name in reader.names() {
+        let shape = reader.shape(name).unwrap().to_vec();
+        match expert_id(name) {
+            None => shared_plan.push((name.to_string(), shape)),
+            Some(e) if keep.is_none_or(|k| k.contains(&e)) => {
+                expert_plan.entry(e).or_default().push((name.to_string(), shape));
+            }
+            Some(_) => {} // filtered out by `keep`
+        }
+    }
 
-    // per-expert shards (optionally filtered to `keep`).
-    let mut expert_ids: Vec<u32> = c
-        .tensors
+    let shared_path = out_dir.join("shared.safetensors");
+    let mut shared_w = StWriter::create(shared_path.to_str().unwrap(), &shared_plan, &config, None)?;
+    let mut expert_w: BTreeMap<u32, StWriter> = expert_plan
         .iter()
-        .filter_map(|t| expert_id(&t.name))
-        .filter(|e| keep.is_none_or(|k| k.contains(e)))
-        .collect();
+        .map(|(&e, plan)| {
+            let path = out_dir.join(format!("experts/expert_{e:04}.safetensors"));
+            Ok((e, StWriter::create(path.to_str().unwrap(), plan, &config, None)?))
+        })
+        .collect::<io::Result<_>>()?;
+
+    // Stream every tensor once, routing it to its destination writer.
+    let mut err: Option<io::Error> = None;
+    reader.for_each(|name, _shape, data| {
+        if err.is_some() {
+            return;
+        }
+        let res = match expert_id(name) {
+            None => shared_w.write(name, &data),
+            Some(e) => match expert_w.get_mut(&e) {
+                Some(w) => w.write(name, &data),
+                None => Ok(()), // filtered out by `keep`
+            },
+        };
+        if let Err(e) = res {
+            err = Some(e);
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+
+    shared_w.finish()?;
+    let mut expert_ids: Vec<u32> = expert_w.keys().copied().collect();
+    for (_, w) in expert_w {
+        w.finish()?;
+    }
     expert_ids.sort_unstable();
-    expert_ids.dedup();
 
     let mut files = BTreeMap::new();
     files.insert("shared.safetensors".to_string(), file_hash(&shared_path)?);
     for &e in &expert_ids {
-        let ts = tensors_named(&c, |n| expert_id(n) == Some(e));
         let rel = format!("experts/expert_{e:04}.safetensors");
         let path = out_dir.join(&rel);
-        checkpoint::save(path.to_str().unwrap(), config.clone(), &ts);
         files.insert(rel, file_hash(&path)?);
     }
 
@@ -164,19 +191,36 @@ pub fn verify(dir: &Path) -> io::Result<Manifest> {
 
 /// Merge a shard directory back into a single full `.safetensors` checkpoint.
 pub fn merge_to_full(dir: &Path, out_weights: &str) -> io::Result<()> {
-    let shared = checkpoint::load(dir.join("shared.safetensors").to_str().unwrap());
-    let config = shared.header["config"].clone();
-    let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = tensors_named(&shared, |_| true);
-
     let manifest = Manifest::from_json(&fs::read_to_string(dir.join("manifest.json"))?)
         .map_err(io::Error::other)?;
-    for e in &manifest.experts {
-        let path = dir.join(format!("experts/expert_{e:04}.safetensors"));
-        let ec = checkpoint::load(path.to_str().unwrap());
-        tensors.extend(tensors_named(&ec, |_| true));
+
+    let mut paths = vec![dir.join("shared.safetensors")];
+    paths.extend(manifest.experts.iter().map(|e| dir.join(format!("experts/expert_{e:04}.safetensors"))));
+
+    // Header-only pass over every source file to build the combined output plan.
+    let mut plan: Vec<(String, Vec<u64>)> = Vec::new();
+    for p in &paths {
+        let r = WeightReader::open(p.to_str().unwrap())?;
+        plan.extend(r.names().map(|n| (n.to_string(), r.shape(n).unwrap().to_vec())));
     }
-    checkpoint::save(out_weights, config, &tensors);
-    Ok(())
+    let config = WeightReader::open(paths[0].to_str().unwrap())?.config();
+
+    let mut writer = StWriter::create(out_weights, &plan, &config, None)?;
+    let mut err: Option<io::Error> = None;
+    for p in &paths {
+        let r = WeightReader::open(p.to_str().unwrap())?;
+        r.for_each(|name, _shape, data| {
+            if err.is_none() {
+                if let Err(e) = writer.write(name, &data) {
+                    err = Some(e);
+                }
+            }
+        });
+    }
+    if let Some(e) = err {
+        return Err(e);
+    }
+    writer.finish()
 }
 
 /// Assemble: start from `base_dir`, overlay each dir in order (last-wins per
@@ -185,28 +229,9 @@ pub fn merge_to_full(dir: &Path, out_weights: &str) -> io::Result<()> {
 pub fn assemble(base_dir: &Path, overlays: &[&Path], out_weights: &str) -> io::Result<()> {
     let base_manifest = verify(base_dir)?;
 
-    // Start from base shared + base experts, indexed by name for last-wins.
-    let shared = checkpoint::load(base_dir.join("shared.safetensors").to_str().unwrap());
-    let config = shared.header["config"].clone();
-    let mut by_name: BTreeMap<String, Vec<f32>> = BTreeMap::new();
-    let mut order: Vec<String> = Vec::new();
-    let push = |name: &str, data: &[f32], by_name: &mut BTreeMap<String, Vec<f32>>, order: &mut Vec<String>| {
-        if !by_name.contains_key(name) {
-            order.push(name.to_string());
-        }
-        by_name.insert(name.to_string(), data.to_vec());
-    };
-    for t in &shared.tensors {
-        push(&t.name, &t.data, &mut by_name, &mut order);
-    }
-    for &e in &base_manifest.experts {
-        let ec = checkpoint::load(base_dir.join(format!("experts/expert_{e:04}.safetensors")).to_str().unwrap());
-        for t in &ec.tensors {
-            push(&t.name, &t.data, &mut by_name, &mut order);
-        }
-    }
-
-    // Overlays (last-wins). Each must agree on the base config.
+    // Same file-visit order as before: base shared, base experts, then per overlay shared + experts.
+    let mut sources: Vec<PathBuf> = vec![base_dir.join("shared.safetensors")];
+    sources.extend(base_manifest.experts.iter().map(|e| base_dir.join(format!("experts/expert_{e:04}.safetensors"))));
     for ov in overlays {
         let m = verify(ov)?;
         if m.base_config_sha256 != base_manifest.base_config_sha256 {
@@ -215,25 +240,46 @@ pub fn assemble(base_dir: &Path, overlays: &[&Path], out_weights: &str) -> io::R
                 ov.display()
             )));
         }
-        // overlay shared (if it differs from base — same names just overwrite)
-        let osh = checkpoint::load(ov.join("shared.safetensors").to_str().unwrap());
-        for t in &osh.tensors {
-            push(&t.name, &t.data, &mut by_name, &mut order);
-        }
-        for e in &m.experts {
-            let ec = checkpoint::load(ov.join(format!("experts/expert_{e:04}.safetensors")).to_str().unwrap());
-            for t in &ec.tensors {
-                push(&t.name, &t.data, &mut by_name, &mut order);
+        sources.push(ov.join("shared.safetensors"));
+        sources.extend(m.experts.iter().map(|e| ov.join(format!("experts/expert_{e:04}.safetensors"))));
+    }
+
+    // Pass 1 (header-only, no tensor data read): later sources overwrite the winner map, so
+    // this resolves last-wins per name before any bytes are decoded — needed because a name
+    // can recur across files and StWriter forbids writing the same planned name twice.
+    let mut winner: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let mut winner_shape: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for path in &sources {
+        let r = WeightReader::open(path.to_str().unwrap())?;
+        for name in r.names() {
+            if !winner.contains_key(name) {
+                order.push(name.to_string());
             }
+            winner.insert(name.to_string(), path.clone());
+            winner_shape.insert(name.to_string(), r.shape(name).unwrap().to_vec());
         }
     }
 
-    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = order
-        .iter()
-        .map(|n| (n.clone(), vec![by_name[n].len() as u64], by_name[n].clone()))
-        .collect();
-    checkpoint::save(out_weights, config, &tensors);
-    Ok(())
+    let plan: Vec<(String, Vec<u64>)> = order.iter().map(|n| (n.clone(), winner_shape[n].clone())).collect();
+    let config = WeightReader::open(base_dir.join("shared.safetensors").to_str().unwrap())?.config();
+    let mut writer = StWriter::create(out_weights, &plan, &config, None)?;
+
+    // Pass 2: each source opened once; only its still-winning names are decoded (named
+    // `tensor()` lookups, not `for_each`, which would decode a losing tensor before any
+    // filter could apply) — a name overridden by a later file is never read at all.
+    let mut by_source: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for (name, path) in &winner {
+        by_source.entry(path.clone()).or_default().push(name.clone());
+    }
+    for (path, names) in &by_source {
+        let r = WeightReader::open(path.to_str().unwrap())?;
+        for name in names {
+            let data = r.tensor(name).expect("winner name present in its own source");
+            writer.write(name, &data)?;
+        }
+    }
+    writer.finish()
 }
 
 #[cfg(test)]
@@ -329,6 +375,55 @@ mod tests {
         let b = checkpoint::load(out.to_str().unwrap());
         // expert 1 replaced with 99s; expert 0 and 2 unchanged (10, 12).
         assert_eq!(b.find("blocks.0.moe.experts.1.w_gate.weight", "").unwrap()[0], 99.0);
+        assert_eq!(b.find("blocks.0.moe.experts.0.w_gate.weight", "").unwrap()[0], 10.0);
+        assert_eq!(b.find("blocks.0.moe.experts.2.w_gate.weight", "").unwrap()[0], 12.0);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // Build a single-expert-1 overlay dir (mirrors the inline setup in overlay_replaces_one_expert_last_wins).
+    fn make_expert1_overlay(odir: &Path, config: &Value, value: f32) {
+        fs::create_dir_all(odir.join("experts")).unwrap();
+        checkpoint::save(odir.join("shared.safetensors").to_str().unwrap(), config.clone(), &[]);
+        let e1 = vec![
+            ("blocks.0.moe.experts.1.w_gate.weight".to_string(), vec![8u64], vec![value; 8]),
+            ("blocks.0.moe.experts.1.w_up.weight".to_string(), vec![8], vec![value; 8]),
+            ("blocks.0.moe.experts.1.w_down.weight".to_string(), vec![8], vec![value; 8]),
+        ];
+        checkpoint::save(odir.join("experts/expert_0001.safetensors").to_str().unwrap(), config.clone(), &e1);
+        let mut files = BTreeMap::new();
+        files.insert("shared.safetensors".to_string(), file_hash(&odir.join("shared.safetensors")).unwrap());
+        files.insert("experts/expert_0001.safetensors".to_string(), file_hash(&odir.join("experts/expert_0001.safetensors")).unwrap());
+        let man = Manifest { base_config_sha256: config_hash(config), experts: vec![1], files };
+        fs::write(odir.join("manifest.json"), man.to_json()).unwrap();
+    }
+
+    /// Same tensor name (expert 1) is touched by base + two overlays; the LAST
+    /// overlay applied must win, proving winner-resolution tracks last-seen
+    /// (not first-seen, and not e.g. lexical/manifest order).
+    #[test]
+    fn assemble_last_wins_across_three_files() {
+        let dir = tmp("three");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("base.safetensors");
+        make_base(base.to_str().unwrap()); // base expert 1 = 11.0 (X)
+        let sdir = dir.join("shards");
+        split(base.to_str().unwrap(), &sdir).unwrap();
+        let config = checkpoint::load(sdir.join("shared.safetensors").to_str().unwrap()).header["config"].clone();
+
+        let odir_a = dir.join("overlay_a");
+        make_expert1_overlay(&odir_a, &config, 42.0); // overlay A expert 1 = Y
+        let odir_b = dir.join("overlay_b");
+        make_expert1_overlay(&odir_b, &config, 77.0); // overlay B (applied after A) expert 1 = Z
+
+        let out = dir.join("assembled3.safetensors");
+        assemble(&sdir, &[&odir_a, &odir_b], out.to_str().unwrap()).unwrap();
+        let b = checkpoint::load(out.to_str().unwrap());
+        // Z (last overlay) wins over Y (earlier overlay) and X (base).
+        assert_eq!(b.find("blocks.0.moe.experts.1.w_gate.weight", "").unwrap()[0], 77.0);
+        assert_eq!(b.find("blocks.0.moe.experts.1.w_up.weight", "").unwrap()[0], 77.0);
+        assert_eq!(b.find("blocks.0.moe.experts.1.w_down.weight", "").unwrap()[0], 77.0);
+        // Untouched experts still come from base.
         assert_eq!(b.find("blocks.0.moe.experts.0.w_gate.weight", "").unwrap()[0], 10.0);
         assert_eq!(b.find("blocks.0.moe.experts.2.w_gate.weight", "").unwrap()[0], 12.0);
         fs::remove_dir_all(&dir).ok();
