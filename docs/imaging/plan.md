@@ -47,25 +47,62 @@ scheduling, LoRA, INT8 and sharding all exist. FLUX.1 differs in four bounded
 ways — per-block (not 3 global) modulation, 3 RoPE axes at θ=10000 (not 4 at
 2000), T5+CLIP (not Qwen3) conditioning, and a 16-ch (not 128-ch) VAE latent.
 
-### Scope warning: InstantID is a much worse fit than PuLID
+### The second finding: the UNet family is cheap, so InstantID stays
 
-The request said "PuLID **or** InstantID". They are not interchangeable here:
+InstantID is SDXL-based — it needs a `UNet2DConditionModel` *plus* a ControlNet,
+and brain today has **no UNet diffusion model at all** (only DiT: `dit`,
+`zimage`, `flux2`). The initial read was that this made InstantID a bad trade.
 
-- **InstantID is SDXL-based** — it needs a `UNet2DConditionModel` *plus* a
-  ControlNet. brain has **no UNet diffusion model at all** (only DiT: `dit`,
-  `zimage`, `flux2`). That is an entire new architecture family — ResBlock/
-  attention U-Net, SDXL's dual text encoders, plus a ControlNet clone of the
-  down-blocks — before any identity work starts.
-- **PuLID-FLUX rides the FLUX.1 backbone we need anyway** for Kontext, and its
-  ID-injection mechanism (extra cross-attention layers keyed by an ArcFace +
-  EVA-CLIP embedding) is the *same* IP-Adapter-FaceID idea the request points at.
+Measuring it says otherwise: **a UNet + ControlNet family needs zero new
+kernels.**
 
-**Recommendation: implement PuLID-FLUX; do not port SDXL.** If InstantID's exact
-weights are required later, the mechanism can be re-hosted on FLUX.1 rather than
-bringing in SDXL. This is flagged as a decision, not taken unilaterally — it
-drops one named model from the request in favour of the equivalent capability.
+| UNet component | What it needs | Status in brain |
+|---|---|---|
+| ResBlock | GroupNorm, SiLU, conv, timestep scale-shift | `gn_{stats,apply,dx,dgamma,dbeta,part,dsum}`, `silu`, `conv2d_gd`, `film_chan` — **all present** |
+| Spatial transformer | self-attn + cross-attn + GEGLU FF | full attention family + `geglu_shift{,_da,_db}` — **present** |
+| Up blocks | nearest upsample + conv | `upsample2`, `resize_nearest` — **present** |
+| ControlNet | conv conditioning stack + zero-convs + residual add | plain convs and `add` — **present** |
+| SDXL VAE | AutoencoderKL, 4 latent channels | `crates/vae` is already **config-driven** (`VaeConfig`); 4-ch is a config, not code |
 
-### Two more substitutions worth making
+So the work is *composition*, not new GPU math — the expensive part of a brain
+port is exactly the part that is already done. What genuinely has to be built:
+
+1. **`crates/unet`** — the `UNet2DConditionModel` graph (down/mid/up blocks,
+   skip connections, timestep + added-conditioning embeddings).
+2. **`crates/controlnet`** — see below; deliberately **backbone-agnostic**.
+3. **`crates/clip`** — brain has no CLIP. SDXL needs CLIP-L **and**
+   OpenCLIP-bigG/14; FLUX.1 needs CLIP-L; PuLID needs EVA-CLIP-L/336. One crate
+   serves all three — another consolidation the workstream pays for once.
+4. **Discrete schedulers in `crates/diffusion`** — today it is flow-matching
+   only (`FlowMatchEulerScheduler`). SDXL needs DDIM / Euler-ancestral /
+   DPM-Solver++ with ε- and v-prediction parameterisations.
+
+**Revised recommendation: build the UNet family and keep InstantID.** PuLID-FLUX
+is still worth doing (it rides the FLUX.1 backbone Kontext needs anyway), so the
+two identity approaches become complementary rather than exclusive — and having
+both lets us measure identity fidelity against each other on the same fixtures.
+
+### ControlNet should be a seam, not an SDXL crate
+
+The important design choice. A ControlNet is a trainable copy of the backbone's
+early blocks whose zero-conv outputs are **added as residuals** at named
+injection points. That structure is not UNet-specific — FLUX ControlNets inject
+into double-stream blocks the same way.
+
+So `crates/controlnet` defines a backbone-agnostic `ControlAdapter` trait over
+*named injection points*, implemented by both `unet` and the FLUX DiTs, rather
+than hardcoding SDXL's down-block list. This is the "make brain better in the
+process" part: one control-conditioning mechanism for every current and future
+diffusion backbone, and it composes with the existing sharding/INT8/residency
+machinery instead of duplicating it.
+
+Two synergies worth naming: brain's **ZipDepth already produces depth maps**, so
+a depth-ControlNet is wired end-to-end inside brain with no external
+preprocessor; and a UNet family also unlocks the whole SD/SDXL ecosystem
+(community LoRAs, inpainting checkpoints, T2I-Adapter, IP-Adapter) on top of
+brain's existing LoRA and INT8 paths.
+
+### Two substitutions still worth making
 
 - **Florence-2 over GroundingDINO** for text→box. GroundingDINO needs
   multi-scale **deformable attention** (a bilinear-gather attention kernel with
@@ -192,8 +229,11 @@ Each phase ends at a validation gate and is independently committable.
 | **1. SAM 2** | Hiera trunk → FPN neck → prompt encoder → two-way mask decoder; image path only (no video memory bank) | parity vs dumped goldens; `check_sam2`; capability + D-Bus + example |
 | **2. Face recognition** | `crates/facenet`: SCRFD + IResNet-100 + alignment | cosine ≥0.999 vs insightface goldens; `check_arcface` |
 | **3. CodeFormer** | `crates/vqgan` + restorer, identity-fidelity dial `w` | parity goldens; `check_codeformer` |
-| **4. FLUX.1** | `crates/flux1` reusing `dit`/`vae`/`diffusion`; T5-XXL + CLIP-L encoders; Kontext edit path | forward cosine vs diffusers; `check_flux1` |
-| **5. PuLID** | ID adapter on the phase-4 backbone, fed by phase-2 embeddings | ID cosine vs reference; `check_pulid` |
+| **3b. Text encoders** | `crates/clip`: CLIP-L + OpenCLIP-bigG + EVA-CLIP-L/336 behind one config-driven graph | cosine ≥0.9999 vs HF per encoder; `check_clip` |
+| **4. FLUX.1** | `crates/flux1` reusing `dit`/`vae`/`diffusion`; T5-XXL encoder + phase-3b CLIP-L; Kontext edit path | forward cosine vs diffusers; `check_flux1` |
+| **4b. UNet family** | `crates/unet` (SDXL `UNet2DConditionModel`) + discrete schedulers (DDIM/Euler-a/DPM++, ε and v-pred) in `crates/diffusion` | forward cosine vs diffusers SDXL; `check_unet` |
+| **4c. ControlNet** | `crates/controlnet`: backbone-agnostic `ControlAdapter` over named injection points; SDXL impl first, FLUX impl second; depth conditioning fed by brain's own ZipDepth | residual parity vs diffusers ControlNet; `check_controlnet` |
+| **5. Identity** | PuLID adapter on the phase-4 FLUX.1 backbone **and** InstantID (phase-4b/4c SDXL + IP-Adapter-FaceID), both fed by phase-2 ArcFace embeddings | ID cosine vs reference for each; `check_pulid`, `check_instantid`; measure the two against each other on shared fixtures |
 | **6. Pipeline** | `imaging.pipeline` action + matting (BiRefNet) + Florence-2 text→box + Real-ESRGAN tail | end-to-end "change only X" on a fixture set |
 
 **Phase 4 is the long pole and it is also disk- and bandwidth-bound** (34 GB at
@@ -212,11 +252,21 @@ and BiRefNet are all <1 GB and can stay resident together.
 
 ---
 
+SDXL is far kinder to the VRAM target than FLUX.1: UNet 2.6 B + both text
+encoders ≈ 3.5 B params, so ~14 GB at fp32 — it fits **one** P40 with no INT8 and
+no sharding, and a ControlNet adds ~1.3 B (~5 GB). That makes phases 4b/4c the
+practical place to get the identity pipeline working end to end first, with
+FLUX.1/Kontext as the higher-quality path behind INT8 + 2-GPU sharding.
+
 ## 5. Open decisions
 
-1. **InstantID dropped in favour of PuLID-FLUX** (§2) — needs sign-off, since it
-   removes a named model from the request.
+1. ~~InstantID dropped in favour of PuLID-FLUX~~ — **resolved: build both.**
+   Measuring the UNet family showed it needs no new kernels (§2), so InstantID
+   stays and brain gains a UNet diffusion backbone + a generic ControlNet seam.
 2. **Florence-2 over GroundingDINO**, **LaMa deferred** (§2).
 3. SAM 2 **video** (memory attention + memory encoder) is out of scope for
    phase 1; the image path is what image editing needs. The config and code are
    downloaded, so it is additive later.
+4. Which SD backbone is the *default* for the editing pipeline — SDXL (fits one
+   P40, whole-ecosystem compatibility) or FLUX.1 Kontext (better edit fidelity,
+   needs INT8 + sharding). Deferred until phase 5 can measure both.
