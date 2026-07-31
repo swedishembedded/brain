@@ -242,10 +242,7 @@ pub fn run_kvcache(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> 
 }
 
 /// `residency` — many models over one budget, through the residency manager.
-pub fn run_residency(opt: &Options, models: usize, over: f64) -> Result<Artifact, String> {
-    run_residency_with(opt, models, over, "cost-aware")
-}
-
+///
 /// `policy`: `"lru"` or `"cost-aware"` — the REAL `residency::place` policies,
 /// so the benchmark measures the code that ships, not a simulation of it.
 pub fn run_residency_with(opt: &Options, models: usize, over: f64, policy: &str) -> Result<Artifact, String> {
@@ -538,8 +535,4 @@ pub fn run_faults(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> {
             .into(),
     );
     Ok(art)
-}
-
-pub fn render(art: &Artifact) -> String {
-    perf::report::render(art)
 }

@@ -37,24 +37,6 @@ fn static_manifests() -> Vec<Manifest> {
     ]
 }
 
-/// Build a registry with **every** provider registered — for the long-lived
-/// services (D-Bus / event loop) that must serve any model on demand. Providers are
-/// cheap to construct; model weights load lazily on the first action call.
-pub fn all_providers() -> Result<Registry, String> {
-    let mut reg = Registry::new();
-    reg.register(Arc::new(DemoModel));
-    reg.register(Arc::new(imageops::ImageOps));
-    reg.register(Arc::new(zimage::caps::ZImageProvider::load()?));
-    reg.register(Arc::new(flux2::caps::Flux2Provider::new()));
-    reg.register(Arc::new(qwen::caps::QwenProvider::new()));
-    reg.register(Arc::new(lfm::caps::LfmProvider::new()));
-    reg.register(Arc::new(fastvlm::caps::FastVlmProvider::new()));
-    reg.register(Arc::new(yolo::caps::YoloProvider::new()));
-    reg.register(Arc::new(depth::caps::DepthProvider::new()));
-    reg.register(Arc::new(tts::caps::TtsProvider::new()));
-    Ok(reg)
-}
-
 /// Build an executable registry for `model` (loads what that model needs). `do`
 /// only constructs the one model it was asked to run.
 fn build_registry(model: &str) -> Result<Registry, String> {

@@ -230,7 +230,7 @@ pub fn run_viewer(
     // constant size while the render buffer shrinks.
     let divs = [1u32, 2, 4];
     let mut q = 0usize;
-    let mut make_win = |div: u32| -> SdlWindow {
+    let make_win = |div: u32| -> SdlWindow {
         SdlWindow::new(title, width / div, height / div, div)
             .unwrap_or_else(|e| panic!("cannot open window: {e} (headless? SDL_VIDEODRIVER=dummy)"))
     };
