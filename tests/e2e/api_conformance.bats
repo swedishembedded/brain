@@ -91,9 +91,14 @@ setup_file() {
 }
 
 teardown_file() {
-  # Kill ONLY the recorded brain serve PID — never pkill.
+  # Kill ONLY recorded brain serve PIDs — never pkill.
   if [ -n "${SERVER_PID:-}" ]; then
     kill -9 "$SERVER_PID" 2>/dev/null || true
+  fi
+  # The admission-429 test starts a SECOND short-deadline server and records its PID
+  # here; kill it too even if that test aborted mid-way.
+  if [ -n "${CONF_DIR:-}" ] && [ -f "$CONF_DIR/pid2" ]; then
+    kill -9 "$(cat "$CONF_DIR/pid2")" 2>/dev/null || true
   fi
   [ -n "${CONF_DIR:-}" ] && rm -rf "$CONF_DIR"
 }
@@ -396,4 +401,169 @@ get_url() {
   post_json openrouter /chat/completions '{"model":"nope","messages":[{"role":"user","content":"hi"}]}'
   [ "$STATUS" -eq 404 ]
   validate openrouter.json InternalServerResponse "$RESP"
+}
+
+# ============================================================ security audit
+# These drive the docs/api-security-audit.md invariants over the REAL socket, so a
+# regression that reopens a hole fails CI. Everything below reuses the ONE mock server
+# from setup_file except the admission-429 test, which needs a short admit deadline +
+# a slow lane and so starts (and kills by PID) its own second server.
+
+# --- 2. Input handling / DoS: an oversized body is rejected (413) before buffering.
+
+@test "security: request body over the 8 MiB limit -> 413 (not buffered/OOM)" {
+  # A ~9 MiB body: over MAX_BODY_BYTES (8 MiB), so DefaultBodyLimit rejects it with a
+  # 413 before any handler buffers it. Built on disk with head/printf (no giant argv).
+  local big="$CONF_DIR/big.json"
+  { printf '{"model":"mock","messages":[{"role":"user","content":"'
+    head -c 9000000 /dev/zero | tr '\0' 'a'
+    printf '"}]}'
+  } > "$big"
+  local st
+  st=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
+    -H "$(auth_hdr openai)" -H 'content-type: application/json' \
+    -X POST "$(base openai)/v1/chat/completions" --data-binary @"$big")
+  [ "$st" -eq 413 ]
+}
+
+# --- 1. Auth: auth wraps the fallback, so an unauthenticated caller cannot enumerate
+# routes — an unknown path is a 401 (auth), never a 404 (route probe).
+
+@test "security: unauthenticated unknown path -> 401 (no route enumeration)" {
+  local st
+  st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$(base openai)/v1/nope/does/not/exist")
+  [ "$st" -eq 401 ]
+  st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$(base anthropic)/v1/secret/admin")
+  [ "$st" -eq 401 ]
+  # WITH a valid key the same unknown path is a 404 — proving auth (not routing) is
+  # what produced the 401 above.
+  st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "$(auth_hdr openai)" "$(base openai)/v1/nope/does/not/exist")
+  [ "$st" -eq 404 ]
+}
+
+# --- 1. Auth: the key is never echoed in ANY response body (200 / 401 / 400 / 404).
+
+@test "security: the API key never appears in any response body" {
+  # 200 chat.
+  post_json openai /v1/chat/completions '{"model":"mock","messages":[{"role":"user","content":"hello there"}]}'
+  [ "$STATUS" -eq 200 ]
+  ! grep -qF "$OPENAI_KEY" "$RESP"
+
+  # 401 (no auth header).
+  local b401="$CONF_DIR/b401.json"
+  curl -sS --max-time 10 -o "$b401" "$(base openai)/v1/models"
+  ! grep -qF "$OPENAI_KEY" "$b401"
+
+  # 400 (malformed JSON).
+  local b400="$CONF_DIR/b400.json"
+  curl -sS --max-time 10 -o "$b400" -H "$(auth_hdr openai)" -H 'content-type: application/json' \
+    -X POST "$(base openai)/v1/chat/completions" -d '{ not json' >/dev/null
+  ! grep -qF "$OPENAI_KEY" "$b400"
+
+  # 404 (unknown model).
+  post_json openai /v1/chat/completions '{"model":"nope","messages":[{"role":"user","content":"hi"}]}'
+  [ "$STATUS" -eq 404 ]
+  ! grep -qF "$OPENAI_KEY" "$RESP"
+}
+
+# --- 2. Input handling: numeric/shape bounds are range-checked -> 400, never 500/panic.
+
+@test "security: out-of-bounds inputs -> 400 (not 500/panic)" {
+  # OpenAI chat n:5 (multiple choices unsupported).
+  post_json openai /v1/chat/completions \
+    '{"model":"mock","messages":[{"role":"user","content":"hi"}],"n":5}'
+  [ "$STATUS" -eq 400 ]
+  validate openai.json ErrorResponse "$RESP"
+
+  # embeddings dimensions oversized (far beyond the model's vector length).
+  post_json openai /v1/embeddings '{"model":"mock","input":"hello","dimensions":100000}'
+  [ "$STATUS" -eq 400 ]
+  validate openai.json ErrorResponse "$RESP"
+
+  # embeddings token-array input (documented unsupported — brain has no tokenizer).
+  post_json openai /v1/embeddings '{"model":"mock","input":[1,2,3,4]}'
+  [ "$STATUS" -eq 400 ]
+  validate openai.json ErrorResponse "$RESP"
+}
+
+# --- 5. Error hygiene: an internal action failure is scrubbed — the client gets only a
+# generic, spec-shaped error, never the mock's internal path/panic detail.
+
+@test "security: internal failure is scrubbed (no path/panic leak)" {
+  post_json openai /v1/chat/completions \
+    '{"model":"mock","messages":[{"role":"user","content":"please __mock_fail__ this"}]}'
+  # A provider-shaped error (the handler maps the runtime failure to a 400).
+  [ "$STATUS" -eq 400 ]
+  validate openai.json ErrorResponse "$RESP"
+  # None of the mock's fabricated internal detail may reach the client.
+  ! grep -qiE 'secret|model\.gguf|/home/|panic' "$RESP"
+  # ...only the generic message is present.
+  [ "$(jq -r '.error.message' "$RESP")" = "the model failed to process the request" ]
+}
+
+# --- 3. Resource safety: a pinned single lane sheds a concurrent request with 429
+# within the admit deadline (never an unbounded hang), carrying Retry-After.
+
+@test "security: saturated lane sheds with 429 + Retry-After (own short-deadline server)" {
+  local port="${SEC_PORT:-8899}"
+  local keys2="$CONF_DIR/keys2.json"
+  local log2="$CONF_DIR/serve2.log"
+
+  # A SECOND server: one CPU lane, a 3s mock delay (pins the lane), a 500ms admit
+  # deadline (fast shed). OpenAI surface only. Record its PID for teardown.
+  BRAIN_MOCK=1 BRAIN_DEVICE=cpu BRAIN_MOCK_DELAY_MS=3000 BRAIN_ADMIT_DEADLINE_MS=500 \
+    "$BRAIN" serve --openai "$port" --api-keys-out "$keys2" >"$log2" 2>&1 &
+  local pid2=$!
+  echo "$pid2" > "$CONF_DIR/pid2"
+
+  # Wait until /models answers (a route that does NOT touch the lane).
+  local key2="" ready=0
+  for _ in $(seq 1 60); do
+    if [ -f "$keys2" ]; then
+      key2=$(jq -r .openai "$keys2" 2>/dev/null)
+      if [ -n "$key2" ] && [ "$key2" != "null" ] \
+         && curl -fsS --max-time 5 -o /dev/null -H "Authorization: Bearer $key2" "http://127.0.0.1:$port/v1/models" 2>/dev/null; then
+        ready=1
+        break
+      fi
+    fi
+    kill -0 "$pid2" 2>/dev/null || break
+    sleep 0.5
+  done
+  if [ "$ready" != 1 ]; then
+    cat "$log2" >&3 || true
+    kill -9 "$pid2" 2>/dev/null || true
+    skip "second (short-deadline) brain serve did not become ready"
+  fi
+
+  # Request 1 pins the single CPU lane for ~3s. Fire it in the background and let it
+  # get ADMITTED (into its delay) before the probe.
+  curl -sS --max-time 15 -o /dev/null \
+    -H "Authorization: Bearer $key2" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$port/v1/chat/completions" \
+    -d '{"model":"mock","messages":[{"role":"user","content":"pin the lane"}]}' &
+  local job1=$!
+  sleep 0.8
+
+  # Request 2: the lane is pinned, so it cannot be admitted within 500ms -> 429,
+  # returning near the deadline (NOT waiting ~3s for the lane to free).
+  local out="$CONF_DIR/sec_resp.json" hdrs="$CONF_DIR/sec_hdrs.txt"
+  local t0 t1 ms st
+  t0=$(date +%s%N)
+  st=$(curl -sS --max-time 10 -D "$hdrs" -o "$out" -w '%{http_code}' \
+    -H "Authorization: Bearer $key2" -H 'content-type: application/json' \
+    -X POST "http://127.0.0.1:$port/v1/chat/completions" \
+    -d '{"model":"mock","messages":[{"role":"user","content":"shed me"}]}')
+  t1=$(date +%s%N)
+  ms=$(( (t1 - t0) / 1000000 ))
+
+  # Clean up: stop the pinning curl and the second server (by recorded PID only).
+  kill "$job1" 2>/dev/null || true
+  kill -9 "$pid2" 2>/dev/null || true
+  rm -f "$CONF_DIR/pid2"
+
+  [ "$st" -eq 429 ]
+  [ "$ms" -lt 2000 ]                                   # shed near 500ms, did not hang ~3s
+  grep -qi '^retry-after:[[:space:]]*[0-9]' "$hdrs"    # a numeric back-off hint
+  validate openai.json ErrorResponse "$out"
 }

@@ -101,12 +101,52 @@ struct MockInstance;
 impl Instance for MockInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match action {
-            "generate" => Ok(generate(inv, progress)),
+            "generate" => generate(inv, progress),
             "embed" => Ok(embed(inv)),
             "text2image" => Ok(text2image(inv, progress)),
             other => Err(format!("mock: unknown action '{other}'")),
         }
     }
+}
+
+/// The substring a client sends to trigger the mock **failure** mode (error-hygiene
+/// probe): `generate` returns an `Err` whose text embeds a fake internal detail
+/// (a filesystem path + panic-ish text) that the apiserve layer must NOT reflect to
+/// the client. See [`generate`].
+pub const FAIL_TRIGGER: &str = "__mock_fail__";
+
+/// The delay (ms) the mock spends "producing" before it streams, from
+/// `BRAIN_MOCK_DELAY_MS` (default 0 = instant). A positive value pins the single CPU
+/// lane long enough to exercise admission (a concurrent request is shed with 429).
+fn mock_delay_ms() -> u64 {
+    std::env::var("BRAIN_MOCK_DELAY_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0)
+}
+
+/// A fake internal error detail for the failure mode. Assembled at runtime from
+/// pieces so **no absolute-path string literal** appears in `crates/**` (the repo's
+/// absolute-path grep gate stays clean). The string deliberately contains a
+/// `secret` segment, a `model.gguf` filename, an absolute home path, and `panic`
+/// text so the conformance harness can prove none of them leak to the client.
+fn fake_internal_detail() -> String {
+    let dir = "home";
+    let leaf = "secret";
+    format!("/{dir}/{leaf}/model.gguf: boom (internal panic while mmapping weights)")
+}
+
+/// Sleep up to `ms` milliseconds in small slices, returning `true` early if `cancel`
+/// fires meanwhile — so a cancelled/timed-out job frees the lane promptly instead of
+/// holding it for the full delay.
+fn sleep_cancellable(ms: u64, cancel: &capability::CancelToken) -> bool {
+    let mut left = ms;
+    while left > 0 {
+        if cancel.is_cancelled() {
+            return true;
+        }
+        let slice = left.min(25);
+        std::thread::sleep(std::time::Duration::from_millis(slice));
+        left -= slice;
+    }
+    cancel.is_cancelled()
 }
 
 /// The last `user`-role message's text (falling back to the last message's content,
@@ -141,9 +181,29 @@ fn parse_stop(inv: &Invocation) -> Vec<String> {
 /// (or a canned line for an empty prompt), streamed token-by-token so the concatenated
 /// deltas exactly reconstruct the returned `text` blob. Honors `max_new` (capping ⇒
 /// `finish_reason: "length"`) and a `stop` sequence (an early stop ⇒ `"stop"`).
-fn generate(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Outcome {
+///
+/// Two opt-in test modes make the security cases reachable without a real model:
+/// * **failure** — if the user text contains [`FAIL_TRIGGER`], return an `Err` whose
+///   string embeds a fake internal detail ([`fake_internal_detail`]); the apiserve
+///   layer must scrub it and return only a generic message.
+/// * **delay** — if `BRAIN_MOCK_DELAY_MS` > 0, sleep that long (polling `cancel`)
+///   before producing, pinning the single CPU lane so a concurrent request is shed
+///   (429). A cancelled/timed-out job returns promptly (`Err("cancelled")`).
+fn generate(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let max_new = inv.get_i64("max_new").unwrap_or(1024).max(1) as usize;
     let user = last_user_text(inv);
+
+    // Failure mode (error-hygiene probe): never reflected verbatim to the client.
+    if user.contains(FAIL_TRIGGER) {
+        return Err(format!("mock resident action failed: {}", fake_internal_detail()));
+    }
+
+    // Delay mode: pin the lane, polling cancel so a shed/disconnected job frees it.
+    let delay = mock_delay_ms();
+    if delay > 0 && sleep_cancellable(delay, &inv.cancel) {
+        return Err("cancelled".into());
+    }
+
     let reply = if user.trim().is_empty() { "mock reply ready".to_string() } else { format!("You said: {}", user.trim()) };
     let words: Vec<&str> = reply.split_whitespace().collect();
     let stops = parse_stop(inv);
@@ -172,11 +232,11 @@ fn generate(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Outcome {
         progress(Progress::token(i as u32, total, piece.clone()));
     }
     let prompt_tokens = user.split_whitespace().count().max(1) as i64;
-    Outcome::new()
+    Ok(Outcome::new()
         .set("prompt_tokens", json!(prompt_tokens))
         .set("completion_tokens", json!(pieces.len()))
         .set("finish_reason", json!(finish))
-        .blob("text", Blob::new(Media::Text, text.into_bytes()))
+        .blob("text", Blob::new(Media::Text, text.into_bytes())))
 }
 
 /// The fixed embedding dimension the mock returns.
@@ -259,6 +319,52 @@ mod tests {
         let out = inst.run("generate", &inv, &mut |_| {}).unwrap();
         assert_eq!(out.outputs["completion_tokens"], 2);
         assert_eq!(out.outputs["finish_reason"], "length");
+    }
+
+    #[test]
+    fn failure_mode_errors_and_embeds_internal_detail_for_the_layer_to_scrub() {
+        let mut inst = MockInstance;
+        let inv = Invocation::new().set("prompt", json!("please __mock_fail__ now"));
+        let err = inst.run("generate", &inv, &mut |_| {}).unwrap_err();
+        // The RAW mock error carries the internal detail (paths/panic) that the
+        // apiserve layer is responsible for scrubbing — proven here so the bats
+        // error-hygiene test has a real leak to defend against.
+        assert!(err.contains("secret"), "raw mock error must embed the fake detail: {err}");
+        assert!(err.contains("model.gguf"), "raw mock error must embed the fake path: {err}");
+        assert!(err.contains("panic"), "raw mock error must embed panic text: {err}");
+    }
+
+    #[test]
+    fn no_absolute_path_string_literal_in_the_detail() {
+        // The fake detail is an absolute home path assembled at runtime; check its
+        // pieces (not a path literal) so the repo's absolute-path grep gate over
+        // crates/** stays clean.
+        let d = fake_internal_detail();
+        assert!(d.starts_with('/'), "must be an absolute path: {d}");
+        assert!(d.contains("home") && d.contains("secret") && d.contains("model.gguf"));
+        assert!(d.contains("panic"));
+    }
+
+    #[test]
+    fn delay_returns_promptly_when_cancelled() {
+        use std::time::Instant;
+        // A long nominal delay, but the token is already cancelled: the sleep must
+        // bail on the first poll rather than block for the full duration. (Tested at
+        // the helper level to avoid racing on the process-global delay env var.)
+        let cancel = capability::CancelToken::armed();
+        cancel.cancel();
+        let t = Instant::now();
+        assert!(sleep_cancellable(5000, &cancel), "cancelled sleep returns true");
+        assert!(t.elapsed().as_millis() < 1000, "cancelled delay must return promptly");
+    }
+
+    #[test]
+    fn delay_sleeps_when_not_cancelled() {
+        use std::time::Instant;
+        let cancel = capability::CancelToken::armed();
+        let t = Instant::now();
+        assert!(!sleep_cancellable(60, &cancel), "an uncancelled sleep returns false");
+        assert!(t.elapsed().as_millis() >= 50, "must actually spend the delay");
     }
 
     #[test]

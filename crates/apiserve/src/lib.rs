@@ -107,6 +107,38 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// The admission deadline for live servers: `BRAIN_ADMIT_DEADLINE_MS` if set to a
+/// positive integer, else [`DEFAULT_ADMIT_DEADLINE`]. An empty/invalid/zero value
+/// falls back to the default (never an unbounded or zero-length wait).
+fn admit_deadline_from_env() -> std::time::Duration {
+    parse_admit_deadline(std::env::var("BRAIN_ADMIT_DEADLINE_MS").ok().as_deref())
+}
+
+/// Pure parse of the admit-deadline override: a positive integer of milliseconds, or
+/// [`DEFAULT_ADMIT_DEADLINE`] for any missing/empty/invalid/zero value.
+fn parse_admit_deadline(raw: Option<&str>) -> std::time::Duration {
+    match raw.and_then(|v| v.trim().parse::<u64>().ok()).filter(|&ms| ms > 0) {
+        Some(ms) => std::time::Duration::from_millis(ms),
+        None => DEFAULT_ADMIT_DEADLINE,
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn admit_deadline_override_parses_positive_ms_else_default() {
+        assert_eq!(parse_admit_deadline(Some("500")), Duration::from_millis(500));
+        assert_eq!(parse_admit_deadline(Some("  250 ")), Duration::from_millis(250));
+        assert_eq!(parse_admit_deadline(None), DEFAULT_ADMIT_DEADLINE);
+        assert_eq!(parse_admit_deadline(Some("")), DEFAULT_ADMIT_DEADLINE);
+        assert_eq!(parse_admit_deadline(Some("0")), DEFAULT_ADMIT_DEADLINE);
+        assert_eq!(parse_admit_deadline(Some("nope")), DEFAULT_ADMIT_DEADLINE);
+    }
+}
+
 /// The shared 404 for any unrouted path, in the surface's dialect.
 async fn fallback(State(state): State<AppState>) -> ApiError {
     ApiError::not_found(state.provider, "no such route")
@@ -119,11 +151,17 @@ async fn fallback(State(state): State<AppState>) -> ApiError {
 /// this is unit-testable but not yet called from the `brain` binary — the CLI
 /// wiring lands in a later phase.)
 pub fn serve_all(exec: Executor, surfaces: Vec<Surface>) -> anyhow::Result<()> {
+    // The admission deadline is operator-overridable via `BRAIN_ADMIT_DEADLINE_MS`
+    // (default `DEFAULT_ADMIT_DEADLINE`, 10s). Keeping it here (rather than in the
+    // pure `router`) leaves the unit-test `oneshot` path on the fixed default while
+    // letting a live server be driven with a short deadline (e.g. the conformance
+    // harness sets 500ms to force fast 429 shedding).
+    let admit_deadline = admit_deadline_from_env();
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
         let mut set = tokio::task::JoinSet::new();
         for s in surfaces {
-            let state = AppState::new(exec.clone(), s.api_key.clone(), s.provider);
+            let state = AppState::new(exec.clone(), s.api_key.clone(), s.provider).with_admit_deadline(admit_deadline);
             let app = router(state);
             let (addr, provider) = (s.addr, s.provider);
             set.spawn(async move {
