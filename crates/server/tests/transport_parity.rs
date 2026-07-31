@@ -7,7 +7,7 @@
 
 use fcbench::RandomWalk;
 use forecast::{ForecastSpec, Panel, Representation, Variate};
-use server::{pump_connection, serve_unix, ControllerSession, ServeOpts, Session};
+use server::{pump_connection, serve_unix, ControllerSession, ServeOpts};
 use std::io::{BufRead, BufReader, Cursor, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;

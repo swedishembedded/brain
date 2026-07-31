@@ -134,7 +134,6 @@ fn build_models() -> Vec<(String, Box<dyn ForecastModel>)> {
 /// advertised capabilities, so the driver stays model-agnostic.
 fn build_panel(model: &dyn ForecastModel, ctx: &[[f32; 5]]) -> Panel {
     let caps = model.capabilities();
-    let n = ctx.len();
     if caps.requires_variates.is_empty() {
         // univariate close target.
         let close: Vec<f32> = ctx.iter().map(|b| b[3]).collect();

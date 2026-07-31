@@ -67,7 +67,7 @@ fn shard_forward_and_grad_parity() {
     single.poll_wait();
 
     // Auto-placed two-stage pipeline from the SAME weights.
-    let mut pipe = Pipeline::<Qwen>::new(cfg.clone(), b, t, &init, &stage_gpus());
+    let pipe = Pipeline::<Qwen>::new(cfg.clone(), b, t, &init, &stage_gpus());
     assert_eq!(pipe.n_stages(), 2);
     eprintln!("auto-placed shards: {:?}", pipe.shards());
     pipe.zero_grads();

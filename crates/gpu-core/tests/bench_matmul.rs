@@ -181,10 +181,19 @@ fn bench_matmul() {
             t_cpu / t_gr2
         );
         println!(
-            "{:<30} parity vs cpu (rel): naive {:.1e}  tiled {:.1e}  reg {:.1e}  reg2 {:.1e}",
-            "", dn_rel, dt_rel, dr_rel, dr2_rel
+            "{:<30} gpu tiled {:>9.0} GFLOP/s | parity vs cpu (max-abs / rel): \
+             naive {:.1e}/{:.1e}  tiled {:.1e}/{:.1e}  reg {:.1e}/{:.1e}  reg2 {:.1e}/{:.1e}",
+            "",
+            gfs(t_gt),
+            dn_abs,
+            dn_rel,
+            dt_abs,
+            dt_rel,
+            dr_abs,
+            dr_rel,
+            dr2_abs,
+            dr2_rel
         );
-        let _ = (dt_abs, dr_abs, dr2_abs);
         assert!(dr_rel < TOL, "{}: gpu reg diverges from cpu (rel {dr_rel:.3e})", s.label);
         assert!(dr2_rel < TOL, "{}: gpu reg2 diverges from cpu (rel {dr2_rel:.3e})", s.label);
 

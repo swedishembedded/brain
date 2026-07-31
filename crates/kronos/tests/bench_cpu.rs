@@ -232,7 +232,7 @@ fn finetune_step_batch_scaling() {
     let mut init: HashMap<String, Vec<f32>> = param_list_c(&cfg)
         .into_iter()
         .filter(|(n, _)| n != "embedding.fusion_l" && n != "embedding.fusion_r")
-        .map(|(n, numel)| (n, Vec::new()))
+        .map(|(n, _)| (n, Vec::new()))
         .collect();
     for (name, v) in init.iter_mut() {
         let numel = param_list_c(&cfg).into_iter().find(|(n, _)| n == name).map(|(_, s)| s).unwrap();

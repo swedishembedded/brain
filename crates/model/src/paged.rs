@@ -503,7 +503,6 @@ mod tests {
 
 #[cfg(test)]
 mod gpu_tests {
-    use super::*;
     use data::rng::Rng;
 
     const SCORES: usize = 0;
@@ -593,7 +592,6 @@ mod gpu_tests {
 
 #[cfg(test)]
 mod batched_tests {
-    use super::*;
     use data::rng::Rng;
 
     static PIPES: &[(&str, &str)] = &[

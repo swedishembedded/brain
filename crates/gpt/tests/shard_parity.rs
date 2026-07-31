@@ -56,7 +56,7 @@ fn shard_forward_and_grad_parity_gpt() {
     single.poll_wait();
 
     // Auto-placed two-stage pipeline from the SAME weights.
-    let mut pipe = Pipeline::<Gpt>::new(cfg.clone(), b, t, &init, &stage_gpus());
+    let pipe = Pipeline::<Gpt>::new(cfg.clone(), b, t, &init, &stage_gpus());
     assert_eq!(pipe.n_stages(), 2);
     eprintln!("auto-placed shards: {:?}", pipe.shards());
     pipe.zero_grads();

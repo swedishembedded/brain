@@ -1809,11 +1809,12 @@ mod tests {
         let m = Qwen::new(cfg.clone(), 1, 16, &w);
         m.reset_cache();
         let emb = m.read_weight("tok.weight");
-        let mut via_steps = Vec::new();
+        // The three token steps only advance the cache; the comparison is on the
+        // logits of the final (embedding) step.
         for &t in &[1u32, 5, 3] {
-            via_steps = m.step(t);
+            m.step(t);
         }
-        via_steps = m.step_embed(&emb[9 * d..10 * d]);
+        let via_steps = m.step_embed(&emb[9 * d..10 * d]);
         let m2 = Qwen::new(cfg, 1, 16, &w);
         m2.reset_cache();
         let via_prefill = m2.prefill(&[
