@@ -10,9 +10,19 @@ name = "checkpoint"
 path = "src/lib.rs"
 
 [dependencies]
+serde.workspace = true
 serde_json.workspace = true
+half.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # On-demand, memory-mapped weight reads (the residency layer's cold tier). Native
 # only — wasm has no mmap and no fs.
 memmap2 = "0.9"
+# Native gets the full (std) safetensors — the writer uses std fs; the reader path
+# is shared with wasm below.
+safetensors.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# wasm only needs the reader (parse_safetensors); the `std` feature pulls tempfile,
+# which does not build for wasm32. `alloc` gives serialize/deserialize/read_metadata.
+safetensors = { version = "0.8", default-features = false, features = ["alloc"] }

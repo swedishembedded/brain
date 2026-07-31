@@ -12,6 +12,7 @@ use std::io::Write;
 use serde_json::Value;
 
 pub mod safetensors;
+pub mod st;
 pub mod gguf;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mmap;
