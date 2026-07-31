@@ -37,8 +37,8 @@ pub const BN_DGAMMA: usize = 9;
 pub const BN_DBETA: usize = 10;
 pub const SILU: usize = 11;
 pub const SILU_BWD: usize = 12;
-pub const MAXPOOL5: usize = 13;
-pub const MAXPOOL5_DX: usize = 14;
+pub const MAXPOOL2D: usize = 13;
+pub const MAXPOOL2D_DX: usize = 14;
 pub const UPSAMPLE2: usize = 15;
 pub const UPSAMPLE2_DX: usize = 16;
 pub const CONCAT2: usize = 17;
@@ -93,8 +93,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("bn_dbeta", kernels::BN_DBETA),
     ("silu", kernels::SILU),
     ("silu_bwd", kernels::SILU_BWD),
-    ("maxpool5", kernels::MAXPOOL5),
-    ("maxpool5_dx", kernels::MAXPOOL5_DX),
+    ("maxpool2d", kernels::MAXPOOL2D),
+    ("maxpool2d_dx", kernels::MAXPOOL2D_DX),
     ("upsample2", kernels::UPSAMPLE2),
     ("upsample2_dx", kernels::UPSAMPLE2_DX),
     ("concat2", kernels::CONCAT2),

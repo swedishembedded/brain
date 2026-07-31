@@ -5,16 +5,17 @@
 //! directly through `gpu_core` like `depth_kernels.rs` / `glue.rs` — no model is
 //! built.
 //!
-//! `maxpool2d` is the GENERALIZATION of `maxpool5` (which is the same kernel
-//! pinned at `stride = 1`; `K` and `pad` were already its parameters). Two
-//! consequences shape this file:
+//! `maxpool2d` is the GENERALIZATION of the deleted `maxpool5` (the same kernel
+//! pinned at `stride = 1`; `K` and `pad` were already its parameters), and it
+//! took over that kernel's only call site, SPPF. Two consequences shape this
+//! file:
 //!
-//! 1. **The base case is a hard gate.** At `K=5, stride=1, pad=2` the new kernel
-//!    must reproduce `maxpool5` *bit for bit*, in both `y` and `argmax`. Unlike a
-//!    reassociated sum, a max-pool is pure SELECTION — no arithmetic is
-//!    reordered, so bit-equality is achievable and anything less is a real
-//!    divergence, not float noise. A generalization that changes its own base
-//!    case is a regression however good its other tests look.
+//! 1. **The base case is a hard gate.** At `K=5, stride=1, pad=2` the kernel is
+//!    what SPPF dispatches, so it is checked *bit for bit* in both `y` and
+//!    `argmax`. Unlike a reassociated sum, a max-pool is pure SELECTION — no
+//!    arithmetic is reordered, so bit-equality is achievable and anything less is
+//!    a real divergence, not float noise. A generalization that changes its own
+//!    base case is a regression however good its other tests look.
 //! 2. **`stride` is the only new degree of freedom, and a wrong stride still
 //!    produces plausible numbers.** So it is attacked three ways: a plain-Rust
 //!    forward oracle at five (K, stride, pad) configurations including the two
@@ -42,11 +43,9 @@ use gpu_core::Gpu;
 static KERNELS: &[(&str, &str)] = &[
     ("maxpool2d", kernels::MAXPOOL2D),       // 0
     ("maxpool2d_dx", kernels::MAXPOOL2D_DX), // 1
-    ("maxpool5", kernels::MAXPOOL5),         // 2 (the stride-1 predecessor)
 ];
 const K_FWD: usize = 0;
 const K_DX: usize = 1;
-const K_MAXPOOL5: usize = 2;
 
 fn skip() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
@@ -217,16 +216,21 @@ fn configs() -> Vec<(&'static str, Pool)> {
 }
 
 // ===========================================================================
-// 1. Base case: maxpool2d at stride=1 must BE maxpool5.
+// 1. Base case: the stride-1 behaviour maxpool5 used to provide.
 // ===========================================================================
 
-/// The generalization must not change the base case. Max-pool reorders no
-/// arithmetic — it selects — so `maxpool5` and `maxpool2d` at K=5/s=1/pad=2 must
-/// agree in every bit of `y` and in every `argmax` entry, including the tie rule
-/// (first-in-scan-order wins) and the `found` seeding that keeps padding from
-/// beating an all-negative window.
+/// `maxpool2d` replaced `maxpool5` (SPPF's K=5/stride=1/pad=2 pool), so the
+/// stride-1 base case is a hard gate rather than just another sweep point. Max-pool
+/// reorders no arithmetic — it selects — so the tolerance is bit-equality on `y`
+/// and exact equality on `argmax`, against the independently-written oracle.
+///
+/// The distinctive part is the data: a third of the input is forced strictly
+/// negative, which is what catches a max seeded from `0.0` instead of from the
+/// first in-bounds tap (`found`). With all-positive data a padding-wins bug is
+/// invisible, and every SPPF call site pools an already-SiLU'd — i.e. possibly
+/// negative — activation.
 #[test]
-fn stride1_is_bit_identical_to_maxpool5() {
+fn stride1_base_case_including_all_negative_windows() {
     if skip() {
         return;
     }
@@ -237,35 +241,24 @@ fn stride1_is_bit_identical_to_maxpool5() {
         assert_eq!(p.ho(), h, "stride-1 with pad=K/2 must preserve H");
         assert_eq!(p.wo(), w, "stride-1 with pad=K/2 must preserve W");
 
-        // A run that includes an all-negative region, so a 0.0-seeded max would
-        // be caught rather than hidden by positive data.
         let mut x = randvec(101, p.x_len());
         for v in x.iter_mut().take(p.x_len() / 3) {
             *v = -(v.abs()) - 1.0;
         }
 
-        let (y2, am2) = gpu_fwd(&gpu, p, &x);
+        let (y, am) = gpu_fwd(&gpu, p, &x);
+        let (ry, ram) = ref_fwd(p, &x);
+        assert!(ry.iter().any(|&v| v < 0.0), "k{k}p{pad}: the negative region did not survive to y");
 
-        let xb = gpu.storage_init("x", &x);
-        let y5b = gpu.storage(p.x_len() as u64);
-        let am5b = gpu.storage(p.x_len() as u64);
-        // maxpool5 ABI is the SHORTER [N, C, H, W, K, pad] — no stride, no Ho/Wo.
-        let p5 = [n as u32, c as u32, h as u32, w as u32, k as u32, pad as u32];
-        let s = gpu.step(K_MAXPOOL5, &[&xb, &y5b, &am5b], &p5, p.x_len() as u32);
-        gpu.submit(&[], &[s]);
-        gpu.poll_wait();
-        let y5 = gpu.read(&y5b, p.x_len());
-        let am5 = gpu.read(&am5b, p.x_len());
-
-        for i in 0..p.x_len() {
+        for i in 0..p.y_len() {
             assert_eq!(
-                y2[i].to_bits(),
-                y5[i].to_bits(),
-                "k{k}p{pad}: y[{i}] maxpool2d {} vs maxpool5 {}",
-                y2[i],
-                y5[i]
+                y[i].to_bits(),
+                ry[i].to_bits(),
+                "k{k}p{pad}: y[{i}] kernel {} vs oracle {}",
+                y[i],
+                ry[i]
             );
-            assert_eq!(am2[i], am5[i], "k{k}p{pad}: argmax[{i}] diverged");
+            assert_eq!(am[i] as usize, ram[i], "k{k}p{pad}: argmax[{i}] diverged");
         }
     }
 }

@@ -1380,7 +1380,7 @@ impl C2f {
 }
 
 // ===========================================================================
-// SPPF = Conv1x1 -> m1,m2,m3 = maxpool5 chain -> concat[x,m1,m2,m3] -> Conv1x1
+// SPPF = Conv1x1 -> m1,m2,m3 = maxpool2d chain -> concat[x,m1,m2,m3] -> Conv1x1
 // ===========================================================================
 
 /// Spatial-Pyramid-Pooling-Fast. A 1x1 conv, three chained 5x5 maxpools, a
@@ -1426,7 +1426,7 @@ impl SPPF {
     /// The general ctor. `cv1` narrows to `spec.hidden`, three K=5/pad=2 max-pools
     /// chain off it, and `cv2` maps the 4-way concat to `spec.c_out`.
     ///
-    /// K is fixed at 5 (the kernel is `maxpool5`, though K/pad are its params):
+    /// K is fixed at 5 (the kernel is `maxpool2d` at K=5/stride=1/pad=2):
     /// Ultralytics and ZipDepth both use 5, and ZipDepth's `k` argument is never
     /// passed a different value. Widen this when something needs it.
     pub fn with_spec(
@@ -1506,9 +1506,13 @@ impl SPPF {
         v
     }
 
-    fn pool_params(&self) -> [u32; 6] {
-        // maxpool5 ABI: [N, C, H, W, K, pad], K=5 pad=2.
-        [self.sh.n, self.c, self.sh.h, self.sh.w, 5, 2]
+    fn pool_params(&self) -> [u32; 9] {
+        // maxpool2d ABI: [N, C, H, W, K, stride, pad, Ho, Wo].
+        // SPPF is K=5, stride=1, pad=2, so Ho=H and Wo=W — the same-size output
+        // the concat below depends on. Recomputing it here rather than writing
+        // `sh.h` twice would hide the assumption; state it instead:
+        //   Ho = (H + 2*2 - 5)/1 + 1 = H.
+        [self.sh.n, self.c, self.sh.h, self.sh.w, 5, 1, 2, self.sh.h, self.sh.w]
     }
 
     pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
@@ -1516,11 +1520,11 @@ impl SPPF {
         let x = self.cv1.out();
         let n1 = self.sh.numel();
         // m1 = pool(x); m2 = pool(m1); m3 = pool(m2). Sequential dependency.
-        let s1 = ctx.step(ctx.ids.maxpool5, &[x, &self.m1, &self.am1], &self.pool_params(), n1);
+        let s1 = ctx.step(ctx.ids.maxpool2d, &[x, &self.m1, &self.am1], &self.pool_params(), n1);
         ctx.gpu.submit(&[], &[s1]);
-        let s2 = ctx.step(ctx.ids.maxpool5, &[&self.m1, &self.m2, &self.am2], &self.pool_params(), n1);
+        let s2 = ctx.step(ctx.ids.maxpool2d, &[&self.m1, &self.m2, &self.am2], &self.pool_params(), n1);
         ctx.gpu.submit(&[], &[s2]);
-        let s3 = ctx.step(ctx.ids.maxpool5, &[&self.m2, &self.m3, &self.am3], &self.pool_params(), n1);
+        let s3 = ctx.step(ctx.ids.maxpool2d, &[&self.m2, &self.m3, &self.am3], &self.pool_params(), n1);
         ctx.gpu.submit(&[], &[s3]);
 
         // concat [x, m1, m2, m3] via left-fold.
@@ -1569,19 +1573,19 @@ impl SPPF {
 
         // Backprop the maxpool chain. m3 = pool(m2): grad wrt m2 from m3.
         // d_m2 = d_m2_cat + maxpool_dx(d_m3 -> via am3)
-        let sd3 = ctx.step(ctx.ids.maxpool5_dx, &[&self.d_m3, &self.am3, &self.d_tmp], &self.pool_params(), n1);
+        let sd3 = ctx.step(ctx.ids.maxpool2d_dx, &[&self.d_m3, &self.am3, &self.d_tmp], &self.pool_params(), n1);
         ctx.gpu.submit(&[], &[sd3]);
         let a3 = ctx.step(ctx.ids.add2, &[&self.d_m2_cat, &self.d_tmp, &self.d_m2], &[n1], n1);
         ctx.gpu.submit(&[], &[a3]);
 
         // m2 = pool(m1): grad wrt m1 = d_m1_cat + maxpool_dx(d_m2 -> via am2)
-        let sd2 = ctx.step(ctx.ids.maxpool5_dx, &[&self.d_m2, &self.am2, &self.d_tmp], &self.pool_params(), n1);
+        let sd2 = ctx.step(ctx.ids.maxpool2d_dx, &[&self.d_m2, &self.am2, &self.d_tmp], &self.pool_params(), n1);
         ctx.gpu.submit(&[], &[sd2]);
         let a2 = ctx.step(ctx.ids.add2, &[&self.d_m1_cat, &self.d_tmp, &self.d_m1], &[n1], n1);
         ctx.gpu.submit(&[], &[a2]);
 
         // m1 = pool(x): grad wrt x = d_x_cat + maxpool_dx(d_m1 -> via am1)
-        let sd1 = ctx.step(ctx.ids.maxpool5_dx, &[&self.d_m1, &self.am1, &self.d_tmp], &self.pool_params(), n1);
+        let sd1 = ctx.step(ctx.ids.maxpool2d_dx, &[&self.d_m1, &self.am1, &self.d_tmp], &self.pool_params(), n1);
         ctx.gpu.submit(&[], &[sd1]);
         let a1 = ctx.step(ctx.ids.add2, &[&self.d_x_cat, &self.d_tmp, &self.d_x], &[n1], n1);
         ctx.gpu.submit(&[], &[a1]);

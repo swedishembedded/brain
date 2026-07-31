@@ -99,7 +99,7 @@ partly **yes**, and it was settled by test rather than by reading:
   and a test pins that they agree exactly at 2×. **That duplication is earned;
   the other two were not.**
 
-**Reused rather than rewritten**: `maxpool5` *is* LightweightSPPF exactly (K/pad
+**Reused rather than rewritten**: `maxpool2d` *is* LightweightSPPF exactly (K/pad
 are params); **`conv_bias`** for every biased conv (NOT `bias_add` — see the trap
 below); `scale_chan`/`mul`/`add2`/`concat2` for the attention gates and
 residuals; `leaky_relu(0)` for ReLU; `mse_value_w`'s weighted-loss shape as the
@@ -307,7 +307,7 @@ generalizations rather than depth-specific hooks:
   the analytic is 1.395: it matches the LEFT slope exactly and the central
   difference splits them. At yolo's own parameters (N=4, eps=5e-3) this config fails
   on **3 of 5 seeds**, while yolo's hand-picked `assert_grads(&h, 707, "sppf")`
-  passes. `maxpool5` caches its argmax, so brain's gradient is the FROZEN-argmax
+  passes. `maxpool2d` caches its argmax, so brain's gradient is the FROZEN-argmax
   gradient — a **subgradient**, which must lie within the envelope of the two
   one-sided slopes. That is what the test asserts, with a derived noise floor
   (`8*|L|*f32::EPSILON/eps`) below which the slopes are round-off.
@@ -608,7 +608,7 @@ Everything below is verified against the two released checkpoints
 | `GlobalContextBlock` | `conv2d_gd`(C→1, bias) + `softmax_hw` + `weighted_gap` + 2× `conv2d_gd` + `bn` + relu + `add_chan_bcast` |
 | `MinimalMultiScale` | 2× depthwise `conv2d_gd` (dilation 1 and 2) + `add2` + `bn` + `add2` |
 | `MinimalCrossScale` | grouped 1×1 `conv2d_gd` + `resize_nearest` + `avgpool2d` + `scale_chan`(0.3) + `add2` |
-| `LightweightSPPF` | `ConvBN` + 3× **`maxpool5`** (exact match, K/pad are params) + `concat2` + `ConvBN` |
+| `LightweightSPPF` | `ConvBN` + 3× **`maxpool2d`** (exact match, K/pad/stride are params) + `concat2` + `ConvBN` |
 | `UltraLightFusion` | `resize_bilinear`(align=**false**) + 2× grouped 1×1 + `add2` + `bn` + relu |
 | `head_half` | `conv2d_gd`(3×3) + `bias_add` |
 | `FastConvexUpsample` (unfold) | `ConvBN` + `conv2d_gd`(→36, bias) + `softmax_k`(K=9) + `convex_upsample` |

@@ -117,7 +117,7 @@ fn lightweight_sppf_width_comes_from_the_input_channels() {
 /// (rel-err 0.30 / 0.24 / 0.19), while 707 itself passes. The instrument is wrong,
 /// not the seed.
 ///
-/// So this states the property that is actually true at a kink: `maxpool5` caches
+/// So this states the property that is actually true at a kink: `maxpool2d` caches
 /// its argmax, so brain's analytic gradient is the FROZEN-argmax gradient — a
 /// subgradient — and a subgradient must lie within the envelope of the two
 /// one-sided slopes. Away from kinks the envelope collapses and this reduces to an

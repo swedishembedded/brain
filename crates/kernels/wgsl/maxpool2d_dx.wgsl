@@ -13,7 +13,7 @@
 // (hi,wi) AND selected this input as its max (argmax == ii). Terminal write is a
 // plain overwrite; dx does NOT need pre-zeroing.
 //
-// The generalization of maxpool5_dx.wgsl (that kernel is this one pinned at
+// This kernel replaced maxpool5_dx.wgsl (that kernel was this one pinned at
 // stride=1). Coverage, inverting maxpool2d.wgsl's window
 // `[ho*stride - pad, ho*stride - pad + K - 1]`:
 //   ho*stride <= hi + pad   and   ho*stride >= hi + pad - K + 1
@@ -27,7 +27,7 @@
 // doing it in u32 wraps and silently pulls in the whole first output row.
 //
 // Ties: the forward records ONE winner, so a plateau sends all of dy to that
-// single input — brain's frozen-argmax convention, identical to maxpool5.
+// single input — brain's frozen-argmax convention, unchanged from maxpool5.
 //
 // All-padding windows (pad >= K only): the forward writes argmax = 0 there
 // without having selected anything. That pointer is never believed here, because

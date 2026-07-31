@@ -77,8 +77,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("sigmoid", kernels::SIGMOID),
     ("sigmoid_bwd", kernels::SIGMOID_BWD),
     // ---- spatial ----
-    ("maxpool5", kernels::MAXPOOL5), // LightweightSPPF: K/pad are params
-    ("maxpool5_dx", kernels::MAXPOOL5_DX),
+    ("maxpool2d", kernels::MAXPOOL2D), // LightweightSPPF: K/pad are params
+    ("maxpool2d_dx", kernels::MAXPOOL2D_DX),
     ("avgpool2d", kernels::AVGPOOL2D), // SE pool, cross-scale down, strip pool
     ("avgpool2d_dx", kernels::AVGPOOL2D_DX),
     ("resize_bilinear", kernels::RESIZE_BILINEAR),
@@ -186,7 +186,7 @@ mod tests {
             (i.bn_dbeta, "bn_dbeta"),
             (i.add2, "add2"),
             (i.concat2, "concat2"),
-            (i.maxpool5, "maxpool5"),
+            (i.maxpool2d, "maxpool2d"),
         ] {
             assert_ne!(id, vision::NONE, "`{what}` did not resolve");
         }

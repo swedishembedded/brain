@@ -81,8 +81,8 @@ pub struct ConvKernelIds {
     pub resize_nearest_dx: usize,
     pub pixel_shuffle: usize,
     pub pixel_shuffle_dx: usize,
-    pub maxpool5: usize,
-    pub maxpool5_dx: usize,
+    pub maxpool2d: usize,
+    pub maxpool2d_dx: usize,
     pub upsample2: usize,
     pub upsample2_dx: usize,
     // ---- context / attention (ZipDepth) ----
@@ -160,8 +160,8 @@ impl ConvKernelIds {
             resize_nearest_dx: k("resize_nearest_dx"),
             pixel_shuffle: k("pixel_shuffle"),
             pixel_shuffle_dx: k("pixel_shuffle_dx"),
-            maxpool5: k("maxpool5"),
-            maxpool5_dx: k("maxpool5_dx"),
+            maxpool2d: k("maxpool2d"),
+            maxpool2d_dx: k("maxpool2d_dx"),
             upsample2: k("upsample2"),
             upsample2_dx: k("upsample2_dx"),
             softmax_k: k("softmax_k"),
@@ -226,15 +226,15 @@ mod tests {
     fn unregistered_kernels_resolve_to_none() {
         let ids = ConvKernelIds::resolve(&[("conv2d", "")]);
         assert_eq!(ids.conv2d, 0);
-        assert_eq!(ids.maxpool5, NONE, "a kernel the model never registered");
+        assert_eq!(ids.maxpool2d, NONE, "a kernel the model never registered");
         assert_eq!(ids.need(ids.conv2d, "conv2d"), 0);
     }
 
     #[test]
-    #[should_panic(expected = "kernel `maxpool5` is not registered")]
+    #[should_panic(expected = "kernel `maxpool2d` is not registered")]
     fn need_panics_with_the_kernel_name() {
         let ids = ConvKernelIds::resolve(&[("conv2d", "")]);
-        ids.need(ids.maxpool5, "maxpool5");
+        ids.need(ids.maxpool2d, "maxpool2d");
     }
 
     /// Resolving against the real yolo pipeline order must reproduce yolo's own
@@ -256,8 +256,8 @@ mod tests {
             ("bn_dbeta", ""),
             ("silu", ""),
             ("silu_bwd", ""),
-            ("maxpool5", ""),
-            ("maxpool5_dx", ""),
+            ("maxpool2d", ""),
+            ("maxpool2d_dx", ""),
             ("upsample2", ""),
             ("upsample2_dx", ""),
             ("concat2", ""),
@@ -280,8 +280,8 @@ mod tests {
         assert_eq!(ids.bn_dbeta, 10);
         assert_eq!(ids.silu, 11);
         assert_eq!(ids.silu_bwd, 12);
-        assert_eq!(ids.maxpool5, 13);
-        assert_eq!(ids.maxpool5_dx, 14);
+        assert_eq!(ids.maxpool2d, 13);
+        assert_eq!(ids.maxpool2d_dx, 14);
         assert_eq!(ids.upsample2, 15);
         assert_eq!(ids.upsample2_dx, 16);
         assert_eq!(ids.concat2, 17);

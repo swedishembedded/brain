@@ -446,10 +446,6 @@ pub const MAX_ABS_ROWS: &str = include_str!("../wgsl/max_abs_rows.wgsl");
 pub const MAXPOOL2D: &str = include_str!("../wgsl/maxpool2d.wgsl");
 /// `wgsl/maxpool2d_dx.wgsl`
 pub const MAXPOOL2D_DX: &str = include_str!("../wgsl/maxpool2d_dx.wgsl");
-/// `wgsl/maxpool5.wgsl`
-pub const MAXPOOL5: &str = include_str!("../wgsl/maxpool5.wgsl");
-/// `wgsl/maxpool5_dx.wgsl`
-pub const MAXPOOL5_DX: &str = include_str!("../wgsl/maxpool5_dx.wgsl");
 /// `wgsl/mla_bwd_dk_pass.wgsl`
 pub const MLA_BWD_DK_PASS: &str = include_str!("../wgsl/mla_bwd_dk_pass.wgsl");
 /// `wgsl/mla_bwd_dk_rope.wgsl`
@@ -898,8 +894,6 @@ pub const ALL: &[(&str, &str)] = &[
     ("max_abs_rows", MAX_ABS_ROWS),
     ("maxpool2d", MAXPOOL2D),
     ("maxpool2d_dx", MAXPOOL2D_DX),
-    ("maxpool5", MAXPOOL5),
-    ("maxpool5_dx", MAXPOOL5_DX),
     ("mla_bwd_dk_pass", MLA_BWD_DK_PASS),
     ("mla_bwd_dk_rope", MLA_BWD_DK_ROPE),
     ("mla_bwd_dq_pass", MLA_BWD_DQ_PASS),

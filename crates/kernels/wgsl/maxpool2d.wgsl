@@ -9,9 +9,9 @@
 //
 // One invocation per OUTPUT element (n, c, ho, wo).
 //
-// The generalization of maxpool5.wgsl, which is this kernel pinned at stride=1
-// (K and pad were already parameters there). The window's top-left input
-// coordinate is
+// This kernel replaced maxpool5.wgsl, which was it pinned at stride=1 (K and pad
+// were already parameters there); SPPF now dispatches it at K=5/stride=1/pad=2.
+// The window's top-left input coordinate is
 //   (ho*stride - pad, wo*stride - pad)
 // and the caller-computed output size is
 //   Ho = (H + 2*pad - K)/stride + 1   (likewise Wo from W)
@@ -22,9 +22,9 @@
 //
 // NOTE the Params order: [N, C, H, W, K, stride, pad, Ho, Wo]. `stride` sits
 // BEFORE `pad`, matching conv2d_gd/convtr1d's (K, stride, pad, dilation, groups)
-// hyperparameter order — it is NOT a suffix-extension of maxpool5's
-// [N, C, H, W, K, pad]. Migrating a maxpool5 call site means rewriting the whole
-// word list, not appending to it.
+// hyperparameter order — it is NOT a suffix-extension of the old maxpool5
+// [N, C, H, W, K, pad] ABI. A call site ported from that kernel rewrites the
+// whole word list rather than appending to it.
 //
 // Out-of-bounds taps are treated as -inf and never selected; the running max is
 // seeded from the FIRST in-bounds tap via `found`, so padding can never win (a
@@ -34,7 +34,7 @@
 // maxpool2d_dx never reads it: see the coverage argument in that kernel's
 // header. `argmax` records the winner's
 // input flat index for the gather-based backward in maxpool2d_dx.wgsl — exact in
-// f32 while N*C*H*W < 2^24, which is the same bound maxpool5 has always carried.
+// f32 while N*C*H*W < 2^24, the same bound maxpool5 always carried.
 
 struct Params {
     N:      u32,

@@ -195,7 +195,7 @@ the brain reproduction of Ultralytics' C2f (cv1/cv2/m naming, `blocks.rs:36-39`)
 ### 3.4 SPPF (Spatial-Pyramid-Pooling-Fast)
 
 `SPPF` (`blocks.rs:610-788`): a 1×1 `cv1` halves to `c = Cout/2`; three **chained
-5×5 max-pools** (stride 1, pad 2, so spatial size is preserved; `wgsl/maxpool5.wgsl`)
+5×5 max-pools** (stride 1, pad 2, so spatial size is preserved; `wgsl/maxpool2d.wgsl`)
 produce `m1=pool(x)`, `m2=pool(m1)`, `m3=pool(m2)`; `[x, m1, m2, m3]` (4·c
 channels) is concatenated and a final 1×1 `cv2` projects to `Cout`. Chaining 5×5
 pools gives effective receptive fields of 5/9/13 — pooling-pyramid context at the
@@ -474,7 +474,7 @@ for brain's engine (`crates/kernels/src/lib.rs:1-9`). The discipline:
 **`@workgroup_size(64)`**, **no atomics / subgroups / f16**, so the same text runs
 on old desktop GPUs and on WebGPU. The detector uses ~27 of the ~97 kernels in
 the crate: `conv2d{,_dw,_dx}`, `bn_{stats,train,eval,running,dstats,dx,dgamma,dbeta}`,
-`silu{,_bwd}`, `maxpool5{,_dx}`, `upsample2{,_dx}`, `concat2`, `concat_split`,
+`silu{,_bwd}`, `maxpool2d{,_dx}`, `upsample2{,_dx}`, `concat2`, `concat_split`,
 `add2`, `bias_{add,grad}`, `dfl_{decode,loss,loss_grad,grad}`, `ciou{,_grad}`,
 `bce_logits{,_grad}`, plus the AdamW/clip optimizer kernels.
 

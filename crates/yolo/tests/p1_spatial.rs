@@ -9,7 +9,7 @@
 //!
 //! Forward kernels are checked against plain-Rust references. Gradients are
 //! checked against central differences: silu_bwd via a tolerance (smooth
-//! nonlinearity), and the linear/selection ops (maxpool5_dx, upsample2_dx,
+//! nonlinearity), and the linear/selection ops (maxpool2d_dx, upsample2_dx,
 //! concat_split) near-exactly.
 
 use gpu_core::Gpu;
@@ -95,9 +95,9 @@ fn silu_backward_fd() {
 }
 
 // ===========================================================================
-// maxpool5 forward + argmax correctness
+// maxpool2d forward + argmax correctness (at the SPPF setting: K=5, s=1, p=2)
 // ===========================================================================
-fn ref_maxpool5(x: &[f32], n: usize, c: usize, h: usize, w: usize, k: usize, pad: usize)
+fn ref_maxpool2d_s1(x: &[f32], n: usize, c: usize, h: usize, w: usize, k: usize, pad: usize)
     -> (Vec<f32>, Vec<usize>) {
     let mut y = vec![0.0f32; n * c * h * w];
     let mut am = vec![0usize; n * c * h * w];
@@ -131,23 +131,25 @@ fn ref_maxpool5(x: &[f32], n: usize, c: usize, h: usize, w: usize, k: usize, pad
 }
 
 #[test]
-fn maxpool5_forward_and_argmax() {
+fn maxpool2d_forward_and_argmax() {
     let (n, c, h, w, k, pad) = (1usize, 2, 5, 5, 5, 2);
     let total = n * c * h * w;
     // Distinct values so the argmax is unambiguous.
     let x: Vec<f32> = randvec(7, total);
 
-    let gpu = Gpu::new_cpu(&[("maxpool5", wgsl!("maxpool5.wgsl"))]);
+    let gpu = Gpu::new_cpu(&[("maxpool2d", wgsl!("maxpool2d.wgsl"))]);
     let xb = gpu.storage_init("x", &x);
     let yb = gpu.storage(total as u64);
     let amb = gpu.storage(total as u64);
-    let params = [n as u32, c as u32, h as u32, w as u32, k as u32, pad as u32];
+    // maxpool2d ABI: [N, C, H, W, K, stride, pad, Ho, Wo]. stride=1 with pad=K/2
+    // keeps Ho=H, Wo=W, which is what the SPPF chain relies on.
+    let params = [n as u32, c as u32, h as u32, w as u32, k as u32, 1, pad as u32, h as u32, w as u32];
     let step = gpu.step(0, &[&xb, &yb, &amb], &params, total as u32);
     gpu.submit(&[], &[step]);
     let y = gpu.read(&yb, total);
     let am = gpu.read(&amb, total);
 
-    let (ry, ram) = ref_maxpool5(&x, n, c, h, w, k, pad);
+    let (ry, ram) = ref_maxpool2d_s1(&x, n, c, h, w, k, pad);
     for i in 0..total {
         assert!((y[i] - ry[i]).abs() < 1e-5, "maxpool y[{i}]: {} vs {}", y[i], ry[i]);
         let gi = am[i] as usize;
@@ -158,17 +160,17 @@ fn maxpool5_forward_and_argmax() {
 }
 
 // ===========================================================================
-// maxpool5_dx — exact analytic gather grad.
+// maxpool2d_dx — exact analytic gather grad.
 // ===========================================================================
 #[test]
-fn maxpool5_dx_exact() {
+fn maxpool2d_dx_exact() {
     let (n, c, h, w, k, pad) = (1usize, 2, 5, 5, 5, 2);
     let total = n * c * h * w;
     let x: Vec<f32> = randvec(11, total);
     let dy: Vec<f32> = randvec(13, total);
 
     // Forward to obtain argmax.
-    let (_, am) = ref_maxpool5(&x, n, c, h, w, k, pad);
+    let (_, am) = ref_maxpool2d_s1(&x, n, c, h, w, k, pad);
 
     // Reference dx: scatter dy into the argmax input cell.
     let mut ref_dx = vec![0.0f32; total];
@@ -178,13 +180,15 @@ fn maxpool5_dx_exact() {
 
     // Run the gather kernel (uses the GPU-produced argmax for self-consistency).
     let gpu = Gpu::new_cpu(&[
-        ("maxpool5", wgsl!("maxpool5.wgsl")),
-        ("maxpool5_dx", wgsl!("maxpool5_dx.wgsl")),
+        ("maxpool2d", wgsl!("maxpool2d.wgsl")),
+        ("maxpool2d_dx", wgsl!("maxpool2d_dx.wgsl")),
     ]);
     let xb = gpu.storage_init("x", &x);
     let yb = gpu.storage(total as u64);
     let amb = gpu.storage(total as u64);
-    let params = [n as u32, c as u32, h as u32, w as u32, k as u32, pad as u32];
+    // maxpool2d ABI: [N, C, H, W, K, stride, pad, Ho, Wo]. stride=1 with pad=K/2
+    // keeps Ho=H, Wo=W, which is what the SPPF chain relies on.
+    let params = [n as u32, c as u32, h as u32, w as u32, k as u32, 1, pad as u32, h as u32, w as u32];
     let fwd = gpu.step(0, &[&xb, &yb, &amb], &params, total as u32);
     gpu.submit(&[], &[fwd]);
 
@@ -196,7 +200,7 @@ fn maxpool5_dx_exact() {
 
     for i in 0..total {
         assert!((dx[i] - ref_dx[i]).abs() < 1e-4,
-            "maxpool5_dx[{i}]: {} vs {}", dx[i], ref_dx[i]);
+            "maxpool2d_dx[{i}]: {} vs {}", dx[i], ref_dx[i]);
     }
 
     // Also cross-check the total grad mass is conserved (gather == scatter sum).
