@@ -3,7 +3,7 @@
 
 // Inverse of head_pack: scatter per-head [rows, hd] context blocks back into
 // the row-major [rows, d_model] stream the output projection consumes:
-//   out[i*dst_stride + dst_off + ho*hd + d] = src[(ho*rows + i)*hd + d]
+//   out[i*dst_stride + dst_off + ho*hd + d] = src[ho*head_stride + i*hd + d]
 // One invocation per (ho, i, d); total = heads * rows * hd. Pure copy.
 
 struct Params {
@@ -12,6 +12,7 @@ struct Params {
     hd: u32,
     dst_stride: u32,
     dst_off: u32,
+    head_stride: u32, // matches the padded stride head_pack wrote ctx_pack with
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -29,5 +30,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let r1 = idx / p.hd;
     let i = r1 % p.rows;
     let ho = r1 / p.rows;
-    out[i * p.dst_stride + p.dst_off + ho * p.hd + d] = src[idx];
+    out[i * p.dst_stride + p.dst_off + ho * p.hd + d] = src[ho * p.head_stride + i * p.hd + d];
 }

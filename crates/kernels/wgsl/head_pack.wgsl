@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // Pack one attention operand head-major-contiguous for GEMM attention:
-//   out[(ho*rows + i)*hd + d] = src[i*src_stride + src_off + (ho/group)*hd + d] * scale
+//   out[ho*head_stride + i*hd + d] = src[i*src_stride + src_off + (ho/group)*hd + d] * scale
 // Turns the row-major [rows, heads*hd] projection layout into per-head [rows, hd]
 // blocks a register-tiled GEMM can consume, folding in the GQA head replication
 // (group > 1 reads the narrow kv projection — no expanded buffer) and an
@@ -17,6 +17,7 @@ struct Params {
     src_stride: u32,
     src_off: u32,
     scale: f32,
+    head_stride: u32, // >= rows*hd, caller-padded so ho*head_stride lands storage-buffer-offset-aligned
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -34,5 +35,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let r1 = idx / p.hd;
     let i = r1 % p.rows;
     let ho = r1 / p.rows;
-    out[idx] = src[i * p.src_stride + p.src_off + (ho / p.group) * p.hd + d] * p.scale;
+    out[ho * p.head_stride + i * p.hd + d] = src[i * p.src_stride + p.src_off + (ho / p.group) * p.hd + d] * p.scale;
 }

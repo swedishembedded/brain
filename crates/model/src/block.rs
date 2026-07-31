@@ -420,6 +420,14 @@ pub fn flash_bidir_fwd(
     }
 }
 
+/// Round up to a 64-word (256B) boundary — `step_sliced`'s storage-buffer
+/// `BufferBinding` offsets must satisfy `min_storage_buffer_offset_alignment`
+/// (256B on the near-universal case), so every per-head/per-segment stride
+/// used as an offset multiplier in [`gemm_bidir_fwd`] is padded to this grain.
+pub fn pad64(words: u64) -> u64 {
+    (words + 63) / 64 * 64
+}
+
 /// Kernel indices for GEMM attention (see [`gemm_bidir_fwd`]).
 #[derive(Clone, Copy)]
 pub struct GemmAttnIds {
@@ -472,52 +480,59 @@ pub fn gemm_bidir_fwd(
     let scale = 1.0 / (hd as f32).sqrt();
     let (kbuf, vbuf) = kv;
     for &(row0, len) in spans {
-        let seg = len as u64 * d_out as u64; // one pack region, f32 words
+        let hstride = pad64(len as u64 * hd as u64); // padded per-head stride: keeps every h*hstride offset 256B-aligned
+        let seg = heads as u64 * hstride; // one pack region, f32 words
         let total = heads * len * hd;
         // Pack q (scale folded), k, vᵀ for this span.
         steps.push(g.step_sliced(
             k.head_pack,
             &[q, packs],
             &[(row0 as u64 * q_stride as u64, 0), (0, 0)],
-            &[len, heads, 1, hd, q_stride, 0, f(scale)],
+            &[len, heads, 1, hd, q_stride, 0, f(scale), hstride as u32],
             total,
         ));
         steps.push(g.step_sliced(
             k.head_pack,
             &[kbuf, packs],
             &[(row0 as u64 * kv_stride as u64, 0), (seg, 0)],
-            &[len, heads, group, hd, kv_stride, 0, f(1.0)],
+            &[len, heads, group, hd, kv_stride, 0, f(1.0), hstride as u32],
             total,
         ));
         steps.push(g.step_sliced(
             k.head_pack_t,
             &[vbuf, packs],
             &[(row0 as u64 * kv_stride as u64, 0), (2 * seg, 0)],
-            &[len, heads, group, hd, kv_stride, 0, f(1.0)],
+            &[len, heads, group, hd, kv_stride, 0, f(1.0), hstride as u32],
             total,
         ));
         let mut q0 = 0u32;
         while q0 < len {
             let qn = chunk.min(len - q0);
+            let sp_stride = pad64(qn as u64 * len as u64); // padded per-head scores/probs stride, same alignment reason
             for h in 0..heads {
                 let (mk, mt) = pick_gemm(qn as usize, len as usize, k.matmul, k.matmul_reg2, force_naive);
                 // scores[h] = q_pack[h][q0..q0+qn] · k_pack[h]ᵀ   ([qn,hd]·[len,hd]ᵀ)
                 steps.push(g.step_sliced(
                     mk,
                     &[packs, packs, scores],
-                    &[((h * len + q0) as u64 * hd as u64, 0), (seg + h as u64 * len as u64 * hd as u64, 0), (h as u64 * qn as u64 * len as u64, 0)],
+                    &[(h as u64 * hstride + q0 as u64 * hd as u64, 0), (seg + h as u64 * hstride, 0), (h as u64 * sp_stride, 0)],
                     &[qn, hd, len],
                     mt,
                 ));
             }
-            steps.push(g.step(k.softmax_rows, &[scores, probs], &[heads * qn, len], heads * qn * 64));
+            // Per-head softmax: the shared row-softmax kernel only ever sees its own
+            // head's contiguous [qn,len] sub-range, so the head-to-head padding gap
+            // (needed for the matmul writes above) stays invisible to it.
+            for h in 0..heads {
+                steps.push(g.step_sliced(k.softmax_rows, &[scores, probs], &[(h as u64 * sp_stride, 0), (h as u64 * sp_stride, 0)], &[qn, len], qn * 64));
+            }
             for h in 0..heads {
                 let (mk, mt) = pick_gemm(qn as usize, hd as usize, k.matmul, k.matmul_reg2, force_naive);
                 // ctx_pack[h][q0..] = probs[h] · V[h]   (A·Bᵀ with B = vᵀ[hd,len])
                 steps.push(g.step_sliced(
                     mk,
                     &[probs, packs, ctx_pack],
-                    &[(h as u64 * qn as u64 * len as u64, 0), (2 * seg + h as u64 * hd as u64 * len as u64, 0), ((h * len + q0) as u64 * hd as u64, 0)],
+                    &[(h as u64 * sp_stride, 0), (2 * seg + h as u64 * hstride, 0), (h as u64 * hstride + q0 as u64 * hd as u64, 0)],
                     &[qn, len, hd],
                     mt,
                 ));
@@ -529,7 +544,7 @@ pub fn gemm_bidir_fwd(
             k.head_unpack,
             &[ctx_pack, ctx],
             &[(0, 0), (row0 as u64 * d_out as u64, 0)],
-            &[len, heads, hd, d_out, 0],
+            &[len, heads, hd, d_out, 0, hstride as u32],
             total,
         ));
     }

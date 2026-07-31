@@ -582,20 +582,30 @@ impl Lfm {
             }
             Some((budget, probe_cap)) => {
                 let heads = cfg.n_heads as u64;
+                let hd = cfg.head_dim as u64;
                 let per_row = heads * t as u64 * 4;
                 let chunk = ((budget / per_row.max(1)) as u32).clamp(64, 4096).min(t);
-                let slab = heads * chunk as u64 * t as u64;
+                // gemm_bidir_fwd pads every per-head stride to 64 words (step_sliced's
+                // 256B offset-alignment contract), so these scratch buffers (reused as
+                // `packs`/`ctx_pack`/scores-probs) must be sized for the PADDED, not
+                // raw, per-span requirement — `n*3*d`/`n*hq`/`heads*chunk*t` have zero
+                // slack over the raw size at b=1.
+                let slab = heads * block::pad64(chunk as u64 * t as u64);
+                let pack_words = 3 * heads * block::pad64(t as u64 * hd);
+                let ctx_pack_words = heads * block::pad64(t as u64 * hd);
                 let cap = probe_cap.max(1) as u64;
+                let mut attn = attn_bufs(&st, 1);
+                attn.qkv = st((n * 3 * d).max(pack_words));
                 (
                     Regime::Chunked {
                         common: common(&st),
-                        attn: attn_bufs(&st, 1),
+                        attn,
                         conv: conv_bufs(&st),
                         res: [st(n * d), st(n * d)],
                         scores: st(slab),
                         probs: st(slab),
                         chunk,
-                        ctx_pack: st(n * hq),
+                        ctx_pack: st((n * hq).max(ctx_pack_words)),
                         probe_cap,
                         probe_idx: gpu.buffer("probe_idx", cap * 4, gpu_core::BufUsage::STORAGE | gpu_core::BufUsage::COPY_DST),
                         probe_h: st(cap * d),
