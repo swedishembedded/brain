@@ -15,6 +15,7 @@ brain-kernels.workspace = true
 brain-checkpoint.workspace = true
 brain-paramstore.workspace = true
 brain-vision.workspace = true
+brain-imaging.workspace = true
 brain-model.workspace = true
 brain-splat.workspace = true
 serde_json.workspace = true

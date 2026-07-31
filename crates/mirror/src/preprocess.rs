@@ -11,49 +11,13 @@
 //! ports Pillow's `Resample.c` arithmetic exactly (T1 gates it against a PIL
 //! golden bit-for-bit).
 
-pub const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-pub const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
-
-/// Interleaved 8-bit RGB image.
-pub struct RgbImage {
-    pub w: usize,
-    pub h: usize,
-    pub rgb: Vec<u8>,
-}
-
-/// Binary P6 PPM loader (maxval 255).
-pub fn load_ppm(path: &str) -> Result<RgbImage, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-    let mut fields = Vec::new();
-    let mut pos = 0usize;
-    // header: P6, width, height, maxval — whitespace/comment separated
-    while fields.len() < 4 && pos < bytes.len() {
-        while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        if pos < bytes.len() && bytes[pos] == b'#' {
-            while pos < bytes.len() && bytes[pos] != b'\n' {
-                pos += 1;
-            }
-            continue;
-        }
-        let start = pos;
-        while pos < bytes.len() && !bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-        }
-        fields.push(std::str::from_utf8(&bytes[start..pos]).map_err(|_| "bad header")?.to_string());
-    }
-    pos += 1; // single whitespace after maxval
-    if fields.len() != 4 || fields[0] != "P6" || fields[3] != "255" {
-        return Err(format!("{path}: need binary P6 maxval 255, got {fields:?}"));
-    }
-    let w: usize = fields[1].parse().map_err(|_| "bad width")?;
-    let h: usize = fields[2].parse().map_err(|_| "bad height")?;
-    if bytes.len() < pos + w * h * 3 {
-        return Err(format!("{path}: truncated pixel data"));
-    }
-    Ok(RgbImage { w, h, rgb: bytes[pos..pos + w * h * 3].to_vec() })
-}
+// `mirror` used to declare its own `RgbImage { w, h, rgb }` plus a second
+// hand-rolled P6 header parser (`load_ppm`). Both are gone: `imaging::Rgb8` is
+// the same struct, and callers load through `imaging::load`, which wraps the
+// workspace's ONE P6 tokenizer (`events::ppm::decode_p6`) and also accepts
+// PNG/JPEG. Imported rather than re-exported: a second name for `Rgb8` is how a
+// shared type becomes a private copy at the next edit.
+use imaging::Rgb8;
 
 /// `_calculate_resize_dims` (crop strategy): longest side → `target`, the
 /// other side scaled and rounded to a multiple of `patch`.
@@ -134,8 +98,8 @@ fn clip8(v: i32) -> u8 {
 
 /// PIL-exact bicubic resize of interleaved RGB8 (horizontal pass, then
 /// vertical, both in fixed point).
-pub fn resize_bicubic(img: &RgbImage, nw: usize, nh: usize) -> RgbImage {
-    let (w, h) = (img.w, img.h);
+pub fn resize_bicubic(img: &Rgb8, nw: usize, nh: usize) -> Rgb8 {
+    let (w, h) = (img.w as usize, img.h as usize);
     // horizontal
     let horiz: Vec<u8> = if nw != w {
         let (ksize, bounds, kk) = coeffs(w, nw);
@@ -146,7 +110,7 @@ pub fn resize_bicubic(img: &RgbImage, nw: usize, nh: usize) -> RgbImage {
                 for ch in 0..3 {
                     let mut ss = 1i32 << (PRECISION_BITS - 1);
                     for i in 0..xmax {
-                        ss += img.rgb[(y * w + xmin + i) * 3 + ch] as i32 * kk[x * ksize + i];
+                        ss += img.px[(y * w + xmin + i) * 3 + ch] as i32 * kk[x * ksize + i];
                     }
                     out[(y * nw + x) * 3 + ch] = clip8(ss);
                 }
@@ -154,7 +118,7 @@ pub fn resize_bicubic(img: &RgbImage, nw: usize, nh: usize) -> RgbImage {
         }
         out
     } else {
-        img.rgb.clone()
+        img.px.clone()
     };
     // vertical
     let vert: Vec<u8> = if nh != h {
@@ -176,27 +140,7 @@ pub fn resize_bicubic(img: &RgbImage, nw: usize, nh: usize) -> RgbImage {
     } else {
         horiz
     };
-    RgbImage { w: nw, h: nh, rgb: vert }
-}
-
-/// Full reference preprocessing of one frame: resize (crop strategy) →
-/// center-crop to ≤ target per axis → `/255` → ImageNet normalize → planar
-/// CHW f32. Returns (chw, out_w, out_h).
-pub fn preprocess(img: &RgbImage, target: usize, patch: usize) -> (Vec<f32>, usize, usize) {
-    let (nw, nh) = resize_dims(img.w, img.h, target, patch);
-    let resized = resize_bicubic(img, nw, nh);
-    let (cw, ch_) = (nw.min(target), nh.min(target));
-    let (x0, y0) = ((nw - cw) / 2, (nh - ch_) / 2);
-    let mut chw = vec![0.0f32; 3 * cw * ch_];
-    for c in 0..3 {
-        for y in 0..ch_ {
-            for x in 0..cw {
-                let v = resized.rgb[((y0 + y) * nw + x0 + x) * 3 + c] as f32 / 255.0;
-                chw[c * cw * ch_ + y * cw + x] = (v - IMAGENET_MEAN[c]) / IMAGENET_STD[c];
-            }
-        }
-    }
-    (chw, cw, ch_)
+    Rgb8 { w: nw as u32, h: nh as u32, px: vert }
 }
 
 // ---- torch-semantics float bicubic (pos-embed interpolation) ----

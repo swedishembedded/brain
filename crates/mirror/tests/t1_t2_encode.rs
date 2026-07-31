@@ -11,9 +11,10 @@
 //! T2 needs the real 5 GB checkpoint → gated on MIRROR_CKPT.
 
 use mirror::config::MirrorConfig;
-use mirror::preprocess::{resize_bicubic, resize_dims, RgbImage, IMAGENET_MEAN, IMAGENET_STD};
+use imaging::{Rgb8, IMAGENET_MEAN, IMAGENET_STD};
+use mirror::preprocess::{resize_bicubic, resize_dims};
 
-fn synth_image(w: usize, h: usize) -> RgbImage {
+fn synth_image(w: usize, h: usize) -> Rgb8 {
     let mut rgb = vec![0u8; w * h * 3];
     for y in 0..h {
         for x in 0..w {
@@ -37,7 +38,7 @@ fn synth_image(w: usize, h: usize) -> RgbImage {
             }
         }
     }
-    RgbImage { w, h, rgb }
+    Rgb8 { w: w as u32, h: h as u32, px: rgb }
 }
 
 struct Sample {
@@ -106,7 +107,7 @@ fn t1_pil_bicubic_exact() {
     let resized = resize_bicubic(&img, nw, nh);
 
     // resized u8: golden sampled from HWC u8 — BIT-exact (tol < 1)
-    let got: Vec<f32> = resized.rgb.iter().map(|&b| b as f32).collect();
+    let got: Vec<f32> = resized.px.iter().map(|&b| b as f32).collect();
     check_sample("t1_resized_u8", &got, &get_sample(&m, "t1_resized_u8"), 0.5);
 
     // normalized CHW
@@ -114,7 +115,7 @@ fn t1_pil_bicubic_exact() {
     for c in 0..3 {
         for y in 0..nh {
             for x in 0..nw {
-                let v = resized.rgb[(y * nw + x) * 3 + c] as f32 / 255.0;
+                let v = resized.px[(y * nw + x) * 3 + c] as f32 / 255.0;
                 chw[c * nw * nh + y * nw + x] = (v - IMAGENET_MEAN[c]) / IMAGENET_STD[c];
             }
         }
@@ -133,14 +134,14 @@ fn t2_dinov2_patch_tokens() {
     let m = meta();
     // reference: pil.crop((41, 0, 441, 400)) → 400x400 → resize 518x518
     let img = synth_image(600, 400);
-    let mut crop = RgbImage { w: 400, h: 400, rgb: vec![0; 400 * 400 * 3] };
+    let mut crop = Rgb8 { w: 400, h: 400, px: vec![0; 400 * 400 * 3] };
     for y in 0..400 {
         let src = (y * 600 + 41) * 3;
         let dst = y * 400 * 3;
-        crop.rgb[dst..dst + 1200].copy_from_slice(&img.rgb[src..src + 1200]);
+        crop.px[dst..dst + 1200].copy_from_slice(&img.px[src..src + 1200]);
     }
     let sq = resize_bicubic(&crop, 518, 518);
-    let got_u8: Vec<f32> = sq.rgb.iter().map(|&b| b as f32).collect();
+    let got_u8: Vec<f32> = sq.px.iter().map(|&b| b as f32).collect();
     check_sample("t2_input_u8", &got_u8, &get_sample(&m, "t2_input_u8"), 0.5);
 
     // model.forward takes RAW [0,1] CHW (it normalizes internally).
@@ -148,7 +149,7 @@ fn t2_dinov2_patch_tokens() {
     for c in 0..3 {
         for y in 0..518 {
             for x in 0..518 {
-                chw[c * 518 * 518 + y * 518 + x] = sq.rgb[(y * 518 + x) * 3 + c] as f32 / 255.0;
+                chw[c * 518 * 518 + y * 518 + x] = sq.px[(y * 518 + x) * 3 + c] as f32 / 255.0;
             }
         }
     }
@@ -195,21 +196,21 @@ fn t2_dinov2_patch_tokens() {
     // ---- T7: rectangular input (392x518, grid 28x37) — pos-embed
     // interpolation + rect trunk/RoPE/DPT, reusing the loaded weights ----
     if m.get("t7_tap0").is_some() {
-        let mut crop = RgbImage { w: 400, h: 400, rgb: vec![0; 400 * 400 * 3] };
+        let mut crop = Rgb8 { w: 400, h: 400, px: vec![0; 400 * 400 * 3] };
         for y in 0..400 {
             let src = (y * 600 + 100) * 3;
-            crop.rgb[y * 400 * 3..y * 400 * 3 + 1200]
-                .copy_from_slice(&img.rgb[src..src + 1200]);
+            crop.px[y * 400 * 3..y * 400 * 3 + 1200]
+                .copy_from_slice(&img.px[src..src + 1200]);
         }
         let rect = resize_bicubic(&crop, 392, 518);
-        let got_u8: Vec<f32> = rect.rgb.iter().map(|&b| b as f32).collect();
+        let got_u8: Vec<f32> = rect.px.iter().map(|&b| b as f32).collect();
         check_sample("t7_input_u8", &got_u8, &get_sample(&m, "t7_input_u8"), 0.5);
         let (w2, h2) = (392usize, 518usize);
         let mut chw2 = vec![0.0f32; 3 * w2 * h2];
         for c in 0..3 {
             for y in 0..h2 {
                 for x in 0..w2 {
-                    chw2[c * w2 * h2 + y * w2 + x] = rect.rgb[(y * w2 + x) * 3 + c] as f32 / 255.0;
+                    chw2[c * w2 * h2 + y * w2 + x] = rect.px[(y * w2 + x) * 3 + c] as f32 / 255.0;
                 }
             }
         }

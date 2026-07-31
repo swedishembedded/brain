@@ -21,7 +21,7 @@ use paramstore::{ParamStore, Role};
 use crate::cam::{record_cam_head, CamBufs, CamKernels, CamWeights};
 use crate::config::MirrorConfig;
 use crate::dpt::{DptCtx, DptKernels, DptScratch, GsBranch, HeadWeights};
-use crate::preprocess::{IMAGENET_MEAN, IMAGENET_STD};
+use imaging::{IMAGENET_MEAN, IMAGENET_STD};
 
 // ---- kernel indices (order matches PIPELINES) ----
 const K_LAYERNORM: usize = 0;
