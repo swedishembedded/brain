@@ -520,10 +520,6 @@ impl Engine {
         self.cfg.vocab as usize
     }
 
-    fn w(&self, name: &str) -> &DeviceBuffer {
-        self.ps.w(name)
-    }
-
     /// Append one slot per sequence and gather the batched-forward metadata.
     fn append_meta(&mut self, tables: &mut [&mut BlockTable]) -> (u32, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
         let mbt = self.max_blocks_per_seq as usize;
