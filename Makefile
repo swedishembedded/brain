@@ -164,6 +164,23 @@ test/full: test test/doc test/slow
 test/times: release
 	scripts/test-times.sh --top 15
 
+# End-to-end: drive the real `claude` CLI against a local `brain serve --anthropic`,
+# proving brain works as a Claude Code backend. Skips cleanly unless `claude` is
+# installed AND a served qwen model is configured:
+#   BRAIN_QWEN_WEIGHTS=... BRAIN_QWEN_TOKENIZER=... make test/e2e/claude-code
+# (import one first: brain qwen import --hf <hf_qwen_dir> --out qwen.safetensors)
+test/e2e/claude-code: release
+	bats tests/e2e/claude_code.bats
+
+# End-to-end: HTTP API conformance over a real socket against a single `brain serve`
+# backed by the built-in deterministic mock model (BRAIN_MOCK=1) — no weights, no GPU,
+# no `claude`. Validates every provider dialect (OpenAI/Anthropic/OpenRouter) against
+# the vendored OpenAPI specs. Fast + deterministic. Needs only a debug/release brain
+# binary + jq (+ optional Python jsonschema for full schema validation).
+#   make test/e2e/api-conformance   (or: BRAIN_BIN=./target/debug/brain bats tests/e2e/api_conformance.bats)
+test/e2e/api-conformance: build
+	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/api_conformance.bats
+
 # Install the Python tooling (OpenVINO/NPU runtime, torch + transformers for the
 # benchmark reference rows, etc.) into the current environment. The Rust engine
 # needs none of these — this is for tools/ and the `--device npu` runtime.

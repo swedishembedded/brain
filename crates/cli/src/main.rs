@@ -36,6 +36,7 @@ mod resident_forecast;
 mod resident_tts;
 mod resident_asr;
 mod resident_flux2;
+mod resident_mock;
 mod caps_cli;
 mod imageops;
 mod run_cli;

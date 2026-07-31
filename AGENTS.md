@@ -694,14 +694,26 @@ per-scenario table and the findings so far.
      this bullet in sync.
   A model that trains and passes parity but cannot be discovered, scheduled, batched,
   and driven over D-Bus is **incomplete**.
-- **Every change to an API surface triggers a full API security audit.** Any change
-  to `crates/apiserve` (the HTTP providers) OR `crates/dbus` (the D-Bus surface) —
-  a route, handler, auth path, error shape, admission policy, or exposed method —
-  requires auditing the **whole** API against **`docs/api-security-audit.md`** (authn/
-  authz, input/DoS bounds, admission/backpressure, cancel-on-disconnect, SSRF/egress,
-  error hygiene, transport), not just the changed handler. Run the pass with the
-  `security-review` skill; fix findings before the change is done. These surfaces are
-  internet-reachable when bound, so all request input is hostile.
+- **The API surface must stay WATERTIGHT — every change triggers a full security
+  audit AND is covered by automated security tests.** Any change to `crates/apiserve`
+  (the HTTP providers) OR `crates/dbus` (the D-Bus surface) — a route, handler, auth
+  path, error shape, admission policy, or exposed method — is **not done** until you
+  have BOTH:
+  1. **Audited the WHOLE API** (not just the changed handler) against
+     **`docs/api-security-audit.md`** — authn/authz (key required on every route incl.
+     the fallback, constant-time compare, no key in any log/response/error), input/DoS
+     bounds (body-size 413, JSON depth, param/array bounds → 400), admission/backpressure
+     (429/503, cancel-on-disconnect frees compute), SSRF/egress, error hygiene (no
+     internal detail/paths/panic text in bodies), transport (localhost default). Run the
+     pass with the **`security-review`** skill and fix every finding.
+  2. **Encoded those requirements as automated tests** so a regression fails CI, not
+     just a future audit: the socket-level **`tests/e2e/api_conformance.bats`** (via the
+     `BRAIN_MOCK` model — auth matrix incl. no-enumeration, no-key-leak, 413, error
+     hygiene, input-bound 400s, admission 429) AND the in-process
+     **`crates/apiserve/tests/api.rs`**. Adding a route/field means adding its security
+     assertions here.
+  These surfaces are internet-reachable when bound, so **all request input is hostile**;
+  never trust the client. Do not consider an API change complete without both.
 - **API specs: at most two sources of truth.** brain's code (what it implements) and
   the **vendored upstream OpenAPI specs** (`crates/apiserve/tests/specs/`, a cached
   copy of what providers support) — validated against each other by the jsonschema

@@ -98,6 +98,13 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, r
     if let Some(a) = crate::resident_asr::QwenAsrResident::from_env() {
         models.push(Arc::new(a));
     }
+    // Deterministic mock model (BRAIN_MOCK): a real ResidentModel — no weights, no
+    // GPU — registered as `mock` so the HTTP conformance harness can validate the
+    // whole API surface through the true serving path (placement → activate →
+    // run_batch). Advertises generate (chat) + embed + text2image.
+    if let Some(m) = crate::resident_mock::MockResident::from_env() {
+        models.push(Arc::new(m));
+    }
     // Stateless helpers (no weights) — always available. `demo` is the worked
     // example every transport smoke (busctl_smoke.sh) exercises.
     models.push(Arc::new(ProviderResident::stateless(Arc::new(crate::caps_cli::DemoModel))));
