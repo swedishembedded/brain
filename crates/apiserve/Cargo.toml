@@ -1,0 +1,32 @@
+[package]
+name = "brain-apiserve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Provider-shaped HTTP surfaces (Anthropic Messages, OpenAI, OpenRouter) that let brain act as a backend for external agents. Stands on residency::Executor: auth, /models, and per-provider chat/embeddings/image endpoints. A thin front-end over the shared executor — no model code here."
+
+[lib]
+name = "apiserve"
+path = "src/lib.rs"
+
+[dependencies]
+brain-residency.workspace = true
+brain-capability.workspace = true
+brain-events.workspace = true
+brain-checkpoint.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+uuid.workspace = true
+rand.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+jsonschema.workspace = true

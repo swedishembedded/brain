@@ -1,0 +1,63 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! The shared handler state: the executor every request submits to, the guarding
+//! key, this surface's provider dialect, and the in-flight job registry.
+//!
+//! Cloned per request by axum (all fields are cheap `Arc`/`Copy`/`String` clones).
+//! The [`JobRegistry`] mirrors `crates/dbus`: armed [`capability::CancelToken`]s
+//! keyed by a request id, so a future `cancel`/client-disconnect path (P5+) can
+//! abort a running generation. It is unused by the P4 skeletons but wired now so
+//! the chat/stream handlers can register jobs without a state change.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use capability::CancelToken;
+use residency::Executor;
+use uuid::Uuid;
+
+use crate::surface::Provider;
+
+/// Armed cancel tokens for in-flight requests, keyed by a per-request UUID. An
+/// entry lives from submission until the reply fires (copy of the dbus pattern).
+pub type JobRegistry = Arc<Mutex<HashMap<Uuid, CancelToken>>>;
+
+/// Everything a request handler needs. Clone is cheap.
+#[derive(Clone)]
+pub struct AppState {
+    pub exec: Executor,
+    pub jobs: JobRegistry,
+    pub key: String,
+    pub provider: Provider,
+}
+
+impl AppState {
+    pub fn new(exec: Executor, key: impl Into<String>, provider: Provider) -> AppState {
+        AppState { exec, jobs: Arc::new(Mutex::new(HashMap::new())), key: key.into(), provider }
+    }
+
+    /// Arm and register a fresh cancel token under a new request id. The handler
+    /// puts the token in its [`capability::Invocation`] and removes the entry
+    /// (via [`AppState::finish`]) when the reply fires.
+    pub fn register(&self) -> (Uuid, CancelToken) {
+        let id = Uuid::new_v4();
+        let token = CancelToken::armed();
+        if let Ok(mut m) = self.jobs.lock() {
+            m.insert(id, token.clone());
+        }
+        (id, token)
+    }
+
+    /// Drop a finished request's cancel token.
+    pub fn finish(&self, id: &Uuid) {
+        if let Ok(mut m) = self.jobs.lock() {
+            m.remove(id);
+        }
+    }
+
+    /// Requests currently in flight.
+    pub fn active(&self) -> usize {
+        self.jobs.lock().map(|m| m.len()).unwrap_or(0)
+    }
+}

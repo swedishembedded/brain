@@ -76,6 +76,7 @@ default-members = [
     "crates/cli",
     "crates/dbus",
     "crates/residency",
+    "crates/apiserve",
     "crates/web",
 ]
 
@@ -128,6 +129,7 @@ brain-gradcheck = { path = "crates/gradcheck" }
 brain-capability = { path = "crates/capability" }
 brain-residency = { path = "crates/residency" }
 brain-dbus = { path = "crates/dbus" }
+brain-apiserve = { path = "crates/apiserve" }
 brain-events = { path = "crates/events" }
 brain-hfsm = { path = "crates/hfsm" }
 brain-wm-core = { path = "crates/wm-core" }
@@ -175,6 +177,21 @@ prost = "0.14"
 # run time (not linked at build), so the build stays green without OpenVINO
 # installed; `--device npu` works with no special rebuild.
 openvino = { version = "0.11", default-features = false, features = ["runtime-linking"] }
+
+# HTTP provider-API surface (crates/apiserve): axum/tower/tokio stack. Confined to
+# that crate — the core compute graph never links these.
+axum = { version = "0.7" }
+tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-stream = "0.3"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+bytes = "1"
+anyhow = "1"
+jsonschema = "0.49"
 
 [profile.release]
 opt-level = 3
