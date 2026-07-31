@@ -191,6 +191,9 @@ impl Chronos2Session {
     pub fn n_out(&self) -> usize {
         0
     }
+    pub fn head_out(&self) -> usize {
+        0
+    }
     pub fn run(&mut self, _emb: &[f32], _kmask: &[f32]) -> Result<Vec<f32>, NpuError> {
         unsupported()
     }
@@ -209,6 +212,9 @@ impl FincastSession {
         ""
     }
     pub fn seq_len(&self) -> usize {
+        0
+    }
+    pub fn head_out(&self) -> usize {
         0
     }
     pub fn run(&mut self, _emb: &[f32], _amask: &[f32]) -> Result<Vec<f32>, NpuError> {

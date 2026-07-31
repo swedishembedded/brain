@@ -106,7 +106,7 @@ mod tests {
         use std::collections::HashMap;
 
         let cfg = KronosConfig::tiny();
-        let (d, t) = (cfg.d_model, 8usize);
+        let t = 8usize;
         let (vs1, vs2) = (cfg.s1_vocab(), cfg.s2_vocab());
         let mut seed = 0x0DE_u64;
         let mut rnd = |n: usize| -> Vec<f32> {

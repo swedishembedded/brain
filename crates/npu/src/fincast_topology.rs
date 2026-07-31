@@ -179,11 +179,6 @@ impl Topo<'_> {
         self.node("Div", &[a, b], &o);
         o
     }
-    fn sub_t(&mut self, a: &str, b: &str) -> String {
-        let o = self.tmp("sub");
-        self.node("Sub", &[a, b], &o);
-        o
-    }
     fn reduce_sum(&mut self, x: &str, axis: i64) -> String {
         // opset-13 ReduceSum takes `axes` as an INPUT tensor (not an attribute, as
         // ReduceMean still does until opset 18) — pass it as an initializer.

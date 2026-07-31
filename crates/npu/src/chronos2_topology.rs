@@ -157,12 +157,6 @@ impl<'a> std::ops::DerefMut for Topo<'a> {
 }
 
 impl<'a> Topo<'a> {
-    fn sub_t(&mut self, a: &str, b: &str) -> String {
-        let o = self.tmp("sub");
-        self.node("Sub", &[a, b], &o);
-        o
-    }
-
     /// Half-split (NeoX) RoPE on `[1,S,heads,hd]`: pair `(j, j+half)` rotated by
     /// `cos/sin` (broadcast over heads). `first' = first*cos - second*sin`,
     /// `second' = second*cos + first*sin`.

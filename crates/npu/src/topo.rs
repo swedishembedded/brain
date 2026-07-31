@@ -99,6 +99,13 @@ impl<'a> TopoBase<'a> {
         o
     }
 
+    /// Tensor-tensor `Sub`.
+    pub fn sub_t(&mut self, a: &str, b: &str) -> String {
+        let o = self.tmp("sub");
+        self.node("Sub", &[a, b], &o);
+        o
+    }
+
     pub fn matmul(&mut self, a: &str, b: &str) -> String {
         let o = self.tmp("mm");
         self.node("MatMul", &[a, b], &o);

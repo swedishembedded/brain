@@ -174,7 +174,6 @@ fn glm_onnx_int8_runs() {
     use npu::openvino::{DecoderSession, NpuConfig, NpuDevice};
 
     let cfg = GlmConfig::tiny();
-    let vocab = cfg.vocab as usize;
     let init = glm::init_weights(&cfg, 7);
     let model = Glm::new(cfg.clone(), 1, cfg.block_size, &init);
     let ids: Vec<u32> = (0..6).map(|i| (i * 5 + 1) % cfg.vocab).collect();

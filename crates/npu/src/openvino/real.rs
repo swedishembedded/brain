@@ -787,6 +787,10 @@ impl Chronos2Session {
     pub fn n_out(&self) -> usize {
         self.n_out
     }
+    /// Width of one head row, i.e. `run`'s output is `n_out * head_out` f32.
+    pub fn head_out(&self) -> usize {
+        self.head_out
+    }
 
     /// Run the core: `emb` is `S*D` f32, `kmask` is `S` f32 (additive per key).
     /// Returns the raw head `[n_out*head_out]`.
