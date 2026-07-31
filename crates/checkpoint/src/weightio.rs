@@ -251,23 +251,32 @@ fn inval(e: String) -> io::Error {
 
 // ---- incremental safetensors writer ----
 
-/// One planned tensor: name + expected element count (all writes are F32).
+/// One planned tensor: name, expected element count, and its absolute byte
+/// offset in the output file (all writes are F32).
 struct Planned {
     name: String,
     numel: usize,
+    offset: u64,
 }
 
 /// An incremental F32 safetensors writer. Offsets are planned up front from
 /// (name, shape) — sizes only, no data — the header is written immediately, and
-/// each tensor's little-endian f32 bytes are appended as the caller yields them
-/// in plan order. Never holds more than the caller's current tensor in RAM. The
-/// output format matches [`crate::st`] (`brain.config`, card via `to_metadata`).
+/// each tensor's little-endian f32 bytes are [`write`](Self::write)able **in
+/// any order** (each exactly once) by seeking to its planned offset — a
+/// converter that streams through its SOURCE in the source's own natural
+/// order (rather than the output plan's order) doesn't need to buffer/reorder
+/// anything to satisfy this writer. Never holds more than the caller's current
+/// tensor in RAM. The output format matches [`crate::st`] (`brain.config`,
+/// card via `to_metadata`).
 pub struct StWriter {
     file: BufWriter<File>,
     tmp: String,
     path: String,
     plan: Vec<Planned>,
-    next: usize,
+    index_by_name: HashMap<String, usize>,
+    written: Vec<bool>,
+    written_count: usize,
+    blob_start: u64,
 }
 
 impl StWriter {
@@ -295,8 +304,8 @@ impl StWriter {
                     "data_offsets": [off, off + nbytes],
                 }),
             );
+            planned.push(Planned { name: name.clone(), numel: numel as usize, offset: off });
             off += nbytes;
-            planned.push(Planned { name: name.clone(), numel: numel as usize });
         }
 
         let mut meta = serde_json::Map::new();
@@ -318,33 +327,53 @@ impl StWriter {
         let mut file = BufWriter::new(File::create(&tmp)?);
         file.write_all(&(hbytes.len() as u64).to_le_bytes())?;
         file.write_all(&hbytes)?;
+        let blob_start = 8 + hbytes.len() as u64;
 
-        Ok(StWriter { file, tmp, path: path.to_string(), plan: planned, next: 0 })
+        let index_by_name: HashMap<String, usize> = planned.iter().enumerate().map(|(i, p)| (p.name.clone(), i)).collect();
+        let written = vec![false; planned.len()];
+        Ok(StWriter { file, tmp, path: path.to_string(), plan: planned, index_by_name, written, written_count: 0, blob_start })
     }
 
-    /// Append the next planned tensor's data. Must be called in plan order with
-    /// the matching name and element count.
+    /// Write one planned tensor's data. May be called in any order (each
+    /// planned name exactly once) — seeks to that tensor's pre-planned offset,
+    /// so a caller streaming through its source in the source's own order
+    /// never needs to buffer or reorder its output.
     pub fn write(&mut self, name: &str, data: &[f32]) -> io::Result<()> {
-        let p = self.plan.get(self.next).ok_or_else(|| inval("st: extra tensor after plan".into()))?;
-        if p.name != name {
-            return Err(inval(format!("st: expected '{}', got '{name}'", p.name)));
+        use io::{Seek, SeekFrom};
+        let i = *self.index_by_name.get(name).ok_or_else(|| inval(format!("st: '{name}' is not in the plan")))?;
+        if self.written[i] {
+            return Err(inval(format!("st: '{name}' written twice")));
         }
+        let p = &self.plan[i];
         if p.numel != data.len() {
             return Err(inval(format!("st: '{name}' expects {} elems, got {}", p.numel, data.len())));
         }
+        self.file.seek(SeekFrom::Start(self.blob_start + p.offset))?;
         // Stream the f32 little-endian bytes without materializing the whole blob.
         for v in data {
             self.file.write_all(&v.to_le_bytes())?;
         }
-        self.next += 1;
+        self.written[i] = true;
+        self.written_count += 1;
         Ok(())
     }
 
     /// Flush and atomically rename tmp → path. Errors if the plan was not fully
-    /// written (the file would be truncated).
+    /// written (the file would have holes).
     pub fn finish(mut self) -> io::Result<()> {
-        if self.next != self.plan.len() {
-            return Err(inval(format!("st: wrote {}/{} planned tensors", self.next, self.plan.len())));
+        if self.written_count != self.plan.len() {
+            let missing: Vec<&str> = self
+                .plan
+                .iter()
+                .zip(&self.written)
+                .filter(|(_, &w)| !w)
+                .map(|(p, _)| p.name.as_str())
+                .collect();
+            return Err(inval(format!(
+                "st: wrote {}/{} planned tensors (missing: {missing:?})",
+                self.written_count,
+                self.plan.len()
+            )));
         }
         self.file.flush()?;
         drop(self.file);
@@ -455,16 +484,47 @@ mod tests {
         let p = scratch("order");
         let plan = vec![("a".to_string(), vec![1u64]), ("b".to_string(), vec![1u64])];
         let mut w = StWriter::create(&p, &plan, &Value::Null, None).unwrap();
-        assert!(w.write("b", &[1.0]).is_err()); // wrong name
+        assert!(w.write("c", &[1.0]).is_err()); // not in the plan
         assert!(w.write("a", &[1.0, 2.0]).is_err()); // wrong count
         w.write("a", &[1.0]).unwrap();
-        // finish before writing 'b' must fail (would truncate the file).
+        assert!(w.write("a", &[9.0]).is_err()); // written twice
+        // finish before writing 'b' must fail (would leave a hole).
         let mut w2 = StWriter::create(&p, &plan, &Value::Null, None).unwrap();
         w2.write("a", &[1.0]).unwrap();
-        assert!(w2.finish().is_err());
+        let err = format!("{}", w2.finish().unwrap_err());
+        assert!(err.contains('b'), "error should name the missing tensor: {err}");
         w.write("b", &[2.0]).unwrap();
         w.finish().unwrap();
         std::fs::remove_file(&p).ok();
+    }
+
+    /// A caller may write planned tensors in ANY order (e.g. streaming through
+    /// its source in the source's own natural order, not the output plan's) --
+    /// the result is byte-identical to writing in plan order.
+    #[test]
+    fn stwriter_out_of_order_write_matches_in_order() {
+        let plan = vec![("a".to_string(), vec![2u64]), ("b".to_string(), vec![3u64]), ("c".to_string(), vec![1u64])];
+        let cfg = serde_json::json!({"k": "v"});
+
+        let p1 = scratch("order-fwd");
+        let mut w1 = StWriter::create(&p1, &plan, &cfg, None).unwrap();
+        w1.write("a", &[1.0, 2.0]).unwrap();
+        w1.write("b", &[3.0, 4.0, 5.0]).unwrap();
+        w1.write("c", &[6.0]).unwrap();
+        w1.finish().unwrap();
+
+        let p2 = scratch("order-rev");
+        let mut w2 = StWriter::create(&p2, &plan, &cfg, None).unwrap();
+        w2.write("c", &[6.0]).unwrap();
+        w2.write("a", &[1.0, 2.0]).unwrap();
+        w2.write("b", &[3.0, 4.0, 5.0]).unwrap();
+        w2.finish().unwrap();
+
+        let b1 = std::fs::read(&p1).unwrap();
+        let b2 = std::fs::read(&p2).unwrap();
+        assert_eq!(b1, b2, "write order must not affect the output bytes");
+        std::fs::remove_file(&p1).ok();
+        std::fs::remove_file(&p2).ok();
     }
 
     /// Streaming `for_each` equals eager `load_safetensors` for an F16 file.
