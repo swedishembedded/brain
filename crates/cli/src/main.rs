@@ -15,6 +15,8 @@
 mod data_cli;
 mod devices_cli;
 mod federated_cli;
+mod fetch;
+mod fetch_cli;
 mod flops_cli;
 mod forecast_cli;
 mod args;
@@ -586,6 +588,7 @@ fn main() {
     match argv.get(1).map(|s| s.as_str()) {
         Some("data") => data_cli::run_data(&argv[2..]),
         Some("devices") => devices_cli::run_devices(&argv[2..]),
+        Some("fetch") => fetch_cli::run_fetch(&argv[2..]),
         Some("gpt") => gpt_cli::run_gpt(&argv[2..]),
         Some("qwen") => qwen_cli::run_qwen(&argv[2..]),
         Some("glm") => glm_cli::run_glm(&argv[2..]),

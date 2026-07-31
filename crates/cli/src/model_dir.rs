@@ -168,10 +168,24 @@ fn register(weights: &Path, card: &Option<ModelCard>, dir: &Path, seen: &mut BTr
     }
 }
 
-/// Construct the resident matching `card.family`, or log + `None` for an unknown
-/// / not-yet-dispatchable family.
+/// GGUF cards carry `general.architecture` verbatim as `family` (the KV's own
+/// reported name, e.g. llama.cpp's `"qwen3"`) — brain's own family names
+/// (`crate::resident_llm`) differ, so alias the ones brain's implementation
+/// actually matches. brain's `qwen` crate targets the Qwen3 architecture
+/// specifically (QK-norm + GQA); a plain `"qwen2"` GGUF is a different
+/// architecture and stays unaliased rather than silently mis-served.
+fn brain_family(reported: &str) -> &str {
+    match reported {
+        "qwen3" => "qwen",
+        other => other,
+    }
+}
+
+/// Construct the resident matching `card.family` (normalized via
+/// [`brain_family`]), or log + `None` for an unknown / not-yet-dispatchable
+/// family.
 fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>) -> Option<Arc<dyn ResidentModel>> {
-    match card.family.as_str() {
+    match brain_family(&card.family) {
         "gpt" => Some(Arc::new(crate::resident_llm::GptResident::from_card(weights, card, tokenizer))),
         "glm" => Some(Arc::new(crate::resident_llm::GlmResident::from_card(weights, card, tokenizer))),
         "qwen" => Some(Arc::new(crate::resident_llm::QwenResident::from_card(weights, card, tokenizer))),
@@ -275,7 +289,10 @@ mod tests {
         let mut kv: Vec<u8> = Vec::new();
         put_str(&mut kv, "general.architecture");
         kv.extend(8u32.to_le_bytes());
-        put_str(&mut kv, "qwen");
+        // The real value llama.cpp writes for Qwen3 (verified against an
+        // actual downloaded Qwen3-0.6B-GGUF) -- brain's own family name is
+        // "qwen"; see `brain_family`'s alias.
+        put_str(&mut kv, "qwen3");
         put_str(&mut kv, "general.name");
         kv.extend(8u32.to_le_bytes());
         put_str(&mut kv, name);
@@ -346,8 +363,16 @@ mod tests {
     }
 
     #[test]
+    fn qwen3_gguf_architecture_aliases_to_the_qwen_family() {
+        assert_eq!(brain_family("qwen3"), "qwen");
+        assert_eq!(brain_family("qwen"), "qwen");
+        assert_eq!(brain_family("llama"), "llama"); // unaliased families pass through
+    }
+
+    #[test]
     fn gguf_qwen_with_embedded_tokenizer_registers_chat_capable() {
-        // A Qwen GGUF carrying its own gpt2 tokenizer registers with NO sibling
+        // A Qwen3 GGUF (general.architecture = "qwen3", llama.cpp's own naming)
+        // carrying its own gpt2 tokenizer registers with NO sibling
         // tokenizer.json, and advertises the streaming chat `generate` action.
         let dir = tmp_dir("ggufqwen");
         write_gguf_qwen(&dir, "qwen3.gguf", "toy-qwen-gguf");
