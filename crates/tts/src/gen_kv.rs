@@ -89,17 +89,9 @@ pub struct CpuTalker {
 
 pub(crate) const EPS: f32 = 1e-6; // matches the WGSL rmsnorm kernel (hardcoded)
 
-#[inline]
-
-/// `out[o] = Σ_k w[o*in + k] * x[k]` — `y = x·Wᵀ` with `W:[out,in]` row-major.
-///
-/// The dominant cost of the cached Talker decode (7 projections × n_layers per
-/// frame). Output rows are independent dot products, so they fan out across all
-/// cores with rayon; the threshold keeps tiny projections on one thread to avoid
-/// scheduling overhead.
-
-/// `Σ row[k]·x[k]` — the inner dot of [`matvec`] and the per-step attention. Uses
-/// AVX2+FMA when the CPU supports it (8 f32 lanes/iter), else a scalar fallback.
+/// `Σ row[k]·x[k]` — the inner dot of `model::hostmath::matvec` and the per-step
+/// attention. Uses AVX2+FMA when the CPU supports it (8 f32 lanes/iter), else a
+/// scalar fallback.
 /// The 8-lane partial sums reorder the reduction, so results differ from the
 /// strictly-sequential scalar sum only in the last ~1 ULP — well inside the
 /// engine parity tolerances, and the KV-cache exactness tests use one impl for

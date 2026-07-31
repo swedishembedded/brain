@@ -475,7 +475,7 @@ impl TalkerGen {
             let st = g.step_buf(kind, &ub, bufs, threads);
             (st, ub)
         };
-        let mut add_pos = |s: &mut Vec<Step>, pus: &mut Vec<(DeviceBuffer, PosUniform)>, pair: (Step, DeviceBuffer), pu: PosUniform| {
+        let add_pos = |s: &mut Vec<Step>, pus: &mut Vec<(DeviceBuffer, PosUniform)>, pair: (Step, DeviceBuffer), pu: PosUniform| {
             s.push(pair.0);
             pus.push((pair.1, pu));
         };
