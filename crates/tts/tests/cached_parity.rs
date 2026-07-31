@@ -38,8 +38,8 @@ fn maxabs(a: &[f32], b: &[f32]) -> f32 {
 
 fn ready() -> bool {
         let CKPT = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
-        let TALKER = repo_path("out/tts/talker.weights");
-        let MTP = repo_path("out/tts/mtp.weights");
+        let TALKER = repo_path("out/tts/talker.safetensors");
+        let MTP = repo_path("out/tts/mtp.safetensors");
     !std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
         && std::path::Path::new(&TALKER).exists()
         && std::path::Path::new(&MTP).exists()
@@ -49,9 +49,9 @@ fn ready() -> bool {
 #[test]
 fn cached_matches_cachefree() {
         let CKPT = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
-        let TALKER = repo_path("out/tts/talker.weights");
-        let MTP = repo_path("out/tts/mtp.weights");
-        let SPEAKER = repo_path("out/tts/speaker.weights");
+        let TALKER = repo_path("out/tts/talker.safetensors");
+        let MTP = repo_path("out/tts/mtp.safetensors");
+        let SPEAKER = repo_path("out/tts/speaker.safetensors");
         let REF_WAV = testdata("tts/voice-clone-example-voice.wav");
     if !ready() {
         eprintln!("skip: weights/checkpoint not present (or MOE_SKIP_GPU_TESTS set)");
@@ -182,11 +182,11 @@ fn rms(x: &[f32]) -> f32 {
 #[test]
 fn cached_clone_audio_quality() {
         let CKPT = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
-        let TALKER = repo_path("out/tts/talker.weights");
-        let MTP = repo_path("out/tts/mtp.weights");
-        let SPEAKER = repo_path("out/tts/speaker.weights");
+        let TALKER = repo_path("out/tts/talker.safetensors");
+        let MTP = repo_path("out/tts/mtp.safetensors");
+        let SPEAKER = repo_path("out/tts/speaker.safetensors");
         let REF_WAV = testdata("tts/voice-clone-example-voice.wav");
-        let CODEC = repo_path("out/tts/codec.weights");
+        let CODEC = repo_path("out/tts/codec.safetensors");
         let GOLD = testdata("tts/dumps/codec_ref/codes.bin");
     if !ready() {
         eprintln!("skip: weights/checkpoint not present (or MOE_SKIP_GPU_TESTS set)");
@@ -206,7 +206,7 @@ fn cached_clone_audio_quality() {
         seed: 0,
         min_new: 2,
     };
-    // --- codec sanity: decode the PyTorch golden codes with our codec.weights ---
+    // --- codec sanity: decode the PyTorch golden codes with our codec.safetensors ---
     if std::path::Path::new(&GOLD).exists() {
         let b = std::fs::read(&GOLD).unwrap();
         let gcodes: Vec<u32> = b[8..]

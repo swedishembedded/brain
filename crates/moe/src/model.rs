@@ -39,8 +39,8 @@ fn load_weights(path: &str) -> Weights {
             "error: cannot read MoE weights '{path}': {e}\n\
              \n\
              Specify a checkpoint with --weights <file>, or train one first:\n\
-             \x20 brain train --steps 2000 --out moe.weights\n\
-             \x20 brain generate --weights moe.weights --prompt 1,2,3,4 --max-new 64\n\
+             \x20 brain train --steps 2000 --out moe.safetensors\n\
+             \x20 brain generate --weights moe.safetensors --prompt 1,2,3,4 --max-new 64\n\
              \n\
              (Run `brain help` for all commands.)"
         );
@@ -402,7 +402,7 @@ struct Args {
 
 fn parse_args() -> Args {
     let mut a = Args {
-        weights: "moe.weights".to_string(),
+        weights: "moe.safetensors".to_string(),
         prompt: vec![0, 1, 2, 3],
         max_new: 64,
         temperature: 0.8,
@@ -437,7 +437,7 @@ fn parse_args() -> Args {
 }
 
 pub fn run_eval(flags: &[String]) {
-    let mut weights_path = "moe_rs.weights".to_string();
+    let mut weights_path = "moe_rs.safetensors".to_string();
     let mut seed: u64 = 123;
     let mut samples: usize = 400;
     let mut i = 0;
@@ -506,7 +506,7 @@ pub fn run_train(flags: &[String]) {
         lr: 3e-4,
         wd: 0.1,
         seed: 0,
-        out: "moe_rs.weights".to_string(),
+        out: "moe_rs.safetensors".to_string(),
     };
     let mut i = 0;
     while i < flags.len() {

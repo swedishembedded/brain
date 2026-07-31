@@ -52,7 +52,7 @@ pub fn manifest_resident() -> Manifest {
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     let common = |a: ActionSpec| {
-        a.param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format LFM2.5-Encoder checkpoint (.weights)").required())
+        a.param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format LFM2.5-Encoder checkpoint (.safetensors)").required())
             .param(ParamSpec::new("tokenizer", ParamType::Str, "path to the checkpoint's tokenizer.json").required())
             .param(ParamSpec::new("text", ParamType::Str, "input text; falls back to the 'text' input blob for long documents"))
             .input(BlobSpec::new("text", Media::Text, "input document (used when the 'text' param is absent)"))
@@ -276,7 +276,7 @@ mod tests {
             .run(
                 MODEL,
                 "embed",
-                Invocation::new().set("weights", json!("/nonexistent/lfm.weights")).set("tokenizer", json!("t")).set("text", json!("hi")),
+                Invocation::new().set("weights", json!("/nonexistent/lfm.safetensors")).set("tokenizer", json!("t")).set("text", json!("hi")),
                 &mut |_| {},
             )
             .unwrap_err();

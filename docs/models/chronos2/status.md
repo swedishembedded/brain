@@ -117,9 +117,9 @@ Implement `impl model::Model` (buys `model::fit`, sampling, and gradcheck).
 
 ### 3. `import.rs` — DONE
 `load_hf(cfg, path)` (strict 1:1, native fp32), `config_from_dir`, `import(hf_dir,
-out)` → brain `.weights` container; `Chronos2::load(path)` reads it back.
+out)` → brain `.safetensors` container; `Chronos2::load(path)` reads it back.
 Roundtrip tested (zero weights → save → load → still forecasts the mean).
-CLI: `brain forecast import --hf <dir> --out chronos2.weights`.
+CLI: `brain forecast import --hf <dir> --out chronos2.safetensors`.
 
 ### 3b. `ForecastModel` adapter — DONE
 `Chronos2Forecaster` (src/forecaster.rs) implements `forecast::ForecastModel`:
@@ -133,11 +133,11 @@ forecasts is importing the actual checkpoint + the parity ladder below.
 
 ### 4. Parity ladder — **T0 + T5 PASS against the real `amazon/chronos-2`** ✅
 Checkpoint downloaded to `resources/time-series/checkpoints/chronos-2/`
-(model.safetensors 478 MB + config.json), imported to `chronos2.weights`.
+(model.safetensors 478 MB + config.json), imported to `chronos2.safetensors`.
 - **T0** param layout (`tests/t0_param_layout.rs`, `CHRONOS2_CKPT=<file>`): brain's
   `param_list()` matches the checkpoint's **170 tensors name-for-name and
   shape-for-shape**, no missing/extra. PASS.
-- **T5** end-to-end forward (`tests/t5_parity.rs`, `CHRONOS2_WEIGHTS=<.weights>`):
+- **T5** end-to-end forward (`tests/t5_parity.rs`, `CHRONOS2_WEIGHTS=<.safetensors>`):
   brain's `forecast_quantiles` vs a golden dump from the official
   `Chronos2Pipeline` (`tools/chronos2_dump_reference.py`) on the identical
   context → **cosine = 1.000000, pearson = 1.000000, rel_max_abs = 0.0000**.

@@ -238,7 +238,7 @@ impl Benchmark for Mqar {
             align_to_lines: true, // each window is one full sequence (NL-aligned)
             seed,
         };
-        let out = dir.join("mqar.weights");
+        let out = dir.join("mqar.safetensors");
         let (init_loss, final_loss) = lm.train_decoder(dir, block, &train_cfg, &out)?;
 
         // ---- SCORE: associative-recall on held-out (val) sequences -----------

@@ -28,7 +28,7 @@ pub const MODEL: &str = "yolo";
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     let detect = ActionSpec::new("detect", "detect objects in an image (letterbox → forward → DFL decode → NMS)")
-        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format YOLO checkpoint (.weights)").required())
+        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format YOLO checkpoint (.safetensors)").required())
         .param(ParamSpec::new("conf", ParamType::Float, "confidence threshold").default(json!(0.25)))
         .param(ParamSpec::new("iou", ParamType::Float, "NMS IoU threshold").default(json!(0.45)))
         .input(BlobSpec::new("image", Media::Image, "the image to run detection on").required())
@@ -131,7 +131,7 @@ mod tests {
         reg.register(Arc::new(YoloProvider::new()));
         let img = Blob::new(Media::Image, vec![0u8; 12]).with_meta(json!({"w":1,"h":1,"c":3}));
         let err = reg
-            .run(MODEL, "detect", Invocation::new().set("weights", json!("/nonexistent/yolo.weights")).blob("image", img), &mut |_| {})
+            .run(MODEL, "detect", Invocation::new().set("weights", json!("/nonexistent/yolo.safetensors")).blob("image", img), &mut |_| {})
             .unwrap_err();
         assert!(err.contains("not found"), "got: {err}");
     }
@@ -155,7 +155,7 @@ mod tests {
             .collect();
         let dir = std::env::temp_dir().join(format!("yolo-caps-e2e-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tiny.weights");
+        let path = dir.join("tiny.safetensors");
         checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
 
         let mut reg = Registry::new();

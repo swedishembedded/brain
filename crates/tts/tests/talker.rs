@@ -99,7 +99,7 @@ fn talker_real_import_and_forward() {
     if gpu_disabled() {
         return;
     }
-    let out = std::env::temp_dir().join("brain_talker_test.weights");
+    let out = std::env::temp_dir().join("brain_talker_test.safetensors");
     let out = out.to_str().unwrap();
     tts::import::import_talker(&dir, out).expect("talker import");
     let model = TalkerModel::load_inference(out, 1, 32);

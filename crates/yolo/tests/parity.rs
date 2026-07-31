@@ -12,8 +12,8 @@
 //! `tools/yolo_export/export_yolov8.py`:
 //!
 //! ```text
-//! YOLO_PARITY_WEIGHTS=yolov8n.brain.weights \
-//! YOLO_PARITY_ACTS=yolov8n.acts.weights \
+//! YOLO_PARITY_WEIGHTS=yolov8n.brain.safetensors \
+//! YOLO_PARITY_ACTS=yolov8n.acts.safetensors \
 //!     cargo test -p brain-yolo --test parity -- --nocapture
 //! ```
 //!
@@ -55,7 +55,7 @@ fn yolov8n_reference_parity() {
         _ => {
             eprintln!(
                 "SKIP yolov8n_reference_parity: set YOLO_PARITY_WEIGHTS to an exported \
-                 yolov8n.brain.weights (see crates/yolo/README.md). Nothing to do here."
+                 yolov8n.brain.safetensors (see crates/yolo/README.md). Nothing to do here."
             );
             return;
         }

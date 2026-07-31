@@ -17,8 +17,8 @@ fn main() {
     let dir = args.get(1).cloned().unwrap_or_else(|| "out/tts-1b7".to_string());
     let iters: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(60);
 
-    let mtp_path = format!("{dir}/mtp.weights");
-    let talker_path = format!("{dir}/talker.weights");
+    let mtp_path = format!("{dir}/mtp.safetensors");
+    let talker_path = format!("{dir}/talker.safetensors");
     eprintln!("loading MTP {mtp_path} + TalkerTables {talker_path} …");
     let mut mtp = tts::CpuMtp::load(&mtp_path);
     let tables = tts::npu_gen::TalkerTables::load(&talker_path);

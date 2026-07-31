@@ -66,7 +66,7 @@ brain flops --model qwen|gpt|lfm [--weights F] [--batch B] [--block T]
 Example — the real LFM2.5-Encoder-230M, one 512-token forward (CPU backend):
 
 ```
-$ BRAIN_DEVICE=cpu brain flops --model lfm --weights out/lfm-230m.weights --block 512 --run
+$ BRAIN_DEVICE=cpu brain flops --model lfm --weights out/lfm-230m.safetensors --block 512 --run
 ...
 matmul_reg2                    98  166.430 G        0      1.181 G
 matmul_tile                     3   68.719 G        0    408.945 M

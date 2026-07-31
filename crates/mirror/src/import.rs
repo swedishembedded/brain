@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Load the reference WorldMirror-2 `model.safetensors` into a brain init map,
-//! and convert it once into a brain `.weights` container.
+//! and convert it once into a brain `.safetensors` container.
 //!
 //! Strict 1:1 name copy (the ZipDepth precedent): `MirrorConfig::param_list`
 //! carries the checkpoint's own names, gated device-free against the committed
@@ -65,7 +65,7 @@ pub fn load(path: &str, cfg: &MirrorConfig) -> Result<HashMap<String, Vec<f32>>,
     Ok(out)
 }
 
-/// One-time conversion: reference safetensors → brain `.weights` with the
+/// One-time conversion: reference safetensors → brain `.safetensors` with the
 /// config embedded, tensors in `param_list` order. Returns the tensor count.
 pub fn convert(src: &str, out_path: &str, cfg: &MirrorConfig) -> Result<usize, String> {
     let mut map = load(src, cfg)?;
@@ -96,7 +96,7 @@ pub fn convert(src: &str, out_path: &str, cfg: &MirrorConfig) -> Result<usize, S
     Ok(tensors.len())
 }
 
-/// Load a converted `.weights` container back into an init map, verifying the
+/// Load a converted `.safetensors` container back into an init map, verifying the
 /// layout against `cfg` (same strictness as [`load`], minus dtype concerns).
 pub fn load_weights(path: &str, cfg: &MirrorConfig) -> Result<HashMap<String, Vec<f32>>, String> {
     let c = checkpoint::load(path);

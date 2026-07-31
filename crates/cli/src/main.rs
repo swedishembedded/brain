@@ -117,7 +117,7 @@ World models (playable action-conditioned video models; docs/models/world-models
   brain wm bench --model fake [--frames N]          # ms/frame + fps
 
 WorldMirror-2 (multi-view images → 3D Gaussian Splatting scene; docs/models/mirror/)
-  brain mirror import <model.safetensors|hf_dir> --out mirror.weights
+  brain mirror import <model.safetensors|hf_dir> --out mirror.safetensors
       One-time conversion of the reference HY-WorldMirror-2.0 checkpoint (strict
       1:1, every tensor verified).
   brain mirror infer --weights F --images <dir|a.ppm,b.ppm,…> [--out DIR]
@@ -163,10 +163,10 @@ SPARSE MoE
   brain eval     --weights F [--samples N]
 
 FEDERATED MoE (train experts separately, then assemble)
-  brain federated split    <base.weights> <out_dir>
+  brain federated split    <base.safetensors> <out_dir>
   brain federated verify   <dir>
-  brain federated merge     <dir> --out <full.weights>
-  brain federated assemble  <base_dir> [overlay_dir ...] --out <full.weights>
+  brain federated merge     <dir> --out <full.safetensors>
+  brain federated assemble  <base_dir> [overlay_dir ...] --out <full.safetensors>
 
 BENCHMARK SUITE (architecture evaluation)
   brain bench [<name>] [--seed S]          # run all benchmarks, or one by name
@@ -229,7 +229,7 @@ GLM-5.2 (MLA + sigmoid noaux_tc MoE)
   brain glm <train|finetune|infer|eval|import|export> ...
 
 LFM2.5-ENCODER (bidirectional conv/attention encoder, MLM head, 8k context)
-  brain lfm import    --hf <dir> --out lfm.weights
+  brain lfm import    --hf <dir> --out lfm.safetensors
   brain lfm fill-mask --weights F --tokenizer T --text \"… <|mask|> …\" [--topk K]
   brain lfm embed     --weights F --tokenizer T (--text \"…\" | --input FILE) [--seq T]
   brain lfm data      --input corpus.txt --tokenizer T --out data/lfm
@@ -261,12 +261,12 @@ OTHER
 
 EXAMPLES
   brain data gen calculator --out data/calculator --n 100000
-  brain gpt train data/calculator --out out/gpt.weights --steps 2000 --mask =
-  brain gpt eval  --weights out/gpt.weights --data data/calculator
-  brain gpt gen   --weights out/gpt.weights --data data/calculator --prompt \"12+7=\" --max-new 8
-  brain train --steps 2000 --out moe.weights
-  brain generate --weights moe.weights --prompt 1,2,3,4 --max-new 64
-  brain federated split moe.weights out/shards && brain federated verify out/shards
+  brain gpt train data/calculator --out out/gpt.safetensors --steps 2000 --mask =
+  brain gpt eval  --weights out/gpt.safetensors --data data/calculator
+  brain gpt gen   --weights out/gpt.safetensors --data data/calculator --prompt \"12+7=\" --max-new 8
+  brain train --steps 2000 --out moe.safetensors
+  brain generate --weights moe.safetensors --prompt 1,2,3,4 --max-new 64
+  brain federated split moe.safetensors out/shards && brain federated verify out/shards
   brain gradcheck
 
 Or drive everything via the Makefile:  make data/calculator train/gpt/calculator eval/gpt/calculator

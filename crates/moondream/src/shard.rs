@@ -7,7 +7,7 @@
 //! [`federated::expert_id`](https://docs.rs/brain-federated) recognizes, so a
 //! Moondream MoE checkpoint federates — `split` peels each expert into its own
 //! hash-verified shard (the router and all dense/attention/vision tensors stay in
-//! `shared.weights`), a worker trains one expert in isolation, and `assemble` folds
+//! `shared.safetensors`), a worker trains one expert in isolation, and `assemble` folds
 //! the overlay back — with **no Moondream-specific sharding code**. This module
 //! documents that weave and enumerates the shardable expert tensors for a config.
 
@@ -16,7 +16,7 @@ use crate::import::moe_layer_keys;
 
 /// All `blocks.<L>.moe.…` tensor keys across the MoE layers of `cfg` (router +
 /// per-expert `w_h`/`w_g`/`w_down`). `federated::split` routes the router into
-/// `shared.weights` and each `experts.<E>.…` tensor into that expert's shard.
+/// `shared.safetensors` and each `experts.<E>.…` tensor into that expert's shard.
 pub fn moe_tensor_keys(cfg: &MoondreamConfig) -> Vec<String> {
     (0..cfg.n_layers).filter(|&l| cfg.is_moe_layer(l)).flat_map(|l| moe_layer_keys(l, cfg.moe.num_experts)).collect()
 }
@@ -48,7 +48,7 @@ mod tests {
         let dir = std::env::temp_dir().join("brain_md_shard_test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let base = dir.join("base.weights");
+        let base = dir.join("base.safetensors");
         let base_s = base.to_str().unwrap();
 
         // A small Moondream-shaped MoE checkpoint: shared (tok/ln/router) + 2 experts
@@ -72,7 +72,7 @@ mod tests {
         let manifest = federated::split(base_s, &split_dir).unwrap();
         assert_eq!(manifest.experts, vec![0, 1]);
         federated::verify(&split_dir).unwrap();
-        let merged = dir.join("merged.weights");
+        let merged = dir.join("merged.safetensors");
         federated::merge_to_full(&split_dir, merged.to_str().unwrap()).unwrap();
 
         let orig = checkpoint::load(base_s);
@@ -87,7 +87,7 @@ mod tests {
         let overlay = dir.join("overlay1");
         let om = federated::split_filtered(base_s, &overlay, Some(&[1])).unwrap();
         assert_eq!(om.experts, vec![1]);
-        let assembled = dir.join("assembled.weights");
+        let assembled = dir.join("assembled.safetensors");
         federated::assemble(&split_dir, &[&overlay], assembled.to_str().unwrap()).unwrap();
         let asm = checkpoint::load(assembled.to_str().unwrap());
         assert!(asm.tensors.iter().any(|t| t.name == "blocks.4.moe.experts.1.w_down.weight"));

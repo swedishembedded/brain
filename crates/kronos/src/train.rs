@@ -959,7 +959,7 @@ impl KronosTrain {
         w.insert("embedding.fusion_proj.weight".into(), fp);
         w
     }
-    /// Save as a brain decoder `.weights` checkpoint (loadable by the inference
+    /// Save as a brain decoder `.safetensors` checkpoint (loadable by the inference
     /// `KronosDecoder`/`KronosForecaster`).
     pub fn save(&self, path: &str) {
         let w = self.to_reference_weights();

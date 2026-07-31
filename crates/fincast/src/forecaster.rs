@@ -49,7 +49,7 @@ impl FincastForecaster {
         FincastForecaster { model, version: "Vincent05R/FinCast".into() }
     }
 
-    /// Load from a brain `.weights` container.
+    /// Load from a brain `.safetensors` container.
     pub fn load(path: &str) -> Result<FincastForecaster, String> {
         Ok(FincastForecaster::new(Fincast::load(path)?))
     }

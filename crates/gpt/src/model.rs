@@ -387,7 +387,7 @@ struct Decode {
 }
 
 impl Gpt {
-    /// Load a model from a `.weights` checkpoint, sized for batch `b` × seq `t`.
+    /// Load a model from a `.safetensors` checkpoint, sized for batch `b` × seq `t`.
     pub fn load(path: &str, b: u32, t: u32) -> Gpt {
         let c = checkpoint::load(path);
         let cfg = GptConfig::from_json(&c.header["config"]);

@@ -4,7 +4,7 @@
 //! Browser (wasm32 + WebGPU) entry point for PID inference.
 //!
 //! Compiled only for `wasm32` under the `webgpu` feature. Exposes a single
-//! `#[wasm_bindgen]` async function that takes a `.weights` byte blob (fetched
+//! `#[wasm_bindgen]` async function that takes a `.safetensors` byte blob (fetched
 //! by JS) and a token sequence, builds the PID decoder, and returns the U-bin
 //! logits at the final (DECIDE) position.
 //!
@@ -36,7 +36,7 @@ pub fn start() {
 
 /// Run one PID inference in the browser.
 ///
-/// * `weights` — the raw bytes of a `.weights` container (same format the native
+/// * `weights` — the raw bytes of a `.safetensors` container (same format the native
 ///   CLI loads from disk).
 /// * `tokens`  — the input token sequence (B=1); the model must have been
 ///   trained with `block_size >= tokens.len()`.

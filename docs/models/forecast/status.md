@@ -74,7 +74,7 @@ All three foundation models were confirmed together on `--device cpu,npu`
 - **fincast weights**: fetched from `Vincent05R/FinCast` (`v1.pth`, ~4 GB) to
   `resources/time-series/checkpoints/fincast/`, converted with
   `tools/fincast_convert.py` → `fincast.safetensors`, imported via
-  `brain forecast import --fincast <safetensors> --out out/fincast.weights`
+  `brain forecast import --fincast <safetensors> --out out/fincast.safetensors`
   (991 M params). Live-validated over D-Bus on CPU (table above).
 - **fincast on NPU**: DONE. FinCast's ~1 B-param ONNX core exceeds protobuf's
   2 GB `read_model_from_buffer` limit, so it is exported with an external-data
@@ -107,7 +107,7 @@ parity-gated (`tests/kvcache_parity.rs` cosine 1.000000 after each).
 | **serving uses the cached path** | the D-Bus kronos resident now calls `forecast_cached` (was the O(T²)/step `forecast`) + a `samples` param | cosine >0.999 |
 
 Net: one kronos forecast ≈ **3.1 s → ~1.3 s**; a samples=N request pays one
-prefill. These compound with the fine-tuned-`.weights` NPU path (`load_decoder`
+prefill. These compound with the fine-tuned-`.safetensors` NPU path (`load_decoder`
 takes a file or dir).
 
 ## NPU KV-cache pass — kronos cached rollout (2026-07-30)

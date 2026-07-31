@@ -801,7 +801,7 @@ pub fn finetune(
 }
 
 impl DiamondTrainer {
-    /// Save the fine-tuned model as a standard DIAMOND `.weights` (trained
+    /// Save the fine-tuned model as a standard DIAMOND `.safetensors` (trained
     /// convs from the ParamStore merged over the frozen base tensors), so
     /// `brain wm play --model diamond` loads it unchanged.
     pub fn save(&self, base: &Tensors, path: &str) -> Result<(), String> {

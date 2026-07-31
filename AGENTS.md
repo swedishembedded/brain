@@ -218,7 +218,7 @@ Multi-GPU scaling lives in `crates/model`:
 | `wgsl-cpu` | the CPU backend's compiler: WGSL → naga IR → Cranelift JIT |
 | `vulkan` | **optional, non-default** `VK_KHR_cooperative_matrix` matmul path (excluded from `default-members`; build with `-p brain-vulkan` / cli feature `vulkan-coopmat`) |
 | `paramstore` / `optim` | param/grad/Adam buffers; AdamW + global grad-norm clip |
-| `checkpoint` | `.weights` container + manifest/SHA-256 + expert-shard I/O (no fs on wasm) |
+| `checkpoint` | `.safetensors` container + manifest/SHA-256 + expert-shard I/O (no fs on wasm) |
 | `model` | architecture-agnostic `Model` abstraction, generic trainer, shared block builders (`block.rs`, `vit.rs`), paged KV, and the multi-GPU parallelism layer |
 | `autodiff` | shared SSA forward-cache / reverse-mode scaffolding — **placeholder** |
 | `data` | char + GPT-2 **BPE** tokenizers, dataset generators, loaders (masking/alignment), normalization |
@@ -331,7 +331,7 @@ make kernels-regen                   # regenerate the kernel const block after a
 make docs                            # docs bundle -> build/docs/brain-docs.{md,pdf} (needs pandoc + xelatex)
 
 make data/<name>                     # calculator|reverser|wordcalc|timeseries|shakespeare_char|gpt|detect|tts
-make train/gpt/<name>                # train GPT -> out/gpt-<name>.weights
+make train/gpt/<name>                # train GPT -> out/gpt-<name>.safetensors
 make eval/gpt/<name>                 # perplexity + exact-match
 make train/yolo | eval/yolo | detect/yolo
 make depth/demo | depth/smoke | depth/camera | train/zipdepth
@@ -388,7 +388,7 @@ This bounds where work **executes** — host RAM and disk stay available as
 cache/spill tiers, so `--device gpu` still uses RAM for weight caching.
 
 ```bash
-./target/release/brain gpt train data/calculator --device cpu --out out/gpt.weights
+./target/release/brain gpt train data/calculator --device cpu --out out/gpt.safetensors
 ./target/release/brain perf run sweep --device gpu0 --target qwen-synth:12x768x12
 BRAIN_DEVICE=cpu make test            # whole suite on CPU, no GPU needed
 ```

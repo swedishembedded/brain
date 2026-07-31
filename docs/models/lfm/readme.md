@@ -57,7 +57,7 @@ serving).
 ## Commands
 
 ```bash
-brain lfm import    --hf <hf_dir> --out out/lfm-230m.weights
+brain lfm import    --hf <hf_dir> --out out/lfm-230m.safetensors
 brain lfm fill-mask --weights F --tokenizer tokenizer.json --text "… <|mask|> …" [--topk K]
 brain lfm embed     --weights F --tokenizer tokenizer.json (--text "…" | --input FILE) [--seq T]
 brain do lfm fill_mask --weights … --tokenizer … --text "…"      # capability surface

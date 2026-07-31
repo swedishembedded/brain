@@ -97,8 +97,8 @@ impl TtsEngine {
     pub fn load(cfg: EngineCfg) -> Result<TtsEngine, String> {
         let sp = TtsSpecials::from_config_dir(&cfg.ckpt_dir)?;
         let tok = prompt::load_tokenizer(&cfg.ckpt_dir)?;
-        let talker = format!("{}/talker.weights", cfg.weights_dir);
-        let mtp_path = format!("{}/mtp.weights", cfg.weights_dir);
+        let talker = format!("{}/talker.safetensors", cfg.weights_dir);
+        let mtp_path = format!("{}/mtp.safetensors", cfg.weights_dir);
         let tables = TalkerTables::load(&talker);
         let mtp = CpuMtp::load(&mtp_path);
         let cache = Path::new(&cfg.npu_cache);
@@ -164,9 +164,9 @@ impl TtsEngine {
             let rw = cfg.ref_wav.as_ref().ok_or("clone engine needs a reference wav")?;
             let rt = cfg.ref_text.clone().unwrap_or_default();
             let wav = audio::wav::read(rw).map_err(|e| format!("read {rw}: {e}"))?;
-            let speaker = speaker::SpeakerEncoder::load_inference(&format!("{}/speaker.weights", cfg.weights_dir));
+            let speaker = speaker::SpeakerEncoder::load_inference(&format!("{}/speaker.safetensors", cfg.weights_dir));
             let xvec = speaker.embed_wav(&wav.samples, wav.sample_rate);
-            let codec_path = format!("{}/codec.weights", cfg.weights_dir);
+            let codec_path = format!("{}/codec.safetensors", cfg.weights_dir);
             let ref_code = pipeline::ref_codes_cached(&codec_path, &wav, rw, Some(&cfg.npu_cache));
             let ref_ids_full = tok.encode(&format!("<|im_start|>assistant\n{rt}<|im_end|>\n"));
             if ref_ids_full.len() < 6 {
@@ -259,7 +259,7 @@ impl TtsEngine {
                 return Err("no codec frames were generated".into());
             }
             if self.cpu_codec.is_none() {
-                let codec_path = format!("{}/codec.weights", self.cfg.weights_dir);
+                let codec_path = format!("{}/codec.safetensors", self.cfg.weights_dir);
                 self.cpu_codec = Some(StreamingCodecDecoder::load(&codec_path));
             }
             let chunk = std::env::var("BRAIN_TTS_STREAM_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(16usize).max(1);
@@ -288,7 +288,7 @@ impl TtsEngine {
                 return Err("no codec frames were generated".into());
             }
             if self.npu_codec.is_none() {
-                let codec_path = format!("{}/codec.weights", self.cfg.weights_dir);
+                let codec_path = format!("{}/codec.safetensors", self.cfg.weights_dir);
                 let front_t = self.kv.cap();
                 let chunk = std::env::var("BRAIN_TTS_STREAM_CHUNK").ok().and_then(|v| v.parse().ok()).unwrap_or(16usize).max(1);
                 self.npu_codec = Some(NpuStreamCodec::load(
@@ -315,7 +315,7 @@ impl TtsEngine {
         let chunk = envn("BRAIN_TTS_STREAM_CHUNK", 16).max(1);
         let win = codec_bucket(envn("BRAIN_TTS_STREAM_WIN", 32).max(chunk));
         if !self.codec_sessions.contains_key(&win) {
-            let codec_path = format!("{}/codec.weights", self.cfg.weights_dir);
+            let codec_path = format!("{}/codec.safetensors", self.cfg.weights_dir);
             let s = open_codec_session(&codec_path, win, self.cfg.device, true, Some(Path::new(&self.cfg.npu_cache)))?;
             self.codec_sessions.insert(win, s);
         }

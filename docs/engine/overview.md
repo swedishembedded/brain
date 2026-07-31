@@ -46,14 +46,14 @@ here.
 ```bash
 # 1. train + export weights from the Python model (repo root)
 python tiny_sparse_moe.py train --steps 1500 --device cpu
-python tiny_sparse_moe.py export --ckpt moe.pt --out moe.weights
+python tiny_sparse_moe.py export --ckpt moe.pt --out moe.safetensors
 
 # 2. build (this environment needs a writable CARGO_HOME)
 cd moe-rs
 CARGO_HOME=/tmp/cargo-moe cargo build --release
 
 # 3. generate on the GPU
-./target/release/moe --weights ../moe.weights --prompt 1,2,3,4 --max-new 64
+./target/release/moe --weights ../moe.safetensors --prompt 1,2,3,4 --max-new 64
 ```
 
 Flags: `--weights`, `--prompt` (comma/space ints in `[0,vocab)`), `--max-new`,

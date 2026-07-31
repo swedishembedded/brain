@@ -167,7 +167,7 @@ pub fn run(sweep: &Sweep, dir: &Path) -> std::io::Result<SweepResult> {
             align_to_lines: true,
             seed: sweep.seed,
         };
-        let out = dir.join(format!("scaling_l{n_layers}_d{d_model}.weights"));
+        let out = dir.join(format!("scaling_l{n_layers}_d{d_model}.safetensors"));
         // Fresh checkpoint per size (fit resumes if present; remove to retrain).
         let _ = std::fs::remove_file(&out);
         let (_init, final_loss) = GptDecoder.train_decoder(dir, block, &cfg, &out)?;

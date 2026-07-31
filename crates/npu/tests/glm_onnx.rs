@@ -25,7 +25,7 @@ fn write_tiny_ckpt(dir: &std::path::Path, cfg: &GlmConfig) -> std::path::PathBuf
         .into_iter()
         .map(|(n, numel)| (n.clone(), vec![numel as u64], init[&n].clone()))
         .collect();
-    let path = dir.join("glm.weights");
+    let path = dir.join("glm.safetensors");
     checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
     path
 }
@@ -78,7 +78,7 @@ fn glm_onnx_matches_brain_forward() {
 
     let dir = std::env::temp_dir().join(format!("brain-glm-parity-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let wpath = dir.join("tiny.weights");
+    let wpath = dir.join("tiny.safetensors");
     model.save(wpath.to_str().unwrap());
 
     let (bytes, _) = npu::glm_export::build_glm_fp32_bytes(wpath.to_str().unwrap(), ids.len()).unwrap();
@@ -128,7 +128,7 @@ fn glm_onnx_runs_on_npu() {
 
     let dir = std::env::temp_dir().join(format!("brain-glm-npu-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let wpath = dir.join("tiny.weights");
+    let wpath = dir.join("tiny.safetensors");
     model.save(wpath.to_str().unwrap());
     let (bytes, _) = npu::glm_export::build_glm_fp32_bytes(wpath.to_str().unwrap(), ids.len()).unwrap();
 
@@ -181,7 +181,7 @@ fn glm_onnx_int8_runs() {
 
     let dir = std::env::temp_dir().join(format!("brain-glm-int8-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let wpath = dir.join("tiny.weights");
+    let wpath = dir.join("tiny.safetensors");
     model.save(wpath.to_str().unwrap());
     let (bytes, _) = npu::glm_export::build_glm_int8_bytes(wpath.to_str().unwrap(), ids.len()).unwrap();
     let mut sess = DecoderSession::load_bytes(

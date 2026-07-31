@@ -95,7 +95,7 @@ fn lora_only_descends_with_base_frozen_and_roundtrips() {
 
     // Save/load round-trip through the checkpoint container: reloaded adapter
     // reproduces the same effective weights.
-    let path = std::env::temp_dir().join(format!("flux2_lora_test_{}.weights", std::process::id()));
+    let path = std::env::temp_dir().join(format!("flux2_lora_test_{}.safetensors", std::process::id()));
     let path = path.to_str().unwrap().to_string();
     save_adapter(&path, &ad);
     let re = load_adapter(&path, &c).expect("reload");

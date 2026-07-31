@@ -46,9 +46,9 @@ npx serve out    # or any static file server
   `…_bg.wasm`. This needs no bundler wasm configuration and keeps the app a pure
   static export.
 - After init (which also installs the Rust panic hook), it fetches
-  `/moe_pid.weights` and calls `rollout_compare(weights, tau, gain, steps)`,
+  `/moe_pid.safetensors` and calls `rollout_compare(weights, tau, gain, steps)`,
   which returns a JSON string parsed into the series the charts render.
-- The weights container is served from `public/moe_pid.weights`.
+- The weights container is served from `public/moe_pid.safetensors`.
 
 ## Layout
 
@@ -56,7 +56,7 @@ npx serve out    # or any static file server
 app/         layout (fonts + metadata), page, globals.css (design system)
 components/   demo.tsx (the client app) + ui/ (shadcn-style primitives)
 lib/          wasm.ts (Rust bridge), grid.ts (train/val grid), utils.ts (cn)
-public/       moe_pid.weights, pkg/ (generated wasm — git-ignored)
+public/       moe_pid.safetensors, pkg/ (generated wasm — git-ignored)
 ```
 
 ## Plant grid

@@ -161,7 +161,7 @@ pub struct Yolo {
 }
 
 impl Yolo {
-    /// Load a model from a `.weights` checkpoint, sized for batch `b`. The config
+    /// Load a model from a `.safetensors` checkpoint, sized for batch `b`. The config
     /// (channels/depths/nc/input) is read from the checkpoint header; the `t`
     /// (sequence) seam is unused by detection so it is passed as 0. Mirrors
     /// [`gpt::Gpt::load`].

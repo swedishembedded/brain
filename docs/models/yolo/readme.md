@@ -578,8 +578,8 @@ head-logits `max_abs_err` must stay `< 1e-3`.
 Because `YoloConfig::yolov8n()` is byte-compatible with the canonical graph, the
 official Ultralytics `yolov8n.pt` weights can be imported and run unchanged:
 
-1. `python3 tools/yolo_export/export_yolov8.py --weights yolov8n.pt --out yolov8n.brain.weights` — an explicit, auditable 1:1 string remap of the state-dict onto brain's `full_param_list` names, no arithmetic on values (`tools/yolo_export/export_yolov8.py`).
-2. `Yolo::load("yolov8n.brain.weights", 1)` reads the config from the checkpoint header (`model.rs:254-259`).
+1. `python3 tools/yolo_export/export_yolov8.py --weights yolov8n.pt --out yolov8n.brain.safetensors` — an explicit, auditable 1:1 string remap of the state-dict onto brain's `full_param_list` names, no arithmetic on values (`tools/yolo_export/export_yolov8.py`).
+2. `Yolo::load("yolov8n.brain.safetensors", 1)` reads the config from the checkpoint header (`model.rs:254-259`).
 3. `detect` on a 719×467 dog photo.
 
 ![dog input](img/dog_input.png)
@@ -599,7 +599,7 @@ head-logit error against PyTorch).
 ## 10. How inference is invoked
 
 * **CLI** (`crates/cli/src/yolo_cli.rs`): `brain yolo detect --weights F --image P [--conf X --iou X]` runs `Yolo::detect` and prints JSON boxes. Sibling subcommands: `train`, `fine-tune`, `eval` (mAP@0.5 / precision / recall).
-* **Event controller** (`crates/runtime`, `crates/events`): the event-driven HSM controller maps a `camera_frame` event → one `object_detected` event by calling the same `detect` through the `DetectModel` seam (`crates/events/src/lib.rs:116-160`; `crates/runtime/src/lib.rs:452`). Run with `brain run --yolo out/yolo.weights`.
+* **Event controller** (`crates/runtime`, `crates/events`): the event-driven HSM controller maps a `camera_frame` event → one `object_detected` event by calling the same `detect` through the `DetectModel` seam (`crates/events/src/lib.rs:116-160`; `crates/runtime/src/lib.rs:452`). Run with `brain run --yolo out/yolo.safetensors`.
 * **brain-py harness** (`brain-py/brain_py/examples/detect_image.py`): a Python client that drives `brain run --yolo <weights>` as a subprocess, reads an image with Pillow, and draws the returned boxes — the path used to render the dog example above.
 
 The CLI `detect`, the runtime `camera_frame → object_detected` path, and the

@@ -6,8 +6,8 @@
 //!   brain tts import --ckpt <hf_dir> [--codec-ckpt <dir> --speaker-ckpt <dir>]
 //!                    [--out-dir out/tts]
 //!       Import all four components into brain checkpoints:
-//!         <out-dir>/talker.weights  <out-dir>/mtp.weights
-//!         <out-dir>/codec.weights   <out-dir>/speaker.weights
+//!         <out-dir>/talker.safetensors  <out-dir>/mtp.safetensors
+//!         <out-dir>/codec.safetensors   <out-dir>/speaker.safetensors
 //!
 //!   brain tts clone --text "..." --ref voice.wav --ref-text "..." --out demo.wav
 //!                   [--weights-dir out/tts --ckpt <hf_dir> --lang english
@@ -21,8 +21,8 @@
 //!                   [--weights-dir out/tts --ckpt <hf_dir> --lang english ...]
 //!       Speaker-free text-to-speech.
 //!
-//!   brain tts finetune --base out/tts/talker.weights --data data/tts
-//!                      --out out/tts/talker_lora.weights
+//!   brain tts finetune --base out/tts/talker.safetensors --data data/tts
+//!                      --out out/tts/talker_lora.safetensors
 //!                      [--steps N --lr X --rank R --alpha A --batch B --block T --seed S]
 //!       LoRA fine-tune (single-speaker SFT) the Talker on a `text->codes`
 //!       dataset (e.g. `make data/tts`). Freezes the base; trains the attention
@@ -56,12 +56,12 @@ pub fn run_tts(args: &[String]) {
 
 /// LoRA fine-tune the Talker on a `text->codes` dataset (single-speaker SFT).
 ///
-///   brain tts finetune --base out/tts/talker.weights --data data/tts --out out/tts/talker_lora.weights
+///   brain tts finetune --base out/tts/talker.safetensors --data data/tts --out out/tts/talker_lora.safetensors
 ///                      [--steps N --lr X --rank R --alpha A --batch B --block T --seed S]
 fn finetune(args: &[String]) {
-    let mut base = "out/tts/talker.weights".to_string();
+    let mut base = "out/tts/talker.safetensors".to_string();
     let mut data_dir = "data/tts".to_string();
-    let mut out = "out/tts/talker_lora.weights".to_string();
+    let mut out = "out/tts/talker_lora.safetensors".to_string();
     let mut o = tts::FinetuneOpts::default();
     let mut i = 0;
     while i < args.len() {
@@ -93,7 +93,7 @@ fn finetune(args: &[String]) {
     }
 }
 
-/// `brain tts sim --a A.wav --b B.wav [--speaker out/tts-1b7/speaker.weights]`
+/// `brain tts sim --a A.wav --b B.wav [--speaker out/tts-1b7/speaker.safetensors]`
 /// Speaker-embedding cosine similarity between two utterances (ECAPA x-vectors) —
 /// the timbre-preservation metric. Used to validate that a quantized (e.g. INT4)
 /// Talker keeps the cloned voice: compare sim(int4_out, ref) vs sim(int8_out, ref).
@@ -101,7 +101,7 @@ fn finetune(args: &[String]) {
 fn sim(args: &[String]) {
     let mut a = String::new();
     let mut b = String::new();
-    let mut speaker = "out/tts-1b7/speaker.weights".to_string();
+    let mut speaker = "out/tts-1b7/speaker.safetensors".to_string();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -113,7 +113,7 @@ fn sim(args: &[String]) {
         i += 1;
     }
     if a.is_empty() || b.is_empty() {
-        eprintln!("usage: brain tts sim --a A.wav --b B.wav [--speaker speaker.weights]");
+        eprintln!("usage: brain tts sim --a A.wav --b B.wav [--speaker speaker.safetensors]");
         std::process::exit(2);
     }
     let wa = audio::wav::read(&a).unwrap_or_else(|e| { eprintln!("read {a}: {e}"); std::process::exit(1); });
@@ -163,10 +163,10 @@ fn import(args: &[String]) {
         eprintln!("create {out_dir}: {e}");
         std::process::exit(2);
     }
-    let talker = format!("{out_dir}/talker.weights");
-    let mtp = format!("{out_dir}/mtp.weights");
-    let codec_out = format!("{out_dir}/codec.weights");
-    let speaker_out = format!("{out_dir}/speaker.weights");
+    let talker = format!("{out_dir}/talker.safetensors");
+    let mtp = format!("{out_dir}/mtp.safetensors");
+    let codec_out = format!("{out_dir}/codec.safetensors");
+    let speaker_out = format!("{out_dir}/speaker.safetensors");
 
     run_step("talker", tts::import::import_talker(&ckpt, &talker));
     run_step("mtp", tts::import::import_mtp(&ckpt, &mtp));
@@ -256,10 +256,10 @@ fn parse_common(args: &[String]) -> (CommonArgs, std::collections::HashMap<Strin
 
 fn paths(c: &CommonArgs) -> TtsPaths {
     TtsPaths {
-        talker: format!("{}/talker.weights", c.weights_dir),
-        mtp: format!("{}/mtp.weights", c.weights_dir),
-        codec: format!("{}/codec.weights", c.weights_dir),
-        speaker: format!("{}/speaker.weights", c.weights_dir),
+        talker: format!("{}/talker.safetensors", c.weights_dir),
+        mtp: format!("{}/mtp.safetensors", c.weights_dir),
+        codec: format!("{}/codec.safetensors", c.weights_dir),
+        speaker: format!("{}/speaker.safetensors", c.weights_dir),
         ckpt_dir: c.ckpt.clone(),
     }
 }

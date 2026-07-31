@@ -30,7 +30,7 @@ make gradcheck                        # backprop correctness gate (finite differ
 
 # Train + evaluate the GPT baseline end to end:
 make data/calculator                  # generate a dataset
-make train/gpt/calculator             # -> out/gpt-calculator.weights
+make train/gpt/calculator             # -> out/gpt-calculator.safetensors
 make eval/gpt/calculator              # validation perplexity + task exact-match
 ```
 
@@ -55,8 +55,8 @@ brain gradcheck   run the gradient checks
 The same WGSL kernels run on three backends, selected at runtime:
 
 ```bash
-brain gpt gen --weights out/gpt-calculator.weights --device gpu   # wgpu (default)
-brain gpt gen --weights out/gpt-calculator.weights --device cpu   # WGSL -> Cranelift JIT, all cores
+brain gpt gen --weights out/gpt-calculator.safetensors --device gpu   # wgpu (default)
+brain gpt gen --weights out/gpt-calculator.safetensors --device cpu   # WGSL -> Cranelift JIT, all cores
 BRAIN_DEVICE=cpu make test                                        # whole suite, no GPU needed
 ```
 
@@ -78,9 +78,9 @@ untied head, masked cross-entropy.
 
 ```bash
 make data/calculator                  # or: reverser wordcalc timeseries shakespeare_char gpt
-brain gpt train data/calculator --out out/gpt.weights --steps 2000 --batch 32 --block 64
-brain gpt eval  --weights out/gpt.weights --data data/calculator
-brain gpt gen   --weights out/gpt.weights --prompt "12+7=" --max-new 8
+brain gpt train data/calculator --out out/gpt.safetensors --steps 2000 --batch 32 --block 64
+brain gpt eval  --weights out/gpt.safetensors --data data/calculator
+brain gpt gen   --weights out/gpt.safetensors --prompt "12+7=" --max-new 8
 ```
 
 ### Qwen3 LLM — real 0.6B, on CPU/GPU/NPU
@@ -90,12 +90,12 @@ half-split RoPE, SwiGLU, tied head), with safetensors import, LoRA, and ONNX/Ope
 export.
 
 ```bash
-brain qwen import --hf <hf_dir> --out qwen.weights        # import HF safetensors
-brain qwen infer  --weights qwen.weights --tokenizer tokenizer.json --prompt "The capital of France is"
-brain qwen finetune data/mydata --weights qwen.weights --out qwen-ft.weights   # full or LoRA
-brain qwen export --weights qwen.weights --out qwen.onnx --seq 16               # -> ONNX (NPU)
-brain qwen precompile --weights qwen.weights --seq 16 --npu-cache out/npu-cache # warm NPU blob cache
-brain qwen infer --weights qwen.weights --device npu --seq 16 --npu-cache out/npu-cache --prompt "…"
+brain qwen import --hf <hf_dir> --out qwen.safetensors        # import HF safetensors
+brain qwen infer  --weights qwen.safetensors --tokenizer tokenizer.json --prompt "The capital of France is"
+brain qwen finetune data/mydata --weights qwen.safetensors --out qwen-ft.safetensors   # full or LoRA
+brain qwen export --weights qwen.safetensors --out qwen.onnx --seq 16               # -> ONNX (NPU)
+brain qwen precompile --weights qwen.safetensors --seq 16 --npu-cache out/npu-cache # warm NPU blob cache
+brain qwen infer --weights qwen.safetensors --device npu --seq 16 --npu-cache out/npu-cache --prompt "…"
 ```
 
 ### Qwen3-TTS — from-scratch, checkpoint-compatible voice cloning
@@ -134,9 +134,9 @@ import.
 
 ```bash
 make data/detect                      # synthetic RGB-shapes detection dataset
-brain yolo train data/detect --out out/yolo.weights --steps 500 --batch 16
-brain yolo eval   --weights out/yolo.weights --data data/detect      # mAP@0.5 + P/R
-brain yolo detect --weights out/yolo.weights --image sample.ppm      # JSON boxes
+brain yolo train data/detect --out out/yolo.safetensors --steps 500 --batch 16
+brain yolo eval   --weights out/yolo.safetensors --data data/detect      # mAP@0.5 + P/R
+brain yolo detect --weights out/yolo.safetensors --image sample.ppm      # JSON boxes
 ```
 
 ### Sparse MoE Transformer (+ federated experts)
@@ -145,11 +145,11 @@ RMSNorm/RoPE, top-2-of-4 routed SwiGLU experts; a toy 64-symbol next-token rule 
 studying memorization vs. generalization, with vertical expert sharding.
 
 ```bash
-brain train data/moe --out out/moe.weights            # MoE train
+brain train data/moe --out out/moe.safetensors            # MoE train
 make federated-demo                                   # train -> split -> verify -> merge
-brain federated split out/moe.weights out/shards/
+brain federated split out/moe.safetensors out/shards/
 brain federated verify out/shards/
-brain federated merge  out/shards/ --out out/merged.weights
+brain federated merge  out/shards/ --out out/merged.safetensors
 ```
 
 ### PID control Transformer
@@ -202,8 +202,8 @@ LoRA (frozen base + trainable adapters) for parameter-efficient fine-tuning.
 ## NPU export (Intel, OpenVINO)
 
 ```bash
-brain npu export   --weights out/yolo.weights --out yolo.onnx
-brain npu quantize --weights out/yolo.weights --calib data/detect --out yolo.int8.onnx
+brain npu export   --weights out/yolo.safetensors --out yolo.onnx
+brain npu quantize --weights out/yolo.safetensors --calib data/detect --out yolo.int8.onnx
 brain npu check    --onnx yolo.onnx --device NPU
 brain npu run      --onnx yolo.onnx --image sample.ppm --device NPU
 brain npu bench    --onnx yolo.onnx --device NPU --iters 100
@@ -217,8 +217,8 @@ without it installed.
 
 ```bash
 # event-driven controller: reads JSONL events on stdin, emits JSONL on stdout
-printf '{"event":"user_text","text":"hi"}\n' | brain run --gpt out/gpt.weights
-printf '{"event":"camera_frame","format":"rgb8","w":128,"h":128,"data":"…"}\n' | brain run --yolo out/yolo.weights
+printf '{"event":"user_text","text":"hi"}\n' | brain run --gpt out/gpt.safetensors
+printf '{"event":"camera_frame","format":"rgb8","w":128,"h":128,"data":"…"}\n' | brain run --yolo out/yolo.safetensors
 
 make web/dev                          # WebGPU browser demo (Node 18+ and a WebGPU browser)
 ```

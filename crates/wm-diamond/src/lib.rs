@@ -9,7 +9,7 @@
 //! - [`cond`]: host-side EDM conditioners, Fourier/action/cond-MLP path,
 //!   AdaGroupNorm gamma/beta production, Karras sigmas.
 //! - [`model`]: the UNet as one pre-recorded brain kernel graph.
-//! - [`import`]: torch `.pt` -> `.weights` with full-coverage validation.
+//! - [`import`]: torch `.pt` -> `.safetensors` with full-coverage validation.
 //! - [`play`]: the context ring + Euler denoising loop behind the trait.
 //! - [`npu`]: fp32 ONNX export + the OpenVINO (Intel NPU) playback path.
 //!

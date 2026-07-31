@@ -3,10 +3,10 @@
 
 //! `brain federated …` — drive the sharded-MoE artifact pipeline.
 //!
-//!   brain federated split   <base.weights> <out_dir>
+//!   brain federated split   <base.safetensors> <out_dir>
 //!   brain federated verify  <dir>
-//!   brain federated merge    <dir> --out <full.weights>
-//!   brain federated assemble <base_dir> [overlay_dir ...] --out <full.weights>
+//!   brain federated merge    <dir> --out <full.safetensors>
+//!   brain federated assemble <base_dir> [overlay_dir ...] --out <full.safetensors>
 
 use std::path::Path;
 
@@ -51,7 +51,7 @@ fn train_expert(args: &[String]) {
         i += 1;
     }
     if base.is_empty() || out.is_empty() {
-        eprintln!("usage: brain federated train-expert --base <base.weights> --expert E --out <dir> [--steps N --batch B --block T --lr X --seed S]");
+        eprintln!("usage: brain federated train-expert --base <base.safetensors> --expert E --out <dir> [--steps N --batch B --block T --lr X --seed S]");
         return;
     }
 
@@ -61,7 +61,7 @@ fn train_expert(args: &[String]) {
     }
     // Train expert E (frozen backbone) -> a full updated checkpoint, then keep
     // only that expert's shard (+ shared) as an overlay dir for `assemble`.
-    let tmp_full = out_dir.join(".worker_full.weights");
+    let tmp_full = out_dir.join(".worker_full.safetensors");
     moe::train::train_expert(moe::train::ExpertTrainArgs {
         base_weights: base,
         expert,
@@ -83,7 +83,7 @@ fn train_expert(args: &[String]) {
 
 fn split(a: &[String]) {
     if a.len() < 2 {
-        eprintln!("usage: brain federated split <base.weights> <out_dir>");
+        eprintln!("usage: brain federated split <base.safetensors> <out_dir>");
         return;
     }
     match federated::split(&a[0], Path::new(&a[1])) {
@@ -106,7 +106,7 @@ fn verify(a: &[String]) {
 fn merge(a: &[String]) {
     let (pos, out) = split_out(a);
     let (Some(dir), Some(out)) = (pos.first(), out) else {
-        eprintln!("usage: brain federated merge <dir> --out <full.weights>");
+        eprintln!("usage: brain federated merge <dir> --out <full.safetensors>");
         return;
     };
     match federated::merge_to_full(Path::new(dir), &out) {
@@ -118,7 +118,7 @@ fn merge(a: &[String]) {
 fn assemble(a: &[String]) {
     let (pos, out) = split_out(a);
     let (Some(base), Some(out)) = (pos.first(), out) else {
-        eprintln!("usage: brain federated assemble <base_dir> [overlay_dir ...] --out <full.weights>");
+        eprintln!("usage: brain federated assemble <base_dir> [overlay_dir ...] --out <full.safetensors>");
         return;
     };
     let overlays: Vec<&Path> = pos[1..].iter().map(Path::new).collect();

@@ -3,7 +3,7 @@
 
 //! `brain mirror …` — WorldMirror-2 multi-view 3D reconstruction.
 //!
-//!   brain mirror import <safetensors|hf_dir> --out mirror.weights
+//!   brain mirror import <safetensors|hf_dir> --out mirror.safetensors
 //!   brain mirror infer  --weights F --images <dir|a.ppm,b.ppm,…> [--out DIR]
 //!         [--ply scene.ply] [--maps] [--min-opacity X] [--max-depth X]
 //!         [--prune VOXEL]   (voxel-merge duplicates, try 0.002 for multi-view)
@@ -173,7 +173,7 @@ fn write_cameras_json(path: &str, cams: &[splat::types::Camera]) {
 /// trunk → 4 taps). Weights external (model.onnx + model.onnx.data).
 fn export_npu(argv: &[String]) {
     let mut a = Args::new(argv);
-    let weights = a.str_or("--weights", "out/mirror.weights");
+    let weights = a.str_or("--weights", "out/mirror.safetensors");
     let stage = a.str_or("--stage", "dino");
     let out = a.str_or("--out", &format!("out/mirror-{stage}.onnx"));
     let s = a.u32_or("--frames", 1) as usize;
@@ -230,7 +230,7 @@ fn export_npu(argv: &[String]) {
 
 fn infer(argv: &[String]) {
     let mut a = Args::new(argv);
-    let weights = a.str_or("--weights", "out/mirror.weights");
+    let weights = a.str_or("--weights", "out/mirror.safetensors");
     let images = a.take_str("--images").unwrap_or_else(|| {
         eprintln!("--images <dir|a.ppm,b.ppm,…> is required");
         std::process::exit(2);
@@ -263,7 +263,7 @@ fn infer(argv: &[String]) {
 
 fn demo(argv: &[String]) {
     let mut a = Args::new(argv);
-    let weights = a.str_or("--weights", "out/mirror.weights");
+    let weights = a.str_or("--weights", "out/mirror.safetensors");
     let images = a.take_str("--images").unwrap_or_else(|| {
         eprintln!("--images <dir|a.ppm,b.ppm,…> is required");
         std::process::exit(2);
@@ -303,9 +303,9 @@ fn demo(argv: &[String]) {
 
 fn import(argv: &[String]) {
     let mut a = Args::new(argv);
-    let out = a.str_or("--out", "out/mirror.weights");
+    let out = a.str_or("--out", "out/mirror.safetensors");
     let src = a.positional().unwrap_or_else(|| {
-        eprintln!("usage: brain mirror import <model.safetensors|hf_dir> --out mirror.weights");
+        eprintln!("usage: brain mirror import <model.safetensors|hf_dir> --out mirror.safetensors");
         std::process::exit(2);
     });
     a.finish();

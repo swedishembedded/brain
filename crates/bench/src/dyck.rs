@@ -251,7 +251,7 @@ impl Benchmark for Dyck {
             align_to_lines: true,
             seed,
         };
-        let out = dir.join("dyck.weights");
+        let out = dir.join("dyck.safetensors");
         let (init_loss, final_loss) = lm.train_decoder(dir, block, &train_cfg, &out)?;
 
         // ---- SCORE: close-bracket accuracy on held-out (val) words -----------

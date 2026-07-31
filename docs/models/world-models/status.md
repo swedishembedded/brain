@@ -187,7 +187,7 @@ actions.json (7 actions), convert via wm-ingest.
    interactive SDL/WASD.
 3. PERF (needed for interactive; correctness is done): wm-genie forward is
    host-round-trip heavy (gpu.read between every op) + naive matmul (~7-19min
-   CPU). Move to a single on-device graph / GPU backend; convert .pt -> .weights
+   CPU). Move to a single on-device graph / GPU backend; convert .pt -> .safetensors
    once (import re-read ~145s tokenizer / ~100s dynamics).
 
 ## Backlog (user-reported)

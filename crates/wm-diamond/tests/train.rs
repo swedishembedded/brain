@@ -226,12 +226,12 @@ fn train_backward_is_repeatable() {
 
 /// FD gradcheck on the REAL imported Breakout weights (config-dependent
 /// backward bugs — multi-group GN, 8-head attention, 4 levels — would hide
-/// from the tiny config). Ignored by default: needs out/diamond-breakout.weights.
+/// from the tiny config). Ignored by default: needs out/diamond-breakout.safetensors.
 #[test]
 #[ignore]
 fn train_gradcheck_real_config() {
     let (cfg, tensors) =
-        wm_diamond::import::load("../../out/diamond-breakout.weights").expect("import first");
+        wm_diamond::import::load("../../out/diamond-breakout.safetensors").expect("import first");
     let tr = DiamondTrainer::from_tensors(cfg.clone(), &tensors, Some("cpu"));
     let n_px = (cfg.img_channels * cfg.h * cfg.w) as usize;
     let nsc = cfg.num_steps_conditioning as usize;

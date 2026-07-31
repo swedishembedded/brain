@@ -14,7 +14,7 @@ engine path.
 ## Pipeline at a glance
 
 ```
-.weights ──export──▶ yolo.onnx (fp32) ──┐
+.safetensors ──export──▶ yolo.onnx (fp32) ──┐
    │                                     ├─▶ OpenVINO compile_model("NPU") ─▶ run ─▶ host DFL+NMS ─▶ boxes
    └──quantize(calib)─▶ yolo.int8.onnx ──┘
 ```
@@ -40,11 +40,11 @@ surfaces when you actually open a session.
 
 ```bash
 # fp32 ONNX (pure Rust)
-brain npu export   --weights out/yolo.weights --out out/yolo.onnx [--input S --opset 13]
+brain npu export   --weights out/yolo.safetensors --out out/yolo.onnx [--input S --opset 13]
 
 # INT8 Q/DQ ONNX via brain-native PTQ (pure Rust): calibrate over representative
 # images, compute symmetric per-tensor activation scales + per-channel weight scales
-brain npu quantize --weights out/yolo.weights --calib calib/ --out out/yolo.int8.onnx \
+brain npu quantize --weights out/yolo.safetensors --calib calib/ --out out/yolo.int8.onnx \
                    [--input S --num-calib 300 --scales-out out/scales.json]
 
 # structural ONNX check (always) + compile/op-coverage on a device (needs OpenVINO)
@@ -59,10 +59,10 @@ brain npu run      --onnx out/yolo.int8.onnx --image sample.ppm --device NPU \
 brain npu bench    --onnx out/yolo.int8.onnx --device NPU --hint throughput [--iters 200 --warmup 20]
 
 # fp32 vs INT8 mAP@0.5 with NO NPU (fake-quant simulation) — the accuracy gate
-brain npu sim      --weights out/yolo.weights --data data/detect [--calib calib/ --num-calib 300]
+brain npu sim      --weights out/yolo.safetensors --data data/detect [--calib calib/ --num-calib 300]
 
 # convenience: route `yolo detect` through the NPU (auto-exports fp32)
-brain yolo detect  --weights out/yolo.weights --image sample.ppm --device npu
+brain yolo detect  --weights out/yolo.safetensors --image sample.ppm --device npu
 ```
 
 Makefile: `make export/yolo-onnx`, `make quantize/yolo`, `make sim/yolo-int8`

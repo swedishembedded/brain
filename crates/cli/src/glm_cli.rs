@@ -10,7 +10,7 @@
 //!                    [--max-new N --temp X --top-k K --seed K --device cpu|gpu]
 //!   brain glm eval  --weights F --data <dir> [--batches N --block T --seed K]
 //!   brain glm finetune <data_dir> --weights BASE --out F [--steps N --lr X ...]
-//!   brain glm import --hf <dir> --out glm.weights
+//!   brain glm import --hf <dir> --out glm.safetensors
 //!   brain glm export --weights F --out model.onnx --seq T
 
 use std::path::Path;
@@ -81,7 +81,7 @@ fn preset(size: &str, block: u32) -> GlmConfig {
 fn train(args: &[String], base: Option<&str>) {
     let mut a = Args::new(args);
     let data_dir = a.positional().unwrap_or_default();
-    let out = a.str_or("--out", "out/glm.weights");
+    let out = a.str_or("--out", "out/glm.safetensors");
     let steps = a.u32_or("--steps", 2000);
     let batch = a.u32_or("--batch", 8);
     let block = a.u32_or("--block", 128);
@@ -278,10 +278,10 @@ fn eval(args: &[String]) {
 fn import(args: &[String]) {
     let mut a = Args::new(args);
     let hf = a.str_or("--hf", "");
-    let out = a.str_or("--out", "glm.weights");
+    let out = a.str_or("--out", "glm.safetensors");
     a.finish();
     if hf.is_empty() {
-        eprintln!("usage: brain glm import --hf <dir> --out glm.weights");
+        eprintln!("usage: brain glm import --hf <dir> --out glm.safetensors");
         return;
     }
     match glm::import::import(&hf, &out) {

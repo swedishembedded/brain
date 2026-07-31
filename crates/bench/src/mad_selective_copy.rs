@@ -224,7 +224,7 @@ impl Benchmark for MadSelectiveCopy {
             align_to_lines: true,
             seed,
         };
-        let out = dir.join("mad_selective_copy.weights");
+        let out = dir.join("mad_selective_copy.safetensors");
         let (init_loss, final_loss) = lm.train_decoder(dir, block, &train_cfg, &out)?;
 
         // ---- SCORE: whole-group exact-match on held-out (val) sequences ------

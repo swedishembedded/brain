@@ -12,7 +12,7 @@ fn mtp_real_import_and_forward() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
-    let out = std::env::temp_dir().join("brain_mtp_test.weights");
+    let out = std::env::temp_dir().join("brain_mtp_test.safetensors");
     let out = out.to_str().unwrap();
     tts::import::import_mtp(&dir, out).expect("mtp import");
     let m = MtpModel::load_inference_on(gpu_core::testgpu::dev(tts::mtp::PIPELINES), out);

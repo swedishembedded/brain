@@ -52,7 +52,7 @@ smoothing trick for the precedent).
 ## 5. Checkpoint downloads
 - Preflight: `df` must show download_size*1.5 + 10 GB headroom.
 - Raw downloads -> gitignored scratchpad/wm-checkpoints/; delete raw after
-  conversion to .weights; converted artifacts also gitignored (out/).
+  conversion to .safetensors; converted artifacts also gitignored (out/).
 
 ## 6. minWM-derived training pitfalls (for when models train)
 - Controllability is capped by action<->frame alignment precision — verify the

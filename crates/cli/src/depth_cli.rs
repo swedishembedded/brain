@@ -147,7 +147,7 @@ brain depth — monocular depth (ZipDepth)
 USAGE:
   brain depth --image <img>  --weights <ckpt.pth> [options]   # single image
   brain depth --camera       --weights <ckpt.pth> [options]   # realtime webcam
-  brain depth train --out <w.weights> [--steps N --batch B --lr X --size WxH
+  brain depth train --out <w.safetensors> [--steps N --batch B --lr X --size WxH
                      --seed S --wd X --weights <init.pth>]    # train / fine-tune
                     (synthetic RGB->depth pairs; loss printed per step)
 
@@ -700,7 +700,7 @@ fn run_train(args: &[String]) {
         i += 1;
     }
     if out.is_empty() {
-        eprintln!("brain depth train: --out <file.weights> is required");
+        eprintln!("brain depth train: --out <file.safetensors> is required");
         std::process::exit(2);
     }
     if w % 32 != 0 || h % 32 != 0 {

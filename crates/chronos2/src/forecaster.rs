@@ -32,7 +32,7 @@ impl Chronos2Forecaster {
         Chronos2Forecaster { model, version: "amazon/chronos-2".into() }
     }
 
-    /// Load from a brain `.weights` container.
+    /// Load from a brain `.safetensors` container.
     pub fn load(path: &str) -> Result<Chronos2Forecaster, String> {
         Ok(Chronos2Forecaster::new(Chronos2::load(path)?))
     }

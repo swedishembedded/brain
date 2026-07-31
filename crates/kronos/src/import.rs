@@ -64,7 +64,7 @@ fn config_from_dir<T>(dir: &str, parse: impl Fn(&serde_json::Value) -> Result<T,
 /// (reads `config.json`, imports strictly). Used by the NPU export, which needs
 /// the raw weights (not the assembled [`KronosModel`]) to build the ONNX graph.
 pub fn load_decoder(decoder_dir: &str) -> Result<(KronosConfig, HashMap<String, Vec<f32>>), String> {
-    // A brain `.weights` container (e.g. a fine-tuned checkpoint from
+    // A brain `.safetensors` container (e.g. a fine-tuned checkpoint from
     // `brain forecast finetune`) is a single file with the config + tensors
     // embedded; an HF checkpoint is a directory. Support both so a fine-tuned
     // decoder loads everywhere the base does (forecaster, server, ranking tool).
@@ -84,7 +84,7 @@ pub fn load_decoder(decoder_dir: &str) -> Result<(KronosConfig, HashMap<String, 
 pub fn load_model(tokenizer_dir: &str, decoder_dir: &str) -> Result<KronosModel, String> {
     let tc = config_from_dir(tokenizer_dir, KronosTokenizerConfig::from_hf)?;
     let tw = load_hf(&tc.param_list(), tokenizer_dir)?;
-    // Decoder may be an HF dir (base) or a brain `.weights` file (fine-tuned) —
+    // Decoder may be an HF dir (base) or a brain `.safetensors` file (fine-tuned) —
     // load_decoder handles both, so a promoted checkpoint drops straight in.
     let (dc, dw) = load_decoder(decoder_dir)?;
     KronosModel::from_weights(tc, &tw, dc, &dw)

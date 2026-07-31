@@ -42,7 +42,7 @@ fn fp32_export_topology() {
     if skip() {
         return;
     }
-    let wpath = tmp("fp32.weights");
+    let wpath = tmp("fp32.safetensors");
     let cfg = save_tiny(&wpath);
     let bytes = npu::build_fp32_bytes(&wpath, None, onnx::DEFAULT_OPSET);
     let m = onnx::decode_model(&bytes).expect("decode");
@@ -88,7 +88,7 @@ fn int8_export_has_qdq() {
     if skip() {
         return;
     }
-    let wpath = tmp("int8.weights");
+    let wpath = tmp("int8.safetensors");
     let cfg = save_tiny(&wpath);
 
     // Calibration keys = every conv prefix (`X.conv.weight` -> X). This is exactly

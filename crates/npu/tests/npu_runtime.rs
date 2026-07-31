@@ -47,7 +47,7 @@ fn npu_fp32_matches_engine() {
     }
     let cfg = YoloConfig::tiny(3);
     let side = cfg.input as usize;
-    let wpath = std::env::temp_dir().join(format!("brain_npu_tierb_{}.weights", std::process::id()));
+    let wpath = std::env::temp_dir().join(format!("brain_npu_tierb_{}.safetensors", std::process::id()));
     let wpath = wpath.to_string_lossy().into_owned();
 
     let init = yolo::init_weights(&cfg, 0x1234);

@@ -82,7 +82,7 @@ fn parse_train(args: &[String]) -> TrainCfg {
         n_traj: 180,
         traj_len: 80,
         mem_budget: 4u64 << 30,
-        out: "moe_pid.weights".to_string(),
+        out: "moe_pid.safetensors".to_string(),
         ckpt_every: 100,
     };
     let mut i = 0;
@@ -196,7 +196,7 @@ fn report(title: &str, dec: &Pid, cfg: &PidConfig, plants: &[pid_data::PlantSpec
 
 /// Load a checkpoint and run the closed-loop generalization report.
 fn rollout(args: &[String]) {
-    let mut weights = "moe_pid.weights".to_string();
+    let mut weights = "moe_pid.safetensors".to_string();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -216,7 +216,7 @@ fn rollout(args: &[String]) {
 /// Time a single inference path (one forward to the DECIDE position) averaged
 /// over `--cycles`, against previously trained weights.
 fn profile(args: &[String]) {
-    let mut weights = "moe_pid.weights".to_string();
+    let mut weights = "moe_pid.safetensors".to_string();
     let mut cycles = 100usize;
     let mut seq_len = 64usize;
     let mut warmup = 10usize;

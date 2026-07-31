@@ -29,7 +29,7 @@ fn talker_onnx_graph_is_well_formed_untied_head() {
 
     let dir = std::env::temp_dir().join(format!("brain_talker_onnx_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let wpath = dir.join("talker_tiny.weights");
+    let wpath = dir.join("talker_tiny.safetensors");
     model.save(wpath.to_str().unwrap());
 
     let (bytes, ecfg) = npu::qwen_export::build_talker_fp32_bytes(wpath.to_str().unwrap(), t as usize)
@@ -77,7 +77,7 @@ fn talker_hidden_graph_is_embeds_in_hidden_out() {
 
     let dir = std::env::temp_dir().join(format!("brain_talker_hidden_onnx_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let wpath = dir.join("talker_tiny.weights");
+    let wpath = dir.join("talker_tiny.safetensors");
     model.save(wpath.to_str().unwrap());
 
     let (bytes, _ecfg) =

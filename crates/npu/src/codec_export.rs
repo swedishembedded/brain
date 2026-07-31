@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Export a brain codec `.weights` checkpoint to an ONNX decoder graph (fixed
+//! Export a brain codec `.safetensors` checkpoint to an ONNX decoder graph (fixed
 //! code length) for OpenVINO whole-graph compilation. Pure Rust — no NPU needed
 //! to produce the file. Mirrors [`crate::qwen_export`] for the conv-heavy codec.
 
@@ -68,7 +68,7 @@ pub fn export_codec_back_stream_fp32(
 mod tests {
     /// Structural check: the front + streaming-back graphs build and emit valid
     /// ONNX, and the back exposes the expected per-conv state buffers. Run:
-    ///   BRAIN_CODEC_WEIGHTS=.../codec.weights \
+    ///   BRAIN_CODEC_WEIGHTS=.../codec.safetensors \
     ///   cargo test -p brain-npu export_streaming_graphs -- --ignored --nocapture
     #[test]
     #[ignore]

@@ -3,7 +3,7 @@
 
 //! `brain qwen …` — import / run / fine-tune the Qwen3 decoder.
 //!
-//!   brain qwen import --hf <dir> --out qwen.weights
+//!   brain qwen import --hf <dir> --out qwen.safetensors
 //!   brain qwen infer  --weights F --tokenizer tokenizer.json --prompt "..."
 //!                     [--max-new N --temp X --top-k K --chat --device cpu|gpu]
 //!   brain qwen train    <data_dir> --out F [--steps N --batch B --block T --lr X ...]
@@ -76,7 +76,7 @@ fn val(args: &[String], i: &mut usize, flag: &str) -> String {
 fn import(args: &[String]) {
     let mut block: Option<u32> = None;
     let mut hf = String::new();
-    let mut out = "qwen.weights".to_string();
+    let mut out = "qwen.safetensors".to_string();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -88,7 +88,7 @@ fn import(args: &[String]) {
         i += 1;
     }
     if hf.is_empty() {
-        eprintln!("usage: brain qwen import --hf <dir> --out qwen.weights");
+        eprintln!("usage: brain qwen import --hf <dir> --out qwen.safetensors");
         return;
     }
     match qwen::import::import_with_block(&hf, &out, block) {
@@ -274,7 +274,7 @@ fn infer(args: &[String]) {
 /// Shared core for `train` (fresh) and `finetune` (seeded from `--weights`).
 fn train(args: &[String], base: Option<&str>) {
     let mut data_dir = String::new();
-    let mut out = "out/qwen.weights".to_string();
+    let mut out = "out/qwen.safetensors".to_string();
     let mut steps = 2000u32;
     let mut batch = 8u32;
     let mut block = 256u32;

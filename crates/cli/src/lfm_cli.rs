@@ -4,7 +4,7 @@
 //! `brain lfm …` — import / run the LFM2.5-Encoder (bidirectional hybrid
 //! short-conv/attention encoder, tied MLM head). Uses the shared `args` grammar.
 //!
-//!   brain lfm import    --hf <dir> --out lfm.weights
+//!   brain lfm import    --hf <dir> --out lfm.safetensors
 //!   brain lfm fill-mask --weights F --tokenizer tokenizer.json --text "… <|mask|> …"
 //!                       [--topk K]
 //!   brain lfm embed     --weights F --tokenizer tokenizer.json
@@ -81,7 +81,7 @@ fn finetune(argv: &[String]) {
     let weights = a.take_str("--weights");
     let tokenizer = a.take_str("--tokenizer");
     let data_dir = a.str_or("--data", "data/lfm");
-    let out = a.str_or("--out", "out/lfm-ft.weights");
+    let out = a.str_or("--out", "out/lfm-ft.safetensors");
     let steps = a.u32_or("--steps", 100);
     let batch = a.u32_or("--batch", 4);
     let seq = a.u32_or("--seq", 1024);
@@ -146,10 +146,10 @@ fn eval(argv: &[String]) {
 fn import(argv: &[String]) {
     let mut a = Args::new(argv);
     let hf = a.take_str("--hf");
-    let out = a.str_or("--out", "out/lfm.weights");
+    let out = a.str_or("--out", "out/lfm.safetensors");
     a.finish();
     let Some(hf) = hf else {
-        eprintln!("usage: brain lfm import --hf <hf_checkpoint_dir> --out lfm.weights");
+        eprintln!("usage: brain lfm import --hf <hf_checkpoint_dir> --out lfm.safetensors");
         std::process::exit(2);
     };
     if let Some(parent) = std::path::Path::new(&out).parent() {
@@ -180,7 +180,7 @@ fn encode_with_template(tok: &QwenBpe, text: &str) -> Vec<u32> {
 
 fn fill_mask(argv: &[String]) {
     let mut a = Args::new(argv);
-    let weights = a.str_or("--weights", "out/lfm.weights");
+    let weights = a.str_or("--weights", "out/lfm.safetensors");
     let tokenizer = a.take_str("--tokenizer");
     let text = a.take_str("--text");
     let topk = a.u32_or("--topk", 5) as usize;
@@ -237,7 +237,7 @@ fn fill_mask(argv: &[String]) {
 
 fn embed(argv: &[String]) {
     let mut a = Args::new(argv);
-    let weights = a.str_or("--weights", "out/lfm.weights");
+    let weights = a.str_or("--weights", "out/lfm.safetensors");
     let tokenizer = a.take_str("--tokenizer");
     let text = a.take_str("--text");
     let input = a.take_str("--input");

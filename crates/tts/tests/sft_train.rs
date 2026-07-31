@@ -44,7 +44,7 @@ fn talker_from_scratch_overfits() {
 
     let block = 16u32;
     let qcfg = TalkerConfig::tiny().to_qwen(block);
-    let out = tmp("scratch_out").join("talker.weights");
+    let out = tmp("scratch_out").join("talker.safetensors");
     let opts = model::train::FitOpts {
         steps: 400,
         batch_size: 32,
@@ -78,7 +78,7 @@ fn talker_lora_finetune_decreases_loss() {
 
     let block = 16u32;
     // A barely-trained base (high loss), leaving the adapters plenty of headroom.
-    let base = tmp("lora_base").join("talker.weights");
+    let base = tmp("lora_base").join("talker.safetensors");
     let base_opts = model::train::FitOpts {
         steps: 25,
         batch_size: 32,
@@ -91,7 +91,7 @@ fn talker_lora_finetune_decreases_loss() {
     model::train::fit::<qwen::Qwen>(&dir, TalkerConfig::tiny().to_qwen(block), &base_opts, Some(&base))
         .expect("base fit");
 
-    let out = tmp("lora_out").join("talker_lora.weights");
+    let out = tmp("lora_out").join("talker_lora.safetensors");
     // rank = d_model (16): a full-capacity attention adapter so the decrease is
     // unambiguous even with the embeddings/head frozen.
     let fopts = FinetuneOpts { steps: 500, batch: 32, block, lr: 5e-3, rank: 16, alpha: 16.0, seed: 9 };

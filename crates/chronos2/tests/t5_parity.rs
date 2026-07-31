@@ -9,7 +9,7 @@
 //! offset-robust), plus a sane relative max-abs error.
 //!
 //! Env-gated: runs only when `CHRONOS2_WEIGHTS` points at an imported
-//! `chronos2.weights` and the golden files exist (regenerate them with
+//! `chronos2.safetensors` and the golden files exist (regenerate them with
 //! `tools/chronos2_dump_reference.py`). Skips (does not fail) otherwise so CI
 //! without the 478 MB checkpoint stays green.
 
@@ -72,7 +72,7 @@ fn full_forward_matches_the_reference() {
     let reference = read_f32(&q_path); // [nq, horizon] row-major (quantile-major)
     assert_eq!(reference.len(), nq * horizon, "golden shape mismatch");
 
-    let model = Chronos2::load_on(gpu_core::testgpu::dev(chronos2::model::PIPELINES), &weights).expect("load chronos2.weights");
+    let model = Chronos2::load_on(gpu_core::testgpu::dev(chronos2::model::PIPELINES), &weights).expect("load chronos2.safetensors");
     let brain = model.forecast_quantiles(&context, horizon); // [nq, horizon] quantile-major
     assert_eq!(brain.len(), nq * horizon, "brain forecast shape");
 

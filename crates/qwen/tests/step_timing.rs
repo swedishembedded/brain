@@ -21,7 +21,7 @@ fn step_timing() {
     if std::env::var("BRAIN_TILE_BUDGET_WORDS").is_err() {
         std::env::set_var("BRAIN_TILE_BUDGET_WORDS", "200000000");
     }
-    let w = format!("{d}/brain/qwen3-0.6b-ft512.weights");
+    let w = format!("{d}/brain/qwen3-0.6b-ft512.safetensors");
     let c = checkpoint::load(&w);
     let mut cfg = QwenConfig::from_json(&c.header["config"]);
     let lora = std::env::var("LORA").is_ok();

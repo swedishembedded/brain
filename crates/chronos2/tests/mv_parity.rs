@@ -71,7 +71,7 @@ fn multivariate_forward_matches_the_reference() {
     let reference = read_f32(&qp); // target row [nq, horizon]
     assert_eq!(reference.len(), nq * horizon, "golden shape mismatch");
 
-    let model = Chronos2::load_on(gpu_core::testgpu::dev(chronos2::model::PIPELINES), &weights).expect("load chronos2.weights");
+    let model = Chronos2::load_on(gpu_core::testgpu::dev(chronos2::model::PIPELINES), &weights).expect("load chronos2.safetensors");
     let brain = model.forecast_quantiles_mv(&[&target, &cov], horizon);
     assert_eq!(brain.len(), nq * horizon, "brain mv forecast shape");
 

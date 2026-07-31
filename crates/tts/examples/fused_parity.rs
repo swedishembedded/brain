@@ -25,7 +25,7 @@ fn mk(seed: u64, n: usize) -> Vec<f32> {
 
 fn main() {
     let dir = std::env::args().nth(1).unwrap_or_else(|| "out/tts-1b7".to_string());
-    let mtp_path = format!("{dir}/mtp.weights");
+    let mtp_path = format!("{dir}/mtp.safetensors");
     let cache = format!("{dir}/npu-cache");
 
     let mut cpu = CpuMtp::load(&mtp_path);

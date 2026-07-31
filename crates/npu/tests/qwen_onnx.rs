@@ -25,7 +25,7 @@ fn tiny_onnx_matches_brain_cpu() {
 
     let dir = std::env::temp_dir().join(format!("brain_qwen_onnx_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let wpath = dir.join("tiny.weights");
+    let wpath = dir.join("tiny.safetensors");
     model.save(wpath.to_str().unwrap());
 
     let (bytes, _) = npu::qwen_export::build_qwen_fp32_bytes(wpath.to_str().unwrap(), ids.len()).unwrap();

@@ -46,7 +46,7 @@ fn forward_matches_hf_reference() {
     let dir = Path::new(&dir);
 
     // Import once (cache the brain checkpoint next to the HF files).
-    let weights = dir.join("qwen.weights");
+    let weights = dir.join("qwen.safetensors");
     if !weights.exists() {
         qwen::import::import(dir.to_str().unwrap(), weights.to_str().unwrap())
             .expect("import HF Qwen3");

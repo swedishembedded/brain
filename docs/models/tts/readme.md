@@ -70,8 +70,8 @@ brain tts import \
 Writes four brain checkpoints into `--out-dir`:
 
 ```
-out/tts/talker.weights   out/tts/mtp.weights
-out/tts/codec.weights    out/tts/speaker.weights
+out/tts/talker.safetensors   out/tts/mtp.safetensors
+out/tts/codec.safetensors    out/tts/speaker.safetensors
 ```
 
 ### 2. Synth — speaker-free text-to-speech (no reference voice)

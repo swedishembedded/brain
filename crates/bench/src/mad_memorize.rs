@@ -208,7 +208,7 @@ impl Benchmark for MadMemorize {
             align_to_lines: true,
             seed,
         };
-        let out = dir.join("mad_memorize.weights");
+        let out = dir.join("mad_memorize.safetensors");
         let (init_loss, final_loss) = lm.train_decoder(dir, block, &train_cfg, &out)?;
 
         // ---- SCORE: recall of the memorized map on held-out (val) sequences --

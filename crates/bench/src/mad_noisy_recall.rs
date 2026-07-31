@@ -252,7 +252,7 @@ impl Benchmark for MadNoisyRecall {
             align_to_lines: true,
             seed,
         };
-        let out = dir.join("mad_noisy_recall.weights");
+        let out = dir.join("mad_noisy_recall.safetensors");
         let (init_loss, final_loss) = lm.train_decoder(dir, block, &train_cfg, &out)?;
 
         // ---- SCORE: recall amid noise on held-out (val) sequences ------------

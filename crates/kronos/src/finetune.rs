@@ -107,7 +107,7 @@ pub fn eval_universe_loss(
     KronosTrain::new(cfg, t, weights).mean_loss(&batches)
 }
 
-/// Write a reference-named decoder weight map as a brain `.weights` checkpoint
+/// Write a reference-named decoder weight map as a brain `.safetensors` checkpoint
 /// (loadable by the inference `KronosDecoder`/`KronosForecaster`).
 pub fn save_decoder_weights(cfg: &crate::config::KronosConfig, weights: &HashMap<String, Vec<f32>>, path: &str) {
     let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg

@@ -24,7 +24,7 @@ fn write_tiny_ckpt(dir: &std::path::Path) -> (std::path::PathBuf, LfmConfig) {
         .into_iter()
         .map(|(n, numel)| (n.clone(), vec![numel as u64], init[&n].clone()))
         .collect();
-    let path = dir.join("lfm.weights");
+    let path = dir.join("lfm.safetensors");
     checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
     (path, cfg)
 }

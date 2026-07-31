@@ -23,9 +23,9 @@
 //! inside each model.
 //!
 //! Env:
-//!   CHRONOS2_WEIGHTS                          — chronos2 `.weights` (optional)
+//!   CHRONOS2_WEIGHTS                          — chronos2 `.safetensors` (optional)
 //!   KRONOS_TOKENIZER_DIR, KRONOS_DECODER_DIR  — kronos checkpoints (optional)
-//!   FINCAST_WEIGHTS                           — fincast `.weights` (optional)
+//!   FINCAST_WEIGHTS                           — fincast `.safetensors` (optional)
 //!   OOS_DATA      — dir of `<TICKER>.csv` (Date,open,high,low,close,volume) (required)
 //!   OOS_OUT       — output JSON path (required)
 //!   OOS_CTX=200  OOS_HORIZON=5  OOS_STEP=5  OOS_START=2026-01-01
@@ -33,7 +33,7 @@
 //!   OOS_LATENCY_ONLY=0  (1 = warmup + a few timed forecasts per model, no eval)
 //!   OOS_SHARD="i/n" — evaluate only names with sorted-index ≡ i (mod n); shard
 //!                     dumps merge via tools/merge_records.py --concat
-//!   KRONOS_FT     — fine-tuned decoder .weights, evaluated as model "kronos_ft"
+//!   KRONOS_FT     — fine-tuned decoder .safetensors, evaluated as model "kronos_ft"
 //!                   alongside base kronos in the same sweep (paired comparison)
 //!   BRAIN_DEVICE  — cpu|gpu|vulkan (recorded in meta; selects the backend)
 

@@ -61,9 +61,9 @@ async function ensureModule(): Promise<PkgModule> {
 /** Fetch + cache the weights container bytes. */
 async function loadWeights(): Promise<Uint8Array> {
   if (weightsCache) return weightsCache;
-  const resp = await fetch('/moe_pid.weights');
+  const resp = await fetch('/moe_pid.safetensors');
   if (!resp.ok) {
-    throw new Error(`failed to fetch /moe_pid.weights — HTTP ${resp.status}`);
+    throw new Error(`failed to fetch /moe_pid.safetensors — HTTP ${resp.status}`);
   }
   weightsCache = new Uint8Array(await resp.arrayBuffer());
   return weightsCache;

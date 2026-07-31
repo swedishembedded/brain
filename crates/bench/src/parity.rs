@@ -209,7 +209,7 @@ impl Benchmark for Parity {
             align_to_lines: true,
             seed,
         };
-        let out = dir.join("parity.weights");
+        let out = dir.join("parity.safetensors");
         let (init_loss, final_loss) = lm.train_decoder(dir, block, &train_cfg, &out)?;
 
         // ---- SCORE: next-token parity accuracy on held-out (val) sequences ---

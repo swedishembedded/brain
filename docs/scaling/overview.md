@@ -76,7 +76,7 @@ let mut dp = DataParallel::<Qwen>::new(cfg, batch, seqlen, &init, &[0, 1]);
 dp.zero_grads();
 dp.forward_backward(&microbatches);                 // concurrent across cards
 dp.adamw_step(step, lr, wd, Some(1.0), 1.0 / microbatches.len() as f32);
-dp.save("out.weights");
+dp.save("out.safetensors");
 ```
 
 ### Pipeline parallel (any `Shardable` model — gpt, qwen)

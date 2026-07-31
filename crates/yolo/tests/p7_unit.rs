@@ -80,7 +80,7 @@ fn save_load_roundtrip_identical_logits() {
     // init map -> Yolo::new.
     let dir = std::env::temp_dir().join(format!("brain_p7_saveload_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("tiny.weights");
+    let path = dir.join("tiny.safetensors");
     let path_s = path.to_str().unwrap().to_string();
     model.save(&path_s);
 

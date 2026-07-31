@@ -91,7 +91,7 @@ impl Fincast {
         Ok(Fincast { gpu, cfg, w })
     }
 
-    /// Load from a brain `.weights` container (see [`crate::import`]).
+    /// Load from a brain `.safetensors` container (see [`crate::import`]).
     pub fn load(path: &str) -> Result<Fincast, String> {
         let c = checkpoint::load(path);
         let cfg = FincastConfig::from_json(&c.header["config"])?;

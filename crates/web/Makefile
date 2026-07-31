@@ -27,7 +27,7 @@ WASM_BINDGEN_VERSION ?= 0.2.125
 # Prefer wasm-bindgen on PATH; otherwise fall back to the standard cargo-install
 # location (~/.cargo/bin), which is often not on PATH. Override with WASM_BINDGEN=.
 WASM_BINDGEN         ?= $(shell command -v wasm-bindgen 2>/dev/null || echo $(HOME)/.cargo/bin/wasm-bindgen)
-WEIGHTS              ?= moe_pid.weights
+WEIGHTS              ?= moe_pid.safetensors
 
 .PHONY: requirements web/wasm web/deps web/dev web/build web/clean help
 

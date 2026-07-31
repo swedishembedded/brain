@@ -19,19 +19,19 @@ head).
 
 ```
 <dir>/
-  shared.weights               # all non-expert tensors + model config
-  experts/expert_NNNN.weights  # expert NNNN's tensors across all layers
+  shared.safetensors               # all non-expert tensors + model config
+  experts/expert_NNNN.safetensors  # expert NNNN's tensors across all layers
   manifest.json                # base-config SHA-256 + per-file SHA-256 + expert list
 ```
 
 ## Implemented (`crates/federated` + `crates/moe`, CLI `brain federated`)
 
-- `split <base.weights> <dir>` — vertical split into shared + per-expert shards
+- `split <base.safetensors> <dir>` — vertical split into shared + per-expert shards
   with a hash-verified manifest.
 - `verify <dir>` — re-hash every file and confirm the shared config matches the
   manifest's base hash (rejects tampering / wrong base).
-- `merge <dir> --out <full.weights>` — reassemble a shard dir into one checkpoint.
-- `assemble <base_dir> [overlay_dir ...] --out <full.weights>` — overlay expert
+- `merge <dir> --out <full.safetensors>` — reassemble a shard dir into one checkpoint.
+- `assemble <base_dir> [overlay_dir ...] --out <full.safetensors>` — overlay expert
   (or shared) shards onto a base, **last-wins** per expert id, verifying all
   overlays share the base config hash.
 - **`train-expert --base <B> --expert E --out <dir>`** — train one expert against
@@ -49,14 +49,14 @@ head).
 ### Train experts separately, then assemble
 
 ```bash
-brain train --steps 2000 --out base.weights              # common base (resumes if it exists)
-brain federated split base.weights out/base              # base shard set
-brain federated train-expert --base base.weights --expert 0 --out out/exp0 --steps 500
-brain federated train-expert --base base.weights --expert 1 --out out/exp1 --steps 500
-brain federated assemble out/base out/exp0 out/exp1 --out out/final.weights
+brain train --steps 2000 --out base.safetensors              # common base (resumes if it exists)
+brain federated split base.safetensors out/base              # base shard set
+brain federated train-expert --base base.safetensors --expert 0 --out out/exp0 --steps 500
+brain federated train-expert --base base.safetensors --expert 1 --out out/exp1 --steps 500
+brain federated assemble out/base out/exp0 out/exp1 --out out/final.safetensors
 ```
 
-Each `train-expert` runs independently and only needs `base.weights`, so you can
+Each `train-expert` runs independently and only needs `base.safetensors`, so you can
 train one shard at a time on a small machine (control per-step memory with
 `--batch`/`--block`). Note: the whole model is still GPU-resident during a
 worker run — true memory sharding (CPU offload / layer-expert shards from

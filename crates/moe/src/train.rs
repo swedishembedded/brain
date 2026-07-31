@@ -862,7 +862,7 @@ pub struct ExpertTrainArgs {
 }
 
 /// Train one expert against an immutable shared backbone, starting from `base`.
-/// Writes a full updated `.weights` to `out`; the backbone and every other
+/// Writes a full updated `.safetensors` to `out`; the backbone and every other
 /// expert are left bit-for-bit unchanged. This is the federated worker step:
 /// load the common base, train your expert, return its shard.
 pub fn train_expert(args: ExpertTrainArgs) {

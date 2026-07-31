@@ -89,7 +89,7 @@ let mbs: Vec<Batch> = /* your micro-batches */;
 dp.zero_grads();
 dp.forward_backward(&mbs);                    // concurrent across cards
 dp.adamw_step(step, lr, wd, Some(1.0), 1.0 / mbs.len() as f32);
-dp.save("out.weights");
+dp.save("out.safetensors");
 ```
 
 ## Where each multi-GPU mode fits

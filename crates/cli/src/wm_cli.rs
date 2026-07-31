@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `brain wm …` — world-model subcommands: import (torch .pt -> .weights),
+//! `brain wm …` — world-model subcommands: import (torch .pt -> .safetensors),
 //! play (windowed SDL / headless), bench. Models: `diamond` (pretrained
 //! Atari-100k EDM world model) and `fake` (deterministic GPU-free test
 //! model). See docs/models/world-models/status.md.
@@ -26,9 +26,9 @@ pub fn run_wm(args: &[String]) {
         Some("export") => run_export(&args[1..]),
         _ => {
             eprintln!("usage: brain wm <import|export|play|replay|bench> [options]");
-            eprintln!("  import --arch diamond --src <agent.pt> --out <F.weights> [--actions-count N]");
-            eprintln!("  export --arch diamond --weights <F.weights> --onnx <F.onnx>");
-            eprintln!("  play  --model fake|diamond [--weights F.weights] [--device cpu|gpu|npu]");
+            eprintln!("  import --arch diamond --src <agent.pt> --out <F.safetensors> [--actions-count N]");
+            eprintln!("  export --arch diamond --weights <F.safetensors> --onnx <F.onnx>");
+            eprintln!("  play  --model fake|diamond [--weights F.safetensors] [--device cpu|gpu|npu]");
             eprintln!("        [--onnx F.onnx (npu)] [--fps N] [--scale N] [--seed N] [--adaptive]");
             eprintln!("        [--record DIR (episode dataset)]");
             eprintln!("        [--headless --frames N [--actions FILE | --action-seq a,b,c]");
@@ -71,7 +71,7 @@ fn finalize_recording(rec: RecorderSink, dir: &str) {
 fn run_finetune(rest: &[String]) {
     let mut a = Args::new(rest);
     let weights = a.take_str("--weights").unwrap_or_else(|| {
-        eprintln!("wm finetune needs --weights <base.weights>");
+        eprintln!("wm finetune needs --weights <base.safetensors>");
         std::process::exit(2);
     });
     let data_dir = a.take_str("--data").unwrap_or_else(|| {
@@ -79,7 +79,7 @@ fn run_finetune(rest: &[String]) {
         std::process::exit(2);
     });
     let out = a.take_str("--out").unwrap_or_else(|| {
-        eprintln!("wm finetune needs --out <tuned.weights>");
+        eprintln!("wm finetune needs --out <tuned.safetensors>");
         std::process::exit(2);
     });
     let steps = a.u32_or("--steps", 300);
@@ -159,7 +159,7 @@ fn run_import(rest: &[String]) {
         std::process::exit(2);
     });
     let out = a.take_str("--out").unwrap_or_else(|| {
-        eprintln!("wm import needs --out <F.weights>");
+        eprintln!("wm import needs --out <F.safetensors>");
         std::process::exit(2);
     });
     let actions = a.u32_or("--actions-count", 4);
@@ -178,7 +178,7 @@ fn run_import(rest: &[String]) {
     }
 }
 
-/// `brain wm export`: DIAMOND `.weights` -> fp32 ONNX of the UNet inner model
+/// `brain wm export`: DIAMOND `.safetensors` -> fp32 ONNX of the UNet inner model
 /// (for `--device npu` play/bench via OpenVINO).
 fn run_export(rest: &[String]) {
     let mut a = Args::new(rest);
@@ -188,7 +188,7 @@ fn run_export(rest: &[String]) {
         std::process::exit(2);
     }
     let weights = a.take_str("--weights").unwrap_or_else(|| {
-        eprintln!("wm export needs --weights <F.weights> (from `brain wm import`)");
+        eprintln!("wm export needs --weights <F.safetensors> (from `brain wm import`)");
         std::process::exit(2);
     });
     let onnx = a.take_str("--onnx").unwrap_or_else(|| {
@@ -261,7 +261,7 @@ fn build_model(
     match name {
         "diamond" => {
             let path = weights.unwrap_or_else(|| {
-                eprintln!("--model diamond needs --weights <F.weights> (from `brain wm import`)");
+                eprintln!("--model diamond needs --weights <F.safetensors> (from `brain wm import`)");
                 std::process::exit(2);
             });
             // `--device npu` is consumed by main's select_backend (it is a

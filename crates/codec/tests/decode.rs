@@ -39,7 +39,7 @@ fn import_to_temp() -> String {
     SHARED
         .get_or_init(|| {
             let out = std::env::temp_dir()
-                .join(format!("codec_decode_{}.weights", std::process::id()))
+                .join(format!("codec_decode_{}.safetensors", std::process::id()))
                 .to_string_lossy()
                 .into_owned();
             codec::import(&CKPT_DIR, &out).expect("import failed");

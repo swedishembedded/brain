@@ -506,7 +506,7 @@ mod tests {
             MemCost::new(GB, 0)
         }
         fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
-            Err("checkpoint not found: /nope.weights".into())
+            Err("checkpoint not found: /nope.safetensors".into())
         }
     }
 

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Import a HuggingFace LFM2.5-Encoder checkpoint (`config.json` +
-//! `model.safetensors`) into a brain `.weights` container.
+//! `model.safetensors`) into a brain `.safetensors` container.
 //!
 //! Convention match (same as qwen): brain's `matmul.wgsl` is `out = x @ Wᵀ`
 //! with `W:[out,in]` row-major — exactly HF `nn.Linear.weight`; the embedding

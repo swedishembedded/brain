@@ -9,7 +9,7 @@ This document covers the **`brain yolo` CLI** (train / eval / detect /
 fine-tune on a synthetic dataset), the **`brain run` runtime integration**
 (camera frames → detections over the event protocol), and **the offline
 pretrained-weight export path** — turning an official Ultralytics `yolov8n.pt`
-into brain's native `.weights` format for fine-tuning, plus the layer-by-layer
+into brain's native `.safetensors` format for fine-tuning, plus the layer-by-layer
 reference-parity test.
 
 ---
@@ -27,23 +27,23 @@ images upload directly (no letterbox) during training. Everything runs on the
 BRAIN_DEVICE=cpu brain data gen detect --out data/detect --n 64 --seed 7
 
 # 2. Train the tiny YOLOv8 graph (real detection loss: assigner+BCE+CIoU+DFL).
-BRAIN_DEVICE=cpu brain yolo train data/detect --out out/yolo.weights \
+BRAIN_DEVICE=cpu brain yolo train data/detect --out out/yolo.safetensors \
     --steps 150 --batch 4 --lr 3e-3 --seed 7
 #   flags: --steps --batch --lr --wd --nc --input --seed
-#   prints the loss every 10 steps; saves a `.weights` checkpoint at the end.
+#   prints the loss every 10 steps; saves a `.safetensors` checkpoint at the end.
 
 # 3. Evaluate: mAP@0.5 + precision/recall over the 10% val split (eval::detection).
-BRAIN_DEVICE=cpu brain yolo eval --weights out/yolo.weights --data data/detect \
+BRAIN_DEVICE=cpu brain yolo eval --weights out/yolo.safetensors --data data/detect \
     --conf 0.1 --iou 0.45
 
 # 4. Detect on one image — a binary PPM (P6) file OR a dataset dir (image 0):
-BRAIN_DEVICE=cpu brain yolo detect --weights out/yolo.weights --image data/detect \
+BRAIN_DEVICE=cpu brain yolo detect --weights out/yolo.safetensors --image data/detect \
     --conf 0.1 --iou 0.45
 #   prints one JSON line per detection: [x1,y1,x2,y2,conf,class]
 
-# 5. Fine-tune from a pretrained checkpoint (e.g. an exported yolov8n.brain.weights):
-BRAIN_DEVICE=cpu brain yolo fine-tune data/detect --weights pretrained.weights \
-    --out out/yolo-ft.weights --steps 150
+# 5. Fine-tune from a pretrained checkpoint (e.g. an exported yolov8n.brain.safetensors):
+BRAIN_DEVICE=cpu brain yolo fine-tune data/detect --weights pretrained.safetensors \
+    --out out/yolo-ft.safetensors --steps 150
 #   tensors present in BOTH checkpoint and model (matched by element count) are
 #   copied in; the rest keep their random init (e.g. a head with a different nc).
 ```
@@ -71,10 +71,10 @@ HWC floats, calls `Yolo::detect` (letterbox → eval-mode forward → DFL decode
 NMS), and returns `[x1,y1,x2,y2,conf,class]` rows; labels are numeric class ids.
 
 ```bash
-# Load a trained YOLO as the detector (or set BRAIN_YOLO=out/yolo.weights).
+# Load a trained YOLO as the detector (or set BRAIN_YOLO=out/yolo.safetensors).
 # With no --yolo, a FakeDetectModel returns a fixed box so the loop still runs.
 printf '{"event":"camera_frame","format":"rgb8","w":128,"h":128,"data":"<base64 rgb8>"}\n' \
-  | BRAIN_DEVICE=cpu brain run --yolo out/yolo.weights
+  | BRAIN_DEVICE=cpu brain run --yolo out/yolo.safetensors
 # -> {"event":"object_detected","dets":[[x1,y1,x2,y2,conf,class],…],"labels":["0","1","2"]}
 ```
 
@@ -107,13 +107,13 @@ On a dev machine with `pip install ultralytics torch`:
 ```bash
 # 1. Convert weights -> brain native container.
 python3 tools/yolo_export/export_yolov8.py \
-    --weights yolov8n.pt --out yolov8n.brain.weights
+    --weights yolov8n.pt --out yolov8n.brain.safetensors
 
 # 2. (Optional) Dump per-stage activations for the parity test, for one fixed
 #    preprocessed 640x640 input image.
 python3 tools/yolo_export/export_yolov8.py \
-    --weights yolov8n.pt --out yolov8n.brain.weights \
-    --dump-acts --image bus.jpg --acts-out yolov8n.acts.weights
+    --weights yolov8n.pt --out yolov8n.brain.safetensors \
+    --dump-acts --image bus.jpg --acts-out yolov8n.acts.safetensors
 
 # 3. Torch-free self-test: the name map covers every brain tensor 1:1.
 python3 tools/yolo_export/export_yolov8.py \
@@ -288,19 +288,19 @@ tensors with EQUAL shapes. The exporter will load a real yolov8n.pt 1:1.
 
 (355 = 297 mapped + 57 `num_batches_tracked` + 1 `dfl.conv.weight`.) This proves
 that on a dev machine with torch, `python3 export_yolov8.py --weights yolov8n.pt`
-will map + shape-check every tensor and write a valid `.weights` file.
+will map + shape-check every tensor and write a valid `.safetensors` file.
 
 ### Running real parity on a dev machine
 
 ```bash
 pip install ultralytics torch
 python3 tools/yolo_export/export_yolov8.py --weights yolov8n.pt \
-    --out yolov8n.brain.weights                       # 297 tensors, shape-checked
+    --out yolov8n.brain.safetensors                       # 297 tensors, shape-checked
 python3 tools/yolo_export/export_yolov8.py --weights yolov8n.pt \
-    --out yolov8n.brain.weights --dump-acts --image bus.jpg \
-    --acts-out yolov8n.acts.weights                   # per-stage activations
-YOLO_PARITY_WEIGHTS=yolov8n.brain.weights \
-YOLO_PARITY_ACTS=yolov8n.acts.weights \
+    --out yolov8n.brain.safetensors --dump-acts --image bus.jpg \
+    --acts-out yolov8n.acts.safetensors                   # per-stage activations
+YOLO_PARITY_WEIGHTS=yolov8n.brain.safetensors \
+YOLO_PARITY_ACTS=yolov8n.acts.safetensors \
     cargo test -p brain-yolo --test parity -- --nocapture
 ```
 
@@ -317,14 +317,14 @@ brain CI box** (no torch/GPU; a 640 forward on the CPU JIT is slow), so it is
 cargo test -p brain-yolo --test parity
 
 # Runs on a dev machine once you have the exported files:
-YOLO_PARITY_WEIGHTS=yolov8n.brain.weights \
-YOLO_PARITY_ACTS=yolov8n.acts.weights \
+YOLO_PARITY_WEIGHTS=yolov8n.brain.safetensors \
+YOLO_PARITY_ACTS=yolov8n.acts.safetensors \
     cargo test -p brain-yolo --test parity -- --nocapture
 ```
 
 When the files exist the test:
 
-1. loads `yolov8n.brain.weights` and builds `Yolo::new(YoloConfig::yolov8n(), 1, …)`
+1. loads `yolov8n.brain.safetensors` and builds `Yolo::new(YoloConfig::yolov8n(), 1, …)`
    directly from the loaded weights,
 2. uploads the dumped `input` tensor (identical preprocessing to PyTorch),
 3. runs the forward and reads the head logits via `Yolo::raw_logits()`,
@@ -339,10 +339,10 @@ When the files exist the test:
 
 ### What the parity test needs to actually run
 
-* `YOLO_PARITY_WEIGHTS` → an exported `yolov8n.brain.weights`
+* `YOLO_PARITY_WEIGHTS` → an exported `yolov8n.brain.safetensors`
   (from `export_yolov8.py`; requires the graph reconciliation above to produce a
   shape-correct file).
-* `YOLO_PARITY_ACTS` → the matching `yolov8n.acts.weights` activation dump
+* `YOLO_PARITY_ACTS` → the matching `yolov8n.acts.safetensors` activation dump
   (`--dump-acts`), optional but required for the stage-by-stage comparison.
 
 ---

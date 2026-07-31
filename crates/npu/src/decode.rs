@@ -15,7 +15,7 @@ use yolo::YoloConfig;
 
 use crate::openvino::{HeadOutputs, NpuConfig, NpuError, NpuSession};
 
-/// One-call detection on the NPU straight from a `.weights` checkpoint: export an
+/// One-call detection on the NPU straight from a `.safetensors` checkpoint: export an
 /// fp32 ONNX in memory, compile it for the device, run, and decode. This backs
 /// `brain yolo detect --device npu` (the convenience fp32 path). For INT8, export
 /// + quantize first, then `brain npu run` on the quantized ONNX.

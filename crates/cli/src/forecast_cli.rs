@@ -11,8 +11,8 @@
 //!   TCP endpoint) with the baselines registered (and Chronos-2 via
 //!   `--chronos2 <weights>`), so a Python client can drive forecasts over any
 //!   transport.
-//! - `import --hf <dir> --out chronos2.weights` converts an `amazon/chronos-2`
-//!   checkpoint into a brain `.weights` container.
+//! - `import --hf <dir> --out chronos2.safetensors` converts an `amazon/chronos-2`
+//!   checkpoint into a brain `.safetensors` container.
 
 use crate::args::Args;
 use std::sync::Arc;
@@ -76,16 +76,16 @@ fn build_registry(fm: &FmPaths) -> runtime::Registry {
     reg
 }
 
-/// `brain forecast import --hf <dir> --out chronos2.weights` (Chronos-2), or
-/// `brain forecast import --fincast <v1.safetensors> --out fincast.weights`.
+/// `brain forecast import --hf <dir> --out chronos2.safetensors` (Chronos-2), or
+/// `brain forecast import --fincast <v1.safetensors> --out fincast.safetensors`.
 fn import(args: &[String]) {
     let mut a = Args::new(args);
     let hf = a.str_or("--hf", "");
     let fincast_ckpt = a.take_str("--fincast");
-    let out = a.str_or("--out", "chronos2.weights");
+    let out = a.str_or("--out", "chronos2.safetensors");
     a.finish();
     if let Some(ckpt) = fincast_ckpt {
-        let out = if out == "chronos2.weights" { "fincast.weights".to_string() } else { out };
+        let out = if out == "chronos2.safetensors" { "fincast.safetensors".to_string() } else { out };
         match fincast::import::import(&ckpt, &out) {
             Ok(()) => println!("ok: wrote {out}"),
             Err(e) => eprintln!("import failed: {e}"),
@@ -93,8 +93,8 @@ fn import(args: &[String]) {
         return;
     }
     if hf.is_empty() {
-        eprintln!("usage: brain forecast import --hf <amazon/chronos-2 dir> --out chronos2.weights");
-        eprintln!("   or: brain forecast import --fincast <FinCast safetensors> --out fincast.weights");
+        eprintln!("usage: brain forecast import --hf <amazon/chronos-2 dir> --out chronos2.safetensors");
+        eprintln!("   or: brain forecast import --fincast <FinCast safetensors> --out fincast.safetensors");
         return;
     }
     match chronos2::import::import(&hf, &out) {
@@ -307,7 +307,7 @@ fn finetune(args: &[String]) {
     let w = weights.expect("weights always returned");
     // Save FIRST (so a slow generalization eval can't cost us the checkpoint).
     if rep.promoted {
-        let path = out.unwrap_or_else(|| "kronos-decoder-ft.weights".into());
+        let path = out.unwrap_or_else(|| "kronos-decoder-ft.safetensors".into());
         kronos::finetune::save_decoder_weights(&cfg, &w, &path);
         println!("promoted checkpoint → {path}");
     } else {

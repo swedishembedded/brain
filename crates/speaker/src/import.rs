@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Import the official Qwen3-TTS `speaker_encoder.*` weights into a brain
-//! `.weights` container.
+//! `.safetensors` container.
 //!
 //! Pure 1:1 name remap: every `speaker_encoder.*` tensor is kept verbatim (just
 //! the `speaker_encoder.` prefix stripped) with its PyTorch layout untouched —

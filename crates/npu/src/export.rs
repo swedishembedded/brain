@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Export a trained YOLO `.weights` checkpoint to ONNX (fp32 or INT8-QDQ).
+//! Export a trained YOLO `.safetensors` checkpoint to ONNX (fp32 or INT8-QDQ).
 
 use onnx::GraphBuilder;
 

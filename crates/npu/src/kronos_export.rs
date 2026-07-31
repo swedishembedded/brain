@@ -130,7 +130,7 @@ mod tests {
         let s2_ref = dec.core_forward_s2(&ctx_ref, &sib, t);
 
         // save tiny decoder, export both graphs at T=t.
-        let tmp = std::env::temp_dir().join(format!("kronos_tiny_{}.weights", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("kronos_tiny_{}.safetensors", std::process::id()));
         let tmp = tmp.to_str().unwrap();
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
             .param_list()

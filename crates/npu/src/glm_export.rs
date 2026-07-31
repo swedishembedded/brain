@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Export a brain GLM `.weights` checkpoint to an ONNX decoder graph (fixed
+//! Export a brain GLM `.safetensors` checkpoint to an ONNX decoder graph (fixed
 //! sequence length) for OpenVINO whole-graph compilation. Pure Rust — no NPU
 //! needed to produce the file. See `docs/models/glm/npu.md`.
 

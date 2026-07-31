@@ -11,8 +11,8 @@
 //!
 //! Config is env-only (no hardcoded paths), mirroring `brain tts synth`'s
 //! `--weights-dir` / `--ckpt` flags:
-//!   * `BRAIN_TTS_WEIGHTS` — dir holding `talker.weights`, `mtp.weights`,
-//!     `codec.weights`, `speaker.weights` (the primary gate; unset ⇒ not served).
+//!   * `BRAIN_TTS_WEIGHTS` — dir holding `talker.safetensors`, `mtp.safetensors`,
+//!     `codec.safetensors`, `speaker.safetensors` (the primary gate; unset ⇒ not served).
 //!   * `BRAIN_TTS_CKPT`     — HF checkpoint dir (for `config.json` + tokenizer).
 //!   * `BRAIN_TTS_LANG`     — default synthesis language (default `english`).
 //!   * `BRAIN_TTS_REF`      — optional reference `.wav`: when set, `speak` voice
@@ -57,10 +57,10 @@ impl TtsResident {
     /// Brain checkpoint paths (same layout as `brain tts`'s `paths()` helper).
     fn paths(&self) -> TtsPaths {
         TtsPaths {
-            talker: format!("{}/talker.weights", self.weights_dir),
-            mtp: format!("{}/mtp.weights", self.weights_dir),
-            codec: format!("{}/codec.weights", self.weights_dir),
-            speaker: format!("{}/speaker.weights", self.weights_dir),
+            talker: format!("{}/talker.safetensors", self.weights_dir),
+            mtp: format!("{}/mtp.safetensors", self.weights_dir),
+            codec: format!("{}/codec.safetensors", self.weights_dir),
+            speaker: format!("{}/speaker.safetensors", self.weights_dir),
             ckpt_dir: self.ckpt_dir.clone(),
         }
     }

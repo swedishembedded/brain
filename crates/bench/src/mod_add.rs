@@ -266,7 +266,7 @@ impl Benchmark for ModAdd {
             align_to_lines: true,
             seed,
         };
-        let out = dir.join("mod_add.weights");
+        let out = dir.join("mod_add.safetensors");
         let (init_loss, final_loss) = lm.train_decoder(dir, block, &train_cfg, &out)?;
 
         // ---- SCORE: test accuracy on held-out facts --------------------------

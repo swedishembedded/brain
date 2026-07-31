@@ -15,10 +15,10 @@ CARGO_HOME=/tmp/cargo-moe cargo build --release
 
 # train from scratch; saves weights in the inference engine's format
 ./target/release/moe train --steps 2000 --batch-size 16 --block-size 64 \
-    --lr 6e-4 --out moe_rs.weights
+    --lr 6e-4 --out moe_rs.safetensors
 
 # generate from the model you just trained
-./target/release/moe generate --weights moe_rs.weights --prompt 1,2,3,4 --max-new 64
+./target/release/moe generate --weights moe_rs.safetensors --prompt 1,2,3,4 --max-new 64
 ```
 
 Train flags: `--steps`, `--batch-size`, `--block-size` (sequence length, ≤64),

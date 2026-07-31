@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Import a HuggingFace Qwen3 checkpoint (`config.json` + `model.safetensors`)
-//! into a brain `.weights` container.
+//! into a brain `.safetensors` container.
 //!
 //! Convention match (verified): brain's `matmul.wgsl` is `out = x @ Wᵀ` with
 //! `W:[out,in]` row-major — exactly HF `nn.Linear.weight`. The embedding table

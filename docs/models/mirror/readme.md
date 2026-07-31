@@ -7,10 +7,10 @@ exactly from the reference checkpoint and re-implemented from scratch on the
 brain engine (same WGSL kernels on wgpu and the CPU JIT).
 
 ```
-brain mirror import <model.safetensors|hf_dir> --out out/mirror.weights
-brain mirror infer  --weights out/mirror.weights --images photos/ --maps
+brain mirror import <model.safetensors|hf_dir> --out out/mirror.safetensors
+brain mirror infer  --weights out/mirror.safetensors --images photos/ --maps
 brain splat view    out/mirror/scene.ply            # fly through it (WASD+mouse)
-brain mirror demo   --weights out/mirror.weights --images photos/   # both at once
+brain mirror demo   --weights out/mirror.safetensors --images photos/   # both at once
 ```
 
 Or via make: `make mirror/import MIRROR_CKPT=…`, `make mirror/infer

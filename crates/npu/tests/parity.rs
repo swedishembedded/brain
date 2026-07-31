@@ -38,7 +38,7 @@ fn int8_sim_tracks_fp32() {
     }
     let cfg = YoloConfig::tiny(3);
     let side = cfg.input as usize;
-    let wpath = tmp("tiny.weights");
+    let wpath = tmp("tiny.safetensors");
 
     // A trained-ish model would be ideal, but quantization fidelity is a property
     // of the weights' dynamic range, not their task accuracy; an init model is a

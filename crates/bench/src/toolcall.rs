@@ -349,7 +349,7 @@ impl Benchmark for Toolcall {
             align_to_lines: true, // each window is one full sequence (NL-aligned)
             seed,
         };
-        let out = dir.join("toolcall.weights");
+        let out = dir.join("toolcall.safetensors");
         let (init_loss, final_loss) = lm.train_decoder(dir, block, &train_cfg, &out)?;
 
         // ---- SCORE: exact-match of the full tool call on held-out sequences ---

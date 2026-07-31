@@ -105,7 +105,7 @@ impl Chronos2 {
         Ok(Chronos2 { gpu, cfg, w })
     }
 
-    /// Load a model from a brain `.weights` container (see [`crate::import`]).
+    /// Load a model from a brain `.safetensors` container (see [`crate::import`]).
     pub fn load(path: &str) -> Result<Chronos2, String> {
         Chronos2::load_on(Gpu::new(PIPELINES), path)
     }

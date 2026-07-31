@@ -65,7 +65,7 @@ pub fn build_onnx_bytes(cfg: &DiamondConfig, tensors: &Tensors) -> Vec<u8> {
     g.finish()
 }
 
-/// `brain wm export`: `.weights` -> fp32 ONNX at `out_path`.
+/// `brain wm export`: `.safetensors` -> fp32 ONNX at `out_path`.
 pub fn export_onnx(weights_path: &str, out_path: &str) -> Result<DiamondConfig, String> {
     let (cfg, tensors) = crate::import::load(weights_path)?;
     std::fs::write(out_path, build_onnx_bytes(&cfg, &tensors))
@@ -81,7 +81,7 @@ pub struct DiamondNpu {
 }
 
 impl DiamondNpu {
-    /// Load `.weights` (config + host conditioning tensors) and compile
+    /// Load `.safetensors` (config + host conditioning tensors) and compile
     /// `onnx_path` (from `brain wm export`) for the configured device.
     pub fn load(weights_path: &str, onnx_path: &str, ov: &NpuConfig) -> Result<DiamondNpu, String> {
         let (cfg, tensors) = crate::import::load(weights_path)?;

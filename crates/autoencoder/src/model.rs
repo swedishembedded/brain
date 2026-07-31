@@ -192,7 +192,7 @@ pub struct Autoencoder {
 }
 
 impl Autoencoder {
-    /// Load a model from a `.weights` checkpoint, sized for batch `b`.
+    /// Load a model from a `.safetensors` checkpoint, sized for batch `b`.
     pub fn load(path: &str, b: u32) -> Autoencoder {
         let c = checkpoint::load(path);
         let cfg = AutoencoderConfig::from_json(&c.header["config"]);

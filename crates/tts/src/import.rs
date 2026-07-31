@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Import a HuggingFace `Qwen3-TTS` checkpoint (`config.json` +
-//! `model.safetensors`) into brain `.weights` containers — one for the Talker
+//! `model.safetensors`) into brain `.safetensors` containers — one for the Talker
 //! decoder, one for the MTP code-predictor.
 //!
 //! Convention match (identical to `crate::qwen::import`): brain's `matmul.wgsl`

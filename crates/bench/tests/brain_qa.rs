@@ -87,7 +87,7 @@ fn qwen_recalls_brain_codebase_facts() {
         seed: 7,
     };
     let block = 80u32; // longest "question=answer" line is ~55 chars
-    let out = dir.join("brainqa.weights");
+    let out = dir.join("brainqa.safetensors");
     let (l0, l1) = QwenDecoder.train_decoder(&dir, block, &cfg, &out).unwrap();
 
     // Closed-book recall (teacher-forced): given the question + the true answer

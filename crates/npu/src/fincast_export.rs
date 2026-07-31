@@ -11,7 +11,7 @@ use onnx::builder::GraphBuilder;
 use crate::fincast_topology::build_fincast_graph_quant;
 use crate::qwen_topology::Quant;
 
-/// Build the FinCast core ONNX bytes from a brain `.weights` container, for a
+/// Build the FinCast core ONNX bytes from a brain `.safetensors` container, for a
 /// fixed sequence length `s` (= number of patch tokens).
 pub fn export_onnx(weights_path: &str, s: usize, quant: Quant) -> Result<Vec<u8>, String> {
     let c = checkpoint::load(weights_path);
@@ -89,7 +89,7 @@ mod tests {
         }
 
         // save tiny weights, export the core ONNX for this s.
-        let tmp = std::env::temp_dir().join(format!("fincast_tiny_{}.weights", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("fincast_tiny_{}.safetensors", std::process::id()));
         let tmp = tmp.to_str().unwrap();
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
             .param_list()

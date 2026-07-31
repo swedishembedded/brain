@@ -9,7 +9,7 @@ point values per stage).
 
 - **P0**: `MirrorConfig::param_list()` reproduces the checkpoint's 1545
   tensors exactly (T0, device-free, incl. the 47 aliased `rope.periods`);
-  `brain mirror import` converts the 5.05 GB safetensors → `.weights` with
+  `brain mirror import` converts the 5.05 GB safetensors → `.safetensors` with
   every tensor consumed + shape-verified. Cross-cutting refactor:
   `layernorm`/`ln_stats`/`layernorm_dx` gained an eps parameter (DINOv2 needs
   1e-6); all 37 call sites updated, gradcheck green.

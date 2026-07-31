@@ -50,7 +50,7 @@ pub fn load_hf(cfg: &FincastConfig, path: &str) -> Result<HashMap<String, Vec<f3
     Ok(out)
 }
 
-/// Import a FinCast safetensors file (or dir) → a brain `.weights` container
+/// Import a FinCast safetensors file (or dir) → a brain `.safetensors` container
 /// (config + tensors). The config is the published default (FinCast ships no
 /// `config.json`; the dims are fixed by the checkpoint and asserted by T0).
 pub fn import(ckpt: &str, out_path: &str) -> Result<(), String> {
@@ -81,7 +81,7 @@ mod tests {
 
         // wrong numel is caught (write a container-like path via checkpoint save/load).
         let dir = std::env::temp_dir();
-        let good = dir.join(format!("fincast-imp-{}.weights", std::process::id()));
+        let good = dir.join(format!("fincast-imp-{}.safetensors", std::process::id()));
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
             cfg.param_list().into_iter().map(|(k, s)| { let n: usize = s.iter().product(); (k.clone(), vec![n as u64], full[&k].clone()) }).collect();
         checkpoint::save(good.to_str().unwrap(), cfg.to_json(), &tensors);

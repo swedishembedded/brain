@@ -57,7 +57,7 @@ fn talker_logits_match_reference() {
     let t = tokens.len();
     assert_eq!(ref_logits.len(), t * vocab, "dump shape [T,vocab]");
 
-    let out = std::env::temp_dir().join("brain_talker_parity.weights");
+    let out = std::env::temp_dir().join("brain_talker_parity.safetensors");
     let out = out.to_str().unwrap();
     tts::import::import_talker(&CKPT, out).expect("talker import");
     let model = TalkerModel::load_inference(out, 1, t as u32);

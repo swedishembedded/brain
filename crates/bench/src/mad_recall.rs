@@ -212,7 +212,7 @@ impl Benchmark for MadRecall {
             align_to_lines: true,
             seed,
         };
-        let out = dir.join("mad_recall.weights");
+        let out = dir.join("mad_recall.safetensors");
         let (init_loss, final_loss) = lm.train_decoder(dir, block, &train_cfg, &out)?;
 
         // ---- SCORE: single-query recall on held-out (val) sequences ----------

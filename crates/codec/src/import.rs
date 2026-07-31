@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Import the official `Qwen3-TTS-Tokenizer-12Hz` safetensors checkpoint into a
-//! brain `.weights` container — decode path **and** (additively) the encode path.
+//! brain `.safetensors` container — decode path **and** (additively) the encode path.
 //!
 //! The decoder lives under the `decoder.*` prefix (271 tensors); the encoder
 //! lives under `encoder.*` (225 tensors, a HuggingFace `MimiModel`). We do a

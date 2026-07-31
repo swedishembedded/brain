@@ -22,8 +22,8 @@ make web/dev      # builds the wasm, stages weights, runs the Next.js dev server
 `make web/dev`:
 1. compiles the Rust inference path to wasm + wasm-bindgen JS into
    `web/app/public/pkg` (`cargo build --target wasm32 --features webgpu`),
-2. copies `moe_pid.weights` into `web/app/public/` (train one first with
-   `./target/release/moe pid train … --out moe_pid.weights` if it's missing),
+2. copies `moe_pid.safetensors` into `web/app/public/` (train one first with
+   `./target/release/moe pid train … --out moe_pid.safetensors` if it's missing),
 3. installs npm deps if needed and starts the Next.js dev server.
 
 Other targets: `make web/build` (static export into `web/app/out`),

@@ -94,8 +94,8 @@ real datasets and the SSI + gradient loss slot into the same two dispatch
 sites in `depth::train`.
 
 ```bash
-brain depth train --out out/zipdepth.weights --steps 50 --batch 2 --size 64x64
-brain depth train --out out/ft.weights --weights zipdepth_base.pth   # fine-tune
+brain depth train --out out/zipdepth.safetensors --steps 50 --batch 2 --size 64x64
+brain depth train --out out/ft.safetensors --weights zipdepth_base.pth   # fine-tune
 ```
 
 `tests/p4_train.rs` pins that overfitting one batch at least halves the loss

@@ -8,9 +8,9 @@
 //! expert's shard; the coordinator overlays shards (last-wins) and reassembles.
 //!
 //! A **checkpoint directory** holds:
-//!   shared.weights              — every non-expert tensor (embeddings, attn,
+//!   shared.safetensors              — every non-expert tensor (embeddings, attn,
 //!                                 norms, router, head) + the model config
-//!   experts/expert_NNNN.weights — expert `NNNN`'s tensors across all layers
+//!   experts/expert_NNNN.safetensors — expert `NNNN`'s tensors across all layers
 //!   manifest.json               — config hash + per-file SHA-256 + expert list
 //!
 //! Expert tensors are those whose name matches `blocks.<L>.moe.experts.<E>.…`;
@@ -91,12 +91,12 @@ fn tensors_named<'a>(c: &'a Container, want: impl Fn(&str) -> bool) -> Vec<(Stri
         .collect()
 }
 
-/// Split a full MoE `.weights` checkpoint into a shard directory (all experts).
+/// Split a full MoE `.safetensors` checkpoint into a shard directory (all experts).
 pub fn split(base_weights: &str, out_dir: &Path) -> io::Result<Manifest> {
     split_filtered(base_weights, out_dir, None)
 }
 
-/// Like [`split`], but only write the experts in `keep` (plus `shared.weights`).
+/// Like [`split`], but only write the experts in `keep` (plus `shared.safetensors`).
 /// `keep = None` writes every expert; `Some(&[E])` produces a single-expert
 /// **overlay** directory ready to pass to [`assemble`] — this is what a
 /// federated worker returns after training one expert.
@@ -107,7 +107,7 @@ pub fn split_filtered(base_weights: &str, out_dir: &Path, keep: Option<&[u32]>) 
 
     // shared = every non-expert tensor.
     let shared = tensors_named(&c, |n| expert_id(n).is_none());
-    let shared_path = out_dir.join("shared.weights");
+    let shared_path = out_dir.join("shared.safetensors");
     checkpoint::save(shared_path.to_str().unwrap(), config.clone(), &shared);
 
     // per-expert shards (optionally filtered to `keep`).
@@ -121,10 +121,10 @@ pub fn split_filtered(base_weights: &str, out_dir: &Path, keep: Option<&[u32]>) 
     expert_ids.dedup();
 
     let mut files = BTreeMap::new();
-    files.insert("shared.weights".to_string(), file_hash(&shared_path)?);
+    files.insert("shared.safetensors".to_string(), file_hash(&shared_path)?);
     for &e in &expert_ids {
         let ts = tensors_named(&c, |n| expert_id(n) == Some(e));
-        let rel = format!("experts/expert_{e:04}.weights");
+        let rel = format!("experts/expert_{e:04}.safetensors");
         let path = out_dir.join(&rel);
         checkpoint::save(path.to_str().unwrap(), config.clone(), &ts);
         files.insert(rel, file_hash(&path)?);
@@ -143,7 +143,7 @@ fn file_hash(p: &Path) -> io::Result<String> {
     Ok(sha256::hex(&fs::read(p)?))
 }
 
-/// Verify a shard directory against its manifest: config-hash of `shared.weights`
+/// Verify a shard directory against its manifest: config-hash of `shared.safetensors`
 /// matches, and every listed file's bytes hash as recorded. Returns the manifest.
 pub fn verify(dir: &Path) -> io::Result<Manifest> {
     let manifest = Manifest::from_json(&fs::read_to_string(dir.join("manifest.json"))?)
@@ -154,24 +154,24 @@ pub fn verify(dir: &Path) -> io::Result<Manifest> {
             return Err(io::Error::other(format!("hash mismatch for {rel}: {got} != {want}")));
         }
     }
-    let shared = checkpoint::load(dir.join("shared.weights").to_str().unwrap());
+    let shared = checkpoint::load(dir.join("shared.safetensors").to_str().unwrap());
     let got = config_hash(&shared.header["config"]);
     if got != manifest.base_config_sha256 {
-        return Err(io::Error::other("shared.weights config hash != manifest base hash"));
+        return Err(io::Error::other("shared.safetensors config hash != manifest base hash"));
     }
     Ok(manifest)
 }
 
-/// Merge a shard directory back into a single full `.weights` checkpoint.
+/// Merge a shard directory back into a single full `.safetensors` checkpoint.
 pub fn merge_to_full(dir: &Path, out_weights: &str) -> io::Result<()> {
-    let shared = checkpoint::load(dir.join("shared.weights").to_str().unwrap());
+    let shared = checkpoint::load(dir.join("shared.safetensors").to_str().unwrap());
     let config = shared.header["config"].clone();
     let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = tensors_named(&shared, |_| true);
 
     let manifest = Manifest::from_json(&fs::read_to_string(dir.join("manifest.json"))?)
         .map_err(io::Error::other)?;
     for e in &manifest.experts {
-        let path = dir.join(format!("experts/expert_{e:04}.weights"));
+        let path = dir.join(format!("experts/expert_{e:04}.safetensors"));
         let ec = checkpoint::load(path.to_str().unwrap());
         tensors.extend(tensors_named(&ec, |_| true));
     }
@@ -186,7 +186,7 @@ pub fn assemble(base_dir: &Path, overlays: &[&Path], out_weights: &str) -> io::R
     let base_manifest = verify(base_dir)?;
 
     // Start from base shared + base experts, indexed by name for last-wins.
-    let shared = checkpoint::load(base_dir.join("shared.weights").to_str().unwrap());
+    let shared = checkpoint::load(base_dir.join("shared.safetensors").to_str().unwrap());
     let config = shared.header["config"].clone();
     let mut by_name: BTreeMap<String, Vec<f32>> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
@@ -200,7 +200,7 @@ pub fn assemble(base_dir: &Path, overlays: &[&Path], out_weights: &str) -> io::R
         push(&t.name, &t.data, &mut by_name, &mut order);
     }
     for &e in &base_manifest.experts {
-        let ec = checkpoint::load(base_dir.join(format!("experts/expert_{e:04}.weights")).to_str().unwrap());
+        let ec = checkpoint::load(base_dir.join(format!("experts/expert_{e:04}.safetensors")).to_str().unwrap());
         for t in &ec.tensors {
             push(&t.name, &t.data, &mut by_name, &mut order);
         }
@@ -216,12 +216,12 @@ pub fn assemble(base_dir: &Path, overlays: &[&Path], out_weights: &str) -> io::R
             )));
         }
         // overlay shared (if it differs from base — same names just overwrite)
-        let osh = checkpoint::load(ov.join("shared.weights").to_str().unwrap());
+        let osh = checkpoint::load(ov.join("shared.safetensors").to_str().unwrap());
         for t in &osh.tensors {
             push(&t.name, &t.data, &mut by_name, &mut order);
         }
         for e in &m.experts {
-            let ec = checkpoint::load(ov.join(format!("experts/expert_{e:04}.weights")).to_str().unwrap());
+            let ec = checkpoint::load(ov.join(format!("experts/expert_{e:04}.safetensors")).to_str().unwrap());
             for t in &ec.tensors {
                 push(&t.name, &t.data, &mut by_name, &mut order);
             }
@@ -275,7 +275,7 @@ mod tests {
         let dir = tmp("rt");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let base = dir.join("base.weights");
+        let base = dir.join("base.safetensors");
         make_base(base.to_str().unwrap());
 
         let sdir = dir.join("shards");
@@ -283,7 +283,7 @@ mod tests {
         assert_eq!(m.experts, vec![0, 1, 2]);
         verify(&sdir).unwrap(); // manifest hashes check out
 
-        let out = dir.join("reassembled.weights");
+        let out = dir.join("reassembled.safetensors");
         assemble(&sdir, &[], out.to_str().unwrap()).unwrap();
 
         // Reassembled == original (tensor-for-tensor).
@@ -301,7 +301,7 @@ mod tests {
         let dir = tmp("ov");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let base = dir.join("base.weights");
+        let base = dir.join("base.safetensors");
         make_base(base.to_str().unwrap());
         let sdir = dir.join("shards");
         split(base.to_str().unwrap(), &sdir).unwrap();
@@ -309,22 +309,22 @@ mod tests {
         // Build an overlay dir carrying only a retrained expert 1 (data = 99).
         let odir = dir.join("overlay");
         fs::create_dir_all(odir.join("experts")).unwrap();
-        let config = checkpoint::load(sdir.join("shared.weights").to_str().unwrap()).header["config"].clone();
-        // overlay must still carry a shared.weights (same config) for verify().
-        checkpoint::save(odir.join("shared.weights").to_str().unwrap(), config.clone(), &[]);
+        let config = checkpoint::load(sdir.join("shared.safetensors").to_str().unwrap()).header["config"].clone();
+        // overlay must still carry a shared.safetensors (same config) for verify().
+        checkpoint::save(odir.join("shared.safetensors").to_str().unwrap(), config.clone(), &[]);
         let e1 = vec![
             ("blocks.0.moe.experts.1.w_gate.weight".to_string(), vec![8u64], vec![99.0; 8]),
             ("blocks.0.moe.experts.1.w_up.weight".to_string(), vec![8], vec![99.0; 8]),
             ("blocks.0.moe.experts.1.w_down.weight".to_string(), vec![8], vec![99.0; 8]),
         ];
-        checkpoint::save(odir.join("experts/expert_0001.weights").to_str().unwrap(), config.clone(), &e1);
+        checkpoint::save(odir.join("experts/expert_0001.safetensors").to_str().unwrap(), config.clone(), &e1);
         let mut files = BTreeMap::new();
-        files.insert("shared.weights".to_string(), file_hash(&odir.join("shared.weights")).unwrap());
-        files.insert("experts/expert_0001.weights".to_string(), file_hash(&odir.join("experts/expert_0001.weights")).unwrap());
+        files.insert("shared.safetensors".to_string(), file_hash(&odir.join("shared.safetensors")).unwrap());
+        files.insert("experts/expert_0001.safetensors".to_string(), file_hash(&odir.join("experts/expert_0001.safetensors")).unwrap());
         let man = Manifest { base_config_sha256: config_hash(&config), experts: vec![1], files };
         fs::write(odir.join("manifest.json"), man.to_json()).unwrap();
 
-        let out = dir.join("assembled.weights");
+        let out = dir.join("assembled.safetensors");
         assemble(&sdir, &[&odir], out.to_str().unwrap()).unwrap();
         let b = checkpoint::load(out.to_str().unwrap());
         // expert 1 replaced with 99s; expert 0 and 2 unchanged (10, 12).

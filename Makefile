@@ -64,10 +64,10 @@ help:
 	@echo "  make gradcheck               numerical backprop correctness gate (GPT)"
 	@echo "  make data/<name>             generate a dataset (calculator|reverser|wordcalc|"
 	@echo "                               timeseries|shakespeare_char|gpt) into $(DATA)/<name>"
-	@echo "  make train/gpt/<name>        train GPT on a dataset -> $(OUT)/gpt-<name>.weights"
+	@echo "  make train/gpt/<name>        train GPT on a dataset -> $(OUT)/gpt-<name>.safetensors"
 	@echo "  make eval/gpt/<name>         perplexity + exact-match for a trained GPT"
 	@echo "  make data/detect             synthetic object-detection dataset -> $(DATA)/detect"
-	@echo "  make train/yolo              train tiny YOLO on it -> $(OUT)/yolo.weights"
+	@echo "  make train/yolo              train tiny YOLO on it -> $(OUT)/yolo.safetensors"
 	@echo "  make eval/yolo               mAP@0.5 + precision/recall for the trained YOLO"
 	@echo "  make detect/yolo             run detection on a sample image (JSON boxes)"
 	@echo "  make bench                   run the architecture-evaluation benchmark suite (all)"
@@ -243,14 +243,14 @@ MASK_wordcalc   := --mask =
 
 train/gpt/%: release
 	@mkdir -p $(OUT)
-	$(BRAIN) gpt train $(DATA)/$* --out $(OUT)/gpt-$*.weights \
+	$(BRAIN) gpt train $(DATA)/$* --out $(OUT)/gpt-$*.safetensors \
 		--steps $(STEPS) --batch $(BATCH) --block $(BLOCK) \
 		--layers $(LAYERS) --d-model $(DMODEL) --heads $(HEADS) --lr $(LR) \
 		--seed $(SEED) $(MASK_$*)
 
 # ---- eval (pattern: eval/gpt/<dataset>) -----------------------------------
 eval/gpt/%: release
-	$(BRAIN) gpt eval --weights $(OUT)/gpt-$*.weights --data $(DATA)/$*
+	$(BRAIN) gpt eval --weights $(OUT)/gpt-$*.safetensors --data $(DATA)/$*
 
 # ---- YOLO detector (synthetic detection dataset) --------------------------
 # `make data/detect` generates a synthetic object-detection dataset (RGB shapes
@@ -263,15 +263,15 @@ data/detect: release
 
 train/yolo: release
 	@mkdir -p $(OUT)
-	$(BRAIN) yolo train $(DATA)/detect --out $(OUT)/yolo.weights \
+	$(BRAIN) yolo train $(DATA)/detect --out $(OUT)/yolo.safetensors \
 		--steps $(YOLO_STEPS) --batch $(YOLO_BATCH) --lr $(YOLO_LR) --seed $(SEED)
 
 eval/yolo: release
-	$(BRAIN) yolo eval --weights $(OUT)/yolo.weights --data $(DATA)/detect \
+	$(BRAIN) yolo eval --weights $(OUT)/yolo.safetensors --data $(DATA)/detect \
 		--conf $(YOLO_CONF) --iou $(YOLO_IOU)
 
 detect/yolo: release
-	$(BRAIN) yolo detect --weights $(OUT)/yolo.weights --image $(DATA)/detect \
+	$(BRAIN) yolo detect --weights $(OUT)/yolo.safetensors --image $(DATA)/detect \
 		--conf $(YOLO_CONF) --iou $(YOLO_IOU)
 
 # ---- depth (ZipDepth) ------------------------------------------------------
@@ -295,9 +295,9 @@ depth/camera: release
 	$(BRAIN) depth --camera --weights $(ZIPDEPTH_PTH) $(DEPTH_ARGS)
 
 # WorldMirror-2 (multi-view 3D reconstruction). MIRROR_CKPT = the reference
-# model.safetensors (or its HF dir); the converted .weights is what infer uses.
+# model.safetensors (or its HF dir); the converted .safetensors is what infer uses.
 MIRROR_CKPT    ?=
-MIRROR_WEIGHTS ?= $(OUT)/mirror.weights
+MIRROR_WEIGHTS ?= $(OUT)/mirror.safetensors
 
 mirror/import: release
 	@test -n "$(MIRROR_CKPT)" || (echo "set MIRROR_CKPT=<model.safetensors|hf_dir>"; exit 2)
@@ -325,7 +325,7 @@ mirror/demo: release
 # real loop: forward -> masked L1 -> backward -> AdamW; loss printed per step).
 # Fine-tune a released checkpoint instead with ZIPDEPTH_PTH set.
 train/zipdepth: release
-	$(BRAIN) depth train --out $(OUT)/zipdepth.weights --steps 50 --batch 2 \
+	$(BRAIN) depth train --out $(OUT)/zipdepth.safetensors --steps 50 --batch 2 \
 		$(if $(ZIPDEPTH_PTH),--weights $(ZIPDEPTH_PTH),)
 
 # ---- Intel NPU deployment (OpenVINO) --------------------------------------
@@ -344,15 +344,15 @@ NPU_NCALIB  ?= 256
 
 export/yolo-onnx: release
 	@mkdir -p $(OUT)
-	$(BRAIN) npu export --weights $(OUT)/yolo.weights --out $(ONNX)
+	$(BRAIN) npu export --weights $(OUT)/yolo.safetensors --out $(ONNX)
 
 quantize/yolo: release
 	@mkdir -p $(OUT)
-	$(BRAIN) npu quantize --weights $(OUT)/yolo.weights --calib $(NPU_CALIB) \
+	$(BRAIN) npu quantize --weights $(OUT)/yolo.safetensors --calib $(NPU_CALIB) \
 		--out $(ONNX_INT8) --num-calib $(NPU_NCALIB) --scales-out $(OUT)/yolo.scales.json
 
 sim/yolo-int8: release
-	$(BRAIN) npu sim --weights $(OUT)/yolo.weights --data $(DATA)/detect \
+	$(BRAIN) npu sim --weights $(OUT)/yolo.safetensors --data $(DATA)/detect \
 		--calib $(NPU_CALIB) --num-calib $(NPU_NCALIB) --conf $(YOLO_CONF) --iou $(YOLO_IOU)
 
 run/yolo-npu: release
@@ -454,11 +454,11 @@ bench/char: release
 # ---- federated MoE artifact round-trip ------------------------------------
 federated-demo: release
 	@mkdir -p $(OUT)
-	$(BRAIN) train --steps 50 --out $(OUT)/moe.weights
-	$(BRAIN) federated split $(OUT)/moe.weights $(OUT)/shards
+	$(BRAIN) train --steps 50 --out $(OUT)/moe.safetensors
+	$(BRAIN) federated split $(OUT)/moe.safetensors $(OUT)/shards
 	$(BRAIN) federated verify $(OUT)/shards
-	$(BRAIN) federated merge $(OUT)/shards --out $(OUT)/moe-reassembled.weights
-	@echo "federated round-trip complete: $(OUT)/moe-reassembled.weights"
+	$(BRAIN) federated merge $(OUT)/shards --out $(OUT)/moe-reassembled.safetensors
+	@echo "federated round-trip complete: $(OUT)/moe-reassembled.safetensors"
 
 # ---- web (delegate to the web crate's Makefile) ---------------------------
 web/dev:
@@ -500,7 +500,7 @@ perf/%: release
 # LFM2.5-Encoder concurrency benchmark, standalone: the residency-executor
 # target (real scheduler + budgets + lanes + equal-length batching) at 8k
 # context. LFM_WEIGHTS/LFM_TOKENIZER select the model (230m/350m).
-LFM_WEIGHTS ?= out/lfm-230m.weights
+LFM_WEIGHTS ?= out/lfm-230m.safetensors
 LFM_TOKENIZER ?= /data/workspace/resources/lfm/LFM2.5-Encoder-230M/tokenizer.json
 LFM_INPUT ?= 8192
 perf/lfm: release

@@ -33,7 +33,7 @@ pub const MODEL: &str = "qwen";
 pub fn manifest() -> Manifest {
     let generate = ActionSpec::new("generate", "generate tokens continuing a prompt (KV-cache decode, one Progress per token)")
         .streaming()
-        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen checkpoint (.weights)").required())
+        .param(ParamSpec::new("weights", ParamType::Str, "path to a brain-format Qwen checkpoint (.safetensors)").required())
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt: text (with a tokenizer) or whitespace/comma-separated token ids (without)").required())
         .param(ParamSpec::new("tokenizer", ParamType::Str, "path to tokenizer.json; omit to feed/return raw token ids"))
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(32)))
@@ -205,7 +205,7 @@ mod tests {
             r
         };
         let err = reg
-            .run(MODEL, "generate", Invocation::new().set("weights", json!("/nonexistent/qwen.weights")).set("prompt", json!("1 2")), &mut |_| {})
+            .run(MODEL, "generate", Invocation::new().set("weights", json!("/nonexistent/qwen.safetensors")).set("prompt", json!("1 2")), &mut |_| {})
             .unwrap_err();
         assert!(err.contains("not found"), "got: {err}");
     }
@@ -227,7 +227,7 @@ mod tests {
             .collect();
         let dir = std::env::temp_dir().join(format!("qwen-caps-e2e-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tiny.weights");
+        let path = dir.join("tiny.safetensors");
         checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
 
         let mut reg = Registry::new();

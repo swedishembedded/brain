@@ -7,7 +7,7 @@
 //! make intelligent function calls.
 //!
 //! Gated on `QWEN3_DIR` (the model directory holding `config.json`,
-//! `tokenizer.json`, and `brain/qwen3-0.6b.weights`), so normal CI skips them:
+//! `tokenizer.json`, and `brain/qwen3-0.6b.safetensors`), so normal CI skips them:
 //!
 //! ```text
 //! QWEN3_DIR=<qwen3-0.6b checkpoint dir> \
@@ -40,12 +40,12 @@ fn setup() {
     }
 }
 fn weights(d: &Path) -> PathBuf {
-    d.join("brain/qwen3-0.6b.weights")
+    d.join("brain/qwen3-0.6b.safetensors")
 }
 /// 512-context checkpoint for fine-tuning (attention is O(T²), so a small window
 /// is much cheaper; RoPE inference still sizes context at load time).
 fn weights_ft(d: &Path) -> PathBuf {
-    d.join("brain/qwen3-0.6b-ft512.weights")
+    d.join("brain/qwen3-0.6b-ft512.safetensors")
 }
 fn tok(d: &Path) -> QwenBpe {
     QwenBpe::from_file(d.join("tokenizer.json").to_str().unwrap()).expect("tokenizer.json")
@@ -182,7 +182,7 @@ fn qwen3_training_validity() {
         eval_batches: 1,
         ..Default::default()
     };
-    let ckpt = out.join("ft.weights");
+    let ckpt = out.join("ft.safetensors");
     std::fs::copy(weights_ft(&d), &ckpt).unwrap();
     let (l0, l1) = model::fit::<Qwen>(&out, cfg, &opts, Some(&ckpt)).expect("fit");
     println!("training validity: loss {l0:.4} -> {l1:.4} over {steps} steps");
@@ -233,7 +233,7 @@ fn qwen3_toolcall_finetune() {
         eval_batches: 4,
         ..Default::default()
     };
-    let ckpt = out.join("ft.weights");
+    let ckpt = out.join("ft.safetensors");
     std::fs::copy(weights_ft(&d), &ckpt).unwrap();
     let (l0, l1) = model::fit::<Qwen>(&out, cfg, &opts, Some(&ckpt)).expect("fit");
     println!("tool-call finetune: loss {l0:.4} -> {l1:.4}");
@@ -332,7 +332,7 @@ fn qwen3_reasoning_finetune() {
         decay_iters: steps as u32, min_lr: 1e-5, weight_decay: 0.0, grad_clip: 1.0, grad_accum: 4,
         eval_interval: (steps / 5).max(1) as u32, eval_batches: 4, ..Default::default()
     };
-    let ckpt = out.join("ft.weights");
+    let ckpt = out.join("ft.safetensors");
     std::fs::copy(weights_ft(&d), &ckpt).unwrap();
     let (l0, l1) = model::fit::<Qwen>(&out, cfg, &opts, Some(&ckpt)).expect("fit");
     println!("reasoning finetune: loss {l0:.4} -> {l1:.4}");
@@ -575,14 +575,14 @@ fn qwen3_full_vs_lora_toolcall() {
     let (ex0, _) = eval_toolcall(&Qwen::load_inference(base_s, 1, 512), &t, &held);
 
     // Full (offloaded) fine-tune.
-    let full_ckpt = out.join("full.weights");
+    let full_ckpt = out.join("full.safetensors");
     let (fl0, fl1) = qwen::finetune::finetune(base_s, &out, &opts(1e-4), &qwen::finetune::Mode::FullOffload, full_ckpt.to_str().unwrap()).unwrap();
     let (exf, _) = eval_toolcall(&Qwen::load_inference(full_ckpt.to_str().unwrap(), 1, 512), &t, &held);
 
     // LoRA fine-tune (adapters only). Same LR as full and scale 1.0 (alpha==rank)
     // for a fair comparison — aggressive scale/LR makes the adapters memorise the
     // tiny synthetic set (train loss -> 0) without generalising.
-    let lora_ckpt = out.join("lora.weights");
+    let lora_ckpt = out.join("lora.safetensors");
     let (ll0, ll1) = qwen::finetune::finetune(base_s, &out, &opts(1e-4), &qwen::finetune::Mode::Lora { rank: 16, alpha: 16.0 }, lora_ckpt.to_str().unwrap()).unwrap();
     let (exl, _) = eval_toolcall(&Qwen::load_inference(lora_ckpt.to_str().unwrap(), 1, 512), &t, &held);
 

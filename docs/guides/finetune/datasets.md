@@ -92,7 +92,7 @@ cd applications/edgeai/brain
     --data out/train-csv \
     --context 180 --horizon 5 --epochs 8 --lr 4e-5 \
     --lora 8 \
-    --out out/kronos-decoder-$(date +%F).weights
+    --out out/kronos-decoder-$(date +%F).safetensors
 ```
 
 What it does: enumerates leak-safe windows across the universe, splits them temporally
@@ -101,7 +101,7 @@ with an embargo gap, tokenizes with the **frozen** tokenizer, fine-tunes the dec
 
 ```
 gate: base_val 3.2140 → ft_val 3.1985  (41230 steps)  ⇒  PROMOTE (fine-tune beats base out-of-sample)
-promoted checkpoint → out/kronos-decoder-2026-07-28.weights
+promoted checkpoint → out/kronos-decoder-2026-07-28.safetensors
 ```
 
 **A checkpoint is written only if the fine-tune beats the base on the held-out

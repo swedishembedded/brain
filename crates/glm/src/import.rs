@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Import a HuggingFace GLM-5.2 (`glm_moe_dsa`) checkpoint (`config.json` +
-//! single or sharded `model.safetensors`) into a brain `.weights` container.
+//! single or sharded `model.safetensors`) into a brain `.safetensors` container.
 //!
 //! Convention: brain's `matmul` is `out = x·Wᵀ` with `W:[out,in]` row-major —
 //! exactly HF `nn.Linear.weight` — so linears are **not transposed**. Two HF

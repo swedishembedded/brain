@@ -403,7 +403,7 @@ host sum — the standing global-reduction pattern) -> `masked_l1_grad`
 (`sign * mask / total`) -> the master-gradcheck-proven backward -> the shared
 on-device AdamW (`optim::Optim`, one submit per step). BN running stats track
 during training so eval on the saved weights works. `ParamStore` comes back to
-the caller; the CLI saves it as a brain-native `.weights`.
+the caller; the CLI saves it as a brain-native `.safetensors`.
 
 Data is a built-in synthetic generator: 6 random rectangles over a far
 background, painted far-to-near, each SHADED by its own inverse depth — so

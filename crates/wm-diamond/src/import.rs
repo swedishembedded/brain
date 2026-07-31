@@ -3,7 +3,7 @@
 
 //! Import a reference DIAMOND checkpoint (torch `.pt`, e.g. HF
 //! `eloialonso/diamond` `atari_100k/models/<Game>.pt`) into a brain
-//! `.weights` container, and load `.weights` back into the host tensor map.
+//! `.safetensors` container, and load `.safetensors` back into the host tensor map.
 //!
 //! Names are the reference names with the `denoiser.inner_model.` prefix
 //! stripped. FULL-COVERAGE discipline (like `glm::import`): every expected
@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 const PREFIX: &str = "denoiser.inner_model.";
 
-/// Import `src` (.pt) to `out` (.weights). `num_actions` must match the game
+/// Import `src` (.pt) to `out` (.safetensors). `num_actions` must match the game
 /// (Breakout: 4); it is validated against the embedding shape.
 pub fn import(src: &str, out: &str, num_actions: u32) -> Result<DiamondConfig, String> {
     let report = checkpoint::torchpt::read_report(src)?;
@@ -84,7 +84,7 @@ pub fn import(src: &str, out: &str, num_actions: u32) -> Result<DiamondConfig, S
     Ok(cfg)
 }
 
-/// Load a brain `.weights` DIAMOND checkpoint into (config, host tensors),
+/// Load a brain `.safetensors` DIAMOND checkpoint into (config, host tensors),
 /// re-validating full coverage and sizes.
 pub fn load(path: &str) -> Result<(DiamondConfig, Tensors), String> {
     let c = checkpoint::load(path);

@@ -573,7 +573,7 @@ mod tests {
 
     /// End-to-end parity: the pure-CPU streaming decoder vs the real gpu_core
     /// `Codec::decode`, on real weights. Run explicitly:
-    ///   BRAIN_CODEC_WEIGHTS=out/tts-1b7/codec.weights \
+    ///   BRAIN_CODEC_WEIGHTS=out/tts-1b7/codec.safetensors \
     ///   cargo test -p brain-codec --lib e2e_parity_vs_codec -- --ignored --nocapture
     #[test]
     #[ignore]
@@ -609,7 +609,7 @@ mod tests {
     }
 
     /// Wall-clock of the rayon decoder. Run in RELEASE:
-    ///   BRAIN_CODEC_WEIGHTS=.../codec.weights \
+    ///   BRAIN_CODEC_WEIGHTS=.../codec.safetensors \
     ///   cargo test --release -p brain-codec --lib bench_decode -- --ignored --nocapture
     #[test]
     #[ignore]

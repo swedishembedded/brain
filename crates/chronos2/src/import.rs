@@ -71,7 +71,7 @@ pub fn config_from_dir(dir: &str) -> Result<Chronos2Config, String> {
     Chronos2Config::from_hf(&v)
 }
 
-/// Import an HF checkpoint dir → a brain `.weights` container (config + tensors).
+/// Import an HF checkpoint dir → a brain `.safetensors` container (config + tensors).
 pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
     let cfg = config_from_dir(hf_dir)?;
     let weights = load_hf(&cfg, hf_dir)?;
@@ -110,7 +110,7 @@ mod tests {
             })
             .collect();
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("chronos2-rt-{}.weights", std::process::id()));
+        let path = dir.join(format!("chronos2-rt-{}.safetensors", std::process::id()));
         checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
 
         let loaded = Chronos2::load(path.to_str().unwrap()).unwrap();

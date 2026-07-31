@@ -1357,7 +1357,7 @@ mod stream_codec_tests {
     use super::*;
 
     /// NPU stateful streaming codec vs the bit-exact CPU reference. Run (CPU dev):
-    ///   BRAIN_CODEC_WEIGHTS=.../codec.weights BRAIN_TTS_NPU_DEVICE=cpu \
+    ///   BRAIN_CODEC_WEIGHTS=.../codec.safetensors BRAIN_TTS_NPU_DEVICE=cpu \
     ///   cargo test --release -p brain-tts npu_stream_matches_cpu -- --ignored --nocapture
     #[test]
     #[ignore]

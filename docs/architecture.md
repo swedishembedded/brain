@@ -35,7 +35,7 @@ Six layers. Each may depend only on layers above it.
 
  ─── 3. training substrate ─────────────────────────────────────────────────
    paramstore ⇄ optim      param/grad/Adam buffers; AdamW + global grad clip
-   checkpoint              .weights container + manifest/SHA-256 + expert
+   checkpoint              .safetensors container + manifest/SHA-256 + expert
                            shards; target-agnostic, no wgpu, no fs on wasm
    autodiff                shared SSA forward-cache scaffolding (placeholder)
    data                    char + GPT-2 BPE tokenizers, dataset generators,

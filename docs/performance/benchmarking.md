@@ -500,7 +500,7 @@ brain perf run <scenario> --target <spec> [--workload W] [--device D]
                           [--seed S] [--out F] [--smoke] [--best-of N]
     # --target fake                     harness self-check, no model
     #          qwen-synth:12x768x12     the real engine on random weights
-    #          qwen:out/qwen.weights    the real engine on a real checkpoint
+    #          qwen:out/qwen.safetensors    the real engine on a real checkpoint
 brain perf sweep --target <spec> --workload chat --concurrency 1,2,4,8,16,32,64
 brain perf compare results/perf-*.json      # leaderboard + differing-axis warnings
 brain perf gate --baselines scripts/perf-baselines.json   # hard-floor regression gate

@@ -33,7 +33,7 @@ const SAMPLE_RATE: u32 = 24_000;
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     let synth = ActionSpec::new("synth", "speaker-free text-to-speech (Talker + MTP + codec, 24 kHz wav)")
-        .param(ParamSpec::new("weights_dir", ParamType::Str, "dir holding talker.weights, mtp.weights, codec.weights (from `brain tts import`)").required())
+        .param(ParamSpec::new("weights_dir", ParamType::Str, "dir holding talker.safetensors, mtp.safetensors, codec.safetensors (from `brain tts import`)").required())
         .param(ParamSpec::new("ckpt", ParamType::Str, "HF checkpoint dir (config.json + tokenizer)").required())
         .param(ParamSpec::new("text", ParamType::Str, "the text to speak").required())
         .param(ParamSpec::new("lang", ParamType::Str, "synthesis language").default(json!("english")))
@@ -83,14 +83,14 @@ impl Action for SynthAction {
 
         // The same layout `brain tts`'s paths() helper builds from --weights-dir.
         let paths = TtsPaths {
-            talker: format!("{weights_dir}/talker.weights"),
-            mtp: format!("{weights_dir}/mtp.weights"),
-            codec: format!("{weights_dir}/codec.weights"),
-            speaker: format!("{weights_dir}/speaker.weights"),
+            talker: format!("{weights_dir}/talker.safetensors"),
+            mtp: format!("{weights_dir}/mtp.safetensors"),
+            codec: format!("{weights_dir}/codec.safetensors"),
+            speaker: format!("{weights_dir}/speaker.safetensors"),
             ckpt_dir: ckpt,
         };
         // Fail cleanly (not a panic in the loaders) when the checkpoints the
-        // synth path loads are absent. `speaker.weights` is not needed here.
+        // synth path loads are absent. `speaker.safetensors` is not needed here.
         for p in [&paths.talker, &paths.mtp, &paths.codec] {
             if !Path::new(p).exists() {
                 return Err(format!("tts synth: weights not found at '{p}' (run `brain tts import`)"));

@@ -109,7 +109,7 @@ impl Chronos2Resident {
     pub fn from_env() -> Option<Chronos2Resident> {
         std::env::var("BRAIN_CHRONOS2").ok().filter(|p| !p.is_empty()).map(|path| Chronos2Resident { path })
     }
-    /// Explicit `.weights` path (the `brain perf` target and non-env callers).
+    /// Explicit `.safetensors` path (the `brain perf` target and non-env callers).
     pub fn new(path: &str) -> Chronos2Resident {
         Chronos2Resident { path: path.to_string() }
     }
@@ -226,7 +226,7 @@ impl FincastResident {
     pub fn from_env() -> Option<FincastResident> {
         std::env::var("BRAIN_FINCAST").ok().filter(|p| !p.is_empty()).map(|path| FincastResident { path })
     }
-    /// Explicit `.weights` path (the `brain perf` target and non-env callers).
+    /// Explicit `.safetensors` path (the `brain perf` target and non-env callers).
     pub fn new(path: &str) -> FincastResident {
         FincastResident { path: path.to_string() }
     }
@@ -364,7 +364,7 @@ impl KronosResident {
             .param(ParamSpec::new("seed", ParamType::Int, "RNG seed when sampling").default(json!(0)))
             .param(ParamSpec::new("samples", ParamType::Int, "sampled paths sharing one prefill (out [N,horizon,feat])").default(json!(1)))
             .param(ParamSpec::new("checkpoint", ParamType::Str,
-                "decoder checkpoint path override (.weights file or HF dir); \
+                "decoder checkpoint path override (.safetensors file or HF dir); \
                  empty = the boot decoder. Instances are keyed on (path, mtime, \
                  size), so per-request checkpoints stay warm side by side and an \
                  overwritten file hot-reloads — checkpoint selection is request \
@@ -440,7 +440,7 @@ impl ResidentModel for KronosResident {
     }
 }
 
-/// Resident bytes for a checkpoint path: a `.weights` file's own size, or the
+/// Resident bytes for a checkpoint path: a `.safetensors` file's own size, or the
 /// summed size of an HF checkpoint dir. (+30% working overhead.)
 fn path_ram(path: &str) -> u64 {
     let meta = std::fs::metadata(path);

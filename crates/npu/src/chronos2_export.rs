@@ -11,7 +11,7 @@ use onnx::builder::GraphBuilder;
 use crate::chronos2_topology::build_chronos2_graph_quant;
 use crate::qwen_topology::Quant;
 
-/// Build the Chronos-2 core ONNX bytes from a brain `.weights` container, for a
+/// Build the Chronos-2 core ONNX bytes from a brain `.safetensors` container, for a
 /// fixed sequence length `s` and forecast-patch count `n_out`.
 pub fn export_onnx(weights_path: &str, s: usize, n_out: usize, quant: Quant) -> Result<Vec<u8>, String> {
     let c = checkpoint::load(weights_path);
@@ -91,7 +91,7 @@ mod tests {
         let reference = model.core_forward(&emb, &kmask, n_out);
 
         // save tiny weights, export the core ONNX for this (s, n_out).
-        let tmp = std::env::temp_dir().join(format!("chronos2_tiny_{}.weights", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("chronos2_tiny_{}.safetensors", std::process::id()));
         let tmp = tmp.to_str().unwrap();
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
             .param_list()

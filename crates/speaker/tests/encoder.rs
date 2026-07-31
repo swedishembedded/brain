@@ -40,7 +40,7 @@ fn shared_weights() -> &'static str {
     let _guard = LOCK.lock().unwrap();
     PATH.get_or_init(|| {
         let out = std::env::temp_dir()
-            .join(format!("speaker_{}.weights", std::process::id()))
+            .join(format!("speaker_{}.safetensors", std::process::id()))
             .to_string_lossy()
             .into_owned();
         speaker::import(&CKPT_DIR, &out).expect("import failed");
