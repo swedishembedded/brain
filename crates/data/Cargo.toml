@@ -11,6 +11,10 @@ path = "src/lib.rs"
 
 [dependencies]
 serde_json.workspace = true
+# Read the tokenizer embedded in a GGUF's `tokenizer.ggml.*` KV so a `.gguf`
+# chat model can build its byte-level BPE (QwenBpe::from_gguf) with no sibling
+# tokenizer.json. checkpoint does not depend on data, so this adds no cycle.
+brain-checkpoint.workspace = true
 # Synthetic object-detection scene rendering (gen_detect) draws shapes into
 # in-memory RGB buffers; the captioned-image dataset loader (imageset, hoisted
 # from zimage) additionally decodes JPEG/PNG/PPM training images — so exactly

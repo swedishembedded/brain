@@ -85,6 +85,75 @@ impl GgufValue {
     }
 }
 
+/// The tokenizer embedded in a GGUF's `tokenizer.ggml.*` KV metadata.
+///
+/// A verbatim, typed view of the KV — no interpretation beyond pulling each key
+/// out of the map. `model` is the ggml tokenizer scheme (`"gpt2"` for the GPT-2
+/// / Qwen byte-level BPE, `"llama"`/`"bert"`/… for others). `tokens[id]` is the
+/// token text for id `id`; `merges` are ranked `"a b"` pairs (index = priority);
+/// `token_types[id]` is the ggml token-type enum (1 NORMAL, 2 UNKNOWN, 3
+/// CONTROL, 4 USER_DEFINED, 5 BYTE, 6 UNUSED). The special-token ids are the
+/// declared `*_token_id` scalars (absent → `None`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct GgufTokenizer {
+    /// `tokenizer.ggml.model` — the tokenizer scheme (e.g. `"gpt2"`, `"llama"`).
+    pub model: String,
+    /// `tokenizer.ggml.pre` — the pre-tokenizer family (e.g. `"qwen2"`), if any.
+    pub pre: Option<String>,
+    /// `tokenizer.ggml.tokens` — token text indexed by id.
+    pub tokens: Vec<String>,
+    /// `tokenizer.ggml.merges` — ranked `"a b"` merge pairs (index = priority).
+    pub merges: Vec<String>,
+    /// `tokenizer.ggml.token_type` — per-id ggml token-type enum (may be empty).
+    pub token_types: Vec<i32>,
+    /// `tokenizer.ggml.bos_token_id`.
+    pub bos: Option<u32>,
+    /// `tokenizer.ggml.eos_token_id`.
+    pub eos: Option<u32>,
+    /// `tokenizer.ggml.unknown_token_id`.
+    pub unk: Option<u32>,
+    /// `tokenizer.ggml.padding_token_id`.
+    pub pad: Option<u32>,
+}
+
+/// Pull a `GgufTokenizer` out of a KV map: `None` unless `tokenizer.ggml.model`
+/// is present (a file without an embedded tokenizer). Shared by
+/// [`GgufModel::tokenizer`] and [`MmapGguf::tokenizer`].
+fn tokenizer_from_kv(kv: &BTreeMap<String, GgufValue>) -> Option<GgufTokenizer> {
+    let model = kv.get("tokenizer.ggml.model").and_then(|v| v.as_str())?.to_string();
+    let str_arr = |k: &str| match kv.get(k) {
+        Some(GgufValue::Array(a)) => a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
+        _ => Vec::new(),
+    };
+    let i32_arr = |k: &str| match kv.get(k) {
+        Some(GgufValue::Array(a)) => a
+            .iter()
+            .map(|v| match *v {
+                GgufValue::I8(x) => x as i32,
+                GgufValue::I16(x) => x as i32,
+                GgufValue::I32(x) => x,
+                GgufValue::U8(x) => x as i32,
+                GgufValue::U16(x) => x as i32,
+                GgufValue::U32(x) => x as i32,
+                _ => v.as_u64().map(|u| u as i32).unwrap_or(0),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let id = |k: &str| kv.get(k).and_then(|v| v.as_u64()).map(|v| v as u32);
+    Some(GgufTokenizer {
+        model,
+        pre: kv.get("tokenizer.ggml.pre").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        tokens: str_arr("tokenizer.ggml.tokens"),
+        merges: str_arr("tokenizer.ggml.merges"),
+        token_types: i32_arr("tokenizer.ggml.token_type"),
+        bos: id("tokenizer.ggml.bos_token_id"),
+        eos: id("tokenizer.ggml.eos_token_id"),
+        unk: id("tokenizer.ggml.unknown_token_id"),
+        pad: id("tokenizer.ggml.padding_token_id"),
+    })
+}
+
 /// A GGUF model read into memory: fp32 tensors + full KV metadata.
 pub struct GgufModel {
     /// Tensor name → dequantized fp32 values (row-major, torch element order).
@@ -108,6 +177,11 @@ impl GgufModel {
     /// `general.name` fills id and display_name.
     pub fn model_card(&self) -> ModelCard {
         card_from_kv(&self.kv, self.param_count())
+    }
+
+    /// The tokenizer embedded in `tokenizer.ggml.*` KV, if the file declares one.
+    pub fn tokenizer(&self) -> Option<GgufTokenizer> {
+        tokenizer_from_kv(&self.kv)
     }
 }
 
@@ -757,6 +831,12 @@ impl MmapGguf {
         card_from_kv(&self.kv, self.param_count())
     }
 
+    /// The tokenizer embedded in `tokenizer.ggml.*` KV, if the file declares one
+    /// (byte-identical to [`GgufModel::tokenizer`] — both read the same KV map).
+    pub fn tokenizer(&self) -> Option<GgufTokenizer> {
+        tokenizer_from_kv(&self.kv)
+    }
+
     /// Dequantize exactly one tensor to fp32, decoding on access from the mmap.
     /// `None` if the name is unknown; `Some(Err)` if the tensor exists but its
     /// quant type is unsupported (IQ/TQ/MXFP4 codebooks). Byte-identical to the
@@ -1111,6 +1191,64 @@ mod tests {
         assert_eq!(card.tokenizer.as_deref(), Some("gpt2"));
         assert_eq!(card.quant.as_deref(), Some("Q4_K_M"));
         assert_eq!(card.param_count, Some(4));
+    }
+
+    #[test]
+    fn tokenizer_accessor_extracts_tokens_merges_specials() {
+        // Emit a header carrying a gpt2 tokenizer: model, tokens[], merges[],
+        // token_type[], and bos/eos ids — then assert the typed accessor.
+        fn put_str_arr(v: &mut Vec<u8>, key: &str, items: &[&str]) {
+            put_str(v, key);
+            v.extend(9u32.to_le_bytes()); // array
+            v.extend(8u32.to_le_bytes()); // element type: string
+            v.extend((items.len() as u64).to_le_bytes());
+            for s in items {
+                put_str(v, s);
+            }
+        }
+        fn put_i32_arr(v: &mut Vec<u8>, key: &str, items: &[i32]) {
+            put_str(v, key);
+            v.extend(9u32.to_le_bytes()); // array
+            v.extend(5u32.to_le_bytes()); // element type: int32
+            v.extend((items.len() as u64).to_le_bytes());
+            for x in items {
+                v.extend(x.to_le_bytes());
+            }
+        }
+        fn put_u32(v: &mut Vec<u8>, key: &str, x: u32) {
+            put_str(v, key);
+            v.extend(4u32.to_le_bytes()); // value type: uint32
+            v.extend(x.to_le_bytes());
+        }
+
+        let mut kv = Vec::new();
+        put_str(&mut kv, "tokenizer.ggml.model");
+        kv.extend(8u32.to_le_bytes());
+        put_str(&mut kv, "gpt2");
+        put_str(&mut kv, "tokenizer.ggml.pre");
+        kv.extend(8u32.to_le_bytes());
+        put_str(&mut kv, "qwen2");
+        put_str_arr(&mut kv, "tokenizer.ggml.tokens", &["<|endoftext|>", "h", "i", "hi"]);
+        put_str_arr(&mut kv, "tokenizer.ggml.merges", &["h i"]);
+        put_i32_arr(&mut kv, "tokenizer.ggml.token_type", &[3, 1, 1, 1]);
+        put_u32(&mut kv, "tokenizer.ggml.bos_token_id", 0);
+        put_u32(&mut kv, "tokenizer.ggml.eos_token_id", 0);
+
+        let bytes = build_gguf(&kv, 7, &[1.0, 2.0]);
+        let m = parse_gguf(&bytes).unwrap();
+        let t = m.tokenizer().expect("tokenizer present");
+        assert_eq!(t.model, "gpt2");
+        assert_eq!(t.pre.as_deref(), Some("qwen2"));
+        assert_eq!(t.tokens, vec!["<|endoftext|>", "h", "i", "hi"]);
+        assert_eq!(t.merges, vec!["h i"]);
+        assert_eq!(t.token_types, vec![3, 1, 1, 1]);
+        assert_eq!(t.bos, Some(0));
+        assert_eq!(t.eos, Some(0));
+        assert_eq!(t.unk, None);
+
+        // A file without tokenizer.ggml.model exposes no tokenizer.
+        let plain = parse_gguf(&build_gguf(&[], 0, &[1.0])).unwrap();
+        assert!(plain.tokenizer().is_none());
     }
 
     #[test]

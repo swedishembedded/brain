@@ -300,13 +300,20 @@ impl ResidentModel for QwenResident {
         est_vram(&self.path)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        if self.tokenizer.is_empty() {
-            return Err("qwen: set BRAIN_QWEN_TOKENIZER to the tokenizer.json path".to_string());
-        }
-        let tok = data::qwen_tokenizer::QwenBpe::from_file(&self.tokenizer)?;
-        let eos = tok.encode("<|im_end|>").first().copied();
-        // Stream weights from the mmap (see GptResident::activate).
+        // Stream weights from the mmap (see GptResident::activate). Open first so
+        // a GGUF can supply its own embedded tokenizer.
         let reader = checkpoint::weightio::WeightReader::open(&self.path).map_err(|e| format!("qwen: {e}"))?;
+        // Tokenizer precedence: an explicit sibling `tokenizer.json` (safetensors
+        // path, or an override) wins; else a `.gguf` builds from its embedded
+        // `tokenizer.ggml.*` KV; else there is nothing to tokenize with.
+        let tok = if !self.tokenizer.is_empty() {
+            data::qwen_tokenizer::QwenBpe::from_file(&self.tokenizer)?
+        } else if let Some(gt) = reader.tokenizer() {
+            data::qwen_tokenizer::QwenBpe::from_gguf(&gt).map_err(|e| format!("qwen: {e}"))?
+        } else {
+            return Err("qwen: no tokenizer (set BRAIN_QWEN_TOKENIZER, or use a GGUF with an embedded tokenizer)".to_string());
+        };
+        let eos = tok.encode("<|im_end|>").first().copied();
         let model = on_device(device, || qwen::model::Qwen::from_reader_inference(&reader, 1, Self::ctx()))?;
         Ok(Box::new(QwenInstance { model, tok, eos }))
     }

@@ -92,6 +92,15 @@ impl WeightReader {
         }
     }
 
+    /// The tokenizer embedded in a GGUF's `tokenizer.ggml.*` KV, if any.
+    /// Always `None` for safetensors (whose tokenizer is a sibling file).
+    pub fn tokenizer(&self) -> Option<crate::gguf::GgufTokenizer> {
+        match &self.inner {
+            Inner::St(_) => None,
+            Inner::Gguf(m) => m.tokenizer(),
+        }
+    }
+
     /// Decode/dequant exactly one tensor to fp32, now, from the mmap. `None` if
     /// the name is unknown. Panics with a clear message only if a GGUF tensor
     /// exists but its quant type is unsupported (IQ/TQ/MXFP4 codebooks).

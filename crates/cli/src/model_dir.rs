@@ -243,6 +243,71 @@ mod tests {
         std::fs::write(dir.join(file), &h).unwrap();
     }
 
+    /// A minimal GGUF whose KV synthesizes a `qwen` card AND embeds a gpt2
+    /// byte-level BPE tokenizer (`tokenizer.ggml.*`) — the shape a real Qwen3
+    /// GGUF ships, minus the weights. Enough for the discovery/registration path
+    /// to build a chat-capable Qwen entry with no sibling tokenizer.json.
+    fn write_gguf_qwen(dir: &Path, file: &str, name: &str) {
+        fn put_str_arr(v: &mut Vec<u8>, key: &str, items: &[&str]) {
+            put_str(v, key);
+            v.extend(9u32.to_le_bytes()); // array
+            v.extend(8u32.to_le_bytes()); // element type: string
+            v.extend((items.len() as u64).to_le_bytes());
+            for s in items {
+                put_str(v, s);
+            }
+        }
+        fn put_i32_arr(v: &mut Vec<u8>, key: &str, items: &[i32]) {
+            put_str(v, key);
+            v.extend(9u32.to_le_bytes()); // array
+            v.extend(5u32.to_le_bytes()); // element type: int32
+            v.extend((items.len() as u64).to_le_bytes());
+            for x in items {
+                v.extend(x.to_le_bytes());
+            }
+        }
+        fn put_u32_kv(v: &mut Vec<u8>, key: &str, x: u32) {
+            put_str(v, key);
+            v.extend(4u32.to_le_bytes());
+            v.extend(x.to_le_bytes());
+        }
+
+        let mut kv: Vec<u8> = Vec::new();
+        put_str(&mut kv, "general.architecture");
+        kv.extend(8u32.to_le_bytes());
+        put_str(&mut kv, "qwen");
+        put_str(&mut kv, "general.name");
+        kv.extend(8u32.to_le_bytes());
+        put_str(&mut kv, name);
+        put_str(&mut kv, "tokenizer.ggml.model");
+        kv.extend(8u32.to_le_bytes());
+        put_str(&mut kv, "gpt2");
+        put_str_arr(&mut kv, "tokenizer.ggml.tokens", &["<|endoftext|>", "<|im_start|>", "<|im_end|>", "h", "i", "hi"]);
+        put_str_arr(&mut kv, "tokenizer.ggml.merges", &["h i"]);
+        put_i32_arr(&mut kv, "tokenizer.ggml.token_type", &[3, 3, 3, 1, 1, 1]);
+        put_u32_kv(&mut kv, "tokenizer.ggml.bos_token_id", 0);
+        put_u32_kv(&mut kv, "tokenizer.ggml.eos_token_id", 2);
+
+        let mut h: Vec<u8> = Vec::new();
+        h.extend(b"GGUF");
+        h.extend(3u32.to_le_bytes()); // version
+        h.extend(1u64.to_le_bytes()); // tensor count
+        h.extend(8u64.to_le_bytes()); // kv count
+        h.extend(&kv);
+        // tensor info: "w", 1 dim [4], type F32, offset 0
+        put_str(&mut h, "w");
+        h.extend(1u32.to_le_bytes());
+        h.extend(4u64.to_le_bytes());
+        h.extend(0u32.to_le_bytes());
+        h.extend(0u64.to_le_bytes());
+        let data_start = h.len().div_ceil(32) * 32;
+        h.resize(data_start, 0);
+        for v in [1.0f32, 2.0, 3.0, 4.0] {
+            h.extend(v.to_le_bytes());
+        }
+        std::fs::write(dir.join(file), &h).unwrap();
+    }
+
     fn ids(residents: &[Arc<dyn ResidentModel>]) -> Vec<String> {
         residents.iter().map(|r| r.manifest().model).collect()
     }
@@ -277,6 +342,26 @@ mod tests {
         write_st(&dir, "enc.safetensors", "toy-enc", "lfm");
         let got = ids(&discover(&dir));
         assert!(!got.contains(&"toy-enc".to_string()), "lfm registered without a tokenizer: {got:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn gguf_qwen_with_embedded_tokenizer_registers_chat_capable() {
+        // A Qwen GGUF carrying its own gpt2 tokenizer registers with NO sibling
+        // tokenizer.json, and advertises the streaming chat `generate` action.
+        let dir = tmp_dir("ggufqwen");
+        write_gguf_qwen(&dir, "qwen3.gguf", "toy-qwen-gguf");
+        let residents = discover(&dir);
+        let got = ids(&residents);
+        assert!(got.contains(&"toy-qwen-gguf".to_string()), "qwen gguf not registered: {got:?}");
+
+        // The registered entry is chat-capable: its `generate` action streams and
+        // takes chat `messages` (generate_spec(chat=true)).
+        let r = residents.iter().find(|r| r.manifest().model == "toy-qwen-gguf").unwrap();
+        let m = r.manifest();
+        let gen = m.actions.iter().find(|a| a.name == "generate").expect("generate action");
+        assert!(gen.streaming, "qwen generate must stream");
+        assert!(gen.params.iter().any(|p| p.name == "messages"), "qwen generate must accept chat messages");
         std::fs::remove_dir_all(&dir).ok();
     }
 

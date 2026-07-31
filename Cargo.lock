@@ -599,6 +599,7 @@ dependencies = [
 name = "brain-data"
 version = "0.1.0"
 dependencies = [
+ "brain-checkpoint",
  "image",
  "imageproc",
  "serde_json",

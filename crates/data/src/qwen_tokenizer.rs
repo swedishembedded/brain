@@ -93,6 +93,90 @@ impl QwenBpe {
         Self::from_json_bytes(unified.to_string().as_bytes())
     }
 
+    /// Build from a GGUF's embedded `tokenizer.ggml.*` KV (see
+    /// [`checkpoint::gguf::GgufTokenizer`]). Supports the GPT-2-style byte-level
+    /// BPE (`model == "gpt2"`) a Qwen3 GGUF ships — the same family as the
+    /// `tokenizer.json` path, so it reuses this struct's vocab/merge/special
+    /// representation rather than forking a second BPE.
+    ///
+    /// Mapping: `tokens[id]` is the token text (already in the GPT-2 byte-encoded
+    /// domain, i.e. HF `vocab.json` keys) → `encoder`/`decoder` keyed by index;
+    /// `merges` are the ranked `"a b"` pairs → `bpe_ranks`; tokens whose
+    /// `token_type` is CONTROL(3) or USER_DEFINED(4) — plus the declared
+    /// bos/eos/unk/pad ids — become atomic `specials`. Qwen's pre-tokenizer caps
+    /// digit runs at one (`\p{N}`), so `digit_run_max = 1`.
+    ///
+    /// Non-gpt2 schemes (llama/bert/…) return a clear `Err` (a documented
+    /// follow-up — each needs its own tokenization model).
+    pub fn from_gguf(tok: &checkpoint::gguf::GgufTokenizer) -> Result<QwenBpe, String> {
+        if tok.model != "gpt2" {
+            return Err(format!("gguf tokenizer model '{}' not supported", tok.model));
+        }
+        if tok.tokens.is_empty() {
+            return Err("gguf tokenizer: empty tokens array".to_string());
+        }
+
+        // vocab: index is the id (GGUF stores tokens in id order).
+        let mut encoder = HashMap::with_capacity(tok.tokens.len());
+        let mut decoder = HashMap::with_capacity(tok.tokens.len());
+        for (id, t) in tok.tokens.iter().enumerate() {
+            let id = id as u32;
+            encoder.insert(t.clone(), id);
+            decoder.insert(id, t.clone());
+        }
+
+        // merges: "a b" strings, ranked by their position in the array.
+        let mut bpe_ranks = HashMap::with_capacity(tok.merges.len());
+        for (rank, m) in tok.merges.iter().enumerate() {
+            let mut it = m.splitn(2, ' ');
+            let l = it.next().unwrap().to_string();
+            let r = it.next().ok_or_else(|| format!("gguf merge {rank:?}: missing space in {m:?}"))?.to_string();
+            bpe_ranks.insert((l, r), rank as u32);
+        }
+
+        // Specials: control / user-defined tokens are matched atomically before
+        // BPE (their text is literal, not byte-encoded). CONTROL=3, USER_DEFINED=4.
+        let mut specials: Vec<(String, u32)> = Vec::new();
+        for (id, ty) in tok.token_types.iter().enumerate() {
+            if (*ty == 3 || *ty == 4) && id < tok.tokens.len() {
+                specials.push((tok.tokens[id].clone(), id as u32));
+            }
+        }
+        // Ensure the declared bos/eos/unk/pad tokens are matchable even if their
+        // token_type was NORMAL / the token_type array was absent.
+        for id in [tok.bos, tok.eos, tok.unk, tok.pad].into_iter().flatten() {
+            if let Some(t) = tok.tokens.get(id as usize) {
+                if !specials.iter().any(|(_, sid)| *sid == id) {
+                    specials.push((t.clone(), id));
+                }
+            }
+        }
+        // Longest content first so e.g. "<|im_start|>" matches before any prefix.
+        specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+        let byte_encoder = bytes_to_unicode();
+        let mut byte_decoder = HashMap::with_capacity(256);
+        for (b, &c) in byte_encoder.iter().enumerate() {
+            byte_decoder.insert(c, b as u8);
+        }
+
+        let vocab_size = decoder.keys().copied().max().map(|m| m as usize + 1).unwrap_or(0);
+
+        Ok(QwenBpe {
+            encoder,
+            decoder,
+            bpe_ranks,
+            byte_encoder,
+            byte_decoder,
+            specials,
+            vocab_size,
+            // Qwen's pre-tokenizer uses a bare `\p{N}` (single-digit) run.
+            digit_run_max: 1,
+            // Qwen declares no single-sequence template prefix.
+            template_prefix: Vec::new(),
+        })
+    }
+
     pub fn from_json_bytes(bytes: &[u8]) -> Result<QwenBpe, String> {
         let j: serde_json::Value =
             serde_json::from_slice(bytes).map_err(|e| format!("tokenizer.json: {e}"))?;
@@ -567,6 +651,55 @@ mod tests {
         assert_eq!(t.template_prefix(), &[1]);
         // Specials are atomic mid-string.
         assert_eq!(t.encode("Paris<|mask|>Lyon"), vec![41677, 16, 553, 31862]);
+    }
+
+    /// A tiny synthetic gpt2 GGUF tokenizer: build `QwenBpe::from_gguf` directly
+    /// from a hand-made [`GgufTokenizer`] and assert encode/decode round-trip and
+    /// special-id resolution — no GGUF bytes, no files, no GPU.
+    #[test]
+    fn from_gguf_gpt2_roundtrip_and_specials() {
+        use checkpoint::gguf::GgufTokenizer;
+        // ids: 0..2 control specials; 3,4 single-byte tokens; 5 the "hi" merge.
+        let gt = GgufTokenizer {
+            model: "gpt2".into(),
+            pre: Some("qwen2".into()),
+            tokens: vec![
+                "<|endoftext|>".into(),
+                "<|im_start|>".into(),
+                "<|im_end|>".into(),
+                "h".into(),
+                "i".into(),
+                "hi".into(),
+            ],
+            merges: vec!["h i".into()],
+            token_types: vec![3, 3, 3, 1, 1, 1],
+            bos: Some(0),
+            eos: Some(2),
+            unk: None,
+            pad: None,
+        };
+        let t = QwenBpe::from_gguf(&gt).unwrap();
+
+        assert_eq!(t.vocab_size(), 6);
+        // The merge fires: "hi" is one token; "hii" is "hi" + "i".
+        assert_eq!(t.encode("hi"), vec![5]);
+        assert_eq!(t.encode("hii"), vec![5, 4]);
+        // Specials resolve and match atomically mid-string.
+        assert_eq!(t.special_id("<|im_end|>"), Some(2));
+        assert_eq!(t.special_id("<|im_start|>"), Some(1));
+        assert_eq!(t.encode("<|im_start|>hi<|im_end|>"), vec![1, 5, 2]);
+        // Round-trips (plain + with specials).
+        for s in ["hi", "hii", "<|im_start|>hi<|im_end|>"] {
+            assert_eq!(t.decode(&t.encode(s)), s, "roundtrip {s:?}");
+        }
+
+        // A non-gpt2 scheme is a clear, deferred error.
+        let llama = GgufTokenizer { model: "llama".into(), ..gt.clone() };
+        let err = match QwenBpe::from_gguf(&llama) {
+            Ok(_) => panic!("expected non-gpt2 scheme to be rejected"),
+            Err(e) => e,
+        };
+        assert!(err.contains("'llama' not supported"), "{err}");
     }
 
     #[test]
