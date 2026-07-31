@@ -183,13 +183,13 @@ fn detections_outcome(dets: &[[f32; 6]]) -> Outcome {
 
 impl Instance for YoloInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        self.run_batch(action, std::slice::from_ref(inv), progress).pop().unwrap()
+        self.run_batch(action, std::slice::from_ref(inv), &mut |_i, p| progress(p)).pop().unwrap()
     }
 
     /// TRUE batched forward: chunk the invocations to the model's batch and run one
     /// `detect_batch` per chunk (the last chunk padded to the batch, its padding
     /// results discarded). With batch 1 this is one forward per image.
-    fn run_batch(&mut self, _action: &str, invs: &[Invocation], _progress: &mut dyn FnMut(Progress)) -> Vec<ActionResult> {
+    fn run_batch(&mut self, _action: &str, invs: &[Invocation], _progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         let b = self.batch;
         let mut out: Vec<ActionResult> = Vec::with_capacity(invs.len());
         for chunk in invs.chunks(b) {
@@ -314,7 +314,7 @@ impl Instance for ZImageInstance {
             let prompt = inv.get_str("prompt").unwrap_or_default();
             let seed = inv.get_i64("seed").unwrap_or(42).max(0) as u64;
             let steps = inv.get_i64("steps").unwrap_or(8).max(1) as u32;
-            let img = pipe.generate(&prompt, seed, steps, &inv.cancel, |s, t, m| progress(Progress { step: s, total: t, message: m.to_string() }))?;
+            let img = pipe.generate(&prompt, seed, steps, &inv.cancel, |s, t, m| progress(Progress::step(s, t, m.to_string())))?;
             return Ok(emit_image(img));
         }
         // Editing / training: delegate to the provider's action (fresh build).

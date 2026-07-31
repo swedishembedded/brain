@@ -288,7 +288,7 @@ mod tests {
         }
         fn run(&self, _inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
             for i in 0..self.steps {
-                progress(Progress { step: i, total: self.steps, message: String::new() });
+                progress(Progress::step(i, self.steps, ""));
             }
             Ok(Outcome::new())
         }
@@ -395,11 +395,11 @@ mod tests {
     }
     impl residency::Instance for DiffuserInst {
         fn run(&mut self, _a: &str, _i: &Invocation, p: &mut dyn FnMut(Progress)) -> ActionResult {
-            p(Progress { step: 0, total: 5, message: "encoding prompt".into() });
+            p(Progress::step(0, 5, "encoding prompt"));
             for i in 0..3u32 {
-                p(Progress { step: i + 1, total: 5, message: "denoising".into() });
+                p(Progress::step(i + 1, 5, "denoising"));
             }
-            p(Progress { step: 5, total: 5, message: "decoding".into() });
+            p(Progress::step(5, 5, "decoding"));
             Ok(Outcome::new())
         }
     }
@@ -554,37 +554,35 @@ impl PerfTarget for ExecutorTarget {
         // reply knows whether it must stand in as the single artifact.
         let streamed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let streamed_r = streamed.clone();
-        self.exec.submit(residency::executor::Job {
-            model: self.model.clone(),
-            action: self.action.clone(),
-            inv,
-            on_progress: Box::new(move |p| {
-                if !admitted {
-                    admitted = true;
-                    let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted });
-                }
-                if let Some(accept) = &is_artifact {
-                    if accept(&p) {
-                        streamed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Artifact });
+        self.exec.submit(
+            residency::executor::Job::new(self.model.clone(), self.action.clone(), inv)
+                .on_progress(move |p| {
+                    if !admitted {
+                        admitted = true;
+                        let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted });
                     }
-                }
-            }),
-            reply: Box::new(move |r| {
-                let at = Instant::now();
-                match r {
-                    Ok(_) => {
-                        if streamed_r.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-                            let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Artifact });
+                    if let Some(accept) = &is_artifact {
+                        if accept(&p) {
+                            streamed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Artifact });
                         }
-                        let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Done });
                     }
-                    Err(_) => {
-                        let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Failed });
+                })
+                .reply(move |r| {
+                    let at = Instant::now();
+                    match r {
+                        Ok(_) => {
+                            if streamed_r.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                                let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Artifact });
+                            }
+                            let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Done });
+                        }
+                        Err(_) => {
+                            let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Failed });
+                        }
                     }
-                }
-            }),
-        });
+                }),
+        );
         id
     }
 

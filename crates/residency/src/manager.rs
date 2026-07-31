@@ -250,7 +250,7 @@ impl ResidencyManager {
     pub fn run_batch(&mut self, model: &str, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(Progress)) -> Result<Vec<ActionResult>, String> {
         let first = invs.first().ok_or("empty batch")?;
         let (handle, key) = self.claim_built(model, action, first)?;
-        let out = handle.lock().unwrap().run_batch(action, invs, progress);
+        let out = handle.lock().unwrap().run_batch(action, invs, &mut |_i, p| progress(p));
         self.release(&key);
         Ok(out)
     }

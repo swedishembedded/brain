@@ -196,7 +196,7 @@ pub fn generate_on(
 ) -> ActionResult {
     let prompt = inv.get_str("prompt").ok_or("'prompt' is required")?;
     let (rgb, w, h) = pipe.generate(&prompt, refs, opts, &inv.cancel, |step, total, msg| {
-        progress(Progress { step, total, message: msg.to_string() })
+        progress(Progress::step(step, total, msg.to_string()))
     })?;
     Ok(image_outcome(&rgb, w, h))
 }
@@ -232,7 +232,7 @@ pub fn train_action(paths: &Paths, inv: &Invocation, progress: &mut dyn FnMut(Pr
         save_path: save.clone(),
         ckpt_every: 100,
     };
-    let mut prog = |step: u32, total: u32, message: String| progress(Progress { step, total, message });
+    let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
     let adapter = crate::finetune::run(&cfg, paths, std::path::Path::new(&dir), &opts, &inv.cancel, &mut prog)?;
     use capability::Blob;
     let bytes = std::fs::read(&save).map_err(|e| format!("read trained adapter '{save}': {e}"))?;
@@ -309,7 +309,7 @@ impl Action for Flux2Action {
                 let mut guard = self.hot.lock().map_err(|_| "hot pipeline lock poisoned")?;
                 if !matches!(&*guard, Some((k, _)) if *k == key) {
                     *guard = None; // free the old resident weights before building new
-                    progress(Progress { step: 0, total: 1, message: "loading weights (first call for this variant/size)".into() });
+                    progress(Progress::step(0, 1, "loading weights (first call for this variant/size)"));
                     let pipe = Pipeline::build_with(&p.cfg, &paths, n_gen + n_ref, p.adapter.as_deref(), p.precision)?;
                     *guard = Some((key, pipe));
                 }

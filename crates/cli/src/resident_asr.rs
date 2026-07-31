@@ -149,10 +149,10 @@ impl Instance for NemotronNpuInstance {
         let blob = inv.get_blob("audio").ok_or("nemotron transcribe: missing 'audio' input")?;
         let wav = wav_from_blob(blob)?;
         let prompt_id = inv.get_i64("prompt_id").unwrap_or(0).max(0) as usize;
-        progress(Progress { step: 0, total: 1, message: "transcribing (NPU encoder)".into() });
+        progress(Progress::step(0, 1, "transcribing (NPU encoder)"));
         let toks = self.model.encoder().transcribe_with_encoder(&wav, prompt_id, |mel, t, mv, pid| self.npu_encode(mel, t, mv, pid));
         let text = self.detok.decode(&toks);
-        progress(Progress { step: 1, total: 1, message: text.clone() });
+        progress(Progress::step(1, 1, text.clone()));
         let mut out = transcription_outcome(text, &toks);
         out = out.set("device", serde_json::json!(self.device.borrow().clone()));
         Ok(out)
@@ -172,7 +172,7 @@ struct NemotronInstance {
 
 impl Instance for NemotronInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        self.run_batch(action, std::slice::from_ref(inv), progress).pop().unwrap()
+        self.run_batch(action, std::slice::from_ref(inv), &mut |_i, p| progress(p)).pop().unwrap()
     }
 
     /// TRUE batched forward, for both actions (the executor groups jobs per action).
@@ -180,7 +180,7 @@ impl Instance for NemotronInstance {
     /// FastConformer forward over all of that group's windows). `transcribe_stream`:
     /// one batched encoder step over every concurrent stream's window
     /// (`StreamSessions::step_batch`). Per-job decode errors stay per-job.
-    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(Progress)) -> Vec<ActionResult> {
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         if action != "transcribe_stream" {
             return self.offline_batch(invs, progress);
         }
@@ -192,7 +192,10 @@ impl Instance for NemotronInstance {
                 Err(e) => results[i] = Some(Err(e)),
             }
         }
-        progress(Progress { step: 0, total: 1, message: format!("stepping {} stream(s)", jobs.len()) });
+        let msg = format!("stepping {} stream(s)", jobs.len());
+        for i in 0..invs.len() {
+            progress(i, Progress::step(0, 1, msg.clone()));
+        }
         let refs: Vec<(&str, &[f32], usize, bool)> = jobs.iter().map(|(_, (id, w, p, e))| (id.as_str(), w.as_slice(), *p, *e)).collect();
         let outs = self.sessions.step_batch(self.model.encoder(), &self.detok, &refs);
         for ((i, _), o) in jobs.into_iter().zip(outs) {
@@ -204,7 +207,7 @@ impl Instance for NemotronInstance {
 
 impl NemotronInstance {
     /// The offline `transcribe` batch path (whole utterances, prompt-grouped).
-    fn offline_batch(&mut self, invs: &[Invocation], progress: &mut dyn FnMut(Progress)) -> Vec<ActionResult> {
+    fn offline_batch(&mut self, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         // 1. decode audio + prompt_id per job (errors recorded, don't abort the batch).
         let mut wavs: Vec<Vec<f32>> = Vec::with_capacity(invs.len());
         let mut pids: Vec<usize> = Vec::with_capacity(invs.len());
@@ -223,7 +226,10 @@ impl NemotronInstance {
                 }
             }
         }
-        progress(Progress { step: 0, total: 1, message: format!("transcribing {} stream(s)", invs.len()) });
+        let msg = format!("transcribing {} stream(s)", invs.len());
+        for i in 0..invs.len() {
+            progress(i, Progress::step(0, 1, msg.clone()));
+        }
 
         // 2. group valid jobs by prompt_id; batch-encode each group.
         let mut tokens_by_job: Vec<Option<Vec<u32>>> = vec![None; invs.len()];
@@ -305,9 +311,9 @@ impl Instance for QwenAsrInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let blob = inv.get_blob("audio").ok_or("qwen-asr transcribe: missing 'audio' input")?;
         let wav = wav_from_blob(blob)?;
-        progress(Progress { step: 0, total: 1, message: "transcribing".into() });
+        progress(Progress::step(0, 1, "transcribing"));
         let (text, tokens) = self.provider.transcribe(&wav)?;
-        progress(Progress { step: 1, total: 1, message: text.clone() });
+        progress(Progress::step(1, 1, text.clone()));
         Ok(transcription_outcome(text, &tokens))
     }
     // run_batch: default sequential loop (offline autoregressive decode; the audio
@@ -371,9 +377,9 @@ impl Instance for QwenAsrNpuInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let blob = inv.get_blob("audio").ok_or("qwen-asr transcribe: missing 'audio' input")?;
         let wav = wav_from_blob(blob)?;
-        progress(Progress { step: 0, total: 1, message: "transcribing (NPU audio encoder)".into() });
+        progress(Progress::step(0, 1, "transcribing (NPU audio encoder)"));
         let (text, tokens) = self.provider.transcribe_with_head(&wav, |packed, n, spans| self.npu_head(packed, n, spans))?;
-        progress(Progress { step: 1, total: 1, message: text.clone() });
+        progress(Progress::step(1, 1, text.clone()));
         Ok(transcription_outcome(text, &tokens).set("device", serde_json::json!(self.device.borrow().clone())))
     }
 }

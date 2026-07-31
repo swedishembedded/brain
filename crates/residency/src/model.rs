@@ -42,9 +42,10 @@ pub trait Instance: Send {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult;
 
     /// Run a batch of same-key invocations. Default = sequential loop; a model with
-    /// real batch support overrides this (P4). Results align with `invs`.
-    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(Progress)) -> Vec<ActionResult> {
-        invs.iter().map(|inv| self.run(action, inv, progress)).collect()
+    /// real batch support overrides this (P4). Results align with `invs`. `progress`
+    /// is called with the batch index so per-sequence token streams stay separate.
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        invs.iter().enumerate().map(|(i, inv)| self.run(action, inv, &mut |p| progress(i, p))).collect()
     }
 }
 
@@ -105,7 +106,7 @@ mod tests {
         // single run
         assert!(inst.run("run", &Invocation::new(), &mut |_| {}).is_ok());
         // default batch = sequential loop
-        let res = inst.run_batch("run", &[Invocation::new(), Invocation::new()], &mut |_| {});
+        let res = inst.run_batch("run", &[Invocation::new(), Invocation::new()], &mut |_, _| {});
         assert_eq!(res.len(), 2);
         assert!(res.iter().all(|r| r.is_ok()));
 

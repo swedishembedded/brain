@@ -119,10 +119,10 @@ impl Instance for GptInstance {
         let prompt_text = if prompt.is_empty() { "\n".to_string() } else { prompt };
         let ids = self.tok.encode(&prompt_text);
         let mut rng = Rng::new(seed);
-        progress(Progress { step: 0, total: max_new as u32, message: "generating".to_string() });
+        progress(Progress::step(0, max_new as u32, "generating"));
         let gen = gpt::sample::generate(&self.model, &ids, max_new, temp, top_k, &mut rng);
         let text = self.tok.decode(&gen);
-        progress(Progress { step: max_new as u32, total: max_new as u32, message: "done".to_string() });
+        progress(Progress::step(max_new as u32, max_new as u32, "done"));
         Ok(text_outcome(text))
     }
 }
@@ -173,10 +173,10 @@ impl Instance for GlmInstance {
         let prompt_text = if prompt.is_empty() { "\n".to_string() } else { prompt };
         let ids = self.tok.encode(&prompt_text);
         let mut rng = Rng::new(seed);
-        progress(Progress { step: 0, total: max_new as u32, message: "generating".to_string() });
+        progress(Progress::step(0, max_new as u32, "generating"));
         let gen = glm::sample::generate(&self.model, &ids, max_new, temp, top_k, None, &mut rng);
         let text = self.tok.decode(&gen);
-        progress(Progress { step: max_new as u32, total: max_new as u32, message: "done".to_string() });
+        progress(Progress::step(max_new as u32, max_new as u32, "done"));
         Ok(text_outcome(text))
     }
 }
@@ -245,10 +245,10 @@ impl Instance for QwenInstance {
             return Err("qwen: empty prompt".to_string());
         }
         let mut rng = Rng::new(seed);
-        progress(Progress { step: 0, total: max_new as u32, message: "generating".to_string() });
+        progress(Progress::step(0, max_new as u32, "generating"));
         let gen = qwen::sample::generate(&self.model, &ids, max_new, temp, top_k, self.eos, &mut rng);
         let out = self.tok.decode(&gen);
-        progress(Progress { step: max_new as u32, total: max_new as u32, message: "done".to_string() });
+        progress(Progress::step(max_new as u32, max_new as u32, "done"));
         Ok(text_outcome(out))
     }
 }

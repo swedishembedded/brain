@@ -370,12 +370,26 @@ impl Outcome {
     }
 }
 
-/// A progress update emitted while a streaming action runs.
+/// A progress update emitted while a streaming action runs. `delta` carries a
+/// per-token text fragment for streaming generation (`None` for plain step
+/// progress); a front-end appends deltas to reconstruct the running output.
 #[derive(Clone, Debug)]
 pub struct Progress {
     pub step: u32,
     pub total: u32,
     pub message: String,
+    pub delta: Option<String>,
+}
+
+impl Progress {
+    /// A plain step update (no token payload).
+    pub fn step(step: u32, total: u32, message: impl Into<String>) -> Progress {
+        Progress { step, total, message: message.into(), delta: None }
+    }
+    /// A streaming token: `text` is the new fragment carried in `delta`.
+    pub fn token(step: u32, total: u32, text: impl Into<String>) -> Progress {
+        Progress { step, total, message: "token".into(), delta: Some(text.into()) }
+    }
 }
 
 pub type ActionResult = Result<Outcome, String>;
@@ -450,7 +464,7 @@ mod tests {
             let n = inv.get_i64("times").unwrap() as usize;
             let up = inv.get_str("mode").unwrap() == "upper";
             let s = if up { text.to_uppercase() } else { text.to_lowercase() };
-            progress(Progress { step: 1, total: 1, message: "echoing".into() });
+            progress(Progress::step(1, 1, "echoing"));
             let out = s.repeat(n);
             Ok(Outcome::new().set("len", json!(out.len())).blob("result", Blob::new(Media::Text, out.into_bytes())))
         }
@@ -501,7 +515,7 @@ mod tests {
                 if inv.cancel.is_cancelled() {
                     return Err("cancelled".into());
                 }
-                progress(Progress { step, total: 100, message: "step".into() });
+                progress(Progress::step(step, 100, "step"));
             }
             Ok(Outcome::new())
         }

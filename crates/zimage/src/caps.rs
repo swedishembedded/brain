@@ -138,7 +138,7 @@ impl Action for ZAction {
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let paths = crate::pipeline::Paths::from_env()?;
         let prompt = inv.get_str("prompt").unwrap_or_default();
-        let mut on = |step, total, message: &str| progress(Progress { step, total, message: message.to_string() });
+        let mut on = |step, total, message: &str| progress(Progress::step(step, total, message.to_string()));
         match self.name.as_str() {
             "text2image" => {
                 // Hot path: build the resident pipeline once per (size, precision),
@@ -203,7 +203,7 @@ impl Action for ZAction {
                     save_path: save.clone(),
                     ckpt_every: 100,
                 };
-                let mut prog = |step: u32, total: u32, message: String| progress(Progress { step, total, message });
+                let mut prog = |step: u32, total: u32, message: String| progress(Progress::step(step, total, message));
                 let tensors = crate::finetune::run(&paths, std::path::Path::new(&dir), &opts, &inv.cancel, &mut prog)?;
                 // Return the trained artifact itself, not just its server-side path —
                 // a remote client has no filesystem access to `save`.

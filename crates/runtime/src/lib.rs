@@ -1138,7 +1138,7 @@ mod tests {
                 .output(BlobSpec::new("result", Media::Text, "the echoed text"))
         }
         fn run(&self, inv: &capability::Invocation, progress: &mut dyn FnMut(capability::Progress)) -> capability::ActionResult {
-            progress(capability::Progress { step: 1, total: 1, message: "echoing".into() });
+            progress(capability::Progress::step(1, 1, "echoing"));
             let s = inv.get_str("text").unwrap_or_default().repeat(inv.get_i64("times").unwrap_or(1) as usize);
             Ok(capability::Outcome::new().set("chars", serde_json::json!(s.len())).blob("result", capability::Blob::new(capability::Media::Text, s.into_bytes())))
         }

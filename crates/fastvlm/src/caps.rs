@@ -225,7 +225,7 @@ impl Action for CaptionAction {
                 break;
             }
             out_ids.push(next);
-            progress(Progress { step: i as u32 + 1, total: max_new as u32, message: String::new() });
+            progress(Progress::step(i as u32 + 1, max_new as u32, ""));
             hidden = hot.dec.step(next);
         }
         stage_time("decode", t_decode);

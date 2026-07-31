@@ -173,9 +173,9 @@ impl Action for TranscribeAction {
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let blob = inv.get_blob("audio").ok_or("qwen-asr transcribe: missing 'audio' input")?;
         let wav = wav_from_blob(blob)?;
-        progress(Progress { step: 0, total: 1, message: "transcribing".into() });
+        progress(Progress::step(0, 1, "transcribing"));
         let (text, tokens) = self.inner.transcribe(&wav)?;
-        progress(Progress { step: 1, total: 1, message: text.clone() });
+        progress(Progress::step(1, 1, text.clone()));
         Ok(transcription_outcome(text, &tokens))
     }
 }

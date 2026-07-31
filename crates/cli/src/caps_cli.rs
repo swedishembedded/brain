@@ -304,7 +304,7 @@ impl Action for EchoAction {
             Some("lower") => text.to_lowercase(),
             _ => text,
         };
-        progress(Progress { step: 1, total: 1, message: "echoing".into() });
+        progress(Progress::step(1, 1, "echoing"));
         let out = s.repeat(n);
         Ok(Outcome::new().set("chars", json!(out.len())).blob("result", Blob::new(Media::Text, out.into_bytes())))
     }

@@ -65,7 +65,7 @@ impl Action for SlowAction {
             if inv.cancel.is_cancelled() {
                 return Err("cancelled".into());
             }
-            progress(Progress { step, total: 500, message: "working".into() });
+            progress(Progress::step(step, 500, "working"));
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         Ok(Outcome::new())

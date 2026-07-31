@@ -58,7 +58,7 @@ impl Action for MaskRect {
         let (wd, ht) = (inv.get_i64("width").unwrap_or(512) as usize, inv.get_i64("height").unwrap_or(512) as usize);
         let (x, y) = (inv.get_i64("x").unwrap_or(0).max(0) as usize, inv.get_i64("y").unwrap_or(0).max(0) as usize);
         let (rw, rh) = (inv.get_i64("w").unwrap_or(0).max(0) as usize, inv.get_i64("h").unwrap_or(0).max(0) as usize);
-        progress(Progress { step: 1, total: 1, message: "drawing mask".into() });
+        progress(Progress::step(1, 1, "drawing mask"));
         let mut m = vec![0f32; wd * ht]; // 1-channel
         for row in y..(y + rh).min(ht) {
             for col in x..(x + rw).min(wd) {
@@ -88,7 +88,7 @@ impl Action for Gradient {
         let maxr = ((cx * cx + cy * cy) as f32).sqrt();
         for row in 0..ht {
             if row % 64 == 0 {
-                progress(Progress { step: (row / 64) as u32 + 1, total: (ht / 64) as u32 + 1, message: "rendering".into() });
+                progress(Progress::step((row / 64) as u32 + 1, (ht / 64) as u32 + 1, "rendering"));
             }
             for col in 0..wd {
                 let t = (col as f32 / wd as f32 * 0.55 + row as f32 / ht as f32 * 0.45).clamp(0.0, 1.0);

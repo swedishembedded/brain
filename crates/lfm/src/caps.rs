@@ -180,7 +180,7 @@ impl Action for EncoderAction {
         let n = ids.len();
         debug_assert_eq!(n as u32, cap);
         model.set_tokens(&ids);
-        progress(Progress { step: 1, total: 2, message: "encode".to_string() });
+        progress(Progress::step(1, 2, "encode"));
 
         match self.name.as_str() {
             "fill_mask" => {

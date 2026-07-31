@@ -197,9 +197,9 @@ impl Instance for Flux2Instance {
     ///
     /// `lora_train` has no batchable form (one host trainer, one dataset, one
     /// adapter out), so it stays the sequential loop.
-    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(Progress)) -> Vec<ActionResult> {
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         if action == "lora_train" || invs.len() < 2 {
-            return invs.iter().map(|inv| self.run(action, inv, progress)).collect();
+            return invs.iter().enumerate().map(|(i, inv)| self.run(action, inv, &mut |p| progress(i, p))).collect();
         }
         let Some(pipe) = self.pipe.as_ref() else {
             return invs.iter().map(|_| Err("flux2: generation on a training instance".to_string())).collect();
@@ -224,7 +224,14 @@ impl Instance for Flux2Instance {
         }
         // `take`, not `clone` — a request's reference images are megabytes.
         let batch: Vec<flux2::BatchRequest> = live.iter().map(|&i| reqs[i].take().unwrap()).collect();
-        let mut prog = |step: u32, total: u32, msg: &str| progress(Progress { step, total, message: msg.to_string() });
+        // Denoising progress is batch-level (all samples step together); broadcast
+        // each update to every job's sink, matching the prior fan-to-all behavior.
+        let n = invs.len();
+        let mut prog = |step: u32, total: u32, msg: &str| {
+            for i in 0..n {
+                progress(i, Progress::step(step, total, msg));
+            }
+        };
         let results = pipe.generate_batch(&batch, &mut prog);
         for (&i, r) in live.iter().zip(results) {
             out[i] = r.map(|(rgb, w, h)| flux2::caps::image_outcome(&rgb, w, h));

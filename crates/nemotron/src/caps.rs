@@ -194,7 +194,7 @@ impl Action for TranscribeStreamAction {
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let (id, wav, prompt_id, eos) = stream_job_from_inv(inv)?;
-        progress(Progress { step: 0, total: 1, message: format!("stream {id}: {} samples", wav.len()) });
+        progress(Progress::step(0, 1, format!("stream {id}: {} samples", wav.len())));
         let mut sessions = self.sessions.lock().map_err(|_| "nemotron stream sessions poisoned".to_string())?;
         Ok(sessions.step(self.model.encoder(), &self.detok, &id, &wav, prompt_id, eos))
     }
@@ -213,10 +213,10 @@ impl Action for TranscribeAction {
         let blob = inv.get_blob("audio").ok_or("nemotron transcribe: missing 'audio' input")?;
         let wav = wav_from_blob(blob)?;
         let prompt_id = inv.get_i64("prompt_id").unwrap_or(0).max(0) as usize;
-        progress(Progress { step: 0, total: 1, message: "transcribing".into() });
+        progress(Progress::step(0, 1, "transcribing"));
         let tokens = self.model.transcribe(&wav, prompt_id);
         let text = self.detok.decode(&tokens);
-        progress(Progress { step: 1, total: 1, message: text.clone() });
+        progress(Progress::step(1, 1, text.clone()));
         Ok(transcription_outcome(text, &tokens))
     }
 }

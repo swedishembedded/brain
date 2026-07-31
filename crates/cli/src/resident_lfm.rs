@@ -252,10 +252,10 @@ impl LfmInstance {
 
 impl Instance for LfmInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        self.run_batch(action, std::slice::from_ref(inv), progress).pop().unwrap()
+        self.run_batch(action, std::slice::from_ref(inv), &mut |_i, p| progress(p)).pop().unwrap()
     }
 
-    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(Progress)) -> Vec<ActionResult> {
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         let mut out: Vec<ActionResult> = (0..invs.len()).map(|_| Err(String::new())).collect();
         // Tokenize all jobs (per-job errors stay per-job).
         let mut ready: Vec<(usize, Vec<u32>, &Invocation)> = Vec::new();
@@ -276,7 +276,10 @@ impl Instance for LfmInstance {
         };
         for (gi, group) in groups.iter().enumerate() {
             self.forward_group(action, group, &mut out);
-            progress(Progress { step: gi as u32 + 1, total, message: format!("batch {}/{total}", gi + 1) });
+            let msg = format!("batch {}/{total}", gi + 1);
+            for i in 0..invs.len() {
+                progress(i, Progress::step(gi as u32 + 1, total, msg.clone()));
+            }
         }
         let _ = &self.tokenizer_path; // key identity; kept for diagnostics
         out

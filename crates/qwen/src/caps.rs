@@ -155,7 +155,7 @@ impl Action for GenerateAction {
         let mut rng = Rng::new(seed);
         let total = max_new as u32;
         let gen = crate::sample::generate_kv_stream(model, &ids, max_new, temp, top_k, eos, &mut rng, &mut |i, _t| {
-            progress(Progress { step: i as u32 + 1, total, message: "token".to_string() });
+            progress(Progress::step(i as u32 + 1, total, "token"));
         });
 
         let text = match &tok {

@@ -27,13 +27,37 @@ use crate::manager::{ClaimError, Claimed, InstanceHandle};
 use crate::scheduler::{choose_next, Group, Policy};
 use crate::{Device, InstanceKey, ResidencyManager, ResidentModel};
 
-/// One unit of work. `on_progress`/`reply` are callbacks (no async dependency here).
+/// One unit of work. `on_progress`/`reply`/`on_admit` are callbacks (no async
+/// dependency here). Build with [`Job::new`] + the `.on_*`/`.reply` setters so new
+/// optional signals don't churn every construction site.
 pub struct Job {
     pub model: String,
     pub action: String,
     pub inv: Invocation,
     pub on_progress: Box<dyn FnMut(Progress) + Send>,
     pub reply: Box<dyn FnOnce(ActionResult) + Send>,
+    /// Fired exactly once, at the moment the dispatcher CLAIMS this job onto a lane
+    /// (work is about to start) — the admission signal an HTTP layer gates on.
+    pub on_admit: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl Job {
+    /// A job with no-op callbacks; attach them with `.on_progress`/`.reply`/`.on_admit`.
+    pub fn new(model: impl Into<String>, action: impl Into<String>, inv: Invocation) -> Job {
+        Job { model: model.into(), action: action.into(), inv, on_progress: Box::new(|_| {}), reply: Box::new(|_| {}), on_admit: None }
+    }
+    pub fn on_progress(mut self, f: impl FnMut(Progress) + Send + 'static) -> Job {
+        self.on_progress = Box::new(f);
+        self
+    }
+    pub fn reply(mut self, f: impl FnOnce(ActionResult) + Send + 'static) -> Job {
+        self.reply = Box::new(f);
+        self
+    }
+    pub fn on_admit(mut self, f: impl FnOnce() + Send + 'static) -> Job {
+        self.on_admit = Some(Box::new(f));
+        self
+    }
 }
 
 struct Pending {
@@ -44,6 +68,7 @@ struct Pending {
     enqueued: Instant,
     on_progress: Box<dyn FnMut(Progress) + Send>,
     reply: Box<dyn FnOnce(ActionResult) + Send>,
+    on_admit: Option<Box<dyn FnOnce() + Send>>,
 }
 
 /// Live scheduler counters — proof that batching and eviction happen, and the
@@ -132,15 +157,9 @@ impl Executor {
     /// Submit and block for the result (the CLI's synchronous path).
     pub fn run_blocking(&self, model: &str, action: &str, inv: Invocation, on_progress: impl FnMut(Progress) + Send + 'static) -> ActionResult {
         let (rtx, rrx) = channel();
-        self.submit(Job {
-            model: model.into(),
-            action: action.into(),
-            inv,
-            on_progress: Box::new(on_progress),
-            reply: Box::new(move |r| {
-                let _ = rtx.send(r);
-            }),
-        });
+        self.submit(Job::new(model, action, inv).on_progress(on_progress).reply(move |r| {
+            let _ = rtx.send(r);
+        }));
         rrx.recv().unwrap_or_else(|_| Err("executor worker gone".into()))
     }
 
@@ -185,6 +204,7 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
                     enqueued: Instant::now(),
                     on_progress: job.on_progress,
                     reply: job.reply,
+                    on_admit: job.on_admit,
                 });
                 let mut s = stats.lock().unwrap();
                 s.queue_peak = s.queue_peak.max(queue.len());
@@ -275,6 +295,14 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
         let mut jobs: Vec<Pending> = idxs.into_iter().map(|i| queue.remove(i)).collect();
         jobs.reverse();
 
+        // The group is now CLAIMED onto a lane — work is about to start. Fire each
+        // job's admission signal exactly once (an HTTP layer gates streaming on it).
+        for j in jobs.iter_mut() {
+            if let Some(f) = j.on_admit.take() {
+                f();
+            }
+        }
+
         // Sync residency counters immediately — a claim may have built/evicted, and
         // that must be visible before the lane's Done (which lags the actual run).
         if let Ok(mut s) = stats.lock() {
@@ -362,12 +390,14 @@ fn run_group(handle: &InstanceHandle, action: &str, jobs: Vec<Pending>) {
     }
     let results = {
         let mut inst = handle.lock().unwrap();
-        let mut fanout = |pr: Progress| {
-            for s in sinks.iter_mut() {
-                s(pr.clone());
+        // Route each progress update to ITS job's sink only (by batch index), so
+        // per-sequence token streams don't cross.
+        let mut route = |i: usize, pr: Progress| {
+            if let Some(s) = sinks.get_mut(i) {
+                s(pr);
             }
         };
-        inst.run_batch(action, &invs, &mut fanout)
+        inst.run_batch(action, &invs, &mut route)
     };
     if results.len() == replies.len() {
         for (r, o) in replies.into_iter().zip(results) {
@@ -427,7 +457,7 @@ mod tests {
         let (tx, rx) = channel();
         for m in models {
             let tx = tx.clone();
-            exec.submit(Job { model: (*m).into(), action: "run".into(), inv: Invocation::new(), on_progress: Box::new(|_| {}), reply: Box::new(move |r| { let _ = tx.send(r); }) });
+            exec.submit(Job::new(*m, "run", Invocation::new()).reply(move |r| { let _ = tx.send(r); }));
         }
         drop(tx);
         let t = Instant::now();
@@ -530,7 +560,7 @@ mod tests {
         let (tx, rx) = channel();
         for _ in 0..3 {
             let tx = tx.clone();
-            exec.submit(Job { model: "bad".into(), action: "run".into(), inv: Invocation::new(), on_progress: Box::new(|_| {}), reply: Box::new(move |r| { let _ = tx.send(r); }) });
+            exec.submit(Job::new("bad", "run", Invocation::new()).reply(move |r| { let _ = tx.send(r); }));
         }
         for _ in 0..3 {
             let r = rx.recv_timeout(Duration::from_secs(5)).expect("reply must arrive, not hang");
@@ -620,7 +650,7 @@ mod tests {
         // unplaceable and filtered; c (fits GPU 1) must still be scheduled.
         for m in ["a", "b", "c"] {
             let tx = tx.clone();
-            exec.submit(Job { model: m.into(), action: "run".into(), inv: Invocation::new(), on_progress: Box::new(|_| {}), reply: Box::new(move |r| { let _ = tx.send(r); }) });
+            exec.submit(Job::new(m, "run", Invocation::new()).reply(move |r| { let _ = tx.send(r); }));
         }
         for _ in 0..3 {
             rx.recv_timeout(Duration::from_secs(5))
@@ -645,7 +675,7 @@ mod tests {
         let exec = Executor::start(models, budgets, Policy::default());
 
         let (stx, srx) = channel();
-        exec.submit(Job { model: "slowboot".into(), action: "run".into(), inv: Invocation::new(), on_progress: Box::new(|_| {}), reply: Box::new(move |r| { let _ = stx.send(r); }) });
+        exec.submit(Job::new("slowboot", "run", Invocation::new()).reply(move |r| { let _ = stx.send(r); }));
         // While slowboot activates on its lane, `fast` must complete quickly.
         let t = Instant::now();
         let ok = exec.run_blocking("fast", "run", Invocation::new(), |_| {});

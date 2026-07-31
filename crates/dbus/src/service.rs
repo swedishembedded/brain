@@ -138,15 +138,9 @@ fn emit_window(executor: &Executor, model: &str, window: &[f32], prompt_id: i64,
         None => "transcribe",
     };
     let (tx, rx) = std::sync::mpsc::channel();
-    executor.submit(Job {
-        model: model.to_string(),
-        action: action.into(),
-        inv,
-        on_progress: Box::new(|_| {}),
-        reply: Box::new(move |r| {
-            let _ = tx.send(r);
-        }),
-    });
+    executor.submit(Job::new(model.to_string(), action, inv).reply(move |r| {
+        let _ = tx.send(r);
+    }));
     match rx.recv() {
         Ok(Ok(outcome)) => {
             let raw = outcome.outputs.get("text").and_then(|v| v.as_str()).unwrap_or("");
@@ -222,16 +216,11 @@ impl Manager {
         let job = self.register_job(&mut inv);
         let jobs = self.jobs.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.executor.submit(Job {
-            model,
-            action,
-            inv,
-            on_progress: Box::new(|_| {}), // Run is one-shot; no streaming
-            reply: Box::new(move |r| {
-                finish_job(&jobs, job);
-                let _ = tx.send(r);
-            }),
-        });
+        // Run is one-shot; no streaming (default no-op on_progress).
+        self.executor.submit(Job::new(model, action, inv).reply(move |r| {
+            finish_job(&jobs, job);
+            let _ = tx.send(r);
+        }));
         let outcome = rx.await.map_err(|_| fdo::Error::Failed("executor dropped the reply".into()))?.map_err(fdo::Error::Failed)?;
         let want_dmabuf = transport.eq_ignore_ascii_case("dmabuf");
         let (out_fds, out_meta) = outcome_to_fds(&outcome, want_dmabuf).map_err(fdo::Error::Failed)?;
@@ -257,33 +246,31 @@ impl Manager {
         let (stream, client) = crate::stream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;
         let stream = Arc::new(Mutex::new(stream));
         let (sp, sr) = (stream.clone(), stream.clone());
-        self.executor.submit(Job {
-            model,
-            action,
-            inv,
-            on_progress: Box::new(move |p: Progress| {
-                if let Ok(mut s) = sp.lock() {
-                    s.progress(p.step, p.total, &p.message);
-                }
-            }),
-            reply: Box::new(move |r| {
-                finish_job(&jobs, job);
-                if let Ok(mut s) = sr.lock() {
-                    match r {
-                        Ok(outcome) => {
-                            for (name, blob) in &outcome.blobs {
-                                match bytes_to_fd(name, &blob.bytes, false) {
-                                    Ok((fd, _)) => s.blob(name, blob.media.name(), &blob.meta, fd.as_fd()),
-                                    Err(e) => s.error(&format!("blob {name}: {e}")),
-                                }
-                            }
-                            s.done(&outcome.outputs);
-                        }
-                        Err(e) => s.error(&e),
+        self.executor.submit(
+            Job::new(model, action, inv)
+                .on_progress(move |p: Progress| {
+                    if let Ok(mut s) = sp.lock() {
+                        s.progress(p.step, p.total, &p.message);
                     }
-                }
-            }),
-        });
+                })
+                .reply(move |r| {
+                    finish_job(&jobs, job);
+                    if let Ok(mut s) = sr.lock() {
+                        match r {
+                            Ok(outcome) => {
+                                for (name, blob) in &outcome.blobs {
+                                    match bytes_to_fd(name, &blob.bytes, false) {
+                                        Ok((fd, _)) => s.blob(name, blob.media.name(), &blob.meta, fd.as_fd()),
+                                        Err(e) => s.error(&format!("blob {name}: {e}")),
+                                    }
+                                }
+                                s.done(&outcome.outputs);
+                            }
+                            Err(e) => s.error(&e),
+                        }
+                    }
+                }),
+        );
         Ok((job, client.into()))
     }
 
