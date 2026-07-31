@@ -474,7 +474,10 @@ impl Inventory {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn probe() -> Inventory {
         Inventory {
-            gpus: crate::discrete_gpu_count() as u32,
+            // Not `discrete_gpu_count`: the default (`--device` absent) set must
+            // include an integrated GPU when that's the only card present, or an
+            // iGPU-only box silently loses GPU scheduling entirely.
+            gpus: crate::visible_gpu_count() as u32,
             cpu_cores: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
             npus: npu_count(),
         }

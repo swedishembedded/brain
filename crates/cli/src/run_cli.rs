@@ -250,7 +250,10 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
     // NPU (a modest fraction of RAM). This is what makes `--device gpu` (and the
     // all-devices default) actually schedule onto the iGPU on such boxes.
     if all_gpus.is_empty() {
-        let n = gpu_core::discrete_gpu_count();
+        // Not `discrete_gpu_count` (that's 0 by definition on an integrated-only
+        // box): `visible_gpu_count` counts the iGPU too, which is exactly the
+        // case this fallback exists for.
+        let n = gpu_core::visible_gpu_count();
         if n > 0 {
             let ram = query_ram_bytes();
             let vram = (8u64 << 30).min(ram / 2).max(1 << 30);
@@ -301,6 +304,13 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
     // its scan appends every carded file as its own catalog entry.
     let dir = crate::model_dir::resolve(models_dir.as_deref());
     if let Some(d) = &dir {
+        // First run on a fresh install: the dir doesn't exist yet. Create it so
+        // the scan is clean (an empty catalog, not an ENOENT warning) — models
+        // dropped in later are picked up on the next `brain serve` with no env
+        // vars needed.
+        if let Err(e) = std::fs::create_dir_all(d) {
+            eprintln!("brain serve: could not create model dir {} ({e}); scan may be empty", d.display());
+        }
         eprintln!("brain serve: scanning model dir {}", d.display());
     }
     let executor =
@@ -326,6 +336,28 @@ struct RunApis {
 /// OpenRouter), each on its own localhost port with a key generated at startup. When
 /// D-Bus and an HTTP surface both run, D-Bus gets its own thread (it owns a tokio
 /// runtime) and the HTTP servers own the main thread; a single surface blocks directly.
+/// A `brain_dbus::serve` failure is almost always "no bus at this address" (no
+/// desktop session, no `dbus-run-session`, no system bus policy for this user) —
+/// give a message that says what to try instead of the raw connect errno.
+/// `http_up` reports whether an HTTP API surface is still serving, so the
+/// operator knows this failure did not take the whole process down.
+fn dbus_connect_hint(err: &dyn std::fmt::Display, system_bus: bool, http_up: bool) -> String {
+    let status = if http_up {
+        "HTTP API surface(s) remain up."
+    } else {
+        "no other surface was requested; exiting."
+    };
+    let advice = if system_bus {
+        "Check the system bus is running and this user has a policy file for \
+         the requested bus name, or drop --dbus-system for the per-user session bus."
+    } else {
+        "Run under `dbus-run-session -- <cmd>`, start a desktop session, or pass \
+         --dbus-system if a system bus policy is installed for this service."
+    };
+    let kind = if system_bus { "system" } else { "session" };
+    format!("brain serve --dbus: could not connect to the D-Bus {kind} bus ({err}). {advice} {status}")
+}
+
 fn run_apis(a: RunApis) {
     let executor = build_serving_executor(a.reserve_gb, a.models_dir);
     let served: Vec<&str> = executor.manifests().iter().map(|m| m.model.as_str()).collect();
@@ -342,12 +374,12 @@ fn run_apis(a: RunApis) {
         if http {
             std::thread::spawn(move || {
                 if let Err(err) = brain_dbus::serve(e, opts) {
-                    eprintln!("brain serve --dbus: {err}");
+                    eprintln!("{}", dbus_connect_hint(&err, a.dbus_system, true));
                 }
             });
         } else {
             if let Err(err) = brain_dbus::serve(e, opts) {
-                eprintln!("brain serve --dbus: {err}");
+                eprintln!("{}", dbus_connect_hint(&err, a.dbus_system, false));
                 std::process::exit(1);
             }
             return;

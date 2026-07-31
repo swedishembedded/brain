@@ -166,6 +166,20 @@ mod native_facade {
             .count()
     }
 
+    /// How many GPUs the wgpu backend can actually schedule work on — discrete
+    /// cards, or (only when no discrete card is present) the integrated GPU.
+    /// This is the canonical device registry's own count, which already applies
+    /// that discrete-preferred precedence (see `devices::DeviceRegistry`).
+    /// Unlike [`discrete_gpu_count`], an integrated-only box (e.g. Intel Arc on
+    /// Meteor Lake) reports 1 here, not 0 — use this wherever "is there GPU
+    /// hardware brain should schedule on" is the real question (the `--device`
+    /// default set, the no-nvidia-smi budgeting fallback); keep
+    /// `discrete_gpu_count` where multi-GPU sharding specifically needs distinct
+    /// discrete cards.
+    pub fn visible_gpu_count() -> usize {
+        crate::devices::gpus().len()
+    }
+
     /// Identities of the physical GPUs the wgpu backend can bind, in its own
     /// enumeration order — for `brain devices` to report per-card backend
     /// visibility against the canonical registry (matched by identity).
@@ -626,7 +640,7 @@ mod native_facade {
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_facade::{
     adapter_info, backend_name, backend_selected, device_caps, discrete_gpu_count,
-    set_default_backend, wgpu_visible_gpus, Backend, Gpu, WeakGpu,
+    set_default_backend, visible_gpu_count, wgpu_visible_gpus, Backend, Gpu, WeakGpu,
 };
 
 // ---- wasm facade ------------------------------------------------------------
