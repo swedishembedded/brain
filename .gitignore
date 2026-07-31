@@ -29,7 +29,8 @@ __pycache__/
 !/results/scale-gpt-1234.json
 
 # Session-local agent machinery (worktrees, locks, loop state, workflows).
-.claude/
+.claude/*
+!.claude/commands/
 
 # Generated world-model artifacts: parity fixtures (regenerate with
 # `make wm-fixtures`) and demo output.
