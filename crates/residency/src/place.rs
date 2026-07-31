@@ -110,10 +110,18 @@ pub fn pick_device(cost: &MemCost, budgets: &Budgets, exclude: &HashSet<Device>)
             return Some(d);
         }
     }
-    // CPU/RAM-resident model.
-    if cost.ram > 0 && !exclude.contains(&Device::Cpu) {
+    // CPU fallback: an explicit RAM-resident model, OR a GPU/NPU model on a host with
+    // no accelerator of that class (a GPU-less/NPU-less box) — a weight-holding model's
+    // host RAM footprint is the same bytes it would take on an accelerator, so spill it
+    // to the CPU. (On a host that HAS the accelerator but it's full, we return None so
+    // the caller's eviction path frees the accelerator instead of spilling to slow CPU.)
+    let cpu_need = cost
+        .ram
+        .max(if budgets.gpus().is_empty() { cost.vram } else { 0 })
+        .max(if budgets.npus().is_empty() { cost.npu } else { 0 });
+    if cpu_need > 0 && !exclude.contains(&Device::Cpu) {
         if let Some(b) = budgets.get(Device::Cpu) {
-            if b.fits(cost.ram) {
+            if b.fits(cpu_need) {
                 return Some(Device::Cpu);
             }
         }
@@ -300,6 +308,25 @@ mod tests {
         // If the NPU is full, an NPU-capable model falls back to a GPU.
         b.alloc(Device::Npu(0), 8 * GB);
         assert_eq!(pick_device(&both, &b, &no_exclude()), Some(Device::Gpu(0)));
+    }
+
+    #[test]
+    fn vram_model_spills_to_cpu_on_a_gpu_less_host() {
+        // A weight-holding model reports its footprint as `vram` (est_vram sets
+        // MemCost::new(bytes, 0)). On a CPU-only host (no GPU/NPU) it MUST fall back to
+        // the CPU using that footprint — otherwise every request to it is unplaceable
+        // and 429s forever (the bug the Claude Code e2e caught).
+        let mut cpu_only = Budgets::new();
+        cpu_only.set(Device::Cpu, 32 * GB, 2 * GB);
+        assert_eq!(pick_device(&vram(3), &cpu_only, &no_exclude()), Some(Device::Cpu));
+        // Too big for the CPU budget -> None (the caller queues / evicts).
+        assert_eq!(pick_device(&vram(64), &cpu_only, &no_exclude()), None);
+        // But on a host WITH a GPU that happens to be full, a vram model does NOT spill
+        // to slow CPU — it returns None so the caller's eviction frees the GPU.
+        let mut b = two_gpus();
+        b.alloc(Device::Gpu(0), 23 * GB);
+        b.alloc(Device::Gpu(1), 23 * GB);
+        assert_eq!(pick_device(&vram(6), &b, &no_exclude()), None);
     }
 
     #[test]
