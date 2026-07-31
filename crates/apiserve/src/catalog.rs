@@ -89,3 +89,28 @@ pub fn resolve_chat(exec: &Executor, model: &str) -> bool {
 pub fn resolve_embed(exec: &Executor, model: &str) -> bool {
     exec.manifests().iter().any(|m| m.model == model && api_caps(m).embeddings)
 }
+
+/// Resolve an image request's `model` string to the **action name** to invoke: is
+/// there a manifest whose `model == id` that advertises the image capability, and if
+/// so, which action realises a text-to-image (the one to dispatch for
+/// `/images/generations`)? `None` on an unknown or non-image model (a
+/// `model_not_found`). The action is picked by shape — nothing is hard-coded per
+/// model — so any model exposing a text→image action serves here (z-image/flux2 name
+/// it `text2image`).
+pub fn resolve_image(exec: &Executor, model: &str) -> Option<String> {
+    exec.manifests().iter().find(|m| m.model == model && api_caps(m).image).and_then(|m| text2image_action(&m))
+}
+
+/// The pure text-to-image action of an image manifest: emits an `Image` output,
+/// takes a `prompt` param, and requires NO input blob (so image-editing actions like
+/// `image2image`/`inpaint`/`outpaint`, which need a source image, are skipped).
+fn text2image_action(m: &Manifest) -> Option<String> {
+    m.actions
+        .iter()
+        .find(|a| {
+            a.outputs.iter().any(|o| o.media == Media::Image)
+                && a.params.iter().any(|p| p.name == "prompt")
+                && !a.inputs.iter().any(|b| b.required)
+        })
+        .map(|a| a.name.clone())
+}

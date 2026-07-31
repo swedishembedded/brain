@@ -14,8 +14,9 @@
 //! - [`models`] — the `/models` catalog handlers.
 //! - [`bridge`] — the async→sync seam to the shared executor (submit/stream + the
 //!   cancel-on-disconnect guard) that the chat handlers dispatch through.
+//! - [`png`] — a minimal dependency-free PNG encoder for `images/generations`.
 //! - [`anthropic`]/[`openai`]/[`openrouter`] — the per-dialect routes: real chat
-//!   (non-stream + SSE token streaming); embeddings/images still 501.
+//!   (non-stream + SSE token streaming), embeddings, and image generation.
 //!
 //! Every path submits [`residency::Job`]s to the ONE shared [`residency::Executor`],
 //! so scheduling/residency/batching stay uniform across the D-Bus surface, the CLI,
@@ -29,6 +30,7 @@ pub mod error;
 pub mod models;
 pub mod openai;
 pub mod openrouter;
+pub mod png;
 pub mod state;
 pub mod surface;
 

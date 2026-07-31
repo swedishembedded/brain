@@ -4,7 +4,8 @@
 //! The OpenRouter-compatible surface. Same request grammar and chat handler as
 //! OpenAI (it reuses [`crate::openai::handle_chat`]) with `native = true`, which
 //! adds OpenRouter's `native_finish_reason` (mirroring `finish_reason`) and the
-//! `system_fingerprint` its `ChatResult` requires. Embeddings/images stay 501.
+//! `system_fingerprint` its `ChatResult` requires. Embeddings and image generation
+//! reuse the shared OpenAI handlers verbatim (identical request grammar).
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -12,7 +13,6 @@ use axum::response::Response;
 use axum::routing::post;
 use axum::Router;
 
-use crate::error::ApiError;
 use crate::openai;
 use crate::state::AppState;
 
@@ -39,7 +39,8 @@ async fn embeddings(State(state): State<AppState>, body: Bytes) -> Response {
     openai::handle_embeddings(state, body).await
 }
 
-/// `POST /images/generations` — 501 until a later phase.
-async fn images_generations(State(state): State<AppState>) -> ApiError {
-    ApiError::not_implemented(state.provider, "POST /images/generations is not implemented yet")
+/// `POST /images/generations` — the shared OpenAI image handler (OpenRouter uses the
+/// identical `CreateImageRequest`/`ImagesResponse` grammar).
+async fn images_generations(State(state): State<AppState>, body: Bytes) -> Response {
+    openai::handle_images(state, body).await
 }

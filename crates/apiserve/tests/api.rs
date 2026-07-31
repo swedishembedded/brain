@@ -69,6 +69,21 @@ fn embed_manifest() -> Manifest {
     )
 }
 
+/// An image model: streaming `text2image(prompt, width, height, seed) -> Image`.
+fn image_manifest() -> Manifest {
+    Manifest::new(
+        "brain-image",
+        "an image model",
+        vec![ActionSpec::new("text2image", "generate an image from a prompt")
+            .streaming()
+            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
+            .param(ParamSpec::new("width", ParamType::Int, "width").default(json!(1024)))
+            .param(ParamSpec::new("height", ParamType::Int, "height").default(json!(1024)))
+            .param(ParamSpec::new("seed", ParamType::Int, "seed"))
+            .output(BlobSpec::new("image", Media::Image, "the generated image"))],
+    )
+}
+
 fn executor() -> Executor {
     let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Carded(chat_manifest())), Arc::new(Carded(embed_manifest()))];
     let mut budgets = Budgets::new();
@@ -157,6 +172,59 @@ fn embed_executor() -> Executor {
     let mut budgets = Budgets::new();
     budgets.set(Device::Cpu, 8 << 30, 0);
     Executor::start(models, budgets, Policy::default())
+}
+
+/// The fixed 2×2 RGB image the [`FakeImage`] model returns, as interleaved HWC f32
+/// in `[0,1]`: red, green, blue, white. Chosen from {0.0, 1.0} so the 8-bit quantise
+/// is exact (0 / 255), letting a test compare the served PNG byte-for-byte.
+const FAKE_IMG_HWC: [f32; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+/// The same pixels quantised to RGB8 — the input the handler PNG-encodes.
+const FAKE_IMG_RGB8: [u8; 12] = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+
+/// A runnable fake image model: `text2image` emits two coarse denoise-step progress
+/// ticks (delta `None`) then returns a 2×2 raw HWC-f32 image blob (the brain image
+/// wire format). Zero-cost so it schedules on a CPU-only budget.
+struct FakeImage;
+struct FakeImageInst;
+impl ResidentModel for FakeImage {
+    fn manifest(&self) -> Manifest {
+        image_manifest()
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-image", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(FakeImageInst))
+    }
+}
+impl Instance for FakeImageInst {
+    fn run(&mut self, _a: &str, _i: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        // Two denoise steps (coarse, delta None) → two partial_image events on SSE.
+        progress(Progress::step(1, 2, "denoise"));
+        progress(Progress::step(2, 2, "denoise"));
+        Ok(Outcome::new()
+            .set("width", json!(2))
+            .set("height", json!(2))
+            .blob("image", capability::blob::image_blob(&FAKE_IMG_HWC, 2, 2, 3)))
+    }
+}
+
+/// An executor with the RUNNABLE [`FakeImage`] plus the RUNNABLE [`FakeChat`] (so
+/// "non-image (chat) model -> 404" can be exercised on a real chat model).
+fn image_executor() -> Executor {
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(FakeImage), Arc::new(FakeChat)];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    Executor::start(models, budgets, Policy::default())
+}
+
+fn image_app(provider: Provider) -> (Router, String) {
+    let key = "sk-brain-test-key".to_string();
+    let state = AppState::new(image_executor(), key.clone(), provider);
+    (router(state), key)
 }
 
 fn embed_app(provider: Provider) -> (Router, String) {
@@ -361,24 +429,6 @@ async fn get_model_by_id_and_404_when_not_exposed() {
     let (st, body) = send(&app, auth(Request::builder().uri("/v1/models/brain-embed"), Provider::Anthropic, &key).body(Body::empty()).unwrap()).await;
     assert_eq!(st, StatusCode::NOT_FOUND, "anthropic must 404 an embed-only model");
     assert_valid("anthropic.json", "ErrorResponse", &body);
-}
-
-#[tokio::test]
-async fn embeddings_images_are_501_with_spec_valid_bodies() {
-    // Chat, Anthropic count_tokens, and embeddings are now implemented; image
-    // generation remains 501. (provider, path)
-    let cases = [
-        (Provider::OpenAI, "/v1/images/generations"),
-        (Provider::OpenRouter, "/images/generations"),
-    ];
-    for (p, path) in cases {
-        let (app, key) = build_app(p);
-        let req = auth(Request::builder().method(Method::POST).uri(path), p, &key).body(Body::from("{}")).unwrap();
-        let (st, body) = send(&app, req).await;
-        assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{p} {path} must 501");
-        let (file, schema) = error_schema(p);
-        assert_valid(file, schema, &body);
-    }
 }
 
 #[tokio::test]
@@ -801,6 +851,133 @@ async fn openrouter_embeddings_works_the_same() {
     let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/embeddings", &body).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
     assert_valid("openrouter.json", "InternalServerResponse", &v);
+}
+
+// ---------------------------------------------------------- P10: image generation
+
+/// The 8-byte PNG signature.
+const PNG_SIG: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+
+/// OpenAI non-stream: a spec-valid `ImagesResponse` whose `b64_json` base64-decodes
+/// to the exact PNG the handler encodes from the model's raw image blob.
+#[tokio::test]
+async fn openai_images_nonstream_validates_and_decodes_to_png() {
+    let (app, key) = image_app(Provider::OpenAI);
+    let body = json!({"model": "brain-image", "prompt": "a red cat", "size": "1024x1024"});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/images/generations", &body).await;
+    assert_eq!(st, StatusCode::OK, "images must 200: {v}");
+    assert_valid("openai.json", "ImagesResponse", &v);
+    assert!(v["created"].is_i64(), "created must be a unix timestamp: {v}");
+    let data = v["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "n defaults to 1 image");
+    let b64 = data[0]["b64_json"].as_str().expect("b64_json must be a string");
+    let bytes = events::base64::decode(b64).expect("b64_json must be valid base64");
+    assert_eq!(&bytes[0..8], &PNG_SIG, "b64_json must decode to PNG bytes");
+    assert_eq!(bytes, apiserve::png::encode_rgb8(&FAKE_IMG_RGB8, 2, 2), "b64_json must be the PNG of the model's image");
+}
+
+/// `n` produces one image per requested count; `response_format: "url"` is accepted
+/// but still answered with `b64_json` (brain has no object store).
+#[tokio::test]
+async fn openai_images_n_and_url_format_return_b64() {
+    let (app, key) = image_app(Provider::OpenAI);
+    let body = json!({"model": "brain-image", "prompt": "cats", "n": 3, "response_format": "url"});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/images/generations", &body).await;
+    assert_eq!(st, StatusCode::OK, "n=3 + url format must 200: {v}");
+    assert_valid("openai.json", "ImagesResponse", &v);
+    let data = v["data"].as_array().unwrap();
+    assert_eq!(data.len(), 3, "n=3 must return 3 images");
+    for d in data {
+        assert!(d["b64_json"].is_string(), "url format still returns b64_json: {d}");
+        assert!(d.get("url").is_none(), "brain never returns a url");
+    }
+}
+
+/// Unknown model -> 404; an existing non-image (chat) model -> 404.
+#[tokio::test]
+async fn openai_images_unknown_and_non_image_models_are_404() {
+    let (app, key) = image_app(Provider::OpenAI);
+    let body = json!({"model": "nope", "prompt": "hi"});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/images/generations", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "unknown model must 404");
+    assert_valid("openai.json", "ErrorResponse", &v);
+
+    let body = json!({"model": "brain-chat", "prompt": "hi"});
+    let (st, _) = post_json(&app, Provider::OpenAI, &key, "/v1/images/generations", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "a non-image (chat) model must 404");
+}
+
+/// Bad bodies -> 400: missing model, missing prompt, unsupported size, n out of
+/// range, a bad response_format, and malformed JSON.
+#[tokio::test]
+async fn openai_images_bad_bodies_are_400() {
+    let (app, key) = image_app(Provider::OpenAI);
+    let cases: [Value; 6] = [
+        json!({"prompt": "hi"}),                                                  // no model
+        json!({"model": "brain-image"}),                                          // no prompt
+        json!({"model": "brain-image", "prompt": "hi", "size": "3x3"}),           // unsupported size
+        json!({"model": "brain-image", "prompt": "hi", "n": 0}),                  // n < 1
+        json!({"model": "brain-image", "prompt": "hi", "n": 11}),                 // n > 10
+        json!({"model": "brain-image", "prompt": "hi", "response_format": "xyz"}), // bad format
+    ];
+    for body in cases {
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/images/generations", &body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "must 400: {body}");
+        assert_valid("openai.json", "ErrorResponse", &v);
+    }
+    let req = auth(Request::builder().method(Method::POST).uri("/v1/images/generations"), Provider::OpenAI, &key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{ not json"))
+        .unwrap();
+    let (st, _) = send(&app, req).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "malformed JSON must 400");
+}
+
+/// OpenRouter `/images/generations` works the same (shared handler): a spec-valid
+/// image response, and an unknown model still 404s in the OpenRouter error shape.
+#[tokio::test]
+async fn openrouter_images_work_the_same() {
+    let (app, key) = image_app(Provider::OpenRouter);
+    let body = json!({"model": "brain-image", "prompt": "a dog"});
+    let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/images/generations", &body).await;
+    assert_eq!(st, StatusCode::OK, "openrouter images must 200: {v}");
+    assert_valid("openai.json", "ImagesResponse", &v);
+    assert_eq!(v["data"].as_array().unwrap().len(), 1);
+
+    let body = json!({"model": "nope", "prompt": "hi"});
+    let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/images/generations", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_valid("openrouter.json", "InternalServerResponse", &v);
+}
+
+/// `stream: true` maps each denoise-step progress tick to a spec-valid
+/// `image_generation.partial_image` event (indexed, no pixels) and the final image to
+/// a spec-valid `image_generation.completed` event whose `b64_json` decodes to the PNG.
+#[tokio::test]
+async fn openai_images_stream_emits_partials_and_final_image() {
+    let (app, key) = image_app(Provider::OpenAI);
+    let body = json!({"model": "brain-image", "prompt": "a cat", "size": "1024x1024", "stream": true});
+    let (st, text) = post_text(&app, Provider::OpenAI, &key, "/v1/images/generations", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let frames: Vec<Value> = sse_data(&text).iter().map(|d| serde_json::from_str(d).unwrap()).collect();
+
+    // One partial_image event per denoise step (the fake emits two), each indexed and
+    // schema-valid.
+    let partials: Vec<&Value> = frames.iter().filter(|e| e["type"] == "image_generation.partial_image").collect();
+    assert!(partials.len() >= 2, "a partial_image event per denoise step: {frames:?}");
+    for (i, p) in partials.iter().enumerate() {
+        assert_valid("openai.json", "ImageGenPartialImageEvent", p);
+        assert_eq!(p["partial_image_index"], i as i64, "partial indices count up");
+    }
+
+    // Exactly one terminal completed event carrying the real PNG.
+    let completed: Vec<&Value> = frames.iter().filter(|e| e["type"] == "image_generation.completed").collect();
+    assert_eq!(completed.len(), 1, "one terminal completed event: {frames:?}");
+    assert_valid("openai.json", "ImageGenCompletedEvent", completed[0]);
+    let b64 = completed[0]["b64_json"].as_str().unwrap();
+    let bytes = events::base64::decode(b64).unwrap();
+    assert_eq!(&bytes[0..8], &PNG_SIG);
+    assert_eq!(bytes, apiserve::png::encode_rgb8(&FAKE_IMG_RGB8, 2, 2), "completed event carries the model's PNG");
 }
 
 // ------------------------------------------------- P6: admission + backpressure

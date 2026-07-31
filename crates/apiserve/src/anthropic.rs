@@ -224,6 +224,7 @@ async fn stream_messages(state: AppState, model: String, inv: Invocation, est_in
                         "delta": { "type": "text_delta", "text": piece },
                     }).to_string()));
                 }
+                StreamMsg::Progress(..) => {} // chat streams token deltas, not coarse steps
                 StreamMsg::Done(outcome) => {
                     let (_t, _p, c, fr) = bridge::read_outcome(&outcome);
                     completion = c;

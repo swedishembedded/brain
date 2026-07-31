@@ -22,6 +22,7 @@ use crate::bridge::{self, StreamMsg};
 use crate::catalog;
 use crate::error::ApiError;
 use crate::models::CREATED_UNIX;
+use crate::png;
 use crate::state::AppState;
 use crate::surface::Provider;
 
@@ -47,9 +48,10 @@ async fn embeddings(State(state): State<AppState>, body: Bytes) -> Response {
     handle_embeddings(state, body).await
 }
 
-/// `POST /v1/images/generations` — 501 until a later phase.
-async fn images_generations(State(state): State<AppState>) -> ApiError {
-    ApiError::not_implemented(state.provider, "POST /images/generations is not implemented yet")
+/// `POST /v1/images/generations` — real image generation (non-stream + SSE),
+/// shared with OpenRouter via [`handle_images`].
+async fn images_generations(State(state): State<AppState>, body: Bytes) -> Response {
+    handle_images(state, body).await
 }
 
 /// How the embedding vector is serialized in the response.
@@ -344,6 +346,264 @@ fn chunk(id: &str, model: &str, delta: Value, finish: Option<&str>, native: bool
     })
 }
 
+// ============================================================ image generation
+
+/// The whitelist of accepted `size` values → `(width, height)` in pixels. A request
+/// size outside this set is a 400 (an arbitrary WxH could blow up a model's VRAM or
+/// simply not be a supported latent grid). Covers the common OpenAI square/portrait/
+/// landscape sizes; the default is `1024x1024`.
+const IMAGE_SIZES: &[(&str, u32, u32)] = &[
+    ("256x256", 256, 256),
+    ("512x512", 512, 512),
+    ("1024x1024", 1024, 1024),
+    ("1024x1536", 1024, 1536),
+    ("1536x1024", 1536, 1024),
+    ("1024x1792", 1024, 1792),
+    ("1792x1024", 1792, 1024),
+];
+
+/// The `size` values OpenAI's streaming image events accept in their `size` enum.
+/// A requested size outside this set is reported as `"auto"` in the stream frames
+/// (the response body itself never echoes a constrained `size`).
+const STREAM_SIZES: &[&str] = &["1024x1024", "1024x1536", "1536x1024"];
+
+/// A parsed OpenAI `CreateImageRequest`: the resolved model + prompt, how many
+/// images, the resolved pixel size (+ its label), a base seed, and whether to stream.
+struct ImageRequest {
+    model: String,
+    prompt: String,
+    n: u32,
+    width: u32,
+    height: u32,
+    size_label: String,
+    seed: i64,
+    stream: bool,
+}
+
+/// Current Unix time (seconds) — the `created`/`created_at` the image responses carry.
+fn now_unix() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(CREATED_UNIX)
+}
+
+/// Parse + validate a `CreateImageRequest`. `prompt` and `model` are required;
+/// `n` defaults to 1 and must be 1..=10; `size` (default `1024x1024`) must be in
+/// [`IMAGE_SIZES`]; `response_format` is `b64_json` (default) or `url` — brain has no
+/// object store, so a `url` request is still answered with `b64_json` (documented);
+/// any other value is a 400. `quality`/`style`/`background` etc. are accepted and
+/// ignored. An optional `seed` (non-standard, honoured when present) seeds generation.
+fn parse_image_request(provider: Provider, body: &Value) -> Result<ImageRequest, ApiError> {
+    let prompt = body
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::invalid_request(provider, "'prompt' is required"))?
+        .to_string();
+    let model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::invalid_request(provider, "'model' is required"))?
+        .to_string();
+
+    let n = match body.get("n") {
+        None | Some(Value::Null) => 1,
+        Some(v) => {
+            let n = v.as_i64().filter(|&n| (1..=10).contains(&n)).ok_or_else(|| ApiError::invalid_request(provider, "'n' must be an integer between 1 and 10"))?;
+            n as u32
+        }
+    };
+
+    let size_label = match body.get("size") {
+        None | Some(Value::Null) => "1024x1024".to_string(),
+        Some(Value::String(s)) => s.clone(),
+        Some(_) => return Err(ApiError::invalid_request(provider, "'size' must be a string like \"1024x1024\"")),
+    };
+    let (width, height) = IMAGE_SIZES
+        .iter()
+        .find(|(label, ..)| *label == size_label)
+        .map(|(_, w, h)| (*w, *h))
+        .ok_or_else(|| {
+            let allowed = IMAGE_SIZES.iter().map(|(l, ..)| *l).collect::<Vec<_>>().join(", ");
+            ApiError::invalid_request(provider, format!("unsupported 'size' {size_label:?}; allowed: {allowed}"))
+        })?;
+
+    // response_format: accept both, but always answer with b64_json (no object store
+    // for a hosted URL). An unknown value is a 400.
+    match body.get("response_format") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(s)) if s == "b64_json" || s == "url" => {}
+        Some(_) => return Err(ApiError::invalid_request(provider, "'response_format' must be \"b64_json\" or \"url\"")),
+    }
+
+    let seed = body.get("seed").and_then(|v| v.as_i64()).unwrap_or(0);
+    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    Ok(ImageRequest { model, prompt, n, width, height, size_label, seed, stream })
+}
+
+/// The image-action [`Invocation`] for the `i`-th requested image: prompt + size +
+/// a per-image seed (so `n>1` yields distinct images from a seed-driven model).
+fn image_invocation(req: &ImageRequest, i: u32) -> Invocation {
+    Invocation::new()
+        .set("prompt", json!(req.prompt))
+        .set("width", json!(req.width))
+        .set("height", json!(req.height))
+        .set("seed", json!(req.seed.wrapping_add(i as i64)))
+}
+
+/// Read the generated image from an [`capability::Outcome`] and return it as
+/// base64-of-PNG (OpenAI's `b64_json`). The blob is either already a PNG (base64 it
+/// as-is) or brain's raw HWC-f32 image wire format (`{w,h,c}` meta, f32-LE in
+/// `[0,1]`), which is quantised to 8-bit RGB and PNG-encoded via [`crate::png`].
+fn image_b64_from_outcome(o: &capability::Outcome) -> Result<String, String> {
+    let blob = o.blobs.get("image").ok_or("model returned no 'image' output blob")?;
+    if blob.bytes.starts_with(&png::SIGNATURE) {
+        return Ok(events::base64::encode(&blob.bytes));
+    }
+    // Raw HWC f32 in [0,1] (capability::blob::image_blob): quantise to RGB8.
+    let dim = |k: &str| blob.meta.get(k).and_then(|v| v.as_u64());
+    let (w, h) = (dim("w").ok_or("image blob missing 'w'")? as u32, dim("h").ok_or("image blob missing 'h'")? as u32);
+    let px = w as usize * h as usize;
+    if px == 0 || blob.bytes.len() % 4 != 0 {
+        return Err("image blob is not a whole number of f32 samples".into());
+    }
+    let samples: Vec<f32> = blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
+    if samples.len() % px != 0 {
+        return Err(format!("image blob ({} samples) is not a whole number of {w}×{h} planes", samples.len()));
+    }
+    let c = samples.len() / px;
+    let q = |f: f32| (f.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let mut rgb = Vec::with_capacity(px * 3);
+    for i in 0..px {
+        let s = &samples[i * c..i * c + c];
+        match c {
+            1 => rgb.extend_from_slice(&[q(s[0]), q(s[0]), q(s[0])]), // grayscale → RGB
+            _ => rgb.extend_from_slice(&[q(s[0]), q(s[1]), q(s[2])]), // RGB (drop alpha if c==4)
+        }
+    }
+    Ok(events::base64::encode(&png::encode_rgb8(&rgb, w, h)))
+}
+
+/// The image handler shared by the OpenAI and OpenRouter surfaces (identical
+/// `CreateImageRequest`/`ImagesResponse` grammar; the provider only shapes errors).
+/// Non-streaming: dispatch the resolved text-to-image action once per requested image
+/// through [`bridge::submit`] (so admission → 429 is enforced as for chat), collect
+/// one `b64_json` PNG per image. Streaming (`stream:true`): map the denoise-step
+/// progress to OpenAI image streaming events (see [`stream_images`]).
+pub async fn handle_images(state: AppState, body: Bytes) -> Response {
+    let provider = state.provider;
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return ApiError::invalid_request(provider, format!("invalid JSON body: {e}")).into_response(),
+    };
+    let req = match parse_image_request(provider, &body) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    // Resolve the model → the text-to-image action to dispatch (404 if unknown/non-image).
+    let action = match catalog::resolve_image(&state.exec, &req.model) {
+        Some(a) => a,
+        None => return ApiError::model_not_found(provider, &req.model).into_response(),
+    };
+
+    if req.stream {
+        return stream_images(state, req, action).await;
+    }
+
+    let mut data: Vec<Value> = Vec::with_capacity(req.n as usize);
+    for i in 0..req.n {
+        let outcome = match bridge::submit(&state, &req.model, &action, image_invocation(&req, i)).await {
+            Ok(o) => o,
+            Err(e) => return e.into_response(),
+        };
+        match image_b64_from_outcome(&outcome) {
+            Ok(b64) => data.push(json!({ "b64_json": b64 })),
+            Err(e) => return ApiError::invalid_request(provider, e).into_response(),
+        }
+    }
+    Json(json!({ "created": now_unix(), "data": data })).into_response()
+}
+
+/// The `size` value the streaming events may carry: the request size if it is in the
+/// stream schema's enum, else `"auto"` (arbitrary sizes are not a valid stream enum).
+fn stream_size(label: &str) -> &'static str {
+    if STREAM_SIZES.contains(&label) {
+        // Return a 'static copy from the whitelist (the event schema constrains this).
+        STREAM_SIZES.iter().copied().find(|s| *s == label).unwrap()
+    } else {
+        "auto"
+    }
+}
+
+/// One `image_generation.partial_image` event (progress tick, no true pixels — brain
+/// does not expose intermediate denoise latents, so `b64_json` is empty).
+fn partial_event(size: &str, index: u32) -> Value {
+    json!({
+        "type": "image_generation.partial_image",
+        "b64_json": "",
+        "created_at": now_unix(),
+        "size": size,
+        "quality": "auto",
+        "background": "auto",
+        "output_format": "png",
+        "partial_image_index": index,
+    })
+}
+
+/// The terminal `image_generation.completed` event carrying the final PNG `b64_json`.
+fn completed_event(size: &str, b64: &str) -> Value {
+    json!({
+        "type": "image_generation.completed",
+        "b64_json": b64,
+        "created_at": now_unix(),
+        "size": size,
+        "quality": "auto",
+        "background": "auto",
+        "output_format": "png",
+        // brain does not meter image tokens; report a zeroed usage (schema-required).
+        "usage": {
+            "total_tokens": 0, "input_tokens": 0, "output_tokens": 0,
+            "input_tokens_details": { "text_tokens": 0, "image_tokens": 0 },
+        },
+    })
+}
+
+/// The SSE image stream: run the admission race FIRST (a shed request is a plain 429,
+/// not an event-stream), then map each denoise-step progress tick to an
+/// `image_generation.partial_image` event and the final image to a terminal
+/// `image_generation.completed` event. Only the first image (`n` is effectively 1 for
+/// the streaming surface) is streamed. Partial events carry no pixels (brain exposes
+/// no intermediate latents); the completed event carries the real PNG.
+async fn stream_images(state: AppState, req: ImageRequest, action: String) -> Response {
+    use futures::StreamExt;
+    let provider = state.provider;
+    let mut src = match bridge::stream_progress(&state, &req.model, &action, image_invocation(&req, 0)).await {
+        Ok(src) => src,
+        Err(e) => return e.into_response(),
+    };
+    let size = stream_size(&req.size_label).to_string();
+    let events = async_stream::stream! {
+        let mut idx = 0u32;
+        while let Some(msg) = src.next().await {
+            match msg {
+                StreamMsg::Progress(..) => {
+                    yield Ok::<Event, Infallible>(Event::default().data(partial_event(&size, idx).to_string()));
+                    idx += 1;
+                }
+                StreamMsg::Delta(_) => {} // image generation has no text deltas
+                StreamMsg::Done(outcome) => match image_b64_from_outcome(&outcome) {
+                    Ok(b64) => yield Ok(Event::default().data(completed_event(&size, &b64).to_string())),
+                    Err(e) => yield Ok(Event::default().data(ApiError::invalid_request(provider, e).body().to_string())),
+                },
+                StreamMsg::Err(e) => {
+                    yield Ok(Event::default().data(e.body().to_string()));
+                    return;
+                }
+            }
+        }
+    };
+    Sse::new(events.boxed()).into_response()
+}
+
 /// The SSE `chat.completion.chunk` stream: a role chunk, one content chunk per token
 /// delta, a terminal chunk carrying `finish_reason`, an optional usage-only chunk
 /// (when `stream_options.include_usage`), then `data: [DONE]`. Runs the admission
@@ -369,6 +629,7 @@ async fn stream_chat(state: AppState, model: String, inv: Invocation, native: bo
                 StreamMsg::Delta(piece) => {
                     yield Ok(Event::default().data(chunk(&id, &model, json!({ "content": piece }), None, native).to_string()));
                 }
+                StreamMsg::Progress(..) => {} // chat streams token deltas, not coarse steps
                 StreamMsg::Done(outcome) => {
                     let (_t, p, c, fr) = bridge::read_outcome(&outcome);
                     prompt = p;

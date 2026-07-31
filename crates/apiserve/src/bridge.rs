@@ -95,10 +95,13 @@ pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invoca
     }
 }
 
-/// One item on a streaming generation: an incremental text piece, the terminal
-/// outcome (full text + token counts + finish reason), or an error.
+/// One item on a streaming generation: an incremental text piece, a coarse
+/// `(step, total)` progress tick (used by image generation's denoise loop; chat
+/// streaming ignores it), the terminal outcome (full text/image + counts), or an
+/// error.
 pub enum StreamMsg {
     Delta(String),
+    Progress(u32, u32),
     Done(Outcome),
     Err(ApiError),
 }
@@ -145,7 +148,21 @@ impl Stream for EventStream {
 /// progress is ignored), then one terminal [`StreamMsg::Done`]/[`StreamMsg::Err`].
 /// The `on_progress`/`reply` closures only touch the (`Send`) channel — never the
 /// model.
-pub async fn stream(state: &AppState, model: &str, action: &str, mut inv: Invocation) -> Result<EventStream, ApiError> {
+pub async fn stream(state: &AppState, model: &str, action: &str, inv: Invocation) -> Result<EventStream, ApiError> {
+    stream_inner(state, model, action, inv, false).await
+}
+
+/// Like [`stream`], but also forwards coarse `(step, total)` progress ticks as
+/// [`StreamMsg::Progress`] (a denoise loop reports these with no `delta`). Used by
+/// image generation, whose "progress" is denoise steps, not token deltas.
+pub async fn stream_progress(state: &AppState, model: &str, action: &str, inv: Invocation) -> Result<EventStream, ApiError> {
+    stream_inner(state, model, action, inv, true).await
+}
+
+/// Shared implementation of [`stream`]/[`stream_progress`]. `forward_steps` decides
+/// whether a `delta`-less progress update becomes a [`StreamMsg::Progress`] tick
+/// (image denoise) or is dropped (chat, which streams only token deltas).
+async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invocation, forward_steps: bool) -> Result<EventStream, ApiError> {
     let provider = state.provider;
     let model_owned = model.to_string();
     let (id, token) = state.register();
@@ -157,6 +174,8 @@ pub async fn stream(state: &AppState, model: &str, action: &str, mut inv: Invoca
         .on_progress(move |p| {
             if let Some(piece) = p.delta {
                 let _ = tx_progress.send(StreamMsg::Delta(piece));
+            } else if forward_steps {
+                let _ = tx_progress.send(StreamMsg::Progress(p.step, p.total));
             }
         })
         .on_admit(move || {
