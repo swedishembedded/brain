@@ -116,7 +116,7 @@ fn vit_ids() -> VitKernelIds {
 
 /// Per-block weight leaf names (relative to `blocks.{b}.`). PyTorch layouts:
 /// Linear `[out, in]`, bias `[out]`. Fused qkv `[3·hidden, hidden]`.
-const BLOCK_LEAVES: &[&str] = &[
+pub const BLOCK_LEAVES: &[&str] = &[
     "norm1.weight", "norm1.bias", "qkv.weight", "qkv.bias", "proj.weight", "proj.bias", "norm2.weight", "norm2.bias",
     "fc1.weight", "fc1.bias", "fc2.weight", "fc2.bias",
 ];
