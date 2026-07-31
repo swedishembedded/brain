@@ -84,6 +84,18 @@ pub struct ConvKernelIds {
     /// DIFFERENT function from `gelu`, not a faster spelling of it.
     pub gelu_erf: usize,
     pub gelu_erf_bwd: usize,
+    /// PReLU with a LEARNED per-channel slope (ArcFace's IResNet). NOT
+    /// `leaky_relu`, whose slope is a dispatch-time constant with no gradient
+    /// and no storage binding — see [`crate::blocks::PReLU`].
+    pub prelu: usize,
+    /// PReLU backward, barrier-free reference (one invocation per CHANNEL). The
+    /// only correct variant where `DeviceCaps::workgroup_reductions` is false.
+    pub prelu_bwd: usize,
+    /// PReLU backward, cooperative twin (one WORKGROUP per channel, `C*64`
+    /// invocations). GPU-only: it needs `workgroup_reductions`. Choosing between
+    /// this and `prelu_bwd` is a CORRECTNESS gate, not a perf tweak — on the CPU
+    /// backend this kernel returns `da` all zeros with no error.
+    pub prelu_bwd_wg: usize,
     // ---- LayerNorm over the channel axis (channels-first `LayerNorm2d`).
     // Only the REFERENCE kernels live here: the coalesced `*_rows` variants are
     // resolved by name inside `model::block::LayerNormIds::resolve`, which is the
@@ -193,6 +205,9 @@ impl ConvKernelIds {
             gelu_bwd: k("gelu_bwd"),
             gelu_erf: k("gelu_erf"),
             gelu_erf_bwd: k("gelu_erf_bwd"),
+            prelu: k("prelu"),
+            prelu_bwd: k("prelu_bwd"),
+            prelu_bwd_wg: k("prelu_bwd_wg"),
             layernorm: k("layernorm"),
             ln_stats: k("ln_stats"),
             layernorm_dx: k("layernorm_dx"),

@@ -2101,6 +2101,203 @@ impl MaxPool {
 }
 
 // ===========================================================================
+// AvgPool = avgpool2d (+ avgpool2d_dx)
+// ===========================================================================
+
+/// An average-pool stage (forward + backward), SSA — the sibling of [`MaxPool`].
+///
+/// `avgpool2d` is **adaptive**: it is parameterised by the OUTPUT size, not by
+/// `(k, stride, pad)`, and reduces to an exact box pool whenever `Ho | H`. So
+/// this unit takes a target `out_shape` rather than a [`PoolSpec`], which is
+/// what the kernel actually is — the three shapes brain pools with (a global
+/// `adaptive_avg_pool2d(x, 1)`, a resize-to-another-map, and a plain 2x2/2 box)
+/// are all the same dispatch at different targets.
+///
+/// The 2x2/2 case is SCRFD's ResNet-D shortcut (`AveragePool(2,2) → conv1x1`);
+/// building it as a strided 1x1 instead gives the right shape and a half-pixel
+/// shift in every feature.
+pub struct AvgPool {
+    pub in_shape: Shape,
+    pub out_shape: Shape,
+    out: DeviceBuffer,
+    d_in: DeviceBuffer,
+}
+
+impl AvgPool {
+    /// Pool `in_shape` down to `(out_h, out_w)`, keeping N and C.
+    pub fn new(ctx: &Ctx, in_shape: Shape, out_h: u32, out_w: u32) -> AvgPool {
+        assert!(out_h > 0 && out_w > 0, "AvgPool: output size must be positive");
+        let out_shape = Shape::new(in_shape.n, in_shape.c, out_h, out_w);
+        AvgPool {
+            in_shape,
+            out_shape,
+            out: ctx.act(out_shape.numel()),
+            d_in: ctx.act(in_shape.numel()),
+        }
+    }
+
+    /// The exact 2x2 / stride-2 box pool, i.e. `PoolSpec::half()`'s geometry
+    /// expressed as an output size. Requires even extents — at an odd `H` the
+    /// adaptive rule would make overlapping windows rather than the box pool an
+    /// ONNX `AveragePool(kernel 2, stride 2)` performs.
+    pub fn half(ctx: &Ctx, in_shape: Shape) -> AvgPool {
+        assert!(
+            in_shape.h % 2 == 0 && in_shape.w % 2 == 0,
+            "AvgPool::half: {}x{} is not evenly halvable; the adaptive rule would overlap windows",
+            in_shape.h,
+            in_shape.w
+        );
+        AvgPool::new(ctx, in_shape, in_shape.h / 2, in_shape.w / 2)
+    }
+
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.out
+    }
+    /// The grad wrt this stage's input, valid after [`AvgPool::backward`].
+    pub fn d_in(&self) -> &DeviceBuffer {
+        &self.d_in
+    }
+
+    /// `avgpool2d` / `avgpool2d_dx` ABI: `[N, C, H, W, Ho, Wo]`.
+    fn params(&self) -> [u32; 6] {
+        [
+            self.in_shape.n,
+            self.in_shape.c,
+            self.in_shape.h,
+            self.in_shape.w,
+            self.out_shape.h,
+            self.out_shape.w,
+        ]
+    }
+
+    /// One invocation per OUTPUT element. Bindings `(x, y)`.
+    pub fn forward(&self, ctx: &Ctx, x: &DeviceBuffer) {
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.avgpool2d, "avgpool2d"),
+            &[x, &self.out],
+            &self.params(),
+            self.out_shape.numel(),
+        );
+        ctx.gpu.submit(&[], &[s]);
+    }
+
+    /// `d_out` -> [`AvgPool::d_in`]. One invocation per INPUT element (gather
+    /// form, like [`MaxPool::backward`]: no pre-zeroing, no atomics).
+    pub fn backward(&self, ctx: &Ctx, d_out: &DeviceBuffer) {
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.avgpool2d_dx, "avgpool2d_dx"),
+            &[d_out, &self.d_in],
+            &self.params(),
+            self.in_shape.numel(),
+        );
+        ctx.gpu.submit(&[], &[s]);
+    }
+}
+
+// ===========================================================================
+// PReLU = prelu (+ prelu_bwd / prelu_bwd_wg)
+// ===========================================================================
+
+/// PReLU with a **learned per-channel slope** — `nn.PReLU(num_parameters=C)`, the
+/// activation of ArcFace's IResNet backbone.
+///
+/// A block rather than an [`Act`] variant, deliberately. Every `Act` is a pure
+/// function of its input: it has no parameter, so [`Conv::param_list`] never
+/// mentions it and `act_pair` can hand back a `(fwd, bwd)` pair with no state.
+/// PReLU owns a trainable `[C]` tensor and its gradient. Squeezing that into
+/// `Act` would put a weight name into an enum and force every conv unit in the
+/// workspace to carry an `Option<slope>` it never uses. IResNet spells the
+/// activation as its own module anyway (`prelu` sits between two convs whose
+/// BatchNorms are folded away), so a separate stage matches the checkpoint.
+///
+/// SSA: `forward` writes a fresh `out`, which is the cache the backward reads.
+///
+/// Tensor name: `{prefix}.weight`, `[C]` — torch's own spelling, so an imported
+/// `nn.PReLU` maps 1:1. A checkpoint whose slope is stored as `[C,1,1]` (which is
+/// what an ONNX export of IResNet produces) is the same `C` values; the importer
+/// flattens it.
+pub struct PReLU {
+    name: String,
+    pub shape: Shape,
+    out: DeviceBuffer,
+    d_in: DeviceBuffer,
+}
+
+impl PReLU {
+    /// `shape` is the activation this unit sees; `shape.c` is the slope count.
+    pub fn new(ctx: &Ctx, prefix: &str, shape: Shape) -> PReLU {
+        PReLU {
+            name: format!("{prefix}.weight"),
+            shape,
+            out: ctx.act(shape.numel()),
+            d_in: ctx.act(shape.numel()),
+        }
+    }
+
+    pub fn out(&self) -> &DeviceBuffer {
+        &self.out
+    }
+    /// The grad wrt this stage's input, valid after [`PReLU::backward`].
+    pub fn d_in(&self) -> &DeviceBuffer {
+        &self.d_in
+    }
+    pub fn param_list(&self) -> Vec<(String, usize)> {
+        vec![(self.name.clone(), self.shape.c as usize)]
+    }
+    /// This unit's slope-tensor name.
+    pub fn names_weight(&self) -> &str {
+        &self.name
+    }
+
+    /// `prelu` / `prelu_bwd` / `prelu_bwd_wg` all share the Params
+    /// `[N, C, H, W, nslope]`. `nslope` is the LENGTH of the slope tensor: `C`
+    /// for a per-channel slope, `1` for a single shared one. This unit is always
+    /// per-channel, so `nslope == C`.
+    fn params(&self) -> [u32; 5] {
+        [self.shape.n, self.shape.c, self.shape.h, self.shape.w, self.shape.c]
+    }
+
+    /// One invocation per element. Bindings `(x, a, y)`.
+    pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer) {
+        let s = ctx.step(
+            ctx.ids.need(ctx.ids.prelu, "prelu"),
+            &[x, ps.w(&self.name), &self.out],
+            &self.params(),
+            self.shape.numel(),
+        );
+        ctx.gpu.submit(&[], &[s]);
+    }
+
+    /// `d_out` -> [`PReLU::d_in`], accumulating the slope gradient into the
+    /// ParamStore. Bindings `(x, a, dy, dx, da)`, and `x` is the block's INPUT
+    /// (the pre-activation), not its output.
+    ///
+    /// **Which backward kernel runs is a correctness gate.** `prelu_bwd_wg` uses
+    /// `var<workgroup>` + a barrier, which the CPU backend's split-at-barrier
+    /// Cranelift JIT mis-executes: `da` comes back ALL ZEROS while `dx` stays
+    /// correct — a PReLU whose slopes never move, training to a plausible loss
+    /// with no error anywhere. So the choice is made on the device's QUERIED
+    /// `DeviceCaps::workgroup_reductions`, never on a preference or a guess, and
+    /// the dispatch count differs with it: `C*64` for the cooperative kernel,
+    /// `C` for the reference. Passing the element count to either is the
+    /// `silu_mul` failure mode — `da` would come out inflated by `N*H*W`.
+    pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer, d_out: &DeviceBuffer) {
+        let c = self.shape.c;
+        let (kind, threads) = if ctx.gpu.caps().workgroup_reductions && ctx.ids.prelu_bwd_wg != crate::NONE {
+            (ctx.ids.prelu_bwd_wg, c * 64)
+        } else {
+            (ctx.ids.need(ctx.ids.prelu_bwd, "prelu_bwd"), c)
+        };
+        let da = ps.g(&self.name);
+        let s = ctx.step(kind, &[x, ps.w(&self.name), d_out, &self.d_in, da], &self.params(), threads);
+        // `da` ACCUMULATES; the model's zero_grads clears it once per step, so
+        // it must NOT go in this submit's clear list (that would drop every
+        // earlier contribution in the same step).
+        ctx.gpu.submit(&[], &[s]);
+    }
+}
+
+// ===========================================================================
 // LayerNorm2d = channels-first LayerNorm, COMPOSED (nchw_nlc -> LN -> nlc_nchw)
 // ===========================================================================
 

@@ -59,7 +59,8 @@ pub mod plumbing;
 
 pub use blocks::{
     Act, Bottleneck, Conv, ConvNames, ConvSpec, ConvTrSpec, ConvTranspose, CxSpec, CXBlock,
-    LayerNorm2d, Ln2dNames, MaxPool, NameStyle, Norm, PoolSpec, SppfSpec, C2f, SPPF,
+    AvgPool, LayerNorm2d, Ln2dNames, MaxPool, NameStyle, Norm, PoolSpec, SppfSpec, C2f, PReLU,
+    SPPF,
 };
 pub use bn::{BatchNorm, BnNames};
 pub use fold::{fold_bn, BN_EPS};
