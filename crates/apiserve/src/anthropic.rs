@@ -48,7 +48,7 @@ async fn messages(State(state): State<AppState>, body: Bytes) -> Response {
     }
     if stream {
         let est_input = heuristic_tokens(&request_text(&body));
-        stream_messages(state, model, inv, est_input).into_response()
+        stream_messages(state, model, inv, est_input).await
     } else {
         match bridge::submit(&state, &model, "generate", inv).await {
             Ok(outcome) => {
@@ -180,8 +180,14 @@ pub fn from_outcome(model: &str, text: &str, prompt: i64, completion: i64, finis
 /// The SSE Messages event stream in Anthropic's fixed order. `est_input` is the
 /// approximate input-token count surfaced in `message_start` (the real prompt-token
 /// count is not known until generation completes).
-fn stream_messages(state: AppState, model: String, inv: Invocation, est_input: i64) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+async fn stream_messages(state: AppState, model: String, inv: Invocation, est_input: i64) -> Response {
     use futures::StreamExt;
+    // Admit BEFORE returning the SSE body — a shed request is a plain 429, not an
+    // event-stream that immediately errors.
+    let mut src = match bridge::stream(&state, &model, "generate", inv).await {
+        Ok(src) => src,
+        Err(e) => return e.into_response(),
+    };
     let id = format!("msg_{}", Uuid::new_v4().simple());
     let events = async_stream::stream! {
         // message_start: an empty-content Message carrying the input-token usage.
@@ -198,7 +204,7 @@ fn stream_messages(state: AppState, model: String, inv: Invocation, est_input: i
                 "usage": { "input_tokens": est_input, "output_tokens": 0 },
             },
         });
-        yield Ok(Event::default().event("message_start").data(start.to_string()));
+        yield Ok::<Event, Infallible>(Event::default().event("message_start").data(start.to_string()));
 
         // content_block_start: the single text block.
         yield Ok(Event::default().event("content_block_start").data(json!({
@@ -207,7 +213,6 @@ fn stream_messages(state: AppState, model: String, inv: Invocation, est_input: i
             "content_block": { "type": "text", "text": "" },
         }).to_string()));
 
-        let mut src = bridge::stream(&state, &model, "generate", inv);
         let mut finish = String::from("stop");
         let mut completion = 0i64;
         while let Some(msg) = src.next().await {
@@ -245,5 +250,5 @@ fn stream_messages(state: AppState, model: String, inv: Invocation, est_input: i
         }).to_string()));
         yield Ok(Event::default().event("message_stop").data(json!({ "type": "message_stop" }).to_string()));
     };
-    Sse::new(events.boxed())
+    Sse::new(events.boxed()).into_response()
 }

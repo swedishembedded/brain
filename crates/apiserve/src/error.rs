@@ -27,7 +27,13 @@ pub enum Kind {
     ModelNotFound,
     InvalidRequest,
     NotImplemented,
+    /// Accepted at the edge but could not be ADMITTED (started on a lane) within the
+    /// admission deadline — HTTP 429, carries a `Retry-After`.
     Overloaded,
+    /// Rejected at the edge before admission: the server's global concurrency limit
+    /// was saturated and the request was load-shed — HTTP 503, carries a
+    /// `Retry-After`.
+    Saturated,
 }
 
 impl Kind {
@@ -38,7 +44,12 @@ impl Kind {
             Kind::InvalidRequest => StatusCode::BAD_REQUEST,
             Kind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             Kind::Overloaded => StatusCode::TOO_MANY_REQUESTS,
+            Kind::Saturated => StatusCode::SERVICE_UNAVAILABLE,
         }
+    }
+    /// `true` when the client should back off and retry — surfaced as `Retry-After`.
+    fn retryable(&self) -> bool {
+        matches!(self, Kind::Overloaded | Kind::Saturated)
     }
     /// Anthropic's `error.type` value (one of its discriminated error variants).
     fn anthropic_type(&self) -> &'static str {
@@ -48,7 +59,7 @@ impl Kind {
             Kind::InvalidRequest => "invalid_request_error",
             // Anthropic has no "not_implemented"; api_error is its catch-all.
             Kind::NotImplemented => "api_error",
-            Kind::Overloaded => "overloaded_error",
+            Kind::Overloaded | Kind::Saturated => "overloaded_error",
         }
     }
     /// OpenAI's `error.type` value.
@@ -58,6 +69,7 @@ impl Kind {
             Kind::NotFound | Kind::ModelNotFound | Kind::InvalidRequest => "invalid_request_error",
             Kind::NotImplemented => "not_implemented",
             Kind::Overloaded => "rate_limit_exceeded",
+            Kind::Saturated => "server_error",
         }
     }
     /// OpenAI's short `error.code` slug.
@@ -69,6 +81,7 @@ impl Kind {
             Kind::InvalidRequest => "invalid_request",
             Kind::NotImplemented => "not_implemented",
             Kind::Overloaded => "rate_limit_exceeded",
+            Kind::Saturated => "server_error",
         }
     }
 }
@@ -103,6 +116,9 @@ impl ApiError {
     pub fn overloaded(provider: Provider, message: impl Into<String>) -> ApiError {
         ApiError::new(provider, Kind::Overloaded, message)
     }
+    pub fn saturated(provider: Provider, message: impl Into<String>) -> ApiError {
+        ApiError::new(provider, Kind::Saturated, message)
+    }
 
     /// The provider-shaped JSON body (without the HTTP status).
     pub fn body(&self) -> Value {
@@ -130,8 +146,20 @@ impl ApiError {
     }
 }
 
+/// Seconds advertised in `Retry-After` on a shed/overloaded response — a small,
+/// fixed back-off hint for clients.
+pub const RETRY_AFTER_SECS: u32 = 1;
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.kind.status(), Json(self.body())).into_response()
+        let status = self.kind.status();
+        let retryable = self.kind.retryable();
+        let mut resp = (status, Json(self.body())).into_response();
+        if retryable {
+            if let Ok(v) = axum::http::HeaderValue::from_str(&RETRY_AFTER_SECS.to_string()) {
+                resp.headers_mut().insert(axum::http::header::RETRY_AFTER, v);
+            }
+        }
+        resp
     }
 }

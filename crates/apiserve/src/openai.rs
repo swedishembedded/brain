@@ -70,7 +70,7 @@ pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response
     }
     if stream {
         let want_usage = body.get("stream_options").and_then(|o| o.get("include_usage")).and_then(|v| v.as_bool()).unwrap_or(false);
-        stream_chat(state, model, inv, native, want_usage).into_response()
+        stream_chat(state, model, inv, native, want_usage).await
     } else {
         match bridge::submit(&state, &model, "generate", inv).await {
             Ok(outcome) => {
@@ -199,15 +199,22 @@ fn chunk(id: &str, model: &str, delta: Value, finish: Option<&str>, native: bool
 
 /// The SSE `chat.completion.chunk` stream: a role chunk, one content chunk per token
 /// delta, a terminal chunk carrying `finish_reason`, an optional usage-only chunk
-/// (when `stream_options.include_usage`), then `data: [DONE]`.
-fn stream_chat(state: AppState, model: String, inv: Invocation, native: bool, want_usage: bool) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+/// (when `stream_options.include_usage`), then `data: [DONE]`. Runs the admission
+/// race FIRST: if the job cannot start on a lane within `state.admit_deadline`, this
+/// returns a plain 429 body (with `Retry-After`) instead of an event-stream.
+async fn stream_chat(state: AppState, model: String, inv: Invocation, native: bool, want_usage: bool) -> Response {
     use futures::StreamExt;
+    // Admit BEFORE returning the SSE body — a shed request is a plain 429, not an
+    // event-stream that immediately errors.
+    let mut src = match bridge::stream(&state, &model, "generate", inv).await {
+        Ok(src) => src,
+        Err(e) => return e.into_response(),
+    };
     let id = format!("chatcmpl-{}", Uuid::new_v4().simple());
     let events = async_stream::stream! {
         // First chunk: announce the assistant role.
-        yield Ok(Event::default().data(chunk(&id, &model, json!({ "role": "assistant", "content": "" }), None, native).to_string()));
+        yield Ok::<Event, Infallible>(Event::default().data(chunk(&id, &model, json!({ "role": "assistant", "content": "" }), None, native).to_string()));
 
-        let mut src = bridge::stream(&state, &model, "generate", inv);
         let mut finish = String::from("stop");
         let (mut prompt, mut completion) = (0i64, 0i64);
         while let Some(msg) = src.next().await {
@@ -246,5 +253,5 @@ fn stream_chat(state: AppState, model: String, inv: Invocation, native: bool, wa
         }
         yield Ok(Event::default().data("[DONE]"));
     };
-    Sse::new(events.boxed())
+    Sse::new(events.boxed()).into_response()
 }

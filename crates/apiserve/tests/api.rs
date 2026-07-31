@@ -7,7 +7,9 @@
 //! no GPU. `Executor::start(...).manifests()` works CPU-only.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use apiserve::{router, AppState, Provider};
 use axum::body::Body;
@@ -622,4 +624,156 @@ async fn openrouter_chat_stream_validates_and_carries_native_finish_reason() {
         }
     }
     assert!(saw_native, "final chunk must carry native_finish_reason");
+}
+
+// ------------------------------------------------- P6: admission + backpressure
+
+/// A shared gate the test uses to (a) pin the single CPU lane and (b) count how
+/// many jobs did REAL work (passed the cancel guard and started running). A
+/// well-behaved model drops a cancelled job before touching the gate, so a job that
+/// was shed at admission (its token cancelled) never bumps `started`.
+#[derive(Clone)]
+struct Gate {
+    inner: Arc<(Mutex<bool>, Condvar)>,
+    started: Arc<AtomicUsize>,
+}
+impl Gate {
+    fn new() -> Gate {
+        Gate { inner: Arc::new((Mutex::new(false), Condvar::new())), started: Arc::new(AtomicUsize::new(0)) }
+    }
+    /// Block the caller (the lane thread) until [`Gate::release`].
+    fn wait(&self) {
+        let (m, cv) = &*self.inner;
+        let mut open = m.lock().unwrap();
+        while !*open {
+            open = cv.wait(open).unwrap();
+        }
+    }
+    /// Let every waiting lane run to completion.
+    fn release(&self) {
+        let (m, cv) = &*self.inner;
+        *m.lock().unwrap() = true;
+        cv.notify_all();
+    }
+    fn started(&self) -> usize {
+        self.started.load(Ordering::SeqCst)
+    }
+}
+
+/// A chat model whose `run` blocks the lane until the gate is released — pinning the
+/// single CPU lane so a second request cannot be admitted. A cancelled invocation
+/// (e.g. one shed at admission whose token was cancelled) returns immediately WITHOUT
+/// bumping `started`, proving a timed-out job never runs wastefully.
+struct SlowChat(Gate);
+struct SlowChatInst(Gate);
+impl ResidentModel for SlowChat {
+    fn manifest(&self) -> Manifest {
+        chat_manifest()
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-chat", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(SlowChatInst(self.0.clone())))
+    }
+}
+impl Instance for SlowChatInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        // Drop cancelled work before doing anything (as a real model would).
+        if inv.cancel.is_cancelled() {
+            return Err("cancelled".into());
+        }
+        self.0.started.fetch_add(1, Ordering::SeqCst);
+        self.0.wait(); // pin the lane until the test releases us
+        Ok(Outcome::new()
+            .set("prompt_tokens", json!(1))
+            .set("completion_tokens", json!(1))
+            .set("finish_reason", json!("stop"))
+            .blob("text", Blob::new(Media::Text, b"done".to_vec())))
+    }
+}
+
+/// A single-CPU-lane executor whose one chat model blocks on `gate`.
+fn slow_executor(gate: Gate) -> Executor {
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(SlowChat(gate))];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    Executor::start(models, budgets, Policy::default())
+}
+
+/// POST returning `(status, headers, json)` — keeps the response headers so the test
+/// can assert `Retry-After` + `content-type` (the shared `send`/`post_json` helpers
+/// discard them).
+async fn post_full(app: &Router, p: Provider, key: &str, path: &str, body: &Value) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let req = auth(Request::builder().method(Method::POST).uri(path), p, key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let v = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() };
+    (status, headers, v)
+}
+
+/// The single CPU lane is pinned by one in-flight request; a second request that
+/// cannot be ADMITTED within the (short) deadline is shed with a 429 — promptly, not
+/// hanging — carrying `Retry-After` and a spec-valid provider error body. The same
+/// holds for a streaming request: it gets a PLAIN 429 JSON, not an SSE stream that
+/// then errors. A shed job's token is cancelled, so it never runs once the lane frees.
+#[tokio::test]
+async fn admit_deadline_sheds_saturated_lane_with_429_and_cancels() {
+    let gate = Gate::new();
+    let key = "sk-brain-test-key".to_string();
+    let deadline = Duration::from_millis(200);
+    let state = AppState::new(slow_executor(gate.clone()), key.clone(), Provider::OpenAI).with_admit_deadline(deadline);
+    let app = router(state);
+    let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}]});
+
+    // Job 1 occupies the single CPU lane. Its response won't resolve until we release
+    // the gate, so drive it on a background task.
+    let (app1, key1, b1) = (app.clone(), key.clone(), body.clone());
+    let job1 = tokio::spawn(async move { post_json(&app1, Provider::OpenAI, &key1, "/v1/chat/completions", &b1).await });
+
+    // Wait until job 1 is actually RUNNING on the lane (past the cancel guard).
+    let until = Instant::now() + Duration::from_secs(5);
+    while gate.started() == 0 {
+        assert!(Instant::now() < until, "job 1 never started on the lane");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Job 2 (non-stream): the lane is pinned, so it cannot be admitted in 200ms -> 429.
+    let t0 = Instant::now();
+    let (st, headers, v) = post_full(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    let elapsed = t0.elapsed();
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "saturated lane must shed with 429: {v}");
+    assert!(elapsed < Duration::from_secs(2), "429 must return near the deadline, not hang: {elapsed:?}");
+    assert!(headers.contains_key(header::RETRY_AFTER), "429 must carry Retry-After: {headers:?}");
+    assert_valid("openai.json", "ErrorResponse", &v);
+
+    // Job 3 (stream): the SSE admit race must ALSO shed BEFORE any event-stream body —
+    // a plain 429 JSON, not text/event-stream.
+    let stream_body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let (st, headers, v) = post_full(&app, Provider::OpenAI, &key, "/v1/chat/completions", &stream_body).await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "streaming request on a saturated lane must shed with 429: {v}");
+    assert!(headers.contains_key(header::RETRY_AFTER), "streamed 429 must carry Retry-After");
+    let ctype = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    assert!(ctype.starts_with("application/json"), "shed stream must be a plain JSON 429, not SSE: {ctype}");
+    assert_valid("openai.json", "ErrorResponse", &v);
+
+    // Only ONE job ever did real work; the shed jobs were cancelled and, even after
+    // the lane frees, must not run.
+    assert_eq!(gate.started(), 1, "no shed job may run before the lane frees");
+    gate.release();
+    let (st1, _v1) = job1.await.unwrap();
+    assert_eq!(st1, StatusCode::OK, "the admitted job 1 must complete once released");
+
+    // Give the dispatcher a moment to (re)visit the queue now the lane is free: the
+    // cancelled jobs must NOT have run.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(gate.started(), 1, "a timed-out (cancelled) job must not run after the lane frees");
 }

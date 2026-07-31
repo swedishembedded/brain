@@ -12,12 +12,18 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use capability::CancelToken;
 use residency::Executor;
 use uuid::Uuid;
 
 use crate::surface::Provider;
+
+/// Default admission deadline: the bounded time a request may wait for work to
+/// START on a lane before it is shed with a 429. A running job may then take much
+/// longer — only the wait-to-start is bounded.
+pub const DEFAULT_ADMIT_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Armed cancel tokens for in-flight requests, keyed by a per-request UUID. An
 /// entry lives from submission until the reply fires (copy of the dbus pattern).
@@ -30,11 +36,27 @@ pub struct AppState {
     pub jobs: JobRegistry,
     pub key: String,
     pub provider: Provider,
+    /// Bounded wait for a request to be ADMITTED (work started on a lane) before it
+    /// is shed with a 429. Overridable so tests can use a short deadline.
+    pub admit_deadline: Duration,
 }
 
 impl AppState {
     pub fn new(exec: Executor, key: impl Into<String>, provider: Provider) -> AppState {
-        AppState { exec, jobs: Arc::new(Mutex::new(HashMap::new())), key: key.into(), provider }
+        AppState {
+            exec,
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            key: key.into(),
+            provider,
+            admit_deadline: DEFAULT_ADMIT_DEADLINE,
+        }
+    }
+
+    /// Override the admission deadline (builder-style). Used by tests to force fast
+    /// shedding without slow real-time waits.
+    pub fn with_admit_deadline(mut self, deadline: Duration) -> AppState {
+        self.admit_deadline = deadline;
+        self
     }
 
     /// Arm and register a fresh cancel token under a new request id. The handler

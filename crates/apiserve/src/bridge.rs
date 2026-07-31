@@ -53,16 +53,39 @@ pub fn map_reply_err(provider: Provider, model: &str, e: &str) -> ApiError {
 }
 
 /// Submit one `generate` job and block (async) for its single reply. Arms a fresh
-/// cancel token, registers it, waits on a `oneshot`, then clears the registry entry.
+/// cancel token, registers it, then runs the **admission race**: a bounded wait
+/// (`state.admit_deadline`) for the job to be ADMITTED (claimed onto a lane — its
+/// `on_admit` signal fires). If it is not admitted in time the job is cancelled
+/// (dropped from the queue so it never runs wastefully), unregistered, and the
+/// caller gets a 429. Once admitted, the wait for the (possibly long) reply is
+/// UNBOUNDED — only the wait-to-start is deadlined.
 pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invocation) -> Result<Outcome, ApiError> {
     let provider = state.provider;
     let (id, token) = state.register();
-    inv.cancel = token;
+    inv.cancel = token.clone();
     let (tx, rx) = oneshot::channel();
-    let job = Job::new(model.to_string(), action.to_string(), inv).on_progress(|_| {}).reply(move |r| {
-        let _ = tx.send(r);
-    });
+    let (admit_tx, admit_rx) = oneshot::channel::<()>();
+    let job = Job::new(model.to_string(), action.to_string(), inv)
+        .on_progress(|_| {})
+        .on_admit(move || {
+            let _ = admit_tx.send(());
+        })
+        .reply(move |r| {
+            let _ = tx.send(r);
+        });
     state.exec.submit(job);
+
+    // Admission race: work started on a lane vs. the deadline elapsing.
+    tokio::select! {
+        _ = admit_rx => {}
+        _ = tokio::time::sleep(state.admit_deadline) => {
+            token.cancel();
+            state.finish(&id);
+            return Err(ApiError::overloaded(provider, "request could not be admitted within the deadline"));
+        }
+    }
+
+    // Admitted — await the reply (unbounded; a running job may take long).
     let res = rx.await;
     state.finish(&id);
     match res {
@@ -112,23 +135,32 @@ impl Stream for EventStream {
     }
 }
 
-/// Submit one `generate` job whose progress/reply fan into a channel. The returned
-/// [`EventStream`] yields a [`StreamMsg::Delta`] per generated token (progress
-/// updates whose `delta` is set — coarse step-only progress is ignored), then one
-/// terminal [`StreamMsg::Done`]/[`StreamMsg::Err`]. The `on_progress`/`reply`
-/// closures only touch the (`Send`) channel — never the model.
-pub fn stream(state: &AppState, model: &str, action: &str, mut inv: Invocation) -> EventStream {
+/// Submit one `generate` job whose progress/reply fan into a channel, running the
+/// same **admission race** as [`submit`] BEFORE returning the stream: a bounded wait
+/// (`state.admit_deadline`) for the job to be claimed onto a lane. If it is not
+/// admitted in time the job is cancelled + unregistered and a 429 [`ApiError`] is
+/// returned — so the caller returns a plain 429 body, NOT an SSE stream that then
+/// errors. Once admitted, the returned [`EventStream`] yields a [`StreamMsg::Delta`]
+/// per generated token (progress updates whose `delta` is set — coarse step-only
+/// progress is ignored), then one terminal [`StreamMsg::Done`]/[`StreamMsg::Err`].
+/// The `on_progress`/`reply` closures only touch the (`Send`) channel — never the
+/// model.
+pub async fn stream(state: &AppState, model: &str, action: &str, mut inv: Invocation) -> Result<EventStream, ApiError> {
     let provider = state.provider;
     let model_owned = model.to_string();
     let (id, token) = state.register();
     inv.cancel = token.clone();
     let (tx, rx) = mpsc::unbounded_channel::<StreamMsg>();
+    let (admit_tx, admit_rx) = oneshot::channel::<()>();
     let tx_progress = tx.clone();
     let job = Job::new(model.to_string(), action.to_string(), inv)
         .on_progress(move |p| {
             if let Some(piece) = p.delta {
                 let _ = tx_progress.send(StreamMsg::Delta(piece));
             }
+        })
+        .on_admit(move || {
+            let _ = admit_tx.send(());
         })
         .reply(move |r| {
             let msg = match r {
@@ -138,5 +170,17 @@ pub fn stream(state: &AppState, model: &str, action: &str, mut inv: Invocation) 
             let _ = tx.send(msg);
         });
     state.exec.submit(job);
-    EventStream { rx, _guard: CancelGuard { token, jobs: state.jobs.clone(), id } }
+
+    // Admission race BEFORE returning the SSE body: a shed request yields a plain
+    // 429, never an event-stream that immediately errors.
+    tokio::select! {
+        _ = admit_rx => {}
+        _ = tokio::time::sleep(state.admit_deadline) => {
+            token.cancel();
+            state.finish(&id);
+            return Err(ApiError::overloaded(provider, "request could not be admitted within the deadline"));
+        }
+    }
+
+    Ok(EventStream { rx, _guard: CancelGuard { token, jobs: state.jobs.clone(), id } })
 }
