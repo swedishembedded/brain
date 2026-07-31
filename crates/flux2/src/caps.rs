@@ -56,7 +56,14 @@ pub fn manifest() -> Manifest {
         .output(image_out());
 
     let mut edit = gen_params(ActionSpec::new("edit", "regenerate toward a prompt conditioned on reference image(s) (token-concatenation editing)").streaming())
-        .input(BlobSpec::new("image", Media::Image, "the reference image to edit (center-cropped to /16)").required());
+        // `strength` belongs to `edit` alone: it seeds the trajectory from the
+        // FIRST input image's latent, so it is meaningless without one.
+        .param(ParamSpec::new(
+            "strength",
+            ParamType::Float,
+            "img2img init strength in (0,1] = the starting noise level: the first input image seeds the              trajectory instead of pure noise. Low = keep the source (0.1 -> ~0.999 structural fidelity),              high = redraw it (0.9 -> ~0.77). Does NOT add colour — see docs/models/flux2/readme.md.              Omit to generate from noise with the references only conditioning.",
+        ))
+        .input(BlobSpec::new("image", Media::Image, "the reference image to edit (center-cropped to /16); also the img2img init when `strength` is set").required());
     for r in EXTRA_REFS {
         edit = edit.input(BlobSpec::new(r, Media::Image, "additional reference image"));
     }
@@ -116,9 +123,13 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
         return Err(format!("width/height must be multiples of 16 (got {width}×{height})"));
     }
     let steps = inv.get_i64("steps").unwrap_or(0).max(0) as u32;
+    // 0 = absent -> generate from noise; (0,1] -> img2img init from the first
+    // reference (the faithful-colorize path).
+    let strength = inv.get_f64("strength").unwrap_or(0.0) as f32;
     let opts = GenOpts {
         width,
         height,
+        strength: (strength > 0.0).then_some(strength),
         steps: (steps > 0).then_some(steps),
         guidance: inv.get_f64("guidance").unwrap_or(4.0) as f32,
         seed: inv.get_i64("seed").unwrap_or(0).max(0) as u64,

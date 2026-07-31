@@ -12,6 +12,8 @@ const HELP: &str = "brain flux2 <cmd>
   generate --prompt <text> --out <out.ppm> [--width W] [--height H]
            [--steps N] [--seed S] [--guidance G] [--variant klein-4b|klein-9b|base-4b|base-9b]
            [--precision fp32|int8]  # int8 = DP4A DiT (~4x smaller, GPU only)
+           [--strength S]           # img2img: 0.2-0.5 keeps the source (colorize),
+                                    # omit = generate from noise (reference only conditions)
            [--ref <in.ppm>]...      # reference images => editing mode
 Weights (env): BRAIN_FLUX2_DIT, BRAIN_FLUX2_VAE, BRAIN_FLUX2_TE, BRAIN_FLUX2_TOKENIZER
 Text-encoder placement (env): BRAIN_FLUX2_TE_DEVICE=gpu<i>[:i8] (truncated shard on that card)";
@@ -54,6 +56,7 @@ fn generate(args: &[String]) -> Result<(), String> {
             "--height" => o.height = need(i)?.parse().map_err(|e| format!("--height: {e}"))?,
             "--steps" => o.steps = Some(need(i)?.parse().map_err(|e| format!("--steps: {e}"))?),
             "--seed" => o.seed = need(i)?.parse().map_err(|e| format!("--seed: {e}"))?,
+            "--strength" => o.strength = Some(need(i)?.parse().map_err(|e| format!("--strength: {e}"))?),
             "--guidance" => o.guidance = need(i)?.parse().map_err(|e| format!("--guidance: {e}"))?,
             "--variant" => variant_name = need(i)?.clone(),
             "--precision" => precision = flux2::Precision::from_name(need(i)?)?,
