@@ -47,6 +47,15 @@ impl Paths {
 pub struct GenOpts {
     pub width: u32,
     pub height: u32,
+    /// Image-to-image init strength in `(0, 1]`. `None` (or 1.0) starts the
+    /// denoise from pure noise — the reference images then only *condition*
+    /// via their tokens, so the result keeps the composition but is a fresh
+    /// generation (see `docs/models/flux2/status.md`: this is why a
+    /// reference-only "colorize" reinterprets the scene). With `Some(s)` the
+    /// first reference is VAE-encoded and the trajectory starts partway down
+    /// the schedule from `x_σ = (1−σ)·x₀ + σ·ε` — the rectified-flow forward
+    /// process — so structure is anchored to the source. Small `s` = faithful.
+    pub strength: Option<f32>,
     /// None → the variant default (4 distilled / 50 base).
     pub steps: Option<u32>,
     /// CFG scale — only meaningful for the undistilled base variants.
@@ -56,7 +65,7 @@ pub struct GenOpts {
 
 impl Default for GenOpts {
     fn default() -> Self {
-        GenOpts { width: 1024, height: 1024, steps: None, guidance: 4.0, seed: 0 }
+        GenOpts { width: 1024, height: 1024, strength: None, steps: None, guidance: 4.0, seed: 0 }
     }
 }
 
@@ -373,7 +382,16 @@ impl Pipeline {
             return Err(format!("width/height must be multiples of 16 (got {}×{})", o.width, o.height));
         }
         let (lh, lw) = ((o.height / 16) as usize, (o.width / 16) as usize);
-        let ref_dims: Vec<(usize, usize)> = r.refs.iter().map(|(_, rh, rw)| ((rh / 16) as usize, (rw / 16) as usize)).collect();
+        // Keep in step with the token builder: under `strength` the first
+        // reference is consumed as the init latent, so it contributes no
+        // reference tokens and therefore no reference position ids.
+        let ref_skip = if o.strength.is_some_and(|st| st < 1.0) { 1 } else { 0 };
+        let ref_dims: Vec<(usize, usize)> = r
+            .refs
+            .iter()
+            .skip(ref_skip)
+            .map(|(_, rh, rw)| ((rh / 16) as usize, (rw / 16) as usize))
+            .collect();
         Ok(position_ids(self.cfg.txt_len, lh, lw, &ref_dims))
     }
 
@@ -400,6 +418,8 @@ impl Pipeline {
             ref_tokens: Vec<f32>,
             sigmas: Vec<f32>,
             lat: Vec<f32>,
+            /// First schedule index this lane runs; > 0 for img2img inits.
+            start: usize,
         }
         let max_steps_hint = members.iter().map(|&i| reqs[i].steps_for(cfg.distilled)).max().unwrap_or(0) as u32;
         let mut lanes: Vec<Lane> = Vec::new();
@@ -415,7 +435,13 @@ impl Pipeline {
             let ctx_uncond = if cf { Some(self.encode_prompt("")) } else { None };
             let mut ref_tokens: Vec<f32> = Vec::new();
             let mut failed = None;
-            for (chw, rh, rw) in &r.refs {
+            // With `strength`, the first reference IS the init latent — passing
+            // it again as conditioning tokens would double-anchor it (and its
+            // greyscale evidence), which is not what img2img means. Standard
+            // img2img: the init image is the conditioning. Extra references
+            // (2nd onward) still ride along as edit context.
+            let ref_skip = if o.strength.is_some_and(|s| s < 1.0) { 1 } else { 0 };
+            for (chw, rh, rw) in r.refs.iter().skip(ref_skip) {
                 progress(0, max_steps_hint + 2, "encoding reference");
                 match self.encode_image(chw, *rh, *rw) {
                     Ok(t) => ref_tokens.extend(t),
@@ -426,6 +452,54 @@ impl Pipeline {
                 out[i] = Err(e);
                 continue;
             }
+            let sigmas = diffusion::scheduler::klein_sigmas(steps, n_gen);
+            let noise = model::hostmath::randn(n_gen * cfg.in_channels, o.seed);
+            // img2img: start partway down the schedule from the source latent.
+            // `x_σ = (1−σ)·x₀ + σ·ε` is the same forward process the trainer
+            // uses (`modelgrad::make_flow_batch`), so the model sees exactly
+            // the distribution it was trained on at that σ.
+            let (lat, start, sigmas) = match o.strength {
+                Some(st) if st < 1.0 => {
+                    let st = st.clamp(1e-3, 1.0);
+                    // Do NOT slice the distilled schedule: `klein_sigmas` is
+                    // shifted so hard for few-step sampling that its lowest
+                    // non-zero entry is 0.56 at 8 steps (0.75 at 4) — there is
+                    // no low-noise entry point to start an img2img from, and
+                    // starting at 0.84 with 3 steps left resolves to noise.
+                    // The velocity field is defined at every σ, so integrate
+                    // the requested number of Euler steps over [strength, 0]
+                    // instead; `strength` IS the starting noise level.
+                    let sigmas: Vec<f32> =
+                        (0..=steps).map(|k| st * (1.0 - k as f32 / steps as f32)).collect();
+                    let start = 0usize;
+                    let Some((chw, rh, rw)) = r.refs.first() else {
+                        out[i] = Err("strength needs a reference image".into());
+                        continue;
+                    };
+                    if (*rh as usize / 16) * (*rw as usize / 16) != n_gen {
+                        out[i] = Err(format!(
+                            "strength needs the reference at the output size ({}x{}, got {rw}x{rh})",
+                            o.width, o.height
+                        ));
+                        continue;
+                    }
+                    match self.encode_image(chw, *rh, *rw) {
+                        Ok(x0) => {
+                            let lat: Vec<f32> = x0
+                                .iter()
+                                .zip(&noise)
+                                .map(|(&a, &e)| (1.0 - st) * a + st * e)
+                                .collect();
+                            (lat, start, sigmas)
+                        }
+                        Err(e) => {
+                            out[i] = Err(e);
+                            continue;
+                        }
+                    }
+                }
+                _ => (noise, 0, sigmas),
+            };
             lanes.push(Lane {
                 idx: i,
                 lh,
@@ -436,8 +510,9 @@ impl Pipeline {
                 ctx,
                 ctx_uncond,
                 ref_tokens,
-                sigmas: diffusion::scheduler::klein_sigmas(steps, n_gen),
-                lat: model::hostmath::randn(n_gen * cfg.in_channels, o.seed),
+                sigmas,
+                lat,
+                start,
             });
         }
         if lanes.is_empty() {
@@ -457,7 +532,8 @@ impl Pipeline {
                     true
                 }
             });
-            let active: Vec<usize> = (0..lanes.len()).filter(|&k| i < lanes[k].steps).collect();
+            let active: Vec<usize> =
+                (0..lanes.len()).filter(|&k| i >= lanes[k].start && i < lanes[k].steps).collect();
             if active.is_empty() {
                 break;
             }

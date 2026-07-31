@@ -103,7 +103,9 @@ to the source, `sat` = mean saturation (did it actually add colour):
 |---|---:|---:|
 | long scene description, from noise | 0.657 | 0.511 |
 | **`"Colorize this photograph."` (instruction), from noise** | **0.853** | **0.414** |
-| description **or** instruction + `--strength` (img2img init) | 0.999 | **0.011** |
+| instruction + `--strength 0.1` (img2img init) | 0.999 | 0.012 |
+| instruction + `--strength 0.5` | 0.975 | 0.011 |
+| instruction + `--strength 0.9` | 0.768 | 0.020 |
 
 Two rules follow:
 
@@ -112,13 +114,23 @@ Two rules follow:
    scene you want. Same model, same seed: fidelity 0.657 → 0.853 with colour
    retained. A description is a text-to-image prompt and the model treats it
    as one.
-2. **`--strength` (img2img) and colour changes are mutually exclusive.** The
-   init latent reconstructs the source *including its greyness* — even at
-   strength 0.9, saturation stays 0.011. Klein is guidance-distilled, so there
-   is no CFG to weight the prompt against the image evidence. Use `--strength`
-   for structure-preserving *tonal/texture* edits; use reference-only (from
-   noise) when the edit must change colour or content, and accept ~0.85
-   structural fidelity. Faithful colorization needs CFG (the undistilled
+2. **`--strength` trades fidelity for freedom, monotonically** (0.1 → 0.999,
+   0.5 → 0.975, 0.9 → 0.768), but it does **not** buy colour: saturation stays
+   ≈0.01–0.02 across the whole range while fidelity collapses. The init latent
+   carries the source's greyness as content, and Klein is guidance-distilled,
+   so there is no CFG to weight the prompt against that evidence. Use
+   `--strength` for structure-preserving *tonal/texture* edits; use
+   reference-only (from noise) when the edit must change colour, and accept
+   ~0.85 structural fidelity.
+
+   **Implementation note (a bug worth not repeating):** the init image must NOT
+   also be passed as a conditioning reference token. Doing so pins the output
+   at ~0.999 for *every* strength — the dial looks inert because the reference
+   tokens override the noise level. `Pipeline` therefore consumes the first
+   reference as the init and skips it in both the token builder and
+   `position_ids`; extra references still ride along as edit context. Side
+   benefit: the joint sequence halves (6848 → 3680 tokens here), so img2img is
+   also 2.4× faster (96 s → 40 s at 8 steps). Faithful colorization needs CFG (the undistilled
    `base-4b`), a colorization LoRA (`brain flux2` can train one), or a
    purpose-built model.
 
