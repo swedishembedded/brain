@@ -132,7 +132,7 @@ Genuinely missing, in dependency order:
 | # | Kernel | Needed by | Notes |
 |---|---|---|---|
 | 1 | `maxpool2d` + `_dx` | Hiera `q_pool`, SCRFD | **DONE.** Generalized `maxpool5` (added `stride` + explicit `Ho`/`Wo`); `maxpool5{,_dx}` deleted and SPPF migrated, so there is one max-pool, not two |
-| 2 | `convtr2d` + `_dw` + `_dx` | SAM 2 mask decoder, VQGAN/CodeFormer decoder | `convtr1d` exists as the shape template |
+| 2 | `convtr2d` + `_dw` + `_dx` | SAM 2 mask decoder, VQGAN/CodeFormer decoder | **DONE.** Built on the `convtr1d` shape template; same 12-word `Params` as `conv2d_gd` (square K, symmetric pad, bias-free) |
 | 3 | `prelu` + `_bwd` | ArcFace IResNet | `leaky_relu` has a *fixed* slope; PReLU's is a learned per-channel parameter needing its own grad |
 | 4 | `grid_sample` + `_bwd` | face alignment (similarity warp), ROI align | bilinear gather |
 | 5 | `resize_bicubic` + `_dx` | SAM 2 `pos_embed` interpolation | joins `resize_bilinear`/`resize_nearest` |
