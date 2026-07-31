@@ -103,85 +103,23 @@ pub fn ciou(pred: Xyxy, tgt: Xyxy) -> f32 {
     iou - rho2 / c2 - alpha * v
 }
 
-/// Letterbox geometry: the scale + padding that maps an original `(w0, h0)`
-/// image onto a square `size x size` model input while preserving aspect ratio.
+/// Letterbox geometry and the resize+pad+CHW pack, **re-exported** from
+/// `imaging::letterbox` — the image substrate crate that owns every pixel-layout
+/// operation in the workspace.
 ///
-/// Forward map (original px -> input px):  `xi = x0 * scale + pad_x`,
-/// `yi = y0 * scale + pad_y`.  `scale = min(size/w0, size/h0)` (downscale-and-
-/// pad; the longer side fills the square, the shorter side is centre-padded).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Letterbox {
-    pub scale: f32,
-    pub pad_x: f32,
-    pub pad_y: f32,
-    /// Scaled content size (before padding), `round(w0*scale)` x `round(h0*scale)`.
-    pub new_w: u32,
-    pub new_h: u32,
-    /// Target square side.
-    pub size: u32,
-}
-
-impl Letterbox {
-    /// Compute the letterbox transform for an original `w0 x h0` image fitted to
-    /// a `size x size` square, preserving aspect ratio and centre-padding.
-    pub fn compute(w0: u32, h0: u32, size: u32) -> Letterbox {
-        let s = (size as f32 / w0 as f32).min(size as f32 / h0 as f32);
-        let new_w = (w0 as f32 * s).round() as u32;
-        let new_h = (h0 as f32 * s).round() as u32;
-        let pad_x = (size as f32 - new_w as f32) * 0.5;
-        let pad_y = (size as f32 - new_h as f32) * 0.5;
-        Letterbox { scale: s, pad_x, pad_y, new_w, new_h, size }
-    }
-
-    /// Map an `xyxy` box from ORIGINAL-image coords into letterboxed INPUT coords.
-    pub fn apply_box(&self, b: Xyxy) -> Xyxy {
-        [
-            b[0] * self.scale + self.pad_x,
-            b[1] * self.scale + self.pad_y,
-            b[2] * self.scale + self.pad_x,
-            b[3] * self.scale + self.pad_y,
-        ]
-    }
-
-    /// Inverse: map an `xyxy` box from letterboxed INPUT coords back to ORIGINAL
-    /// coords, clamped to the original `[0,w0] x [0,h0]` frame.
-    pub fn invert_box(&self, b: Xyxy, w0: u32, h0: u32) -> Xyxy {
-        let inv = 1.0 / self.scale;
-        let x1 = ((b[0] - self.pad_x) * inv).clamp(0.0, w0 as f32);
-        let y1 = ((b[1] - self.pad_y) * inv).clamp(0.0, h0 as f32);
-        let x2 = ((b[2] - self.pad_x) * inv).clamp(0.0, w0 as f32);
-        let y2 = ((b[3] - self.pad_y) * inv).clamp(0.0, h0 as f32);
-        [x1, y1, x2, y2]
-    }
-}
-
-/// Resize an interleaved-RGB `src` (`w0 x h0`, row-major `[h0*w0*3]`, channel-
-/// last, u8-as-f32 or already-normalised) into a letterboxed CHW float tensor
-/// `[3 * size * size]` (the model input layout). Pad value is `pad` (default
-/// grey 114/255 is common; caller supplies it). Uses nearest-neighbour resize
-/// (adequate for the from-scratch CPU detector; bilinear is a later refinement).
-/// Returns `(chw, lb)` — the CHW input buffer and the letterbox transform.
-pub fn letterbox_rgb(src: &[f32], w0: u32, h0: u32, size: u32, pad: f32) -> (Vec<f32>, Letterbox) {
-    assert_eq!(src.len(), (w0 * h0 * 3) as usize, "src must be HWC RGB [h0*w0*3]");
-    let lb = Letterbox::compute(w0, h0, size);
-    let sz = size as usize;
-    let mut chw = vec![pad; 3 * sz * sz];
-    let inv = 1.0 / lb.scale;
-    for yi in 0..lb.new_h as usize {
-        // source row for this destination row (nearest neighbour).
-        let sy = ((yi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, h0 as f32 - 1.0) as usize;
-        let dy = yi + lb.pad_y as usize;
-        for xi in 0..lb.new_w as usize {
-            let sx = ((xi as f32 + 0.5) * inv - 0.5).round().clamp(0.0, w0 as f32 - 1.0) as usize;
-            let dx = xi + lb.pad_x as usize;
-            let s_base = (sy * w0 as usize + sx) * 3;
-            for c in 0..3 {
-                chw[c * sz * sz + dy * sz + dx] = src[s_base + c];
-            }
-        }
-    }
-    (chw, lb)
-}
+/// It used to be defined here, and this module is still where detection code
+/// names it (`boxmath::Letterbox`, `boxmath::letterbox_rgb`), so no call site
+/// moved. But the letterbox is not box *math*: it is an image transform, and
+/// keeping a second definition next to `imaging`'s is exactly the drift the
+/// "one implementation" rule (AGENTS.md) exists to prevent — the pad fill, the
+/// `pad_y as usize` truncation and the half-pixel nearest rule are all baked
+/// into the trained yolo weights and into every reported `map50`, so there must
+/// be exactly one place they can be changed.
+///
+/// `imaging::letterbox`'s module header documents why the nearest rule is
+/// half-pixel (and therefore *not* `resize_nearest.wgsl`) and why the
+/// truncation must not be "fixed" without a `map50` gate.
+pub use imaging::letterbox::{letterbox_rgb, Letterbox};
 
 /// Is the pixel point `(px, py)` strictly inside the pixel `xyxy` box?
 #[inline]

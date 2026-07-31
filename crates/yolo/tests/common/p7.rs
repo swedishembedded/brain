@@ -89,22 +89,6 @@ pub fn targets_for_split(split: &[Sample], relabel: impl Fn(u32) -> u32) -> Vec<
     gts
 }
 
-/// CHW (`[3,side,side]`, normalized) -> interleaved HWC-RGB `[side*side*3]`, the
-/// layout `Yolo::detect` expects.
-pub fn chw_to_hwc(chw: &[f32], side: u32) -> Vec<f32> {
-    let s = side as usize;
-    let plane = s * s;
-    let mut out = vec![0.0f32; plane * 3];
-    for y in 0..s {
-        for x in 0..s {
-            let idx = y * s + x;
-            for c in 0..3 {
-                out[idx * 3 + c] = chw[c * plane + idx];
-            }
-        }
-    }
-    out
-}
 
 /// A TEST-ONLY shrunk config: `YoloConfig::tiny(nc)` but at a smaller square input
 /// resolution. The conv stack dominates CPU-JIT cost and scales ~quadratically
@@ -179,7 +163,7 @@ pub fn detect_split(
     iou: f32,
 ) -> Vec<Vec<Detection>> {
     let evalm = clone_for_eval(model, cfg, val.len() as u32);
-    let hwc: Vec<Vec<f32>> = val.iter().map(|s| chw_to_hwc(&s.chw, side)).collect();
+    let hwc: Vec<Vec<f32>> = val.iter().map(|s| imaging::pixels::chw_to_hwc(&s.chw, 3, side as usize, side as usize)).collect();
     let batch: Vec<(&[f32], u32, u32)> = hwc.iter().map(|h| (h.as_slice(), side, side)).collect();
     evalm.detect_batch(&batch, conf, iou)
 }

@@ -13,6 +13,11 @@ path = "src/lib.rs"
 brain-capability.workspace = true
 brain-gpu-core.workspace = true
 brain-vision.workspace = true
+# `imaging::letterbox` — the workspace's ONE letterbox (geometry + resize/pad/CHW
+# pack). It lived in `boxmath` until `crates/imaging` was created; `boxmath`
+# re-exports it so every detection call site keeps its name, and there is still
+# exactly one implementation of the transform the trained weights depend on.
+brain-imaging.workspace = true
 brain-model.workspace = true
 brain-paramstore.workspace = true
 brain-optim.workspace = true

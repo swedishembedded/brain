@@ -44,18 +44,6 @@ fn boxes_for_img(img: u32, dboxes: &[data::binio::DetectBox]) -> Vec<GtBox> {
         .collect()
 }
 
-/// Interleaved-RGB HWC `src[h*w*3]` (the `Yolo::detect` input form), built from
-/// the generator's CHW blob (`gen_detect::image_to_chw` is `[3,H,W]`, /255).
-fn chw_to_hwc(chw: &[f32], side: usize) -> Vec<f32> {
-    let hw = side * side;
-    let mut hwc = vec![0.0f32; hw * 3];
-    for p in 0..hw {
-        hwc[p * 3] = chw[p];
-        hwc[p * 3 + 1] = chw[hw + p];
-        hwc[p * 3 + 2] = chw[2 * hw + p];
-    }
-    hwc
-}
 
 /// Recall over the GT set through `Yolo::detect`. A GT is recovered if some
 /// returned detection has the correct class, conf >= `conf_thr`, IoU>0.5.
@@ -160,7 +148,7 @@ fn eval_mode_detect_recovers_overfit_objects() {
     // `detect` wants interleaved-RGB HWC at the original size; at native size the
     // letterbox is an identity resize, so the eval path sees exactly the training
     // pixels (only the BN mode differs from training).
-    let hwc = chw_to_hwc(&chw, side as usize);
+    let hwc = imaging::pixels::chw_to_hwc(&chw, 3, side as usize, side as usize);
 
     let t0 = std::time::Instant::now();
 
