@@ -20,8 +20,13 @@ use crate::config::ZipConfig;
 /// ImageNet statistics, as the reference bakes them into the state_dict
 /// (`architecture.py:616-617`). They are constants, not learned, but they ship
 /// with the weights because normalization happens INSIDE the model.
-pub const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-pub const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
+///
+/// The arrays themselves come from `imaging` — they were declared byte-identically
+/// here and in `mirror::preprocess`. Only the arrays are shared: WHERE they are
+/// applied is model-specific and deliberately not unified. ZipDepth folds them
+/// into the first BatchNorm below, so its predictor feeds the model `[0,1]` and
+/// never normalizes; `mirror` applies them per frame on the host.
+use imaging::{IMAGENET_MEAN, IMAGENET_STD};
 
 /// Initialize every parameter in `params` (`(name, numel)`), deterministic for
 /// `seed`. `std` scales the conv-weight Gaussian.

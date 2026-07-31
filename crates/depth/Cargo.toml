@@ -14,6 +14,7 @@ brain-capability.workspace = true
 brain-gpu-core.workspace = true
 brain-backend-cpu.workspace = true
 brain-vision.workspace = true
+brain-imaging.workspace = true
 brain-model.workspace = true
 brain-paramstore.workspace = true
 brain-optim.workspace = true

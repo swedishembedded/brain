@@ -40,55 +40,6 @@ pub fn target_size(w0: u32, h0: u32, input: u32) -> (u32, u32) {
     (make_divisible(h0 as f32 * scale, 32), make_divisible(w0 as f32 * scale, 32))
 }
 
-/// Bilinear resize of an interleaved-RGB HWC `[h0*w0*3]` image to `th × tw`,
-/// `align_corners=false` (`half_pixel`), matching the reference's `cv2` /
-/// `F.interpolate`.
-fn resize_hwc(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
-    let mut out = vec![0f32; (tw * th * 3) as usize];
-    let sx = w0 as f32 / tw as f32;
-    let sy = h0 as f32 / th as f32;
-    // Row-parallel: each output row only reads `src` and writes its own chunk.
-    backend_cpu::par::rows_mut(&mut out, (tw * 3) as usize, |y, row| {
-        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, h0 as f32 - 1.0);
-        let (y0, ty) = (fy.floor() as u32, fy - fy.floor());
-        let y1 = (y0 + 1).min(h0 - 1);
-        for x in 0..tw {
-            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, w0 as f32 - 1.0);
-            let (x0, tx) = (fx.floor() as u32, fx - fx.floor());
-            let x1 = (x0 + 1).min(w0 - 1);
-            for c in 0..3u32 {
-                let p = |xx: u32, yy: u32| src[((yy * w0 + xx) * 3 + c) as usize];
-                let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
-                let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
-                row[(x * 3 + c) as usize] = top * (1.0 - ty) + bot * ty;
-            }
-        }
-    });
-    out
-}
-
-/// Bilinear resize of a single-channel `[h0*w0]` map to `th × tw`.
-fn resize_map(src: &[f32], w0: u32, h0: u32, tw: u32, th: u32) -> Vec<f32> {
-    let mut out = vec![0f32; (tw * th) as usize];
-    let sx = w0 as f32 / tw as f32;
-    let sy = h0 as f32 / th as f32;
-    backend_cpu::par::rows_mut(&mut out, tw as usize, |y, row| {
-        let fy = ((y as f32 + 0.5) * sy - 0.5).clamp(0.0, h0 as f32 - 1.0);
-        let (y0, ty) = (fy.floor() as u32, fy - fy.floor());
-        let y1 = (y0 + 1).min(h0 - 1);
-        for x in 0..tw {
-            let fx = ((x as f32 + 0.5) * sx - 0.5).clamp(0.0, w0 as f32 - 1.0);
-            let (x0, tx) = (fx.floor() as u32, fx - fx.floor());
-            let x1 = (x0 + 1).min(w0 - 1);
-            let p = |xx: u32, yy: u32| src[(yy * w0 + xx) as usize];
-            let top = p(x0, y0) * (1.0 - tx) + p(x1, y0) * tx;
-            let bot = p(x0, y1) * (1.0 - tx) + p(x1, y1) * tx;
-            row[x as usize] = top * (1.0 - ty) + bot * ty;
-        }
-    });
-    out
-}
-
 /// A model built for one target size, plus its input buffer.
 struct Built {
     th: u32,
@@ -156,7 +107,7 @@ impl<'g> Predictor<'g> {
 
         // Resize to (th, tw), pack HWC -> CHW (channel-parallel: each channel
         // plane strides through `resized` independently).
-        let resized = resize_hwc(hwc, w0, h0, tw, th);
+        let resized = imaging::resize_bilinear_hwc(hwc, 3, w0, h0, tw, th);
         let hw = (th * tw) as usize;
         let mut chw = vec![0f32; 3 * hw];
         {
@@ -187,7 +138,7 @@ impl<'g> Predictor<'g> {
         let b = self.built.borrow();
         let b = b.as_ref().unwrap();
         let depth_t = self.gpu.read(b.model.out(), (th * tw) as usize);
-        resize_map(&depth_t, tw, th, w0, h0)
+        imaging::resize_bilinear_hwc(&depth_t, 1, tw, th, w0, h0)
     }
 
     /// Whether a `begin` is awaiting its `finish`.

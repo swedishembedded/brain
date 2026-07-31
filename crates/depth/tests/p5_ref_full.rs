@@ -10,30 +10,14 @@ use depth::{import, Predictor, ZipConfig};
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 
-fn read_ppm(p: &str) -> (Vec<f32>, u32, u32) {
-    let d = std::fs::read(p).unwrap();
-    assert_eq!(&d[..2], b"P6");
-    // parse header: P6\nW H\n255\n
-    let mut i = 2; let mut nums = vec![];
-    while nums.len() < 3 {
-        while d[i].is_ascii_whitespace() { i += 1; }
-        let s = i;
-        while !d[i].is_ascii_whitespace() { i += 1; }
-        nums.push(std::str::from_utf8(&d[s..i]).unwrap().parse::<u32>().unwrap());
-    }
-    i += 1;
-    let (w, h) = (nums[0], nums[1]);
-    let hwc: Vec<f32> = d[i..].iter().map(|&b| b as f32 / 255.0).collect();
-    (hwc, w, h)
-}
-
 #[test]
 fn full_pipeline_matches_reference() {
     let (Ok(ppm), Ok(refb), Ok(pth)) = (
         std::env::var("NATIVE_PPM"), std::env::var("REF_FULL_BIN"), std::env::var("ZIPDEPTH_NPU_PTH"),
     ) else { eprintln!("SKIP"); return; };
 
-    let (hwc, w, h) = read_ppm(&ppm);
+    let img = imaging::load(&ppm).unwrap();
+    let (hwc, w, h) = (img.to_hwc_unit(), img.w, img.h);
     let cfg = ZipConfig { upsample_unfold: false, ..ZipConfig::base() };
     let gpu = Gpu::new_cpu(depth::net::PIPELINES);
     let init: HashMap<String, Vec<f32>> = import::load(&pth, &cfg).unwrap();
