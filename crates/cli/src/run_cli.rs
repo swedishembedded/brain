@@ -68,6 +68,22 @@ pub fn run_serve(args: &[String]) {
     // Global model directory scanned at startup for the served-model catalog
     // (`--models-dir`, else BRAIN_MODELS_DIR / XDG default; see model_dir::resolve).
     let mut models_dir: Option<String> = None;
+    // HTTP inference APIs (`--anthropic|--openai|--openrouter [PORT]`), each on its own
+    // localhost port with a per-provider key generated at startup. All share the one
+    // executor (with D-Bus, if also selected). `--api-keys-out FILE` writes the keys as
+    // JSON for scripted clients / the e2e test.
+    let (mut anthropic, mut openai, mut openrouter): (Option<u16>, Option<u16>, Option<u16>) =
+        (None, None, None);
+    let mut api_keys_out: Option<String> = None;
+    // Optional PORT immediately following an API flag (else the provider default).
+    let take_port = |args: &[String], i: &mut usize, default: u16| -> u16 {
+        if let Some(p) = args.get(*i + 1).and_then(|s| s.parse::<u16>().ok()) {
+            *i += 1;
+            p
+        } else {
+            default
+        }
+    };
 
     let mut i = 0;
     while i < args.len() {
@@ -118,6 +134,13 @@ pub fn run_serve(args: &[String]) {
                 i += 1;
                 models_dir = args.get(i).cloned();
             }
+            "--anthropic" => anthropic = Some(take_port(args, &mut i, 8787)),
+            "--openai" => openai = Some(take_port(args, &mut i, 8788)),
+            "--openrouter" => openrouter = Some(take_port(args, &mut i, 8789)),
+            "--api-keys-out" => {
+                i += 1;
+                api_keys_out = args.get(i).cloned();
+            }
             other => eprintln!("brain run: ignoring unknown flag {other:?}"),
         }
         i += 1;
@@ -125,8 +148,18 @@ pub fn run_serve(args: &[String]) {
 
     // The D-Bus control surface replaces the stdio loop when requested: it serves
     // every registered model over `com.swedishembedded.Brain1` until Ctrl-C.
-    if dbus {
-        return run_dbus(dbus_system, dbus_name, dbus_reserve_gb, models_dir);
+    if dbus || anthropic.is_some() || openai.is_some() || openrouter.is_some() {
+        return run_apis(RunApis {
+            dbus,
+            dbus_system,
+            dbus_name,
+            reserve_gb: dbus_reserve_gb,
+            models_dir,
+            anthropic,
+            openai,
+            openrouter,
+            api_keys_out,
+        });
     }
 
     // Build the registry: a real GPT if a checkpoint was given, else a fake echo
@@ -203,10 +236,10 @@ pub fn run_serve(args: &[String]) {
     }
 }
 
-/// Serve the D-Bus control surface (`brain serve --dbus`). Registers every model
-/// and hands the registry to `brain_dbus::serve`, which owns it for the service's
-/// lifetime. Compiled into the default build; only reached when `--dbus` is passed.
-fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64, models_dir: Option<String>) {
+/// Discover schedulable compute (GPUs/NPUs/CPU RAM, narrowed by `--device`), resolve
+/// the model directory, and build the one shared residency executor that every serving
+/// surface (D-Bus + the HTTP APIs) drives.
+fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> residency::Executor {
     // Discover the GPUs' capacity so the scheduler can budget/evict against real VRAM,
     // then narrow to what `--device` made schedulable. With no `--device` the set is
     // every device, which is exactly the "use all the hardware wisely" default.
@@ -223,7 +256,7 @@ fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64, models_dir: Opt
             let vram = (8u64 << 30).min(ram / 2).max(1 << 30);
             all_gpus = (0..n as u32).map(|i| (i, vram)).collect();
             eprintln!(
-                "brain serve --dbus: no NVIDIA GPU; budgeting {n} integrated GPU(s) at {} GB shared RAM (schedulable)",
+                "brain serve: no NVIDIA GPU; budgeting {n} integrated GPU(s) at {} GB shared RAM (schedulable)",
                 vram >> 30
             );
         }
@@ -236,9 +269,9 @@ fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64, models_dir: Opt
     let cpu_schedulable = set.map(|s| s.cpu_enabled()).unwrap_or(true);
 
     if gpus.is_empty() && !all_gpus.is_empty() {
-        eprintln!("brain serve --dbus: --device excluded every GPU; scheduling on CPU only");
+        eprintln!("brain serve: --device excluded every GPU; scheduling on CPU only");
     } else if all_gpus.is_empty() {
-        eprintln!("brain serve --dbus: no GPUs detected (nvidia-smi); serving with CPU-only budget");
+        eprintln!("brain serve: no GPUs detected (nvidia-smi); serving with CPU-only budget");
     }
     let ram = query_ram_bytes();
     let reserved = reserve_gb << 30;
@@ -257,7 +290,7 @@ fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64, models_dir: Opt
     let npu_budget = (8u64 << 30).min(ram / 2).max(1 << 30);
     let npus: Vec<(u32, u64)> = npu_indices.iter().map(|&i| (i, npu_budget)).collect();
     eprintln!(
-        "brain serve --dbus: compute {} | {} GPU(s), {} NPU(s) schedulable, {} GB reserved/card, {} GB RAM budget",
+        "brain serve: compute {} | {} GPU(s), {} NPU(s) schedulable, {} GB reserved/card, {} GB RAM budget",
         set.map(|s| s.to_string()).unwrap_or_else(|| "all".into()),
         gpus.len(),
         npus.len(),
@@ -268,19 +301,84 @@ fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64, models_dir: Opt
     // its scan appends every carded file as its own catalog entry.
     let dir = crate::model_dir::resolve(models_dir.as_deref());
     if let Some(d) = &dir {
-        eprintln!("brain serve --dbus: scanning model dir {}", d.display());
+        eprintln!("brain serve: scanning model dir {}", d.display());
     }
     let executor =
         crate::resident::build_executor(&gpus, &npus, reserved, cpu_compute_ram, dir.as_deref(), residency::Policy::default());
+    executor
+}
+
+/// Which serving surfaces to bring up and their config (see `run_apis`).
+struct RunApis {
+    dbus: bool,
+    dbus_system: bool,
+    dbus_name: Option<String>,
+    reserve_gb: u64,
+    models_dir: Option<String>,
+    anthropic: Option<u16>,
+    openai: Option<u16>,
+    openrouter: Option<u16>,
+    api_keys_out: Option<String>,
+}
+
+/// Build the one shared executor and bring up the requested surfaces: D-Bus
+/// (`com.swedishembedded.Brain1`) and/or the HTTP inference APIs (Anthropic / OpenAI /
+/// OpenRouter), each on its own localhost port with a key generated at startup. When
+/// D-Bus and an HTTP surface both run, D-Bus gets its own thread (it owns a tokio
+/// runtime) and the HTTP servers own the main thread; a single surface blocks directly.
+fn run_apis(a: RunApis) {
+    let executor = build_serving_executor(a.reserve_gb, a.models_dir);
     let served: Vec<&str> = executor.manifests().iter().map(|m| m.model.as_str()).collect();
-    eprintln!("brain serve --dbus: models: {}", served.join(", "));
-    let opts = brain_dbus::DbusOpts {
-        bus: if system { brain_dbus::BusKind::System } else { brain_dbus::BusKind::Session },
-        name: name.unwrap_or_else(|| "com.swedishembedded.Brain1".to_string()),
-    };
-    if let Err(e) = brain_dbus::serve(executor, opts) {
-        eprintln!("brain serve --dbus: {e}");
-        std::process::exit(1);
+    eprintln!("brain serve: models: {}", served.join(", "));
+
+    let http = a.anthropic.is_some() || a.openai.is_some() || a.openrouter.is_some();
+
+    if a.dbus {
+        let opts = brain_dbus::DbusOpts {
+            bus: if a.dbus_system { brain_dbus::BusKind::System } else { brain_dbus::BusKind::Session },
+            name: a.dbus_name.unwrap_or_else(|| "com.swedishembedded.Brain1".to_string()),
+        };
+        let e = executor.clone();
+        if http {
+            std::thread::spawn(move || {
+                if let Err(err) = brain_dbus::serve(e, opts) {
+                    eprintln!("brain serve --dbus: {err}");
+                }
+            });
+        } else {
+            if let Err(err) = brain_dbus::serve(e, opts) {
+                eprintln!("brain serve --dbus: {err}");
+                std::process::exit(1);
+            }
+            return;
+        }
+    }
+
+    if http {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        let local = |port: u16| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let mut surfaces = Vec::new();
+        if let Some(p) = a.anthropic {
+            surfaces.push(apiserve::Surface::generate(apiserve::Provider::Anthropic, local(p)));
+        }
+        if let Some(p) = a.openai {
+            surfaces.push(apiserve::Surface::generate(apiserve::Provider::OpenAI, local(p)));
+        }
+        if let Some(p) = a.openrouter {
+            surfaces.push(apiserve::Surface::generate(apiserve::Provider::OpenRouter, local(p)));
+        }
+        for s in &surfaces {
+            s.announce();
+        }
+        if let Some(path) = &a.api_keys_out {
+            if let Err(e) = apiserve::write_keys(&surfaces, std::path::Path::new(path)) {
+                eprintln!("brain serve: --api-keys-out {path}: {e}");
+            }
+        }
+        if let Err(e) = apiserve::serve_all(executor, surfaces) {
+            eprintln!("brain serve: {e}");
+            std::process::exit(1);
+        }
     }
 }
 

@@ -36,7 +36,7 @@ use tower_http::trace::TraceLayer;
 pub use catalog::{api_caps, CapSet};
 pub use error::{ApiError, Kind};
 pub use state::{AppState, JobRegistry};
-pub use surface::{Provider, Surface};
+pub use surface::{write_keys, Provider, Surface};
 
 use residency::Executor;
 
