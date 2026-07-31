@@ -694,6 +694,20 @@ per-scenario table and the findings so far.
      this bullet in sync.
   A model that trains and passes parity but cannot be discovered, scheduled, batched,
   and driven over D-Bus is **incomplete**.
+- **Every change to an API surface triggers a full API security audit.** Any change
+  to `crates/apiserve` (the HTTP providers) OR `crates/dbus` (the D-Bus surface) —
+  a route, handler, auth path, error shape, admission policy, or exposed method —
+  requires auditing the **whole** API against **`docs/api-security-audit.md`** (authn/
+  authz, input/DoS bounds, admission/backpressure, cancel-on-disconnect, SSRF/egress,
+  error hygiene, transport), not just the changed handler. Run the pass with the
+  `security-review` skill; fix findings before the change is done. These surfaces are
+  internet-reachable when bound, so all request input is hostile.
+- **API specs: at most two sources of truth.** brain's code (what it implements) and
+  the **vendored upstream OpenAPI specs** (`crates/apiserve/tests/specs/`, a cached
+  copy of what providers support) — validated against each other by the jsonschema
+  conformance tests. There is **no** separate hand-maintained "brain spec." Refresh
+  the vendored specs from upstream with the **`api-sync`** command (`.claude/commands/
+  api-sync.md`), then adapt brain to any drift and re-green the conformance tests.
 - **No absolute paths in source — anywhere.** Never hardcode a machine-specific
   absolute path (`/data/…`, `/home/…`, `/tmp/…`) in `crates/**`: not in code, not
   in a test `const`, not as a runtime default, not in a doc comment. Two homes for
