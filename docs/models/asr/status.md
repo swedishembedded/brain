@@ -101,11 +101,37 @@ JIT — see the serve log). Use Qwen3-ASR for accuracy/offline transcription, Ne
 for streaming/real-time.
 
 
+## NPU path (OpenVINO) — DONE (2026-07-31)
+
+Both encoders run on the Intel NPU as fixed-shape ONNX graphs, parity-gated to
+**cosine 1.0** vs the device encoders (`crates/npu/tests/{nemotron,qwen_asr}_encoder.rs`):
+
+- **Nemotron**: `crates/npu/src/nemotron_topology.rs` builds the whole FastConformer
+  encoder (subsampling + 24 macaron Conformer blocks with Transformer-XL rel-pos
+  attention + GLU conv + projectors), `mel → pooler`. `nemotron_export::export`
+  writes it with an external-data sidecar; `NemotronNpuInstance` compiles it on the
+  NPU and runs mel → pooler there, host frontend + RNN-T decode unchanged.
+- **Qwen3-ASR**: `crates/npu/src/qwen_asr_topology.rs` builds the audio-tower head
+  (24 windowed ViT blocks + ln_post + projector); `QwenAsrNpuInstance` runs it on
+  the NPU (conv stem + Qwen decoder stay on the device backend).
+- Wiring: `nemotron::encoder::transcribe_with_encoder` /
+  `qwen_asr::caps::transcribe_with_head` closure seams (host frontend + decode,
+  NPU-supplied encoder). Both residents advertise `MemCost::with_npu` and branch to
+  the NPU instance on `Device::Npu`, so `brain serve --dbus --device …,npu` places
+  ASR on the NPU; the response `device` field reports where the encoder ran. The
+  encoder graphs are cached per shape, and `asr_npu_cfg` sets an OpenVINO
+  `cache_dir` (`BRAIN_OV_CACHE`) so the heavy first compile of the 0.6 B / 1.7 B-tower
+  encoder is written once and reloaded on later runs.
+
+Correct-by-construction: the encoder graphs are bit-parity to the device path and
+everything around them (frontend, RNN-T, Qwen decoder) is unchanged, so the NPU
+path yields the same tokens. Caveat: OpenVINO's first compile of the full 0.6 B
+Conformer is minutes-scale (the model-cache makes it one-time).
+
 ## Not yet
 
 - Qwen3-ASR variable-length serving (fixed window today; probe-per-length or a padded
   KV scheme would generalise it).
-- NPU path (OpenVINO Conformer export); Vulkan runs bit-exact but is submit-bound.
 - Streaming-session survival across residency eviction (state is dropped with the
   instance today; serialising `StreamState` would allow swap-out mid-stream).
 

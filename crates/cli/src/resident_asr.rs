@@ -28,9 +28,13 @@ use npu::openvino::{Feed, NpuConfig, NpuDevice, NpuGraph};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 /// OpenVINO config for the ASR encoders: prefer the NPU, fall back to CPU-OpenVINO
-/// where no NPU is present (the graph is device-precision-independent).
+/// where no NPU is present (the graph is device-precision-independent). A model
+/// cache dir is set so the heavy first compile of the 0.6 B / 1.7 B-tower encoder
+/// is written once and reloaded on later runs (`BRAIN_OV_CACHE` overrides).
 fn asr_npu_cfg() -> NpuConfig {
-    NpuConfig { device: NpuDevice::Npu, allow_fallback: true, ..Default::default() }
+    let cache = std::env::var("BRAIN_OV_CACHE").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir().join("brain_ov_cache"));
+    let _ = std::fs::create_dir_all(&cache);
+    NpuConfig { device: NpuDevice::Npu, allow_fallback: true, cache_dir: Some(cache), ..Default::default() }
 }
 
 // ---------------------------------------------------------------- Nemotron
