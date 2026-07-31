@@ -524,6 +524,8 @@ pub const PRELU_BWD: &str = include_str!("../wgsl/prelu_bwd.wgsl");
 pub const PRELU_BWD_WG: &str = include_str!("../wgsl/prelu_bwd_wg.wgsl");
 /// `wgsl/quant_pack.wgsl`
 pub const QUANT_PACK: &str = include_str!("../wgsl/quant_pack.wgsl");
+/// `wgsl/quick_gelu.wgsl`
+pub const QUICK_GELU: &str = include_str!("../wgsl/quick_gelu.wgsl");
 /// `wgsl/region_copy.wgsl`
 pub const REGION_COPY: &str = include_str!("../wgsl/region_copy.wgsl");
 /// `wgsl/rel_shift.wgsl`
@@ -955,6 +957,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("prelu_bwd", PRELU_BWD),
     ("prelu_bwd_wg", PRELU_BWD_WG),
     ("quant_pack", QUANT_PACK),
+    ("quick_gelu", QUICK_GELU),
     ("region_copy", REGION_COPY),
     ("rel_shift", REL_SHIFT),
     ("rel_shift_bwd", REL_SHIFT_BWD),
