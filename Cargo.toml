@@ -60,6 +60,10 @@ default-members = [
     "crates/wm-genie",
     "crates/vision",
     "crates/imaging",
+    "crates/sam2",
+    "crates/facenet",
+    "crates/vqgan",
+    "crates/clip",
     "crates/depth",
     "crates/splat",
     "crates/mirror",
@@ -132,6 +136,10 @@ brain-wm-diamond = { path = "crates/wm-diamond" }
 brain-wm-genie = { path = "crates/wm-genie" }
 brain-vision = { path = "crates/vision" }
 brain-imaging = { path = "crates/imaging" }
+brain-sam2 = { path = "crates/sam2" }
+brain-facenet = { path = "crates/facenet" }
+brain-vqgan = { path = "crates/vqgan" }
+brain-clip = { path = "crates/clip" }
 brain-depth = { path = "crates/depth" }
 brain-splat = { path = "crates/splat" }
 brain-mirror = { path = "crates/mirror" }

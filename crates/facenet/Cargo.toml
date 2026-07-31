@@ -1,0 +1,18 @@
+[package]
+name = "brain-facenet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Face recognition: SCRFD detection, 5-point similarity alignment and the ArcFace IResNet-100 embedding — the visual analogue of crates/speaker."
+
+[lib]
+name = "facenet"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-vision.workspace = true
+brain-imaging.workspace = true
+brain-checkpoint.workspace = true

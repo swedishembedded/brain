@@ -1,0 +1,18 @@
+[package]
+name = "brain-sam2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SAM 2 promptable segmentation: Hiera trunk, FPN neck, prompt encoder and the two-way mask decoder (image path)."
+
+[lib]
+name = "sam2"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-vision.workspace = true
+brain-imaging.workspace = true
+brain-checkpoint.workspace = true

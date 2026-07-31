@@ -390,6 +390,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-clip"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-vision",
+]
+
+[[package]]
 name = "brain-codec"
 version = "0.1.0"
 dependencies = [
@@ -480,6 +492,18 @@ version = "0.1.0"
 dependencies = [
  "brain-forecast",
  "serde_json",
+]
+
+[[package]]
+name = "brain-facenet"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-vision",
 ]
 
 [[package]]
@@ -905,6 +929,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-sam2"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-vision",
+]
+
+[[package]]
 name = "brain-seq2seq"
 version = "0.1.0"
 dependencies = [
@@ -1001,6 +1037,18 @@ dependencies = [
  "brain-model",
  "brain-paramstore",
  "bytemuck",
+]
+
+[[package]]
+name = "brain-vqgan"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-vision",
 ]
 
 [[package]]

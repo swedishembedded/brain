@@ -1,0 +1,18 @@
+[package]
+name = "brain-clip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLIP-family text and image encoders: CLIP-L, OpenCLIP-bigG and EVA-CLIP behind one config-driven graph."
+
+[lib]
+name = "clip"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-vision.workspace = true
+brain-imaging.workspace = true
+brain-checkpoint.workspace = true
