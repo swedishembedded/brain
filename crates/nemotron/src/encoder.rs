@@ -463,7 +463,6 @@ impl Encoder {
     /// on each utterance alone.
     pub fn encode_batch(&self, items: &[(&[f32], u32, u32)], prompt_id: usize) -> Vec<(Vec<f32>, u32)> {
         let cfg = &self.cfg;
-        let c = cfg.hidden as usize;
         // 1. subsampling per item; collect row spans (offset, frames, valid).
         let mut spans: Vec<(usize, usize, usize)> = Vec::with_capacity(items.len());
         let mut h: Vec<f32> = Vec::new();

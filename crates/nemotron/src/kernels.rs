@@ -89,23 +89,23 @@ pub fn lstm_gates_bwd(
     steps.push(g.step(k, &[dh, dc_next, pre, c_prev, c_out, d_pre, d_cprev], &[rows, h], rows * h));
 }
 
-/// Pipeline for the on-device FF fwd/bwd gradcheck (proves the device training path
-/// with the real backward kernels).
-fn ff_bwd_pipelines() -> &'static [(&'static str, &'static str)] {
-    &[
-        ("matmul", kernels::MATMUL),         // 0
-        ("silu", kernels::SILU),             // 1
-        ("matmul_dx", kernels::MATMUL_DX),   // 2
-        ("silu_bwd", kernels::SILU_BWD),     // 3
-        ("matmul_dw", kernels::MATMUL_DW),   // 4
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use data::rng::Rng;
     use gpu_core::f;
+
+    /// Pipeline for the on-device FF fwd/bwd gradcheck (proves the device training
+    /// path with the real backward kernels).
+    fn ff_bwd_pipelines() -> &'static [(&'static str, &'static str)] {
+        &[
+            ("matmul", kernels::MATMUL),       // 0
+            ("silu", kernels::SILU),           // 1
+            ("matmul_dx", kernels::MATMUL_DX), // 2
+            ("silu_bwd", kernels::SILU_BWD),   // 3
+            ("matmul_dw", kernels::MATMUL_DW), // 4
+        ]
+    }
 
     /// On-device Conformer feed-forward (Linear→SiLU→Linear) forward AND backward,
     /// gradchecked against central finite differences of the device forward — the
