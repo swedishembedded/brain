@@ -37,6 +37,10 @@ use crate::st::{ModelCard, CONFIG_KEY};
 enum Inner {
     St(MmapSafetensors),
     Gguf(MmapGguf),
+    /// A sharded HF checkpoint (`model.safetensors.index.json` +
+    /// `model-K-of-N.safetensors`): one mmap per shard file + which shard owns
+    /// each tensor name. See [`WeightReader::open_hf_dir`].
+    StSharded(Vec<MmapSafetensors>, HashMap<String, usize>),
 }
 
 /// A lazy, mmap-backed reader over a safetensors or GGUF weight file. Decodes
@@ -62,8 +66,76 @@ impl WeightReader {
         let (order, shapes) = match &inner {
             Inner::St(m) => shape_index(m.names(), |n| m.shape(n).map(usize_to_u64)),
             Inner::Gguf(m) => shape_index(m.names(), |n| m.shape(n).map(usize_to_u64)),
+            Inner::StSharded(..) => unreachable!("open() constructs only St/Gguf; see open_hf_dir"),
         };
         Ok(WeightReader { inner, order, shapes })
+    }
+
+    /// Open a **foreign** (non-brain) HuggingFace checkpoint directory: a
+    /// single `model.safetensors`, or a sharded `model.safetensors.index.json`
+    /// + `model-K-of-N.safetensors` set. Each shard is mmapped (header only) —
+    /// `tensor`/`for_each` still decode exactly one tensor at a time, from
+    /// whichever shard owns it, so an importer streaming through a sharded
+    /// multi-GB checkpoint never holds more than one shard's mmap header +
+    /// one tensor's fp32 expansion. Unlike [`open`](Self::open), `config()`/
+    /// `card()` return empty/`None` here — a foreign checkpoint has no
+    /// `brain.config`/`brain.card`; read the source's own `config.json`
+    /// separately (as every importer already does) and build a
+    /// [`ModelCard`] for the *output*.
+    pub fn open_hf_dir(dir: &Path) -> io::Result<WeightReader> {
+        let index_path = dir.join("model.safetensors.index.json");
+        if !index_path.exists() {
+            // No index: exactly one *.safetensors file (mirrors
+            // crate::safetensors::read_model_dir's single-file fallback).
+            let mut candidates: Vec<std::path::PathBuf> = std::fs::read_dir(dir)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "safetensors"))
+                .collect();
+            candidates.sort();
+            let path = candidates
+                .into_iter()
+                .next()
+                .ok_or_else(|| inval(format!("no .safetensors file in {}", dir.display())))?;
+            let path = path.to_str().ok_or_else(|| inval("non-utf8 shard path".to_string()))?;
+            return Self::open(path);
+        }
+
+        let idx_bytes = std::fs::read(&index_path)?;
+        let idx: Value = serde_json::from_slice(&idx_bytes).map_err(|e| inval(format!("bad index.json: {e}")))?;
+        let weight_map = idx["weight_map"]
+            .as_object()
+            .ok_or_else(|| inval("index.json: missing weight_map object".to_string()))?;
+
+        // Unique shard filenames, sorted for a deterministic shard index
+        // (matches read_model_dir's determinism).
+        let shard_files: std::collections::BTreeSet<String> = weight_map
+            .values()
+            .map(|v| v.as_str().map(str::to_string).ok_or_else(|| inval("index.json: weight_map value is not a string".to_string())))
+            .collect::<io::Result<_>>()?;
+        let shard_files: Vec<String> = shard_files.into_iter().collect();
+        let shard_of: HashMap<&str, usize> = shard_files.iter().enumerate().map(|(i, f)| (f.as_str(), i)).collect();
+
+        let mut readers = Vec::with_capacity(shard_files.len());
+        for f in &shard_files {
+            readers.push(MmapSafetensors::open(dir.join(f)).map_err(inval)?);
+        }
+
+        let mut owner: HashMap<String, usize> = HashMap::with_capacity(weight_map.len());
+        let mut shapes = HashMap::with_capacity(weight_map.len());
+        let mut order = Vec::with_capacity(weight_map.len());
+        for (name, file_val) in weight_map {
+            let file = file_val.as_str().unwrap(); // validated above
+            let si = shard_of[file];
+            owner.insert(name.clone(), si);
+            if let Some(s) = readers[si].shape(name) {
+                shapes.insert(name.clone(), usize_to_u64(s));
+            }
+            order.push(name.clone());
+        }
+        order.sort(); // deterministic regardless of the index JSON's own key order
+
+        Ok(WeightReader { inner: Inner::StSharded(readers, owner), order, shapes })
     }
 
     /// Tensor names, in the underlying file's order.
@@ -81,6 +153,9 @@ impl WeightReader {
         match &self.inner {
             Inner::St(m) => m.config(),
             Inner::Gguf(m) => m.config(),
+            // A foreign checkpoint's config is its own config.json, read
+            // separately by the caller -- see open_hf_dir's doc.
+            Inner::StSharded(..) => Value::Null,
         }
     }
 
@@ -89,6 +164,7 @@ impl WeightReader {
         match &self.inner {
             Inner::St(m) => m.card(),
             Inner::Gguf(m) => Some(m.model_card()),
+            Inner::StSharded(..) => None,
         }
     }
 
@@ -96,7 +172,7 @@ impl WeightReader {
     /// Always `None` for safetensors (whose tokenizer is a sibling file).
     pub fn tokenizer(&self) -> Option<crate::gguf::GgufTokenizer> {
         match &self.inner {
-            Inner::St(_) => None,
+            Inner::St(_) | Inner::StSharded(..) => None,
             Inner::Gguf(m) => m.tokenizer(),
         }
     }
@@ -108,6 +184,7 @@ impl WeightReader {
         match &self.inner {
             Inner::St(m) => m.tensor_f32(name),
             Inner::Gguf(m) => m.tensor(name).map(|r| r.expect("gguf dequant")),
+            Inner::StSharded(readers, owner) => readers[*owner.get(name)?].tensor_f32(name),
         }
     }
 
@@ -567,5 +644,85 @@ mod tests {
         // Opening allocated far less than the declared tensor (no blob copy).
         assert!(peak < (huge * 4) as usize / 100, "open allocated {peak}");
         std::fs::remove_file(&p).ok();
+    }
+
+    // ---- open_hf_dir: sharded + single-file foreign checkpoints ----
+
+    /// A one-tensor F32 safetensors byte buffer (mirrors
+    /// crate::safetensors::tests::one_tensor_bytes).
+    fn one_tensor_bytes(name: &str, vals: &[f32]) -> Vec<u8> {
+        let hdr = serde_json::json!({
+            name: {"dtype": "F32", "shape": [vals.len()], "data_offsets": [0, vals.len() * 4]},
+        });
+        let hb = serde_json::to_vec(&hdr).unwrap();
+        let mut buf = (hb.len() as u64).to_le_bytes().to_vec();
+        buf.extend_from_slice(&hb);
+        for v in vals {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        buf
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("brain-weightio-hfdir-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn open_hf_dir_sharded_matches_eager_read_model_dir() {
+        let dir = scratch_dir("sharded");
+        std::fs::write(dir.join("model-00001-of-00002.safetensors"), one_tensor_bytes("a", &[1.0, 2.0])).unwrap();
+        std::fs::write(dir.join("model-00002-of-00002.safetensors"), one_tensor_bytes("b", &[3.0, 4.0, 5.0])).unwrap();
+        std::fs::write(
+            dir.join("model.safetensors.index.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "metadata": {"total_size": 20},
+                "weight_map": {"a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let eager = crate::safetensors::read_model_dir(&dir).unwrap();
+        let mut eager_map: HashMap<String, Vec<f32>> = HashMap::new();
+        for t in eager {
+            eager_map.insert(t.name, t.data);
+        }
+
+        let streamed = WeightReader::open_hf_dir(&dir).unwrap();
+        assert_eq!(streamed.shape("a"), Some([2u64].as_slice()));
+        assert_eq!(streamed.shape("b"), Some([3u64].as_slice()));
+        assert_eq!(streamed.tensor("a").unwrap(), eager_map["a"]);
+        assert_eq!(streamed.tensor("b").unwrap(), eager_map["b"]);
+        // Config/card are intentionally empty for a foreign checkpoint.
+        assert_eq!(streamed.config(), Value::Null);
+        assert!(streamed.card().is_none());
+
+        let mut seen: HashMap<String, Vec<f32>> = HashMap::new();
+        streamed.for_each(|n, _, data| {
+            seen.insert(n.to_string(), data);
+        });
+        assert_eq!(seen, eager_map);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn open_hf_dir_single_file_no_index() {
+        let dir = scratch_dir("single");
+        std::fs::write(dir.join("model.safetensors"), one_tensor_bytes("w", &[9.0, 8.0])).unwrap();
+
+        let streamed = WeightReader::open_hf_dir(&dir).unwrap();
+        assert_eq!(streamed.tensor("w").unwrap(), vec![9.0, 8.0]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn open_hf_dir_missing_reports_a_clean_error() {
+        let dir = scratch_dir("empty");
+        assert!(WeightReader::open_hf_dir(&dir).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
