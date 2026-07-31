@@ -230,7 +230,16 @@ pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
         let extra: Vec<&String> = brain.keys().collect();
         return Err(format!("import: {} mapped HF tensors unused: {extra:?}", brain.len()));
     }
-    checkpoint::save(out_path, cfg.to_json(), &out);
+    // A card so this file auto-serves from the global model directory (P2) with
+    // no BRAIN_GLM_WEIGHTS env var — id defaults to the output filename stem,
+    // matching how the model dir keys catalog entries.
+    let param_count: u64 = out.iter().map(|(_, shape, _)| shape.iter().product::<u64>()).sum();
+    let id = Path::new(out_path).file_stem().and_then(|s| s.to_str()).unwrap_or("glm");
+    let mut card = checkpoint::st::ModelCard::new(id, "glm");
+    card.context_length = Some(cfg.block_size as u64);
+    card.param_count = Some(param_count);
+    checkpoint::st::save_safetensors(out_path, &out, &cfg.to_json(), Some(&card))
+        .map_err(|e| format!("write {out_path}: {e}"))?;
     eprintln!("imported {} tensors -> {out_path} ({dropped} HF tensors dropped: indexer/MTP/tied)", out.len());
     Ok(())
 }

@@ -135,11 +135,21 @@ pub fn import_with_block(hf_dir: &str, out_path: &str, block_size: Option<u32>) 
 
     // Emit in param_list order (coverage already validated by brain_init_from_hf).
     let mut out: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
+    let mut param_count: u64 = 0;
     for (name, numel) in cfg.param_list() {
         let data = init.get(&name).expect("coverage validated").clone();
+        param_count += numel as u64;
         out.push((name, vec![numel as u64], data));
     }
-    checkpoint::save(out_path, cfg.to_json(), &out);
+    // A card so this file auto-serves from the global model directory (P2) with
+    // no BRAIN_QWEN_WEIGHTS env var — id defaults to the output filename stem,
+    // matching how the model dir keys catalog entries.
+    let id = Path::new(out_path).file_stem().and_then(|s| s.to_str()).unwrap_or("qwen");
+    let mut card = checkpoint::st::ModelCard::new(id, "qwen");
+    card.context_length = Some(cfg.block_size as u64);
+    card.param_count = Some(param_count);
+    checkpoint::st::save_safetensors(out_path, &out, &cfg.to_json(), Some(&card))
+        .map_err(|e| format!("write {out_path}: {e}"))?;
     eprintln!("imported {} tensors -> {out_path}", out.len());
     Ok(())
 }
