@@ -146,32 +146,128 @@ to fix *selection*, not add copies:
   profile says the gather dominates.
 - *LayerNorm2d* (channels-first): compose `nchw_nlc` → `layernorm_rows` →
   `nlc_nchw` first. `layernorm_rows` is the coalesced cooperative kernel
-  (2.3–9.1× on a P40); a naive fused `layernorm2d` would likely be *slower*, and
-  one-thread-per-row is the documented coalescing trap.
+  (2.3–9.1× on a P40); one-thread-per-row is the documented coalescing trap.
 
 Every new kernel: `@workgroup_size(64)`, ≤8 storage buffers, fp32, no atomics/
 subgroups/f16, then `make kernels-regen`.
+
+#### 3.1.1 Measured — both decisions, phase 0
+
+Both measurements were **run**, not asserted, and both are pinned by a test that
+re-runs them. A methodology note that invalidated the first attempt at the
+LayerNorm2d number and must be observed by anything timing this engine:
+`WgpuBackend::submit` with an empty clear list only appends to `pending` — it
+encodes and queues nothing. A timing loop of bare `submit`s measures host-side
+bind-group construction and reports it as device bandwidth (the first run showed
+**377 GB/s on a ~346 GB/s card**, and a permute cost that did not vary with size
+— both signatures of a host cost). Every timed region must be bracketed by
+`Gpu::poll_wait()`, which flushes the pending pass and blocks.
+
+**LayerNorm2d — compose vs fuse.** `crates/vision/tests/imaging_blocks.rs::layernorm2d_composition_cost`,
+Tesla P40 (Vulkan), release, synchronised, warm-ups drained:
+
+| shape | bytes | total | 2 permutes | permute | norm |
+|---|---|---|---|---|---|
+| 1×96×64×64 | 1.5 MiB | 0.104 ms | 0.077 ms (74.5 %) | 81.3 GB/s | 0.027 ms |
+| 1×896×32×32 | 3.5 MiB | 0.212 ms | 0.143 ms (67.4 %) | 102.8 GB/s | 0.069 ms |
+| 1×448×64×64 | 7.0 MiB | 0.349 ms | 0.260 ms (74.6 %) | 112.8 GB/s | 0.088 ms |
+| 1×224×128×128 | 14.0 MiB | 0.816 ms | 0.700 ms (85.9 %) | 83.9 GB/s | 0.115 ms |
+| 1×112×256×256 | 28.0 MiB | 3.000 ms | 2.474 ms (82.5 %) | 47.5 GB/s | 0.526 ms |
+
+**The measurement does not support the prediction it was asked to test.** The
+two permutes are 67–86 % of the composition and run at **14–33 % of the roof**,
+not at it. The mechanism explains why: `nchw_nlc` gathers
+`x[(n*C+ch)*HW + l]` with `ch` varying fastest, so a warp's 32 loads land `H*W`
+floats apart; `nlc_nchw` is its mirror. **Both permutes already pay the sector
+amplification that was the reason to reject a fused kernel**, and it worsens with
+`H*W` (47.5 GB/s at `HW=65536` vs 102.8 at `HW=1024`). The row-oriented
+LayerNorm between them is the only coalesced stage.
+
+*Decision:* composition is what shipped and is the right **first**
+implementation — correct, no new kernel, one `*_rows` selection site. But a
+fused `layernorm2d` would trade ~6 passes (4 of them strided) for ~2 strided
+passes, so it is **not ruled out** and this measurement must not be cited as if
+it ruled it out. Adding it is its own task: `docs/kernel-checklist.md`,
+gradcheck, `make kernels-regen`.
+
+**Windowed attention — gather vs a dedicated kernel.**
+`crates/model/tests/vit_windowed.rs::measure_gather_vs_windowed_attention`,
+same box, 10 iterations, `perm/blk` = permutation ÷ block (not ÷ their sum):
+
+| config | perm | attn | q_pool | block | perm/blk |
+|---|---|---|---|---|---|
+| 64×64×256 / w8 | 0.158 ms | 4.687 ms | 0.234 ms | 44.094 ms | **0.36 %** |
+| 128×128×112 / w8 | 0.153 ms | 16.116 ms | 0.253 ms | 39.718 ms | **0.39 %** |
+
+*Decision:* the gather does **not** dominate — it is under half a percent of the
+block. `embed` + `row_scatter` compose the partition and its exact inverse, so
+**no `window_partition` / `window_reverse` kernel is added.** Revisit only if a
+profile at a materially different shape moves this above a few percent.
 
 ### 3.2 Shared blocks (the reuse story)
 
 New capability belongs in existing shared homes, not per-model copies:
 
-- **`model::vit`** — extend with windowed-span attention and `q_pool` so Hiera,
-  Swin (BiRefNet) and DaViT (Florence-2) all compose from it. It already has
-  QK-norm, 2D-RoPE tables, span-chunked attention and a full backward.
-- **`vision::blocks`** — add `ConvTranspose`, generic `MaxPool`, `LayerNorm2d`
-  and the ConvNeXt `CXBlock` next to the existing spec-driven `Conv`/`SPPF`.
+- **`model::vit`** — **DONE.** `WindowPlan` (regular + Swin-shifted `axis_cuts`,
+  verified against the roll algebra on both axes), windowed-span attention, and
+  `q_pool`/`q_pool_bwd`, so Hiera, Swin (BiRefNet) and DaViT (Florence-2) all
+  compose from it. Zero new kernels: the partition is `embed` + `row_scatter`
+  (exact inverses) and `q_pool` is `nlc_nchw` → `maxpool2d` → `nchw_nlc`.
+  Two alignment constraints are load-bearing and now enforced rather than
+  assumed — `min_storage_buffer_offset_alignment` is 256 B, so per-span `probs`
+  slabs are padded to 64 floats and the `q`/`kv` row offsets moved into the
+  kernels' own `q_off`/`k_off`/`v_off` Params instead of being buffer slices.
+  `attn_apply_cross` still has **no output-offset Param**, so `ctx` stays sliced
+  and a span's `q0*C` must be 64-aligned (always true for `C % 64 == 0`);
+  `WindowPlan::ctx_bindable(dim)` lets a model check up front. Adding `out_off`
+  to those three kernels is a deliberate kernel task (their ABI is shared with
+  `seq2seq` and `fastvlm`), not a phase-0 edit.
+- **`vision::blocks`** — **DONE.** `ConvTranspose`, generic `MaxPool`,
+  `LayerNorm2d` and the ConvNeXt `CXBlock` sit next to the existing spec-driven
+  `Conv`/`SPPF`, each with its backward and a finite-difference test. `SPPF`
+  composes the new `MaxPool` (one max-pool dispatch site in the crate).
+  Still owed for finetuning: `CXBlock` does not model **DropPath** (identity at
+  eval, so parity is unaffected).
 - **`crates/facenet`** *(new)* — ArcFace IResNet-100 + SCRFD detection + the
   5-point similarity-transform alignment. This mirrors `crates/speaker`
   (ECAPA-TDNN) exactly: an embedding model consumed by a generative one. The
   request already noted the pattern is familiar; make it structurally identical.
 - **`crates/vqgan`** *(new, small)* — the VQ encoder/decoder/codebook shared by
   CodeFormer, reusing `crates/vae`'s conv/attention blocks and `vq_argmin`.
-- **`crates/imaging`** *(new)* — the image substrate currently scattered across
-  `depth` (viz), `yolo` (letterbox), `capture` (YUYV) and `zimage`: decode/encode,
-  resize/crop/pad/letterbox, mask algebra (union, feather, dilate, composite),
-  tiling for >1 MP work, and colour conversion. Consolidating this is a
+- **`crates/imaging`** *(new)* — **DONE.** The image substrate that was ~60 sites
+  across 24 crates: decode/encode, a device `Ctx` (resize/crop/pad/affine over
+  the kernels), mask algebra (union, feather, dilate, composite, IoU), tiling for
+  >1 MP work, colour conversion, and the letterbox. Consolidating this is a
   precondition for a *pipeline* rather than four models with private image code.
+
+  **The rule the crate is held to: being the home means the old copy is gone,
+  not shadowed.** A consolidation crate that only *adds* a definition raises the
+  copy count. Each item therefore has no predecessor, or its predecessor now
+  re-exports it. Post-migration census: host bilinear resize **6 → 1**
+  (`imaging::host::resize_bilinear_hwc`, channel count a parameter), letterbox
+  definitions **1**, host CHW/HWC/RGB8 converters **3, all in `imaging::pixels`**,
+  P6 header writers outside `events`/`imaging` **0**, `IMAGENET_MEAN`/`STD`
+  **1 pair**. `crates/capture` lost `convert.rs` and is V4L2-only again.
+  `imaging` has **7 reverse dependencies** (`yolo`, `npu`, `mirror`, `depth`,
+  `wm-display`, `cli`, plus itself in the workspace list) — not a crate with no
+  consumers.
+
+  Deliberately **not** migrated, each for a stated numeric reason, listed in
+  `crates/imaging/src/lib.rs`: `data::{imageset,gen_detect}` (a real dependency
+  cycle — `imaging → vision → model → data`), `mirror`'s PIL/torch bicubic
+  variants (parity-gated, and not `resize_bicubic.wgsl`'s `a = −0.75`
+  no-antialias function), `zimage::pipeline::{feather_mask,downsample_mask}`
+  (different float summation order, no in-tree inpaint metric to gate the ramp),
+  `zimage::caps::build_outpaint_canvas` (needs a `pad_mode` word on
+  `pad2d.wgsl`), and `fastvlm::caps::pad_resize_chw` (pad-then-resize is a
+  different function).
+
+  Two open items carried forward, both recorded at their call sites:
+  survey §6.2 — `brain depth calib` letterboxes while `depth::predict` does an
+  aspect-preserving bilinear resize; the migration preserved this bit-for-bit so
+  the INT8 scales did not move, and fixing it needs its own quantized-accuracy
+  gate. And `events::ppm` stays the P6 definition (`imaging::codec` re-exports
+  it) because moving it would give the wasm build a JPEG decoder it cannot use.
 
 ### 3.3 Training / finetuning (explicit requirement)
 
@@ -225,7 +321,7 @@ Each phase ends at a validation gate and is independently committable.
 
 | Phase | Content | Gate |
 |---|---|---|
-| **0. Foundations** | kernels 1–5 + `crates/imaging` + `vision::blocks` additions + `model::vit` windowed spans | `make kernels-regen`, `make test`, per-kernel parity vs a CPU reference |
+| **0. Foundations** ✅ **DONE** | kernels 1–5 + `crates/imaging` + `vision::blocks` additions + `model::vit` windowed spans | `make kernels-regen`, `make test`, per-kernel parity vs a CPU reference — **met**, see below |
 | **1. SAM 2** | Hiera trunk → FPN neck → prompt encoder → two-way mask decoder; image path only (no video memory bank) | parity vs dumped goldens; `check_sam2`; capability + D-Bus + example |
 | **2. Face recognition** | `crates/facenet`: SCRFD + IResNet-100 + alignment | cosine ≥0.999 vs insightface goldens; `check_arcface` |
 | **3. CodeFormer** | `crates/vqgan` + restorer, identity-fidelity dial `w` | parity goldens; `check_codeformer` |
@@ -235,6 +331,33 @@ Each phase ends at a validation gate and is independently committable.
 | **4c. ControlNet** | `crates/controlnet`: backbone-agnostic `ControlAdapter` over named injection points; SDXL impl first, FLUX impl second; depth conditioning fed by brain's own ZipDepth | residual parity vs diffusers ControlNet; `check_controlnet` |
 | **5. Identity** | PuLID adapter on the phase-4 FLUX.1 backbone **and** InstantID (phase-4b/4c SDXL + IP-Adapter-FaceID), both fed by phase-2 ArcFace embeddings | ID cosine vs reference for each; `check_pulid`, `check_instantid`; measure the two against each other on shared fixtures |
 | **6. Pipeline** | `imaging.pipeline` action + matting (BiRefNet) + Florence-2 text→box + Real-ESRGAN tail | end-to-end "change only X" on a fixture set |
+
+#### Phase 0 gate — what was actually run
+
+Tesla P40 (wgpu/Vulkan) and `BRAIN_DEVICE=cpu`, release. Workspace `cargo build`
+and `cargo build --release`: **zero rustc warnings** (the two `cargo:warning`
+lines are build-script notes from `brain-vulkan`/`brain-npu` about an absent
+glslc / OpenVINO and are not code warnings). Absolute-path gate
+`grep -rnE '"/(data|home|tmp|opt|mnt|root)/' crates` empty.
+
+| suite | result |
+|---|---|
+| `brain-imaging` | 41 lib + 3 `color` + 19 `device_ops` — 63 passed, 0 failed (device ops re-run on the P40) |
+| `brain-vision` | 8 lib + 13 `imaging_blocks` — 21 passed, 0 failed |
+| `brain-model` | 54 lib + 8 `vit_windowed` + 2 `vit_block_gradcheck` + 3 `vit_bwd_kernels` + 2 `chunked_attn` + rest of the integration set — 0 failed |
+| `brain-gradcheck` | 14 lib; `maxpool2d_kernels` 10, `grid_sample_kernels` 12, `prelu_kernels` 10, `resize_bicubic_kernels` 9, `convtr2d_kernels` 8, `attn_bidir_fd` 3, `attn_cross_fd` 3 — 0 failed |
+| migrated crates | `yolo` 105, `depth` 112, `npu` 47, `wm-display` 17, `capture` 4, `capability` 9, `mirror` 10, `backend-cpu` 21, `cli` 8 — 0 failed |
+| vit consumers | `fastvlm` 31, `moondream` 34, `qwenvl` 38, `qwen-asr` 3 lib tests — 0 failed |
+
+Known and carried into phase 1, none of them blocking: `ImagingKernelIds`
+re-implements `vision::ids::ConvKernelIds`'s name→index resolver (11 of 16 names
+overlap; the fix is a free `vision::ids::need()` both call — a tidiness defect,
+both are pure lookups over the same array); `imaging` depends transitively on
+`events` → `forecast` for a 40-line PPM parser; `imaging::Ctx` submits eagerly
+and returns owned buffers, so phase 1's `resize_bicubic` inside SAM 2's
+pos-embed path must dispatch directly rather than through `Ctx`; and
+`fastvlm/src/encoder.rs` still hand-rolls the per-span cross-attention backward
+trio that `model::vit` now owns.
 
 **Phase 4 is the long pole and it is also disk- and bandwidth-bound** (34 GB at
 ~1.5 MB/s ≈ 6 h). Phases 0–3 need no Kontext weights, so they proceed in
