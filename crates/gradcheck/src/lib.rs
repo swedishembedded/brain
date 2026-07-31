@@ -354,9 +354,8 @@ pub fn check_moe(seed: u64) -> Report {
     // aux_coef/z_coef = 0: the FD check differentiates the model's scalar
     // `forward()`, which is the cross-entropy only (the load-balancing aux loss
     // and router z-loss are folded into the router gradient, not the returned
-    // scalar — matching `validate`'s CE-only comparison vs the PyTorch
-    // reference). Zeroing them makes the analytic router grad consistent with the
-    // CE-only FD; the aux/z terms are gated separately by `train::validate`.
+    // scalar). Zeroing them makes the analytic router grad consistent with the
+    // CE-only FD.
     let cfg = Config {
         vocab: 23,
         block_size: 12,

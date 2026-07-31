@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Shared weight container: `[u64 LE json_len][json header][f32 LE blob]`,
-//! tensor offsets in f32 units. Used for inference weights, training
-//! checkpoints, and the PyTorch golden-reference / batch-stream files.
+//! Shared weight container, backed by safetensors (see [`st`]). Used for
+//! inference weights and training checkpoints. The public `Container` API is
+//! preserved: `header` carries `{"config": ...}` and every tensor has role `""`
+//! (safetensors has no role concept). Reads/writes delegate to [`st`].
 
 use std::collections::HashMap;
-#[cfg(not(target_arch = "wasm32"))]
-use std::io::Write;
 
 use serde_json::Value;
 
@@ -51,29 +50,15 @@ impl Container {
 /// Parse a weight container from an in-memory byte slice. This is the portable
 /// core: native `load` reads the file then calls this; the browser entry point
 /// (`web::run_inference`) passes the fetched bytes directly, since there is no
-/// `std::fs` in a browser.
+/// `std::fs` in a browser. Backed by safetensors; every tensor gets role `""`.
 pub fn parse(bytes: &[u8]) -> Container {
-    let jlen = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
-    let header: Value =
-        serde_json::from_str(std::str::from_utf8(&bytes[8..8 + jlen]).expect("bad header utf8"))
-            .expect("bad header json");
-    let data = &bytes[8 + jlen..];
-    let read = |offset: usize, numel: usize| -> Vec<f32> {
-        data[offset * 4..(offset + numel) * 4]
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect()
-    };
-    let mut tensors = Vec::new();
-    for t in header["tensors"].as_array().expect("tensors array") {
-        let name = t["name"].as_str().unwrap().to_string();
-        let role = t["role"].as_str().unwrap_or("").to_string();
-        let vals = read(
-            t["offset"].as_u64().unwrap() as usize,
-            t["numel"].as_u64().unwrap() as usize,
-        );
-        tensors.push(LoadedTensor { name, role, data: vals });
-    }
+    let m = st::parse_safetensors(bytes).expect("parse safetensors");
+    let header = serde_json::json!({ "config": m.config() });
+    let tensors = m
+        .tensors
+        .into_iter()
+        .map(|(name, data)| LoadedTensor { name, role: String::new(), data })
+        .collect();
     Container { header, tensors }
 }
 
@@ -84,49 +69,11 @@ pub fn load(path: &str) -> Container {
 }
 
 /// Write a checkpoint: `config` is the model config object, `tensors` is an
-/// ordered list of (name, shape, data). Offsets/numel are filled in here.
-///
-/// The write is atomic: bytes go to a sibling `<path>.tmp` which is then renamed
-/// over `path`. A crash (or the GPU device loss that periodic checkpointing
-/// guards against) mid-write therefore never truncates or corrupts an existing
-/// good checkpoint — readers see either the old file or the complete new one.
+/// ordered list of (name, shape, data). Delegates to [`st::save_safetensors`],
+/// which writes atomically (tmp + rename).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save(path: &str, config: Value, tensors: &[(String, Vec<u64>, Vec<f32>)]) {
-    let mut entries = Vec::new();
-    let mut blob: Vec<f32> = Vec::new();
-    for (name, shape, data) in tensors {
-        entries.push(serde_json::json!({
-            "name": name, "shape": shape, "offset": blob.len(), "numel": data.len()
-        }));
-        blob.extend_from_slice(data);
-    }
-    let header = serde_json::json!({ "config": config, "tensors": entries });
-    let hbytes = serde_json::to_vec(&header).unwrap();
-
-    // Create the parent directory if needed so `--out some/dir/x.weights` works
-    // without a manual mkdir.
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .unwrap_or_else(|e| panic!("cannot create directory {}: {e}", parent.display()));
-        }
-    }
-
-    let tmp = format!("{path}.tmp");
-    {
-        let mut file = std::io::BufWriter::new(
-            std::fs::File::create(&tmp).unwrap_or_else(|_| panic!("cannot write {tmp}")),
-        );
-        file.write_all(&(hbytes.len() as u64).to_le_bytes()).unwrap();
-        file.write_all(&hbytes).unwrap();
-        let mut bytes: Vec<u8> = Vec::with_capacity(blob.len() * 4);
-        for v in &blob {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
-        file.write_all(&bytes).unwrap();
-        file.flush().unwrap();
-    }
-    std::fs::rename(&tmp, path).unwrap_or_else(|_| panic!("cannot finalise {path}"));
+    st::save_safetensors(path, tensors, &config, None).expect("save safetensors");
 }
 
 #[cfg(test)]

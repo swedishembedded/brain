@@ -127,23 +127,14 @@ cargo test -p brain-yolo --test p8_names dump_brain_names -- --nocapture \
   | grep -E '^(backbone|neck|head)\.' > tools/yolo_export/brain_names.txt
 ```
 
-### Output format (`.weights`)
+### Output format (safetensors)
 
-Byte-for-byte identical to `checkpoint::save` (see `crates/checkpoint/src/lib.rs`):
-
-```
-[u64 LE json_header_len][json header bytes][f32 LE blob]
-
-header = {
-  "config":  YoloConfig::yolov8n().to_json(),
-  "tensors": [ {"name", "shape":[numel], "offset", "numel"}, ... ]
-}
-```
-
-`offset`/`numel` are in **f32 units** (not bytes); tensors are concatenated in
-header order. The `role` field is omitted (defaults to `""` on read, which
-`Container::by_role("")` keys on), matching the brain writer. The activation
-dump uses `role:"act"`.
+A standard safetensors file, matching `checkpoint::save` / `checkpoint::st`
+(see `crates/checkpoint/src/st.rs`). Each brain tensor is stored 1-D (fp32) under
+its brain name; `YoloConfig::yolov8n().to_json()` goes in `__metadata__` under
+`brain.config` and is recovered via `Container::header["config"]`. Safetensors
+has no role concept, so tensors read back under role `""` (`by_role("")`); the
+activation dump likewise uses plain names.
 
 ---
 

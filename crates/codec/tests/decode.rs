@@ -58,13 +58,9 @@ fn import_consumes_every_decoder_tensor() {
     }
     let out = import_to_temp();
     let c = checkpoint::load(&out);
-    let by_name: HashMap<String, usize> = c
-        .header["tensors"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| (t["name"].as_str().unwrap().to_string(), t["numel"].as_u64().unwrap() as usize))
-        .collect();
+    // safetensors carries no role; numel comes from the loaded tensor length.
+    let by_name: HashMap<String, usize> =
+        c.tensors.iter().map(|t| (t.name.clone(), t.data.len())).collect();
 
     // Decoder-derived params (names without the `encoder.` prefix): 271 decoder
     // tensors, 2 input_proj dropped, 32 codebook tensors collapse to 16 tables

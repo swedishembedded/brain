@@ -15,7 +15,7 @@ USAGE:
     python3 export_yolov8.py --weights yolov8n.pt --out yolov8n.brain.weights
 
     # 2. (Optional) Also dump per-stage activations for the parity test, for one
-    #    fixed preprocessed 640x640 input image (role="act" tensors).
+    #    fixed preprocessed 640x640 input image (plain-named safetensors tensors).
     python3 export_yolov8.py --weights yolov8n.pt --out yolov8n.brain.weights \
         --dump-acts --image bus.jpg --acts-out yolov8n.acts.weights
 
@@ -49,19 +49,13 @@ brain Conv runs conv2d (bias-free) -> BatchNorm -> SiLU exactly like
 Ultralytics, so the BN tensors are copied straight across 1:1. ``num_batches_
 tracked`` (a scalar bookkeeping tensor) is dropped — it has no brain counterpart.
 
-OUTPUT FORMAT (byte-for-byte ``checkpoint::save``; see crates/checkpoint/src/lib.rs):
+OUTPUT FORMAT (safetensors; matches ``checkpoint::save`` / ``checkpoint::st``):
 
-    [u64 LE json_header_len][json header bytes][f32 LE blob]
-
-    header = {
-      "config":  <YoloConfig::yolov8n().to_json()>,
-      "tensors": [ {"name", "shape":[numel], "offset", "numel"}, ... ]   # role="weights" omitted
-    }
-
-    offset/numel are in **f32 units** (not bytes); the blob is the tensors
-    concatenated in header order. We match brain's writer: tensors carry a flat
-    1-element shape ``[numel]`` (model.rs `save` writes `vec![numel]`), no role
-    field (role defaults to "" on read, which `Container::by_role("")` keys on).
+    A standard safetensors file. Each brain tensor is stored 1-D (fp32) under its
+    brain name; safetensors has no role concept, so activation dumps just use
+    plain names (brain reads them back under role ""). The model config JSON is
+    placed in ``__metadata__`` under ``brain.config`` and recovered by
+    ``StModel::config`` / ``Container::header["config"]``.
 
 BYTE-COMPATIBLE (P12): brain's ``YoloConfig::yolov8n()`` is now the EXACT
 canonical Ultralytics yolov8n graph — per-stage channels
@@ -90,7 +84,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import struct
 import sys
 
 # ---------------------------------------------------------------------------
@@ -247,31 +240,19 @@ def ultra_to_brain(name: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# brain .weights writer (reimplements checkpoint::save in pure Python).
+# brain-loadable safetensors writer (matches checkpoint::st).
 # ---------------------------------------------------------------------------
 def write_brain_weights(path: str, config: dict, tensors: list[tuple[str, list[float], str]]) -> None:
-    """tensors: list of (name, flat_f32_values, role). role="" matches the
-    brain writer (model.rs save) which omits the field entirely; we emit it only
-    when non-empty so weight files stay byte-identical to ``checkpoint::save``."""
-    entries = []
-    blob = bytearray()
-    offset = 0  # f32 units
-    for name, vals, role in tensors:
-        numel = len(vals)
-        entry = {"name": name, "shape": [numel], "offset": offset, "numel": numel}
-        if role:
-            entry["role"] = role
-        entries.append(entry)
-        blob += struct.pack(f"<{numel}f", *vals)
-        offset += numel
-    header = {"config": config, "tensors": entries}
-    # serde_json default separators (", " / ": "); we don't need byte-identical
-    # JSON, only a valid header serde_json::from_str can parse. Compact is fine.
-    hbytes = json.dumps(header).encode("utf-8")
-    with open(path, "wb") as f:
-        f.write(struct.pack("<Q", len(hbytes)))
-        f.write(hbytes)
-        f.write(blob)
+    """Write a brain-loadable safetensors file. `tensors` is a list of
+    (name, flat_f32_values, role); safetensors carries no role concept, so the
+    role is dropped and every tensor is stored 1-D under its name (brain reads
+    them back under role ""). The model config JSON is placed in `__metadata__`
+    under `brain.config`, matching ``checkpoint::st`` / ``StModel::config``."""
+    import torch
+    from safetensors.torch import save_file
+
+    data = {name: torch.tensor(vals, dtype=torch.float32) for name, vals, _role in tensors}
+    save_file(data, path, metadata={"brain.config": json.dumps(config)})
 
 
 # ---------------------------------------------------------------------------
@@ -604,9 +585,11 @@ def dump_acts(weights: str, image: str, acts_out: str) -> int:
     for h in handles:
         h.remove()
 
+    # The role tag is retained in the tuple for readability but dropped on write
+    # (safetensors has no role); the Rust test reads these by plain name.
     tensors = [(name, vals, "act") for name, vals in captured]
     # Also dump the input image itself so the Rust test uploads the identical
-    # preprocessed tensor (name "input", role "act").
+    # preprocessed tensor under the name "input".
     tensors.insert(0, ("input", x.contiguous().view(-1).float().tolist(), "act"))
     write_brain_weights(acts_out, BRAIN_CONFIG, tensors)
     print(f"wrote {acts_out} ({len(tensors)} activation tensors).")

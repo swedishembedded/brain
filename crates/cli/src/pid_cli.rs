@@ -1,39 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! CLI for the PID event/effect transformer: validate / validate-stream /
-//! train / rollout. Dispatched from `main` via `moe pid <action> ...`.
+//! CLI for the PID event/effect transformer: train / rollout / profile.
+//! Dispatched from `main` via `moe pid <action> ...`.
 
 use std::collections::HashMap;
 
-use pid::{Pid, PidConfig, BOS, DECIDE, IGNORE};
+use pid::{Pid, PidConfig, BOS, DECIDE};
 use pid::data::{self as pid_data, Rng};
-
-fn map_label(v: f32) -> u32 {
-    if v < -0.5 {
-        IGNORE
-    } else {
-        v.round() as u32
-    }
-}
-
-fn max_err(a: &[f32], b: &[f32]) -> (f32, f32) {
-    let mut mae = 0.0f32;
-    let mut mre = 0.0f32;
-    for (x, y) in a.iter().zip(b.iter()) {
-        let ae = (x - y).abs();
-        mae = mae.max(ae);
-        if y.abs() > 1e-3 {
-            mre = mre.max(ae / y.abs());
-        }
-    }
-    (mae, mre)
-}
 
 pub fn run_pid(args: &[String]) {
     match args.first().map(|s| s.as_str()) {
-        Some("validate") => validate(args.get(1).map(|s| s.as_str()).unwrap_or("../pid_ref.bin")),
-        Some("stream") => validate_stream(args.get(1).map(|s| s.as_str()).unwrap_or("../pid_stream.bin")),
         Some("train") => train(&args[1..]),
         Some("rollout") => rollout(&args[1..]),
         Some("profile") => profile(&args[1..]),
@@ -42,134 +19,9 @@ pub fn run_pid(args: &[String]) {
         #[cfg(feature = "vulkan-coopmat")]
         Some("vk-matmul") => vulkan::cooperative_matmul_demo(),
         other => {
-            eprintln!("usage: moe pid <validate|stream|train|rollout|profile> ...  (got {other:?})");
+            eprintln!("usage: moe pid <train|rollout|profile> ...  (got {other:?})");
         }
     }
-}
-
-/// Single-step parity gate vs the PyTorch reference.
-fn validate(path: &str) {
-    let c = checkpoint::load(path);
-    let cfg = PidConfig::from_json(&c.header["config"]);
-    let b = c.header["B"].as_u64().unwrap() as u32;
-    let t = c.header["T"].as_u64().unwrap() as u32;
-    let init = c.by_role("init");
-    let grad = c.by_role("grad");
-    let updated = c.by_role("updated");
-    let opt = &c.header["opt"];
-    let lr = opt["lr"].as_f64().unwrap() as f32;
-    let wd = opt["weight_decay"].as_f64().unwrap() as f32;
-
-    let batch_x = c.find("batch_x", "data").expect("batch_x");
-    let batch_y = c.find("batch_y", "data").expect("batch_y");
-    let xs: Vec<u32> = batch_x.iter().map(|v| v.round() as u32).collect();
-    let ys: Vec<u32> = batch_y.iter().map(|&v| map_label(v)).collect();
-
-    let model = Pid::new(cfg.clone(), b, t, &init);
-    model.set_batch(&xs, &ys);
-
-    let ce = model.forward();
-    println!("loss: rust_ce={:.6}  py_ce={:.6}", ce, c.header["losses"]["ce"].as_f64().unwrap());
-
-    if std::env::var("PID_DUMP").is_ok() {
-        let r0 = model.read_res0();
-        println!("rust res0[0..6] = {:?}", &r0[0..6]);
-        let pw = model.read_weight("pos.weight");
-        println!("rust pos.weight[0..6] = {:?}", &pw[0..6]);
-        let tw = model.read_weight("tok.weight");
-        let bos = 257usize * 32;
-        println!("rust tok.weight[257][0..6] = {:?}", &tw[bos..bos + 6]);
-    }
-    if let Some(ref_logits) = c.find("forward_logits", "logits") {
-        let r = model.read_logits();
-        let (mae, mre) = max_err(&r, ref_logits);
-        println!("\n== forward logits ==\nmax abs logit error = {:.3e}  max rel = {:.3e}", mae, mre);
-        if std::env::var("PID_DUMP").is_ok() {
-            println!("rust logits[0..6] = {:?}", &r[0..6]);
-            println!("ref  logits[0..6] = {:?}", &ref_logits[0..6]);
-        }
-    }
-
-    model.backward();
-    println!("\n== gradient check (Rust vs PyTorch autograd) ==");
-    let (mut g_mae, mut g_mre, mut worst) = (0.0f32, 0.0f32, String::new());
-    for (name, _) in model.ps.params.iter() {
-        let r = model.read_grad(name);
-        let (mae, mre) = max_err(&r, &grad[name]);
-        if mae > g_mae {
-            g_mae = mae;
-            worst = name.clone();
-        }
-        g_mre = g_mre.max(mre);
-    }
-    println!("max abs grad error = {:.3e} (worst: {})", g_mae, worst);
-    println!("max rel grad error = {:.3e}", g_mre);
-
-    model.adamw_step(1, lr, wd, Some(1.0), 1.0);
-    println!("\n== weight check after one AdamW(+clip) step ==");
-    let (mut w_mae, mut w_mre) = (0.0f32, 0.0f32);
-    for (name, _) in model.ps.params.iter() {
-        let r = model.read_weight(name);
-        let (mae, mre) = max_err(&r, &updated[name]);
-        w_mae = w_mae.max(mae);
-        w_mre = w_mre.max(mre);
-    }
-    println!("max abs weight error = {:.3e}", w_mae);
-    println!("max rel weight error = {:.3e}", w_mre);
-
-    let ok = g_mae < 2e-3 && w_mae < 2e-4;
-    println!("\n{}", if ok { "VALIDATION PASSED" } else { "VALIDATION FAILED" });
-}
-
-/// Fixed-data multi-step check: replay the exact PyTorch batch stream and
-/// compare the loss curve + final weights (no RNG divergence).
-fn validate_stream(path: &str) {
-    let c = checkpoint::load(path);
-    let cfg = PidConfig::from_json(&c.header["config"]);
-    let b = c.header["B"].as_u64().unwrap() as u32;
-    let t = c.header["T"].as_u64().unwrap() as u32;
-    let steps = c.header["steps"].as_u64().unwrap() as usize;
-    let opt = &c.header["opt"];
-    let lr = opt["lr"].as_f64().unwrap() as f32;
-    let wd = opt["weight_decay"].as_f64().unwrap() as f32;
-    let init = c.by_role("init");
-    let final_w = c.by_role("final");
-    let py_losses: Vec<f32> = c.header["losses"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
-
-    let xs_all = c.find("batch_x", "data").expect("batch_x");
-    let ys_all = c.find("batch_y", "data").expect("batch_y");
-    let span = (b * t) as usize;
-
-    let model = Pid::new(cfg.clone(), b, t, &init);
-    println!("replaying {steps} steps (B={b}, T={t})");
-    let mut max_loss_err = 0.0f32;
-    for step in 0..steps {
-        let xs: Vec<u32> = xs_all[step * span..(step + 1) * span].iter().map(|v| v.round() as u32).collect();
-        let ys: Vec<u32> = ys_all[step * span..(step + 1) * span].iter().map(|&v| map_label(v)).collect();
-        model.set_batch(&xs, &ys);
-        model.zero_grads();
-        let loss = model.forward();
-        model.backward();
-        model.adamw_step((step + 1) as u32, lr, wd, Some(1.0), 1.0);
-        let e = (loss - py_losses[step]).abs();
-        max_loss_err = max_loss_err.max(e);
-        if step < 3 || step % 50 == 0 || step + 1 == steps {
-            println!("step {:4} | rust {:.5} | py {:.5} | |d| {:.2e}", step + 1, loss, py_losses[step], e);
-        }
-    }
-    println!("\nmax per-step loss error = {:.3e}", max_loss_err);
-    let (mut w_mae, mut worst) = (0.0f32, String::new());
-    for (name, _) in model.ps.params.iter() {
-        let r = model.read_weight(name);
-        let (mae, _) = max_err(&r, &final_w[name]);
-        if mae > w_mae {
-            w_mae = mae;
-            worst = name.clone();
-        }
-    }
-    println!("max abs final-weight error = {:.3e} (worst: {})", w_mae, worst);
-    let ok = max_loss_err < 5e-3 && w_mae < 1e-2;
-    println!("\n{}", if ok { "STREAM VALIDATION PASSED" } else { "STREAM VALIDATION FAILED" });
 }
 
 struct TrainCfg {
@@ -410,26 +262,6 @@ fn profile(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn label_mapping() {
-        assert_eq!(map_label(-100.0), IGNORE);
-        assert_eq!(map_label(-1.0), IGNORE);
-        assert_eq!(map_label(0.0), 0);
-        assert_eq!(map_label(40.0), 40);
-        assert_eq!(map_label(80.0), 80);
-    }
-
-    #[test]
-    fn max_err_abs_and_rel() {
-        let (mae, mre) = max_err(&[1.0, 2.0, 3.0], &[1.0, 2.1, 3.0]);
-        assert!((mae - 0.1).abs() < 1e-6);
-        assert!((mre - 0.1 / 2.1).abs() < 1e-6);
-        // small reference magnitudes are excluded from the relative metric
-        let (mae2, mre2) = max_err(&[0.0005], &[0.0001]);
-        assert!((mae2 - 0.0004).abs() < 1e-9);
-        assert_eq!(mre2, 0.0);
-    }
 
     #[test]
     fn batch_planner_budget_and_divisibility() {

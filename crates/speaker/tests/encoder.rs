@@ -48,14 +48,11 @@ fn shared_weights() -> &'static str {
     })
 }
 
-/// `<u64 count><f32 data>` little-endian dump reader.
+/// Raw little-endian `f32` array (the whole file is data), matching the kronos
+/// golden convention. Length comes from the file size; no prefix or meta needed.
 fn read_dump(path: &str) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap_or_else(|_| panic!("read {path}"));
-    let count = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
-    bytes[8..8 + count * 4]
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect()
+    bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
 }
 
 #[test]
@@ -66,12 +63,8 @@ fn import_consumes_every_speaker_tensor() {
     }
     let out = shared_weights();
     let c = checkpoint::load(out);
-    let names: Vec<String> = c.header["tensors"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| t["name"].as_str().unwrap().to_string())
-        .collect();
+    // safetensors carries no role, so every tensor loads under role "".
+    let names: Vec<String> = c.tensors.iter().map(|t| t.name.clone()).collect();
     // 76 speaker_encoder.* tensors, prefix stripped, none duplicated.
     assert_eq!(names.len(), 76, "expected 76 tensors, got {}", names.len());
     let map = c.by_role("");
@@ -110,8 +103,8 @@ fn parity_against_reference_dump() {
         eprintln!("skip: checkpoint not present");
         return;
     }
-    let mel_path = format!("{DUMP_DIR}/mel.bin");
-    let emb_path = format!("{DUMP_DIR}/embedding.bin");
+    let mel_path = format!("{DUMP_DIR}/mel.f32");
+    let emb_path = format!("{DUMP_DIR}/embedding.f32");
     if !std::path::Path::new(&mel_path).exists() || !std::path::Path::new(&emb_path).exists() {
         eprintln!("skip: reference dump not present");
         return;

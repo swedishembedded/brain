@@ -349,7 +349,7 @@ Direct binary — the model is selected by the command:
 ```bash
 ./target/release/brain <cmd> [opts]
 # data gpt qwen glm tts wm yolo depth mirror splat npu federated bench forecast
-# caps|capabilities  do  run|serve  pid  gradcheck  validate
+# caps|capabilities  do  run|serve  pid  gradcheck
 # train | eval | generate           (these three are the bare MoE model)
 ```
 

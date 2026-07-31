@@ -24,15 +24,16 @@ fn repo_path(rel: &str) -> String {
 }
 
 
+// Raw little-endian arrays (the whole file is data; length = file size), matching
+// the kronos golden convention. Shapes come from context (T = tokens.len(),
+// vocab is fixed), so no length prefix or side-car meta is needed.
 fn read_u32(path: &str) -> Option<Vec<u32>> {
     let b = std::fs::read(path).ok()?;
-    let n = u64::from_le_bytes(b[0..8].try_into().unwrap()) as usize;
-    Some((0..n).map(|i| u32::from_le_bytes(b[8 + i * 4..12 + i * 4].try_into().unwrap())).collect())
+    Some(b.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
 fn read_f32(path: &str) -> Option<Vec<f32>> {
     let b = std::fs::read(path).ok()?;
-    let n = u64::from_le_bytes(b[0..8].try_into().unwrap()) as usize;
-    Some((0..n).map(|i| f32::from_le_bytes(b[8 + i * 4..12 + i * 4].try_into().unwrap())).collect())
+    Some(b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
 }
 
 #[test]
@@ -43,7 +44,7 @@ fn talker_logits_match_reference() {
         return;
     }
     let (Some(tokens), Some(ref_logits)) =
-        (read_u32(&format!("{DUMP}/tokens.bin")), read_f32(&format!("{DUMP}/logits.bin")))
+        (read_u32(&format!("{DUMP}/tokens.u32")), read_f32(&format!("{DUMP}/logits.f32")))
     else {
         eprintln!("skip: talker golden dump not present");
         return;

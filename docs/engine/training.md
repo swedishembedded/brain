@@ -58,32 +58,21 @@ Backward: `ce_grad`, `matmul_dx`, `matmul_dw`, `rms_inv`, `rmsnorm_dx`,
 `expert_counts`, `router_bwd`, `rope_train_bwd`, `attn_bwd_d{scores,v,q,k}`,
 `emb_bwd`, `adamw`.
 
-## Correctness: validated against PyTorch
+## Correctness: finite-difference gradient check
 
-`train_ref.py` builds the model with a fixed seed and a deterministic batch,
-runs one forward+backward+AdamW, and dumps init weights, the batch,
-**per-parameter gradients**, and post-step weights. `moe validate` loads that,
-runs one Rust step, and compares:
+Backprop correctness is gated by `make gradcheck` (the `brain-gradcheck` crate):
+it perturbs each parameter and compares the analytic gradient against a central
+finite-difference estimate of the loss, with no external reference needed.
 
 ```bash
-python train_ref.py --out train_ref.bin --B 4 --T 16 --seed 0   # repo root, PYTHONPATH=.
-./moe-rs/target/release/moe validate train_ref.bin
-```
-
-Result (capacity dropping disabled so the dense top-k path matches exactly,
-router noise / dropout off):
-
-```
-loss: rust_ce=4.216326   py_ce=4.216325
-max abs grad error   = 3.4e-8     <- floating-point roundoff
-max rel grad error   = 1.3e-5
-max abs weight error = 4.5e-6     (after one AdamW step)
-VALIDATION PASSED
+make gradcheck
 ```
 
 Every gradient — cross-entropy, all matmuls, RMSNorm, SwiGLU, the top-k router
 *including* the load-balancing aux loss and the router z-loss, attention, RoPE,
-and the tied embedding — matches PyTorch autograd to fp32 precision.
+and the tied embedding — is checked to finite-difference precision. (The earlier
+PyTorch-parity `moe validate` / `train_ref.py` path has been retired in favour of
+this self-contained check.)
 
 ## Notes / limits
 

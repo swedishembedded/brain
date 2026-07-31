@@ -26,7 +26,7 @@ use crate::model::{DecoderLm, Scorer, TrainConfig};
 /// MoE-specific layout choices the benchmark's depth/width/heads don't carry.
 /// Kept here (not on `TrainConfig`, which stays architecture-neutral) so every
 /// benchmark scores MoE at the same sparse shape. 4 experts / top-2 is the
-/// established MoE default (matches `moe::train::train` and the validate ref);
+/// established MoE default (matches `moe::train::train`);
 /// `d_ff = 2 * d_model` keeps a single expert's FFN comparable to GPT's `4*d`
 /// dense MLP split across the routed experts.
 const N_EXPERTS: u32 = 4;

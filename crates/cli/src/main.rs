@@ -5,7 +5,7 @@
 //! The model is chosen by the subcommand (no global "model type" flag).
 //!
 //!   * `gpt`        — dense GPT decoder baseline (nanogpt parity).
-//!   * `generate`/`train`/`eval`/`validate` — the sparse-MoE Transformer.
+//!   * `generate`/`train`/`eval` — the sparse-MoE Transformer.
 //!   * `federated`  — sharded-MoE shard split/assemble.
 //!   * `data`       — dataset generation; `gradcheck` — backprop correctness gate.
 //!   * `pid`        — event/effect control Transformer (the WebGPU demo).
@@ -161,7 +161,6 @@ SPARSE MoE
   brain train [--steps N --batch-size B --block-size T --lr X --out F]
   brain generate --weights F [--prompt 1,2,3,4 --max-new N --temperature X --top-k K]
   brain eval     --weights F [--samples N]
-  brain validate [ref.bin]                # gradient parity gate (if a ref file exists)
 
 FEDERATED MoE (train experts separately, then assemble)
   brain federated split    <base.weights> <out_dir>
@@ -257,7 +256,7 @@ CAPABILITIES (typed actions; one dispatch path for CLI + event API)
 
 OTHER
   brain gradcheck                          # finite-difference backprop check (GPT)
-  brain pid <validate|stream|train|rollout|profile> ...
+  brain pid <train|rollout|profile> ...
   brain help
 
 EXAMPLES
@@ -617,13 +616,6 @@ fn main() {
         Some("do") => std::process::exit(caps_cli::run_do(&argv[2..])),
         Some("run") | Some("serve") => run_cli::run_serve(&argv[2..]),
         Some("pid") => pid_cli::run_pid(&argv[2..]),
-        Some("validate") => {
-            let path = argv
-                .get(2)
-                .map(|s| s.as_str())
-                .unwrap_or("scratchpad/weights/train_ref.bin");
-            moe::train::validate(path);
-        }
         Some("train") => moe::run_train(&argv[2..]),
         Some("eval") => moe::run_eval(&argv[2..]),
         Some("generate") => moe::run_generate(),

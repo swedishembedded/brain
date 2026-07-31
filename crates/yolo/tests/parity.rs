@@ -20,9 +20,9 @@
 //! When `YOLO_PARITY_WEIGHTS` is unset or the file is missing the test prints a
 //! skip notice and returns OK (so plain `cargo test` is green everywhere).
 //!
-//! `YOLO_PARITY_ACTS` (optional) is the activation dump (`role="act"`): a fixed
-//! preprocessed `input` tensor plus one tensor per backbone/neck stage and the
-//! head scale outputs, keyed by brain stage name. When present, the test feeds
+//! `YOLO_PARITY_ACTS` (optional) is the activation dump (a safetensors file): a
+//! fixed preprocessed `input` tensor plus one tensor per backbone/neck stage and
+//! the head scale outputs, keyed by brain stage name. When present, the test feeds
 //! the identical `input` and compares the brain forward's publicly-readable
 //! output (the per-scale head logits, via [`Yolo::raw_logits`]) against the
 //! dumped head-scale activations. (Finer per-internal-buffer parity needs
@@ -95,7 +95,8 @@ fn yolov8n_reference_parity() {
     });
 
     let n_in = (b * 3 * cfg.input * cfg.input) as usize;
-    let input: Vec<f32> = match acts.as_ref().and_then(|c| c.find("input", "act")) {
+    // Safetensors carries no role, so every tensor loads under role "".
+    let input: Vec<f32> = match acts.as_ref().and_then(|c| c.find("input", "")) {
         Some(v) => {
             assert_eq!(v.len(), n_in, "dumped input has wrong size");
             v.clone()
@@ -125,7 +126,7 @@ fn yolov8n_reference_parity() {
     // first branch that diverges.
     let mut first_div: Option<(String, f32)> = None;
     for (name, got) in [("head.cls", &cls), ("head.reg", &boxl)] {
-        if let Some(reference) = acts.find(name, "act") {
+        if let Some(reference) = acts.find(name, "") {
             let e = max_abs_err(got, reference);
             eprintln!("stage {name}: max_abs_err = {e:.3e}");
             if e >= TOL && first_div.is_none() {

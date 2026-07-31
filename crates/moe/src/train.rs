@@ -5,12 +5,10 @@
 //! pipeline. Mirrors `tiny_sparse_moe.py`'s training step exactly, so the Rust
 //! executable can train the model from scratch on the GPU.
 //!
-//! Two entry points:
-//!   * `validate(path)` — load the PyTorch golden reference (init weights, a
-//!     fixed batch, per-parameter grads, post-AdamW weights), run one Rust step
-//!     and report the max gradient / weight error. This is the correctness gate.
+//! Entry point:
 //!   * `train(args)`    — generate the toy corpus, init weights, and run the
 //!     optimisation loop, then save weights in the inference engine's format.
+//!     Numerical correctness is gated by the finite-difference `brain-gradcheck`.
 //!
 //! Design notes:
 //!   * fp32 only; <=5 storage buffers per kernel; single bind group. We request
@@ -84,7 +82,7 @@ const PIPELINES: &[(&str, &str)] = &[
     // target must NOT index `logits[base + target]` (an unmasked CE would read
     // out of bounds for the 0xFFFF_FFFF sentinel). Mirrors GPT/PID. With no
     // masking (count == n) these are numerically identical to the unmasked CE,
-    // so the PyTorch-parity validate + gradcheck paths are unchanged.
+    // so the gradcheck path is unchanged.
     ("ce_grad", kernels::CE_GRAD_MASKED),
     ("ce_value", kernels::CE_VALUE_MASKED),
     ("matmul_dx", kernels::MATMUL_DX),
@@ -119,7 +117,8 @@ const PIPELINES: &[(&str, &str)] = &[
 /// MoE's fixed AdamW betas/eps (the established values matched against the
 /// PyTorch reference). The unified trait [`model::Model::adamw_step`] does not
 /// thread per-call betas, so the trait path uses these; the inherent
-/// [`Trainer::adamw_step`] still accepts explicit betas for the validate path.
+/// [`Trainer::adamw_step_betas`] still accepts explicit betas for callers that
+/// need them (e.g. federated expert training).
 const MOE_BETA1: f32 = 0.9;
 const MOE_BETA2: f32 = 0.95;
 const MOE_EPS: f32 = 1e-8;
@@ -522,7 +521,7 @@ impl Trainer {
     }
 
     /// One AdamW step with MoE's fixed betas/eps and no grad clipping — the
-    /// signature the existing CLI / federated / validate callers use. `t` is the
+    /// signature the existing CLI / federated callers use. `t` is the
     /// (1-based) step index for bias correction. Delegates to the shared
     /// optimizer so the dispatch graph is cached across steps.
     pub fn adamw_step_betas(&self, t: u32, lr: f32, wd: f32, beta1: f32, beta2: f32, eps: f32) {
@@ -707,7 +706,7 @@ fn expert_id_of(name: &str) -> Option<u32> {
 }
 
 // ===========================================================================
-// CLI: `validate <ref.bin>`  and  `train [flags]`
+// CLI: `train [flags]`
 // ===========================================================================
 
 fn cfg_from_json(c: &serde_json::Value) -> Config {
@@ -725,109 +724,6 @@ fn cfg_from_json(c: &serde_json::Value) -> Config {
         aux_coef: gf("aux_loss_coef", 0.01),
         z_coef: gf("z_loss_coef", 1e-4),
     }
-}
-
-fn max_err(a: &[f32], b: &[f32]) -> (f32, f32) {
-    // returns (max abs error, max relative error over entries with |b|>1e-3)
-    let mut mae = 0.0f32;
-    let mut mre = 0.0f32;
-    for (x, y) in a.iter().zip(b.iter()) {
-        let ae = (x - y).abs();
-        mae = mae.max(ae);
-        if y.abs() > 1e-3 {
-            mre = mre.max(ae / y.abs());
-        }
-    }
-    (mae, mre)
-}
-
-pub fn validate(path: &str) {
-    let bytes = std::fs::read(path).expect("cannot read ref file");
-    let jlen = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
-    let json: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&bytes[8..8 + jlen]).unwrap(),
-    )
-    .unwrap();
-    let data = &bytes[8 + jlen..];
-    let cfg = cfg_from_json(&json["config"]);
-    let bsz = json["B"].as_u64().unwrap() as u32;
-    let t = json["T"].as_u64().unwrap() as u32;
-
-    let read_tensor = |offset: usize, numel: usize| -> Vec<f32> {
-        data[offset * 4..(offset + numel) * 4]
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .collect()
-    };
-
-    let mut init = HashMap::new();
-    let mut grad = HashMap::new();
-    let mut updated = HashMap::new();
-    let mut batch_x = Vec::new();
-    let mut batch_y = Vec::new();
-    for t in json["tensors"].as_array().unwrap() {
-        let name = t["name"].as_str().unwrap().to_string();
-        let role = t["role"].as_str().unwrap();
-        let vals = read_tensor(t["offset"].as_u64().unwrap() as usize, t["numel"].as_u64().unwrap() as usize);
-        match role {
-            "init" => { init.insert(name, vals); }
-            "grad" => { grad.insert(name, vals); }
-            "updated" => { updated.insert(name, vals); }
-            "data" if name == "batch_x" => batch_x = vals,
-            "data" if name == "batch_y" => batch_y = vals,
-            _ => {}
-        }
-    }
-
-    let opt = &json["opt"];
-    let (lr, wd) = (opt["lr"].as_f64().unwrap() as f32, opt["weight_decay"].as_f64().unwrap() as f32);
-    let (beta1, beta2, eps) = (
-        opt["beta1"].as_f64().unwrap() as f32,
-        opt["beta2"].as_f64().unwrap() as f32,
-        opt["eps"].as_f64().unwrap() as f32,
-    );
-
-    let trainer = Trainer::new(cfg, bsz, t, &init);
-    let xs: Vec<u32> = batch_x.iter().map(|v| *v as u32).collect();
-    let ys: Vec<u32> = batch_y.iter().map(|v| *v as u32).collect();
-    trainer.set_batch(&xs, &ys);
-
-    let ce = trainer.forward();
-    let total = json["losses"]["total"].as_f64().unwrap() as f32;
-    let moe = json["losses"]["moe"].as_f64().unwrap() as f32;
-    println!("loss: rust_ce={:.6}  py_ce(total-moe)={:.6}  (py total={:.6})", ce, total - moe, total);
-
-    trainer.zero_grads();
-    trainer.backward();
-    println!("\n== gradient check (Rust vs PyTorch autograd) ==");
-    let mut g_mae = 0.0f32;
-    let mut g_mre = 0.0f32;
-    let mut worst = String::new();
-    for (name, _) in trainer.ps.params.iter() {
-        let r = trainer.read_grad(name);
-        let p = &grad[name];
-        let (mae, mre) = max_err(&r, p);
-        if mae > g_mae { g_mae = mae; worst = name.clone(); }
-        g_mre = g_mre.max(mre);
-    }
-    println!("max abs grad error = {:.3e} (worst: {})", g_mae, worst);
-    println!("max rel grad error = {:.3e}", g_mre);
-
-    trainer.adamw_step_betas(1, lr, wd, beta1, beta2, eps);
-    println!("\n== weight check after one AdamW step ==");
-    let mut w_mae = 0.0f32;
-    let mut w_mre = 0.0f32;
-    for (name, _) in trainer.ps.params.iter() {
-        let r = trainer.read_weight(name);
-        let (mae, mre) = max_err(&r, &updated[name]);
-        w_mae = w_mae.max(mae);
-        w_mre = w_mre.max(mre);
-    }
-    println!("max abs weight error = {:.3e}", w_mae);
-    println!("max rel weight error = {:.3e}", w_mre);
-
-    let ok = g_mae < 2e-3 && w_mae < 2e-4;
-    println!("\n{}", if ok { "VALIDATION PASSED" } else { "VALIDATION FAILED" });
 }
 
 // ---- toy corpus + init for from-scratch training (Rust side) ----
@@ -1002,39 +898,22 @@ pub fn train_expert(args: ExpertTrainArgs) {
 }
 
 fn save_weights(trainer: &Trainer, cfg: &Config, path: &str) {
-    use std::io::Write;
-    let mut tensors = Vec::new();
-    let mut blob: Vec<f32> = Vec::new();
-    let add = |name: &str, shape: Vec<u64>, data: &[f32], tensors: &mut Vec<serde_json::Value>, blob: &mut Vec<f32>| {
-        tensors.push(serde_json::json!({
-            "name": name, "shape": shape, "offset": blob.len(), "numel": data.len()
-        }));
-        blob.extend_from_slice(data);
-    };
     let d = cfg.d_model as u64;
+    let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
     for (name, _) in trainer.ps.params.iter() {
         let data = trainer.read_weight(name);
-        add(name, vec![data.len() as u64], &data, &mut tensors, &mut blob);
+        tensors.push((name.clone(), vec![data.len() as u64], data));
     }
     // tied head expected by the inference loader
     let emb = trainer.read_weight("token_emb.weight");
-    add("lm_head.weight", vec![cfg.vocab as u64, d], &emb, &mut tensors, &mut blob);
+    tensors.push(("lm_head.weight".to_string(), vec![cfg.vocab as u64, d], emb));
 
-    let header = serde_json::json!({
-        "config": {
-            "vocab_size": cfg.vocab, "block_size": cfg.block_size, "n_layers": cfg.n_layers,
-            "d_model": cfg.d_model, "n_heads": cfg.n_heads, "n_experts": cfg.n_experts,
-            "top_k": cfg.top_k, "d_ff": cfg.d_ff
-        },
-        "tensors": tensors
+    let config = serde_json::json!({
+        "vocab_size": cfg.vocab, "block_size": cfg.block_size, "n_layers": cfg.n_layers,
+        "d_model": cfg.d_model, "n_heads": cfg.n_heads, "n_experts": cfg.n_experts,
+        "top_k": cfg.top_k, "d_ff": cfg.d_ff
     });
-    let hbytes = serde_json::to_vec(&header).unwrap();
-    let mut f = std::fs::File::create(path).unwrap();
-    f.write_all(&(hbytes.len() as u64).to_le_bytes()).unwrap();
-    f.write_all(&hbytes).unwrap();
-    for v in &blob {
-        f.write_all(&v.to_le_bytes()).unwrap();
-    }
+    checkpoint::save(path, config, &tensors);
 }
 
 #[cfg(test)]
