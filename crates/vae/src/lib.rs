@@ -16,6 +16,7 @@
 //! the bidirectional self-attention trio — the same primitives the DIAMOND UNet
 //! (`crates/wm-diamond`) already validates.
 
+pub mod blocks;
 pub mod config;
 pub mod decoder;
 pub mod latent;
