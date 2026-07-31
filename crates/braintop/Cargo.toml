@@ -1,0 +1,24 @@
+[package]
+name = "braintop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "braintop: a standalone btop-like TUI (and `--cli` one-shot) that renders brain's live serving state — accelerators, model residency, executor counters, in-flight requests — by subscribing to the `StatsStream` D-Bus signal (com.swedishembedded.Brain1) with a `stats_snapshot()` poll fallback. Depends only on the shared `brain-stats` types; no engine/model code."
+
+[lib]
+name = "braintop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "braintop"
+path = "src/main.rs"
+
+[dependencies]
+brain-stats.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+tokio = { workspace = true }
+futures.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
