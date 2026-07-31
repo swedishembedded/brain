@@ -81,3 +81,11 @@ pub fn is_exposed(exec: &Executor, provider: Provider, model: &str) -> bool {
 pub fn resolve_chat(exec: &Executor, model: &str) -> bool {
     exec.manifests().iter().any(|m| m.model == model && api_caps(m).chat)
 }
+
+/// Resolve an embeddings request's `model` string: is there a manifest whose
+/// `model == id` AND that advertises the embeddings capability? The `/embeddings`
+/// dispatch (the `embed` action) gates on this — an unknown or non-embeddings model
+/// is a `model_not_found`.
+pub fn resolve_embed(exec: &Executor, model: &str) -> bool {
+    exec.manifests().iter().any(|m| m.model == model && api_caps(m).embeddings)
+}

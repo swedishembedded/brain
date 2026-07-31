@@ -118,6 +118,53 @@ fn chat_executor() -> Executor {
     Executor::start(models, budgets, Policy::default())
 }
 
+/// The fixed mean-pooled vector the [`FakeEmbed`] model returns for any input.
+const FAKE_EMBED: [f32; 4] = [0.1, 0.2, 0.3, 0.4];
+
+/// A runnable fake embeddings model: `embed` returns a fixed `mean` vector plus a
+/// `tokens`/`dim` count, mirroring the LFM encoder's outcome shape. Zero-cost so it
+/// schedules on a CPU-only budget.
+struct FakeEmbed;
+struct FakeEmbedInst;
+impl ResidentModel for FakeEmbed {
+    fn manifest(&self) -> Manifest {
+        embed_manifest()
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-embed", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(FakeEmbedInst))
+    }
+}
+impl Instance for FakeEmbedInst {
+    fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        Ok(Outcome::new()
+            .set("tokens", json!(3))
+            .set("dim", json!(FAKE_EMBED.len()))
+            .set("mean", json!(FAKE_EMBED.to_vec()))
+            .blob("embeddings", Blob::new(Media::Bytes, Vec::new())))
+    }
+}
+
+/// An executor with the RUNNABLE [`FakeEmbed`] model plus the RUNNABLE [`FakeChat`]
+/// (so "non-embeddings model -> 404" can be exercised on a real chat model).
+fn embed_executor() -> Executor {
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(FakeEmbed), Arc::new(FakeChat)];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    Executor::start(models, budgets, Policy::default())
+}
+
+fn embed_app(provider: Provider) -> (Router, String) {
+    let key = "sk-brain-test-key".to_string();
+    let state = AppState::new(embed_executor(), key.clone(), provider);
+    (router(state), key)
+}
+
 fn chat_app(provider: Provider) -> (Router, String) {
     let key = "sk-brain-test-key".to_string();
     let state = AppState::new(chat_executor(), key.clone(), provider);
@@ -318,12 +365,10 @@ async fn get_model_by_id_and_404_when_not_exposed() {
 
 #[tokio::test]
 async fn embeddings_images_are_501_with_spec_valid_bodies() {
-    // Chat (and Anthropic count_tokens) are now implemented; embeddings + image
-    // generation remain 501. (provider, path)
+    // Chat, Anthropic count_tokens, and embeddings are now implemented; image
+    // generation remains 501. (provider, path)
     let cases = [
-        (Provider::OpenAI, "/v1/embeddings"),
         (Provider::OpenAI, "/v1/images/generations"),
-        (Provider::OpenRouter, "/embeddings"),
         (Provider::OpenRouter, "/images/generations"),
     ];
     for (p, path) in cases {
@@ -624,6 +669,138 @@ async fn openrouter_chat_stream_validates_and_carries_native_finish_reason() {
         }
     }
     assert!(saw_native, "final chunk must carry native_finish_reason");
+}
+
+// ------------------------------------------------------------- P9: embeddings
+
+/// OpenAI single-string input: a spec-valid `CreateEmbeddingResponse` with one
+/// float embedding, index 0, and non-zero usage.
+#[tokio::test]
+async fn openai_embeddings_single_string_validates() {
+    let (app, key) = embed_app(Provider::OpenAI);
+    let body = json!({"model": "brain-embed", "input": "hello world"});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/embeddings", &body).await;
+    assert_eq!(st, StatusCode::OK, "single-string embeddings must 200: {v}");
+    assert_valid("openai.json", "CreateEmbeddingResponse", &v);
+    assert_eq!(v["object"], "list");
+    assert_eq!(v["model"], "brain-embed");
+    let data = v["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["object"], "embedding");
+    assert_eq!(data[0]["index"], 0);
+    let emb: Vec<f64> = data[0]["embedding"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+    assert_eq!(emb.len(), 4);
+    assert!((emb[0] - 0.1).abs() < 1e-6 && (emb[3] - 0.4).abs() < 1e-6, "float embedding must match the model vector: {emb:?}");
+    assert_eq!(v["usage"]["prompt_tokens"], 3);
+    assert_eq!(v["usage"]["total_tokens"], 3);
+}
+
+/// OpenAI array-of-strings input: one `data` entry per input, indices 0..n, and
+/// usage summed across inputs.
+#[tokio::test]
+async fn openai_embeddings_array_of_strings_indices_and_usage() {
+    let (app, key) = embed_app(Provider::OpenAI);
+    let body = json!({"model": "brain-embed", "input": ["a", "b", "c"]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/embeddings", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_valid("openai.json", "CreateEmbeddingResponse", &v);
+    let data = v["data"].as_array().unwrap();
+    assert_eq!(data.len(), 3, "one embedding per input string");
+    let idx: Vec<i64> = data.iter().map(|d| d["index"].as_i64().unwrap()).collect();
+    assert_eq!(idx, vec![0, 1, 2], "indices must be request order");
+    assert_eq!(v["usage"]["prompt_tokens"], 9, "3 tokens * 3 inputs summed");
+    assert_eq!(v["usage"]["total_tokens"], 9);
+}
+
+/// `encoding_format: "base64"` yields a base64 string that decodes to the exact
+/// same floats as the float form.
+#[tokio::test]
+async fn openai_embeddings_base64_decodes_to_same_floats() {
+    let (app, key) = embed_app(Provider::OpenAI);
+    let body = json!({"model": "brain-embed", "input": "hi", "encoding_format": "base64"});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/embeddings", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let s = v["data"][0]["embedding"].as_str().expect("base64 embedding must be a string");
+    let floats = events::bytes::decode_f32(s).expect("must decode as LE-f32");
+    assert_eq!(floats, vec![0.1_f32, 0.2, 0.3, 0.4], "base64 must decode to the model vector");
+}
+
+/// `dimensions` less than the vector length truncates; greater than it is a 400.
+#[tokio::test]
+async fn openai_embeddings_dimensions_truncate_and_overflow() {
+    let (app, key) = embed_app(Provider::OpenAI);
+    // Truncate 4 -> 2.
+    let body = json!({"model": "brain-embed", "input": "hi", "dimensions": 2});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/embeddings", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_valid("openai.json", "CreateEmbeddingResponse", &v);
+    let emb: Vec<f64> = v["data"][0]["embedding"].as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect();
+    assert_eq!(emb.len(), 2, "dimensions=2 must truncate to the first 2 dims");
+    assert!((emb[0] - 0.1).abs() < 1e-6 && (emb[1] - 0.2).abs() < 1e-6);
+
+    // Too many dims -> 400.
+    let body = json!({"model": "brain-embed", "input": "hi", "dimensions": 8});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/embeddings", &body).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "dimensions > vector length must 400");
+    assert_valid("openai.json", "ErrorResponse", &v);
+}
+
+/// Unknown model -> 404; an existing non-embeddings (chat) model -> 404.
+#[tokio::test]
+async fn openai_embeddings_unknown_and_non_embed_models_are_404() {
+    let (app, key) = embed_app(Provider::OpenAI);
+    let body = json!({"model": "nope", "input": "hi"});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/embeddings", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "unknown model must 404");
+    assert_valid("openai.json", "ErrorResponse", &v);
+
+    let body = json!({"model": "brain-chat", "input": "hi"});
+    let (st, _) = post_json(&app, Provider::OpenAI, &key, "/v1/embeddings", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "a non-embeddings (chat) model must 404");
+}
+
+/// Bad bodies -> 400: malformed JSON, missing model, missing input, empty input,
+/// token-array input, and a bad encoding_format.
+#[tokio::test]
+async fn openai_embeddings_bad_bodies_are_400() {
+    let (app, key) = embed_app(Provider::OpenAI);
+    let cases: [Value; 5] = [
+        json!({"input": "hi"}),                                          // no model
+        json!({"model": "brain-embed"}),                                 // no input
+        json!({"model": "brain-embed", "input": ""}),                    // empty string
+        json!({"model": "brain-embed", "input": [1212, 318, 257]}),      // token array
+        json!({"model": "brain-embed", "input": "hi", "encoding_format": "bogus"}), // bad format
+    ];
+    for body in cases {
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/embeddings", &body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "must 400: {body}");
+        assert_valid("openai.json", "ErrorResponse", &v);
+    }
+    // Malformed JSON body.
+    let req = auth(Request::builder().method(Method::POST).uri("/v1/embeddings"), Provider::OpenAI, &key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from("{ not json"))
+        .unwrap();
+    let (st, _) = send(&app, req).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+/// OpenRouter `/embeddings` works the same (same grammar, spec-valid response).
+#[tokio::test]
+async fn openrouter_embeddings_works_the_same() {
+    let (app, key) = embed_app(Provider::OpenRouter);
+    let body = json!({"model": "brain-embed", "input": ["x", "y"]});
+    let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/embeddings", &body).await;
+    assert_eq!(st, StatusCode::OK, "openrouter embeddings must 200: {v}");
+    // The response is the OpenAI embeddings shape; validate against that schema.
+    assert_valid("openai.json", "CreateEmbeddingResponse", &v);
+    assert_eq!(v["data"].as_array().unwrap().len(), 2);
+
+    // Unknown model still 404 (OpenRouter error shape).
+    let body = json!({"model": "nope", "input": "hi"});
+    let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/embeddings", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_valid("openrouter.json", "InternalServerResponse", &v);
 }
 
 // ------------------------------------------------- P6: admission + backpressure

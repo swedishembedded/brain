@@ -33,9 +33,10 @@ async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Respons
     openai::handle_chat(state, body, true).await
 }
 
-/// `POST /embeddings` — 501 until a later phase.
-async fn embeddings(State(state): State<AppState>) -> ApiError {
-    ApiError::not_implemented(state.provider, "POST /embeddings is not implemented yet")
+/// `POST /embeddings` — the shared OpenAI embeddings handler (OpenRouter uses the
+/// identical `CreateEmbeddingRequest`/`CreateEmbeddingResponse` grammar).
+async fn embeddings(State(state): State<AppState>, body: Bytes) -> Response {
+    openai::handle_embeddings(state, body).await
 }
 
 /// `POST /images/generations` — 501 until a later phase.

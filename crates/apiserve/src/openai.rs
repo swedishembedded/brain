@@ -41,14 +41,161 @@ async fn chat_completions(State(state): State<AppState>, body: Bytes) -> Respons
     handle_chat(state, body, false).await
 }
 
-/// `POST /v1/embeddings` — 501 until a later phase.
-async fn embeddings(State(state): State<AppState>) -> ApiError {
-    ApiError::not_implemented(state.provider, "POST /embeddings is not implemented yet")
+/// `POST /v1/embeddings` — real embeddings on the OpenAI dialect (shared with
+/// OpenRouter via [`handle_embeddings`]).
+async fn embeddings(State(state): State<AppState>, body: Bytes) -> Response {
+    handle_embeddings(state, body).await
 }
 
 /// `POST /v1/images/generations` — 501 until a later phase.
 async fn images_generations(State(state): State<AppState>) -> ApiError {
     ApiError::not_implemented(state.provider, "POST /images/generations is not implemented yet")
+}
+
+/// How the embedding vector is serialized in the response.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EncodingFormat {
+    /// A JSON array of floats (OpenAI default).
+    Float,
+    /// A base64 string of the little-endian f32 bytes.
+    Base64,
+}
+
+/// A parsed `CreateEmbeddingRequest`: the resolved model, the input strings (one
+/// per requested embedding), the wire format, and an optional truncation width.
+struct EmbeddingRequest {
+    model: String,
+    inputs: Vec<String>,
+    encoding_format: EncodingFormat,
+    dimensions: Option<usize>,
+}
+
+/// Parse + validate a `CreateEmbeddingRequest`. `input` accepts a single string or
+/// an array of strings; a token-array input (array of ints, or array of int arrays)
+/// is a 400 with a clear message — brain has no tokenizer at this layer to decode
+/// it. `model` is required. `encoding_format` is `float` (default) or `base64`;
+/// `dimensions`, if given, must be a positive integer.
+fn parse_embedding_request(provider: Provider, body: &Value) -> Result<EmbeddingRequest, ApiError> {
+    let model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::invalid_request(provider, "'model' is required"))?
+        .to_string();
+
+    let inputs = match body.get("input") {
+        Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
+        Some(Value::String(_)) => return Err(ApiError::invalid_request(provider, "'input' string must not be empty")),
+        Some(Value::Array(a)) if a.is_empty() => return Err(ApiError::invalid_request(provider, "'input' array must not be empty")),
+        Some(Value::Array(a)) => {
+            if a.iter().all(|x| x.is_string()) {
+                let strs: Vec<String> = a.iter().map(|x| x.as_str().unwrap_or_default().to_string()).collect();
+                if strs.iter().any(|s| s.is_empty()) {
+                    return Err(ApiError::invalid_request(provider, "'input' strings must not be empty"));
+                }
+                strs
+            } else if a.iter().all(|x| x.is_number() || x.is_array()) {
+                // Array of tokens (or array of token arrays): brain has no tokenizer
+                // at the API layer to turn ids back into text.
+                return Err(ApiError::invalid_request(provider, "token-array 'input' is not supported; pass text as a string or array of strings"));
+            } else {
+                return Err(ApiError::invalid_request(provider, "'input' must be a string or an array of strings"));
+            }
+        }
+        Some(_) => return Err(ApiError::invalid_request(provider, "'input' must be a string or an array of strings")),
+        None => return Err(ApiError::invalid_request(provider, "'input' is required")),
+    };
+
+    let encoding_format = match body.get("encoding_format") {
+        None | Some(Value::Null) => EncodingFormat::Float,
+        Some(Value::String(s)) if s == "float" => EncodingFormat::Float,
+        Some(Value::String(s)) if s == "base64" => EncodingFormat::Base64,
+        Some(_) => return Err(ApiError::invalid_request(provider, "'encoding_format' must be \"float\" or \"base64\"")),
+    };
+
+    let dimensions = match body.get("dimensions") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let n = v.as_i64().filter(|&n| n >= 1).ok_or_else(|| ApiError::invalid_request(provider, "'dimensions' must be a positive integer"))?;
+            Some(n as usize)
+        }
+    };
+
+    Ok(EmbeddingRequest { model, inputs, encoding_format, dimensions })
+}
+
+/// Read the mean-pooled embedding vector from an `embed` [`capability::Outcome`]:
+/// the `mean` output is a JSON array of f32 (length = the model's `d_model`).
+fn read_mean(o: &capability::Outcome) -> Option<Vec<f32>> {
+    let arr = o.outputs.get("mean")?.as_array()?;
+    Some(arr.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect())
+}
+
+/// The embeddings handler shared by the OpenAI and OpenRouter surfaces. Both speak
+/// the identical `CreateEmbeddingRequest`/`CreateEmbeddingResponse` grammar under
+/// Bearer auth, so the provider only shapes the error bodies. Each input string is
+/// dispatched as one `embed` job through [`bridge::submit`] (so admission → 429 is
+/// enforced exactly as for chat); the response collects one `data` entry per input,
+/// indexed in request order.
+pub async fn handle_embeddings(state: AppState, body: Bytes) -> Response {
+    let provider = state.provider;
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return ApiError::invalid_request(provider, format!("invalid JSON body: {e}")).into_response(),
+    };
+    let req = match parse_embedding_request(provider, &body) {
+        Ok(r) => r,
+        Err(e) => return e.into_response(),
+    };
+    // Resolve the model against the embeddings-capable manifests before dispatching.
+    if !catalog::resolve_embed(&state.exec, &req.model) {
+        return ApiError::model_not_found(provider, &req.model).into_response();
+    }
+
+    let mut data: Vec<Value> = Vec::with_capacity(req.inputs.len());
+    let mut prompt_tokens = 0i64;
+    for (index, text) in req.inputs.iter().enumerate() {
+        let inv = Invocation::new().set("text", json!(text));
+        let outcome = match bridge::submit(&state, &req.model, "embed", inv).await {
+            Ok(o) => o,
+            Err(e) => return e.into_response(),
+        };
+        let mut vector = match read_mean(&outcome) {
+            Some(v) if !v.is_empty() => v,
+            _ => return ApiError::invalid_request(provider, "model did not return a 'mean' embedding vector").into_response(),
+        };
+        // `dimensions`: truncate to the first N dims (brain does NOT re-project);
+        // asking for more dims than the model produces is a 400.
+        if let Some(dims) = req.dimensions {
+            if dims > vector.len() {
+                return ApiError::invalid_request(provider, format!("'dimensions' ({dims}) exceeds the model's embedding length ({})", vector.len())).into_response();
+            }
+            vector.truncate(dims);
+        }
+        // Usage: the encoder reports the token count as the `tokens` output; if a
+        // model omits it, fall back to a chars/4 heuristic (documented, coarse).
+        prompt_tokens += outcome
+            .outputs
+            .get("tokens")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_else(|| (text.chars().count().div_ceil(4)).max(1) as i64);
+
+        let embedding = match req.encoding_format {
+            EncodingFormat::Float => json!(vector),
+            EncodingFormat::Base64 => json!(events::bytes::encode_f32(&vector)),
+        };
+        data.push(json!({ "object": "embedding", "index": index, "embedding": embedding }));
+    }
+
+    let resp = json!({
+        "object": "list",
+        "data": data,
+        "model": req.model,
+        // OpenAI's embedding usage has only prompt_tokens + total_tokens (no
+        // completion side); the two are equal for an encoder.
+        "usage": { "prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens },
+    });
+    Json(resp).into_response()
 }
 
 /// The chat handler shared by the OpenAI and OpenRouter surfaces. `native` adds
