@@ -14,7 +14,7 @@
 //! (base frozen, LoRA-only overfit drives the loss down; adapter save/load
 //! round-trips).
 
-use crate::grad::{GradsF32, WeightsF32};
+use crate::grad::WeightsF32;
 use crate::modelgrad::{Cfg, ModelGradsF32, ModelWeightsF32};
 
 /// LoRA hyper-parameters.

@@ -177,7 +177,7 @@ fn main() {
             cfg.n_layers = n;
         }
     }
-    let (ps, pf) = (cfg.patch_size, cfg.f_patch_size);
+    let ps = cfg.patch_size;
     let (f, ft, ht, wt) = (1u32, 1u32, h / ps, w / ps);
     let n_img = (ft * ht * wt) as u64;
     let gflop = forward_gflop(&cfg, n_img, cap_len as u64);

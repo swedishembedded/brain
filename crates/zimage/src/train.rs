@@ -189,10 +189,6 @@ impl DeviceTrainer {
         DeviceTrainer { eng, cfg }
     }
 
-    pub(crate) fn cfg(&self) -> &Cfg {
-        &self.cfg
-    }
-
     fn dims(&self, t: usize) -> Dims {
         Dims::new(t, self.cfg.dim, self.cfg.nh)
     }
