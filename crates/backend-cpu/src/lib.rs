@@ -393,15 +393,29 @@ impl CpuBackend {
         }
         // Cross-attention trio (query-chunked bidirectional attention): per-head
         // packed GEMMs through the same AVX2 matmul_abt as the linear layers.
-        // Buffer lengths reconstruct from the uniform (sliced dispatches arrive
-        // pre-offset, so the base pointers already point at the chunk rows).
+        //
+        // Buffer lengths reconstruct from the uniform, and must be the EXACT
+        // highest element the kernel touches — `bsz*t*stride` silently assumed
+        // the base pointer was already advanced to the span's first row (i.e.
+        // that `q_off`/`k_off`/`v_off` were region offsets only). A caller may
+        // instead bind the buffer whole and carry the span's row offset in
+        // those Params — which is what `model::vit::cross_q_fwd` does, because
+        // a storage-binding offset must be 256B-aligned and `row0*stride` is
+        // not for a ragged window partition. Both conventions land on the same
+        // bound below; the old expression was too short for the second and
+        // (marginally) too long for the first.
+        let span_len = |n: usize, stride: usize, off: usize, heads: usize, hd: usize| {
+            // `n == 0` is an empty dispatch; saturate rather than wrap, because
+            // this length goes straight into `slice::from_raw_parts`.
+            n.saturating_sub(1) * stride + off + heads * hd
+        };
         if Some(kind) == f.attn_scores_cross && bufs.len() >= 3 {
             unsafe {
                 let pu = std::slice::from_raw_parts(uniform, 9);
                 let (b, h, tq, tk, hd) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
                 let (qs, kvs, qo, ko) = (pu[5] as usize, pu[6] as usize, pu[7] as usize, pu[8] as usize);
-                let q = std::slice::from_raw_parts(bufs[0] as *const f32, b * tq * qs);
-                let kv = std::slice::from_raw_parts(bufs[1] as *const f32, b * tk * kvs);
+                let q = std::slice::from_raw_parts(bufs[0] as *const f32, span_len(b * tq, qs, qo, h, hd));
+                let kv = std::slice::from_raw_parts(bufs[1] as *const f32, span_len(b * tk, kvs, ko, h, hd));
                 let sc = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * h * tq * tk);
                 fast_ops::attn_scores_cross(q, kv, sc, b, h, tq, tk, hd, qs, kvs, qo, ko);
             }
@@ -424,7 +438,7 @@ impl CpuBackend {
                 let (b, h, tq, tk, hd) = (pu[0] as usize, pu[1] as usize, pu[2] as usize, pu[3] as usize, pu[4] as usize);
                 let (kvs, vo, dm) = (pu[5] as usize, pu[6] as usize, pu[7] as usize);
                 let p = std::slice::from_raw_parts(bufs[0] as *const f32, b * h * tq * tk);
-                let kv = std::slice::from_raw_parts(bufs[1] as *const f32, b * tk * kvs);
+                let kv = std::slice::from_raw_parts(bufs[1] as *const f32, span_len(b * tk, kvs, vo, h, hd));
                 let o = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, b * tq * dm);
                 fast_ops::attn_apply_cross(p, kv, o, b, h, tq, tk, hd, kvs, vo, dm);
             }
