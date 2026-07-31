@@ -181,6 +181,46 @@ pub fn matvec_par(w: &[f32], x: &[f32], out: usize, inn: usize) -> Vec<f32> {
     matvec(w, x, out, inn)
 }
 
+/// L2-normalise a vector: `v / ‖v‖`.
+///
+/// The operation every embedding model's consumer performs before a cosine
+/// comparison (ArcFace and ECAPA both emit un-normalised vectors). Host math by
+/// the `AGENTS.md` rule — one vector of a few hundred values, once per item —
+/// and therefore here rather than in a model crate.
+///
+/// A zero vector comes back unchanged rather than as NaN; the floor is applied
+/// to the norm, not to the values.
+pub fn l2_normalize(v: &[f32]) -> Vec<f32> {
+    let n = v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>().sqrt();
+    if n <= 0.0 {
+        return v.to_vec();
+    }
+    v.iter().map(|x| (*x as f64 / n) as f32).collect()
+}
+
+/// Cosine similarity of two equal-length vectors, accumulated in f64.
+///
+/// f64 accumulation is not decoration: a 512-d ArcFace embedding is gated at
+/// seven digits of cosine against a numpy reference, and an f32 dot product
+/// loses the last two of them to summation order alone.
+///
+/// Panics on a length mismatch — a silent 0.0 there would read as "different
+/// identity" rather than "you passed the wrong tensor".
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len(), "cosine: length mismatch ({} vs {})", a.len(), b.len());
+    let (mut d, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
+    for (x, y) in a.iter().zip(b) {
+        d += *x as f64 * *y as f64;
+        na += *x as f64 * *x as f64;
+        nb += *y as f64 * *y as f64;
+    }
+    let den = na.sqrt() * nb.sqrt();
+    if den <= 0.0 {
+        return 0.0;
+    }
+    (d / den) as f32
+}
+
 /// Numerically-stable softmax over a slice, in place.
 pub fn softmax(x: &mut [f32]) {
     let m = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
@@ -196,6 +236,35 @@ pub fn softmax(x: &mut [f32]) {
         for v in x.iter_mut() {
             *v /= sum;
         }
+    }
+}
+
+#[cfg(test)]
+mod embed_tests {
+    use super::*;
+
+    #[test]
+    fn l2_normalize_gives_a_unit_vector_and_leaves_zero_alone() {
+        let v = l2_normalize(&[3.0, 4.0]);
+        assert!((v[0] - 0.6).abs() < 1e-6 && (v[1] - 0.8).abs() < 1e-6, "{v:?}");
+        assert_eq!(l2_normalize(&[0.0, 0.0]), vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn cosine_is_direction_only_and_zero_safe() {
+        let a = [1.0f32, 2.0, 3.0];
+        let b: Vec<f32> = a.iter().map(|x| x * 7.5).collect();
+        assert!((cosine(&a, &b) - 1.0).abs() < 1e-6);
+        let neg: Vec<f32> = a.iter().map(|x| -x).collect();
+        assert!((cosine(&a, &neg) + 1.0).abs() < 1e-6);
+        assert!((cosine(&[1.0, 0.0], &[0.0, 1.0])).abs() < 1e-6);
+        assert_eq!(cosine(&[0.0, 0.0], &[1.0, 2.0]), 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "length mismatch")]
+    fn cosine_refuses_mismatched_lengths() {
+        cosine(&[1.0, 2.0], &[1.0]);
     }
 }
 
@@ -398,3 +467,161 @@ pub fn randn(n: usize, seed: u64) -> Vec<f32> {
     out
 }
 
+
+/// Least-squares 2-D **similarity** transform (Umeyama) mapping `src` onto `dst`.
+///
+/// `src`/`dst` are `n` point pairs, flat row-major `[n, 2]` as `(x, y)`. Returns
+/// the affine matrix `M` as `[a, b, tx, c, d, ty]` (row-major `[2, 3]`), i.e.
+///
+/// ```text
+/// dst ≈ M · [x, y, 1]ᵀ,      M = [ s·cosθ  -s·sinθ  tx ]
+///                                [ s·sinθ   s·cosθ  ty ]
+/// ```
+///
+/// This is `skimage.transform.SimilarityTransform().estimate(src, dst)` — the
+/// solver insightface's `face_align.estimate_norm` uses to fit 5 facial landmarks
+/// to the 112×112 ArcFace template. Four degrees of freedom (uniform scale,
+/// rotation, translation) over `n ≥ 2` points, so with 5 points there is an
+/// irreducible residual; that is expected, not an error.
+///
+/// # Why it lives here and not in the face model
+///
+/// It is host math (a 4-parameter closed-form least squares over ≤ 8 numbers),
+/// and AGENTS.md gives host math exactly one home. It is also not face-specific:
+/// any point-set registration — ROI alignment, template matching, a fiducial fit
+/// — wants the same solve.
+///
+/// # Reflections are rejected, not silently dropped
+///
+/// Umeyama's general form allows a reflection when the cross-covariance has a
+/// negative determinant, and returns `R = U·diag(1, −1)·Vᵀ` there. A *proper*
+/// similarity (`M[0][0] == M[1][1]`, `M[0][1] == −M[1][0]`) cannot express that,
+/// so this returns `Err` rather than quietly fitting the nearest non-reflected
+/// transform — which would be a plausible-looking, wrong warp. A landmark set
+/// that needs a reflection is a mirrored/degenerate input, not a valid fit.
+pub fn similarity_transform_2d(src: &[f32], dst: &[f32], n: usize) -> Result<[f32; 6], String> {
+    if n < 2 {
+        return Err(format!("similarity_transform_2d: need >= 2 points, got {n}"));
+    }
+    if src.len() != 2 * n || dst.len() != 2 * n {
+        return Err(format!(
+            "similarity_transform_2d: expected {} values per point set, got src {} dst {}",
+            2 * n,
+            src.len(),
+            dst.len()
+        ));
+    }
+    // f64 throughout: the solve is 8 numbers wide and the reference (numpy/
+    // skimage) is f64, so matching it costs nothing and avoids a needless
+    // divergence in the last digits of a matrix every later pixel depends on.
+    let nf = n as f64;
+    let (mut msx, mut msy, mut mdx, mut mdy) = (0.0f64, 0.0, 0.0, 0.0);
+    for i in 0..n {
+        msx += src[2 * i] as f64;
+        msy += src[2 * i + 1] as f64;
+        mdx += dst[2 * i] as f64;
+        mdy += dst[2 * i + 1] as f64;
+    }
+    msx /= nf;
+    msy /= nf;
+    mdx /= nf;
+    mdy /= nf;
+
+    // var_src = mean ||s - mu_s||², and the 2x2 cross-covariance
+    // cov = mean (d - mu_d)(s - mu_s)ᵀ.
+    let (mut var_src, mut c00, mut c01, mut c10, mut c11) = (0.0f64, 0.0, 0.0, 0.0, 0.0);
+    for i in 0..n {
+        let sx = src[2 * i] as f64 - msx;
+        let sy = src[2 * i + 1] as f64 - msy;
+        let dx = dst[2 * i] as f64 - mdx;
+        let dy = dst[2 * i + 1] as f64 - mdy;
+        var_src += sx * sx + sy * sy;
+        c00 += dx * sx;
+        c01 += dx * sy;
+        c10 += dy * sx;
+        c11 += dy * sy;
+    }
+    var_src /= nf;
+    c00 /= nf;
+    c01 /= nf;
+    c10 /= nf;
+    c11 /= nf;
+    if var_src <= 0.0 {
+        return Err("similarity_transform_2d: degenerate source (all points coincide)".into());
+    }
+    if c00 * c11 - c01 * c10 < 0.0 {
+        return Err("similarity_transform_2d: the best fit is a REFLECTION, which is not a proper similarity".into());
+    }
+
+    // For d = 2 with no reflection, Umeyama's `s·R` has the closed form of the
+    // least-squares fit over the two free parameters of a scaled rotation
+    // (`M = [[a, -b], [b, a]]`): differentiating `Σ‖M·s + t − d‖²` gives
+    //   a = Σ(s·d)/Σ‖s‖²,  b = Σ(s_x·d_y − s_y·d_x)/Σ‖s‖².
+    // In cross-covariance terms that is `a = (c00 + c11)/var_src` and
+    // `b = (c10 − c01)/var_src`, and `√(a² + b²) = trace(D)/var_src` is exactly
+    // Umeyama's scale — so this is the same transform, not an approximation.
+    let a = (c00 + c11) / var_src;
+    let b = (c10 - c01) / var_src;
+    let tx = mdx - (a * msx - b * msy);
+    let ty = mdy - (b * msx + a * msy);
+    Ok([a as f32, -b as f32, tx as f32, b as f32, a as f32, ty as f32])
+}
+
+/// Invert an affine `[2, 3]` matrix `[a, b, tx, c, d, ty]`.
+///
+/// A warp *samples* the source at `M⁻¹ · [x_dst, y_dst, 1]`, so the inverse — not
+/// the forward matrix — is what builds a resampling grid.
+pub fn invert_affine_2x3(m: &[f32; 6]) -> Result<[f32; 6], String> {
+    let (a, b, tx, c, d, ty) = (m[0] as f64, m[1] as f64, m[2] as f64, m[3] as f64, m[4] as f64, m[5] as f64);
+    let det = a * d - b * c;
+    if det == 0.0 {
+        return Err("invert_affine_2x3: singular matrix".into());
+    }
+    let (ia, ib, ic, id) = (d / det, -b / det, -c / det, a / det);
+    Ok([ia as f32, ib as f32, (-(ia * tx + ib * ty)) as f32, ic as f32, id as f32, (-(ic * tx + id * ty)) as f32])
+}
+
+#[cfg(test)]
+mod geom_tests {
+    use super::*;
+
+    /// An exact scaled rotation + translation must be recovered exactly.
+    #[test]
+    fn recovers_an_exact_similarity() {
+        let (s, th, tx, ty) = (1.7f64, 0.4f64, 3.0f64, -2.0f64);
+        let src = [0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0, 2.0, 3.0, -1.0, 4.0];
+        let mut dst = [0.0f32; 10];
+        for i in 0..5 {
+            let (x, y) = (src[2 * i] as f64, src[2 * i + 1] as f64);
+            dst[2 * i] = (s * (th.cos() * x - th.sin() * y) + tx) as f32;
+            dst[2 * i + 1] = (s * (th.sin() * x + th.cos() * y) + ty) as f32;
+        }
+        let m = similarity_transform_2d(&src, &dst, 5).unwrap();
+        assert!((m[0] - (s * th.cos()) as f32).abs() < 1e-5, "{m:?}");
+        assert!((m[1] + (s * th.sin()) as f32).abs() < 1e-5, "{m:?}");
+        assert!((m[2] - tx as f32).abs() < 1e-4, "{m:?}");
+        assert!((m[4] - m[0]).abs() < 1e-6, "must be a proper similarity");
+        assert!((m[3] + m[1]).abs() < 1e-6, "must be a proper similarity");
+    }
+
+    #[test]
+    fn inverse_composes_to_the_identity() {
+        let m = [1.3f32, -0.7, 5.0, 0.7, 1.3, -4.0];
+        let inv = invert_affine_2x3(&m).unwrap();
+        // M ∘ M⁻¹ applied to a point is the point.
+        for &(x, y) in &[(0.0f32, 0.0f32), (3.0, -2.0), (17.5, 9.25)] {
+            let ux = inv[0] * x + inv[1] * y + inv[2];
+            let uy = inv[3] * x + inv[4] * y + inv[5];
+            let rx = m[0] * ux + m[1] * uy + m[2];
+            let ry = m[3] * ux + m[4] * uy + m[5];
+            assert!((rx - x).abs() < 1e-3 && (ry - y).abs() < 1e-3, "{rx} {ry} vs {x} {y}");
+        }
+    }
+
+    #[test]
+    fn a_reflected_fit_is_an_error_not_a_silent_wrong_warp() {
+        let src = [0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let dst = [0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0]; // x/y swapped = a reflection
+        assert!(similarity_transform_2d(&src, &dst, 3).unwrap_err().contains("REFLECTION"));
+    }
+}
