@@ -346,7 +346,6 @@ pub struct Chronos2Train {
 pub struct HeadCache {
     emb: Vec<f32>,
     inv: Vec<f32>,     // final-norm reciprocal norms
-    normed: Vec<f32>,  // [s, d]
     rb: ResidualCache, // the head ResidualBlock's cache
     quantiles: Vec<f32>, // [H, Q]
     s: usize,
@@ -387,7 +386,7 @@ impl Chronos2Train {
             }
         }
         let loss = forecast::metrics::mean_pinball(&quantiles, levels, target);
-        (loss, HeadCache { emb: emb.to_vec(), inv, normed, rb, quantiles, s, n_out })
+        (loss, HeadCache { emb: emb.to_vec(), inv, rb, quantiles, s, n_out })
     }
 
     /// Backward of [`head_forward`]: accumulate head + final-norm grads into `g`
@@ -565,7 +564,7 @@ mod tests {
         let ff = cfg.d_ff;
         let ho = cfg.head_out_dim();
         let mut w = HashMap::new();
-        let mut fill = |name: &str, len: usize, w: &mut HashMap<String, Vec<f32>>, seed: &mut u64| {
+        let fill = |name: &str, len: usize, w: &mut HashMap<String, Vec<f32>>, seed: &mut u64| {
             w.insert(name.to_string(), (0..len).map(|_| rng(seed)).collect());
         };
         fill("encoder.final_layer_norm.weight", d, &mut w, seed);
@@ -590,7 +589,7 @@ mod tests {
         let (d, inner, f) = (cfg.d_model, cfg.inner_dim(), cfg.d_ff);
         let p = format!("encoder.block.{b}");
         let mut w = HashMap::new();
-        let mut fill = |name: String, len: usize, gain1: bool, w: &mut HashMap<String, Vec<f32>>, seed: &mut u64| {
+        let fill = |name: String, len: usize, gain1: bool, w: &mut HashMap<String, Vec<f32>>, seed: &mut u64| {
             let base = if gain1 { 1.0 } else { 0.0 };
             w.insert(name, (0..len).map(|_| base + rng(seed)).collect());
         };
