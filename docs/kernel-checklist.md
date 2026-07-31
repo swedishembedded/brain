@@ -150,6 +150,21 @@ was wrong and the profile was right.** Killed, with the number that killed it:
 | `conv_bias_reg` has a coalescing bug | flat ~700 GFLOP/s across **all 15 shapes** = its structural 0.75 byte/FLOP ceiling, not a fault |
 | the optimizer's 385 grad-norm dispatches need fusing over an offset table | 385 was 77 tensors × **5 steps**; once each is a cooperative tree the whole grad-norm is **2.84 ms of a 840 ms step** and fusing buys <0.25% for a ParamStore relayout |
 | `clip_coef` on one thread is fine, it sums a handful of numbers | true at 77 inputs (0.047 ms), **false at 11 586** (0.475 ms) — the cooperative reduction's own partials made a second cooperative kernel mandatory |
+| composing LayerNorm2d from `nchw_nlc` → `layernorm_rows` → `nlc_nchw` beats a fused kernel, because the `*_rows` stage is coalesced | **the two permutes are 67–86% of it**, at 14–33% of the roof — *both* permutes already pay the sector amplification that was the reason to reject fusing, and it worsens with `H*W` (47.5 GB/s at 65536 vs 102.8 at 1024). Composition still shipped as the correct first cut, but the measurement did **not** rule fusing out |
+
+### E.0 Bracket every timed region with `poll_wait()` — or you are timing the host
+
+`WgpuBackend::submit` with an empty clear list only appends to `pending`; it
+encodes and queues **nothing**. A timing loop of bare `submit`s therefore measures
+host-side bind-group construction and reports it as device bandwidth.
+
+This produced **377 GB/s on a ~346 GB/s card** — the tell was a number above the
+physical roof, plus a permute cost that did not vary with size. Both are host-cost
+signatures. Any timed region must be bracketed by `Gpu::poll_wait()`, which
+flushes the pending pass and blocks until the device is done.
+
+If a measurement comes out faster than the card can move memory, you measured the
+CPU. Compute the roof first and sanity-check against it before believing a result.
 
 So:
 
