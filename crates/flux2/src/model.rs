@@ -46,7 +46,6 @@ use crate::import::Tensors;
 pub const KERNELS: &[(&str, &str)] = &[
     ("layernorm", kernels::LAYERNORM),
     ("matmul", kernels::MATMUL),
-    ("matmul_reg2", kernels::MATMUL_REG2),
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
@@ -67,22 +66,21 @@ pub const KERNELS: &[(&str, &str)] = &[
 ];
 const K_LN: usize = 0;
 const K_MATMUL: usize = 1;
-const K_MATMUL_REG2: usize = 2;
-const K_MATMUL_REG3: usize = 3;
-const K_RMSNORM: usize = 4;
-const K_RMSNORM_ROWS: usize = 5;
-const K_ROPE: usize = 6;
-const K_PACK: usize = 7;
-const K_SCORES: usize = 8;
-const K_SOFTMAX: usize = 9;
-const K_APPLY: usize = 10;
-const K_FLASH: usize = 11;
-const K_FLASH_SPLIT: usize = 12;
-const K_SILU_MUL: usize = 13;
-const K_GATE: usize = 14;
-const K_MAXABS: usize = 15;
-const K_QUANT: usize = 16;
-const K_MATMUL_I8: usize = 17;
+const K_MATMUL_REG3: usize = 2;
+const K_RMSNORM: usize = 3;
+const K_RMSNORM_ROWS: usize = 4;
+const K_ROPE: usize = 5;
+const K_PACK: usize = 6;
+const K_SCORES: usize = 7;
+const K_SOFTMAX: usize = 8;
+const K_APPLY: usize = 9;
+const K_FLASH: usize = 10;
+const K_FLASH_SPLIT: usize = 11;
+const K_SILU_MUL: usize = 12;
+const K_GATE: usize = 13;
+const K_MAXABS: usize = 14;
+const K_QUANT: usize = 15;
+const K_MATMUL_I8: usize = 16;
 
 const EPS: f32 = 1e-6;
 
