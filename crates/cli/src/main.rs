@@ -27,6 +27,7 @@ mod perf_cli;
 mod perf_engine;
 mod pid_cli;
 mod qwen_cli;
+mod model_dir;
 mod resident;
 mod resident_lfm;
 mod resident_llm;

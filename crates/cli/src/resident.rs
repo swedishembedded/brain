@@ -23,7 +23,7 @@ use zimage::pipeline::{HotPipeline, Image, Paths};
 /// budgets. `gpus` is `(index, total_bytes)` per card; `reserved` bytes are kept free
 /// on each. The RAM pool bounds CPU-resident models. Falls back gracefully if a heavy
 /// model's weights are not configured (it is simply not registered).
-pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, ram_total: u64, policy: Policy) -> Executor {
+pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, ram_total: u64, models_dir: Option<&std::path::Path>, policy: Policy) -> Executor {
     let mut budgets = residency::budget::Budgets::new();
     for &(i, total) in gpus {
         budgets.set(Device::Gpu(i), total, reserved);
@@ -107,6 +107,22 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, r
     // stateless resident — invoking it with no checkpoint on disk is a clean
     // per-call error, not a registration failure.
     models.push(Arc::new(ProviderResident::stateless(Arc::new(fastvlm::caps::FastVlmProvider::new()))));
+
+    // Global model directory: append every discovered file as its own catalog
+    // entry (keyed by model-card id), deduped against the env-gated residents
+    // above (their manifest model == id). Additive — the env-gated path stands
+    // on its own when no dir is configured or the scan finds nothing.
+    if let Some(dir) = models_dir {
+        let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
+        for r in crate::model_dir::discover(dir) {
+            let id = r.manifest().model;
+            if existing.contains(&id) {
+                eprintln!("brain: model dir entry '{id}' shadowed by an env-gated resident; keeping the env one");
+                continue;
+            }
+            models.push(r);
+        }
+    }
 
     Executor::start(models, budgets, policy)
 }

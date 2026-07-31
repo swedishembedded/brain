@@ -20,6 +20,7 @@
 //! `from_env` returns `None` when its primary weights var is unset/empty.
 
 use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress};
+use checkpoint::st::ModelCard;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
@@ -78,21 +79,32 @@ pub(crate) fn on_device<R>(device: Device, f: impl FnOnce() -> R) -> Result<R, S
 /// The dense char-level GPT baseline behind the scheduler (`BRAIN_GPT_WEIGHTS`).
 /// The checkpoint must embed its char vocab (trained with vocab embedding).
 pub struct GptResident {
+    /// Catalog id (the model-card id): the manifest/instance-key key, so two
+    /// checkpoints of the same family are two distinct selectable models.
+    id: String,
     path: String,
 }
 
 impl GptResident {
     pub fn from_env() -> Option<GptResident> {
-        std::env::var("BRAIN_GPT_WEIGHTS").ok().filter(|p| !p.is_empty()).map(|path| GptResident { path })
+        let path = std::env::var("BRAIN_GPT_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        // Back-compat: synthesize a card whose id is the family constant.
+        Some(Self::from_card(&path, &ModelCard::new("gpt", "gpt"), None))
+    }
+
+    /// Construct under the card's id. `_tokenizer` is unused — GPT is char-level
+    /// (its vocab is embedded in the checkpoint).
+    pub fn from_card(path: &str, card: &ModelCard, _tokenizer: Option<&str>) -> GptResident {
+        GptResident { id: card.id.clone(), path: path.to_string() }
     }
 }
 
 impl ResidentModel for GptResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new("gpt", "text generation (dense char-level GPT)", vec![generate_spec("generate text continuing a prompt (char-level GPT)", false)])
+        Manifest::new(&self.id, "text generation (dense char-level GPT)", vec![generate_spec("generate text continuing a prompt (char-level GPT)", false)])
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new("gpt", "default")
+        InstanceKey::new(self.id.as_str(), "default")
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         est_vram(&self.path)
@@ -136,21 +148,28 @@ impl Instance for GptInstance {
 /// The GLM decoder (MLA + sigmoid noaux_tc MoE) behind the scheduler
 /// (`BRAIN_GLM_WEIGHTS`). Char-level: the checkpoint must embed its vocab.
 pub struct GlmResident {
+    id: String,
     path: String,
 }
 
 impl GlmResident {
     pub fn from_env() -> Option<GlmResident> {
-        std::env::var("BRAIN_GLM_WEIGHTS").ok().filter(|p| !p.is_empty()).map(|path| GlmResident { path })
+        let path = std::env::var("BRAIN_GLM_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        Some(Self::from_card(&path, &ModelCard::new("glm", "glm"), None))
+    }
+
+    /// Construct under the card's id. `_tokenizer` is unused — GLM is char-level.
+    pub fn from_card(path: &str, card: &ModelCard, _tokenizer: Option<&str>) -> GlmResident {
+        GlmResident { id: card.id.clone(), path: path.to_string() }
     }
 }
 
 impl ResidentModel for GlmResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new("glm", "text generation (GLM MLA + MoE decoder)", vec![generate_spec("generate text continuing a prompt (GLM decoder)", false)])
+        Manifest::new(&self.id, "text generation (GLM MLA + MoE decoder)", vec![generate_spec("generate text continuing a prompt (GLM decoder)", false)])
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new("glm", "default")
+        InstanceKey::new(self.id.as_str(), "default")
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         est_vram(&self.path)
@@ -193,6 +212,7 @@ impl Instance for GlmInstance {
 /// `BRAIN_QWEN_TOKENIZER`). Runs the CPU/GPU forward `generate` path (never the
 /// NPU branch). `BRAIN_QWEN_CTX` (default 2048) sizes the built context length.
 pub struct QwenResident {
+    id: String,
     path: String,
     tokenizer: String,
 }
@@ -201,7 +221,13 @@ impl QwenResident {
     pub fn from_env() -> Option<QwenResident> {
         let path = std::env::var("BRAIN_QWEN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
         let tokenizer = std::env::var("BRAIN_QWEN_TOKENIZER").ok().unwrap_or_default();
-        Some(QwenResident { path, tokenizer })
+        Some(Self::from_card(&path, &ModelCard::new("qwen", "qwen"), Some(&tokenizer)))
+    }
+
+    /// Construct under the card's id. `tokenizer` is the sibling `tokenizer.json`
+    /// (empty/None defers the "set a tokenizer" error to `activate`).
+    pub fn from_card(path: &str, card: &ModelCard, tokenizer: Option<&str>) -> QwenResident {
+        QwenResident { id: card.id.clone(), path: path.to_string(), tokenizer: tokenizer.unwrap_or_default().to_string() }
     }
 
     fn ctx() -> u32 {
@@ -211,10 +237,10 @@ impl QwenResident {
 
 impl ResidentModel for QwenResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new("qwen", "text generation (Qwen3 BPE decoder)", vec![generate_spec("generate text (Qwen3; chat template optional)", true)])
+        Manifest::new(&self.id, "text generation (Qwen3 BPE decoder)", vec![generate_spec("generate text (Qwen3; chat template optional)", true)])
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new("qwen", "default")
+        InstanceKey::new(self.id.as_str(), "default")
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         est_vram(&self.path)

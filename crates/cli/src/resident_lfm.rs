@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
+use checkpoint::st::ModelCard;
 use data::qwen_tokenizer::QwenBpe;
 use data::tokenizer::Tokenizer;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
@@ -32,6 +33,8 @@ const SLAB_BUDGET: u64 = 512 << 20;
 const PROBE_CAP: u32 = 64;
 
 pub struct LfmResident {
+    /// Catalog id (the model-card id): the manifest/instance-key key.
+    id: String,
     weights: String,
     tokenizer_path: String,
     tok: Arc<QwenBpe>,
@@ -54,12 +57,21 @@ impl LfmResident {
         }
     }
 
-    /// Explicit-path constructor (the perf harness builds it directly).
+    /// Explicit-path constructor (the perf harness builds it directly): the
+    /// family constant as the catalog id.
     pub fn new(weights: &str, tokenizer_path: &str) -> Result<LfmResident, String> {
+        Self::from_card(weights, &ModelCard::new("lfm", "lfm"), Some(tokenizer_path))
+    }
+
+    /// Construct under the card's id. The encoder tokenizes eagerly, so a
+    /// `tokenizer.json` is required (LFM embeds no vocab); `None`/empty errors.
+    pub fn from_card(weights: &str, card: &ModelCard, tokenizer_path: Option<&str>) -> Result<LfmResident, String> {
+        let tokenizer_path = tokenizer_path.filter(|t| !t.is_empty()).ok_or("lfm: a sibling tokenizer.json is required")?;
         let tok = Arc::new(QwenBpe::from_file(tokenizer_path)?);
         let batch = std::env::var("BRAIN_LFM_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(2u32).max(1);
         let weight_bytes = std::fs::metadata(weights).map(|m| m.len()).unwrap_or(1 << 30);
         Ok(LfmResident {
+            id: card.id.clone(),
             weights: weights.to_string(),
             tokenizer_path: tokenizer_path.to_string(),
             tok,
@@ -87,7 +99,11 @@ impl LfmResident {
 
 impl ResidentModel for LfmResident {
     fn manifest(&self) -> Manifest {
-        lfm::caps::manifest_resident()
+        // The shared resident manifest, re-keyed to this model's catalog id so
+        // variants coexist.
+        let mut m = lfm::caps::manifest_resident();
+        m.model = self.id.clone();
+        m
     }
 
     fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
@@ -95,7 +111,7 @@ impl ResidentModel for LfmResident {
         // equal-length jobs group. Un-tokenizable requests share a key and
         // fail cleanly inside run().
         let len = self.ids_of(inv).map(|v| v.len()).unwrap_or(0);
-        InstanceKey::new(lfm::caps::MODEL, format!("t{len}"))
+        InstanceKey::new(self.id.as_str(), format!("t{len}"))
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {

@@ -18,6 +18,10 @@
 //!     the YOLO detector (default 0.25). Lower it so a lightly-trained tiny model's
 //!     low-confidence boxes still surface. No effect on the fake detector.
 //!   * `--max-new N`, `--temp X`, `--top-k K`, `--seed S` — generation config.
+//!   * `--models-dir <path>` (or env `BRAIN_MODELS_DIR`) — the global model
+//!     directory `brain serve --dbus` scans at startup to build the served-model
+//!     catalog (one entry per carded file, keyed by model-card id). Defaults to
+//!     `$XDG_DATA_HOME/brain/models` else `$HOME/.local/share/brain/models`.
 
 use std::io::{BufRead, Write};
 
@@ -61,6 +65,9 @@ pub fn run_serve(args: &[String]) {
     // D-Bus control surface (`--dbus [--dbus-system] [--dbus-name NAME]`).
     let (mut dbus, mut dbus_system, mut dbus_name) = (false, false, None::<String>);
     let mut dbus_reserve_gb: u64 = 2; // GB kept free per GPU (headroom for activations)
+    // Global model directory scanned at startup for the served-model catalog
+    // (`--models-dir`, else BRAIN_MODELS_DIR / XDG default; see model_dir::resolve).
+    let mut models_dir: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -107,6 +114,10 @@ pub fn run_serve(args: &[String]) {
                 i += 1;
                 dbus_reserve_gb = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(dbus_reserve_gb);
             }
+            "--models-dir" => {
+                i += 1;
+                models_dir = args.get(i).cloned();
+            }
             other => eprintln!("brain run: ignoring unknown flag {other:?}"),
         }
         i += 1;
@@ -115,7 +126,7 @@ pub fn run_serve(args: &[String]) {
     // The D-Bus control surface replaces the stdio loop when requested: it serves
     // every registered model over `com.swedishembedded.Brain1` until Ctrl-C.
     if dbus {
-        return run_dbus(dbus_system, dbus_name, dbus_reserve_gb);
+        return run_dbus(dbus_system, dbus_name, dbus_reserve_gb, models_dir);
     }
 
     // Build the registry: a real GPT if a checkpoint was given, else a fake echo
@@ -195,7 +206,7 @@ pub fn run_serve(args: &[String]) {
 /// Serve the D-Bus control surface (`brain serve --dbus`). Registers every model
 /// and hands the registry to `brain_dbus::serve`, which owns it for the service's
 /// lifetime. Compiled into the default build; only reached when `--dbus` is passed.
-fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64) {
+fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64, models_dir: Option<String>) {
     // Discover the GPUs' capacity so the scheduler can budget/evict against real VRAM,
     // then narrow to what `--device` made schedulable. With no `--device` the set is
     // every device, which is exactly the "use all the hardware wisely" default.
@@ -253,8 +264,14 @@ fn run_dbus(system: bool, name: Option<String>, reserve_gb: u64) {
         reserve_gb,
         ram >> 30
     );
+    // Resolve the global model directory (flag > BRAIN_MODELS_DIR > XDG default);
+    // its scan appends every carded file as its own catalog entry.
+    let dir = crate::model_dir::resolve(models_dir.as_deref());
+    if let Some(d) = &dir {
+        eprintln!("brain serve --dbus: scanning model dir {}", d.display());
+    }
     let executor =
-        crate::resident::build_executor(&gpus, &npus, reserved, cpu_compute_ram, residency::Policy::default());
+        crate::resident::build_executor(&gpus, &npus, reserved, cpu_compute_ram, dir.as_deref(), residency::Policy::default());
     let served: Vec<&str> = executor.manifests().iter().map(|m| m.model.as_str()).collect();
     eprintln!("brain serve --dbus: models: {}", served.join(", "));
     let opts = brain_dbus::DbusOpts {
