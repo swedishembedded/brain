@@ -4,8 +4,6 @@
 //! Frame sinks: where rendered RGB8 frames go. The window is one sink; CI
 //! uses the headless ones (hashes for golden tests, PPM dumps for artifacts).
 
-use std::io::Write;
-
 /// Per-frame HUD state shown by sinks that can display it.
 #[derive(Clone, Debug, Default)]
 pub struct Hud {
@@ -75,9 +73,8 @@ impl FrameSink for PpmDirSink {
     fn frame(&mut self, rgb: &[u8], w: u32, h: u32, _hud: &Hud) {
         let path = self.dir.join(format!("frame_{:06}.ppm", self.n));
         self.n += 1;
-        if let Ok(mut f) = std::fs::File::create(path) {
-            let _ = write!(f, "P6\n{w} {h}\n255\n");
-            let _ = f.write_all(rgb);
+        if let Ok(img) = imaging::Rgb8::new(w, h, rgb.to_vec()) {
+            let _ = imaging::save_ppm(path, &img);
         }
     }
 }

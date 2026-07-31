@@ -21,20 +21,6 @@ use data::episode::EpisodeWriter;
 /// Default recording byte budget: 2 GiB.
 pub const DEFAULT_BYTE_BUDGET: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Convert an interleaved HWC RGB8 frame (`w*h*3` bytes) to planar CHW `u8`
-/// (the episode-dataset frame layout).
-pub fn rgb8_to_chw(rgb: &[u8], w: u32, h: u32) -> Vec<u8> {
-    let plane = (w * h) as usize;
-    assert_eq!(rgb.len(), plane * 3, "rgb8_to_chw: expected {}x{}x3 bytes", w, h);
-    let mut chw = vec![0u8; plane * 3];
-    for i in 0..plane {
-        for c in 0..3 {
-            chw[c * plane + i] = rgb[i * 3 + c];
-        }
-    }
-    chw
-}
-
 /// A [`FrameSink`] that records every frame + action into an episode
 /// dataset. Create it, tee it with the display sink, and call
 /// [`RecorderSink::finalize`] when the session ends — without finalize no
@@ -122,7 +108,11 @@ impl FrameSink for RecorderSink {
                 self.bytes, self.budget
             ));
         }
-        if let Err(e) = self.writer.as_mut().unwrap().push(&rgb8_to_chw(rgb, w, h), hud.action, None)
+        // Byte-typed on purpose: the episode dataset stores `u8` and must NOT be
+        // rescaled to [0,1]. `imaging::pixels::hwc_to_chw` is generic over the
+        // element type precisely so this needs no second function.
+        let chw = imaging::pixels::hwc_to_chw(rgb, 3, h as usize, w as usize);
+        if let Err(e) = self.writer.as_mut().unwrap().push(&chw, hud.action, None)
         {
             return self.stop(&e);
         }
@@ -135,7 +125,7 @@ mod tests {
     use super::*;
     use crate::keymap::KeyChordMap;
     use crate::pacing::{FixedTimestep, MockClock};
-    use crate::{chw_to_rgb8, play_loop, ScriptInput, SplitIo};
+    use crate::{play_loop, ScriptInput, SplitIo};
     use data::episode::EpisodeDataset;
     use wm_core::{FakeWorldModel, WorldModel};
 
@@ -178,7 +168,8 @@ mod tests {
         let (c, h, w) = replay.frame_shape();
         for (i, &a) in ds.actions().iter().enumerate() {
             let f = replay.step(a);
-            let got = rgb8_to_chw(&chw_to_rgb8(&f, c, h, w), w, h);
+            let rgb = imaging::pixels::chw_to_rgb8(&f, w, h, c as usize, imaging::ChannelPolicy::RequireRgb).unwrap().px;
+            let got = imaging::pixels::hwc_to_chw(&rgb, 3, h as usize, w as usize);
             assert_eq!(got, ds.frame(i).unwrap(), "frame {i} differs");
         }
         let _ = std::fs::remove_dir_all(&dir);

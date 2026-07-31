@@ -13,3 +13,4 @@ path = "src/lib.rs"
 brain-wm-core.workspace = true
 # Recording sink (`record::RecorderSink`) writes episode datasets.
 brain-data.workspace = true
+brain-imaging.workspace = true

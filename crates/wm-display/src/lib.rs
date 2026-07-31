@@ -26,21 +26,6 @@ use pacing::{Clock, FixedTimestep};
 use sink::{FrameSink, Hud};
 use wm_core::WorldModel;
 
-/// Convert a CHW f32 [0,1] frame to interleaved RGB8.
-pub fn chw_to_rgb8(frame: &[f32], c: u32, h: u32, w: u32) -> Vec<u8> {
-    assert_eq!(frame.len(), (c * h * w) as usize);
-    assert!(c >= 3, "need at least 3 channels for RGB, got {c}");
-    let plane = (h * w) as usize;
-    let mut rgb = vec![0u8; plane * 3];
-    for i in 0..plane {
-        for ch in 0..3 {
-            let v = frame[ch * plane + i].clamp(0.0, 1.0);
-            rgb[i * 3 + ch] = (v * 255.0 + 0.5) as u8;
-        }
-    }
-    rgb
-}
-
 /// Outcome of a play session.
 #[derive(Clone, Debug, Default)]
 pub struct PlayReport {
@@ -205,7 +190,11 @@ pub fn play_loop<C: Clock>(
         hud.action = action;
         hud.reset = pending_reset;
         pending_reset = false;
-        let rgb = chw_to_rgb8(&frame, c, h, w);
+        // A world-model frame is always RGB: `RequireRgb` makes a 1-channel
+        // frame an error rather than a silently grey display.
+        let rgb = imaging::pixels::chw_to_rgb8(&frame, w, h, c as usize, imaging::ChannelPolicy::RequireRgb)
+            .expect("world-model frames are RGB")
+            .px;
         io.frame(&rgb, w, h, &hud);
     }
 
@@ -270,7 +259,9 @@ mod tests {
     #[test]
     fn playloop_chw_to_rgb8_clamps_and_rounds() {
         // 1x1 frame, 3 channels: -0.5 -> 0, 0.5 -> 128, 2.0 -> 255.
-        let rgb = chw_to_rgb8(&[-0.5, 0.5, 2.0], 3, 1, 1);
+        let rgb = imaging::pixels::chw_to_rgb8(&[-0.5, 0.5, 2.0], 1, 1, 3, imaging::ChannelPolicy::RequireRgb)
+            .unwrap()
+            .px;
         assert_eq!(rgb, vec![0, 128, 255]);
     }
 }
