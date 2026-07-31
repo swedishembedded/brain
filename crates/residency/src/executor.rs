@@ -61,6 +61,9 @@ impl Job {
 }
 
 struct Pending {
+    /// Monotonic id assigned at submit, stable for the job's whole life (queued →
+    /// running). Surfaced by [`Executor::in_flight`] so a live view can track a job.
+    id: u64,
     model: String,
     action: String,
     inv: Invocation,
@@ -69,6 +72,33 @@ struct Pending {
     on_progress: Box<dyn FnMut(Progress) + Send>,
     reply: Box<dyn FnOnce(ActionResult) + Send>,
     on_admit: Option<Box<dyn FnOnce() + Send>>,
+}
+
+/// One job the executor currently holds — either still in the pending `queue`
+/// (`phase == "queued"`) or handed to a device lane and running (`phase ==
+/// "running"`). A live snapshot from [`Executor::in_flight`]; `id` is the stable
+/// submit-order id and `since_ms` is the elapsed time since the job was enqueued.
+#[derive(Clone, Debug)]
+pub struct InFlightJob {
+    pub id: u64,
+    pub model: String,
+    pub action: String,
+    /// Coarse phase: `"queued"` (waiting in the pending queue) or `"running"`
+    /// (claimed onto a device lane). Group-granular — a whole same-key group is
+    /// admitted together, so all of its jobs flip to `running` at once.
+    pub phase: String,
+    pub since_ms: u64,
+}
+
+/// A job the dispatcher has handed to a lane and is tracking as running. Retained
+/// until the lane's `Done` for its group arrives. Mirrors the fields
+/// [`InFlightJob`] needs so the pending `Pending` can be dropped into the lane.
+struct RunningJob {
+    id: u64,
+    model: String,
+    action: String,
+    key: InstanceKey,
+    enqueued: Instant,
 }
 
 /// Live scheduler counters — proof that batching and eviction happen, and the
@@ -97,6 +127,10 @@ enum Msg {
     /// replies with a residency + budget snapshot. Mirrors how [`Stats`] is
     /// exposed, but read straight from the manager rather than the counters.
     Report(Sender<crate::ResidencyReport>),
+    /// An in-flight query: the dispatcher replies with one [`InFlightJob`] per job
+    /// currently queued OR running. Handled like [`Msg::Report`] — read from the
+    /// dispatcher's own live queue + running set, so it is scheduling-consistent.
+    InFlight(Sender<Vec<InFlightJob>>),
 }
 
 /// A group of same-key jobs handed to a device lane to run. `work` is either a
@@ -184,6 +218,20 @@ impl Executor {
         rx.recv().unwrap_or_default()
     }
 
+    /// A live list of every job the executor currently holds — queued or running —
+    /// each with a stable submit-order `id`, model/action, coarse phase, and elapsed
+    /// time since it was enqueued. Round-trips a query through the dispatcher (the
+    /// only thread that owns the queue + running set) so it is consistent with
+    /// scheduling. Returns an empty vec if the dispatcher is gone. Mirrors
+    /// [`residency`](Self::residency).
+    pub fn in_flight(&self) -> Vec<InFlightJob> {
+        let (tx, rx) = channel();
+        if self.tx.send(Msg::InFlight(tx)).is_err() {
+            return Vec::new();
+        }
+        rx.recv().unwrap_or_default()
+    }
+
     pub fn manifests(&self) -> &[Manifest] {
         &self.manifests
     }
@@ -195,25 +243,34 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
     let mut queue: Vec<Pending> = Vec::new();
     let mut running: HashSet<InstanceKey> = HashSet::new();
     let mut busy: HashSet<Device> = HashSet::new();
+    // Jobs handed to a lane and running now — tracked here (not in `queue`) so the
+    // in-flight query can report them, keyed by the group's instance key.
+    let mut running_jobs: Vec<RunningJob> = Vec::new();
+    // Monotonic job-id source; each submitted job gets the next value.
+    let mut next_id: u64 = 0;
 
     loop {
         // Block for at least one message, then drain everything pending.
         match rx.recv() {
-            Ok(msg) => on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats),
+            Ok(msg) => on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats, &mut running_jobs, &mut next_id),
             Err(_) => return, // all senders gone
         }
         while let Ok(msg) = rx.try_recv() {
-            on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats);
+            on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats, &mut running_jobs, &mut next_id);
         }
-        assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats);
+        assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats, &mut running_jobs);
     }
 }
 
-fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>) {
+#[allow(clippy::too_many_arguments)]
+fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>, next_id: &mut u64) {
     match msg {
         Msg::Submit(job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
             Some(key) => {
+                let id = *next_id;
+                *next_id += 1;
                 queue.push(Pending {
+                    id,
                     model: job.model,
                     action: job.action,
                     inv: job.inv,
@@ -234,6 +291,30 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
         Msg::Report(tx) => {
             let _ = tx.send(mgr.report());
         }
+        Msg::InFlight(tx) => {
+            let now = Instant::now();
+            let mut jobs: Vec<InFlightJob> = Vec::with_capacity(queue.len() + running_jobs.len());
+            for p in queue.iter() {
+                jobs.push(InFlightJob {
+                    id: p.id,
+                    model: p.model.clone(),
+                    action: p.action.clone(),
+                    phase: "queued".to_string(),
+                    since_ms: now.saturating_duration_since(p.enqueued).as_millis() as u64,
+                });
+            }
+            for r in running_jobs.iter() {
+                jobs.push(InFlightJob {
+                    id: r.id,
+                    model: r.model.clone(),
+                    action: r.action.clone(),
+                    phase: "running".to_string(),
+                    since_ms: now.saturating_duration_since(r.enqueued).as_millis() as u64,
+                });
+            }
+            jobs.sort_by_key(|j| j.id); // stable, submit-order
+            let _ = tx.send(jobs);
+        }
         Msg::Done { key, device, batch, failed } => {
             if failed {
                 mgr.build_failed(&key); // unwind budget + slot; jobs already failed
@@ -241,6 +322,7 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
                 mgr.release(&key);
             }
             running.remove(&key);
+            running_jobs.retain(|r| r.key != key); // group finished — drop its jobs
             busy.remove(&device);
             let mut s = stats.lock().unwrap();
             s.batches += 1;
@@ -254,7 +336,8 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
 }
 
 /// Assign as many runnable groups as there are free device lanes.
-fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy, lanes: &HashMap<Device, Sender<RunReq>>, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>) {
+#[allow(clippy::too_many_arguments)]
+fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy, lanes: &HashMap<Device, Sender<RunReq>>, running: &mut HashSet<InstanceKey>, busy: &mut HashSet<Device>, stats: &Arc<Mutex<Stats>>, running_jobs: &mut Vec<RunningJob>) {
     loop {
         // Groups whose key is not already running AND that can be placed on some
         // non-busy device (the scheduler policy then picks among them).
@@ -321,6 +404,12 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
             if let Some(f) = j.on_admit.take() {
                 f();
             }
+        }
+
+        // Track these jobs as running so the in-flight query keeps reporting them
+        // (they've left `queue`); cleared on this group's `Done`.
+        for j in jobs.iter() {
+            running_jobs.push(RunningJob { id: j.id, model: j.model.clone(), action: j.action.clone(), key: ckey.clone(), enqueued: j.enqueued });
         }
 
         // Sync residency counters immediately — a claim may have built/evicted, and
@@ -437,7 +526,7 @@ mod tests {
     use crate::budget::Budgets;
     use crate::{Instance, MemCost};
     use capability::{ActionResult, ActionSpec, Blob, Manifest, Media, Outcome};
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
 
     const GB: u64 = 1 << 30;
@@ -734,5 +823,105 @@ mod tests {
                 "fast model blocked behind another model's activation: {fast_elapsed:?}");
         // and slowboot itself still completes
         assert!(srx.recv_timeout(Duration::from_secs(5)).expect("slowboot reply").is_ok());
+    }
+
+    /// A model whose `run` blocks until a shared gate is released — so a job can be
+    /// held mid-flight while the test inspects the executor. `entered` flips once the
+    /// lane is actually executing the job (so the test can wait for the running
+    /// state deterministically, with no sleeps-as-timing).
+    struct Gated {
+        name: String,
+        vram: u64,
+        entered: Arc<AtomicU32>,
+        release: Arc<AtomicBool>,
+    }
+    struct GatedInst {
+        entered: Arc<AtomicU32>,
+        release: Arc<AtomicBool>,
+    }
+    impl ResidentModel for Gated {
+        fn manifest(&self) -> Manifest {
+            Manifest::new(&self.name, "gated", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new(&self.name, "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(self.vram, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+            Ok(Box::new(GatedInst { entered: self.entered.clone(), release: self.release.clone() }))
+        }
+    }
+    impl Instance for GatedInst {
+        fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            // Block until released — bounded so a bug can never hang the suite.
+            let start = Instant::now();
+            while !self.release.load(Ordering::SeqCst) {
+                if start.elapsed() > Duration::from_secs(5) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
+        }
+    }
+
+    /// `Executor::in_flight` reports both a RUNNING job (claimed onto a lane) and a
+    /// QUEUED one (still waiting), with stable, monotonic submit-order ids. Two
+    /// 20 GB models on a 24 GB card: only one fits, so while `a` runs (gated) `b`
+    /// cannot be placed and sits queued — a deterministic queued+running mix.
+    #[test]
+    fn in_flight_reports_queued_and_running_jobs_with_monotonic_ids() {
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let entered = Arc::new(AtomicU32::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let models: Vec<Arc<dyn ResidentModel>> = vec![
+            Arc::new(Gated { name: "a".into(), vram: 20 * GB, entered: entered.clone(), release: release.clone() }),
+            Arc::new(Gated { name: "b".into(), vram: 20 * GB, entered: entered.clone(), release: release.clone() }),
+        ];
+        let exec = Executor::start(models, budgets, Policy::default());
+
+        let (tx, rx) = channel();
+        let (ta, tb) = (tx.clone(), tx.clone());
+        exec.submit(Job::new("a", "run", Invocation::new()).reply(move |r| { let _ = ta.send(r); }));
+        exec.submit(Job::new("b", "run", Invocation::new()).reply(move |r| { let _ = tb.send(r); }));
+
+        // Wait until `a` is genuinely running on its lane (no timing guesswork).
+        let start = Instant::now();
+        while entered.load(Ordering::SeqCst) == 0 {
+            assert!(start.elapsed() < Duration::from_secs(5), "gated run never started");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let jobs = exec.in_flight();
+        // Both jobs are in flight: exactly one running, one queued (only one 20 GB
+        // model fits the card). Which model the scheduler picked to run is not fixed,
+        // so assert the split by phase, not by name.
+        let running: Vec<_> = jobs.iter().filter(|j| j.phase == "running").collect();
+        let queued: Vec<_> = jobs.iter().filter(|j| j.phase == "queued").collect();
+        assert_eq!(running.len(), 1, "exactly one running, jobs={jobs:?}");
+        assert_eq!(queued.len(), 1, "exactly one queued, jobs={jobs:?}");
+        assert_eq!(running[0].action, "run");
+        // Ids are monotonic in SUBMIT order (independent of which was scheduled): `a`
+        // submitted first, so its id is the smaller one.
+        let a = jobs.iter().find(|j| j.model == "a").expect("a in flight");
+        let b = jobs.iter().find(|j| j.model == "b").expect("b in flight");
+        assert!(a.id < b.id, "ids must be monotonic in submit order: a={} b={}", a.id, b.id);
+        assert!(jobs.iter().all(|j| j.since_ms < 5_000), "since_ms should be a small elapsed, jobs={jobs:?}");
+
+        // Release: both finish and the in-flight list drains.
+        release.store(true, Ordering::SeqCst);
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        // The list drains once both groups' `Done` land (which the lane sends just
+        // after each reply — so poll rather than assume it is already processed).
+        let start = Instant::now();
+        while !exec.in_flight().is_empty() {
+            assert!(start.elapsed() < Duration::from_secs(5), "in-flight never drained: {:?}", exec.in_flight());
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 }

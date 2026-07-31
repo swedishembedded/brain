@@ -15,14 +15,16 @@
 //! - **models** — the manifest catalog joined with per-instance placement, so each
 //!   model shows where (if anywhere) it is resident.
 //! - **executor** — the scheduler counters.
+//! - **requests** — the executor's in-flight jobs ([`Executor::in_flight`]), each
+//!   queued or running, mapped to a `RequestStat` (model/action/phase/since_ms).
 //!
-//! `requests`/`connections` are left to dedicated sources (a `JobRegistry`-backed
-//! request source can be added without touching this one).
+//! `connections` is still left to a dedicated source: per-transport socket tracking
+//! is a front-end concern, not something the executor sees.
 
 use capability::Manifest;
-use residency::{Device, DeviceBudget, Executor, InstancePlacement, ResidencyReport, Tier};
+use residency::{Device, DeviceBudget, Executor, InFlightJob, InstancePlacement, ResidencyReport, Tier};
 
-use crate::snapshot::{Accelerator, ExecutorStat, Instance, ModelStat, StatsSnapshot};
+use crate::snapshot::{Accelerator, ExecutorStat, Instance, ModelStat, RequestStat, StatsSnapshot};
 use crate::source::{Assembler, StatsSource};
 
 /// The `--device`-style id for a device (`cpu`, `gpu0`, `npu1`).
@@ -104,6 +106,21 @@ fn executor_stat(s: &residency::executor::Stats) -> ExecutorStat {
     }
 }
 
+/// Map one executor in-flight job into a snapshot [`RequestStat`]. `provider` stays
+/// `None` — it is a transport concept (which front-end submitted), not something the
+/// executor knows; the executor only sees model/action/phase.
+fn request_from_inflight(j: InFlightJob) -> RequestStat {
+    RequestStat {
+        id: j.id.to_string(),
+        provider: None,
+        model: Some(j.model),
+        action: Some(j.action),
+        phase: j.phase,
+        since_ms: j.since_ms,
+        extra: Default::default(),
+    }
+}
+
 /// The live source that reads a residency [`Executor`]. Holds a cheap clone, so it
 /// can be registered once and sampled repeatedly (e.g. by the D-Bus stream task).
 pub struct ExecutorSource {
@@ -125,6 +142,10 @@ impl StatsSource for ExecutorSource {
         // budgeted device, so the set adapts to any machine (0..N GPUs/NPUs).
         snap.accelerators.extend(budgets.iter().map(accelerator_from_budget));
         snap.models.extend(models_from(self.exec.manifests(), &placements));
+        // In-flight work → `requests`, straight from the executor's live queue +
+        // running set. `connections` stays empty: per-transport socket tracking is a
+        // front-end concern, out of scope for this executor-backed source.
+        snap.requests.extend(self.exec.in_flight().into_iter().map(request_from_inflight));
     }
 }
 
@@ -224,5 +245,80 @@ mod tests {
         // The whole thing serializes to a parseable JSON document.
         let json = snap.to_json_string();
         assert!(StatsSnapshot::from_json_str(&json).is_ok());
+    }
+
+    /// A snapshot built from an executor with in-flight work carries a non-empty
+    /// `requests` section, mapped from the executor's live jobs (model/action/phase/
+    /// since_ms; provider stays None). A gated model holds one job running while the
+    /// snapshot is taken, so the assertion is deterministic (no timing guesswork).
+    #[test]
+    fn snapshot_has_requests_when_executor_has_in_flight_work() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::mpsc::channel;
+        use std::time::{Duration, Instant};
+
+        struct Gated {
+            entered: Arc<AtomicU32>,
+            release: Arc<AtomicBool>,
+        }
+        struct GatedInst {
+            entered: Arc<AtomicU32>,
+            release: Arc<AtomicBool>,
+        }
+        impl ResidentModel for Gated {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("g", "gated", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("g", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(GB, 0)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn RInstance>, String> {
+                Ok(Box::new(GatedInst { entered: self.entered.clone(), release: self.release.clone() }))
+            }
+        }
+        impl RInstance for GatedInst {
+            fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                self.entered.fetch_add(1, Ordering::SeqCst);
+                let start = Instant::now();
+                while !self.release.load(Ordering::SeqCst) {
+                    if start.elapsed() > Duration::from_secs(5) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
+            }
+        }
+
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let entered = Arc::new(AtomicU32::new(0));
+        let release = Arc::new(AtomicBool::new(false));
+        let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Gated { entered: entered.clone(), release: release.clone() })];
+        let exec = Executor::start(models, budgets, Policy::default());
+
+        let (tx, rx) = channel();
+        exec.submit(residency::Job::new("g", "run", Invocation::new()).reply(move |r| { let _ = tx.send(r); }));
+        // Wait until the job is genuinely running on the lane before sampling.
+        let start = Instant::now();
+        while entered.load(Ordering::SeqCst) == 0 {
+            assert!(start.elapsed() < Duration::from_secs(5), "gated run never started");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let snap = snapshot_from_executor(&exec);
+        assert!(!snap.requests.is_empty(), "expected a non-empty requests section");
+        let r = &snap.requests[0];
+        assert_eq!(r.model.as_deref(), Some("g"));
+        assert_eq!(r.action.as_deref(), Some("run"));
+        assert_eq!(r.phase, "running");
+        assert_eq!(r.provider, None, "provider is a transport concept, not set here");
+        assert!(r.id.parse::<u64>().is_ok(), "id should be the numeric job id: {}", r.id);
+
+        release.store(true, Ordering::SeqCst);
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
     }
 }
