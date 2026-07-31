@@ -516,6 +516,12 @@ pub const PIXEL_SHUFFLE_DX: &str = include_str!("../wgsl/pixel_shuffle_dx.wgsl")
 pub const POS_ADD: &str = include_str!("../wgsl/pos_add.wgsl");
 /// `wgsl/pos_bwd.wgsl`
 pub const POS_BWD: &str = include_str!("../wgsl/pos_bwd.wgsl");
+/// `wgsl/prelu.wgsl`
+pub const PRELU: &str = include_str!("../wgsl/prelu.wgsl");
+/// `wgsl/prelu_bwd.wgsl`
+pub const PRELU_BWD: &str = include_str!("../wgsl/prelu_bwd.wgsl");
+/// `wgsl/prelu_bwd_wg.wgsl`
+pub const PRELU_BWD_WG: &str = include_str!("../wgsl/prelu_bwd_wg.wgsl");
 /// `wgsl/quant_pack.wgsl`
 pub const QUANT_PACK: &str = include_str!("../wgsl/quant_pack.wgsl");
 /// `wgsl/region_copy.wgsl`
@@ -945,6 +951,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("pixel_shuffle_dx", PIXEL_SHUFFLE_DX),
     ("pos_add", POS_ADD),
     ("pos_bwd", POS_BWD),
+    ("prelu", PRELU),
+    ("prelu_bwd", PRELU_BWD),
+    ("prelu_bwd_wg", PRELU_BWD_WG),
     ("quant_pack", QUANT_PACK),
     ("region_copy", REGION_COPY),
     ("rel_shift", REL_SHIFT),
