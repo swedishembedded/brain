@@ -17,7 +17,6 @@
 //! `text_embedding.weight` / `text_projection.*` names (ignored by the Qwen
 //! loader, picked up by [`crate::talker::TalkerModel`]).
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use serde_json::Value;
@@ -108,7 +107,7 @@ fn read_config(dir: &Path) -> Result<Value, String> {
     serde_json::from_str(&s).map_err(|e| format!("parse config.json: {e}"))
 }
 
-fn read_safetensors(dir: &Path) -> Result<Vec<checkpoint::safetensors::StTensor>, String> {
+fn open_source(dir: &Path) -> Result<checkpoint::weightio::WeightReader, String> {
     let st = dir.join("model.safetensors");
     if !st.exists() {
         return Err(format!(
@@ -116,7 +115,8 @@ fn read_safetensors(dir: &Path) -> Result<Vec<checkpoint::safetensors::StTensor>
             st.display()
         ));
     }
-    checkpoint::safetensors::read(st.to_str().unwrap())
+    checkpoint::weightio::WeightReader::open(st.to_str().unwrap())
+        .map_err(|e| format!("import: opening checkpoint: {e}"))
 }
 
 /// The Talker decoder parameter list (Qwen3, untied) plus the text-conditioning
@@ -177,85 +177,81 @@ fn mtp_param_specs(cfg: &MtpConfig) -> Vec<(String, usize)> {
     out
 }
 
-/// Remap + validate a set of HF tensors against an expected `(name, numel)` spec
-/// list, producing the ordered tensor table for a brain checkpoint. Fails loudly
-/// on a missing tensor, a shape mismatch, or a duplicate mapping.
-fn build_container(
-    tensors: Vec<checkpoint::safetensors::StTensor>,
+/// Stream `reader`'s tensors through `map`, writing each mapped tensor straight
+/// to `writer` (one at a time — never the whole checkpoint in memory). Fails
+/// loudly on a missing tensor, a shape mismatch, or a duplicate mapping — all
+/// caught by `StWriter::write`/`finish` (an unplanned or already-written name,
+/// or a wrong element count), so no separate coverage pass is needed here.
+fn stream_container(
+    reader: &checkpoint::weightio::WeightReader,
     map: impl Fn(&str) -> Option<String>,
-    specs: &[(String, usize)],
-) -> Result<(Vec<(String, Vec<u64>, Vec<f32>)>, usize, usize), String> {
-    let mut brain: HashMap<String, Vec<f32>> = HashMap::new();
+    writer: &mut checkpoint::weightio::StWriter,
+) -> Result<(usize, usize), String> {
     let mut dropped = 0usize;
     let mut mapped = 0usize;
-    for t in tensors {
-        match map(&t.name) {
+    let mut err: Option<String> = None;
+    reader.for_each(|name, _shape, data| {
+        if err.is_some() {
+            return;
+        }
+        match map(name) {
             Some(bn) => {
                 mapped += 1;
-                if brain.insert(bn.clone(), t.data).is_some() {
-                    return Err(format!("duplicate mapping to {bn}"));
+                if let Err(e) = writer.write(&bn, &data) {
+                    err = Some(format!("import: {e}"));
                 }
             }
             None => dropped += 1,
         }
+    });
+    if let Some(e) = err {
+        return Err(e);
     }
-    let mut out = Vec::new();
-    for (name, numel) in specs {
-        let data = brain
-            .remove(name)
-            .ok_or_else(|| format!("import: missing tensor for brain param {name}"))?;
-        if data.len() != *numel {
-            return Err(format!(
-                "import: {name} element count {} != expected {numel}",
-                data.len()
-            ));
-        }
-        out.push((name.clone(), vec![*numel as u64], data));
-    }
-    if !brain.is_empty() {
-        let extra: Vec<&String> = brain.keys().collect();
-        return Err(format!(
-            "import: {} mapped tensors unused: {extra:?}",
-            brain.len()
-        ));
-    }
-    Ok((out, mapped, dropped))
+    Ok((mapped, dropped))
 }
 
 /// Import the Talker decoder (+ text-conditioning tensors) from `<hf_dir>` into a
 /// brain checkpoint at `out_path`. Loadable by [`crate::talker::TalkerModel`].
+/// Streams one source tensor at a time (never the whole checkpoint in memory).
 pub fn import_talker(hf_dir: &str, out_path: &str) -> Result<(), String> {
     let dir = Path::new(hf_dir);
     let root = read_config(dir)?;
     let cfg = TalkerConfig::from_json(&root);
-    let tensors = read_safetensors(dir)?;
     let specs = talker_param_specs(&cfg);
-    let (out, mapped, dropped) = build_container(tensors, |n| talker_hf_to_brain(n), &specs)?;
+    let plan: Vec<(String, Vec<u64>)> = specs.iter().map(|(n, numel)| (n.clone(), vec![*numel as u64])).collect();
     // The container's config is the Qwen3 decoder config (untied) so the shared
     // loader parses it directly; the talker's M-RoPE/code-group metadata is not
     // needed for the decoder forward.
     let cfg_json = cfg.to_qwen(2048).to_json();
-    checkpoint::save(out_path, cfg_json, &out);
+    let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg_json, None)
+        .map_err(|e| format!("import: creating output: {e}"))?;
+    let reader = open_source(dir)?;
+    let (mapped, dropped) = stream_container(&reader, |n| talker_hf_to_brain(n), &mut writer)?;
+    writer.finish().map_err(|e| format!("import: {e}"))?;
     eprintln!(
         "imported Talker: {} tensors -> {out_path} ({mapped} HF talker.* tensors mapped, {dropped} dropped)",
-        out.len(),
+        plan.len(),
     );
     Ok(())
 }
 
 /// Import the MTP code-predictor from `<hf_dir>` into a brain checkpoint at
 /// `out_path`. Loadable by [`crate::mtp::MtpModel`].
+/// Streams one source tensor at a time (never the whole checkpoint in memory).
 pub fn import_mtp(hf_dir: &str, out_path: &str) -> Result<(), String> {
     let dir = Path::new(hf_dir);
     let root = read_config(dir)?;
     let cfg = MtpConfig::from_json(&root);
-    let tensors = read_safetensors(dir)?;
     let specs = mtp_param_specs(&cfg);
-    let (out, mapped, dropped) = build_container(tensors, |n| mtp_hf_to_brain(n), &specs)?;
-    checkpoint::save(out_path, cfg.to_json(), &out);
+    let plan: Vec<(String, Vec<u64>)> = specs.iter().map(|(n, numel)| (n.clone(), vec![*numel as u64])).collect();
+    let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg.to_json(), None)
+        .map_err(|e| format!("import: creating output: {e}"))?;
+    let reader = open_source(dir)?;
+    let (mapped, dropped) = stream_container(&reader, |n| mtp_hf_to_brain(n), &mut writer)?;
+    writer.finish().map_err(|e| format!("import: {e}"))?;
     eprintln!(
         "imported MTP: {} tensors -> {out_path} ({mapped} HF code_predictor.* tensors mapped, {dropped} dropped)",
-        out.len(),
+        plan.len(),
     );
     Ok(())
 }
@@ -263,6 +259,7 @@ pub fn import_mtp(hf_dir: &str, out_path: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn talker_name_mapping() {
@@ -339,5 +336,155 @@ mod tests {
         };
         let ms = mtp_param_specs(&mc);
         assert_eq!(ms.len(), 5 * 11 + 1 + 15 + 15);
+    }
+
+    /// Inverse of `layer_leaf`: the HF decoder-layer leaf name for a brain leaf.
+    fn hf_layer_leaf(brain_leaf: &str) -> &'static str {
+        match brain_leaf {
+            "ln1.weight" => "input_layernorm.weight",
+            "ln2.weight" => "post_attention_layernorm.weight",
+            "attn.wq.weight" => "self_attn.q_proj.weight",
+            "attn.wk.weight" => "self_attn.k_proj.weight",
+            "attn.wv.weight" => "self_attn.v_proj.weight",
+            "attn.wo.weight" => "self_attn.o_proj.weight",
+            "attn.q_norm.weight" => "self_attn.q_norm.weight",
+            "attn.k_norm.weight" => "self_attn.k_norm.weight",
+            "mlp.gate.weight" => "mlp.gate_proj.weight",
+            "mlp.up.weight" => "mlp.up_proj.weight",
+            "mlp.down.weight" => "mlp.down_proj.weight",
+            other => panic!("unknown brain leaf {other}"),
+        }
+    }
+
+    /// Inverse of `talker_hf_to_brain`: the HF tensor name a given brain Talker
+    /// param name came from.
+    fn hf_name_for_talker(brain_name: &str) -> String {
+        match brain_name {
+            "tok.weight" => "talker.model.codec_embedding.weight".to_string(),
+            "norm.weight" => "talker.model.norm.weight".to_string(),
+            "lm_head.weight" => "talker.codec_head.weight".to_string(),
+            "text_embedding.weight" => "talker.model.text_embedding.weight".to_string(),
+            "text_projection.fc1.weight" => "talker.text_projection.linear_fc1.weight".to_string(),
+            "text_projection.fc1.bias" => "talker.text_projection.linear_fc1.bias".to_string(),
+            "text_projection.fc2.weight" => "talker.text_projection.linear_fc2.weight".to_string(),
+            "text_projection.fc2.bias" => "talker.text_projection.linear_fc2.bias".to_string(),
+            other => {
+                let rest = other.strip_prefix("blocks.").unwrap();
+                let (n, leaf) = rest.split_once('.').unwrap();
+                format!("talker.model.layers.{n}.{}", hf_layer_leaf(leaf))
+            }
+        }
+    }
+
+    /// Inverse of `mtp_hf_to_brain`.
+    fn hf_name_for_mtp(brain_name: &str) -> String {
+        match brain_name {
+            "norm.weight" => "talker.code_predictor.model.norm.weight".to_string(),
+            "small_to_mtp_projection.weight" => {
+                "talker.code_predictor.small_to_mtp_projection.weight".to_string()
+            }
+            "small_to_mtp_projection.bias" => "talker.code_predictor.small_to_mtp_projection.bias".to_string(),
+            other if other.starts_with("codec_embedding.") => {
+                let i = other.strip_prefix("codec_embedding.").unwrap().strip_suffix(".weight").unwrap();
+                format!("talker.code_predictor.model.codec_embedding.{i}.weight")
+            }
+            other if other.starts_with("lm_head.") => {
+                let i = other.strip_prefix("lm_head.").unwrap().strip_suffix(".weight").unwrap();
+                format!("talker.code_predictor.lm_head.{i}.weight")
+            }
+            other => {
+                let rest = other.strip_prefix("blocks.").unwrap();
+                let (n, leaf) = rest.split_once('.').unwrap();
+                format!("talker.code_predictor.model.layers.{n}.{}", hf_layer_leaf(leaf))
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_import_talker_and_mtp_from_one_shared_checkpoint() {
+        // A synthetic HF checkpoint dir holding BOTH talker.* and
+        // talker.code_predictor.* tensors in one model.safetensors (mirrors the
+        // real Qwen3-TTS layout) — each import must pick out only its own
+        // tensors, streaming, without cross-contamination.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("tts-import-src-{pid}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = serde_json::json!({
+            "talker_config": {
+                "num_hidden_layers": 2, "hidden_size": 16, "head_dim": 8,
+                "num_attention_heads": 4, "num_key_value_heads": 2, "intermediate_size": 32,
+                "vocab_size": 23, "text_hidden_size": 20, "text_vocab_size": 29,
+                "code_predictor_config": {
+                    "num_hidden_layers": 2, "hidden_size": 16, "head_dim": 8,
+                    "num_attention_heads": 4, "num_key_value_heads": 2, "intermediate_size": 32,
+                    "vocab_size": 23, "num_code_groups": 4,
+                },
+            },
+        });
+        std::fs::write(dir.join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+
+        let root = &config;
+        let tc = TalkerConfig::from_json(root);
+        let mc = MtpConfig::from_json(root);
+        let talker_specs = talker_param_specs(&tc);
+        let mtp_specs = mtp_param_specs(&mc);
+
+        // Every tensor both imports need, keyed by its brain name (namespaced so
+        // the two never collide, matching how the real checkpoint co-resides).
+        let mut plan: Vec<(String, Vec<u64>)> = Vec::new();
+        let mut expect_talker: HashMap<String, Vec<f32>> = HashMap::new();
+        let mut expect_mtp: HashMap<String, Vec<f32>> = HashMap::new();
+        for (i, (name, numel)) in talker_specs.iter().enumerate() {
+            let hf = hf_name_for_talker(name);
+            let data: Vec<f32> = (0..*numel).map(|j| (i * 10_000 + j) as f32 * 0.001).collect();
+            plan.push((hf.clone(), vec![*numel as u64]));
+            expect_talker.insert(name.clone(), data);
+        }
+        for (i, (name, numel)) in mtp_specs.iter().enumerate() {
+            let hf = hf_name_for_mtp(name);
+            let data: Vec<f32> = (0..*numel).map(|j| (i * 20_000 + j) as f32 * 0.001 + 5.0).collect();
+            plan.push((hf.clone(), vec![*numel as u64]));
+            expect_mtp.insert(name.clone(), data);
+        }
+
+        let mut w = checkpoint::weightio::StWriter::create(
+            dir.join("model.safetensors").to_str().unwrap(),
+            &plan,
+            &serde_json::Value::Null,
+            None,
+        )
+        .unwrap();
+        for (i, (name, numel)) in talker_specs.iter().enumerate() {
+            let hf = hf_name_for_talker(name);
+            let data: Vec<f32> = (0..*numel).map(|j| (i * 10_000 + j) as f32 * 0.001).collect();
+            w.write(&hf, &data).unwrap();
+        }
+        for (i, (name, numel)) in mtp_specs.iter().enumerate() {
+            let hf = hf_name_for_mtp(name);
+            let data: Vec<f32> = (0..*numel).map(|j| (i * 20_000 + j) as f32 * 0.001 + 5.0).collect();
+            w.write(&hf, &data).unwrap();
+        }
+        w.finish().unwrap();
+
+        let talker_out = std::env::temp_dir().join(format!("tts-import-talker-{pid}.safetensors"));
+        let mtp_out = std::env::temp_dir().join(format!("tts-import-mtp-{pid}.safetensors"));
+        import_talker(dir.to_str().unwrap(), talker_out.to_str().unwrap()).unwrap();
+        import_mtp(dir.to_str().unwrap(), mtp_out.to_str().unwrap()).unwrap();
+
+        let tr = checkpoint::weightio::WeightReader::open(talker_out.to_str().unwrap()).unwrap();
+        assert_eq!(tr.names().count(), expect_talker.len());
+        for (name, data) in &expect_talker {
+            assert_eq!(tr.tensor(name).unwrap(), *data, "talker {name}");
+        }
+
+        let mr = checkpoint::weightio::WeightReader::open(mtp_out.to_str().unwrap()).unwrap();
+        assert_eq!(mr.names().count(), expect_mtp.len());
+        for (name, data) in &expect_mtp {
+            assert_eq!(mr.tensor(name).unwrap(), *data, "mtp {name}");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&talker_out).ok();
+        std::fs::remove_file(&mtp_out).ok();
     }
 }

@@ -10,7 +10,7 @@
 //! silently half-loaded model is worse than one that refuses to load.
 
 use crate::config::Chronos2Config;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Tensors the checkpoint header carries that are NOT learnable params
@@ -71,19 +71,57 @@ pub fn config_from_dir(dir: &str) -> Result<Chronos2Config, String> {
     Chronos2Config::from_hf(&v)
 }
 
-/// Import an HF checkpoint dir → a brain `.safetensors` container (config + tensors).
+/// Import an HF checkpoint dir → a brain `.safetensors` container (config +
+/// tensors), streaming one source tensor at a time (never the whole checkpoint
+/// in memory). Mirrors `load_hf`'s validation (strict, same error shapes) but
+/// writes straight through `StWriter` instead of building an in-RAM map first.
 pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
     let cfg = config_from_dir(hf_dir)?;
-    let weights = load_hf(&cfg, hf_dir)?;
-    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
+    // Output shapes are flat (matches this crate's long-standing convention:
+    // the container stores element counts, not param_list's real shape).
+    let plan: Vec<(String, Vec<u64>)> = cfg
         .param_list()
         .into_iter()
-        .map(|(name, _shape)| {
-            let data = weights.get(&name).cloned().unwrap_or_default();
-            (name, vec![data.len() as u64], data)
-        })
+        .map(|(name, shape)| (name, vec![shape.iter().product::<usize>() as u64]))
         .collect();
-    checkpoint::save(out_path, cfg.to_json(), &tensors);
+    let planned: HashSet<&str> = plan.iter().map(|(n, _)| n.as_str()).collect();
+    let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg.to_json(), None)
+        .map_err(|e| format!("import: creating output: {e}"))?;
+
+    let p = Path::new(hf_dir);
+    let reader = if p.is_dir() {
+        checkpoint::weightio::WeightReader::open_hf_dir(p)
+    } else {
+        checkpoint::weightio::WeightReader::open(hf_dir)
+    }
+    .map_err(|e| format!("import: opening checkpoint: {e}"))?;
+
+    let mut extra: Vec<String> = Vec::new();
+    let mut err: Option<String> = None;
+    reader.for_each(|name, _shape, data| {
+        if err.is_some() || is_non_persistent(name) {
+            return;
+        }
+        if !planned.contains(name) {
+            extra.push(name.to_string());
+            return;
+        }
+        if let Err(e) = writer.write(name, &data) {
+            err = Some(format!("import: {e}"));
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    if !extra.is_empty() {
+        extra.sort();
+        return Err(format!(
+            "import: {} unmapped tensors, e.g. {:?}",
+            extra.len(),
+            &extra[..extra.len().min(5)]
+        ));
+    }
+    writer.finish().map_err(|e| format!("import: {e}"))?;
     Ok(())
 }
 
@@ -121,6 +159,51 @@ mod tests {
             assert!(out.iter().all(|&v| (v - mean).abs() < 1e-2), "loaded model lost the mean");
         }
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_import_writes_every_tensor_and_drops_non_persistent_buffers() {
+        // A synthetic HF checkpoint dir: config.json + a single model.safetensors
+        // holding every `tiny()` param plus one non-persistent buffer that must
+        // be silently skipped (never reaches the output plan).
+        let cfg = Chronos2Config::tiny();
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("chronos2-import-src-{pid}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), serde_json::to_vec(&cfg.to_json()).unwrap()).unwrap();
+
+        let list = cfg.param_list();
+        let mut plan: Vec<(String, Vec<u64>)> =
+            list.iter().map(|(n, s)| (n.clone(), s.iter().map(|&d| d as u64).collect())).collect();
+        plan.push(("model.rope_embed.inv_freq".to_string(), vec![4]));
+        let mut w = checkpoint::weightio::StWriter::create(
+            dir.join("model.safetensors").to_str().unwrap(),
+            &plan,
+            &serde_json::Value::Null,
+            None,
+        )
+        .unwrap();
+        let mut expect: HashMap<String, Vec<f32>> = HashMap::new();
+        for (i, (name, shape)) in list.iter().enumerate() {
+            let n: usize = shape.iter().product();
+            let data: Vec<f32> = (0..n).map(|j| (i * 1000 + j) as f32 * 0.001).collect();
+            w.write(name, &data).unwrap();
+            expect.insert(name.clone(), data);
+        }
+        w.write("model.rope_embed.inv_freq", &[0.0, 0.0, 0.0, 0.0]).unwrap();
+        w.finish().unwrap();
+
+        let out = std::env::temp_dir().join(format!("chronos2-import-out-{pid}.safetensors"));
+        import(dir.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+
+        let reader = checkpoint::weightio::WeightReader::open(out.to_str().unwrap()).unwrap();
+        for (name, data) in &expect {
+            assert_eq!(reader.tensor(name).unwrap(), *data, "{name}");
+        }
+        assert_eq!(reader.names().count(), expect.len(), "non-persistent buffer must not be carried through");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&out).ok();
     }
 
     #[test]

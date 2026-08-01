@@ -10,7 +10,7 @@
 //! error: a silently half-loaded model is worse than one that refuses to load.
 
 use crate::config::{is_non_persistent, FincastConfig};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// Read FinCast weights (a single safetensors file or an HF-style dir) into a
@@ -54,17 +54,55 @@ pub fn load_hf(cfg: &FincastConfig, path: &str) -> Result<HashMap<String, Vec<f3
 /// (config + tensors). The config is the published default (FinCast ships no
 /// `config.json`; the dims are fixed by the checkpoint and asserted by T0).
 pub fn import(ckpt: &str, out_path: &str) -> Result<(), String> {
-    let cfg = FincastConfig::default();
-    let weights = load_hf(&cfg, ckpt)?;
-    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
+    import_cfg(&FincastConfig::default(), ckpt, out_path)
+}
+
+/// `import`, parametrized over the config (split out so tests can exercise the
+/// real streaming path at `tiny()` scale instead of the real ~1.3B-param model).
+/// Streams one source tensor at a time (never the whole checkpoint in memory);
+/// mirrors `load_hf`'s validation but writes straight through `StWriter`.
+fn import_cfg(cfg: &FincastConfig, ckpt: &str, out_path: &str) -> Result<(), String> {
+    // Output shapes are flat (matches this crate's long-standing convention:
+    // the container stores element counts, not param_list's real shape).
+    let plan: Vec<(String, Vec<u64>)> = cfg
         .param_list()
         .into_iter()
-        .map(|(name, _shape)| {
-            let data = weights.get(&name).cloned().unwrap_or_default();
-            (name, vec![data.len() as u64], data)
-        })
+        .map(|(name, shape)| (name, vec![shape.iter().product::<usize>() as u64]))
         .collect();
-    checkpoint::save(out_path, cfg.to_json(), &tensors);
+    let planned: HashSet<&str> = plan.iter().map(|(n, _)| n.as_str()).collect();
+    let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg.to_json(), None)
+        .map_err(|e| format!("import: creating output: {e}"))?;
+
+    let p = Path::new(ckpt);
+    let reader = if p.is_dir() {
+        checkpoint::weightio::WeightReader::open_hf_dir(p)
+    } else {
+        checkpoint::weightio::WeightReader::open(ckpt)
+    }
+    .map_err(|e| format!("import: opening checkpoint: {e}"))?;
+
+    let mut extra: Vec<String> = Vec::new();
+    let mut err: Option<String> = None;
+    reader.for_each(|name, _shape, data| {
+        if err.is_some() || is_non_persistent(name) {
+            return;
+        }
+        if !planned.contains(name) {
+            extra.push(name.to_string());
+            return;
+        }
+        if let Err(e) = writer.write(name, &data) {
+            err = Some(format!("import: {e}"));
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    if !extra.is_empty() {
+        extra.sort();
+        return Err(format!("import: {} unmapped tensors, e.g. {:?}", extra.len(), &extra[..extra.len().min(5)]));
+    }
+    writer.finish().map_err(|e| format!("import: {e}"))?;
     Ok(())
 }
 
@@ -90,5 +128,45 @@ mod tests {
         let back = FincastConfig::from_json(&c.header["config"]).unwrap();
         assert_eq!(back, cfg);
         std::fs::remove_file(&good).ok();
+    }
+
+    #[test]
+    fn streaming_import_writes_every_tensor_and_drops_non_persistent_buffers() {
+        // A synthetic single-file HF checkpoint holding every `tiny()` param
+        // plus one gate-threshold buffer that import must silently drop. Goes
+        // through `import_cfg` directly (real `import` is pinned to the full
+        // ~1.3B-param default, too big for a unit test).
+        let cfg = FincastConfig::tiny();
+        let pid = std::process::id();
+        let src = std::env::temp_dir().join(format!("fincast-import-src-{pid}.safetensors"));
+
+        let list = cfg.param_list();
+        let mut plan: Vec<(String, Vec<u64>)> =
+            list.iter().map(|(n, s)| (n.clone(), s.iter().map(|&d| d as u64).collect())).collect();
+        plan.push(("gate.threshold_eval".to_string(), vec![1]));
+        let mut w =
+            checkpoint::weightio::StWriter::create(src.to_str().unwrap(), &plan, &serde_json::Value::Null, None)
+                .unwrap();
+        let mut expect: HashMap<String, Vec<f32>> = HashMap::new();
+        for (i, (name, shape)) in list.iter().enumerate() {
+            let n: usize = shape.iter().product();
+            let data: Vec<f32> = (0..n).map(|j| (i * 1000 + j) as f32 * 0.001).collect();
+            w.write(name, &data).unwrap();
+            expect.insert(name.clone(), data);
+        }
+        w.write("gate.threshold_eval", &[0.0]).unwrap();
+        w.finish().unwrap();
+
+        let out = std::env::temp_dir().join(format!("fincast-import-out-{pid}.safetensors"));
+        import_cfg(&cfg, src.to_str().unwrap(), out.to_str().unwrap()).unwrap();
+
+        let reader = checkpoint::weightio::WeightReader::open(out.to_str().unwrap()).unwrap();
+        for (name, data) in &expect {
+            assert_eq!(reader.tensor(name).unwrap(), *data, "{name}");
+        }
+        assert_eq!(reader.names().count(), expect.len(), "non-persistent buffer must not be carried through");
+
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&out).ok();
     }
 }
