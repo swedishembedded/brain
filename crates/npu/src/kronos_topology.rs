@@ -22,37 +22,34 @@
 //! transposed once to ONNX `[in,out]`; `Int8` stores them per-output-channel and
 //! dequantises in-graph.
 
-use std::collections::HashMap;
-
 use kronos::KronosConfig;
 use onnx::builder::GraphBuilder;
 use onnx::graph::Node;
 
 use crate::qwen_topology::Quant;
-
-type W = HashMap<String, Vec<f32>>;
+use crate::topology::WeightSource;
 
 /// Assemble the Kronos decoder `decode_s1` graph into `g` (fp32).
-pub fn build_kronos_decoder_graph(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder) {
+pub fn build_kronos_decoder_graph(cfg: &KronosConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBuilder) {
     build_kronos_decoder_graph_quant(cfg, w, t, g, Quant::F32);
 }
 
 /// As [`build_kronos_decoder_graph`] with a weight-quantization mode.
-pub fn build_kronos_decoder_graph_quant(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder, quant: Quant) {
+pub fn build_kronos_decoder_graph_quant(cfg: &KronosConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBuilder, quant: Quant) {
     s1_stack(cfg, w, t, g, quant, false);
 }
 
 /// s1 PREFILL: the full-window decoder, additionally emitting per-layer RoPE'd
 /// `k_{l}`/`v_{l}` `[1,heads,T,hd]` — these seed the single-token decode's KV cache
 /// (`build_kronos_s1_decode_graph`). Same math as the plain decoder graph.
-pub fn build_kronos_s1_prefill_graph_quant(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder, quant: Quant) {
+pub fn build_kronos_s1_prefill_graph_quant(cfg: &KronosConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBuilder, quant: Quant) {
     s1_stack(cfg, w, t, g, quant, true);
 }
-pub fn build_kronos_s1_prefill_graph(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder) {
+pub fn build_kronos_s1_prefill_graph(cfg: &KronosConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBuilder) {
     s1_stack(cfg, w, t, g, Quant::F32, true);
 }
 
-fn s1_stack(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder, quant: Quant, emit_kv: bool) {
+fn s1_stack(cfg: &KronosConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBuilder, quant: Quant, emit_kv: bool) {
     let d = cfg.d_model;
     let heads = cfg.n_heads;
     let hd = d / heads;
@@ -157,10 +154,10 @@ fn s1_stack(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder, quant: Qu
 /// dep PREFILL: project the whole context `ctx:[1,T,D]` to the cross-attention
 /// K/V once, `dep_k`/`dep_v:[1,dep_heads,T,dep_hd]` (K RoPE'd at each position),
 /// seeding the dep decode cache — mirrors host `ensure_dep_kv`.
-pub fn build_kronos_dep_prefill_graph(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder) {
+pub fn build_kronos_dep_prefill_graph(cfg: &KronosConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBuilder) {
     build_kronos_dep_prefill_graph_quant(cfg, w, t, g, Quant::F32);
 }
-pub fn build_kronos_dep_prefill_graph_quant(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder, quant: Quant) {
+pub fn build_kronos_dep_prefill_graph_quant(cfg: &KronosConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBuilder, quant: Quant) {
     let d = cfg.d_model;
     let heads = cfg.dep_n_heads;
     let hd = d / heads;
@@ -207,10 +204,10 @@ pub fn build_kronos_dep_prefill_graph_quant(cfg: &KronosConfig, w: &W, t: usize,
 /// `s2_logits:[1,1,s2v]`. The dep cross-attn is non-causal but during the rollout
 /// only positions `0..=pos` exist, so `dep_mask` (0 on filled slots) + the self
 /// score attends exactly the same set the full-window dep graph would.
-pub fn build_kronos_dep_decode_graph(cfg: &KronosConfig, w: &W, cap: usize, g: &mut GraphBuilder) {
+pub fn build_kronos_dep_decode_graph(cfg: &KronosConfig, w: &dyn WeightSource, cap: usize, g: &mut GraphBuilder) {
     build_kronos_dep_decode_graph_quant(cfg, w, cap, g, Quant::F32);
 }
-pub fn build_kronos_dep_decode_graph_quant(cfg: &KronosConfig, w: &W, cap: usize, g: &mut GraphBuilder, quant: Quant) {
+pub fn build_kronos_dep_decode_graph_quant(cfg: &KronosConfig, w: &dyn WeightSource, cap: usize, g: &mut GraphBuilder, quant: Quant) {
     let d = cfg.d_model;
     let heads = cfg.dep_n_heads;
     let hd = d / heads;
@@ -280,7 +277,7 @@ pub fn build_kronos_dep_decode_graph_quant(cfg: &KronosConfig, w: &W, cap: usize
 }
 
 /// Assemble the Kronos `decode_s2` dependency-layer graph into `g` (fp32).
-pub fn build_kronos_dep_graph(cfg: &KronosConfig, w: &W, t: usize, g: &mut GraphBuilder) {
+pub fn build_kronos_dep_graph(cfg: &KronosConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBuilder) {
     build_kronos_dep_graph_quant(cfg, w, t, g, Quant::F32);
 }
 
@@ -291,7 +288,7 @@ pub fn build_kronos_dep_graph(cfg: &KronosConfig, w: &W, t: usize, g: &mut Graph
 /// `D/dep_n_heads`, so its own RoPE tables); then `norm(ctx + attn)` → `proj_s2`.
 pub fn build_kronos_dep_graph_quant(
     cfg: &KronosConfig,
-    w: &W,
+    w: &dyn WeightSource,
     t: usize,
     g: &mut GraphBuilder,
     quant: Quant,
@@ -368,10 +365,10 @@ pub fn build_kronos_dep_graph_quant(
 /// [1,heads,cap,hd]` + `rope_cos`/`rope_sin:[1,1,1,hd/2]` (this token's absolute
 /// position) + `past_mask:[1,1,1,cap]` (additive, 0 on filled slots) → per-layer
 /// `new_k_{l}`/`new_v_{l}:[1,heads,1,hd]`, `ctx:[1,1,D]`, `s1_logits:[1,1,s1v]`.
-pub fn build_kronos_s1_decode_graph(cfg: &KronosConfig, w: &W, cap: usize, g: &mut GraphBuilder) {
+pub fn build_kronos_s1_decode_graph(cfg: &KronosConfig, w: &dyn WeightSource, cap: usize, g: &mut GraphBuilder) {
     build_kronos_s1_decode_graph_quant(cfg, w, cap, g, Quant::F32);
 }
-pub fn build_kronos_s1_decode_graph_quant(cfg: &KronosConfig, w: &W, cap: usize, g: &mut GraphBuilder, quant: Quant) {
+pub fn build_kronos_s1_decode_graph_quant(cfg: &KronosConfig, w: &dyn WeightSource, cap: usize, g: &mut GraphBuilder, quant: Quant) {
     let d = cfg.d_model;
     let heads = cfg.n_heads;
     let hd = d / heads;
@@ -504,44 +501,44 @@ impl<'a> Topo<'a> {
         self.concat2(&new_first, &new_second, 3)
     }
 
-    fn rmsnorm(&mut self, x: &str, name: &str, w: &W, dim: usize) -> String {
+    fn rmsnorm(&mut self, x: &str, name: &str, w: &dyn WeightSource, dim: usize) -> String {
         let gain = format!("{name}.g");
-        self.b.rmsnorm(x, &gain, w[name].clone(), dim, "c_eps")
+        self.b.rmsnorm(x, &gain, w.get(name), dim, "c_eps")
     }
     /// RMSNorm writing its final scaled tensor to `out_name`.
-    fn rmsnorm_to(&mut self, x: &str, name: &str, w: &W, dim: usize, out_name: &str) {
+    fn rmsnorm_to(&mut self, x: &str, name: &str, w: &dyn WeightSource, dim: usize, out_name: &str) {
         let gain = format!("{name}.g");
-        self.b.rmsnorm_to(x, &gain, w[name].clone(), dim, "c_eps", out_name);
+        self.b.rmsnorm_to(x, &gain, w.get(name), dim, "c_eps", out_name);
     }
 
     /// Bias-free linear `y = x @ W^T`; brain `[out,in]` transposed to ONNX
     /// `[in,out]`, INT8 per-channel dequant when enabled.
-    fn linear(&mut self, x: &str, name: &str, w: &W, out: usize, inp: usize) -> String {
+    fn linear(&mut self, x: &str, name: &str, w: &dyn WeightSource, out: usize, inp: usize) -> String {
         let o = self.tmp("lin");
         self.matmul_w(x, name, &format!("{name}.wt"), w, out, inp, &o);
         o
     }
     /// Biased linear `y = x @ W^T + b` (weight `<prefix>.weight`, bias
     /// `<prefix>.bias`), into a fresh tensor.
-    fn linear_biased(&mut self, x: &str, prefix: &str, w: &W, out: usize, inp: usize) -> String {
+    fn linear_biased(&mut self, x: &str, prefix: &str, w: &dyn WeightSource, out: usize, inp: usize) -> String {
         let o = self.tmp("linb");
         self.linear_biased_to(x, prefix, w, out, inp, &o);
         o
     }
     /// Biased linear writing the bias-add to `out_name`.
-    fn linear_biased_to(&mut self, x: &str, prefix: &str, w: &W, out: usize, inp: usize, out_name: &str) {
+    fn linear_biased_to(&mut self, x: &str, prefix: &str, w: &dyn WeightSource, out: usize, inp: usize, out_name: &str) {
         let wname = format!("{prefix}.weight");
         let y = self.linear(x, &wname, w, out, inp);
         let bn = format!("{prefix}.bias.b");
-        self.f32(&bn, &[out as i64], w[&format!("{prefix}.bias")].clone());
+        self.f32(&bn, &[out as i64], w.get(&format!("{prefix}.bias")));
         self.node("Add", &[&y, &bn], out_name);
     }
 
-    fn matmul_w(&mut self, x: &str, name: &str, winit: &str, w: &W, out: usize, inp: usize, y: &str) {
+    fn matmul_w(&mut self, x: &str, name: &str, winit: &str, w: &dyn WeightSource, out: usize, inp: usize, y: &str) {
         let qmax = match self.quant {
             Quant::F32 => {
                 if !self.has(winit) {
-                    let wt = transpose(&w[name], out, inp);
+                    let wt = transpose(&w.get(name), out, inp);
                     self.f32(winit, &[inp as i64, out as i64], wt);
                 }
                 self.node("MatMul", &[x, winit], y);
@@ -552,7 +549,7 @@ impl<'a> Topo<'a> {
         };
         let wq = format!("{winit}.q");
         if !self.has(&wq) {
-            let wt = transpose(&w[name], out, inp);
+            let wt = transpose(&w.get(name), out, inp);
             let mut scales = vec![0f32; out];
             let mut q = vec![0i8; inp * out];
             for oc in 0..out {
@@ -594,12 +591,15 @@ fn transpose(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     #[test]
     fn builds_a_valid_graph_at_tiny_scale() {
         let cfg = KronosConfig::tiny();
-        let w: W = cfg.param_list().into_iter().map(|(k, s)| (k, vec![0.01; s.iter().product()])).collect();
+        let w: HashMap<String, Vec<f32>> =
+            cfg.param_list().into_iter().map(|(k, s)| (k, vec![0.01; s.iter().product()])).collect();
         let mut g = GraphBuilder::new("kronos_decoder");
         build_kronos_decoder_graph(&cfg, &w, 8, &mut g);
         let bytes = g.finish();

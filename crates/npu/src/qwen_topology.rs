@@ -14,18 +14,16 @@
 //! lm_head reuses `tok.weight`. RoPE uses Qwen's half-split (NeoX) convention via
 //! precomputed cos/sin tables; QK-norm is RMSNorm over `head_dim`.
 
-use std::collections::HashMap;
-
 use onnx::builder::GraphBuilder;
 use onnx::graph::Node;
 use qwen::config::QwenConfig;
 
-type W = HashMap<String, Vec<f32>>;
+use crate::topology::WeightSource;
 
 /// Assembles the decoder graph into `g`. `w` is the brain checkpoint's tensors
 /// (role ""), `t` the fixed sequence length. Input `input_ids:[1,T]` (int64),
 /// output `logits:[1,T,vocab]` (f32).
-pub fn build_qwen_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder) {
+pub fn build_qwen_graph(cfg: &QwenConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBuilder) {
     let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant: Quant::F32 };
     let d = cfg.d_model as usize;
     let vocab = cfg.vocab as usize;
@@ -35,7 +33,7 @@ pub fn build_qwen_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder)
     tp.g.output_f32("logits", &[1, ti, vocab as i64]);
 
     // Token embedding: Gather(tok.weight[vocab,d], ids) -> [1,T,d].
-    tp.f32("tok.weight", &[vocab as i64, d as i64], w["tok.weight"].clone());
+    tp.f32("tok.weight", &[vocab as i64, d as i64], w.get("tok.weight"));
     let x = tp.gather("tok.weight", "input_ids", 0, "emb");
 
     let xf = build_stack(&mut tp, cfg, w, t, &x, false);
@@ -54,7 +52,7 @@ pub fn build_qwen_graph(cfg: &QwenConfig, w: &W, t: usize, g: &mut GraphBuilder)
 /// state, exactly mirroring [`tts::gen::TalkerGen::forward`]. The codebook-0 head
 /// (`codec_head_logits`) and the MTP residual fill stay on the host, so this
 /// graph stops at the final RMSNorm and emits the hidden state, not logits.
-pub fn build_talker_hidden_graph(cfg: &QwenConfig, w: &W, t: usize, quant: bool, g: &mut GraphBuilder) {
+pub fn build_talker_hidden_graph(cfg: &QwenConfig, w: &dyn WeightSource, t: usize, quant: bool, g: &mut GraphBuilder) {
     let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant: Quant::from_bool(quant) };
     let d = cfg.d_model as usize;
     let ti = t as i64;
@@ -73,7 +71,7 @@ pub fn build_talker_hidden_graph(cfg: &QwenConfig, w: &W, t: usize, quant: bool,
 /// this once seeds the resident decode cache for the whole prompt prefix in a
 /// single inference, instead of streaming the prefix token-by-token through the
 /// decode-step graph.
-pub fn build_talker_prefill_graph(cfg: &QwenConfig, w: &W, t: usize, quant: Quant, g: &mut GraphBuilder) {
+pub fn build_talker_prefill_graph(cfg: &QwenConfig, w: &dyn WeightSource, t: usize, quant: Quant, g: &mut GraphBuilder) {
     let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant };
     let d = cfg.d_model as usize;
     let ti = t as i64;
@@ -98,7 +96,7 @@ pub fn build_talker_prefill_graph(cfg: &QwenConfig, w: &W, t: usize, quant: Quan
 /// (this token's k/v, which the host writes into the cache at the current slot).
 /// Attention is over the (masked) past cache concatenated with the new token's
 /// own key/value, so the static `cap` shapes never change.
-pub fn build_talker_decode_graph(cfg: &QwenConfig, w: &W, cap: usize, quant: Quant, g: &mut GraphBuilder) {
+pub fn build_talker_decode_graph(cfg: &QwenConfig, w: &dyn WeightSource, cap: usize, quant: Quant, g: &mut GraphBuilder) {
     let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant };
     let d = cfg.d_model as usize;
     let nh = cfg.n_heads as usize;
@@ -224,7 +222,7 @@ pub fn build_talker_decode_graph(cfg: &QwenConfig, w: &W, cap: usize, quant: Qua
 /// Weights: `small_to_mtp_projection.{weight,bias}` (emb→d; Identity if emb==d),
 /// `blocks.{l}.*`, `norm.weight`, `codec_embedding.{i}.weight[vocab,emb]`,
 /// `lm_head.{i}.weight[vocab,d]` for i in 0..nres.
-pub fn build_mtp_fused_graph(cfg: &QwenConfig, emb: usize, vocab: usize, n_groups: usize, w: &W, g: &mut GraphBuilder) {
+pub fn build_mtp_fused_graph(cfg: &QwenConfig, emb: usize, vocab: usize, n_groups: usize, w: &dyn WeightSource, g: &mut GraphBuilder) {
     let mut tp = Topo { b: crate::topo::TopoBase::new(g), quant: Quant::F32 };
     let d = cfg.d_model as usize;
     let nh = cfg.n_heads as usize;
@@ -281,7 +279,7 @@ pub fn build_mtp_fused_graph(cfg: &QwenConfig, emb: usize, vocab: usize, n_group
         let tbl = format!("codec_embedding.{}.weight", k - 1);
         let tf = format!("{tbl}.f");
         if !tp.has(&tf) {
-            tp.f32(&tf, &[vocab as i64, emb as i64], w[&tbl].clone());
+            tp.f32(&tf, &[vocab as i64, emb as i64], w.get(&tbl));
         }
         let idx2 = tp.tmp("mf_idx2");
         tp.g.add(Node::new("Squeeze", &[&idx, "mf_sq2"], &[&idx2])); // [1,1]
@@ -300,14 +298,14 @@ pub fn build_mtp_fused_graph(cfg: &QwenConfig, emb: usize, vocab: usize, n_group
 
 /// Project an `[1,1,emb]` embedding to the MTP decoder width `[1,1,d]` via
 /// `small_to_mtp_projection` (Identity when `emb == d`, the 0.6B case).
-fn mtp_project(tp: &mut Topo, x: &str, w: &W, d: usize, emb: usize, has_proj: bool) -> String {
+fn mtp_project(tp: &mut Topo, x: &str, w: &dyn WeightSource, d: usize, emb: usize, has_proj: bool) -> String {
     if !has_proj {
         return x.to_string();
     }
     let y = tp.linear(x, "small_to_mtp_projection.weight", w, d, emb); // [1,1,d]
     let bn = "small_to_mtp_projection.bias.b";
     if !tp.has(bn) {
-        tp.f32(bn, &[d as i64], w["small_to_mtp_projection.bias"].clone());
+        tp.f32(bn, &[d as i64], w.get("small_to_mtp_projection.bias"));
     }
     tp.add(&y, bn)
 }
@@ -321,7 +319,7 @@ fn mtp_decode_step(
     kacc: &mut [Option<String>],
     vacc: &mut [Option<String>],
     cfg: &QwenConfig,
-    w: &W,
+    w: &dyn WeightSource,
     x_in: &str,
     pos: usize,
 ) -> String {
@@ -400,7 +398,7 @@ fn mtp_decode_step(
 /// the name of the final-norm hidden states (`[1,T,d]`). Used by both the
 /// token-id graph ([`build_qwen_graph`]) and the input-embedding Talker graph
 /// ([`build_talker_hidden_graph`]).
-fn build_stack(tp: &mut Topo, cfg: &QwenConfig, w: &W, t: usize, x_in: &str, emit_kv: bool) -> String {
+fn build_stack(tp: &mut Topo, cfg: &QwenConfig, w: &dyn WeightSource, t: usize, x_in: &str, emit_kv: bool) -> String {
     let d = cfg.d_model as usize;
     let nh = cfg.n_heads as usize;
     let nkv = cfg.n_kv_heads as usize;
@@ -576,9 +574,9 @@ impl<'a> Topo<'a> {
     }
 
     /// RMSNorm over the last `dim` axis with gain `name` (from `w`).
-    fn rmsnorm(&mut self, x: &str, name: &str, w: &W, dim: usize) -> String {
+    fn rmsnorm(&mut self, x: &str, name: &str, w: &dyn WeightSource, dim: usize) -> String {
         let gain = format!("{name}.g");
-        self.b.rmsnorm(x, &gain, w[name].clone(), dim, "c_eps")
+        self.b.rmsnorm(x, &gain, w.get(name), dim, "c_eps")
     }
 
     /// RoPE (half-split) on [1,T,heads,hd]: x*cos + rotate_half(x)*sin.
@@ -647,7 +645,7 @@ impl<'a> Topo<'a> {
 
     /// Linear `y = x · Wᵀ` with brain weight `name` ([out,in]); transposed to
     /// [in,out] for ONNX MatMul. Output is a fresh temp.
-    fn linear(&mut self, x: &str, name: &str, w: &W, out: usize, inp: usize) -> String {
+    fn linear(&mut self, x: &str, name: &str, w: &dyn WeightSource, out: usize, inp: usize) -> String {
         let o = self.tmp("lin");
         self.linear_named(x, name, &format!("{name}.wt"), w, out, inp, &o);
         o
@@ -655,10 +653,45 @@ impl<'a> Topo<'a> {
     /// As [`linear`] but writes to an explicit output name; `winit` names the
     /// transposed weight initializer. Delegates to the ONE shared
     /// weight-quantizing emitter ([`crate::topo::linear_quant`]).
-    fn linear_named(&mut self, x: &str, name: &str, winit: &str, w: &W, out: usize, inp: usize, y: &str) {
+    fn linear_named(&mut self, x: &str, name: &str, winit: &str, w: &dyn WeightSource, out: usize, inp: usize, y: &str) {
         let quant = self.quant;
         crate::topo::linear_quant(&mut self.b, x, name, winit, w, out, inp, quant, y);
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Widening `w` from a hardcoded `HashMap` alias to `&dyn WeightSource` must
+    /// not change the emitted graph: build once from an eager in-memory HashMap
+    /// (the old call shape), once from a streaming `WeightReader` opened on the
+    /// same checkpoint written to disk, and diff the raw ONNX bytes.
+    #[test]
+    fn streaming_weight_source_matches_eager_hashmap() {
+        let cfg = QwenConfig::tiny();
+        let block = cfg.block_size;
+        let init = qwen::init_weights(&cfg, 11);
+        let model = qwen::Qwen::new(cfg.clone(), 1, block, &init);
+        let dir = std::env::temp_dir().join(format!("brain_qwen_topo_parity_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiny.safetensors");
+        let path = path.to_str().unwrap();
+        model.save(path);
+
+        let w_eager: HashMap<String, Vec<f32>> = checkpoint::load(path).by_role("");
+        let reader = checkpoint::weightio::WeightReader::open(path).unwrap();
+
+        let t = 4usize;
+        let mut g1 = GraphBuilder::new("qwen_decoder");
+        build_qwen_graph(&cfg, &w_eager, t, &mut g1);
+        let mut g2 = GraphBuilder::new("qwen_decoder");
+        build_qwen_graph(&cfg, &reader, t, &mut g2);
+
+        assert_eq!(g1.finish(), g2.finish(), "HashMap vs WeightReader graphs must be byte-identical");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 

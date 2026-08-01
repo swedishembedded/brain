@@ -5,8 +5,6 @@
 //! code length) for OpenVINO whole-graph compilation. Pure Rust — no NPU needed
 //! to produce the file. Mirrors [`crate::qwen_export`] for the conv-heavy codec.
 
-use std::collections::HashMap;
-
 use codec::CodecConfig;
 use onnx::builder::GraphBuilder;
 
@@ -14,11 +12,10 @@ use onnx::builder::GraphBuilder;
 /// `(bytes, config)`. Input `codes:[num_quantizers, code_len]` (int64,
 /// codebook-major), output `waveform:[1,1,L]` (f32).
 pub fn build_codec_fp32_bytes(weights_path: &str, code_len: usize) -> std::io::Result<(Vec<u8>, CodecConfig)> {
-    let c = checkpoint::load(weights_path);
-    let cfg = CodecConfig::from_json(&c.header["config"]);
-    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
+    let cfg = CodecConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("qwen3tts_codec_decoder");
-    crate::codec_topology::build_codec_graph(&cfg, &w, code_len, &mut g);
+    crate::codec_topology::build_codec_graph(&cfg, &reader, code_len, &mut g);
     Ok((g.finish(), cfg))
 }
 
@@ -28,21 +25,19 @@ const EXTERNAL_THRESHOLD: usize = 1 << 20; // 1 MiB
 /// Export the fp32 ONNX codec decoder to `out_path` (+ a `<out_path>.data`
 /// sidecar for the large conv/codebook weights).
 pub fn export_codec_fp32(weights_path: &str, out_path: &str, code_len: usize) -> std::io::Result<()> {
-    let c = checkpoint::load(weights_path);
-    let cfg = CodecConfig::from_json(&c.header["config"]);
-    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
+    let cfg = CodecConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("qwen3tts_codec_decoder");
-    crate::codec_topology::build_codec_graph(&cfg, &w, code_len, &mut g);
+    crate::codec_topology::build_codec_graph(&cfg, &reader, code_len, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
 
 /// Export the **front-only** codec graph (`codes:[nq,T]` -> `latent:[1,latent,T]`).
 pub fn export_codec_front_fp32(weights_path: &str, out_path: &str, t: usize) -> std::io::Result<CodecConfig> {
-    let c = checkpoint::load(weights_path);
-    let cfg = CodecConfig::from_json(&c.header["config"]);
-    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
+    let cfg = CodecConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("qwen3tts_codec_front");
-    crate::codec_topology::build_codec_front_graph(&cfg, &w, t, &mut g);
+    crate::codec_topology::build_codec_front_graph(&cfg, &reader, t, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)?;
     Ok(cfg)
 }
@@ -55,11 +50,10 @@ pub fn export_codec_back_stream_fp32(
     out_path: &str,
     chunk: usize,
 ) -> std::io::Result<(CodecConfig, Vec<(String, i64, i64)>)> {
-    let c = checkpoint::load(weights_path);
-    let cfg = CodecConfig::from_json(&c.header["config"]);
-    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
+    let cfg = CodecConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("qwen3tts_codec_back_stream");
-    let bufs = crate::codec_topology::build_codec_back_stream_graph(&cfg, &w, chunk, &mut g);
+    let bufs = crate::codec_topology::build_codec_back_stream_graph(&cfg, &reader, chunk, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)?;
     Ok((cfg, bufs))
 }

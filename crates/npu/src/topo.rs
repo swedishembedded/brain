@@ -22,6 +22,7 @@
 use onnx::{GraphBuilder, Node};
 
 pub use crate::qwen_topology::Quant;
+use crate::topology::WeightSource;
 
 /// The shared graph-builder core: the wrapped graph, the temp-name counter and
 /// the emission DSL. Model builders hold one and `Deref` to it.
@@ -268,7 +269,7 @@ pub fn linear_quant(
     x: &str,
     name: &str,
     winit: &str,
-    w: &std::collections::HashMap<String, Vec<f32>>,
+    w: &dyn WeightSource,
     out: usize,
     inp: usize,
     quant: Quant,
@@ -286,7 +287,7 @@ pub fn linear_quant(
     let (q4, qmax) = match quant {
         Quant::F32 => {
             if !b.has(winit) {
-                let wt = transpose(&w[name]);
+                let wt = transpose(&w.get(name));
                 b.f32(winit, &[inp as i64, out as i64], wt);
             }
             b.node("MatMul", &[x, winit], y);
@@ -297,7 +298,7 @@ pub fn linear_quant(
     };
     let wq = format!("{winit}.q");
     if !b.has(&wq) {
-        let wt = transpose(&w[name]);
+        let wt = transpose(&w.get(name));
         let mut scales = vec![0f32; out];
         let mut q = vec![0i8; inp * out];
         for o in 0..out {

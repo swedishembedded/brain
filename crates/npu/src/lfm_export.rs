@@ -23,11 +23,10 @@ pub fn export(weights: &str, s: usize, out: &str, int8: bool) -> Result<(), Stri
 /// fp16), `Quant::Int8` / `Quant::Int4` (per-output-channel weight-only
 /// quantization, fp16 activations). One graph per (S, quant) bucket.
 pub fn export_quant(weights: &str, s: usize, out: &str, quant: Quant) -> Result<(), String> {
-    let c = checkpoint::load(weights);
-    let cfg = LfmConfig::from_json(&c.header["config"]);
-    let w = c.by_role("");
+    let reader = checkpoint::weightio::WeightReader::open(weights).map_err(|e| format!("open {weights}: {e}"))?;
+    let cfg = LfmConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("lfm25_encoder");
-    crate::lfm_topology::build_lfm_graph_quant(&cfg, &w, s, &mut g, quant);
+    crate::lfm_topology::build_lfm_graph_quant(&cfg, &reader, s, &mut g, quant);
     g.finish_external(out, 1 << 20).map_err(|e| format!("write {out}: {e}"))?;
     eprintln!("exported {weights} (S={s}, {quant:?}) -> {out}");
     Ok(())
@@ -36,10 +35,9 @@ pub fn export_quant(weights: &str, s: usize, out: &str, quant: Quant) -> Result<
 /// In-memory ONNX bytes (tests / small graphs; big checkpoints exceed the
 /// buffer path — use [`export`] + `LfmSession::load_path` instead).
 pub fn build_lfm_bytes(weights: &str, s: usize, int8: bool) -> Result<(Vec<u8>, LfmConfig), String> {
-    let c = checkpoint::load(weights);
-    let cfg = LfmConfig::from_json(&c.header["config"]);
-    let w = c.by_role("");
+    let reader = checkpoint::weightio::WeightReader::open(weights).map_err(|e| format!("open {weights}: {e}"))?;
+    let cfg = LfmConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("lfm25_encoder");
-    crate::lfm_topology::build_lfm_graph_quant(&cfg, &w, s, &mut g, Quant::from_bool(int8));
+    crate::lfm_topology::build_lfm_graph_quant(&cfg, &reader, s, &mut g, Quant::from_bool(int8));
     Ok((g.finish(), cfg))
 }

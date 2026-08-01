@@ -32,6 +32,14 @@ impl WeightSource for checkpoint::Container {
     }
 }
 
+/// Streaming source: decodes exactly one tensor from the mmap per call (no
+/// whole-checkpoint host copy) — see `checkpoint::weightio`.
+impl WeightSource for checkpoint::weightio::WeightReader {
+    fn get(&self, name: &str) -> Vec<f32> {
+        self.tensor(name).unwrap_or_else(|| panic!("checkpoint is missing tensor `{name}`"))
+    }
+}
+
 /// A feature-map edge in the graph being built: its ONNX tensor name + NCHW dims.
 #[derive(Clone)]
 struct Feat {

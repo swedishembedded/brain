@@ -84,7 +84,7 @@ impl ResidentModel for NemotronResident {
 struct NemotronNpuInstance {
     model: nemotron::model::NemotronAsr, // device backend: RNN-T decode
     detok: nemotron::tokenizer::Detokenizer,
-    weights: HashMap<String, Vec<f32>>, // raw HF tensors, for the ONNX export
+    weights: checkpoint::weightio::WeightReader, // streamed HF tensors, for the ONNX export
     topo: npu::NemotronTopo,
     /// One compiled encoder graph per fixed `(mel_t, mel_valid, prompt_id)`.
     graphs: RefCell<HashMap<(u32, u32, usize), NpuGraph>>,
@@ -94,8 +94,9 @@ struct NemotronNpuInstance {
 
 impl NemotronNpuInstance {
     fn new(dir: &str, cfg: nemotron::NemotronConfig, model: nemotron::model::NemotronAsr, detok: nemotron::tokenizer::Detokenizer) -> Result<NemotronNpuInstance, String> {
-        let tensors = checkpoint::safetensors::read_model_dir(std::path::Path::new(dir))?;
-        let weights: HashMap<String, Vec<f32>> = tensors.into_iter().map(|t| (t.name, t.data)).collect();
+        // Streamed (mmap, header-only open): no second full-model host copy
+        // alongside the already-resident `model` — see checkpoint::weightio.
+        let weights = checkpoint::weightio::WeightReader::open_hf_dir(std::path::Path::new(dir)).map_err(|e| e.to_string())?;
         let topo = npu::NemotronTopo {
             num_mel_bins: cfg.num_mel_bins,
             hidden: cfg.hidden,

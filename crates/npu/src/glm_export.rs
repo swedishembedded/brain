@@ -5,18 +5,15 @@
 //! sequence length) for OpenVINO whole-graph compilation. Pure Rust — no NPU
 //! needed to produce the file. See `docs/models/glm/npu.md`.
 
-use std::collections::HashMap;
-
 use glm::config::GlmConfig;
 use onnx::builder::GraphBuilder;
 
 /// Build the fp32 ONNX GLM decoder for `seq_len` and return `(bytes, config)`.
 pub fn build_glm_fp32_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, GlmConfig)> {
-    let c = checkpoint::load(weights_path);
-    let cfg = GlmConfig::from_json(&c.header["config"]);
-    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
+    let cfg = GlmConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("glm_decoder");
-    crate::glm_topology::build_glm_graph(&cfg, &w, seq_len, &mut g);
+    crate::glm_topology::build_glm_graph(&cfg, &reader, seq_len, &mut g);
     Ok((g.finish(), cfg))
 }
 
@@ -29,11 +26,10 @@ pub fn export_glm_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> st
 /// Build the INT8 (per-output-channel weight-only) ONNX GLM decoder — ~4x smaller
 /// than fp32; norms/RoPE/router stay fp32.
 pub fn build_glm_int8_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, GlmConfig)> {
-    let c = checkpoint::load(weights_path);
-    let cfg = GlmConfig::from_json(&c.header["config"]);
-    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
+    let cfg = GlmConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("glm_decoder_int8");
-    crate::glm_topology::build_glm_graph_quant(&cfg, &w, seq_len, &mut g, crate::qwen_topology::Quant::Int8);
+    crate::glm_topology::build_glm_graph_quant(&cfg, &reader, seq_len, &mut g, crate::qwen_topology::Quant::Int8);
     Ok((g.finish(), cfg))
 }
 

@@ -12,24 +12,21 @@
 //! are transposed once to ONNX `[in,out]`. RoPE uses brain's **interleaved**
 //! convention (base 10000, matching `rope_train`). See `docs/models/glm/npu.md`.
 
-use std::collections::HashMap;
-
 use onnx::builder::GraphBuilder;
 use onnx::graph::Node;
 use glm::config::GlmConfig;
 
 use crate::qwen_topology::Quant;
-
-type W = HashMap<String, Vec<f32>>;
+use crate::topology::WeightSource;
 
 /// Assemble the GLM decoder graph into `g` (fp32). `w` = checkpoint tensors (role "").
-pub fn build_glm_graph(cfg: &GlmConfig, w: &W, t: usize, g: &mut GraphBuilder) {
+pub fn build_glm_graph(cfg: &GlmConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBuilder) {
     build_glm_graph_quant(cfg, w, t, g, Quant::F32);
 }
 
 /// As [`build_glm_graph`] but with a weight quantization mode (`Int8` stores the
 /// linear weights per-output-channel and dequantises in-graph — ~4x smaller).
-pub fn build_glm_graph_quant(cfg: &GlmConfig, w: &W, t: usize, g: &mut GraphBuilder, quant: Quant) {
+pub fn build_glm_graph_quant(cfg: &GlmConfig, w: &dyn WeightSource, t: usize, g: &mut GraphBuilder, quant: Quant) {
     let d = cfg.d_model as usize;
     let vocab = cfg.vocab as usize;
     let ti = t as i64;
@@ -38,7 +35,7 @@ pub fn build_glm_graph_quant(cfg: &GlmConfig, w: &W, t: usize, g: &mut GraphBuil
     tp.g.input_i64("input_ids", &[1, ti]);
     tp.g.output_f32("logits", &[1, ti, vocab as i64]);
 
-    tp.f32("tok.weight", &[vocab as i64, d as i64], w["tok.weight"].clone());
+    tp.f32("tok.weight", &[vocab as i64, d as i64], w.get("tok.weight"));
     let x = tp.gather("tok.weight", "input_ids", 0, "emb"); // [1,T,d]
 
     let xf = build_stack(&mut tp, cfg, w, t, &x);
@@ -46,7 +43,7 @@ pub fn build_glm_graph_quant(cfg: &GlmConfig, w: &W, t: usize, g: &mut GraphBuil
     tp.linear_named(&xf, head, "lm_head.wt", w, vocab, d, "logits");
 }
 
-fn build_stack(tp: &mut Topo, cfg: &GlmConfig, w: &W, t: usize, x_in: &str) -> String {
+fn build_stack(tp: &mut Topo, cfg: &GlmConfig, w: &dyn WeightSource, t: usize, x_in: &str) -> String {
     let d = cfg.d_model as usize;
     let nh = cfg.n_heads as usize;
     let nope = cfg.qk_nope_head_dim as usize;
@@ -228,21 +225,21 @@ impl<'a> Topo<'a> {
         self.reshape(&merged, &sh2) // [..,rope] interleaved
     }
 
-    fn rmsnorm(&mut self, x: &str, name: &str, w: &W, dim: usize) -> String {
+    fn rmsnorm(&mut self, x: &str, name: &str, w: &dyn WeightSource, dim: usize) -> String {
         let gain = format!("{name}.g");
-        self.b.rmsnorm(x, &gain, w[name].clone(), dim, "c_eps")
+        self.b.rmsnorm(x, &gain, w.get(name), dim, "c_eps")
     }
 
-    fn linear(&mut self, x: &str, name: &str, w: &W, out: usize, inp: usize) -> String {
+    fn linear(&mut self, x: &str, name: &str, w: &dyn WeightSource, out: usize, inp: usize) -> String {
         let o = self.tmp("lin");
         self.linear_named(x, name, &format!("{name}.wt"), w, out, inp, &o);
         o
     }
-    fn linear_named(&mut self, x: &str, name: &str, winit: &str, w: &W, out: usize, inp: usize, y: &str) {
+    fn linear_named(&mut self, x: &str, name: &str, winit: &str, w: &dyn WeightSource, out: usize, inp: usize, y: &str) {
         let qmax = match self.quant {
             Quant::F32 => {
                 if !self.has(winit) {
-                    let wt = transpose(&w[name], out, inp); // [out,in] -> [in,out]
+                    let wt = transpose(&w.get(name), out, inp); // [out,in] -> [in,out]
                     self.f32(winit, &[inp as i64, out as i64], wt);
                 }
                 self.node("MatMul", &[x, winit], y);
@@ -255,7 +252,7 @@ impl<'a> Topo<'a> {
         // in-graph (DequantizeLinear) then MatMul.
         let wq = format!("{winit}.q");
         if !self.has(&wq) {
-            let wt = transpose(&w[name], out, inp);
+            let wt = transpose(&w.get(name), out, inp);
             let mut scales = vec![0f32; out];
             let mut q = vec![0i8; inp * out];
             for o in 0..out {
@@ -284,7 +281,7 @@ impl<'a> Topo<'a> {
     }
 
     /// SwiGLU MLP: down(silu(gate(x)) * up(x)).
-    fn swiglu(&mut self, x: &str, gate: &str, up: &str, down: &str, w: &W, ff: usize, d: usize) -> String {
+    fn swiglu(&mut self, x: &str, gate: &str, up: &str, down: &str, w: &dyn WeightSource, ff: usize, d: usize) -> String {
         let g = self.linear(x, gate, w, ff, d);
         let u = self.linear(x, up, w, ff, d);
         let sig = self.unary("Sigmoid", &g);
@@ -296,13 +293,13 @@ impl<'a> Topo<'a> {
     /// Dense-expert MoE: sigmoid noaux_tc router (top-k gate via TopK +
     /// ScatterElements) + every expert FFN gate-weighted + shared expert.
     #[allow(clippy::too_many_arguments)]
-    fn moe(&mut self, x: &str, l: usize, cfg: &GlmConfig, w: &W, e: usize, moe_ff: usize, shared_ff: usize, d: usize) -> String {
+    fn moe(&mut self, x: &str, l: usize, cfg: &GlmConfig, w: &dyn WeightSource, e: usize, moe_ff: usize, shared_ff: usize, d: usize) -> String {
         let p = |s: &str| format!("blocks.{l}.moe.{s}");
         let topk = cfg.num_experts_per_tok as i64;
         // router: s = sigmoid(x·Wr^T) ; choice = s + bias
         let logits = self.linear(x, &p("router.weight"), w, e, d); // [1,T,E]
         let s = self.unary("Sigmoid", &logits);
-        self.f32(&format!("{}.b", p("router.bias")), &[1, 1, e as i64], w[&p("router.bias")].clone());
+        self.f32(&format!("{}.b", p("router.bias")), &[1, 1, e as i64], w.get(&p("router.bias")));
         let choice = self.add(&s, &format!("{}.b", p("router.bias")));
         // TopK over experts -> indices [1,T,k]
         let (tv, tidx) = {
@@ -372,4 +369,39 @@ fn transpose(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Widening `w` from a hardcoded `HashMap` alias to `&dyn WeightSource` must
+    /// not change the emitted graph: build once from an eager in-memory HashMap
+    /// (the old call shape), once from a streaming `WeightReader` opened on the
+    /// same checkpoint written to disk, and diff the raw ONNX bytes.
+    #[test]
+    fn streaming_weight_source_matches_eager_hashmap() {
+        let cfg = GlmConfig::tiny();
+        let block = cfg.block_size;
+        let init = glm::init_weights(&cfg, 11);
+        let model = glm::Glm::new(cfg.clone(), 1, block, &init);
+        let dir = std::env::temp_dir().join(format!("brain_glm_topo_parity_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiny.safetensors");
+        let path = path.to_str().unwrap();
+        model.save(path);
+
+        let w_eager: HashMap<String, Vec<f32>> = checkpoint::load(path).by_role("");
+        let reader = checkpoint::weightio::WeightReader::open(path).unwrap();
+
+        let t = 4usize;
+        let mut g1 = GraphBuilder::new("glm_decoder");
+        build_glm_graph(&cfg, &w_eager, t, &mut g1);
+        let mut g2 = GraphBuilder::new("glm_decoder");
+        build_glm_graph(&cfg, &reader, t, &mut g2);
+
+        assert_eq!(g1.finish(), g2.finish(), "HashMap vs WeightReader graphs must be byte-identical");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

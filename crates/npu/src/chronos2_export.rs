@@ -14,11 +14,10 @@ use crate::qwen_topology::Quant;
 /// Build the Chronos-2 core ONNX bytes from a brain `.safetensors` container, for a
 /// fixed sequence length `s` and forecast-patch count `n_out`.
 pub fn export_onnx(weights_path: &str, s: usize, n_out: usize, quant: Quant) -> Result<Vec<u8>, String> {
-    let c = checkpoint::load(weights_path);
-    let cfg = Chronos2Config::from_hf(&c.header["config"])?;
-    let w = c.by_role("");
+    let reader = checkpoint::weightio::WeightReader::open(weights_path).map_err(|e| format!("open {weights_path}: {e}"))?;
+    let cfg = Chronos2Config::from_hf(&reader.config())?;
     let mut g = GraphBuilder::new("chronos2");
-    build_chronos2_graph_quant(&cfg, &w, s, n_out, &mut g, quant);
+    build_chronos2_graph_quant(&cfg, &reader, s, n_out, &mut g, quant);
     Ok(g.finish())
 }
 

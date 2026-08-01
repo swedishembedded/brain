@@ -20,23 +20,20 @@
 //! `GreaterOrEqual(prob, 2nd-largest)` mask (no `uniform` stochasticity — see
 //! `docs/models/fincast/status.md`). The horizon head is a SiLU ResidualBlock.
 
-use std::collections::HashMap;
-
 use fincast::FincastConfig;
 use onnx::builder::GraphBuilder;
 use onnx::graph::Node;
 
 use crate::qwen_topology::Quant;
-
-type W = HashMap<String, Vec<f32>>;
+use crate::topology::WeightSource;
 
 /// Assemble the FinCast core graph into `g` (fp32).
-pub fn build_fincast_graph(cfg: &FincastConfig, w: &W, s: usize, g: &mut GraphBuilder) {
+pub fn build_fincast_graph(cfg: &FincastConfig, w: &dyn WeightSource, s: usize, g: &mut GraphBuilder) {
     build_fincast_graph_quant(cfg, w, s, g, Quant::F32);
 }
 
 /// As [`build_fincast_graph`] with a weight-quantization mode.
-pub fn build_fincast_graph_quant(cfg: &FincastConfig, w: &W, s: usize, g: &mut GraphBuilder, quant: Quant) {
+pub fn build_fincast_graph_quant(cfg: &FincastConfig, w: &dyn WeightSource, s: usize, g: &mut GraphBuilder, quant: Quant) {
     let d = cfg.hidden_size;
     let heads = cfg.num_heads;
     let hd = cfg.head_dim;
@@ -139,11 +136,11 @@ pub fn build_fincast_graph_quant(cfg: &FincastConfig, w: &W, s: usize, g: &mut G
 
 /// Per-dim query scale for layer `b`: `base * softplus(scaling[dd])` tiled over
 /// the `num_heads` heads (length `inner`).
-fn qscale_const(cfg: &FincastConfig, w: &W, b: usize) -> Vec<f32> {
+fn qscale_const(cfg: &FincastConfig, w: &dyn WeightSource, b: usize) -> Vec<f32> {
     let hd = cfg.head_dim;
     let heads = cfg.num_heads;
     let base = 1.442695041f32 / (hd as f32).sqrt();
-    let scaling = &w[&format!("stacked_transformer.layers.{b}.self_attn.scaling")];
+    let scaling = w.get(&format!("stacked_transformer.layers.{b}.self_attn.scaling"));
     let mut out = vec![0f32; heads * hd];
     for h in 0..heads {
         for dd in 0..hd {
@@ -207,38 +204,38 @@ impl Topo<'_> {
         o
     }
 
-    fn rmsnorm(&mut self, x: &str, name: &str, w: &W, dim: usize, eps: &str) -> String {
+    fn rmsnorm(&mut self, x: &str, name: &str, w: &dyn WeightSource, dim: usize, eps: &str) -> String {
         let gain = format!("{name}.g");
-        self.b.rmsnorm(x, &gain, w[name].clone(), dim, eps)
+        self.b.rmsnorm(x, &gain, w.get(name), dim, eps)
     }
 
     /// LayerNorm with gain+bias: `(x-mean)/sqrt(var+eps)*g + b`.
-    fn layernorm(&mut self, x: &str, prefix: &str, w: &W, dim: usize, eps: &str) -> String {
+    fn layernorm(&mut self, x: &str, prefix: &str, w: &dyn WeightSource, dim: usize, eps: &str) -> String {
         let gain = format!("{prefix}.weight.g");
         let bias = format!("{prefix}.bias.b");
-        let gw = w[&format!("{prefix}.weight")].clone();
-        let bw = w[&format!("{prefix}.bias")].clone();
+        let gw = w.get(&format!("{prefix}.weight"));
+        let bw = w.get(&format!("{prefix}.bias"));
         self.b.layernorm(x, &gain, gw, &bias, bw, dim, eps)
     }
 
     /// Bias-free linear `y = x @ W^T` (brain `[out,in]` -> ONNX `[in,out]`).
-    fn linear(&mut self, x: &str, name: &str, w: &W, out: usize, inp: usize) -> String {
+    fn linear(&mut self, x: &str, name: &str, w: &dyn WeightSource, out: usize, inp: usize) -> String {
         let o = self.tmp("lin");
         self.linear_named(x, name, &format!("{name}.wt"), w, out, inp, &o);
         o
     }
     /// Biased linear: `prefix.weight` / `prefix.bias`.
-    fn linear_bias(&mut self, x: &str, prefix: &str, w: &W, out: usize, inp: usize) -> String {
+    fn linear_bias(&mut self, x: &str, prefix: &str, w: &dyn WeightSource, out: usize, inp: usize) -> String {
         let y = self.linear(x, &format!("{prefix}.weight"), w, out, inp);
         let bn = format!("{prefix}.bias.b");
-        self.f32(&bn, &[out as i64], w[&format!("{prefix}.bias")].clone());
+        self.f32(&bn, &[out as i64], w.get(&format!("{prefix}.bias")));
         self.add(&y, &bn)
     }
-    fn linear_named(&mut self, x: &str, name: &str, winit: &str, w: &W, out: usize, inp: usize, y: &str) {
+    fn linear_named(&mut self, x: &str, name: &str, winit: &str, w: &dyn WeightSource, out: usize, inp: usize, y: &str) {
         let qmax = match self.quant {
             Quant::F32 => {
                 if !self.has(winit) {
-                    let wt = transpose(&w[name], out, inp);
+                    let wt = transpose(&w.get(name), out, inp);
                     self.f32(winit, &[inp as i64, out as i64], wt);
                 }
                 self.node("MatMul", &[x, winit], y);
@@ -249,7 +246,7 @@ impl Topo<'_> {
         };
         let wq = format!("{winit}.q");
         if !self.has(&wq) {
-            let wt = transpose(&w[name], out, inp);
+            let wt = transpose(&w.get(name), out, inp);
             let mut scales = vec![0f32; out];
             let mut q = vec![0i8; inp * out];
             for oc in 0..out {
@@ -279,7 +276,7 @@ impl Topo<'_> {
 
     /// A biased ResidualBlock with a SiLU hidden nonlinearity:
     /// `output(silu(hidden(x))) + residual(x)`. Writes to `out_name`.
-    fn residual_block_silu(&mut self, x: &str, prefix: &str, w: &W, in_dim: usize, h: usize, out_dim: usize, out_name: &str) {
+    fn residual_block_silu(&mut self, x: &str, prefix: &str, w: &dyn WeightSource, in_dim: usize, h: usize, out_dim: usize, out_name: &str) {
         let hid = self.linear_bias(x, &format!("{prefix}.hidden_layer.0"), w, h, in_dim);
         let sg = self.unary("Sigmoid", &hid);
         let hr = self.mul(&hid, &sg); // SiLU
@@ -302,12 +299,15 @@ fn transpose(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     #[test]
     fn builds_a_valid_graph_at_tiny_scale() {
         let cfg = FincastConfig::tiny();
-        let w: W = cfg.param_list().into_iter().map(|(k, s)| (k, vec![0.01; s.iter().product()])).collect();
+        let w: HashMap<String, Vec<f32>> =
+            cfg.param_list().into_iter().map(|(k, s)| (k, vec![0.01; s.iter().product()])).collect();
         let mut g = GraphBuilder::new("fincast");
         build_fincast_graph(&cfg, &w, 8, &mut g);
         let bytes = g.finish();

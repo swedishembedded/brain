@@ -26,27 +26,24 @@
 //!   materialize ~2 GB per layer. Never Concat directly into a graph output
 //!   (the mirror lesson): the concat lands in a temp, the final norm follows.
 
-use std::collections::HashMap;
-
 use lfm::config::{LayerType, LfmConfig};
 use onnx::builder::GraphBuilder;
 use onnx::graph::Node;
 
 use crate::topo::{linear_quant, Quant, TopoBase};
-
-type W = HashMap<String, Vec<f32>>;
+use crate::topology::WeightSource;
 
 /// Materialized attention up to this many query rows; above it, chunked.
 const CHUNK_ABOVE: usize = 2048;
 
 /// Assemble the LFM2.5-Encoder graph into `g` (fp32 weights).
-pub fn build_lfm_graph(cfg: &LfmConfig, w: &W, s: usize, g: &mut GraphBuilder) {
+pub fn build_lfm_graph(cfg: &LfmConfig, w: &dyn WeightSource, s: usize, g: &mut GraphBuilder) {
     build_lfm_graph_quant(cfg, w, s, g, Quant::F32)
 }
 
 /// As [`build_lfm_graph`] with a weight-quantization mode (per-output-channel
 /// INT8/INT4 weight-only; norms, RoPE tables and the conv taps stay fp32).
-pub fn build_lfm_graph_quant(cfg: &LfmConfig, w: &W, s: usize, g: &mut GraphBuilder, quant: Quant) {
+pub fn build_lfm_graph_quant(cfg: &LfmConfig, w: &dyn WeightSource, s: usize, g: &mut GraphBuilder, quant: Quant) {
     let d = cfg.d_model as usize;
     let nh = cfg.n_heads as usize;
     let nkv = cfg.n_kv_heads as usize;
@@ -65,7 +62,7 @@ pub fn build_lfm_graph_quant(cfg: &LfmConfig, w: &W, s: usize, g: &mut GraphBuil
     tp.f32("c_scale", &[1], vec![1.0 / (hd as f32).sqrt()]);
 
     // Token embedding: Gather over the [vocab, d] table (external sidecar).
-    tp.f32("tok.weight", &[cfg.vocab as i64, d as i64], w["tok.weight"].clone());
+    tp.f32("tok.weight", &[cfg.vocab as i64, d as i64], w.get("tok.weight"));
     let mut x = tp.gather("tok.weight", "ids", 0, "emb"); // [1,S,d]
 
     // Half-split RoPE tables [1,S,1,hd] (full width: cos = cat(f,f)), theta
@@ -115,7 +112,7 @@ pub fn build_lfm_graph_quant(cfg: &LfmConfig, w: &W, s: usize, g: &mut GraphBuil
                 let bx = tp.mul_t(&bg, &xg);
                 let ncl = tp.transpose(&bx, &[0, 2, 1]); // [1,d,S]
                 let cw = format!("{}.w", p("conv.conv.weight"));
-                tp.f32(&cw, &[d as i64, 1, k as i64], w[&p("conv.conv.weight")].clone());
+                tp.f32(&cw, &[d as i64, 1, k as i64], w.get(&p("conv.conv.weight")));
                 let conv = {
                     let o = tp.tmp("conv");
                     let pad = (k / 2) as i64;
@@ -173,7 +170,7 @@ pub fn build_lfm_graph_quant(cfg: &LfmConfig, w: &W, s: usize, g: &mut GraphBuil
     // Final embedding_norm into the graph output (Mul writes `hidden` directly
     // — a norm, not a Concat, so the mirror Concat-into-output trap is avoided).
     let gain = format!("{}.g", "norm.weight");
-    tp.b.rmsnorm_to(&x, &gain, w["norm.weight"].clone(), d, "c_eps", "hidden");
+    tp.b.rmsnorm_to(&x, &gain, w.get("norm.weight"), d, "c_eps", "hidden");
 }
 
 /// ONNX assembly helper (mirrors the qwen/chronos2 topologies' `Topo`).
@@ -195,13 +192,13 @@ impl<'a> std::ops::DerefMut for Topo<'a> {
 }
 
 impl<'a> Topo<'a> {
-    fn rmsnorm(&mut self, x: &str, name: &str, w: &W, dim: usize) -> String {
+    fn rmsnorm(&mut self, x: &str, name: &str, w: &dyn WeightSource, dim: usize) -> String {
         let gain = format!("{name}.g");
-        self.b.rmsnorm(x, &gain, w[name].clone(), dim, "c_eps")
+        self.b.rmsnorm(x, &gain, w.get(name), dim, "c_eps")
     }
 
     /// Bias-free linear via the shared weight-quantizing emitter.
-    fn linear(&mut self, x: &str, name: &str, w: &W, out: usize, inp: usize) -> String {
+    fn linear(&mut self, x: &str, name: &str, w: &dyn WeightSource, out: usize, inp: usize) -> String {
         let o = self.tmp("lin");
         let quant = self.quant;
         linear_quant(&mut self.b, x, name, &format!("{name}.wt"), w, out, inp, quant, &o);

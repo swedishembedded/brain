@@ -18,25 +18,22 @@
 //! linear weights `[out,in]` are transposed once to ONNX `[in,out]`; `Int8`
 //! stores them per-output-channel and dequantises in-graph.
 
-use std::collections::HashMap;
-
 use chronos2::Chronos2Config;
 use onnx::builder::GraphBuilder;
 use onnx::graph::Node;
 
 use crate::qwen_topology::Quant;
-
-type W = HashMap<String, Vec<f32>>;
+use crate::topology::WeightSource;
 
 /// Assemble the Chronos-2 graph into `g` (fp32).
-pub fn build_chronos2_graph(cfg: &Chronos2Config, w: &W, s: usize, n_out: usize, g: &mut GraphBuilder) {
+pub fn build_chronos2_graph(cfg: &Chronos2Config, w: &dyn WeightSource, s: usize, n_out: usize, g: &mut GraphBuilder) {
     build_chronos2_graph_quant(cfg, w, s, n_out, g, Quant::F32);
 }
 
 /// As [`build_chronos2_graph`] with a weight-quantization mode.
 pub fn build_chronos2_graph_quant(
     cfg: &Chronos2Config,
-    w: &W,
+    w: &dyn WeightSource,
     s: usize,
     n_out: usize,
     g: &mut GraphBuilder,
@@ -180,19 +177,19 @@ impl<'a> Topo<'a> {
         self.concat2(&new_first, &new_second, 3)
     }
 
-    fn rmsnorm(&mut self, x: &str, name: &str, w: &W, dim: usize) -> String {
+    fn rmsnorm(&mut self, x: &str, name: &str, w: &dyn WeightSource, dim: usize) -> String {
         let gain = format!("{name}.g");
-        self.b.rmsnorm(x, &gain, w[name].clone(), dim, "c_eps")
+        self.b.rmsnorm(x, &gain, w.get(name), dim, "c_eps")
     }
 
     /// Bias-free linear `y = x @ W^T`; brain `[out,in]` transposed to ONNX
     /// `[in,out]`, INT8 per-channel dequant when enabled.
-    fn linear(&mut self, x: &str, name: &str, w: &W, out: usize, inp: usize) -> String {
+    fn linear(&mut self, x: &str, name: &str, w: &dyn WeightSource, out: usize, inp: usize) -> String {
         let o = self.tmp("lin");
         self.linear_named(x, name, &format!("{name}.wt"), w, out, inp, &o);
         o
     }
-    fn linear_named(&mut self, x: &str, name: &str, winit: &str, w: &W, out: usize, inp: usize, y: &str) {
+    fn linear_named(&mut self, x: &str, name: &str, winit: &str, w: &dyn WeightSource, out: usize, inp: usize, y: &str) {
         // Delegates to the ONE shared weight-quantizing emitter (crate::topo).
         let quant = self.quant;
         crate::topo::linear_quant(&mut self.b, x, name, winit, w, out, inp, quant, y);
@@ -200,7 +197,7 @@ impl<'a> Topo<'a> {
 
     /// A biased `ResidualBlock`: `output(relu(hidden(x))) + residual(x)`. Writes
     /// the final sum to `out_name`. The three linears carry biases (broadcast Add).
-    fn residual_block(&mut self, x: &str, prefix: &str, w: &W, in_dim: usize, h: usize, out_dim: usize, out_name: &str) {
+    fn residual_block(&mut self, x: &str, prefix: &str, w: &dyn WeightSource, in_dim: usize, h: usize, out_dim: usize, out_name: &str) {
         let hid = self.linear(x, &format!("{prefix}.hidden_layer.weight"), w, h, in_dim);
         let hid = self.bias(&hid, &format!("{prefix}.hidden_layer.bias"), w, h);
         let hr = self.unary("Relu", &hid);
@@ -210,9 +207,9 @@ impl<'a> Topo<'a> {
         let res = self.bias(&res, &format!("{prefix}.residual_layer.bias"), w, out_dim);
         self.node("Add", &[&o1, &res], out_name);
     }
-    fn bias(&mut self, x: &str, name: &str, w: &W, dim: usize) -> String {
+    fn bias(&mut self, x: &str, name: &str, w: &dyn WeightSource, dim: usize) -> String {
         let bn = format!("{name}.b");
-        self.f32(&bn, &[dim as i64], w[name].clone());
+        self.f32(&bn, &[dim as i64], w.get(name));
         self.add(x, &bn)
     }
 }
@@ -220,12 +217,15 @@ impl<'a> Topo<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     #[test]
     fn builds_a_valid_graph_at_tiny_scale() {
         let cfg = Chronos2Config::tiny();
-        let w: W = cfg.param_list().into_iter().map(|(k, s)| (k, vec![0.01; s.iter().product()])).collect();
+        let w: HashMap<String, Vec<f32>> =
+            cfg.param_list().into_iter().map(|(k, s)| (k, vec![0.01; s.iter().product()])).collect();
         let mut g = GraphBuilder::new("chronos2");
         build_chronos2_graph(&cfg, &w, 12, 2, &mut g);
         let bytes = g.finish();

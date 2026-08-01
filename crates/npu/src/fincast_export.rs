@@ -14,11 +14,10 @@ use crate::qwen_topology::Quant;
 /// Build the FinCast core ONNX bytes from a brain `.safetensors` container, for a
 /// fixed sequence length `s` (= number of patch tokens).
 pub fn export_onnx(weights_path: &str, s: usize, quant: Quant) -> Result<Vec<u8>, String> {
-    let c = checkpoint::load(weights_path);
-    let cfg = FincastConfig::from_json(&c.header["config"])?;
-    let w = c.by_role("");
+    let reader = checkpoint::weightio::WeightReader::open(weights_path).map_err(|e| format!("open {weights_path}: {e}"))?;
+    let cfg = FincastConfig::from_json(&reader.config())?;
     let mut g = GraphBuilder::new("fincast");
-    build_fincast_graph_quant(&cfg, &w, s, &mut g, quant);
+    build_fincast_graph_quant(&cfg, &reader, s, &mut g, quant);
     Ok(g.finish())
 }
 
@@ -35,11 +34,10 @@ pub fn export_file(weights_path: &str, s: usize, quant: Quant, out: &str) -> Res
 /// [`crate::openvino::FincastSession::load_path`] rather than `load_bytes`
 /// (mirrors `lfm_export::export`).
 pub fn export_external(weights_path: &str, s: usize, quant: Quant, out: &str) -> Result<(), String> {
-    let c = checkpoint::load(weights_path);
-    let cfg = FincastConfig::from_json(&c.header["config"])?;
-    let w = c.by_role("");
+    let reader = checkpoint::weightio::WeightReader::open(weights_path).map_err(|e| format!("open {weights_path}: {e}"))?;
+    let cfg = FincastConfig::from_json(&reader.config())?;
     let mut g = GraphBuilder::new("fincast");
-    build_fincast_graph_quant(&cfg, &w, s, &mut g, quant);
+    build_fincast_graph_quant(&cfg, &reader, s, &mut g, quant);
     g.finish_external(out, 1 << 20).map_err(|e| format!("write {out}: {e}"))
 }
 

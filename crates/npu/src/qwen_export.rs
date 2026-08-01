@@ -5,18 +5,15 @@
 //! sequence length) for OpenVINO whole-graph compilation. Pure Rust — no NPU
 //! needed to produce the file.
 
-use std::collections::HashMap;
-
 use onnx::builder::GraphBuilder;
 use qwen::config::QwenConfig;
 
 /// Build the fp32 ONNX decoder for `seq_len` and return `(bytes, config)`.
 pub fn build_qwen_fp32_bytes(weights_path: &str, seq_len: usize) -> std::io::Result<(Vec<u8>, QwenConfig)> {
-    let c = checkpoint::load(weights_path);
-    let cfg = QwenConfig::from_json(&c.header["config"]);
-    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
+    let cfg = QwenConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("qwen_decoder");
-    crate::qwen_topology::build_qwen_graph(&cfg, &w, seq_len, &mut g);
+    crate::qwen_topology::build_qwen_graph(&cfg, &reader, seq_len, &mut g);
     Ok((g.finish(), cfg))
 }
 
@@ -55,15 +52,10 @@ pub fn build_talker_hidden_int8_bytes(weights_path: &str, seq_len: usize) -> std
 }
 
 fn talker_hidden_bytes(weights_path: &str, seq_len: usize, quant: bool) -> std::io::Result<(Vec<u8>, QwenConfig)> {
-    // Drop the checkpoint as soon as the tensors are extracted to bound peak RAM.
-    let (cfg, w) = {
-        let c = checkpoint::load(weights_path);
-        let cfg = QwenConfig::from_json(&c.header["config"]);
-        let w: HashMap<String, Vec<f32>> = c.by_role("");
-        (cfg, w)
-    };
+    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
+    let cfg = QwenConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("qwen_talker_hidden");
-    crate::qwen_topology::build_talker_hidden_graph(&cfg, &w, seq_len, quant, &mut g);
+    crate::qwen_topology::build_talker_hidden_graph(&cfg, &reader, seq_len, quant, &mut g);
     Ok((g.finish(), cfg))
 }
 
@@ -79,14 +71,10 @@ pub fn export_talker_hidden_int8(weights_path: &str, out_path: &str, seq_len: us
 }
 
 fn export_talker_hidden(weights_path: &str, out_path: &str, seq_len: usize, quant: bool) -> std::io::Result<()> {
-    let (cfg, w) = {
-        let c = checkpoint::load(weights_path);
-        let cfg = QwenConfig::from_json(&c.header["config"]);
-        let w: HashMap<String, Vec<f32>> = c.by_role("");
-        (cfg, w)
-    };
+    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
+    let cfg = QwenConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("qwen_talker_hidden");
-    crate::qwen_topology::build_talker_hidden_graph(&cfg, &w, seq_len, quant, &mut g);
+    crate::qwen_topology::build_talker_hidden_graph(&cfg, &reader, seq_len, quant, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
 
@@ -108,14 +96,10 @@ pub fn export_talker_decode_int4(weights_path: &str, out_path: &str, cap: usize)
 }
 
 fn export_talker_decode(weights_path: &str, out_path: &str, cap: usize, quant: crate::qwen_topology::Quant) -> std::io::Result<()> {
-    let (cfg, w) = {
-        let c = checkpoint::load(weights_path);
-        let cfg = QwenConfig::from_json(&c.header["config"]);
-        let w: HashMap<String, Vec<f32>> = c.by_role("");
-        (cfg, w)
-    };
+    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
+    let cfg = QwenConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("qwen_talker_decode");
-    crate::qwen_topology::build_talker_decode_graph(&cfg, &w, cap, quant, &mut g);
+    crate::qwen_topology::build_talker_decode_graph(&cfg, &reader, cap, quant, &mut g);
     finish_quant(&g, out_path, quant)
 }
 
@@ -145,33 +129,29 @@ pub fn export_mtp_decode_int8(mtp_path: &str, out_path: &str, cap: usize) -> std
 }
 
 fn export_mtp_decode(mtp_path: &str, out_path: &str, cap: usize, quant: bool) -> std::io::Result<()> {
-    let (cfg, w) = {
-        let c = checkpoint::load(mtp_path);
-        let h = &c.header["config"];
-        let gu = |k: &str, d: u32| h[k].as_u64().map(|x| x as u32).unwrap_or(d);
-        let gf = |k: &str, d: f32| h[k].as_f64().map(|x| x as f32).unwrap_or(d);
-        // The MTP header (MtpConfig::to_json) keys map to the decoder QwenConfig.
-        let cfg = QwenConfig {
-            vocab: 0,
-            block_size: 0,
-            n_layers: gu("n_layers", 5),
-            d_model: gu("d_model", 1024),
-            n_heads: gu("n_heads", 16),
-            n_kv_heads: gu("n_kv_heads", 8),
-            head_dim: gu("head_dim", 128),
-            d_ff: gu("d_ff", 3072),
-            rope_theta: gf("rope_theta", 1_000_000.0),
-            rms_eps: gf("rms_norm_eps", 1e-6),
-            tie_embeddings: false,
-            qk_norm: true,
-            attn_bias: false,
-            lora: None,
-        };
-        let w: HashMap<String, Vec<f32>> = c.by_role("");
-        (cfg, w)
+    let reader = checkpoint::weightio::WeightReader::open(mtp_path)?;
+    let h = reader.config();
+    let gu = |k: &str, d: u32| h[k].as_u64().map(|x| x as u32).unwrap_or(d);
+    let gf = |k: &str, d: f32| h[k].as_f64().map(|x| x as f32).unwrap_or(d);
+    // The MTP header (MtpConfig::to_json) keys map to the decoder QwenConfig.
+    let cfg = QwenConfig {
+        vocab: 0,
+        block_size: 0,
+        n_layers: gu("n_layers", 5),
+        d_model: gu("d_model", 1024),
+        n_heads: gu("n_heads", 16),
+        n_kv_heads: gu("n_kv_heads", 8),
+        head_dim: gu("head_dim", 128),
+        d_ff: gu("d_ff", 3072),
+        rope_theta: gf("rope_theta", 1_000_000.0),
+        rms_eps: gf("rms_norm_eps", 1e-6),
+        tie_embeddings: false,
+        qk_norm: true,
+        attn_bias: false,
+        lora: None,
     };
     let mut g = GraphBuilder::new("qwen_mtp_decode");
-    crate::qwen_topology::build_talker_decode_graph(&cfg, &w, cap, crate::qwen_topology::Quant::from_bool(quant), &mut g);
+    crate::qwen_topology::build_talker_decode_graph(&cfg, &reader, cap, crate::qwen_topology::Quant::from_bool(quant), &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
 
@@ -180,35 +160,31 @@ fn export_mtp_decode(mtp_path: &str, out_path: &str, cap: usize, quant: bool) ->
 /// prediction (16 substeps) in ONE inference. Inputs `talker_hidden` + `cb0_embed`,
 /// outputs `codes` (f32, host rounds) + `res_sum`. fp32 weights.
 pub fn export_mtp_fused(mtp_path: &str, out_path: &str) -> std::io::Result<()> {
-    let (cfg, emb, vocab, n_groups, w) = {
-        let c = checkpoint::load(mtp_path);
-        let h = &c.header["config"];
-        let gu = |k: &str, d: u32| h[k].as_u64().map(|x| x as u32).unwrap_or(d);
-        let gf = |k: &str, d: f32| h[k].as_f64().map(|x| x as f32).unwrap_or(d);
-        let cfg = QwenConfig {
-            vocab: 0,
-            block_size: 0,
-            n_layers: gu("n_layers", 5),
-            d_model: gu("d_model", 1024),
-            n_heads: gu("n_heads", 16),
-            n_kv_heads: gu("n_kv_heads", 8),
-            head_dim: gu("head_dim", 128),
-            d_ff: gu("d_ff", 3072),
-            rope_theta: gf("rope_theta", 1_000_000.0),
-            rms_eps: gf("rms_norm_eps", 1e-6),
-            tie_embeddings: false,
-            qk_norm: true,
-            attn_bias: false,
-            lora: None,
-        };
-        let emb = gu("embedding_dim", gu("d_model", 1024)) as usize;
-        let vocab = gu("vocab_size", 2048) as usize;
-        let n_groups = gu("num_code_groups", 16) as usize;
-        let w: HashMap<String, Vec<f32>> = c.by_role("");
-        (cfg, emb, vocab, n_groups, w)
+    let reader = checkpoint::weightio::WeightReader::open(mtp_path)?;
+    let h = reader.config();
+    let gu = |k: &str, d: u32| h[k].as_u64().map(|x| x as u32).unwrap_or(d);
+    let gf = |k: &str, d: f32| h[k].as_f64().map(|x| x as f32).unwrap_or(d);
+    let cfg = QwenConfig {
+        vocab: 0,
+        block_size: 0,
+        n_layers: gu("n_layers", 5),
+        d_model: gu("d_model", 1024),
+        n_heads: gu("n_heads", 16),
+        n_kv_heads: gu("n_kv_heads", 8),
+        head_dim: gu("head_dim", 128),
+        d_ff: gu("d_ff", 3072),
+        rope_theta: gf("rope_theta", 1_000_000.0),
+        rms_eps: gf("rms_norm_eps", 1e-6),
+        tie_embeddings: false,
+        qk_norm: true,
+        attn_bias: false,
+        lora: None,
     };
+    let emb = gu("embedding_dim", gu("d_model", 1024)) as usize;
+    let vocab = gu("vocab_size", 2048) as usize;
+    let n_groups = gu("num_code_groups", 16) as usize;
     let mut g = GraphBuilder::new("qwen_mtp_fused");
-    crate::qwen_topology::build_mtp_fused_graph(&cfg, emb, vocab, n_groups, &w, &mut g);
+    crate::qwen_topology::build_mtp_fused_graph(&cfg, emb, vocab, n_groups, &reader, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
 
@@ -230,14 +206,10 @@ pub fn export_talker_prefill_int4(weights_path: &str, out_path: &str, seq_len: u
 }
 
 fn export_talker_prefill(weights_path: &str, out_path: &str, seq_len: usize, quant: crate::qwen_topology::Quant) -> std::io::Result<()> {
-    let (cfg, w) = {
-        let c = checkpoint::load(weights_path);
-        let cfg = QwenConfig::from_json(&c.header["config"]);
-        let w: HashMap<String, Vec<f32>> = c.by_role("");
-        (cfg, w)
-    };
+    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
+    let cfg = QwenConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("qwen_talker_prefill");
-    crate::qwen_topology::build_talker_prefill_graph(&cfg, &w, seq_len, quant, &mut g);
+    crate::qwen_topology::build_talker_prefill_graph(&cfg, &reader, seq_len, quant, &mut g);
     finish_quant(&g, out_path, quant)
 }
 
@@ -248,10 +220,9 @@ const EXTERNAL_THRESHOLD: usize = 1 << 20; // 1 MiB
 /// Export the fp32 ONNX decoder to `out_path` (+ a `<out_path>.data` sidecar for
 /// large weights). The pair is read back with a file-based OpenVINO loader.
 pub fn export_qwen_fp32(weights_path: &str, out_path: &str, seq_len: usize) -> std::io::Result<()> {
-    let c = checkpoint::load(weights_path);
-    let cfg = QwenConfig::from_json(&c.header["config"]);
-    let w: HashMap<String, Vec<f32>> = c.by_role("");
+    let reader = checkpoint::weightio::WeightReader::open(weights_path)?;
+    let cfg = QwenConfig::from_json(&reader.config());
     let mut g = GraphBuilder::new("qwen_decoder");
-    crate::qwen_topology::build_qwen_graph(&cfg, &w, seq_len, &mut g);
+    crate::qwen_topology::build_qwen_graph(&cfg, &reader, seq_len, &mut g);
     g.finish_external(out_path, EXTERNAL_THRESHOLD)
 }
