@@ -147,23 +147,17 @@ pub fn brain_init_from_hf(
 }
 
 /// Import `<hf_dir>/config.json` + `model.safetensors` into the brain
-/// checkpoint `out_path`. Never writes a partial checkpoint.
+/// checkpoint `out_path`. Never writes a partial checkpoint. Streams one HF
+/// source tensor at a time.
 pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
     let dir = Path::new(hf_dir);
     let cfg_json = std::fs::read_to_string(dir.join("config.json"))
         .map_err(|e| format!("read config.json: {e}"))?;
     let cfg = config_from_hf(&cfg_json)?;
 
-    let tensors = checkpoint::safetensors::read_model_dir(dir)?;
-    let init = brain_init_from_hf(tensors, &cfg)?;
-
-    let mut out: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
-    let mut param_count: u64 = 0;
-    for (name, numel) in cfg.param_list() {
-        let data = init.get(&name).expect("coverage validated").clone();
-        param_count += numel as u64;
-        out.push((name, vec![numel as u64], data));
-    }
+    let plan: Vec<(String, Vec<u64>)> =
+        cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64])).collect();
+    let param_count: u64 = plan.iter().map(|(_, s)| s.iter().product::<u64>()).sum();
     // A card so this file auto-serves from the global model directory (P2) with
     // no BRAIN_LFM_WEIGHTS env var — id defaults to the output filename stem,
     // matching how the model dir keys catalog entries.
@@ -171,9 +165,37 @@ pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
     let mut card = checkpoint::st::ModelCard::new(id, "lfm");
     card.context_length = Some(cfg.block_size as u64);
     card.param_count = Some(param_count);
-    checkpoint::st::save_safetensors(out_path, &out, &cfg.to_json(), Some(&card))
-        .map_err(|e| format!("write {out_path}: {e}"))?;
-    eprintln!("imported {} tensors -> {out_path}", out.len());
+
+    let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg.to_json(), Some(&card))
+        .map_err(|e| format!("create {out_path}: {e}"))?;
+    let reader = checkpoint::weightio::WeightReader::open_hf_dir(dir).map_err(|e| format!("open {hf_dir}: {e}"))?;
+
+    let mut err: Option<String> = None;
+    let mut unmapped: Vec<String> = Vec::new();
+    let mut n_written = 0usize;
+    reader.for_each(|name, _shape, data| {
+        if err.is_some() {
+            return;
+        }
+        match hf_to_brain(name) {
+            Some(bn) => {
+                n_written += 1;
+                if let Err(e) = writer.write(&bn, &data) {
+                    err = Some(e.to_string());
+                }
+            }
+            None if name == "lm_head.weight" => {} // tied, deliberately dropped
+            None => unmapped.push(name.to_string()),
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    if !unmapped.is_empty() {
+        return Err(format!("import: {} unmapped HF tensors: {unmapped:?}", unmapped.len()));
+    }
+    writer.finish().map_err(|e| e.to_string())?;
+    eprintln!("imported {n_written} tensors -> {out_path}");
     Ok(())
 }
 
@@ -227,5 +249,85 @@ mod tests {
             "layer_types":["conv"]}"#;
         let cfg = config_from_hf(json).unwrap();
         assert_eq!(cfg.d_ff, 4608); // matches the real 350M checkpoint shapes
+    }
+
+    // ---- streaming import() parity: synthetic tiny HF checkpoint (conv + attention layer) ----
+
+    fn seq(base: f32, n: usize) -> Vec<f32> {
+        (0..n).map(|i| base + i as f32).collect()
+    }
+
+    /// Tiny 2-layer (conv, then attention) tied-embedding checkpoint dir. Ships a
+    /// redundant `lm_head.weight` to exercise the "tied -> drop" branch.
+    fn build_tiny_hf_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("brain-lfm-import-streaming-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let json = r#"{"vocab_size":5,"hidden_size":6,"num_hidden_layers":2,
+            "num_attention_heads":2,"num_key_value_heads":1,
+            "intermediate_size":8,"block_auto_adjust_ff_dim":false,
+            "conv_L_cache":3,"norm_eps":1e-5,
+            "rope_parameters":{"rope_theta":1000000.0,"rope_type":"default"},
+            "tie_word_embeddings":true,
+            "layer_types":["conv","full_attention"]}"#;
+        std::fs::write(dir.join("config.json"), json).unwrap();
+
+        // d=6, hq = 2*head_dim(=d/n_heads=3) = 6, hkv = 1*3 = 3, ff = 8, conv_k = 3.
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = vec![
+            ("lfm2.embed_tokens.weight".into(), vec![30], seq(1_000_000.0, 30)),
+            ("lfm2.embedding_norm.weight".into(), vec![6], seq(2_000_000.0, 6)),
+            ("lm_head.weight".into(), vec![30], seq(3_000_000.0, 30)), // tied -> must be dropped
+            // layer 0: conv
+            ("lfm2.layers.0.operator_norm.weight".into(), vec![6], seq(10.0, 6)),
+            ("lfm2.layers.0.conv.in_proj.weight".into(), vec![108], seq(20.0, 108)),
+            ("lfm2.layers.0.conv.conv.weight".into(), vec![18], seq(140.0, 18)),
+            ("lfm2.layers.0.conv.out_proj.weight".into(), vec![36], seq(160.0, 36)),
+            ("lfm2.layers.0.ffn_norm.weight".into(), vec![6], seq(200.0, 6)),
+            ("lfm2.layers.0.feed_forward.w1.weight".into(), vec![48], seq(210.0, 48)),
+            ("lfm2.layers.0.feed_forward.w3.weight".into(), vec![48], seq(260.0, 48)),
+            ("lfm2.layers.0.feed_forward.w2.weight".into(), vec![48], seq(310.0, 48)),
+            // layer 1: attention
+            ("lfm2.layers.1.operator_norm.weight".into(), vec![6], seq(400.0, 6)),
+            ("lfm2.layers.1.self_attn.q_proj.weight".into(), vec![36], seq(410.0, 36)),
+            ("lfm2.layers.1.self_attn.k_proj.weight".into(), vec![18], seq(450.0, 18)),
+            ("lfm2.layers.1.self_attn.v_proj.weight".into(), vec![18], seq(470.0, 18)),
+            ("lfm2.layers.1.self_attn.q_layernorm.weight".into(), vec![3], seq(490.0, 3)),
+            ("lfm2.layers.1.self_attn.k_layernorm.weight".into(), vec![3], seq(500.0, 3)),
+            ("lfm2.layers.1.self_attn.out_proj.weight".into(), vec![36], seq(510.0, 36)),
+            ("lfm2.layers.1.ffn_norm.weight".into(), vec![6], seq(550.0, 6)),
+            ("lfm2.layers.1.feed_forward.w1.weight".into(), vec![48], seq(560.0, 48)),
+            ("lfm2.layers.1.feed_forward.w3.weight".into(), vec![48], seq(610.0, 48)),
+            ("lfm2.layers.1.feed_forward.w2.weight".into(), vec![48], seq(660.0, 48)),
+        ];
+        checkpoint::st::save_safetensors(dir.join("model.safetensors").to_str().unwrap(), &tensors, &serde_json::Value::Null, None)
+            .unwrap();
+        dir
+    }
+
+    #[test]
+    fn import_streams_and_matches_param_list_tied_head_dropped() {
+        let dir = build_tiny_hf_dir();
+        let out = std::env::temp_dir().join(format!("brain-lfm-import-streaming-out-{}.st", std::process::id()));
+        let out_str = out.to_str().unwrap();
+
+        import(dir.to_str().unwrap(), out_str).expect("streaming import");
+
+        let cfg = config_from_hf(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        let m = checkpoint::st::load_safetensors(out_str).unwrap();
+
+        let expected = cfg.param_list();
+        assert_eq!(m.tensors.len(), expected.len());
+        for (name, numel) in &expected {
+            let data = m.tensors.get(name).unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(data.len(), *numel, "{name}");
+        }
+        assert!(!m.tensors.contains_key("lm_head.weight")); // tied source tensor dropped, never written
+
+        assert_eq!(m.tensors["tok.weight"], seq(1_000_000.0, 30));
+        assert_eq!(m.tensors["blocks.0.conv.conv.weight"], seq(140.0, 18));
+        assert_eq!(m.tensors["blocks.1.attn.wq.weight"], seq(410.0, 36));
+        assert_eq!(m.tensors["blocks.1.mlp.down.weight"], seq(660.0, 48));
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&out).ok();
     }
 }
