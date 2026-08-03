@@ -1,0 +1,63 @@
+# qwen — workstream ledger
+
+Qwen3 dense decoder Transformer (GQA + QK-norm + RoPE + SwiGLU), fp32/WGSL
+engine. The concurrent paged-KV serving engine is a major workstream
+in brain.
+
+## Done
+
+- **P0 — config + param layout**: `QwenConfig` with GQA (`n_kv_heads < n_heads`),
+  per-head QK-norm, decoupled `head_dim`, SwiGLU, no biases. `param_list()`
+  verified against HF Qwen3-0.6B checkpoints (exact tensor count + shape match).
+- **P1 — forward + backward**: full decoder forward/backprop as WGSL dispatches
+  via `model::block`. Gradchecked via `gradcheck::check_qwen`.
+- **P2 — HF import**: `brain qwen import --hf <dir>` reads single or sharded
+  safetensors, maps HF tensor names 1:1, handles the GQA de-interleave for
+  `k_proj`/`v_proj` when `n_kv_heads ≠ n_heads`.
+- **P3 — training**: `brain qwen train` — end-to-end training loop with the
+  shared `optim::Optim` (AdamW + grad-norm clip). Convergence tested.
+- **P4 — LoRA finetuning**: `brain qwen finetune` — frozen base + trainable
+  `A`/`B` adapters on attention projections. `gradcheck::check_qwen_lora` gates
+  the backward.
+- **P5 — INT8 weight quantization**: `crates/qwen/src/q8.rs` — per-channel
+  symmetric weights packed 4-per-u32, DP4A GEMMs. ~4× memory reduction with
+  bounded accuracy loss.
+- **P6 — sharding**: tensor parallel (`shard.rs`) + data parallel
+  (`DataParallel<Qwen>`). `dp_parity` and `shard_parity` tests verify
+  cross-device numerical agreement.
+- **P7 — paged-KV serving engine** (`serve.rs`):
+  - Paged KV cache with shared block pools (`model::paged::BlockAllocator`)
+  - Batched ragged paged decode (one forward per iteration for all active sequences)
+  - Chunked prefill (long prompts split into bounded chunks)
+  - Int8 paged KV (on-read dequant, ~4× smaller pool)
+  - Speculative decoding
+  - Device-side greedy head (`ARGMAX_ROW/PART/FINAL`) — no `[batch, vocab]`
+    transfer to host
+  - Decode-regime kernel selection by row count
+  - Int8 weight path A0 (per-token activation quant + DP4A)
+  - On-device decode window A4 (argmax → next input without host round-trip)
+  - Continuous batching scheduler + throughput benchmark
+- **P8 — tool-call eval**: `brain qwen toolcall` — structured tool-call
+  evaluation against ground-truth targets.
+- **P9 — encoder parity**: cross-backend parity (CPU == wgpu == Vulkan) for the
+  encoder path used by FLUX.2 text conditioning (`encoder_parity.rs`).
+- **P10 — bench train P40**: measured training throughput on Tesla P40
+  (`bench_train_p40.rs`).
+
+## Parity ladder
+
+| Gate | What | Result |
+|---|---|---|
+| P1 | forward vs HF reference | cosine ≥0.9999 |
+| P1 | backward (gradcheck) | all params pass `check_qwen` |
+| P2 | HF import (single + sharded) | exact tensor match |
+| P4 | LoRA backward (gradcheck) | passes `check_qwen_lora` |
+| P6 | DP parity (2 GPUs) | bit-identical |
+| P7 | paged-KV decode vs naive | bit-identical per-token |
+
+## Remaining
+
+- Prefix caching across requests (infrastructure exists in `model::paged`,
+  not yet wired into `serve.rs`).
+- FP8 / E4M3 weight path (the INT8 path is the current quant tool).
+- Mixture-of-Experts serving (dense configs only today).
