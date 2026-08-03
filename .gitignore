@@ -6,6 +6,8 @@ moe-rs/target/
 # reference material. Never committed — see scratchpad/README.md.
 scratchpad/
 
+/.todo/
+
 # Generated training data and trained checkpoints (regenerate via `make data/*`).
 /data/
 /out/
