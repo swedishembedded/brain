@@ -12,8 +12,11 @@ Python in the build/test path; backprop correctness is gated by an in-repo
 finite-difference gradient checker (`crates/gradcheck`), not a PyTorch oracle.
 
 The engine is **architecture-agnostic**: the 320 WGSL kernels (`crates/kernels`)
-are reusable building blocks, not a fixed model. New architectures are composed
-from them, keeping the gradient-check discipline.
+are reusable building blocks, not a fixed model. New architectures should be
+composed from them, keeping the gradient-check discipline. If a new architecture
+requires new kernels, they should be created only after checking whether an
+equivalent kernel already exists, and the newly added kernel must be a proper
+fast and scalable kernel — not a naive one.
 
 ---
 
@@ -296,7 +299,7 @@ front-end to depend on.
 
 | Task | Where |
 |---|---|
-| Architecture & crate graph | `docs/architecture.md` *(crate graph is stale — see Doc gaps)* |
+| Architecture & crate graph | `docs/architecture.md` |
 | Testing strategy + gradient-check gate | `docs/testing.md` |
 | **Porting a new model** (goldens → import → kernel contracts → parity ladder → training) | **`docs/porting-playbook.md`** — read BEFORE starting any port |
 | Multi-GPU scaling (data / pipeline / tensor parallel) | `docs/scaling/*.md`; `crates/model/src/{distributed,parallel,collective,shard,plan,grid}.rs` |
@@ -345,7 +348,7 @@ front-end to depend on.
 | **ASR (speech-to-text)**: status / serving / perf | `docs/models/asr/status.md`; `crates/{nemotron,qwen-asr}`, shared `audio::asr_caps`, `crates/cli/src/resident_asr.rs`, D-Bus `StreamTranscribe` (`crates/dbus`), `examples/asr/` |
 | Forecasting models + backtester | `docs/models/{chronos2,kronos,fincast}/status.md`; `crates/{forecast,fcbench,chronos2,kronos,fincast}`, `crates/cli/src/forecast_cli.rs` |
 | World models (playable) | `docs/models/world-models/{status,playbooks,fixtures}.md` + `specs/`; `crates/wm-*`, `crates/cli/src/wm_cli.rs` |
-| Z-Image / diffusion stack | `crates/{zimage,dit,diffusion,vae}` *(no docs/ entry yet)* |
+| Z-Image / diffusion stack | `docs/models/zimage/{readme,status}.md`; `crates/{zimage,dit,diffusion,vae}` |
 | FLUX.2 Klein: guide / ledger | `docs/models/flux2/{readme,status}.md`; `crates/flux2`, `crates/cli/src/flux2_cli.rs`; goldens via `tools/flux2_dump_reference.py` |
 | Finetuning guides | `docs/guides/finetune/{plan,datasets}.md` |
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
@@ -490,7 +493,7 @@ benchmarks score *any* architecture and results are directly comparable:
 (*informational*) — each scored as the mean of its benchmarks. `eval` writes a
 JSON artifact (arch, size, params, commit, seed, per-benchmark + per-axis
 results, gating pass-rate); `compare` diffs ≥2 side-by-side. `results/` is
-git-ignored except two committed examples.
+git-ignored.
 
 > Non-GPT caveat: `mad_compress` is a bottleneck autoencoder (MSE head), not a
 > next-token decoder, so it ignores the supplied `DecoderLm` — its `compression`
@@ -786,23 +789,33 @@ per-scenario table and the findings so far.
 
 ---
 
-## Doc gaps (as of this revision)
+## Local Task Management Protocol
 
-Known-stale or missing, in rough priority order:
+You are authorized to manage and execute tasks located in the local `.todo/`
+folder. Each file in that directory represents a distinct task using a Markdown
++ Frontmatter format. Each task can contain items and checkbox lists. You may
+remove completed tasks from `.todo` but only after ALL of the items have been
+completed.
 
-1. **No `docs/models/` entry** for: `qwen` (incl. the whole paged-KV serving
-   workstream), `zimage`/`dit`/`diffusion`/`vae`, `gpt`, `moe`, `pid`, `seq2seq`.
-2. **No `status.md` ledger** for `qwen`, `tts`, `glm`, `yolo`, `zimage` (the
-   models that have one: `depth`, `mirror`, `splat`, `chronos2`, `kronos`,
-   `fincast`, `world-models`, and now `perf`).
-3. The serving/runtime stack (`capability`, `residency`, `server`, `dbus`) has
-   rich crate-level rustdoc but **no prose doc** — the table above is currently
-   the only map of it.
+### How to Pick Up a Task
 
-Fixed in this revision: the CLI `HELP` now documents `qwen`, `glm`, `tts`,
-`depth`, `forecast`, `caps`/`do` and `perf`; `docs/architecture.md`'s crate graph
-and its "≤4 storage buffers" invariant are corrected.
+When the user asks you to "pick up <some description> task" (or a specific task
+ID/name):
 
-Not a gap, despite appearances: `federated-moe.md` at the repo root is the
-3148-line *source design* essay; `docs/federated.md` is the shorter "what brain
-implements" doc and cites it deliberately. Keep both.
+1. Read the contents of the target file inside `.todo/`. If no specific task is
+named, look for the oldest file that matches the description.
+2. Immediately modify that file's frontmatter to change `status: pending` to
+`status: in_progress`.
+3. Read the "Objective" and "In-Scope" definitions in that file. Do not wander
+outside the defined scope.
+4. Plan and execute the code changes required to complete the task.
+
+### How to Complete a Task
+
+Once each task milestone is fully built, tested, and verified:
+1. Commit the changes to git as a series of self-contained, independent commits.
+2. Mark the task file as completed and ask the user if he would like to remove
+it.
+3. You may only remove the task .md file after the task has been completed IN
+FULL and user has confirmed the deletion.
+
