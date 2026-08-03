@@ -1,6 +1,6 @@
 # Federated / sharded MoE in brain
 
-Source design: `federated-moe.md` (root) and the Python reference
+Source design: `docs/federated-moe.md` (the long-form essay) and the Python reference
 `scratchpad/reference/sharded_moe_example/`. This doc describes what brain
 implements (`crates/federated`) and what remains.
 
@@ -60,7 +60,7 @@ Each `train-expert` runs independently and only needs `base.safetensors`, so you
 train one shard at a time on a small machine (control per-step memory with
 `--batch`/`--block`). Note: the whole model is still GPU-resident during a
 worker run — true memory sharding (CPU offload / layer-expert shards from
-`federated-moe.md`) is not yet implemented; what you get today is independent,
+`docs/federated-moe.md`) is not yet implemented; what you get today is independent,
 sequential, auditable per-expert training.
 
 ## The full lifecycle (target)
