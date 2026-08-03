@@ -20,13 +20,9 @@ __pycache__/
 *.pyc
 .mypy_cache
 
-# Architecture-eval results artifacts (`brain bench eval`/`scale` write here). Run
-# outputs are not committed; the dir is kept via results/.gitkeep and two example
-# artifacts (one eval, one scaling) are committed + shown in crates/bench/README.md.
+# Architecture-eval results artifacts (`brain bench eval`/`scale` write here).
+# Run outputs are not committed; the directory is regenerated on demand.
 /results/*.json
-!/results/.gitkeep
-!/results/gpt-1234.json
-!/results/scale-gpt-1234.json
 
 # Session-local agent machinery (worktrees, locks, loop state, workflows).
 .claude/*
