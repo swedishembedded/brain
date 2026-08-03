@@ -12,44 +12,44 @@
 //!
 //! Run `brain help` for the full usage with examples.
 
+mod args;
+mod caps_cli;
 mod data_cli;
+mod depth_cli;
 mod devices_cli;
 mod federated_cli;
 mod fetch;
 mod fetch_cli;
 mod flops_cli;
+mod flux2_cli;
 mod forecast_cli;
-mod args;
 mod glm_cli;
 mod gpt_cli;
-mod lfm_cli;
 mod image_io;
+mod imageops;
+mod lfm_cli;
+mod mirror_cli;
+mod model_dir;
 mod npu_cli;
 mod perf_cli;
 mod perf_engine;
 mod pid_cli;
 mod qwen_cli;
-mod model_dir;
 mod resident;
+mod resident_asr;
+mod resident_depth;
+mod resident_flux2;
+mod resident_forecast;
 mod resident_lfm;
 mod resident_llm;
-mod resident_depth;
-mod resident_forecast;
-mod resident_tts;
-mod resident_asr;
-mod resident_flux2;
 mod resident_mock;
-mod caps_cli;
-mod imageops;
+mod resident_tts;
 mod run_cli;
+mod splat_cli;
 mod tts_cli;
 mod tts_serve;
 mod wm_cli;
 mod yolo_cli;
-mod depth_cli;
-mod flux2_cli;
-mod mirror_cli;
-mod splat_cli;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -262,6 +262,7 @@ OTHER
   brain gradcheck                          # finite-difference backprop check (GPT)
   brain pid <train|rollout|profile> ...
   brain help
+  brain --version
 
 EXAMPLES
   brain data gen calculator --out data/calculator --n 100000
@@ -294,7 +295,9 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
             match argv.get(i + 1) {
                 Some(v) => spec_text = Some(v.clone()),
                 None => {
-                    eprintln!("brain: --device needs a value (cpu | gpu | npu | gpu0 | cpu0-7 | gpu,cpu)");
+                    eprintln!(
+                        "brain: --device needs a value (cpu | gpu | npu | gpu0 | cpu0-7 | gpu,cpu)"
+                    );
                     std::process::exit(2);
                 }
             }
@@ -307,7 +310,9 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
 
     // No flag and no BRAIN_DEVICE => the empty spec, which resolves to every
     // device on the machine (GPUs + CPU + NPU), scheduled together.
-    let text = spec_text.or_else(|| std::env::var("BRAIN_DEVICE").ok()).unwrap_or_default();
+    let text = spec_text
+        .or_else(|| std::env::var("BRAIN_DEVICE").ok())
+        .unwrap_or_default();
     let spec = match gpu_core::DeviceSpec::parse(&text) {
         Ok(s) => s,
         Err(e) => {
@@ -406,7 +411,10 @@ fn run_bench(args: &[String]) {
 fn run_scaling(seed: u64) {
     let dir = std::env::temp_dir().join(format!("brain_scaling_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    let sweep = bench::scaling::Sweep { seed, ..Default::default() };
+    let sweep = bench::scaling::Sweep {
+        seed,
+        ..Default::default()
+    };
     match bench::scaling::run(&sweep, &dir) {
         Ok(result) => {
             result.print();
@@ -518,7 +526,10 @@ fn run_bench_scale(args: &[String]) {
         i += 1;
     }
 
-    let cfg = bench::capscale::CapScaleConfig { seed, ..Default::default() };
+    let cfg = bench::capscale::CapScaleConfig {
+        seed,
+        ..Default::default()
+    };
     let report = match bench::capscale::run(&arch, &cfg) {
         Ok(r) => r,
         Err(e) => {
@@ -584,7 +595,13 @@ fn run_bench_compare(args: &[String]) {
 }
 
 fn main() {
-    let argv = select_backend(std::env::args().collect());
+    let argv: Vec<String> = std::env::args().collect();
+    if matches!(argv.get(1).map(String::as_str), Some("--version" | "-V")) {
+        println!("brain {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
+    let argv = select_backend(argv);
     match argv.get(1).map(|s| s.as_str()) {
         Some("data") => data_cli::run_data(&argv[2..]),
         Some("devices") => devices_cli::run_devices(&argv[2..]),
