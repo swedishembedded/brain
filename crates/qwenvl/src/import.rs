@@ -135,8 +135,7 @@ pub fn partition(hf: HashMap<String, Vec<f32>>, n_deepstack: usize) -> ImportedW
 #[cfg(test)]
 mod tests {
 
-#[allow(dead_code)]
-use brain_testutil::testdata;
+use brain_testutil::model_dir;
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {
     format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
@@ -181,7 +180,7 @@ fn repo_path(rel: &str) -> String {
     /// config expects is imported and the vision/merger groups have the right counts.
     #[test]
     fn real_index_fully_covered() {
-        let path = testdata("vl/qwen3-vl/Qwen3-VL-4B-Instruct/model.safetensors.index.json");
+        let path = format!("{}/model.safetensors.index.json", model_dir("Qwen/Qwen3-VL-4B-Instruct").unwrap_or_default());
         let Ok(txt) = std::fs::read_to_string(path) else {
             eprintln!("skip real_index_fully_covered: checkpoint not present");
             return;

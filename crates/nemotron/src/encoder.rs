@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn subsampling_matches_reference() {
         let GOLD = crate::testdata("asr/golden/nemotron");
-        let CKPT = crate::testdata("asr/nemotron/hf");
+        let CKPT = crate::model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_or_default();
         if !Path::new(&format!("{GOLD}/subsampling.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
             eprintln!("skipping: goldens/checkpoint absent");
             return;
@@ -686,7 +686,7 @@ mod tests {
     #[ignore = "requires a real GPU: run with BRAIN_DEVICE=vulkan (Arc iGPU) or gpu"]
     fn gpu_encoder_matches_reference() {
         let GOLD = crate::testdata("asr/golden/nemotron");
-        let CKPT = crate::testdata("asr/nemotron/hf");
+        let CKPT = crate::model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_or_default();
         if !Path::new(&format!("{GOLD}/pooler.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
             eprintln!("skipping: goldens/checkpoint absent");
             return;
@@ -715,7 +715,7 @@ mod tests {
     #[test]
     fn device_encoder_matches_reference() {
         let GOLD = crate::testdata("asr/golden/nemotron");
-        let CKPT = crate::testdata("asr/nemotron/hf");
+        let CKPT = crate::model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_or_default();
         if !Path::new(&format!("{GOLD}/pooler.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
             eprintln!("skipping: goldens/checkpoint absent");
             return;
@@ -750,7 +750,7 @@ mod tests {
     #[ignore = "loads the 0.6B checkpoint + batched activations (heavy; run explicitly)"]
     fn batched_encode_matches_single() {
         let GOLD = crate::testdata("asr/golden/nemotron");
-        let CKPT = crate::testdata("asr/nemotron/hf");
+        let CKPT = crate::model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_or_default();
         if !Path::new(&format!("{GOLD}/input_features.f32")).exists() || !Path::new(&format!("{CKPT}/model.safetensors")).exists() {
             eprintln!("skipping: goldens/checkpoint absent");
             return;

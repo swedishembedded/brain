@@ -20,6 +20,10 @@ pub use model::Qwen3Asr;
 /// defaulting to `<repo>/testdata` (populated by `make fetch/testdata`).
 #[cfg(test)]
 use brain_testutil::testdata;
+/// Resolve the on-disk model-store directory for the real Qwen3-ASR
+/// checkpoint tests import/parity-test against; see `brain_testutil::model_dir`.
+#[cfg(test)]
+use brain_testutil::model_dir;
 
 #[cfg(test)]
 mod tests {
@@ -55,7 +59,7 @@ mod tests {
     #[ignore = "slow: loads the 1.7B checkpoint + KV-cache decode (~minutes; bandwidth-bound)"]
     fn qwen_transcribe_matches_reference() {
         let dg = crate::testdata("asr/golden/qwen_decode");
-        let CKPT = crate::testdata("asr/qwen-asr/hf");
+        let CKPT = crate::model_dir("Qwen/Qwen3-ASR-1.7B").unwrap_or_default();
         if !have(&format!("{dg}/output_ids.f32")) || !have(&format!("{CKPT}/model.safetensors")) {
             eprintln!("skipping: goldens/checkpoint absent");
             return;
@@ -96,7 +100,7 @@ mod tests {
     #[test]
     fn qwen_encoder_matches_reference() {
         let GOLD = crate::testdata("asr/golden/qwen_encoder");
-        let CKPT = crate::testdata("asr/qwen-asr/hf");
+        let CKPT = crate::model_dir("Qwen/Qwen3-ASR-1.7B").unwrap_or_default();
         if !have(&format!("{GOLD}/encoder_out.f32")) || !have(&format!("{CKPT}/model.safetensors")) {
             eprintln!("skipping: goldens/checkpoint absent");
             return;

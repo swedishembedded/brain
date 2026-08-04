@@ -16,6 +16,7 @@ mod tests {
 
 #[allow(dead_code)]
 use brain_testutil::testdata;
+use brain_testutil::model_dir;
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {
     format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
@@ -39,7 +40,7 @@ fn repo_path(rel: &str) -> String {
 
     #[test]
     fn fastvlm_decoder_logits_match_hf_reference() {
-        let CKPT = testdata("vl/fastvlm/hf/FastVLM-0.5B/model.safetensors");
+        let CKPT = format!("{}/model.safetensors", model_dir("apple/FastVLM-0.5B").unwrap_or_default());
         let REF = testdata("vl/parity/fastvlm_dec_ref.bin");
         let TOK = testdata("vl/parity/fastvlm_dec_tokens.bin");
         let GEN = testdata("vl/parity/fastvlm_dec_gen.bin");
@@ -122,7 +123,7 @@ fn repo_path(rel: &str) -> String {
 
     #[test]
     fn fastvlm_vision_tower_matches_hf() {
-        let CKPT = testdata("vl/fastvlm/hf/FastVLM-0.5B/model.safetensors");
+        let CKPT = format!("{}/model.safetensors", model_dir("apple/FastVLM-0.5B").unwrap_or_default());
         let VIS_PX = testdata("vl/parity/fastvlm_vis_px.bin");
         let VIS_FEAT = testdata("vl/parity/fastvlm_vis_feat.bin");
         // brain's OWN FastViTHD (Encoder::mobileclip_l) vs the HF mobileclip tower on
@@ -169,7 +170,7 @@ fn repo_path(rel: &str) -> String {
 
     #[test]
     fn fastvlm_full_pipeline_caption() {
-        let CKPT = testdata("vl/fastvlm/hf/FastVLM-0.5B/model.safetensors");
+        let CKPT = format!("{}/model.safetensors", model_dir("apple/FastVLM-0.5B").unwrap_or_default());
         let VIS_PX = testdata("vl/parity/fastvlm_vis_px.bin");
         let CAP_LAYOUT = testdata("vl/parity/fastvlm_cap_layout.bin");
         let CAP_IDS = testdata("vl/parity/fastvlm_cap_ids.bin");
@@ -261,7 +262,7 @@ fn repo_path(rel: &str) -> String {
 
     #[test]
     fn fastvlm_image_caption_matches_hf() {
-        let CKPT = testdata("vl/fastvlm/hf/FastVLM-0.5B/model.safetensors");
+        let CKPT = format!("{}/model.safetensors", model_dir("apple/FastVLM-0.5B").unwrap_or_default());
         let CAP_EMB = testdata("vl/parity/fastvlm_cap_embeds.bin");
         let CAP_LAYOUT = testdata("vl/parity/fastvlm_cap_layout.bin");
         let CAP_IDS = testdata("vl/parity/fastvlm_cap_ids.bin");

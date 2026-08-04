@@ -19,24 +19,37 @@
 #     ONE place a machine-specific mirror location may appear, and it is an
 #     overridable variable, not source code.
 #   * `testdata/` holds test INPUTS AND GOLDENS ONLY — never a `.git` directory
-#     (stripped unconditionally, see `_link_from` below) and never upstream
-#     source/notebooks/docs a test doesn't read (`vl_tree`'s extra exclusions).
-#     See .todo/cleanup-testdata.md for the audit that motivated this.
+#     (stripped unconditionally, see `_link_from` below), never upstream
+#     source/notebooks/docs a test doesn't read (`vl_tree`'s extra exclusions),
+#     and never a model checkpoint — those go to the model store (see
+#     `model_tree` below), addressed by fully-qualified `<vendor>/<repo>` name,
+#     the same place `brain fetch` writes and `brain_testutil::model_dir`
+#     resolves. See .todo/cleanup-testdata.md for the audit that motivated this.
 #
 # Layout produced (a proper tree, mirroring each model's asset namespace):
-#   testdata/asr/nemotron/hf/…         Nemotron 3.5 ASR 0.6B HF checkpoint
-#   testdata/asr/qwen-asr/hf/…         Qwen3-ASR 1.7B HF checkpoint
 #   testdata/asr/golden/{nemotron,qwen_encoder,qwen_decode,frontend}/…  dumped goldens
 #   testdata/asr/audio/…               test waveforms
+#   <models-dir>/nvidia/nemotron-3.5-asr-streaming-0.6b/…  Nemotron checkpoint
+#   <models-dir>/Qwen/Qwen3-ASR-1.7B/…                     Qwen3-ASR checkpoint
+#   (<models-dir> resolved like brain_modelstore::default_root: BRAIN_MODELS_DIR,
+#   else $XDG_DATA_HOME/brain/models, else $HOME/.local/share/brain/models)
 #
 # Usage:
 #   make fetch/testdata                      # populate everything missing
 #   BRAIN_ASR_MIRROR=/path make fetch/testdata
 #   BRAIN_TESTDATA=/scratch/td make fetch/testdata
+#   BRAIN_MODELS_DIR=/scratch/models make fetch/testdata
 set -euo pipefail
 
 ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
 DEST="${BRAIN_TESTDATA:-$ROOT/testdata}"
+if [ -n "${BRAIN_MODELS_DIR:-}" ]; then
+  MODELS_DIR="$BRAIN_MODELS_DIR"
+elif [ -n "${XDG_DATA_HOME:-}" ]; then
+  MODELS_DIR="$XDG_DATA_HOME/brain/models"
+else
+  MODELS_DIR="$HOME/.local/share/brain/models"
+fi
 
 # Local mirrors of the raw assets on a dev box (override each with its env var).
 # These are the "copy from the local absolute path" sources the tests used to
@@ -50,9 +63,10 @@ IDENTITY_MIRROR="${BRAIN_IDENTITY_MIRROR:-/data/workspace/resources/identity}"
 
 added=0 skipped=0 missing=0
 
-# _link_from <mirror-root> <mirror-subdir> <dest-subdir> [extra-exclude-ere] —
+# _link_from <mirror-root> <mirror-subdir> <dest-subdir> [extra-exclude-ere] [dest-root] —
 # hard-link (or copy) every file under <mirror-root>/<mirror-subdir> into
-# $DEST/<dest-subdir>, creating only what's missing.
+# <dest-root>/<dest-subdir> (dest-root defaults to $DEST, the testdata tree;
+# `model_tree` below passes $MODELS_DIR instead), creating only what's missing.
 #
 # ALWAYS excludes `.git` directory contents — no test consumer ever needs one,
 # and a cloned mirror's `.git` is pure duplicated disk (a checked-out working
@@ -64,8 +78,8 @@ added=0 skipped=0 missing=0
 # particular tree's mirror carries but no test reads — see `vl_tree` below,
 # whose mirror is whole upstream HF/GitHub checkouts.
 _link_from() {
-  local root="$1" sub_src="$2" sub_dst="$3" extra_exclude="${4:-}"
-  local src="$root/$sub_src" dst="$DEST/$sub_dst"
+  local root="$1" sub_src="$2" sub_dst="$3" extra_exclude="${4:-}" dest_root="${5:-$DEST}"
+  local src="$root/$sub_src" dst="$dest_root/$sub_dst"
   if [ ! -d "$src" ]; then
     echo "  · $sub_dst: mirror '$src' absent — skipping (point its BRAIN_*_MIRROR at a copy, or add a URL)"
     missing=$((missing + 1))
@@ -141,13 +155,22 @@ VL_EXCLUDE='\.(py|ipynb|sh|md|MD|html|pdf|mp4|pt)$|(^|/)(docker|evaluation|cookb
 vl_tree()  { _link_from "$VL_MIRROR"  "$1" "$2" "$VL_EXCLUDE"; }
 tts_tree() { _link_from "$TTS_MIRROR" "$1" "$2"; }
 sam2_tree() { _link_from "$SAM2_MIRROR" "$1" "$2"; }
+# model_tree <mirror-root> <mirror-subdir> <vendor>/<repo> — like the *_tree
+# helpers above, but the destination is $MODELS_DIR/<vendor>/<repo>, not
+# $DEST/testdata/…: a model CHECKPOINT (an upstream HF repo, as downloaded —
+# not test input/golden data) belongs in the model store, addressed by its
+# fully-qualified reference, so it's found the same way a real `brain fetch`
+# of the same ref would leave it. No extra-exclude: unlike vl_tree's whole
+# upstream checkout, each call here already names one exact model variant's
+# subdir, so nothing needs filtering out.
+model_tree() { _link_from "$1" "$2" "$3" "" "$MODELS_DIR"; }
 
-echo "brain: populating testdata at $DEST"
+echo "brain: populating testdata at $DEST, models at $MODELS_DIR"
 echo "       mirrors: asr=$ASR_MIRROR vl=$VL_MIRROR tts=$TTS_MIRROR golden=$GOLDEN_MIRROR sam2=$SAM2_MIRROR identity=$IDENTITY_MIRROR"
 
 # --- ASR (Nemotron 3.5 ASR, Qwen3-ASR) --------------------------------------
-asr_tree "nemotron/hf"     "asr/nemotron/hf"
-asr_tree "qwen3-asr/hf"    "asr/qwen-asr/hf"
+model_tree "$ASR_MIRROR" "nemotron/hf"  "nvidia/nemotron-3.5-asr-streaming-0.6b"
+model_tree "$ASR_MIRROR" "qwen3-asr/hf" "Qwen/Qwen3-ASR-1.7B"
 asr_tree "golden"          "asr/golden"
 asr_tree "audio"           "asr/audio"
 
@@ -183,9 +206,12 @@ _link_files "$IDENTITY_MIRROR" "weights/antelopev2" "face/antelopev2" \
   glintr100.onnx scrfd_10g_bnkps.onnx
 
 # --- Vision-language (FastVLM, Moondream3, Qwen3-VL) -------------------------
-vl_tree  "fastvlm/hf"      "vl/fastvlm/hf"
-vl_tree  "moondream3/hf"   "vl/moondream3/hf"
-vl_tree  "qwen3-vl"        "vl/qwen3-vl"
+# Checkpoints go to the model store, named exactly (only the ONE variant per
+# family the model crates actually import/parity-test against — the mirror
+# also carries sibling sizes, e.g. FastVLM-1.5B/7B, that nothing here reads).
+model_tree "$VL_MIRROR" "fastvlm/hf/FastVLM-0.5B"          "apple/FastVLM-0.5B"
+model_tree "$VL_MIRROR" "moondream3/hf/moondream3-preview" "moondream/moondream3-preview"
+model_tree "$VL_MIRROR" "qwen3-vl/Qwen3-VL-4B-Instruct"    "Qwen/Qwen3-VL-4B-Instruct"
 vl_tree  "parity"          "vl/parity"
 
 # --- Audio codec / TTS / speaker (Qwen3-TTS) --------------------------------

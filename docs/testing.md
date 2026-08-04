@@ -30,18 +30,30 @@ dev-dependency — this used to be a byte-identical function copy-pasted into ev
 one of those crates). It resolves to `$BRAIN_TESTDATA` if set, else the gitignored
 `<repo>/testdata/`.
 
-**`testdata/` holds test inputs and goldens ONLY** — reference checkpoints a test
-loads, dumped-golden tensors it compares against, and small input media (audio
-clips, images). It must never hold a `.git` directory or runnable code (upstream
-source, notebooks, docs): `scripts/data/fetch-testdata.sh`, the one thing that
-populates it, unconditionally strips `.git` and `.cache/huggingface` from
-everything it mirrors, plus an extra exclusion list for trees whose mirror is a
-whole upstream checkout (`vl_tree`'s `.py`/`.ipynb`/`.md`/`.pdf`/`.mp4`/`.pt`
-exclusion — none of `fastvlm`/`moondream`/`qwenvl`'s tests read any of those).
+**`testdata/` holds test inputs and goldens ONLY** — dumped-golden tensors a test
+compares against and small input media (audio clips, images). It must never hold a
+`.git` directory, runnable code (upstream source, notebooks, docs), or a model
+checkpoint: `scripts/data/fetch-testdata.sh`, the one thing that populates it,
+unconditionally strips `.git` and `.cache/huggingface` from everything it mirrors,
+plus an extra exclusion list for trees whose mirror is a whole upstream checkout
+(`vl_tree`'s `.py`/`.ipynb`/`.md`/`.pdf`/`.mp4`/`.pt` exclusion — none of
+`fastvlm`/`moondream`/`qwenvl`'s tests read any of those).
 
-Populate it with `make fetch/testdata` (hard-links from a local mirror —
+**Real upstream checkpoints (`fastvlm`, `moondream`, `qwenvl`, `nemotron`,
+`qwen-asr`'s parity/import tests) live in the model store, not `testdata/`** — the
+same `<models-dir>/<vendor>/<repo>/` tree `brain fetch` writes and
+`crates/modelstore` scans (see `docs/models/naming.md`). Tests resolve one with
+`brain_testutil::model_dir("<vendor>/<repo>")`, which wraps
+`brain_modelstore::default_root()` (`$BRAIN_MODELS_DIR`, else
+`$XDG_DATA_HOME/brain/models`, else `$HOME/.local/share/brain/models`) — `None` when
+unresolvable, which every call site turns into an empty path via `unwrap_or_default()`
+so the existing `Path::new(&format!("{ckpt}/…")).exists()` skip check stays correct
+either way.
+
+Populate both with `make fetch/testdata` (hard-links from a local mirror —
 `BRAIN_*_MIRROR` env vars, the ONE place a machine-specific path may appear in
-this repo, per `AGENTS.md`). A test whose fixture is still absent **skips
+this repo, per `AGENTS.md` — into `testdata/` for goldens/media, `$BRAIN_MODELS_DIR`
+or its default for checkpoints). A test whose fixture is still absent **skips
 itself** (`eprintln!` + early return, never `panic!`) — verify a change here by
 removing `testdata/`, re-running `make fetch/testdata`, and re-running the
 crates in the table above; a fixture that stopped resolving shows up as a new

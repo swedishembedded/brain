@@ -24,3 +24,9 @@ pub use config::NemotronConfig;
 /// `make fetch/testdata`). Tests skip themselves when the file is absent.
 #[cfg(test)]
 use brain_testutil::testdata;
+/// Resolve the on-disk model-store directory for the real Nemotron checkpoint
+/// tests import/parity-test against; see `brain_testutil::model_dir`. `None`
+/// (no models dir resolvable) collapses to an empty path so the existing
+/// `Path::new(&format!("{ckpt}/…")).exists()` skip checks stay correct.
+#[cfg(test)]
+use brain_testutil::model_dir;

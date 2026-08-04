@@ -58,8 +58,7 @@ pub fn map_vision(hf: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
 
-#[allow(dead_code)]
-use brain_testutil::testdata;
+use brain_testutil::model_dir;
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {
     format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
@@ -93,7 +92,7 @@ fn repo_path(rel: &str) -> String {
     #[test]
     fn real_checkpoint_decoder_and_projector_covered() {
         use std::io::Read;
-        let path = testdata("vl/fastvlm/hf/FastVLM-0.5B/model.safetensors");
+        let path = format!("{}/model.safetensors", model_dir("apple/FastVLM-0.5B").unwrap_or_default());
         let Ok(mut f) = std::fs::File::open(path) else {
             eprintln!("skip: FastVLM checkpoint not present");
             return;

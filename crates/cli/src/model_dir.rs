@@ -32,22 +32,15 @@ use checkpoint::st::{self, ModelCard};
 use residency::ResidentModel;
 
 /// Resolve the models directory. Precedence: the `--models-dir` flag, then
-/// `BRAIN_MODELS_DIR`, then `$XDG_DATA_HOME/brain/models`, then
-/// `$HOME/.local/share/brain/models`. `None` only when the flag and all three
-/// env vars are unset (no HOME) — the scan is then simply skipped.
+/// [`brain_modelstore::default_root`] (`BRAIN_MODELS_DIR`, then
+/// `$XDG_DATA_HOME/brain/models`, then `$HOME/.local/share/brain/models`).
+/// `None` only when the flag and all three env vars are unset (no HOME) — the
+/// scan is then simply skipped.
 pub fn resolve(flag: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = flag.filter(|s| !s.is_empty()) {
         return Some(PathBuf::from(p));
     }
-    if let Some(p) = std::env::var_os("BRAIN_MODELS_DIR").filter(|s| !s.is_empty()) {
-        return Some(PathBuf::from(p));
-    }
-    if let Some(x) = std::env::var_os("XDG_DATA_HOME").filter(|s| !s.is_empty()) {
-        return Some(Path::new(&x).join("brain").join("models"));
-    }
-    std::env::var_os("HOME")
-        .filter(|s| !s.is_empty())
-        .map(|h| Path::new(&h).join(".local").join("share").join("brain").join("models"))
+    brain_modelstore::default_root()
 }
 
 /// If `fname` is an HF shard (`<base>-<NNNNN>-of-<MMMMM>.safetensors`), return

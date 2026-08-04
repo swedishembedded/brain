@@ -14,7 +14,7 @@ use std::path::Path;
 use npu::openvino::{available_devices, Feed, NpuConfig, NpuDevice, NpuGraph, PerfHint};
 use npu::NemotronTopo;
 
-use brain_testutil::testdata;
+use brain_testutil::{model_dir, testdata};
 
 fn read_f32(p: &str) -> Vec<f32> {
     let b = std::fs::read(p).unwrap_or_else(|_| panic!("missing {p}"));
@@ -23,7 +23,7 @@ fn read_f32(p: &str) -> Vec<f32> {
 
 #[test]
 fn subsampling_matches_golden_on_cpu() {
-    let ckpt = testdata("asr/nemotron/hf");
+    let ckpt = model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_or_default();
     let gold = testdata("asr/golden/nemotron");
     if !Path::new(&format!("{ckpt}/model.safetensors")).exists() || !Path::new(&format!("{gold}/subsampling.f32")).exists() {
         eprintln!("skip: nemotron checkpoint/golden absent (run `make fetch/testdata`)");

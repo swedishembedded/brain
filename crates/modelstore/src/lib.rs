@@ -59,6 +59,26 @@ pub struct Store {
     root: PathBuf,
 }
 
+/// Resolve the default models directory purely from the environment:
+/// `BRAIN_MODELS_DIR`, else `$XDG_DATA_HOME/brain/models`, else
+/// `$HOME/.local/share/brain/models`. `None` only when every one of those is
+/// unset (no `$HOME`). This is the env-only tail of `crates/cli/src/
+/// model_dir.rs`'s `resolve` (which layers a `--models-dir` flag override on
+/// top) -- shared here so anything that needs "the models dir" without a CLI
+/// flag in scope (this crate's own callers, `brain_testutil`'s model-backed
+/// test fixtures) doesn't duplicate the precedence.
+pub fn default_root() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("BRAIN_MODELS_DIR").filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    if let Some(x) = std::env::var_os("XDG_DATA_HOME").filter(|s| !s.is_empty()) {
+        return Some(Path::new(&x).join("brain").join("models"));
+    }
+    std::env::var_os("HOME")
+        .filter(|s| !s.is_empty())
+        .map(|h| Path::new(&h).join(".local").join("share").join("brain").join("models"))
+}
+
 /// The brain-format conversion of a base repo's weights -- what a resident
 /// actually loads. The upstream `model.safetensors` (or shard set) that
 /// produced it is not itself servable: `model_dir::register` requires a
@@ -223,6 +243,58 @@ mod tests {
         assert!(local.tokenizer.is_some());
         let card = local.card.expect("save_safetensors wrote a card");
         assert_eq!(card.id, "Qwen/Qwen3-0.6B");
+    }
+
+    #[test]
+    fn default_root_prefers_brain_models_dir_over_xdg_and_home() {
+        // No other test in this crate reads these three env vars, so mutating
+        // them here (Rust >= 1.82 requires `unsafe` for env mutation, since
+        // it is genuinely process-global and unsafe to race against another
+        // thread reading it) cannot race a concurrently-running test. Capture
+        // the real values up front so they can be restored exactly, not
+        // guessed, once this test is done mutating them.
+        let orig_home = std::env::var_os("HOME");
+        let orig_xdg = std::env::var_os("XDG_DATA_HOME");
+        let orig_models = std::env::var_os("BRAIN_MODELS_DIR");
+
+        unsafe {
+            std::env::set_var("BRAIN_MODELS_DIR", "/scratch/models-dir");
+            std::env::set_var("XDG_DATA_HOME", "/scratch/xdg");
+        }
+        assert_eq!(default_root(), Some(PathBuf::from("/scratch/models-dir")));
+
+        unsafe {
+            std::env::remove_var("BRAIN_MODELS_DIR");
+        }
+        assert_eq!(default_root(), Some(PathBuf::from("/scratch/xdg/brain/models")));
+
+        unsafe {
+            std::env::remove_var("XDG_DATA_HOME");
+            std::env::set_var("HOME", "/scratch/home");
+        }
+        assert_eq!(default_root(), Some(PathBuf::from("/scratch/home/.local/share/brain/models")));
+
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        assert_eq!(default_root(), None);
+
+        // Restore every var to its real pre-test value (or unset, if it was
+        // unset before) so nothing else in this process is left disturbed.
+        unsafe {
+            match orig_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match orig_xdg {
+                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+            match orig_models {
+                Some(v) => std::env::set_var("BRAIN_MODELS_DIR", v),
+                None => std::env::remove_var("BRAIN_MODELS_DIR"),
+            }
+        }
     }
 
     #[test]

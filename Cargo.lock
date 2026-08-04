@@ -1247,6 +1247,10 @@ dependencies = [
 [[package]]
 name = "brain-testutil"
 version = "0.1.0"
+dependencies = [
+ "brain-modelref",
+ "brain-modelstore",
+]
 
 [[package]]
 name = "brain-timeseries"

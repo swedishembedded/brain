@@ -804,7 +804,7 @@ mod tests {
     #[ignore = "loads the 0.6B checkpoint (run explicitly)"]
     fn streaming_e2e_matches_offline_transcribe() {
         use std::path::Path;
-        let ckpt = crate::testdata("asr/nemotron/hf");
+        let ckpt = crate::model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_or_default();
         let wav_path = crate::testdata("asr/audio/librispeech_mr_quilter.wav");
         if !Path::new(&wav_path).exists() || !Path::new(&format!("{ckpt}/model.safetensors")).exists() {
             eprintln!("skipping: assets absent (run `make fetch/testdata`)");

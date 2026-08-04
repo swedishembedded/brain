@@ -182,8 +182,7 @@ pub fn build_vision_weights(tensors: &[(String, Vec<f32>)]) -> HashMap<String, V
 #[cfg(test)]
 mod tests {
 
-#[allow(dead_code)]
-use brain_testutil::testdata;
+use brain_testutil::model_dir;
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {
     format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
@@ -196,7 +195,7 @@ fn repo_path(rel: &str) -> String {
     fn vision_import_covers_every_brain_param() {
         // Every mobileclip_l parameter brain expects must be produced by the import
         // from the real checkpoint's vision tensors (skips if the checkpoint absent).
-        let path = testdata("vl/fastvlm/hf/FastVLM-0.5B/model.safetensors");
+        let path = format!("{}/model.safetensors", model_dir("apple/FastVLM-0.5B").unwrap_or_default());
         let Ok(tensors) = checkpoint::safetensors::read(&path) else {
             eprintln!("skip: FastVLM checkpoint not present");
             return;

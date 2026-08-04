@@ -17,6 +17,7 @@ mod tests {
 
 #[allow(dead_code)]
 use brain_testutil::testdata;
+use brain_testutil::model_dir;
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {
     format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
@@ -41,7 +42,7 @@ fn repo_path(rel: &str) -> String {
 
     #[test]
     fn moondream_decoder_partial_depth_matches_hf() {
-        let DIR = testdata("vl/moondream3/hf/moondream3-preview");
+        let DIR = model_dir("moondream/moondream3-preview").unwrap_or_default();
         let REF = testdata("vl/parity/moondream_dec_ref.bin");
         let TOK = testdata("vl/parity/moondream_dec_tokens.bin");
         let (Some(ref_logits), Some(tok_raw)) = (read_f32(&REF), std::fs::read(TOK).ok()) else {

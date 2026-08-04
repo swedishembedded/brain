@@ -36,6 +36,26 @@ pub fn testdata_path(rel: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(testdata(rel))
 }
 
+/// The on-disk store directory for a fully-qualified upstream model
+/// reference (e.g. `"nvidia/nemotron-3.5-asr-streaming-0.6b"`) — the same
+/// `<models-dir>/<vendor>/<repo>/` directory `brain fetch` writes and
+/// [`brain_modelstore::Store`] scans, resolved via
+/// [`brain_modelstore::default_root`]. Import/parity tests that need a real
+/// upstream HF checkpoint (raw `model.safetensors`, `config.json`,
+/// `tokenizer.json` — not yet brain-converted) resolve it here instead of
+/// keeping a private copy under `testdata/`, which stays reserved for actual
+/// fixtures (audio/image inputs, golden output dumps).
+///
+/// `None` when `reference` doesn't parse as `<vendor>/<repo>` or no models
+/// directory can be resolved at all (no `$HOME`) — the caller stays in
+/// control of skipping, exactly like an absent [`testdata`] fixture; this
+/// helper only builds the path, it never checks existence.
+pub fn model_dir(reference: &str) -> Option<String> {
+    let r = brain_modelref::ModelRef::parse(reference).ok()?;
+    let root = brain_modelstore::default_root()?;
+    Some(brain_modelstore::Store::new(root).repo_dir(&r).to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +104,41 @@ mod tests {
         assert!(p.ends_with("/testdata/x"), "{p}");
         unsafe {
             std::env::remove_var("BRAIN_TESTDATA");
+        }
+    }
+
+    #[test]
+    fn model_dir_joins_the_models_root_with_vendor_and_repo() {
+        // SAFETY: single-threaded within this test; capture and restore the
+        // real value so no other test in this binary is left disturbed.
+        let orig = std::env::var_os("BRAIN_MODELS_DIR");
+        unsafe {
+            std::env::set_var("BRAIN_MODELS_DIR", "/scratch/models");
+        }
+        assert_eq!(
+            model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").as_deref(),
+            Some("/scratch/models/nvidia/nemotron-3.5-asr-streaming-0.6b")
+        );
+        unsafe {
+            match orig {
+                Some(v) => std::env::set_var("BRAIN_MODELS_DIR", v),
+                None => std::env::remove_var("BRAIN_MODELS_DIR"),
+            }
+        }
+    }
+
+    #[test]
+    fn model_dir_rejects_a_reference_with_no_vendor() {
+        let orig = std::env::var_os("BRAIN_MODELS_DIR");
+        unsafe {
+            std::env::set_var("BRAIN_MODELS_DIR", "/scratch/models");
+        }
+        assert_eq!(model_dir("no-slash-here"), None);
+        unsafe {
+            match orig {
+                Some(v) => std::env::set_var("BRAIN_MODELS_DIR", v),
+                None => std::env::remove_var("BRAIN_MODELS_DIR"),
+            }
         }
     }
 }

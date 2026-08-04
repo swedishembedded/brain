@@ -58,7 +58,7 @@ mod tests {
     #[ignore = "loads the 0.6B checkpoint + full pipeline (~seconds)"]
     fn transcribe_end_to_end_matches_reference() {
         use std::io::Read;
-        let ckpt = crate::testdata("asr/nemotron/hf");
+        let ckpt = crate::model_dir("nvidia/nemotron-3.5-asr-streaming-0.6b").unwrap_or_default();
         let wav_path = crate::testdata("asr/audio/librispeech_mr_quilter.wav");
         let gold = crate::testdata("asr/golden/nemotron");
         if !Path::new(&wav_path).exists() || !Path::new(&format!("{ckpt}/model.safetensors")).exists() {

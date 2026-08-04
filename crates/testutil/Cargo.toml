@@ -8,3 +8,7 @@ description = "The one implementation of the gitignored testdata/ fixture path h
 [lib]
 name = "brain_testutil"
 path = "src/lib.rs"
+
+[dependencies]
+brain-modelref.workspace = true
+brain-modelstore.workspace = true

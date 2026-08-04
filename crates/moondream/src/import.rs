@@ -121,8 +121,7 @@ pub fn moe_layer_keys(layer: u32, num_experts: u32) -> Vec<String> {
 #[cfg(test)]
 mod tests {
 
-#[allow(dead_code)]
-use brain_testutil::testdata;
+use brain_testutil::model_dir;
 #[allow(dead_code)]
 fn repo_path(rel: &str) -> String {
     format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
@@ -168,7 +167,7 @@ fn repo_path(rel: &str) -> String {
     #[test]
     fn real_checkpoint_fully_covered() {
         use std::io::Read;
-        let path = testdata("vl/moondream3/hf/moondream3-preview/model.safetensors.index.json");
+        let path = format!("{}/model.safetensors.index.json", model_dir("moondream/moondream3-preview").unwrap_or_default());
         let Ok(mut f) = std::fs::File::open(path) else {
             eprintln!("skip: moondream3 index not present");
             return;
