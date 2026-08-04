@@ -25,6 +25,7 @@ try:
     import brain_py  # noqa: F401
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.base import skip  # noqa: E402
 from brain_py.dbus import BrainDBus  # noqa: E402
 from brain_py.image import to_pil  # noqa: E402
 
@@ -75,8 +76,7 @@ def main() -> int:
         print("models:", models)
         for need in ("z-image", "yolo"):
             if need not in models:
-                print(f"FATAL: '{need}' not served (set its weights env)", file=sys.stderr)
-                return 2
+                skip(f"'{need}' not served (set its weights env)")
 
         # Step 1 — generate. Save the raw z-image output.
         print(f"[1/3 generate] z-image {SIZE}x{SIZE}: {PROMPT!r}")

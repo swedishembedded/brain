@@ -33,17 +33,18 @@ try:
     import brain_py  # noqa: F401
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.base import skip  # noqa: E402
 from brain_py.dbus import BrainDBus  # noqa: E402
 
 
-def embed_once(brain: BrainDBus, text: bytes, label: str) -> tuple[int, int, float]:
+def embed_once(brain: BrainDBus, model: str, text: bytes, label: str) -> tuple[int, int, float]:
     """One embed request: text in as an input blob, [n, d] f32 hidden states out.
 
     `run()` seals the input into a memfd and reads the output fd back into bytes
     for us — no manual memfd/ctypes plumbing needed on the client side (brain-py
     already implements that once, in `brain_py.dbus.sealed_memfd`/`read_fd`)."""
     t0 = time.monotonic()
-    out = brain.run("lfm", "embed", params={}, blobs={"text": text}, meta={"text": {"media": "text"}})
+    out = brain.run(model, "embed", params={}, blobs={"text": text}, meta={"text": {"media": "text"}})
     dt = time.monotonic() - t0
     emb_meta = out.meta["embeddings"]
     shape = (emb_meta.get("meta") or {}).get("shape", [0, 0])
@@ -64,6 +65,7 @@ def embed_once(brain: BrainDBus, text: bytes, label: str) -> tuple[int, int, flo
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--input", required=True, help="text file to embed (long context welcome)")
+    ap.add_argument("--model", default="lfm", help="an embed-capable model (lfm, or mock for a quick check)")
     ap.add_argument("--concurrent", type=int, default=1, help="issue N identical requests concurrently")
     args = ap.parse_args()
 
@@ -72,13 +74,12 @@ def main() -> int:
 
     with BrainDBus() as brain:
         models = brain.models()
-        if "lfm" not in models:
-            print(f"lfm not served (models: {models}); set BRAIN_LFM + BRAIN_LFM_TOKENIZER", file=sys.stderr)
-            return 1
+        if args.model not in models:
+            skip(f"{args.model!r} not served (models: {models}); set BRAIN_LFM + BRAIN_LFM_TOKENIZER")
 
         # Warm-up (weight upload + graph build for this length) — never timed.
         print("warm-up:")
-        embed_once(brain, text, "warm")
+        embed_once(brain, args.model, text, "warm")
 
         print(f"{args.concurrent} concurrent request(s):")
         t0 = time.monotonic()
@@ -90,7 +91,7 @@ def main() -> int:
             # thread-safe for concurrent calls).
             try:
                 with BrainDBus() as b:
-                    times.append(embed_once(b, text, f"req{i}")[2])
+                    times.append(embed_once(b, args.model, text, f"req{i}")[2])
             except Exception as e:  # noqa: BLE001 — report, don't crash the demo
                 errs.append(f"req{i}: {e}")
 

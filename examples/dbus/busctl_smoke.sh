@@ -13,6 +13,12 @@
 # model (which returns its result as a file descriptor). `busctl` is ideal for
 # validating the surface + reply signatures; a real client (see brain_dbus.py) is
 # needed to actually consume returned fds.
+#
+# Set BRAIN_DBUS_EXTERNAL=1 to reuse an ALREADY-RUNNING `brain serve --dbus` on
+# this bus instead of starting (and later killing) one of our own — a single
+# well-known bus name can only have one owner, so this is what lets
+# tests/e2e/examples.bats run this script against its own shared server rather
+# than racing a second `brain serve --dbus` for ownership of the name.
 set -euo pipefail
 
 BIN="${1:-target/debug/brain}"
@@ -25,10 +31,14 @@ if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
   exit 1
 fi
 
-echo "== starting: $BIN serve --dbus =="
-"$BIN" serve --dbus &
-SERVER=$!
-trap 'kill $SERVER 2>/dev/null || true' EXIT
+if [[ "${BRAIN_DBUS_EXTERNAL:-0}" == "1" ]]; then
+  echo "== BRAIN_DBUS_EXTERNAL=1: reusing the already-running server =="
+else
+  echo "== starting: $BIN serve --dbus =="
+  "$BIN" serve --dbus &
+  SERVER=$!
+  trap 'kill $SERVER 2>/dev/null || true' EXIT
+fi
 
 # Wait for the well-known name to appear on the bus.
 for _ in $(seq 1 50); do

@@ -26,11 +26,34 @@ rewriting: the high-level API is identical; only the wire underneath differs.
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NoReturn, Optional
 
 # Progress callbacks receive (step, total, message).
 OnProgress = Callable[[int, int, str], None]
+
+#: The exit code every example uses to mean "this environment can't run me" —
+#: a missing model, a missing device, no mic, no `claude` on PATH, and so on.
+#: This is the GNU automake convention (`man 1 automake` / `AM_TESTS_ENVIRONMENT`)
+#: for "skip", deliberately distinct from both success (0) and failure (any other
+#: non-zero). Before this, examples used `return 1` or `return 2` for "not
+#: served", which reads identically to a real failure to anything driving them —
+#: exactly the ambiguity `tests/e2e/examples.bats` needs resolved to tell a
+#: legitimately-skipped example apart from a broken one.
+EXIT_SKIP = 77
+
+
+def skip(reason: str) -> NoReturn:
+    """Print `SKIP: <reason>` to stderr and exit with :data:`EXIT_SKIP`.
+
+    Call this from an example's `main()` wherever it would otherwise print an
+    error and `return 1`/`return 2` for an environment it cannot run in (model
+    not served, no GPU, no mic, `claude` not installed, …) — never for an actual
+    bug. `tests/e2e/examples.bats` maps exit 77 to a bats `skip`, not a failure.
+    """
+    print(f"SKIP: {reason}", file=sys.stderr)
+    sys.exit(EXIT_SKIP)
 
 
 class BrainError(RuntimeError):

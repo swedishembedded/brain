@@ -30,7 +30,7 @@ try:
     import brain_py  # noqa: F401
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
-from brain_py.base import BrainError  # noqa: E402
+from brain_py.base import BrainError, skip  # noqa: E402
 from brain_py.dbus import BrainDBus  # noqa: E402
 
 from generate import MODEL, run_streaming  # noqa: E402
@@ -40,6 +40,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--data", required=True, help="SERVER-side folder of captioned images (data::imageset)")
     ap.add_argument("--save", required=True, help="SERVER-side path for the trained adapter")
+    ap.add_argument("--model", default=MODEL, help="a streaming `lora_train`-capable model")
     ap.add_argument("--adapter-out", default="adapter.lora", help="local copy of the returned adapter blob")
     ap.add_argument("--rank", type=int, default=16)
     ap.add_argument("--steps", type=int, default=200, help="training steps")
@@ -64,9 +65,8 @@ def main() -> int:
 
     with BrainDBus() as brain:
         models = brain.models()
-        if MODEL not in models:
-            print(f"{MODEL} not served (models: {models}); set BRAIN_FLUX2_*", file=sys.stderr)
-            return 1
+        if args.model not in models:
+            skip(f"{args.model!r} not served (models: {models}); set BRAIN_FLUX2_*")
 
         print(f"lora_train rank={args.rank} steps={args.steps} ({args.variant}):")
 
@@ -75,7 +75,7 @@ def main() -> int:
             print(f"  {message}", flush=True)
 
         try:
-            outcome = brain.subscribe(MODEL, "lora_train", params, timeout=48 * 3600.0, on_progress=on_progress)
+            outcome = brain.subscribe(args.model, "lora_train", params, timeout=48 * 3600.0, on_progress=on_progress)
         except BrainError as e:
             print(f"  ERROR: {e}", file=sys.stderr)
             return 1
@@ -94,6 +94,7 @@ def main() -> int:
         print(f"text2image with adapter={args.save}:")
         return run_streaming(
             brain,
+            args.model,
             "text2image",
             {"prompt": args.prompt, "variant": args.variant, "adapter": args.save},
             args.out,

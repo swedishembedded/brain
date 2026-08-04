@@ -36,7 +36,11 @@ import wave
 from pathlib import Path
 
 # Reusable D-Bus client from the brain-py package (run straight from the repo).
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+try:
+    import brain_py  # noqa: F401
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.base import skip  # noqa: E402
 from brain_py.dbus import BrainDBus  # noqa: E402
 
 SAMPLE_RATE = 16000
@@ -109,8 +113,7 @@ def main() -> int:
     with BrainDBus() as brain:
         models = brain.models()
         if args.model not in models:
-            print(f"model {args.model!r} not served (have: {models}); start `brain serve --dbus` with BRAIN_NEMOTRON / BRAIN_QWEN_ASR set", file=sys.stderr)
-            return 1
+            skip(f"model {args.model!r} not served (have: {models}); start `brain serve --dbus` with BRAIN_NEMOTRON / BRAIN_QWEN_ASR set")
 
         r, w = os.pipe()
         params = {"window_ms": args.window_ms, "sample_rate": SAMPLE_RATE, "prompt_id": 0}

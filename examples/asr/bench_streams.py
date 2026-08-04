@@ -30,7 +30,11 @@ import time
 import wave
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+try:
+    import brain_py  # noqa: F401
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.base import skip  # noqa: E402
 from brain_py.dbus import BrainDBus  # noqa: E402
 
 SAMPLE_RATE = 16000
@@ -130,8 +134,7 @@ def main() -> int:
 
     with BrainDBus() as probe:
         if args.model not in probe.models():
-            print(f"model {args.model!r} not served (have {probe.models()})", file=sys.stderr)
-            return 1
+            skip(f"model {args.model!r} not served (have {probe.models()})")
         print(f"model={args.model}  clip={audio_s:.2f}s  window={args.window_ms}ms\n")
         print(f"{'streams':>7} {'ok':>3} {'wall(s)':>8} {'aggRTF':>7} {'perRTF':>7} {'1st(ms)':>8}")
         stats_before = probe.stats()

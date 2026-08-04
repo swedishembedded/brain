@@ -1,0 +1,13 @@
+path	mode	notes
+examples/api/claude-with-brain.sh	check	--check against BRAIN_MOCK; real interactive run needs claude + qwen weights, see tests/e2e/claude_code.bats
+examples/asr/bench_streams.py	skip	needs real ASR weights (nemotron/qwen-asr); mock ASR streaming is a deferred follow-up
+examples/asr/transcribe_mic.py	skip	needs real ASR weights; mock ASR streaming is a deferred follow-up
+examples/dbus/brain_dbus.py	run	imageops path always runs against the mock; the z-image path self-skips without BRAIN_ZIMAGE_*
+examples/dbus/busctl_smoke.sh	run	BRAIN_DBUS_EXTERNAL=1 reuses the harness's own server (two servers can't share one bus name)
+examples/dbus/detect_pipeline.py	skip	needs real z-image + yolo weights; the mock model has no detect action
+examples/embedding/embed_document.py	run	--model mock exercises the fd-in/fd-out embed contract for real
+examples/forecast/forecast_client.py	run	--model mock exercises the forecast wire contract for real
+examples/imagegen/generate.py	run	--model mock streams real denoise ticks and returns a real image blob
+examples/imagegen/edit_image.py	skip	needs real FLUX.2 weights; the mock model has no edit action
+examples/imagegen/lora_finetune.py	skip	needs real FLUX.2 weights; the mock model has no lora_train action
+examples/imagegen/cancel_generation.py	run	--model mock with BRAIN_MOCK_DELAY_MS so the cancel race is observable

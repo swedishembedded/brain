@@ -171,7 +171,7 @@ test/slow:
 	$(CARGO_TEST) --lib --bins --tests -- --ignored --test-threads=$(TEST_THREADS)
 
 # Everything, for a release gate.
-test/full: test test/doc test/slow
+test/full: test test/doc test/slow test/e2e
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -202,6 +202,29 @@ test/e2e/api-conformance: build
 # binary + a working dbus-daemon.
 test/e2e/shutdown: build
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/shutdown.bats
+
+# End-to-end: every example under examples/ is actually exercised — the harness
+# that did not exist when they all silently rotted after the P19 brain-py rewrite.
+# ONE shared BRAIN_MOCK=1 server (D-Bus + Anthropic HTTP); each example that CAN
+# run against the weight-free mock does so for real, the rest skip honestly with
+# a printed reason. A completeness check fails the suite if a tracked example is
+# missing from tests/e2e/examples/manifest.tsv (or vice versa), so a new, unwired
+# example cannot silently rot the way these did. Needs a debug/release binary,
+# dbus-daemon, curl, and `pip install -e brain-py` (jeepney) on EXAMPLES_PY
+# (default python3).
+#   make test/e2e/examples   (or: EXAMPLES_PY=/path/to/python3 bats tests/e2e/examples.bats)
+test/e2e/examples: build
+	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/examples.bats
+
+# Heavy, opt-in: brain's residency scheduler (batching/eviction) + the generate ->
+# detect -> annotate demo against REAL model weights and a GPU. NOT part of
+# test/e2e (that's test/e2e/examples' job, against the mock) — see
+# tests/e2e/scheduler.bats for the required env vars.
+test/e2e/scheduler:
+	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/scheduler.bats
+
+# Every fast (no real weights, no GPU) end-to-end bats suite, in one target.
+test/e2e: test/e2e/api-conformance test/e2e/shutdown test/e2e/examples
 
 # Install the Python tooling (OpenVINO/NPU runtime, torch + transformers for the
 # benchmark reference rows, etc.) into the current environment. The Rust engine

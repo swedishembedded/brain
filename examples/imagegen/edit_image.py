@@ -27,6 +27,7 @@ try:
     import brain_py  # noqa: F401
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.base import skip  # noqa: E402
 from brain_py.dbus import BrainDBus  # noqa: E402
 
 from generate import MODEL, run_streaming  # noqa: E402  (shared frame loop)
@@ -64,6 +65,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--image", required=True, help="input PPM (P6) to edit")
     ap.add_argument("--prompt", required=True, help="what to change / generate")
+    ap.add_argument("--model", default=MODEL, help="a streaming `edit`-capable model")
     ap.add_argument("--out", default="edited.ppm", help="output PPM path")
     ap.add_argument("--width", type=int, default=512, help="output width (multiple of 16)")
     ap.add_argument("--height", type=int, default=512, help="output height (multiple of 16)")
@@ -90,11 +92,10 @@ def main() -> int:
 
     with BrainDBus() as brain:
         models = brain.models()
-        if MODEL not in models:
-            print(f"{MODEL} not served (models: {models}); set BRAIN_FLUX2_*", file=sys.stderr)
-            return 1
+        if args.model not in models:
+            skip(f"{args.model!r} not served (models: {models}); set BRAIN_FLUX2_*")
         print(f"edit -> {args.width}x{args.height} ({args.variant}):")
-        return run_streaming(brain, "edit", params, args.out, blobs=blobs, meta=meta)
+        return run_streaming(brain, args.model, "edit", params, args.out, blobs=blobs, meta=meta)
 
 
 if __name__ == "__main__":

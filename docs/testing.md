@@ -59,6 +59,34 @@ full data→train→eval path; `make federated-demo` runs the federated round-tr
 `make gradcheck` runs the correctness gate. All complete on tiny configs quickly
 enough for CI.
 
+## 6. End-to-end (`bats`, real sockets/processes)
+
+Layered above the cargo test suites: full processes, real sockets, real signals.
+Nothing here needs GPU or trained weights unless a suite says so; each one is
+independently runnable and skips honestly (never fails) when its prerequisite
+tooling or weights are absent.
+
+| Suite | `make` target | What it proves |
+|---|---|---|
+| `tests/e2e/api_conformance.bats` | `test/e2e/api-conformance` | The OpenAI/Anthropic/OpenRouter HTTP dialects, over a real socket, against the deterministic `BRAIN_MOCK=1` model — schema-validated against the vendored OpenAPI specs, plus the auth/DoS/error-hygiene security matrix. |
+| `tests/e2e/shutdown.bats` | `test/e2e/shutdown` | `brain serve` actually exits on SIGINT/SIGTERM, for every surface combination (`--dbus` alone, `--dbus --openai` together, `--openai` alone) — each test starts and kills its own server. |
+| `tests/e2e/examples.bats` | `test/e2e/examples` | Every example under `examples/` actually runs (against the mock, where the model it needs has a mock equivalent) or skips with a clear, honest reason — not silently. A completeness check fails the suite if a tracked example is missing from `tests/e2e/examples/manifest.tsv`, so a newly-added, never-wired example cannot rot the way every existing example did before this suite existed (see the git history around commit `38f384e`). |
+| `tests/e2e/claude_code.bats` | `test/e2e/claude-code` | The real `claude` CLI working end-to-end against `brain serve --anthropic` with a real qwen checkpoint. Needs `claude` installed + `BRAIN_QWEN_WEIGHTS`/`BRAIN_QWEN_TOKENIZER`; skips cleanly without them. |
+| `tests/e2e/scheduler.bats` | `test/e2e/scheduler` | Heavy, opt-in (`BRAIN_E2E=1`): residency scheduler batching/eviction, and the generate→detect→annotate pipeline, against **real** z-image + yolo weights and a GPU. Not part of the fast lane — `tests/e2e/examples.bats` runs the same generate/detect example against the mock instead. |
+
+`make test/e2e` runs the three fast suites (api-conformance, shutdown, examples)
+in one shot; `make test/full` folds that into the release gate alongside the
+cargo lanes. `claude-code` and `scheduler` stay separate targets — they need real
+weights/a real `claude` install/a GPU, which the fast lane deliberately does not
+require.
+
+**Server lifecycle discipline**, followed by every suite above that starts a
+process: record `$!` into a file immediately, poll readiness (never a fixed
+sleep), and `teardown_file` kills **only** that recorded PID — never `pkill`. The
+D-Bus suites additionally spin up a **private** `dbus-daemon` per run
+(`dbus-daemon --session --fork --print-address --print-pid=3`) so nothing here
+ever touches the real session/system bus.
+
 ## Known gaps (honestly tracked)
 
 - **MoE / federated rows in `make bench`**: the MoE engine currently trains on

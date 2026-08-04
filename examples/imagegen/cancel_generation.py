@@ -14,6 +14,11 @@ aborts at its next per-step poll (the current denoise step finishes first).
       brain serve --dbus & sleep 2
       python3 examples/imagegen/cancel_generation.py'
 
+Also runs against the weight-free mock model (`--model mock`), which polls the
+same cancel token between denoise steps — set `BRAIN_MOCK_DELAY_MS` (e.g. 200) so
+there is actually time to call `Cancel` between the first two progress frames;
+without it the mock's 4 steps complete before the second frame is even read.
+
 Requires: jeepney — `pip install -e brain-py`.
 """
 from __future__ import annotations
@@ -26,6 +31,7 @@ try:
     import brain_py  # noqa: F401
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.base import skip  # noqa: E402
 from brain_py.dbus import BrainDBus  # noqa: E402
 
 from generate import MODEL  # noqa: E402
@@ -34,24 +40,24 @@ from generate import MODEL  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--prompt", default="a lighthouse in a storm", help="prompt (the image is never produced)")
+    ap.add_argument("--model", default=MODEL, help="a streaming, cancellable text2image model (or `mock`)")
     ap.add_argument("--variant", default="klein-4b", choices=["klein-4b", "klein-9b", "base-4b", "base-9b"])
     args = ap.parse_args()
 
     with BrainDBus() as brain:
         models = brain.models()
-        if MODEL not in models:
-            print(f"{MODEL} not served (models: {models}); set BRAIN_FLUX2_*", file=sys.stderr)
-            return 1
+        if args.model not in models:
+            skip(f"{args.model!r} not served (models: {models}); set BRAIN_FLUX2_*")
+
+        # `variant` is a FLUX.2-specific param the mock model doesn't declare.
+        params = {"prompt": args.prompt}
+        if args.model != "mock":
+            params["variant"] = args.variant
 
         # Deliberately the LOW-LEVEL frame iterator (not the high-level
         # subscribe()): this example needs the job id mid-stream to cancel it,
         # which the materialised-Outcome API has no way to expose.
-        job, frames = brain.stream_frames_with_job(
-            MODEL,
-            "text2image",
-            {"prompt": args.prompt, "variant": args.variant},
-            timeout=7200.0,
-        )
+        job, frames = brain.stream_frames_with_job(args.model, "text2image", params, timeout=7200.0)
         print(f"job {job} started; cancelling after the second progress frame")
 
         progress_seen = 0
