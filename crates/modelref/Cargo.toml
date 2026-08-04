@@ -1,0 +1,13 @@
+[package]
+name = "brain-modelref"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The fully-qualified model reference grammar (<vendor>/<repo>[-<QUANT>], matching the HuggingFace URL exactly) and the alias table for legacy short names. A leaf crate: no fs, no network, no dependency on any other brain crate -- wasm-safe."
+
+[lib]
+name = "brain_modelref"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true

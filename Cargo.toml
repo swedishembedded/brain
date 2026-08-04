@@ -52,6 +52,7 @@ default-members = [
     "crates/perf",
     "crates/gradcheck",
     "crates/testutil",
+    "crates/modelref",
     "crates/capability",
     "crates/events",
     "crates/hfsm",
@@ -131,6 +132,7 @@ brain-bench = { path = "crates/bench" }
 brain-perf = { path = "crates/perf" }
 brain-gradcheck = { path = "crates/gradcheck" }
 brain-testutil = { path = "crates/testutil" }
+brain-modelref = { path = "crates/modelref" }
 brain-capability = { path = "crates/capability" }
 brain-residency = { path = "crates/residency" }
 brain-stats = { path = "crates/stats" }

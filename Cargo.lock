@@ -927,6 +927,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-modelref"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "brain-moe"
 version = "0.1.0"
 dependencies = [

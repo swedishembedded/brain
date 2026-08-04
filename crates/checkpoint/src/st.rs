@@ -72,6 +72,28 @@ pub struct ModelCard {
     pub embedding_dim: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_params: Option<Value>,
+    /// The `<vendor>` half of this model's fully-qualified reference
+    /// (`brain_modelref::ModelRef`), e.g. `"Qwen"` for `Qwen/Qwen3-0.6B`.
+    /// Additive (`#[serde(default)]`): absent on any card written before this
+    /// field existed, which still deserializes fine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    /// The `<repo>` half of the reference (WITHOUT a quant suffix, matching
+    /// `ModelRef::repo()`), e.g. `"Qwen3-0.6B"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    /// The upstream commit/revision these bytes were fetched at, when known
+    /// (a HuggingFace commit SHA). Absent for a locally-produced or
+    /// hand-imported checkpoint with no upstream provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Set only when `quant` was NOT produced from `vendor/repo` directly, but
+    /// downloaded from a sibling quantization repo (e.g. a `Qwen/Qwen3-0.6B-Q8_0`
+    /// ref resolving to a file inside the upstream `Qwen/Qwen3-0.6B-GGUF` repo
+    /// rather than being quantized locally) — records where the bytes actually
+    /// came from, for provenance and for `brain models migrate`-style tooling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_repo: Option<String>,
 }
 
 /// The single metadata key holding the whole card as a JSON string.
@@ -101,7 +123,25 @@ impl ModelCard {
             quant: None,
             embedding_dim: None,
             default_params: None,
+            vendor: None,
+            repo: None,
+            revision: None,
+            source_repo: None,
         }
+    }
+
+    /// A minimal card whose `id`/`vendor`/`repo`/`quant` come from a fully
+    /// qualified `brain_modelref::ModelRef` (via its `Display` string and
+    /// accessors, so `checkpoint` does not need a direct dependency on
+    /// `brain-modelref` just for this constructor). `id` is the ref's full
+    /// `Display` form (`"Qwen/Qwen3-0.6B-Q8_0"`), matching how the model store
+    /// and the catalog key models by their canonical name.
+    pub fn for_ref(id: &str, vendor: &str, repo: &str, quant: Option<&str>, family: impl Into<String>) -> Self {
+        let mut card = ModelCard::new(id, family);
+        card.vendor = Some(vendor.to_string());
+        card.repo = Some(repo.to_string());
+        card.quant = quant.map(str::to_string);
+        card
     }
 
     /// Pack the card into safetensors `__metadata__` entries. `brain.card` is
@@ -122,6 +162,12 @@ impl ModelCard {
         }
         if let Some(v) = self.context_length {
             m.insert("context_length".to_string(), v.to_string());
+        }
+        if let Some(v) = &self.vendor {
+            m.insert("vendor".to_string(), v.clone());
+        }
+        if let Some(v) = &self.repo {
+            m.insert("repo".to_string(), v.clone());
         }
         m
     }
@@ -330,6 +376,39 @@ mod tests {
             default_params: Some(serde_json::json!({"temperature": 0.7})),
             ..ModelCard::new("qwen3-0.6b", "qwen")
         }
+    }
+
+    #[test]
+    fn old_card_json_without_vendor_repo_fields_still_deserializes() {
+        // Exactly what a card written before vendor/repo/revision/source_repo
+        // existed looks like on disk -- none of those four keys present.
+        let old = serde_json::json!({
+            "schema_version": 1,
+            "id": "qwen3-0.6b",
+            "family": "qwen",
+        });
+        let card: ModelCard = serde_json::from_value(old).expect("additive fields must not break old cards");
+        assert_eq!(card.id, "qwen3-0.6b");
+        assert_eq!(card.vendor, None);
+        assert_eq!(card.repo, None);
+        assert_eq!(card.revision, None);
+        assert_eq!(card.source_repo, None);
+    }
+
+    #[test]
+    fn for_ref_populates_vendor_repo_quant_and_mirrors_into_metadata() {
+        let card = ModelCard::for_ref("Qwen/Qwen3-0.6B-Q8_0", "Qwen", "Qwen3-0.6B", Some("Q8_0"), "qwen");
+        assert_eq!(card.id, "Qwen/Qwen3-0.6B-Q8_0");
+        assert_eq!(card.vendor.as_deref(), Some("Qwen"));
+        assert_eq!(card.repo.as_deref(), Some("Qwen3-0.6B"));
+        assert_eq!(card.quant.as_deref(), Some("Q8_0"));
+
+        let meta = card.to_metadata();
+        assert_eq!(meta.get("vendor").map(String::as_str), Some("Qwen"));
+        assert_eq!(meta.get("repo").map(String::as_str), Some("Qwen3-0.6B"));
+        // brain.card round-trips the full struct, including the new fields.
+        let roundtrip = ModelCard::from_metadata(&meta).unwrap();
+        assert_eq!(roundtrip, card);
     }
 
     #[test]
