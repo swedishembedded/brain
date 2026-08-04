@@ -711,12 +711,14 @@ impl Backend for CpuBackend {
             workgroup_reductions: false,
             peak_bandwidth_gbs: None,
             numeric: NumericSupport {
-                f32: true,
                 // The multi-barrier packed-int8 GEMMs are outside the JIT's
                 // single-barrier model, and there is no VNNI fast path yet.
                 int8_dot: false,
-                f16: false,
-                coop_matrix: false,
+                // Host RAM holds any byte layout; storage is unconditional
+                // here even though there is no fast f16/bf16 compute path.
+                f16_storage: true,
+                bf16_storage: true,
+                ..NumericSupport::BASELINE
             },
         }
     }

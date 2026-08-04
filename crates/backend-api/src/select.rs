@@ -400,7 +400,7 @@ mod tests {
 
     fn gpu_caps() -> DeviceCaps {
         let mut c = DeviceCaps::portable_baseline(DeviceClass::DiscreteGpu);
-        c.numeric = NumericSupport { f32: true, int8_dot: true, f16: false, coop_matrix: false };
+        c.numeric = NumericSupport { int8_dot: true, ..NumericSupport::BASELINE };
         c
     }
 

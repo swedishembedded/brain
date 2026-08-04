@@ -382,10 +382,9 @@ impl VulkanBackend {
             workgroup_reductions: true, // real barrier semantics (SPIR-V)
             peak_bandwidth_gbs: None,
             numeric: NumericSupport {
-                f32: true,
                 int8_dot: ctx.prec.dp4a,
-                f16: false,
                 coop_matrix: ctx.caps.feature_supported && !ctx.caps.shapes.is_empty(),
+                ..NumericSupport::BASELINE
             },
         }
     }

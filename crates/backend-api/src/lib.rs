@@ -151,6 +151,12 @@ pub enum DeviceClass {
 /// marketing. Speed *within* a supported tier is the autotuner's question, not
 /// this struct's: a device may expose f16 at 1/64 rate (Pascal), which is why
 /// `f16` here means *fast* f16 and stays `false` until measured.
+///
+/// `f16`/`bf16` mean *fast compute*; `f16_storage`/`bf16_storage` mean only
+/// "can hold bytes of this width, dequantizing to fp32 to compute" -- the
+/// distinction [`DType::promote`] needs. A card can store bf16 without a fast
+/// bf16 compute path (e.g. a Pascal card widens on load and computes fp32);
+/// storage-only support is never sufficient to skip that promotion.
 #[derive(Clone, Copy, Debug)]
 pub struct NumericSupport {
     /// Always true — the portable baseline and the numerical reference every
@@ -164,6 +170,14 @@ pub struct NumericSupport {
     /// exposes f16 at 1/64 rate, so availability without a measured rate is
     /// exactly the trap. Stays false until the autotuner (S5) measures it.
     pub f16: bool,
+    /// *Fast* bf16 arithmetic, same "measured, not marketed" rule as `f16`.
+    pub bf16: bool,
+    /// The device can hold f16 bytes at all (even without a fast compute
+    /// path for them) -- "exists" as opposed to `f16`'s "fast".
+    pub f16_storage: bool,
+    /// The device can hold bf16 bytes at all -- "exists" as opposed to
+    /// `bf16`'s "fast".
+    pub bf16_storage: bool,
     /// Cooperative-matrix / tensor-core matmul (the optional
     /// `VK_KHR_cooperative_matrix` path).
     pub coop_matrix: bool,
@@ -171,8 +185,96 @@ pub struct NumericSupport {
 
 impl NumericSupport {
     /// The portable floor: fp32 only.
-    pub const BASELINE: NumericSupport =
-        NumericSupport { f32: true, int8_dot: false, f16: false, coop_matrix: false };
+    pub const BASELINE: NumericSupport = NumericSupport {
+        f32: true,
+        int8_dot: false,
+        f16: false,
+        bf16: false,
+        f16_storage: false,
+        bf16_storage: false,
+        coop_matrix: false,
+    };
+}
+
+/// A checkpoint's on-disk/in-memory element width -- the input to
+/// [`DType::promote`]'s placement-budgeting decision. Deliberately separate
+/// from any per-backend storage type; this is what a *checkpoint* declares,
+/// not what a kernel computes in. No `Ord`: F16 and BF16 are the same width
+/// with no natural ordering between them, so "widens" is checked via
+/// [`DType::bytes`], not variant order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DType {
+    F32,
+    F16,
+    BF16,
+}
+
+impl DType {
+    /// Bytes per element on disk/in host memory for this dtype.
+    pub const fn bytes(self) -> u64 {
+        match self {
+            DType::F32 => 4,
+            DType::F16 | DType::BF16 => 2,
+        }
+    }
+
+    /// The dtype a checkpoint declared as `self` actually executes as on a
+    /// device with `numeric` support -- **only ever widens**, never
+    /// narrows: there is deliberately no `demote`, so "never auto-quantize
+    /// down" is structural rather than a policy a caller could get wrong.
+    /// fp32 is the guaranteed ceiling (every device supports it), so this
+    /// always returns *some* dtype rather than an `Option`.
+    ///
+    /// Today every backend dequantizes to fp32 on load (see `crate::gguf`'s
+    /// `deq_*` family and every model crate's `from_reader`), so this
+    /// currently returns `F32` for every input regardless of `numeric` --
+    /// honestly reflecting that no execution path can compute f16/bf16 yet.
+    /// The value here is the *placement budgeting* this makes correct now
+    /// (a bf16 checkpoint promoted to fp32 costs 2x, not 1x); the value
+    /// later is that a real f16/bf16 compute path landing cannot silently
+    /// mis-budget or mis-execute on a card that lacks it.
+    pub fn promote(self, numeric: &NumericSupport) -> DType {
+        let _ = numeric;
+        DType::F32
+    }
+}
+
+#[cfg(test)]
+mod dtype_tests {
+    use super::*;
+
+    #[test]
+    fn promote_never_narrows_and_always_lands_at_or_above_the_input() {
+        let none = NumericSupport::BASELINE;
+        let full = NumericSupport { f16: true, bf16: true, f16_storage: true, bf16_storage: true, ..NumericSupport::BASELINE };
+        for numeric in [none, full] {
+            for dtype in [DType::F32, DType::F16, DType::BF16] {
+                let promoted = dtype.promote(&numeric);
+                assert!(
+                    promoted.bytes() >= dtype.bytes(),
+                    "{dtype:?} ({} bytes) promoted to {promoted:?} ({} bytes) under {numeric:?} -- narrowed",
+                    dtype.bytes(),
+                    promoted.bytes()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fp32_is_the_guaranteed_ceiling() {
+        // Every promotion lands at F32 today (see promote's doc comment for
+        // why); this pins that honestly rather than asserting an aspiration.
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            assert_eq!(dtype.promote(&NumericSupport::BASELINE), DType::F32);
+        }
+    }
+
+    #[test]
+    fn bytes_matches_element_width() {
+        assert_eq!(DType::F32.bytes(), 4);
+        assert_eq!(DType::F16.bytes(), 2);
+        assert_eq!(DType::BF16.bytes(), 2);
+    }
 }
 
 /// What the device can actually do. Filled once at backend construction,

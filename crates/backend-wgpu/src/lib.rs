@@ -845,7 +845,6 @@ impl WgpuBackend {
             workgroup_reductions: true, // real barrier semantics on every wgpu target
             peak_bandwidth_gbs: None, // no API reports it; measurement may fill it
             numeric: NumericSupport {
-                f32: true,
                 // dot4I8Packed is core WGSL: naga lowers it to hardware DP4A
                 // where the driver has it, else a polyfill — the packed-int8
                 // kernels execute either way and the 4x weight-byte saving
@@ -853,8 +852,7 @@ impl WgpuBackend {
                 int8_dot: true,
                 // Exposed-f16 is not fast-f16 (Pascal: 1/64 rate). Stays
                 // false until a measured rate says otherwise (S5).
-                f16: false,
-                coop_matrix: false,
+                ..NumericSupport::BASELINE
             },
         }
     }
