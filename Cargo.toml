@@ -73,6 +73,8 @@ default-members = [
     "crates/unet",
     "crates/controlnet",
     "crates/pulid",
+    "crates/instantid",
+    "crates/imgpipe",
     "crates/depth",
     "crates/splat",
     "crates/mirror",
@@ -166,6 +168,8 @@ brain-restore = { path = "crates/restore" }
 brain-unet = { path = "crates/unet" }
 brain-controlnet = { path = "crates/controlnet" }
 brain-pulid = { path = "crates/pulid" }
+brain-instantid = { path = "crates/instantid" }
+brain-imgpipe = { path = "crates/imgpipe" }
 brain-depth = { path = "crates/depth" }
 brain-splat = { path = "crates/splat" }
 brain-mirror = { path = "crates/mirror" }

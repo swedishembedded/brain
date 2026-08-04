@@ -912,6 +912,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-imgpipe"
+version = "0.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-facenet",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-restore",
+ "brain-sam2",
+]
+
+[[package]]
+name = "brain-instantid"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-clip",
+ "brain-controlnet",
+ "brain-facenet",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-unet",
+]
+
+[[package]]
 name = "brain-kernels"
 version = "0.1.0"
 

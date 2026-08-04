@@ -1,0 +1,21 @@
+[package]
+name = "brain-instantid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "InstantID: SDXL + a face-keypoint ControlNet + IP-Adapter-FaceID decoupled cross-attention keyed by the ArcFace embedding."
+
+[lib]
+name = "instantid"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-checkpoint.workspace = true
+brain-unet.workspace = true
+brain-controlnet.workspace = true
+brain-facenet.workspace = true
+brain-clip.workspace = true
+brain-imaging.workspace = true

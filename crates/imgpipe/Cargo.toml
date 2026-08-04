@@ -1,0 +1,21 @@
+[package]
+name = "brain-imgpipe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The composed imaging pipeline: segment -> edit -> restore -> upscale as one capability Action over a JSON stage graph."
+
+[lib]
+name = "imgpipe"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-checkpoint.workspace = true
+brain-capability.workspace = true
+brain-imaging.workspace = true
+brain-sam2.workspace = true
+brain-restore.workspace = true
+brain-facenet.workspace = true
