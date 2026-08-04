@@ -12,10 +12,26 @@ use std::path::Path;
 
 use crate::fetch::stream_to_file;
 
-/// Hosts a fetch is ever allowed to touch, including redirect targets. HF
-/// serves large files from a CDN subdomain reached via a 3xx from the API
-/// host, so the allowlist must cover both -- but nothing else.
-const ALLOWED_HOSTS: &[&str] = &["huggingface.co", "cdn-lfs.huggingface.co", "cdn-lfs-us-1.huggingface.co"];
+/// Domains a fetch is ever allowed to touch, including redirect targets,
+/// checked as an exact match OR a `.`-delimited suffix (`host == domain ||
+/// host.ends_with(".{domain}")`) -- never a bare substring, so
+/// `evilhuggingface.co`/`huggingface.co.evil.example` are still refused (see
+/// [`host_is_allowed`]'s tests). Both domains are needed: `huggingface.co`
+/// itself for the API + the legacy Git-LFS CDN
+/// (`cdn-lfs[-us-1].huggingface.co`); `hf.co` for the newer Xet content
+/// storage backend large files are served from today (verified live: `GET
+/// .../resolve/main/<file>` 302s to `<region>.aws.cdn.hf.co/xet-bridge-
+/// <region>/...`, and that response's own `Link`/CORS headers point back at
+/// `xethub.hf.co`/`huggingface.co`, confirming common ownership). A per-
+/// region subdomain list would need updating every time HF adds a region;
+/// the suffix check is what makes that not this crate's problem, while still
+/// refusing anything NOT under HF's own domains.
+const ALLOWED_HOST_SUFFIXES: &[&str] = &["huggingface.co", "hf.co"];
+
+/// Is `host` exactly one of [`ALLOWED_HOST_SUFFIXES`], or a subdomain of one?
+fn host_is_allowed(host: &str) -> bool {
+    ALLOWED_HOST_SUFFIXES.iter().any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
 
 #[derive(Debug)]
 pub enum HubError {
@@ -141,21 +157,34 @@ impl Hub for HfHub {
 }
 
 /// GETs `url`, manually following redirects one hop at a time and refusing
-/// any whose `Location` host is not in [`ALLOWED_HOSTS`]. `ureq`'s built-in
+/// any whose `Location` host is not [`host_is_allowed`]. `ureq`'s built-in
 /// redirect handling has no host-inspection hook, so this loop exists
 /// specifically to make an off-host redirect a hard error instead of a
 /// silent follow.
+///
+/// With `redirects(0)`, `ureq` hands back a 3xx as `Ok(resp)` (its own docs:
+/// "get a response object with the 3xx status code") -- NOT as
+/// `Err(ureq::Error::Status(..))`, which only ever fires for a genuinely
+/// unsuccessful (4xx/5xx) response. An earlier version of this function
+/// checked for the redirect ONLY in the `Err` arm, so it never actually
+/// triggered: every redirect fell straight through `Ok(resp) => return
+/// Ok(resp)` and handed the caller the 3xx response's OWN body (HF's
+/// `resolve/<rev>/<file>` endpoint replies with a plain-text "Temporary
+/// Redirect..." page) instead of ever fetching the real file. Caught by
+/// actually running the auto-fetch acceptance test end to end against
+/// `huggingface.co`, not by the (host-only) unit tests below.
 fn get_following_allowed_redirects(url: &str) -> Result<ureq::Response, HubError> {
     let agent = ureq::AgentBuilder::new().redirects(0).build();
     let mut current = url.to_string();
     for _ in 0..10 {
         match agent.get(&current).call() {
-            Ok(resp) => return Ok(resp),
-            Err(ureq::Error::Status(code, resp)) if (300..400).contains(&code) => {
-                let location = resp.header("Location").ok_or_else(|| HubError::BadResponse("redirect with no Location header".into()))?;
-                check_redirect_allowed(location)?;
-                current = location.to_string();
+            Ok(resp) if (300..400).contains(&resp.status()) => {
+                let location = resp.header("Location").ok_or_else(|| HubError::BadResponse("redirect with no Location header".into()))?.to_string();
+                let absolute = resolve_redirect_location(&current, &location)?;
+                check_redirect_allowed(&absolute)?;
+                current = absolute;
             }
+            Ok(resp) => return Ok(resp),
             Err(ureq::Error::Status(404, resp)) => return Ok(resp),
             Err(e) => return Err(HubError::Network(e.to_string())),
         }
@@ -163,11 +192,32 @@ fn get_following_allowed_redirects(url: &str) -> Result<ureq::Response, HubError
     Err(HubError::Network(format!("too many redirects following {url}")))
 }
 
+/// Resolve a `Location` header against the URL that produced it, into an
+/// absolute URL. HF's own `resolve/<rev>/<file>` -> CDN redirect is
+/// ABSOLUTE-PATH relative (`/api/resolve-cache/...`, no scheme/host) per RFC
+/// 7231 §7.1.2 -- with automatic redirect-following disabled, nothing
+/// resolves that for us the way a browser or `curl -L` would, so this does:
+/// an already-absolute `http(s)://` location is used as-is; an absolute-path
+/// location (`/...`) resolves against `base`'s origin. Anything else
+/// (relative-to-current-path, protocol-relative `//host/...`, etc.) is a
+/// hard error rather than a guess -- HF has never sent brain anything else,
+/// and guessing wrong here is exactly the kind of thing
+/// [`check_redirect_allowed`] exists to not have to reason about.
+fn resolve_redirect_location(base: &str, location: &str) -> Result<String, HubError> {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        return Ok(location.to_string());
+    }
+    let Some(path) = location.strip_prefix('/') else {
+        return Err(HubError::BadResponse(format!("unsupported relative redirect (not absolute-path): {location}")));
+    };
+    Ok(format!("{}/{path}", url_origin(base)?))
+}
+
 /// The host-allowlist check, pulled out as a pure function so it is testable
 /// without a live server or a mock HTTP stack.
 fn check_redirect_allowed(location: &str) -> Result<(), HubError> {
     let host = url_host(location)?;
-    if !ALLOWED_HOSTS.contains(&host.as_str()) {
+    if !host_is_allowed(&host) {
         return Err(HubError::Network(format!("refused off-host redirect to {host}")));
     }
     Ok(())
@@ -183,6 +233,18 @@ fn url_host(url: &str) -> Result<String, HubError> {
         return Err(HubError::BadResponse(format!("redirect url has no host: {url}")));
     }
     Ok(host.to_string())
+}
+
+/// The `scheme://host` prefix of an absolute `http(s)://` URL.
+fn url_origin(url: &str) -> Result<String, HubError> {
+    let scheme = if url.starts_with("https://") {
+        "https"
+    } else if url.starts_with("http://") {
+        "http"
+    } else {
+        return Err(HubError::BadResponse(format!("not an http(s) url: {url}")));
+    };
+    Ok(format!("{scheme}://{}", url_host(url)?))
 }
 
 /// An in-memory [`Hub`] for tests: no network, no filesystem beyond writing
@@ -294,7 +356,69 @@ mod tests {
         assert!(check_redirect_allowed("https://huggingface.co/x").is_ok());
         assert!(check_redirect_allowed("https://cdn-lfs.huggingface.co/x").is_ok());
         assert!(check_redirect_allowed("https://cdn-lfs-us-1.huggingface.co/x").is_ok());
+        // The newer Xet CDN backend (verified live -- see `host_is_allowed`'s
+        // doc comment): a `hf.co` subdomain, not `huggingface.co`.
+        assert!(check_redirect_allowed("https://us.aws.cdn.hf.co/xet-bridge-us/x").is_ok());
+        assert!(check_redirect_allowed("https://cas-server.xethub.hf.co/v1/x").is_ok());
         assert!(check_redirect_allowed("https://evil.example/steal").is_err());
         assert!(check_redirect_allowed("https://huggingface.co.evil.example/x").is_err());
+    }
+
+    #[test]
+    fn host_is_allowed_matches_the_bare_domain_and_any_subdomain_never_a_substring() {
+        for domain in ["huggingface.co", "hf.co"] {
+            assert!(host_is_allowed(domain), "{domain}");
+            assert!(host_is_allowed(&format!("cdn.{domain}")), "cdn.{domain}");
+            assert!(host_is_allowed(&format!("a.b.{domain}")), "a.b.{domain}");
+        }
+        // A substring match (no '.' separator) must NOT pass -- these are
+        // attacker-registerable domains that merely CONTAIN the allowed name.
+        assert!(!host_is_allowed("evilhuggingface.co"));
+        assert!(!host_is_allowed("notahf.co"));
+        assert!(!host_is_allowed("huggingface.co.evil.example"));
+        assert!(!host_is_allowed("hf.co.evil.example"));
+        assert!(!host_is_allowed("evil.example"));
+    }
+
+    #[test]
+    fn resolve_redirect_location_keeps_an_already_absolute_url_as_is() {
+        assert_eq!(
+            resolve_redirect_location("https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/config.json", "https://cdn-lfs.huggingface.co/repos/x").unwrap(),
+            "https://cdn-lfs.huggingface.co/repos/x"
+        );
+    }
+
+    /// Regression for the real bug: HF's `resolve/<rev>/<file>` redirect is
+    /// ABSOLUTE-PATH relative (no scheme/host), e.g.
+    /// `/api/resolve-cache/models/Qwen/Qwen3-0.6B/<sha>/config.json?...` —
+    /// verified against the actual live response. This must resolve onto the
+    /// SAME origin as the request that produced it, not be rejected or
+    /// mis-treated as a host.
+    #[test]
+    fn resolve_redirect_location_resolves_an_absolute_path_onto_the_request_origin() {
+        let resolved = resolve_redirect_location(
+            "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/config.json",
+            "/api/resolve-cache/models/Qwen/Qwen3-0.6B/deadbeef/config.json?etag=%22abc%22",
+        )
+        .unwrap();
+        assert_eq!(resolved, "https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-0.6B/deadbeef/config.json?etag=%22abc%22");
+    }
+
+    #[test]
+    fn resolve_redirect_location_rejects_a_relative_to_current_path_location() {
+        // Not absolute-path (no leading '/') and not an absolute URL -- HF
+        // never sends this shape; refuse rather than guess a resolution.
+        assert!(resolve_redirect_location("https://huggingface.co/a/b/resolve/main/config.json", "config.json").is_err());
+    }
+
+    #[test]
+    fn resolve_redirect_location_still_enforces_the_allowlist_after_resolving() {
+        // An absolute-path redirect resolves onto the CURRENT request's own
+        // origin -- so if that origin were ever something other than an
+        // allowed host, resolution must not be what launders it past
+        // `check_redirect_allowed`, which runs on the resolved URL right
+        // after this in `get_following_allowed_redirects`.
+        let resolved = resolve_redirect_location("https://evil.example/x", "/y").unwrap();
+        assert!(check_redirect_allowed(&resolved).is_err());
     }
 }

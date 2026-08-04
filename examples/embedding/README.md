@@ -13,11 +13,21 @@ the dispatcher thread so lane time is pure forward.
 ```bash
 # deps: jeepney (pip install -e brain-py)
 dbus-run-session -- bash -c '
-  BRAIN_LFM=out/lfm-230m.weights \
-  BRAIN_LFM_TOKENIZER=/path/to/LFM2.5-Encoder-230M/tokenizer.json \
   ./target/release/brain serve --dbus & sleep 2
   python3 examples/embedding/embed_document.py --input README.md --concurrent 4'
 ```
+
+Nothing to pre-fetch: `--model` defaults to `LiquidAI/LFM2.5-350M`, a
+fully-qualified `<vendor>/<repo>` reference — brain's transparent auto-fetch
+(`docs/models/naming.md`) downloads and converts it on the first request that
+names it (that first call is as slow as the cold fetch; every one after is
+instant). Point `--model` at `LiquidAI/LFM2.5-230M` for the smaller encoder,
+or `brain/mock` for a weight-free smoke test.
+
+Prefer an already-converted local checkpoint instead? Set `BRAIN_LFM`/
+`BRAIN_LFM_TOKENIZER` before `brain serve --dbus` and pass `--model brain/lfm`
+— the env-loaded-checkpoint fallback (`docs/models/naming.md`'s `brain/`
+table), unchanged from before auto-fetch existed.
 
 Environment knobs: `BRAIN_LFM_BATCH` (batched-forward slots per instance,
 default 2), `BRAIN_DEVICE` (which compute is schedulable).

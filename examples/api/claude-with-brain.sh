@@ -5,27 +5,35 @@
 #
 # Run Claude Code against a LOCAL brain server instead of the hosted Anthropic API.
 #
-# It launches `brain serve --anthropic` (serving a local qwen3 model), captures the
-# freshly-generated per-launch API key, points Claude Code at the local endpoint with
-# that key, and starts `claude` normally (interactive). The brain server is stopped
-# automatically when you quit claude.
+# It launches `brain serve --anthropic` (serving MODEL, a fully-qualified
+# `<vendor>/<repo>` reference -- Qwen/Qwen3-0.6B by default), captures the
+# freshly-generated per-launch API key, points Claude Code at the local endpoint
+# with that key, and starts `claude` normally (interactive). The brain server is
+# stopped automatically when you quit claude.
 #
-#   examples/api/claude-with-brain.sh              # interactive claude on your local qwen3
+#   examples/api/claude-with-brain.sh              # interactive claude on the local model
 #   examples/api/claude-with-brain.sh -p "hi"      # or pass any claude flags through
 #
-# First time: build brain and import a Qwen3 checkpoint into brain's format, e.g.
-#   make release
-#   ./target/release/brain qwen import --hf /path/to/Qwen3-0.6B --out qwen3.safetensors
-# (download a Qwen3 dir from HuggingFace: config.json + model.safetensors + tokenizer.json)
+# Nothing to pre-fetch or pre-import: MODEL doesn't have to be resident yet.
+# brain's transparent auto-fetch (see docs/models/naming.md) downloads +
+# converts it on the first request that names it -- the first message you send
+# in claude takes as long as that cold fetch (progress streams to Claude Code
+# as it happens); every one after is instant. Point MODEL at any
+# `<vendor>/<repo>[-<QUANT>]` your machine can serve (`docs/models/naming.md`
+# lists the supported architectures) to use a different model, or set
+# `BRAIN_AUTO_FETCH=0` to require it already be resident (the pre-auto-fetch
+# behavior) and fail fast instead of fetching.
 #
 # --check runs the same preflight -> launch -> key-capture sequence, makes ONE
 # authenticated GET /v1/models, prints OK, and exits WITHOUT exec'ing `claude` — the
 # non-interactive mode `tests/e2e/examples.bats` drives. Under BRAIN_MOCK=1 it also
-# skips the qwen-weights preflight and the `claude`-installed check (neither the
-# mock model nor a real `claude` binary is needed to prove the server + key path
-# works), so `--check` is runnable in CI with no weights and no `claude` install.
-# Without BRAIN_MOCK, --check still needs the same real qwen checkpoint the
-# interactive path does — see `tests/e2e/claude_code.bats` for that full run.
+# skips the `claude`-installed check (the mock model needs no real `claude` binary
+# to prove the server + key path works), so `--check` is runnable in CI with no
+# weights and no `claude` install. Without BRAIN_MOCK, `GET /v1/models` alone never
+# triggers a fetch (discovery routes are deliberately fetch-free — see
+# `docs/api-security-audit.md`), so `--check` stays fast and offline-safe even
+# though MODEL is a real, not-yet-fetched reference; see `tests/e2e/claude_code.bats`
+# for a full interactive run against the deterministic mock.
 
 set -uo pipefail
 
@@ -38,32 +46,19 @@ fi
 # ---- config (override via env) ----------------------------------------------
 PORT="${PORT:-8787}"
 MOCK="${BRAIN_MOCK:-0}"
-MODEL="${MODEL:-$([ "$MOCK" = "0" ] && echo brain/qwen || echo brain/mock)}"
+MODEL="${MODEL:-$([ "$MOCK" = "0" ] && echo Qwen/Qwen3-0.6B || echo brain/mock)}"
 BRAIN="${BRAIN:-./target/release/brain}"
-# A brain-native qwen3 checkpoint + its tokenizer (see the import note above).
-QWEN_WEIGHTS="${BRAIN_QWEN_WEIGHTS:-qwen3.safetensors}"
-QWEN_TOKENIZER="${BRAIN_QWEN_TOKENIZER:-tokenizer.json}"
 
 # ---- preflight --------------------------------------------------------------
 [ -x "$BRAIN" ] || { echo "error: brain binary not found at '$BRAIN' (build: make release)" >&2; exit 1; }
 if [ "$CHECK" = "0" ]; then
   command -v claude >/dev/null 2>&1 || { echo "error: the 'claude' CLI is not installed" >&2; exit 1; }
 fi
-if [ "$MOCK" = "0" ]; then
-  if [ ! -f "$QWEN_WEIGHTS" ]; then
-    echo "error: qwen weights not found: '$QWEN_WEIGHTS'" >&2
-    echo "  import one:  $BRAIN qwen import --hf /path/to/Qwen3-0.6B --out $QWEN_WEIGHTS" >&2
-    echo "  or set BRAIN_QWEN_WEIGHTS / BRAIN_QWEN_TOKENIZER to your files." >&2
-    exit 1
-  fi
-  [ -f "$QWEN_TOKENIZER" ] || { echo "error: tokenizer not found: '$QWEN_TOKENIZER'" >&2; exit 1; }
-fi
 
 # ---- launch the brain Anthropic surface -------------------------------------
 LOG="$(mktemp)"
 if [ "$MOCK" = "0" ]; then
-  BRAIN_QWEN_WEIGHTS="$QWEN_WEIGHTS" BRAIN_QWEN_TOKENIZER="$QWEN_TOKENIZER" \
-    "$BRAIN" serve --anthropic "$PORT" >"$LOG" 2>&1 &
+  "$BRAIN" serve --anthropic "$PORT" >"$LOG" 2>&1 &
 else
   BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve --anthropic "$PORT" >"$LOG" 2>&1 &
 fi
@@ -99,7 +94,7 @@ fi
 
 # ---- point Claude Code at the local backend ---------------------------------
 # ANTHROPIC_API_KEY overrides any logged-in subscription/system key; routing EVERY model
-# alias (incl. the haiku-class background model) to the local qwen means nothing ever
+# alias (incl. the haiku-class background model) to the local MODEL means nothing ever
 # reaches the hosted API.
 export ANTHROPIC_BASE_URL="http://127.0.0.1:$PORT"
 export ANTHROPIC_API_KEY="$API_KEY"
