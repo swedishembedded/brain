@@ -3,7 +3,7 @@
 
 //! T1 — PIL-exact preprocessing parity; T2 — DINOv2 patch-token parity.
 //!
-//! Goldens come from `tools/mirror_dump_reference.py` (run manually against
+//! Goldens come from `tools/goldens/mirror_dump_reference.py` (run manually against
 //! the reference repo + checkpoint); the committed `golden_meta.json` holds
 //! shape + rms + 64–256 sampled values per stage. The synthetic input image
 //! is regenerated here bit-for-bit (same integer formula as the dump script).
@@ -235,6 +235,6 @@ fn t2_dinov2_patch_tokens() {
         }
         assert!(errs7.is_empty(), "T7 rect mismatches:\n{}", errs7.join("\n"));
     } else {
-        eprintln!("no t7 goldens in meta — regenerate with tools/mirror_dump_reference.py");
+        eprintln!("no t7 goldens in meta — regenerate with tools/goldens/mirror_dump_reference.py");
     }
 }

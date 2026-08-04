@@ -69,7 +69,7 @@ Event variant): `{"event":"action_request","model":"brain/lfm","action":"fill_ma
 
 ## Parity (the gate)
 
-`tools/lfm_dump_reference.py` bakes staged goldens from the released fp32
+`tools/goldens/lfm_dump_reference.py` bakes staged goldens from the released fp32
 checkpoints through the repo's own `modeling_lfm2_bidirectional.py` (fixed
 token ids — tokenizer parity is gated separately in `crates/data` with pinned
 id vectors incl. adversarial digit runs). `crates/lfm/tests/parity.rs` checks

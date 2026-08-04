@@ -13,7 +13,7 @@
 //! universe we forecast the `H`-bar-ahead close from `CTX` bars of real history,
 //! record the predicted vs realized `H`-bar return, accumulate point MASE (vs the
 //! naive last-value baseline), and time the forecast. A separate Python step
-//! (`tools/oos_skill_report.py`) ranks each origin's cross-section and computes
+//! (`tools/forecast/oos_skill_report.py`) ranks each origin's cross-section and computes
 //! RankIC (Spearman) ± stderr + t, directional accuracy, a cost-aware long/short
 //! basket vs `^gspc`, and the shuffled negative control + naive baseline.
 //!
@@ -32,7 +32,7 @@
 //!   OOS_NSAMPLES=16 (kronos sample count)  OOS_MAXORIG=0(=all)  OOS_WARMUP=2
 //!   OOS_LATENCY_ONLY=0  (1 = warmup + a few timed forecasts per model, no eval)
 //!   OOS_SHARD="i/n" — evaluate only names with sorted-index ≡ i (mod n); shard
-//!                     dumps merge via tools/merge_records.py --concat
+//!                     dumps merge via tools/forecast/merge_records.py --concat
 //!   KRONOS_FT     — fine-tuned decoder .safetensors, evaluated as model "kronos_ft"
 //!                   alongside base kronos in the same sweep (paired comparison)
 //!   BRAIN_DEVICE  — cpu|gpu|vulkan (recorded in meta; selects the backend)
@@ -221,7 +221,7 @@ fn oos_skill_eval() {
     tickers.sort();
     // OOS_SHARD="i/n": deterministic name-shard (index modulo after the sort)
     // for multi-process sweeps. Records stay date-keyed, so shard dumps merge
-    // back into full cross-sections (tools/merge_records.py --concat).
+    // back into full cross-sections (tools/forecast/merge_records.py --concat).
     if let Ok(shard) = std::env::var("OOS_SHARD") {
         let p: Vec<usize> = shard.split('/').filter_map(|x| x.parse().ok()).collect();
         assert!(p.len() == 2 && p[1] > 0 && p[0] < p[1], "OOS_SHARD must be i/n with i<n, got {shard:?}");

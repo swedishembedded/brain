@@ -15,7 +15,7 @@
 //! ```
 //!
 //! Each test SKIPS ITSELF when its fixture is absent (`make fetch/testdata` /
-//! `tools/sam2_dump_reference.py` populate the tree).
+//! `tools/goldens/sam2_dump_reference.py` populate the tree).
 
 use std::collections::HashMap;
 use std::path::Path;

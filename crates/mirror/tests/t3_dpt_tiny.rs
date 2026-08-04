@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Stage-level DPT-head isolation vs the reference on a tiny 4×4 grid with
-//! random seeded weights (`tools/mirror_dump_dpt_tiny.py` → scratchpad bins).
+//! random seeded weights (`tools/goldens/mirror_dump_dpt_tiny.py` → scratchpad bins).
 //! Env-gated: MIRROR_DPT_TINY=<dir>. Reports the FIRST diverging stage:
 //! rn0..rn3 → fused → full → out.
 

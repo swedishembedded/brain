@@ -9,7 +9,7 @@
 //! an architecture with no standard-HF analogue, so this is the strongest real-weight
 //! check of the novel decoder. brain builds the identical 4-layer decoder from the
 //! streamed weights and compares logits to the reference from
-//! `tools/moondream_decoder_dump_reference.py` (causal mask, i.e. `prefix_attn=1`).
+//! `tools/goldens/moondream_decoder_dump_reference.py` (causal mask, i.e. `prefix_attn=1`).
 
 #[cfg(test)]
 mod tests {
@@ -45,7 +45,7 @@ fn repo_path(rel: &str) -> String {
         let REF = testdata("vl/parity/moondream_dec_ref.bin");
         let TOK = testdata("vl/parity/moondream_dec_tokens.bin");
         let (Some(ref_logits), Some(tok_raw)) = (read_f32(&REF), std::fs::read(TOK).ok()) else {
-            eprintln!("skip: Moondream decoder reference not present (run tools/moondream_decoder_dump_reference.py)");
+            eprintln!("skip: Moondream decoder reference not present (run tools/goldens/moondream_decoder_dump_reference.py)");
             return;
         };
         let Ok(rd) = std::fs::read_dir(DIR) else {

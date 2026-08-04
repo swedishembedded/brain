@@ -8,7 +8,7 @@
 #
 # Kept in sync with what tools/**/*.py and scripts/**/*.py actually import —
 # `huggingface_hub` was removed from here because nothing imports it (brain
-# fetches checkpoints itself, via `brain fetch` / scripts/fetch-testdata.sh).
+# fetches checkpoints itself, via `brain fetch` / scripts/data/fetch-testdata.sh).
 
 openvino>=2024.0       # NPU/OpenVINO runtime (native libs for `--device npu`)
 torch                  # HuggingFace reference rows in the inference benchmarks
@@ -17,20 +17,20 @@ numpy                  # parity logit/token dumps
 pillow                 # image I/O for the YOLO inference benchmark
 ultralytics             # YOLOv8 reference row in tools/bench/bench_yolo_inference.py
 safetensors             # every *_dump_reference.py fixture writer
-diffusers               # tools/{vae,zimage,flux2,clip}_dump_reference.py, tools/vae_dump_reference.py
-onnx                    # tools/arcface_dump_reference.py (ONNX SCRFD/ArcFace)
-onnxruntime             # tools/arcface_dump_reference.py, tools/npu-adjacent NPU checks
-opencv-python           # tools/arcface_dump_reference.py, tools/yolo_export/export_yolov8.py (cv2)
-scikit-image            # tools/arcface_dump_reference.py (5-point alignment; skimage.transform)
-pyyaml                  # tools/sam2_dump_reference.py, scripts/api_sync.py
-soundfile                # scripts/brain_tts_client.py, tools/asr_dump_reference.py
-sounddevice              # scripts/brain_tts_client.py, tools/asr_dump_reference.py (live audio)
-jsonschema               # scripts/validate_spec.py (degrades to jq shape checks if absent)
-chronos-forecasting      # tools/chronos2_dump_*_reference.py (`from chronos.chronos2 import ...`)
-st_moe_pytorch           # tools/fincast_dump_reference.py
+diffusers               # tools/goldens/{vae,zimage,flux2,clip}_dump_reference.py
+onnx                    # tools/goldens/arcface_dump_reference.py (ONNX SCRFD/ArcFace)
+onnxruntime             # tools/goldens/arcface_dump_reference.py, tools/npu-adjacent NPU checks
+opencv-python           # tools/goldens/arcface_dump_reference.py, tools/yolo_export/export_yolov8.py (cv2)
+scikit-image            # tools/goldens/arcface_dump_reference.py (5-point alignment; skimage.transform)
+pyyaml                  # tools/goldens/sam2_dump_reference.py, scripts/api/api_sync.py
+soundfile                # scripts/tts/brain_tts_client.py, tools/goldens/asr_dump_reference.py
+sounddevice              # scripts/tts/brain_tts_client.py, tools/goldens/asr_dump_reference.py (live audio)
+jsonschema               # scripts/api/validate_spec.py (degrades to jq shape checks if absent)
+chronos-forecasting      # tools/goldens/chronos2_dump_*_reference.py (`from chronos.chronos2 import ...`)
+st_moe_pytorch           # tools/goldens/fincast_dump_reference.py
 
 # NOT pip-installable under a stable PyPI name — install from source manually if
 # you need to regenerate their goldens (the parity tests these feed skip cleanly
 # without it; nothing else in the build/test path needs it):
-#   eva_clip       tools/clip_dump_reference.py       — github.com/baaivision/EVA (EVA-CLIP)
+#   eva_clip       tools/goldens/clip_dump_reference.py       — github.com/baaivision/EVA (EVA-CLIP)
 #   hyworldmirror   tools/mirror_dump_{reference,dpt_tiny}.py — HY-World-2.0's own package

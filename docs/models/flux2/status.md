@@ -5,7 +5,7 @@ Chronological, measured-only. Reference material + the phased plan live in
 
 ## P0–P1 (2026-07-30) — goldens, import
 
-- `tools/flux2_dump_reference.py` dumps stage goldens from the diffusers
+- `tools/goldens/flux2_dump_reference.py` dumps stage goldens from the diffusers
   pipeline (fp32 CPU): schedule sigmas, text hidden taps + concat, VAE
   moments/packed/decoded, transformer I/O captured by forward hooks (t2i and
   one-ref editing), per-step e2e latents + final image. All f32.

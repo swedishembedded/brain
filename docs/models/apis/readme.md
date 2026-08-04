@@ -78,7 +78,7 @@ The three providers' upstream OpenAPI specs are vendored (cached) under
 `crates/apiserve/tests/specs/` — the **single source of truth** the conformance tests
 validate against. There is no separately hand-maintained brain spec. Refresh from
 upstream and see drift with the **`/api-sync`** command (`.claude/commands/api-sync.md`,
-`scripts/api_sync.py`).
+`scripts/api/api_sync.py`).
 
 ## Testing & security
 

@@ -5,7 +5,7 @@
 //!
 //! Golden fixture (`testdata/golden/vae/zimage_vae_decode.safetensors`, fetched):
 //! a fixed latent `[1,16,8,8]` and diffusers' `vae.decode(z).sample`
-//! `[1,3,64,64]`, baked by `tools/vae_dump_reference.py`.
+//! `[1,3,64,64]`, baked by `tools/goldens/vae_dump_reference.py`.
 //! The 168 MB reference weights are NOT committed — point `BRAIN_ZIMAGE_VAE` at
 //! `.../z-image/weights/vae/diffusion_pytorch_model.safetensors` (a default
 //! resources path is tried); the test skips if absent (like brain's other

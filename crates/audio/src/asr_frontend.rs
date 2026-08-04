@@ -3,7 +3,7 @@
 
 //! Log-mel front ends for the ASR models, computed in f64 internally and
 //! parity-gated (byte-for-byte inputs) against the HuggingFace feature
-//! extractors — see `tools/asr_dump_reference.py` and the tests below.
+//! extractors — see `tools/goldens/asr_dump_reference.py` and the tests below.
 //!
 //! This is deliberately separate from [`crate::mel`] (which is f32, radix-2 only
 //! and tuned for the TTS/speaker front end). The ASR extractors need: arbitrary

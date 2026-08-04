@@ -137,7 +137,7 @@ Two rules follow:
 ## Parity (the gate)
 
 Stage-by-stage vs the diffusers/BFL reference on dumped goldens
-(`tools/flux2_dump_reference.py`, `testdata/flux2/klein-4b/`) — see
+(`tools/goldens/flux2_dump_reference.py`, `testdata/flux2/klein-4b/`) — see
 `status.md` for the measured table. Gradient checking: in-crate FD tests +
 `gradcheck::check_flux2`.
 

@@ -97,7 +97,7 @@ Legend: ✅ implemented + validated · 🟡 implemented, validation pending · �
 
 ```
 # 1. reference dumps (needs torch + transformers, CPU is fine)
-python3 tools/fastvlm_decoder_dump_reference.py
+python3 tools/goldens/fastvlm_decoder_dump_reference.py
 
 # 2. brain parity (CPU-JIT backend — the tied vocab table exceeds GPU binding limits)
 BRAIN_DEVICE=cpu cargo test -p brain-fastvlm --release fastvlm_decoder_logits -- --nocapture

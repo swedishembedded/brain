@@ -8,7 +8,7 @@
 //! norm → tied head → logits) against `transformers` built the same way — a genuine
 //! Qwen3 block (QK-norm, head_dim-128 GQA 32/8, SwiGLU, θ=5e6) on real weights. The
 //! checkpoint shards are read one at a time and filtered to just these tensors so the
-//! footprint stays small. Requires the dump from `tools/qwenvl_decoder_dump_reference.py`.
+//! footprint stays small. Requires the dump from `tools/goldens/qwenvl_decoder_dump_reference.py`.
 
 #[cfg(test)]
 mod tests {
@@ -43,7 +43,7 @@ fn repo_path(rel: &str) -> String {
         let REF = testdata("vl/parity/qwenvl_dec_ref.bin");
         let TOK = testdata("vl/parity/qwenvl_dec_tokens.bin");
         let (Some(ref_logits), Some(tok_raw)) = (read_f32(&REF), std::fs::read(TOK).ok()) else {
-            eprintln!("skip: Qwen3-VL decoder reference not present (run tools/qwenvl_decoder_dump_reference.py)");
+            eprintln!("skip: Qwen3-VL decoder reference not present (run tools/goldens/qwenvl_decoder_dump_reference.py)");
             return;
         };
         std::env::set_var("BRAIN_DEVICE", "cpu");

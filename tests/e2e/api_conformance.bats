@@ -8,7 +8,7 @@
 # mock is instant, so the whole suite runs in seconds and is fully deterministic.
 #
 # It validates every provider dialect (OpenAI, Anthropic, OpenRouter) against the
-# vendored OpenAPI specs in crates/apiserve/tests/specs via scripts/validate_spec.py
+# vendored OpenAPI specs in crates/apiserve/tests/specs via scripts/api/validate_spec.py
 # (the same sanitize→Draft-2020-12 path the Rust api.rs harness uses). If the Python
 # `jsonschema` package is missing the schema checks degrade to structural jq checks
 # (noted once at startup); the shape/behavior assertions always run.
@@ -31,7 +31,7 @@ setup_file() {
   export BRAIN
 
   export SPECS="$REPO/crates/apiserve/tests/specs"
-  export VALIDATE="$REPO/scripts/validate_spec.py"
+  export VALIDATE="$REPO/scripts/api/validate_spec.py"
 
   # Is Python jsonschema available? If not, schema validation degrades to jq shape
   # checks (behavior assertions are unaffected).

@@ -10,7 +10,7 @@
 //! Gate: **cosine > 0.99 AND Pearson > 0.99** plus a sane relative max-abs.
 //!
 //! Env-gated on `CHRONOS2_WEIGHTS` + the golden dump from
-//! `tools/chronos2_dump_mv_reference.py`; skips otherwise.
+//! `tools/goldens/chronos2_dump_mv_reference.py`; skips otherwise.
 
 use chronos2::Chronos2;
 use std::path::Path;
@@ -58,7 +58,7 @@ fn multivariate_forward_matches_the_reference() {
         golden.join("mv_meta.json"),
     );
     if !tp.exists() || !cp.exists() || !qp.exists() {
-        eprintln!("mv golden missing; run tools/chronos2_dump_mv_reference.py — skipping");
+        eprintln!("mv golden missing; run tools/goldens/chronos2_dump_mv_reference.py — skipping");
         return;
     }
 

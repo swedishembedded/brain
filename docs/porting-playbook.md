@@ -28,7 +28,7 @@ port). The gates are cheap compared to debugging a 40-layer model that is
 ## 1. Dump reference goldens FIRST (before any Rust)
 
 One Python script (`tools/<model>_dump_reference.py`, e.g.
-`tools/flux2_dump_reference.py`), CPU + fp32, fixed seeds, everything saved as
+`tools/goldens/flux2_dump_reference.py`), CPU + fp32, fixed seeds, everything saved as
 **f32** (brain's safetensors reader is F32/F16/BF16-only — ints cast exactly):
 
 - **Stage taps**: tokenizer output + text-encoder hidden states; every VAE

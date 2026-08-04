@@ -7,7 +7,7 @@
 //! (e.g. `stacked_transformer.layers.0.self_attn.qkv_proj.weight`), not a
 //! brain-flavoured renaming — deliberately, so weight import is a 1:1 name match
 //! against `Vincent05R/FinCast` `v1.pth` (after the `torch.compile`/DDP prefix
-//! strip in `tools/fincast_convert.py`) and the T0 layout gate is a mechanical
+//! strip in `tools/convert/fincast_convert.py`) and the T0 layout gate is a mechanical
 //! diff rather than a hand-maintained translation table.
 //!
 //! Architecture (extracted from the reference source + verified against the real

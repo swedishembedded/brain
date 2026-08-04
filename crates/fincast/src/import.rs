@@ -4,7 +4,7 @@
 //! Weight import — strict, 1:1 by the reference's own tensor names.
 //!
 //! FinCast ships native **fp32** (`v1.pth` → safetensors via
-//! `tools/fincast_convert.py`), so the loader is verify-and-copy. Strictness
+//! `tools/convert/fincast_convert.py`), so the loader is verify-and-copy. Strictness
 //! (a duplicate destination, a missing/wrong-numel declared param, or an unused
 //! leftover tensor beyond the known non-persistent gate buffers) is a hard
 //! error: a silently half-loaded model is worse than one that refuses to load.

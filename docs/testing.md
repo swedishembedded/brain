@@ -33,7 +33,7 @@ one of those crates). It resolves to `$BRAIN_TESTDATA` if set, else the gitignor
 **`testdata/` holds test inputs and goldens ONLY** — reference checkpoints a test
 loads, dumped-golden tensors it compares against, and small input media (audio
 clips, images). It must never hold a `.git` directory or runnable code (upstream
-source, notebooks, docs): `scripts/fetch-testdata.sh`, the one thing that
+source, notebooks, docs): `scripts/data/fetch-testdata.sh`, the one thing that
 populates it, unconditionally strips `.git` and `.cache/huggingface` from
 everything it mirrors, plus an extra exclusion list for trees whose mirror is a
 whole upstream checkout (`vl_tree`'s `.py`/`.ipynb`/`.md`/`.pdf`/`.mp4`/`.pt`

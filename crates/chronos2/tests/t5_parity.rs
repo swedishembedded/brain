@@ -10,7 +10,7 @@
 //!
 //! Env-gated: runs only when `CHRONOS2_WEIGHTS` points at an imported
 //! `chronos2.safetensors` and the golden files exist (regenerate them with
-//! `tools/chronos2_dump_reference.py`). Skips (does not fail) otherwise so CI
+//! `tools/goldens/chronos2_dump_reference.py`). Skips (does not fail) otherwise so CI
 //! without the 478 MB checkpoint stays green.
 
 use chronos2::Chronos2;
@@ -59,7 +59,7 @@ fn full_forward_matches_the_reference() {
     let q_path = golden.join("t5_quantiles.f32");
     let meta_path = golden.join("t5_meta.json");
     if !ctx_path.exists() || !q_path.exists() {
-        eprintln!("golden dump missing; run tools/chronos2_dump_reference.py — skipping");
+        eprintln!("golden dump missing; run tools/goldens/chronos2_dump_reference.py — skipping");
         return;
     }
 

@@ -6,7 +6,7 @@
 //! `future_covariates` carrying the covariate's future (target future = NaN).
 //!
 //! Gate: cosine > 0.99 AND Pearson > 0.99. Env-gated on `CHRONOS2_WEIGHTS` + the
-//! golden dump from `tools/chronos2_dump_kf_reference.py`; skips otherwise.
+//! golden dump from `tools/goldens/chronos2_dump_kf_reference.py`; skips otherwise.
 
 use chronos2::Chronos2;
 use std::path::Path;
@@ -45,7 +45,7 @@ fn known_future_forward_matches_the_reference() {
         g.join("kf_quantiles.f32"), g.join("kf_meta.json"),
     );
     if !tp.exists() || !fp.exists() || !qp.exists() {
-        eprintln!("kf golden missing; run tools/chronos2_dump_kf_reference.py — skipping");
+        eprintln!("kf golden missing; run tools/goldens/chronos2_dump_kf_reference.py — skipping");
         return;
     }
     let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(&mp).unwrap()).unwrap();

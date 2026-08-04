@@ -76,7 +76,7 @@ many-tiny-infers/frame (MTP).** CPU MTP remains the default.
 **What.** `brain tts serve`: a Unix-socket, JSONL server. A single executor
 thread owns the resident engines (OpenVINO infer requests aren't thread-shared)
 and pulls jobs from a channel; connection threads stream `audio_chunk`s. Python
-clients (`scripts/voice-clone.py`, `scripts/voice-design.py`) play the PCM to the
+clients (`scripts/tts/voice-clone.py`, `scripts/tts/voice-design.py`) play the PCM to the
 speakers.
 
 **Why.** Compiling/loading the ~1.4 GB INT8 graphs is a real per-process cost;
@@ -211,8 +211,8 @@ brain tts design --device npu --ckpt <1.7B-VoiceDesign> --weights-dir out/tts-vd
 
 # Resident server + streaming Python clients (play to speakers):
 brain tts serve
-python scripts/voice-clone.py  "hi, this is my voice clone"
-python scripts/voice-design.py --instruct "a deep cinematic narrator" --text "..."
+python scripts/tts/voice-clone.py  "hi, this is my voice clone"
+python scripts/tts/voice-design.py --instruct "a deep cinematic narrator" --text "..."
 ```
 
 ### Env knobs

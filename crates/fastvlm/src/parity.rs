@@ -8,7 +8,7 @@
 //! short of a full end-to-end run.
 //!
 //! Requires the checkpoint and the reference dump produced by
-//! `tools/fastvlm_decoder_dump_reference.py`; the test skips (passes) when absent.
+//! `tools/goldens/fastvlm_decoder_dump_reference.py`; the test skips (passes) when absent.
 
 #[cfg(test)]
 mod tests {
@@ -44,7 +44,7 @@ fn repo_path(rel: &str) -> String {
         let TOK = testdata("vl/parity/fastvlm_dec_tokens.bin");
         let GEN = testdata("vl/parity/fastvlm_dec_gen.bin");
         let (Some(ref_logits), Some(tok_raw)) = (read_f32(&REF), std::fs::read(TOK).ok()) else {
-            eprintln!("skip: FastVLM decoder reference dump not present (run tools/fastvlm_decoder_dump_reference.py)");
+            eprintln!("skip: FastVLM decoder reference dump not present (run tools/goldens/fastvlm_decoder_dump_reference.py)");
             return;
         };
         // The tied vocab table (151936×896×4 ≈ 544 MB) exceeds a typical GPU storage-
@@ -129,7 +129,7 @@ fn repo_path(rel: &str) -> String {
         // the real weights: same preprocessed pixels → the [256, 3072] features must
         // match (fully-in-brain vision, closing the loop for a native image caption).
         let (Some(px), Some(feat)) = (read_f32(VIS_PX), read_f32(VIS_FEAT)) else {
-            eprintln!("skip: vision reference not present (run tools/fastvlm_vision_dump_reference.py)");
+            eprintln!("skip: vision reference not present (run tools/goldens/fastvlm_vision_dump_reference.py)");
             return;
         };
         let Ok(tensors) = checkpoint::safetensors::read(&CKPT) else {
@@ -276,7 +276,7 @@ fn repo_path(rel: &str) -> String {
         let (Some(embeds), Some(layout), Some(ids), Some(gen_ref)) =
             (read_f32(CAP_EMB), read_i32(CAP_LAYOUT), read_i32(CAP_IDS), read_i32(CAP_GEN))
         else {
-            eprintln!("skip: FastVLM caption reference not present (run tools/fastvlm_caption_dump_reference.py)");
+            eprintln!("skip: FastVLM caption reference not present (run tools/goldens/fastvlm_caption_dump_reference.py)");
             return;
         };
         let Ok(tensors) = checkpoint::safetensors::read(&CKPT) else {

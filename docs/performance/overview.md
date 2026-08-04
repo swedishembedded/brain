@@ -934,7 +934,7 @@ What the profiler taught (in order):
 The NPU is the fastest path on this machine — 23.7 ms per UNet inference on
 the NPU silicon (vs 77.9 ms for OpenVINO-CPU on the same graph), parity
 2.6e-4 vs brain's engine (fp16 internals). The sampler stays host-side;
-`scripts/wm-perf-gate.sh` floors all three paths (hand-set x3 envelopes —
+`scripts/gates/wm-perf-gate.sh` floors all three paths (hand-set x3 envelopes —
 auto-baselining was twice corrupted by background load on this box).
 
 Quality/speed ladder: `--denoise-steps 1..3` (1 step ≈ 3x the fps, still

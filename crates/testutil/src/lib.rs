@@ -14,7 +14,7 @@
 //! precisely because of drift risk like that.
 //!
 //! See `AGENTS.md`'s "No absolute paths in source" section and
-//! `scripts/fetch-testdata.sh` for how the tree gets populated. A test whose
+//! `scripts/data/fetch-testdata.sh` for how the tree gets populated. A test whose
 //! fixture is absent is expected to skip itself (`eprintln!` + early `return`
 //! or a `let-else`), never `panic!` — this helper only builds the path, it
 //! never checks existence, so the caller stays in control of the skip.

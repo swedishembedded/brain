@@ -104,7 +104,7 @@ tools/yolo_export/
 
 On a dev machine with `pip install ultralytics torch` — or skip both the
 `pip install` and the manual `yolov8n.pt` download with
-`scripts/fetch-yolov8.sh [--variant yolov8n] [--out DIR]`, which fetches the
+`scripts/data/fetch-yolov8.sh [--variant yolov8n] [--out DIR]`, which fetches the
 checkpoint from the Ultralytics release assets and runs `export_yolov8.py` for
 you, one step:
 

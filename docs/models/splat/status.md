@@ -33,7 +33,7 @@ gated wgpu duplicates (`MOE_SKIP_GPU_TESTS`).
   segment ranges = `splat_tile_ranges` with depth_bits=0),
   `splat_grad_reduce`, `splat_project_bwd` (full EWA VJP incl. clamped-FOV
   Jacobian terms and the quat-normalization chain). **Gradcheck vs a
-  committed float64 torch-autograd golden** (`tools/splat_dump_gradcheck.py`)
+  committed float64 torch-autograd golden** (`tools/goldens/splat_dump_gradcheck.py`)
   — all 84 grads within 5e-3. Finite differences are deliberately NOT the
   oracle: the 1/255 truncation boundary biases them (verified 2× off where
   autograd confirms our analytic value). `splat fit` (AdamW on packed

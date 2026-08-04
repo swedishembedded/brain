@@ -9,7 +9,7 @@
 //!   (`tests/golden/header.json`, dumped from the real `v1.pth`). Runs in CI with
 //!   no checkpoint.
 //! - **Env-gated live gate**: when `FINCAST_CKPT` points at the converted
-//!   `model.safetensors` (see `tools/fincast_convert.py`), assert `param_list()`
+//!   `model.safetensors` (see `tools/convert/fincast_convert.py`), assert `param_list()`
 //!   matches the checkpoint's tensor header name-for-name and shape-for-shape,
 //!   with nothing missing or extra (bar the known non-persistent gate buffers).
 //!   This is the mechanical diff that must pass before any kernel is written.

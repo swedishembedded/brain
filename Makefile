@@ -104,10 +104,10 @@ release:
 deb: deb/release
 
 deb/debug: build
-	bash scripts/build-deb.sh --binary target/debug/brain
+	bash scripts/build/build-deb.sh --binary target/debug/brain
 
 deb/release: release
-	bash scripts/build-deb.sh
+	bash scripts/build/build-deb.sh
 
 # ---- tests -----------------------------------------------------------------
 # `make test` is the FAST LANE and must stay fast: unit + integration tests
@@ -156,7 +156,7 @@ test:
 	rc=$$?; \
 	if [ $$rc -eq 124 ]; then \
 		echo; echo "TIMED OUT after $(TEST_TIMEOUT)s of RUNNING — almost certainly a deadlock."; \
-		echo "Find it with:  scripts/test-times.sh --top 10"; \
+		echo "Find it with:  scripts/gates/test-times.sh --top 10"; \
 	fi; \
 	exit $$rc
 
@@ -173,9 +173,9 @@ test/slow:
 # Self-validation for scripts/ and tools/: every one parses, every one is named
 # somewhere else in the repo (Makefile target / bats test / crate doc comment /
 # doc — an orphan gate), and no non-overridable absolute machine path. See
-# scripts/check-scripts.sh for the full rationale.
+# scripts/gates/check-scripts.sh for the full rationale.
 check/scripts:
-	bash scripts/check-scripts.sh
+	bash scripts/gates/check-scripts.sh
 
 # Everything, for a release gate.
 test/full: test test/doc test/slow test/e2e check/scripts
@@ -183,7 +183,7 @@ test/full: test test/doc test/slow test/e2e check/scripts
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
 test/times: release
-	scripts/test-times.sh --top 15
+	scripts/gates/test-times.sh --top 15
 
 # End-to-end: drive the real `claude` CLI against a local `brain serve --anthropic`,
 # proving brain works as a Claude Code backend. Skips cleanly unless `claude` is
@@ -247,7 +247,7 @@ gradcheck: release
 # from the contents of crates/kernels/wgsl/. Run after adding/removing a .wgsl
 # file; merge conflicts in lib.rs are resolved by union-ing wgsl/ + this target.
 kernels-regen:
-	scripts/kernels-regen.sh
+	scripts/build/kernels-regen.sh
 
 # Regenerate the DIAMOND parity fixtures (gitignored — never committed) from
 # the reference implementation in resources/world-models/repos/diamond.
@@ -264,24 +264,24 @@ wm/play: release
 # Cross-backend parity gate: CPU == Vulkan == NPU (gradcheck on both backends +
 # direct CPU-vs-GPU forward parity + TTS NPU codec vs CPU reference).
 parity:
-	scripts/parity-gate.sh
+	scripts/gates/parity-gate.sh
 
 # Forecasting correctness gate: every time-series optimization stays fp32-exact
 # (kronos KV-cache/shared-prefill/cross-section + batched-training parity).
 forecast/parity:
-	scripts/forecast-parity-gate.sh
+	scripts/gates/forecast-parity-gate.sh
 
 # Forecasting latency regression gate: each forecaster through `brain perf run`
-# vs the committed baseline (scripts/forecast-perf-baselines/, `--update` to
+# vs the committed baseline (scripts/gates/forecast-perf-baselines/, `--update` to
 # refresh). Weights via env (BRAIN_KRONOS_*/BRAIN_CHRONOS2/BRAIN_FINCAST).
 forecast/perf-gate: release
-	scripts/forecast-perf-gate.sh
+	scripts/gates/forecast-perf-gate.sh
 
-# World-model fps regression gate (best-of-3 vs scripts/wm-perf-baselines.json,
+# World-model fps regression gate (best-of-3 vs scripts/gates/wm-perf-baselines.json,
 # hard floors only). Dev-box gate, not CI: needs out/diamond-breakout.weights
 # (brain wm import ...) and a real display/GPU. `--update` rewrites baselines.
 wm/perf-gate: release
-	scripts/wm-perf-gate.sh
+	scripts/gates/wm-perf-gate.sh
 
 # ---- data generation ------------------------------------------------------
 data/calculator data/reverser data/wordcalc: release
@@ -296,9 +296,9 @@ data/tts: release
 
 # Populate the gitignored testdata/ tree (checkpoints/goldens/audio) that parity
 # and integration tests read from $BRAIN_TESTDATA. Idempotent — fetches only what
-# is missing, from a local mirror (hard-linked) or a URL. See scripts/fetch-testdata.sh.
+# is missing, from a local mirror (hard-linked) or a URL. See scripts/data/fetch-testdata.sh.
 fetch/testdata:
-	bash scripts/fetch-testdata.sh
+	bash scripts/data/fetch-testdata.sh
 
 $(DATA)/shakespeare_char/input.txt:
 	mkdir -p $(DATA)/shakespeare_char && curl -sSL -o $@ $(SHAKE_URL)

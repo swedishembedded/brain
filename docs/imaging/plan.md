@@ -447,9 +447,9 @@ legs (`BRAIN_DEVICE=cpu`) were run by the porting agents but not re-run here; th
 SAM 2 no-object path (`NO_OBJ_SCORE = -1024` / `no_obj_ptr`) has no golden and
 has never executed; the antialiased 1024→256 mask-prompt downsample is not
 implemented; and every fixture in this gate came from the local mirrors, so
-`scripts/fetch-testdata.sh` provisioning was verified for the sam2 checkpoints
+`scripts/data/fetch-testdata.sh` provisioning was verified for the sam2 checkpoints
 and the two antelopev2 `.onnx` only — the ~1 GB of stage goldens per model are
-regenerated from the `tools/*_dump_reference.py` commands recorded in that
+regenerated from the `tools/goldens/*_dump_reference.py` commands recorded in that
 script, not mirrored.
 
 **Phase 4 is the long pole and it is also disk- and bandwidth-bound** (34 GB at

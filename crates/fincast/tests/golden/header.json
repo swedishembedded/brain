@@ -1,7 +1,7 @@
 {
 "count": 1613,
 "note": "learnable tensors only; gate.threshold_{train,eval} buffers excluded",
-"source": "Vincent05R/FinCast v1.pth -> safetensors (tools/fincast_convert.py)",
+"source": "Vincent05R/FinCast v1.pth -> safetensors (tools/convert/fincast_convert.py)",
 "tensors": {
 "freq_emb.weight": [
 3,

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Stage-by-stage forward parity for the CLIP encoder family against the
-//! goldens dumped by `tools/clip_dump_reference.py`.
+//! goldens dumped by `tools/goldens/clip_dump_reference.py`.
 //!
 //! Fixtures live under `$BRAIN_TESTDATA` (default `<repo>/testdata`) in
 //! `clip/`; the reference WEIGHTS are named by env var. Every test SKIPS itself

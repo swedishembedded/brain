@@ -327,16 +327,16 @@ front-end to depend on.
 | **Stats snapshot / braintop contract** (add a metric, data-driven sections) | `crates/stats/src/{snapshot,source,build}.rs`; D-Bus `StatsSnapshot`/`StatsStream` in `crates/dbus/src/service.rs`; `Executor::residency` in `crates/residency/src/{executor,manager}.rs` |
 | Event/HFSM controller (`brain run`) | `crates/runtime/src/{lib,pump}.rs`, `crates/cli/src/run_cli.rs`, `crates/events/src/lib.rs` |
 | GLM-5.2 (MLA + MoE + DSA indexer + MTP) | `docs/models/glm/readme.md`, `docs/models/glm/npu.md`; `crates/glm`, `crates/cli/src/glm_cli.rs` |
-| LFM2.5-Encoder (bidir conv/attn hybrid, MLM, 8k) | `docs/models/lfm/{readme,status}.md`; `crates/lfm`, `crates/cli/src/lfm_cli.rs`; goldens via `tools/lfm_dump_reference.py` |
+| LFM2.5-Encoder (bidir conv/attn hybrid, MLM, 8k) | `docs/models/lfm/{readme,status}.md`; `crates/lfm`, `crates/cli/src/lfm_cli.rs`; goldens via `tools/goldens/lfm_dump_reference.py` |
 | YOLO model / loss / inference | `crates/yolo/src/{model,head,blocks,loss,assign,infer,nms,config}.rs`; `docs/models/yolo/readme.md` |
 | YOLO → Intel NPU (export/quantize/run/bench) | `crates/npu`, `crates/onnx`, `crates/cli/src/npu_cli.rs`, `docs/models/yolo/npu.md` |
 | ZipDepth: guide / ledger (incl. GPU perf root causes) | `docs/models/depth/{readme,status}.md`; `crates/depth/src/*`, `crates/cli/src/depth_cli.rs` |
-| Face recognition (SCRFD + alignment + ArcFace) | `docs/models/face/status.md`; `crates/facenet/src/{config,import,model,align,detect}.rs`; goldens via `tools/arcface_dump_reference.py` |
+| Face recognition (SCRFD + alignment + ArcFace) | `docs/models/face/status.md`; `crates/facenet/src/{config,import,model,align,detect}.rs`; goldens via `tools/goldens/arcface_dump_reference.py` |
 | **Read an ONNX file** (initializers, nodes, attributes) | `crates/onnx/src/read.rs` — the import front-end; `crates/onnx` is otherwise export-only |
-| VQGAN / CodeFormer VQ autoencoder | `docs/models/vqgan/status.md`; `crates/vqgan/src/{config,import,model}.rs` over `crates/vae/src/blocks.rs`; goldens via `tools/codeformer_dump_reference.py` |
-| CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers | `crates/clip/src/{config,import,model}.rs`; goldens via `tools/clip_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
+| VQGAN / CodeFormer VQ autoencoder | `docs/models/vqgan/status.md`; `crates/vqgan/src/{config,import,model}.rs` over `crates/vae/src/blocks.rs`; goldens via `tools/goldens/codeformer_dump_reference.py` |
+| CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers | `crates/clip/src/{config,import,model}.rs`; goldens via `tools/goldens/clip_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
-| SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/sam2_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
+| SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/goldens/sam2_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
 | WorldMirror-2 (photos → 3DGS scene) | `docs/models/mirror/{readme,status}.md`; `crates/mirror`, `crates/cli/src/mirror_cli.rs` |
 | 3D Gaussian Splatting rasterizer + viewer + fit | `docs/models/splat/{readme,status}.md`; `crates/splat`, `crates/cli/src/splat_cli.rs` |
 | Shared ViT block builder (DINOv2/trunk/camera-head) | `crates/model/src/vit.rs` |
@@ -349,7 +349,7 @@ front-end to depend on.
 | Forecasting models + backtester | `docs/models/{chronos2,kronos,fincast}/status.md`; `crates/{forecast,fcbench,chronos2,kronos,fincast}`, `crates/cli/src/forecast_cli.rs` |
 | World models (playable) | `docs/models/world-models/{status,playbooks,fixtures}.md` + `specs/`; `crates/wm-*`, `crates/cli/src/wm_cli.rs` |
 | Z-Image / diffusion stack | `docs/models/zimage/{readme,status}.md`; `crates/{zimage,dit,diffusion,vae}` |
-| FLUX.2 Klein: guide / ledger | `docs/models/flux2/{readme,status}.md`; `crates/flux2`, `crates/cli/src/flux2_cli.rs`; goldens via `tools/flux2_dump_reference.py` |
+| FLUX.2 Klein: guide / ledger | `docs/models/flux2/{readme,status}.md`; `crates/flux2`, `crates/cli/src/flux2_cli.rs`; goldens via `tools/goldens/flux2_dump_reference.py` |
 | Finetuning guides | `docs/guides/finetune/{plan,datasets}.md` |
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
 
@@ -367,7 +367,7 @@ make release && make test            # optimized build + full suite (MOE_SKIP_GP
                                      # tests run at TEST_THREADS=8 on the pooled test device — every
                                      # test binary shares one device via gpu_core::testgpu)
 make gradcheck                       # backprop correctness gate
-make parity                          # cross-backend parity: CPU == Vulkan == NPU (scripts/parity-gate.sh)
+make parity                          # cross-backend parity: CPU == Vulkan == NPU (scripts/gates/parity-gate.sh)
 make kernels-regen                   # regenerate the kernel const block after adding/removing a .wgsl
 make docs                            # docs bundle -> build/docs/brain-docs.{md,pdf} (needs pandoc + xelatex)
 
@@ -631,7 +631,7 @@ per-scenario table and the findings so far.
 
 - **WGSL is the source of truth.** Kernels live only in `crates/kernels/wgsl/`,
   embedded as consts; no kernel text is duplicated. After adding/removing a
-  `.wgsl`, run **`make kernels-regen`** (`scripts/kernels-regen.sh`) to
+  `.wgsl`, run **`make kernels-regen`** (`scripts/build/kernels-regen.sh`) to
   regenerate the const block + `ALL` registry in `crates/kernels/src/lib.rs`.
 - **fp32 arithmetic only, core compute only** — single bind group, **≤8 storage
   buffers/kernel** (the WebGPU guarantee; the splat backward kernels bind 8),
@@ -709,7 +709,7 @@ per-scenario table and the findings so far.
 - **Imported models are parity-gated, not gradient-guessed.** `mirror`,
   `chronos2`, `kronos`, `fincast`, `depth`, `wm-diamond` are imported 1:1 from a
   reference checkpoint and verified stage-by-stage against dumped goldens
-  (`scripts/parity-dump/`, `tools/*_dump_reference.py`). `make parity` is the
+  (`scripts/parity-dump/`, `tools/goldens/*_dump_reference.py`). `make parity` is the
   cross-backend gate (CPU == Vulkan == NPU).
 - **Adding a capability ≠ adding a subcommand.** Implement `capability::Action`
   and list it in a `Provider`; `brain do` and the event API pick it up.
@@ -790,7 +790,7 @@ per-scenario table and the findings so far.
      (`crates/testutil`, a dev-dependency — the one implementation; it used to be
      36 byte-identical copy-pasted helpers, one per crate). A test **skips
      itself** when its fixture is absent. Populate the tree with
-     **`make fetch/testdata`** (`scripts/fetch-testdata.sh`) — it hard-links from
+     **`make fetch/testdata`** (`scripts/data/fetch-testdata.sh`) — it hard-links from
      a local mirror, fetching only files not already present, organised as a tree
      (`testdata/<domain>/<model>/…`); there is currently no URL-download fallback
      (say so if you add one — don't leave the claim stale). The mirror location is
@@ -810,7 +810,7 @@ per-scenario table and the findings so far.
   Makefile target or a bats test, nothing else. `tools/` is developer utilities a
   human runs by hand (golden dumpers, converters, benchmarks) — it needs
   `requirements.txt`, `crates/**` never does. **`make check/scripts`**
-  (`scripts/check-scripts.sh`, folded into `test/full`) is what keeps both from
+  (`scripts/gates/check-scripts.sh`, folded into `test/full`) is what keeps both from
   rotting the way they did before it existed: every `.sh` parses and every `.py`
   compiles; every tracked file is named **somewhere else** in the repo (a
   Makefile target, a bats test, a Rust doc comment citing it as a golden

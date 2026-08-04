@@ -2,7 +2,7 @@
 
 2026-07-20, branch feat/world-models. Model = HY-WorldMirror-2.0 (1.26B fp32),
 imported exactly; all parity vs the PyTorch reference via
-`tools/mirror_dump_reference.py` goldens (committed samples: rms + 64–256
+`tools/goldens/mirror_dump_reference.py` goldens (committed samples: rms + 64–256
 point values per stage).
 
 ## Done
@@ -25,7 +25,7 @@ point values per stage).
   a/b/t/u fusion ping-pong) + GS parameter convs + iterative camera head
   (adaptive-LN modulation via 3 sliced matmuls of the fused 6144 projection).
   Two bugs found & fixed via the tiny-grid stage-isolation harness
-  (`tools/mirror_dump_dpt_tiny.py` + `tests/t3_dpt_tiny.rs`): (1) the DPT
+  (`tools/goldens/mirror_dump_dpt_tiny.py` + `tests/t3_dpt_tiny.rs`): (1) the DPT
   token→NCHW permute was wired to the inverse kernel; (2) the reference
   `ResidualConvUnit` uses `nn.ReLU(inplace=True)`, which MUTATES the block
   input — the skip connection adds `relu(x)`, not `x` (the classic MiDaS
@@ -57,7 +57,7 @@ point values per stage).
   with the reference `prune_gs` weighted-merge semantics (`splat::prune`).
 - **P6b/6c**: trunk + all four DPT heads export to ONNX (`export-npu --stage
   trunk|heads`); RoPE tables/pos-embeds as initializers, structural tests
-  green; `tools/mirror_check_onnx.py --stage trunk|heads` verifies against
+  green; `tools/goldens/mirror_check_onnx.py --stage trunk|heads` verifies against
   the T4/T5 goldens under OpenVINO (chained trunk→heads).
 
 ## Parity ladder

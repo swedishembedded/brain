@@ -76,7 +76,7 @@ in the extracted spec (in the P2 task + agent transcript). PyTorch `[out,in]`.
 ## Parity — T0 + T1 + T2 + T4 PASS vs the real checkpoints ✅
 
 Checkpoints downloaded to `resources/time-series/checkpoints/{kronos-small,
-kronos-tokenizer-base}/`. Reference dump: `tools/kronos_dump_reference.py`
+kronos-tokenizer-base}/`. Reference dump: `tools/goldens/kronos_dump_reference.py`
 (deterministic rungs — avoids the stochastic rollout). Brain side:
 `crates/kronos/tests/parity.rs` (env-gated `KRONOS_TOKENIZER_DIR` /
 `KRONOS_DECODER_DIR`).
@@ -106,7 +106,7 @@ brain skips it on an empty stamp.
 - **T4.5** exposure-bias sampling path (seeded).
 - **T5** full generate — AR loop (argmax/seeded), decode, de-normalize; check
   per-step logits + final de-normalized bars; verify sample_count averaging +
-  the top_k/top_p quirk. Reference dump via a `tools/kronos_dump_reference.py`
+  the top_k/top_p quirk. Reference dump via a `tools/goldens/kronos_dump_reference.py`
   (KronosPredictor), env-gated like Chronos-2.
 
 ## New kernels — DONE, isolation-tested (`crates/kronos/tests/kernels.rs`, CPU)

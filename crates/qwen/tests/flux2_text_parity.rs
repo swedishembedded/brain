@@ -5,7 +5,7 @@
 //! encoder vs the transformers reference.
 //!
 //! Goldens: `testdata/flux2/klein-4b/text.safetensors` (from
-//! `tools/flux2_dump_reference.py`): chat-templated `input_ids` (512, right-pad
+//! `tools/goldens/flux2_dump_reference.py`): chat-templated `input_ids` (512, right-pad
 //! 151643), per-layer taps `hidden_{9,18,27}` `[512,2560]`, and the
 //! concatenated `ctx` `[512,7680]`. All rows must match — including the ~480
 //! pad rows, which the reference computes under the HF `attention_mask` (pad

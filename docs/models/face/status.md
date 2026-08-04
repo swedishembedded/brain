@@ -14,7 +14,7 @@ contract are deliberately deferred; see "Deferred" below for what they will need
 
 | Piece | Where |
 |---|---|
-| Reference dumper | `tools/arcface_dump_reference.py` |
+| Reference dumper | `tools/goldens/arcface_dump_reference.py` |
 | Goldens (gitignored) | `testdata/face/antelopev2/{arcface,arcface_blocks,scrfd,align,e2e}.safetensors` + `manifest.json` |
 | Weights (gitignored) | `testdata/face/antelopev2/{glintr100,scrfd_10g_bnkps}.onnx` |
 | Config | `crates/facenet/src/config.rs` |
@@ -27,7 +27,7 @@ contract are deliberately deferred; see "Deferred" below for what they will need
 | PReLU / AvgPool blocks (new, shared) | `vision::blocks::{PReLU, AvgPool}` |
 | Similarity solve (new, shared) | `model::hostmath::{similarity_transform_2d, invert_affine_2x3}` |
 | Embedding host math (new, shared) | `model::hostmath::{l2_normalize, cosine}` |
-| Weights fetch | `scripts/fetch-testdata.sh` → `make fetch/testdata` (goldens are regenerated, not mirrored) |
+| Weights fetch | `scripts/data/fetch-testdata.sh` → `make fetch/testdata` (goldens are regenerated, not mirrored) |
 
 ```bash
 CARGO_HOME=… cargo test --release -p brain-facenet --test parity -- --nocapture

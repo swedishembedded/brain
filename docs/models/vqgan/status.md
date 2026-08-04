@@ -16,7 +16,7 @@ serving contract are deliberately deferred — see "Deferred" for what each need
 
 | Piece | Where |
 |---|---|
-| Reference dumper | `tools/codeformer_dump_reference.py` |
+| Reference dumper | `tools/goldens/codeformer_dump_reference.py` |
 | Goldens (gitignored) | `testdata/restore/vqgan/{codeformer,vqgan_code1024}/{codebook,quantizer,stages_128,e2e_512_synth,e2e_512_face}.safetensors` + `manifest.json` |
 | Weights (not in repo) | `$BRAIN_VQGAN_WEIGHTS/{codeformer,vqgan_code1024}.pth` |
 | Shared block builder (**hoisted**) | `vae::blocks::{Builder, BlockNames, kernels_with, NEXT_SLOT}` |

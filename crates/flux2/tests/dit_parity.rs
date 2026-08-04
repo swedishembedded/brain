@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! DiT forward parity vs the diffusers reference, replaying the exact
-//! transformer inputs captured by `tools/flux2_dump_reference.py` (forward
+//! transformer inputs captured by `tools/goldens/flux2_dump_reference.py` (forward
 //! hooks during a real pipeline run): packed latents, text conditioning,
 //! timestep, and the reference's own position ids.
 //!

@@ -79,7 +79,7 @@ from the specs in `docs/depth/specs/`.
 - Backwards are all **gathers** (brain is atomic-free). Where inverting the index
   map is subtle, the candidate range is loose and each candidate re-evaluates the
   *forward's own* predicate — one definition, evaluated twice.
-- Fixed a latent **SIGPIPE race in `scripts/kernels-regen.sh`**
+- Fixed a latent **SIGPIPE race in `scripts/build/kernels-regen.sh`**
   (`grep | head -1` under `set -o pipefail`): it worked at 180/200 kernels and
   began aborting the regen at 211, reading as "nothing happened".
 

@@ -7,7 +7,7 @@
 //! fixed image `[1,3,64,64]` and diffusers' `vae.encode(x).latent_dist`
 //! parameters `[1,32,8,8]` (mean‖logvar) + `mean` `[1,16,8,8]`. Unlike
 //! `decode_parity.rs`'s golden, this one has **no in-repo generator** —
-//! `tools/vae_dump_reference.py` only bakes the decode direction; a
+//! `tools/goldens/vae_dump_reference.py` only bakes the decode direction; a
 //! `<something>_encode` counterpart does not exist in this repo (see
 //! `.todo/unify-scripts-and-tools.md`). This VAE has no
 //! `quant_conv`, so the posterior parameters are exactly the encoder `conv_out`

@@ -63,7 +63,7 @@ golden is deterministic and comparable. Documented, not hidden.
   + deterministic top-2 MoE. Reused `matmul`/`bias_add`/`relu_inplace`/`silu`/`add`/
   `rmsnorm`/`layernorm` — **no new WGSL kernel needed**. Zero-weight self-check
   forecasts the first-patch mean.
-- [x] **P6 parity** — `tools/fincast_dump_reference.py` runs the REAL reference
+- [x] **P6 parity** — `tools/goldens/fincast_dump_reference.py` runs the REAL reference
   (stochastic MoE neutralized) → committed golden. `tests/parity.rs` on the real
   991M weights: **cosine=1.000000, pearson=0.999980, rel_rms=0.000000**.
 - [x] **P7 forecaster + CLI** — `FincastForecaster` (9 native quantiles +
@@ -97,7 +97,7 @@ initializer input fixed it: cosine **1.000000** on CPU-OpenVINO and the NPU.
 
 ## Checkpoint
 
-`tools/fincast_convert.py <v1.pth> <out.safetensors>` (torch pickle → flat fp32
+`tools/convert/fincast_convert.py <v1.pth> <out.safetensors>` (torch pickle → flat fp32
 safetensors, strips `_orig_mod.`/`module.` prefixes). Downloaded + converted to
 `scratchpad/fincast/model.safetensors` (gitignored). Live gates read it via
 `FINCAST_CKPT=<abs path>`.

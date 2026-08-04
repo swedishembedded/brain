@@ -15,7 +15,7 @@ written from the specs in `docs/world-models/specs/`.
 
 ## Done
 - Kernel registry mechanically derivable: `make kernels-regen`
-  (`scripts/kernels-regen.sh`); registry canonicalized, 161 kernels.
+  (`scripts/build/kernels-regen.sh`); registry canonicalized, 161 kernels.
 - GroupNorm kernel family (`gn_stats/apply/dsum/dx/dgamma/dbeta`) fwd+bwd
   + host dispatch `wm_core::gn` — spec P1.gn.md, 9 tests incl. FD backward.
 - FiLM/adaLN family (`film_chan*`, `film_row*` w/ rows_per_cond
@@ -62,7 +62,7 @@ written from the specs in `docs/world-models/specs/`.
 - Levers (measurement-driven, docs/PERFORMANCE.md): parallel GroupNorm
   reduction (gn_part/gn_stats2 — gn_stats was 77.6% of GPU frame time),
   register-tiled conv_bias_reg (~21x GPU conv), native CPU gn fast paths,
-  on-device denoise loop (one readback/frame). scripts/wm-perf-gate.sh
+  on-device denoise loop (one readback/frame). scripts/gates/wm-perf-gate.sh
   guards order-of-magnitude regressions (x3 band; tighter flaps thermally).
 - NPU path: `brain wm export --arch diamond` -> fp32 ONNX (Gemm+Split
   AdaGN, decomposed GN, attention as MatMul/Softmax) -> `--device npu

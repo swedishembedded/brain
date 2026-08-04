@@ -3,7 +3,7 @@
 
 //! The reference configuration, exactly as the insightface `antelopev2` release
 //! defines it. Every number here was read off the released ONNX graphs or the
-//! insightface source vendored into `tools/arcface_dump_reference.py`; none is a
+//! insightface source vendored into `tools/goldens/arcface_dump_reference.py`; none is a
 //! guess, and the parity goldens' `manifest.json` records the same values.
 
 /// Preprocessing constants of a `cv2.dnn.blobFromImage` call: `(bgr_u8 → RGB −

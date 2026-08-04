@@ -3,7 +3,7 @@
 
 //! FLUX.2 Klein schedule parity vs the diffusers reference
 //! (`testdata/flux2/klein-4b/schedule.safetensors`, from
-//! `tools/flux2_dump_reference.py`): `empirical_mu` + exponential shift must
+//! `tools/goldens/flux2_dump_reference.py`): `empirical_mu` + exponential shift must
 //! reproduce the scheduler's sigma vectors exactly (float32).
 
 use diffusion::scheduler::{empirical_mu, klein_sigmas};

@@ -376,7 +376,7 @@ measured — and it will change once A lands and the device rate rises.
 device, greedy streams compared, opt-out rather than opt-in. **This must precede
 the kernel and quantisation work** — it is the safety net for exactly the failure
 mode A0–A2 risk. (2) `brain perf gate` against committed baselines as *hard
-floors* on best-of-N, following `scripts/wm-perf-gate.sh`; tight deltas flap on
+floors* on best-of-N, following `scripts/gates/wm-perf-gate.sh`; tight deltas flap on
 shared boxes.
 
 ### K. `resources` is null

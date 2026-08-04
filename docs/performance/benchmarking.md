@@ -62,7 +62,7 @@ negotiable; a benchmark that violates one produces a number nobody can use.
    the stable signals are min-of-N microbenchmarks and per-stage timings. `perf`
    therefore reports best-of-N *and* the spread, and its regression gates are
    hard floors rather than tight deltas — the same discipline as
-   `scripts/wm-perf-gate.sh`.
+   `scripts/gates/wm-perf-gate.sh`.
 
 ---
 
@@ -488,7 +488,7 @@ apples-to-oranges comparison is visible rather than silent.
 
 **Noise discipline.** Report best-of-N with the observed spread. Regression gates
 are *hard floors* on best-of-N, not tight deltas — a laptop- or shared-class box
-throttles, and tight deltas flap. This matches `scripts/wm-perf-gate.sh`.
+throttles, and tight deltas flap. This matches `scripts/gates/wm-perf-gate.sh`.
 
 ---
 

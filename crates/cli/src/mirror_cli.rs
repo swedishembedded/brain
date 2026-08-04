@@ -225,7 +225,7 @@ fn export_npu(argv: &[String]) {
         std::process::exit(1);
     });
     println!("wrote {out} (+ external weight data)");
-    println!("verify: python3 tools/mirror_check_onnx.py {out}   (OpenVINO CPU/NPU)");
+    println!("verify: python3 tools/goldens/mirror_check_onnx.py {out}   (OpenVINO CPU/NPU)");
 }
 
 fn infer(argv: &[String]) {

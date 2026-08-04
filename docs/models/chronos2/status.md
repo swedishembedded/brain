@@ -139,13 +139,13 @@ Checkpoint downloaded to `resources/time-series/checkpoints/chronos-2/`
   shape-for-shape**, no missing/extra. PASS.
 - **T5** end-to-end forward (`tests/t5_parity.rs`, `CHRONOS2_WEIGHTS=<.safetensors>`):
   brain's `forecast_quantiles` vs a golden dump from the official
-  `Chronos2Pipeline` (`tools/chronos2_dump_reference.py`) on the identical
+  `Chronos2Pipeline` (`tools/goldens/chronos2_dump_reference.py`) on the identical
   context → **cosine = 1.000000, pearson = 1.000000, rel_max_abs = 0.0000**.
   Brain reproduces the reference to full fp32 precision. PASS.
 
 Because T5 is exact end-to-end, T1–T4 (scaler / patch-embed / block / head) are
 implicitly validated — no need to add per-stage goldens unless a future change
-regresses T5. (`tools/chronos2_dump_reference.py` can be extended with module
+regresses T5. (`tools/goldens/chronos2_dump_reference.py` can be extended with module
 hooks to dump T1–T4 if drill-down is ever needed.)
 
 ### 5. Register + gradcheck
@@ -173,7 +173,7 @@ patch position and its row is kept.
   per series}. B=1 matches the univariate path (self-check cosine>0.9999).
 - `forecaster.rs`: `CovariateSupport::Full`; `forecast()` routes past-covariate
   variates through the mv path.
-- Parity: `tools/chronos2_dump_mv_reference.py` + `tests/mv_parity.rs` →
+- Parity: `tools/goldens/chronos2_dump_mv_reference.py` + `tests/mv_parity.rs` →
   **cosine=1.000000 pearson=1.000000 rel_max=0.0** (target+covariate, group_ids=[0,0]).
 
 Group attention is host-computed, so an N-series forecast is slow (~20–70 s for 8

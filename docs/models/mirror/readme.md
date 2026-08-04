@@ -38,7 +38,7 @@ whole forward is recorded once (`crates/mirror/src/model.rs`) and reuses the
 shared ViT block builder `model::vit` (also used by the camera head) plus the
 `crates/splat` renderer for display.
 
-## Parity (vs the PyTorch reference, `tools/mirror_dump_reference.py`)
+## Parity (vs the PyTorch reference, `tools/goldens/mirror_dump_reference.py`)
 
 | Gate | What | Status |
 |---|---|---|

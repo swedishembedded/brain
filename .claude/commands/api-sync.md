@@ -11,14 +11,14 @@ vendored specs — there is no separate hand-maintained brain spec.
 Do this:
 
 1. **See the drift** (does not write):
-   `python3 scripts/api_sync.py --check`
+   `python3 scripts/api/api_sync.py --check`
    It fetches each provider's current upstream OpenAPI doc and prints added/removed/
    changed `paths` and `components/schemas` vs the vendored copies.
 
 2. **If there is drift**, review it and decide what matters for the endpoints brain
    actually implements (chat/messages, embeddings, images, models). Then update the
    vendored specs:
-   `python3 scripts/api_sync.py`  (optionally `--provider openai`)
+   `python3 scripts/api/api_sync.py`  (optionally `--provider openai`)
 
 3. **Re-run conformance**: `cargo test -p brain-apiserve`. Failures show exactly where
    brain's accepted requests / emitted responses no longer match the refreshed spec.

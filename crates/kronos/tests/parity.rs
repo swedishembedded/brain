@@ -8,7 +8,7 @@
 //!
 //! Both sides read the same normalized context (`t_context.f32`). Env-gated on
 //! the imported weights + the golden dump; skips otherwise so CI stays green.
-//! Regenerate goldens with `tools/kronos_dump_reference.py`.
+//! Regenerate goldens with `tools/goldens/kronos_dump_reference.py`.
 
 use kronos::{import, KronosConfig, KronosTokenizerConfig};
 use std::path::Path;
@@ -51,7 +51,7 @@ fn tokenizer_and_decoder_match_the_reference() {
     let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
     let ctx_p = golden.join("t_context.f32");
     if !ctx_p.exists() {
-        eprintln!("golden dump missing; run tools/kronos_dump_reference.py — skipping");
+        eprintln!("golden dump missing; run tools/goldens/kronos_dump_reference.py — skipping");
         return;
     }
     let meta: serde_json::Value =

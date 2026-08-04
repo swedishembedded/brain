@@ -7,7 +7,7 @@
 //!
 //! Golden fixture (`testdata/golden/qwen/qwen3_4b_encoder.safetensors`, fetched):
 //! a fixed token sequence + Qwen3-4B `hidden_states[-2]` `[8,2560]`, baked by
-//! `tools/qwen_encoder_dump_reference.py` from the SAME Comfy
+//! `tools/goldens/qwen_encoder_dump_reference.py` from the SAME Comfy
 //! single-file weights brain imports. Fixed token ids isolate forward parity
 //! from tokenizer parity. The 8 GB weights are NOT committed — set
 //! `BRAIN_QWEN3_4B` (a resources default is tried); skips if absent. Runs on the

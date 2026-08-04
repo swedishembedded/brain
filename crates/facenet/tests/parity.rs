@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Stage-by-stage forward parity against the insightface goldens dumped by
-//! `tools/arcface_dump_reference.py`.
+//! `tools/goldens/arcface_dump_reference.py`.
 //!
 //! Every test SKIPS ITSELF when its fixture is absent (`AGENTS.md`): the
 //! goldens and the two `.onnx` files live under `$BRAIN_TESTDATA`

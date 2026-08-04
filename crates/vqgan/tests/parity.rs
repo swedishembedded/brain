@@ -3,7 +3,7 @@
 
 //! VQGAN forward parity vs the `basicsr` reference, replayed stage by stage.
 //!
-//! Goldens (step 1, `tools/codeformer_dump_reference.py`) live under
+//! Goldens (step 1, `tools/goldens/codeformer_dump_reference.py`) live under
 //! `testdata/restore/vqgan/{codeformer,vqgan_code1024}/` and are gitignored;
 //! each test skips itself when its fixture is absent. The reference weights are
 //! not in `testdata/` either — point **`BRAIN_VQGAN_WEIGHTS`** at the directory

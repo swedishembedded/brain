@@ -3,7 +3,7 @@
 
 //! T2 gate: rasterizer backward.
 //!   1. gradcheck of render_bwd against a committed torch-autograd golden
-//!      (tools/splat_dump_gradcheck.py; float64 oracle of the identical
+//!      (tools/goldens/splat_dump_gradcheck.py; float64 oracle of the identical
 //!      scene/loss). Finite differences are NOT used: the 1/255 truncation
 //!      boundaries make them biased for scale/mean grads (the classic 3DGS
 //!      finite-diff pitfall — verified: autograd matches our analytic grads

@@ -4,7 +4,7 @@
 //! End-to-end parity vs the reference FinCast forward.
 //!
 //! The committed golden (`tests/golden/golden_meta.json`, from
-//! `tools/fincast_dump_reference.py` on the real `v1.pth` with stochastic MoE
+//! `tools/goldens/fincast_dump_reference.py` on the real `v1.pth` with stochastic MoE
 //! routing neutralized to deterministic top-2) carries the full fixed context
 //! and the reference's denormalized head output for the last patch
 //! (`[horizon_len, num_outputs]`). This test loads the real weights

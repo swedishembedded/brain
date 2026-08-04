@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! `perf gate` — a candidate run against a committed baseline as HARD floors
-//! (J2). The pattern is `scripts/wm-perf-gate.sh`: best-of-N against committed
+//! (J2). The pattern is `scripts/gates/wm-perf-gate.sh`: best-of-N against committed
 //! baselines with generous floors, because tight deltas flap on shared boxes
 //! and a flapping gate gets deleted.
 //!

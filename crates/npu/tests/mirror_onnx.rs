@@ -4,7 +4,7 @@
 //! Structural test for the WorldMirror-2 DINOv2 ONNX export: build a
 //! 2-block graph from zero weights with the real shapes, decode it, and
 //! assert the IO signature and op inventory. (Numerical parity vs the
-//! reference goldens is the manual `tools/mirror_check_onnx.py` step —
+//! reference goldens is the manual `tools/goldens/mirror_check_onnx.py` step —
 //! OpenVINO CPU/NPU — since the full 24-block graph carries 1.2 GB of
 //! weights.)
 

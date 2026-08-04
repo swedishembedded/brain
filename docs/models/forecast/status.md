@@ -73,7 +73,7 @@ All three foundation models were confirmed together on `--device cpu,npu`
 
 - **fincast weights**: fetched from `Vincent05R/FinCast` (`v1.pth`, ~4 GB) to
   `resources/time-series/checkpoints/fincast/`, converted with
-  `tools/fincast_convert.py` → `fincast.safetensors`, imported via
+  `tools/convert/fincast_convert.py` → `fincast.safetensors`, imported via
   `brain forecast import --fincast <safetensors> --out out/fincast.safetensors`
   (991 M params). Live-validated over D-Bus on CPU (table above).
 - **fincast on NPU**: DONE. FinCast's ~1 B-param ONNX core exceeds protobuf's
