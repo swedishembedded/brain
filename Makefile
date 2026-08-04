@@ -149,6 +149,12 @@ CARGO_TEST   ?= cargo test --release --offline
 # statement about *running tests* — a cold rebuild after an engine change takes
 # minutes on its own, and letting it eat the budget turns "compiling" into a
 # false "TIMED OUT" that reads like a hang.
+# The clippy gate — a ratchet. Checks that clippy EXITS 0 (it stops at the first
+# deny-by-default lint and then silently reports nothing about everything after
+# it) and that the warning count has not grown. See scripts/clippy-gate.sh.
+clippy:
+	@scripts/clippy-gate.sh
+
 test:
 	@echo "test: fast lane (unit + integration, no doc-tests, GPU serialised)"
 	@$(CARGO_TEST) --lib --bins --tests --no-run
