@@ -28,15 +28,24 @@
 //!
 //! ## Scope
 //!
-//! Forward only, and **unmasked** — which is the FLUX contract:
+//! Forward ([`model`]) + **training** ([`train`]), and **unmasked** — which is
+//! the FLUX contract:
 //! `FluxPipeline._get_t5_prompt_embeds` passes no `attention_mask`, so right-pad
 //! positions are attended as ordinary keys. Unlike CLIP's causal isolation this
 //! is *not* a no-op (the dumper measures a 4.5 max|d| difference on content rows
 //! between the masked and unmasked runs), so a masked variant would be a real
 //! feature; it is not implemented. Also not implemented: the sentencepiece
 //! tokenizer (ids come from the goldens; the tokenizer belongs in `crates/data`
-//! next to the GPT-2/Qwen/CLIP BPEs), the backward/gradcheck, INT8, and the
-//! serving contract.
+//! next to the GPT-2/Qwen/CLIP BPEs), INT8, and the serving contract.
+//!
+//! [`train`] adds the SSA forward + hand-written reverse over **every** tensor
+//! in the manifest (including the learned relative-position bias), gated by
+//! `gradcheck::check_t5` on both the P40 and `backend-cpu`. It is honest about
+//! two limits: it caches the softmax probabilities **per block** (the inference
+//! graph shares one slab, which the reverse cannot read), so T = 512 needs
+//! `block::chunked_bidir_bwd`'s per-chunk recompute before a real XXL finetune;
+//! and it re-records the forward rather than sharing [`model`]'s private step
+//! builder.
 //!
 //! ## Size
 //!
@@ -54,3 +63,4 @@ pub mod config;
 pub mod hostbias;
 pub mod import;
 pub mod model;
+pub mod train;

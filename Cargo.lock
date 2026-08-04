@@ -1328,6 +1328,7 @@ name = "brain-t5"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
