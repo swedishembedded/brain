@@ -10,6 +10,7 @@
 //! (`BRAIN_DEVICE=cpu` in CI). Models are built strictly sequentially — the
 //! first is dropped before the second exists (one live device at a time).
 
+use data::rng::Lcg;
 use std::collections::HashMap;
 
 use lfm::config::LfmConfig;
@@ -17,17 +18,13 @@ use lfm::model::Lfm;
 
 /// Deterministic pseudo-random init (small values keep fp32 paths well-scaled).
 fn lcg_init(cfg: &LfmConfig, seed: u64) -> HashMap<String, Vec<f32>> {
-    let mut state = seed | 1;
-    let mut next = move || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        ((state >> 33) as f32 / (1u64 << 31) as f32) - 0.5
-    };
+    let mut rng = Lcg::new(seed | 1);
     cfg.param_list()
         .into_iter()
         .map(|(name, numel)| {
             let scale = if name.ends_with("norm.weight") || name.contains("ln") { 1.0 } else { 0.08 };
             let base = if name.ends_with("ln1.weight") || name.ends_with("ln2.weight") || name == "norm.weight" || name.contains("_norm") { 1.0 } else { 0.0 };
-            (name, (0..numel).map(|_| base + scale * next()).collect())
+            (name, (0..numel).map(|_| base + scale * rng.scaled(0.5)).collect())
         })
         .collect()
 }

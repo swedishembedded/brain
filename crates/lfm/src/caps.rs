@@ -33,7 +33,11 @@ use crate::model::Lfm;
 /// The model id used on the CLI (`brain do lfm …`) and the event API.
 pub const MODEL: &str = "brain/lfm";
 
-/// Attention-slab budget for the chunked path (chunk 2048 at T=8192, H=16).
+/// Attention-slab budget for the chunked path. `Lfm::new_impl` derives
+/// `chunk = budget / (H · T · 4)`, so at T=8192 / H=16 this is **1024**, not the
+/// 2048 this comment used to claim (512 MiB / (16·8192·4 B) = 1024).
+/// Only the GEMM/naive attention paths allocate against it — the fused flash
+/// path selected on a cooperative device writes no `[H, chunk, T]` slab at all.
 const SLAB_BUDGET: u64 = 512 << 20;
 /// Fill-mask probe capacity the resident model is built with.
 const PROBE_CAP: u32 = 64;

@@ -96,25 +96,36 @@ const DQ_CROSS: usize = 47;
 const DK_CROSS_ACC: usize = 48;
 const DV_CROSS_ACC: usize = 49;
 const ROW_SCATTER: usize = 50;
-// Slot 51 (`flash_attn_bidir`, registered below) is compiled but NOT yet
-// dispatched: the chunked GPU path runs `block::gemm_bidir_fwd`, which measured
-// ~8x the naive trio AND the *baseline* flash kernel at 8k on a P40
-// (`docs/models/lfm/status.md`). That comparison is stale — it predates
-// `flash_attn_bidir_split` (same Params, same output layout, cosine 1.00000000,
-// 14.4x the baseline at head_dim 64, which is lfm's config). Kept, not deleted,
-// because the A/B is a named open item in the ledger ("flash_attn_bidir
-// autoselect"). Wiring it requires three things this const cannot carry:
-// register `kernels::FLASH_ATTN_BIDIR_SPLIT` as a second slot, dispatch through
-// `block::flash_bidir_fwd` with `FlashIds { bidir: FLASH_BIDIR, split: Some(..) }`
-// on the `workgroup_reductions` path, and re-enable the three `kv_expand`
-// dispatches (`emit_attn_qkv(build_fused = true)`) that the GEMM path skips —
-// then measure vs `gemm_bidir_fwd` at 8k/hd=64 on a P40 and record the number.
-#[allow(dead_code)]
+// Fused bidirectional flash attention — the chunked forward's attention when
+// the device can run the SPLIT kernel. Both slots are registered because
+// `block::flash_bidir_variant` picks between them from the device's queried
+// `max_workgroup_size`, and only the split one is worth taking here:
+//
+//   T=8192, d_model 1024, 16 heads, head_dim 64, chunk 1024, Tesla P40, fp32
+//   (`cargo run --release -p brain-lfm --bin lfm_attn_ab -- 8192 5`)
+//     gemm_bidir_fwd (was)               1185.10 ms    232 GFLOP/s   1.97% peak
+//     kv_expand + flash_bidir_split       274.17 ms   1003 GFLOP/s   8.53% peak  4.32x
+//     kv_expand + flash_bidir (baseline) 3722.48 ms     74 GFLOP/s   0.63% peak  0.32x
+//     kv_expand alone                       1.07 ms   (included in both flash rows)
+//   agreement gemm vs split: cosine 1.0000000000, max_abs 1.9e-6.
+//
+//   Re-measured twice since on the same box: the split row reproduces to 0.2%
+//   (274.73 / 274.68 ms) but the GEMM row swings 9% (1194.77 / 1090.09 ms), so
+//   the ratio is 3.97-4.35x and the honest claim is "about 4x". The direction
+//   never moves; see docs/models/lfm/status.md for the three-run table.
+//
+// The ledger's old "flash measured ~= naive here" was measured against the
+// BASELINE kernel, whose per-thread `q[128]`/`o[128]` arrays fall out of
+// registers — the bottom row above, and 3.1x SLOWER than the GEMM path. It does
+// not transfer to the split kernel, which is ~4x FASTER. So the gate below is
+// "the split kernel is actually selectable", not "the device is cooperative":
+// on a device that can only run the baseline, GEMM still wins and is kept.
 const FLASH_BIDIR: usize = 51;
 const HEAD_PACK: usize = 52;
 const HEAD_PACK_T: usize = 53;
 const HEAD_UNPACK: usize = 54;
 const SOFTMAX_ROWS: usize = 55;
+const FLASH_BIDIR_SPLIT: usize = 56;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed_tile", kernels::EMBED_TILE),
@@ -173,6 +184,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("head_pack_t", kernels::HEAD_PACK_T),
     ("head_unpack", kernels::HEAD_UNPACK),
     ("softmax_rows", kernels::SOFTMAX_ROWS),
+    ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
     // Cooperative grad-norm (optimiser): `gradnorm_part` + `clip_coef_wg` replace
     // the single-threaded `gradnorm_sq`/`clip_coef` walk. `optim::Optim` resolves
     // them BY NAME, so appending them here (and only here) is the whole opt-in.
@@ -742,6 +754,22 @@ impl Lfm {
         self.ps.w(name)
     }
 
+    /// The two interchangeable fused bidirectional flash kernels, as this
+    /// model's pipeline slots.
+    fn flash_ids() -> block::FlashIds {
+        block::FlashIds { bidir: FLASH_BIDIR, split: Some(FLASH_BIDIR_SPLIT) }
+    }
+
+    /// Whether the fused flash path is worth taking on THIS device: only when
+    /// `block::flash_bidir_variant` actually resolves to the split kernel. The
+    /// baseline kernel is 3.1x SLOWER than `gemm_bidir_fwd` at lfm's shape (see
+    /// the `FLASH_BIDIR` comment), so "cooperative device" is not the gate —
+    /// "the split kernel is selectable" is.
+    fn flash_selectable(gpu: &Gpu) -> bool {
+        let caps = gpu.caps();
+        caps.workgroup_reductions && block::flash_bidir_variant(Self::flash_ids(), &caps).0 == FLASH_BIDIR_SPLIT
+    }
+
     fn bidir_ids() -> BidirIds {
         BidirIds {
             scores: SCORES_BIDIR,
@@ -928,7 +956,9 @@ impl Lfm {
             match ty {
                 LayerType::Attention => {
                     let ab = attn.expect("attn bufs");
-                    let gemm_attn = matches!(&self.regime, Regime::Chunked { .. }) && self.gpu.caps().workgroup_reductions;
+                    let chunked = matches!(&self.regime, Regime::Chunked { .. });
+                    let flash_attn = chunked && Self::flash_selectable(&self.gpu);
+                    let gemm_attn = chunked && !flash_attn && self.gpu.caps().workgroup_reductions;
                     self.emit_attn_qkv(&mut s, l, &common.xn1, ab, b_use, !gemm_attn);
                     match &self.regime {
                         Regime::Materialized { scores, .. } => match self.train_chunk {
@@ -946,13 +976,22 @@ impl Lfm {
                         },
                         Regime::Chunked { scores, probs, chunk, ctx_pack, .. } => {
                             let spans: Vec<(u32, u32)> = (0..b_use).map(|i| (i * self.t, self.t)).collect();
-                            // GEMM attention on cooperative devices (register-
-                            // tiled matmuls over per-head packs, GQA folded into
-                            // the pack — measured ~8x over the naive trio and the
-                            // flash kernel at 8k on a P40); the chunked cross trio
-                            // is the CPU-JIT path (its native fast paths own that
-                            // regime and read the fused qkv).
-                            if self.gpu.caps().workgroup_reductions {
+                            // Fused flash attention wherever the SPLIT kernel is
+                            // selectable — ~4x the GEMM path at 8k/hd=64 on a
+                            // P40 (3.97-4.35x over three runs), cosine
+                            // 1.0000000000 (numbers by `FLASH_BIDIR`
+                            // above). Otherwise GEMM attention on cooperative
+                            // devices (register-tiled matmuls over per-head
+                            // packs, GQA folded into the pack — ~8x the naive
+                            // trio); the chunked cross trio is the CPU-JIT path
+                            // (its native fast paths own that regime and read
+                            // the fused qkv).
+                            if flash_attn {
+                                block::flash_bidir_fwd(
+                                    &self.gpu, Self::flash_ids(), c.n_heads, c.head_dim, hq, &ab.qkv, 3 * d, 0, d,
+                                    2 * d, &ab.ctx, &spans, &mut s,
+                                );
+                            } else if self.gpu.caps().workgroup_reductions {
                                 let ids = block::GemmAttnIds {
                                     head_pack: HEAD_PACK,
                                     head_pack_t: HEAD_PACK_T,
@@ -1492,5 +1531,34 @@ mod tests {
             assert_eq!(&streamed.read_weight(&name), &init[&name], "streamed {name} vs source");
         }
         std::fs::remove_file(&path).ok();
+    }
+
+    /// The slot consts index `PIPELINES` positionally, so inserting a pipeline
+    /// silently re-points every const after it — a mismatched kernel is wrong
+    /// output, not a crash (`docs/kernel-checklist.md` §B). Pin the ones this
+    /// file dispatches by NAME.
+    #[test]
+    fn slot_constants_name_the_pipeline_they_index() {
+        for (slot, want) in [
+            (super::MATMUL, "matmul"),
+            (super::MATMUL_REG2, "matmul_reg2"),
+            (super::RMSNORM_EPS, "rmsnorm_eps"),
+            // `ROPE`/`ROPE_BWD` are local shorthands for the `rope_base` pair —
+            // lfm's RoPE takes theta as a Params word, which is what
+            // `rope_base.wgsl` is (`rope.wgsl` bakes the base in).
+            (super::ROPE, "rope_base"),
+            (super::ROPE_BWD, "rope_base_bwd"),
+            (super::KV_EXPAND, "kv_expand"),
+            (super::EMBED, "embed"),
+            (super::ROW_SCATTER, "row_scatter"),
+            (super::FLASH_BIDIR, "flash_attn_bidir"),
+            (super::HEAD_PACK, "head_pack"),
+            (super::HEAD_PACK_T, "head_pack_t"),
+            (super::HEAD_UNPACK, "head_unpack"),
+            (super::SOFTMAX_ROWS, "softmax_rows"),
+            (super::FLASH_BIDIR_SPLIT, "flash_attn_bidir_split"),
+        ] {
+            assert_eq!(PIPELINES[slot].0, want, "slot {slot} is not '{want}'");
+        }
     }
 }

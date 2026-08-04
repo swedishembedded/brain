@@ -62,7 +62,9 @@ Notes (honesty ledger):
 - Optimization evidence for the deferred items: at 8k the forward is
   compute-bound (GPU 100%, linear concurrency scaling) — `flash_attn_bidir`
   autoselect and kernel-level attention work are where wins would come from,
-  not batching policy.
+  not batching policy. *(That prediction held: the flash autoselect landed on
+  2026-08-04 at ~4× the GEMM attention — 3.97–4.35× over three independent
+  runs; see the A/B section below.)*
 
 ### First honest 8k wall-times (single sequence, chunk 1024, fp32)
 
@@ -154,8 +156,8 @@ the CPU forward; GPU scaling fits isolated the same t² term):
 - GPU: `block::gemm_bidir_fwd` — per-head packed operands through
   `matmul_reg2` (GQA replication + 1/√hd folded into `head_pack`; `kv_expand`
   eliminated on this path) and `softmax_rows` (workgroup-per-row); gated on
-  `DeviceCaps::workgroup_reductions`. `flash_attn_bidir` measured ≈ naive here
-  (a memory escape hatch, as zimage's ledger says — not a fast path).
+  `DeviceCaps::workgroup_reductions`. **Superseded on 2026-08-04 by fused flash
+  attention — see the A/B below.**
 - All parity/equivalence gates re-run green after each step (cosine 1.000000).
 - FLOP accounting landed (`brain flops`, `Gpu::cost_of`/`ops_counters`): 100%
   pipeline coverage for qwen/gpt/lfm at merge; the GEMM-attention pack kernels
@@ -165,6 +167,71 @@ the CPU forward; GPU scaling fits isolated the same t² term):
   for K=64 shapes and conv/permute fusion. 350M re-measure and a chunked-regime
   builder for `brain flops` (the materialized build OOMs at --block 8192) are
   follow-ups.
+
+### Attention A/B: flash vs GEMM at 8k (2026-08-04) — **flash wins ~4×**
+
+The open item "`flash_attn_bidir` autoselect" is **closed, measured**. It had
+been left open behind a WRONG conclusion: the earlier "flash measured ≈ naive
+here" was taken against `flash_attn_bidir`, the **baseline** kernel, whose
+per-thread `var<function> q[128]`/`o[128]` arrays fall out of registers and run
+at local-memory bandwidth. `flash_attn_bidir_split` computes the same thing to
+cosine 1.0000000000 and is a different kernel entirely at `head_dim = 64` —
+which is exactly lfm's config.
+
+Harness: `crates/lfm/src/bin/lfm_attn_ab.rs`
+(`cargo run --release -p brain-lfm --bin lfm_attn_ab -- [T] [reps]`). It drives
+`model::block` directly at the real shape (`lfm25_encoder_350m`: d_model 1024,
+16 heads, 8 kv heads, head_dim 64, chunk 1024 — the chunk `caps::SLAB_BUDGET`
+picks at T=8192), best-of-5, fp32, single Tesla P40. The flash rows **include**
+the three `kv_expand` dispatches that build the fused `[q | k_exp | v_exp]`
+slab, which the GEMM path does not need — so the comparison is like-for-like
+and not flattered.
+
+| path | T=8192 | GFLOP/s | % P40 peak | vs GEMM | T=4096 | vs GEMM |
+|---|---|---|---|---|---|---|
+| `gemm_bidir_fwd` (was) | 1185.10 ms | 232 | 1.97 % | 1.00× | 258.63 ms | 1.00× |
+| `kv_expand` + `flash_bidir_split` | **274.17 ms** | **1003** | **8.53 %** | **4.32×** | **68.35 ms** | **3.78×** |
+| `kv_expand` + `flash_bidir` (baseline) | 3722.48 ms | 74 | 0.63 % | 0.32× | 949.81 ms | 0.27× |
+| `kv_expand` alone | 1.07 ms | — | — | — | 0.86 ms | — |
+
+At T=4096 the split kernel is 3.78× and at T=2048 3.88× (65.88 ms → 16.99 ms);
+its GFLOP/s is flat at ~1005 across all three lengths while the GEMM path's
+falls with T, which is why the gap widens with context.
+
+Agreement on the same inputs: GEMM vs split **cosine 1.0000000000**, max_abs
+1.9e-6; baseline vs split cosine 1.0000000000, max_abs 2.3e-6.
+
+**Independently re-measured three times, and the ratio is not stable — the two
+absolute numbers are.** Same box, same binary, `BRAIN_DEVICE=gpu1`, best-of-5:
+
+| run | `gemm_bidir_fwd` | `flash_bidir_split` | ratio |
+|---|---|---|---|
+| the port | 1185.10 ms | 274.17 ms | 4.32× |
+| adversarial re-run | 1194.77 ms | 274.73 ms | 4.35× |
+| integration re-run | **1090.09 ms** | **274.68 ms** | **3.97×** |
+
+The split kernel reproduces to **0.2 %** across all three; the GEMM baseline
+swings **9 %**, and the whole spread in the headline ratio comes from it. So the
+defensible claim is **"about 4× (measured 3.97–4.35×)"**, not "4.32×", and the
+`flash_bidir_split` wall-time of **~274.7 ms at T=8192** is the number to quote.
+The direction is never in doubt: the smallest observed win is still 3.97×, and
+the baseline flash kernel is 0.29–0.32× — i.e. 3.1–3.4× *slower* than GEMM — in
+every run.
+
+Note the bottom row: the **baseline** flash kernel is 3.1× SLOWER than the GEMM
+path. That is the number the old ledger entry was really reporting, and it is
+why the wiring gate in `model.rs` is *"`flash_bidir_variant` resolves to the
+SPLIT kernel"* and not *"the device is cooperative"* — on a device that can only
+run the 64-thread baseline, `gemm_bidir_fwd` is still the right choice and is
+kept.
+
+Wired: `crates/lfm/src/model.rs` registers `flash_attn_bidir_split` (slot 56),
+`Lfm::flash_selectable` is the gate, and the chunked forward re-enables the
+three `kv_expand` dispatches (`emit_attn_qkv(build_fused = true)`) that the GEMM
+path skipped. Follow-up not taken here: with flash selected, the chunked
+regime's `[H, chunk, T]` `scores`/`probs` slabs (536 MiB **each** at 8k) are
+allocated and never written — freeing ~1 GiB of VRAM needs a change to
+`Regime::Chunked`'s allocation, which the probe/`fill-mask` paths also read.
 
 ### NPU measured — Intel "AI Boost" (Core Ultra) via OpenVINO (2026-07-29)
 
@@ -245,18 +312,25 @@ int4 263 s. Small buckets compile in seconds (1024 ~13–36 s, 4096 ~163 s).
   numbers; the benchmark **selectable per model and runnable standalone**
   (`brain perf run serve --target lfm:…` / `make perf/lfm`) inside the brain
   perf suite; concurrency ladder on this hardware, then optimize from the
-  evidence (flash_attn_bidir autoselect, batching policy); NPU PerfTarget
+  evidence (flash_attn_bidir autoselect — **done 2026-08-04, ~4×**; batching
+  policy); NPU PerfTarget
   prepared for the Ultra box. Deliverable: model × device × concurrency table
   at `--input 8192`.
 
 ## Known gaps / caveats
 
-- `tests/chunked_equiv.rs::chunked_matches_materialized` FAILS on a real GPU
+- ~~`tests/chunked_equiv.rs::chunked_matches_materialized` FAILS on a real GPU
   (P40, wgpu): a bind-group buffer offset of 3200 B violates the device's
-  `min_storage_buffer_offset_alignment` of 256 — the chunked-attention path binds
-  at a row offset that is not 256-aligned. Pre-existing (verified on a clean
-  tree, 2026-07-29); passes on the CPU backend. Fix: align chunk-row offsets to
-  the device limit (pad or copy) wherever the chunked path binds mid-buffer.
+  `min_storage_buffer_offset_alignment` of 256.~~ **FIXED as a side effect of
+  wiring flash attention (2026-08-04).** The offending mid-buffer binds were
+  `gemm_bidir_fwd`'s per-head/per-chunk pack slices; `flash_bidir_fwd` binds only
+  at span starts (`row0 · stride`), which are whole-sample offsets and therefore
+  256-aligned by construction. Measured on gpu1: `hidden max|Δ| = 7.15e-7`,
+  `test chunked_matches_materialized ... ok`.
+  **The underlying defect is NOT fixed** — it is only no longer on the selected
+  path. A device that can run only the 64-thread baseline flash kernel still
+  falls back to `gemm_bidir_fwd` and will still hit it. Aligning the chunk-row
+  offsets (pad or copy) remains owed.
 
 - Unmasked padding is unsound (bidirectional) — exact-length builds only.
 - Ragged batching not yet wired (conv mixer needs equal-length rows; spans
