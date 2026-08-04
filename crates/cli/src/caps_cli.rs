@@ -33,6 +33,8 @@ fn static_manifests() -> Vec<Manifest> {
         depth::caps::manifest(),
         sam2::caps::manifest(),
         facenet::caps::manifest(),
+        vqgan::caps::manifest(),
+        restore::caps::manifest(),
         tts::caps::manifest(),
         imageops::manifest(),
         DemoModel.manifest(),
@@ -65,6 +67,12 @@ fn build_registry(model: &str) -> Result<Registry, String> {
         )),
         facenet::caps::MODEL => reg.register(Arc::new(
             facenet::caps::FacenetProvider::from_env().ok_or("set BRAIN_FACENET_DIR to an antelopev2 directory holding glintr100.onnx + scrfd_10g_bnkps.onnx")?,
+        )),
+        vqgan::caps::MODEL => reg.register(Arc::new(
+            vqgan::caps::VqganProvider::from_env().ok_or("set BRAIN_VQGAN_WEIGHTS to an existing VQGAN checkpoint (or its directory)")?,
+        )),
+        restore::caps::MODEL => reg.register(Arc::new(
+            restore::caps::RestoreProvider::from_env().ok_or("set BRAIN_RESTORE_WEIGHTS to an existing codeformer.pth (or its directory)")?,
         )),
         tts::caps::MODEL => reg.register(Arc::new(tts::caps::TtsProvider::new())),
         other => return Err(format!("unknown model '{other}' (see `brain caps`)")),

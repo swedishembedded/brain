@@ -25,9 +25,14 @@
 //!
 //! Scope today: **forward only**, parity-gated per stage against
 //! `tools/codeformer_restore_dump_reference.py` goldens at several `w`
-//! including both endpoints. Backward/gradcheck and the serving contract are
-//! follow-ups.
+//! including both endpoints. Backward/gradcheck are follow-ups.
+//!
+//! The serving contract is met by [`caps`] (the `restore_face`
+//! `capability::Provider`), `crates/cli/src/resident_restore.rs` (the residency
+//! adapter, `BRAIN_RESTORE_WEIGHTS`) and `examples/restore/` — see
+//! `docs/serving-contract.md`.
 
+pub mod caps;
 pub mod config;
 pub mod import;
 pub mod model;

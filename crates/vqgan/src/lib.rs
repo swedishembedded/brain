@@ -24,8 +24,14 @@
 //! an SSA forward, a hand-written reverse over `vae::blocks::grad`, and the VQ
 //! straight-through estimator, gated by `gradcheck::check_vqgan`. The
 //! CodeFormer transformer / controllable feature transformation / fidelity dial
-//! and the serving contract are follow-up workstreams.
+//! are `crates/restore`.
+//!
+//! The serving contract is met by [`caps`] (the `encode`/`decode`
+//! `capability::Provider`), `crates/cli/src/resident_restore.rs` (the residency
+//! adapter, `BRAIN_VQGAN_WEIGHTS`) and `examples/restore/` — see
+//! `docs/serving-contract.md`.
 
+pub mod caps;
 pub mod config;
 pub mod import;
 pub mod model;

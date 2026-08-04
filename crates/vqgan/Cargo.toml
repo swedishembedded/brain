@@ -15,6 +15,11 @@ brain-kernels.workspace = true
 brain-vae.workspace = true
 brain-wm-core.workspace = true
 brain-checkpoint.workspace = true
+brain-imaging.workspace = true
+# `caps.rs` — the serving contract's capability surface (`docs/serving-contract.md`).
+brain-capability.workspace = true
+serde_json.workspace = true
+
 # Everything above is ALSO what the parity test needs, and cargo already links
 # every [dependencies] entry into tests/ — so this is the one genuinely
 # test-only addition, not a second [dependencies] section.
