@@ -20,3 +20,7 @@ brain-diffusion.workspace = true
 brain-clip.workspace = true
 brain-t5.workspace = true
 brain-imaging.workspace = true
+bytemuck.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

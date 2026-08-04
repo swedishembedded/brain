@@ -774,6 +774,8 @@ dependencies = [
  "brain-model",
  "brain-t5",
  "brain-vae",
+ "bytemuck",
+ "serde_json",
 ]
 
 [[package]]
@@ -1177,6 +1179,7 @@ dependencies = [
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-vae",
  "brain-vision",
  "brain-vqgan",
 ]
@@ -1288,6 +1291,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
+ "brain-paramstore",
 ]
 
 [[package]]
