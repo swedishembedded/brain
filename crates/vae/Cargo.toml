@@ -13,6 +13,10 @@ path = "src/lib.rs"
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
+# `blocks::grad` dispatches the bidirectional-attention backward through
+# `model::block::bidir_bwd` — the one implementation of that quartet. No cycle:
+# `brain-model` does not depend on `brain-vae`.
+brain-model.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

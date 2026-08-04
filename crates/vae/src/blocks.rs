@@ -32,6 +32,8 @@
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use std::collections::HashMap;
 
+pub mod grad;
+
 // Kernel-table indices (order matches KERNELS).
 const K_CONV: usize = 0;
 const K_GN_STATS: usize = 1;
@@ -48,6 +50,12 @@ const K_GN_STATS_WG: usize = 11;
 const K_MATMUL: usize = 12;
 const K_IM2COL_AT: usize = 13;
 const K_NLC_BIAS_NCHW: usize = 14;
+
+/// The `add2` slot inside [`KERNELS`]. Public for the same reason
+/// [`grad::BwdIds::axpy`] is: a caller stitching extra graph onto these blocks
+/// must reuse this pipeline rather than register a second `add2`, which the CPU
+/// backend's JIT rejects as a duplicate definition.
+pub const ADD2_SLOT: usize = K_ADD2;
 
 /// The block builder's kernel set, in slot order. Public so a profiler can name
 /// the kernel behind each recorded [`Step`] (`flux2_bench vae`), and so a crate
@@ -75,6 +83,37 @@ pub const KERNELS: [(&str, &str); 15] = [
 /// with [`kernels_with`] — i.e. `KERNELS.len()`. A `Builder` addresses slots
 /// `0..NEXT_SLOT`, so a caller's own kernels must start here.
 pub const NEXT_SLOT: usize = KERNELS.len();
+
+/// The backward kernels the reverse walk of a train-mode [`Builder`] dispatches,
+/// in [`grad::BwdIds`] order. A crate that trains these blocks appends this
+/// block to its kernel set and hands `grad::BwdIds::at(base)` to
+/// [`grad::Trace::backward`] — the same "ids struct at a caller-chosen base"
+/// shape `model::block::BidirIds` uses, so the shared blocks never assume a
+/// slot layout their user did not pick.
+///
+/// Everything here is barrier-free and gather-based: one invocation per element
+/// of the buffer it writes. The two per-channel reductions (`gn_dgamma` /
+/// `gn_dbeta`, C invocations each) and the per-group `gn_dsum` (N*G) have no
+/// cooperative twin anywhere in the tree — that is the documented §C.2 perf gap
+/// in `docs/kernel-checklist.md`, NOT a correctness gate, because none of them
+/// uses `workgroupBarrier()` and all three are exact on `backend-cpu`.
+pub const BWD_KERNELS: [(&str, &str); 15] = [
+    ("conv2d_dx", kernels::CONV2D_DX),
+    ("conv2d_dw", kernels::CONV2D_DW),
+    ("bias_grad", kernels::BIAS_GRAD),
+    ("silu_bwd", kernels::SILU_BWD),
+    ("scale_chan", kernels::SCALE_CHAN),
+    ("gn_dsum", kernels::GN_DSUM),
+    ("gn_dx", kernels::GN_DX),
+    ("gn_dgamma", kernels::GN_DGAMMA),
+    ("gn_dbeta", kernels::GN_DBETA),
+    ("upsample2_dx", kernels::UPSAMPLE2_DX),
+    ("axpy", kernels::AXPY),
+    ("attn_bwd_dscores_bidir", kernels::ATTN_BWD_DSCORES_BIDIR),
+    ("attn_bwd_dv_bidir", kernels::ATTN_BWD_DV_BIDIR),
+    ("attn_bwd_dq_bidir", kernels::ATTN_BWD_DQ_BIDIR),
+    ("attn_bwd_dk_bidir", kernels::ATTN_BWD_DK_BIDIR),
+];
 
 /// Copy [`KERNELS`] into the front of a fixed-size kernel set whose remaining
 /// slots the caller fills, so a crate that needs the shared blocks **and** its
@@ -147,6 +186,53 @@ impl BlockNames {
     }
 }
 
+/// One recorded forward stage, with exactly the buffers its adjoint reads.
+///
+/// Recorded only in **train mode** ([`Builder::set_train`]); the tape is what
+/// `blocks::grad` walks in reverse. Every variant names its output `y` — the
+/// reverse walk looks `y` up in the gradient map and skips the op when nothing
+/// downstream consumed it.
+#[derive(Clone)]
+pub(crate) enum Op {
+    /// Direct-lowered conv + bias. `w`/`b` are ParamStore-style tensor names.
+    Conv {
+        w: String,
+        b: String,
+        cin: u32,
+        cout: u32,
+        k: u32,
+        stride: u32,
+        pad: u32,
+        h: u32,
+        w_in: u32,
+        ho: u32,
+        wo: u32,
+        x: DeviceBuffer,
+        y: DeviceBuffer,
+    },
+    /// GroupNorm with the fused `gb[2C]` parameter and its retained `stats[2G]`.
+    Gn {
+        gb: String,
+        c: u32,
+        h: u32,
+        w: u32,
+        g: u32,
+        x: DeviceBuffer,
+        stats: DeviceBuffer,
+        y: DeviceBuffer,
+    },
+    Silu { n: u32, x: DeviceBuffer, y: DeviceBuffer },
+    Add2 { n: u32, a: DeviceBuffer, b: DeviceBuffer, y: DeviceBuffer },
+    /// Nearest-2x upsample; dims are the INPUT's.
+    Up2 { c: u32, h: u32, w: u32, x: DeviceBuffer, y: DeviceBuffer },
+    /// `[c,hw] -> [hw,c]` (its adjoint is `NlcNchw` and vice versa).
+    NchwNlc { c: u32, hw: u32, x: DeviceBuffer, y: DeviceBuffer },
+    NlcNchw { c: u32, hw: u32, x: DeviceBuffer, y: DeviceBuffer },
+    /// The bidirectional attention trio over the fused `qkv[t, 3c]` rows.
+    /// `probs` is the cached softmax slab; `y` is the context `[t, c]`.
+    Attn { c: u32, t: u32, qkv: DeviceBuffer, probs: DeviceBuffer, y: DeviceBuffer },
+}
+
 /// Graph-construction state (borrows the device + host tensors).
 pub struct Builder<'a> {
     gpu: &'a Gpu,
@@ -156,6 +242,21 @@ pub struct Builder<'a> {
     names: BlockNames,
     steps: Vec<Step>,
     taps: Vec<(String, DeviceBuffer, usize)>,
+    /// Train mode: record the [`Op`] tape, keep every activation alive (the
+    /// pool is disabled, so the forward is SSA and doubles as the backprop
+    /// cache), and pin the **direct** conv/attention lowerings — those are the
+    /// ones whose adjoints exist (`conv2d_dx`/`conv2d_dw` and the
+    /// `attn_bwd_*_bidir` quartet). The `im2col_at + matmul_reg3` conv lowering
+    /// would need a `col2im` that does not exist, and the GEMM attention path
+    /// folds `1/sqrt(C)` into the q weights, which changes what `qkv.w`'s
+    /// gradient means. Selection, not a second block implementation.
+    train: bool,
+    tape: Vec<Op>,
+    /// Every weight buffer this builder uploaded, by tensor name, in first-use
+    /// order. Memoized so one tensor is one device buffer (and therefore one
+    /// gradient buffer) however many times a block asks for it.
+    wmemo: HashMap<String, DeviceBuffer>,
+    worder: Vec<(String, u64)>,
     /// Free-list of activation buffers keyed by exact length (words). An `act(len)`
     /// reuses a buffer of the same length whose last read is already recorded, so
     /// the resident peak is the max *concurrently-live* activation set instead of
@@ -217,11 +318,29 @@ impl<'a> Builder<'a> {
             names,
             steps: Vec::new(),
             taps: Vec::new(),
+            train: false,
+            tape: Vec::new(),
+            wmemo: HashMap::new(),
+            worder: Vec::new(),
             pool: HashMap::new(),
             taps_on,
             coop: gpu.caps().workgroup_reductions,
             col: None,
         }
+    }
+
+    /// Record the reverse-mode tape (see [`Builder::train`]). Set this BEFORE
+    /// recording any block — it changes both what is kept and which lowering
+    /// each block picks.
+    pub fn set_train(&mut self, on: bool) {
+        assert!(self.steps.is_empty(), "vae::blocks: set_train must precede the first block");
+        self.train = on;
+    }
+
+    /// The recorded forward tape + weight buffers, for [`grad::Trace::backward`].
+    /// Empty unless [`Builder::set_train`] was called.
+    pub fn trace(&self) -> grad::Trace {
+        grad::Trace::new(self.tape.clone(), self.worder.clone(), &self.wmemo)
     }
 
     /// The device the graph is being recorded on.
@@ -236,6 +355,16 @@ impl<'a> Builder<'a> {
 
     /// Append a caller-recorded step (for kernels outside the shared blocks —
     /// e.g. `vqgan`'s codebook assignment). Ordering is the caller's.
+    ///
+    /// **Records no [`Op`].** On a [`Builder::set_train`] builder that makes the
+    /// step invisible to [`grad::Trace::backward`], which walks the tape and
+    /// silently skips any producer whose output no consumer claimed — so a
+    /// pushed step in the middle of a differentiated chain breaks the chain and
+    /// every parameter upstream of it gets a **zero** gradient with no error.
+    /// Either keep pushed steps outside the differentiated subgraph (record them
+    /// on a separate non-train `Builder`, as `vqgan::train` does for the
+    /// codebook assignment and gather), or stitch their adjoint on by hand
+    /// around `Trace::backward`, as `vqgan::train` does for the quantiser seam.
     pub fn push_step(&mut self, step: Step) {
         self.steps.push(step);
     }
@@ -258,9 +387,41 @@ impl<'a> Builder<'a> {
         self.t.get(name).unwrap_or_else(|| panic!("vae::blocks: missing tensor {name}"))
     }
 
-    /// Upload a host tensor to the device by name.
-    pub fn dev(&self, name: &str) -> DeviceBuffer {
-        self.gpu.storage_init(name, &self.get(name).1)
+    /// Upload a host tensor to the device by name (memoized: one tensor is one
+    /// device buffer, so a training build has exactly one gradient buffer per
+    /// tensor however many blocks read it).
+    pub fn dev(&mut self, name: &str) -> DeviceBuffer {
+        if let Some(b) = self.wmemo.get(name) {
+            return b.clone();
+        }
+        let gpu = self.gpu;
+        let (buf, n) = {
+            let data = &self.get(name).1;
+            (gpu.storage_init(name, data), data.len() as u64)
+        };
+        self.remember(name, buf, n)
+    }
+
+    /// Upload host data the builder synthesised (a fused `gamma|beta` or
+    /// `q|k|v`) under a name of its own, memoized like [`Builder::dev`]. That
+    /// fused buffer is the trainable tensor: `gn_dgamma`/`gn_dbeta` write the
+    /// matching fused `dgb[2C]`, and one `conv2d_dw` covers the fused qkv.
+    fn dev_fused(&mut self, name: &str, data: &[f32]) -> DeviceBuffer {
+        if let Some(b) = self.wmemo.get(name) {
+            return b.clone();
+        }
+        let buf = self.gpu.storage_init(name, data);
+        self.remember(name, buf, data.len() as u64)
+    }
+
+    fn remember(&mut self, name: &str, buf: DeviceBuffer, n: u64) -> DeviceBuffer {
+        match self.wmemo.entry(name.to_string()) {
+            std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                self.worder.push((name.to_string(), n));
+                e.insert(buf).clone()
+            }
+        }
     }
 
     /// Allocate an activation buffer of `len` words, reusing a same-length freed
@@ -276,7 +437,9 @@ impl<'a> Builder<'a> {
     /// the buffer's last read step has been pushed (else a later reuse would clobber
     /// data a pending step still needs). No-op when pooling is disabled.
     pub fn free(&mut self, len: u64, buf: DeviceBuffer) {
-        if !self.taps_on {
+        // Train mode keeps every activation: the forward buffer IS the backprop
+        // cache, so reuse would silently overwrite a cached stage.
+        if !self.taps_on && !self.train {
             self.pool.entry(len).or_default().push(buf);
         }
     }
@@ -363,12 +526,16 @@ impl<'a> Builder<'a> {
         wo: u32,
         x: &DeviceBuffer,
     ) -> DeviceBuffer {
-        let wgt = self.dev(&format!("{prefix}.weight"));
-        let bias = self.dev(&format!("{prefix}.bias"));
-        let y = self.act((cout * ho * wo) as u64);
+        let (wn, bn) = (format!("{prefix}.weight"), format!("{prefix}.bias"));
+        let wgt = self.dev(&wn);
+        let bias = self.dev(&bn);
         let hw = ho * wo;
         let cinkk = cin * k * k;
-        if self.coop && cout >= GEMM_CONV_MIN_COUT && hw >= 128 {
+        if self.train || !(self.coop && cout >= GEMM_CONV_MIN_COUT && hw >= 128) {
+            return self.conv_direct(wn, bn, &wgt, &bias, cin, cout, k, stride, pad, h, w, ho, wo, x);
+        }
+        let y = self.act((cout * ho * wo) as u64);
+        {
             // Positions per GEMM: a multiple of the 128-row tile, inside the
             // scratch budget, at least one tile.
             let budget = col_budget_floats();
@@ -400,14 +567,56 @@ impl<'a> Builder<'a> {
                 cout.div_ceil(64) * hw.div_ceil(64) * 64,
             ));
             self.free((hw * cout) as u64, nhwc);
-        } else {
-            let threads = cout.div_ceil(8) * hw.div_ceil(4);
-            self.steps.push(self.gpu.step(
-                K_CONV,
-                &[x, &wgt, &bias, &y],
-                &[1, cin, h, w, cout, k, stride, pad, ho, wo],
-                threads,
-            ));
+        }
+        y
+    }
+
+    /// The direct (`conv_bias_reg`) lowering over already-uploaded weight/bias
+    /// buffers, recording an [`Op::Conv`] in train mode. Split out of
+    /// [`Builder::conv_s`] so the fused qkv projection inside [`Builder::attn`]
+    /// dispatches and back-propagates through the same one implementation.
+    #[allow(clippy::too_many_arguments)]
+    fn conv_direct(
+        &mut self,
+        wn: String,
+        bn: String,
+        wgt: &DeviceBuffer,
+        bias: &DeviceBuffer,
+        cin: u32,
+        cout: u32,
+        k: u32,
+        stride: u32,
+        pad: u32,
+        h: u32,
+        w: u32,
+        ho: u32,
+        wo: u32,
+        x: &DeviceBuffer,
+    ) -> DeviceBuffer {
+        let y = self.act((cout * ho * wo) as u64);
+        let threads = cout.div_ceil(8) * (ho * wo).div_ceil(4);
+        self.steps.push(self.gpu.step(
+            K_CONV,
+            &[x, wgt, bias, &y],
+            &[1, cin, h, w, cout, k, stride, pad, ho, wo],
+            threads,
+        ));
+        if self.train {
+            self.tape.push(Op::Conv {
+                w: wn,
+                b: bn,
+                cin,
+                cout,
+                k,
+                stride,
+                pad,
+                h,
+                w_in: w,
+                ho,
+                wo,
+                x: x.clone(),
+                y: y.clone(),
+            });
         }
         y
     }
@@ -419,7 +628,8 @@ impl<'a> Builder<'a> {
         let (_, beta) = self.get(&format!("{prefix}.bias"));
         let mut gbv = gamma.clone();
         gbv.extend_from_slice(beta);
-        let gb = self.gpu.storage_init(&format!("{prefix}.gb"), &gbv);
+        let gbn = format!("{prefix}.gb");
+        let gb = self.dev_fused(&gbn, &gbv);
         let g = self.groups;
         let stats = self.act(2 * g as u64);
         let y = self.act((c * h * w) as u64);
@@ -450,6 +660,20 @@ impl<'a> Builder<'a> {
             &[1, c, h, w, g],
             c * h * w,
         ));
+        if self.train {
+            // `stats` is NOT freed in train mode (the pool is off): gn_dsum and
+            // gn_dgamma both read it back.
+            self.tape.push(Op::Gn {
+                gb: gbn,
+                c,
+                h,
+                w,
+                g,
+                x: x.clone(),
+                stats: stats.clone(),
+                y: y.clone(),
+            });
+        }
         self.free(2 * g as u64, stats); // last read was GN_APPLY above
         y
     }
@@ -458,6 +682,9 @@ impl<'a> Builder<'a> {
     pub fn silu(&mut self, n: u32, x: &DeviceBuffer) -> DeviceBuffer {
         let y = self.act(n as u64);
         self.steps.push(self.gpu.step(K_SILU, &[x, &y], &[n], n));
+        if self.train {
+            self.tape.push(Op::Silu { n, x: x.clone(), y: y.clone() });
+        }
         y
     }
 
@@ -465,6 +692,9 @@ impl<'a> Builder<'a> {
     pub fn add(&mut self, n: u32, a: &DeviceBuffer, b: &DeviceBuffer) -> DeviceBuffer {
         let y = self.act(n as u64);
         self.steps.push(self.gpu.step(K_ADD2, &[a, b, &y], &[n], n));
+        if self.train {
+            self.tape.push(Op::Add2 { n, a: a.clone(), b: b.clone(), y: y.clone() });
+        }
         y
     }
 
@@ -472,6 +702,9 @@ impl<'a> Builder<'a> {
     pub fn upsample(&mut self, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
         let y = self.act((c * 2 * h * 2 * w) as u64);
         self.steps.push(self.gpu.step(K_UPSAMPLE2, &[x, &y], &[1, c, h, w], c * 4 * h * w));
+        if self.train {
+            self.tape.push(Op::Up2 { c, h, w, x: x.clone(), y: y.clone() });
+        }
         y
     }
 
@@ -564,9 +797,14 @@ impl<'a> Builder<'a> {
         // fold it into `q` instead. `q = (Wx+b)/√C = (W/√C)x + b/√C`
         // exactly; only the fp32 rounding of the two orders differs (≈1 ulp on
         // a score of O(1), invisible through the softmax).
+        //
+        // Train mode takes the per-element trio (its adjoints are the shipped
+        // `attn_bwd_*_bidir` quartet), so the fold must be off there too — a
+        // folded `qkv.w` would make the reported gradient that of `W/√C`.
+        let gemm_attn = self.coop && !self.train;
         let qn = qw.len();
         let qbn = qb.len();
-        if self.coop {
+        if gemm_attn {
             let sc = 1.0f32 / (c as f32).sqrt();
             for v in qkv_w[..qn].iter_mut() {
                 *v *= sc;
@@ -575,20 +813,16 @@ impl<'a> Builder<'a> {
                 *v *= sc;
             }
         }
-        let qkv_wd = self.gpu.storage_init(&format!("{prefix}.qkv.w"), &qkv_w);
-        let qkv_bd = self.gpu.storage_init(&format!("{prefix}.qkv.b"), &qkv_b);
+        let (wn, bn) = (format!("{prefix}.qkv.w"), format!("{prefix}.qkv.b"));
+        let qkv_wd = self.dev_fused(&wn, &qkv_w);
+        let qkv_bd = self.dev_fused(&bn, &qkv_b);
 
         // qkv 1×1 conv: [C,h,w] → [3C,h,w].
-        let qkv_chw = self.act((3 * c * t) as u64);
-        self.steps.push(self.gpu.step(
-            K_CONV,
-            &[&normed, &qkv_wd, &qkv_bd, &qkv_chw],
-            &[1, c, h, w, 3 * c, 1, 1, 0, h, w],
-            (3 * c).div_ceil(8) * t.div_ceil(4),
-        ));
+        let qkv_chw =
+            self.conv_direct(wn, bn, &qkv_wd, &qkv_bd, c, 3 * c, 1, 1, 0, h, w, h, w, &normed);
         self.free((c * t) as u64, normed); // last read was the qkv conv
 
-        let attn_rows = if self.coop {
+        let attn_rows = if gemm_attn {
             // ---- attention as two GEMMs -----------------------------------
             // The per-element trio gives one thread per (i,j) score, each
             // looping head_dim with its `k` reads a whole row apart: at the
@@ -640,8 +874,7 @@ impl<'a> Builder<'a> {
             rows
         } else {
             // NCHW [3C,h,w] → NLC rows [T, 3C].
-            let qkv = self.act((3 * c * t) as u64);
-            self.steps.push(self.gpu.step(K_NCHW_NLC, &[&qkv_chw, &qkv], &[3 * c * t, 3 * c, t], 3 * c * t));
+            let qkv = self.nchw_to_rows(3 * c, t, &qkv_chw);
             self.free((3 * c * t) as u64, qkv_chw);
 
             // Single head, head_dim = C, scale 1/√C (applied in the kernel).
@@ -662,13 +895,23 @@ impl<'a> Builder<'a> {
                 &[1, 1, t, c, 3 * c, 2 * c, c],
                 t * c,
             ));
+            if self.train {
+                // `probs` and `qkv` stay live: `attn_bwd_dscores_bidir` /
+                // `_dv` / `_dq` / `_dk` read both back (no softmax recompute).
+                self.tape.push(Op::Attn {
+                    c,
+                    t,
+                    qkv: qkv.clone(),
+                    probs: probs.clone(),
+                    y: rows.clone(),
+                });
+            }
             self.free((t * t) as u64, probs);
             self.free((3 * c * t) as u64, qkv);
             rows
         };
         // NLC rows [T, C] → NCHW [C,h,w].
-        let attn_chw = self.act((c * t) as u64);
-        self.steps.push(self.gpu.step(K_NLC_NCHW, &[&attn_rows, &attn_chw], &[c * t, c, t], c * t));
+        let attn_chw = self.rows_to_nchw(c, t, &attn_rows);
         self.free((t * c) as u64, attn_rows);
 
         let proj = self.conv(&format!("{prefix}.{nproj}"), c, c, 1, 0, h, w, &attn_chw);
@@ -686,6 +929,9 @@ impl<'a> Builder<'a> {
     pub fn nchw_to_rows(&mut self, c: u32, hw: u32, x: &DeviceBuffer) -> DeviceBuffer {
         let y = self.act((c * hw) as u64);
         self.steps.push(self.gpu.step(K_NCHW_NLC, &[x, &y], &[c * hw, c, hw], c * hw));
+        if self.train {
+            self.tape.push(Op::NchwNlc { c, hw, x: x.clone(), y: y.clone() });
+        }
         y
     }
 
@@ -694,6 +940,9 @@ impl<'a> Builder<'a> {
     pub fn rows_to_nchw(&mut self, c: u32, hw: u32, x: &DeviceBuffer) -> DeviceBuffer {
         let y = self.act((c * hw) as u64);
         self.steps.push(self.gpu.step(K_NLC_NCHW, &[x, &y], &[c * hw, c, hw], c * hw));
+        if self.train {
+            self.tape.push(Op::NlcNchw { c, hw, x: x.clone(), y: y.clone() });
+        }
         y
     }
 }

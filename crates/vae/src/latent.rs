@@ -27,7 +27,7 @@ pub fn pack(
     eps: f32,
 ) -> Vec<f32> {
     assert_eq!(mean.len(), c * h * w, "pack: mean len != c*h*w");
-    assert!(h % 2 == 0 && w % 2 == 0, "pack: h/w must be even ({h}x{w})");
+    assert!(h.is_multiple_of(2) && w.is_multiple_of(2), "pack: h/w must be even ({h}x{w})");
     assert_eq!(bn_mean.len(), 4 * c, "pack: bn_mean len != 4c");
     assert_eq!(bn_var.len(), 4 * c, "pack: bn_var len != 4c");
     let (oh, ow) = (h / 2, w / 2);
@@ -63,7 +63,7 @@ pub fn unpack(
     bn_var: &[f32],
     eps: f32,
 ) -> Vec<f32> {
-    assert!(h % 2 == 0 && w % 2 == 0, "unpack: h/w must be even ({h}x{w})");
+    assert!(h.is_multiple_of(2) && w.is_multiple_of(2), "unpack: h/w must be even ({h}x{w})");
     let (oh, ow) = (h / 2, w / 2);
     assert_eq!(z.len(), 4 * c * oh * ow, "unpack: z len != 4c*(h/2)*(w/2)");
     assert_eq!(bn_mean.len(), 4 * c, "unpack: bn_mean len != 4c");
