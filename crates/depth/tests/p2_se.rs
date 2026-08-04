@@ -2,17 +2,12 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! P2: `ChannelAttention` (squeeze-and-excitation) — stage3's gate.
+use data::rng::Lcg;
 use std::collections::HashMap;
 use depth::blocks::ChannelAttention;
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 use vision::{Ctx, Shape};
-
-fn lcg(s: &mut u64) -> f32 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-}
-fn rv(seed: u64, n: usize) -> Vec<f32> { let mut s = seed; (0..n).map(|_| lcg(&mut s)).collect() }
 
 fn fixture(shape: Shape, seed: u64) -> (Gpu, ParamStore, Vec<f32>) {
     let gpu = Gpu::new_cpu(depth::net::PIPELINES);
@@ -21,10 +16,10 @@ fn fixture(shape: Shape, seed: u64) -> (Gpu, ParamStore, Vec<f32>) {
     let params = probe.param_list();
     let mut init: HashMap<String, Vec<f32>> = HashMap::new();
     for (i, (n, numel)) in params.iter().enumerate() {
-        init.insert(n.clone(), rv(seed ^ i as u64, *numel).iter().map(|v| 0.4 * v).collect());
+        init.insert(n.clone(), Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 0.4 * v).collect());
     }
     let ps = ParamStore::new(&gpu, params, &init);
-    (gpu, ps, rv(seed ^ 0xF, shape.numel() as usize))
+    (gpu, ps, Lcg::new(seed ^ 0xF).vec(shape.numel() as usize))
 }
 
 /// `hidden = max(dim/8, 4)`, and both convs are BIAS-FREE with no BatchNorm.
@@ -81,7 +76,7 @@ fn se_backward_matches_finite_differences() {
         let ctx = Ctx::new(&gpu, depth::net::ids());
         let se = ChannelAttention::new(&ctx, "se", shape);
         let tot = shape.numel() as usize;
-        let r = rv(55, tot);
+        let r = Lcg::new(55).vec(tot);
 
         let xb = gpu.storage_init("x", &x);
         se.forward(&ctx, &ps, &xb);
@@ -101,7 +96,7 @@ fn se_backward_matches_finite_differences() {
         for wname in ["se.fc.0.weight", "se.fc.2.weight"] {
             let g = gpu.read(ps.g(wname), ps.numel(wname));
             let n = g.len();
-            let dir: Vec<f32> = rv(7, n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+            let dir: Vec<f32> = Lcg::new(7).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
             let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
             let w0 = gpu.read(ps.w(wname), n);
             let eps = 5e-4f32;
@@ -121,7 +116,7 @@ fn se_backward_matches_finite_differences() {
         // ...and d_in, which sums TWO paths (the pool and the multiply). A missing
         // path here is the classic SE bug and the weight grads would not catch it.
         let dg = gpu.read(&d_in, tot);
-        let dir: Vec<f32> = rv(8, tot).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(8).vec(tot).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = dg.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let eps = 5e-4f32;
         let lp = {

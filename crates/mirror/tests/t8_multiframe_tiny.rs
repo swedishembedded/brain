@@ -12,19 +12,11 @@
 //!   * `dpt.rs` hardcoded the reference's 32-channel `output_conv2.0` where
 //!     `param_list` says `feat/8`, so non-default configs read out of bounds.
 
+use data::rng::Lcg;
 use mirror::config::MirrorConfig;
 use mirror::gaussians::{assemble, AssembleOpts};
 use mirror::model::{Head, Mirror};
 use std::collections::HashMap;
-
-struct Lcg(u64);
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        (((self.0 >> 33) as f32 / (1u64 << 31) as f32) - 1.0) * 0.5
-    }
-}
-
 #[test]
 fn s3_forward_is_finite() {
     let cfg = MirrorConfig {
@@ -41,19 +33,19 @@ fn s3_forward_is_finite() {
         cam_blocks: 2,
         cam_params: 9,
     };
-    let mut r = Lcg(0x5EED);
+    let mut r = Lcg::new(0x5EED);
     let mut init: HashMap<String, Vec<f32>> = HashMap::new();
     for (name, shape) in cfg.param_list() {
         let n: usize = shape.iter().product();
         let vals: Vec<f32> = if name.ends_with("norm.weight") || name.contains("norm1.weight")
             || name.contains("norm2.weight") || name.contains("ls")
         {
-            (0..n).map(|_| 1.0 + 0.1 * r.next()).collect()
+            (0..n).map(|_| 1.0 + 0.1 * r.scaled(0.5)).collect()
         } else if name.contains("rope.periods") {
             (0..n).map(|i| 1.0 + i as f32).collect()
         } else {
             // small scale keeps the random-weight pyramid numerically tame
-            (0..n).map(|_| 0.05 * r.next()).collect()
+            (0..n).map(|_| 0.05 * r.scaled(0.5)).collect()
         };
         init.insert(name, vals);
     }
@@ -61,7 +53,7 @@ fn s3_forward_is_finite() {
     let s = 3usize;
     let (hp, wp) = (4usize, 4usize);
     let (h, w) = (hp * cfg.patch, wp * cfg.patch);
-    let frames: Vec<f32> = (0..s * 3 * h * w).map(|_| 0.5 + 0.4 * r.next()).collect();
+    let frames: Vec<f32> = (0..s * 3 * h * w).map(|_| 0.5 + 0.4 * r.scaled(0.5)).collect();
 
     let gpu = gpu_core::Gpu::new_cpu(mirror::model::PIPELINES);
     let mut model = Mirror::new(&gpu, cfg, &init, 0);

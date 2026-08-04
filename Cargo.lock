@@ -434,6 +434,7 @@ name = "brain-backend-cpu"
 version = "0.1.0"
 dependencies = [
  "brain-backend-api",
+ "brain-data",
  "brain-gpu-core",
  "brain-kernels",
  "brain-wgsl-cpu",
@@ -943,6 +944,7 @@ name = "brain-mirror"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
@@ -1374,6 +1376,7 @@ dependencies = [
 name = "brain-vision"
 version = "0.1.0"
 dependencies = [
+ "brain-data",
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
@@ -1436,6 +1439,7 @@ dependencies = [
 name = "brain-wm-core"
 version = "0.1.0"
 dependencies = [
+ "brain-data",
  "brain-gpu-core",
  "brain-kernels",
 ]

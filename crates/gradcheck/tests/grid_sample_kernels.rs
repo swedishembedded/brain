@@ -47,6 +47,7 @@
 //! O(Ho*Wo) per input element by construction — see grid_sample_dx.wgsl — so the
 //! shapes here are deliberately tiny, but the gate is honoured anyway).
 
+use data::rng::Lcg;
 use gpu_core::Gpu;
 
 static KERNELS: &[(&str, &str)] = &[
@@ -101,21 +102,13 @@ impl Shape {
 
 // ---- deterministic noise (never `rand`) -------------------------------------
 
-fn lcg(state: &mut u64) -> f32 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*state >> 33) as f32 / (1u64 << 31) as f32) - 1.0 // ~[-1,1)
-}
-fn randvec(seed: u64, n: usize) -> Vec<f32> {
-    let mut st = seed;
-    (0..n).map(|_| lcg(&mut st)).collect()
-}
 /// Grid values in ~[-1.3, 1.3): deliberately WIDER than the valid range so that
 /// roughly a third of the samples have one or more taps outside the frame. That
 /// is the `padding_mode='zeros'` path, and it is where a clamp-to-edge mistake
 /// lives.
 fn randgrid(seed: u64, n: usize) -> Vec<f32> {
-    let mut st = seed;
-    (0..n).map(|_| lcg(&mut st) * 1.3).collect()
+    let mut st = Lcg::new(seed);
+    (0..n).map(|_| st.signed() * 1.3).collect()
 }
 fn dot(a: &[f32], b: &[f32]) -> f64 {
     a.iter().zip(b).map(|(&x, &y)| x as f64 * y as f64).sum()
@@ -170,7 +163,7 @@ fn fwd_matches_reference_half_pixel() {
     }
     let s = Shape { n: 2, c: 3, h: 5, w: 7, ho: 4, wo: 6, align: false };
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let x = randvec(1, s.xn());
+    let x = Lcg::new(1).vec(s.xn());
     let grid = randgrid(2, s.gn());
     let y = run_fwd(&gpu, &s, &x, &grid);
     let r = gs_ref(&s, &x, &grid);
@@ -187,7 +180,7 @@ fn fwd_matches_reference_align_corners() {
     }
     let s = Shape { n: 2, c: 3, h: 5, w: 7, ho: 4, wo: 6, align: true };
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let x = randvec(3, s.xn());
+    let x = Lcg::new(3).vec(s.xn());
     let grid = randgrid(4, s.gn());
     let y = run_fwd(&gpu, &s, &x, &grid);
     let r = gs_ref(&s, &x, &grid);
@@ -257,7 +250,7 @@ fn channels_are_independent() {
     let s = Shape { n: 2, c: 4, h: 5, w: 6, ho: 3, wo: 3, align: false };
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let grid = randgrid(5, s.gn());
-    let x = randvec(6, s.xn());
+    let x = Lcg::new(6).vec(s.xn());
     let base = run_fwd(&gpu, &s, &x, &grid);
 
     let zc = 2usize;
@@ -297,14 +290,14 @@ fn zeros_padding_drops_out_of_bounds_taps() {
     }
     let s = Shape { n: 1, c: 2, h: 4, w: 4, ho: 2, wo: 2, align: false };
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let x = randvec(7, s.xn());
+    let x = Lcg::new(7).vec(s.xn());
     // Every sample is far outside [-1,1] in both axes.
     let grid: Vec<f32> = (0..s.gn()).map(|i| if i % 2 == 0 { -4.0 } else { 4.0 }).collect();
 
     let y = run_fwd(&gpu, &s, &x, &grid);
     assert!(y.iter().all(|v| v.abs() < 1e-6), "out-of-bounds samples must be 0 under padding_mode='zeros', got {y:?}");
 
-    let dy = randvec(8, s.yn());
+    let dy = Lcg::new(8).vec(s.yn());
     let dx = run_dx(&gpu, &s, &dy, &grid);
     assert!(dx.iter().all(|v| v.abs() < 1e-6), "out-of-bounds samples must not deposit any dx");
 
@@ -320,9 +313,9 @@ fn zeros_padding_drops_out_of_bounds_taps() {
 /// case where a gather that forgets the zeros-padding rule leaks weight.
 fn assert_dx_adjoint(s: Shape, seed: u64) {
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let x = randvec(seed, s.xn());
+    let x = Lcg::new(seed).vec(s.xn());
     let grid = randgrid(seed + 100, s.gn());
-    let dy = randvec(seed + 200, s.yn());
+    let dy = Lcg::new(seed + 200).vec(s.yn());
 
     let y = run_fwd(&gpu, &s, &x, &grid);
     let dx = run_dx(&gpu, &s, &dy, &grid);
@@ -366,7 +359,7 @@ fn dx_matches_reference() {
     for align in [false, true] {
         let s = Shape { n: 2, c: 2, h: 5, w: 6, ho: 4, wo: 4, align };
         let grid = randgrid(31, s.gn());
-        let dy = randvec(32, s.yn());
+        let dy = Lcg::new(32).vec(s.yn());
         let got = run_dx(&gpu, &s, &dy, &grid);
         let want = gs_dx_ref(&s, &grid, &dy);
         let d = max_abs_diff(&got, &want);
@@ -380,12 +373,12 @@ fn dx_matches_reference() {
 /// and away from pixel boundaries, so a small perturbation stays inside one
 /// bilinear cell and central differences are meaningful. See the module doc.
 fn safe_interior_grid(s: &Shape, seed: u64) -> Vec<f32> {
-    let mut st = seed;
+    let mut st = Lcg::new(seed);
     let mut g = vec![0f32; s.gn()];
     for i in 0..s.n * s.ho * s.wo {
         for (a, size) in [(0usize, s.w), (1usize, s.h)] {
             // uniform-ish in [0.6, size-1.6], then push the fraction into [0.15, 0.85]
-            let u = (lcg(&mut st) as f64 + 1.0) * 0.5; // [0,1)
+            let u = st.unit() as f64; // [0,1)
             let mut c = 0.6 + u * ((size as f64) - 2.2).max(0.0);
             let fr = c - c.floor();
             if fr < 0.15 {
@@ -407,9 +400,9 @@ fn safe_interior_grid(s: &Shape, seed: u64) -> Vec<f32> {
 
 fn assert_dgrid_fd(s: Shape, seed: u64) {
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let x = randvec(seed, s.xn());
+    let x = Lcg::new(seed).vec(s.xn());
     let grid = safe_interior_grid(&s, seed + 100);
-    let dy = randvec(seed + 200, s.yn());
+    let dy = Lcg::new(seed + 200).vec(s.yn());
 
     let ana = run_dgrid(&gpu, &s, &dy, &x, &grid);
 
@@ -461,9 +454,9 @@ fn dgrid_matches_reference() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     for align in [false, true] {
         let s = Shape { n: 2, c: 3, h: 5, w: 6, ho: 4, wo: 4, align };
-        let x = randvec(61, s.xn());
+        let x = Lcg::new(61).vec(s.xn());
         let grid = randgrid(62, s.gn());
-        let dy = randvec(63, s.yn());
+        let dy = Lcg::new(63).vec(s.yn());
         let got = run_dgrid(&gpu, &s, &dy, &x, &grid);
         let want = gs_dgrid_ref(&s, &x, &grid, &dy);
         let d = max_abs_diff(&got, &want);

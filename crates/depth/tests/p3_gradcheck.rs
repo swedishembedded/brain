@@ -43,19 +43,11 @@
 //! (`UltraLightFusion`) is gradchecked in isolation at full fidelity. FD gradcheck
 //! bounds the AGGREGATE gradient; the per-connection guarantee comes from the
 //! forward structure plus the block tests, not from this file alone.
+use data::rng::Lcg;
 use depth::{ZipConfig, ZipDepth};
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 use vision::Ctx;
-
-fn lcg(s: &mut u64) -> f32 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-}
-fn rv(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed;
-    (0..n).map(|_| lcg(&mut s)).collect()
-}
 
 /// N=4: a BN batch big enough that the per-channel statistics stay stable across
 /// the FD perturbation. At N=2 they are computed from two samples and swing enough
@@ -163,11 +155,11 @@ fn run(cfg: ZipConfig, seed: u64, tensors: &[&str]) {
     let ps = ParamStore::new(&gpu, m.param_list(), &init);
 
     let tot = m.in_shape.numel() as usize;
-    let x: Vec<f32> = rv(seed ^ 3, tot).iter().map(|v| 0.5 + 0.3 * v).collect();
+    let x: Vec<f32> = Lcg::new(seed ^ 3).vec(tot).iter().map(|v| 0.5 + 0.3 * v).collect();
     // CENTERED loss weights: the output is a depth map (~O(1) everywhere post-ReLU),
     // so an uncentered `sum(out*r)` carries a large constant that quantizes the FD
     // to noise (measured on FastConvexUpsample). Centering removes it.
-    let raw = rv(seed ^ 5, m.out_shape.numel() as usize);
+    let raw = Lcg::new(seed ^ 5).vec(m.out_shape.numel() as usize);
     let mean = raw.iter().sum::<f32>() / raw.len() as f32;
     let r: Vec<f32> = raw.iter().map(|v| v - mean).collect();
 

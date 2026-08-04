@@ -6,6 +6,7 @@
 //! finite differences of the forward kernels — all smooth ops, so plain
 //! finite differences are exact here. CPU backend (no GPU needed).
 
+use data::rng::Lcg;
 use gpu_core::{f, DeviceBuffer, Gpu};
 
 const PIPES: &[(&str, &str)] = &[
@@ -22,18 +23,6 @@ const LN_HEAD_DX: usize = 2;
 const LN_HEAD_DGB: usize = 3;
 const SCALE_CHAN: usize = 4;
 const SCALE_CHAN_DG: usize = 5;
-
-struct Lcg(u64);
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        ((self.0 >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-    }
-    fn vec(&mut self, n: usize) -> Vec<f32> {
-        (0..n).map(|_| self.next()).collect()
-    }
-}
-
 fn buf(g: &Gpu, d: &[f32]) -> DeviceBuffer {
     g.storage_init("t", d)
 }
@@ -62,7 +51,7 @@ fn rope2d_bwd_is_exact_inverse_transpose() {
     let g = Gpu::new_cpu(PIPES);
     let (rows, heads, half, stride, off, tmod) = (6u32, 2u32, 4u32, 24u32, 8u32, 3u32);
     let n = (rows * stride) as usize;
-    let mut r = Lcg(7);
+    let mut r = Lcg::new(7);
     let x = r.vec(n);
     let cos = r.vec((tmod * half) as usize).iter().map(|v| v.cos()).collect::<Vec<_>>();
     let sin: Vec<f32> = cos.iter().map(|c| (1.0 - c * c).max(0.0).sqrt()).collect();
@@ -90,7 +79,7 @@ fn ln_head_dx_dgb() {
     let (rows, heads, hd, stride, off) = (5u32, 2u32, 8u32, 24u32, 4u32);
     let eps = 1e-5f32;
     let n = (rows * stride) as usize;
-    let mut r = Lcg(11);
+    let mut r = Lcg::new(11);
     let x = r.vec(n);
     let gamma = r.vec(hd as usize);
     let beta = r.vec(hd as usize);
@@ -142,7 +131,7 @@ fn scale_chan_dg_matches() {
     let g = Gpu::new_cpu(PIPES);
     let (rows, c, inner) = (7usize, 5usize, 3usize);
     let total = rows * c * inner;
-    let mut r = Lcg(13);
+    let mut r = Lcg::new(13);
     let x = r.vec(total);
     let scale = r.vec(c);
     let w = r.vec(total);

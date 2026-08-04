@@ -71,9 +71,121 @@ impl Rng {
     }
 }
 
+/// The deterministic LCG that fixtures, parity probes and kernel tests use to
+/// fill buffers without pulling in `rand`.
+///
+/// It is a **separate type from [`Rng`] on purpose**: [`Rng`] is SplitMix64 and
+/// defines the on-disk datasets, so its stream must never move. This one exists
+/// so the ~40 hand-rolled copies of
+///
+/// ```text
+/// *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+/// ((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
+/// ```
+///
+/// have one home. That expression is **one-sided**: `u64 >> 33` is 31 bits, so
+/// `/ 2^31` lands in `[0, 1)` and the `- 1.0` makes every sample land in
+/// `[-1, 0)`. The intended `[-1, 1)` never occurred, which meant no test ever
+/// fed a positive value to `relu`/`prelu`/`leaky_relu`/`max`-style kernels —
+/// exactly the branch worth testing. [`Lcg::signed`] shifts by **32**, keeping
+/// 32 bits, so `/ 2^31 - 1.0` covers the full `[-1, 1)`.
+///
+/// The LCG constants are Knuth's MMIX; the top bits are used because an LCG's
+/// low bits have short periods.
+#[derive(Clone, Debug)]
+pub struct Lcg {
+    state: u64,
+}
+
+impl Lcg {
+    /// Seed the generator. The first value returned is the seed *advanced once*,
+    /// matching the hand-rolled helpers this replaces.
+    pub fn new(seed: u64) -> Self {
+        Lcg { state: seed }
+    }
+
+    /// Next raw 64-bit state.
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state
+    }
+
+    /// The top 32 bits of the next state — the raw source for the float helpers.
+    pub fn next_u32(&mut self) -> u32 {
+        (self.next_u64() >> 32) as u32
+    }
+
+    /// Uniform `f32` in `[0, 1)`.
+    pub fn unit(&mut self) -> f32 {
+        self.next_u32() as f32 / (1u64 << 32) as f32
+    }
+
+    /// Uniform `f32` in `[-1, 1)` — **both** signs, unlike the copies this
+    /// replaces.
+    pub fn signed(&mut self) -> f32 {
+        self.next_u32() as f32 / (1u64 << 31) as f32 - 1.0
+    }
+
+    /// Uniform `f32` in `[-a, a)`.
+    pub fn scaled(&mut self, a: f32) -> f32 {
+        self.signed() * a
+    }
+
+    /// `n` samples from [`Lcg::signed`].
+    pub fn vec(&mut self, n: usize) -> Vec<f32> {
+        (0..n).map(|_| self.signed()).collect()
+    }
+
+    /// `n` samples from [`Lcg::scaled`].
+    pub fn vec_scaled(&mut self, n: usize, a: f32) -> Vec<f32> {
+        (0..n).map(|_| self.scaled(a)).collect()
+    }
+
+    /// `n` samples from [`Lcg::unit`].
+    pub fn vec_unit(&mut self, n: usize) -> Vec<f32> {
+        (0..n).map(|_| self.unit()).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The defect this type exists to fix: the stream must straddle zero.
+    #[test]
+    fn signed_covers_both_halves_of_minus_one_to_one() {
+        let mut r = Lcg::new(1);
+        let (mut lo, mut hi) = (0usize, 0usize);
+        for _ in 0..10_000 {
+            let v = r.signed();
+            assert!((-1.0..1.0).contains(&v), "out of range: {v}");
+            if v < 0.0 {
+                lo += 1;
+            } else {
+                hi += 1;
+            }
+        }
+        // A fair generator gives ~5000/5000; assert only that neither half is
+        // starved, which the `>> 33` version failed with hi == 0.
+        assert!(lo > 4000 && hi > 4000, "one-sided stream: {lo} negative / {hi} non-negative");
+    }
+
+    #[test]
+    fn unit_stays_in_zero_to_one() {
+        let mut r = Lcg::new(9);
+        for _ in 0..10_000 {
+            let v = r.unit();
+            assert!((0.0..1.0).contains(&v), "out of range: {v}");
+        }
+    }
+
+    #[test]
+    fn lcg_is_deterministic_for_fixed_seed() {
+        let (mut a, mut b) = (Lcg::new(3), Lcg::new(3));
+        for _ in 0..1000 {
+            assert_eq!(a.next_u64(), b.next_u64());
+        }
+    }
 
     #[test]
     fn deterministic_for_fixed_seed() {

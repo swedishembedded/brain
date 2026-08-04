@@ -10,6 +10,7 @@
 //!   cargo build --release --example mtp_bench -p brain-tts
 //!   ./target/release/examples/mtp_bench out/tts-1b7 [iters]
 
+use data::rng::Lcg;
 use std::time::Instant;
 
 fn main() {
@@ -27,17 +28,8 @@ fn main() {
     eprintln!("MTP embedding_dim={emb} d_model(MTP)={} ; talker d={d} vocab={}", mtp.cfg.d_model, tables.cfg.vocab);
 
     // Deterministic pseudo-random inputs (cost is data-independent).
-    let mk = |seed: u64, n: usize| -> Vec<f32> {
-        let mut s = seed;
-        (0..n)
-            .map(|_| {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
-                ((s >> 33) as i32 as f32 / i32::MAX as f32) * 0.5
-            })
-            .collect()
-    };
-    let talker_hidden = mk(1, emb);
-    let cb0_embed = mk(2, emb);
+    let talker_hidden = Lcg::new(1).vec_scaled(emb, 0.5);
+    let cb0_embed = Lcg::new(2).vec_scaled(emb, 0.5);
 
     // ---- MTP generate_residuals ----
     for _ in 0..5 {
@@ -58,7 +50,7 @@ fn main() {
     );
 
     // ---- cb0 codec head ----
-    let hidden = mk(3, d);
+    let hidden = Lcg::new(3).vec_scaled(d, 0.5);
     for _ in 0..5 {
         let _ = tables.codec_head_logits(&hidden);
     }

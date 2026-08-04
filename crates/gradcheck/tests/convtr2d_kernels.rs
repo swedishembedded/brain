@@ -49,6 +49,7 @@
 //! what pin that down: with `Cin == Cout` and `G == 1` the transposed layout is
 //! merely a permutation and a wrong reading still "works".
 
+use data::rng::Lcg;
 use gpu_core::Gpu;
 
 static KERNELS: &[(&str, &str)] = &[
@@ -173,23 +174,6 @@ fn convtr2d_ref(s: &Shape, x: &[f32], w: &[f32]) -> Vec<f64> {
 }
 
 // ---- helpers ----------------------------------------------------------------
-
-struct Lcg(u64);
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        // 32 high bits -> [0,2) -> [-1,1). It MUST straddle zero: with a
-        // one-sided sample every x*w product has the same sign, the forward sum
-        // never cancels, and <A(x),dy> grows ~n instead of ~sqrt(n) — which
-        // inflates the relative adjointness tolerance below by the same factor
-        // and quietly turns the sharpest check in this file into a weak one.
-        ((self.0 >> 32) as f32 / (1u64 << 31) as f32) - 1.0
-    }
-    fn vec(&mut self, n: usize) -> Vec<f32> {
-        (0..n).map(|_| self.next()).collect()
-    }
-}
-
 fn dot(a: &[f32], b: &[f32]) -> f64 {
     a.iter().zip(b).map(|(&x, &y)| x as f64 * y as f64).sum()
 }
@@ -243,7 +227,7 @@ fn check(tag: &str, s: Shape, seed: u64) {
     assert_eq!(s.cin % s.groups, 0, "{tag}: Cin must divide by groups");
     assert_eq!(s.cout % s.groups, 0, "{tag}: Cout must divide by groups");
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut r = Lcg(seed);
+    let mut r = Lcg::new(seed);
     let x = r.vec(s.xn());
     let w = r.vec(s.wn());
     let dy = r.vec(s.yn()); // random cotangent
@@ -391,7 +375,7 @@ fn convtr2d_group_isolation() {
     }
     let s = Shape { n: 1, cin: 4, h: 4, w: 4, cout: 6, k: 3, stride: 2, pad: 1, dilation: 1, groups: 2, out_pad: 0 };
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut r = Lcg(7);
+    let mut r = Lcg::new(7);
     let x = r.vec(s.xn());
     let w = r.vec(s.wn());
     let base = fwd_gpu(&gpu, &s, &x, &w);
@@ -432,7 +416,7 @@ fn convtr2d_dw_accumulates() {
     }
     let s = Shape { n: 1, cin: 4, h: 4, w: 5, cout: 6, k: 3, stride: 2, pad: 1, dilation: 1, groups: 2, out_pad: 0 };
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut r = Lcg(13);
+    let mut r = Lcg::new(13);
     let x = r.vec(s.xn());
     let dy = r.vec(s.yn());
     let once = dw_gpu(&gpu, &s, &dy, &x);
@@ -482,7 +466,7 @@ fn convtr2d_out_pad_extends_without_moving() {
     assert_eq!((ph, pw), (bh + 1, bw + 1));
 
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut r = Lcg(11);
+    let mut r = Lcg::new(11);
     let x = r.vec(base.xn());
     let w = r.vec(base.wn());
     let yb = fwd_gpu(&gpu, &base, &x, &w);

@@ -64,6 +64,7 @@
 //! Runs on any device. Under `BRAIN_DEVICE=cpu` the cooperative variant is
 //! correctly skipped rather than silently asserted.
 
+use data::rng::Lcg;
 use gpu_core::Gpu;
 
 static KERNELS: &[(&str, &str)] = &[
@@ -93,24 +94,12 @@ fn skip() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
 }
 
-/// Deterministic LCG in **[-1, 1)** — never `rand`.
-///
-/// NB the shift is `>> 32`, not the `>> 33` the older kernel tests use. `>> 33`
-/// keeps 31 bits, so `bits / 2^31` lands in `[0, 1)` and the `- 1.0` puts every
-/// sample in `[-1, 0)`. For a resize or a conv that is merely a weak input
-/// distribution; for PReLU it is fatal — with no positive sample the `x > 0`
-/// branch is never taken, and a kernel that computed `a[c] * x` unconditionally
-/// would pass every forward and backward test in this file. Verified: 32 bits
-/// gives a mix (measured 50.9% positive, and no exact zeros, over every seed and
-/// shape used below — so the `x == 0` tie-break never decides an assertion).
-fn lcg(state: &mut u64) -> f32 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*state >> 32) as f32 / (1u64 << 31) as f32) - 1.0 // [-1,1)
-}
-fn randvec(seed: u64, n: usize) -> Vec<f32> {
-    let mut st = seed;
-    (0..n).map(|_| lcg(&mut st)).collect()
-}
+/// Inputs come from [`Lcg::signed`], which is **[-1, 1)** — both signs. That is
+/// load-bearing here and nowhere more so: with a one-sided (negative-only)
+/// stream the `x > 0` branch is never taken, and a kernel that computed
+/// `a[c] * x` unconditionally would pass every forward and backward test in
+/// this file. Measured over every seed and shape used below: 50.9% positive,
+/// and no exact zeros, so the `x == 0` tie-break never decides an assertion.
 fn dot(a: &[f32], b: &[f32]) -> f64 {
     a.iter().zip(b).map(|(&x, &y)| x as f64 * y as f64).sum()
 }
@@ -248,8 +237,8 @@ fn forward_per_channel_matches_reference() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     for &(n, c, h, w) in &[(3usize, 5usize, 6usize, 7usize), (2, 3, 9, 15), (1, 7, 1, 1)] {
         let total = n * c * h * w;
-        let x = randvec(0x5eed_0001, total);
-        let a = randvec(0x5eed_0002, c);
+        let x = Lcg::new(0x5eed_0001).vec(total);
+        let a = Lcg::new(0x5eed_0002).vec(c);
         let got = prelu_fwd(&gpu, &x, &a, (n, c, h, w), c);
         let want = prelu_ref(&x, &a, n, c, h, w, c);
         let d = max_abs_diff(&got, &want);
@@ -268,7 +257,7 @@ fn forward_shared_slope_matches_reference() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2usize, 5usize, 4usize, 11usize);
     let total = n * c * h * w;
-    let x = randvec(0x5eed_0011, total);
+    let x = Lcg::new(0x5eed_0011).vec(total);
     let a = vec![0.2437f32];
     let got = prelu_fwd(&gpu, &x, &a, (n, c, h, w), 1);
     let want = prelu_ref(&x, &a, n, c, h, w, 1);
@@ -277,7 +266,7 @@ fn forward_shared_slope_matches_reference() {
 
     // And it must NOT coincide with the per-channel path for a varying `a`,
     // which is what makes the assertion above meaningful.
-    let a_pc = randvec(0x5eed_0012, c);
+    let a_pc = Lcg::new(0x5eed_0012).vec(c);
     let pc = prelu_fwd(&gpu, &x, &a_pc, (n, c, h, w), c);
     assert!(max_abs_diff(&pc, &got) > 1e-3, "shared and per-channel paths are indistinguishable");
 }
@@ -298,7 +287,7 @@ fn forward_equals_leaky_relu_at_constant_slope() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2usize, 4usize, 5usize, 5usize);
     let total = n * c * h * w;
-    let x = randvec(0x5eed_0021, total);
+    let x = Lcg::new(0x5eed_0021).vec(total);
     let slope = 0.1f32;
 
     let mine = prelu_fwd(&gpu, &x, &vec![slope; c], (n, c, h, w), c);
@@ -327,7 +316,7 @@ fn channel_isolation() {
     let (n, c, h, w) = (3usize, 5usize, 6usize, 7usize);
     let hw = h * w;
     let total = n * c * hw;
-    let x = randvec(0x5eed_0031, total);
+    let x = Lcg::new(0x5eed_0031).vec(total);
     let a = vec![0.25f32; c];
     let base = prelu_fwd(&gpu, &x, &a, (n, c, h, w), c);
 
@@ -388,9 +377,9 @@ fn backward_matches_reference() {
     for &(name, kind, tpc) in bwd_variants(&gpu).iter() {
         for &(n, c, h, w) in BWD_SHAPES {
             let total = n * c * h * w;
-            let x = randvec(0x5eed_0041, total);
-            let a = randvec(0x5eed_0042, c);
-            let dy = randvec(0x5eed_0043, total);
+            let x = Lcg::new(0x5eed_0041).vec(total);
+            let a = Lcg::new(0x5eed_0042).vec(c);
+            let dy = Lcg::new(0x5eed_0043).vec(total);
             let (dx, da) = prelu_bwd_k(&gpu, kind, tpc, &x, &a, &dy, (n, c, h, w), c);
             let (wdx, wda) = prelu_bwd_ref(&x, &a, &dy, n, c, h, w, c);
 
@@ -437,9 +426,9 @@ fn backward_variants_agree() {
     }
     for &(n, c, h, w) in BWD_SHAPES {
         let total = n * c * h * w;
-        let x = randvec(0x5eed_0091, total);
-        let a = randvec(0x5eed_0092, c);
-        let dy = randvec(0x5eed_0093, total);
+        let x = Lcg::new(0x5eed_0091).vec(total);
+        let a = Lcg::new(0x5eed_0092).vec(c);
+        let dy = Lcg::new(0x5eed_0093).vec(total);
         let (dx_r, da_r) = prelu_bwd_k(&gpu, K_PRELU_BWD, 1, &x, &a, &dy, (n, c, h, w), c);
         let (dx_w, da_w) = prelu_bwd_k(&gpu, K_PRELU_BWD_WG, 64, &x, &a, &dy, (n, c, h, w), c);
         // dx is a pure map — no reassociation, so this one IS exact.
@@ -470,9 +459,9 @@ fn backward_dx_matches_finite_differences() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2usize, 3usize, 5usize, 6usize);
     let total = n * c * h * w;
-    let x = randvec(0x5eed_0051, total);
-    let a = randvec(0x5eed_0052, c);
-    let dy = randvec(0x5eed_0053, total);
+    let x = Lcg::new(0x5eed_0051).vec(total);
+    let a = Lcg::new(0x5eed_0052).vec(c);
+    let dy = Lcg::new(0x5eed_0053).vec(total);
     for &(name, kind, tpc) in bwd_variants(&gpu).iter() {
         let (dx, _) = prelu_bwd_k(&gpu, kind, tpc, &x, &a, &dy, (n, c, h, w), c);
 
@@ -515,9 +504,9 @@ fn backward_da_matches_finite_differences() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2usize, 5usize, 4usize, 11usize);
     let total = n * c * h * w;
-    let x = randvec(0x5eed_0061, total);
-    let a = randvec(0x5eed_0062, c);
-    let dy = randvec(0x5eed_0063, total);
+    let x = Lcg::new(0x5eed_0061).vec(total);
+    let a = Lcg::new(0x5eed_0062).vec(c);
+    let dy = Lcg::new(0x5eed_0063).vec(total);
     for &(name, kind, tpc) in bwd_variants(&gpu).iter() {
         let (_, da) = prelu_bwd_k(&gpu, kind, tpc, &x, &a, &dy, (n, c, h, w), c);
 
@@ -550,9 +539,9 @@ fn shared_slope_da_is_per_channel_partials() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2usize, 5usize, 4usize, 11usize);
     let total = n * c * h * w;
-    let x = randvec(0x5eed_0071, total);
+    let x = Lcg::new(0x5eed_0071).vec(total);
     let a = vec![0.31f32];
-    let dy = randvec(0x5eed_0073, total);
+    let dy = Lcg::new(0x5eed_0073).vec(total);
     for &(name, kind, tpc) in bwd_variants(&gpu).iter() {
         let (_, da) = prelu_bwd_k(&gpu, kind, tpc, &x, &a, &dy, (n, c, h, w), 1);
         let summed: f64 = da.iter().map(|&v| v as f64).sum();
@@ -585,9 +574,9 @@ fn da_accumulates_into_a_pre_zeroed_buffer() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2usize, 3usize, 5usize, 6usize);
     let total = n * c * h * w;
-    let x = randvec(0x5eed_0081, total);
-    let a = randvec(0x5eed_0082, c);
-    let dy = randvec(0x5eed_0083, total);
+    let x = Lcg::new(0x5eed_0081).vec(total);
+    let a = Lcg::new(0x5eed_0082).vec(c);
+    let dy = Lcg::new(0x5eed_0083).vec(total);
     let params = [n as u32, c as u32, h as u32, w as u32, c as u32];
 
     for &(name, kind, tpc) in bwd_variants(&gpu).iter() {

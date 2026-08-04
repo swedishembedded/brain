@@ -596,6 +596,7 @@ impl Encoder {
 mod tests {
     use std::collections::HashMap;
 
+    use data::rng::Lcg;
     use gpu_core::Gpu;
 
     use crate::config::NemotronConfig;
@@ -631,19 +632,8 @@ mod tests {
         }
     }
 
-    struct Lcg(u64);
-    impl Lcg {
-        fn f(&mut self) -> f32 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((self.0 >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-        }
-        fn vec(&mut self, n: usize, scale: f32) -> Vec<f32> {
-            (0..n).map(|_| self.f() * scale).collect()
-        }
-    }
-
     fn tiny_weights(cfg: &NemotronConfig) -> HashMap<String, Vec<f32>> {
-        let mut r = Lcg(0xB5AD4ECEDA1CE2A9);
+        let mut r = Lcg::new(0xB5AD_4ECE_DA1C_E2A9);
         let (c, ch, ffn) = (cfg.hidden as usize, cfg.subsampling_channels as usize, cfg.intermediate as usize);
         let (dh, np, pi, v) = (cfg.decoder_hidden as usize, cfg.num_prompts as usize, cfg.prompt_intermediate as usize, cfg.vocab as usize);
         let k = cfg.conv_kernel as usize;
@@ -652,54 +642,54 @@ mod tests {
         let mut put = |name: String, data: Vec<f32>| {
             w.insert(name, data);
         };
-        put("encoder.subsampling.conv_in.weight".into(), r.vec(ch * 9, 0.3));
-        put("encoder.subsampling.conv_in.bias".into(), r.vec(ch, 0.1));
+        put("encoder.subsampling.conv_in.weight".into(), r.vec_scaled(ch * 9, 0.3));
+        put("encoder.subsampling.conv_in.bias".into(), r.vec_scaled(ch, 0.1));
         for i in 0..2 {
-            put(format!("encoder.subsampling.layers.{i}.depthwise_conv.weight"), r.vec(ch * 9, 0.3));
-            put(format!("encoder.subsampling.layers.{i}.depthwise_conv.bias"), r.vec(ch, 0.1));
-            put(format!("encoder.subsampling.layers.{i}.pointwise_conv.weight"), r.vec(ch * ch, 0.3));
-            put(format!("encoder.subsampling.layers.{i}.pointwise_conv.bias"), r.vec(ch, 0.1));
+            put(format!("encoder.subsampling.layers.{i}.depthwise_conv.weight"), r.vec_scaled(ch * 9, 0.3));
+            put(format!("encoder.subsampling.layers.{i}.depthwise_conv.bias"), r.vec_scaled(ch, 0.1));
+            put(format!("encoder.subsampling.layers.{i}.pointwise_conv.weight"), r.vec_scaled(ch * ch, 0.3));
+            put(format!("encoder.subsampling.layers.{i}.pointwise_conv.bias"), r.vec_scaled(ch, 0.1));
         }
-        put("encoder.subsampling.linear.weight".into(), r.vec(c * flat, 0.2));
-        put("encoder.subsampling.linear.bias".into(), r.vec(c, 0.1));
+        put("encoder.subsampling.linear.weight".into(), r.vec_scaled(c * flat, 0.2));
+        put("encoder.subsampling.linear.bias".into(), r.vec_scaled(c, 0.1));
         for b in 0..cfg.n_layers {
             let pre = format!("encoder.layers.{b}");
             for n in ["norm_feed_forward1", "norm_feed_forward2", "norm_self_att", "norm_conv", "norm_out"] {
                 put(format!("{pre}.{n}.weight"), vec![1.0; c]);
-                put(format!("{pre}.{n}.bias"), r.vec(c, 0.05));
+                put(format!("{pre}.{n}.bias"), r.vec_scaled(c, 0.05));
             }
             for f in ["feed_forward1", "feed_forward2"] {
-                put(format!("{pre}.{f}.linear1.weight"), r.vec(ffn * c, 0.2));
-                put(format!("{pre}.{f}.linear2.weight"), r.vec(c * ffn, 0.2));
+                put(format!("{pre}.{f}.linear1.weight"), r.vec_scaled(ffn * c, 0.2));
+                put(format!("{pre}.{f}.linear2.weight"), r.vec_scaled(c * ffn, 0.2));
             }
             for p in ["q_proj", "k_proj", "v_proj", "o_proj", "relative_k_proj"] {
-                put(format!("{pre}.self_attn.{p}.weight"), r.vec(c * c, 0.2));
+                put(format!("{pre}.self_attn.{p}.weight"), r.vec_scaled(c * c, 0.2));
             }
-            put(format!("{pre}.self_attn.bias_u"), r.vec(c, 0.1));
-            put(format!("{pre}.self_attn.bias_v"), r.vec(c, 0.1));
-            put(format!("{pre}.conv.pointwise_conv1.weight"), r.vec(2 * c * c, 0.2));
-            put(format!("{pre}.conv.depthwise_conv.weight"), r.vec(c * k, 0.2));
+            put(format!("{pre}.self_attn.bias_u"), r.vec_scaled(c, 0.1));
+            put(format!("{pre}.self_attn.bias_v"), r.vec_scaled(c, 0.1));
+            put(format!("{pre}.conv.pointwise_conv1.weight"), r.vec_scaled(2 * c * c, 0.2));
+            put(format!("{pre}.conv.depthwise_conv.weight"), r.vec_scaled(c * k, 0.2));
             put(format!("{pre}.conv.norm.weight"), vec![1.0; c]);
-            put(format!("{pre}.conv.norm.bias"), r.vec(c, 0.05));
-            put(format!("{pre}.conv.pointwise_conv2.weight"), r.vec(c * c, 0.2));
+            put(format!("{pre}.conv.norm.bias"), r.vec_scaled(c, 0.05));
+            put(format!("{pre}.conv.pointwise_conv2.weight"), r.vec_scaled(c * c, 0.2));
         }
-        put("prompt_projector.linear_1.weight".into(), r.vec(pi * (c + np), 0.2));
-        put("prompt_projector.linear_1.bias".into(), r.vec(pi, 0.1));
-        put("prompt_projector.linear_2.weight".into(), r.vec(c * pi, 0.2));
-        put("prompt_projector.linear_2.bias".into(), r.vec(c, 0.1));
-        put("encoder_projector.weight".into(), r.vec(dh * c, 0.2));
-        put("encoder_projector.bias".into(), r.vec(dh, 0.1));
-        put("joint.head.weight".into(), r.vec(v * dh, 0.3));
-        put("joint.head.bias".into(), r.vec(v, 0.1));
-        put("decoder.embedding.weight".into(), r.vec(v * dh, 0.3));
+        put("prompt_projector.linear_1.weight".into(), r.vec_scaled(pi * (c + np), 0.2));
+        put("prompt_projector.linear_1.bias".into(), r.vec_scaled(pi, 0.1));
+        put("prompt_projector.linear_2.weight".into(), r.vec_scaled(c * pi, 0.2));
+        put("prompt_projector.linear_2.bias".into(), r.vec_scaled(c, 0.1));
+        put("encoder_projector.weight".into(), r.vec_scaled(dh * c, 0.2));
+        put("encoder_projector.bias".into(), r.vec_scaled(dh, 0.1));
+        put("joint.head.weight".into(), r.vec_scaled(v * dh, 0.3));
+        put("joint.head.bias".into(), r.vec_scaled(v, 0.1));
+        put("decoder.embedding.weight".into(), r.vec_scaled(v * dh, 0.3));
         for l in 0..2 {
-            put(format!("decoder.lstm.weight_ih_l{l}"), r.vec(4 * dh * dh, 0.2));
-            put(format!("decoder.lstm.weight_hh_l{l}"), r.vec(4 * dh * dh, 0.2));
-            put(format!("decoder.lstm.bias_ih_l{l}"), r.vec(4 * dh, 0.1));
-            put(format!("decoder.lstm.bias_hh_l{l}"), r.vec(4 * dh, 0.1));
+            put(format!("decoder.lstm.weight_ih_l{l}"), r.vec_scaled(4 * dh * dh, 0.2));
+            put(format!("decoder.lstm.weight_hh_l{l}"), r.vec_scaled(4 * dh * dh, 0.2));
+            put(format!("decoder.lstm.bias_ih_l{l}"), r.vec_scaled(4 * dh, 0.1));
+            put(format!("decoder.lstm.bias_hh_l{l}"), r.vec_scaled(4 * dh, 0.1));
         }
-        put("decoder.decoder_projector.weight".into(), r.vec(dh * dh, 0.2));
-        put("decoder.decoder_projector.bias".into(), r.vec(dh, 0.1));
+        put("decoder.decoder_projector.weight".into(), r.vec_scaled(dh * dh, 0.2));
+        put("decoder.decoder_projector.bias".into(), r.vec_scaled(dh, 0.1));
         w
     }
 
@@ -718,8 +708,8 @@ mod tests {
         // 521 mel frames -> 66 subsampled rows: an odd length that exercises the
         // partial-chunk flush, the full [-3,59] band-offset range AND K/V trimming
         let t = 521usize;
-        let mut r = Lcg(0x5EED);
-        let mel = r.vec(t * nm, 1.0);
+        let mut r = Lcg::new(0x5EED);
+        let mel = r.vec_scaled(t * nm, 1.0);
 
         let (pooler, valid) = enc.encode(&mel, t as u32, t as u32, 0);
         let tokens = enc.rnnt_greedy(&pooler, valid as usize);
@@ -766,9 +756,9 @@ mod tests {
         let enc = Encoder::new(g, cfg, &w);
         let nm = cfg.num_mel_bins as usize;
 
-        let mut r = Lcg(0xABCD);
-        let mel_a = r.vec(96 * nm, 1.0);
-        let mel_b = r.vec(57 * nm, 1.0);
+        let mut r = Lcg::new(0xABCD);
+        let mel_a = r.vec_scaled(96 * nm, 1.0);
+        let mel_b = r.vec_scaled(57 * nm, 1.0);
 
         // singles
         let mut sa = enc.stream_new(0);

@@ -15,6 +15,7 @@
 //!
 //! Run with `BRAIN_DEVICE=cpu`.
 
+use data::rng::Lcg;
 use gpu_core::Gpu;
 
 // Kernel order passed to Gpu::new; indices below reference these.
@@ -47,11 +48,6 @@ impl Shape {
     fn scores_len(&self) -> usize {
         (self.b * self.h * self.t * self.t) as usize
     }
-}
-
-fn lcg(state: &mut u64) -> f32 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*state >> 33) as f32 / (1u64 << 31) as f32) - 1.0 // ~[-1,1)
 }
 
 /// Run forward (scores->softmax->apply) for a given qkv vector, return out.
@@ -119,8 +115,8 @@ fn loss(out: &[f32], g: &[f32]) -> f32 {
 fn bidir_forward_is_deterministic() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 2, h: 2, t: 5, hd: 4 };
-    let mut st = 0x1234_5678u64;
-    let qkv: Vec<f32> = (0..s.qkv_len()).map(|_| lcg(&mut st)).collect();
+    let mut st = Lcg::new(0x1234_5678u64);
+    let qkv: Vec<f32> = (0..s.qkv_len()).map(|_| st.signed()).collect();
     let a = forward(&gpu, &s, &qkv);
     let b = forward(&gpu, &s, &qkv);
     assert_eq!(a, b, "bidir forward not deterministic");
@@ -134,8 +130,8 @@ fn bidir_softmax_rows_sum_to_one() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 1, h: 1, t: 6, hd: 3 };
     let d = s.d();
-    let mut st = 0xABCDu64;
-    let qkv: Vec<f32> = (0..s.qkv_len()).map(|_| lcg(&mut st)).collect();
+    let mut st = Lcg::new(0xABCDu64);
+    let qkv: Vec<f32> = (0..s.qkv_len()).map(|_| st.signed()).collect();
     let qkv_buf = gpu.storage_init("qkv", &qkv);
     let scores = gpu.storage(s.scores_len() as u64);
     let probs = gpu.storage(s.scores_len() as u64);
@@ -156,9 +152,9 @@ fn bidir_softmax_rows_sum_to_one() {
 fn bidir_backward_matches_finite_differences() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let s = Shape { b: 2, h: 2, t: 4, hd: 3 };
-    let mut st = 0xDEAD_BEEFu64;
-    let qkv: Vec<f32> = (0..s.qkv_len()).map(|_| lcg(&mut st)).collect();
-    let g: Vec<f32> = (0..s.out_len()).map(|_| lcg(&mut st)).collect();
+    let mut st = Lcg::new(0xDEAD_BEEFu64);
+    let qkv: Vec<f32> = (0..s.qkv_len()).map(|_| st.signed()).collect();
+    let g: Vec<f32> = (0..s.out_len()).map(|_| st.signed()).collect();
 
     let analytic = backward(&gpu, &s, &qkv, &g);
 

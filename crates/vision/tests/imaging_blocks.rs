@@ -18,6 +18,7 @@
 //! MEASUREMENT and uses the pooled test device, because a CPU-backend timing
 //! would say nothing about the coalescing question it exists to settle.
 
+use data::rng::Lcg;
 use std::collections::HashMap;
 
 use gpu_core::Gpu;
@@ -83,19 +84,10 @@ fn dev() -> Gpu {
     Gpu::new_cpu(PIPELINES)
 }
 
-fn lcg(s: &mut u64) -> f32 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-}
-fn rv(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed;
-    (0..n).map(|_| lcg(&mut s)).collect()
-}
-
 fn store(gpu: &Gpu, params: Vec<(String, usize)>, seed: u64) -> ParamStore {
     let mut init: HashMap<String, Vec<f32>> = HashMap::new();
     for (i, (n, numel)) in params.iter().enumerate() {
-        init.insert(n.clone(), rv(seed ^ (i as u64 * 0x9E37), *numel).iter().map(|v| 0.5 * v).collect());
+        init.insert(n.clone(), Lcg::new(seed ^ (i as u64 * 0x9E37)).vec(*numel).iter().map(|v| 0.5 * v).collect());
     }
     ParamStore::new(gpu, params, &init)
 }
@@ -190,7 +182,7 @@ fn convtr_case(xs: Shape, spec: ConvTrSpec, seed: u64) {
     let ctx = Ctx::new(&gpu, ids());
     let ct = ConvTranspose::torch(&ctx, "deconv", xs, spec);
     let ps = store(&gpu, ct.param_list(), seed);
-    let x = rv(seed ^ 0xABC, xs.numel() as usize);
+    let x = Lcg::new(seed ^ 0xABC).vec(xs.numel() as usize);
     let xb = gpu.storage_init("x", &x);
     ct.forward(&ctx, &ps, &xb);
     let got = gpu.read(ct.out(), ct.out_shape.numel() as usize);
@@ -237,7 +229,7 @@ fn output_padding_band_is_not_zeros() {
     // Ho = (4-1)*2 - 2*1 + 1*(3-1) + 1 + 1 = 8. Without out_pad it would be 7.
     assert_eq!(ct.out_shape, Shape::new(1, 2, 8, 8));
     let ps = store(&gpu, ct.param_list(), 21);
-    let xb = gpu.storage_init("x", &rv(9, xs.numel() as usize));
+    let xb = gpu.storage_init("x", &Lcg::new(9).vec(xs.numel() as usize));
     ct.forward(&ctx, &ps, &xb);
     let out = gpu.read(ct.out(), ct.out_shape.numel() as usize);
     let last_row: f32 = (0..8).map(|c| out[7 * 8 + c].abs()).sum();
@@ -258,7 +250,7 @@ fn maxpool_forward_matches_a_host_reference() {
         // Strictly negative input: a kernel that seeded its running max at 0.0
         // instead of the first in-bounds tap would let zero PADDING win, and
         // every-value-positive test data hides that.
-        let x: Vec<f32> = rv(31, xs.numel() as usize).iter().map(|v| -1.0 - v.abs()).collect();
+        let x: Vec<f32> = Lcg::new(31).vec(xs.numel() as usize).iter().map(|v| -1.0 - v.abs()).collect();
         let xb = gpu.storage_init("x", &x);
         mp.forward(&ctx, &xb);
         let got = gpu.read(mp.out(), mp.out_shape.numel() as usize);
@@ -299,10 +291,10 @@ fn maxpool_backward_routes_gradient_to_the_winning_tap() {
     let xs = Shape::new(1, 2, 6, 6);
     let spec = PoolSpec::new(3, 2, 1);
     let mp = MaxPool::new(&ctx, xs, spec);
-    let x = rv(41, xs.numel() as usize);
+    let x = Lcg::new(41).vec(xs.numel() as usize);
     let xb = gpu.storage_init("x", &x);
     mp.forward(&ctx, &xb);
-    let d_out = rv(42, mp.out_shape.numel() as usize);
+    let d_out = Lcg::new(42).vec(mp.out_shape.numel() as usize);
     let dob = gpu.storage_init("dy", &d_out);
     mp.backward(&ctx, &dob);
     let got = gpu.read(mp.d_in(), xs.numel() as usize);
@@ -365,7 +357,7 @@ fn layernorm2d_normalizes_across_channels_not_across_space() {
     let eps = 1e-6;
     let ln = LayerNorm2d::new(&ctx, Ln2dNames::torch("norm"), s, eps);
     let ps = store(&gpu, ln.param_list(), 51);
-    let x = rv(52, s.numel() as usize);
+    let x = Lcg::new(52).vec(s.numel() as usize);
     let xb = gpu.storage_init("x", &x);
     ln.forward(&ctx, &ps, &xb);
     let got = gpu.read(ln.out(), s.numel() as usize);
@@ -425,9 +417,9 @@ fn convtranspose_backward_matches_finite_differences() {
     let ct = ConvTranspose::torch(&ctx, "d", xs, spec);
     let ps = store(&gpu, ct.param_list(), 61);
     let on = ct.out_shape.numel() as usize;
-    let dw = rv(62, on); // the loss's output weights
+    let dw = Lcg::new(62).vec(on); // the loss's output weights
 
-    let x = rv(63, xs.numel() as usize);
+    let x = Lcg::new(63).vec(xs.numel() as usize);
     let xb = gpu.storage(xs.numel() as u64);
     let mut fwd = |xv: &[f32]| {
         gpu.write(&xb, bytemuck::cast_slice(xv));
@@ -477,8 +469,8 @@ fn layernorm2d_backward_matches_finite_differences() {
     let ln = LayerNorm2d::new(&ctx, Ln2dNames::torch("n"), s, 1e-6);
     let ps = store(&gpu, ln.param_list(), 71);
     let n = s.numel() as usize;
-    let dw = rv(72, n);
-    let x = rv(73, n);
+    let dw = Lcg::new(72).vec(n);
+    let x = Lcg::new(73).vec(n);
     let xb = gpu.storage(n as u64);
     let mut fwd = |xv: &[f32]| {
         gpu.write(&xb, bytemuck::cast_slice(xv));
@@ -568,11 +560,11 @@ fn cxblock_is_the_identity_at_zero_layer_scale() {
     let cx = CXBlock::new(&ctx, "b", s, CxSpec::new(), true);
     let mut init: HashMap<String, Vec<f32>> = HashMap::new();
     for (i, (n, numel)) in cx.param_list().iter().enumerate() {
-        let v = if n.ends_with(".gamma") { vec![0.0; *numel] } else { rv(81 ^ i as u64, *numel) };
+        let v = if n.ends_with(".gamma") { vec![0.0; *numel] } else { Lcg::new(81 ^ i as u64).vec(*numel) };
         init.insert(n.clone(), v);
     }
     let ps = ParamStore::new(&gpu, cx.param_list(), &init);
-    let x = rv(82, s.numel() as usize);
+    let x = Lcg::new(82).vec(s.numel() as usize);
     let xb = gpu.storage_init("x", &x);
     cx.forward(&ctx, &ps, &xb);
     close(&gpu.read(cx.out(), s.numel() as usize), &x, 1e-6, "CXBlock at gamma=0");
@@ -589,8 +581,8 @@ fn cxblock_backward_matches_finite_differences() {
     let cx = CXBlock::new(&ctx, "b", s, spec, true);
     let ps = store(&gpu, cx.param_list(), 91);
     let n = s.numel() as usize;
-    let dw = rv(92, n);
-    let x = rv(93, n);
+    let dw = Lcg::new(92).vec(n);
+    let x = Lcg::new(93).vec(n);
     let xb = gpu.storage(n as u64);
     let mut fwd = |xv: &[f32]| {
         gpu.write(&xb, bytemuck::cast_slice(xv));
@@ -660,7 +652,7 @@ fn blocks_agree_across_backends() {
     let cpu = dev();
     let xs = Shape::new(1, 4, 5, 5);
     let spec = ConvTrSpec::new(6, 3, 2, 1).with_act(Act::GeluErf);
-    let x = rv(111, xs.numel() as usize);
+    let x = Lcg::new(111).vec(xs.numel() as usize);
 
     let run_ct = |g: &Gpu| {
         let ctx = Ctx::new(g, ids());
@@ -669,7 +661,7 @@ fn blocks_agree_across_backends() {
         let xb = g.storage_init("x", &x);
         ct.forward(&ctx, &ps, &xb);
         let out = g.read(ct.out(), ct.out_shape.numel() as usize);
-        let dob = g.storage_init("dy", &rv(113, ct.out_shape.numel() as usize));
+        let dob = g.storage_init("dy", &Lcg::new(113).vec(ct.out_shape.numel() as usize));
         let dxb = g.storage(xs.numel() as u64);
         ps.zero_grads(g);
         ct.backward(&ctx, &ps, &xb, &dob, &dxb);
@@ -683,7 +675,7 @@ fn blocks_agree_across_backends() {
 
     let s = Shape::new(1, 8, 6, 6);
     let cxs = CxSpec { k: 3, pad: 1, mlp_ratio: 2, ..CxSpec::new() };
-    let xc = rv(114, s.numel() as usize);
+    let xc = Lcg::new(114).vec(s.numel() as usize);
     let run_cx = |g: &Gpu| {
         let ctx = Ctx::new(g, ids());
         let cx = CXBlock::new(&ctx, "b", s, cxs, true);
@@ -691,7 +683,7 @@ fn blocks_agree_across_backends() {
         let xb = g.storage_init("x", &xc);
         cx.forward(&ctx, &ps, &xb);
         let out = g.read(cx.out(), s.numel() as usize);
-        let dob = g.storage_init("dy", &rv(116, s.numel() as usize));
+        let dob = g.storage_init("dy", &Lcg::new(116).vec(s.numel() as usize));
         let dxb = g.storage(s.numel() as u64);
         ps.zero_grads(g);
         cx.backward(&ctx, &ps, &xb, &dob, &dxb);
@@ -709,7 +701,7 @@ fn blocks_agree_across_backends() {
         let mp = MaxPool::new(&ctx, s, PoolSpec::new(3, 2, 1));
         let xb = g.storage_init("x", &xc);
         mp.forward(&ctx, &xb);
-        let dob = g.storage_init("dy", &rv(117, mp.out_shape.numel() as usize));
+        let dob = g.storage_init("dy", &Lcg::new(117).vec(mp.out_shape.numel() as usize));
         mp.backward(&ctx, &dob);
         (g.read(mp.out(), mp.out_shape.numel() as usize), g.read(mp.d_in(), s.numel() as usize))
     };
@@ -725,7 +717,7 @@ fn blocks_agree_across_backends() {
         let xb = g.storage_init("x", &xc);
         ln.forward(&ctx, &ps, &xb);
         let out = g.read(ln.out(), s.numel() as usize);
-        let dob = g.storage_init("dy", &rv(119, s.numel() as usize));
+        let dob = g.storage_init("dy", &Lcg::new(119).vec(s.numel() as usize));
         let dxb = g.storage(s.numel() as u64);
         ps.zero_grads(g);
         ln.backward(&ctx, &ps, &dob, &dxb);
@@ -783,7 +775,7 @@ fn layernorm2d_composition_cost() {
         let ln = LayerNorm2d::new(&ctx, Ln2dNames::torch("n"), s, 1e-6);
         let ps = store(&gpu, ln.param_list(), 101);
         let n = s.numel() as usize;
-        let xb = gpu.storage_init("x", &rv(102, n));
+        let xb = gpu.storage_init("x", &Lcg::new(102).vec(n));
         let tmp = gpu.storage(n as u64);
         let perm = [s.numel(), s.c, s.h * s.w];
         let reps = 20;

@@ -18,6 +18,7 @@
 //!
 //! No fixtures: the weights come from `clip::init`, so this test never skips.
 
+use data::rng::Lcg;
 use clip::config::{ClipTextConfig, TextAct};
 use clip::model::{ClipText, TEXT_PIPELINES};
 
@@ -36,17 +37,6 @@ fn tiny(act: TextAct, projection: Option<u32>) -> ClipTextConfig {
         eos_id: 22,
         pad_id: 22,
     }
-}
-
-/// Deterministic ±0.5-bounded proxy direction.
-fn proxy(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed | 1;
-    (0..n)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-        })
-        .collect()
 }
 
 #[test]
@@ -102,8 +92,8 @@ fn a_gradient_step_reduces_the_proxy_objective() {
             &init,
         );
         m.set_tokens(&ids);
-        let r_h = proxy(0xC0FFEE, n * h);
-        let r_o = proxy(0xBEEF, b as usize * out_w);
+        let r_h = Lcg::new(0xC0FFEE | 1).vec(n * h);
+        let r_o = Lcg::new(0xBEEF | 1).vec(b as usize * out_w);
 
         let loss = || -> f32 {
             m.forward();

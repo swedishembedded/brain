@@ -484,17 +484,13 @@ impl StreamingCodecDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn rng(seed: &mut u64) -> f32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        ((*seed >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-    }
+    use data::rng::Lcg;
 
     /// Build a tiny but structurally-complete codec config + random weights, and
     /// check the streaming back: chunked == one-shot, sample-exact.
     #[test]
     fn back_chunked_equals_full() {
-        let mut seed = 7u64;
+        let mut seed = Lcg::new(7);
         let mut cfg = CodecConfig::default();
         cfg.latent_dim = 4;
         cfg.decoder_dim = 8;
@@ -502,8 +498,8 @@ mod tests {
         cfg.upsample_rates = vec![2, 2];
 
         let mut w: W = HashMap::new();
-        let fill = |w: &mut W, name: &str, n: usize, seed: &mut u64| {
-            w.insert(name.to_string(), (0..n).map(|_| rng(seed)).collect());
+        let fill = |w: &mut W, name: &str, n: usize, seed: &mut Lcg| {
+            w.insert(name.to_string(), seed.vec(n));
         };
         let latent = 4usize;
         let dec = 8usize;
@@ -548,7 +544,7 @@ mod tests {
         fill(&mut w, "decoder.6.conv.bias", 1, &mut seed);
 
         let t = 12usize;
-        let lat: Vec<f32> = (0..latent * t).map(|_| rng(&mut seed)).collect();
+        let lat: Vec<f32> = seed.vec(latent * t);
 
         let mut full = Back::new(&w, &cfg);
         let y_full = full.step(&lat, t);
@@ -582,13 +578,8 @@ mod tests {
         let dec = StreamingCodecDecoder::load(&path);
         let nq = dec.cfg.num_quantizers as usize;
         let t = 16usize; // small T (< sliding_window) so attention is plain causal
-        let mut seed = 3u64;
-        let codes: Vec<u32> = (0..t * nq)
-            .map(|_| {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                ((seed >> 40) % 256) as u32
-            })
-            .collect();
+        let mut seed = Lcg::new(3);
+        let codes: Vec<u32> = (0..t * nq).map(|_| seed.next_u32() % 256).collect();
 
         let full = dec.decode_streaming(&codes, 0); // whole clip
         let stream = dec.decode_streaming(&codes, 4); // 4-frame chunks
@@ -618,13 +609,8 @@ mod tests {
         let dec = StreamingCodecDecoder::load(&path);
         let nq = dec.cfg().num_quantizers as usize;
         let t = 48usize;
-        let mut seed = 5u64;
-        let codes: Vec<u32> = (0..t * nq)
-            .map(|_| {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                ((seed >> 40) % 256) as u32
-            })
-            .collect();
+        let mut seed = Lcg::new(5);
+        let codes: Vec<u32> = (0..t * nq).map(|_| seed.next_u32() % 256).collect();
         let t0 = std::time::Instant::now();
         let wav = dec.decode_streaming(&codes, 16);
         let dt = t0.elapsed().as_secs_f64();

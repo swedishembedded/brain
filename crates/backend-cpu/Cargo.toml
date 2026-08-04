@@ -18,3 +18,6 @@ rayon = "1"
 [dev-dependencies]
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
+
+# `data::rng::Lcg` — the one deterministic test PRNG (tests only).
+brain-data.workspace = true

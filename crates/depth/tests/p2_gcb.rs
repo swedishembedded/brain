@@ -5,21 +5,13 @@
 //!
 //! The first block with BIASED convs, and the one that consumes `weighted_gap` /
 //! `add_chan_bcast` — the two kernels written specifically for its bmm and residual.
+use data::rng::Lcg;
 use std::collections::HashMap;
 
 use depth::blocks::GlobalContextBlock;
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 use vision::{Ctx, Shape};
-
-fn lcg(s: &mut u64) -> f32 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-}
-fn rv(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed;
-    (0..n).map(|_| lcg(&mut s)).collect()
-}
 
 fn fixture(shape: Shape, seed: u64) -> (Gpu, ParamStore, Vec<f32>) {
     let gpu = Gpu::new_cpu(depth::net::PIPELINES);
@@ -33,14 +25,14 @@ fn fixture(shape: Shape, seed: u64) -> (Gpu, ParamStore, Vec<f32>) {
         } else if n.ends_with("running_var") {
             vec![1.0; *numel]
         } else if n == "g.transform.1.weight" {
-            rv(seed ^ i as u64, *numel).iter().map(|v| 1.0 + 0.2 * v).collect()
+            Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 1.0 + 0.2 * v).collect()
         } else {
-            rv(seed ^ i as u64, *numel).iter().map(|v| 0.4 * v).collect()
+            Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 0.4 * v).collect()
         };
         init.insert(n.clone(), v);
     }
     let ps = ParamStore::new(&gpu, params, &init);
-    (gpu, ps, rv(seed ^ 0xD, shape.numel() as usize))
+    (gpu, ps, Lcg::new(seed ^ 0xD).vec(shape.numel() as usize))
 }
 
 /// Every conv here is `nn.Conv2d(..)` with torch's DEFAULT `bias=True`, so all
@@ -104,7 +96,7 @@ fn gcb_context_is_per_image() {
 
     // Image 0 gets a distinctive input; image 1 gets zeros.
     let mut x = vec![0.0f32; shape.numel() as usize];
-    x[..per].copy_from_slice(&rv(5, per));
+    x[..per].copy_from_slice(&Lcg::new(5).vec(per));
     let xb = gpu.storage_init("x", &x);
     g.forward(&ctx, &ps, &xb);
     let out = gpu.read(g.out(), shape.numel() as usize);
@@ -114,10 +106,10 @@ fn gcb_context_is_per_image() {
     // show up here.
     let solo = {
         let mut x1 = vec![0.0f32; shape.numel() as usize];
-        x1[..per].copy_from_slice(&rv(5, per));
+        x1[..per].copy_from_slice(&Lcg::new(5).vec(per));
         // Same image 0, but now duplicated into slot 1 — if contexts were shared,
         // image 1's output would be unchanged from the run above.
-        x1[per..].copy_from_slice(&rv(5, per));
+        x1[per..].copy_from_slice(&Lcg::new(5).vec(per));
         let xb = gpu.storage_init("x1", &x1);
         g.forward(&ctx, &ps, &xb);
         gpu.read(g.out(), shape.numel() as usize)
@@ -133,7 +125,7 @@ fn gcb_weight_grads_match_finite_differences() {
     let ctx = Ctx::new(&gpu, depth::net::ids());
     let m = GlobalContextBlock::new(&ctx, "g", shape, 4, true);
     let tot = shape.numel() as usize;
-    let r = rv(53, tot);
+    let r = Lcg::new(53).vec(tot);
 
     let xb = gpu.storage_init("x", &x);
     m.forward(&ctx, &ps, &xb);
@@ -165,7 +157,7 @@ fn gcb_weight_grads_match_finite_differences() {
     ] {
         let g = gpu.read(ps.g(wname), ps.numel(wname));
         let n = g.len();
-        let dir: Vec<f32> = rv(3, n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(3).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let w0 = gpu.read(ps.w(wname), n);
         let eps = 5e-4f32;
@@ -192,7 +184,7 @@ fn gcb_input_grad_matches_finite_differences_elementwise() {
     let ctx = Ctx::new(&gpu, depth::net::ids());
     let m = GlobalContextBlock::new(&ctx, "g", shape, 4, true);
     let tot = shape.numel() as usize;
-    let r = rv(59, tot);
+    let r = Lcg::new(59).vec(tot);
 
     let xb = gpu.storage_init("x", &x);
     m.forward(&ctx, &ps, &xb);
@@ -228,12 +220,23 @@ fn gcb_input_grad_matches_finite_differences_elementwise() {
 /// and BN subtracts the mean of whatever precedes it — so `context_weight.bias` and
 /// `transform.0.bias` cannot affect the output at all.
 ///
-/// The invariance is exact in exact arithmetic and near-exact in f32: at the FD eps
-/// scale (+-5e-3, +-5e-1) the loss moves by EXACTLY 0.0f32, and at a +-5.0 shift by
-/// 2 ULP — softmax subtracts the running max, and `(z+b) - (mx+b)` is not bitwise
-/// `z - mx` once b is large. So the tolerance below is a round-off budget, not a
-/// gradient tolerance: a real dependence would move this loss by ~850 at a 5.0
-/// shift (the live gradients here are ~1.7e2), which is 8 orders above what we see.
+/// The invariance is exact in exact arithmetic and only near-exact in f32: softmax
+/// subtracts the running max and BN subtracts the batch mean, and neither
+/// `(z+b) - (mx+b)` nor `(z+b) - mean(z+b)` is bitwise `z - mx` / `z - mean(z)`
+/// once `b` is large. That residue is round-off whose size depends on the data,
+/// so an absolute "the loss must not move by more than X" budget is a **bad
+/// test**: it passes or fails on the input distribution, not on the property.
+/// (It did: this assertion was calibrated against a one-sided test RNG and
+/// tripped at 1.7e-5 the moment the RNG was corrected to straddle zero.)
+///
+/// So the check here is the property itself, and it is **sign symmetry**. A real
+/// dependence is odd in the shift — `L(w+s) - L(w) = +g·s` and
+/// `L(w-s) - L(w) = -g·s` — while round-off from a cancellation is even in it.
+/// Measured (`+-5.0`, three seeds): `d(+5)` and `d(-5)` come out BIT-IDENTICAL,
+/// i.e. the odd part is exactly `0.0f32`, while the even part wanders over
+/// 1e-6..2e-4 with no relation to the shift. That is a strictly sharper gate
+/// than any tolerance — it detects a dependence orders of magnitude below the
+/// round-off floor — and it cannot be re-tuned by changing the inputs.
 ///
 /// This is what covers the two tensors that `gcb_weight_grads_match_finite_
 /// differences` cannot: FD divides that round-off by 2*eps and reports pure noise
@@ -246,7 +249,7 @@ fn gcb_two_biases_are_provably_dead() {
     let ctx = Ctx::new(&gpu, depth::net::ids());
     let m = GlobalContextBlock::new(&ctx, "g", shape, 4, true);
     let tot = shape.numel() as usize;
-    let r = rv(53, tot);
+    let r = Lcg::new(53).vec(tot);
 
     let loss = |gpu: &Gpu, ps: &ParamStore| -> f32 {
         let ctx = Ctx::new(gpu, depth::net::ids());
@@ -267,14 +270,25 @@ fn gcb_two_biases_are_provably_dead() {
     for wname in ["g.context_weight.bias", "g.transform.0.bias"] {
         let n = ps.numel(wname);
         let w0 = gpu.read(ps.w(wname), n);
-        // A shift of 5.0 is ~10^4 x the FD eps. If the parameter had ANY effect this
-        // would move the loss enormously.
-        let shifted: Vec<f32> = w0.iter().map(|w| w + 5.0).collect();
-        gpu.write(ps.w(wname), bytemuck::cast_slice(&shifted));
-        let moved = loss(&gpu, &ps);
-        gpu.write(ps.w(wname), bytemuck::cast_slice(&w0));
-        let rel = (moved - base).abs() / base.abs().max(1e-6);
-        assert!(rel < 1e-5, "{wname}: shifting by +5.0 moved the loss {base} -> {moved} (rel {rel:e}); it must be invariant to round-off");
+        // A shift of 5.0 is ~10^4 x the FD eps: if the parameter had ANY effect
+        // this would move the loss enormously (a live gradient here is ~1.7e2,
+        // so the odd part would be ~850).
+        let shift = |s: f32| -> f32 {
+            let shifted: Vec<f32> = w0.iter().map(|w| w + s).collect();
+            gpu.write(ps.w(wname), bytemuck::cast_slice(&shifted));
+            let moved = loss(&gpu, &ps);
+            gpu.write(ps.w(wname), bytemuck::cast_slice(&w0));
+            moved - base
+        };
+        let (d_plus, d_minus) = (shift(5.0), shift(-5.0));
+        // Odd part = the linear response = 2 * 5.0 * dL/dw. Round-off is even in
+        // the shift and cancels out of it exactly.
+        let odd = 0.5 * (d_plus - d_minus);
+        assert_eq!(
+            odd, 0.0,
+            "{wname}: shifting by +-5.0 gave d+ {d_plus:e} / d- {d_minus:e}; the ODD part {odd:e} \
+             must be exactly zero — a non-zero odd part is a real dependence, not round-off"
+        );
 
         // ...and the analytic gradient agrees it is zero, to round-off. The live
         // gradients in this block are ~1e2, so 1e-2 is four orders below signal.

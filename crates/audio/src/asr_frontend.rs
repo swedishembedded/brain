@@ -479,6 +479,7 @@ fn repo_path(rel: &str) -> String {
     format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
 }
     use super::*;
+    use data::rng::Lcg;
     use std::io::Read;
 
     fn read_f32(path: &str) -> Vec<f32> {
@@ -553,13 +554,7 @@ fn repo_path(rel: &str) -> String {
     fn nemotron_mel_stream_matches_offline() {
         // deterministic pseudo-random signal, awkward length (not a hop multiple)
         let n = 16000 + 137;
-        let mut state = 0x2545F4914F6CDD1Du64;
-        let wav: Vec<f32> = (0..n)
-            .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                ((state >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-            })
-            .collect();
+        let wav: Vec<f32> = Lcg::new(0x2545F4914F6CDD1D).vec(n);
         let (mel, _t, mels) = nemotron_logmel(&wav);
         let valid = n / 160;
 

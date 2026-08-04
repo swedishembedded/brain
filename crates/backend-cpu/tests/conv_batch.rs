@@ -5,12 +5,8 @@
 //! bug: the WorldMirror S=3 patch conv (N=3, Cin=3, 56x56, Cout=64, K=14 s14)
 //! produced garbage for every frame after the first on the CPU backend.
 
+use data::rng::Lcg;
 use gpu_core::Gpu;
-
-fn lcg(seed: &mut u64) -> f32 {
-    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*seed >> 33) as f32 / (1u64 << 31) as f32 - 1.0) * 0.5
-}
 
 // Conv dims + the two input tensors: the reference this test exists to
 // compare the JIT against, so it takes the shape explicitly.
@@ -54,7 +50,7 @@ fn scalar_conv(
 #[test]
 fn batched_conv_matches_scalar() {
     let gpu = Gpu::new_cpu(&[("conv2d", kernels::CONV2D)]);
-    let mut seed = 0xABCD;
+    let mut seed = Lcg::new(0xABCD);
     for (n, cin, h, w, cout, k, stride, pad) in [
         (3usize, 3usize, 56usize, 56usize, 64usize, 14usize, 14usize, 0usize),
         (2, 4, 9, 9, 8, 3, 1, 1),
@@ -65,8 +61,8 @@ fn batched_conv_matches_scalar() {
     ] {
         let ho = (h + 2 * pad - k) / stride + 1;
         let wo = (w + 2 * pad - k) / stride + 1;
-        let x: Vec<f32> = (0..n * cin * h * w).map(|_| lcg(&mut seed)).collect();
-        let wt: Vec<f32> = (0..cout * cin * k * k).map(|_| lcg(&mut seed)).collect();
+        let x: Vec<f32> = (0..n * cin * h * w).map(|_| seed.scaled(0.5)).collect();
+        let wt: Vec<f32> = (0..cout * cin * k * k).map(|_| seed.scaled(0.5)).collect();
         let want = scalar_conv(n, cin, h, w, cout, k, stride, pad, &x, &wt);
         let xb = gpu.storage_init("x", &x);
         let wb = gpu.storage_init("w", &wt);

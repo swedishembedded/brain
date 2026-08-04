@@ -19,3 +19,7 @@ brain-imaging.workspace = true
 brain-model.workspace = true
 brain-splat.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+# `data::rng::Lcg` — the one deterministic test PRNG (tests only).
+brain-data.workspace = true

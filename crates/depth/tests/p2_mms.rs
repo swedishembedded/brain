@@ -5,17 +5,12 @@
 //!
 //! The block that forced `vision::BatchNorm` to exist: its BN spans the SUM of two
 //! convs, which a unit whose BN is welded to one conv cannot express.
+use data::rng::Lcg;
 use std::collections::HashMap;
 use depth::blocks::MinimalMultiScale;
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 use vision::{Ctx, Shape};
-
-fn lcg(s: &mut u64) -> f32 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-}
-fn rv(seed: u64, n: usize) -> Vec<f32> { let mut s = seed; (0..n).map(|_| lcg(&mut s)).collect() }
 
 fn fixture(shape: Shape, seed: u64) -> (Gpu, ParamStore, Vec<f32>) {
     let gpu = Gpu::new_cpu(depth::net::PIPELINES);
@@ -26,13 +21,13 @@ fn fixture(shape: Shape, seed: u64) -> (Gpu, ParamStore, Vec<f32>) {
     for (i, (n, numel)) in params.iter().enumerate() {
         let v: Vec<f32> = if n.ends_with("running_mean") { vec![0.0; *numel] }
             else if n.ends_with("running_var") { vec![1.0; *numel] }
-            else if n == "m.bn.weight" { rv(seed ^ i as u64, *numel).iter().map(|v| 1.0 + 0.2 * v).collect() }
-            else if n == "m.bn.bias" { rv(seed ^ i as u64, *numel).iter().map(|v| 0.1 * v).collect() }
-            else { rv(seed ^ i as u64, *numel).iter().map(|v| 0.3 * v).collect() };
+            else if n == "m.bn.weight" { Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 1.0 + 0.2 * v).collect() }
+            else if n == "m.bn.bias" { Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 0.1 * v).collect() }
+            else { Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 0.3 * v).collect() };
         init.insert(n.clone(), v);
     }
     let ps = ParamStore::new(&gpu, params, &init);
-    (gpu, ps, rv(seed ^ 0xD, shape.numel() as usize))
+    (gpu, ps, Lcg::new(seed ^ 0xD).vec(shape.numel() as usize))
 }
 
 /// The layout the reference actually has: TWO depthwise weights `[C,1,3,3]` and
@@ -75,7 +70,7 @@ fn mms_backward_matches_finite_differences() {
     let ctx = Ctx::new(&gpu, depth::net::ids());
     let m = MinimalMultiScale::new(&ctx, "m", shape, true);
     let tot = shape.numel() as usize;
-    let r = rv(41, tot);
+    let r = Lcg::new(41).vec(tot);
 
     let xb = gpu.storage_init("x", &x);
     m.forward(&ctx, &ps, &xb);
@@ -96,7 +91,7 @@ fn mms_backward_matches_finite_differences() {
     for wname in ["m.branch1.weight", "m.branch2.weight", "m.bn.weight"] {
         let g = gpu.read(ps.g(wname), ps.numel(wname));
         let n = g.len();
-        let dir: Vec<f32> = rv(3, n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(3).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let w0 = gpu.read(ps.w(wname), n);
         let eps = 5e-4f32;

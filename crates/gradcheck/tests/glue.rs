@@ -18,6 +18,7 @@
 //! determinism, exact f32 `==` for the edm_mix skip-identity, and the global
 //! gradcheck tolerances (h=5e-3, atol=4e-3, rtol=8e-2) for the FD entry.
 
+use data::rng::Lcg;
 use gpu_core::{f, DeviceBuffer, Gpu};
 
 // Kernel order passed to Gpu::new; indices below reference these.
@@ -41,15 +42,6 @@ const K_PAD2D: usize = 5;
 const K_CROP2D: usize = 6;
 const K_NCHW_NLC: usize = 7;
 const K_NLC_NCHW: usize = 8;
-
-fn lcg(state: &mut u64) -> f32 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*state >> 33) as f32 / (1u64 << 31) as f32) - 1.0 // ~[-1,1)
-}
-
-fn lcg_vec(state: &mut u64, n: usize) -> Vec<f32> {
-    (0..n).map(|_| lcg(state)).collect()
-}
 
 /// Generic single-step dispatch: inputs (in §8 buffer order), fresh output
 /// buffer last, one submit, read back. Every call allocates FRESH buffers.
@@ -261,9 +253,9 @@ fn glue_edm_mix_identity_skip() {
     // (`==`, NOT bitwise: x = -0.0 yields +0.0).
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, m) = (2usize, 6usize);
-    let mut st = 0x1D_5EEDu64;
-    let x = lcg_vec(&mut st, n * m);
-    let fv = lcg_vec(&mut st, n * m);
+    let mut st = Lcg::new(0x1D_5EEDu64);
+    let x = st.vec(n * m);
+    let fv = st.vec(n * m);
     let ab = [1.0f32, 0.0, 1.0, 0.0]; // a_vec = 1.0, b_vec = 0.0 packed
 
     let y = k_edm_mix(&gpu, &x, &fv, &ab, m);
@@ -331,11 +323,11 @@ fn glue_fd_mse_grad_w() {
     let (n, m) = (3usize, 5usize);
     let total = n * m;
     let scale = 0.7f32;
-    let mut st = 0xF00D_5EEDu64;
-    let pred = lcg_vec(&mut st, total);
-    let tgt = lcg_vec(&mut st, total);
+    let mut st = Lcg::new(0xF00D_5EEDu64);
+    let pred = st.vec(total);
+    let tgt = st.vec(total);
     // w in [0.25, 2): positive, bounded away from 0.
-    let w: Vec<f32> = (0..n).map(|_| 1.125 + 0.875 * lcg(&mut st)).collect();
+    let w: Vec<f32> = (0..n).map(|_| 1.125 + 0.875 * st.signed()).collect();
 
     // GUARD: a zero-stub forward must NOT let the FD check pass trivially.
     let l0 = loss_w(&gpu, &pred, &tgt, &w, m, scale);
@@ -351,7 +343,7 @@ fn glue_fd_mse_grad_w() {
     let (atol, rtol) = (4e-3f32, 8e-2f32);
     for dir in 0..2 {
         // LCG direction over ALL 15 entries.
-        let v = lcg_vec(&mut st, total);
+        let v = st.vec(total);
         let a = dot(&analytic, &v);
 
         let plus: Vec<f32> = pred.iter().zip(v.iter()).map(|(&p, &vi)| p + h * vi).collect();
@@ -411,12 +403,12 @@ fn glue_pad_crop_adjoint() {
     // dot in ascending index order on both sides.
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (nc, h, w) = (2usize, 3usize, 2usize);
-    let mut st = 0xADD_017u64;
+    let mut st = Lcg::new(0xADD_017);
 
     for &(l, r, t, b) in &[(1usize, 2usize, 0usize, 1usize), (0, 0, 0, 0), (2, 0, 3, 0)] {
         let (hp, wp) = (h + t + b, w + l + r);
-        let x = lcg_vec(&mut st, nc * h * w); // unpadded shape
-        let y = lcg_vec(&mut st, nc * hp * wp); // padded shape
+        let x = st.vec(nc * h * w); // unpadded shape
+        let y = st.vec(nc * hp * wp); // padded shape
 
         let px = k_pad2d(&gpu, &x, h, w, (l, r, t, b));
         let cy = k_crop2d(&gpu, &y, h, w, (l, r, t, b));
@@ -437,7 +429,7 @@ fn glue_pad_crop_adjoint() {
     }
 
     // §6.4: crop2d(pad2d(x)) bitwise == x for asymmetric (1,2,0,1).
-    let x = lcg_vec(&mut st, nc * h * w);
+    let x = st.vec(nc * h * w);
     let px = k_pad2d(&gpu, &x, h, w, (1, 2, 0, 1));
     let back = k_crop2d(&gpu, &px, h, w, (1, 2, 0, 1));
     assert_bits(&back, &x, "crop2d(pad2d(x))");
@@ -475,9 +467,9 @@ fn glue_nlc_roundtrip_and_adjoint() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, hw) = (2usize, 3usize, 4usize);
     let total = n * c * hw;
-    let mut st = 0x0DDB_A11u64;
-    let x = lcg_vec(&mut st, total); // NCHW
-    let y = lcg_vec(&mut st, total); // NLC
+    let mut st = Lcg::new(0x00DD_BA11_u64);
+    let x = st.vec(total); // NCHW
+    let y = st.vec(total); // NLC
 
     // Roundtrip BITWISE (permutations are pure copies).
     let fwd = k_nchw_nlc(&gpu, &x, c, hw);
@@ -500,25 +492,25 @@ fn glue_deterministic_bitwise() {
     const SEED: u64 = 0xDE7E_121Eu64;
 
     // Regenerate identical inputs from the same fixed seed for each pass.
-    let inputs = |st: &mut u64| {
-        let mul_a = lcg_vec(st, 7);
-        let mul_b = lcg_vec(st, 7);
-        let sr_x = lcg_vec(st, 10); // N=2, M=5
-        let sr_s = lcg_vec(st, 2);
-        let em_x = lcg_vec(st, 6); // N=2, M=3
-        let em_f = lcg_vec(st, 6);
-        let em_ab = lcg_vec(st, 4);
-        let ms_pred = lcg_vec(st, 12); // N=3, M=4
-        let ms_tgt = lcg_vec(st, 12);
-        let ms_w: Vec<f32> = (0..3).map(|_| 1.125 + 0.875 * lcg(st)).collect();
-        let pad_x = lcg_vec(st, 2 * 2 * 3); // NC=2, h=2, w=3
-        let crop_x = lcg_vec(st, 2 * 5 * 4); // padded: hp=5, wp=4 for (1,0,2,1)
-        let perm_x = lcg_vec(st, 2 * 3 * 4); // N=2, C=3, hw=4
+    let inputs = |st: &mut Lcg| {
+        let mul_a = st.vec(7);
+        let mul_b = st.vec(7);
+        let sr_x = st.vec(10); // N=2, M=5
+        let sr_s = st.vec(2);
+        let em_x = st.vec(6); // N=2, M=3
+        let em_f = st.vec(6);
+        let em_ab = st.vec(4);
+        let ms_pred = st.vec(12); // N=3, M=4
+        let ms_tgt = st.vec(12);
+        let ms_w: Vec<f32> = (0..3).map(|_| 1.125 + 0.875 * st.signed()).collect();
+        let pad_x = st.vec(2 * 2 * 3); // NC=2, h=2, w=3
+        let crop_x = st.vec(2 * 5 * 4); // padded: hp=5, wp=4 for (1,0,2,1)
+        let perm_x = st.vec(2 * 3 * 4); // N=2, C=3, hw=4
         (mul_a, mul_b, sr_x, sr_s, em_x, em_f, em_ab, ms_pred, ms_tgt, ms_w, pad_x, crop_x, perm_x)
     };
 
     let pass = || {
-        let mut st = SEED;
+        let mut st = Lcg::new(SEED);
         let (mul_a, mul_b, sr_x, sr_s, em_x, em_f, em_ab, ms_pred, ms_tgt, ms_w, pad_x, crop_x, perm_x) =
             inputs(&mut st);
         vec![
@@ -553,9 +545,9 @@ fn glue_zero_weight_sample_contributes_zero() {
     // loss partial sum and the gradient (finite inputs by contract).
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (m, scale) = (3usize, 0.7f32);
-    let mut st = 0x00C0_FFEEu64; // fixed seed
-    let pred = lcg_vec(&mut st, 2 * m);
-    let tgt = lcg_vec(&mut st, 2 * m);
+    let mut st = Lcg::new(0x00C0_FFEE); // fixed seed
+    let pred = st.vec(2 * m);
+    let tgt = st.vec(2 * m);
     let w = [0.0f32, 1.5];
 
     let out = k_mse_value_w(&gpu, &pred, &tgt, &w, m);

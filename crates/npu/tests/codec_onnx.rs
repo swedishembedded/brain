@@ -10,6 +10,7 @@
 //! `Sin`/`Erf` primitives that compose SnakeBeta / exact-GELU. The `init_f32`
 //! shape checks in the builder also validate every weight's declared shape.
 
+use data::rng::Lcg;
 use std::collections::HashMap;
 
 use codec::CodecConfig;
@@ -61,15 +62,9 @@ fn synth_weights(cfg: &CodecConfig) -> HashMap<String, Vec<f32>> {
     let dec = cfg.decoder_dim as usize;
 
     let mut m: HashMap<String, Vec<f32>> = HashMap::new();
-    let mut seed = 1u64;
+    let mut seed = Lcg::new(1);
     let mut put = |m: &mut HashMap<String, Vec<f32>>, name: &str, numel: usize| {
-        let v: Vec<f32> = (0..numel)
-            .map(|_| {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                ((seed >> 33) as f32 / u32::MAX as f32 - 0.5) * 0.1
-            })
-            .collect();
-        m.insert(name.to_string(), v);
+        m.insert(name.to_string(), seed.vec_scaled(numel, 0.05));
     };
 
     // RVQ.

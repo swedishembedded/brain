@@ -29,10 +29,15 @@ class Lcg:
 
     def next(s):
         s.v = (s.v * 6364136223846793005 + 1442695040888963407) % (1 << 64)
-        # replicate the Rust f32 op order exactly:
-        # (((v>>33) as f32 / (1<<31) as f32) - 1.0) * 0.5
+        # replicate `data::rng::Lcg::scaled(0.5)`'s f32 op order exactly:
+        # ((v >> 32) as f32 / (1<<31) as f32 - 1.0) * 0.5
+        #
+        # The shift is 32, not 33. `v >> 33` keeps 31 bits, so `/ 2^31` lands in
+        # [0,1) and the `- 1.0` put EVERY sample in [-1, 0) — the shared Rust
+        # helper was corrected to straddle zero, and this golden's inputs are
+        # that stream, so it moves with it.
         import numpy as np
-        raw = (np.float32(s.v >> 33) / np.float32(1 << 31) - np.float32(1.0)) * np.float32(0.5)
+        raw = (np.float32(s.v >> 32) / np.float32(1 << 31) - np.float32(1.0)) * np.float32(0.5)
         return float(raw)
 
     def vec(s, n):

@@ -10,6 +10,7 @@
 //! lives in `tests/gn_fd.rs` (mse_fd.rs pattern). All test fn names start
 //! with `gn_` so `cargo test gn_` selects exactly this unit's tests.
 
+use data::rng::Lcg;
 use gpu_core::Gpu;
 use wm_core::gn::{num_groups, Gn, GnDims};
 
@@ -20,15 +21,6 @@ static KERNEL_SOURCES: [(&str, &str); 7] = Gn::kernel_sources();
 
 fn gpu() -> Gpu {
     gpu_core::testgpu::dev(&KERNEL_SOURCES)
-}
-
-/// Deterministic LCG in [-1, 1). Spec §10.3 requires seeded data in [−1,1];
-/// mse_fd.rs's `>> 33` variant keeps only 31 bits and thus lands in [−1,0)
-/// (its `~[-1,1)` comment is wrong) — copying it here lost all sign coverage,
-/// so this takes 32 bits before the 2^31 scale (round-2 adversary fix).
-fn lcg(state: &mut u64) -> f32 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*state >> 32) as f32 / (1u64 << 31) as f32) - 1.0
 }
 
 struct Fwd {
@@ -313,8 +305,8 @@ fn gn_g_equals_c_is_instance_norm() {
     let (n, c, h, w) = (2u32, 3u32, 2u32, 2u32);
     let eps = 1e-2f32;
     let d = GnDims::new(n, c, h, w, c, eps).expect("valid dims");
-    let mut seed = 0x0A11_5EEDu64;
-    let x: Vec<f32> = (0..d.elems()).map(|_| lcg(&mut seed)).collect();
+    let mut seed = Lcg::new(0x0A11_5EED);
+    let x: Vec<f32> = (0..d.elems()).map(|_| seed.signed()).collect();
     let mut gb = vec![1.0f32; c as usize]; // gamma = 1
     gb.extend(std::iter::repeat_n(0.0f32, c as usize)); // beta = 0
 
@@ -342,11 +334,11 @@ fn gn_g_equals_c_is_instance_norm() {
 #[test]
 fn gn_deterministic_bitwise() {
     let d = GnDims::new(2, 4, 3, 2, 2, 1e-5).expect("valid dims");
-    let mut seed = 0xD37E_2814_57A7_E5EEu64;
-    let x: Vec<f32> = (0..d.elems()).map(|_| lcg(&mut seed)).collect();
-    let mut gb: Vec<f32> = (0..d.c).map(|_| 1.0 + 0.5 * lcg(&mut seed)).collect(); // gamma ~[0.5,1.5)
-    gb.extend((0..d.c).map(|_| lcg(&mut seed))); // beta
-    let dy: Vec<f32> = (0..d.elems()).map(|_| lcg(&mut seed)).collect();
+    let mut seed = Lcg::new(0xD37E_2814_57A7_E5EE);
+    let x: Vec<f32> = (0..d.elems()).map(|_| seed.signed()).collect();
+    let mut gb: Vec<f32> = (0..d.c).map(|_| 1.0 + 0.5 * seed.signed()).collect(); // gamma ~[0.5,1.5)
+    gb.extend((0..d.c).map(|_| seed.signed())); // beta
+    let dy: Vec<f32> = (0..d.elems()).map(|_| seed.signed()).collect();
 
     let gpu = gpu();
     let gn = Gn::seq();

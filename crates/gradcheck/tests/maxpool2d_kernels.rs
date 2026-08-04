@@ -38,6 +38,7 @@
 //!
 //! Run with `BRAIN_DEVICE=cpu` for a headless gating run.
 
+use data::rng::Lcg;
 use gpu_core::Gpu;
 
 static KERNELS: &[(&str, &str)] = &[
@@ -51,17 +52,6 @@ fn skip() -> bool {
     std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
 }
 
-// ---------------------------------------------------------------------------
-// Deterministic LCG (never `rand`) — values in ~[-1, 1).
-// ---------------------------------------------------------------------------
-fn lcg(state: &mut u64) -> f32 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*state >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-}
-fn randvec(seed: u64, n: usize) -> Vec<f32> {
-    let mut st = seed;
-    (0..n).map(|_| lcg(&mut st)).collect()
-}
 fn dot(a: &[f32], b: &[f32]) -> f64 {
     a.iter().zip(b).map(|(&x, &y)| x as f64 * y as f64).sum()
 }
@@ -241,7 +231,7 @@ fn stride1_base_case_including_all_negative_windows() {
         assert_eq!(p.ho(), h, "stride-1 with pad=K/2 must preserve H");
         assert_eq!(p.wo(), w, "stride-1 with pad=K/2 must preserve W");
 
-        let mut x = randvec(101, p.x_len());
+        let mut x = Lcg::new(101).vec(p.x_len());
         for v in x.iter_mut().take(p.x_len() / 3) {
             *v = -(v.abs()) - 1.0;
         }
@@ -278,7 +268,7 @@ fn forward_matches_reference() {
     }
     let gpu = gpu_core::testgpu::dev(KERNELS);
     for (tag, p) in configs() {
-        let x = randvec(2024 + p.h as u64 * 31 + p.k as u64, p.x_len());
+        let x = Lcg::new(2024 + p.h as u64 * 31 + p.k as u64).vec(p.x_len());
         let (y, am) = gpu_fwd(&gpu, p, &x);
         let (ry, ram) = ref_fwd(p, &x);
         assert_eq!(y.len(), p.y_len(), "{tag}: Ho/Wo sizing");
@@ -336,8 +326,8 @@ fn dx_matches_scatter_reference() {
     }
     let gpu = gpu_core::testgpu::dev(KERNELS);
     for (tag, p) in configs() {
-        let x = randvec(77 + p.k as u64, p.x_len());
-        let dy = randvec(1337 + p.stride as u64, p.y_len());
+        let x = Lcg::new(77 + p.k as u64).vec(p.x_len());
+        let dy = Lcg::new(1337 + p.stride as u64).vec(p.y_len());
         let (_, am, dx) = gpu_fwd_bwd(&gpu, p, &x, &dy);
         let am_u: Vec<usize> = am.iter().map(|&v| v as usize).collect();
         let rdx = ref_dx(p, &am_u, &dy);
@@ -371,8 +361,8 @@ fn dx_is_the_adjoint_of_the_frozen_argmax_operator() {
     }
     let gpu = gpu_core::testgpu::dev(KERNELS);
     for (tag, p) in configs() {
-        let x = randvec(555 + p.w as u64, p.x_len());
-        let dy = randvec(9001 + p.h as u64, p.y_len());
+        let x = Lcg::new(555 + p.w as u64).vec(p.x_len());
+        let dy = Lcg::new(9001 + p.h as u64).vec(p.y_len());
         let (y, _, dx) = gpu_fwd_bwd(&gpu, p, &x, &dy);
         let lhs = dot(&y, &dy);
         let rhs = dot(&x, &dx);
@@ -399,8 +389,8 @@ fn dx_matches_finite_differences() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let eps = 1e-3f32;
     for (tag, p) in configs() {
-        let x = randvec(31337 + p.k as u64 * 7, p.x_len());
-        let dy = randvec(4242 + p.stride as u64 * 13, p.y_len());
+        let x = Lcg::new(31337 + p.k as u64 * 7).vec(p.x_len());
+        let dy = Lcg::new(4242 + p.stride as u64 * 13).vec(p.y_len());
         let (_, _, dx) = gpu_fwd_bwd(&gpu, p, &x, &dy);
 
         let loss = |xv: &[f32]| -> f64 {
@@ -437,7 +427,7 @@ fn uncovered_pixels_get_exactly_zero_gradient() {
     }
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let p = Pool { n: 1, c: 2, h: 8, w: 8, k: 2, stride: 3, pad: 0 };
-    let x = randvec(606, p.x_len());
+    let x = Lcg::new(606).vec(p.x_len());
     let dy: Vec<f32> = (0..p.y_len()).map(|i| 1.0 + i as f32).collect(); // all non-zero
     let (_, _, dx) = gpu_fwd_bwd(&gpu, p, &x, &dy);
 
@@ -504,8 +494,8 @@ fn shape_sweep_forward_and_backward_match_the_oracles() {
                     }
                     let p = Pool { n: 2, c: 2, h, w, k, stride, pad };
                     let tag = format!("h{h}w{w}k{k}s{stride}p{pad}");
-                    let x = randvec(9_000 + (checked as u64) * 17, p.x_len());
-                    let dy = randvec(4_000 + (checked as u64) * 29, p.y_len());
+                    let x = Lcg::new(9_000 + (checked as u64) * 17).vec(p.x_len());
+                    let dy = Lcg::new(4_000 + (checked as u64) * 29).vec(p.y_len());
                     let (y, am, dx) = gpu_fwd_bwd(&gpu, p, &x, &dy);
 
                     let (ry, ram) = ref_fwd(p, &x);
@@ -620,8 +610,8 @@ fn k1_stride1_is_the_identity_in_both_directions() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let p = Pool { n: 2, c: 3, h: 5, w: 7, k: 1, stride: 1, pad: 0 };
     assert_eq!((p.ho(), p.wo()), (p.h, p.w));
-    let x = randvec(4711, p.x_len());
-    let dy = randvec(1174, p.y_len());
+    let x = Lcg::new(4711).vec(p.x_len());
+    let dy = Lcg::new(1174).vec(p.y_len());
     let (y, am, dx) = gpu_fwd_bwd(&gpu, p, &x, &dy);
     for i in 0..p.x_len() {
         assert_eq!(y[i].to_bits(), x[i].to_bits(), "y[{i}] is not a copy of x");

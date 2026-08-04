@@ -5,21 +5,13 @@
 //!
 //! The multi-scale family. Two of the three take TWO inputs, so the interesting
 //! failure is a gradient that reaches one input and not the other.
+use data::rng::Lcg;
 use std::collections::HashMap;
 
 use depth::blocks::{lightweight_sppf, MinimalCrossScale, UltraLightFusion};
 use gpu_core::{DeviceBuffer, Gpu};
 use paramstore::ParamStore;
 use vision::{Ctx, Shape};
-
-fn lcg(s: &mut u64) -> f32 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-}
-fn rv(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed;
-    (0..n).map(|_| lcg(&mut s)).collect()
-}
 
 /// Init every param of `params` with a sane scale for FD.
 fn store(gpu: &Gpu, params: Vec<(String, usize)>, seed: u64) -> ParamStore {
@@ -30,11 +22,11 @@ fn store(gpu: &Gpu, params: Vec<(String, usize)>, seed: u64) -> ParamStore {
         } else if n.ends_with("running_var") {
             vec![1.0; *numel]
         } else if n.ends_with("bn.weight") || n.ends_with(".1.weight") && *numel < 64 {
-            rv(seed ^ i as u64, *numel).iter().map(|v| 1.0 + 0.2 * v).collect()
+            Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 1.0 + 0.2 * v).collect()
         } else if n.ends_with("bn.bias") || n.ends_with(".1.bias") {
-            rv(seed ^ i as u64, *numel).iter().map(|v| 0.1 * v).collect()
+            Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 0.1 * v).collect()
         } else {
-            rv(seed ^ i as u64, *numel).iter().map(|v| 0.4 * v).collect()
+            Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 0.4 * v).collect()
         };
         init.insert(n.clone(), v);
     }
@@ -45,7 +37,7 @@ fn store(gpu: &Gpu, params: Vec<(String, usize)>, seed: u64) -> ParamStore {
 fn fd_check(gpu: &Gpu, ps: &ParamStore, wname: &str, loss: &dyn Fn(&Gpu, &ParamStore) -> f32) {
     let g = gpu.read(ps.g(wname), ps.numel(wname));
     let n = g.len();
-    let dir: Vec<f32> = rv(3, n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+    let dir: Vec<f32> = Lcg::new(3).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
     let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
     let w0 = gpu.read(ps.w(wname), n);
     let eps = 5e-4f32;
@@ -139,8 +131,8 @@ fn lightweight_sppf_backward_matches_finite_differences() {
     let ps = store(&gpu, probe.param_list(), 61);
     let m = lightweight_sppf(&ctx, "s", shape, 8, true);
     let tot = shape.numel() as usize;
-    let x = rv(0xAB, tot);
-    let r = rv(67, tot);
+    let x = Lcg::new(0xAB).vec(tot);
+    let r = Lcg::new(67).vec(tot);
 
     let xb = gpu.storage_init("x", &x);
     m.forward(&ctx, &ps, &xb);
@@ -268,10 +260,10 @@ fn cross_scale_both_inputs_get_gradients_from_both_outputs() {
     let ps = store(&gpu, probe.param_list(), 71);
     let m = MinimalCrossScale::new(&ctx, "m", high, low, true);
     let (nh, nl) = (high.numel() as usize, low.numel() as usize);
-    let xh = rv(0xC1, nh);
-    let xl = rv(0xC2, nl);
-    let rh = rv(73, nh);
-    let rl = rv(79, nl);
+    let xh = Lcg::new(0xC1).vec(nh);
+    let xl = Lcg::new(0xC2).vec(nl);
+    let rh = Lcg::new(73).vec(nh);
+    let rl = Lcg::new(79).vec(nl);
 
     let xhb = gpu.storage_init("xh", &xh);
     let xlb = gpu.storage_init("xl", &xl);
@@ -382,9 +374,9 @@ fn fusion_backward_matches_finite_differences() {
     let m = UltraLightFusion::new(&ctx, "f", high, low, 4, true);
     let (nh, nl) = (high.numel() as usize, low.numel() as usize);
     let no = m.out_shape.numel() as usize;
-    let xh = rv(0xD1, nh);
-    let xl = rv(0xD2, nl);
-    let r = rv(89, no);
+    let xh = Lcg::new(0xD1).vec(nh);
+    let xl = Lcg::new(0xD2).vec(nl);
+    let r = Lcg::new(89).vec(no);
 
     let xhb = gpu.storage_init("xh", &xh);
     let xlb = gpu.storage_init("xl", &xl);

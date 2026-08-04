@@ -6,21 +6,13 @@
 //! The decoder's tail, and the only block whose two variants are DIFFERENT
 //! ARCHITECTURES rather than two implementations — the two released checkpoints
 //! differ by exactly this.
+use data::rng::Lcg;
 use std::collections::HashMap;
 
 use depth::blocks::{FastConvexUpsample, UpsampleKind};
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 use vision::{Ctx, Shape};
-
-fn lcg(s: &mut u64) -> f32 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-}
-fn rv(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed;
-    (0..n).map(|_| lcg(&mut s)).collect()
-}
 
 fn store(gpu: &Gpu, params: Vec<(String, usize)>, seed: u64) -> ParamStore {
     let mut init: HashMap<String, Vec<f32>> = HashMap::new();
@@ -30,9 +22,9 @@ fn store(gpu: &Gpu, params: Vec<(String, usize)>, seed: u64) -> ParamStore {
         } else if n.ends_with("running_var") {
             vec![1.0; *numel]
         } else if n.ends_with(".1.weight") || n.ends_with(".4.weight") {
-            rv(seed ^ i as u64, *numel).iter().map(|v| 1.0 + 0.2 * v).collect()
+            Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 1.0 + 0.2 * v).collect()
         } else {
-            rv(seed ^ i as u64, *numel).iter().map(|v| 0.4 * v).collect()
+            Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 0.4 * v).collect()
         };
         init.insert(n.clone(), v);
     }
@@ -141,7 +133,7 @@ fn convex_upsample_of_a_constant_depth_is_that_constant() {
     let ps = store(&gpu, probe.param_list(), 97);
     let m = FastConvexUpsample::new(&ctx, "u", UpsampleKind::Unfold, feat, d, 2, 1.0, true);
 
-    let fb = gpu.storage_init("f", &rv(0xE1, feat.numel() as usize));
+    let fb = gpu.storage_init("f", &Lcg::new(0xE1).vec(feat.numel() as usize));
     // A positive constant, so the final ReLU is the identity here.
     let db = gpu.storage_init("d", &vec![2.5f32; d.numel() as usize]);
     m.forward(&ctx, &ps, &fb, &db);
@@ -162,7 +154,7 @@ fn blend_upsample_of_a_constant_depth_is_that_constant() {
     let ps = store(&gpu, probe.param_list(), 101);
     let m = FastConvexUpsample::new(&ctx, "u", UpsampleKind::Blend, feat, d, 2, 1.0, true);
 
-    let fb = gpu.storage_init("f", &rv(0xE2, feat.numel() as usize));
+    let fb = gpu.storage_init("f", &Lcg::new(0xE2).vec(feat.numel() as usize));
     let db = gpu.storage_init("d", &vec![1.75f32; d.numel() as usize]);
     m.forward(&ctx, &ps, &fb, &db);
     let out = gpu.read(m.out(), m.out_shape.numel() as usize);
@@ -179,9 +171,9 @@ fn fd_both(kind: UpsampleKind, seed: u64, weights: &[&str]) {
     let ps = store(&gpu, probe.param_list(), seed);
     let m = FastConvexUpsample::new(&ctx, "u", kind, feat, d, 2, 1.0, true);
     let no = m.out_shape.numel() as usize;
-    let fv = rv(0xF1 ^ seed, feat.numel() as usize);
+    let fv = Lcg::new(0xF1 ^ seed).vec(feat.numel() as usize);
     // Strictly positive: keeps the output off the final ReLU's kink.
-    let dv: Vec<f32> = rv(0xF2 ^ seed, d.numel() as usize).iter().map(|v| 2.0 + 0.3 * v).collect();
+    let dv: Vec<f32> = Lcg::new(0xF2 ^ seed).vec(d.numel() as usize).iter().map(|v| 2.0 + 0.3 * v).collect();
     // The loss weights are CENTERED, and that is not cosmetic. `out` here is ~2.0
     // everywhere (a depth map, not a zero-mean feature map), so an uncentered `r`
     // makes the loss ~= 2.0 * sum(r) — measured at -87.74, whose f32 ULP is 7.6e-6.
@@ -190,7 +182,7 @@ fn fd_both(kind: UpsampleKind, seed: u64, weights: &[&str]) {
     // multiple of the ULP: pure quantization, converging to the analytic only once
     // eps reaches 1e-2. Centering `r` removes the constant that carries no gradient
     // and restores ~4 orders of FD headroom.
-    let raw = rv(0xF3 ^ seed, no);
+    let raw = Lcg::new(0xF3 ^ seed).vec(no);
     let mean = raw.iter().sum::<f32>() / raw.len() as f32;
     let r: Vec<f32> = raw.iter().map(|v| v - mean).collect();
 
@@ -213,7 +205,7 @@ fn fd_both(kind: UpsampleKind, seed: u64, weights: &[&str]) {
     for w in weights {
         let g = gpu.read(ps.g(w), ps.numel(w));
         let n = g.len();
-        let dir: Vec<f32> = rv(3, n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(3).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let w0 = gpu.read(ps.w(w), n);
         let eps = 5e-4f32;

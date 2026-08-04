@@ -302,14 +302,7 @@ mod embed_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn rng(seed: u64) -> impl FnMut() -> f32 {
-        let mut s = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-        move || {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-        }
-    }
+    use data::rng::Lcg;
 
     /// The point of this module: the host result must equal what the WGSL
     /// kernel computes. Run through the CPU backend so the check is
@@ -317,9 +310,9 @@ mod tests {
     #[test]
     fn rmsnorm_matches_the_wgsl_kernel() {
         let (rows, d, eps) = (5usize, 64usize, 1e-6f32);
-        let mut r = rng(7);
-        let x: Vec<f32> = (0..rows * d).map(|_| r()).collect();
-        let g: Vec<f32> = (0..d).map(|_| r() * 0.5 + 1.0).collect();
+        let mut r = Lcg::new(7);
+        let x: Vec<f32> = (0..rows * d).map(|_| r.signed()).collect();
+        let g: Vec<f32> = (0..d).map(|_| r.signed() * 0.5 + 1.0).collect();
 
         let gpu = gpu_core::Gpu::new_cpu(&[("rmsnorm", kernels::RMSNORM)]);
         let xb = gpu.storage_init("x", &x);
@@ -350,17 +343,17 @@ mod tests {
     #[test]
     fn single_row_helper_matches_the_rows_form() {
         let d = 16;
-        let mut r = rng(3);
-        let x: Vec<f32> = (0..d).map(|_| r()).collect();
-        let g: Vec<f32> = (0..d).map(|_| r()).collect();
+        let mut r = Lcg::new(3);
+        let x: Vec<f32> = (0..d).map(|_| r.signed()).collect();
+        let g: Vec<f32> = (0..d).map(|_| r.signed()).collect();
         assert_eq!(rmsnorm(&x, &g, 1e-6), rmsnorm_rows(&x, &g, 1, d, 1e-6));
     }
 
     #[test]
     fn layernorm_centres_and_scales() {
         let (rows, c, eps) = (4usize, 32usize, 1e-5f32);
-        let mut r = rng(11);
-        let x: Vec<f32> = (0..rows * c).map(|_| r() * 3.0 + 2.0).collect();
+        let mut r = Lcg::new(11);
+        let x: Vec<f32> = (0..rows * c).map(|_| r.signed() * 3.0 + 2.0).collect();
         let g = vec![1.0f32; c];
         let b = vec![0.0f32; c];
         let (y, mean, inv) = layernorm_rows_with_stats(&x, &g, &b, rows, c, eps);
@@ -389,8 +382,8 @@ mod tests {
     #[test]
     fn rope_is_a_norm_preserving_rotation() {
         let (heads, hd, theta) = (2usize, 8usize, 10000.0f32);
-        let mut r = rng(5);
-        let orig: Vec<f32> = (0..heads * hd).map(|_| r()).collect();
+        let mut r = Lcg::new(5);
+        let orig: Vec<f32> = (0..heads * hd).map(|_| r.signed()).collect();
 
         let mut at0 = orig.clone();
         rope_neox_row(&mut at0, heads, hd, 0, theta);
@@ -417,9 +410,9 @@ mod tests {
     #[test]
     fn rope_dot_product_depends_only_on_relative_position() {
         let (heads, hd, theta) = (1usize, 16usize, 10000.0f32);
-        let mut r = rng(9);
-        let q0: Vec<f32> = (0..hd).map(|_| r()).collect();
-        let k0: Vec<f32> = (0..hd).map(|_| r()).collect();
+        let mut r = Lcg::new(9);
+        let q0: Vec<f32> = (0..hd).map(|_| r.signed()).collect();
+        let k0: Vec<f32> = (0..hd).map(|_| r.signed()).collect();
         let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
 
         let mut q_a = q0.clone();

@@ -6,21 +6,13 @@
 //! The first block where the INPUT gradient is the interesting one: `x` reaches the
 //! output by three routes (both strips and the final multiply), so a dropped route
 //! is invisible in the weight grads and shows up only in `d_in`.
+use data::rng::Lcg;
 use std::collections::HashMap;
 
 use depth::blocks::StripPoolingAttention;
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 use vision::{Ctx, Shape};
-
-fn lcg(s: &mut u64) -> f32 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-}
-fn rv(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed;
-    (0..n).map(|_| lcg(&mut s)).collect()
-}
 
 fn fixture(shape: Shape, seed: u64) -> (Gpu, ParamStore, Vec<f32>) {
     let gpu = Gpu::new_cpu(depth::net::PIPELINES);
@@ -34,16 +26,16 @@ fn fixture(shape: Shape, seed: u64) -> (Gpu, ParamStore, Vec<f32>) {
         } else if n.ends_with("running_var") {
             vec![1.0; *numel]
         } else if n.ends_with("gate_conv.1.weight") {
-            rv(seed ^ i as u64, *numel).iter().map(|v| 1.0 + 0.2 * v).collect()
+            Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 1.0 + 0.2 * v).collect()
         } else if n.ends_with("gate_conv.1.bias") {
-            rv(seed ^ i as u64, *numel).iter().map(|v| 0.1 * v).collect()
+            Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 0.1 * v).collect()
         } else {
-            rv(seed ^ i as u64, *numel).iter().map(|v| 0.5 * v).collect()
+            Lcg::new(seed ^ i as u64).vec(*numel).iter().map(|v| 0.5 * v).collect()
         };
         init.insert(n.clone(), v);
     }
     let ps = ParamStore::new(&gpu, params, &init);
-    (gpu, ps, rv(seed ^ 0xD, shape.numel() as usize))
+    (gpu, ps, Lcg::new(seed ^ 0xD).vec(shape.numel() as usize))
 }
 
 /// `nn.Sequential(Conv2d(dim,dim,1,groups=dim,bias=False), BatchNorm2d, Sigmoid)`.
@@ -87,7 +79,7 @@ fn strip_weight_grads_match_finite_differences() {
     let ctx = Ctx::new(&gpu, depth::net::ids());
     let m = StripPoolingAttention::new(&ctx, "s", shape, true);
     let tot = shape.numel() as usize;
-    let r = rv(43, tot);
+    let r = Lcg::new(43).vec(tot);
 
     let xb = gpu.storage_init("x", &x);
     m.forward(&ctx, &ps, &xb);
@@ -106,7 +98,7 @@ fn strip_weight_grads_match_finite_differences() {
     for wname in ["s.gate_conv.0.weight", "s.gate_conv.1.weight"] {
         let g = gpu.read(ps.g(wname), ps.numel(wname));
         let n = g.len();
-        let dir: Vec<f32> = rv(3, n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(3).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let w0 = gpu.read(ps.w(wname), n);
         let eps = 5e-4f32;
@@ -139,7 +131,7 @@ fn strip_input_grad_matches_finite_differences_elementwise() {
     let ctx = Ctx::new(&gpu, depth::net::ids());
     let m = StripPoolingAttention::new(&ctx, "s", shape, true);
     let tot = shape.numel() as usize;
-    let r = rv(47, tot);
+    let r = Lcg::new(47).vec(tot);
 
     let xb = gpu.storage_init("x", &x);
     m.forward(&ctx, &ps, &xb);

@@ -8,6 +8,7 @@
 //!      a scalar loss `L = <y, dy>` w.r.t. x;
 //!   3. weight grad: `conv1d_dw`/`convtr1d_dw` == finite differences w.r.t. w.
 
+use data::rng::Lcg;
 use audio::conv::{conv1d_ref, convtr1d_ref, Conv1d};
 use gpu_core::{BufUsage, DeviceBuffer, Gpu};
 
@@ -25,18 +26,6 @@ const C_DW: usize = 2;
 const T_FWD: usize = 3;
 const T_DX: usize = 4;
 const T_DW: usize = 5;
-
-struct Lcg(u64);
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        ((self.0 >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-    }
-    fn vec(&mut self, n: usize) -> Vec<f32> {
-        (0..n).map(|_| self.next()).collect()
-    }
-}
-
 fn buf(g: &Gpu, data: &[f32]) -> DeviceBuffer {
     let b = g.buffer("b", (data.len() * 4) as u64, BufUsage::STORAGE | BufUsage::COPY_DST | BufUsage::COPY_SRC);
     g.write(&b, bytemuck::cast_slice(data));
@@ -56,7 +45,7 @@ fn max_abs(a: &[f32], b: &[f32]) -> f32 {
 /// kernels / weight layout / reference).
 fn check(c: Conv1d, transposed: bool, seed: u64) {
     let g = Gpu::new_cpu(PIPES);
-    let mut r = Lcg(seed);
+    let mut r = Lcg::new(seed);
     let xn = (c.n * c.cin * c.l) as usize;
     let yn = (c.n * c.cout * c.lo) as usize;
     let wn = if transposed { c.weight_numel_transposed() } else { c.weight_numel() };

@@ -5,12 +5,8 @@
 //! same per-output accumulation order → bitwise equality, including ragged
 //! row-tails.
 
+use data::rng::Lcg;
 use gpu_core::Gpu;
-
-fn lcg(seed: &mut u64) -> f32 {
-    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*seed >> 33) as f32 / (1u64 << 31) as f32 - 1.0) * 0.5
-}
 
 #[test]
 fn matches_naive_matmul_bitwise() {
@@ -25,10 +21,10 @@ fn matches_naive_matmul_bitwise() {
         ("matmul_rows", kernels::MATMUL_ROWS),
     ]);
     std::env::remove_var("BRAIN_NO_FASTCONV");
-    let mut seed = 0xC0FFEE;
+    let mut seed = Lcg::new(0xC0FFEE);
     for (m, k, n) in [(1usize, 7usize, 5usize), (8, 16, 3), (13, 32, 20), (64, 24, 8), (17, 5, 1)] {
-        let x: Vec<f32> = (0..m * k).map(|_| lcg(&mut seed)).collect();
-        let w: Vec<f32> = (0..n * k).map(|_| lcg(&mut seed)).collect();
+        let x: Vec<f32> = (0..m * k).map(|_| seed.scaled(0.5)).collect();
+        let w: Vec<f32> = (0..n * k).map(|_| seed.scaled(0.5)).collect();
         let xb = gpu.storage_init("x", &x);
         let wb = gpu.storage_init("w", &w);
         let naive = gpu.storage((m * n) as u64);

@@ -13,6 +13,7 @@
 //!
 //! Run with `BRAIN_DEVICE=cpu`.
 
+use data::rng::Lcg;
 use gpu_core::Gpu;
 
 // Kernel order passed to Gpu::new; indices below reference these.
@@ -20,11 +21,6 @@ static KERNELS: &[(&str, &str)] = &[
     ("mse_value", kernels::MSE_VALUE), // 0
     ("mse_grad", kernels::MSE_GRAD),   // 1
 ];
-
-fn lcg(state: &mut u64) -> f32 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*state >> 33) as f32 / (1u64 << 31) as f32) - 1.0 // ~[-1,1)
-}
 
 /// Run `mse_value` for a given prediction vector; return the summed loss.
 fn loss(gpu: &Gpu, pred: &[f32], target: &[f32]) -> f32 {
@@ -65,10 +61,10 @@ fn mse_value_matches_reference() {
 #[test]
 fn mse_grad_matches_finite_differences() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut st = 0x5EED_C0DEu64;
+    let mut st = Lcg::new(0x5EED_C0DE);
     let n = 37usize; // not a multiple of 64 -> exercises the bounds check
-    let pred: Vec<f32> = (0..n).map(|_| lcg(&mut st)).collect();
-    let target: Vec<f32> = (0..n).map(|_| lcg(&mut st)).collect();
+    let pred: Vec<f32> = (0..n).map(|_| st.signed()).collect();
+    let target: Vec<f32> = (0..n).map(|_| st.signed()).collect();
 
     let analytic = grad(&gpu, &pred, &target);
 

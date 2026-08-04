@@ -4,6 +4,26 @@ The goal is to evaluate every architecture **reliably against the same input
 data**, and to keep the from-scratch WGSL backprop provably correct without a
 PyTorch oracle. Coverage is layered:
 
+## 0. Test inputs: one PRNG, `data::rng::Lcg`
+
+Tests never depend on `rand`. Deterministic filler comes from
+**`data::rng::Lcg`** (`Lcg::new(seed)` → `signed()` `[-1,1)`, `unit()` `[0,1)`,
+`scaled(a)` `[-a,a)`, plus the `vec*` bulk forms) — and from nowhere else.
+`data::rng::Rng` (SplitMix64) is a *different* generator and belongs to the
+on-disk dataset generators; its stream must not move.
+
+The reason `Lcg` exists as a shared type rather than a per-file helper: the
+copied helper was
+`((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0`, and `u64 >> 33` keeps only
+31 bits — so it returned `[-1, 0)` and **no test ever fed a positive value to
+an activation kernel**. Three files had independently rediscovered and locally
+patched that (`prelu_kernels.rs`, `convtr2d_kernels.rs`, `wm-core/tests/*`); ~40
+had not. `Lcg::signed` shifts by 32 and straddles zero.
+
+Consequence to remember when a fixture changes: goldens generated from this
+stream move with it. `tools/vit_dump_gradcheck.py` replicates the Rust f32 op
+order exactly and must be kept in step with `Lcg`.
+
 ## 1. Per-crate unit tests (`cargo test`)
 
 | Crate | What's covered |

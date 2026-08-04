@@ -9,19 +9,12 @@
 //!   cargo build --release --example fused_parity -p brain-tts
 //!   ./target/release/examples/fused_parity out/tts-1b7
 
+use data::rng::Lcg;
 use npu::openvino::NpuDevice;
 use tts::npu_gen::{FusedMtp, MtpEngine};
 use tts::CpuMtp;
 
-fn mk(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed;
-    (0..n)
-        .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
-            ((s >> 33) as i32 as f32 / i32::MAX as f32) * 0.5
-        })
-        .collect()
-}
+
 
 fn main() {
     let dir = std::env::args().nth(1).unwrap_or_else(|| "out/tts-1b7".to_string());
@@ -34,8 +27,8 @@ fn main() {
     let mut fused = FusedMtp::load(&mtp_path, NpuDevice::Cpu, true, Some(std::path::Path::new(&cache)))
         .expect("FusedMtp load");
 
-    let th = mk(1, emb);
-    let cb0 = mk(2, emb);
+    let th = Lcg::new(1).vec_scaled(emb, 0.5);
+    let cb0 = Lcg::new(2).vec_scaled(emb, 0.5);
     let (codes_c, res_c) = cpu.generate_residuals(&th, &cb0);
     let (codes_f, res_f) = fused.generate_residuals(&th, &cb0);
 

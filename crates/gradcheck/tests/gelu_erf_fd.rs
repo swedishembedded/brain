@@ -20,6 +20,7 @@
 //!
 //! Run with `BRAIN_DEVICE=cpu`.
 
+use data::rng::Lcg;
 use gpu_core::Gpu;
 
 // Kernel order passed to Gpu::new; indices below reference these.
@@ -29,11 +30,6 @@ static KERNELS: &[(&str, &str)] = &[
     ("gelu", kernels::GELU),                 // 2
     ("gelu_bwd", kernels::GELU_BWD),         // 3
 ];
-
-fn lcg(state: &mut u64) -> f32 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    (((*state >> 33) as f32 / (1u64 << 31) as f32) - 1.0) * 3.0 // ~[-3,3)
-}
 
 /// Elementwise forward for kernel `k` (0 = gelu_erf, 2 = gelu).
 fn fwd(gpu: &Gpu, k: usize, x: &[f32]) -> Vec<f32> {
@@ -103,8 +99,8 @@ fn gelu_erf_forward_matches_reference_erf() {
 #[test]
 fn gelu_erf_bwd_matches_finite_differences() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
-    let mut st = 12345u64;
-    let x: Vec<f32> = (0..64).map(|_| lcg(&mut st)).collect();
+    let mut st = Lcg::new(12345u64);
+    let x: Vec<f32> = (0..64).map(|_| st.scaled(3.0)).collect();
 
     let analytic = dgelu(&gpu, 1, &x);
 

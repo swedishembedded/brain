@@ -5,6 +5,7 @@
 //! chunks must not change the attention output (the S=3 WorldMirror global
 //! attention is the first real multi-chunk user).
 
+use data::rng::Lcg;
 use gpu_core::Gpu;
 use model::vit::{chunked_attn_fwd, VitKernelIds, VitShape};
 
@@ -39,21 +40,12 @@ fn ids() -> VitKernelIds {
         matmul_rows: 11,
     }
 }
-
-struct Lcg(u64);
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        (((self.0 >> 33) as f32 / (1u64 << 31) as f32) - 1.0) * 0.5
-    }
-}
-
 fn run(chunk: u32, spans: &[(u32, u32)], rows: u32) -> Vec<f32> {
     let sh = VitShape { dim: 32, heads: 2, mlp: 64, eps: 1e-5 };
     let g = Gpu::new_cpu(PIPES);
     let k = ids();
-    let mut r = Lcg(0xBEEF);
-    let qkv_host: Vec<f32> = (0..rows as usize * 96).map(|_| r.next()).collect();
+    let mut r = Lcg::new(0xBEEF);
+    let qkv_host: Vec<f32> = (0..rows as usize * 96).map(|_| r.scaled(0.5)).collect();
     let qkv = g.storage_init("qkv", &qkv_host);
     let ctx = g.storage(rows as u64 * 32);
     // slab big enough for the largest chunk

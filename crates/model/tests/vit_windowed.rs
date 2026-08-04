@@ -14,6 +14,7 @@
 //! proposes a dedicated `window_partition`/`window_reverse` kernel: it prints
 //! the permutation cost next to the windowed-attention cost it enables.
 
+use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::CrossIds;
 use model::vit::{
@@ -120,18 +121,6 @@ fn qpool_ids() -> VitQPoolIds {
 fn cross_ids() -> CrossIds {
     CrossIds { scores: 6, softmax: 7, apply: 8 }
 }
-
-struct Lcg(u64);
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        (((self.0 >> 33) as f32 / (1u64 << 31) as f32) - 1.0) * 0.5
-    }
-    fn vec(&mut self, n: usize) -> Vec<f32> {
-        (0..n).map(|_| self.next()).collect()
-    }
-}
-
 fn dev() -> Gpu {
     gpu_core::testgpu::dev(PIPES)
 }
@@ -186,8 +175,8 @@ fn partition_then_reverse_is_bit_exact() {
     let (gh, gw, c) = (8u32, 8u32, 16u32);
     let plan = WindowPlan::shifted(gh, gw, 4, 4, 2, 2);
     let wi = WindowIndex::new(&g, &plan);
-    let mut r = Lcg(0x51DE);
-    let host = r.vec((gh * gw * c) as usize);
+    let mut r = Lcg::new(0x51DE);
+    let host = r.vec_scaled((gh * gw * c) as usize, 0.5);
     let x = g.storage_init("x", &host);
     let win = g.storage((gh * gw * c) as u64);
     let back = g.storage((gh * gw * c) as u64);
@@ -222,7 +211,7 @@ impl Blk {
         let sizes = [c, c, 3 * c * c, 3 * c, c * c, c, c, c, m * c, m, c * m, c];
         let mut bufs = Vec::new();
         for (i, n) in sizes.iter().enumerate() {
-            let mut v = r.vec(*n);
+            let mut v = r.vec_scaled(*n, 0.5);
             // norm gains near 1, projections scaled so softmax stays unsaturated
             if i == 0 || i == 6 {
                 for x in v.iter_mut() {
@@ -272,9 +261,9 @@ fn windowed_block_equals_per_window_block() {
     let plan = WindowPlan::new(gh, gw, wh, ww);
     let wi = WindowIndex::new(&g, &plan);
 
-    let mut r = Lcg(0xC0FFEE);
+    let mut r = Lcg::new(0xC0FFEE);
     let blk = Blk::new(&g, &sh, &mut r);
-    let host = r.vec((rows * sh.dim) as usize);
+    let host = r.vec_scaled((rows * sh.dim) as usize, 0.5);
 
     // --- path A: permute -> one block over window spans -> unpermute
     let x = g.storage_init("x", &host);
@@ -348,9 +337,9 @@ fn shifted_window_cached_block_matches_unchunked() {
     assert!(plan.ctx_bindable(sh.dim), "test shape must satisfy the ctx binding rule");
     let (rows, c, ms) = (plan.rows(), sh.dim, plan.max_span());
 
-    let mut r = Lcg(0x5417);
+    let mut r = Lcg::new(0x5417);
     let blk = Blk::new(&g, &sh, &mut r);
-    let host = r.vec((rows * c) as usize);
+    let host = r.vec_scaled((rows * c) as usize, 0.5);
 
     // reference: the inference builder over the same ragged spans
     let xref = g.storage_init("x", &host);
@@ -406,8 +395,8 @@ fn q_pool_matches_host_maxpool() {
     assert_eq!((pool.n, pool.ho(), pool.wo()), (2, 2, 2));
     let rows = plan.rows();
 
-    let mut r = Lcg(0xBEEF);
-    let qkv_host = r.vec((rows * 3 * c) as usize);
+    let mut r = Lcg::new(0xBEEF);
+    let qkv_host = r.vec_scaled((rows * 3 * c) as usize, 0.5);
     let qkv = g.storage_init("qkv", &qkv_host);
     let q_idx = row_index_buffer(&g, "q_idx", &region_index(rows, 3, 0));
     let cache = QPoolCache::new(&g, &pool, c);
@@ -459,9 +448,9 @@ fn pooled_attention_gradcheck() {
     let rows_q = pool.rows_out();
     assert_eq!(spans.len(), 2);
 
-    let mut r = Lcg(0x1234_5678);
-    let qkv_host = r.vec((rows * 3 * c) as usize);
-    let wloss = r.vec((rows_q * c) as usize);
+    let mut r = Lcg::new(0x1234_5678);
+    let qkv_host = r.vec_scaled((rows * 3 * c) as usize, 0.5);
+    let wloss = r.vec_scaled((rows_q * c) as usize, 0.5);
 
     let q_idx = row_index_buffer(&g, "q_idx", &region_index(rows, 3, 0));
     let cache = QPoolCache::new(&g, &pool, c);
@@ -596,8 +585,8 @@ fn measure_gather_vs_windowed_attention() {
         let plan = WindowPlan::new(gh, gw, win, win);
         let wi = WindowIndex::new(&g, &plan);
 
-        let mut r = Lcg(0xA5A5);
-        let x = g.storage_init("x", &r.vec((rows * c) as usize));
+        let mut r = Lcg::new(0xA5A5);
+        let x = g.storage_init("x", &r.vec_scaled((rows * c) as usize, 0.5));
         let winbuf = g.storage((rows * c) as u64);
         let out = g.storage((rows * c) as u64);
 
@@ -605,7 +594,7 @@ fn measure_gather_vs_windowed_attention() {
             vec![window_partition(&g, &ids, &wi, &x, &winbuf, c), window_reverse(&g, &ids, &wi, &winbuf, &out, c)];
 
         // the windowed attention the permutation enables, on its own
-        let qkv = g.storage_init("qkv", &r.vec((rows * 3 * c) as usize));
+        let qkv = g.storage_init("qkv", &r.vec_scaled((rows * 3 * c) as usize, 0.5));
         let ctx = g.storage((rows * c) as u64);
         let slab = heads as u64 * ws as u64 * ws as u64;
         let scores = g.storage(slab);
@@ -654,8 +643,8 @@ fn gather_and_scatter_are_inverse() {
     let (n, d) = (64u32, 16u32);
     let plan = WindowPlan::new(8, 8, 4, 4);
     let fwd = row_index_buffer(&g, "p", plan.perm());
-    let mut r = Lcg(7);
-    let host = r.vec((n * d) as usize);
+    let mut r = Lcg::new(7);
+    let host = r.vec_scaled((n * d) as usize, 0.5);
     let src = g.storage_init("src", &host);
     let mid = g.storage((n * d) as u64);
     let back = g.storage((n * d) as u64);

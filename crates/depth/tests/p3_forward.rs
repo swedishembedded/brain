@@ -9,19 +9,11 @@
 //! compose into one graph that produces a depth map at the input resolution,
 //! finite and non-negative, on both backends.
 
+use data::rng::Lcg;
 use depth::{ZipConfig, ZipDepth};
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 use vision::{Ctx, Shape};
-
-fn lcg(s: &mut u64) -> f32 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-}
-fn rv(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed;
-    (0..n).map(|_| lcg(&mut s)).collect()
-}
 
 /// A small ZipDepth: the base config's structure at a 64-px input, so every stage,
 /// tail, fusion and the convex upsampler all execute, but the test runs in seconds.
@@ -51,7 +43,7 @@ fn forward_produces_a_depth_map_at_input_resolution() {
     m.set_eval(true);
     let ps = init_store(&gpu, &m);
 
-    let x = gpu.storage_init("x", &rv(1, m.in_shape.numel() as usize).iter().map(|v| 0.5 + 0.5 * v).collect::<Vec<_>>());
+    let x = gpu.storage_init("x", &Lcg::new(1).vec(m.in_shape.numel() as usize).iter().map(|v| 0.5 + 0.5 * v).collect::<Vec<_>>());
     m.forward(&ctx, &ps, &x);
     let out = gpu.read(m.out(), m.out_shape.numel() as usize);
 
@@ -77,7 +69,7 @@ fn both_upsampler_variants_run() {
         let m = ZipDepth::build(&ctx, cfg, 1, false);
         m.set_eval(true);
         let ps = init_store(&gpu, &m);
-        let x = gpu.storage_init("x", &rv(7, m.in_shape.numel() as usize).iter().map(|v| 0.5 + 0.5 * v).collect::<Vec<_>>());
+        let x = gpu.storage_init("x", &Lcg::new(7).vec(m.in_shape.numel() as usize).iter().map(|v| 0.5 + 0.5 * v).collect::<Vec<_>>());
         m.forward(&ctx, &ps, &x);
         let out = gpu.read(m.out(), m.out_shape.numel() as usize);
         assert!(out.iter().all(|v| v.is_finite() && *v >= 0.0), "unfold={unfold}: contract violated");
@@ -97,11 +89,11 @@ fn backward_runs_and_reaches_every_parameter() {
     let m = ZipDepth::build(&ctx, tiny(), 2, true);
     let ps = init_store(&gpu, &m);
 
-    let x = gpu.storage_init("x", &rv(3, m.in_shape.numel() as usize).iter().map(|v| 0.5 + 0.5 * v).collect::<Vec<_>>());
+    let x = gpu.storage_init("x", &Lcg::new(3).vec(m.in_shape.numel() as usize).iter().map(|v| 0.5 + 0.5 * v).collect::<Vec<_>>());
     m.forward(&ctx, &ps, &x);
     ps.zero_grads(&gpu);
     // A non-degenerate upstream grad.
-    let d = gpu.storage_init("d", &rv(5, m.out_shape.numel() as usize));
+    let d = gpu.storage_init("d", &Lcg::new(5).vec(m.out_shape.numel() as usize));
     m.backward(&ctx, &ps, &x, &d);
 
     // Every conv WEIGHT must have a finite gradient, and at least most must be

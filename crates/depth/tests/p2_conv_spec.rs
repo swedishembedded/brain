@@ -17,21 +17,13 @@
 //!
 //! Run with `BRAIN_DEVICE=cpu`.
 
+use data::rng::Lcg;
 use std::collections::HashMap;
 
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 use vision::blocks::{Act, Conv, ConvSpec};
 use vision::{Ctx, Shape};
-
-fn lcg(s: &mut u64) -> f32 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-}
-fn rv(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed;
-    (0..n).map(|_| lcg(&mut s)).collect()
-}
 
 /// Build a `Conv` from a spec with deterministic weights, and return everything
 /// needed to drive it.
@@ -54,13 +46,13 @@ impl Fix {
             ("c.bn.run_var".into(), spec.cout as usize),
         ];
         let mut init: HashMap<String, Vec<f32>> = HashMap::new();
-        init.insert("c.conv.weight".into(), rv(seed, params[0].1));
-        init.insert("c.bn.gamma".into(), rv(seed ^ 1, spec.cout as usize).iter().map(|v| 1.0 + 0.1 * v).collect());
-        init.insert("c.bn.beta".into(), rv(seed ^ 2, spec.cout as usize).iter().map(|v| 0.05 * v).collect());
+        init.insert("c.conv.weight".into(), Lcg::new(seed).vec(params[0].1));
+        init.insert("c.bn.gamma".into(), Lcg::new(seed ^ 1).vec(spec.cout as usize).iter().map(|v| 1.0 + 0.1 * v).collect());
+        init.insert("c.bn.beta".into(), Lcg::new(seed ^ 2).vec(spec.cout as usize).iter().map(|v| 0.05 * v).collect());
         init.insert("c.bn.run_mean".into(), vec![0.0; spec.cout as usize]);
         init.insert("c.bn.run_var".into(), vec![1.0; spec.cout as usize]);
         let ps = ParamStore::new(&gpu, params, &init);
-        let x = rv(seed ^ 3, in_shape.numel() as usize);
+        let x = Lcg::new(seed ^ 3).vec(in_shape.numel() as usize);
         (Fix { gpu, ps, x, in_shape }, spec)
     }
 }
@@ -116,7 +108,7 @@ fn grouped_relu_conv_backward_matches_finite_differences() {
     for (tag, in_shape, spec) in cases {
         let (fix, spec) = Fix::new(in_shape, spec, 11);
         let out_n = spec.out_shape(in_shape).numel() as usize;
-        let r = rv(99, out_n);
+        let r = Lcg::new(99).vec(out_n);
 
         // Analytic dW.
         let ctx = Ctx::new(&fix.gpu, depth::net::ids());
@@ -133,7 +125,7 @@ fn grouped_relu_conv_backward_matches_finite_differences() {
         // uses: it averages per-element round-off into one well-conditioned
         // number instead of probing 1e3 elements individually).
         let n = g.len();
-        let dir: Vec<f32> = rv(123, n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(123).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = g.iter().zip(&dir).map(|(a, b)| a * b).sum();
         let w0 = fix.gpu.read(fix.ps.w("c.conv.weight"), n);
         let eps = 5e-4f32;

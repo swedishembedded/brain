@@ -28,6 +28,7 @@
 //!
 //! Run with `BRAIN_DEVICE=cpu`.
 
+use data::rng::Lcg;
 use gpu_core::{f, Gpu};
 
 static KERNELS: &[(&str, &str)] = &[
@@ -62,14 +63,6 @@ static KERNELS: &[(&str, &str)] = &[
     ("upsample2", kernels::UPSAMPLE2),                        // 28 (pre-existing)
 ];
 
-fn lcg(state: &mut u64) -> f32 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*state >> 33) as f32 / (1u64 << 31) as f32) - 1.0 // ~[-1,1)
-}
-fn randvec(seed: u64, n: usize) -> Vec<f32> {
-    let mut st = seed;
-    (0..n).map(|_| lcg(&mut st)).collect()
-}
 fn dot(a: &[f32], b: &[f32]) -> f64 {
     a.iter().zip(b).map(|(&x, &y)| x as f64 * y as f64).sum()
 }
@@ -137,8 +130,8 @@ fn assert_adjoint(tag: &str, ax: &[f32], y: &[f32], x: &[f32], aty: &[f32]) {
 fn conv2d_gd_reproduces_conv2d_at_groups1_dilation1() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, cin, h, w, cout, k) = (2u32, 3u32, 9u32, 7u32, 4u32, 3u32);
-    let x = randvec(1, (n * cin * h * w) as usize);
-    let wt = randvec(2, (cout * cin * k * k) as usize);
+    let x = Lcg::new(1).vec((n * cin * h * w) as usize);
+    let wt = Lcg::new(2).vec((cout * cin * k * k) as usize);
 
     for &(stride, pad) in &[(1u32, 1u32), (2, 1), (1, 0)] {
         let ho = (h + 2 * pad - k) / stride + 1;
@@ -174,8 +167,8 @@ fn conv2d_gd_depthwise_channels_are_isolated() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w, k) = (1u32, 4u32, 6u32, 6u32, 3u32);
     let (stride, pad, dil) = (1u32, 1u32, 1u32);
-    let x = randvec(3, (n * c * h * w) as usize);
-    let wt = randvec(4, (c * k * k) as usize); // [C, 1, k, k]
+    let x = Lcg::new(3).vec((n * c * h * w) as usize);
+    let wt = Lcg::new(4).vec((c * k * k) as usize); // [C, 1, k, k]
     let on = (n * c * h * w) as usize;
     let params = [n, c, h, w, c, k, stride, pad, dil, c, h, w];
 
@@ -230,13 +223,13 @@ fn conv2d_gd_backward_is_adjoint_and_weight_grad_matches() {
     let (ho, wo) = (h, w);
     let xn = (n * cin * h * w) as usize;
     let yn = (n * cout * ho * wo) as usize;
-    let x = randvec(5, xn);
-    let wt = randvec(6, (cout * (cin / g) * k * k) as usize);
+    let x = Lcg::new(5).vec(xn);
+    let wt = Lcg::new(6).vec((cout * (cin / g) * k * k) as usize);
     let params = [n, cin, h, w, cout, k, stride, pad, dil, g, ho, wo];
 
     // conv is linear in x for fixed w: <conv(x), dy> == <x, conv_dx(dy)>.
     let ax = run3(&gpu, 1, &x, &wt, yn, &params);
-    let dy = randvec(7, yn);
+    let dy = Lcg::new(7).vec(yn);
     let atdy = run3(&gpu, 2, &dy, &wt, xn, &params);
     assert_adjoint("conv2d_gd (wrt x)", &ax, &dy, &x, &atdy);
 
@@ -320,8 +313,8 @@ fn resize_bilinear_dx_is_the_exact_adjoint() {
             let (n, c) = (2u32, 3u32);
             let xn = (n * c * h * w) as usize;
             let yn = (n * c * ho * wo) as usize;
-            let x = randvec(11, xn);
-            let y = randvec(12, yn);
+            let x = Lcg::new(11).vec(xn);
+            let y = Lcg::new(12).vec(yn);
             let params = [n, c, h, w, ho, wo, align];
             let ax = run2(&gpu, 4, &x, yn, &params);
             let aty = run2(&gpu, 5, &y, xn, &params);
@@ -336,7 +329,7 @@ fn resize_bilinear_dx_is_the_exact_adjoint() {
 fn avgpool2d_global_is_the_mean_and_dx_is_adjoint() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2u32, 3u32, 4u32, 5u32);
-    let x = randvec(21, (n * c * h * w) as usize);
+    let x = Lcg::new(21).vec((n * c * h * w) as usize);
     // Ho=Wo=1 is SE's adaptive_avg_pool2d(x, 1): a plain per-channel mean.
     let got = run2(&gpu, 6, &x, (n * c) as usize, &[n, c, h, w, 1, 1]);
     for i in 0..(n * c) as usize {
@@ -348,7 +341,7 @@ fn avgpool2d_global_is_the_mean_and_dx_is_adjoint() {
     for &(ho, wo) in &[(1u32, 1u32), (2, 2), (4, 5), (2, 3)] {
         let xn = (n * c * h * w) as usize;
         let yn = (n * c * ho * wo) as usize;
-        let y = randvec(22, yn);
+        let y = Lcg::new(22).vec(yn);
         let params = [n, c, h, w, ho, wo];
         let ax = run2(&gpu, 6, &x, yn, &params);
         let aty = run2(&gpu, 7, &y, xn, &params);
@@ -363,7 +356,7 @@ fn pixel_shuffle_is_a_permutation_and_dx_inverts_it() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w, s) = (2u32, 2u32, 3u32, 4u32, 2u32);
     let xn = (n * c * s * s * h * w) as usize;
-    let x = randvec(51, xn);
+    let x = Lcg::new(51).vec(xn);
     let params = [n, c, h, w, s];
     let y = run2(&gpu, 8, &x, xn, &params);
 
@@ -393,9 +386,9 @@ fn convex_upsample_output_stays_within_the_neighbourhood() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, h, w, s) = (1u32, 4u32, 4u32, 2u32);
     let ss = (s * s) as usize;
-    let d = randvec(61, (n * h * w) as usize);
+    let d = Lcg::new(61).vec((n * h * w) as usize);
     // A valid mask: softmax over the 9 axis. Build it on the host.
-    let raw = randvec(62, (n * 9 * s * s * h * w) as usize);
+    let raw = Lcg::new(62).vec((n * 9 * s * s * h * w) as usize);
     let mut mask = raw.clone();
     let hw = (h * w) as usize;
     for sub in 0..ss {
@@ -441,9 +434,9 @@ fn convex_upsample_backward_is_adjoint_in_both_inputs() {
     let dn = (n * h * w) as usize;
     let mn = (n * 9 * s * s * h * w) as usize;
     let on = (n * h * s * w * s) as usize;
-    let mask = randvec(71, mn);
-    let d = randvec(72, dn);
-    let dy = randvec(73, on);
+    let mask = Lcg::new(71).vec(mn);
+    let d = Lcg::new(72).vec(dn);
+    let dy = Lcg::new(73).vec(on);
     let params = [n, h, w, s];
 
     let ax = run3(&gpu, 10, &mask, &d, on, &params);
@@ -499,8 +492,8 @@ fn masked_l1_applies_the_mask_and_its_grad_is_the_signed_mask() {
 fn broadcast_add_hw_broadcasts_two_strips_and_its_adjoints_are_the_axis_sums() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, h, w) = (2u32, 3u32, 4u32, 5u32);
-    let a = randvec(81, (n * c * h) as usize); // [N,C,H,1]
-    let b = randvec(82, (n * c * w) as usize); // [N,C,1,W]
+    let a = Lcg::new(81).vec((n * c * h) as usize); // [N,C,H,1]
+    let b = Lcg::new(82).vec((n * c * w) as usize); // [N,C,1,W]
     let yn = (n * c * h * w) as usize;
     let params = [n, c, h, w];
     let y = run3(&gpu, 17, &a, &b, yn, &params);
@@ -516,7 +509,7 @@ fn broadcast_add_hw_broadcasts_two_strips_and_its_adjoints_are_the_axis_sums() {
     // Adjoint in each strip SEPARATELY. `y` is a SUM of both strips' broadcasts,
     // so <y, dy> carries the other strip's contribution too — each direction must
     // be isolated by zeroing the other, or the identity simply does not apply.
-    let dy = randvec(83, yn);
+    let dy = Lcg::new(83).vec(yn);
     let zero_a = vec![0.0f32; (n * c * h) as usize];
     let zero_b = vec![0.0f32; (n * c * w) as usize];
 
@@ -551,8 +544,8 @@ fn resize_nearest_selects_the_floor_tap_and_dx_is_adjoint() {
         let (n, c) = (2u32, 3u32);
         let xn = (n * c * h * w) as usize;
         let yn = (n * c * ho * wo) as usize;
-        let xx = randvec(91, xn);
-        let yy = randvec(92, yn);
+        let xx = Lcg::new(91).vec(xn);
+        let yy = Lcg::new(92).vec(yn);
         let params = [n, c, h, w, ho, wo];
         let ax = run2(&gpu, 19, &xx, yn, &params);
         let aty = run2(&gpu, 20, &yy, xn, &params);
@@ -566,7 +559,7 @@ fn resize_nearest_selects_the_floor_tap_and_dx_is_adjoint() {
 fn softmax_k_normalizes_the_strided_axis_and_backward_matches_fd() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, k, m) = (2u32, 9u32, 6u32); // K=9 like FastConvexUpsample
-    let x = randvec(101, (n * k * m) as usize);
+    let x = Lcg::new(101).vec((n * k * m) as usize);
     let y = run2(&gpu, 21, &x, (n * k * m) as usize, &[n, k, m]);
     // Each (n, m) group sums to 1 over the STRIDED k axis.
     for ni in 0..n as usize {
@@ -578,7 +571,7 @@ fn softmax_k_normalizes_the_strided_axis_and_backward_matches_fd() {
         }
     }
     // FD on L = <r, softmax_k(x)>.
-    let r = randvec(102, (n * k * m) as usize);
+    let r = Lcg::new(102).vec((n * k * m) as usize);
     let analytic = run3(&gpu, 22, &y, &r, (n * k * m) as usize, &[n, k, m]);
     let h = 1e-3f32;
     for i in 0..(n * k * m) as usize {
@@ -603,8 +596,8 @@ fn softmax_k_normalizes_the_strided_axis_and_backward_matches_fd() {
 fn weighted_gap_contracts_against_the_weight_map_and_both_adjoints_hold() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, hw) = (2u32, 3u32, 12u32);
-    let x = randvec(111, (n * c * hw) as usize);
-    let m = randvec(112, (n * hw) as usize);
+    let x = Lcg::new(111).vec((n * c * hw) as usize);
+    let m = Lcg::new(112).vec((n * hw) as usize);
     let params = [n, c, hw];
     let y = run3(&gpu, 23, &x, &m, (n * c) as usize, &params);
     for ni in 0..n as usize {
@@ -626,7 +619,7 @@ fn weighted_gap_contracts_against_the_weight_map_and_both_adjoints_hold() {
     }
 
     // Bilinear -> adjoint in each argument.
-    let dy = randvec(113, (n * c) as usize);
+    let dy = Lcg::new(113).vec((n * c) as usize);
     let dx = run3(&gpu, 24, &dy, &m, (n * c * hw) as usize, &params);
     assert_adjoint("weighted_gap (wrt x)", &y, &dy, &x, &dx);
     let dm = run3(&gpu, 25, &dy, &x, (n * hw) as usize, &params);
@@ -641,7 +634,7 @@ fn add_chan_bcast_is_per_image_and_its_adjoint_is_the_spatial_sum() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     let (n, c, hw) = (2u32, 3u32, 6u32);
     let x = vec![0.0f32; (n * c * hw) as usize];
-    let v = randvec(121, (n * c) as usize);
+    let v = Lcg::new(121).vec((n * c) as usize);
     let params = [n, c, hw];
     let y = run3(&gpu, 26, &x, &v, (n * c * hw) as usize, &params);
     for nc in 0..(n * c) as usize {
@@ -655,9 +648,9 @@ fn add_chan_bcast_is_per_image_and_its_adjoint_is_the_spatial_sum() {
         "fixture is degenerate; cannot distinguish per-image from shared"
     );
 
-    let xr = randvec(122, (n * c * hw) as usize);
+    let xr = Lcg::new(122).vec((n * c * hw) as usize);
     let yr = run3(&gpu, 26, &xr, &v, (n * c * hw) as usize, &params);
-    let dy = randvec(123, (n * c * hw) as usize);
+    let dy = Lcg::new(123).vec((n * c * hw) as usize);
     let dv = run2(&gpu, 27, &dy, (n * c) as usize, &params);
     // Adjoint wrt v: <A(v), dy> == <v, A^T(dy)> with x held at 0.
     let y0 = run3(&gpu, 26, &x, &v, (n * c * hw) as usize, &params);
@@ -685,7 +678,7 @@ fn add_chan_bcast_is_per_image_and_its_adjoint_is_the_spatial_sum() {
 fn resize_nearest_agrees_with_the_fast_pathed_upsample2() {
     let gpu = gpu_core::testgpu::dev(KERNELS);
     for &(n, c, h, w) in &[(2u32, 3u32, 4u32, 5u32), (1, 1, 1, 1), (1, 8, 7, 3)] {
-        let x = randvec(131, (n * c * h * w) as usize);
+        let x = Lcg::new(131).vec((n * c * h * w) as usize);
         let on = (n * c * h * 2 * w * 2) as usize;
         let up = run2(&gpu, 28, &x, on, &[n, c, h, w]);
         let rn = run2(&gpu, 19, &x, on, &[n, c, h, w, h * 2, w * 2]);

@@ -8,6 +8,7 @@
 //! smooth, so finite differences are a valid oracle here (unlike the
 //! rasterizer's truncated gaussians). CPU backend.
 
+use data::rng::Lcg;
 use std::collections::HashMap;
 
 use gpu_core::{DeviceBuffer, Gpu};
@@ -85,18 +86,6 @@ fn ids() -> (VitKernelIds, VitBwdIds) {
         },
     )
 }
-
-struct Lcg(u64);
-impl Lcg {
-    fn next(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        (((self.0 >> 33) as f32 / (1u64 << 31) as f32) - 1.0) * 0.5
-    }
-    fn vec(&mut self, n: usize) -> Vec<f32> {
-        (0..n).map(|_| self.next()).collect()
-    }
-}
-
 const C: usize = 32;
 const HEADS: usize = 2; // head_dim 16, rope quarter 4
 const M: usize = 64;
@@ -137,10 +126,10 @@ struct Setup {
 }
 
 fn setup(qk_norm: bool, ls: bool, seed: u64) -> Setup {
-    let mut r = Lcg(seed);
+    let mut r = Lcg::new(seed);
     let mut weights = HashMap::new();
     for (name, n) in param_shapes(qk_norm, ls) {
-        let mut v = r.vec(n);
+        let mut v = r.vec_scaled(n, 0.5);
         if name.ends_with("_w") && name.contains("norm") || name.starts_with("ls") {
             // norms/scales near 1
             for x in v.iter_mut() {
@@ -157,10 +146,10 @@ fn setup(qk_norm: bool, ls: bool, seed: u64) -> Setup {
     }
     Setup {
         weights,
-        x: r.vec(ROWS * C),
-        wloss: r.vec(ROWS * C),
-        cos: r.vec(SPAN * C / HEADS / 2).iter().map(|v| (v * 2.0).cos()).collect(),
-        sin: r.vec(SPAN * C / HEADS / 2).iter().map(|v| (v * 2.0).sin()).collect(),
+        x: r.vec_scaled(ROWS * C, 0.5),
+        wloss: r.vec_scaled(ROWS * C, 0.5),
+        cos: r.vec_scaled(SPAN * C / HEADS / 2, 0.5).iter().map(|v: &f32| (v * 2.0).cos()).collect(),
+        sin: r.vec_scaled(SPAN * C / HEADS / 2, 0.5).iter().map(|v: &f32| (v * 2.0).sin()).collect(),
     }
 }
 

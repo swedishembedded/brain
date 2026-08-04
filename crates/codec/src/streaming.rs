@@ -161,11 +161,7 @@ impl StreamConvTr1d {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn rng(seed: &mut u64) -> f32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        ((*seed >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-    }
+    use data::rng::Lcg;
 
     fn concat_chunks(cout: usize, parts: &[Vec<f32>], per: &[usize]) -> Vec<f32> {
         // Re-stitch channel-major chunks [cout, li] into one [cout, sum(li)].
@@ -183,12 +179,12 @@ mod tests {
 
     #[test]
     fn stream_conv1d_chunked_equals_full() {
-        let mut seed = 12345u64;
+        let mut seed = Lcg::new(12345);
         let (cin, cout, k, dil) = (3usize, 4usize, 3usize, 2usize);
         let l = 20usize;
-        let w: Vec<f32> = (0..cout * cin * k).map(|_| rng(&mut seed)).collect();
-        let bias: Vec<f32> = (0..cout).map(|_| rng(&mut seed)).collect();
-        let x: Vec<f32> = (0..cin * l).map(|_| rng(&mut seed)).collect();
+        let w: Vec<f32> = seed.vec(cout * cin * k);
+        let bias: Vec<f32> = seed.vec(cout);
+        let x: Vec<f32> = seed.vec(cin * l);
 
         // One-shot.
         let mut full = StreamConv1d::new(cin, cout, k, dil, 1, w.clone(), bias.clone());
@@ -214,13 +210,13 @@ mod tests {
 
     #[test]
     fn stream_convtr1d_chunked_equals_full() {
-        let mut seed = 999u64;
+        let mut seed = Lcg::new(999);
         let (cin, cout, stride) = (3usize, 2usize, 4usize);
         let k = 2 * stride; // SEANet block.1: k = 2*rate
         let l = 16usize;
-        let w: Vec<f32> = (0..cin * cout * k).map(|_| rng(&mut seed)).collect();
-        let bias: Vec<f32> = (0..cout).map(|_| rng(&mut seed)).collect();
-        let x: Vec<f32> = (0..cin * l).map(|_| rng(&mut seed)).collect();
+        let w: Vec<f32> = seed.vec(cin * cout * k);
+        let bias: Vec<f32> = seed.vec(cout);
+        let x: Vec<f32> = seed.vec(cin * l);
 
         let mut full = StreamConvTr1d::new(cin, cout, k, stride, w.clone(), bias.clone());
         let y_full = full.step(&x, l);
