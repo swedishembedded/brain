@@ -765,14 +765,20 @@ per-scenario table and the findings so far.
   absolute path (`/data/…`, `/home/…`, `/tmp/…`) in `crates/**`: not in code, not
   in a test `const`, not as a runtime default, not in a doc comment. Two homes for
   what used to be hardcoded:
-  1. **Test / parity fixtures** live under the **gitignored `testdata/` tree**,
-     resolved at runtime from `$BRAIN_TESTDATA` (default `<repo>/testdata`, via a
-     `#[cfg(test)] fn testdata(rel)` helper per crate). A test **skips itself** when
-     its fixture is absent. Populate the tree with **`make fetch/testdata`**
-     (`scripts/fetch-testdata.sh`) — it hard-links from a local mirror or downloads
-     from a URL, fetching only files not already present, organised as a tree
-     (`testdata/<domain>/<model>/…`). The mirror location is an overridable script
-     variable — the ONE permitted place a machine path may appear.
+  1. **Test / parity fixtures** live under the **gitignored `testdata/` tree** —
+     inputs and goldens ONLY (audio/image/text fixtures, dumped-golden tensors);
+     never a model checkpoint's `.git` directory, never runnable code or upstream
+     docs/notebooks a test doesn't read. Resolved at runtime from
+     `$BRAIN_TESTDATA` (default `<repo>/testdata`) via **`brain_testutil::testdata`**
+     (`crates/testutil`, a dev-dependency — the one implementation; it used to be
+     36 byte-identical copy-pasted helpers, one per crate). A test **skips
+     itself** when its fixture is absent. Populate the tree with
+     **`make fetch/testdata`** (`scripts/fetch-testdata.sh`) — it hard-links from
+     a local mirror, fetching only files not already present, organised as a tree
+     (`testdata/<domain>/<model>/…`); there is currently no URL-download fallback
+     (say so if you add one — don't leave the claim stale). The mirror location is
+     an overridable script variable — the ONE permitted place a machine path may
+     appear in `crates/**`'s fixture-resolution path.
   2. **In-repo artifacts** (`out/…` build outputs, `scratchpad/…`) are resolved
      **repo-relative** (`concat!(env!("CARGO_MANIFEST_DIR"), "/../../out/…")`), never
      as an absolute literal.
@@ -780,7 +786,22 @@ per-scenario table and the findings so far.
   path. Grep gate (a string literal that *starts* an absolute machine path):
   `grep -rnE '"/(data|home|tmp|opt|mnt|root)/' crates` must stay empty. (A `/data/`
   substring mid-string — a URL, or a torch-archive-internal `…/data/<key>` — is
-  not a filesystem path and is fine.)
+  not a filesystem path and is fine.) `scripts/` and `tools/` get the equivalent
+  check via `make check/scripts` (below) — they are not `crates/**`, but they are
+  not exempt from the spirit of this rule either.
+- **`scripts/` vs `tools/`.** `scripts/` is repo automation — invoked by a
+  Makefile target or a bats test, nothing else. `tools/` is developer utilities a
+  human runs by hand (golden dumpers, converters, benchmarks) — it needs
+  `requirements.txt`, `crates/**` never does. **`make check/scripts`**
+  (`scripts/check-scripts.sh`, folded into `test/full`) is what keeps both from
+  rotting the way they did before it existed: every `.sh` parses and every `.py`
+  compiles; every tracked file is named **somewhere else** in the repo (a
+  Makefile target, a bats test, a Rust doc comment citing it as a golden
+  generator, a sibling script, a doc) or it is a true orphan and the gate fails;
+  and no non-overridable absolute machine path outside a sanctioned
+  `${VAR:-/path}` / `os.environ.get(V, "/path")` default. Adding a script means
+  citing it from whatever actually uses it in the same change — an uncited
+  script is indistinguishable from a dead one on the next `check/scripts` run.
 - **Evaluate honestly.** Hold the input distribution fixed; separate the metric
   (perplexity) from the task (exact-match on held-out data); see `README.md` §3.
 - **Gitignored:** `scratchpad/` (scratch weights, images, porting references),
