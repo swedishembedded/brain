@@ -34,7 +34,7 @@ use checkpoint::weightio::WeightReader;
 use brain_modelref::{ModelRef, Quant};
 
 pub use hub::{FakeHub, HfHub, Hub, HubError};
-pub use plan::{execute, plan, Plan, PlanError, Step};
+pub use plan::{declared_architecture, execute, family_of_architecture, plan, Plan, PlanError, Step};
 
 /// The on-disk container format backing a [`LocalModel`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

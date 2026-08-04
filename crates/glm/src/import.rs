@@ -209,6 +209,14 @@ fn transform_tensor(n: &str, data: Vec<f32>, cfg: &GlmConfig, dropped: &mut usiz
 /// only tensor ever fully materialized is the packed-expert one, and only for
 /// the duration of producing its own per-expert outputs.
 pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
+    import_as(hf_dir, out_path, None)
+}
+
+/// Like [`import`] but overrides the card's `id` (defaults to the output
+/// filename stem). Used by the model-store auto-fetch dispatcher, which needs
+/// the id to be the fully-qualified `vendor/repo` reference rather than a
+/// filesystem-derived name.
+pub fn import_as(hf_dir: &str, out_path: &str, id_override: Option<&str>) -> Result<(), String> {
     let dir = Path::new(hf_dir);
     let cfg_json = std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("read config.json: {e}"))?;
     let cfg = config_from_hf(&cfg_json)?;
@@ -217,9 +225,10 @@ pub fn import(hf_dir: &str, out_path: &str) -> Result<(), String> {
         cfg.param_list().into_iter().map(|(name, numel)| (name, vec![numel as u64])).collect();
     // A card so this file auto-serves from the global model directory (P2) with
     // no BRAIN_GLM_WEIGHTS env var — id defaults to the output filename stem,
-    // matching how the model dir keys catalog entries.
+    // matching how the model dir keys catalog entries, unless the caller
+    // overrides it (the auto-fetch dispatcher needs the vendor/repo ref).
     let param_count: u64 = plan.iter().map(|(_, s)| s.iter().product::<u64>()).sum();
-    let id = Path::new(out_path).file_stem().and_then(|s| s.to_str()).unwrap_or("glm");
+    let id = id_override.unwrap_or_else(|| Path::new(out_path).file_stem().and_then(|s| s.to_str()).unwrap_or("glm"));
     let mut card = checkpoint::st::ModelCard::new(id, "glm");
     card.context_length = Some(cfg.block_size as u64);
     card.param_count = Some(param_count);

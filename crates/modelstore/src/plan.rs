@@ -193,8 +193,11 @@ fn download_step(vendor: &str, repo: &str, file: &str, dest_name: &str) -> Step 
 }
 
 /// The HF `config.json` architecture string: `architectures[0]` (the
-/// standard `transformers` field) or `model_type` as a fallback.
-fn declared_architecture(config: &serde_json::Value) -> Option<String> {
+/// standard `transformers` field) or `model_type` as a fallback. Public so a
+/// Convert-step dispatcher (`crates/cli/src/supply.rs`) can re-derive the
+/// same architecture string `plan()` gated on, rather than re-parsing
+/// `config.json` with different logic.
+pub fn declared_architecture(config: &serde_json::Value) -> Option<String> {
     config
         .get("architectures")
         .and_then(|a| a.as_array())
@@ -204,13 +207,20 @@ fn declared_architecture(config: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Only families brain's `model_dir` can actually register today. An
+/// The brain family (`crates/cli/src/model_dir.rs`'s `resident_for` dispatch
+/// key) an HF `architecture` string maps to, or `None` if unsupported. An
 /// approximation (substring match on the family name), documented as such --
 /// tightening it to an exact HF class-name table is future work once more
-/// families are wired.
-fn is_supported_architecture(arch: &str) -> bool {
+/// families are wired. Public so the Convert-step dispatcher picks the exact
+/// same family `plan()` already gated the fetch on -- one implementation of
+/// "which families brain can serve today", not two.
+pub fn family_of_architecture(arch: &str) -> Option<&'static str> {
     let lower = arch.to_ascii_lowercase();
-    ["gpt", "glm", "qwen", "lfm"].iter().any(|fam| lower.contains(fam))
+    ["gpt", "glm", "qwen", "lfm"].into_iter().find(|fam| lower.contains(fam))
+}
+
+fn is_supported_architecture(arch: &str) -> bool {
+    family_of_architecture(arch).is_some()
 }
 
 /// Runs every [`Step::Download`] in `plan.steps` against `hub`, writing into
