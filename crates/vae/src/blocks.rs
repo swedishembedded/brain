@@ -84,6 +84,16 @@ pub const KERNELS: [(&str, &str); 15] = [
 /// `0..NEXT_SLOT`, so a caller's own kernels must start here.
 pub const NEXT_SLOT: usize = KERNELS.len();
 
+/// `(scores, softmax, apply)` slots of the shared `attn_*_bidir` trio, in
+/// [`model::block::BidirIds`] field order.
+///
+/// Exported because a crate that layers its own kernels on top of
+/// [`kernels_with`] may want that trio too (`crates/unet` reuses it for the
+/// self-attention fallback on devices without workgroup reductions) and the
+/// alternative is a literal `8, 9, 10` in the caller — which reorders silently
+/// into a wrong pipeline the moment [`KERNELS`] grows an entry in the middle.
+pub const ATTN_BIDIR_SLOTS: (usize, usize, usize) = (K_ATTN_SCORES, K_ATTN_SOFTMAX, K_ATTN_APPLY);
+
 /// The backward kernels the reverse walk of a train-mode [`Builder`] dispatches,
 /// in [`grad::BwdIds`] order. A crate that trains these blocks appends this
 /// block to its kernel set and hands `grad::BwdIds::at(base)` to
@@ -274,6 +284,9 @@ pub struct Builder<'a> {
     /// GEMM lowerings. False on the CPU JIT, which keeps the reference kernels
     /// (whose native AVX2 fast paths are the fast CPU route anyway).
     coop: bool,
+    /// Bytes uploaded since the last forced staging drain — see
+    /// [`Builder::upload`].
+    uploaded: u64,
     /// The single im2col scratch (`length, buffer`) shared by every lowered
     /// conv, grown on demand. Bounded by [`col_budget_floats`] — a whole-image
     /// im2col operand exceeds the P40's 2047 MiB binding limit, so the GEMM is
@@ -325,8 +338,23 @@ impl<'a> Builder<'a> {
             pool: HashMap::new(),
             taps_on,
             coop: gpu.caps().workgroup_reductions,
+            uploaded: 0,
             col: None,
         }
+    }
+
+    /// Change the GroupNorm epsilon used by every subsequently-recorded block.
+    ///
+    /// `AutoencoderKL` and VQGAN use one epsilon throughout, which is why it is
+    /// a constructor argument. SDXL's `UNet2DConditionModel` does not: its
+    /// resnets and `conv_norm_out` use the config's `norm_eps` (1e-5) while the
+    /// GroupNorm inside every `Transformer2DModel` is hardcoded to 1e-6
+    /// (diffusers `_init_continuous_input`). Both live in one recorded graph,
+    /// so the value has to be switchable at the boundary — a single-epsilon
+    /// builder would force `crates/unet` to hand-roll a second GroupNorm, which
+    /// is exactly the private copy this module exists to prevent.
+    pub fn set_eps(&mut self, eps: f32) {
+        self.eps = eps;
     }
 
     /// Record the reverse-mode tape (see [`Builder::train`]). Set this BEFORE
@@ -394,12 +422,45 @@ impl<'a> Builder<'a> {
         if let Some(b) = self.wmemo.get(name) {
             return b.clone();
         }
-        let gpu = self.gpu;
-        let (buf, n) = {
-            let data = &self.get(name).1;
-            (gpu.storage_init(name, data), data.len() as u64)
-        };
-        self.remember(name, buf, n)
+        // `self.t` is a `&'a Tensors` independent of `&self`, so copying the
+        // reference out lets `upload` take `&mut self` without cloning the
+        // tensor (the SDXL feed-forward weights are 52 MB each).
+        let t = self.t;
+        let data = &t.get(name).unwrap_or_else(|| panic!("vae::blocks: missing tensor {name}")).1;
+        let buf = self.upload(data);
+        self.remember(name, buf, data.len() as u64)
+    }
+
+    /// Upload one weight tensor, non-ReBAR-safe.
+    ///
+    /// **Not `storage_init`**, and both departures are load-bearing on a P40
+    /// (`docs/kernel-checklist.md` §D, `paramstore`'s upload loop, and
+    /// `zimage::BlockWeights::upload` all record the same two):
+    ///
+    /// 1. `create_buffer_init`'s mapped-at-creation path forces weights into an
+    ///    inefficient memory type on a card without resizable BAR, inflating a
+    ///    multi-GB model far past its nominal size. `storage()` + `write()`
+    ///    gives plain DEVICE_LOCAL, which packs tightly.
+    /// 2. wgpu only reclaims `write_buffer` staging on a real submit + drain, so
+    ///    a long upload accrues a second copy of the whole model. `poll_wait`
+    ///    per tensor plus a 1-element readback every ~1 GiB forces that drain.
+    ///
+    /// Neither changes a single bit of the uploaded data — this is purely how
+    /// the memory is obtained. It became necessary when `crates/unet` put a
+    /// **10.3 GB** model through this builder (the earlier users — the FLUX.2
+    /// VAE and the VQGAN pair — are each well under 1 GB and never hit it);
+    /// SDXL OOM'd on a P40 with 20 GB free before this.
+    fn upload(&mut self, data: &[f32]) -> DeviceBuffer {
+        let buf = self.gpu.storage(data.len() as u64);
+        let bits: Vec<u32> = data.iter().map(|v| v.to_bits()).collect();
+        self.gpu.write(&buf, &bits);
+        self.gpu.poll_wait();
+        self.uploaded += 4 * data.len() as u64;
+        if self.uploaded > (1 << 30) {
+            let _ = self.gpu.read(&buf, 1);
+            self.uploaded = 0;
+        }
+        buf
     }
 
     /// Upload host data the builder synthesised (a fused `gamma|beta` or
@@ -410,7 +471,7 @@ impl<'a> Builder<'a> {
         if let Some(b) = self.wmemo.get(name) {
             return b.clone();
         }
-        let buf = self.gpu.storage_init(name, data);
+        let buf = self.upload(data);
         self.remember(name, buf, data.len() as u64)
     }
 
