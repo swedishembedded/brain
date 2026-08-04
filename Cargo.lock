@@ -550,6 +550,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-gradcheck",
  "brain-imaging",
+ "brain-imgpipe",
  "brain-kronos",
  "brain-lfm",
  "brain-mirror",

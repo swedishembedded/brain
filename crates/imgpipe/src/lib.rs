@@ -39,6 +39,8 @@
 //! do move. [`Outcome::mask`] is therefore returned alongside the image: it is
 //! the authoritative record of which pixels were authorised to change.
 
+pub mod caps;
+
 use capability::{Blob, Invocation, Media, Registry};
 use gpu_core::Gpu;
 use imaging::{Ctx, Shape};

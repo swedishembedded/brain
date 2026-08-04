@@ -79,6 +79,7 @@ brain-npu.workspace = true
 serde_json.workspace = true
 brain-vulkan = { workspace = true, optional = true }
 brain-clip.workspace = true
+brain-imgpipe.workspace = true
 # `brain fetch`: a blocking, streaming HTTP client (rustls, no system OpenSSL)
 # is enough for a one-shot CLI download; no need to pull tokio in for this.
 ureq = { version = "2", default-features = false, features = ["tls"] }

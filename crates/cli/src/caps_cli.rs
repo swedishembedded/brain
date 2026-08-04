@@ -36,6 +36,7 @@ fn static_manifests() -> Vec<Manifest> {
         vqgan::caps::manifest(),
         restore::caps::manifest(),
         clip::caps::manifest(),
+        imgpipe::caps::manifest(),
         tts::caps::manifest(),
         imageops::manifest(),
         DemoModel.manifest(),
@@ -78,6 +79,20 @@ fn build_registry(model: &str) -> Result<Registry, String> {
         clip::caps::MODEL => reg.register(Arc::new(
             clip::caps::ClipProvider::from_env().ok_or("set BRAIN_CLIP_DIR to a checkpoint root holding tokenizer/ (CLIP-L) and/or tokenizer_2/ (OpenCLIP-bigG)")?,
         )),
+        // The pipeline is a capability that COMPOSES capabilities: it dispatches
+        // its stages into a registry of the models whose weights are configured,
+        // so a stage whose model is unset fails with that model's own
+        // "set BRAIN_..." message rather than a generic one from the pipeline.
+        imgpipe::caps::MODEL => {
+            let mut inner = Registry::new();
+            if let Some(p) = sam2::caps::Sam2Provider::from_env() {
+                inner.register(Arc::new(p));
+            }
+            if let Some(p) = restore::caps::RestoreProvider::from_env() {
+                inner.register(Arc::new(p));
+            }
+            reg.register(Arc::new(imgpipe::caps::PipelineProvider::new(Arc::new(inner))));
+        }
         tts::caps::MODEL => reg.register(Arc::new(tts::caps::TtsProvider::new())),
         other => return Err(format!("unknown model '{other}' (see `brain caps`)")),
     }
