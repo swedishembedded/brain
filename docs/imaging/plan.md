@@ -370,13 +370,30 @@ New capability belongs in existing shared homes, not per-model copies:
 Per AGENTS.md every model is gradient-checked, and per the follow-up all of these
 need training/finetuning. New `gradcheck` entry points:
 
-| Entry | Covers | Loss |
-|---|---|---|
-| `check_sam2` | Hiera + FPN + prompt encoder + two-way mask decoder | focal + dice on masks, MSE on the IoU head |
-| `check_arcface` | IResNet backbone + margin head | ArcFace additive-angular-margin CE |
-| `check_flux1` | FLUX.1 MMDiT | flow-matching MSE (mirror `check_flux2`) |
-| `check_pulid` | ID adapter layers only, backbone frozen | flow-matching MSE + ID cosine |
-| `check_codeformer` | VQ encoder/decoder + transformer | CE on code indices + straight-through VQ + L1/perceptual |
+| Entry | Covers | Loss | Status |
+|---|---|---|---|
+| `check_sam2` | Hiera + FPN + prompt encoder + two-way mask decoder | focal + dice on masks, MSE on the IoU head | **LANDED, decoder only** — trunk + neck `Role::Frozen`; 128 tensors |
+| `check_arcface` | IResNet backbone + margin head | ArcFace additive-angular-margin CE | **LANDED** — 53 tensors |
+| `check_vqgan` | VQ encoder/generator/codebook | straight-through VQ + codebook/commitment | **LANDED** — 87 tensors |
+| `check_clip` | CLIP-L **text tower only** | — | **LANDED, partial** — bigG and the EVA image tower owe theirs |
+| `check_t5` | the T5-XXL encoder backward (`t5::train::T5Trainer`) | MSE on the encoder output | **LANDED** — 17 tensors, + `_one_block` (10), `_tiled` (10), `_rel_bias_elementwise` (24 entries) |
+| `check_codeformer` | CodeFormer's **code-prediction Transformer**, VQ autoencoder frozen | CE on code indices | **LANDED** — 34 tensors, + `_one_layer` (20) |
+| `check_flux1` | FLUX.1 MMDiT | flow-matching MSE (mirror `check_flux2`) | **NOT DELIVERED.** Stated blocker: hoist `flux2::grad`'s scalar `Fp` primitives into `crates/dit` rather than take a `flux1 → flux2` dependency |
+| `check_unet` | SDXL `UNet2DConditionModel` | — | **NOT DELIVERED** — `crates/unet` has no backward |
+| `check_controlnet` | the ControlNet's down/mid copy + zero-convs | — | **NOT DELIVERED** — `crates/controlnet` has no backward at all |
+| `check_pulid` | ID adapter layers only, backbone frozen | flow-matching MSE + ID cosine | **NOT DELIVERED** — `crates/pulid` has no training-mode forward; its `IdFormer` ping-pongs `lat_a`/`lat_b` and reuses `nkv`/`q`/`kv` across all 10 layers, so a training graph is a **second graph, not a flag** |
+
+**The gate that gates the gate.** `directional_check` keeps the *best-agreeing*
+of `n_dirs` random ±1 contractions, which is blind to a **partially** wrong
+gradient — the exact signature of a folded or shared parameter accumulated over
+only some of its contributors. Measured: deleting T5's cross-block `axpy` fold
+leaves `rel_bias.weight` **33 % wrong** (‖Δg‖₂ 0.672 vs ‖g‖₂ 2.044) and every T5
+directional check still passes on both backends. `gradcheck::elementwise_check`
+(per-**entry** central differences) is the answer and is wired for
+`rel_bias.weight`. **Every other folded/shared parameter in the repo is still
+covered only by the blind check** — `restore`'s `position_emb` passes today
+because its injected error happened to be large, not because anything
+structurally catches it.
 
 LoRA finetune paths mirror `flux2::{lora,finetune}`. SAM 2 finetuning follows
 the upstream MOSE recipe (`sam2.1_hiera_b+_MOSE_finetune.yaml`, downloaded).
@@ -424,8 +441,8 @@ Each phase ends at a validation gate and is independently committable.
 | **3b. Text encoders** ◑ **FORWARD DONE** | `crates/clip`: CLIP-L + OpenCLIP-bigG + EVA-CLIP-L/336 behind one config-driven graph | cosine ≥0.9999 vs HF per encoder — **met** (see below); the **BPE tokenizer is done** (`data::clip_bpe`, exact-id gate vs HF on both SDXL tokenizers) but is **not yet wired into `crates/clip`'s tests**; **image preprocessing is not implemented**; `check_clip` **landed for the CLIP-L text tower**; bigG and the EVA image tower still owe theirs |
 | **4. FLUX.1** ◑ **TRANSFORMER FORWARD DONE** | `crates/flux1` reusing `dit`/`vae`/`model::block`; **`crates/t5`** (T5-XXL encoder) + phase-3b CLIP-L; Kontext edit path | forward cosine vs diffusers — **met for the transformer and for T5-XXL** (see the phase 3c/4 gate below). **fp32 parity is gated at reduced depth only** (47.6 GiB does not fit a 24 GiB card); full depth is gated at **int8**. No sampler loop, no VAE glue, no CLI, no `check_flux1` |
 | **4b. UNet family** ◑ **FORWARD DONE** | `crates/unet` (SDXL `UNet2DConditionModel`) + discrete schedulers (DDIM/Euler/Euler-a/DPM++, ε and v-pred) in `crates/diffusion` | forward cosine vs diffusers SDXL — **met** (165 comparisons / 0 failed, `out.sample` cosine 1.0000000000, rel_l2 3.258e-6; schedulers 66 checks / 0 failed — see the phase-4b gate below); `check_unet` **still owed**, and so is the **whole serving contract** (no capability, no residency adapter, no `run_batch`, no D-Bus, no example) plus the sampler loop, the VAE/text-encoder glue and batch > 1 |
-| **4c. ControlNet** | `crates/controlnet`: backbone-agnostic `ControlAdapter` over named injection points; SDXL impl first, FLUX impl second; depth conditioning fed by brain's own ZipDepth | residual parity vs diffusers ControlNet; `check_controlnet` |
-| **5. Identity** | PuLID adapter on the phase-4 FLUX.1 backbone **and** InstantID (phase-4b/4c SDXL + IP-Adapter-FaceID), both fed by phase-2 ArcFace embeddings | ID cosine vs reference for each; `check_pulid`, `check_instantid`; measure the two against each other on shared fixtures |
+| **4c. ControlNet** ◑ **SEAM + RESIDUAL PARITY DONE** | `crates/controlnet`: backbone-agnostic `ControlAdapter` over named injection points; SDXL impl first, FLUX impl second; depth conditioning fed by brain's own ZipDepth | residual parity vs diffusers ControlNet — **met** (140 comparisons / 0 failed, worst 1−cos 1.914e-11, on **both** backends; see the phase-4c/5 gate below). The FLUX impl is **not** written (only asserted implementable), ZipDepth is **not** wired, and **`check_controlnet` does not exist** — there is no backward in the crate at all. No serving contract |
+| **5. Identity** ◐ **PuLID FORWARD DONE; InstantID NOT STARTED** | PuLID adapter on the phase-4 FLUX.1 backbone **and** InstantID (phase-4b/4c SDXL + IP-Adapter-FaceID), both fed by phase-2 ArcFace embeddings | PuLID: IDFormer + the injected CA + the **conditioned FLUX.1 forward** parity-gated on both backends (47 comparisons, worst 1−cos 1.44e-11). **Not met and not started:** InstantID, `check_pulid`, `check_instantid`, and the head-to-head measurement. **`crates/pulid` has no image → `id_cond` path** — `id_cond` is a host slice supplied by the caller, so the phase-2 ArcFace and phase-3b EVA-CLIP towers are *composable* but **not composed** |
 | **6. Pipeline** | `imaging.pipeline` action + matting (BiRefNet) + Florence-2 text→box + Real-ESRGAN tail | end-to-end "change only X" on a fixture set |
 
 #### Phase 0 gate — what was actually run
@@ -575,6 +592,112 @@ at 10.27 GB and is now the `storage()`+`write()`+`poll_wait()` pattern
 INT8, the VAE/text encoders, anything about speed beyond the single 4.06 s
 wall-clock, and `BRAIN_DEVICE=cpu` numbers (a run-to-run determinism finding on
 that backend is contested — see the ledger).
+
+#### Phase 4c/5 gate — what was actually run (integration pass)
+
+**Scope: the control seam + ControlNet residual parity, PuLID forward parity,
+and the first two backwards in the imaging stack (`check_t5`,
+`check_codeformer`). Nothing else.** No backward exists in `crates/controlnet`
+or `crates/pulid` at all; `check_flux1`, `check_unet`, `check_controlnet`,
+`check_pulid` and `check_instantid` are **absent**, not failing. Neither new
+crate has any part of the serving contract. Ledgers:
+`docs/models/{controlnet,pulid}/status.md`.
+
+Two Tesla P40s and `BRAIN_DEVICE=cpu`, `--release`, targeted
+`cargo test --release -p <crate>` (never a workspace `--tests --examples`).
+**All weight env vars were set for this run** (`BRAIN_CONTROLNET`,
+`BRAIN_PULID`, `BRAIN_FLUX1_TRANSFORMER`, `BRAIN_T5_XXL`, `BRAIN_SDXL`,
+`BRAIN_VQGAN_WEIGHTS`, `BRAIN_RESTORE_WEIGHTS`, `BRAIN_FLUX1_FULL=1`) and the
+logs were grepped for `SKIP` — **nothing self-skipped** except where stated.
+
+**Gradient checks — `crates/gradcheck/tests/imaging_models.rs`, 10 checks,
+`(atol, rtol) = (4e-3, 8e-2)`, seed 1. `10 passed / 0 failed` on BOTH a P40 and
+`BRAIN_DEVICE=cpu`.** Running both is a correctness requirement, not
+thoroughness: a `var<workgroup>` reduction with no barrier-free sibling returns
+**all zeros** on `backend-cpu` with no error. Both new trainers route their
+norms through the shared selection seams (`block::rms_variant`,
+`block::LayerNormIds` + `layernorm_fwd`/`ln_stats_fwd`/`layernorm_dx_bwd`), and
+every backward reduction they dispatch (`layernorm_dgamma`/`dbeta`,
+`bias_grad`, `attn_bwd_dbias`, `emb_bwd`) is a barrier-free gather.
+
+| check | tensors | max abs err (P40 / cpu) |
+|---|---|---|
+| `check_sam2` (decoder only) | 128 | 2.19e-2 / 2.28e-2 |
+| `check_arcface` | 53 | 3.83e-1 / 3.85e-1 |
+| `check_vqgan` | 87 | 1.69e-4 / 1.66e-4 |
+| `check_clip` (CLIP-L text only) | 28 | 1.14e-2 / 1.13e-2 |
+| **`check_t5`** | 17 | 3.74e-3 / 1.87e-3 |
+| **`check_t5_one_block`** | 10 | 4.34e-4 / 3.98e-4 |
+| **`check_t5_tiled`** | 10 | 3.84e-1 / 2.93e-1 |
+| **`check_t5_rel_bias_elementwise`** | 24 entries | 1.77e-4 / 2.55e-4 |
+| **`check_codeformer`** | 34 | 5.51e-4 / 3.70e-4 |
+| **`check_codeformer_one_layer`** | 20 | 2.84e-4 / 2.53e-4 |
+
+*Read the absolute column, not a relative one.* The gate is
+`|a − n| ≤ atol + rtol·max(|a|,|n|)`; `check_arcface` and `check_sam2` report
+`max_rel` up to 0.6 / 0.95 on directional derivatives that are themselves ~0,
+which is what the `atol` floor exists for. Quoting `max_rel` alone here would be
+misleading in the opposite direction from usual.
+
+**No regression in the pre-existing entries.** `cargo test --release -p
+brain-gradcheck --lib` — which carries `check_gpt`, `check_qwen`(+`_lora`,
+`qwen2`, `_mrope`, `vlm_splice`), `check_moe`, `check_glm`(+`_mtp`),
+`check_pid`, `check_seq2seq`, `check_autoencoder`, `check_lfm`, `check_flux2`
+alongside the imaging modules — is **31 passed / 0 failed on `gpu0`, on `gpu1`,
+on `cpu`, and with `BRAIN_DEVICE` unset**.
+
+| suite | device | result |
+|---|---|---|
+| `brain-gradcheck` `imaging_models` | P40 / cpu | **10 / 10**, 0 failed (11.5 s / 16.1 s) |
+| `brain-gradcheck` `--lib` | gpu0, gpu1, cpu, default | **31 / 31**, 0 failed |
+| `brain-controlnet` | P40 | 19 lib + **2 parity** + 6 smoke, 0 failed (parity 32.8 s — a real run, not a skip) |
+| `brain-unet` (regression) | P40 | 9 lib + **1 parity** (1 `#[ignore]`d) + 3 smoke, 0 failed (parity 40.1 s) |
+| `brain-restore` | P40 | 20 lib + **4 parity**, 0 failed (parity 20.5 s) |
+| `brain-pulid` | P40 | 7 lib + **3 parity**, 0 failed (parity 52.1 s) |
+| `brain-flux1` (regression) | P40 | 8 lib + **2 dit_parity** + 3 smoke, 0 failed — including the full-depth int8 leg with `BRAIN_FLUX1_FULL=1` (162.7 s) |
+| `brain-t5` | P40 | 5 lib **passed**; `t5_xxl_encoder_stage_parity` **FAILED — `wgpu error: Out of Memory`**, see below |
+
+**The one failure, and what it is not.** `brain-t5`'s XXL parity OOM'd on a P40
+that had **4.5 GB of VRAM held by processes outside this session** (confirmed
+with `nvidia-smi`; the owning PIDs are not visible in this namespace). The
+T5-XXL fp32 encoder is ~19 GB against a 24 GB card, so it needs a card that is
+essentially idle. This is an **environment result, not a code result** — but it
+means **T5-XXL forward parity was NOT re-measured in this pass** and the
+42-stage / 0.9999999992 figure in the phase-3c/4 gate above is carried over
+from that gate, not reconfirmed here.
+
+**Warnings gate.** `cargo build` (lib+bin) **exit 0 with 0 rustc code warnings**
+(the two `cargo:warning` lines remain the `brain-vulkan`/`brain-npu`
+build-script notes about an absent glslc / OpenVINO). `cargo clippy --workspace
+--all-targets` **exit 0** — checked by exit code, not by grepping the text —
+with **192** individual warnings, **zero of them in any file this workstream
+touched**, and a per-crate distribution byte-identical to the run taken before
+any of these changes. The workstream's stated "190" baseline is a stale figure
+against this counting method (`^warning:` lines minus the per-crate summaries);
+what is *measured* is that this integration contributed **0**.
+`grep -rnE '"/(data|home|tmp|opt|mnt|root)/' crates` is empty.
+
+**Legs that did NOT run in this pass, and are therefore unverified here:** the
+shared-home regression suites `brain-model`, `brain-flux2`, `brain-vqgan`,
+`brain-vae` and `brain-gpu-core`, and the `BRAIN_DEVICE=cpu` forward legs for
+`controlnet`/`pulid`/`unet`/`t5`/`restore`. They were queued and cut for time,
+not skipped because they were expected to fail; the cross-backend *gradient*
+legs (which are the correctness gate that `backend-cpu` uniquely catches) did
+all run. `model::block::ln_variant` going from private to `pub` cannot change
+behaviour, and the 41 gradcheck tests exercise `model::block` heavily on both
+backends — but that is an argument, not a measurement.
+
+**Not measured by this gate, and therefore not claimed:** any backward for
+`controlnet`, `pulid`, `unet` or `flux1`; the composed UNet+ControlNet at full
+SDXL dims on real weights (the residual gate is the *producer*, and the
+placement of a residual inside the backbone is gated separately and only at toy
+dims by `smoke.rs::a_down_residual_reaches_the_output_only_through_the_up_path`);
+a FLUX ControlNet (the seam is asserted backbone-agnostic by inspection and by
+`Layout::Tokens` existing, **not** by a running FLUX implementation); PuLID's
+single-interval schedule value (at the gated 2+2 depth the site list is
+`{double 0, single 0}` for any interval ≥ 2, so the forward cannot distinguish
+4 from 3 or 5 — written into the test); anything about speed; and anything about
+image quality or identity fidelity for either model.
 
 ### VRAM budget (24–48 GB target)
 

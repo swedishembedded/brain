@@ -224,6 +224,42 @@ fast and scalable kernel — not a naive one.
     example, no CLI. No sampler loop and no VAE/text-encoder glue, so "SDXL
     works" is **not** claimed. Batch = 1; backward/`check_unet` deferred.)*
 
+12f. **ControlNet** (`crates/controlnet`) — phase 4c: a **backbone-agnostic
+    control seam** plus the SDXL `ControlNetModel` that is its first producer.
+    The deliverable is the seam: `ControlAdapter` declares a backbone's *named*
+    `InjectionPoint`s (`Layout::Spatial{c,h,w}` for a UNet, `Layout::Tokens{t,d}`
+    for a DiT stream) and `check_compatible`/`order_for` match producer to
+    consumer **by name and element count** — because diffusers zips a bare tuple,
+    and SDXL's four 320-ch and three 640-ch points make a permutation
+    type-check, run, and produce a plausible image. Nothing in `adapter.rs`
+    mentions convolutions, resolutions or SDXL, so a FLUX DiT implements it
+    unchanged. The trainable copy **is** the UNet's blocks — recorded by
+    `unet::model::Rec`, adding **no kernel** beyond `scale_chan`.
+    Imported **844 → 810** tensors, **1 251 014 160 params = 5.00 GB fp32**.
+    Residual-parity-gated vs a hooked diffusers `ControlNetModel` at
+    **140 comparisons / 0 failed, worst 1−cos 1.914e-11, worst rel_l2 6.187e-6**
+    on both a P40 and `BRAIN_DEVICE=cpu`. See `docs/models/controlnet/status.md`.
+    *(Forward/residuals only: **no backward, no `check_controlnet`**, no INT8, no
+    batch > 1, no sampler loop, no CLI and **no serving contract**. "InstantID
+    works" is NOT claimed.)*
+
+12g. **PuLID-FLUX identity conditioning** (`crates/pulid`) — phase 5's FLUX half:
+    the `IDFormer` Perceiver resampler (a face embedding → 32 ID tokens) and the
+    injected `PerceiverAttentionCA`, cross-attended into the FLUX.1 image stream
+    at **20 sites** (after double block `i` when `i%2==0`, after single block `i`
+    when `i%4==0`, one **shared sequential** `ca_idx` counter across both loops).
+    `img = img + id_weight · ca(id, img)` — added to the residual stream, never
+    concatenated as tokens. Composes `clip::EvaVision`
+    (`EvaVisionConfig::PULID_TAPS`) and `flux1::{Flux, inject, KERNELS}`; adds
+    **no kernel and no shared block**, and contains no second face model and no
+    second CLIP. 312 tensors → 562 M params. Parity-gated vs a hooked reference
+    on both backends — IDFormer 29 taps, the CA unit 8, and the **conditioned
+    FLUX.1 forward** 10, worst 1−cos **1.44e-11**. See `docs/models/pulid/status.md`.
+    *(Forward only: **no backward, no `check_pulid`**, no serving contract. The
+    crate takes `id_cond` as **host slices** — there is **no image → `id_cond`
+    path**, so the facenet/EVA-CLIP → PuLID wiring is NOT done, and "PuLID works"
+    is NOT claimed.)*
+
 ### Audio / speech
 
 13. **Qwen3-TTS** (`crates/tts` + `crates/codec` + `crates/speaker` +
@@ -366,6 +402,7 @@ front-end to depend on.
 | `depth` | ZipDepth: model/blocks/import/fuse, `Predictor`, viz/stereo/effects, INT8 calib |
 | `mirror` / `splat` | WorldMirror-2; 3DGS rasterizer + PLY IO + `fit` + viewer |
 | `diffusion` / `dit` / `vae` / `zimage` | flow-matching core; shared DiT blocks; AutoencoderKL; Z-Image |
+| `unet` / `controlnet` / `pulid` | SDXL UNet backbone; the backbone-agnostic control seam + its SDXL producer; PuLID identity conditioning on FLUX.1 |
 | `audio` / `codec` / `speaker` / `tts` | wav/STFT/mel + 1D conv builders; Mimi codec; ECAPA-TDNN; Talker+MTP |
 | `forecast` / `fcbench` / `chronos2` / `kronos` / `fincast` | forecasting seam, backtester, three imported models |
 | `wm-core` / `wm-diamond` / `wm-genie` / `wm-display` | world-model trait + fake model; DIAMOND; GenieRedux-G; SDL window |
@@ -425,6 +462,9 @@ front-end to depend on.
 | **Which GEMM kernel a forward dispatches** (naive / skinny-M GEMV / 128×128 tiled), fp32 and int8 | `model::block::gemm_variant` — one rule, shared by flux1 and flux2; `block::pick_gemm` is the training-shaped sibling |
 | CodeFormer face restoration (code Transformer + CFT + the `w` dial) | `docs/models/restore/status.md`; `crates/restore/src/{config,import,model}.rs` over `crates/vqgan` + `crates/vae`; goldens via `tools/goldens/codeformer_restore_dump_reference.py` |
 | SDXL UNet forward + the discrete samplers (DDIM/Euler/Euler-a/DPM++) | `docs/models/unet/status.md`; `crates/unet/src/{config,import,model,hostemb}.rs` over `crates/vae/src/blocks.rs`; `crates/diffusion/src/discrete.rs`; goldens via `tools/goldens/sdxl_dump_reference.py` |
+| **Adding control conditioning to ANY diffusion backbone** (the named-injection-point seam, not an SDXL crate) | `crates/controlnet/src/adapter.rs` — `ControlAdapter`/`ControlSource`/`InjectionPoint`/`Residuals`; SDXL producer in `src/{config,import,model}.rs`; `docs/models/controlnet/status.md`; goldens via `tools/goldens/controlnet_dump_reference.py` |
+| PuLID identity conditioning on FLUX.1 (IDFormer + the 20 cross-attention sites) | `docs/models/pulid/status.md`; `crates/pulid/src/{config,import,model,adapter}.rs`; the backbone seam is `crates/flux1/src/inject.rs`; goldens via `tools/goldens/pulid_dump_reference.py` |
+| **Upload a host `&[f32]` to a device buffer** | `Gpu::write_f32` (`crates/gpu-core`) — the `&[f32]` half of `Gpu::write`/`read`; never re-derive `to_bits().collect()` at a call site |
 | CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers | `crates/clip/src/{config,import,model}.rs`; goldens via `tools/goldens/clip_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
 | SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/goldens/sam2_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
@@ -692,6 +732,7 @@ per-scenario table and the findings so far.
   | CPU-parallel execution (rayon) | `backend_cpu::par` only — the on-CPU scheduler's primitives; no other crate may depend on rayon |
   | deterministic filler in a test or fixture | **`data::rng::Lcg`** (`signed`/`unit`/`scaled` + the `vec*` forms). `data::rng::Rng` is SplitMix64 and defines the on-disk datasets — its stream must not move, so it is *not* the test PRNG. The copied `(s >> 33)/2^31 − 1.0` helper was one-sided (`[-1,0)`), so no test ever fed a positive value to an activation kernel; see `docs/testing.md` §0 |
   | shared model blocks | `model::block`, `model::vit` |
+  | uploading a host `&[f32]` to a device buffer | **`Gpu::write_f32`** — the `&[f32]` sibling of `Gpu::write`/`Gpu::read`. It was missing, so this had congealed into two byte-identical private `fn write` helpers (`unet::model`, `controlnet::model`) and ~20 inline `to_bits().collect()` sites in 10 crates |
   | ONNX graph emission (DSL + shared norm/silu emitters) | `crates/npu/src/topo.rs` (`TopoBase`); model-specific graphs stay in `crates/npu/src/*_topology.rs` |
 
   Do **not** wrap a shared function in a local alias "for readability"
@@ -795,9 +836,25 @@ per-scenario table and the findings so far.
 - **Backprop is gated by `gradcheck`** (finite differences) — run it after any
   fwd/bwd math change. Entry points today: `check_gpt`, `check_qwen`,
   `check_qwen_lora`, `check_moe`, `check_glm`, `check_glm_mtp`, `check_pid`,
-  `check_seq2seq`, `check_autoencoder`. SSA-style forward (each stage writes a
+  `check_seq2seq`, `check_autoencoder`, `check_lfm`, `check_flux2`, plus the
+  imaging workstream's `check_sam2`, `check_arcface`, `check_vqgan`,
+  `check_clip`, `check_t5` (+ `_one_block`, `_tiled`, `_rel_bias_elementwise`)
+  and `check_codeformer` (+ `_one_layer`). Genuinely **absent**:
+  `check_flux1`, `check_unet`, `check_controlnet`, `check_pulid`,
+  `check_instantid`. SSA-style forward (each stage writes a
   fresh buffer that doubles as the backprop activation cache) — preserve it when
   adding stages.
+
+  **`directional_check` alone does NOT catch a partially-wrong gradient.** It
+  contracts a tensor onto one ±1 direction and keeps the *best-agreeing* of
+  `n_dirs`; a *wholly* wrong gradient fails every direction, but a **folded or
+  shared parameter** accumulated over only some of its contributors has a
+  contraction that can be small, and best-of-`n` actively selects the direction
+  where it is smallest. Measured: deleting T5's cross-block `axpy` fold leaves
+  `rel_bias.weight` **33 % wrong** (‖Δg‖₂ 0.672 vs ‖g‖₂ 2.044, one entry
+  sign-flipped) and **every** T5 directional check still passes on both
+  backends. Use `gradcheck::elementwise_check` — per-**entry** central
+  differences, `2·numel` forwards — for every folded/shared parameter.
 - **Imported models are parity-gated, not gradient-guessed.** `mirror`,
   `chronos2`, `kronos`, `fincast`, `depth`, `wm-diamond` are imported 1:1 from a
   reference checkpoint and verified stage-by-stage against dumped goldens
@@ -833,9 +890,9 @@ per-scenario table and the findings so far.
   `caps` module, a `resident_*.rs` registered in `build_executor`, the existing
   D-Bus `Run`, and an example under `examples/{vision,restore}/`. Only `sam2`'s
   `run_batch` does real grouping (by image); the other three are the serial
-  default and each says why in-file. It is **not** met for `clip`, `t5`, `flux1`
-  or `unet` — those four have no capability manifest, no residency adapter and
-  no D-Bus surface at all.
+  default and each says why in-file. It is **not** met for `clip`, `t5`, `flux1`,
+  `unet`, `controlnet` or `pulid` — those six have no capability manifest, no
+  residency adapter and no D-Bus surface at all.
 - **Every served model is named `<vendor>/<repo>[-<QUANT>]`, matching its
   upstream URL exactly (case included) — never a bare short name.** `brain/`,
   `local/` and `test/` are reserved vendors for built-ins, hand-placed files,
