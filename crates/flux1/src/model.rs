@@ -706,15 +706,10 @@ impl Flux1Model {
     /// supports it (`Op::LayerNorm` selection — the per-element kernel gives
     /// one thread a whole 3072-float row and reads at 1/8 of bandwidth).
     fn ln_rows(&self, x: &DeviceBuffer, o: &DeviceBuffer, r0: u32, r1: u32) -> Step {
-        use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
         let d = self.cfg.hidden as u32;
         let m = r1 - r0;
         let off = (r0 as u64 * d as u64, m as u64 * d as u64);
-        let shape = OpShape { m, n: d, k: 0, dtype: Dtype::F32 };
-        let (kind, threads) = match gpu_core::select::DefaultSelector.select(Op::LayerNorm, shape, &self.gpu.caps()) {
-            KernelVariant::WorkgroupPerOutput => (K_LN_ROWS, m * 64),
-            _ => (K_LN, m),
-        };
+        let (kind, threads) = model::block::ln_variant(&self.gpu, K_LN, Some(K_LN_ROWS), m, d);
         self.gpu.step_sliced(
             kind,
             &[x, &self.scr.ln_gamma, &self.scr.ln_beta, o],
@@ -813,7 +808,25 @@ impl Flux1Model {
     /// `[n_pred, in_channels]` — the noise span for an edit run.
     #[allow(clippy::too_many_arguments)]
     pub fn forward(&self, img_tokens: &[f32], ctx: &[f32], pooled: &[f32], t: f32, guidance: f32, ids: &[u32], n_pred: usize) -> Vec<f32> {
-        self.run(img_tokens, ctx, pooled, t, guidance, ids, n_pred, None)
+        self.run(img_tokens, ctx, pooled, t, guidance, ids, n_pred, None, None)
+    }
+
+    /// [`Self::forward`] with an adapter contributing dispatches after each
+    /// block — see [`crate::inject`]. The adapter's steps join the model's own
+    /// list, so a conditioned forward is still one submit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_injected(
+        &self,
+        img_tokens: &[f32],
+        ctx: &[f32],
+        pooled: &[f32],
+        t: f32,
+        guidance: f32,
+        ids: &[u32],
+        n_pred: usize,
+        inject: &dyn crate::inject::BlockInject,
+    ) -> Vec<f32> {
+        self.run(img_tokens, ctx, pooled, t, guidance, ids, n_pred, None, Some(inject))
     }
 
     /// [`Self::forward`] plus a per-stage tap of the residual slab — the parity
@@ -823,12 +836,31 @@ impl Flux1Model {
     #[allow(clippy::too_many_arguments)]
     pub fn forward_traced(&self, img_tokens: &[f32], ctx: &[f32], pooled: &[f32], t: f32, guidance: f32, ids: &[u32], n_pred: usize) -> (Vec<f32>, Trace) {
         let mut tr = Trace { stages: Vec::new(), pre_final: Vec::new(), temb: Vec::new() };
-        let out = self.run(img_tokens, ctx, pooled, t, guidance, ids, n_pred, Some(&mut tr));
+        let out = self.run(img_tokens, ctx, pooled, t, guidance, ids, n_pred, Some(&mut tr), None);
+        (out, tr)
+    }
+
+    /// [`Self::forward_traced`] with an adapter — the conditioned parity replay.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_traced_injected(
+        &self,
+        img_tokens: &[f32],
+        ctx: &[f32],
+        pooled: &[f32],
+        t: f32,
+        guidance: f32,
+        ids: &[u32],
+        n_pred: usize,
+        inject: &dyn crate::inject::BlockInject,
+    ) -> (Vec<f32>, Trace) {
+        let mut tr = Trace { stages: Vec::new(), pre_final: Vec::new(), temb: Vec::new() };
+        let out =
+            self.run(img_tokens, ctx, pooled, t, guidance, ids, n_pred, Some(&mut tr), Some(inject));
         (out, tr)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run(&self, img_tokens: &[f32], ctx: &[f32], pooled: &[f32], t: f32, guidance: f32, ids: &[u32], n_pred: usize, mut trace: Option<&mut Trace>) -> Vec<f32> {
+    fn run(&self, img_tokens: &[f32], ctx: &[f32], pooled: &[f32], t: f32, guidance: f32, ids: &[u32], n_pred: usize, mut trace: Option<&mut Trace>, inject: Option<&dyn crate::inject::BlockInject>) -> Vec<f32> {
         let cfg = &self.cfg;
         let d = cfg.hidden as u32;
         let mlp = cfg.mlp_hidden() as u32;
@@ -945,6 +977,9 @@ impl Flux1Model {
                 s.push(self.gate_rows(xa, moff + 5 * d as u64, &scr.mlpo, xb, r0, r1));
             }
             std::mem::swap(&mut xa, &mut xb);
+            if let Some(inj) = inject {
+                inj.after_double(bi, crate::inject::InjectSite { x: xa, n_txt: nt, n, d, n_pred: n_pred as u32 }, &mut s);
+            }
             if let Some(tr) = trace.as_deref_mut() {
                 flush(&mut s);
                 tr.stages.push((format!("db{bi}"), self.gpu.read(xa, (n * d) as usize)));
@@ -982,6 +1017,9 @@ impl Flux1Model {
             std::mem::swap(&mut xa, &mut xb);
             s.push(self.gate_rows(xa, g, &scr.mlpo, xb, 0, n));
             std::mem::swap(&mut xa, &mut xb);
+            if let Some(inj) = inject {
+                inj.after_single(bi, crate::inject::InjectSite { x: xa, n_txt: nt, n, d, n_pred: n_pred as u32 }, &mut s);
+            }
             if let Some(tr) = trace.as_deref_mut() {
                 flush(&mut s);
                 tr.stages.push((format!("sg{bi}"), self.gpu.read(xa, (n * d) as usize)));

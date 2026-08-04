@@ -28,8 +28,10 @@
 
 pub mod config;
 pub mod import;
+pub mod inject;
 pub mod model;
 
 pub use config::Flux1Config;
 pub use import::{import_bfl, import_diffusers, truncate_to_depth, Tensors};
+pub use inject::{BlockInject, InjectSite};
 pub use model::{position_ids, Flux1Model, Precision, Trace, KERNELS};
