@@ -531,6 +531,7 @@ dependencies = [
  "brain-capture",
  "brain-checkpoint",
  "brain-chronos2",
+ "brain-clip",
  "brain-codec",
  "brain-data",
  "brain-dbus",
@@ -591,6 +592,7 @@ dependencies = [
 name = "brain-clip"
 version = "0.1.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
@@ -600,6 +602,7 @@ dependencies = [
  "brain-paramstore",
  "brain-testutil",
  "brain-vision",
+ "serde_json",
 ]
 
 [[package]]

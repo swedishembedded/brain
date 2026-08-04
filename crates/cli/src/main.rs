@@ -44,6 +44,7 @@ mod resident_lfm;
 mod resident_llm;
 mod resident_mock;
 mod resident_tts;
+mod resident_clip;
 mod resident_facenet;
 mod resident_sam2;
 mod resident_restore;

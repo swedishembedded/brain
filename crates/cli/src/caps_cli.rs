@@ -35,6 +35,7 @@ fn static_manifests() -> Vec<Manifest> {
         facenet::caps::manifest(),
         vqgan::caps::manifest(),
         restore::caps::manifest(),
+        clip::caps::manifest(),
         tts::caps::manifest(),
         imageops::manifest(),
         DemoModel.manifest(),
@@ -73,6 +74,9 @@ fn build_registry(model: &str) -> Result<Registry, String> {
         )),
         restore::caps::MODEL => reg.register(Arc::new(
             restore::caps::RestoreProvider::from_env().ok_or("set BRAIN_RESTORE_WEIGHTS to an existing codeformer.pth (or its directory)")?,
+        )),
+        clip::caps::MODEL => reg.register(Arc::new(
+            clip::caps::ClipProvider::from_env().ok_or("set BRAIN_CLIP_DIR to a checkpoint root holding tokenizer/ (CLIP-L) and/or tokenizer_2/ (OpenCLIP-bigG)")?,
         )),
         tts::caps::MODEL => reg.register(Arc::new(tts::caps::TtsProvider::new())),
         other => return Err(format!("unknown model '{other}' (see `brain caps`)")),

@@ -15,6 +15,7 @@
 //! residency adapter / D-Bus surface and the CLIP BPE tokenizer (which belongs
 //! in `crates/data` next to the GPT-2 and Qwen BPEs, not here).
 
+pub mod caps;
 pub mod config;
 pub mod import;
 pub mod init;

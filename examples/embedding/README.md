@@ -54,3 +54,29 @@ wall …s for 4 requests (batching/lanes = wall < sum)
 - The benchmark twin of this example is `make perf/lfm` — the same executor
   measured by the brain perf suite (`brain perf run sweep --target
   lfm:<weights>:<tokenizer> --input 8192 --ladder 1,2,4,8`).
+
+---
+
+## CLIP text embeddings (`brain do clip embed_text`)
+
+The same generic surface serves CLIP. Both SDXL text towers are available; the
+action returns the projected `text_embeds` when the tower projects and the
+pooled EOS row when it does not, so a caller does not have to know which is
+which.
+
+```bash
+BRAIN_CLIP_DIR=/path/to/stable-diffusion-xl-base-1.0 \
+  ./target/release/brain do clip embed_text \
+    --text "a photo of a cat" --tower clip_l \
+    --out embedding=/tmp/cat.f32     # 768 f32 LE (openclip_bigg gives 1280)
+```
+
+Verified end to end against HuggingFace on the released checkpoint — string in,
+BPE, tower, pooling — at **cosine 1.0000000000 / max_abs 1.5e-5** (CLIP-L) and
+**0.9999998212 / 1.0e-5** (OpenCLIP-bigG). `crates/clip/tests/serving.rs` is the
+standing gate.
+
+Unlike the face stack, CLIP's `run_batch` is a **genuine batched forward**: the
+residency adapter groups a batch by tower and runs one forward per group at
+`b = N`, because every row is the same fixed 77-token context. See
+`crates/cli/src/resident_clip.rs`.

@@ -19,6 +19,8 @@ brain-imaging.workspace = true
 brain-checkpoint.workspace = true
 # `init::init_text_weights` — `data::rng::Rng` is the workspace's only RNG.
 brain-data.workspace = true
+brain-capability.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

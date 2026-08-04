@@ -78,7 +78,8 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, r
     // Imaging models, each gated on its own weights env var: SAM 2.1 promptable
     // segmentation (BRAIN_SAM2_WEIGHTS, prompt-batched per image), the
     // antelopev2 face stack (BRAIN_FACENET_DIR), the VQ autoencoder
-    // (BRAIN_VQGAN_WEIGHTS) and CodeFormer restoration (BRAIN_RESTORE_WEIGHTS).
+    // (BRAIN_VQGAN_WEIGHTS), CodeFormer restoration (BRAIN_RESTORE_WEIGHTS) and
+    // the CLIP encoders (BRAIN_CLIP_DIR, genuinely batched per tower).
     if let Some(s) = crate::resident_sam2::Sam2Resident::from_env() {
         models.push(Arc::new(s));
     }
@@ -90,6 +91,9 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, r
     }
     if let Some(r) = crate::resident_restore::RestoreResident::from_env() {
         models.push(Arc::new(r));
+    }
+    if let Some(c) = crate::resident_clip::ClipResident::from_env() {
+        models.push(Arc::new(c));
     }
     // Time-series forecasting foundation models — each gated on its weights env
     // var. chronos2/fincast advertise an NPU footprint (auto-placed on the NPU
