@@ -1,0 +1,20 @@
+[package]
+name = "brain-pulid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PuLID identity conditioning: ArcFace + EVA-CLIP ID embeddings injected into the FLUX.1 backbone through additional cross-attention."
+
+[lib]
+name = "pulid"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-checkpoint.workspace = true
+brain-flux1.workspace = true
+brain-facenet.workspace = true
+brain-clip.workspace = true
+brain-imaging.workspace = true
