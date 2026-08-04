@@ -19,7 +19,6 @@ Requires: jeepney — `pip install -e brain-py`.
 from __future__ import annotations
 
 import argparse
-import struct
 import sys
 from pathlib import Path
 
@@ -29,36 +28,9 @@ except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
 from brain_py.base import skip  # noqa: E402
 from brain_py.dbus import BrainDBus  # noqa: E402
+from brain_py.image import load_ppm  # noqa: E402
 
 from generate import MODEL, run_streaming  # noqa: E402  (shared frame loop)
-
-
-def load_ppm_hwc_f32(path: str) -> tuple[bytes, int, int]:
-    """Read a binary PPM (P6) into HWC f32-LE `[0,1]` bytes; returns (data, w, h)."""
-    raw = Path(path).read_bytes()
-    # header: P6 <w> <h> <maxval> single-whitespace, then binary pixels
-    fields: list[bytes] = []
-    i = 0
-    while len(fields) < 4:
-        while i < len(raw) and raw[i : i + 1].isspace():
-            i += 1
-        if raw[i : i + 1] == b"#":  # comment line
-            while i < len(raw) and raw[i] != 0x0A:
-                i += 1
-            continue
-        j = i
-        while j < len(raw) and not raw[j : j + 1].isspace():
-            j += 1
-        fields.append(raw[i:j])
-        i = j
-    i += 1  # the single whitespace after maxval
-    if fields[0] != b"P6":
-        raise ValueError(f"{path}: not a binary PPM (P6)")
-    w, h, maxval = int(fields[1]), int(fields[2]), int(fields[3])
-    px = raw[i : i + w * h * 3]
-    if len(px) != w * h * 3:
-        raise ValueError(f"{path}: truncated pixel data")
-    return struct.pack(f"<{w * h * 3}f", *(b / maxval for b in px)), w, h
 
 
 def main() -> int:
@@ -85,7 +57,7 @@ def main() -> int:
     }
     blobs, meta = {}, {}
     for name, path in [("image", args.image)] + [(f"image{i}", p) for i, p in enumerate(args.ref)]:
-        data, w, h = load_ppm_hwc_f32(path)
+        data, w, h = load_ppm(path)
         blobs[name] = data
         meta[name] = {"media": "image", "w": w, "h": h, "c": 3}
         print(f"  ref {name}: {path} ({w}x{h})")

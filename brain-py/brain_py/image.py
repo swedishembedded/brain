@@ -32,6 +32,41 @@ def _u8(value: float) -> int:
     return max(0, min(255, int(value * 255 + 0.5)))
 
 
+def load_ppm(path: str | PathLike[str]) -> tuple[bytes, int, int]:
+    """Read a binary PPM (P6) into `(hwc_f32_bytes, w, h)` — the inverse of
+    :func:`save_ppm`, and the format every example uses to send an image INTO
+    brain (`in_meta = {"media": "image", "w": w, "h": h, "c": 3}`).
+
+    One implementation, here, so no example grows its own P6 parser.
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    if not raw.startswith(b"P6"):
+        raise ValueError(f"{path}: not a binary PPM (P6)")
+    # header: P6, width, height, maxval — whitespace-separated, '#' comments.
+    fields, i = [], 2
+    while len(fields) < 3:
+        while i < len(raw) and raw[i : i + 1].isspace():
+            i += 1
+        if raw[i : i + 1] == b"#":
+            while i < len(raw) and raw[i : i + 1] != b"\n":
+                i += 1
+            continue
+        j = i
+        while j < len(raw) and not raw[j : j + 1].isspace():
+            j += 1
+        fields.append(int(raw[i:j]))
+        i = j
+    w, h, maxval = fields
+    if maxval != 255:
+        raise ValueError(f"{path}: only 8-bit PPMs are supported (maxval {maxval})")
+    px = raw[i + 1 : i + 1 + w * h * 3]
+    if len(px) != w * h * 3:
+        raise ValueError(f"{path}: truncated ({len(px)} of {w * h * 3} bytes)")
+    out = array.array("f", [b / 255.0 for b in px])
+    return out.tobytes(), w, h
+
+
 def save_ppm(path: str | PathLike[str], data: bytes, w: int, h: int, c: int = 3) -> None:
     """Write an HWC-f32 image to a binary PPM (P6)."""
     px = _pixels(data)
