@@ -22,7 +22,7 @@ import pytest
 
 jeepney = pytest.importorskip("jeepney")  # jeepney is required (D-Bus is the default)
 
-from brain_py import BrainDBus  # noqa: E402
+from brain_py import BrainDBus, BrainError  # noqa: E402
 from brain_py.base import BrainBase, Outcome  # noqa: E402
 from brain_py.dbus import read_fd, sealed_memfd  # noqa: E402
 
@@ -48,6 +48,73 @@ def test_braindbus_is_a_brainbase():
     assert issubclass(BrainDBus, BrainBase)
     for verb in ("run", "subscribe", "generate", "chat", "embed", "text2image", "models"):
         assert hasattr(BrainDBus, verb), verb
+
+
+# -- regression: a D-Bus ERROR reply must raise BrainError, not a masked JSON bug --
+#
+# `send_and_get_reply` does not distinguish a `method_return` from an `error`
+# reply on its own — before the fix, `_call`/`_get_prop` did
+# `json.loads(self._call(...)[0])` on whatever came back, so a genuine server
+# error (the reply's body is the error TEXT, not JSON) surfaced as a baffling
+# `json.decoder.JSONDecodeError: Expecting value: line 1 column 1` instead of a
+# real, readable exception. This is exactly the bug reported against
+# `detect_pipeline.py` / `embed_document.py`.
+
+def _error_reply(text: str, name: str = "com.swedishembedded.Brain1.Error.Failed"):
+    """A genuine jeepney D-Bus ERROR-type `Message`, built without any real bus —
+    jeepney's message types are pure data, so this is exactly what a real
+    `org.freedesktop.DBus.Error.Failed` (or brain's own error) reply looks like
+    on the wire."""
+    from jeepney import Header, HeaderFields, Message, MessageType
+
+    header = Header(
+        endianness="l",
+        message_type=MessageType.error,
+        flags=0,
+        protocol_version=1,
+        body_length=0,
+        serial=2,
+        fields={
+            HeaderFields.reply_serial: 1,
+            HeaderFields.error_name: name,
+            HeaderFields.signature: "s",
+        },
+    )
+    return Message(header, (text,))
+
+
+class _FakeErrorConnection:
+    """Stands in for jeepney's blocking `DBusConnection`: every call returns a
+    canned D-Bus error reply, so `BrainDBus._call`/`_get_prop` can be exercised
+    with no session bus at all."""
+
+    def __init__(self, text: str):
+        self._text = text
+
+    def send_and_get_reply(self, _msg, timeout=None):
+        return _error_reply(self._text)
+
+
+def test_call_raises_brain_error_not_a_masked_json_bug():
+    brain = BrainDBus.__new__(BrainDBus)  # skip __init__ (no real bus connection)
+    brain._conn = _FakeErrorConnection("model 'nemotron' not served (have: mock, demo)")
+
+    with pytest.raises(BrainError) as exc_info:
+        brain.manifests()  # json.loads(self._call("Manifests")[0]) in the old code
+
+    err = exc_info.value
+    assert "not served" in str(err)
+    assert err.name == "com.swedishembedded.Brain1.Error.Failed"
+    # The precise regression: this must NOT be a JSON parse failure.
+    assert not isinstance(err, json.JSONDecodeError)
+
+
+def test_get_prop_raises_brain_error_on_an_error_reply():
+    brain = BrainDBus.__new__(BrainDBus)
+    brain._conn = _FakeErrorConnection("no such property")
+
+    with pytest.raises(BrainError, match="no such property"):
+        brain.version()
 
 
 # -- transport-agnostic capability layer, exercised with a fake transport -------

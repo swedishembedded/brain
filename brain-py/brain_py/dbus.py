@@ -37,8 +37,9 @@ from typing import Any, Optional
 from jeepney import DBusAddress, Properties, new_method_call
 from jeepney.fds import FileDescriptor
 from jeepney.io.blocking import open_dbus_connection
+from jeepney.wrappers import DBusErrorResponse, unwrap_msg
 
-from .base import BrainBase, Outcome, OnProgress
+from .base import BrainBase, BrainError, Outcome, OnProgress
 
 BUS_NAME = "com.swedishembedded.Brain1"
 OBJECT_PATH = "/com/swedishembedded/Brain1"
@@ -149,7 +150,7 @@ class BrainDBus(BrainBase):
             elif kind == "done":
                 outputs = frame.get("result") or {}
             elif kind == "error":
-                raise RuntimeError(f"{model}.{action} failed: {frame.get('message')}")
+                raise BrainError(f"{model}.{action} failed: {frame.get('message')}")
         return Outcome(outputs=outputs, blobs=out_blobs, meta=out_meta)
 
     # -- audio: live streaming transcription ---------------------------------
@@ -197,7 +198,7 @@ class BrainDBus(BrainBase):
             elif kind == "done":
                 transcript = (frame.get("result") or {}).get("text", transcript)
             elif kind == "error":
-                raise RuntimeError(f"transcribe failed: {frame.get('message')}")
+                raise BrainError(f"transcribe failed: {frame.get('message')}")
         writer.join(timeout=5)
         return transcript
 
@@ -291,12 +292,30 @@ class BrainDBus(BrainBase):
 
     # -- internal ------------------------------------------------------------
     def _call(self, method: str, signature: str | None = None, body: tuple = ()) -> tuple:
+        """Send a method call and return its reply body, or raise :class:`BrainError`.
+
+        `send_and_get_reply` alone does NOT distinguish a `method_return` from an
+        `error` reply — a D-Bus error comes back as an ordinary `Message` whose
+        `.body[0]` is the error TEXT, not JSON. Every prior caller here that did
+        `json.loads(self._call(...)[0])` therefore turned a server-side failure
+        into a confusing `json.decoder.JSONDecodeError: Expecting value: line 1
+        column 1` instead of a real exception. `unwrap_msg` (jeepney's own helper
+        for exactly this) raises `DBusErrorResponse` on an error reply; we
+        translate that into `BrainError` so callers see one exception type
+        regardless of transport.
+        """
         msg = new_method_call(_ADDR, method, signature, body) if signature else new_method_call(_ADDR, method)
-        return self._conn.send_and_get_reply(msg).body
+        try:
+            return unwrap_msg(self._conn.send_and_get_reply(msg))
+        except DBusErrorResponse as e:
+            raise BrainError(_dbus_error_text(e), name=e.name) from None
 
     def _get_prop(self, name: str) -> Any:
         msg = Properties(_ADDR).get(name)
-        variant = self._conn.send_and_get_reply(msg).body[0]
+        try:
+            variant = unwrap_msg(self._conn.send_and_get_reply(msg))[0]
+        except DBusErrorResponse as e:
+            raise BrainError(_dbus_error_text(e), name=e.name) from None
         return variant[1]  # (signature, value)
 
     @staticmethod
@@ -309,6 +328,15 @@ class BrainDBus(BrainBase):
         """Per-fd metadata for the input blobs (only names present in `blobs`)."""
         meta = meta or {}
         return {name: meta[name] for name in (blobs or {}) if name in meta}
+
+
+def _dbus_error_text(e: DBusErrorResponse) -> str:
+    """A human-readable message from a `DBusErrorResponse`: the first string
+    field of its body when present (the convention every `fdo::Error::*` and
+    brain's own D-Bus error replies follow), else `str(e)`."""
+    if e.data and isinstance(e.data[0], str):
+        return e.data[0]
+    return str(e)
 
 
 def _read_stream(raw_fd: int, timeout: float) -> Iterator[tuple[dict[str, Any], list[int]]]:

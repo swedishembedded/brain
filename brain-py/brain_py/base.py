@@ -33,6 +33,30 @@ from typing import Any, Callable, Optional
 OnProgress = Callable[[int, int, str], None]
 
 
+class BrainError(RuntimeError):
+    """A server-side action/method failure, uniform across transports.
+
+    Both :class:`~brain_py.dbus.BrainDBus` (an action's ``error`` frame, or a
+    D-Bus method call that comes back as an error reply) and
+    :class:`~brain_py.client.BrainStdio` (a JSONL ``error`` event) raise this
+    same type, so calling code can write one ``except BrainError`` regardless
+    of ``transport=``.
+
+    ``name`` is the D-Bus error name (e.g. ``org.freedesktop.DBus.Error.Failed``)
+    when the failure came from a D-Bus method-call reply; ``None`` for an action
+    ``error`` frame (over either transport, since a capability action has no
+    D-Bus-style error name) or for the JSONL transport in general.
+    """
+
+    def __init__(self, message: str, *, name: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.name = name
+
+    def __str__(self) -> str:
+        return f"[{self.name}] {self.message}" if self.name else self.message
+
+
 @dataclass
 class Outcome:
     """The result of a capability action, materialised and transport-agnostic.

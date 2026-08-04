@@ -48,7 +48,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from .base import BrainBase, OnProgress, Outcome
+from .base import BrainBase, BrainError, OnProgress, Outcome
 from .forecast import Forecast, Panel
 
 try:
@@ -338,7 +338,7 @@ class BrainStdio(BrainBase):
                 raise TimeoutError(f"timed out waiting for response to {req_id!r}")
             p = self._pending.pop(req_id)
         if p.error:
-            raise RuntimeError(f"brain error for {req_id!r}: {p.error}")
+            raise BrainError(f"brain error for {req_id!r}: {p.error}")
         return p
 
     # -- public API ----------------------------------------------------------
@@ -412,7 +412,7 @@ class BrainStdio(BrainBase):
         })
         p = self._wait_for(rid, timeout)
         if p.error:
-            raise RuntimeError(f"{model}.{action} failed: {p.error}")
+            raise BrainError(f"{model}.{action} failed: {p.error}")
         res = next((e for e in p.events if e.get("event") == "action_result"), None)
         if res is None:
             raise RuntimeError(f"{model}.{action}: no action_result (events: {[e.get('event') for e in p.events]})")
