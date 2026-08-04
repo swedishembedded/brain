@@ -17,6 +17,7 @@ pub mod binio;
 pub mod chat;
 pub mod toolcall;
 pub mod bpe;
+pub mod clip_bpe;
 pub mod episode;
 pub mod imageset;
 pub mod loader;

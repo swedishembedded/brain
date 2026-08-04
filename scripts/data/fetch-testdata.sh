@@ -60,6 +60,7 @@ TTS_MIRROR="${BRAIN_TTS_MIRROR:-/data/workspace/tmp/qwen3-tts-resources}"
 GOLDEN_MIRROR="${BRAIN_GOLDEN_MIRROR:-/data/workspace/resources/brain-goldens}"
 SAM2_MIRROR="${BRAIN_SAM2_MIRROR:-/data/workspace/resources/sam2}"
 IDENTITY_MIRROR="${BRAIN_IDENTITY_MIRROR:-/data/workspace/resources/identity}"
+UNET_MIRROR="${BRAIN_UNET_MIRROR:-/data/workspace/resources/unet}"
 
 added=0 skipped=0 missing=0
 
@@ -166,7 +167,7 @@ sam2_tree() { _link_from "$SAM2_MIRROR" "$1" "$2"; }
 model_tree() { _link_from "$1" "$2" "$3" "" "$MODELS_DIR"; }
 
 echo "brain: populating testdata at $DEST, models at $MODELS_DIR"
-echo "       mirrors: asr=$ASR_MIRROR vl=$VL_MIRROR tts=$TTS_MIRROR golden=$GOLDEN_MIRROR sam2=$SAM2_MIRROR identity=$IDENTITY_MIRROR"
+echo "       mirrors: asr=$ASR_MIRROR vl=$VL_MIRROR tts=$TTS_MIRROR golden=$GOLDEN_MIRROR sam2=$SAM2_MIRROR identity=$IDENTITY_MIRROR unet=$UNET_MIRROR"
 
 # --- ASR (Nemotron 3.5 ASR, Qwen3-ASR) --------------------------------------
 model_tree "$ASR_MIRROR" "nemotron/hf"  "nvidia/nemotron-3.5-asr-streaming-0.6b"
@@ -204,6 +205,15 @@ sam2_tree "weights/sam2.1-hiera-tiny"  "sam2/hiera-tiny"
 # `crates/facenet/tests/parity.rs` skips itself while they are absent.
 _link_files "$IDENTITY_MIRROR" "weights/antelopev2" "face/antelopev2" \
   glintr100.onnx scrfd_10g_bnkps.onnx
+
+# --- CLIP tokenizer (SDXL) ---------------------------------------------------
+# `vocab.json` + `merges.txt` for `data::clip_bpe::ClipBpe`. SDXL's `tokenizer/`
+# and `tokenizer_2/` ship BYTE-IDENTICAL copies (they differ only in
+# `pad_token`), so one copy is linked and the test builds both tokenizers from
+# it. The id golden `clip/tokenizer/ids.safetensors` comes from
+# `tools/clip_dump_reference.py`, not from here.
+_link_files "$UNET_MIRROR" "weights/sdxl-base-1.0/tokenizer" "clip/tokenizer" \
+  vocab.json merges.txt
 
 # --- Vision-language (FastVLM, Moondream3, Qwen3-VL) -------------------------
 # Checkpoints go to the model store, named exactly (only the ONE variant per
