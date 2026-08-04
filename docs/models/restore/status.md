@@ -1,8 +1,9 @@
 # CodeFormer face restoration (`crates/restore`) — status
 
 **Scope reached: goldens → import → FORWARD parity, per stage, at five `w`.**
-Backward/gradcheck and the serving contract are deferred; what they need is at
-the bottom.
+Backward/gradcheck is deferred; the **serving contract is met** (`restore::caps`
+`restore_face`, `crates/cli/src/resident_restore.rs`, D-Bus `Run`,
+`examples/restore/`) apart from a batched `run_batch`. Both are at the bottom.
 
 `crates/vqgan` already owns the VQ autoencoder (encoder / 1024×256 codebook /
 generator) and is parity-gated on its own goldens — see
@@ -272,7 +273,7 @@ parity digit (re-measured identical after the fix).
    finite, plausible image computed from unwritten memory instead of failing —
    the "silently wrong, not a crash" class. The contract was documented on the
    method but not enforced. Fixed with an `AtomicBool` (kept `Sync` for the
-   deferred serving contract) set by `predict_codes` and asserted by both
+   serving contract, which has since landed) set by `predict_codes` and asserted by both
    readers, plus a regression test in `pooled_matches_tapped` that asserts both
    entry points panic on a fresh model.
 2. **~47 MB of dead VRAM pinned on the production path.**
@@ -372,26 +373,32 @@ after the `run_blocks` signature change.
 * Gate it as `gradcheck::check_codeformer` with the FD floors the playbook sets
   (block < 1e-4, model < 1e-3).
 
-### Serving contract
+### Serving contract — **MET** (2026-08-04), except for batching
 
-* **`capability::Provider`**: one action, `restore_face`, taking an aligned RGB
-  512² image plus `w ∈ [0, 1]` and returning an image. `w` must be a typed
-  `ActionSpec` parameter, not a build-time constant — the graph already supports
-  that (`w` is a device buffer), so no rebuild per request.
-* **Residency adapter** (`crates/cli/src/resident_restore.rs`, registered in
-  `resident::build_executor`): the resident weight set is ~370 MB fp32; the
-  *activations* are the real budget — a 512² inference graph with the pool ON
-  peaks far below the 6.9 GB tapped build but has not been measured yet, and
-  four encoder features (≈46 MB) must stay pinned between the two submits.
-* **`run_batch`**: the architecture batches cleanly — every attention dispatch
-  already takes `bsz` and every conv takes `N` — but the current graph hardcodes
-  `bsz = 1`. Batching means parameterising `CodeFormer::new` on batch size and
-  widening the `img_in` / `idx_in` / `out` buffers; the host round-trip for the
-  argmax indices is per-batch, not per-image, so it does not serialise.
-* **D-Bus**: image in / image out fits the existing fd-blob surface
-  (`Run` + memfd), same shape as the depth and yolo paths; a `--w` scalar rides
-  the existing typed-argument map. An `examples/face/` demo would want the
-  detection+alignment gap above closed first.
+* **`capability::Provider`**: `restore::caps`, one action `restore_face`, taking
+  an (ideally aligned) RGB image — resized to 512² on the device — plus a typed
+  `w ∈ [0, 1]` float param, returning an image. `w` is a device buffer, so a
+  sweep is a buffer write and not a rebuild; measured over D-Bus, a 0 → 0.5 → 1
+  sweep on one resident instance costs 29097 / 951 / 1050 ms (debug build).
+* **Residency adapter**: `crates/cli/src/resident_restore.rs`
+  (`RestoreResident`), registered in `resident::build_executor` behind
+  `BRAIN_RESTORE_WEIGHTS`; `instance_key` is the fixed 512² graph, which is what
+  makes the `w` sweep share one build. `estimate` budgets 1.2× the checkpoint
+  plus 3 GiB of activation slack — still a bound, not a measurement.
+* **D-Bus** `Run` with the image as a memfd blob, plus
+  `examples/restore/restore_face.py`. Measured against the
+  `gen_face_w{0p00,0p50,1p00}` goldens through a u8 PPM round trip on both
+  sides: cosine **0.999998** at every `w`, `mean|out−ref|` 0.00099, and
+  `mean|out−in|` 0.0359 / 0.0294 / 0.0274 — the dial moves in the right
+  direction. Detection + alignment are still NOT chained in (see above);
+  the action takes the face it is given.
+* **Still owed — `run_batch`**: the architecture batches cleanly — every
+  attention dispatch already takes `bsz` and every conv takes `N` — but the
+  current graph hardcodes `bsz = 1` as a recorded step list over fixed buffers.
+  Batching means parameterising `CodeFormer::new` on batch size and widening the
+  `img_in` / `idx_in` / `out` buffers; the host round-trip for the argmax
+  indices is per-batch, not per-image, so it does not serialise. Until then
+  `run_batch` is the serial default, said so in-file.
 * **Perf**: not profiled. The two P40 submits at 512² run in well under a second
   end to end in the test, but no per-kernel table has been published, so no
   optimisation claim is made here. Follow `docs/porting-playbook.md` §10 and

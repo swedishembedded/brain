@@ -50,8 +50,18 @@ ways — per-block (not 3 global) modulation, 3 RoPE axes at θ=10000 (not 4 at
 ### The second finding: the UNet family is cheap, so InstantID stays
 
 InstantID is SDXL-based — it needs a `UNet2DConditionModel` *plus* a ControlNet,
-and brain today has **no UNet diffusion model at all** (only DiT: `dit`,
-`zimage`, `flux2`). The initial read was that this made InstantID a bad trade.
+and at the time this was written brain had **no UNet diffusion backbone** (only
+DiT: `dit`, `zimage`, `flux2`). The initial read was that this made InstantID a
+bad trade.
+
+> Correction, recorded because the sentence above was stated too strongly:
+> `crates/wm-diamond` **is** a UNet-shaped diffusion model (an EDM world model
+> with a down/mid/up + skips + resnets + self-attention `DiamondUNet`). What was
+> missing was a *text-conditioned image* UNet, and — the part that matters for
+> reuse — `wm-diamond` records its graph **by hand** rather than through
+> `vae::blocks::Builder`. Since `crates/unet` landed (phase 4b) brain has two
+> independent UNet graph recorders; migrating `wm-diamond` onto the shared
+> builder is an open follow-up, filed in `docs/models/unet/status.md`.
 
 Measuring it says otherwise: **a UNet + ControlNet family needs zero new
 kernels.**
@@ -263,8 +273,10 @@ New capability belongs in existing shared homes, not per-model copies:
   `basicsr` reference is cosine 1.000000000 on every one of the 25+25 blocks at
   128², on the 512² end-to-end (synthetic + real face), and on the quantizer
   unit — with **zero** code-index disagreements — for **both** checkpoints
-  (`codeformer.pth`, `vqgan_code1024.pth`). Backward/gradcheck, the CodeFormer
-  transformer + fidelity dial, and the serving contract are follow-ups.
+  (`codeformer.pth`, `vqgan_code1024.pth`). The CodeFormer transformer +
+  fidelity dial are `crates/restore`; the serving contract is met by
+  `vqgan::caps` + `resident_restore::VqganResident` + `examples/restore/`
+  (2026-08-04). Backward/gradcheck is the remaining follow-up.
 
   Reuse was made real by **hoisting**, not copying: `crates/vae`'s private
   `Builder` is now the public `vae::blocks::Builder` (parameterised by
@@ -287,9 +299,35 @@ New capability belongs in existing shared homes, not per-model copies:
   `fc1/act/fc2` MLP rather than SwiGLU, and it is non-SSA so the per-stage taps
   could not exist through it).
 
-  The CLIP **BPE tokenizer is not implemented** — it belongs in `crates/data`
-  next to the GPT-2 and Qwen BPEs, and the parity tests feed token ids from the
-  goldens. Preprocessing (decode → bicubic 336 → normalize) is likewise absent;
+  The CLIP **BPE tokenizer is implemented** (2026-08-04) as
+  `data::clip_bpe::ClipBpe`, next to the GPT-2 and Qwen BPEs. It reuses
+  `data::bpe`'s merge loop verbatim and adds only what differs: the `</w>`
+  word-end marker, CLIP's pre-tokenization (no leading-space rule, ONE digit per
+  pre-token, whitespace dropped), lowercase + whitespace collapse, and the
+  `<|startoftext|>`/`<|endoftext|>` frame at the fixed 77 context. Gated by
+  `crates/data/tests/clip_tokenizer_parity.rs` at **exact id equality** vs HF's
+  `CLIPTokenizer` over 32 tricky strings × both SDXL tokenizers, plus an
+  8000-string randomized differential run against `transformers` (0 mismatches
+  on either tower) that is how the two pre-tokenizer defects below were found —
+  it is a review tool, not a committed test, since it needs `transformers`.
+  Two things the pinned corpus now nails down, each having been wrong:
+  (a) a greedy `[^\s\p{L}\p{N}]+` run does **not** yield to the `'s`/`'re`
+  alternatives — Python's alternation priority applies where a match *starts*,
+  so `%'s` is `["%'", "s"]`, and breaking out of the run was wrong on 351/3000
+  fuzzed strings; (b) `\p{L}` is the general category `L*`, not
+  `char::is_alphabetic` (which is the `Alphabetic` property, `L* | Nl |
+  Other_Alphabetic`), so a roman numeral (`Nl`) must take the `[\p{N}]` branch.
+  The residual `Other_Alphabetic` gap (1510 codepoints — combining marks, so
+  Indic/Thai/Hebrew vowel signs) is measured and documented in the module, not
+  silent.
+  A finding worth carrying: the two SDXL tokenizers are **not** "same ids,
+  different padding" — `tokenizer_2` registers its pad token `!` as an *added*
+  token, so HF splits on it before the BPE and a literal `!` is id 0 there
+  versus `!</w>` (256) in `tokenizer/`.
+  *Still owed:* `crates/clip`'s parity tests still feed token ids from the
+  goldens rather than driving the tokenizer, and no `encode_prompt`-shaped
+  helper ties tokenizer → tower yet.
+  Preprocessing (decode → bicubic 336 → normalize) is likewise absent;
   its goldens (`image_raw`/`image_mean`/`image_std`) are already dumped and are
   the gate for wiring `crates/imaging` to it.
 - **`crates/imaging`** *(new)* — **DONE.** The image substrate that was ~60 sites
@@ -380,12 +418,12 @@ Each phase ends at a validation gate and is independently committable.
 | Phase | Content | Gate |
 |---|---|---|
 | **0. Foundations** ✅ **DONE** | kernels 1–5 + `crates/imaging` + `vision::blocks` additions + `model::vit` windowed spans | `make kernels-regen`, `make test`, per-kernel parity vs a CPU reference — **met**, see below |
-| **1. SAM 2** ◑ **FORWARD DONE** | Hiera trunk → FPN neck → prompt encoder → two-way mask decoder; image path only (no video memory bank) | parity vs dumped goldens — **met** (283/283, see below); `check_sam2`, capability + D-Bus + example **still owed** |
-| **2. Face recognition** ◑ **FORWARD DONE** | `crates/facenet`: SCRFD + IResNet-100 + alignment | cosine ≥0.999 vs insightface goldens — **met** (1.0000000 on every tap, see below); `check_arcface` **still owed** |
-| **3. CodeFormer** ◑ **FORWARD DONE** | `crates/vqgan` + `crates/restore` (code-prediction transformer, `Fuse_sft_block` CFT, identity-fidelity dial `w`) | VQ encoder/decoder/codebook parity **and** the full restorer — **met** (see the phase 3c/4 gate below); `check_codeformer` **still owed**, and `adain=True` — the reference CLI's actual path — is **not implemented** |
-| **3b. Text encoders** ◑ **FORWARD DONE** | `crates/clip`: CLIP-L + OpenCLIP-bigG + EVA-CLIP-L/336 behind one config-driven graph | cosine ≥0.9999 vs HF per encoder — **met** (see below); the **BPE tokenizer and image preprocessing are not implemented**; `check_clip` **still owed** |
+| **1. SAM 2** ◑ **FORWARD DONE** | Hiera trunk → FPN neck → prompt encoder → two-way mask decoder; image path only (no video memory bank) | parity vs dumped goldens — **met** (283/283, see below); the **serving contract is met** (`sam2::caps` `segment`, `resident_sam2.rs`, D-Bus `Run`, `examples/vision/`, `run_batch` grouped by image); `check_sam2` **landed for the mask decoder** (128 tensors, 0 failures, trunk+neck `Role::Frozen`) — **full-trunk training still owed** |
+| **2. Face recognition** ◑ **FORWARD DONE** | `crates/facenet`: SCRFD + IResNet-100 + alignment | cosine ≥0.999 vs insightface goldens — **met** (1.0000000 on every tap, see below); the **serving contract is met** (`facenet::caps` `detect`/`embed`, `resident_facenet.rs`, D-Bus `Run`, `examples/vision/`; the insightface detector letterbox now lives in `caps.rs`), `check_arcface` **landed** |
+| **3. CodeFormer** ◑ **FORWARD DONE** | `crates/vqgan` + `crates/restore` (code-prediction transformer, `Fuse_sft_block` CFT, identity-fidelity dial `w`) | VQ encoder/decoder/codebook parity **and** the full restorer — **met** (see the phase 3c/4 gate below); the **serving contract is met** for both crates (`vqgan::caps` `encode`/`decode`, `restore::caps` `restore_face`, `resident_restore.rs`, D-Bus `Run`, `examples/restore/`); `check_vqgan` **landed** for the VQ half; **`check_codeformer` — the code transformer + CFT — is still owed**, and `adain=True` — the reference CLI's actual path — is **not implemented** |
+| **3b. Text encoders** ◑ **FORWARD DONE** | `crates/clip`: CLIP-L + OpenCLIP-bigG + EVA-CLIP-L/336 behind one config-driven graph | cosine ≥0.9999 vs HF per encoder — **met** (see below); the **BPE tokenizer is done** (`data::clip_bpe`, exact-id gate vs HF on both SDXL tokenizers) but is **not yet wired into `crates/clip`'s tests**; **image preprocessing is not implemented**; `check_clip` **landed for the CLIP-L text tower**; bigG and the EVA image tower still owe theirs |
 | **4. FLUX.1** ◑ **TRANSFORMER FORWARD DONE** | `crates/flux1` reusing `dit`/`vae`/`model::block`; **`crates/t5`** (T5-XXL encoder) + phase-3b CLIP-L; Kontext edit path | forward cosine vs diffusers — **met for the transformer and for T5-XXL** (see the phase 3c/4 gate below). **fp32 parity is gated at reduced depth only** (47.6 GiB does not fit a 24 GiB card); full depth is gated at **int8**. No sampler loop, no VAE glue, no CLI, no `check_flux1` |
-| **4b. UNet family** | `crates/unet` (SDXL `UNet2DConditionModel`) + discrete schedulers (DDIM/Euler-a/DPM++, ε and v-pred) in `crates/diffusion` | forward cosine vs diffusers SDXL; `check_unet` |
+| **4b. UNet family** ◑ **FORWARD DONE** | `crates/unet` (SDXL `UNet2DConditionModel`) + discrete schedulers (DDIM/Euler/Euler-a/DPM++, ε and v-pred) in `crates/diffusion` | forward cosine vs diffusers SDXL — **met** (165 comparisons / 0 failed, `out.sample` cosine 1.0000000000, rel_l2 3.258e-6; schedulers 66 checks / 0 failed — see the phase-4b gate below); `check_unet` **still owed**, and so is the **whole serving contract** (no capability, no residency adapter, no `run_batch`, no D-Bus, no example) plus the sampler loop, the VAE/text-encoder glue and batch > 1 |
 | **4c. ControlNet** | `crates/controlnet`: backbone-agnostic `ControlAdapter` over named injection points; SDXL impl first, FLUX impl second; depth conditioning fed by brain's own ZipDepth | residual parity vs diffusers ControlNet; `check_controlnet` |
 | **5. Identity** | PuLID adapter on the phase-4 FLUX.1 backbone **and** InstantID (phase-4b/4c SDXL + IP-Adapter-FaceID), both fed by phase-2 ArcFace embeddings | ID cosine vs reference for each; `check_pulid`, `check_instantid`; measure the two against each other on shared fixtures |
 | **6. Pipeline** | `imaging.pipeline` action + matting (BiRefNet) + Florence-2 text→box + Real-ESRGAN tail | end-to-end "change only X" on a fixture set |
@@ -458,10 +496,13 @@ script, not mirrored.
 Backward/gradcheck (`check_codeformer`, `check_flux1`, `check_t5`) and the
 serving contract (`Provider`, residency adapter, `run_batch`, D-Bus,
 `examples/`) are **deliberately deferred** and are not claimed by any number
-below. None of `crates/{t5,flux1,restore}` has a CLI subcommand, a capability
-manifest or a D-Bus surface; `crates/flux1` has **no sampler loop and no VAE
-glue**, so "FLUX.1 works" is *not* a claim this gate supports — what it supports
-is that one transformer evaluation reproduces diffusers.
+below. At the time of this gate none of `crates/{t5,flux1,restore}` had a CLI
+subcommand, a capability manifest or a D-Bus surface — **`crates/restore` has
+since gained all three** (`restore::caps`, `resident_restore.rs`,
+`examples/restore/`, 2026-08-04); `t5`/`flux1` still have none. `crates/flux1`
+has **no sampler loop and no VAE glue**, so "FLUX.1 works" is *not* a claim this
+gate supports — what it supports is that one transformer evaluation reproduces
+diffusers.
 
 One Tesla P40 (`BRAIN_DEVICE=gpu0`, wgpu/Vulkan), `--release`, run as targeted
 `cargo test --release -p <crate>` invocations (never a workspace
@@ -497,6 +538,43 @@ One Tesla P40 (`BRAIN_DEVICE=gpu0`, wgpu/Vulkan), `--release`, run as targeted
 **Phase 4 is the long pole and it is also disk- and bandwidth-bound** (34 GB at
 ~1.5 MB/s ≈ 6 h). Phases 0–3 need no Kontext weights, so they proceed in
 parallel with the download.
+
+#### Phase 4b gate — what was actually run
+
+**Scope: goldens → import → FORWARD parity, plus the schedulers. Nothing
+else.** `check_unet` and the **entire serving contract** (`Provider`, residency
+adapter, `run_batch`, D-Bus, `examples/`) are deferred and are claimed by no
+number here — unlike phases 1/2/3, `crates/unet` has **no** capability manifest,
+**no** `resident_unet.rs` and **no** example. There is also no sampler loop and
+no VAE/text-encoder glue, so "SDXL works" is *not* supported; what is supported
+is that one UNet evaluation and four schedulers reproduce diffusers. Full
+ledger: `docs/models/unet/status.md`.
+
+One Tesla P40 (`BRAIN_DEVICE=gpu1`, wgpu/Vulkan), `--release`, targeted
+`cargo test --release -p <crate>` (never a workspace `--tests --examples`).
+
+| suite | tests | measured |
+|---|---|---|
+| `brain-unet` | 10 lib + 3 smoke + 1 parity (1 ignored), 0 failed (parity 40.7 s) | SDXL `unet/`: import **1680 source tensors → 1610 brain tensors**, two-way covered (the delta is the 70 `BasicTransformerBlock`s' three host-side fusions/splits); **2158 steps** at a 32×32 latent. **165 comparisons, 0 failed** (162 device taps + 2 host + `out.sample`), **worst cosine 0.9999999999** (`up1.attn1.proj_out`, max_abs 3.728e-4, rel_l2 1.539e-5); `out.sample` cosine **1.0000000000** / max_abs 1.705e-5 / rel_l2 **3.258e-6**. Both a cosine gate (≥0.9999) **and** a `rel_l2` gate (1e-3) are asserted — cosine alone is scale-invariant, so a dropped `output_scale_factor` or a doubled attention scale passes it |
+| `brain-diffusion` | 7 lib + 66 scheduler checks + 5 other, 0 failed | DDIM / Euler / Euler-ancestral / DPM-Solver++(2M) × {ε, v-pred} × {4, 20} steps: the `timesteps` vector **exact** (0.000e0), the `sigmas` table incl. the terminal entry, `init_noise_sigma`, `scale_model_input` at every step, and the **full** `step()` trajectory. **Worst max_rel 7.510e-6** (`ddim.epsilon.20.traj`); the eight `init_noise_sigma` checks at ≤4.502e-7 |
+| residency (`#[ignore]`d, not a parity gate) | 1 | **2 567 463 684 parameters = 10.27 GB fp32**; the production graph at a **128×128 latent** (SDXL's native size) is **2198 dispatches** at **4.06 s per forward** — the full-resolution fp32 UNet forward runs on one P40. The ~14 GB in the VRAM table below is UNet + both text encoders; the UNet alone is 10.27 GB |
+
+Defects this phase found and fixed, each with the number that proved it, are in
+`docs/models/unet/status.md`. Two are worth naming here because they are not
+UNet-specific: `diffusion::Sigmas::init_noise_sigma` had its two
+`timestep_spacing` branches **inverted**, so every SDXL sampling run would have
+started from 11.028 instead of 11.074 (SDXL ships `leading`) and nothing gated
+it; and `vae::blocks::Builder` uploaded weights with `storage_init`
+(mapped-at-creation, no staging drain), which **OOM'd a P40 with ~20 GB free**
+at 10.27 GB and is now the `storage()`+`write()`+`poll_wait()` pattern
+`paramstore` and `zimage` already used.
+
+**Not measured by this gate, and therefore not claimed:** the 128×128 latent
+(the golden is dumped at 32×32; the graph is resolution-independent, so what
+32×32 gates is the composition), batch > 1 and therefore CFG-as-one-forward,
+INT8, the VAE/text encoders, anything about speed beyond the single 4.06 s
+wall-clock, and `BRAIN_DEVICE=cpu` numbers (a run-to-run determinism finding on
+that backend is contested — see the ledger).
 
 ### VRAM budget (24–48 GB target)
 
@@ -565,7 +643,9 @@ commitment term that file's own line-29 comment claims — pinned by reading the
 reference, not by the gate.
 
 Still owed: full-trunk SAM 2 training, the CodeFormer transformer + dial `w`,
-bigG/EVA backwards, and the serving contract for all four.
+and bigG/EVA backwards. *(The serving contract, listed here as owed for all
+four, has since landed for `sam2`/`facenet`/`vqgan`/`restore`; `clip` still owes
+it — it needs `data::clip_bpe` wired in and EVA image preprocessing.)*
 
 ## 5. Open decisions
 

@@ -8,9 +8,12 @@ The `basicsr` VQ autoencoder behind **CodeFormer** blind face restoration
 
 ## Scope of this pass
 
-**Goldens → import → FORWARD parity only.** Backward/gradcheck, the CodeFormer
-transformer + controllable feature transformation + fidelity dial, and the
-serving contract are deliberately deferred — see "Deferred" for what each needs.
+**Goldens → import → FORWARD parity only.** The CodeFormer transformer +
+controllable feature transformation + fidelity dial are `crates/restore`; the
+**serving contract is met** (2026-08-04) by `vqgan::caps` (`encode`/`decode`),
+`resident_restore::VqganResident` (`BRAIN_VQGAN_WEIGHTS`), D-Bus `Run` and
+`examples/restore/vq_roundtrip.py`. Backward/gradcheck is deliberately deferred
+— see "Deferred" for what it needs.
 
 ## Deliverables
 
@@ -245,15 +248,24 @@ Still deferred on the training side:
 - The selective-tap problem below is unchanged: train mode is also a whole-graph
   switch.
 
-**Serving contract**
-- One-shot image-in/image-out, so `capability::Action`'s `Progress` timeline
-  collapses to a single latency (same treatment as `depth`/`yolo`).
-- `run_batch`: every kernel takes an `N`, but `vae::blocks::Builder` hardcodes
-  `N = 1`. True batching is a change to the **shared** builder, so it lands for
-  `AutoencoderKL` at the same time — do it there, not in a vqgan fork.
-- Residency: two graphs on one `Gpu`; ~72 M params fp32 ≈ 290 MB of weights plus
-  ~4 GB of activations at 512² with taps off.
-- D-Bus: image in / image out fits the existing fd-blob surface.
+**Serving contract** — **MET**, except for batching
+- `vqgan::caps` is the `capability::Provider`: `encode` (image → u32 codes as a
+  `Media::Bytes` blob) and `decode` (codes → image). They are two actions on
+  purpose — the point of a discrete latent is that the codes travel.
+- `resident_restore::VqganResident` is the residency adapter, registered in
+  `resident::build_executor` behind `BRAIN_VQGAN_WEIGHTS`; `instance_key` is the
+  square side, so `encode` and `decode` share one build.
+- D-Bus `Run` + `examples/restore/vq_roundtrip.py`. Measured on the
+  `e2e_512_face` golden with `codeformer.pth`: **256/256 code indices identical**
+  to the reference, `quant_mse` 4.022529 vs the golden `mean(vq.min_dist)`
+  4.022528, reconstruction cosine 0.99999795 through the u8 PPM round trip.
+- **Still owed — `run_batch`.** Every kernel takes an `N`, but
+  `vae::blocks::Builder` hardcodes `N = 1` and the graph is a recorded step list
+  over fixed buffers. True batching is a change to the **shared** builder, so it
+  lands for `AutoencoderKL` at the same time — do it there, not in a vqgan fork.
+  Until then `run_batch` is the serial default, said so in-file.
+- Residency footprint: two graphs on one `Gpu`; ~72 M params fp32 ≈ 290 MB of
+  weights plus ~4 GB of activations at 512² with taps off.
 
 **CodeFormer (task #5, second half)**
 - `Vqgan::generate(&z_q)` is the seam, verified bit-identical to `decode`.

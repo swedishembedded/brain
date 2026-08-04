@@ -9,8 +9,11 @@ generative one (PuLID / InstantID — `docs/imaging/plan.md`).
 
 **Goldens → import → FORWARD parity**, plus the ArcFace **TRAINING** half:
 `facenet::train::ArcFaceTrainer` (IResNet backbone + additive-angular-margin
-head, hand-written device backward) gated by `gradcheck::check_arcface`. The
-serving contract is still deferred; see "Deferred" below.
+head, hand-written device backward) gated by `gradcheck::check_arcface`.
+The **serving contract is met** (2026-08-04): `facenet::caps` (`detect`,
+`embed`), `crates/cli/src/resident_facenet.rs` (`BRAIN_FACENET_DIR`), D-Bus
+`Run`, `examples/vision/`. What is still owed under it — a genuinely batched
+`run_batch` — is in "Deferred" below.
 
 ## Deliverables
 
@@ -179,26 +182,31 @@ forwards of a 49-block net). The grad wrt the input blob
 (`ArcFaceTrainer::d_input`) is computed but not FD-checked; it exists so an
 alignment-aware variant can hang `grid_sample_dx` off it.
 
-**Serving contract** (`docs/serving-contract.md`)
-* `capability::Provider` + `crates/cli/src/resident_facenet.rs` registered in
-  `resident::build_executor`.
-* `Instance::run_batch`: ArcFace batches trivially (the ONNX input is
-  `[N,3,112,112]`), but the current `ArcFace` pre-allocates `N = 1` activations —
-  batching means threading `n` through the block constructors. SCRFD's input is
-  `[1,3,H,W]`, so the detector batches only by looping or re-export.
-* D-Bus `Run` with an image fd + `examples/face/`. `capability::Media::Image`
-  already exists, so no surface change is expected.
+**Serving contract** (`docs/serving-contract.md`) — **MET**, except for batching
+* `facenet::caps` is the `capability::Provider` (`detect`, `embed`);
+  `crates/cli/src/resident_facenet.rs` is the residency adapter and is
+  registered in `resident::build_executor` behind `BRAIN_FACENET_DIR`; D-Bus
+  `Run` + `examples/vision/{face_id.py,README.md}` drive it.
+* **Still owed — `Instance::run_batch`.** ArcFace batches trivially (the ONNX
+  input is `[N,3,112,112]`), but the current `ArcFace` pre-allocates `N = 1`
+  activations — batching means threading `n` through the block constructors, the
+  way `yolo::Yolo::load(path, batch)` already does. SCRFD's input is
+  `[1,3,H,W]`, so the detector batches only by looping or re-export. Until then
+  `run_batch` is the serial default, and `resident_facenet.rs` says so in-file.
 
 **Not implemented in this pass**
-* **The detector's input resize.** insightface's `SCRFD.detect` does
-  `cv2.resize` to fit the long side, zero-pads to 640×640, and derives
-  `det_scale = nh / h0` — which `detect::decode` needs. Neither the resize nor
-  `det_scale` exists in the crate: `scrfd_decode_and_nms_reproduce_the_reference_detections`
-  feeds the golden `det_blob` and passes the four `det_scale` values recorded in
-  `manifest.json` as literals. Reproducing `cv2.INTER_LINEAR` is its own
-  resampler-parity question (`imaging::Filter` names an exact reference per
-  kernel and cv2's is not among them). Until it lands there is **no
-  image-in → faces-out entry point**, only `Scrfd::forward(blob)`.
+* ~~**The detector's input resize.**~~ **Landed** with the serving contract:
+  `facenet::caps::Session::det_canvas` reproduces insightface's `SCRFD.detect`
+  geometry — aspect-preserving `resize_bilinear` into the **top-left** of a zero
+  640×640 canvas (`pad2d`), `det_scale = new_h / h0`, then the `(x−127.5)/128`
+  normalisation re-expressed for `[0,1]` input — all on the device, and it is
+  `Session::faces` that turns image-in into faces-out. cv2's `INTER_LINEAR` is
+  half-pixel-centred bilinear, which is `Filter::Bilinear` +
+  `AlignCorners::HalfPixel`; measured on the golden 640² detector canvas the
+  served box and landmarks reproduce `photo0_dets`/`photo0_kpss` (rescaled by the
+  recorded `det_scale`) to **5.0e-5 px** and **6.7e-5 px** max-abs, score
+  0.8217951655 vs 0.8217951059. The parity test still feeds the golden
+  `det_blob` because it gates the *network*, not the letterbox.
 * **The INFERENCE graphs are pinned to `N = 1`** — `ArcFace::new` / `Scrfd::new`
   pre-allocate at `n = 1`. The blocks themselves are batch-generic (they take a
   `Shape` that carries `n`), which is how `train::ArcFaceTrainer` runs at batch

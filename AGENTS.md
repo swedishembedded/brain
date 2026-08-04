@@ -71,8 +71,11 @@ fast and scalable kernel — not a naive one.
     release). Imported from **ONNX** — the first import in the repo to read the
     protobuf, via the new `onnx::read` — with two-way coverage (462 / 119
     tensors). Forward-parity-gated per stage at cosine 1.000000.
-    See `docs/models/face/status.md`. *(Forward only: backward/gradcheck and the
-    serving contract are deferred and listed in that ledger.)*
+    See `docs/models/face/status.md`. **Serving contract met**: `facenet::caps`
+    (`detect`, `embed`), `crates/cli/src/resident_facenet.rs`
+    (`BRAIN_FACENET_DIR`), D-Bus `Run`, `examples/vision/`. *(`run_batch` is the
+    serial default and says why: both released graphs are built for
+    `Shape::new(1,3,side,side)`. Backward/gradcheck are listed in that ledger.)*
 9c. **SAM 2.1 promptable segmentation** (`crates/sam2`) — the **image path** of
     Meta's SAM 2.1: Hiera trunk (windowed attention with a per-block window
     schedule + `q_pool` stride stages) → FPN neck → prompt encoder (points, boxes
@@ -81,8 +84,12 @@ fast and scalable kernel — not a naive one.
     variants (`hiera_tiny`, `hiera_large`) imported with two-way coverage and
     **forward-parity-gated per stage at cosine ≥0.9999999999** over 283
     comparisons. Composes `model::vit`'s windowed spans and `vision::blocks`;
-    adds no kernel. *(Forward only: the video memory bank, backward/gradcheck and
-    the serving contract are deferred — see `docs/imaging/plan.md` §4.)*
+    adds no kernel. **Serving contract met**: `sam2::caps` (`segment`),
+    `crates/cli/src/resident_sam2.rs` (`BRAIN_SAM2_WEIGHTS`), D-Bus `Run`,
+    `examples/vision/`; `run_batch` groups a batch **by image**, so N prompts on
+    one frame cost ONE Hiera trunk pass and N decoder passes. *(Forward only: the
+    video memory bank and backward/gradcheck are deferred — see
+    `docs/imaging/plan.md` §4.)*
 10. **WorldMirror-2 multi-view 3D reconstruction** (`crates/mirror`) — the
     HY-World 2.0 1.26B feed-forward model: per-frame DINOv2 ViT-L/14 encoding,
     24 alternating frame/global attention levels (QK-norm + normalized 2D RoPE),
@@ -148,8 +155,11 @@ fast and scalable kernel — not a naive one.
     the codebook assignment and `embed` for the lookup. Adds **no kernel and no
     block**. Both released checkpoints (`codeformer.pth`, `vqgan_code1024.pth`)
     imported and forward-parity-gated at cosine 1.000000000 with **zero**
-    code-index disagreements. See `docs/models/vqgan/status.md`. *(Backward/
-    gradcheck and the serving contract are deferred.)*
+    code-index disagreements. See `docs/models/vqgan/status.md`. **Serving
+    contract met**: `vqgan::caps` (`encode`/`decode` — the codes travel as a
+    `Media::Bytes` blob), `resident_restore::VqganResident`
+    (`BRAIN_VQGAN_WEIGHTS`), D-Bus `Run`, `examples/restore/`. *(Backward/
+    gradcheck are deferred; `run_batch` is the serial default and says why.)*
 
 12c-bis. **CodeFormer face restoration** (`crates/restore`) — what turns the
     VQ autoencoder above into a blind face restorer: the **code-prediction
@@ -165,9 +175,11 @@ fast and scalable kernel — not a naive one.
     **no kernel and no block**. Two-way import coverage over all 515 checkpoint
     tensors; forward-parity-gated per stage at cosine 1.000000000 with **zero**
     code-index disagreements at every `w`. See `docs/models/restore/status.md`.
-    *(Forward only: `adain=True` — the reference CLI's path — face detection/
-    alignment, batch > 1, sizes ≠ 512², backward/gradcheck and the serving
-    contract are all deferred and listed in that ledger.)*
+    **Serving contract met**: `restore::caps` (`restore_face`, `w` as a plain
+    float param), `resident_restore::RestoreResident` (`BRAIN_RESTORE_WEIGHTS`),
+    D-Bus `Run`, `examples/restore/`. *(Forward only: `adain=True` — the
+    reference CLI's path — face detection/alignment, batch > 1, sizes ≠ 512² and
+    backward/gradcheck are all deferred and listed in that ledger.)*
 
 12d. **CLIP text + image towers** (`crates/clip`) — one config-driven graph for
     the three encoders the imaging workstream needs: **CLIP-L** and
@@ -177,10 +189,40 @@ fast and scalable kernel — not a naive one.
     `text_encoder{,_2}` safetensors and the EVA `.pt`, two-way covered, and
     forward-parity-gated per stage vs `transformers`/`open_clip` (cross-checked
     against `diffusers.encode_prompt` for the SDXL conditioning pair).
-    *(Forward only: the **CLIP BPE tokenizer** belongs in `crates/data` next to
-    the GPT-2/Qwen BPEs and is **not implemented**, image preprocessing is not
-    implemented, and backward/gradcheck + the serving contract are deferred —
-    see `docs/imaging/plan.md` §4.)*
+    The **CLIP BPE tokenizer** now lives in `crates/data` next to the GPT-2/Qwen
+    BPEs (`data::clip_bpe::ClipBpe`) — it reuses `data::bpe`'s merge loop and adds
+    only what differs (`</w>` word-end marker, CLIP's pre-tokenization, lowercase
+    + whitespace collapse, the 77-token `<|startoftext|>`…`<|endoftext|>` frame),
+    gated at **exact id equality** vs HF `CLIPTokenizer` on both SDXL tokenizers.
+    *(Forward only: the tokenizer is not yet wired into `crates/clip`'s own tests,
+    image preprocessing is not implemented, and backward/gradcheck + the serving
+    contract are deferred — see `docs/imaging/plan.md` §4.)*
+
+12e. **SDXL UNet2DConditionModel** (`crates/unet`) — the first UNet *diffusion
+    backbone* in the imaging stack (`crates/wm-diamond` has a UNet-shaped world
+    model, recorded by hand): `CrossAttnDownBlock2D`/`DownBlock2D` → mid → up
+    with skip concats, ResBlocks whose timestep embedding is **added**
+    (`resnet_time_scale_shift: "default"` → `add_chan_bcast`, *not* `film_chan`),
+    `Transformer2DModel` spatial transformers (self-attn + cross-attn + GEGLU) on
+    the two inner levels, and the SDXL added conditioning
+    `concat([pooled_text, time_ids_sinusoids])`. **Two GroupNorm epsilons in one
+    graph** (1e-5 in the resnets, 1e-6 inside every transformer), which is why
+    `vae::blocks::Builder` gained `set_eps`. Imported diffusers **1680 → 1610**
+    tensors, two-way covered; adds **no kernel and no block** — the conv half is
+    `vae::blocks::Builder`, the transformer half is `model::block`.
+    Forward-parity-gated per stage at **165 comparisons / 0 failed**, worst
+    cosine 0.9999999999, `out.sample` cosine 1.0000000000 and rel_l2 3.258e-6
+    (both cosine *and* rel_l2 are asserted — cosine alone is scale-invariant).
+    **2 567 463 684 params = 10.27 GB fp32**, 2198 dispatches and 4.06 s per
+    forward at SDXL's native 128×128 latent, so it fits one 24 GB P40.
+    The **discrete schedulers** it needs — DDIM / Euler / Euler-ancestral /
+    DPM-Solver++(2M) × {ε, v-pred} — live in `diffusion::discrete`, gated at
+    **66 checks / 0 failed** (timesteps, sigmas, `init_noise_sigma`,
+    `scale_model_input` and the full step trajectory). See
+    `docs/models/unet/status.md`. *(Forward only, and **no serving contract**:
+    no capability manifest, no residency adapter, no `run_batch`, no D-Bus, no
+    example, no CLI. No sampler loop and no VAE/text-encoder glue, so "SDXL
+    works" is **not** claimed. Batch = 1; backward/`check_unet` deferred.)*
 
 ### Audio / speech
 
@@ -305,7 +347,7 @@ front-end to depend on.
 | `checkpoint` | `.safetensors` container + manifest/SHA-256 + expert-shard I/O (no fs on wasm) |
 | `model` | architecture-agnostic `Model` abstraction, generic trainer, shared block builders (`block.rs`, `vit.rs`), paged KV, and the multi-GPU parallelism layer |
 | `autodiff` | shared SSA forward-cache / reverse-mode scaffolding — **placeholder** |
-| `data` | char + GPT-2 **BPE** tokenizers, dataset generators, loaders (masking/alignment), normalization |
+| `data` | char + GPT-2/Qwen/**CLIP** BPE tokenizers, the shared deterministic PRNGs (`rng::Rng` for datasets, `rng::Lcg` for tests/fixtures), dataset generators, loaders (masking/alignment), normalization |
 | `eval` | perplexity + task exact-match (LM) and detection metrics (mAP@0.5/precision/recall) |
 | `gradcheck` | finite-difference backprop correctness gate |
 | `bench` | model-agnostic architecture-evaluation suite — *does it **learn**?* (see below) |
@@ -382,6 +424,7 @@ front-end to depend on.
 | T5-XXL encoder (FLUX.1 conditioning) | `docs/models/t5/status.md`; `crates/t5/src/{config,import,model,hostbias}.rs`; goldens via `tools/goldens/t5_dump_reference.py` |
 | **Which GEMM kernel a forward dispatches** (naive / skinny-M GEMV / 128×128 tiled), fp32 and int8 | `model::block::gemm_variant` — one rule, shared by flux1 and flux2; `block::pick_gemm` is the training-shaped sibling |
 | CodeFormer face restoration (code Transformer + CFT + the `w` dial) | `docs/models/restore/status.md`; `crates/restore/src/{config,import,model}.rs` over `crates/vqgan` + `crates/vae`; goldens via `tools/goldens/codeformer_restore_dump_reference.py` |
+| SDXL UNet forward + the discrete samplers (DDIM/Euler/Euler-a/DPM++) | `docs/models/unet/status.md`; `crates/unet/src/{config,import,model,hostemb}.rs` over `crates/vae/src/blocks.rs`; `crates/diffusion/src/discrete.rs`; goldens via `tools/goldens/sdxl_dump_reference.py` |
 | CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers | `crates/clip/src/{config,import,model}.rs`; goldens via `tools/goldens/clip_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
 | SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/goldens/sam2_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
@@ -391,7 +434,7 @@ front-end to depend on.
 | Fused conv eval paths (act selector, register tiling, grouped) | `crates/vision/src/blocks.rs`, `crates/kernels/wgsl/conv_act*.wgsl`, `conv2d_gd_reg.wgsl`, `crates/backend-cpu/src/fast_conv.rs` |
 | Detection metrics (mAP/precision/recall) | `crates/eval/src/detection.rs` |
 | Synthetic detection dataset (RGB shapes + GT boxes) | `crates/data/src/gen_detect.rs` |
-| Datasets & tokenizers | `crates/data/src/{prepare,gen_*,tokenizer,bpe,loader,binio,rng}.rs` |
+| Datasets & tokenizers | `crates/data/src/{prepare,gen_*,tokenizer,bpe,clip_bpe,qwen_tokenizer,loader,binio,rng}.rs` |
 | TTS: guide / acceleration | `docs/models/tts/{readme,acceleration}.md`; `crates/{tts,codec,speaker,audio}`, `crates/cli/src/{tts_cli,tts_serve}.rs` |
 | **ASR (speech-to-text)**: status / serving / perf | `docs/models/asr/status.md`; `crates/{nemotron,qwen-asr}`, shared `audio::asr_caps`, `crates/cli/src/resident_asr.rs`, D-Bus `StreamTranscribe` (`crates/dbus`), `examples/asr/` |
 | Forecasting models + backtester | `docs/models/{chronos2,kronos,fincast}/status.md`; `crates/{forecast,fcbench,chronos2,kronos,fincast}`, `crates/cli/src/forecast_cli.rs` |
@@ -647,6 +690,7 @@ per-scenario table and the findings so far.
   | math that runs on a device | a WGSL kernel in `crates/kernels/wgsl/`, dispatched via `gpu_core` |
   | math that genuinely runs on the host | **`model::hostmath`** — and nowhere else |
   | CPU-parallel execution (rayon) | `backend_cpu::par` only — the on-CPU scheduler's primitives; no other crate may depend on rayon |
+  | deterministic filler in a test or fixture | **`data::rng::Lcg`** (`signed`/`unit`/`scaled` + the `vec*` forms). `data::rng::Rng` is SplitMix64 and defines the on-disk datasets — its stream must not move, so it is *not* the test PRNG. The copied `(s >> 33)/2^31 − 1.0` helper was one-sided (`[-1,0)`), so no test ever fed a positive value to an activation kernel; see `docs/testing.md` §0 |
   | shared model blocks | `model::block`, `model::vit` |
   | ONNX graph emission (DSL + shared norm/silu emitters) | `crates/npu/src/topo.rs` (`TopoBase`); model-specific graphs stay in `crates/npu/src/*_topology.rs` |
 
@@ -783,6 +827,15 @@ per-scenario table and the findings so far.
      this bullet in sync.
   A model that trains and passes parity but cannot be discovered, scheduled, batched,
   and driven over D-Bus is **incomplete**.
+
+  **Imaging workstream status, so nobody has to infer it:** the contract is met
+  for **`sam2`, `facenet`, `vqgan` and `restore`** — four models, each with a
+  `caps` module, a `resident_*.rs` registered in `build_executor`, the existing
+  D-Bus `Run`, and an example under `examples/{vision,restore}/`. Only `sam2`'s
+  `run_batch` does real grouping (by image); the other three are the serial
+  default and each says why in-file. It is **not** met for `clip`, `t5`, `flux1`
+  or `unet` — those four have no capability manifest, no residency adapter and
+  no D-Bus surface at all.
 - **Every served model is named `<vendor>/<repo>[-<QUANT>]`, matching its
   upstream URL exactly (case included) — never a bare short name.** `brain/`,
   `local/` and `test/` are reserved vendors for built-ins, hand-placed files,
