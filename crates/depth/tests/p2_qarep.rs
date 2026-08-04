@@ -16,21 +16,13 @@
 //!
 //! Run with `BRAIN_DEVICE=cpu`.
 
+use data::rng::Lcg;
 use std::collections::HashMap;
 
 use depth::blocks::QARepBlock;
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 use vision::{Ctx, Shape};
-
-fn lcg(s: &mut u64) -> f32 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-}
-fn rv(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed;
-    (0..n).map(|_| lcg(&mut s)).collect()
-}
 
 struct Fix {
     gpu: Gpu,
@@ -54,18 +46,18 @@ impl Fix {
                 vec![0.0; *numel]
             } else if name.ends_with("running_var") {
                 // Non-trivial running var so eval-mode BN is not an identity.
-                rv(seed ^ (i as u64), *numel).iter().map(|v| v.abs() + 0.5).collect()
+                Lcg::new(seed ^ (i as u64)).vec(*numel).iter().map(|v| v.abs() + 0.5).collect()
             } else if name.ends_with(".1.weight") {
-                rv(seed ^ (i as u64), *numel).iter().map(|v| 1.0 + 0.2 * v).collect()
+                Lcg::new(seed ^ (i as u64)).vec(*numel).iter().map(|v| 1.0 + 0.2 * v).collect()
             } else if name.ends_with(".1.bias") {
-                rv(seed ^ (i as u64), *numel).iter().map(|v| 0.1 * v).collect()
+                Lcg::new(seed ^ (i as u64)).vec(*numel).iter().map(|v| 0.1 * v).collect()
             } else {
-                rv(seed ^ (i as u64), *numel).iter().map(|v| 0.3 * v).collect()
+                Lcg::new(seed ^ (i as u64)).vec(*numel).iter().map(|v| 0.3 * v).collect()
             };
             init.insert(name.clone(), v);
         }
         let ps = ParamStore::new(&gpu, params, &init);
-        let x = rv(seed ^ 0xABC, in_shape.numel() as usize);
+        let x = Lcg::new(seed ^ 0xABC).vec(in_shape.numel() as usize);
         Fix { gpu, ps, x, in_shape, cout, stride }
     }
 
@@ -138,7 +130,7 @@ fn qarep_backward_matches_finite_differences() {
         let ctx = Ctx::new(&fix.gpu, depth::net::ids());
         let b = QARepBlock::new(&ctx, "b", in_shape, cout, stride, true);
         let out_n = b.out_shape.numel() as usize;
-        let r = rv(77, out_n);
+        let r = Lcg::new(77).vec(out_n);
 
         let xb = fix.gpu.storage_init("x", &fix.x);
         b.forward(&ctx, &fix.ps, &xb);
@@ -151,11 +143,28 @@ fn qarep_backward_matches_finite_differences() {
         let wname = "b.branch_3x3.0.weight";
         let g = fix.gpu.read(fix.ps.g(wname), fix.ps.numel(wname));
         let n = g.len();
-        let dir: Vec<f32> = rv(5, n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
+        let dir: Vec<f32> = Lcg::new(5).vec(n).iter().map(|v| if *v < 0.0 { -1.0f32 } else { 1.0 }).collect();
         let analytic: f32 = g.iter().zip(&dir).map(|(a, c)| a * c).sum();
 
         let w0 = fix.gpu.read(fix.ps.w(wname), n);
-        let eps = 5e-4f32;
+        // 1e-4, not 5e-4. This is a DIRECTIONAL difference along a ±1 vector of
+        // 576–1152 components, so the L2 step is eps·√n — at 5e-4 that is ~0.017
+        // and the central difference is dominated by its own O(eps²·L''')
+        // truncation error, not by the gradient. Measured rel error vs the
+        // analytic gradient over the three cases, on the corrected RNG:
+        //
+        //   eps      5e-4     2.5e-4    2e-4     1e-4     7.5e-5
+        //   residual 0.0925   0.0416    0.0343   0.0030   0.0033
+        //   chanchg  0.0264   0.0002    0.0001   0.0004   0.0006
+        //   down2    0.1260   0.0013    0.0008   0.0014   0.0025
+        //
+        // i.e. the FD converges ONTO the analytic gradient as eps shrinks (and
+        // starts to lose to f32 round-off below ~7.5e-5). The old eps sat above
+        // the knee and only passed because the tolerance was 8e-2; `down2` broke
+        // it at 0.126 as soon as the test RNG stopped being one-sided and moved
+        // the operating point. The fix is the eps, and the tolerance below is
+        // then 8x TIGHTER than it was, not looser.
+        let eps = 1e-4f32;
         let wp: Vec<f32> = w0.iter().zip(&dir).map(|(w, d)| w + eps * d).collect();
         fix.gpu.write(fix.ps.w(wname), bytemuck::cast_slice(&wp));
         let lp = fix.loss(true, &r);
@@ -168,7 +177,7 @@ fn qarep_backward_matches_finite_differences() {
         let abs = (analytic - numeric).abs();
         let denom = analytic.abs().max(numeric.abs()).max(1e-3);
         assert!(
-            abs <= 4e-3 + 8e-2 * denom,
+            abs <= 4e-3 + 1e-2 * denom,
             "{tag}: analytic {analytic}, fd {numeric} (abs {abs}, rel {})",
             abs / denom
         );
