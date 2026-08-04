@@ -782,3 +782,70 @@ it — it needs `data::clip_bpe` wired in and EVA image preprocessing.)*
 4. Which SD backbone is the *default* for the editing pipeline — SDXL (fits one
    P40, whole-ecosystem compatibility) or FLUX.1 Kontext (better edit fidelity,
    needs INT8 + sharding). Deferred until phase 5 can measure both.
+
+---
+
+## 7. Where the workstream actually stands
+
+Written at the end of the build-out. The wins are recorded above with their
+measured numbers; this section is the **honest ledger of what is not done**,
+because that is what the next person needs.
+
+### Gated and working
+
+| Crate | Forward | Backward | Serving contract |
+|---|---|---|---|
+| `imaging` | n/a (substrate) | n/a | n/a |
+| `sam2` | ✅ 283/283, worst cosine 0.9999999999 | ✅ decoder only, trunk frozen | ✅ |
+| `facenet` | ✅ every tap cosine 1.0000000 | ✅ `check_arcface` | ✅ |
+| `vqgan` | ✅ cosine 1.000000000, 0 code-index mismatches | ✅ VQ straight-through | ✅ |
+| `restore` | ✅ 0/256 indices differ, `quant_feat` bit-exact | ✅ `check_codeformer` | ✅ |
+| `clip` | ✅ 148 stage checks; served path cosine 1.0 vs HF | ✅ text tower | ✅ |
+| `t5` | ✅ 42 stages, worst 0.9999999992 | ✅ `check_t5` | ❌ |
+| `flux1` | ◑ reduced-depth fp32 + full-depth int8 | ❌ | ❌ |
+| `unet` | ✅ 165 comparisons, worst 0.9999999999 | ❌ | ❌ |
+| `controlnet` | ✅ 140 comparisons, both backends | ❌ | ❌ |
+| `pulid` | ✅ ID pipeline + injection | ❌ | ❌ |
+| `instantid` | ❌ shapes + import only | ❌ | ❌ |
+| `imgpipe` | ✅ bit-exactness contract | n/a | ✅ discoverable |
+
+### Not done — the real list
+
+1. **`crates/instantid` has no forward.** Shapes, import validation and the
+   reference ladder are in; the Resampler and the decoupled attention are not.
+   It should **reuse `crates/pulid`'s `Emit`**, which already records this exact
+   Perceiver block — writing a second one is the duplication this workstream
+   spent its whole length avoiding.
+2. **`flux1` has no sampler loop and no VAE glue.** One transformer evaluation
+   reproduces diffusers; "FLUX.1 generates an image" is not supported by
+   anything. PuLID and Kontext inherit that limit.
+3. **`flux1` full-depth fp32 is unmeasured** (47.6 GiB vs a 24 GiB card), and
+   **T5 at T=512** — the length FLUX actually uses — is untested and takes a
+   2D-grid dispatch path T=128 never exercises.
+4. **CodeFormer `adain=True`** — what `inference_codeformer.py` actually runs —
+   is not implemented; the gated graph is `adain=False`.
+5. **No backward** for `unet`, `controlnet`, `flux1`, `pulid`, `instantid`; no
+   serving contract for those or `t5`.
+6. **The depth INT8 scale delta is unmeasured.** The calibration preprocessing
+   was fixed, but no checkpoint exists on the dev box to quantify the change.
+7. **BiRefNet matting and Real-ESRGAN upscale are downloaded but not ported** —
+   `imgpipe` has hooks, not stages.
+8. **190 clippy warnings**, ratcheted by `make clippy`. 69 are doc-list
+   indentation needing per-site judgment.
+9. **NPU topologies** for the new models are not written; nothing here has run
+   on an NPU, and this box has none.
+10. **`wm-diamond` still hand-records its UNet** rather than using
+    `vae::blocks::Builder`, so brain has two UNet graph recorders.
+
+### The three findings worth carrying forward
+
+* **A gate that never runs is worse than no gate.** Three separate ones were
+  silently green: `sam2`'s parity self-skipped on every machine but this one,
+  `flux2`'s host/device parity had dims the device could not bind, and
+  `cargo clippy` aborted before linting most of the workspace — twice.
+  `make clippy` now checks the exit code, not the output.
+* **Cosine is scale-invariant.** A dropped scale factor scores 1.0. The `unet`
+  ladder gates `rel_l2` as well for exactly that reason.
+* **Finite differences gate the backward against whatever forward is emitted.**
+  A mis-weighted objective is self-consistent and passes — which is why the VQ
+  `beta` placement is pinned by reading the reference, not by `check_vqgan`.

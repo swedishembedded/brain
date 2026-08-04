@@ -383,6 +383,8 @@ front-end to depend on.
 | `checkpoint` | `.safetensors` container + manifest/SHA-256 + expert-shard I/O (no fs on wasm) |
 | `model` | architecture-agnostic `Model` abstraction, generic trainer, shared block builders (`block.rs`, `vit.rs`), paged KV, and the multi-GPU parallelism layer |
 | `autodiff` | shared SSA forward-cache / reverse-mode scaffolding — **placeholder** |
+| `imaging` | the image substrate: decode/encode, device-dispatched resize/pad/crop/layout, colour normalisation, **mask algebra** (threshold/dilate/erode/feather/invert/union/intersect/difference/composite) and tiling — one home for what was scattered across depth, yolo, mirror, zimage, capture and cli |
+| `imgpipe` | the composed pipeline: a stage list executed as ONE capability call, dispatching its model stages back through `capability::Registry`. Pixels outside the mask come back **bit-identical** |
 | `data` | char + GPT-2/Qwen/**CLIP** BPE tokenizers, the shared deterministic PRNGs (`rng::Rng` for datasets, `rng::Lcg` for tests/fixtures), dataset generators, loaders (masking/alignment), normalization |
 | `eval` | perplexity + task exact-match (LM) and detection metrics (mAP@0.5/precision/recall) |
 | `gradcheck` | finite-difference backprop correctness gate |
@@ -402,7 +404,7 @@ front-end to depend on.
 | `depth` | ZipDepth: model/blocks/import/fuse, `Predictor`, viz/stereo/effects, INT8 calib |
 | `mirror` / `splat` | WorldMirror-2; 3DGS rasterizer + PLY IO + `fit` + viewer |
 | `diffusion` / `dit` / `vae` / `zimage` | flow-matching core; shared DiT blocks; AutoencoderKL; Z-Image |
-| `unet` / `controlnet` / `pulid` | SDXL UNet backbone; the backbone-agnostic control seam + its SDXL producer; PuLID identity conditioning on FLUX.1 |
+| `unet` / `controlnet` / `pulid` / `instantid` | SDXL UNet backbone; the backbone-agnostic control seam + its SDXL producer; PuLID identity conditioning on FLUX.1; InstantID's IP-Adapter-FaceID shapes (**forward not implemented** — see `crates/instantid/src/lib.rs`) |
 | `audio` / `codec` / `speaker` / `tts` | wav/STFT/mel + 1D conv builders; Mimi codec; ECAPA-TDNN; Talker+MTP |
 | `forecast` / `fcbench` / `chronos2` / `kronos` / `fincast` | forecasting seam, backtester, three imported models |
 | `wm-core` / `wm-diamond` / `wm-genie` / `wm-display` | world-model trait + fake model; DIAMOND; GenieRedux-G; SDL window |
@@ -482,6 +484,10 @@ front-end to depend on.
 | Z-Image / diffusion stack | `docs/models/zimage/{readme,status}.md`; `crates/{zimage,dit,diffusion,vae}` |
 | FLUX.2 Klein: guide / ledger | `docs/models/flux2/{readme,status}.md`; `crates/flux2`, `crates/cli/src/flux2_cli.rs`; goldens via `tools/goldens/flux2_dump_reference.py` |
 | Finetuning guides | `docs/guides/finetune/{plan,datasets}.md` |
+| **"change only X" end to end** (segment -> refine -> restore -> composite) | `crates/imgpipe` — the bit-exactness contract and why it holds is in its module docs |
+| Image handling of ANY kind (resize/pad/crop/letterbox/masks/tiling/codecs) | `crates/imaging` — check here BEFORE writing a pixel loop; five copies of `chw_to_hwc` is what created it |
+| Identity conditioning (ArcFace -> ID tokens -> diffusion attention) | `crates/pulid` (FLUX.1, wired), `crates/instantid` (SDXL, shapes only); `pulid::idcond` documents the raw-vs-normalised asymmetry that silently breaks it |
+| Clippy gate (exit code + a warning ratchet) | `make clippy`, `scripts/clippy-gate.sh` — clippy ABORTS on a denied lint and then reports nothing, so always check the exit code |
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
 
 ---
