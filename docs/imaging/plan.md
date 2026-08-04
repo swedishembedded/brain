@@ -491,6 +491,40 @@ SDXL is the kinder starting point: UNet 2.6 B + both text encoders ≈ 3.5 B, so
 practical place to get the identity pipeline working end to end first, with
 FLUX.1 Kontext as the higher-quality path behind INT8 (~12 GB, also one card).
 
+#### Phase 0–3b training gate — what was actually run
+
+Backward + gradcheck landed after the forward gate. Measured on **both** a Tesla
+P40 and `BRAIN_DEVICE=cpu` (both matter — see below), all four passing at the
+workspace tolerance `(atol, rtol) = (4e-3, 8e-2)`:
+
+| check | scope | result |
+|---|---|---|
+| `check_sam2` | **decoder only**, Hiera trunk + FPN neck `Role::Frozen` (the common finetune mode) | **128 tensors, 0 failures** across seeds 1/2/3/7/11 |
+| `check_arcface` | tiny IResNet under the real additive-angular-margin CE; folded conv, train-mode BN, PReLU per-channel slope | pass |
+| `check_vqgan` | VQ straight-through + codebook/commitment, and every encoder/generator param through `vae::blocks::grad` | pass |
+| `check_clip` | CLIP-L **text tower only**; bigG and the EVA image tower still owe theirs | pass |
+
+`eps = 5e-4`, not the workspace default `5e-3`: a ±1 direction over `numel`
+entries is an L2 step of `eps·√numel`, which at `5e-3` moves these tensors
+comparably to their init scale, deep into the nonlinear regime. Same reason
+`yolo/tests/p3_gradcheck.rs` drops to `5e-4`.
+
+**Running both backends is a correctness requirement, not thoroughness.** A
+`var<workgroup>` + `workgroupBarrier()` reduction with no barrier-free sibling
+returns **all zeros** on `backend-cpu` with no error — a trainable parameter
+whose gradient is silently dead and whose loss curve still looks plausible. A
+GPU-only gate passes that completely. `vision::PReLU::backward` selects on the
+queried `DeviceCaps::workgroup_reductions` for exactly this reason.
+
+**What finite differences cannot see.** They gate the backward against whatever
+forward is emitted, so a *mis-weighted objective* is self-consistent and passes.
+`beta` sits on the VQ **codebook** term in `vqgan_arch.py:55`, not on the
+commitment term that file's own line-29 comment claims — pinned by reading the
+reference, not by the gate.
+
+Still owed: full-trunk SAM 2 training, the CodeFormer transformer + dial `w`,
+bigG/EVA backwards, and the serving contract for all four.
+
 ## 5. Open decisions
 
 1. ~~InstantID dropped in favour of PuLID-FLUX~~ — **resolved: build both.**
