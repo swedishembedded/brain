@@ -16,6 +16,4 @@ brain-model.workspace = true
 brain-checkpoint.workspace = true
 brain-capability.workspace = true
 brain-imaging.workspace = true
-brain-sam2.workspace = true
-brain-restore.workspace = true
-brain-facenet.workspace = true
+serde_json.workspace = true

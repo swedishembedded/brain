@@ -920,13 +920,11 @@ version = "0.1.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
- "brain-facenet",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
  "brain-model",
- "brain-restore",
- "brain-sam2",
+ "serde_json",
 ]
 
 [[package]]
