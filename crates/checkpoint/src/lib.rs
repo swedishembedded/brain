@@ -13,6 +13,9 @@ use serde_json::Value;
 pub mod safetensors;
 pub mod st;
 pub mod gguf;
+pub mod quant;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod gguf_write;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mmap;
 #[cfg(not(target_arch = "wasm32"))]

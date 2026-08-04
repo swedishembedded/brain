@@ -24,23 +24,25 @@ use std::collections::{BTreeMap, HashMap};
 use crate::safetensors::StTensor;
 use crate::st::ModelCard;
 
-// ggml_type ids (see the GGUF spec's ggml_type enum).
-const T_F32: u32 = 0;
-const T_F16: u32 = 1;
-const T_Q4_0: u32 = 2;
-const T_Q4_1: u32 = 3;
-const T_Q5_0: u32 = 6;
-const T_Q5_1: u32 = 7;
-const T_Q8_0: u32 = 8;
-const T_Q2_K: u32 = 10;
-const T_Q3_K: u32 = 11;
-const T_Q4_K: u32 = 12;
-const T_Q5_K: u32 = 13;
-const T_Q6_K: u32 = 14;
-const T_Q8_K: u32 = 15;
-const T_BF16: u32 = 30;
+// ggml_type ids (see the GGUF spec's ggml_type enum). `pub(crate)` so
+// `quant.rs`/`gguf_write.rs` dispatch on the same ids this reader does --
+// one type-id table, not a second copy that can drift.
+pub(crate) const T_F32: u32 = 0;
+pub(crate) const T_F16: u32 = 1;
+pub(crate) const T_Q4_0: u32 = 2;
+pub(crate) const T_Q4_1: u32 = 3;
+pub(crate) const T_Q5_0: u32 = 6;
+pub(crate) const T_Q5_1: u32 = 7;
+pub(crate) const T_Q8_0: u32 = 8;
+pub(crate) const T_Q2_K: u32 = 10;
+pub(crate) const T_Q3_K: u32 = 11;
+pub(crate) const T_Q4_K: u32 = 12;
+pub(crate) const T_Q5_K: u32 = 13;
+pub(crate) const T_Q6_K: u32 = 14;
+pub(crate) const T_Q8_K: u32 = 15;
+pub(crate) const T_BF16: u32 = 30;
 
-const QK_K: usize = 256;
+pub(crate) const QK_K: usize = 256;
 
 /// A single GGUF metadata value. Mirrors the 13 `gguf_metadata_value_type`s;
 /// arrays (including nested ones) are held as a `Vec<GgufValue>`.
@@ -434,7 +436,7 @@ pub fn read(path: &str) -> Result<Vec<StTensor>, String> {
 }
 
 /// Block geometry `(elements_per_block, bytes_per_block)` for a ggml type.
-fn block_geometry(ty: u32) -> Option<(usize, usize)> {
+pub(crate) fn block_geometry(ty: u32) -> Option<(usize, usize)> {
     Some(match ty {
         T_F32 => (1, 4),
         T_F16 | T_BF16 => (1, 2),
@@ -454,7 +456,7 @@ fn block_geometry(ty: u32) -> Option<(usize, usize)> {
 }
 
 /// Total on-disk byte count for `numel` elements of `ty`.
-fn tensor_nbytes(ty: u32, numel: usize) -> Option<usize> {
+pub(crate) fn tensor_nbytes(ty: u32, numel: usize) -> Option<usize> {
     let (be, bb) = block_geometry(ty)?;
     Some(numel / be * bb + if numel.is_multiple_of(be) { 0 } else { bb })
 }
@@ -465,7 +467,7 @@ fn f16(b: &[u8], i: usize) -> f32 {
 }
 
 /// Dequantize a tensor's raw bytes to `numel` fp32 values.
-fn dequantize(ty: u32, raw: &[u8], numel: usize) -> Result<Vec<f32>, String> {
+pub(crate) fn dequantize(ty: u32, raw: &[u8], numel: usize) -> Result<Vec<f32>, String> {
     match ty {
         T_F32 => Ok(raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()),
         T_F16 => Ok(raw.chunks_exact(2).map(|b| crate::safetensors::f16_to_f32(u16::from_le_bytes([b[0], b[1]]))).collect()),
