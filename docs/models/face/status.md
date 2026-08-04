@@ -7,8 +7,10 @@ generative one (PuLID / InstantID — `docs/imaging/plan.md`).
 
 ## Scope of this pass
 
-**Goldens → import → FORWARD parity only.** Backward/gradcheck and the serving
-contract are deliberately deferred; see "Deferred" below for what they will need.
+**Goldens → import → FORWARD parity**, plus the ArcFace **TRAINING** half:
+`facenet::train::ArcFaceTrainer` (IResNet backbone + additive-angular-margin
+head, hand-written device backward) gated by `gradcheck::check_arcface`. The
+serving contract is still deferred; see "Deferred" below.
 
 ## Deliverables
 
@@ -23,6 +25,9 @@ contract are deliberately deferred; see "Deferred" below for what they will need
 | Alignment | `crates/facenet/src/align.rs` |
 | Decode + NMS | `crates/facenet/src/detect.rs` |
 | Parity test | `crates/facenet/tests/parity.rs` |
+| Training graph + backward | `crates/facenet/src/train.rs` |
+| Gradient check | `gradcheck::check_arcface` (`crates/gradcheck/src/facenet.rs`) |
+| ArcFace margin kernels (new) | `crates/kernels/wgsl/arcface_margin{,_bwd}.wgsl` |
 | ONNX **reader** (new, shared) | `crates/onnx/src/read.rs` |
 | PReLU / AvgPool blocks (new, shared) | `vision::blocks::{PReLU, AvgPool}` |
 | Similarity solve (new, shared) | `model::hostmath::{similarity_transform_2d, invert_affine_2x3}` |
@@ -111,21 +116,68 @@ BRAIN_DEVICE=cpu   # same numbers, no GPU
 
 ## Deferred — what the follow-ups will need
 
-**Backward / gradcheck (`check_arcface`)**
-* The goldens are forward-only.
-* The ArcFace **additive-angular-margin head is not in the ONNX** (the release is
-  the backbone up to the `features` BN). It must come from the paper
-  (`…/identity/papers/1801.07698-arcface.pdf`) or `arcface_torch`, which is **not
-  on this box** — an acquisition item.
-* `vision::blocks::PReLU::backward` already selects `prelu_bwd_wg` vs
-  `prelu_bwd` on the **queried** `DeviceCaps::workgroup_reductions`. That is a
-  correctness gate: `backend-cpu` reports it false and the cooperative kernel
-  returns `da` all zeros there, silently.
-* Every backward kernel the graph needs (`conv2d_dx/_dw`, `bias_grad`, `bn_d*`,
-  `leaky_relu_bwd`, `maxpool2d_dx`, `avgpool2d_dx`, `resize_nearest_dx`,
-  `prelu_bwd*`) is already registered in `facenet::PIPELINES`.
-* `Conv` is built with `train = false` throughout; a trainer must flip
-  `set_eval(false)` / `set_update_running(true)` per unit.
+**Backward / gradcheck — LANDED (`check_arcface`)**
+
+`facenet::train::ArcFaceTrainer` trains the **embedding backbone**. SCRFD and the
+alignment warp are preprocessing and carry no recognition gradient (the reference
+recipe trains on pre-aligned crops), so there is no detector backward and none is
+owed.
+
+* **Folded, like the release.** `glintr100.onnx` ships BN folded into the convs,
+  so the trainable tensors are the folded ones (`Norm::None` conv weight + bias).
+  The three BatchNorms that survive as real nodes (`bn1` per block, `bn2`,
+  `features`) train in **TRAIN mode** — `vision::bn::BatchNorm::backward` is the
+  train-mode formula and reads the `mvg` packing only a train-mode forward
+  writes; eval-mode BN would read stale `mvg` rather than fail. The running-stat
+  EMA stays OFF for determinism, so `run_mean`/`run_var` are `Role::Frozen`; a
+  real training loop must call `set_update_running(true)`.
+* **Loss**: ArcFace additive-angular-margin CE. `ArcFaceTrainConfig::insightface`
+  carries the paper's `s = 64, m = 0.5 rad`; the gradient check runs
+  `ArcFaceTrainConfig::tiny` at `s = 8, m = 0.5` (the kernels are exactly linear
+  in `s`, and `s = 64` over 5 classes saturates the softmax past what a central
+  difference can resolve).
+* **The margin head is still not in the ONNX** — `head.weight` is initialised,
+  not imported, exactly as when fine-tuning onto a new identity set. Nothing in
+  the release constrains it, so there is no golden to match it against.
+* **Two new kernels**, `arcface_margin` / `arcface_margin_bwd`, Params
+  `[rows, classes, cos_m, sin_m, scale]` (last three bit-cast f32), bindings
+  `(cos, labels, out)` / `(cos, labels, dy, dx)`, one invocation per output
+  element. Elementwise gathers — no reduction, so no cooperative twin. The plain
+  unclamped formula: insightface's `cos <= cos(pi-m)` fallback is a piecewise
+  switch that would put a kink in the objective.
+* `vision::blocks::PReLU::backward` selects `prelu_bwd_wg` vs `prelu_bwd` on the
+  **queried** `DeviceCaps::workgroup_reductions`. That is a correctness gate:
+  `backend-cpu` reports it false and the cooperative kernel returns `da` all
+  zeros there, silently — so `check_arcface` is run on BOTH the P40 and
+  `BRAIN_DEVICE=cpu`, and `every_prelu_slope_gradient_is_nonzero` pins it
+  directly.
+
+```bash
+CARGO_HOME=… cargo test --release -p brain-gradcheck --lib facenet -- --nocapture
+BRAIN_DEVICE=cpu CARGO_HOME=… cargo test --release -p brain-gradcheck --lib facenet
+```
+
+Measured, 46 trainable tensors, tolerance `(atol 4e-3, rtol 8e-2)`, `eps = 1e-3`,
+3 directions, seed 7 — **all 46 within tolerance on both backends**:
+
+| backend | worst rel-err | worst-rel tensor | elapsed |
+|---|---|---|---|
+| Tesla P40 (Vulkan) | 2.381e-1 | `layer3.0.downsample.bias` (analytic 3.6e-7, numeric 2.4e-4, abs 2.4e-4) | 4.14 s |
+| `brain-wgsl-cpu` (Cranelift JIT, 48 threads) | 4.766e-1 | `layer1.0.conv2.bias` (analytic -2.7e-7, numeric -4.8e-4, abs 4.8e-4) | 1.43 s |
+
+Both worst cases are *structurally-zero* gradients passing on the absolute
+tolerance: a conv bias feeding a BatchNorm is a per-channel constant shift, which
+the mean subtraction annihilates, so the true gradient IS zero and the finite
+difference is pure fp32 round-off. The tensors with real signal agree to
+1e-5 – 4e-2 relative on both backends (e.g. `layer4.0.prelu.weight`
+analytic −1.38541 vs numeric −1.38545 on CPU).
+
+**Not gated by this**: only the tiny config (4 blocks at 32×32) is checked, not
+IResNet-100's 49 blocks — block count changes no kernel and no dispatch shape,
+but nobody has run the FD check at full size (it would be ~46 tensors × 6
+forwards of a 49-block net). The grad wrt the input blob
+(`ArcFaceTrainer::d_input`) is computed but not FD-checked; it exists so an
+alignment-aware variant can hang `grid_sample_dx` off it.
 
 **Serving contract** (`docs/serving-contract.md`)
 * `capability::Provider` + `crates/cli/src/resident_facenet.rs` registered in
@@ -147,7 +199,11 @@ BRAIN_DEVICE=cpu   # same numbers, no GPU
   resampler-parity question (`imaging::Filter` names an exact reference per
   kernel and cv2's is not among them). Until it lands there is **no
   image-in → faces-out entry point**, only `Scrfd::forward(blob)`.
-* **Batch is pinned to `N = 1`** — every block pre-allocates at `n = 1`.
+* **The INFERENCE graphs are pinned to `N = 1`** — `ArcFace::new` / `Scrfd::new`
+  pre-allocate at `n = 1`. The blocks themselves are batch-generic (they take a
+  `Shape` that carries `n`), which is how `train::ArcFaceTrainer` runs at batch
+  4; threading `n` through `ArcFace::new` is a constructor change, not a graph
+  change.
 
 **Performance** — not measured. The forward is correct and unoptimised:
 * the `Conv` block allocates five full-size maps per unit even for a

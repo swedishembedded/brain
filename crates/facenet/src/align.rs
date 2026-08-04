@@ -86,6 +86,10 @@ pub fn warp_grid(m: &[f32; 6], src_w: u32, src_h: u32, out_w: u32, out_h: u32) -
 /// invocation per OUTPUT element (`N*C*Ho*Wo`). `align_corners = 0` is PyTorch's
 /// default and what this grid is built for; the padding mode is `'zeros'`, which
 /// drops each out-of-range corner tap individually (it is NOT clamp-to-edge).
+// The 8 positional args ARE the kernel's contract — (device, input, its NCHW
+// extent, the grid, the output extent). Bundling them into a struct would put a
+// second spelling of `Shape` in this crate for one call site.
+#[allow(clippy::too_many_arguments)]
 pub fn grid_sample(
     gpu: &Gpu,
     x: &DeviceBuffer,

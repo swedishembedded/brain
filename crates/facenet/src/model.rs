@@ -33,15 +33,15 @@ use vision::{
 use crate::config::{ArcFaceConfig, ScrfdConfig};
 use crate::import::Tensors;
 
-/// Every kernel the two forward graphs dispatch, by name.
+/// Every kernel the forward graphs and the ArcFace trainer dispatch, by name.
 ///
 /// The blocks resolve their own ids from this list via
 /// [`ConvKernelIds::resolve`], so the ORDER here is free — that is the whole
 /// point of the name-resolved seam. The backward-only kernels (`*_dx`, `*_dw`,
-/// `prelu_bwd*`) are registered even though this workflow is forward-only:
-/// leaving them out would make the deferred trainer fail at its first dispatch
-/// with a `not registered` panic rather than at build time, and they cost
-/// nothing but a pipeline slot.
+/// `prelu_bwd*`, the loss head) are registered in ONE list rather than a
+/// separate training one: `gpu_core::testgpu::dev` keys its device pool on the
+/// slice's address, so a second list would build a second device in every test
+/// binary that touches both.
 pub const PIPELINES: &[(&str, &str)] = &[
     // conv (dense; every conv in both models has groups=1, dilation=1)
     ("conv2d", kernels::CONV2D),
@@ -82,7 +82,17 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("add2", kernels::ADD2),
     ("axpy", kernels::AXPY),
     ("matmul", kernels::MATMUL),
+    ("matmul_dx", kernels::MATMUL_DX),
+    ("matmul_dw", kernels::MATMUL_DW),
     ("bias_add", kernels::BIAS_ADD),
+    // the ArcFace margin head (see `crate::train`): row-L2-normalise both the
+    // embedding and the class centres, cosine table, angular margin, CE.
+    ("l2norm_scale", kernels::L2NORM_SCALE),
+    ("l2norm_scale_dx", kernels::L2NORM_SCALE_DX),
+    ("arcface_margin", kernels::ARCFACE_MARGIN),
+    ("arcface_margin_bwd", kernels::ARCFACE_MARGIN_BWD),
+    ("ce_value", kernels::CE_VALUE),
+    ("ce_grad", kernels::CE_GRAD),
     // preprocessing: brain's one per-channel affine, dispatched via `imaging::Ctx`.
     ("film_chan", kernels::FILM_CHAN),
 ];
@@ -122,7 +132,7 @@ fn frozen_store(gpu: &Gpu, t: &Tensors) -> ParamStore {
 
 /// A bias-free conv spec with a learned bias and no norm — the shape EVERY conv
 /// in both folded graphs takes.
-fn folded(cout: u32, k: u32, stride: u32, pad: u32, act: Act) -> ConvSpec {
+pub(crate) fn folded(cout: u32, k: u32, stride: u32, pad: u32, act: Act) -> ConvSpec {
     ConvSpec { cout, k, stride, pad, groups: 1, dilation: 1, norm: Norm::None, act, bias: true }
 }
 
@@ -137,18 +147,18 @@ fn folded(cout: u32, k: u32, stride: u32, pad: u32, act: Act) -> ConvSpec {
 /// pre-activation ("v3") residual. Feeding it `bn1(x)` instead still runs, still
 /// produces plausible features, and is wrong; it is visible only against the
 /// `s{n}b0_branch` golden.
-struct ResBlock {
-    bn1: BatchNorm,
-    conv1: Conv,
-    prelu: PReLU,
-    conv2: Conv,
-    downsample: Option<Conv>,
+pub(crate) struct ResBlock {
+    pub(crate) bn1: BatchNorm,
+    pub(crate) conv1: Conv,
+    pub(crate) prelu: PReLU,
+    pub(crate) conv2: Conv,
+    pub(crate) downsample: Option<Conv>,
     out: DeviceBuffer,
-    out_shape: Shape,
+    pub(crate) out_shape: Shape,
 }
 
 impl ResBlock {
-    fn new(ctx: &Ctx, prefix: &str, in_shape: Shape, cout: u32, stride: u32) -> ResBlock {
+    pub(crate) fn new(ctx: &Ctx, prefix: &str, in_shape: Shape, cout: u32, stride: u32) -> ResBlock {
         let bn1 = BatchNorm::new(ctx, BnNames::torch(&format!("{prefix}.bn1")), in_shape, false);
         bn1.set_eval(true);
         let conv1 = Conv::with_names(
@@ -184,7 +194,13 @@ impl ResBlock {
         ResBlock { bn1, conv1, prelu, conv2, downsample, out: ctx.act(out_shape.numel()), out_shape }
     }
 
-    fn param_list(&self) -> Vec<(String, usize)> {
+    /// This block's output buffer — the next block's input, and therefore the
+    /// activation the next block's backward needs as its `x`.
+    pub(crate) fn out_ref(&self) -> &DeviceBuffer {
+        &self.out
+    }
+
+    pub(crate) fn param_list(&self) -> Vec<(String, usize)> {
         let mut v = self.bn1.param_list();
         v.extend(self.conv1.param_list());
         v.extend(self.prelu.param_list());
@@ -195,7 +211,7 @@ impl ResBlock {
         v
     }
 
-    fn forward(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer) -> &DeviceBuffer {
+    pub(crate) fn forward(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer) -> &DeviceBuffer {
         self.bn1.forward(ctx, ps, x);
         self.conv1.forward(ctx, ps, self.bn1.out());
         self.prelu.forward(ctx, ps, self.conv1.out());
@@ -270,14 +286,14 @@ impl ArcFace {
         let mut shape = stem_conv.out_shape;
         let mut blocks: Vec<ResBlock> = Vec::new();
         let mut stage_last = [0usize; 4];
-        for s in 0..4usize {
+        for (s, last) in stage_last.iter_mut().enumerate() {
             for b in 0..cfg.layers[s] as usize {
                 let stride = if b == 0 { 2 } else { 1 };
                 let blk = ResBlock::new(&ctx, &format!("layer{}.{}", s + 1, b), shape, cfg.channels[s], stride);
                 shape = blk.out_shape;
                 blocks.push(blk);
             }
-            stage_last[s] = blocks.len() - 1;
+            *last = blocks.len() - 1;
         }
 
         let bn2 = BatchNorm::new(&ctx, BnNames::torch("bn2"), shape, false);
@@ -967,7 +983,7 @@ mod tests {
         let rows = nchw_to_rows(&x, c, h, w, a);
         assert_eq!(rows.len(), (h * w * a * (c / a)) as usize);
         // row for (p=1, anchor=1) must be channels [1*2+0, 1*2+1] at p=1.
-        let r = (1 * a + 1) as usize;
+        let r = (a + 1) as usize; // (p=1)*a + anchor=1
         assert_eq!(rows[r * 2], 21.0);
         assert_eq!(rows[r * 2 + 1], 31.0);
     }

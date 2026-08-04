@@ -365,6 +365,9 @@ fn scrfd_decode_and_nms_reproduce_the_reference_detections() {
     // is NOT possible, so compare in DETECTOR space (det_scale = 1) against the
     // reference boxes scaled back up.
     println!("scrfd decode:");
+    // The dumper recorded these as f64; kept at full precision so the literal is
+    // a verbatim copy of `per_photo.det_scale` rather than a re-rounded one.
+    #[allow(clippy::excessive_precision)]
     let scales = [1.1786372007366483f32, 1.1636363636363636, 0.4383561643835616, 1.3882863340563991];
     for p in 0..4usize {
         let t = m.forward(&g[&format!("photo{p}_det_blob")].1);

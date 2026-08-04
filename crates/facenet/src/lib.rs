@@ -26,10 +26,14 @@
 //!
 //! # Scope
 //!
-//! This is the FORWARD port: goldens, import and stage parity. Backward /
-//! gradcheck and the serving contract (`capability::Provider`, a residency
-//! adapter, `run_batch`, D-Bus, `examples/face/`) are deliberately deferred and
-//! not started — see `docs/serving-contract.md` for what a later change owes.
+//! The forward port (goldens, import, stage parity) plus the ArcFace TRAINING
+//! half: [`train::ArcFaceTrainer`] is the IResNet embedding backbone with an
+//! additive-angular-margin head and a hand-written device backward, gated by
+//! `gradcheck::check_arcface`. Training covers the **embedding backbone only** —
+//! SCRFD detection and the alignment warp are preprocessing and carry no
+//! recognition gradient, which is how the reference recipe trains too. The
+//! serving contract (`capability::Provider`, a residency adapter, `run_batch`,
+//! D-Bus, `examples/face/`) is still deferred — see `docs/serving-contract.md`.
 //!
 //! # Two normalisations, one letter apart
 //!
@@ -42,12 +46,14 @@ pub mod config;
 pub mod detect;
 pub mod import;
 pub mod model;
+pub mod train;
 
 pub use align::{estimate_norm, norm_crop_chw, warp_grid};
 pub use config::{ArcFaceConfig, Preprocess, ScrfdConfig, ARCFACE_DST_112};
 pub use detect::{decode, nms, Face};
 pub use import::{import_arcface, import_dir, import_scrfd, Tensors};
 pub use model::{ArcFace, ArcFaceTaps, Scrfd, ScrfdTaps, PIPELINES};
+pub use train::{ArcFaceTrainConfig, ArcFaceTrainer};
 
 use gpu_core::Gpu;
 
