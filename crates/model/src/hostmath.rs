@@ -117,6 +117,37 @@ pub fn silu_slice(x: &[f32]) -> Vec<f32> {
     x.iter().map(|&v| silu(v)).collect()
 }
 
+/// Sinusoidal timestep embedding, **cos block first** then sin — the layout
+/// every diffusion model in this repo needs:
+///
+/// ```text
+/// half     = dim / 2
+/// freq[k]  = max_period^(-k/half)
+/// e[k]     = cos(t · freq[k])          k in 0..half
+/// e[half+k]= sin(t · freq[k])
+/// ```
+///
+/// This is `flux.modules.layers.timestep_embedding` (BFL) and diffusers'
+/// `Timesteps(dim, flip_sin_to_cos=True, downscale_freq_shift=0)` — they agree.
+/// `t` is the ALREADY-SCALED time (both references pre-multiply by their
+/// `time_factor`, 1000 for the FLUX family), so this function applies no
+/// scaling of its own.
+///
+/// The angle is accumulated in `f64` and rounded once, as the references do.
+/// `dim` must be even.
+pub fn timestep_embedding(t: f32, dim: usize, max_period: f64) -> Vec<f32> {
+    assert!(dim.is_multiple_of(2), "timestep_embedding: dim {dim} must be even");
+    let half = dim / 2;
+    let mut e = vec![0.0f32; dim];
+    for k in 0..half {
+        let freq = (-(max_period.ln()) * k as f64 / half as f64).exp();
+        let arg = t as f64 * freq;
+        e[k] = arg.cos() as f32;
+        e[half + k] = arg.sin() as f32;
+    }
+    e
+}
+
 /// NeoX **half-split** rotary embedding, in place.
 ///
 /// `buf` is `rows × heads × head_dim`; row `r` is rotated at absolute position

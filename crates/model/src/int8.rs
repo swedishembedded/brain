@@ -42,6 +42,55 @@ pub fn quantize_weight(w: &[f32], n: usize, k: usize) -> (Vec<u32>, Vec<f32>) {
     (packed, sw)
 }
 
+/// The buffers and kernel slots one dynamic activation quantization needs —
+/// the same "bundle the ids so the call stays readable" shape as
+/// [`crate::block::FlashIds`].
+pub struct QuantRows<'a> {
+    /// `[max_abs_row, quant_pack]` in the caller's kernel list.
+    pub kernels: [usize; 2],
+    /// `[.., k]` f32 activation to quantize.
+    pub x: &'a gpu_core::DeviceBuffer,
+    /// `[rows]` per-token scale (written).
+    pub sx: &'a gpu_core::DeviceBuffer,
+    /// `[.., k/4]` packed u32 activation (written).
+    pub xq: &'a gpu_core::DeviceBuffer,
+}
+
+/// The DEVICE half of the same tier: dynamic per-token activation quantization
+/// of rows `r0..r1` of `q.x` — `max_abs_row` writes `q.sx[r0..r1]`,
+/// `quant_pack` writes the packed rows of `q.xq`. Returns the two steps in
+/// order; ONE call feeds every linear that reads that activation.
+///
+/// This exists so the *offset units* live in one place. Every buffer is bound
+/// as a sub-range and the units differ per buffer — `x` and `xq` are offset in
+/// ELEMENTS of their own width (`k` vs `k/4`) while `sx` is offset in ROWS.
+/// Getting one wrong is silently wrong arithmetic, not a crash; `step_sliced`'s
+/// element-vs-byte contract already cost this repo a SIGSEGV (see
+/// `docs/porting-playbook.md` §3).
+///
+/// **Alignment:** `step_sliced` turns each offset into a real
+/// `BufferBinding::offset`, so every one must clear
+/// `min_storage_buffer_offset_alignment` (256 B = 64 floats on a P40). `k` is
+/// normally a multiple of 64, so `x`/`xq` are safe for any `r0`; `sx` is offset
+/// by `r0` itself, so **`r0` must be a multiple of 64** — asserted here rather
+/// than left to each caller to remember (a violation is a wgpu validation
+/// error, not a wrong number, so it hides until someone changes a text length).
+pub fn quant_rows_steps(g: &gpu_core::Gpu, q: QuantRows, r0: u32, r1: u32, k: u32) -> [gpu_core::Step; 2] {
+    assert_eq!(k % 4, 0, "int8 K must be a multiple of 4 (got {k})");
+    assert!(
+        r0.is_multiple_of(64),
+        "int8 activation quant: row base {r0} breaks the 64-float storage-binding alignment of the per-token scale buffer"
+    );
+    let m = r1 - r0;
+    let xo = (r0 as u64 * k as u64, m as u64 * k as u64);
+    let so = (r0 as u64, m as u64);
+    let qo = (r0 as u64 * (k as u64 / 4), m as u64 * (k as u64 / 4));
+    [
+        g.step_sliced(q.kernels[0], &[q.x, q.sx], &[xo, so], &[m, k], m),
+        g.step_sliced(q.kernels[1], &[q.x, q.sx, q.xq], &[xo, so, qo], &[m, k], m * k / 4),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

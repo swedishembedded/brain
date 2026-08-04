@@ -15,6 +15,13 @@
 //! Linear projections stay in the model (they carry model-specific concerns such
 //! as LoRA adapters and bias). MoE/GPT/PID are not yet ported.
 
+// Every builder here takes a device, a kernel-id set, the kernel's buffer
+// bindings and its Params fields — so the arity IS the WGSL kernel's binding
+// list. Packing those into a struct would put a second, drifting description
+// of a kernel's signature next to the authoritative one in the .wgsl, which
+// is the failure mode `docs/kernel-checklist.md` exists to prevent.
+#![allow(clippy::too_many_arguments)]
+
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 
 /// Kernel-pipeline indices a model supplies from its own PIPELINES list. Only
@@ -128,7 +135,6 @@ pub fn gqa_fwd(
 /// but must not be attended as keys. The kmask pipeline id is passed
 /// explicitly so [`KernelIds`] (a struct literal at every call site in the
 /// workspace) stays unchanged for models that never mask.
-#[allow(clippy::too_many_arguments)]
 pub fn gqa_fwd_kmask(
     g: &Gpu,
     kmask_kernel: usize,
@@ -152,7 +158,6 @@ pub fn gqa_fwd_kmask(
 
 /// GQA attention backward: produces `d_scores`, `d_v`, `d_q`, `d_k` from the
 /// context grad `d_ctx` and the cached `q`/`k`/`v`/`probs`.
-#[allow(clippy::too_many_arguments)]
 pub fn gqa_bwd(
     g: &Gpu,
     k: &KernelIds,
@@ -272,7 +277,6 @@ pub struct CrossIds {
 /// mechanism that keeps long-context (8k+) attention inside the per-binding
 /// budget. Layout-generic: `stride` is the fused row width, `q/k/v_off` the
 /// region offsets, `d_out` the context width (`heads*head_dim`).
-#[allow(clippy::too_many_arguments)]
 pub fn chunked_bidir_fwd(
     g: &Gpu,
     k: &CrossIds,
@@ -357,7 +361,6 @@ pub fn flash_bidir_variant(ids: FlashIds, caps: &gpu_core::DeviceCaps) -> (usize
 /// (`[bsz·t, d_model]`). One workgroup owns one `(b, head, query-tile)`, so
 /// samples never mix and the per-query arithmetic is unchanged — a batched
 /// dispatch is bit-identical to `bsz` separate ones.
-#[allow(clippy::too_many_arguments)]
 pub fn flash_bidir_step(
     g: &Gpu,
     ids: FlashIds,
@@ -389,7 +392,6 @@ pub fn flash_bidir_step(
 /// gets it here too. Forward-only and workgroup-cooperative: callers MUST gate
 /// on `DeviceCaps::workgroup_reductions` (false on the CPU JIT) and fall back
 /// to [`chunked_bidir_fwd`]. `head_dim` ≤ 128.
-#[allow(clippy::too_many_arguments)]
 pub fn flash_bidir_fwd(
     g: &Gpu,
     ids: FlashIds,
@@ -454,7 +456,6 @@ pub struct GemmAttnIds {
 /// projections; no expanded buffer exists). Scores/probs slabs stay
 /// `[H, chunk, len]`; `ctx_pack` collects per-head context, unpacked into
 /// the row-major `[rows, d_out]` `ctx` at the end of each span.
-#[allow(clippy::too_many_arguments)]
 pub fn gemm_bidir_fwd(
     g: &Gpu,
     k: &GemmAttnIds,
@@ -567,7 +568,6 @@ pub struct CrossBwdIds {
 /// what makes long-context (8k) training fit the per-binding budget: the
 /// transient slabs stay `[heads, chunk, max_span]`. Writes `d_q`/`d_k`/`d_v`
 /// into their regions of the fused `d_qkv`.
-#[allow(clippy::too_many_arguments)]
 pub fn chunked_bidir_bwd(
     g: &Gpu,
     fwd: &CrossIds,
@@ -647,7 +647,6 @@ pub fn chunked_bidir_bwd(
 /// GQA→MHA head replication into a fused-buffer region: dst head `ho` copies
 /// src head `ho/group` (`repeat_kv` layout). `group == 1` is a strided copy —
 /// the same dispatch places q. `src` is `[rows, (heads_out/group)*hd]`.
-#[allow(clippy::too_many_arguments)]
 pub fn kv_expand_fwd(
     g: &Gpu,
     idx: usize,
@@ -666,7 +665,6 @@ pub fn kv_expand_fwd(
 
 /// Adjoint of [`kv_expand_fwd`]: group-sums the region grad back to the
 /// narrow projection grad (overwrites `d_src`).
-#[allow(clippy::too_many_arguments)]
 pub fn kv_expand_bwd(
     g: &Gpu,
     idx: usize,
@@ -690,10 +688,38 @@ pub fn rmsnorm_eps_fwd(g: &Gpu, idx: usize, x: &DeviceBuffer, w: &DeviceBuffer, 
     g.step(idx, &[x, w, out], &[dim, rows, f(eps)], rows)
 }
 
+/// `(kernel index, dispatch threads)` for one RMSNorm — the RMSNorm twin of
+/// `ln_variant`: the cooperative workgroup-per-row kernel (`rmsnorm_rows`,
+/// measured 19.4x on a P40 and a win at *every* row width because the
+/// per-element kernel's one-thread-per-row layout is uncoalesced) where the
+/// model registered it and the device can run a workgroup reduction, else the
+/// per-element reference (`rmsnorm` / `rmsnorm_eps`).
+///
+/// Both variants take the same buffers `[x, w, out]` and the same Params
+/// `[d, rows, eps]`, so only the index and the thread count change — which is
+/// why this returns them instead of building the `Step`: callers bind whole
+/// buffers (`Gpu::step`) or slices (`Gpu::step_sliced`) and both must share one
+/// selection rule. The policy itself lives in `backend_api::select`
+/// (`Op::RmsNorm`) keyed on `DeviceCaps`, never on a backend name; the `*_rows`
+/// kernels are `@workgroup_size(64)`, at or below the WebGPU floor of 256, so
+/// no `max_workgroup_size` gate is needed on top of it.
+pub fn rms_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32) -> (usize, u32) {
+    use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
+    let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
+    match coop {
+        Some(i)
+            if gpu_core::select::DefaultSelector.select(Op::RmsNorm, shape, &g.caps())
+                == KernelVariant::WorkgroupPerOutput =>
+        {
+            (i, rows * 64)
+        }
+        _ => (reference, rows),
+    }
+}
+
 /// RMSNorm backward with runtime epsilon: input grad always (`rmsnorm_dx_eps`),
 /// gain grad only when `gw` is `Some` (`rms_inv_eps` + `rmsnorm_dw`; the dw
 /// kernel is eps-free — eps enters through the per-row inverse).
-#[allow(clippy::too_many_arguments)]
 pub fn rmsnorm_eps_bwd(
     g: &Gpu,
     inv_idx: usize,
@@ -799,7 +825,6 @@ fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32)
 
 /// LayerNorm forward: `y = (x-mean)/sqrt(var+eps) * gamma + beta` over `rows`
 /// rows of `d` elements. Same math and Params either variant.
-#[allow(clippy::too_many_arguments)]
 pub fn layernorm_fwd(
     g: &Gpu,
     k: &LayerNormIds,
@@ -831,7 +856,6 @@ pub fn ln_stats_fwd(
 }
 
 /// LayerNorm backward w.r.t. `x` (mean/inv recomputed from `x`).
-#[allow(clippy::too_many_arguments)]
 pub fn layernorm_dx_bwd(
     g: &Gpu,
     k: &LayerNormIds,
@@ -887,6 +911,60 @@ pub fn pick_gemm(m: usize, n: usize, naive: usize, reg2: usize, force_naive: boo
     }
 }
 
+/// Which forward-GEMM kernels a model registered, for [`gemm_variant`].
+///
+/// `pick_gemm` above answers the *training-shaped* question ("is this output
+/// big enough to fill a 128×128 tile?"). This answers the *inference-shaped*
+/// one the DiT models ask: the graph is a fixed list of linears whose M is
+/// either a whole token slab or a single conditioning row, and the tier
+/// (naive reference vs. the fast kernels) is a property of the model, not of
+/// the shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GemmVariants {
+    /// One thread per output element. The portable reference: no workgroup
+    /// reduction, no tiling, runs anywhere. Selected when the model is in its
+    /// reference tier (`fast == false`).
+    Reference(usize),
+    /// The fast tier.
+    Fast {
+        /// Skinny-M GEMV — one WORKGROUP per output COLUMN, reading each weight
+        /// row once and applying it to all M rows from registers. `None` when
+        /// the model did not register it. **Requires `m <= 32`** (the kernel
+        /// says so); `gemm_variant` enforces that, so a model may pass `Some`
+        /// unconditionally.
+        gemv: Option<usize>,
+        /// 128×128 register-tiled GEMM, `@workgroup_size(256)`.
+        tiled: usize,
+    },
+}
+
+/// Pick the forward GEMM kernel + dispatch thread count for `[m,k]·[n,k]ᵀ`.
+///
+/// This exists because the rule was written twice and the two copies **drifted
+/// apart in the useful direction**: `flux1` learned that a register-tiled GEMM
+/// at M=1 wastes 127/128 of every tile and routed skinny-M to the GEMV kernels;
+/// `flux2`, written first, never did, so every one of its per-token modulation
+/// mat-vecs paid the full tile. That is `docs/kernel-checklist.md` §A — "a fast
+/// kernel a later model never learned about" — and the checklist's answer is to
+/// put the fix in *selection*, in one place, not in a second copy.
+///
+/// The same rule serves the fp32 and the int8 (DP4A) tiers: the two families
+/// take different buffers but identical dispatch geometry, so int8 callers pass
+/// their own `matmul_i8_gemv` / `matmul_i8_dyn` indices and always the `Fast`
+/// arm (the DP4A path is GPU-only and has no naive sibling).
+///
+/// Returns `(kernel index, invocation count)` rather than a `Step` for the same
+/// reason [`rms_variant`] does: callers bind whole buffers (`Gpu::step`) or
+/// sub-ranges (`Gpu::step_sliced`) and both must share one selection rule.
+/// Every arm computes the same math — this only changes speed.
+pub fn gemm_variant(v: GemmVariants, m: u32, n: u32) -> (usize, u32) {
+    match v {
+        GemmVariants::Reference(k) => (k, m * n),
+        GemmVariants::Fast { gemv: Some(g), .. } if m <= 32 => (g, n * 64),
+        GemmVariants::Fast { tiled, .. } => (tiled, m.div_ceil(128) * n.div_ceil(128) * 256),
+    }
+}
+
 /// SwiGLU activation forward: `h = SiLU(gate) * up`, elementwise over `total`.
 pub fn swiglu_fwd(g: &Gpu, k: &KernelIds, gate: &DeviceBuffer, up: &DeviceBuffer, h: &DeviceBuffer, total: u32) -> Step {
     g.step(k.silu_mul, &[gate, up, h], &[total], total)
@@ -907,4 +985,36 @@ pub fn swiglu_bwd(
         g.step(k.silu_da, &[gate, up, d_h, d_gate], &[total], total),
         g.step(k.silu_db, &[gate, d_h, d_up], &[total], total),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gemm_variant, GemmVariants};
+
+    /// Pins the three arms and, in particular, the `m <= 32` precondition the
+    /// GEMV kernels state in their headers: violating it is silently wrong
+    /// output, not a crash, so the bound belongs in the selector and nowhere
+    /// else. Thread counts are pinned too — they are the kernels' documented
+    /// dispatch geometry (one workgroup per output column; one 256-thread
+    /// workgroup per 128x128 output tile), not free parameters.
+    #[test]
+    fn gemm_variant_routes_skinny_m_to_the_gemv_kernel() {
+        let fast = GemmVariants::Fast { gemv: Some(7), tiled: 9 };
+        assert_eq!(gemm_variant(fast, 1, 3072), (7, 3072 * 64));
+        assert_eq!(gemm_variant(fast, 32, 3072), (7, 3072 * 64));
+        // One row past the kernel's stated limit: the tile takes over.
+        assert_eq!(gemm_variant(fast, 33, 3072), (9, 24 * 256));
+        assert_eq!(gemm_variant(fast, 512, 3072), (9, 4 * 24 * 256));
+
+        // A model that never registered the GEMV kernel keeps the tiled arm at
+        // every M — this is what makes the migration of an existing user
+        // provably behaviour-preserving before the kernel is added.
+        let no_gemv = GemmVariants::Fast { gemv: None, tiled: 9 };
+        assert_eq!(gemm_variant(no_gemv, 1, 3072), (9, 24 * 256));
+        assert_eq!(gemm_variant(no_gemv, 512, 3072), (9, 4 * 24 * 256));
+
+        // The reference tier ignores both fast kernels at every shape.
+        assert_eq!(gemm_variant(GemmVariants::Reference(2), 1, 3072), (2, 3072));
+        assert_eq!(gemm_variant(GemmVariants::Reference(2), 512, 3072), (2, 512 * 3072));
+    }
 }
