@@ -782,21 +782,28 @@ fn run_calib(args: &[String]) {
     let _ = &variant; // variant is auto-detected from the checkpoint now.
     let cfg = cfg_for_checkpoint(&weights);
 
-    // Load calibration images (any PPM in the dir), letterbox each to the model
-    // input as CHW.
-    let imgs = load_calib_chw(&images_dir, cfg.input, max_n);
+    // Load calibration images (any PPM in the dir), preprocessed exactly as the
+    // predictor does — aspect-preserving, no pad, so each carries its own size.
+    let imgs = load_calib_images(&images_dir, cfg.input, max_n);
     if imgs.is_empty() {
         eprintln!("brain depth: no PPM images found under {images_dir}");
         std::process::exit(1);
     }
-    eprintln!("calibrating on {} images at {}x{}...", imgs.len(), cfg.input, cfg.input);
+    {
+        let mut shapes: Vec<(u32, u32)> = imgs.iter().map(|i| (i.h, i.w)).collect();
+        shapes.sort_unstable();
+        shapes.dedup();
+        let shown: Vec<String> = shapes.iter().take(4).map(|(h, w)| format!("{h}x{w}")).collect();
+        let more = if shapes.len() > 4 { format!(" (+{} more)", shapes.len() - 4) } else { String::new() };
+        eprintln!("calibrating on {} images, {} distinct input shapes: {}{more}...", imgs.len(), shapes.len(), shown.join(", "));
+    }
 
     let gpu = Gpu::new(depth::net::PIPELINES);
     let ps = import::load_into(&gpu, &weights, &cfg).unwrap_or_else(|e| {
         eprintln!("brain depth: loading {weights}: {e}");
         std::process::exit(1);
     });
-    let stats = depth::collect_activation_stats(&gpu, &cfg, &ps, &imgs);
+    let stats = depth::collect_activation_stats_sized(&gpu, &cfg, &ps, &imgs);
     let report = stats.report();
 
     // Encoder vs decoder summary — the QuartDepth question.
@@ -826,7 +833,16 @@ fn run_calib(args: &[String]) {
 }
 
 /// Load up to `max_n` PPM images from `dir`, letterboxed to `[3,size,size]` CHW.
-fn load_calib_chw(dir: &str, size: u32, max_n: usize) -> Vec<Vec<f32>> {
+/// Load calibration images and preprocess each one **exactly as the predictor
+/// does**: `depth::predict::preprocess_chw` — aspect-preserving bilinear resize
+/// so the shorter side is `input`, both dims rounded to a multiple of 32, no pad.
+///
+/// This used to letterbox to a padded square with a 0.5 grey fill, so
+/// calibration fitted INT8 scales to a resampler, a geometry and a border the
+/// model never sees at inference (and which `depth::predict`'s own module docs
+/// record as having been REMOVED because it visibly degrades the depth). Each
+/// image therefore now carries its own `(h, w)`.
+fn load_calib_images(dir: &str, input: u32, max_n: usize) -> Vec<depth::CalibImage> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(dir) else {
         return out;
@@ -843,14 +859,8 @@ fn load_calib_chw(dir: &str, size: u32, max_n: usize) -> Vec<Vec<f32>> {
         }
         let Ok((px, w, h)) = events::ppm::decode_p6(&bytes) else { continue };
         let hwc: Vec<f32> = px.iter().map(|&b| b as f32 / 255.0).collect();
-        // `pad = 0.5` reproduces this path bit-for-bit. NOTE (survey §6.2): the
-        // predictor does NOT letterbox — it does an aspect-preserving bilinear
-        // resize to a multiple of 32 with no pad (`depth::predict::target_size`).
-        // So calibration still collects activation ranges under a transform the
-        // model never sees at inference. Keeping the exact fill/geometry here
-        // keeps today's INT8 scales stable; fixing the mismatch changes them and
-        // is a separate, separately-gated change.
-        out.push(imaging::letterbox_rgb(&hwc, w, h, size, 0.5).0);
+        let (chw, th, tw) = depth::predict::preprocess_chw(&hwc, w, h, input);
+        out.push(depth::CalibImage { chw, h: th, w: tw });
     }
     out
 }

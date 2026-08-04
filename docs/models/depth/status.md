@@ -643,3 +643,31 @@ Then: P4 (data/train/eval), P5 (demo), P6 (NPU), P7 (DA3), P8 (docs).
    `crates/vision` so `crates/depth` could reuse it without inheriting OpenVINO.
 4. **Structure before arithmetic.** The param layout was verified against the real
    checkpoint before a single kernel was dispatched.
+
+## INT8 calibration preprocessing (fixed; scale delta UNMEASURED)
+
+`brain depth calib` letterboxed every calibration image into a padded square
+with a 0.5 grey fill, while `Predictor::begin` does an aspect-preserving
+bilinear resize to a multiple of 32 with **no pad** — and this file's own
+`predict.rs` module docs record that letterboxing was *removed* because it
+visibly degrades the depth. The INT8 activation ranges were therefore fitted to
+a resampler, a geometry and a border the model never sees at inference. The
+doc-comment on the loader asserted the opposite ("the same transform the
+predictor uses").
+
+Fixed by extracting `depth::predict::preprocess_chw` — one implementation, used
+by both paths — and by teaching the collector to take per-image `(h, w)`
+(`collect_activation_stats_sized`), since an aspect-preserving resize gives a
+landscape and a portrait photo different input shapes. ZipDepth is fully
+convolutional, so it runs at any multiple of 32; images are grouped by shape and
+each distinct shape costs one model build.
+
+**What is NOT measured:** how far the INT8 scales actually move, and what that
+does to depth quality. That needs a ZipDepth checkpoint and a calibration set,
+neither of which is present on this machine — `brain depth calib --report` has
+not been run against real weights since the change. Anyone with the checkpoint
+should run it before and after and record the per-layer scale deltas here.
+
+`crates/depth/tests/p6_calib_transform.rs` gates the property that does not need
+weights: a 4:3 image must not come back square, no fill value may be introduced,
+and portrait/landscape must stay distinguishable.

@@ -40,6 +40,30 @@ pub fn target_size(w0: u32, h0: u32, input: u32) -> (u32, u32) {
     (make_divisible(h0 as f32 * scale, 32), make_divisible(w0 as f32 * scale, 32))
 }
 
+/// The reference's preprocessing, as one function: aspect-preserving bilinear
+/// resize so the shorter side is `input` with both dims rounded to a multiple of
+/// 32, then HWC -> CHW. Returns the tensor and its `(th, tw)`.
+///
+/// Extracted so **calibration runs the transform inference actually uses**.
+/// `brain depth calib` previously letterboxed to a padded square — a different
+/// resampler, a different geometry and a grey fill the model never sees — so it
+/// collected INT8 activation ranges from a distribution that does not occur at
+/// inference. There is no second copy of this: [`Predictor::begin`] and
+/// `depth::quant` both call it.
+pub fn preprocess_chw(hwc: &[f32], w0: u32, h0: u32, input: u32) -> (Vec<f32>, u32, u32) {
+    let (th, tw) = target_size(w0, h0, input);
+    let resized = imaging::resize_bilinear_hwc(hwc, 3, w0, h0, tw, th);
+    let hw = (th * tw) as usize;
+    let mut chw = vec![0f32; 3 * hw];
+    // Channel-parallel: each channel plane strides through `resized` independently.
+    backend_cpu::par::rows_mut(&mut chw, hw, |c, plane| {
+        for (i, v) in plane.iter_mut().enumerate() {
+            *v = resized[i * 3 + c];
+        }
+    });
+    (chw, th, tw)
+}
+
 /// A model built for one target size, plus its input buffer.
 struct Built {
     th: u32,
@@ -105,18 +129,7 @@ impl<'g> Predictor<'g> {
             }
         }
 
-        // Resize to (th, tw), pack HWC -> CHW (channel-parallel: each channel
-        // plane strides through `resized` independently).
-        let resized = imaging::resize_bilinear_hwc(hwc, 3, w0, h0, tw, th);
-        let hw = (th * tw) as usize;
-        let mut chw = vec![0f32; 3 * hw];
-        {
-                    backend_cpu::par::rows_mut(&mut chw, hw, |c, plane| {
-                for (i, v) in plane.iter_mut().enumerate() {
-                    *v = resized[i * 3 + c];
-                }
-            });
-        }
+        let (chw, _, _) = preprocess_chw(hwc, w0, h0, self.cfg.input);
 
         let b = self.built.borrow();
         let b = b.as_ref().unwrap();

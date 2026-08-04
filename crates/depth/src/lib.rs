@@ -30,6 +30,6 @@ pub use init::init_model as init_weights;
 pub use import::{cfg_for_checkpoint, load as load_checkpoint, load_into, tensor_names};
 pub use model::ZipDepth;
 pub use predict::Predictor;
-pub use quant::{collect_activation_stats, ActStatsCollector, LayerReport};
+pub use quant::{collect_activation_stats, collect_activation_stats_sized, ActStatsCollector, CalibImage, LayerReport};
 pub use effects::{depth_blur, fog};
 pub use stereo::{autostereogram, autostereogram_textured, stereo_pair, StereoOpts};

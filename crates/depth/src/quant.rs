@@ -133,21 +133,68 @@ impl LayerReport {
     }
 }
 
-/// Run `images` (each CHW `[3,input,input]` in `[0,1]`) through an eval-mode
-/// ZipDepth built on `ps`, collecting per-layer activation stats. Pure CPU/GPU
-/// forward — no NPU.
-pub fn collect_activation_stats(gpu: &Gpu, cfg: &ZipConfig, ps: &ParamStore, images: &[Vec<f32>]) -> ActStatsCollector {
+/// One calibration image at the size the predictor would feed it.
+pub struct CalibImage {
+    /// CHW `[3, h, w]` in `[0,1]`.
+    pub chw: Vec<f32>,
+    pub h: u32,
+    pub w: u32,
+}
+
+/// Run `images` through an eval-mode ZipDepth built on `ps`, collecting
+/// per-layer activation stats. Pure CPU/GPU forward — no NPU.
+///
+/// Each image carries its OWN `(h, w)`, because the reference's preprocessing is
+/// an aspect-preserving resize to a multiple of 32 — so a landscape and a
+/// portrait photo produce different input shapes. ZipDepth is fully
+/// convolutional and runs at any such size; the model is rebuilt when the shape
+/// changes, so images are processed grouped by shape and each distinct shape
+/// costs one build.
+///
+/// This matters for correctness, not tidiness: calibration used to letterbox
+/// every image to a padded square, which is a different resampler, a different
+/// geometry and a grey fill the model never sees at inference — so the INT8
+/// scales were fitted to a distribution that does not occur.
+pub fn collect_activation_stats_sized(
+    gpu: &Gpu,
+    cfg: &ZipConfig,
+    ps: &ParamStore,
+    images: &[CalibImage],
+) -> ActStatsCollector {
     let collector = ActStatsCollector::new();
     let ids = crate::net::ids();
     let ctx = Ctx::with_tap(gpu, ids, &collector);
-    let model = ZipDepth::build(&ctx, cfg.clone(), 1, false);
-    model.set_eval(true);
-    let n = (3 * cfg.input * cfg.input) as usize;
-    let input = gpu.storage(n as u64);
-    for img in images {
-        assert_eq!(img.len(), n, "each calib image must be a [3,{0},{0}] CHW tensor", cfg.input);
-        gpu.write(&input, bytemuck::cast_slice(img));
-        model.forward(&ctx, ps, &input);
+
+    // Group by shape so each distinct (h, w) costs one build, not one per image.
+    let mut order: Vec<usize> = (0..images.len()).collect();
+    order.sort_by_key(|&i| (images[i].h, images[i].w));
+
+    let mut cur: Option<(u32, u32, ZipDepth, gpu_core::DeviceBuffer)> = None;
+    for i in order {
+        let im = &images[i];
+        assert_eq!(im.chw.len(), (3 * im.h * im.w) as usize, "calib image must be [3,{},{}] CHW", im.h, im.w);
+        let need = cur.as_ref().map(|(h, w, _, _)| (*h, *w) != (im.h, im.w)).unwrap_or(true);
+        if need {
+            let model = ZipDepth::build_hw(&ctx, cfg.clone(), 1, im.h, im.w, false);
+            model.set_eval(true);
+            let input = gpu.storage((3 * im.h * im.w) as u64);
+            cur = Some((im.h, im.w, model, input));
+        }
+        let (_, _, model, input) = cur.as_ref().expect("built above");
+        gpu.write(input, bytemuck::cast_slice(&im.chw));
+        model.forward(&ctx, ps, input);
     }
     collector
+}
+
+/// Square-input convenience: every image is `[3, input, input]`.
+///
+/// Kept for the unit tests, which build synthetic square tensors and care about
+/// the collector's bookkeeping rather than the preprocessing. Production
+/// calibration goes through [`collect_activation_stats_sized`] so it sees the
+/// shapes inference produces.
+pub fn collect_activation_stats(gpu: &Gpu, cfg: &ZipConfig, ps: &ParamStore, images: &[Vec<f32>]) -> ActStatsCollector {
+    let sized: Vec<CalibImage> =
+        images.iter().map(|c| CalibImage { chw: c.clone(), h: cfg.input, w: cfg.input }).collect();
+    collect_activation_stats_sized(gpu, cfg, ps, &sized)
 }
