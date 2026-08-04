@@ -46,6 +46,7 @@ mod resident_mock;
 mod resident_tts;
 mod run_cli;
 mod splat_cli;
+mod supply;
 mod tts_cli;
 mod tts_serve;
 mod wm_cli;

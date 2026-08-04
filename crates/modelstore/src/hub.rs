@@ -41,7 +41,7 @@ impl std::error::Error for HubError {}
 /// supplies; [`resolve_revision`](Hub::resolve_revision) pins it to a sha for
 /// provenance recording, but callers are free to pass a sha directly and skip
 /// that call.
-pub trait Hub {
+pub trait Hub: Send + Sync {
     fn resolve_revision(&self, vendor: &str, repo: &str, revision: &str) -> Result<String, HubError>;
     fn list_files(&self, vendor: &str, repo: &str, revision: &str) -> Result<Vec<String>, HubError>;
     /// Reads one file fully into memory -- only for small files (`config.json`,

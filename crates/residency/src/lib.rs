@@ -25,11 +25,13 @@ pub mod manager;
 pub mod model;
 pub mod place;
 pub mod scheduler;
+pub mod supply;
 
 pub use executor::{Executor, InFlightJob, Job};
 pub use manager::{DeviceBudget, InstancePlacement, ResidencyManager, ResidencyReport};
 pub use model::{Instance, ResidentModel};
 pub use scheduler::Policy;
+pub use supply::{ModelSupplier, Supply};
 
 /// A device that can hold a hot model instance.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

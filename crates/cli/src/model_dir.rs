@@ -237,6 +237,17 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>) -> Opt
     }
 }
 
+/// [`resident_for`] over a [`brain_modelstore::LocalModel`] -- the same
+/// family dispatch [`discover`] uses for the store's scan, reused by the
+/// auto-fetch supplier (`crate::supply`) so there is exactly one
+/// "weights file -> resident" mapping regardless of how the file was found.
+pub(crate) fn resident_for_local(local: &brain_modelstore::LocalModel) -> Option<Arc<dyn ResidentModel>> {
+    let card = local.card.as_ref()?;
+    let weights = local.weights.to_str()?;
+    let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str());
+    resident_for(weights, card, tokenizer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
