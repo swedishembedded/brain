@@ -16,10 +16,17 @@
 //! carries the card; the `-00001-of-*` shards are grouped, not re-registered).
 //! GGUF embeds its tokenizer in KV; a safetensors model reuses a sibling
 //! `tokenizer.json` (HF convention) and registers even without one.
+//!
+//! Two layouts are scanned, preferred-first: the `<vendor>/<repo>` store
+//! layout ([`brain_modelstore::Store::scan`]) — each entry already knows its
+//! own directory, so its sibling `tokenizer.json` is never shared across
+//! models — and, for back-compat, the original flat single-level directory of
+//! `*.safetensors`/`*.gguf` files. A flat-layout hit logs a one-time-per-process
+//! warning recommending migration to the store layout.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
 use checkpoint::st::{self, ModelCard};
 use residency::ResidentModel;
@@ -59,14 +66,32 @@ fn shard_of(fname: &str) -> Option<(String, u32)> {
 }
 
 /// Scan `dir` and build one resident per discovered model-card id. Deduplicates
-/// by id (first wins). See the module docs for the skip/warn policy.
+/// by id (first wins, store layout before flat layout). See the module docs
+/// for the layout precedence and the skip/warn policy.
 pub fn discover(dir: &Path) -> Vec<Arc<dyn ResidentModel>> {
     let mut out: Vec<Arc<dyn ResidentModel>> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+
+    let mut locals = brain_modelstore::Store::new(dir.to_path_buf()).scan();
+    locals.sort_by(|a, b| a.weights.cmp(&b.weights)); // deterministic catalog order
+    for local in &locals {
+        register(&local.weights, &local.card, &local.dir, &mut seen, &mut out);
+    }
+
+    discover_flat(dir, &mut seen, &mut out);
+    out
+}
+
+static FLAT_LAYOUT_WARNING: Once = Once::new();
+
+/// The original single-level flat scan, predating the `<vendor>/<repo>` store
+/// layout. Kept for back-compat; a hit warns once per process.
+fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn ResidentModel>>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("brain: models dir {} not scanned ({e})", dir.display());
-            return out;
+            return;
         }
     };
 
@@ -93,11 +118,21 @@ pub fn discover(dir: &Path) -> Vec<Arc<dyn ResidentModel>> {
         }
     }
 
-    let mut seen: BTreeSet<String> = BTreeSet::new();
+    if !singles.is_empty() || !shards.is_empty() {
+        FLAT_LAYOUT_WARNING.call_once(|| {
+            eprintln!(
+                "brain: {} holds models directly (the flat legacy layout); \
+                 migrate to <vendor>/<repo>/ (see docs/models/naming.md) -- \
+                 this warning prints once per process",
+                dir.display()
+            );
+        });
+    }
+
     // Sorted for a deterministic catalog order.
     singles.sort();
     for path in &singles {
-        register(path, &card_of(path), dir, &mut seen, &mut out);
+        register(path, &card_of(path), dir, seen, out);
     }
     for (base, mut group) in shards {
         group.sort_by_key(|(idx, _)| *idx);
@@ -105,9 +140,8 @@ pub fn discover(dir: &Path) -> Vec<Arc<dyn ResidentModel>> {
         // Prefer the `<base>.safetensors.index.json` handle if it exists.
         let index = dir.join(format!("{base}.safetensors.index.json"));
         let handle = if index.exists() { index } else { first.clone() };
-        register(&handle, &card_of(first), dir, &mut seen, &mut out);
+        register(&handle, &card_of(first), dir, seen, out);
     }
-    out
 }
 
 /// Read a file's card: `read_card` (metadata-only) for safetensors, the KV-
@@ -394,5 +428,45 @@ mod tests {
     fn resolve_prefers_the_flag() {
         // The explicit flag wins over env/default; empty flag falls through.
         assert!(resolve(Some("flagdir")).unwrap().ends_with("flagdir"));
+    }
+
+    #[test]
+    fn store_layout_scans_vendor_repo_dirs_with_independent_tokenizers() {
+        // Regression test for the shared-tokenizer bug: two different
+        // <vendor>/<repo> dirs each own their sibling tokenizer.json, so one
+        // repo's tokenizer must never leak into another's.
+        let dir = tmp_dir("store-layout");
+        let a = dir.join("VendorA").join("RepoX");
+        std::fs::create_dir_all(&a).unwrap();
+        let card_a = ModelCard::new("VendorA/RepoX", "lfm");
+        st::save_safetensors(
+            a.join("model.brain.safetensors").to_str().unwrap(),
+            &[("w".into(), vec![1u64], vec![0.0f32])],
+            &serde_json::json!({}),
+            Some(&card_a),
+        )
+        .unwrap();
+        std::fs::write(a.join("tokenizer.json"), br#"{"model":{"vocab":{"a":0}}}"#).unwrap();
+
+        // A second repo with NO tokenizer of its own: it must NOT register (lfm
+        // requires one), proving VendorA's tokenizer wasn't picked up for it.
+        let b = dir.join("VendorB").join("RepoY");
+        std::fs::create_dir_all(&b).unwrap();
+        let card_b = ModelCard::new("VendorB/RepoY", "lfm");
+        st::save_safetensors(
+            b.join("model.brain.safetensors").to_str().unwrap(),
+            &[("w".into(), vec![1u64], vec![0.0f32])],
+            &serde_json::json!({}),
+            Some(&card_b),
+        )
+        .unwrap();
+
+        let got = ids(&discover(&dir));
+        assert!(got.contains(&"VendorA/RepoX".to_string()), "A missing: {got:?}");
+        assert!(
+            !got.contains(&"VendorB/RepoY".to_string()),
+            "B registered without its own tokenizer -- tokenizer leaked across repos: {got:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -1,0 +1,17 @@
+[package]
+name = "brain-modelstore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The on-disk model store: <vendor>/<repo> layout, local discovery, and the fetch resolution ladder (on disk -> upstream quantized artifact -> base + local quantize). No capability, no residency, no model crates -- a leaf between modelref/checkpoint and the CLI."
+
+[lib]
+name = "brain_modelstore"
+path = "src/lib.rs"
+
+[dependencies]
+brain-modelref.workspace = true
+brain-checkpoint.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }

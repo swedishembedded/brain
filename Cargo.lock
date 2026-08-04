@@ -550,6 +550,7 @@ dependencies = [
  "brain-lfm",
  "brain-mirror",
  "brain-model",
+ "brain-modelstore",
  "brain-moe",
  "brain-nemotron",
  "brain-npu",
@@ -931,6 +932,17 @@ name = "brain-modelref"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "brain-modelstore"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-modelref",
+ "serde_json",
+ "sha2",
+ "ureq",
 ]
 
 [[package]]
@@ -4760,6 +4772,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]
