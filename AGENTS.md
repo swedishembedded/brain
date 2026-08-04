@@ -114,6 +114,33 @@ fast and scalable kernel — not a naive one.
     `brain flux2 generate` (t2i + `--ref` editing). 9B weights are
     NC-licensed — see `docs/models/flux2/readme.md`.
 
+12b-bis. **FLUX.1 / Kontext** (`crates/flux1`) — BFL's 12 B MMDiT: 19
+    double-stream blocks (separate img/txt weights, joint attention over
+    `cat(txt, img)`) then 38 single-stream parallel blocks, with **per-block**
+    modulation (77 linears — so unlike FLUX.2 the modulation stays on the device
+    as 77 `m = 1` GEMVs), biased linears throughout, GELU(tanh) MLPs, 3-axis
+    interleaved RoPE (theta 10000), and the Kontext edit path (reference images
+    VAE-encoded and appended, axis-0 id = 1). Imported diffusers **1160 → 780**
+    BFL tensors, two-way covered. Adds **no kernel**. **Forward-parity-gated at
+    reduced depth in fp32 (worst 1−cos 1.5e-11) and at full depth in int8
+    (`out` cosine 0.9985 / 0.9991)** — the full-depth fp32 number does NOT fit a
+    24 GiB card and is not claimed. See `docs/models/flux1/status.md`.
+    *(Transformer forward only: **no sampler loop, no VAE glue, no CLI, no
+    serving surface**; backward/gradcheck deferred.)*
+
+12b-ter. **T5-XXL encoder** (`crates/t5`) — the text encoder FLUX.1 conditions
+    on: bidirectional encoder-only T5 (RMSNorm, no bias, **no** `1/√d_kv`
+    attention scale, learned relative-position bucket bias shared by every
+    layer, gated-GELU `wi_0`/`wi_1` FFN). Imported **219 → 171** tensors,
+    two-way covered; `relative_position_bucket` exact over all 16384 entries.
+    Forward-parity-gated per stage at **42/42, worst cosine 0.9999999992**
+    (B=2, T=128), plus a **checkpoint-free** `tiny_ref` gate at deliberately
+    distinct dims (`heads ≠ d_kv`, `heads·d_kv ≠ d_model`) at cosine 1.0000000000
+    — because at XXL those three numbers are all equal and a swap would be
+    invisible. See `docs/models/t5/status.md`. *(Forward only: **T=512 — the
+    length FLUX.1 actually uses — is untested**; no tokenizer; backward and the
+    serving contract deferred.)*
+
 12c. **VQGAN / CodeFormer VQ autoencoder** (`crates/vqgan`) — the VQ
     encoder/codebook/generator that CodeFormer's face restoration is built on:
     a 25-block encoder and a 25-block generator over `vae::blocks` (conv,
@@ -121,9 +148,26 @@ fast and scalable kernel — not a naive one.
     the codebook assignment and `embed` for the lookup. Adds **no kernel and no
     block**. Both released checkpoints (`codeformer.pth`, `vqgan_code1024.pth`)
     imported and forward-parity-gated at cosine 1.000000000 with **zero**
-    code-index disagreements. See `docs/models/vqgan/status.md`. *(The
-    CodeFormer **transformer and the fidelity dial `w` are not implemented**;
-    backward/gradcheck and the serving contract are deferred.)*
+    code-index disagreements. See `docs/models/vqgan/status.md`. *(Backward/
+    gradcheck and the serving contract are deferred.)*
+
+12c-bis. **CodeFormer face restoration** (`crates/restore`) — what turns the
+    VQ autoencoder above into a blind face restorer: the **code-prediction
+    Transformer** (9 pre-LN `TransformerSALayer`s over the flattened encoder
+    output, learned `position_emb` added to q/k but **not** v — which is why the
+    fused `in_proj_weight` is split into `qk`/`v` at import — erf-GELU MLP, and
+    a biasless 1024-way head whose argmax replaces the nearest-neighbour
+    codebook search), the **controllable feature transformation**
+    (`Fuse_sft_block`) at four resolutions, and the **identity-fidelity dial
+    `w`** (`w = 0` maximum quality, `w = 1` maximum fidelity; a one-element
+    device buffer read by `scale_add`, so changing it is a write, not a graph
+    rebuild). Composes `vqgan::model::run_blocks` + `vae::blocks` and adds
+    **no kernel and no block**. Two-way import coverage over all 515 checkpoint
+    tensors; forward-parity-gated per stage at cosine 1.000000000 with **zero**
+    code-index disagreements at every `w`. See `docs/models/restore/status.md`.
+    *(Forward only: `adain=True` — the reference CLI's path — face detection/
+    alignment, batch > 1, sizes ≠ 512², backward/gradcheck and the serving
+    contract are all deferred and listed in that ledger.)*
 
 12d. **CLIP text + image towers** (`crates/clip`) — one config-driven graph for
     the three encoders the imaging workstream needs: **CLIP-L** and
@@ -334,6 +378,10 @@ front-end to depend on.
 | Face recognition (SCRFD + alignment + ArcFace) | `docs/models/face/status.md`; `crates/facenet/src/{config,import,model,align,detect}.rs`; goldens via `tools/goldens/arcface_dump_reference.py` |
 | **Read an ONNX file** (initializers, nodes, attributes) | `crates/onnx/src/read.rs` — the import front-end; `crates/onnx` is otherwise export-only |
 | VQGAN / CodeFormer VQ autoencoder | `docs/models/vqgan/status.md`; `crates/vqgan/src/{config,import,model}.rs` over `crates/vae/src/blocks.rs`; goldens via `tools/goldens/codeformer_dump_reference.py` |
+| FLUX.1 / Kontext (12 B MMDiT, per-block modulation, edit path) | `docs/models/flux1/status.md`; `crates/flux1/src/{config,import,model}.rs`; goldens via `tools/goldens/flux1_dump_reference.py` |
+| T5-XXL encoder (FLUX.1 conditioning) | `docs/models/t5/status.md`; `crates/t5/src/{config,import,model,hostbias}.rs`; goldens via `tools/goldens/t5_dump_reference.py` |
+| **Which GEMM kernel a forward dispatches** (naive / skinny-M GEMV / 128×128 tiled), fp32 and int8 | `model::block::gemm_variant` — one rule, shared by flux1 and flux2; `block::pick_gemm` is the training-shaped sibling |
+| CodeFormer face restoration (code Transformer + CFT + the `w` dial) | `docs/models/restore/status.md`; `crates/restore/src/{config,import,model}.rs` over `crates/vqgan` + `crates/vae`; goldens via `tools/goldens/codeformer_restore_dump_reference.py` |
 | CLIP-L / OpenCLIP-bigG / EVA-CLIP text+image towers | `crates/clip/src/{config,import,model}.rs`; goldens via `tools/goldens/clip_dump_reference.py`; plan/status in `docs/imaging/plan.md` |
 | ZipDepth → Intel NPU (fp32 ONNX, exact parity) | `npu::depth_topology`, `crates/depth/src/fuse.rs` |
 | SAM 2.1 promptable segmentation (image path) | `crates/sam2/src/{config,import,model,hostpe}.rs`; goldens via `tools/goldens/sam2_dump_reference.py`; plan/status in `docs/imaging/plan.md` |

@@ -263,8 +263,17 @@ Still deferred on the training side:
 - The 512² goldens already carry the CFT tap points (encoder
   `{2,5,8,11,14,18}` ↔ generator `{6,9,12,15,18,21}`, `codeformer_arch.py:204`),
   all at cosine 1.000000000 — no re-dump needed for the fuse inputs.
-- Still to dump: the 9-layer `TransformerSALayer` I/O, `position_emb`,
+- ~~Still to dump: the 9-layer `TransformerSALayer` I/O, `position_emb`,
   `feat_emb`, `idx_pred_layer` logits, `Fuse_sft_block` scale/shift, and a
-  sweep over `w`. `import::CODEFORMER_ONLY` names exactly the prefixes those
-  weights live under; the follow-up extends the manifest and removes them from
-  that list.
+  sweep over `w`.~~ **Done** — `crates/restore` dumps and gates all of it; see
+  `docs/models/restore/status.md`. `import::CODEFORMER_ONLY` still names those
+  prefixes, and `vqgan`'s own import deliberately reports them as *skipped*
+  rather than *unused* (a test pins that: `vq.skipped.len() == 515 - 329`).
+
+## 2026-08 — re-verified as `crates/restore`'s foundation
+
+`crates/restore` builds on `vqgan::model::run_blocks`, which gained a signature
+change (segment inputs are returned to the pool). Re-run on one Tesla P40,
+`--release`: **11 lib + 9 parity, 0 failed**, cosine 1.000000000 and **0
+code-index mismatches** unchanged on both checkpoints, and the pooled
+(`taps=false`) graph still bit-identical to the tapped one.

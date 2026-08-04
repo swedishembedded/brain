@@ -382,9 +382,9 @@ Each phase ends at a validation gate and is independently committable.
 | **0. Foundations** ✅ **DONE** | kernels 1–5 + `crates/imaging` + `vision::blocks` additions + `model::vit` windowed spans | `make kernels-regen`, `make test`, per-kernel parity vs a CPU reference — **met**, see below |
 | **1. SAM 2** ◑ **FORWARD DONE** | Hiera trunk → FPN neck → prompt encoder → two-way mask decoder; image path only (no video memory bank) | parity vs dumped goldens — **met** (283/283, see below); `check_sam2`, capability + D-Bus + example **still owed** |
 | **2. Face recognition** ◑ **FORWARD DONE** | `crates/facenet`: SCRFD + IResNet-100 + alignment | cosine ≥0.999 vs insightface goldens — **met** (1.0000000 on every tap, see below); `check_arcface` **still owed** |
-| **3. CodeFormer** ◑ **VQGAN FORWARD DONE** | `crates/vqgan` + restorer, identity-fidelity dial `w` | VQ encoder/decoder/codebook parity — **met** (see below); the CodeFormer **transformer + dial `w` are not implemented**; `check_codeformer` **still owed** |
+| **3. CodeFormer** ◑ **FORWARD DONE** | `crates/vqgan` + `crates/restore` (code-prediction transformer, `Fuse_sft_block` CFT, identity-fidelity dial `w`) | VQ encoder/decoder/codebook parity **and** the full restorer — **met** (see the phase 3c/4 gate below); `check_codeformer` **still owed**, and `adain=True` — the reference CLI's actual path — is **not implemented** |
 | **3b. Text encoders** ◑ **FORWARD DONE** | `crates/clip`: CLIP-L + OpenCLIP-bigG + EVA-CLIP-L/336 behind one config-driven graph | cosine ≥0.9999 vs HF per encoder — **met** (see below); the **BPE tokenizer and image preprocessing are not implemented**; `check_clip` **still owed** |
-| **4. FLUX.1** | `crates/flux1` reusing `dit`/`vae`/`diffusion`; T5-XXL encoder + phase-3b CLIP-L; Kontext edit path | forward cosine vs diffusers; `check_flux1` |
+| **4. FLUX.1** ◑ **TRANSFORMER FORWARD DONE** | `crates/flux1` reusing `dit`/`vae`/`model::block`; **`crates/t5`** (T5-XXL encoder) + phase-3b CLIP-L; Kontext edit path | forward cosine vs diffusers — **met for the transformer and for T5-XXL** (see the phase 3c/4 gate below). **fp32 parity is gated at reduced depth only** (47.6 GiB does not fit a 24 GiB card); full depth is gated at **int8**. No sampler loop, no VAE glue, no CLI, no `check_flux1` |
 | **4b. UNet family** | `crates/unet` (SDXL `UNet2DConditionModel`) + discrete schedulers (DDIM/Euler-a/DPM++, ε and v-pred) in `crates/diffusion` | forward cosine vs diffusers SDXL; `check_unet` |
 | **4c. ControlNet** | `crates/controlnet`: backbone-agnostic `ControlAdapter` over named injection points; SDXL impl first, FLUX impl second; depth conditioning fed by brain's own ZipDepth | residual parity vs diffusers ControlNet; `check_controlnet` |
 | **5. Identity** | PuLID adapter on the phase-4 FLUX.1 backbone **and** InstantID (phase-4b/4c SDXL + IP-Adapter-FaceID), both fed by phase-2 ArcFace embeddings | ID cosine vs reference for each; `check_pulid`, `check_instantid`; measure the two against each other on shared fixtures |
@@ -451,6 +451,48 @@ implemented; and every fixture in this gate came from the local mirrors, so
 and the two antelopev2 `.onnx` only — the ~1 GB of stage goldens per model are
 regenerated from the `tools/goldens/*_dump_reference.py` commands recorded in that
 script, not mirrored.
+
+#### Phase 3c/4 gate — what was actually run
+
+**Scope of this gate is goldens → import → FORWARD parity, nothing else.**
+Backward/gradcheck (`check_codeformer`, `check_flux1`, `check_t5`) and the
+serving contract (`Provider`, residency adapter, `run_batch`, D-Bus,
+`examples/`) are **deliberately deferred** and are not claimed by any number
+below. None of `crates/{t5,flux1,restore}` has a CLI subcommand, a capability
+manifest or a D-Bus surface; `crates/flux1` has **no sampler loop and no VAE
+glue**, so "FLUX.1 works" is *not* a claim this gate supports — what it supports
+is that one transformer evaluation reproduces diffusers.
+
+One Tesla P40 (`BRAIN_DEVICE=gpu0`, wgpu/Vulkan), `--release`, run as targeted
+`cargo test --release -p <crate>` invocations (never a workspace
+`--tests --examples` build).
+
+| suite | tests | measured |
+|---|---|---|
+| `brain-t5` | 4 lib + 1 parity + 2 smoke + 1 tiny_ref, 0 failed (parity 48.1 s) | T5-XXL from the Kontext `text_encoder_2`: import **219 source tensors → 171 parameters**, `relative_position_bucket` 16384 entries **exact**. **42 stages at B=2/T=128, 0 failed, worst cosine 0.9999999992** (`block23_out`, max_abs 3.271e0, relL2 4.048e-5 — that is 1.4e-5 of the stage's own peak \|x\| = 2.36e5, i.e. scale, not drift). `position_bias` and `embed` at max_abs **0.000e0**; `last_hidden_state` 0.9999999996 / 9.284e-4 / 2.831e-5; `last_hidden_state[content]` **1.0000000000** / 2.694e-5. Plus a **checkpoint-free** `tiny_ref` gate at deliberately distinct dims (`heads=2, d_kv=64, d_model=64`, so `heads ≠ d_kv` and `heads·d_kv ≠ d_model`) — 17 stages, cosine 1.0000000000 |
+| `brain-flux1` | 8 lib + 2 dit_parity + 3 model_smoke, 0 failed (reduced-depth 49.4 s, full-depth 203.1 s) | **Two gates, because the fp32 model does not fit one card.** *Reduced depth (2 double + 2 single), fp32, real Kontext-dev weights* — import 1160 tensors, 1048 dropped as out-of-depth; t2i `out` cosine **0.999999999996** (1−cos 4.187e-12) max_abs 3e-5, edit `out` **0.999999999993** (6.633e-12) max_abs 8e-5; worst stage anywhere `sg1_txt` **0.999999999985** (1.511e-11). *Full depth (19+38), **int8*** — t2i `out` **0.998544477641** max_abs 0.40522, worst `db18_img` 0.994796217798; edit `out` **0.999137355865** max_abs 0.61119, worst `sg36_txt` 0.989315144936; `pre_final` 0.998047889316 / 0.997514888243. **The full-depth fp32 number is NOT measured and is not claimed** — 47.6 GiB of weights against a 24 GiB card |
+| `brain-restore` | 4 parity, 0 failed (35.6 s) | CodeFormer `codeformer.pth`: **515 source tensors → 533 runtime tensors**, two-way covered. **0/256 predicted code indices differ from the reference** on both cases (face 201 distinct, synth 125 distinct), and `quant_feat` is **bit-exact** (max\|Δ\| 0.000e0) at every `w`. Encoder+transformer: face worst `logits_norm` 1−cos **2.99e-12** / relL2 2.421e-6; synth worst `ft.08` **3.79e-12** / 2.726e-6. Generator+CFT, worst 1−cos across `w = 0, .25, .5, .75, 1` — face **4.84e-12 / 5.45e-11 / 5.62e-11 / 5.73e-11 / 6.07e-11**, synth up to **7.38e-11** (relL2 1.207e-5), every stage cosine 1.000000000. The dial does something monotone and matches the torch-computed drift in `manifest.json`: face max\|out(w)−out(0)\| = **0 / 0.9444 / 1.4420 / 1.5193 / 1.6321**, synth **0 / 2.1283 / 2.8225 / 3.4448 / 3.7374**. The pooled (`taps=false`) production graph is **bit-identical** to the tapped one |
+| shared homes touched | `brain-flux2` 26 (+4 ignored measurements), `brain-vqgan` 11+9, `brain-vae` 2+1, `brain-model` all green — 0 failed | the `model::block::gemm_variant` hoist did **not** regress its first users: flux2 `dit_parity`, `e2e_parity`, `int8_parity`, `host_forward_parity`, `import_real`, `model_grad` and the **bit-identical** `batch_parity` all still pass; vqgan 0 code-index mismatches unchanged; `vae` FLUX.2 encode/decode parity unchanged |
+
+**Not measured by this gate, and therefore not claimed:**
+
+* **FLUX.1 full-depth fp32.** Only reduced-depth fp32 and full-depth int8 ran.
+* **T5-XXL at T=512**, the length the FLUX contract actually uses. Parity is
+  gated at T=128/B=2 only. T=512 cannot run fp32 on one 24 GiB card, and its
+  score-slab dispatch (33.5 M threads = 524 288 workgroups) exceeds the 65 535
+  per-dimension limit, so it takes the kernels' **2D-grid path — which T=128
+  never exercises**. That is the first thing to check when T=512 is attempted.
+* **CodeFormer `adain=True`**, which is what `inference_codeformer.py` actually
+  runs; what is gated here is the `adain=False` graph. It needs unbiased
+  variance with eps *inside* the sqrt (no brain reduction does this today) plus
+  a golden re-dump. Also unimplemented: face detection/alignment, batch > 1,
+  and sizes ≠ 512².
+* **The CPU-JIT leg** (`BRAIN_DEVICE=cpu`) for all three. `backend-cpu`'s
+  reduction order depends on rayon splitting, so its low digits are not a
+  fingerprint and must not be quoted as one.
+* **`crates/vae`'s Z-Image encode/decode parity**, which **skipped** — there is
+  no Z-Image VAE checkpoint on this box. Its FLUX.2 leg did run and is green.
+* Anything about **speed**. No profile was taken and no speed claim is made.
 
 **Phase 4 is the long pole and it is also disk- and bandwidth-bound** (34 GB at
 ~1.5 MB/s ≈ 6 h). Phases 0–3 need no Kontext weights, so they proceed in
