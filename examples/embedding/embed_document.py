@@ -18,64 +18,45 @@ Run under a private session bus (weights + tokenizer via env):
       brain serve --dbus & sleep 2
       python3 examples/embedding/embed_document.py --input README.md --concurrent 4'
 
-Requires: python3-dbus (the same dependency as examples/dbus).
+Requires: jeepney (the same dependency as examples/dbus) — `pip install -e brain-py`.
 """
 from __future__ import annotations
 
 import argparse
-import ctypes
-import json
-import os
 import struct
 import sys
 import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
-from brain_py.dbus import BrainDBus, read_fd  # noqa: E402
-
-libc = ctypes.CDLL(None, use_errno=True)
-
-
-def memfd_with(data: bytes, name: str = "doc") -> int:
-    """A sealed memfd holding `data` — the long context the service will mmap."""
-    fd = libc.memfd_create(name.encode(), 0)
-    if fd < 0:
-        raise OSError(ctypes.get_errno(), "memfd_create")
-    os.write(fd, data)
-    os.lseek(fd, 0, os.SEEK_SET)
-    return fd
+try:
+    import brain_py  # noqa: F401
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.dbus import BrainDBus  # noqa: E402
 
 
 def embed_once(brain: BrainDBus, text: bytes, label: str) -> tuple[int, int, float]:
-    """One embed request: text in via fd, [n, d] f32 hidden states out via fd."""
-    fd = memfd_with(text)
+    """One embed request: text in as an input blob, [n, d] f32 hidden states out.
+
+    `run()` seals the input into a memfd and reads the output fd back into bytes
+    for us — no manual memfd/ctypes plumbing needed on the client side (brain-py
+    already implements that once, in `brain_py.dbus.sealed_memfd`/`read_fd`)."""
     t0 = time.monotonic()
-    try:
-        out = brain.run(
-            "lfm",
-            "embed",
-            params={},
-            in_fds={"text": fd},
-            in_meta={"text": {"media": "text"}},
-        )
-    finally:
-        os.close(fd)
+    out = brain.run("lfm", "embed", params={}, blobs={"text": text}, meta={"text": {"media": "text"}})
     dt = time.monotonic() - t0
     emb_meta = out.meta["embeddings"]
     shape = (emb_meta.get("meta") or {}).get("shape", [0, 0])
-    raw = read_fd(out.fds["embeddings"])
+    raw = out.blobs["embeddings"]
     n, d = int(shape[0]), int(shape[1])
     assert len(raw) == n * d * 4, f"fd payload {len(raw)} != {n}x{d} f32"
     # Mean-pool on the client as a sanity check on the fd payload.
     floats = struct.unpack(f"<{n * d}f", raw)
     mean0 = sum(floats[i * d] for i in range(n)) / max(n, 1)
-    result = json.loads(out.result) if isinstance(out.result, str) else out.result
     print(
         f"  [{label}] {n} tokens x {d} dim over {emb_meta['transport']} "
         f"({len(raw) >> 10} KiB) in {dt:.2f}s; mean[0]={mean0:+.4f} "
-        f"(service: {result.get('tokens')} tokens)"
+        f"(service: {out.outputs.get('tokens')} tokens)"
     )
     return n, d, dt
 
@@ -105,7 +86,7 @@ def main() -> int:
         errs: list[str] = []
 
         def worker(i: int) -> None:
-            # One bus connection per thread (dbus-python connections are not
+            # One bus connection per thread (a jeepney blocking connection is not
             # thread-safe for concurrent calls).
             try:
                 with BrainDBus() as b:

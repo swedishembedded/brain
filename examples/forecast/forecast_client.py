@@ -30,8 +30,13 @@ import argparse
 import math
 import struct
 import sys
+from pathlib import Path
 
-from brain_py.dbus import BrainDBus, read_fd, sealed_memfd
+try:
+    import brain_py  # noqa: F401
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.dbus import BrainDBus  # noqa: E402
 
 
 def f32le(values) -> bytes:
@@ -84,15 +89,15 @@ def main() -> None:
             sys.exit(1)
         out = brain.run(
             args.model, "forecast", params,
-            in_fds={"context": sealed_memfd(payload, "context")},
-            in_meta={"context": {"media": "bytes", "shape": shape}},
+            blobs={"context": payload},
+            meta={"context": {"media": "bytes", "shape": shape}},
         )
 
     fmeta = out.meta["forecast"]["meta"]
     fshape, kind, levels = fmeta["shape"], fmeta["kind"], fmeta.get("levels", [])
-    data = unpack_f32(read_fd(out.fds["forecast"]))
+    data = unpack_f32(out.blobs["forecast"])
 
-    print(f"model={out.result.get('model')}  device={out.result.get('device')}  horizon={out.result.get('horizon')}")
+    print(f"model={out.outputs.get('model')}  device={out.outputs.get('device')}  horizon={out.outputs.get('horizon')}")
     print(f"forecast: shape={fshape}  kind={kind}  levels={levels if levels else '(samples)'}")
 
     # Extract a single point path for a readable summary.

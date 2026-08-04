@@ -91,7 +91,7 @@ first. Python: `BrainDBus.cancel(job)`.
 
 - The reusable client lives in the **brain-py** package: `brain_py.dbus.BrainDBus`
   (context manager + `read_fd`/`sealed_memfd`; jeepney with `enable_fds=True`, install
-  with `pip install brain-py[dbus]`) and `brain_py.image` (PPM save + box drawing for
+  with `pip install -e brain-py`) and `brain_py.image` (PPM save + box drawing for
   brain's HWC-f32 image blobs, no third-party image lib).
 - **`brain_dbus.py`** — an example using the client: discovery, `imageops.gradient`
   (a real image via fd → PPM), and — with `BRAIN_ZIMAGE_*` exported — a streaming

@@ -20,18 +20,22 @@ import sys
 from pathlib import Path
 
 # Use the reusable client from the brain-py package (run straight from the repo).
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
-from brain_py.dbus import BrainDBus, read_fd  # noqa: E402
+try:
+    import brain_py  # noqa: F401
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.base import BrainError  # noqa: E402
+from brain_py.dbus import BrainDBus  # noqa: E402
 from brain_py.image import save_ppm  # noqa: E402
 
 OUT = Path(os.environ.get("OUT", "/tmp"))
 
 
 def demo_image_over_fd(brain: BrainDBus) -> None:
-    """imageops.gradient → a real image returned as a memfd → PPM."""
+    """imageops.gradient → a real image, already materialised into bytes by `run()`."""
     out = brain.run("imageops", "gradient", {"width": 128, "height": 128, "style": "aurora"})
     meta = out.meta["image"]
-    data = read_fd(out.fds["image"])
+    data = out.blobs["image"]
     dims = meta.get("meta") or {}
     w, h, c = dims.get("w", 128), dims.get("h", 128), dims.get("c", 3)
     path = OUT / "brain_dbus_gradient.ppm"
@@ -40,22 +44,25 @@ def demo_image_over_fd(brain: BrainDBus) -> None:
 
 
 def demo_streaming_generation(brain: BrainDBus) -> None:
-    """z-image text2image over Subscribe: progress frames + the image via SCM_RIGHTS."""
+    """z-image text2image over Subscribe: progress callback + the final image."""
     print("z-image text2image (streaming over dbus)...")
     params = {"prompt": "a red apple on a wooden table", "width": 256, "height": 256, "steps": 8}
-    for frame, fds in brain.subscribe("z-image", "text2image", params):
-        kind = frame["type"]
-        if kind == "progress":
-            print(f"  [{frame['step']}/{frame['total']}] {frame['message']}")
-        elif kind == "blob" and fds:
-            data = read_fd(fds[0])
-            path = OUT / "brain_dbus_image.ppm"
-            save_ppm(path, data, 256, 256)
-            print(f"  saved image -> {path}")
-        elif kind == "done":
-            print("  done:", frame.get("result"))
-        elif kind == "error":
-            print("  error:", frame["message"])
+
+    def on_progress(step: int, total: int, message: str) -> None:
+        print(f"  [{step}/{total}] {message}")
+
+    try:
+        out = brain.subscribe("z-image", "text2image", params, on_progress=on_progress)
+    except BrainError as e:
+        print("  error:", e)
+        return
+
+    data = out.blobs.get("image")
+    if data:
+        path = OUT / "brain_dbus_image.ppm"
+        save_ppm(path, data, 256, 256)
+        print(f"  saved image -> {path}")
+    print("  done:", out.outputs)
 
 
 def main() -> int:

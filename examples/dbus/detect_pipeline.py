@@ -21,8 +21,11 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
-from brain_py.dbus import BrainDBus, read_fd, sealed_memfd  # noqa: E402
+try:
+    import brain_py  # noqa: F401
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.dbus import BrainDBus  # noqa: E402
 from brain_py.image import to_pil  # noqa: E402
 
 OUT = Path(os.environ.get("OUT", "/tmp"))
@@ -34,21 +37,22 @@ PROMPT = os.environ.get("PROMPT", "two dogs sitting side by side on grass, full 
 def generate(brain: BrainDBus) -> bytes:
     """Stream a z-image text2image generation; return the HWC-f32 image bytes."""
     params = {"prompt": PROMPT, "width": SIZE, "height": SIZE, "steps": STEPS, "seed": 7}
-    for frame, fds in brain.subscribe("z-image", "text2image", params):
-        if frame["type"] == "progress":
-            print(f"  [{frame['step']}/{frame['total']}] {frame['message']}")
-        elif frame["type"] == "blob" and fds:
-            return read_fd(fds[0])
-        elif frame["type"] == "error":
-            raise RuntimeError(frame["message"])
-    raise RuntimeError("no image produced")
+
+    def on_progress(step: int, total: int, message: str) -> None:
+        print(f"  [{step}/{total}] {message}")
+
+    out = brain.subscribe("z-image", "text2image", params, on_progress=on_progress)
+    image = out.blobs.get("image")
+    if not image:
+        raise RuntimeError("no image produced")
+    return image
 
 
 def detect(brain: BrainDBus, image: bytes) -> list[dict]:
-    """Run yolo detection on the image (passed as a memfd)."""
+    """Run yolo detection on the image (passed as an input blob)."""
     meta = {"image": {"media": "image", "w": SIZE, "h": SIZE, "c": 3}}
-    out = brain.run("yolo", "detect", {"conf": 0.25}, in_fds={"image": sealed_memfd(image)}, in_meta=meta)
-    return out.result.get("detections", [])
+    out = brain.run("yolo", "detect", {"conf": 0.25}, blobs={"image": image}, meta=meta)
+    return out.outputs.get("detections", [])
 
 
 def annotate(image: bytes, detections: list[dict]):

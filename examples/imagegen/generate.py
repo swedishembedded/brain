@@ -16,7 +16,7 @@ Run under a private session bus (weights via env — see the README):
       brain serve --dbus & sleep 2
       python3 examples/imagegen/generate.py --prompt "a red fox in the snow"'
 
-Requires: jeepney (pip install brain-py[dbus]).
+Requires: jeepney — `pip install -e brain-py`.
 """
 from __future__ import annotations
 
@@ -25,32 +25,36 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
-from brain_py.dbus import BrainDBus, read_fd  # noqa: E402
+try:
+    import brain_py  # noqa: F401
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.base import BrainError  # noqa: E402
+from brain_py.dbus import BrainDBus  # noqa: E402
 from brain_py.image import save_ppm  # noqa: E402
 
 MODEL = "flux2-klein"
 
 
 def run_streaming(brain: BrainDBus, action: str, params: dict, out: str, **kw) -> int:
-    """Drive one streaming generation; save the image blob; return exit code."""
+    """Drive one streaming generation (`kw` forwards `blobs=`/`meta=` for actions
+    that take reference images); save the image blob; return exit code."""
     t0 = time.monotonic()
-    image = None  # (bytes, meta)
-    for frame, fds in brain.subscribe(MODEL, action, params, timeout=7200.0, **kw):
-        kind = frame.get("type")
-        if kind == "progress":
-            print(f"  [{frame['step']}/{frame['total']}] {frame.get('message', '')}", flush=True)
-        elif kind == "blob" and frame.get("name") == "image":
-            image = (read_fd(fds[0]), frame.get("meta") or {})
-        elif kind == "done":
-            print(f"  done: {frame.get('result')} ({time.monotonic() - t0:.1f}s)")
-        elif kind == "error":
-            print(f"  ERROR: {frame.get('message')}", file=sys.stderr)
-            return 1
-    if image is None:
+
+    def on_progress(step: int, total: int, message: str) -> None:
+        print(f"  [{step}/{total}] {message}", flush=True)
+
+    try:
+        outcome = brain.subscribe(MODEL, action, params, timeout=7200.0, on_progress=on_progress, **kw)
+    except BrainError as e:
+        print(f"  ERROR: {e}", file=sys.stderr)
+        return 1
+    print(f"  done: {outcome.outputs} ({time.monotonic() - t0:.1f}s)")
+    data = outcome.blobs.get("image")
+    if data is None:
         print("  no image blob arrived", file=sys.stderr)
         return 1
-    data, meta = image
+    meta = (outcome.meta.get("image") or {}).get("meta") or {}
     w, h, c = int(meta.get("w", 0)), int(meta.get("h", 0)), int(meta.get("c", 3))
     save_ppm(out, data, w, h, c)
     print(f"wrote {out} ({w}x{h})")

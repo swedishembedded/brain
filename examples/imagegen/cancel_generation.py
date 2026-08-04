@@ -14,7 +14,7 @@ aborts at its next per-step poll (the current denoise step finishes first).
       brain serve --dbus & sleep 2
       python3 examples/imagegen/cancel_generation.py'
 
-Requires: jeepney (pip install brain-py[dbus]).
+Requires: jeepney — `pip install -e brain-py`.
 """
 from __future__ import annotations
 
@@ -22,7 +22,10 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+try:
+    import brain_py  # noqa: F401
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
 from brain_py.dbus import BrainDBus  # noqa: E402
 
 from generate import MODEL  # noqa: E402
@@ -40,7 +43,10 @@ def main() -> int:
             print(f"{MODEL} not served (models: {models}); set BRAIN_FLUX2_*", file=sys.stderr)
             return 1
 
-        job, frames = brain.subscribe_with_job(
+        # Deliberately the LOW-LEVEL frame iterator (not the high-level
+        # subscribe()): this example needs the job id mid-stream to cancel it,
+        # which the materialised-Outcome API has no way to expose.
+        job, frames = brain.stream_frames_with_job(
             MODEL,
             "text2image",
             {"prompt": args.prompt, "variant": args.variant},

@@ -24,7 +24,7 @@ residency executor --instance key--> resident flux2::Pipeline (DiT+TE+VAE)
 ## Run
 
 ```bash
-# deps: pip install brain-py[dbus]   (jeepney with fd passing)
+# deps: pip install -e brain-py   (jeepney with fd passing)
 dbus-run-session -- bash -c '
   BRAIN_FLUX2_DIT=/path/to/flux2-klein/transformer \
   BRAIN_FLUX2_VAE=/path/to/flux2-klein/vae \

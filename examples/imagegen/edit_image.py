@@ -14,7 +14,7 @@ the regenerated image. The server center-crops references to multiples of 16.
       python3 examples/imagegen/edit_image.py --image in.ppm \
           --prompt "the same scene at night" --out edited.ppm'
 
-Requires: jeepney (pip install brain-py[dbus]).
+Requires: jeepney — `pip install -e brain-py`.
 """
 from __future__ import annotations
 
@@ -23,8 +23,11 @@ import struct
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
-from brain_py.dbus import BrainDBus, sealed_memfd  # noqa: E402
+try:
+    import brain_py  # noqa: F401
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.dbus import BrainDBus  # noqa: E402
 
 from generate import MODEL, run_streaming  # noqa: E402  (shared frame loop)
 
@@ -78,11 +81,11 @@ def main() -> int:
         "seed": args.seed,
         "variant": args.variant,
     }
-    in_fds, in_meta = {}, {}
+    blobs, meta = {}, {}
     for name, path in [("image", args.image)] + [(f"image{i}", p) for i, p in enumerate(args.ref)]:
         data, w, h = load_ppm_hwc_f32(path)
-        in_fds[name] = sealed_memfd(data, name)
-        in_meta[name] = {"media": "image", "w": w, "h": h, "c": 3}
+        blobs[name] = data
+        meta[name] = {"media": "image", "w": w, "h": h, "c": 3}
         print(f"  ref {name}: {path} ({w}x{h})")
 
     with BrainDBus() as brain:
@@ -91,7 +94,7 @@ def main() -> int:
             print(f"{MODEL} not served (models: {models}); set BRAIN_FLUX2_*", file=sys.stderr)
             return 1
         print(f"edit -> {args.width}x{args.height} ({args.variant}):")
-        return run_streaming(brain, "edit", params, args.out, in_fds=in_fds, in_meta=in_meta)
+        return run_streaming(brain, "edit", params, args.out, blobs=blobs, meta=meta)
 
 
 if __name__ == "__main__":

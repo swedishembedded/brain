@@ -18,7 +18,7 @@ LoRA fold-in).
       python3 examples/imagegen/lora_finetune.py --data /srv/mydataset \
           --save out/flux2-my.lora --prompt "a photo of sks dog on the moon"'
 
-Requires: jeepney (pip install brain-py[dbus]).
+Requires: jeepney — `pip install -e brain-py`.
 """
 from __future__ import annotations
 
@@ -26,8 +26,12 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
-from brain_py.dbus import BrainDBus, read_fd  # noqa: E402
+try:
+    import brain_py  # noqa: F401
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "brain-py"))
+from brain_py.base import BrainError  # noqa: E402
+from brain_py.dbus import BrainDBus  # noqa: E402
 
 from generate import MODEL, run_streaming  # noqa: E402
 
@@ -65,19 +69,18 @@ def main() -> int:
             return 1
 
         print(f"lora_train rank={args.rank} steps={args.steps} ({args.variant}):")
-        adapter = None
-        for frame, fds in brain.subscribe(MODEL, "lora_train", params, timeout=48 * 3600.0):
-            kind = frame.get("type")
-            if kind == "progress":
-                # per-step messages look like "step 3/200  loss 0.41231  (95.2 s)"
-                print(f"  {frame.get('message', '')}", flush=True)
-            elif kind == "blob" and frame.get("name") == "adapter":
-                adapter = read_fd(fds[0])
-            elif kind == "done":
-                print(f"  done: {frame.get('result')}")
-            elif kind == "error":
-                print(f"  ERROR: {frame.get('message')}", file=sys.stderr)
-                return 1
+
+        def on_progress(_step: int, _total: int, message: str) -> None:
+            # per-step messages look like "step 3/200  loss 0.41231  (95.2 s)"
+            print(f"  {message}", flush=True)
+
+        try:
+            outcome = brain.subscribe(MODEL, "lora_train", params, timeout=48 * 3600.0, on_progress=on_progress)
+        except BrainError as e:
+            print(f"  ERROR: {e}", file=sys.stderr)
+            return 1
+        print(f"  done: {outcome.outputs}")
+        adapter = outcome.blobs.get("adapter")
         if adapter is None:
             print("  no adapter blob arrived", file=sys.stderr)
             return 1

@@ -11,7 +11,7 @@ the dispatcher thread so lane time is pure forward.
 ## Run
 
 ```bash
-# deps: python3-dbus (pip install dbus-python)
+# deps: jeepney (pip install -e brain-py)
 dbus-run-session -- bash -c '
   BRAIN_LFM=out/lfm-230m.weights \
   BRAIN_LFM_TOKENIZER=/path/to/LFM2.5-Encoder-230M/tokenizer.json \
