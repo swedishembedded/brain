@@ -1,0 +1,19 @@
+[package]
+name = "brain-controlnet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Backbone-agnostic ControlNet: a ControlAdapter over named injection points, so one control-conditioning mechanism serves the UNet and the FLUX DiTs alike."
+
+[lib]
+name = "controlnet"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-checkpoint.workspace = true
+brain-vision.workspace = true
+brain-unet.workspace = true
+brain-imaging.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "brain-unet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SDXL UNet2DConditionModel: down/mid/up blocks with skip connections, ResBlocks with timestep scale-shift, spatial transformers, and the SDXL added-conditioning embedding."
+
+[lib]
+name = "unet"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-checkpoint.workspace = true
+brain-vae.workspace = true
+brain-vision.workspace = true
+brain-diffusion.workspace = true
+brain-clip.workspace = true
+brain-imaging.workspace = true

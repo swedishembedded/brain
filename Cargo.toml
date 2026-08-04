@@ -70,6 +70,8 @@ default-members = [
     "crates/t5",
     "crates/flux1",
     "crates/restore",
+    "crates/unet",
+    "crates/controlnet",
     "crates/depth",
     "crates/splat",
     "crates/mirror",
@@ -160,6 +162,8 @@ brain-clip = { path = "crates/clip" }
 brain-t5 = { path = "crates/t5" }
 brain-flux1 = { path = "crates/flux1" }
 brain-restore = { path = "crates/restore" }
+brain-unet = { path = "crates/unet" }
+brain-controlnet = { path = "crates/controlnet" }
 brain-depth = { path = "crates/depth" }
 brain-splat = { path = "crates/splat" }
 brain-mirror = { path = "crates/mirror" }

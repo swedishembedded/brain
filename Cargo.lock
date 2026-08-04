@@ -616,6 +616,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-controlnet"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-unet",
+ "brain-vision",
+]
+
+[[package]]
 name = "brain-data"
 version = "0.1.0"
 dependencies = [
@@ -1328,6 +1341,21 @@ dependencies = [
  "brain-testutil",
  "bytemuck",
  "serde_json",
+]
+
+[[package]]
+name = "brain-unet"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-clip",
+ "brain-diffusion",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-vae",
+ "brain-vision",
 ]
 
 [[package]]
