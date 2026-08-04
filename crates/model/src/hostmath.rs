@@ -117,33 +117,57 @@ pub fn silu_slice(x: &[f32]) -> Vec<f32> {
     x.iter().map(|&v| silu(v)).collect()
 }
 
-/// Sinusoidal timestep embedding, **cos block first** then sin — the layout
-/// every diffusion model in this repo needs:
+/// Sinusoidal timestep embedding — the one host sinusoid every diffusion model
+/// in this repo uses (`zimage`, `flux1`, `flux2`, `unet`, and the phase-4c
+/// ControlNet next).
 ///
 /// ```text
 /// half     = dim / 2
-/// freq[k]  = max_period^(-k/half)
-/// e[k]     = cos(t · freq[k])          k in 0..half
-/// e[half+k]= sin(t · freq[k])
+/// freq[k]  = max_period^(-k/(half - downscale_freq_shift))
+/// out      = flip_sin_to_cos ? [cos(t·freq) ‖ sin(t·freq)]
+///                            : [sin(t·freq) ‖ cos(t·freq)]
 /// ```
 ///
-/// This is `flux.modules.layers.timestep_embedding` (BFL) and diffusers'
-/// `Timesteps(dim, flip_sin_to_cos=True, downscale_freq_shift=0)` — they agree.
+/// The layout used by everything here today is `flip_sin_to_cos = true` with
+/// `downscale_freq_shift = 0`, which is what
+/// `flux.modules.layers.timestep_embedding` (BFL) and diffusers'
+/// `Timesteps(dim, flip_sin_to_cos=True, downscale_freq_shift=0)` both do.
 /// `t` is the ALREADY-SCALED time (both references pre-multiply by their
 /// `time_factor`, 1000 for the FLUX family), so this function applies no
 /// scaling of its own.
 ///
+/// The two knobs are diffusers' `get_timestep_embedding` parameters and they
+/// are here — rather than in a per-model copy — because they are the whole
+/// reason a second copy was written:
+///
+/// * `flip_sin_to_cos` swaps the halves to `[sin ‖ cos]`. Not cosmetic: a UNet
+///   whose `time_embedding` weights were trained against `[cos ‖ sin]` sees a
+///   systematic error on **every** timestep and produces plausible-looking
+///   noise rather than an obvious failure.
+/// * `downscale_freq_shift` sits in the **denominator** (`half - shift`), so it
+///   moves every frequency, not one. 0 for SDXL and the FLUX family, 1 for the
+///   original DDPM.
+///
 /// The angle is accumulated in `f64` and rounded once, as the references do.
-/// `dim` must be even.
-pub fn timestep_embedding(t: f32, dim: usize, max_period: f64) -> Vec<f32> {
+/// `dim` must be even (diffusers zero-pads an odd `dim`; this asserts rather
+/// than silently dropping the pad).
+pub fn timestep_embedding(
+    t: f32,
+    dim: usize,
+    flip_sin_to_cos: bool,
+    downscale_freq_shift: f64,
+    max_period: f64,
+) -> Vec<f32> {
     assert!(dim.is_multiple_of(2), "timestep_embedding: dim {dim} must be even");
     let half = dim / 2;
+    let denom = half as f64 - downscale_freq_shift;
     let mut e = vec![0.0f32; dim];
+    let (cos_at, sin_at) = if flip_sin_to_cos { (0, half) } else { (half, 0) };
     for k in 0..half {
-        let freq = (-(max_period.ln()) * k as f64 / half as f64).exp();
+        let freq = (-(max_period.ln()) * k as f64 / denom).exp();
         let arg = t as f64 * freq;
-        e[k] = arg.cos() as f32;
-        e[half + k] = arg.sin() as f32;
+        e[cos_at + k] = arg.cos() as f32;
+        e[sin_at + k] = arg.sin() as f32;
     }
     e
 }
@@ -462,6 +486,34 @@ mod tests {
         assert!((a.iter().sum::<f32>() - 1.0).abs() < 1e-6);
         for (x, y) in a.iter().zip(&b) {
             assert!((x - y).abs() < 1e-6, "softmax must be shift-invariant");
+        }
+    }
+
+    /// `t = 0` makes every argument 0, so the flipped layout is `[1…1, 0…0]`
+    /// and the unflipped one is its mirror — the cheapest possible check that
+    /// the reordering is applied in the right direction. A wrong direction is
+    /// silent: the shape is identical and the model still produces an image.
+    #[test]
+    fn flip_sin_to_cos_reorders_the_halves() {
+        assert_eq!(
+            timestep_embedding(0.0, 8, true, 0.0, 10_000.0),
+            vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            timestep_embedding(0.0, 8, false, 0.0, 10_000.0),
+            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+        );
+    }
+
+    /// `downscale_freq_shift` divides the exponent, so it must move every
+    /// frequency except `k = 0` (whose exponent is 0 either way).
+    #[test]
+    fn the_freq_shift_moves_every_frequency_but_the_first() {
+        let a = timestep_embedding(1.0, 8, true, 0.0, 10_000.0);
+        let b = timestep_embedding(1.0, 8, true, 1.0, 10_000.0);
+        assert_eq!(a[0], b[0], "k=0 has exponent 0 regardless of the shift");
+        for k in 1..4 {
+            assert_ne!(a[k], b[k], "frequency {k} did not move with the shift");
         }
     }
 }

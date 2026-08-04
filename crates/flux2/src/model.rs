@@ -502,7 +502,7 @@ impl Flux2Model {
         // the embedding itself is `hostmath::timestep_embedding` (cos block
         // first, angles in f64) — shared with `flux1`, byte-for-byte the
         // local copy this replaced.
-        let emb = model::hostmath::timestep_embedding(t * 1000.0, 256, 10000.0);
+        let emb = model::hostmath::timestep_embedding(t * 1000.0, 256, true, 0.0, 10000.0);
         let h = silu_slice(&matvec_par(&self.time_in_a, &emb, d, 256));
         let vec_ = matvec_par(&self.time_in_b, &h, d, d);
         let sv = silu_slice(&vec_);

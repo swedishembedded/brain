@@ -586,7 +586,7 @@ impl Flux1Model {
         let d = self.cfg.hidden;
         // `time_factor = 1000` is the reference's, applied here (not in
         // hostmath) because it is a FLUX pipeline convention, not embedding math.
-        let temb = |x: f32| model::hostmath::timestep_embedding(x * 1000.0, 256, 10000.0);
+        let temb = |x: f32| model::hostmath::timestep_embedding(x * 1000.0, 256, true, 0.0, 10000.0);
         let mut vec_ = Self::mlp_embed(&self.time_a, &self.time_b, &temb(t), d);
         if let (Some(ga), Some(gb)) = (&self.guid_a, &self.guid_b) {
             let g = Self::mlp_embed(ga, gb, &temb(guidance), d);
