@@ -27,3 +27,6 @@ serde_json.workspace = true
 bytemuck.workspace = true
 wgpu = "29"
 pollster = "0.4"
+
+[dev-dependencies]
+brain-testutil.workspace = true

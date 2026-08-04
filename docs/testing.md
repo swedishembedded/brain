@@ -20,6 +20,33 @@ PyTorch oracle. Coverage is layered:
 Run with `make test` (or `cargo test`); set `MOE_SKIP_GPU_TESTS=1` on a machine
 with no GPU to skip the device-dependent tests.
 
+### `testdata/` — fixture inputs and goldens, not a model store
+
+Parity/import tests across ~20 crates (`fastvlm`, `moondream`, `qwenvl`, `nemotron`,
+`qwen-asr`, `sam2`, `zimage`, `vae`, `clip`, `facenet`, `tts`, `codec`, `speaker`,
+`vqgan`, `wm-genie`, `flux2`, `qwen`, `diffusion`, `npu`, `audio`) resolve their
+fixtures through `brain_testutil::testdata(rel)` (one implementation, shared as a
+dev-dependency — this used to be a byte-identical function copy-pasted into every
+one of those crates). It resolves to `$BRAIN_TESTDATA` if set, else the gitignored
+`<repo>/testdata/`.
+
+**`testdata/` holds test inputs and goldens ONLY** — reference checkpoints a test
+loads, dumped-golden tensors it compares against, and small input media (audio
+clips, images). It must never hold a `.git` directory or runnable code (upstream
+source, notebooks, docs): `scripts/fetch-testdata.sh`, the one thing that
+populates it, unconditionally strips `.git` and `.cache/huggingface` from
+everything it mirrors, plus an extra exclusion list for trees whose mirror is a
+whole upstream checkout (`vl_tree`'s `.py`/`.ipynb`/`.md`/`.pdf`/`.mp4`/`.pt`
+exclusion — none of `fastvlm`/`moondream`/`qwenvl`'s tests read any of those).
+
+Populate it with `make fetch/testdata` (hard-links from a local mirror —
+`BRAIN_*_MIRROR` env vars, the ONE place a machine-specific path may appear in
+this repo, per `AGENTS.md`). A test whose fixture is still absent **skips
+itself** (`eprintln!` + early return, never `panic!`) — verify a change here by
+removing `testdata/`, re-running `make fetch/testdata`, and re-running the
+crates in the table above; a fixture that stopped resolving shows up as a new
+skip, not a failure, which is itself the bug to look for.
+
 ## 2. Backprop correctness gate — numerical gradient check
 
 `crates/gradcheck` replaces the dropped PyTorch oracle. For each parameter

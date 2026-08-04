@@ -15,5 +15,8 @@ brain-kernels.workspace = true
 brain-vae.workspace = true
 brain-wm-core.workspace = true
 brain-checkpoint.workspace = true
-# No [dev-dependencies]: cargo already links every [dependencies] entry into
-# tests/, and the parity test needs nothing beyond gpu-core, checkpoint and vae.
+# Everything above is ALSO what the parity test needs, and cargo already links
+# every [dependencies] entry into tests/ — so this is the one genuinely
+# test-only addition, not a second [dependencies] section.
+[dev-dependencies]
+brain-testutil.workspace = true

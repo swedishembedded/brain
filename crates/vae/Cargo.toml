@@ -14,3 +14,6 @@ brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-checkpoint.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

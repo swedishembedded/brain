@@ -14,10 +14,7 @@ use std::path::Path;
 use npu::openvino::{available_devices, Feed, NpuConfig, NpuDevice, NpuGraph, PerfHint};
 use npu::NemotronTopo;
 
-fn testdata(rel: &str) -> String {
-    let root = std::env::var("BRAIN_TESTDATA").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    format!("{root}/{rel}")
-}
+use brain_testutil::testdata;
 
 fn read_f32(p: &str) -> Vec<f32> {
     let b = std::fs::read(p).unwrap_or_else(|_| panic!("missing {p}"));

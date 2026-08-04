@@ -10,11 +10,15 @@ main layers, FinalLayer, and unpatchify. Small dims + no padding (lengths
 multiple of SEQ_MULTI_OF=32) keep it fast. Dev-time only.
 """
 import os, sys
+from pathlib import Path
 import torch
 from safetensors.torch import save_file
 from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
 
-OUT = "/data/workspace/brain/crates/zimage/tests/golden/zimage_model.safetensors"
+# testdata/golden/zimage/... -- where crates/zimage/tests/model_parity.rs's
+# testdata("golden/zimage/zimage_model.safetensors") actually looks.
+TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[1] / "testdata")
+OUT = str(Path(TESTDATA) / "golden" / "zimage" / "zimage_model.safetensors")
 
 DIM, N_LAYERS, N_REF, N_HEADS = 48, 2, 1, 2   # head_dim 24
 CAP_FEAT_DIM, IN_CH = 16, 16

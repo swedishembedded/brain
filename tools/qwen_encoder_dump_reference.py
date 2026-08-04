@@ -12,6 +12,7 @@ Fixed token ids (not tokenizer output) isolate forward parity from tokenizer
 parity. Dev-time only.
 """
 import json, os, sys
+from pathlib import Path
 import torch
 from transformers import Qwen3ForCausalLM, Qwen3Config
 from safetensors.torch import load_file, save_file
@@ -21,8 +22,11 @@ if len(sys.argv) < 3:
              "  <enc_config_dir>: dir with the Qwen3-4B config.json; <weights>: the encoder safetensors")
 ENC_DIR = sys.argv[1]
 WEIGHTS = sys.argv[2]
-OUT = sys.argv[3] if len(sys.argv) > 3 else os.path.join(
-    os.path.dirname(__file__), "..", "crates", "qwen", "tests", "golden", "qwen3_4b_encoder.safetensors")
+# testdata/golden/qwen/... by default -- where
+# crates/qwen/tests/encoder_parity.rs's testdata("golden/qwen/qwen3_4b_encoder.safetensors")
+# actually looks.
+_TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[1] / "testdata")
+OUT = sys.argv[3] if len(sys.argv) > 3 else str(Path(_TESTDATA) / "golden" / "qwen" / "qwen3_4b_encoder.safetensors")
 
 # A fixed, arbitrary token sequence (valid ids < vocab 151936).
 TOKENS = [9707, 11, 419, 374, 264, 2613, 1273, 13]

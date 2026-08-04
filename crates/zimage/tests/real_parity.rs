@@ -6,7 +6,7 @@
 //!
 //! Golden (`tests/golden/zimage_real.safetensors`, committed — small: inputs +
 //! output only): a forward of the turbo-config model loaded from the real Comfy
-//! weights, baked by `resources/image-models/_goldens/gen_zimage_real.py`. brain
+//! weights, baked by `tools/zimage_real_dump_reference.py`. brain
 //! imports the SAME weights (`import_comfy`) and must match. The 12 GB weights
 //! are NOT committed — set `BRAIN_ZIMAGE_DIT` (a resources default is tried);
 //! skips if absent. Heavy (loads ~24 GB fp32, 30-layer CPU forward).
@@ -17,11 +17,7 @@ use zimage::{import::import_comfy, ZImageConfig, ZImageDitI8, ZImageDitShard, ZI
 
 /// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
 /// override the root with `BRAIN_TESTDATA`).
-fn testdata(rel: &str) -> String {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    format!("{root}/{rel}")
-}
+use brain_testutil::testdata;
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);

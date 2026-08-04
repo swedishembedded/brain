@@ -28,11 +28,7 @@ use model::hostmath::{cosine, l2_normalize};
 // fixtures
 // ---------------------------------------------------------------------------
 
-fn testdata(rel: &str) -> String {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    format!("{root}/{rel}")
-}
+use brain_testutil::testdata;
 
 fn dir() -> String {
     testdata("face/antelopev2")

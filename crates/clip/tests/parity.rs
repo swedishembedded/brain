@@ -25,11 +25,7 @@ use clip::model::{ClipText, EvaVision, TextTap, VisionTap};
 
 const GATE: f64 = 0.9999;
 
-fn testdata(rel: &str) -> PathBuf {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    Path::new(&root).join(rel)
-}
+use brain_testutil::testdata_path as testdata;
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);

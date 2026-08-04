@@ -8,11 +8,7 @@
 
 use diffusion::scheduler::{empirical_mu, klein_sigmas};
 
-fn testdata(rel: &str) -> String {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    format!("{root}/{rel}")
-}
+use brain_testutil::testdata;
 
 #[test]
 fn klein_sigmas_match_reference() {

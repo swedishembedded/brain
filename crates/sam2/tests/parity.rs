@@ -18,16 +18,12 @@
 //! `tools/sam2_dump_reference.py` populate the tree).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use checkpoint::safetensors::StTensor;
 use sam2::{Sam2, Sam2Config};
 
-fn testdata(rel: &str) -> PathBuf {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    PathBuf::from(root).join(rel)
-}
+use brain_testutil::testdata_path as testdata;
 
 fn load(path: &Path) -> HashMap<String, StTensor> {
     checkpoint::safetensors::read(path.to_str().unwrap())

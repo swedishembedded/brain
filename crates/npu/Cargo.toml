@@ -46,6 +46,7 @@ openvino.workspace = true
 # exported graph against brain's own DiamondUNet forward. Dev-only, so the lib
 # dependency direction stays brain-wm-diamond -> brain-npu.
 [dev-dependencies]
+brain-testutil.workspace = true
 brain-wm-diamond.workspace = true
 brain-gpu-core.workspace = true
 brain-paramstore.workspace = true

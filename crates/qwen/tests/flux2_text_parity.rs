@@ -21,11 +21,7 @@ const PROMPT: &str = "a red fox sitting on a mossy rock in a misty forest, morni
 const PAD: u32 = 151643;
 const TAPS: [usize; 3] = [9, 18, 27];
 
-fn testdata(rel: &str) -> String {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    format!("{root}/{rel}")
-}
+use brain_testutil::testdata;
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);

@@ -4,7 +4,7 @@
 //! Single ZImageTransformerBlock forward parity vs diffusers.
 //!
 //! Golden (`tests/golden/zimage_block.safetensors`, committed, baked by
-//! `resources/image-models/_goldens/gen_zimage_block.py`): a small block
+//! `tools/zimage_block_dump_reference.py`): a small block
 //! (dim 48, 2 heads, T 8) with random weights + inputs and its reference output.
 //! Exercises adaLN folding, the double-RMSNorm sandwich, QK-norm attention with
 //! multi-axis interleaved RoPE, and SwiGLU. No external weights needed — the
@@ -16,11 +16,7 @@ use zimage::{BlockDims, ZImageBlock};
 
 /// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
 /// override the root with `BRAIN_TESTDATA`).
-fn testdata(rel: &str) -> String {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    format!("{root}/{rel}")
-}
+use brain_testutil::testdata;
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);

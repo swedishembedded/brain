@@ -7,14 +7,21 @@
 #
 # Design goals:
 #   * Idempotent — only ever fetches files that are NOT already present.
-#   * Offline-first — prefers a local mirror directory (fast, no network); falls
-#     back to a URL download only when a mirror file is absent and a URL is known.
+#   * Offline-first — reads a local mirror directory (fast, no network). There is
+#     currently no URL-download fallback; a missing mirror is reported and
+#     skipped (see the `missing` counter at the end of a run). `brain fetch`
+#     (`crates/cli/src/fetch.rs`) is the network-download path for actual model
+#     weights — this script is test-fixture plumbing, not a general fetcher.
 #   * Zero extra disk on the same filesystem — mirror files are HARD-LINKED into
 #     `testdata/` when possible (instant, shares blocks), else copied.
 #   * Never bakes an absolute path into the source tree: tests resolve their
 #     inputs from `$BRAIN_TESTDATA` (default `<repo>/testdata`); this script is the
 #     ONE place a machine-specific mirror location may appear, and it is an
 #     overridable variable, not source code.
+#   * `testdata/` holds test INPUTS AND GOLDENS ONLY — never a `.git` directory
+#     (stripped unconditionally, see `_link_from` below) and never upstream
+#     source/notebooks/docs a test doesn't read (`vl_tree`'s extra exclusions).
+#     See .todo/cleanup-testdata.md for the audit that motivated this.
 #
 # Layout produced (a proper tree, mirroring each model's asset namespace):
 #   testdata/asr/nemotron/hf/…         Nemotron 3.5 ASR 0.6B HF checkpoint
@@ -43,11 +50,21 @@ IDENTITY_MIRROR="${BRAIN_IDENTITY_MIRROR:-/data/workspace/resources/identity}"
 
 added=0 skipped=0 missing=0
 
-# _link_from <mirror-root> <mirror-subdir> <dest-subdir> — hard-link (or copy)
-# every file under <mirror-root>/<mirror-subdir> into $DEST/<dest-subdir>,
-# creating only what's missing.
+# _link_from <mirror-root> <mirror-subdir> <dest-subdir> [extra-exclude-ere] —
+# hard-link (or copy) every file under <mirror-root>/<mirror-subdir> into
+# $DEST/<dest-subdir>, creating only what's missing.
+#
+# ALWAYS excludes `.git` directory contents — no test consumer ever needs one,
+# and a cloned mirror's `.git` is pure duplicated disk (a checked-out working
+# tree plus its own packed history of the same blobs) — and a mirror's
+# `.cache/huggingface/` (download bookkeeping `huggingface_hub`/`hf` leave
+# behind: `.gitignore`, `CACHEDIR.TAG`, per-file `.metadata`, tree manifests —
+# never a weight, never read by a test). An optional extended regex (matched
+# against the path relative to <mirror-subdir>) excludes whatever else that
+# particular tree's mirror carries but no test reads — see `vl_tree` below,
+# whose mirror is whole upstream HF/GitHub checkouts.
 _link_from() {
-  local root="$1" sub_src="$2" sub_dst="$3"
+  local root="$1" sub_src="$2" sub_dst="$3" extra_exclude="${4:-}"
   local src="$root/$sub_src" dst="$DEST/$sub_dst"
   if [ ! -d "$src" ]; then
     echo "  · $sub_dst: mirror '$src' absent — skipping (point its BRAIN_*_MIRROR at a copy, or add a URL)"
@@ -55,8 +72,16 @@ _link_from() {
     return 0
   fi
   mkdir -p "$dst"
+  local excluded=0
   while IFS= read -r -d '' f; do
     local rel="${f#"$src"/}"
+    case "$rel" in
+      .git/*|*/.git/*|.cache/huggingface/*|*/.cache/huggingface/*) excluded=$((excluded + 1)); continue ;;
+    esac
+    if [ -n "$extra_exclude" ] && [[ "$rel" =~ $extra_exclude ]]; then
+      excluded=$((excluded + 1))
+      continue
+    fi
     local out="$dst/$rel"
     if [ -e "$out" ]; then
       skipped=$((skipped + 1))
@@ -66,7 +91,11 @@ _link_from() {
     ln "$f" "$out" 2>/dev/null || cp "$f" "$out"
     added=$((added + 1))
   done < <(find "$src" -type f -print0)
-  echo "  ✓ $sub_dst"
+  if [ "$excluded" -gt 0 ]; then
+    echo "  ✓ $sub_dst ($excluded excluded — .git and/or the tree's extra-exclude pattern)"
+  else
+    echo "  ✓ $sub_dst"
+  fi
 }
 # _link_files <mirror-root> <mirror-subdir> <dest-subdir> <file>… — same as
 # _link_from but for a NAMED subset, used where the mirror holds more models
@@ -98,7 +127,18 @@ _link_files() {
 }
 asr_tree() { _link_from "$ASR_MIRROR" "$1" "$2"; }
 golden_tree() { _link_from "$GOLDEN_MIRROR" "$1" "$2"; }
-vl_tree()  { _link_from "$VL_MIRROR"  "$1" "$2"; }
+# vl_tree's mirror is whole upstream HF/GitHub checkouts (that is what a `git
+# clone` / `git lfs` checkout of a model repo naturally is), so beyond `.git`
+# (always excluded) it also carries source code, notebooks, docs, papers and
+# demo media that `crates/{fastvlm,moondream,qwenvl}` never read — only
+# `*.safetensors`, `*.safetensors.index.json` and small tokenizer/config JSON
+# are. Exclude by extension/path rather than allow-list by filename, since new
+# checkpoint shards land under names this script doesn't know ahead of time.
+# `.pt` is safe to exclude HERE specifically because nothing under `vl/` reads
+# one (sam2's `.pt` checkpoint goes through `sam2_tree`, a different mirror
+# root, which does not carry this exclusion).
+VL_EXCLUDE='\.(py|ipynb|sh|md|MD|html|pdf|mp4|pt)$|(^|/)(docker|evaluation|cookbooks|qwen-vl-finetune)(/|$)'
+vl_tree()  { _link_from "$VL_MIRROR"  "$1" "$2" "$VL_EXCLUDE"; }
 tts_tree() { _link_from "$TTS_MIRROR" "$1" "$2"; }
 sam2_tree() { _link_from "$SAM2_MIRROR" "$1" "$2"; }
 

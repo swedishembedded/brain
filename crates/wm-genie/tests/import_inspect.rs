@@ -8,12 +8,6 @@
 #![allow(non_snake_case)] // uppercase test-path locals (AGENTS.md: no absolute paths)
 
 #[allow(dead_code)]
-fn testdata(rel: &str) -> String {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    format!("{root}/{rel}")
-}
-#[allow(dead_code)]
 fn repo_path(rel: &str) -> String {
     format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
 }

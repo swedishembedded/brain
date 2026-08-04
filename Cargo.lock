@@ -400,6 +400,7 @@ dependencies = [
  "brain-data",
  "brain-gpu-core",
  "brain-kernels",
+ "brain-testutil",
  "bytemuck",
  "serde_json",
 ]
@@ -588,6 +589,7 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-paramstore",
+ "brain-testutil",
  "brain-vision",
 ]
 
@@ -604,6 +606,7 @@ dependencies = [
  "brain-model",
  "brain-optim",
  "brain-paramstore",
+ "brain-testutil",
  "bytemuck",
  "serde_json",
 ]
@@ -658,6 +661,7 @@ name = "brain-diffusion"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-testutil",
  "serde_json",
 ]
 
@@ -698,6 +702,7 @@ dependencies = [
  "brain-model",
  "brain-onnx",
  "brain-paramstore",
+ "brain-testutil",
  "brain-vision",
  "bytemuck",
 ]
@@ -714,6 +719,7 @@ dependencies = [
  "brain-model",
  "brain-paramstore",
  "brain-qwen",
+ "brain-testutil",
  "brain-vision",
  "bytemuck",
  "serde_json",
@@ -762,6 +768,7 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-qwen",
+ "brain-testutil",
  "brain-vae",
  "bytemuck",
  "serde_json",
@@ -945,6 +952,7 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-qwen",
+ "brain-testutil",
  "serde_json",
 ]
 
@@ -960,6 +968,7 @@ dependencies = [
  "brain-gradcheck",
  "brain-kernels",
  "brain-model",
+ "brain-testutil",
  "serde_json",
 ]
 
@@ -987,6 +996,7 @@ dependencies = [
  "brain-paramstore",
  "brain-qwen",
  "brain-qwen-asr",
+ "brain-testutil",
  "brain-vision",
  "brain-wm-diamond",
  "brain-yolo",
@@ -1068,6 +1078,7 @@ dependencies = [
  "brain-model",
  "brain-optim",
  "brain-paramstore",
+ "brain-testutil",
  "bytemuck",
  "pollster",
  "serde_json",
@@ -1086,6 +1097,7 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-qwen",
+ "brain-testutil",
  "serde_json",
 ]
 
@@ -1099,6 +1111,7 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-qwen",
+ "brain-testutil",
  "serde_json",
 ]
 
@@ -1135,6 +1148,7 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-paramstore",
+ "brain-testutil",
  "brain-vision",
  "bytemuck",
 ]
@@ -1183,6 +1197,7 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-paramstore",
+ "brain-testutil",
  "bytemuck",
  "serde_json",
 ]
@@ -1208,6 +1223,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-testutil"
+version = "0.1.0"
+
+[[package]]
 name = "brain-timeseries"
 version = "0.1.0"
 
@@ -1230,6 +1249,7 @@ dependencies = [
  "brain-paramstore",
  "brain-qwen",
  "brain-speaker",
+ "brain-testutil",
  "bytemuck",
  "serde_json",
 ]
@@ -1241,6 +1261,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
  "brain-kernels",
+ "brain-testutil",
  "serde_json",
 ]
 
@@ -1262,6 +1283,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
  "brain-kernels",
+ "brain-testutil",
  "brain-vae",
  "brain-wm-core",
 ]
@@ -1381,6 +1403,7 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-qwen",
+ "brain-testutil",
  "brain-vae",
  "serde_json",
 ]

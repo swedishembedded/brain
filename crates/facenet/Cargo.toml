@@ -23,6 +23,7 @@ brain-onnx.workspace = true
 bytemuck.workspace = true
 
 [dev-dependencies]
+brain-testutil.workspace = true
 # The parity test replays goldens dumped as safetensors; nothing in the library
 # reads a checkpoint (weights arrive through `import_dir`).
 brain-checkpoint.workspace = true

@@ -12,6 +12,7 @@ Small latent (16x16 -> 64 patches, mult of 32; cap 32) keeps the 30-layer 6B
 forward tractable on CPU. Dev-time only.
 """
 import os, sys
+from pathlib import Path
 import torch
 from safetensors.torch import load_file, save_file
 from diffusers.models.transformers.transformer_z_image import ZImageTransformer2DModel
@@ -19,8 +20,11 @@ from diffusers.models.transformers.transformer_z_image import ZImageTransformer2
 if len(sys.argv) < 2:
     sys.exit("usage: zimage_real_dump_reference.py <z_image_turbo_bf16.safetensors> [out.safetensors]")
 COMFY = sys.argv[1]
-OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
-    os.path.dirname(__file__), "..", "crates", "zimage", "tests", "golden", "zimage_real.safetensors")
+# testdata/golden/zimage/... by default -- where
+# crates/zimage/tests/real_parity.rs's testdata("golden/zimage/zimage_real.safetensors")
+# actually looks.
+_TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[1] / "testdata")
+OUT = sys.argv[2] if len(sys.argv) > 2 else str(Path(_TESTDATA) / "golden" / "zimage" / "zimage_real.safetensors")
 DIM = 3840
 
 def remap(sd):

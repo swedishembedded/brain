@@ -1,0 +1,10 @@
+[package]
+name = "brain-testutil"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The one implementation of the gitignored testdata/ fixture path helper, shared as a dev-dependency by every crate with a parity/goldens test — was 36 byte-identical copy-pasted `fn testdata(rel: &str) -> String` bodies, one per crate, before this existed."
+
+[lib]
+name = "brain_testutil"
+path = "src/lib.rs"

@@ -25,3 +25,4 @@ brain-data.workspace = true
 brain-checkpoint.workspace = true
 
 [dev-dependencies]
+brain-testutil.workspace = true

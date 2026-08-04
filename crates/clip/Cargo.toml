@@ -17,3 +17,6 @@ brain-paramstore.workspace = true
 brain-vision.workspace = true
 brain-imaging.workspace = true
 brain-checkpoint.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

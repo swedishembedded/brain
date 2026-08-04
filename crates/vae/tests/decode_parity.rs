@@ -3,9 +3,9 @@
 
 //! Z-Image VAE (`AutoencoderKL`) decode parity vs the diffusers reference.
 //!
-//! Golden fixture (`tests/fixtures/zimage_vae_decode.safetensors`, committed):
+//! Golden fixture (`testdata/golden/vae/zimage_vae_decode.safetensors`, fetched):
 //! a fixed latent `[1,16,8,8]` and diffusers' `vae.decode(z).sample`
-//! `[1,3,64,64]`, baked by `resources/image-models/_goldens/gen_vae_decode.py`.
+//! `[1,3,64,64]`, baked by `tools/vae_dump_reference.py`.
 //! The 168 MB reference weights are NOT committed — point `BRAIN_ZIMAGE_VAE` at
 //! `.../z-image/weights/vae/diffusion_pytorch_model.safetensors` (a default
 //! resources path is tried); the test skips if absent (like brain's other
@@ -18,11 +18,7 @@ use vae::{VaeConfig, VaeDecoder};
 
 /// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
 /// override the root with `BRAIN_TESTDATA`).
-fn testdata(rel: &str) -> String {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    format!("{root}/{rel}")
-}
+use brain_testutil::testdata;
 
 fn load_tensors(path: &str) -> HashMap<String, (Vec<usize>, Vec<f32>)> {
     checkpoint::safetensors::read(path)

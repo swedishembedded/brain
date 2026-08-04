@@ -4,7 +4,7 @@
 //! Full Z-Image S³-DiT forward parity vs diffusers (small config).
 //!
 //! Golden (`tests/golden/zimage_model.safetensors`, committed, baked by
-//! `resources/image-models/_goldens/gen_zimage_model.py`): a small model (dim 48,
+//! `tools/zimage_model_dump_reference.py`): a small model (dim 48,
 //! 2 layers, 1 refiner, cap_feat_dim 16) with random weights + inputs and its
 //! reference output. Validates the whole assembly — timestep/x/cap embedders,
 //! patchify, noise/context refiners, [image, caption] unified sequence, main
@@ -17,11 +17,7 @@ use zimage::{ZImageConfig, ZImageModel};
 
 /// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
 /// override the root with `BRAIN_TESTDATA`).
-fn testdata(rel: &str) -> String {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    format!("{root}/{rel}")
-}
+use brain_testutil::testdata;
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
     let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);

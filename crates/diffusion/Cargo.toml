@@ -13,4 +13,5 @@ path = "src/lib.rs"
 serde_json = { workspace = true }
 
 [dev-dependencies]
+brain-testutil.workspace = true
 brain-checkpoint.workspace = true

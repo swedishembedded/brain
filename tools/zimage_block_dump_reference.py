@@ -11,11 +11,15 @@ Small dims keep it fast; dim<256 so the adaLN input == dim (folding logic is
 identical for the real dim=3840/cdim=256 case). Dev-time only.
 """
 import os, sys
+from pathlib import Path
 import torch
 from safetensors.torch import save_file
 from diffusers.models.transformers.transformer_z_image import ZImageTransformerBlock, RopeEmbedder
 
-OUT = "/data/workspace/brain/crates/zimage/tests/golden/zimage_block.safetensors"
+# testdata/golden/zimage/... -- where crates/zimage/tests/block_parity.rs's
+# testdata("golden/zimage/zimage_block.safetensors") actually looks.
+TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[1] / "testdata")
+OUT = str(Path(TESTDATA) / "golden" / "zimage" / "zimage_block.safetensors")
 
 DIM, N_HEADS = 48, 2          # head_dim = 24
 AXES_DIMS, AXES_LENS = [8, 8, 8], [16, 8, 8]   # sum = 24 = head_dim

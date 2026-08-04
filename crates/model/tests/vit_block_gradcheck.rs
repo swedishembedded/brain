@@ -294,6 +294,8 @@ fn gradcheck(qk_norm: bool, ls: bool, seed: u64, cfg_key: &str) {
     let base = setup(qk_norm, ls, seed);
     let (_, grads, dx) = run(&g, &base, qk_norm, ls, true);
 
+    // Regenerate golden/vit_gradcheck.json with `tools/vit_dump_gradcheck.py`
+    // (a float64 autograd oracle) if this block's forward/backward changes.
     let golden: serde_json::Value =
         serde_json::from_str(include_str!("golden/vit_gradcheck.json")).unwrap();
     let gold = &golden[cfg_key];

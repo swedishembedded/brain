@@ -3,10 +3,13 @@
 
 //! Z-Image VAE (`AutoencoderKL`) ENCODE parity vs the diffusers reference.
 //!
-//! Golden fixture (`tests/golden/zimage_vae_encode.safetensors`, committed): a
+//! Golden fixture (`testdata/golden/vae/zimage_vae_encode.safetensors`, fetched): a
 //! fixed image `[1,3,64,64]` and diffusers' `vae.encode(x).latent_dist`
-//! parameters `[1,32,8,8]` (mean‖logvar) + `mean` `[1,16,8,8]`, baked by
-//! `resources/image-models/_goldens/gen_vae_encode.py`. This VAE has no
+//! parameters `[1,32,8,8]` (mean‖logvar) + `mean` `[1,16,8,8]`. Unlike
+//! `decode_parity.rs`'s golden, this one has **no in-repo generator** —
+//! `tools/vae_dump_reference.py` only bakes the decode direction; a
+//! `<something>_encode` counterpart does not exist in this repo (see
+//! `.todo/unify-scripts-and-tools.md`). This VAE has no
 //! `quant_conv`, so the posterior parameters are exactly the encoder `conv_out`
 //! that brain's `VaeEncoder` returns. Weights gated on `BRAIN_ZIMAGE_VAE` (skips
 //! if absent). CPU backend by default; `BRAIN_VAE_DEVICE=gpu` runs it on wgpu.
@@ -18,11 +21,7 @@ use vae::{VaeConfig, VaeEncoder};
 
 /// Resolve a fixture under the fetched `testdata/` tree (`make fetch/testdata`;
 /// override the root with `BRAIN_TESTDATA`).
-fn testdata(rel: &str) -> String {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    format!("{root}/{rel}")
-}
+use brain_testutil::testdata;
 
 fn load_tensors(path: &str) -> HashMap<String, (Vec<usize>, Vec<f32>)> {
     checkpoint::safetensors::read(path)

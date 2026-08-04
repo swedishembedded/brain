@@ -13,12 +13,6 @@ use wm_genie::import::{import_dynamics, import_tokenizer};
 use wm_genie::{dynamics_forward, kernel_sources};
 
 #[allow(dead_code)]
-fn testdata(rel: &str) -> String {
-    let root = std::env::var("BRAIN_TESTDATA")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata").to_string());
-    format!("{root}/{rel}")
-}
-#[allow(dead_code)]
 fn repo_path(rel: &str) -> String {
     format!("{}/../../{rel}", env!("CARGO_MANIFEST_DIR"))
 }

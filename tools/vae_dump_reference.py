@@ -11,6 +11,7 @@ reads back. Small spatial size (8x8 latent -> 64x64 image) keeps the fixture
 tiny while exercising every decoder stage (conv_in, mid attention, 4 up-blocks).
 """
 import json, os, sys
+from pathlib import Path
 import torch
 from diffusers import AutoencoderKL
 from safetensors.torch import load_file, save_file
@@ -19,8 +20,11 @@ if len(sys.argv) < 2:
     sys.exit("usage: vae_dump_reference.py <vae_dir> [out.safetensors]\n"
              "  <vae_dir>: diffusers vae/ dir (config.json + diffusion_pytorch_model.safetensors)")
 VAE_DIR = sys.argv[1]
-OUT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
-    os.path.dirname(__file__), "..", "crates", "vae", "tests", "golden", "zimage_vae_decode.safetensors")
+# testdata/golden/vae/... by default -- where
+# crates/vae/tests/decode_parity.rs's testdata("golden/vae/zimage_vae_decode.safetensors")
+# actually looks.
+_TESTDATA = os.environ.get("BRAIN_TESTDATA") or str(Path(__file__).resolve().parents[1] / "testdata")
+OUT = sys.argv[2] if len(sys.argv) > 2 else str(Path(_TESTDATA) / "golden" / "vae" / "zimage_vae_decode.safetensors")
 
 def main():
     cfg = json.load(open(os.path.join(VAE_DIR, "config.json")))
