@@ -386,7 +386,7 @@ fn ciou_grad_finite_difference() {
         let cy = rng.unit() * 20.0 + 10.0;
         let gw = 4.0 + rng.unit() * 4.0;
         let gh = 4.0 + rng.unit() * 4.0;
-        tgt[(k * 4)] = cx - gw * 0.5;
+        tgt[k * 4] = cx - gw * 0.5;
         tgt[k * 4 + 1] = cy - gh * 0.5;
         tgt[k * 4 + 2] = cx + gw * 0.5;
         tgt[k * 4 + 3] = cy + gh * 0.5;
@@ -398,7 +398,7 @@ fn ciou_grad_finite_difference() {
         let ph = gh * (0.7 + rng.unit() * 0.6);
         let pcx = cx + sx;
         let pcy = cy + sy;
-        pred[(k * 4)] = pcx - pw * 0.5;
+        pred[k * 4] = pcx - pw * 0.5;
         pred[k * 4 + 1] = pcy - ph * 0.5;
         pred[k * 4 + 2] = pcx + pw * 0.5;
         pred[k * 4 + 3] = pcy + ph * 0.5;

@@ -44,8 +44,8 @@ fn shard_forward_and_grad_parity_gpt() {
     let cfg = GptConfig::tiny().with_ff_default(); // L2
     let init = gpt::init_weights(&cfg, 7);
     let (b, t) = (2u32, 8u32);
-    let x: Vec<u32> = (0..b * t).map(|i| (i * 3 % cfg.vocab)).collect();
-    let y: Vec<u32> = (0..b * t).map(|i| ((i * 3 + 1) % cfg.vocab)).collect();
+    let x: Vec<u32> = (0..b * t).map(|i| i * 3 % cfg.vocab).collect();
+    let y: Vec<u32> = (0..b * t).map(|i| (i * 3 + 1) % cfg.vocab).collect();
 
     // Single-device reference.
     let single = Gpt::new_on(gpu_core::testgpu::dev(gpt::model::PIPELINES), cfg.clone(), b, t, &init);

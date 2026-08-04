@@ -537,7 +537,7 @@ mod tests {
                 fill(&mut w, &format!("{bp}.block.{j}.conv1.conv.bias"), out_dim, &mut seed);
                 fill(&mut w, &format!("{bp}.block.{j}.act2.alpha"), out_dim, &mut seed);
                 fill(&mut w, &format!("{bp}.block.{j}.act2.beta"), out_dim, &mut seed);
-                fill(&mut w, &format!("{bp}.block.{j}.conv2.conv.weight"), (out_dim * out_dim), &mut seed);
+                fill(&mut w, &format!("{bp}.block.{j}.conv2.conv.weight"), out_dim * out_dim, &mut seed);
                 fill(&mut w, &format!("{bp}.block.{j}.conv2.conv.bias"), out_dim, &mut seed);
             }
         }

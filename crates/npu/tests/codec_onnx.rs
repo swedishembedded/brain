@@ -142,7 +142,7 @@ fn synth_weights(cfg: &CodecConfig) -> HashMap<String, Vec<f32>> {
             put(&mut m, &format!("{rp}.conv1.conv.bias"), out_dim);
             put(&mut m, &format!("{rp}.act2.alpha"), out_dim);
             put(&mut m, &format!("{rp}.act2.beta"), out_dim);
-            put(&mut m, &format!("{rp}.conv2.conv.weight"), (out_dim * out_dim));
+            put(&mut m, &format!("{rp}.conv2.conv.weight"), out_dim * out_dim);
             put(&mut m, &format!("{rp}.conv2.conv.bias"), out_dim);
         }
     }

@@ -242,7 +242,7 @@ mod tests {
         }
         let vweights = rand_map(Rng::new(1), &vspecs);
 
-        let merged = (c * 4); // in_dim·merge²
+        let merged = c * 4; // in_dim·merge²
         // Main merger: LayerNorm over in_dim (postshuffle_norm=false).
         let mweights = rand_map(
             Rng::new(2),

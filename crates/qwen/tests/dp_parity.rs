@@ -52,8 +52,8 @@ fn dp_grad_parity() {
     let k = 4usize;
     let mbs: Vec<(Vec<u32>, Vec<u32>)> = (0..k)
         .map(|j| {
-            let x = (0..b * t).map(|i| ((i * 3 + j as u32 * 13) % cfg.vocab)).collect();
-            let y = (0..b * t).map(|i| ((i * 3 + 1 + j as u32 * 13) % cfg.vocab)).collect();
+            let x = (0..b * t).map(|i| (i * 3 + j as u32 * 13) % cfg.vocab).collect();
+            let y = (0..b * t).map(|i| (i * 3 + 1 + j as u32 * 13) % cfg.vocab).collect();
             (x, y)
         })
         .collect();

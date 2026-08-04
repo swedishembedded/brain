@@ -48,7 +48,7 @@ fn cpb_diagonal_is_constant_and_shaped() {
     let b = cpb_bias(&net, h, w, heads);
     assert_eq!(b.len(), heads*hw*hw);
     for hd in 0..heads {
-        let d0 = b[((hd*hw)*hw)];
+        let d0 = b[(hd*hw)*hw];
         for p in 1..hw {
             assert!((b[(hd*hw+p)*hw+p] - d0).abs() < 1e-5, "cpb diagonal not constant");
         }

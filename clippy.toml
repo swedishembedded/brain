@@ -1,0 +1,10 @@
+# brain is a kernel-dispatch codebase: a Rust function that records one WGSL
+# dispatch mirrors that kernel's `Params` struct field for field, and those run
+# to 12 u32 words (see `conv2d_gd.wgsl`). Bundling them into a struct purely to
+# satisfy the default threshold of 7 would put a second, drifting copy of each
+# kernel's ABI in Rust — exactly the duplication AGENTS.md's one-implementation
+# rule exists to prevent, and the `silu_mul` cosine-0.504 defect it cites.
+#
+# 12 is the widest real Params in the tree, so the lint still fires on anything
+# genuinely excessive rather than being switched off.
+too-many-arguments-threshold = 12

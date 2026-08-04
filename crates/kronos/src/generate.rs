@@ -666,7 +666,7 @@ mod tests {
         let opts = GenOpts { argmax: false, top_k: 1, top_p: 0.1, temperature: 1.0, seed: 0 };
         // top_k=1 keeps only index 3 -> always sampled
         for _ in 0..8 {
-            let mut l = lg.clone();
+            let l = lg.clone();
             assert_eq!(sample(&l, &opts, &mut rng), 3);
         }
         let _ = &mut lg;

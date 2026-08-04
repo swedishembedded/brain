@@ -43,8 +43,8 @@ fn stage_gpus() -> Vec<usize> {
 
 fn batch(cfg: &QwenConfig, b: u32, t: u32, seed: u32) -> (Vec<u32>, Vec<u32>) {
     let n = b * t;
-    let x = (0..n).map(|i| ((i * 3 + seed) % cfg.vocab)).collect();
-    let y = (0..n).map(|i| ((i * 3 + 1 + seed) % cfg.vocab)).collect();
+    let x = (0..n).map(|i| (i * 3 + seed) % cfg.vocab).collect();
+    let y = (0..n).map(|i| (i * 3 + 1 + seed) % cfg.vocab).collect();
     (x, y)
 }
 
