@@ -73,14 +73,24 @@ while IFS= read -r -d '' f; do
   # Full lines (NOT `grep -o`, which would truncate to just the path match and
   # throw away the `${VAR:-...}` / `.get(..., ...)` context this needs to see).
   while IFS=: read -r lineno full_line; do
-    case "$full_line" in
-      *'${'*':-/'[dhtmor]*'}'*) continue ;;            # ${VAR:-/abs/path} — sanctioned
-      *'os.environ.get('*',*'/'*')'*) continue ;;      # os.environ.get(V, "/abs/path") — sanctioned
-    esac
     trimmed="${full_line#"${full_line%%[![:space:]]*}"}"
+    # A full-line comment (# in bash or python) has no runtime effect — an
+    # absolute path there can't misbehave on someone else's machine the way one
+    # baked into executable code can. Skip it; docstring usage EXAMPLES should
+    # still use a placeholder (see mirror_dump_reference.py), but that's a
+    # documentation-quality call, not this gate's job.
+    case "$trimmed" in '#'*) continue ;; esac
+    # ${VAR:-/abs/path} or os.environ.get(V, "/abs/path") — both an overridable
+    # variable with a default, not a baked-in path — are sanctioned.
+    if [[ "$full_line" =~ \$\{[A-Za-z_][A-Za-z0-9_]*:-/(data|home|tmp|opt|mnt|root)/ ]]; then
+      continue
+    fi
+    if [[ "$full_line" =~ environ\.get\([^,]+,.*/(data|home|tmp|opt|mnt|root)/ ]]; then
+      continue
+    fi
     echo "  ABS PATH: $f:$lineno: $trimmed"
     abs=$((abs + 1))
-  done < <(grep -noE '^.*["'\''`]?/(data|home|tmp|opt|mnt|root)/[A-Za-z0-9_./-]*.*$' "$f" || true)
+  done < <(grep -nE '/(data|home|tmp|opt|mnt|root)/[A-Za-z0-9_./-]+' "$f" || true)
 done < <(git ls-files -z 'scripts/*.sh' 'scripts/*.py' 'tools/*.sh' 'tools/*.py')
 if [ "$abs" -gt 0 ]; then
   echo "  $abs absolute path literal(s) — make them an overridable \${VAR:-/path}"

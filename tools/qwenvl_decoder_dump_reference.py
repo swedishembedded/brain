@@ -24,8 +24,8 @@ import torch
 from safetensors import safe_open
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-CKPT = "/data/workspace/resources/vl/qwen3-vl/Qwen3-VL-4B-Instruct"
-OUT = "/data/workspace/resources/vl/parity"
+CKPT = os.environ.get("BRAIN_QWENVL_CKPT", "/data/workspace/resources/vl/qwen3-vl/Qwen3-VL-4B-Instruct")
+OUT = os.environ.get("BRAIN_VL_PARITY_OUT", "/data/workspace/resources/vl/parity")
 os.makedirs(OUT, exist_ok=True)
 N = 4  # blocks to validate
 

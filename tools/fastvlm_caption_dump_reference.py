@@ -26,9 +26,9 @@ import torch
 from PIL import Image
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-CKPT = "/data/workspace/resources/vl/fastvlm/hf/FastVLM-0.5B"
-IMG = "/data/workspace/resources/emulation/dosbox-x/DOSBox-Logo-2-680x350.png"
-OUT = "/data/workspace/resources/vl/parity"
+CKPT = os.environ.get("BRAIN_FASTVLM_CKPT", "/data/workspace/resources/vl/fastvlm/hf/FastVLM-0.5B")
+IMG = os.environ.get("BRAIN_FASTVLM_TEST_IMG", "/data/workspace/resources/emulation/dosbox-x/DOSBox-Logo-2-680x350.png")
+OUT = os.environ.get("BRAIN_VL_PARITY_OUT", "/data/workspace/resources/vl/parity")
 os.makedirs(OUT, exist_ok=True)
 GEN = 20
 

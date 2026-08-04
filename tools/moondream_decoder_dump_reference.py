@@ -29,8 +29,8 @@ import numpy as np
 import torch
 from safetensors import safe_open
 
-SRC = "/data/workspace/resources/vl/moondream3/hf/moondream3-preview"
-OUT = "/data/workspace/resources/vl/parity"
+SRC = os.environ.get("BRAIN_MOONDREAM_CKPT", "/data/workspace/resources/vl/moondream3/hf/moondream3-preview")
+OUT = os.environ.get("BRAIN_VL_PARITY_OUT", "/data/workspace/resources/vl/parity")
 os.makedirs(OUT, exist_ok=True)
 N = 4  # dense blocks (0-3, before MoE start_layer=4)
 

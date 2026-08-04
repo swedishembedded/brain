@@ -55,7 +55,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo \
         export/yolo-onnx quantize/yolo sim/yolo-int8 run/yolo-npu bench/yolo-npu \
-        web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate fetch/testdata
+        web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata
 
 help:
 	@echo "brain targets:"
@@ -170,8 +170,15 @@ test/doc:
 test/slow:
 	$(CARGO_TEST) --lib --bins --tests -- --ignored --test-threads=$(TEST_THREADS)
 
+# Self-validation for scripts/ and tools/: every one parses, every one is named
+# somewhere else in the repo (Makefile target / bats test / crate doc comment /
+# doc — an orphan gate), and no non-overridable absolute machine path. See
+# scripts/check-scripts.sh for the full rationale.
+check/scripts:
+	bash scripts/check-scripts.sh
+
 # Everything, for a release gate.
-test/full: test test/doc test/slow test/e2e
+test/full: test test/doc test/slow test/e2e check/scripts
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -269,6 +276,12 @@ forecast/parity:
 # refresh). Weights via env (BRAIN_KRONOS_*/BRAIN_CHRONOS2/BRAIN_FINCAST).
 forecast/perf-gate: release
 	scripts/forecast-perf-gate.sh
+
+# World-model fps regression gate (best-of-3 vs scripts/wm-perf-baselines.json,
+# hard floors only). Dev-box gate, not CI: needs out/diamond-breakout.weights
+# (brain wm import ...) and a real display/GPU. `--update` rewrites baselines.
+wm/perf-gate: release
+	scripts/wm-perf-gate.sh
 
 # ---- data generation ------------------------------------------------------
 data/calculator data/reverser data/wordcalc: release

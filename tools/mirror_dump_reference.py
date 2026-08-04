@@ -7,8 +7,8 @@
 Run manually (never in the build) against the reference repo + checkpoint:
 
   python3 tools/mirror_dump_reference.py \
-      --repo /data/workspace/resources/world-3d/repos/HY-World-2.0/hyworld2/worldrecon \
-      --ckpt /data/workspace/resources/world-3d/checkpoints/HY-WorldMirror-2.0/model.safetensors \
+      --repo <clone of HY-World-2.0>/hyworld2/worldrecon \
+      --ckpt <HY-WorldMirror-2.0 checkpoint>/model.safetensors \
       --out crates/mirror/tests/golden
 
 Stages dumped (each as .npy + a small committed sample in golden_meta.json):

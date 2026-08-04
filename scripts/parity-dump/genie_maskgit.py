@@ -12,7 +12,7 @@ Outputs (gitignored): scratchpad/parity/genie_maskgit_{prime.u32,actions.f32,out
 """
 import os, sys
 
-REPO = "/data/workspace/resources/world-models/repos/GenieRedux"
+REPO = os.environ.get("BRAIN_GENIEREDUX_REPO", "/data/workspace/resources/world-models/repos/GenieRedux")
 TOK = "scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt"
 DYN = "scratchpad/wm-checkpoints/GenieRedux_Guided_CoinRun_80mln_v1.0.pt"
 OUT = "scratchpad/parity"

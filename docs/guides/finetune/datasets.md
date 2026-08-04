@@ -113,6 +113,24 @@ Flags: `--context`/`--horizon` (window shape), `--epochs`/`--lr` (the reference 
 defaults to LR 4e-5, weight-decay 0.1, grad-clip 3.0), `--lora RANK` (0/omitted = full
 fine-tune), `--embargo` (purge gap, default = horizon), `--out` (checkpoint path).
 
+## Commands — full-universe walk-forward validation
+
+`tools/full_backtest.sh` is the standalone orchestrator behind the promotion gate
+above: prep the leak-free split → fine-tune (bounded to bars `<= T0`) → a
+sharded base-vs-fine-tuned sweep across the whole universe → a scored,
+trademiner-compatible summary. It composes `tools/prep_backtest_data.py`,
+`brain forecast finetune`, `tools/oos_shard.py` (which itself calls
+`tools/merge_records.py` and `tools/oos_skill_report.py`), all under one
+`--update`-able env-var configuration (`DB`, `OUT`, `TOK`, `BASE_DEC`, `NAMES`,
+`SHARDS`, …). Run it standalone (it does not depend on the weekly command
+above having already run):
+
+```bash
+DB=stocks.db OUT=out/bt TOK=<tokenizer dir> BASE_DEC=<decoder dir> \
+  tools/full_backtest.sh
+# -> out/bt/... + out/backtest_summary.json
+```
+
 ## Honesty notes
 
 - We **adapt** released weights on real, recent US data with a promotion gate — we do not

@@ -16,7 +16,7 @@ genie_tokenizer_idx.u32, genie_tokenizer_meta.txt
 """
 import os, sys, struct
 
-REPO = "/data/workspace/resources/world-models/repos/GenieRedux"
+REPO = os.environ.get("BRAIN_GENIEREDUX_REPO", "/data/workspace/resources/world-models/repos/GenieRedux")
 CKPT = "scratchpad/wm-checkpoints/GenieRedux_Tokenizer_CoinRun_100mln_v1.0.pt"
 OUT = "scratchpad/parity"
 

@@ -13,16 +13,19 @@ path (see docs/world-models/FIXTURES.md). Output is copied into
 crates/wm-diamond/tests/fixtures/diamond/ and committed.
 
 Usage:
-  python3 scripts/parity-dump/diamond.py --out /tmp/fixtures-diamond
+  python3 scripts/parity-dump/diamond.py --out <scratch dir>/fixtures-diamond
 """
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
 
-DIAMOND_REPO = pathlib.Path("/data/workspace/resources/world-models/repos/diamond")
+DIAMOND_REPO = pathlib.Path(
+    os.environ.get("BRAIN_DIAMOND_REPO", "/data/workspace/resources/world-models/repos/diamond")
+)
 
 import torch  # noqa: E402
 

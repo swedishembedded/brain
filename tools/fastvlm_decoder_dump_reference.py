@@ -20,8 +20,8 @@ import torch
 from safetensors.torch import load_file
 from transformers import Qwen2Config, Qwen2ForCausalLM
 
-CKPT = "/data/workspace/resources/vl/fastvlm/hf/FastVLM-0.5B"
-OUT = "/data/workspace/resources/vl/parity"
+CKPT = os.environ.get("BRAIN_FASTVLM_CKPT", "/data/workspace/resources/vl/fastvlm/hf/FastVLM-0.5B")
+OUT = os.environ.get("BRAIN_VL_PARITY_OUT", "/data/workspace/resources/vl/parity")
 os.makedirs(OUT, exist_ok=True)
 
 cfg = json.load(open(f"{CKPT}/config.json"))

@@ -10,12 +10,18 @@ via sounddevice as they arrive (or saving to a WAV with --out).
 """
 import base64
 import json
+import os
 import socket
 import sys
+import tempfile
 
 import numpy as np
 
-DEFAULT_SOCK = "/tmp/brain-tts.sock"
+# Matches the Rust server's own default exactly: crates/cli/src/tts_serve.rs
+# binds std::env::temp_dir().join("brain-tts.sock") unless --socket overrides
+# it, so this needs to resolve the same OS temp dir, not a literal "/tmp".
+# BRAIN_TTS_SOCK / --socket (on the two callers) both override it.
+DEFAULT_SOCK = os.environ.get("BRAIN_TTS_SOCK") or os.path.join(tempfile.gettempdir(), "brain-tts.sock")
 SR = 24000
 
 

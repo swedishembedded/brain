@@ -819,6 +819,9 @@ regression" was nearly attributed to a batching change.
 - **bench_yolo_inference.py**: one `DEVICE=cpu|gpu` drives both sides; honest
   per-side device labels + the engine adapter line; torch GPU fallback
   (cuda→vulkan→mps→cpu); engine stage timing surfaced under `BRAIN_PROFILE`.
+- **bench_qwen_inference.py**: the same head-to-head shape for Qwen3 text
+  generation across brain's CPU/GPU/NPU targets vs HuggingFace Transformers on
+  CPU/GPU (NPU is brain-only), isolating load cost from per-token latency.
 
 ---
 

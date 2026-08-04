@@ -12,7 +12,7 @@ full (post output_conv1+bilinear+pos), out (post output_conv2).
 
 Run from the repo root with the reference repo importable:
   python3 tools/mirror_dump_dpt_tiny.py \
-      --repo /data/workspace/resources/world-3d/repos/HY-World-2.0/hyworld2/worldrecon \
+      --repo <clone of HY-World-2.0>/hyworld2/worldrecon \
       --out crates/mirror/tests/golden/dpt_tiny.json
 """
 import argparse

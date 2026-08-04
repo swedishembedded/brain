@@ -23,7 +23,7 @@ import sys
 
 import numpy as np
 
-RES = "/data/workspace/resources/asr"
+RES = os.environ.get("BRAIN_ASR_MIRROR", "/data/workspace/resources/asr")
 GOLD = os.path.join(RES, "golden")
 
 
