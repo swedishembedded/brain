@@ -145,11 +145,7 @@ pub fn run_do(argv: &[String]) -> i32 {
 
     let mut inv = Invocation::new();
     for p in &spec.params {
-        if p.ty == ParamType::Bool {
-            if matches.get_flag(&p.name) {
-                inv = inv.set(&p.name, json!(true));
-            }
-        } else if let Some(v) = matches.get_one::<String>(&p.name) {
+        if let Some(v) = matches.get_one::<String>(&p.name) {
             inv = inv.set(&p.name, coerce(&p.ty, v));
         }
     }
@@ -224,7 +220,19 @@ fn build_parser(model: &str, action: &str, spec: &ActionSpec) -> Command {
     for p in &spec.params {
         let mut arg = Arg::new(p.name.clone()).long(p.name.clone()).help(p.help.clone());
         if p.ty == ParamType::Bool {
-            arg = arg.action(ArgAction::SetTrue);
+            // A bool takes an OPTIONAL value: `--flag` is still `true` (every
+            // existing call site keeps working), and `--flag false` / `--flag=0`
+            // can now turn one OFF. Without that, a param whose schema default
+            // is `true` — `facenet embed --aligned`, `sam2 segment --multimask`
+            // — was unreachable from `brain do` while being perfectly settable
+            // over D-Bus, i.e. the CLI silently exposed a smaller API than the
+            // manifest advertises.
+            arg = arg
+                .action(ArgAction::Set)
+                .value_name("BOOL")
+                .num_args(0..=1)
+                .default_missing_value("true")
+                .value_parser(["true", "false", "1", "0"]);
         } else {
             arg = arg.action(ArgAction::Set).value_name(p.ty.name().to_uppercase());
             if let ParamType::Enum(vals) = &p.ty {
