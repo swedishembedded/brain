@@ -44,6 +44,8 @@ mod resident_lfm;
 mod resident_llm;
 mod resident_mock;
 mod resident_tts;
+mod resident_facenet;
+mod resident_sam2;
 mod run_cli;
 mod splat_cli;
 mod supply;

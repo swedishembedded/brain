@@ -16,6 +16,11 @@
 //! therefore takes the mask ALREADY at `mask_input_size`; the goldens dump both
 //! forms so the decoder can be replayed exactly.
 //!
+//! The serving contract is met by [`caps`] (the `segment`
+//! `capability::Provider`), `crates/cli/src/resident_sam2.rs` (the residency
+//! adapter, `BRAIN_SAM2_WEIGHTS`, with a genuine per-image `run_batch`) and
+//! `examples/vision/` — see `docs/serving-contract.md`.
+//!
 //! ```text
 //! image [1,3,1024,1024]
 //!   -> patch_embed (7x7 s4) + bicubic pos_embed + tiled window pos_embed
@@ -29,6 +34,7 @@
 //!   -> IoU head, object-score head, object pointer
 //! ```
 
+pub mod caps;
 pub mod config;
 pub mod hostpe;
 pub mod import;

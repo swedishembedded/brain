@@ -75,6 +75,15 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, r
     if let Some(d) = crate::resident_depth::DepthResident::from_env() {
         models.push(Arc::new(d));
     }
+    // Imaging models, each gated on its own weights env var: SAM 2.1 promptable
+    // segmentation (BRAIN_SAM2_WEIGHTS, prompt-batched per image) and the
+    // antelopev2 face stack (BRAIN_FACENET_DIR).
+    if let Some(s) = crate::resident_sam2::Sam2Resident::from_env() {
+        models.push(Arc::new(s));
+    }
+    if let Some(f) = crate::resident_facenet::FacenetResident::from_env() {
+        models.push(Arc::new(f));
+    }
     // Time-series forecasting foundation models — each gated on its weights env
     // var. chronos2/fincast advertise an NPU footprint (auto-placed on the NPU
     // when budgeted); kronos serves on CPU/GPU (see resident_forecast.rs).

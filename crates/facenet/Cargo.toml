@@ -20,6 +20,9 @@ brain-paramstore.workspace = true
 # import reads the protobuf. The reader lives in `crates/onnx` — a private one
 # here would be a second decoder of the same wire format.
 brain-onnx.workspace = true
+# `caps.rs` — the serving contract's capability surface (`docs/serving-contract.md`).
+brain-capability.workspace = true
+serde_json.workspace = true
 bytemuck.workspace = true
 
 [dev-dependencies]

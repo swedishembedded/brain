@@ -31,6 +31,8 @@ fn static_manifests() -> Vec<Manifest> {
         fastvlm::caps::manifest(),
         yolo::caps::manifest(),
         depth::caps::manifest(),
+        sam2::caps::manifest(),
+        facenet::caps::manifest(),
         tts::caps::manifest(),
         imageops::manifest(),
         DemoModel.manifest(),
@@ -55,6 +57,15 @@ fn build_registry(model: &str) -> Result<Registry, String> {
         fastvlm::caps::MODEL => reg.register(Arc::new(fastvlm::caps::FastVlmProvider::new())),
         yolo::caps::MODEL => reg.register(Arc::new(yolo::caps::YoloProvider::new())),
         depth::caps::MODEL => reg.register(Arc::new(depth::caps::DepthProvider::new())),
+        // The imaging models carry their weights path in the provider (from a
+        // `BRAIN_*` env var), not as an action param, so `brain do` and the
+        // residency adapter advertise ONE manifest each.
+        sam2::caps::MODEL => reg.register(Arc::new(
+            sam2::caps::Sam2Provider::from_env().ok_or("set BRAIN_SAM2_WEIGHTS to an existing sam2.1_hiera_*.pt checkpoint")?,
+        )),
+        facenet::caps::MODEL => reg.register(Arc::new(
+            facenet::caps::FacenetProvider::from_env().ok_or("set BRAIN_FACENET_DIR to an antelopev2 directory holding glintr100.onnx + scrfd_10g_bnkps.onnx")?,
+        )),
         tts::caps::MODEL => reg.register(Arc::new(tts::caps::TtsProvider::new())),
         other => return Err(format!("unknown model '{other}' (see `brain caps`)")),
     }

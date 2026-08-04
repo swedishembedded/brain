@@ -31,9 +31,12 @@
 //! additive-angular-margin head and a hand-written device backward, gated by
 //! `gradcheck::check_arcface`. Training covers the **embedding backbone only** —
 //! SCRFD detection and the alignment warp are preprocessing and carry no
-//! recognition gradient, which is how the reference recipe trains too. The
-//! serving contract (`capability::Provider`, a residency adapter, `run_batch`,
-//! D-Bus, `examples/face/`) is still deferred — see `docs/serving-contract.md`.
+//! recognition gradient, which is how the reference recipe trains too.
+//!
+//! The serving contract is met by [`caps`] (the `detect`/`embed`
+//! `capability::Provider`), `crates/cli/src/resident_facenet.rs` (the residency
+//! adapter, `BRAIN_FACENET_DIR`) and `examples/vision/` — see
+//! `docs/serving-contract.md`.
 //!
 //! # Two normalisations, one letter apart
 //!
@@ -42,6 +45,7 @@
 //! lives in its own [`config::Preprocess`] and is never defaulted.
 
 pub mod align;
+pub mod caps;
 pub mod config;
 pub mod detect;
 pub mod import;

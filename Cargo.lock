@@ -537,6 +537,7 @@ dependencies = [
  "brain-depth",
  "brain-eval",
  "brain-events",
+ "brain-facenet",
  "brain-fastvlm",
  "brain-fcbench",
  "brain-federated",
@@ -565,6 +566,7 @@ dependencies = [
  "brain-qwen-asr",
  "brain-residency",
  "brain-runtime",
+ "brain-sam2",
  "brain-server",
  "brain-shutdown",
  "brain-speaker",
@@ -714,6 +716,7 @@ dependencies = [
 name = "brain-facenet"
 version = "0.1.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-gpu-core",
  "brain-imaging",
@@ -724,6 +727,7 @@ dependencies = [
  "brain-testutil",
  "brain-vision",
  "bytemuck",
+ "serde_json",
 ]
 
 [[package]]
@@ -1218,6 +1222,7 @@ dependencies = [
 name = "brain-sam2"
 version = "0.1.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-gpu-core",
  "brain-imaging",
@@ -1227,6 +1232,7 @@ dependencies = [
  "brain-testutil",
  "brain-vision",
  "bytemuck",
+ "serde_json",
 ]
 
 [[package]]
