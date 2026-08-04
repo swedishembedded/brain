@@ -20,14 +20,18 @@
 //! `nn.ModuleList` whose indices the checkpoint names positionally), the
 //! two-way-validated [`import`], and the graph wiring in [`model`].
 //!
-//! Scope: forward only. The hand-written backward, the CodeFormer transformer /
-//! controllable feature transformation / fidelity dial, and the serving
-//! contract are follow-up workstreams.
+//! Scope: the forward graph ([`model`]) plus the **training** graph ([`train`]) —
+//! an SSA forward, a hand-written reverse over `vae::blocks::grad`, and the VQ
+//! straight-through estimator, gated by `gradcheck::check_vqgan`. The
+//! CodeFormer transformer / controllable feature transformation / fidelity dial
+//! and the serving contract are follow-up workstreams.
 
 pub mod config;
 pub mod import;
 pub mod model;
+pub mod train;
 
 pub use config::{Block, VqganConfig};
 pub use import::Import;
 pub use model::{Codebook, Reconstruction, Vqgan, KERNELS};
+pub use train::{VqganTrainer, TRAIN_KERNELS, TRAIN_PIPELINES};

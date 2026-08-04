@@ -173,9 +173,10 @@ Measured: `vqgan_code1024.pth` → 329 imported / 0 skipped;
 - q/k/v are not separately observable — the shared attention fuses them into one
   1×1 conv. `sub.attn17.{norm,proj_out}` bracket them and both match, which
   pins the fusion order.
-- The graph emits the **raw gather**, not the straight-through
+- The **inference** graph emits the raw gather, not the straight-through
   `z + (z_q − z).detach()`; they agree at max\|Δ\| 6.0e-8 in the forward and
-  differ only in the backward.
+  differ only in the backward. The **training** graph emits the
+  straight-through form (see below).
 - No CLI subcommand, no `Model` impl, no INT8, no batching. Input is
   `[3,H,W]` fp32 NCHW from the caller (`crates/imaging` is not on this path
   yet); `H`/`W` must be multiples of the 32× downscale (asserted), and the
@@ -188,18 +189,61 @@ Measured: `vqgan_code1024.pth` → 329 imported / 0 skipped;
   buffers were tapped (buffer identity, which `DeviceBuffer` does not expose) —
   left for the backward workstream, which needs the same distinction.
 
-## Deferred
+## Training / backward — DONE (gradcheck-gated)
 
-**Backward / gradcheck**
-- FD anchors already exist: the 67 taps in `stages_128.safetensors` at 128².
-  Every stage is a fresh SSA buffer, so the forward cache is already the shape
-  the backward wants — but the pool **aliases** buffers when `taps = false`, so
-  a training build needs `taps`-like lifetimes or an explicit no-reuse mode.
-- The VQ straight-through path needs `emb_bwd` (exists) plus the
-  commitment/codebook MSE terms; `wm_core::vq` documents the composition.
-- The trainable encoder needs the straight-through form (`add2` + a subtract) —
-  two extra steps in `Vqgan::new`, no new kernel.
-- `gradcheck::check_vqgan` needs a `Model` impl; there is none.
+`crates/vqgan/src/train.rs` (`VqganTrainer`) is the training graph: an SSA
+forward, a hand-written reverse, and the VQ straight-through estimator. Gated by
+`gradcheck::check_vqgan` (`crates/gradcheck/src/vqgan.rs`), **87/87 parameter
+tensors** inside the workspace tolerance `(atol 4e-3, rtol 8e-2)` on a Tesla P40
+and on `BRAIN_DEVICE=cpu`. No new WGSL kernel was written.
+
+- The block reverse is **shared**: `vae::blocks::grad` (new) walks a tape the
+  train-mode `Builder` records, so `AutoencoderKL` gets the same backward.
+  Train mode also disables the activation pool (the aliasing noted below) and
+  pins the **direct** conv/attention lowerings, whose adjoints exist — the
+  `im2col_at + matmul_reg3` conv has no `col2im`, and the GEMM attention folds
+  `1/sqrt(C)` into the q weights, which would change what `qkv.w`'s gradient
+  means.
+- Parameters are the fused tensors the shared builder already materialises:
+  GroupNorm as one `{prefix}.gb[2C]` (matching `gn_dgamma`/`gn_dbeta`'s fused
+  `dgb`), attention q/k/v as one `{prefix}.qkv.{w,b}`.
+- The straight-through form is `z + sub0` with `sub0 = q0 - z0` **latched**
+  (`VqganTrainer::latch_assignment`), plus the codebook term `beta*||sg[z] - q||²/n`
+  and the commitment term `||z - sg[q]||²/n`. The stop-gradients are
+  literally which buffer each `mse_grad` binds: `z0` for the codebook term,
+  `q0` for the commitment term.
+- **`beta` weights the CODEBOOK term, not the commitment term.**
+  `vqgan_arch.py:55` is
+  `loss = mean((z_q.detach()-z)**2) + self.beta * mean((z_q - z.detach())**2)`:
+  `z_q.detach()` makes the *first* (unweighted) term the one that reaches the
+  encoder, and `z.detach()` makes the *second* (beta-weighted) term the one that
+  reaches the codebook. This is the opposite of the VQ-VAE paper AND of the
+  reference's own comment on line 29; the executed code is what trained both
+  released checkpoints, so it wins. A finite-difference check cannot see this —
+  it gates the backward against whatever forward is emitted — so it is pinned by
+  reading the reference, and both the code and the docs say which line.
+- Reconstruction is **L1**. The perceptual (LPIPS) and adversarial
+  (patch-discriminator) terms of the published recipe are out of scope — they
+  attach as further contributions to the same `d_out` seed.
+- **Read the reported `max_rel` with the best-of-N rule in mind.**
+  `gradcheck::directional_check` tries `n_dirs` random +/-1 directions per tensor
+  and reports the **best-conditioned** one. For a conv bias feeding a GroupNorm
+  that is load-bearing: the bias gradient sums to **exactly zero within each
+  GroupNorm group** (adding the same delta to every channel of a group shifts the
+  group mean by the same delta and leaves `xhat` unchanged), so any direction that
+  is constant within groups has a directional derivative of exactly 0 and the
+  reported row is `0` vs `0` — informative about nothing. Four to five of the 87
+  rows land there. Re-running the same sweep and keeping the **worst** of the 3
+  directions still gives **0/87 outside `(atol 4e-3, rtol 8e-2)`** on both the
+  P40 and `BRAIN_DEVICE=cpu`, which is what actually establishes those tensors.
+
+Still deferred on the training side:
+- Batching (`N = 1`, see below), the AdamW/`ParamStore` wiring and a `Model`
+  impl, and a real training loop / CLI subcommand.
+- Gradient checkpointing. Train mode keeps every activation, so the 512² memory
+  figure is the `taps = true` one (6.9 GB), not the pooled ~1 GB.
+- The selective-tap problem below is unchanged: train mode is also a whole-graph
+  switch.
 
 **Serving contract**
 - One-shot image-in/image-out, so `capability::Action`'s `Progress` timeline

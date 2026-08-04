@@ -227,7 +227,7 @@ impl Vqgan {
     pub fn new(cfg: VqganConfig, tensors: &Tensors, h: u32, w: u32, gpu: Gpu, taps: bool) -> Vqgan {
         let scale = cfg.downscale();
         assert!(
-            h % scale == 0 && w % scale == 0,
+            h.is_multiple_of(scale) && w.is_multiple_of(scale),
             "vqgan: input {h}x{w} is not a multiple of the {scale}x downscale"
         );
         let (lh, lw) = (h / scale, w / scale);
@@ -388,7 +388,7 @@ impl Vqgan {
 
 /// Record one flat `nn.ModuleList` of [`Block`]s, tapping each block's output
 /// under `{net}.blocks.{i}`. Returns the final buffer and its spatial size.
-fn run_blocks(
+pub(crate) fn run_blocks(
     b: &mut Builder,
     net: &str,
     blocks: &[Block],

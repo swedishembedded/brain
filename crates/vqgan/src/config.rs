@@ -75,7 +75,12 @@ pub struct VqganConfig {
     pub img_size: u32,
     pub codebook_size: u32,
     pub emb_dim: u32,
-    /// Commitment weight of the VQ loss (training only; unused by the forward).
+    /// Weight of the VQ **codebook** loss (training only; unused by the
+    /// forward). Named `beta` after the reference's constructor argument, whose
+    /// own comment calls it the *commitment* cost — but `vqgan_arch.py:55`
+    /// multiplies it into `torch.mean((z_q - z.detach())**2)`, the `z.detach()`
+    /// half, which is the term that reaches the CODEBOOK. The comment and the
+    /// code disagree there; `vqgan::train` follows the code.
     pub beta: f32,
     pub norm_groups: u32,
     pub norm_eps: f32,
