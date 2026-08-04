@@ -1,0 +1,22 @@
+[package]
+name = "brain-flux1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FLUX.1 MMDiT (dev/Kontext): double-stream joint attention + single-stream parallel blocks, 3-axis RoPE, T5-XXL + CLIP-L conditioning, 16-channel VAE."
+
+[lib]
+name = "flux1"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-checkpoint.workspace = true
+brain-dit.workspace = true
+brain-vae.workspace = true
+brain-diffusion.workspace = true
+brain-clip.workspace = true
+brain-t5.workspace = true
+brain-imaging.workspace = true

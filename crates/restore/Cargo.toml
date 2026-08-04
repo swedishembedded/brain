@@ -1,0 +1,20 @@
+[package]
+name = "brain-restore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CodeFormer face restoration: the code-prediction transformer and controllable feature transformation over crates/vqgan, with the identity-fidelity dial w."
+
+[lib]
+name = "restore"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-checkpoint.workspace = true
+brain-vqgan.workspace = true
+brain-vision.workspace = true
+brain-imaging.workspace = true
+brain-facenet.workspace = true

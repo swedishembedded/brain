@@ -761,6 +761,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-flux1"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-clip",
+ "brain-diffusion",
+ "brain-dit",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-t5",
+ "brain-vae",
+]
+
+[[package]]
 name = "brain-flux2"
 version = "0.1.0"
 dependencies = [
@@ -1152,6 +1168,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-restore"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-facenet",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-model",
+ "brain-vision",
+ "brain-vqgan",
+]
+
+[[package]]
 name = "brain-runtime"
 version = "0.1.0"
 dependencies = [
@@ -1248,6 +1278,16 @@ dependencies = [
  "brain-residency",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "brain-t5"
+version = "0.1.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-kernels",
+ "brain-model",
 ]
 
 [[package]]

@@ -1,0 +1,17 @@
+[package]
+name = "brain-t5"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "T5-XXL encoder — the text conditioning FLUX.1 needs alongside CLIP-L."
+
+[lib]
+name = "t5"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-model.workspace = true
+brain-checkpoint.workspace = true
+
