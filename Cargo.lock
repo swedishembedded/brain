@@ -887,8 +887,10 @@ dependencies = [
  "brain-moe",
  "brain-pid",
  "brain-qwen",
+ "brain-restore",
  "brain-sam2",
  "brain-seq2seq",
+ "brain-t5",
  "brain-vae",
  "brain-vqgan",
 ]

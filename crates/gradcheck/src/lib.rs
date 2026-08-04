@@ -28,6 +28,12 @@ pub use vqgan::check_vqgan;
 pub mod clip;
 pub use clip::check_clip;
 
+pub mod t5;
+pub use t5::check_t5;
+
+pub mod restore;
+pub use restore::check_codeformer;
+
 /// A model the checker can drive: a fixed batch must already be set.
 pub trait CheckModel {
     fn param_names(&self) -> Vec<String>;
@@ -86,12 +92,79 @@ impl Report {
     }
 }
 
+/// Per-**element** finite differences on ONE named parameter tensor.
+///
+/// [`directional_check`] contracts a whole tensor onto one random ±1 direction
+/// and keeps the *best-agreeing* of `n_dirs`. That is the right trade for a
+/// large GEMM weight, but it is measurably blind to a **partial** gradient error
+/// — one where a *share* of the true gradient is missing rather than all of it —
+/// for two compounding reasons: the contraction `⟨∇L − ∇̃L, v⟩` can be
+/// numerically small even when `‖∇L − ∇̃L‖` is not, and best-of-`n_dirs`
+/// actively selects the direction where it is smallest.
+///
+/// That is not hypothetical. Deleting T5's cross-block `rel_bias` fold (the
+/// `axpy` that sums `attn_bwd_dbias` over the block stack) leaves a **33 %**
+/// error in `rel_bias.weight`'s gradient, and `directional_check` reported
+/// `rel = 6.2e-4` for it at seed 1 — a clean pass. Perturbing one entry at a
+/// time removes both effects: every entry is its own comparison, so a missing
+/// share cannot hide behind a contraction.
+///
+/// Cost is `2·numel` forward passes, so this is for the small, structurally
+/// interesting tensors — the ones a reverse pass *folds* or *shares* — not for
+/// a GEMM weight. `eps` wants to be larger than [`directional_check`]'s: a
+/// single-entry step has no `√numel` amplification, so the loss difference is
+/// `eps·|∂L/∂wᵢ|` and fp32 cancellation bites sooner.
+pub fn elementwise_check<M: CheckModel>(m: &M, name: &str, eps: f32) -> Report {
+    m.zero_grads();
+    let _ = m.loss();
+    m.backward();
+
+    let w0 = m.read_weight(name);
+    let g = m.read_grad(name);
+    assert_eq!(g.len(), w0.len(), "{name}: grad/weight size mismatch");
+    let mut w = w0.clone();
+    let mut checks = Vec::with_capacity(w0.len());
+    for i in 0..w0.len() {
+        w[i] = w0[i] + eps;
+        m.write_weight(name, &w);
+        let lp = m.loss();
+        w[i] = w0[i] - eps;
+        m.write_weight(name, &w);
+        let lm = m.loss();
+        w[i] = w0[i];
+
+        let numeric = (lp - lm) / (2.0 * eps);
+        let analytic = g[i];
+        let abs_err = (analytic - numeric).abs();
+        let denom = analytic.abs().max(numeric.abs()).max(1e-3);
+        checks.push(Check {
+            param: format!("{name}[{i}]"),
+            analytic,
+            numeric,
+            abs_err,
+            rel_err: abs_err / denom,
+        });
+    }
+    m.write_weight(name, &w0); // restore
+    Report { checks }
+}
+
 /// Directional gradient check over every parameter tensor. `eps` ≈ 5e-3 suits
 /// fp32; `n_dirs` random directions are tried per tensor and the best-agreeing
-/// one is reported — a real backprop bug fails *every* direction, while a random
-/// direction nearly orthogonal to ∇L only makes finite differences ill-
-/// conditioned (the directional derivative ≈ 0). A fixed batch must already be
-/// set on `m`.
+/// one is reported, because a random direction nearly orthogonal to ∇L makes
+/// finite differences ill-conditioned (the directional derivative ≈ 0). A fixed
+/// batch must already be set on `m`.
+///
+/// **What this cannot see.** A *wholly* wrong gradient fails every direction, so
+/// best-of-`n_dirs` is safe against that. A **partial** one — a share of the
+/// true gradient missing, which is what a mis-folded shared parameter produces —
+/// is a different matter: the contraction onto `v` can be numerically small even
+/// when the error vector is not, and best-of-`n_dirs` picks the direction where
+/// it is smallest. Measured on this repo: with T5's cross-block `rel_bias` fold
+/// deleted (33 % gradient error) this function reported `rel = 6.2e-4` at seed 1
+/// and 5.3e-2 at seed 7 — both inside the workspace `(4e-3, 8e-2)` gate. Every
+/// parameter a reverse pass *folds across stages* therefore needs
+/// [`elementwise_check`] next to its directional check, not instead of it.
 pub fn directional_check<M: CheckModel>(m: &M, eps: f32, n_dirs: usize, seed: u64) -> Report {
     // Analytic gradients for the current batch (computed once).
     m.zero_grads();

@@ -34,3 +34,36 @@ check!(sam2_backward, gradcheck::check_sam2, "check_sam2");
 check!(arcface_backward, gradcheck::check_arcface, "check_arcface");
 check!(vqgan_backward, gradcheck::check_vqgan, "check_vqgan");
 check!(clip_backward, gradcheck::check_clip, "check_clip");
+
+// ---- phase 4c: the four newer models ----
+//
+// `check_t5` is the T5 encoder backward (`t5::train::T5Trainer`). The two
+// siblings are run because each isolates a failure mode the main gate cannot:
+// `check_t5_one_block` removes the cross-block accumulation of the shared
+// relative-position bias, and `check_t5_tiled` forces `block::pick_gemm` onto
+// the register-tiled backward GEMMs (which on `backend-cpu` route to the AVX2
+// fast path instead of the WGSL, so running the suite on both backends covers
+// two different implementations of the same op).
+check!(t5_backward, gradcheck::check_t5, "check_t5");
+check!(t5_one_block_backward, gradcheck::t5::check_t5_one_block, "check_t5_one_block");
+check!(t5_tiled_backward, gradcheck::t5::check_t5_tiled, "check_t5_tiled");
+// `check_t5` does NOT cover the cross-block fold of the shared relative-position
+// bias — measured: deleting the `axpy` leaves a 33 % error in that tensor's
+// gradient and `check_t5` still passes on both backends and both seeds. The
+// per-ENTRY check below is what covers it.
+check!(
+    t5_rel_bias_elementwise,
+    gradcheck::t5::check_t5_rel_bias_elementwise,
+    "check_t5_rel_bias_elementwise"
+);
+
+// `check_codeformer` is CodeFormer's code-prediction Transformer under the
+// code-token cross-entropy — stage II of the reference recipe, with the VQ
+// autoencoder frozen (its own backward is `check_vqgan`, above). The
+// single-layer sibling isolates the cross-layer `position_emb` accumulation.
+check!(codeformer_backward, gradcheck::check_codeformer, "check_codeformer");
+check!(
+    codeformer_one_layer_backward,
+    gradcheck::restore::check_codeformer_one_layer,
+    "check_codeformer_one_layer"
+);
