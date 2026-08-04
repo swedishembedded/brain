@@ -24,7 +24,7 @@ fn alibi_has_expected_structure() {
         }
     }
     // head 0 has the largest slope (steepest); head 7 the smallest.
-    assert!(b[(0*t)*t+(t-1)] < b[(7*t)*t+(t-1)]);
+    assert!(b[t-1] < b[(7*t)*t+(t-1)]);
 }
 
 fn rand(seed: u64, n: usize) -> Vec<f32> {
@@ -55,5 +55,5 @@ fn cpb_diagonal_is_constant_and_shaped() {
     }
     // symmetric relative positions p1->p2 vs p2->p1 differ (rel_pos negates,
     // and the MLP is not even) — sanity that it's not degenerate/all-equal.
-    assert!((b[(0*hw)*hw+1] - b[(0*hw+1)*hw]).abs() > 1e-6);
+    assert!((b[1] - b[hw]).abs() > 1e-6);
 }

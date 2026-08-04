@@ -255,7 +255,7 @@ mod tests {
         let st = win.fut_stamps();
         assert_eq!(st[3], 11); // day
         assert_eq!(st[4], 1); // month
-        assert_eq!(st[0 * 5], 0); // minute
+        assert_eq!(st[0], 0); // minute (field 0 of stamp row 0)
     }
 
     #[test]

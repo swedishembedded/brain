@@ -139,7 +139,10 @@ pub fn build_fincast_graph_quant(cfg: &FincastConfig, w: &dyn WeightSource, s: u
 fn qscale_const(cfg: &FincastConfig, w: &dyn WeightSource, b: usize) -> Vec<f32> {
     let hd = cfg.head_dim;
     let heads = cfg.num_heads;
-    let base = 1.442695041f32 / (hd as f32).sqrt();
+    // log2(e): same base change as `fincast::model` — kept identical so the
+    // exported ONNX graph matches the in-repo forward bit for bit. (As f32 this
+    // is bit-identical to the `1.442695041f32` literal it replaced.)
+    let base = std::f32::consts::LOG2_E / (hd as f32).sqrt();
     let scaling = w.get(&format!("stacked_transformer.layers.{b}.self_attn.scaling"));
     let mut out = vec![0f32; heads * hd];
     for h in 0..heads {

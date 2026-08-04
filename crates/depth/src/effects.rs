@@ -141,7 +141,7 @@ mod tests {
         let (w, h) = (40u32, 4u32);
         let (rgb, depth) = split(w, h);
         let out = fog(&rgb, &depth, w, h, Bounds { lo: 0.0, hi: 1.0 }, [255, 255, 255], 4.0, true);
-        let near = out[(0) * 3]; // x=0, near, red channel
+        let near = out[0]; // x=0, near, red channel
         let far = out[(w as usize - 1) * 3]; // x=w-1, far, red channel
         assert!(near > 190, "near pixel should stay ~red (200), got {near}");
         assert!(far > 240, "far pixel should be washed toward white fog, got {far}");

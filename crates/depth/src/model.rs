@@ -302,7 +302,9 @@ impl ZipDepth {
 
         // ---- encoder: stem. ConvBN(k=3, s=2) -> pad = (k + (k-1)*(d-1))//2 = 1.
         let cbn = |ctx: &Ctx, p: &str, ins: Shape, cout: u32, k: u32, s: u32| {
-            let pad = (k + (k - 1) * 0) / 2;
+            // pad = (k + (k-1)*(dilation-1)) / 2; every conv here is dilation 1.
+            let dilation: u32 = 1;
+            let pad = (k + (k - 1) * (dilation - 1)) / 2;
             Conv::with_names(ctx, p, ConvNames::torch_conv_bn(p), ins, ConvSpec::relu(cout, k, s, pad), train)
         };
         let stem_half = cbn(ctx, "encoder.stem_half", in_shape, half, 3, 2);

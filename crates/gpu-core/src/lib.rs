@@ -759,6 +759,31 @@ mod wasm_facade {
 #[cfg(target_arch = "wasm32")]
 pub use wasm_facade::Gpu;
 
+/// Reject a dispatch that binds its OUTPUT buffer as an input as well.
+///
+/// wgpu treats `STORAGE_READ_WRITE` as exclusive within one dispatch, so
+/// `f(x, y, x)` is a validation error there even though the CPU backend would
+/// happily run it — the failure then shows up only on GPU, often surfacing at
+/// an unrelated later call. Binding a buffer twice READ-ONLY is fine (the
+/// chunked-attention trio deliberately binds one fused qkv buffer as both the
+/// q and kv views), so only the output slot is checked. Kernels that must
+/// accumulate into themselves have a dedicated `*_inplace` form with a single
+/// read_write binding.
+#[track_caller]
+fn assert_no_output_alias(bufs: &[&DeviceBuffer]) {
+    // The output is the last binding (for the `*_inplace` family it is the
+    // first, but then the *other* operand is last, so the same test holds).
+    if let Some(out) = bufs.last() {
+        if bufs.iter().filter(|b| b.alloc_id() == out.alloc_id()).count() > 1 {
+            panic!(
+                "dispatch binds its output buffer as an input as well; this is a \
+                 wgpu usage-scope violation (STORAGE_READ_WRITE is exclusive). \
+                 Use the kernel's *_inplace form, or write to a distinct buffer."
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,7 +792,7 @@ mod tests {
     fn f_packs_float_bits() {
         assert_eq!(f(1.0), 1.0f32.to_bits());
         assert_eq!(f(-2.5), (-2.5f32).to_bits());
-        assert_eq!(f32::from_bits(f(3.14159)), 3.14159f32);
+        assert_eq!(f32::from_bits(f(7.2589)), 7.2589f32);
     }
 
     /// The capability contract every consumer relies on: fp32 is always
@@ -858,30 +883,5 @@ mod tests {
         let s2 = gpu.step(0, &[&out, &b, &out2], &[4], 4);
         gpu.submit(&[], &[s1, s2]);
         assert_eq!(gpu.read(&out2, 4), vec![21.0, 42.0, 63.0, 84.0]);
-    }
-}
-
-/// Reject a dispatch that binds its OUTPUT buffer as an input as well.
-///
-/// wgpu treats `STORAGE_READ_WRITE` as exclusive within one dispatch, so
-/// `f(x, y, x)` is a validation error there even though the CPU backend would
-/// happily run it — the failure then shows up only on GPU, often surfacing at
-/// an unrelated later call. Binding a buffer twice READ-ONLY is fine (the
-/// chunked-attention trio deliberately binds one fused qkv buffer as both the
-/// q and kv views), so only the output slot is checked. Kernels that must
-/// accumulate into themselves have a dedicated `*_inplace` form with a single
-/// read_write binding.
-#[track_caller]
-fn assert_no_output_alias(bufs: &[&DeviceBuffer]) {
-    // The output is the last binding (for the `*_inplace` family it is the
-    // first, but then the *other* operand is last, so the same test holds).
-    if let Some(out) = bufs.last() {
-        if bufs.iter().filter(|b| b.alloc_id() == out.alloc_id()).count() > 1 {
-            panic!(
-                "dispatch binds its output buffer as an input as well; this is a \
-                 wgpu usage-scope violation (STORAGE_READ_WRITE is exclusive). \
-                 Use the kernel's *_inplace form, or write to a distinct buffer."
-            );
-        }
     }
 }

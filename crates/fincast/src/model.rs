@@ -339,7 +339,9 @@ impl Fincast {
         let inner = cfg.inner_dim();
         let qkvd = cfg.qkv_dim();
         let scaling = self.gpu.read(self.w(&format!("stacked_transformer.layers.{layer}.self_attn.scaling")), hd);
-        let base = 1.442_695_f32 / (hd as f32).sqrt();
+        // log2(e): the reference folds the exp2-based softmax's base change
+        // into the query scale.
+        let base = std::f32::consts::LOG2_E / (hd as f32).sqrt();
         let qscale: Vec<f32> = (0..hd).map(|dd| base * softplus(scaling[dd])).collect();
 
         let q_off = 0usize;
