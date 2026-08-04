@@ -21,4 +21,7 @@ brain-imaging.workspace = true
 brain-facenet.workspace = true
 # `caps.rs` — the serving contract's capability surface (`docs/serving-contract.md`).
 brain-capability.workspace = true
+# `train.rs` — trainable params + grads, and the workspace's test PRNG.
+brain-paramstore.workspace = true
+brain-data.workspace = true
 serde_json.workspace = true

@@ -1211,11 +1211,13 @@ version = "0.1.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
+ "brain-data",
  "brain-facenet",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-paramstore",
  "brain-vae",
  "brain-vision",
  "brain-vqgan",

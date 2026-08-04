@@ -23,9 +23,15 @@
 //! from `crates/facenet` (SCRFD + Umeyama similarity alignment, already
 //! parity-gated); this crate takes an aligned 512×512 face and gives one back.
 //!
-//! Scope today: **forward only**, parity-gated per stage against
+//! Scope today: the **forward** ([`model`]), parity-gated per stage against
 //! `tools/codeformer_restore_dump_reference.py` goldens at several `w`
-//! including both endpoints. Backward/gradcheck are follow-ups.
+//! including both endpoints, plus the **stage-II training graph** ([`train`]) —
+//! the code-prediction Transformer under the code-token cross-entropy, with the
+//! VQ autoencoder frozen exactly as the reference's stage II freezes it. That
+//! backward is gated by `gradcheck::check_codeformer` on both the P40 and
+//! `backend-cpu`. Still follow-ups: training the CFT / the dial `w`, and
+//! composing this reverse with `vqgan::train`'s so a gradient reaches the
+//! encoder end to end.
 //!
 //! The serving contract is met by [`caps`] (the `restore_face`
 //! `capability::Provider`), `crates/cli/src/resident_restore.rs` (the residency
@@ -36,7 +42,9 @@ pub mod caps;
 pub mod config;
 pub mod import;
 pub mod model;
+pub mod train;
 
 pub use config::{CodeFormerConfig, FuseTap, FUSE_TAPS};
 pub use import::Import;
 pub use model::{CodeFormer, Restoration, KERNELS};
+pub use train::{CodeTransformerTrainer, TRAIN_PIPELINES};

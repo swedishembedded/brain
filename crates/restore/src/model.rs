@@ -119,7 +119,7 @@ const fn kernel_set() -> [(&'static str, &'static str); N_VQGAN + 12] {
 /// Slot indices resolved from the device by NAME, so this crate never restates
 /// where `vae::blocks` put its attention trio.
 #[derive(Clone, Copy)]
-struct Ids {
+pub(crate) struct Ids {
     scores: usize,
     softmax: usize,
     apply: usize,
@@ -127,7 +127,7 @@ struct Ids {
 }
 
 impl Ids {
-    fn resolve(g: &Gpu) -> Ids {
+    pub(crate) fn resolve(g: &Gpu) -> Ids {
         let at = |n: &str| {
             g.kernel_index(n)
                 .unwrap_or_else(|| panic!("restore: kernel {n} not in the device's set"))
@@ -510,7 +510,7 @@ fn layernorm(
 /// `attn_scores_bidir` reads q and k out of ONE buffer at `qkv_stride = 2E`
 /// (`q_off = 0`, `k_off = E`) and `attn_apply_bidir` reads v out of its own at
 /// stride `E`.
-fn record_transformer(
+pub(crate) fn record_transformer(
     b: &mut Builder,
     cfg: &CodeFormerConfig,
     ids: &Ids,
