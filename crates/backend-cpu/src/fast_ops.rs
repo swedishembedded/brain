@@ -443,6 +443,12 @@ pub fn chan_place(params: &[u32], src: &[f32], dst: &mut [f32]) {
     // (each maps to a distinct (n, channel-range, position) of dst).
     let dptr = SendMutPtr(dst.as_mut_ptr());
     src.par_chunks(chunk).enumerate().for_each(|(ci, sin)| {
+        // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
+        // Rust 2021 disjoint capture a closure that only touches `dptr.0`
+        // captures that raw pointer directly, which is not `Send`. Verified by
+        // deletion — it fails with E0277 `*mut f32` cannot be shared between
+        // threads safely.
+        #[allow(clippy::redundant_locals)]
         let dptr = dptr;
         let base = ci * chunk;
         let mut o = 0usize;
@@ -898,14 +904,14 @@ mod tests {
         // contract the padded dispatch uniform provides.
         let mut o = vec![0.0f32; x.len()];
         bn_eval(&[n as u32, c as u32, h as u32, w as u32], &x, &mv, &gb, &mut o);
-        for idx in 0..x.len() {
+        for (idx, &oi) in o.iter().enumerate() {
             let r = affine(idx);
-            assert!((o[idx] - r).abs() < 1e-4, "bn {idx}");
+            assert!((oi - r).abs() < 1e-4, "bn {idx}");
         }
         // All four act codes against the scalar reference.
         for act in 0..4u32 {
             bn_eval(&[n as u32, c as u32, h as u32, w as u32, act], &x, &mv, &gb, &mut o);
-            for idx in 0..x.len() {
+            for (idx, &oi) in o.iter().enumerate() {
                 let z = affine(idx);
                 let r = match act {
                     1 => z.max(0.0),
@@ -913,7 +919,7 @@ mod tests {
                     3 => 1.0 / (1.0 + (-z).exp()),
                     _ => z,
                 };
-                assert!((o[idx] - r).abs() < 1e-4, "bn act={act} {idx}");
+                assert!((oi - r).abs() < 1e-4, "bn act={act} {idx}");
             }
         }
     }
@@ -927,8 +933,7 @@ mod tests {
         let ctot = ca + cb;
         let mut y = vec![0.0f32; n * ctot * h * w];
         concat2(&[n as u32, ca as u32, cb as u32, h as u32, w as u32], &a, &b, &mut y);
-        let hw = h * w;
-        for idx in 0..y.len() {
+        for (idx, &yi) in y.iter().enumerate() {
             let ww = idx % w;
             let t1 = idx / w;
             let hh = t1 % h;
@@ -940,8 +945,7 @@ mod tests {
             } else {
                 b[((nn * cb + (cc - ca)) * h + hh) * w + ww]
             };
-            assert_eq!(y[idx], exp);
-            let _ = hw;
+            assert_eq!(yi, exp);
         }
     }
 
@@ -953,12 +957,12 @@ mod tests {
         let mut dst = vec![-1.0f32; n * ctot * h * w];
         chan_place(&[n as u32, ctot as u32, csrc as u32, c_off as u32, h as u32, w as u32], &src, &mut dst);
         let hw = h * w;
-        for idx in 0..src.len() {
+        for (idx, &si) in src.iter().enumerate() {
             let cc = (idx / hw) % csrc;
             let nn = idx / (csrc * hw);
             let pos = idx % hw;
             let di = (nn * ctot + (c_off + cc)) * hw + pos;
-            assert_eq!(dst[di], src[idx], "chan_place idx {idx}");
+            assert_eq!(dst[di], si, "chan_place idx {idx}");
         }
     }
 
@@ -970,7 +974,7 @@ mod tests {
         let (oh, ow) = (h * 2, w * 2);
         let mut y = vec![0.0f32; n * c * oh * ow];
         upsample2(&[n as u32, c as u32, h as u32, w as u32], &x, &mut y);
-        for idx in 0..y.len() {
+        for (idx, &yi) in y.iter().enumerate() {
             let wo = idx % ow;
             let t1 = idx / ow;
             let ho = t1 % oh;
@@ -978,7 +982,7 @@ mod tests {
             let cc = t2 % c;
             let nn = t2 / c;
             let exp = x[((nn * c + cc) * h + ho / 2) * w + wo / 2];
-            assert_eq!(y[idx], exp);
+            assert_eq!(yi, exp);
         }
     }
 }

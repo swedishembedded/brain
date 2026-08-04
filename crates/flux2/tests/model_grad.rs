@@ -39,7 +39,7 @@ fn run_loss(c: &Cfg, w: &flux2::modelgrad::ModelWeights<f64>, b: &Batch<f64>) ->
 fn full_model_gradcheck() {
     let c = Cfg::tiny();
     let w0 = init_model::<f64>(&c, 0xF1_ABCD);
-    let mut r = rng(0xBEEF_02);
+    let mut r = rng(0x00BE_EF02);
     let b = batch(&c, &mut r);
 
     let (pred, cache) = forward(&c, &w0, &b.img, &b.ctx, b.t, &b.cos, &b.sin);
@@ -53,7 +53,7 @@ fn full_model_gradcheck() {
     let mut worst_name = String::new();
     let nparam = { let mut w = w0.clone(); params_mut(&mut w).len() };
     assert_eq!(nparam, analytic.len(), "param/grad enumeration mismatch");
-    for pi in 0..nparam {
+    for (pi, (aname, avals)) in analytic.iter().enumerate() {
         let plen = { let mut w = w0.clone(); params_mut(&mut w)[pi].1.len() };
         let step = (plen / 6).max(1);
         let mut worst = 0f64;
@@ -65,13 +65,13 @@ fn full_model_gradcheck() {
             params_mut(&mut wp)[pi].1[i] = orig - h;
             let lm = run_loss(&c, &wp, &b);
             let num = (lp - lm) / (2.0 * h);
-            let a = analytic[pi].1[i];
+            let a = avals[i];
             let denom = a.abs().max(num.abs()).max(1e-4);
             worst = worst.max((a - num).abs() / denom);
         }
         if worst > worst_all {
             worst_all = worst;
-            worst_name = analytic[pi].0.clone();
+            worst_name = aname.clone();
         }
     }
     eprintln!("FLUX.2 full-model gradcheck: worst rel err = {worst_all:.2e} ({worst_name})");

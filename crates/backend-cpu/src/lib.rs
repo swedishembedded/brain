@@ -648,7 +648,19 @@ impl CpuBackend {
         starts.par_iter().for_each(|&s| {
             // Rebind whole wrappers so the closure captures the `Send` newtypes,
             // not their raw-pointer fields (Rust 2021 disjoint capture).
+            // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
+            // Rust 2021 disjoint capture a closure that only touches `uni.0`
+            // captures that raw pointer directly, which is not `Send`. Verified by
+            // deletion — it fails with E0277 `*mut f32` cannot be shared between
+            // threads safely.
+            #[allow(clippy::redundant_locals)]
             let uni = uni;
+            // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
+            // Rust 2021 disjoint capture a closure that only touches `bufs_ptr.0`
+            // captures that raw pointer directly, which is not `Send`. Verified by
+            // deletion — it fails with E0277 `*mut f32` cannot be shared between
+            // threads safely.
+            #[allow(clippy::redundant_locals)]
             let bufs_ptr = bufs_ptr;
             let e = (s + chunk).min(total);
             // SAFETY: each invocation writes a disjoint output element, so the
@@ -674,8 +686,8 @@ struct SendMut(*const *mut u8);
 unsafe impl Send for SendMut {}
 unsafe impl Sync for SendMut {}
 
-/// Neutral-handle bridge: downcast the opaque [`DeviceBuffer`]/[`Step`] back to
-/// `CpuBuffer`/[`CpuStep`] and delegate to the inherent methods.
+// Neutral-handle bridge: downcast the opaque `DeviceBuffer`/`Step` back to
+// `CpuBuffer`/`CpuStep` and delegate to the inherent methods.
 
 /// Weak handle onto the compiled JIT state — `backend_api::Backend::downgrade`.
 struct WeakCpu(std::sync::Weak<CpuShared>);

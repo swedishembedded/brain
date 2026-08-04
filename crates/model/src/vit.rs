@@ -16,6 +16,10 @@
 //!
 //! Pure dispatch assembly: no WGSL, no ParamStore, no buffer ownership.
 
+// See `block.rs`: these are dispatch builders whose arity is the kernel's
+// buffer + Params list, not a design smell.
+#![allow(clippy::too_many_arguments)]
+
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 
 /// Kernel-pipeline indices a model supplies from its own PIPELINES list.
@@ -134,7 +138,6 @@ pub fn attn_chunk_for(sh: &VitShape, max_span: u32, budget_bytes: u64) -> u32 {
 /// Span + chunked self-attention over the fused qkv buffer: for each span
 /// `(row0, len)`, queries attend to that span's keys/values; results land in
 /// `ctx` at the same absolute rows. `chunk` bounds the score slab.
-#[allow(clippy::too_many_arguments)]
 pub fn chunked_attn_fwd(
     g: &Gpu,
     k: &VitKernelIds,
@@ -230,7 +233,6 @@ impl VitBlockCache {
 /// Record one pre-LN ViT block, in place on `x` (`[rows, C]`):
 ///   x += ls1 ∘ proj(attn(qk_norm/rope(qkv(LN1(x)))));
 ///   x += ls2 ∘ fc2(gelu_erf(fc1(LN2(x))))
-#[allow(clippy::too_many_arguments)]
 pub fn vit_block_fwd(
     g: &Gpu,
     k: &VitKernelIds,
@@ -357,7 +359,6 @@ impl VitBwdScratch {
 /// (chunk == span) through [`cross_q_fwd`], caching each span's probs at
 /// [`probs_offsets`] — a running, binding-aligned prefix, so `spans` may be
 /// RAGGED. `cache.qkv` must be in the submit clears list (axpy-copied).
-#[allow(clippy::too_many_arguments)]
 pub fn vit_block_fwd_cached(
     g: &Gpu,
     k: &VitKernelIds,
@@ -436,7 +437,6 @@ pub fn vit_block_fwd_cached(
 /// must cover disjoint rows — which frame spans and the single global span
 /// both satisfy). `sb.d_qkv`/`sb.d_qkv_pre` must be zero-cleared by the
 /// caller's submit for each block.
-#[allow(clippy::too_many_arguments)]
 pub fn vit_block_bwd(
     g: &Gpu,
     k: &VitKernelIds,
@@ -632,7 +632,6 @@ pub fn gather_rows(
 /// for the q-region scatter of [`q_pool_bwd`] the k/v regions are deliberately
 /// left for `attn_bwd_dk/dv_cross` to write.
 /// Params: `[n_idx, d, n_rows_out]`, threads `n*d`.
-#[allow(clippy::too_many_arguments)]
 pub fn scatter_rows(
     g: &Gpu,
     ids: &VitPermuteIds,
@@ -966,8 +965,7 @@ impl QPoolCache {
 ///   * `embed`      `[c, rows_in]`, bufs `[q_idx, qkv, q_c]`
 ///   * `nlc_nchw`   `[n*c*h*w, c, h*w]`, bufs `[q_c, q_nchw]`
 ///   * `maxpool2d`  `[n, c, h, w, K, stride, pad, ho, wo]`,
-///                  bufs `[q_nchw, qp_nchw, argmax]` — note `stride` sits
-///                  BEFORE `pad`
+///     bufs `[q_nchw, qp_nchw, argmax]` — note `stride` sits BEFORE `pad`
 ///   * `nchw_nlc`   `[n*c*ho*wo, c, ho*wo]`, bufs `[qp_nchw, q_pooled]`
 pub fn q_pool_fwd(
     g: &Gpu,
@@ -1005,10 +1003,9 @@ pub fn q_pool_fwd(
 /// Kernel Params:
 ///   * `nlc_nchw`     `[n*c*ho*wo, c, ho*wo]`, bufs `[d_q_pooled, d_qp_nchw]`
 ///   * `maxpool2d_dx` `[n, c, h, w, K, stride, pad, ho, wo]`,
-///                    bufs `[d_qp_nchw, argmax, d_q_nchw]`, threads `n*c*h*w`
+///     bufs `[d_qp_nchw, argmax, d_q_nchw]`, threads `n*c*h*w`
 ///   * `nchw_nlc`     `[n*c*h*w, c, h*w]`, bufs `[d_q_nchw, d_q_c]`
 ///   * `row_scatter`  `[rows_in, c, 3*rows_in]`, bufs `[q_idx, d_q_c, d_qkv]`
-#[allow(clippy::too_many_arguments)]
 pub fn q_pool_bwd(
     g: &Gpu,
     ids: &VitQPoolIds,
@@ -1183,7 +1180,6 @@ fn num_gcd(a: u64, b: u64) -> u64 {
 ///   * `attn_apply_cross`   `[1, heads, qn, kn, hd, kv_stride,
 ///     k0*kv_stride + v_off, d_out]`, bufs `[probs, kv, ctx]`,
 ///     slices `[(probs_at,0), (0,0), (q0*d_out,0)]`, threads `heads*qn*hd`
-#[allow(clippy::too_many_arguments)]
 pub fn cross_q_fwd(
     g: &Gpu,
     ids: &crate::block::CrossIds,
@@ -1248,7 +1244,6 @@ pub fn cross_q_fwd(
 ///     bufs `[dscores, kv, d_q]`, threads `heads*qn*hd`
 ///   * `attn_bwd_dk_cross`      same 9 words,
 ///     bufs `[dscores, q, d_kv]`, threads `heads*kn*hd`
-#[allow(clippy::too_many_arguments)]
 pub fn cross_q_bwd(
     g: &Gpu,
     kb: &VitBwdIds,

@@ -89,8 +89,8 @@ impl Pair {
         for o in 0..self.out {
             let brow = &self.b[o * self.r..(o + 1) * self.r];
             let wrow = &mut out_buf[(row0 + o) * row_stride + col0..(row0 + o) * row_stride + col0 + self.inn];
-            for k in 0..self.r {
-                let bok = brow[k] * scale;
+            for (k, &bk) in brow.iter().enumerate() {
+                let bok = bk * scale;
                 if bok == 0.0 {
                     continue;
                 }

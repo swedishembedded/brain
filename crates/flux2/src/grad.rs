@@ -476,9 +476,9 @@ fn attn_fwd<T: Fp>(qr: &[T], kr: &[T], v: &[T], n: usize, nh: usize, hd: usize) 
                 }
             }
             let mut den = T::ZERO;
-            for j in 0..n {
-                row[j] = (row[j] - mx).exp();
-                den += row[j];
+            for v in row.iter_mut() {
+                *v = (*v - mx).exp();
+                den += *v;
             }
             for j in 0..n {
                 let p = row[j] / den;

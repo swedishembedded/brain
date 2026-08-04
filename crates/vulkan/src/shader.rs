@@ -35,10 +35,14 @@ pub fn wgsl_to_spirv(src: &str) -> Result<Vec<u32>, String> {
     // Back end: naga IR -> SPIR-V. Target Vulkan 1.1-class SPIR-V 1.3 so the
     // module is consumable by a 1.3 device. Default Options maps group/binding
     // -> descriptor set/binding directly (empty binding_map + fake bindings).
-    let mut options = naga::back::spv::Options::default();
-    options.lang_version = (1, 3);
+    let mut flags = naga::back::spv::Options::default().flags;
     // Strip debug info regardless of build profile for a lean module.
-    options.flags.remove(naga::back::spv::WriterFlags::DEBUG);
+    flags.remove(naga::back::spv::WriterFlags::DEBUG);
+    let options = naga::back::spv::Options {
+        lang_version: (1, 3),
+        flags,
+        ..Default::default()
+    };
 
     let words = naga::back::spv::write_vec(&module, &info, &options, None)
         .map_err(|e| format!("SPIR-V emit error: {e:?}"))?;

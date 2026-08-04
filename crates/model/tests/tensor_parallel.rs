@@ -56,7 +56,9 @@ fn bwd_kernels() -> Vec<(&'static str, &'static str)> {
 /// returns `(z, dx, dw_fc, dw_proj)` — `z`/`dx` are **partial** (all-reduce across
 /// TP ranks for the full values); `dw_fc`/`dw_proj` are the local weight-shard
 /// gradients. With `ffl==ff` this is the whole single-GPU MLP.
-#[allow(clippy::type_complexity)]
+// The trailing (m, d, ffl) are the GEMM dims this oracle must be told
+// explicitly — it exists to be dimension-swept against the sharded path.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn mlp_fwd_bwd(gpu: &Gpu, x: &[f32], w_fc: &[f32], w_proj: &[f32], dz: &[f32], m: usize, d: usize, ffl: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
     let (mu, du, fu) = (m as u32, d as u32, ffl as u32);
     let xb = gpu.storage_init("x", x);
@@ -90,6 +92,8 @@ fn mlp_fwd_bwd(gpu: &Gpu, x: &[f32], w_fc: &[f32], w_proj: &[f32], dz: &[f32], m
 /// Multi-head self-attention **context** `[m, d_local]` for `nh_local` heads:
 /// qkv = X·Wqkv^T, causal scores, softmax, apply. `Wqkv` is `[3·d_local, d]`.
 /// (No output projection — the caller does that row-parallel.)
+// (b, t, d, nh_local, hd) is the attention shape, swept by the caller.
+#[allow(clippy::too_many_arguments)]
 fn attn_ctx(gpu: &Gpu, x: &[f32], w_qkv: &[f32], b: usize, t: usize, d: usize, nh_local: usize, hd: usize) -> Vec<f32> {
     let m = b * t;
     let dl = nh_local * hd; // local hidden
@@ -222,8 +226,8 @@ fn tensor_parallel_mlp_matches_single_gpu() {
     eprintln!("TP MLP ({world}-way) vs single-GPU: rel {rel:.2e}");
     assert!(rel < 1e-4, "tensor-parallel MLP diverged: rel {rel:.2e}");
     // every rank must hold the identical reduced result
-    for r in 1..world {
-        assert_eq!(*results[r].lock().unwrap(), z_tp, "rank {r} disagrees after all-reduce");
+    for (r, res) in results.iter().enumerate().skip(1) {
+        assert_eq!(*res.lock().unwrap(), z_tp, "rank {r} disagrees after all-reduce");
     }
 }
 
@@ -289,8 +293,8 @@ fn tensor_parallel_mlp_training_matches_single_gpu() {
     let rdx = rel(&dx0, &dx_tp);
     // dW_fc: rank shards stack over ff -> [ff, d].
     let mut dwfc_tp = Vec::new();
-    for r in 0..world {
-        dwfc_tp.extend_from_slice(&out[r].lock().unwrap().1);
+    for o in out.iter() {
+        dwfc_tp.extend_from_slice(&o.lock().unwrap().1);
     }
     let rwfc = rel(&dwfc0, &dwfc_tp);
     // dW_proj: rank shards are column blocks of [d, ff]; reassemble per row.

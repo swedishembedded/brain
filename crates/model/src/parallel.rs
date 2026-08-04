@@ -59,8 +59,11 @@ use crate::{Batch, Model};
 
 /// Host-resident fused all-reduce + AdamW state (master weights + moments in RAM).
 struct FusedAdam {
-    state: Vec<(String, Vec<f32>, Vec<f32>, Vec<f32>)>, // name, master, m, v
+    state: Vec<AdamSlot>,
 }
+
+/// One parameter's host-resident optimiser state: `(name, master, m, v)`.
+type AdamSlot = (String, Vec<f32>, Vec<f32>, Vec<f32>);
 
 /// One full model replica per GPU, trained data-parallel. Generic over the model.
 pub struct DataParallel<M: Model> {
@@ -222,7 +225,6 @@ impl<M: Model + Send> DataParallel<M> {
         let DataParallel { replicas, fused, .. } = self;
         let fused = fused.as_ref().unwrap();
         std::thread::scope(|s| {
-            let fused = fused;
             for r in replicas.iter_mut() {
                 s.spawn(move || {
                     for (n, w, _, _) in &fused.state {

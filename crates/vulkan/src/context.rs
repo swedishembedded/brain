@@ -94,6 +94,15 @@ impl CoopMatCaps {
     }
 }
 
+/// Picks which enumerated physical device to bind, by index — how
+/// `backend-vulkan` resolves a card by canonical identity rather than position.
+///
+/// The `'a` is load-bearing: a bare `dyn Fn` in a type alias defaults to
+/// `+ 'static`, which would force every caller's closure to outlive the
+/// process — the elided lifetime of the `&dyn Fn` argument this replaced.
+pub type PhysicalDeviceSelect<'a> =
+    dyn Fn(&ash::Instance, &[vk::PhysicalDevice]) -> Result<usize, String> + 'a;
+
 // Some fields (entry, physical_device, queue_family_index) are retained for
 // ownership/lifetime and for the documented follow-up forward port; they are
 // not all read by the matmul slice yet.
@@ -166,15 +175,11 @@ impl VkContext {
     /// (an index into the enumerated list) instead of the built-in ranking —
     /// how `backend-vulkan` binds the card the canonical device registry
     /// resolved, by identity rather than position.
-    pub fn new_select(
-        select: &dyn Fn(&ash::Instance, &[vk::PhysicalDevice]) -> Result<usize, String>,
-    ) -> Result<VkContext, String> {
+    pub fn new_select(select: &PhysicalDeviceSelect<'_>) -> Result<VkContext, String> {
         unsafe { Self::new_inner(Some(select)) }
     }
 
-    unsafe fn new_inner(
-        select: Option<&dyn Fn(&ash::Instance, &[vk::PhysicalDevice]) -> Result<usize, String>>,
-    ) -> Result<VkContext, String> {
+    unsafe fn new_inner(select: Option<&PhysicalDeviceSelect<'_>>) -> Result<VkContext, String> {
         let entry = ash::Entry::load().map_err(|e| format!("failed to load Vulkan loader: {e}"))?;
 
         let app_name = CString::new("moe-rs-vk").unwrap();
@@ -252,9 +257,13 @@ impl VkContext {
                 )
                 .pfn_user_callback(Some(vk_debug_callback));
             let loader = ash::ext::debug_utils::Instance::new(&entry, &instance);
-            if let Ok(m) = loader.create_debug_utils_messenger(&info, None) {
-                // Leak for the process lifetime (diagnostic only).
-                std::mem::forget((loader, m));
+            // Deliberately never destroyed: the messenger lives for the process
+            // lifetime (diagnostic only) and is reclaimed with the instance.
+            // Neither the loader nor the handle implements `Drop`, so letting
+            // both bindings fall out of scope already leaks the messenger — a
+            // `mem::forget` here would be a no-op that only looked deliberate.
+            if loader.create_debug_utils_messenger(&info, None).is_err() {
+                eprintln!("[vk] failed to install the debug messenger");
             }
             eprintln!("[vk] validation layer + synchronization validation enabled");
         }

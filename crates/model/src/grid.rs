@@ -145,12 +145,12 @@ mod tests {
         for &(tp, pp, dp) in &[(1, 1, 1), (2, 1, 1), (1, 2, 1), (1, 1, 2), (2, 2, 2), (4, 3, 2), (2, 1, 3)] {
             let g = Grid::new(tp, pp, dp);
             let mut seen = vec![false; g.world_size()];
-            for r in 0..g.world_size() {
+            for (r, slot) in seen.iter_mut().enumerate() {
                 let c = g.coord(r);
                 assert_eq!(g.rank(c), r, "roundtrip {r} in {g:?}");
                 assert!(c.tp < tp && c.pp < pp && c.dp < dp);
-                assert!(!seen[r], "coord not unique");
-                seen[r] = true;
+                assert!(!*slot, "coord not unique");
+                *slot = true;
             }
             assert!(seen.into_iter().all(|x| x), "grid covers every rank exactly once");
         }

@@ -160,7 +160,7 @@ fn scale_chan_dg_matches() {
     let s = g.step(SCALE_CHAN_DG, &[&xb, &wb, &dg], &[total as u32, c as u32, inner as u32], c as u32);
     g.submit(&[], &[s]);
     let dg_a = g.read(&dg, c);
-    for ci in 0..c {
-        assert_close(&format!("scale_chan dg[{ci}]"), dg_a[ci], numeric_grad(&fwd_s, &scale, &w, ci));
+    for (ci, &got) in dg_a.iter().enumerate() {
+        assert_close(&format!("scale_chan dg[{ci}]"), got, numeric_grad(&fwd_s, &scale, &w, ci));
     }
 }

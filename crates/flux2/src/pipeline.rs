@@ -318,7 +318,7 @@ impl Pipeline {
         o: &GenOpts,
         cancel: &capability::CancelToken,
         mut progress: impl FnMut(u32, u32, &str),
-    ) -> Result<(Vec<u8>, u32, u32), String> {
+    ) -> BatchOutcome {
         let req = BatchRequest { prompt: prompt.to_string(), refs: refs.to_vec(), opts: o.clone(), cancel: cancel.clone() };
         self.generate_batch(std::slice::from_ref(&req), &mut progress)
             .pop()
@@ -355,8 +355,8 @@ impl Pipeline {
         &self,
         reqs: &[BatchRequest],
         progress: &mut dyn FnMut(u32, u32, &str),
-    ) -> Vec<Result<(Vec<u8>, u32, u32), String>> {
-        let mut out: Vec<Result<(Vec<u8>, u32, u32), String>> = (0..reqs.len()).map(|_| Err("not run".to_string())).collect();
+    ) -> Vec<BatchOutcome> {
+        let mut out: Vec<BatchOutcome> = (0..reqs.len()).map(|_| Err("not run".to_string())).collect();
         // Partition by position ids: one slab layout per group.
         let mut groups: Vec<(Vec<u32>, Vec<usize>)> = Vec::new();
         for (i, r) in reqs.iter().enumerate() {
@@ -401,7 +401,7 @@ impl Pipeline {
         reqs: &[BatchRequest],
         ids: &[u32],
         members: &[usize],
-        out: &mut [Result<(Vec<u8>, u32, u32), String>],
+        out: &mut [BatchOutcome],
         progress: &mut dyn FnMut(u32, u32, &str),
     ) {
         let cfg = &self.cfg;
@@ -588,6 +588,12 @@ impl Pipeline {
         }
     }
 }
+
+
+/// One generated image `(rgb8, width, height)`, or why it failed. Named because
+/// it appears in the batch entry point, its per-group helper and the
+/// single-image wrapper, which must not drift apart.
+pub type BatchOutcome = Result<(Vec<u8>, u32, u32), String>;
 
 /// One generation in a [`Pipeline::generate_batch`] call: everything
 /// `Pipeline::generate` takes, owned, plus its cancellation token.

@@ -50,6 +50,11 @@ impl FlatAdam {
     /// the **mean** gradient (`sum / world`), with an optional global-norm clip.
     /// Returns the updated weights (identical on every rank). `t` is the 1-based
     /// step (Adam bias correction).
+    // (coll, rank) address the collective and (t, lr, wd, clip) are AdamW's
+    // hyperparameters. Boxing the latter into a struct would need the same
+    // struct threaded through `DataParallel::step` and every caller in
+    // `crates/{qwen,gpt,moe}`; the flat list matches `optim`'s existing API.
+    #[allow(clippy::too_many_arguments)]
     pub fn step(&mut self, coll: &dyn Collective, rank: usize, local_grad: Vec<f32>, t: u32, lr: f32, wd: f32, clip: Option<f32>) -> &[f32] {
         assert_eq!(local_grad.len(), self.master.len(), "grad/param length mismatch");
         let summed = coll.all_reduce(rank, local_grad);
@@ -69,8 +74,8 @@ impl FlatAdam {
         let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
         let bc1 = 1.0 - b1.powi(t as i32);
         let bc2 = 1.0 - b2.powi(t as i32);
-        for i in 0..self.master.len() {
-            let g = summed[i] * eff;
+        for (i, &s) in summed.iter().enumerate().take(self.master.len()) {
+            let g = s * eff;
             self.m[i] = b1 * self.m[i] + (1.0 - b1) * g;
             self.v[i] = b2 * self.v[i] + (1.0 - b2) * g * g;
             let mhat = self.m[i] / bc1;
@@ -131,6 +136,8 @@ impl DdpOptimizer {
 
     /// One optimiser step: flatten this replica's grads, all-reduce + AdamW via
     /// [`FlatAdam::step`], scatter the new weights back to the model.
+    // Same AdamW hyperparameter list as [`FlatAdam::step`], which it forwards to.
+    #[allow(clippy::too_many_arguments)]
     pub fn step<M: Model>(&mut self, model: &M, coll: &dyn Collective, rank: usize, t: u32, lr: f32, wd: f32, clip: Option<f32>) {
         let mut flat = Vec::with_capacity(self.adam.master.len());
         for n in &self.names {

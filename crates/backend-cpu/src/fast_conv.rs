@@ -248,6 +248,12 @@ fn conv2d_impl(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32], sb: Option<(
         let cptr = SendMutPtr(y_img.as_mut_ptr());
         let starts: Vec<usize> = (0..psz).step_by(band).collect();
         starts.par_iter().for_each(|&pa| {
+            // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
+            // Rust 2021 disjoint capture a closure that only touches `cptr.0`
+            // captures that raw pointer directly, which is not `Send`. Verified by
+            // deletion — it fails with E0277 `*mut f32` cannot be shared between
+            // threads safely.
+            #[allow(clippy::redundant_locals)]
             let cptr = cptr;
             let pb = (pa + band).min(psz);
             // Reusable per-band im2col scratch (general conv only).
@@ -345,6 +351,10 @@ unsafe fn build_im2col_panel(
 /// `C[co, j] = Σ_kg A[co,kg]·B[kg,j]` for `co∈0..m`, `j∈0..ncols`. `B` rows have
 /// stride `bstride`, `C` rows stride `cstride`; `a`/`b_base`/`c_base` are bases.
 /// Scalar reference path. # Safety: caller guarantees disjoint C columns.
+// A raw-pointer GEMM inner kernel: the arity is the tile's base pointers and
+// strides. `gemm_cols_scalar` and `gemm_cols_avx2` MUST keep identical
+// signatures — they are selected interchangeably at the call site.
+#[allow(clippy::too_many_arguments)]
 unsafe fn gemm_cols_scalar(
     m: usize, kg: usize, a: *const f32, b_base: *const f32, bstride: usize,
     c_base: *mut f32, cstride: usize, ncols: usize,
@@ -366,6 +376,10 @@ unsafe fn gemm_cols_scalar(
 /// (channel, column). # Safety: requires avx2+fma; disjoint C columns per call.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
+// A raw-pointer GEMM inner kernel: the arity is the tile's base pointers and
+// strides. `gemm_cols_scalar` and `gemm_cols_avx2` MUST keep identical
+// signatures — they are selected interchangeably at the call site.
+#[allow(clippy::too_many_arguments)]
 unsafe fn gemm_cols_avx2(
     m: usize, kg: usize, a: *const f32, b_base: *const f32, bstride: usize,
     c_base: *mut f32, cstride: usize, ncols: usize,
@@ -572,6 +586,12 @@ mod winograd {
         {
             let uptr = SendMutPtr(u.as_mut_ptr());
             (0..cout).into_par_iter().for_each(|co| {
+                // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
+                // Rust 2021 disjoint capture a closure that only touches `uptr.0`
+                // captures that raw pointer directly, which is not `Send`. Verified by
+                // deletion — it fails with E0277 `*mut f32` cannot be shared between
+                // threads safely.
+                #[allow(clippy::redundant_locals)]
                 let uptr = uptr;
                 let mut uf = [0.0f32; 16];
                 for ci in 0..cin {
@@ -592,6 +612,12 @@ mod winograd {
             {
                 let vptr = SendMutPtr(v.as_mut_ptr());
                 (0..cin).into_par_iter().for_each(|ci| {
+                    // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
+                    // Rust 2021 disjoint capture a closure that only touches `vptr.0`
+                    // captures that raw pointer directly, which is not `Send`. Verified by
+                    // deletion — it fails with E0277 `*mut f32` cannot be shared between
+                    // threads safely.
+                    #[allow(clippy::redundant_locals)]
                     let vptr = vptr;
                     let xc = &x_img[ci * h * wd..(ci + 1) * h * wd];
                     let mut d = [0.0f32; 16];
@@ -628,6 +654,12 @@ mod winograd {
             {
                 let mptr = SendMutPtr(m.as_mut_ptr());
                 (0..16usize).into_par_iter().for_each(|t| {
+                    // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
+                    // Rust 2021 disjoint capture a closure that only touches `mptr.0`
+                    // captures that raw pointer directly, which is not `Send`. Verified by
+                    // deletion — it fails with E0277 `*mut f32` cannot be shared between
+                    // threads safely.
+                    #[allow(clippy::redundant_locals)]
                     let mptr = mptr;
                     let a = &u[t * cout * cin..(t + 1) * cout * cin];
                     let b = &v[t * cin * nt..(t + 1) * cin * nt];
@@ -646,6 +678,12 @@ mod winograd {
             let y_img = &mut y[n * cout * ho * wo..(n + 1) * cout * ho * wo];
             let yptr = SendMutPtr(y_img.as_mut_ptr());
             (0..cout).into_par_iter().for_each(|co| {
+                // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
+                // Rust 2021 disjoint capture a closure that only touches `yptr.0`
+                // captures that raw pointer directly, which is not `Send`. Verified by
+                // deletion — it fails with E0277 `*mut f32` cannot be shared between
+                // threads safely.
+                #[allow(clippy::redundant_locals)]
                 let yptr = yptr;
                 let (scale, bias) = match sb {
                     Some((sb, _)) => (sb[2 * co], sb[2 * co + 1]),
@@ -828,6 +866,9 @@ mod tests {
         assert!(maxerr < 2e-3, "rel err {maxerr} too large for {p:?}");
     }
 
+    // The eight fields of `ConvParams` that are not derived; this is a
+    // literal constructor for the test table.
+    #[allow(clippy::too_many_arguments)]
     fn cp(n: usize, cin: usize, h: usize, w: usize, cout: usize, k: usize, stride: usize, pad: usize) -> ConvParams {
         let ho = (h + 2 * pad - k) / stride + 1;
         let wo = (w + 2 * pad - k) / stride + 1;

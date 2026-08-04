@@ -12,6 +12,9 @@ fn lcg(seed: &mut u64) -> f32 {
     ((*seed >> 33) as f32 / (1u64 << 31) as f32 - 1.0) * 0.5
 }
 
+// Conv dims + the two input tensors: the reference this test exists to
+// compare the JIT against, so it takes the shape explicitly.
+#[allow(clippy::too_many_arguments)]
 fn scalar_conv(
     n: usize, cin: usize, h: usize, w: usize, cout: usize, k: usize, stride: usize, pad: usize,
     x: &[f32], wt: &[f32],

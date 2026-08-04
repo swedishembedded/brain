@@ -125,8 +125,8 @@ pub fn plan_balanced(cost: &ShardCost, gpus: &[usize]) -> Vec<Shard> {
     let inf = f64::INFINITY;
     let mut best = vec![vec![inf; l + 1]; k];
     let mut cut = vec![vec![0usize; l + 1]; k];
-    for i in 0..=l {
-        best[0][i] = stage_cost(0, i, 0);
+    for (i, b) in best[0].iter_mut().enumerate() {
+        *b = stage_cost(0, i, 0);
     }
     for s in 1..k {
         for i in 0..=l {
@@ -154,8 +154,11 @@ pub fn plan_balanced(cost: &ShardCost, gpus: &[usize]) -> Vec<Shard> {
 /// Host-resident fused optimiser state (master weights + AdamW moments in RAM),
 /// covering the union of all stages' parameters.
 struct FusedAdam {
-    state: Vec<(String, Vec<f32>, Vec<f32>, Vec<f32>)>, // name, master, m, v
+    state: Vec<AdamSlot>,
 }
+
+/// One parameter's host-resident optimiser state: `(name, master, m, v)`.
+type AdamSlot = (String, Vec<f32>, Vec<f32>, Vec<f32>);
 
 /// A pipeline of decoder stages across GPUs, for any [`Shardable`] model.
 pub struct Pipeline<M: Shardable> {
