@@ -43,6 +43,13 @@ async fn messages(State(state): State<AppState>, body: Bytes) -> Response {
         Ok(x) => x,
         Err(e) => return e.into_response(),
     };
+    // A legacy short name (e.g. "mock") is a deprecation, not a second id: it
+    // resolves to its canonical `brain/<name>` form here, before the catalog
+    // lookup and before it is echoed back into any response body (see
+    // `modelref::alias`'s module docs). OpenAI/OpenRouter get the same
+    // treatment inside `catalog::candidates`; Anthropic has no candidate list
+    // (exact-match only), so it resolves directly.
+    let model = brain_modelref::alias::canonical(&model).map(str::to_string).unwrap_or(model);
     if !catalog::resolve_chat(&state.exec, &model) {
         return ApiError::model_not_found(PROVIDER, &model).into_response();
     }

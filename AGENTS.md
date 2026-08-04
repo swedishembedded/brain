@@ -735,6 +735,23 @@ per-scenario table and the findings so far.
      this bullet in sync.
   A model that trains and passes parity but cannot be discovered, scheduled, batched,
   and driven over D-Bus is **incomplete**.
+- **Every served model is named `<vendor>/<repo>[-<QUANT>]`, matching its
+  upstream URL exactly (case included) — never a bare short name.** `brain/`,
+  `local/` and `test/` are reserved vendors for built-ins, hand-placed files,
+  and test mocks respectively (`brain/mock`, `brain/yolo`, `brain/z-image`, …);
+  everything else names a real HuggingFace repo (`Qwen/Qwen3-0.6B`,
+  `Qwen/Qwen3-0.6B-Q4_K_M`). The grammar, the reserved-vendor list, and the
+  legacy-name deprecation table live in **`crates/modelref`**
+  (`ModelRef`/`Quant`, `modelref::alias`); the on-disk `<vendor>/<repo>/…`
+  layout and the fetch resolution ladder live in **`crates/modelstore`**. A
+  `capability::Manifest`'s `model` field is **always** the canonical id — never
+  a legacy short name. Adding a model means adding its fully-qualified ref, not
+  a convenient alias; if it already shipped under a short name, add a row to
+  `modelref::alias::ROWS` instead of breaking existing callers, and consume it
+  ONLY at the two dispatch seams that resolve a client-supplied name against the
+  catalog (`apiserve::catalog::candidates` for HTTP, the D-Bus/`brain do` model
+  argument) — never bake it into a manifest or a test fixture. See
+  `docs/models/naming.md`.
 - **The API surface must stay WATERTIGHT — every change triggers a full security
   audit AND is covered by automated security tests.** Any change to `crates/apiserve`
   (the HTTP providers) OR `crates/dbus` (the D-Bus surface) — a route, handler, auth

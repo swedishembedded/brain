@@ -28,7 +28,7 @@ use serde_json::json;
 use crate::{Predictor, ZipConfig};
 
 /// The model id used on the CLI (`brain do depth …`) and the event API.
-pub const MODEL: &str = "depth";
+pub const MODEL: &str = "brain/depth";
 
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {

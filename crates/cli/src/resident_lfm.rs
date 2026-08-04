@@ -58,9 +58,11 @@ impl LfmResident {
     }
 
     /// Explicit-path constructor (the perf harness builds it directly): the
-    /// family constant as the catalog id.
+    /// canonical brain/ fallback as the catalog id (see
+    /// `resident_llm.rs::GptResident::from_env`'s comment -- no upstream
+    /// vendor/repo provenance from an env-loaded checkpoint).
     pub fn new(weights: &str, tokenizer_path: &str) -> Result<LfmResident, String> {
-        Self::from_card(weights, &ModelCard::new("lfm", "lfm"), Some(tokenizer_path))
+        Self::from_card(weights, &ModelCard::new("brain/lfm", "lfm"), Some(tokenizer_path))
     }
 
     /// Construct under the card's id. The encoder tokenizes eagerly, so a

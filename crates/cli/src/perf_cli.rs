@@ -537,7 +537,7 @@ fn build_lfm(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
             .set("text", serde_json::json!(text))
             .set("max_tokens", serde_json::json!(req.input_artifacts))
     });
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "lfm", "embed", "sequence", info, build)))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, lfm::caps::MODEL, "embed", "sequence", info, build)))
 }
 
 /// `BRAIN_FORECAST_HORIZON` / `BRAIN_FORECAST_SAMPLES` (defaults 64 / 1) — the
@@ -610,7 +610,7 @@ fn build_kronos(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         ("samples".to_string(), serde_json::json!(samples)),
         ("engine".to_string(), serde_json::json!("residency-executor")),
     ];
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "kronos", "forecast", "forecast", info, forecast_build(horizon, samples))))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, crate::resident_forecast::KRONOS_MODEL, "forecast", "forecast", info, forecast_build(horizon, samples))))
 }
 
 /// `chronos2:<weights>` — the Chronos-2 universal forecaster behind the residency
@@ -626,7 +626,7 @@ fn build_chronos2(path: &str) -> Result<Box<dyn PerfTarget>, String> {
         ("horizon".to_string(), serde_json::json!(horizon)),
         ("engine".to_string(), serde_json::json!("residency-executor")),
     ];
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "chronos2", "forecast", "forecast", info, forecast_build(horizon, 1))))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, crate::resident_forecast::CHRONOS2_MODEL, "forecast", "forecast", info, forecast_build(horizon, 1))))
 }
 
 /// `fincast:<weights>` — the FinCast financial forecaster behind the residency
@@ -642,7 +642,7 @@ fn build_fincast(path: &str) -> Result<Box<dyn PerfTarget>, String> {
         ("horizon".to_string(), serde_json::json!(horizon)),
         ("engine".to_string(), serde_json::json!("residency-executor")),
     ];
-    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, "fincast", "forecast", "forecast", info, forecast_build(horizon, 1))))
+    Ok(Box::new(perf::targets::ExecutorTarget::new(exec, crate::resident_forecast::FINCAST_MODEL, "forecast", "forecast", info, forecast_build(horizon, 1))))
 }
 
 /// `flux2[:<W>x<H>x<steps>[:<precision>]]` — FLUX.2 Klein (klein-4b, weights from the

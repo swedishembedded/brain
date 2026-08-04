@@ -1147,7 +1147,7 @@ mod tests {
     impl capability::Provider for DemoProvider {
         fn manifest(&self) -> capability::Manifest {
             use capability::Action as _;
-            capability::Manifest::new("demo", "demo", vec![DemoAction.spec()])
+            capability::Manifest::new("brain/demo", "demo", vec![DemoAction.spec()])
         }
         fn action(&self, name: &str) -> Option<Arc<dyn capability::Action>> {
             (name == "echo").then(|| Arc::new(DemoAction) as Arc<dyn capability::Action>)
@@ -1163,14 +1163,14 @@ mod tests {
         let out = ctrl.feed_line(r#"{"event":"manifest_request"}"#);
         match &out[0].event {
             Event::ManifestResult { manifests } => {
-                assert_eq!(manifests[0]["model"], "demo");
+                assert_eq!(manifests[0]["model"], "brain/demo");
                 assert_eq!(manifests[0]["actions"][0]["name"], "echo");
             }
             e => panic!("expected manifest_result, got {e:?}"),
         }
 
         // invocation → progress + result (result blob is base64)
-        let out = ctrl.feed_line(r#"{"event":"action_request","model":"demo","action":"echo","params":{"text":"ab","times":3}}"#);
+        let out = ctrl.feed_line(r#"{"event":"action_request","model":"brain/demo","action":"echo","params":{"text":"ab","times":3}}"#);
         assert!(matches!(&out[0].event, Event::ActionProgress { total: 1, .. }));
         match &out[1].event {
             Event::ActionResult { outputs, blobs } => {
@@ -1183,7 +1183,7 @@ mod tests {
         }
 
         // validation error surfaces as a structured error, not a panic
-        let out = ctrl.feed_line(r#"{"event":"action_request","model":"demo","action":"echo","params":{}}"#);
+        let out = ctrl.feed_line(r#"{"event":"action_request","model":"brain/demo","action":"echo","params":{}}"#);
         assert!(matches!(&out[0].event, Event::Error { .. }));
         // unknown model
         let out = ctrl.feed_line(r#"{"event":"action_request","model":"nope","action":"echo","params":{}}"#);

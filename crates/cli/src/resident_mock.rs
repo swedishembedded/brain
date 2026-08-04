@@ -36,7 +36,7 @@ use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::{json, Value};
 
 /// The catalog id the mock registers under.
-pub const MODEL: &str = "mock";
+pub const MODEL: &str = "brain/mock";
 
 /// The mock model family (no state — every action is a pure function of its inputs).
 pub struct MockResident;

@@ -34,9 +34,9 @@ from brain_py.dbus import BrainDBus  # noqa: E402
 from brain_py.image import save_ppm  # noqa: E402
 
 #: The default `--model` every imagegen example uses (they share this constant
-#: rather than each hardcoding it). Override per-invocation with `--model mock`
+#: rather than each hardcoding it). Override per-invocation with `--model brain/mock`
 #: to run against the weight-free mock instead of real FLUX.2 Klein weights.
-MODEL = "flux2-klein"
+MODEL = "brain/flux2-klein"
 
 
 def run_streaming(brain: BrainDBus, model: str, action: str, params: dict, out: str, **kw) -> int:
@@ -68,7 +68,7 @@ def run_streaming(brain: BrainDBus, model: str, action: str, params: dict, out: 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--prompt", required=True, help="text description of the desired image")
-    ap.add_argument("--model", default=MODEL, help="a streaming text2image model (or `mock` for a quick check)")
+    ap.add_argument("--model", default=MODEL, help="a streaming text2image model (or `brain/mock` for a quick check)")
     ap.add_argument("--out", default="flux2.ppm", help="output PPM path")
     ap.add_argument("--width", type=int, default=512, help="output width (multiple of 16)")
     ap.add_argument("--height", type=int, default=512, help="output height (multiple of 16)")
@@ -82,7 +82,7 @@ def main() -> int:
     # `steps`/`variant`/`adapter` are FLUX.2-specific params the mock model
     # doesn't declare — ActionSpec.validate rejects unknown params, so only send
     # them to a model that actually advertises them.
-    if args.model != "mock":
+    if args.model != "brain/mock":
         params["steps"] = args.steps
         params["variant"] = args.variant
         if args.adapter:

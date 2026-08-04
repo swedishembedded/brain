@@ -30,6 +30,15 @@ use crate::stream::StreamTx;
 /// submission until the job's reply fires, so `Cancel` can find any running job.
 type JobRegistry = Arc<Mutex<HashMap<u64, CancelToken>>>;
 
+/// A legacy short name (e.g. `"mock"`) is a deprecation, not a second id: every
+/// D-Bus entry point that takes a `model` string resolves it to its canonical
+/// `brain/<name>` form here, before it ever reaches a [`Job`] or a manifest
+/// lookup -- `Manifest.model` itself is never a legacy name (see
+/// `modelref::alias`'s module docs).
+fn resolve_model_alias(model: String) -> String {
+    brain_modelref::alias::canonical(&model).map(str::to_string).unwrap_or(model)
+}
+
 pub struct Manager {
     executor: Executor,
     version: String,
@@ -211,6 +220,7 @@ impl Manager {
         in_meta: String,
         transport: String,
     ) -> fdo::Result<(String, HashMap<String, ZOwnedFd>, String)> {
+        let model = resolve_model_alias(model);
         let mut inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
         // Armed so ActiveJobs counts it; a Run has no client-visible job id, so its
         // token is only ever dropped here (the reply), never cancelled by Cancel.
@@ -239,6 +249,7 @@ impl Manager {
         in_fds: HashMap<String, ZOwnedFd>,
         in_meta: String,
     ) -> fdo::Result<(u64, ZOwnedFd)> {
+        let model = resolve_model_alias(model);
         let mut inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
         // Arm a cancel token under the returned job id: `Cancel(job)` flips it and
         // the running action aborts at its next poll (see docs/serving-contract.md).
@@ -293,6 +304,7 @@ impl Manager {
     /// `model` is `"nemotron"` (the streaming model) or `"qwen-asr"`.
     #[zbus(out_args("job", "event_fd"))]
     async fn stream_transcribe(&self, model: String, params: String, pcm: ZOwnedFd) -> fdo::Result<(u64, ZOwnedFd)> {
+        let model = resolve_model_alias(model);
         let p: Value = if params.trim().is_empty() { json!({}) } else { serde_json::from_str(&params).map_err(|e| fdo::Error::Failed(format!("params JSON: {e}")))? };
         let sample_rate = p.get("sample_rate").and_then(|v| v.as_u64()).unwrap_or(16000);
         if sample_rate != 16000 {
@@ -425,7 +437,20 @@ mod tests {
     use residency::budget::Budgets;
     use residency::{Device, Executor, Policy};
 
+    use super::resolve_model_alias;
+
     const GB: u64 = 1 << 30;
+
+    #[test]
+    fn resolve_model_alias_maps_a_legacy_short_name_to_its_canonical_form() {
+        assert_eq!(resolve_model_alias("mock".to_string()), "brain/mock");
+    }
+
+    #[test]
+    fn resolve_model_alias_leaves_a_canonical_or_unknown_name_untouched() {
+        assert_eq!(resolve_model_alias("brain/mock".to_string()), "brain/mock");
+        assert_eq!(resolve_model_alias("Qwen/Qwen3-0.6B".to_string()), "Qwen/Qwen3-0.6B");
+    }
 
     /// The `StatsSnapshot`/`StatsStream` payload is built by `brain-stats` from the
     /// executor. Verify the wiring end-to-end (executor -> stats -> JSON): the

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use capability::{Action, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use serde_json::json;
 
-pub const MODEL: &str = "imageops";
+pub const MODEL: &str = "brain/imageops";
 
 pub fn manifest() -> Manifest {
     let size = |s: ActionSpec| {
@@ -117,7 +117,7 @@ mod tests {
 
         // mask_rect: exact white-pixel count, mask media, right byte length.
         let out = reg
-            .run("imageops", "mask_rect", Invocation::new().set("width", json!(64)).set("height", json!(48)).set("x", json!(10)).set("y", json!(8)).set("w", json!(20)).set("h", json!(12)), &mut |_| {})
+            .run(MODEL, "mask_rect", Invocation::new().set("width", json!(64)).set("height", json!(48)).set("x", json!(10)).set("y", json!(8)).set("w", json!(20)).set("h", json!(12)), &mut |_| {})
             .unwrap();
         assert_eq!(out.outputs["white_px"], 20 * 12);
         let m = &out.blobs["mask"];
@@ -126,7 +126,7 @@ mod tests {
         assert_eq!(m.meta, json!({"w":64,"h":48,"c":1}));
 
         // gradient: deterministic (two runs bit-identical), 3-channel, in range.
-        let g = |_: &()| reg.run("imageops", "gradient", Invocation::new().set("width", json!(32)).set("height", json!(32)).set("style", json!("ocean")), &mut |_| {}).unwrap();
+        let g = |_: &()| reg.run(MODEL, "gradient", Invocation::new().set("width", json!(32)).set("height", json!(32)).set("style", json!("ocean")), &mut |_| {}).unwrap();
         let (a, b) = (g(&()), g(&()));
         assert_eq!(a.blobs["image"].bytes, b.blobs["image"].bytes, "gradient must be deterministic");
         let px: Vec<f32> = a.blobs["image"].bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();

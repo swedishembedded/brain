@@ -60,12 +60,12 @@ serving).
 brain lfm import    --hf <hf_dir> --out out/lfm-230m.safetensors
 brain lfm fill-mask --weights F --tokenizer tokenizer.json --text "… <|mask|> …" [--topk K]
 brain lfm embed     --weights F --tokenizer tokenizer.json (--text "…" | --input FILE) [--seq T]
-brain do lfm fill_mask --weights … --tokenizer … --text "…"      # capability surface
+brain do brain/lfm fill_mask --weights … --tokenizer … --text "…"      # capability surface
 brain caps                                                        # discovery
 ```
 
 The event API serves the same actions via generic `action_request` (no new
-Event variant): `{"event":"action_request","model":"lfm","action":"fill_mask",…}`.
+Event variant): `{"event":"action_request","model":"brain/lfm","action":"fill_mask",…}`.
 
 ## Parity (the gate)
 

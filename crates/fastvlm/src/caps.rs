@@ -29,7 +29,7 @@ use gpu_core::Gpu;
 use paramstore::ParamStore;
 use qwen::model::Qwen;
 
-pub const MODEL: &str = "fastvlm";
+pub const MODEL: &str = "brain/fastvlm";
 /// Default FastVLM checkpoint directory — from `$BRAIN_FASTVLM_WEIGHTS`, never a
 /// baked-in absolute path (see AGENTS.md: no absolute paths in source). Empty when
 /// unset, so the `weights` param (or the caller) must supply one.
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn manifest_validates_without_weights() {
         let m = manifest();
-        assert_eq!(m.model, "fastvlm");
+        assert_eq!(m.model, MODEL);
         let a = &m.actions[0];
         assert_eq!(a.name, "caption");
         assert!(a.streaming, "per-token Progress is what gives the perf harness TTFT/ITL");

@@ -117,43 +117,43 @@ run_example() {
 # ------------------------------------------------------------- embedding/
 
 @test "examples/embedding/embed_document.py runs against the mock" {
-  run_example "$REPO/examples/embedding/embed_document.py" --input "$REPO/README.md" --model mock
+  run_example "$REPO/examples/embedding/embed_document.py" --input "$REPO/README.md" --model brain/mock
   [[ "$output" == *"tokens x 8 dim"* ]]
 }
 
 # ------------------------------------------------------------- forecast/
 
 @test "examples/forecast/forecast_client.py runs against the mock" {
-  run_example "$REPO/examples/forecast/forecast_client.py" --model mock --horizon 8
+  run_example "$REPO/examples/forecast/forecast_client.py" --model brain/mock --horizon 8
   [[ "$output" == *"kind=quantiles"* ]]
 }
 
 # ------------------------------------------------------------- imagegen/
 
 @test "examples/imagegen/generate.py runs against the mock" {
-  run_example "$REPO/examples/imagegen/generate.py" --model mock --prompt test --width 8 --height 8 --out "$OUT/mock.ppm"
+  run_example "$REPO/examples/imagegen/generate.py" --model brain/mock --prompt test --width 8 --height 8 --out "$OUT/mock.ppm"
   [ -f "$OUT/mock.ppm" ]
 }
 
 @test "examples/imagegen/edit_image.py skips cleanly without FLUX.2 weights (mock has no edit action)" {
-  run_example "$REPO/examples/imagegen/edit_image.py" --image "$OUT/mock.ppm" --prompt test --model flux2-klein
+  run_example "$REPO/examples/imagegen/edit_image.py" --image "$OUT/mock.ppm" --prompt test --model brain/flux2-klein
 }
 
 @test "examples/imagegen/lora_finetune.py skips cleanly without FLUX.2 weights" {
-  run_example "$REPO/examples/imagegen/lora_finetune.py" --data /nonexistent --save /nonexistent/out.lora --model flux2-klein
+  run_example "$REPO/examples/imagegen/lora_finetune.py" --data /nonexistent --save /nonexistent/out.lora --model brain/flux2-klein
 }
 
 @test "examples/imagegen/cancel_generation.py actually cancels a mock job" {
   # The shared server was started with BRAIN_MOCK_DELAY_MS=300 (see setup_file)
   # so there is real time to call Cancel between the first two progress frames.
-  run_example "$REPO/examples/imagegen/cancel_generation.py" --model mock
+  run_example "$REPO/examples/imagegen/cancel_generation.py" --model brain/mock
   [[ "$output" == *"'cancelled' (expected)"* ]]
 }
 
 # ------------------------------------------------------------- asr/
 
 @test "examples/asr/bench_streams.py skips cleanly without real ASR weights" {
-  run env "$PY" "$REPO/examples/asr/bench_streams.py" --model nemotron --wav /dev/null --streams 1
+  run env "$PY" "$REPO/examples/asr/bench_streams.py" --model brain/nemotron --wav /dev/null --streams 1
   # argparse's own --wav validation may fire before the model check; either a
   # clean skip (77) or a clean argument error is acceptable — a hang or a Python
   # traceback is not.
@@ -161,7 +161,7 @@ run_example() {
 }
 
 @test "examples/asr/transcribe_mic.py skips cleanly without real ASR weights" {
-  run "$PY" "$REPO/examples/asr/transcribe_mic.py" --model nemotron --wav /dev/null
+  run "$PY" "$REPO/examples/asr/transcribe_mic.py" --model brain/nemotron --wav /dev/null
   [ "$status" -eq 77 ]
 }
 

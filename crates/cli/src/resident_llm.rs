@@ -142,8 +142,11 @@ pub struct GptResident {
 impl GptResident {
     pub fn from_env() -> Option<GptResident> {
         let path = std::env::var("BRAIN_GPT_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        // Back-compat: synthesize a card whose id is the family constant.
-        Some(Self::from_card(&path, &ModelCard::new("gpt", "gpt"), None))
+        // Back-compat: synthesize a card whose id is the canonical brain/
+        // fallback (see crates/modelref/src/alias.rs's module docs) -- a
+        // checkpoint loaded straight from an env var carries no upstream
+        // vendor/repo provenance to build a fully-qualified ref from.
+        Some(Self::from_card(&path, &ModelCard::new("brain/gpt", "gpt"), None))
     }
 
     /// Construct under the card's id. `_tokenizer` is unused — GPT is char-level
@@ -209,7 +212,8 @@ pub struct GlmResident {
 impl GlmResident {
     pub fn from_env() -> Option<GlmResident> {
         let path = std::env::var("BRAIN_GLM_WEIGHTS").ok().filter(|p| !p.is_empty())?;
-        Some(Self::from_card(&path, &ModelCard::new("glm", "glm"), None))
+        // See GptResident::from_env's comment: env-loaded, no upstream provenance.
+        Some(Self::from_card(&path, &ModelCard::new("brain/glm", "glm"), None))
     }
 
     /// Construct under the card's id. `_tokenizer` is unused — GLM is char-level.
@@ -275,7 +279,8 @@ impl QwenResident {
     pub fn from_env() -> Option<QwenResident> {
         let path = std::env::var("BRAIN_QWEN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
         let tokenizer = std::env::var("BRAIN_QWEN_TOKENIZER").ok().unwrap_or_default();
-        Some(Self::from_card(&path, &ModelCard::new("qwen", "qwen"), Some(&tokenizer)))
+        // See GptResident::from_env's comment: env-loaded, no upstream provenance.
+        Some(Self::from_card(&path, &ModelCard::new("brain/qwen", "qwen"), Some(&tokenizer)))
     }
 
     /// Construct under the card's id. `tokenizer` is the sibling `tokenizer.json`

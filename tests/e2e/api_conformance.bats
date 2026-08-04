@@ -164,29 +164,43 @@ get_url() {
   get_url openai /v1/models
   [ "$STATUS" -eq 200 ]
   [ "$(jq -r '.object' "$RESP")" = "list" ]
-  [ "$(jq -r '.data | map(.id) | index("mock")' "$RESP")" != "null" ]
+  [ "$(jq -r '.data | map(.id) | index("brain/mock")' "$RESP")" != "null" ]
   validate openai.json ListModelsResponse "$RESP"
 }
 
 @test "openrouter /models: 200, lists mock, validates ModelsListResponse" {
   get_url openrouter /models
   [ "$STATUS" -eq 200 ]
-  [ "$(jq -r '.data | map(.id) | index("mock")' "$RESP")" != "null" ]
+  [ "$(jq -r '.data | map(.id) | index("brain/mock")' "$RESP")" != "null" ]
   validate openrouter.json ModelsListResponse "$RESP"
 }
 
 @test "anthropic /models: 200, lists mock (chat surface)" {
   get_url anthropic /v1/models
   [ "$STATUS" -eq 200 ]
-  [ "$(jq -r '.data | map(.id) | index("mock")' "$RESP")" != "null" ]
+  [ "$(jq -r '.data | map(.id) | index("brain/mock")' "$RESP")" != "null" ]
   [ "$(jq -r '.data[0].type' "$RESP")" = "model" ]
+}
+
+@test "legacy short model name 'mock' still resolves via the alias table, but is never listed" {
+  # A deprecation, not a second id: an old client sending the bare short name
+  # still dispatches successfully...
+  post_json openai /v1/chat/completions \
+    '{"model":"mock","messages":[{"role":"user","content":"hello there"}]}'
+  [ "$STATUS" -eq 200 ]
+  [ "$(jq -r '.choices[0].message.content' "$RESP")" = "You said: hello there" ]
+
+  # ...but GET /models never advertises the legacy form -- brain/mock is the
+  # only id a client discovers.
+  get_url openai /v1/models
+  [ "$(jq -r '.data | map(.id) | index("mock")' "$RESP")" = "null" ]
 }
 
 # ------------------------------------------------------ chat: non-streaming
 
 @test "openai chat non-stream: 200, usage + finish_reason, validates CreateChatCompletionResponse" {
   post_json openai /v1/chat/completions \
-    '{"model":"mock","messages":[{"role":"user","content":"hello there"}]}'
+    '{"model":"brain/mock","messages":[{"role":"user","content":"hello there"}]}'
   [ "$STATUS" -eq 200 ]
   [ "$(jq -r '.object' "$RESP")" = "chat.completion" ]
   [ "$(jq -r '.choices[0].message.content' "$RESP")" = "You said: hello there" ]
@@ -198,7 +212,7 @@ get_url() {
 
 @test "anthropic chat non-stream: 200, maps stop_reason, validates Message" {
   post_json anthropic /v1/messages \
-    '{"model":"mock","max_tokens":64,"messages":[{"role":"user","content":"hello there"}]}'
+    '{"model":"brain/mock","max_tokens":64,"messages":[{"role":"user","content":"hello there"}]}'
   [ "$STATUS" -eq 200 ]
   [ "$(jq -r '.type' "$RESP")" = "message" ]
   [ "$(jq -r '.content[0].text' "$RESP")" = "You said: hello there" ]
@@ -209,7 +223,7 @@ get_url() {
 
 @test "openrouter chat non-stream: 200, native_finish_reason, validates ChatResult" {
   post_json openrouter /chat/completions \
-    '{"model":"mock","messages":[{"role":"user","content":"hello there"}]}'
+    '{"model":"brain/mock","messages":[{"role":"user","content":"hello there"}]}'
   [ "$STATUS" -eq 200 ]
   [ "$(jq -r '.choices[0].message.content' "$RESP")" = "You said: hello there" ]
   [ "$(jq -r '.choices[0].finish_reason' "$RESP")" = "stop" ]
@@ -224,7 +238,7 @@ get_url() {
   curl -sS -N --max-time 20 \
     -H "$(auth_hdr openai)" -H 'content-type: application/json' \
     -X POST "$(base openai)/v1/chat/completions" \
-    -d '{"model":"mock","messages":[{"role":"user","content":"hello there"}],"stream":true,"stream_options":{"include_usage":true}}' \
+    -d '{"model":"brain/mock","messages":[{"role":"user","content":"hello there"}],"stream":true,"stream_options":{"include_usage":true}}' \
     >"$sse"
 
   # Terminal marker is the last data payload.
@@ -255,7 +269,7 @@ get_url() {
   curl -sS -N --max-time 20 \
     -H "$(auth_hdr anthropic)" -H 'content-type: application/json' \
     -X POST "$(base anthropic)/v1/messages" \
-    -d '{"model":"mock","max_tokens":64,"messages":[{"role":"user","content":"hello there"}],"stream":true}' \
+    -d '{"model":"brain/mock","max_tokens":64,"messages":[{"role":"user","content":"hello there"}],"stream":true}' \
     >"$sse"
 
   [ "$(grep '^event: ' "$sse" | head -n1)" = "event: message_start" ]
@@ -291,7 +305,7 @@ get_url() {
   curl -sS -N --max-time 20 \
     -H "$(auth_hdr openrouter)" -H 'content-type: application/json' \
     -X POST "$(base openrouter)/chat/completions" \
-    -d '{"model":"mock","messages":[{"role":"user","content":"hello there"}],"stream":true}' \
+    -d '{"model":"brain/mock","messages":[{"role":"user","content":"hello there"}],"stream":true}' \
     >"$sse"
 
   [ "$(grep '^data: ' "$sse" | tail -n1)" = "data: [DONE]" ]
@@ -314,7 +328,7 @@ get_url() {
 # ------------------------------------------------------------- embeddings
 
 @test "openai /embeddings: 200, validates CreateEmbeddingResponse, float dim 8" {
-  post_json openai /v1/embeddings '{"model":"mock","input":"hello world"}'
+  post_json openai /v1/embeddings '{"model":"brain/mock","input":"hello world"}'
   [ "$STATUS" -eq 200 ]
   [ "$(jq -r '.object' "$RESP")" = "list" ]
   [ "$(jq -r '.data[0].embedding | length' "$RESP")" -eq 8 ]
@@ -326,7 +340,7 @@ get_url() {
   # The base64 form is a string, which the spec's array-typed `embedding` does not
   # admit (OpenAI's own schema only models the float form), so — like the Rust api.rs
   # harness — we assert the decode, not the schema.
-  post_json openai /v1/embeddings '{"model":"mock","input":"hello","encoding_format":"base64"}'
+  post_json openai /v1/embeddings '{"model":"brain/mock","input":"hello","encoding_format":"base64"}'
   [ "$STATUS" -eq 200 ]
   [ "$(jq -r '.data[0].embedding | type' "$RESP")" = "string" ]
   local n=$(jq -r '.data[0].embedding' "$RESP" | base64 -d | wc -c)
@@ -334,7 +348,7 @@ get_url() {
 }
 
 @test "openrouter /embeddings: 200, validates CreateEmbeddingResponse" {
-  post_json openrouter /embeddings '{"model":"mock","input":["a","b"]}'
+  post_json openrouter /embeddings '{"model":"brain/mock","input":["a","b"]}'
   [ "$STATUS" -eq 200 ]
   [ "$(jq -r '.data | length' "$RESP")" -eq 2 ]
   validate openai.json CreateEmbeddingResponse "$RESP"
@@ -343,7 +357,7 @@ get_url() {
 # --------------------------------------------------------- image generation
 
 @test "openai /images/generations: 200, validates ImagesResponse, b64_json decodes to PNG" {
-  post_json openai /v1/images/generations '{"model":"mock","prompt":"a red cat","size":"256x256"}'
+  post_json openai /v1/images/generations '{"model":"brain/mock","prompt":"a red cat","size":"256x256"}'
   [ "$STATUS" -eq 200 ]
   [ "$(jq -r '.created' "$RESP")" != "null" ]
   validate openai.json ImagesResponse "$RESP"
@@ -352,7 +366,7 @@ get_url() {
 }
 
 @test "openrouter /images/generations: 200, b64_json decodes to PNG" {
-  post_json openrouter /images/generations '{"model":"mock","prompt":"a dog","size":"256x256"}'
+  post_json openrouter /images/generations '{"model":"brain/mock","prompt":"a dog","size":"256x256"}'
   [ "$STATUS" -eq 200 ]
   validate openai.json ImagesResponse "$RESP"
   local sig=$(jq -r '.data[0].b64_json' "$RESP" | base64 -d | od -An -tx1 -N8 | tr -d ' \n')
@@ -363,7 +377,7 @@ get_url() {
 
 @test "anthropic /v1/messages/count_tokens: 200, {input_tokens} > 0" {
   post_json anthropic /v1/messages/count_tokens \
-    '{"model":"mock","messages":[{"role":"user","content":"count these tokens please"}]}'
+    '{"model":"brain/mock","messages":[{"role":"user","content":"count these tokens please"}]}'
   [ "$STATUS" -eq 200 ]
   [ "$(jq -r '.input_tokens' "$RESP")" -gt 0 ]
   validate anthropic.json BetaCountMessageTokensResponse "$RESP"
@@ -415,7 +429,7 @@ get_url() {
   # A ~9 MiB body: over MAX_BODY_BYTES (8 MiB), so DefaultBodyLimit rejects it with a
   # 413 before any handler buffers it. Built on disk with head/printf (no giant argv).
   local big="$CONF_DIR/big.json"
-  { printf '{"model":"mock","messages":[{"role":"user","content":"'
+  { printf '{"model":"brain/mock","messages":[{"role":"user","content":"'
     head -c 9000000 /dev/zero | tr '\0' 'a'
     printf '"}]}'
   } > "$big"
@@ -445,7 +459,7 @@ get_url() {
 
 @test "security: the API key never appears in any response body" {
   # 200 chat.
-  post_json openai /v1/chat/completions '{"model":"mock","messages":[{"role":"user","content":"hello there"}]}'
+  post_json openai /v1/chat/completions '{"model":"brain/mock","messages":[{"role":"user","content":"hello there"}]}'
   [ "$STATUS" -eq 200 ]
   ! grep -qF "$OPENAI_KEY" "$RESP"
 
@@ -471,17 +485,17 @@ get_url() {
 @test "security: out-of-bounds inputs -> 400 (not 500/panic)" {
   # OpenAI chat n:5 (multiple choices unsupported).
   post_json openai /v1/chat/completions \
-    '{"model":"mock","messages":[{"role":"user","content":"hi"}],"n":5}'
+    '{"model":"brain/mock","messages":[{"role":"user","content":"hi"}],"n":5}'
   [ "$STATUS" -eq 400 ]
   validate openai.json ErrorResponse "$RESP"
 
   # embeddings dimensions oversized (far beyond the model's vector length).
-  post_json openai /v1/embeddings '{"model":"mock","input":"hello","dimensions":100000}'
+  post_json openai /v1/embeddings '{"model":"brain/mock","input":"hello","dimensions":100000}'
   [ "$STATUS" -eq 400 ]
   validate openai.json ErrorResponse "$RESP"
 
   # embeddings token-array input (documented unsupported — brain has no tokenizer).
-  post_json openai /v1/embeddings '{"model":"mock","input":[1,2,3,4]}'
+  post_json openai /v1/embeddings '{"model":"brain/mock","input":[1,2,3,4]}'
   [ "$STATUS" -eq 400 ]
   validate openai.json ErrorResponse "$RESP"
 }
@@ -491,7 +505,7 @@ get_url() {
 
 @test "security: internal failure is scrubbed (no path/panic leak)" {
   post_json openai /v1/chat/completions \
-    '{"model":"mock","messages":[{"role":"user","content":"please __mock_fail__ this"}]}'
+    '{"model":"brain/mock","messages":[{"role":"user","content":"please __mock_fail__ this"}]}'
   # A provider-shaped error (the handler maps the runtime failure to a 400).
   [ "$STATUS" -eq 400 ]
   validate openai.json ErrorResponse "$RESP"
@@ -541,7 +555,7 @@ get_url() {
   curl -sS --max-time 15 -o /dev/null \
     -H "Authorization: Bearer $key2" -H 'content-type: application/json' \
     -X POST "http://127.0.0.1:$port/v1/chat/completions" \
-    -d '{"model":"mock","messages":[{"role":"user","content":"pin the lane"}]}' &
+    -d '{"model":"brain/mock","messages":[{"role":"user","content":"pin the lane"}]}' &
   local job1=$!
   sleep 0.8
 
@@ -553,7 +567,7 @@ get_url() {
   st=$(curl -sS --max-time 10 -D "$hdrs" -o "$out" -w '%{http_code}' \
     -H "Authorization: Bearer $key2" -H 'content-type: application/json' \
     -X POST "http://127.0.0.1:$port/v1/chat/completions" \
-    -d '{"model":"mock","messages":[{"role":"user","content":"shed me"}]}')
+    -d '{"model":"brain/mock","messages":[{"role":"user","content":"shed me"}]}')
   t1=$(date +%s%N)
   ms=$(( (t1 - t0) / 1000000 ))
 

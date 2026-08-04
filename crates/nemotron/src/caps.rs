@@ -26,7 +26,7 @@ use crate::stream::StreamState;
 use crate::tokenizer::Detokenizer;
 
 /// The model name advertised in the manifest.
-pub const MODEL: &str = "nemotron";
+pub const MODEL: &str = "brain/nemotron";
 
 /// The manifest: offline `transcribe` plus frame-synchronous `transcribe_stream`
 /// (schemas shared via [`audio::asr_caps`]).
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn manifest_advertises_transcribe_and_stream() {
         let m = manifest();
-        assert_eq!(m.model, "nemotron");
+        assert_eq!(m.model, MODEL);
         assert_eq!(m.actions.len(), 2);
         assert_eq!(m.actions[0].name, "transcribe");
         assert_eq!(m.actions[1].name, "transcribe_stream");

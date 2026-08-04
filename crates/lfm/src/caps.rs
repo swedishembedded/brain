@@ -31,7 +31,7 @@ use serde_json::json;
 use crate::model::Lfm;
 
 /// The model id used on the CLI (`brain do lfm …`) and the event API.
-pub const MODEL: &str = "lfm";
+pub const MODEL: &str = "brain/lfm";
 
 /// Attention-slab budget for the chunked path (chunk 2048 at T=8192, H=16).
 const SLAB_BUDGET: u64 = 512 << 20;

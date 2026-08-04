@@ -12,7 +12,7 @@ pipe fd, and prints the transcription **segments** as each ~1 s window decodes.
     BRAIN_NEMOTRON=$BRAIN_TESTDATA/asr/nemotron/hf \
       dbus-run-session -- bash -c '
         brain serve --dbus --device cpu & sleep 2
-        python3 examples/asr/transcribe_mic.py --model nemotron --seconds 15
+        python3 examples/asr/transcribe_mic.py --model brain/nemotron --seconds 15
       '
 
     # or transcribe a wav file (no mic needed — good for a smoke test):
@@ -103,7 +103,7 @@ def stream_mic(write_fd: int, stop: threading.Event, seconds: float) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", default="nemotron", help="ASR model name (nemotron | qwen-asr)")
+    ap.add_argument("--model", default="brain/nemotron", help="ASR model name (brain/nemotron | brain/qwen-asr)")
     ap.add_argument("--window-ms", type=int, default=1000, help="server-side transcription window")
     ap.add_argument("--seconds", type=float, default=0.0, help="mic capture duration (0 = until Ctrl-C)")
     ap.add_argument("--wav", help="stream this 16 kHz mono wav instead of the mic")

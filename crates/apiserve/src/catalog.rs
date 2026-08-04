@@ -118,6 +118,11 @@ pub fn strip_provider_prefix(model: &str) -> Option<&str> {
 ///   prefix-stripped form.
 /// Exact match always precedes the stripped form of the same id, and the primary
 /// `model` (both forms) is always tried before any `models` fallback entry.
+///
+/// A legacy short name (e.g. `"mock"`) is a deprecation, not a second id: every
+/// pushed id also tries its canonical `brain/<name>` form immediately after the
+/// literal, so an old client keeps working with no change to `Manifest.model`
+/// itself (see `modelref::alias`'s module docs).
 fn candidates(provider: Provider, body: &Value) -> Vec<String> {
     let openrouter = provider == Provider::OpenRouter;
     let mut out: Vec<String> = Vec::new();
@@ -126,6 +131,9 @@ fn candidates(provider: Provider, body: &Value) -> Vec<String> {
             return;
         }
         out.push(id.to_string());
+        if let Some(canon) = brain_modelref::alias::canonical(id) {
+            out.push(canon.to_string());
+        }
         if openrouter {
             if let Some(stripped) = strip_provider_prefix(id) {
                 out.push(stripped.to_string());
@@ -167,4 +175,36 @@ fn text2image_action(m: &Manifest) -> Option<String> {
                 && !a.inputs.iter().any(|b| b.required)
         })
         .map(|a| a.name.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_short_name_resolves_via_its_canonical_alias() {
+        // A catalog holding only the canonical id -- a client still sending the
+        // old bare "mock" must still resolve, without Manifest.model ever being
+        // anything but "brain/mock".
+        let body = json!({"model": "mock"});
+        let resolve = |id: &str| (id == "brain/mock").then_some(());
+        let got = resolve_model(Provider::Anthropic, &body, resolve);
+        assert_eq!(got, Some(("brain/mock".to_string(), ())));
+    }
+
+    #[test]
+    fn canonical_name_resolves_directly_with_no_alias_hop() {
+        let body = json!({"model": "brain/mock"});
+        let resolve = |id: &str| (id == "brain/mock").then_some(());
+        let got = resolve_model(Provider::Anthropic, &body, resolve);
+        assert_eq!(got, Some(("brain/mock".to_string(), ())));
+    }
+
+    #[test]
+    fn unknown_name_with_no_alias_does_not_resolve() {
+        let body = json!({"model": "totally-unknown"});
+        let resolve = |id: &str| (id == "brain/mock").then_some(());
+        assert_eq!(resolve_model(Provider::Anthropic, &body, resolve), None);
+    }
 }

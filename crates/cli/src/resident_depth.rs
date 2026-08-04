@@ -47,10 +47,10 @@ impl DepthResident {
 
 impl ResidentModel for DepthResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new("depth", "monocular depth (ZipDepth)", vec![Self::depth_spec()])
+        Manifest::new(depth::caps::MODEL, "monocular depth (ZipDepth)", vec![Self::depth_spec()])
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new("depth", "default")
+        InstanceKey::new(depth::caps::MODEL, "default")
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         // ZipDepth (~6.1M params) is imported into a host-RAM weight map and runs

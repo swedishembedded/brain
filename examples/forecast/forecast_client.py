@@ -55,8 +55,8 @@ def synth_series(n: int) -> list[float]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", default="chronos2", choices=["chronos2", "fincast", "kronos", "mock"],
-                     help="a forecast-capable model (mock needs no weights — a quick, deterministic check)")
+    ap.add_argument("--model", default="brain/chronos2", choices=["brain/chronos2", "brain/fincast", "brain/kronos", "brain/mock"],
+                     help="a forecast-capable model (brain/mock needs no weights — a quick, deterministic check)")
     ap.add_argument("--horizon", type=int, default=64, help="steps to forecast")
     ap.add_argument("--context", type=int, default=256, help="synthetic context length (ignored with --series)")
     ap.add_argument("--freq", type=int, default=0, help="fincast frequency bucket (0 daily / 1 weekly / 2 monthly)")
@@ -78,15 +78,15 @@ def main() -> None:
     payload, shape = f32le(ctx), [len(ctx)]
 
     params: dict = {"horizon": args.horizon}
-    if args.model == "fincast":
+    if args.model == "brain/fincast":
         params["freq"] = args.freq
 
     with BrainDBus(bus=args.bus) as brain:
         served = brain.models()
         if args.model not in served:
-            env = {"chronos2": "BRAIN_CHRONOS2=<weights>", "fincast": "BRAIN_FINCAST=<weights>",
-                   "kronos": "BRAIN_KRONOS_TOKENIZER=<dir> BRAIN_KRONOS_DECODER=<dir>",
-                   "mock": "BRAIN_MOCK=1"}[args.model]
+            env = {"brain/chronos2": "BRAIN_CHRONOS2=<weights>", "brain/fincast": "BRAIN_FINCAST=<weights>",
+                   "brain/kronos": "BRAIN_KRONOS_TOKENIZER=<dir> BRAIN_KRONOS_DECODER=<dir>",
+                   "brain/mock": "BRAIN_MOCK=1"}[args.model]
             skip(f"model {args.model!r} is not served (served: {served}); start it with: {env} brain serve --dbus")
         out = brain.run(
             args.model, "forecast", params,

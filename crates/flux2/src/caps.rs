@@ -22,7 +22,7 @@ use crate::config::Flux2Config;
 use crate::pipeline::{GenOpts, Paths, Pipeline};
 
 /// The model id used on the CLI (`brain do flux2-klein …`) and the event API.
-pub const MODEL: &str = "flux2-klein";
+pub const MODEL: &str = "brain/flux2-klein";
 
 /// The variant enum, in manifest order.
 const VARIANTS: [&str; 4] = ["klein-4b", "klein-9b", "base-4b", "base-9b"];

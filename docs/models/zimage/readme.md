@@ -40,8 +40,8 @@ the generalized capability interface (the serving contract, not a bespoke
 command):
 
 ```
-brain caps z-image                 # discovery (static manifest, no weights needed)
-brain do z-image <action> …        # execution; also over D-Bus / the event API
+brain caps brain/z-image                 # discovery (static manifest, no weights needed)
+brain do brain/z-image <action> …        # execution; also over D-Bus / the event API
 ```
 
 Actions (`crates/zimage/src/caps.rs`): `text2image`, `image2image`, `inpaint`,

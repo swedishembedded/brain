@@ -171,10 +171,10 @@ impl YoloResident {
 
 impl ResidentModel for YoloResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new("yolo", "object detection (YOLOv8, COCO-80)", vec![Self::detect_spec()])
+        Manifest::new(yolo::caps::MODEL, "object detection (YOLOv8, COCO-80)", vec![Self::detect_spec()])
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new("yolo", "default")
+        InstanceKey::new(yolo::caps::MODEL, "default")
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         // YOLOv8n is small and runs on the CPU in brain → a modest RAM footprint.

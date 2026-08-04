@@ -376,6 +376,7 @@ dependencies = [
  "brain-capability",
  "brain-checkpoint",
  "brain-events",
+ "brain-modelref",
  "brain-residency",
  "brain-shutdown",
  "bytes",
@@ -550,6 +551,7 @@ dependencies = [
  "brain-lfm",
  "brain-mirror",
  "brain-model",
+ "brain-modelref",
  "brain-modelstore",
  "brain-moe",
  "brain-nemotron",
@@ -628,6 +630,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "brain-capability",
+ "brain-modelref",
  "brain-residency",
  "brain-shutdown",
  "brain-stats",

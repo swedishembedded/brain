@@ -27,7 +27,7 @@ use serde_json::json;
 use crate::model::Qwen;
 
 /// The model id used on the CLI (`brain do qwen …`) and the event API.
-pub const MODEL: &str = "qwen";
+pub const MODEL: &str = "brain/qwen";
 
 /// The full, static capability manifest — safe to build with no weights loaded.
 pub fn manifest() -> Manifest {

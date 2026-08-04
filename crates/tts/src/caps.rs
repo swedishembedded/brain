@@ -25,7 +25,7 @@ use serde_json::json;
 use crate::{GenOpts, TtsPaths};
 
 /// The model id used on the CLI (`brain do tts …`) and the event API.
-pub const MODEL: &str = "tts";
+pub const MODEL: &str = "brain/tts";
 
 /// Qwen3-TTS output sample rate (see [`crate::pipeline`] / `brain tts synth`).
 const SAMPLE_RATE: u32 = 24_000;

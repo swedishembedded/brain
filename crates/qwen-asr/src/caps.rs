@@ -25,7 +25,7 @@ use crate::config::QwenAsrConfig;
 use crate::model::Qwen3Asr;
 
 /// Model name in the manifest.
-pub const MODEL: &str = "qwen-asr";
+pub const MODEL: &str = "brain/qwen-asr";
 
 /// Contiguous audio-placeholder token id (`config.audio_token_id`).
 pub const AUDIO_TOKEN_ID: u32 = 151676;
@@ -195,7 +195,7 @@ mod tests {
         // padding/truncation to the window
         assert_eq!(pad_to_window(&[1.0, 2.0], 4), vec![1.0, 2.0, 0.0, 0.0]);
         assert_eq!(pad_to_window(&[1.0, 2.0, 3.0, 4.0, 5.0], 3), vec![1.0, 2.0, 3.0]);
-        assert_eq!(manifest().model, "qwen-asr");
+        assert_eq!(manifest().model, MODEL);
     }
 
     #[test]

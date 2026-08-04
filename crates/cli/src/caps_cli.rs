@@ -37,13 +37,17 @@ fn static_manifests() -> Vec<Manifest> {
     ]
 }
 
+/// The catalog id of the trivial always-available demo model (no `caps.rs` of
+/// its own -- this const is its single source of truth).
+const DEMO_MODEL: &str = "brain/demo";
+
 /// Build an executable registry for `model` (loads what that model needs). `do`
 /// only constructs the one model it was asked to run.
 fn build_registry(model: &str) -> Result<Registry, String> {
     let mut reg = Registry::new();
     match model {
-        "demo" => reg.register(Arc::new(DemoModel)),
-        "imageops" => reg.register(Arc::new(imageops::ImageOps)),
+        DEMO_MODEL => reg.register(Arc::new(DemoModel)),
+        imageops::MODEL => reg.register(Arc::new(imageops::ImageOps)),
         zimage::caps::MODEL => reg.register(Arc::new(zimage::caps::ZImageProvider::load()?)),
         flux2::caps::MODEL => reg.register(Arc::new(flux2::caps::Flux2Provider::new())),
         qwen::caps::MODEL => reg.register(Arc::new(qwen::caps::QwenProvider::new())),
@@ -109,6 +113,10 @@ pub fn run_do(argv: &[String]) -> i32 {
             return 2;
         }
     };
+    // A legacy short name (e.g. "mock") is a deprecation, not a second id: it
+    // resolves to the canonical `brain/<name>` before dispatch, but is never
+    // itself what gets registered or listed (see modelref::alias's module docs).
+    let model = brain_modelref::alias::canonical(&model).map(str::to_string).unwrap_or(model);
     let reg = match build_registry(&model) {
         Ok(r) => r,
         Err(e) => {
@@ -312,7 +320,7 @@ impl Action for EchoAction {
 
 impl Provider for DemoModel {
     fn manifest(&self) -> Manifest {
-        Manifest::new("demo", "a trivial always-available model (no weights) — a worked example of the capability interface", vec![EchoAction.spec()])
+        Manifest::new(DEMO_MODEL, "a trivial always-available model (no weights) — a worked example of the capability interface", vec![EchoAction.spec()])
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
         (name == "echo").then(|| Arc::new(EchoAction) as Arc<dyn Action>)

@@ -38,7 +38,7 @@ fi
 # ---- config (override via env) ----------------------------------------------
 PORT="${PORT:-8787}"
 MOCK="${BRAIN_MOCK:-0}"
-MODEL="${MODEL:-$([ "$MOCK" = "0" ] && echo qwen || echo mock)}"
+MODEL="${MODEL:-$([ "$MOCK" = "0" ] && echo brain/qwen || echo brain/mock)}"
 BRAIN="${BRAIN:-./target/release/brain}"
 # A brain-native qwen3 checkpoint + its tokenizer (see the import note above).
 QWEN_WEIGHTS="${BRAIN_QWEN_WEIGHTS:-qwen3.safetensors}"

@@ -65,7 +65,7 @@ def embed_once(brain: BrainDBus, model: str, text: bytes, label: str) -> tuple[i
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--input", required=True, help="text file to embed (long context welcome)")
-    ap.add_argument("--model", default="lfm", help="an embed-capable model (lfm, or mock for a quick check)")
+    ap.add_argument("--model", default="brain/lfm", help="an embed-capable model (brain/lfm, or brain/mock for a quick check)")
     ap.add_argument("--concurrent", type=int, default=1, help="issue N identical requests concurrently")
     args = ap.parse_args()
 

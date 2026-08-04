@@ -62,7 +62,7 @@ Chronological, measured-only. Reference material + the phased plan live in
   `flux2-klein`: `text2image` / `edit` / `lora_train`, all streaming, all
   polling `inv.cancel` per denoise/training step; images via the shared
   `capability::blob` codec; `lora_train` returns the adapter as an Outcome
-  blob. Static weight-free manifest (`brain caps flux2-klein` works with no
+  blob. Static weight-free manifest (`brain caps brain/flux2-klein` works with no
   weights; unit test `manifest_declares_the_full_surface`). `adapter` param
   wired through `Pipeline::build_adapted` (LoRA fold-in at build). 9B
   variants gated on `BRAIN_FLUX2_ALLOW_NC=1` (FLUX.2 [Non-Commercial]

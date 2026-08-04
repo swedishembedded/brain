@@ -14,7 +14,7 @@ aborts at its next per-step poll (the current denoise step finishes first).
       brain serve --dbus & sleep 2
       python3 examples/imagegen/cancel_generation.py'
 
-Also runs against the weight-free mock model (`--model mock`), which polls the
+Also runs against the weight-free mock model (`--model brain/mock`), which polls the
 same cancel token between denoise steps — set `BRAIN_MOCK_DELAY_MS` (e.g. 200) so
 there is actually time to call `Cancel` between the first two progress frames;
 without it the mock's 4 steps complete before the second frame is even read.
@@ -40,7 +40,7 @@ from generate import MODEL  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--prompt", default="a lighthouse in a storm", help="prompt (the image is never produced)")
-    ap.add_argument("--model", default=MODEL, help="a streaming, cancellable text2image model (or `mock`)")
+    ap.add_argument("--model", default=MODEL, help="a streaming, cancellable text2image model (or `brain/mock`)")
     ap.add_argument("--variant", default="klein-4b", choices=["klein-4b", "klein-9b", "base-4b", "base-9b"])
     args = ap.parse_args()
 
@@ -51,7 +51,7 @@ def main() -> int:
 
         # `variant` is a FLUX.2-specific param the mock model doesn't declare.
         params = {"prompt": args.prompt}
-        if args.model != "mock":
+        if args.model != "brain/mock":
             params["variant"] = args.variant
 
         # Deliberately the LOW-LEVEL frame iterator (not the high-level

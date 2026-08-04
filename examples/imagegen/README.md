@@ -67,7 +67,7 @@ wrote fox.ppm (512x512)
 
 - **Weights** come only from the four `BRAIN_FLUX2_*` env vars (diffusers
   `transformer/`+`vae/` dirs, BFL single-file safetensors, or BF16 GGUF for
-  the DiT). Without them the model is discoverable (`brain caps flux2-klein`,
+  the DiT). Without them the model is discoverable (`brain caps brain/flux2-klein`,
   static manifest) but not served.
 - **Variants**: `klein-4b` (default, 4-step distilled), `klein-9b`,
   `base-4b`/`base-9b` (50 steps + CFG via `guidance`). The **9B weights are
@@ -82,5 +82,5 @@ wrote fox.ppm (512x512)
 - Same-key concurrent requests are grouped by the scheduler but execute
   sequentially for now (documented in `resident_flux2.rs::run_batch`; a true
   batched DiT forward is a planned follow-up).
-- The CLI twins of these scripts: `brain do flux2-klein text2image --prompt …
+- The CLI twins of these scripts: `brain do brain/flux2-klein text2image --prompt …
   --out image=out.ppm` and `brain flux2 generate …`.

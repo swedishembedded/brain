@@ -33,7 +33,7 @@ OUT = Path(os.environ.get("OUT", "/tmp"))
 
 def demo_image_over_fd(brain: BrainDBus) -> None:
     """imageops.gradient → a real image, already materialised into bytes by `run()`."""
-    out = brain.run("imageops", "gradient", {"width": 128, "height": 128, "style": "aurora"})
+    out = brain.run("brain/imageops", "gradient", {"width": 128, "height": 128, "style": "aurora"})
     meta = out.meta["image"]
     data = out.blobs["image"]
     dims = meta.get("meta") or {}
@@ -52,7 +52,7 @@ def demo_streaming_generation(brain: BrainDBus) -> None:
         print(f"  [{step}/{total}] {message}")
 
     try:
-        out = brain.subscribe("z-image", "text2image", params, on_progress=on_progress)
+        out = brain.subscribe("brain/z-image", "text2image", params, on_progress=on_progress)
     except BrainError as e:
         print("  error:", e)
         return
@@ -71,10 +71,10 @@ def main() -> int:
         models = brain.models()
         print("models:", models)
 
-        if "imageops" in models:
+        if "brain/imageops" in models:
             demo_image_over_fd(brain)
 
-        if "z-image" in models and os.environ.get("BRAIN_ZIMAGE_DIT"):
+        if "brain/z-image" in models and os.environ.get("BRAIN_ZIMAGE_DIT"):
             demo_streaming_generation(brain)
         else:
             print("z-image streaming demo skipped (export BRAIN_ZIMAGE_* to enable)")

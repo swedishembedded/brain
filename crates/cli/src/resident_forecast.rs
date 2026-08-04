@@ -28,6 +28,14 @@ use npu::openvino::{Chronos2Session, Feed, FincastSession, NpuConfig, NpuDevice,
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
+/// Catalog ids for the three forecasters. No dedicated `caps.rs` exists for
+/// these crates (unlike yolo/depth/tts/…) -- these three consts are the
+/// analogous single source of truth here (also referenced by `perf_cli.rs`'s
+/// `ExecutorTarget` construction, which must route to the same catalog id).
+pub(crate) const CHRONOS2_MODEL: &str = "brain/chronos2";
+pub(crate) const FINCAST_MODEL: &str = "brain/fincast";
+pub(crate) const KRONOS_MODEL: &str = "brain/kronos";
+
 // ============================ shared wire codec ============================
 
 /// Decode a numeric input blob: raw f32 little-endian + meta `{"shape":[...]}`.
@@ -118,7 +126,7 @@ impl Chronos2Resident {
 impl ResidentModel for Chronos2Resident {
     fn manifest(&self) -> Manifest {
         Manifest::new(
-            "chronos2",
+            CHRONOS2_MODEL,
             "probabilistic time-series forecasting (Chronos-2); 21 quantile levels",
             vec![base_forecast_spec("probabilistic forecast; forecast blob is [levels, horizon] quantile-major")],
         )
@@ -126,7 +134,7 @@ impl ResidentModel for Chronos2Resident {
     fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
         // One hot instance per horizon; the NPU session cache inside the instance
         // keys the compiled graph on the context-length bucket.
-        InstanceKey::new("chronos2", format!("h{}", horizon_of(inv, 64)))
+        InstanceKey::new(CHRONOS2_MODEL, format!("h{}", horizon_of(inv, 64)))
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         // Weights in RAM for the gpu_core path; a compiled fp16 core graph on the
@@ -207,7 +215,7 @@ impl Instance for Chronos2NpuInstance {
 fn chronos2_outcome(q: Vec<f32>, horizon: usize, device: &str) -> Outcome {
     let levels = chronos2::QUANTILES;
     Outcome::new()
-        .set("model", json!("chronos2"))
+        .set("model", json!(CHRONOS2_MODEL))
         .set("horizon", json!(horizon))
         .set("device", json!(device))
         .blob("forecast", encode_forecast(&q, vec![levels.len(), horizon], "quantiles", &levels))
@@ -238,11 +246,11 @@ impl FincastResident {
 
 impl ResidentModel for FincastResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new("fincast", "financial time-series forecasting (FinCast); mean + 9 quantiles", vec![Self::spec()])
+        Manifest::new(FINCAST_MODEL, "financial time-series forecasting (FinCast); mean + 9 quantiles", vec![Self::spec()])
     }
     fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
         let freq = inv.get_i64("freq").unwrap_or(0);
-        InstanceKey::new("fincast", format!("h{}f{freq}", horizon_of(inv, 64)))
+        InstanceKey::new(FINCAST_MODEL, format!("h{}f{freq}", horizon_of(inv, 64)))
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         // NPU-eligible: the ~1 B-param core is exported with an external-data
@@ -327,7 +335,7 @@ impl Instance for FincastNpuInstance {
 fn fincast_outcome(model: &fincast::model::Fincast, out: Vec<f32>, horizon: usize, device: &str) -> Outcome {
     let no = model.config().num_outputs();
     Outcome::new()
-        .set("model", json!("fincast"))
+        .set("model", json!(FINCAST_MODEL))
         .set("horizon", json!(horizon))
         .set("device", json!(device))
         .blob("forecast", encode_forecast(&out, vec![horizon, no], "mean+quantiles", &fincast::QUANTILES))
@@ -405,11 +413,11 @@ fn decoder_from_key(config: &str) -> &str {
 
 impl ResidentModel for KronosResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new("kronos", "autoregressive OHLCV forecasting (Kronos)", vec![Self::spec()])
+        Manifest::new(KRONOS_MODEL, "autoregressive OHLCV forecasting (Kronos)", vec![Self::spec()])
     }
     fn instance_key(&self, _action: &str, inv: &Invocation) -> InstanceKey {
         // One hot instance per decoder checkpoint (any horizon); see decoder_key.
-        InstanceKey::new("kronos", decoder_key(&self.decoder_for(inv)))
+        InstanceKey::new(KRONOS_MODEL, decoder_key(&self.decoder_for(inv)))
     }
     fn estimate(&self, key: &InstanceKey) -> MemCost {
         // tokenizer + the requested decoder resident in RAM (host embed/sample
@@ -504,7 +512,7 @@ fn kronos_opts(inv: &Invocation) -> kronos::generate::GenOpts {
 
 fn kronos_outcome(out: Vec<f32>, horizon: usize, feat: usize, device: &str) -> Outcome {
     Outcome::new()
-        .set("model", json!("kronos"))
+        .set("model", json!(KRONOS_MODEL))
         .set("horizon", json!(horizon))
         .set("device", json!(device))
         .blob("forecast", encode_forecast(&out, vec![horizon, feat], "samples", &[]))
@@ -526,7 +534,7 @@ impl Instance for KronosInstance {
             let outs = self.model.forecast_cached_samples(&bars, &ctx_stamp, &fut_stamp, horizon, samples, &opts);
             let flat: Vec<f32> = outs.into_iter().flatten().collect();
             return Ok(Outcome::new()
-                .set("model", json!("kronos"))
+                .set("model", json!(KRONOS_MODEL))
                 .set("horizon", json!(horizon))
                 .set("samples", json!(samples))
                 .set("device", json!("gpu_core"))
@@ -591,7 +599,7 @@ impl Instance for KronosNpuInstance {
             })?;
             let flat: Vec<f32> = outs.into_iter().flatten().collect();
             return Ok(Outcome::new()
-                .set("model", json!("kronos"))
+                .set("model", json!(KRONOS_MODEL))
                 .set("horizon", json!(horizon))
                 .set("samples", json!(samples))
                 .set("device", json!(dev))

@@ -78,11 +78,11 @@ impl TtsResident {
 
 impl ResidentModel for TtsResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new("tts", "text-to-speech (Qwen3-TTS Talker + MTP + codec)", vec![Self::speak_spec()])
+        Manifest::new(tts::caps::MODEL, "text-to-speech (Qwen3-TTS Talker + MTP + codec)", vec![Self::speak_spec()])
     }
 
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new("tts", "default")
+        InstanceKey::new(tts::caps::MODEL, "default")
     }
 
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
