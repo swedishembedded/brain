@@ -234,7 +234,7 @@ impl VqganTrainer {
         // ---- encoder (train mode: SSA, direct lowerings, taped) ------------
         let mut be = Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_groups, BlockNames::vqgan(), false);
         be.set_train(true);
-        let z = run_blocks(&mut be, "encoder", &cfg.encoder_blocks(), h, w, &img_in).0;
+        let z = run_blocks(&mut be, "encoder", &cfg.encoder_blocks(), 0, h, w, &img_in).0;
         let z_flat = be.nchw_to_rows(emb, t, &z);
         let enc = be.trace();
         let (enc_steps, _) = be.finish();
@@ -280,7 +280,7 @@ impl VqganTrainer {
         bg.set_train(true);
         let z_q = bg.rows_to_nchw(emb, t, &zq_st);
         let (out, (oh, ow)) =
-            run_blocks(&mut bg, "generator", &cfg.generator_blocks(), lh, lw, &z_q);
+            run_blocks(&mut bg, "generator", &cfg.generator_blocks(), 0, lh, lw, &z_q);
         assert_eq!((oh, ow), (h, w), "vqgan: generator output {oh}x{ow} != input {h}x{w}");
         let gen = bg.trace();
         let (gen_steps, _) = bg.finish();

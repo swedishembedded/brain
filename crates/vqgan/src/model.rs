@@ -245,7 +245,7 @@ impl Vqgan {
         let img_in = gpu.storage((cfg.in_channels * h * w) as u64);
         let mut b =
             Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_groups, BlockNames::vqgan(), taps);
-        let z = run_blocks(&mut b, "encoder", &cfg.encoder_blocks(), h, w, &img_in).0;
+        let z = run_blocks(&mut b, "encoder", &cfg.encoder_blocks(), 0, h, w, &img_in).0;
 
         // z[emb, lh, lw] → z_flat[T, emb]: the quantizer's `z.permute(0,2,3,1)
         // .view(-1, emb_dim)`, which is exactly the NCHW→NLC permutation.
@@ -264,7 +264,7 @@ impl Vqgan {
         b.free((t * emb) as u64, rows);
         b.tap("z_q".into(), &z_q, emb * t);
         let gather_end = b.n_steps();
-        let (out, (oh, ow)) = run_blocks(&mut b, "generator", &cfg.generator_blocks(), lh, lw, &z_q);
+        let (out, (oh, ow)) = run_blocks(&mut b, "generator", &cfg.generator_blocks(), 0, lh, lw, &z_q);
         assert_eq!((oh, ow), (h, w), "vqgan: generator output {oh}x{ow} != input {h}x{w}");
         let (decode_steps, dec_taps) = b.finish();
         all_taps.extend(dec_taps);
@@ -386,12 +386,26 @@ impl Vqgan {
     }
 }
 
-/// Record one flat `nn.ModuleList` of [`Block`]s, tapping each block's output
-/// under `{net}.blocks.{i}`. Returns the final buffer and its spatial size.
-pub(crate) fn run_blocks(
+/// Record a **contiguous run** of a flat `nn.ModuleList` of [`Block`]s, tapping
+/// each block's output under `{net}.blocks.{start + i}`. Returns the final
+/// buffer and its spatial size.
+///
+/// `start` is the global index of `blocks[0]`, so a caller that needs to reach
+/// *between* two blocks records the list in segments and keeps the checkpoint's
+/// positional tensor names correct. That is how `crates/restore` walks the same
+/// encoder/generator with CodeFormer's feature taps and controllable-feature
+/// transformation spliced in, rather than owning a second copy of this loop.
+/// [`Vqgan`] passes `start = 0` and the whole list.
+///
+/// Buffer ownership: `input` and the returned buffer are the CALLER's — neither
+/// is returned to the builder's activation pool, so a segment's output stays
+/// valid for as long as the caller needs it (CodeFormer holds four encoder
+/// features live across the entire generator).
+pub fn run_blocks(
     b: &mut Builder,
     net: &str,
     blocks: &[Block],
+    start: usize,
     h: u32,
     w: u32,
     input: &DeviceBuffer,
@@ -400,7 +414,7 @@ pub(crate) fn run_blocks(
     let mut x = input.clone();
     let mut xlen = 0u64; // length of `x` when we own it (0 = caller-owned)
     for (i, blk) in blocks.iter().enumerate() {
-        let p = format!("{net}.blocks.{i}");
+        let p = format!("{net}.blocks.{}", start + i);
         // `resnet` and `attn` tap their own output under `p`; the others do not.
         let (nx, self_tapped) = match *blk {
             Block::Conv { cin, cout } => (b.conv(&p, cin, cout, 3, 1, hh, ww, &x), false),

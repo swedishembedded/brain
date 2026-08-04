@@ -129,7 +129,11 @@ pub fn import(raw: Tensors, cfg: &VqganConfig) -> Result<Import, String> {
 /// Drop the `params_ema.` / `params.` / `state_dict.` wrapper if every tensor
 /// carries the same one. A checkpoint with a mix is left alone, so the
 /// coverage check reports the real names rather than a half-stripped set.
-fn strip_state_prefix(raw: Tensors) -> Tensors {
+///
+/// Public because every `basicsr` checkpoint in this workspace wraps its state
+/// dict the same way — `crates/restore` reads the *same file* for the
+/// CodeFormer half and must strip it identically.
+pub fn strip_state_prefix(raw: Tensors) -> Tensors {
     for key in STATE_KEYS {
         let dot = format!("{key}.");
         if !raw.is_empty() && raw.keys().all(|k| k.starts_with(&dot)) {
