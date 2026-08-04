@@ -33,7 +33,9 @@ pub mod config;
 pub mod hostpe;
 pub mod import;
 pub mod model;
+pub mod train;
 
 pub use config::{BlockSpec, Sam2Config};
 pub use import::{import, ImportReport, Tensors};
 pub use model::{Decoded, Encoded, Prompt, Sam2, PIPELINES};
+pub use train::{FrozenEncode, MaskDecoderTrainer, MaskTargets};

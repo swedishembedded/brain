@@ -86,6 +86,30 @@ pub const PIPELINES: &[(&str, &str)] = &[
     // `imaging::Ctx`'s per-channel affine — brain's ONE normalise/denormalise
     // kernel, used by [`Sam2::preprocess`].
     ("film_chan", kernels::FILM_CHAN),
+    // ---- backward half (dispatched by [`crate::train`] only) ----
+    // Registering them here rather than in a second pipeline list keeps ONE
+    // kernel index space for the crate: `vision::ConvKernelIds::resolve` and
+    // `Gpu::kernel_index` both key on the name, so the forward is unaffected.
+    ("matmul_dx", kernels::MATMUL_DX),
+    ("matmul_dw", kernels::MATMUL_DW),
+    ("bias_grad", kernels::BIAS_GRAD),
+    ("layernorm_dgamma", kernels::LAYERNORM_DGAMMA),
+    ("layernorm_dbeta", kernels::LAYERNORM_DBETA),
+    ("attn_bwd_dscores_cross", kernels::ATTN_BWD_DSCORES_CROSS),
+    ("attn_bwd_dv_cross", kernels::ATTN_BWD_DV_CROSS),
+    ("attn_bwd_dq_cross", kernels::ATTN_BWD_DQ_CROSS),
+    ("attn_bwd_dk_cross", kernels::ATTN_BWD_DK_CROSS),
+    ("convtr2d_dx", kernels::CONVTR2D_DX),
+    ("convtr2d_dw", kernels::CONVTR2D_DW),
+    ("add_chan_bcast_dv", kernels::ADD_CHAN_BCAST_DV),
+    // loss heads: focal + dice on the mask logits, MSE on the IoU head,
+    // BCE-with-logits on the object score.
+    ("focal_dice_stats", kernels::FOCAL_DICE_STATS),
+    ("focal_dice_grad", kernels::FOCAL_DICE_GRAD),
+    ("mse_value", kernels::MSE_VALUE),
+    ("mse_grad", kernels::MSE_GRAD),
+    ("bce_logits", kernels::BCE_LOGITS),
+    ("bce_logits_grad", kernels::BCE_LOGITS_GRAD),
 ];
 
 /// Query rows per `chunked_bidir_fwd` dispatch. A multiple of 64 is REQUIRED,
@@ -103,29 +127,29 @@ const ATTN_CHUNK: u32 = 256;
 const MAXPOOL_ELEMS: u64 = 1 << 24;
 
 /// Pipeline indices resolved by NAME (never by position — see `vision::ids`).
-struct Ids {
-    matmul: usize,
-    matmul_rows: usize,
-    bias_add: usize,
-    add2: usize,
-    axpy: usize,
-    gelu_erf: usize,
-    leaky_relu: usize,
-    sigmoid: usize,
-    nchw_nlc: usize,
-    nlc_nchw: usize,
+pub(crate) struct Ids {
+    pub(crate) matmul: usize,
+    pub(crate) matmul_rows: usize,
+    pub(crate) bias_add: usize,
+    pub(crate) add2: usize,
+    pub(crate) axpy: usize,
+    pub(crate) gelu_erf: usize,
+    pub(crate) leaky_relu: usize,
+    pub(crate) sigmoid: usize,
+    pub(crate) nchw_nlc: usize,
+    pub(crate) nlc_nchw: usize,
     maxpool2d: usize,
-    add_chan_inplace: usize,
+    pub(crate) add_chan_inplace: usize,
     resize_bicubic: usize,
     resize_bilinear: usize,
     resize_nearest: usize,
-    cross: CrossIds,
-    permute: VitPermuteIds,
+    pub(crate) cross: CrossIds,
+    pub(crate) permute: VitPermuteIds,
     qpool: VitQPoolIds,
-    ln: LayerNormIds,
+    pub(crate) ln: LayerNormIds,
 }
 
-fn idx(g: &Gpu, name: &str) -> usize {
+pub(crate) fn idx(g: &Gpu, name: &str) -> usize {
     g.kernel_index(name).unwrap_or_else(|| panic!("sam2: kernel {name} is not in PIPELINES"))
 }
 
@@ -161,8 +185,11 @@ impl Ids {
                 maxpool2d: idx(g, "maxpool2d"),
                 maxpool2d_dx: idx(g, "maxpool2d_dx"),
             },
-            // Forward-only: the LayerNorm backward slots mirror the forward.
-            ln: LayerNormIds::resolve_fwd(g, idx(g, "layernorm")),
+            // Full resolve (forward + backward): `ln_stats`, `layernorm_dx` and
+            // the coalesced `*_rows` twins are all in PIPELINES, so the
+            // forward-only variant would leave the training path's LN backward
+            // pointing at the forward kernel.
+            ln: LayerNormIds::resolve(g, idx(g, "layernorm"), idx(g, "ln_stats"), idx(g, "layernorm_dx")),
         }
     }
 }
@@ -184,8 +211,8 @@ pub struct Sam2 {
     pub gpu: Gpu,
     pub cfg: Sam2Config,
     pub ps: ParamStore,
-    ids: Ids,
-    conv_ids: vision::ConvKernelIds,
+    pub(crate) ids: Ids,
+    pub(crate) conv_ids: vision::ConvKernelIds,
     host: HostConsts,
 }
 
@@ -262,8 +289,22 @@ impl Sam2 {
     /// produced. Every parameter is `Role::Frozen`: this is a forward-parity
     /// port, and the trainable roles arrive with the backward workstream.
     pub fn new(gpu: Gpu, cfg: Sam2Config, weights: &Tensors) -> Sam2 {
-        let params: Vec<(String, usize, Role)> =
-            import::param_list(&cfg).into_iter().map(|(n, c)| (n, c, Role::Frozen)).collect();
+        Sam2::new_with_roles(gpu, cfg, weights, &|_| false)
+    }
+
+    /// [`Sam2::new`] with a per-tensor trainability predicate. `trainable(name)`
+    /// picks the parameters that get gradient + AdamW buffers; everything else
+    /// stays `Role::Frozen` (weight buffer only). `crate::train` uses this to
+    /// build the mask-decoder-finetune role set — the trunk and neck stay frozen
+    /// and allocate no optimiser state at all.
+    pub fn new_with_roles(gpu: Gpu, cfg: Sam2Config, weights: &Tensors, trainable: &dyn Fn(&str) -> bool) -> Sam2 {
+        let params: Vec<(String, usize, Role)> = import::param_list(&cfg)
+            .into_iter()
+            .map(|(n, c)| {
+                let r = if trainable(&n) { Role::Trainable } else { Role::Frozen };
+                (n, c, r)
+            })
+            .collect();
         let init: HashMap<String, Vec<f32>> = import::init_map(weights);
         let ps = ParamStore::new_with_roles(&gpu, params, &init);
         let ids = Ids::resolve(&gpu);
@@ -287,7 +328,7 @@ impl Sam2 {
         Sam2 { gpu, cfg, ps, ids, conv_ids, host }
     }
 
-    fn ctx(&self) -> Ctx<'_> {
+    pub(crate) fn ctx(&self) -> Ctx<'_> {
         Ctx::new(&self.gpu, &self.conv_ids)
     }
 
@@ -300,12 +341,12 @@ impl Sam2 {
     /// each weight row once per 8 output rows; the trunk's `[65536, C]` inputs
     /// are exactly the shape that motivated it.
     #[allow(clippy::too_many_arguments)]
-    fn linear(&self, s: &mut Vec<Step>, x: &DeviceBuffer, out: &DeviceBuffer, rows: u32, k: u32, n: u32, w: &str, b: &str) {
+    pub(crate) fn linear(&self, s: &mut Vec<Step>, x: &DeviceBuffer, out: &DeviceBuffer, rows: u32, k: u32, n: u32, w: &str, b: &str) {
         s.push(self.gpu.step(self.ids.matmul_rows, &[x, self.ps.w(w), out], &[rows, k, n], rows.div_ceil(8) * n));
         s.push(self.gpu.step(self.ids.bias_add, &[out, self.ps.w(b)], &[rows, n], rows * n));
     }
 
-    fn act_step(&self, x: &DeviceBuffer, y: &DeviceBuffer, n: u32, act: Act) -> Step {
+    pub(crate) fn act_step(&self, x: &DeviceBuffer, y: &DeviceBuffer, n: u32, act: Act) -> Step {
         match act {
             // ReLU is `leaky_relu` at slope 0 — identical, and costs no kernel.
             Act::Relu => self.gpu.step(self.ids.leaky_relu, &[x, y], &[n, f(0.0)], n),
@@ -347,17 +388,17 @@ impl Sam2 {
     }
 
     /// `[N, L, C] -> [N, C, H, W]`.
-    fn to_nchw(&self, s: &mut Vec<Step>, x: &DeviceBuffer, y: &DeviceBuffer, c: u32, hw: u32) {
+    pub(crate) fn to_nchw(&self, s: &mut Vec<Step>, x: &DeviceBuffer, y: &DeviceBuffer, c: u32, hw: u32) {
         let t = c * hw;
         s.push(self.gpu.step(self.ids.nlc_nchw, &[x, y], &[t, c, hw], t));
     }
     /// `[N, C, H, W] -> [N, L, C]`.
-    fn to_nlc(&self, s: &mut Vec<Step>, x: &DeviceBuffer, y: &DeviceBuffer, c: u32, hw: u32) {
+    pub(crate) fn to_nlc(&self, s: &mut Vec<Step>, x: &DeviceBuffer, y: &DeviceBuffer, c: u32, hw: u32) {
         let t = c * hw;
         s.push(self.gpu.step(self.ids.nchw_nlc, &[x, y], &[t, c, hw], t));
     }
 
-    fn upload(&self, label: &str, data: &[f32]) -> DeviceBuffer {
+    pub(crate) fn upload(&self, label: &str, data: &[f32]) -> DeviceBuffer {
         self.gpu.storage_init(label, data)
     }
 
