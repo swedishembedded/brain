@@ -1141,13 +1141,12 @@ name = "brain-pulid"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
- "brain-clip",
- "brain-facenet",
  "brain-flux1",
  "brain-gpu-core",
- "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-paramstore",
+ "serde_json",
 ]
 
 [[package]]
