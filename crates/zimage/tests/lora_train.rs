@@ -77,7 +77,7 @@ fn lora_only_overfits_with_base_frozen() {
     let mut r = rng(0x51a7);
     let base = init(&c, &mut r).to_f32(); // FROZEN — never mutated below
     let b = batch(&c, &mut r);
-    let tr = DeviceTrainer::new(c.clone());
+    let tr = DeviceTrainer::new(c);
     let lc = LoraCfg::new(8);
     let mut ad = LoraAdapter::new(&c, lc);
 

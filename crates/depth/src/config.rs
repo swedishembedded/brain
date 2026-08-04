@@ -103,7 +103,7 @@ impl ZipConfig {
 /// or, worse, a silently different model that still loads.
 pub fn pick_groups(in_ch: u32, out_ch: u32, max_g: u32) -> u32 {
     for g in [max_g, 2, 1] {
-        if in_ch % g == 0 && out_ch % g == 0 {
+        if in_ch.is_multiple_of(g) && out_ch.is_multiple_of(g) {
             return g;
         }
     }

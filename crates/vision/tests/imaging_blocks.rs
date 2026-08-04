@@ -545,7 +545,7 @@ fn cxblock_param_list_matches_the_reference_module() {
     );
     let sizes: Vec<usize> = cx.param_list().iter().map(|(_, n)| *n).collect();
     // dwconv is DEPTHWISE: [C, 1, 7, 7], not [C, C, 7, 7].
-    assert_eq!(sizes[0], 8 * 1 * 7 * 7);
+    assert_eq!(sizes[0], 8 * 7 * 7);
     // pwconv1 is an nn.Linear(8, 32) in the reference — same flat layout as a
     // 1x1 conv weight [32, 8, 1, 1], which is why it loads without permuting.
     assert_eq!(sizes[4], 32 * 8);

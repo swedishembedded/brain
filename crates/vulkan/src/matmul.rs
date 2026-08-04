@@ -292,7 +292,7 @@ fn scalar_matmul(ctx: &VkContext, x: &[f32], w: &[f32], m: u32, k: u32, n: u32) 
 fn coopmat_matmul(ctx: &VkContext, x: &[f32], w: &[f32], m: u32, k: u32, n: u32) -> Vec<f32> {
     let spv_bytes = coopmat_spv().expect("coopmat backend selected without baked SPIR-V");
     // SPIR-V is little-endian u32 words.
-    assert!(spv_bytes.len() % 4 == 0, "coopmat spv not word-aligned");
+    assert!(spv_bytes.len().is_multiple_of(4), "coopmat spv not word-aligned");
     let spirv: Vec<u32> = spv_bytes
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))

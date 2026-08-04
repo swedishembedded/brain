@@ -73,7 +73,7 @@ pub fn image_token_count(h_bar: u32, w_bar: u32, patch: u32, merge: u32) -> u32 
 /// `temporal` slices (images carry no motion).
 pub fn pack_patches(img_chw: &[f32], channels: u32, h_bar: u32, w_bar: u32, patch: u32, merge: u32, temporal: u32) -> Vec<f32> {
     assert_eq!(img_chw.len(), (channels * h_bar * w_bar) as usize, "img must be [C, h_bar, w_bar]");
-    assert!(h_bar % (patch * merge) == 0 && w_bar % (patch * merge) == 0);
+    assert!(h_bar.is_multiple_of(patch * merge) && w_bar.is_multiple_of(patch * merge));
     let (gh, gw) = patch_grid(h_bar, w_bar, patch);
     let pv = channels * temporal * patch * patch;
     let n = gh * gw;

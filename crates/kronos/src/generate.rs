@@ -667,7 +667,7 @@ mod tests {
         // top_k=1 keeps only index 3 -> always sampled
         for _ in 0..8 {
             let mut l = lg.clone();
-            assert_eq!(sample(&mut l, &opts, &mut rng), 3);
+            assert_eq!(sample(&l, &opts, &mut rng), 3);
         }
         let _ = &mut lg;
     }

@@ -124,7 +124,7 @@ impl<'g> AudioEncoder<'g> {
         let c = &self.cfg;
         let (nm, chunk_len) = (c.num_mel_bins as usize, c.chunk_len() as usize);
         let t = mel.len() / nm;
-        assert!(t % chunk_len == 0, "T ({t}) must be a multiple of chunk_len ({chunk_len})");
+        assert!(t.is_multiple_of(chunk_len), "T ({t}) must be a multiple of chunk_len ({chunk_len})");
         let num_chunks = (t / chunk_len) as u32;
         let hidden = c.d_model;
 

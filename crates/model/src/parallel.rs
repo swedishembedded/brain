@@ -222,7 +222,7 @@ impl<M: Model + Send> DataParallel<M> {
         let DataParallel { replicas, fused, .. } = self;
         let fused = fused.as_ref().unwrap();
         std::thread::scope(|s| {
-            let fused = &*fused;
+            let fused = fused;
             for r in replicas.iter_mut() {
                 s.spawn(move || {
                     for (n, w, _, _) in &fused.state {

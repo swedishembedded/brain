@@ -124,7 +124,7 @@ pub fn silu_slice(x: &[f32]) -> Vec<f32> {
 /// the interleaved layout that pairs `2j` with `2j+1`) — matching
 /// `crates/kernels/wgsl/rope.wgsl`.
 pub fn rope_neox(buf: &mut [f32], rows: usize, heads: usize, hd: usize, pos0: usize, theta: f32) {
-    assert!(hd % 2 == 0, "rope: head_dim {hd} must be even");
+    assert!(hd.is_multiple_of(2), "rope: head_dim {hd} must be even");
     assert!(buf.len() >= rows * heads * hd, "rope: buffer too small");
     let half = hd / 2;
     for r in 0..rows {

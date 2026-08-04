@@ -128,9 +128,7 @@ impl Device {
             return Err(format!("open {path}: errno {}", errno()));
         }
         let mut dev = Device { fd, width, height, bufs: Vec::new(), buf: [0u8; SZ_BUFFER] };
-        if let Err(e) = dev.init(width, height, nbuf) {
-            return Err(e);
-        }
+        dev.init(width, height, nbuf)?;
         Ok(dev)
     }
 

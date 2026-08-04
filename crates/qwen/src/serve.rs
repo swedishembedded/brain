@@ -911,7 +911,7 @@ impl Engine {
         inputs: &[u32],
         k: usize,
     ) -> Vec<Vec<u32>> {
-        assert!(k >= 1 && k <= DECODE_WINDOW, "window {k} out of range");
+        assert!((1..=DECODE_WINDOW).contains(&k), "window {k} out of range");
         let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
         let mbt = self.max_blocks_per_seq;
         // Pre-allocate sub-steps 1..k and build the device schedule:

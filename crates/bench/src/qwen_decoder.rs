@@ -28,7 +28,7 @@ impl QwenDecoder {
     /// follow GPT-comparable conventions. `vocab` is `0` (inferred from the
     /// dataset's `meta.json`).
     pub fn qwen_config(&self, block_size: u32, cfg: &TrainConfig) -> QwenConfig {
-        let n_kv = if cfg.n_heads % 2 == 0 { cfg.n_heads / 2 } else { cfg.n_heads };
+        let n_kv = if cfg.n_heads.is_multiple_of(2) { cfg.n_heads / 2 } else { cfg.n_heads };
         QwenConfig {
             vocab: 0,
             block_size,

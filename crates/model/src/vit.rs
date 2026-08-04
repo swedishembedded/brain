@@ -800,7 +800,7 @@ impl WindowPlan {
     /// step-build time. The unchunked inference path [`vit_block_fwd`] does not
     /// slice `ctx` per span and is unaffected.
     pub fn ctx_bindable(&self, dim: u32) -> bool {
-        self.spans.iter().all(|&(row0, _)| (row0 as u64 * dim as u64) % BIND_ALIGN == 0)
+        self.spans.iter().all(|&(row0, _)| (row0 as u64 * dim as u64).is_multiple_of(BIND_ALIGN))
     }
 }
 
@@ -1132,7 +1132,7 @@ fn row_param(rows: u32, stride: u32, region: u32) -> u32 {
 fn aligned_ctx(q0: u32, d_out: u32) -> u64 {
     let off = q0 as u64 * d_out as u64;
     assert!(
-        off % BIND_ALIGN == 0,
+        off.is_multiple_of(BIND_ALIGN),
         "ctx binding offset q0*C = {q0}*{d_out} = {off} floats is not 64-float (256B) aligned; \
          a ragged/shifted partition needs C to be a multiple of 64, or every span's q0 to be a \
          multiple of {}",

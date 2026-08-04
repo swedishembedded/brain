@@ -175,7 +175,7 @@ fn conv2d_gd_depthwise_channels_are_isolated() {
     let (n, c, h, w, k) = (1u32, 4u32, 6u32, 6u32, 3u32);
     let (stride, pad, dil) = (1u32, 1u32, 1u32);
     let x = randvec(3, (n * c * h * w) as usize);
-    let wt = randvec(4, (c * 1 * k * k) as usize); // [C, 1, k, k]
+    let wt = randvec(4, (c * k * k) as usize); // [C, 1, k, k]
     let on = (n * c * h * w) as usize;
     let params = [n, c, h, w, c, k, stride, pad, dil, c, h, w];
 

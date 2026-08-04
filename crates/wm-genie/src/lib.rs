@@ -428,7 +428,7 @@ fn patchify(video: &[f32], b: usize, c: usize, t: usize, hh: usize, ww: usize, p
 #[allow(clippy::too_many_arguments)]
 pub fn patch_embed(gpu: &Gpu, video: &[f32], w: &PatchEmbedWeights, b: u32, c: u32, t: u32, hh: u32, ww: u32, p: u32, dim: u32) -> Vec<f32> {
     let (patches, h, wd) = patchify(video, b as usize, c as usize, t as usize, hh as usize, ww as usize, p as usize);
-    let pf = (c * p * p) as u32;
+    let pf = c * p * p;
     let rows = b * t * h as u32 * wd as u32;
     let n1 = layernorm_b(gpu, &patches, &w.ln1_g, &w.ln1_b, rows, pf);
     let lw = gpu.storage_init("lw", &w.lin_w);
@@ -573,7 +573,7 @@ fn decode_latents(
     let mut recon = vec![0.0f32; bu*cu*fu*hhu*wwu];
     for bb in 0..bu { for cc in 0..cu {
         let dst0 = ((bb*cu+cc)*fu)*hhu*wwu;
-        let sf = ((bb*cu+cc)*1)*hhu*wwu;
+        let sf = (bb*cu+cc)*hhu*wwu;
         recon[dst0..dst0+hhu*wwu].copy_from_slice(&pix_first[sf..sf+hhu*wwu]);
         for tt in 0..fu-1 {
             let src = ((bb*cu+cc)*(fu-1)+tt)*hhu*wwu;

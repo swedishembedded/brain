@@ -1058,7 +1058,7 @@ pub fn finetune(
             ft.adamw_step(step, opts.lr, opts.wd, Some(opts.clip));
             run += l;
             cnt += 1;
-            if opts.progress && (step as usize % every == 0 || step as usize == total) {
+            if opts.progress && ((step as usize).is_multiple_of(every) || step as usize == total) {
                 let el = t0.elapsed().as_secs_f32();
                 let frac = step as f32 / total as f32;
                 let eta = if frac > 0.0 { el / frac - el } else { 0.0 };

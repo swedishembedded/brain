@@ -82,7 +82,7 @@ fn forward_finite_random_mel() {
     // deterministic pseudo-random mel in a plausible log-mel range.
     let mel: Vec<f32> = (0..t * 128)
         .map(|i| {
-            let x = ((i as f32 * 12.9898).sin() * 43758.5453).fract();
+            let x = ((i as f32 * 12.9898).sin() * 43_758.547).fract();
             -5.0 + 6.0 * x
         })
         .collect();

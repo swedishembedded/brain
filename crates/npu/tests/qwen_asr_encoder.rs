@@ -102,7 +102,7 @@ fn audio_encoder_head_matches_reference_on_cpu() {
 
     // reference (device) head
     let gpu = gpu_core::Gpu::new_cpu(audio_pipelines());
-    let enc = AudioEncoder::new(&gpu, cfg.clone(), &w);
+    let enc = AudioEncoder::new(&gpu, cfg, &w);
     let (_encoder_out, reference) = enc.encode_packed(&packed, n_audio, &spans);
     assert_eq!(reference.len(), n_audio as usize * out);
 

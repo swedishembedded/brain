@@ -73,7 +73,7 @@ const KERNELS: [(&str, &str); 21] = [
 const EPS: f32 = 1e-5;
 
 fn d128(x: usize) -> u32 {
-    ((x + 127) / 128) as u32
+    x.div_ceil(128) as u32
 }
 
 /// adaLN fold (host): `mod = adaln_w·c + adaln_b` → folded norm weights + the

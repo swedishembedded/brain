@@ -336,7 +336,8 @@ mod tests {
                 "final_layer.adaLN_modulation.1.weight" => "norm_out.linear.weight".into(),
                 "final_layer.linear.weight" => "proj_out.weight".into(),
                 other => {
-                    let o = other
+                    
+                    other
                         .replace("double_blocks.", "transformer_blocks.")
                         .replace("img_attn.proj.weight", "attn.to_out.0.weight")
                         .replace("txt_attn.proj.weight", "attn.to_add_out.weight")
@@ -355,8 +356,7 @@ mod tests {
                         .replace("linear1.weight", "attn.to_qkv_mlp_proj.weight")
                         .replace("linear2.weight", "attn.to_out.weight")
                         .replace("norm.query_norm.scale", "attn.norm_q.weight")
-                        .replace("norm.key_norm.scale", "attn.norm_k.weight");
-                    o
+                        .replace("norm.key_norm.scale", "attn.norm_k.weight")
                 }
             };
             let data = if name == "final_layer.adaLN_modulation.1.weight" {

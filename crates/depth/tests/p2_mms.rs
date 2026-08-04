@@ -46,8 +46,8 @@ fn mms_has_two_depthwise_weights_and_exactly_one_bn() {
     let m = MinimalMultiScale::new(&ctx, "encoder.stage2.2", Shape::new(1, 96, 48, 48), true);
     let p = m.param_list();
     assert_eq!(p, vec![
-        ("encoder.stage2.2.branch1.weight".to_string(), 96 * 1 * 3 * 3),
-        ("encoder.stage2.2.branch2.weight".to_string(), 96 * 1 * 3 * 3),
+        ("encoder.stage2.2.branch1.weight".to_string(), 96 * 3 * 3),
+        ("encoder.stage2.2.branch2.weight".to_string(), 96 * 3 * 3),
         ("encoder.stage2.2.bn.weight".to_string(), 96),
         ("encoder.stage2.2.bn.bias".to_string(), 96),
         ("encoder.stage2.2.bn.running_mean".to_string(), 96),

@@ -161,7 +161,7 @@ fn qwen3_training_validity() {
         "The secret phrase is: velvet thunder over the quiet harbor.",
     );
     // Repeat so the token stream exceeds the 512 window (loader samples windows).
-    let corpus: Vec<_> = std::iter::repeat(ex.clone()).take(40).collect();
+    let corpus: Vec<_> = std::iter::repeat_n(ex.clone(), 40).collect();
     let out = std::env::temp_dir().join("qwen3_train_validity");
     data::chat::prepare_chat(&corpus, &corpus, &t, 151936, &out).unwrap();
 

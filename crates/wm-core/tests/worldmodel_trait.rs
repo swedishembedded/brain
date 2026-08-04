@@ -154,9 +154,9 @@ mod specref {
 #[test]
 fn worldmodel_specref_selfcheck_against_spec_constants() {
     // §5.1 FNV chain over zero bytes.
-    assert_eq!(specref::fnv1a(std::iter::repeat(0u8).take(1)), 0xaf63bd4c8601b7df);
-    assert_eq!(specref::fnv1a(std::iter::repeat(0u8).take(2)), 0x08328807b4eb6fed);
-    assert_eq!(specref::fnv1a(std::iter::repeat(0u8).take(16)), 0x88201fb960ff6465);
+    assert_eq!(specref::fnv1a(std::iter::repeat_n(0u8, 1)), 0xaf63bd4c8601b7df);
+    assert_eq!(specref::fnv1a(std::iter::repeat_n(0u8, 2)), 0x08328807b4eb6fed);
+    assert_eq!(specref::fnv1a(std::iter::repeat_n(0u8, 16)), 0x88201fb960ff6465);
     assert_eq!(specref::seed(&[], &[]), (37, 57));
 
     // §5.2 Case B byte stream and checkpoints.

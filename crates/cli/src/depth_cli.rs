@@ -513,7 +513,7 @@ fn run_camera(args: &[String]) {
     let cap_thread = std::thread::spawn(move || {
         let mut seq = 0u64;
         while stop.load(Ordering::Relaxed) {
-            let r = dev.next_frame(|yuyv, w, h| yuyv_to_rgb(yuyv, w, h));
+            let r = dev.next_frame(yuyv_to_rgb);
             match r {
                 Ok(rgb) => {
                     seq += 1;

@@ -773,9 +773,9 @@ impl WgpuBackend {
                 "limits: max_buffer_size {} MiB, max_storage_buffer_binding_size {} MiB \
                  (adapter caps: {} / {} MiB)",
                 mib(l.max_buffer_size),
-                mib(l.max_storage_buffer_binding_size as u64),
+                mib(l.max_storage_buffer_binding_size),
                 mib(adapter_limits.max_buffer_size),
-                mib(adapter_limits.max_storage_buffer_binding_size as u64),
+                mib(adapter_limits.max_storage_buffer_binding_size),
             );
         }
 
@@ -873,7 +873,7 @@ impl WgpuBackend {
     }
 
     fn max_storage_binding_bytes(&self) -> u64 {
-        self.device().limits().max_storage_buffer_binding_size as u64
+        self.device().limits().max_storage_buffer_binding_size
     }
 
     /// Record all pending dispatches into ONE compute pass and submit. Idempotent.
@@ -1027,7 +1027,7 @@ impl WgpuBackend {
     fn uniform(&self, data: &[u32]) -> wgpu::Buffer {
         self.stats_uniform.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut bytes: Vec<u8> = bytemuck::cast_slice(data).to_vec();
-        while bytes.len() % 16 != 0 {
+        while !bytes.len().is_multiple_of(16) {
             bytes.push(0);
         }
         self.device().create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1043,7 +1043,7 @@ impl WgpuBackend {
     /// avoiding the per-dispatch buffer/bind-group churn that otherwise exhausts
     /// the GPU memory aperture in long training loops.
     pub fn uniform_dynamic(&self, len: usize) -> wgpu::Buffer {
-        let size = (((len * 4) + 15) / 16 * 16).max(16) as u64;
+        let size = ((len * 4).div_ceil(16) * 16).max(16) as u64;
         self.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("params"),
             size,
@@ -1088,7 +1088,7 @@ impl WgpuBackend {
     /// `(word_offset, word_len)` (`word_len == 0` => to the end). This keeps a
     /// single binding within `max_storage_buffer_binding_size` (e.g. tiling a
     /// >128MB embedding into vocab slices). Offsets must satisfy the adapter's
-    /// `min_storage_buffer_offset_alignment` (256B); row-aligned tiles do.
+    /// > `min_storage_buffer_offset_alignment` (256B); row-aligned tiles do.
     pub fn step_sliced(&self, kind: usize, bufs: &[&wgpu::Buffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> WgpuStep {
         let ubuf = self.uniform(params);
         let mut entries = vec![wgpu::BindGroupEntry { binding: 0, resource: ubuf.as_entire_binding() }];
@@ -1222,10 +1222,10 @@ impl WgpuBackend {
     }
 }
 
-/// Neutral-handle bridge: downcast the opaque [`DeviceBuffer`]/[`Step`] back to
-/// `wgpu::Buffer`/[`WgpuStep`] and delegate to the inherent methods. Inherent
-/// methods take resolution priority, so `WgpuBackend::method(self, …)` is
-/// unambiguous.
+// Neutral-handle bridge: downcast the opaque `DeviceBuffer`/`Step` back to
+// `wgpu::Buffer`/`WgpuStep` and delegate to the inherent methods. Inherent
+// methods take resolution priority, so `WgpuBackend::method(self, …)` is
+// unambiguous.
 
 /// Weak handle onto a [`DeviceShared`] — see `backend_api::Backend::downgrade`.
 /// Holds no strong count, so the device still dies with its last real handle.

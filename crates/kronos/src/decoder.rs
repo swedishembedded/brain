@@ -216,7 +216,7 @@ impl KronosDecoder {
         let ops = self.ops();
 
         // cross-attention: q from sibling, k/v from context (non-causal, scaled)
-        let q = ops.linear(&sibd, "dep_layer.cross_attn.q_proj.weight", "dep_layer.cross_attn.q_proj.bias", t, d, d);
+        let q = ops.linear(sibd, "dep_layer.cross_attn.q_proj.weight", "dep_layer.cross_attn.q_proj.bias", t, d, d);
         let k = ops.linear(context, "dep_layer.cross_attn.k_proj.weight", "dep_layer.cross_attn.k_proj.bias", t, d, d);
         let v = ops.linear(context, "dep_layer.cross_attn.v_proj.weight", "dep_layer.cross_attn.v_proj.bias", t, d, d);
         ops.rope(&q, t, heads, hd);

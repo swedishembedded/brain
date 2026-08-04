@@ -209,7 +209,7 @@ mod tests {
             samples: (0..5).map(|i| sample(i as f64 * 3600.0, 100.0, 500.0, 1000)).collect(),
             restarts: 0,
         };
-        assert_eq!(r.throughput_drift_pct_per_h().unwrap().abs() < 1e-9, true);
+        assert!(r.throughput_drift_pct_per_h().unwrap().abs() < 1e-9);
         assert!(r.healthy(5.0, 64.0));
     }
 

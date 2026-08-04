@@ -301,20 +301,20 @@ fn film_identity_when_modulation_zero() {
     // channel: N=2, C=3, H=W=2 (24 elems), sb = 0 with len 2*N*C = 12.
     let dc = FilmChanDims::new(2, 3, 2, 2).expect("valid dims");
     let xc = vec_seeded(24, &mut st);
-    let yc = chan_fwd(&gpu, &f, &dc, &xc, &vec![0.0f32; 12], 1);
+    let yc = chan_fwd(&gpu, &f, &dc, &xc, &[0.0f32; 12], 1);
     assert_exact(&yc, &xc, "film_chan identity at s=b=0");
 
     // row: R=4, D=3, rows_per_cond=1 => NC=4 (extreme), sb = 0 len 2*4*3.
     let dr = FilmRowDims::new(4, 3, 1).expect("valid dims");
     let xr = vec_seeded(12, &mut st);
-    let yr = row_fwd(&gpu, &f, &dr, &xr, &vec![0.0f32; 24], 1);
+    let yr = row_fwd(&gpu, &f, &dr, &xr, &[0.0f32; 24], 1);
     assert_exact(&yr, &xr, "film_row identity at s=b=0 (rows_per_cond=1)");
 
     // gate: R=4, D=3, rows_per_cond=R=4 => NC=1 (other extreme), g = 0.
     let dg = FilmRowDims::new(4, 3, 4).expect("valid dims");
     let xg = vec_seeded(12, &mut st);
     let hg = vec_seeded(12, &mut st);
-    let yg = gate_fwd(&gpu, &f, &dg, &xg, &vec![0.0f32; 3], &hg, 1);
+    let yg = gate_fwd(&gpu, &f, &dg, &xg, &[0.0f32; 3], &hg, 1);
     assert_exact(&yg, &xg, "gate_row identity at g=0 (rows_per_cond=R)");
 }
 

@@ -44,8 +44,8 @@ pub fn run_devices(_args: &[String]) {
     let wgpu_ids = gpu_core::wgpu_visible_gpus();
     println!("canonical device registry (source: {} enumeration, PCI-bus order)", reg.source());
     println!(
-        "{:<6} {:<28} {:<14} {:<10} {:>9}  {}",
-        "index", "name", "pci bus", "uuid", "vram", "backends"
+        "{:<6} {:<28} {:<14} {:<10} {:>9}  backends",
+        "index", "name", "pci bus", "uuid", "vram"
     );
     for d in devs {
         let id = &d.identity;

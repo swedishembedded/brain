@@ -1748,7 +1748,7 @@ mod tests {
         };
         let eps = 1e-3f32;
         // check embedding rows actually used by the tokens
-        for &i in &[1 * dh, 1 * dh + 2, 3 * dh + 1, 5 * dh, 5 * dh + 3] {
+        for &i in &[dh, dh + 2, 3 * dh + 1, 5 * dh, 5 * dh + 3] {
             let (mut wp, mut wm) = (w.clone(), w.clone());
             wp.get_mut("decoder.embedding.weight").unwrap()[i] += eps;
             wm.get_mut("decoder.embedding.weight").unwrap()[i] -= eps;

@@ -230,7 +230,7 @@ mod tests {
         let o = p.overhead();
         let want = 4.0 * 544.0 * 544.0 / (1024.0 * 1024.0);
         assert!((o - want).abs() < 1e-6, "overhead {o}, expected {want}");
-        assert!((o - 1.128_906_25).abs() < 1e-6, "overhead {o}");
+        assert!((o - 1.128_906_3).abs() < 1e-6, "overhead {o}");
         assert!(o < (576.0f32 / 512.0).powi(2), "must beat the interior ceiling");
     }
 }

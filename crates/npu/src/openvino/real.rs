@@ -161,7 +161,7 @@ pub fn device_info(device: NpuDevice, allow_fallback: bool) -> Result<DeviceInfo
     // OV returns the list as a string (space- or comma-separated, sometimes
     // bracketed) — split into tokens.
     let capabilities = caps_raw
-        .split(|c: char| c == ' ' || c == ',' || c == '[' || c == ']' || c == '\'' || c == '"')
+        .split([' ', ',', '[', ']', '\'', '"'])
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect();

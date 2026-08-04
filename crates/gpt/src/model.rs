@@ -896,7 +896,7 @@ impl Gpt {
         for l in 0..c.n_layers as usize {
             let p = |name: &str| format!("blocks.{l}.{name}");
             // --- attention: LN -> fused-QKV (as three contiguous slices) -> attend ---
-            s.push(model::block::layernorm_fwd(&g, &LN_IDS, &dec.res[l], w(&p("ln1.weight")), w(&p("ln1.bias")), &dec.xn1, d, 1, 1e-5));
+            s.push(model::block::layernorm_fwd(g, &LN_IDS, &dec.res[l], w(&p("ln1.weight")), w(&p("ln1.bias")), &dec.xn1, d, 1, 1e-5));
             // q/k/v via the fused `attn.qkv.weight [3d,d]` sliced by output-row block
             // (offsets d*d, 2*d*d are large + 256B-aligned) -> contiguous [d] buffers.
             let dw = d * d;
@@ -917,7 +917,7 @@ impl Gpt {
             s.push(g.step(BIAS_ADD, &[&dec.proj, w(&p("attn.out.bias"))], &[1, d], d));
             s.push(g.step(ADD2, &[&dec.res[l], &dec.proj, &dec.xmid], &[d], d));
             // --- MLP: LN -> fc -> GELU -> proj ---
-            s.push(model::block::layernorm_fwd(&g, &LN_IDS, &dec.xmid, w(&p("ln2.weight")), w(&p("ln2.bias")), &dec.ln2_out, d, 1, 1e-5));
+            s.push(model::block::layernorm_fwd(g, &LN_IDS, &dec.xmid, w(&p("ln2.weight")), w(&p("ln2.bias")), &dec.ln2_out, d, 1, 1e-5));
             s.push(g.step(MATMUL, &[&dec.ln2_out, w(&p("mlp.fc.weight")), &dec.fc], &[1, d, ff], ff));
             s.push(g.step(BIAS_ADD, &[&dec.fc, w(&p("mlp.fc.bias"))], &[1, ff], ff));
             s.push(g.step(GELU, &[&dec.fc, &dec.gelu], &[ff], ff));
@@ -926,7 +926,7 @@ impl Gpt {
             s.push(g.step(ADD2, &[&dec.xmid, &dec.ffn_out, &dec.res[l + 1]], &[d], d));
         }
         let last = c.n_layers as usize;
-        s.push(model::block::layernorm_fwd(&g, &LN_IDS, &dec.res[last], w("ln.weight"), w("ln.bias"), &dec.xn_final, d, 1, 1e-5));
+        s.push(model::block::layernorm_fwd(g, &LN_IDS, &dec.res[last], w("ln.weight"), w("ln.bias"), &dec.xn_final, d, 1, 1e-5));
         g.submit(&[], &s);
         g.read(&dec.xn_final, dd)
     }

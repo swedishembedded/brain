@@ -30,6 +30,7 @@
 //!   * rectangle `Rect::at(x,y).of_size(w,h)` paints `[x, x+w-1] × [y, y+h-1]`.
 //!   * circle center `(cx,cy)` radius `r` paints `[cx-r, cx+r] × [cy-r, cy+r]`
 //!     (imageproc fills the inclusive disc, so the bounding box spans `2r+1`px).
+//!
 //! The extent is clipped to the image; zero/negative-area boxes are dropped. The
 //! box is then stored normalized center-xywh in `[0,1]` (see [`DetectBox`]).
 //!

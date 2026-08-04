@@ -195,10 +195,14 @@ fn val_eq(a: &Value, b: &Value) -> bool {
 
 // ---- deterministic generator ---------------------------------------------------
 
+/// One catalogue row: a tool spec paired with, per argument, the name and the
+/// pool of values the generator may draw from.
+type CatalogueEntry = (ToolSpec, Vec<(&'static str, &'static [&'static str])>);
+
 /// The fixed tool catalogue the generator draws from. Each has 1-2 args whose
 /// values are copied from the request — the routing+filling skill. Distractor
 /// tools (the ones NOT called) force the model to select by name, not position.
-fn catalogue() -> Vec<(ToolSpec, Vec<(&'static str, &'static [&'static str])>)> {
+fn catalogue() -> Vec<CatalogueEntry> {
     // (spec, per-arg value pool). Values are drawn from disjoint pools so a wrong
     // routing produces a wrong, checkable answer.
     let p = |name: &str, ty: &'static str, desc: &str| ToolParam {

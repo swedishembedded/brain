@@ -62,7 +62,7 @@ impl Projector {
 /// Abramowitz-Stegun erf (matches the gelu_erf kernel) for the host projector.
 fn libm_erf(x: f32) -> f32 {
     let t = 1.0 / (1.0 + 0.3275911 * x.abs());
-    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * (-x * x).exp();
+    let y = 1.0 - (((((1.061_405_4 * t - 1.453_152_1) * t) + 1.421_413_8) * t - 0.284_496_72) * t + 0.254_829_6) * t * (-x * x).exp();
     if x < 0.0 {
         -y
     } else {

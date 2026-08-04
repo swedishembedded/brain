@@ -154,7 +154,7 @@ impl MadFuzzyRecall {
         while keys.len() < self.n_pairs {
             let kl = self.group_len(rng);
             let kg: Vec<u16> = (0..kl).map(|_| self.rand_key(rng)).collect();
-            if keys.iter().any(|k| *k == kg) {
+            if keys.contains(&kg) {
                 continue; // keep key groups distinct
             }
             let vl = self.group_len(rng);

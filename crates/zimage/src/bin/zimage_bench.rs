@@ -106,7 +106,7 @@ fn main() {
         let dyb = gpu.storage(big_act);
         let dxb = gpu.storage(big_act);
         let dwb = gpu.storage(big_w);
-        let d128 = |x: usize| ((x + 127) / 128) as u32;
+        let d128 = |x: usize| x.div_ceil(128) as u32;
         // (in, out) of the 7 linears in one block.
         let linears = [(dim, dim), (dim, dim), (dim, dim), (dim, dim), (dim, hidden), (dim, hidden), (hidden, dim)];
         let mut fwd = Vec::new();

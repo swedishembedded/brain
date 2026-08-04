@@ -162,7 +162,7 @@ impl HotPipeline {
     /// the DiT weights before the (int8/fp32) engine is built — so the resident
     /// pipeline generates adapter-conditioned images with no other change.
     pub fn build_adapted(paths: &Paths, width: u32, height: u32, cap_len: u32, hifi: bool, adapter: Option<&str>, mut progress: impl FnMut(&str)) -> Result<HotPipeline, String> {
-        if width % 16 != 0 || height % 16 != 0 {
+        if !width.is_multiple_of(16) || !height.is_multiple_of(16) {
             return Err("width/height must be multiples of 16".into());
         }
         let (lh, lw) = (height / 8, width / 8);
@@ -488,7 +488,7 @@ pub fn generate_img(prompt: &str, opts: &Opts, paths: &Paths, init: Init, progre
 /// step.
 fn generate_core(prompt: &str, opts: &Opts, paths: &Paths, init: Option<Init>, mut progress: impl FnMut(u32, u32, &str)) -> Result<Image, String> {
     let total = opts.steps + 2; // encode + N sampling + decode
-    if opts.width % 16 != 0 || opts.height % 16 != 0 {
+    if !opts.width.is_multiple_of(16) || !opts.height.is_multiple_of(16) {
         return Err("width/height must be multiples of 16".into());
     }
     let (lh, lw) = (opts.height / 8, opts.width / 8); // VAE downscale 8

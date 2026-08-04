@@ -316,7 +316,7 @@ fn gn_g_equals_c_is_instance_norm() {
     let mut seed = 0x0A11_5EEDu64;
     let x: Vec<f32> = (0..d.elems()).map(|_| lcg(&mut seed)).collect();
     let mut gb = vec![1.0f32; c as usize]; // gamma = 1
-    gb.extend(std::iter::repeat(0.0f32).take(c as usize)); // beta = 0
+    gb.extend(std::iter::repeat_n(0.0f32, c as usize)); // beta = 0
 
     let gpu = gpu();
     let gn = Gn::seq();

@@ -484,7 +484,7 @@ impl<'g> PatchMerger<'g> {
     pub fn merge(&self, x: &[f32], n: u32) -> Vec<f32> {
         let g = self.gpu;
         let m2 = self.merge * self.merge;
-        assert!(n % m2 == 0, "n must be a multiple of merge²");
+        assert!(n.is_multiple_of(m2), "n must be a multiple of merge²");
         let mrows = n / m2;
         let merged = self.in_dim * m2; // e.g. 1024·4 = 4096
         let eps = gpu_core::f(VISION_EPS);

@@ -38,7 +38,7 @@ trait TestBlock {
     fn param_list(&self) -> Vec<(String, usize)>;
     fn out_numel(&self) -> u32;
     fn forward(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer);
-    fn out<'a>(&'a self) -> &'a DeviceBuffer;
+    fn out(&self) -> &DeviceBuffer;
     fn backward(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer);
 }
 
@@ -163,7 +163,7 @@ macro_rules! impl_block {
             fn forward(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer) {
                 <$ty>::forward(self, ctx, ps, x)
             }
-            fn out<'a>(&'a self) -> &'a DeviceBuffer {
+            fn out(&self) -> &DeviceBuffer {
                 <$ty>::out(self)
             }
             fn backward(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {

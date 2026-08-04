@@ -288,7 +288,7 @@ mod tests {
         for line in text.lines() {
             // `lines()` strips the '\n', so add it back for the limit check.
             assert!(
-                line.len() + 1 <= MAX_CHARS_PER_LINE,
+                line.len() < MAX_CHARS_PER_LINE,
                 "line too long: {line:?}"
             );
             assert_eq!(

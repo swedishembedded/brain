@@ -43,7 +43,7 @@ pub fn transcribe_stream_spec() -> ActionSpec {
 /// `sample_rate` (the ASR front ends are fixed at 16 kHz) and a byte length that is
 /// not a whole number of f32 samples.
 pub fn wav_from_blob(blob: &Blob) -> Result<Vec<f32>, String> {
-    if blob.bytes.len() % 4 != 0 {
+    if !blob.bytes.len().is_multiple_of(4) {
         return Err(format!("audio blob length {} is not a multiple of 4 (expected f32 LE PCM)", blob.bytes.len()));
     }
     if let Some(sr) = blob.meta.get("sample_rate").and_then(|v| v.as_u64()) {

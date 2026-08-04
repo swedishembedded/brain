@@ -61,7 +61,7 @@ fn plan_batch(cfg: &PidConfig, t: u32, eff_batch: u32, budget: u64) -> (u32, u32
     );
     let avail = budget.saturating_sub(fixed).max(per_sample);
     let mut b_micro = ((avail / per_sample) as u32).clamp(1, eff_batch);
-    while eff_batch % b_micro != 0 {
+    while !eff_batch.is_multiple_of(b_micro) {
         b_micro -= 1;
     }
     (b_micro, eff_batch / b_micro)
@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(acc, 1);
         // tiny budget -> microbatch shrinks but still divides the effective batch
         let (bm2, acc2) = plan_batch(&cfg, 256, 12, 1 << 20);
-        assert!(bm2 >= 1 && bm2 <= 12);
+        assert!((1..=12).contains(&bm2));
         assert_eq!(12 % bm2, 0);
         assert_eq!(bm2 * acc2, 12);
     }

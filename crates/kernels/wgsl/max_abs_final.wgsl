@@ -11,8 +11,15 @@ struct Params { p: u32 };
 @group(0) @binding(2) var<storage, read_write> sx:   array<f32>;
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x != 0u) { return; }
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(num_workgroups) nwg: vec3<u32>) {
+    // One active thread. `num_workgroups` is declared and the index reconstructed
+    // the standard way even though this is always dispatched as a single
+    // workgroup: the CPU (Cranelift) JIT requires every kernel to take the
+    // argument, and omitting it made this the ONE kernel of 346 that failed to
+    // compile there — i.e. int8 quantization had no working CPU-backend path.
+    let t = gid.y * (nwg.x * 64u) + gid.x;
+    if (t != 0u) { return; }
     var m = 0.0;
     for (var i: u32 = 0u; i < pr.p; i = i + 1u) {
         m = max(m, part[i]);

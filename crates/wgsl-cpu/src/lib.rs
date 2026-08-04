@@ -1086,7 +1086,7 @@ impl<'a, 'b> Tr<'a, 'b> {
                 let (idx, _) = self.scalar(*index)?;
                 match base_place {
                     Place::Mem { addr, elem } => {
-                        let idx64 = self.to_i64(idx);
+                        let idx64 = self.emit_i64(idx);
                         let off = self.b.ins().imul_imm(idx64, 4);
                         let a = self.b.ins().iadd(addr, off);
                         Ok(Eval::Place(Place::Mem { addr: a, elem }))
@@ -1475,7 +1475,10 @@ impl<'a, 'b> Tr<'a, 'b> {
         }
     }
 
-    fn to_i64(&mut self, v: Value) -> Value {
+    /// Emit a widening to i64. Named `emit_*` rather than `to_*`: this appends
+    /// an instruction to the function under construction, it does not convert
+    /// `self`.
+    fn emit_i64(&mut self, v: Value) -> Value {
         let t = self.b.func.dfg.value_type(v);
         if t == types::I64 {
             v
@@ -1510,10 +1513,11 @@ mod tests {
         let mut a2 = a.clone();
         let mut b2 = b.clone();
         let bufs = {
-            let mut v: Vec<*mut u8> = Vec::new();
-            v.push(a2.as_mut_ptr() as *mut u8);
-            v.push(b2.as_mut_ptr() as *mut u8);
-            v.push(out.as_mut_ptr() as *mut u8);
+            let v: Vec<*mut u8> = vec![
+                a2.as_mut_ptr() as *mut u8,
+                b2.as_mut_ptr() as *mut u8,
+                out.as_mut_ptr() as *mut u8,
+            ];
             v
         };
         let uniform = [4u32];
@@ -1552,13 +1556,11 @@ mod tests {
         let mut sx: Vec<f32> = vec![0.5, 0.25];
         let mut sw: Vec<f32> = vec![1.0, 2.0, 0.125];
         let mut out = vec![0.0f32; m * n];
-        let bufs = vec![
-            xq.as_mut_ptr() as *mut u8,
+        let bufs = [xq.as_mut_ptr() as *mut u8,
             wq.as_mut_ptr() as *mut u8,
             sx.as_mut_ptr() as *mut u8,
             sw.as_mut_ptr() as *mut u8,
-            out.as_mut_ptr() as *mut u8,
-        ];
+            out.as_mut_ptr() as *mut u8];
         let uniform = [m as u32, kg as u32, n as u32];
         // One workgroup (64 threads) per output column.
         unsafe {
@@ -1606,11 +1608,9 @@ mod tests {
             n as u32, cin as u32, h as u32, w as u32, cout as u32, k as u32,
             stride as u32, pad as u32, ho as u32, wo as u32,
         ];
-        let bufs = vec![
-            x.as_mut_ptr() as *mut u8,
+        let bufs = [x.as_mut_ptr() as *mut u8,
             wt.as_mut_ptr() as *mut u8,
-            y.as_mut_ptr() as *mut u8,
-        ];
+            y.as_mut_ptr() as *mut u8];
         // Dispatch: one workgroup per (n, co, 64-spatial-block).
         let psz = ho * wo;
         let blocks = psz.div_ceil(64);
@@ -1656,11 +1656,9 @@ mod tests {
         let mut x = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut w = vec![1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0];
         let mut out = vec![0.0f32; 4];
-        let bufs = vec![
-            x.as_mut_ptr() as *mut u8,
+        let bufs = [x.as_mut_ptr() as *mut u8,
             w.as_mut_ptr() as *mut u8,
-            out.as_mut_ptr() as *mut u8,
-        ];
+            out.as_mut_ptr() as *mut u8];
         let uniform = [2u32, 3u32, 2u32]; // m,k,n
         unsafe {
             jit.run(0, 0, 64, 1, 1, uniform.as_ptr(), bufs.as_ptr());

@@ -378,7 +378,7 @@ impl<'a> Exporter<'a> {
         let a = self.conv_raw(&format!("{prefix}.wc3"), &a, &w3p, &w3b, wh, 5, 1, 2, wh, 1);
         let a = self.relu(&a);
         let w6 = self.w.get(&format!("{prefix}.where_conv.6.weight"));
-        let a = self.conv_raw(&format!("{prefix}.wc6"), &a, &w6, &vec![0.0; 1], 1, 1, 1, 0, 1, 1);
+        let a = self.conv_raw(&format!("{prefix}.wc6"), &a, &w6, &[0.0; 1], 1, 1, 1, 0, 1, 1);
         // alpha upsampled (bilinear) BEFORE sigmoid.
         let a_up = self.resize(&a, oh, ow, true);
         let alpha = self.sigmoid(&a_up);

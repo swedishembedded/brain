@@ -339,7 +339,7 @@ impl Fincast {
         let inner = cfg.inner_dim();
         let qkvd = cfg.qkv_dim();
         let scaling = self.gpu.read(self.w(&format!("stacked_transformer.layers.{layer}.self_attn.scaling")), hd);
-        let base = 1.442695041f32 / (hd as f32).sqrt();
+        let base = 1.442_695_f32 / (hd as f32).sqrt();
         let qscale: Vec<f32> = (0..hd).map(|dd| base * softplus(scaling[dd])).collect();
 
         let q_off = 0usize;

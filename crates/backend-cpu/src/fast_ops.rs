@@ -266,14 +266,14 @@ unsafe fn affine_silu_avx2(buf: &mut [f32], s: f32, b: f32) {
 #[target_feature(enable = "avx2,fma")]
 pub(crate) unsafe fn exp256_ps(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
-    let hi = _mm256_set1_ps(88.3762626647949);
-    let lo = _mm256_set1_ps(-88.3762626647949);
+    let hi = _mm256_set1_ps(88.376_26);
+    let lo = _mm256_set1_ps(-88.376_26);
     // log2(e). The std constant rounds to the SAME f32 as the Cephes literal
     // `1.44269504088896341`, so this is bit-identical and not a retune.
     let log2ef = _mm256_set1_ps(std::f32::consts::LOG2_E);
     let half = _mm256_set1_ps(0.5);
-    let ln2hi = _mm256_set1_ps(0.693359375);
-    let ln2lo = _mm256_set1_ps(-2.12194440e-4);
+    let ln2hi = _mm256_set1_ps(0.693_359_4);
+    let ln2lo = _mm256_set1_ps(-2.121_944_4e-4);
     let x = _mm256_min_ps(_mm256_max_ps(x, lo), hi);
     // fx = floor(x*log2ef + 0.5)
     let mut fx = _mm256_fmadd_ps(x, log2ef, half);
@@ -282,12 +282,12 @@ pub(crate) unsafe fn exp256_ps(x: std::arch::x86_64::__m256) -> std::arch::x86_6
     let x = _mm256_fnmadd_ps(fx, ln2hi, x);
     let x = _mm256_fnmadd_ps(fx, ln2lo, x);
     let z = _mm256_mul_ps(x, x);
-    let p0 = _mm256_set1_ps(1.9875691500e-4);
-    let p1 = _mm256_set1_ps(1.3981999507e-3);
-    let p2 = _mm256_set1_ps(8.3334519073e-3);
-    let p3 = _mm256_set1_ps(4.1665795894e-2);
-    let p4 = _mm256_set1_ps(1.6666665459e-1);
-    let p5 = _mm256_set1_ps(5.0000001201e-1);
+    let p0 = _mm256_set1_ps(1.987_569_1e-4);
+    let p1 = _mm256_set1_ps(1.398_199_9e-3);
+    let p2 = _mm256_set1_ps(8.333_452e-3);
+    let p3 = _mm256_set1_ps(4.166_579_6e-2);
+    let p4 = _mm256_set1_ps(1.666_666_6e-1);
+    let p5 = _mm256_set1_ps(5e-1);
     let mut y = p0;
     y = _mm256_fmadd_ps(y, x, p1);
     y = _mm256_fmadd_ps(y, x, p2);
@@ -484,192 +484,6 @@ pub fn upsample2(params: &[u32], x: &[f32], y: &mut [f32]) {
             }
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn lcg(s: &mut u32) -> f32 {
-        *s = s.wrapping_mul(1664525).wrapping_add(1013904223);
-        ((*s >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
-    }
-
-    #[test]
-    fn silu_matches_scalar() {
-        let mut s = 1u32;
-        let x: Vec<f32> = (0..1000).map(|_| lcg(&mut s) * 8.0).collect();
-        let mut o = vec![0.0f32; x.len()];
-        silu(&x, &mut o);
-        for (i, &v) in x.iter().enumerate() {
-            let r = v / (1.0 + (-v).exp());
-            assert!((o[i] - r).abs() < 1e-4, "silu {v} -> {} vs {r}", o[i]);
-        }
-    }
-
-    #[test]
-    fn matmul_abt_matches_scalar() {
-        // sweep shapes incl. non-multiples of 8 (K tail) and 4 (N tail).
-        let mut s = 7u32;
-        for &(m, k, n) in &[(1, 16, 32), (5, 63, 17), (33, 128, 40), (8, 7, 3), (2, 512, 1024)] {
-            let a: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
-            let b: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
-            let mut c = vec![0.0f32; m * n];
-            matmul_abt(&a, &b, &mut c, m, k, n);
-            let mut maxerr = 0.0f32;
-            for i in 0..m {
-                for j in 0..n {
-                    let r: f32 = (0..k).map(|kk| a[i * k + kk] * b[j * k + kk]).sum();
-                    maxerr = maxerr.max((c[i * n + j] - r).abs() / (r.abs() + 1e-3));
-                }
-            }
-            assert!(maxerr < 2e-3, "matmul_abt rel err {maxerr} for ({m},{k},{n})");
-        }
-    }
-
-    // Perf microbench (run: cargo test -p brain-backend-cpu --release matmul_bench -- --ignored --nocapture)
-    #[test]
-    #[ignore]
-    fn matmul_bench() {
-        let (m, k, n) = (512, 512, 1024); // Kronos-scale linear
-        let mut s = 3u32;
-        let a: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
-        let b: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
-        let mut c = vec![0.0f32; m * n];
-        let iters = 20;
-        // AVX2 + threaded
-        matmul_abt(&a, &b, &mut c, m, k, n); // warm
-        let t = std::time::Instant::now();
-        for _ in 0..iters {
-            matmul_abt(&a, &b, &mut c, m, k, n);
-        }
-        let avx = t.elapsed().as_secs_f64() / iters as f64;
-        // scalar single-thread reference
-        let mut c2 = vec![0.0f32; m * n];
-        let t = std::time::Instant::now();
-        for r in 0..m {
-            row_abt_scalar(&a[r * k..r * k + k], &b, &mut c2[r * n..r * n + n], k, n);
-        }
-        let scal = t.elapsed().as_secs_f64();
-        // scalar + rayon (the true JIT baseline is threaded-scalar)
-        let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
-        let t = std::time::Instant::now();
-        for _ in 0..iters {
-            c2.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cc)| {
-                let row0 = ci * rows_per;
-                for r in 0..cc.len() / n {
-                    row_abt_scalar(&a[(row0 + r) * k..(row0 + r) * k + k], &b, &mut cc[r * n..r * n + n], k, n);
-                }
-            });
-        }
-        let scalt = t.elapsed().as_secs_f64() / iters as f64;
-        let gflops = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
-        eprintln!(
-            "matmul {m}x{k}x{n} ({} threads): AVX2+threads {:.2} ms ({:.1} GFLOP/s) | scalar+threads {:.2} ms ({:.1} GFLOP/s) | scalar-1t {:.2} ms | AVX2-vs-scalar-threaded {:.1}x",
-            rayon::current_num_threads(), avx * 1e3, gflops / avx, scalt * 1e3, gflops / scalt, scal * 1e3, scalt / avx
-        );
-    }
-
-    #[test]
-    fn bn_eval_matches_scalar() {
-        let (n, c, h, w) = (1, 7, 5, 9);
-        let mut s = 2u32;
-        let x: Vec<f32> = (0..n * c * h * w).map(|_| lcg(&mut s)).collect();
-        let mv: Vec<f32> = (0..2 * c).map(|i| if i % 2 == 1 { lcg(&mut s).abs() + 0.1 } else { lcg(&mut s) }).collect();
-        let gb: Vec<f32> = (0..2 * c).map(|_| lcg(&mut s)).collect();
-        let hw = h * w;
-        let affine = |idx: usize| {
-            let ci = (idx / hw) % c;
-            let inv = 1.0 / (mv[2 * ci + 1] + 1e-5).sqrt();
-            (x[idx] - mv[2 * ci]) * inv * gb[2 * ci] + gb[2 * ci + 1]
-        };
-        // Legacy 4-word params: the absent act word means identity — the same
-        // contract the padded dispatch uniform provides.
-        let mut o = vec![0.0f32; x.len()];
-        bn_eval(&[n as u32, c as u32, h as u32, w as u32], &x, &mv, &gb, &mut o);
-        for idx in 0..x.len() {
-            let r = affine(idx);
-            assert!((o[idx] - r).abs() < 1e-4, "bn {idx}");
-        }
-        // All four act codes against the scalar reference.
-        for act in 0..4u32 {
-            bn_eval(&[n as u32, c as u32, h as u32, w as u32, act], &x, &mv, &gb, &mut o);
-            for idx in 0..x.len() {
-                let z = affine(idx);
-                let r = match act {
-                    1 => z.max(0.0),
-                    2 => z / (1.0 + (-z).exp()),
-                    3 => 1.0 / (1.0 + (-z).exp()),
-                    _ => z,
-                };
-                assert!((o[idx] - r).abs() < 1e-4, "bn act={act} {idx}");
-            }
-        }
-    }
-
-    #[test]
-    fn concat2_matches_scalar() {
-        let (n, ca, cb, h, w) = (2, 3, 5, 4, 6);
-        let mut s = 3u32;
-        let a: Vec<f32> = (0..n * ca * h * w).map(|_| lcg(&mut s)).collect();
-        let b: Vec<f32> = (0..n * cb * h * w).map(|_| lcg(&mut s)).collect();
-        let ctot = ca + cb;
-        let mut y = vec![0.0f32; n * ctot * h * w];
-        concat2(&[n as u32, ca as u32, cb as u32, h as u32, w as u32], &a, &b, &mut y);
-        let hw = h * w;
-        for idx in 0..y.len() {
-            let ww = idx % w;
-            let t1 = idx / w;
-            let hh = t1 % h;
-            let t2 = t1 / h;
-            let cc = t2 % ctot;
-            let nn = t2 / ctot;
-            let exp = if cc < ca {
-                a[((nn * ca + cc) * h + hh) * w + ww]
-            } else {
-                b[((nn * cb + (cc - ca)) * h + hh) * w + ww]
-            };
-            assert_eq!(y[idx], exp);
-            let _ = hw;
-        }
-    }
-
-    #[test]
-    fn chan_place_matches_scalar() {
-        let (n, ctot, csrc, c_off, h, w) = (2, 11, 3, 5, 4, 6);
-        let mut s = 9u32;
-        let src: Vec<f32> = (0..n * csrc * h * w).map(|_| lcg(&mut s)).collect();
-        let mut dst = vec![-1.0f32; n * ctot * h * w];
-        chan_place(&[n as u32, ctot as u32, csrc as u32, c_off as u32, h as u32, w as u32], &src, &mut dst);
-        let hw = h * w;
-        for idx in 0..src.len() {
-            let cc = (idx / hw) % csrc;
-            let nn = idx / (csrc * hw);
-            let pos = idx % hw;
-            let di = (nn * ctot + (c_off + cc)) * hw + pos;
-            assert_eq!(dst[di], src[idx], "chan_place idx {idx}");
-        }
-    }
-
-    #[test]
-    fn upsample2_matches_scalar() {
-        let (n, c, h, w) = (1, 3, 4, 5);
-        let mut s = 4u32;
-        let x: Vec<f32> = (0..n * c * h * w).map(|_| lcg(&mut s)).collect();
-        let (oh, ow) = (h * 2, w * 2);
-        let mut y = vec![0.0f32; n * c * oh * ow];
-        upsample2(&[n as u32, c as u32, h as u32, w as u32], &x, &mut y);
-        for idx in 0..y.len() {
-            let wo = idx % ow;
-            let t1 = idx / ow;
-            let ho = t1 % oh;
-            let t2 = t1 / oh;
-            let cc = t2 % c;
-            let nn = t2 / c;
-            let exp = x[((nn * c + cc) * h + ho / 2) * w + wo / 2];
-            assert_eq!(y[idx], exp);
-        }
-    }
 }
 
 /// `gn_stats`: two-pass GroupNorm statistics over NCHW (matches
@@ -979,6 +793,192 @@ pub fn attn_apply_cross(
                 let dst = (b * tq + i) * d_model + h * hd;
                 out[dst..dst + hd].copy_from_slice(&ctxh[i * hd..i * hd + hd]);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lcg(s: &mut u32) -> f32 {
+        *s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        ((*s >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
+    }
+
+    #[test]
+    fn silu_matches_scalar() {
+        let mut s = 1u32;
+        let x: Vec<f32> = (0..1000).map(|_| lcg(&mut s) * 8.0).collect();
+        let mut o = vec![0.0f32; x.len()];
+        silu(&x, &mut o);
+        for (i, &v) in x.iter().enumerate() {
+            let r = v / (1.0 + (-v).exp());
+            assert!((o[i] - r).abs() < 1e-4, "silu {v} -> {} vs {r}", o[i]);
+        }
+    }
+
+    #[test]
+    fn matmul_abt_matches_scalar() {
+        // sweep shapes incl. non-multiples of 8 (K tail) and 4 (N tail).
+        let mut s = 7u32;
+        for &(m, k, n) in &[(1, 16, 32), (5, 63, 17), (33, 128, 40), (8, 7, 3), (2, 512, 1024)] {
+            let a: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
+            let b: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
+            let mut c = vec![0.0f32; m * n];
+            matmul_abt(&a, &b, &mut c, m, k, n);
+            let mut maxerr = 0.0f32;
+            for i in 0..m {
+                for j in 0..n {
+                    let r: f32 = (0..k).map(|kk| a[i * k + kk] * b[j * k + kk]).sum();
+                    maxerr = maxerr.max((c[i * n + j] - r).abs() / (r.abs() + 1e-3));
+                }
+            }
+            assert!(maxerr < 2e-3, "matmul_abt rel err {maxerr} for ({m},{k},{n})");
+        }
+    }
+
+    // Perf microbench (run: cargo test -p brain-backend-cpu --release matmul_bench -- --ignored --nocapture)
+    #[test]
+    #[ignore]
+    fn matmul_bench() {
+        let (m, k, n) = (512, 512, 1024); // Kronos-scale linear
+        let mut s = 3u32;
+        let a: Vec<f32> = (0..m * k).map(|_| lcg(&mut s)).collect();
+        let b: Vec<f32> = (0..n * k).map(|_| lcg(&mut s)).collect();
+        let mut c = vec![0.0f32; m * n];
+        let iters = 20;
+        // AVX2 + threaded
+        matmul_abt(&a, &b, &mut c, m, k, n); // warm
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            matmul_abt(&a, &b, &mut c, m, k, n);
+        }
+        let avx = t.elapsed().as_secs_f64() / iters as f64;
+        // scalar single-thread reference
+        let mut c2 = vec![0.0f32; m * n];
+        let t = std::time::Instant::now();
+        for r in 0..m {
+            row_abt_scalar(&a[r * k..r * k + k], &b, &mut c2[r * n..r * n + n], k, n);
+        }
+        let scal = t.elapsed().as_secs_f64();
+        // scalar + rayon (the true JIT baseline is threaded-scalar)
+        let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            c2.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cc)| {
+                let row0 = ci * rows_per;
+                for r in 0..cc.len() / n {
+                    row_abt_scalar(&a[(row0 + r) * k..(row0 + r) * k + k], &b, &mut cc[r * n..r * n + n], k, n);
+                }
+            });
+        }
+        let scalt = t.elapsed().as_secs_f64() / iters as f64;
+        let gflops = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
+        eprintln!(
+            "matmul {m}x{k}x{n} ({} threads): AVX2+threads {:.2} ms ({:.1} GFLOP/s) | scalar+threads {:.2} ms ({:.1} GFLOP/s) | scalar-1t {:.2} ms | AVX2-vs-scalar-threaded {:.1}x",
+            rayon::current_num_threads(), avx * 1e3, gflops / avx, scalt * 1e3, gflops / scalt, scal * 1e3, scalt / avx
+        );
+    }
+
+    #[test]
+    fn bn_eval_matches_scalar() {
+        let (n, c, h, w) = (1, 7, 5, 9);
+        let mut s = 2u32;
+        let x: Vec<f32> = (0..n * c * h * w).map(|_| lcg(&mut s)).collect();
+        let mv: Vec<f32> = (0..2 * c).map(|i| if i % 2 == 1 { lcg(&mut s).abs() + 0.1 } else { lcg(&mut s) }).collect();
+        let gb: Vec<f32> = (0..2 * c).map(|_| lcg(&mut s)).collect();
+        let hw = h * w;
+        let affine = |idx: usize| {
+            let ci = (idx / hw) % c;
+            let inv = 1.0 / (mv[2 * ci + 1] + 1e-5).sqrt();
+            (x[idx] - mv[2 * ci]) * inv * gb[2 * ci] + gb[2 * ci + 1]
+        };
+        // Legacy 4-word params: the absent act word means identity — the same
+        // contract the padded dispatch uniform provides.
+        let mut o = vec![0.0f32; x.len()];
+        bn_eval(&[n as u32, c as u32, h as u32, w as u32], &x, &mv, &gb, &mut o);
+        for idx in 0..x.len() {
+            let r = affine(idx);
+            assert!((o[idx] - r).abs() < 1e-4, "bn {idx}");
+        }
+        // All four act codes against the scalar reference.
+        for act in 0..4u32 {
+            bn_eval(&[n as u32, c as u32, h as u32, w as u32, act], &x, &mv, &gb, &mut o);
+            for idx in 0..x.len() {
+                let z = affine(idx);
+                let r = match act {
+                    1 => z.max(0.0),
+                    2 => z / (1.0 + (-z).exp()),
+                    3 => 1.0 / (1.0 + (-z).exp()),
+                    _ => z,
+                };
+                assert!((o[idx] - r).abs() < 1e-4, "bn act={act} {idx}");
+            }
+        }
+    }
+
+    #[test]
+    fn concat2_matches_scalar() {
+        let (n, ca, cb, h, w) = (2, 3, 5, 4, 6);
+        let mut s = 3u32;
+        let a: Vec<f32> = (0..n * ca * h * w).map(|_| lcg(&mut s)).collect();
+        let b: Vec<f32> = (0..n * cb * h * w).map(|_| lcg(&mut s)).collect();
+        let ctot = ca + cb;
+        let mut y = vec![0.0f32; n * ctot * h * w];
+        concat2(&[n as u32, ca as u32, cb as u32, h as u32, w as u32], &a, &b, &mut y);
+        let hw = h * w;
+        for idx in 0..y.len() {
+            let ww = idx % w;
+            let t1 = idx / w;
+            let hh = t1 % h;
+            let t2 = t1 / h;
+            let cc = t2 % ctot;
+            let nn = t2 / ctot;
+            let exp = if cc < ca {
+                a[((nn * ca + cc) * h + hh) * w + ww]
+            } else {
+                b[((nn * cb + (cc - ca)) * h + hh) * w + ww]
+            };
+            assert_eq!(y[idx], exp);
+            let _ = hw;
+        }
+    }
+
+    #[test]
+    fn chan_place_matches_scalar() {
+        let (n, ctot, csrc, c_off, h, w) = (2, 11, 3, 5, 4, 6);
+        let mut s = 9u32;
+        let src: Vec<f32> = (0..n * csrc * h * w).map(|_| lcg(&mut s)).collect();
+        let mut dst = vec![-1.0f32; n * ctot * h * w];
+        chan_place(&[n as u32, ctot as u32, csrc as u32, c_off as u32, h as u32, w as u32], &src, &mut dst);
+        let hw = h * w;
+        for idx in 0..src.len() {
+            let cc = (idx / hw) % csrc;
+            let nn = idx / (csrc * hw);
+            let pos = idx % hw;
+            let di = (nn * ctot + (c_off + cc)) * hw + pos;
+            assert_eq!(dst[di], src[idx], "chan_place idx {idx}");
+        }
+    }
+
+    #[test]
+    fn upsample2_matches_scalar() {
+        let (n, c, h, w) = (1, 3, 4, 5);
+        let mut s = 4u32;
+        let x: Vec<f32> = (0..n * c * h * w).map(|_| lcg(&mut s)).collect();
+        let (oh, ow) = (h * 2, w * 2);
+        let mut y = vec![0.0f32; n * c * oh * ow];
+        upsample2(&[n as u32, c as u32, h as u32, w as u32], &x, &mut y);
+        for idx in 0..y.len() {
+            let wo = idx % ow;
+            let t1 = idx / ow;
+            let ho = t1 % oh;
+            let t2 = t1 / oh;
+            let cc = t2 % c;
+            let nn = t2 / c;
+            let exp = x[((nn * c + cc) * h + ho / 2) * w + wo / 2];
+            assert_eq!(y[idx], exp);
         }
     }
 }

@@ -67,7 +67,7 @@ fn forward(gpu: &Gpu, s: &Shape, qkv: &[f32]) -> Vec<f32> {
     let st0 = gpu.step(0, &[&qkv_buf, &scores], &p_scores, s.scores_len() as u32);
     // softmax: params {bsz,n_heads,T}; bufs [scores, probs]
     let p_soft = [s.b, s.h, s.t];
-    let st1 = gpu.step(1, &[&scores, &probs], &p_soft, (s.b * s.h * s.t) as u32);
+    let st1 = gpu.step(1, &[&scores, &probs], &p_soft, ((s.b * s.h * s.t)));
     // apply: params {bsz,n_heads,T,head_dim,qkv_stride,v_off,d_model}; bufs [probs, qkv, out]
     let p_apply = [s.b, s.h, s.t, s.hd, 3 * d, 2 * d, d];
     let st2 = gpu.step(2, &[&probs, &qkv_buf, &out], &p_apply, s.out_len() as u32);
@@ -91,12 +91,12 @@ fn backward(gpu: &Gpu, s: &Shape, qkv: &[f32], g: &[f32]) -> Vec<f32> {
     let p_scores = [s.b, s.h, s.t, s.hd, 3 * d, 0, d];
     let st0 = gpu.step(0, &[&qkv_buf, &scores], &p_scores, s.scores_len() as u32);
     let p_soft = [s.b, s.h, s.t];
-    let st1 = gpu.step(1, &[&scores, &probs], &p_soft, (s.b * s.h * s.t) as u32);
+    let st1 = gpu.step(1, &[&scores, &probs], &p_soft, ((s.b * s.h * s.t)));
 
     // dscores: params {bsz,n_heads,T,head_dim,qkv_stride,v_off,d_model}
     //          bufs [d_out, qkv, probs, d_scores]
     let p_dsc = [s.b, s.h, s.t, s.hd, 3 * d, 2 * d, d];
-    let st2 = gpu.step(3, &[&d_out, &qkv_buf, &probs, &d_scores], &p_dsc, (s.b * s.h * s.t) as u32);
+    let st2 = gpu.step(3, &[&d_out, &qkv_buf, &probs, &d_scores], &p_dsc, ((s.b * s.h * s.t)));
     // dv: params {bsz,n_heads,T,head_dim,qkv_stride,v_off,d_model}; bufs [probs, d_out, d_qkv]
     let p_dv = [s.b, s.h, s.t, s.hd, 3 * d, 2 * d, d];
     let st3 = gpu.step(4, &[&probs, &d_out, &d_qkv], &p_dv, s.out_len() as u32);
@@ -141,7 +141,7 @@ fn bidir_softmax_rows_sum_to_one() {
     let probs = gpu.storage(s.scores_len() as u64);
     let p_scores = [s.b, s.h, s.t, s.hd, 3 * d, 0, d];
     let st0 = gpu.step(0, &[&qkv_buf, &scores], &p_scores, s.scores_len() as u32);
-    let st1 = gpu.step(1, &[&scores, &probs], &[s.b, s.h, s.t], (s.b * s.h * s.t) as u32);
+    let st1 = gpu.step(1, &[&scores, &probs], &[s.b, s.h, s.t], ((s.b * s.h * s.t)));
     gpu.submit(&[], &[st0, st1]);
     gpu.poll_wait();
     let pr = gpu.read(&probs, s.scores_len());

@@ -345,7 +345,7 @@ impl SynthSpec {
     /// Parse `<L>x<D>x<H>[xV]` and size a KV pool for `workload`.
     pub fn parse(shape: &str, workload: &str) -> Result<SynthSpec, String> {
         let parts: Vec<u32> = shape.split('x').map(|p| p.trim().parse().unwrap_or(0)).collect();
-        if parts.len() < 3 || parts[..3].iter().any(|&v| v == 0) {
+        if parts.len() < 3 || parts[..3].contains(&0) {
             return Err(format!("bad shape {shape:?}, expected <layers>x<d_model>x<heads>[x<vocab>]"));
         }
         let (n_layers, d_model, n_heads) = (parts[0], parts[1], parts[2]);
@@ -378,7 +378,7 @@ impl SynthSpec {
 
     pub fn config(&self) -> qwen::QwenConfig {
         let head_dim = self.d_model / self.n_heads;
-        let n_kv_heads = if self.n_heads % 4 == 0 { self.n_heads / 4 } else { self.n_heads };
+        let n_kv_heads = if self.n_heads.is_multiple_of(4) { self.n_heads / 4 } else { self.n_heads };
         qwen::QwenConfig {
             vocab: self.vocab,
             block_size: 4096,
@@ -671,7 +671,7 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
         (512u32, 512u32, 4u32)
     } else {
         let p: Vec<u32> = rest.split('x').map(|s| s.trim().parse().unwrap_or(0)).collect();
-        if p.len() != 3 || p.iter().any(|&v| v == 0) {
+        if p.len() != 3 || p.contains(&0) {
             return Err(format!("bad flux2 spec {rest:?}, expected <W>x<H>x<steps>[:<precision>] (e.g. 512x512x4:int8)"));
         }
         (p[0], p[1], p[2])
@@ -771,7 +771,7 @@ fn spec_flags(spec: &str) -> (&str, bool) {
 fn build_qwen_synth(shape: &str, workload: &str) -> Result<Box<dyn PerfTarget>, String> {
     let (shape, weights_int8) = spec_flags(shape);
     let parts: Vec<u32> = shape.split('x').map(|p| p.trim().parse().unwrap_or(0)).collect();
-    if parts.len() < 3 || parts[..3].iter().any(|&v| v == 0) {
+    if parts.len() < 3 || parts[..3].contains(&0) {
         return Err(format!("bad shape {shape:?}, expected <layers>x<d_model>x<heads>[x<vocab>]"));
     }
     let (n_layers, d_model, n_heads) = (parts[0], parts[1], parts[2]);

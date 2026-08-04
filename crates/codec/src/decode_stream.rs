@@ -510,7 +510,7 @@ mod tests {
         // upsample.0.0 convtr [latent,latent,2]; .1 convnext.
         fill(&mut w, "upsample.0.0.conv.weight", latent * latent * 2, &mut seed);
         fill(&mut w, "upsample.0.0.conv.bias", latent, &mut seed);
-        fill(&mut w, "upsample.0.1.dwconv.conv.weight", latent * 1 * 7, &mut seed);
+        fill(&mut w, "upsample.0.1.dwconv.conv.weight", latent * 7, &mut seed);
         fill(&mut w, "upsample.0.1.dwconv.conv.bias", latent, &mut seed);
         fill(&mut w, "upsample.0.1.norm.weight", latent, &mut seed);
         fill(&mut w, "upsample.0.1.norm.bias", latent, &mut seed);
@@ -537,14 +537,14 @@ mod tests {
                 fill(&mut w, &format!("{bp}.block.{j}.conv1.conv.bias"), out_dim, &mut seed);
                 fill(&mut w, &format!("{bp}.block.{j}.act2.alpha"), out_dim, &mut seed);
                 fill(&mut w, &format!("{bp}.block.{j}.act2.beta"), out_dim, &mut seed);
-                fill(&mut w, &format!("{bp}.block.{j}.conv2.conv.weight"), out_dim * out_dim * 1, &mut seed);
+                fill(&mut w, &format!("{bp}.block.{j}.conv2.conv.weight"), (out_dim * out_dim), &mut seed);
                 fill(&mut w, &format!("{bp}.block.{j}.conv2.conv.bias"), out_dim, &mut seed);
             }
         }
         let out_dim = dec >> 2;
         fill(&mut w, "decoder.5.alpha", out_dim, &mut seed);
         fill(&mut w, "decoder.5.beta", out_dim, &mut seed);
-        fill(&mut w, "decoder.6.conv.weight", 1 * out_dim * 7, &mut seed);
+        fill(&mut w, "decoder.6.conv.weight", out_dim * 7, &mut seed);
         fill(&mut w, "decoder.6.conv.bias", 1, &mut seed);
 
         let t = 12usize;

@@ -260,7 +260,7 @@ impl Summary {
             "queue_ms": self.queue.to_json(),
             "normalised_slowdown": slowdown,
             "jain_fairness": jain_fairness(per_class_rate).map(Value::from).unwrap_or(Value::Null),
-            "starvation_ms_max": self.queue.max().map(|v| r3(v)).map(Value::from).unwrap_or(Value::Null),
+            "starvation_ms_max": self.queue.max().map(r3).map(Value::from).unwrap_or(Value::Null),
             "preemptions": Value::Null,
             "decode_stall_ms_from_prefill": Value::Null,
         })

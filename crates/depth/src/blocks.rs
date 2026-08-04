@@ -394,7 +394,7 @@ impl ChannelAttention {
         ctx.gpu.submit(&[], &[s]);
         // fc.2: [hidden -> c] at 1x1
         let p2 = [n, self.hidden, 1, 1, c, 1, 1, 0, 1, 1];
-        let s_dw = ctx.step(ctx.ids.need(ctx.ids.conv2d_dw, "conv2d_dw"), &[&self.d_g, &self.h_act, ps.g(&p("fc.2.weight"))], &p2, (c * self.hidden) as u32);
+        let s_dw = ctx.step(ctx.ids.need(ctx.ids.conv2d_dw, "conv2d_dw"), &[&self.d_g, &self.h_act, ps.g(&p("fc.2.weight"))], &p2, c * self.hidden);
         let s_dx = ctx.step(ctx.ids.need(ctx.ids.conv2d_dx, "conv2d_dx"), &[&self.d_g, ps.w(&p("fc.2.weight")), &self.d_h_act], &p2, n * self.hidden);
         ctx.gpu.submit(&[], &[s_dw, s_dx]);
         let nh = n * self.hidden;
@@ -402,7 +402,7 @@ impl ChannelAttention {
         ctx.gpu.submit(&[], &[s]);
         // fc.0: [c -> hidden] at 1x1
         let p0 = [n, c, 1, 1, self.hidden, 1, 1, 0, 1, 1];
-        let s_dw = ctx.step(ctx.ids.need(ctx.ids.conv2d_dw, "conv2d_dw"), &[&self.d_h, &self.pooled, ps.g(&p("fc.0.weight"))], &p0, (self.hidden * c) as u32);
+        let s_dw = ctx.step(ctx.ids.need(ctx.ids.conv2d_dw, "conv2d_dw"), &[&self.d_h, &self.pooled, ps.g(&p("fc.0.weight"))], &p0, self.hidden * c);
         let s_dx = ctx.step(ctx.ids.need(ctx.ids.conv2d_dx, "conv2d_dx"), &[&self.d_h, ps.w(&p("fc.0.weight")), &self.d_pooled], &p0, n * c);
         ctx.gpu.submit(&[], &[s_dw, s_dx]);
         // the squeeze's adjoint: spread d_pooled back over space / (H*W)

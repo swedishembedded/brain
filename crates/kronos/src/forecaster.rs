@@ -297,12 +297,12 @@ mod tests {
         assert_eq!(ctx.len(), t * 5);
         assert_eq!(fut.len(), horizon * 5);
         // weekday is index 2, day index 3, month index 4.
-        assert_eq!(ctx[0 * 5 + 2], 1); // weekday bar 0
+        assert_eq!(ctx[2], 1); // weekday bar 0
         assert_eq!(ctx[3 * 5 + 2], 4); // weekday bar 3
         assert_eq!(ctx[2 * 5 + 3], 12); // day bar 2
-        assert_eq!(ctx[0 * 5 + 4], 6); // month bar 0
-        assert_eq!(fut[1 * 5 + 3], 17); // day future step 1
-        assert_eq!(fut[0 * 5 + 4], 7); // month future step 0
+        assert_eq!(ctx[4], 6); // month bar 0
+        assert_eq!(fut[5 + 3], 17); // day future step 1
+        assert_eq!(fut[4], 7); // month future step 0
     }
 
     #[test]

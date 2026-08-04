@@ -158,7 +158,8 @@ impl Engine {
 
         let d = c.d_model as u64;
         let ff = c.d_ff as u64;
-        let engine = Engine {
+        
+        Engine {
             weights,
             tokens,
             x: storage(bs * d),
@@ -176,8 +177,7 @@ impl Engine {
             logits: storage(bs * c.vocab_size as u64),
             cfg: w.cfg,
             gpu,
-        };
-        engine
+        }
     }
 
     fn w(&self, name: &str) -> &DeviceBuffer {
@@ -417,7 +417,7 @@ fn parse_args() -> Args {
             "--weights" => a.weights = next(),
             "--prompt" => {
                 a.prompt = next()
-                    .split(|ch| ch == ',' || ch == ' ')
+                    .split([',', ' '])
                     .filter(|s| !s.is_empty())
                     .map(|s| s.parse().expect("bad prompt token"))
                     .collect()

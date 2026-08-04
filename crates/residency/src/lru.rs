@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn lru_order_reflects_touches_and_skips_pinned() {
         let mut r = Residents::new();
-        r.insert(k("a"), MemCost::new(1 * GB, 0), Device::Gpu(0));
+        r.insert(k("a"), MemCost::new(GB, 0), Device::Gpu(0));
         r.insert(k("b"), MemCost::new(2 * GB, 0), Device::Gpu(0));
         r.insert(k("c"), MemCost::new(3 * GB, 0), Device::Gpu(0));
         // a is oldest so far; touch it so b becomes the LRU.

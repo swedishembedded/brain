@@ -196,13 +196,13 @@ pub fn eval(inp: &LossInput, asg: &Assignment) -> LossOutput {
     let bce_out = inp.gpu.storage(total as u64);
     let s = inp.gpu.step(BCE_LOGITS, &[&clsb, &tgtb, &bce_out], &[total], total);
     inp.gpu.submit(&[], &[s]);
-    let bce_sum: f32 = inp.gpu.read(&bce_out, (na * nc) as usize).iter().sum();
+    let bce_sum: f32 = inp.gpu.read(&bce_out, na * nc).iter().sum();
 
     // BCE grad (full grid) -> scaled later.
     let dcls_buf = inp.gpu.storage(total as u64);
     let s = inp.gpu.step(BCE_LOGITS_GRAD, &[&clsb, &tgtb, &dcls_buf], &[total], total);
     inp.gpu.submit(&[], &[s]);
-    let mut d_cls = inp.gpu.read(&dcls_buf, (na * nc) as usize);
+    let mut d_cls = inp.gpu.read(&dcls_buf, na * nc);
     let cls_scale = g.cls / norm;
     for v in d_cls.iter_mut() {
         *v *= cls_scale;

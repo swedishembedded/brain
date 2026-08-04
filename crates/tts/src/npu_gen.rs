@@ -240,7 +240,7 @@ impl TalkerNpu {
     /// inference over the zero-padded `[1,cap,d]` context, and return the final-
     /// norm hidden row at the new last position (`[d]`).
     pub fn feed(&mut self, embeds: &[f32]) -> Result<Vec<f32>, String> {
-        assert!(!embeds.is_empty() && embeds.len() % self.d == 0, "feed must be a whole number of [d] rows");
+        assert!(!embeds.is_empty() && embeds.len().is_multiple_of(self.d), "feed must be a whole number of [d] rows");
         self.ctx.extend_from_slice(embeds);
         let len = self.ctx.len() / self.d;
         if len > self.cap {
@@ -867,7 +867,7 @@ pub fn decode_with_session(sess: &mut CodecSession, codes: &[u32]) -> Result<Vec
         return Err("no codec frames were generated".to_string());
     }
     let ncode = 16usize;
-    if codes.len() % ncode != 0 {
+    if !codes.len().is_multiple_of(ncode) {
         return Err(format!("codes len {} is not a multiple of 16", codes.len()));
     }
     let t = codes.len() / ncode;

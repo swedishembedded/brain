@@ -282,7 +282,7 @@ fn bce_logits_grad_finite_difference() {
 
 // Same atan polyfill as the kernel (for x >= 0).
 fn atan_pos(xin: f32) -> f32 {
-    let half_pi = 1.5707963267948966f32;
+    let half_pi = 1.570_796_4_f32;
     let mut x = xin;
     let mut flip = false;
     if x > 1.0 {
@@ -291,13 +291,13 @@ fn atan_pos(xin: f32) -> f32 {
     }
     let z = x * x;
     let mut a = 0.0028662257f32;
-    a = a * z - 0.0161657367;
-    a = a * z + 0.0429096138;
-    a = a * z - 0.0752896400;
-    a = a * z + 0.1065626393;
-    a = a * z - 0.1420889944;
-    a = a * z + 0.1999355085;
-    a = a * z - 0.3333314528;
+    a = a * z - 0.016_165_737;
+    a = a * z + 0.042_909_615;
+    a = a * z - 0.075_289_64;
+    a = a * z + 0.106_562_64;
+    a = a * z - 0.142_089;
+    a = a * z + 0.199_935_51;
+    a = a * z - 0.333_331_47;
     a = a * z + 1.0;
     let mut r = a * x;
     if flip {
@@ -331,7 +331,7 @@ fn ciou_loss_one(p: &[f32], g: &[f32]) -> f32 {
     let atg = atan_pos(wg / hg.max(1e-9));
     let atp = atan_pos(wp / hp.max(1e-9));
     let diff = atg - atp;
-    let k = 0.4052847345693511f32;
+    let k = 0.405_284_73_f32;
     let v = k * diff * diff;
     let alpha = v / ((1.0 - iou) + v).max(1e-9);
     let ciou = iou - rho2 / c2 - alpha * v;
@@ -386,7 +386,7 @@ fn ciou_grad_finite_difference() {
         let cy = rng.unit() * 20.0 + 10.0;
         let gw = 4.0 + rng.unit() * 4.0;
         let gh = 4.0 + rng.unit() * 4.0;
-        tgt[k * 4 + 0] = cx - gw * 0.5;
+        tgt[(k * 4)] = cx - gw * 0.5;
         tgt[k * 4 + 1] = cy - gh * 0.5;
         tgt[k * 4 + 2] = cx + gw * 0.5;
         tgt[k * 4 + 3] = cy + gh * 0.5;
@@ -398,7 +398,7 @@ fn ciou_grad_finite_difference() {
         let ph = gh * (0.7 + rng.unit() * 0.6);
         let pcx = cx + sx;
         let pcy = cy + sy;
-        pred[k * 4 + 0] = pcx - pw * 0.5;
+        pred[(k * 4)] = pcx - pw * 0.5;
         pred[k * 4 + 1] = pcy - ph * 0.5;
         pred[k * 4 + 2] = pcx + pw * 0.5;
         pred[k * 4 + 3] = pcy + ph * 0.5;
@@ -437,7 +437,7 @@ fn ciou_grad_finite_difference() {
         let atg = atan_pos(wg / hg.max(1e-9));
         let atp = atan_pos(wp / hp.max(1e-9));
         let diff = atg - atp;
-        let k = 0.4052847345693511f32;
+        let k = 0.405_284_73_f32;
         let v = k * diff * diff;
         let ciou = iou - rho2 / c2 - alpha0 * v;
         1.0 - ciou
@@ -458,7 +458,7 @@ fn ciou_grad_finite_difference() {
         let atg = atan_pos(wg / hg.max(1e-9));
         let atp = atan_pos(wp / hp.max(1e-9));
         let diff = atg - atp;
-        let k = 0.4052847345693511f32;
+        let k = 0.405_284_73_f32;
         let v = k * diff * diff;
         v / ((1.0 - iou) + v).max(1e-9)
     };

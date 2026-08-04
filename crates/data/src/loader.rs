@@ -97,7 +97,7 @@ impl TokenDataset {
         let mut starts = Vec::new();
         // A start needs `block_size` input tokens AND one more for the shifted
         // target, so it is valid only when `start + block_size + 1 <= len`.
-        let fits = |start: usize| start + block_size + 1 <= data.len();
+        let fits = |start: usize| start + block_size < data.len();
 
         if fits(0) && (nl_pos.first().is_some_and(|&p| p < block_size) || nl_pos.is_empty()) {
             starts.push(0);
@@ -241,7 +241,7 @@ mod tests {
         // Wherever a '=' (2) appears in y, it and everything before it on the
         // line is IGNORE; tokens after '=' are kept.
         // Just assert at least one IGNORE and at least one kept target.
-        assert!(y.iter().any(|&v| v == IGNORE));
+        assert!(y.contains(&IGNORE));
         assert!(y.iter().any(|&v| v >= 0));
     }
 

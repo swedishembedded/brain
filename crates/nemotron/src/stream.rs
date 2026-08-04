@@ -652,7 +652,7 @@ mod tests {
         let mut put = |name: String, data: Vec<f32>| {
             w.insert(name, data);
         };
-        put("encoder.subsampling.conv_in.weight".into(), r.vec(ch * 1 * 9, 0.3));
+        put("encoder.subsampling.conv_in.weight".into(), r.vec(ch * 9, 0.3));
         put("encoder.subsampling.conv_in.bias".into(), r.vec(ch, 0.1));
         for i in 0..2 {
             put(format!("encoder.subsampling.layers.{i}.depthwise_conv.weight"), r.vec(ch * 9, 0.3));

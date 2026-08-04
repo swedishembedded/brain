@@ -77,7 +77,7 @@ fn constant_velocity_integrates_exactly_to_minus_v() {
     for _ in 0..sched.timesteps().len() {
         x = sched.step(&v, &x);
     }
-    let want: Vec<f32> = vec![10.0f32, 10.0, 10.0, 10.0]
+    let want: Vec<f32> = [10.0f32, 10.0, 10.0, 10.0]
         .iter()
         .zip(&v)
         .map(|(xi, vi)| xi - vi)

@@ -86,7 +86,7 @@ pub fn conv1d_bwd(
         s.push(g.step(k.dx, &[dy, w, dx], &c.params(), c.n * c.cin * c.l));
     }
     if let Some(dw) = dw {
-        s.push(g.step(k.dw, &[dy, x, dw], &c.params(), (c.cout * (c.cin / c.groups) * c.k) as u32));
+        s.push(g.step(k.dw, &[dy, x, dw], &c.params(), c.cout * (c.cin / c.groups) * c.k));
     }
     s
 }
@@ -113,7 +113,7 @@ pub fn convtr1d_bwd(
         s.push(g.step(k.dx, &[dy, w, dx], &c.params(), c.n * c.cin * c.l));
     }
     if let Some(dw) = dw {
-        s.push(g.step(k.dw, &[dy, x, dw], &c.params(), (c.cin * (c.cout / c.groups) * c.k) as u32));
+        s.push(g.step(k.dw, &[dy, x, dw], &c.params(), c.cin * (c.cout / c.groups) * c.k));
     }
     s
 }
@@ -165,7 +165,7 @@ pub fn convtr1d_ref(c: &Conv1d, x: &[f32], w: &[f32]) -> Vec<f32> {
                 for kw in 0..c.k {
                     let num = lo + c.pad;
                     let sub = kw * c.dilation;
-                    if num >= sub && (num - sub) % c.stride == 0 {
+                    if num >= sub && (num - sub).is_multiple_of(c.stride) {
                         let li = (num - sub) / c.stride;
                         if li < c.l {
                             for cl in 0..cin_g {

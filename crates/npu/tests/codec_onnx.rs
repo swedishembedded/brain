@@ -111,7 +111,7 @@ fn synth_weights(cfg: &CodecConfig) -> HashMap<String, Vec<f32>> {
         put(&mut m, &format!("upsample.{u}.0.conv.weight"), latent * latent * f); // [Cin,Cout,K]
         put(&mut m, &format!("upsample.{u}.0.conv.bias"), latent);
         let p = format!("upsample.{u}.1");
-        put(&mut m, &format!("{p}.dwconv.conv.weight"), latent * 1 * 7); // depthwise
+        put(&mut m, &format!("{p}.dwconv.conv.weight"), latent * 7); // depthwise
         put(&mut m, &format!("{p}.dwconv.conv.bias"), latent);
         put(&mut m, &format!("{p}.norm.weight"), latent);
         put(&mut m, &format!("{p}.norm.bias"), latent);
@@ -142,14 +142,14 @@ fn synth_weights(cfg: &CodecConfig) -> HashMap<String, Vec<f32>> {
             put(&mut m, &format!("{rp}.conv1.conv.bias"), out_dim);
             put(&mut m, &format!("{rp}.act2.alpha"), out_dim);
             put(&mut m, &format!("{rp}.act2.beta"), out_dim);
-            put(&mut m, &format!("{rp}.conv2.conv.weight"), out_dim * out_dim * 1);
+            put(&mut m, &format!("{rp}.conv2.conv.weight"), (out_dim * out_dim));
             put(&mut m, &format!("{rp}.conv2.conv.bias"), out_dim);
         }
     }
     let final_out = dec >> cfg.upsample_rates.len();
     put(&mut m, "decoder.5.alpha", final_out);
     put(&mut m, "decoder.5.beta", final_out);
-    put(&mut m, "decoder.6.conv.weight", 1 * final_out * 7);
+    put(&mut m, "decoder.6.conv.weight", final_out * 7);
     put(&mut m, "decoder.6.conv.bias", 1);
     m
 }

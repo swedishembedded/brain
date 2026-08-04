@@ -183,7 +183,7 @@ pub fn build_subsampling(g: &mut GraphBuilder, topo: &NemotronTopo, w: &dyn Weig
     // reshape [1,C,T',F'] -> [T', C*F'] : transpose to [1,T',C,F'] then reshape.
     let (tt, ff) = (cur.t, cur.f);
     let flat = ch * ff;
-    let tp = format!("sub.perm");
+    let tp = "sub.perm".to_string();
     g.add(Node::new("Transpose", &[&cur.name], &[&tp]).name("sub.perm").attr_ints("perm", &[0, 2, 1, 3]));
     let shp = "sub.flatshape";
     g.init_i64(shp, &[2], vec![tt as i64, flat as i64]);
@@ -320,7 +320,7 @@ pub(crate) fn linear_nb(g: &mut GraphBuilder, w: &dyn WeightSource, x: &str, wna
 
 pub(crate) fn reshape(g: &mut GraphBuilder, x: &str, dims: &[i64], tag: &str) -> String {
     let shp = format!("{tag}.shape");
-    g.init_i64(&shp, &[dims.len() as i64], dims.iter().copied().collect());
+    g.init_i64(&shp, &[dims.len() as i64], dims.to_vec());
     let out = format!("{tag}.rs");
     g.add(Node::new("Reshape", &[x, &shp], &[&out]).name(&format!("{tag}.reshape")));
     out

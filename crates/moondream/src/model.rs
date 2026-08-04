@@ -204,7 +204,7 @@ mod tests {
         let seq = 1 + ppc + 3; // bos + image + 3 text = 20
         let model = MoondreamModel::new(cfg, vw, cw, dw, vision.dim, seq);
         let mut tokens = vec![0u32]; // bos
-        tokens.extend(std::iter::repeat(5u32).take(ppc as usize)); // image placeholders
+        tokens.extend(std::iter::repeat_n(5u32, ppc as usize)); // image placeholders
         tokens.extend([7u32, 9, 11]);
         let mut targets = tokens[1..].to_vec();
         targets.push(13);
@@ -289,7 +289,7 @@ mod tests {
         let seq = 1 + ppc + 3;
         let model = MoondreamModel::new(cfg, vw, cw, dw, conn_in, seq);
         let mut tokens = vec![0u32];
-        tokens.extend(std::iter::repeat(5u32).take(ppc as usize));
+        tokens.extend(std::iter::repeat_n(5u32, ppc as usize));
         tokens.extend([7u32, 9, 11]);
         let mut targets = tokens[1..].to_vec();
         targets.push(13);

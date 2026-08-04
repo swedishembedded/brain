@@ -228,7 +228,7 @@ mod tests {
         assert_eq!((lb.new_w, lb.new_h), (4, 2));
         assert_eq!(lb.pad_y as u32, 1);
         // Top row (y=0) is pad.
-        assert!((chw[0 * 16 + 0 * 4 + 0] - 0.5).abs() < 1e-6);
+        assert!((chw[0] - 0.5).abs() < 1e-6);
         // Content rows y=1,2 carry the (resized) image; finite + in range.
         assert!(chw.iter().all(|v| v.is_finite()));
         assert_eq!(chw.len(), 3 * 16);

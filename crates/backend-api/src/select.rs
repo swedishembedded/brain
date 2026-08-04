@@ -264,7 +264,10 @@ impl KernelVariant {
             KernelVariant::PackedInt8 => "packed_int8",
         }
     }
-    pub fn from_str(s: &str) -> Option<KernelVariant> {
+    /// Inverse of [`KernelVariant::as_str`]. Deliberately NOT `from_str`:
+    /// that name shadows `std::str::FromStr::from_str` at the call site, and
+    /// this returns `Option` rather than the trait's `Result`.
+    pub fn parse_str(s: &str) -> Option<KernelVariant> {
         Some(match s {
             "reference" => KernelVariant::Reference,
             "workgroup_per_output" => KernelVariant::WorkgroupPerOutput,
@@ -336,7 +339,7 @@ impl AutoTuner {
         }
         let key = Self::key(op, shape);
         if let Some(stored) = self.store.as_ref().and_then(|s| s.load(&key)) {
-            if let Some(v) = KernelVariant::from_str(&stored).filter(|v| cands.contains(v)) {
+            if let Some(v) = KernelVariant::parse_str(&stored).filter(|v| cands.contains(v)) {
                 self.memo.lock().unwrap().insert((op, shape), v);
                 return v;
             }

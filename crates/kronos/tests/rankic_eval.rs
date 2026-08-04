@@ -191,17 +191,17 @@ fn rankic_backtest() {
     // can intersect a partial fine-tuned run against a complete base run.
     let write_json = |recs: &[(usize, String, String, f32, f32)], n_orig_done: usize| {
         let mut js = String::from("{\n");
-        let _ = write!(
+        let _ = writeln!(
             js,
-            "  \"meta\": {{\"context\": {ctx_len}, \"horizon\": {horizon}, \"step\": {step}, \"argmax\": {argmax}, \"nsamples\": {nsamples}, \"n_tickers\": {}, \"n_origins\": {n_orig_done}}},\n",
+            "  \"meta\": {{\"context\": {ctx_len}, \"horizon\": {horizon}, \"step\": {step}, \"argmax\": {argmax}, \"nsamples\": {nsamples}, \"n_tickers\": {}, \"n_origins\": {n_orig_done}}},",
             series.len(),
         );
         js.push_str("  \"records\": [\n");
         for (i, (o, date, tk, pred, real)) in recs.iter().enumerate() {
             let comma = if i + 1 < recs.len() { "," } else { "" };
-            let _ = write!(
+            let _ = writeln!(
                 js,
-                "    {{\"o\": {o}, \"date\": \"{date}\", \"ticker\": \"{tk}\", \"pred\": {pred:.6}, \"real\": {real:.6}}}{comma}\n"
+                "    {{\"o\": {o}, \"date\": \"{date}\", \"ticker\": \"{tk}\", \"pred\": {pred:.6}, \"real\": {real:.6}}}{comma}"
             );
         }
         js.push_str("  ]\n}\n");
@@ -217,7 +217,7 @@ fn rankic_backtest() {
         let od = &series[0].dates[o - 1];
         let date = format!("{:04}-{:02}-{:02}", od.0, od.1, od.2);
         for (ti, s) in series.iter().enumerate() {
-            if o < ctx_len || o + horizon - 1 >= s.ohlcv.len() {
+            if o < ctx_len || o + horizon > s.ohlcv.len() {
                 continue;
             }
             let ctx = &s.ohlcv[o - ctx_len..o];

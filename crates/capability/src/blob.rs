@@ -32,7 +32,7 @@ pub fn decode_hwc(inv: &Invocation, name: &str) -> Result<(Vec<f32>, u32, u32, u
     let (w, h) = (dim("w")? as u32, dim("h")? as u32);
     let px = w as usize * h as usize;
     let hwc: Vec<f32> = b.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
-    if px == 0 || b.bytes.len() % 4 != 0 || hwc.len() % px != 0 || hwc.is_empty() {
+    if px == 0 || b.bytes.len() % 4 != 0 || !hwc.len().is_multiple_of(px) || hwc.is_empty() {
         return Err(format!("'{name}' payload ({} bytes) is not a whole number of {w}×{h} f32 planes", b.bytes.len()));
     }
     let c = hwc.len() / px;

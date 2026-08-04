@@ -36,7 +36,7 @@ impl GnDims {
                 "GnDims: all dims must be nonzero (n={n}, c={c}, h={h}, w={w}, g={g})"
             ));
         }
-        if c % g != 0 {
+        if !c.is_multiple_of(g) {
             return Err(format!(
                 "GnDims: C must be divisible by G (c={c}, g={g}, c%g={})",
                 c % g

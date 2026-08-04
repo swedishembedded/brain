@@ -68,9 +68,9 @@ impl ChatExample {
         let mut ids = Vec::with_capacity(prompt.len() + resp.len() + 1);
         let mut mask = Vec::with_capacity(ids.capacity());
         ids.extend_from_slice(&prompt);
-        mask.extend(std::iter::repeat(false).take(prompt.len()));
+        mask.extend(std::iter::repeat_n(false, prompt.len()));
         ids.extend_from_slice(&resp);
-        mask.extend(std::iter::repeat(true).take(resp.len()));
+        mask.extend(std::iter::repeat_n(true, resp.len()));
         ids.push(ENDOFTEXT);
         mask.push(false);
         (ids, mask)

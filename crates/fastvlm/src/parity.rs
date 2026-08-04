@@ -241,7 +241,7 @@ fn repo_path(rel: &str) -> String {
         let (pre_len, _post_len) = (layout[0] as usize, layout[1] as usize);
         let img_start = pre_len as u32;
         let mut seq: Vec<u32> = ids[..pre_len].to_vec();
-        seq.extend(std::iter::repeat(0u32).take(rows as usize));
+        seq.extend(std::iter::repeat_n(0u32, rows as usize));
         seq.extend(&ids[pre_len..]);
         let t_max = (seq.len() + gen_ref.len() + 1) as u32;
         let vocab = cfg.vocab as usize;
@@ -300,7 +300,7 @@ fn repo_path(rel: &str) -> String {
         // Prompt layout: [pre] [n_img image placeholders] [post], image at row pre_len.
         let img_start = pre_len as u32;
         let mut seq: Vec<u32> = ids[..pre_len].to_vec();
-        seq.extend(std::iter::repeat(0u32).take(n_img)); // overwritten by the splice
+        seq.extend(std::iter::repeat_n(0u32, n_img)); // overwritten by the splice
         seq.extend(&ids[pre_len..]);
         let prompt_len = seq.len();
         let t_max = (prompt_len + gen_ref.len() + 1) as u32;

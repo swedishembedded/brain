@@ -150,7 +150,7 @@ struct AttnCache {
 fn attention(qkv: &[f32], scaling: &[f32], s: usize, heads: usize, hd: usize) -> (Vec<f32>, AttnCache) {
     let inner = heads * hd;
     let qkvd = 3 * inner;
-    let base = 1.442695041f32 / (hd as f32).sqrt();
+    let base = 1.442_695_f32 / (hd as f32).sqrt();
     let qscale: Vec<f32> = (0..hd).map(|dd| base * softplus(scaling[dd])).collect();
     let mut q = vec![0.0f32; s * inner];
     let mut k = vec![0.0f32; s * inner];
@@ -230,7 +230,7 @@ fn attention_bwd(d_ctx: &[f32], c: &AttnCache, scaling: &[f32], heads: usize, hd
         }
     }
     // unscale: qscaled = q * qscale[dd]; d_q = d_qscaled * qscale; d_qscale accum
-    let base = 1.442695041f32 / (hd as f32).sqrt();
+    let base = 1.442_695_f32 / (hd as f32).sqrt();
     let mut d_qkv = vec![0.0f32; s * qkvd];
     for t in 0..s {
         for h in 0..heads {

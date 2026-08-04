@@ -50,7 +50,7 @@ pub const PROMPT_SUFFIX: [u32; 6] = [151670, 151645, 198, 151644, 77091, 198];
 pub fn build_input_ids(n_audio: u32) -> Vec<u32> {
     let mut ids = Vec::with_capacity(PROMPT_PREFIX.len() + n_audio as usize + PROMPT_SUFFIX.len());
     ids.extend_from_slice(&PROMPT_PREFIX);
-    ids.extend(std::iter::repeat(AUDIO_TOKEN_ID).take(n_audio as usize));
+    ids.extend(std::iter::repeat_n(AUDIO_TOKEN_ID, n_audio as usize));
     ids.extend_from_slice(&PROMPT_SUFFIX);
     ids
 }

@@ -480,7 +480,7 @@ pub struct PatchEmbed {
 
 impl PatchEmbed {
     pub fn new(ctx: &Ctx, prefix: &str, in_shape: Shape, out_ch: u32) -> PatchEmbed {
-        assert!(out_ch % in_shape.c == 0, "PatchEmbed out_ch must be a multiple of in_ch");
+        assert!(out_ch.is_multiple_of(in_shape.c), "PatchEmbed out_ch must be a multiple of in_ch");
         // Grouped 7×7 stride-2 (groups = in_ch), +bias, +GELU.
         let rlk = ConvUnit::new(ctx, &format!("{prefix}.rlk"), in_shape, out_ch, 7, 2, 3, in_shape.c, false, true, true);
         // 1×1 MobileOne (dense), +bias, +GELU.
@@ -827,7 +827,7 @@ impl Encoder {
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_cfg(ctx: &Ctx, layers: [u32; 5], dims: [u32; 5], mlp_ratio: u32, cls_ratio: u32, input: u32, se_reduction: u32, bn_stem: bool) -> Encoder {
-        assert!(input % 64 == 0, "input must be a multiple of the 64× downsample");
+        assert!(input.is_multiple_of(64), "input must be a multiple of the 64× downsample");
         let mut ls = Vec::new();
         let mut shape = Shape::new(1, 3, input, input);
         // Stem: dense 3→d0 /2, depthwise d0 /2, dense 1×1 d0.

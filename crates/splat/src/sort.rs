@@ -123,7 +123,7 @@ pub fn record_sort_pairs(
     steps: &mut Vec<Step>,
 ) -> bool {
     assert!(n >= 1 && n <= scratch.max_n, "sort n={n} exceeds scratch max {}", scratch.max_n);
-    assert!(key_bits >= 1 && key_bits <= 32);
+    assert!((1..=32).contains(&key_bits));
     let passes = key_bits.div_ceil(8);
     let n_chunks = n.div_ceil(SORT_CHUNK_LEN);
     let hist_n = 256 * n_chunks;

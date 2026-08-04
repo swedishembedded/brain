@@ -170,7 +170,7 @@ pub fn build_vision_weights(tensors: &[(String, Vec<f32>)]) -> HashMap<String, V
             Some(Out::LayerScale(k)) => {
                 // brain film sb = [scale = ls-1 (C), shift = 0 (C)].
                 let mut sb: Vec<f32> = data.iter().map(|v| v - 1.0).collect();
-                sb.extend(std::iter::repeat(0.0).take(data.len()));
+                sb.extend(std::iter::repeat_n(0.0, data.len()));
                 out.insert(k, sb);
             }
             None => {}

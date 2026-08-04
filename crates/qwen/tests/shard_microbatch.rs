@@ -48,8 +48,8 @@ fn microbatch_pipeline_grad_parity() {
     let k = 4usize; // microbatches
     let mbs: Vec<(Vec<u32>, Vec<u32>)> = (0..k)
         .map(|j| {
-            let x = (0..b * t).map(|i| ((i * 3 + j as u32 * 13) % cfg.vocab) as u32).collect();
-            let y = (0..b * t).map(|i| ((i * 3 + 1 + j as u32 * 13) % cfg.vocab) as u32).collect();
+            let x = (0..b * t).map(|i| ((i * 3 + j as u32 * 13) % cfg.vocab)).collect();
+            let y = (0..b * t).map(|i| ((i * 3 + 1 + j as u32 * 13) % cfg.vocab)).collect();
             (x, y)
         })
         .collect();
@@ -102,8 +102,8 @@ fn microbatch_train_step_reduces_loss() {
     let k = 4usize;
     let mbs: Vec<(Vec<u32>, Vec<u32>)> = (0..k)
         .map(|j| {
-            let x = (0..b * t).map(|i| ((i * 7 + j as u32 * 5) % cfg.vocab) as u32).collect();
-            let y = (0..b * t).map(|i| ((i * 7 + 1 + j as u32 * 5) % cfg.vocab) as u32).collect();
+            let x = (0..b * t).map(|i| ((i * 7 + j as u32 * 5) % cfg.vocab)).collect();
+            let y = (0..b * t).map(|i| ((i * 7 + 1 + j as u32 * 5) % cfg.vocab)).collect();
             (x, y)
         })
         .collect();

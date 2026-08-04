@@ -339,7 +339,7 @@ mod tests {
         for line in &lines {
             // `lines()` strips the '\n'; add it back to check full length.
             assert!(
-                line.len() + 1 <= MAX_CHARS_PER_LINE,
+                line.len() < MAX_CHARS_PER_LINE,
                 "line too long: {line:?}"
             );
             assert_eq!(

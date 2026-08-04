@@ -108,7 +108,7 @@ fn bicubic_reproduces_a_constant_and_differs_from_bilinear() {
     let gpu = testgpu::dev(PIPELINES);
     let c = Ctx::new(&gpu);
     let s = Shape::new(1, 1, 4, 4);
-    let flat = c.upload("flat", &vec![0.375f32; 16]);
+    let flat = c.upload("flat", &[0.375f32; 16]);
     let (y, ys) = c.resize(&flat, s, 7, 9, Filter::Bicubic, AlignCorners::HalfPixel);
     for v in c.download(&y, ys.numel()) {
         assert!((v - 0.375).abs() < 1e-5, "bicubic on a constant gave {v}");
@@ -159,8 +159,8 @@ fn add_region_places_a_patch_into_a_zeroed_canvas() {
     c.add_region(&canvas, s, &patch, Rect::new(2, 1, 2, 2));
     let got = c.download(&canvas, s.numel());
     let mut want = vec![0f32; 16];
-    want[1 * 4 + 2] = 1.0;
-    want[1 * 4 + 3] = 2.0;
+    want[4 + 2] = 1.0;
+    want[4 + 3] = 2.0;
     want[2 * 4 + 2] = 3.0;
     want[2 * 4 + 3] = 4.0;
     assert_eq!(got, want);
@@ -246,7 +246,7 @@ fn dilate_and_erode_are_dual_on_a_single_pixel() {
     let d = c.download(&mask::dilate(&c, &x, s, 1), s.numel());
     let on: Vec<usize> = d.iter().enumerate().filter(|(_, &v)| v > 0.5).map(|(i, _)| i).collect();
     assert_eq!(on.len(), 9, "radius-1 dilation of a point is a 3x3 block");
-    assert!(on.contains(&(1 * 5 + 1)) && on.contains(&(3 * 5 + 3)));
+    assert!(on.contains(&(5 + 1)) && on.contains(&(3 * 5 + 3)));
 
     // Eroding that block by the same radius returns the single pixel.
     let block = c.upload("block", &d);
@@ -262,7 +262,7 @@ fn erode_of_a_full_mask_keeps_the_border_by_this_conventions_definition() {
     // that wants SciPy's `border_value=0` must pad first.
     let (gpu, s) = mask_ctx();
     let c = Ctx::new(&gpu);
-    let x = c.upload("full", &vec![1f32; 25]);
+    let x = c.upload("full", &[1f32; 25]);
     assert_eq!(c.download(&mask::erode(&c, &x, s, 1), s.numel()), vec![1f32; 25]);
 }
 
@@ -276,7 +276,7 @@ fn feather_box_blur_averages_over_the_window() {
     let b = c.download(&mask::feather(&c, &x, s, 1), s.numel());
     // A single 9.0 spread over a 3x3 box: every neighbour gets 1.0.
     assert!((b[2 * 5 + 2] - 1.0).abs() < 1e-6);
-    assert!((b[1 * 5 + 1] - 1.0).abs() < 1e-6);
+    assert!((b[5 + 1] - 1.0).abs() < 1e-6);
     assert!((b[0] - 0.0).abs() < 1e-6, "outside the window stays zero");
     // Zero-padded border: mass is conserved because the source is interior.
     let total: f32 = b.iter().sum();

@@ -216,7 +216,7 @@ fn train(args: &[String], pretrained: Option<&str>) {
 /// a one-line notice (documented limitation).
 fn fine_tune(args: &[String]) {
     // `fine-tune <data_dir> --weights <pretrained> --out F ...`
-    if args.first().is_none() {
+    if args.is_empty() {
         eprintln!("usage: brain yolo fine-tune <data_dir> --weights <pretrained> --out F [flags]");
         return;
     }

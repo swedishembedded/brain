@@ -119,7 +119,7 @@ pub fn gen_params_from(inv: &Invocation) -> Result<GenParams, String> {
     )?;
     let width = inv.get_i64("width").unwrap_or(512).max(16) as u32;
     let height = inv.get_i64("height").unwrap_or(512).max(16) as u32;
-    if width % 16 != 0 || height % 16 != 0 {
+    if !width.is_multiple_of(16) || !height.is_multiple_of(16) {
         return Err(format!("width/height must be multiples of 16 (got {width}×{height})"));
     }
     let steps = inv.get_i64("steps").unwrap_or(0).max(0) as u32;

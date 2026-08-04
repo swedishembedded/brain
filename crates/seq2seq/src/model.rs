@@ -736,7 +736,7 @@ impl Seq2Seq {
         let enc_mem = &self.enc_res[c.n_enc as usize];
         // Ping-pong accumulator parity for the encoder-memory grad: starts at the
         // cleared `d_enc_mem0`; each decoder layer flips it.
-        let mem_acc = |i: u32| if i % 2 == 0 { &self.d_enc_mem0 } else { &self.d_enc_mem1 };
+        let mem_acc = |i: u32| if i.is_multiple_of(2) { &self.d_enc_mem0 } else { &self.d_enc_mem1 };
         let mut mem_idx: u32 = 0;
 
         // ---- head + final LN ----

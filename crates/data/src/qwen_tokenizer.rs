@@ -269,10 +269,10 @@ impl QwenBpe {
             .map(|b| self.byte_encoder[b as usize].to_string())
             .collect();
         for sub in bpe_merge(&self.bpe_ranks, chars) {
-            match self.encoder.get(&sub) {
-                Some(&id) => out.push(id),
-                // Unknown subword should not occur for a complete byte-level vocab.
-                None => {}
+            // A miss cannot occur for a complete byte-level vocab; drop it rather
+            // than emitting an UNK the decoder has no way to invert.
+            if let Some(&id) = self.encoder.get(&sub) {
+                out.push(id);
             }
         }
     }

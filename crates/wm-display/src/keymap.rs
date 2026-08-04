@@ -105,7 +105,7 @@ impl KeyChordMap {
         for (chord, action) in &self.chords {
             if !chord.is_empty() && pressed.contains(*chord) {
                 let len = chord.len();
-                if best.map_or(true, |(bl, _)| len > bl) {
+                if best.is_none_or(|(bl, _)| len > bl) {
                     best = Some((len, *action));
                 }
             }

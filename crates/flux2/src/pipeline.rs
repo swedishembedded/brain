@@ -378,7 +378,7 @@ impl Pipeline {
     /// decides which requests can share a batched forward).
     fn plan(&self, r: &BatchRequest) -> Result<Vec<u32>, String> {
         let o = &r.opts;
-        if o.width % 16 != 0 || o.height % 16 != 0 {
+        if !o.width.is_multiple_of(16) || !o.height.is_multiple_of(16) {
             return Err(format!("width/height must be multiples of 16 (got {}×{})", o.width, o.height));
         }
         let (lh, lw) = ((o.height / 16) as usize, (o.width / 16) as usize);

@@ -253,8 +253,8 @@ mod tests {
         assert_eq!(win.fut_dates[0], (2025, 1, 11));
         // stamps: weekday/day/month populated, minute/hour zero.
         let st = win.fut_stamps();
-        assert_eq!(st[0 * 5 + 3], 11); // day
-        assert_eq!(st[0 * 5 + 4], 1); // month
+        assert_eq!(st[3], 11); // day
+        assert_eq!(st[4], 1); // month
         assert_eq!(st[0 * 5], 0); // minute
     }
 

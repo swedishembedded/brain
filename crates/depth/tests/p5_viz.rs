@@ -111,7 +111,7 @@ fn composite_places_both_halves() {
 #[test]
 fn composite_handles_unequal_widths() {
     let left = vec![1u8; (3 * 3 * 2) as usize]; // 3x2
-    let right = vec![2u8; (1 * 3 * 2) as usize]; // 1x2
+    let right = vec![2u8; (3 * 2) as usize]; // 1x2
     let (out, w, h) = composite_side_by_side(&left, 3, 2, &right, 1, 2);
     assert_eq!((w, h), (4, 2));
     assert_eq!(out.len(), (4 * 2 * 3) as usize);

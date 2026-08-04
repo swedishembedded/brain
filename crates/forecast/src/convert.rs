@@ -97,8 +97,8 @@ fn samples_to_quantiles(
     let mut out = vec![0.0f32; h * levels.len()];
     let mut col = vec![0.0f32; n];
     for t in 0..h {
-        for i in 0..n {
-            col[i] = s.data[i * h + t];
+        for (i, c) in col.iter_mut().enumerate() {
+            *c = s.data[i * h + t];
         }
         col.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         for (j, &q) in levels.iter().enumerate() {
@@ -128,12 +128,12 @@ fn samples_to_mean(tf: &TargetForecast) -> Result<Block, ForecastError> {
     let s = tf.samples.as_ref().ok_or_else(|| ForecastError::internal("no samples"))?;
     let (n, h) = (s.shape[0], s.shape[1]);
     let mut out = vec![0.0f32; h];
-    for t in 0..h {
+    for (t, o) in out.iter_mut().enumerate() {
         let mut acc = 0.0f32;
         for i in 0..n {
             acc += s.data[i * h + t];
         }
-        out[t] = acc / n as f32;
+        *o = acc / n as f32;
     }
     Ok(Block::derived(vec![h], out, "sample_mean"))
 }
@@ -153,8 +153,8 @@ fn quantiles_to_mean(tf: &TargetForecast) -> Result<Block, ForecastError> {
         })
         .map(|(i, _)| i);
     let mut out = vec![0.0f32; h];
-    for t in 0..h {
-        out[t] = match mid {
+    for (t, o) in out.iter_mut().enumerate() {
+        *o = match mid {
             Some(j) => q.data[t * ql + j],
             None => q.data[t * ql..t * ql + ql].iter().sum::<f32>() / ql as f32,
         };
@@ -271,7 +271,7 @@ pub fn norm_ppf(p: f32) -> f32 {
         -3.969683028665376e+01,
         2.209460984245205e+02,
         -2.759285104469687e+02,
-        1.383577518672690e+02,
+        1.383_577_518_672_69e2,
         -3.066479806614716e+01,
         2.506628277459239e+00,
     ];

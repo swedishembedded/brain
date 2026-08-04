@@ -1316,7 +1316,7 @@ pub struct C2f {
 
 impl C2f {
     pub fn new(ctx: &Ctx, prefix: &str, in_shape: Shape, c_out: u32, n: u32, shortcut: bool, train: bool) -> C2f {
-        assert!(c_out % 2 == 0, "C2f C_out must be even");
+        assert!(c_out.is_multiple_of(2), "C2f C_out must be even");
         let c = c_out / 2;
         let cv1 = Conv::new(ctx, &format!("{prefix}.cv1"), in_shape, 2 * c, 1, 1, 0, train);
         let sh = Shape::new(cv1.out_shape.n, c, cv1.out_shape.h, cv1.out_shape.w);
@@ -2142,7 +2142,7 @@ impl AvgPool {
     /// ONNX `AveragePool(kernel 2, stride 2)` performs.
     pub fn half(ctx: &Ctx, in_shape: Shape) -> AvgPool {
         assert!(
-            in_shape.h % 2 == 0 && in_shape.w % 2 == 0,
+            in_shape.h.is_multiple_of(2) && in_shape.w.is_multiple_of(2),
             "AvgPool::half: {}x{} is not evenly halvable; the adaptive rule would overlap windows",
             in_shape.h,
             in_shape.w

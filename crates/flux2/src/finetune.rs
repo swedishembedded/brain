@@ -68,7 +68,7 @@ pub fn encode_samples(
     cancel: &capability::CancelToken,
     mut progress: impl FnMut(usize, usize, &str),
 ) -> Result<Vec<Encoded>, String> {
-    if size % 16 != 0 {
+    if !size.is_multiple_of(16) {
         return Err("size must be a multiple of 16".into());
     }
     let n = samples.len();

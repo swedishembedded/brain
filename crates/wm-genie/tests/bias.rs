@@ -19,12 +19,12 @@ fn alibi_has_expected_structure() {
             }
             // strictly more negative as |i-j| grows (slope>0)
             if i >= 2 {
-                assert!(b[(h*t+i)*t+0] < b[(h*t+i)*t+1]);
+                assert!(b[(h*t+i)*t] < b[(h*t+i)*t+1]);
             }
         }
     }
     // head 0 has the largest slope (steepest); head 7 the smallest.
-    assert!(b[(0*t+0)*t+(t-1)] < b[(7*t+0)*t+(t-1)]);
+    assert!(b[(0*t)*t+(t-1)] < b[(7*t)*t+(t-1)]);
 }
 
 fn rand(seed: u64, n: usize) -> Vec<f32> {
@@ -48,12 +48,12 @@ fn cpb_diagonal_is_constant_and_shaped() {
     let b = cpb_bias(&net, h, w, heads);
     assert_eq!(b.len(), heads*hw*hw);
     for hd in 0..heads {
-        let d0 = b[(hd*hw+0)*hw+0];
+        let d0 = b[((hd*hw)*hw)];
         for p in 1..hw {
             assert!((b[(hd*hw+p)*hw+p] - d0).abs() < 1e-5, "cpb diagonal not constant");
         }
     }
     // symmetric relative positions p1->p2 vs p2->p1 differ (rel_pos negates,
     // and the MLP is not even) — sanity that it's not degenerate/all-equal.
-    assert!((b[(0*hw+0)*hw+1] - b[(0*hw+1)*hw+0]).abs() > 1e-6);
+    assert!((b[(0*hw)*hw+1] - b[(0*hw+1)*hw]).abs() > 1e-6);
 }

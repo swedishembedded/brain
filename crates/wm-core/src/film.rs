@@ -82,7 +82,7 @@ impl FilmRowDims {
                 "FilmRowDims: all dims must be nonzero (r={r} d={d} rows_per_cond={rows_per_cond})"
             ));
         }
-        if r % rows_per_cond != 0 {
+        if !r.is_multiple_of(rows_per_cond) {
             return Err(format!(
                 "FilmRowDims: r must be divisible by rows_per_cond (r={r} rows_per_cond={rows_per_cond})"
             ));

@@ -27,7 +27,7 @@ fn rope_neox_rotates_the_half_split_pair() {
     let gpu = Gpu::new_cpu(&[("rope_neox", kernels::ROPE_NEOX)]);
     let q = gpu.storage_init("q", &[0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0]);
     // params: seq_len, n_heads, head_dim, row_stride, base_off, theta
-    let step = gpu.step(0, &[&q], &[2, 1, 4, 4, 0, f(10000.0)], 2 * 1 * 2);
+    let step = gpu.step(0, &[&q], &[2, 1, 4, 4, 0, f(10000.0)], 2 * 2);
     gpu.submit(&[], &[step]);
     let out = gpu.read(&q, 8);
     let tok1 = &out[4..8];
@@ -59,7 +59,7 @@ fn rope_neox_is_identity_at_t0() {
     // seq_len=1 but token index t is derived from position; use a 2-token buffer
     // and check token 0 is untouched.
     let q2 = gpu.storage_init("q2", &[5.0, -1.0, 2.0, 7.0, 9.0, 9.0, 9.0, 9.0]);
-    let step = gpu.step(0, &[&q2], &[2, 1, 4, 4, 0, f(10000.0)], 2 * 1 * 2);
+    let step = gpu.step(0, &[&q2], &[2, 1, 4, 4, 0, f(10000.0)], 2 * 2);
     gpu.submit(&[], &[step]);
     let out = gpu.read(&q2, 8);
     // token 0 (t=0) unchanged
@@ -85,7 +85,7 @@ fn attn_scores_full_is_unscaled_with_additive_mask() {
     let mask = gpu.storage_init("mask", &[0.0, -10.0]);
     let scores = gpu.storage(4);
     // params: bsz, n_heads, tcols(S), head_dim, qk_stride
-    let step = gpu.step(0, &[&q, &k, &mask, &scores], &[1, 1, 2, 2, 2], 1 * 1 * 2 * 2);
+    let step = gpu.step(0, &[&q, &k, &mask, &scores], &[1, 1, 2, 2, 2], 2 * 2);
     gpu.submit(&[], &[step]);
     let out = gpu.read(&scores, 4);
     // layout ((b*H+h)*S+i)*S+j -> [i=0,j=0],[i=0,j=1],[i=1,j=0],[i=1,j=1]
@@ -126,7 +126,7 @@ fn attn_softmax_full_normalises_over_all_keys() {
     let ln4 = 4.0f32.ln();
     let scores = gpu.storage_init("scores", &[0.0, ln4, ln4, 0.0]);
     let probs = gpu.storage(4);
-    let step = gpu.step(0, &[&scores, &probs], &[1, 1, 2], 1 * 1 * 2);
+    let step = gpu.step(0, &[&scores, &probs], &[1, 1, 2], 2);
     gpu.submit(&[], &[step]);
     let out = gpu.read(&probs, 4);
     assert!((out[0] - 0.2).abs() < 1e-5, "{out:?}");
@@ -149,7 +149,7 @@ fn attn_apply_full_weights_values_over_all_keys() {
     let v = gpu.storage_init("v", &[1.0, 10.0, 3.0, 30.0]);
     let out = gpu.storage(4);
     // params: bsz, n_heads, tcols, head_dim, v_stride, d_model
-    let step = gpu.step(0, &[&probs, &v, &out], &[1, 1, 2, 2, 2, 2], 1 * 1 * 2 * 2);
+    let step = gpu.step(0, &[&probs, &v, &out], &[1, 1, 2, 2, 2, 2], 2 * 2);
     gpu.submit(&[], &[step]);
     let o = gpu.read(&out, 4);
     assert!((o[0] - 2.6).abs() < 1e-5, "{o:?}");

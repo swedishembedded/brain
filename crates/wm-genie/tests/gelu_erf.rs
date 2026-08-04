@@ -31,6 +31,6 @@ fn gelu_erf_matches_torch_values() {
         assert!((y[i] - want).abs() < 1e-4, "gelu_erf({xi}) = {} want {want}", y[i]);
     }
     // distinct from the tanh approximation at a point where they differ.
-    let tanh_gelu = |v: f32| 0.5*v*(1.0 + (0.7978845608028654f32*(v + 0.044715*v*v*v)).tanh());
+    let tanh_gelu = |v: f32| 0.5*v*(1.0 + (0.797_884_6_f32*(v + 0.044715*v*v*v)).tanh());
     assert!((y[3] - tanh_gelu(2.0)).abs() > 1e-5, "erf and tanh gelu should differ");
 }

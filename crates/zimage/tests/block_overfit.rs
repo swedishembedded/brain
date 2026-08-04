@@ -98,8 +98,8 @@ fn block_overfits_one_batch() {
         let g = backward(d, &w, &cache, &dout);
         // Adam update over the flat parameter vector.
         let grads = grads_ref(&g);
-        let bc1 = 1.0 - b1.powi(step as i32);
-        let bc2 = 1.0 - b2.powi(step as i32);
+        let bc1 = 1.0 - b1.powi(step);
+        let bc2 = 1.0 - b2.powi(step);
         let mut off = 0;
         for (pi, param) in params_mut(&mut w).into_iter().enumerate() {
             let gt = grads[pi];

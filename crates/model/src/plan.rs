@@ -94,7 +94,7 @@ pub fn fits(hw: &Hardware, s: &ModelShape, t: usize) -> bool {
 
 /// Candidate TP degrees: divisors of `n_gpus` (a TP group evenly splits its GEMMs).
 fn candidate_degrees(n_gpus: usize) -> Vec<usize> {
-    (1..=n_gpus).filter(|t| n_gpus % t == 0).collect()
+    (1..=n_gpus).filter(|t| n_gpus.is_multiple_of(*t)).collect()
 }
 
 /// The smallest local (split) GEMM dimension at TP degree `t`.

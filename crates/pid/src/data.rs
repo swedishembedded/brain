@@ -224,7 +224,7 @@ fn build_window(traj: &[TrajStep], start: usize, seq_steps: usize, t_pad: usize)
     for offset in 0..seq_steps {
         let s = &traj[start + offset];
         tokens.extend_from_slice(&s.event);
-        labels.extend(std::iter::repeat(IGNORE).take(s.event.len()));
+        labels.extend(std::iter::repeat_n(IGNORE, s.event.len()));
         tokens.push(DECIDE);
         if offset == 0 && start != 0 {
             labels.push(IGNORE);
@@ -232,7 +232,7 @@ fn build_window(traj: &[TrajStep], start: usize, seq_steps: usize, t_pad: usize)
             labels.push(s.expert_bin);
         }
         tokens.extend_from_slice(&s.effect);
-        labels.extend(std::iter::repeat(IGNORE).take(s.effect.len()));
+        labels.extend(std::iter::repeat_n(IGNORE, s.effect.len()));
     }
     assert!(tokens.len() <= t_pad, "window {} exceeds T={}", tokens.len(), t_pad);
     while tokens.len() < t_pad {
@@ -528,6 +528,6 @@ mod tests {
         assert_eq!(ys.len(), 4 * 128);
         // at least one supervised label and one PAD present
         assert!(ys.iter().any(|&v| v != IGNORE));
-        assert!(xs.iter().any(|&v| v == PAD));
+        assert!(xs.contains(&PAD));
     }
 }

@@ -447,7 +447,7 @@ impl VulkanBackend {
         // Host-visible: `write` then updates it by direct map (no staging
         // submit), matching its purpose — a caller-owned uniform rewritten
         // every iteration of a hot loop.
-        let size = (((len * 4) + 15) / 16 * 16).max(16) as u64;
+        let size = ((len * 4).div_ceil(16) * 16).max(16) as u64;
         let b = self.ctx.storage_host(size, vk::BufferUsageFlags::UNIFORM_BUFFER);
         self.ctx.zero(&b);
         VkOwnedBuffer { inner: b }
@@ -522,7 +522,7 @@ impl VulkanBackend {
     /// a fill submit + a staged-copy submit — two blocking GPU round trips — per
     /// dispatch per frame, which serialized inference ~100x.)
     fn make_uniform(&self, params: &[u32]) -> VkBuffer {
-        let size = ((params.len() * 4 + 15) / 16 * 16).max(16) as u64;
+        let size = ((params.len() * 4).div_ceil(16) * 16).max(16) as u64;
         let b = self
             .free_uniforms
             .lock()

@@ -13,7 +13,7 @@
 /// `rot_pos_emb` / `get_vision_position_ids`: reshape `(hp/m, m, wp/m, m)`,
 /// permute to `(hp/m, wp/m, m, m)`, flatten. `hp` and `wp` must be multiples of `m`.
 pub fn vision_position_ids(hp: u32, wp: u32, merge: u32) -> Vec<(u32, u32)> {
-    assert!(hp % merge == 0 && wp % merge == 0, "grid must be a multiple of merge size");
+    assert!(hp.is_multiple_of(merge) && wp.is_multiple_of(merge), "grid must be a multiple of merge size");
     let mut out = Vec::with_capacity((hp * wp) as usize);
     for bh in 0..hp / merge {
         for bw in 0..wp / merge {
@@ -67,7 +67,7 @@ pub fn vision_rope_tables(positions: &[(u32, u32)], head_dim: u32, theta: f32) -
 /// for a patch is `Σ table[idx[k]] * wts[k]`. Single image grid (temporal `t=1`);
 /// callers repeat per frame.
 pub fn pos_embed_bilinear(grid_h: u32, grid_w: u32, merge: u32, side: u32) -> (Vec<[u32; 4]>, Vec<[f32; 4]>) {
-    assert!(side >= 1 && grid_h % merge == 0 && grid_w % merge == 0);
+    assert!(side >= 1 && grid_h.is_multiple_of(merge) && grid_w.is_multiple_of(merge));
     // linspace(0, side-1, n)[i]; a single sample sits at 0 (torch semantics).
     let lin = |i: u32, n: u32| -> f32 {
         if n <= 1 {

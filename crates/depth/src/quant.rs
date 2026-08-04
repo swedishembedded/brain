@@ -104,7 +104,7 @@ impl ActTap for ActStatsCollector {
             if a > acc.absmax {
                 acc.absmax = a;
             }
-            if acc.samples.len() < SAMPLE_CAP && (acc.seen as usize + i) % stride == 0 {
+            if acc.samples.len() < SAMPLE_CAP && (acc.seen as usize + i).is_multiple_of(stride) {
                 acc.samples.push(a);
             }
         }

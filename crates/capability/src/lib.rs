@@ -8,8 +8,9 @@
 //! The whole design in four types:
 //! * [`Provider`] — a loaded model, advertising a [`Manifest`] of the actions it
 //!   supports and handing back an [`Action`] by name.
-//! * [`ActionSpec`] — a self-describing schema for one action (typed [`ParamSpec`]s
-//!   + binary [`BlobSpec`] inputs/outputs), serializable so a host can discover
+//! * [`ActionSpec`] — a self-describing schema for one action (typed
+//!   [`ParamSpec`]s plus binary [`BlobSpec`] inputs/outputs), serializable so a
+//!   host can discover
 //!   and drive it without hard-coding anything.
 //! * [`Invocation`] → [`Outcome`] — one call: typed params (`serde_json`) + named
 //!   binary blobs in, scalar outputs + named blobs out.

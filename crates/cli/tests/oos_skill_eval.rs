@@ -279,9 +279,9 @@ fn oos_skill_eval() {
 
     let write_json = |outs: &[ModelOut], n_done: usize| {
         let mut js = String::from("{\n");
-        let _ = write!(
+        let _ = writeln!(
             js,
-            "  \"meta\": {{\"ctx\": {ctx_len}, \"horizon\": {horizon}, \"step\": {step}, \"nsamples\": {nsamples}, \"n_names\": {}, \"n_origins\": {n_done}, \"device\": \"{device}\", \"start\": \"{start}\"}},\n",
+            "  \"meta\": {{\"ctx\": {ctx_len}, \"horizon\": {horizon}, \"step\": {step}, \"nsamples\": {nsamples}, \"n_names\": {}, \"n_origins\": {n_done}, \"device\": \"{device}\", \"start\": \"{start}\"}},",
             series.len()
         );
         js.push_str("  \"models\": {\n");
@@ -299,9 +299,9 @@ fn oos_skill_eval() {
             );
             for (i, r) in o.recs.iter().enumerate() {
                 let c = if i + 1 < o.recs.len() { "," } else { "" };
-                let _ = write!(
+                let _ = writeln!(
                     js,
-                    "        {{\"o\": {}, \"date\": \"{}\", \"ticker\": \"{}\", \"pred\": {:.6}, \"real\": {:.6}}}{c}\n",
+                    "        {{\"o\": {}, \"date\": \"{}\", \"ticker\": \"{}\", \"pred\": {:.6}, \"real\": {:.6}}}{c}",
                     r.o, r.date, r.ticker, r.pred, r.real
                 );
             }

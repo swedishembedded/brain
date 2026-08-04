@@ -243,7 +243,7 @@ pub fn run(
     cancel: &capability::CancelToken,
     mut progress: impl FnMut(u32, u32, String),
 ) -> Result<Vec<(String, Vec<usize>, Vec<f32>)>, String> {
-    if opts.size % 16 != 0 {
+    if !opts.size.is_multiple_of(16) {
         return Err("size must be a multiple of 16".into());
     }
     // 1. dataset

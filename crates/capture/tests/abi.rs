@@ -12,12 +12,7 @@
 use std::process::Command;
 
 fn cc() -> Option<&'static str> {
-    for c in ["cc", "gcc"] {
-        if Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
-            return Some(c);
-        }
-    }
-    None
+    ["cc", "gcc"].into_iter().find(|&c| Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)).map(|v| v as _)
 }
 
 #[test]
@@ -63,14 +58,14 @@ int main(void){
     }
     use capture::v4l2::*;
     let eq = |k: &str, got: u64| assert_eq!(m[k], got, "V4L2 `{k}` drifted: header {} vs FFI {got}", m[k]);
-    eq("QUERYCAP", VIDIOC_QUERYCAP as u64);
-    eq("S_FMT", VIDIOC_S_FMT as u64);
-    eq("REQBUFS", VIDIOC_REQBUFS as u64);
-    eq("QUERYBUF", VIDIOC_QUERYBUF as u64);
-    eq("QBUF", VIDIOC_QBUF as u64);
-    eq("DQBUF", VIDIOC_DQBUF as u64);
-    eq("STREAMON", VIDIOC_STREAMON as u64);
-    eq("STREAMOFF", VIDIOC_STREAMOFF as u64);
+    eq("QUERYCAP", VIDIOC_QUERYCAP);
+    eq("S_FMT", VIDIOC_S_FMT);
+    eq("REQBUFS", VIDIOC_REQBUFS);
+    eq("QUERYBUF", VIDIOC_QUERYBUF);
+    eq("QBUF", VIDIOC_QBUF);
+    eq("DQBUF", VIDIOC_DQBUF);
+    eq("STREAMON", VIDIOC_STREAMON);
+    eq("STREAMOFF", VIDIOC_STREAMOFF);
     eq("YUYV", V4L2_PIX_FMT_YUYV as u64);
     eq("SZCAP", SZ_CAPABILITY as u64);
     eq("SZFMT", SZ_FORMAT as u64);

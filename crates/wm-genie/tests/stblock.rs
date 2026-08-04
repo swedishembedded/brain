@@ -74,9 +74,9 @@ fn h_geglu(x: &[f32], w: &FfWeights, rows: usize, dim: usize, inner: usize) -> V
     let xp = h_matmul(&xn, &w.w_x, rows, dim, inner);
     let gate = h_matmul(&xn, &w.w_gate, rows, dim, inner);
     let erf = |x: f32| { let s=x.signum(); let ax=x.abs(); let t=1.0/(1.0+0.3275911*ax);
-        let poly=((((1.061405429*t-1.453152027)*t+1.421413741)*t-0.284496736)*t+0.254829592)*t;
+        let poly=((((1.061_405_4*t-1.453_152_1)*t+1.421_413_8)*t-0.284_496_72)*t+0.254_829_6)*t;
         s*(1.0-poly*(-ax*ax).exp()) };
-    let gelu = |v: f32| 0.5*v*(1.0+erf(v*0.7071067811865476));
+    let gelu = |v: f32| 0.5*v*(1.0+erf(v*0.707_106_77));
     let act: Vec<f32> = gate.iter().zip(&xp).map(|(g,xv)| gelu(*g)*xv).collect();
     h_matmul(&act, &w.w_out, rows, inner, dim)
 }

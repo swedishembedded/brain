@@ -136,6 +136,83 @@ fn build(depth: &[f32], w: u32, h: u32, bounds: Bounds, opts: &StereoOpts, sourc
     out
 }
 
+// ---------------------------------------------------------------------------
+// Cross-eye stereo PAIR (depth-image-based rendering) — shows the actual image.
+// ---------------------------------------------------------------------------
+
+/// A cross-eye stereo pair (`left | right`, `2w × h`) synthesized from the image and
+/// its depth by Depth-Image-Based Rendering: each pixel is displaced horizontally by
+/// a disparity proportional to its (normalized) depth — nearer moves more — forward-
+/// warped with a per-pixel z-test so nearer pixels win, and disocclusion holes are
+/// filled from neighbours. Free-view CROSS-EYED (right eye on the LEFT image) and the
+/// actual scene appears in 3D — unlike an autostereogram, you see the real photo.
+///
+/// `max_disparity` is the peak shift in px (a knob, since depth is relative). Larger
+/// = more relief but bigger holes and harder fusion.
+pub fn stereo_pair(rgb: &[u8], depth: &[f32], w: u32, h: u32, bounds: Bounds, max_disparity: u32, near_is_high: bool) -> Vec<u8> {
+    assert_eq!(rgb.len(), (w * h * 3) as usize, "rgb must be [h*w*3]");
+    let (wi, hi) = (w as usize, h as usize);
+    let ow = wi * 2;
+    let md = max_disparity as f32;
+    let mut out = vec![0u8; ow * hi * 3];
+    let (mut lrow, mut rrow) = (vec![0u8; wi * 3], vec![0u8; wi * 3]);
+    let (mut lz, mut rz) = (vec![f32::NEG_INFINITY; wi], vec![f32::NEG_INFINITY; wi]);
+    let (mut lf, mut rf) = (vec![false; wi], vec![false; wi]);
+    for y in 0..hi {
+        lz.iter_mut().for_each(|v| *v = f32::NEG_INFINITY);
+        rz.iter_mut().for_each(|v| *v = f32::NEG_INFINITY);
+        lf.iter_mut().for_each(|v| *v = false);
+        rf.iter_mut().for_each(|v| *v = false);
+        for x in 0..wi {
+            let n = bounds.norm(depth[y * wi + x]);
+            let z = if near_is_high { n } else { 1.0 - n };
+            let d = (md * z * 0.5).round() as i32; // half-shift each side
+            let px = [rgb[(y * wi + x) * 3], rgb[(y * wi + x) * 3 + 1], rgb[(y * wi + x) * 3 + 2]];
+            // LEFT pane is the right-eye view (near shifts right); RIGHT pane the
+            // left-eye view (near shifts left) — the cross-eye convention.
+            let xl = x as i32 + d;
+            let xr = x as i32 - d;
+            if xl >= 0 && (xl as usize) < wi && z > lz[xl as usize] {
+                lz[xl as usize] = z;
+                lf[xl as usize] = true;
+                lrow[(xl as usize) * 3..][..3].copy_from_slice(&px);
+            }
+            if xr >= 0 && (xr as usize) < wi && z > rz[xr as usize] {
+                rz[xr as usize] = z;
+                rf[xr as usize] = true;
+                rrow[(xr as usize) * 3..][..3].copy_from_slice(&px);
+            }
+        }
+        fill_holes(&mut lrow, &lf, wi);
+        fill_holes(&mut rrow, &rf, wi);
+        out[(y * ow) * 3..(y * ow + wi) * 3].copy_from_slice(&lrow);
+        out[(y * ow + wi) * 3..(y * ow + 2 * wi) * 3].copy_from_slice(&rrow);
+    }
+    out
+}
+
+/// Fill unwritten (disoccluded) pixels in a row from the nearest written neighbour:
+/// interior/trailing holes copy from the left (the background just uncovered), and
+/// leading holes copy from the first written pixel.
+fn fill_holes(row: &mut [u8], filled: &[bool], w: usize) {
+    let get = |row: &[u8], x: usize| [row[x * 3], row[x * 3 + 1], row[x * 3 + 2]];
+    let mut last: Option<[u8; 3]> = None;
+    for x in 0..w {
+        if filled[x] {
+            last = Some(get(row, x));
+        } else if let Some(c) = last {
+            row[x * 3..][..3].copy_from_slice(&c);
+        }
+    }
+    // Leading holes (before the first filled pixel) get the first filled colour.
+    if let Some(fx) = (0..w).find(|&x| filled[x]) {
+        let c = get(row, fx);
+        for x in 0..fx {
+            row[x * 3..][..3].copy_from_slice(&c);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,82 +382,5 @@ mod tests {
         };
         assert!(periodic(5, s_far), "a pure-background row should be periodic with s_far");
         assert!(!periodic(30, s_far), "a row through the near square must break s_far periodicity");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Cross-eye stereo PAIR (depth-image-based rendering) — shows the actual image.
-// ---------------------------------------------------------------------------
-
-/// A cross-eye stereo pair (`left | right`, `2w × h`) synthesized from the image and
-/// its depth by Depth-Image-Based Rendering: each pixel is displaced horizontally by
-/// a disparity proportional to its (normalized) depth — nearer moves more — forward-
-/// warped with a per-pixel z-test so nearer pixels win, and disocclusion holes are
-/// filled from neighbours. Free-view CROSS-EYED (right eye on the LEFT image) and the
-/// actual scene appears in 3D — unlike an autostereogram, you see the real photo.
-///
-/// `max_disparity` is the peak shift in px (a knob, since depth is relative). Larger
-/// = more relief but bigger holes and harder fusion.
-pub fn stereo_pair(rgb: &[u8], depth: &[f32], w: u32, h: u32, bounds: Bounds, max_disparity: u32, near_is_high: bool) -> Vec<u8> {
-    assert_eq!(rgb.len(), (w * h * 3) as usize, "rgb must be [h*w*3]");
-    let (wi, hi) = (w as usize, h as usize);
-    let ow = wi * 2;
-    let md = max_disparity as f32;
-    let mut out = vec![0u8; ow * hi * 3];
-    let (mut lrow, mut rrow) = (vec![0u8; wi * 3], vec![0u8; wi * 3]);
-    let (mut lz, mut rz) = (vec![f32::NEG_INFINITY; wi], vec![f32::NEG_INFINITY; wi]);
-    let (mut lf, mut rf) = (vec![false; wi], vec![false; wi]);
-    for y in 0..hi {
-        lz.iter_mut().for_each(|v| *v = f32::NEG_INFINITY);
-        rz.iter_mut().for_each(|v| *v = f32::NEG_INFINITY);
-        lf.iter_mut().for_each(|v| *v = false);
-        rf.iter_mut().for_each(|v| *v = false);
-        for x in 0..wi {
-            let n = bounds.norm(depth[y * wi + x]);
-            let z = if near_is_high { n } else { 1.0 - n };
-            let d = (md * z * 0.5).round() as i32; // half-shift each side
-            let px = [rgb[(y * wi + x) * 3], rgb[(y * wi + x) * 3 + 1], rgb[(y * wi + x) * 3 + 2]];
-            // LEFT pane is the right-eye view (near shifts right); RIGHT pane the
-            // left-eye view (near shifts left) — the cross-eye convention.
-            let xl = x as i32 + d;
-            let xr = x as i32 - d;
-            if xl >= 0 && (xl as usize) < wi && z > lz[xl as usize] {
-                lz[xl as usize] = z;
-                lf[xl as usize] = true;
-                lrow[(xl as usize) * 3..][..3].copy_from_slice(&px);
-            }
-            if xr >= 0 && (xr as usize) < wi && z > rz[xr as usize] {
-                rz[xr as usize] = z;
-                rf[xr as usize] = true;
-                rrow[(xr as usize) * 3..][..3].copy_from_slice(&px);
-            }
-        }
-        fill_holes(&mut lrow, &lf, wi);
-        fill_holes(&mut rrow, &rf, wi);
-        out[(y * ow) * 3..(y * ow + wi) * 3].copy_from_slice(&lrow);
-        out[(y * ow + wi) * 3..(y * ow + 2 * wi) * 3].copy_from_slice(&rrow);
-    }
-    out
-}
-
-/// Fill unwritten (disoccluded) pixels in a row from the nearest written neighbour:
-/// interior/trailing holes copy from the left (the background just uncovered), and
-/// leading holes copy from the first written pixel.
-fn fill_holes(row: &mut [u8], filled: &[bool], w: usize) {
-    let get = |row: &[u8], x: usize| [row[x * 3], row[x * 3 + 1], row[x * 3 + 2]];
-    let mut last: Option<[u8; 3]> = None;
-    for x in 0..w {
-        if filled[x] {
-            last = Some(get(row, x));
-        } else if let Some(c) = last {
-            row[x * 3..][..3].copy_from_slice(&c);
-        }
-    }
-    // Leading holes (before the first filled pixel) get the first filled colour.
-    if let Some(fx) = (0..w).find(|&x| filled[x]) {
-        let c = get(row, fx);
-        for x in 0..fx {
-            row[x * 3..][..3].copy_from_slice(&c);
-        }
     }
 }

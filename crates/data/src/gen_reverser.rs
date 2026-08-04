@@ -165,9 +165,9 @@ mod tests {
             );
 
             // Right side equals char-reverse of left side.
-            let mut parts = body.splitn(2, '=');
-            let left = parts.next().unwrap();
-            let right = parts.next().unwrap();
+            let (left, right) = body.split_once('=').unwrap();
+            
+            
             assert_eq!(
                 right,
                 reverse_chars(left),

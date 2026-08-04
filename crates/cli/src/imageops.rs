@@ -85,7 +85,7 @@ impl Action for Gradient {
         };
         let mut img = vec![0f32; wd * ht * 3];
         let (cx, cy) = (wd as f32 * 0.5, ht as f32 * 0.55);
-        let maxr = ((cx * cx + cy * cy) as f32).sqrt();
+        let maxr = (cx * cx + cy * cy).sqrt();
         for row in 0..ht {
             if row % 64 == 0 {
                 progress(Progress::step((row / 64) as u32 + 1, (ht / 64) as u32 + 1, "rendering"));

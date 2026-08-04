@@ -284,7 +284,7 @@ impl Flux2Model {
             // step_sliced binds sub-ranges at BYTE offset elem*4; storage
             // bindings must be 256-byte aligned. Every sliced row offset here is
             // 0 or txt_len rows, so widths and txt_len must be multiples of 64.
-            assert!(cfg.txt_len % 64 == 0 && d % 64 == 0 && mlp % 64 == 0, "int8 slicing alignment");
+            assert!(cfg.txt_len.is_multiple_of(64) && d.is_multiple_of(64) && mlp.is_multiple_of(64), "int8 slicing alignment");
         }
         let get = |name: &str| -> &(Vec<usize>, Vec<f32>) {
             ts.get(name).unwrap_or_else(|| panic!("flux2: missing tensor {name}"))
@@ -872,7 +872,7 @@ impl Flux2Model {
         // it surface as a wgpu validation error (P9 finding, status.md).
         if bsz > 1 && self.fast {
             let al = |what: &str, v: u64| {
-                assert!(v % 64 == 0, "flux2 batched forward: {what} = {v} floats is not a multiple of 64 (256-byte storage-binding alignment); use B=1 at these dims");
+                assert!(v.is_multiple_of(64), "flux2 batched forward: {what} = {v} floats is not a multiple of 64 (256-byte storage-binding alignment); use B=1 at these dims");
             };
             al("hidden", d as u64);
             al("mlp_hidden", mlp as u64);
