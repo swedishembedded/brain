@@ -109,6 +109,16 @@ impl ModelRef {
             None => (rest, None),
         };
 
+        // `vendor`/`repo` become path COMPONENTS verbatim (`Store::repo_dir`
+        // joins them onto the store root with no further check) — a segment
+        // that is exactly `.` or `..` is a directory-traversal primitive, not
+        // a real vendor/repo name, and `PathBuf::join` does not sanitize it.
+        // Rejecting it HERE is what makes the module doc's "the grammar itself
+        // is the security gate" claim actually true, rather than aspirational.
+        if vendor == "." || vendor == ".." || repo == "." || repo == ".." {
+            return Err(RefError::PathTraversal);
+        }
+
         Ok(ModelRef { vendor: vendor.to_string(), repo: repo.to_string(), quant })
     }
 
@@ -188,6 +198,10 @@ pub enum RefError {
     /// The repo segment ends in two quant suffixes, e.g. `...-Q8_0-Q4_0`.
     /// Specifying more than one quantization is not allowed.
     TwoQuants,
+    /// The vendor or repo segment is exactly `.` or `..` -- a directory-
+    /// traversal component, not a real name (see `Store::repo_dir`, which
+    /// joins these segments onto the store root with no other check).
+    PathTraversal,
 }
 
 impl fmt::Display for RefError {
@@ -198,6 +212,7 @@ impl fmt::Display for RefError {
             RefError::TooManySegments => "model ref must have exactly one '/'",
             RefError::BadChar => "model ref must not contain whitespace",
             RefError::TwoQuants => "model ref names two quantizations (only one is allowed)",
+            RefError::PathTraversal => "model ref's vendor or repo segment must not be '.' or '..'",
         };
         f.write_str(msg)
     }
@@ -409,6 +424,27 @@ mod tests {
     fn no_slash_is_novendor() {
         assert_eq!(ModelRef::parse("mock").unwrap_err(), RefError::NoVendor);
         assert_eq!(ModelRef::parse("").unwrap_err(), RefError::NoVendor);
+    }
+
+    /// `vendor`/`repo` become path COMPONENTS verbatim wherever a `ModelRef` is
+    /// resolved to a store directory (`Store::repo_dir` joins them onto the
+    /// store root with no other check) -- a `.`/`..` segment is a directory-
+    /// traversal primitive, not a real name, and must be rejected here, the
+    /// one place every caller (HTTP/D-Bus auto-fetch included) parses a
+    /// client-supplied model string. Regression for a real path-traversal
+    /// finding from the auto-fetch security review: `"../evil"` used to parse
+    /// clean (vendor=".."), letting a crafted `model` request field probe one
+    /// directory above the configured models root.
+    #[test]
+    fn dot_and_dotdot_segments_are_rejected_as_path_traversal() {
+        assert_eq!(ModelRef::parse("../evil").unwrap_err(), RefError::PathTraversal);
+        assert_eq!(ModelRef::parse("./evil").unwrap_err(), RefError::PathTraversal);
+        assert_eq!(ModelRef::parse("evil/..").unwrap_err(), RefError::PathTraversal);
+        assert_eq!(ModelRef::parse("evil/.").unwrap_err(), RefError::PathTraversal);
+        assert_eq!(ModelRef::parse("../..").unwrap_err(), RefError::PathTraversal);
+        // A repo segment merely CONTAINING dots (not equal to "." or "..") is a
+        // legitimate literal name, not a traversal component -- must still parse.
+        assert!(ModelRef::parse("Qwen/Qwen3..0.6B").is_ok());
     }
 
     #[test]

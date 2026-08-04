@@ -32,9 +32,20 @@ binds them, so treat all request input as hostile.
 - [ ] Numeric params are range-checked before use: `max_tokens`/`max_new`,
       `n`, `top_k`, `dimensions`, batch/`input` array length, image `size`. Reject
       absurd values (400) rather than allocating on them.
-- [ ] The request `model` string is treated as an opaque catalog id — it must NOT be
-      interpolated into a filesystem path, a URL, a shell command, or a D-Bus path.
-      Resolve it only against `exec.manifests()`.
+- [ ] The request `model` string is treated as an opaque catalog id for DISPATCH — it
+      must NOT be interpolated into a shell command. It IS deliberately parsed as a
+      `<vendor>/<repo>[-<QUANT>]` model reference for **auto-fetch** classification
+      (`residency::ModelSupplier::classify`, `crates/cli/src/supply.rs`'s
+      `StoreSupplier`) when it doesn't already resolve against `exec.manifests()` — that
+      parse (`brain_modelref::ModelRef::parse`) is itself a security boundary and must
+      reject: a segment containing `/` beyond the one separator, a `.`/`..` segment
+      (path traversal — `Store::repo_dir` joins vendor/repo onto the store root with no
+      other check), and anything under a reserved vendor (`brain`/`local`/`test`) unless
+      it's already on disk. `classify()` must do this with ZERO network or filesystem
+      I/O for every reject case — only a name that both parses AND isn't reserved may
+      trigger `ensure()`'s fetch. See item 4 for the resulting egress and item 5 for why
+      a failed/refused fetch must still collapse to the exact same generic 404/"no
+      model" a genuinely-unknown model gets.
 
 ### 3. Resource safety & backpressure
 - [ ] Admission is bounded: a request that can't start within the admit deadline → 429
@@ -50,12 +61,43 @@ binds them, so treat all request input as hostile.
 - [ ] No handler fetches an attacker-controlled URL (e.g. image/document `url` inputs,
       OpenRouter passthrough fields). Either resolve locally or reject; never let a
       request cause brain to make an outbound request to an arbitrary host.
+- [ ] **Auto-fetch is the one sanctioned exception** — a dispatch request (chat/
+      embeddings/images on HTTP; `Run`/`Subscribe`/`StreamTranscribe` on D-Bus) for a
+      model that classifies `Fetchable` DOES cause an outbound request, to
+      `huggingface.co` only (`crates/modelstore/src/hub.rs`'s `HfHub`, whose redirect
+      handling is host-allowlisted — verify `hub.rs`'s allowlist test still covers this).
+      The HOST is fixed by `HfHub`, never by request input — only the PATH (the
+      vendor/repo/file) is client-influenced, which this checklist's own precedent
+      treats as not a distinct SSRF concern by itself. Confirm: (a) `GET /models` and
+      `GET /models/{id}` (pure discovery/read routes) never reach `ensure_and_recheck`/
+      `ensure_resident` — only a dispatch route may fetch; (b) `BRAIN_AUTO_FETCH=0`
+      (operator env var, not request-controlled) fully disables the supplier before a
+      process ever constructs one; (c) HTTP surfaces stay loopback-only (item 7) — an
+      operator who binds non-loopback is opting a wider set of callers into this
+      already-sanctioned egress path, same as any other dispatch route.
+- [ ] Live fetch-progress rendering (`bridge::stream_with_autofetch`'s SSE COMMENT
+      lines, `Manager::subscribe`'s `phase:"fetching"` frames) never carries content
+      that could break the wire format: the `name` field of a download step comes
+      from the remote repo's OWN file names (chosen by whoever owns the HF repo, not
+      by the requesting client) and is untrusted — `axum::sse::Event::comment` PANICS
+      on an embedded newline/CR, so it must be stripped before rendering (see the
+      regression test `a_newline_in_the_fetch_progress_name_does_not_panic_the_sse_
+      stream`). The message is display-only in both wire shapes; no code path
+      interpolates it into a path, command, or further request.
 
 ### 5. Error hygiene
 - [ ] Error bodies carry a provider-shaped `{type/message/code}` only — never an
       internal error string, file path, panic message, or stack trace.
 - [ ] A panicking handler is isolated (one connection/request), never taking down the
       server or leaking state across requests.
+- [ ] Auto-fetch specifically: `ensure()`'s failure reason (a hub URL, HTTP status, or
+      on-disk path from `crates/modelstore`'s `plan`/`execute`/the `qwen`/`glm`/`lfm`
+      importers' `import_as`) is logged server-side (`eprintln!`) only —
+      `bridge::ensure_and_recheck` (HTTP) and `Manager::ensure_resident` (D-Bus) both
+      collapse EVERY non-success outcome (no supplier, `Unknown`, fetch `Err`, or a
+      panicked `spawn_blocking` task) to the exact same generic "model not found" the
+      client would see for a model that was simply never going to exist — a failed
+      fetch must be indistinguishable from an unknown model, from the response alone.
 
 ### 6. Output / data exposure
 - [ ] `/models` (and any listing) exposes only the operator's served models and the

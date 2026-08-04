@@ -50,18 +50,40 @@ async fn messages(State(state): State<AppState>, body: Bytes) -> Response {
     // treatment inside `catalog::candidates`; Anthropic has no candidate list
     // (exact-match only), so it resolves directly.
     let model = brain_modelref::alias::canonical(&model).map(str::to_string).unwrap_or(model);
-    if !catalog::resolve_chat(&state.exec, &model) {
-        return ApiError::model_not_found(PROVIDER, &model).into_response();
-    }
-    if stream {
-        let est_input = heuristic_tokens(&request_text(&body));
-        stream_messages(state, model, inv, est_input).await
-    } else {
-        match bridge::submit(&state, &model, "generate", inv).await {
-            Ok(outcome) => {
-                let (text, prompt, completion, finish) = bridge::read_outcome(&outcome);
-                Json(from_outcome(&model, &text, prompt, completion, &finish)).into_response()
+    if catalog::resolve_chat(&state.exec, &model) {
+        if stream {
+            let est_input = heuristic_tokens(&request_text(&body));
+            stream_messages(state, model, inv, est_input).await
+        } else {
+            match bridge::submit(&state, &model, "generate", inv).await {
+                Ok(outcome) => {
+                    let (text, prompt, completion, finish) = bridge::read_outcome(&outcome);
+                    Json(from_outcome(&model, &text, prompt, completion, &finish)).into_response()
+                }
+                Err(e) => e.into_response(),
             }
+        }
+    } else if stream {
+        // Not already resident. Cheap, zero-I/O classify BEFORE opening any SSE
+        // body: an Unknown/no-supplier model stays a plain 404, matching the
+        // non-streaming path below and never opening a stream that would just
+        // immediately error.
+        match state.supplier.clone() {
+            Some(supplier) if matches!(supplier.classify(&model), residency::Supply::Fetchable) => {
+                let est_input = heuristic_tokens(&request_text(&body));
+                stream_messages_with_autofetch(state, supplier, model, inv, est_input)
+            }
+            _ => ApiError::model_not_found(PROVIDER, &model).into_response(),
+        }
+    } else {
+        match bridge::ensure_and_recheck(&state, PROVIDER, &model, |id| catalog::resolve_chat(&state.exec, id).then_some(())).await {
+            Ok(()) => match bridge::submit(&state, &model, "generate", inv).await {
+                Ok(outcome) => {
+                    let (text, prompt, completion, finish) = bridge::read_outcome(&outcome);
+                    Json(from_outcome(&model, &text, prompt, completion, &finish)).into_response()
+                }
+                Err(e) => e.into_response(),
+            },
             Err(e) => e.into_response(),
         }
     }
@@ -188,13 +210,27 @@ pub fn from_outcome(model: &str, text: &str, prompt: i64, completion: i64, finis
 /// approximate input-token count surfaced in `message_start` (the real prompt-token
 /// count is not known until generation completes).
 async fn stream_messages(state: AppState, model: String, inv: Invocation, est_input: i64) -> Response {
-    use futures::StreamExt;
     // Admit BEFORE returning the SSE body — a shed request is a plain 429, not an
     // event-stream that immediately errors.
-    let mut src = match bridge::stream(&state, &model, "generate", inv).await {
+    let src = match bridge::stream(&state, &model, "generate", inv).await {
         Ok(src) => src,
         Err(e) => return e.into_response(),
     };
+    render_messages_stream(src, model, est_input)
+}
+
+/// Like [`stream_messages`], but for a `model` that ISN'T already resident and
+/// classifies `Fetchable`: opens the SSE body immediately and interleaves
+/// [`StreamMsg::Fetching`] progress (as SSE comment lines) ahead of the usual
+/// events — see [`bridge::stream_with_autofetch`]. Never called for a model
+/// that's already resident or classifies `Unknown`/has no supplier.
+fn stream_messages_with_autofetch(state: AppState, supplier: std::sync::Arc<dyn residency::ModelSupplier>, model: String, inv: Invocation, est_input: i64) -> Response {
+    let src = bridge::stream_with_autofetch(&state, supplier, &model, "generate", inv, false);
+    render_messages_stream(src, model, est_input)
+}
+
+fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input: i64) -> Response {
+    use futures::StreamExt;
     let id = format!("msg_{}", Uuid::new_v4().simple());
     let events = async_stream::stream! {
         // message_start: an empty-content Message carrying the input-token usage.
@@ -232,6 +268,9 @@ async fn stream_messages(state: AppState, model: String, inv: Invocation, est_in
                     }).to_string()));
                 }
                 StreamMsg::Progress(..) => {} // chat streams token deltas, not coarse steps
+                StreamMsg::Fetching(p) => {
+                    yield Ok(Event::default().comment(p.comment_text()));
+                }
                 StreamMsg::Done(outcome) => {
                     let (_t, _p, c, fr) = bridge::read_outcome(&outcome);
                     completion = c;

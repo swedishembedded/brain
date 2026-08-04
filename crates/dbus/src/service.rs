@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use capability::{Blob, CancelToken, Invocation, Media, Outcome, Progress};
-use residency::{Executor, Job};
+use residency::{Executor, Job, ModelSupplier, Supply};
 use serde_json::{json, Value};
 use zbus::fdo;
 use zbus::object_server::SignalEmitter;
@@ -44,11 +44,67 @@ pub struct Manager {
     version: String,
     jobs: JobRegistry,
     next_job: AtomicU64,
+    /// Classifies/fetches a `model` string that isn't already resident
+    /// (transparent auto-fetch). `None` -- the default -- means an unresolved
+    /// model is a plain `"no model '…'"` reply with zero I/O, exactly today's
+    /// behavior. Set only via [`Manager::with_supplier`] (`crate::serve_with_shutdown_and_supplier`).
+    supplier: Option<Arc<dyn ModelSupplier>>,
 }
 
 impl Manager {
     pub fn new(executor: Executor) -> Manager {
-        Manager { executor, version: env!("CARGO_PKG_VERSION").to_string(), jobs: Arc::new(Mutex::new(HashMap::new())), next_job: AtomicU64::new(0) }
+        Manager {
+            executor,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            next_job: AtomicU64::new(0),
+            supplier: None,
+        }
+    }
+
+    /// Attach a model supplier (builder-style) so an unresolved model
+    /// auto-fetches instead of every dispatch entry point replying `"no model
+    /// '…'"`. `None` restores today's no-auto-fetch behavior.
+    pub fn with_supplier(mut self, supplier: Option<Arc<dyn ModelSupplier>>) -> Manager {
+        self.supplier = supplier;
+        self
+    }
+
+    /// `model` isn't in `self.executor.manifests()` -- try to make it resident
+    /// via `self.supplier` before the caller dispatches. Blocks (this is called
+    /// from an async zbus method, so it runs on a `spawn_blocking` task) for the
+    /// duration of a cold fetch. Every non-success outcome (no supplier, a
+    /// classify of `Unknown`, or the fetch itself failing) maps to the SAME
+    /// `"no model '{model}'"` `fdo::Error` a genuinely unknown model already
+    /// gets elsewhere in this file -- the raw fetch-failure reason (which could
+    /// carry a hub URL or a filesystem path) is logged server-side, never
+    /// reflected to the caller (`docs/api-security-audit.md`'s error-hygiene
+    /// requirement).
+    async fn ensure_resident(&self, model: &str) -> fdo::Result<()> {
+        if self.executor.manifests().iter().any(|m| m.model == model) {
+            return Ok(());
+        }
+        let Some(supplier) = self.supplier.clone() else {
+            return Err(fdo::Error::Failed(format!("no model '{model}'")));
+        };
+        match supplier.classify(model) {
+            Supply::Fetchable => {}
+            Supply::Resident | Supply::Unknown(_) => return Err(fdo::Error::Failed(format!("no model '{model}'"))),
+        }
+        let exec = self.executor.clone();
+        let model_owned = model.to_string();
+        let outcome = tokio::task::spawn_blocking(move || exec.ensure_model(&model_owned, supplier.as_ref(), &mut |_, _, _| {})).await;
+        match outcome {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(reason)) => {
+                eprintln!("brain dbus: auto-fetch {model}: {reason}");
+                Err(fdo::Error::Failed(format!("no model '{model}'")))
+            }
+            Err(join_err) => {
+                eprintln!("brain dbus: auto-fetch {model}: blocking task failed: {join_err}");
+                Err(fdo::Error::Failed(format!("no model '{model}'")))
+            }
+        }
     }
 
     /// Arm `inv` with a fresh [`CancelToken`] and register it under a new job id.
@@ -194,6 +250,42 @@ fn outcome_to_fds(outcome: &Outcome, want_dmabuf: bool) -> Result<(HashMap<Strin
     Ok((out_fds, Value::Object(meta)))
 }
 
+/// Submit `Job::new(model, action, inv)`, forwarding its progress/blobs/result
+/// into `stream` -- the tail shared by `subscribe`'s already-resident fast path
+/// and its post-fetch continuation, so there is exactly one place that turns a
+/// running job's callbacks into stream frames. A free function, not a method
+/// on `Manager`: the `#[zbus::interface]` macro on `impl Manager` below treats
+/// every item in that block as a candidate D-Bus method, so a private helper
+/// must live outside it.
+fn submit_subscribed_job(exec: Executor, jobs: JobRegistry, stream: Arc<Mutex<crate::stream::StreamTx>>, job: u64, model: String, action: String, inv: Invocation) {
+    let (sp, sr) = (stream.clone(), stream);
+    exec.submit(
+        Job::new(model, action, inv)
+            .on_progress(move |p: Progress| {
+                if let Ok(mut s) = sp.lock() {
+                    s.progress(p.step, p.total, &p.message, None);
+                }
+            })
+            .reply(move |r| {
+                finish_job(&jobs, job);
+                if let Ok(mut s) = sr.lock() {
+                    match r {
+                        Ok(outcome) => {
+                            for (name, blob) in &outcome.blobs {
+                                match bytes_to_fd(name, &blob.bytes, false) {
+                                    Ok((fd, _)) => s.blob(name, blob.media.name(), &blob.meta, fd.as_fd()),
+                                    Err(e) => s.error(&format!("blob {name}: {e}")),
+                                }
+                            }
+                            s.done(&outcome.outputs);
+                        }
+                        Err(e) => s.error(&e),
+                    }
+                }
+            }),
+    );
+}
+
 #[zbus::interface(name = "com.swedishembedded.Brain1.Manager")]
 impl Manager {
     /// JSON array of every model's manifest (discovery).
@@ -221,6 +313,7 @@ impl Manager {
         transport: String,
     ) -> fdo::Result<(String, HashMap<String, ZOwnedFd>, String)> {
         let model = resolve_model_alias(model);
+        self.ensure_resident(&model).await?;
         let mut inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
         // Armed so ActiveJobs counts it; a Run has no client-visible job id, so its
         // token is only ever dropped here (the reply), never cancelled by Cancel.
@@ -240,6 +333,14 @@ impl Manager {
 
     /// Start a streaming run. Returns a job id + a SEQPACKET fd delivering framed
     /// progress/blob/done/error events.
+    ///
+    /// For a model that isn't already resident and classifies `Fetchable`, this
+    /// returns the stream fd IMMEDIATELY (before any network I/O) and runs the
+    /// fetch in the background, forwarding its progress as `phase: "fetching"`
+    /// progress frames over the SAME stream, then submits the real job once the
+    /// model is ready -- mirroring `crate::bridge::stream_with_autofetch` on the
+    /// HTTP side. An `Unknown`/no-supplier model is still the plain `"no model
+    /// '…'"` error with zero I/O, no stream opened at all.
     #[zbus(out_args("job", "event_fd"))]
     async fn subscribe(
         &self,
@@ -257,32 +358,61 @@ impl Manager {
         let jobs = self.jobs.clone();
         let (stream, client) = crate::stream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;
         let stream = Arc::new(Mutex::new(stream));
-        let (sp, sr) = (stream.clone(), stream.clone());
-        self.executor.submit(
-            Job::new(model, action, inv)
-                .on_progress(move |p: Progress| {
-                    if let Ok(mut s) = sp.lock() {
-                        s.progress(p.step, p.total, &p.message);
+
+        if self.executor.manifests().iter().any(|m| m.model == model) {
+            submit_subscribed_job(self.executor.clone(), jobs, stream, job, model, action, inv);
+            return Ok((job, client.into()));
+        }
+
+        let Some(supplier) = self.supplier.clone() else {
+            finish_job(&jobs, job);
+            return Err(fdo::Error::Failed(format!("no model '{model}'")));
+        };
+        match supplier.classify(&model) {
+            Supply::Fetchable => {}
+            Supply::Resident | Supply::Unknown(_) => {
+                finish_job(&jobs, job);
+                return Err(fdo::Error::Failed(format!("no model '{model}'")));
+            }
+        }
+
+        let exec = self.executor.clone();
+        let model_owned = model.clone();
+        let stream_bg = stream.clone();
+        tokio::spawn(async move {
+            let fetch_stream = stream_bg.clone();
+            let fetch_model = model_owned.clone();
+            let fetch_exec = exec.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                fetch_exec.ensure_model(&fetch_model, supplier.as_ref(), &mut |name, got, total| {
+                    if let Ok(mut s) = fetch_stream.lock() {
+                        s.progress(got, total, &format!("fetching {fetch_model}: {name}"), Some("fetching"));
                     }
                 })
-                .reply(move |r| {
-                    finish_job(&jobs, job);
-                    if let Ok(mut s) = sr.lock() {
-                        match r {
-                            Ok(outcome) => {
-                                for (name, blob) in &outcome.blobs {
-                                    match bytes_to_fd(name, &blob.bytes, false) {
-                                        Ok((fd, _)) => s.blob(name, blob.media.name(), &blob.meta, fd.as_fd()),
-                                        Err(e) => s.error(&format!("blob {name}: {e}")),
-                                    }
-                                }
-                                s.done(&outcome.outputs);
-                            }
-                            Err(e) => s.error(&e),
-                        }
+            })
+            .await;
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(reason)) => {
+                    eprintln!("brain dbus: auto-fetch {model_owned}: {reason}");
+                    if let Ok(mut s) = stream_bg.lock() {
+                        s.error(&format!("no model '{model_owned}'"));
                     }
-                }),
-        );
+                    finish_job(&jobs, job);
+                    return;
+                }
+                Err(join_err) => {
+                    eprintln!("brain dbus: auto-fetch {model_owned}: blocking task failed: {join_err}");
+                    if let Ok(mut s) = stream_bg.lock() {
+                        s.error(&format!("no model '{model_owned}'"));
+                    }
+                    finish_job(&jobs, job);
+                    return;
+                }
+            }
+            submit_subscribed_job(exec, jobs, stream_bg, job, model_owned, action, inv);
+        });
+
         Ok((job, client.into()))
     }
 
@@ -305,6 +435,7 @@ impl Manager {
     #[zbus(out_args("job", "event_fd"))]
     async fn stream_transcribe(&self, model: String, params: String, pcm: ZOwnedFd) -> fdo::Result<(u64, ZOwnedFd)> {
         let model = resolve_model_alias(model);
+        self.ensure_resident(&model).await?;
         let p: Value = if params.trim().is_empty() { json!({}) } else { serde_json::from_str(&params).map_err(|e| fdo::Error::Failed(format!("params JSON: {e}")))? };
         let sample_rate = p.get("sample_rate").and_then(|v| v.as_u64()).unwrap_or(16000);
         if sample_rate != 16000 {
@@ -434,10 +565,13 @@ pub async fn run_stats_stream(conn: zbus::Connection, executor: Executor, path: 
 
 #[cfg(test)]
 mod tests {
-    use residency::budget::Budgets;
-    use residency::{Device, Executor, Policy};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::resolve_model_alias;
+    use capability::Manifest;
+    use residency::budget::Budgets;
+    use residency::{Device, Executor, Instance, InstanceKey, MemCost, Policy, ResidentModel, Supply};
+
+    use super::{resolve_model_alias, Manager};
 
     const GB: u64 = 1 << 30;
 
@@ -467,5 +601,96 @@ mod tests {
         assert!(snap.accelerators.iter().any(|a| a.id == "cpu"));
         assert!(snap.accelerators.iter().any(|a| a.id == "gpu0" && a.mem_total == 24 * GB));
         assert!(snap.models.is_empty());
+    }
+
+    /// A stub [`residency::ModelSupplier`] mirroring the one in
+    /// `crates/apiserve/tests/api.rs`: `"vendor/fetchable"` classifies as
+    /// fetchable and "fetching" it registers a minimal resident under that exact
+    /// name; every other model is `Unknown`. Counts `ensure` calls.
+    struct StubSupplier {
+        ensure_calls: AtomicUsize,
+    }
+    struct StubResident(String);
+    struct StubInst;
+    impl ResidentModel for StubResident {
+        fn manifest(&self) -> Manifest {
+            Manifest::new(&self.0, "stub", vec![])
+        }
+        fn instance_key(&self, _action: &str, _inv: &capability::Invocation) -> InstanceKey {
+            InstanceKey::new(self.0.clone(), "default")
+        }
+        fn estimate(&self, _key: &InstanceKey) -> MemCost {
+            MemCost::default()
+        }
+        fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
+            Ok(Box::new(StubInst))
+        }
+    }
+    impl Instance for StubInst {
+        fn run(&mut self, _action: &str, _inv: &capability::Invocation, _progress: &mut dyn FnMut(capability::Progress)) -> capability::ActionResult {
+            Err("not implemented in this stub".into())
+        }
+    }
+    impl residency::ModelSupplier for StubSupplier {
+        fn classify(&self, model: &str) -> Supply {
+            if model == "vendor/fetchable" { Supply::Fetchable } else { Supply::Unknown(format!("{model}: not in the stub catalog")) }
+        }
+        fn ensure(&self, model: &str, exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+            self.ensure_calls.fetch_add(1, Ordering::SeqCst);
+            exec.register(std::sync::Arc::new(StubResident(model.to_string())));
+            Ok(())
+        }
+    }
+
+    fn empty_exec() -> Executor {
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Cpu, GB, 0);
+        Executor::start(vec![], budgets, Policy::default())
+    }
+
+    #[tokio::test]
+    async fn ensure_resident_fetches_an_unresident_fetchable_model_exactly_once() {
+        let supplier = std::sync::Arc::new(StubSupplier { ensure_calls: AtomicUsize::new(0) });
+        let mgr = Manager::new(empty_exec()).with_supplier(Some(supplier.clone() as std::sync::Arc<dyn residency::ModelSupplier>));
+        mgr.ensure_resident("vendor/fetchable").await.expect("must resolve after fetch");
+        assert_eq!(supplier.ensure_calls.load(Ordering::SeqCst), 1);
+        assert!(mgr.executor.manifests().iter().any(|m| m.model == "vendor/fetchable"));
+
+        // A second call for the SAME model finds it already resident -- no
+        // second `ensure` call.
+        mgr.ensure_resident("vendor/fetchable").await.unwrap();
+        assert_eq!(supplier.ensure_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ensure_resident_never_calls_ensure_for_an_unknown_model() {
+        let supplier = std::sync::Arc::new(StubSupplier { ensure_calls: AtomicUsize::new(0) });
+        let mgr = Manager::new(empty_exec()).with_supplier(Some(supplier.clone() as std::sync::Arc<dyn residency::ModelSupplier>));
+        let err = mgr.ensure_resident("brain/reserved-or-nonsense").await.unwrap_err();
+        assert!(err.to_string().contains("no model"), "{err}");
+        assert_eq!(supplier.ensure_calls.load(Ordering::SeqCst), 0, "classify-only Unknown must never call ensure");
+    }
+
+    #[tokio::test]
+    async fn ensure_resident_with_no_supplier_is_the_plain_no_model_error() {
+        let mgr = Manager::new(empty_exec());
+        let err = mgr.ensure_resident("vendor/fetchable").await.unwrap_err();
+        assert!(err.to_string().contains("no model"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn ensure_resident_does_not_leak_the_internal_fetch_error_reason() {
+        struct AlwaysFails;
+        impl residency::ModelSupplier for AlwaysFails {
+            fn classify(&self, _model: &str) -> Supply {
+                Supply::Fetchable
+            }
+            fn ensure(&self, _model: &str, _exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+                Err("hub error: /data/workspace/secret-internal-path unreachable".to_string())
+            }
+        }
+        let mgr = Manager::new(empty_exec()).with_supplier(Some(std::sync::Arc::new(AlwaysFails) as std::sync::Arc<dyn residency::ModelSupplier>));
+        let err = mgr.ensure_resident("vendor/will-fail").await.unwrap_err().to_string();
+        assert!(!err.contains("secret-internal-path"), "internal fetch error leaked: {err}");
     }
 }

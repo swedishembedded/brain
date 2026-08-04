@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use capability::CancelToken;
-use residency::Executor;
+use residency::{Executor, ModelSupplier};
 use uuid::Uuid;
 
 use crate::surface::Provider;
@@ -39,6 +39,11 @@ pub struct AppState {
     /// Bounded wait for a request to be ADMITTED (work started on a lane) before it
     /// is shed with a 429. Overridable so tests can use a short deadline.
     pub admit_deadline: Duration,
+    /// Classifies/fetches a `model` string that isn't already resident (transparent
+    /// auto-fetch). `None` — the default, and every test's `AppState::new` — means
+    /// an unresolved model is a plain 404 with zero I/O, exactly today's behavior.
+    /// Set only by `run_apis` (a live `brain serve`), via [`AppState::with_supplier`].
+    pub supplier: Option<Arc<dyn ModelSupplier>>,
 }
 
 impl AppState {
@@ -49,6 +54,7 @@ impl AppState {
             key: key.into(),
             provider,
             admit_deadline: DEFAULT_ADMIT_DEADLINE,
+            supplier: None,
         }
     }
 
@@ -56,6 +62,13 @@ impl AppState {
     /// shedding without slow real-time waits.
     pub fn with_admit_deadline(mut self, deadline: Duration) -> AppState {
         self.admit_deadline = deadline;
+        self
+    }
+
+    /// Attach a model supplier (builder-style) so an unresolved model auto-fetches
+    /// instead of 404ing. `None` restores today's no-auto-fetch behavior.
+    pub fn with_supplier(mut self, supplier: Option<Arc<dyn ModelSupplier>>) -> AppState {
+        self.supplier = supplier;
         self
     }
 

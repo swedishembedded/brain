@@ -158,6 +158,19 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>) -> anyhow::Result<()> {
     serve_all_with_shutdown(exec, surfaces, brain_shutdown::Shutdown::from_signals())
 }
 
+/// Like [`serve_all_with_shutdown`], but every surface's [`AppState`] gets
+/// `supplier` attached ([`AppState::with_supplier`]) so an unresolved model
+/// auto-fetches instead of 404ing. `None` is identical to
+/// [`serve_all_with_shutdown`] (today's no-auto-fetch behavior).
+pub fn serve_all_with_shutdown_and_supplier(
+    exec: Executor,
+    surfaces: Vec<Surface>,
+    shutdown: brain_shutdown::Shutdown,
+    supplier: Option<std::sync::Arc<dyn residency::ModelSupplier>>,
+) -> anyhow::Result<()> {
+    serve_all_inner(exec, surfaces, shutdown, supplier)
+}
+
 /// Serve every [`Surface`] until `shutdown` fires. Identical to [`serve_all`]
 /// except the caller supplies the shutdown signal — the shape needed when HTTP
 /// runs alongside D-Bus: `tokio::signal::ctrl_c()` claims a process-wide
@@ -174,6 +187,15 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>) -> anyhow::Result<()> {
 /// bound of its own here; `run_apis` bounds the overall wait so a slow client
 /// cannot hold the process open indefinitely.
 pub fn serve_all_with_shutdown(exec: Executor, surfaces: Vec<Surface>, shutdown: brain_shutdown::Shutdown) -> anyhow::Result<()> {
+    serve_all_inner(exec, surfaces, shutdown, None)
+}
+
+fn serve_all_inner(
+    exec: Executor,
+    surfaces: Vec<Surface>,
+    shutdown: brain_shutdown::Shutdown,
+    supplier: Option<std::sync::Arc<dyn residency::ModelSupplier>>,
+) -> anyhow::Result<()> {
     // The admission deadline is operator-overridable via `BRAIN_ADMIT_DEADLINE_MS`
     // (default `DEFAULT_ADMIT_DEADLINE`, 10s). Keeping it here (rather than in the
     // pure `router`) leaves the unit-test `oneshot` path on the fixed default while
@@ -184,7 +206,7 @@ pub fn serve_all_with_shutdown(exec: Executor, surfaces: Vec<Surface>, shutdown:
     rt.block_on(async move {
         let mut set = tokio::task::JoinSet::new();
         for s in surfaces {
-            let state = AppState::new(exec.clone(), s.api_key.clone(), s.provider).with_admit_deadline(admit_deadline);
+            let state = AppState::new(exec.clone(), s.api_key.clone(), s.provider).with_admit_deadline(admit_deadline).with_supplier(supplier.clone());
             let app = router(state);
             let (addr, provider) = (s.addr, s.provider);
             let sd = shutdown.clone();

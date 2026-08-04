@@ -417,6 +417,24 @@ get_url() {
   validate openrouter.json InternalServerResponse "$RESP"
 }
 
+@test "security: a well-formed but reserved-vendor model ref 404s fast, with no auto-fetch attempt" {
+  # `BRAIN_AUTO_FETCH` is on by default for this whole suite's server (no env
+  # override in `setup()`), so this exercises the REAL run_cli.rs wiring, not
+  # just the unit-level ModelSupplier stubs. "brain/…" LOOKS like a fetchable
+  # <vendor>/<repo> ref but is a reserved vendor (crates/modelref's grammar):
+  # classify() must refuse it with zero network I/O, so this returns instantly
+  # and with a plain 404 -- not a hang, timeout, or leaked fetch-error detail.
+  local t0 t1
+  t0=$(date +%s%N)
+  post_json openai /v1/chat/completions '{"model":"brain/totally-fake-nonexistent-model","messages":[{"role":"user","content":"hi"}]}'
+  t1=$(date +%s%N)
+  [ "$STATUS" -eq 404 ]
+  validate openai.json ErrorResponse "$RESP"
+  # Well under the 15s curl --max-time: proves no network round-trip was attempted.
+  [ $(( (t1 - t0) / 1000000 )) -lt 3000 ]
+  ! grep -qi "huggingface\|hub error\|/home/\|/data/\|\.local/share" "$RESP"
+}
+
 # ============================================================ security audit
 # These drive the docs/api-security-audit.md invariants over the REAL socket, so a
 # regression that reopens a hole fails CI. Everything below reuses the ONE mock server

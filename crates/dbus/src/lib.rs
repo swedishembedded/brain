@@ -69,13 +69,31 @@ pub fn serve(executor: Executor, opts: DbusOpts) -> anyhow::Result<()> {
 /// `crates/cli/src/run_cli.rs::run_apis`), so exactly one SIGINT/SIGTERM
 /// registration is shared by every surface in the process instead of each surface
 /// racing to install its own.
+///
+/// No auto-fetch supplier — a plain `"no model '…'"` reply for an unresolved
+/// model, exactly today's behavior. Use [`serve_with_shutdown_and_supplier`] to
+/// enable transparent auto-fetch (`crates/cli/src/run_cli.rs::run_apis` does,
+/// building a `StoreSupplier`).
 pub fn serve_with_shutdown(executor: Executor, opts: DbusOpts, shutdown: brain_shutdown::Shutdown) -> anyhow::Result<()> {
+    serve_with_shutdown_and_supplier(executor, opts, shutdown, None)
+}
+
+/// Like [`serve_with_shutdown`], but `Run`/`Subscribe`/`StreamTranscribe` first
+/// try `supplier` (if given) for a model that isn't already resident, blocking
+/// until it's fetched and registered before dispatching — see
+/// `service::Manager::ensure_resident`.
+pub fn serve_with_shutdown_and_supplier(
+    executor: Executor,
+    opts: DbusOpts,
+    shutdown: brain_shutdown::Shutdown,
+    supplier: Option<std::sync::Arc<dyn residency::ModelSupplier>>,
+) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
         // A cheap executor clone drives the background stats stream, so the
         // snapshot source is independent of the served `Manager` instance.
         let stats_executor = executor.clone();
-        let manager = service::Manager::new(executor);
+        let manager = service::Manager::new(executor).with_supplier(supplier);
         let builder = match opts.bus {
             BusKind::Session => zbus::connection::Builder::session()?,
             BusKind::System => zbus::connection::Builder::system()?,

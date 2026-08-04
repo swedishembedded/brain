@@ -1347,3 +1347,219 @@ async fn write_keys_file_is_owner_only_0600() {
     let _ = std::fs::remove_file(&path);
     assert_eq!(mode, 0o600, "keys file must be owner-only 0600, got {mode:o}");
 }
+
+// ------------------------------------------------------- auto-fetch wiring
+
+/// A stub [`residency::ModelSupplier`] that exercises the HTTP-layer wiring
+/// (`bridge::ensure_and_recheck`) without a real network/model-store dependency:
+/// `"vendor/fetchable-chat"` classifies as fetchable and "fetching" it registers
+/// a runnable chat resident under that exact name; every other model is
+/// `Unknown`. Counts `ensure` calls so a test can assert a classify-only
+/// (`Unknown`) outcome never triggers one — the zero-network-I/O invariant
+/// `docs/api-security-audit.md` requires for a name the store would refuse.
+struct StubSupplier {
+    ensure_calls: AtomicUsize,
+}
+impl residency::ModelSupplier for StubSupplier {
+    fn classify(&self, model: &str) -> residency::Supply {
+        if model == "vendor/fetchable-chat" {
+            residency::Supply::Fetchable
+        } else {
+            residency::Supply::Unknown(format!("{model}: not in the stub catalog"))
+        }
+    }
+    fn ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+        self.ensure_calls.fetch_add(1, Ordering::SeqCst);
+        progress("model.safetensors", 512, 1503);
+        exec.register(Arc::new(FetchedChat(model.to_string())));
+        Ok(())
+    }
+}
+
+/// Like [`FakeChat`] but its manifest name is chosen at construction — what a
+/// real `StoreSupplier::ensure` produces (a resident carded under the
+/// fully-qualified `vendor/repo` the client asked for, not a fixed built-in name).
+struct FetchedChat(String);
+impl ResidentModel for FetchedChat {
+    fn manifest(&self) -> Manifest {
+        let mut m = chat_manifest();
+        m.model = self.0.clone();
+        m
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new(self.0.clone(), "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(FakeChatInst))
+    }
+}
+
+/// An unresolved model that the supplier classifies `Fetchable` is fetched (via
+/// `ensure`) and the ORIGINAL request then succeeds against the newly-registered
+/// resident — the end-to-end "ask for a name that isn't resident yet, it just
+/// works" path `bridge::ensure_and_recheck` exists for.
+#[tokio::test]
+async fn unresolved_chat_model_auto_fetches_via_the_supplier_then_succeeds() {
+    let key = "sk-brain-test-key".to_string();
+    let supplier = Arc::new(StubSupplier { ensure_calls: AtomicUsize::new(0) });
+    let state = AppState::new(chat_executor(), key.clone(), Provider::OpenAI).with_supplier(Some(supplier.clone() as Arc<dyn residency::ModelSupplier>));
+    let app = router(state);
+
+    let body = json!({"model": "vendor/fetchable-chat", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "auto-fetched model must serve the request: {v:?}");
+    assert_eq!(supplier.ensure_calls.load(Ordering::SeqCst), 1);
+}
+
+/// The STREAMING sibling of the test above: the SSE body opens immediately (no
+/// blocking wait before the response starts), fetch progress from the
+/// supplier's `progress` callback arrives as SSE COMMENT lines (`: BRAIN …`,
+/// legal per the SSE spec, invisible to `sse_data`/`sse_events` and to every
+/// conformant client's `data:`/`event:` parsing), and the real
+/// `chat.completion.chunk` stream still follows once the model is ready.
+#[tokio::test]
+async fn unresolved_chat_model_streams_fetch_progress_as_sse_comments_then_the_real_stream() {
+    let key = "sk-brain-test-key".to_string();
+    let supplier = Arc::new(StubSupplier { ensure_calls: AtomicUsize::new(0) });
+    let state = AppState::new(chat_executor(), key.clone(), Provider::OpenAI).with_supplier(Some(supplier.clone() as Arc<dyn residency::ModelSupplier>));
+    let app = router(state);
+
+    let body = json!({"model": "vendor/fetchable-chat", "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let (st, text) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(supplier.ensure_calls.load(Ordering::SeqCst), 1);
+
+    // A comment line for the fetch tick, carrying the model name and the
+    // percentage computed from the stub's `progress(512, 1503)` callback.
+    assert!(text.lines().any(|l| l.starts_with(": BRAIN") && l.contains("vendor/fetchable-chat") && l.contains("34%")), "no fetch-progress comment line in:\n{text}");
+
+    // The comment line(s) are invisible to standard SSE data/event parsing --
+    // the real chat stream underneath is completely unaffected.
+    let chunks = sse_data(&text);
+    assert!(chunks.iter().any(|d| d.contains("\"role\":\"assistant\"") || d.contains("\"role\": \"assistant\"")), "missing role chunk: {chunks:?}");
+    assert_eq!(chunks.last().unwrap(), "[DONE]");
+}
+
+/// A malicious/malformed HF filename in the fetch-progress callback (the
+/// `name` argument comes from the store's `Step::Download { dest_name, .. }`,
+/// itself derived from whatever file names the remote repo's owner chose --
+/// attacker-influenced, not attacker-controlled by the requesting client, but
+/// still untrusted) must not crash the SSE renderer: `axum::sse::Event::
+/// comment` PANICS on an embedded newline/CR, so `stream_with_autofetch`
+/// strips them before building the comment line. Regression for exactly that.
+#[tokio::test]
+async fn a_newline_in_the_fetch_progress_name_does_not_panic_the_sse_stream() {
+    struct NewlineSupplier;
+    impl residency::ModelSupplier for NewlineSupplier {
+        fn classify(&self, model: &str) -> residency::Supply {
+            if model == "vendor/fetchable-chat" { residency::Supply::Fetchable } else { residency::Supply::Unknown("n/a".into()) }
+        }
+        fn ensure(&self, model: &str, exec: &Executor, progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+            progress("evil\r\nfilename\nhere.safetensors", 1, 2);
+            exec.register(Arc::new(FetchedChat(model.to_string())));
+            Ok(())
+        }
+    }
+    let key = "sk-brain-test-key".to_string();
+    let state = AppState::new(chat_executor(), key.clone(), Provider::OpenAI).with_supplier(Some(Arc::new(NewlineSupplier) as Arc<dyn residency::ModelSupplier>));
+    let app = router(state);
+
+    let body = json!({"model": "vendor/fetchable-chat", "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let (st, text) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK, "must not panic/500 on a newline-carrying fetch-progress name");
+    assert_eq!(sse_data(&text).last().unwrap(), "[DONE]", "stream must still complete normally: {text}");
+}
+
+/// The STREAMING sibling of `unknown_model_with_a_supplier_present_still_404s_
+/// with_no_fetch_attempt`: an `Unknown` model must stay a plain, non-SSE 404
+/// body -- never an event-stream that opens and then immediately errors --
+/// and `ensure` is never called.
+#[tokio::test]
+async fn unresolved_chat_model_streaming_request_for_an_unknown_model_is_a_plain_404() {
+    let key = "sk-brain-test-key".to_string();
+    let supplier = Arc::new(StubSupplier { ensure_calls: AtomicUsize::new(0) });
+    let state = AppState::new(chat_executor(), key.clone(), Provider::OpenAI).with_supplier(Some(supplier.clone() as Arc<dyn residency::ModelSupplier>));
+    let app = router(state);
+
+    let body = json!({"model": "brain/reserved-or-nonsense", "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let (st, text) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert!(!text.starts_with("data:") && !text.starts_with(":"), "must not open an SSE body: {text}");
+    assert_eq!(supplier.ensure_calls.load(Ordering::SeqCst), 0);
+}
+
+/// Same streaming-auto-fetch mechanism as the OpenAI test above, on the
+/// Anthropic dialect: SSE comment lines for fetch progress, then the normal
+/// `message_start..message_stop` event sequence.
+#[tokio::test]
+async fn anthropic_unresolved_chat_model_streams_fetch_progress_then_the_real_stream() {
+    let key = "sk-brain-test-key".to_string();
+    let supplier = Arc::new(StubSupplier { ensure_calls: AtomicUsize::new(0) });
+    let state = AppState::new(chat_executor(), key.clone(), Provider::Anthropic).with_supplier(Some(supplier.clone() as Arc<dyn residency::ModelSupplier>));
+    let app = router(state);
+
+    let body = json!({"model": "vendor/fetchable-chat", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let (st, text) = post_text(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(supplier.ensure_calls.load(Ordering::SeqCst), 1);
+    assert!(text.lines().any(|l| l.starts_with(": BRAIN") && l.contains("34%")), "no fetch-progress comment line in:\n{text}");
+
+    let events = sse_events(&text);
+    assert!(events.iter().any(|(ev, _)| ev == "message_start"));
+    assert!(events.iter().any(|(ev, _)| ev == "message_stop"));
+}
+
+/// A model the supplier classifies `Unknown` (the shape a reserved-vendor or
+/// malformed ref gets) still 404s -- and, critically, `ensure` is NEVER called,
+/// proving `classify` alone gates any network/filesystem I/O.
+#[tokio::test]
+async fn unknown_model_with_a_supplier_present_still_404s_with_no_fetch_attempt() {
+    let key = "sk-brain-test-key".to_string();
+    let supplier = Arc::new(StubSupplier { ensure_calls: AtomicUsize::new(0) });
+    let state = AppState::new(chat_executor(), key.clone(), Provider::OpenAI).with_supplier(Some(supplier.clone() as Arc<dyn residency::ModelSupplier>));
+    let app = router(state);
+
+    let body = json!({"model": "brain/reserved-or-nonsense", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, _) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert_eq!(supplier.ensure_calls.load(Ordering::SeqCst), 0, "classify-only Unknown must never call ensure");
+}
+
+/// A supplier whose `ensure` fails must still just 404 -- the raw failure reason
+/// (which could carry a hub URL or a filesystem path) is never reflected into the
+/// response body (`docs/api-security-audit.md`'s error-hygiene requirement).
+#[tokio::test]
+async fn a_failed_fetch_404s_without_leaking_the_internal_error_reason() {
+    struct AlwaysFails;
+    impl residency::ModelSupplier for AlwaysFails {
+        fn classify(&self, _model: &str) -> residency::Supply {
+            residency::Supply::Fetchable
+        }
+        fn ensure(&self, _model: &str, _exec: &Executor, _progress: &mut dyn FnMut(&str, u32, u32)) -> Result<(), String> {
+            Err("hub error: /data/workspace/secret-internal-path unreachable".to_string())
+        }
+    }
+    let key = "sk-brain-test-key".to_string();
+    let state = AppState::new(chat_executor(), key.clone(), Provider::OpenAI).with_supplier(Some(Arc::new(AlwaysFails) as Arc<dyn residency::ModelSupplier>));
+    let app = router(state);
+
+    let body = json!({"model": "vendor/will-fail", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let body_text = v.to_string();
+    assert!(!body_text.contains("secret-internal-path"), "internal fetch error leaked into the response: {body_text}");
+}
+
+/// With NO supplier configured (every test above this one, and every
+/// `AppState::new` that doesn't call `.with_supplier`), an unresolved model is a
+/// plain 404 -- the pre-auto-fetch behavior, unchanged.
+#[tokio::test]
+async fn no_supplier_configured_is_a_plain_404_unchanged() {
+    let (app, key) = chat_app(Provider::OpenAI);
+    let body = json!({"model": "vendor/would-be-fetchable", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, _) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}

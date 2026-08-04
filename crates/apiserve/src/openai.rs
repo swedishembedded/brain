@@ -18,6 +18,8 @@ use serde_json::{json, Value};
 use std::convert::Infallible;
 use uuid::Uuid;
 
+use residency::Supply;
+
 use crate::bridge::{self, StreamMsg};
 use crate::catalog;
 use crate::error::ApiError;
@@ -155,7 +157,10 @@ pub async fn handle_embeddings(state: AppState, body: Bytes) -> Response {
     // replaces the requested one for dispatch and the echoed response `model`.
     match catalog::resolve_model(provider, &body, |id| catalog::resolve_embed(&state.exec, id).then_some(())) {
         Some((id, ())) => req.model = id,
-        None => return ApiError::model_not_found(provider, &req.model).into_response(),
+        None => match bridge::ensure_and_recheck(&state, provider, &req.model, |id| catalog::resolve_embed(&state.exec, id).then_some(())).await {
+            Ok(()) => {}
+            Err(e) => return e.into_response(),
+        },
     }
 
     let mut data: Vec<Value> = Vec::with_capacity(req.inputs.len());
@@ -217,24 +222,47 @@ pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response
         Ok(x) => x,
         Err(e) => return e.into_response(),
     };
+    let want_usage = || body.get("stream_options").and_then(|o| o.get("include_usage")).and_then(|v| v.as_bool()).unwrap_or(false);
+
     // Resolve the model against the chat-capable manifests before dispatching. On the
     // OpenRouter surface this also strips a `"<provider>/"` prefix and walks a `models`
     // fallback array (see [`catalog::resolve_model`]); OpenAI is exact-match only.
-    let model = match catalog::resolve_model(provider, &body, |id| catalog::resolve_chat(&state.exec, id).then_some(())) {
-        Some((id, ())) => id,
-        None => return ApiError::model_not_found(provider, &requested).into_response(),
-    };
-    if stream {
-        let want_usage = body.get("stream_options").and_then(|o| o.get("include_usage")).and_then(|v| v.as_bool()).unwrap_or(false);
-        stream_chat(state, model, inv, native, want_usage).await
-    } else {
-        match bridge::submit(&state, &model, "generate", inv).await {
-            Ok(outcome) => {
-                let (text, prompt, completion, finish) = bridge::read_outcome(&outcome);
-                Json(non_stream_body(&model, &text, prompt, completion, &finish, native)).into_response()
+    match catalog::resolve_model(provider, &body, |id| catalog::resolve_chat(&state.exec, id).then_some(())) {
+        Some((model, ())) => {
+            if stream {
+                stream_chat(state, model, inv, native, want_usage()).await
+            } else {
+                match bridge::submit(&state, &model, "generate", inv).await {
+                    Ok(outcome) => {
+                        let (text, prompt, completion, finish) = bridge::read_outcome(&outcome);
+                        Json(non_stream_body(&model, &text, prompt, completion, &finish, native)).into_response()
+                    }
+                    Err(e) => e.into_response(),
+                }
             }
-            Err(e) => e.into_response(),
         }
+        // Not already resident. Non-streaming blocks on the fetch (the plan's
+        // accepted trade-off); streaming opens the SSE body immediately and
+        // reports fetch progress as it happens (`stream_chat_with_autofetch`)
+        // -- but only once classify() has ALREADY confirmed Fetchable with
+        // zero I/O, so an Unknown/no-supplier model still never opens a
+        // stream that would just immediately error.
+        None if stream => match state.supplier.clone() {
+            Some(supplier) if matches!(supplier.classify(&requested), Supply::Fetchable) => {
+                stream_chat_with_autofetch(state, supplier, requested, inv, native, want_usage())
+            }
+            _ => ApiError::model_not_found(provider, &requested).into_response(),
+        },
+        None => match bridge::ensure_and_recheck(&state, provider, &requested, |id| catalog::resolve_chat(&state.exec, id).then_some(())).await {
+            Ok(()) => match bridge::submit(&state, &requested, "generate", inv).await {
+                Ok(outcome) => {
+                    let (text, prompt, completion, finish) = bridge::read_outcome(&outcome);
+                    Json(non_stream_body(&requested, &text, prompt, completion, &finish, native)).into_response()
+                }
+                Err(e) => e.into_response(),
+            },
+            Err(e) => e.into_response(),
+        },
     }
 }
 
@@ -515,7 +543,13 @@ pub async fn handle_images(state: AppState, body: Bytes) -> Response {
             req.model = id;
             action
         }
-        None => return ApiError::model_not_found(provider, &req.model).into_response(),
+        None => {
+            let requested = req.model.clone();
+            match bridge::ensure_and_recheck(&state, provider, &requested, |id| catalog::resolve_image(&state.exec, id)).await {
+                Ok(action) => action,
+                Err(e) => return e.into_response(),
+            }
+        }
     };
 
     if req.stream {
@@ -602,6 +636,9 @@ async fn stream_images(state: AppState, req: ImageRequest, action: String) -> Re
                     yield Ok::<Event, Infallible>(Event::default().data(partial_event(&size, idx).to_string()));
                     idx += 1;
                 }
+                StreamMsg::Fetching(p) => {
+                    yield Ok(Event::default().comment(p.comment_text()));
+                }
                 StreamMsg::Delta(_) => {} // image generation has no text deltas
                 StreamMsg::Done(outcome) => match image_b64_from_outcome(&outcome) {
                     Ok(b64) => yield Ok(Event::default().data(completed_event(&size, &b64).to_string())),
@@ -623,13 +660,28 @@ async fn stream_images(state: AppState, req: ImageRequest, action: String) -> Re
 /// race FIRST: if the job cannot start on a lane within `state.admit_deadline`, this
 /// returns a plain 429 body (with `Retry-After`) instead of an event-stream.
 async fn stream_chat(state: AppState, model: String, inv: Invocation, native: bool, want_usage: bool) -> Response {
-    use futures::StreamExt;
     // Admit BEFORE returning the SSE body — a shed request is a plain 429, not an
     // event-stream that immediately errors.
-    let mut src = match bridge::stream(&state, &model, "generate", inv).await {
+    let src = match bridge::stream(&state, &model, "generate", inv).await {
         Ok(src) => src,
         Err(e) => return e.into_response(),
     };
+    render_chat_stream(src, model, native, want_usage)
+}
+
+/// Like [`stream_chat`], but for a `model` that ISN'T already resident and
+/// classifies `Fetchable`: opens the SSE body immediately and interleaves
+/// [`StreamMsg::Fetching`] progress (as SSE comment lines) ahead of the usual
+/// chunks — see [`bridge::stream_with_autofetch`]. Never called for a model
+/// that's already resident or that classifies `Unknown`/has no supplier —
+/// those stay a plain, zero-I/O 404 (see `handle_chat`).
+fn stream_chat_with_autofetch(state: AppState, supplier: std::sync::Arc<dyn residency::ModelSupplier>, model: String, inv: Invocation, native: bool, want_usage: bool) -> Response {
+    let src = bridge::stream_with_autofetch(&state, supplier, &model, "generate", inv, false);
+    render_chat_stream(src, model, native, want_usage)
+}
+
+fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool, want_usage: bool) -> Response {
+    use futures::StreamExt;
     let id = format!("chatcmpl-{}", Uuid::new_v4().simple());
     let events = async_stream::stream! {
         // First chunk: announce the assistant role.
@@ -643,6 +695,9 @@ async fn stream_chat(state: AppState, model: String, inv: Invocation, native: bo
                     yield Ok(Event::default().data(chunk(&id, &model, json!({ "content": piece }), None, native).to_string()));
                 }
                 StreamMsg::Progress(..) => {} // chat streams token deltas, not coarse steps
+                StreamMsg::Fetching(p) => {
+                    yield Ok(Event::default().comment(p.comment_text()));
+                }
                 StreamMsg::Done(outcome) => {
                     let (_t, p, c, fr) = bridge::read_outcome(&outcome);
                     prompt = p;

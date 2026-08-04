@@ -20,13 +20,48 @@ use std::task::{Context, Poll};
 
 use capability::{Invocation, Outcome};
 use futures::Stream;
-use residency::Job;
+use residency::{Job, Supply};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::{AppState, JobRegistry};
 use crate::surface::Provider;
+
+/// Auto-fetch entry point: `model` didn't resolve against `resolve` (the caller's
+/// `catalog::resolve_*` predicate, already tried once). If `state.supplier` can
+/// classify `model` as fetchable, blocks (off the async runtime, via
+/// `spawn_blocking` — a cold fetch can take minutes) until it's on disk and
+/// registered, then retries `resolve`. Returns a `model_not_found` for every other
+/// outcome (no supplier configured, `Unknown`, or the fetch itself failing) —
+/// deliberately the SAME error as an unknown model, so a failed/refused fetch
+/// tells a client nothing more than "this model isn't available" (see
+/// `docs/api-security-audit.md`'s error-hygiene section: hub URLs, filesystem
+/// paths, and other fetch-internal detail are logged server-side, never reflected
+/// to the caller).
+pub async fn ensure_and_recheck<T>(state: &AppState, provider: Provider, model: &str, resolve: impl Fn(&str) -> Option<T>) -> Result<T, ApiError> {
+    let Some(supplier) = state.supplier.clone() else {
+        return Err(ApiError::model_not_found(provider, model));
+    };
+    match supplier.classify(model) {
+        Supply::Fetchable => {}
+        Supply::Resident | Supply::Unknown(_) => return Err(ApiError::model_not_found(provider, model)),
+    }
+    let exec = state.exec.clone();
+    let model_owned = model.to_string();
+    let outcome = tokio::task::spawn_blocking(move || exec.ensure_model(&model_owned, supplier.as_ref(), &mut |_, _, _| {})).await;
+    match outcome {
+        Ok(Ok(())) => resolve(model).ok_or_else(|| ApiError::model_not_found(provider, model)),
+        Ok(Err(reason)) => {
+            eprintln!("apiserve: auto-fetch {model}: {reason}");
+            Err(ApiError::model_not_found(provider, model))
+        }
+        Err(join_err) => {
+            eprintln!("apiserve: auto-fetch {model}: blocking task failed: {join_err}");
+            Err(ApiError::model_not_found(provider, model))
+        }
+    }
+}
 
 /// Read the contract's `generate` [`Outcome`] into `(text, prompt_tokens,
 /// completion_tokens, finish_reason)`. `text` is the `text` blob (full assistant
@@ -100,13 +135,46 @@ pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invoca
     }
 }
 
+/// One `StreamMsg::Fetching` tick: a human-readable phase description plus the
+/// raw byte counts (mirrors `residency::Executor::ensure_model`'s progress
+/// callback shape: `name`, `got`, `total`). Rendered as an SSE COMMENT line
+/// (`: …`, RFC-legal, ignored by every conformant parser) so a cold auto-fetch
+/// keeps the connection alive and visibly progressing through a multi-minute
+/// download instead of holding the response back in silence — without adding
+/// a new `data:` event shape that would break the vendored-OpenAPI/Anthropic
+/// conformance tests.
+pub struct FetchProgress {
+    pub message: String,
+    pub got: u64,
+    pub total: Option<u64>,
+}
+
+impl FetchProgress {
+    /// Render as SSE COMMENT-line text (the caller wraps it in
+    /// `axum::response::sse::Event::comment`) -- e.g. `BRAIN fetching Qwen/
+    /// Qwen3-0.6B: model.safetensors 34% (512/1503 KiB)` with a known total,
+    /// `BRAIN fetching …: model.safetensors (512 KiB)` without one (some hub
+    /// responses omit `Content-Length`).
+    pub fn comment_text(&self) -> String {
+        match self.total {
+            Some(total) if total > 0 => {
+                let pct = (self.got.min(total).saturating_mul(100) / total).min(100);
+                format!("BRAIN {} {pct}% ({}/{} KiB)", self.message, self.got / 1024, total / 1024)
+            }
+            _ => format!("BRAIN {} ({} KiB)", self.message, self.got / 1024),
+        }
+    }
+}
+
 /// One item on a streaming generation: an incremental text piece, a coarse
 /// `(step, total)` progress tick (used by image generation's denoise loop; chat
-/// streaming ignores it), the terminal outcome (full text/image + counts), or an
-/// error.
+/// streaming ignores it), a cold-auto-fetch progress tick (see
+/// [`FetchProgress`] — only ever produced by [`stream_with_autofetch`]), the
+/// terminal outcome (full text/image + counts), or an error.
 pub enum StreamMsg {
     Delta(String),
     Progress(u32, u32),
+    Fetching(FetchProgress),
     Done(Outcome),
     Err(ApiError),
 }
@@ -207,4 +275,108 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
     }
 
     Ok(EventStream { rx, _guard: CancelGuard { token, jobs: state.jobs.clone(), id } })
+}
+
+/// Like [`stream`]/[`stream_progress`], but for a `model` that is NOT already
+/// resident: returns the [`EventStream`] IMMEDIATELY (before any network I/O),
+/// then — in a background task — classifies and (if `Fetchable`) fetches the
+/// model with its progress forwarded as [`StreamMsg::Fetching`] ticks, and only
+/// once it's ready submits the real job under the normal admission race,
+/// continuing to forward `Delta`/`Progress`/`Done`/`Err` into the SAME stream.
+/// The caller (e.g. `openai::stream_chat_with_autofetch`) is expected to have
+/// already confirmed `state.supplier.is_some()` and classified `Fetchable`
+/// with zero I/O (`ModelSupplier::classify`) BEFORE calling this — an `Unknown`
+/// or no-supplier model must still be a plain 404 with no SSE body opened at
+/// all, exactly like [`crate::bridge::ensure_and_recheck`]'s non-streaming
+/// sibling.
+///
+/// A 429 (admission failed after the fetch completed) becomes a terminal
+/// [`StreamMsg::Err`] here, not an HTTP 429 status — the SSE body's headers
+/// are already committed by the time admission is even attempted.
+pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn residency::ModelSupplier>, model: &str, action: &str, inv: Invocation, forward_steps: bool) -> EventStream {
+    let provider = state.provider;
+    let (id, token) = state.register();
+    let (tx, rx) = mpsc::unbounded_channel::<StreamMsg>();
+    let exec = state.exec.clone();
+    let jobs = state.jobs.clone();
+    let admit_deadline = state.admit_deadline;
+    let model_owned = model.to_string();
+    let action_owned = action.to_string();
+    let mut inv = inv;
+    inv.cancel = token.clone();
+    let guard_token = token.clone();
+
+    tokio::spawn(async move {
+        let tx_fetch = tx.clone();
+        let fetch_model = model_owned.clone();
+        let fetch_exec = exec.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            fetch_exec.ensure_model(&fetch_model, supplier.as_ref(), &mut |name, got, total| {
+                let _ = tx_fetch.send(StreamMsg::Fetching(FetchProgress {
+                    message: format!("fetching {fetch_model}: {name}").replace(['\n', '\r'], " "),
+                    got: got as u64,
+                    total: if total == 0 { None } else { Some(total as u64) },
+                }));
+            })
+        })
+        .await;
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(reason)) => {
+                eprintln!("apiserve: auto-fetch {model_owned}: {reason}");
+                let _ = tx.send(StreamMsg::Err(ApiError::model_not_found(provider, &model_owned)));
+                if let Ok(mut m) = jobs.lock() { m.remove(&id); }
+                return;
+            }
+            Err(join_err) => {
+                eprintln!("apiserve: auto-fetch {model_owned}: blocking task failed: {join_err}");
+                let _ = tx.send(StreamMsg::Err(ApiError::model_not_found(provider, &model_owned)));
+                if let Ok(mut m) = jobs.lock() { m.remove(&id); }
+                return;
+            }
+        }
+
+        // Model is ready -- submit the real job, forwarding into the SAME
+        // channel the fetch ticks just used, so the client sees one
+        // continuous stream (fetch progress, then generation deltas). A
+        // dedicated clone for the admission-timeout branch below: the other
+        // two are moved into the job's closures and won't be available if
+        // admission times out before either ever fires.
+        let tx_timeout = tx.clone();
+        let (admit_tx, admit_rx) = oneshot::channel::<()>();
+        let tx_progress = tx.clone();
+        let tx_reply = tx;
+        let job = Job::new(model_owned.clone(), action_owned, inv)
+            .on_progress(move |p| {
+                if let Some(piece) = p.delta {
+                    let _ = tx_progress.send(StreamMsg::Delta(piece));
+                } else if forward_steps {
+                    let _ = tx_progress.send(StreamMsg::Progress(p.step, p.total));
+                }
+            })
+            .on_admit(move || {
+                let _ = admit_tx.send(());
+            })
+            .reply(move |r| {
+                let msg = match r {
+                    Ok(outcome) => StreamMsg::Done(outcome),
+                    Err(e) => StreamMsg::Err(map_reply_err(provider, &model_owned, &e)),
+                };
+                let _ = tx_reply.send(msg);
+            });
+        exec.submit(job);
+
+        tokio::select! {
+            _ = admit_rx => {}
+            _ = tokio::time::sleep(admit_deadline) => {
+                token.cancel();
+                if let Ok(mut m) = jobs.lock() {
+                    m.remove(&id);
+                }
+                let _ = tx_timeout.send(StreamMsg::Err(ApiError::overloaded(provider, "request could not be admitted within the deadline")));
+            }
+        }
+    });
+
+    EventStream { rx, _guard: CancelGuard { token: guard_token, jobs: state.jobs.clone(), id } }
 }

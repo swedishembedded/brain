@@ -69,9 +69,13 @@ impl StreamTx {
         }
     }
 
-    /// A progress update.
-    pub fn progress(&mut self, step: u32, total: u32, message: &str) {
-        self.send(&json!({"type": "progress", "step": step, "total": total, "message": message}), None);
+    /// A progress update. `phase` is `None` for a running job's normal
+    /// progress (today's wire shape, unchanged); `Some("fetching")` for a
+    /// cold auto-fetch tick ahead of the real job (`step`/`total` are then
+    /// byte counts, not steps) -- an additive JSON key, so an older client
+    /// that doesn't look for `phase` sees exactly the frame it always has.
+    pub fn progress(&mut self, step: u32, total: u32, message: &str, phase: Option<&str>) {
+        self.send(&json!({"type": "progress", "step": step, "total": total, "message": message, "phase": phase}), None);
     }
 
     /// A streaming-transcription segment: the `text` decoded for window `index` —

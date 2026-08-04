@@ -24,6 +24,7 @@
 //!     `$XDG_DATA_HOME/brain/models` else `$HOME/.local/share/brain/models`.
 
 use std::io::{BufRead, Write};
+use std::sync::Arc;
 
 use events::Envelope;
 use runtime::{
@@ -365,7 +366,38 @@ fn dbus_connect_hint(err: &dyn std::fmt::Display, system_bus: bool, http_up: boo
 /// second-signal escape hatch is the backstop if this window is not enough.
 const DBUS_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Build the transparent auto-fetch supplier for a live `brain serve`, unless
+/// disabled via `BRAIN_AUTO_FETCH=0` (also accepts `false`/`off`,
+/// case-insensitive; anything else -- including unset -- is enabled, since
+/// transparent auto-fetch is the point of `brain serve`; see
+/// `docs/models/naming.md` and `docs/api-security-audit.md`). `None` when
+/// disabled OR when no models directory can be resolved at all (no `$HOME`) --
+/// either way, an unresolved model then just 404s/errors with zero I/O, same as
+/// before this existed.
+///
+/// Every HTTP/D-Bus surface in this process shares ONE supplier instance (not
+/// one per surface): `StoreSupplier`'s in-flight map is what makes concurrent
+/// requests for the same cold model share a single fetch rather than each
+/// surface racing its own download.
+fn build_auto_fetch_supplier(models_dir: Option<&str>) -> Option<Arc<dyn residency::ModelSupplier>> {
+    let disabled = std::env::var("BRAIN_AUTO_FETCH")
+        .ok()
+        .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off"));
+    if disabled {
+        eprintln!("brain serve: BRAIN_AUTO_FETCH disabled -- an unresolved model 404s/errors instead of auto-fetching");
+        return None;
+    }
+    // The SAME models directory `build_serving_executor`'s startup scan
+    // resolved, so a freshly auto-fetched model lands exactly where a restart's
+    // scan would find it again.
+    let dir = crate::model_dir::resolve(models_dir)?;
+    let store = brain_modelstore::Store::new(dir);
+    let hub: Box<dyn brain_modelstore::Hub> = Box::new(brain_modelstore::HfHub::new());
+    Some(Arc::new(crate::supply::StoreSupplier::new(store, hub)))
+}
+
 fn run_apis(a: RunApis) {
+    let supplier = build_auto_fetch_supplier(a.models_dir.as_deref());
     let executor = build_serving_executor(a.reserve_gb, a.models_dir);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
@@ -388,16 +420,17 @@ fn run_apis(a: RunApis) {
             name: a.dbus_name.unwrap_or_else(|| "com.swedishembedded.Brain1".to_string()),
         };
         let e = executor.clone();
+        let sup = supplier.clone();
         if http {
             let sd = shutdown.clone();
             let dbus_system = a.dbus_system;
             Some(std::thread::spawn(move || {
-                if let Err(err) = brain_dbus::serve_with_shutdown(e, opts, sd) {
+                if let Err(err) = brain_dbus::serve_with_shutdown_and_supplier(e, opts, sd, sup) {
                     eprintln!("{}", dbus_connect_hint(&err, dbus_system, true));
                 }
             }))
         } else {
-            if let Err(err) = brain_dbus::serve_with_shutdown(e, opts, shutdown) {
+            if let Err(err) = brain_dbus::serve_with_shutdown_and_supplier(e, opts, shutdown, sup) {
                 eprintln!("{}", dbus_connect_hint(&err, a.dbus_system, false));
                 std::process::exit(1);
             }
@@ -428,7 +461,7 @@ fn run_apis(a: RunApis) {
                 eprintln!("brain serve: --api-keys-out {path}: {e}");
             }
         }
-        if let Err(e) = apiserve::serve_all_with_shutdown(executor, surfaces, shutdown) {
+        if let Err(e) = apiserve::serve_all_with_shutdown_and_supplier(executor, surfaces, shutdown, supplier) {
             eprintln!("brain serve: {e}");
             std::process::exit(1);
         }
