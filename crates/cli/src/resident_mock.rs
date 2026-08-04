@@ -5,18 +5,28 @@
 //!
 //! It is a real [`ResidentModel`] so a `BRAIN_MOCK=1 brain serve` exercises the true
 //! serving path — placement → claim → activate → `run_batch` — with no weights, no
-//! GPU, and no external model. Registered under the id **`mock`**, it advertises the
-//! exact three actions the apiserve handlers dispatch:
+//! GPU, and no external model. Registered under the id **`mock`**, it advertises
+//! the actions the apiserve handlers (and the examples regression harness) dispatch:
 //!
 //! * **`generate`** (streaming chat): reads the flattened `messages` (a JSON-array
 //!   string) or `prompt`, echoes the last user turn back deterministically, streams
 //!   it token-by-token via [`Progress::token`], and returns a `text` blob plus
 //!   `{prompt_tokens, completion_tokens, finish_reason}` — matching
 //!   [`apiserve`'s `bridge::read_outcome`].
-//! * **`embed`**: returns `outputs.mean` (a fixed dim-8 `Vec<f32>` derived from the
-//!   input) plus `outputs.tokens`.
+//! * **`embed`**: takes `text` as a param OR as an input blob (the fd-in/fd-out
+//!   embedding contract every real embedding model — `lfm` — uses), returns
+//!   `outputs.mean` (a fixed dim-8 `Vec<f32>` derived from the input) plus
+//!   `outputs.tokens`, AND the same vector as an `embeddings` output blob (f32-LE,
+//!   `meta.shape=[1,DIM]`) so a client exercising the blob path (not just the HTTP
+//!   JSON path) has something real to read.
 //! * **`text2image`**: returns an `image` blob in brain's raw HWC-f32 wire format
-//!   (`capability::blob::image_blob`) after a couple of denoise-`step` ticks.
+//!   (`capability::blob::image_blob`) after a couple of denoise-`step` ticks,
+//!   polling the cancel token between them (so `Cancel` has a runnable action to
+//!   exercise beyond `crates/dbus/tests/roundtrip.rs`'s synthetic `slow` action).
+//! * **`forecast`**: a deterministic last-value-plus-drift extrapolation, returned
+//!   in the same `[levels, horizon]` quantile-major f32-LE wire shape chronos2
+//!   uses — pinning the forecast contract `examples/forecast/README.md` documents,
+//!   not a stand-in.
 //!
 //! `estimate()` reports a small non-zero VRAM footprint so real placement runs (and,
 //! on a GPU-less box, falls back to the CPU/RAM pool); `activate()` is instant.
@@ -58,10 +68,27 @@ impl MockResident {
     }
 
     /// The embeddings action (`api_caps` classifies any action named `embed`).
+    /// `text` is accepted as a param (the HTTP JSON path) OR as an input blob (the
+    /// fd-in/fd-out path every real embedding model uses) — neither is `.required()`
+    /// at the spec level so either alone validates; [`embed`] rejects only if BOTH
+    /// are absent.
     fn embed_spec() -> ActionSpec {
         ActionSpec::new("embed", "deterministic mock text embedding")
-            .param(ParamSpec::new("text", ParamType::Str, "input text").required())
-            .output(BlobSpec::new("embedding", Media::Bytes, "embedding vector bytes"))
+            .param(ParamSpec::new("text", ParamType::Str, "input text (alternative to the `text` input blob)"))
+            .input(BlobSpec::new("text", Media::Text, "input text (alternative to the `text` param)"))
+            .output(BlobSpec::new("embedding", Media::Bytes, "embedding vector bytes (legacy/unused placeholder)"))
+            .output(BlobSpec::new("embeddings", Media::Bytes, "the mean vector as f32-LE bytes, meta.shape=[1,DIM]"))
+    }
+
+    /// The forecast action: deterministic last-value-plus-drift extrapolation over
+    /// an f32-LE context blob, three quantile levels, returned `[levels, horizon]`
+    /// quantile-major — chronos2's own wire shape (see `crates/chronos2`).
+    fn forecast_spec() -> ActionSpec {
+        ActionSpec::new("forecast", "deterministic mock time-series forecast")
+            .input(BlobSpec::new("context", Media::Bytes, "f32-LE context series, meta.shape=[T]").required())
+            .param(ParamSpec::new("horizon", ParamType::Int, "steps to forecast").default(json!(16)))
+            .param(ParamSpec::new("freq", ParamType::Int, "frequency bucket (accepted, ignored by the mock)").default(json!(0)))
+            .output(BlobSpec::new("forecast", Media::Bytes, "f32-LE forecast, meta {shape:[levels,horizon], kind:\"quantiles\", levels}"))
     }
 
     /// The text-to-image action. An `Image` output + a `prompt` param + no required
@@ -79,7 +106,11 @@ impl MockResident {
 
 impl ResidentModel for MockResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(MODEL, "deterministic mock model (chat + embeddings + image)", vec![Self::generate_spec(), Self::embed_spec(), Self::text2image_spec()])
+        Manifest::new(
+            MODEL,
+            "deterministic mock model (chat + embeddings + image + forecast)",
+            vec![Self::generate_spec(), Self::embed_spec(), Self::text2image_spec(), Self::forecast_spec()],
+        )
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
         InstanceKey::new(MODEL, "default")
@@ -102,8 +133,9 @@ impl Instance for MockInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         match action {
             "generate" => generate(inv, progress),
-            "embed" => Ok(embed(inv)),
-            "text2image" => Ok(text2image(inv, progress)),
+            "embed" => embed(inv),
+            "text2image" => text2image(inv, progress),
+            "forecast" => forecast(inv),
             other => Err(format!("mock: unknown action '{other}'")),
         }
     }
@@ -244,9 +276,22 @@ const EMBED_DIM: usize = 8;
 
 /// A deterministic dim-8 embedding of `text`: byte sums folded into 8 buckets, mean-
 /// normalized and squashed with `sin` to a bounded, reproducible vector. `outputs.mean`
-/// + `outputs.tokens` are exactly what the embeddings handler reads.
-fn embed(inv: &Invocation) -> Outcome {
-    let text = inv.get_str("text").unwrap_or_default();
+/// + `outputs.tokens` are exactly what the HTTP embeddings handler reads; the
+/// `embeddings` blob (f32-LE, `meta.shape=[1,DIM]`) is the same vector for a caller
+/// on the fd-in/fd-out path (see `examples/embedding/embed_document.py`).
+///
+/// `text` comes from the input blob if present, else the `text` param — neither is
+/// required at the spec level (see [`MockResident::embed_spec`]) so this is the one
+/// place that actually enforces "at least one of them", with a clear error rather
+/// than silently embedding an empty string.
+fn embed(inv: &Invocation) -> ActionResult {
+    let text = match inv.get_blob("text") {
+        Some(blob) => String::from_utf8_lossy(&blob.bytes).into_owned(),
+        None => match inv.get_str("text") {
+            Some(t) => t,
+            None => return Err("mock: embed needs a `text` param or a `text` input blob".into()),
+        },
+    };
     let mut v = [0f32; EMBED_DIM];
     for (i, b) in text.bytes().enumerate() {
         v[i % EMBED_DIM] += b as f32;
@@ -254,18 +299,77 @@ fn embed(inv: &Invocation) -> Outcome {
     let n = text.len().max(1) as f32;
     let mean: Vec<f32> = v.iter().map(|x| (x / n).sin()).collect();
     let tokens = text.split_whitespace().count().max(1);
-    Outcome::new().set("mean", json!(mean)).set("tokens", json!(tokens)).set("dim", json!(EMBED_DIM)).blob("embedding", Blob::new(Media::Bytes, Vec::new()))
+    let mut raw = Vec::with_capacity(EMBED_DIM * 4);
+    for f in &mean {
+        raw.extend_from_slice(&f.to_le_bytes());
+    }
+    Ok(Outcome::new()
+        .set("mean", json!(mean))
+        .set("tokens", json!(tokens))
+        .set("dim", json!(EMBED_DIM))
+        .blob("embedding", Blob::new(Media::Bytes, Vec::new()))
+        .blob("embeddings", Blob::new(Media::Bytes, raw).with_meta(json!({ "shape": [1, EMBED_DIM] }))))
+}
+
+/// The three quantile levels the mock's `forecast` reports (matching chronos2's
+/// convention closely enough to be a real stand-in, not just a placeholder shape).
+const FORECAST_LEVELS: [f32; 3] = [0.1, 0.5, 0.9];
+
+/// Deterministic time-series forecast: extrapolate the context's last value along
+/// its overall linear drift, with a spread around the median that widens with the
+/// horizon (so `--horizon 64` visibly produces a wider band than `--horizon 4`,
+/// exercising a client's per-quantile unpacking rather than returning three
+/// identical rows). Wire shape and field names match chronos2
+/// (`crates/chronos2`) — `[levels, horizon]` quantile-major f32-LE, `meta.kind =
+/// "quantiles"` — so this pins the contract `examples/forecast/README.md`
+/// documents instead of drifting from it silently.
+fn forecast(inv: &Invocation) -> ActionResult {
+    let blob = inv.get_blob("context").ok_or("mock: forecast needs a `context` input blob")?;
+    if blob.bytes.is_empty() || !blob.bytes.len().is_multiple_of(4) {
+        return Err(format!("mock: context blob is {} bytes, expected a non-empty multiple of 4 (f32-LE)", blob.bytes.len()));
+    }
+    let context: Vec<f32> = blob.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let horizon = inv.get_i64("horizon").unwrap_or(16).clamp(1, 4096) as usize;
+    let last = *context.last().expect("checked non-empty above");
+    let drift = if context.len() > 1 { (last - context[0]) / (context.len() - 1) as f32 } else { 0.0 };
+
+    let mut raw = Vec::with_capacity(FORECAST_LEVELS.len() * horizon * 4);
+    for level in FORECAST_LEVELS {
+        for t in 0..horizon {
+            let point = last + drift * (t + 1) as f32;
+            let spread = 0.1 * drift.abs().max(0.01) * (t + 1) as f32;
+            let value = point + (level - 0.5) * 2.0 * spread;
+            raw.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    let meta = json!({ "shape": [FORECAST_LEVELS.len(), horizon], "kind": "quantiles", "levels": FORECAST_LEVELS });
+    Ok(Outcome::new()
+        .set("model", json!(MODEL))
+        .set("device", json!("cpu"))
+        .set("horizon", json!(horizon))
+        .blob("forecast", Blob::new(Media::Bytes, raw).with_meta(meta)))
 }
 
 /// Deterministic image generation: a seed-shifted RGB gradient in brain's raw HWC-f32
 /// `[0,1]` wire format, after a couple of `step` denoise ticks (mapped to
-/// `image_generation.partial_image` events on the streaming surface).
-fn text2image(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Outcome {
+/// `image_generation.partial_image` events on the streaming surface). Polls
+/// `inv.cancel` between steps (honoring `BRAIN_MOCK_DELAY_MS` split evenly across
+/// them) so `Cancel` has a real, runnable action to exercise — the D-Bus/HTTP
+/// examples cancel-generation demos, and `roundtrip.rs`'s synthetic `slow` action,
+/// were previously the only paths that ever hit `Cancel` at all.
+fn text2image(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let w = inv.get_i64("width").unwrap_or(1024).clamp(1, 4096) as u32;
     let h = inv.get_i64("height").unwrap_or(1024).clamp(1, 4096) as u32;
     let seed = inv.get_i64("seed").unwrap_or(0).rem_euclid(256) as u32;
     let steps = 4u32;
+    let per_step_delay = mock_delay_ms() / u64::from(steps);
     for s in 0..steps {
+        if per_step_delay > 0 && sleep_cancellable(per_step_delay, &inv.cancel) {
+            return Err("cancelled".into());
+        }
+        if inv.cancel.is_cancelled() {
+            return Err("cancelled".into());
+        }
         progress(Progress::step(s + 1, steps, "denoise"));
     }
     let mut hwc = Vec::with_capacity((w * h * 3) as usize);
@@ -276,7 +380,7 @@ fn text2image(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Outcome {
             hwc.push((x.wrapping_add(y) % 256) as f32 / 255.0);
         }
     }
-    Outcome::new().set("width", json!(w)).set("height", json!(h)).blob("image", capability::blob::image_blob(&hwc, w, h, 3))
+    Ok(Outcome::new().set("width", json!(w)).set("height", json!(h)).blob("image", capability::blob::image_blob(&hwc, w, h, 3)))
 }
 
 #[cfg(test)]
@@ -289,6 +393,16 @@ mod tests {
         assert!(caps.chat, "generate must classify as chat");
         assert!(caps.embeddings, "embed must classify as embeddings");
         assert!(caps.image, "text2image must classify as image");
+        // Adding `forecast` must NOT change this triple — a stray classification
+        // here would reclassify the mock model and break the HTTP conformance
+        // suite (`tests/e2e/api_conformance.bats`), which assumes exactly
+        // chat+embeddings+image. `forecast` has no prompt/messages/text param, no
+        // Text-media output, and no "embed"-ish output name, so none of
+        // `api_caps`'s three rules should ever fire on it.
+        assert!(
+            MockResident.manifest().actions.iter().any(|a| a.name == "forecast"),
+            "forecast must be advertised"
+        );
     }
 
     #[test]
@@ -374,6 +488,32 @@ mod tests {
         let mean = out.outputs["mean"].as_array().unwrap();
         assert_eq!(mean.len(), EMBED_DIM);
         assert!(out.outputs["tokens"].as_i64().unwrap() > 0);
+        // The blob path must return the SAME vector as f32-LE, meta.shape=[1,DIM] —
+        // this is the fd-in/fd-out contract `examples/embedding/embed_document.py`
+        // depends on, and previously had zero coverage.
+        let blob = &out.blobs["embeddings"];
+        assert_eq!(blob.meta, json!({ "shape": [1, EMBED_DIM] }));
+        assert_eq!(blob.bytes.len(), EMBED_DIM * 4);
+        let floats: Vec<f32> = blob.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        for (a, b) in floats.iter().zip(mean.iter()) {
+            assert!((a - b.as_f64().unwrap() as f32).abs() < 1e-6, "blob vector must match outputs.mean: {floats:?} vs {mean:?}");
+        }
+    }
+
+    #[test]
+    fn embed_accepts_text_as_an_input_blob_instead_of_a_param() {
+        let mut inst = MockInstance;
+        let inv = Invocation::new().blob("text", Blob::new(Media::Text, b"hello world".to_vec()));
+        let by_blob = inst.run("embed", &inv, &mut |_| {}).unwrap();
+        let by_param = inst.run("embed", &Invocation::new().set("text", json!("hello world")), &mut |_| {}).unwrap();
+        assert_eq!(by_blob.outputs["mean"], by_param.outputs["mean"], "blob and param inputs must embed identically");
+    }
+
+    #[test]
+    fn embed_errors_clearly_when_neither_text_param_nor_blob_is_given() {
+        let mut inst = MockInstance;
+        let err = inst.run("embed", &Invocation::new(), &mut |_| {}).unwrap_err();
+        assert!(err.contains("text"), "error should name the missing input: {err}");
     }
 
     #[test]
@@ -387,5 +527,62 @@ mod tests {
         assert_eq!(blob.media, Media::Image);
         assert_eq!(blob.meta, json!({ "w": 4, "h": 4, "c": 3 }));
         assert_eq!(blob.bytes.len(), 4 * 4 * 3 * 4);
+    }
+
+    #[test]
+    fn text2image_aborts_promptly_when_already_cancelled() {
+        // Armed and pre-cancelled BEFORE the run: the plain `is_cancelled()` check
+        // (independent of BRAIN_MOCK_DELAY_MS, which this test deliberately never
+        // touches — see the delay tests' own note on the process-global env race)
+        // must abort on the very first step.
+        let mut inst = MockInstance;
+        let cancel = capability::CancelToken::armed();
+        cancel.cancel();
+        let mut inv = Invocation::new().set("prompt", json!("a cat"));
+        inv.cancel = cancel;
+        let mut steps = 0u32;
+        let err = inst.run("text2image", &inv, &mut |_| steps += 1).unwrap_err();
+        assert_eq!(err, "cancelled");
+        assert_eq!(steps, 0, "no progress tick should fire once already cancelled");
+    }
+
+    /// A gentle upward-trending series: value[i] = 10 + i.
+    fn ramp_context(n: usize) -> Blob {
+        let raw: Vec<u8> = (0..n).flat_map(|i| (10.0f32 + i as f32).to_le_bytes()).collect();
+        Blob::new(Media::Bytes, raw)
+    }
+
+    #[test]
+    fn forecast_extrapolates_the_context_drift_with_quantile_spread() {
+        let mut inst = MockInstance;
+        let inv = Invocation::new().set("horizon", json!(8)).blob("context", ramp_context(16));
+        let out = inst.run("forecast", &inv, &mut |_| {}).unwrap();
+        assert_eq!(out.outputs["horizon"], 8);
+        assert_eq!(out.outputs["model"], MODEL);
+
+        let blob = &out.blobs["forecast"];
+        assert_eq!(blob.meta["shape"], json!([3, 8]));
+        assert_eq!(blob.meta["kind"], "quantiles");
+        assert_eq!(blob.meta["levels"], json!(FORECAST_LEVELS));
+        assert_eq!(blob.bytes.len(), 3 * 8 * 4);
+
+        let data: Vec<f32> = blob.bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        // Context is a unit ramp ending at 25.0 (10 + 15); drift 1.0/step, so the
+        // horizon's last median point must land near 25 + 8 = 33.
+        let median_row = &data[8..16]; // levels = [0.1, 0.5, 0.9] -> row 1 is 0.5
+        assert!((median_row[7] - 33.0).abs() < 1.0, "median path should track the drift: {median_row:?}");
+        // The band must actually widen with the horizon (t=7 vs t=0), and the
+        // three levels must be ordered low < median < high at a given t.
+        let lo_row = &data[0..8];
+        let hi_row = &data[16..24];
+        assert!(hi_row[7] - lo_row[7] > hi_row[0] - lo_row[0], "the quantile spread should widen with the horizon");
+        assert!(lo_row[3] < median_row[3] && median_row[3] < hi_row[3], "levels must be ordered low < median < high");
+    }
+
+    #[test]
+    fn forecast_requires_a_context_blob() {
+        let mut inst = MockInstance;
+        let err = inst.run("forecast", &Invocation::new().set("horizon", json!(4)), &mut |_| {}).unwrap_err();
+        assert!(err.contains("context"), "error should name the missing input: {err}");
     }
 }
