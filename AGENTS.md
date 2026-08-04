@@ -814,8 +814,10 @@ outside the defined scope.
 
 Once each task milestone is fully built, tested, and verified:
 1. Commit the changes to git as a series of self-contained, independent commits.
-2. Mark the task file as completed and ask the user if he would like to remove
-it.
-3. You may only remove the task .md file after the task has been completed IN
-FULL and user has confirmed the deletion.
+2. Move the task file to `.todo/completed/` (`git mv .todo/<name>.md
+.todo/completed/<name>.md`, creating that directory the first time). No
+deletion, no confirmation prompt — moving is not destructive, the file's history
+and content are preserved, and the user can always delete it later themselves.
+3. If the task was only partially completed, do not move it — update its
+frontmatter/body to record what is done vs. remaining and leave it in `.todo/`.
 
