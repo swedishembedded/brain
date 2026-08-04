@@ -11,13 +11,27 @@
 //! the same way every model calls the shared `model` trainer — the analogue of
 //! how `bench` is model-agnostic.
 //!
-//! Today it provides the [`FlowMatchEulerScheduler`] used by Z-Image and FLUX.2
-//! (rectified flow, `x_{t} = (1-σ)·x_0 + σ·ε`, Euler integration of the learned
-//! velocity). It is deliberately pure host math (no `gpu_core` dependency) so it
-//! is trivially unit-testable and reusable on CPU and GPU paths alike; the
+//! Two scheduler families live here, one per forward process:
+//!
+//! * [`scheduler`] — **flow matching / rectified flow** ([`FlowMatchEulerScheduler`],
+//!   Z-Image and FLUX.2): `x_σ = (1-σ)·x_0 + σ·ε`, the denoiser predicts a
+//!   velocity, and Euler integrates it.
+//! * [`discrete`] — the **DDPM variance-preserving chain** (SD / SDXL,
+//!   `crates/unet`): `x_t = sqrt(ᾱ_t)·x_0 + sqrt(1-ᾱ_t)·ε`, with
+//!   [`DdimScheduler`], [`EulerScheduler`], [`EulerAncestralScheduler`] and
+//!   [`DpmSolverPlusPlusScheduler`], each in the ε- and v-prediction
+//!   parameterisations.
+//!
+//! Both are deliberately pure host math (no `gpu_core` dependency) so they are
+//! trivially unit-testable and reusable on CPU and GPU paths alike; the
 //! device-touching pieces (velocity loss, CFG combine) land alongside as they
-//! are wired to the DiT.
+//! are wired to the denoiser.
 
+pub mod discrete;
 pub mod scheduler;
 
+pub use discrete::{
+    BetaSchedule, DdimScheduler, DiscreteConfig, DpmSolverPlusPlusScheduler,
+    EulerAncestralScheduler, EulerScheduler, Prediction, Sigmas, SolverType, TimestepSpacing,
+};
 pub use scheduler::{default_z_image_sigmas, FlowMatchConfig, FlowMatchEulerScheduler};
