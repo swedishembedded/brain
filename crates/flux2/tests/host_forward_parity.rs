@@ -8,6 +8,15 @@
 //! validates the host path's fused→split slicing, modulation fold, RoPE
 //! tables, and op order against the checked-in device graph. Pooled test
 //! device (`BRAIN_DEVICE=cpu` works).
+//!
+//! Dims are NOT free: the device leg binds each block's modulation slice at a
+//! `3 * hidden` float offset, and a storage binding must respect the 256-byte
+//! `min_storage_buffer_offset_alignment` (= 64 floats). `hidden: 16` put that
+//! offset at 48 floats / 192 bytes and the test failed with a wgpu validation
+//! error on every GPU — real dims are fine (klein-4B's `3 * 3072` is 36 864 B),
+//! so this was a test-config fault, not a model one. Keep `hidden` and
+//! `mlp_hidden` multiples of 64 floats, the same rule `tests/batch_parity.rs`
+//! documents and `Flux2Model::forward_batch` asserts.
 
 use flux2::modelgrad::{forward, make_flow_batch, Cfg, ModelWeights};
 
@@ -26,12 +35,12 @@ fn host_f32_forward_matches_device_forward() {
     let fc = flux2::Flux2Config {
         in_channels: 4,
         context_in_dim: 6,
-        hidden: 16,
+        hidden: 64,
         n_heads: 2,
         depth_double: 2,
         depth_single: 2,
-        mlp_ratio: 0.75, // mlp_hidden 12
-        axes_dim: [2, 2, 2, 2],
+        mlp_ratio: 1.0, // mlp_hidden 64
+        axes_dim: [8, 8, 8, 8],
         txt_len: 3,
         ..flux2::Flux2Config::klein_4b()
     };
