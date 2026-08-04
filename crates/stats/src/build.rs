@@ -141,7 +141,7 @@ impl StatsSource for ExecutorSource {
         // Accelerators come straight from the device budgets — one row per
         // budgeted device, so the set adapts to any machine (0..N GPUs/NPUs).
         snap.accelerators.extend(budgets.iter().map(accelerator_from_budget));
-        snap.models.extend(models_from(self.exec.manifests(), &placements));
+        snap.models.extend(models_from(&self.exec.manifests(), &placements));
         // In-flight work → `requests`, straight from the executor's live queue +
         // running set. `connections` stays empty: per-transport socket tracking is a
         // front-end concern, out of scope for this executor-backed source.

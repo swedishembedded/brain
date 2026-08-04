@@ -367,7 +367,8 @@ const DBUS_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5)
 
 fn run_apis(a: RunApis) {
     let executor = build_serving_executor(a.reserve_gb, a.models_dir);
-    let served: Vec<&str> = executor.manifests().iter().map(|m| m.model.as_str()).collect();
+    let manifests = executor.manifests();
+    let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
     eprintln!("brain serve: models: {}", served.join(", "));
 
     let http = a.anthropic.is_some() || a.openai.is_some() || a.openrouter.is_some();

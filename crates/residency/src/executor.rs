@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
@@ -121,6 +121,13 @@ pub struct Stats {
 /// errored; the lane already replied to the jobs, the manager must unwind).
 enum Msg {
     Submit(Box<Job>),
+    /// Register a newly-available model with the manager, so a `Submit`
+    /// enqueued after this one (FIFO on this same channel) can find it.
+    /// [`Executor::register`] updates the public manifest snapshot
+    /// synchronously before sending this, so `manifests()` reflects the
+    /// registration immediately even though scheduling eligibility lands
+    /// here, one hop later, on the dispatcher thread.
+    Register(Arc<dyn ResidentModel>),
     Built { key: InstanceKey, handle: InstanceHandle },
     Done { key: InstanceKey, device: Device, batch: usize, failed: bool },
     /// A stats query: the dispatcher (the sole owner of the [`ResidencyManager`])
@@ -150,7 +157,7 @@ struct RunReq {
 #[derive(Clone)]
 pub struct Executor {
     tx: Sender<Msg>,
-    manifests: Arc<Vec<Manifest>>,
+    manifests: Arc<RwLock<Vec<Manifest>>>,
     stats: Arc<Mutex<Stats>>,
 }
 
@@ -185,11 +192,26 @@ impl Executor {
             .spawn(move || dispatch_loop(rx, mgr, policy, lanes, disp_stats))
             .expect("spawn dispatcher");
 
-        Executor { tx, manifests: Arc::new(manifests), stats }
+        Executor { tx, manifests: Arc::new(RwLock::new(manifests)), stats }
     }
 
     pub fn submit(&self, job: Job) {
         let _ = self.tx.send(Msg::Submit(Box::new(job)));
+    }
+
+    /// Register a model discovered after `start` -- the seam a supplier
+    /// (e.g. a just-completed model-store fetch) uses to make a new model
+    /// servable without restarting the process. Updates the public
+    /// [`manifests`](Self::manifests) snapshot synchronously (so a caller
+    /// that just registered a model sees it immediately in a listing), then
+    /// hands the model to the dispatcher over the SAME channel `submit`
+    /// uses -- FIFO ordering guarantees a `Submit` enqueued after this call
+    /// returns sees the registration, so a caller may register-then-submit
+    /// with no extra synchronization.
+    pub fn register(&self, model: Arc<dyn ResidentModel>) {
+        let manifest = model.manifest();
+        self.manifests.write().unwrap().push(manifest);
+        let _ = self.tx.send(Msg::Register(model));
     }
 
     /// Submit and block for the result (the CLI's synchronous path).
@@ -232,8 +254,13 @@ impl Executor {
         rx.recv().unwrap_or_default()
     }
 
-    pub fn manifests(&self) -> &[Manifest] {
-        &self.manifests
+    /// A snapshot of every currently-registered manifest, in registration
+    /// order. Owned (not a reference) because the underlying set can grow
+    /// after `start` via [`register`](Self::register) -- a snapshot is the
+    /// only thing that can be handed out without holding the lock open
+    /// across the caller's iteration.
+    pub fn manifests(&self) -> Vec<Manifest> {
+        self.manifests.read().unwrap().clone()
     }
 }
 
@@ -285,6 +312,9 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
             }
             None => (job.reply)(Err(format!("no model '{}'", job.model))),
         },
+        Msg::Register(model) => {
+            mgr.register(model);
+        }
         Msg::Built { key, handle } => {
             mgr.adopt(&key, handle);
         }
@@ -923,5 +953,31 @@ mod tests {
             assert!(start.elapsed() < Duration::from_secs(5), "in-flight never drained: {:?}", exec.in_flight());
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn register_makes_a_model_immediately_listed_and_schedulable() {
+        let builds = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        // Starts with nothing registered -- a model discovered later (e.g. a
+        // just-completed model-store fetch) is the case this seam exists for.
+        let exec = Executor::start(vec![], budgets, Policy::default());
+        assert!(exec.manifests().is_empty());
+
+        let model: Arc<dyn ResidentModel> = Arc::new(Slow { name: "late".into(), vram: 1 * GB, ms: 5, builds: builds.clone() });
+        exec.register(model);
+
+        // The manifest snapshot reflects the registration synchronously --
+        // register() returns only after updating it, before the dispatcher
+        // even sees the message.
+        let names: Vec<String> = exec.manifests().into_iter().map(|m| m.model).collect();
+        assert_eq!(names, vec!["late".to_string()]);
+
+        // And it is schedulable: a Submit enqueued right after register()
+        // returns finds it, because both share one FIFO channel.
+        let elapsed = submit_wait(&exec, &["late"]);
+        assert!(elapsed < Duration::from_secs(2), "registered model never ran in time: {elapsed:?}");
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
     }
 }
