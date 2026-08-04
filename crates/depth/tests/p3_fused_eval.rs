@@ -23,6 +23,7 @@
 //!
 //! Run with `BRAIN_DEVICE=cpu` (test 3 needs a real GPU and skips without one).
 
+use data::rng::Lcg;
 use std::collections::HashMap;
 
 use gpu_core::Gpu;
@@ -30,13 +31,26 @@ use paramstore::ParamStore;
 use vision::blocks::{Act, Conv, ConvSpec};
 use vision::{ConvKernelIds, Ctx, Shape};
 
-fn lcg(s: &mut u64) -> f32 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-    ((*s >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-}
-fn rv(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed;
-    (0..n).map(|_| lcg(&mut s)).collect()
+/// Cross-implementation agreement, measured **against the tensor's own scale**:
+/// `max|a-b| / max|b|`.
+///
+/// NOT a per-element `|a-b| / (|b| + 1e-4)`. These outputs span four decades
+/// (|out| runs from ~1e-4 to ~9), and every element carries the same *absolute*
+/// round-off — the one produced by summing the largest terms in the
+/// accumulation, ~2.9e-6 here. A per-element ratio with a 1e-4 floor therefore
+/// reports 2e-4 for an element that merely happened to land near zero (a
+/// legitimate 2.1e-7 difference on a -9.1e-4 value) while allowing a 9.3e-4
+/// difference on an element of magnitude 9.3 — it is loose exactly where the
+/// error lives and tight exactly where it does not. That is why it failed the
+/// moment the test RNG stopped being one-sided and outputs started landing near
+/// zero; the arithmetic never changed.
+///
+/// Measured worst case on a P40 (wgpu) vs the CPU JIT, over every spec below:
+/// 3.4e-7. The bounds are set an order above that.
+fn scale_rel(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(a.len(), b.len());
+    let scale = b.iter().map(|v| v.abs()).fold(0.0f32, f32::max).max(1e-6);
+    a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max) / scale
 }
 
 /// depth's PIPELINES with the fused eval kernels removed — the unfused
@@ -64,11 +78,11 @@ fn params_for(spec: &ConvSpec, cin: u32, seed: u64) -> (Vec<(String, usize)>, Ha
         ("c.bn.run_var".into(), c),
     ];
     let mut init: HashMap<String, Vec<f32>> = HashMap::new();
-    init.insert("c.conv.weight".into(), rv(seed, wlen));
-    init.insert("c.bn.gamma".into(), rv(seed ^ 1, c).iter().map(|v| 1.0 + 0.2 * v).collect());
-    init.insert("c.bn.beta".into(), rv(seed ^ 2, c).iter().map(|v| 0.1 * v).collect());
-    init.insert("c.bn.run_mean".into(), rv(seed ^ 4, c).iter().map(|v| 0.3 * v).collect());
-    init.insert("c.bn.run_var".into(), rv(seed ^ 5, c).iter().map(|v| 1.0 + 0.5 * v.abs()).collect());
+    init.insert("c.conv.weight".into(), Lcg::new(seed).vec(wlen));
+    init.insert("c.bn.gamma".into(), Lcg::new(seed ^ 1).vec(c).iter().map(|v| 1.0 + 0.2 * v).collect());
+    init.insert("c.bn.beta".into(), Lcg::new(seed ^ 2).vec(c).iter().map(|v| 0.1 * v).collect());
+    init.insert("c.bn.run_mean".into(), Lcg::new(seed ^ 4).vec(c).iter().map(|v| 0.3 * v).collect());
+    init.insert("c.bn.run_var".into(), Lcg::new(seed ^ 5).vec(c).iter().map(|v| 1.0 + 0.5 * v.abs()).collect());
     (params, init)
 }
 
@@ -79,7 +93,7 @@ fn eval_forward(gpu: &Gpu, ids: &ConvKernelIds, in_shape: Shape, spec: ConvSpec,
     let ctx = Ctx::new(gpu, ids);
     let c = Conv::with_spec(&ctx, "c", in_shape, spec, false);
     c.set_eval(true);
-    let x = gpu.storage_init("x", &rv(seed ^ 3, in_shape.numel() as usize));
+    let x = gpu.storage_init("x", &Lcg::new(seed ^ 3).vec(in_shape.numel() as usize));
     c.forward(&ctx, &ps, &x);
     gpu.read(c.out(), c.out_shape.numel() as usize)
 }
@@ -133,12 +147,9 @@ fn fused_eval_matches_unfused_reference() {
         let f = eval_forward(&fused_gpu, depth::net::ids(), in_shape, spec, seed);
         let u = eval_forward(&plain_gpu, &plain_ids, in_shape, spec, seed);
         assert_eq!(f.len(), u.len());
-        let mut max_rel = 0.0f32;
-        for (a, b) in f.iter().zip(u.iter()) {
-            max_rel = max_rel.max((a - b).abs() / (b.abs() + 1e-4));
-        }
+        let max_rel = scale_rel(&f, &u);
         assert!(
-            max_rel < 1e-4,
+            max_rel < 5e-6,
             "fused vs unfused rel err {max_rel} for act {:?}",
             spec.act
         );
@@ -161,11 +172,8 @@ fn fused_eval_gpu_matches_cpu() {
         let seed = 29 + i as u64;
         let g = eval_forward(&gpu, depth::net::ids(), in_shape, spec, seed);
         let c = eval_forward(&cpu, depth::net::ids(), in_shape, spec, seed);
-        let mut max_rel = 0.0f32;
-        for (a, b) in g.iter().zip(c.iter()) {
-            max_rel = max_rel.max((a - b).abs() / (b.abs() + 1e-4));
-        }
-        assert!(max_rel < 1e-4, "GPU vs CPU fused rel err {max_rel} for act {:?}", spec.act);
+        let max_rel = scale_rel(&g, &c);
+        assert!(max_rel < 5e-6, "GPU vs CPU fused rel err {max_rel} for act {:?}", spec.act);
     }
 }
 
@@ -193,32 +201,27 @@ fn qarep_fused_eval_matches_unfused() {
             expect_fused,
             "fused-path selection (expect_fused={expect_fused})"
         );
-        let mut s = seed;
-        let mut rv = |n: usize, f: &dyn Fn(f32) -> f32| -> Vec<f32> {
-            (0..n)
-                .map(|_| {
-                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                    f(((s >> 33) as f32 / (1u64 << 31) as f32) - 1.0)
-                })
-                .collect()
+        let mut s = Lcg::new(seed);
+        let mut mapped = |n: usize, f: &dyn Fn(f32) -> f32| -> Vec<f32> {
+            (0..n).map(|_| f(s.signed())).collect()
         };
         let mut init: HashMap<String, Vec<f32>> = HashMap::new();
         for (name, numel) in blk.param_list() {
             let v = if name.ends_with(".1.weight") {
-                rv(numel, &|r| 1.0 + 0.2 * r) // BN gamma
+                mapped(numel, &|r| 1.0 + 0.2 * r) // BN gamma
             } else if name.ends_with(".1.bias") {
-                rv(numel, &|r| 0.1 * r) // BN beta
+                mapped(numel, &|r| 0.1 * r) // BN beta
             } else if name.ends_with("running_mean") {
-                rv(numel, &|r| 0.3 * r)
+                mapped(numel, &|r| 0.3 * r)
             } else if name.ends_with("running_var") {
-                rv(numel, &|r| 1.0 + 0.5 * r.abs())
+                mapped(numel, &|r| 1.0 + 0.5 * r.abs())
             } else {
-                rv(numel, &|r| 0.5 * r) // conv weights
+                mapped(numel, &|r| 0.5 * r) // conv weights
             };
             init.insert(name, v);
         }
         let ps = ParamStore::new(gpu, blk.param_list(), &init);
-        let x = gpu.storage_init("x", &rv(in_shape.numel() as usize, &|r| r));
+        let x = gpu.storage_init("x", &mapped(in_shape.numel() as usize, &|r| r));
         blk.forward(&ctx, &ps, &x);
         gpu.read(blk.out(), blk.out_shape.numel() as usize)
     };
@@ -235,12 +238,9 @@ fn qarep_fused_eval_matches_unfused() {
         let f = block_forward(&fused_gpu, depth::net::ids(), in_shape, cout, stride, seed, true);
         let u = block_forward(&plain_gpu, &plain_ids, in_shape, cout, stride, seed, false);
         assert_eq!(f.len(), u.len());
-        let mut max_rel = 0.0f32;
-        for (a, b) in f.iter().zip(u.iter()) {
-            max_rel = max_rel.max((a - b).abs() / (b.abs() + 1e-4));
-        }
+        let max_rel = scale_rel(&f, &u);
         assert!(
-            max_rel < 1e-3,
+            max_rel < 5e-6,
             "QARep fused vs unfused rel err {max_rel} (cout {cout}, stride {stride})"
         );
     }
@@ -281,12 +281,9 @@ fn grouped_reg_conv_gpu_matches_cpu() {
         let seed = 71 + i as u64;
         let g = eval_forward(&gpu, depth::net::ids(), in_shape, spec, seed);
         let c = eval_forward(&cpu, depth::net::ids(), in_shape, spec, seed);
-        let mut max_rel = 0.0f32;
-        for (a, b) in g.iter().zip(c.iter()) {
-            max_rel = max_rel.max((a - b).abs() / (b.abs() + 1e-4));
-        }
+        let max_rel = scale_rel(&g, &c);
         assert!(
-            max_rel < 1e-4,
+            max_rel < 5e-6,
             "GPU vs CPU grouped-reg rel err {max_rel} for groups {} dilation {}",
             spec.groups,
             spec.dilation
