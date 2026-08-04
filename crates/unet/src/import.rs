@@ -55,8 +55,26 @@ pub fn load(path: &str, cfg: &UNetConfig) -> Result<Tensors, String> {
 /// The pure remap, so a synthetic checkpoint (tests, `crate::init`) exercises
 /// exactly the code the real one does.
 pub fn remap(
-    mut raw: HashMap<String, (Vec<usize>, Vec<f32>)>,
+    raw: HashMap<String, (Vec<usize>, Vec<f32>)>,
     cfg: &UNetConfig,
+) -> Result<Tensors, String> {
+    remap_manifest("unet", raw, &cfg.tensor_manifest())
+}
+
+/// [`remap`] driven by an explicit manifest rather than a [`UNetConfig`].
+///
+/// **Shared with `crates/controlnet`**, which is why it is public and takes
+/// `who` for its error messages: a diffusers `ControlNetModel` checkpoint is a
+/// UNet-family checkpoint carrying the *same three fused leaves* (`attn1`'s
+/// q/k/v, `attn2`'s k/v, the GEGLU `ff.net.0.proj`) under the *same* module
+/// names, so a second copy of this loop is a second place those three fusions
+/// can be got wrong — and nothing would compare the copies. The
+/// ControlNet-only tensors (the conditioning embedder, the zero-convs) map 1:1
+/// and need no special case here.
+pub fn remap_manifest(
+    who: &str,
+    mut raw: HashMap<String, (Vec<usize>, Vec<f32>)>,
+    manifest: &[(String, Vec<usize>)],
 ) -> Result<Tensors, String> {
     let mut out: Tensors = HashMap::new();
     let mut used: HashSet<String> = HashSet::new();
@@ -66,18 +84,17 @@ pub fn remap(
                     name: &str|
      -> Result<(Vec<usize>, Vec<f32>), String> {
         used.insert(name.to_string());
-        raw.remove(name).ok_or_else(|| format!("unet import: missing source tensor {name}"))
+        raw.remove(name).ok_or_else(|| format!("{who} import: missing source tensor {name}"))
     };
 
     // Everything that maps 1:1 by name is driven off the manifest itself, so a
     // manifest edit cannot forget to import its new tensor.
-    let manifest = cfg.tensor_manifest();
     let fused: HashSet<&str> = ["qkv.weight", "kv.weight", "ff.hidden", "ff.gate", "ff.out"]
         .into_iter()
         .collect();
     let is_fused = |n: &str| fused.iter().any(|f| n.contains(f)) || n.contains(".to_out.");
 
-    for (name, shape) in &manifest {
+    for (name, shape) in manifest {
         if is_fused(name) {
             continue;
         }
@@ -87,7 +104,7 @@ pub fn remap(
     }
 
     // ---- the fused / split / renamed leaves -------------------------------
-    for (name, shape) in &manifest {
+    for (name, shape) in manifest {
         if !is_fused(name) {
             continue;
         }
@@ -127,7 +144,7 @@ pub fn remap(
                 // ROWS and the last I rows. Splitting the wrong way is a silent
                 // swap of the gate and the value.
                 let src = format!("{b}.ff.net.0.proj.{leaf}");
-                let (s, d) = raw.get(&src).ok_or_else(|| format!("unet import: missing {src}"))?.clone();
+                let (s, d) = raw.get(&src).ok_or_else(|| format!("{who} import: missing {src}"))?.clone();
                 used.insert(src.clone());
                 // The SOURCE is `[2I, C]` (or `[2I]`); check that before
                 // slicing, so a wrong `C` fails naming `ff.net.0.proj` rather
@@ -149,10 +166,10 @@ pub fn remap(
                 check_shape(name, &s, shape)?;
                 out.insert(name.clone(), (s, d));
             } else {
-                return Err(format!("unet import: unhandled fused name {name}"));
+                return Err(format!("{who} import: unhandled fused name {name}"));
             }
         } else {
-            return Err(format!("unet import: unhandled fused name {name}"));
+            return Err(format!("{who} import: unhandled fused name {name}"));
         }
     }
     // The GEGLU split reads one source twice; drop it once, after both halves.
@@ -164,13 +181,13 @@ pub fn remap(
         let mut extra: Vec<&String> = raw.keys().collect();
         extra.sort();
         return Err(format!(
-            "unet import: {} source tensors unused, e.g. {:?}",
+            "{who} import: {} source tensors unused, e.g. {:?}",
             extra.len(),
             &extra[..extra.len().min(8)]
         ));
     }
     if out.len() != manifest.len() {
-        return Err(format!("unet import: produced {} of {} tensors", out.len(), manifest.len()));
+        return Err(format!("{who} import: produced {} of {} tensors", out.len(), manifest.len()));
     }
     Ok(out)
 }
@@ -185,9 +202,9 @@ pub fn remap(
 /// `use_linear_projection: false`) as if it were SDXL's `[C, C]` linear, which
 /// is exactly the variant-checkpoint confusion this importer's two-way coverage
 /// exists to reject.
-fn check_shape(name: &str, got: &[usize], want: &[usize]) -> Result<(), String> {
+pub(crate) fn check_shape(name: &str, got: &[usize], want: &[usize]) -> Result<(), String> {
     if got != want {
-        return Err(format!("unet import: {name} shape {got:?}, expected {want:?}"));
+        return Err(format!("import: {name} shape {got:?}, expected {want:?}"));
     }
     Ok(())
 }

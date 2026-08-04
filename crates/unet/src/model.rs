@@ -106,9 +106,50 @@ const fn kernel_set() -> [(&'static str, &'static str); vae::blocks::NEXT_SLOT +
     k
 }
 
+/// One entry of the down path's skip stack: `(buffer, channels, h, w)`.
+pub type Skip = (DeviceBuffer, u32, u32, u32);
+
+/// Words needed by ONE materialised self-attention slab (`scores` and `probs`
+/// are the same size) on a device without workgroup reductions.
+///
+/// Sized over the levels that actually RECORD a transformer, not all of them.
+/// Taking the max over all levels is quadratically wrong at the finest one:
+/// SDXL's level 0 is `DownBlock2D`/`UpBlock2D` (no attention at all), yet its
+/// `T = H·W` is 16x the next level's, so including it sizes the pair at
+/// 5·(H·W)² instead of 10·(H·W/4)² — 8x too big, i.e. 10.7 GB of never-bound
+/// slab at a 128×128 latent.
+///
+/// `with_up = false` is the **ControlNet** shape: a trainable copy of the
+/// down + mid blocks has no up path at all, and `cfg.up_block_types` may be
+/// empty, so the up term must not even be indexed.
+pub fn attn_slab_words(cfg: &UNetConfig, h: u32, w: u32, with_up: bool) -> u64 {
+    let levels = cfg.levels();
+    let max_t = (h as u64) * (w as u64);
+    let mut words = 0u64;
+    for l in 0..levels {
+        // The mid block's transformer always runs, at the coarsest level.
+        let used = l == levels - 1
+            || cfg.down_block_types[l] == BlockKind::CrossAttn
+            || (with_up && cfg.up_block_types[levels - 1 - l] == BlockKind::CrossAttn);
+        if !used {
+            continue;
+        }
+        let t = max_t >> (2 * l);
+        words = words.max(cfg.attention_heads[l] as u64 * t * t);
+    }
+    words
+}
+
 /// Graph-recording state: the shared block builder plus the handful of things
 /// only the transformer half needs.
-struct Rec<'a> {
+///
+/// **Public because a ControlNet is a trainable copy of exactly these blocks.**
+/// `crates/controlnet` records `conditioning` → `conv_in` → [`Rec::down_path`]
+/// → [`Rec::mid_block`] with the same tensor prefixes and the same tap names as
+/// [`Unet::new`] does, so the two graphs are one implementation rather than a
+/// copy that can drift (AGENTS.md "one implementation"). Nothing here is
+/// SDXL-specific beyond `UNetConfig` itself.
+pub struct Rec<'a> {
     b: Builder<'a>,
     ln: block::LayerNormIds,
     flash: block::FlashIds,
@@ -118,16 +159,51 @@ struct Rec<'a> {
     /// path (see the module header).
     slab: Option<(DeviceBuffer, DeviceBuffer)>,
     t_enc: u32,
-    /// `silu(emb)` — computed once, because `ResnetBlock2D` applies the SAME
-    /// nonlinearity to the SAME `temb` in every one of the 17 resnets.
-    temb_act: DeviceBuffer,
+    /// `silu(emb)` — computed once by [`Rec::conditioning`], because
+    /// `ResnetBlock2D` applies the SAME nonlinearity to the SAME `temb` in
+    /// every one of the 17 resnets. `None` until then, so a resnet recorded
+    /// before the conditioning chain panics by name instead of binding a
+    /// placeholder buffer.
+    temb_act: Option<DeviceBuffer>,
 }
 
-impl Rec<'_> {
+impl<'a> Rec<'a> {
+    /// A recorder over `tensors` for a graph with `t_enc` text tokens.
+    ///
+    /// `slab_words` sizes the materialised self-attention slabs and is only
+    /// consulted on a device without workgroup reductions — see
+    /// [`attn_slab_words`].
+    pub fn new(
+        gpu: &'a Gpu,
+        cfg: &UNetConfig,
+        tensors: &'a Tensors,
+        t_enc: u32,
+        slab_words: u64,
+        taps: bool,
+    ) -> Rec<'a> {
+        let coop = gpu.caps().workgroup_reductions;
+        let slab =
+            if coop { None } else { Some((gpu.storage(slab_words.max(1)), gpu.storage(slab_words.max(1)))) };
+        let b = Builder::new(gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps);
+        let ln = block::LayerNormIds::resolve_fwd(gpu, K_LAYERNORM);
+        let flash = block::FlashIds { bidir: K_FLASH, split: Some(K_FLASH_SPLIT) };
+        Rec { b, ln, flash, coop, slab, t_enc, temb_act: None }
+    }
+
+    /// The underlying block builder — conv / GroupNorm / SiLU / add / upsample.
+    pub fn blocks(&mut self) -> &mut Builder<'a> {
+        &mut self.b
+    }
+
+    /// Consume the recorder, yielding the builder so the caller can `finish()`.
+    pub fn into_blocks(self) -> Builder<'a> {
+        self.b
+    }
+
     /// `y[m, n] = x[m, k] · W[n, k]ᵀ (+ b[n])`, the shape every diffusers
     /// `nn.Linear` has. `bias = false` covers `to_q/to_k/to_v`, which SDXL
     /// ships bias-free.
-    fn linear(&mut self, prefix: &str, m: u32, k: u32, n: u32, bias: bool, x: &DeviceBuffer) -> DeviceBuffer {
+    pub fn linear(&mut self, prefix: &str, m: u32, k: u32, n: u32, bias: bool, x: &DeviceBuffer) -> DeviceBuffer {
         let w = self.b.dev(&format!("{prefix}.weight"));
         let y = self.b.act((m as u64) * (n as u64));
         let (kind, threads) = block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG2, false);
@@ -141,7 +217,7 @@ impl Rec<'_> {
         y
     }
 
-    fn layernorm(&mut self, prefix: &str, rows: u32, d: u32, x: &DeviceBuffer) -> DeviceBuffer {
+    pub fn layernorm(&mut self, prefix: &str, rows: u32, d: u32, x: &DeviceBuffer) -> DeviceBuffer {
         let (gamma, beta) =
             (self.b.dev(&format!("{prefix}.weight")), self.b.dev(&format!("{prefix}.bias")));
         let y = self.b.act((rows as u64) * (d as u64));
@@ -153,9 +229,147 @@ impl Rec<'_> {
         y
     }
 
+    /// SDXL's conditioning chain: `time_embedding(sinusoid(t)) +
+    /// add_embedding([pooled ‖ time_ids sinusoids])`, then the single
+    /// `silu(emb)` every resnet consumes.
+    ///
+    /// Must be recorded before any [`Rec::resnet`]. Byte-for-byte the same
+    /// modules (and the same tap names) in `UNet2DConditionModel` and in
+    /// `ControlNetModel` — which is why it lives here and not in either.
+    pub fn conditioning(&mut self, cfg: &UNetConfig, temb_in: &DeviceBuffer, aug_in: &DeviceBuffer) {
+        let (c0, te) = (cfg.block_out_channels[0], cfg.time_embed_dim);
+        let t1 = self.linear("time_embedding.linear_1", 1, c0, te, true, temb_in);
+        self.b.tap("time_embedding.linear_1".into(), &t1, te);
+        let t1a = self.b.silu(te, &t1);
+        self.b.free(te as u64, t1);
+        let temb = self.linear("time_embedding.linear_2", 1, te, te, true, &t1a);
+        self.b.tap("time_embedding".into(), &temb, te);
+        self.b.free(te as u64, t1a);
+
+        let a1 = self.linear(
+            "add_embedding.linear_1",
+            1,
+            cfg.projection_class_embeddings_input_dim,
+            te,
+            true,
+            aug_in,
+        );
+        self.b.tap("add_embedding.linear_1".into(), &a1, te);
+        let a1a = self.b.silu(te, &a1);
+        self.b.free(te as u64, a1);
+        let aug = self.linear("add_embedding.linear_2", 1, te, te, true, &a1a);
+        self.b.tap("add_embedding".into(), &aug, te);
+        self.b.free(te as u64, a1a);
+
+        let emb = self.b.add(te, &temb, &aug);
+        self.b.free(te as u64, temb);
+        self.b.free(te as u64, aug);
+        // `ResnetBlock2D` applies `nonlinearity(temb)` before its own linear;
+        // the argument is identical in all 17 resnets, so it is hoisted here.
+        let act = self.b.silu(te, &emb);
+        self.b.free(te as u64, emb);
+        self.temb_act = Some(act);
+    }
+
+    /// The down path: `layers_per_block` resnets (each optionally followed by a
+    /// spatial transformer) per level, plus a stride-2 downsampler between
+    /// levels. Returns the running hidden state, the skip/residual stack in
+    /// PUSH order (`x` first), and the final spatial size.
+    ///
+    /// `x` is `conv_in`'s output — the ControlNet adds its conditioning
+    /// embedding to that *before* calling, which is the only difference between
+    /// the two down paths and the reason this takes it as an argument.
+    pub fn down_path(
+        &mut self,
+        cfg: &UNetConfig,
+        h: u32,
+        w: u32,
+        enc: &DeviceBuffer,
+        x: &DeviceBuffer,
+    ) -> (DeviceBuffer, Vec<Skip>, u32, u32) {
+        let levels = cfg.levels();
+        let c0 = cfg.block_out_channels[0];
+        let mut hh = x.clone();
+        let mut skips: Vec<Skip> = vec![(x.clone(), c0, h, w)];
+        let (mut ch, mut cw) = (h, w);
+        let mut prev = c0;
+        for i in 0..levels {
+            let cout = cfg.block_out_channels[i];
+            for j in 0..cfg.layers_per_block {
+                let cin = if j == 0 { prev } else { cout };
+                hh = self.resnet(
+                    &format!("down_blocks.{i}.resnets.{j}"),
+                    &format!("down{i}.resnet{j}"),
+                    cin,
+                    cout,
+                    ch,
+                    cw,
+                    cfg.time_embed_dim,
+                    &hh,
+                );
+                if cfg.down_block_types[i] == BlockKind::CrossAttn {
+                    hh = self.transformer(
+                        &format!("down_blocks.{i}.attentions.{j}"),
+                        &format!("down{i}.attn{j}"),
+                        cfg,
+                        i,
+                        ch,
+                        cw,
+                        enc,
+                        &hh,
+                    );
+                }
+                skips.push((hh.clone(), cout, ch, cw));
+            }
+            if i + 1 < levels {
+                // `Downsample2D(use_conv, padding=1)`: a symmetric-pad stride-2
+                // 3x3 conv. NOT the VAE's asymmetric `F.pad(x,(0,1,0,1))` +
+                // `padding=0` form that `Builder::conv_down` implements — the
+                // two differ by a half-pixel shift in every feature.
+                let next = self.b.conv_s(
+                    &format!("down_blocks.{i}.downsamplers.0.conv"),
+                    cout,
+                    cout,
+                    3,
+                    2,
+                    1,
+                    ch,
+                    cw,
+                    ch / 2,
+                    cw / 2,
+                    &hh,
+                );
+                ch /= 2;
+                cw /= 2;
+                hh = next;
+                self.b.tap(format!("down{i}.downsample0"), &hh, cout * ch * cw);
+                skips.push((hh.clone(), cout, ch, cw));
+            }
+            prev = cout;
+        }
+        (hh, skips, ch, cw)
+    }
+
+    /// `UNetMidBlock2DCrossAttn`: resnet → spatial transformer → resnet, at the
+    /// coarsest level.
+    pub fn mid_block(
+        &mut self,
+        cfg: &UNetConfig,
+        ch: u32,
+        cw: u32,
+        enc: &DeviceBuffer,
+        x: &DeviceBuffer,
+    ) -> DeviceBuffer {
+        let cmid = *cfg.block_out_channels.last().expect("levels >= 1");
+        let te = cfg.time_embed_dim;
+        let mut hh = self.resnet("mid_block.resnets.0", "mid.resnet0", cmid, cmid, ch, cw, te, x);
+        hh = self.transformer("mid_block.attentions.0", "mid.attn0", cfg, cfg.levels() - 1, ch, cw, enc, &hh);
+        self.resnet("mid_block.resnets.1", "mid.resnet1", cmid, cmid, ch, cw, te, &hh)
+    }
+
     /// `ResnetBlock2D` with `time_embedding_norm = "default"`.
     #[allow(clippy::too_many_arguments)]
-    fn resnet(
+    pub fn resnet(
         &mut self,
         prefix: &str,
         tap: &str,
@@ -184,7 +398,8 @@ impl Rec<'_> {
         self.b.free(nin, s1);
 
         // temb -> [1, cout], broadcast over H*W and added to every channel.
-        let temb_act = self.temb_act.clone();
+        let temb_act =
+            self.temb_act.clone().expect("Rec::conditioning must be recorded before any resnet");
         let tp = self.linear(&format!("{prefix}.time_emb_proj"), 1, temb_dim, cout, true, &temb_act);
         self.b.tap(format!("{tap}.time_emb_proj"), &tp, cout);
         let c1t = self.b.act(nout);
@@ -214,7 +429,7 @@ impl Rec<'_> {
 
     /// One `BasicTransformerBlock` over `[T, c]` rows.
     #[allow(clippy::too_many_arguments)]
-    fn transformer_block(
+    pub fn transformer_block(
         &mut self,
         prefix: &str,
         tap: &str,
@@ -291,7 +506,7 @@ impl Rec<'_> {
     }
 
     /// Multi-head self-attention over a fused `[T, 3c]` buffer.
-    fn self_attention(&mut self, heads: u32, hd: u32, c: u32, t: u32, qkv: &DeviceBuffer, ctx: &DeviceBuffer) {
+    pub fn self_attention(&mut self, heads: u32, hd: u32, c: u32, t: u32, qkv: &DeviceBuffer, ctx: &DeviceBuffer) {
         let g = self.b.gpu();
         let mut steps: Vec<Step> = Vec::new();
         if self.coop {
@@ -344,7 +559,7 @@ impl Rec<'_> {
 
     /// Cross-attention: `T` queries over `t_enc` text keys/values.
     #[allow(clippy::too_many_arguments)]
-    fn cross_attention(
+    pub fn cross_attention(
         &mut self,
         heads: u32,
         hd: u32,
@@ -381,7 +596,7 @@ impl Rec<'_> {
 
     /// `Transformer2DModel` (`use_linear_projection = true`).
     #[allow(clippy::too_many_arguments)]
-    fn transformer(
+    pub fn transformer(
         &mut self,
         prefix: &str,
         tap: &str,
@@ -440,7 +655,7 @@ impl Rec<'_> {
     }
 
     /// `torch.cat([hidden, skip], dim=1)` — the up path's skip join.
-    fn concat_channels(
+    pub fn concat_channels(
         &mut self,
         ca: u32,
         cb: u32,
@@ -467,6 +682,10 @@ pub struct Unet {
     enc_in: DeviceBuffer,
     temb_in: DeviceBuffer,
     aug_in: DeviceBuffer,
+    /// Control-residual inputs, one per injection point in `control_shapes`
+    /// order. Empty unless the graph was built by [`Unet::new_controlled`].
+    control_in: Vec<DeviceBuffer>,
+    control_shapes: Vec<(u32, u32, u32)>,
     out: DeviceBuffer,
     steps: Vec<Step>,
     taps: Vec<(String, DeviceBuffer, usize)>,
@@ -480,6 +699,32 @@ impl Unet {
     /// `false` (and `crates/unet/tests/parity.rs` gates the two against each
     /// other bit-for-bit).
     pub fn new(gpu: Gpu, cfg: UNetConfig, tensors: &Tensors, h: u32, w: u32, t_enc: u32, taps: bool) -> Unet {
+        Unet::new_controlled(gpu, cfg, tensors, h, w, t_enc, taps, false)
+    }
+
+    /// [`Unet::new`], plus (when `control`) a set of device inputs the graph
+    /// adds as **control residuals** — the consumer half of the ControlNet
+    /// seam. One buffer per entry of [`UNetConfig::skip_stack`], plus one for
+    /// the mid block, in that order; write them with [`Unet::run_with_control`]
+    /// and read their shapes from [`Unet::control_shapes`].
+    ///
+    /// The residual is added to the SKIP COPY, not to the running hidden state
+    /// — diffusers adds it to `down_block_res_samples`, which only the up path
+    /// consumes. Adding it to `hh` as well would double-count it through the
+    /// next down block, and every shape still matches, so nothing would fail.
+    /// The mid residual *is* added to the running state, because there the
+    /// residual list and the hidden state are the same tensor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_controlled(
+        gpu: Gpu,
+        cfg: UNetConfig,
+        tensors: &Tensors,
+        h: u32,
+        w: u32,
+        t_enc: u32,
+        taps: bool,
+        control: bool,
+    ) -> Unet {
         let levels = cfg.levels();
         let scale = 1u32 << (levels - 1);
         assert!(
@@ -488,142 +733,43 @@ impl Unet {
         );
         let c0 = cfg.block_out_channels[0];
         let te = cfg.time_embed_dim;
-        let coop = gpu.caps().workgroup_reductions;
 
         let sample_in = gpu.storage((cfg.in_channels * h * w) as u64);
         let enc_in = gpu.storage((t_enc * cfg.cross_attention_dim) as u64);
         let temb_in = gpu.storage(c0 as u64);
         let aug_in = gpu.storage(cfg.projection_class_embeddings_input_dim as u64);
 
-        // Slabs, sized for the worst level so every block shares one pair — but
-        // only over the levels that actually RECORD a transformer. Taking the
-        // max over all levels instead is quadratically wrong at the finest one:
-        // SDXL's level 0 is `DownBlock2D`/`UpBlock2D` (no attention at all), yet
-        // its `T = H·W` is 16x the next level's, so including it sized the pair
-        // at 5x(H·W)² instead of 10x(H·W/4)² — 8x too big, i.e. 10.7 GB of
-        // never-bound slab at a 128x128 latent on the non-cooperative path.
-        let max_t = (h * w) as u64;
-        let mut s_words = 0u64;
-        for l in 0..levels {
-            // The mid block's transformer always runs, at the coarsest level.
-            let used = l == levels - 1
-                || cfg.down_block_types[l] == BlockKind::CrossAttn
-                || cfg.up_block_types[levels - 1 - l] == BlockKind::CrossAttn;
-            if !used {
-                continue;
-            }
-            let t = max_t >> (2 * l);
-            s_words = s_words.max(cfg.attention_heads[l] as u64 * t * t);
-        }
-        let slab = if coop { None } else { Some((gpu.storage(s_words.max(1)), gpu.storage(s_words.max(1)))) };
+        // Slabs, sized for the worst level that actually records a transformer.
+        let s_words = attn_slab_words(&cfg, h, w, true);
+        let mut r = Rec::new(&gpu, &cfg, tensors, t_enc, s_words, taps);
 
-        let mut b = Builder::new(&gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps);
-        let ln = block::LayerNormIds::resolve_fwd(&gpu, K_LAYERNORM);
-        let flash = block::FlashIds { bidir: K_FLASH, split: Some(K_FLASH_SPLIT) };
-        // `temb_act` is filled below; a placeholder keeps `Rec` constructible.
-        let placeholder = temb_in.clone();
-        let mut r = Rec { b, ln, flash, coop, slab, t_enc, temb_act: placeholder };
-
-        // ---- conditioning ----------------------------------------------------
-        let t1 = r.linear("time_embedding.linear_1", 1, c0, te, true, &temb_in);
-        r.b.tap("time_embedding.linear_1".into(), &t1, te);
-        let t1a = r.b.silu(te, &t1);
-        r.b.free(te as u64, t1);
-        let temb = r.linear("time_embedding.linear_2", 1, te, te, true, &t1a);
-        r.b.tap("time_embedding".into(), &temb, te);
-        r.b.free(te as u64, t1a);
-
-        let a1 = r.linear(
-            "add_embedding.linear_1",
-            1,
-            cfg.projection_class_embeddings_input_dim,
-            te,
-            true,
-            &aug_in,
-        );
-        r.b.tap("add_embedding.linear_1".into(), &a1, te);
-        let a1a = r.b.silu(te, &a1);
-        r.b.free(te as u64, a1);
-        let aug = r.linear("add_embedding.linear_2", 1, te, te, true, &a1a);
-        r.b.tap("add_embedding".into(), &aug, te);
-        r.b.free(te as u64, a1a);
-
-        let emb = r.b.add(te, &temb, &aug);
-        r.b.free(te as u64, temb);
-        r.b.free(te as u64, aug);
-        // `ResnetBlock2D` applies `nonlinearity(temb)` before its own linear;
-        // the argument is identical in all 17 resnets, so it is hoisted here.
-        r.temb_act = r.b.silu(te, &emb);
-        r.b.free(te as u64, emb);
+        r.conditioning(&cfg, &temb_in, &aug_in);
 
         // ---- conv_in + down path ---------------------------------------------
-        let mut hh = r.b.conv("conv_in", cfg.in_channels, c0, 3, 1, h, w, &sample_in);
-        r.b.tap("conv_in".into(), &hh, c0 * h * w);
-        let mut skips: Vec<(DeviceBuffer, u32, u32, u32)> = vec![(hh.clone(), c0, h, w)];
-        let (mut ch, mut cw) = (h, w);
-        let mut prev = c0;
-        for i in 0..levels {
-            let cout = cfg.block_out_channels[i];
-            for j in 0..cfg.layers_per_block {
-                let cin = if j == 0 { prev } else { cout };
-                let next = r.resnet(
-                    &format!("down_blocks.{i}.resnets.{j}"),
-                    &format!("down{i}.resnet{j}"),
-                    cin,
-                    cout,
-                    ch,
-                    cw,
-                    te,
-                    &hh,
-                );
-                hh = next;
-                if cfg.down_block_types[i] == BlockKind::CrossAttn {
-                    let next = r.transformer(
-                        &format!("down_blocks.{i}.attentions.{j}"),
-                        &format!("down{i}.attn{j}"),
-                        &cfg,
-                        i,
-                        ch,
-                        cw,
-                        &enc_in,
-                        &hh,
-                    );
-                    hh = next;
-                }
-                skips.push((hh.clone(), cout, ch, cw));
-            }
-            if i + 1 < levels {
-                // `Downsample2D(use_conv, padding=1)`: a symmetric-pad stride-2
-                // 3x3 conv. NOT the VAE's asymmetric `F.pad(x,(0,1,0,1))` +
-                // `padding=0` form that `Builder::conv_down` implements — the
-                // two differ by a half-pixel shift in every feature.
-                let next = r.b.conv_s(
-                    &format!("down_blocks.{i}.downsamplers.0.conv"),
-                    cout,
-                    cout,
-                    3,
-                    2,
-                    1,
-                    ch,
-                    cw,
-                    ch / 2,
-                    cw / 2,
-                    &hh,
-                );
-                ch /= 2;
-                cw /= 2;
-                hh = next;
-                r.b.tap(format!("down{i}.downsample0"), &hh, cout * ch * cw);
-                skips.push((hh.clone(), cout, ch, cw));
-            }
-            prev = cout;
-        }
+        let cin = r.b.conv("conv_in", cfg.in_channels, c0, 3, 1, h, w, &sample_in);
+        r.b.tap("conv_in".into(), &cin, c0 * h * w);
+        let (mut hh, mut skips, mut ch, mut cw) = r.down_path(&cfg, h, w, &enc_in, &cin);
+        let mut prev = *cfg.block_out_channels.last().expect("levels >= 1");
 
         // ---- mid --------------------------------------------------------------
-        let cmid = *cfg.block_out_channels.last().expect("levels >= 1");
-        hh = r.resnet("mid_block.resnets.0", "mid.resnet0", cmid, cmid, ch, cw, te, &hh);
-        hh = r.transformer("mid_block.attentions.0", "mid.attn0", &cfg, levels - 1, ch, cw, &enc_in, &hh);
-        hh = r.resnet("mid_block.resnets.1", "mid.resnet1", cmid, cmid, ch, cw, te, &hh);
+        hh = r.mid_block(&cfg, ch, cw, &enc_in, &hh);
+
+        // ---- control residuals -------------------------------------------------
+        let control_shapes: Vec<(u32, u32, u32)> =
+            skips.iter().map(|&(_, c, sh, sw)| (c, sh, sw)).chain([(prev, ch, cw)]).collect();
+        let control_in: Vec<DeviceBuffer> = if control {
+            control_shapes.iter().map(|&(c, sh, sw)| gpu.storage((c * sh * sw) as u64)).collect()
+        } else {
+            Vec::new()
+        };
+        if control {
+            for (k, (buf, c, sh, sw)) in skips.iter_mut().enumerate() {
+                let n = *c * *sh * *sw;
+                *buf = r.b.add(n, buf, &control_in[k]);
+            }
+            let n = prev * ch * cw;
+            hh = r.b.add(n, &hh, &control_in[skips.len()]);
+        }
 
         // ---- up path -----------------------------------------------------------
         for i in 0..levels {
@@ -681,9 +827,67 @@ impl Unet {
         let out = r.b.conv("conv_out", c0, cfg.out_channels, 3, 1, ch, cw, &sa);
         r.b.tap("conv_out".into(), &out, cfg.out_channels * ch * cw);
 
-        b = r.b;
-        let (steps, taps) = b.finish();
-        Unet { gpu, cfg, hw: (h, w), t_enc, sample_in, enc_in, temb_in, aug_in, out, steps, taps }
+        let (steps, taps) = r.into_blocks().finish();
+        Unet {
+            gpu,
+            cfg,
+            hw: (h, w),
+            t_enc,
+            sample_in,
+            enc_in,
+            temb_in,
+            aug_in,
+            control_in,
+            control_shapes,
+            out,
+            steps,
+            taps,
+        }
+    }
+
+    /// `(channels, h, w)` of every control-residual injection point, in the
+    /// order [`Unet::run_with_control`] expects: the whole
+    /// [`UNetConfig::skip_stack`] (finest first), then the mid block.
+    /// Available whether or not the graph was built with `control`.
+    pub fn control_shapes(&self) -> &[(u32, u32, u32)] {
+        &self.control_shapes
+    }
+
+    /// Does the RECORDED graph read control residuals (i.e. was it built by
+    /// [`Unet::new_controlled`] with `control = true`)? [`Unet::control_shapes`]
+    /// describes the points either way, so this is the question a caller has to
+    /// ask before [`Unet::run_with_control`].
+    pub fn accepts_control(&self) -> bool {
+        !self.control_in.is_empty()
+    }
+
+    /// [`Unet::run`] with a ControlNet's residuals added at every injection
+    /// point. Requires a graph built by [`Unet::new_controlled`] with
+    /// `control = true`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_with_control(
+        &self,
+        sample: &[f32],
+        timestep: f32,
+        enc: &[f32],
+        pooled: &[f32],
+        time_ids: &[f32],
+        control: &[Vec<f32>],
+    ) -> Vec<f32> {
+        assert!(!self.control_in.is_empty(), "unet: graph was not built with control inputs");
+        assert_eq!(
+            control.len(),
+            self.control_in.len(),
+            "unet: {} control residuals, graph has {} injection points",
+            control.len(),
+            self.control_in.len()
+        );
+        for (k, (buf, (c, h, w))) in self.control_in.iter().zip(&self.control_shapes).enumerate() {
+            let want = (c * h * w) as usize;
+            assert_eq!(control[k].len(), want, "unet: control residual {k} is {} values, want {want}", control[k].len());
+            self.gpu.write_f32(buf, &control[k]);
+        }
+        self.run(sample, timestep, enc, pooled, time_ids)
     }
 
     pub fn config(&self) -> &UNetConfig {
@@ -729,10 +933,10 @@ impl Unet {
             c.flip_sin_to_cos,
             c.freq_shift,
         );
-        write(&self.gpu, &self.sample_in, sample);
-        write(&self.gpu, &self.enc_in, enc);
-        write(&self.gpu, &self.temb_in, &temb);
-        write(&self.gpu, &self.aug_in, &aug);
+        self.gpu.write_f32(&self.sample_in, sample);
+        self.gpu.write_f32(&self.enc_in, enc);
+        self.gpu.write_f32(&self.temb_in, &temb);
+        self.gpu.write_f32(&self.aug_in, &aug);
         self.gpu.submit(&[], &self.steps);
         self.gpu.read(&self.out, (c.out_channels * h * w) as usize)
     }
@@ -746,11 +950,6 @@ impl Unet {
     pub fn tap_names(&self) -> Vec<&str> {
         self.taps.iter().map(|(n, _, _)| n.as_str()).collect()
     }
-}
-
-fn write(gpu: &Gpu, buf: &DeviceBuffer, data: &[f32]) {
-    let bits: Vec<u32> = data.iter().map(|v| v.to_bits()).collect();
-    gpu.write(buf, &bits);
 }
 
 #[cfg(test)]
