@@ -492,27 +492,17 @@ impl Flux2Model {
         self.n_max
     }
 
-    /// `timestep_embedding(t·1000, 256)`: 128 freqs, **cos first**, then sin.
-    fn timestep_embedding(t: f32) -> Vec<f32> {
-        let half = 128usize;
-        let x = t * 1000.0;
-        let mut emb = vec![0.0f32; 256];
-        for i in 0..half {
-            let freq = (-(10000.0f64.ln()) * i as f64 / half as f64).exp();
-            let arg = x as f64 * freq;
-            emb[i] = arg.cos() as f32;
-            emb[half + i] = arg.sin() as f32;
-        }
-        emb
-    }
-
     /// Host conditioning for ONE timestep: the timestep MLP + the three global
     /// modulation linears, folded into the six (gamma, beta) LN pairs and five
     /// gate vectors. Pure — the device write is [`Self::upload_modulation`].
     fn modulation_for(&self, t: f32) -> ModVals {
         let d = self.cfg.hidden;
         use model::hostmath::{matvec_par, silu_slice};
-        let emb = Self::timestep_embedding(t);
+        // `time_factor = 1000` is the FLUX pipeline convention, applied here;
+        // the embedding itself is `hostmath::timestep_embedding` (cos block
+        // first, angles in f64) — shared with `flux1`, byte-for-byte the
+        // local copy this replaced.
+        let emb = model::hostmath::timestep_embedding(t * 1000.0, 256, 10000.0);
         let h = silu_slice(&matvec_par(&self.time_in_a, &emb, d, 256));
         let vec_ = matvec_par(&self.time_in_b, &h, d, d);
         let sv = silu_slice(&vec_);
@@ -584,12 +574,31 @@ impl Flux2Model {
         K_MATMUL_REG3
     }
 
-    fn mm(&self, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
+    /// The fp32 GEMM tier this model dispatches, for `model::block::gemm_variant`
+    /// — the rule shared with flux1.
+    fn gemm_tier(&self) -> model::block::GemmVariants {
         if self.fast {
-            self.gpu.step(self.mm_kernel(), &[x, w, o], &[m, k, n], m.div_ceil(128) * n.div_ceil(128) * 256)
+            // `gemv: None` deliberately, and this is MEASURED, not assumed: the
+            // smallest M this model dispatches on the real klein-4B forward is
+            // **512** (fp32: M in {512, 1024, 1536, 2048, 2560}; int8: {512,
+            // 1024, 1536}), so not one GEMM would ever reach the GEMV kernel's
+            // `m <= 32` arm. That is a consequence of the design in this file's
+            // header — FLUX.2's modulation is GLOBAL and folded on the host, so
+            // unlike flux1 (whose per-block modulation issues 77 `m = 1`
+            // mat-vecs per forward) there is no skinny-M work on the device at
+            // all. Registering the kernels would add two dead pipelines, and an
+            // M-dependent kernel choice would put a hazard under
+            // `tests/batch_parity.rs`, whose bit-identity claim rests on every
+            // dispatch being independent of M.
+            model::block::GemmVariants::Fast { gemv: None, tiled: self.mm_kernel() }
         } else {
-            self.gpu.step(K_MATMUL, &[x, w, o], &[m, k, n], m * n)
+            model::block::GemmVariants::Reference(K_MATMUL)
         }
+    }
+
+    fn mm(&self, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
+        let (kind, threads) = model::block::gemm_variant(self.gemm_tier(), m, n);
+        self.gpu.step(kind, &[x, w, o], &[m, k, n], threads)
     }
 
     /// Sliced matmul: read rows `xr0..xr0+m` of `x`, write rows `or0..or0+m` of
@@ -601,11 +610,8 @@ impl Flux2Model {
     fn mm_rows_at(&self, x: &DeviceBuffer, w: &DeviceBuffer, o: &DeviceBuffer, xr0: u32, or0: u32, m: u32, k: u32, n: u32) -> Step {
         let xo = (xr0 as u64 * k as u64, m as u64 * k as u64);
         let oo = (or0 as u64 * n as u64, m as u64 * n as u64);
-        if self.fast {
-            self.gpu.step_sliced(self.mm_kernel(), &[x, w, o], &[xo, (0, 0), oo], &[m, k, n], m.div_ceil(128) * n.div_ceil(128) * 256)
-        } else {
-            self.gpu.step_sliced(K_MATMUL, &[x, w, o], &[xo, (0, 0), oo], &[m, k, n], m * n)
-        }
+        let (kind, threads) = model::block::gemm_variant(self.gemm_tier(), m, n);
+        self.gpu.step_sliced(kind, &[x, w, o], &[xo, (0, 0), oo], &[m, k, n], threads)
     }
 
     /// Int8 only: which packed-activation scratch holds a K-wide activation.
@@ -628,13 +634,13 @@ impl Flux2Model {
     /// that activation (n1 → q/k/v and w1/w3, ctx → wo, hs → w2).
     fn quant_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, r0: u32, r1: u32, k: u32) {
         let Some(i8s) = self.i8scr.as_ref() else { return };
-        let m = r1 - r0;
-        let xo = (r0 as u64 * k as u64, m as u64 * k as u64);
-        let so = (r0 as u64, m as u64);
-        let qo = (r0 as u64 * (k as u64 / 4), m as u64 * (k as u64 / 4));
-        let xq = self.xq_for(k);
-        s.push(self.gpu.step_sliced(K_MAXABS, &[x, &i8s.sx], &[xo, so], &[m, k], m));
-        s.push(self.gpu.step_sliced(K_QUANT, &[x, &i8s.sx, xq], &[xo, so, qo], &[m, k], m * k / 4));
+        s.extend(model::int8::quant_rows_steps(
+            &self.gpu,
+            model::int8::QuantRows { kernels: [K_MAXABS, K_QUANT], x, sx: &i8s.sx, xq: self.xq_for(k) },
+            r0,
+            r1,
+            k,
+        ));
     }
 
     /// Int8 DP4A matmul over pre-quantized rows `xr0..xr0+m` of the K-matched
@@ -647,12 +653,16 @@ impl Flux2Model {
         let xo = (xr0 as u64 * kg, m as u64 * kg);
         let so = (xr0 as u64, m as u64);
         let oo = (or0 as u64 * n as u64, m as u64 * n as u64);
+        // Same selection rule and the same measured `gemv: None` as the fp32
+        // tier — see `gemm_tier`.
+        let tier = model::block::GemmVariants::Fast { gemv: None, tiled: K_MATMUL_I8 };
+        let (kind, threads) = model::block::gemm_variant(tier, m, n);
         self.gpu.step_sliced(
-            K_MATMUL_I8,
+            kind,
             &[self.xq_for(k), wq, &i8s.sx, sw, o],
             &[xo, (0, 0), so, (0, 0), oo],
             &[m, k / 4, n],
-            m.div_ceil(128) * n.div_ceil(128) * 256,
+            threads,
         )
     }
 
@@ -702,6 +712,9 @@ impl Flux2Model {
 
     /// Gated residual over rows `r0..r1`: `y = x + gate[b] ⊙ h` (one condition
     /// group — the whole range belongs to sample `b`).
+    // Arity is the `gate_row` kernel's binding list + its row window, like the
+    // other dispatch helpers in this file.
+    #[allow(clippy::too_many_arguments)]
     fn gate_rows(&self, x: &DeviceBuffer, gi: usize, h: &DeviceBuffer, y: &DeviceBuffer, b: u32, r0: u32, r1: u32) -> Step {
         let d = self.cfg.hidden as u32;
         let m = r1 - r0;
@@ -744,30 +757,15 @@ impl Flux2Model {
     /// `backend_api::select` (`Op::RmsNorm`), which now prefers it at EVERY
     /// row count on a device with workgroup barriers.
     fn qknorm_rows(&self, x: &DeviceBuffer, scale: &DeviceBuffer, o: &DeviceBuffer, r0: u32, r1: u32) -> Step {
-        use gpu_core::select::{Dtype, KernelSelector, Op, OpShape};
         let d = self.cfg.hidden as u32;
         let hd = self.cfg.head_dim() as u32;
         let nh = self.cfg.n_heads as u32;
         let m = r1 - r0;
         let off = (r0 as u64 * d as u64, m as u64 * d as u64);
         let rows = m * nh;
-        let shape = OpShape { m: rows, n: hd, k: 0, dtype: Dtype::F32 };
-        match gpu_core::select::DefaultSelector.select(Op::RmsNorm, shape, &self.gpu.caps()) {
-            gpu_core::select::KernelVariant::WorkgroupPerOutput => self.gpu.step_sliced(
-                K_RMSNORM_ROWS,
-                &[x, scale, o],
-                &[off, (0, 0), off],
-                &[hd, rows, f(EPS)],
-                rows * 64,
-            ),
-            _ => self.gpu.step_sliced(
-                K_RMSNORM,
-                &[x, scale, o],
-                &[off, (0, 0), off],
-                &[hd, rows, f(EPS)],
-                rows,
-            ),
-        }
+        let (kind, threads) =
+            model::block::rms_variant(&self.gpu, K_RMSNORM, Some(K_RMSNORM_ROWS), rows, hd);
+        self.gpu.step_sliced(kind, &[x, scale, o], &[off, (0, 0), off], &[hd, rows, f(EPS)], threads)
     }
 
     /// Joint attention over `bsz` samples of `n` rows each. Both the flash and

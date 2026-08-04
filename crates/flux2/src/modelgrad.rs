@@ -139,8 +139,11 @@ pub struct ModelGrads<T> {
 
 const TDIM: usize = 256; // timestep sinusoid width
 
-/// `timestep_embedding(t·1000, 256)`: 128 freqs, **cos first** — mirrors
-/// `Flux2Model::timestep_embedding` (angles in f64, like the device path).
+/// `timestep_embedding(t·1000, 256)`: 128 freqs, **cos first** — the generic-`T`
+/// twin of `model::hostmath::timestep_embedding` (angles in f64, like the device
+/// path). It is a deliberate second implementation: AGENTS.md exception 1 — a
+/// gradcheck oracle that shared code with the thing it checks would prove
+/// nothing, and this one instantiates at `f64` for the FD check.
 pub fn timestep_embedding<T: Fp>(t: f64) -> Vec<T> {
     let half = TDIM / 2;
     let x = t * 1000.0;
