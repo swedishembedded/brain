@@ -20,8 +20,15 @@ brain-pid.workspace = true
 brain-seq2seq.workspace = true
 brain-autoencoder.workspace = true
 brain-flux2.workspace = true
+brain-sam2.workspace = true
+brain-vqgan.workspace = true
+brain-vae.workspace = true
+brain-gpu-core.workspace = true
+# `check_arcface` (src/facenet.rs) — the ArcFace/IResNet training graph.
+brain-facenet.workspace = true
+# `check_clip` (src/clip.rs) — the CLIP text-tower training graph.
+brain-clip.workspace = true
 brain-data.workspace = true
 
 [dev-dependencies]
-brain-gpu-core.workspace = true
 brain-kernels.workspace = true

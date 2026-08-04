@@ -60,6 +60,14 @@ pub fn variant_name(base: &str, params: &[(&str, u32)]) -> String {
     s
 }
 
+/// One specialised kernel: `(variant name, specialised WGSL source)`, both
+/// leaked to `'static` so a pipeline can hold them for the process lifetime.
+pub type Variant = (&'static str, &'static str);
+
+/// Interning key: the base source's address (kernel sources are `'static`
+/// consts, so the pointer is a stable identity) plus the variant name.
+type VariantKey = (usize, String);
+
 /// [`specialize`], interned: the same `(source, params)` always returns the
 /// same `'static` `(name, source)` pair. Specialisations are few (a tuner
 /// probes a handful of tile sizes), so leaking them is the working set, not a
@@ -68,9 +76,8 @@ pub fn interned(
     base: &'static str,
     src: &'static str,
     params: &[(&str, u32)],
-) -> Result<(&'static str, &'static str), String> {
-    static CACHE: OnceLock<Mutex<HashMap<(usize, String), (&'static str, &'static str)>>> =
-        OnceLock::new();
+) -> Result<Variant, String> {
+    static CACHE: OnceLock<Mutex<HashMap<VariantKey, Variant>>> = OnceLock::new();
     let name = variant_name(base, params);
     let key = (src.as_ptr() as usize, name.clone());
     let mut cache = CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
@@ -78,7 +85,7 @@ pub fn interned(
         return Ok(hit);
     }
     let specialised = specialize(src, params)?;
-    let entry: (&'static str, &'static str) =
+    let entry: Variant =
         (Box::leak(name.into_boxed_str()), Box::leak(specialised.into_boxed_str()));
     cache.insert(key, entry);
     Ok(entry)

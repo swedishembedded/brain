@@ -13,6 +13,21 @@
 
 use data::rng::Rng;
 
+/// Per-model gradient-check entry points for the imaging workstream. Each module
+/// documents, at its head, exactly which parameters its check covers and which
+/// are frozen — read that before trusting a green result.
+pub mod sam2;
+pub use sam2::check_sam2;
+
+pub mod facenet;
+pub use facenet::check_arcface;
+
+pub mod vqgan;
+pub use vqgan::check_vqgan;
+
+pub mod clip;
+pub use clip::check_clip;
+
 /// A model the checker can drive: a fixed batch must already be set.
 pub trait CheckModel {
     fn param_names(&self) -> Vec<String>;

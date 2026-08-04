@@ -587,6 +587,7 @@ name = "brain-clip"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
@@ -834,7 +835,9 @@ name = "brain-gradcheck"
 version = "0.1.0"
 dependencies = [
  "brain-autoencoder",
+ "brain-clip",
  "brain-data",
+ "brain-facenet",
  "brain-flux2",
  "brain-glm",
  "brain-gpt",
@@ -845,7 +848,10 @@ dependencies = [
  "brain-moe",
  "brain-pid",
  "brain-qwen",
+ "brain-sam2",
  "brain-seq2seq",
+ "brain-vae",
+ "brain-vqgan",
 ]
 
 [[package]]
@@ -1287,6 +1293,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-gpu-core",
  "brain-kernels",
+ "brain-model",
  "brain-testutil",
  "serde_json",
 ]

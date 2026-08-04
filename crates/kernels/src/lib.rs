@@ -40,6 +40,10 @@ pub const ADD_CHAN_INPLACE: &str = include_str!("../wgsl/add_chan_inplace.wgsl")
 pub const ADD_INDEX_MASK: &str = include_str!("../wgsl/add_index_mask.wgsl");
 /// `wgsl/add_inplace.wgsl`
 pub const ADD_INPLACE: &str = include_str!("../wgsl/add_inplace.wgsl");
+/// `wgsl/arcface_margin.wgsl`
+pub const ARCFACE_MARGIN: &str = include_str!("../wgsl/arcface_margin.wgsl");
+/// `wgsl/arcface_margin_bwd.wgsl`
+pub const ARCFACE_MARGIN_BWD: &str = include_str!("../wgsl/arcface_margin_bwd.wgsl");
 /// `wgsl/argmax_final.wgsl`
 pub const ARGMAX_FINAL: &str = include_str!("../wgsl/argmax_final.wgsl");
 /// `wgsl/argmax_part.wgsl`
@@ -290,6 +294,10 @@ pub const FILM_ROW_DX: &str = include_str!("../wgsl/film_row_dx.wgsl");
 pub const FLASH_ATTN_BIDIR: &str = include_str!("../wgsl/flash_attn_bidir.wgsl");
 /// `wgsl/flash_attn_bidir_split.wgsl`
 pub const FLASH_ATTN_BIDIR_SPLIT: &str = include_str!("../wgsl/flash_attn_bidir_split.wgsl");
+/// `wgsl/focal_dice_grad.wgsl`
+pub const FOCAL_DICE_GRAD: &str = include_str!("../wgsl/focal_dice_grad.wgsl");
+/// `wgsl/focal_dice_stats.wgsl`
+pub const FOCAL_DICE_STATS: &str = include_str!("../wgsl/focal_dice_stats.wgsl");
 /// `wgsl/gate_row.wgsl`
 pub const GATE_ROW: &str = include_str!("../wgsl/gate_row.wgsl");
 /// `wgsl/gate_row_dg.wgsl`
@@ -526,6 +534,8 @@ pub const PRELU_BWD_WG: &str = include_str!("../wgsl/prelu_bwd_wg.wgsl");
 pub const QUANT_PACK: &str = include_str!("../wgsl/quant_pack.wgsl");
 /// `wgsl/quick_gelu.wgsl`
 pub const QUICK_GELU: &str = include_str!("../wgsl/quick_gelu.wgsl");
+/// `wgsl/quick_gelu_bwd.wgsl`
+pub const QUICK_GELU_BWD: &str = include_str!("../wgsl/quick_gelu_bwd.wgsl");
 /// `wgsl/region_copy.wgsl`
 pub const REGION_COPY: &str = include_str!("../wgsl/region_copy.wgsl");
 /// `wgsl/rel_shift.wgsl`
@@ -715,6 +725,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("add_chan_inplace", ADD_CHAN_INPLACE),
     ("add_index_mask", ADD_INDEX_MASK),
     ("add_inplace", ADD_INPLACE),
+    ("arcface_margin", ARCFACE_MARGIN),
+    ("arcface_margin_bwd", ARCFACE_MARGIN_BWD),
     ("argmax_final", ARGMAX_FINAL),
     ("argmax_part", ARGMAX_PART),
     ("argmax_row", ARGMAX_ROW),
@@ -840,6 +852,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("film_row_dx", FILM_ROW_DX),
     ("flash_attn_bidir", FLASH_ATTN_BIDIR),
     ("flash_attn_bidir_split", FLASH_ATTN_BIDIR_SPLIT),
+    ("focal_dice_grad", FOCAL_DICE_GRAD),
+    ("focal_dice_stats", FOCAL_DICE_STATS),
     ("gate_row", GATE_ROW),
     ("gate_row_dg", GATE_ROW_DG),
     ("gate_row_dh", GATE_ROW_DH),
@@ -958,6 +972,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("prelu_bwd_wg", PRELU_BWD_WG),
     ("quant_pack", QUANT_PACK),
     ("quick_gelu", QUICK_GELU),
+    ("quick_gelu_bwd", QUICK_GELU_BWD),
     ("region_copy", REGION_COPY),
     ("rel_shift", REL_SHIFT),
     ("rel_shift_bwd", REL_SHIFT_BWD),
