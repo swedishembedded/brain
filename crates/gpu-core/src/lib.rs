@@ -530,6 +530,19 @@ mod native_facade {
         pub fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
             self.inner.write(buf, data)
         }
+        /// [`Self::write`] for a host `f32` slice — the bit reinterpretation the
+        /// backend's `u32` upload wants.
+        ///
+        /// The inverse of [`Self::read`], which already returns `Vec<f32>`; this
+        /// side was missing, so every model that uploads host floats re-derived
+        /// `data.iter().map(f32::to_bits).collect()` at its call site. Two of
+        /// those had congealed into byte-identical private `fn write` helpers
+        /// (`unet::model`, `controlnet::model`) — AGENTS.md's "one
+        /// implementation" rule, and the reason this lives on the device facade
+        /// that owns the `u32` half rather than in any model crate.
+        pub fn write_f32(&self, buf: &DeviceBuffer, data: &[f32]) {
+            self.write(buf, bytemuck::cast_slice(data))
+        }
         pub fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
             self.inner.read(buf, n)
         }
@@ -690,6 +703,11 @@ mod wasm_facade {
         }
         pub fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
             Backend::write(&self.inner, buf, data)
+        }
+        /// [`Self::write`] for a host `f32` slice. Kept in step with the native
+        /// facade so a model is written once against one `Gpu` surface.
+        pub fn write_f32(&self, buf: &DeviceBuffer, data: &[f32]) {
+            self.write(buf, bytemuck::cast_slice(data))
         }
         pub fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
             crate::assert_no_output_alias(bufs);

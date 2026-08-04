@@ -865,6 +865,7 @@ dependencies = [
  "brain-backend-vulkan",
  "brain-backend-wgpu",
  "brain-kernels",
+ "bytemuck",
  "libc",
 ]
 

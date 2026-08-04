@@ -14,6 +14,10 @@ brain-backend-api.workspace = true
 # Pure string data (no deps, no GPU): the WGSL for the drop-in fast kernels the
 # `upgrade` table swaps in for a model's registered one.
 brain-kernels.workspace = true
+# `Gpu::write_f32`'s zero-copy `&[f32] -> &[u32]` reinterpretation. The three
+# spellings this replaced were two allocating `to_bits().collect()` copies and
+# one `cast_slice`; the shared one keeps the cheapest of them.
+bytemuck.workspace = true
 
 # Native builds carry all three eager backends; the active one is chosen at
 # runtime per `Gpu` instance (registry lookup by name). wasm keeps only the
