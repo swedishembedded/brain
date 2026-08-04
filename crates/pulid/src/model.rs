@@ -104,39 +104,18 @@ pub fn joint_kernels() -> &'static [(&'static str, &'static str)] {
 /// with.
 #[derive(Clone, Copy, Debug)]
 pub struct Ki {
-    ln: usize,
-    ln_rows: usize,
-    mm: usize,
-    mm_reg: usize,
-    mm_gemv: usize,
-    bias: usize,
+    /// The shared row-range emitter's kernels — hoisted to `model::rowemit` so
+    /// the second IP-Adapter-lineage model (InstantID's `Resampler`) does not
+    /// carry a second copy of this dispatch logic.
+    row: model::rowemit::RowKernels,
+    // PuLID-only, dispatched directly rather than through the emitter.
     leaky: usize,
-    gelu: usize,
-    xscores: usize,
-    xsoftmax: usize,
-    xapply: usize,
     add2: usize,
     axpy: usize,
-    copy: usize,
+    gelu: usize,
 }
 
 impl Ki {
-    /// The fp32 GEMM tier to dispatch on this device, for
-    /// [`model::block::gemm_variant`] — the ONE rule `flux1`/`flux2` share.
-    ///
-    /// Gated on the queried `DeviceCaps::workgroup_reductions` exactly as
-    /// `flux1::Flux1Model::gemm_tier` is: both fast kernels cooperate across a
-    /// workgroup, so a device without that capability keeps the naive
-    /// one-thread-per-output reference (which `backend-cpu` routes to its AVX2
-    /// GEMM anyway).
-    fn tier(&self, g: &Gpu) -> model::block::GemmVariants {
-        if g.caps().workgroup_reductions {
-            model::block::GemmVariants::Fast { gemv: Some(self.mm_gemv), tiled: self.mm_reg }
-        } else {
-            model::block::GemmVariants::Reference(self.mm)
-        }
-    }
-
     /// Resolve against the pipeline list the [`Gpu`] was constructed with.
     /// Panics naming the kernel if one is absent — a wrong index is silently
     /// wrong output, not a crash (`docs/kernel-checklist.md`).
@@ -148,162 +127,26 @@ impl Ki {
                 .unwrap_or_else(|| panic!("pulid: the Gpu was built without the `{k}` kernel"))
         };
         Ki {
-            ln: f("layernorm"),
-            ln_rows: f("layernorm_rows"),
-            mm: f("matmul"),
-            mm_reg: f("matmul_reg3"),
-            mm_gemv: f("matmul_gemv"),
-            bias: f("bias_add"),
+            row: model::rowemit::RowKernels::resolve("pulid", names),
             leaky: f("leaky_relu"),
-            gelu: f("gelu_erf"),
-            xscores: f("attn_scores_cross"),
-            xsoftmax: f("attn_softmax_cross"),
-            xapply: f("attn_apply_cross"),
             add2: f("add2"),
             axpy: f("axpy"),
-            copy: f("region_copy"),
+            gelu: f("gelu_erf"),
         }
     }
 }
 
-fn f(x: f32) -> u32 {
-    x.to_bits()
-}
+use model::rowemit::{fbits as f, rows};
 
-/// A `[.., d]` row range as a `(float offset, float length)` binding slice.
-fn rows(r0: usize, n: usize, d: usize) -> (u64, u64) {
-    ((r0 * d) as u64, (n * d) as u64)
-}
-
-/// Shared dispatch emitters. `IdFormer` and `PulidCa` both build linear /
-/// LayerNorm / cross-attention chains over row ranges, so these live once.
-struct Emit<'a> {
-    g: &'a Gpu,
-    k: Ki,
-    eps: f32,
-    tier: model::block::GemmVariants,
-}
-
-impl<'a> Emit<'a> {
-    fn new(g: &'a Gpu, k: Ki, eps: f32) -> Emit<'a> {
-        Emit { g, k, eps, tier: k.tier(g) }
-    }
-}
-
-impl Emit<'_> {
-    /// `y[yr0..yr0+m] = LayerNorm(x[xr0..xr0+m]) * gamma + beta`.
-    #[allow(clippy::too_many_arguments)]
-    fn ln(
-        &self,
-        s: &mut Vec<Step>,
-        x: &DeviceBuffer,
-        xr0: usize,
-        gamma: &DeviceBuffer,
-        beta: &DeviceBuffer,
-        y: &DeviceBuffer,
-        yr0: usize,
-        m: usize,
-        d: usize,
-    ) {
-        let (kind, threads) =
-            model::block::ln_variant(self.g, self.k.ln, Some(self.k.ln_rows), m as u32, d as u32);
-        s.push(self.g.step_sliced(
-            kind,
-            &[x, gamma, beta, y],
-            &[rows(xr0, m, d), (0, 0), (0, 0), rows(yr0, m, d)],
-            &[d as u32, m as u32, f(self.eps)],
-            threads,
-        ));
-    }
-
-    /// `y[yr0..] = x[xr0..xr0+m] @ Wᵀ` (+ `bias` when given), `W` = `[n, k]`.
-    #[allow(clippy::too_many_arguments)]
-    fn linear(
-        &self,
-        s: &mut Vec<Step>,
-        x: &DeviceBuffer,
-        xr0: usize,
-        w: &DeviceBuffer,
-        bias: Option<&DeviceBuffer>,
-        y: &DeviceBuffer,
-        yr0: usize,
-        m: usize,
-        k: usize,
-        n: usize,
-    ) {
-        let (kind, threads) = model::block::gemm_variant(self.tier, m as u32, n as u32);
-        s.push(self.g.step_sliced(
-            kind,
-            &[x, w, y],
-            &[rows(xr0, m, k), (0, 0), rows(yr0, m, n)],
-            &[m as u32, k as u32, n as u32],
-            threads,
-        ));
-        if let Some(b) = bias {
-            s.push(self.g.step_sliced(
-                self.k.bias,
-                &[y, b],
-                &[rows(yr0, m, n), (0, 0)],
-                &[m as u32, n as u32],
-                (m * n) as u32,
-            ));
-        }
-    }
-
-    /// `dst[r1..r1+m] = src[r0..r0+m]`, both `[.., d]`. `region_copy` copies at
-    /// equal indices *within the two bound views*, so two slices at different
-    /// row offsets are exactly a row-range copy.
-    #[allow(clippy::too_many_arguments)]
-    fn copy_rows(&self, s: &mut Vec<Step>, src: &DeviceBuffer, r0: usize, dst: &DeviceBuffer, r1: usize, m: usize, d: usize) {
-        s.push(self.g.step_sliced(
-            self.k.copy,
-            &[src, dst],
-            &[rows(r0, m, d), rows(r1, m, d)],
-            &[m as u32, d as u32, d as u32, 0],
-            (m * d) as u32,
-        ));
-    }
-
-    /// Cross-attention: `[t_dec, inner]` queries at row `q_r0` against a fused
-    /// `[t_enc, 2·inner]` kv buffer, context out as `[t_dec, inner]`.
-    #[allow(clippy::too_many_arguments)]
-    fn cross_attn(
-        &self,
-        s: &mut Vec<Step>,
-        q: &DeviceBuffer,
-        q_r0: usize,
-        kv: &DeviceBuffer,
-        scores: &DeviceBuffer,
-        probs: &DeviceBuffer,
-        ctx: &DeviceBuffer,
-        heads: usize,
-        head_dim: usize,
-        t_dec: usize,
-        t_enc: usize,
-    ) {
-        let inner = (heads * head_dim) as u32;
-        let (h, hd, td, te) = (heads as u32, head_dim as u32, t_dec as u32, t_enc as u32);
-        // `attn_scores_cross` Params:
-        //   [bsz, n_heads, t_dec, t_enc, head_dim, q_stride, kv_stride, q_off, k_off]
-        s.push(self.g.step_sliced(
-            self.k.xscores,
-            &[q, kv, scores],
-            &[rows(q_r0, t_dec, inner as usize), (0, 0), (0, 0)],
-            &[1, h, td, te, hd, inner, 2 * inner, 0, 0],
-            h * td * te,
-        ));
-        // `attn_softmax_cross` Params: [bsz, n_heads, t_dec, t_enc]
-        s.push(self.g.step(self.k.xsoftmax, &[scores, probs], &[1, h, td, te], h * td));
-        // `attn_apply_cross` Params:
-        //   [bsz, n_heads, t_dec, t_enc, head_dim, kv_stride, v_off, d_model]
-        s.push(self.g.step(
-            self.k.xapply,
-            &[probs, kv, ctx],
-            &[1, h, td, te, hd, 2 * inner, inner, inner],
-            h * td * hd,
-        ));
-    }
-}
+/// The shared row-range emitter, now `model::rowemit::RowEmit`.
+///
+/// It used to live here. It was hoisted because InstantID's `Resampler` is the
+/// same `PerceiverAttention` from the same IP-Adapter lineage — `cat(x, latents)`
+/// as one buffer written at row offsets, `to_q` over the latent rows, `to_kv`
+/// over the whole thing — and a second copy of the row arithmetic and the
+/// fused-kv strides is exactly the drift AGENTS.md's one-implementation rule
+/// targets.
+type Emit<'a> = model::rowemit::RowEmit<'a>;
 
 /// A named stage snapshot: the buffer it lives in, its float offset and
 /// length, and the step index just after the step that wrote it.
@@ -444,11 +287,11 @@ impl IdFormer {
         let (lin0w, lin0b) = (self.w(&format!("{pfx}.lin0.weight")), self.w(&format!("{pfx}.lin0.bias")));
         e.linear(s, x, 0, lin0w, Some(lin0b), a, 0, m, k0, d);
         e.ln(s, a, 0, self.w(&format!("{pfx}.ln0.weight")), self.w(&format!("{pfx}.ln0.bias")), b, 0, m, d);
-        s.push(self.gpu.step(e.k.leaky, &[b, a], &[(m * d) as u32, f(self.cfg.leaky_slope)], (m * d) as u32));
+        s.push(self.gpu.step(self.ki.leaky, &[b, a], &[(m * d) as u32, f(self.cfg.leaky_slope)], (m * d) as u32));
         let (lin1w, lin1b) = (self.w(&format!("{pfx}.lin1.weight")), self.w(&format!("{pfx}.lin1.bias")));
         e.linear(s, a, 0, lin1w, Some(lin1b), b, 0, m, d, d);
         e.ln(s, b, 0, self.w(&format!("{pfx}.ln1.weight")), self.w(&format!("{pfx}.ln1.bias")), a, 0, m, d);
-        s.push(self.gpu.step(e.k.leaky, &[a, b], &[(m * d) as u32, f(self.cfg.leaky_slope)], (m * d) as u32));
+        s.push(self.gpu.step(self.ki.leaky, &[a, b], &[(m * d) as u32, f(self.cfg.leaky_slope)], (m * d) as u32));
         // The last linear writes DIRECTLY into the concatenation target. For
         // `id_map` that is one row of `num_id_token * dim` at row 0 of `ctxf`,
         // which IS the reference's `reshape(-1, num_id_token, dim)`.
@@ -458,7 +301,7 @@ impl IdFormer {
 
     fn build_steps(&self) -> (Vec<Step>, Vec<Tap>) {
         let c = &self.cfg;
-        let e = Emit::new(&self.gpu, self.ki, c.eps);
+        let e = Emit::new(&self.gpu, self.ki.row, c.eps);
         let (d, nid, lr, cr, kr) = (c.dim, c.num_id_token, c.latent_rows(), c.ctx_rows(), c.kv_rows());
         let mut s: Vec<Step> = Vec::new();
         let mut taps: Vec<Tap> = Vec::new();
@@ -655,7 +498,7 @@ impl PulidCa {
         assert!(n_img <= self.max_img, "pulid: {n_img} image rows > max_img {}", self.max_img);
         self.last_n_img.set(n_img);
         let c = &self.cfg;
-        let e = Emit::new(&self.gpu, self.ki, c.eps);
+        let e = Emit::new(&self.gpu, self.ki.row, c.eps);
         let (dm, kvd, inner, nq) = (c.ca_dim, c.output_dim, c.ca_inner_dim(), c.num_queries);
         let b = format!("ca.{k}");
         let w = |n: &str| self.ps.w(&format!("{b}.{n}"));

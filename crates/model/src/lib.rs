@@ -18,6 +18,7 @@ use std::collections::HashMap;
 pub mod block;
 pub mod collective;
 pub mod paged;
+pub mod rowemit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod distributed;
 pub mod grid;
