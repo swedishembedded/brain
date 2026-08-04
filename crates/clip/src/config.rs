@@ -159,13 +159,20 @@ pub struct EvaVisionConfig {
     pub pt_seq_len: u32,
     pub rope_theta: f32,
     /// OpenAI CLIP normalization constants (for the preprocessing seam; the
-    /// parity test replays the reference's `pixel_values` directly).
+    /// parity test replays the reference's `pixel_values` directly). Written
+    /// verbatim as the reference states them — see [`EvaVisionConfig::eva02_l336`].
     pub mean: [f32; 3],
     pub std: [f32; 3],
 }
 
 impl EvaVisionConfig {
     /// `EVA02-CLIP-L-14-336` — the checkpoint PuLID ships against.
+    // `mean`/`std` are OpenAI CLIP's published constants, transcribed digit for
+    // digit from the reference preprocessing config. Two of them carry one more
+    // decimal than f32 can represent, which clippy flags; truncating would make
+    // them stop matching the source they were copied from for no numerical gain,
+    // so the literals stay and the lint is silenced HERE only.
+    #[allow(clippy::excessive_precision)]
     pub fn eva02_l336() -> EvaVisionConfig {
         EvaVisionConfig {
             image_size: 336,

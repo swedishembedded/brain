@@ -150,10 +150,15 @@ fn text_slot(name: &str) -> Option<TextSlot> {
     Some(TextSlot::Direct(format!("blocks.{n}.{slot}")))
 }
 
+/// The three q/k/v thirds of one fused attention projection, in `TextSlot::Qkv`
+/// slot order, as they arrive from the checkpoint: `(shape, data)` each, `None`
+/// until that third is seen.
+type QkvThirds = [Option<(Vec<usize>, Vec<f32>)>; 3];
+
 /// Import an HF `CLIPTextModel` / `CLIPTextModelWithProjection` checkpoint.
 pub fn import_text(tensors: Vec<StTensor>, cfg: &ClipTextConfig) -> Result<Tensors, String> {
     let mut map: Tensors = HashMap::new();
-    let mut qkv: HashMap<String, [Option<(Vec<usize>, Vec<f32>)>; 3]> = HashMap::new();
+    let mut qkv: HashMap<String, QkvThirds> = HashMap::new();
 
     for t in tensors {
         match text_slot(&t.name) {
@@ -217,9 +222,9 @@ fn permute_head_rows(src: &[f32], heads: usize, hd: usize, row: usize, perm: &[u
     debug_assert_eq!(src.len(), heads * hd * row);
     let mut out = vec![0.0f32; src.len()];
     for h in 0..heads {
-        for d in 0..hd {
+        for (d, &pd) in perm.iter().enumerate() {
             let dst0 = (h * hd + d) * row;
-            let src0 = (h * hd + perm[d]) * row;
+            let src0 = (h * hd + pd) * row;
             out[dst0..dst0 + row].copy_from_slice(&src[src0..src0 + row]);
         }
     }

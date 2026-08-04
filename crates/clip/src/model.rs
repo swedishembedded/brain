@@ -79,10 +79,35 @@ const T_APPLY: usize = 9;
 const T_ADD2: usize = 10;
 const T_QUICK_GELU: usize = 11;
 const T_GELU_ERF: usize = 12;
+// `layernorm_rows` is 13 — resolved BY NAME, never indexed directly.
+// ---- backward (appended, so every index above is unchanged) ----
+const T_LN_STATS: usize = 14;
+const T_LAYERNORM_DX: usize = 16;
+const T_LN_DGAMMA: usize = 18;
+const T_LN_DBETA: usize = 19;
+const T_MATMUL_DX: usize = 20;
+const T_MATMUL_DW: usize = 21;
+const T_MATMUL_DX_REG: usize = 22;
+const T_MATMUL_DW_REG: usize = 23;
+const T_BIAS_GRAD: usize = 24;
+const T_ATTN_DSCORES: usize = 25;
+const T_ATTN_DV: usize = 26;
+const T_ATTN_DQ: usize = 27;
+const T_ATTN_DK: usize = 28;
+const T_QUICK_GELU_BWD: usize = 29;
+const T_GELU_ERF_BWD: usize = 30;
+const T_POS_BWD: usize = 31;
+const T_EMB_BWD: usize = 32;
 
-/// Text-tower kernels. `layernorm_rows` is registered but never indexed
-/// directly: `block::LayerNormIds::resolve_fwd` picks it up BY NAME wherever
-/// the device supports workgroup reductions (2.3-9.1x on a P40).
+/// Text-tower kernels — forward AND backward, one list, so an inference build
+/// and a training build share a device handle (`gpu_core::testgpu::dev` keys on
+/// the slice address). `layernorm_rows` / `ln_stats_rows` / `layernorm_dx_rows`
+/// are registered but never indexed directly: `block::LayerNormIds::resolve`
+/// picks them up BY NAME wherever the device supports workgroup reductions
+/// (2.3-9.1x on a P40).
+///
+/// The backward half is appended, never interleaved: every `T_*` index above is
+/// a position in this list and reordering it is silently wrong.
 pub const TEXT_PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
     ("region_copy", kernels::REGION_COPY),
@@ -98,6 +123,25 @@ pub const TEXT_PIPELINES: &[(&str, &str)] = &[
     ("quick_gelu", kernels::QUICK_GELU),
     ("gelu_erf", kernels::GELU_ERF),
     ("layernorm_rows", kernels::LAYERNORM_ROWS),
+    ("ln_stats", kernels::LN_STATS),
+    ("ln_stats_rows", kernels::LN_STATS_ROWS),
+    ("layernorm_dx", kernels::LAYERNORM_DX),
+    ("layernorm_dx_rows", kernels::LAYERNORM_DX_ROWS),
+    ("layernorm_dgamma", kernels::LAYERNORM_DGAMMA),
+    ("layernorm_dbeta", kernels::LAYERNORM_DBETA),
+    ("matmul_dx", kernels::MATMUL_DX),
+    ("matmul_dw", kernels::MATMUL_DW),
+    ("matmul_dx_reg", kernels::MATMUL_DX_REG),
+    ("matmul_dw_reg", kernels::MATMUL_DW_REG),
+    ("bias_grad", kernels::BIAS_GRAD),
+    ("attn_bwd_dscores", kernels::ATTN_BWD_DSCORES),
+    ("attn_bwd_dv", kernels::ATTN_BWD_DV),
+    ("attn_bwd_dq", kernels::ATTN_BWD_DQ),
+    ("attn_bwd_dk", kernels::ATTN_BWD_DK),
+    ("quick_gelu_bwd", kernels::QUICK_GELU_BWD),
+    ("gelu_erf_bwd", kernels::GELU_ERF_BWD),
+    ("pos_bwd", kernels::POS_BWD),
+    ("emb_bwd", kernels::EMB_BWD),
 ];
 
 /// One text layer's SSA activations.
@@ -117,6 +161,47 @@ pub struct TextLayerBufs {
     pub mlp_out: DeviceBuffer,
 }
 
+/// Reverse-pass buffers + the recorded backward step list. Allocated ONLY by
+/// [`ClipText::new_train_on`]; an inference build carries `None` and is
+/// byte-for-byte the graph the parity ladder gates.
+///
+/// Every entry is a *gradient*; the activations the backward reads are the
+/// forward's own SSA buffers ([`TextLayerBufs`], `x`, `hidden`, `pooled`) —
+/// nothing is recomputed and nothing is aliased. The per-layer scratch is
+/// reused across layers because the reverse walk holds exactly one layer's
+/// intermediate grads live at a time; only `dx` is per layer, mirroring `x`.
+struct TextBwd {
+    /// `dx[i]` is the grad of `x[i]`: `dx[0]` = embedding-output grad,
+    /// `dx[i+1]` = grad of layer `i`'s output.
+    dx: Vec<DeviceBuffer>,
+    /// Objective grad on `hidden` (`final_layer_norm` output), uploaded by the
+    /// caller; `d_hidden` starts as a copy of it and then accumulates the
+    /// EOS-pooling scatter.
+    seed_hidden: DeviceBuffer,
+    /// Objective grad on the tower OUTPUT — `text_embeds` when the config has a
+    /// projection, else `pooled`.
+    seed_out: DeviceBuffer,
+    d_hidden: DeviceBuffer,
+    d_pooled: DeviceBuffer,
+    /// Grad of the post-attention residual `res` (the MLP branch's input).
+    d_res: DeviceBuffer,
+    /// Grad flowing out of a normalized branch, before the residual re-join.
+    d_branch: DeviceBuffer,
+    d_tmp: DeviceBuffer,
+    d_ctx: DeviceBuffer,
+    d_qkv: DeviceBuffer,
+    d_scores: DeviceBuffer,
+    /// Grad of the POST-activation MLP hidden (`h_act`).
+    d_h_act: DeviceBuffer,
+    /// Grad of the PRE-activation MLP hidden (`h`).
+    d_h: DeviceBuffer,
+    /// Per-row LayerNorm mean / inverse-std, recomputed per use (they are
+    /// `[rows]` — cheaper to recompute than to cache, as `model::vit` does).
+    mean: DeviceBuffer,
+    inv: DeviceBuffer,
+    steps: Vec<Step>,
+}
+
 pub struct ClipText {
     pub gpu: Gpu,
     pub cfg: ClipTextConfig,
@@ -129,17 +214,20 @@ pub struct ClipText {
     /// `x[0]` = embeddings output, `x[i+1]` = output of layer `i`.
     x: Vec<DeviceBuffer>,
     layers: Vec<TextLayerBufs>,
-    /// Transient score slab (pre-softmax) — the one non-SSA buffer here; the
-    /// backward recomputes scores from `qkv` rather than caching two slabs.
+    /// Transient score slab (pre-softmax) — the one non-SSA buffer here, and it
+    /// is sound: the backward reads `probs` (cached per layer), never `scores`.
     scores: DeviceBuffer,
     hidden: DeviceBuffer,
     pooled: DeviceBuffer,
     text_embeds: Option<DeviceBuffer>,
     steps: Vec<Step>,
+    bwd: Option<TextBwd>,
 }
 
 impl ClipText {
     /// Build on an existing device (tests pass `gpu_core::testgpu::dev`).
+    /// **Inference**: every parameter `Frozen`, no gradient buffers, no reverse
+    /// step list — the graph the forward-parity ladder gates.
     pub fn new_on(
         gpu: Gpu,
         cfg: ClipTextConfig,
@@ -147,11 +235,52 @@ impl ClipText {
         t: u32,
         init: &HashMap<String, Vec<f32>>,
     ) -> ClipText {
+        ClipText::build(gpu, cfg, b, t, init, false)
+    }
+
+    /// Build a **trainable** tower on an existing device: every parameter
+    /// `Role::Trainable` (grad + AdamW moments) plus the reverse step list.
+    ///
+    /// The forward is the SAME `build_steps` an inference build records — CLIP's
+    /// text tower is already SSA (`ln1`/`qkv`/`probs`/`ctx`/`res`/`ln2`/`h`/
+    /// `h_act` each own a buffer), so there is no `fwd` vs `fwd_cached` split to
+    /// make here and no parity risk from the training path existing.
+    pub fn new_train_on(
+        gpu: Gpu,
+        cfg: ClipTextConfig,
+        b: u32,
+        t: u32,
+        init: &HashMap<String, Vec<f32>>,
+    ) -> ClipText {
+        ClipText::build(gpu, cfg, b, t, init, true)
+    }
+
+    /// Trainable tower on its own device handle (`Gpu::new`), mirroring
+    /// `Gpt::new` / `Seq2Seq::new`. Prefer [`ClipText::new_train_on`] in a
+    /// process that already holds a device.
+    pub fn new_train(
+        cfg: ClipTextConfig,
+        b: u32,
+        t: u32,
+        init: &HashMap<String, Vec<f32>>,
+    ) -> ClipText {
+        ClipText::new_train_on(Gpu::new(TEXT_PIPELINES), cfg, b, t, init)
+    }
+
+    fn build(
+        gpu: Gpu,
+        cfg: ClipTextConfig,
+        b: u32,
+        t: u32,
+        init: &HashMap<String, Vec<f32>>,
+        train: bool,
+    ) -> ClipText {
         assert!(t <= cfg.max_positions, "seq len {t} > max_positions {}", cfg.max_positions);
+        let role = if train { Role::Trainable } else { Role::Frozen };
         let roles: Vec<(String, usize, Role)> = cfg
             .tensor_manifest()
             .into_iter()
-            .map(|(n, s)| (n, s.iter().product::<usize>(), Role::Frozen))
+            .map(|(n, s)| (n, s.iter().product::<usize>(), role))
             .collect();
         let ps = ParamStore::new_with_roles(&gpu, roles, init);
 
@@ -196,8 +325,33 @@ impl ClipText {
             b,
             t,
             steps: Vec::new(),
+            bwd: None,
         };
         m.steps = m.build_steps();
+        if train {
+            let g = &m.gpu;
+            let out_w = m.cfg.projection.unwrap_or(m.cfg.hidden) as u64;
+            m.bwd = Some(TextBwd {
+                dx: (0..=m.cfg.layers).map(|_| g.storage(n * h)).collect(),
+                seed_hidden: g.storage(n * h),
+                seed_out: g.storage(b as u64 * out_w),
+                d_hidden: g.storage(n * h),
+                d_pooled: g.storage(b as u64 * h),
+                d_res: g.storage(n * h),
+                d_branch: g.storage(n * h),
+                d_tmp: g.storage(n * h),
+                d_ctx: g.storage(n * h),
+                d_qkv: g.storage(n * 3 * h),
+                d_scores: g.storage(slab),
+                d_h_act: g.storage(n * i),
+                d_h: g.storage(n * i),
+                mean: g.storage(n),
+                inv: g.storage(n),
+                steps: Vec::new(),
+            });
+            let steps = m.build_bwd_steps();
+            m.bwd.as_mut().expect("bwd allocated").steps = steps;
+        }
         m
     }
 
@@ -209,6 +363,15 @@ impl ClipText {
         block::pick_gemm(m as usize, n as usize, T_MATMUL, T_MATMUL_REG2, false)
     }
 
+    /// Backward-GEMM kernel + dispatch threads, picked on the OUTPUT dims — the
+    /// same policy `block::pick_gemm` implements for the forward (the tiled
+    /// `matmul_{dx,dw}_reg` share `matmul_reg2`'s 128x128 / 256-thread shape and
+    /// are bit-compatible with the naive kernels). `matmul_dw` writes `[n,k]`
+    /// and `matmul_dx` writes `[m,k]`, so each passes its own output dims.
+    fn bwd_gemm(&self, rows: u32, cols: u32, naive: usize, reg: usize) -> (usize, u32) {
+        block::pick_gemm(rows as usize, cols as usize, naive, reg, false)
+    }
+
     fn build_steps(&self) -> Vec<Step> {
         let g = &self.gpu;
         let c = &self.cfg;
@@ -217,7 +380,10 @@ impl ClipText {
         let h = c.hidden;
         let inter = c.intermediate;
         let hd = c.head_dim();
-        let ln = block::LayerNormIds::resolve_fwd(g, T_LAYERNORM);
+        // Same handle the backward uses; for the forward only `layernorm` /
+        // `layernorm_rows` are consulted, so this is identical to the
+        // `resolve_fwd` an inference-only tower would build.
+        let ln = block::LayerNormIds::resolve(g, T_LAYERNORM, T_LN_STATS, T_LAYERNORM_DX);
         let act = match c.act {
             TextAct::QuickGelu => T_QUICK_GELU,
             TextAct::GeluErf => T_GELU_ERF,
@@ -306,6 +472,192 @@ impl ClipText {
             s.push(g.step(mk, &[&self.pooled, self.w("text_projection.weight"), te], &[b, h, p], mt));
         }
         s
+    }
+
+    /// The reverse pass, recorded once at build time — the exact adjoint of
+    /// [`ClipText::build_steps`], walked bottom-up.
+    ///
+    /// Seeds. The objective is supplied as two output gradients (see
+    /// [`ClipText::backward`]): `seed_hidden` on `final_layer_norm(x_L)` and
+    /// `seed_out` on the tower output (`text_embeds` if the config projects,
+    /// else `pooled`). That covers both consumers CLIP actually has — SDXL's
+    /// sequence conditioning and its pooled/projected embedding — and makes the
+    /// EOS gather's adjoint a *second* contribution into `d_hidden`, which is
+    /// the accumulation the gradcheck has to see.
+    ///
+    /// Every kernel here is gather-based (one invocation per element of the
+    /// output it writes) and there are no atomics: `emb_bwd` / `pos_bwd` loop
+    /// the source rows inside the invocation that owns the destination row.
+    ///
+    /// Clears. NOTHING in this list needs a pre-zeroed transient: `matmul_dx`
+    /// runs with `accumulate = 0`, `layernorm_dx` / `add2` / the activation
+    /// backwards / the four `attn_bwd_*` kernels all ASSIGN, and `region_copy`
+    /// seeds `d_hidden` before `emb_bwd` adds to it. The PARAMETER grads do
+    /// accumulate (`matmul_dw`, `bias_grad`, `layernorm_dgamma/dbeta`,
+    /// `pos_bwd`, `emb_bwd`) — they are cleared exactly once per step by
+    /// `ParamStore::zero_grads`, so they must NOT appear in a submit's clear
+    /// list or every earlier contribution is dropped.
+    fn build_bwd_steps(&self) -> Vec<Step> {
+        let g = &self.gpu;
+        let c = &self.cfg;
+        let bw = self.bwd.as_ref().expect("build_bwd_steps in training mode only");
+        let (b, t) = (self.b, self.t);
+        let n = b * t;
+        let h = c.hidden;
+        let inter = c.intermediate;
+        let hd = c.head_dim();
+        let ln = block::LayerNormIds::resolve(g, T_LAYERNORM, T_LN_STATS, T_LAYERNORM_DX);
+        let act_bwd = match c.act {
+            TextAct::QuickGelu => T_QUICK_GELU_BWD,
+            TextAct::GeluErf => T_GELU_ERF_BWD,
+        };
+        let gr = |name: &str| self.ps.g(name);
+        let mut s: Vec<Step> = Vec::new();
+
+        // ---- head: optional projection, then EOS pooling ----
+        if let Some(te_dim) = c.projection {
+            // `matmul_dw` Params: [m, k, n]; bufs [dy, x, dw] — ACCUMULATES.
+            // Forward was `text_embeds[b, p] = pooled[b, h] @ Wproj[p, h]^T`.
+            let (dw, dwt) = self.bwd_gemm(te_dim, h, T_MATMUL_DW, T_MATMUL_DW_REG);
+            s.push(g.step(dw, &[&bw.seed_out, &self.pooled, gr("text_projection.weight")], &[b, h, te_dim], dwt));
+            // `matmul_dx` Params: [m, k, n, accumulate]; bufs [dy, w, dx].
+            let (dx, dxt) = self.bwd_gemm(b, h, T_MATMUL_DX, T_MATMUL_DX_REG);
+            s.push(g.step(dx, &[&bw.seed_out, self.w("text_projection.weight"), &bw.d_pooled], &[b, h, te_dim, 0], dxt));
+        } else {
+            // No projection: the tower output IS `pooled`.
+            // `region_copy` Params: [rows, width, row_stride, off] — whole buffer.
+            s.push(g.step(T_REGION_COPY, &[&bw.seed_out, &bw.d_pooled], &[b, h, h, 0], b * h));
+        }
+        // `d_hidden` starts at the sequence seed, then the EOS gather's adjoint
+        // scatters `d_pooled` onto the pooled rows. The forward gather is
+        // `embed(eos_rows, hidden -> pooled)`, whose adjoint is `emb_bwd` with
+        // the SAME index buffer, `hidden`'s row count as the "vocab", and
+        // `d_pooled` as the row grads. It accumulates, which is why the seed
+        // copy has to come first.
+        s.push(g.step(T_REGION_COPY, &[&bw.seed_hidden, &bw.d_hidden], &[n, h, h, 0], n * h));
+        // `emb_bwd` Params: [n_rows, d_model, vocab]; bufs [tokens(u32), d_x, grad_emb].
+        s.push(g.step(T_EMB_BWD, &[&self.eos_rows, &bw.d_pooled, &bw.d_hidden], &[b, h, n], n * h));
+
+        // ---- final LayerNorm ----
+        let last = c.layers as usize;
+        s.push(block::ln_stats_fwd(g, &ln, &self.x[last], &bw.mean, &bw.inv, h, n, c.eps));
+        // `layernorm_dgamma` Params: [d_model, n_rows]; bufs [dy, x, mean, inv, dgamma].
+        s.push(g.step(T_LN_DGAMMA, &[&bw.d_hidden, &self.x[last], &bw.mean, &bw.inv, gr("final_norm.weight")], &[h, n], h));
+        // `layernorm_dbeta` Params: [d_model, n_rows]; bufs [dy, dbeta].
+        s.push(g.step(T_LN_DBETA, &[&bw.d_hidden, gr("final_norm.bias")], &[h, n], h));
+        s.push(block::layernorm_dx_bwd(g, &ln, &self.x[last], self.w("final_norm.weight"), &bw.d_hidden, &bw.dx[last], h, n, c.eps));
+
+        for l in (0..c.layers as usize).rev() {
+            let lb = &self.layers[l];
+            let p = format!("blocks.{l}");
+            let d_out = &bw.dx[l + 1]; // grad of this layer's output
+
+            // ---- MLP branch ----
+            // `bias_grad` Params: [m, n]; bufs [dy, dbias] — one thread per feature.
+            s.push(g.step(T_BIAS_GRAD, &[d_out, gr(&format!("{p}.fc2.bias"))], &[n, h], h));
+            let (dw, dwt) = self.bwd_gemm(h, inter, T_MATMUL_DW, T_MATMUL_DW_REG);
+            s.push(g.step(dw, &[d_out, &lb.h_act, gr(&format!("{p}.fc2.weight"))], &[n, inter, h], dwt));
+            let (dx, dxt) = self.bwd_gemm(n, inter, T_MATMUL_DX, T_MATMUL_DX_REG);
+            s.push(g.step(dx, &[d_out, self.w(&format!("{p}.fc2.weight")), &bw.d_h_act], &[n, inter, h, 0], dxt));
+            // The activation backward reads the PRE-activation `h` (post-bias),
+            // never `h_act`. Params: a single `total`; bufs [x, dout, dx].
+            s.push(g.step(act_bwd, &[&lb.h, &bw.d_h_act, &bw.d_h], &[n * inter], n * inter));
+            s.push(g.step(T_BIAS_GRAD, &[&bw.d_h, gr(&format!("{p}.fc1.bias"))], &[n, inter], inter));
+            let (dw, dwt) = self.bwd_gemm(inter, h, T_MATMUL_DW, T_MATMUL_DW_REG);
+            s.push(g.step(dw, &[&bw.d_h, &lb.ln2, gr(&format!("{p}.fc1.weight"))], &[n, h, inter], dwt));
+            let (dx, dxt) = self.bwd_gemm(n, h, T_MATMUL_DX, T_MATMUL_DX_REG);
+            s.push(g.step(dx, &[&bw.d_h, self.w(&format!("{p}.fc1.weight")), &bw.d_branch], &[n, h, inter, 0], dxt));
+            s.push(block::ln_stats_fwd(g, &ln, &lb.res, &bw.mean, &bw.inv, h, n, c.eps));
+            s.push(g.step(T_LN_DGAMMA, &[&bw.d_branch, &lb.res, &bw.mean, &bw.inv, gr(&format!("{p}.ln2.weight"))], &[h, n], h));
+            s.push(g.step(T_LN_DBETA, &[&bw.d_branch, gr(&format!("{p}.ln2.bias"))], &[h, n], h));
+            s.push(block::layernorm_dx_bwd(g, &ln, &lb.res, self.w(&format!("{p}.ln2.weight")), &bw.d_branch, &bw.d_tmp, h, n, c.eps));
+            // residual re-join: d_res = d_out (pass-through) + branch grad.
+            s.push(g.step(T_ADD2, &[d_out, &bw.d_tmp, &bw.d_res], &[n * h], n * h));
+
+            // ---- attention branch ----
+            s.push(g.step(T_BIAS_GRAD, &[&bw.d_res, gr(&format!("{p}.proj.bias"))], &[n, h], h));
+            let (dw, dwt) = self.bwd_gemm(h, h, T_MATMUL_DW, T_MATMUL_DW_REG);
+            s.push(g.step(dw, &[&bw.d_res, &lb.ctx, gr(&format!("{p}.proj.weight"))], &[n, h, h], dwt));
+            let (dx, dxt) = self.bwd_gemm(n, h, T_MATMUL_DX, T_MATMUL_DX_REG);
+            s.push(g.step(dx, &[&bw.d_res, self.w(&format!("{p}.proj.weight")), &bw.d_ctx], &[n, h, h, 0], dxt));
+            // Causal attention backward. The dscores/dv pair carries the v-region
+            // params `[.., v_off, d_model]`, the dq/dk pair the q/k-region params
+            // `[.., q_off, k_off]` — the same split `gpt::model` dispatches. All
+            // four ASSIGN their region of `d_qkv`, which is why it needs no clear.
+            // Note they read `probs` (per-layer cache), NOT `scores`.
+            let pv = [b, c.heads, t, hd, 3 * h, 2 * h, h];
+            let pqk = [b, c.heads, t, hd, 3 * h, 0, h];
+            s.push(g.step(T_ATTN_DSCORES, &[&bw.d_ctx, &lb.qkv, &lb.probs, &bw.d_scores], &pv, b * c.heads * t));
+            s.push(g.step(T_ATTN_DV, &[&lb.probs, &bw.d_ctx, &bw.d_qkv], &pv, b * c.heads * t * hd));
+            s.push(g.step(T_ATTN_DQ, &[&bw.d_scores, &lb.qkv, &bw.d_qkv], &pqk, b * c.heads * t * hd));
+            s.push(g.step(T_ATTN_DK, &[&bw.d_scores, &lb.qkv, &bw.d_qkv], &pqk, b * c.heads * t * hd));
+            s.push(g.step(T_BIAS_GRAD, &[&bw.d_qkv, gr(&format!("{p}.qkv.bias"))], &[n, 3 * h], 3 * h));
+            let (dw, dwt) = self.bwd_gemm(3 * h, h, T_MATMUL_DW, T_MATMUL_DW_REG);
+            s.push(g.step(dw, &[&bw.d_qkv, &lb.ln1, gr(&format!("{p}.qkv.weight"))], &[n, h, 3 * h], dwt));
+            let (dx, dxt) = self.bwd_gemm(n, h, T_MATMUL_DX, T_MATMUL_DX_REG);
+            s.push(g.step(dx, &[&bw.d_qkv, self.w(&format!("{p}.qkv.weight")), &bw.d_branch], &[n, h, 3 * h, 0], dxt));
+            s.push(block::ln_stats_fwd(g, &ln, &self.x[l], &bw.mean, &bw.inv, h, n, c.eps));
+            s.push(g.step(T_LN_DGAMMA, &[&bw.d_branch, &self.x[l], &bw.mean, &bw.inv, gr(&format!("{p}.ln1.weight"))], &[h, n], h));
+            s.push(g.step(T_LN_DBETA, &[&bw.d_branch, gr(&format!("{p}.ln1.bias"))], &[h, n], h));
+            s.push(block::layernorm_dx_bwd(g, &ln, &self.x[l], self.w(&format!("{p}.ln1.weight")), &bw.d_branch, &bw.d_tmp, h, n, c.eps));
+            s.push(g.step(T_ADD2, &[&bw.d_res, &bw.d_tmp, &bw.dx[l]], &[n * h], n * h));
+        }
+
+        // ---- embeddings ----
+        // Forward: `x0 = region_copy(embed(ids)); pos_add(x0, pos)` — the
+        // positional add is in place, so `dx[0]` is BOTH the positional grad
+        // source and (through the identity region_copy) the token-embedding
+        // grad source.
+        // `pos_bwd` Params: [b, t, d_model]; bufs [d_x, dpos] — ACCUMULATES, and
+        // writes only the first `t` of `max_positions` rows.
+        s.push(g.step(T_POS_BWD, &[&bw.dx[0], gr("pos.weight")], &[b, t, h], t * h));
+        s.push(g.step(T_EMB_BWD, &[&self.tokens, &bw.dx[0], gr("tok.weight")], &[n, h, c.vocab], c.vocab * h));
+        s
+    }
+
+    /// Zero every parameter gradient. Call once per training step, BEFORE
+    /// [`ClipText::backward`] — the reverse pass accumulates into them.
+    pub fn zero_grads(&self) {
+        self.ps.zero_grads(&self.gpu);
+    }
+
+    /// Run the reverse pass for the objective whose gradients w.r.t. the two
+    /// tower outputs are `d_hidden` (`[B*T, H]`, the grad of
+    /// `final_layer_norm(x_L)`) and `d_out` (`[B, P]` when the config has a
+    /// projection, else `[B, H]` on `pooled`).
+    ///
+    /// The forward must already have run on the current tokens/weights — the
+    /// backward reads the SSA activation buffers it left behind.
+    pub fn backward(&self, d_hidden: &[f32], d_out: &[f32]) {
+        let bw = self.bwd.as_ref().expect("backward() needs ClipText::new_train_on");
+        let n = self.n();
+        let h = self.cfg.hidden as usize;
+        let out_w = self.cfg.projection.unwrap_or(self.cfg.hidden) as usize;
+        assert_eq!(d_hidden.len(), n * h, "d_hidden must be [B*T, H]");
+        assert_eq!(d_out.len(), self.b as usize * out_w, "d_out must be [B, P]");
+        let bits = |v: &[f32]| -> Vec<u32> { v.iter().map(|x| x.to_bits()).collect() };
+        self.gpu.write(&bw.seed_hidden, &bits(d_hidden));
+        self.gpu.write(&bw.seed_out, &bits(d_out));
+        self.gpu.submit(&[], &bw.steps);
+    }
+
+    /// Whether this tower was built trainable (`new_train_on`).
+    pub fn is_trainable(&self) -> bool {
+        self.bwd.is_some()
+    }
+
+    pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        self.ps.read_grad(&self.gpu, name)
+    }
+    pub fn read_weight(&self, name: &str) -> Vec<f32> {
+        self.ps.read_weight(&self.gpu, name)
+    }
+    pub fn write_weight(&self, name: &str, data: &[f32]) {
+        let bits: Vec<u32> = data.iter().map(|v| v.to_bits()).collect();
+        self.gpu.write(self.w(name), &bits);
+    }
+    pub fn poll_wait(&self) {
+        self.gpu.poll_wait();
     }
 
     /// Set the token ids (`[B*T]`, row-major) and derive the EOS pooling rows.

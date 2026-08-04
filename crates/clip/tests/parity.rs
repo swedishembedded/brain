@@ -70,7 +70,9 @@ impl Report {
         let (c, m, r) = (cosine(got, want), max_abs(got, want), rel_l2(got, want));
         eprintln!("  {stage:<34} cosine={c:.8}  max_abs={m:.3e}  rel_l2={r:.3e}");
         self.rows.push((stage.to_string(), c, m, r));
-        if !(c >= GATE) {
+        // NaN-safe: a NaN cosine (an all-zero or poisoned stage) must FAIL, so
+        // the test is written as an explicit NaN check plus `<`, not `!(>=)`.
+        if c.is_nan() || c < GATE {
             self.failures.push(format!("{stage}: cosine {c:.8} < {GATE}"));
         }
     }

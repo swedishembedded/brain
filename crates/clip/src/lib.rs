@@ -6,13 +6,16 @@
 //!
 //! * [`config`] — the reference configurations and canonical tensor manifests.
 //! * [`import`] — checkpoint import with two-way coverage validation.
-//! * [`model`] — the forward graphs (`ClipText`, `EvaVision`).
+//! * [`init`] — random init for the text tower (tests / gradient checks only).
+//! * [`model`] — the graphs (`ClipText`, `EvaVision`).
 //!
-//! Scope today is **forward parity only**. The backward, the `capability`
-//! Provider / residency adapter / D-Bus surface, and the CLIP BPE tokenizer
-//! (which belongs in `crates/data` next to the GPT-2 and Qwen BPEs, not here)
-//! are follow-up work.
+//! The **text** tower is trainable: `ClipText::new_train_on` adds the reverse
+//! pass over the same SSA forward, gated by `gradcheck::check_clip`. The EVA
+//! **image** tower is still forward-only, as are the `capability` Provider /
+//! residency adapter / D-Bus surface and the CLIP BPE tokenizer (which belongs
+//! in `crates/data` next to the GPT-2 and Qwen BPEs, not here).
 
 pub mod config;
 pub mod import;
+pub mod init;
 pub mod model;
