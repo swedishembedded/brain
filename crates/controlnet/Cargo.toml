@@ -9,11 +9,20 @@ description = "Backbone-agnostic ControlNet: a ControlAdapter over named injecti
 name = "controlnet"
 path = "src/lib.rs"
 
+# Every entry here is USED by src/ or tests/ — checked by grepping for the
+# crate's lib name, because cargo links each one into every test binary and
+# `cargo build` does not warn about an unused dependency. `brain-vision` was on
+# the skeleton and is referenced by nothing (this crate never builds an NCHW
+# `Shape`); it belongs back here when a device conv path outside
+# `vae::blocks` lands.
 [dependencies]
-brain-gpu-core.workspace = true
-brain-kernels.workspace = true
-brain-model.workspace = true
-brain-checkpoint.workspace = true
-brain-vision.workspace = true
-brain-unet.workspace = true
+brain-gpu-core.workspace = true   # Gpu, DeviceBuffer, Step
+brain-kernels.workspace = true    # scale_chan — the one kernel appended to unet's set
+brain-model.workspace = true      # model::hostmath::timestep_embedding
+brain-checkpoint.workspace = true # safetensors reader (import + parity fixtures)
+brain-unet.workspace = true       # unet::model::Rec — the trainable copy IS the UNet's blocks
+brain-data.workspace = true       # data::rng::Rng for init.rs
+# `imaging::pixels::{u8_to_unit, hwc_to_chw}` — the workspace's ONE home for the
+# u8->[0,1] cast and the HWC->CHW permutation `src/cond.rs` needs. Hand-rolling
+# that loop here is the exact duplication `crates/imaging` was created to end.
 brain-imaging.workspace = true

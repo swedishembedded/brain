@@ -625,12 +625,12 @@ name = "brain-controlnet"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
  "brain-model",
  "brain-unet",
- "brain-vision",
 ]
 
 [[package]]
