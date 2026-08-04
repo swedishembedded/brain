@@ -1174,6 +1174,7 @@ name = "brain-pulid"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-facenet",
  "brain-flux1",
  "brain-gpu-core",
  "brain-kernels",

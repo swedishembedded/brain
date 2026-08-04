@@ -60,6 +60,7 @@
 
 pub mod adapter;
 pub mod config;
+pub mod idcond;
 pub mod import;
 pub mod model;
 

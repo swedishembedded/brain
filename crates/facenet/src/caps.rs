@@ -195,29 +195,49 @@ impl Session {
     }
 
     /// Run one `embed` invocation.
-    pub fn embed(&self, inv: &Invocation) -> ActionResult {
-        let (chw, w, h) = Session::source_chw(inv)?;
+    /// The RAW ArcFace embedding for one image, plus the face it was taken
+    /// from — the shared core of the `embed` action and of PuLID's ID
+    /// conditioning.
+    ///
+    /// **Raw, deliberately.** The released graph has no L2 norm (`‖e‖ ≈ 15–20`),
+    /// and the two consumers want different things: the `embed` action
+    /// normalises so its output is cosine-ready, while PuLID concatenates the
+    /// UN-normalised vector (`pipeline_flux.py` uses insightface's
+    /// `face_info['embedding']`, not `normed_embedding`, and only the EVA-CLIP
+    /// half of `id_cond` is divided by its norm). Normalising here would make
+    /// PuLID's first 512 components ~20x too small with nothing to catch it —
+    /// the dumped golden's `‖id_cond[:512]‖` is 20.11 against `‖id_cond[512:]‖`
+    /// of exactly 1.0.
+    pub fn embed_raw_chw(
+        &self,
+        chw: &[f32],
+        w: u32,
+        h: u32,
+        align: bool,
+        select_largest: bool,
+    ) -> Result<(Vec<f32>, Option<Face>), String> {
         let side = self.acfg.image_size;
         let ctx = Ctx::new(&self.gpu);
 
-        let (aligned, face) = if inv.get_bool("align").unwrap_or(true) {
-            let faces = self.faces(&chw, w, h);
+        let (aligned, face) = if align {
+            let faces = self.faces(chw, w, h);
             if faces.is_empty() {
                 return Err("facenet embed: no face detected (pass align=false for an already-aligned 112x112 crop)".into());
             }
             // `faces` is score-sorted; "largest" re-picks by box area, which is
-            // the reference recipe's primary-face rule.
-            let f = match inv.get_str("select").as_deref() {
-                Some("score") => faces[0],
-                _ => *faces.iter().max_by(|a, b| a.area().partial_cmp(&b.area()).unwrap_or(std::cmp::Ordering::Equal)).expect("non-empty"),
+            // the reference recipe's primary-face rule (and PuLID's).
+            let f = if select_largest {
+                *faces.iter().max_by(|a, b| a.area().partial_cmp(&b.area()).unwrap_or(std::cmp::Ordering::Equal)).expect("non-empty")
+            } else {
+                faces[0]
             };
             let lmk: Vec<f32> = f.kps.iter().flat_map(|p| [p[0], p[1]]).collect();
             // Umeyama solve on the host + the `grid_sample` kernel — the crate's
             // one alignment implementation.
-            let (crop, _m) = crate::align::norm_crop_chw(&self.gpu, &chw, 3, h, w, &lmk, side)?;
+            let (crop, _m) = crate::align::norm_crop_chw(&self.gpu, chw, 3, h, w, &lmk, side)?;
             (crop, Some(f))
         } else {
-            let src = ctx.upload("facenet.caps.face", &chw);
+            let src = ctx.upload("facenet.caps.face", chw);
             let (small, sshape) = ctx.resize(&src, Shape::new(1, 3, h, w), side, side, Filter::Bilinear, AlignCorners::HalfPixel);
             (ctx.download(&small, sshape.numel()), None)
         };
@@ -225,9 +245,16 @@ impl Session {
         let shape = Shape::new(1, 3, side, side);
         let up = ctx.upload("facenet.caps.aligned", &aligned);
         let blob = ctx.normalize(&up, shape, &unit_norm(&self.acfg.pre));
-        let raw = self.arcface.embed_blob(&ctx.download(&blob, shape.numel()));
-        // The released graph has NO L2 norm (‖e‖ ≈ 15–20); consumers normalise
-        // for cosine, and `model::hostmath` is the one place that lives.
+        Ok((self.arcface.embed_blob(&ctx.download(&blob, shape.numel())), face))
+    }
+
+    pub fn embed(&self, inv: &Invocation) -> ActionResult {
+        let (chw, w, h) = Session::source_chw(inv)?;
+        let align = inv.get_bool("align").unwrap_or(true);
+        let largest = !matches!(inv.get_str("select").as_deref(), Some("score"));
+        let (raw, face) = self.embed_raw_chw(&chw, w, h, align, largest)?;
+        // Consumers normalise for cosine, and `model::hostmath` is the one place
+        // that lives.
         let e = model::hostmath::l2_normalize(&raw);
         let bytes: Vec<u8> = e.iter().flat_map(|v| v.to_le_bytes()).collect();
 
