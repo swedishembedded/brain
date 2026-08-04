@@ -809,7 +809,14 @@ impl LayerNormIds {
 /// keyed on `DeviceCaps`, never a backend name. The `*_rows` kernels are
 /// `@workgroup_size(64)` — at or below the WebGPU floor of 256 — so no
 /// `max_workgroup_size` gate is needed on top of it.
-fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32) -> (usize, u32) {
+///
+/// Public for the same reason [`gemm_variant`] returns indices rather than a
+/// `Step`: [`layernorm_fwd`] and friends bind whole buffers (`Gpu::step`), while
+/// the DiT forwards normalise a ROW RANGE of a joint slab and must bind
+/// sub-ranges (`Gpu::step_sliced`). Both shapes have to share ONE selection
+/// rule — a second copy is a place a model silently keeps the slow kernel, which
+/// is `docs/kernel-checklist.md` §A's most expensive defect class.
+pub fn ln_variant(g: &Gpu, reference: usize, coop: Option<usize>, rows: u32, d: u32) -> (usize, u32) {
     use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
     let shape = OpShape { m: rows, n: d, k: 0, dtype: Dtype::F32 };
     match coop {
