@@ -14,6 +14,7 @@ brain-residency.workspace = true
 brain-capability.workspace = true
 brain-events.workspace = true
 brain-checkpoint.workspace = true
+brain-shutdown.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 bytes.workspace = true

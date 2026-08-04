@@ -1,0 +1,13 @@
+[package]
+name = "brain-shutdown"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "One coordinated shutdown signal for every serving surface (D-Bus, HTTP). A tokio-agnostic watch-based token: fired from a single dedicated signal thread that owns SIGINT/SIGTERM, awaited from any runtime. Exists so a process serving --dbus and an HTTP surface together has exactly one place that claims the process signal disposition, instead of each surface racing to install its own tokio::signal handler."
+
+[lib]
+name = "brain_shutdown"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["signal", "sync", "rt", "macros", "time"] }

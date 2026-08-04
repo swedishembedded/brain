@@ -178,3 +178,64 @@ fn run_roundtrips_a_result_over_an_fd() {
         eprintln!("cancel ok: Subscribe(rev.slow) aborted in {:?}", t0.elapsed());
     });
 }
+
+/// Regression test for the shutdown deadlock: before the fix, `run_stats_stream`
+/// held its own `zbus::Connection` clone for its whole life and only released it
+/// when a signal emit *failed* — which cannot happen while the connection is
+/// alive — so `Connection::graceful_shutdown()` awaited a drop event that could
+/// never fire. `serve`/`serve_with_shutdown` would print "shutting down" and then
+/// hang forever. This test drives `serve_with_shutdown` on its own thread, waits
+/// for it to actually claim the bus name (so the fix is proven against a *live*
+/// connection with the stats task running, not just an early return), fires the
+/// shutdown token, and asserts the thread joins within a bound. On the old code
+/// this test hangs until the harness's own timeout kills it.
+#[test]
+fn dbus_serve_stops_promptly_once_shutdown_fires() {
+    if std::env::var("DBUS_SESSION_BUS_ADDRESS").map(|s| s.is_empty()).unwrap_or(true) {
+        eprintln!("SKIP: no session bus (run under `dbus-run-session -- cargo test ...`)");
+        return;
+    }
+    // A stateless resident is enough — this test is about the shutdown handshake,
+    // not about serving a real action.
+    let rev: Arc<dyn residency::ResidentModel> = Arc::new(residency::bridge::ProviderResident::stateless(Arc::new(RevProvider)));
+    let mut budgets = residency::budget::Budgets::new();
+    budgets.set(residency::Device::Gpu(0), 24 << 30, 0);
+    let executor = residency::Executor::start(vec![rev], budgets, residency::Policy::default());
+
+    let name = format!("com.swedishembedded.Brain1.shutdowntest{}", std::process::id());
+    let opts = brain_dbus::DbusOpts { bus: brain_dbus::BusKind::Session, name: name.clone() };
+    let (trigger, shutdown) = brain_shutdown::channel();
+
+    let handle = std::thread::spawn(move || brain_dbus::serve_with_shutdown(executor, opts, shutdown));
+
+    // Wait for the server to actually claim the bus name (proving a *live*
+    // connection, stats task and all, unwinds cleanly) before firing shutdown.
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let ready = rt.block_on(async {
+        let client = zbus::Connection::session().await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(proxy) = zbus::Proxy::new(&client, name.as_str(), brain_dbus::OBJECT_PATH, "com.swedishembedded.Brain1.Manager").await {
+                if proxy.call::<_, _, Vec<String>>("ListModels", &()).await.is_ok() {
+                    return true;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    });
+    assert!(ready, "server never claimed {name} on the bus within 10s");
+
+    trigger.fire();
+    let t0 = std::time::Instant::now();
+    loop {
+        if handle.is_finished() {
+            break;
+        }
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "brain_dbus::serve_with_shutdown did not stop within 5s of shutdown firing");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    handle.join().unwrap().unwrap();
+}

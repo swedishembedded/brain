@@ -18,6 +18,11 @@
 #   make test            # full cargo test suite
 
 BRAIN  ?= ./target/release/brain
+# The debug-build binary the e2e bats suites drive by default (they build via the
+# `build` target, not `release`, so the fast lane stays fast). Override to point
+# an e2e run at a release build instead: `BRAIN_BIN=./target/release/brain make
+# test/e2e/api-conformance`.
+BRAIN_BIN ?= ./target/debug/brain
 PIP    ?= python3 -m pip
 DATA   ?= data
 OUT    ?= out
@@ -189,6 +194,14 @@ test/e2e/claude-code: release
 #   make test/e2e/api-conformance   (or: BRAIN_BIN=./target/debug/brain bats tests/e2e/api_conformance.bats)
 test/e2e/api-conformance: build
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/api_conformance.bats
+
+# End-to-end: `brain serve` actually stops on SIGINT/SIGTERM, for every combination
+# of surfaces it can be told to serve (D-Bus alone, D-Bus+HTTP together, HTTP
+# alone). Each test starts and kills its own server; the D-Bus cases use a private
+# per-test dbus-daemon, never the real session/system bus. Needs a debug/release
+# binary + a working dbus-daemon.
+test/e2e/shutdown: build
+	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/shutdown.bats
 
 # Install the Python tooling (OpenVINO/NPU runtime, torch + transformers for the
 # benchmark reference rows, etc.) into the current environment. The Rust engine

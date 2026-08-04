@@ -358,6 +358,13 @@ fn dbus_connect_hint(err: &dyn std::fmt::Display, system_bus: bool, http_up: boo
     format!("brain serve --dbus: could not connect to the D-Bus {kind} bus ({err}). {advice} {status}")
 }
 
+/// How long [`run_apis`] waits for a backgrounded D-Bus surface to finish its own
+/// graceful shutdown after the HTTP surface has drained, before giving up and
+/// letting the process exit anyway. Bounded so a wedged D-Bus shutdown cannot
+/// hang `brain serve` forever — [`brain_shutdown::install_signals`]'s own
+/// second-signal escape hatch is the backstop if this window is not enough.
+const DBUS_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn run_apis(a: RunApis) {
     let executor = build_serving_executor(a.reserve_gb, a.models_dir);
     let served: Vec<&str> = executor.manifests().iter().map(|m| m.model.as_str()).collect();
@@ -365,26 +372,39 @@ fn run_apis(a: RunApis) {
 
     let http = a.anthropic.is_some() || a.openai.is_some() || a.openrouter.is_some();
 
-    if a.dbus {
+    // One shutdown source for every surface this process serves. SIGINT/SIGTERM
+    // disposition is process-wide: if D-Bus and HTTP each installed their own
+    // `tokio::signal::ctrl_c()` handler, only one registration would ever
+    // actually see the signal — see `brain_shutdown` for the failure this
+    // caused. Installed once, here, before either surface's runtime exists, so
+    // Ctrl-C/SIGTERM reaches whichever surfaces are actually running.
+    let (trigger, shutdown) = brain_shutdown::channel();
+    brain_shutdown::install_signals(trigger);
+
+    let dbus_handle = if a.dbus {
         let opts = brain_dbus::DbusOpts {
             bus: if a.dbus_system { brain_dbus::BusKind::System } else { brain_dbus::BusKind::Session },
             name: a.dbus_name.unwrap_or_else(|| "com.swedishembedded.Brain1".to_string()),
         };
         let e = executor.clone();
         if http {
-            std::thread::spawn(move || {
-                if let Err(err) = brain_dbus::serve(e, opts) {
-                    eprintln!("{}", dbus_connect_hint(&err, a.dbus_system, true));
+            let sd = shutdown.clone();
+            let dbus_system = a.dbus_system;
+            Some(std::thread::spawn(move || {
+                if let Err(err) = brain_dbus::serve_with_shutdown(e, opts, sd) {
+                    eprintln!("{}", dbus_connect_hint(&err, dbus_system, true));
                 }
-            });
+            }))
         } else {
-            if let Err(err) = brain_dbus::serve(e, opts) {
+            if let Err(err) = brain_dbus::serve_with_shutdown(e, opts, shutdown) {
                 eprintln!("{}", dbus_connect_hint(&err, a.dbus_system, false));
                 std::process::exit(1);
             }
             return;
         }
-    }
+    } else {
+        None
+    };
 
     if http {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -407,9 +427,20 @@ fn run_apis(a: RunApis) {
                 eprintln!("brain serve: --api-keys-out {path}: {e}");
             }
         }
-        if let Err(e) = apiserve::serve_all(executor, surfaces) {
+        if let Err(e) = apiserve::serve_all_with_shutdown(executor, surfaces, shutdown) {
             eprintln!("brain serve: {e}");
             std::process::exit(1);
+        }
+    }
+
+    // HTTP has drained and returned. Give a backgrounded D-Bus surface a bounded
+    // window to finish its own graceful shutdown (both saw the same `shutdown`
+    // fire, so it should already be on its way out) rather than let `main`
+    // return out from under a live thread.
+    if let Some(h) = dbus_handle {
+        let deadline = std::time::Instant::now() + DBUS_JOIN_TIMEOUT;
+        while !h.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
 }

@@ -147,10 +147,33 @@ async fn fallback(State(state): State<AppState>) -> ApiError {
 /// Serve every [`Surface`] over the ONE shared [`Executor`] until interrupted.
 /// Builds a single multi-threaded Tokio runtime and one axum router per surface
 /// (its own key + provider), binds each `Surface.addr`, and serves them
-/// concurrently on a [`tokio::task::JoinSet`]. Blocks the calling thread. (In P4
-/// this is unit-testable but not yet called from the `brain` binary — the CLI
-/// wiring lands in a later phase.)
+/// concurrently on a [`tokio::task::JoinSet`]. Blocks the calling thread.
+///
+/// Installs its own SIGINT/SIGTERM handling via [`brain_shutdown`]. If HTTP is the
+/// only serving surface in the process, that is exactly right; when it runs
+/// alongside D-Bus (`brain serve --dbus --openai ...`), use
+/// [`serve_all_with_shutdown`] instead so both surfaces share one shutdown
+/// source — see that function's docs for why.
 pub fn serve_all(exec: Executor, surfaces: Vec<Surface>) -> anyhow::Result<()> {
+    serve_all_with_shutdown(exec, surfaces, brain_shutdown::Shutdown::from_signals())
+}
+
+/// Serve every [`Surface`] until `shutdown` fires. Identical to [`serve_all`]
+/// except the caller supplies the shutdown signal — the shape needed when HTTP
+/// runs alongside D-Bus: `tokio::signal::ctrl_c()` claims a process-wide
+/// disposition, so if each surface independently registered its own handler,
+/// only one would ever actually see the signal (in practice: whichever runtime
+/// happened to register first, which for the combined case was the D-Bus
+/// thread — and that runtime was the one that used to deadlock in
+/// `Connection::graceful_shutdown()`, so Ctrl-C did nothing at all). Sharing one
+/// `Shutdown` — installed once, in `crates/cli/src/run_cli.rs::run_apis` — fixes
+/// both problems: exactly one registration, and every surface reacts to it.
+///
+/// Each surface is served with axum's `with_graceful_shutdown`, so in-flight
+/// requests drain instead of being cut off mid-response. The drain has no upper
+/// bound of its own here; `run_apis` bounds the overall wait so a slow client
+/// cannot hold the process open indefinitely.
+pub fn serve_all_with_shutdown(exec: Executor, surfaces: Vec<Surface>, shutdown: brain_shutdown::Shutdown) -> anyhow::Result<()> {
     // The admission deadline is operator-overridable via `BRAIN_ADMIT_DEADLINE_MS`
     // (default `DEFAULT_ADMIT_DEADLINE`, 10s). Keeping it here (rather than in the
     // pure `router`) leaves the unit-test `oneshot` path on the fixed default while
@@ -164,12 +187,16 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>) -> anyhow::Result<()> {
             let state = AppState::new(exec.clone(), s.api_key.clone(), s.provider).with_admit_deadline(admit_deadline);
             let app = router(state);
             let (addr, provider) = (s.addr, s.provider);
+            let sd = shutdown.clone();
             set.spawn(async move {
                 let listener = tokio::net::TcpListener::bind(addr)
                     .await
                     .map_err(|e| anyhow::anyhow!("bind {addr} ({provider}): {e}"))?;
                 eprintln!("brain apiserve: {provider} on http://{addr}");
-                axum::serve(listener, app).await.map_err(|e| anyhow::anyhow!("serve {provider}: {e}"))?;
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async move { sd.wait().await })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("serve {provider}: {e}"))?;
                 Ok::<(), anyhow::Error>(())
             });
         }

@@ -13,6 +13,7 @@ path = "src/lib.rs"
 brain-capability.workspace = true
 brain-residency.workspace = true
 brain-stats.workspace = true
+brain-shutdown.workspace = true
 serde_json.workspace = true
 anyhow = "1"
 zbus = { version = "5", default-features = false, features = ["tokio"] }

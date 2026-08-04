@@ -377,6 +377,7 @@ dependencies = [
  "brain-checkpoint",
  "brain-events",
  "brain-residency",
+ "brain-shutdown",
  "bytes",
  "futures",
  "jsonschema",
@@ -560,6 +561,7 @@ dependencies = [
  "brain-residency",
  "brain-runtime",
  "brain-server",
+ "brain-shutdown",
  "brain-speaker",
  "brain-splat",
  "brain-tts",
@@ -623,6 +625,7 @@ dependencies = [
  "anyhow",
  "brain-capability",
  "brain-residency",
+ "brain-shutdown",
  "brain-stats",
  "nix",
  "serde_json",
@@ -1160,6 +1163,13 @@ dependencies = [
  "brain-forecast",
  "brain-runtime",
  "serde_json",
+]
+
+[[package]]
+name = "brain-shutdown"
+version = "0.1.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

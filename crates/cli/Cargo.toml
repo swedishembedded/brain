@@ -20,6 +20,7 @@ fault-injection = ["brain-qwen/fault-injection"]
 # D-Bus control surface: compiled into the default build so `brain serve --dbus`
 # always works, but only served when the `--dbus` flag is passed.
 brain-dbus.workspace = true
+brain-shutdown.workspace = true
 brain-apiserve.workspace = true
 brain-residency.workspace = true
 brain-gpu-core.workspace = true

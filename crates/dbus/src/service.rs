@@ -391,11 +391,22 @@ pub const STATS_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 /// Background task that pushes the stats snapshot: every [`STATS_INTERVAL`] it
 /// builds a fresh snapshot from `executor` and emits it as the `StatsStream`
 /// signal on the `Manager` served at `path`. Reuses the existing interface/object
-/// path (braintop subscribes there). Returns when the connection is gone.
-pub async fn run_stats_stream(conn: zbus::Connection, executor: Executor, path: &'static str) {
+/// path (braintop subscribes there). Returns when the connection is gone **or**
+/// `shutdown` fires.
+///
+/// The `shutdown` race is load-bearing, not cosmetic: this task holds a clone of
+/// `conn` for as long as it runs, and `Connection::graceful_shutdown()` awaits a
+/// drop event that fires only once every clone is gone. Without an explicit exit
+/// path, a healthy connection (every `stats_stream` emit keeps succeeding) never
+/// releases its clone, and shutdown deadlocks forever — the tick loop looks
+/// exactly like the reason to keep going, from the inside.
+pub async fn run_stats_stream(conn: zbus::Connection, executor: Executor, path: &'static str, shutdown: brain_shutdown::Shutdown) {
     let mut tick = tokio::time::interval(STATS_INTERVAL);
     loop {
-        tick.tick().await;
+        tokio::select! {
+            _ = shutdown.wait() => return,
+            _ = tick.tick() => {}
+        }
         // Fetch the served interface fresh each tick: if it is not yet registered
         // (startup race) skip this tick rather than give up the whole stream.
         let iface = match conn.object_server().interface::<_, Manager>(path).await {
