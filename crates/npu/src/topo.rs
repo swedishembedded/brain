@@ -26,7 +26,7 @@ use crate::topology::WeightSource;
 
 /// The shared graph-builder core: the wrapped graph, the temp-name counter and
 /// the emission DSL. Model builders hold one and `Deref` to it.
-pub(crate) struct TopoBase<'a> {
+pub struct TopoBase<'a> {
     pub g: &'a mut GraphBuilder,
     pub n: usize,
 }
@@ -253,6 +253,86 @@ impl<'a> TopoBase<'a> {
         };
         let scaled = self.mul(&nrm, gamma_name);
         self.add(&scaled, beta_name)
+    }
+
+    /// GroupNorm over NCHW, decomposed — the shared emitter for every
+    /// conv-autoencoder topology (`vae::blocks` is GroupNorm-shaped, so vqgan,
+    /// restore, unet and flux1 all need this one).
+    ///
+    /// Decomposed rather than emitted as `GroupNormalization` because that op
+    /// is **opset 18** and this builder targets 13 (`onnx::DEFAULT_OPSET`).
+    /// Raising the opset for one node would change every other model's export,
+    /// so the norm is built from ReduceMean/Sub/Mul/Add/Sqrt/Div — the same
+    /// choice [`TopoBase::layernorm`] already makes, for the same reason.
+    ///
+    /// The statistics are taken over `(C/G, H, W)` *jointly*, which is what
+    /// makes it a GROUP norm and not an instance norm: reshaping to
+    /// `[N, G, (C/G)*H*W]` and reducing the last axis is the whole trick, and
+    /// getting that reshape wrong is a plausible-looking picture with the wrong
+    /// contrast rather than an error.
+    #[allow(clippy::too_many_arguments)]
+    pub fn group_norm(
+        &mut self,
+        x: &str,
+        n: usize,
+        c: usize,
+        h: usize,
+        w: usize,
+        groups: usize,
+        gamma_name: &str,
+        gamma: Vec<f32>,
+        beta_name: &str,
+        beta: Vec<f32>,
+        eps: f32,
+    ) -> String {
+        assert!(c % groups == 0, "group_norm: C={c} not divisible by G={groups}");
+        // Per-channel affine, shaped [1,C,1,1] so it broadcasts over NCHW.
+        self.f32(gamma_name, &[1, c as i64, 1, 1], gamma);
+        self.f32(beta_name, &[1, c as i64, 1, 1], beta);
+        let eps_name = self.tmp("gn_eps");
+        self.f32(&eps_name, &[1], vec![eps]);
+
+        // -> [N, G, (C/G)*H*W]
+        let grouped_shape = self.tmp("gn_shape_g");
+        self.i64(&grouped_shape, &[3], vec![n as i64, groups as i64, ((c / groups) * h * w) as i64]);
+        let g3 = self.reshape(x, &grouped_shape);
+
+        let mean = {
+            let o = self.tmp("gn_mean");
+            self.g.add(Node::new("ReduceMean", &[&g3], &[&o]).attr_ints("axes", &[-1]).attr_int("keepdims", 1));
+            o
+        };
+        let cent = {
+            let o = self.tmp("gn_sub");
+            self.node("Sub", &[&g3, &mean], &o);
+            o
+        };
+        let sq = self.mul_t(&cent, &cent);
+        let var = {
+            let o = self.tmp("gn_var");
+            self.g.add(Node::new("ReduceMean", &[&sq], &[&o]).attr_ints("axes", &[-1]).attr_int("keepdims", 1));
+            o
+        };
+        let veps = self.add(&var, &eps_name);
+        let sd = self.unary("Sqrt", &veps);
+        let nrm = {
+            let o = self.tmp("gn_div");
+            self.node("Div", &[&cent, &sd], &o);
+            o
+        };
+
+        // back to [N, C, H, W], then the per-channel affine.
+        let nchw_shape = self.tmp("gn_shape_nchw");
+        self.i64(&nchw_shape, &[4], vec![n as i64, c as i64, h as i64, w as i64]);
+        let back = self.reshape(&nrm, &nchw_shape);
+        let scaled = self.mul_t(&back, gamma_name);
+        self.add_t(&scaled, beta_name)
+    }
+
+    /// SiLU / swish, `x * sigmoid(x)` — `vae::blocks`' activation.
+    pub fn silu_t(&mut self, x: &str) -> String {
+        let s = self.unary("Sigmoid", x);
+        self.mul_t(x, &s)
     }
 }
 
