@@ -164,3 +164,90 @@ fn x4plus_forward_matches_the_reference() {
     m.run(&input.data);
     assert_eq!(ladder(&m, &g, "x4plus_"), 0, "x4plus ladder");
 }
+
+/// How the tile seam responds to the halo — the measurement that makes
+/// `TILE_HALO` a number rather than a guess.
+///
+/// The comparison is tiled-vs-**one-tile-covering-everything**, not
+/// tiled-vs-whole-image. Those two differ for a reason that has nothing to do
+/// with seams: the whole-image path lets the convolutions zero-pad at the image
+/// border, while any tiled path replicate-pads it. Comparing against the
+/// single-tile result holds the border regime fixed, so what is left IS the
+/// seam.
+#[test]
+fn the_tile_seam_shrinks_with_the_halo() {
+    let Some(g) = goldens() else { return };
+    let mut w: Tensors = HashMap::new();
+    let mut shapes: HashMap<String, Vec<usize>> = HashMap::new();
+    for t in &g {
+        if let Some(name) = t.name.strip_prefix("tiny_w_") {
+            shapes.insert(name.to_string(), t.shape.clone());
+            w.insert(name.to_string(), (t.shape.clone(), t.data.clone()));
+        }
+    }
+    let cfg = RrdbConfig::from_tensors(&shapes).expect("derive");
+    let scale = cfg.scale;
+    let w = upscale::import::validate(w, &cfg).expect("validate");
+    let input = g.iter().find(|t| t.name == "tiny_input").expect("tiny_input");
+    let (h, wd) = (input.shape[2] as u32, input.shape[3] as u32);
+
+    let gpu = gpu_core::testgpu::dev(&KERNELS);
+    let s = upscale::caps::Session::new(gpu, cfg, w);
+
+    // Reference: ONE tile covering the whole image, at the halo under test —
+    // same border regime, no interior seam.
+    let mut prev = f32::INFINITY;
+    for halo in [4u32, 8, 16, 32] {
+        let (whole, ow, oh) = s.upscale_with_halo(&input.data, wd, h, wd, halo).expect("one tile");
+        let (tiled, _, _) = s.upscale_with_halo(&input.data, wd, h, 12, halo).expect("tiled");
+        let max = whole.iter().zip(&tiled).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        let over = whole.iter().zip(&tiled).filter(|(a, b)| (*a - *b).abs() > 1.0 / 255.0).count();
+        eprintln!("  halo={halo:3} max|seam| = {max:.3e}  ({over} of {} px above 1/255)", ow * oh * 3);
+        assert!(max <= prev * 1.05 + 1e-6, "halo {halo} made the seam WORSE ({max:.3e} vs {prev:.3e})");
+        prev = max;
+        assert_eq!((ow, oh), (wd * scale, h * scale));
+    }
+    eprintln!("tiny seam at halo=32: {prev:.3e}");
+    // On the 2-block toy a large halo DOES clear an 8-bit step. That is a fact
+    // about this fixture, not about the released net — see
+    // `the_tile_seam_on_the_released_net`, where the same halo does not.
+    assert!(prev < 1.0 / 255.0, "seam {prev:.3e} exceeds an 8-bit step at the largest halo tried");
+}
+
+/// The same seam measurement on the RELEASED net, whose 23 blocks give a far
+/// larger receptive field than the 2-block tiny config — so a halo that is
+/// ample there can be far too small here. Measuring only the toy would be
+/// exactly the degenerate-fixture mistake of `docs/lessons.md` #4.
+#[test]
+fn the_tile_seam_on_the_released_net() {
+    let Some(g) = goldens() else { return };
+    let Ok(ckpt) = std::env::var("BRAIN_ESRGAN") else {
+        eprintln!("SKIP: BRAIN_ESRGAN unset");
+        return;
+    };
+    if !std::path::Path::new(&ckpt).exists() {
+        eprintln!("SKIP: {ckpt} does not exist");
+        return;
+    }
+    let Some(input) = g.iter().find(|t| t.name == "x4plus_input") else {
+        eprintln!("SKIP: no x4plus goldens");
+        return;
+    };
+    let (tensors, shapes, _) = upscale::import::read(&ckpt).expect("read");
+    let cfg = RrdbConfig::from_tensors(&shapes).expect("derive");
+    let w = upscale::import::validate(tensors, &cfg).expect("validate");
+    let (h, wd) = (input.shape[2] as u32, input.shape[3] as u32);
+
+    let gpu = gpu_core::testgpu::dev(&KERNELS);
+    let s = upscale::caps::Session::new(gpu, cfg, w);
+    let mut best = f32::INFINITY;
+    for halo in [16u32, 32, 48] {
+        let (whole, _, _) = s.upscale_with_halo(&input.data, wd, h, wd, halo).expect("one tile");
+        let (tiled, _, _) = s.upscale_with_halo(&input.data, wd, h, 12, halo).expect("tiled");
+        let max = whole.iter().zip(&tiled).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        let over = whole.iter().zip(&tiled).filter(|(a, b)| (*a - *b).abs() > 1.0 / 255.0).count();
+        eprintln!("  x4plus halo={halo:3} max|seam| = {max:.3e}  ({over} px above 1/255)");
+        best = best.min(max);
+    }
+    eprintln!("x4plus best seam: {best:.3e}");
+}

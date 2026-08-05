@@ -260,7 +260,40 @@ differ only by an optimisation, the slow one should not be selectable — the
 place to encode that is the shared slot the block set exports, so a caller
 cannot re-derive the wrong answer. Eleven other crates still register `reg2`.
 
-## 18. Disk shape on the dev box
+## 18. A constant tuned on the toy fixture can be orders out on the real model
+
+`crates/upscale`'s tile halo is the cost/quality knob for super-resolution
+tiling: too small and each tile is computed as if the image ended at its border,
+which shows as a grid of seams. The first draft picked **16**, and the
+checkpoint-free 2-block gate agreed — max |seam| **9.2e-4**, four times below an
+8-bit quantisation step, zero visible pixels. It looked measured, because it was.
+
+On the released 23-block `x4plus` the same halo measures **7.3e-1**: three
+orders of magnitude worse, 45 676 visibly wrong pixels. The reason is
+structural — a 3x3-conv net's receptive radius grows with DEPTH (~`1 + 15*blocks
++ 1`, so ~32 input pixels at 2 blocks and ~347 at 23) — so the toy could not have
+predicted the real number no matter how carefully it was measured.
+
+Two things follow, neither specific to upscaling:
+
+* A **checkpoint-free gate is necessary and not sufficient.** It runs everywhere
+  and catches wiring, shapes and algebra; it cannot calibrate anything whose
+  scale depends on the real model's depth or width. Any constant of that kind
+  needs a measurement on the released weights, even when that gate has to skip
+  on most machines.
+* **Report the sweep, not the chosen value.** The table in `TILE_HALO`'s doc
+  comment shows both configs at every halo tried, so the next person can see
+  that the number is a trade-off with a known cost — and that hard-cropped
+  tiling on a deep net is approximate at any affordable halo, which is why the
+  real fix is a blended tiler and why `tile` defaults to 0.
+
+The comparison also had to be set up correctly to mean anything: tiled-vs-whole
+image is NOT a seam measurement, because the whole-image path lets the
+convolutions zero-pad at the image border while any tiled path replicate-pads
+it. Holding the border regime fixed — tiled vs ONE tile covering everything —
+is what isolates the seam.
+
+## 19. Disk shape on the dev box
 
 `cargo build` is ~3.7 GB of `target/`; adding `--tests --examples` across the
 workspace is **~29 GB**. That 8× jump filled the overlay to 0 bytes and

@@ -20,13 +20,18 @@
 //! recorded for one input size, so `w`/`h` are part of the residency instance
 //! key.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use capability::{
     Action, ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec,
     ParamType, Progress, Provider,
 };
+use gpu_core::Gpu;
 use serde_json::json;
+use vae::blocks::Tensors;
+
+use crate::config::RrdbConfig;
+use crate::model::Rrdb;
 
 /// The canonical served id — the upstream repo, exactly
 /// (`docs/models/naming.md`).
@@ -113,6 +118,180 @@ impl<T: Upscaler + 'static> Provider for UpscaleProvider<T> {
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
         (name == "upscale").then(|| Arc::new(UpscaleAction(self.inner.clone())) as Arc<dyn Action>)
     }
+}
+
+// ===================== the built model =====================
+
+/// Halo, in INPUT pixels, added around every tile and cropped from its output.
+///
+/// **Tiling is an APPROXIMATION, and on the released net a visible one.**
+/// RRDBNet is fully convolutional with 3x3 convs, so a pixel depends on a
+/// neighbourhood whose radius grows with depth: roughly `1 + 15*num_block + 1`
+/// input pixels, which is ~347 at `x4plus`'s 23 blocks. A halo that made hard-
+/// cropped tiling exact would be larger than any tile worth cutting, so the
+/// halo trades seam against memory rather than removing the seam.
+///
+/// Measured (`the_tile_seam_shrinks_with_the_halo`,
+/// `the_tile_seam_on_the_released_net`), tile 12, max |delta| against a single
+/// tile covering the whole image at the same halo:
+///
+/// | halo | tiny, 2 blocks | x4plus, 23 blocks |
+/// |---|---|---|
+/// | 4  | 1.0e0   | — |
+/// | 8  | 2.0e-1  | — |
+/// | 16 | 9.2e-4  | **7.3e-1** |
+/// | 32 | 3.3e-6  | 1.6e-1 |
+/// | 48 | —       | 5.9e-2 |
+///
+/// The first draft of this constant was 16, justified on the 2-block toy where
+/// it is 4x below an 8-bit step. On the model anyone actually runs it is off by
+/// nearly three orders of magnitude — `docs/lessons.md` #18. 32 is the current
+/// cost/quality point; the real fix is a BLENDED tiler (feather the overlap
+/// instead of hard-cropping it), which is why `tile` defaults to 0 and callers
+/// who can afford the memory should leave it there.
+pub const TILE_HALO: u32 = 32;
+
+/// A built RRDBNet, rebuilt when the requested input size changes.
+///
+/// The graph is recorded for one `(h, w)`, so serving arbitrary sizes means
+/// either a build per size or tiling onto one fixed build. Both are here: `tile
+/// = 0` builds for the whole image (fast, memory grows with the image), any
+/// other value builds ONE graph at the tile size and sweeps it.
+pub struct Session {
+    gpu: Gpu,
+    cfg: RrdbConfig,
+    weights: Tensors,
+    built: Mutex<Option<(u32, u32, Rrdb)>>,
+}
+
+impl Session {
+    pub fn new(gpu: Gpu, cfg: RrdbConfig, weights: Tensors) -> Session {
+        Session { gpu, cfg, weights, built: Mutex::new(None) }
+    }
+
+    pub fn config(&self) -> &RrdbConfig {
+        &self.cfg
+    }
+
+    /// Run one `[3,h,w]` CHW tile through a graph built for exactly that size,
+    /// reusing the previous build when the size is unchanged.
+    fn run_exact(&self, chw: &[f32], w: u32, h: u32) -> Vec<f32> {
+        let mut b = self.built.lock().expect("session lock");
+        if !matches!(&*b, Some((bw, bh, _)) if *bw == w && *bh == h) {
+            // Drop the old graph BEFORE building the new one: holding both
+            // doubles peak device memory for no reason.
+            *b = None;
+            *b = Some((w, h, Rrdb::new(self.gpu.share(), self.cfg.clone(), &self.weights, h, w, false)));
+        }
+        b.as_ref().expect("just built").2.run(chw)
+    }
+}
+
+/// Replicate-pad `[3,h,w]` by `pad` on every side.
+///
+/// Replication, not zeros: a zero border is a hard black edge the net would
+/// happily sharpen into the output.
+fn pad_replicate(chw: &[f32], w: u32, h: u32, pad: u32) -> (Vec<f32>, u32, u32) {
+    let (pw, ph) = (w + 2 * pad, h + 2 * pad);
+    let mut out = vec![0.0f32; 3 * (pw * ph) as usize];
+    for c in 0..3usize {
+        for y in 0..ph as usize {
+            let sy = (y as i64 - pad as i64).clamp(0, h as i64 - 1) as usize;
+            for x in 0..pw as usize {
+                let sx = (x as i64 - pad as i64).clamp(0, w as i64 - 1) as usize;
+                out[(c * ph as usize + y) * pw as usize + x] = chw[(c * h as usize + sy) * w as usize + sx];
+            }
+        }
+    }
+    (out, pw, ph)
+}
+
+impl Session {
+    /// [`Upscaler::upscale`] with the halo as a parameter, so a test can measure
+    /// how the seam responds to it instead of trusting [`TILE_HALO`].
+    pub fn upscale_with_halo(
+        &self,
+        chw: &[f32],
+        w: u32,
+        h: u32,
+        tile: u32,
+        halo: u32,
+    ) -> Result<(Vec<f32>, u32, u32), String> {
+        let s = self.cfg.scale;
+        let (ow, oh) = (w * s, h * s);
+        if chw.len() != 3 * (w as usize) * (h as usize) {
+            return Err(format!("upscale: input is {} floats, expected {}", chw.len(), 3 * w * h));
+        }
+
+        if tile == 0 {
+            return Ok((self.run_exact(chw, w, h), ow, oh));
+        }
+
+        // One graph at (tile + 2*halo) square, swept over the image. Every tile
+        // is the SAME size — including the edge ones, which are replicate-padded
+        // — so the graph is built once.
+        let side = tile + 2 * halo;
+        let mut out = vec![0.0f32; 3 * (ow as usize) * (oh as usize)];
+        let (padded, pw, ph) = pad_replicate(chw, w, h, halo);
+        let mut ty = 0u32;
+        while ty < h {
+            let mut tx = 0u32;
+            while tx < w {
+                // Cut `side` pixels starting `halo` before the tile origin.
+                let mut cut = vec![0.0f32; 3 * (side * side) as usize];
+                for c in 0..3usize {
+                    for y in 0..side as usize {
+                        let sy = ((ty + y as u32) as usize).min(ph as usize - 1);
+                        for x in 0..side as usize {
+                            let sx = ((tx + x as u32) as usize).min(pw as usize - 1);
+                            cut[(c * side as usize + y) * side as usize + x] =
+                                padded[(c * ph as usize + sy) * pw as usize + sx];
+                        }
+                    }
+                }
+                let up = self.run_exact(&cut, side, side);
+                // Crop the scaled halo and write the interior.
+                let (hs, us) = ((halo * s) as usize, (side * s) as usize);
+                for c in 0..3usize {
+                    for y in 0..(tile * s) as usize {
+                        let dy = (ty * s) as usize + y;
+                        if dy >= oh as usize {
+                            break;
+                        }
+                        for x in 0..(tile * s) as usize {
+                            let dx = (tx * s) as usize + x;
+                            if dx >= ow as usize {
+                                break;
+                            }
+                            out[(c * oh as usize + dy) * ow as usize + dx] =
+                                up[(c * us + hs + y) * us + hs + x];
+                        }
+                    }
+                }
+                tx += tile;
+            }
+            ty += tile;
+        }
+        Ok((out, ow, oh))
+    }
+}
+
+impl Upscaler for Session {
+    fn upscale(&self, chw: &[f32], w: u32, h: u32, tile: u32) -> Result<(Vec<f32>, u32, u32), String> {
+        self.upscale_with_halo(chw, w, h, tile, TILE_HALO)
+    }
+}
+
+/// Import a released checkpoint and build a session.
+pub fn load(path: &str, gpu: Gpu) -> Result<Session, String> {
+    let (tensors, shapes, src) = crate::import::read(path)?;
+    let cfg = RrdbConfig::from_tensors(&shapes)?;
+    eprintln!(
+        "upscale: {path} ({src:?}) feat={} grow={} blocks={} scale={}x",
+        cfg.num_feat, cfg.num_grow_ch, cfg.num_block, cfg.scale
+    );
+    let tensors = crate::import::validate(tensors, &cfg)?;
+    Ok(Session::new(gpu, cfg, tensors))
 }
 
 #[cfg(test)]
