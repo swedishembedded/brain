@@ -1004,6 +1004,38 @@ per-scenario table and the findings so far.
   `${VAR:-/path}` / `os.environ.get(V, "/path")` default. Adding a script means
   citing it from whatever actually uses it in the same change — an uncited
   script is indistinguishable from a dead one on the next `check/scripts` run.
+- **Validate everything crossing into brain from outside, at the point of
+  entry — structurally AND semantically.** Anything brain did not itself
+  produce is untrusted: a bench-exported training JSONL, an imported HF
+  `config.json`/`tokenizer_config.json`, a hand-written dataset, a checkpoint
+  from an unfamiliar source. "Validate" means two different things and BOTH
+  are required:
+  1. **Structural** — the right fields, present, the right types. Parse into
+     typed, `#[serde(deny_unknown_fields)]` structs with required fields as
+     plain (non-`Option`) types (serde itself then fails loudly on anything
+     missing or mistyped) — never permissive `serde_json::Value` indexing with
+     `.unwrap_or(default)` fallbacks, which silently launders a missing or
+     wrong-shaped field into a plausible-looking default. See
+     `crates/checkpoint::st::ModelCard` for the field-typing convention and
+     `crates/data::chat`'s `Wire*` structs for the full pattern on a real
+     training-data pipeline.
+  2. **Semantic** — the fields are individually well-typed but the DATA is
+     still nonsense: a tool result whose `tool_call_id` names no tool call
+     that was ever made, a tool response appearing before any assistant turn
+     called a tool, a message sequence a codec/template cannot make sense of.
+     Structural validation cannot catch this class at all — it is exactly the
+     kind of defect that "only shows up when a particular field takes some
+     particular value," the far more dangerous failure mode because it trains
+     silently on garbage instead of refusing to run.
+  Fail loudly and specifically (name the record/line/field), never coerce,
+  never drop-and-continue. Validate ONCE, at the boundary where external data
+  becomes an in-process value — not scattered re-checks downstream, and not
+  deferred to a separate, optional command a caller has to remember to run
+  (a validator nothing calls automatically is equivalent to no validator: see
+  `docs/lessons.md` §1, "a gate that never runs is worse than no gate"). This
+  generalizes the WATERTIGHT-API rule above (network input is hostile) to
+  every other boundary: file input is exactly as hostile as network input,
+  it just fails later and quieter.
 - **Evaluate honestly.** Hold the input distribution fixed; separate the metric
   (perplexity) from the task (exact-match on held-out data); see `README.md` §3.
 - **Gitignored:** `scratchpad/` (scratch weights, images, porting references),

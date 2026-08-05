@@ -340,25 +340,60 @@ struct WireFunction {
     arguments: String,
 }
 
+/// `deny_unknown_fields` typed parsing (above) is STRUCTURAL validation only
+/// -- the right fields, the right types. It cannot catch a well-typed field
+/// that is still nonsense: `arguments` that types-check as a string but
+/// isn't actually valid JSON, or a tool response whose `tool_call_id` names
+/// no tool call anyone ever made. Both are semantically malformed input a
+/// permissive parser would happily pass through to training as garbled
+/// `<tool_call>` text or a tool response in the wrong place -- the "only
+/// shows up when a particular field takes some particular value" failure
+/// mode. See AGENTS.md "Validate everything crossing into brain from
+/// outside" -- this is that rule's brain-side half for bench's export;
+/// `benchlib/datasets/formats/schema.py`'s `validate_record` (structural)
+/// plus `build.py`'s automatic tool-call-resolution check (semantic) are the
+/// bench-side half.
 fn sample_from_wire(record: WireRecord) -> Result<ChatSample, String> {
     if record.messages.is_empty() {
         return Err("\"messages\" is empty".to_string());
     }
-    let messages = record
-        .messages
-        .into_iter()
-        .map(|m| {
-            let role = match m.role {
-                WireRole::System => "system",
-                WireRole::User => "user",
-                WireRole::Assistant => "assistant",
-                WireRole::Tool => "tool",
-            };
-            let tool_calls =
-                m.tool_calls.into_iter().map(|tc| ToolCall { id: tc.id, name: tc.function.name, arguments: tc.function.arguments }).collect();
-            ChatMessage { role: role.to_string(), content: m.content, tool_calls, tool_call_id: m.tool_call_id, train: m.train }
-        })
-        .collect();
+    let mut messages = Vec::with_capacity(record.messages.len());
+    let mut known_tool_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for (i, m) in record.messages.into_iter().enumerate() {
+        let role = match m.role {
+            WireRole::System => "system",
+            WireRole::User => "user",
+            WireRole::Assistant => "assistant",
+            WireRole::Tool => "tool",
+        };
+
+        let mut tool_calls = Vec::with_capacity(m.tool_calls.len());
+        for (j, tc) in m.tool_calls.into_iter().enumerate() {
+            serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                .map_err(|e| format!("messages[{i}].tool_calls[{j}]: function.arguments is not valid JSON: {e}"))?;
+            if let Some(id) = &tc.id {
+                known_tool_call_ids.insert(id.clone());
+            }
+            tool_calls.push(ToolCall { id: tc.id, name: tc.function.name, arguments: tc.function.arguments });
+        }
+
+        if matches!(m.role, WireRole::Tool) {
+            let id = m
+                .tool_call_id
+                .as_deref()
+                .ok_or_else(|| format!("messages[{i}]: a \"tool\"-role message must carry \"tool_call_id\""))?;
+            if !known_tool_call_ids.contains(id) {
+                return Err(format!(
+                    "messages[{i}]: tool_call_id {id:?} does not match any tool_calls id from an \
+                     earlier assistant message in this sample -- a tool response with no matching \
+                     call is malformed input, not something to silently train on"
+                ));
+            }
+        }
+
+        messages.push(ChatMessage { role: role.to_string(), content: m.content, tool_calls, tool_call_id: m.tool_call_id, train: m.train });
+    }
     Ok(ChatSample { messages, tools: record.tools })
 }
 
@@ -499,6 +534,54 @@ mod tests {
             err.to_string().contains("expected a string"),
             "error should flag the type mismatch (object where a JSON-encoded string was required), got: {err}"
         );
+    }
+
+    /// SEMANTIC malformation, not structural: `arguments` type-checks as a
+    /// string (satisfying `deny_unknown_fields` + the required-String type),
+    /// but the string itself is not valid JSON syntax. A parser that only
+    /// checks shape, never content, would pass this straight through as
+    /// literal garbled text in a rendered `<tool_call>` block.
+    #[test]
+    fn from_jsonl_rejects_syntactically_invalid_json_in_tool_call_arguments() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-jsonl-badjson-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad_json.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"messages":[{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"get_weather","arguments":"{not valid json"}}],"train":true}]}"#,
+        )
+        .unwrap();
+        let err = ChatSample::from_jsonl(&path).unwrap_err();
+        assert!(err.to_string().contains("not valid JSON"), "got: {err}");
+    }
+
+    /// SEMANTIC malformation: every field individually type-checks (role is
+    /// a real role, content is a string, train is a bool), but the
+    /// CONVERSATION is nonsense -- a tool response that answers no tool call
+    /// anyone ever made. Exactly "tool responses in the right places" from
+    /// AGENTS.md's validate-at-the-boundary rule.
+    #[test]
+    fn from_jsonl_rejects_a_tool_message_with_no_tool_call_id() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-jsonl-notoolid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("no_tool_id.jsonl");
+        std::fs::write(&path, r#"{"messages":[{"role":"tool","content":"18C, sunny","train":false}]}"#).unwrap();
+        let err = ChatSample::from_jsonl(&path).unwrap_err();
+        assert!(err.to_string().contains("tool_call_id"), "got: {err}");
+    }
+
+    #[test]
+    fn from_jsonl_rejects_a_tool_message_whose_tool_call_id_matches_no_prior_call() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-jsonl-orphantoolid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("orphan_tool_id.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"messages":[{"role":"user","content":"hi","train":false},{"role":"tool","content":"18C, sunny","tool_call_id":"does-not-exist","train":false}]}"#,
+        )
+        .unwrap();
+        let err = ChatSample::from_jsonl(&path).unwrap_err();
+        assert!(err.to_string().contains("does not match any tool_calls id"), "got: {err}");
     }
 
     #[test]
