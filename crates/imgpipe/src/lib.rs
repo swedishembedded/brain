@@ -77,6 +77,10 @@ pub enum Stage {
     Invert,
     /// Blind face restoration (`crates/restore`); `w` is the fidelity dial.
     Restore { w: f32 },
+    /// Super-resolution (`crates/upscale`). A **tail**: it changes the image
+    /// size, so it may only be the LAST stage and runs AFTER the composite —
+    /// see [`Spec::parse`].
+    Upscale { tile: u32 },
 }
 
 /// Default fidelity dial when `restore` omits `w`.
@@ -91,6 +95,7 @@ fn allowed(op: &str) -> &'static [&'static str] {
         "dilate" | "erode" | "feather" => &["op", "radius"],
         "invert" => &["op"],
         "restore" => &["op", "w"],
+        "upscale" => &["op", "tile"],
         _ => &[],
     }
 }
@@ -140,6 +145,9 @@ impl Stage {
             "restore" => Stage::Restore {
                 w: o.get("w").and_then(|x| x.as_f64()).map(|x| x as f32).unwrap_or(DEFAULT_W),
             },
+            "upscale" => Stage::Upscale {
+                tile: o.get("tile").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+            },
             _ => unreachable!("guarded by `allowed`"),
         })
     }
@@ -159,7 +167,29 @@ impl Spec {
             return Err(format!("imgpipe: unknown top-level key '{bad}' (expected 'stages')"));
         }
         let arr = o.get("stages").and_then(|s| s.as_array()).ok_or("imgpipe: 'stages' must be an array")?;
-        Ok(Spec { stages: arr.iter().map(Stage::from_value).collect::<Result<_, _>>()? })
+        let stages: Vec<Stage> = arr.iter().map(Stage::from_value).collect::<Result<_, _>>()?;
+
+        // `upscale` is a TAIL, and the restriction is structural rather than
+        // fussy: every other stage operates at the source resolution and shares
+        // `(h, w)` with the working mask, so a size change part-way through
+        // would leave the mask describing a different grid than the image. The
+        // composite therefore happens at source size and the upscale runs after
+        // it. Rejecting a mid-list `upscale` here is much better than silently
+        // resampling a mask nobody asked to resample.
+        if let Some(i) = stages.iter().position(|s| matches!(s, Stage::Upscale { .. })) {
+            if i + 1 != stages.len() {
+                return Err(format!(
+                    "imgpipe: 'upscale' changes the image size, so it must be the LAST stage \
+                     (it is stage {} of {})",
+                    i + 1,
+                    stages.len()
+                ));
+            }
+            if stages.iter().filter(|s| matches!(s, Stage::Upscale { .. })).count() > 1 {
+                return Err("imgpipe: at most one 'upscale' stage".into());
+            }
+        }
+        Ok(Spec { stages })
     }
 
     /// How many stages replace image content. Zero means no composite is needed
@@ -232,6 +262,8 @@ impl<'a> Pipeline<'a> {
                     let out = imaging::mask::invert(&ctx, &m, m_shape);
                     mask_host = ctx.download(&out, m_shape.numel());
                 }
+                // The tail runs after the composite; the loop skips it.
+                Stage::Upscale { .. } => {}
                 Stage::Restore { w: dial } => {
                     cur_host = self.restore(&cur_host, w, h, *dial).map_err(|e| format!("stage {i}: {e}"))?;
                     if cur_host.len() != img_shape.numel() as usize {
@@ -257,6 +289,28 @@ impl<'a> Pipeline<'a> {
             let out = imaging::mask::composite(&ctx, &edited, &orig, &m3, img_shape);
             ctx.download(&out, img_shape.numel())
         };
+
+        // The upscale tail, AFTER the composite: every stage above works at the
+        // source resolution, so compositing first keeps the mask and the image
+        // on one grid. `Spec::parse` has already guaranteed there is at most one
+        // and that it is last.
+        if let Some(Stage::Upscale { tile }) = spec.stages.last() {
+            let (up, ow, oh) = self.upscale(&image, w, h, *tile)?;
+            // Resize the mask to match, so the returned mask still describes the
+            // returned image. NEAREST, not bilinear: the mask is the record of
+            // which pixels were allowed to move, and interpolating it would
+            // invent fractional coverage at the edges that no stage produced.
+            let m = ctx.upload("imgpipe.mask", &mask_host);
+            let (mup, mshape) = ctx.resize(
+                &m,
+                m_shape,
+                oh,
+                ow,
+                imaging::Filter::Nearest,
+                imaging::AlignCorners::HalfPixel,
+            );
+            return Ok(Outcome { image: up, mask: ctx.download(&mup, mshape.numel()), w: ow, h: oh });
+        }
         Ok(Outcome { image, mask: mask_host, w, h })
     }
 
@@ -274,6 +328,22 @@ impl<'a> Pipeline<'a> {
         decode_plane(b, w, h)
     }
 
+    /// Run the upscale tail through the capability layer, like every other
+    /// stage — the pipeline never links a model crate directly.
+    fn upscale(&self, chw: &[f32], w: u32, h: u32, tile: u32) -> Result<(Vec<f32>, u32, u32), String> {
+        let hwc = imaging::pixels::chw_to_hwc(chw, 3, h as usize, w as usize);
+        let inv = Invocation::new()
+            .set("tile", serde_json::json!(tile))
+            .blob("image", capability::blob::image_blob(&hwc, w, h, 3));
+        let out = self.registry.run("ai-forever/Real-ESRGAN", "upscale", inv, &mut |_| {})?;
+        let b = out.blobs.get("image").ok_or("upscale returned no 'image' blob")?;
+        // The output size is the model's to report — x4 for x4plus, x2 for
+        // x2plus — so read it back rather than assuming a factor here.
+        let (ow, oh) = blob_wh(b).ok_or("upscale's image blob carries no w/h meta")?;
+        let hwc = decode_rgb(b, ow, oh)?;
+        Ok((imaging::pixels::hwc_to_chw(&hwc, 3, oh as usize, ow as usize), ow, oh))
+    }
+
     fn restore(&self, chw: &[f32], w: u32, h: u32, dial: f32) -> Result<Vec<f32>, String> {
         let hwc = imaging::pixels::chw_to_hwc(chw, 3, h as usize, w as usize);
         let inv = Invocation::new()
@@ -284,6 +354,11 @@ impl<'a> Pipeline<'a> {
         let hwc = decode_rgb(b, w, h)?;
         Ok(imaging::pixels::hwc_to_chw(&hwc, 3, h as usize, w as usize))
     }
+}
+
+/// `(w, h)` from a blob's meta, which is where `image_blob` records them.
+fn blob_wh(b: &Blob) -> Option<(u32, u32)> {
+    Some((b.meta.get("w")?.as_u64()? as u32, b.meta.get("h")?.as_u64()? as u32))
 }
 
 fn as_f32(b: &Blob) -> Vec<f32> {
@@ -373,6 +448,33 @@ mod tests {
         }
     }
 
+    /// A "2x upscaler" that doubles by pixel replication, so the tail's
+    /// plumbing (size change, mask resize, post-composite ordering) is
+    /// checkable without a checkpoint.
+    struct StubUpscale;
+    impl Action for StubUpscale {
+        fn spec(&self) -> ActionSpec {
+            ActionSpec::new("upscale", "stub")
+                .param(capability::ParamSpec::new("tile", capability::ParamType::Int, "tile"))
+                .input(BlobSpec::new("image", Media::Image, "i"))
+                .output(BlobSpec::new("image", Media::Image, "o"))
+        }
+        fn run(&self, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+            let (hwc, w, h) = capability::blob::decode_image(inv, "image")?;
+            let (ow, oh) = (w * 2, h * 2);
+            let mut out = vec![0.0f32; (3 * ow * oh) as usize];
+            for y in 0..oh as usize {
+                for x in 0..ow as usize {
+                    for c in 0..3usize {
+                        out[(y * ow as usize + x) * 3 + c] =
+                            hwc[((y / 2) * w as usize + x / 2) * 3 + c];
+                    }
+                }
+            }
+            Ok(CapOutcome::new().blob("image", capability::blob::image_blob(&out, ow, oh, 3)))
+        }
+    }
+
     struct StubProvider(&'static str, Arc<dyn Action>);
     impl Provider for StubProvider {
         fn manifest(&self) -> Manifest {
@@ -387,6 +489,7 @@ mod tests {
         let mut r = Registry::new();
         r.register(Arc::new(StubProvider("sam2", Arc::new(seg))));
         r.register(Arc::new(StubProvider("restore", Arc::new(StubRestore))));
+        r.register(Arc::new(StubProvider("ai-forever/Real-ESRGAN", Arc::new(StubUpscale))));
         r
     }
 
@@ -464,5 +567,78 @@ mod tests {
         assert!(Spec::parse(r#"{"stages":[{"op":"enhance"}]}"#).is_err());
         // ... and so would a misspelled parameter.
         assert!(Spec::parse(r#"{"stages":[{"op":"dilate","radius_px":3}]}"#).is_err());
+    }
+
+    /// `upscale` changes the image size, so it may only be last. A mid-list one
+    /// is an error naming its position, not a silent reorder.
+    #[test]
+    fn upscale_must_be_the_last_stage() {
+        let e = Spec::parse(r#"{"stages":[{"op":"upscale"},{"op":"invert"}]}"#).unwrap_err();
+        assert!(e.contains("LAST stage") && e.contains("stage 1 of 2"), "{e}");
+        assert!(Spec::parse(r#"{"stages":[{"op":"invert"},{"op":"upscale"}]}"#).is_ok());
+    }
+
+    #[test]
+    fn at_most_one_upscale() {
+        let e = Spec::parse(r#"{"stages":[{"op":"upscale"},{"op":"upscale"}]}"#).unwrap_err();
+        assert!(e.contains("LAST stage") || e.contains("at most one"), "{e}");
+    }
+
+    /// The tail runs AFTER the composite, and the returned mask is resized with
+    /// it — otherwise the mask would describe a different grid than the image it
+    /// is supposed to explain.
+    #[test]
+    fn the_tail_scales_the_image_and_its_mask_together() {
+        let (w, h) = (8u32, 6u32);
+        let gpu = gpu_core::testgpu::dev(imaging::PIPELINES);
+        let reg = registry(StubSeg { x0: 2, y0: 1, x1: 6, y1: 4 });
+        let p = Pipeline::new(&gpu, &reg);
+        let src = ramp(w, h);
+
+        let spec = Spec::parse(r#"{"stages":[{"op":"segment"},{"op":"restore"},{"op":"upscale"}]}"#).unwrap();
+        let out = p.run(&spec, &src, w, h).expect("run");
+
+        assert_eq!((out.w, out.h), (w * 2, h * 2), "the tail's size is reported");
+        assert_eq!(out.image.len(), (3 * out.w * out.h) as usize);
+        assert_eq!(out.mask.len(), (out.w * out.h) as usize, "the mask travels with the image");
+
+        // The stub doubles by replication, so every 2x2 output block must equal
+        // the source pixel it came from — which pins that the tail ran on the
+        // COMPOSITED image, not on the pre-composite one.
+        let base = p.run(&Spec::parse(r#"{"stages":[{"op":"segment"},{"op":"restore"}]}"#).unwrap(), &src, w, h).unwrap();
+        for y in 0..out.h as usize {
+            for x in 0..out.w as usize {
+                for c in 0..3usize {
+                    let got = out.image[(c * out.h as usize + y) * out.w as usize + x];
+                    let want = base.image[(c * h as usize + y / 2) * w as usize + x / 2];
+                    assert_eq!(got, want, "pixel c{c} y{y} x{x}");
+                }
+            }
+        }
+    }
+
+    /// A mask-only pipeline with a tail still upscales: there is nothing to
+    /// composite, and the input must come back at the new size unedited.
+    #[test]
+    fn a_tail_without_edits_still_scales_the_untouched_input() {
+        let (w, h) = (4u32, 4u32);
+        let gpu = gpu_core::testgpu::dev(imaging::PIPELINES);
+        let reg = registry(StubSeg { x0: 1, y0: 1, x1: 3, y1: 3 });
+        let p = Pipeline::new(&gpu, &reg);
+        let src = ramp(w, h);
+        let spec = Spec::parse(r#"{"stages":[{"op":"segment"},{"op":"upscale"}]}"#).unwrap();
+        let out = p.run(&spec, &src, w, h).expect("run");
+        assert_eq!((out.w, out.h), (8, 8));
+        for y in 0..8usize {
+            for x in 0..8usize {
+                for c in 0..3usize {
+                    assert_eq!(
+                        out.image[(c * 8 + y) * 8 + x],
+                        src[(c * h as usize + y / 2) * w as usize + x / 2],
+                        "c{c} y{y} x{x}"
+                    );
+                }
+            }
+        }
     }
 }

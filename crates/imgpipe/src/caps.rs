@@ -46,13 +46,16 @@ pub const PIPELINES: &[(&str, &str)] = imaging::PIPELINES;
 fn run_spec() -> ActionSpec {
     ActionSpec::new(
         "run",
-        "compose segmentation, mask refinement and restoration into one call; pixels outside the mask are returned bit-identical",
+        "compose segmentation, mask refinement, restoration and an optional upscale tail into one call; \
+         pixels outside the mask are returned bit-identical AT SOURCE RESOLUTION — an `upscale` tail runs \
+         after the composite and resamples everything, so the guarantee is about what the composite wrote, \
+         not about the final pixels",
     )
     .param(
         ParamSpec::new(
             "stages",
             ParamType::Str,
-            r#"JSON stage list, e.g. {"stages":[{"op":"segment","points":[[120,80]]},{"op":"dilate","radius":4},{"op":"restore","w":0.7}]}"#,
+            r#"JSON stage list, e.g. {"stages":[{"op":"segment","points":[[120,80]]},{"op":"dilate","radius":4},{"op":"restore","w":0.7},{"op":"upscale"}]}; `upscale` changes the image size so it must be LAST"#,
         )
         .required(),
     )
