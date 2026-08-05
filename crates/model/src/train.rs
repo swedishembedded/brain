@@ -159,6 +159,29 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
         align_to_lines: opts.align_to_lines || has_token_mask,
         newline_token: if has_token_mask { Some(data::chat::ENDOFTEXT) } else { newline_id },
     };
+    // A split shorter than `block_size` has no valid sampling window at all
+    // (`TokenDataset::sample_start`'s `data.len() - block_size - 1` requires
+    // `data.len() > block_size`) -- validated HERE, at the point this data
+    // enters the training loop, rather than left to surface as a
+    // `data.len() - block_size` integer underflow deep in a later batch draw
+    // (AGENTS.md: validate everything crossing into brain from outside, at
+    // the point of entry). An EMPTY split (0 samples, e.g. no
+    // `validation.jsonl`) is a deliberate, supported "skip this split"
+    // signal elsewhere in the codebase and is not an error here.
+    let too_short = |label: &str, tok: &[u32]| -> std::io::Result<()> {
+        if !tok.is_empty() && tok.len() <= batch_cfg.block_size {
+            return Err(std::io::Error::other(format!(
+                "{label} split has {} token(s), too few for block_size {} (need more than block_size); \
+                 reduce --block or add more {label} data",
+                tok.len(),
+                batch_cfg.block_size
+            )));
+        }
+        Ok(())
+    };
+    too_short("train", &train_tok)?;
+    too_short("validation", &val_tok)?;
+
     let mk = |tok: Vec<u32>, mask: Option<Vec<bool>>| match mask {
         Some(m) if m.len() == tok.len() => TokenDataset::new_with_mask(tok, m, &batch_cfg),
         _ => TokenDataset::new(tok, &batch_cfg),
@@ -384,5 +407,62 @@ mod tests {
         let mut rng = Rng::new(0);
         let logits = [0.1, 5.0, 0.2, -1.0];
         assert_eq!(sample_logits(&logits, 0.0, 0, &mut rng), 1);
+    }
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("brain-model-train-load-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The exact defect a real `brain qwen finetune --lora` run hit: a
+    /// dataset shorter than `block_size` used to load without error and then
+    /// panic much later, deep in `TokenDataset::sample_start`, with a
+    /// `data.len() - block_size - 1` usize underflow surfacing as a bizarre
+    /// "index out of bounds" on a near-u64::MAX index -- nothing about that
+    /// message points back at "your dataset is too small." `load_dataset`
+    /// must instead reject it right here, by name, at the point this data
+    /// enters the training loop.
+    #[test]
+    fn load_dataset_rejects_a_train_split_shorter_than_block_size_instead_of_panicking_later() {
+        let dir = tmp("train-too-short");
+        let tokens: Vec<u32> = (0..10).collect(); // 10 tokens, block_size will be 64
+        binio::write_u32_bin(&dir.join("train.u32.bin"), &tokens).unwrap();
+        binio::write_u32_bin(&dir.join("val.u32.bin"), &[]).unwrap();
+        std::fs::write(dir.join("meta.json"), Meta::vocab_only(32)).unwrap();
+
+        let opts = FitOpts { block_size: 64, ..Default::default() };
+        let Err(err) = load_dataset(&dir, &opts) else { panic!("expected an error for a too-short train split") };
+        let msg = err.to_string();
+        assert!(msg.contains("train"), "{msg}");
+        assert!(msg.contains("10"), "{msg}");
+        assert!(msg.contains("64"), "{msg}");
+    }
+
+    #[test]
+    fn load_dataset_accepts_an_empty_validation_split_as_the_deliberate_skip_eval_signal() {
+        let dir = tmp("val-empty-ok");
+        let tokens: Vec<u32> = (0..100).collect();
+        binio::write_u32_bin(&dir.join("train.u32.bin"), &tokens).unwrap();
+        binio::write_u32_bin(&dir.join("val.u32.bin"), &[]).unwrap();
+        std::fs::write(dir.join("meta.json"), Meta::vocab_only(32)).unwrap();
+
+        let opts = FitOpts { block_size: 16, ..Default::default() };
+        load_dataset(&dir, &opts).expect("an empty validation split must not be treated as too-short");
+    }
+
+    #[test]
+    fn load_dataset_rejects_a_nonempty_validation_split_shorter_than_block_size() {
+        let dir = tmp("val-too-short");
+        let train: Vec<u32> = (0..100).collect();
+        let val: Vec<u32> = (0..5).collect();
+        binio::write_u32_bin(&dir.join("train.u32.bin"), &train).unwrap();
+        binio::write_u32_bin(&dir.join("val.u32.bin"), &val).unwrap();
+        std::fs::write(dir.join("meta.json"), Meta::vocab_only(32)).unwrap();
+
+        let opts = FitOpts { block_size: 16, ..Default::default() };
+        let Err(err) = load_dataset(&dir, &opts) else { panic!("expected an error for a too-short validation split") };
+        assert!(err.to_string().contains("validation"), "{err}");
     }
 }
