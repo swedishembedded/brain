@@ -70,31 +70,78 @@ fn groups(steps: &[Step]) -> Vec<(usize, usize, usize)> {
 fn report(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> f64 {
     let total = best_of(gpu, steps, reps);
     let gs = groups(steps);
-    let mut per: HashMap<usize, (f64, usize)> = HashMap::new();
+    // Per kind: time, call count, and the ANALYTICAL FLOP/byte volume from
+    // `gpu_core::cost` — the repo's own accounting, so the rate below is
+    // comparable with every other number in docs/performance/.
+    let mut per: HashMap<usize, (f64, usize, u64, u64, bool)> = HashMap::new();
     for (k, start, len) in &gs {
         let t = best_of(gpu, &steps[*start..*start + *len], reps);
-        let e = per.entry(*k).or_insert((0.0, 0));
+        let name = gpu.kernel_name(*k).unwrap_or("?");
+        let (mut fl, mut by, mut covered) = (0u64, 0u64, true);
+        for st in &steps[*start..*start + *len] {
+            let m = st.meta();
+            let params = m.as_ref().and_then(|m| m.params.as_deref());
+            match gpu_core::cost::kernel_cost(name, params, m.as_ref().map(|m| m.threads).unwrap_or(0)) {
+                Some(c) => {
+                    fl += c.flops;
+                    by += c.bytes;
+                }
+                None => covered = false,
+            }
+        }
+        let e = per.entry(*k).or_insert((0.0, 0, 0, 0, true));
         e.0 += t;
         e.1 += *len;
+        e.2 += fl;
+        e.3 += by;
+        e.4 &= covered;
     }
-    let mut rows: Vec<(String, f64, usize)> = per
+    let mut rows: Vec<(String, f64, usize, u64, u64, bool)> = per
         .into_iter()
-        .map(|(k, (t, n))| (gpu.kernel_name(k).unwrap_or("?").to_string(), t, n))
+        .map(|(k, (t, n, fl, by, cov))| (gpu.kernel_name(k).unwrap_or("?").to_string(), t, n, fl, by, cov))
         .collect();
     rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     let summed: f64 = rows.iter().map(|r| r.1).sum();
+    let tot_flops: u64 = rows.iter().map(|r| r.3).sum();
 
     println!("\n=== {label}: {} dispatches, {:.2} ms ===", steps.len(), total * 1e3);
-    println!("{:<26} {:>9} {:>7} {:>7}  {:>9}", "kernel", "ms", "n", "%", "ms/call");
-    println!("{}", "-".repeat(64));
-    for (name, t, n) in rows.iter().take(14) {
+    println!(
+        "{:<24} {:>9} {:>6} {:>6} {:>9} {:>11} {:>7} {:>9}",
+        "kernel", "ms", "n", "%", "ms/call", "GFLOP/s", "%peak", "GB/s"
+    );
+    println!("{}", "-".repeat(88));
+    for (name, t, n, fl, by, cov) in rows.iter().take(14) {
+        // A compute rate is only meaningful where `cost` has a formula. An
+        // UNCOVERED kernel prints "-" rather than a zero that reads as slow.
+        let gfs = if *cov && *fl > 0 { format!("{:.1}", *fl as f64 / t / 1e9) } else { "-".into() };
+        let pk = if *cov && *fl > 0 {
+            format!("{:.1}%", 100.0 * (*fl as f64 / t / 1e9) / (PEAK_TFLOPS * 1e3))
+        } else {
+            "-".into()
+        };
+        let gbs = if *cov && *by > 0 { format!("{:.1}", *by as f64 / t / 1e9) } else { "-".into() };
         println!(
-            "{:<26} {:>9.2} {:>7} {:>6.1}% {:>9.3}",
+            "{:<24} {:>9.2} {:>6} {:>5.1}% {:>9.3} {:>11} {:>7} {:>9}",
             name,
             t * 1e3,
             n,
             100.0 * t / summed,
-            t * 1e3 / *n as f64
+            t * 1e3 / *n as f64,
+            gfs,
+            pk,
+            gbs
+        );
+    }
+    if tot_flops > 0 {
+        println!(
+            "{:<24} {:>9.2} {:>6} {:>6} {:>9} {:>11.1} {:>6.1}%",
+            "WHOLE PASS",
+            total * 1e3,
+            steps.len(),
+            "",
+            "",
+            tot_flops as f64 / total / 1e9,
+            100.0 * (tot_flops as f64 / total / 1e9) / (PEAK_TFLOPS * 1e3)
         );
     }
     println!("{}", "-".repeat(64));

@@ -128,7 +128,7 @@ pub const MATMUL_REG3_SLOT: usize = K_MATMUL;
 /// cooperative twin anywhere in the tree — that is the documented §C.2 perf gap
 /// in `docs/kernel-checklist.md`, NOT a correctness gate, because none of them
 /// uses `workgroupBarrier()` and all three are exact on `backend-cpu`.
-pub const BWD_KERNELS: [(&str, &str); 17] = [
+pub const BWD_KERNELS: [(&str, &str); 18] = [
     ("conv2d_dx", kernels::CONV2D_DX),
     ("conv2d_dw", kernels::CONV2D_DW),
     ("bias_grad", kernels::BIAS_GRAD),
@@ -148,6 +148,11 @@ pub const BWD_KERNELS: [(&str, &str); 17] = [
     // `BwdIds::at(base)` offset stays valid.
     ("matmul_dx_reg", kernels::MATMUL_DX_REG),
     ("col2im", kernels::COL2IM),
+    // ...and the weight gradient's. `im2col_at` is NOT here: the forward set
+    // already registers it, and a second definition of the same kernel is what
+    // the CPU JIT rejects as a duplicate. The reverse reuses the forward's slot
+    // through `super::K_IM2COL_AT`, exactly as it already does for `nchw_nlc`.
+    ("matmul_dw_reg", kernels::MATMUL_DW_REG),
 ];
 
 /// Minimum output channels for the LOWERED conv input gradient.

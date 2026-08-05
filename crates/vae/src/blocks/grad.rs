@@ -33,7 +33,7 @@
 //!    why train mode disables the activation pool: the forward buffer *is* the
 //!    cache.
 
-use super::{Op, K_NCHW_NLC, K_NLC_NCHW};
+use super::{Op, K_IM2COL_AT, K_NCHW_NLC, K_NLC_NCHW};
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use std::collections::HashMap;
 
@@ -55,6 +55,7 @@ const B_ATTN_DQ: usize = 13;
 const B_ATTN_DK: usize = 14;
 const B_MATMUL_DX_REG: usize = 15;
 const B_COL2IM: usize = 16;
+const B_MATMUL_DW_REG: usize = 17;
 
 /// Where the caller placed [`super::BWD_KERNELS`] in its kernel set.
 #[derive(Clone, Copy)]
@@ -164,14 +165,50 @@ impl Trace {
                 let Some(dy) = r.get(y) else { return };
                 let p = [1, *cin, *h, *w_in, *cout, *k, *stride, *pad, *ho, *wo];
                 let (hw, n_in) = (ho * wo, cin * h * w_in);
+                let cinkk = cin * k * k;
+                let lowered = r.gpu.caps().workgroup_reductions && *cout >= super::GEMM_CONV_BWD_MIN_COUT;
+
                 // dW (accumulates) then db, both from the conv's own input.
-                r.push(r.gpu.step(r.ids.k(B_CONV_DW), &[&dy, x, grads.g(w)], &p, cout * cin * k * k));
+                //
+                // `conv2d_dw` reduces over EVERY output position (Ho*Wo) per
+                // weight element on one lane — 53% of a VQGAN training step
+                // once `conv2d_dx` was lowered. The same lowering applies:
+                //
+                //   col[HW, CinKK] = im2col(x)                     (im2col_at)
+                //   dW[Cout,CinKK] += dY[HW,Cout]^T . col[HW,CinKK] (matmul_dw_reg)
+                //
+                // and `matmul_dw_reg` ACCUMULATES into its output, which is
+                // exactly the "a parameter gradient accumulates" rule this file
+                // opens with — no extra axpy, no clear.
+                // ONE `nchw_nlc` of dY per conv. All three consumers want the
+                // same [HW, Cout] view — dW's GEMM, `bias_grad`, and dX's GEMM —
+                // and transposing per consumer showed up immediately as
+                // `nchw_nlc` doubling to 182 calls in the profile.
+                let t = r.tmp((cout * hw) as u64);
+                r.push(r.gpu.step(K_NCHW_NLC, &[&dy, &t], &[cout * hw, *cout, hw], cout * hw));
+
+                if lowered {
+                    let col = r.tmp((hw * cinkk) as u64);
+                    r.push(r.gpu.step(
+                        K_IM2COL_AT,
+                        &[x, &col],
+                        &[*cin, *h, *w_in, *k, *stride, *pad, *ho, *wo, cinkk, 0, hw],
+                        hw * cinkk,
+                    ));
+                    r.push(r.gpu.step(
+                        r.ids.k(B_MATMUL_DW_REG),
+                        &[&t, &col, grads.g(w)],
+                        &[hw, cinkk, *cout],
+                        cout.div_ceil(128) * cinkk.div_ceil(128) * 256,
+                    ));
+                    r.give((hw * cinkk) as u64, col);
+                } else {
+                    r.push(r.gpu.step(r.ids.k(B_CONV_DW), &[&dy, x, grads.g(w)], &p, cout * cin * k * k));
+                }
                 // `bias_grad` reduces a [rows, features] buffer down its rows,
                 // but `dy` is NCHW = feature-major. One `nchw_nlc` puts the
                 // channels last; the alternative would be a new NCHW bias
                 // reduction kernel, and this composition needs neither.
-                let t = r.tmp((cout * hw) as u64);
-                r.push(r.gpu.step(K_NCHW_NLC, &[&dy, &t], &[cout * hw, *cout, hw], cout * hw));
                 r.push(r.gpu.step(r.ids.k(B_BIAS_GRAD), &[&t, grads.g(b)], &[hw, *cout], *cout));
 
                 // dX (assigns) -> accumulate. Two paths:
@@ -190,9 +227,7 @@ impl Trace {
                 // The NLC transpose the GEMM needs is `t`, which bias_grad has
                 // already built — so the fast path costs one transpose less than
                 // it looks.
-                let cinkk = cin * k * k;
                 let dx = r.tmp(n_in as u64);
-                let lowered = r.gpu.caps().workgroup_reductions && *cout >= super::GEMM_CONV_BWD_MIN_COUT;
                 if lowered {
                     let dcol = r.tmp((hw * cinkk) as u64);
                     r.push(r.gpu.step(
