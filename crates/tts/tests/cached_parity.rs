@@ -36,7 +36,7 @@ fn ready() -> bool {
         let CKPT = testdata("tts/ckpt/Qwen3-TTS-12Hz-0.6B-Base");
         let TALKER = repo_path("out/tts/talker.safetensors");
         let MTP = repo_path("out/tts/mtp.safetensors");
-    !std::env::var("MOE_SKIP_GPU_TESTS").is_ok()
+    std::env::var("MOE_SKIP_GPU_TESTS").is_err()
         && std::path::Path::new(&TALKER).exists()
         && std::path::Path::new(&MTP).exists()
         && std::path::Path::new(&CKPT).join("config.json").exists()

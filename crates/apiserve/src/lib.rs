@@ -123,22 +123,6 @@ fn parse_admit_deadline(raw: Option<&str>) -> std::time::Duration {
     }
 }
 
-#[cfg(test)]
-mod deadline_tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[test]
-    fn admit_deadline_override_parses_positive_ms_else_default() {
-        assert_eq!(parse_admit_deadline(Some("500")), Duration::from_millis(500));
-        assert_eq!(parse_admit_deadline(Some("  250 ")), Duration::from_millis(250));
-        assert_eq!(parse_admit_deadline(None), DEFAULT_ADMIT_DEADLINE);
-        assert_eq!(parse_admit_deadline(Some("")), DEFAULT_ADMIT_DEADLINE);
-        assert_eq!(parse_admit_deadline(Some("0")), DEFAULT_ADMIT_DEADLINE);
-        assert_eq!(parse_admit_deadline(Some("nope")), DEFAULT_ADMIT_DEADLINE);
-    }
-}
-
 /// The shared 404 for any unrouted path, in the surface's dialect.
 async fn fallback(State(state): State<AppState>) -> ApiError {
     ApiError::not_found(state.provider, "no such route")
@@ -227,4 +211,20 @@ fn serve_all_inner(
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn admit_deadline_override_parses_positive_ms_else_default() {
+        assert_eq!(parse_admit_deadline(Some("500")), Duration::from_millis(500));
+        assert_eq!(parse_admit_deadline(Some("  250 ")), Duration::from_millis(250));
+        assert_eq!(parse_admit_deadline(None), DEFAULT_ADMIT_DEADLINE);
+        assert_eq!(parse_admit_deadline(Some("")), DEFAULT_ADMIT_DEADLINE);
+        assert_eq!(parse_admit_deadline(Some("0")), DEFAULT_ADMIT_DEADLINE);
+        assert_eq!(parse_admit_deadline(Some("nope")), DEFAULT_ADMIT_DEADLINE);
+    }
 }

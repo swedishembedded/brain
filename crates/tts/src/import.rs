@@ -226,7 +226,7 @@ pub fn import_talker(hf_dir: &str, out_path: &str) -> Result<(), String> {
     let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg_json, None)
         .map_err(|e| format!("import: creating output: {e}"))?;
     let reader = open_source(dir)?;
-    let (mapped, dropped) = stream_container(&reader, |n| talker_hf_to_brain(n), &mut writer)?;
+    let (mapped, dropped) = stream_container(&reader, talker_hf_to_brain, &mut writer)?;
     writer.finish().map_err(|e| format!("import: {e}"))?;
     eprintln!(
         "imported Talker: {} tensors -> {out_path} ({mapped} HF talker.* tensors mapped, {dropped} dropped)",
@@ -247,7 +247,7 @@ pub fn import_mtp(hf_dir: &str, out_path: &str) -> Result<(), String> {
     let mut writer = checkpoint::weightio::StWriter::create(out_path, &plan, &cfg.to_json(), None)
         .map_err(|e| format!("import: creating output: {e}"))?;
     let reader = open_source(dir)?;
-    let (mapped, dropped) = stream_container(&reader, |n| mtp_hf_to_brain(n), &mut writer)?;
+    let (mapped, dropped) = stream_container(&reader, mtp_hf_to_brain, &mut writer)?;
     writer.finish().map_err(|e| format!("import: {e}"))?;
     eprintln!(
         "imported MTP: {} tensors -> {out_path} ({mapped} HF code_predictor.* tensors mapped, {dropped} dropped)",

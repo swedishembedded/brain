@@ -99,7 +99,7 @@ pub fn resolve_embed(exec: &Executor, model: &str) -> bool {
 /// model — so any model exposing a text→image action serves here (z-image/flux2 name
 /// it `text2image`).
 pub fn resolve_image(exec: &Executor, model: &str) -> Option<String> {
-    exec.manifests().iter().find(|m| m.model == model && api_caps(m).image).and_then(|m| text2image_action(&m))
+    exec.manifests().iter().find(|m| m.model == model && api_caps(m).image).and_then(text2image_action)
 }
 
 /// Strip a leading `"<segment>/"` provider namespace from an OpenRouter-style model

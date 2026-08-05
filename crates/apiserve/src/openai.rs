@@ -502,7 +502,7 @@ fn image_b64_from_outcome(o: &capability::Outcome) -> Result<String, String> {
         return Err("image blob is not a whole number of f32 samples".into());
     }
     let samples: Vec<f32> = blob.bytes.chunks_exact(4).map(|q| f32::from_le_bytes([q[0], q[1], q[2], q[3]])).collect();
-    if samples.len() % px != 0 {
+    if !samples.len().is_multiple_of(px) {
         return Err(format!("image blob ({} samples) is not a whole number of {w}×{h} planes", samples.len()));
     }
     let c = samples.len() / px;

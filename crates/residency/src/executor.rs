@@ -965,7 +965,7 @@ mod tests {
         let exec = Executor::start(vec![], budgets, Policy::default());
         assert!(exec.manifests().is_empty());
 
-        let model: Arc<dyn ResidentModel> = Arc::new(Slow { name: "late".into(), vram: 1 * GB, ms: 5, builds: builds.clone() });
+        let model: Arc<dyn ResidentModel> = Arc::new(Slow { name: "late".into(), vram: GB, ms: 5, builds: builds.clone() });
         exec.register(model);
 
         // The manifest snapshot reflects the registration synchronously --

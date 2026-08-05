@@ -270,6 +270,193 @@ impl PerfTarget for PagedLlmTarget {
     }
 }
 
+// ===================== residency executor seam =====================
+
+/// Drives a [`residency::Executor`] — the scheduler + budgets + per-device
+/// lanes that production serving (D-Bus) uses — so concurrency numbers reflect
+/// brain's real batching/placement, not a synchronous provider mutex.
+///
+/// `submit` hands the job to the executor immediately (arrivals are genuinely async);
+/// emissions come back on a channel from the job callbacks: the first
+/// `Progress` marks `Admitted` (the lane started the group this job is in),
+/// the reply marks `Artifact` + `Done` (one-shot models) or `Failed`.
+/// `step` drains the channel; the executor's own threads make the progress.
+///
+/// For a **streaming** resident action ([`ExecutorTarget::new_streaming`]) the
+/// in-flight `Progress` callbacks themselves are the artifact timeline — the
+/// same contract [`CapabilityTarget`] gives a `Provider` — filtered by a
+/// predicate so bookkeeping callbacks ("encoding", "decoding") never count as
+/// output units.
+pub struct ExecutorTarget {
+    exec: residency::Executor,
+    info: TargetInfo,
+    model: String,
+    action: String,
+    build: Box<dyn Fn(&PerfRequest) -> Invocation>,
+    /// `Some` = streaming: a `Progress` this predicate accepts is timestamped
+    /// as one `Artifact`. `None` = one-shot: the reply is the single artifact.
+    is_artifact: Option<Arc<dyn Fn(&Progress) -> bool + Send + Sync>>,
+    rx: std::sync::mpsc::Receiver<Emission>,
+    tx: std::sync::mpsc::Sender<Emission>,
+    inflight: std::collections::HashSet<ReqId>,
+    next: ReqId,
+}
+
+impl ExecutorTarget {
+    pub fn new(
+        exec: residency::Executor,
+        model: &str,
+        action: &str,
+        artifact_unit: &str,
+        info_extra: Vec<(String, serde_json::Value)>,
+        build: Box<dyn Fn(&PerfRequest) -> Invocation>,
+    ) -> ExecutorTarget {
+        let mut info = TargetInfo::new(model, artifact_unit);
+        info.config = info_extra;
+        ExecutorTarget::build(exec, model, action, info, build, None)
+    }
+
+    /// Streaming variant: every `Progress` accepted by `is_artifact` becomes an
+    /// `Artifact` emission at its callback time, so a multi-step resident model
+    /// (diffusion denoise steps, TTS chunks) yields a real TTFA/IAL timeline
+    /// through the real scheduler. `job_model` routes to the resident's
+    /// manifest id; `info.model` may name the variant more precisely. An action
+    /// that streams no accepted progress still records its reply as one
+    /// artifact (one-shot collapse, as [`CapabilityTarget`] does).
+    pub fn new_streaming(
+        exec: residency::Executor,
+        job_model: &str,
+        action: &str,
+        info: TargetInfo,
+        build: Box<dyn Fn(&PerfRequest) -> Invocation>,
+        is_artifact: Arc<dyn Fn(&Progress) -> bool + Send + Sync>,
+    ) -> ExecutorTarget {
+        ExecutorTarget::build(exec, job_model, action, info, build, Some(is_artifact))
+    }
+
+    fn build(
+        exec: residency::Executor,
+        job_model: &str,
+        action: &str,
+        info: TargetInfo,
+        build: Box<dyn Fn(&PerfRequest) -> Invocation>,
+        is_artifact: Option<Arc<dyn Fn(&Progress) -> bool + Send + Sync>>,
+    ) -> ExecutorTarget {
+        let (tx, rx) = std::sync::mpsc::channel();
+        ExecutorTarget {
+            exec,
+            info,
+            model: job_model.to_string(),
+            action: action.to_string(),
+            build,
+            is_artifact,
+            rx,
+            tx,
+            inflight: std::collections::HashSet::new(),
+            next: 1,
+        }
+    }
+}
+
+impl PerfTarget for ExecutorTarget {
+    fn describe(&self) -> TargetInfo {
+        self.info.clone()
+    }
+
+    fn submit(&mut self, req: PerfRequest) -> ReqId {
+        let id = self.next;
+        self.next += 1;
+        self.inflight.insert(id);
+        let inv = (self.build)(&req);
+        let tx_p = self.tx.clone();
+        let tx_r = self.tx.clone();
+        let mut admitted = false;
+        let is_artifact = self.is_artifact.clone();
+        // Shared between the two callbacks: how many artifacts streamed, so the
+        // reply knows whether it must stand in as the single artifact.
+        let streamed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let streamed_r = streamed.clone();
+        self.exec.submit(
+            residency::executor::Job::new(self.model.clone(), self.action.clone(), inv)
+                .on_progress(move |p| {
+                    if !admitted {
+                        admitted = true;
+                        let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted });
+                    }
+                    if let Some(accept) = &is_artifact {
+                        if accept(&p) {
+                            streamed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Artifact });
+                        }
+                    }
+                })
+                .reply(move |r| {
+                    let at = Instant::now();
+                    match r {
+                        Ok(_) => {
+                            if streamed_r.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                                let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Artifact });
+                            }
+                            let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Done });
+                        }
+                        Err(_) => {
+                            let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Failed });
+                        }
+                    }
+                }),
+        );
+        id
+    }
+
+    fn step(&mut self, out: &mut Vec<Emission>) -> bool {
+        // The executor's threads do the work; drain what they emitted. Block
+        // briefly when something is in flight so the driver doesn't spin.
+        if self.inflight.is_empty() {
+            while let Ok(e) = self.rx.try_recv() {
+                out.push(e);
+            }
+            return false;
+        }
+        if let Ok(e) = self.rx.recv_timeout(std::time::Duration::from_millis(2)) {
+            if matches!(e.kind, EmissionKind::Done | EmissionKind::Failed) {
+                self.inflight.remove(&e.id);
+            }
+            out.push(e);
+        }
+        while let Ok(e) = self.rx.try_recv() {
+            if matches!(e.kind, EmissionKind::Done | EmissionKind::Failed) {
+                self.inflight.remove(&e.id);
+            }
+            out.push(e);
+        }
+        !self.inflight.is_empty()
+    }
+
+    fn busy(&self) -> bool {
+        !self.inflight.is_empty()
+    }
+
+    /// The scheduler's own counters — **the proof that batching happened**.
+    /// `sched_max_batch > 1` means concurrent same-key jobs really were handed
+    /// to one `Instance::run_batch` call; `sched_jobs / sched_batches` is the
+    /// mean group size the model actually saw. Without these, a throughput
+    /// number cannot distinguish "the model batched" from "the scheduler ran
+    /// them one at a time and the GPU happened to be idle".
+    fn counters(&self) -> Vec<(String, serde_json::Value)> {
+        let s = self.exec.stats();
+        vec![
+            ("sched_batches".into(), s.batches.into()),
+            ("sched_jobs".into(), s.jobs.into()),
+            ("sched_max_batch".into(), s.max_batch.into()),
+            ("sched_mean_batch".into(), serde_json::json!(if s.batches > 0 { s.jobs as f64 / s.batches as f64 } else { 0.0 })),
+            ("sched_queue_peak".into(), s.queue_peak.into()),
+            ("sched_max_parallel".into(), s.max_parallel.into()),
+            ("sched_builds".into(), s.builds.into()),
+            ("sched_evictions".into(), s.evictions.into()),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,195 +632,5 @@ mod tests {
         let d = t.describe();
         assert_eq!(d.model, "streamer");
         assert_eq!(d.artifact_unit, "audio_chunk");
-    }
-}
-
-// ===================== residency executor seam =====================
-
-/// Drives a [`residency::Executor`] — the scheduler + budgets + per-device
-/// lanes that production serving (D-Bus) uses — so concurrency numbers reflect
-/// brain's real batching/placement, not a synchronous provider mutex.
-///
-/// `submit` hands the job to the executor immediately (arrivals are genuinely async);
-/// emissions come back on a channel from the job callbacks: the first
-/// `Progress` marks `Admitted` (the lane started the group this job is in),
-/// the reply marks `Artifact` + `Done` (one-shot models) or `Failed`.
-/// `step` drains the channel; the executor's own threads make the progress.
-///
-/// For a **streaming** resident action ([`ExecutorTarget::new_streaming`]) the
-/// in-flight `Progress` callbacks themselves are the artifact timeline — the
-/// same contract [`CapabilityTarget`] gives a `Provider` — filtered by a
-/// predicate so bookkeeping callbacks ("encoding", "decoding") never count as
-/// output units.
-pub struct ExecutorTarget {
-    exec: residency::Executor,
-    info: TargetInfo,
-    model: String,
-    action: String,
-    build: Box<dyn Fn(&PerfRequest) -> Invocation>,
-    /// `Some` = streaming: a `Progress` this predicate accepts is timestamped
-    /// as one `Artifact`. `None` = one-shot: the reply is the single artifact.
-    is_artifact: Option<Arc<dyn Fn(&Progress) -> bool + Send + Sync>>,
-    rx: std::sync::mpsc::Receiver<Emission>,
-    tx: std::sync::mpsc::Sender<Emission>,
-    inflight: std::collections::HashSet<ReqId>,
-    next: ReqId,
-}
-
-impl ExecutorTarget {
-    pub fn new(
-        exec: residency::Executor,
-        model: &str,
-        action: &str,
-        artifact_unit: &str,
-        info_extra: Vec<(String, serde_json::Value)>,
-        build: Box<dyn Fn(&PerfRequest) -> Invocation>,
-    ) -> ExecutorTarget {
-        let mut info = TargetInfo::new(model, artifact_unit);
-        info.config = info_extra;
-        ExecutorTarget::build(exec, model, action, info, build, None)
-    }
-
-    /// Streaming variant: every `Progress` accepted by `is_artifact` becomes an
-    /// `Artifact` emission at its callback time, so a multi-step resident model
-    /// (diffusion denoise steps, TTS chunks) yields a real TTFA/IAL timeline
-    /// through the real scheduler. `job_model` routes to the resident's
-    /// manifest id; `info.model` may name the variant more precisely. An action
-    /// that streams no accepted progress still records its reply as one
-    /// artifact (one-shot collapse, as [`CapabilityTarget`] does).
-    pub fn new_streaming(
-        exec: residency::Executor,
-        job_model: &str,
-        action: &str,
-        info: TargetInfo,
-        build: Box<dyn Fn(&PerfRequest) -> Invocation>,
-        is_artifact: Arc<dyn Fn(&Progress) -> bool + Send + Sync>,
-    ) -> ExecutorTarget {
-        ExecutorTarget::build(exec, job_model, action, info, build, Some(is_artifact))
-    }
-
-    fn build(
-        exec: residency::Executor,
-        job_model: &str,
-        action: &str,
-        info: TargetInfo,
-        build: Box<dyn Fn(&PerfRequest) -> Invocation>,
-        is_artifact: Option<Arc<dyn Fn(&Progress) -> bool + Send + Sync>>,
-    ) -> ExecutorTarget {
-        let (tx, rx) = std::sync::mpsc::channel();
-        ExecutorTarget {
-            exec,
-            info,
-            model: job_model.to_string(),
-            action: action.to_string(),
-            build,
-            is_artifact,
-            rx,
-            tx,
-            inflight: std::collections::HashSet::new(),
-            next: 1,
-        }
-    }
-}
-
-impl PerfTarget for ExecutorTarget {
-    fn describe(&self) -> TargetInfo {
-        self.info.clone()
-    }
-
-    fn submit(&mut self, req: PerfRequest) -> ReqId {
-        let id = self.next;
-        self.next += 1;
-        self.inflight.insert(id);
-        let inv = (self.build)(&req);
-        let tx_p = self.tx.clone();
-        let tx_r = self.tx.clone();
-        let mut admitted = false;
-        let is_artifact = self.is_artifact.clone();
-        // Shared between the two callbacks: how many artifacts streamed, so the
-        // reply knows whether it must stand in as the single artifact.
-        let streamed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let streamed_r = streamed.clone();
-        self.exec.submit(
-            residency::executor::Job::new(self.model.clone(), self.action.clone(), inv)
-                .on_progress(move |p| {
-                    if !admitted {
-                        admitted = true;
-                        let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted });
-                    }
-                    if let Some(accept) = &is_artifact {
-                        if accept(&p) {
-                            streamed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let _ = tx_p.send(Emission { id, at: Instant::now(), kind: EmissionKind::Artifact });
-                        }
-                    }
-                })
-                .reply(move |r| {
-                    let at = Instant::now();
-                    match r {
-                        Ok(_) => {
-                            if streamed_r.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-                                let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Artifact });
-                            }
-                            let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Done });
-                        }
-                        Err(_) => {
-                            let _ = tx_r.send(Emission { id, at, kind: EmissionKind::Failed });
-                        }
-                    }
-                }),
-        );
-        id
-    }
-
-    fn step(&mut self, out: &mut Vec<Emission>) -> bool {
-        // The executor's threads do the work; drain what they emitted. Block
-        // briefly when something is in flight so the driver doesn't spin.
-        if self.inflight.is_empty() {
-            while let Ok(e) = self.rx.try_recv() {
-                out.push(e);
-            }
-            return false;
-        }
-        match self.rx.recv_timeout(std::time::Duration::from_millis(2)) {
-            Ok(e) => {
-                if matches!(e.kind, EmissionKind::Done | EmissionKind::Failed) {
-                    self.inflight.remove(&e.id);
-                }
-                out.push(e);
-            }
-            Err(_) => {}
-        }
-        while let Ok(e) = self.rx.try_recv() {
-            if matches!(e.kind, EmissionKind::Done | EmissionKind::Failed) {
-                self.inflight.remove(&e.id);
-            }
-            out.push(e);
-        }
-        !self.inflight.is_empty()
-    }
-
-    fn busy(&self) -> bool {
-        !self.inflight.is_empty()
-    }
-
-    /// The scheduler's own counters — **the proof that batching happened**.
-    /// `sched_max_batch > 1` means concurrent same-key jobs really were handed
-    /// to one `Instance::run_batch` call; `sched_jobs / sched_batches` is the
-    /// mean group size the model actually saw. Without these, a throughput
-    /// number cannot distinguish "the model batched" from "the scheduler ran
-    /// them one at a time and the GPU happened to be idle".
-    fn counters(&self) -> Vec<(String, serde_json::Value)> {
-        let s = self.exec.stats();
-        vec![
-            ("sched_batches".into(), s.batches.into()),
-            ("sched_jobs".into(), s.jobs.into()),
-            ("sched_max_batch".into(), s.max_batch.into()),
-            ("sched_mean_batch".into(), serde_json::json!(if s.batches > 0 { s.jobs as f64 / s.batches as f64 } else { 0.0 })),
-            ("sched_queue_peak".into(), s.queue_peak.into()),
-            ("sched_max_parallel".into(), s.max_parallel.into()),
-            ("sched_builds".into(), s.builds.into()),
-            ("sched_evictions".into(), s.evictions.into()),
-        ]
     }
 }

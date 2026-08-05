@@ -68,7 +68,7 @@ impl ResidentModel for NemotronResident {
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let cfg = nemotron::NemotronConfig::nemotron_3_5_asr_0_6b();
-        let model = nemotron::model::NemotronAsr::from_hf(&self.dir, cfg.clone())?;
+        let model = nemotron::model::NemotronAsr::from_hf(&self.dir, cfg)?;
         let detok = nemotron::tokenizer::Detokenizer::from_hf(&self.dir)?;
         if let Device::Npu(_) = device {
             return Ok(Box::new(NemotronNpuInstance::new(&self.dir, cfg, model, detok)?));

@@ -427,7 +427,7 @@ pub fn flash_bidir_fwd(
 /// (256B on the near-universal case), so every per-head/per-segment stride
 /// used as an offset multiplier in [`gemm_bidir_fwd`] is padded to this grain.
 pub fn pad64(words: u64) -> u64 {
-    (words + 63) / 64 * 64
+    words.div_ceil(64) * 64
 }
 
 /// Kernel indices for GEMM attention (see [`gemm_bidir_fwd`]).

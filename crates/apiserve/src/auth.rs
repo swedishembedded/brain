@@ -27,7 +27,7 @@ fn key_matches(presented: &str, expected: &str) -> bool {
 }
 
 /// Pull the presented key out of the request headers in this provider's scheme.
-fn presented_key<'a>(provider: Provider, req: &'a Request) -> Option<&'a str> {
+fn presented_key(provider: Provider, req: &Request) -> Option<&str> {
     let h = req.headers();
     match provider {
         Provider::Anthropic => h.get("x-api-key").and_then(|v| v.to_str().ok()).map(str::trim),
