@@ -134,35 +134,13 @@ impl ToolCase {
 /// Parse the first `<tool_call>{…}</tool_call>` from generated text into a
 /// [`ToolCall`]. Tolerant of whitespace and a missing closing tag (greedy decode
 /// may stop early). Returns `None` if no parseable call is present.
+///
+/// Delegates to [`crate::qwen_chat`]'s streaming scanner (the same state
+/// machine that drives real token-by-token tool-call decoding) rather than
+/// duplicating a second JSON scanner here — this module stays the training/eval
+/// *domain* layer (dataset generation, scoring), not a second parser.
 pub fn parse_tool_call(text: &str) -> Option<ToolCall> {
-    let start = text.find("<tool_call>")? + "<tool_call>".len();
-    let rest = &text[start..];
-    let body = match rest.find("</tool_call>") {
-        Some(e) => &rest[..e],
-        None => rest,
-    };
-    // Extract the first balanced {...} JSON object.
-    let obj_start = body.find('{')?;
-    let mut depth = 0i32;
-    let mut end = None;
-    for (i, c) in body[obj_start..].char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(obj_start + i + 1);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let obj = &body[obj_start..end?];
-    let v: Value = serde_json::from_str(obj).ok()?;
-    let name = v.get("name")?.as_str()?.to_string();
-    let arguments = v.get("arguments").cloned().unwrap_or_else(|| json!({}));
-    Some(ToolCall { name, arguments })
+    crate::qwen_chat::first_tool_call(text)
 }
 
 /// True iff two calls match: same function name and the same argument
@@ -296,4 +274,79 @@ pub fn generate(n: usize, n_tools: usize, seed: u64) -> Vec<ToolCase> {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_tool_call_basic() {
+        let text = "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Paris\"}}\n</tool_call>";
+        let got = parse_tool_call(text).expect("parses");
+        assert_eq!(got.name, "get_weather");
+        assert_eq!(got.arguments, json!({"location": "Paris"}));
+    }
+
+    #[test]
+    fn parse_tool_call_tolerates_missing_closing_tag() {
+        // greedy decode stopped right after the JSON object, before </tool_call>
+        let text = "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Paris\"}}";
+        let got = parse_tool_call(text).expect("parses despite missing closing tag");
+        assert_eq!(got.name, "get_weather");
+        assert_eq!(got.arguments, json!({"location": "Paris"}));
+    }
+
+    #[test]
+    fn parse_tool_call_handles_quoted_brace() {
+        // a literal '}' inside a quoted string must not be mistaken for the end
+        // of the arguments object.
+        let text = "<tool_call>\n{\"name\": \"write_file\", \"arguments\": {\"path\":\"a\\\"}b\"}}\n</tool_call>";
+        let got = parse_tool_call(text).expect("parses despite quoted brace");
+        assert_eq!(got.name, "write_file");
+        assert_eq!(got.arguments, json!({"path": "a\"}b"}));
+    }
+
+    #[test]
+    fn parse_tool_call_none_when_absent() {
+        assert!(parse_tool_call("just plain text, no call here").is_none());
+    }
+
+    #[test]
+    fn parse_tool_call_none_on_truncated_json() {
+        // cut mid-arguments (e.g. a max_new_tokens stop) — no balanced JSON, so
+        // this is not a parseable call.
+        let text = "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Par";
+        assert!(parse_tool_call(text).is_none());
+    }
+
+    #[test]
+    fn round_trip_response_str_through_parse_tool_call() {
+        let call = ToolCall { name: "set_timer".into(), arguments: json!({"minutes": 5}) };
+        let text = format!("{}<|im_end|>\n", call.response_str());
+        let got = parse_tool_call(&text).expect("round trips");
+        assert!(calls_match(&call, &got));
+    }
+
+    #[test]
+    fn calls_match_is_order_independent_and_loose_on_scalars() {
+        let expected = ToolCall { name: "convert_currency".into(), arguments: json!({"amount": 10, "to": "USD"}) };
+        let got = ToolCall { name: "convert_currency".into(), arguments: json!({"to": "USD", "amount": "10"}) };
+        assert!(calls_match(&expected, &got));
+        let wrong_name = ToolCall { name: "other".into(), ..got.clone() };
+        assert!(!calls_match(&expected, &wrong_name));
+    }
+
+    #[test]
+    fn generate_produces_matching_ground_truth_calls() {
+        let cases = generate(20, 3, 42);
+        assert_eq!(cases.len(), 20);
+        for c in &cases {
+            assert!(c.tools.iter().any(|t| t.name == c.call.name), "target tool must be among candidates");
+            let ex = c.to_chat_example();
+            // the assistant span parses back to the same call
+            let got = parse_tool_call(&ex.assistant).expect("generated example parses");
+            assert!(calls_match(&c.call, &got));
+        }
+    }
 }
