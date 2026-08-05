@@ -440,7 +440,7 @@ pub struct GemmAttnIds {
     /// slab (GPU-only; the GEMM path is already gated on cooperative devices).
     pub softmax_rows: usize,
     pub matmul: usize,
-    pub matmul_reg2: usize,
+    pub matmul_reg: usize,
 }
 
 /// Query-chunked bidirectional attention as REAL GEMMs: per-head packed
@@ -511,7 +511,7 @@ pub fn gemm_bidir_fwd(
             let qn = chunk.min(len - q0);
             let sp_stride = pad64(qn as u64 * len as u64); // padded per-head scores/probs stride, same alignment reason
             for h in 0..heads {
-                let (mk, mt) = pick_gemm(qn as usize, len as usize, k.matmul, k.matmul_reg2, force_naive);
+                let (mk, mt) = pick_gemm(qn as usize, len as usize, k.matmul, k.matmul_reg, force_naive);
                 // scores[h] = q_pack[h][q0..q0+qn] · k_pack[h]ᵀ   ([qn,hd]·[len,hd]ᵀ)
                 steps.push(g.step_sliced(
                     mk,
@@ -528,7 +528,7 @@ pub fn gemm_bidir_fwd(
                 steps.push(g.step_sliced(k.softmax_rows, &[scores, probs], &[(h as u64 * sp_stride, 0), (h as u64 * sp_stride, 0)], &[qn, len], qn * 64));
             }
             for h in 0..heads {
-                let (mk, mt) = pick_gemm(qn as usize, hd as usize, k.matmul, k.matmul_reg2, force_naive);
+                let (mk, mt) = pick_gemm(qn as usize, hd as usize, k.matmul, k.matmul_reg, force_naive);
                 // ctx_pack[h][q0..] = probs[h] · V[h]   (A·Bᵀ with B = vᵀ[hd,len])
                 steps.push(g.step_sliced(
                     mk,

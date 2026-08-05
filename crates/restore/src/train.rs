@@ -114,7 +114,7 @@ use crate::config::CodeFormerConfig;
 // ---- forward ----
 const K_LAYERNORM: usize = 0;
 const K_MATMUL: usize = 1;
-const K_MATMUL_REG2: usize = 2;
+const K_MATMUL_REG3: usize = 2;
 const K_BIAS_ADD: usize = 3;
 const K_GELU_ERF: usize = 4;
 const K_ADD2: usize = 5;
@@ -152,7 +152,7 @@ const K_AXPY: usize = 28;
 pub const TRAIN_PIPELINES: &[(&str, &str)] = &[
     ("layernorm", kernels::LAYERNORM),
     ("matmul", kernels::MATMUL),
-    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_reg3", kernels::MATMUL_REG3),
     ("bias_add", kernels::BIAS_ADD),
     ("gelu_erf", kernels::GELU_ERF),
     ("add2", kernels::ADD2),
@@ -351,7 +351,7 @@ impl CodeTransformerTrainer {
         self.ps.w(name)
     }
     fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
-        block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG2, false)
+        block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG3, false)
     }
     fn bwd_gemm(&self, rows: u32, cols: u32, naive: usize, reg: usize) -> (usize, u32) {
         block::pick_gemm(rows as usize, cols as usize, naive, reg, false)

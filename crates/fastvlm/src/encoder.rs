@@ -81,7 +81,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("sigmoid", kernels::SIGMOID),
     ("sigmoid_bwd", kernels::SIGMOID_BWD),
     ("im2col", kernels::IM2COL),
-    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_reg3", kernels::MATMUL_REG3),
     ("avgpool2d", kernels::AVGPOOL2D),
     ("avgpool2d_dx", kernels::AVGPOOL2D_DX),
     ("add2", kernels::ADD2),

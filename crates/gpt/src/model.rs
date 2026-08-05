@@ -89,7 +89,7 @@ const ADAMW: usize = 28;
 const CLIP_COEF: usize = 29;
 const GRAD_SCALE_BUF: usize = 30;
 const MATMUL_REG: usize = 31;
-const MATMUL_REG2: usize = 32;
+const MATMUL_REG3: usize = 32;
 const MATMUL_DX_REG: usize = 33;
 const MATMUL_DW_REG: usize = 34;
 const CE_STATS: usize = 35;
@@ -149,7 +149,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("clip_coef", kernels::CLIP_COEF),
     ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
     ("matmul_reg", kernels::MATMUL_REG),
-    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_reg3", kernels::MATMUL_REG3),
     ("matmul_dx_reg", kernels::MATMUL_DX_REG),
     ("matmul_dw_reg", kernels::MATMUL_DW_REG),
     ("ce_stats", kernels::CE_STATS),
@@ -169,7 +169,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
 ];
 
 /// Pick the forward-linear GEMM kernel + its dispatch thread count for an
-/// `[M,K]·[N,K]ᵀ` product. The software-pipelined `matmul_reg2` (128×128 output tile,
+/// `[M,K]·[N,K]ᵀ` product. The software-pipelined `matmul_reg3` (128×128 output tile,
 /// 256 threads) wins by ~10× once both output dims fill at least one tile; below
 /// that the naive one-thread-per-output `matmul` is better (a whole tile for a
 /// handful of outputs is mostly masked lanes). Same math either way — parity is
@@ -182,17 +182,17 @@ fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
         return (MATMUL, (m * n) as u32);
     }
     let threads = (m.div_ceil(128) * n.div_ceil(128) * 256) as u32;
-    // `matmul_reg2` (software-pipelined) is the default; `BRAIN_GPT_REG1=1`
+    // `matmul_reg3` (software-pipelined) is the default; `BRAIN_GPT_REG1=1`
     // selects the non-pipelined `matmul_reg` for A/B comparison.
     if std::env::var("BRAIN_GPT_REG1").map(|v| v != "0").unwrap_or(false) {
         (MATMUL_REG, threads)
     } else {
-        (MATMUL_REG2, threads)
+        (MATMUL_REG3, threads)
     }
 }
 
 
-/// Backward GEMM pickers — the tiled `matmul_{dx,dw}_reg` (matmul_reg2 structure,
+/// Backward GEMM pickers — the tiled `matmul_{dx,dw}_reg` (matmul_reg3 structure,
 /// ~34% of P40 peak, bit-identical to the naive kernels) once both output dims
 /// fill a 128-tile, else the naive per-output kernel. `BRAIN_GPT_NAIVE_MM=1`
 /// forces naive (shares the forward's flag). Same math — gradcheck-gated.

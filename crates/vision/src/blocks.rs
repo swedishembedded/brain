@@ -64,7 +64,7 @@ fn use_tiled_conv() -> bool {
 
 /// Minimum output channels for the conv-as-GEMM eval path (`BRAIN_CONV_GEMM_MIN`,
 /// default 32). Below this the direct register-tiled conv wins (large spatial /
-/// few channels under-fills the GEMM tile); at/above it, im2col + matmul_reg2 is
+/// few channels under-fills the GEMM tile); at/above it, im2col + matmul_reg3 is
 /// 2-5x faster on the P40. Whole YOLOv8n@640 forward: 2.36x at 32.
 fn gemm_conv_min_cout() -> u32 {
     use std::sync::OnceLock;
@@ -885,7 +885,7 @@ impl Conv {
                 self.sb_ready.set(true);
             }
             // Conv-as-GEMM fast path (P40 / compute-bound GPUs): a dense conv
-            // with many output channels is far faster as im2col + matmul_reg2 +
+            // with many output channels is far faster as im2col + matmul_reg3 +
             // per-channel-affine+SiLU epilogue than the direct register-tiled
             // conv, which collapses on deep small-spatial layers (measured 2-5x
             // on YOLOv8n's stage2-4). Same math — parity-gated by the detection
@@ -970,11 +970,11 @@ impl Conv {
             && self.out_shape.c >= gemm_conv_min_cout()
             && matches!(self.spec.act, Act::Silu)
             && ctx.ids.im2col != crate::NONE
-            && ctx.ids.matmul_reg2 != crate::NONE
+            && ctx.ids.matmul_reg != crate::NONE
             && ctx.ids.conv_epilogue != crate::NONE
     }
 
-    /// im2col + matmul_reg2 (raw conv into `act`) + conv_epilogue (per-channel
+    /// im2col + matmul_reg3 (raw conv into `act`) + conv_epilogue (per-channel
     /// affine from `sb` + SiLU, in place). Reproduces the fused conv_act exactly.
     fn forward_eval_gemm(&self, ctx: &Ctx, ps: &ParamStore, x_in: &DeviceBuffer) {
         let (cin, h, w) = (self.in_shape.c, self.in_shape.h, self.in_shape.w);
@@ -996,7 +996,7 @@ impl Conv {
         // y[Cout, HW] = W[Cout, CinKK] . col[HW, CinKK]^T into conv_out (raw conv).
         let reg_threads = cout.div_ceil(128) * hw.div_ceil(128) * 256;
         let s_gemm = ctx.step(
-            ctx.ids.matmul_reg2,
+            ctx.ids.matmul_reg,
             &[ps.w(&self.names.weight), col, &self.conv_out],
             &[cout, cinkk, hw],
             reg_threads,

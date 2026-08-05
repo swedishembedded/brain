@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! YOLOv8n @640 forward on the P40: conv-as-GEMM (im2col + matmul_reg2 +
+//! YOLOv8n @640 forward on the P40: conv-as-GEMM (im2col + matmul_reg3 +
 //! epilogue) vs the direct register-tiled conv (`conv_act_reg`).
 //!
 //! ```text
@@ -59,7 +59,7 @@ fn yolov8n_forward_p40() {
 
     println!("\n=== YOLOv8n @640 forward on P40 (wgpu) ===");
     println!("  direct conv (conv_act_reg):  {direct:8.1} ms   {:.1} fps", 1e3 / direct);
-    println!("  conv-as-GEMM (im2col+reg2):  {gemm:8.1} ms   {:.1} fps", 1e3 / gemm);
+    println!("  conv-as-GEMM (im2col+reg3):  {gemm:8.1} ms   {:.1} fps", 1e3 / gemm);
     println!("  speedup: {:.2}x", direct / gemm);
 
     assert!(direct.is_finite() && gemm > 0.0);

@@ -69,7 +69,7 @@ fn main() {
     }
     // `train`: measure a real training step's dominant cost — the forward and
     // backward GEMM sweep across the whole 34-block DiT — with the actual
-    // register-tiled kernels (matmul_reg2 fwd, matmul_dx_reg + matmul_dw_reg
+    // register-tiled kernels (matmul_reg3 fwd, matmul_dx_reg + matmul_dw_reg
     // bwd). No 6B load needed: GEMM time depends only on shapes, so we drive
     // correctly-shaped scratch. Backward = dx (dY@W) + dW (dY^T@X) per linear =
     // 2× the forward FLOP; this measures whether the bwd kernels hold the same
@@ -93,7 +93,7 @@ fn main() {
         const K_FWD: usize = 0;
         const K_DX: usize = 1;
         const K_DW: usize = 2;
-        let kk = [("matmul_reg2", kernels::MATMUL_REG2), ("matmul_dx_reg", kernels::MATMUL_DX_REG), ("matmul_dw_reg", kernels::MATMUL_DW_REG)];
+        let kk = [("matmul_reg3", kernels::MATMUL_REG3), ("matmul_dx_reg", kernels::MATMUL_DX_REG), ("matmul_dw_reg", kernels::MATMUL_DW_REG)];
         let gpu = Gpu::new_wgpu(&kk);
         // Shared scratch, sized to the largest shape (reused across all linears —
         // we time compute, not numerics). max activation ntot×hidden, max weight

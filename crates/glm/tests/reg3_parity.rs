@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! GLM-5.2 forward at a size that triggers the register GEMM (`matmul_reg2`):
+//! GLM-5.2 forward at a size that triggers the register GEMM (`matmul_reg3`):
 //! the CPU reference and the GPU must agree, and the register kernel must
 //! reproduce the naive kernel bit-for-bit. This is what makes "GLM is on the
 //! fast path" a validated claim rather than a wiring assertion — its tiny
@@ -13,7 +13,7 @@ use glm::{init_weights, Glm, GlmConfig};
 use gpu_core::{set_default_backend, Backend};
 
 /// d_model 256, seq 160 → every forward linear has m=160, nout ∈ {256, …} ≥ 128,
-/// so `mm()` selects `matmul_reg2`.
+/// so `mm()` selects `matmul_reg3`.
 fn cfg() -> GlmConfig {
     let mut c = GlmConfig::tiny();
     c.vocab = 512;
@@ -45,7 +45,7 @@ fn rel(a: &[f32], b: &[f32]) -> (f32, f32) {
 }
 
 #[test]
-fn glm_reg2_matches_naive_and_cpu() {
+fn glm_reg3_matches_naive_and_cpu() {
     if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
         return;
     }
@@ -53,14 +53,14 @@ fn glm_reg2_matches_naive_and_cpu() {
     let init = init_weights(&c, 9);
     let x: Vec<u32> = (0..160).map(|i| ((i * 7 + 1) as u32) % c.vocab).collect();
 
-    let gpu_reg = logits(Backend::Vulkan, false, &c, &init, &x); // matmul_reg2
+    let gpu_reg = logits(Backend::Vulkan, false, &c, &init, &x); // matmul_reg3
     let gpu_naive = logits(Backend::Vulkan, true, &c, &init, &x); // matmul
-    let cpu = logits(Backend::Cpu, false, &c, &init, &x); // CPU (reg2 -> AVX2)
+    let cpu = logits(Backend::Cpu, false, &c, &init, &x); // CPU (reg3 -> AVX2)
 
     let (ka, kr) = rel(&gpu_naive, &gpu_reg);
     let (ca, cr) = rel(&cpu, &gpu_reg);
-    eprintln!("glm reg2 vs naive (same GPU): max-abs {ka:.2e} rel {kr:.2e}");
-    eprintln!("glm reg2 vs cpu reference:    max-abs {ca:.2e} rel {cr:.2e}");
+    eprintln!("glm reg3 vs naive (same GPU): max-abs {ka:.2e} rel {kr:.2e}");
+    eprintln!("glm reg3 vs cpu reference:    max-abs {ca:.2e} rel {cr:.2e}");
 
     // Same backend, only the GEMM kernel differs → fp32 associativity only.
     assert!(kr < 1e-4, "glm register GEMM changes the forward (rel {kr:.2e})");

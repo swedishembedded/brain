@@ -33,7 +33,7 @@ pub(crate) const K_SOFTMAX: usize = 5;
 pub(crate) const K_APPLY: usize = 6;
 pub(crate) const K_SILU_MUL: usize = 7;
 pub(crate) const K_ADD2: usize = 8;
-pub(crate) const K_MATMUL_REG2: usize = 9;
+pub(crate) const K_MATMUL_REG3: usize = 9;
 pub(crate) const K_QUANT_PACK: usize = 10;
 pub(crate) const K_MATMUL_I8: usize = 11;
 pub(crate) const K_MAX_ABS_ROW: usize = 12;
@@ -52,7 +52,7 @@ pub(crate) const KERNELS: [(&str, &str); 15] = [
     ("add2", kernels::ADD2),
     // GPU-only fast GEMM (software-pipelined register tiling). The CPU JIT can't
     // compile its barrier, so CPU uses the naive `matmul` (native AVX2 path).
-    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_reg3", kernels::MATMUL_REG3),
     // int8 DP4A path (GPU only): per-token activation quant (max_abs_row) + DP4A GEMM.
     ("quant_pack", kernels::QUANT_PACK),
     ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
@@ -317,15 +317,15 @@ pub(crate) fn build_block_steps(
     sin: &DeviceBuffer,
     d: BlockDims,
     t: u32,
-    reg2: bool,
+    reg_gemm: bool,
 ) {
     let (dim, nh, hd, hidden) = (d.dim, d.n_heads, d.head_dim, d.hidden);
     let half = hd / 2;
-    // GPU: register-tiled matmul_reg2 (128×128 tile, 256 threads). CPU: naive
-    // matmul (native AVX2 fast path; the JIT can't compile reg2's barrier).
+    // GPU: register-tiled matmul_reg3 (128×128 tile, 256 threads). CPU: naive
+    // matmul (native AVX2 fast path; the JIT can't compile reg_gemm's barrier).
     let mm = |x: &DeviceBuffer, wt: &DeviceBuffer, o: &DeviceBuffer, m: u32, kk: u32, n: u32| {
-        if reg2 {
-            gpu.step(K_MATMUL_REG2, &[x, wt, o], &[m, kk, n], m.div_ceil(128) * n.div_ceil(128) * 256)
+        if reg_gemm {
+            gpu.step(K_MATMUL_REG3, &[x, wt, o], &[m, kk, n], m.div_ceil(128) * n.div_ceil(128) * 256)
         } else {
             gpu.step(K_MATMUL, &[x, wt, o], &[m, kk, n], m * n)
         }
@@ -340,7 +340,7 @@ pub(crate) fn build_block_steps(
     s.push(gpu.step(K_ROPE, &[&scr.qn, cos, sin, &scr.qr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_ROPE, &[&scr.kn, cos, sin, &scr.kr], &[t, nh, hd, half], t * nh * half));
     s.push(gpu.step(K_PACK, &[&scr.qr, &scr.kr, &scr.v, &scr.qkv], &[t, dim], t * 3 * dim));
-    push_attention(gpu, s, scr, nh, t, hd, dim, reg2 && use_flash(gpu, nh, t));
+    push_attention(gpu, s, scr, nh, t, hd, dim, reg_gemm && use_flash(gpu, nh, t));
     s.push(mm(&scr.ctx, &w.wo, &scr.attn_out, t, dim, dim));
     s.push(gpu.step(K_RMSNORM, &[&scr.attn_out, &nb.an2, &scr.n2], &[dim, t, f(EPS)], t));
     s.push(gpu.step(K_ADD2, &[x_in, &scr.n2, &scr.x1], &[t * dim], t * dim));
@@ -500,7 +500,7 @@ pub struct ZImageBlock {
 
 impl ZImageBlock {
     pub fn new(tensors: &Tensors, prefix: &str, d: BlockDims, t: u32, modulation: bool, device: Option<&str>) -> ZImageBlock {
-        let reg2 = device != Some("cpu");
+        let reg_gemm = device != Some("cpu");
         let gpu = match device {
             Some("cpu") => Gpu::new_cpu(&KERNELS),
             Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
@@ -515,7 +515,7 @@ impl ZImageBlock {
         let mut steps = Vec::new();
         let scr = Scratch::new(&gpu, d, t);
         let out = gpu.storage((t * d.dim) as u64);
-        build_block_steps(&gpu, &mut steps, &w, &nb, &x_in, &out, &scr, &cos, &sin, d, t, reg2);
+        build_block_steps(&gpu, &mut steps, &w, &nb, &x_in, &out, &scr, &cos, &sin, d, t, reg_gemm);
         ZImageBlock { gpu, d, t, steps, x_in, cos, sin, nb, out, _scr: scr }
     }
 

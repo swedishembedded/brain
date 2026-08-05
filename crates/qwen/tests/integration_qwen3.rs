@@ -32,7 +32,7 @@ fn dir() -> Option<PathBuf> {
 /// Pin the GPU backend and make the 151936-vocab lm_head a SINGLE reg2 tile.
 /// Qwen's default vocab-tile budget splits the lm_head into ~7 tiles that run on
 /// the naive `matmul_tile` (~4 s/forward); one tile (622 MB weight < the 2 GB
-/// binding cap) uses the fast `matmul_reg2` (~40 ms). Turns a ~60 s step into ~1 s.
+/// binding cap) uses the fast `matmul_reg3` (~40 ms). Turns a ~60 s step into ~1 s.
 fn setup() {
     set_default_backend(Backend::Wgpu);
     if std::env::var("BRAIN_TILE_BUDGET_WORDS").is_err() {

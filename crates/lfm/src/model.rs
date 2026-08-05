@@ -44,7 +44,7 @@ pub const IGNORE: u32 = 0xFFFF_FFFF;
 // ---- kernel indices (order matches PIPELINES) ----
 const EMBED_TILE: usize = 0;
 const MATMUL: usize = 1;
-const MATMUL_REG2: usize = 2;
+const MATMUL_REG3: usize = 2;
 const MATMUL_TILE: usize = 3;
 const RMSNORM_EPS: usize = 4;
 const ROPE: usize = 5;
@@ -130,7 +130,7 @@ const FLASH_BIDIR_SPLIT: usize = 56;
 const PIPELINES: &[(&str, &str)] = &[
     ("embed_tile", kernels::EMBED_TILE),
     ("matmul", kernels::MATMUL),
-    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_reg3", kernels::MATMUL_REG3),
     ("matmul_tile", kernels::MATMUL_TILE),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("rope_base", kernels::ROPE_BASE),
@@ -194,7 +194,7 @@ const PIPELINES: &[(&str, &str)] = &[
 
 fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
     let naive = std::env::var("BRAIN_LFM_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
-    block::pick_gemm(m, n, MATMUL, MATMUL_REG2, naive)
+    block::pick_gemm(m, n, MATMUL, MATMUL_REG3, naive)
 }
 fn dx_kernel(m: u32, k: u32) -> (usize, u32) {
     let naive = std::env::var("BRAIN_LFM_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
@@ -998,7 +998,7 @@ impl Lfm {
                                     head_unpack: HEAD_UNPACK,
                                     softmax_rows: SOFTMAX_ROWS,
                                     matmul: MATMUL,
-                                    matmul_reg2: MATMUL_REG2,
+                                    matmul_reg: MATMUL_REG3,
                                 };
                                 block::gemm_bidir_fwd(
                                     &self.gpu, &ids, c.n_heads, c.head_dim, c.group(), &ab.q, hq, (&ab.k, &ab.v),
@@ -1541,7 +1541,7 @@ mod tests {
     fn slot_constants_name_the_pipeline_they_index() {
         for (slot, want) in [
             (super::MATMUL, "matmul"),
-            (super::MATMUL_REG2, "matmul_reg2"),
+            (super::MATMUL_REG3, "matmul_reg3"),
             (super::RMSNORM_EPS, "rmsnorm_eps"),
             // `ROPE`/`ROPE_BWD` are local shorthands for the `rope_base` pair —
             // lfm's RoPE takes theta as a Params word, which is what

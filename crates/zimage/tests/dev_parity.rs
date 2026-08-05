@@ -50,7 +50,7 @@ fn zimage_dev_matches_reference_golden() {
     }
 
     // Backend: CPU by default; BRAIN_DEV_GPU=1 validates the reused-scratch +
-    // double-buffered residual + reg2 path on the GPU (wgpu WAR barriers).
+    // double-buffered residual + register-GEMM path on the GPU (wgpu WAR barriers).
     let dev = if std::env::var("BRAIN_DEV_GPU").as_deref() == Ok("1") { "gpu" } else { "cpu" };
     let dit = ZImageDit::build(small_cfg(), weights, 1, 16, 8, 32, Some(dev));
     let got = dit.forward(&input["latent"], &input["cap"], input["t"][0]);
@@ -59,7 +59,7 @@ fn zimage_dev_matches_reference_golden() {
     let max_abs = got.iter().zip(want).map(|(&x, &y)| (x - y).abs()).fold(0.0f32, f32::max);
     let want_max = want.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
     eprintln!("ZImageDit ({dev}, reuse+double-buffer) parity: max_abs={max_abs:.6} (|want|max={want_max:.3})");
-    // GPU reg2 uses a different accumulation order than the CPU golden → looser.
+    // GPU register GEMM uses a different accumulation order than the CPU golden → looser.
     let tol = if dev == "gpu" { 3e-3 } else { 1e-3 };
     assert!(max_abs <= tol * want_max.max(1.0), "max_abs {max_abs:.6} too large");
 }

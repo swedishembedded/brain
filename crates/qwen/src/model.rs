@@ -186,9 +186,10 @@ const PIPELINES: &[(&str, &str)] = &[
 ];
 
 /// Pick the GEMM kernel + dispatch thread count for a forward linear
-/// `[m,k]·[n,k]ᵀ`. The software-pipelined `matmul_reg2` (128×128 tile, 256
-/// threads, ~4 TFLOP/s on a P40) wins once both output dims fill a tile; below
-/// that the naive one-thread-per-output `matmul` is better. Same math either way
+/// `[m,k]·[n,k]ᵀ`. The software-pipelined `matmul_reg3` (128×128 tile, 256
+/// threads, ~4 TFLOP/s on a P40) wins from `m = 8` up — it bounds-guards its
+/// tile, so a short M costs only the idle rows, while the naive
+/// one-thread-per-output `matmul` collapses on a wide N (`docs/lessons.md` #15). Same math either way
 /// (parity gated by `tests/backend_parity` + gradcheck), so this only changes
 /// speed. `BRAIN_QWEN_NAIVE_MM=1` forces the naive kernel.
 fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
@@ -999,7 +1000,7 @@ impl Qwen {
         // lm_head. When the whole vocab fits one tile (v0=0, cnt=v — the common
         // case for a small vocab like the TTS Talker's 3072), it is a plain
         // `[n,d]·[v,d]ᵀ` matmul, so dispatch the size-adaptive fast kernel
-        // (`matmul_reg2`) instead of the naive column-tiled `matmul_tile` — the
+        // (`matmul_reg3`) instead of the naive column-tiled `matmul_tile` — the
         // Talker lm_head was ~50 ms (naive) vs ~2 ms (reg2). Only when the weight
         // genuinely exceeds a binding budget do we fall back to the tiled path.
         let head = c.head_weight();

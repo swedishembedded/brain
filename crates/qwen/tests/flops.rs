@@ -68,7 +68,7 @@ fn i8_model_reports_int_ops() {
     let fp_linear_flops: u64 = fp
         .by_kernel
         .iter()
-        .filter(|(k, _)| k.as_str() == "matmul" || k.as_str() == "matmul_reg2")
+        .filter(|(k, _)| k.as_str() == "matmul" || k.as_str() == "matmul_reg3")
         .map(|(_, v)| v.cost.flops)
         .sum();
     assert!(fp_linear_flops >= off.total.int_ops, "i8 int_ops exceed the fp32 linear volume");

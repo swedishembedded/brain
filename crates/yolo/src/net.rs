@@ -130,9 +130,9 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("conv_bias", kernels::CONV_BIAS),
     // ---- accumulate-in-place (index 41) ----
     ("add_inplace", kernels::ADD_INPLACE),
-    // ---- conv-as-GEMM eval fast path (im2col + matmul_reg2 + conv_epilogue) ----
+    // ---- conv-as-GEMM eval fast path (im2col + matmul_reg3 + conv_epilogue) ----
     ("im2col", kernels::IM2COL),
-    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_reg3", kernels::MATMUL_REG3),
     ("conv_epilogue", kernels::CONV_EPILOGUE),
     // Cooperative grad-norm (optimiser): `gradnorm_part` + `clip_coef_wg` replace
     // the single-threaded `gradnorm_sq`/`clip_coef` walk. `optim::Optim` resolves

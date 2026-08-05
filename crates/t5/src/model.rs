@@ -69,7 +69,7 @@ const K_EMBED: usize = 1;
 const K_NLC_NCHW: usize = 2;
 const K_RMSNORM: usize = 3;
 const K_MATMUL: usize = 4;
-const K_MATMUL_REG2: usize = 5;
+const K_MATMUL_REG3: usize = 5;
 const K_SCORES: usize = 6;
 const K_SOFTMAX: usize = 7;
 const K_APPLY: usize = 8;
@@ -87,7 +87,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("nlc_nchw", kernels::NLC_NCHW),
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
     ("matmul", kernels::MATMUL),
-    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_reg3", kernels::MATMUL_REG3),
     ("attn_scores_bidir_bias", kernels::ATTN_SCORES_BIDIR_BIAS),
     ("attn_softmax_bidir", kernels::ATTN_SOFTMAX_BIDIR),
     ("attn_apply_bidir", kernels::ATTN_APPLY_BIDIR),
@@ -236,7 +236,7 @@ impl T5Encoder {
     }
 
     fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
-        block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG2, false)
+        block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG3, false)
     }
 
     /// RMSNorm with the coalesced workgroup-per-row kernel wherever the device

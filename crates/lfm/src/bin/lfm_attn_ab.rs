@@ -41,7 +41,7 @@ const KERNELS: &[(&str, &str)] = &[
     ("head_unpack", kernels::HEAD_UNPACK),
     ("softmax_rows", kernels::SOFTMAX_ROWS),
     ("matmul", kernels::MATMUL),
-    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_reg3", kernels::MATMUL_REG3),
 ];
 const K_KV_EXPAND: usize = 0;
 const K_FLASH: usize = 1;
@@ -51,7 +51,7 @@ const K_HEAD_PACK_T: usize = 4;
 const K_HEAD_UNPACK: usize = 5;
 const K_SOFTMAX_ROWS: usize = 6;
 const K_MATMUL: usize = 7;
-const K_MATMUL_REG2: usize = 8;
+const K_MATMUL_REG3: usize = 8;
 
 fn time_steps(gpu: &Gpu, steps: &[Step], reps: usize) -> f64 {
     gpu.submit(&[], steps);
@@ -132,7 +132,7 @@ fn main() {
         head_unpack: K_HEAD_UNPACK,
         softmax_rows: K_SOFTMAX_ROWS,
         matmul: K_MATMUL,
-        matmul_reg2: K_MATMUL_REG2,
+        matmul_reg: K_MATMUL_REG3,
     };
     let mut gemm_steps: Vec<Step> = Vec::new();
     block::gemm_bidir_fwd(

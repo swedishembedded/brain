@@ -79,7 +79,7 @@ const K_LAYERNORM: usize = N_VQGAN;
 // `layernorm_rows` is N_VQGAN + 1 — registered so `block::LayerNormIds::resolve_fwd`
 // can pick it up BY NAME on a device with workgroup reductions; never indexed.
 const K_MATMUL: usize = N_VQGAN + 2;
-const K_MATMUL_REG2: usize = N_VQGAN + 3;
+const K_MATMUL_REG3: usize = N_VQGAN + 3;
 const K_BIAS_ADD: usize = N_VQGAN + 4;
 const K_GELU_ERF: usize = N_VQGAN + 5;
 const K_ARGMAX_ROW: usize = N_VQGAN + 6;
@@ -104,7 +104,7 @@ const fn kernel_set() -> [(&'static str, &'static str); N_VQGAN + 12] {
     k[K_LAYERNORM] = ("layernorm", kernels::LAYERNORM);
     k[N_VQGAN + 1] = ("layernorm_rows", kernels::LAYERNORM_ROWS);
     k[K_MATMUL] = ("matmul", kernels::MATMUL);
-    k[K_MATMUL_REG2] = ("matmul_reg2", kernels::MATMUL_REG2);
+    k[K_MATMUL_REG3] = ("matmul_reg3", kernels::MATMUL_REG3);
     k[K_BIAS_ADD] = ("bias_add", kernels::BIAS_ADD);
     k[K_GELU_ERF] = ("gelu_erf", kernels::GELU_ERF);
     k[K_ARGMAX_ROW] = ("argmax_row", kernels::ARGMAX_ROW);
@@ -454,7 +454,7 @@ fn matmul(
 ) -> DeviceBuffer {
     let y = b.act((m * n) as u64);
     let (kind, threads) =
-        block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG2, false);
+        block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG3, false);
     let step = b.gpu().step(kind, &[x, wgt, &y], &[m, k, n], threads);
     b.push_step(step);
     y
@@ -714,7 +714,7 @@ mod tests {
             (super::K_LAYERNORM, "layernorm"),
             (super::N_VQGAN + 1, "layernorm_rows"),
             (super::K_MATMUL, "matmul"),
-            (super::K_MATMUL_REG2, "matmul_reg2"),
+            (super::K_MATMUL_REG3, "matmul_reg3"),
             (super::K_BIAS_ADD, "bias_add"),
             (super::K_GELU_ERF, "gelu_erf"),
             (super::K_ARGMAX_ROW, "argmax_row"),

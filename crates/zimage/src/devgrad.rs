@@ -48,7 +48,7 @@ const K_RDW: usize = 20;
 
 const KERNELS: [(&str, &str); 21] = [
     ("rmsnorm_eps", kernels::RMSNORM_EPS),
-    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_reg3", kernels::MATMUL_REG3),
     ("rope_interleave_table", kernels::ROPE_INTERLEAVE_TABLE),
     ("pack_qkv", kernels::PACK_QKV),
     ("attn_scores_bidir", kernels::ATTN_SCORES_BIDIR),

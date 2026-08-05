@@ -36,7 +36,7 @@ pub const IGNORE: u32 = 0xFFFF_FFFF;
 // ---- kernel indices (order matches PIPELINES) ----
 const EMBED: usize = 0;
 const MATMUL: usize = 1;
-const MATMUL_REG2: usize = 42;
+const MATMUL_REG3: usize = 42;
 const MATMUL_DX: usize = 2;
 const MATMUL_DW: usize = 3;
 const RMSNORM: usize = 4;
@@ -82,7 +82,7 @@ const ADD_INDEX_MASK: usize = 40;
 /// one dispatch is a wgpu usage-scope violation (it panics on the GPU
 /// backend), which is exactly what the MTP path used to do.
 const ADD_INPLACE: usize = 41;
-// ---- incremental KV-cache decode kernels (indices continue after MATMUL_REG2=42) ----
+// ---- incremental KV-cache decode kernels (indices continue after MATMUL_REG3=42) ----
 const KV_APPEND: usize = 43;
 const DECODE_SOFTMAX: usize = 44;
 const ATTN_DECODE_APPLY: usize = 45;
@@ -199,7 +199,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("topk_mask", kernels::TOPK_MASK),
     ("add_index_mask", kernels::ADD_INDEX_MASK),
     ("add_inplace", kernels::ADD_INPLACE),
-    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_reg3", kernels::MATMUL_REG3),
     // incremental KV-cache decode kernels (indices 43..=47)
     ("kv_append", kernels::KV_APPEND),
     ("decode_softmax", kernels::DECODE_SOFTMAX),
@@ -632,7 +632,7 @@ impl Glm {
     // ---- dispatch helpers (mirror the moe/qwen style) ----
 
     fn mm(&self, s: &mut Vec<Step>, x: &DeviceBuffer, wname: &str, out: &DeviceBuffer, m: u32, k: u32, nout: u32) {
-        // Size-adaptive GEMM: software-pipelined `matmul_reg2` (128x128 tile,
+        // Size-adaptive GEMM: software-pipelined `matmul_reg3` (128x128 tile,
         // ~4 TFLOP/s on a P40) once both output dims fill a tile, else the naive
         // per-output `matmul`. Same math (parity gated by gradcheck::check_glm),
         // so this only changes speed. `BRAIN_GLM_NAIVE_MM=1` forces naive.
@@ -640,7 +640,7 @@ impl Glm {
         let (mk, mt) = if naive || m < 128 || nout < 128 {
             (MATMUL, m * nout)
         } else {
-            (MATMUL_REG2, (m as usize).div_ceil(128) as u32 * (nout as usize).div_ceil(128) as u32 * 256)
+            (MATMUL_REG3, (m as usize).div_ceil(128) as u32 * (nout as usize).div_ceil(128) as u32 * 256)
         };
         s.push(self.gpu.step(mk, &[x, self.w(wname), out], &[m, k, nout], mt));
     }

@@ -71,7 +71,7 @@ const T_REGION_COPY: usize = 1;
 const T_POS_ADD: usize = 2;
 const T_LAYERNORM: usize = 3;
 const T_MATMUL: usize = 4;
-const T_MATMUL_REG2: usize = 5;
+const T_MATMUL_REG3: usize = 5;
 const T_BIAS_ADD: usize = 6;
 const T_SCORES: usize = 7;
 const T_SOFTMAX: usize = 8;
@@ -114,7 +114,7 @@ pub const TEXT_PIPELINES: &[(&str, &str)] = &[
     ("pos_add", kernels::POS_ADD),
     ("layernorm", kernels::LAYERNORM),
     ("matmul", kernels::MATMUL),
-    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_reg3", kernels::MATMUL_REG3),
     ("bias_add", kernels::BIAS_ADD),
     ("attn_scores", kernels::ATTN_SCORES),
     ("attn_softmax", kernels::ATTN_SOFTMAX),
@@ -360,12 +360,12 @@ impl ClipText {
     }
 
     fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
-        block::pick_gemm(m as usize, n as usize, T_MATMUL, T_MATMUL_REG2, false)
+        block::pick_gemm(m as usize, n as usize, T_MATMUL, T_MATMUL_REG3, false)
     }
 
     /// Backward-GEMM kernel + dispatch threads, picked on the OUTPUT dims — the
     /// same policy `block::pick_gemm` implements for the forward (the tiled
-    /// `matmul_{dx,dw}_reg` share `matmul_reg2`'s 128x128 / 256-thread shape and
+    /// `matmul_{dx,dw}_reg` share `matmul_reg3`'s 128x128 / 256-thread shape and
     /// are bit-compatible with the naive kernels). `matmul_dw` writes `[n,k]`
     /// and `matmul_dx` writes `[m,k]`, so each passes its own output dims.
     fn bwd_gemm(&self, rows: u32, cols: u32, naive: usize, reg: usize) -> (usize, u32) {
@@ -765,7 +765,7 @@ const V_BIAS_ADD: usize = 3;
 const V_ADD2: usize = 4;
 const V_LAYERNORM: usize = 5;
 const V_MATMUL: usize = 6;
-const V_MATMUL_REG2: usize = 7;
+const V_MATMUL_REG3: usize = 7;
 const V_ROPE2D: usize = 8;
 const V_SCORES: usize = 9;
 const V_SOFTMAX: usize = 10;
@@ -782,7 +782,7 @@ pub const VISION_PIPELINES: &[(&str, &str)] = &[
     ("add2", kernels::ADD2),
     ("layernorm", kernels::LAYERNORM),
     ("matmul", kernels::MATMUL),
-    ("matmul_reg2", kernels::MATMUL_REG2),
+    ("matmul_reg3", kernels::MATMUL_REG3),
     ("rope2d", kernels::ROPE2D),
     ("attn_scores_bidir", kernels::ATTN_SCORES_BIDIR),
     ("attn_softmax_bidir", kernels::ATTN_SOFTMAX_BIDIR),
@@ -900,7 +900,7 @@ impl EvaVision {
         self.ps.w(name)
     }
     fn gemm(&self, m: u32, n: u32) -> (usize, u32) {
-        block::pick_gemm(m as usize, n as usize, V_MATMUL, V_MATMUL_REG2, false)
+        block::pick_gemm(m as usize, n as usize, V_MATMUL, V_MATMUL_REG3, false)
     }
 
     fn build_steps(&self) -> Vec<Step> {

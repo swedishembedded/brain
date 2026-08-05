@@ -37,22 +37,22 @@ struct Phase {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_phase(gpu: &Gpu, tensors: &Tensors, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool, reg2: bool) -> Phase {
+fn build_phase(gpu: &Gpu, tensors: &Tensors, prefixes: &[String], bd: BlockDims, t: u32, modulation: bool, reg_gemm: bool) -> Phase {
     let half = bd.head_dim / 2;
     let resa = gpu.storage((t * bd.dim) as u64);
     let resb = gpu.storage((t * bd.dim) as u64);
     let cos = gpu.storage((t * half) as u64);
     let sin = gpu.storage((t * half) as u64);
-    // Flash only on the GPU (reg2 ⇒ GPU; the CPU JIT can't compile the barrier);
+    // Flash only on the GPU (reg_gemm ⇒ GPU; the CPU JIT can't compile the barrier);
     // Scratch must match so it skips the [nh·t·t] buffers under flash.
-    let scr = Scratch::new_maybe_flash(gpu, bd, t, reg2 && crate::block::use_flash(gpu, bd.n_heads, t));
+    let scr = Scratch::new_maybe_flash(gpu, bd, t, reg_gemm && crate::block::use_flash(gpu, bd.n_heads, t));
     let (mut weights, mut norms, mut steps) = (Vec::new(), Vec::new(), Vec::new());
     // Double-buffer the residual: block reads `cur_in`, writes `cur_out`, swap.
     let (mut cur_in, mut cur_out) = (resa.clone(), resb.clone());
     for p in prefixes {
         let w = BlockWeights::upload(gpu, tensors, p);
         let nb = NormBufs::new(gpu, tensors, p, bd.dim, modulation);
-        build_block_steps(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &scr, &cos, &sin, bd, t, reg2);
+        build_block_steps(gpu, &mut steps, &w, &nb, &cur_in, &cur_out, &scr, &cos, &sin, bd, t, reg_gemm);
         weights.push(w);
         norms.push(nb);
         std::mem::swap(&mut cur_in, &mut cur_out);
@@ -95,7 +95,7 @@ impl ZImageDit {
     /// Build resident stage graphs for the given latent size `(f,h,wd)` and
     /// caption length. `device`: `Some("cpu")`|`Some("gpu")`|`None`.
     pub fn build(cfg: ZImageConfig, weights: Tensors, f: u32, h: u32, wd: u32, cap_len: u32, device: Option<&str>) -> ZImageDit {
-        let reg2 = device != Some("cpu");
+        let reg_gemm = device != Some("cpu");
         let gpu = match device {
             Some("cpu") => Gpu::new_cpu(&KERNELS),
             Some("gpu") | Some("wgpu") => Gpu::new_wgpu(&KERNELS),
@@ -108,9 +108,9 @@ impl ZImageDit {
         let np: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("noise_refiner.{l}")).collect();
         let cp: Vec<String> = (0..cfg.n_refiner_layers).map(|l| format!("context_refiner.{l}")).collect();
         let mp: Vec<String> = (0..cfg.n_layers).map(|l| format!("layers.{l}")).collect();
-        let noise = build_phase(&gpu, &weights, &np, bd, n_img, true, reg2);
-        let context = build_phase(&gpu, &weights, &cp, bd, cap_len, false, reg2);
-        let main = build_phase(&gpu, &weights, &mp, bd, ntot, true, reg2);
+        let noise = build_phase(&gpu, &weights, &np, bd, n_img, true, reg_gemm);
+        let context = build_phase(&gpu, &weights, &cp, bd, cap_len, false, reg_gemm);
+        let main = build_phase(&gpu, &weights, &mp, bd, ntot, true, reg_gemm);
         ZImageDit { gpu, cfg, w: weights, f, h, wd, cap_len, noise, context, main }
     }
 
