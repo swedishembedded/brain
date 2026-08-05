@@ -849,3 +849,41 @@ because that is what the next person needs.
 * **Finite differences gate the backward against whatever forward is emitted.**
   A mis-weighted objective is self-consistent and passes — which is why the VQ
   `beta` placement is pinned by reading the reference, not by `check_vqgan`.
+
+## Matting (BiRefNet): scoped, not started
+
+Read off the released checkpoint
+(`/data/workspace/resources/pipeline/weights/birefnet/model.safetensors`, 754
+tensors, 424 MB) rather than the paper, so the numbers are what a port would
+actually face:
+
+| part | tensors | what it is |
+|---|---|---|
+| `bb.*` | 357 | **Swin-L** backbone: `patch_embed` 4x4 -> 192, stages `[2, 2, 18, 2]`, dims 192/384/768/1536 |
+| `decoder.*` | 331 | 4 decoder blocks + `gdt_convs_*` gradient-decoder heads + `conv_ms_spvn_*` multi-scale supervision |
+| `squeeze_module.*` | 66 | the lateral squeeze between backbone and decoder |
+
+**The two hard pieces already have precedent in-tree, which makes this smaller
+than it first looks:**
+
+* **Window partition / reverse** — `model::vit::WindowPlan` / `WindowIndex`,
+  written for SAM 2's Hiera, including the zero-pad when the window does not
+  divide the token grid. Swin needs the same operator.
+* **Relative position bias** — Swin stores a
+  `relative_position_bias_table` + a `relative_position_index` per block (48
+  tensors total). That is a host-side gather into a bias buffer, which is
+  exactly the shape `t5::hostbias` already has.
+
+**What is genuinely new:** the *shifted* window attention — a cyclic roll
+(`torch.roll`) of the token grid on alternate blocks, plus the attention mask
+that stops rolled-in tokens attending across the wrap. Hiera does not shift, so
+this is the one operator with no precedent. It is a mask + an index permutation,
+not a new kernel.
+
+The decoder is conv/upsample-shaped and lands on `vae::blocks::Builder` the way
+`crates/upscale` did.
+
+**Not started.** The estimate is the Swin backbone (the 18-block stage 2
+dominates), its parity ladder against the reference, then the decoder. Doing it
+badly — without the per-stage ladder — would produce exactly the class of defect
+`docs/lessons.md` #16 describes: a plausible mask that is quietly wrong.
