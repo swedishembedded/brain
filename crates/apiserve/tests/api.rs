@@ -1563,3 +1563,313 @@ async fn no_supplier_configured_is_a_plain_404_unchanged() {
     let (st, _) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
+
+// ============================================================ tool calling
+
+/// A chat model that ROUND-TRIPS `tools`/`enable_thinking` (echoed into
+/// `reasoning_content`, so a test can assert what actually reached the
+/// invocation without a second introspection channel) and streams a scripted
+/// `reasoning` event plus TWO parallel tool calls, through the exact neutral
+/// `Progress::event` `{"kind":...}` shapes `crates/cli/src/resident_llm.rs`'s
+/// `emit_chat_events` / `crates/cli/src/resident_mock.rs`'s `generate_tool_call`
+/// use — so `crates/apiserve`'s handling is exercised against a model that isn't
+/// `resident_mock` itself, while staying byte-for-byte faithful to what a real
+/// model's `ChatScanner` actually emits.
+struct FakeToolCallChat;
+struct FakeToolCallChatInst;
+impl ResidentModel for FakeToolCallChat {
+    fn manifest(&self) -> Manifest {
+        Manifest::new(
+            "brain-toolcall",
+            "a tool-calling chat model",
+            vec![ActionSpec::new("generate", "generate text")
+                .streaming()
+                .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
+                .param(ParamSpec::new("messages", ParamType::Str, "chat messages"))
+                .param(ParamSpec::new("tools", ParamType::Str, "tool definitions"))
+                .param(ParamSpec::new("tool_choice", ParamType::Str, "tool choice"))
+                .param(ParamSpec::new("enable_thinking", ParamType::Bool, "thinking").default(json!(true)))
+                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+        )
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-toolcall", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(FakeToolCallChatInst))
+    }
+}
+/// The scripted parallel calls: `(name, arguments)`, streamed as two argument
+/// fragments each so fragment-concatenation is actually exercised.
+const TOOLCALL_SCRIPT: [(&str, &str); 2] = [("get_weather", r#"{"location": "Paris"}"#), ("set_timer", r#"{"minutes": 5}"#)];
+impl Instance for FakeToolCallChatInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        // Round-trip proof: what `to_invocation` actually set, echoed into
+        // `reasoning_content` (itself under test for streaming/non-stream parity).
+        let tools_len = inv.get_str("tools").map(|s| s.len()).unwrap_or(0);
+        let enable_thinking = inv.get_bool("enable_thinking").map(|b| b.to_string()).unwrap_or_else(|| "unset".to_string());
+        let reasoning = format!("deciding (tools_len:{tools_len};enable_thinking:{enable_thinking})");
+        progress(Progress::event(0, 1, json!({ "kind": "reasoning", "text": reasoning })));
+
+        let mut calls: Vec<Value> = Vec::with_capacity(TOOLCALL_SCRIPT.len());
+        for (index, (name, arguments)) in TOOLCALL_SCRIPT.iter().enumerate() {
+            let index = index as u32;
+            let id = format!("call_{index}");
+            progress(Progress::event(0, 1, json!({ "kind": "tool_call_start", "index": index, "id": id, "name": name })));
+            let mid = arguments.len() / 2;
+            progress(Progress::event(0, 1, json!({ "kind": "tool_call_args", "index": index, "text": &arguments[..mid] })));
+            progress(Progress::event(0, 1, json!({ "kind": "tool_call_args", "index": index, "text": &arguments[mid..] })));
+            progress(Progress::event(0, 1, json!({ "kind": "tool_call_end", "index": index })));
+            calls.push(json!({ "id": id, "name": name, "arguments": arguments }));
+        }
+
+        Ok(Outcome::new()
+            .set("prompt_tokens", json!(5))
+            .set("completion_tokens", json!(2))
+            .set("finish_reason", json!("tool_calls"))
+            .set("reasoning_content", json!(reasoning))
+            .set("tool_calls", json!(serde_json::to_string(&calls).unwrap()))
+            .blob("text", Blob::new(Media::Text, Vec::new())))
+    }
+}
+fn toolcall_executor() -> Executor {
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(FakeToolCallChat)];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    Executor::start(models, budgets, Policy::default())
+}
+fn toolcall_app(provider: Provider) -> (Router, String) {
+    let key = "sk-brain-test-key".to_string();
+    let state = AppState::new(toolcall_executor(), key.clone(), provider);
+    (router(state), key)
+}
+
+#[tokio::test]
+async fn openai_chat_tool_calls_nonstream_validates_content_null_and_arguments_parse() {
+    let (app, key) = toolcall_app(Provider::OpenAI);
+    let body = json!({"model": "brain-toolcall", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_valid("openai.json", "CreateChatCompletionResponse", &v);
+    assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+    assert!(v["choices"][0]["message"]["content"].is_null(), "content must be null alongside tool_calls: {v}");
+    let calls = v["choices"][0]["message"]["tool_calls"].as_array().expect("tool_calls array present");
+    assert_eq!(calls.len(), 2, "both scripted calls present");
+    for c in calls {
+        assert_eq!(c["type"], "function");
+        assert!(c["id"].as_str().unwrap().starts_with("call_"));
+        let args = c["function"]["arguments"].as_str().expect("arguments is a JSON string");
+        let _: Value = serde_json::from_str(args).expect("arguments must itself parse as JSON");
+    }
+    // reasoning_content appears on the non-stream message (chunk of the
+    // streaming/non-stream parity requirement covered by the stream test below).
+    assert!(!v["choices"][0]["message"]["reasoning_content"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn openai_chat_tool_calls_stream_validates_indices_fragments_and_no_markup_leak() {
+    let (app, key) = toolcall_app(Provider::OpenAI);
+    let body = json!({"model": "brain-toolcall", "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let (st, text) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let datas = sse_data(&text);
+    assert_eq!(datas.last().map(String::as_str), Some("[DONE]"));
+
+    let mut first_seen: std::collections::HashMap<i64, (String, String)> = std::collections::HashMap::new();
+    let mut frags: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    let mut saw_finish = false;
+    let mut saw_reasoning = false;
+    for d in datas.iter().filter(|d| d.as_str() != "[DONE]") {
+        let v: Value = serde_json::from_str(d).unwrap();
+        assert_valid("openai.json", "CreateChatCompletionStreamResponse", &v);
+        let delta = &v["choices"][0]["delta"];
+        if let Some(c) = delta["content"].as_str() {
+            assert!(!c.contains("<tool_call>") && !c.contains("<think>"), "raw markup leaked into delta.content: {c:?}");
+        }
+        if let Some(r) = delta["reasoning_content"].as_str() {
+            if !r.is_empty() {
+                saw_reasoning = true;
+            }
+        }
+        if let Some(tcs) = delta["tool_calls"].as_array() {
+            for tc in tcs {
+                let index = tc["index"].as_i64().expect("tool_calls[].index present");
+                if let Some(id) = tc["id"].as_str() {
+                    // First chunk for this index: id+type+function.name+EMPTY arguments.
+                    assert_eq!(tc["type"], "function");
+                    let name = tc["function"]["name"].as_str().unwrap().to_string();
+                    assert_eq!(tc["function"]["arguments"].as_str(), Some(""), "first chunk's arguments must be empty");
+                    first_seen.insert(index, (id.to_string(), name));
+                } else {
+                    // Later chunk: index + argument fragment ONLY (no id/type/name).
+                    assert!(tc.get("type").is_none(), "later chunk must not repeat 'type'");
+                    assert!(tc["function"].get("name").is_none(), "later chunk must not repeat 'function.name'");
+                    let frag = tc["function"]["arguments"].as_str().expect("later chunk carries an arguments fragment");
+                    frags.entry(index).or_default().push_str(frag);
+                }
+            }
+        }
+        if v["choices"][0]["finish_reason"].as_str() == Some("tool_calls") {
+            saw_finish = true;
+        }
+    }
+    assert!(saw_reasoning, "reasoning_content must appear in at least one streaming delta");
+    assert!(saw_finish, "terminal chunk must carry finish_reason=tool_calls");
+
+    // Parallel calls get distinct sequential indices.
+    assert_eq!(first_seen.len(), 2, "two distinct tool-call starts: {first_seen:?}");
+    assert_eq!(first_seen.get(&0).map(|(_, n)| n.as_str()), Some("get_weather"));
+    assert_eq!(first_seen.get(&1).map(|(_, n)| n.as_str()), Some("set_timer"));
+
+    // Concatenated argument fragments parse as JSON, per index.
+    let a0: Value = serde_json::from_str(frags.get(&0).expect("index 0 fragments")).expect("index 0 arguments parse as JSON");
+    assert_eq!(a0["location"], "Paris");
+    let a1: Value = serde_json::from_str(frags.get(&1).expect("index 1 fragments")).expect("index 1 arguments parse as JSON");
+    assert_eq!(a1["minutes"], 5);
+}
+
+#[tokio::test]
+async fn openai_chat_tools_and_enable_thinking_reach_the_invocation() {
+    let (app, key) = toolcall_app(Provider::OpenAI);
+    let body = json!({
+        "model": "brain-toolcall",
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}],
+        "enable_thinking": false,
+    });
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let reasoning = v["choices"][0]["message"]["reasoning_content"].as_str().unwrap();
+    assert!(!reasoning.contains("tools_len:0"), "a non-empty 'tools' must reach the invocation: {reasoning}");
+    assert!(reasoning.contains("enable_thinking:false"), "'enable_thinking' must reach the invocation: {reasoning}");
+}
+
+#[tokio::test]
+async fn openai_chat_no_tools_means_unset_enable_thinking_in_the_invocation() {
+    // The sibling of the round-trip test above: when the client sends neither
+    // `tools` nor `enable_thinking`, the invocation must carry neither (an
+    // absent optional param, not a false/empty default silently injected).
+    let (app, key) = toolcall_app(Provider::OpenAI);
+    let body = json!({"model": "brain-toolcall", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let reasoning = v["choices"][0]["message"]["reasoning_content"].as_str().unwrap();
+    assert!(reasoning.contains("tools_len:0"));
+    assert!(reasoning.contains("enable_thinking:unset"));
+}
+
+#[tokio::test]
+async fn openrouter_chat_tool_calls_validate_against_the_openrouter_spec() {
+    let (app, key) = toolcall_app(Provider::OpenRouter);
+
+    // Non-streaming: ChatResult (not the raw OpenAI schema).
+    let body = json!({"model": "brain-toolcall", "messages": [{"role": "user", "content": "hi"}]});
+    let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_valid("openrouter.json", "ChatResult", &v);
+    assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+    assert_eq!(v["choices"][0]["native_finish_reason"], "tool_calls");
+    assert!(v["choices"][0]["message"]["tool_calls"].as_array().unwrap().len() == 2);
+
+    // Streaming: ChatStreamChunk.
+    let body = json!({"model": "brain-toolcall", "messages": [{"role": "user", "content": "hi"}], "stream": true});
+    let (st, text) = post_text(&app, Provider::OpenRouter, &key, "/chat/completions", &body).await;
+    assert_eq!(st, StatusCode::OK);
+    let datas = sse_data(&text);
+    let mut saw_tool_calls = false;
+    for d in datas.iter().filter(|d| d.as_str() != "[DONE]") {
+        let v: Value = serde_json::from_str(d).unwrap();
+        assert_valid("openrouter.json", "ChatStreamChunk", &v);
+        if v["choices"][0]["delta"]["tool_calls"].is_array() {
+            saw_tool_calls = true;
+        }
+    }
+    assert!(saw_tool_calls, "openrouter stream must carry tool_calls deltas");
+}
+
+#[tokio::test]
+async fn anthropic_messages_with_tools_is_400() {
+    let (app, key) = chat_app(Provider::Anthropic);
+    let body = json!({
+        "model": "brain-chat", "max_tokens": 16,
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
+    });
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "tools present must 400 on the Anthropic surface");
+    assert_valid("anthropic.json", "ErrorResponse", &v);
+}
+
+#[tokio::test]
+async fn anthropic_tool_result_content_block_is_400() {
+    let (app, key) = chat_app(Provider::Anthropic);
+    let body = json!({
+        "model": "brain-chat", "max_tokens": 16,
+        "messages": [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "22C"}]}],
+    });
+    let (st, v) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a tool_result content block must 400");
+    assert_valid("anthropic.json", "ErrorResponse", &v);
+
+    // The sibling case: a tool_use block in an assistant message.
+    let body = json!({
+        "model": "brain-chat", "max_tokens": 16,
+        "messages": [
+            {"role": "user", "content": "weather?"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "x", "name": "get_weather", "input": {}}]},
+        ],
+    });
+    let (st, _) = post_json(&app, Provider::Anthropic, &key, "/v1/messages", &body).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "a tool_use content block must 400");
+}
+
+#[tokio::test]
+async fn openai_chat_tools_bounds_are_400_not_panics_or_500s() {
+    let (app, key) = chat_app(Provider::OpenAI);
+
+    let cases: Vec<(&str, Value)> = vec![
+        ("tools not an array", json!({"model":"brain-chat","messages":[{"role":"user","content":"hi"}],"tools":"nope"})),
+        (
+            "tool missing function.name",
+            json!({"model":"brain-chat","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{}}]}),
+        ),
+        (
+            "tool function.name over 64 chars",
+            json!({"model":"brain-chat","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"a".repeat(65)}}]}),
+        ),
+        (
+            "more than 128 tools",
+            json!({
+                "model":"brain-chat","messages":[{"role":"user","content":"hi"}],
+                "tools": (0..129).map(|i| json!({"type":"function","function":{"name": format!("t{i}")}})).collect::<Vec<_>>(),
+            }),
+        ),
+        (
+            "oversized tools payload",
+            json!({
+                "model":"brain-chat","messages":[{"role":"user","content":"hi"}],
+                "tools":[{"type":"function","function":{"name":"t","description":"x".repeat(300 * 1024)}}],
+            }),
+        ),
+        (
+            "bad tool_choice string",
+            json!({"model":"brain-chat","messages":[{"role":"user","content":"hi"}],"tool_choice":"whatever"}),
+        ),
+        (
+            "tool_choice object missing function.name",
+            json!({"model":"brain-chat","messages":[{"role":"user","content":"hi"}],"tool_choice":{"type":"function"}}),
+        ),
+        (
+            "tool message missing tool_call_id",
+            json!({"model":"brain-chat","messages":[{"role":"tool","content":"22C"}]}),
+        ),
+    ];
+    for (label, body) in cases {
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{label} must 400, got {st}: {v}");
+        assert_valid("openai.json", "ErrorResponse", &v);
+    }
+}

@@ -322,6 +322,7 @@ fn train(args: &[String], base: Option<&str>) {
             d_ff: 1024,
             rope_theta: 1.0e6,
             rms_eps: 1e-6,
+            max_position_embeddings: block,
             tie_embeddings: true,
             qk_norm: true,
             attn_bias: false,

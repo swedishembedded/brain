@@ -66,13 +66,50 @@ pub async fn ensure_and_recheck<T>(state: &AppState, provider: Provider, model: 
 /// Read the contract's `generate` [`Outcome`] into `(text, prompt_tokens,
 /// completion_tokens, finish_reason)`. `text` is the `text` blob (full assistant
 /// text); the counts + `finish_reason` come from the `outputs` object. Missing
-/// fields degrade gracefully (empty text, zero counts, `"stop"`).
+/// fields degrade gracefully (empty text, zero counts, `"stop"`). Kept as the
+/// smaller reader every existing caller (image generation's non-chat callers never
+/// use it; Anthropic — no tool-calling support yet — still does) uses unchanged;
+/// [`read_chat_outcome`] is an additive sibling for callers that also need
+/// reasoning/tool_calls, not a replacement.
 pub fn read_outcome(o: &Outcome) -> (String, i64, i64, String) {
     let text = o.blobs.get("text").map(|b| String::from_utf8_lossy(&b.bytes).into_owned()).unwrap_or_default();
     let prompt = o.outputs.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
     let completion = o.outputs.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
     let finish = o.outputs.get("finish_reason").and_then(|v| v.as_str()).unwrap_or("stop").to_string();
     (text, prompt, completion, finish)
+}
+
+/// A generation outcome's full chat shape, read from the contract `Outcome`:
+/// everything [`read_outcome`] reads, plus `reasoning` (the model's
+/// `<think>…</think>` text, empty when it didn't reason) and `tool_calls` (one
+/// JSON object per call — `{"id","name","arguments"}`, `arguments` a raw JSON-text
+/// string, never re-parsed — from `outputs.tool_calls`'s JSON-array-string;
+/// empty when absent). `text` is VISIBLE content only — the resident layer
+/// (`crates/cli/src/resident_llm.rs::QwenInstance::run`,
+/// `resident_mock.rs::generate_tool_call`) guarantees `<think>`/`<tool_call>`
+/// markup never reaches the `text` blob.
+pub struct ChatOutcome {
+    pub text: String,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub finish: String,
+    pub reasoning: String,
+    pub tool_calls: Vec<serde_json::Value>,
+}
+
+/// Read a [`ChatOutcome`] from the contract `Outcome`. See [`read_outcome`] for the
+/// smaller (pre-tool-calling) shape this extends.
+pub fn read_chat_outcome(o: &Outcome) -> ChatOutcome {
+    let (text, prompt_tokens, completion_tokens, finish) = read_outcome(o);
+    let reasoning = o.outputs.get("reasoning_content").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let tool_calls = o
+        .outputs
+        .get("tool_calls")
+        .and_then(|v| v.as_str())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    ChatOutcome { text, prompt_tokens, completion_tokens, finish, reasoning, tool_calls }
 }
 
 /// Map an executor reply error string to a provider-shaped [`ApiError`]. An unknown
@@ -166,13 +203,19 @@ impl FetchProgress {
     }
 }
 
-/// One item on a streaming generation: an incremental text piece, a coarse
-/// `(step, total)` progress tick (used by image generation's denoise loop; chat
-/// streaming ignores it), a cold-auto-fetch progress tick (see
+/// One item on a streaming generation: an incremental text piece, a structured
+/// out-of-band event (reasoning/tool-call progress — see [`capability::Progress::event`]
+/// and `resident_llm.rs::emit_chat_events`'s neutral `{"kind":...}` shapes; chat
+/// streaming renders these into `delta.reasoning_content`/`delta.tool_calls`,
+/// NEVER into `delta.content` — that structural separation is what keeps raw
+/// `<think>`/`<tool_call>` markup from ever leaking into plain content deltas), a
+/// coarse `(step, total)` progress tick (used by image generation's denoise loop;
+/// chat streaming ignores it), a cold-auto-fetch progress tick (see
 /// [`FetchProgress`] — only ever produced by [`stream_with_autofetch`]), the
 /// terminal outcome (full text/image + counts), or an error.
 pub enum StreamMsg {
     Delta(String),
+    Event(serde_json::Value),
     Progress(u32, u32),
     Fetching(FetchProgress),
     Done(Outcome),
@@ -247,6 +290,8 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
         .on_progress(move |p| {
             if let Some(piece) = p.delta {
                 let _ = tx_progress.send(StreamMsg::Delta(piece));
+            } else if let Some(ev) = p.event {
+                let _ = tx_progress.send(StreamMsg::Event(ev));
             } else if forward_steps {
                 let _ = tx_progress.send(StreamMsg::Progress(p.step, p.total));
             }
@@ -350,6 +395,8 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
             .on_progress(move |p| {
                 if let Some(piece) = p.delta {
                     let _ = tx_progress.send(StreamMsg::Delta(piece));
+                } else if let Some(ev) = p.event {
+                    let _ = tx_progress.send(StreamMsg::Event(ev));
                 } else if forward_steps {
                     let _ = tx_progress.send(StreamMsg::Progress(p.step, p.total));
                 }

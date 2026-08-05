@@ -101,10 +101,35 @@ async fn count_tokens(State(_state): State<AppState>, body: Bytes) -> Response {
     Json(json!({ "input_tokens": heuristic_tokens(&request_text(&body)) })).into_response()
 }
 
+/// Reject a request that uses tool-calling features this surface does not support
+/// yet: a top-level `tools` array, or any message content block of type
+/// `tool_use`/`tool_result`. An explicit 400 (not a silent drop) — full Anthropic
+/// tool-calling (the block-index streaming restructure it needs) is a documented
+/// follow-up, out of scope here.
+fn reject_unsupported_tools(body: &Value) -> Result<(), ApiError> {
+    if body.get("tools").map(|v| !v.is_null()).unwrap_or(false) {
+        return Err(ApiError::invalid_request(PROVIDER, "'tools' is not supported on this surface yet"));
+    }
+    if let Some(msgs) = body.get("messages").and_then(|v| v.as_array()) {
+        for m in msgs {
+            if let Some(blocks) = m.get("content").and_then(|v| v.as_array()) {
+                for b in blocks {
+                    if matches!(b.get("type").and_then(|v| v.as_str()), Some("tool_use") | Some("tool_result")) {
+                        return Err(ApiError::invalid_request(PROVIDER, "'tool_use'/'tool_result' content blocks are not supported on this surface yet"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Parse + validate an Anthropic Messages request into `(model, invocation, stream)`.
-/// Enforces `model`/`messages`/`max_tokens` present; builds the contract `generate`
+/// Enforces `model`/`messages`/`max_tokens` present, rejects unsupported
+/// tool-calling ([`reject_unsupported_tools`]); builds the contract `generate`
 /// invocation (Anthropic's top-level `system` maps to the `system` param).
 pub fn to_invocation(body: &Value) -> Result<(String, Invocation, bool), ApiError> {
+    reject_unsupported_tools(body)?;
     let model = body.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).ok_or_else(|| ApiError::invalid_request(PROVIDER, "'model' is required"))?;
     let messages = body.get("messages").and_then(|v| v.as_array()).filter(|a| !a.is_empty()).ok_or_else(|| ApiError::invalid_request(PROVIDER, "'messages' must be a non-empty array"))?;
     let max_tokens = body.get("max_tokens").and_then(|v| v.as_i64()).ok_or_else(|| ApiError::invalid_request(PROVIDER, "'max_tokens' is required"))?;
@@ -268,6 +293,10 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
                     }).to_string()));
                 }
                 StreamMsg::Progress(..) => {} // chat streams token deltas, not coarse steps
+                // Reasoning/tool-call events: no Anthropic surface shape yet (full
+                // tool-calling is a documented follow-up — see
+                // `reject_unsupported_tools`); dropped rather than misrendered.
+                StreamMsg::Event(_) => {}
                 StreamMsg::Fetching(p) => {
                     yield Ok(Event::default().comment(p.comment_text()));
                 }

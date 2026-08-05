@@ -46,6 +46,17 @@ binds them, so treat all request input as hostile.
       trigger `ensure()`'s fetch. See item 4 for the resulting egress and item 5 for why
       a failed/refused fetch must still collapse to the exact same generic 404/"no
       model" a genuinely-unknown model gets.
+- [ ] Tool-calling input (`crates/apiserve/src/openai.rs`'s `validate_tools`/
+      `validate_tool_choice`, called from `to_invocation` BEFORE anything reaches the
+      resident model / prompt renderer): `tools` must be an array of at most 128
+      entries, at most 256 KiB serialized; every element's `function.name` must be a
+      non-empty string of at most 64 characters; `tool_choice` must be one of
+      `"auto"`/`"none"`/`"required"` or `{"type":"function","function":{"name":...}}`;
+      any `role:"tool"` message must carry a non-empty `tool_call_id` (the linkage a
+      malformed/adversarial client could otherwise omit to desync a multi-turn
+      tool-calling conversation). Each is a 400, not a truncation/best-effort pass-through
+      — see the bounds cases in `crates/apiserve/tests/api.rs`
+      (`openai_chat_tools_bounds_are_400_not_panics_or_500s`).
 
 ### 3. Resource safety & backpressure
 - [ ] Admission is bounded: a request that can't start within the admit deadline → 429
@@ -104,6 +115,17 @@ binds them, so treat all request input as hostile.
       capability-appropriate subset per provider — no internal paths, budgets, or keys.
 - [ ] Stats/observability surfaces (`crates/stats`, D-Bus stats stream) never include
       keys or request contents.
+- [ ] Tool-call `arguments` (`message.tool_calls[].function.arguments`, both the
+      non-streaming body and the streamed `delta.tool_calls[].function.arguments`
+      fragments) are the MODEL's raw generated JSON text, re-serialized verbatim by
+      `crates/apiserve/src/openai.rs::openai_tool_calls` — the server never parses
+      and executes a tool call itself, and no server-side state (file paths, other
+      requests, prior sessions) is ever echoed into an `arguments` string. The
+      resident layer (`crates/cli/src/resident_llm.rs::QwenInstance::run`) guarantees
+      raw `<think>`/`<tool_call>` markup never leaks into `message.content`/
+      `delta.content` — only `ChatEvent::Content` ever feeds those fields (see
+      `bridge::StreamMsg`'s doc comment and `openai.rs::event_delta`, which is the
+      ONLY path that builds `reasoning_content`/`tool_calls` deltas).
 
 ### 7. Transport
 - [ ] Servers bind `127.0.0.1` by default (localhost only); binding a public interface

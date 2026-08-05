@@ -49,9 +49,10 @@ impl MockResident {
 
     /// The streaming chat action. Declares every param the OpenAI/Anthropic/OpenRouter
     /// chat handlers set (`messages`, `max_new`, `temp`, `top_p`, `top_k`, `seed`,
-    /// optional `system`/`stop`) plus a `prompt` alias — so `ActionSpec::validate`
-    /// never rejects a handler-built invocation. `streaming` + a `messages`/`prompt`
-    /// param + a `Text` output is what `catalog::api_caps` classifies as chat.
+    /// optional `system`/`stop`/`tools`/`tool_choice`/`enable_thinking`) plus a
+    /// `prompt` alias — so `ActionSpec::validate` never rejects a handler-built
+    /// invocation. `streaming` + a `messages`/`prompt` param + a `Text` output is
+    /// what `catalog::api_caps` classifies as chat.
     fn generate_spec() -> ActionSpec {
         ActionSpec::new("generate", "deterministic mock chat generation")
             .streaming()
@@ -64,6 +65,9 @@ impl MockResident {
             .param(ParamSpec::new("top_k", ParamType::Int, "top-k").default(json!(0)))
             .param(ParamSpec::new("seed", ParamType::Int, "sampling seed").default(json!(0)))
             .param(ParamSpec::new("stop", ParamType::Str, "stop sequences (JSON array string)"))
+            .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (accepted, only inspected for the mock tool-call trigger)"))
+            .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive (accepted, ignored by the mock)"))
+            .param(ParamSpec::new("enable_thinking", ParamType::Bool, "accepted, ignored by the mock").default(json!(true)))
             .output(BlobSpec::new("text", Media::Text, "the generated text"))
     }
 
@@ -146,6 +150,66 @@ impl Instance for MockInstance {
 /// (a filesystem path + panic-ish text) that the apiserve layer must NOT reflect to
 /// the client. See [`generate`].
 pub const FAIL_TRIGGER: &str = "__mock_fail__";
+
+/// The substring a client sends to trigger the mock **tool-calling** mode: instead
+/// of the plain `"You said: …"` echo, `generate` streams a scripted `reasoning`
+/// event followed by one or two tool calls (repeating the trigger in the user text
+/// requests a second, parallel call) through the SAME neutral `Progress::event`
+/// shapes a real model's `qwen_chat::ChatScanner` emits (see
+/// `crates/cli/src/resident_llm.rs::emit_chat_events`): `tool_call_start` →
+/// `tool_call_args`* → `tool_call_end`. No weights/GPU are involved, so
+/// `crates/apiserve/tests/api.rs` can exercise the full OpenAI/Anthropic/OpenRouter
+/// tool-calling pipe against a real HTTP server. See [`FAIL_TRIGGER`] for the
+/// sibling error-hygiene trigger and its naming convention (there was no existing
+/// mock trigger-string convention to match beyond "double-underscore-wrapped",
+/// which this follows).
+pub const TOOL_CALL_TRIGGER: &str = "__MOCK_TOOL_CALL__";
+
+/// The scripted tool calls [`TOOL_CALL_TRIGGER`] emits, in order: `(name,
+/// arguments)`. A repeated trigger in the user text requests more than one
+/// (clamped to this list's length) — the sequential-index test in
+/// `crates/apiserve/tests/api.rs` covers exactly this "parallel calls" shape.
+const MOCK_TOOL_CALLS: [(&str, &str); 2] = [("get_weather", r#"{"location": "Paris"}"#), ("set_timer", r#"{"minutes": 5}"#)];
+
+/// The reasoning text streamed (as a single `Progress::event(kind:"reasoning")`)
+/// ahead of the scripted tool call(s).
+const MOCK_TOOL_CALL_REASONING: &str = "checking which tool to call";
+
+/// [`TOOL_CALL_TRIGGER`]'s scripted reply: a reasoning event, then one
+/// `tool_call_start`/`tool_call_args`*/`tool_call_end` run per requested call (the
+/// arguments text is split into two fragments so a client's fragment-concatenation
+/// path is actually exercised, not just its single-fragment case). Returns an
+/// `Outcome` with no visible text (`outputs.tool_calls` carries the calls as a JSON
+/// array string; `finish_reason: "tool_calls"`), mirroring
+/// `resident_llm.rs::QwenInstance::run`'s real-model shape exactly so the two paths
+/// are indistinguishable to `crates/apiserve`.
+fn generate_tool_call(user: &str, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    let n = user.matches(TOOL_CALL_TRIGGER).count().clamp(1, MOCK_TOOL_CALLS.len());
+    progress(Progress::event(0, 1, json!({ "kind": "reasoning", "text": MOCK_TOOL_CALL_REASONING })));
+
+    let mut calls: Vec<Value> = Vec::with_capacity(n);
+    for (index, (name, arguments)) in MOCK_TOOL_CALLS.iter().take(n).enumerate() {
+        let index = index as u32;
+        let id = format!("call_{index}");
+        progress(Progress::event(0, 1, json!({ "kind": "tool_call_start", "index": index, "id": id, "name": name })));
+        let mid = arguments.len() / 2;
+        for frag in [&arguments[..mid], &arguments[mid..]] {
+            if !frag.is_empty() {
+                progress(Progress::event(0, 1, json!({ "kind": "tool_call_args", "index": index, "text": frag })));
+            }
+        }
+        progress(Progress::event(0, 1, json!({ "kind": "tool_call_end", "index": index })));
+        calls.push(json!({ "id": id, "name": name, "arguments": arguments }));
+    }
+
+    Ok(Outcome::new()
+        .set("prompt_tokens", json!(user.split_whitespace().count().max(1) as i64))
+        .set("completion_tokens", json!(n as i64))
+        .set("finish_reason", json!("tool_calls"))
+        .set("reasoning_content", json!(MOCK_TOOL_CALL_REASONING))
+        .set("tool_calls", json!(serde_json::to_string(&calls).unwrap_or_else(|_| "[]".to_string())))
+        .blob("text", Blob::new(Media::Text, Vec::new())))
+}
 
 /// The delay (ms) the mock spends "producing" before it streams, from
 /// `BRAIN_MOCK_DELAY_MS` (default 0 = instant). A positive value pins the single CPU
@@ -234,6 +298,12 @@ fn generate(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResul
     let delay = mock_delay_ms();
     if delay > 0 && sleep_cancellable(delay, &inv.cancel) {
         return Err("cancelled".into());
+    }
+
+    // Tool-calling mode: a scripted tool_call/reasoning event stream instead of the
+    // plain text echo (see [`TOOL_CALL_TRIGGER`]/[`generate_tool_call`]).
+    if user.contains(TOOL_CALL_TRIGGER) {
+        return generate_tool_call(&user, progress);
     }
 
     let reply = if user.trim().is_empty() { "mock reply ready".to_string() } else { format!("You said: {}", user.trim()) };
@@ -403,6 +473,76 @@ mod tests {
             MockResident.manifest().actions.iter().any(|a| a.name == "forecast"),
             "forecast must be advertised"
         );
+    }
+
+    #[test]
+    fn tool_call_trigger_streams_one_scripted_call_by_default() {
+        let mut inst = MockInstance;
+        let messages = serde_json::to_string(&json!([{ "role": "user", "content": format!("weather please {TOOL_CALL_TRIGGER}") }])).unwrap();
+        let inv = Invocation::new().set("messages", json!(messages));
+
+        let mut events: Vec<Value> = Vec::new();
+        let mut deltas = String::new();
+        let out = inst
+            .run("generate", &inv, &mut |p| {
+                if let Some(d) = p.delta {
+                    deltas.push_str(&d);
+                }
+                if let Some(e) = p.event {
+                    events.push(e);
+                }
+            })
+            .unwrap();
+
+        // No plain-text content deltas leak — the whole reply is tool-call/reasoning
+        // events, matching a real model's shape when it emits nothing but a call.
+        assert!(deltas.is_empty(), "tool-call mode must not stream content deltas: {deltas:?}");
+        assert_eq!(out.outputs["finish_reason"], "tool_calls");
+        assert_eq!(out.outputs["reasoning_content"], MOCK_TOOL_CALL_REASONING);
+        assert!(out.blobs["text"].bytes.is_empty(), "no visible text alongside a tool call");
+
+        let calls: Value = serde_json::from_str(out.outputs["tool_calls"].as_str().unwrap()).unwrap();
+        let calls = calls.as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["name"], "get_weather");
+        let args: Value = serde_json::from_str(calls[0]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["location"], "Paris");
+
+        // Event ordering: reasoning, then start/args*/end for the one call.
+        let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds[0], "reasoning");
+        assert_eq!(kinds[1], "tool_call_start");
+        assert_eq!(kinds.last(), Some(&"tool_call_end"));
+        assert!(kinds.contains(&"tool_call_args"));
+
+        // Argument fragments concatenate to the full JSON.
+        let frags: String =
+            events.iter().filter(|e| e["kind"] == "tool_call_args").map(|e| e["text"].as_str().unwrap()).collect();
+        assert_eq!(frags, r#"{"location": "Paris"}"#);
+    }
+
+    #[test]
+    fn tool_call_trigger_repeated_emits_a_second_call_with_the_next_index() {
+        let mut inst = MockInstance;
+        let messages =
+            serde_json::to_string(&json!([{ "role": "user", "content": format!("{TOOL_CALL_TRIGGER} and {TOOL_CALL_TRIGGER}") }]))
+                .unwrap();
+        let inv = Invocation::new().set("messages", json!(messages));
+
+        let mut starts: Vec<(u32, String)> = Vec::new();
+        let out = inst
+            .run("generate", &inv, &mut |p| {
+                if let Some(e) = p.event {
+                    if e["kind"] == "tool_call_start" {
+                        starts.push((e["index"].as_u64().unwrap() as u32, e["id"].as_str().unwrap().to_string()));
+                    }
+                }
+            })
+            .unwrap();
+
+        assert_eq!(starts, vec![(0, "call_0".to_string()), (1, "call_1".to_string())], "distinct sequential indices");
+        let calls: Value = serde_json::from_str(out.outputs["tool_calls"].as_str().unwrap()).unwrap();
+        assert_eq!(calls.as_array().unwrap().len(), 2);
     }
 
     #[test]

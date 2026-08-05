@@ -233,10 +233,7 @@ pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response
                 stream_chat(state, model, inv, native, want_usage()).await
             } else {
                 match bridge::submit(&state, &model, "generate", inv).await {
-                    Ok(outcome) => {
-                        let (text, prompt, completion, finish) = bridge::read_outcome(&outcome);
-                        Json(non_stream_body(&model, &text, prompt, completion, &finish, native)).into_response()
-                    }
+                    Ok(outcome) => Json(non_stream_body(&model, &bridge::read_chat_outcome(&outcome), native)).into_response(),
                     Err(e) => e.into_response(),
                 }
             }
@@ -255,10 +252,7 @@ pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response
         },
         None => match bridge::ensure_and_recheck(&state, provider, &requested, |id| catalog::resolve_chat(&state.exec, id).then_some(())).await {
             Ok(()) => match bridge::submit(&state, &requested, "generate", inv).await {
-                Ok(outcome) => {
-                    let (text, prompt, completion, finish) = bridge::read_outcome(&outcome);
-                    Json(non_stream_body(&requested, &text, prompt, completion, &finish, native)).into_response()
-                }
+                Ok(outcome) => Json(non_stream_body(&requested, &bridge::read_chat_outcome(&outcome), native)).into_response(),
                 Err(e) => e.into_response(),
             },
             Err(e) => e.into_response(),
@@ -266,9 +260,21 @@ pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response
     }
 }
 
+/// Bounds enforced on `tools`/`tool_choice` before they ever reach the resident
+/// model (`docs/api-security-audit.md`'s input-handling/DoS section): a request
+/// body is otherwise unbounded attacker-controlled JSON, and `tools` feeds
+/// straight into prompt construction (the `<tools>` block's byte length is
+/// unbounded input to the tokenizer/model if left unchecked).
+const MAX_TOOLS: usize = 128;
+const MAX_TOOLS_BYTES: usize = 256 * 1024;
+const MAX_TOOL_NAME_LEN: usize = 64;
+
 /// Parse + validate an OpenAI chat request into `(model, invocation, stream)`.
-/// Enforces `model`/`messages` present and rejects `n > 1`; builds the contract
-/// `generate` invocation.
+/// Enforces `model`/`messages` present, rejects `n > 1`, and enforces every
+/// `tools`/`tool_choice`/`tool_call_id` INPUT BOUND (see [`validate_tools`]/
+/// [`validate_tool_choice`]); builds the contract `generate` invocation, setting
+/// `tools`/`tool_choice`/`enable_thinking` only when the request supplies them
+/// (the same optional-param pattern as `stop`).
 pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invocation, bool), ApiError> {
     let model = body.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).ok_or_else(|| ApiError::invalid_request(provider, "'model' is required"))?;
     let messages = body.get("messages").and_then(|v| v.as_array()).filter(|a| !a.is_empty()).ok_or_else(|| ApiError::invalid_request(provider, "'messages' must be a non-empty array"))?;
@@ -277,7 +283,21 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     }
     let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    // Flatten each message to the contract shape {role, content(text)}.
+    // Every `role:"tool"` message must carry the `tool_call_id` it answers — a
+    // client that omits it has sent a malformed request that would otherwise
+    // silently misattribute the tool result; reject it up front.
+    for (i, m) in messages.iter().enumerate() {
+        if m.get("role").and_then(|v| v.as_str()) == Some("tool") {
+            let has_id = m.get("tool_call_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).is_some();
+            if !has_id {
+                return Err(ApiError::invalid_request(provider, format!("messages[{i}]: a 'tool' message requires a non-empty 'tool_call_id'")));
+            }
+        }
+    }
+
+    // Flatten each message to the contract shape, preserving tool_calls/
+    // tool_call_id/reasoning_content so a multi-turn tool-calling conversation
+    // round-trips (see [`flatten_message`]).
     let msgs: Vec<Value> = messages.iter().map(flatten_message).collect();
     let mut inv = Invocation::new()
         .set("messages", json!(serde_json::to_string(&msgs).unwrap_or_else(|_| "[]".into())))
@@ -289,7 +309,77 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     if let Some(stop) = normalize_stop(body.get("stop")) {
         inv = inv.set("stop", json!(stop));
     }
+
+    if let Some(tools) = body.get("tools").filter(|v| !v.is_null()) {
+        validate_tools(provider, tools)?;
+        inv = inv.set("tools", json!(serde_json::to_string(tools).unwrap_or_else(|_| "[]".into())));
+    }
+    if let Some(tc) = body.get("tool_choice").filter(|v| !v.is_null()) {
+        validate_tool_choice(provider, tc)?;
+        inv = inv.set("tool_choice", json!(serde_json::to_string(tc).unwrap_or_default()));
+    }
+    // `enable_thinking`: nested under `chat_template_kwargs` (the vLLM/SGLang
+    // OpenAI-compatible extension point real Qwen3 tool-calling clients use) or,
+    // tolerated, top-level.
+    let enable_thinking = body
+        .get("chat_template_kwargs")
+        .and_then(|k| k.get("enable_thinking"))
+        .and_then(|v| v.as_bool())
+        .or_else(|| body.get("enable_thinking").and_then(|v| v.as_bool()));
+    if let Some(et) = enable_thinking {
+        inv = inv.set("enable_thinking", json!(et));
+    }
+
     Ok((model.to_string(), inv, stream))
+}
+
+/// INPUT BOUNDS on the `tools` array: must be an array, at most [`MAX_TOOLS`]
+/// entries, at most [`MAX_TOOLS_BYTES`] serialized bytes, and every element's
+/// `function.name` a non-empty string of at most [`MAX_TOOL_NAME_LEN`]
+/// characters. Enforced BEFORE the array ever reaches the resident model /
+/// prompt renderer (`docs/api-security-audit.md`).
+fn validate_tools(provider: Provider, tools: &Value) -> Result<(), ApiError> {
+    let arr = tools.as_array().ok_or_else(|| ApiError::invalid_request(provider, "'tools' must be an array"))?;
+    if arr.len() > MAX_TOOLS {
+        return Err(ApiError::invalid_request(provider, format!("'tools' must not have more than {MAX_TOOLS} entries")));
+    }
+    let bytes = serde_json::to_vec(tools).map(|v| v.len()).unwrap_or(usize::MAX);
+    if bytes > MAX_TOOLS_BYTES {
+        return Err(ApiError::invalid_request(provider, format!("'tools' payload must not exceed {MAX_TOOLS_BYTES} bytes")));
+    }
+    for (i, t) in arr.iter().enumerate() {
+        let name = t.get("function").and_then(|f| f.get("name"));
+        let ok = matches!(name, Some(Value::String(s)) if !s.is_empty() && s.chars().count() <= MAX_TOOL_NAME_LEN);
+        if !ok {
+            return Err(ApiError::invalid_request(
+                provider,
+                format!("'tools[{i}].function.name' must be a non-empty string of at most {MAX_TOOL_NAME_LEN} characters"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// INPUT BOUNDS on `tool_choice`: `"auto"` | `"none"` | `"required"`, or
+/// `{"type":"function","function":{"name":<non-empty string>}}` — any other shape
+/// is a 400 rather than being forwarded verbatim to the resident.
+fn validate_tool_choice(provider: Provider, tc: &Value) -> Result<(), ApiError> {
+    let ok = match tc {
+        Value::String(s) => s == "auto" || s == "none" || s == "required",
+        Value::Object(o) => {
+            o.get("type").and_then(|v| v.as_str()) == Some("function")
+                && matches!(o.get("function").and_then(|f| f.get("name")), Some(Value::String(s)) if !s.is_empty())
+        }
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(ApiError::invalid_request(
+            provider,
+            "'tool_choice' must be \"auto\", \"none\", \"required\", or {\"type\":\"function\",\"function\":{\"name\":...}}",
+        ))
+    }
 }
 
 /// `max_tokens` (or the newer `max_completion_tokens`), defaulting to 1024.
@@ -306,15 +396,44 @@ fn normalize_stop(v: Option<&Value>) -> Option<String> {
     }
 }
 
-/// One OpenAI message → the contract `{role, content}` (content flattened to text).
+/// One OpenAI message → the contract `{role, content, reasoning_content?,
+/// tool_calls?, tool_call_id?}` (content flattened to text; a `tool_calls`
+/// element's `function.{name,arguments}` flattens to `{id,name,arguments}` —
+/// the shape `crates/cli/src/resident_llm.rs::parse_chat_messages` reads).
+/// `role:"tool"` is now its OWN contract role (no longer folded into `user`) so
+/// the resident's chat template renders it as a `<tool_response>` turn.
 fn flatten_message(m: &Value) -> Value {
     let role = match m.get("role").and_then(|v| v.as_str()).unwrap_or("user") {
         "system" | "developer" => "system",
         "assistant" => "assistant",
-        // tool results and anything else fold into the user turn.
+        "tool" => "tool",
+        // anything else folds into the user turn.
         _ => "user",
     };
-    json!({ "role": role, "content": content_text(m.get("content")) })
+    let mut out = json!({ "role": role, "content": content_text(m.get("content")) });
+    if let Some(rc) = m.get("reasoning_content").and_then(|v| v.as_str()) {
+        out["reasoning_content"] = json!(rc);
+    }
+    if let Some(id) = m.get("tool_call_id").and_then(|v| v.as_str()) {
+        out["tool_call_id"] = json!(id);
+    }
+    if let Some(calls) = m.get("tool_calls").and_then(|v| v.as_array()).filter(|a| !a.is_empty()) {
+        let flat: Vec<Value> = calls
+            .iter()
+            .map(|c| {
+                let id = c.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                let name = c.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()).unwrap_or_default();
+                let arguments = match c.get("function").and_then(|f| f.get("arguments")) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(other) => serde_json::to_string(other).unwrap_or_default(),
+                    None => "{}".to_string(),
+                };
+                json!({ "id": id, "name": name, "arguments": arguments })
+            })
+            .collect();
+        out["tool_calls"] = json!(flat);
+    }
+    out
 }
 
 /// Flatten OpenAI message content (a string, or an array of typed parts) to text.
@@ -331,20 +450,35 @@ fn content_text(c: Option<&Value>) -> String {
 }
 
 /// Map the contract `finish_reason` to OpenAI's enum. There is no `stop_sequence`
-/// in OpenAI; a stop-sequence hit is reported as `stop`.
+/// in OpenAI; a stop-sequence hit is reported as `stop`. `tool_calls` passes
+/// through unchanged (both the contract and OpenAI use that exact name).
 fn finish_openai(fr: &str) -> &'static str {
     match fr {
         "length" => "length",
+        "tool_calls" => "tool_calls",
         _ => "stop",
     }
 }
 
-/// The non-streaming `chat.completion` body.
-fn non_stream_body(model: &str, text: &str, prompt: i64, completion: i64, finish: &str, native: bool) -> Value {
-    let fr = finish_openai(finish);
+/// The non-streaming `chat.completion` body. `co.tool_calls` non-empty emits
+/// `message.tool_calls` ([`openai_tool_calls`]: `{id, type:"function",
+/// function:{name, arguments}}`, `arguments` a JSON STRING) and sets
+/// `message.content` to JSON `null` (never an empty string —
+/// `ChatCompletionResponseMessage.content` is nullable specifically for a
+/// tool-call-only turn).
+fn non_stream_body(model: &str, co: &bridge::ChatOutcome, native: bool) -> Value {
+    let fr = finish_openai(&co.finish);
+    let content = if co.tool_calls.is_empty() { json!(co.text) } else { Value::Null };
+    let mut message = json!({ "role": "assistant", "content": content, "refusal": Value::Null });
+    if !co.reasoning.is_empty() {
+        message["reasoning_content"] = json!(co.reasoning);
+    }
+    if !co.tool_calls.is_empty() {
+        message["tool_calls"] = json!(openai_tool_calls(&co.tool_calls));
+    }
     let mut choice = json!({
         "index": 0,
-        "message": { "role": "assistant", "content": text, "refusal": Value::Null },
+        "message": message,
         "finish_reason": fr,
         "logprobs": Value::Null,
     });
@@ -357,13 +491,31 @@ fn non_stream_body(model: &str, text: &str, prompt: i64, completion: i64, finish
         "created": CREATED_UNIX,
         "model": model,
         "choices": [choice],
-        "usage": { "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion },
+        "usage": { "prompt_tokens": co.prompt_tokens, "completion_tokens": co.completion_tokens, "total_tokens": co.prompt_tokens + co.completion_tokens },
     });
     if native {
         // OpenRouter's ChatResult requires system_fingerprint (nullable).
         body["system_fingerprint"] = Value::Null;
     }
     body
+}
+
+/// The internal `{id,name,arguments}` tool-call shape ([`bridge::ChatOutcome`]) →
+/// OpenAI's `ChatCompletionMessageToolCall`: `{id, type:"function",
+/// function:{name, arguments}}`. `arguments` is re-emitted verbatim as the
+/// JSON-text string the resident produced — never re-parsed (the server relays
+/// model output; it does not parse-and-execute tool calls, see
+/// `docs/api-security-audit.md`).
+fn openai_tool_calls(calls: &[Value]) -> Vec<Value> {
+    calls
+        .iter()
+        .map(|c| {
+            let id = c.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let name = c.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+            let arguments = c.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
+            json!({ "id": id, "type": "function", "function": { "name": name, "arguments": arguments } })
+        })
+        .collect()
 }
 
 /// One streaming `chat.completion.chunk`.
@@ -379,6 +531,39 @@ fn chunk(id: &str, model: &str, delta: Value, finish: Option<&str>, native: bool
         "model": model,
         "choices": [choice],
     })
+}
+
+/// A [`StreamMsg::Event`]'s neutral `{"kind":...}` payload (see
+/// `resident_llm.rs::emit_chat_events`/`resident_mock.rs::generate_tool_call` for
+/// the emitting side) → an OpenAI streaming `delta` fragment: `reasoning` becomes
+/// `delta.reasoning_content`; `tool_call_start` becomes the first `delta.tool_calls`
+/// chunk for that index (`id`+`type`+`function.name`+empty `function.arguments`);
+/// `tool_call_args` becomes a later chunk carrying only `index`+`function.arguments`.
+/// `tool_call_end` (OpenAI's wire format has no explicit per-call terminator — the
+/// terminal `finish_reason:"tool_calls"` chunk covers it) and any unrecognized
+/// `kind` (forward-compatible: ignored, not an error) yield no chunk. Deliberately
+/// the ONLY path that builds `delta.reasoning_content`/`delta.tool_calls` — never
+/// touches `delta.content` — so raw `<think>`/`<tool_call>` markup can never reach
+/// a plain content delta (see [`StreamMsg`]'s doc comment).
+fn event_delta(v: &Value) -> Option<Value> {
+    match v.get("kind").and_then(|k| k.as_str())? {
+        "reasoning" => Some(json!({ "reasoning_content": v.get("text").and_then(|t| t.as_str()).unwrap_or("") })),
+        "tool_call_start" => Some(json!({
+            "tool_calls": [{
+                "index": v.get("index").and_then(|i| i.as_u64()).unwrap_or(0),
+                "id": v.get("id").and_then(|i| i.as_str()).unwrap_or(""),
+                "type": "function",
+                "function": { "name": v.get("name").and_then(|n| n.as_str()).unwrap_or(""), "arguments": "" },
+            }]
+        })),
+        "tool_call_args" => Some(json!({
+            "tool_calls": [{
+                "index": v.get("index").and_then(|i| i.as_u64()).unwrap_or(0),
+                "function": { "arguments": v.get("text").and_then(|t| t.as_str()).unwrap_or("") },
+            }]
+        })),
+        _ => None,
+    }
 }
 
 // ============================================================ image generation
@@ -639,7 +824,7 @@ async fn stream_images(state: AppState, req: ImageRequest, action: String) -> Re
                 StreamMsg::Fetching(p) => {
                     yield Ok(Event::default().comment(p.comment_text()));
                 }
-                StreamMsg::Delta(_) => {} // image generation has no text deltas
+                StreamMsg::Delta(_) | StreamMsg::Event(_) => {} // image generation has no text/chat-event deltas
                 StreamMsg::Done(outcome) => match image_b64_from_outcome(&outcome) {
                     Ok(b64) => yield Ok(Event::default().data(completed_event(&size, &b64).to_string())),
                     Err(e) => yield Ok(Event::default().data(ApiError::invalid_request(provider, e).body().to_string())),
@@ -694,15 +879,22 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
                 StreamMsg::Delta(piece) => {
                     yield Ok(Event::default().data(chunk(&id, &model, json!({ "content": piece }), None, native).to_string()));
                 }
+                StreamMsg::Event(v) => {
+                    // reasoning_content / tool_calls deltas only — never delta.content
+                    // (see `event_delta`'s doc comment).
+                    if let Some(delta) = event_delta(&v) {
+                        yield Ok(Event::default().data(chunk(&id, &model, delta, None, native).to_string()));
+                    }
+                }
                 StreamMsg::Progress(..) => {} // chat streams token deltas, not coarse steps
                 StreamMsg::Fetching(p) => {
                     yield Ok(Event::default().comment(p.comment_text()));
                 }
                 StreamMsg::Done(outcome) => {
-                    let (_t, p, c, fr) = bridge::read_outcome(&outcome);
-                    prompt = p;
-                    completion = c;
-                    finish = fr;
+                    let co = bridge::read_chat_outcome(&outcome);
+                    prompt = co.prompt_tokens;
+                    completion = co.completion_tokens;
+                    finish = co.finish;
                 }
                 StreamMsg::Err(e) => {
                     // Surface the error as an OpenAI error frame, then terminate.

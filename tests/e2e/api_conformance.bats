@@ -231,6 +231,26 @@ get_url() {
   validate openrouter.json ChatResult "$RESP"
 }
 
+# --------------------------------------------------------- chat: tool calling
+
+# End-to-end over a real socket: the mock model's `__MOCK_TOOL_CALL__` trigger
+# (crates/cli/src/resident_mock.rs::TOOL_CALL_TRIGGER) drives the full
+# apiserve wiring (crates/apiserve/src/openai.rs) with no real weights/GPU.
+@test "openai chat tool-calling: mock trigger emits tool_calls, content null, arguments parse" {
+  post_json openai /v1/chat/completions \
+    '{"model":"brain/mock","messages":[{"role":"user","content":"weather please __MOCK_TOOL_CALL__"}]}'
+  [ "$STATUS" -eq 200 ]
+  [ "$(jq -r '.choices[0].finish_reason' "$RESP")" = "tool_calls" ]
+  [ "$(jq -r '.choices[0].message.content' "$RESP")" = "null" ]
+  [ "$(jq -r '.choices[0].message.tool_calls | length' "$RESP")" -eq 1 ]
+  [ "$(jq -r '.choices[0].message.tool_calls[0].type' "$RESP")" = "function" ]
+  [ "$(jq -r '.choices[0].message.tool_calls[0].function.name' "$RESP")" = "get_weather" ]
+  [ -n "$(jq -r '.choices[0].message.reasoning_content' "$RESP")" ]
+  # arguments is a JSON-TEXT string that itself parses as JSON.
+  jq -e '.choices[0].message.tool_calls[0].function.arguments | fromjson' "$RESP" >/dev/null
+  validate openai.json CreateChatCompletionResponse "$RESP"
+}
+
 # ------------------------------------------------------------- chat: SSE
 
 @test "openai chat SSE: ordered chunks, [DONE] terminal, deltas concat to text, validates stream schema" {
