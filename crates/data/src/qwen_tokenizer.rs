@@ -277,17 +277,23 @@ impl QwenBpe {
         }
     }
 
+    /// One ChatML turn: `<|im_start|>{role}\n{content}<|im_end|>\n`. The
+    /// single building block `apply_chat_template` folds over -- exposed so a
+    /// per-message-boundary encoder (multi-turn SFT with per-message loss
+    /// masking, `data::chat::ChatSample::encode`) renders byte-identically to
+    /// this batch path rather than a parallel reimplementation that could
+    /// drift from it (see docs/lessons.md on shared preprocessing).
+    pub fn frame_message(&self, role: &str, content: &str) -> String {
+        format!("<|im_start|>{role}\n{content}<|im_end|>\n")
+    }
+
     /// Render the Qwen ChatML template for a single-turn (or multi-turn) chat,
     /// optionally appending the assistant generation prompt. Plain string
     /// assembly (no Jinja). Returns the prompt text; encode it for inference.
     pub fn apply_chat_template(&self, msgs: &[(&str, &str)], add_generation_prompt: bool) -> String {
         let mut s = String::new();
         for (role, content) in msgs {
-            s.push_str("<|im_start|>");
-            s.push_str(role);
-            s.push('\n');
-            s.push_str(content);
-            s.push_str("<|im_end|>\n");
+            s.push_str(&self.frame_message(role, content));
         }
         if add_generation_prompt {
             s.push_str("<|im_start|>assistant\n");

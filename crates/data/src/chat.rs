@@ -89,6 +89,256 @@ pub fn encode_split(examples: &[ChatExample], tok: &QwenBpe) -> (Vec<u32>, Vec<b
     (ids, mask)
 }
 
+/// A tool call within an assistant turn: `{"name": ..., "arguments": {...}}`,
+/// rendered exactly as `data::toolcall`'s single-turn path does (the
+/// established brain-side convention, shared with bench's `qwen-hermes`
+/// export format).
+#[derive(Clone, Debug)]
+pub struct ToolCall {
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+/// One message in a multi-turn chat sample. Unlike [`ChatExample`] (one
+/// fixed system/user/assistant boundary), a [`ChatSample`] can carry many
+/// trainable assistant turns interleaved with tool results in one packed
+/// conversation -- `train` is per-message, not implied by position, which is
+/// what lets a whole trajectory be one sample instead of N nested-prefix
+/// samples repeating the same context (see bench's `extract_packed_sample`).
+///
+/// `role` is always `"system"`, `"user"`, or `"assistant"` by construction —
+/// [`ChatSample::from_jsonl`] folds a `"tool"`-role message into a
+/// `"user"`-role one wrapped in `<tool_response>` tags, the Hermes/Qwen
+/// tool-calling convention (no chat-template support for a bare `"tool"`
+/// role turn).
+#[derive(Clone, Debug)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+    /// Whether this message's tokens are supervised (assistant decision
+    /// turns the model should learn) or masked context (system/user/tool-
+    /// result turns, and any assistant turn a producer excluded from
+    /// training).
+    pub train: bool,
+}
+
+impl ChatMessage {
+    pub fn system(content: impl Into<String>) -> ChatMessage {
+        ChatMessage { role: "system".into(), content: content.into(), tool_calls: Vec::new(), train: false }
+    }
+    pub fn user(content: impl Into<String>) -> ChatMessage {
+        ChatMessage { role: "user".into(), content: content.into(), tool_calls: Vec::new(), train: false }
+    }
+    pub fn assistant(content: impl Into<String>, train: bool) -> ChatMessage {
+        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls: Vec::new(), train }
+    }
+    pub fn assistant_tool_calls(content: impl Into<String>, tool_calls: Vec<ToolCall>, train: bool) -> ChatMessage {
+        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls, train }
+    }
+    /// A tool result, rendered as a `user`-role turn wrapped in
+    /// `<tool_response>` tags (never trainable).
+    pub fn tool_result(content: impl AsRef<str>) -> ChatMessage {
+        ChatMessage {
+            role: "user".into(),
+            content: format!("<tool_response>\n{}\n</tool_response>", content.as_ref()),
+            tool_calls: Vec::new(),
+            train: false,
+        }
+    }
+
+    /// This message's content, with any tool calls inlined as
+    /// `<tool_call>{...}</tool_call>` blocks -- matches
+    /// `data::toolcall`'s single-call rendering exactly.
+    fn rendered_content(&self) -> String {
+        if self.tool_calls.is_empty() {
+            return self.content.clone();
+        }
+        let mut blocks: Vec<String> = Vec::new();
+        if !self.content.is_empty() {
+            blocks.push(self.content.clone());
+        }
+        for tc in &self.tool_calls {
+            blocks.push(format!("<tool_call>\n{{\"name\": \"{}\", \"arguments\": {}}}\n</tool_call>", tc.name, tc.arguments));
+        }
+        blocks.join("\n")
+    }
+}
+
+/// A packed multi-turn chat sample: a full conversation, encoded and masked
+/// message-by-message. See [`ChatMessage`] for why `train` lives per-message.
+#[derive(Clone, Debug, Default)]
+pub struct ChatSample {
+    pub messages: Vec<ChatMessage>,
+}
+
+impl ChatSample {
+    /// Encode to `(ids, mask)`. Each message is framed via
+    /// `QwenBpe::frame_message` -- the SAME function `apply_chat_template`
+    /// (what inference renders) folds over -- so concatenating every
+    /// message's framed+encoded span is byte-identical to encoding the whole
+    /// conversation through the batch template at once; only the per-message
+    /// mask value differs. Terminated by a masked `<|endoftext|>`.
+    pub fn encode(&self, tok: &QwenBpe) -> (Vec<u32>, Vec<bool>) {
+        let mut ids = Vec::new();
+        let mut mask = Vec::new();
+        for m in &self.messages {
+            let framed = tok.frame_message(&m.role, &m.rendered_content());
+            let tid = tok.encode(&framed);
+            mask.extend(std::iter::repeat_n(m.train, tid.len()));
+            ids.extend(tid);
+        }
+        ids.push(ENDOFTEXT);
+        mask.push(false);
+        (ids, mask)
+    }
+
+    /// Parse bench's `generic-messages-v2` JSONL export: one packed sample
+    /// per line, `{"messages":[{"role","content","train",...}], ...}`.
+    /// `messages[].train` is REQUIRED on every message -- a record with no
+    /// explicit supervision boundary is rejected rather than silently
+    /// treated as all-context or all-trained (either would be a silent
+    /// no-op or a silent prompt-leak into the loss).
+    pub fn from_jsonl(path: &Path) -> io::Result<Vec<ChatSample>> {
+        let text = std::fs::read_to_string(path)?;
+        let mut out = Vec::new();
+        for (lineno, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let v: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("{}:{}: invalid JSON: {e}", path.display(), lineno + 1))
+            })?;
+            out.push(sample_from_json(&v).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("{}:{}: {e}", path.display(), lineno + 1))
+            })?);
+        }
+        Ok(out)
+    }
+}
+
+fn sample_from_json(v: &serde_json::Value) -> Result<ChatSample, String> {
+    let msgs = v["messages"].as_array().ok_or("missing \"messages\" array")?;
+    let mut messages = Vec::with_capacity(msgs.len());
+    for (i, m) in msgs.iter().enumerate() {
+        let role = m["role"].as_str().ok_or_else(|| format!("messages[{i}]: missing \"role\""))?;
+        let content = m["content"].as_str().unwrap_or("").to_string();
+        let train = m
+            .get("train")
+            .ok_or_else(|| format!("messages[{i}]: missing \"train\" -- every message must state its supervision boundary explicitly"))?
+            .as_bool()
+            .ok_or_else(|| format!("messages[{i}]: \"train\" must be a bool"))?;
+
+        if role == "tool" {
+            messages.push(ChatMessage::tool_result(content));
+            continue;
+        }
+
+        let tool_calls: Vec<ToolCall> = m["tool_calls"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .enumerate()
+                    .map(|(j, tc)| {
+                        let f = &tc["function"];
+                        let name = f["name"].as_str().ok_or_else(|| format!("messages[{i}].tool_calls[{j}]: missing function.name"))?;
+                        Ok(ToolCall { name: name.to_string(), arguments: f["arguments"].clone() })
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        messages.push(ChatMessage { role: role.to_string(), content, tool_calls, train });
+    }
+    if messages.is_empty() {
+        return Err("\"messages\" is empty".to_string());
+    }
+    Ok(ChatSample { messages })
+}
+
+/// Encode a set of packed samples into one `(ids, mask)` stream.
+pub fn encode_sample_split(samples: &[ChatSample], tok: &QwenBpe) -> (Vec<u32>, Vec<bool>) {
+    let mut ids = Vec::new();
+    let mut mask = Vec::new();
+    for s in samples {
+        let (i, m) = s.encode(tok);
+        ids.extend_from_slice(&i);
+        mask.extend_from_slice(&m);
+    }
+    (ids, mask)
+}
+
+/// Write a train/val split of packed [`ChatSample`]s to `dir`, in the same
+/// on-disk layout as [`prepare_chat`].
+pub fn prepare_chat_samples(train: &[ChatSample], val: &[ChatSample], tok: &QwenBpe, vocab: usize, dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let (train_ids, train_mask) = encode_sample_split(train, tok);
+    let (val_ids, val_mask) = encode_sample_split(val, tok);
+    binio::write_u32_bin(&dir.join("train.u32.bin"), &train_ids)?;
+    binio::write_mask_bin(&dir.join("train.mask.bin"), &train_mask)?;
+    binio::write_u32_bin(&dir.join("val.u32.bin"), &val_ids)?;
+    binio::write_mask_bin(&dir.join("val.mask.bin"), &val_mask)?;
+    std::fs::write(dir.join("meta.json"), binio::Meta::vocab_only(vocab))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_jsonl_parses_a_packed_multi_turn_sample() {
+        let samples = ChatSample::from_jsonl(std::path::Path::new("testdata/chat_sample_packed.jsonl")).expect("parses");
+        assert_eq!(samples.len(), 1);
+        let s = &samples[0];
+        assert_eq!(s.messages.len(), 5);
+        assert_eq!(s.messages[0].role, "system");
+        assert!(!s.messages[0].train);
+        assert_eq!(s.messages[2].role, "assistant");
+        assert!(s.messages[2].train);
+        assert_eq!(s.messages[2].tool_calls.len(), 1);
+        assert_eq!(s.messages[2].tool_calls[0].name, "get_weather");
+        // role: "tool" folds into a user-role <tool_response> turn, never trainable.
+        assert_eq!(s.messages[3].role, "user");
+        assert!(s.messages[3].content.contains("<tool_response>"));
+        assert!(s.messages[3].content.contains("18C, sunny"));
+        assert!(!s.messages[3].train);
+        assert!(s.messages[4].train);
+    }
+
+    #[test]
+    fn from_jsonl_rejects_a_message_with_no_train_field() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-jsonl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("no_train.jsonl");
+        std::fs::write(&path, r#"{"messages":[{"role":"user","content":"hi","train":false},{"role":"assistant","content":"hey"}]}"#).unwrap();
+        let err = ChatSample::from_jsonl(&path).unwrap_err();
+        assert!(err.to_string().contains("train"), "error should mention the missing train field: {err}");
+    }
+
+    #[test]
+    fn from_jsonl_rejects_empty_messages() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-jsonl-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("empty.jsonl");
+        std::fs::write(&path, r#"{"messages":[]}"#).unwrap();
+        assert!(ChatSample::from_jsonl(&path).is_err());
+    }
+
+    #[test]
+    fn rendered_content_inlines_tool_calls_matching_the_toolcall_convention() {
+        let m = ChatMessage::assistant_tool_calls(
+            "checking",
+            vec![ToolCall { name: "get_weather".into(), arguments: serde_json::json!({"location": "Paris"}) }],
+            true,
+        );
+        let rendered = m.rendered_content();
+        assert_eq!(rendered, "checking\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\":\"Paris\"}}\n</tool_call>");
+    }
+}
+
 /// Write a train/val split to `dir` as brain's masked token-dataset layout.
 /// `vocab` is the MODEL's vocab (from its `config.json`), which must match the
 /// checkpoint's `lm_head` — not the tokenizer's derived size.
