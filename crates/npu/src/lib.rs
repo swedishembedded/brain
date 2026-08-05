@@ -29,6 +29,7 @@ pub mod glm_decode;
 pub mod glm_topology;
 pub mod lfm_topology;
 pub mod upscale_topology;
+pub mod vae_topology;
 pub mod lfm_export;
 pub mod chronos2_topology;
 pub mod chronos2_export;
