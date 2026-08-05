@@ -378,6 +378,8 @@ pub const HEAD_UNPACK: &str = include_str!("../wgsl/head_unpack.wgsl");
 pub const IM2COL: &str = include_str!("../wgsl/im2col.wgsl");
 /// `wgsl/im2col_at.wgsl`
 pub const IM2COL_AT: &str = include_str!("../wgsl/im2col_at.wgsl");
+/// col2im as a gather — the input gradient of a conv lowered to a GEMM.
+pub const COL2IM: &str = include_str!("../wgsl/col2im.wgsl");
 /// `wgsl/kv_append.wgsl`
 pub const KV_APPEND: &str = include_str!("../wgsl/kv_append.wgsl");
 /// `wgsl/kv_expand.wgsl`
@@ -894,6 +896,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("head_unpack", HEAD_UNPACK),
     ("im2col", IM2COL),
     ("im2col_at", IM2COL_AT),
+    ("col2im", COL2IM),
     ("kv_append", KV_APPEND),
     ("kv_expand", KV_EXPAND),
     ("kv_expand_bwd", KV_EXPAND_BWD),

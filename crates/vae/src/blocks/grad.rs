@@ -53,6 +53,8 @@ const B_ATTN_DSCORES: usize = 11;
 const B_ATTN_DV: usize = 12;
 const B_ATTN_DQ: usize = 13;
 const B_ATTN_DK: usize = 14;
+const B_MATMUL_DX_REG: usize = 15;
+const B_COL2IM: usize = 16;
 
 /// Where the caller placed [`super::BWD_KERNELS`] in its kernel set.
 #[derive(Clone, Copy)]
@@ -171,10 +173,45 @@ impl Trace {
                 let t = r.tmp((cout * hw) as u64);
                 r.push(r.gpu.step(K_NCHW_NLC, &[&dy, &t], &[cout * hw, *cout, hw], cout * hw));
                 r.push(r.gpu.step(r.ids.k(B_BIAS_GRAD), &[&t, grads.g(b)], &[hw, *cout], *cout));
-                r.give((cout * hw) as u64, t);
-                // dX (assigns) -> accumulate.
+
+                // dX (assigns) -> accumulate. Two paths:
+                //
+                //  * LOWERED — `dcol[HW,CinKK] = dY[HW,Cout] . W[Cout,CinKK]`
+                //    (`matmul_dx_reg`, register-tiled) then `col2im`, which sums
+                //    only the K*K taps per input pixel. `conv2d_dx` instead
+                //    reduces over Cout*K*K on ONE lane, and the backward profile
+                //    put it at 41% of a VQGAN training step, 12.9 ms/call
+                //    against the forward conv's 4.8. Measured 4.8x-22x here.
+                //  * DIRECT — below `GEMM_CONV_BWD_MIN_COUT`, and on any device
+                //    without workgroup reductions: `matmul_dx_reg` carries
+                //    barriers the CPU JIT cannot compile, so this branches on the
+                //    QUERIED capability, never on an assumption (lessons #5).
+                //
+                // The NLC transpose the GEMM needs is `t`, which bias_grad has
+                // already built — so the fast path costs one transpose less than
+                // it looks.
+                let cinkk = cin * k * k;
                 let dx = r.tmp(n_in as u64);
-                r.push(r.gpu.step(r.ids.k(B_CONV_DX), &[&dy, self.weight(w), &dx], &p, n_in));
+                let lowered = r.gpu.caps().workgroup_reductions && *cout >= super::GEMM_CONV_BWD_MIN_COUT;
+                if lowered {
+                    let dcol = r.tmp((hw * cinkk) as u64);
+                    r.push(r.gpu.step(
+                        r.ids.k(B_MATMUL_DX_REG),
+                        &[&t, self.weight(w), &dcol],
+                        &[hw, cinkk, *cout, 0],
+                        hw.div_ceil(128) * cinkk.div_ceil(128) * 256,
+                    ));
+                    r.push(r.gpu.step(
+                        r.ids.k(B_COL2IM),
+                        &[&dcol, &dx],
+                        &[1, *cin, *h, *w_in, *k, *stride, *pad, *ho, *wo, cinkk],
+                        n_in,
+                    ));
+                    r.give((hw * cinkk) as u64, dcol);
+                } else {
+                    r.push(r.gpu.step(r.ids.k(B_CONV_DX), &[&dy, self.weight(w), &dx], &p, n_in));
+                }
+                r.give((cout * hw) as u64, t);
                 r.acc(x, n_in as u64, &dx, 1.0);
                 r.give(n_in as u64, dx);
             }

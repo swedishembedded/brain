@@ -128,7 +128,7 @@ pub const MATMUL_REG3_SLOT: usize = K_MATMUL;
 /// cooperative twin anywhere in the tree — that is the documented §C.2 perf gap
 /// in `docs/kernel-checklist.md`, NOT a correctness gate, because none of them
 /// uses `workgroupBarrier()` and all three are exact on `backend-cpu`.
-pub const BWD_KERNELS: [(&str, &str); 15] = [
+pub const BWD_KERNELS: [(&str, &str); 17] = [
     ("conv2d_dx", kernels::CONV2D_DX),
     ("conv2d_dw", kernels::CONV2D_DW),
     ("bias_grad", kernels::BIAS_GRAD),
@@ -144,7 +144,33 @@ pub const BWD_KERNELS: [(&str, &str); 15] = [
     ("attn_bwd_dv_bidir", kernels::ATTN_BWD_DV_BIDIR),
     ("attn_bwd_dq_bidir", kernels::ATTN_BWD_DQ_BIDIR),
     ("attn_bwd_dk_bidir", kernels::ATTN_BWD_DK_BIDIR),
+    // The GEMM-lowered conv input gradient. APPENDED, so every existing
+    // `BwdIds::at(base)` offset stays valid.
+    ("matmul_dx_reg", kernels::MATMUL_DX_REG),
+    ("col2im", kernels::COL2IM),
 ];
+
+/// Minimum output channels for the LOWERED conv input gradient.
+///
+/// The lowering materialises `dcol[HW, Cin*K*K]`, whose cost does not shrink
+/// with `Cout`, while `conv2d_dx` costs `Cout*K*K` per input pixel — so there is
+/// a `Cout` below which direct wins. Measured (`vqgan_bench convbwd`, Cin 128,
+/// 256x256, 3x3):
+///
+/// | Cout | direct | lowered | |
+/// |---|---|---|---|
+/// | 3   |   4.25 |  24.25 | 0.18x |
+/// | 8   |   9.82 |  24.09 | 0.41x |
+/// | 16  |  18.03 |  24.28 | 0.74x |
+/// | 32  |  35.01 |  23.99 | **1.46x** |
+/// | 64  |  69.63 |  25.27 | 2.76x |
+/// | 128 | 138.88 |  26.79 | 5.18x |
+///
+/// The crossover sits between 16 and 32, so 32 is the threshold. This is NOT
+/// the forward's `GEMM_CONV_MIN_COUT` (128) — different kernels, separately
+/// measured, and assuming they share a threshold would leave 4x on the table
+/// for every 32..128-channel conv.
+pub const GEMM_CONV_BWD_MIN_COUT: u32 = 32;
 
 /// Copy [`KERNELS`] into the front of a fixed-size kernel set whose remaining
 /// slots the caller fills, so a crate that needs the shared blocks **and** its

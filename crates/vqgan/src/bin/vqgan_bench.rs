@@ -247,8 +247,109 @@ fn gn_ab(reps: usize) {
     }
 }
 
+/// A/B the conv INPUT gradient: the direct `conv2d_dx` against the GEMM
+/// lowering (`nchw_nlc` -> `matmul_dx_reg` -> `col2im`).
+///
+/// The backward profile says `conv2d_dx` is 41% of a VQGAN training step at
+/// 12.9 ms/call, against the forward conv's 4.8. The direct kernel reduces over
+/// `Cout*K*K` per input pixel; the lowering moves the `Cout` axis into a
+/// register-tiled GEMM and leaves `col2im` summing only `K*K`.
+fn convbwd_ab(reps: usize) {
+    let kernels: &[(&str, &str)] = &[
+        ("conv2d_dx", kernels::CONV2D_DX),
+        ("matmul_dx_reg", kernels::MATMUL_DX_REG),
+        ("col2im", kernels::COL2IM),
+        ("nchw_nlc", kernels::NCHW_NLC),
+    ];
+    let gpu = Gpu::new(kernels);
+    let (k_dx, k_mm, k_c2i, k_t) = (0usize, 1, 2, 3);
+    println!("{:<34} {:>10} {:>10} {:>9}", "conv (cin,cout,HxW,k,s)", "direct", "lowered", "speedup");
+
+    // Sweep Cout at a fixed spatial size to FIND the crossover, rather than
+    // guessing it — the lowering's cost is dominated by materialising
+    // dcol[HW, Cin*K*K], which does not shrink with Cout, while the direct
+    // kernel's cost is linear in Cout. So there must be a Cout below which
+    // direct wins, and the whole point is to know where.
+    for &(cin, cout, h, w, k, st) in &[
+        (128u32, 3u32, 256u32, 256u32, 3u32, 1u32),
+        (128, 8, 256, 256, 3, 1),
+        (128, 16, 256, 256, 3, 1),
+        (128, 32, 256, 256, 3, 1),
+        (128, 64, 256, 256, 3, 1),
+        (128, 128, 256, 256, 3, 1),
+    ] {
+        let pad = k / 2;
+        let (ho, wo) = ((h + 2 * pad - k) / st + 1, (w + 2 * pad - k) / st + 1);
+        let hw = (ho * wo) as u64;
+        let cinkk = (cin * k * k) as u64;
+        let dy = gpu.storage((cout as u64) * hw);
+        let wt = gpu.storage((cout as u64) * cinkk);
+        let dx = gpu.storage((cin * h * w) as u64);
+        let t_direct = best_of(&gpu, &[gpu.step(k_dx, &[&dy, &wt, &dx], &[1, cin, h, w, cout, k, st, pad, ho, wo], cin * h * w)], reps);
+        let dy_nlc = gpu.storage((cout as u64) * hw);
+        let dcol = gpu.storage(hw * cinkk);
+        let t_low = best_of(&gpu, &[
+            gpu.step(k_t, &[&dy, &dy_nlc], &[cout * hw as u32, cout, hw as u32], cout * hw as u32),
+            gpu.step(k_mm, &[&dy_nlc, &wt, &dcol], &[hw as u32, cinkk as u32, cout, 0],
+                     (hw as u32).div_ceil(128) * (cinkk as u32).div_ceil(128) * 256),
+            gpu.step(k_c2i, &[&dcol, &dx], &[1, cin, h, w, k, st, pad, ho, wo, cinkk as u32], cin * h * w),
+        ], reps);
+        println!("  sweep cout={cout:4}          {:>10.3} {:>10.3} {:>8.2}x", t_direct * 1e3, t_low * 1e3, t_direct / t_low);
+    }
+
+    // The VQGAN decoder's real convs, widest first.
+    for &(cin, cout, h, w, k, st) in &[
+        (512u32, 512u32, 64u32, 64u32, 3u32, 1u32),
+        (512, 512, 128, 128, 3, 1),
+        (256, 256, 256, 256, 3, 1),
+        (128, 128, 512, 512, 3, 1),
+        (128, 3, 512, 512, 3, 1),
+    ] {
+        let pad = k / 2;
+        let (ho, wo) = ((h + 2 * pad - k) / st + 1, (w + 2 * pad - k) / st + 1);
+        let hw = (ho * wo) as u64;
+        let cinkk = (cin * k * k) as u64;
+        let dy = gpu.storage((cout as u64) * hw);
+        let wt = gpu.storage((cout as u64) * cinkk);
+        let dx = gpu.storage((cin * h * w) as u64);
+
+        let direct = vec![gpu.step(
+            k_dx,
+            &[&dy, &wt, &dx],
+            &[1, cin, h, w, cout, k, st, pad, ho, wo],
+            cin * h * w,
+        )];
+        let t_direct = best_of(&gpu, &direct, reps);
+
+        let dy_nlc = gpu.storage((cout as u64) * hw);
+        let dcol = gpu.storage(hw * cinkk);
+        let lowered = vec![
+            gpu.step(k_t, &[&dy, &dy_nlc], &[cout * hw as u32, cout, hw as u32], cout * hw as u32),
+            gpu.step(
+                k_mm,
+                &[&dy_nlc, &wt, &dcol],
+                &[hw as u32, cinkk as u32, cout, 0],
+                (hw as u32).div_ceil(128) * (cinkk as u32).div_ceil(128) * 256,
+            ),
+            gpu.step(k_c2i, &[&dcol, &dx], &[1, cin, h, w, k, st, pad, ho, wo, cinkk as u32], cin * h * w),
+        ];
+        let t_low = best_of(&gpu, &lowered, reps);
+
+        println!(
+            "({cin:4},{cout:4}) {h:4}x{w:<4} k{k} s{st}       {:>10.3} {:>10.3} {:>8.2}x",
+            t_direct * 1e3,
+            t_low * 1e3,
+            t_direct / t_low
+        );
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
+    if a.get(1).map(|s| s == "convbwd").unwrap_or(false) {
+        convbwd_ab(a.get(2).and_then(|s| s.parse().ok()).unwrap_or(3));
+        return;
+    }
     if a.get(1).map(|s| s == "gn").unwrap_or(false) {
         gn_ab(a.get(2).and_then(|s| s.parse().ok()).unwrap_or(5));
         return;
