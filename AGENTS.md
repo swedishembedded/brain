@@ -425,6 +425,7 @@ front-end to depend on.
 | Task | Where |
 |---|---|
 | Architecture & crate graph | `docs/architecture.md` |
+| **Defects this repo has already paid for** (gates that lie, metrics that cannot see a bug, backend-specific silent-zero gradients) | **`docs/lessons.md`** — read before designing a gate |
 | Testing strategy + gradient-check gate | `docs/testing.md` |
 | **Porting a new model** (goldens → import → kernel contracts → parity ladder → training) | **`docs/porting-playbook.md`** — read BEFORE starting any port |
 | Multi-GPU scaling (data / pipeline / tensor parallel) | `docs/scaling/*.md`; `crates/model/src/{distributed,parallel,collective,shard,plan,grid}.rs` |
@@ -711,6 +712,24 @@ carries a `notes` string explaining why. See `docs/performance/status.md` for th
 per-scenario table and the findings so far.
 
 ## Conventions & invariants
+
+- **Write down what you learned, in the same change.** When you find a
+  non-obvious defect — something that was silently wrong, or a gate that was
+  green without running — add it to **`docs/lessons.md`** as part of the commit
+  that fixes it, with the number that proved it. Not later, not in a follow-up:
+  the reason is fresh exactly once, and every entry in that file is there because
+  it cost someone a day.
+
+  Where it goes:
+  | what you learned | where it belongs |
+  |---|---|
+  | a cross-cutting defect class (a gate that lies, a metric that cannot see X) | `docs/lessons.md` |
+  | a kernel-authoring or optimisation rule, incl. a killed hypothesis | `docs/kernel-checklist.md` |
+  | a step in porting a model that was not obvious | `docs/porting-playbook.md` |
+  | a measured number about ONE model | `docs/models/<model>/status.md` |
+
+  A commit message is not a home for a finding: nobody greps commit messages.
+  If a lesson only exists in one, it will be relearned.
 
 - **Zero compile warnings. Always.** A build that emits warnings is not done.
   Fix every warning the build reports — **including ones your change did not

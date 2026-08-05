@@ -38,11 +38,23 @@ pub fn validate_resampler(map: Weights, cfg: &ResamplerConfig) -> Result<Weights
     Ok(map)
 }
 
-/// Every site's `to_k_ip` / `to_v_ip`, keyed by site index.
+/// Every site's decoupled projections, keyed by site index — stored FUSED.
+///
+/// The released file carries `to_k_ip` and `to_v_ip` as separate `[hidden,
+/// token_dim]` weights, but brain's cross-attention kernels read a fused kv
+/// buffer: `k` in each row's first `hidden` floats and `v` in the second, with
+/// `kv_stride = 2*hidden` and `v_off = hidden` (see `attn_apply_cross.wgsl`,
+/// whose `v_off` is an offset WITHIN a row, not a block offset).
+///
+/// Concatenating the two weights along dim 0 once, here, makes a single linear
+/// produce exactly that layout. The alternative — two linears into separate
+/// buffers and then an interleave — cannot be expressed by `region_copy`, which
+/// is a SAME-LAYOUT copy (it indexes src and dst identically), and would cost an
+/// extra pass per site at 70 sites per step.
 pub struct SiteWeights {
     pub cfg: Vec<SiteConfig>,
-    pub k: HashMap<usize, Vec<f32>>,
-    pub v: HashMap<usize, Vec<f32>>,
+    /// `[2*hidden, token_dim]` = `vstack(to_k_ip, to_v_ip)`.
+    pub kv: HashMap<usize, Vec<f32>>,
 }
 
 /// Validate the `ip_adapter` half: every declared site must have both
@@ -52,22 +64,25 @@ pub fn validate_sites(
     data: HashMap<String, Vec<f32>>,
 ) -> Result<SiteWeights, String> {
     let cfg = SiteConfig::from_tensors(shapes)?;
-    let (mut k, mut v) = (HashMap::new(), HashMap::new());
+    let mut kv = HashMap::new();
     for s in &cfg {
-        for (suffix, dst) in [("to_k_ip", &mut k), ("to_v_ip", &mut v)] {
+        let want = s.hidden * s.token_dim;
+        let mut fused = Vec::with_capacity(2 * want);
+        // k rows FIRST, then v rows — the order `v_off = hidden` implies.
+        for suffix in ["to_k_ip", "to_v_ip"] {
             let name = format!("{}.{suffix}.weight", s.index);
             let d = data.get(&name).ok_or_else(|| format!("instantid: missing {name}"))?;
-            let want = s.hidden * s.token_dim;
             if d.len() != want {
                 return Err(format!("instantid: {name} has {} values, expected {want}", d.len()));
             }
-            dst.insert(s.index, d.clone());
+            fused.extend_from_slice(d);
         }
+        kv.insert(s.index, fused);
     }
     if data.len() != cfg.len() * 2 {
         return Err(format!("instantid: ip_adapter has {} tensors for {} sites (expected {})", data.len(), cfg.len(), cfg.len() * 2));
     }
-    Ok(SiteWeights { cfg, k, v })
+    Ok(SiteWeights { cfg, kv })
 }
 
 #[cfg(test)]
