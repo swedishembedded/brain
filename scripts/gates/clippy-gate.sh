@@ -38,6 +38,8 @@ cd "$ROOT"
 # reattached a summary line to the wrong list item, which is a documentation
 # defect rather than a lint fix.
 #
+# 207 -> 194 by fixing, not by suppressing: see 86bf582 and bfe00f3.
+#
 # LOWER THIS WHENEVER YOU CLEAR WARNINGS. Raising it is almost always wrong: it
 # is how a real regression gets absorbed. It was raised exactly once, 179 -> 207,
 # when this branch rebased onto 73 upstream commits that carry their own
@@ -47,7 +49,7 @@ cd "$ROOT"
 # `git diff -U0 origin/main HEAD` hunks), and zero are in any of the thirteen
 # crates the branch created. Anything short of that evidence means fix the
 # warnings, not the number.
-BASELINE="${BASELINE:-207}"
+BASELINE="${BASELINE:-194}"
 
 # Force a full re-lint: cargo replays diagnostics only for units it re-runs, so
 # a warm target dir would otherwise report a small fraction of the real count.

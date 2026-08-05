@@ -18,6 +18,7 @@
 //!        matched class gets `target_score`, every other class 0).
 //!      * `ciou` over the fg anchors (decoded box vs target box).
 //!      * `dfl_loss` over the fg anchors (target_dist).
+//!
 //!    `L = box_gain*Σciou + cls_gain*Σbce + dfl_gain*Σdfl`, with all three terms
 //!    normalised by `max(Σ target_score, 1)` (Ultralytics' "target-score-sum"
 //!    normaliser — the BCE is the full grid so its sum is already extensive,
@@ -28,10 +29,11 @@
 //! `dL/d(box_logits)` and `dL/d(cls_logits)` are produced flat `[N,A,·]`:
 //!   * `bce_logits_grad` -> d(cls_logits) (× cls_gain / norm).
 //!   * `ciou_grad` -> d(decoded box) (× box_gain / norm); chain box -> dist:
-//!       x1=(ax-l)s,y1=(ay-t)s,x2=(ax+r)s,y2=(ay+b)s  =>
-//!       dl = -s·dx1, dt = -s·dy1, dr = s·dx2, db = s·dy2.
+//!     x1=(ax-l)s,y1=(ay-t)s,x2=(ax+r)s,y2=(ay+b)s  =>
+//!     dl = -s·dx1, dt = -s·dy1, dr = s·dx2, db = s·dy2.
 //!     Feed dE=(dl,dt,dr,db) to `dfl_grad` -> d(box_logits) (box-branch path).
 //!   * `dfl_loss_grad` -> d(box_logits) directly (× dfl_gain / norm), ADDED.
+//!
 //! Both grad tensors come back flat and are scattered into the per-branch NCHW
 //! head grad buffers by the model.
 
