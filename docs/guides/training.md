@@ -31,6 +31,19 @@ exported SFT data (`.todo/bench-training.md`), in the house `status.md` style.
   missing/mistyped/unexpected field is a hard error naming the exact field,
   not a silent default that only produces a wrong answer downstream when some
   particular record happens to hit the gap.
+- **Semantic validation on top of the structural schema, on both sides,
+  automatically.** Structural typing alone accepts a well-typed field that is
+  still nonsense: `tool_calls[].function.arguments` type-checking as a string
+  that isn't actually valid JSON, or a `"tool"`-role message whose
+  `tool_call_id` names no tool call anyone made. Both are now checked — every
+  "tool" message must carry a `tool_call_id` that resolves to a `tool_calls`
+  id from an earlier assistant message in the SAME sample — on brain's read
+  side (`chat.rs::sample_from_wire`) and bench's write side
+  (`schema.py`'s `ChatRecord`/`ChatRecordV2` `model_validator`,
+  automatically on every `datasets build`, not just the separate manual
+  `datasets validate` command). This is now AGENTS.md's own hard rule
+  ("Validate everything crossing into brain from outside") — see that entry
+  for what "structural AND semantic" means in general, not just here.
 - **LoRA fine-tuning that actually survives a reload**: `QwenConfig`'s `lora`
   field round-trips through a checkpoint's config JSON (it silently didn't
   before — see `docs/lessons.md`); adapter-only save/load
