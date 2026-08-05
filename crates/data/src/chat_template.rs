@@ -198,11 +198,23 @@ impl ChatTemplate {
     /// messages follow it — Qwen3's own `chat_template` inserts an empty
     /// `<think>\n\n</think>\n\n` block for an assistant turn only when it is
     /// LITERALLY the last message (`loop.last`), so a truncated prefix can
-    /// render that same message differently than the full conversation
-    /// does. When the prefix check fails, this returns an error naming which
-    /// message broke prefix-stability rather than silently emitting a wrong
-    /// mask boundary — a training bug that would be invisible until it
-    /// quietly taught the model on the wrong span.
+    /// render that same message differently than the full conversation does
+    /// (concretely: a tool-call turn followed by a tool result and a final
+    /// answer -- an ordinary packed-conversation shape, two assistant turns
+    /// after the last real user turn -- hits this, since the tool-call turn
+    /// LOOKS last in a 3-message truncation but isn't in the true 5-message
+    /// conversation).
+    ///
+    /// KNOWN LIMITATION, not silently absorbed: a smarter probe (render the
+    /// full-length array with everything after `i` reduced to role-only, so
+    /// `loop.last`/message count stay correct) was tried and reverted -- it
+    /// can pull a FOLLOWING message's shared opening boilerplate into `i`'s
+    /// span whenever the role-only and real renderings of that following
+    /// message share a literal prefix (the common case: `<|im_start|>{role}`
+    /// is always emitted before any content-dependent branching), which is a
+    /// smaller but still real silent-mismask risk. Failing loudly on the
+    /// hazard, as this does, is the safe choice until a provably exact fix
+    /// exists — see docs/guides/training.md "Known gaps".
     pub fn render_with_message_boundaries(&self, messages: &[Value], tools: Option<Value>) -> Result<(String, Vec<Range<usize>>), TemplateError> {
         let full = self.render(Value::from(messages.to_vec()), tools.clone(), false, &BTreeMap::new())?;
         let mut boundaries = Vec::with_capacity(messages.len());
@@ -277,12 +289,14 @@ mod tests {
     #[test]
     fn render_with_message_boundaries_rejects_a_non_prefix_stable_template() {
         // A template whose rendering of a message depends on whether it's
-        // literally the last one -- exactly Qwen3's <think> empty-block hazard,
-        // minimized. Must error, not silently mis-measure.
-        let t = ChatTemplate::compile(
-            "{% for m in messages %}{{ m.content }}{% if loop.last %}[LAST]{% endif %}{% endfor %}",
-        )
-        .unwrap();
+        // literally the last one -- exactly Qwen3's <think> empty-block
+        // hazard, minimized, and exactly the common "tool call, then a final
+        // answer" packed-conversation shape (two assistant turns after the
+        // real content, only the true-last one special-cased). A truncated
+        // 1-message prefix makes message 0 LOOK last when it isn't. Must
+        // error, not silently mis-measure -- see this method's doc for why a
+        // smarter probe was tried and reverted rather than shipped half-right.
+        let t = ChatTemplate::compile("{% for m in messages %}{{ m.content }}{% if loop.last %}[LAST]{% endif %}{% endfor %}").unwrap();
         let messages: Vec<Value> = vec![
             parse_json_ordered(r#"{"role":"assistant","content":"a"}"#).unwrap(),
             parse_json_ordered(r#"{"role":"assistant","content":"b"}"#).unwrap(),

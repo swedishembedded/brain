@@ -25,6 +25,7 @@ use std::io;
 use std::path::Path;
 
 use crate::binio;
+use crate::chat_template::{ChatTemplate, TemplateError};
 use crate::qwen_tokenizer::QwenBpe;
 use crate::tokenizer::Tokenizer;
 
@@ -89,14 +90,18 @@ pub fn encode_split(examples: &[ChatExample], tok: &QwenBpe) -> (Vec<u32>, Vec<b
     (ids, mask)
 }
 
-/// A tool call within an assistant turn: `{"name": ..., "arguments": {...}}`,
-/// rendered exactly as `data::toolcall`'s single-turn path does (the
-/// established brain-side convention, shared with bench's `qwen-hermes`
-/// export format).
+/// A tool call within an assistant turn. `arguments` is the RAW JSON text (a
+/// JSON-encoded string, the OpenAI wire convention) -- never re-parsed into
+/// an object and reserialized, which would risk losing key order or
+/// diverging from what the model actually emitted. The chat template itself
+/// takes this same "already a string" path
+/// (`{%- if tool_call.arguments is string %}{{- tool_call.arguments }}`),
+/// matching `data::qwen_chat::ToolCallMsg`'s convention exactly.
 #[derive(Clone, Debug)]
 pub struct ToolCall {
+    pub id: Option<String>,
     pub name: String,
-    pub arguments: serde_json::Value,
+    pub arguments: String,
 }
 
 /// One message in a multi-turn chat sample. Unlike [`ChatExample`] (one
@@ -106,16 +111,19 @@ pub struct ToolCall {
 /// what lets a whole trajectory be one sample instead of N nested-prefix
 /// samples repeating the same context (see bench's `extract_packed_sample`).
 ///
-/// `role` is always `"system"`, `"user"`, or `"assistant"` by construction —
-/// [`ChatSample::from_jsonl`] folds a `"tool"`-role message into a
-/// `"user"`-role one wrapped in `<tool_response>` tags, the Hermes/Qwen
-/// tool-calling convention (no chat-template support for a bare `"tool"`
-/// role turn).
+/// `role` can be `"system"`, `"user"`, `"assistant"`, or `"tool"` --
+/// rendering (via [`ChatSample::encode`]) hands every message straight to
+/// the checkpoint's own chat template, which knows how to merge consecutive
+/// `"tool"` turns and where think-blocks go; this struct does not
+/// pre-render or pre-fold anything.
 #[derive(Clone, Debug)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
+    /// Only meaningful when `role == "tool"`: which tool call this result
+    /// answers.
+    pub tool_call_id: Option<String>,
     /// Whether this message's tokens are supervised (assistant decision
     /// turns the model should learn) or masked context (system/user/tool-
     /// result turns, and any assistant turn a producer excluded from
@@ -125,43 +133,57 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> ChatMessage {
-        ChatMessage { role: "system".into(), content: content.into(), tool_calls: Vec::new(), train: false }
+        ChatMessage { role: "system".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, train: false }
     }
     pub fn user(content: impl Into<String>) -> ChatMessage {
-        ChatMessage { role: "user".into(), content: content.into(), tool_calls: Vec::new(), train: false }
+        ChatMessage { role: "user".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, train: false }
     }
     pub fn assistant(content: impl Into<String>, train: bool) -> ChatMessage {
-        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls: Vec::new(), train }
+        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, train }
     }
     pub fn assistant_tool_calls(content: impl Into<String>, tool_calls: Vec<ToolCall>, train: bool) -> ChatMessage {
-        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls, train }
+        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls, tool_call_id: None, train }
     }
-    /// A tool result, rendered as a `user`-role turn wrapped in
-    /// `<tool_response>` tags (never trainable).
-    pub fn tool_result(content: impl AsRef<str>) -> ChatMessage {
-        ChatMessage {
-            role: "user".into(),
-            content: format!("<tool_response>\n{}\n</tool_response>", content.as_ref()),
-            tool_calls: Vec::new(),
-            train: false,
-        }
+    /// A tool result. Never trainable; the template merges consecutive
+    /// `"tool"`-role messages into one wrapping turn on its own.
+    pub fn tool_result(content: impl Into<String>) -> ChatMessage {
+        ChatMessage { role: "tool".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, train: false }
     }
 
-    /// This message's content, with any tool calls inlined as
-    /// `<tool_call>{...}</tool_call>` blocks -- matches
-    /// `data::toolcall`'s single-call rendering exactly.
-    fn rendered_content(&self) -> String {
-        if self.tool_calls.is_empty() {
-            return self.content.clone();
+    /// This message as the JSON-shaped value a chat template reads
+    /// (`message.role`, `message.content`, `message.tool_calls`, …).
+    fn to_template_value(&self) -> minijinja::Value {
+        #[derive(serde::Serialize)]
+        struct TplFunction<'a> {
+            name: &'a str,
+            arguments: &'a str,
         }
-        let mut blocks: Vec<String> = Vec::new();
-        if !self.content.is_empty() {
-            blocks.push(self.content.clone());
+        #[derive(serde::Serialize)]
+        struct TplToolCall<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            id: Option<&'a str>,
+            r#type: &'a str,
+            function: TplFunction<'a>,
         }
-        for tc in &self.tool_calls {
-            blocks.push(format!("<tool_call>\n{{\"name\": \"{}\", \"arguments\": {}}}\n</tool_call>", tc.name, tc.arguments));
+        #[derive(serde::Serialize)]
+        struct TplMessage<'a> {
+            role: &'a str,
+            content: &'a str,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            tool_calls: Vec<TplToolCall<'a>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            tool_call_id: Option<&'a str>,
         }
-        blocks.join("\n")
+        minijinja::Value::from_serialize(TplMessage {
+            role: &self.role,
+            content: &self.content,
+            tool_calls: self
+                .tool_calls
+                .iter()
+                .map(|tc| TplToolCall { id: tc.id.as_deref(), r#type: "function", function: TplFunction { name: &tc.name, arguments: &tc.arguments } })
+                .collect(),
+            tool_call_id: self.tool_call_id.as_deref(),
+        })
     }
 }
 
@@ -170,36 +192,51 @@ impl ChatMessage {
 #[derive(Clone, Debug, Default)]
 pub struct ChatSample {
     pub messages: Vec<ChatMessage>,
+    /// The tool JSON-schema array, if any (drives the template's tools
+    /// preamble). Order-preserving `minijinja::Value`s, never
+    /// `serde_json::Value` -- see `chat_template`'s module doc.
+    pub tools: Vec<minijinja::Value>,
 }
 
 impl ChatSample {
-    /// Encode to `(ids, mask)`. Each message is framed via
-    /// `QwenBpe::frame_message` -- the SAME function `apply_chat_template`
-    /// (what inference renders) folds over -- so concatenating every
-    /// message's framed+encoded span is byte-identical to encoding the whole
-    /// conversation through the batch template at once; only the per-message
-    /// mask value differs. Terminated by a masked `<|endoftext|>`.
-    pub fn encode(&self, tok: &QwenBpe) -> (Vec<u32>, Vec<bool>) {
+    /// Encode to `(ids, mask)` by rendering the WHOLE conversation through
+    /// `tmpl` once (via [`ChatTemplate::render_with_message_boundaries`]),
+    /// then encoding each message's own byte range of that single rendered
+    /// text and concatenating -- so tool-call/tool-response framing and
+    /// think-block placement all come from the checkpoint's OWN template,
+    /// not a hand-rolled approximation. Terminated by a masked
+    /// `<|endoftext|>`. Fails (does not silently mismask) if the template's
+    /// rendering of some message is not prefix-stable -- see
+    /// `render_with_message_boundaries`'s doc for exactly when that happens.
+    pub fn encode(&self, tok: &QwenBpe, tmpl: &ChatTemplate) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
+        let values: Vec<minijinja::Value> = self.messages.iter().map(ChatMessage::to_template_value).collect();
+        let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
+        let (full, ranges) = tmpl.render_with_message_boundaries(&values, tools)?;
+
         let mut ids = Vec::new();
         let mut mask = Vec::new();
-        for m in &self.messages {
-            let framed = tok.frame_message(&m.role, &m.rendered_content());
-            let tid = tok.encode(&framed);
+        for (m, range) in self.messages.iter().zip(ranges) {
+            let tid = tok.encode(&full[range]);
             mask.extend(std::iter::repeat_n(m.train, tid.len()));
             ids.extend(tid);
         }
         ids.push(ENDOFTEXT);
         mask.push(false);
-        (ids, mask)
+        Ok((ids, mask))
     }
 
     /// Parse bench's `generic-messages-v2` JSONL export: one packed sample
-    /// per line, `{"messages":[{"role","content","train",...}], ...}`.
-    /// Deserializes into the strict, `deny_unknown_fields` wire structs below
-    /// (not raw `Value` indexing with `.unwrap_or(default)` fallbacks) -- a
-    /// missing/mistyped/unexpected field is a hard parse error naming the
-    /// exact line and field, not a silent default that only produces a wrong
-    /// answer downstream when some particular record happens to hit the gap.
+    /// per line, `{"messages":[{"role","content","train",...}], "tools":[...]}`.
+    /// Deserializes DIRECTLY into the strict, `deny_unknown_fields` wire
+    /// structs below (never through an intermediate `serde_json::Value` --
+    /// that would both permit `.unwrap_or(default)`-style silent coercion
+    /// AND lose `tools`' JSON key order, since the workspace's `serde_json`
+    /// does not build with `preserve_order`; `WireRecord.tools` is typed
+    /// `minijinja::Value` specifically so serde deserializes it order-
+    /// preservingly on its own, independent of that). A missing/mistyped/
+    /// unexpected field is a hard parse error naming the exact line and
+    /// field, not a silent default that only produces a wrong answer
+    /// downstream when some particular record happens to hit the gap.
     /// `messages[].train` is REQUIRED on every message -- a record with no
     /// explicit supervision boundary is rejected rather than silently
     /// treated as all-context or all-trained (either would be a silent
@@ -215,10 +252,10 @@ impl ChatSample {
             if line.is_empty() {
                 continue;
             }
-            let v: serde_json::Value = serde_json::from_str(line).map_err(|e| {
-                io::Error::new(io::ErrorKind::InvalidData, format!("{}:{}: invalid JSON: {e}", path.display(), lineno + 1))
+            let record: WireRecord = serde_json::from_str(line).map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("{}:{}: {e}", path.display(), lineno + 1))
             })?;
-            out.push(sample_from_json(&v).map_err(|e| {
+            out.push(sample_from_wire(record).map_err(|e| {
                 io::Error::new(io::ErrorKind::InvalidData, format!("{}:{}: {e}", path.display(), lineno + 1))
             })?);
         }
@@ -244,9 +281,9 @@ impl ChatSample {
 #[serde(deny_unknown_fields)]
 struct WireRecord {
     messages: Vec<WireMessage>,
-    #[allow(dead_code)] // part of the wire contract; not yet consumed here
+    /// `minijinja::Value`, not `serde_json::Value` -- see `from_jsonl`'s doc.
     #[serde(default)]
-    tools: Vec<serde_json::Value>,
+    tools: Vec<minijinja::Value>,
     #[allow(dead_code)]
     #[serde(default)]
     metadata: serde_json::Value,
@@ -271,10 +308,7 @@ struct WireMessage {
     content: String,
     #[serde(default)]
     tool_calls: Vec<WireToolCall>,
-    /// Only meaningful on `WireRole::Tool`; not read here (`role` alone
-    /// determines the fold-to-user-turn behavior) but must still be a known
-    /// field or `deny_unknown_fields` would reject every tool-result message.
-    #[allow(dead_code)]
+    /// Only meaningful on `WireRole::Tool`.
     #[serde(default)]
     tool_call_id: Option<String>,
     /// No default: a message with no explicit supervision boundary is
@@ -285,7 +319,6 @@ struct WireMessage {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireToolCall {
-    #[allow(dead_code)]
     #[serde(default)]
     id: Option<String>,
     #[allow(dead_code)]
@@ -307,65 +340,78 @@ struct WireFunction {
     arguments: String,
 }
 
-fn sample_from_json(v: &serde_json::Value) -> Result<ChatSample, String> {
-    let record: WireRecord = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+fn sample_from_wire(record: WireRecord) -> Result<ChatSample, String> {
     if record.messages.is_empty() {
         return Err("\"messages\" is empty".to_string());
     }
-
-    let mut messages = Vec::with_capacity(record.messages.len());
-    for (i, m) in record.messages.into_iter().enumerate() {
-        if matches!(m.role, WireRole::Tool) {
-            messages.push(ChatMessage::tool_result(m.content));
-            continue;
-        }
-        let role = match m.role {
-            WireRole::System => "system",
-            WireRole::User => "user",
-            WireRole::Assistant => "assistant",
-            WireRole::Tool => unreachable!("handled above"),
-        };
-        let tool_calls = m
-            .tool_calls
-            .into_iter()
-            .enumerate()
-            .map(|(j, tc)| {
-                let arguments: serde_json::Value = serde_json::from_str(&tc.function.arguments).map_err(|e| {
-                    format!("messages[{i}].tool_calls[{j}]: function.arguments is not valid JSON (expected a JSON-encoded string): {e}")
-                })?;
-                Ok(ToolCall { name: tc.function.name, arguments })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        messages.push(ChatMessage { role: role.to_string(), content: m.content, tool_calls, train: m.train });
-    }
-    Ok(ChatSample { messages })
+    let messages = record
+        .messages
+        .into_iter()
+        .map(|m| {
+            let role = match m.role {
+                WireRole::System => "system",
+                WireRole::User => "user",
+                WireRole::Assistant => "assistant",
+                WireRole::Tool => "tool",
+            };
+            let tool_calls =
+                m.tool_calls.into_iter().map(|tc| ToolCall { id: tc.id, name: tc.function.name, arguments: tc.function.arguments }).collect();
+            ChatMessage { role: role.to_string(), content: m.content, tool_calls, tool_call_id: m.tool_call_id, train: m.train }
+        })
+        .collect();
+    Ok(ChatSample { messages, tools: record.tools })
 }
 
 /// Encode a set of packed samples into one `(ids, mask)` stream.
-pub fn encode_sample_split(samples: &[ChatSample], tok: &QwenBpe) -> (Vec<u32>, Vec<bool>) {
+pub fn encode_sample_split(samples: &[ChatSample], tok: &QwenBpe, tmpl: &ChatTemplate) -> Result<(Vec<u32>, Vec<bool>), TemplateError> {
     let mut ids = Vec::new();
     let mut mask = Vec::new();
     for s in samples {
-        let (i, m) = s.encode(tok);
+        let (i, m) = s.encode(tok, tmpl)?;
         ids.extend_from_slice(&i);
         mask.extend_from_slice(&m);
     }
-    (ids, mask)
+    Ok((ids, mask))
 }
 
 /// Write a train/val split of packed [`ChatSample`]s to `dir`, in the same
-/// on-disk layout as [`prepare_chat`].
-pub fn prepare_chat_samples(train: &[ChatSample], val: &[ChatSample], tok: &QwenBpe, vocab: usize, dir: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let (train_ids, train_mask) = encode_sample_split(train, tok);
-    let (val_ids, val_mask) = encode_sample_split(val, tok);
-    binio::write_u32_bin(&dir.join("train.u32.bin"), &train_ids)?;
-    binio::write_mask_bin(&dir.join("train.mask.bin"), &train_mask)?;
-    binio::write_u32_bin(&dir.join("val.u32.bin"), &val_ids)?;
-    binio::write_mask_bin(&dir.join("val.mask.bin"), &val_mask)?;
-    std::fs::write(dir.join("meta.json"), binio::Meta::vocab_only(vocab))?;
+/// on-disk layout as [`prepare_chat`]. `tmpl` is the checkpoint's OWN
+/// chat template (compiled once by the caller; see `chat_template`).
+pub fn prepare_chat_samples(
+    train: &[ChatSample],
+    val: &[ChatSample],
+    tok: &QwenBpe,
+    tmpl: &ChatTemplate,
+    vocab: usize,
+    dir: &Path,
+) -> Result<(), PrepareError> {
+    std::fs::create_dir_all(dir).map_err(PrepareError::Io)?;
+    let (train_ids, train_mask) = encode_sample_split(train, tok, tmpl).map_err(PrepareError::Template)?;
+    let (val_ids, val_mask) = encode_sample_split(val, tok, tmpl).map_err(PrepareError::Template)?;
+    binio::write_u32_bin(&dir.join("train.u32.bin"), &train_ids).map_err(PrepareError::Io)?;
+    binio::write_mask_bin(&dir.join("train.mask.bin"), &train_mask).map_err(PrepareError::Io)?;
+    binio::write_u32_bin(&dir.join("val.u32.bin"), &val_ids).map_err(PrepareError::Io)?;
+    binio::write_mask_bin(&dir.join("val.mask.bin"), &val_mask).map_err(PrepareError::Io)?;
+    std::fs::write(dir.join("meta.json"), binio::Meta::vocab_only(vocab)).map_err(PrepareError::Io)?;
     Ok(())
 }
+
+#[derive(Debug)]
+pub enum PrepareError {
+    Io(io::Error),
+    Template(TemplateError),
+}
+
+impl std::fmt::Display for PrepareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrepareError::Io(e) => write!(f, "{e}"),
+            PrepareError::Template(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for PrepareError {}
 
 /// Write a train/val split to `dir` as brain's masked token-dataset layout.
 /// `vocab` is the MODEL's vocab (from its `config.json`), which must match the
@@ -404,10 +450,10 @@ mod tests {
         assert!(s.messages[2].train);
         assert_eq!(s.messages[2].tool_calls.len(), 1);
         assert_eq!(s.messages[2].tool_calls[0].name, "get_weather");
-        // role: "tool" folds into a user-role <tool_response> turn, never trainable.
-        assert_eq!(s.messages[3].role, "user");
-        assert!(s.messages[3].content.contains("<tool_response>"));
-        assert!(s.messages[3].content.contains("18C, sunny"));
+        // role: "tool" passes through as-is -- the chat template merges
+        // consecutive tool-role turns and wraps them, not this parser.
+        assert_eq!(s.messages[3].role, "tool");
+        assert_eq!(s.messages[3].content, "18C, sunny");
         assert!(!s.messages[3].train);
         assert!(s.messages[4].train);
     }
@@ -496,13 +542,14 @@ mod tests {
     }
 
     #[test]
-    fn rendered_content_inlines_tool_calls_matching_the_toolcall_convention() {
-        let m = ChatMessage::assistant_tool_calls(
-            "checking",
-            vec![ToolCall { name: "get_weather".into(), arguments: serde_json::json!({"location": "Paris"}) }],
-            true,
-        );
-        let rendered = m.rendered_content();
-        assert_eq!(rendered, "checking\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\":\"Paris\"}}\n</tool_call>");
+    fn to_template_value_omits_empty_tool_calls_and_tool_call_id() {
+        // Fields the template checks with `is defined`/truthiness must be
+        // genuinely ABSENT when empty, not present-but-empty -- an empty
+        // `tool_calls: []` vs. a missing key can take different branches in
+        // a real template (`{%- if message.tool_calls %}`).
+        let m = ChatMessage::user("hi");
+        let v = m.to_template_value();
+        assert_eq!(v.get_attr("tool_calls").unwrap().kind(), minijinja::value::ValueKind::Undefined);
+        assert_eq!(v.get_attr("tool_call_id").unwrap().kind(), minijinja::value::ValueKind::Undefined);
     }
 }

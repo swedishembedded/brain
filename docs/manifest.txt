@@ -28,4 +28,5 @@ models/fincast/status.md
 models/kronos/status.md
 guides/finetune/datasets.md
 guides/finetune/plan.md
+guides/training.md
 adr/0001-model-abstraction.md
