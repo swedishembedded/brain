@@ -86,6 +86,20 @@ pub enum Stage {
 /// Default fidelity dial when `restore` omits `w`.
 pub const DEFAULT_W: f32 = 0.5;
 
+/// The catalog id the `upscale` tail dispatches to.
+///
+/// A string, not `upscale::caps::MODEL`, because this crate deliberately links
+/// NO model crate — the whole point of dispatching through
+/// [`capability::Registry`] is that the pipeline composes capabilities without
+/// depending on their implementations. `crates/cli` sees both and asserts they
+/// are equal (`catalog::tests::imgpipe_stage_ids_match_the_catalog`), so the
+/// string cannot drift from the model it names.
+pub const UPSCALE_MODEL: &str = "brain/upscale";
+
+/// The catalog ids of the other model-backed stages, for the same reason.
+pub const SEGMENT_MODEL: &str = "brain/sam2";
+pub const RESTORE_MODEL: &str = "brain/restore";
+
 /// The parameter names each `op` accepts. Anything else is an error rather than
 /// a silent default — a misspelled `radius` that quietly became 0 would produce
 /// a plausible image that did not do what was asked.
@@ -323,7 +337,7 @@ impl<'a> Pipeline<'a> {
         if !boxes.is_empty() {
             inv = inv.set("boxes", serde_json::json!(boxes));
         }
-        let out = self.registry.run("sam2", "segment", inv, &mut |_| {})?;
+        let out = self.registry.run(SEGMENT_MODEL, "segment", inv, &mut |_| {})?;
         let b = out.blobs.get("mask").ok_or("sam2 segment returned no 'mask' blob")?;
         decode_plane(b, w, h)
     }
@@ -335,7 +349,7 @@ impl<'a> Pipeline<'a> {
         let inv = Invocation::new()
             .set("tile", serde_json::json!(tile))
             .blob("image", capability::blob::image_blob(&hwc, w, h, 3));
-        let out = self.registry.run("ai-forever/Real-ESRGAN", "upscale", inv, &mut |_| {})?;
+        let out = self.registry.run(UPSCALE_MODEL, "upscale", inv, &mut |_| {})?;
         let b = out.blobs.get("image").ok_or("upscale returned no 'image' blob")?;
         // The output size is the model's to report — x4 for x4plus, x2 for
         // x2plus — so read it back rather than assuming a factor here.
@@ -349,7 +363,7 @@ impl<'a> Pipeline<'a> {
         let inv = Invocation::new()
             .set("w", serde_json::json!(dial))
             .blob("image", capability::blob::image_blob(&hwc, w, h, 3));
-        let out = self.registry.run("restore", "restore_face", inv, &mut |_| {})?;
+        let out = self.registry.run(RESTORE_MODEL, "restore_face", inv, &mut |_| {})?;
         let b = out.blobs.get("image").ok_or("restore returned no 'image' blob")?;
         let hwc = decode_rgb(b, w, h)?;
         Ok(imaging::pixels::hwc_to_chw(&hwc, 3, h as usize, w as usize))
@@ -487,9 +501,9 @@ mod tests {
 
     fn registry(seg: StubSeg) -> Registry {
         let mut r = Registry::new();
-        r.register(Arc::new(StubProvider("sam2", Arc::new(seg))));
-        r.register(Arc::new(StubProvider("restore", Arc::new(StubRestore))));
-        r.register(Arc::new(StubProvider("ai-forever/Real-ESRGAN", Arc::new(StubUpscale))));
+        r.register(Arc::new(StubProvider(SEGMENT_MODEL, Arc::new(seg))));
+        r.register(Arc::new(StubProvider(RESTORE_MODEL, Arc::new(StubRestore))));
+        r.register(Arc::new(StubProvider(UPSCALE_MODEL, Arc::new(StubUpscale))));
         r
     }
 

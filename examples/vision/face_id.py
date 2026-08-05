@@ -40,7 +40,7 @@ def image_args(img: bytes, w: int, h: int) -> dict:
 
 def embedding_of(brain: BrainDBus, img: bytes, w: int, h: int) -> tuple[list[float], dict]:
     """`embed` returns the vector as a raw `Media::Bytes` blob (512 f32 LE)."""
-    r = brain.run("facenet", "embed", {}, **image_args(img, w, h))
+    r = brain.run("brain/facenet", "embed", {}, **image_args(img, w, h))
     raw = read_fd(r.fds["embedding"])
     vec = list(struct.unpack(f"<{len(raw) // 4}f", raw))
     return vec, r.result
@@ -55,14 +55,14 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     with BrainDBus() as brain:
-        if "facenet" not in brain.models():
+        if "brain/facenet" not in brain.models():
             print("FATAL: 'facenet' not served (set BRAIN_FACENET_DIR)", file=sys.stderr)
             return 2
 
         embeddings: list[list[float]] = []
         for i, path in enumerate(args.photos):
             img, w, h = load_ppm(path)
-            det = brain.run("facenet", "detect", {}, **image_args(img, w, h)).result
+            det = brain.run("brain/facenet", "detect", {}, **image_args(img, w, h)).result
             print(f"{path}: {w}x{h}, {det['count']} face(s)")
             for f in det["faces"]:
                 x1, y1, x2, y2 = f["bbox"]

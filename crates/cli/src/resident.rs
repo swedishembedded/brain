@@ -80,21 +80,11 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, r
     // antelopev2 face stack (BRAIN_FACENET_DIR), the VQ autoencoder
     // (BRAIN_VQGAN_WEIGHTS), CodeFormer restoration (BRAIN_RESTORE_WEIGHTS) and
     // the CLIP encoders (BRAIN_CLIP_DIR, genuinely batched per tower).
-    if let Some(s) = crate::resident_sam2::Sam2Resident::from_env() {
-        models.push(Arc::new(s));
-    }
-    if let Some(f) = crate::resident_facenet::FacenetResident::from_env() {
-        models.push(Arc::new(f));
-    }
-    if let Some(v) = crate::resident_restore::VqganResident::from_env() {
-        models.push(Arc::new(v));
-    }
-    if let Some(r) = crate::resident_restore::RestoreResident::from_env() {
-        models.push(Arc::new(r));
-    }
-    if let Some(c) = crate::resident_clip::ClipResident::from_env() {
-        models.push(Arc::new(c));
-    }
+    // The imaging models come from `crate::catalog`, which owns their manifests
+    // and providers too — so a model cannot be listed by `brain caps`, runnable
+    // by `brain do` and yet missing here (which is exactly how Real-ESRGAN
+    // shipped unreachable). Each is still gated on its own weights env var.
+    models.extend(crate::catalog::residents());
     // Time-series forecasting foundation models — each gated on its weights env
     // var. chronos2/fincast advertise an NPU footprint (auto-placed on the NPU
     // when budgeted); kronos serves on CPU/GPU (see resident_forecast.rs).

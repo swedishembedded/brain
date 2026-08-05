@@ -14,8 +14,8 @@ marshalled through D-Bus.
 Discover them the same way as everything else:
 
 ```bash
-brain caps sam2
-brain caps facenet
+brain caps brain/sam2
+brain caps brain/facenet
 ```
 
 ## Run it
@@ -38,10 +38,10 @@ result back. Everything the scripts write is a PPM too.
 The same actions work with no bus at all:
 
 ```bash
-BRAIN_SAM2_WEIGHTS=… brain do sam2 segment --points "614,430" \
+BRAIN_SAM2_WEIGHTS=… brain do brain/sam2 segment --points "614,430" \
     --in image=photo.ppm --out mask=mask.ppm --json
-BRAIN_FACENET_DIR=… brain do facenet detect --in image=photo.ppm --json
-BRAIN_FACENET_DIR=… brain do facenet embed --align false \
+BRAIN_FACENET_DIR=… brain do brain/facenet detect --in image=photo.ppm --json
+BRAIN_FACENET_DIR=… brain do brain/facenet embed --align false \
     --in image=aligned112.ppm --out embedding=id.bin
 ```
 

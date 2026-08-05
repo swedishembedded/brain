@@ -41,12 +41,12 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     with BrainDBus() as brain:
-        if "vqgan" not in brain.models():
+        if "brain/vqgan" not in brain.models():
             print("FATAL: 'vqgan' not served (set BRAIN_VQGAN_WEIGHTS)", file=sys.stderr)
             return 2
 
         enc = brain.run(
-            "vqgan", "encode", {"size": args.size},
+            "brain/vqgan", "encode", {"size": args.size},
             in_fds={"image": sealed_memfd(img)},
             in_meta={"image": {"media": "image", "w": w, "h": h, "c": 3}},
         )
@@ -62,7 +62,7 @@ def main() -> int:
 
         # The codes blob comes straight back in — same bytes, same media type.
         dec = brain.run(
-            "vqgan", "decode", {"size": args.size},
+            "brain/vqgan", "decode", {"size": args.size},
             in_fds={"codes": sealed_memfd(codes)},
             in_meta={"codes": {"media": "bytes", "lh": enc.result["lh"], "lw": enc.result["lw"]}},
         )
@@ -77,7 +77,7 @@ def main() -> int:
                 broken[i] = 0
             raw = struct.pack(f"<{len(broken)}I", *broken)
             dec2 = brain.run(
-                "vqgan", "decode", {"size": args.size},
+                "brain/vqgan", "decode", {"size": args.size},
                 in_fds={"codes": sealed_memfd(raw)},
                 in_meta={"codes": {"media": "bytes"}},
             )

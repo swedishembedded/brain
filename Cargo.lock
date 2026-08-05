@@ -575,6 +575,7 @@ dependencies = [
  "brain-speaker",
  "brain-splat",
  "brain-tts",
+ "brain-upscale",
  "brain-vision",
  "brain-vqgan",
  "brain-vulkan",

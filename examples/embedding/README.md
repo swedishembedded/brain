@@ -57,7 +57,7 @@ wall …s for 4 requests (batching/lanes = wall < sum)
 
 ---
 
-## CLIP text embeddings (`brain do clip embed_text`)
+## CLIP text embeddings (`brain do brain/clip embed_text`)
 
 The same generic surface serves CLIP. Both SDXL text towers are available; the
 action returns the projected `text_embeds` when the tower projects and the
@@ -66,7 +66,7 @@ which.
 
 ```bash
 BRAIN_CLIP_DIR=/path/to/stable-diffusion-xl-base-1.0 \
-  ./target/release/brain do clip embed_text \
+  ./target/release/brain do brain/clip embed_text \
     --text "a photo of a cat" --tower clip_l \
     --out embedding=/tmp/cat.f32     # 768 f32 LE (openclip_bigg gives 1280)
 ```

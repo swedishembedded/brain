@@ -56,7 +56,7 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     with BrainDBus() as brain:
-        if "restore" not in brain.models():
+        if "brain/restore" not in brain.models():
             print("FATAL: 'restore' not served (set BRAIN_RESTORE_WEIGHTS)", file=sys.stderr)
             return 2
 
@@ -64,7 +64,7 @@ def main() -> int:
         for value in [float(v) for v in args.w.split(",")]:
             t = time.perf_counter()
             r = brain.run(
-                "restore", "restore_face", {"w": value},
+                "brain/restore", "restore_face", {"w": value},
                 in_fds={"image": sealed_memfd(img)}, in_meta=meta,
             )
             dt = (time.perf_counter() - t) * 1000

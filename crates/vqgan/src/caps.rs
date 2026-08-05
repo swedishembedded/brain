@@ -42,7 +42,7 @@ use crate::model::Vqgan;
 
 /// The model id used on the CLI (`brain do vqgan …`), over D-Bus and in the
 /// residency manifest.
-pub const MODEL: &str = "vqgan";
+pub const MODEL: &str = "brain/vqgan";
 
 /// The default square side the graph is built for — the released checkpoints'
 /// training resolution.

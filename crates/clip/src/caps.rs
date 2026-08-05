@@ -57,7 +57,7 @@ fn to_map(t: Tensors) -> HashMap<String, Vec<f32>> {
 
 /// The model id used on the CLI (`brain do clip …`), over D-Bus and in the
 /// residency manifest.
-pub const MODEL: &str = "clip";
+pub const MODEL: &str = "brain/clip";
 
 /// The two text towers this action can serve, by the name used on the wire.
 pub const TOWERS: [&str; 2] = ["clip_l", "openclip_bigg"];

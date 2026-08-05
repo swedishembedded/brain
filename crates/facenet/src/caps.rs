@@ -42,7 +42,7 @@ use crate::model::{ArcFace, Scrfd};
 
 /// The model id used on the CLI (`brain do facenet …`), over D-Bus and in the
 /// residency manifest.
-pub const MODEL: &str = "facenet";
+pub const MODEL: &str = "brain/facenet";
 
 /// [`crate::model::PIPELINES`] plus the two kernels only the *serving* path
 /// dispatches: the detector letterbox (`resize_bilinear` for the aspect-

@@ -45,7 +45,7 @@ use crate::model::CodeFormer;
 
 /// The model id used on the CLI (`brain do restore …`), over D-Bus and in the
 /// residency manifest.
-pub const MODEL: &str = "restore";
+pub const MODEL: &str = "brain/restore";
 
 /// [`crate::model::KERNELS`] plus the two kernels only the *serving* path
 /// dispatches: `resize_bilinear` (the input is any size, the graph is 512²) and

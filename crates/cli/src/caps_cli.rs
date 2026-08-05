@@ -11,9 +11,9 @@
 //! Neither command knows anything model-specific: both go through
 //! `capability::Registry`. A new model shows up here the moment it provides a
 //! `capability::Manifest` (discovery) and a `Provider` (execution) — see
-//! [`static_manifests`] and [`build_registry`].
+//! `crate::catalog` — ONE entry per model, so the list and the constructor
+//! cannot drift apart (see that module's docs).
 
-use crate::imageops;
 use std::sync::Arc;
 
 use capability::{Action, ActionSpec, Blob, Invocation, Manifest, Media, ParamType, Progress, Provider, Registry};
@@ -22,89 +22,16 @@ use serde_json::{json, Value};
 
 /// Every model's static capability manifest (discovery — no weights). Add a model
 /// here and it appears in `brain caps` immediately.
-fn static_manifests() -> Vec<Manifest> {
-    vec![
-        zimage::caps::manifest(),
-        flux2::caps::manifest(),
-        qwen::caps::manifest(),
-        lfm::caps::manifest(),
-        fastvlm::caps::manifest(),
-        yolo::caps::manifest(),
-        depth::caps::manifest(),
-        sam2::caps::manifest(),
-        facenet::caps::manifest(),
-        vqgan::caps::manifest(),
-        restore::caps::manifest(),
-        clip::caps::manifest(),
-        imgpipe::caps::manifest(),
-        tts::caps::manifest(),
-        imageops::manifest(),
-        DemoModel.manifest(),
-    ]
-}
-
 /// The catalog id of the trivial always-available demo model (no `caps.rs` of
 /// its own -- this const is its single source of truth).
 const DEMO_MODEL: &str = "brain/demo";
-
-/// Build an executable registry for `model` (loads what that model needs). `do`
-/// only constructs the one model it was asked to run.
-fn build_registry(model: &str) -> Result<Registry, String> {
-    let mut reg = Registry::new();
-    match model {
-        DEMO_MODEL => reg.register(Arc::new(DemoModel)),
-        imageops::MODEL => reg.register(Arc::new(imageops::ImageOps)),
-        zimage::caps::MODEL => reg.register(Arc::new(zimage::caps::ZImageProvider::load()?)),
-        flux2::caps::MODEL => reg.register(Arc::new(flux2::caps::Flux2Provider::new())),
-        qwen::caps::MODEL => reg.register(Arc::new(qwen::caps::QwenProvider::new())),
-        lfm::caps::MODEL => reg.register(Arc::new(lfm::caps::LfmProvider::new())),
-        fastvlm::caps::MODEL => reg.register(Arc::new(fastvlm::caps::FastVlmProvider::new())),
-        yolo::caps::MODEL => reg.register(Arc::new(yolo::caps::YoloProvider::new())),
-        depth::caps::MODEL => reg.register(Arc::new(depth::caps::DepthProvider::new())),
-        // The imaging models carry their weights path in the provider (from a
-        // `BRAIN_*` env var), not as an action param, so `brain do` and the
-        // residency adapter advertise ONE manifest each.
-        sam2::caps::MODEL => reg.register(Arc::new(
-            sam2::caps::Sam2Provider::from_env().ok_or("set BRAIN_SAM2_WEIGHTS to an existing sam2.1_hiera_*.pt checkpoint")?,
-        )),
-        facenet::caps::MODEL => reg.register(Arc::new(
-            facenet::caps::FacenetProvider::from_env().ok_or("set BRAIN_FACENET_DIR to an antelopev2 directory holding glintr100.onnx + scrfd_10g_bnkps.onnx")?,
-        )),
-        vqgan::caps::MODEL => reg.register(Arc::new(
-            vqgan::caps::VqganProvider::from_env().ok_or("set BRAIN_VQGAN_WEIGHTS to an existing VQGAN checkpoint (or its directory)")?,
-        )),
-        restore::caps::MODEL => reg.register(Arc::new(
-            restore::caps::RestoreProvider::from_env().ok_or("set BRAIN_RESTORE_WEIGHTS to an existing codeformer.pth (or its directory)")?,
-        )),
-        clip::caps::MODEL => reg.register(Arc::new(
-            clip::caps::ClipProvider::from_env().ok_or("set BRAIN_CLIP_DIR to a checkpoint root holding tokenizer/ (CLIP-L) and/or tokenizer_2/ (OpenCLIP-bigG)")?,
-        )),
-        // The pipeline is a capability that COMPOSES capabilities: it dispatches
-        // its stages into a registry of the models whose weights are configured,
-        // so a stage whose model is unset fails with that model's own
-        // "set BRAIN_..." message rather than a generic one from the pipeline.
-        imgpipe::caps::MODEL => {
-            let mut inner = Registry::new();
-            if let Some(p) = sam2::caps::Sam2Provider::from_env() {
-                inner.register(Arc::new(p));
-            }
-            if let Some(p) = restore::caps::RestoreProvider::from_env() {
-                inner.register(Arc::new(p));
-            }
-            reg.register(Arc::new(imgpipe::caps::PipelineProvider::new(Arc::new(inner))));
-        }
-        tts::caps::MODEL => reg.register(Arc::new(tts::caps::TtsProvider::new())),
-        other => return Err(format!("unknown model '{other}' (see `brain caps`)")),
-    }
-    Ok(reg)
-}
 
 // ---------------------------------------------------------------- brain caps
 
 pub fn run_caps(argv: &[String]) -> i32 {
     let json_out = argv.iter().any(|a| a == "--json");
     let model = argv.iter().find(|a| !a.starts_with("--")).cloned();
-    let mans: Vec<Manifest> = static_manifests().into_iter().filter(|m| model.as_deref().is_none_or(|w| w == m.model)).collect();
+    let mans: Vec<Manifest> = crate::catalog::manifests().into_iter().filter(|m| model.as_deref().is_none_or(|w| w == m.model)).collect();
     if mans.is_empty() {
         eprintln!("no such model '{}' (try `brain caps`)", model.unwrap_or_default());
         return 1;
@@ -155,7 +82,11 @@ pub fn run_do(argv: &[String]) -> i32 {
     // resolves to the canonical `brain/<name>` before dispatch, but is never
     // itself what gets registered or listed (see modelref::alias's module docs).
     let model = brain_modelref::alias::canonical(&model).map(str::to_string).unwrap_or(model);
-    let reg = match build_registry(&model) {
+    let reg = match crate::catalog::provider(&model).map(|p| {
+        let mut r = Registry::new();
+        r.register(p);
+        r
+    }) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("brain do: {e}");

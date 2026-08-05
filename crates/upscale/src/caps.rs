@@ -33,9 +33,15 @@ use vae::blocks::Tensors;
 use crate::config::RrdbConfig;
 use crate::model::Rrdb;
 
-/// The canonical served id — the upstream repo, exactly
-/// (`docs/models/naming.md`).
-pub const MODEL: &str = "ai-forever/Real-ESRGAN";
+/// The served id.
+///
+/// A BARE name, like its siblings in the imaging stack (`sam2`, `facenet`,
+/// `vqgan`, `restore`, `clip`, `imgpipe`) — which resolve under the reserved
+/// `brain` vendor. `crates/cli/tests/model_ids.rs` requires every static
+/// catalog id to sit under a reserved vendor, so the upstream-repo spelling
+/// (`ai-forever/Real-ESRGAN`) is NOT usable here: that vendor is fetchable, and
+/// this model is served from a locally-configured checkpoint, not fetched.
+pub const MODEL: &str = "brain/upscale";
 
 pub fn upscale_spec() -> ActionSpec {
     ActionSpec::new("upscale", "super-resolve an image (Real-ESRGAN RRDBNet generator)")
@@ -279,6 +285,20 @@ impl Session {
 impl Upscaler for Session {
     fn upscale(&self, chw: &[f32], w: u32, h: u32, tile: u32) -> Result<(Vec<f32>, u32, u32), String> {
         self.upscale_with_halo(chw, w, h, tile, TILE_HALO)
+    }
+}
+
+impl UpscaleProvider<Session> {
+    /// Build from `BRAIN_ESRGAN_WEIGHTS`, on a device of this crate's kernel
+    /// set. `None` when the var is unset or names nothing that exists — the
+    /// caller turns that into its own "set BRAIN_..." message.
+    pub fn from_env() -> Option<UpscaleProvider<Session>> {
+        let path = std::env::var("BRAIN_ESRGAN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        if !std::path::Path::new(&path).exists() {
+            return None;
+        }
+        let gpu = Gpu::new(&crate::model::KERNELS);
+        load(&path, gpu).ok().map(UpscaleProvider::new)
     }
 }
 

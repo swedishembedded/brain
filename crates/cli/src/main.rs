@@ -14,6 +14,7 @@
 
 mod args;
 mod caps_cli;
+mod catalog;
 mod data_cli;
 mod depth_cli;
 mod devices_cli;
@@ -44,6 +45,7 @@ mod resident_lfm;
 mod resident_llm;
 mod resident_mock;
 mod resident_tts;
+mod resident_upscale;
 mod resident_clip;
 mod resident_facenet;
 mod resident_sam2;

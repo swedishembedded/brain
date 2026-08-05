@@ -49,7 +49,7 @@ use crate::model::{Encoded, Prompt, Sam2, PIPELINES};
 
 /// The model id used on the CLI (`brain do sam2 …`), over D-Bus and in the
 /// residency manifest.
-pub const MODEL: &str = "sam2";
+pub const MODEL: &str = "brain/sam2";
 
 /// The released variants, by the name the `variant` param takes.
 pub fn variant_config(name: &str) -> Result<Sam2Config, String> {

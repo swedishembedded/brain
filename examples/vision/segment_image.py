@@ -39,7 +39,7 @@ def segment(brain: BrainDBus, img: bytes, w: int, h: int, params: dict) -> tuple
     """One `segment` call. The image goes in as a sealed memfd, the mask comes
     back as one — no bulk data is marshalled through D-Bus itself."""
     meta = {"image": {"media": "image", "w": w, "h": h, "c": 3}}
-    r = brain.run("sam2", "segment", params, in_fds={"image": sealed_memfd(img)}, in_meta=meta)
+    r = brain.run("brain/sam2", "segment", params, in_fds={"image": sealed_memfd(img)}, in_meta=meta)
     return r.result, read_fd(r.fds["mask"])
 
 
@@ -81,7 +81,7 @@ def main() -> int:
         prompts = [{"points": f"{w // 2},{h // 2}"}]
 
     with BrainDBus() as brain:
-        if "sam2" not in brain.models():
+        if "brain/sam2" not in brain.models():
             print("FATAL: 'sam2' not served (set BRAIN_SAM2_WEIGHTS)", file=sys.stderr)
             return 2
 

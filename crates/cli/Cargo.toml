@@ -48,6 +48,7 @@ brain-sam2.workspace = true
 brain-facenet.workspace = true
 brain-vqgan.workspace = true
 brain-restore.workspace = true
+brain-upscale.workspace = true
 brain-mirror.workspace = true
 brain-splat.workspace = true
 brain-paramstore.workspace = true

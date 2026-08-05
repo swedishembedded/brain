@@ -41,6 +41,16 @@ const ROWS: &[Row] = &[
     Row { legacy: "kronos", canonical: "brain/kronos" },
     Row { legacy: "gpt", canonical: "brain/gpt" },
     Row { legacy: "glm", canonical: "brain/glm" },
+    // The imaging stack. These shipped on the p40 branch under bare names
+    // before the fully-qualified scheme landed; the rows keep those callers
+    // (examples, docs, D-Bus clients) working.
+    Row { legacy: "sam2", canonical: "brain/sam2" },
+    Row { legacy: "facenet", canonical: "brain/facenet" },
+    Row { legacy: "vqgan", canonical: "brain/vqgan" },
+    Row { legacy: "restore", canonical: "brain/restore" },
+    Row { legacy: "clip", canonical: "brain/clip" },
+    Row { legacy: "imgpipe", canonical: "brain/imgpipe" },
+    Row { legacy: "upscale", canonical: "brain/upscale" },
     // qwen/lfm/nemotron/qwen-asr are env-loaded from an arbitrary checkpoint,
     // so their canonical id depends on what was actually imported (see
     // `resident_llm.rs`'s BRAIN_QWEN_REF / BRAIN_LFM_REF / BRAIN_NEMOTRON_REF /

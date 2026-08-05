@@ -37,7 +37,7 @@ use crate::{Pipeline, Spec};
 
 /// The model id used on the CLI (`brain do imgpipe …`), over D-Bus and in the
 /// residency manifest.
-pub const MODEL: &str = "imgpipe";
+pub const MODEL: &str = "brain/imgpipe";
 
 /// The kernels the pipeline itself dispatches — the mask algebra and the
 /// composite. Model stages bring their own.
