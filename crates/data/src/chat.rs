@@ -195,10 +195,18 @@ impl ChatSample {
 
     /// Parse bench's `generic-messages-v2` JSONL export: one packed sample
     /// per line, `{"messages":[{"role","content","train",...}], ...}`.
+    /// Deserializes into the strict, `deny_unknown_fields` wire structs below
+    /// (not raw `Value` indexing with `.unwrap_or(default)` fallbacks) -- a
+    /// missing/mistyped/unexpected field is a hard parse error naming the
+    /// exact line and field, not a silent default that only produces a wrong
+    /// answer downstream when some particular record happens to hit the gap.
     /// `messages[].train` is REQUIRED on every message -- a record with no
     /// explicit supervision boundary is rejected rather than silently
     /// treated as all-context or all-trained (either would be a silent
-    /// no-op or a silent prompt-leak into the loss).
+    /// no-op or a silent prompt-leak into the loss). bench independently
+    /// enforces the SAME schema before writing
+    /// (`benchlib/datasets/formats/schema.py`, `validate_record`), so a
+    /// malformed export fails the bench build, not just the brain read.
     pub fn from_jsonl(path: &Path) -> io::Result<Vec<ChatSample>> {
         let text = std::fs::read_to_string(path)?;
         let mut out = Vec::new();
@@ -218,42 +226,117 @@ impl ChatSample {
     }
 }
 
-fn sample_from_json(v: &serde_json::Value) -> Result<ChatSample, String> {
-    let msgs = v["messages"].as_array().ok_or("missing \"messages\" array")?;
-    let mut messages = Vec::with_capacity(msgs.len());
-    for (i, m) in msgs.iter().enumerate() {
-        let role = m["role"].as_str().ok_or_else(|| format!("messages[{i}]: missing \"role\""))?;
-        let content = m["content"].as_str().unwrap_or("").to_string();
-        let train = m
-            .get("train")
-            .ok_or_else(|| format!("messages[{i}]: missing \"train\" -- every message must state its supervision boundary explicitly"))?
-            .as_bool()
-            .ok_or_else(|| format!("messages[{i}]: \"train\" must be a bool"))?;
+// ===================== strict wire schema =====================
+//
+// bench's generic-messages-v2 export is the one true wire contract this
+// parses; the shape lives in bench's benchlib/datasets/formats/messages.py
+// (render_generic_messages_v2) and benchlib/datasets/segment.py
+// (extract_packed_sample). Deserializing into typed, `deny_unknown_fields`
+// structs (rather than indexing a raw serde_json::Value with `.unwrap_or(..)`
+// fallbacks) means a missing/mistyped/unexpected field is a hard parse error
+// naming exactly which field and line, not a silent default that only shows
+// up as a wrong answer downstream when some particular record happens to hit
+// the gap -- matching the precedent in checkpoint::st::ModelCard (required
+// fields are plain, non-Option types; only genuinely optional fields are
+// `Option<T>`).
 
-        if role == "tool" {
-            messages.push(ChatMessage::tool_result(content));
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireRecord {
+    messages: Vec<WireMessage>,
+    #[allow(dead_code)] // part of the wire contract; not yet consumed here
+    #[serde(default)]
+    tools: Vec<serde_json::Value>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    metadata: serde_json::Value,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum WireRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireMessage {
+    role: WireRole,
+    /// Required: bench's exporter always writes this key (possibly `""`),
+    /// never omits it -- an absent `content` is a real shape violation, not
+    /// something to paper over with a default.
+    content: String,
+    #[serde(default)]
+    tool_calls: Vec<WireToolCall>,
+    /// Only meaningful on `WireRole::Tool`; not read here (`role` alone
+    /// determines the fold-to-user-turn behavior) but must still be a known
+    /// field or `deny_unknown_fields` would reject every tool-result message.
+    #[allow(dead_code)]
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    /// No default: a message with no explicit supervision boundary is
+    /// rejected rather than silently treated as all-context or all-trained.
+    train: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireToolCall {
+    #[allow(dead_code)]
+    #[serde(default)]
+    id: Option<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    r#type: Option<String>,
+    function: WireFunction,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireFunction {
+    name: String,
+    /// OpenAI wire format requires a JSON-ENCODED STRING here, not a nested
+    /// object -- bench's `_stringify_tool_call_arguments` (messages.py)
+    /// writes it that way. Typed as `String` so serde itself rejects a
+    /// record that regresses to the old (pre-fix) object shape, instead of
+    /// silently accepting it and later double-encoding it into the rendered
+    /// <tool_call> block.
+    arguments: String,
+}
+
+fn sample_from_json(v: &serde_json::Value) -> Result<ChatSample, String> {
+    let record: WireRecord = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+    if record.messages.is_empty() {
+        return Err("\"messages\" is empty".to_string());
+    }
+
+    let mut messages = Vec::with_capacity(record.messages.len());
+    for (i, m) in record.messages.into_iter().enumerate() {
+        if matches!(m.role, WireRole::Tool) {
+            messages.push(ChatMessage::tool_result(m.content));
             continue;
         }
-
-        let tool_calls: Vec<ToolCall> = m["tool_calls"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .enumerate()
-                    .map(|(j, tc)| {
-                        let f = &tc["function"];
-                        let name = f["name"].as_str().ok_or_else(|| format!("messages[{i}].tool_calls[{j}]: missing function.name"))?;
-                        Ok(ToolCall { name: name.to_string(), arguments: f["arguments"].clone() })
-                    })
-                    .collect::<Result<Vec<_>, String>>()
+        let role = match m.role {
+            WireRole::System => "system",
+            WireRole::User => "user",
+            WireRole::Assistant => "assistant",
+            WireRole::Tool => unreachable!("handled above"),
+        };
+        let tool_calls = m
+            .tool_calls
+            .into_iter()
+            .enumerate()
+            .map(|(j, tc)| {
+                let arguments: serde_json::Value = serde_json::from_str(&tc.function.arguments).map_err(|e| {
+                    format!("messages[{i}].tool_calls[{j}]: function.arguments is not valid JSON (expected a JSON-encoded string): {e}")
+                })?;
+                Ok(ToolCall { name: tc.function.name, arguments })
             })
-            .transpose()?
-            .unwrap_or_default();
-
-        messages.push(ChatMessage { role: role.to_string(), content, tool_calls, train });
-    }
-    if messages.is_empty() {
-        return Err("\"messages\" is empty".to_string());
+            .collect::<Result<Vec<_>, String>>()?;
+        messages.push(ChatMessage { role: role.to_string(), content: m.content, tool_calls, train: m.train });
     }
     Ok(ChatSample { messages })
 }
@@ -276,6 +359,27 @@ pub fn prepare_chat_samples(train: &[ChatSample], val: &[ChatSample], tok: &Qwen
     std::fs::create_dir_all(dir)?;
     let (train_ids, train_mask) = encode_sample_split(train, tok);
     let (val_ids, val_mask) = encode_sample_split(val, tok);
+    binio::write_u32_bin(&dir.join("train.u32.bin"), &train_ids)?;
+    binio::write_mask_bin(&dir.join("train.mask.bin"), &train_mask)?;
+    binio::write_u32_bin(&dir.join("val.u32.bin"), &val_ids)?;
+    binio::write_mask_bin(&dir.join("val.mask.bin"), &val_mask)?;
+    std::fs::write(dir.join("meta.json"), binio::Meta::vocab_only(vocab))?;
+    Ok(())
+}
+
+/// Write a train/val split to `dir` as brain's masked token-dataset layout.
+/// `vocab` is the MODEL's vocab (from its `config.json`), which must match the
+/// checkpoint's `lm_head` — not the tokenizer's derived size.
+pub fn prepare_chat(
+    train: &[ChatExample],
+    val: &[ChatExample],
+    tok: &QwenBpe,
+    vocab: usize,
+    dir: &Path,
+) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let (train_ids, train_mask) = encode_split(train, tok);
+    let (val_ids, val_mask) = encode_split(val, tok);
     binio::write_u32_bin(&dir.join("train.u32.bin"), &train_ids)?;
     binio::write_mask_bin(&dir.join("train.mask.bin"), &train_mask)?;
     binio::write_u32_bin(&dir.join("val.u32.bin"), &val_ids)?;
@@ -327,6 +431,70 @@ mod tests {
         assert!(ChatSample::from_jsonl(&path).is_err());
     }
 
+    /// This is the exact bug class the strict wire schema exists to catch:
+    /// `arguments` as a raw nested object (the shape before bench's export
+    /// fix) instead of a JSON-encoded string. A permissive `Value`-indexing
+    /// parser accepts this silently and only breaks later, when
+    /// `rendered_content` double-encodes it into garbled `<tool_call>` text
+    /// -- a problem that "only appears when a data field is set to some
+    /// particular value" instead of failing at parse time.
+    #[test]
+    fn from_jsonl_rejects_tool_call_arguments_as_a_raw_object() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-jsonl-badargs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad_args.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"messages":[{"role":"assistant","content":"","tool_calls":[{"type":"function","function":{"name":"get_weather","arguments":{"location":"Paris"}}}],"train":true}]}"#,
+        )
+        .unwrap();
+        let err = ChatSample::from_jsonl(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("expected a string"),
+            "error should flag the type mismatch (object where a JSON-encoded string was required), got: {err}"
+        );
+    }
+
+    #[test]
+    fn from_jsonl_rejects_a_non_bool_train_value() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-jsonl-badtrain-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad_train.jsonl");
+        std::fs::write(&path, r#"{"messages":[{"role":"user","content":"hi","train":"yes"}]}"#).unwrap();
+        assert!(ChatSample::from_jsonl(&path).is_err());
+    }
+
+    #[test]
+    fn from_jsonl_rejects_an_unrecognized_role() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-jsonl-badrole-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad_role.jsonl");
+        std::fs::write(&path, r#"{"messages":[{"role":"developer","content":"hi","train":false}]}"#).unwrap();
+        assert!(ChatSample::from_jsonl(&path).is_err());
+    }
+
+    #[test]
+    fn from_jsonl_rejects_a_missing_content_field() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-jsonl-nocontent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("no_content.jsonl");
+        std::fs::write(&path, r#"{"messages":[{"role":"user","train":false}]}"#).unwrap();
+        assert!(ChatSample::from_jsonl(&path).is_err());
+    }
+
+    #[test]
+    fn from_jsonl_rejects_an_unexpected_top_level_field() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-jsonl-extrafield-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("extra_field.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"messages":[{"role":"user","content":"hi","train":false}],"unexpected_new_field":123}"#,
+        )
+        .unwrap();
+        assert!(ChatSample::from_jsonl(&path).is_err());
+    }
+
     #[test]
     fn rendered_content_inlines_tool_calls_matching_the_toolcall_convention() {
         let m = ChatMessage::assistant_tool_calls(
@@ -337,25 +505,4 @@ mod tests {
         let rendered = m.rendered_content();
         assert_eq!(rendered, "checking\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\":\"Paris\"}}\n</tool_call>");
     }
-}
-
-/// Write a train/val split to `dir` as brain's masked token-dataset layout.
-/// `vocab` is the MODEL's vocab (from its `config.json`), which must match the
-/// checkpoint's `lm_head` — not the tokenizer's derived size.
-pub fn prepare_chat(
-    train: &[ChatExample],
-    val: &[ChatExample],
-    tok: &QwenBpe,
-    vocab: usize,
-    dir: &Path,
-) -> io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let (train_ids, train_mask) = encode_split(train, tok);
-    let (val_ids, val_mask) = encode_split(val, tok);
-    binio::write_u32_bin(&dir.join("train.u32.bin"), &train_ids)?;
-    binio::write_mask_bin(&dir.join("train.mask.bin"), &train_mask)?;
-    binio::write_u32_bin(&dir.join("val.u32.bin"), &val_ids)?;
-    binio::write_mask_bin(&dir.join("val.mask.bin"), &val_mask)?;
-    std::fs::write(dir.join("meta.json"), binio::Meta::vocab_only(vocab))?;
-    Ok(())
 }

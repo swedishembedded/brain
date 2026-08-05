@@ -10,6 +10,7 @@ name = "data"
 path = "src/lib.rs"
 
 [dependencies]
+serde.workspace = true
 serde_json.workspace = true
 # Read the tokenizer embedded in a GGUF's `tokenizer.ggml.*` KV so a `.gguf`
 # chat model can build its byte-level BPE (QwenBpe::from_gguf) with no sibling
