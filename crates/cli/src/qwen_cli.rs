@@ -11,6 +11,8 @@
 //!   brain qwen finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR
 //!                     [--alpha A --steps N --lr X --batch B --block T --seed S
 //!                      --models-dir DIR --dataset-id ID]
+//!   brain qwen eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG]
+//!                     --block T --models-dir DIR]
 
 use std::path::{Path, PathBuf};
 
@@ -30,8 +32,9 @@ pub fn run_qwen(args: &[String]) {
         Some("train") => train(&args[1..], None),
         Some("finetune") => finetune(&args[1..]),
         Some("toolcall") => toolcall(&args[1..]),
+        Some("eval") => eval_chat(&args[1..]),
         other => {
-            eprintln!("usage: brain qwen <import|infer|export|precompile|train|finetune|toolcall> ...  (got {other:?})")
+            eprintln!("usage: brain qwen <import|infer|export|precompile|train|finetune|toolcall|eval> ...  (got {other:?})")
         }
     }
 }
@@ -706,6 +709,131 @@ fn toolcall_eval(args: &[String]) {
     };
     let (exact, tacc) = qwen::toolcall_eval::score(&weights, &tok, n, tools, seq, seed);
     println!("tool-call eval: exact-match {:.1}%  token-acc {:.1}%  ({n} held-out cases)", exact * 100.0, tacc * 100.0);
+}
+
+/// `brain qwen eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG]
+///     --block T --models-dir DIR]`
+///
+/// Gate B of the Definition of Done's "a way to validate that model has
+/// learned ideas from the dataset": teacher-forced held-out loss + token
+/// accuracy (`qwen::eval::score_chat`) against a REAL checkpoint and a REAL
+/// bench-exported `validation.jsonl`/`test.jsonl`. Always reports the base
+/// score; with `--adapter` also folds that named adapter in (the same fold
+/// a resident uses to serve it -- see `qwen::lora::fold_adapter_into`) and
+/// reports it side by side, so the honest question -- does this adapter
+/// actually help on data it never trained on -- has a number attached, not
+/// just a training-loss curve.
+fn eval_chat(args: &[String]) {
+    let mut base = String::new();
+    let mut jsonl = String::new();
+    let mut adapter_spec: Option<String> = None;
+    let mut block = 1024u32;
+    let mut models_dir: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--weights" => base = val(args, &mut i, "--weights"),
+            "--jsonl" => jsonl = val(args, &mut i, "--jsonl"),
+            "--adapter" => adapter_spec = Some(val(args, &mut i, "--adapter")),
+            "--block" => block = val(args, &mut i, "--block").parse().unwrap_or(block),
+            "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    if base.is_empty() || jsonl.is_empty() {
+        eprintln!("usage: brain qwen eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG] --block T --models-dir DIR]");
+        return;
+    }
+
+    let store_root = crate::model_dir::resolve(models_dir.as_deref());
+    let (base_weights_path, base_dir, base_id) = match resolve_base(&base, store_root.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
+        }
+    };
+
+    let samples = match data::chat::ChatSample::from_jsonl(Path::new(&jsonl)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{jsonl}: {e}");
+            return;
+        }
+    };
+    if samples.is_empty() {
+        eprintln!("{jsonl}: no samples");
+        return;
+    }
+
+    let tokenizer_path = base_dir.join("tokenizer.json");
+    let tok = match data::qwen_tokenizer::QwenBpe::from_file(tokenizer_path.to_str().unwrap_or_default()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{}: {e}", tokenizer_path.display());
+            return;
+        }
+    };
+    let chat_template = match data::chat_template::ChatTemplate::from_model_dir(&base_dir) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
+        }
+    };
+
+    let base_weights_str = base_weights_path.to_str().unwrap_or_default();
+    let base_score = qwen::eval::score_chat(base_weights_str, None, &tok, &chat_template, &samples, block);
+    println!(
+        "base {base_id}: loss {:.4}  token-acc {:.1}%  ({}/{} samples scored, {} positions)",
+        base_score.loss,
+        base_score.token_accuracy * 100.0,
+        base_score.samples,
+        base_score.samples + base_score.skipped,
+        base_score.positions
+    );
+
+    let Some(spec) = adapter_spec else { return };
+    let (owner, name, tag) = match parse_adapter_spec(&spec) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("--adapter {spec:?}: {e}");
+            return;
+        }
+    };
+    let full_ref_str = format!("{base_id}:{owner}:{name}:{tag}");
+    let adapter_ref = match brain_modelref::ModelRef::parse(&full_ref_str) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{full_ref_str}: {e}");
+            return;
+        }
+    };
+    let Some(store_root) = store_root else {
+        eprintln!("no models directory resolved (set --models-dir, BRAIN_MODELS_DIR, or HOME)");
+        return;
+    };
+    let store = brain_modelstore::Store::new(&store_root);
+    let Some(local) = store.local(&adapter_ref) else {
+        eprintln!("{full_ref_str}: not found in the model store at {}", store_root.display());
+        return;
+    };
+    let Some(adapter_path) = local.adapter else {
+        eprintln!("{full_ref_str}: resolved but carries no adapter file (bug: parsed with an adapter suffix)");
+        return;
+    };
+    let adapter_score = qwen::eval::score_chat(base_weights_str, Some(adapter_path.to_str().unwrap_or_default()), &tok, &chat_template, &samples, block);
+    println!(
+        "{full_ref_str}: loss {:.4}  token-acc {:.1}%  ({}/{} samples scored, {} positions)",
+        adapter_score.loss,
+        adapter_score.token_accuracy * 100.0,
+        adapter_score.samples,
+        adapter_score.samples + adapter_score.skipped,
+        adapter_score.positions
+    );
+    let verdict = if adapter_score.loss < base_score.loss { "beats" } else { "does NOT beat" };
+    println!("{full_ref_str} {verdict} base on held-out loss ({:.4} vs {:.4})", adapter_score.loss, base_score.loss);
 }
 
 #[cfg(test)]

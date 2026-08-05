@@ -7,6 +7,7 @@
 
 pub mod caps;
 pub mod config;
+pub mod eval;
 pub mod import;
 pub mod init;
 pub mod model;
