@@ -439,8 +439,9 @@ front-end to depend on.
 | Prompt-prefix cache (paged block reuse across requests) | `model::paged::PrefixCache`; adoption in `qwen::serve::Engine::prefill` |
 | Int8 serving weights + on-device decode window | `qwen::serve` (`--weights-int8` / target suffix `:i8w`; `DECODE_WINDOW`) |
 | Engine internals | `docs/engine/{overview,training,vulkan,web}.md` |
+| **Profile a forward or a BACKWARD, per kernel kind** | `crates/unet/src/bin/unet_bench.rs` (forward, + a `gemm` mode that A/Bs kernels for correctness AND speed) and `crates/vqgan/src/bin/vqgan_bench.rs` (a full training step, both halves, + `gn`/`convbwd` A/B modes). Copy their shape; see `docs/kernel-checklist.md` §F.1 |
 | **Add/adjust/dispatch a WGSL kernel** | **`docs/kernel-checklist.md`** — read BEFORE writing or dispatching one; then `crates/kernels/wgsl/*.wgsl` + **`make kernels-regen`** |
-| **Something is slow (model, kernel, training step)** | **`docs/kernel-checklist.md` §E** (measure-first rules + the five killed hypotheses), `docs/porting-playbook.md` §10 (the performance ladder), case studies in `docs/performance/overview.md` |
+| **Something is slow (model, kernel, training step)** | **`docs/kernel-checklist.md` §F** — the ORDERED loop that found the big wins (profile per kernel kind → check for an already-faster sibling → measure the branch your hardware skips → sweep for the crossover → fix it in the SELECTOR → mutation-verify → re-profile); then **§E** (measure-first rules + the killed hypotheses), `docs/porting-playbook.md` §10, case studies in `docs/performance/overview.md` |
 | MoE toy task / honest eval methodology | `README.md` |
 | Federated MoE pipeline (done vs remaining) | `docs/federated.md`; `crates/federated/src/{shard,sha256}.rs` |
 | GPT model / training / sampling | `crates/gpt/src/{model,train,sample,init}.rs` |

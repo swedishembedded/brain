@@ -138,6 +138,10 @@ existing caller. Assume nothing about units.
 
 ## E. Optimizing: measure first, because the guess is wrong
 
+> **§F is the procedure**; this section is the evidence for why it starts with
+> a profile. If you are here to make something faster, read §F first and come
+> back for the killed hypotheses.
+
 In three rounds of optimization on this engine, **every confident hypothesis
 was wrong and the profile was right.** Killed, with the number that killed it:
 
@@ -200,6 +204,118 @@ So:
    data-parallel run. The comment was stale; the code was right. Write the
    comment so the next reader can tell the difference: **say what breaks if X
    goes away**, not just what X cost.
+
+---
+
+## F. The loop: how the big wins were actually found
+
+§E says measure first. This section is the *procedure* — the order the steps go
+in, and the decision at each one — reconstructed from the run that produced
+1.93x on the SDXL forward, 3x on the CPU GroupNorm and 5.2x on the conv input
+gradient in a single day. Follow it in order; most of the steps end the work
+early, and the ones that end it early are the cheap ones.
+
+### F.1 Profile per KERNEL KIND, and publish the table
+
+Not per model, not per layer. Group contiguous runs of one kernel in submit
+order so the sum of the parts is comparable to the whole, print both, and
+`poll_wait()`-bracket every region (§E.0). `crates/unet/src/bin/unet_bench.rs`
+and `crates/vqgan/src/bin/vqgan_bench.rs` are the two shapes to copy — the
+second covers a **backward**, which nothing did until it existed.
+
+Publish the table in the commit. Every number below started as a row in one.
+
+### F.2 Ask what the top row is running at, against the roof
+
+A percentage of the profile tells you where the time is. A percentage of *peak*
+tells you whether it can be fixed. `[77, 2048, 2560]` at **37.7 GFLOP/s against
+11 760** is not a kernel that needs tuning — it is the wrong kernel.
+
+### F.3 Before writing anything: is there already a faster sibling?
+
+This is the highest-value question in the list and it costs one `grep`. It was
+the answer **four times** in one workstream:
+
+| what looked like new work | what it actually was |
+|---|---|
+| lfm's attention is slow | `flash_attn_bidir_split` existed, unregistered — 4x |
+| the SDXL kv projection is slow | the tiled GEMM existed; a *selection rule* excluded it — 22x on that shape |
+| unet needs a faster GEMM | it already carried `matmul_reg3` and dispatched `matmul_reg2` |
+| the CPU GroupNorm fallback is slow | `crates/wm-diamond` had written a barrier-free two-stage reduction privately — 3x |
+
+Only when this comes back empty do you write WGSL. For the conv input gradient
+it genuinely did — no `conv2d_dx_reg`, no `col2im` anywhere — which is what
+justified a new kernel.
+
+### F.4 Profile the branch your hardware does NOT take
+
+A capability-gated fallback is invisible on the machine that never takes it.
+`vae::blocks::gn` picked a cooperative reduction on GPU and a **serial** one
+otherwise; `backend-cpu` reports `workgroup_reductions: false`, so every
+conv-autoencoder in the tree ran the unmeasured branch on the CPU JIT, ~3x
+slower than the barrier-free path that already existed. Enumerate the branches
+and measure each.
+
+### F.5 A/B for CORRECTNESS and speed in the same harness
+
+A faster kernel that disagrees is not a faster kernel. Print `max|delta|`
+beside the timings, always.
+
+And compare against a **host oracle**, not just kernel-to-kernel: the first run
+of the GroupNorm A/B reported all three kernels disagreeing by 1.7, which was
+the *harness* dispatching a `@workgroup_size(256)` kernel at 64 threads. It was
+caught only because a parity gate elsewhere was green, so the harness had to be
+the liar. Kernel-vs-kernel agreement cannot tell you which one is wrong.
+
+### F.6 Sweep for the crossover; never guess a threshold
+
+Where two kernels trade places, the threshold is a measurement. Sweep the
+parameter that separates them and read it off:
+
+    Cout      3     8     16     32     64    128
+    direct 4.25  9.82  18.03  35.01  69.63 138.88     ms
+    lowered 24.25 24.09 24.28  23.99  25.27  26.79
+    ratio  0.18x 0.41x  0.74x  1.46x  2.76x  5.18x
+
+Two corollaries, both paid for:
+
+* **Each kernel pair gets its OWN threshold.** Reusing the forward's
+  `GEMM_CONV_MIN_COUT = 128` for the backward would have left 4x on the table
+  for every 32..128-channel conv. The measured backward crossover is 32.
+* **A selection rule is as much a bottleneck as a kernel.** `pick_gemm`'s
+  `m < 128` guard sent 60 dispatches per forward to the naive kernel; the real
+  crossover was `m = 8`. Profile the selection, not just the kernels.
+
+### F.7 Put the fix in the SELECTOR, so the next model inherits it
+
+`block::pick_gemm`, `gemm_variant`, `vae::blocks`' capability branch — a fix
+there reaches every model that already calls it, including ones written later.
+A fix in one model's `model.rs` reaches exactly that model.
+
+### F.8 Gate it, then mutation-verify the gate
+
+Write the correctness gate before wiring the fast path in
+(`crates/gradcheck/tests/col2im_kernels.rs` gates the lowered conv gradient
+against the direct kernel across 3x3/1x1/5x5, strided, padded, unpadded and
+asymmetric dims, on **both** backends). Then break the thing on purpose and
+confirm the gate fails. A gate nobody has seen fail is a hypothesis.
+
+### F.9 Re-profile — the bottleneck moves, and that is the point
+
+Every fix promotes the next row. `conv2d_dx` at 41% became 0.1%, and
+`conv2d_dw` — which was 35% and invisible behind it — is now 53% and the next
+target. Stop when the top row is near the roof (§F.2), not when you are tired.
+
+### The shape of the result
+
+    conv2d_dx   1137.93 ms (88 calls)  ->  2.12 ms (1 call)
+    backward       2508.69 -> 1563.38 ms
+    step           2916.41 -> 1971.10 ms
+    backward/fwd      6.15x -> 3.83x
+
+Nothing in that came from a clever kernel. It came from measuring the right
+thing, finding what already existed, and putting the choice where every model
+sees it.
 
 ---
 
