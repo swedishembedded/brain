@@ -7,7 +7,12 @@ examples/dbus/busctl_smoke.sh	run	BRAIN_DBUS_EXTERNAL=1 reuses the harness's own
 examples/dbus/detect_pipeline.py	skip	needs real z-image + yolo weights; the mock model has no detect action
 examples/embedding/embed_document.py	run	--model mock exercises the fd-in/fd-out embed contract for real
 examples/forecast/forecast_client.py	run	--model mock exercises the forecast wire contract for real
-examples/imagegen/generate.py	run	--model mock streams real denoise ticks and returns a real image blob
-examples/imagegen/edit_image.py	skip	needs real FLUX.2 weights; the mock model has no edit action
-examples/imagegen/lora_finetune.py	skip	needs real FLUX.2 weights; the mock model has no lora_train action
 examples/imagegen/cancel_generation.py	run	--model mock with BRAIN_MOCK_DELAY_MS so the cancel race is observable
+examples/imagegen/edit_image.py	skip	needs real FLUX.2 weights; the mock model has no edit action
+examples/imagegen/generate.py	run	--model mock streams real denoise ticks and returns a real image blob
+examples/imagegen/lora_finetune.py	skip	needs real FLUX.2 weights; the mock model has no lora_train action
+examples/imaging/edit_pipeline.py	skip	needs sam2 + restore (+ esrgan for the tail) weights; the mock model serves no imgpipe stage
+examples/restore/restore_face.py	skip	needs BRAIN_RESTORE_WEIGHTS (codeformer.pth); the mock model serves no restore_face
+examples/restore/vq_roundtrip.py	skip	needs BRAIN_VQGAN_WEIGHTS (a VQGAN checkpoint); the mock model serves no encode/decode
+examples/vision/face_id.py	skip	needs BRAIN_FACENET_DIR (antelopev2 glintr100 + scrfd); the mock model serves no detect/embed
+examples/vision/segment_image.py	skip	needs BRAIN_SAM2_WEIGHTS (sam2.1_hiera_*.pt); the mock model serves no segment
