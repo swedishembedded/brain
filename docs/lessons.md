@@ -283,9 +283,18 @@ Two things follow, neither specific to upscaling:
   on most machines.
 * **Report the sweep, not the chosen value.** The table in `TILE_HALO`'s doc
   comment shows both configs at every halo tried, so the next person can see
-  that the number is a trade-off with a known cost — and that hard-cropped
-  tiling on a deep net is approximate at any affordable halo, which is why the
-  real fix is a blended tiler and why `tile` defaults to 0.
+  that the number is a trade-off with a known cost.
+
+And a corollary earned the hard way, in the same file: **the obvious remedy was
+wrong.** "Hard-cropped tiling leaves a seam, so blend the overlap instead" is
+the standard move, and it was written into the doc comment as the planned fix
+before anyone measured it. Blending is *worse* — 2.1e-2 against cropping's
+3.3e-6 on the toy, 2.0e-1 against 1.6e-1 on the released net — because it mixes
+each tile's halo pixels, the least accurate ones it computed, back into the
+output, where cropping throws them away and keeps the well-conditioned interior.
+Blending trades the error's magnitude for its continuity. A planned fix recorded
+in a comment is a claim like any other; this one is now recorded as refuted, with
+the numbers, so it is not attempted a third time.
 
 The comparison also had to be set up correctly to mean anything: tiled-vs-whole
 image is NOT a seam measurement, because the whole-image path lets the

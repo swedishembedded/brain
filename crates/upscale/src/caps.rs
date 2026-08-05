@@ -152,9 +152,18 @@ impl<T: Upscaler + 'static> Provider for UpscaleProvider<T> {
 /// The first draft of this constant was 16, justified on the 2-block toy where
 /// it is 4x below an 8-bit step. On the model anyone actually runs it is off by
 /// nearly three orders of magnitude — `docs/lessons.md` #18. 32 is the current
-/// cost/quality point; the real fix is a BLENDED tiler (feather the overlap
-/// instead of hard-cropping it), which is why `tile` defaults to 0 and callers
-/// who can afford the memory should leave it there.
+/// cost/quality point, and `tile` defaults to 0 so callers who can afford the
+/// memory never meet the trade-off at all.
+///
+/// **A blended tiler was tried and is WORSE — do not re-try it without new
+/// evidence.** Feathering the overlap instead of hard-cropping it measured
+/// 2.1e-2 on the tiny config where cropping measures 3.3e-6, and 2.0e-1 vs
+/// 1.6e-1 on x4plus. The reason is structural: blending mixes each tile's HALO
+/// pixels — the least accurate ones it computed, precisely because they had the
+/// least context — back into the output, while cropping discards them and keeps
+/// only the well-conditioned interior. Blending buys continuity of the error at
+/// the cost of its magnitude, and here the magnitude is what was wrong. The
+/// real fix is a bigger halo, i.e. memory.
 pub const TILE_HALO: u32 = 32;
 
 /// A built RRDBNet, rebuilt when the requested input size changes.
