@@ -23,8 +23,23 @@ make release
 # Training
 ./target/release/brain qwen train --data data/shakespeare_char --out qwen-train.safetensors --steps 1000
 
-# LoRA finetune
-./target/release/brain qwen finetune --hf /path/to/Qwen3-0.6B --data data/shakespeare_char --out qwen-lora.safetensors --steps 500
+# LoRA finetune -- trains a NAMED adapter, saved beside its base in the
+# model store (<models-dir>/Qwen/Qwen3-0.6B/adapters/<owner>/<name>/<tag>/),
+# addressable as Qwen/Qwen3-0.6B:<owner>:<name>:<tag> (tag defaults "latest",
+# and is OVERWRITTEN on every rerun -- "fully retrain and overwrite").
+./target/release/brain qwen finetune --lora 8 --weights Qwen/Qwen3-0.6B \
+    --adapter my-org/my-finetune --dataset /path/to/bench/generic-messages-v2/dir \
+    --steps 500
+# or: make train/qwen/lora DATASET=<dir> ADAPTER=my-org/my-finetune
+
+# Prove it learned: held-out loss/accuracy, base vs the adapter, on the same
+# bench-exported validation split (see docs/guides/training.md).
+./target/release/brain qwen eval --weights Qwen/Qwen3-0.6B \
+    --adapter my-org/my-finetune --jsonl /path/to/validation.jsonl
+
+# Full-parameter finetune from a plain checkpoint file (no --lora, no store
+# ref needed) -- the older, still-supported path.
+./target/release/brain qwen finetune data/shakespeare_char --weights qwen.safetensors --out qwen-ft.safetensors --steps 500
 
 # Concurrent serving (paged KV, continuous batching)
 ./target/release/brain qwen serve --weights qwen.safetensors --port 8080
@@ -83,7 +98,8 @@ brain qwen serve        # concurrent paged-KV serving
 brain qwen export       # export to ONNX
 brain qwen precompile   # precompile kernels for a target device
 brain qwen train        # training from scratch
-brain qwen finetune     # LoRA finetuning
+brain qwen finetune     # full-parameter OR named-LoRA-adapter finetuning
+brain qwen eval         # held-out loss/accuracy, base vs a named adapter
 brain qwen toolcall     # tool-call evaluation
 ```
 
@@ -97,8 +113,9 @@ make eval/gpt/qwen                        # evaluate perplexity
 
 ## Limitations
 
-- LoRA targets are the four attention projections (`wq`, `wk`, `wv`, `wo`) by
-  default; MLP adapters are not yet wired.
+- `brain qwen finetune --lora`'s target set is fixed (the four attention
+  projections plus the three MLP projections, `wq`/`wk`/`wv`/`wo`/`gate`/`up`/
+  `down`) -- not yet a `--targets` flag.
 - The serving engine does not yet support prefix caching across requests
   (the `PrefixCache` infrastructure exists in `model::paged` but is not yet
   adopted in `serve.rs`).

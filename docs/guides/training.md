@@ -60,6 +60,66 @@ exported SFT data (`.todo/bench-training.md`), in the house `status.md` style.
   `Qwen/Qwen3-0.6B:owner:name:tag`, with a store layout
   (`adapters/<owner>/<name>/<tag>/`) so a base model and a fine-tune sitting
   side by side are two distinct selectable models.
+- **The retrain-and-overwrite command**: `brain qwen finetune --lora RANK
+  --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR` (`crates/cli/src/
+  qwen_cli.rs`) — resolves `BASE` as either a model-store ref or a direct
+  file path, loads a bench-exported `train.jsonl`/`validation.jsonl` through
+  `ChatSample` + the base's own real chat template, runs
+  `qwen::finetune::finetune(.., Mode::Lora, ..)`, and saves ONLY the adapter
+  into the store at the resolved `OWNER/NAME/TAG` path — a rerun with the
+  same `--adapter` overwrites the tag in place, the literal "fully retrain
+  and overwrite" ask. `make train/qwen/lora DATASET=.. ADAPTER=..` wraps it.
+  Verified end to end against the real Qwen3-0.6B checkpoint
+  (`crates/cli/tests/qwen_lora_finetune.rs`, `QWEN3_DIR`-gated).
+- **Two learning gates, proving the adapter actually learned from its data,
+  from a RELOADED checkpoint** — the DoD's other ask:
+  - **Gate A** (`crates/qwen/tests/lora_learning_gate.rs`): always runs, CPU,
+    no real checkpoint. Trains two adapters from the same base differing
+    only in which token their data supervises for one fixed prompt; asserts
+    each adapter's reloaded greedy completion matches its OWN target and the
+    two diverge. Verified as a real gate (not a decoration) by temporarily
+    reintroducing the reload-drops-`lora` defect this whole workstream
+    started from and confirming it fails exactly as expected. An earlier,
+    more ambitious design (generalize to entirely unseen input symbols, a
+    held-out arithmetic/copy rule) is documented in that file's own header as
+    a dead end: it plateaued around ~40% training accuracy regardless of
+    step count/width/LR — testing whether a tiny transformer can skip most
+    of a "grokking" transition in a few hundred steps, not testing brain's
+    machinery.
+  - **Gate B** (`brain qwen eval`, `qwen::eval::score_chat`,
+    `crates/cli/tests/qwen_eval.rs`): held-out teacher-forced loss + token
+    accuracy against a REAL checkpoint and a REAL bench-shaped
+    `validation.jsonl`, base alone or base-vs-adapter side by side with an
+    explicit beats/does-not-beat-base verdict — `QWEN3_DIR`-gated,
+    `#[ignore]`d, on demand rather than every `cargo test`.
+- **Serving a named adapter**: `QwenResident::activate`
+  (`crates/cli/src/resident_llm.rs`) folds a named adapter into its base at
+  load (`Qwen::from_tensors_decode`, `qwen::lora::fold_adapter_into`) — zero
+  per-token cost once folded. `model_dir::discover` threads
+  `Store::scan`'s base/adapter split through to the resident catalog, so
+  `brain caps` lists a trained adapter under its own fully-qualified id and
+  `brain do <that ref>` selects it, closing the DoD's "brain should be able
+  to find it".
+
+## Robustness fixes found while building the above
+
+- **A dataset split shorter than `--block` used to panic with a nonsense
+  message, not an error naming the problem.** `TokenDataset::sample_start`
+  computes `data.len() - block_size - 1`; a split no longer than
+  `block_size` underflows that `usize` subtraction, surfacing many calls
+  later as `index out of bounds: ... the index is 14526087532006025156`.
+  `model::load_dataset` now validates both splits against `block_size` right
+  where the data enters the training loop and returns a clear error instead
+  (`crates/model/src/train.rs`). Found by the real end-to-end `--lora` CLI
+  test hitting it on a small bench-shaped dataset — exactly the size real
+  bench exports currently are.
+- **`qwen::finetune::finetune`'s returned "final loss" is a single last-step
+  batch sample, not a corpus average.** Useful for eyeballing a training run,
+  but treating it as a pass/fail signal in Gate A initially produced
+  confusing false negatives (a genuinely-learned adapter with a
+  noisy-looking final number). Gate A now checks the actual learned
+  behavior (does the reloaded adapter's completion match its target) and
+  uses the loss only as a weak decrease-at-all sanity check.
 
 ## Known gaps
 

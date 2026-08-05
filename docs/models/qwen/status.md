@@ -16,9 +16,10 @@ in brain.
   `k_proj`/`v_proj` when `n_kv_heads ≠ n_heads`.
 - **P3 — training**: `brain qwen train` — end-to-end training loop with the
   shared `optim::Optim` (AdamW + grad-norm clip). Convergence tested.
-- **P4 — LoRA finetuning**: `brain qwen finetune` — frozen base + trainable
-  `A`/`B` adapters on attention projections. `gradcheck::check_qwen_lora` gates
-  the backward.
+- **P4 — LoRA finetuning**: frozen base + trainable `A`/`B` adapters.
+  `gradcheck::check_qwen_lora` gates the backward. See P11 for the full
+  named-adapter workstream (`--lora`, model-store integration, eval, serving)
+  this landed into.
 - **P5 — INT8 weight quantization**: `crates/qwen/src/q8.rs` — per-channel
   symmetric weights packed 4-per-u32, DP4A GEMMs. ~4× memory reduction with
   bounded accuracy loss.
@@ -43,6 +44,21 @@ in brain.
   encoder path used by FLUX.2 text conditioning (`encoder_parity.rs`).
 - **P10 — bench train P40**: measured training throughput on Tesla P40
   (`bench_train_p40.rs`).
+- **P11 — named LoRA adapters, end to end**: `brain qwen finetune --lora RANK
+  --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR` trains a named
+  adapter from a bench-exported `generic-messages-v2` dataset (real Qwen3
+  chat template, `data::chat_template`, never a hand-rolled one) and saves
+  ONLY the adapter tensors into the model store
+  (`<vendor>/<repo>/adapters/<owner>/<name>/<tag>/`, `crates/modelref`'s
+  `vendor/repo:owner:name:tag` grammar) — retraining with the same
+  `--adapter` overwrites the tag in place. `brain qwen eval --weights BASE
+  [--adapter ...] --jsonl FILE` reports held-out teacher-forced loss/token
+  accuracy, base alone or base-vs-adapter side by side
+  (`qwen::eval::score_chat`). `QwenResident` folds a named adapter into the
+  base at `activate` (`Qwen::from_tensors_decode`) so `brain caps`/`brain do`
+  serve it as its own catalog entry, zero extra per-token cost once folded.
+  See `docs/guides/training.md` for the full ledger (dataset contract, both
+  learning gates, what's still planned).
 
 ## Parity ladder
 
@@ -54,6 +70,8 @@ in brain.
 | P4 | LoRA backward (gradcheck) | passes `check_qwen_lora` |
 | P6 | DP parity (2 GPUs) | bit-identical |
 | P7 | paged-KV decode vs naive | bit-identical per-token |
+| P11 | folded-adapter decode-only generation vs live unfolded trained forward | exact token match (`lora_serve_fold.rs`) |
+| P11 | adapter beats base on held-out inputs, from a RELOADED checkpoint | `lora_learning_gate.rs` (synthetic, CPU) + `qwen_eval.rs` (real Qwen3-0.6B, `#[ignore]`) |
 
 ## Remaining
 
