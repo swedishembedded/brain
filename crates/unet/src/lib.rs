@@ -37,6 +37,7 @@ pub mod hostemb;
 pub mod import;
 pub mod init;
 pub mod model;
+pub mod pipeline;
 
 pub use config::{BlockKind, UNetConfig};
 pub use model::Unet;

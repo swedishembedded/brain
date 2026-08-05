@@ -150,7 +150,36 @@ than silencing. The fix needs judgment: sometimes the doc belongs to the item
 below and only the blank line is wrong, sometimes the doc is an orphan and must
 go. An automated pass cannot tell the two apart.
 
-## 13. Disk shape on the dev box
+## 13. Kernel indices are per-crate, so one `Gpu` is not interchangeable
+
+Every model resolves its kernel ids as positions in the pipeline list ITS crate
+registered. Building `clip::ClipText` on a `Gpu` constructed from
+`unet::KERNELS` therefore binds the wrong pipelines. `Gpu::new_like` exists for
+this — a different kernel set on the same device — and is what a pipeline
+assembling several crates must use.
+
+That one surfaced as `Number of bindings in bind group descriptor (4) does not
+match the bind group layout (5)`, which was luck: a wrong index is *silently
+wrong output*, and only crashed because those two kernels happened to differ in
+arity.
+
+## 14. Fit the card by lifetime, not by hope
+
+SDXL is ~3.5 B params across four models (~14 GB at fp32), and a non-ReBAR
+Pascal card carries roughly 2x resident overhead per storage buffer. Holding the
+UNet, both text encoders and the VAE at once does not fit 24 GB.
+
+The fix is scheduling, not precision: the text encoders are needed ONCE per
+generation and the VAE once at the end, while the UNet runs every step. Build
+the encoders, encode every prompt (conditional AND unconditional) in one pass,
+drop them; run the loop; then decode.
+
+The failure mode is worth the entry: the first version OOMed **at the VAE decode
+after all 24 steps had already run** — the most expensive possible moment to
+discover a memory problem. Prefer decoding on the CPU when the resident model
+still owns the card; it is one pass.
+
+## 15. Disk shape on the dev box
 
 `cargo build` is ~3.7 GB of `target/`; adding `--tests --examples` across the
 workspace is **~29 GB**. That 8× jump filled the overlay to 0 bytes and

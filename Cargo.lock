@@ -1412,11 +1412,15 @@ name = "brain-unet"
 version = "0.1.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-clip",
  "brain-data",
+ "brain-diffusion",
  "brain-gpu-core",
+ "brain-imaging",
  "brain-kernels",
  "brain-model",
  "brain-vae",
+ "serde_json",
 ]
 
 [[package]]

@@ -12,16 +12,20 @@ path = "src/lib.rs"
 # Every entry here is USED by src/ or tests/ — checked by grepping for the
 # crate's lib name, because cargo links each one into every test binary and
 # `cargo build` does not warn about an unused dependency. `brain-vision`,
-# `brain-imaging`, `brain-clip` and `brain-diffusion` were listed and never
-# referenced (the last two appear only inside doc-comment code spans, which
-# need no dependency); they belong back here when the sampler/serving glue
-# actually calls them.
+# `brain-imaging`, `brain-clip` and `brain-diffusion` are back: src/pipeline.rs
+# is the sampler glue this comment said would need them — it encodes with both
+# CLIP towers, steps a discrete scheduler and hands the decoded CHW to
+# imaging::pixels.
 [dependencies]
 brain-gpu-core.workspace = true   # Gpu, DeviceBuffer, Step
 brain-kernels.workspace = true    # the WGSL sources in model::KERNELS
 brain-model.workspace = true      # model::block (layernorm, gemm, attention) + hostmath::timestep_embedding
 brain-checkpoint.workspace = true # safetensors reader (import + parity fixtures)
 brain-vae.workspace = true        # vae::blocks::Builder — the whole conv half
-brain-data.workspace = true       # data::rng::Rng for init.rs
+brain-data.workspace = true       # data::rng::Rng for init.rs; clip_bpe for the pipeline
+brain-clip.workspace = true       # pipeline: the two SDXL text towers
+brain-diffusion.workspace = true  # pipeline: the discrete schedulers
+brain-imaging.workspace = true    # pipeline: CHW -> HWC on the decoded image
 # No [dev-dependencies]: cargo links every [dependencies] entry into tests/,
 # and the parity test needs nothing beyond gpu-core, checkpoint, vae and model.
+serde_json.workspace = true
