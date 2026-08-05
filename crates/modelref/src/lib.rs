@@ -55,7 +55,49 @@ use serde::{Deserialize, Serialize};
 
 pub mod alias;
 
-/// A fully-qualified model reference: `<vendor>/<repo>[-<QUANT>]`.
+/// A named LoRA adapter on top of a base [`ModelRef`]:
+/// `<owner>/<name>:<tag>` in Docker-tag terms, but written `:owner:name:tag`
+/// as a suffix on the base ref (see [`ModelRef`]'s grammar) since `/` is
+/// already spoken for by `vendor/repo`.
+///
+/// `owner`/`name`/`tag` become path components verbatim under
+/// `<base-repo-dir>/adapters/<owner>/<name>/<tag>/` (see `modelstore`) — the
+/// same directory-traversal concern `ModelRef::parse` already guards
+/// `vendor`/`repo` against applies here too.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct AdapterRef {
+    owner: String,
+    name: String,
+    tag: String,
+}
+
+impl AdapterRef {
+    /// Build an `AdapterRef` directly (no parsing, no validation) — for
+    /// callers that already have valid components from a trusted source,
+    /// e.g. `modelstore::Store::scan`'s `adapters/<owner>/<name>/<tag>/`
+    /// directory walk (the path components ARE the fields; re-round-tripping
+    /// them through `ModelRef::parse` would be redundant).
+    pub fn new(owner: impl Into<String>, name: impl Into<String>, tag: impl Into<String>) -> AdapterRef {
+        AdapterRef { owner: owner.into(), name: name.into(), tag: tag.into() }
+    }
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn tag(&self) -> &str {
+        &self.tag
+    }
+}
+
+impl fmt::Display for AdapterRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}:{}", self.owner, self.name, self.tag)
+    }
+}
+
+/// A fully-qualified model reference: `<vendor>/<repo>[-<QUANT>][:<owner>:<name>:<tag>]`.
 ///
 /// `Display` round-trips: `ModelRef::parse(&r.to_string()).unwrap() == r` for
 /// every `r` (see the `roundtrips` proptest-style unit test).
@@ -66,6 +108,10 @@ pub struct ModelRef {
     /// terms (see `modelstore`'s directory-keying doc).
     repo: String,
     quant: Option<Quant>,
+    /// A named LoRA adapter on top of this base ref, e.g.
+    /// `Qwen/Qwen3-0.6B:swedishembedded-com:generic-sft:latest`. `None` for
+    /// a plain base-model reference.
+    adapter: Option<AdapterRef>,
 }
 
 impl ModelRef {
@@ -94,6 +140,31 @@ impl ModelRef {
             return Err(RefError::BadChar);
         }
 
+        // Split off a `:owner:name:tag` adapter suffix BEFORE quant-stripping,
+        // so `...-Q8_0:owner:name:tag` still finds its quant on the left of the
+        // first `:` — quant tokens never contain `:`, so this ordering can't
+        // eat into the base repo name.
+        let (rest, adapter) = match rest.split_once(':') {
+            Some((repo_part, adapter_part)) => {
+                let segs: Vec<&str> = adapter_part.split(':').collect();
+                let [owner, name, tag] = segs[..] else {
+                    return Err(RefError::BadAdapter);
+                };
+                if owner.is_empty() || name.is_empty() || tag.is_empty() {
+                    return Err(RefError::BadAdapter);
+                }
+                if [owner, name, tag].iter().any(|s| **s == *"." || **s == *"..") {
+                    return Err(RefError::PathTraversal);
+                }
+                (repo_part, Some(AdapterRef { owner: owner.to_string(), name: name.to_string(), tag: tag.to_string() }))
+            }
+            None => (rest, None),
+        };
+        if rest.is_empty() {
+            // `vendor/-Q8_0:owner:name:tag` -- an adapter suffix with no repo left.
+            return Err(RefError::EmptySegment);
+        }
+
         // `repo` is non-empty on both arms below: `strip_quant_suffix` only
         // returns `Some` when a non-empty base remains (see its doc comment),
         // and `rest` was already checked non-empty above.
@@ -119,13 +190,20 @@ impl ModelRef {
             return Err(RefError::PathTraversal);
         }
 
-        Ok(ModelRef { vendor: vendor.to_string(), repo: repo.to_string(), quant })
+        Ok(ModelRef { vendor: vendor.to_string(), repo: repo.to_string(), quant, adapter })
     }
 
     /// Build a ref directly (no parsing) — for callers that already have the
     /// three fields (e.g. `modelstore` composing a ref from a store directory).
     pub fn new(vendor: impl Into<String>, repo: impl Into<String>, quant: Option<Quant>) -> ModelRef {
-        ModelRef { vendor: vendor.into(), repo: repo.into(), quant }
+        ModelRef { vendor: vendor.into(), repo: repo.into(), quant, adapter: None }
+    }
+
+    /// Build a ref directly with an adapter suffix already known (no
+    /// parsing) — for callers composing a ref from a store directory walk
+    /// (`modelstore::Store::scan`'s `adapters/<owner>/<name>/<tag>/` walk).
+    pub fn new_adapter(vendor: impl Into<String>, repo: impl Into<String>, quant: Option<Quant>, adapter: AdapterRef) -> ModelRef {
+        ModelRef { vendor: vendor.into(), repo: repo.into(), quant, adapter: Some(adapter) }
     }
 
     pub fn vendor(&self) -> &str {
@@ -137,19 +215,31 @@ impl ModelRef {
         &self.repo
     }
 
+    pub fn adapter(&self) -> Option<&AdapterRef> {
+        self.adapter.as_ref()
+    }
+
     pub fn quant(&self) -> Option<Quant> {
         self.quant
     }
 
-    /// This ref with its quant suffix removed — the base model. A no-op if
-    /// already unquantized. This is the store-directory key (see `modelstore`).
+    /// This ref with its quant suffix AND any adapter suffix removed — the
+    /// base model. A no-op if already a plain base ref. This is the
+    /// store-directory key (see `modelstore`).
     pub fn base(&self) -> ModelRef {
-        ModelRef { vendor: self.vendor.clone(), repo: self.repo.clone(), quant: None }
+        ModelRef { vendor: self.vendor.clone(), repo: self.repo.clone(), quant: None, adapter: None }
     }
 
-    /// This ref with `quant` applied (replacing any existing one).
+    /// This ref with `quant` applied (replacing any existing one); any
+    /// adapter suffix is preserved.
     pub fn with_quant(&self, quant: Quant) -> ModelRef {
-        ModelRef { vendor: self.vendor.clone(), repo: self.repo.clone(), quant: Some(quant) }
+        ModelRef { vendor: self.vendor.clone(), repo: self.repo.clone(), quant: Some(quant), adapter: self.adapter.clone() }
+    }
+
+    /// This ref with its adapter suffix removed (quant, if any, preserved) —
+    /// the base weights this adapter would be folded into.
+    pub fn without_adapter(&self) -> ModelRef {
+        ModelRef { vendor: self.vendor.clone(), repo: self.repo.clone(), quant: self.quant, adapter: None }
     }
 
     /// Is this vendor one of the reserved, never-fetched namespaces
@@ -171,6 +261,9 @@ impl fmt::Display for ModelRef {
         write!(f, "{}/{}", self.vendor, self.repo)?;
         if let Some(q) = self.quant {
             write!(f, "-{}", q.as_str())?;
+        }
+        if let Some(a) = &self.adapter {
+            write!(f, ":{a}")?;
         }
         Ok(())
     }
@@ -202,6 +295,9 @@ pub enum RefError {
     /// traversal component, not a real name (see `Store::repo_dir`, which
     /// joins these segments onto the store root with no other check).
     PathTraversal,
+    /// The `:owner:name:tag` adapter suffix is malformed: not exactly three
+    /// `:`-separated segments, or one of them is empty.
+    BadAdapter,
 }
 
 impl fmt::Display for RefError {
@@ -213,6 +309,7 @@ impl fmt::Display for RefError {
             RefError::BadChar => "model ref must not contain whitespace",
             RefError::TwoQuants => "model ref names two quantizations (only one is allowed)",
             RefError::PathTraversal => "model ref's vendor or repo segment must not be '.' or '..'",
+            RefError::BadAdapter => "model ref's adapter suffix must be exactly \":owner:name:tag\", each segment non-empty",
         };
         f.write_str(msg)
     }
@@ -482,12 +579,77 @@ mod tests {
             "LiquidAI/LFM2.5-350M",
             "brain/mock",
             "local/my-checkpoint",
+            "Qwen/Qwen3-0.6B:swedishembedded-com:generic-sft:latest",
+            "Qwen/Qwen3-0.6B-Q8_0:swedishembedded-com:generic-sft:latest",
         ];
         for s in cases {
             let r = ModelRef::parse(s).unwrap_or_else(|e| panic!("{s}: {e}"));
             assert_eq!(r.to_string(), s, "round-trip for {s}");
             assert_eq!(ModelRef::parse(&r.to_string()).unwrap(), r);
         }
+    }
+
+    #[test]
+    fn parses_an_adapter_suffix() {
+        let r = ModelRef::parse("Qwen/Qwen3-0.6B:swedishembedded-com:generic-sft:latest").unwrap();
+        assert_eq!(r.vendor(), "Qwen");
+        assert_eq!(r.repo(), "Qwen3-0.6B");
+        assert_eq!(r.quant(), None);
+        let a = r.adapter().expect("adapter suffix");
+        assert_eq!(a.owner(), "swedishembedded-com");
+        assert_eq!(a.name(), "generic-sft");
+        assert_eq!(a.tag(), "latest");
+    }
+
+    #[test]
+    fn adapter_suffix_coexists_with_a_quant_suffix() {
+        // The `:` split happens BEFORE quant-stripping, so the quant is still
+        // found on the left of the first ':' even with an adapter suffix present.
+        let r = ModelRef::parse("Qwen/Qwen3-0.6B-Q8_0:swedishembedded-com:generic-sft:latest").unwrap();
+        assert_eq!(r.repo(), "Qwen3-0.6B");
+        assert_eq!(r.quant(), Some(Quant::Q8_0));
+        assert_eq!(r.adapter().unwrap().tag(), "latest");
+    }
+
+    #[test]
+    fn a_bare_colon_with_the_wrong_number_of_segments_is_rejected() {
+        // Before the adapter grammar existed, ':' was just an ordinary repo
+        // character and this parsed as a literal repo name. It must now be
+        // treated as an (invalid) adapter suffix -- an ambiguous silent
+        // repo-name interpretation is exactly the hazard the grammar closes.
+        assert_eq!(ModelRef::parse("Qwen/Qwen3-0.6B:oops").unwrap_err(), RefError::BadAdapter);
+        assert_eq!(ModelRef::parse("Qwen/Qwen3-0.6B:a:b:c:d").unwrap_err(), RefError::BadAdapter);
+    }
+
+    #[test]
+    fn adapter_suffix_with_an_empty_segment_is_rejected() {
+        assert_eq!(ModelRef::parse("Qwen/Qwen3-0.6B::name:latest").unwrap_err(), RefError::BadAdapter);
+        assert_eq!(ModelRef::parse("Qwen/Qwen3-0.6B:owner::latest").unwrap_err(), RefError::BadAdapter);
+        assert_eq!(ModelRef::parse("Qwen/Qwen3-0.6B:owner:name:").unwrap_err(), RefError::BadAdapter);
+    }
+
+    #[test]
+    fn adapter_segments_reject_path_traversal() {
+        assert_eq!(ModelRef::parse("Qwen/Qwen3-0.6B:..:name:latest").unwrap_err(), RefError::PathTraversal);
+        assert_eq!(ModelRef::parse("Qwen/Qwen3-0.6B:owner:.:latest").unwrap_err(), RefError::PathTraversal);
+        assert_eq!(ModelRef::parse("Qwen/Qwen3-0.6B:owner:name:..").unwrap_err(), RefError::PathTraversal);
+    }
+
+    #[test]
+    fn without_adapter_strips_only_the_adapter_and_keeps_quant() {
+        let r = ModelRef::parse("Qwen/Qwen3-0.6B-Q8_0:owner:name:latest").unwrap();
+        let stripped = r.without_adapter();
+        assert_eq!(stripped.to_string(), "Qwen/Qwen3-0.6B-Q8_0");
+        assert!(stripped.adapter().is_none());
+    }
+
+    #[test]
+    fn base_strips_both_quant_and_adapter() {
+        let r = ModelRef::parse("Qwen/Qwen3-0.6B-Q8_0:owner:name:latest").unwrap();
+        let base = r.base();
+        assert_eq!(base.to_string(), "Qwen/Qwen3-0.6B");
+        assert!(base.adapter().is_none());
+        assert!(base.quant().is_none());
     }
 
     #[test]

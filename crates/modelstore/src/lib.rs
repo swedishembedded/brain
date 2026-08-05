@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 use checkpoint::st::ModelCard;
 use checkpoint::weightio::WeightReader;
-use brain_modelref::{ModelRef, Quant};
+use brain_modelref::{AdapterRef, ModelRef, Quant};
 
 pub use hub::{FakeHub, HfHub, Hub, HubError};
 pub use plan::{declared_architecture, execute, family_of_architecture, plan, Plan, PlanError, Step};
@@ -52,6 +52,11 @@ pub struct LocalModel {
     pub tokenizer: Option<PathBuf>,
     pub card: Option<ModelCard>,
     pub format: Format,
+    /// A named LoRA adapter's own weight file, when `reference.adapter()` is
+    /// `Some` -- `weights` above still points at the BASE model (a resident
+    /// folds this into those weights at load; see `qwen::lora::fold_adapter_into`).
+    /// Always `None` for a plain base/quant reference.
+    pub adapter: Option<PathBuf>,
 }
 
 /// A models directory on disk, laid out `<vendor>/<base-repo>/...`.
@@ -85,6 +90,14 @@ pub fn default_root() -> Option<PathBuf> {
 /// `brain.card`, which only a brain-format file carries.
 const BASE_WEIGHTS_FILE: &str = "model.brain.safetensors";
 const TOKENIZER_FILE: &str = "tokenizer.json";
+/// Named LoRA adapters live inside their base repo's directory (they share
+/// its tokenizer/config, same reasoning as quants) under
+/// `adapters/<owner>/<name>/<tag>/`, one adapter-only safetensors file each
+/// (`qwen::lora::save_adapter`'s output). Adding this subdirectory is
+/// backward compatible with `Store::scan`'s existing base/quant walk, which
+/// only ever iterates `is_file()` entries in a repo dir.
+const ADAPTERS_DIR: &str = "adapters";
+const ADAPTER_WEIGHTS_FILE: &str = "adapter.brain.safetensors";
 
 impl Store {
     pub fn new(root: impl Into<PathBuf>) -> Store {
@@ -105,6 +118,9 @@ impl Store {
     /// unreadable as a weight file -- callers fall through to [`plan`] either way.
     pub fn local(&self, reference: &ModelRef) -> Option<LocalModel> {
         let dir = self.repo_dir(reference);
+        if let Some(a) = reference.adapter() {
+            return self.local_adapter(reference, &dir, a);
+        }
         match reference.quant() {
             Some(q) => self.local_quant(reference, &dir, q),
             None => self.local_base(reference, &dir),
@@ -119,6 +135,40 @@ impl Store {
     fn local_quant(&self, reference: &ModelRef, dir: &Path, quant: Quant) -> Option<LocalModel> {
         let weights = dir.join(format!("{}.gguf", quant.as_str()));
         open_local(reference.clone(), dir.to_path_buf(), weights, Format::Gguf)
+    }
+
+    /// `reference.adapter()` is `Some`: resolve the BASE weights the normal
+    /// way (quant, if any, still respected) and the adapter's own file
+    /// alongside it. `None` if either is missing -- a dangling adapter
+    /// (base deleted) or a not-yet-trained adapter are both "not found",
+    /// not a partial result.
+    fn local_adapter(&self, reference: &ModelRef, dir: &Path, adapter: &AdapterRef) -> Option<LocalModel> {
+        let base_ref = reference.without_adapter();
+        let (base_weights, format) = match base_ref.quant() {
+            Some(q) => (dir.join(format!("{}.gguf", q.as_str())), Format::Gguf),
+            None => (dir.join(BASE_WEIGHTS_FILE), Format::Safetensors),
+        };
+        if !base_weights.is_file() {
+            return None;
+        }
+        let adapter_path = dir.join(ADAPTERS_DIR).join(adapter.owner()).join(adapter.name()).join(adapter.tag()).join(ADAPTER_WEIGHTS_FILE);
+        if !adapter_path.is_file() {
+            return None;
+        }
+        let reader = WeightReader::open(adapter_path.to_str()?).ok()?;
+        let tokenizer = {
+            let t = dir.join(TOKENIZER_FILE);
+            t.is_file().then_some(t)
+        };
+        Some(LocalModel {
+            reference: reference.clone(),
+            dir: dir.to_path_buf(),
+            weights: base_weights,
+            tokenizer,
+            card: reader.card(),
+            format,
+            adapter: Some(adapter_path),
+        })
     }
 
     /// Every servable model currently on disk: one entry per base repo with a
@@ -181,6 +231,35 @@ impl Store {
                 out.push(m);
             }
         }
+        out.extend(self.scan_adapters(vendor, repo, dir));
+        out
+    }
+
+    /// Walk `<repo-dir>/adapters/<owner>/<name>/<tag>/` for every trained
+    /// adapter on this base repo. Each level is skipped (not an error) if
+    /// unreadable or contains a non-UTF8/non-directory entry -- a scan finds
+    /// what's servable, it doesn't validate the whole tree.
+    fn scan_adapters(&self, vendor: &str, repo: &str, base_dir: &Path) -> Vec<LocalModel> {
+        let mut out = Vec::new();
+        let Ok(owners) = std::fs::read_dir(base_dir.join(ADAPTERS_DIR)) else {
+            return out;
+        };
+        for o in owners.flatten().filter(|e| e.path().is_dir()) {
+            let Some(owner) = o.file_name().to_str().map(str::to_string) else { continue };
+            let Ok(names) = std::fs::read_dir(o.path()) else { continue };
+            for n in names.flatten().filter(|e| e.path().is_dir()) {
+                let Some(name) = n.file_name().to_str().map(str::to_string) else { continue };
+                let Ok(tags) = std::fs::read_dir(n.path()) else { continue };
+                for t in tags.flatten().filter(|e| e.path().is_dir()) {
+                    let Some(tag) = t.file_name().to_str().map(str::to_string) else { continue };
+                    let adapter = AdapterRef::new(&owner, &name, &tag);
+                    let r = ModelRef::new_adapter(vendor, repo, None, adapter.clone());
+                    if let Some(m) = self.local_adapter(&r, base_dir, &adapter) {
+                        out.push(m);
+                    }
+                }
+            }
+        }
         out
     }
 }
@@ -194,7 +273,7 @@ fn open_local(reference: ModelRef, dir: PathBuf, weights: PathBuf, format: Forma
         let t = dir.join(TOKENIZER_FILE);
         t.is_file().then_some(t)
     };
-    Some(LocalModel { reference, dir, weights, tokenizer, card: reader.card(), format })
+    Some(LocalModel { reference, dir, weights, tokenizer, card: reader.card(), format, adapter: None })
 }
 
 #[cfg(test)]
@@ -328,5 +407,77 @@ mod tests {
         sorted.sort();
         assert_eq!(refs, sorted);
         assert_eq!(refs.len(), 2);
+    }
+
+    fn write_adapter_fixture(store: &Store, vendor: &str, repo: &str, owner: &str, name: &str, tag: &str) {
+        let base_dir = store.repo_dir(&ModelRef::new(vendor, repo, None));
+        let adapter_dir = base_dir.join(ADAPTERS_DIR).join(owner).join(name).join(tag);
+        std::fs::create_dir_all(&adapter_dir).unwrap();
+        let card_id = format!("{vendor}/{repo}:{owner}:{name}:{tag}");
+        let mut card = ModelCard::new(&card_id, "qwen");
+        card.variant_of = Some(format!("{vendor}/{repo}"));
+        card.adapter = Some(checkpoint::st::Adapter {
+            kind: "lora".into(),
+            rank: Some(8),
+            base: Some(format!("{vendor}/{repo}")),
+            alpha: Some(16.0),
+            targets: Some(vec!["wq".into()]),
+            dataset_id: None,
+        });
+        checkpoint::st::save_safetensors(
+            adapter_dir.join(ADAPTER_WEIGHTS_FILE).to_str().unwrap(),
+            &[("blocks.0.attn.wq.weight.lora_a".to_string(), vec![2], vec![0.1, 0.2])],
+            &json!({"rank": 8, "alpha": 16.0}),
+            Some(&card),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn local_resolves_an_adapter_ref_to_base_weights_plus_the_adapter_file() {
+        let store = scratch_store("modelstore-lib-test-adapter-local");
+        write_base_fixture(&store, "Qwen", "Qwen3-0.6B");
+        write_adapter_fixture(&store, "Qwen", "Qwen3-0.6B", "swedishembedded-com", "generic-sft", "latest");
+
+        let r = ModelRef::parse("Qwen/Qwen3-0.6B:swedishembedded-com:generic-sft:latest").unwrap();
+        let found = store.local(&r).expect("adapter should resolve");
+        assert!(found.weights.ends_with(BASE_WEIGHTS_FILE), "weights must point at the BASE model: {:?}", found.weights);
+        assert!(found.weights.is_file());
+        let adapter_path = found.adapter.expect("adapter path must be set");
+        assert!(adapter_path.ends_with(ADAPTER_WEIGHTS_FILE));
+        assert!(adapter_path.is_file());
+        assert_eq!(found.tokenizer, Some(store.repo_dir(&ModelRef::new("Qwen", "Qwen3-0.6B", None)).join(TOKENIZER_FILE)));
+        let card = found.card.expect("adapter file's card");
+        assert_eq!(card.id, "Qwen/Qwen3-0.6B:swedishembedded-com:generic-sft:latest");
+        assert_eq!(card.adapter.unwrap().rank, Some(8));
+    }
+
+    #[test]
+    fn local_is_none_when_the_base_is_missing_even_if_the_adapter_exists() {
+        let store = scratch_store("modelstore-lib-test-adapter-no-base");
+        write_adapter_fixture(&store, "Qwen", "Qwen3-0.6B", "owner", "name", "latest");
+        let r = ModelRef::parse("Qwen/Qwen3-0.6B:owner:name:latest").unwrap();
+        assert!(store.local(&r).is_none());
+    }
+
+    #[test]
+    fn local_is_none_when_the_adapter_is_missing_even_if_the_base_exists() {
+        let store = scratch_store("modelstore-lib-test-adapter-no-adapter");
+        write_base_fixture(&store, "Qwen", "Qwen3-0.6B");
+        let r = ModelRef::parse("Qwen/Qwen3-0.6B:owner:name:latest").unwrap();
+        assert!(store.local(&r).is_none());
+    }
+
+    #[test]
+    fn scan_finds_a_base_model_and_its_adapter_as_two_distinct_entries() {
+        let store = scratch_store("modelstore-lib-test-scan-adapter");
+        write_base_fixture(&store, "Qwen", "Qwen3-0.6B");
+        write_adapter_fixture(&store, "Qwen", "Qwen3-0.6B", "swedishembedded-com", "generic-sft", "latest");
+
+        let found = store.scan();
+        assert_eq!(found.len(), 2, "base and adapter must be two distinct catalog entries, not merged");
+        let refs: Vec<String> = found.iter().map(|m| m.reference.to_string()).collect();
+        assert!(refs.contains(&"Qwen/Qwen3-0.6B".to_string()));
+        assert!(refs.contains(&"Qwen/Qwen3-0.6B:swedishembedded-com:generic-sft:latest".to_string()));
     }
 }
