@@ -1424,6 +1424,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-upscale"
+version = "0.1.0"
+dependencies = [
+ "brain-capability",
+ "brain-checkpoint",
+ "brain-gpu-core",
+ "brain-imaging",
+ "brain-kernels",
+ "brain-testutil",
+ "brain-vae",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-vae"
 version = "0.1.0"
 dependencies = [

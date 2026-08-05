@@ -1,0 +1,23 @@
+[package]
+name = "brain-upscale"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Real-ESRGAN RRDBNet super-resolution — the imaging pipeline's detail/upscale tail, built on crates/vae's shared conv block builder."
+
+[lib]
+name = "upscale"
+path = "src/lib.rs"
+
+[dependencies]
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+brain-vae.workspace = true
+brain-checkpoint.workspace = true
+brain-imaging.workspace = true
+# `caps.rs` — the serving contract's capability surface (`docs/serving-contract.md`).
+brain-capability.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true
