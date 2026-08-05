@@ -36,20 +36,25 @@ pub mod grad;
 
 // Kernel-table indices (order matches KERNELS).
 const K_CONV: usize = 0;
-const K_GN_STATS: usize = 1;
-const K_GN_APPLY: usize = 2;
-const K_SILU: usize = 3;
-const K_ADD2: usize = 4;
-const K_UPSAMPLE2: usize = 5;
-const K_NCHW_NLC: usize = 6;
-const K_NLC_NCHW: usize = 7;
-const K_ATTN_SCORES: usize = 8;
-const K_ATTN_SOFTMAX: usize = 9;
-const K_ATTN_APPLY: usize = 10;
-const K_GN_STATS_WG: usize = 11;
-const K_MATMUL: usize = 12;
-const K_IM2COL_AT: usize = 13;
-const K_NLC_BIAS_NCHW: usize = 14;
+const K_GN_APPLY: usize = 1;
+const K_SILU: usize = 2;
+const K_ADD2: usize = 3;
+const K_UPSAMPLE2: usize = 4;
+const K_NCHW_NLC: usize = 5;
+const K_NLC_NCHW: usize = 6;
+const K_ATTN_SCORES: usize = 7;
+const K_ATTN_SOFTMAX: usize = 8;
+const K_ATTN_APPLY: usize = 9;
+const K_GN_STATS_WG: usize = 10;
+const K_MATMUL: usize = 11;
+const K_IM2COL_AT: usize = 12;
+const K_NLC_BIAS_NCHW: usize = 13;
+const K_GN_PART: usize = 14;
+const K_GN_STATS2: usize = 15;
+
+/// Partials per group for the two-stage GroupNorm reduction. 64 is the value
+/// `crates/wm-diamond` arrived at, and the measurement below was taken at it.
+const GN_P: u32 = 64;
 
 /// The `add2` slot inside [`KERNELS`]. Public for the same reason
 /// [`grad::BwdIds::axpy`] is: a caller stitching extra graph onto these blocks
@@ -61,9 +66,8 @@ pub const ADD2_SLOT: usize = K_ADD2;
 /// the kernel behind each recorded [`Step`] (`flux2_bench vae`), and so a crate
 /// that needs extra kernels alongside these can build its set with
 /// [`kernels_with`] instead of restating them.
-pub const KERNELS: [(&str, &str); 15] = [
+pub const KERNELS: [(&str, &str); 16] = [
     ("conv_bias_reg", kernels::CONV_BIAS_REG),
-    ("gn_stats", kernels::GN_STATS),
     ("gn_apply", kernels::GN_APPLY),
     ("silu", kernels::SILU),
     ("add2", kernels::ADD2),
@@ -77,6 +81,8 @@ pub const KERNELS: [(&str, &str); 15] = [
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("im2col_at", kernels::IM2COL_AT),
     ("nlc_bias_nchw", kernels::NLC_BIAS_NCHW),
+    ("gn_part", kernels::GN_PART),
+    ("gn_stats2", kernels::GN_STATS2),
 ];
 
 /// Slot index the first caller-supplied kernel gets when a kernel set is built
@@ -723,12 +729,34 @@ impl<'a> Builder<'a> {
                 g * 256,
             ));
         } else {
+            // No workgroup reductions (backend-cpu): the SERIAL `gn_stats`
+            // dispatches `g` invocations for up to 33 M elements. The
+            // barrier-free two-stage reduction is the right fallback and was
+            // measured at ~3x it on the CPU JIT, at every VAE decoder shape:
+            //
+            //   [C,H,W]          serial   2-stage
+            //   [512, 64, 64]     1.465     0.443
+            //   [512,128,128]     6.274     2.108
+            //   [256,256,256]    12.223     4.599
+            //   [128,512,512]    23.882     7.898
+            //
+            // `crates/wm-diamond` built this pair after measuring the serial
+            // kernel at 77% of its frame time, and the shared builder never
+            // learned about it — `docs/lessons.md` #8 once more.
+            let part = self.act(2 * g as u64 * GN_P as u64);
             self.steps.push(self.gpu.step(
-                K_GN_STATS,
-                &[x, &stats],
-                &[1, c, h, w, g, f(self.eps)],
+                K_GN_PART,
+                &[x, &part],
+                &[1, c, h, w, g, GN_P],
+                g * GN_P,
+            ));
+            self.steps.push(self.gpu.step(
+                K_GN_STATS2,
+                &[&part, &stats],
+                &[1, c, h, w, g, GN_P, f(self.eps)],
                 g,
             ));
+            self.free(2 * g as u64 * GN_P as u64, part);
         }
         self.steps.push(self.gpu.step(
             K_GN_APPLY,

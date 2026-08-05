@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use gpu_core::{Gpu, Step};
+use gpu_core::{f, Gpu, Step};
 use vqgan::config::VqganConfig;
 use vqgan::train::VqganTrainer;
 
@@ -125,8 +125,134 @@ fn init_weights(cfg: &VqganConfig, seed: u64) -> vae::blocks::Tensors {
     t
 }
 
+/// A/B the two GroupNorm statistic reductions at one shape, for CORRECTNESS and
+/// speed.
+///
+/// `vae::blocks` selects `gn_stats` (serial, one lane per group) or
+/// `gn_stats_wg` (workgroup-cooperative) on `DeviceCaps::workgroup_reductions`.
+/// `crates/wm-diamond` independently built a THIRD path — `gn_part` +
+/// `gn_stats2`, a barrier-free two-stage reduction — after measuring the serial
+/// one at 77% of its frame time. Nobody has compared them, and the answer
+/// decides whether wm-diamond can drop its private Builder (task #25) or
+/// whether the shared one has to learn the two-stage path first.
+///
+/// Barrier-free matters beyond speed: `backend-cpu` reports
+/// `workgroup_reductions: false`, so on the CPU JIT the cooperative kernel is
+/// not selectable at all and the shared builder falls back to the serial one.
+fn gn_ab(reps: usize) {
+    const P: u32 = 64; // partials per group, wm-diamond's GN_P
+    let kernels: &[(&str, &str)] = &[
+        ("gn_stats", kernels::GN_STATS),
+        ("gn_stats_wg", kernels::GN_STATS_WG),
+        ("gn_part", kernels::GN_PART),
+        ("gn_stats2", kernels::GN_STATS2),
+    ];
+    let gpu = Gpu::new(kernels);
+    let (k_ser, k_wg, k_part, k_st2) = (0usize, 1, 2, 3);
+    // `gn_stats_wg` uses workgroupBarrier; backend-cpu reports
+    // workgroup_reductions: false and its JIT cannot compile it. Dispatching it
+    // anyway panics — which is exactly why `vae::blocks` branches on the
+    // QUERIED capability rather than assuming (docs/lessons.md #5).
+    let coop = gpu.caps().workgroup_reductions;
+    if !coop {
+        println!("(no workgroup reductions on this device — the cooperative kernel is not selectable)");
+    }
+    println!("{:<44} {:>10} {:>10} {:>10}  {:>12}", "shape [C,H,W] groups", "serial", "coop", "2-stage", "max|delta|");
+
+    // A small shape first, checked against a HOST reference, so "they disagree"
+    // becomes "this one is wrong" instead of a three-way stare.
+    {
+        let (c, h, w, g) = (8u32, 4u32, 4u32, 2u32);
+        let n = (c * h * w) as usize;
+        let mut rng = data::rng::Rng::new(3);
+        let x: Vec<f32> = (0..n).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
+        let xb = gpu.storage(n as u64);
+        gpu.write_f32(&xb, &x);
+        let eps = f(1e-6);
+        let per = n / g as usize;
+        let mut host = vec![0.0f32; 2 * g as usize];
+        for k in 0..g as usize {
+            let sl = &x[k * per..(k + 1) * per];
+            let m = sl.iter().sum::<f32>() / per as f32;
+            let v = sl.iter().map(|q| (q - m) * (q - m)).sum::<f32>() / per as f32;
+            host[2 * k] = m;
+            host[2 * k + 1] = 1.0 / (v + 1e-6).sqrt();
+        }
+        let s_ser = gpu.storage(2 * g as u64);
+        gpu.submit(&[], &[gpu.step(k_ser, &[&xb, &s_ser], &[1, c, h, w, g, eps], g)]);
+        let s_wg = gpu.storage(2 * g as u64);
+        if coop {
+            gpu.submit(&[], &[gpu.step(k_wg, &[&xb, &s_wg], &[1, c, h, w, g, eps], g * 256)]);
+        }
+        let part = gpu.storage(2 * g as u64 * P as u64);
+        let s_2 = gpu.storage(2 * g as u64);
+        gpu.submit(&[], &[
+            gpu.step(k_part, &[&xb, &part], &[1, c, h, w, g, P], g * P),
+            gpu.step(k_st2, &[&part, &s_2], &[1, c, h, w, g, P, eps], g),
+        ]);
+        gpu.poll_wait();
+        let m = |b: &gpu_core::DeviceBuffer| gpu.read(b, 2 * g as usize);
+        let (a, b, cc) = (m(&s_ser), m(&s_wg), m(&s_2));
+        let dev = |v: &Vec<f32>| v.iter().zip(&host).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+        let _ = &b;
+        println!("  host check [{c},{h},{w}] g={g}:  serial {:.3e}   coop {:.3e}   2-stage {:.3e}",
+                 dev(&a), dev(&b), dev(&cc));
+        println!("    host    {host:?}");
+        println!("    serial  {a:?}");
+        println!("    coop    {b:?}");
+        println!("    2-stage {cc:?}");
+    }
+
+    // The decoder's real shapes, widest-to-narrowest.
+    for &(c, h, w, g) in &[(512u32, 64u32, 64u32, 32u32), (512, 128, 128, 32), (256, 256, 256, 32), (128, 512, 512, 32)] {
+        let n = (c * h * w) as u64;
+        let mut rng = data::rng::Rng::new(9);
+        let x: Vec<f32> = (0..n as usize).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
+        let xb = gpu.storage(n);
+        gpu.write_f32(&xb, &x);
+        let eps = f(1e-6);
+
+        let s_ser = gpu.storage(2 * g as u64);
+        let t_ser = best_of(&gpu, &[gpu.step(k_ser, &[&xb, &s_ser], &[1, c, h, w, g, eps], g)], reps);
+
+        let s_wg = gpu.storage(2 * g as u64);
+        let t_wg = if coop {
+            best_of(&gpu, &[gpu.step(k_wg, &[&xb, &s_wg], &[1, c, h, w, g, eps], g * 256)], reps)
+        } else {
+            f64::NAN
+        };
+
+        let part = gpu.storage(2 * g as u64 * P as u64);
+        let s_2 = gpu.storage(2 * g as u64);
+        let two = vec![
+            gpu.step(k_part, &[&xb, &part], &[1, c, h, w, g, P], g * P),
+            gpu.step(k_st2, &[&part, &s_2], &[1, c, h, w, g, P, eps], g),
+        ];
+        let t_2 = best_of(&gpu, &two, reps);
+
+        // Correctness: all three must agree. A fast wrong reduction is not fast.
+        let (a, b, cc) = (gpu.read(&s_ser, 2 * g as usize), gpu.read(&s_wg, 2 * g as usize), gpu.read(&s_2, 2 * g as usize));
+        let d = if coop {
+            a.iter().zip(&b).zip(&cc).map(|((x, y), z)| (x - y).abs().max((x - z).abs())).fold(0.0f32, f32::max)
+        } else {
+            a.iter().zip(&cc).map(|(x, z)| (x - z).abs()).fold(0.0f32, f32::max)
+        };
+        println!(
+            "[{c:4},{h:4},{w:4}] g={g:<3} {:>28.3} {:>10.3} {:>10.3}  {:>12.3e}",
+            t_ser * 1e3,
+            t_wg * 1e3,
+            t_2 * 1e3,
+            d
+        );
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
+    if a.get(1).map(|s| s == "gn").unwrap_or(false) {
+        gn_ab(a.get(2).and_then(|s| s.parse().ok()).unwrap_or(5));
+        return;
+    }
     let size: u32 = a.get(1).and_then(|s| s.parse().ok()).unwrap_or(256);
     let reps: usize = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
 
