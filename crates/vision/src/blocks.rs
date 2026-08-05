@@ -93,8 +93,6 @@ fn pack2(a: &[f32], b: &[f32]) -> Vec<f32> {
 // Conv = conv2d (bias-free) -> BatchNorm -> SiLU
 // ===========================================================================
 
-/// A single `Conv` unit. Supports stride 1/2 and K=3 (pad 1) / K=1 (pad 0).
-
 /// A conv unit's activation. An enum rather than a bare kernel id: the id alone
 /// cannot express the unfused path's fwd+bwd PAIR, nor whether a fused kernel
 /// exists for it, and it would let a caller set an activation the fused path

@@ -161,7 +161,7 @@ impl ResidencyManager {
         };
         let cost = m.estimate(key);
         pick_device(&cost, &self.budgets, exclude).is_some()
-            || plan_eviction(&cost, &self.budgets, &self.residents, &[key.clone()], exclude).is_some()
+            || plan_eviction(&cost, &self.budgets, &self.residents, std::slice::from_ref(key), exclude).is_some()
     }
 
     pub fn models(&self) -> Vec<String> {
@@ -263,7 +263,7 @@ impl ResidencyManager {
         let device = match pick_device(&cost, &self.budgets, exclude) {
             Some(d) => d,
             None => {
-                let plan = plan_eviction(&cost, &self.budgets, &self.residents, &[key.clone()], exclude)
+                let plan = plan_eviction(&cost, &self.budgets, &self.residents, std::slice::from_ref(&key), exclude)
                     .ok_or_else(|| {
                         ClaimError::NoCapacity(format!(
                             "{key} ({} MiB) is too large for any available device",

@@ -135,7 +135,22 @@ so no test ever exercised the positive branch of an activation. Correct is
 measured across five values, `eps` dropped to 1e-4 and the tolerance **tightened**
 8× — not loosened.
 
-## 12. Disk shape on the dev box
+## 12. An orphaned `///` mis-documents its neighbour
+
+rustdoc concatenates a doc comment onto the **next item**, even across a blank
+line. So a `///` left behind by a function that was deleted or hoisted does not
+just sit there — it becomes the first paragraph of whatever follows.
+`vision::blocks::Act` documented itself as "A single `Conv` unit. Supports
+stride 1/2…"; `chronos2`'s `rmsnorm_bwd` carried the docs of the `rmsnorm` that
+had been hoisted away from it. Four instances, all leftovers of the
+one-implementation consolidations.
+
+Clippy calls this `empty_line_after_doc_comments` and it is worth fixing rather
+than silencing. The fix needs judgment: sometimes the doc belongs to the item
+below and only the blank line is wrong, sometimes the doc is an orphan and must
+go. An automated pass cannot tell the two apart.
+
+## 13. Disk shape on the dev box
 
 `cargo build` is ~3.7 GB of `target/`; adding `--tests --examples` across the
 workspace is **~29 GB**. That 8× jump filled the overlay to 0 bytes and

@@ -151,8 +151,6 @@ unsafe fn dot_avx2(row: &[f32], x: &[f32]) -> f32 {
     s
 }
 
-/// RMSNorm of a single `dim`-vector: `out = x / sqrt(mean(x²)+eps) * w`.
-
 /// In-place per-head RMSNorm (QK-norm) over `head_dim` of a `[n_heads*head_dim]`
 /// row, gain `w:[head_dim]`.
 fn qk_norm(buf: &mut [f32], w: &[f32], n_heads: usize, hd: usize) {
@@ -168,9 +166,6 @@ fn qk_norm(buf: &mut [f32], w: &[f32], n_heads: usize, hd: usize) {
         }
     }
 }
-
-/// In-place half-split RoPE (Qwen/NeoX `rotate_half`) at absolute position `pos`
-/// over a `[n_heads*head_dim]` row, rotary base `theta`.
 
 /// Build the per-layer weight list (`blocks.{l}.*`) from a name->tensor accessor.
 /// Shared by the Talker ([`CpuTalker`]) and the MTP ([`crate::gen_kv_mtp::CpuMtp`])

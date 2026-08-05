@@ -37,7 +37,7 @@ cd "$ROOT"
 # docs/imaging/plan.md. The largest group (69) is doc-list indentation, which
 # needs per-site judgment — an automated pass reattached a summary line to the
 # wrong list item, which is a documentation defect rather than a lint fix.
-BASELINE="${BASELINE:-190}"
+BASELINE="${BASELINE:-179}"
 
 # Force a full re-lint: cargo replays diagnostics only for units it re-runs, so
 # a warm target dir would otherwise report a small fraction of the real count.

@@ -1793,11 +1793,11 @@ mod tests {
         let map = tiny_weights(&cfg);
         let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 96, 2, 12, 16, false, false);
         let prompt: Vec<u32> = vec![3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8];
-        let cold = eng.generate_greedy(&[prompt.clone()], 10, None);
+        let cold = eng.generate_greedy(std::slice::from_ref(&prompt), 10, None);
         let (hit0, _, cached) = eng.prefix_stats();
         assert_eq!(hit0, 0, "first prefill must be cold");
         assert!(cached > 0, "full prompt blocks must be indexed after prefill");
-        let warm = eng.generate_greedy(&[prompt.clone()], 10, None);
+        let warm = eng.generate_greedy(std::slice::from_ref(&prompt), 10, None);
         let (hit1, _, _) = eng.prefix_stats();
         assert!(hit1 > 0, "the second prefill must actually reuse the prefix");
         assert_eq!(warm, cold, "a cache hit must be byte-identical to computing the prefix");
@@ -2331,7 +2331,7 @@ mod tests {
         let max_new = 20usize;
 
         let mut e_ref = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, false, false);
-        let greedy = e_ref.generate_greedy(&[prompt.clone()], max_new, None)[0].clone();
+        let greedy = e_ref.generate_greedy(std::slice::from_ref(&prompt), max_new, None)[0].clone();
         let full: Vec<u32> = prompt.iter().copied().chain(greedy.iter().copied()).collect();
 
         // Oracle draft: proposes the true continuation → all accepted.
@@ -2421,7 +2421,7 @@ mod tests {
         let mut eng_seq = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 16, 512, n_req as u32, 16, 32, false, false);
         let t0 = std::time::Instant::now();
         for p in &prompts {
-            eng_seq.generate_greedy(&[p.clone()], max_new, None);
+            eng_seq.generate_greedy(std::slice::from_ref(p), max_new, None);
         }
         let seq_s = t0.elapsed().as_secs_f64();
 

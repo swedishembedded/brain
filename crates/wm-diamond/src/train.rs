@@ -697,7 +697,6 @@ impl DiamondTrainer {
 
 
     /// The inner-model output F of the last forward.
-
     pub fn read_output(&self) -> Vec<f32> {
         self.gpu.read(&self.y_out, self.n_px as usize)
     }

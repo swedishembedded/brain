@@ -76,9 +76,6 @@ fn bias_bwd(dout: &[f32], m: usize, n: usize, db: &mut [f32]) {
     }
 }
 
-/// RMSNorm per row with per-feature gain `g[d]`: `y[r,i] = x[r,i]/rms(x[r]) * g[i]`.
-/// Returns `(y, inv_rms[rows])` (the reciprocal norms, kept for the backward).
-
 /// Backward of [`rmsnorm`]: `dy` → `dx`, accumulate `dg`. `inv` from the forward.
 fn rmsnorm_bwd(x: &[f32], g: &[f32], inv: &[f32], dy: &[f32], rows: usize, d: usize, dg: &mut [f32]) -> Vec<f32> {
     let mut dx = vec![0.0f32; rows * d];
