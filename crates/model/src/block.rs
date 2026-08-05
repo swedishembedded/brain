@@ -906,12 +906,40 @@ pub fn vocab_tiles(vocab: u64, d_model: u64) -> Vec<(u32, u32)> {
     out
 }
 
-/// Pick the forward GEMM kernel + dispatch thread count for `[m,k]·[n,k]ᵀ`:
-/// the register-tiled kernel (128×128 tile, 256 threads) once both output dims
-/// fill a tile, else the naive one-thread-per-output kernel. Same math either
-/// way — this only changes speed. `force_naive` lets models keep an env escape.
+/// Pick the GEMM kernel + dispatch thread count for `[m,k]·[n,k]ᵀ`: the
+/// register-tiled kernel (128×128 tile, 256 threads) when there is enough work
+/// to fill tiles, else the naive one-thread-per-output kernel. Same math either
+/// way — every variant is bit-identical to the naive reference (measured,
+/// `max|Δ| = 0`), so this only changes speed. `force_naive` is a model's env
+/// escape.
+///
+/// # `M` is NOT required to fill a tile, and requiring it cost 22x
+///
+/// The rule used to be `m < 128 || n < 128 -> naive`, on the reading that a
+/// partial tile is wasted. The tiled kernel bounds-guards its tile, so a short
+/// `M` costs only the unused rows — while the naive kernel gives one thread per
+/// output element, each walking `k` serially, which collapses on a wide `N`.
+///
+/// SDXL's cross-attention `kv` projection is `[77, 2048, 2560]`: 77 text tokens
+/// is under the old threshold, so 60 of those per forward took the naive path at
+/// **43 GFLOP/s — 0.4% of a P40's 11.76 TFLOP/s peak, and 49% of the entire UNet
+/// forward**. Measured on a P40, `k = 2048`, `n = 2560`:
+///
+/// | m | naive | tiled |
+/// |---|---|---|
+/// | 1 | **0.19 ms** | 0.48 ms |
+/// | 2 | **0.37** | 0.73 |
+/// | 4 | **0.43** | 0.77 |
+/// | 8 | 0.89 | **0.77** |
+/// | 12 | 1.08 | **0.78** |
+/// | 77 | 18.67 | **0.84**  (22x) |
+///
+/// So the crossover is `m = 8`, not 128. Below it the tile genuinely is mostly
+/// idle and naive wins; at `m = 1` the right kernel is neither — it is
+/// `matmul_gemv` (one workgroup per output column), which `gemm_variant`
+/// selects for models that register it.
 pub fn pick_gemm(m: usize, n: usize, naive: usize, reg2: usize, force_naive: bool) -> (usize, u32) {
-    if force_naive || m < 128 || n < 128 {
+    if force_naive || m < 8 || n < 128 {
         (naive, (m * n) as u32)
     } else {
         (reg2, (m.div_ceil(128) * n.div_ceil(128) * 256) as u32)
