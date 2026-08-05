@@ -8,8 +8,11 @@
 //!                     [--max-new N --temp X --top-k K --chat --device cpu|gpu]
 //!   brain qwen train    <data_dir> --out F [--steps N --batch B --block T --lr X ...]
 //!   brain qwen finetune <data_dir> --weights BASE --out F [--steps N --lr X ...]
+//!   brain qwen finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR
+//!                     [--alpha A --steps N --lr X --batch B --block T --seed S
+//!                      --models-dir DIR --dataset-id ID]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use data::rng::Rng;
 use data::tokenizer::Tokenizer;
@@ -361,6 +364,16 @@ fn train(args: &[String], base: Option<&str>) {
 }
 
 fn finetune(args: &[String]) {
+    // `--lora RANK` selects the named-adapter path (finetune_lora) over the
+    // legacy full-parameter path below -- a distinct function, not a branch
+    // threaded through `train`/`model::fit`, because qwen::finetune::finetune
+    // is a self-contained training loop for exactly this reason (seeding a
+    // LoRA-extended param set from a base checkpoint is something
+    // `model::fit`'s checkpoint-config-wins resume path cannot do; see that
+    // module's own doc comment).
+    if args.iter().any(|a| a == "--lora") {
+        return finetune_lora(args);
+    }
     // Extract --weights as the base, pass the rest through to the shared core.
     let mut base = String::new();
     let mut rest: Vec<String> = Vec::new();
@@ -378,6 +391,246 @@ fn finetune(args: &[String]) {
         return;
     }
     train(&rest, Some(&base));
+}
+
+/// Resolve `--weights` to `(weights_file, its_directory, canonical_base_id)`
+/// -- either a `vendor/repo[-QUANT]` model-store reference, or a direct
+/// filesystem path to a `.safetensors` file (its sibling directory then
+/// supplies `tokenizer.json`/`tokenizer_config.json`). Filesystem existence
+/// is checked FIRST: a relative path like `out/qwen.safetensors` also parses
+/// as a syntactically valid (if unlikely) `ModelRef`, so "is this a real
+/// file" must win before "is this a ref" is even considered.
+fn resolve_base(base: &str, store_root: Option<&Path>) -> Result<(PathBuf, PathBuf, String), String> {
+    let path = Path::new(base);
+    if path.is_file() {
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+        // Synthesize under the "local" reserved vendor (`brain_modelref::is_reserved`)
+        // so the id is always a valid `vendor/repo` -- required a moment later to
+        // build `vendor/repo:owner:name:tag` for the adapter ref, which a bare
+        // filename (no '/') could never parse as.
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("base");
+        let id = format!("local/{stem}");
+        return Ok((path.to_path_buf(), dir, id));
+    }
+    let r = brain_modelref::ModelRef::parse(base).map_err(|e| format!("{base}: not a file, and not a valid model ref ({e})"))?;
+    let root = store_root.ok_or_else(|| "no models directory resolved (set --models-dir, BRAIN_MODELS_DIR, or HOME)".to_string())?;
+    let store = brain_modelstore::Store::new(root);
+    let local = store.local(&r).ok_or_else(|| format!("{base}: not found in the model store at {}", root.display()))?;
+    Ok((local.weights, local.dir, r.to_string()))
+}
+
+/// `OWNER/NAME[:TAG]` -> `(owner, name, tag)`, `tag` defaulting to `"latest"`
+/// (Docker-style mutable tags -- retraining with the same `--adapter`
+/// overwrites that tag; see `.todo/model-hashing-and-tags.md` for a
+/// content-addressed tag scheme beyond `latest`, deliberately out of scope
+/// here).
+fn parse_adapter_spec(spec: &str) -> Result<(String, String, String), String> {
+    let (owner_name, tag) = match spec.split_once(':') {
+        Some((a, b)) => (a, b.to_string()),
+        None => (spec, "latest".to_string()),
+    };
+    let (owner, name) = owner_name.split_once('/').ok_or_else(|| "expected \"OWNER/NAME[:TAG]\"".to_string())?;
+    if owner.is_empty() || name.is_empty() || tag.is_empty() {
+        return Err("OWNER, NAME, and TAG must all be non-empty".to_string());
+    }
+    Ok((owner.to_string(), name.to_string(), tag))
+}
+
+/// `brain qwen finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG]
+///     --dataset DIR [--alpha A --steps N --lr X --batch B --block T --seed S
+///     --models-dir DIR --dataset-id ID]`
+///
+/// Trains a NAMED LoRA adapter and saves ONLY the adapter tensors into the
+/// model store at `<models-dir>/<vendor>/<repo>/adapters/<owner>/<name>/<tag>/`
+/// -- retraining with the same `--adapter` always overwrites that tag. The
+/// full "retrain and overwrite" command bench's exported dataset needs:
+/// `--dataset DIR` is a bench `datasets build` output directory
+/// (`train.jsonl`, optionally `validation.jsonl`), rendered through the
+/// BASE checkpoint's own chat template (`data::chat_template`, from its
+/// `tokenizer_config.json` -- already on disk for any model fetched through
+/// the normal store/plan path, no extra step).
+fn finetune_lora(args: &[String]) {
+    let mut base = String::new();
+    let mut adapter_spec = String::new();
+    let mut dataset_dir = String::new();
+    let mut rank = 0u32;
+    let mut alpha: Option<f32> = None;
+    let mut steps = 500u32;
+    let mut lr = 5e-5f32;
+    let mut batch = 4u32;
+    let mut block = 1024u32;
+    let mut seed = 1234u64;
+    let mut models_dir: Option<String> = None;
+    let mut dataset_id: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--weights" => base = val(args, &mut i, "--weights"),
+            "--adapter" => adapter_spec = val(args, &mut i, "--adapter"),
+            "--dataset" => dataset_dir = val(args, &mut i, "--dataset"),
+            "--lora" => rank = val(args, &mut i, "--lora").parse().unwrap_or(rank),
+            "--alpha" => alpha = val(args, &mut i, "--alpha").parse().ok(),
+            "--steps" => steps = val(args, &mut i, "--steps").parse().unwrap_or(steps),
+            "--lr" => lr = val(args, &mut i, "--lr").parse().unwrap_or(lr),
+            "--batch" => batch = val(args, &mut i, "--batch").parse().unwrap_or(batch),
+            "--block" => block = val(args, &mut i, "--block").parse().unwrap_or(block),
+            "--seed" => seed = val(args, &mut i, "--seed").parse().unwrap_or(seed),
+            "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
+            "--dataset-id" => dataset_id = Some(val(args, &mut i, "--dataset-id")),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    if base.is_empty() || adapter_spec.is_empty() || dataset_dir.is_empty() {
+        eprintln!(
+            "usage: brain qwen finetune --lora RANK --weights BASE --adapter OWNER/NAME[:TAG] --dataset DIR \
+             [--alpha A --steps N --lr X --batch B --block T --seed S --models-dir DIR --dataset-id ID]"
+        );
+        return;
+    }
+    if rank == 0 {
+        eprintln!("--lora RANK must be > 0");
+        return;
+    }
+    let alpha = alpha.unwrap_or(rank as f32 * 2.0);
+
+    let store_root = crate::model_dir::resolve(models_dir.as_deref());
+    let (base_weights_path, base_dir, base_id) = match resolve_base(&base, store_root.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
+        }
+    };
+    let (owner, name, tag) = match parse_adapter_spec(&adapter_spec) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("--adapter {adapter_spec:?}: {e}");
+            return;
+        }
+    };
+    let full_ref_str = format!("{base_id}:{owner}:{name}:{tag}");
+    let adapter_ref = match brain_modelref::ModelRef::parse(&full_ref_str) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{full_ref_str}: {e}");
+            return;
+        }
+    };
+    let Some(store_root) = store_root else {
+        eprintln!("no models directory resolved (set --models-dir, BRAIN_MODELS_DIR, or HOME)");
+        return;
+    };
+    let store = brain_modelstore::Store::new(&store_root);
+    let Some(adapter_out_path) = store.adapter_weights_path(&adapter_ref) else {
+        eprintln!("{adapter_ref}: not an adapter reference (bug: parsed above with an adapter suffix)");
+        return;
+    };
+
+    let dataset_dir = Path::new(&dataset_dir);
+    let train_samples = match data::chat::ChatSample::from_jsonl(&dataset_dir.join("train.jsonl")) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
+        }
+    };
+    if train_samples.is_empty() {
+        eprintln!("{}: no training samples", dataset_dir.join("train.jsonl").display());
+        return;
+    }
+    let val_path = dataset_dir.join("validation.jsonl");
+    let val_samples = if val_path.is_file() {
+        match data::chat::ChatSample::from_jsonl(&val_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{e}");
+                return;
+            }
+        }
+    } else {
+        eprintln!("note: no validation.jsonl in {} -- training with no held-out eval", dataset_dir.display());
+        Vec::new()
+    };
+
+    let tokenizer_path = base_dir.join("tokenizer.json");
+    let tok = match data::qwen_tokenizer::QwenBpe::from_file(tokenizer_path.to_str().unwrap_or_default()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{}: {e}", tokenizer_path.display());
+            return;
+        }
+    };
+    let chat_template = match data::chat_template::ChatTemplate::from_model_dir(&base_dir) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
+        }
+    };
+
+    let base_cfg_json = checkpoint::load(base_weights_path.to_str().unwrap_or_default()).header["config"].clone();
+    let vocab = base_cfg_json["vocab_size"].as_u64().unwrap_or(0) as usize;
+    if vocab == 0 {
+        eprintln!("{}: could not read vocab_size from the base checkpoint's config", base_weights_path.display());
+        return;
+    }
+
+    let scratch = std::env::temp_dir().join(format!("brain-qwen-lora-train-{}", std::process::id()));
+    if let Err(e) = data::chat::prepare_chat_samples(&train_samples, &val_samples, &tok, &chat_template, vocab, &scratch) {
+        eprintln!("preparing training data: {e}");
+        return;
+    }
+
+    println!(
+        "training LoRA adapter {full_ref_str} (rank={rank} alpha={alpha}) on {} train / {} val samples, {steps} steps...",
+        train_samples.len(),
+        val_samples.len()
+    );
+    let opts = model::FitOpts {
+        steps,
+        batch_size: batch,
+        block_size: block,
+        lr,
+        min_lr: lr * 0.1,
+        warmup: (steps / 20).max(1),
+        decay_iters: steps,
+        weight_decay: 0.1,
+        grad_clip: 1.0,
+        grad_accum: 1,
+        eval_interval: if val_samples.is_empty() { 0 } else { (steps / 10).max(1) },
+        eval_batches: 20,
+        checkpoint_secs: 0,
+        mask_before: None,
+        mask_per_line: false,
+        align_to_lines: false,
+        seed,
+    };
+    let mode = qwen::finetune::Mode::Lora { rank, alpha };
+    let full_ckpt_out = scratch.join("full.safetensors");
+    let (l0, l1) = match qwen::finetune::finetune(
+        base_weights_path.to_str().unwrap_or_default(),
+        &scratch,
+        &opts,
+        &mode,
+        full_ckpt_out.to_str().unwrap_or_default(),
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("finetune error: {e}");
+            return;
+        }
+    };
+    println!("trained: loss {l0:.4} -> {l1:.4}");
+
+    let reloaded = Qwen::load_inference(full_ckpt_out.to_str().unwrap_or_default(), 1, block);
+    if let Err(e) = qwen::lora::save_adapter(adapter_out_path.to_str().unwrap_or_default(), &reloaded, &full_ref_str, &base_id, dataset_id.as_deref())
+    {
+        eprintln!("save_adapter: {e}");
+        return;
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    println!("saved: {full_ref_str} -> {}", adapter_out_path.display());
 }
 
 
@@ -453,4 +706,100 @@ fn toolcall_eval(args: &[String]) {
     };
     let (exact, tacc) = qwen::toolcall_eval::score(&weights, &tok, n, tools, seq, seed);
     println!("tool-call eval: exact-match {:.1}%  token-acc {:.1}%  ({n} held-out cases)", exact * 100.0, tacc * 100.0);
+}
+
+#[cfg(test)]
+mod lora_finetune_cli_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("brain-qwen-cli-lora-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn parse_adapter_spec_defaults_the_tag_to_latest() {
+        assert_eq!(
+            parse_adapter_spec("swedishembedded-com/generic-sft").unwrap(),
+            ("swedishembedded-com".to_string(), "generic-sft".to_string(), "latest".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_adapter_spec_accepts_an_explicit_tag() {
+        assert_eq!(parse_adapter_spec("owner/name:v2").unwrap(), ("owner".to_string(), "name".to_string(), "v2".to_string()));
+    }
+
+    #[test]
+    fn parse_adapter_spec_rejects_a_spec_with_no_slash() {
+        let err = parse_adapter_spec("no-slash-here").unwrap_err();
+        assert!(err.contains("OWNER/NAME"), "{err}");
+    }
+
+    #[test]
+    fn parse_adapter_spec_rejects_any_empty_segment() {
+        assert!(parse_adapter_spec("/name").is_err());
+        assert!(parse_adapter_spec("owner/").is_err());
+        assert!(parse_adapter_spec("owner/name:").is_err());
+    }
+
+    #[test]
+    fn resolve_base_prefers_a_real_file_over_parsing_it_as_a_model_ref() {
+        // "out/qwen.safetensors" is ALSO a syntactically valid ModelRef
+        // ("out" as vendor, "qwen" as repo) -- the file on disk must win.
+        let dir = tmp("file-path");
+        let weights = dir.join("qwen.safetensors");
+        std::fs::write(&weights, b"not a real checkpoint, just needs to exist").unwrap();
+
+        let (path, base_dir, id) = resolve_base(weights.to_str().unwrap(), None).unwrap();
+        assert_eq!(path, weights);
+        assert_eq!(base_dir, dir);
+        // Synthesized under the "local" reserved vendor so it is always a
+        // valid `vendor/repo` -- required a moment later to build
+        // `vendor/repo:owner:name:tag` for the adapter ref.
+        assert_eq!(id, "local/qwen");
+        assert!(brain_modelref::ModelRef::parse(&format!("{id}:o:n:latest")).is_ok(), "id {id:?} must combine into a parseable adapter ref");
+    }
+
+    #[test]
+    fn resolve_base_reports_neither_a_file_nor_a_valid_ref_by_name_not_a_panic() {
+        let err = resolve_base("not-a-file-and-not-a-ref-either", None).unwrap_err();
+        assert!(err.contains("not a file"), "{err}");
+    }
+
+    #[test]
+    fn resolve_base_reports_a_missing_models_dir_by_name_not_a_panic() {
+        let err = resolve_base("Qwen/Qwen3-0.6B", None).unwrap_err();
+        assert!(err.contains("no models directory"), "{err}");
+    }
+
+    #[test]
+    fn resolve_base_resolves_a_store_ref_via_the_model_store() {
+        let dir = tmp("store-ref");
+        let repo_dir = dir.join("Qwen").join("Qwen3-0.6B");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let card = checkpoint::st::ModelCard::new("Qwen/Qwen3-0.6B", "qwen");
+        checkpoint::st::save_safetensors(
+            repo_dir.join("model.brain.safetensors").to_str().unwrap(),
+            &[("weight".to_string(), vec![2], vec![1.0, 2.0])],
+            &serde_json::json!({"vocab_size": 23}),
+            Some(&card),
+        )
+        .unwrap();
+        std::fs::write(repo_dir.join("tokenizer.json"), b"{}").unwrap();
+
+        let (path, base_dir, id) = resolve_base("Qwen/Qwen3-0.6B", Some(&dir)).unwrap();
+        assert_eq!(path, repo_dir.join("model.brain.safetensors"));
+        assert_eq!(base_dir, repo_dir);
+        assert_eq!(id, "Qwen/Qwen3-0.6B");
+    }
+
+    #[test]
+    fn resolve_base_reports_a_ref_not_found_in_the_store_by_name_not_a_panic() {
+        let dir = tmp("store-ref-missing");
+        let err = resolve_base("Qwen/Qwen3-0.6B", Some(&dir)).unwrap_err();
+        assert!(err.contains("not found in the model store"), "{err}");
+    }
 }

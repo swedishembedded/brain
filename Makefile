@@ -53,7 +53,7 @@ SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tin
 .PHONY: help build release deb deb/debug deb/release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
-        train/yolo eval/yolo detect/yolo \
+        train/yolo eval/yolo detect/yolo train/qwen/lora \
         export/yolo-onnx quantize/yolo sim/yolo-int8 run/yolo-npu bench/yolo-npu \
         web/dev web/build forecast/compare forecast/serve forecast/parity forecast/perf-gate wm/perf-gate fetch/testdata
 
@@ -332,6 +332,28 @@ train/gpt/%: release
 # ---- eval (pattern: eval/gpt/<dataset>) -----------------------------------
 eval/gpt/%: release
 	$(BRAIN) gpt eval --weights $(OUT)/gpt-$*.safetensors --data $(DATA)/$*
+
+# ---- Qwen LoRA fine-tuning: the "one command to fully retrain and overwrite
+# the lora checkpoint" from applications/edgeai/brain/.todo/bench-training.md.
+# DATASET is a bench `datasets build` output dir (train.jsonl [+ validation.jsonl]);
+# ADAPTER is OWNER/NAME[:TAG] (TAG defaults to "latest" and is OVERWRITTEN on
+# every rerun -- that's the "retrain and overwrite" part). QWEN_BASE is a model
+# store ref (default the published Qwen3-0.6B) or a direct .safetensors path.
+QWEN_BASE  ?= Qwen/Qwen3-0.6B
+LORA_RANK  ?= 8
+LORA_ALPHA ?= 16
+QWEN_STEPS ?= 500
+QWEN_LR    ?= 5e-5
+QWEN_BATCH ?= 4
+QWEN_BLOCK ?= 1024
+
+train/qwen/lora: release
+	@test -n "$(DATASET)" || (echo "usage: make train/qwen/lora DATASET=<dir> ADAPTER=<owner/name[:tag]>" && exit 1)
+	@test -n "$(ADAPTER)" || (echo "usage: make train/qwen/lora DATASET=<dir> ADAPTER=<owner/name[:tag]>" && exit 1)
+	$(BRAIN) qwen finetune --lora $(LORA_RANK) --alpha $(LORA_ALPHA) \
+		--weights $(QWEN_BASE) --adapter $(ADAPTER) --dataset $(DATASET) \
+		--steps $(QWEN_STEPS) --lr $(QWEN_LR) --batch $(QWEN_BATCH) --block $(QWEN_BLOCK) \
+		--seed $(SEED) $(if $(MODELS_DIR),--models-dir $(MODELS_DIR)) $(if $(DATASET_ID),--dataset-id $(DATASET_ID))
 
 # ---- YOLO detector (synthetic detection dataset) --------------------------
 # `make data/detect` generates a synthetic object-detection dataset (RGB shapes

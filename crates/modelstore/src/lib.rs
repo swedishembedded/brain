@@ -114,12 +114,21 @@ impl Store {
         self.root.join(reference.vendor()).join(reference.repo())
     }
 
+    /// Where `reference`'s adapter file belongs on disk, whether or not it
+    /// exists yet -- for a trainer that is ABOUT TO WRITE one (unlike
+    /// [`Store::local`], which requires the file to already be there).
+    /// `None` if `reference` names no adapter.
+    pub fn adapter_weights_path(&self, reference: &ModelRef) -> Option<PathBuf> {
+        let a = reference.adapter()?;
+        Some(self.repo_dir(reference).join(ADAPTERS_DIR).join(a.owner()).join(a.name()).join(a.tag()).join(ADAPTER_WEIGHTS_FILE))
+    }
+
     /// Looks up `reference` on disk. `None` if the expected file is absent or
     /// unreadable as a weight file -- callers fall through to [`plan`] either way.
     pub fn local(&self, reference: &ModelRef) -> Option<LocalModel> {
         let dir = self.repo_dir(reference);
-        if let Some(a) = reference.adapter() {
-            return self.local_adapter(reference, &dir, a);
+        if reference.adapter().is_some() {
+            return self.local_adapter(reference, &dir);
         }
         match reference.quant() {
             Some(q) => self.local_quant(reference, &dir, q),
@@ -142,7 +151,7 @@ impl Store {
     /// alongside it. `None` if either is missing -- a dangling adapter
     /// (base deleted) or a not-yet-trained adapter are both "not found",
     /// not a partial result.
-    fn local_adapter(&self, reference: &ModelRef, dir: &Path, adapter: &AdapterRef) -> Option<LocalModel> {
+    fn local_adapter(&self, reference: &ModelRef, dir: &Path) -> Option<LocalModel> {
         let base_ref = reference.without_adapter();
         let (base_weights, format) = match base_ref.quant() {
             Some(q) => (dir.join(format!("{}.gguf", q.as_str())), Format::Gguf),
@@ -151,7 +160,7 @@ impl Store {
         if !base_weights.is_file() {
             return None;
         }
-        let adapter_path = dir.join(ADAPTERS_DIR).join(adapter.owner()).join(adapter.name()).join(adapter.tag()).join(ADAPTER_WEIGHTS_FILE);
+        let adapter_path = self.adapter_weights_path(reference)?;
         if !adapter_path.is_file() {
             return None;
         }
@@ -253,8 +262,8 @@ impl Store {
                 for t in tags.flatten().filter(|e| e.path().is_dir()) {
                     let Some(tag) = t.file_name().to_str().map(str::to_string) else { continue };
                     let adapter = AdapterRef::new(&owner, &name, &tag);
-                    let r = ModelRef::new_adapter(vendor, repo, None, adapter.clone());
-                    if let Some(m) = self.local_adapter(&r, base_dir, &adapter) {
+                    let r = ModelRef::new_adapter(vendor, repo, None, adapter);
+                    if let Some(m) = self.local_adapter(&r, base_dir) {
                         out.push(m);
                     }
                 }
