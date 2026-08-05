@@ -269,6 +269,9 @@ pub struct NpuSession {
     device: String,
 }
 
+/// One named output tensor: `(name, shape, row-major f32 data)`.
+pub type NamedTensor = (String, Vec<usize>, Vec<f32>);
+
 impl NpuSession {
     /// Read an ONNX file (fp32 or INT8-QDQ) and compile it for the configured
     /// device. The ONNX must have a single static `[1,3,S,S]` input.
@@ -580,7 +583,7 @@ impl NpuGraph {
     /// Run one inference. `feeds` maps input names to tensors (order-independent);
     /// returns each output as `(name, shape, f32 data)` in graph order. A single-input
     /// graph accepts the feed regardless of name.
-    pub fn run(&mut self, feeds: &[(&str, Feed)]) -> Result<Vec<(String, Vec<usize>, Vec<f32>)>, NpuError> {
+    pub fn run(&mut self, feeds: &[(&str, Feed)]) -> Result<Vec<NamedTensor>, NpuError> {
         for (name, feed) in feeds {
             let shape = Shape::new(feed.dims()).map_err(|e| NpuError::Other(format!("{e:?}")))?;
             let mut t = Tensor::new(feed.elem(), &shape).map_err(|e| NpuError::Other(format!("{e:?}")))?;

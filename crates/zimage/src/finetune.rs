@@ -38,6 +38,9 @@ pub const VAE_SHIFT: f32 = 0.1159;
 
 /// Build the training [`Cfg`] for a real Z-Image checkpoint at latent size
 /// `h×w` (latent pixels = image/8) and `cap_len` caption tokens.
+/// One named tensor: `(name, shape, row-major f32 data)`.
+pub type NamedTensor = (String, Vec<usize>, Vec<f32>);
+
 pub fn train_cfg(z: &ZImageConfig, h: u32, w: u32, cap_len: u32) -> Cfg {
     Cfg {
         dim: z.dim as usize,
@@ -242,7 +245,7 @@ pub fn run(
     opts: &TrainOpts,
     cancel: &capability::CancelToken,
     mut progress: impl FnMut(u32, u32, String),
-) -> Result<Vec<(String, Vec<usize>, Vec<f32>)>, String> {
+) -> Result<Vec<NamedTensor>, String> {
     if !opts.size.is_multiple_of(16) {
         return Err("size must be a multiple of 16".into());
     }

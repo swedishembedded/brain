@@ -22,9 +22,13 @@ use paramstore::ParamStore;
 use backend_cpu::par;
 
 /// Host-resident AdamW state for the offloaded parameters.
+/// One offloaded parameter's host-side state:
+/// `(name, master fp32 weights, Adam m, Adam v)`.
+pub type OffloadSlot = (String, Vec<f32>, Vec<f32>, Vec<f32>);
+
 pub struct OffloadAdam {
     /// Per param: (name, master weights, m, v). Order matches `ps.offload`.
-    state: Vec<(String, Vec<f32>, Vec<f32>, Vec<f32>)>,
+    state: Vec<OffloadSlot>,
 }
 
 impl OffloadAdam {

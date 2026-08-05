@@ -41,6 +41,10 @@ use residency::ResidentModel;
 
 /// One served model. `provider` and `manifest` describe the SAME model by
 /// construction — that is the whole point of the type.
+/// A residency-adapter constructor: `None` when the model's weights are not
+/// configured, so the scheduler simply does not serve it.
+pub type ResidentCtor = fn() -> Option<Arc<dyn ResidentModel>>;
+
 pub struct ModelEntry {
     /// The static manifest: safe to build with no weights loaded.
     pub manifest: fn() -> Manifest,
@@ -50,7 +54,7 @@ pub struct ModelEntry {
     /// Register with the residency scheduler, when this model has an adapter
     /// and its weights are configured. `None` from the fn means "not
     /// configured"; a `None` field means "no adapter exists yet".
-    pub resident: Option<fn() -> Option<Arc<dyn ResidentModel>>>,
+    pub resident: Option<ResidentCtor>,
 }
 
 /// Shorthand: a provider that needs no weights.
