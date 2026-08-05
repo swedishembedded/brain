@@ -491,11 +491,13 @@ mod tests {
     #[test]
     fn back_chunked_equals_full() {
         let mut seed = Lcg::new(7);
-        let mut cfg = CodecConfig::default();
-        cfg.latent_dim = 4;
-        cfg.decoder_dim = 8;
-        cfg.upsampling_ratios = vec![2];
-        cfg.upsample_rates = vec![2, 2];
+        let mut cfg = CodecConfig {
+            latent_dim: 4,
+            decoder_dim: 8,
+            upsampling_ratios: vec![2],
+            upsample_rates: vec![2, 2],
+            ..Default::default()
+        };
 
         let mut w: W = HashMap::new();
         let fill = |w: &mut W, name: &str, n: usize, seed: &mut Lcg| {

@@ -85,9 +85,7 @@ pub fn power_spectrogram(samples: &[f32], cfg: &MelConfig) -> (Vec<f32>, usize, 
     let window = hann(cfg.win);
     let pad = cfg.n_fft / 2;
     let mut padded = vec![0.0f32; samples.len() + 2 * pad];
-    for i in 0..samples.len() {
-        padded[pad + i] = samples[i];
-    }
+    padded[pad..pad + samples.len()].copy_from_slice(samples);
     // reflect padding at the edges
     for i in 0..pad {
         padded[pad - 1 - i] = samples.get(i + 1).copied().unwrap_or(0.0);

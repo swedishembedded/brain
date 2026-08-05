@@ -42,8 +42,9 @@ impl GnDims {
                 c % g
             ));
         }
-        // `!(eps > 0.0)` also rejects NaN.
-        if !(eps > 0.0) {
+        // NaN is rejected too, and SPELLED OUT: the tempting `eps <= 0.0` is
+        // false for NaN, so that "simplification" would quietly accept it.
+        if eps.is_nan() || eps <= 0.0 {
             return Err(format!("GnDims: eps must be strictly positive (eps={eps})"));
         }
         Ok(GnDims { n, c, h, w, g, eps })
