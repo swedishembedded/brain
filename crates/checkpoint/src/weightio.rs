@@ -72,16 +72,16 @@ impl WeightReader {
     }
 
     /// Open a **foreign** (non-brain) HuggingFace checkpoint directory: a
-    /// single `model.safetensors`, or a sharded `model.safetensors.index.json`
-    /// + `model-K-of-N.safetensors` set. Each shard is mmapped (header only) —
-    /// `tensor`/`for_each` still decode exactly one tensor at a time, from
-    /// whichever shard owns it, so an importer streaming through a sharded
-    /// multi-GB checkpoint never holds more than one shard's mmap header +
-    /// one tensor's fp32 expansion. Unlike [`open`](Self::open), `config()`/
-    /// `card()` return empty/`None` here — a foreign checkpoint has no
-    /// `brain.config`/`brain.card`; read the source's own `config.json`
-    /// separately (as every importer already does) and build a
-    /// [`ModelCard`] for the *output*.
+    /// single `model.safetensors`, or a sharded set of
+    /// `model.safetensors.index.json` plus `model-K-of-N.safetensors` files.
+    /// Each shard is mmapped (header only) — `tensor`/`for_each` still decode
+    /// exactly one tensor at a time, from whichever shard owns it, so an
+    /// importer streaming through a sharded multi-GB checkpoint never holds
+    /// more than one shard's mmap header plus one tensor's fp32 expansion.
+    /// Unlike [`open`](Self::open), `config()`/`card()` return empty/`None`
+    /// here — a foreign checkpoint has no `brain.config`/`brain.card`; read
+    /// the source's own `config.json` separately (as every importer already
+    /// does) and build a [`ModelCard`] for the *output*.
     pub fn open_hf_dir(dir: &Path) -> io::Result<WeightReader> {
         let index_path = dir.join("model.safetensors.index.json");
         if !index_path.exists() {
