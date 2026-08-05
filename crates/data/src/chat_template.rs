@@ -171,6 +171,27 @@ impl ChatTemplate {
         Ok(ChatTemplate { env })
     }
 
+    /// Compile the `chat_template` field out of `<model_dir>/tokenizer_config.json`
+    /// -- for a base model fetched through brain's normal store/plan path,
+    /// this file is ALREADY on disk (`modelstore::plan`'s `plan_base`
+    /// downloads it alongside `tokenizer.json` whenever the upstream repo
+    /// ships one), so this needs no separate import-time wiring. Returns a
+    /// `TemplateError` naming which part is missing (file absent, no
+    /// `chat_template` key, unparseable Jinja) rather than panicking --
+    /// a checkpoint with no template is a real, expected case (e.g. a base,
+    /// non-instruction-tuned model), not a bug to crash on.
+    pub fn from_model_dir(dir: &std::path::Path) -> Result<ChatTemplate, TemplateError> {
+        let path = dir.join("tokenizer_config.json");
+        let text = std::fs::read_to_string(&path).map_err(|e| TemplateError(format!("{}: {e}", path.display())))?;
+        let cfg: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| TemplateError(format!("{}: invalid JSON: {e}", path.display())))?;
+        let src = cfg
+            .get("chat_template")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TemplateError(format!("{}: no \"chat_template\" string field", path.display())))?;
+        Self::compile(src)
+    }
+
     /// Render `messages` (a JSON array of `{role, content, tool_calls?,
     /// tool_call_id?, ...}` objects — build via [`parse_json_ordered`] or
     /// `Value::from_serialize`) through the template. `tools` is the JSON
@@ -284,6 +305,25 @@ mod tests {
         assert_eq!(full, "<|user|>hi<|assistant|>hey");
         assert_eq!(&full[ranges[0].clone()], "<|user|>hi");
         assert_eq!(&full[ranges[1].clone()], "<|assistant|>hey");
+    }
+
+    #[test]
+    fn from_model_dir_reads_chat_template_out_of_tokenizer_config_json() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-template-fromdir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tokenizer_config.json"), r#"{"chat_template": "<|{{ messages[0].role }}|>{{ messages[0].content }}"}"#).unwrap();
+        let t = ChatTemplate::from_model_dir(&dir).expect("load");
+        let messages = parse_json_ordered(r#"[{"role":"user","content":"hi"}]"#).unwrap();
+        assert_eq!(t.render(messages, None, false, &BTreeMap::new()).unwrap(), "<|user|>hi");
+    }
+
+    #[test]
+    fn from_model_dir_errors_clearly_when_chat_template_is_absent() {
+        let dir = std::env::temp_dir().join(format!("brain-chat-template-nofield-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tokenizer_config.json"), r#"{"some_other_field": true}"#).unwrap();
+        let Err(err) = ChatTemplate::from_model_dir(&dir) else { panic!("expected an error") };
+        assert!(err.to_string().contains("chat_template"), "got: {err}");
     }
 
     #[test]
