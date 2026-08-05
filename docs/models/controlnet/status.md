@@ -111,7 +111,7 @@ not a local loop — only the `swap_rb` channel order is this crate's.
 
 Reference: `/…/instantid/ControlNetModel` (a real, **trained** SDXL ControlNet —
 its zero-convs are not zero, so the residuals are a non-trivial target).
-Goldens: `tools/controlnet_dump_reference.py`, diffusers 0.39.0 / torch 2.13.0,
+Goldens: `tools/goldens/controlnet_dump_reference.py`, diffusers 0.39.0 / torch 2.13.0,
 CPU fp32, seed 20260804.
 
 Import: **844 source tensors → 810 brain tensors**, two-way covered (the delta

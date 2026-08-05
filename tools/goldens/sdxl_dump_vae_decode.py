@@ -14,12 +14,13 @@ looks for the un-suffixed name. brain reads that same fp16 file and upcasts to
 f32, so the golden is baked from exactly the tensors brain consumes.
 
 Usage:
-  python3 tools/sdxl_dump_vae_decode.py \
+  python3 tools/goldens/sdxl_dump_vae_decode.py \
       --sdxl /path/to/stable-diffusion-xl-base-1.0 [--out <golden-mirror>/vae]
 """
 
 import argparse
 import json
+import os
 import pathlib
 
 import torch
@@ -27,11 +28,18 @@ from diffusers import AutoencoderKL
 from safetensors.torch import load_file, save_file
 
 
+# Overridable machine path (scripts/gates/check-scripts.sh 3/3); the same
+# BRAIN_GOLDEN_MIRROR that scripts/data/fetch-testdata.sh links goldens from.
+GOLDEN_MIRROR = os.environ.get("BRAIN_GOLDEN_MIRROR", "/data/workspace/resources/brain-goldens")
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sdxl", required=True, help="stable-diffusion-xl-base-1.0 root")
-    ap.add_argument("--out", default="/data/workspace/resources/brain-goldens/vae",
-                    help="golden mirror dir that make fetch/testdata links from")
+    ap.add_argument(
+        "--out",
+        default=f"{GOLDEN_MIRROR}/vae",
+        help="golden mirror dir that make fetch/testdata links from",
+    )
     ap.add_argument("--seed", type=int, default=11)
     a = ap.parse_args()
 

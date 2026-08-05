@@ -89,7 +89,11 @@ struct Sam2Instance {
 
 impl Instance for Sam2Instance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        self.run_batch(action, std::slice::from_ref(inv), progress).pop().expect("one result per invocation")
+        // The batch callback carries the batch index; a single invocation is
+        // index 0, so the one-shot path forwards its progress unchanged.
+        self.run_batch(action, std::slice::from_ref(inv), &mut |_, p| progress(p))
+            .pop()
+            .expect("one result per invocation")
     }
 
     /// Group the batch by image and run ONE trunk pass per distinct image.
@@ -97,7 +101,12 @@ impl Instance for Sam2Instance {
     /// Results are returned in the caller's order (the executor zips them back
     /// to jobs positionally), so the grouping is over indices, not over a
     /// reordered slice.
-    fn run_batch(&mut self, action: &str, invs: &[Invocation], _progress: &mut dyn FnMut(Progress)) -> Vec<ActionResult> {
+    fn run_batch(
+        &mut self,
+        action: &str,
+        invs: &[Invocation],
+        _progress: &mut dyn FnMut(usize, Progress),
+    ) -> Vec<ActionResult> {
         if action != "segment" {
             return invs.iter().map(|_| Err(format!("sam2: unknown action '{action}'"))).collect();
         }

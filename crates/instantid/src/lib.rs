@@ -28,7 +28,7 @@
 //! What is **not** here, and not claimed: the resampler forward, the decoupled
 //! attention itself, and the wiring into `crates/unet`'s attention sites. The
 //! reference activations are already dumped
-//! (`tools/instantid_dump_reference.py` -> `testdata/instantid/`, 21 tensors
+//! (`tools/goldens/instantid_dump_reference.py` -> `testdata/instantid/`, 21 tensors
 //! covering `proj_in`, every layer's attention and feed-forward, `proj_out`,
 //! `norm_out`, plus both site widths), so the forward has a ladder to climb the
 //! moment it lands.

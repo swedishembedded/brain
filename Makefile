@@ -151,9 +151,9 @@ CARGO_TEST   ?= cargo test --release --offline
 # false "TIMED OUT" that reads like a hang.
 # The clippy gate — a ratchet. Checks that clippy EXITS 0 (it stops at the first
 # deny-by-default lint and then silently reports nothing about everything after
-# it) and that the warning count has not grown. See scripts/clippy-gate.sh.
+# it) and that the warning count has not grown. See scripts/gates/clippy-gate.sh.
 clippy:
-	@scripts/clippy-gate.sh
+	@scripts/gates/clippy-gate.sh
 
 test:
 	@echo "test: fast lane (unit + integration, no doc-tests, GPU serialised)"

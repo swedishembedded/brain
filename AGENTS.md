@@ -488,7 +488,7 @@ front-end to depend on.
 | **"change only X" end to end** (segment -> refine -> restore -> composite) | `crates/imgpipe` — the bit-exactness contract and why it holds is in its module docs |
 | Image handling of ANY kind (resize/pad/crop/letterbox/masks/tiling/codecs) | `crates/imaging` — check here BEFORE writing a pixel loop; five copies of `chw_to_hwc` is what created it |
 | Identity conditioning (ArcFace -> ID tokens -> diffusion attention) | `crates/pulid` (FLUX.1, wired), `crates/instantid` (SDXL, shapes only); `pulid::idcond` documents the raw-vs-normalised asymmetry that silently breaks it |
-| Clippy gate (exit code + a warning ratchet) | `make clippy`, `scripts/clippy-gate.sh` — clippy ABORTS on a denied lint and then reports nothing, so always check the exit code |
+| Clippy gate (exit code + a warning ratchet) | `make clippy`, `scripts/gates/clippy-gate.sh` — clippy ABORTS on a denied lint and then reports nothing, so always check the exit code |
 | CLI subcommands | `crates/cli/src/{main,args,*_cli}.rs` |
 
 ---

@@ -107,12 +107,16 @@ impl Instance for ClipInstance {
         &mut self,
         action: &str,
         invs: &[Invocation],
-        progress: &mut dyn FnMut(Progress),
+        progress: &mut dyn FnMut(usize, Progress),
     ) -> Vec<ActionResult> {
         if action != "embed_text" {
             // `embed_image` has no batched build; fall back to the serial path
             // rather than pretending.
-            return invs.iter().map(|i| self.run(action, i, progress)).collect();
+            return invs
+                .iter()
+                .enumerate()
+                .map(|(n, i)| self.run(action, i, &mut |p| progress(n, p)))
+                .collect();
         }
 
         // Group by tower, carrying the original index so the results come back

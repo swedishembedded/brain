@@ -239,7 +239,7 @@ pub fn import_diffusers(tensors: Vec<StTensor>, cfg: &Flux1Config) -> Result<Ten
 /// This is the ONLY sanctioned way to import a truncated model: the count of
 /// dropped tensors is returned so a caller can assert it, and every surviving
 /// tensor still goes through the same `validate`. Goldens must be dumped at the
-/// SAME depth (`tools/flux1_dump_reference.py --small-double/--small-single`).
+/// SAME depth (`tools/goldens/flux1_dump_reference.py --small-double/--small-single`).
 pub fn truncate_to_depth(
     tensors: Vec<StTensor>,
     cfg: &Flux1Config,

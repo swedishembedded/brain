@@ -49,7 +49,7 @@ Two semantic questions are SETTLED HERE by measurement rather than by argument
     clamp to `num_buckets - 1`.
 
 Usage:
-  python3 tools/t5_dump_reference.py \
+  python3 tools/goldens/t5_dump_reference.py \
       --model     /path/to/FLUX.1-Kontext-dev/text_encoder_2 \
       --tokenizer /path/to/FLUX.1-Kontext-dev/tokenizer_2 \
       --out       testdata/t5 [--seq-len 128]

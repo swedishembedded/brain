@@ -17,7 +17,7 @@ Two independent pieces, because they fail differently:
 
 Usage (weights default to the released layout under resources/):
 
-    python3 tools/instantid_dump_reference.py \
+    python3 tools/goldens/instantid_dump_reference.py \
         --ckpt /path/to/instantid/ip-adapter.bin \
         --out  testdata/instantid
 """
@@ -30,6 +30,10 @@ import sys
 import numpy as np
 import torch
 
+
+# Overridable machine paths (scripts/gates/check-scripts.sh 3/3).
+CKPT = os.environ.get("BRAIN_INSTANTID_CKPT", "/data/workspace/resources/identity/weights/instantid/ip-adapter.bin")
+CODE = os.environ.get("BRAIN_INSTANTID_CODE", "/data/workspace/resources/identity/code/InstantID")
 
 def load_reference(code_root):
     """Import the upstream Resampler / IPAttnProcessor rather than reimplementing them."""
@@ -48,8 +52,8 @@ def dump(out_dir, name, arrays, meta):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", default="/data/workspace/resources/identity/weights/instantid/ip-adapter.bin")
-    ap.add_argument("--code", default="/data/workspace/resources/identity/code/InstantID")
+    ap.add_argument("--ckpt", default=CKPT)
+    ap.add_argument("--code", default=CODE)
     ap.add_argument("--out", default="testdata/instantid")
     ap.add_argument("--seed", type=int, default=1337)
     a = ap.parse_args()

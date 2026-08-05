@@ -24,7 +24,7 @@
 //! parity-gated); this crate takes an aligned 512×512 face and gives one back.
 //!
 //! Scope today: the **forward** ([`model`]), parity-gated per stage against
-//! `tools/codeformer_restore_dump_reference.py` goldens at several `w`
+//! `tools/goldens/codeformer_restore_dump_reference.py` goldens at several `w`
 //! including both endpoints, plus the **stage-II training graph** ([`train`]) —
 //! the code-prediction Transformer under the code-token cross-entropy, with the
 //! VQ autoencoder frozen exactly as the reference's stage II freezes it. That

@@ -21,7 +21,7 @@ and INT8 are **deferred** and are not claimed by any number below.
 | Forward graph | `crates/unet/src/model.rs` |
 | Synthetic weights for the smoke test | `crates/unet/src/init.rs` |
 | DDIM / Euler / Euler-ancestral / DPM-Solver++(2M), ε and v-pred | `crates/diffusion/src/discrete.rs` |
-| Reference goldens | `tools/sdxl_dump_reference.py` → `testdata/sdxl/` |
+| Reference goldens | `tools/goldens/sdxl_dump_reference.py` → `testdata/sdxl/` |
 
 **Zero new kernels and zero new blocks.** Everything convolutional is
 `vae::blocks::Builder`; everything transformer is `model::block`
@@ -140,7 +140,7 @@ re-run turned up on top of it.
 | `import::check_shape` compared **element counts, not shapes**. Every square weight in SDXL (`to_q/to_k/to_v/to_out`, `proj_in`, `proj_out`, `time_embedding.linear_2`) would pass transposed, and SD 1.5's `[C,C,1,1]` conv `proj_in` would pass as SDXL's `[C,C]` linear — the exact variant-checkpoint confusion the two-way coverage exists to reject | Not observed; the shapes happen to be right | `import.rs`: exact shape equality, plus per-piece checks on the three `attn1` and two `attn2` sources and on the GEGLU `ff.net.0.proj` before it is halved |
 | `model.rs` hardcoded `scores: 8, softmax: 9, apply: 10` into `BidirIds` — private slot numbers of `vae::blocks::KERNELS`. Adding one entry mid-list would silently dispatch the wrong pipeline, and only on non-cooperative devices | Not observed | `vae::blocks::ATTN_BIDIR_SLOTS` exported and used; `the_bidir_attention_trio_is_at_the_exported_slots` and `appended_slots_hold_their_named_kernels` pin the whole set |
 | `manifest.json` recorded **only** `unet/stages.safetensors`. The dumper rebuilt the manifest from scratch on every run, so the two-run workflow (`--skip-unet`, then `--skip-schedulers`) threw away the first run's `files` entry, its sha256 and the `scheduler_config` | `files` had one key; `params` had no `scheduler_config`/`sched_steps` | The dumper now MERGES. Re-running `--skip-unet` reproduced `steps.safetensors` **byte-identically** (sha256 `d45ff4fb…`) and restored both entries |
-| `tools/sdxl_dump_reference.py` defined `_fit` and `_CLASSES` twice (identical copy-paste) | F811 redefinition; harmless but the first copy is dead | Removed |
+| `tools/goldens/sdxl_dump_reference.py` defined `_fit` and `_CLASSES` twice (identical copy-paste) | F811 redefinition; harmless but the first copy is dead | Removed |
 | `crates/unet/Cargo.toml` listed four dependencies it never used (`brain-vision`, `brain-imaging`, `brain-clip`, `brain-diffusion` — the last two appear only inside doc-comment code spans), directly contradicting its own comment about cargo linking every entry into each test binary | grep for each lib name in `src/` + `tests/` | Removed, with a per-dependency justification comment |
 
 ### Corrected claim

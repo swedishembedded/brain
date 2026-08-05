@@ -23,7 +23,7 @@ degradation-robust restorer:
 
 | File | What |
 |---|---|
-| `tools/codeformer_restore_dump_reference.py` | reference goldens, forward hooks, CPU/fp32/seed 1234, per-`w` |
+| `tools/goldens/codeformer_restore_dump_reference.py` | reference goldens, forward hooks, CPU/fp32/seed 1234, per-`w` |
 | `crates/restore/src/config.rs` | `CodeFormerConfig`, the CFT tap table, the 515-tensor checkpoint manifest and the 533-tensor runtime manifest |
 | `crates/restore/src/import.rs` | two-way coverage validation + the one boundary split (`in_proj_weight` → `qk` \| `v`) |
 | `crates/restore/src/model.rs` | the forward graph (`KERNELS`, `CodeFormer`, `record_transformer`, `record_fuse`) |
@@ -33,7 +33,7 @@ degradation-robust restorer:
 Goldens are regenerated with:
 
 ```bash
-python3 tools/codeformer_restore_dump_reference.py \
+python3 tools/goldens/codeformer_restore_dump_reference.py \
   --code    <CodeFormer repo> \
   --weights <dir with codeformer.pth> \
   --out     testdata/restore/codeformer \

@@ -3,7 +3,7 @@
 
 //! FLUX.1 / Kontext forward parity vs the diffusers reference, replaying the
 //! exact transformer inputs and EVERY block boundary captured by
-//! `tools/flux1_dump_reference.py` (forward hooks during a real
+//! `tools/goldens/flux1_dump_reference.py` (forward hooks during a real
 //! `FluxKontextPipeline` run).
 //!
 //! Two gates, because the fp32 model does not fit one card:
@@ -85,7 +85,7 @@ struct Fixture {
 impl Fixture {
     fn open(path: &str) -> Option<Fixture> {
         if !std::path::Path::new(path).exists() {
-            eprintln!("SKIP: fixture {path} absent (run tools/flux1_dump_reference.py)");
+            eprintln!("SKIP: fixture {path} absent (run tools/goldens/flux1_dump_reference.py)");
             return None;
         }
         Some(Fixture { tensors: checkpoint::safetensors::read(path).unwrap() })
@@ -166,7 +166,7 @@ fn reduced_depth_fp32_parity() {
             )
         }
         Err(_) => {
-            eprintln!("SKIP: {manifest} absent (run tools/flux1_dump_reference.py)");
+            eprintln!("SKIP: {manifest} absent (run tools/goldens/flux1_dump_reference.py)");
             return;
         }
     };

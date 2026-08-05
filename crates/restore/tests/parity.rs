@@ -4,7 +4,7 @@
 //! CodeFormer forward parity vs the `basicsr` reference, replayed stage by
 //! stage, at several fidelity weights including both endpoints.
 //!
-//! Goldens come from `tools/codeformer_restore_dump_reference.py` and live
+//! Goldens come from `tools/goldens/codeformer_restore_dump_reference.py` and live
 //! under `testdata/restore/codeformer/` (gitignored); each test skips itself
 //! when its fixture is absent. The reference weights are not in `testdata/`
 //! either — point **`BRAIN_RESTORE_WEIGHTS`** (or `BRAIN_VQGAN_WEIGHTS`, the

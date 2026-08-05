@@ -29,7 +29,7 @@
 //! ## What is gated, and what is not
 //!
 //! Gated against `pulid_flux_v0.9.1` reference goldens
-//! (`tools/pulid_dump_reference.py`, replayed by `tests/parity.rs`):
+//! (`tools/goldens/pulid_dump_reference.py`, replayed by `tests/parity.rs`):
 //!
 //! * the **ID embedding pipeline**, stage by stage — `id_map`, each of the 5
 //!   scale mappings, all 10 resampler layers, and the projected ID tokens,

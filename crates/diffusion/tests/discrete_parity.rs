@@ -2,14 +2,14 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Parity for the discrete (DDPM) schedulers against diffusers' own `step()`
-//! outputs on a fixed trajectory, dumped by `tools/sdxl_dump_reference.py`.
+//! outputs on a fixed trajectory, dumped by `tools/goldens/sdxl_dump_reference.py`.
 //!
 //! Fixture: `$BRAIN_TESTDATA/sdxl/schedulers/steps.safetensors` (default
 //! `<repo>/testdata`). The test **skips itself** when the fixture is absent.
 //!
 //! Regenerate with:
 //! ```text
-//! python3 tools/sdxl_dump_reference.py --sdxl <sdxl-base-1.0> \
+//! python3 tools/goldens/sdxl_dump_reference.py --sdxl <sdxl-base-1.0> \
 //!         --out testdata/sdxl --skip-unet
 //! ```
 //!
@@ -52,7 +52,7 @@ impl Golden {
     fn open() -> Option<Golden> {
         let p = testdata("sdxl/schedulers/steps.safetensors");
         if !p.exists() {
-            eprintln!("SKIP: {} absent (run tools/sdxl_dump_reference.py)", p.display());
+            eprintln!("SKIP: {} absent (run tools/goldens/sdxl_dump_reference.py)", p.display());
             return None;
         }
         Some(Golden(checkpoint::safetensors::read(p.to_str().expect("utf-8 path")).expect("read golden")))

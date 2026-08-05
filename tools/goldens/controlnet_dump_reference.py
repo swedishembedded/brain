@@ -30,7 +30,7 @@ graph is resolution-independent, so this gates the composition; it does NOT
 gate the 128x128 latent SDXL actually generates at, and the test says so.
 
 Usage:
-  python3 tools/controlnet_dump_reference.py \
+  python3 tools/goldens/controlnet_dump_reference.py \
       --controlnet /path/to/ControlNetModel \
       --out testdata/controlnet [--latent 32]
 """
@@ -49,7 +49,7 @@ SEED = 20260804
 # Micro-conditioning in diffusers' order:
 #   (original_h, original_w, crop_top, crop_left, target_h, target_w)
 # Six DISTINCT values — an off-by-one in the concat order is invisible when
-# they repeat. Same values as tools/sdxl_dump_reference.py, deliberately: the
+# they repeat. Same values as tools/goldens/sdxl_dump_reference.py, deliberately: the
 # ControlNet's conditioning chain is byte-for-byte the UNet's, so a disagreement
 # between the two goldens is a real disagreement and not a different input.
 TIME_IDS = [1024.0, 1024.0, 8.0, 16.0, 512.0, 768.0]

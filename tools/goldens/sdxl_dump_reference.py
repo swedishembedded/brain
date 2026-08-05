@@ -30,7 +30,7 @@ gates the composition; it does NOT gate the 128x128 latent SDXL actually
 generates at, and the test says so.
 
 Usage:
-  python3 tools/sdxl_dump_reference.py \
+  python3 tools/goldens/sdxl_dump_reference.py \
       --sdxl /path/to/sdxl-base-1.0 \
       --out  testdata/sdxl [--latent 32] [--skip-unet] [--skip-schedulers]
 """

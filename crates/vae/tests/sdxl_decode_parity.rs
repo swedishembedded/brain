@@ -14,7 +14,7 @@
 //!
 //! Golden fixture: `testdata/golden/vae/sdxl_vae_decode.safetensors`, a fixed
 //! `[1,4,16,16]` latent and diffusers' `vae.decode(z).sample` `[1,3,128,128]`,
-//! baked by `tools/sdxl_dump_vae_decode.py` from the released fp16 weights
+//! baked by `tools/goldens/sdxl_dump_vae_decode.py` from the released fp16 weights
 //! upcast to fp32 (which is what brain loads).
 //!
 //! Run:
@@ -64,7 +64,7 @@ fn psnr(a: &[f32], b: &[f32]) -> f64 {
 fn sdxl_vae_decode_matches_diffusers() {
     let fixture = testdata("golden/vae/sdxl_vae_decode.safetensors");
     if !Path::new(&fixture).exists() {
-        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata` (or tools/sdxl_dump_vae_decode.py)");
+        eprintln!("SKIP: fixture {fixture} absent — run `make fetch/testdata` (or tools/goldens/sdxl_dump_vae_decode.py)");
         return;
     }
     let Ok(root) = std::env::var("BRAIN_SDXL") else {

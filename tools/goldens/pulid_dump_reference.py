@@ -25,7 +25,7 @@ Three files, each gating a different rung of the ladder:
 
   flux_cond.safetensors  ONE conditioned transformer evaluation: the reduced-depth
                          FLUX.1 transformer (the same truncation
-                         `tools/flux1_dump_reference.py` dumps as `dit_small`)
+                         `tools/goldens/flux1_dump_reference.py` dumps as `dit_small`)
                          replayed on the SAME inputs, once WITHOUT the ID
                          (self-validation: must reproduce `dit_small`'s `out`
                          bit-for-bit) and once WITH it, following the reference
@@ -50,7 +50,7 @@ as tokens), the image rows are the QUERIES and the ID tokens the KEYS/VALUES, an
 `ca_idx` is a single sequential counter shared by both loops.
 
 Usage:
-  python tools/pulid_dump_reference.py \
+  python tools/goldens/pulid_dump_reference.py \
       --pulid   /path/to/pulid_flux_v0.9.1.safetensors \
       --code    /path/to/PuLID \
       --testdata testdata \
@@ -283,7 +283,7 @@ def dump_flux_cond(tr_dir, cas, id_embedding, testdata, keep_d, keep_s, id_weigh
                    out_dir, manifest):
     small = os.path.join(testdata, "flux1/kontext-dev/dit_small.safetensors")
     if not os.path.exists(small):
-        sys.exit(f"missing fixture {small} (run tools/flux1_dump_reference.py)")
+        sys.exit(f"missing fixture {small} (run tools/goldens/flux1_dump_reference.py)")
     fx = load_file(small)
     model, full_d, full_s = build_small_transformer(tr_dir, keep_d, keep_s)
 

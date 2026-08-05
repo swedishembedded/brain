@@ -21,7 +21,7 @@ patched that (`prelu_kernels.rs`, `convtr2d_kernels.rs`, `wm-core/tests/*`); ~40
 had not. `Lcg::signed` shifts by 32 and straddles zero.
 
 Consequence to remember when a fixture changes: goldens generated from this
-stream move with it. `tools/vit_dump_gradcheck.py` replicates the Rust f32 op
+stream move with it. `tools/goldens/vit_dump_gradcheck.py` replicates the Rust f32 op
 order exactly and must be kept in step with `Lcg`.
 
 ## 1. Per-crate unit tests (`cargo test`)

@@ -97,7 +97,7 @@ and `cat(norm1(ctx), norm2(latents))` by the two LayerNorms at row offsets 0 and
 
 ## Goldens
 
-`tools/pulid_dump_reference.py`, three files under `testdata/pulid/`:
+`tools/goldens/pulid_dump_reference.py`, three files under `testdata/pulid/`:
 
 * `idformer.safetensors` — the ID pipeline with **inputs taken from the fixtures
   brain already gates**: the ArcFace embedding from
@@ -389,7 +389,7 @@ this review, so they were left alone.
 ## Reproduce
 
 ```bash
-python tools/pulid_dump_reference.py \
+python tools/goldens/pulid_dump_reference.py \
     --pulid  /path/to/pulid_flux_v0.9.1.safetensors \
     --code   /path/to/PuLID \
     --testdata testdata \

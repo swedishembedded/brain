@@ -24,9 +24,9 @@
 # Lower BASELINE whenever you clear warnings. Never raise it.
 #
 # Usage:
-#   scripts/clippy-gate.sh            # gate against BASELINE
-#   scripts/clippy-gate.sh --list     # print the current warnings and exit 0
-#   BASELINE=n scripts/clippy-gate.sh # override for a one-off check
+#   scripts/gates/clippy-gate.sh            # gate against BASELINE
+#   scripts/gates/clippy-gate.sh --list     # print the current warnings and exit 0
+#   BASELINE=n scripts/gates/clippy-gate.sh # override for a one-off check
 set -uo pipefail
 
 ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"

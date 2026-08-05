@@ -39,7 +39,7 @@ Per-file tensors (dit*):
   pre_final [n_img, 3072] hidden states entering `norm_out`
 
 Usage:
-  python tools/flux1_dump_reference.py \
+  python tools/goldens/flux1_dump_reference.py \
       --weights /path/to/FLUX.1-Kontext-dev \
       --out testdata/flux1/kontext-dev \
       [--height 256 --width 256 --steps 4 --seed 42 --t5-len 256]

@@ -38,7 +38,7 @@
 //! 3. **`conditioning_scale` multiplies the ZERO-CONV OUTPUT and nothing
 //!    else.** It is applied inside `ControlNetModel.forward` after both the
 //!    down and the mid zero-conv, so it never touches the trainable copy's
-//!    activations. `tools/controlnet_dump_reference.py` asserts this by dumping
+//!    activations. `tools/goldens/controlnet_dump_reference.py` asserts this by dumping
 //!    a second forward at 0.75 and checking it is exactly 0.75x the first.
 //! 4. **The residual list is the backbone's skip stack, in the same order.**
 //!    `controlnet_down_blocks.k` conditions `skip_stack()[k]`, so the k-th

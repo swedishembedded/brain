@@ -38,7 +38,7 @@ fn norm(v: &[f32]) -> f32 {
 fn compose_reproduces_the_reference_id_cond() {
     let p = testdata("pulid/idformer.safetensors");
     if !p.exists() {
-        eprintln!("SKIP: {} absent (run tools/pulid_dump_reference.py)", p.display());
+        eprintln!("SKIP: {} absent (run tools/goldens/pulid_dump_reference.py)", p.display());
         return;
     }
     let t = checkpoint::safetensors::read(p.to_str().unwrap()).expect("read golden");

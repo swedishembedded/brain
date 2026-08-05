@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Stage-by-stage forward parity for PuLID-FLUX v0.9.1 against the goldens
-//! dumped by `tools/pulid_dump_reference.py`.
+//! dumped by `tools/goldens/pulid_dump_reference.py`.
 //!
 //! Three gates, in ladder order:
 //!
@@ -121,7 +121,7 @@ impl Golden {
     fn open(rel: &str) -> Option<Golden> {
         let p = testdata(rel);
         if !p.exists() {
-            eprintln!("SKIP: golden {} absent (run tools/pulid_dump_reference.py)", p.display());
+            eprintln!("SKIP: golden {} absent (run tools/goldens/pulid_dump_reference.py)", p.display());
             return None;
         }
         Some(Golden { t: checkpoint::safetensors::read(p.to_str().unwrap()).expect("read golden") })

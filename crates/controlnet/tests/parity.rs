@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Stage-by-stage forward parity for the SDXL `ControlNetModel` against the
-//! goldens dumped by `tools/controlnet_dump_reference.py`.
+//! goldens dumped by `tools/goldens/controlnet_dump_reference.py`.
 //!
 //! Fixtures live under `$BRAIN_TESTDATA` (default `<repo>/testdata`) in
 //! `controlnet/`; the reference WEIGHTS are named by env var. The test **SKIPS
@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! BRAIN_CONTROLNET=/path/to/a/diffusers/ControlNetModel
-//! python3 tools/controlnet_dump_reference.py --controlnet $BRAIN_CONTROLNET \
+//! python3 tools/goldens/controlnet_dump_reference.py --controlnet $BRAIN_CONTROLNET \
 //!     --out testdata/controlnet
 //! ```
 //!
@@ -138,7 +138,7 @@ fn sdxl_controlnet_residuals_match_diffusers_at_a_non_square_latent() {
 fn run_parity(rel: &str) {
     let g = testdata(rel);
     if !g.exists() {
-        eprintln!("SKIP: {} absent (run tools/controlnet_dump_reference.py)", g.display());
+        eprintln!("SKIP: {} absent (run tools/goldens/controlnet_dump_reference.py)", g.display());
         return;
     }
     let Ok(weights) = std::env::var("BRAIN_CONTROLNET") else {

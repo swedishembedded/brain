@@ -135,7 +135,7 @@ impl Residuals {
 
     /// Every residual scaled by `s` — diffusers' `conditioning_scale`, which is
     /// a pure multiply of the zero-conv outputs and of nothing else (asserted
-    /// inside `tools/controlnet_dump_reference.py`).
+    /// inside `tools/goldens/controlnet_dump_reference.py`).
     pub fn scaled(&self, s: f32) -> Residuals {
         let mut r = Residuals::new();
         for n in &self.order {

@@ -107,7 +107,7 @@ impl Flux1Config {
 
     /// A reduced-depth copy for gating the math on hardware that cannot hold
     /// the full 12 B model. Goldens must be dumped at the SAME depth
-    /// (`tools/flux1_dump_reference.py --small-double/--small-single`).
+    /// (`tools/goldens/flux1_dump_reference.py --small-double/--small-single`).
     pub fn with_depth(&self, depth_double: usize, depth_single: usize) -> Flux1Config {
         Flux1Config { depth_double, depth_single, ..self.clone() }
     }

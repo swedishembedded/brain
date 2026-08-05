@@ -40,7 +40,7 @@ Written per variant (`codeformer`), all tensors f32 except indices (I32):
                         w grid, run params and library versions.
 
 usage:
-  python3 tools/codeformer_restore_dump_reference.py \
+  python3 tools/goldens/codeformer_restore_dump_reference.py \
       --code    /path/to/CodeFormer \
       --weights /path/to/weights/codeformer \
       --out     testdata/restore/codeformer \

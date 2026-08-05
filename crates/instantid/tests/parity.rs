@@ -3,7 +3,7 @@
 
 //! InstantID Resampler forward parity, stage by stage, against the reference.
 //!
-//! Goldens come from `tools/instantid_dump_reference.py`, which imports the
+//! Goldens come from `tools/goldens/instantid_dump_reference.py`, which imports the
 //! UPSTREAM `ip_adapter.resampler.Resampler` rather than reimplementing it and
 //! taps `proj_in`, every layer's attention and feed-forward, `proj_out` and
 //! `norm_out`.
@@ -54,7 +54,7 @@ fn max_abs(a: &[f32], b: &[f32]) -> f32 {
 fn resampler_forward_matches_the_reference() {
     let gp = testdata("instantid/resampler.safetensors");
     if !gp.exists() {
-        eprintln!("SKIP: {} absent (run tools/instantid_dump_reference.py)", gp.display());
+        eprintln!("SKIP: {} absent (run tools/goldens/instantid_dump_reference.py)", gp.display());
         return;
     }
     let Ok(ckpt) = std::env::var("BRAIN_INSTANTID") else {

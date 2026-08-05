@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Stage-by-stage forward parity for the T5 encoder against the goldens dumped
-//! by `tools/t5_dump_reference.py`.
+//! by `tools/goldens/t5_dump_reference.py`.
 //!
 //! Fixtures live under `$BRAIN_TESTDATA` (default `<repo>/testdata`) in `t5/`;
 //! the reference WEIGHTS are named by env var. The test SKIPS itself (never

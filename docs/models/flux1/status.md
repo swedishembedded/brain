@@ -10,7 +10,7 @@ surface. "FLUX.1 works" is not a claim this ledger supports.
 
 ## P0–P1 (2026-08) — goldens, import, forward parity
 
-Goldens: `tools/flux1_dump_reference.py`, forward hooks during a real
+Goldens: `tools/goldens/flux1_dump_reference.py`, forward hooks during a real
 `FluxKontextPipeline` run, every block boundary captured, for both a t2i and a
 one-reference edit run.
 
