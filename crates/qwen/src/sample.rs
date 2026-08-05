@@ -7,7 +7,7 @@
 
 use data::rng::Rng;
 
-use crate::model::Qwen;
+use crate::model::{PrefillInput, Qwen};
 
 /// Generate `max_new` tokens continuing `prompt`. The context is cropped to the
 /// model's sized length (`ctx_len`). `temperature <= 0` selects greedy argmax;
@@ -128,13 +128,19 @@ pub fn generate_kv_stream_with_head(
     let logits_of = |hidden: &[f32]| -> Vec<f32> { model::hostmath::matvec_par(head, hidden, vocab, d) };
     model.reset_cache();
     let mut out = Vec::with_capacity(max_new);
-    // Feed the prompt; the hidden after the last prompt token gives the first
-    // next-token distribution. (Empty prompt → seed a single newline-like id 0.)
-    let mut hidden = Vec::new();
+    // Feed the prompt in ONE prefill call (single readback at the end), not a
+    // step()-per-token loop: step() does a full submit+fence+map round trip
+    // per call, and Qwen::prefill's own doc calls that "pure waste" during
+    // prefill, where every intermediate hidden is discarded anyway. Proven
+    // identical to the old step()-per-token behavior by
+    // model::tests::prefill_matches_step_by_step. For a real agentic prompt
+    // (a system prompt plus a full tool-schema block, easily 1000+ tokens)
+    // this was measured to dominate turn latency by orders of magnitude --
+    // multiple real end-to-end runs against Qwen3-0.6B took 600+ seconds
+    // before this fix. (Empty prompt → seed a single newline-like id 0.)
     let seed_prompt: &[u32] = if prompt.is_empty() { &[0] } else { prompt };
-    for &t in seed_prompt {
-        hidden = model.step(t);
-    }
+    let prefill_inputs: Vec<PrefillInput<'_>> = seed_prompt.iter().map(|&t| PrefillInput::Token(t)).collect();
+    let mut hidden = model.prefill(&prefill_inputs);
     for _ in 0..max_new {
         let next = sample_logits(&logits_of(&hidden), temperature, top_k, top_p, rng);
         if eos.contains(&next) {
