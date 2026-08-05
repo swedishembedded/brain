@@ -940,3 +940,52 @@ auto-baselining was twice corrupted by background load on this box).
 Quality/speed ladder: `--denoise-steps 1..3` (1 step ≈ 3x the fps, still
 recognizably Breakout; `--adaptive` walks this automatically). At 1 step the
 CPU path reaches ~18 fps — playable-smooth on this machine today.
+
+## The training datapath: the backward is 6.15x the forward, and 84% of it is two kernels
+
+Measured with `vqgan_bench` (`crates/vqgan/src/bin/vqgan_bench.rs`), the first
+per-kernel-kind profiler in this tree that covers a **backward**. VQGAN at
+256x256 on one P40, because its backward IS the shared block backward set that
+`crates/vae`, `crates/unet` and `crates/restore` all train through.
+
+```
+FORWARD   348 dispatches    407.72 ms      BACKWARD  1079 dispatches   2508.69 ms
+  conv_bias_reg  422.51  88  90.3%           conv2d_dx     1137.93  88  41.2%
+  gn_apply        12.02  64   2.6%           conv2d_dw      973.04  88  35.3%
+  gn_stats_wg     10.75  64   2.3%           gn_dsum         228.43  64   8.3%
+  silu             9.94  56   2.1%           gn_dgamma       100.77  64   3.7%
+  add2             6.61  35   1.4%           bias_grad        99.66  88   3.6%
+                                             gn_dbeta         72.64  64   2.6%
+                                             axpy             52.97 304   1.9%
+```
+
+**The headline.** A backward costs about **2x** its forward in theory — one pass
+for `dX`, one for `dW`. This one costs **6.15x**. The gap is not spread thin: 84%
+of the backward is `conv2d_dx` + `conv2d_dw`, at **12.9 and 11.1 ms/call against
+the forward conv's 4.8**.
+
+**The cause is structural, not a tuning miss.** The forward conv was lowered to
+`im2col_at` + `matmul_reg3` (register-tiled, ~3-4 TFLOP/s). The backward convs
+never were: `conv2d_dx` and `conv2d_dw` are naive gather kernels, one thread per
+output element walking the reduction serially. There is no `conv2d_dx_reg`, no
+`conv2d_dw_reg` and no `col2im` anywhere in the tree — checked, because the
+usual finding is an unwired fast sibling (`docs/lessons.md` #8) and here there
+genuinely is none.
+
+If the backward convs matched the forward's efficiency the step would drop from
+~2916 ms to roughly **1650 ms — a 1.75x on every conv-net training step in the
+workspace**. The lowering is the same one the forward already uses:
+
+* `dW[Cout, Cin*K*K] = dY[HW, Cout]^T . col[HW, Cin*K*K]` — reuses the existing
+  `im2col_at` output and `matmul_dw_reg`, which is already the register-tiled
+  backward GEMM for linear layers.
+* `dX = col2im(dY[HW, Cout] . W[Cout, Cin*K*K])` — the GEMM exists; `col2im`
+  (scatter-add, the transpose of `im2col`) is the one genuinely new kernel, and
+  it needs its own gradcheck on BOTH backends (`docs/lessons.md` #5).
+
+**Second finding, smaller but free-standing.** `gn_dsum` (3.57 ms/call),
+`gn_dgamma` (1.58) and `gn_dbeta` (1.14) are 402 ms — 16% of the backward — and
+all three are the per-channel reductions `vae::blocks::BWD_KERNELS` already
+documents as having no cooperative twin (the §C.2 gap in
+`docs/kernel-checklist.md`). Unlike the convs this is a known, written-down gap;
+the profile just says what it costs.

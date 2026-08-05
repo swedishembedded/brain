@@ -404,6 +404,28 @@ impl VqganTrainer {
         }
     }
 
+    /// The forward dispatches of one training step, in submit order.
+    ///
+    /// Exposed for the PROFILER (`vqgan_bench`), not for driving: a caller that
+    /// submits these itself skips the latch and the clears and would get a
+    /// silently wrong gradient. `docs/kernel-checklist.md` §E wants a per-
+    /// kernel-kind table before anyone optimises, and until this existed there
+    /// was no way to get one for a BACKWARD anywhere in the tree.
+    pub fn fwd_steps(&self) -> &[Step] {
+        &self.fwd_steps
+    }
+
+    /// The backward dispatches of one training step, in submit order.
+    pub fn bwd_steps(&self) -> &[Step] {
+        &self.bwd_steps
+    }
+
+    /// The activation-gradient buffers the backward accumulates into, which
+    /// MUST be zeroed before it runs.
+    pub fn bwd_clears(&self) -> &[DeviceBuffer] {
+        &self.bwd_clears
+    }
+
     pub fn config(&self) -> &VqganConfig {
         &self.cfg
     }

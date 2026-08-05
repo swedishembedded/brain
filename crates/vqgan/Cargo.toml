@@ -15,6 +15,7 @@ brain-kernels.workspace = true
 brain-vae.workspace = true
 brain-wm-core.workspace = true
 brain-checkpoint.workspace = true
+brain-data.workspace = true
 brain-imaging.workspace = true
 # `caps.rs` — the serving contract's capability surface (`docs/serving-contract.md`).
 brain-capability.workspace = true
