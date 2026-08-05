@@ -374,22 +374,31 @@ impl Outcome {
 /// A progress update emitted while a streaming action runs. `delta` carries a
 /// per-token text fragment for streaming generation (`None` for plain step
 /// progress); a front-end appends deltas to reconstruct the running output.
+/// `event` carries a structured, out-of-band progress payload — e.g. a
+/// tool-call event surfaced mid-generation — for updates that don't fit the
+/// plain-text `delta` shape; `None` for ordinary step/token progress.
 #[derive(Clone, Debug)]
 pub struct Progress {
     pub step: u32,
     pub total: u32,
     pub message: String,
     pub delta: Option<String>,
+    pub event: Option<serde_json::Value>,
 }
 
 impl Progress {
     /// A plain step update (no token payload).
     pub fn step(step: u32, total: u32, message: impl Into<String>) -> Progress {
-        Progress { step, total, message: message.into(), delta: None }
+        Progress { step, total, message: message.into(), delta: None, event: None }
     }
     /// A streaming token: `text` is the new fragment carried in `delta`.
     pub fn token(step: u32, total: u32, text: impl Into<String>) -> Progress {
-        Progress { step, total, message: "token".into(), delta: Some(text.into()) }
+        Progress { step, total, message: "token".into(), delta: Some(text.into()), event: None }
+    }
+    /// A structured out-of-band progress payload (e.g. a tool-call event
+    /// surfaced during streaming generation), carried in `event`.
+    pub fn event(step: u32, total: u32, v: serde_json::Value) -> Progress {
+        Progress { step, total, message: "event".into(), delta: None, event: Some(v) }
     }
 }
 
