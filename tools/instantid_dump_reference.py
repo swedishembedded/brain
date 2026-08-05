@@ -105,12 +105,20 @@ def main():
     # `to_v_ip` are bias-free and map the 2048-wide ID tokens into the site's
     # hidden size; the reference adds `scale * ip_out` to the text-attention
     # result (attention_processor.py: `hidden_states + self.scale * ip_hidden_states`).
+    # ONE SITE PER DISTINCT WIDTH, not the first two. SDXL's 70 attn2 modules
+    # come in two hidden sizes (640 and 1280), and `heads = hidden // 64` differs
+    # between them (10 vs 20) — gating only one width cannot catch a
+    # width-dependent bug. See docs/lessons.md #4.
+    by_width = {}
+    for k in ip_attn:
+        if k.endswith(".to_k_ip.weight"):
+            by_width.setdefault(tuple(ip_attn[k].shape)[0], k.split(".")[0])
+    print(f"site widths: {sorted(by_width)} -> indices {[by_width[w] for w in sorted(by_width)]}",
+          file=sys.stderr)
+
     sites = {}
-    for key in ("1.to_k_ip.weight", "3.to_k_ip.weight"):
-        if key not in ip_attn:
-            continue
-        idx = key.split(".")[0]
-        wk, wv = ip_attn[f"{idx}.to_k_ip.weight"], ip_attn[f"{idx}.to_v_ip.weight"]
+    for idx in [by_width[w] for w in sorted(by_width)]:
+        wk, wv = ip_attn[f"{idx}.to_k_ip.weight"], ip_attn[f"{idx}.to_v_ip.weight"]  # noqa: E501
         hidden = wk.shape[0]
         n_img = 12
         q = torch.randn(1, n_img, hidden, generator=g)

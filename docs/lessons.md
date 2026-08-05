@@ -56,6 +56,13 @@ d_model=64` was the fix, plus a checkpoint-free tiny gate at those dims.
 The same rule catches the `kv_rows == num_queries + 1` trap in the IP-Adapter
 resampler: sizing k/v at `num_queries` is shape-legal only at one query.
 
+It applies to *which fixtures you gate*, not only to their dims. InstantID's 70
+cross-attention sites come in two widths (640 and 1280) and `heads = hidden / 64`
+differs between them — the first draft dumped sites 1 and 3, which are **both
+640**, so a width-dependent bug would have passed. The dumper now picks one site
+per distinct width and the test **discovers the indices from the goldens** and
+asserts it saw ≥2 widths, so a re-dump cannot silently stop gating one.
+
 ## 5. Run every gradcheck on BOTH backends
 
 A `var<workgroup>` + `workgroupBarrier()` reduction with no barrier-free sibling

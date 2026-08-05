@@ -218,3 +218,115 @@ impl Resampler {
         self.gpu.read(&t.buf, t.off + t.len)[t.off..].to_vec()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Decoupled cross-attention
+// ---------------------------------------------------------------------------
+
+/// One SDXL cross-attention site's **decoupled** ID branch.
+///
+/// Decoupled is the load-bearing word, and both wrong readings still run and
+/// still produce a face:
+///
+/// * it does **not replace** the text cross-attention;
+/// * the ID tokens are **not concatenated** onto the text tokens.
+///
+/// It is a SECOND attention over the same queries, with its own `k`/`v`
+/// projections, whose result the caller adds with its own scale —
+/// `hidden = text_attn + scale * ip_attn` (upstream
+/// `attention_processor.py::IPAttnProcessor`). There is no `to_out` on this
+/// branch: the shared one is applied to the sum afterwards, so [`SiteAttn::run`]
+/// returns the pre-`to_out` context exactly as the reference's
+/// `ip_hidden_states` does.
+///
+/// The scale is deliberately NOT applied here. It is per-call (and often
+/// scheduled over sampling steps), while this object is per-site and built once.
+pub struct SiteAttn {
+    gpu: Gpu,
+    k: RowKernels,
+    cfg: crate::config::SiteConfig,
+    num_queries: usize,
+    kv_w: DeviceBuffer,
+    id: DeviceBuffer,
+    kv: DeviceBuffer,
+    q: DeviceBuffer,
+    scores: DeviceBuffer,
+    probs: DeviceBuffer,
+    ctx: DeviceBuffer,
+    max_img: usize,
+}
+
+impl SiteAttn {
+    /// `kv_w` is the FUSED `[2*hidden, token_dim]` weight from
+    /// [`crate::import::validate_sites`] — `vstack(to_k_ip, to_v_ip)`, which is
+    /// what makes one linear produce the `k | v` row layout
+    /// `attn_apply_cross` reads (`kv_stride = 2*hidden`, `v_off = hidden`).
+    pub fn new_on(
+        gpu: Gpu,
+        names: &[(&str, &str)],
+        cfg: crate::config::SiteConfig,
+        num_queries: usize,
+        max_img: usize,
+        kv_w: &[f32],
+    ) -> SiteAttn {
+        let k = RowKernels::resolve("instantid", names);
+        let hidden = cfg.hidden;
+        assert_eq!(kv_w.len(), 2 * hidden * cfg.token_dim, "instantid: fused kv weight size");
+        assert_eq!(hidden % 64, 0, "instantid: site hidden {hidden} is not a multiple of head_dim 64");
+        let w = gpu.storage(kv_w.len() as u64);
+        gpu.write_f32(&w, kv_w);
+        let heads = hidden / 64;
+        SiteAttn {
+            id: gpu.storage((num_queries * cfg.token_dim) as u64),
+            kv: gpu.storage((num_queries * 2 * hidden) as u64),
+            q: gpu.storage((max_img * hidden) as u64),
+            scores: gpu.storage((heads * max_img * num_queries) as u64),
+            probs: gpu.storage((heads * max_img * num_queries) as u64),
+            ctx: gpu.storage((max_img * hidden) as u64),
+            gpu,
+            k,
+            cfg,
+            num_queries,
+            kv_w: w,
+            max_img,
+        }
+    }
+
+    /// Upload the ID tokens. Once per identity, not once per step — the `k`/`v`
+    /// projection depends only on them, so it is recorded here and reused.
+    pub fn set_id(&self, id: &[f32]) {
+        assert_eq!(id.len(), self.num_queries * self.cfg.token_dim, "instantid: id token slab");
+        self.gpu.write_f32(&self.id, id);
+    }
+
+    /// `ip_out[n_img, hidden]` for the given image queries — the term the caller
+    /// scales and adds to the text cross-attention's output.
+    pub fn run(&self, q: &[f32], n_img: usize) -> Vec<f32> {
+        let hidden = self.cfg.hidden;
+        assert!(n_img <= self.max_img, "instantid: {n_img} image rows > max_img {}", self.max_img);
+        assert_eq!(q.len(), n_img * hidden, "instantid: query slab");
+        self.gpu.write_f32(&self.q, q);
+        let e = RowEmit::new(&self.gpu, self.k, EPS);
+        let mut s = Vec::new();
+        // One linear over the FUSED weight produces `[nq, 2*hidden]` laid out as
+        // k | v per row — the layout the cross-attention kernels expect.
+        e.linear(&mut s, &self.id, 0, &self.kv_w, None, &self.kv, 0, self.num_queries, self.cfg.token_dim, 2 * hidden);
+        e.cross_attn(&mut s, &self.q, 0, &self.kv, &self.scores, &self.probs, &self.ctx, hidden / 64, 64, n_img, self.num_queries);
+        self.gpu.submit(&[], &s);
+        self.gpu.read(&self.ctx, n_img * hidden)
+    }
+
+    /// The projected `k` and `v` for the uploaded ID tokens, de-interleaved —
+    /// the parity ladder's view into the fused buffer.
+    pub fn read_kv(&self) -> (Vec<f32>, Vec<f32>) {
+        let hidden = self.cfg.hidden;
+        let fused = self.gpu.read(&self.kv, self.num_queries * 2 * hidden);
+        let mut k = Vec::with_capacity(self.num_queries * hidden);
+        let mut v = Vec::with_capacity(self.num_queries * hidden);
+        for r in fused.chunks(2 * hidden) {
+            k.extend_from_slice(&r[..hidden]);
+            v.extend_from_slice(&r[hidden..]);
+        }
+        (k, v)
+    }
+}

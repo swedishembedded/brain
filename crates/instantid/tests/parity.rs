@@ -130,3 +130,94 @@ fn resampler_forward_matches_the_reference() {
     eprintln!("Resampler: {} comparisons, {failed} failed, worst {worst_at} at cosine {worst:.10}", stages.len());
     assert_eq!(failed, 0, "worst {worst_at} at cosine {worst:.10}");
 }
+
+/// The decoupled branch at both SDXL cross-attention widths.
+///
+/// The reference computes `k = to_k_ip(id)`, `v = to_v_ip(id)`, attends the
+/// image queries over them, and returns the context WITHOUT a `to_out` — the
+/// shared one is applied to `text_attn + scale * ip_out` afterwards. This gates
+/// exactly that term.
+#[test]
+fn decoupled_attention_matches_the_reference() {
+    let gp = testdata("instantid/resampler.safetensors");
+    if !gp.exists() {
+        eprintln!("SKIP: {} absent", gp.display());
+        return;
+    }
+    let Ok(ckpt) = std::env::var("BRAIN_INSTANTID") else {
+        eprintln!("SKIP: BRAIN_INSTANTID unset");
+        return;
+    };
+    if !std::path::Path::new(&ckpt).exists() {
+        eprintln!("SKIP: {ckpt} does not exist");
+        return;
+    }
+
+    let tensors = checkpoint::torchpt::read(&ckpt).expect("read ip-adapter.bin");
+    let mut shapes: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut data: HashMap<String, Vec<f32>> = HashMap::new();
+    for t in tensors {
+        if let Some(rest) = t.name.strip_prefix("ip_adapter.") {
+            shapes.insert(rest.to_string(), t.shape.clone());
+            data.insert(rest.to_string(), t.data);
+        }
+    }
+    let sites = instantid::import::validate_sites(&shapes, data).expect("site coverage");
+    eprintln!("instantid: {} decoupled sites", sites.cfg.len());
+
+    let g = checkpoint::safetensors::read(gp.to_str().unwrap()).expect("read goldens");
+    let golden = |n: &str| -> Option<&Vec<f32>> { g.iter().find(|t| t.name == n).map(|t| &t.data) };
+    let id_tokens = golden("id_tokens").expect("golden id_tokens");
+
+    // Gate whichever sites the dumper chose — it picks ONE PER DISTINCT WIDTH
+    // (640 and 1280 on SDXL), because `heads = hidden / 64` differs between them
+    // and one width cannot catch a width-dependent bug. Discovering them from
+    // the goldens rather than hardcoding indices means a re-dump that changes
+    // the representative sites does not silently stop gating a width.
+    let mut idxs: Vec<usize> = g
+        .iter()
+        .filter_map(|t| t.name.strip_prefix("site").and_then(|r| r.strip_suffix("_out")))
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    idxs.sort_unstable();
+    assert!(!idxs.is_empty(), "goldens carry no site*_out");
+
+    let gpu = gpu_core::testgpu::dev(KERNELS);
+    let mut checked = 0usize;
+    let mut widths: Vec<usize> = Vec::new();
+    for idx in idxs {
+        let Some(want_out) = golden(&format!("site{idx}_out")) else { continue };
+        let sc = sites.cfg.iter().find(|s| s.index == idx).expect("site in checkpoint").clone();
+        let q = golden(&format!("site{idx}_q")).expect("golden q");
+        let n_img = q.len() / sc.hidden;
+        widths.push(sc.hidden);
+
+        let a = instantid::model::SiteAttn::new_on(
+            gpu.share(),
+            KERNELS,
+            sc.clone(),
+            id_tokens.len() / sc.token_dim,
+            n_img,
+            &sites.kv[&idx],
+        );
+        a.set_id(id_tokens);
+        let got = a.run(q, n_img);
+        let (gk, gv) = a.read_kv();
+
+        for (tag, got, want) in [
+            (format!("site{idx}_k"), &gk, golden(&format!("site{idx}_k")).expect("golden k")),
+            (format!("site{idx}_v"), &gv, golden(&format!("site{idx}_v")).expect("golden v")),
+            (format!("site{idx}_out"), &got, want_out),
+        ] {
+            let c = cosine(got, want);
+            eprintln!("  {tag:14} (hidden {:4})  cosine={c:.10}  max_abs={:.3e}", sc.hidden, max_abs(got, want));
+            assert!(c >= GATE, "{tag} cosine {c:.10}");
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no site goldens were compared");
+    widths.sort_unstable();
+    widths.dedup();
+    assert!(widths.len() >= 2, "only width(s) {widths:?} gated — SDXL has two, and heads = hidden/64 differs");
+    eprintln!("Decoupled attention: {checked} comparisons over widths {widths:?}, 0 failed");
+}
