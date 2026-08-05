@@ -14,6 +14,7 @@ pub mod q8;
 pub mod sample;
 pub mod serve;
 pub mod finetune;
+pub mod lora;
 pub mod shard;
 pub mod toolcall_eval;
 

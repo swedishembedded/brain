@@ -25,6 +25,18 @@ pub struct Adapter {
     pub rank: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// LoRA scaling factor (the effective update is `(alpha/rank)·B·A`).
+    /// Additive: absent on any card written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alpha: Option<f32>,
+    /// Which base projections this adapter targets (matched by leaf name,
+    /// e.g. `["wq","wk","wv","wo"]`), matching `qwen::LoraCfg::targets`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<String>>,
+    /// The bench dataset this adapter was trained on
+    /// (`sha256:...`, bench's `dataset_id`), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataset_id: Option<String>,
 }
 
 /// Declared input/output modalities.
@@ -366,7 +378,14 @@ mod tests {
 
     fn sample_card() -> ModelCard {
         ModelCard {
-            adapter: Some(Adapter { kind: "lora".into(), rank: Some(16), base: Some("qwen3".into()) }),
+            adapter: Some(Adapter {
+                kind: "lora".into(),
+                rank: Some(16),
+                base: Some("qwen3".into()),
+                alpha: Some(32.0),
+                targets: Some(vec!["wq".into(), "wk".into(), "wv".into(), "wo".into()]),
+                dataset_id: Some("sha256:abc123".into()),
+            }),
             capabilities: vec!["text".into(), "chat".into()],
             modalities: Some(Modalities { input: vec!["text".into()], output: vec!["text".into()] }),
             context_length: Some(32768),
