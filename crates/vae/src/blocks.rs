@@ -94,6 +94,21 @@ pub const NEXT_SLOT: usize = KERNELS.len();
 /// into a wrong pipeline the moment [`KERNELS`] grows an entry in the middle.
 pub const ATTN_BIDIR_SLOTS: (usize, usize, usize) = (K_ATTN_SCORES, K_ATTN_SOFTMAX, K_ATTN_APPLY);
 
+/// The tiled-GEMM slot inside [`KERNELS`] — `matmul_reg3`, which the conv
+/// lowering dispatches and which is the tiled kernel any caller layering on
+/// [`kernels_with`] should hand to [`model::block::pick_gemm`].
+///
+/// Exported because the alternative is registering a *second* tiled GEMM
+/// alongside this one, which is what `crates/unet` did: it carried both this
+/// kernel and its own `matmul_reg2`, and every `nn.Linear` in the model went to
+/// the slower of the two. `matmul_reg3` is `matmul_reg2` with the shared-memory
+/// bank conflicts removed — same `Params`, same `@workgroup_size(256)`, same
+/// dispatch arithmetic, bit-identical output — and it measured faster at all
+/// twelve shapes swept from `[1,4096,4096]` to `[8192,320,320]` (1.08x-1.30x).
+/// There is no shape where preferring `matmul_reg2` is correct; see
+/// `docs/lessons.md` #17.
+pub const MATMUL_REG3_SLOT: usize = K_MATMUL;
+
 /// The backward kernels the reverse walk of a train-mode [`Builder`] dispatches,
 /// in [`grad::BwdIds`] order. A crate that trains these blocks appends this
 /// block to its kernel set and hands `grad::BwdIds::at(base)` to

@@ -173,11 +173,9 @@ pub fn gemm_ab(m: u32, k: u32, n: u32, reps: usize) {
     gpu.write_f32(&xb, &x);
     gpu.write_f32(&wb, &w);
 
-    let cands: [(&str, u32); 3] = [
-        ("matmul", m * n),
-        ("matmul_reg2", m.div_ceil(128) * n.div_ceil(128) * 256),
-        ("matmul_gemv", n * 64),
-    ];
+    let tiles = m.div_ceil(128) * n.div_ceil(128) * 256;
+    let cands: [(&str, u32); 4] =
+        [("matmul", m * n), ("matmul_reg2", tiles), ("matmul_reg3", tiles), ("matmul_gemv", n * 64)];
     println!("A/B at [m {m}, k {k}, n {n}]  ({} MFLOP)", 2.0 * m as f64 * k as f64 * n as f64 / 1e6);
     println!("{:<16} {:>10} {:>12} {:>14}", "kernel", "ms", "GFLOP/s", "max|Δ| vs naive");
     let mut reference: Option<Vec<f32>> = None;

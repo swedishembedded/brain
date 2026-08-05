@@ -65,20 +65,25 @@ use crate::hostemb;
 /// [`KERNELS`]'s length; the const constructor checks it at compile time.
 const K_LAYERNORM: usize = vae::blocks::NEXT_SLOT;
 const K_MATMUL: usize = vae::blocks::NEXT_SLOT + 1;
-const K_MATMUL_REG2: usize = vae::blocks::NEXT_SLOT + 2;
-const K_BIAS_ADD: usize = vae::blocks::NEXT_SLOT + 3;
-const K_GELU_ERF: usize = vae::blocks::NEXT_SLOT + 4;
-const K_MUL: usize = vae::blocks::NEXT_SLOT + 5;
-const K_XSCORES: usize = vae::blocks::NEXT_SLOT + 6;
-const K_XSOFTMAX: usize = vae::blocks::NEXT_SLOT + 7;
-const K_XAPPLY: usize = vae::blocks::NEXT_SLOT + 8;
-const K_FLASH: usize = vae::blocks::NEXT_SLOT + 9;
-const K_FLASH_SPLIT: usize = vae::blocks::NEXT_SLOT + 10;
-const K_ADD_CHAN: usize = vae::blocks::NEXT_SLOT + 11;
-const K_CONCAT2: usize = vae::blocks::NEXT_SLOT + 12;
+const K_BIAS_ADD: usize = vae::blocks::NEXT_SLOT + 2;
+const K_GELU_ERF: usize = vae::blocks::NEXT_SLOT + 3;
+const K_MUL: usize = vae::blocks::NEXT_SLOT + 4;
+const K_XSCORES: usize = vae::blocks::NEXT_SLOT + 5;
+const K_XSOFTMAX: usize = vae::blocks::NEXT_SLOT + 6;
+const K_XAPPLY: usize = vae::blocks::NEXT_SLOT + 7;
+const K_FLASH: usize = vae::blocks::NEXT_SLOT + 8;
+const K_FLASH_SPLIT: usize = vae::blocks::NEXT_SLOT + 9;
+const K_ADD_CHAN: usize = vae::blocks::NEXT_SLOT + 10;
+const K_CONCAT2: usize = vae::blocks::NEXT_SLOT + 11;
+
+/// The tiled GEMM every `nn.Linear` here dispatches: the ONE the shared block
+/// set already registers. This crate used to register its own `matmul_reg2`
+/// beside it and send every linear there — the slower of two kernels it was
+/// already carrying (`docs/lessons.md` #17).
+const K_MATMUL_REG: usize = vae::blocks::MATMUL_REG3_SLOT;
 // `layernorm_rows` occupies the last slot and is resolved BY NAME through
 // `block::LayerNormIds::resolve_fwd`, never indexed directly.
-const N_EXTRA: usize = 14;
+const N_EXTRA: usize = 13;
 
 /// This model's kernel set: the shared block kernels (slots `0..NEXT_SLOT`,
 /// copied — never restated — by [`vae::blocks::kernels_with`]) then the extras
@@ -91,7 +96,6 @@ const fn kernel_set() -> [(&'static str, &'static str); vae::blocks::NEXT_SLOT +
     let mut k = vae::blocks::kernels_with::<{ vae::blocks::NEXT_SLOT + N_EXTRA }>();
     k[K_LAYERNORM] = ("layernorm", kernels::LAYERNORM);
     k[K_MATMUL] = ("matmul", kernels::MATMUL);
-    k[K_MATMUL_REG2] = ("matmul_reg2", kernels::MATMUL_REG2);
     k[K_BIAS_ADD] = ("bias_add", kernels::BIAS_ADD);
     k[K_GELU_ERF] = ("gelu_erf", kernels::GELU_ERF);
     k[K_MUL] = ("mul", kernels::MUL);
@@ -102,7 +106,7 @@ const fn kernel_set() -> [(&'static str, &'static str); vae::blocks::NEXT_SLOT +
     k[K_FLASH_SPLIT] = ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT);
     k[K_ADD_CHAN] = ("add_chan_bcast", kernels::ADD_CHAN_BCAST);
     k[K_CONCAT2] = ("concat2", kernels::CONCAT2);
-    k[vae::blocks::NEXT_SLOT + 13] = ("layernorm_rows", kernels::LAYERNORM_ROWS);
+    k[vae::blocks::NEXT_SLOT + 12] = ("layernorm_rows", kernels::LAYERNORM_ROWS);
     k
 }
 
@@ -218,7 +222,7 @@ impl<'a> Rec<'a> {
     pub fn linear(&mut self, prefix: &str, m: u32, k: u32, n: u32, bias: bool, x: &DeviceBuffer) -> DeviceBuffer {
         let w = self.b.dev(&format!("{prefix}.weight"));
         let y = self.b.act((m as u64) * (n as u64));
-        let (kind, threads) = block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG2, false);
+        let (kind, threads) = block::pick_gemm(m as usize, n as usize, K_MATMUL, K_MATMUL_REG, false);
         let g = self.b.gpu();
         self.b.push_step(g.step(kind, &[x, &w, &y], &[m, k, n], threads));
         if bias {
@@ -1078,7 +1082,7 @@ mod tests {
         for (slot, name) in [
             (super::K_LAYERNORM, "layernorm"),
             (super::K_MATMUL, "matmul"),
-            (super::K_MATMUL_REG2, "matmul_reg2"),
+            (super::K_MATMUL_REG, "matmul_reg3"),
             (super::K_BIAS_ADD, "bias_add"),
             (super::K_GELU_ERF, "gelu_erf"),
             (super::K_MUL, "mul"),
