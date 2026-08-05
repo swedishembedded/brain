@@ -41,6 +41,11 @@ pub fn finetune(
     let base_w = c.by_role("");
 
     // Build the init map for THIS mode's parameter set, seeded from the base.
+    // BRAIN_OFFLOAD_ADAM is a process-global switch (the same convention
+    // `model::parallel`/`model::shard` use) -- save/restore the caller's prior
+    // value rather than clobbering it, so a nested or later call in the same
+    // process doesn't silently inherit this call's mode.
+    let prev_off = std::env::var("BRAIN_OFFLOAD_ADAM").ok();
     match mode {
         Mode::FullOffload => {
             std::env::set_var("BRAIN_OFFLOAD_ADAM", "1");
@@ -62,6 +67,10 @@ pub fn finetune(
     }
 
     let m = Qwen::new(cfg, opts.batch_size, opts.block_size, &init);
+    match prev_off {
+        Some(v) => std::env::set_var("BRAIN_OFFLOAD_ADAM", v),
+        None => std::env::remove_var("BRAIN_OFFLOAD_ADAM"),
+    }
     let (train, _val, bcfg, _vocab) = model::load_dataset(dir, opts)?;
     let mut rng = Rng::new(opts.seed ^ 0xA5A5_5A5A);
 

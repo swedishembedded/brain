@@ -198,14 +198,23 @@ impl QwenConfig {
     }
 
     pub fn to_json(&self) -> Value {
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "model": "qwen",
             "vocab_size": self.vocab, "block_size": self.block_size, "n_layers": self.n_layers,
             "d_model": self.d_model, "n_heads": self.n_heads, "n_kv_heads": self.n_kv_heads,
             "head_dim": self.head_dim, "d_ff": self.d_ff,
             "rope_theta": self.rope_theta, "rms_norm_eps": self.rms_eps,
             "tie_word_embeddings": self.tie_embeddings
-        })
+        });
+        // A LoRA checkpoint must round-trip its adapter shape, or `param_list()`
+        // rebuilds without the `.lora_a`/`.lora_b` names on load and the trained
+        // adapters are silently dropped (see crates/qwen/tests/lora_roundtrip.rs).
+        if let Some(l) = &self.lora {
+            v["lora"] = serde_json::json!({
+                "rank": l.rank, "alpha": l.alpha, "targets": l.targets,
+            });
+        }
+        v
     }
 
     pub fn from_json(c: &Value) -> QwenConfig {
@@ -226,7 +235,14 @@ impl QwenConfig {
             // Qwen3 default (QK-norm on, bias-free); a Qwen2 loader sets these.
             qk_norm: c["qk_norm"].as_bool().unwrap_or(true),
             attn_bias: c["attention_bias"].as_bool().unwrap_or(false),
-            lora: None, // LoRA is a training-time choice, not stored in the checkpoint config
+            lora: c.get("lora").and_then(|l| l.as_object()).map(|l| LoraCfg {
+                rank: l["rank"].as_u64().unwrap_or(0) as u32,
+                alpha: l["alpha"].as_f64().unwrap_or(0.0) as f32,
+                targets: l["targets"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
+            }),
         }
         .with_defaults()
     }
