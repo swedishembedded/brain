@@ -55,6 +55,7 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),
     ("region_copy", kernels::REGION_COPY),
     ("add2", kernels::ADD2),
+    ("axpy", kernels::AXPY),
 ];
 
 /// LayerNorm epsilon. `nn.LayerNorm`'s default, which the reference does not
@@ -328,5 +329,159 @@ impl SiteAttn {
             v.extend_from_slice(&r[hidden..]);
         }
         (k, v)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The adapter: all 70 sites, as one CrossAttnInject
+// ---------------------------------------------------------------------------
+
+/// Every decoupled site, ready to be injected into a backbone's cross-attention.
+///
+/// Implements [`model::attninject::CrossAttnInject`], so `crates/unet` consumes
+/// it without knowing what an identity is — the same way `crates/controlnet`'s
+/// residuals are consumed without the backbone knowing what a control image is.
+///
+/// # The scale is folded into `v`, and that is exact
+///
+/// The reference applies a per-call `scale` to the ID branch's output. A
+/// recorded graph cannot take a per-call scalar in a kernel's `Params` (those
+/// are baked when the step is recorded), and re-recording 70 sites per sampling
+/// step to change one number would be absurd.
+///
+/// It does not need to: `ip_out = softmax(q·kᵀ/√d)·V` is **linear in `V`**, so
+/// scaling `V` by `s` scales the output by exactly `s`. [`SiteAttnSet::set_scale`]
+/// therefore re-uploads the `v` half of each fused weight scaled — one upload per
+/// site, only when the scale changes, and bit-exact rather than approximate.
+/// Scaling `k` instead would go through the softmax and be a different function
+/// entirely.
+pub struct SiteAttnSet {
+    gpu: Gpu,
+    k: RowKernels,
+    k_axpy: usize,
+    sites: Vec<crate::config::SiteConfig>,
+    /// Unscaled `[2*hidden, token_dim]` per site, kept so `set_scale` can be
+    /// re-applied from the original rather than compounding.
+    base: Vec<Vec<f32>>,
+    kv_w: Vec<DeviceBuffer>,
+    id: DeviceBuffer,
+    /// Per-site scratch: the projected kv, the score/prob slabs and the context.
+    scratch: Vec<SiteScratch>,
+    num_queries: usize,
+    /// Atomic because the trait is `Send + Sync` (a backbone may be shared) and
+    /// `set_scale` takes `&self` — it writes device buffers, which is already a
+    /// shared-reference operation.
+    scale: std::sync::atomic::AtomicU32,
+}
+
+struct SiteScratch {
+    kv: DeviceBuffer,
+    scores: DeviceBuffer,
+    probs: DeviceBuffer,
+    ctx: DeviceBuffer,
+}
+
+impl SiteAttnSet {
+    /// `w` is the fused per-site weight map from [`crate::import::validate_sites`].
+    /// `max_t` bounds the query rows any site will see (the largest latent
+    /// resolution in the backbone).
+    pub fn new_on(
+        gpu: Gpu,
+        names: &[(&str, &str)],
+        w: &crate::import::SiteWeights,
+        num_queries: usize,
+        max_t: usize,
+    ) -> SiteAttnSet {
+        let k = RowKernels::resolve("instantid", names);
+        let k_axpy = idx(names, "axpy");
+        let mut base = Vec::with_capacity(w.cfg.len());
+        let mut kv_w = Vec::with_capacity(w.cfg.len());
+        let mut scratch = Vec::with_capacity(w.cfg.len());
+        for s in &w.cfg {
+            assert_eq!(s.hidden % 64, 0, "instantid: site hidden {} is not a multiple of head_dim 64", s.hidden);
+            let fused = w.kv.get(&s.index).unwrap_or_else(|| panic!("instantid: no fused kv for site {}", s.index));
+            let b = gpu.storage(fused.len() as u64);
+            gpu.write_f32(&b, fused);
+            let heads = s.hidden / 64;
+            scratch.push(SiteScratch {
+                kv: gpu.storage((num_queries * 2 * s.hidden) as u64),
+                scores: gpu.storage((heads * max_t * num_queries) as u64),
+                probs: gpu.storage((heads * max_t * num_queries) as u64),
+                ctx: gpu.storage((max_t * s.hidden) as u64),
+            });
+            base.push(fused.clone());
+            kv_w.push(b);
+        }
+        let token_dim = w.cfg[0].token_dim;
+        SiteAttnSet {
+            id: gpu.storage((num_queries * token_dim) as u64),
+            gpu,
+            k,
+            k_axpy,
+            sites: w.cfg.clone(),
+            base,
+            kv_w,
+            scratch,
+            num_queries,
+            scale: std::sync::atomic::AtomicU32::new(1.0f32.to_bits()),
+        }
+    }
+
+    /// Upload the ID tokens produced by [`Resampler`]. Once per identity.
+    pub fn set_id(&self, id: &[f32]) {
+        assert_eq!(id.len(), self.num_queries * self.sites[0].token_dim, "instantid: id token slab");
+        self.gpu.write_f32(&self.id, id);
+    }
+
+    /// Set the ID strength. Folded into each site's `v` rows — exact, see the
+    /// type docs. Re-applied from the unscaled weights, so calling it twice does
+    /// not compound.
+    pub fn set_scale(&self, s: f32) {
+        for (i, site) in self.sites.iter().enumerate() {
+            let half = site.hidden * site.token_dim;
+            let mut w = self.base[i].clone();
+            for x in &mut w[half..] {
+                *x *= s;
+            }
+            self.gpu.write_f32(&self.kv_w[i], &w);
+        }
+        self.scale.store(s.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn scale(&self) -> f32 {
+        f32::from_bits(self.scale.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// The kernels [`SiteAttnSet`] dispatches on the BACKBONE's device, beyond what
+/// a UNet already registers: the row-emitter set plus `axpy` for the add.
+pub const INJECT_EXTRA: &[(&str, &str)] = &[("axpy", kernels::AXPY)];
+
+impl model::attninject::CrossAttnInject for SiteAttnSet {
+    fn kernels(&self) -> &'static [(&'static str, &'static str)] {
+        INJECT_EXTRA
+    }
+
+    fn sites(&self) -> usize {
+        self.sites.len()
+    }
+
+    fn inject(&self, steps: &mut Vec<Step>, gpu: &Gpu, k: usize, q: &DeviceBuffer, ctx: &DeviceBuffer, t: u32, c: u32) {
+        let site = &self.sites[k];
+        assert_eq!(
+            site.hidden as u32, c,
+            "instantid: site {k} is {} wide but the backbone's cross-attention is {c}",
+            site.hidden
+        );
+        let sc = &self.scratch[k];
+        let e = RowEmit::new(gpu, self.k, EPS);
+        let (nq, hidden) = (self.num_queries, site.hidden);
+        // One linear over the FUSED weight yields `[nq, 2*hidden]` = k | v per
+        // row, which is the layout the cross-attention kernels read.
+        e.linear(steps, &self.id, 0, &self.kv_w[k], None, &sc.kv, 0, nq, site.token_dim, 2 * hidden);
+        e.cross_attn(steps, q, 0, &sc.kv, &sc.scores, &sc.probs, &sc.ctx, hidden / 64, 64, t as usize, nq);
+        // ctx += ip_ctx. The scale is already inside `v`, so this is a plain add
+        // (`axpy` with s = 1) rather than a second scaling.
+        steps.push(gpu.step(self.k_axpy, &[ctx, &sc.ctx], &[t * c, 1.0f32.to_bits()], t * c));
     }
 }

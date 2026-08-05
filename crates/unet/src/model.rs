@@ -159,6 +159,18 @@ pub struct Rec<'a> {
     /// path (see the module header).
     slab: Option<(DeviceBuffer, DeviceBuffer)>,
     t_enc: u32,
+    /// An optional extra term added into every cross-attention context, before
+    /// the block's shared `to_out` — the consumer half of
+    /// `model::attninject::CrossAttnInject`.
+    ///
+    /// It cannot be a pre-supplied input the way a control residual is: the
+    /// adapter attends the per-site QUERY, which only exists inside
+    /// [`Rec::transformer_block`]. So the graph calls it there, at the point
+    /// that tensor is live.
+    inject: Option<&'a dyn model::attninject::CrossAttnInject>,
+    /// Which cross-attention site the recorder is on. Counted in graph order,
+    /// which is the order the released `ip_adapter` keys are numbered in.
+    site: usize,
     /// `silu(emb)` — computed once by [`Rec::conditioning`], because
     /// `ResnetBlock2D` applies the SAME nonlinearity to the SAME `temb` in
     /// every one of the 17 resnets. `None` until then, so a resnet recorded
@@ -187,7 +199,7 @@ impl<'a> Rec<'a> {
         let b = Builder::new(gpu, tensors, cfg.norm_eps, cfg.norm_num_groups, BlockNames::diffusers(), taps);
         let ln = block::LayerNormIds::resolve_fwd(gpu, K_LAYERNORM);
         let flash = block::FlashIds { bidir: K_FLASH, split: Some(K_FLASH_SPLIT) };
-        Rec { b, ln, flash, coop, slab, t_enc, temb_act: None }
+        Rec { b, ln, flash, coop, slab, t_enc, inject: None, site: 0, temb_act: None }
     }
 
     /// The underlying block builder — conv / GroupNorm / SiLU / add / upsample.
@@ -468,8 +480,31 @@ impl<'a> Rec<'a> {
         let kv = self.linear(&format!("{prefix}.attn2.kv"), t_enc, cross_dim, 2 * c, false, enc);
         let ctx2 = self.b.act(n);
         self.cross_attention(heads, hd, c, t, &q, &kv, &ctx2);
-        self.b.free(n, q);
+        // The adapter attends the SAME queries, so `q` must outlive the text
+        // attention when one is installed.
+        let q_for_inject = q.clone();
+        if self.inject.is_none() {
+            self.b.free(n, q);
+        }
         self.b.free((t_enc as u64) * 2 * (c as u64), kv);
+        // The decoupled term goes in HERE — on the context, before the shared
+        // `to_out`, which is where IPAttnProcessor puts it. Adding after
+        // `to_out`, or concatenating the adapter's tokens onto the text tokens,
+        // both run and both produce a plausible image.
+        if let Some(inj) = self.inject {
+            let k = self.site;
+            let gpu = self.b.gpu();
+            let mut extra = Vec::new();
+            inj.inject(&mut extra, gpu, k, &q_for_inject, &ctx2, t, c);
+            for st in extra {
+                self.b.push_step(st);
+            }
+            self.b.tap(format!("{tap}.attn2_injected"), &ctx2, t * c);
+        }
+        self.site += 1;
+        if self.inject.is_some() {
+            self.b.free(n, q_for_inject.clone());
+        }
         let ao2 = self.linear(&format!("{prefix}.attn2.to_out"), t, c, c, true, &ctx2);
         self.b.tap(format!("{tap}.attn2"), &ao2, t * c);
         self.b.free(n, ctx2);
@@ -686,12 +721,21 @@ pub struct Unet {
     /// order. Empty unless the graph was built by [`Unet::new_controlled`].
     control_in: Vec<DeviceBuffer>,
     control_shapes: Vec<(u32, u32, u32)>,
+    /// Cross-attention sites the recorder emitted — the number an injection
+    /// adapter must serve. Counted from the graph, never from a formula.
+    sites: usize,
     out: DeviceBuffer,
     steps: Vec<Step>,
     taps: Vec<(String, DeviceBuffer, usize)>,
 }
 
 impl Unet {
+    /// How many cross-attention sites this backbone recorded — what
+    /// [`Unet::new_injected`]'s adapter must serve.
+    pub fn cross_attention_sites(&self) -> usize {
+        self.sites
+    }
+
     /// Record the graph for a `h × w` latent and `t_enc` text tokens.
     ///
     /// `taps` records every stage output for the parity ladder; it pins buffers
@@ -715,6 +759,46 @@ impl Unet {
     /// The mid residual *is* added to the running state, because there the
     /// residual list and the hidden state are the same tensor.
     #[allow(clippy::too_many_arguments)]
+    /// [`Unet::new_controlled`], plus an adapter that contributes an extra term
+    /// to every cross-attention context.
+    ///
+    /// This is a DIFFERENT seam from `control`, and deliberately so. A control
+    /// residual is a pre-supplied device input, because it depends on nothing
+    /// the backbone computes. A cross-attention adapter attends the per-site
+    /// QUERY, which only exists inside the transformer block — so it is called
+    /// during recording, at the point that tensor is live, through
+    /// `model::attninject::CrossAttnInject`.
+    ///
+    /// The adapter's site count is checked against the number of cross-attention
+    /// blocks the recorder ACTUALLY emitted — not against a formula over the
+    /// config, which could disagree with the graph. A checkpoint built for a
+    /// different UNet therefore fails at construction with two numbers rather
+    /// than mid-forward with a shape.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_injected(
+        gpu: Gpu,
+        cfg: UNetConfig,
+        tensors: &Tensors,
+        h: u32,
+        w: u32,
+        t_enc: u32,
+        taps: bool,
+        control: bool,
+        inject: &dyn model::attninject::CrossAttnInject,
+    ) -> Unet {
+        // The adapter dispatches on OUR device, so it can only use kernels this
+        // Gpu was built with. Check now, naming the missing one, rather than
+        // letting the adapter's own resolve panic mid-record.
+        for (name, _) in inject.kernels() {
+            assert!(
+                gpu.kernel_index(name).is_some(),
+                "unet: the injection adapter needs the `{name}` kernel, but this Gpu was not built with it — \
+                 construct it from the union of unet::KERNELS and the adapter's (see model::attninject)"
+            );
+        }
+        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, control, Some(inject))
+    }
+
     pub fn new_controlled(
         gpu: Gpu,
         cfg: UNetConfig,
@@ -724,6 +808,21 @@ impl Unet {
         t_enc: u32,
         taps: bool,
         control: bool,
+    ) -> Unet {
+        Unet::build(gpu, cfg, tensors, h, w, t_enc, taps, control, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        gpu: Gpu,
+        cfg: UNetConfig,
+        tensors: &Tensors,
+        h: u32,
+        w: u32,
+        t_enc: u32,
+        taps: bool,
+        control: bool,
+        inject: Option<&dyn model::attninject::CrossAttnInject>,
     ) -> Unet {
         let levels = cfg.levels();
         let scale = 1u32 << (levels - 1);
@@ -742,6 +841,7 @@ impl Unet {
         // Slabs, sized for the worst level that actually records a transformer.
         let s_words = attn_slab_words(&cfg, h, w, true);
         let mut r = Rec::new(&gpu, &cfg, tensors, t_enc, s_words, taps);
+        r.inject = inject;
 
         r.conditioning(&cfg, &temb_in, &aug_in);
 
@@ -827,8 +927,21 @@ impl Unet {
         let out = r.b.conv("conv_out", c0, cfg.out_channels, 3, 1, ch, cw, &sa);
         r.b.tap("conv_out".into(), &out, cfg.out_channels * ch * cw);
 
+        // The graph is the authority on how many cross-attention sites exist —
+        // a formula over the config could disagree with what was recorded.
+        if let Some(inj) = inject {
+            assert_eq!(
+                r.site,
+                inj.sites(),
+                "unet: recorded {} cross-attention sites but the adapter serves {}",
+                r.site,
+                inj.sites()
+            );
+        }
+        let sites = r.site;
         let (steps, taps) = r.into_blocks().finish();
         Unet {
+            sites,
             gpu,
             cfg,
             hw: (h, w),
