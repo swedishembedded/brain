@@ -12,6 +12,8 @@ path = "src/lib.rs"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+minijinja.workspace = true
+minijinja-contrib.workspace = true
 # Read the tokenizer embedded in a GGUF's `tokenizer.ggml.*` KV so a `.gguf`
 # chat model can build its byte-level BPE (QwenBpe::from_gguf) with no sibling
 # tokenizer.json. checkpoint does not depend on data, so this adds no cycle.

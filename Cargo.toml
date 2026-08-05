@@ -192,6 +192,16 @@ brain-wgsl-cpu = { path = "crates/wgsl-cpu" }
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Jinja2 execution of a checkpoint's OWN `tokenizer_config.json` chat_template
+# string — the generic path for chat rendering, so a new model family needs no
+# hand-ported template code (see crates/data/src/chat_template.rs). Its own
+# `preserve_order` feature keeps a rendered `tojson` byte-identical to the
+# source JSON's key order; deliberately does NOT touch serde_json's own
+# (workspace-wide) `preserve_order` feature -- transcode straight into
+# minijinja::Value instead of through serde_json::Value, so this stays
+# isolated and does not change key order anywhere else in the workspace.
+minijinja = { version = "2", features = ["loop_controls", "json", "preserve_order"] }
+minijinja-contrib = { version = "2", features = ["pycompat"] }
 # Safetensors read/write (HF's official pure-Rust container) + half for
 # f16/bf16<->f32. Both are wasm-compatible.
 safetensors = "0.8"

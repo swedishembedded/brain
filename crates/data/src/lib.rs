@@ -15,6 +15,7 @@
 
 pub mod binio;
 pub mod chat;
+pub mod chat_template;
 pub mod toolcall;
 pub mod bpe;
 pub mod clip_bpe;
@@ -22,6 +23,7 @@ pub mod episode;
 pub mod imageset;
 pub mod loader;
 pub mod mlm;
+pub mod qwen_chat;
 pub mod qwen_tokenizer;
 pub mod rng;
 pub mod tokenizer;
