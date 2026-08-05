@@ -38,7 +38,7 @@ cd "$ROOT"
 # reattached a summary line to the wrong list item, which is a documentation
 # defect rather than a lint fix.
 #
-# 207 -> 185 by fixing, not by suppressing: bfe00f3, 86bf582, and the yolo doc pass.
+# 207 -> 183 by fixing, not by suppressing: bfe00f3, 86bf582, and the yolo doc pass.
 #
 # LOWER THIS WHENEVER YOU CLEAR WARNINGS. Raising it is almost always wrong: it
 # is how a real regression gets absorbed. It was raised exactly once, 179 -> 207,
@@ -49,7 +49,7 @@ cd "$ROOT"
 # `git diff -U0 origin/main HEAD` hunks), and zero are in any of the thirteen
 # crates the branch created. Anything short of that evidence means fix the
 # warnings, not the number.
-BASELINE="${BASELINE:-185}"
+BASELINE="${BASELINE:-183}"
 
 # Force a full re-lint: cargo replays diagnostics only for units it re-runs, so
 # a warm target dir would otherwise report a small fraction of the real count.
