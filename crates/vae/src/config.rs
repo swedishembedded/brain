@@ -26,10 +26,12 @@ pub struct VaeConfig {
     pub scaling_factor: f32,
     pub shift_factor: f32,
     /// 1×1 `quant_conv` (2·latent → 2·latent) after the encoder `conv_out`
-    /// (FLUX.2: true; Z-Image/FLUX.1: false).
+    /// (SDXL/SD1.x and FLUX.2: true; Z-Image/FLUX.1: false). Defaults to TRUE
+    /// when the config omits it — see [`VaeConfig::from_json`].
     pub use_quant_conv: bool,
     /// 1×1 `post_quant_conv` (latent → latent) before the decoder `conv_in`
-    /// (FLUX.2: true; Z-Image/FLUX.1: false).
+    /// (SDXL/SD1.x and FLUX.2: true; Z-Image/FLUX.1: false). Defaults to TRUE
+    /// when the config omits it — see [`VaeConfig::from_json`].
     pub use_post_quant_conv: bool,
     /// Latent pixel-unshuffle patch `[pi, pj]` (FLUX.2: `[2,2]` → the DiT sees
     /// `prod(patch)·latent` channels). `[1,1]` = no packing.
@@ -64,11 +66,21 @@ impl VaeConfig {
                 .unwrap_or(true),
             scaling_factor: f("scaling_factor", 0.3611),
             shift_factor: f("shift_factor", 0.1159),
-            use_quant_conv: v.get("use_quant_conv").and_then(|x| x.as_bool()).unwrap_or(false),
+            // DEFAULT TRUE, because that is `AutoencoderKL.__init__`'s default
+            // (`use_quant_conv: bool = True, use_post_quant_conv: bool = True`)
+            // and a config.json only carries the keys it OVERRIDES. Every model
+            // that omits them — the whole SDXL/SD1.x family — therefore means
+            // true, while the models that want them off (FLUX.1, Z-Image) say
+            // `false` explicitly. Defaulting to false silently dropped SDXL's
+            // `post_quant_conv`, a 4x4 mixing of the latent channels: the decode
+            // stayed in a plausible [-1,1] range and was UNCORRELATED with the
+            // reference (cosine -0.03), so the picture had roughly the right
+            // structure and unusable colour. See `docs/lessons.md` #16.
+            use_quant_conv: v.get("use_quant_conv").and_then(|x| x.as_bool()).unwrap_or(true),
             use_post_quant_conv: v
                 .get("use_post_quant_conv")
                 .and_then(|x| x.as_bool())
-                .unwrap_or(false),
+                .unwrap_or(true),
             patch_size: v
                 .get("patch_size")
                 .and_then(|x| x.as_array())
