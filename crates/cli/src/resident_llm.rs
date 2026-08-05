@@ -375,6 +375,11 @@ pub struct QwenResident {
     id: String,
     path: String,
     tokenizer: String,
+    /// A named LoRA adapter's own weight file (`qwen::lora::save_adapter`'s
+    /// output), when this resident is the ADAPTER's catalog entry rather than
+    /// the base's -- folded into the base tensors at `activate` (see that
+    /// method's doc). `None` for a plain base/quant resident.
+    adapter: Option<String>,
 }
 
 impl QwenResident {
@@ -382,13 +387,20 @@ impl QwenResident {
         let path = std::env::var("BRAIN_QWEN_WEIGHTS").ok().filter(|p| !p.is_empty())?;
         let tokenizer = std::env::var("BRAIN_QWEN_TOKENIZER").ok().unwrap_or_default();
         // See GptResident::from_env's comment: env-loaded, no upstream provenance.
-        Some(Self::from_card(&path, &ModelCard::new("brain/qwen", "qwen"), Some(&tokenizer)))
+        Some(Self::from_card(&path, &ModelCard::new("brain/qwen", "qwen"), Some(&tokenizer), None))
     }
 
     /// Construct under the card's id. `tokenizer` is the sibling `tokenizer.json`
-    /// (empty/None defers the "set a tokenizer" error to `activate`).
-    pub fn from_card(path: &str, card: &ModelCard, tokenizer: Option<&str>) -> QwenResident {
-        QwenResident { id: card.id.clone(), path: path.to_string(), tokenizer: tokenizer.unwrap_or_default().to_string() }
+    /// (empty/None defers the "set a tokenizer" error to `activate`). `adapter`
+    /// is the adapter's own weight file when `card.id` names one
+    /// (`brain_modelstore::LocalModel::adapter`) -- `None` for a plain base.
+    pub fn from_card(path: &str, card: &ModelCard, tokenizer: Option<&str>, adapter: Option<&str>) -> QwenResident {
+        QwenResident {
+            id: card.id.clone(),
+            path: path.to_string(),
+            tokenizer: tokenizer.unwrap_or_default().to_string(),
+            adapter: adapter.filter(|a| !a.is_empty()).map(str::to_string),
+        }
     }
 
     fn ctx() -> u32 {
@@ -421,11 +433,27 @@ impl ResidentModel for QwenResident {
             return Err("qwen: no tokenizer (set BRAIN_QWEN_TOKENIZER, or use a GGUF with an embedded tokenizer)".to_string());
         };
         let eos = tok.encode("<|im_end|>").first().copied();
-        // Decode-only KV-cache load (see `Qwen::from_reader_decode`'s doc comment):
-        // this instance only ever drives `generate_kv_stream` (incremental
-        // `step`/`prefill`), never the batched forward `from_reader_inference` sizes
-        // buffers for.
-        let model = on_device(device, || qwen::model::Qwen::from_reader_decode(&reader, Self::ctx()))?;
+        let ctx = Self::ctx();
+        let model = on_device(device, || -> Result<qwen::model::Qwen, String> {
+            match &self.adapter {
+                // Decode-only KV-cache load (see `Qwen::from_reader_decode`'s doc
+                // comment): this instance only ever drives `generate_kv_stream`
+                // (incremental `step`/`prefill`), never the batched forward
+                // `from_reader_inference` sizes buffers for.
+                None => Ok(qwen::model::Qwen::from_reader_decode(&reader, ctx)),
+                // Fold the adapter's delta into the base tensors first (the same
+                // fold `qwen::eval::score_chat` uses to score one) -- the result
+                // is an ordinary frozen decode-only model, zero extra inference
+                // cost versus the base once folded.
+                Some(a) => {
+                    let mut tensors = checkpoint::load(&self.path).by_role("");
+                    let mut cfg = qwen::config::QwenConfig::from_json(&reader.config());
+                    qwen::lora::fold_adapter_into(&mut tensors, a).map_err(|e| format!("qwen: folding adapter {a}: {e}"))?;
+                    cfg.lora = None;
+                    Ok(qwen::model::Qwen::from_tensors_decode(cfg, &tensors, ctx))
+                }
+            }
+        })??;
         Ok(Box::new(QwenInstance { model, tok, eos }))
     }
 }

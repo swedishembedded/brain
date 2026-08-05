@@ -415,6 +415,17 @@ impl Qwen {
         Qwen::new_impl(cfg, 1, ctx, reader, false, shard, false, true)
     }
 
+    /// [`Self::from_reader_decode`], but from an in-memory tensor map instead of
+    /// a mmap'd checkpoint file -- for serving a named LoRA adapter, whose delta
+    /// must be folded into the base tensors (`qwen::lora::fold_adapter_into`)
+    /// before a decode-only KV-cache model can be built from the result. Pays
+    /// the whole-model host copy `from_reader_decode` avoids, but only for the
+    /// (rare, one-off-per-activation) adapter-serving path.
+    pub fn from_tensors_decode(cfg: QwenConfig, tensors: &HashMap<String, Vec<f32>>, ctx: u32) -> Qwen {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, false, true)
+    }
+
     /// [`Self::load_inference`] with the int8 numeric tier: per-channel weight
     /// quantisation + dynamic activation quant, for both batched forwards and
     /// KV-cache decode (the m=1 packed GEMV).

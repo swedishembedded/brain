@@ -68,7 +68,7 @@ pub fn discover(dir: &Path) -> Vec<Arc<dyn ResidentModel>> {
     let mut locals = brain_modelstore::Store::new(dir.to_path_buf()).scan();
     locals.sort_by(|a, b| a.weights.cmp(&b.weights)); // deterministic catalog order
     for local in &locals {
-        register(&local.weights, &local.card, &local.dir, &mut seen, &mut out);
+        register(&local.weights, &local.card, &local.dir, local.adapter.as_deref(), &mut seen, &mut out);
     }
 
     discover_flat(dir, &mut seen, &mut out);
@@ -125,7 +125,7 @@ fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn 
     // Sorted for a deterministic catalog order.
     singles.sort();
     for path in &singles {
-        register(path, &card_of(path), dir, seen, out);
+        register(path, &card_of(path), dir, None, seen, out);
     }
     for (base, mut group) in shards {
         group.sort_by_key(|(idx, _)| *idx);
@@ -133,7 +133,7 @@ fn discover_flat(dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn 
         // Prefer the `<base>.safetensors.index.json` handle if it exists.
         let index = dir.join(format!("{base}.safetensors.index.json"));
         let handle = if index.exists() { index } else { first.clone() };
-        register(&handle, &card_of(first), dir, seen, out);
+        register(&handle, &card_of(first), dir, None, seen, out);
     }
 }
 
@@ -161,8 +161,10 @@ fn card_of(path: &Path) -> Option<ModelCard> {
     }
 }
 
-/// Dispatch one carded file to its family's resident and push it (deduped by id).
-fn register(weights: &Path, card: &Option<ModelCard>, dir: &Path, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn ResidentModel>>) {
+/// Dispatch one carded file to its family's resident and push it (deduped by
+/// id). `adapter` is the adapter's own weight file when `card.id` names one
+/// (`brain_modelstore::LocalModel::adapter`) -- `None` for a plain base/quant.
+fn register(weights: &Path, card: &Option<ModelCard>, dir: &Path, adapter: Option<&Path>, seen: &mut BTreeSet<String>, out: &mut Vec<Arc<dyn ResidentModel>>) {
     let wp = weights.to_string_lossy();
     let card = match card {
         Some(c) => c,
@@ -187,7 +189,8 @@ fn register(weights: &Path, card: &Option<ModelCard>, dir: &Path, seen: &mut BTr
         None
     };
 
-    match resident_for(&wp, card, tokenizer.as_deref()) {
+    let adapter = adapter.map(|p| p.to_string_lossy().into_owned());
+    match resident_for(&wp, card, tokenizer.as_deref(), adapter.as_deref()) {
         Some(r) => out.push(r),
         None => {
             seen.remove(&card.id); // free the id if the family declined
@@ -210,12 +213,13 @@ fn brain_family(reported: &str) -> &str {
 
 /// Construct the resident matching `card.family` (normalized via
 /// [`brain_family`]), or log + `None` for an unknown / not-yet-dispatchable
-/// family.
-fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>) -> Option<Arc<dyn ResidentModel>> {
+/// family. `adapter` (a named LoRA adapter's own weight file) is meaningful
+/// only to the `qwen` family today -- other families ignore it.
+fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapter: Option<&str>) -> Option<Arc<dyn ResidentModel>> {
     match brain_family(&card.family) {
         "gpt" => Some(Arc::new(crate::resident_llm::GptResident::from_card(weights, card, tokenizer))),
         "glm" => Some(Arc::new(crate::resident_llm::GlmResident::from_card(weights, card, tokenizer))),
-        "qwen" => Some(Arc::new(crate::resident_llm::QwenResident::from_card(weights, card, tokenizer))),
+        "qwen" => Some(Arc::new(crate::resident_llm::QwenResident::from_card(weights, card, tokenizer, adapter))),
         "lfm" => match crate::resident_lfm::LfmResident::from_card(weights, card, tokenizer) {
             Ok(l) => Some(Arc::new(l)),
             Err(e) => {
@@ -238,7 +242,8 @@ pub(crate) fn resident_for_local(local: &brain_modelstore::LocalModel) -> Option
     let card = local.card.as_ref()?;
     let weights = local.weights.to_str()?;
     let tokenizer = local.tokenizer.as_deref().and_then(|p| p.to_str());
-    resident_for(weights, card, tokenizer)
+    let adapter = local.adapter.as_deref().and_then(|p| p.to_str());
+    resident_for(weights, card, tokenizer, adapter)
 }
 
 #[cfg(test)]
@@ -471,6 +476,48 @@ mod tests {
             !got.contains(&"VendorB/RepoY".to_string()),
             "B registered without its own tokenizer -- tokenizer leaked across repos: {got:?}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A base Qwen model and a named LoRA adapter trained on top of it must
+    /// register as TWO distinct, independently selectable catalog entries
+    /// (mirrors `brain_modelstore::Store`'s own
+    /// `scan_finds_a_base_model_and_its_adapter_as_two_distinct_entries`,
+    /// but as the CLI-facing gate: this is what `brain caps`/`brain do`
+    /// actually walk).
+    #[test]
+    fn discover_surfaces_a_base_and_its_named_adapter_as_two_distinct_entries() {
+        let dir = tmp_dir("adapter-catalog");
+        let repo = dir.join("Qwen").join("Qwen3-Toy");
+        std::fs::create_dir_all(&repo).unwrap();
+        let base_card = ModelCard::new("Qwen/Qwen3-Toy", "qwen");
+        st::save_safetensors(
+            repo.join("model.brain.safetensors").to_str().unwrap(),
+            &[("w".into(), vec![1u64], vec![0.0f32])],
+            &serde_json::json!({}),
+            Some(&base_card),
+        )
+        .unwrap();
+        write_tokenizer(&repo);
+
+        let adapter_dir = repo.join("adapters").join("swedishembedded-com").join("generic-sft").join("latest");
+        std::fs::create_dir_all(&adapter_dir).unwrap();
+        let mut adapter_card = ModelCard::new("Qwen/Qwen3-Toy:swedishembedded-com:generic-sft:latest", "qwen");
+        adapter_card.variant_of = Some("Qwen/Qwen3-Toy".to_string());
+        adapter_card.adapter = Some(st::Adapter { kind: "lora".into(), rank: Some(4), base: Some("Qwen/Qwen3-Toy".to_string()), alpha: Some(8.0), targets: Some(vec!["wq".into()]), dataset_id: None });
+        st::save_safetensors(
+            adapter_dir.join("adapter.brain.safetensors").to_str().unwrap(),
+            &[("blocks.0.attn.wq.weight.lora_a".into(), vec![1u64], vec![0.1f32])],
+            &serde_json::json!({"rank": 4, "alpha": 8.0}),
+            Some(&adapter_card),
+        )
+        .unwrap();
+
+        let residents = discover(&dir);
+        let got = ids(&residents);
+        assert!(got.contains(&"Qwen/Qwen3-Toy".to_string()), "base missing: {got:?}");
+        assert!(got.contains(&"Qwen/Qwen3-Toy:swedishembedded-com:generic-sft:latest".to_string()), "adapter missing: {got:?}");
+        assert_eq!(got.len(), 2, "expected exactly base + adapter, got: {got:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
