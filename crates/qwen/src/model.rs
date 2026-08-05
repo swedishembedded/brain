@@ -358,6 +358,12 @@ pub struct Qwen {
     /// run in int8 (weights ~4× smaller — fits the fp32-encoder-too-big case on
     /// one card) and are absent from the fp32 `ps`. None ⇒ all-fp32 path.
     q8: Option<crate::q8::Q8>,
+    /// True for a [`Self::from_reader_decode`] build: activations are sized for
+    /// a single token and `scores`/`probs` for `n_heads·ctx` (KV-cache decode
+    /// only — the KV cache is the only ctx-scaled allocation). The batched
+    /// forward/backward entry points assert against being called on such an
+    /// instance instead of silently reading/writing past the smaller buffers.
+    decode_only: bool,
 }
 
 impl Qwen {
@@ -372,7 +378,7 @@ impl Qwen {
             .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
         let cfg = QwenConfig::from_json(&reader.config());
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &reader, true, shard, false)
+        Qwen::new_impl(cfg, b, t, &reader, true, shard, false, false)
     }
 
     /// Load an **inference-only** model: parameters are frozen (weights only, no
@@ -389,7 +395,24 @@ impl Qwen {
     pub fn from_reader_inference(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Qwen {
         let cfg = QwenConfig::from_json(&reader.config());
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, reader, false, shard, false)
+        Qwen::new_impl(cfg, b, t, reader, false, shard, false, false)
+    }
+
+    /// Streaming **decode-only** load: like [`Self::from_reader_inference`]
+    /// (mmap-backed, one tensor at a time), but shaped for incremental
+    /// KV-cache decode only ([`Self::step`]/[`Self::prefill`]/[`Self::step_embed`])
+    /// rather than the batched forward. Activations are sized for a single
+    /// token (`n = 1`) instead of `b·t`, and `scores`/`probs` for `n_heads·ctx`
+    /// instead of `n_heads·ctx²` — the KV cache (`[ctx, kv_dim]` per layer) is
+    /// the only allocation that scales with `ctx`. No backward buffers and no
+    /// `logits`/`d_logits` buffer (the LM head is applied host-side; see
+    /// `sample::generate_kv_stream`). Calling a batched forward/backward entry
+    /// point on the result panics loudly rather than reading/writing past the
+    /// smaller buffers — use the KV-cache decode API instead.
+    pub fn from_reader_decode(reader: &checkpoint::weightio::WeightReader, ctx: u32) -> Qwen {
+        let cfg = QwenConfig::from_json(&reader.config());
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen::new_impl(cfg, 1, ctx, reader, false, shard, false, true)
     }
 
     /// [`Self::load_inference`] with the int8 numeric tier: per-channel weight
@@ -411,12 +434,12 @@ impl Qwen {
             .unwrap_or_else(|e| panic!("cannot open {path}: {e}"));
         let cfg = QwenConfig::from_json(&reader.config());
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &reader, false, shard, i8)
+        Qwen::new_impl(cfg, b, t, &reader, false, shard, i8, false)
     }
 
     pub fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, init, true, shard, false)
+        Qwen::new_impl(cfg, b, t, init, true, shard, false, false)
     }
 
     /// Build a single pipeline **stage**: only the layers (and endpoint weights)
@@ -425,7 +448,7 @@ impl Qwen {
     /// `shard.gpu_index` names the canonical physical card (device registry);
     /// `Shard::ANY_GPU` keeps the ambient selection.
     pub fn new_shard(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, train: bool, shard: Shard) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, train, shard, false)
+        Qwen::new_impl(cfg, b, t, init, train, shard, false, false)
     }
 
     /// Inference-only shard with the 7 per-layer linears quantized to int8 (DP4A).
@@ -433,11 +456,17 @@ impl Qwen {
     /// weights → ~9.5 GB resident) fits a single 24 GB card — where the fp32
     /// encoder (~30 GB resident on non-ReBAR Pascal) does not. Frozen, no LoRA.
     pub fn new_shard_i8(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, shard: Shard) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, false, shard, true)
+        Qwen::new_impl(cfg, b, t, init, false, shard, true, false)
     }
 
-    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, i8: bool) -> Qwen {
+    /// The shared builder behind every constructor. `decode_only` (set only by
+    /// [`Self::from_reader_decode`]) shapes the model for single-token KV-cache
+    /// decode instead of the batched forward: activations at `n = 1`,
+    /// `scores`/`probs` at `n_heads·ctx` (not `n_heads·ctx²`), no backward
+    /// scratch, no `logits`/`d_logits`/CE buffers.
+    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, i8: bool, decode_only: bool) -> Qwen {
         assert!(!(i8 && train), "int8 path is inference-only");
+        assert!(!(decode_only && train), "decode-only build is inference-only");
         // An explicitly-placed shard binds its canonical card through the
         // device registry; `Shard::ANY_GPU` (the `Shard::whole` default) keeps
         // the ambient selection (`--device` / scoped `with_gpu`).
@@ -494,13 +523,16 @@ impl Qwen {
         // parameter took Role::Offload).
         let offload_opt: std::cell::RefCell<Option<optim::OffloadAdam>> = std::cell::RefCell::new(None);
 
-        let n = (b * t) as u64;
+        // Decode-only: activations at n=1 (one token) instead of b·t, and the
+        // score/prob extent at n_heads·ctx instead of n_heads·ctx² — the KV
+        // cache below is the only allocation left that scales with ctx.
+        let n = if decode_only { 1u64 } else { (b * t) as u64 };
         let d = cfg.d_model as u64;
         let ff = cfg.d_ff as u64;
         let v = cfg.vocab as u64;
         let hq = cfg.q_dim() as u64;
         let hkv = cfg.kv_dim() as u64;
-        let bht2 = (b * cfg.n_heads * t * t) as u64;
+        let bht2 = if decode_only { cfg.n_heads as u64 * t as u64 } else { (b * cfg.n_heads * t * t) as u64 };
         let st = |x: u64| gpu.storage(x);
 
         let tokens = gpu.buffer(
@@ -524,7 +556,7 @@ impl Qwen {
         for i in 0..=cfg.n_layers as usize {
             let live = i >= shard.start && i <= shard.end;
             res.push(if live { st(n * d) } else { st(1) });
-            dres.push(if live { st(n * d) } else { st(1) });
+            dres.push(if live && !decode_only { st(n * d) } else { st(1) });
         }
         let dummy_layer = || Layer {
             xn1: st(1), q_pre: st(1), q: st(1), k_pre: st(1), k: st(1), v: st(1),
@@ -565,6 +597,11 @@ impl Qwen {
         // `n·vocab`, ~311 MB each at vocab 152k, block 512).
         let head = shard.head;
         let hd_v = |x: u64| if head { st(x) } else { st(1) };
+        // Decode-only builds skip the CE-head buffers (the LM head is applied
+        // host-side, see `sample::generate_kv_stream`) and all backward scratch
+        // (backward never runs — `train` is forced false), regardless of `head`.
+        let hd_or_dummy = |x: u64| if decode_only { st(1) } else { hd_v(x) };
+        let bwd = |x: u64| if decode_only { st(1) } else { st(x) };
 
         // Int8 linears (inference): quantize+upload the owned layers' 7 matmul
         // weights from `init`; the fp32 store already excludes them (plist filter).
@@ -631,29 +668,32 @@ impl Qwen {
             proj: st(n * d),
             mlp_out: st(n * d),
             scores: st(bht2),
-            kmask: st(t as u64),
+            // Not ctx-scaled in the decode-only build: unused there (no padded
+            // encoder mask during single-token decode), so the only allocation
+            // left that scales with ctx is the KV cache below.
+            kmask: if decode_only { st(1) } else { st(t as u64) },
             kmask_on: Cell::new(false),
             coop: gpu.caps().workgroup_reductions,
             xn_final: hd_v(n * d),
-            logits: hd_v(n * v),
-            ce_buf: hd_v(n),
+            logits: hd_or_dummy(n * v),
+            ce_buf: hd_or_dummy(n),
             dres,
-            d_logits: hd_v(n * v),
-            ce_stats: hd_v(n * 2),
-            d_xn: st(n * d),
-            d_tmp: st(n * d),
-            dxmid: st(n * d),
-            d_ctx: st(n * hq),
-            d_scores: st(bht2),
-            d_q: st(n * hq),
-            d_k: st(n * hkv),
-            dq_pre: st(n * hq),
-            dk_pre: st(n * hkv),
-            d_v: st(n * hkv),
-            d_h: st(n * ff),
-            d_gate_pre: st(n * ff),
-            d_up: st(n * ff),
-            inv: st(inv_rows),
+            d_logits: hd_or_dummy(n * v),
+            ce_stats: hd_or_dummy(n * 2),
+            d_xn: bwd(n * d),
+            d_tmp: bwd(n * d),
+            dxmid: bwd(n * d),
+            d_ctx: bwd(n * hq),
+            d_scores: bwd(bht2),
+            d_q: bwd(n * hq),
+            d_k: bwd(n * hkv),
+            dq_pre: bwd(n * hq),
+            dk_pre: bwd(n * hkv),
+            d_v: bwd(n * hkv),
+            d_h: bwd(n * ff),
+            d_gate_pre: bwd(n * ff),
+            d_up: bwd(n * ff),
+            inv: bwd(inv_rows),
             lora_a: st(n * r),
             lora_da: st(n * r),
             lora_out: st(n * max_out),
@@ -664,9 +704,15 @@ impl Qwen {
             vcache,
             dec_pos: Cell::new(0),
             q8,
+            decode_only,
             gpu,
         };
-        m.fwd_steps = m.forward_steps(m.b, m.t);
+        // Decode-only builds never call the batched forward_steps (its dispatch
+        // sizes assume the b·t-sized buffers this build deliberately doesn't
+        // have) — the KV-cache decode path builds its own tape per call
+        // (`decode_submit`). `forward()`/`run_forward()` assert against being
+        // called on a decode-only instance rather than relying on this being empty.
+        m.fwd_steps = if decode_only { Vec::new() } else { m.forward_steps(m.b, m.t) };
         m.bwd_steps = if train { m.build_backward_steps() } else { Vec::new() };
         m
     }
@@ -859,6 +905,11 @@ impl Qwen {
     }
 
     fn forward_steps(&self, b_use: u32, t_use: u32) -> Vec<Step> {
+        assert!(
+            !self.decode_only,
+            "forward_steps: batched forward called on a decode-only-built Qwen \
+             (activations sized for n=1, no logits buffer) — use step/prefill/step_embed instead"
+        );
         let c = &self.cfg;
         let n = b_use * t_use;
         let d = c.d_model;
@@ -1023,6 +1074,7 @@ impl Qwen {
     }
 
     pub fn forward(&self) -> f32 {
+        assert!(!self.decode_only, "Qwen::forward: batched forward called on a decode-only-built model; use step/prefill/step_embed instead");
         self.gpu.submit(&[], &self.fwd_steps);
         let n = (self.b * self.t) as usize;
         let losses = self.gpu.read(&self.ce_buf, n);
@@ -1030,12 +1082,14 @@ impl Qwen {
     }
 
     pub fn backward(&self) {
+        assert!(!self.decode_only, "Qwen::backward: batched backward called on a decode-only-built model (no backward buffers were allocated)");
         let n = self.b * self.t;
         self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab, IGNORE, f(self.count.get())]);
         self.gpu.submit(&[], &self.bwd_steps);
     }
 
     fn build_backward_steps(&self) -> Vec<Step> {
+        assert!(!self.decode_only, "build_backward_steps: no backward buffers on a decode-only-built Qwen");
         let c = &self.cfg;
         let n = self.b * self.t;
         let d = c.d_model;
@@ -1189,6 +1243,7 @@ impl Qwen {
     }
     /// Run the forward graph without reading the loss (non-head stages).
     pub fn run_forward(&self) {
+        assert!(!self.decode_only, "Qwen::run_forward: batched forward called on a decode-only-built model");
         self.gpu.submit(&[], &self.fwd_steps);
     }
     /// Read this stage's OUTPUT residual `res[end]` (for the next stage's input).
@@ -1286,6 +1341,7 @@ impl Qwen {
     /// (it drives `ce_grad_stats`); other stages consume `dres[end]` written by
     /// [`Self::write_out_dres`].
     pub fn run_backward(&self) {
+        assert!(!self.decode_only, "Qwen::run_backward: batched backward called on a decode-only-built model (no backward buffers were allocated)");
         if self.shard.head {
             let n = self.b * self.t;
             self.gpu.write(&self.ce_grad_uni, &[n, self.cfg.vocab, IGNORE, f(self.count.get())]);
@@ -1806,6 +1862,105 @@ mod tests {
             assert_eq!(eager.read_weight(name), streamed.read_weight(name), "weight {name}");
             assert_eq!(&streamed.read_weight(name), &init[name], "streamed {name} vs source");
         }
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Writes `cfg`'s `init` to a temp `.st` file and opens a [`checkpoint::weightio::WeightReader`]
+    /// on it — the fixture [`streaming_load_matches_eager`] already established
+    /// for exercising the streaming (`from_reader_*`) constructors.
+    fn write_reader_fixture(cfg: &QwenConfig, init: &HashMap<String, Vec<f32>>, tag: &str) -> std::path::PathBuf {
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+            init.iter().map(|(n, v)| (n.clone(), vec![v.len() as u64], v.clone())).collect();
+        let path = std::env::temp_dir().join(format!("qwen-decode-only-{tag}-{}.st", std::process::id()));
+        checkpoint::st::save_safetensors(path.to_str().unwrap(), &tensors, &cfg.to_json(), None).unwrap();
+        path
+    }
+
+    /// Read `n` elements from `buf`, or `None` if that panics (out of bounds) —
+    /// lets a test prove a buffer's TRUE extent (not just that it's big enough)
+    /// by bracketing a read that must succeed against one that must not.
+    fn try_read(gpu: &Gpu, buf: &DeviceBuffer, n: usize) -> Option<Vec<f32>> {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // silence the expected panic's backtrace
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gpu.read(buf, n)));
+        std::panic::set_hook(prev);
+        r.ok()
+    }
+
+    /// [`Qwen::from_reader_decode`] must build activations at `n=1` and
+    /// `scores`/`probs` at `n_heads·ctx` (NOT `n_heads·ctx²`) — the KV cache is
+    /// the only ctx-scaled allocation. For each buffer, reading exactly the
+    /// decode-shaped extent succeeds while reading the old training-shaped
+    /// (`b·t` / `ctx²`) extent is out of bounds — proving the buffer genuinely
+    /// IS the smaller size, not merely that it's big enough to under-read.
+    #[test]
+    fn from_reader_decode_sizes_activations_and_scores_for_decode_not_prefill() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny(); // n_heads=4, d_model=16
+        let init = crate::init::init_weights(&cfg, 5);
+        let path = write_reader_fixture(&cfg, &init, "sizes");
+        let ctx = 12u32;
+        let reader = checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).unwrap();
+        let dec = Qwen::from_reader_decode(&reader, ctx);
+        assert!(dec.decode_only);
+        assert_eq!(dec.ctx_len(), ctx as usize);
+
+        let d = cfg.d_model as usize;
+        let nh = cfg.n_heads as usize;
+
+        // Activation (n=1): `xn1` is `[1, d_model]`, not `[ctx, d_model]`.
+        assert!(try_read(&dec.gpu, &dec.layers[0].xn1, d).is_some(), "xn1 must hold at least one row");
+        assert!(try_read(&dec.gpu, &dec.layers[0].xn1, ctx as usize * d).is_none(), "xn1 must NOT be ctx-sized (n=1, not n=b*t)");
+
+        // scores/probs: `n_heads·ctx`, not `n_heads·ctx²`.
+        let decode_shaped = nh * ctx as usize;
+        let prefill_shaped = nh * ctx as usize * ctx as usize;
+        assert!(try_read(&dec.gpu, &dec.scores, decode_shaped).is_some(), "scores must hold n_heads*ctx elements");
+        assert!(try_read(&dec.gpu, &dec.scores, prefill_shaped).is_none(), "scores must NOT be n_heads*ctx^2 (the batched-forward shape)");
+        assert!(try_read(&dec.gpu, &dec.layers[0].probs, decode_shaped).is_some(), "probs must hold n_heads*ctx elements");
+        assert!(try_read(&dec.gpu, &dec.layers[0].probs, prefill_shaped).is_none(), "probs must NOT be n_heads*ctx^2");
+
+        // No `logits`/`d_logits` buffers: dummy (size-1) even though this is a
+        // head-carrying (whole) shard, because the LM head is applied host-side.
+        assert!(try_read(&dec.gpu, &dec.logits, 1).is_some());
+        assert!(try_read(&dec.gpu, &dec.logits, cfg.vocab as usize).is_none(), "logits must be a size-1 dummy on a decode-only build");
+        assert!(try_read(&dec.gpu, &dec.d_logits, 1).is_some());
+        assert!(try_read(&dec.gpu, &dec.d_logits, cfg.vocab as usize).is_none(), "d_logits must be a size-1 dummy on a decode-only build");
+
+        // The KV cache is the one allocation that DOES scale with ctx.
+        let hkv = cfg.kv_dim() as usize;
+        assert!(try_read(&dec.gpu, &dec.kcache[0], ctx as usize * hkv).is_some(), "the KV cache must still be ctx-sized");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Calling a batched forward/backward entry point on a decode-only build
+    /// must panic loudly (a mis-wire) rather than read/write past the smaller
+    /// buffers `from_reader_decode` allocated.
+    #[test]
+    fn from_reader_decode_batched_entry_points_panic() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 6);
+        let path = write_reader_fixture(&cfg, &init, "panics");
+        let reader = checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).unwrap();
+        let dec = Qwen::from_reader_decode(&reader, 12);
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.forward())).is_err(), "forward() must panic on a decode-only build");
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.run_forward())).is_err(), "run_forward() must panic on a decode-only build");
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.logits_all(&[1, 2, 3]))).is_err(), "logits_all() must panic on a decode-only build");
+        std::panic::set_hook(prev);
+
+        // The decode API itself still works (this is what the build is FOR).
+        let hidden = dec.step(1);
+        assert_eq!(hidden.len(), cfg.d_model as usize);
+
         std::fs::remove_file(&path).ok();
     }
 

@@ -46,6 +46,14 @@ pub struct QwenConfig {
     pub d_ff: u32,
     pub rope_theta: f32,
     pub rms_eps: f32,
+    /// HF `max_position_embeddings` (the checkpoint's trained RoPE extent),
+    /// carried through for reference — NOT what sizes runtime buffers (that is
+    /// `block_size`/the `t` an instance is loaded/built with; see
+    /// `import::config_from_hf`'s doc comment on why `block_size` doesn't
+    /// default to it). Defaults to `block_size` when absent from the source
+    /// (HF `config.json` predating this field, or a brain checkpoint written
+    /// before this field existed), so old checkpoints keep loading unchanged.
+    pub max_position_embeddings: u32,
     pub tie_embeddings: bool,
     /// Per-head QK-RMSNorm on q/k before RoPE. `true` for Qwen3; `false` for
     /// Qwen2 (which has no QK-norm). Governs both the forward and `param_list`.
@@ -74,6 +82,7 @@ impl QwenConfig {
             d_ff: 32,
             rope_theta: 1.0e6,
             rms_eps: 1e-6,
+            max_position_embeddings: 12,
             tie_embeddings: true,
             qk_norm: true,
             attn_bias: false,
@@ -94,6 +103,7 @@ impl QwenConfig {
             d_ff: 3072,
             rope_theta: 1.0e6,
             rms_eps: 1e-6,
+            max_position_embeddings: 1024,
             tie_embeddings: true,
             qk_norm: true,
             attn_bias: false,
@@ -116,6 +126,7 @@ impl QwenConfig {
             d_ff: 6144,
             rope_theta: 1.0e6,
             rms_eps: 1e-6,
+            max_position_embeddings: 1024,
             tie_embeddings: true,
             qk_norm: true,
             attn_bias: false,
@@ -138,6 +149,7 @@ impl QwenConfig {
             d_ff: 9728,
             rope_theta: 1.0e6,
             rms_eps: 1e-6,
+            max_position_embeddings: 1024,
             tie_embeddings: true,
             qk_norm: true,
             attn_bias: false,
@@ -161,6 +173,7 @@ impl QwenConfig {
             d_ff: 12288,
             rope_theta: 1.0e6,
             rms_eps: 1e-6,
+            max_position_embeddings: 1024,
             tie_embeddings: false,
             qk_norm: true,
             attn_bias: false,
@@ -204,6 +217,7 @@ impl QwenConfig {
             "d_model": self.d_model, "n_heads": self.n_heads, "n_kv_heads": self.n_kv_heads,
             "head_dim": self.head_dim, "d_ff": self.d_ff,
             "rope_theta": self.rope_theta, "rms_norm_eps": self.rms_eps,
+            "max_position_embeddings": self.max_position_embeddings,
             "tie_word_embeddings": self.tie_embeddings
         });
         // A LoRA checkpoint must round-trip its adapter shape, or `param_list()`
@@ -220,9 +234,10 @@ impl QwenConfig {
     pub fn from_json(c: &Value) -> QwenConfig {
         let g = |k: &str, d: u32| c[k].as_u64().map(|v| v as u32).unwrap_or(d);
         let gf = |k: &str, d: f32| c[k].as_f64().map(|v| v as f32).unwrap_or(d);
+        let block_size = g("block_size", 12);
         QwenConfig {
             vocab: g("vocab_size", 23),
-            block_size: g("block_size", 12),
+            block_size,
             n_layers: g("n_layers", 2),
             d_model: g("d_model", 16),
             n_heads: g("n_heads", 4),
@@ -231,6 +246,9 @@ impl QwenConfig {
             d_ff: g("d_ff", 32),
             rope_theta: gf("rope_theta", 1.0e6),
             rms_eps: gf("rms_norm_eps", 1e-6),
+            // Absent on brain checkpoints written before this field existed —
+            // default to `block_size` so those keep loading unchanged.
+            max_position_embeddings: g("max_position_embeddings", block_size),
             tie_embeddings: c["tie_word_embeddings"].as_bool().unwrap_or(true),
             // Qwen3 default (QK-norm on, bias-free); a Qwen2 loader sets these.
             qk_norm: c["qk_norm"].as_bool().unwrap_or(true),
@@ -259,6 +277,7 @@ impl QwenConfig {
             n_kv_heads,
             head_dim: d_model / n_heads,
             d_ff,
+            max_position_embeddings: 2048,
             rope_theta: 1.0e6,
             rms_eps: 1e-6,
             tie_embeddings: tie,

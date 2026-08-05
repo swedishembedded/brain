@@ -54,9 +54,10 @@ fn hf_to_brain(name: &str, tie: bool) -> Option<String> {
 pub fn config_from_hf(json: &str) -> Result<QwenConfig, String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
     let g = |k: &str| v[k].as_u64().map(|x| x as u32);
+    let block_size = 2048;
     let cfg = QwenConfig {
         vocab: g("vocab_size").ok_or("config: vocab_size")?,
-        block_size: 2048,
+        block_size,
         n_layers: g("num_hidden_layers").ok_or("config: num_hidden_layers")?,
         d_model: g("hidden_size").ok_or("config: hidden_size")?,
         n_heads: g("num_attention_heads").ok_or("config: num_attention_heads")?,
@@ -65,6 +66,11 @@ pub fn config_from_hf(json: &str) -> Result<QwenConfig, String> {
         d_ff: g("intermediate_size").ok_or("config: intermediate_size")?,
         rope_theta: v["rope_theta"].as_f64().unwrap_or(1.0e6) as f32,
         rms_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-6) as f32,
+        // The HF trained RoPE extent, carried through for reference (`block_size`
+        // is what actually sizes buffers — see `QwenConfig::max_position_embeddings`).
+        // Older `config.json`s lacking the key, and pre-existing brain checkpoints,
+        // fall back to `block_size` for backward compatibility.
+        max_position_embeddings: g("max_position_embeddings").unwrap_or(block_size),
         tie_embeddings: v["tie_word_embeddings"].as_bool().unwrap_or(true),
         qk_norm: true,
         attn_bias: false,

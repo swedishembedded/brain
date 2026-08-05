@@ -125,11 +125,15 @@ impl Action for GenerateAction {
         if ids.is_empty() {
             return Err("qwen generate: empty prompt".to_string());
         }
-        // Stop token: explicit param wins (-1 disables); else the chat end token.
-        let eos = match inv.get_i64("eos") {
-            Some(e) if e >= 0 => Some(e as u32),
-            Some(_) => None,
-            None => tok.as_ref().and_then(|t| t.encode("<|im_end|>").first().copied()),
+        // Stop tokens: explicit param wins (-1 disables); else both Qwen3 EOS ids
+        // (`<|im_end|>` and `<|endoftext|>`) from the tokenizer, when present.
+        let eos: Vec<u32> = match inv.get_i64("eos") {
+            Some(e) if e >= 0 => vec![e as u32],
+            Some(_) => Vec::new(),
+            None => tok
+                .as_ref()
+                .map(|t| ["<|im_end|>", "<|endoftext|>"].iter().filter_map(|s| t.encode(s).first().copied()).collect())
+                .unwrap_or_default(),
         };
 
         // Hot path: keep the loaded model resident across calls; rebuild only when
@@ -156,7 +160,7 @@ impl Action for GenerateAction {
         // The one decode loop `brain qwen infer` uses, with a per-token stream.
         let mut rng = Rng::new(seed);
         let total = max_new as u32;
-        let gen = crate::sample::generate_kv_stream(model, &ids, max_new, temp, top_k, top_p, eos, &mut rng, &mut |i, _t| {
+        let gen = crate::sample::generate_kv_stream(model, &ids, max_new, temp, top_k, top_p, &eos, &mut rng, &mut |i, _t| {
             progress(Progress::step(i as u32 + 1, total, "token"));
             true
         });
