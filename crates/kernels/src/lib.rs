@@ -186,6 +186,8 @@ pub const CIOU_GRAD: &str = include_str!("../wgsl/ciou_grad.wgsl");
 pub const CLIP_COEF: &str = include_str!("../wgsl/clip_coef.wgsl");
 /// `wgsl/clip_coef_wg.wgsl`
 pub const CLIP_COEF_WG: &str = include_str!("../wgsl/clip_coef_wg.wgsl");
+/// `wgsl/col2im.wgsl`
+pub const COL2IM: &str = include_str!("../wgsl/col2im.wgsl");
 /// `wgsl/concat2.wgsl`
 pub const CONCAT2: &str = include_str!("../wgsl/concat2.wgsl");
 /// `wgsl/concat_split.wgsl`
@@ -334,10 +336,10 @@ pub const GN_DGB_PART: &str = include_str!("../wgsl/gn_dgb_part.wgsl");
 pub const GN_DGB2: &str = include_str!("../wgsl/gn_dgb2.wgsl");
 /// `wgsl/gn_dsum.wgsl`
 pub const GN_DSUM: &str = include_str!("../wgsl/gn_dsum.wgsl");
-/// GroupNorm backward reductions, stage 1: partial sums (barrier-free).
-pub const GN_DSUM_PART: &str = include_str!("../wgsl/gn_dsum_part.wgsl");
-/// GroupNorm backward reductions, stage 2: fold the partials.
+/// `wgsl/gn_dsum2.wgsl`
 pub const GN_DSUM2: &str = include_str!("../wgsl/gn_dsum2.wgsl");
+/// `wgsl/gn_dsum_part.wgsl`
+pub const GN_DSUM_PART: &str = include_str!("../wgsl/gn_dsum_part.wgsl");
 /// `wgsl/gn_dx.wgsl`
 pub const GN_DX: &str = include_str!("../wgsl/gn_dx.wgsl");
 /// `wgsl/gn_part.wgsl`
@@ -386,8 +388,6 @@ pub const HEAD_UNPACK: &str = include_str!("../wgsl/head_unpack.wgsl");
 pub const IM2COL: &str = include_str!("../wgsl/im2col.wgsl");
 /// `wgsl/im2col_at.wgsl`
 pub const IM2COL_AT: &str = include_str!("../wgsl/im2col_at.wgsl");
-/// col2im as a gather — the input gradient of a conv lowered to a GEMM.
-pub const COL2IM: &str = include_str!("../wgsl/col2im.wgsl");
 /// `wgsl/kv_append.wgsl`
 pub const KV_APPEND: &str = include_str!("../wgsl/kv_append.wgsl");
 /// `wgsl/kv_expand.wgsl`
@@ -528,6 +528,8 @@ pub const PAGED_KV_APPEND: &str = include_str!("../wgsl/paged_kv_append.wgsl");
 pub const PAGED_KV_APPEND_BATCHED: &str = include_str!("../wgsl/paged_kv_append_batched.wgsl");
 /// `wgsl/paged_kv_append_i8_batched.wgsl`
 pub const PAGED_KV_APPEND_I8_BATCHED: &str = include_str!("../wgsl/paged_kv_append_i8_batched.wgsl");
+/// `wgsl/paged_kv_append_i8_clipped_batched.wgsl`
+pub const PAGED_KV_APPEND_I8_CLIPPED_BATCHED: &str = include_str!("../wgsl/paged_kv_append_i8_clipped_batched.wgsl");
 /// `wgsl/pixel_shuffle.wgsl`
 pub const PIXEL_SHUFFLE: &str = include_str!("../wgsl/pixel_shuffle.wgsl");
 /// `wgsl/pixel_shuffle_dx.wgsl`
@@ -812,6 +814,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("ciou_grad", CIOU_GRAD),
     ("clip_coef", CLIP_COEF),
     ("clip_coef_wg", CLIP_COEF_WG),
+    ("col2im", COL2IM),
     ("concat2", CONCAT2),
     ("concat_split", CONCAT_SPLIT),
     ("conv1d", CONV1D),
@@ -886,8 +889,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("gn_dgb_part", GN_DGB_PART),
     ("gn_dgb2", GN_DGB2),
     ("gn_dsum", GN_DSUM),
-    ("gn_dsum_part", GN_DSUM_PART),
     ("gn_dsum2", GN_DSUM2),
+    ("gn_dsum_part", GN_DSUM_PART),
     ("gn_dx", GN_DX),
     ("gn_part", GN_PART),
     ("gn_stats", GN_STATS),
@@ -912,7 +915,6 @@ pub const ALL: &[(&str, &str)] = &[
     ("head_unpack", HEAD_UNPACK),
     ("im2col", IM2COL),
     ("im2col_at", IM2COL_AT),
-    ("col2im", COL2IM),
     ("kv_append", KV_APPEND),
     ("kv_expand", KV_EXPAND),
     ("kv_expand_bwd", KV_EXPAND_BWD),
@@ -983,6 +985,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("paged_kv_append", PAGED_KV_APPEND),
     ("paged_kv_append_batched", PAGED_KV_APPEND_BATCHED),
     ("paged_kv_append_i8_batched", PAGED_KV_APPEND_I8_BATCHED),
+    ("paged_kv_append_i8_clipped_batched", PAGED_KV_APPEND_I8_CLIPPED_BATCHED),
     ("pixel_shuffle", PIXEL_SHUFFLE),
     ("pixel_shuffle_dx", PIXEL_SHUFFLE_DX),
     ("pos_add", POS_ADD),

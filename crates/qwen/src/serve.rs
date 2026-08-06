@@ -67,6 +67,11 @@ const DECODE_ADVANCE: usize = 27;
 // ARGMAX_FINAL/ARGMAX_ROW above, so real (non-greedy) sampling reads back
 // `[bsz, TOPK_CAPACITY]` candidates instead of the whole `[bsz, vocab]` row.
 const TOPK_EXTRACT_STEP: usize = 28;
+// Calibrated int8 KV append (W3.3): identical to APPEND_I8 except each
+// kv-head's per-token online absmax is capped at a calibrated ceiling
+// (`KvCalib`) before deriving the scale. Selected in place of APPEND_I8 only
+// when `self.kv_calib.is_some()` — APPEND_I8 itself is untouched.
+const APPEND_I8_CLIPPED: usize = 29;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -98,6 +103,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("decode_feed", kernels::DECODE_FEED),
     ("decode_advance", kernels::DECODE_ADVANCE),
     ("topk_extract_step", kernels::TOPK_EXTRACT_STEP),
+    ("paged_kv_append_i8_clipped_batched", kernels::PAGED_KV_APPEND_I8_CLIPPED_BATCHED),
 ];
 
 /// Longest on-device decode window (tokens per host round-trip). The scheduler
@@ -274,6 +280,15 @@ pub struct Engine {
     kv_int8: bool,
     scales_k: Vec<DeviceBuffer>,
     scales_v: Vec<DeviceBuffer>,
+    /// `Some` selects the calibrated append kernel (`APPEND_I8_CLIPPED`) in
+    /// place of the plain online-absmax one (`APPEND_I8`) — see
+    /// [`Engine::set_kv_calib`]. `None` (the default) leaves the uncalibrated
+    /// path completely untouched, bit-for-bit.
+    kv_calib: Option<crate::kvcalib::KvCalib>,
+    /// Per-layer `[n_kv]` clip-ceiling upload buffers for `kv_calib` — empty
+    /// until `set_kv_calib(Some(_))` allocates and fills them.
+    clip_k: Vec<DeviceBuffer>,
+    clip_v: Vec<DeviceBuffer>,
     /// Int8 WEIGHT path (A0): the 7 per-layer linears quantized per-channel and
     /// packed 4/u32 (~4x fewer weight bytes in the bandwidth-bound decode
     /// regime), with per-token dynamic activation quant. `None` = fp32 weights
@@ -488,6 +503,9 @@ impl Engine {
             kv_int8,
             scales_k,
             scales_v,
+            kv_calib: None,
+            clip_k: Vec::new(),
+            clip_v: Vec::new(),
             w8,
             head8,
             tuned_i8,
@@ -520,6 +538,27 @@ impl Engine {
             map.insert(hw.to_string(), h);
         }
         Engine::from_map(cfg, &map, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, weights_int8)
+    }
+
+    /// Install a calibrated KV clip table, uploading its per-layer ceilings
+    /// once. `None` (or a [`crate::kvcalib::KvCalib::disabled`] table) clears
+    /// calibration — the append dispatch falls back to the plain online-
+    /// absmax kernel. A no-op on a fp32-KV engine (`kv_int8: false`): there
+    /// is nothing to clip.
+    pub fn set_kv_calib(&mut self, calib: Option<crate::kvcalib::KvCalib>) {
+        let calib = calib.filter(|c| !c.is_disabled());
+        if let Some(c) = &calib {
+            assert_eq!(c.n_layers as u32, self.cfg.n_layers, "kv_calib: n_layers mismatch");
+            assert_eq!(c.n_kv as u32, self.cfg.n_kv_heads, "kv_calib: n_kv mismatch");
+            assert_eq!(c.head_dim as u32, self.cfg.head_dim, "kv_calib: head_dim mismatch");
+            let g = &self.gpu;
+            self.clip_k = c.k.iter().map(|row| { let b = g.storage(row.len() as u64); g.write(&b, bytemuck::cast_slice(row)); b }).collect();
+            self.clip_v = c.v.iter().map(|row| { let b = g.storage(row.len() as u64); g.write(&b, bytemuck::cast_slice(row)); b }).collect();
+        } else {
+            self.clip_k.clear();
+            self.clip_v.clear();
+        }
+        self.kv_calib = calib;
     }
 
     /// True when the decode path runs on int8 weights (the request survived the
@@ -797,8 +836,19 @@ impl Engine {
             s.push(g.step(ROPE_PAGED, &[&sc.q, &sc.pos_buf], &[b, nh, hd, hq, fb(theta)], b * nh * half));
             s.push(g.step(ROPE_PAGED, &[&sc.k, &sc.pos_buf], &[b, nkv, hd, hkv, fb(theta)], b * nkv * half));
             if self.kv_int8 {
-                s.push(g.step(APPEND_I8, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.pool_k[l], &self.scales_k[l]], &[b, hkv, bs, hd], b * nkv));
-                s.push(g.step(APPEND_I8, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
+                // The calibrated append kernel is selected here, in place of
+                // APPEND_I8, only when a clip table is actually installed —
+                // APPEND_I8 itself, and every test that pins its behaviour,
+                // is untouched. Same params/thread-count either way; the
+                // clipped variant just takes one extra binding (the clip
+                // ceiling) between offsets and pool.
+                if self.kv_calib.is_some() {
+                    s.push(g.step(APPEND_I8_CLIPPED, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.clip_k[l], &self.pool_k[l], &self.scales_k[l]], &[b, hkv, bs, hd], b * nkv));
+                    s.push(g.step(APPEND_I8_CLIPPED, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.clip_v[l], &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
+                } else {
+                    s.push(g.step(APPEND_I8, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.pool_k[l], &self.scales_k[l]], &[b, hkv, bs, hd], b * nkv));
+                    s.push(g.step(APPEND_I8, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.pool_v[l], &self.scales_v[l]], &[b, hkv, bs, hd], b * nkv));
+                }
                 s.push(g.step(SCORES_I8, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_k[l], &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], b * nh * cap));
                 s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
                 s.push(g.step(APPLY_I8, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &self.scales_v[l], &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
@@ -2228,6 +2278,54 @@ mod tests {
         let mag = h32.iter().fold(0f32, |m, &x| m.max(x.abs()));
         println!("int8 KV vs fp32 (prefill + 6 decode) maxabs={err:e} (mag {mag:e})");
         assert!(err < 0.2 * mag + 1e-3, "int8 diverges too far: {err} vs mag {mag}");
+    }
+
+    /// A [`crate::kvcalib::KvCalib::disabled`] table must select the SAME
+    /// kernel path as no calibration at all (`set_kv_calib(None)`) — the
+    /// selector switches on `self.kv_calib.is_some()` post-filtering, so a
+    /// disabled-but-`Some` table must not accidentally take the clipped path.
+    #[test]
+    fn a_disabled_calib_table_is_bit_identical_to_no_calibration() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let prompt = vec![1u32, 5, 3, 9, 2];
+        let run = |calib: Option<crate::kvcalib::KvCalib>| -> Vec<f32> {
+            let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, true, false);
+            e.set_kv_calib(calib);
+            let mut t = BlockTable::new();
+            e.prefill(&mut t, &prompt)
+        };
+        let uncalibrated = run(None);
+        let disabled = run(Some(crate::kvcalib::KvCalib::disabled(cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize)));
+        assert_eq!(uncalibrated, disabled, "a disabled clip table must be bit-identical to no calibration at all");
+    }
+
+    /// A REAL (binding) calibrated clip must change the KV pool's contents
+    /// relative to the uncalibrated kernel — proving the clipped kernel path
+    /// actually dispatches and its clip ceiling actually takes effect, not
+    /// just that the selector compiles.
+    #[test]
+    fn a_binding_calib_clip_changes_output_vs_uncalibrated() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let prompt = vec![1u32, 5, 3, 9, 2, 7, 6, 8];
+        let mut uncal = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, true, false);
+        let mut t1 = BlockTable::new();
+        let h_uncal = uncal.prefill(&mut t1, &prompt);
+
+        // A deliberately tiny clip (far below any real activation magnitude)
+        // on every stream -- guaranteed to bind on every token, so this is a
+        // maximally aggressive, unambiguous "does the clip do anything" probe.
+        let mut calib = crate::kvcalib::KvCalib::disabled(cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize);
+        for row in calib.k.iter_mut().chain(calib.v.iter_mut()) {
+            row.fill(1e-6);
+        }
+        let mut cal = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, true, false);
+        cal.set_kv_calib(Some(calib));
+        let mut t2 = BlockTable::new();
+        let h_cal = cal.prefill(&mut t2, &prompt);
+
+        assert_ne!(h_uncal, h_cal, "an aggressively binding clip must change the decoded hidden state");
     }
 
     /// Chunked prefill (small chunk) must produce the same hidden as whole-prompt

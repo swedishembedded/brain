@@ -11,6 +11,7 @@ pub mod config;
 pub mod eval;
 pub mod import;
 pub mod init;
+pub mod kvcalib;
 pub mod model;
 pub mod q8;
 pub mod sample;

@@ -59,6 +59,33 @@ in brain.
   serve it as its own catalog entry, zero extra per-token cost once folded.
   See `docs/guides/training.md` for the full ledger (dataset contract, both
   learning gates, what's still planned).
+- **P12 — calibrated INT8 KV cache**: `serve.rs`'s existing int8 KV path
+  quantizes with a purely ONLINE per-(token, kv-head) absmax — no
+  calibration, no offline pass. `Engine::calibrate_kv` (offline only, never
+  on the hot `run_batched_submit` path) prefills a representative prompt set
+  and reads back every K (post-RoPE)/V row into `model::actstats::Collector`,
+  keyed `layer{L:02}.{k|v}.head{H}`. `brain qwen calib --weights --jsonl
+  [--report] [--out report.json] [--clip-out kv_calib.json --percentile Q]`
+  prints/writes the `absmax`/`p99`/`p99.99`/`outlier_ratio` report and, with
+  `--clip-out`, the actual `qwen::kvcalib::KvCalib` table the engine loads.
+
+  **Measured on the real Qwen3-0.6B checkpoint** (8 short calibration
+  prompts, `--percentile 0.999`): 448 streams (28 layers × 8 kv-heads × K+V),
+  **worst `outlier_ratio` 1.72** (`layer26.v.head5`), **median 1.07** — the
+  handful of streams above ~1.3 cluster almost entirely in LATE-layer V heads
+  (23–27), not K, and not early layers. This is a much tighter distribution
+  than the "long-tailed activations" case calibration exists to fix: today's
+  online per-token absmax is already close to optimal for the great majority
+  of K/V streams on this (small) prompt set. Worth a larger/more
+  representative calibration set before drawing a final conclusion, but the
+  honest reading of this measurement is that clipping recovers little on
+  Qwen3-0.6B specifically — the mechanism (`paged_kv_append_i8_clipped_batched.wgsl`,
+  `scale = min(this_token_absmax, clip[head]) / 127`, selected via
+  `Engine::set_kv_calib` in place of the plain `APPEND_I8` kernel, which stays
+  byte-for-byte untouched) is real and tested either way.
+  `KvCalib::from_model_dir` auto-discovers `kv_calib.json` beside a
+  checkpoint; absent, serving stays uncalibrated (`KvCalib::disabled`'s
+  `f32::MAX` sentinel makes the clipped kernel bit-identical to the plain one).
 
 ## Parity ladder
 

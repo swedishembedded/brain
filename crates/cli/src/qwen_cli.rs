@@ -840,7 +840,7 @@ fn eval_chat(args: &[String]) {
 }
 
 /// `brain qwen calib --weights BASE --jsonl PROMPTS [--report] [--out kv_calib.json]
-///     [--models-dir DIR]`
+///     [--clip-out kv_calib.json --percentile Q] [--models-dir DIR]`
 ///
 /// The design input for a calibrated INT8 KV scale: runs `PROMPTS` through a
 /// real checkpoint's fp32-KV paged engine and reports, per `(layer, K|V,
@@ -849,12 +849,21 @@ fn eval_chat(args: &[String]) {
 /// `model::actstats`). `outlier_ratio` near 1 means today's per-token online
 /// absmax is already close to optimal for that stream; a large ratio means a
 /// rare-token outlier is setting the scale and crushing the resolution of
-/// everything else — exactly the case a percentile-clipped calibrated scale
-/// (`brain qwen serve`'s future `--kv-calib`, W3.3) exists to fix.
+/// everything else.
+///
+/// `--clip-out FILE` (with `--percentile Q`, default `0.999`) additionally
+/// writes the actual usable `KvCalib` clip table (`qwen::kvcalib`) — save it
+/// as `kv_calib.json` next to the checkpoint and `brain qwen serve`/`brain
+/// serve` picks it up automatically (`KvCalib::from_model_dir`). This is a
+/// SEPARATE artifact from `--out`'s raw diagnostic report: `--out` dumps
+/// `absmax`/`p99`/`p99.99` for humans to read, `--clip-out` writes the
+/// `[layer][kv_head]` ceiling table the engine actually loads.
 fn calib(args: &[String]) {
     let mut weights = String::new();
     let mut jsonl = String::new();
     let mut out: Option<String> = None;
+    let mut clip_out: Option<String> = None;
+    let mut percentile = 0.999f32;
     let mut report = false;
     let mut models_dir: Option<String> = None;
     let mut i = 0;
@@ -863,6 +872,8 @@ fn calib(args: &[String]) {
             "--weights" => weights = val(args, &mut i, "--weights"),
             "--jsonl" => jsonl = val(args, &mut i, "--jsonl"),
             "--out" => out = Some(val(args, &mut i, "--out")),
+            "--clip-out" => clip_out = Some(val(args, &mut i, "--clip-out")),
+            "--percentile" => percentile = val(args, &mut i, "--percentile").parse().unwrap_or(percentile),
             "--report" => report = true,
             "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
             other => eprintln!("ignoring unknown flag {other:?}"),
@@ -870,11 +881,15 @@ fn calib(args: &[String]) {
         i += 1;
     }
     if weights.is_empty() || jsonl.is_empty() {
-        eprintln!("usage: brain qwen calib --weights BASE --jsonl FILE [--report] [--out kv_calib.json] [--models-dir DIR]");
+        eprintln!("usage: brain qwen calib --weights BASE --jsonl FILE [--report] [--out kv_calib_report.json] [--clip-out kv_calib.json --percentile Q] [--models-dir DIR]");
         return;
     }
-    if !report && out.is_none() {
-        eprintln!("brain qwen calib: nothing to do without --report or --out (both is fine too)");
+    if !report && out.is_none() && clip_out.is_none() {
+        eprintln!("brain qwen calib: nothing to do without --report, --out, or --clip-out");
+        return;
+    }
+    if !(0.0..=1.0).contains(&percentile) {
+        eprintln!("brain qwen calib: --percentile must be in [0,1], got {percentile}");
         return;
     }
 
@@ -975,6 +990,23 @@ fn calib(args: &[String]) {
         let text = serde_json::to_string_pretty(&doc).expect("report JSON is always serializable");
         match std::fs::write(&path, text) {
             Ok(()) => println!("brain qwen calib: wrote {path}"),
+            Err(e) => eprintln!("brain qwen calib: {path}: {e}"),
+        }
+    }
+
+    if let Some(path) = clip_out {
+        let ckpt_cfg = checkpoint::load(weights_str).header["config"].clone();
+        let cfg = QwenConfig::from_json(&ckpt_cfg);
+        let calib = qwen::kvcalib::KvCalib::from_collector(
+            &base_id,
+            cfg.n_layers as usize,
+            cfg.n_kv_heads as usize,
+            cfg.head_dim as usize,
+            percentile,
+            &collector,
+        );
+        match calib.save(Path::new(&path)) {
+            Ok(()) => println!("brain qwen calib: wrote {path} (percentile {percentile})"),
             Err(e) => eprintln!("brain qwen calib: {path}: {e}"),
         }
     }

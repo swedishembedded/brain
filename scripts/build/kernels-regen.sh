@@ -8,7 +8,11 @@
 # lib.rs are resolved by union-ing wgsl/ and re-running this script.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# This script lives at scripts/build/kernels-regen.sh -- two levels below the
+# repo root, not one. Same class of bug commit 96dc6b4 fixed in
+# scripts/gates/*.sh (each `cd`'d one directory short of the repo root and
+# every path built from REPO_ROOT silently resolved under scripts/ instead).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LIB="$REPO_ROOT/crates/kernels/src/lib.rs"
 WGSL_DIR="$REPO_ROOT/crates/kernels/wgsl"
 

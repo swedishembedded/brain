@@ -74,6 +74,24 @@ impl Collector {
         acc.seen += x.len() as u64;
     }
 
+    /// The value at percentile `q` (`0.0..=1.0`) of `name`'s sample, or
+    /// `None` if `name` was never observed. Reuses the same bounded
+    /// reservoir [`Collector::report`] draws from — `q = 0.9999` reproduces
+    /// `StreamReport::p9999` for the same stream. Exists because a caller
+    /// choosing a quantization CLIP ceiling wants to sweep percentiles
+    /// (p99.9, p99.99, …) rather than the two fixed ones `report()` bakes in.
+    pub fn quantile(&self, name: &str, q: f32) -> Option<f32> {
+        let streams = self.streams.borrow();
+        let acc = streams.get(name)?;
+        if acc.samples.is_empty() {
+            return None;
+        }
+        let mut s = acc.samples.clone();
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let k = ((q * (s.len() - 1) as f32).round() as usize).min(s.len() - 1);
+        Some(s[k])
+    }
+
     /// Per-stream `(absmax, p99, p99.99, outlier_ratio)`, sorted by
     /// `outlier_ratio` descending — the most quantization-hostile stream first.
     pub fn report(&self) -> Vec<StreamReport> {
@@ -186,5 +204,22 @@ mod tests {
         assert_eq!(r[0].absmax, 0.0);
         assert!(r[0].p9999 > 0.0, "p9999 must floor above zero to avoid a NaN/inf ratio");
         assert!(r[0].outlier_ratio.is_finite());
+    }
+
+    #[test]
+    fn quantile_at_9999_matches_reports_p9999_for_the_same_stream() {
+        let c = Collector::new();
+        let mut vals: Vec<f32> = (1..=20000).map(|v| v as f32).collect();
+        vals.push(1_000_000.0);
+        c.observe("x", &vals);
+        let r = c.report();
+        assert_eq!(c.quantile("x", 0.9999), Some(r[0].p9999));
+    }
+
+    #[test]
+    fn quantile_of_an_unobserved_stream_is_none() {
+        let c = Collector::new();
+        c.observe("x", &[1.0, 2.0, 3.0]);
+        assert_eq!(c.quantile("nope", 0.5), None);
     }
 }
