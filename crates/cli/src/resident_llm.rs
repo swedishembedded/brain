@@ -467,7 +467,7 @@ impl ResidentModel for QwenResident {
                 // paid on every single chat request --
                 // `.todo/serving-performance-audit.md`).
                 let head = model.read_weight(model.cfg.head_weight());
-                return Ok(QwenEngineKind::Legacy { model, head });
+                return Ok(QwenEngineKind::Legacy { model: Box::new(model), head });
             }
             // See QwenResident::pool_sizing's doc comment for the arithmetic
             // -- the same derivation `estimate()` predicts a budget from, so
@@ -525,7 +525,7 @@ impl ResidentModel for QwenResident {
                     eng.set_kv_calib(calib);
                 }
             }
-            Ok(QwenEngineKind::Batched(model::serve::Scheduler::new(eng, max_batch as usize)))
+            Ok(QwenEngineKind::Batched(Box::new(model::serve::Scheduler::new(eng, max_batch as usize))))
         })??;
         Ok(Box::new(QwenInstance { tok, eos, engine }))
     }
@@ -536,10 +536,13 @@ impl ResidentModel for QwenResident {
 enum QwenEngineKind {
     /// The original single-sequence KV-cache decode path (`Qwen::
     /// from_reader_decode` + `generate_kv_stream_with_head`) -- GGUF only.
-    Legacy { model: qwen::model::Qwen, head: Vec<f32> },
+    /// `model` boxed: `qwen::model::Qwen` is ~1.6 KB by value, which would
+    /// otherwise size every `QwenEngineKind` (even a `Batched` one) to it.
+    Legacy { model: Box<qwen::model::Qwen>, head: Vec<f32> },
     /// The paged, continuous-batching serving engine (this plan's W2/W3) --
-    /// every safetensors checkpoint, the common case.
-    Batched(model::serve::Scheduler<qwen::serve::Engine>),
+    /// every safetensors checkpoint, the common case. Boxed for the same
+    /// reason as `Legacy.model`: `Scheduler<Engine>` is large by value too.
+    Batched(Box<model::serve::Scheduler<qwen::serve::Engine>>),
 }
 
 struct QwenInstance {

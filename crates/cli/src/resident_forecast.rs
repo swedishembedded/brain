@@ -797,9 +797,9 @@ impl kronos::generate::CachedCores for KronosCachedNpu {
                 ("rope_sin", Feed::F32(&sin, vec![1, 1, 1, half as i64])),
                 ("past_mask", Feed::F32(&mask, vec![1, 1, 1, cap as i64])),
             ];
-            for l in 0..nl {
-                feeds.push((keys[l].0.as_str(), Feed::F32(&self.pk[l], vec![1, heads as i64, cap as i64, hd as i64])));
-                feeds.push((keys[l].1.as_str(), Feed::F32(&self.pv[l], vec![1, heads as i64, cap as i64, hd as i64])));
+            for (l, (kname, vname)) in keys.iter().enumerate().take(nl) {
+                feeds.push((kname.as_str(), Feed::F32(&self.pk[l], vec![1, heads as i64, cap as i64, hd as i64])));
+                feeds.push((vname.as_str(), Feed::F32(&self.pv[l], vec![1, heads as i64, cap as i64, hd as i64])));
             }
             self.s1_decode.run(&feeds).expect("kronos s1 decode")
         };
