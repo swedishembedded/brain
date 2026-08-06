@@ -96,15 +96,29 @@ pub fn grid_ws(threads: u32, wg: u32) -> (u32, u32) {
 /// Only decimal literals are recognised — `@workgroup_size(WG)` with a `const`
 /// would silently fall back to 64, so kernels spell the number out.
 pub fn workgroup_size_of(src: &str) -> u32 {
-    let Some(at) = src.find("@workgroup_size") else { return DEFAULT_WORKGROUP_SIZE };
-    let rest = &src[at + "@workgroup_size".len()..];
-    let Some(open) = rest.find('(') else { return DEFAULT_WORKGROUP_SIZE };
-    let digits: String = rest[open + 1..]
-        .trim_start()
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    digits.parse().unwrap_or(DEFAULT_WORKGROUP_SIZE)
+    // Scan the CODE, not the comments. This used to take the first
+    // `@workgroup_size` anywhere in the source, and ten in-repo kernels mention
+    // the attribute in their header prose ("`@workgroup_size(256)`.") — which
+    // sits ABOVE the declaration, so the parse read the comment. Every one of
+    // them happens to state the right number, so nothing was broken; a single
+    // stale or aspirational comment would have laid out every backend's
+    // dispatch grid with the wrong size, and this function's own doc comment
+    // was relying on the parity tests to notice.
+    for line in src.lines() {
+        let code = line.split("//").next().unwrap_or("");
+        let Some(at) = code.find("@workgroup_size") else { continue };
+        let rest = &code[at + "@workgroup_size".len()..];
+        let Some(open) = rest.find('(') else { continue };
+        let digits: String = rest[open + 1..]
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(n) = digits.parse() {
+            return n;
+        }
+    }
+    DEFAULT_WORKGROUP_SIZE
 }
 
 /// Per-kernel workgroup sizes for a `(name, wgsl)` registration list, in the
@@ -749,6 +763,54 @@ pub use registry::{backend_registered, create_backend, register_backend, Factory
 
 #[cfg(test)]
 mod tests {
+    /// A comment mentioning the attribute must not win over the declaration.
+    ///
+    /// Ten in-repo kernels document their own `@workgroup_size` in the header
+    /// prose, which sits ABOVE the code — so a first-occurrence scan read the
+    /// comment. All ten happen to agree with their code, so this was latent;
+    /// the failure it prevents is silent and total (every backend lays out the
+    /// dispatch grid with the wrong size, and the kernel reconstructs its flat
+    /// invocation id from a different one).
+    #[test]
+    fn workgroup_size_ignores_comments() {
+        let src = "\
+// This kernel uses @workgroup_size(256) for its register tile.\n\
+@compute @workgroup_size(64)\n\
+fn main() {}\n";
+        assert_eq!(super::workgroup_size_of(src), 64);
+
+        // Trailing comment on the declaration line, and the real value after it.
+        assert_eq!(super::workgroup_size_of("@workgroup_size(128) // not @workgroup_size(8)"), 128);
+        // A comment-only mention yields the DEFAULT, never the commented number.
+        assert_eq!(
+            super::workgroup_size_of("// @workgroup_size(256)\nfn main() {}"),
+            super::DEFAULT_WORKGROUP_SIZE
+        );
+        // Every real kernel still parses to what its code declares.
+        for (name, src) in kernels_probe() {
+            let code_only: String = src
+                .lines()
+                .map(|l| l.split("//").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                super::workgroup_size_of(src),
+                super::workgroup_size_of(&code_only),
+                "{name}: comment-stripped parse disagrees"
+            );
+        }
+    }
+
+    /// The kernel sources are not a dependency of this crate, so the check
+    /// above runs over a representative sample written inline.
+    fn kernels_probe() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("doc-above", "// see @workgroup_size(256)\n@compute @workgroup_size(64)\nfn main(){}"),
+            ("plain", "@compute @workgroup_size(64)\nfn main(){}"),
+            ("wg256", "@compute @workgroup_size(256)\nfn main(){}"),
+        ]
+    }
+
     use super::*;
 
     #[test]

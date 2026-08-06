@@ -763,3 +763,21 @@ Two things worth keeping:
   *seeded* by the same comment-counting code, so fixing the checker was not
   enough — the seeds had to be recomputed too. Any bootstrap-then-hand-maintain
   migration carries this: the bootstrap's bugs are baked into the data.
+* **The bug was in two files because the derivation was.** The seeder and the
+  checker each had their own copy of "count the barriers, read the workgroup
+  size, decide the tier", so one defect needed two fixes and could be
+  half-fixed. They now share `scripts/build/kernelmeta.py`, and the property
+  that matters is asserted: for every kernel, what the seeder would *propose*
+  for the mechanical fields is exactly what the checker *demands* — 0
+  disagreements over 358. Without that, seeding a new kernel could emit a block
+  that immediately fails the build.
+
+The same comment-blindness was in **production** code:
+`backend_api::workgroup_size_of` took the first `@workgroup_size` anywhere in
+the source, and **ten in-repo kernels document the attribute in their header
+prose**, which sits above the declaration. All ten happen to state the right
+number, so nothing was broken — but a single stale or aspirational comment would
+have laid out every backend's dispatch grid with the wrong size, while the
+kernel reconstructed its flat invocation id from a different one. Its own doc
+comment admitted it was relying on the parity tests to notice. It now scans code
+only, with a test that pins it.
