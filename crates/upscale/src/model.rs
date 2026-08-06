@@ -35,17 +35,15 @@ const RESIDUAL_SCALE: f32 = 0.2;
 
 const N_BLOCKS: usize = vae::blocks::NEXT_SLOT;
 const K_LEAKY_RELU: usize = N_BLOCKS;
-const K_CONCAT2: usize = N_BLOCKS + 1;
-const K_SCALE_ADD: usize = N_BLOCKS + 2;
+const K_SCALE_ADD: usize = N_BLOCKS + 1;
 
 /// This model's kernel set: the shared block kernels verbatim (copied by
-/// [`vae::blocks::kernels_with`], never restated) plus the three this net adds.
-pub const KERNELS: [(&str, &str); N_BLOCKS + 3] = kernel_set();
+/// [`vae::blocks::kernels_with`], never restated) plus the two this net adds (`concat2` now comes from the shared set).
+pub const KERNELS: [(&str, &str); N_BLOCKS + 2] = kernel_set();
 
-const fn kernel_set() -> [(&'static str, &'static str); N_BLOCKS + 3] {
-    let mut k = vae::blocks::kernels_with::<{ N_BLOCKS + 3 }>();
+const fn kernel_set() -> [(&'static str, &'static str); N_BLOCKS + 2] {
+    let mut k = vae::blocks::kernels_with::<{ N_BLOCKS + 2 }>();
     k[K_LEAKY_RELU] = ("leaky_relu", kernels::LEAKY_RELU);
-    k[K_CONCAT2] = ("concat2", kernels::CONCAT2);
     k[K_SCALE_ADD] = ("scale_add", kernels::SCALE_ADD);
     k
 }
@@ -193,16 +191,7 @@ fn residual(b: &mut Builder, n: u64, scale: &DeviceBuffer, x: &DeviceBuffer, fx:
 
 /// Concatenate `[1, ca, h, w]` and `[1, cb, h, w]` along channels.
 fn cat(b: &mut Builder, ca: u32, cb: u32, h: u32, w: u32, a: &DeviceBuffer, bb: &DeviceBuffer) -> DeviceBuffer {
-    let hw = (h as u64) * (w as u64);
-    let y = b.act(((ca + cb) as u64) * hw);
-    let g = b.gpu();
-    // concat2 params: (rows, a_cols, b_cols) over row-major [rows, cols]; with
-    // NCHW and one image, a "row" is a channel of `hw` elements, so the concat
-    // is over the channel axis exactly.
-    // `concat2` Params: [N, Ca, Cb, H, W] — it decomposes the output index as
-    // NCHW itself, so the concat is over the CHANNEL axis by construction.
-    b.push_step(g.step(K_CONCAT2, &[a, bb, &y], &[1, ca, cb, h, w], ((ca + cb) as u64 * hw) as u32));
-    y
+    b.concat(ca, cb, h, w, a, bb)
 }
 
 /// `ResidualDenseBlock_5C`: five convs whose inputs accumulate every earlier
@@ -265,7 +254,6 @@ mod tests {
     fn slot_constants_name_the_kernel_they_index() {
         for (slot, want) in [
             (super::K_LEAKY_RELU, "leaky_relu"),
-            (super::K_CONCAT2, "concat2"),
             (super::K_SCALE_ADD, "scale_add"),
         ] {
             assert_eq!(super::KERNELS[slot].0, want, "slot {slot} is not '{want}'");

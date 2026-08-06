@@ -158,7 +158,7 @@ quality, since the generated tokens are meaningless. Artifacts record
   `.todo/serving-performance-audit.md`'s 600s regression: every target above
   measures a scheduler/engine/executor directly, which stayed fast the whole
   time the actual served path (`crates/cli/src/resident_llm.rs`) never reached
-  any of it (`docs/lessons.md` #22). Selected as
+  any of it (`docs/lessons.md` #24). Selected as
   `--target http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>` (random weights,
   no checkpoint needed — same rationale as `qwen-synth:` above) or
   `http:qwen:<weights.brain>:<tokenizer.json>` (a real checkpoint).

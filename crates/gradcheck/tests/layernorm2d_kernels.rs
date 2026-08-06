@@ -73,8 +73,26 @@ fn best_of(gpu: &Gpu, steps: &[gpu_core::Step], reps: usize) -> f64 {
 
 #[test]
 fn fused_layernorm2d_matches_the_composition_and_is_faster() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() {
+        return;
+    }
     let gpu = gpu_core::testgpu::dev(&KERNELS);
     let eps = 1e-6f32;
+    // `layernorm_rows` carries two `workgroupBarrier`s, so the COMPOSED path is
+    // not a legal thing to dispatch where the device reports no workgroup
+    // reductions — on `backend-cpu` the JIT does not refuse it, it miscompiles
+    // it and the process dies in the allocator with no attributable message.
+    // The fused kernel is barrier-free and IS legal there, and checking it
+    // against the host oracle on both backends is the point (`docs/lessons.md`
+    // #5); only the A/B comparison needs the cap.
+    let coop = gpu.caps().workgroup_reductions;
+    // The CPU JIT walks these shapes on one core; the 2 M-element case is the
+    // GPU's headline, not a useful CPU test.
+    let shapes: &[(usize, usize, usize)] = if coop {
+        &[(1, 32, 65536), (1, 64, 16384), (1, 256, 4096), (1, 96, 1024)]
+    } else {
+        &[(1, 32, 256), (1, 96, 128)]
+    };
     println!(
         "{:<26} {:>10} {:>10} {:>9}  {:>12}",
         "shape [N,C,H*W]", "composed", "fused", "speedup", "max|delta|"
@@ -82,7 +100,7 @@ fn fused_layernorm2d_matches_the_composition_and_is_faster() {
 
     // SAM 2's mask-decoder shapes (LayerNorm2d after each ConvTranspose2d), plus
     // a ConvNeXt-ish one. C and H*W deliberately differ everywhere.
-    for &(n, c, hw) in &[(1usize, 32usize, 65536usize), (1, 64, 16384), (1, 256, 4096), (1, 96, 1024)] {
+    for &(n, c, hw) in shapes {
         let total = n * c * hw;
         let x = rnd(total, 5);
         let g = rnd(c, 7).iter().map(|v| 1.0 + 0.2 * v).collect::<Vec<f32>>();
@@ -96,22 +114,31 @@ fn fused_layernorm2d_matches_the_composition_and_is_faster() {
         let bb = gpu.storage(c as u64);
         gpu.write_f32(&bb, &b);
 
-        // Composed: NCHW -> NLC, row-wise LN, NLC -> NCHW.
-        let rows = (n * hw) as u32;
-        let xt = gpu.storage(total as u64);
-        let yt = gpu.storage(total as u64);
-        let y_comp = gpu.storage(total as u64);
-        let composed = vec![
-            gpu.step(K_NCHW_NLC, &[&xb, &xt], &[total as u32, c as u32, hw as u32], total as u32),
-            gpu.step(
-                K_LN_ROWS,
-                &[&xt, &gb, &bb, &yt],
-                &[c as u32, rows, f(eps)],
-                rows * 64,
-            ),
-            gpu.step(K_NLC_NCHW, &[&yt, &y_comp], &[total as u32, c as u32, hw as u32], total as u32),
-        ];
-        let t_comp = best_of(&gpu, &composed, 5);
+        // Composed: NCHW -> NLC, row-wise LN, NLC -> NCHW. Recorded only where
+        // it is legal — `gpu.step` on a barrier kernel is what the CPU JIT
+        // cannot survive, so the guard has to wrap the RECORDING, not just the
+        // submit.
+        let (t_comp, dc) = if coop {
+            let rows = (n * hw) as u32;
+            let xt = gpu.storage(total as u64);
+            let yt = gpu.storage(total as u64);
+            let y_comp = gpu.storage(total as u64);
+            let composed = vec![
+                gpu.step(K_NCHW_NLC, &[&xb, &xt], &[total as u32, c as u32, hw as u32], total as u32),
+                gpu.step(K_LN_ROWS, &[&xt, &gb, &bb, &yt], &[c as u32, rows, f(eps)], rows * 64),
+                gpu.step(
+                    K_NLC_NCHW,
+                    &[&yt, &y_comp],
+                    &[total as u32, c as u32, hw as u32],
+                    total as u32,
+                ),
+            ];
+            let t = best_of(&gpu, &composed, 5);
+            let g = gpu.read(&y_comp, total);
+            (t, g.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max))
+        } else {
+            (f64::NAN, 0.0)
+        };
 
         // Fused: one dispatch, one invocation per spatial position.
         let y_fused = gpu.storage(total as u64);
@@ -123,21 +150,23 @@ fn fused_layernorm2d_matches_the_composition_and_is_faster() {
         )];
         let t_fused = best_of(&gpu, &fused, 5);
 
-        let gc = gpu.read(&y_comp, total);
         let gf = gpu.read(&y_fused, total);
-        let dc = gc.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         let df = gf.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
-        println!(
-            "[{n},{c:4},{hw:6}]            {:>10.3} {:>10.3} {:>8.2}x  {:>12.3e}",
-            t_comp * 1e3,
-            t_fused * 1e3,
-            t_comp / t_fused,
-            df
-        );
+        // The composed columns read "-" where the device cannot run it at all,
+        // rather than NaN, so an A/B that never happened cannot be misread as
+        // one that came out even.
+        let (cs, ss) = if coop {
+            (format!("{:>10.3}", t_comp * 1e3), format!("{:>8.2}x", t_comp / t_fused))
+        } else {
+            ("         -".to_string(), "       -".to_string())
+        };
+        println!("[{n},{c:4},{hw:6}]            {cs} {:>10.3} {ss}  {df:>12.3e}", t_fused * 1e3);
 
         // BOTH must match the host — a faster wrong kernel is not faster, and
         // checking the composition too keeps the oracle honest.
-        assert!(dc < 2e-5, "composed differs from host by {dc:.3e}");
+        if coop {
+            assert!(dc < 2e-5, "composed differs from host by {dc:.3e}");
+        }
         assert!(df < 2e-5, "FUSED differs from host by {df:.3e}");
     }
 }

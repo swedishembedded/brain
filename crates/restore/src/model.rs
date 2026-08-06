@@ -83,19 +83,19 @@ const K_MATMUL_REG3: usize = N_VQGAN + 3;
 const K_BIAS_ADD: usize = N_VQGAN + 4;
 const K_GELU_ERF: usize = N_VQGAN + 5;
 const K_ARGMAX_ROW: usize = N_VQGAN + 6;
-const K_CONCAT2: usize = N_VQGAN + 7;
-const K_MUL: usize = N_VQGAN + 8;
-const K_LEAKY_RELU: usize = N_VQGAN + 9;
-const K_SCALE_ADD: usize = N_VQGAN + 10;
-const K_REGION_COPY: usize = N_VQGAN + 11;
+const K_MUL: usize = N_VQGAN + 7;
+const K_LEAKY_RELU: usize = N_VQGAN + 8;
+const K_SCALE_ADD: usize = N_VQGAN + 9;
+const K_REGION_COPY: usize = N_VQGAN + 10;
 
 /// This model's kernel set: [`vqgan::KERNELS`] verbatim (never restated — a
 /// restated list that drifts by one entry is silently wrong, not a crash) plus
-/// the twelve the Transformer and the CFT need.
-pub const KERNELS: [(&str, &str); N_VQGAN + 12] = kernel_set();
+/// the eleven the Transformer and the CFT need (`concat2` now comes from the
+/// shared block set, through `vae::blocks::Builder::concat`).
+pub const KERNELS: [(&str, &str); N_VQGAN + 11] = kernel_set();
 
-const fn kernel_set() -> [(&'static str, &'static str); N_VQGAN + 12] {
-    let mut k = [("", ""); N_VQGAN + 12];
+const fn kernel_set() -> [(&'static str, &'static str); N_VQGAN + 11] {
+    let mut k = [("", ""); N_VQGAN + 11];
     let mut i = 0;
     while i < N_VQGAN {
         k[i] = vqgan::KERNELS[i];
@@ -108,7 +108,6 @@ const fn kernel_set() -> [(&'static str, &'static str); N_VQGAN + 12] {
     k[K_BIAS_ADD] = ("bias_add", kernels::BIAS_ADD);
     k[K_GELU_ERF] = ("gelu_erf", kernels::GELU_ERF);
     k[K_ARGMAX_ROW] = ("argmax_row", kernels::ARGMAX_ROW);
-    k[K_CONCAT2] = ("concat2", kernels::CONCAT2);
     k[K_MUL] = ("mul", kernels::MUL);
     k[K_LEAKY_RELU] = ("leaky_relu", kernels::LEAKY_RELU);
     k[K_SCALE_ADD] = ("scale_add", kernels::SCALE_ADD);
@@ -637,10 +636,7 @@ fn record_fuse(
     let n = c * h * w;
     let nn = n as u64;
 
-    // `concat2` Params: [N, Ca, Cb, H, W]; one invocation per OUTPUT element.
-    let cat = b.act(2 * nn);
-    let step = b.gpu().step(K_CONCAT2, &[enc, dec, &cat], &[1, c, c, h, w], 2 * n);
-    b.push_step(step);
+    let cat = b.concat(c, c, h, w, enc, dec);
     let e = b.resnet(&format!("{p}.encode_enc"), 2 * c, c, h, w, &cat);
     b.free(2 * nn, cat);
     b.tap(format!("fuse.{}.encode_enc", tap.size), &e, n);
@@ -718,7 +714,6 @@ mod tests {
             (super::K_BIAS_ADD, "bias_add"),
             (super::K_GELU_ERF, "gelu_erf"),
             (super::K_ARGMAX_ROW, "argmax_row"),
-            (super::K_CONCAT2, "concat2"),
             (super::K_MUL, "mul"),
             (super::K_LEAKY_RELU, "leaky_relu"),
             (super::K_SCALE_ADD, "scale_add"),

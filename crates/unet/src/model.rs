@@ -74,7 +74,6 @@ const K_XAPPLY: usize = vae::blocks::NEXT_SLOT + 7;
 const K_FLASH: usize = vae::blocks::NEXT_SLOT + 8;
 const K_FLASH_SPLIT: usize = vae::blocks::NEXT_SLOT + 9;
 const K_ADD_CHAN: usize = vae::blocks::NEXT_SLOT + 10;
-const K_CONCAT2: usize = vae::blocks::NEXT_SLOT + 11;
 
 /// The tiled GEMM every `nn.Linear` here dispatches: the ONE the shared block
 /// set already registers. This crate used to register its own `matmul_reg2`
@@ -83,7 +82,7 @@ const K_CONCAT2: usize = vae::blocks::NEXT_SLOT + 11;
 const K_MATMUL_REG: usize = vae::blocks::MATMUL_REG3_SLOT;
 // `layernorm_rows` occupies the last slot and is resolved BY NAME through
 // `block::LayerNormIds::resolve_fwd`, never indexed directly.
-const N_EXTRA: usize = 13;
+const N_EXTRA: usize = 12;
 
 /// This model's kernel set: the shared block kernels (slots `0..NEXT_SLOT`,
 /// copied — never restated — by [`vae::blocks::kernels_with`]) then the extras
@@ -105,8 +104,7 @@ const fn kernel_set() -> [(&'static str, &'static str); vae::blocks::NEXT_SLOT +
     k[K_FLASH] = ("flash_attn_bidir", kernels::FLASH_ATTN_BIDIR);
     k[K_FLASH_SPLIT] = ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT);
     k[K_ADD_CHAN] = ("add_chan_bcast", kernels::ADD_CHAN_BCAST);
-    k[K_CONCAT2] = ("concat2", kernels::CONCAT2);
-    k[vae::blocks::NEXT_SLOT + 12] = ("layernorm_rows", kernels::LAYERNORM_ROWS);
+    k[vae::blocks::NEXT_SLOT + 11] = ("layernorm_rows", kernels::LAYERNORM_ROWS);
     k
 }
 
@@ -703,11 +701,7 @@ impl<'a> Rec<'a> {
         a: &DeviceBuffer,
         b: &DeviceBuffer,
     ) -> DeviceBuffer {
-        let y = self.b.act(((ca + cb) as u64) * (h as u64) * (w as u64));
-        let g = self.b.gpu();
-        // `concat2` Params: [N, Ca, Cb, H, W]; one invocation per OUTPUT element.
-        self.b.push_step(g.step(K_CONCAT2, &[a, b, &y], &[1, ca, cb, h, w], (ca + cb) * h * w));
-        y
+        self.b.concat(ca, cb, h, w, a, b)
     }
 }
 
@@ -1092,7 +1086,6 @@ mod tests {
             (super::K_FLASH, "flash_attn_bidir"),
             (super::K_FLASH_SPLIT, "flash_attn_bidir_split"),
             (super::K_ADD_CHAN, "add_chan_bcast"),
-            (super::K_CONCAT2, "concat2"),
         ] {
             assert_eq!(super::KERNELS[slot].0, name, "slot {slot}");
         }

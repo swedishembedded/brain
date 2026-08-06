@@ -51,6 +51,7 @@ const K_IM2COL_AT: usize = 12;
 const K_NLC_BIAS_NCHW: usize = 13;
 const K_GN_PART: usize = 14;
 const K_GN_STATS2: usize = 15;
+const K_CONCAT2: usize = 16;
 
 /// Partials per group for the two-stage GroupNorm reduction. 64 is the value
 /// `crates/wm-diamond` arrived at, and the measurement below was taken at it.
@@ -66,7 +67,7 @@ pub const ADD2_SLOT: usize = K_ADD2;
 /// the kernel behind each recorded [`Step`] (`flux2_bench vae`), and so a crate
 /// that needs extra kernels alongside these can build its set with
 /// [`kernels_with`] instead of restating them.
-pub const KERNELS: [(&str, &str); 16] = [
+pub const KERNELS: [(&str, &str); 17] = [
     ("conv_bias_reg", kernels::CONV_BIAS_REG),
     ("gn_apply", kernels::GN_APPLY),
     ("silu", kernels::SILU),
@@ -83,6 +84,7 @@ pub const KERNELS: [(&str, &str); 16] = [
     ("nlc_bias_nchw", kernels::NLC_BIAS_NCHW),
     ("gn_part", kernels::GN_PART),
     ("gn_stats2", kernels::GN_STATS2),
+    ("concat2", kernels::CONCAT2),
 ];
 
 /// Slot index the first caller-supplied kernel gets when a kernel set is built
@@ -409,6 +411,23 @@ impl<'a> Builder<'a> {
     /// is exactly the private copy this module exists to prevent.
     pub fn set_eps(&mut self, eps: f32) {
         self.eps = eps;
+    }
+
+    /// Change the GroupNorm group count used by every subsequently-recorded
+    /// block.
+    ///
+    /// `AutoencoderKL` and VQGAN normalise with a fixed `norm_num_groups` at
+    /// every width, which is why this is a constructor argument too. DIAMOND
+    /// does not: it derives the count from the channel width
+    /// (`wm_core::gn::num_groups`, `max(C/32, 1)`), so a graph whose levels are
+    /// 8 and 48 channels wide normalises over 1 group at one level and 1 group
+    /// at the other — and an SDXL-shaped fixed 32 would be wrong at both. Like
+    /// [`set_eps`](Self::set_eps), the alternative to switching it at the
+    /// boundary is a second private GroupNorm, which is the copy this module
+    /// exists to prevent.
+    pub fn set_groups(&mut self, groups: u32) {
+        assert!(groups > 0, "GroupNorm needs at least one group");
+        self.groups = groups;
     }
 
     /// Record the reverse-mode tape (see [`Builder::train`]). Set this BEFORE
@@ -745,6 +764,33 @@ impl<'a> Builder<'a> {
         gbv.extend_from_slice(beta);
         let gbn = format!("{prefix}.gb");
         let gb = self.dev_fused(&gbn, &gbv);
+        self.gn_gb(&gbn, c, h, w, x, &gb)
+    }
+
+    /// GroupNorm with a caller-owned fused `[gamma ‖ beta]` buffer (`2·C`
+    /// floats), rather than one loaded from `prefix.{weight,bias}`.
+    ///
+    /// Exists for **adaptive** GroupNorm: DIAMOND's `AdaGroupNorm` computes
+    /// gamma and beta per frame from the conditioning vector, so the affine
+    /// parameters are not checkpoint tensors at all — the caller keeps the
+    /// buffer and rewrites it before each forward. Everything else (the
+    /// statistics kernels, the capability gate, the pooling, the training tape)
+    /// is identical, which is exactly why this is a seam on the shared block
+    /// rather than a second GroupNorm in `crates/wm-diamond`.
+    ///
+    /// `gb_name` names the buffer on the training tape. For an adaptive norm it
+    /// is not a checkpoint key and carries no gradient — DIAMOND trains the
+    /// linear that PRODUCES gamma/beta, on the host.
+    pub fn gn_gb(
+        &mut self,
+        gb_name: &str,
+        c: u32,
+        h: u32,
+        w: u32,
+        x: &DeviceBuffer,
+        gb: &DeviceBuffer,
+    ) -> DeviceBuffer {
+        let gbn = gb_name.to_string();
         let g = self.groups;
         let stats = self.act(2 * g as u64);
         let y = self.act((c * h * w) as u64);
@@ -793,7 +839,7 @@ impl<'a> Builder<'a> {
         }
         self.steps.push(self.gpu.step(
             K_GN_APPLY,
-            &[x, &stats, &gb, &y],
+            &[x, &stats, gb, &y],
             &[1, c, h, w, g],
             c * h * w,
         ));
@@ -812,6 +858,33 @@ impl<'a> Builder<'a> {
             });
         }
         self.free(2 * g as u64, stats); // last read was GN_APPLY above
+        y
+    }
+
+    /// Channel-axis concatenation of two NCHW tensors: `[Ca,H,W] ‖ [Cb,H,W]`
+    /// → `[Ca+Cb,H,W]`.
+    ///
+    /// Every U-shaped net here needs it for skip connections, and before this
+    /// existed **eleven** crates each registered `concat2` under a private slot
+    /// constant and dispatched it inline — including three that were already
+    /// building on this Builder. That is the duplication this module exists to
+    /// absorb: not because the four-line dispatch is hard, but because eleven
+    /// copies is eleven places to get the `[N, Ca, Cb, H, W]` param order or
+    /// the output-element thread count wrong, and each copy has to be found
+    /// again the next time the kernel changes.
+    pub fn concat(
+        &mut self,
+        ca: u32,
+        cb: u32,
+        h: u32,
+        w: u32,
+        a: &DeviceBuffer,
+        b: &DeviceBuffer,
+    ) -> DeviceBuffer {
+        let n = (ca + cb) as u64 * h as u64 * w as u64;
+        let y = self.act(n);
+        // `concat2` Params: [N, Ca, Cb, H, W]; one invocation per OUTPUT element.
+        self.steps.push(self.gpu.step(K_CONCAT2, &[a, b, &y], &[1, ca, cb, h, w], n as u32));
         y
     }
 
