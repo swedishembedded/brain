@@ -333,3 +333,50 @@ fn train_forward_matches_inference_depth2() {
     let max = f_train.iter().zip(&f_ref).map(|(a,b)|(a-b).abs()).fold(0.0f32,f32::max);
     assert!(max < 1e-5, "train vs inference forward diverged at depth 2: {max}");
 }
+
+/// `depth2_cfg` runs `attn_depths: [false, false]` and `channels: [8, 8]`, so
+/// the test above — the ONLY thing asserting that `train.rs`'s graph and
+/// `model.rs`'s graph are the same graph — never reaches either of the two
+/// emitters most likely to drift between them:
+///
+/// * **attention**, ~60 lines written out twice, including the reference quirk
+///   that `SelfAttention2d` adds the NORMED tensor to the projection rather than
+///   the block input (`blocks.py`), and a head count derived from `C / 8`;
+/// * the resblock **`proj` shortcut**, which only exists when `cin != cout` and
+///   therefore never fires at equal widths.
+///
+/// Two hand-maintained copies of a graph are only as safe as the test that says
+/// they agree, and that test was checking the easy half. This runs the other
+/// half: attention on the second level, and every level a different width.
+fn attn_cfg() -> DiamondConfig {
+    DiamondConfig {
+        img_channels: 3, num_steps_conditioning: 2, cond_channels: 16,
+        depths: vec![1, 1], channels: vec![8, 48], attn_depths: vec![false, true],
+        num_actions: 4, h: 8, w: 8, sigma_data: 0.5, sigma_offset_noise: 0.3,
+    }
+}
+
+#[test]
+fn train_forward_matches_inference_with_attention_and_changing_widths() {
+    if std::env::var("MOE_SKIP_GPU_TESTS").is_ok() { return; }
+    let cfg = attn_cfg();
+    let tensors = random_tensors(&cfg, 5);
+    let tr = DiamondTrainer::from_tensors(cfg.clone(), &tensors, Some("cpu"));
+    let fx = fixture(&cfg);
+    tr.set_transition(&fx.obs, &fx.clean, &fx.noise, fx.sigma, &fx.actions);
+    let _ = tr.forward_loss();
+    let f_train = tr.read_output();
+
+    let unet = DiamondUNet::new(cfg.clone(), &tensors, Some("cpu"));
+    let cs = wm_diamond::cond::conditioners(fx.sigma, cfg.sigma_data, cfg.sigma_offset_noise);
+    let s_eff = (fx.sigma*fx.sigma + cfg.sigma_offset_noise*cfg.sigma_offset_noise).sqrt();
+    let noisy: Vec<f32> = fx.clean.iter().zip(&fx.noise).map(|(c,n)| c + s_eff*n).collect();
+    let x_scaled: Vec<f32> = noisy.iter().map(|v| v*cs.c_in).collect();
+    let obs_rescaled: Vec<f32> = fx.obs.iter().map(|v| v/cfg.sigma_data).collect();
+    unet.set_context(&obs_rescaled);
+    let f_ref = unet.forward(&x_scaled, cs.c_noise, &fx.actions);
+
+    assert_eq!(f_train.len(), f_ref.len(), "the two graphs emit different shapes");
+    let max = f_train.iter().zip(&f_ref).map(|(a,b)|(a-b).abs()).fold(0.0f32,f32::max);
+    assert!(max < 1e-5, "train vs inference forward diverged WITH attention: {max}");
+}

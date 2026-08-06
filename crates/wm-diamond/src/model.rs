@@ -263,7 +263,7 @@ impl<'a> Builder<'a> {
         let normed = self.affine_gn(&format!("{prefix}.norm.norm"), c, h, w, x);
         self.tap(format!("{prefix}.norm"), &normed, c * h * w);
         let (qkv_chw, _, _) =
-            self.conv_on(&format!("{prefix}.qkv_proj"), c, 3 * c, 1, 1, 0, h, w, &normed);
+            self.conv(&format!("{prefix}.qkv_proj"), c, 3 * c, 1, 1, 0, h, w, &normed);
         self.tap(format!("{prefix}.qkv_proj"), &qkv_chw, 3 * c * h * w);
         // Reshape the conv output for attention: NCHW -> [T, 3C].
         let qkv = self.act((3 * c * t) as u64);
@@ -307,30 +307,12 @@ impl<'a> Builder<'a> {
             c * t,
         ));
         self.tap(format!("{prefix}.pre_out_proj"), &attn_chw, c * h * w);
-        let (proj, _, _) = self.conv_on(&format!("{prefix}.out_proj"), c, c, 1, 1, 0, h, w, &attn_chw);
+        let (proj, _, _) = self.conv(&format!("{prefix}.out_proj"), c, c, 1, 1, 0, h, w, &attn_chw);
         self.tap(format!("{prefix}.out_proj"), &proj, c * h * w);
         // Reference quirk: SelfAttention2d reassigns x = norm(x) BEFORE the
         // residual — the skip connection adds the NORMED tensor, not the
         // block input (blocks.py::SelfAttention2d.forward).
         self.add(c * h * w, &normed, &proj)
-    }
-
-    // conv() borrows self mutably after computing on x captured earlier;
-    // helper for calling conv with an explicit input buffer.
-    #[allow(clippy::too_many_arguments)]
-    fn conv_on(
-        &mut self,
-        prefix: &str,
-        cin: u32,
-        cout: u32,
-        k: u32,
-        stride: u32,
-        pad: u32,
-        h: u32,
-        w: u32,
-        x: &DeviceBuffer,
-    ) -> (DeviceBuffer, u32, u32) {
-        self.conv(prefix, cin, cout, k, stride, pad, h, w, x)
     }
 
     /// One reference ResBlock: r = proj(x); y = conv2(silu(norm2(conv1(silu(
@@ -347,7 +329,7 @@ impl<'a> Builder<'a> {
         x: &DeviceBuffer,
     ) -> DeviceBuffer {
         let r = if cin != cout {
-            let (p, _, _) = self.conv_on(&format!("{prefix}.proj"), cin, cout, 1, 1, 0, h, w, x);
+            let (p, _, _) = self.conv(&format!("{prefix}.proj"), cin, cout, 1, 1, 0, h, w, x);
             p
         } else {
             x.clone()
@@ -355,12 +337,12 @@ impl<'a> Builder<'a> {
         let n1 = self.adagn(&format!("{prefix}.norm1"), cin, h, w, x);
         self.tap(format!("{prefix}.norm1"), &n1, cin * h * w);
         let s1 = self.silu(cin * h * w, &n1);
-        let (c1, _, _) = self.conv_on(&format!("{prefix}.conv1"), cin, cout, 3, 1, 1, h, w, &s1);
+        let (c1, _, _) = self.conv(&format!("{prefix}.conv1"), cin, cout, 3, 1, 1, h, w, &s1);
         self.tap(format!("{prefix}.conv1"), &c1, cout * h * w);
         let n2 = self.adagn(&format!("{prefix}.norm2"), cout, h, w, &c1);
         self.tap(format!("{prefix}.norm2"), &n2, cout * h * w);
         let s2 = self.silu(cout * h * w, &n2);
-        let (c2, _, _) = self.conv_on(&format!("{prefix}.conv2"), cout, cout, 3, 1, 1, h, w, &s2);
+        let (c2, _, _) = self.conv(&format!("{prefix}.conv2"), cout, cout, 3, 1, 1, h, w, &s2);
         self.tap(format!("{prefix}.conv2"), &c2, cout * h * w);
         let y = self.add(cout * h * w, &c2, &r);
         let out = if attn {
@@ -416,7 +398,7 @@ impl DiamondUNet {
         b.tap("cat".into(), &cat, (nsc + 1) * ic * h0 * w0);
         let c0 = cfg.channels[0];
         let (mut x, _, _) =
-            b.conv_on("conv_in", (nsc + 1) * ic, c0, 3, 1, 1, h0, w0, &cat);
+            b.conv("conv_in", (nsc + 1) * ic, c0, 3, 1, 1, h0, w0, &cat);
         b.tap("conv_in".into(), &x, c0 * h0 * w0);
 
         // Down path. Skips per level: (x_down, rb outputs...).
@@ -427,7 +409,7 @@ impl DiamondUNet {
             let c2 = cfg.channels[i];
             // downsamples[i]: identity for i==0, stride-2 conv otherwise.
             if i > 0 {
-                let (y, nh, nw) = b.conv_on(
+                let (y, nh, nw) = b.conv(
                     &format!("unet.downsamples.{i}.conv"),
                     c1,
                     c1,
@@ -483,7 +465,7 @@ impl DiamondUNet {
                 let cx = c2; // uniform-channel configs: output of previous level is c2
                 let up = b.upsample(cx, hw.0, hw.1, &x);
                 hw = (hw.0 * 2, hw.1 * 2);
-                let (y, _, _) = b.conv_on(
+                let (y, _, _) = b.conv(
                     &format!("unet.upsamples.{j}.conv"),
                     cx,
                     cx,
@@ -519,7 +501,7 @@ impl DiamondUNet {
         // Head: affine GroupNorm -> SiLU -> conv_out.
         let hn = b.affine_gn("norm_out.norm", c0, hw.0, hw.1, &x);
         let hs = b.silu(c0 * hw.0 * hw.1, &hn);
-        let (y_out, _, _) = b.conv_on("conv_out", c0, ic, 3, 1, 1, hw.0, hw.1, &hs);
+        let (y_out, _, _) = b.conv("conv_out", c0, ic, 3, 1, 1, hw.0, hw.1, &hs);
 
         assert_eq!(hw, (h0, w0), "UNet did not return to input resolution");
 
