@@ -1284,3 +1284,50 @@ Two candidate fixes, neither yet built, in the order the evidence favours:
 
 `flash_attn_bidir*` is NOT the sibling to reach for: it is bidirectional, and
 this path is causal. Checked first per §F.3.
+
+---
+
+## Cross-model finding: a profile that reports above the roof is reporting a bug
+
+Adding cost formulas for the paged serving tape (so `qwen::serve`'s step could
+report a rate at all) immediately produced `paged_decode_scores_batched` at
+**2120% of the bandwidth roof**. That is not a fast kernel; it is a broken
+measurement, and printing it as a percentage launders it into a flattering one.
+
+`gpu_core::profile` now refuses: any row above `IMPOSSIBLE_PCT` (105%) prints as
+`!542%` and the footer names every offending row —
+
+```
+!! 2 row(s) report ABOVE the device roof — the accounting or the timing is
+   wrong, not the kernel: paged_decode_scores_batched, paged_decode_apply_batched
+```
+
+This is §E.0's rule ("compute the roof first and disbelieve anything above it")
+made mechanical, and it earned its keep on the first run by catching **two
+distinct defects in the same table**:
+
+1. **The harness, not the kernel.** Every row shared one block table, so all 128
+   sequences read the same ~1 MB of KV, sat entirely in L2, and the streaming
+   byte estimate was fiction. Giving each row its own blocks took it 2120% →
+   542%. (That also needed a pool-size guard: distinct blocks made the pool
+   `rows * mbs * 3.6 MB`, which OOM'd a 24 GB card at the old default context.)
+2. **A real overcount in the formula.** GQA means `group` query heads share one
+   KV head, so the cache is read `nh/group` times, not `nh`. `bytes` is a
+   streaming estimate — "each logical operand once" — not a count of per-thread
+   loads. Fixing it took 542% → **292%**.
+
+**Still impossible at 292%, and deliberately left that way.** The remaining ~3×
+is unexplained; the candidates are the engine's `cap` differing from the
+sequence length the harness sets, a further sharing factor in the pool layout,
+or the per-group timing. Tuning the formula until the number looks plausible
+would be fitting the model to flatter the answer, which is the opposite of the
+method here — so it stays flagged, and ranking anything on the served attention
+path stays blocked until it is understood. The rest of that table (`matmul_reg3`
+at 13.7% of the compute roof, 63.4% of the pass) is unaffected and rankable.
+
+*Convention this exposed:* these kernels are **data-dependent** — the work per
+sequence is `seq_lens[b]`, which lives in a storage buffer `kernel_cost(name,
+params, threads)` cannot see. The formulas use `cap`, exact at full context and
+an over-estimate for short sequences, and `qwen_bench serve` was changed to
+profile full-context rows so the two agree. A cost model that cannot see its own
+inputs is a limitation worth naming rather than hiding.

@@ -163,24 +163,58 @@ fn main() {
             let rows: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(128);
             eprintln!("qwen_bench serve: Qwen3-0.6B, {rows} rows, {reps} reps (random weights)");
             let init = init_weights(&cfg, 7);
-            let (bs, seq) = (16u32, 1024u32);
-            let mbs = seq / bs;
+            let bs = 16u32;
+            // Context per sequence. Every row gets its OWN blocks (see below),
+            // so the paged pool is `rows * mbs` blocks and grows with BOTH —
+            // 2 * n_layers * block_size * kv_stride * 4 B each, which is 3.6 MB
+            // per block on this config. Default to a context that keeps the
+            // pool inside a 24 GB card alongside the 2.4 GB of weights; the
+            // guard below turns an over-large request into a message rather
+            // than a wgpu "Out of Memory" panic ten seconds later.
+            let seq: u32 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(256);
+            let mbs = seq.div_ceil(bs);
+            let blk_bytes =
+                2 * cfg.n_layers as u64 * bs as u64 * cfg.kv_dim() as u64 * 4;
+            let pool_gb = (rows as u64 * mbs as u64) as f64 * blk_bytes as f64 / 1e9;
+            eprintln!(
+                "paged pool: {} blocks x {:.1} MB = {:.1} GB (+2.4 GB weights)",
+                rows * mbs,
+                blk_bytes as f64 / 1e6,
+                pool_gb
+            );
+            if pool_gb > 18.0 {
+                eprintln!(
+                    "refusing: that pool will not fit. Lower `rows` or the 4th arg (context, \
+                     default 256): qwen_bench serve <rows> <reps> <ctx>"
+                );
+                return;
+            }
             let t0 = Instant::now();
             let eng = qwen::serve::Engine::from_map(
-                cfg.clone(), &init, bs, mbs * 4, rows.max(8), mbs, rows.max(8), false, false,
+                cfg.clone(), &init, bs, rows * mbs, rows.max(8), mbs, rows.max(8), false, false,
             );
             eprintln!("built in {:.1}s\n", t0.elapsed().as_secs_f32());
             let gpu = eng.gpu().share();
             let roofs = banner(&gpu);
             weight_budget(&cfg, roofs);
 
-            // One sequence's worth of rows at increasing positions — the shape
-            // a prefill chunk presents.
-            let positions: Vec<u32> = (0..rows).collect();
-            let seqlens: Vec<u32> = (0..rows).map(|i| i + 1).collect();
-            let blocks: Vec<u32> = (0..rows).map(|i| i / bs).collect();
+            // Every row at FULL context, not a 1..rows ramp. Two reasons, and
+            // they agree: it is the steady-state decode shape (the case worth
+            // optimising), and it is the case `gpu_core::cost`'s paged formulas
+            // are EXACT for — those use `cap` because `seq_lens` lives in a
+            // storage buffer the cost model cannot see, so a ramp would make
+            // the attention kernels report roughly double their real rate.
+            let positions: Vec<u32> = (0..rows).map(|_| seq - 1).collect();
+            let seqlens: Vec<u32> = (0..rows).map(|_| seq).collect();
+            // Each row gets its OWN physical blocks. Sharing one block table
+            // across every row (the obvious way to build this) makes all 128
+            // sequences read the same few megabytes, so they hit cache and the
+            // profile's streaming byte estimate becomes fiction — it reported
+            // `paged_decode_scores_batched` at 2120% of the bandwidth roof,
+            // which is the profiler catching the harness, not the kernel.
+            let blocks: Vec<u32> = (0..rows).map(|i| i * mbs).collect();
             let offsets: Vec<u32> = (0..rows).map(|i| i % bs).collect();
-            let bt: Vec<u32> = (0..rows).flat_map(|_| 0..mbs).collect();
+            let bt: Vec<u32> = (0..rows).flat_map(|i| (0..mbs).map(move |b| i * mbs + b)).collect();
 
             let steps = eng.steps_for_profile(rows, &positions, &seqlens, &blocks, &offsets, &bt);
             let secs = report(&gpu, &format!("SERVE {rows} rows"), &steps, reps, roofs);

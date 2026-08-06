@@ -265,6 +265,67 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(m * k, 4 * (m * k + m))
         }
 
+        // ---- paged KV decode/prefill (the SERVING tape) ---------------------
+        //
+        // These were all uncovered, so `qwen::serve`'s step could not report a
+        // rate at all — and an unrateable pass cannot be ranked, which is the
+        // first thing `docs/kernel-checklist.md` §F asks for.
+        //
+        // CONVENTION, because these kernels are DATA-dependent in a way the
+        // others are not: the work per sequence is `seq_lens[b]`, which lives in
+        // a storage buffer, not in `Params`, so `kernel_cost` cannot see it.
+        // The formulas therefore use `cap` — the row stride the dispatch is
+        // sized for, and the length every sequence actually reaches at full
+        // context. That is EXACT for steady-state decode (the case worth
+        // optimising) and an OVER-estimate for short sequences, which flatters
+        // the rate. Anything profiling a ramp of short sequences must say so.
+        //
+        // params: [batch, n_heads, group, head_dim, block_size, kv_stride, cap, max_bt(, scale)]
+        "paged_decode_scores_batched" | "paged_decode_scores" => {
+            let (b, nh, grp, hd, cap) = (p(0)?, p(1)?, p(2)?, p(3)?, p(6)?);
+            // GQA: `group` query heads SHARE one kv head, so the KV cache is
+            // read `nh/group` times, not `nh`. Counting per query head
+            // overstated it by exactly `group` (2x here) — and `bytes` is a
+            // streaming estimate, "each logical operand once", not a count of
+            // per-thread loads.
+            let nkv = nh / grp.max(1);
+            f(2 * b * nh * cap * hd, 4 * (b * nh * hd + b * nkv * cap * hd + b * nh * cap))
+        }
+        "paged_decode_apply_batched" | "paged_decode_apply" => {
+            let (b, nh, grp, hd, cap) = (p(0)?, p(1)?, p(2)?, p(3)?, p(6)?);
+            let nkv = nh / grp.max(1);
+            f(2 * b * nh * cap * hd, 4 * (b * nh * cap + b * nkv * cap * hd + b * nh * hd))
+        }
+        // int8 paged KV: same math, dequantized on read, so the K/V half of the
+        // traffic is 1 byte per element plus a per-block scale.
+        "paged_decode_scores_i8_batched" => {
+            let (b, nh, grp, hd, cap) = (p(0)?, p(1)?, p(2)?, p(3)?, p(6)?);
+            let nkv = nh / grp.max(1);
+            f(2 * b * nh * cap * hd, 4 * (b * nh * hd + b * nh * cap) + b * nkv * cap * hd)
+        }
+        "paged_decode_apply_i8_batched" => {
+            let (b, nh, grp, hd, cap) = (p(0)?, p(1)?, p(2)?, p(3)?, p(6)?);
+            let nkv = nh / grp.max(1);
+            f(2 * b * nh * cap * hd, 4 * (b * nh * cap + b * nh * hd) + b * nkv * cap * hd)
+        }
+        // params: [batch, kv_stride, block_size] — a copy into the paged pool.
+        "paged_kv_append_batched" | "paged_kv_append" => f(0, 8 * p(0)? * p(1)?),
+        "paged_kv_append_i8_batched" => {
+            let (b, kv) = (p(0)?, p(1)?);
+            f(2 * b * kv, 5 * b * kv)
+        }
+        // params: [batch, n_heads, cap] — one softmax row per (b, head).
+        "decode_softmax_batched" | "decode_softmax" => {
+            let n = p(0)? * p(1)? * p(2)?;
+            f(4 * n, 8 * n)
+        }
+        // params: [n_rows, n_heads, head_dim, row_stride, base] — in-place RoPE
+        // on the newly appended token of each sequence.
+        "rope_paged" => {
+            let n = p(0)? * p(1)? * p(2)?;
+            f(4 * n, 8 * n)
+        }
+
         // ---- gathers / scatters / copies (bytes, no flops) ------------------
         // embed: params [d_model, seq_len]; embed_tile adds [v0, v_count].
         "embed" | "embed_tile" => {
@@ -500,10 +561,6 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(h * t * (2 * hd + 1), 4 * (h * hd + t * p(5)? + h * t))
         }
         // params [n_heads, t, cap].
-        "decode_softmax" => {
-            let (h, t) = (p(0)?, p(1)?);
-            f(h * (6 * t + 1), 8 * h * t)
-        }
         "attn_decode_apply" => {
             let (h, hd, t) = (p(0)?, p(2)?, p(3)?);
             f(2 * h * hd * t, 4 * (h * t + t * p(5)? + h * hd))
@@ -838,6 +895,11 @@ mod tests {
             "silu", "silu_bwd", "scale_chan", "dw_splitk_reduce", "gn_dsum_part", "gn_dsum2",
             "gn_dgb_part", "gn_dgb2", "mse_value", "masked_l1", "upsample2_dx", "concat2",
             "concat_split", "matmul_i8", "roof_fma", "mse_grad", "masked_l1_grad",
+            // the served paged tape
+            "paged_decode_scores_batched", "paged_decode_apply_batched",
+            "paged_kv_append_batched", "decode_softmax_batched", "rope_paged",
+            "paged_decode_scores_i8_batched", "paged_decode_apply_i8_batched",
+            "paged_kv_append_i8_batched",
         ] {
             assert!(covers(k), "kernel `{k}` has no cost formula");
         }

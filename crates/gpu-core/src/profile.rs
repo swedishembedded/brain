@@ -27,9 +27,15 @@
 //! the pass** (`docs/lessons.md` #21).
 
 use crate::roof::{Bound, Roofs};
+
 use crate::{Gpu, Step};
 use std::collections::HashMap;
 use std::time::Instant;
+
+/// Above this fraction of a roof, the number is impossible and is reported as an
+/// error (`!`) rather than as a utilisation. A few percent of headroom keeps
+/// measurement noise on a kernel genuinely at the roof from tripping it.
+pub const IMPOSSIBLE_PCT: f32 = 105.0;
 
 /// One kernel kind's contribution to a pass.
 #[derive(Clone, Debug)]
@@ -127,8 +133,23 @@ impl PassProfile {
             let (bound, util) = match roofs {
                 Some(rf) => (
                     r.bound(rf).map(|b| b.as_str().to_string()).unwrap_or_else(|| dash.clone()),
+                    // A rate ABOVE the device's roof is not an achievement, it
+                    // is a defect in the measurement — either the cost formula
+                    // overstates the work (a data-dependent kernel costed by an
+                    // upper bound, a synthetic harness whose buffers alias so
+                    // the "streaming" byte estimate is fiction) or the timed
+                    // region was the host (`docs/kernel-checklist.md` §E.0,
+                    // which exists because a bare-submit loop once reported
+                    // 377 GB/s on a ~346 GB/s card). Printing it as a percentage
+                    // launders a broken number into a flattering one.
                     r.utilisation(rf)
-                        .map(|u| format!("{u:.1}%"))
+                        .map(|u| {
+                            if u > IMPOSSIBLE_PCT {
+                                format!("!{u:.0}%")
+                            } else {
+                                format!("{u:.1}%")
+                            }
+                        })
                         .unwrap_or_else(|| dash.clone()),
                 ),
                 None => (dash.clone(), dash.clone()),
@@ -190,6 +211,22 @@ impl PassProfile {
             self.groups,
         );
         println!("Rank with the table; decide with the whole-pass number (docs/lessons.md #21).");
+        if let Some(rf) = roofs {
+            let bogus: Vec<&str> = self
+                .rows
+                .iter()
+                .filter(|r| r.utilisation(rf).is_some_and(|u| u > IMPOSSIBLE_PCT))
+                .map(|r| r.name.as_str())
+                .collect();
+            if !bogus.is_empty() {
+                println!(
+                    "!! {} row(s) report ABOVE the device roof — the accounting or the timing is \
+                     wrong, not the kernel: {}",
+                    bogus.len(),
+                    bogus.join(", "),
+                );
+            }
+        }
     }
 
     /// Every row over `pct` of the pass that sits below its class's defect
