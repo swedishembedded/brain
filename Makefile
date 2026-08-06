@@ -50,7 +50,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release deb deb/debug deb/release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen kernels-table kernels-table/check parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: help build release deb deb/debug deb/release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen kernels-table kernels-table/check parity requirements environment environment/openvino bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
@@ -61,6 +61,8 @@ help:
 	@echo "brain targets:"
 	@echo "  make release                 build the optimized 'brain' binary"
 	@echo "  make requirements            pip-install the Python tooling (OpenVINO/NPU, torch, ...)"
+	@echo "  make environment             requirements + detect/verify a real Intel NPU (no-op if absent)"
+	@echo "  make environment/openvino    OpenVINO/NPU setup only, skips torch/CUDA (fast iteration)"
 	@echo "  make test                    FAST lane: unit+integration, no doc-tests"
 	@echo "  make test/doc                doc-tests (slow: one link per crate)"
 	@echo "  make test/slow               #[ignore]d long-running tests"
@@ -255,6 +257,32 @@ test/e2e: test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/
 requirements:
 	$(PIP) install --upgrade pip
 	$(PIP) install -r requirements.txt
+
+# `requirements` + hardware-specific setup that a package list alone can't
+# cover: detects a real Intel NPU (if any -- a no-op, exit 0 otherwise),
+# checks the kernel/driver prerequisites, installs/upgrades OpenVINO, and
+# PROVES it can see the NPU (not just that the package imported) by asking
+# OpenVINO's own Core() for its device list. See scripts/build/
+# setup-npu-runtime.sh for why there is no single pinned driver->OpenVINO
+# version table to check against.
+#
+# This pulls in the FULL requirements.txt first, including torch -- whose
+# default PyPI wheel depends unconditionally on nvidia-*-cuXX / cuda-bindings
+# / cuda-toolkit on Linux (that's pip resolving torch's own declared deps,
+# not anything this repo lists -- `pip show torch` names them; there is no
+# `cuda` line in requirements.txt). Those packages install as dead weight on
+# an NVIDIA-less box like this one -- torch never touches them here, brain's
+# own iGPU/NPU paths don't use torch at all -- but `make environment` still
+# pays for the download/disk because `requirements` installs torch for the
+# benchmark reference rows (tools/bench/*, tools/goldens/*), which do need it.
+environment: requirements
+	scripts/build/setup-npu-runtime.sh
+
+# OpenVINO/NPU setup only, skipping the rest of requirements.txt (torch +
+# its CUDA deps, transformers, ultralytics, ...) -- use this to iterate on
+# NPU detection/driver setup without re-installing the whole Python stack.
+environment/openvino:
+	scripts/build/setup-npu-runtime.sh
 
 gradcheck: release
 	$(BRAIN) gradcheck
