@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Calibrated twin of paged_kv_append_i8_batched
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant int8
+//
 // Calibrated twin of paged_kv_append_i8_batched: append a batch of new tokens'
 // K (or V) into an INT8 paged pool, but cap each kv-head's per-token online
 // absmax scale at a CALIBRATED ceiling before dividing by 127 — a percentile
