@@ -561,8 +561,8 @@ fn run_replay(rest: &[String]) {
     let mut max_mad = 0f32;
     let mut worst = context;
     let mut failed = 0usize;
-    for i in context..ds.n {
-        let f = model.step(actions[i]);
+    for (i, &action) in actions.iter().enumerate().take(ds.n).skip(context) {
+        let f = model.step(action);
         // The exact conversion the recorder applied: f32 -> RGB8 -> CHW u8.
         let rgb = imaging::pixels::chw_to_rgb8(&f, w, h, c as usize, imaging::ChannelPolicy::RequireRgb)
             .unwrap_or_else(|e| die(e))

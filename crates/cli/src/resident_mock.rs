@@ -345,10 +345,10 @@ fn generate(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResul
 const EMBED_DIM: usize = 8;
 
 /// A deterministic dim-8 embedding of `text`: byte sums folded into 8 buckets, mean-
-/// normalized and squashed with `sin` to a bounded, reproducible vector. `outputs.mean`
-/// + `outputs.tokens` are exactly what the HTTP embeddings handler reads; the
-/// `embeddings` blob (f32-LE, `meta.shape=[1,DIM]`) is the same vector for a caller
-/// on the fd-in/fd-out path (see `examples/embedding/embed_document.py`).
+/// normalized and squashed with `sin` to a bounded, reproducible vector.
+/// `outputs.mean` and `outputs.tokens` are exactly what the HTTP embeddings handler
+/// reads; the `embeddings` blob (f32-LE, `meta.shape=[1,DIM]`) is the same vector for
+/// a caller on the fd-in/fd-out path (see `examples/embedding/embed_document.py`).
 ///
 /// `text` comes from the input blob if present, else the `text` param — neither is
 /// required at the spec level (see [`MockResident::embed_spec`]) so this is the one

@@ -3,7 +3,7 @@
 
 //! [`residency::ModelSupplier`] backed by the model store
 //! (`brain_modelstore`): classifies a model name against the naming grammar
-//! + reserved-vendor gate (no network for anything `classify` alone can
+//! and reserved-vendor gate (no network for anything `classify` alone can
 //! answer), and fetches via the store's resolution ladder on `ensure`.
 //!
 //! Single-flight: concurrent `ensure` calls for the SAME model share one
@@ -72,10 +72,14 @@ enum FetchState {
     Done(Result<(), String>),
 }
 
+/// One single-flight gate per model: the fetch's outcome plus the condvar
+/// that wakes every other concurrent `ensure` call waiting on it.
+type FetchGate = Arc<(Mutex<FetchState>, Condvar)>;
+
 pub struct StoreSupplier {
     store: Store,
     hub: Box<dyn Hub>,
-    inflight: Mutex<HashMap<String, Arc<(Mutex<FetchState>, Condvar)>>>,
+    inflight: Mutex<HashMap<String, FetchGate>>,
 }
 
 impl StoreSupplier {

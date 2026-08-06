@@ -49,7 +49,7 @@ cd "$ROOT"
 # `git diff -U0 origin/main HEAD` hunks), and zero are in any of the thirteen
 # crates the branch created. Anything short of that evidence means fix the
 # warnings, not the number.
-BASELINE="${BASELINE:-183}"
+BASELINE="${BASELINE:-182}"
 
 # Force a full re-lint: cargo replays diagnostics only for units it re-runs, so
 # a warm target dir would otherwise report a small fraction of the real count.

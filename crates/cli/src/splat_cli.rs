@@ -334,8 +334,8 @@ pub fn run_viewer(
         if held(Key::C) {
             add([0.0, 1.0, 0.0], 1.0);
         }
-        for k in 0..3 {
-            fly.pos[k] += mv[k] * speed;
+        for (p, &m) in fly.pos.iter_mut().zip(mv.iter()) {
+            *p += m * speed;
         }
 
         // render + present
@@ -495,8 +495,8 @@ pub fn write_ppm(path: &str, rgba: &[f32], w: usize, h: usize, normalize: bool) 
     }
     let mut hwc = Vec::with_capacity(w * h * 3);
     for px in rgba.chunks_exact(4) {
-        for k in 0..3 {
-            hwc.push(if normalize { (px[k] - lo) / (hi - lo) } else { px[k] });
+        for &v in px.iter().take(3) {
+            hwc.push(if normalize { (v - lo) / (hi - lo) } else { v });
         }
     }
     let img = imaging::pixels::hwc_to_rgb8(&hwc, w as u32, h as u32, 3, imaging::ChannelPolicy::RequireRgb)
