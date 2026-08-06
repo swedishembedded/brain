@@ -251,6 +251,35 @@ fn decoder_param_list(cfg: &QwenConfig) -> Vec<(String, usize)> {
     out
 }
 
+/// Per-(K or V)-buffer word counts for the paged KV pool at this sizing — the
+/// ONE place the int8/fp32 layout is derived. `from_map_with_gpu`'s
+/// allocation loop and [`kv_pool_bytes`] both call this rather than each
+/// carrying their own copy of the arithmetic, so a caller reading
+/// `Engine::kv_pool_bytes` back is reading what was actually allocated, never
+/// a second guess at it.
+fn kv_pool_words(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8: bool) -> (u64, u64) {
+    let hkv = cfg.kv_dim() as u64;
+    let n_kv = cfg.n_kv_heads as u64;
+    let slots = num_blocks as u64 * block_size as u64;
+    let pool_words = if kv_int8 { slots * hkv / 4 } else { slots * hkv };
+    let scale_words = if kv_int8 { slots * n_kv } else { 0 };
+    (pool_words, scale_words)
+}
+
+/// Device bytes the paged KV pool costs at this sizing: K + V pools (packed
+/// int8 4/`u32` + a fp32 scale per `(token slot, kv-head)`, or plain fp32) for
+/// every layer.
+///
+/// The exact ratio `fp32 / int8` is `4·head_dim / (head_dim + 4)` — 3.8788x
+/// at Qwen3's `head_dim=128`, but a DIFFERENT number at any other `head_dim`
+/// (2.6667x at `QwenConfig::tiny()`'s `head_dim=8`) — see
+/// `kv_pool_bytes_identity_holds_at_the_real_shape`, which pins both.
+pub fn kv_pool_bytes(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8: bool) -> u64 {
+    let (pool_words, scale_words) = kv_pool_words(cfg, block_size, num_blocks, kv_int8);
+    let n_layers = cfg.n_layers as u64;
+    n_layers * 2 * (pool_words + scale_words) * 4 // K + V, every layer, 4 bytes/word
+}
+
 /// A running sequence: its block table, generated tokens, and completion flag.
 struct Seq {
     table: BlockTable,
@@ -328,6 +357,10 @@ pub struct Engine {
     kv_int8: bool,
     scales_k: Vec<DeviceBuffer>,
     scales_v: Vec<DeviceBuffer>,
+    /// What [`kv_pool_bytes`] computed for this sizing — recorded once at
+    /// construction (not re-derived by the accessor) so it can never drift
+    /// from what `pool_k`/`pool_v`/`scales_k`/`scales_v` actually allocated.
+    kv_pool_bytes: u64,
     /// `Some` selects the calibrated append kernel (`APPEND_I8_CLIPPED`) in
     /// place of the plain online-absmax one (`APPEND_I8`) — see
     /// [`Engine::set_kv_calib`]. `None` (the default) leaves the uncalibrated
@@ -444,10 +477,15 @@ impl Engine {
         for _ in 0..=cfg.n_layers {
             res.push(st(b * d));
         }
-        let n_kv = cfg.n_kv_heads as u64;
-        let slots = num_blocks as u64 * block_size as u64;
         // int8 pools pack 4 values/u32 (÷4 words) + a scale per (token slot, kv-head).
-        let pool_words = if kv_int8 { slots * hkv / 4 } else { slots * hkv };
+        // The WGSL append kernels require head_dim % 4 == 0 (a packed u32 must
+        // stay within one head, else its 4 lanes span two heads' scales) --
+        // asserted here, once, rather than left as an unguarded `/ 4` that
+        // would silently under-allocate the pool for an odd head_dim.
+        if kv_int8 {
+            assert!(cfg.head_dim.is_multiple_of(4), "int8 KV requires head_dim % 4 == 0 (got {})", cfg.head_dim);
+        }
+        let (pool_words, scale_words) = kv_pool_words(&cfg, block_size, num_blocks, kv_int8);
         let mut pool_k = Vec::new();
         let mut pool_v = Vec::new();
         let mut scales_k = Vec::new();
@@ -456,10 +494,11 @@ impl Engine {
             pool_k.push(st(pool_words));
             pool_v.push(st(pool_words));
             if kv_int8 {
-                scales_k.push(st(slots * n_kv));
-                scales_v.push(st(slots * n_kv));
+                scales_k.push(st(scale_words));
+                scales_v.push(st(scale_words));
             }
         }
+        let kv_pool_bytes_val = cfg.n_layers as u64 * 2 * (pool_words + scale_words) * 4;
         let sc = Scratch {
             res,
             xn1: st(b * d),
@@ -568,6 +607,7 @@ impl Engine {
             kv_int8,
             scales_k,
             scales_v,
+            kv_pool_bytes: kv_pool_bytes_val,
             kv_calib: None,
             clip_k: Vec::new(),
             clip_v: Vec::new(),
@@ -631,6 +671,28 @@ impl Engine {
     /// was asked for.
     pub fn weights_int8(&self) -> bool {
         self.w8.is_some()
+    }
+
+    /// True when the KV cache is packed int8 rather than fp32 (unlike
+    /// `weights_int8`, this is exactly what the constructor was built with —
+    /// int8 KV has no capability gate to fall back from).
+    pub fn kv_int8(&self) -> bool {
+        self.kv_int8
+    }
+
+    /// Device bytes the KV pool costs at this engine's sizing — recorded once
+    /// at construction from [`kv_pool_bytes`], never re-derived, so this can
+    /// never drift from what `pool_k`/`pool_v`/`scales_k`/`scales_v` actually
+    /// allocated.
+    pub fn kv_pool_bytes(&self) -> u64 {
+        self.kv_pool_bytes
+    }
+
+    /// Whether the installed KV clip table is a real, binding calibration
+    /// (not `None`, not `KvCalib::disabled`) — i.e. whether `APPEND_I8_CLIPPED`
+    /// is actually selected in place of `APPEND_I8`.
+    pub fn kv_calibrated(&self) -> bool {
+        self.kv_calib.is_some()
     }
 
     /// The device this engine runs on — the parent handle for building more
@@ -1796,6 +1858,24 @@ mod tests {
         map
     }
 
+    /// G1: the KV pool byte count at REAL Qwen3-0.6B serving defaults (`ctx=2048`
+    /// -> `block_size=16`, `num_blocks=272`), pinned exactly -- pure arithmetic,
+    /// no device, no weights. The int8/fp32 ratio is `4*head_dim/(head_dim+4)`,
+    /// which is why `tiny()`'s ratio (`head_dim=8`) is a DIFFERENT number from
+    /// the real one (`head_dim=128`) -- a toy config cannot stand in for it.
+    #[test]
+    fn kv_pool_bytes_identity_holds_at_the_real_shape() {
+        let real = QwenConfig::qwen3_0_6b();
+        let (bs, nb) = (16u32, 2048u32.div_ceil(16) * 2 + 16); // = 272
+        assert_eq!(nb, 272);
+        assert_eq!(kv_pool_bytes(&real, bs, nb, false), 998_244_352);
+        assert_eq!(kv_pool_bytes(&real, bs, nb, true), 257_359_872);
+
+        let ratio = |c: &QwenConfig| kv_pool_bytes(c, bs, nb, false) as f64 / kv_pool_bytes(c, bs, nb, true) as f64;
+        assert!((ratio(&real) - 4.0 * 128.0 / 132.0).abs() < 1e-9, "real head_dim=128 ratio must be 3.8788...");
+        assert!((ratio(&QwenConfig::tiny()) - 4.0 * 8.0 / 12.0).abs() < 1e-9, "tiny head_dim=8 ratio must be 2.6667... -- NOT the same number as the real shape");
+    }
+
     /// Single-sequence paged/batched serving must match the reference contiguous
     /// KV generation (`Qwen::generate_kv`) token-for-token, and a two-sequence
     /// batch must equal running each prompt on its own — proving batched paged
@@ -2492,6 +2572,23 @@ mod tests {
         for &t in &sampled_a {
             assert!(t < cfg.vocab, "sampled token {t} outside vocab {}", cfg.vocab);
         }
+    }
+
+    /// G2: `Engine::kv_pool_bytes()` must equal the independently-recomputed
+    /// [`kv_pool_bytes`] free function (two derivations that must agree — the
+    /// engine's is recorded at construction, this test's is a fresh call), and
+    /// an int8 engine's pool must be strictly smaller than an fp32 one at the
+    /// SAME `num_blocks`.
+    #[test]
+    fn engine_kv_pool_bytes_matches_what_it_allocated() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let (bs, nb) = (4u32, 64u32);
+        let e32 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, bs, nb, 1, 8, 32, false, false);
+        let e8 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, bs, nb, 1, 8, 32, true, false);
+        assert_eq!(e32.kv_pool_bytes(), kv_pool_bytes(&cfg, bs, nb, false));
+        assert_eq!(e8.kv_pool_bytes(), kv_pool_bytes(&cfg, bs, nb, true));
+        assert!(e8.kv_pool_bytes() < e32.kv_pool_bytes(), "int8 pool must be smaller than fp32 at the same num_blocks");
     }
 
     /// int8 paged KV stays close to fp32 through prefill + decode (both read the
