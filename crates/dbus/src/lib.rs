@@ -53,46 +53,53 @@ impl Default for DbusOpts {
 /// The object path the `Manager` is served at.
 pub const OBJECT_PATH: &str = "/com/swedishembedded/Brain1";
 
-/// Serve the [`Executor`] over D-Bus until Ctrl-C / SIGTERM. Builds a multi-threaded
-/// Tokio runtime, connects to the chosen bus, requests the well-known name, and
-/// serves the [`service::Manager`] at [`OBJECT_PATH`]. The executor owns the
-/// residency manager + scheduler worker (inference runs there, off the bus threads).
-/// Blocks the calling thread for the lifetime of the service.
-///
-/// Installs its own SIGINT/SIGTERM handling via [`brain_shutdown`]. If this is the
-/// only serving surface in the process, that is exactly right; when it runs
-/// alongside an HTTP surface, use [`serve_with_shutdown`] instead so both surfaces
-/// share one shutdown source — see that function's docs for why a second,
-/// independent `tokio::signal::ctrl_c()` registration is a bug, not a redundancy.
-pub fn serve(executor: Executor, opts: DbusOpts) -> anyhow::Result<()> {
-    serve_with_shutdown(executor, opts, brain_shutdown::Shutdown::from_signals())
+/// Everything [`serve`] needs beyond the executor and the bus options. Mirrors
+/// `apiserve::ServeOpts` — see that type's docs for why a shared shutdown source
+/// matters when D-Bus runs alongside an HTTP surface, and why the readiness gate
+/// is a marker file rather than a bus method.
+#[derive(Default)]
+pub struct ServeOpts {
+    /// `None` installs a private shutdown source via
+    /// [`brain_shutdown::Shutdown::from_signals`] — right for a D-Bus-only
+    /// process, wrong when it runs alongside HTTP (see `apiserve::ServeOpts::shutdown`).
+    pub shutdown: Option<brain_shutdown::Shutdown>,
+    /// `Run`/`Subscribe`/`StreamTranscribe` first try this (if given) for a model
+    /// that isn't already resident, blocking until it's fetched and registered —
+    /// see `service::Manager::ensure_resident`. `None` is today's default: a
+    /// plain `"no model '…'"` reply for an unresolved model.
+    pub supplier: Option<std::sync::Arc<dyn residency::ModelSupplier>>,
+    /// Notified once, after the well-known bus name is acquired. Default is
+    /// [`brain_shutdown::ready::Gate::disabled`] (a no-op).
+    pub ready: brain_shutdown::ready::Gate,
 }
 
-/// Serve the [`Executor`] over D-Bus until `shutdown` fires. Identical to [`serve`]
-/// except the caller supplies (and owns the lifetime of) the shutdown signal —
-/// the shape needed when D-Bus runs alongside another surface (see
-/// `crates/cli/src/run_cli.rs::run_apis`), so exactly one SIGINT/SIGTERM
-/// registration is shared by every surface in the process instead of each surface
-/// racing to install its own.
-///
-/// No auto-fetch supplier — a plain `"no model '…'"` reply for an unresolved
-/// model, exactly today's behavior. Use [`serve_with_shutdown_and_supplier`] to
-/// enable transparent auto-fetch (`crates/cli/src/run_cli.rs::run_apis` does,
-/// building a `StoreSupplier`).
-pub fn serve_with_shutdown(executor: Executor, opts: DbusOpts, shutdown: brain_shutdown::Shutdown) -> anyhow::Result<()> {
-    serve_with_shutdown_and_supplier(executor, opts, shutdown, None)
+impl ServeOpts {
+    pub fn new() -> ServeOpts {
+        ServeOpts::default()
+    }
+    pub fn with_shutdown(mut self, shutdown: brain_shutdown::Shutdown) -> ServeOpts {
+        self.shutdown = Some(shutdown);
+        self
+    }
+    pub fn with_supplier(mut self, supplier: Option<std::sync::Arc<dyn residency::ModelSupplier>>) -> ServeOpts {
+        self.supplier = supplier;
+        self
+    }
+    pub fn with_ready(mut self, ready: brain_shutdown::ready::Gate) -> ServeOpts {
+        self.ready = ready;
+        self
+    }
 }
 
-/// Like [`serve_with_shutdown`], but `Run`/`Subscribe`/`StreamTranscribe` first
-/// try `supplier` (if given) for a model that isn't already resident, blocking
-/// until it's fetched and registered before dispatching — see
-/// `service::Manager::ensure_resident`.
-pub fn serve_with_shutdown_and_supplier(
-    executor: Executor,
-    opts: DbusOpts,
-    shutdown: brain_shutdown::Shutdown,
-    supplier: Option<std::sync::Arc<dyn residency::ModelSupplier>>,
-) -> anyhow::Result<()> {
+/// Serve the [`Executor`] over D-Bus until `opts.shutdown` fires (or, with
+/// `opts.shutdown: None`, until this process's own Ctrl-C/SIGTERM). Builds a
+/// multi-threaded Tokio runtime, connects to the chosen bus, requests the
+/// well-known name, and serves the [`service::Manager`] at [`OBJECT_PATH`]. The
+/// executor owns the residency manager + scheduler worker (inference runs there,
+/// off the bus threads). Blocks the calling thread for the lifetime of the service.
+pub fn serve(executor: Executor, opts: DbusOpts, serve_opts: ServeOpts) -> anyhow::Result<()> {
+    let shutdown = serve_opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
+    let ServeOpts { supplier, ready, .. } = serve_opts;
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
         // A cheap executor clone drives the background stats stream, so the
@@ -109,6 +116,10 @@ pub fn serve_with_shutdown_and_supplier(
             .build()
             .await?;
         eprintln!("brain: serving {} on the {:?} bus at {OBJECT_PATH}", opts.name, opts.bus);
+        // The well-known name is owned and the object is served: this is a true
+        // "up" point. zbus 5's `Builder::name` acquires the name during `build()`
+        // and errors above if it cannot, so reaching here means both succeeded.
+        ready.bound("dbus");
         // Push the self-describing stats snapshot as the `StatsStream` signal at
         // >=2 Hz (see `service::STATS_INTERVAL`), so braintop subscribes instead of
         // polling. It holds its own `conn` clone and exits on `shutdown` — see

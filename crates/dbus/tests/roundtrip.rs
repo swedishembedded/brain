@@ -183,8 +183,9 @@ fn run_roundtrips_a_result_over_an_fd() {
 /// held its own `zbus::Connection` clone for its whole life and only released it
 /// when a signal emit *failed* — which cannot happen while the connection is
 /// alive — so `Connection::graceful_shutdown()` awaited a drop event that could
-/// never fire. `serve`/`serve_with_shutdown` would print "shutting down" and then
-/// hang forever. This test drives `serve_with_shutdown` on its own thread, waits
+/// never fire. `serve` would print "shutting down" and then hang forever. This
+/// test drives `serve` (with only a shutdown source set on `ServeOpts`) on its
+/// own thread, waits
 /// for it to actually claim the bus name (so the fix is proven against a *live*
 /// connection with the stats task running, not just an early return), fires the
 /// shutdown token, and asserts the thread joins within a bound. On the old code
@@ -206,7 +207,7 @@ fn dbus_serve_stops_promptly_once_shutdown_fires() {
     let opts = brain_dbus::DbusOpts { bus: brain_dbus::BusKind::Session, name: name.clone() };
     let (trigger, shutdown) = brain_shutdown::channel();
 
-    let handle = std::thread::spawn(move || brain_dbus::serve_with_shutdown(executor, opts, shutdown));
+    let handle = std::thread::spawn(move || brain_dbus::serve(executor, opts, brain_dbus::ServeOpts::new().with_shutdown(shutdown)));
 
     // Wait for the server to actually claim the bus name (proving a *live*
     // connection, stats task and all, unwinds cleanly) before firing shutdown.
@@ -234,7 +235,7 @@ fn dbus_serve_stops_promptly_once_shutdown_fires() {
         if handle.is_finished() {
             break;
         }
-        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "brain_dbus::serve_with_shutdown did not stop within 5s of shutdown firing");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5), "brain_dbus::serve did not stop within 5s of shutdown firing");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     handle.join().unwrap().unwrap();

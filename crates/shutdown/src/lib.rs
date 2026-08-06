@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! One coordinated shutdown signal for every serving surface.
+//! Process lifecycle signalling for every serving surface: one shutdown source
+//! ([`Shutdown`], end of life) and one readiness latch ([`ready::Gate`], start of
+//! life). `brain serve` can run several surfaces at once (an HTTP dialect per
+//! port, plus D-Bus), each on its own thread/runtime, and both signals are the
+//! same shape for that reason: "has everything started" and "should everything
+//! stop" are both an AND/OR over surfaces that only a shared, cross-thread token
+//! can express — see [`ready`]'s module docs for the readiness half.
 //!
 //! `brain serve` can run the D-Bus surface and one or more HTTP surfaces at once,
 //! each on its own tokio runtime (`crates/dbus` builds a multi-thread runtime on
@@ -22,6 +28,8 @@
 //! owns the one SIGINT/SIGTERM registration on a dedicated thread, so it does not
 //! matter which surface's runtime is built first or which one owns the process's
 //! main thread.
+
+pub mod ready;
 
 use tokio::sync::watch;
 

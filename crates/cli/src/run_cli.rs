@@ -54,6 +54,96 @@ impl<W: Write> Emit for StdoutSink<'_, W> {
     }
 }
 
+const HELP: &str = "\
+brain serve — serve brain's models over HTTP, D-Bus, or stdio  (alias: brain run)
+
+USAGE:
+  brain serve [SURFACE ...] [options]     # one or more serving surfaces
+  brain serve                             # NO surface flag: the stdio JSONL loop
+
+HTTP INFERENCE APIS  (each on its own localhost port, each behind its own key)
+  --openai [PORT]        OpenAI-compatible dialect       (default port 8788)
+  --openrouter [PORT]    OpenRouter-compatible dialect   (default port 8789)
+  --anthropic [PORT]     Anthropic Messages dialect      (default port 8787)
+
+  BASE URL — for OpenAI and OpenRouter, BOTH of these work, because every route
+  is registered with and without the /v1 prefix:
+      http://127.0.0.1:PORT        POST /chat/completions,    GET /models
+      http://127.0.0.1:PORT/v1     POST /v1/chat/completions, GET /v1/models
+  Point OPENAI_BASE_URL / a client's base_url at either one. The Anthropic
+  dialect is /v1-ONLY: base URL http://127.0.0.1:PORT, routes POST /v1/messages
+  and POST /v1/messages/count_tokens. GET /models and GET /v1/models are served
+  on every surface. Also available on openai/openrouter: /embeddings and
+  /images/generations, each with and without /v1.
+
+  Auth:  Authorization: Bearer <key>   (openai, openrouter)
+         x-api-key: <key>              (anthropic)
+  A fresh key per surface per launch, printed on stdout as
+  `APIKEY <provider> <key>`; --api-keys-out writes the same keys as JSON, 0600.
+
+  Surfaces ALWAYS bind 127.0.0.1. There is no --listen / --host / --bind flag.
+
+D-BUS CONTROL SURFACE
+  --dbus                 serve com.swedishembedded.Brain1 on the session bus
+  --dbus-system          use the system bus instead (needs a system.d policy)
+  --dbus-name NAME       request NAME instead of com.swedishembedded.Brain1
+
+SERVING OPTIONS
+  --models-dir DIR       directory scanned at startup for the served catalog
+                         (else $BRAIN_MODELS_DIR, else $XDG_DATA_HOME/brain/models)
+  --api-keys-out FILE    write {\"openai\":\"sk-brain-…\", …} as JSON, mode 0600
+  --reserve-gb N         GB of VRAM kept free per GPU for activations (default 2)
+  --ready-file PATH      create PATH (empty) once EVERY surface requested above
+                         has bound its listener. Because the APIKEY lines and
+                         --api-keys-out are both written BEFORE any bind, PATH
+                         appearing means: keys are on disk AND every listener is
+                         accepting. Wait on this one file instead of polling a
+                         port or grepping the log.
+                         It is NEVER created if any requested surface fails to
+                         come up -- so a waiter must also bound its wait and
+                         check the process is still alive.
+                         \"Ready\" means listening, not warm: models load lazily.
+                         A stale PATH from a previous run is removed at startup.
+                         The file is empty and not a secret: it holds no key, no
+                         pid and no address.
+
+STDIO CONTROLLER  (the default, with no surface flag)
+  --gpt PATH             GPT checkpoint (else $BRAIN_GPT; else a fake echo model)
+  --yolo PATH             YOLO checkpoint (else $BRAIN_YOLO; else a fake detector)
+  --conf X                detection confidence threshold (else $BRAIN_CONF, 0.25)
+  --max-new N  --temp X  --top-k K  --seed S      generation config
+  Reads JSONL events on stdin, writes JSONL events on stdout, one per line.
+  Example: printf '{\"event\":\"user_text\",\"text\":\"hi\"}\\n' | brain run
+
+GLOBAL
+  --device cpu|gpu|npu|gpu0|cpu0-7|gpu,cpu   consumed before this subcommand
+                                             (see brain --help); $BRAIN_DEVICE
+  -h, --help                                 this text
+
+EXAMPLES
+  brain serve --openai                       # OpenAI API on http://127.0.0.1:8788
+  brain serve --openai 9000 --api-keys-out /run/brain/keys.json \\
+              --ready-file /run/brain/ready
+  brain serve --dbus --anthropic --openrouter
+";
+
+/// The value that must follow a value-taking flag. A flag with no value is a
+/// typo, not a request for the default: a trailing `--gpt` used to silently
+/// mean \"no checkpoint\", erasing a `BRAIN_GPT` already read from the
+/// environment, and a trailing `--models-dir` used to silently scan the XDG
+/// default instead of the directory the caller meant to name.
+fn val(args: &[String], i: &mut usize, flag: &str) -> String {
+    *i += 1;
+    match args.get(*i) {
+        Some(v) => v.clone(),
+        None => {
+            eprintln!("brain serve: {flag} needs a value\n");
+            eprint!("{HELP}");
+            std::process::exit(2);
+        }
+    }
+}
+
 pub fn run_serve(args: &[String]) {
     let mut gpt_path = std::env::var("BRAIN_GPT").ok();
     let mut yolo_path = std::env::var("BRAIN_YOLO").ok();
@@ -76,6 +166,7 @@ pub fn run_serve(args: &[String]) {
     let (mut anthropic, mut openai, mut openrouter): (Option<u16>, Option<u16>, Option<u16>) =
         (None, None, None);
     let mut api_keys_out: Option<String> = None;
+    let mut ready_file: Option<String> = None;
     // Optional PORT immediately following an API flag (else the provider default).
     let take_port = |args: &[String], i: &mut usize, default: u16| -> u16 {
         if let Some(p) = args.get(*i + 1).and_then(|s| s.parse::<u16>().ok()) {
@@ -89,63 +180,78 @@ pub fn run_serve(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--gpt" => {
-                i += 1;
-                gpt_path = args.get(i).cloned();
-            }
-            "--yolo" => {
-                i += 1;
-                yolo_path = args.get(i).cloned();
-            }
+            "--gpt" => gpt_path = Some(val(args, &mut i, "--gpt")),
+            "--yolo" => yolo_path = Some(val(args, &mut i, "--yolo")),
             "--max-new" => {
-                i += 1;
-                cfg.max_new = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(cfg.max_new);
+                let v = val(args, &mut i, "--max-new");
+                cfg.max_new = v.parse().unwrap_or(cfg.max_new);
             }
             "--temp" | "--temperature" => {
-                i += 1;
-                cfg.temperature =
-                    args.get(i).and_then(|s| s.parse().ok()).unwrap_or(cfg.temperature);
+                let flag = args[i].clone();
+                let v = val(args, &mut i, &flag);
+                cfg.temperature = v.parse().unwrap_or(cfg.temperature);
             }
             "--top-k" => {
-                i += 1;
-                cfg.top_k = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(cfg.top_k);
+                let v = val(args, &mut i, "--top-k");
+                cfg.top_k = v.parse().unwrap_or(cfg.top_k);
             }
             "--seed" => {
-                i += 1;
-                cfg.seed = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(cfg.seed);
+                let v = val(args, &mut i, "--seed");
+                cfg.seed = v.parse().unwrap_or(cfg.seed);
             }
             "--conf" => {
-                i += 1;
-                conf = args.get(i).and_then(|s| s.parse().ok()).or(conf);
+                let v = val(args, &mut i, "--conf");
+                conf = v.parse().ok().or(conf);
             }
             "--dbus" => dbus = true,
             "--dbus-system" => {
                 dbus = true;
                 dbus_system = true;
             }
-            "--dbus-name" => {
-                i += 1;
-                dbus_name = args.get(i).cloned();
-            }
+            "--dbus-name" => dbus_name = Some(val(args, &mut i, "--dbus-name")),
             "--reserve-gb" => {
-                i += 1;
-                dbus_reserve_gb = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(dbus_reserve_gb);
+                let v = val(args, &mut i, "--reserve-gb");
+                dbus_reserve_gb = v.parse().unwrap_or(dbus_reserve_gb);
             }
-            "--models-dir" => {
-                i += 1;
-                models_dir = args.get(i).cloned();
-            }
+            "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
             "--anthropic" => anthropic = Some(take_port(args, &mut i, 8787)),
             "--openai" => openai = Some(take_port(args, &mut i, 8788)),
             "--openrouter" => openrouter = Some(take_port(args, &mut i, 8789)),
-            "--api-keys-out" => {
-                i += 1;
-                api_keys_out = args.get(i).cloned();
+            "--api-keys-out" => api_keys_out = Some(val(args, &mut i, "--api-keys-out")),
+            "--ready-file" => ready_file = Some(val(args, &mut i, "--ready-file")),
+            "--help" | "-h" => {
+                print!("{HELP}");
+                return;
             }
-            other => eprintln!("brain run: ignoring unknown flag {other:?}"),
+            other => {
+                // stderr, not stdout: brain serve's stdout is a protocol stream
+                // (JSONL envelopes; `APIKEY <provider> <key>` lines a harness
+                // greps), so dumping usage onto it on the ERROR path would
+                // corrupt that stream. `--help` above -- a successful request
+                // for the text -- still goes to stdout.
+                eprintln!("brain serve: unknown flag {other:?}\n");
+                eprint!("{HELP}");
+                std::process::exit(2);
+            }
         }
         i += 1;
     }
+
+    let surfaces_requested =
+        dbus as usize + anthropic.is_some() as usize + openai.is_some() as usize + openrouter.is_some() as usize;
+    // The stdio loop counts as one "surface" too, so --ready-file means the same
+    // thing in both modes: it fires at the same point the loop already emits
+    // `events::Event::Ready`.
+    let ready = match &ready_file {
+        Some(p) => match brain_shutdown::ready::Gate::touching(p, surfaces_requested.max(1)) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("brain serve: --ready-file {p}: {e}");
+                std::process::exit(2);
+            }
+        },
+        None => brain_shutdown::ready::Gate::disabled(),
+    };
 
     // The D-Bus control surface replaces the stdio loop when requested: it serves
     // every registered model over `com.swedishembedded.Brain1` until Ctrl-C.
@@ -160,6 +266,7 @@ pub fn run_serve(args: &[String]) {
             openai,
             openrouter,
             api_keys_out,
+            ready,
         });
     }
 
@@ -211,6 +318,7 @@ pub fn run_serve(args: &[String]) {
     // Announce readiness.
     let _ = writeln!(out, "{}", events::encode_line(&events::Event::Ready));
     let _ = out.flush();
+    ready.bound("stdio");
 
     // Blocking line read = idle wait. EOF (None) ends the loop.
     for line in stdin.lock().lines() {
@@ -330,6 +438,9 @@ struct RunApis {
     openai: Option<u16>,
     openrouter: Option<u16>,
     api_keys_out: Option<String>,
+    /// Notified once per bound surface (HTTP + D-Bus); disabled unless
+    /// `--ready-file` was given. See `brain_shutdown::ready::Gate`.
+    ready: brain_shutdown::ready::Gate,
 }
 
 /// Build the one shared executor and bring up the requested surfaces: D-Bus
@@ -424,13 +535,20 @@ fn run_apis(a: RunApis) {
         if http {
             let sd = shutdown.clone();
             let dbus_system = a.dbus_system;
+            let ready = a.ready.clone();
+            let ready_for_diag = a.ready.clone();
             Some(std::thread::spawn(move || {
-                if let Err(err) = brain_dbus::serve_with_shutdown_and_supplier(e, opts, sd, sup) {
+                let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(sd).with_supplier(sup).with_ready(ready);
+                if let Err(err) = brain_dbus::serve(e, opts, serve_opts) {
                     eprintln!("{}", dbus_connect_hint(&err, dbus_system, true));
+                    if let Some(p) = ready_for_diag.path() {
+                        eprintln!("brain serve: --ready-file {} will NEVER be created -- the D-Bus surface was requested but did not start", p.display());
+                    }
                 }
             }))
         } else {
-            if let Err(err) = brain_dbus::serve_with_shutdown_and_supplier(e, opts, shutdown, sup) {
+            let serve_opts = brain_dbus::ServeOpts::new().with_shutdown(shutdown).with_supplier(sup).with_ready(a.ready.clone());
+            if let Err(err) = brain_dbus::serve(e, opts, serve_opts) {
                 eprintln!("{}", dbus_connect_hint(&err, a.dbus_system, false));
                 std::process::exit(1);
             }
@@ -453,6 +571,12 @@ fn run_apis(a: RunApis) {
         if let Some(p) = a.openrouter {
             surfaces.push(apiserve::Surface::generate(apiserve::Provider::OpenRouter, local(p)));
         }
+        // ORDER IS THE CONTRACT: announce() and --api-keys-out both run BEFORE
+        // any listener binds, and --ready-file is touched only from inside the
+        // per-surface bind (apiserve::serve_all / brain_dbus::serve). That is
+        // what lets a script wait on the ready file ALONE and then read the
+        // keys with no retry. Do not move write_keys below serve_all.
+        // Gate: tests/e2e/ready.bats.
         for s in &surfaces {
             s.announce();
         }
@@ -461,7 +585,8 @@ fn run_apis(a: RunApis) {
                 eprintln!("brain serve: --api-keys-out {path}: {e}");
             }
         }
-        if let Err(e) = apiserve::serve_all_with_shutdown_and_supplier(executor, surfaces, shutdown, supplier) {
+        let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready);
+        if let Err(e) = apiserve::serve_all(executor, surfaces, opts) {
             eprintln!("brain serve: {e}");
             std::process::exit(1);
         }
@@ -522,4 +647,52 @@ pub(crate) fn query_ram_bytes() -> u64 {
         })
         .map(|kb| kb << 10)
         .unwrap_or(16 << 30)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HELP;
+
+    /// Every flag the hand-rolled loop in `run_serve` actually parses must be
+    /// documented in `HELP` -- this is the content-side gate for the bench
+    /// incident (`--listen` was undocumented AND unparsed; a flag that is
+    /// parsed but undocumented is the same bug in the other direction).
+    #[test]
+    fn help_documents_every_flag_the_parser_accepts() {
+        for f in [
+            "--gpt", "--yolo", "--max-new", "--temp", "--top-k", "--seed", "--conf", "--dbus", "--dbus-system", "--dbus-name",
+            "--reserve-gb", "--models-dir", "--anthropic", "--openai", "--openrouter", "--api-keys-out", "--ready-file",
+        ] {
+            assert!(HELP.contains(f), "{f} is parsed by run_serve but not documented in HELP");
+        }
+    }
+
+    #[test]
+    fn help_states_the_default_ports() {
+        for p in ["8788", "8787", "8789"] {
+            assert!(HELP.contains(p), "default port {p} is not documented in HELP");
+        }
+    }
+
+    #[test]
+    fn help_states_both_openai_base_urls() {
+        assert!(HELP.contains("http://127.0.0.1:PORT/v1"));
+        assert!(HELP.contains("http://127.0.0.1:PORT "), "the bare (non-/v1) base URL must be documented too");
+        assert!(HELP.contains("/chat/completions"));
+        assert!(HELP.contains("/v1/chat/completions"));
+    }
+
+    #[test]
+    fn help_states_the_anthropic_dialect_is_v1_only() {
+        assert!(HELP.contains("/v1/messages"));
+        assert!(HELP.contains("/v1-ONLY"));
+    }
+
+    /// Regression gate for the bench incident: `--listen HOST:PORT` was
+    /// silently ignored because it never existed. State plainly that it does
+    /// not exist, so a reader does not have to grep the parser to find out.
+    #[test]
+    fn help_states_there_is_no_listen_flag() {
+        assert!(HELP.contains("no --listen"));
+    }
 }

@@ -115,58 +115,69 @@ async fn fallback(State(state): State<AppState>) -> ApiError {
     ApiError::not_found(state.provider, "no such route")
 }
 
-/// Serve every [`Surface`] over the ONE shared [`Executor`] until interrupted.
+/// Everything [`serve_all`] needs beyond the executor and the surfaces.
+///
+/// One options struct rather than a `serve_all_with_shutdown_and_supplier…`-style
+/// ladder: the previous three-rung ladder had two rungs with zero callers anywhere
+/// in the workspace, and every new cross-cutting concern (a shutdown source, an
+/// auto-fetch supplier, a readiness gate) was adding another rung and another name.
+#[derive(Default)]
+pub struct ServeOpts {
+    /// The shared shutdown source. `None` installs a private one via
+    /// [`brain_shutdown::Shutdown::from_signals`] — right when HTTP is the only
+    /// serving surface in the process, WRONG when it runs alongside D-Bus
+    /// (`brain serve --dbus --openai ...`): SIGINT/SIGTERM disposition is
+    /// process-wide, so if each surface independently registered its own handler,
+    /// only one would ever actually see the signal (in practice: whichever runtime
+    /// happened to register first, which for the combined case was the D-Bus
+    /// thread — and that runtime was the one that used to deadlock in
+    /// `Connection::graceful_shutdown()`, so Ctrl-C did nothing at all).
+    /// `crates/cli/src/run_cli.rs::run_apis` installs one shared source and passes
+    /// it to both surfaces, which fixes both problems: exactly one registration,
+    /// and every surface reacts to it.
+    ///
+    /// Each surface is served with axum's `with_graceful_shutdown`, so in-flight
+    /// requests drain instead of being cut off mid-response. The drain has no
+    /// upper bound of its own here; `run_apis` bounds the overall wait so a slow
+    /// client cannot hold the process open indefinitely.
+    pub shutdown: Option<brain_shutdown::Shutdown>,
+    /// Attached to every surface's [`AppState`] ([`AppState::with_supplier`]) so
+    /// an unresolved model auto-fetches instead of 404ing. `None` disables
+    /// auto-fetch (today's default behavior with no supplier).
+    pub supplier: Option<std::sync::Arc<dyn residency::ModelSupplier>>,
+    /// Notified once per surface, immediately after its `TcpListener` binds (and
+    /// before it starts serving). Default is [`brain_shutdown::ready::Gate::disabled`]
+    /// (a no-op) — see that type's docs for why a marker file, not an HTTP route,
+    /// is how `brain serve` reports "every requested surface is up".
+    pub ready: brain_shutdown::ready::Gate,
+}
+
+impl ServeOpts {
+    pub fn new() -> ServeOpts {
+        ServeOpts::default()
+    }
+    pub fn with_shutdown(mut self, shutdown: brain_shutdown::Shutdown) -> ServeOpts {
+        self.shutdown = Some(shutdown);
+        self
+    }
+    pub fn with_supplier(mut self, supplier: Option<std::sync::Arc<dyn residency::ModelSupplier>>) -> ServeOpts {
+        self.supplier = supplier;
+        self
+    }
+    pub fn with_ready(mut self, ready: brain_shutdown::ready::Gate) -> ServeOpts {
+        self.ready = ready;
+        self
+    }
+}
+
+/// Serve every [`Surface`] over the ONE shared [`Executor`] until `opts.shutdown`
+/// fires (or, with `opts.shutdown: None`, until this process's own Ctrl-C/SIGTERM).
 /// Builds a single multi-threaded Tokio runtime and one axum router per surface
 /// (its own key + provider), binds each `Surface.addr`, and serves them
 /// concurrently on a [`tokio::task::JoinSet`]. Blocks the calling thread.
-///
-/// Installs its own SIGINT/SIGTERM handling via [`brain_shutdown`]. If HTTP is the
-/// only serving surface in the process, that is exactly right; when it runs
-/// alongside D-Bus (`brain serve --dbus --openai ...`), use
-/// [`serve_all_with_shutdown`] instead so both surfaces share one shutdown
-/// source — see that function's docs for why.
-pub fn serve_all(exec: Executor, surfaces: Vec<Surface>) -> anyhow::Result<()> {
-    serve_all_with_shutdown(exec, surfaces, brain_shutdown::Shutdown::from_signals())
-}
-
-/// Like [`serve_all_with_shutdown`], but every surface's [`AppState`] gets
-/// `supplier` attached ([`AppState::with_supplier`]) so an unresolved model
-/// auto-fetches instead of 404ing. `None` is identical to
-/// [`serve_all_with_shutdown`] (today's no-auto-fetch behavior).
-pub fn serve_all_with_shutdown_and_supplier(
-    exec: Executor,
-    surfaces: Vec<Surface>,
-    shutdown: brain_shutdown::Shutdown,
-    supplier: Option<std::sync::Arc<dyn residency::ModelSupplier>>,
-) -> anyhow::Result<()> {
-    serve_all_inner(exec, surfaces, shutdown, supplier)
-}
-
-/// Serve every [`Surface`] until `shutdown` fires. Identical to [`serve_all`]
-/// except the caller supplies the shutdown signal — the shape needed when HTTP
-/// runs alongside D-Bus: `tokio::signal::ctrl_c()` claims a process-wide
-/// disposition, so if each surface independently registered its own handler,
-/// only one would ever actually see the signal (in practice: whichever runtime
-/// happened to register first, which for the combined case was the D-Bus
-/// thread — and that runtime was the one that used to deadlock in
-/// `Connection::graceful_shutdown()`, so Ctrl-C did nothing at all). Sharing one
-/// `Shutdown` — installed once, in `crates/cli/src/run_cli.rs::run_apis` — fixes
-/// both problems: exactly one registration, and every surface reacts to it.
-///
-/// Each surface is served with axum's `with_graceful_shutdown`, so in-flight
-/// requests drain instead of being cut off mid-response. The drain has no upper
-/// bound of its own here; `run_apis` bounds the overall wait so a slow client
-/// cannot hold the process open indefinitely.
-pub fn serve_all_with_shutdown(exec: Executor, surfaces: Vec<Surface>, shutdown: brain_shutdown::Shutdown) -> anyhow::Result<()> {
-    serve_all_inner(exec, surfaces, shutdown, None)
-}
-
-fn serve_all_inner(
-    exec: Executor,
-    surfaces: Vec<Surface>,
-    shutdown: brain_shutdown::Shutdown,
-    supplier: Option<std::sync::Arc<dyn residency::ModelSupplier>>,
-) -> anyhow::Result<()> {
+pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> anyhow::Result<()> {
+    let shutdown = opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
+    let ServeOpts { supplier, ready, .. } = opts;
     // The admission deadline is operator-overridable via `BRAIN_ADMIT_DEADLINE_MS`
     // (default `DEFAULT_ADMIT_DEADLINE`, 10s). Keeping it here (rather than in the
     // pure `router`) leaves the unit-test `oneshot` path on the fixed default while
@@ -181,11 +192,16 @@ fn serve_all_inner(
             let app = router(state);
             let (addr, provider) = (s.addr, s.provider);
             let sd = shutdown.clone();
+            let ready = ready.clone();
             set.spawn(async move {
                 let listener = tokio::net::TcpListener::bind(addr)
                     .await
                     .map_err(|e| anyhow::anyhow!("bind {addr} ({provider}): {e}"))?;
                 eprintln!("brain apiserve: {provider} on http://{addr}");
+                // AFTER the bind and after the line every existing harness greps
+                // for, and BEFORE serving: the marker means "the listener existed",
+                // nothing stronger.
+                ready.bound(&provider.to_string());
                 axum::serve(listener, app)
                     .with_graceful_shutdown(async move { sd.wait().await })
                     .await

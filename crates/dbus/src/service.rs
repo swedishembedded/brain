@@ -49,7 +49,7 @@ pub struct Manager {
     /// Classifies/fetches a `model` string that isn't already resident
     /// (transparent auto-fetch). `None` -- the default -- means an unresolved
     /// model is a plain `"no model '…'"` reply with zero I/O, exactly today's
-    /// behavior. Set only via [`Manager::with_supplier`] (`crate::serve_with_shutdown_and_supplier`).
+    /// behavior. Set only via [`Manager::with_supplier`] (`crate::serve`'s `ServeOpts::supplier`).
     supplier: Option<Arc<dyn ModelSupplier>>,
     /// Edge concurrency ceiling (`residency::admission::EDGE_CONCURRENCY`) --
     /// the SAME gate `crates/apiserve`'s HTTP surfaces apply, so a saturated
