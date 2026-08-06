@@ -342,6 +342,28 @@ struct Running {
     rng: data::rng::Rng,
 }
 
+/// Accept a freshly sampled token into `r`.
+///
+/// If `next` is the EOS token, `r` is marked done WITHOUT appending it to
+/// `generated` — EOS is a control signal that ends the sequence, not output
+/// text. Appending it (the previous behavior) meant the token's decoded text
+/// (e.g. Qwen's `<|im_end|>`) leaked into every streamed response, since
+/// `generated`/`tokens_of` feed the text returned to callers. Otherwise
+/// `next` is appended normally, and `r` is marked done if `max_new` is now
+/// reached. A free function (not `Scheduler<D>::accept_token`) because it
+/// only ever touches `Running`, never `D`/`self`.
+fn accept_token(r: &mut Running, next: u32) {
+    if Some(next) == r.eos {
+        r.done = true;
+        return;
+    }
+    r.generated.push(next);
+    r.next_input = next;
+    if r.generated.len() >= r.max_new {
+        r.done = true;
+    }
+}
+
 /// **Continuous-batching scheduler.** Requests are submitted at any time, admitted
 /// when the KV pool + batch have room (prefilled + first token sampled), then every
 /// running sequence advances together in one batched decode step per iteration.
@@ -484,11 +506,6 @@ impl<D: PagedDecoder> Scheduler<D> {
         !self.waiting.is_empty() || !self.running.is_empty()
     }
 
-    fn finish_check(r: &mut Running) {
-        if Some(*r.generated.last().unwrap()) == r.eos || r.generated.len() >= r.max_new {
-            r.done = true;
-        }
-    }
 
     /// One scheduler iteration, reporting **everything that happened** — not just
     /// what finished.
@@ -635,8 +652,8 @@ impl<D: PagedDecoder> Scheduler<D> {
                 candidates.truncate(self.dec.topk_capacity().max(1));
                 sample_from_topk(&candidates, sample, &mut rng)
             };
-            let mut r = Running { id, table, generated: vec![first], max_new: req.max_new, eos: req.eos, next_input: first, done: false, sample, rng };
-            Self::finish_check(&mut r);
+            let mut r = Running { id, table, generated: Vec::new(), max_new: req.max_new, eos: req.eos, next_input: first, done: false, sample, rng };
+            accept_token(&mut r, first);
             report.admitted.push(id);
             self.running.push(r);
         }
@@ -710,10 +727,12 @@ impl<D: PagedDecoder> Scheduler<D> {
                 let r = &mut self.running[si];
                 let mut used = 0usize;
                 for &next in &window[bi] {
-                    r.generated.push(next);
-                    r.next_input = next;
+                    // `used` counts consumed window slots (a real decode step
+                    // happened and wrote a KV-cache entry) regardless of
+                    // whether `next` ends up in `generated` - EOS still
+                    // occupies a real slot, it just isn't output text.
                     used += 1;
-                    Self::finish_check(r);
+                    accept_token(r, next);
                     if r.done {
                         break;
                     }
@@ -820,5 +839,61 @@ mod tests {
         for _ in 0..50 {
             assert_eq!(sample_from_topk(&candidates, narrow, &mut rng), 0, "tight top_p must stay on the dominant candidate");
         }
+    }
+
+    // ── accept_token ─────────────────────────────────────────────
+
+    fn running(eos: Option<u32>, max_new: usize) -> Running {
+        Running {
+            id: 0,
+            table: BlockTable::new(),
+            generated: Vec::new(),
+            max_new,
+            eos,
+            next_input: 0,
+            done: false,
+            sample: SampleParams { temp: 0.0, top_k: 0, top_p: 1.0 },
+            rng: data::rng::Rng::new(0),
+        }
+    }
+
+    #[test]
+    fn accept_token_eos_marks_done_without_appending_it() {
+        // Regression test: the EOS token id must never end up in `generated`
+        // (it feeds tokens_of()/completed, which the tokenizer decodes back
+        // to text - an appended EOS id decodes to its literal special-token
+        // text, e.g. Qwen's "<|im_end|>", leaking into every response).
+        let mut r = running(Some(99), 100);
+        r.generated.push(5); // a real token already generated this turn
+        accept_token(&mut r, 99);
+        assert!(r.done, "EOS must mark the sequence done");
+        assert_eq!(r.generated, vec![5], "EOS must not be appended to generated");
+    }
+
+    #[test]
+    fn accept_token_normal_token_is_appended_and_not_done() {
+        let mut r = running(Some(99), 100);
+        accept_token(&mut r, 42);
+        assert!(!r.done);
+        assert_eq!(r.generated, vec![42]);
+        assert_eq!(r.next_input, 42);
+    }
+
+    #[test]
+    fn accept_token_reaching_max_new_marks_done_and_still_appends() {
+        // Unlike EOS, hitting the length cap on a real token must still
+        // include that token in the output - only EOS is excluded.
+        let mut r = running(Some(99), 1);
+        accept_token(&mut r, 42);
+        assert!(r.done);
+        assert_eq!(r.generated, vec![42]);
+    }
+
+    #[test]
+    fn accept_token_with_no_eos_configured_never_stops_on_token_value() {
+        let mut r = running(None, 100);
+        accept_token(&mut r, 99); // would be EOS if configured
+        assert!(!r.done);
+        assert_eq!(r.generated, vec![99]);
     }
 }
