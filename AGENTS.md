@@ -800,15 +800,35 @@ per-scenario table and the findings so far.
 
   **Keep the catalogue current — it is the list §F.3 tells you to check before
   writing a kernel, so a stale one causes the exact defect this repo pays for
-  most (a fast sibling a later model never learned about).** Every column is
-  derived from the sources, so never edit the rows by hand; adjust
-  `scripts/build/gen-kernel-table.py` if a column is wrong. It is not optional
-  bookkeeping: `make kernels-table/check` fails the build (via `test/full`) when
-  the table has drifted, because a generator whose output can be produced by
-  hand will be, and its breakage stays invisible (`docs/lessons.md` #29).
+  most (a fast sibling a later model never learned about).** Every row comes
+  from a block the kernel DECLARES in its own header, so **edit the kernel, never
+  the table**:
+
+  ```wgsl
+  // @what  Register-tiled matmul (out = x @ Wᵀ), ...
+  // @how   register block per thread, 256-thread workgroup tile, 3 barriers
+  // @opt   5      // 1-5, structural: see the README legend
+  // @cpu   native-only   // yes | no | native | native-only
+  // @gpu   yes-wg256     // yes | yes-wg256 | no
+  // @npu   yes           // can crates/npu's ONNX DSL emit an equivalent op?
+  // @quant none          // int8 | none
+  ```
+
+  A NEW kernel gets its block seeded by `scripts/build/seed-kernel-meta.py`
+  (idempotent — it skips kernels that already have one); refine it by hand after.
   Changing a kernel's *structure* — adding a barrier, a register tile, a
-  workgroup stage — changes its row, so regenerate after edits too, not only
-  after adding or deleting a file.
+  workgroup stage — changes its row, so update the block and regenerate after
+  edits too, not only after adding or deleting a file.
+
+  This is not optional bookkeeping. `make kernels-table/check` fails the build
+  (via `test/full`) when a kernel is missing a field, when the table has drifted,
+  **and when a declaration contradicts the code** — `@cpu` is cross-checked
+  against the barrier count, `@gpu` against `@workgroup_size`, `@quant` against
+  `dot4I8Packed`, `@opt 5` against the presence of a register block. A comment
+  that claims a property the code lacks is not harmless: `dw_splitk_reduce`'s
+  header asserted it compiled on `backend-cpu` while it did not, and that false
+  claim is why a red `compile_all` read as noise for months instead of as the
+  2D-grid correctness bug it was.
 - **fp32 arithmetic only, core compute only** — single bind group, **≤8 storage
   buffers/kernel** (the WebGPU guarantee; the splat backward kernels bind 8),
   **no atomics, no subgroups, no f16** (the only mentions of those in the kernel
