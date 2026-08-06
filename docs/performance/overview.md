@@ -1210,5 +1210,9 @@ card. But it is recorded here as a zero, not credited as a win.
 compared submit counts through `.unwrap_or(0)`, so on a backend that does not
 count submits its first two assertions passed **vacuously** (0 == 0) and only
 the third failed. That is brain's own "unmeasured is null, never
-0-pretending-complete" rule broken inside a test. It now skips with a stated
-reason, and the whole `serve` suite is green on both backends.
+0-pretending-complete" rule broken inside a test — and the reason no backend
+counted was that **two of the three never implemented `Backend::stats()` at
+all**. Making the test skip was the first attempt and was a workaround; the
+counters are now real on `backend-cpu` and `backend-vulkan` (per HANDLE, which
+is what makes concurrent measurement correct), so the test runs for real
+everywhere. See `docs/lessons.md` #30.
