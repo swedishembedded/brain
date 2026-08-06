@@ -147,7 +147,7 @@ was wrong and the profile was right.** Killed, with the number that killed it:
 
 | hypothesis | reality |
 |---|---|
-| per-dispatch overhead dominates (~476 dispatches) | **0.03%** (0.0065 ms × 499) |
+| per-dispatch overhead dominates (~476 dispatches) | **0.03%** (0.0065 ms × 499). Re-measured at the VQGAN backward's 1404 dispatches: 9.107 ms = **2.0%** of a 455 ms pass. Higher, still a 2% ceiling on what fusion could return |
 | deeper K-blocking will fix the GEMM | **BK cancels** in the AI formula — algebra error; GEMMs were already at 35.8% of peak |
 | the GEMMs are the bottleneck | attention was **81%**; GEMMs 16% |
 | the text encoder is the unprofiled half worth attacking | it was **1.23 s of 7.3 s**; the VAE was 88% |
