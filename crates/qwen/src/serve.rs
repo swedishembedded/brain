@@ -36,48 +36,44 @@ const KV_APPEND_B: usize = 7;
 const SCORES_B: usize = 8;
 const SOFTMAX_B: usize = 9;
 const APPLY_B: usize = 10;
-// Causal attention over a whole prompt (batched prefill).
-const GQA_SCORES: usize = 11;
-const ATTN_SOFTMAX: usize = 12;
-const GQA_APPLY: usize = 13;
 // int8 paged KV (dequant on read).
-const APPEND_I8: usize = 14;
-const SCORES_I8: usize = 15;
-const APPLY_I8: usize = 16;
+const APPEND_I8: usize = 11;
+const SCORES_I8: usize = 12;
+const APPLY_I8: usize = 13;
 // Device-side greedy head: matmul -> row argmax, so decode never ships a
 // [batch, vocab] logit block to the host.
-const ARGMAX_ROW: usize = 17;
-const ARGMAX_PART: usize = 18;
-const ARGMAX_FINAL: usize = 19;
+const ARGMAX_ROW: usize = 14;
+const ARGMAX_PART: usize = 15;
+const ARGMAX_FINAL: usize = 16;
 // Decode-regime kernels: selected per dispatch by row count.
-const RMSNORM_ROWS: usize = 20;
-const MATMUL_GEMV: usize = 21;
+const RMSNORM_ROWS: usize = 17;
+const MATMUL_GEMV: usize = 18;
 // Int8 weight path (A0): per-token activation quant + DP4A GEMMs with
 // per-token x per-channel dequant scales — the tile GEMM for prefill shapes,
 // the packed GEMV for decode row counts.
-const MAX_ABS_ROW: usize = 22;
-const QUANT_PACK: usize = 23;
-const MATMUL_I8_DYN: usize = 24;
-const MATMUL_I8_GEMV: usize = 25;
+const MAX_ABS_ROW: usize = 19;
+const QUANT_PACK: usize = 20;
+const MATMUL_I8_DYN: usize = 21;
+const MATMUL_I8_GEMV: usize = 22;
 // On-device decode window (A4): feed the argmax back as the next input and
 // advance the paged metadata without a host round-trip.
-const DECODE_FEED: usize = 26;
-const DECODE_ADVANCE: usize = 27;
+const DECODE_FEED: usize = 23;
+const DECODE_ADVANCE: usize = 24;
 // Iterative on-device top-K extraction (W3): composes with ARGMAX_PART/
 // ARGMAX_FINAL/ARGMAX_ROW above, so real (non-greedy) sampling reads back
 // `[bsz, TOPK_CAPACITY]` candidates instead of the whole `[bsz, vocab]` row.
-const TOPK_EXTRACT_STEP: usize = 28;
+const TOPK_EXTRACT_STEP: usize = 25;
 // Calibrated int8 KV append (W3.3): identical to APPEND_I8 except each
 // kv-head's per-token online absmax is capped at a calibrated ceiling
 // (`KvCalib`) before deriving the scale. Selected in place of APPEND_I8 only
 // when `self.kv_calib.is_some()` — APPEND_I8 itself is untouched.
-const APPEND_I8_CLIPPED: usize = 29;
+const APPEND_I8_CLIPPED: usize = 26;
 // The 128x128 register-tiled fp32 GEMM. It was MISSING from this engine's
 // pipeline table entirely, so `Engine::mm` had only the decode GEMV and the
 // naive kernel to choose between and every chunked-prefill chunk above
 // `DECODE_REGIME_MAX_ROWS` ran one thread per output element — while the
 // batched forward next door dispatched this same kernel at ~80x the rate.
-const MATMUL_REG3: usize = 30;
+const MATMUL_REG3: usize = 27;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -91,9 +87,6 @@ const PIPELINES: &[(&str, &str)] = &[
     ("paged_decode_scores_batched", kernels::PAGED_DECODE_SCORES_BATCHED),
     ("decode_softmax_batched", kernels::DECODE_SOFTMAX_BATCHED),
     ("paged_decode_apply_batched", kernels::PAGED_DECODE_APPLY_BATCHED),
-    ("gqa_scores", kernels::GQA_SCORES),
-    ("attn_softmax", kernels::ATTN_SOFTMAX),
-    ("gqa_apply", kernels::GQA_APPLY),
     ("paged_kv_append_i8_batched", kernels::PAGED_KV_APPEND_I8_BATCHED),
     ("paged_decode_scores_i8_batched", kernels::PAGED_DECODE_SCORES_I8_BATCHED),
     ("paged_decode_apply_i8_batched", kernels::PAGED_DECODE_APPLY_I8_BATCHED),
@@ -129,9 +122,15 @@ fn ids() -> KernelIds {
         rmsnorm_dw: RMSNORM,
         rope: ROPE_PAGED,
         rope_bwd: ROPE_PAGED,
-        gqa_scores: GQA_SCORES,
-        gqa_apply: GQA_APPLY,
-        attn_softmax: ATTN_SOFTMAX,
+        // This engine never calls `block::gqa_fwd`: prefill and decode share
+        // the PAGED attention kernels (`paged_decode_*`), so the batched causal
+        // trio was registered — three pipelines compiled at every Engine
+        // build — and never dispatched. Placeholders, same convention as the
+        // backward ids below, so nothing reads a live index for a path that
+        // does not exist.
+        gqa_scores: 0,
+        gqa_apply: 0,
+        attn_softmax: 0,
         gqa_dscores: 0,
         gqa_dv: 0,
         gqa_dq: 0,
