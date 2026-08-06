@@ -24,6 +24,7 @@
 //! Buffers are host-visible+coherent (no DEVICE_LOCAL/staging split yet), which is
 //! correct and simple; a perf pass can add a staged device-local path later.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use ash::vk;
@@ -81,6 +82,17 @@ struct KernelPipeline {
 }
 
 /// The Vulkan compute device.
+/// Relaxed device-op counters, mirroring what the wgpu backend records so the
+/// two are directly comparable.
+#[derive(Default)]
+struct OpCounters {
+    submits: AtomicU64,
+    dispatches: AtomicU64,
+    readbacks: AtomicU64,
+    bind_groups: AtomicU64,
+    uniform_allocs: AtomicU64,
+}
+
 pub struct VulkanBackend {
     ctx: VkContext,
     /// What this device can do — queried once at construction from the
@@ -96,6 +108,13 @@ pub struct VulkanBackend {
     /// invocation id from — 64 for almost everything, 256 for the register-tiled
     /// GEMMs.
     wgsizes: Vec<u32>,
+    /// Device-op counters, always maintained (relaxed atomics are negligible
+    /// next to a dispatch) — the same contract `backend-wgpu` and
+    /// `backend-cpu` implement. Without them `Backend::stats()` fell through to
+    /// the trait's `None` default and every caller counting device ops was
+    /// blind on this backend, which is how a `.unwrap_or(0)` at a call site
+    /// silently turned "not counted" into "zero".
+    stats: OpCounters,
     /// Descriptor pools, grown on demand. A descriptor set's lifetime is tied to
     /// its `VkStep` (which a caller may hold and re-submit, e.g. the
     /// `uniform_dynamic` + `step_buf` reuse pattern), so sets are NEVER reset
@@ -339,6 +358,7 @@ impl VulkanBackend {
             max_storage_binding,
             pipelines,
             wgsizes: backend_api::workgroup_sizes(kernels),
+            stats: OpCounters::default(),
             pools: Mutex::new(vec![pool]),
             pending: Mutex::new(Vec::new()),
             uniforms: Mutex::new(Vec::new()),
@@ -394,6 +414,7 @@ impl VulkanBackend {
     /// Allocate one descriptor set with `set_layout`, growing the pool list when
     /// the active pool is exhausted (never resets — see [`VulkanBackend::pools`]).
     fn alloc_set(&self, set_layout: vk::DescriptorSetLayout) -> vk::DescriptorSet {
+        self.stats.bind_groups.fetch_add(1, Ordering::Relaxed);
         let dev = &self.ctx.device;
         let set_layouts = [set_layout];
         let mut pools = self.pools.lock().unwrap();
@@ -463,6 +484,7 @@ impl VulkanBackend {
     }
 
     pub fn read(&self, buf: &VkOwnedBuffer, n: usize) -> Vec<f32> {
+        self.stats.readbacks.fetch_add(1, Ordering::Relaxed);
         self.flush();
         let bytes = self.ctx.download(&buf.inner, n * 4);
         bytemuck::cast_slice::<u8, f32>(&bytes).to_vec()
@@ -524,6 +546,7 @@ impl VulkanBackend {
     /// a fill submit + a staged-copy submit — two blocking GPU round trips — per
     /// dispatch per frame, which serialized inference ~100x.)
     fn make_uniform(&self, params: &[u32]) -> VkBuffer {
+        self.stats.uniform_allocs.fetch_add(1, Ordering::Relaxed);
         let size = ((params.len() * 4).div_ceil(16) * 16).max(16) as u64;
         let b = self
             .free_uniforms
@@ -606,6 +629,8 @@ impl VulkanBackend {
     }
 
     pub fn submit(&self, clears: &[&VkOwnedBuffer], steps: &[VkStep]) {
+        self.stats.submits.fetch_add(1, Ordering::Relaxed);
+        self.stats.dispatches.fetch_add(steps.len() as u64, Ordering::Relaxed);
         if !clears.is_empty() {
             // Match wgpu: complete prior work, then zero the buffers, before the
             // new steps (which may read them) are queued.
@@ -815,6 +840,19 @@ impl Backend for VulkanBackend {
     fn kind(&self) -> &'static str {
         "vulkan"
     }
+    /// Device-op accounting — the same counters the other two backends report,
+    /// so "how many submits/readbacks did this run cost" has a real answer on
+    /// every backend rather than `None` on this one.
+    fn stats(&self) -> Option<backend_api::DeviceStats> {
+        Some(backend_api::DeviceStats {
+            submits: self.stats.submits.load(Ordering::Relaxed),
+            dispatches: self.stats.dispatches.load(Ordering::Relaxed),
+            readbacks: self.stats.readbacks.load(Ordering::Relaxed),
+            bind_groups: self.stats.bind_groups.load(Ordering::Relaxed),
+            uniform_allocs: self.stats.uniform_allocs.load(Ordering::Relaxed),
+        })
+    }
+
     fn caps(&self) -> backend_api::DeviceCaps {
         self.caps.clone()
     }

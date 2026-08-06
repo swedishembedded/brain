@@ -23,6 +23,7 @@ pub mod par;
 
 use rayon::prelude::*;
 use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use wgsl_cpu::Jit;
 
@@ -82,8 +83,37 @@ struct CpuShared {
     wgsizes: Vec<u32>,
 }
 
+/// Relaxed device-op counters. `submits`/`readbacks` are per call;
+/// `dispatches`/`bind_groups`/`uniform_allocs` are per recorded step, matching
+/// what the wgpu backend counts so the two are comparable.
+#[derive(Default)]
+struct OpCounters {
+    submits: AtomicU64,
+    dispatches: AtomicU64,
+    readbacks: AtomicU64,
+    bind_groups: AtomicU64,
+    uniform_allocs: AtomicU64,
+}
+
 pub struct CpuBackend {
     shared: std::sync::Arc<CpuShared>,
+    /// Device-op counters, always maintained (relaxed atomics are negligible
+    /// next to a dispatch) — the same contract `backend-wgpu` implements.
+    ///
+    /// PER HANDLE, not per device: `Backend::stats` is documented as
+    /// "accounting for THIS handle since its creation", and a caller measuring
+    /// what one engine cost needs a counter its neighbours cannot move. That is
+    /// why this sits on `CpuBackend` and not on the `Arc`-shared `CpuShared` —
+    /// `share()` is an `Arc` clone, so counters living there would be
+    /// device-global and every concurrent user would land in everyone's delta.
+    ///
+    /// They were missing entirely, so `stats()` fell through to the trait's
+    /// `None` default and every caller counting device ops was blind here.
+    /// Callers must report null for that; the one in-tree consumer wrote
+    /// `.unwrap_or(0)` and turned "not counted" into "zero", which made an
+    /// engine test pass vacuously. Counting removes the ambiguity at its source
+    /// rather than teaching each caller to cope.
+    stats: OpCounters,
 }
 
 /// Indices of the kernels that have a native CPU fast path (see `fast_conv` /
@@ -202,6 +232,7 @@ impl CpuBackend {
         let wgsizes = backend_api::workgroup_sizes(kernels);
         CpuBackend {
             shared: std::sync::Arc::new(CpuShared { jit, threads, names, profile, fast, wgsizes }),
+            stats: OpCounters::default(),
         }
     }
 
@@ -230,6 +261,7 @@ impl CpuBackend {
     }
 
     pub fn read(&self, buf: &CpuBuffer, n: usize) -> Vec<f32> {
+        self.stats.readbacks.fetch_add(1, Ordering::Relaxed);
         let w = buf.words_mut();
         (0..n).map(|i| f32::from_bits(w[i])).collect()
     }
@@ -239,6 +271,7 @@ impl CpuBackend {
     /// Build a dispatch around an already-allocated uniform buffer. Mirrors the
     /// wgpu backend's grid math so the kernels' index reconstruction is identical.
     pub fn step_buf(&self, kind: usize, ubuf: &CpuBuffer, bufs: &[&CpuBuffer], threads: u32) -> CpuStep {
+        self.stats.bind_groups.fetch_add(1, Ordering::Relaxed);
         let bg = BindGroup {
             uniform: ubuf.clone(),
             bufs: bufs.iter().map(|b| ((*b).clone(), 0usize)).collect(),
@@ -259,6 +292,7 @@ impl CpuBackend {
     }
 
     pub fn step(&self, kind: usize, bufs: &[&CpuBuffer], params: &[u32], threads: u32) -> CpuStep {
+        self.stats.uniform_allocs.fetch_add(1, Ordering::Relaxed);
         let ubuf = CpuBuffer::with_words(Self::pad_uniform(params));
         self.step_buf(kind, &ubuf, bufs, threads)
     }
@@ -267,6 +301,8 @@ impl CpuBackend {
     /// word_len)` — the dispatch sees the buffer starting at `word_offset`
     /// (`word_len` is advisory on CPU; the kernel self-bounds via params).
     pub fn step_sliced(&self, kind: usize, bufs: &[&CpuBuffer], offsets: &[(u64, u64)], params: &[u32], threads: u32) -> CpuStep {
+        self.stats.uniform_allocs.fetch_add(1, Ordering::Relaxed);
+        self.stats.bind_groups.fetch_add(1, Ordering::Relaxed);
         let ubuf = CpuBuffer::with_words(Self::pad_uniform(params));
         let bg = BindGroup {
             uniform: ubuf,
@@ -280,6 +316,8 @@ impl CpuBackend {
     /// equivalent of wgpu's single compute pass), parallelising invocations within
     /// each step across the rayon pool.
     pub fn submit(&self, clears: &[&CpuBuffer], steps: &[CpuStep]) {
+        self.stats.submits.fetch_add(1, Ordering::Relaxed);
+        self.stats.dispatches.fetch_add(steps.len() as u64, Ordering::Relaxed);
         for c in clears {
             c.words_mut().iter_mut().for_each(|w| *w = 0);
         }
@@ -694,7 +732,7 @@ struct WeakCpu(std::sync::Weak<CpuShared>);
 
 impl backend_api::WeakBackend for WeakCpu {
     fn upgrade(&self) -> Option<Box<dyn Backend>> {
-        Some(Box::new(CpuBackend { shared: self.0.upgrade()? }))
+        Some(Box::new(CpuBackend { shared: self.0.upgrade()?, stats: OpCounters::default() }))
     }
 }
 
@@ -705,6 +743,20 @@ impl Backend for CpuBackend {
     fn dump_profile(&self) {
         CpuBackend::dump_profile(self)
     }
+    /// Device-op accounting — the same counters `backend-wgpu` reports, so a
+    /// caller asking "how many submits/readbacks did this run cost" gets a real
+    /// answer on every backend instead of `None` on this one.
+    fn stats(&self) -> Option<backend_api::DeviceStats> {
+        let c = &self.stats;
+        Some(backend_api::DeviceStats {
+            submits: c.submits.load(Ordering::Relaxed),
+            dispatches: c.dispatches.load(Ordering::Relaxed),
+            readbacks: c.readbacks.load(Ordering::Relaxed),
+            bind_groups: c.bind_groups.load(Ordering::Relaxed),
+            uniform_allocs: c.uniform_allocs.load(Ordering::Relaxed),
+        })
+    }
+
     fn caps(&self) -> backend_api::DeviceCaps {
         use backend_api::{DeviceCaps, DeviceClass, NumericSupport};
         DeviceCaps {
@@ -739,7 +791,8 @@ impl Backend for CpuBackend {
     }
     fn share(&self) -> Option<Box<dyn Backend>> {
         // Eager execution, no per-handle stream: sharing is an Arc clone.
-        Some(Box::new(CpuBackend { shared: self.shared.clone() }))
+        // A fresh handle starts its own counters — see `CpuBackend::stats`.
+        Some(Box::new(CpuBackend { shared: self.shared.clone(), stats: OpCounters::default() }))
     }
     fn downgrade(&self) -> Option<Box<dyn backend_api::WeakBackend>> {
         Some(Box::new(WeakCpu(std::sync::Arc::downgrade(&self.shared))))

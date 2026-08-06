@@ -2471,11 +2471,20 @@ mod tests {
     fn prefill_submits_scale_with_chunks_not_with_token_count() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        // A backend that does not count submits cannot answer this question at
-        // all. Skipping is the honest outcome — `unwrap_or(0)` made the first
-        // two assertions pass VACUOUSLY (0 == 0) on `backend-cpu` and only the
-        // third caught it, which is brain's own "unmeasured is null, never
-        // 0-pretending-complete" rule violated inside a test.
+        // Every backend counts submits (`backend-cpu` and `backend-vulkan`
+        // gained the counters `backend-wgpu` always had), so this runs
+        // everywhere rather than degrading. It used to read the counter through
+        // `.unwrap_or(0)`, which turned "this backend does not count" into
+        // "zero" and made the first two assertions pass VACUOUSLY (0 == 0) on
+        // the CPU backend — brain's own "unmeasured is null, never
+        // 0-pretending-complete" rule, broken inside a test. `None` is now an
+        // assertion failure, not a shrug.
+        //
+        // This is safe to run concurrently with the rest of the binary because
+        // the counters are PER HANDLE: each `Engine` below builds its own, so a
+        // neighbour sharing the same pooled device cannot land inside this
+        // delta. Counters on the shared device state would have made this test
+        // flaky rather than wrong, which is a worse failure.
         let submits_for = |prompt: &[u32], max_prefill: u32| -> Option<u64> {
             let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, max_prefill, false, false);
             let mut t = BlockTable::new();
@@ -2489,17 +2498,14 @@ mod tests {
         // is per-CALL, not per-TOKEN (a per-token dispatcher would cost 4x more here).
         let short = vec![1u32, 5, 3, 9];
         let long: Vec<u32> = (0..16).map(|i| (i % 20) as u32 + 1).collect();
-        let (Some(submits_short), Some(submits_long)) = (submits_for(&short, 16), submits_for(&long, 16))
-        else {
-            eprintln!("skipped: this backend does not count submits (Backend::stats() is None)");
-            return;
-        };
+        let submits_short = submits_for(&short, 16).expect("every backend must count submits");
+        let submits_long = submits_for(&long, 16).expect("every backend must count submits");
         assert_eq!(submits_short, submits_long, "prefill submits must not scale with in-chunk token count: {submits_short} (4 tok) vs {submits_long} (16 tok)");
         assert!(submits_short > 0, "prefill must dispatch SOMETHING");
 
         // The SAME 16-token prompt split into 2 chunks of 8 must cost exactly 2x the
         // one-chunk submit count — proportional to CHUNKS, not tokens (which would be 16x).
-        let submits_2chunks = submits_for(&long, 8).expect("stats were available a moment ago");
+        let submits_2chunks = submits_for(&long, 8).expect("every backend must count submits");
         assert_eq!(submits_2chunks, 2 * submits_long, "2 chunks must cost exactly 2x 1 chunk's submits, not scale with the (unchanged) token count: {submits_2chunks} vs 2x{submits_long}");
     }
 
