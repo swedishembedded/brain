@@ -65,6 +65,21 @@ fn est_vram(path: &str) -> MemCost {
     MemCost::new(bytes, 0)
 }
 
+/// The KV pool alone must not exceed this before `QwenResident::activate`
+/// refuses outright, rather than let `Engine::from_map_with_gpu` attempt a
+/// device allocation that fails with wgpu's cryptic per-buffer byte count
+/// (`resident_llm.rs`'s own `pool_sizing` doc comment has the historical
+/// crash). Matches `run_cli.rs::build_serving_executor`'s iGPU policy budget
+/// (`(8u64 << 30).min(ram / 2)`) -- duplicated here because that budget is
+/// computed once at server startup and not threaded down to a single
+/// resident's `activate`, and this guard must fire before any allocation,
+/// not after querying a live budget that may not exist yet (e.g. `brain qwen
+/// serve`'s direct-engine CLI path never builds a residency executor at
+/// all). Only ever checked against the FP32 pool: at `BRAIN_QWEN_CTX`'s new
+/// 24576 default, int8 is comfortably under this on its own
+/// (`kv_pool_bytes_at_the_new_ctx_default_fits_the_igpu_budget`); fp32 is not.
+const MAX_FP32_KV_POOL_BYTES: u64 = 8 << 30;
+
 /// Run `f` placed on the residency-assigned device: a GPU assignment becomes a
 /// scoped (thread-local) selection in the canonical device registry, so every
 /// `Gpu::new` inside `f` binds that physical card — race-free across the
@@ -249,8 +264,17 @@ impl QwenResident {
         }
     }
 
+    /// Default 24576 (12x the old 2048), sized to what int8 KV actually
+    /// buys: at real Qwen3-0.6B (`head_dim=128`), the pool + scores/probs
+    /// scratch at this `ctx` is ~7.0 GiB measured
+    /// (`kv_pool_bytes_at_the_new_ctx_default_fits_the_igpu_budget`) against
+    /// the iGPU policy budget's 8 GiB (`run_cli.rs::build_serving_executor`),
+    /// ~1 GiB of margin. This default is ONLY safe because int8 KV is the
+    /// serving default (this workstream) -- the fp32 pool at the SAME `ctx`
+    /// is ~10.6 GiB, which is why `activate()` refuses rather than attempts
+    /// it (see `MAX_FP32_KV_POOL_BYTES`).
     fn ctx() -> u32 {
-        std::env::var("BRAIN_QWEN_CTX").ok().and_then(|s| s.parse().ok()).unwrap_or(2048u32).max(1)
+        std::env::var("BRAIN_QWEN_CTX").ok().and_then(|s| s.parse().ok()).unwrap_or(24576u32).max(1)
     }
 
     /// Concurrent decode slots for the batched (paged-KV) serving path.
@@ -348,6 +372,32 @@ impl QwenResident {
         let max_prefill = ctx.min(512);
         (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill)
     }
+
+    /// `Err` naming the checkpoint, the requested `ctx`, the computed byte
+    /// count and the safety ceiling when a FP32 KV pool at this sizing would
+    /// exceed [`MAX_FP32_KV_POOL_BYTES`] -- called from `activate()` before
+    /// any device allocation is attempted, so the failure is specific and
+    /// actionable instead of wgpu's own bare-byte-count error (the exact
+    /// crash `pool_sizing`'s doc comment records: "Buffer size 2147483648 is
+    /// greater than the maximum buffer size (2147483647)", no context on
+    /// which buffer or why). A free function of its inputs (no I/O, no env
+    /// read) so a test can drive it directly at whatever `num_blocks` trips
+    /// the ceiling, without needing a real multi-GiB allocation to prove it.
+    fn check_fp32_kv_pool_fits(cfg: &qwen::config::QwenConfig, block_size: u32, num_blocks: u32, ctx: u32, path: &str) -> Result<(), String> {
+        let pool_bytes = qwen::serve::kv_pool_bytes(cfg, block_size, num_blocks, false);
+        if pool_bytes <= MAX_FP32_KV_POOL_BYTES {
+            return Ok(());
+        }
+        let int8_bytes = qwen::serve::kv_pool_bytes(cfg, block_size, num_blocks, true);
+        Err(format!(
+            "qwen: {path}: fp32 KV pool at ctx={ctx} would be {:.2} GiB, over the {:.0} GiB safety ceiling \
+             (MAX_FP32_KV_POOL_BYTES) -- lower BRAIN_QWEN_CTX, or drop --kv-fp32/BRAIN_QWEN_KV_INT8=0 \
+             so int8 KV (~{:.2} GiB at this ctx) is used instead",
+            pool_bytes as f64 / (1u64 << 30) as f64,
+            MAX_FP32_KV_POOL_BYTES as f64 / (1u64 << 30) as f64,
+            int8_bytes as f64 / (1u64 << 30) as f64,
+        ))
+    }
 }
 
 impl ResidentModel for QwenResident {
@@ -439,6 +489,15 @@ impl ResidentModel for QwenResident {
                     "serve: {}: int8 KV requested (the default) but head_dim={} is not a multiple of 4; falling back to fp32 KV",
                     self.path, checkpoint_cfg.head_dim
                 );
+            }
+            // Boundary guard: refuse a fp32 KV pool over the safety ceiling,
+            // loudly and specifically, BEFORE Engine::from_map_with_gpu
+            // attempts the device allocation. Only reachable via an explicit
+            // opt-out (--kv-fp32/BRAIN_QWEN_KV_INT8=0) or an unsupported
+            // head_dim -- the int8 default at the SAME ctx does not come
+            // close.
+            if !kv_int8 {
+                QwenResident::check_fp32_kv_pool_fits(&checkpoint_cfg, block_size, num_blocks, ctx, &self.path)?;
             }
             let mut eng = match &self.adapter {
                 None => qwen::serve::Engine::load(&self.path, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, false),
@@ -689,6 +748,119 @@ mod tests {
         for off in ["0", "false", "yes", "anything-else", ""] {
             assert!(!QwenResident::kv_calib_opt_in_from(Some(off)), "{off:?} must not opt in to calibration");
         }
+    }
+
+    /// The fp32 KV boundary guard must refuse (not attempt) a pool over the
+    /// ceiling, and pass through a pool comfortably under it -- pure
+    /// arithmetic, no engine, no allocation, so a multi-GiB refusal case
+    /// costs nothing to test.
+    #[test]
+    fn fp32_kv_pool_guard_refuses_over_ceiling_and_passes_under_it() {
+        let cfg = qwen::config::QwenConfig::tiny(); // head_dim=8, n_kv_heads=2, hkv=16
+        // Small, ordinary sizing: comfortably under the ceiling.
+        assert!(QwenResident::check_fp32_kv_pool_fits(&cfg, 16, 64, 2048, "test.safetensors").is_ok());
+        // num_blocks chosen so this TINY config's fp32 pool (256 bytes/slot)
+        // alone exceeds MAX_FP32_KV_POOL_BYTES (8 GiB) -- num_blocks=3,000,000
+        // -> slots=48,000,000 -> ~11.4 GiB, comfortably over.
+        let err = QwenResident::check_fp32_kv_pool_fits(&cfg, 16, 3_000_000, 100_000_000, "test.safetensors")
+            .expect_err("an 11+ GiB fp32 pool must be refused, not attempted");
+        assert!(err.contains("test.safetensors"), "error must name the checkpoint: {err}");
+        assert!(err.contains("100000000"), "error must name the requested ctx: {err}");
+        assert!(err.contains("GiB"), "error must name the computed size: {err}");
+    }
+
+    /// The plan's ctx=24576 sizing table (docs/models/qwen/status.md's
+    /// planning notes) was a HAND ESTIMATE before this test -- this replaces
+    /// it with the real number, computed through the exact same
+    /// `pool_sizing`/`kv_pool_bytes` the resident actually calls, at the
+    /// REAL Qwen3-0.6B config (not `tiny()` -- lesson 18, a toy-fitted
+    /// number can't predict the real shape). Pure arithmetic, no device, no
+    /// checkpoint file, so it runs always.
+    #[test]
+    fn ctx_24576_int8_kv_pool_fits_but_fp32_kv_pool_would_be_refused() {
+        let cfg = qwen::config::QwenConfig::qwen3_0_6b();
+        let ctx = 24576u32;
+        assert_eq!(QwenResident::ctx(), ctx, "this test's premise is the new default -- update it if the default changes");
+        let (block_size, _max_batch, _max_blocks_per_seq, num_blocks, _max_prefill) = QwenResident::pool_sizing(ctx);
+
+        let int8_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
+        let fp32_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, false);
+        eprintln!(
+            "ctx={ctx}: int8 KV pool = {:.2} GiB, fp32 KV pool = {:.2} GiB (ceiling {:.0} GiB)",
+            int8_bytes as f64 / (1u64 << 30) as f64,
+            fp32_bytes as f64 / (1u64 << 30) as f64,
+            MAX_FP32_KV_POOL_BYTES as f64 / (1u64 << 30) as f64,
+        );
+
+        assert!(int8_bytes <= MAX_FP32_KV_POOL_BYTES, "int8 KV pool at the new ctx default must fit the iGPU policy budget on its own");
+
+        // `check_fp32_kv_pool_fits` always checks the FP32 pool regardless of
+        // what dtype the caller actually intends to serve -- it's only ever
+        // CALLED from `activate()` on the `!kv_int8` arm (the fp32 opt-out).
+        // Driving it directly here re-derives the exact refusal `activate()`
+        // would hit under `--kv-fp32`/`BRAIN_QWEN_KV_INT8=0` at this ctx.
+        assert!(fp32_bytes > MAX_FP32_KV_POOL_BYTES, "fp32 KV pool at ctx=24576 must exceed the ceiling -- this is WHY the default is safe only under int8");
+        let err = QwenResident::check_fp32_kv_pool_fits(&cfg, block_size, num_blocks, ctx, "qwen3-0.6b")
+            .expect_err("the fp32 opt-out at the new ctx default must be refused, not attempted");
+        assert!(err.contains("qwen3-0.6b") && err.contains("24576"), "refusal must name the checkpoint and the requested ctx: {err}");
+    }
+
+    /// Real-checkpoint version of the arithmetic test above: actually builds
+    /// the paged engine at ctx=24576 against the real Qwen3-0.6B checkpoint
+    /// (`Engine::kv_pool_bytes()` must equal the pure function above -- no
+    /// drift between "what we predicted" and "what got allocated"), and
+    /// measures real host RSS before/after via `host_mem_mb()` -- on this
+    /// iGPU box host RSS *is* device memory (see `est_vram`'s doc / D1), so
+    /// this is the honest number, not a second guess. `BRAIN_DEVICE=cpu` so
+    /// this never additionally carves the iGPU's own 8 GiB policy budget out
+    /// of the same shared RAM while the box is also running everything else.
+    ///
+    /// Gated on `QWEN3_DIR` (needs `qwen.brain.safetensors`), skips loudly if
+    /// unset -- same convention as `crates/cli/tests/qwen_eval.rs`.
+    #[test]
+    #[ignore = "slow: real checkpoint"]
+    fn kv_pool_bytes_at_the_new_ctx_default_fits_the_igpu_budget() {
+        let Ok(dir) = std::env::var("QWEN3_DIR") else {
+            eprintln!("SKIP: set QWEN3_DIR to a real Qwen3-0.6B checkpoint dir to run this test");
+            return;
+        };
+        let path = std::path::Path::new(&dir).join("qwen.brain.safetensors");
+        if !path.is_file() {
+            eprintln!("SKIP: {} not found under QWEN3_DIR", path.display());
+            return;
+        }
+        // SAFETY: this test is `#[ignore]`d (never runs under the default
+        // `TEST_THREADS=8` fast lane) and is invoked alone, single-threaded,
+        // for exactly this measurement -- see the module doc's OOM-budget
+        // discipline (never build a real-shape engine alongside other tests).
+        unsafe { std::env::set_var("BRAIN_DEVICE", "cpu") };
+
+        let cfg = qwen::config::QwenConfig::qwen3_0_6b();
+        let ctx = QwenResident::ctx();
+        assert_eq!(ctx, 24576, "this test's premise is the new default");
+        let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx);
+        let expected_pool_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
+
+        let before = perf::scenarios::soak::host_mem_mb();
+        let eng = qwen::serve::Engine::load(path.to_str().unwrap(), block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, true, false);
+        let after = perf::scenarios::soak::host_mem_mb();
+
+        assert_eq!(eng.kv_pool_bytes(), expected_pool_bytes, "the engine must allocate exactly what the pure function predicts -- no drift");
+
+        let (before_mb, after_mb) = (before.unwrap_or(0.0), after.unwrap_or(0.0));
+        eprintln!(
+            "ctx=24576, real Qwen3-0.6B: kv_pool_bytes = {:.2} GiB, host RSS {:.0} MiB -> {:.0} MiB (delta {:.0} MiB)",
+            expected_pool_bytes as f64 / (1u64 << 30) as f64,
+            before_mb,
+            after_mb,
+            after_mb - before_mb,
+        );
+        // The iGPU policy budget is 8 GiB (`run_cli.rs::build_serving_executor`);
+        // total resident host footprint (weights + KV pool + scratch) must
+        // stay comfortably under that at the new default, not just the pool
+        // alone -- this is the number the plan's hand-estimate table stood
+        // in for.
+        assert!(after_mb < 8192.0, "total host RSS after activation at ctx=24576 must stay under the 8 GiB iGPU policy budget, got {after_mb:.0} MiB");
     }
 
     /// The residency budget must PREDICT the memory the KV pool actually
