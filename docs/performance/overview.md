@@ -1120,3 +1120,37 @@ ce_value       29.89    1   6.8%                    memory   3.6%   <- DEFECT
 `gqa_scores` at **1.6% of the bandwidth roof** while consuming a third of the
 pass is the next target, and `matmul_reg3` at 33.6% of the compute roof is above
 the 30% defect line but well short of the 60% band.
+
+### Qwen3-0.6B decode, first profile
+
+```
+=== DECODE @pos 511: 590 dispatches, 20.98 ms ===   -> 47.7 tok/s single-stream
+matmul_gemv         23.40  196  38.4%   75.4 GB/s  memory  26.2%  <- DEFECT
+rmsnorm_rows         8.93  113  14.6%    0.2 GB/s  memory   0.1%  <- DEFECT
+decode_softmax       7.53   28  12.4%    0.2 GB/s  memory   0.1%  <- DEFECT
+add2                 5.53   56   9.1%    0.1 GB/s  memory   0.0%  <- DEFECT
+attn_decode_apply    3.79   28   6.2%   15.8 GB/s  memory   5.5%  <- DEFECT
+attn_decode_scores   3.35   28   5.5%   17.9 GB/s  memory   6.2%  <- DEFECT
+sum of groups 60.97 ms vs whole pass 20.98 ms — 191% drain inflation over 422 groups
+```
+
+Two things have to be read together here, and neither is visible without the
+other:
+
+* **The ceiling.** 595 984 384 params = 2.38 GB fp32, read once per token, so on
+  a 287.6 GB/s card single-stream decode cannot exceed **121 tok/s fp32** (483
+  int8) however good the kernels are. At 47.7 tok/s the path is at **39% of its
+  own achievable ceiling** — a real gap, but a 2.5× one, not the 200× the "0.5%
+  of the compute roof" row suggests. Reporting a decode step against the FLOP
+  peak is exactly the meaningless comparison the classifier exists to prevent.
+* **The dispatch floor.** 590 dispatches at the measured 0.0065 ms/dispatch is
+  **~3.8 ms — 18% of a 20.98 ms step.** On the VQGAN backward the same floor was
+  2% and fusion was correctly judged not worth it (§E); here it is nine times
+  that share, and the four kernels doing almost no work per launch
+  (`rmsnorm_rows`, `decode_softmax`, `add2`, `silu_mul` — together 40% of the
+  grouped table at ≤0.2 GB/s) are launch-bound, not bandwidth-bound. This is the
+  first pass in the tree where the fusion argument is *quantitatively* different.
+
+The 191% drain inflation is also a record for this tree and is the expected
+consequence of 422 groups over a 21 ms pass — the group table here ranks and
+nothing more.
