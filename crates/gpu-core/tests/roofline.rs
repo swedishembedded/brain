@@ -117,7 +117,7 @@ fn caps_expose_the_roofs_only_after_something_measured_them() {
 fn a_streaming_kernel_is_graded_against_bandwidth_not_flops() {
     // Pure arithmetic on the type — no device needed, so this runs everywhere
     // and pins the classification rule itself.
-    let r = Roofs { gflops: 11760.0, gbs: 346.0 };
+    let r = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0 };
     // `axpy`: 2 FLOP per 12 bytes moved.
     assert_eq!(r.classify(2, 12), Bound::Memory);
     // `col2im` measured 23.2 GB/s on a P40 — 6.7% of that roof, far under the

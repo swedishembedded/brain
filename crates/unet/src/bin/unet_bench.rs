@@ -72,8 +72,8 @@ fn main() {
     let roofs = gpu_core::roof::ensure(&gpu);
     match roofs {
         Some(r) => println!(
-            "measured roofline: {:.0} GFLOP/s, {:.1} GB/s, ridge {:.1} FLOP/byte",
-            r.gflops, r.gbs, r.ridge()
+            "measured roofline: {:.0} GFLOP/s, {:.1} GB/s DRAM, {:.1} GB/s cache, ridge {:.1} FLOP/byte",
+            r.gflops, r.gbs, r.cache_gbs, r.ridge()
         ),
         None => println!("roofline unmeasured — utilisation columns print '-' rather than a guess"),
     }

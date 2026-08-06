@@ -1331,3 +1331,48 @@ params, threads)` cannot see. The formulas use `cap`, exact at full context and
 an over-estimate for short sequences, and `qwen_bench serve` was changed to
 profile full-context rows so the two agree. A cost model that cannot see its own
 inputs is a limitation worth naming rather than hiding.
+
+### The measurement itself was wrong — and the impossible-rate guard is what caught it
+
+Three rounds of fixing the byte model never got
+`paged_decode_scores_batched` under the roof (2120% → 542% → 292%). Searching for
+a fourth correction was the wrong move; the right one was to question the *time*.
+
+brain's backends already carry GPU timestamp queries (`BRAIN_PROFILE=1`). Run
+both ways on the same `qwen_bench serve 128`:
+
+| kernel | host-timed ms/call | timestamped ms/call | inflation |
+|---|---:|---:|---:|
+| `matmul_reg3` | 0.605 | 0.400 | 1.5× |
+| `rmsnorm_rows` | 0.240 | 0.0122 | **19.7×** |
+| `paged_decode_scores_batched` | 0.349 | 0.0205 | **17×** |
+| `paged_decode_apply_batched` | 0.443 | 0.0152 | **29×** |
+
+The per-group host timing measures **launch + execute + fence**, whose floor is
+roughly constant, so it inflates in inverse proportion to kernel size. By device
+time `matmul_reg3` is **94.8% of that pass**; the host table said 53.8% and
+promoted `rmsnorm_rows` (1.7% of real GPU time) and `add2` to DEFECT rows.
+**Optimising either would have been work against an artifact.**
+
+It also resolves the impossible rate, in the opposite direction to the one being
+chased: with the true, *shorter* device time the same byte model yields
+**6537 GB/s** — the byte model is wrong by >20×, not the 2-3× the successive
+corrections were closing. Two independent errors were being tuned against each
+other, and only the >roof guard stopped a plausible wrong answer from shipping.
+
+**Also measured, and negative:** a cache-level roof was added on the hypothesis
+that these kernels were L2-resident and so legitimately above the DRAM roof
+(the standard hierarchical-roofline reading). The probe says otherwise — a
+2 MiB axpy triad on this card measures **287.8 GB/s, identical to the 512 MiB
+one**. Pascal gives a read-modify-write stream no L2 bandwidth advantage at that
+size, so `cache_gbs` collapses onto `gbs` here and the hypothesis is dead. The
+roof is kept (it is measured, costs one probe, and is the right structure on a
+card where L2 *does* pay), and recorded as a negative result rather than removed.
+
+**Consequences, stated plainly.** Every whole-pass number in this document — and
+so every speedup claimed here, all of which were judged by one — is unaffected.
+Every per-kernel *share* recorded before this entry is suspect for small kernels.
+The fix is timestamp queries inside the production single-pass flush, so
+attribution and the whole-pass number come from one execution; `BRAIN_PROFILE`
+today only times dispatches one-pass-per-dispatch, so its absolute times are not
+production times either (330.7 ms of GPU total against a 114.9 ms pass).

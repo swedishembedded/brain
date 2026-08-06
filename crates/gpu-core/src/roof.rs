@@ -40,8 +40,20 @@ use std::time::Instant;
 pub struct Roofs {
     /// Peak fp32 arithmetic rate, GFLOP/s.
     pub gflops: f32,
-    /// Peak memory bandwidth, GB/s.
+    /// Peak DRAM bandwidth, GB/s — a working set far larger than any cache.
     pub gbs: f32,
+    /// Peak bandwidth for a CACHE-RESIDENT working set, GB/s.
+    ///
+    /// The roofline is HIERARCHICAL: a kernel whose data fits in L2 is bounded
+    /// by L2 bandwidth, not by DRAM, and can legitimately exceed the DRAM roof
+    /// several times over. Grading such a kernel against `gbs` produces a
+    /// number above 100% that looks like a broken measurement and is not one —
+    /// which is exactly what `paged_decode_scores_batched` did at 292%.
+    ///
+    /// Measured with the same triad over a working set small enough to stay
+    /// resident. On a device whose cache is smaller than the probe this simply
+    /// converges to `gbs`, which is a conservative and self-consistent failure.
+    pub cache_gbs: f32,
 }
 
 impl Roofs {
@@ -50,6 +62,21 @@ impl Roofs {
     /// limit.
     pub fn ridge(&self) -> f32 {
         if self.gbs > 0.0 { self.gflops / self.gbs } else { 0.0 }
+    }
+
+    /// The memory roof that applies to a kernel achieving `gbs` of *logical*
+    /// traffic — DRAM if it is under that roof, the cache roof if it is above
+    /// it (the data is being served from cache, which is a real and legitimate
+    /// place for it to come from), and `None` if it is above even that, which
+    /// means the accounting or the timing is wrong.
+    pub fn memory_roof(&self, achieved_gbs: f64) -> Option<(f32, bool)> {
+        if achieved_gbs as f32 <= self.gbs * 1.05 {
+            Some((self.gbs, false))
+        } else if achieved_gbs as f32 <= self.cache_gbs * 1.05 {
+            Some((self.cache_gbs, true))
+        } else {
+            None
+        }
     }
 
     /// Which roof a kernel doing `flops` and moving `bytes` is graded against.
@@ -72,7 +99,11 @@ impl Roofs {
                 Some(100.0 * (flops as f64 / seconds / 1e9) as f32 / self.gflops)
             }
             Bound::Memory if self.gbs > 0.0 => {
-                Some(100.0 * (bytes as f64 / seconds / 1e9) as f32 / self.gbs)
+                // Graded against whichever memory roof actually applies — DRAM,
+                // or the cache roof when the kernel is plainly cache-resident.
+                let achieved = bytes as f64 / seconds / 1e9;
+                let roof = self.memory_roof(achieved).map(|(r, _)| r).unwrap_or(self.gbs);
+                Some(100.0 * achieved as f32 / roof)
             }
             _ => None,
         }
@@ -131,8 +162,15 @@ const FMA_FLOPS_PER_ITER: u64 = 16;
 /// resident, and 768 MiB of traffic per pass — far past any LLC, so the number
 /// is DRAM bandwidth rather than cache bandwidth.
 const BW_ELEMS: u64 = 64 << 20;
+/// Elements per CACHE-roof probe buffer. Two buffers of 1 MiB = 2 MiB resident,
+/// which fits a Pascal GP102's 3 MiB L2 and is large enough that the dispatch is
+/// still bandwidth-bound rather than launch-bound. A device with a smaller cache
+/// measures its DRAM rate here instead, which `measure` clamps to stay monotonic.
+const CACHE_ELEMS: u64 = 256 << 10;
 /// `out[i] = out[i] + s * in[i]` reads two words and writes one.
 const BW_BYTES_PER_ELEM: u64 = 12;
+/// A tiny working set needs many more repetitions to clear the launch floor.
+const MAX_BW_PASSES: usize = 4096;
 
 /// Grow a probe's trip count until the timed region is at least this long, so
 /// launch latency and queue drain cannot dominate the measurement.
@@ -178,8 +216,13 @@ pub fn known() -> Option<Roofs> {
 pub fn measure(gpu: &Gpu) -> Option<Roofs> {
     let g = gpu.new_like(PROBE_KERNELS);
     let gflops = measure_compute(&g)?;
-    let gbs = measure_bandwidth(&g)?;
-    Some(Roofs { gflops, gbs })
+    let gbs = measure_bandwidth(&g, BW_ELEMS)?;
+    // The same triad over a working set chosen to stay in cache. Never report a
+    // cache roof BELOW the DRAM roof: on a device whose cache is smaller than
+    // the probe (or which has none worth the name) the two converge, and the
+    // max keeps the hierarchy monotonic so `memory_roof` cannot invert.
+    let cache_gbs = measure_bandwidth(&g, CACHE_ELEMS)?.max(gbs);
+    Some(Roofs { gflops, gbs, cache_gbs })
 }
 
 /// Time one submit of `steps`, best of `reps`, `poll_wait`-bracketed.
@@ -225,9 +268,9 @@ fn measure_compute(gpu: &Gpu) -> Option<f32> {
     }
 }
 
-fn measure_bandwidth(gpu: &Gpu) -> Option<f32> {
-    let out = gpu.storage(BW_ELEMS);
-    let inp = gpu.storage(BW_ELEMS);
+fn measure_bandwidth(gpu: &Gpu, elems: u64) -> Option<f32> {
+    let out = gpu.storage(elems);
+    let inp = gpu.storage(elems);
     // Leave both buffers at their zero-initialised contents: axpy's rate depends
     // on bytes moved, not on values, and writing 512 MiB from the host would
     // cost far more than the measurement.
@@ -241,18 +284,18 @@ fn measure_bandwidth(gpu: &Gpu) -> Option<f32> {
                 gpu.step(
                     K_AXPY,
                     &[&out, &inp],
-                    &[BW_ELEMS as u32, backend_api::f(1.0)],
-                    BW_ELEMS as u32,
+                    &[elems as u32, backend_api::f(1.0)],
+                    elems as u32,
                 )
             })
             .collect();
         let secs = best_of(gpu, &steps, 3);
-        if secs >= MIN_PROBE_SECONDS || passes >= 64 {
-            let bytes = BW_ELEMS * BW_BYTES_PER_ELEM * passes as u64;
+        if secs >= MIN_PROBE_SECONDS || passes >= MAX_BW_PASSES {
+            let bytes = elems * BW_BYTES_PER_ELEM * passes as u64;
             return Some((bytes as f64 / secs / 1e9) as f32);
         }
         let want = (passes as f64 * MIN_PROBE_SECONDS / secs.max(1e-9)).ceil();
-        passes = (want as usize).clamp(passes * 2, 64);
+        passes = (want as usize).clamp(passes * 2, MAX_BW_PASSES);
     }
 }
 
@@ -293,18 +336,26 @@ mod persist {
         /// trusted — the same rule the tune store applies.
         pub fn load(&self) -> Option<Roofs> {
             let text = std::fs::read_to_string(&self.path).ok()?;
-            let (mut gflops, mut gbs) = (None, None);
+            let (mut gflops, mut gbs, mut cache) = (None, None, None);
             for line in text.lines() {
                 let (k, v) = line.split_once('=')?;
                 let v: f32 = v.trim().parse().ok()?;
                 match k.trim() {
                     "gflops" => gflops = Some(v),
                     "gbs" => gbs = Some(v),
+                    "cache_gbs" => cache = Some(v),
                     _ => {}
                 }
             }
-            let r = Roofs { gflops: gflops?, gbs: gbs? };
-            (r.gflops.is_finite() && r.gflops > 0.0 && r.gbs.is_finite() && r.gbs > 0.0)
+            // A record written before `cache_gbs` existed parses to `None` here
+            // and is simply re-measured — a stale cache is ignored, never
+            // patched up with a default.
+            let r = Roofs { gflops: gflops?, gbs: gbs?, cache_gbs: cache? };
+            (r.gflops.is_finite()
+                && r.gflops > 0.0
+                && r.gbs.is_finite()
+                && r.gbs > 0.0
+                && r.cache_gbs >= r.gbs)
                 .then_some(r)
         }
 
@@ -313,7 +364,8 @@ mod persist {
                 let _ = std::fs::create_dir_all(parent);
             }
             let tmp = self.path.with_extension("tmp");
-            let body = format!("gflops={}\ngbs={}\n", r.gflops, r.gbs);
+            let body =
+                format!("gflops={}\ngbs={}\ncache_gbs={}\n", r.gflops, r.gbs, r.cache_gbs);
             if std::fs::write(&tmp, body).is_ok() {
                 let _ = std::fs::rename(&tmp, &self.path);
             }
@@ -327,7 +379,7 @@ mod tests {
 
     #[test]
     fn ridge_and_classification_split_at_the_ridge() {
-        let r = Roofs { gflops: 11760.0, gbs: 346.0 };
+        let r = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0 };
         // A P40's ridge is ~34 FLOP/byte — anything streaming is left of it.
         assert!((r.ridge() - 33.99).abs() < 0.1, "ridge {}", r.ridge());
         // axpy: 2 FLOP per 12 bytes.
@@ -340,7 +392,7 @@ mod tests {
 
     #[test]
     fn utilisation_is_measured_against_the_kernels_own_roof() {
-        let r = Roofs { gflops: 11760.0, gbs: 346.0 };
+        let r = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0 };
         // A streaming kernel at exactly the bandwidth roof reads 100%, even
         // though its FLOP rate is negligible — the whole point of classifying.
         let bytes = 346_000_000_000u64;

@@ -19,6 +19,27 @@
 //!   covered pass silently *under*-reported its rate instead of declaring
 //!   itself incomplete. Here an uncovered pass says so.
 //!
+//! ## KNOWN DEFECT: the time source (`docs/lessons.md` #31)
+//!
+//! Group times here are HOST wall-clock around a `poll_wait`-bracketed submit of
+//! that slice, so they measure **launch + execute + fence**. The floor of that is
+//! roughly constant, which inflates small kernels in inverse proportion to their
+//! size — measured against the backend's GPU timestamp queries on one
+//! `qwen_bench serve` run: `matmul_reg3` 1.5x, `rmsnorm_rows` **19.7x**,
+//! `paged_decode_scores_batched` **17x**, `paged_decode_apply_batched` **29x**.
+//!
+//! The resulting RANKING is wrong, not merely imprecise: by device time
+//! `matmul_reg3` is 94.8% of that pass, where this table said 53.8% and promoted
+//! two sub-2% kernels to "DEFECT" rows. **Do not attribute time between kernels
+//! from this table for small kernels** — cross-check with `BRAIN_PROFILE=1`.
+//! [`PassProfile::total_secs`] is unaffected, and remains the number a change is
+//! judged by.
+//!
+//! The fix is timestamp queries inside the production single-pass flush, so
+//! attribution and the whole-pass number come from the same execution;
+//! `BRAIN_PROFILE` today only times dispatches in a one-pass-per-dispatch mode
+//! whose absolute times are not production times either.
+//!
 //! Two numbers come out of every profile and they are not interchangeable.
 //! [`PassProfile::total_secs`] is ONE submit of the whole list — the number that
 //! decides whether a change worked. [`PassProfile::summed_secs`] is the sum of
@@ -62,6 +83,13 @@ impl KernelRow {
     pub fn bound(&self, roofs: Roofs) -> Option<Bound> {
         self.covered.then(|| roofs.classify(self.flops, self.bytes))
     }
+    /// True when this row's logical traffic exceeds the DRAM roof but not the
+    /// cache roof — i.e. it is being served from cache, which is a real place
+    /// for data to come from and not a broken measurement.
+    pub fn cache_resident(&self, roofs: Roofs) -> bool {
+        self.gbs().and_then(|g| roofs.memory_roof(g)).map(|(_, c)| c).unwrap_or(false)
+    }
+
     /// Percent of *its own class's* roof. This is the number the target bands
     /// in `.todo/saturate-the-gpu.md` are stated against — reporting a
     /// memory-bound kernel as a fraction of a FLOP peak is meaningless.
@@ -146,6 +174,11 @@ impl PassProfile {
                         .map(|u| {
                             if u > IMPOSSIBLE_PCT {
                                 format!("!{u:.0}%")
+                            } else if r.cache_resident(rf) {
+                                // Above the DRAM roof but under the cache roof:
+                                // the data really is coming from cache, and the
+                                // percentage is against THAT roof.
+                                format!("{u:.1}%c")
                             } else {
                                 format!("{u:.1}%")
                             }
@@ -211,6 +244,10 @@ impl PassProfile {
             self.groups,
         );
         println!("Rank with the table; decide with the whole-pass number (docs/lessons.md #21).");
+        println!(
+            "NOTE per-kernel times are host-bracketed (launch+execute+fence) and inflate small \
+             kernels up to ~30x — cross-check any RANKING with BRAIN_PROFILE=1 (lessons #31)."
+        );
         if let Some(rf) = roofs {
             let bogus: Vec<&str> = self
                 .rows
@@ -220,8 +257,8 @@ impl PassProfile {
                 .collect();
             if !bogus.is_empty() {
                 println!(
-                    "!! {} row(s) report ABOVE the device roof — the accounting or the timing is \
-                     wrong, not the kernel: {}",
+                    "!! {} row(s) report above even the CACHE roof — the accounting or the \
+                     timing is wrong, not the kernel: {}",
                     bogus.len(),
                     bogus.join(", "),
                 );
@@ -384,7 +421,7 @@ mod tests {
 
     #[test]
     fn defects_are_rows_under_their_own_classs_floor() {
-        let roofs = Roofs { gflops: 11760.0, gbs: 346.0 };
+        let roofs = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0 };
         // col2im-shaped: 142.75 ms moving ~3.3 GB => ~23 GB/s, 6.7% of the roof.
         let col2im = row("col2im", 0.14275, 0, 3_312_000_000, true);
         // A GEMM at 2 TFLOP/s: 17% of peak — under the 30% compute floor too.
