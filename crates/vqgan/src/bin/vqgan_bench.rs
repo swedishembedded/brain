@@ -19,134 +19,52 @@
 //! `crates/restore` all train through. A finding here is a finding for all of
 //! them.
 //!
-//! Method (identical to `unet_bench`, deliberately):
+//! Method lives in `gpu_core::profile` — the shared §F.1 profiler this and
+//! every other model bench now call, rather than each carrying a copy:
 //!   * every timed region is `poll_wait()`-bracketed — a bare `submit` only
 //!     appends to `pending`, so an unbracketed loop times the HOST and reports
 //!     it as device throughput (`docs/lessons.md` #6);
 //!   * best-of-N, not mean: the minimum is the least contaminated sample;
 //!   * groups are CONTIGUOUS runs of one kernel in submit order, so the sum of
-//!     the parts is comparable to the whole, and both are printed.
+//!     the parts is comparable to the whole, and both are printed;
+//!   * utilisation divides by the device's **measured** roofline
+//!     (`gpu_core::roof`), not by a hardcoded P40 peak.
 //!
 //! Usage:
 //!   vqgan_bench [size] [reps]        # default 256, 3
 
-use std::collections::HashMap;
 use std::time::Instant;
 
+use gpu_core::roof::Roofs;
 use gpu_core::{f, Gpu, Step};
 use vqgan::config::VqganConfig;
 use vqgan::train::VqganTrainer;
 
-/// Tesla P40 fp32 peak, printed as a denominator so a rate above the physical
-/// roof is visibly impossible rather than quietly believed.
-const PEAK_TFLOPS: f64 = 11.76;
-
 fn best_of(gpu: &Gpu, steps: &[Step], reps: usize) -> f64 {
-    gpu.submit(&[], steps);
-    gpu.poll_wait();
-    let mut best = f64::INFINITY;
-    for _ in 0..reps {
-        let t0 = Instant::now();
-        gpu.submit(&[], steps);
-        gpu.poll_wait();
-        best = best.min(t0.elapsed().as_secs_f64());
-    }
-    best
+    gpu_core::profile::best_of(gpu, steps, reps)
 }
 
-/// Contiguous runs of one kernel, in graph order.
-fn groups(steps: &[Step]) -> Vec<(usize, usize, usize)> {
-    let mut g: Vec<(usize, usize, usize)> = Vec::new();
-    for (i, s) in steps.iter().enumerate() {
-        let k = s.meta().map(|m| m.kernel).unwrap_or(usize::MAX);
-        match g.last_mut() {
-            Some((gk, _, len)) if *gk == k => *len += 1,
-            _ => g.push((k, i, 1)),
+/// One §F.1 pass profile, printed against the device's MEASURED roofline.
+///
+/// The table, the grouping, the drain accounting and the coverage honesty all
+/// live in `gpu_core::profile` — four benches used to carry a copy of them, and
+/// each copy divided by its own `PEAK_TFLOPS = 11.76` literal.
+fn report(gpu: &Gpu, label: &str, steps: &[Step], reps: usize, roofs: Option<Roofs>) -> f64 {
+    let p = gpu_core::profile::profile(gpu, label, steps, reps);
+    p.print_top(roofs, 14);
+    if let Some(r) = roofs {
+        for (row, bound, pct) in p.defects(r, 5.0) {
+            println!(
+                "  DEFECT  {:<24} {:>5.1}% of its {} roof (floor {:.0}%) — {:.1}% of this pass",
+                row.name,
+                pct,
+                bound.as_str(),
+                bound.defect_pct(),
+                100.0 * row.secs / p.summed_secs,
+            );
         }
     }
-    g
-}
-
-fn report(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> f64 {
-    let total = best_of(gpu, steps, reps);
-    let gs = groups(steps);
-    // Per kind: time, call count, and the ANALYTICAL FLOP/byte volume from
-    // `gpu_core::cost` — the repo's own accounting, so the rate below is
-    // comparable with every other number in docs/performance/.
-    let mut per: HashMap<usize, (f64, usize, u64, u64, bool)> = HashMap::new();
-    for (k, start, len) in &gs {
-        let t = best_of(gpu, &steps[*start..*start + *len], reps);
-        let name = gpu.kernel_name(*k).unwrap_or("?");
-        let (mut fl, mut by, mut covered) = (0u64, 0u64, true);
-        for st in &steps[*start..*start + *len] {
-            let m = st.meta();
-            let params = m.as_ref().and_then(|m| m.params.as_deref());
-            match gpu_core::cost::kernel_cost(name, params, m.as_ref().map(|m| m.threads).unwrap_or(0)) {
-                Some(c) => {
-                    fl += c.flops;
-                    by += c.bytes;
-                }
-                None => covered = false,
-            }
-        }
-        let e = per.entry(*k).or_insert((0.0, 0, 0, 0, true));
-        e.0 += t;
-        e.1 += *len;
-        e.2 += fl;
-        e.3 += by;
-        e.4 &= covered;
-    }
-    let mut rows: Vec<(String, f64, usize, u64, u64, bool)> = per
-        .into_iter()
-        .map(|(k, (t, n, fl, by, cov))| (gpu.kernel_name(k).unwrap_or("?").to_string(), t, n, fl, by, cov))
-        .collect();
-    rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    let summed: f64 = rows.iter().map(|r| r.1).sum();
-    let tot_flops: u64 = rows.iter().map(|r| r.3).sum();
-
-    println!("\n=== {label}: {} dispatches, {:.2} ms ===", steps.len(), total * 1e3);
-    println!(
-        "{:<24} {:>9} {:>6} {:>6} {:>9} {:>11} {:>7} {:>9}",
-        "kernel", "ms", "n", "%", "ms/call", "GFLOP/s", "%peak", "GB/s"
-    );
-    println!("{}", "-".repeat(88));
-    for (name, t, n, fl, by, cov) in rows.iter().take(14) {
-        // A compute rate is only meaningful where `cost` has a formula. An
-        // UNCOVERED kernel prints "-" rather than a zero that reads as slow.
-        let gfs = if *cov && *fl > 0 { format!("{:.1}", *fl as f64 / t / 1e9) } else { "-".into() };
-        let pk = if *cov && *fl > 0 {
-            format!("{:.1}%", 100.0 * (*fl as f64 / t / 1e9) / (PEAK_TFLOPS * 1e3))
-        } else {
-            "-".into()
-        };
-        let gbs = if *cov && *by > 0 { format!("{:.1}", *by as f64 / t / 1e9) } else { "-".into() };
-        println!(
-            "{:<24} {:>9.2} {:>6} {:>5.1}% {:>9.3} {:>11} {:>7} {:>9}",
-            name,
-            t * 1e3,
-            n,
-            100.0 * t / summed,
-            t * 1e3 / *n as f64,
-            gfs,
-            pk,
-            gbs
-        );
-    }
-    if tot_flops > 0 {
-        println!(
-            "{:<24} {:>9.2} {:>6} {:>6} {:>9} {:>11.1} {:>6.1}%",
-            "WHOLE PASS",
-            total * 1e3,
-            steps.len(),
-            "",
-            "",
-            tot_flops as f64 / total / 1e9,
-            100.0 * (tot_flops as f64 / total / 1e9) / (PEAK_TFLOPS * 1e3)
-        );
-    }
-    println!("{}", "-".repeat(64));
-    println!("{:<26} {:>9.2}  (whole {:.2} ms, {} drains)", "sum of groups", summed * 1e3, total * 1e3, gs.len());
-    total
+    p.total_secs
 }
 
 /// Shape-correct random weights. The profile depends only on the graph, so this
@@ -623,10 +541,23 @@ fn main() {
     tr.set_batch(&img, &img);
     tr.latch_assignment();
 
-    let fwd = report(&gpu, "FORWARD", tr.fwd_steps(), reps);
-    let bwd = report(&gpu, "BACKWARD", tr.bwd_steps(), reps);
+    // Measure this device's own roofline before profiling anything: every
+    // utilisation number below divides by it, so a hardcoded peak would make
+    // the whole table a statement about one card (`gpu_core::roof`).
+    let roofs = gpu_core::roof::ensure(&gpu);
+    match roofs {
+        Some(r) => println!(
+            "measured roofline: {:.0} GFLOP/s, {:.1} GB/s, ridge {:.1} FLOP/byte",
+            r.gflops,
+            r.gbs,
+            r.ridge()
+        ),
+        None => println!("roofline unmeasured — utilisation columns print '-' rather than a guess"),
+    }
+
+    let fwd = report(&gpu, "FORWARD", tr.fwd_steps(), reps, roofs);
+    let bwd = report(&gpu, "BACKWARD", tr.bwd_steps(), reps, roofs);
 
     println!("\nforward {:.2} ms + backward {:.2} ms = {:.2} ms/step", fwd * 1e3, bwd * 1e3, (fwd + bwd) * 1e3);
     println!("backward/forward = {:.2}x   ({} clears before each backward)", bwd / fwd, tr.bwd_clears().len());
-    println!("P40 fp32 peak {PEAK_TFLOPS} TFLOP/s; a rate above it means the host was timed, not the device.");
 }

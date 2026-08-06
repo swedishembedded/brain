@@ -33,10 +33,6 @@ use unet::config::UNetConfig;
 use unet::init::init_weights;
 use unet::model::{Unet, KERNELS};
 
-/// Tesla P40 fp32 peak (11.76 TFLOP/s) and its memory roof (~346 GB/s). Printed
-/// as a denominator so a number above the roof is visibly impossible rather than
-/// quietly believed.
-const PEAK_TFLOPS: f64 = 11.76;
 
 fn best_of(gpu: &Gpu, steps: &[gpu_core::Step], reps: usize) -> f64 {
     gpu.submit(&[], steps);
@@ -70,68 +66,47 @@ fn main() {
     let m = Unet::new(gpu.share(), cfg.clone(), &w, lh, lw, 77, false);
     eprintln!("built in {:.1}s, {} dispatches\n", t0.elapsed().as_secs_f32(), m.steps().len());
 
-    let steps = m.steps();
-    let total = best_of(&gpu, steps, reps);
+    // Measure this device's own roofline first: every utilisation number below
+    // divides by it, so a hardcoded P40 peak would make the table a statement
+    // about one card rather than about whatever ran (`gpu_core::roof`).
+    let roofs = gpu_core::roof::ensure(&gpu);
+    match roofs {
+        Some(r) => println!(
+            "measured roofline: {:.0} GFLOP/s, {:.1} GB/s, ridge {:.1} FLOP/byte",
+            r.gflops, r.gbs, r.ridge()
+        ),
+        None => println!("roofline unmeasured — utilisation columns print '-' rather than a guess"),
+    }
 
-    // Contiguous runs of one kernel, so the sum is comparable to the whole and
-    // graph order is preserved.
-    let mut groups: Vec<(usize, usize, usize)> = Vec::new(); // (kernel, start, len)
-    for (i, s) in steps.iter().enumerate() {
-        let k = s.meta().map(|m| m.kernel).unwrap_or(usize::MAX);
-        match groups.last_mut() {
-            Some((gk, _, len)) if *gk == k => *len += 1,
-            _ => groups.push((k, i, 1)),
+    let steps = m.steps();
+    // The §F.1 table, the grouping, the drain accounting and the coverage
+    // honesty all live in `gpu_core::profile` — this bench used to carry its
+    // own copy of them, as three others did.
+    let p = gpu_core::profile::profile(&gpu, "FORWARD", steps, reps);
+    p.print(roofs);
+    if let Some(r) = roofs {
+        for (row, bound, pct) in p.defects(r, 5.0) {
+            println!(
+                "  DEFECT  {:<24} {:>5.1}% of its {} roof (floor {:.0}%) — {:.1}% of this pass",
+                row.name, pct, bound.as_str(), bound.defect_pct(),
+                100.0 * row.secs / p.summed_secs,
+            );
         }
     }
-
-    let mut per_kind: HashMap<usize, (f64, usize)> = HashMap::new();
-    for (k, start, len) in &groups {
-        let t = best_of(&gpu, &steps[*start..*start + *len], reps);
-        let e = per_kind.entry(*k).or_insert((0.0, 0));
-        e.0 += t;
-        e.1 += *len;
-    }
-
-    let mut rows: Vec<(String, f64, usize)> = per_kind
-        .into_iter()
-        .map(|(k, (t, n))| (gpu.kernel_name(k).unwrap_or("?").to_string(), t, n))
-        .collect();
-    rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-
-    let summed: f64 = rows.iter().map(|r| r.1).sum();
-    println!("{:<26} {:>9} {:>8} {:>7}  {:>9}", "kernel", "ms", "n", "%", "ms/call");
-    println!("{}", "-".repeat(66));
-    for (name, t, n) in &rows {
-        println!(
-            "{:<26} {:>9.2} {:>8} {:>6.1}% {:>9.3}",
-            name,
-            t * 1e3,
-            n,
-            100.0 * t / summed,
-            t * 1e3 / *n as f64
-        );
-    }
-    println!("{}", "-".repeat(66));
-    println!("{:<26} {:>9.2} {:>8}", "sum of groups", summed * 1e3, steps.len());
-    println!("{:<26} {:>9.2}", "whole graph (one submit)", total * 1e3);
-    println!(
-        "\nper-group drain overhead: {:.1}% ({} drains)",
-        100.0 * (summed - total) / total,
-        groups.len()
-    );
+    let total = p.total_secs;
+    let rows = &p.rows;
     println!("one forward: {:.2} ms  ->  {:.1} forwards/s", total * 1e3, 1.0 / total);
-    println!("P40 fp32 peak {PEAK_TFLOPS} TFLOP/s; a rate above it means the host was timed, not the device.");
 
     // The shapes behind the top kernel. A per-kind total says WHAT is slow; the
     // shape histogram says WHY, and whether a faster sibling could have taken it.
-    if let Some((top, _, _)) = rows.first() {
-        let ki = gpu.kernel_index(top);
+    if let Some(top) = rows.first().map(|r| r.name.clone()) {
+        let ki = gpu.kernel_index(&top);
         let mut hist: HashMap<Vec<u32>, (usize, f64)> = HashMap::new();
-        for (k, start, len) in &groups {
+        for (k, start, len) in &gpu_core::profile::groups(steps) {
             if Some(*k) != ki {
                 continue;
             }
-            let t = best_of(&gpu, &steps[*start..*start + *len], 1) / *len as f64;
+            let t = gpu_core::profile::best_of(&gpu, &steps[*start..*start + *len], 1) / *len as f64;
             for s in &steps[*start..*start + *len] {
                 if let Some(p) = s.meta().and_then(|m| m.params.clone()) {
                     let e = hist.entry(p).or_insert((0, 0.0));
@@ -143,15 +118,24 @@ fn main() {
         let mut hs: Vec<_> = hist.into_iter().collect();
         hs.sort_by(|a, b| b.1 .1.partial_cmp(&a.1 .1).unwrap());
         println!("\n`{top}` by shape (params as recorded):");
-        println!("{:<28} {:>6} {:>10} {:>12}", "params", "n", "ms", "GFLOP/s");
-        for (p, (n, t)) in hs.iter().take(10) {
-            // matmul params are [m, k, n]: 2*m*k*n FLOP.
-            let gf = if p.len() >= 3 {
-                2.0 * p[0] as f64 * p[1] as f64 * p[2] as f64 * *n as f64 / t / 1e9
-            } else {
-                f64::NAN
+        println!("{:<28} {:>6} {:>10} {:>12} {:>8}", "params", "n", "ms", "GFLOP/s", "%roof");
+        for (pr, (n, t)) in hs.iter().take(10) {
+            // FLOPs come from `gpu_core::cost`, not from a local matmul model:
+            // this bench used to hardcode `2*p[0]*p[1]*p[2]`, which is silently
+            // wrong for every kernel that is not a plain GEMM.
+            let (gf, roofpct) = match gpu_core::cost::kernel_cost(&top, Some(pr), 0) {
+                Some(c) => {
+                    let work = c.flops.max(c.int_ops) * *n as u64;
+                    let g = work as f64 / t / 1e9;
+                    let pct = roofs
+                        .and_then(|r| r.utilisation(work, c.bytes * *n as u64, *t))
+                        .map(|u| format!("{u:.1}%"))
+                        .unwrap_or_else(|| "-".into());
+                    (format!("{g:.1}"), pct)
+                }
+                None => ("-".to_string(), "-".to_string()),
             };
-            println!("{:<28} {:>6} {:>10.2} {:>12.1}", format!("{p:?}"), n, t * 1e3, gf);
+            println!("{:<28} {:>6} {:>10.2} {:>12} {:>8}", format!("{pr:?}"), n, t * 1e3, gf, roofpct);
         }
     }
 }
