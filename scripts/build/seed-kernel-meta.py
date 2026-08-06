@@ -39,6 +39,19 @@ def native_cpu_kernels():
     return set(re.findall(r"^\s{4}([a-z0-9_]+): Option<usize>", block.group(1), re.M)) if block else set()
 
 
+def strip_comments(text):
+    """Kernel body with `//` comments removed.
+
+    Counting `workgroupBarrier` over the raw source counts the word where a
+    header *mentions* it — which is exactly what a kernel documenting its own
+    barrier discipline does, so the cross-check fired on a correct kernel
+    (`paged_decode_scores_wg`, one barrier, green on `backend-cpu`). A checker
+    that cannot tell code from prose produces false positives on the kernels
+    that document themselves best.
+    """
+    return "\n".join(re.sub(r"//.*$", "", ln) for ln in text.splitlines())
+
+
 def header_lines(text):
     out = []
     for line in text.splitlines():
@@ -73,9 +86,9 @@ def summarise(lines):
 def derive(name, text):
     wg = re.search(r"@workgroup_size\((\d+)", text)
     wg = int(wg.group(1)) if wg else 64
-    barriers = text.count("workgroupBarrier")
-    shared = "var<workgroup>" in text
-    dp4a = "dot4I8Packed" in text
+    barriers = strip_comments(text).count("workgroupBarrier")
+    shared = "var<workgroup>" in strip_comments(text)
+    dp4a = "dot4I8Packed" in strip_comments(text)
     # A loop is a serial reduction when its bound comes from the uniform —
     # either directly (`d < p.head_dim`) or through the far more common local
     # alias (`let hd = p.head_dim;` then `d < hd`). Missing the aliased form

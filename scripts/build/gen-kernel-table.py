@@ -65,6 +65,19 @@ NPU_CELL = {"yes": "✓", "no": "—"}
 QUANT_CELL = {"int8": "int8", "none": "—"}
 
 
+def strip_comments(text):
+    """Kernel body with `//` comments removed.
+
+    Counting `workgroupBarrier` over the raw source counts the word where a
+    header *mentions* it — which is exactly what a kernel documenting its own
+    barrier discipline does, so the cross-check fired on a correct kernel
+    (`paged_decode_scores_wg`, one barrier, green on `backend-cpu`). A checker
+    that cannot tell code from prose produces false positives on the kernels
+    that document themselves best.
+    """
+    return "\n".join(re.sub(r"//.*$", "", ln) for ln in text.splitlines())
+
+
 def parse_meta(text):
     """The declared `@` block, or `None` for each field it does not declare."""
     meta = {}
@@ -77,10 +90,10 @@ def parse_meta(text):
 def cross_check(name, text, meta):
     """Errors where a declaration contradicts what the code actually is."""
     errs = []
-    barriers = text.count("workgroupBarrier")
+    barriers = strip_comments(text).count("workgroupBarrier")
     wg = re.search(r"@workgroup_size\((\d+)", text)
     wg = int(wg.group(1)) if wg else 64
-    dp4a = "dot4I8Packed" in text
+    dp4a = "dot4I8Packed" in strip_comments(text)
 
     cpu = meta["cpu"]
     if cpu not in CPU_CELL:

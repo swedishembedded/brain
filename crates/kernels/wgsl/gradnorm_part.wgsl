@@ -4,7 +4,7 @@
 // @what  Per-parameter sum of squares of its gradient, as a COOPERATIVE tree reduction
 // @how   64-thread workgroup tile, 2 barriers
 // @opt   4
-// @cpu   no
+// @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant none

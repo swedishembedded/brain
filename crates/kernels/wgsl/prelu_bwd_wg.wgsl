@@ -4,7 +4,7 @@
 // @what  PReLU backward, one WORKGROUP per CHANNEL — the cooperative, COALESCED twin of prelu_bwd.wgsl
 // @how   64-thread workgroup tile, 3 barriers
 // @opt   4
-// @cpu   no
+// @cpu   yes
 // @gpu   yes
 // @npu   yes
 // @quant none
