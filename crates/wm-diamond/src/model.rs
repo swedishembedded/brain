@@ -20,30 +20,32 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use std::collections::HashMap;
 
 // Kernel-table indices (order matches KERNELS).
-#[allow(dead_code)]
-const K_CONV_BIAS: usize = 0;
-#[allow(dead_code)]
-const K_GN_STATS: usize = 1;
-const K_GN_APPLY: usize = 2;
-const K_SILU: usize = 3;
-const K_ADD2: usize = 4;
-const K_CONCAT2: usize = 5;
-const K_UPSAMPLE2: usize = 6;
-const K_NCHW_NLC: usize = 7;
-const K_NLC_NCHW: usize = 8;
-const K_ATTN_SCORES: usize = 9;
-const K_ATTN_SOFTMAX: usize = 10;
-const K_ATTN_APPLY: usize = 11;
-const K_SCALE_ROW: usize = 12;
-const K_EDM_MIX: usize = 13;
-const K_EDM_WRAP: usize = 14;
-const K_GN_PART: usize = 15;
-const K_GN_STATS2: usize = 16;
-const K_CONV_BIAS_REG: usize = 17;
+//
+// `conv_bias` and the serial `gn_stats` used to sit at slots 0 and 1, carrying
+// `#[allow(dead_code)]` markers: registered on every device this model ever
+// built, compiled by every backend, and dispatched by nothing. The register
+// -tiled `conv_bias_reg` replaced the first and the two-stage
+// `gn_part`/`gn_stats2` pair replaced the second, and neither removal reached
+// the table. The `#[allow]` is what let them sit there — see the slot test at
+// the bottom of this file, which is now what keeps this list honest.
+const K_GN_APPLY: usize = 0;
+const K_SILU: usize = 1;
+const K_ADD2: usize = 2;
+const K_CONCAT2: usize = 3;
+const K_UPSAMPLE2: usize = 4;
+const K_NCHW_NLC: usize = 5;
+const K_NLC_NCHW: usize = 6;
+const K_ATTN_SCORES: usize = 7;
+const K_ATTN_SOFTMAX: usize = 8;
+const K_ATTN_APPLY: usize = 9;
+const K_SCALE_ROW: usize = 10;
+const K_EDM_MIX: usize = 11;
+const K_EDM_WRAP: usize = 12;
+const K_GN_PART: usize = 13;
+const K_GN_STATS2: usize = 14;
+const K_CONV_BIAS_REG: usize = 15;
 
-const KERNELS: [(&str, &str); 18] = [
-    ("conv_bias", kernels::CONV_BIAS),
-    ("gn_stats", kernels::GN_STATS),
+const KERNELS: [(&str, &str); 16] = [
     ("gn_apply", kernels::GN_APPLY),
     ("silu", kernels::SILU),
     ("add2", kernels::ADD2),
@@ -653,5 +655,46 @@ impl DiamondUNet {
         self.gpu.submit(&[], &self.steps);
         let n = (self.cfg.img_channels * self.cfg.h * self.cfg.w) as usize;
         self.gpu.read(&self.y_out, n)
+    }
+}
+
+#[cfg(test)]
+mod kernel_slots {
+    /// Every slot constant must name the kernel actually sitting at that index.
+    ///
+    /// This did not exist while `conv_bias` and `gn_stats` sat at slots 0 and 1
+    /// long after `conv_bias_reg` and `gn_part`/`gn_stats2` replaced them —
+    /// they were dispatched by nothing and compiled by every backend on every
+    /// device init, and two `#[allow(dead_code)]` markers are what let them
+    /// stay. Removing a slot renumbers every one after it, and a stale constant
+    /// then dispatches the WRONG pipeline: silently different numbers if the
+    /// bind-group arities happen to match, a panic if they do not
+    /// (`docs/lessons.md` #13). This test is what makes that a red build.
+    #[test]
+    fn every_slot_constant_names_its_kernel() {
+        for (slot, name) in [
+            (super::K_GN_APPLY, "gn_apply"),
+            (super::K_SILU, "silu"),
+            (super::K_ADD2, "add2"),
+            (super::K_CONCAT2, "concat2"),
+            (super::K_UPSAMPLE2, "upsample2"),
+            (super::K_NCHW_NLC, "nchw_nlc"),
+            (super::K_NLC_NCHW, "nlc_nchw"),
+            (super::K_ATTN_SCORES, "attn_scores_bidir"),
+            (super::K_ATTN_SOFTMAX, "attn_softmax_bidir"),
+            (super::K_ATTN_APPLY, "attn_apply_bidir"),
+            (super::K_SCALE_ROW, "scale_row"),
+            (super::K_EDM_MIX, "edm_mix"),
+            (super::K_EDM_WRAP, "edm_wrap"),
+            (super::K_GN_PART, "gn_part"),
+            (super::K_GN_STATS2, "gn_stats2"),
+            (super::K_CONV_BIAS_REG, "conv_bias_reg"),
+        ] {
+            assert_eq!(super::KERNELS[slot].0, name, "slot {slot}");
+        }
+        // ...and the table has nothing in it the list above does not cover, so
+        // a kernel that stops being dispatched cannot quietly stay registered.
+        assert_eq!(super::KERNELS.len(), 16);
+        assert!(super::KERNELS.iter().all(|(n, s)| !n.is_empty() && !s.is_empty()));
     }
 }
