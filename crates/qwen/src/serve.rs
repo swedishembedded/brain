@@ -1858,6 +1858,126 @@ mod tests {
         map
     }
 
+    /// A small config where every dimension is DISTINCT and non-degenerate --
+    /// unlike `QwenConfig::tiny()` (`n_kv_heads=2, head_dim=8`, several numbers
+    /// coincide), this exercises a real GQA ratio (group 2) at a `head_dim`
+    /// that packs to more than one int8 word/head (16/4=4), with
+    /// `n_heads*head_dim=96 != d_model=20` so a transposed/mismatched dimension
+    /// cannot accidentally read as correct. Replaces `tiny()` for int8-KV
+    /// numeric gates -- see `docs/lessons.md` #4 (degenerate test dims hide bug
+    /// classes) and #18 (a toy-fitted constant cannot predict the real shape).
+    fn kv_probe_cfg() -> QwenConfig {
+        QwenConfig {
+            vocab: 29,
+            block_size: 64,
+            n_layers: 3,
+            d_model: 20,
+            n_heads: 6,
+            n_kv_heads: 3,
+            head_dim: 16,
+            d_ff: 28,
+            rope_theta: 1.0e6,
+            rms_eps: 1e-6,
+            max_position_embeddings: 64,
+            tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
+            lora: None,
+        }
+    }
+
+    /// G3 (the scale-bug gate — lesson 2: cosine cannot see a dropped scale,
+    /// and the int8 bug class IS a scale bug). ONE int8 engine, ONE prefill
+    /// (the whole prompt fits in a single `max_prefill`-sized chunk, so it is
+    /// exactly one forward pass): the ground truth for "what was quantized"
+    /// is read straight out of the engine's OWN scratch (`sc.k`/`sc.v`), which
+    /// still hold the last layer's post-RoPE K/V — the literal `src` the
+    /// append kernel just packed — because nothing overwrites them after the
+    /// final layer's dispatch. This deliberately avoids comparing against a
+    /// SEPARATE fp32 engine: two independently-built engines can select
+    /// different autotuned kernel variants for the identical (op, shape) and
+    /// differ by GPU floating-point noise well under any real scale bug but
+    /// well above `assert_eq!` — the oracle must come from the same
+    /// computation being checked, not a second one hoped to agree with it.
+    ///
+    /// Per `(token, kv-head)`, every element: the scale is EXACTLY
+    /// `absmax/127` (or `1.0` when `absmax==0`), the stored byte is EXACTLY
+    /// `clamp(round(x/scale), -127, 127)`, the dequantized value sits within
+    /// half a quantization step of the truth, and the whole-tensor `rel_l2`
+    /// stays under a DERIVED bound (not a hand-fitted one) — `rel_l2` because
+    /// cosine alone cannot see a dropped or doubled scale factor.
+    #[test]
+    fn int8_kv_scale_and_bytes_match_a_host_oracle() {
+        let cfg = kv_probe_cfg();
+        let map = tiny_weights(&cfg);
+        let prompt = vec![1u32, 5, 3, 9, 2, 7, 11, 4];
+        let (bs, nb) = (5u32, 32u32);
+        let mut e8 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, bs, nb, 1, 8, 32, true, false);
+        let mut t8 = BlockTable::new();
+        e8.prefill(&mut t8, &prompt);
+
+        let hd = cfg.head_dim as usize;
+        let n_kv = cfg.n_kv_heads as usize;
+        let hkv = n_kv * hd;
+        let block_size = bs as usize;
+        let last_layer = cfg.n_layers as usize - 1;
+        let (pool_words8, scale_words) = kv_pool_words(&cfg, bs, nb, true);
+
+        // sc.k/sc.v: [prompt.len(), hkv] row-major, one row per TOKEN position
+        // (not physical slot) -- exactly what `run_batched(cc, ...)` wrote for
+        // this single unchunked prefill.
+        let xk = e8.gpu.read(&e8.sc.k, prompt.len() * hkv);
+        let xv = e8.gpu.read(&e8.sc.v, prompt.len() * hkv);
+        let pk8: Vec<u32> = e8.gpu.read(&e8.pool_k[last_layer], pool_words8 as usize).iter().map(|f| f.to_bits()).collect();
+        let pv8: Vec<u32> = e8.gpu.read(&e8.pool_v[last_layer], pool_words8 as usize).iter().map(|f| f.to_bits()).collect();
+        let scales_k = e8.gpu.read(&e8.scales_k[last_layer], scale_words as usize);
+        let scales_v = e8.gpu.read(&e8.scales_v[last_layer], scale_words as usize);
+
+        let check = |name: &str, x: &[f32], packed: &[u32], scales: &[f32]| {
+            let mut sq_err = 0f64;
+            let mut sq_mag = 0f64;
+            for tok in 0..prompt.len() {
+                let phys = t8.blocks()[tok / block_size] as usize;
+                let off = tok % block_size;
+                let slot = phys * block_size + off;
+                for h in 0..n_kv {
+                    let xbase = tok * hkv + h * hd;
+                    let xh = &x[xbase..xbase + hd];
+                    let absmax = xh.iter().fold(0f32, |m, &v| m.max(v.abs()));
+                    let expected_scale = if absmax == 0.0 { 1.0 } else { absmax / 127.0 };
+                    let actual_scale = scales[slot * n_kv + h];
+                    // A GPU division instruction is not guaranteed IEEE-correctly-
+                    // rounded (WGSL allows ~1 ULP slack), so host and device can
+                    // legitimately disagree in the last bit of `absmax/127.0` --
+                    // tolerance is 8+ orders of magnitude tighter than any real
+                    // scale bug (dropped/halved/doubled), which lands orders of
+                    // magnitude away, not one ULP away.
+                    let tol = (expected_scale.abs() * 2e-6).max(1e-12);
+                    assert!((actual_scale - expected_scale).abs() <= tol, "{name} tok{tok} head{h}: scale drifted past a GPU-division ULP: actual={actual_scale} expected={expected_scale}");
+
+                    let base = slot * hkv + h * hd;
+                    for (d, &xv) in xh.iter().enumerate() {
+                        let e = base + d;
+                        let word = packed[e / 4];
+                        let byte = (word >> (8 * (e % 4))) & 0xff;
+                        let signed = if byte > 127 { byte as i32 - 256 } else { byte as i32 };
+                        let expected_qv = (xv / actual_scale).round().clamp(-127.0, 127.0) as i32;
+                        assert_eq!(signed, expected_qv, "{name} tok{tok} head{h} d{d}: quantized byte must be exact");
+                        let dequant = signed as f32 * actual_scale;
+                        let err = (dequant - xv).abs();
+                        assert!(err <= 0.5 * actual_scale + 1e-6, "{name} tok{tok} head{h} d{d}: dequant off by more than half a step: {err} vs scale {actual_scale}");
+                        sq_err += (err as f64).powi(2);
+                        sq_mag += (xv as f64).powi(2);
+                    }
+                }
+            }
+            let rel_l2 = (sq_err / sq_mag.max(1e-12)).sqrt();
+            assert!(rel_l2 < 0.01, "{name}: rel_l2 {rel_l2} too high");
+        };
+        check("K", &xk, &pk8, &scales_k);
+        check("V", &xv, &pv8, &scales_v);
+    }
+
     /// G1: the KV pool byte count at REAL Qwen3-0.6B serving defaults (`ctx=2048`
     /// -> `block_size=16`, `num_blocks=272`), pinned exactly -- pure arithmetic,
     /// no device, no weights. The int8/fp32 ratio is `4*head_dim/(head_dim+4)`,
