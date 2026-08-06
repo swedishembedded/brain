@@ -115,13 +115,16 @@ in brain.
 
   **Conclusion for the default (W3.5)**: ship plain (uncalibrated) int8 KV as
   the serving default — the data supports it as a clear, nearly-free win.
-  Calibrated int8 stays available (`--kv-calib` / `kv_calib.json` next to a
-  checkpoint) but is NOT defaulted to: shipping a default that measurably
-  degrades quality on the only real measurement taken would be irresponsible,
-  regardless of the mechanism's promise. `KvCalib::from_model_dir`
-  auto-discovers `kv_calib.json` beside a checkpoint when a caller opts in;
-  absent, serving stays uncalibrated (`KvCalib::disabled`'s `f32::MAX`
-  sentinel makes the clipped kernel bit-identical to the plain one).
+  Calibrated int8 stays available (`brain qwen serve --kv-calib`, or
+  `BRAIN_QWEN_KV_CALIB=1` for `brain serve`'s resident) but is NOT defaulted
+  to: shipping a default that measurably degrades quality on the only real
+  measurement taken would be irresponsible, regardless of the mechanism's
+  promise. Opting in makes `KvCalib::from_model_dir` look for `kv_calib.json`
+  beside the checkpoint; absent (or a shape mismatch), serving stays
+  uncalibrated with a printed warning (`KvCalib::disabled`'s `f32::MAX`
+  sentinel makes the clipped kernel bit-identical to the plain one) —
+  calibration is never picked up without the flag/env var, even if the file
+  is sitting right there.
 
 ## Parity ladder
 

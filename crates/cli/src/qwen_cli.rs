@@ -150,6 +150,7 @@ fn serve(args: &[String]) {
     // with it in a script; --kv-fp32 is the real opt-out.
     let mut int8 = true;
     let mut weights_int8 = false;
+    let mut kv_calib_opt_in = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -161,13 +162,15 @@ fn serve(args: &[String]) {
             "--int8" => int8 = true,
             "--kv-fp32" => int8 = false,
             "--weights-int8" => weights_int8 = true,
+            "--kv-calib" => kv_calib_opt_in = true,
             other => eprintln!("serve: ignoring {other:?}"),
         }
         i += 1;
     }
     if weights.is_empty() || tokenizer.is_empty() || prompts.is_empty() {
-        eprintln!("usage: brain qwen serve --weights F --tokenizer T --prompt \"...\" [--prompt \"...\"]... [--max-new N --block-size B --kv-fp32 --weights-int8]");
-        eprintln!("       (int8 KV is on by default; --kv-fp32 opts out. --int8 is accepted as a no-op.)");
+        eprintln!("usage: brain qwen serve --weights F --tokenizer T --prompt \"...\" [--prompt \"...\"]... [--max-new N --block-size B --kv-fp32 --weights-int8 --kv-calib]");
+        eprintln!("       (int8 KV is on by default; --kv-fp32 opts out. --int8 is accepted as a no-op.");
+        eprintln!("        --kv-calib opts INTO a kv_calib.json beside --weights, if one exists there.)");
         return;
     }
     let tok = match data::qwen_tokenizer::QwenBpe::from_file(&tokenizer) {
@@ -184,27 +187,46 @@ fn serve(args: &[String]) {
     let max_len = max_prompt + max_new as u32 + 8;
     let blocks_per_seq = max_len.div_ceil(block_size);
     let num_blocks = blocks_per_seq * n + n; // headroom for every sequence
+    // A header-only peek (not a second full checkpoint load), shared by the
+    // int8-KV degrade check below and the --kv-calib lookup further down.
+    let header_cfg = checkpoint::weightio::WeightReader::open(&weights).ok().map(|r| QwenConfig::from_json(&r.config()));
     // `--int8` requesting the DEFAULT degrades loudly on an unsupported
-    // head_dim rather than hitting `from_map_with_gpu`'s hard assert (a
-    // header-only peek, not a second full checkpoint load) -- an explicit
-    // `--int8` on the command line is, deliberately, still a request by
-    // name and would panic instead; this branch only ever softens the
-    // DEFAULT. See `qwen::serve::kv_int8_supported`'s doc comment.
+    // head_dim rather than hitting `from_map_with_gpu`'s hard assert -- an
+    // explicit `--int8` on the command line is, deliberately, still a
+    // request by name and would panic instead; this branch only ever
+    // softens the DEFAULT. See `qwen::serve::kv_int8_supported`'s doc
+    // comment.
     let int8 = int8
-        && match checkpoint::weightio::WeightReader::open(&weights) {
-            Ok(r) => {
-                let supported = qwen::serve::kv_int8_supported(&QwenConfig::from_json(&r.config()));
+        && match &header_cfg {
+            Some(cfg) => {
+                let supported = qwen::serve::kv_int8_supported(cfg);
                 if !supported {
                     eprintln!("serve: {weights}: int8 KV requested (the default) but head_dim is not a multiple of 4; falling back to fp32 KV");
                 }
                 supported
             }
-            Err(_) => true, // let Engine::load raise the real, specific I/O error below
+            None => true, // let Engine::load raise the real, specific I/O error below
         };
-    let eng = qwen::serve::Engine::load(&weights, block_size, num_blocks, n, blocks_per_seq, max_prompt.max(1), int8, weights_int8);
+    let mut eng = qwen::serve::Engine::load(&weights, block_size, num_blocks, n, blocks_per_seq, max_prompt.max(1), int8, weights_int8);
+    // --kv-calib: opt IN to a kv_calib.json beside the checkpoint, if the
+    // engine is int8 and one exists there with a matching shape --
+    // KvCalib::from_model_dir already warns and returns None on a missing
+    // file or a shape mismatch, so a caller that opts in without a real
+    // file just serves uncalibrated, same as not opting in.
+    if kv_calib_opt_in {
+        if int8 {
+            if let (Some(cfg), Some(dir)) = (&header_cfg, std::path::Path::new(&weights).parent()) {
+                let calib = model::kvcalib::KvCalib::from_model_dir(dir, cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize);
+                eng.set_kv_calib(calib);
+            }
+        } else {
+            eprintln!("serve: --kv-calib requested but the engine is fp32-KV (calibration only applies to int8 KV); ignoring");
+        }
+    }
     // Report what actually ran: the int8-weights request is capability-gated
-    // and may have fallen back to fp32.
+    // and may have fallen back to fp32; --kv-calib may have found nothing.
     let weights_int8 = eng.weights_int8();
+    let kv_calibrated = eng.kv_calibrated();
     let mut sched = qwen::serve::Scheduler::new(eng, n as usize);
     let ids: Vec<u64> = toks.iter().map(|t| sched.submit(qwen::serve::Request { prompt: t.clone(), max_new, eos })).collect();
 
@@ -217,9 +239,10 @@ fn serve(args: &[String]) {
         println!("{}\n", tok.decode(&out[id]));
     }
     eprintln!(
-        "served {n} prompts, {total} tokens in {secs:.2}s ({:.1} tok/s aggregate){}{}",
+        "served {n} prompts, {total} tokens in {secs:.2}s ({:.1} tok/s aggregate){}{}{}",
         total as f64 / secs,
         if int8 { " [int8 KV]" } else { " [fp32 KV]" },
+        if kv_calibrated { " [calibrated]" } else { "" },
         if weights_int8 { " [int8 weights]" } else { "" }
     );
 }
@@ -911,12 +934,17 @@ fn eval_chat(args: &[String]) {
 ///
 /// `--clip-out FILE` (with `--percentile Q`, default `0.999`) additionally
 /// writes the actual usable `KvCalib` clip table (`model::kvcalib`, shared
-/// with any future paged-attention model, not Qwen-specific) — save it
-/// as `kv_calib.json` next to the checkpoint and `brain qwen serve`/`brain
-/// serve` picks it up automatically (`KvCalib::from_model_dir`). This is a
-/// SEPARATE artifact from `--out`'s raw diagnostic report: `--out` dumps
-/// `absmax`/`p99`/`p99.99` for humans to read, `--clip-out` writes the
-/// `[layer][kv_head]` ceiling table the engine actually loads.
+/// with any future paged-attention model, not Qwen-specific) — save it as
+/// `kv_calib.json` next to the checkpoint and pass `--kv-calib` to `brain
+/// qwen serve` (`BRAIN_QWEN_KV_CALIB=1` for `brain serve`'s resident) to opt
+/// IN to it (`KvCalib::from_model_dir`); calibration is NOT picked up
+/// automatically -- `docs/models/qwen/status.md` P12's own measurement found
+/// a small (10-prompt) calibration set makes things WORSE, so the serving
+/// default stays plain online-absmax and a caller must explicitly ask for a
+/// specific calibration file. This is a SEPARATE artifact from `--out`'s raw
+/// diagnostic report: `--out` dumps `absmax`/`p99`/`p99.99` for humans to
+/// read, `--clip-out` writes the `[layer][kv_head]` ceiling table the engine
+/// actually loads.
 fn calib(args: &[String]) {
     let mut weights = String::new();
     let mut jsonl = String::new();

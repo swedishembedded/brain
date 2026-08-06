@@ -290,6 +290,22 @@ impl QwenResident {
         !v.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off"))
     }
 
+    /// Whether to opt INTO a `kv_calib.json` beside the checkpoint, when the
+    /// engine is int8 and one exists there with a matching shape. Default
+    /// OFF (unlike `kv_int8`): P12's own measurement found a small (10-
+    /// prompt) calibration set makes serving quality measurably WORSE, so
+    /// this is opt-in only, matching `brain qwen serve --kv-calib`'s CLI
+    /// equivalent -- see that flag's doc comment.
+    fn kv_calib_opt_in() -> bool {
+        Self::kv_calib_opt_in_from(std::env::var("BRAIN_QWEN_KV_CALIB").ok().as_deref())
+    }
+
+    /// Pure parsing logic for [`Self::kv_calib_opt_in`] -- same
+    /// dependency-injection reasoning as `kv_int8_from`.
+    fn kv_calib_opt_in_from(v: Option<&str>) -> bool {
+        v.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on"))
+    }
+
     /// KV-pool geometry for the batched serving engine — the ONE place
     /// `estimate()` and `activate()` derive `block_size`/`max_batch`/
     /// `max_blocks_per_seq`/`num_blocks`/`max_prefill` from, so the residency
@@ -424,7 +440,7 @@ impl ResidentModel for QwenResident {
                     self.path, checkpoint_cfg.head_dim
                 );
             }
-            let eng = match &self.adapter {
+            let mut eng = match &self.adapter {
                 None => qwen::serve::Engine::load(&self.path, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, false),
                 // Fold the adapter's delta into the base tensors first (the same
                 // fold `qwen::eval::score_chat` uses to score one) -- the result
@@ -438,6 +454,18 @@ impl ResidentModel for QwenResident {
                     qwen::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, false)
                 }
             };
+            // BRAIN_QWEN_KV_CALIB=1: opt IN to a kv_calib.json beside the
+            // BASE checkpoint (self.path, not the adapter's own file, since
+            // the adapter is folded into the base's K/V distribution) --
+            // KvCalib::from_model_dir already warns and returns None on a
+            // missing file or a shape mismatch, so opting in without a real
+            // file just serves uncalibrated, same as not opting in.
+            if kv_int8 && QwenResident::kv_calib_opt_in() {
+                if let Some(dir) = std::path::Path::new(&self.path).parent() {
+                    let calib = model::kvcalib::KvCalib::from_model_dir(dir, checkpoint_cfg.n_layers as usize, checkpoint_cfg.n_kv_heads as usize, checkpoint_cfg.head_dim as usize);
+                    eng.set_kv_calib(calib);
+                }
+            }
             Ok(QwenEngineKind::Batched(model::serve::Scheduler::new(eng, max_batch as usize)))
         })??;
         Ok(Box::new(QwenInstance { tok, eos, engine }))
@@ -645,6 +673,21 @@ mod tests {
         }
         for on in ["1", "true", "yes", "anything-else", ""] {
             assert!(QwenResident::kv_int8_from(Some(on)), "{on:?} must not disable int8 KV");
+        }
+    }
+
+    /// Opposite default from `kv_int8`: calibration is OFF unless explicitly
+    /// requested (P12's own measurement found a small calibration set makes
+    /// things worse), so this must default to `false` with no env override
+    /// and recognize the same on-spellings `kv_int8_from` recognizes for off.
+    #[test]
+    fn kv_calib_opt_in_defaults_off_and_recognizes_every_on_spelling() {
+        assert!(!QwenResident::kv_calib_opt_in_from(None), "calibration must default OFF with no env override");
+        for on in ["1", "true", "on", "TRUE", "On", " on ", "ON"] {
+            assert!(QwenResident::kv_calib_opt_in_from(Some(on)), "{on:?} must opt in to calibration");
+        }
+        for off in ["0", "false", "yes", "anything-else", ""] {
+            assert!(!QwenResident::kv_calib_opt_in_from(Some(off)), "{off:?} must not opt in to calibration");
         }
     }
 
