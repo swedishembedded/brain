@@ -1216,3 +1216,30 @@ all**. Making the test skip was the first attempt and was a workaround; the
 counters are now real on `backend-cpu` and `backend-vulkan` (per HANDLE, which
 is what makes concurrent measurement correct), so the test runs for real
 everywhere. See `docs/lessons.md` #30.
+
+### The same guard, twice more: `gpt` and `glm`
+
+`docs/lessons.md` §15 records `m < 128` as the guard that sent an SDXL UNet's
+`[77, 2048, 2560]` projection to the naive kernel — 22× on that GEMM, 49% of the
+forward. `qwen` and `lfm` were migrated to `block::pick_gemm` (crossover
+**measured at m = 8**); `gpt` and `glm` kept private copies of the old constant,
+in four functions between them.
+
+A/B'd on a P40 at `k = 768, n = 3072` (`unet_bench gemm`), naive vs
+`matmul_reg3`, `max|Δ| = 0.0` at every point:
+
+| m | 8 | 16 | 32 | 64 | 96 | 127 |
+|---|---:|---:|---:|---:|---:|---:|
+| naive (ms) | 0.46 | 1.11 | 2.86 | 5.92 | 8.28 | 11.26 |
+| tiled (ms) | 0.31 | 0.28 | 0.35 | 0.30 | 0.42 | 0.33 |
+| **speedup** | 1.5× | 4.0× | 8.2× | 19.7× | 19.8× | **34.1×** |
+
+Worth more here than in the UNet, and note the shape of it: the naive kernel's
+cost grows linearly in `m` while the tiled kernel's is flat to 127 — a 128×128
+tile is not full until `m = 128`, so everything in the band was paying for
+masked lanes *and* getting one thread per output. Every GPT/GLM shape with
+`8 ≤ m < 128` — short prompts, small eval batches, the `m = T` generate path —
+was on the wrong side of it.
+
+Both now call `pick_gemm`, so the rule has one home and the next model inherits
+it rather than copying the constant a fifth time.

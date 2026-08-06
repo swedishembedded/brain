@@ -178,17 +178,26 @@ pub const PIPELINES: &[(&str, &str)] = &[
 /// kernel (A/B comparison + a fallback if a driver ever mishandles the tile).
 fn linear_kernel(m: usize, n: usize) -> (usize, u32) {
     let naive = std::env::var("BRAIN_GPT_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
-    if naive || m < 128 || n < 128 {
-        return (MATMUL, (m * n) as u32);
-    }
-    let threads = (m.div_ceil(128) * n.div_ceil(128) * 256) as u32;
     // `matmul_reg3` (software-pipelined) is the default; `BRAIN_GPT_REG1=1`
     // selects the non-pipelined `matmul_reg` for A/B comparison.
-    if std::env::var("BRAIN_GPT_REG1").map(|v| v != "0").unwrap_or(false) {
-        (MATMUL_REG, threads)
+    let reg = if std::env::var("BRAIN_GPT_REG1").map(|v| v != "0").unwrap_or(false) {
+        MATMUL_REG
     } else {
-        (MATMUL_REG3, threads)
-    }
+        MATMUL_REG3
+    };
+    // The threshold is `block::pick_gemm`'s MEASURED one (`m < 8`), not the
+    // `m < 128` this used to carry. That guard is the one `docs/lessons.md` §15
+    // records as costing 22x on an SDXL UNet, and it is worth more here than
+    // there: A/B'd on a P40 at `k=768, n=3072`, naive vs tiled is
+    //
+    //     m       8      16      32      64      96     127
+    //     x     1.5x    4.0x    8.2x   19.7x   19.8x   34.1x
+    //
+    // bit-identical at every point (max|delta| 0.0). Every GPT shape with
+    // 8 <= m < 128 — short prompts, small eval batches, the m = T generate
+    // path — was paying that. `pick_gemm` owns the rule so the next model
+    // inherits it instead of copying the constant again.
+    model::block::pick_gemm(m, n, MATMUL, reg, naive)
 }
 
 

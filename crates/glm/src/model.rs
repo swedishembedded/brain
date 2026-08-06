@@ -636,12 +636,13 @@ impl Glm {
         // ~4 TFLOP/s on a P40) once both output dims fill a tile, else the naive
         // per-output `matmul`. Same math (parity gated by gradcheck::check_glm),
         // so this only changes speed. `BRAIN_GLM_NAIVE_MM=1` forces naive.
+        // The threshold is `block::pick_gemm`'s MEASURED `m < 8`, not the
+        // `m < 128` this used to carry — the guard `docs/lessons.md` §15 records
+        // as costing 22x on an SDXL UNet. A/B'd on a P40 at `k=768, n=3072`,
+        // naive vs tiled is 1.5x at m=8 rising to 34.1x at m=127, bit-identical
+        // throughout. `pick_gemm` owns the rule so this cannot drift again.
         let naive = std::env::var("BRAIN_GLM_NAIVE_MM").map(|v| v != "0").unwrap_or(false);
-        let (mk, mt) = if naive || m < 128 || nout < 128 {
-            (MATMUL, m * nout)
-        } else {
-            (MATMUL_REG3, (m as usize).div_ceil(128) as u32 * (nout as usize).div_ceil(128) as u32 * 256)
-        };
+        let (mk, mt) = model::block::pick_gemm(m as usize, nout as usize, MATMUL, MATMUL_REG3, naive);
         s.push(self.gpu.step(mk, &[x, self.w(wname), out], &[m, k, nout], mt));
     }
 
