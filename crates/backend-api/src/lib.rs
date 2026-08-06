@@ -300,10 +300,37 @@ pub struct DeviceCaps {
     /// cooperative variant where this is false — that is a correctness gate,
     /// not a tuning preference.
     pub workgroup_reductions: bool,
-    /// Peak memory bandwidth, GB/s. `None` = unknown (no API reports it; a
-    /// measured value may fill it later).
+    /// Peak memory bandwidth, GB/s. `None` = unknown.
+    ///
+    /// No graphics/compute API reports this, so it is filled by *measurement*
+    /// (`gpu_core::roof`), not by a query — and it stays `None` until something
+    /// measures it. It is the denominator every memory-bound kernel is judged
+    /// against; reporting a memory-bound kernel as a FLOP rate is meaningless.
     pub peak_bandwidth_gbs: Option<f32>,
+    /// Peak fp32 arithmetic rate, GFLOP/s. `None` = unknown.
+    ///
+    /// Same rule as [`Self::peak_bandwidth_gbs`]: measured, never queried and
+    /// never derived from a marketing figure. Together the two are the roofline
+    /// this engine's kernels are graded on, and having them here — rather than
+    /// as a `PEAK_TFLOPS` literal in each bench — is what makes a "% of peak"
+    /// claim a statement about *the device that ran*, on any hardware.
+    pub peak_gflops: Option<f32>,
     pub numeric: NumericSupport,
+}
+
+impl DeviceCaps {
+    /// Where a kernel sits relative to the ridge point, given the work it did.
+    ///
+    /// The ridge is `peak_gflops / peak_bandwidth_gbs` FLOP/byte: below it a
+    /// kernel cannot be compute-bound however it is tiled, above it bandwidth
+    /// cannot be the limit. `None` when either roof is unmeasured — an
+    /// unknown capability is never assumed present.
+    pub fn ridge_flops_per_byte(&self) -> Option<f32> {
+        match (self.peak_gflops, self.peak_bandwidth_gbs) {
+            (Some(f), Some(b)) if b > 0.0 => Some(f / b),
+            _ => None,
+        }
+    }
 }
 
 impl DeviceCaps {
@@ -325,6 +352,7 @@ impl DeviceCaps {
             // this is part of the floor, not an extension.
             workgroup_reductions: true,
             peak_bandwidth_gbs: None,
+            peak_gflops: None,
             numeric: NumericSupport::BASELINE,
         }
     }

@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! The measured roofline: does the probe produce a number that can be believed?
+//!
+//! These assertions are deliberately device-INDEPENDENT. A test that pins
+//! "11.76 TFLOP/s" would pass on exactly one card and would be the very defect
+//! this module exists to remove. What is checked instead is that the
+//! measurement cannot be one of the two ways this probe can lie:
+//!
+//! 1. **A folded loop.** If a compiler proves the FMA chain away, the reported
+//!    rate goes to absurdity. `roof_fma` sources its multiplier and addend from
+//!    the uniform to prevent that; the sanity ceiling here is what would catch
+//!    a regression in that guarantee.
+//! 2. **A host-timed region.** `docs/kernel-checklist.md` §E.0: `submit` only
+//!    appends to the pending list on the wgpu backend, so an unbracketed loop
+//!    times host recording and reports a rate above the hardware roof. A
+//!    bandwidth number at or above the arithmetic rate is that failure.
+
+use gpu_core::roof::{self, Bound, Roofs};
+
+fn skip_gpu() -> bool {
+    std::env::var("MOE_SKIP_GPU_TESTS").map(|v| v != "0").unwrap_or(false)
+}
+
+/// The probes must not run concurrently **with each other**.
+///
+/// A roofline probe measures the throughput available to it, so two of them
+/// sharing a device measure the contended device and disagree — which is not a
+/// bug in the probe, it is what the probe is for. The suite runs at
+/// `--test-threads=8`, so without this the reproducibility check fails purely
+/// because its neighbour is also saturating the card.
+///
+/// Production is unaffected: `roof::ensure` measures once and caches. This is
+/// also why `ensure` is the API benches call, and why any *use* of the roofs
+/// under load is reading a cached idle number rather than re-measuring.
+static PROBE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn probe_lock() -> std::sync::MutexGuard<'static, ()> {
+    PROBE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[test]
+fn the_measured_roofs_are_physically_plausible() {
+    if skip_gpu() {
+        return;
+    }
+    let _probe = probe_lock();
+    let gpu = gpu_core::testgpu::dev(&[("axpy", kernels::AXPY)]);
+    let Some(r) = roof::measure(&gpu) else {
+        return; // unprobeable device — callers print `-`, never a guess
+    };
+
+    println!(
+        "measured roofline on {}: {:.0} GFLOP/s, {:.1} GB/s, ridge {:.1} FLOP/byte",
+        gpu.kind(),
+        r.gflops,
+        r.gbs,
+        r.ridge()
+    );
+
+    assert!(r.gflops.is_finite() && r.gflops > 0.0, "compute roof {}", r.gflops);
+    assert!(r.gbs.is_finite() && r.gbs > 0.0, "bandwidth roof {}", r.gbs);
+
+    // (1) A folded FMA chain reports absurdity. No device brain targets is
+    // within two orders of magnitude of a petaflop of fp32.
+    assert!(r.gflops < 1.0e6, "compute roof {} GFLOP/s implies the FMA loop folded", r.gflops);
+
+    // (2) Bandwidth at or above the arithmetic rate means the timed region was
+    // the host, not the device (§E.0). Every real device has a ridge > 1.
+    assert!(
+        r.gbs < r.gflops,
+        "bandwidth {} GB/s >= compute {} GFLOP/s — the timing is measuring the host",
+        r.gbs,
+        r.gflops
+    );
+    assert!(r.ridge() > 1.0, "ridge {} FLOP/byte", r.ridge());
+}
+
+#[test]
+fn measuring_twice_agrees() {
+    if skip_gpu() {
+        return;
+    }
+    let _probe = probe_lock();
+    let gpu = gpu_core::testgpu::dev(&[("axpy", kernels::AXPY)]);
+    let (Some(a), Some(b)) = (roof::measure(&gpu), roof::measure(&gpu)) else {
+        return;
+    };
+    // A probe whose answer moves run to run cannot rank anything. The band is
+    // wide because these cards throttle under sustained load — the point is to
+    // catch a probe that is timing noise, not to pin a clock.
+    let spread = |x: f32, y: f32| (x - y).abs() / x.max(y);
+    assert!(spread(a.gflops, b.gflops) < 0.25, "compute {a:?} vs {b:?}");
+    assert!(spread(a.gbs, b.gbs) < 0.25, "bandwidth {a:?} vs {b:?}");
+}
+
+#[test]
+fn caps_expose_the_roofs_only_after_something_measured_them() {
+    if skip_gpu() {
+        return;
+    }
+    let _probe = probe_lock();
+    let gpu = gpu_core::testgpu::dev(&[("axpy", kernels::AXPY)]);
+    // `ensure` is the only thing that may run probe kernels; reading caps must
+    // never have that side effect.
+    let Some(r) = roof::ensure(&gpu) else {
+        return;
+    };
+    let caps = gpu.caps();
+    assert_eq!(caps.peak_gflops, Some(r.gflops));
+    assert_eq!(caps.peak_bandwidth_gbs, Some(r.gbs));
+    assert_eq!(caps.ridge_flops_per_byte(), Some(r.ridge()));
+}
+
+#[test]
+fn a_streaming_kernel_is_graded_against_bandwidth_not_flops() {
+    // Pure arithmetic on the type — no device needed, so this runs everywhere
+    // and pins the classification rule itself.
+    let r = Roofs { gflops: 11760.0, gbs: 346.0 };
+    // `axpy`: 2 FLOP per 12 bytes moved.
+    assert_eq!(r.classify(2, 12), Bound::Memory);
+    // `col2im` measured 23.2 GB/s on a P40 — 6.7% of that roof, far under the
+    // memory-bound defect line, which is what makes it a defect and not merely
+    // an untuned kernel.
+    let u = r.utilisation(0, 23_200_000_000, 1.0).unwrap();
+    assert!(u < Bound::Memory.defect_pct(), "col2im-shaped utilisation {u}%");
+}

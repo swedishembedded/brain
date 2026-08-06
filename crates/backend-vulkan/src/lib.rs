@@ -380,7 +380,9 @@ impl VulkanBackend {
                 vk::PhysicalDeviceType::INTEGRATED_GPU | vk::PhysicalDeviceType::CPU
             ),
             workgroup_reductions: true, // real barrier semantics (SPIR-V)
+            // Measured by `gpu_core::roof`, never reported by Vulkan.
             peak_bandwidth_gbs: None,
+            peak_gflops: None,
             numeric: NumericSupport {
                 int8_dot: ctx.prec.dp4a,
                 coop_matrix: ctx.caps.feature_supported && !ctx.caps.shapes.is_empty(),

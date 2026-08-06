@@ -1,0 +1,358 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+
+//! The device's own roofline — measured, never assumed.
+//!
+//! Every "% of peak" this engine printed used to divide by a literal
+//! (`PEAK_TFLOPS = 11.76`, `PEAK_GBPS = 346.0`) copied into each bench and test.
+//! Those are one card's numbers. On anything else the utilisation column was a
+//! fiction, and since the whole optimisation method here is "rank against the
+//! roof, fix the top row, re-profile", a wrong roof silently invalidates the
+//! method rather than producing an obviously wrong answer.
+//!
+//! No compute API reports either roof, so both are **measured**:
+//!
+//! * **compute** — [`kernels::ROOF_FMA`], a dependency-free FMA chain held in
+//!   registers with no memory traffic in the loop. It measures the *silicon*,
+//!   deliberately not "the best GEMM we have written": grading brain's kernels
+//!   against brain's best kernel would hide exactly the gap worth closing.
+//! * **bandwidth** — `axpy` (`out[i] += s * in[i]`) over buffers far larger than
+//!   any cache: the classic STREAM-triad shape, 12 bytes moved per element
+//!   (two reads and a write), already in the kernel tree.
+//!
+//! Both probes self-calibrate their trip count until the timed region is long
+//! enough to dominate launch and drain, and both are `poll_wait`-bracketed —
+//! `docs/kernel-checklist.md` §E.0 exists because a bare-submit loop once
+//! reported 377 GB/s on a ~346 GB/s card by timing the host.
+//!
+//! Results are cached per adapter, with the same key discipline
+//! [`crate::tune`] uses (adapter slug + a fingerprint of the probe sources), so
+//! a probe-kernel edit invalidates old numbers by construction instead of
+//! silently reusing them.
+
+use crate::Gpu;
+use std::sync::Mutex;
+use std::time::Instant;
+
+/// A device's measured roofline. Both halves are required — a memory-bound
+/// kernel reported as a FLOP rate is meaningless, and vice versa.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Roofs {
+    /// Peak fp32 arithmetic rate, GFLOP/s.
+    pub gflops: f32,
+    /// Peak memory bandwidth, GB/s.
+    pub gbs: f32,
+}
+
+impl Roofs {
+    /// FLOP per byte at the ridge point — below it no kernel can be
+    /// compute-bound however it is tiled, above it bandwidth cannot be the
+    /// limit.
+    pub fn ridge(&self) -> f32 {
+        if self.gbs > 0.0 { self.gflops / self.gbs } else { 0.0 }
+    }
+
+    /// Which roof a kernel doing `flops` and moving `bytes` is graded against.
+    pub fn classify(&self, flops: u64, bytes: u64) -> Bound {
+        if bytes == 0 {
+            return Bound::Compute;
+        }
+        let intensity = flops as f32 / bytes as f32;
+        if intensity >= self.ridge() { Bound::Compute } else { Bound::Memory }
+    }
+
+    /// Percent of the relevant roof a kernel achieved. `seconds` must be a
+    /// `poll_wait`-bracketed device time.
+    pub fn utilisation(&self, flops: u64, bytes: u64, seconds: f64) -> Option<f32> {
+        if seconds <= 0.0 {
+            return None;
+        }
+        match self.classify(flops, bytes) {
+            Bound::Compute if self.gflops > 0.0 => {
+                Some(100.0 * (flops as f64 / seconds / 1e9) as f32 / self.gflops)
+            }
+            Bound::Memory if self.gbs > 0.0 => {
+                Some(100.0 * (bytes as f64 / seconds / 1e9) as f32 / self.gbs)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Which side of the ridge a kernel sits on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bound {
+    Compute,
+    Memory,
+}
+
+impl Bound {
+    /// The band this workstream holds each class to (`.todo/saturate-the-gpu.md`).
+    /// A well-tuned fp32 GEMM on old silicon lands 60-80% of peak, so 99% is not
+    /// the target for either class and stating one per class is what makes the
+    /// goal falsifiable.
+    pub fn target_pct(self) -> f32 {
+        match self {
+            Bound::Compute => 60.0,
+            Bound::Memory => 70.0,
+        }
+    }
+
+    /// Below this, treat the kernel as a defect rather than as untuned.
+    pub fn defect_pct(self) -> f32 {
+        match self {
+            Bound::Compute => 30.0,
+            Bound::Memory => 35.0,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Bound::Compute => "compute",
+            Bound::Memory => "memory",
+        }
+    }
+}
+
+/// The probe kernel set — the two sources whose fingerprint keys the cache.
+const PROBE_KERNELS: &[(&str, &str)] =
+    &[("roof_fma", kernels::ROOF_FMA), ("axpy", kernels::AXPY)];
+const K_FMA: usize = 0;
+const K_AXPY: usize = 1;
+
+/// Threads the FMA probe launches. Deliberately far more than any device has
+/// lanes, so the probe never depends on knowing the topology — an
+/// under-subscribed device would report its *latency*, not its throughput.
+const FMA_THREADS: u32 = 1 << 20;
+/// Eight independent accumulators, one FMA each = 16 FLOP per thread-iteration.
+const FMA_FLOPS_PER_ITER: u64 = 16;
+
+/// Elements per bandwidth-probe buffer. Two buffers of 64 Mi f32 = 512 MiB
+/// resident, and 768 MiB of traffic per pass — far past any LLC, so the number
+/// is DRAM bandwidth rather than cache bandwidth.
+const BW_ELEMS: u64 = 64 << 20;
+/// `out[i] = out[i] + s * in[i]` reads two words and writes one.
+const BW_BYTES_PER_ELEM: u64 = 12;
+
+/// Grow a probe's trip count until the timed region is at least this long, so
+/// launch latency and queue drain cannot dominate the measurement.
+const MIN_PROBE_SECONDS: f64 = 0.05;
+
+static CACHE: Mutex<Option<Roofs>> = Mutex::new(None);
+
+/// The roofs for this process's device, measuring them once if needed.
+///
+/// Returns `None` when the device cannot be probed — callers must then print
+/// `-`, never a guess. Set `BRAIN_NO_ROOF=1` to skip probing entirely (useful
+/// when a run must not spend the ~0.2 s, or to reproduce pre-roofline output).
+pub fn ensure(gpu: &Gpu) -> Option<Roofs> {
+    if std::env::var("BRAIN_NO_ROOF").map(|v| v != "0").unwrap_or(false) {
+        return None;
+    }
+    let mut slot = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(r) = *slot {
+        return Some(r);
+    }
+    let store = persist::store();
+    if let Some(r) = store.as_ref().and_then(|s| s.load()) {
+        *slot = Some(r);
+        return Some(r);
+    }
+    let r = measure(gpu)?;
+    if let Some(s) = store.as_ref() {
+        s.save(r);
+    }
+    *slot = Some(r);
+    Some(r)
+}
+
+/// Whatever has already been measured, without measuring. This is what
+/// [`Gpu::caps`] overlays onto [`backend_api::DeviceCaps`] — reading caps must
+/// never have the side effect of running kernels.
+pub fn known() -> Option<Roofs> {
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Run both probes now, ignoring and not updating the cache. Exposed so a test
+/// can assert the measurement itself rather than a memoised value.
+pub fn measure(gpu: &Gpu) -> Option<Roofs> {
+    let g = gpu.new_like(PROBE_KERNELS);
+    let gflops = measure_compute(&g)?;
+    let gbs = measure_bandwidth(&g)?;
+    Some(Roofs { gflops, gbs })
+}
+
+/// Time one submit of `steps`, best of `reps`, `poll_wait`-bracketed.
+///
+/// The bracketing is the whole point: `submit` only appends to the pending list
+/// on the wgpu backend, so an unbracketed loop times host-side recording and
+/// reports a rate above the hardware roof (§E.0).
+fn best_of(gpu: &Gpu, steps: &[crate::Step], reps: usize) -> f64 {
+    gpu.submit(&[], steps);
+    gpu.poll_wait();
+    let mut best = f64::INFINITY;
+    for _ in 0..reps {
+        let t0 = Instant::now();
+        gpu.submit(&[], steps);
+        gpu.poll_wait();
+        best = best.min(t0.elapsed().as_secs_f64());
+    }
+    best
+}
+
+fn measure_compute(gpu: &Gpu) -> Option<f32> {
+    let inp = gpu.storage(FMA_THREADS as u64);
+    let out = gpu.storage(FMA_THREADS as u64);
+    gpu.write_f32(&inp, &vec![1.0f32; FMA_THREADS as usize]);
+
+    // c = 0.5, d = 0.5 has fixed point 1.0: the chain converges immediately and
+    // then stays exactly 1.0 — no overflow, no denormals (slow on some
+    // hardware, which would understate the roof), no NaNs.
+    let (c, d) = (backend_api::f(0.5), backend_api::f(0.5));
+
+    let mut iters: u32 = 256;
+    loop {
+        let step = gpu.step(K_FMA, &[&inp, &out], &[FMA_THREADS, iters, c, d], FMA_THREADS);
+        let secs = best_of(gpu, std::slice::from_ref(&step), 3);
+        if secs >= MIN_PROBE_SECONDS || iters >= (1 << 20) {
+            let flops = FMA_THREADS as u64 * iters as u64 * FMA_FLOPS_PER_ITER;
+            return Some((flops as f64 / secs / 1e9) as f32);
+        }
+        // Scale straight to the target rather than doubling blindly, then round
+        // up, so a fast device converges in one extra step instead of ten.
+        let want = (iters as f64 * MIN_PROBE_SECONDS / secs.max(1e-9)).ceil();
+        iters = (want as u32).clamp(iters.saturating_mul(2), 1 << 20);
+    }
+}
+
+fn measure_bandwidth(gpu: &Gpu) -> Option<f32> {
+    let out = gpu.storage(BW_ELEMS);
+    let inp = gpu.storage(BW_ELEMS);
+    // Leave both buffers at their zero-initialised contents: axpy's rate depends
+    // on bytes moved, not on values, and writing 512 MiB from the host would
+    // cost far more than the measurement.
+
+    // One pass over 512 MiB is already ~2 ms on a fast card; repeat the same
+    // dispatch until the timed region clears the launch floor.
+    let mut passes = 1usize;
+    loop {
+        let steps: Vec<crate::Step> = (0..passes)
+            .map(|_| {
+                gpu.step(
+                    K_AXPY,
+                    &[&out, &inp],
+                    &[BW_ELEMS as u32, backend_api::f(1.0)],
+                    BW_ELEMS as u32,
+                )
+            })
+            .collect();
+        let secs = best_of(gpu, &steps, 3);
+        if secs >= MIN_PROBE_SECONDS || passes >= 64 {
+            let bytes = BW_ELEMS * BW_BYTES_PER_ELEM * passes as u64;
+            return Some((bytes as f64 / secs / 1e9) as f32);
+        }
+        let want = (passes as f64 * MIN_PROBE_SECONDS / secs.max(1e-9)).ceil();
+        passes = (want as usize).clamp(passes * 2, 64);
+    }
+}
+
+/// Per-adapter persistence, mirroring [`crate::tune`]'s discipline: keyed by the
+/// adapter slug plus a fingerprint of the probe sources, so editing a probe
+/// invalidates old numbers by filename rather than by trusting them.
+mod persist {
+    use super::Roofs;
+    use std::path::PathBuf;
+
+    pub struct RoofStore {
+        path: PathBuf,
+    }
+
+    pub fn store() -> Option<RoofStore> {
+        let (desc, _) = crate::adapter_info()?;
+        let dir = cache_dir()?;
+        let hash = crate::tune::source_fingerprint(
+            &super::PROBE_KERNELS.iter().map(|(_, s)| *s).collect::<Vec<_>>(),
+        );
+        let slug: String =
+            desc.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+        Some(RoofStore { path: dir.join(format!("roof-{slug}-{hash:016x}.txt")) })
+    }
+
+    fn cache_dir() -> Option<PathBuf> {
+        if let Ok(d) = std::env::var("BRAIN_PIPELINE_CACHE_DIR") {
+            return Some(d.into());
+        }
+        if let Ok(d) = std::env::var("XDG_CACHE_HOME") {
+            return Some(std::path::Path::new(&d).join("brain"));
+        }
+        std::env::var("HOME").ok().map(|h| std::path::Path::new(&h).join(".cache/brain"))
+    }
+
+    impl RoofStore {
+        /// A missing, unparseable or non-finite record is ignored, never
+        /// trusted — the same rule the tune store applies.
+        pub fn load(&self) -> Option<Roofs> {
+            let text = std::fs::read_to_string(&self.path).ok()?;
+            let (mut gflops, mut gbs) = (None, None);
+            for line in text.lines() {
+                let (k, v) = line.split_once('=')?;
+                let v: f32 = v.trim().parse().ok()?;
+                match k.trim() {
+                    "gflops" => gflops = Some(v),
+                    "gbs" => gbs = Some(v),
+                    _ => {}
+                }
+            }
+            let r = Roofs { gflops: gflops?, gbs: gbs? };
+            (r.gflops.is_finite() && r.gflops > 0.0 && r.gbs.is_finite() && r.gbs > 0.0)
+                .then_some(r)
+        }
+
+        pub fn save(&self, r: Roofs) {
+            if let Some(parent) = self.path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let tmp = self.path.with_extension("tmp");
+            let body = format!("gflops={}\ngbs={}\n", r.gflops, r.gbs);
+            if std::fs::write(&tmp, body).is_ok() {
+                let _ = std::fs::rename(&tmp, &self.path);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ridge_and_classification_split_at_the_ridge() {
+        let r = Roofs { gflops: 11760.0, gbs: 346.0 };
+        // A P40's ridge is ~34 FLOP/byte — anything streaming is left of it.
+        assert!((r.ridge() - 33.99).abs() < 0.1, "ridge {}", r.ridge());
+        // axpy: 2 FLOP per 12 bytes.
+        assert_eq!(r.classify(2, 12), Bound::Memory);
+        // A square GEMM at 1024: 2*n^3 flops over ~3*n^2*4 bytes = 170 FLOP/byte.
+        assert_eq!(r.classify(2 * 1024 * 1024 * 1024, 3 * 1024 * 1024 * 4), Bound::Compute);
+        // A kernel that moves nothing can only be compute-bound.
+        assert_eq!(r.classify(100, 0), Bound::Compute);
+    }
+
+    #[test]
+    fn utilisation_is_measured_against_the_kernels_own_roof() {
+        let r = Roofs { gflops: 11760.0, gbs: 346.0 };
+        // A streaming kernel at exactly the bandwidth roof reads 100%, even
+        // though its FLOP rate is negligible — the whole point of classifying.
+        let bytes = 346_000_000_000u64;
+        let u = r.utilisation(bytes / 6, bytes, 1.0).unwrap();
+        assert!((u - 100.0).abs() < 0.5, "{u}");
+        // Zero-length regions produce nothing rather than infinity.
+        assert!(r.utilisation(1, 1, 0.0).is_none());
+    }
+
+    #[test]
+    fn target_bands_are_stated_per_class() {
+        assert!(Bound::Compute.target_pct() > Bound::Compute.defect_pct());
+        assert!(Bound::Memory.target_pct() > Bound::Memory.defect_pct());
+    }
+}

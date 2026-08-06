@@ -262,6 +262,8 @@ pub const DFL_GRAD: &str = include_str!("../wgsl/dfl_grad.wgsl");
 pub const DFL_LOSS: &str = include_str!("../wgsl/dfl_loss.wgsl");
 /// `wgsl/dfl_loss_grad.wgsl`
 pub const DFL_LOSS_GRAD: &str = include_str!("../wgsl/dfl_loss_grad.wgsl");
+/// `wgsl/dw_splitk_reduce.wgsl`
+pub const DW_SPLITK_REDUCE: &str = include_str!("../wgsl/dw_splitk_reduce.wgsl");
 /// `wgsl/dwconv3d.wgsl`
 pub const DWCONV3D: &str = include_str!("../wgsl/dwconv3d.wgsl");
 /// `wgsl/dwconv3d_dw.wgsl`
@@ -330,10 +332,10 @@ pub const GN_APPLY: &str = include_str!("../wgsl/gn_apply.wgsl");
 pub const GN_DBETA: &str = include_str!("../wgsl/gn_dbeta.wgsl");
 /// `wgsl/gn_dgamma.wgsl`
 pub const GN_DGAMMA: &str = include_str!("../wgsl/gn_dgamma.wgsl");
-/// GroupNorm affine gradients, stage 1: dgamma+dbeta partials in ONE pass.
-pub const GN_DGB_PART: &str = include_str!("../wgsl/gn_dgb_part.wgsl");
-/// GroupNorm affine gradients, stage 2: fold and accumulate.
+/// `wgsl/gn_dgb2.wgsl`
 pub const GN_DGB2: &str = include_str!("../wgsl/gn_dgb2.wgsl");
+/// `wgsl/gn_dgb_part.wgsl`
+pub const GN_DGB_PART: &str = include_str!("../wgsl/gn_dgb_part.wgsl");
 /// `wgsl/gn_dsum.wgsl`
 pub const GN_DSUM: &str = include_str!("../wgsl/gn_dsum.wgsl");
 /// `wgsl/gn_dsum2.wgsl`
@@ -402,6 +404,8 @@ pub const L2NORM_SCALE_DG: &str = include_str!("../wgsl/l2norm_scale_dg.wgsl");
 pub const L2NORM_SCALE_DX: &str = include_str!("../wgsl/l2norm_scale_dx.wgsl");
 /// `wgsl/layernorm.wgsl`
 pub const LAYERNORM: &str = include_str!("../wgsl/layernorm.wgsl");
+/// `wgsl/layernorm2d.wgsl`
+pub const LAYERNORM2D: &str = include_str!("../wgsl/layernorm2d.wgsl");
 /// `wgsl/layernorm_dbeta.wgsl`
 pub const LAYERNORM_DBETA: &str = include_str!("../wgsl/layernorm_dbeta.wgsl");
 /// `wgsl/layernorm_dgamma.wgsl`
@@ -412,8 +416,6 @@ pub const LAYERNORM_DX: &str = include_str!("../wgsl/layernorm_dx.wgsl");
 pub const LAYERNORM_DX_ROWS: &str = include_str!("../wgsl/layernorm_dx_rows.wgsl");
 /// `wgsl/layernorm_rows.wgsl`
 pub const LAYERNORM_ROWS: &str = include_str!("../wgsl/layernorm_rows.wgsl");
-/// Channels-first LayerNorm, FUSED (no permute either side). See §E.
-pub const LAYERNORM2D: &str = include_str!("../wgsl/layernorm2d.wgsl");
 /// `wgsl/leaky_relu.wgsl`
 pub const LEAKY_RELU: &str = include_str!("../wgsl/leaky_relu.wgsl");
 /// `wgsl/leaky_relu_bwd.wgsl`
@@ -442,12 +444,10 @@ pub const MATMUL: &str = include_str!("../wgsl/matmul.wgsl");
 pub const MATMUL_DW: &str = include_str!("../wgsl/matmul_dw.wgsl");
 /// `wgsl/matmul_dw_reg.wgsl`
 pub const MATMUL_DW_REG: &str = include_str!("../wgsl/matmul_dw_reg.wgsl");
-/// `wgsl/matmul_dw_reg_tn.wgsl`
-pub const MATMUL_DW_REG_TN: &str = include_str!("../wgsl/matmul_dw_reg_tn.wgsl");
 /// `wgsl/matmul_dw_reg_splitk.wgsl`
 pub const MATMUL_DW_REG_SPLITK: &str = include_str!("../wgsl/matmul_dw_reg_splitk.wgsl");
-/// `wgsl/dw_splitk_reduce.wgsl`
-pub const DW_SPLITK_REDUCE: &str = include_str!("../wgsl/dw_splitk_reduce.wgsl");
+/// `wgsl/matmul_dw_reg_tn.wgsl`
+pub const MATMUL_DW_REG_TN: &str = include_str!("../wgsl/matmul_dw_reg_tn.wgsl");
 /// `wgsl/matmul_dx.wgsl`
 pub const MATMUL_DX: &str = include_str!("../wgsl/matmul_dx.wgsl");
 /// `wgsl/matmul_dx_reg.wgsl`
@@ -592,6 +592,8 @@ pub const RMSNORM_DX_EPS: &str = include_str!("../wgsl/rmsnorm_dx_eps.wgsl");
 pub const RMSNORM_EPS: &str = include_str!("../wgsl/rmsnorm_eps.wgsl");
 /// `wgsl/rmsnorm_rows.wgsl`
 pub const RMSNORM_ROWS: &str = include_str!("../wgsl/rmsnorm_rows.wgsl");
+/// `wgsl/roof_fma.wgsl`
+pub const ROOF_FMA: &str = include_str!("../wgsl/roof_fma.wgsl");
 /// `wgsl/rope.wgsl`
 pub const ROPE: &str = include_str!("../wgsl/rope.wgsl");
 /// `wgsl/rope2d.wgsl`
@@ -858,6 +860,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("dfl_grad", DFL_GRAD),
     ("dfl_loss", DFL_LOSS),
     ("dfl_loss_grad", DFL_LOSS_GRAD),
+    ("dw_splitk_reduce", DW_SPLITK_REDUCE),
     ("dwconv3d", DWCONV3D),
     ("dwconv3d_dw", DWCONV3D_DW),
     ("dwconv3d_dx", DWCONV3D_DX),
@@ -892,8 +895,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("gn_apply", GN_APPLY),
     ("gn_dbeta", GN_DBETA),
     ("gn_dgamma", GN_DGAMMA),
-    ("gn_dgb_part", GN_DGB_PART),
     ("gn_dgb2", GN_DGB2),
+    ("gn_dgb_part", GN_DGB_PART),
     ("gn_dsum", GN_DSUM),
     ("gn_dsum2", GN_DSUM2),
     ("gn_dsum_part", GN_DSUM_PART),
@@ -928,12 +931,12 @@ pub const ALL: &[(&str, &str)] = &[
     ("l2norm_scale_dg", L2NORM_SCALE_DG),
     ("l2norm_scale_dx", L2NORM_SCALE_DX),
     ("layernorm", LAYERNORM),
+    ("layernorm2d", LAYERNORM2D),
     ("layernorm_dbeta", LAYERNORM_DBETA),
     ("layernorm_dgamma", LAYERNORM_DGAMMA),
     ("layernorm_dx", LAYERNORM_DX),
     ("layernorm_dx_rows", LAYERNORM_DX_ROWS),
     ("layernorm_rows", LAYERNORM_ROWS),
-    ("layernorm2d", LAYERNORM2D),
     ("leaky_relu", LEAKY_RELU),
     ("leaky_relu_bwd", LEAKY_RELU_BWD),
     ("ln_head", LN_HEAD),
@@ -948,9 +951,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul", MATMUL),
     ("matmul_dw", MATMUL_DW),
     ("matmul_dw_reg", MATMUL_DW_REG),
-    ("matmul_dw_reg_tn", MATMUL_DW_REG_TN),
     ("matmul_dw_reg_splitk", MATMUL_DW_REG_SPLITK),
-    ("dw_splitk_reduce", DW_SPLITK_REDUCE),
+    ("matmul_dw_reg_tn", MATMUL_DW_REG_TN),
     ("matmul_dx", MATMUL_DX),
     ("matmul_dx_reg", MATMUL_DX_REG),
     ("matmul_gemv", MATMUL_GEMV),
@@ -1023,6 +1025,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("rmsnorm_dx_eps", RMSNORM_DX_EPS),
     ("rmsnorm_eps", RMSNORM_EPS),
     ("rmsnorm_rows", RMSNORM_ROWS),
+    ("roof_fma", ROOF_FMA),
     ("rope", ROPE),
     ("rope2d", ROPE2D),
     ("rope_at", ROPE_AT),

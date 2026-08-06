@@ -867,7 +867,11 @@ impl WgpuBackend {
             subgroup_size,
             unified_memory: unified,
             workgroup_reductions: true, // real barrier semantics on every wgpu target
-            peak_bandwidth_gbs: None, // no API reports it; measurement may fill it
+            // Neither roof is reported by any API. `gpu_core::roof` measures
+            // both once per adapter and fills them in; until it runs they stay
+            // `None` so a consumer cannot mistake a guess for a measurement.
+            peak_bandwidth_gbs: None,
+            peak_gflops: None,
             numeric: NumericSupport {
                 // dot4I8Packed is core WGSL: naga lowers it to hardware DP4A
                 // where the driver has it, else a polyfill — the packed-int8

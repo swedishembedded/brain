@@ -721,7 +721,10 @@ impl Backend for CpuBackend {
             // reduction kernels (measured token-for-token); the AVX2 fast
             // paths own the decode regime here instead.
             workgroup_reductions: false,
+            // Measured by `gpu_core::roof` like every other device — a CPU has
+            // a roofline too, and the JIT's kernels are graded against it.
             peak_bandwidth_gbs: None,
+            peak_gflops: None,
             numeric: NumericSupport {
                 // The multi-barrier packed-int8 GEMMs are outside the JIT's
                 // single-barrier model, and there is no VNNI fast path yet.
