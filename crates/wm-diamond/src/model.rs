@@ -16,57 +16,29 @@
 
 use crate::cond::{AdaGnSite, CondNet};
 use crate::config::DiamondConfig;
-use gpu_core::{f, DeviceBuffer, Gpu, Step};
+use gpu_core::{DeviceBuffer, Gpu, Step};
 use std::collections::HashMap;
+use vae::blocks::{self, BlockNames};
 
-// Kernel-table indices (order matches KERNELS).
-//
-// `conv_bias` and the serial `gn_stats` used to sit at slots 0 and 1, carrying
-// `#[allow(dead_code)]` markers: registered on every device this model ever
-// built, compiled by every backend, and dispatched by nothing. The register
-// -tiled `conv_bias_reg` replaced the first and the two-stage
-// `gn_part`/`gn_stats2` pair replaced the second, and neither removal reached
-// the table. The `#[allow]` is what let them sit there — see the slot test at
-// the bottom of this file, which is now what keeps this list honest.
-const K_GN_APPLY: usize = 0;
-const K_SILU: usize = 1;
-const K_ADD2: usize = 2;
-const K_CONCAT2: usize = 3;
-const K_UPSAMPLE2: usize = 4;
-const K_NCHW_NLC: usize = 5;
-const K_NLC_NCHW: usize = 6;
-const K_ATTN_SCORES: usize = 7;
-const K_ATTN_SOFTMAX: usize = 8;
-const K_ATTN_APPLY: usize = 9;
-const K_SCALE_ROW: usize = 10;
-const K_EDM_MIX: usize = 11;
-const K_EDM_WRAP: usize = 12;
-const K_GN_PART: usize = 13;
-const K_GN_STATS2: usize = 14;
-const K_CONV_BIAS_REG: usize = 15;
+// Kernel table: the shared block set (`vae::blocks::KERNELS`, never restated —
+// slot drift there is a compile-time copy, not a silent renumber here) plus the
+// three kernels only the EDM sampler ring uses.
+const K_SCALE_ROW: usize = blocks::NEXT_SLOT;
+const K_EDM_MIX: usize = blocks::NEXT_SLOT + 1;
+const K_EDM_WRAP: usize = blocks::NEXT_SLOT + 2;
+const N_KERNELS: usize = blocks::NEXT_SLOT + 3;
 
-const KERNELS: [(&str, &str); 16] = [
-    ("gn_apply", kernels::GN_APPLY),
-    ("silu", kernels::SILU),
-    ("add2", kernels::ADD2),
-    ("concat2", kernels::CONCAT2),
-    ("upsample2", kernels::UPSAMPLE2),
-    ("nchw_nlc", kernels::NCHW_NLC),
-    ("nlc_nchw", kernels::NLC_NCHW),
-    ("attn_scores_bidir", kernels::ATTN_SCORES_BIDIR),
-    ("attn_softmax_bidir", kernels::ATTN_SOFTMAX_BIDIR),
-    ("attn_apply_bidir", kernels::ATTN_APPLY_BIDIR),
-    ("scale_row", kernels::SCALE_ROW),
-    ("edm_mix", kernels::EDM_MIX),
-    ("edm_wrap", kernels::EDM_WRAP),
-    ("gn_part", kernels::GN_PART),
-    ("gn_stats2", kernels::GN_STATS2),
-    ("conv_bias_reg", kernels::CONV_BIAS_REG),
-];
+const KERNELS: [(&str, &str); N_KERNELS] = kernel_set();
+
+const fn kernel_set() -> [(&'static str, &'static str); N_KERNELS] {
+    let mut k = blocks::kernels_with::<N_KERNELS>();
+    k[K_SCALE_ROW] = ("scale_row", kernels::SCALE_ROW);
+    k[K_EDM_MIX] = ("edm_mix", kernels::EDM_MIX);
+    k[K_EDM_WRAP] = ("edm_wrap", kernels::EDM_WRAP);
+    k
+}
 
 const GN_EPS: f32 = 1e-5;
-/// Partial-reduction width for gn_part (threads per (n,g) group).
-const GN_P: u32 = 64;
 const ATTN_HEAD_DIM: u32 = 8;
 
 /// Host tensors by (stripped) reference name.
@@ -97,43 +69,29 @@ pub struct DiamondUNet {
     taps: Vec<(String, DeviceBuffer, usize)>,
 }
 
-/// Graph-construction state.
+/// Graph-construction state: the shared block builder plus the two things that
+/// are DIAMOND's alone — the conditioning width and the AdaGroupNorm sites
+/// whose gamma/beta the host rewrites before every forward.
 struct Builder<'a> {
-    gpu: &'a Gpu,
-    t: &'a Tensors,
+    b: blocks::Builder<'a>,
     cc: usize,
-    steps: Vec<Step>,
     adagn: Vec<(AdaGnSite, DeviceBuffer)>,
-    taps: Vec<(String, DeviceBuffer, usize)>,
 }
 
 impl<'a> Builder<'a> {
-    fn dev(&self, name: &str) -> DeviceBuffer {
-        let (_, data) =
-            self.t.get(name).unwrap_or_else(|| panic!("diamond: missing tensor {name}"));
-        self.gpu.storage_init(name, data)
-    }
-
-    fn host(&self, name: &str) -> (Vec<usize>, Vec<f32>) {
-        self.t
-            .get(name)
-            .unwrap_or_else(|| panic!("diamond: missing tensor {name}"))
-            .clone()
-    }
-
-    fn act(&self, len: u64) -> DeviceBuffer {
-        self.gpu.storage(len)
-    }
-
     fn tap(&mut self, name: String, buf: &DeviceBuffer, len: u32) {
-        self.taps.push((name, buf.clone(), len as usize));
+        self.b.tap(name, buf, len);
     }
 
-    fn push(&mut self, step: Step) {
-        self.steps.push(step);
+    /// DIAMOND derives the GroupNorm group count from the channel width rather
+    /// than fixing it per model, so it has to be set at each width. See
+    /// `blocks::Builder::set_groups`.
+    fn groups_for(&mut self, c: u32) {
+        self.b.set_groups(wm_core::gn::num_groups(c));
     }
 
     /// conv (+bias) `prefix.{weight,bias}`: x[cin,h,w] -> y[cout,ho,wo].
+    #[allow(clippy::too_many_arguments)]
     fn conv(
         &mut self,
         prefix: &str,
@@ -148,86 +106,33 @@ impl<'a> Builder<'a> {
     ) -> (DeviceBuffer, u32, u32) {
         let ho = (h + 2 * pad - k) / stride + 1;
         let wo = (w + 2 * pad - k) / stride + 1;
-        let wgt = self.dev(&format!("{prefix}.weight"));
-        let bias = self.dev(&format!("{prefix}.bias"));
-        let y = self.act((cout * ho * wo) as u64);
-        // Register-tiled conv (8 output channels x 4 positions per invocation).
-        let threads = cout.div_ceil(8) * (ho * wo).div_ceil(4);
-        self.push(self.gpu.step(
-            K_CONV_BIAS_REG,
-            &[x, &wgt, &bias, &y],
-            &[1, cin, h, w, cout, k, stride, pad, ho, wo],
-            threads,
-        ));
-        (y, ho, wo)
+        (self.b.conv_s(prefix, cin, cout, k, stride, pad, h, w, ho, wo, x), ho, wo)
     }
 
     /// GroupNorm with a DYNAMIC (conditioned) gamma/beta buffer.
+    ///
+    /// The buffer is not a checkpoint tensor: `cond::AdaGnSite` recomputes
+    /// gamma/beta on the host from the conditioning vector and rewrites it
+    /// before each forward, which is exactly what `blocks::Builder::gn_gb`
+    /// exists for.
     fn adagn(&mut self, prefix: &str, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
-        let (wsh, wdat) = self.host(&format!("{prefix}.linear.weight"));
-        let (_, bdat) = self.host(&format!("{prefix}.linear.bias"));
+        let (wsh, wdat) = self.b.get(&format!("{prefix}.linear.weight")).clone();
+        let (_, bdat) = self.b.get(&format!("{prefix}.linear.bias")).clone();
         assert_eq!(wsh, vec![2 * c as usize, self.cc]);
-        let gb = self.gpu.storage(2 * c as u64);
+        let gb = self.b.gpu().storage(2 * c as u64);
         self.adagn.push((AdaGnSite { w: wdat, b: bdat, c: c as usize }, gb.clone()));
-        self.gn_with_gb(c, h, w, x, &gb)
+        self.groups_for(c);
+        self.b.gn_gb(&format!("{prefix}.gb"), c, h, w, x, &gb)
     }
 
     /// GroupNorm with a STATIC affine gamma/beta from `prefix.{weight,bias}`.
     fn affine_gn(&mut self, prefix: &str, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
-        let (_, gamma) = self.host(&format!("{prefix}.weight"));
-        let (_, beta) = self.host(&format!("{prefix}.bias"));
-        let mut gbv = gamma;
-        gbv.extend_from_slice(&beta);
-        let gb = self.gpu.storage_init(prefix, &gbv);
-        self.gn_with_gb(c, h, w, x, &gb)
-    }
-
-    fn gn_with_gb(
-        &mut self,
-        c: u32,
-        h: u32,
-        w: u32,
-        x: &DeviceBuffer,
-        gb: &DeviceBuffer,
-    ) -> DeviceBuffer {
-        let g = wm_core::gn::num_groups(c);
-        let stats = self.act(2 * g as u64);
-        let y = self.act((c * h * w) as u64);
-        // Parallel two-stage reduction (gn_part -> gn_stats2): the serial
-        // per-group gn_stats was measured at 77% of GPU frame time (2-4
-        // invocations looping 131k elements on one EU lane each).
-        let part = self.act(2 * g as u64 * GN_P as u64);
-        self.push(self.gpu.step(
-            K_GN_PART,
-            &[x, &part],
-            &[1, c, h, w, g, GN_P],
-            g * GN_P,
-        ));
-        self.push(self.gpu.step(
-            K_GN_STATS2,
-            &[&part, &stats],
-            &[1, c, h, w, g, GN_P, f(GN_EPS)],
-            g,
-        ));
-        self.push(self.gpu.step(
-            K_GN_APPLY,
-            &[x, &stats, gb, &y],
-            &[1, c, h, w, g],
-            c * h * w,
-        ));
-        y
+        self.groups_for(c);
+        self.b.gn(prefix, c, h, w, x)
     }
 
     fn silu(&mut self, n: u32, x: &DeviceBuffer) -> DeviceBuffer {
-        let y = self.act(n as u64);
-        self.push(self.gpu.step(K_SILU, &[x, &y], &[n], n));
-        y
-    }
-
-    fn add(&mut self, n: u32, a: &DeviceBuffer, b: &DeviceBuffer) -> DeviceBuffer {
-        let y = self.act(n as u64);
-        self.push(self.gpu.step(K_ADD2, &[a, b, &y], &[n], n));
-        y
+        self.b.silu(n, x)
     }
 
     fn concat(
@@ -239,84 +144,18 @@ impl<'a> Builder<'a> {
         a: &DeviceBuffer,
         b: &DeviceBuffer,
     ) -> DeviceBuffer {
-        let y = self.act(((ca + cb) * h * w) as u64);
-        self.push(self.gpu.step(
-            K_CONCAT2,
-            &[a, b, &y],
-            &[1, ca, cb, h, w],
-            (ca + cb) * h * w,
-        ));
-        y
+        self.b.concat(ca, cb, h, w, a, b)
     }
 
     fn upsample(&mut self, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
-        let y = self.act((c * 2 * h * 2 * w) as u64);
-        self.push(self.gpu.step(K_UPSAMPLE2, &[x, &y], &[1, c, h, w], c * 4 * h * w));
-        y
-    }
-
-    /// Mid-block self-attention (norm -> qkv 1x1 -> bidir attention -> out 1x1
-    /// -> residual add).
-    fn attn(&mut self, prefix: &str, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
-        let t = h * w;
-        let heads = (c / ATTN_HEAD_DIM).max(1);
-        let normed = self.affine_gn(&format!("{prefix}.norm.norm"), c, h, w, x);
-        self.tap(format!("{prefix}.norm"), &normed, c * h * w);
-        let (qkv_chw, _, _) =
-            self.conv(&format!("{prefix}.qkv_proj"), c, 3 * c, 1, 1, 0, h, w, &normed);
-        self.tap(format!("{prefix}.qkv_proj"), &qkv_chw, 3 * c * h * w);
-        // Reshape the conv output for attention: NCHW -> [T, 3C].
-        let qkv = self.act((3 * c * t) as u64);
-        self.push(self.gpu.step(
-            K_NCHW_NLC,
-            &[&qkv_chw, &qkv],
-            &[3 * c * t, 3 * c, t],
-            3 * c * t,
-        ));
-        self.tap(format!("{prefix}.qkv_rows"), &qkv, 3 * c * t);
-        let scores = self.act((heads * t * t) as u64);
-        self.push(self.gpu.step(
-            K_ATTN_SCORES,
-            &[&qkv, &scores],
-            &[1, heads, t, ATTN_HEAD_DIM, 3 * c, 0, c],
-            heads * t * t,
-        ));
-        self.tap(format!("{prefix}.scores"), &scores, heads * t * t);
-        let probs = self.act((heads * t * t) as u64);
-        self.push(self.gpu.step(
-            K_ATTN_SOFTMAX,
-            &[&scores, &probs],
-            &[1, heads, t],
-            heads * t,
-        ));
-        self.tap(format!("{prefix}.probs"), &probs, heads * t * t);
-        let attn_out = self.act((t * c) as u64);
-        // NOTE binding order: attn_apply_bidir takes (probs, qkv, out).
-        self.push(self.gpu.step(
-            K_ATTN_APPLY,
-            &[&probs, &qkv, &attn_out],
-            &[1, heads, t, ATTN_HEAD_DIM, 3 * c, 2 * c, c],
-            heads * t * ATTN_HEAD_DIM,
-        ));
-        self.tap(format!("{prefix}.attn_rows"), &attn_out, t * c);
-        let attn_chw = self.act((c * t) as u64);
-        self.push(self.gpu.step(
-            K_NLC_NCHW,
-            &[&attn_out, &attn_chw],
-            &[c * t, c, t],
-            c * t,
-        ));
-        self.tap(format!("{prefix}.pre_out_proj"), &attn_chw, c * h * w);
-        let (proj, _, _) = self.conv(&format!("{prefix}.out_proj"), c, c, 1, 1, 0, h, w, &attn_chw);
-        self.tap(format!("{prefix}.out_proj"), &proj, c * h * w);
-        // Reference quirk: SelfAttention2d reassigns x = norm(x) BEFORE the
-        // residual — the skip connection adds the NORMED tensor, not the
-        // block input (blocks.py::SelfAttention2d.forward).
-        self.add(c * h * w, &normed, &proj)
+        self.b.upsample(c, h, w, x)
     }
 
     /// One reference ResBlock: r = proj(x); y = conv2(silu(norm2(conv1(silu(
     /// norm1(x)))))) + r; then optional attention.
+    ///
+    /// Not `blocks::Builder::resnet`: that one normalises with the STATIC
+    /// affine GroupNorm, and every norm here is adaptive.
     #[allow(clippy::too_many_arguments)]
     fn resblock(
         &mut self,
@@ -344,9 +183,10 @@ impl<'a> Builder<'a> {
         let s2 = self.silu(cout * h * w, &n2);
         let (c2, _, _) = self.conv(&format!("{prefix}.conv2"), cout, cout, 3, 1, 1, h, w, &s2);
         self.tap(format!("{prefix}.conv2"), &c2, cout * h * w);
-        let y = self.add(cout * h * w, &c2, &r);
+        let y = self.b.add(cout * h * w, &c2, &r);
         let out = if attn {
-            self.attn(&format!("{prefix}.attn"), cout, h, w, &y)
+            self.groups_for(cout);
+            self.b.attn(&format!("{prefix}.attn"), cout, h, w, &y)
         } else {
             y
         };
@@ -381,8 +221,14 @@ impl DiamondUNet {
             mlp2_b: get("cond_proj.2.bias"),
         };
 
-        let mut b =
-            Builder { gpu: &gpu, t: tensors, cc, steps: vec![], adagn: vec![], taps: vec![] };
+        // `groups` is re-set at every width (see `Builder::groups_for`), so the
+        // constructor value is only a placeholder. Taps stay on: the parity
+        // harness reads them by name, and they pin buffers against pooling —
+        // which is the lifetime this graph has always had.
+        let mut inner =
+            blocks::Builder::new(&gpu, tensors, GN_EPS, 1, BlockNames::diamond(), true);
+        inner.set_attn_head_dim(Some(ATTN_HEAD_DIM));
+        let mut b = Builder { b: inner, cc, adagn: vec![] };
 
         let ic = cfg.img_channels;
         let (h0, w0) = (cfg.h, cfg.w);
@@ -516,15 +362,16 @@ impl DiamondUNet {
         let one_buf = gpu.storage_init("wm.one", &[1.0]);
         let wrap_coef = gpu.storage(2);
         let euler_ab = gpu.storage(2);
-        let mut loop_steps: Vec<Step> = Vec::with_capacity(b.steps.len() + 4);
+        let mut loop_steps: Vec<Step> = Vec::with_capacity(b.b.n_steps() + 4);
         loop_steps.push(gpu.step(K_SCALE_ROW, &[&x_state, &cin_buf, &x_in], &[n_px, n_px], n_px));
-        loop_steps.extend(b.steps.iter().cloned());
+        // End the builder's borrow of `gpu` before moving it into the model.
+        let Builder { b: inner, adagn, cc: _ } = b;
+        let (steps, taps) = inner.finish();
+
+        loop_steps.extend(steps.iter().cloned());
         loop_steps.push(gpu.step(K_EDM_WRAP, &[&x_state, &y_out, &wrap_coef, &denoised], &[n_px], n_px));
         loop_steps.push(gpu.step(K_EDM_MIX, &[&x_state, &denoised, &euler_ab, &x_next], &[n_px, n_px], n_px));
         loop_steps.push(gpu.step(K_SCALE_ROW, &[&x_next, &one_buf, &x_state], &[n_px, n_px], n_px));
-
-        // End the builder's borrow of `gpu` before moving it into the model.
-        let Builder { steps, adagn, taps, gpu: _, t: _, cc: _ } = b;
 
         DiamondUNet {
             gpu,
@@ -657,28 +504,22 @@ mod kernel_slots {
     #[test]
     fn every_slot_constant_names_its_kernel() {
         for (slot, name) in [
-            (super::K_GN_APPLY, "gn_apply"),
-            (super::K_SILU, "silu"),
-            (super::K_ADD2, "add2"),
-            (super::K_CONCAT2, "concat2"),
-            (super::K_UPSAMPLE2, "upsample2"),
-            (super::K_NCHW_NLC, "nchw_nlc"),
-            (super::K_NLC_NCHW, "nlc_nchw"),
-            (super::K_ATTN_SCORES, "attn_scores_bidir"),
-            (super::K_ATTN_SOFTMAX, "attn_softmax_bidir"),
-            (super::K_ATTN_APPLY, "attn_apply_bidir"),
             (super::K_SCALE_ROW, "scale_row"),
             (super::K_EDM_MIX, "edm_mix"),
             (super::K_EDM_WRAP, "edm_wrap"),
-            (super::K_GN_PART, "gn_part"),
-            (super::K_GN_STATS2, "gn_stats2"),
-            (super::K_CONV_BIAS_REG, "conv_bias_reg"),
         ] {
             assert_eq!(super::KERNELS[slot].0, name, "slot {slot}");
         }
-        // ...and the table has nothing in it the list above does not cover, so
-        // a kernel that stops being dispatched cannot quietly stay registered.
-        assert_eq!(super::KERNELS.len(), 16);
+        // The shared block kernels are COPIED from `vae::blocks::KERNELS` by
+        // `kernels_with`, so their slots cannot drift out from under this crate
+        // — but the copy must land where the shared constants say it does, and
+        // this crate's three must sit strictly after it.
+        assert_eq!(
+            super::KERNELS[..vae::blocks::NEXT_SLOT],
+            vae::blocks::KERNELS[..],
+            "shared block kernels are not the prefix of this table"
+        );
+        assert_eq!(super::KERNELS.len(), super::N_KERNELS);
         assert!(super::KERNELS.iter().all(|(n, s)| !n.is_empty() && !s.is_empty()));
     }
 }

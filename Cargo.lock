@@ -1549,6 +1549,7 @@ dependencies = [
  "brain-onnx",
  "brain-optim",
  "brain-paramstore",
+ "brain-vae",
  "brain-wm-core",
  "serde_json",
 ]
