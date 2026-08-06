@@ -328,6 +328,10 @@ pub const GN_APPLY: &str = include_str!("../wgsl/gn_apply.wgsl");
 pub const GN_DBETA: &str = include_str!("../wgsl/gn_dbeta.wgsl");
 /// `wgsl/gn_dgamma.wgsl`
 pub const GN_DGAMMA: &str = include_str!("../wgsl/gn_dgamma.wgsl");
+/// GroupNorm affine gradients, stage 1: dgamma+dbeta partials in ONE pass.
+pub const GN_DGB_PART: &str = include_str!("../wgsl/gn_dgb_part.wgsl");
+/// GroupNorm affine gradients, stage 2: fold and accumulate.
+pub const GN_DGB2: &str = include_str!("../wgsl/gn_dgb2.wgsl");
 /// `wgsl/gn_dsum.wgsl`
 pub const GN_DSUM: &str = include_str!("../wgsl/gn_dsum.wgsl");
 /// GroupNorm backward reductions, stage 1: partial sums (barrier-free).
@@ -877,6 +881,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("gn_apply", GN_APPLY),
     ("gn_dbeta", GN_DBETA),
     ("gn_dgamma", GN_DGAMMA),
+    ("gn_dgb_part", GN_DGB_PART),
+    ("gn_dgb2", GN_DGB2),
     ("gn_dsum", GN_DSUM),
     ("gn_dsum_part", GN_DSUM_PART),
     ("gn_dsum2", GN_DSUM2),

@@ -44,8 +44,8 @@ const B_BIAS_GRAD: usize = 2;
 const B_SILU_BWD: usize = 3;
 const B_SCALE_CHAN: usize = 4;
 const B_GN_DX: usize = 5;
-const B_GN_DGAMMA: usize = 6;
-const B_GN_DBETA: usize = 7;
+const B_GN_DGB_PART: usize = 6;
+const B_GN_DGB2: usize = 7;
 const B_UPSAMPLE2_DX: usize = 8;
 const B_AXPY: usize = 9;
 const B_ATTN_DSCORES: usize = 10;
@@ -274,8 +274,20 @@ impl Trace {
                 r.give(2 * *g as u64 * super::GN_P as u64, part);
                 // dgamma -> dgb[0..C], dbeta -> dgb[C..2C]: disjoint writes into
                 // the same fused buffer, both accumulating.
-                r.push(r.gpu.step(r.ids.k(B_GN_DGAMMA), &[x, &dy, stats, grads.g(gb)], &p, *c));
-                r.push(r.gpu.step(r.ids.k(B_GN_DBETA), &[&dy, grads.g(gb)], &p, *c));
+                // Two-stage, and ONE pass over `dy` for both affine gradients.
+                // `gn_dgamma`/`gn_dbeta` were a lane per channel walking N*H*W
+                // each — 97.63 + 72.54 ms at 5.4 / 7.2 GB/s, ~2% of the roof —
+                // and each read the whole of `dy` separately.
+                let dgb_part = r.tmp(2 * *c as u64 * super::GN_P as u64);
+                let pg = [1, *c, *h, *w, *g, super::GN_P];
+                r.push(r.gpu.step(
+                    r.ids.k(B_GN_DGB_PART),
+                    &[x, &dy, stats, &dgb_part],
+                    &pg,
+                    c * super::GN_P,
+                ));
+                r.push(r.gpu.step(r.ids.k(B_GN_DGB2), &[&dgb_part, grads.g(gb)], &pg, *c));
+                r.give(2 * *c as u64 * super::GN_P as u64, dgb_part);
                 let dx = r.tmp(n as u64);
                 r.push(r.gpu.step(r.ids.k(B_GN_DX), &[x, &dyg, &sums, &dx], &p, n));
                 r.acc(x, n as u64, &dx, 1.0);
