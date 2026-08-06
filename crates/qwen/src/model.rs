@@ -729,6 +729,16 @@ impl Qwen {
     }
 
     pub fn set_batch(&self, x: &[u32], y: &[u32]) {
+        // `embed_tile.wgsl` (the batched forward's embedding gather) tile-gates
+        // its own reads, so an out-of-vocab token here can't OOB-read the way
+        // decode_submit's single-token EMBED could — but it silently leaves
+        // that position's embedding row at whatever the buffer previously held
+        // (no tile ever claims it), which is a correctness bug, not a crash.
+        // Same root cause as the decode-path segfault (a checkpoint/tokenizer
+        // vocab mismatch); fail loudly here too rather than serving garbage.
+        if let Some(&bad) = x.iter().find(|&&t| t as usize >= self.cfg.vocab as usize) {
+            panic!("batched-forward token id {bad} exceeds vocab {} (checkpoint/tokenizer mismatch?)", self.cfg.vocab);
+        }
         self.gpu.write(&self.tokens, x);
         self.gpu.write(&self.targets, y);
         let c = y.iter().filter(|&&v| v != IGNORE).count();
@@ -1577,6 +1587,24 @@ impl Qwen {
             "KV-cache decode requires a whole (single-device) model"
         );
         assert!(pos < self.t, "decode pos {pos} exceeds ctx_len {}", self.t);
+        // A token id the tokenizer produced but this checkpoint's embedding
+        // table doesn't cover (a checkpoint/tokenizer vocab mismatch) used to
+        // reach EMBED's `emb[tokens[t] * d_model + c]` gather unchecked and
+        // read arbitrarily far out of bounds of the embedding buffer — on the
+        // CPU JIT (raw pointer arithmetic, no bounds checks: see wgsl-cpu's
+        // "we synthesise our own bounds via the kernel's early-return mask"
+        // doc comment, which only covers `idx`, never a value READ from a
+        // buffer) this reliably segfaults; on GPU the same OOB read is just
+        // silently wrong. Fail loudly here instead, at the one point every
+        // decode caller (`step`, `step_embed`'s sibling, `prefill`) funnels
+        // through — see .todo/completed/cpu-backend-jit-dispatch-segfault.md.
+        if let Some(tid) = token_id {
+            assert!(
+                (tid as usize) < self.cfg.vocab as usize,
+                "decode token id {tid} exceeds vocab {} (checkpoint/tokenizer mismatch?)",
+                self.cfg.vocab
+            );
+        }
 
         let c = &self.cfg;
         let d = c.d_model;
@@ -1973,6 +2001,70 @@ mod tests {
         assert_eq!(hidden.len(), cfg.d_model as usize);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    /// REGRESSION (.todo/completed/cpu-backend-jit-dispatch-segfault.md): a
+    /// decode token id the checkpoint's embedding table doesn't cover (a
+    /// checkpoint/tokenizer vocab mismatch — e.g. a real BPE tokenizer's
+    /// `<|im_start|>`-class special token fed to a tiny synthetic checkpoint)
+    /// used to reach `EMBED`'s unchecked `emb[tokens[t]*d_model+c]` gather and
+    /// read arbitrarily far out of bounds — 100% reproducible SIGSEGV on the
+    /// CPU JIT backend (no bounds checks on a value read FROM a buffer, only
+    /// on the invocation index), silently wrong on GPU. Must now be a clean,
+    /// catchable panic naming the offending id, on every backend.
+    #[test]
+    fn step_rejects_a_token_id_outside_the_vocab() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny(); // vocab 23
+        let init = crate::init::init_weights(&cfg, 9);
+        let path = write_reader_fixture(&cfg, &init, "vocab-guard");
+        let reader = checkpoint::weightio::WeightReader::open(path.to_str().unwrap()).unwrap();
+        let dec = Qwen::from_reader_decode(&reader, 12);
+
+        // The real Qwen3 tokenizer's `<|im_start|>` id — exactly what a
+        // checkpoint/tokenizer mismatch fed into the crash.
+        let out_of_vocab = 151644u32;
+        assert!(out_of_vocab as usize >= cfg.vocab as usize);
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.step(out_of_vocab)));
+        std::panic::set_hook(prev);
+        let err = res.expect_err("step() must panic on an out-of-vocab token, not read out of bounds");
+        let msg = err.downcast_ref::<String>().map(String::as_str).or_else(|| err.downcast_ref::<&str>().copied()).unwrap_or_default();
+        assert!(msg.contains("151644") && msg.contains("vocab"), "panic message should name the id and 'vocab': {msg:?}");
+
+        // A valid token id right at the vocab boundary still works normally.
+        let hidden = dec.step(cfg.vocab - 1);
+        assert_eq!(hidden.len(), cfg.d_model as usize);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Sibling of [`step_rejects_a_token_id_outside_the_vocab`] for the
+    /// batched-forward path (`set_batch` → `embed_tile.wgsl`): that kernel
+    /// tile-gates its own reads so an out-of-vocab id can't OOB-read the way
+    /// the single-token `EMBED` kernel could, but it silently leaves the
+    /// position's embedding row un-written (stale/garbage) — a correctness
+    /// bug, not a crash. Must also fail loudly instead.
+    #[test]
+    fn logits_all_rejects_a_token_id_outside_the_vocab() {
+        if gpu_disabled() {
+            return;
+        }
+        let cfg = QwenConfig::tiny();
+        let init = crate::init::init_weights(&cfg, 10);
+        let model = Qwen::new(cfg.clone(), 1, 16, &init);
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| model.logits_all(&[1, 2, 151644])));
+        std::panic::set_hook(prev);
+        let err = res.expect_err("logits_all() must panic on an out-of-vocab token");
+        let msg = err.downcast_ref::<String>().map(String::as_str).or_else(|| err.downcast_ref::<&str>().copied()).unwrap_or_default();
+        assert!(msg.contains("151644") && msg.contains("vocab"), "panic message should name the id and 'vocab': {msg:?}");
     }
 
     /// Every kernel this model can dispatch has a cost formula — pins the
