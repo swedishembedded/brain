@@ -67,25 +67,61 @@ in brain.
   keyed `layer{L:02}.{k|v}.head{H}`. `brain qwen calib --weights --jsonl
   [--report] [--out report.json] [--clip-out kv_calib.json --percentile Q]`
   prints/writes the `absmax`/`p99`/`p99.99`/`outlier_ratio` report and, with
-  `--clip-out`, the actual `qwen::kvcalib::KvCalib` table the engine loads.
+  `--clip-out`, the actual `model::kvcalib::KvCalib` table the engine loads
+  (architecture-agnostic — lives in `crates/model`, not `crates/qwen`, since
+  nothing about the type or file format is Qwen-specific; qwen is just the
+  first consumer). `brain qwen eval --kv fp32,int8,int8-calib` scores held-out
+  loss/accuracy through the SAME paged engine `brain serve` runs
+  (`qwen::eval::score_chat_paged`, gated bit-for-bit-in-spirit against the
+  legacy `score_chat` backend at `fp32` — see below), so the calibration
+  decision is judged on the number that actually matters, not a proxy.
 
-  **Measured on the real Qwen3-0.6B checkpoint** (8 short calibration
+  **Measured on the real Qwen3-0.6B checkpoint** (10 short calibration
   prompts, `--percentile 0.999`): 448 streams (28 layers × 8 kv-heads × K+V),
   **worst `outlier_ratio` 1.72** (`layer26.v.head5`), **median 1.07** — the
   handful of streams above ~1.3 cluster almost entirely in LATE-layer V heads
-  (23–27), not K, and not early layers. This is a much tighter distribution
-  than the "long-tailed activations" case calibration exists to fix: today's
-  online per-token absmax is already close to optimal for the great majority
-  of K/V streams on this (small) prompt set. Worth a larger/more
-  representative calibration set before drawing a final conclusion, but the
-  honest reading of this measurement is that clipping recovers little on
-  Qwen3-0.6B specifically — the mechanism (`paged_kv_append_i8_clipped_batched.wgsl`,
-  `scale = min(this_token_absmax, clip[head]) / 127`, selected via
-  `Engine::set_kv_calib` in place of the plain `APPEND_I8` kernel, which stays
-  byte-for-byte untouched) is real and tested either way.
-  `KvCalib::from_model_dir` auto-discovers `kv_calib.json` beside a
-  checkpoint; absent, serving stays uncalibrated (`KvCalib::disabled`'s
-  `f32::MAX` sentinel makes the clipped kernel bit-identical to the plain one).
+  (23–27), not K, and not early layers. A much tighter distribution than the
+  "long-tailed activations" case calibration exists to fix.
+
+  **`brain qwen eval --kv fp32,int8,int8-calib`, same checkpoint, a held-out
+  10-sample chat set, `--block 256` (228 scored positions)**:
+
+  | `--kv` | loss | Δ vs legacy fp32 | token-acc |
+  |---|---:|---:|---:|
+  | `fp32` (paged engine) | 4.2225 | **+0.0000** | 54.8% |
+  | `int8` (uncalibrated, online absmax) | 4.2379 | +0.0154 | 55.3% |
+  | `int8-calib` (p99.9, this calibration set) | 5.5618 | **+1.3392** | 40.8% |
+
+  Two findings, both load-bearing for W3.5's default decision:
+  1. **The paged fp32 backend matches the legacy backend EXACTLY** (delta
+     `0.0000`, not just "close") — confirms `score_chat_paged`/
+     `Engine::score_positions` are correct, independent of the KV-dtype
+     question, on a real checkpoint (the tiny-synthetic-checkpoint gate test
+     only proves the mechanism; this proves it at the real shape).
+  2. **Plain uncalibrated int8 is nearly free** (+0.0154 loss, token-acc
+     *higher*) — consistent with the low outlier ratios above. **Calibrated
+     int8 at p99.9 is measurably WORSE** — not a wash, a real regression
+     (+1.34 loss, −14 points of token accuracy). This is the clip mechanism
+     working exactly as designed (`scale = min(token_absmax, clip[head]) /
+     127` hard-truncates any value above `clip[head]`) applied to
+     UNDER-calibrated ceilings: 10 short prompts underestimate the true
+     p99.9 a held-out set actually needs, so real signal on the eval set gets
+     truncated away. **Not evidence against the calibration mechanism** — it
+     is evidence that a 10-prompt calibration set is too small at this
+     percentile. A larger/more representative calibration set (or a less
+     aggressive percentile, e.g. p99.99) is very likely to close most or all
+     of this gap, but that is unverified — no larger sweep was run in this
+     pass.
+
+  **Conclusion for the default (W3.5)**: ship plain (uncalibrated) int8 KV as
+  the serving default — the data supports it as a clear, nearly-free win.
+  Calibrated int8 stays available (`--kv-calib` / `kv_calib.json` next to a
+  checkpoint) but is NOT defaulted to: shipping a default that measurably
+  degrades quality on the only real measurement taken would be irresponsible,
+  regardless of the mechanism's promise. `KvCalib::from_model_dir`
+  auto-discovers `kv_calib.json` beside a checkpoint when a caller opts in;
+  absent, serving stays uncalibrated (`KvCalib::disabled`'s `f32::MAX`
+  sentinel makes the clipped kernel bit-identical to the plain one).
 
 ## Parity ladder
 

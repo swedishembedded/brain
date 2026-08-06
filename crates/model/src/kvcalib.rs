@@ -1,18 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Calibrated INT8 KV-cache scales.
+//! Calibrated INT8 KV-cache scales — architecture-agnostic, like the rest of
+//! this crate (`paged`'s `BlockAllocator`/`BlockTable`, `serve`'s
+//! `PagedDecoder` trait + `Scheduler<D>`, `actstats`'s percentile reservoir).
+//! [`KvCalib`] itself names no model: it is a pure `(layer, kv_head, K|V) ->
+//! f32` table plus JSON I/O, built from an `actstats::Collector` any paged-KV
+//! model can populate its own way. `crates/qwen` is the first (and today
+//! only) consumer — see `crates/qwen/src/serve.rs`'s `Engine::calibrate_kv`/
+//! `set_kv_calib` for how a concrete `PagedDecoder` implementation wires this
+//! in — but nothing here is Qwen-specific; a second paged-attention model
+//! adopting the same INT8-KV-with-calibration pattern reuses this file and
+//! its `kv_calib.json` format as-is.
 //!
 //! A per-`(layer, kv_head, K|V)` clip ceiling, derived offline (`brain qwen
-//! calib`) from a chosen percentile of a representative prompt set's
-//! post-RoPE K / raw V magnitude distribution (`model::actstats`,
-//! `Engine::calibrate_kv`).
+//! calib` today) from a chosen percentile of a representative prompt set's
+//! K / V magnitude distribution (`actstats::Collector`).
 //!
 //! The mechanism that makes this a win is percentile CLIPPING, not
 //! staticness: a static per-(layer,head) scale sized to the worst token in
 //! the calibration set would waste resolution on a typical token relative to
-//! today's per-token online absmax. [`KvCalib`] is instead used as a
-//! CEILING on that online scale (`paged_kv_append_i8_clipped_batched.wgsl`:
+//! an online per-token absmax. [`KvCalib`] is instead used as a CEILING on
+//! that online scale (`paged_kv_append_i8_clipped_batched.wgsl`:
 //! `scale = min(this_token's_absmax, clip[head]) / 127`) — keeping the
 //! per-token adaptivity while denying one rare outlier token the ability to
 //! crush every other token's resolution in that head. A `KvCalib` whose
@@ -22,7 +31,7 @@
 //! (and the "no calibration file present" default) clean.
 //!
 //! See `docs/models/qwen/status.md` (P12) for the real-checkpoint
-//! measurement this was built against.
+//! measurement this was built against, on the one consumer that exists today.
 
 use std::path::Path;
 
@@ -63,14 +72,15 @@ impl KvCalib {
         self.k.iter().flatten().all(|&x| x == f32::MAX) && self.v.iter().flatten().all(|&x| x == f32::MAX)
     }
 
-    /// Build from a [`model::actstats::Collector`] populated by
-    /// [`crate::serve::Engine::calibrate_kv`] (stream names
-    /// `layer{L:02}.{k|v}.head{H}`, see that function's doc), at percentile
-    /// `q` (e.g. `0.999`). A `(layer, head)` the collector never observed —
-    /// shouldn't happen with a non-empty, representative prompt set, but
-    /// defensive rather than panicking — falls back to `f32::MAX` (no clip
-    /// for that stream specifically, not a failure of the whole table).
-    pub fn from_collector(model_id: &str, n_layers: usize, n_kv: usize, head_dim: usize, q: f32, collector: &model::actstats::Collector) -> KvCalib {
+    /// Build from a [`crate::actstats::Collector`] populated by a model's own
+    /// calibration pass (`crates/qwen/src/serve.rs`'s `Engine::calibrate_kv`
+    /// is the one that exists today; stream names `layer{L:02}.{k|v}.head{H}`
+    /// is that caller's convention, not one this function enforces), at
+    /// percentile `q` (e.g. `0.999`). A `(layer, head)` the collector never
+    /// observed — shouldn't happen with a non-empty, representative prompt
+    /// set, but defensive rather than panicking — falls back to `f32::MAX`
+    /// (no clip for that stream specifically, not a failure of the whole table).
+    pub fn from_collector(model_id: &str, n_layers: usize, n_kv: usize, head_dim: usize, q: f32, collector: &crate::actstats::Collector) -> KvCalib {
         assert!((0.0..=1.0).contains(&q), "percentile must be in [0,1], got {q}");
         let mut k = vec![vec![f32::MAX; n_kv]; n_layers];
         let mut v = vec![vec![f32::MAX; n_kv]; n_layers];
@@ -176,8 +186,8 @@ impl KvCalib {
 mod tests {
     use super::*;
 
-    fn tiny_collector() -> model::actstats::Collector {
-        let c = model::actstats::Collector::new();
+    fn tiny_collector() -> crate::actstats::Collector {
+        let c = crate::actstats::Collector::new();
         // layer00: K tight, V has a real tail; layer01: nothing observed for K.
         c.observe("layer00.k.head0", &(1..=6000).map(|v| v as f32).collect::<Vec<_>>());
         let mut v_tail: Vec<f32> = (1..=6000).map(|v| v as f32).collect();

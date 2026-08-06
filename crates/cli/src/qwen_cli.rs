@@ -732,6 +732,7 @@ fn eval_chat(args: &[String]) {
     let mut adapter_spec: Option<String> = None;
     let mut block = 1024u32;
     let mut models_dir: Option<String> = None;
+    let mut kv_modes: Vec<qwen::eval::KvMode> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -740,12 +741,24 @@ fn eval_chat(args: &[String]) {
             "--adapter" => adapter_spec = Some(val(args, &mut i, "--adapter")),
             "--block" => block = val(args, &mut i, "--block").parse().unwrap_or(block),
             "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
+            "--kv" => {
+                let spec = val(args, &mut i, "--kv");
+                for m in spec.split(',') {
+                    match qwen::eval::KvMode::parse(m.trim()) {
+                        Ok(mode) => kv_modes.push(mode),
+                        Err(e) => {
+                            eprintln!("--kv: {e}");
+                            return;
+                        }
+                    }
+                }
+            }
             other => eprintln!("ignoring unknown flag {other:?}"),
         }
         i += 1;
     }
     if base.is_empty() || jsonl.is_empty() {
-        eprintln!("usage: brain qwen eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG] --block T --models-dir DIR]");
+        eprintln!("usage: brain qwen eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG] --block T --models-dir DIR] [--kv fp32,int8,int8-calib]");
         return;
     }
 
@@ -796,6 +809,26 @@ fn eval_chat(args: &[String]) {
         base_score.samples + base_score.skipped,
         base_score.positions
     );
+
+    // --kv scores through the paged serving engine (qwen::serve::Engine) --
+    // the actual engine `brain serve` runs -- at each requested KV
+    // representation, side by side. fp32 is included in the requested list
+    // itself if the caller wants the paged-vs-legacy cross-check; it is NOT
+    // implied automatically, so this stays a strict opt-in addition to the
+    // unconditional base_score line above.
+    for kv in &kv_modes {
+        let score = qwen::eval::score_chat_paged(base_weights_str, None, &tok, &chat_template, &samples, block, *kv);
+        let delta = if base_score.loss.is_finite() { score.loss - base_score.loss } else { f32::NAN };
+        println!(
+            "base {base_id} [kv={}]: loss {:.4} ({delta:+.4} vs legacy fp32)  token-acc {:.1}%  ({}/{} samples scored, {} positions)",
+            kv.label(),
+            score.loss,
+            score.token_accuracy * 100.0,
+            score.samples,
+            score.samples + score.skipped,
+            score.positions
+        );
+    }
 
     let Some(spec) = adapter_spec else { return };
     let (owner, name, tag) = match parse_adapter_spec(&spec) {
@@ -852,7 +885,8 @@ fn eval_chat(args: &[String]) {
 /// everything else.
 ///
 /// `--clip-out FILE` (with `--percentile Q`, default `0.999`) additionally
-/// writes the actual usable `KvCalib` clip table (`qwen::kvcalib`) — save it
+/// writes the actual usable `KvCalib` clip table (`model::kvcalib`, shared
+/// with any future paged-attention model, not Qwen-specific) — save it
 /// as `kv_calib.json` next to the checkpoint and `brain qwen serve`/`brain
 /// serve` picks it up automatically (`KvCalib::from_model_dir`). This is a
 /// SEPARATE artifact from `--out`'s raw diagnostic report: `--out` dumps
@@ -997,7 +1031,7 @@ fn calib(args: &[String]) {
     if let Some(path) = clip_out {
         let ckpt_cfg = checkpoint::load(weights_str).header["config"].clone();
         let cfg = QwenConfig::from_json(&ckpt_cfg);
-        let calib = qwen::kvcalib::KvCalib::from_collector(
+        let calib = model::kvcalib::KvCalib::from_collector(
             &base_id,
             cfg.n_layers as usize,
             cfg.n_kv_heads as usize,

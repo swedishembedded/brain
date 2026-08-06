@@ -284,7 +284,7 @@ pub struct Engine {
     /// place of the plain online-absmax one (`APPEND_I8`) — see
     /// [`Engine::set_kv_calib`]. `None` (the default) leaves the uncalibrated
     /// path completely untouched, bit-for-bit.
-    kv_calib: Option<crate::kvcalib::KvCalib>,
+    kv_calib: Option<model::kvcalib::KvCalib>,
     /// Per-layer `[n_kv]` clip-ceiling upload buffers for `kv_calib` — empty
     /// until `set_kv_calib(Some(_))` allocates and fills them.
     clip_k: Vec<DeviceBuffer>,
@@ -541,11 +541,11 @@ impl Engine {
     }
 
     /// Install a calibrated KV clip table, uploading its per-layer ceilings
-    /// once. `None` (or a [`crate::kvcalib::KvCalib::disabled`] table) clears
+    /// once. `None` (or a [`model::kvcalib::KvCalib::disabled`] table) clears
     /// calibration — the append dispatch falls back to the plain online-
     /// absmax kernel. A no-op on a fp32-KV engine (`kv_int8: false`): there
     /// is nothing to clip.
-    pub fn set_kv_calib(&mut self, calib: Option<crate::kvcalib::KvCalib>) {
+    pub fn set_kv_calib(&mut self, calib: Option<model::kvcalib::KvCalib>) {
         let calib = calib.filter(|c| !c.is_disabled());
         if let Some(c) = &calib {
             assert_eq!(c.n_layers as u32, self.cfg.n_layers, "kv_calib: n_layers mismatch");
@@ -1202,6 +1202,60 @@ impl Engine {
         last
     }
 
+    /// Like [`Engine::prefill`], but returns EVERY position's final-norm
+    /// hidden state (`[prompt.len() * d_model]`, row-major) instead of only
+    /// the last — what teacher-forced held-out scoring needs (`qwen::eval`),
+    /// where every position's loss counts, not just the next-token
+    /// prediction after the whole prompt.
+    ///
+    /// Deliberately bypasses the prefix cache (`self.prefix`) entirely: an
+    /// eval pass scores a set of independent held-out samples, not a live
+    /// conversation, so there is no shared prefix to exploit and no reason
+    /// to let one sample's cache entries affect another's — full recompute
+    /// per sample keeps the measurement simple and reproducible. `run_batched`
+    /// itself already computes every chunk row's hidden state (`prefill`
+    /// just slices out the last one); this keeps all of them.
+    pub(crate) fn score_positions(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
+        assert!(table.is_empty(), "score_positions expects a fresh sequence");
+        assert!(
+            prompt.len() <= self.max_seq_len(),
+            "prompt of {} tokens exceeds the engine's per-sequence capacity of {}",
+            prompt.len(),
+            self.max_seq_len()
+        );
+        if let Some(&bad) = prompt.iter().find(|&&t| t >= self.cfg.vocab) {
+            panic!("prompt token {bad} is outside the model vocabulary ({})", self.cfg.vocab);
+        }
+        let d = self.cfg.d_model as usize;
+        let bs = self.block_size;
+        let mbt = self.max_blocks_per_seq as usize;
+        let n = prompt.len() as u32;
+        let chunk = self.max_prefill.max(1);
+        let mut out = vec![0f32; prompt.len() * d];
+        let mut start = 0u32;
+        while start < n {
+            let cc = (n - start).min(chunk);
+            table.reserve(cc, &mut self.alloc).expect("KV pool exhausted");
+            let (mut positions, mut seqlens, mut blocks, mut offsets) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let mut bt = vec![0u32; cc as usize * mbt];
+            for i in 0..cc {
+                let pos = start + i;
+                let (bl, off) = table.locate(pos, bs);
+                positions.push(pos);
+                seqlens.push(pos + 1);
+                blocks.push(bl);
+                offsets.push(off);
+                for (lb, &phys) in table.blocks().iter().enumerate() {
+                    bt[i as usize * mbt + lb] = phys;
+                }
+            }
+            let hidden = self.run_batched(cc, Input::Tokens(&prompt[start as usize..(start + cc) as usize]), &positions, &seqlens, &blocks, &offsets, &bt);
+            out[start as usize * d..(start + cc) as usize * d].copy_from_slice(&hidden[..cc as usize * d]);
+            start += cc;
+        }
+        out
+    }
+
     /// Release up to `want` least-recently-used cache-only prefix blocks back
     /// to the pool — the admission path calls this when the pool is short.
     pub(crate) fn reclaim_prefix(&mut self, want: u32) -> u32 {
@@ -1229,7 +1283,7 @@ impl Engine {
     /// `hostmath::matvec`'s doc comment) — a real per-request stall this
     /// device-side-everything-else engine had left unfixed at exactly the one
     /// remaining host head.
-    fn logits(&self, hidden: &[f32]) -> Vec<f32> {
+    pub(crate) fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         let (d, v) = (self.cfg.d_model as usize, self.cfg.vocab as usize);
         model::hostmath::matvec_par(&self.head, hidden, v, d)
     }
@@ -1267,7 +1321,7 @@ impl Engine {
     pub fn blocks_for(&self, tokens: u32) -> u32 {
         tokens.div_ceil(self.block_size)
     }
-    fn release_table(&mut self, t: &mut BlockTable) {
+    pub(crate) fn release_table(&mut self, t: &mut BlockTable) {
         t.release(&mut self.alloc);
     }
 
@@ -2280,7 +2334,7 @@ mod tests {
         assert!(err < 0.2 * mag + 1e-3, "int8 diverges too far: {err} vs mag {mag}");
     }
 
-    /// A [`crate::kvcalib::KvCalib::disabled`] table must select the SAME
+    /// A [`model::kvcalib::KvCalib::disabled`] table must select the SAME
     /// kernel path as no calibration at all (`set_kv_calib(None)`) — the
     /// selector switches on `self.kv_calib.is_some()` post-filtering, so a
     /// disabled-but-`Some` table must not accidentally take the clipped path.
@@ -2289,14 +2343,14 @@ mod tests {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
         let prompt = vec![1u32, 5, 3, 9, 2];
-        let run = |calib: Option<crate::kvcalib::KvCalib>| -> Vec<f32> {
+        let run = |calib: Option<model::kvcalib::KvCalib>| -> Vec<f32> {
             let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, true, false);
             e.set_kv_calib(calib);
             let mut t = BlockTable::new();
             e.prefill(&mut t, &prompt)
         };
         let uncalibrated = run(None);
-        let disabled = run(Some(crate::kvcalib::KvCalib::disabled(cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize)));
+        let disabled = run(Some(model::kvcalib::KvCalib::disabled(cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize)));
         assert_eq!(uncalibrated, disabled, "a disabled clip table must be bit-identical to no calibration at all");
     }
 
@@ -2316,7 +2370,7 @@ mod tests {
         // A deliberately tiny clip (far below any real activation magnitude)
         // on every stream -- guaranteed to bind on every token, so this is a
         // maximally aggressive, unambiguous "does the clip do anything" probe.
-        let mut calib = crate::kvcalib::KvCalib::disabled(cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize);
+        let mut calib = model::kvcalib::KvCalib::disabled(cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize);
         for row in calib.k.iter_mut().chain(calib.v.iter_mut()) {
             row.fill(1e-6);
         }
