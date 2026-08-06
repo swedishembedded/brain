@@ -46,13 +46,14 @@ impl Zeros {
             m.insert(format!("{p}.weight"), vec![c as i64]);
             m.insert(format!("{p}.bias"), vec![c as i64]);
         };
+        let names = t.names;
         let mut resnet = |p: &str, cin: u32, cout: u32, m: &mut HashMap<String, Vec<i64>>| {
             norm(&format!("{p}.norm1"), cin, m);
             conv(&format!("{p}.conv1"), cout, cin, 3, m);
             norm(&format!("{p}.norm2"), cout, m);
             conv(&format!("{p}.conv2"), cout, cout, 3, m);
             if cin != cout {
-                conv(&format!("{p}.conv_shortcut"), cout, cin, 1, m);
+                conv(&format!("{p}.{}", names.shortcut), cout, cin, 1, m);
             }
         };
 
@@ -65,8 +66,8 @@ impl Zeros {
         resnet("decoder.mid_block.resnets.0", mid, mid, &mut m);
         if t.mid_block_add_attention {
             let p = "decoder.mid_block.attentions.0";
-            norm(&format!("{p}.group_norm"), mid, &mut m);
-            for n in ["to_q", "to_k", "to_v", "to_out.0"] {
+            norm(&format!("{p}.{}", names.attn_norm), mid, &mut m);
+            for n in [names.attn_q, names.attn_k, names.attn_v, names.attn_proj] {
                 m.insert(format!("{p}.{n}.weight"), vec![mid as i64, mid as i64]);
                 m.insert(format!("{p}.{n}.bias"), vec![mid as i64]);
             }
@@ -93,6 +94,7 @@ impl Zeros {
 /// Widths all differ so a schedule walked the wrong way cannot pass.
 fn sdxl_tiny() -> VaeTopo {
     VaeTopo {
+        names: npu::vae_topology::TopoNames::diffusers(),
         latent_channels: 4,
         out_channels: 3,
         block_out_channels: vec![32, 64, 96, 128],
@@ -202,4 +204,21 @@ fn the_export_round_trips_with_the_declared_shapes() {
     assert!(g.output.iter().any(|v| v.name == "image"));
     // 4 blocks -> 8x upscale.
     assert_eq!(t.upscale(), 8);
+}
+
+/// The VQGAN autoencoder is the SAME graph under different leaf names, so it
+/// must build from this topology with `TopoNames::vqgan()` rather than a copied
+/// module. Asserts the op counts are IDENTICAL — only the names differ.
+#[test]
+fn the_vqgan_naming_builds_the_same_graph() {
+    let d = sdxl_tiny();
+    let v = VaeTopo { names: npu::vae_topology::TopoNames::vqgan(), ..sdxl_tiny() };
+    let (cd, cv) = (op_counts(&build(&d)), op_counts(&build(&v)));
+    assert_eq!(cd, cv, "diffusers and VQGAN naming must yield the same graph shape");
+
+    // ...and the names really did change, or the test above is vacuous.
+    let g = build(&v);
+    let init: Vec<&str> = g.graph().initializers.iter().map(|i| i.name.as_str()).collect();
+    assert!(init.iter().any(|n| n.contains(".q.weight")), "VQGAN uses `q`, not `to_q`");
+    assert!(!init.iter().any(|n| n.contains(".to_q.")), "no diffusers names should survive");
 }

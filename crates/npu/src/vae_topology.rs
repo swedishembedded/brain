@@ -28,10 +28,60 @@ use onnx::{GraphBuilder, Node};
 use crate::topo::TopoBase;
 use crate::topology::WeightSource;
 
+/// The per-architecture leaf tensor names, mirroring `vae::blocks::BlockNames`
+/// without depending on that crate.
+///
+/// diffusers and VQGAN are the SAME graph with different leaf names — a
+/// resnet's projection shortcut is `conv_shortcut` in one and `conv_out` in the
+/// other, an attention's projections `to_q/to_k/to_v/to_out.0` over a
+/// `group_norm` versus `q/k/v/proj_out` over a `norm`. Parameterising them is
+/// what stops `vqgan_topology` being a copy of this file (the shared block
+/// builder makes exactly this choice for the same reason).
+#[derive(Clone, Copy, Debug)]
+pub struct TopoNames {
+    pub shortcut: &'static str,
+    pub attn_norm: &'static str,
+    pub attn_q: &'static str,
+    pub attn_k: &'static str,
+    pub attn_v: &'static str,
+    pub attn_proj: &'static str,
+    /// Prefix the decoder's tensors sit under (`decoder` for both today).
+    pub decoder: &'static str,
+}
+
+impl TopoNames {
+    /// diffusers `AutoencoderKL` naming.
+    pub const fn diffusers() -> TopoNames {
+        TopoNames {
+            shortcut: "conv_shortcut",
+            attn_norm: "group_norm",
+            attn_q: "to_q",
+            attn_k: "to_k",
+            attn_v: "to_v",
+            attn_proj: "to_out.0",
+            decoder: "decoder",
+        }
+    }
+    /// `basicsr` VQGAN naming (CodeFormer's autoencoder).
+    pub const fn vqgan() -> TopoNames {
+        TopoNames {
+            shortcut: "conv_out",
+            attn_norm: "norm",
+            attn_q: "q",
+            attn_k: "k",
+            attn_v: "v",
+            attn_proj: "proj_out",
+            decoder: "decoder",
+        }
+    }
+}
+
 /// The decoder's shape, mirroring `vae::VaeConfig` without depending on it
 /// (the `npu` crate stays free of model crates).
 #[derive(Clone, Debug)]
 pub struct VaeTopo {
+    /// Leaf names — [`TopoNames::diffusers`] or [`TopoNames::vqgan`].
+    pub names: TopoNames,
     pub latent_channels: u32,
     pub out_channels: u32,
     /// Encoder channel schedule, low→high res. The decoder walks it REVERSED.
@@ -120,8 +170,11 @@ impl<'a> Vae<'a> {
         let n2 = self.gn(&format!("{p}.norm2"), cout, h, w_, t, w, &c1);
         let s2 = self.b.silu_t(&n2);
         let c2 = self.conv(&format!("{p}.conv2"), cout, cout, 3, w, &s2);
-        let skip =
-            if cin != cout { self.conv(&format!("{p}.conv_shortcut"), cout, cin, 1, w, x) } else { x.to_string() };
+        let skip = if cin != cout {
+            self.conv(&format!("{p}.{}", t.names.shortcut), cout, cin, 1, w, x)
+        } else {
+            x.to_string()
+        };
         self.b.add_t(&c2, &skip)
     }
 
@@ -130,7 +183,7 @@ impl<'a> Vae<'a> {
     #[allow(clippy::too_many_arguments)]
     fn attn(&mut self, p: &str, c: u32, h: u32, w_: u32, t: &VaeTopo, w: &dyn WeightSource, x: &str) -> String {
         let hw = (h * w_) as i64;
-        let n = self.gn(&format!("{p}.group_norm"), c, h, w_, t, w, x);
+        let n = self.gn(&format!("{p}.{}", t.names.attn_norm), c, h, w_, t, w, x);
         // [1,C,H,W] -> [1,HW,C] so the projections are plain MatMuls.
         let flat_shape = self.b.tmp("attn_shape_flat");
         self.b.i64(&flat_shape, &[3], vec![1, c as i64, hw]);
@@ -153,9 +206,9 @@ impl<'a> Vae<'a> {
             let m = s.b.matmul(src, &wn);
             s.b.add_t(&m, &bn)
         };
-        let q = proj(self, "to_q", &rows);
-        let k = proj(self, "to_k", &rows);
-        let v = proj(self, "to_v", &rows);
+        let q = proj(self, t.names.attn_q, &rows);
+        let k = proj(self, t.names.attn_k, &rows);
+        let v = proj(self, t.names.attn_v, &rows);
 
         let kt = self.b.transpose(&k, &[0, 2, 1]);
         let scores = self.b.matmul(&q, &kt);
@@ -164,7 +217,7 @@ impl<'a> Vae<'a> {
         let scaled = self.b.mul_t(&scores, &scale);
         let probs = self.b.softmax(&scaled, -1);
         let ctx = self.b.matmul(&probs, &v);
-        let out = proj(self, "to_out.0", &ctx);
+        let out = proj(self, t.names.attn_proj, &ctx);
 
         // back to [1,C,H,W] and the residual onto the PRE-norm input.
         let back = self.b.transpose(&out, &[0, 2, 1]);
@@ -207,33 +260,34 @@ pub fn build_vae_decoder_graph(t: &VaeTopo, w: &dyn WeightSource, g: &mut GraphB
     } else {
         "latent".to_string()
     };
-    let mut x = m.conv("decoder.conv_in", mid_c, t.latent_channels, 3, w, &z);
+    let dec = t.names.decoder;
+    let mut x = m.conv(&format!("{dec}.conv_in"), mid_c, t.latent_channels, 3, w, &z);
 
     let (mut ch, mut cw) = (t.lh, t.lw);
-    x = m.resnet("decoder.mid_block.resnets.0", mid_c, mid_c, ch, cw, t, w, &x);
+    x = m.resnet(&format!("{dec}.mid_block.resnets.0"), mid_c, mid_c, ch, cw, t, w, &x);
     if t.mid_block_add_attention {
-        x = m.attn("decoder.mid_block.attentions.0", mid_c, ch, cw, t, w, &x);
+        x = m.attn(&format!("{dec}.mid_block.attentions.0"), mid_c, ch, cw, t, w, &x);
     }
-    x = m.resnet("decoder.mid_block.resnets.1", mid_c, mid_c, ch, cw, t, w, &x);
+    x = m.resnet(&format!("{dec}.mid_block.resnets.1"), mid_c, mid_c, ch, cw, t, w, &x);
 
     let mut cin = mid_c;
     for (i, &out_c) in rev.iter().enumerate() {
         for r in 0..=t.layers_per_block {
-            x = m.resnet(&format!("decoder.up_blocks.{i}.resnets.{r}"), cin, out_c, ch, cw, t, w, &x);
+            x = m.resnet(&format!("{dec}.up_blocks.{i}.resnets.{r}"), cin, out_c, ch, cw, t, w, &x);
             cin = out_c;
         }
         if i + 1 < rev.len() {
             x = m.upsample2(&x);
             ch *= 2;
             cw *= 2;
-            x = m.conv(&format!("decoder.up_blocks.{i}.upsamplers.0.conv"), out_c, out_c, 3, w, &x);
+            x = m.conv(&format!("{dec}.up_blocks.{i}.upsamplers.0.conv"), out_c, out_c, 3, w, &x);
         }
     }
 
     // Head: GroupNorm -> SiLU -> conv_out, writing the graph output.
-    let n = m.gn("decoder.conv_norm_out", cin, ch, cw, t, w, &x);
+    let n = m.gn(&format!("{dec}.conv_norm_out"), cin, ch, cw, t, w, &x);
     let a = m.b.silu_t(&n);
-    let (wn, bn) = ("decoder.conv_out.weight".to_string(), "decoder.conv_out.bias".to_string());
+    let (wn, bn) = (format!("{dec}.conv_out.weight"), format!("{dec}.conv_out.bias"));
     m.b.f32(&wn, &[t.out_channels as i64, cin as i64, 3, 3], w.get(&wn));
     m.b.f32(&bn, &[t.out_channels as i64], w.get(&bn));
     m.b.g.add(
