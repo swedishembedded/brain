@@ -2376,9 +2376,23 @@ impl Ln2dNames {
 /// The earlier version of this comment claimed the permutes ran at "377 GB/s,
 /// at the memory roof" — that number came from a timing loop of bare `submit`s
 /// that never reached the device, and 377 GB/s on a 346 GB/s card is
-/// self-refuting. **Anyone adding the kernel must re-run the test above and
-/// show the fused numbers next to these; anyone NOT adding it should not cite
-/// this table as proof that it cannot win.**
+/// self-refuting.
+///
+/// ## RESOLVED — the fused kernel was written, and it wins
+///
+/// `layernorm2d` exists (`crates/kernels/wgsl/layernorm2d.wgsl`): one invocation
+/// per spatial position, walking `C` at stride `H*W`, barrier-free so
+/// `backend-cpu` JITs it. Gated against a host oracle in
+/// `crates/gradcheck/tests/layernorm2d_kernels.rs`. Measured against this same
+/// composition: **4.38x at `[1,32,65536]`**, 2.72x at `[1,64,16384]`, 1.34x at
+/// `[1,256,4096]`, 1.09x at `[1,96,1024]` — the margin growing with `H*W`
+/// exactly as the bandwidth column above predicts.
+///
+/// It is opt-in through [`LayerNorm2d::infer_only`] and NOT the default,
+/// because the composed forward's `xt` is the backward's activation cache and
+/// the fused kernel does not write it. That is a real constraint, not
+/// conservatism: a trainable `LayerNorm2d` still takes the composed path, and
+/// making the fused one differentiable means writing its backward.
 ///
 /// Which LayerNorm kernel actually runs is decided by `model::block`'s
 /// `LayerNormIds` seam on the queried `DeviceCaps` — the one selection site in
@@ -2397,6 +2411,10 @@ pub struct LayerNorm2d {
     dxt: DeviceBuffer,  // NLC grad wrt xt
     mean: DeviceBuffer, // per-row mean [N*HW]
     inv: DeviceBuffer,  // per-row 1/sqrt(var+eps) [N*HW]
+    /// Take the fused single-dispatch `layernorm2d` path, which does NOT
+    /// populate `xt`/`yt` and therefore has no backward. Off by default, so the
+    /// safe (differentiable) path is what a caller gets without asking.
+    infer_only: bool,
 }
 
 impl LayerNorm2d {
@@ -2423,7 +2441,25 @@ impl LayerNorm2d {
             dxt: ctx.act(total),
             mean: ctx.act(rows),
             inv: ctx.act(rows),
+            infer_only: false,
         }
+    }
+
+    /// Take the fused `layernorm2d` kernel: ONE dispatch, NCHW in and out, no
+    /// permute either side.
+    ///
+    /// Measured 4.38x over the composed path at `[1,32,65536]`, 2.72x at
+    /// `[1,64,16384]`, 1.34x at `[1,256,4096]`, 1.09x at `[1,96,1024]` — the
+    /// margin growing with `H*W` (`docs/kernel-checklist.md` §E).
+    ///
+    /// Inference ONLY, and the name says so because the reason is structural,
+    /// not a tuning choice: the composed forward's `xt` (the NLC image of the
+    /// input) IS the backward's activation cache, and the fused kernel never
+    /// writes it. [`backward`](Self::backward) panics rather than read a stale
+    /// buffer. Silently ignored if the model did not register `layernorm2d`.
+    pub fn infer_only(mut self) -> LayerNorm2d {
+        self.infer_only = true;
+        self
     }
 
     /// torch-named (`P.weight` / `P.bias`) at `eps = 1e-6` — ConvNeXt / SAM 2.
@@ -2453,6 +2489,16 @@ impl LayerNorm2d {
 
     pub fn forward(&self, ctx: &Ctx, ps: &ParamStore, x: &DeviceBuffer) {
         let (total, c, rows) = (self.shape.numel(), self.shape.c, self.rows());
+        if self.infer_only && ctx.ids.layernorm2d != crate::ids::NONE {
+            let s = ctx.step(
+                ctx.ids.layernorm2d,
+                &[x, ps.w(&self.names.gamma), ps.w(&self.names.beta), &self.out],
+                &[self.shape.n, c, self.shape.h * self.shape.w, f(self.eps)],
+                rows,
+            );
+            ctx.gpu.submit(&[], &[s]);
+            return;
+        }
         let s_in = ctx.step(ctx.ids.need(ctx.ids.nchw_nlc, "nchw_nlc"), &[x, &self.xt], &self.perm_params(), total);
         let s_ln = mblock::layernorm_fwd(
             ctx.gpu,
@@ -2478,6 +2524,11 @@ impl LayerNorm2d {
     /// Takes no `x_in`: the forward cached the NLC image of the input in `xt`,
     /// which is what every backward kernel here reads.
     pub fn backward(&self, ctx: &Ctx, ps: &ParamStore, d_out: &DeviceBuffer, d_in: &DeviceBuffer) {
+        assert!(
+            !self.infer_only,
+            "LayerNorm2d::infer_only() takes the fused forward, which does not write the \
+             xt activation cache this backward reads — construct it without infer_only() to train it"
+        );
         let (total, c, rows) = (self.shape.numel(), self.shape.c, self.rows());
         let steps = [
             // The adjoint of nlc_nchw is nchw_nlc — the same permutation matrix

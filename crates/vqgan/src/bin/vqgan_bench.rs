@@ -391,8 +391,137 @@ fn convbwd_ab(reps: usize) {
     }
 }
 
+/// `vqgan_bench dwtn [reps]` — A/B `matmul_dw_reg` against `matmul_dw_reg_tn`.
+///
+/// The dw GEMM is a TN contraction: `dW[n,k] += sum_m dY[m,n]*X[m,k]` sums over
+/// the ROW index of both operands, so consecutive lanes read a row apart. The
+/// profile shows it at 3.8x the per-call cost of `matmul_dx_reg` at IDENTICAL
+/// m/k/n and a third of its bandwidth, with the same FLOP count — a coalescing
+/// gap, not an arithmetic one. `_tn` takes dY already transposed (which for conv
+/// backward is just the raw NCHW dY) so the A-side load coalesces.
+///
+/// Correctness first, against a HOST oracle: a kernel that disagrees is not a
+/// faster kernel.
+fn dwtn_ab(reps: usize) {
+    let kernels: &[(&str, &str)] =
+        &[
+        ("matmul_dw_reg", kernels::MATMUL_DW_REG),
+        ("matmul_dw_reg_tn", kernels::MATMUL_DW_REG_TN),
+        ("matmul_dw_reg_splitk", kernels::MATMUL_DW_REG_SPLITK),
+        ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
+    ];
+    let gpu = Gpu::new(kernels);
+    let (k_dw, k_tn, k_sk, k_rd) = (0usize, 1usize, 2usize, 3usize);
+
+    // ---- correctness, small enough to check on the host --------------------
+    {
+        let (m, k, n) = (37u32, 23u32, 19u32);
+        let mut rng = data::rng::Rng::new(7);
+        let dy: Vec<f32> = (0..(m * n) as usize).map(|_| rng.next_f32() - 0.5).collect();
+        let x: Vec<f32> = (0..(m * k) as usize).map(|_| rng.next_f32() - 0.5).collect();
+        // dY^T, the layout `_tn` expects.
+        let mut dyt = vec![0.0f32; (m * n) as usize];
+        for mm in 0..m as usize {
+            for nn in 0..n as usize {
+                dyt[nn * m as usize + mm] = dy[mm * n as usize + nn];
+            }
+        }
+        let mut want = vec![0.0f64; (n * k) as usize];
+        for nn in 0..n as usize {
+            for kk in 0..k as usize {
+                let mut acc = 0.0f64;
+                for mm in 0..m as usize {
+                    acc += dy[mm * n as usize + nn] as f64 * x[mm * k as usize + kk] as f64;
+                }
+                want[nn * k as usize + kk] = acc;
+            }
+        }
+        for (name, ki, a_host) in [("matmul_dw_reg", k_dw, &dy), ("matmul_dw_reg_tn", k_tn, &dyt)] {
+            let ab = gpu.storage((m * n) as u64);
+            let xb = gpu.storage((m * k) as u64);
+            let ob = gpu.storage((n * k) as u64);
+            gpu.write_f32(&ab, a_host);
+            gpu.write_f32(&xb, &x);
+            gpu.write_f32(&ob, &vec![0.0f32; (n * k) as usize]); // it ACCUMULATES
+            gpu.submit(&[], &[gpu.step(ki, &[&ab, &xb, &ob], &[m, k, n], n.div_ceil(128) * k.div_ceil(128) * 256)]);
+            gpu.poll_wait();
+            let got = gpu.read(&ob, (n * k) as usize);
+            let err = got.iter().zip(&want).map(|(a, b)| (*a as f64 - b).abs()).fold(0.0f64, f64::max);
+            println!("  oracle [{m},{k},{n}]  {name:<18} max|delta| {err:.3e}");
+        }
+        // split-K, at several slice counts: the reduction must not change what
+        // the GEMM means, at any split.
+        for slices in [1u32, 3, 8, 64] {
+            let ab = gpu.storage((m * n) as u64);
+            let xb = gpu.storage((m * k) as u64);
+            let ob = gpu.storage((n * k) as u64);
+            let pb = gpu.storage((slices * n * k) as u64);
+            gpu.write_f32(&ab, &dy);
+            gpu.write_f32(&xb, &x);
+            gpu.write_f32(&ob, &vec![0.0f32; (n * k) as usize]);
+            let tiles = n.div_ceil(128) * k.div_ceil(128);
+            gpu.submit(&[], &[
+                gpu.step(k_sk, &[&ab, &xb, &pb], &[m, k, n, slices], slices * tiles * 256),
+                gpu.step(k_rd, &[&pb, &ob], &[n * k, slices], (n * k).div_ceil(64) * 64),
+            ]);
+            gpu.poll_wait();
+            let got = gpu.read(&ob, (n * k) as usize);
+            let err = got.iter().zip(&want).map(|(a, b)| (*a as f64 - b).abs()).fold(0.0f64, f64::max);
+            println!("  oracle [{m},{k},{n}]  splitk s={slices:<3}        max|delta| {err:.3e}");
+        }
+    }
+
+    // ---- speed, at the shapes the VQGAN backward actually dispatches -------
+    println!();
+    println!("{:<30} {:>10} {:>10} {:>9} {:>10} {:>10}", "conv (cin,cout,HxW)", "dw", "dw_tn", "speedup", "GB/s dw", "GB/s tn");
+    for &(cin, cout, h, w, k) in &[
+        (512u32, 512u32, 64u32, 64u32, 3u32),
+        (512, 512, 128, 128, 3),
+        (256, 256, 256, 256, 3),
+        (128, 128, 512, 512, 3),
+    ] {
+        let (hw, cinkk) = ((h * w) as u64, (cin * k * k) as u64);
+        let (m, kk, n) = (hw as u32, cinkk as u32, cout);
+        let dy = gpu.storage((cout as u64) * hw); // [m,n] and [n,m] are the same size
+        let col = gpu.storage(hw * cinkk);
+        let dw = gpu.storage((cout as u64) * cinkk);
+        let threads = n.div_ceil(128) * kk.div_ceil(128) * 256;
+        let t_a = best_of(&gpu, &[gpu.step(k_dw, &[&dy, &col, &dw], &[m, kk, n], threads)], reps);
+        let t_b = best_of(&gpu, &[gpu.step(k_tn, &[&dy, &col, &dw], &[m, kk, n], threads)], reps);
+        let tiles = n.div_ceil(128) * kk.div_ceil(128);
+        // bytes: dY + col read, dW read-modify-write.
+        let bytes = 4.0 * ((m as f64 * n as f64) + (m as f64 * kk as f64) + 2.0 * (n as f64 * kk as f64));
+        println!(
+            "({cin:4},{cout:4}) {h:4}x{w:<4}          {:>10.3} {:>10.3} {:>8.2}x {:>10.1} {:>10.1}",
+            t_a * 1e3, t_b * 1e3, t_a / t_b, bytes / t_a / 1e9, bytes / t_b / 1e9
+        );
+        // Sweep the slice count rather than guess it: more slices buys
+        // occupancy but costs a wider partial buffer and a longer reduction.
+        let mut best = (1u32, f64::INFINITY);
+        for slices in [1u32, 2, 4, 8, 16, 32, 64] {
+            if (slices as u64) * (n as u64) * (kk as u64) > 400_000_000 {
+                continue;
+            }
+            let pb = gpu.storage((slices as u64) * (n as u64) * (kk as u64));
+            let t = best_of(&gpu, &[
+                gpu.step(k_sk, &[&dy, &col, &pb], &[m, kk, n, slices], slices * tiles * 256),
+                gpu.step(k_rd, &[&pb, &dw], &[n * kk, slices], (n * kk).div_ceil(64) * 64),
+            ], reps);
+            print!("  s={slices}:{:.1}", t * 1e3);
+            if t < best.1 {
+                best = (slices, t);
+            }
+        }
+        println!("   -> best s={} at {:.3} ms ({:.2}x, {} wgs)", best.0, best.1 * 1e3, t_a / best.1, best.0 * tiles);
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
+    if a.get(1).map(|s| s == "dwtn").unwrap_or(false) {
+        dwtn_ab(a.get(2).and_then(|s| s.parse().ok()).unwrap_or(3));
+        return;
+    }
     if a.get(1).map(|s| s == "convbwd").unwrap_or(false) {
         convbwd_ab(a.get(2).and_then(|s| s.parse().ok()).unwrap_or(3));
         return;

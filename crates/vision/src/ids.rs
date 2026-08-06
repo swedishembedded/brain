@@ -107,6 +107,11 @@ pub struct ConvKernelIds {
     pub layernorm_dx: usize,
     pub layernorm_dgamma: usize,
     pub layernorm_dbeta: usize,
+    /// The FUSED channels-first LayerNorm (`layernorm2d`), NCHW in and out.
+    /// Optional: a model that does not register it keeps the composed
+    /// `nchw_nlc` -> `layernorm_rows` -> `nlc_nchw` path, which is also the only
+    /// path with a backward. See `LayerNorm2d::infer_only`.
+    pub layernorm2d: usize,
     // ---- fused conv -> affine -> act (inference only) ----
     pub conv_act: usize,
     pub conv_act_tiled: usize,
@@ -213,6 +218,7 @@ impl ConvKernelIds {
             layernorm_dx: k("layernorm_dx"),
             layernorm_dgamma: k("layernorm_dgamma"),
             layernorm_dbeta: k("layernorm_dbeta"),
+            layernorm2d: k("layernorm2d"),
             conv_act: k("conv_act"),
             conv_act_tiled: k("conv_act_tiled"),
             conv_act_reg: k("conv_act_reg"),

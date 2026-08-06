@@ -237,7 +237,9 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (m, k, n) = (p(0)?, p(1)?, p(2)?);
             f(2 * m * k * n, 4 * (m * n + n * k + m * k))
         }
-        "matmul_dw" | "matmul_dw_reg" => {
+        // `_tn` differs only in how dY is INDEXED (already transposed), not in
+        // what it reads or computes, so the cost is identical.
+        "matmul_dw" | "matmul_dw_reg" | "matmul_dw_reg_tn" | "matmul_dw_reg_splitk" => {
             let (m, k, n) = (p(0)?, p(1)?, p(2)?);
             f(2 * m * k * n, 4 * (m * n + m * k + 2 * n * k))
         }

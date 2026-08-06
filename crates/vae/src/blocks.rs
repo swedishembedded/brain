@@ -130,7 +130,7 @@ pub const MATMUL_REG3_SLOT: usize = K_MATMUL;
 /// cooperative twin anywhere in the tree — that is the documented §C.2 perf gap
 /// in `docs/kernel-checklist.md`, NOT a correctness gate, because none of them
 /// uses `workgroupBarrier()` and all three are exact on `backend-cpu`.
-pub const BWD_KERNELS: [(&str, &str); 19] = [
+pub const BWD_KERNELS: [(&str, &str); 21] = [
     ("conv2d_dx", kernels::CONV2D_DX),
     ("conv2d_dw", kernels::CONV2D_DW),
     ("bias_grad", kernels::BIAS_GRAD),
@@ -157,7 +157,22 @@ pub const BWD_KERNELS: [(&str, &str); 19] = [
     // The two-stage replacement for `gn_dsum`, which is one lane per group.
     ("gn_dsum_part", kernels::GN_DSUM_PART),
     ("gn_dsum2", kernels::GN_DSUM2),
+    // Split-K weight gradient. `matmul_dw_reg`'s tile grid is
+    // ceil(Cout/128)*ceil(CinKK/128) workgroups REGARDLESS of how long the
+    // contraction is, so a wide-shallow conv leaves most of the card idle —
+    // measured at 9 workgroups and 9.4% of peak on a 30-SM P40. These split the
+    // contraction instead. See `matmul_dw_reg_splitk.wgsl`.
+    ("matmul_dw_reg_splitk", kernels::MATMUL_DW_REG_SPLITK),
+    ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
 ];
+
+/// Workgroups the split-K weight gradient aims to launch.
+///
+/// Swept per shape (`vqgan_bench dwtn`): every VQGAN conv-backward shape's
+/// optimum landed on **288** workgroups — 144 tiles x 2 slices, 36 x 8, and
+/// 9 x 32 all beat their neighbours — i.e. ~9.6 per SM on the P40's 30. So the
+/// slice count is not a constant to guess but `ceil(TARGET / tiles)`.
+pub const DW_SPLITK_TARGET_WGS: u32 = 288;
 
 /// Minimum output channels for the LOWERED conv input gradient.
 ///

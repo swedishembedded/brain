@@ -57,6 +57,8 @@ const B_COL2IM: usize = 15;
 const B_MATMUL_DW_REG: usize = 16;
 const B_GN_DSUM_PART: usize = 17;
 const B_GN_DSUM2: usize = 18;
+const B_MATMUL_DW_SPLITK: usize = 19;
+const B_DW_SPLITK_REDUCE: usize = 20;
 
 /// Where the caller placed [`super::BWD_KERNELS`] in its kernel set.
 #[derive(Clone, Copy)]
@@ -196,12 +198,36 @@ impl Trace {
                         &[*cin, *h, *w_in, *k, *stride, *pad, *ho, *wo, cinkk, 0, hw],
                         hw * cinkk,
                     ));
-                    r.push(r.gpu.step(
-                        r.ids.k(B_MATMUL_DW_REG),
-                        &[&t, &col, grads.g(w)],
-                        &[hw, cinkk, *cout],
-                        cout.div_ceil(128) * cinkk.div_ceil(128) * 256,
-                    ));
+                    // dW's tile grid is ceil(Cout/128)*ceil(CinKK/128) — it does
+                    // NOT grow with the contraction length, so a wide-shallow
+                    // conv launches a handful of workgroups and idles the card.
+                    // Split the contraction to reach `DW_SPLITK_TARGET_WGS`.
+                    let tiles = cout.div_ceil(128) * cinkk.div_ceil(128);
+                    let slices = super::DW_SPLITK_TARGET_WGS.div_ceil(tiles).max(1).min(hw.div_ceil(8));
+                    if slices > 1 {
+                        let rc = (*cout as u64) * cinkk as u64;
+                        let part = r.tmp(rc * slices as u64);
+                        r.push(r.gpu.step(
+                            r.ids.k(B_MATMUL_DW_SPLITK),
+                            &[&t, &col, &part],
+                            &[hw, cinkk, *cout, slices],
+                            slices * tiles * 256,
+                        ));
+                        r.push(r.gpu.step(
+                            r.ids.k(B_DW_SPLITK_REDUCE),
+                            &[&part, grads.g(w)],
+                            &[cout * cinkk, slices],
+                            (cout * cinkk).div_ceil(64) * 64,
+                        ));
+                        r.give(rc * slices as u64, part);
+                    } else {
+                        r.push(r.gpu.step(
+                            r.ids.k(B_MATMUL_DW_REG),
+                            &[&t, &col, grads.g(w)],
+                            &[hw, cinkk, *cout],
+                            tiles * 256,
+                        ));
+                    }
                     r.give((hw * cinkk) as u64, col);
                 } else {
                     r.push(r.gpu.step(r.ids.k(B_CONV_DW), &[&dy, x, grads.g(w)], &p, cout * cin * k * k));
