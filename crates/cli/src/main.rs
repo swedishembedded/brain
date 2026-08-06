@@ -199,6 +199,15 @@ BENCHMARK SUITE (architecture evaluation)
                                            # in the best capability direction (headroom x size-slope)
   brain bench compare <a.json> <b.json> ...# side-by-side leaderboard across results artifacts
 
+HTTP INFERENCE APIS (brain as an OpenAI / Anthropic / OpenRouter backend)
+  brain serve [--openai [PORT]] [--anthropic [PORT]] [--openrouter [PORT]] [--dbus]
+              [--models-dir DIR] [--api-keys-out FILE] [--ready-file PATH]
+      Serves the shared executor over localhost HTTP: one port + one freshly
+      generated key per dialect (defaults: openai 8788, anthropic 8787,
+      openrouter 8789). OpenAI/OpenRouter base URL: http://127.0.0.1:PORT
+      *or* http://127.0.0.1:PORT/v1 -- both work.  Full reference:
+      brain serve --help
+
 EVENT/STDIO CONTROLLER
   brain run [--gpt <ckpt>] [--yolo <ckpt>] [--conf X] [--max-new N --temp X --top-k K --seed S]
       Event-driven HFSM controller: read JSONL events on stdin, emit JSONL events
@@ -653,6 +662,23 @@ fn main() {
             eprintln!("brain: unknown command '{other}'\n");
             print!("{HELP}");
             std::process::exit(2);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HELP;
+
+    /// `brain --help` must at least point a reader at the HTTP serving surface
+    /// and its reference (`brain serve --help`) -- before this it documented
+    /// zero HTTP serving flags, so nothing told a reader brain is an OpenAI
+    /// backend at all.
+    #[test]
+    fn global_help_advertises_the_http_serving_surface() {
+        assert!(HELP.contains("brain serve --help"));
+        for f in ["--openai", "--anthropic", "--openrouter", "8788"] {
+            assert!(HELP.contains(f), "{f} missing from the global HTTP serving summary");
         }
     }
 }
