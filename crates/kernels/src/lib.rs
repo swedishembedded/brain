@@ -466,6 +466,8 @@ pub const MATMUL_REG: &str = include_str!("../wgsl/matmul_reg.wgsl");
 pub const MATMUL_REG2: &str = include_str!("../wgsl/matmul_reg2.wgsl");
 /// `wgsl/matmul_reg3.wgsl`
 pub const MATMUL_REG3: &str = include_str!("../wgsl/matmul_reg3.wgsl");
+/// `wgsl/matmul_reg3_splitk.wgsl`
+pub const MATMUL_REG3_SPLITK: &str = include_str!("../wgsl/matmul_reg3_splitk.wgsl");
 /// `wgsl/matmul_rows.wgsl`
 pub const MATMUL_ROWS: &str = include_str!("../wgsl/matmul_rows.wgsl");
 /// `wgsl/matmul_tile.wgsl`
@@ -964,6 +966,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_reg", MATMUL_REG),
     ("matmul_reg2", MATMUL_REG2),
     ("matmul_reg3", MATMUL_REG3),
+    ("matmul_reg3_splitk", MATMUL_REG3_SPLITK),
     ("matmul_rows", MATMUL_ROWS),
     ("matmul_tile", MATMUL_TILE),
     ("matmul_tiled", MATMUL_TILED),

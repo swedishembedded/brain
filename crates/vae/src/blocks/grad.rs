@@ -216,7 +216,9 @@ impl Trace {
                         r.push(r.gpu.step(
                             r.ids.k(B_DW_SPLITK_REDUCE),
                             &[&part, grads.g(w)],
-                            &[cout * cinkk, slices],
+                            // acc = 1: a parameter gradient ACCUMULATES (a
+                            // weight used twice gets two contributions).
+                            &[cout * cinkk, slices, 1],
                             (cout * cinkk).div_ceil(64) * 64,
                         ));
                         r.give(rc * slices as u64, part);

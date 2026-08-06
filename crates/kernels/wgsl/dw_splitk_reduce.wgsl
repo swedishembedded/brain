@@ -36,7 +36,11 @@
 //
 // @workgroup_size(64).
 
-struct Params { rc: u32, slices: u32 };
+// `acc`: 1 accumulates into `dw` (the parameter-gradient contract every
+// adjoint in `blocks::grad` follows), 0 ASSIGNS (a forward split-K GEMM owns
+// its output outright and has nothing to accumulate into). Same flag and same
+// reason as `matmul_dx_reg`'s.
+struct Params { rc: u32, slices: u32, acc: u32 };
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       partial: array<f32>;
@@ -50,9 +54,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     if (i >= p.rc) {
         return;
     }
-    var acc = 0.0;
+    var acc_v = 0.0;
     for (var s = 0u; s < p.slices; s = s + 1u) {
-        acc = acc + partial[s * p.rc + i];
+        acc_v = acc_v + partial[s * p.rc + i];
     }
-    dw[i] = dw[i] + acc;
+    dw[i] = select(acc_v, dw[i] + acc_v, p.acc == 1u);
 }

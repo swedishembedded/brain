@@ -223,7 +223,8 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
 
     match base {
         // ---- GEMMs: out = x[m,k] @ w[n,k]ᵀ (contraction MACs only) ----------
-        "matmul" | "matmul_reg" | "matmul_reg2" | "matmul_reg3" | "matmul_gemv" => {
+        "matmul" | "matmul_reg" | "matmul_reg2" | "matmul_reg3" | "matmul_reg3_splitk"
+        | "matmul_gemv" => {
             let (m, k, n) = (p(0)?, p(1)?, p(2)?);
             f(2 * m * k * n, 4 * (m * k + n * k + m * n))
         }
@@ -895,6 +896,7 @@ mod tests {
             "silu", "silu_bwd", "scale_chan", "dw_splitk_reduce", "gn_dsum_part", "gn_dsum2",
             "gn_dgb_part", "gn_dgb2", "mse_value", "masked_l1", "upsample2_dx", "concat2",
             "concat_split", "matmul_i8", "roof_fma", "mse_grad", "masked_l1_grad",
+            "matmul_reg3_splitk",
             // the served paged tape
             "paged_decode_scores_batched", "paged_decode_scores_wg", "paged_decode_apply_batched",
             "paged_kv_append_batched", "decode_softmax_batched", "rope_paged",
