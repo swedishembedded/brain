@@ -225,6 +225,14 @@ second covers a **backward**, which nothing did until it existed.
 
 Publish the table in the commit. Every number below started as a row in one.
 
+**But the group table is an UPPER BOUND, not the cost.** Each group is drained
+separately, so its number includes a queue round-trip and excludes the overlap
+that kernel would have had in the real submit — on the VQGAN backward the
+grouped sum was 855 ms against a 574 ms whole pass, a 49% inflation. Use the
+table to RANK, and the whole-pass number to decide whether a fix worked. One
+change this session looked like 99 → 30 ms in the table and moved the pass by
+nothing; it was reverted (`docs/lessons.md` #21).
+
 ### F.2 Ask what the top row is running at, against the roof
 
 A percentage of the profile tells you where the time is. A percentage of *peak*
