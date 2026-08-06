@@ -130,11 +130,12 @@ tooling or weights are absent.
 | `tests/e2e/api_conformance.bats` | `test/e2e/api-conformance` | The OpenAI/Anthropic/OpenRouter HTTP dialects, over a real socket, against the deterministic `BRAIN_MOCK=1` model — schema-validated against the vendored OpenAPI specs, plus the auth/DoS/error-hygiene security matrix. |
 | `tests/e2e/shutdown.bats` | `test/e2e/shutdown` | `brain serve` actually exits on SIGINT/SIGTERM, for every surface combination (`--dbus` alone, `--dbus --openai` together, `--openai` alone) — each test starts and kills its own server. |
 | `tests/e2e/examples.bats` | `test/e2e/examples` | Every example under `examples/` actually runs (against the mock, where the model it needs has a mock equivalent) or skips with a clear, honest reason — not silently. A completeness check fails the suite if a tracked example is missing from `tests/e2e/examples/manifest.tsv`, so a newly-added, never-wired example cannot rot the way every existing example did before this suite existed (see the git history around commit `38f384e`). |
+| `tests/e2e/ready.bats` | `test/e2e/ready` | `brain serve --ready-file PATH` appears only after **every** requested surface (HTTP dialects + D-Bus) has bound its listener, and never at all when one fails — and therefore strictly after `--api-keys-out` is written, so a script can wait on one file and then read the keys with no retry. Covers a full bind, a failed bind, a partial bind, and D-Bus alone / D-Bus+HTTP together. |
 | `tests/e2e/claude_code.bats` | `test/e2e/claude-code` | The real `claude` CLI working end-to-end against `brain serve --anthropic` (the deterministic `BRAIN_MOCK` model, so it needs no weights and never hangs on a cold fetch). Skips cleanly unless `claude`/`jq`/`timeout` and a brain binary are present. |
 | `tests/e2e/scheduler.bats` | `test/e2e/scheduler` | Heavy, opt-in (`BRAIN_E2E=1`): residency scheduler batching/eviction, and the generate→detect→annotate pipeline, against **real** z-image + yolo weights and a GPU. Not part of the fast lane — `tests/e2e/examples.bats` runs the same generate/detect example against the mock instead. |
 
-`make test/e2e` runs the three fast suites (api-conformance, shutdown, examples)
-in one shot; `make test/full` folds that into the release gate alongside the
+`make test/e2e` runs the four fast suites (api-conformance, shutdown, examples,
+ready) in one shot; `make test/full` folds that into the release gate alongside the
 cargo lanes. `claude-code` and `scheduler` stay separate targets — they need real
 weights/a real `claude` install/a GPU, which the fast lane deliberately does not
 require.

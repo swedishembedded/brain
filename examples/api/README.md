@@ -10,10 +10,11 @@ only different `ANTHROPIC_*` environment variables.
 1. Preflight: `brain` binary present, `claude` on `PATH`. Nothing else — `MODEL`
    (a fully-qualified `<vendor>/<repo>` reference, `Qwen/Qwen3-0.6B` by default)
    does not need to be fetched or converted ahead of time.
-2. Launches `brain serve --anthropic $PORT` in the background, waits for it to bind,
-   and reads the freshly-generated per-launch API key from its log
-   (`APIKEY anthropic <key>`, printed once at startup — see
-   `crates/apiserve/src/surface.rs`).
+2. Launches `brain serve --anthropic $PORT --ready-file PATH` in the background,
+   waits for `PATH` to appear (touched only once the listener is actually bound;
+   see `brain_shutdown::ready::Gate`), and reads the freshly-generated per-launch
+   API key from its log (`APIKEY anthropic <key>`, printed once at startup,
+   strictly before the ready file — see `crates/apiserve/src/surface.rs`).
 3. Exports `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY` and points every model alias
    (including the haiku-class background model) at `MODEL`, so nothing reaches the
    hosted API for the duration of the session.

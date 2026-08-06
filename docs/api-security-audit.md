@@ -133,6 +133,20 @@ binds them, so treat all request input as hostile.
 - [ ] CORS is intentional (the permissive default is acceptable only because every
       route is key-gated; re-confirm if that changes).
 
+## Audit note: `--ready-file` (`brain_shutdown::ready::Gate`)
+
+Reviewed against this checklist when added. **Adds no route** — the "every route
+requires the per-provider key, including the 404 fallback" invariant (§1) is
+unchanged, and `crates/apiserve/tests/api.rs::unauthenticated_unknown_path_is_401_not_404`
+("no route is outside auth") still holds unmodified. The marker file is a
+process-filesystem signal, not a network surface, and it is a **marker only**:
+empty, created with the process's default (non-secret) permissions, and holding
+no key, no pid and no address — it cannot leak anything an attacker with
+filesystem access to the marker's directory didn't already have from
+`--api-keys-out`'s own file (which IS access-restricted, per §1). An
+unauthenticated `/healthz` HTTP route was considered and explicitly declined for
+this reason among others — see `docs/serving.md`'s readiness section.
+
 ## When to run
 - Adding/removing/altering any route, handler, auth path, error shape, admission
   policy, or D-Bus method.

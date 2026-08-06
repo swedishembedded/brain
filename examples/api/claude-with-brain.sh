@@ -57,24 +57,29 @@ fi
 
 # ---- launch the brain Anthropic surface -------------------------------------
 LOG="$(mktemp)"
+RUNDIR="$(mktemp -d)"
+READY="$RUNDIR/ready"
 if [ "$MOCK" = "0" ]; then
-  "$BRAIN" serve --anthropic "$PORT" >"$LOG" 2>&1 &
+  "$BRAIN" serve --anthropic "$PORT" --ready-file "$READY" >"$LOG" 2>&1 &
 else
-  BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve --anthropic "$PORT" >"$LOG" 2>&1 &
+  BRAIN_MOCK=1 BRAIN_DEVICE=cpu "$BRAIN" serve --anthropic "$PORT" --ready-file "$READY" >"$LOG" 2>&1 &
 fi
 BRAIN_PID=$!
 echo "brain serve --anthropic on http://127.0.0.1:$PORT  (pid $BRAIN_PID)"
 
-# Always stop the server (and clean the log) when this script exits.
-cleanup() { kill "$BRAIN_PID" 2>/dev/null || true; rm -f "$LOG"; }
+# Always stop the server (and clean up the log/ready dir) when this script exits.
+cleanup() { kill "$BRAIN_PID" 2>/dev/null || true; rm -f "$LOG"; rm -rf "$RUNDIR"; }
 trap cleanup EXIT INT TERM
 
-# Wait for it to bind (it prints "apiserve: anthropic on ..." when ready).
+# Wait for the ready file: it is touched only once the listener is actually
+# bound AND (since it's written first) the APIKEY line below is already on
+# disk -- so once this loop exits, no retry is needed for either.
 for _ in $(seq 1 60); do
-  grep -q 'apiserve: anthropic on' "$LOG" 2>/dev/null && break
+  [ -e "$READY" ] && break
   kill -0 "$BRAIN_PID" 2>/dev/null || { echo "error: brain server exited on startup:" >&2; cat "$LOG" >&2; exit 1; }
   sleep 0.5
 done
+[ -e "$READY" ] || { echo "error: brain server never became ready:" >&2; cat "$LOG" >&2; exit 1; }
 
 # brain generates a fresh key each launch and prints it as: `APIKEY anthropic <key>`.
 API_KEY="$(grep -m1 '^APIKEY anthropic ' "$LOG" | awk '{print $3}')"

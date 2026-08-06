@@ -155,7 +155,25 @@ returns the outcome fds.
 `--models-dir`/`--anthropic`/`--openai`/`--openrouter`/…; with no surface flag
 it is the stdio controller loop, with `--dbus` it serves the executor over
 D-Bus. **The D-Bus/HTTP path bypasses the HFSM and drives the `Executor`
-directly** — the HFSM is the stdio event-driven path.
+directly** — the HFSM is the stdio event-driven path. An unknown flag is a
+hard error (exit 2, usage to stderr), not a warning — see `brain serve --help`
+for the full flag reference, including that OpenAI/OpenRouter serve every
+route both with and without the `/v1` prefix (either works as a client's
+`base_url`) while Anthropic is `/v1`-only.
+
+**Readiness.** `--ready-file PATH` (`brain_shutdown::ready::Gate`) touches an
+empty marker file once *every* requested surface — every HTTP dialect plus
+D-Bus — has actually bound, and never at all if one fails to come up. Because
+`--api-keys-out` and the `APIKEY` stdout lines are both written before any
+bind, the marker appearing implies both the keys are on disk and the socket(s)
+are accepting, so a launcher script waits on one file instead of polling a
+port or grepping the log. There is deliberately no `/healthz` route: readiness
+here is a *process*-level property (it must also cover D-Bus, which has no
+HTTP route to answer for it), and adding an unauthenticated route would be the
+first one outside the auth layer (see `docs/api-security-audit.md`) for no
+gain over the existing `GET /v1/models` probe. If an orchestrator ever needs
+an `httpGet`-shaped readiness probe, the answer is an *authenticated* route
+with an injected key, not an unauthenticated one.
 
 ## Request data flow
 

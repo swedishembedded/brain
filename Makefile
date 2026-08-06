@@ -236,8 +236,17 @@ test/e2e/examples: build
 test/e2e/scheduler:
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/scheduler.bats
 
+# End-to-end: `brain serve --ready-file PATH` fires only once EVERY requested
+# surface (HTTP dialects + D-Bus) has actually bound, never on a failed or
+# partial bind, and strictly AFTER --api-keys-out is written — so a script can
+# wait on PATH alone and then read the keys with no retry. BRAIN_MOCK=1,
+# CPU-only, no real weights. Needs a debug/release binary + jq + curl (+
+# dbus-daemon/busctl for the D-Bus cases, which skip cleanly without them).
+test/e2e/ready: build
+	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/ready.bats
+
 # Every fast (no real weights, no GPU) end-to-end bats suite, in one target.
-test/e2e: test/e2e/api-conformance test/e2e/shutdown test/e2e/examples
+test/e2e: test/e2e/api-conformance test/e2e/shutdown test/e2e/examples test/e2e/ready
 
 # Install the Python tooling (OpenVINO/NPU runtime, torch + transformers for the
 # benchmark reference rows, etc.) into the current environment. The Rust engine

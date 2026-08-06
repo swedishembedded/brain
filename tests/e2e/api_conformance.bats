@@ -45,6 +45,7 @@ setup_file() {
   export CONF_DIR="$(mktemp -d)"
   export KEYS="$CONF_DIR/keys.json"
   export LOG="$CONF_DIR/serve.log"
+  export READY="$CONF_DIR/ready"
   export OPENAI_PORT="${OPENAI_PORT:-8896}"
   export ANTHROPIC_PORT="${ANTHROPIC_PORT:-8897}"
   export OPENROUTER_PORT="${OPENROUTER_PORT:-8898}"
@@ -55,13 +56,31 @@ setup_file() {
     --anthropic "$ANTHROPIC_PORT" \
     --openrouter "$OPENROUTER_PORT" \
     --api-keys-out "$KEYS" \
+    --ready-file "$READY" \
     >"$LOG" 2>&1 &
   export SERVER_PID=$!
   echo "$SERVER_PID" > "$CONF_DIR/pid"
 
-  # Poll until all three /models return 200 with the per-provider key (bounded ≤ 30s).
-  local ready=0
+  # First: wait for the ready file (touched only once all three listeners are
+  # bound, and strictly after --api-keys-out is written -- see
+  # crates/cli/src/run_cli.rs, "ORDER IS THE CONTRACT"), bounded ≤30s.
+  local bound=0
   for _ in $(seq 1 60); do
+    [ -e "$READY" ] && { bound=1; break; }
+    kill -0 "$SERVER_PID" 2>/dev/null || break # died early
+    sleep 0.5
+  done
+  if [ "$bound" != 1 ]; then
+    echo "--- brain serve log ---" >&3
+    cat "$LOG" >&3 || true
+    skip "brain serve did not become ready on all three surfaces"
+  fi
+
+  # Second: the actual conformance probe -- this asserts MORE than readiness
+  # (auth is enforced, the catalog is populated), so it stays even though the
+  # ready file already proves the listeners are up.
+  local ready=0
+  for _ in $(seq 1 20); do
     if [ -f "$KEYS" ]; then
       local ok=$(jq -r .openai "$KEYS" 2>/dev/null)
       local ak=$(jq -r .anthropic "$KEYS" 2>/dev/null)
@@ -82,7 +101,7 @@ setup_file() {
   if [ "$ready" != 1 ]; then
     echo "--- brain serve log ---" >&3
     cat "$LOG" >&3 || true
-    skip "brain serve did not become ready on all three surfaces"
+    skip "brain serve's /models conformance probe never succeeded, despite the ready file appearing"
   fi
 
   export OPENAI_KEY="$(jq -r .openai "$KEYS")"
