@@ -224,6 +224,16 @@ pub struct BlockNames {
     pub attn_v: &'static str,
     /// Attention output projection (1×1 conv).
     pub attn_proj: &'static str,
+    /// Pre-fused qkv projection. `Some(name)` means the checkpoint already
+    /// ships one `[3C, C, 1, 1]` weight (DIAMOND's `qkv_proj`), so
+    /// `attn_q`/`attn_k`/`attn_v` are unused and the host-side concatenation
+    /// is skipped. `None` means three separate tensors to fuse.
+    pub attn_qkv: Option<&'static str>,
+    /// The attention residual adds the NORMED tensor instead of the block
+    /// input. DIAMOND's `SelfAttention2d.forward` reassigns `x = norm(x)`
+    /// before the skip (`blocks.py`), so its residual source is the norm
+    /// output; diffusers and VQGAN both add the untouched input.
+    pub attn_residual_normed: bool,
 }
 
 impl BlockNames {
@@ -236,6 +246,8 @@ impl BlockNames {
             attn_k: "to_k",
             attn_v: "to_v",
             attn_proj: "to_out.0",
+            attn_qkv: None,
+            attn_residual_normed: false,
         }
     }
 
@@ -248,6 +260,27 @@ impl BlockNames {
             attn_k: "k",
             attn_v: "v",
             attn_proj: "proj_out",
+            attn_qkv: None,
+            attn_residual_normed: false,
+        }
+    }
+
+    /// DIAMOND naming (`SelfAttention2d` / `ResBlock` in the reference
+    /// `blocks.py`). Two things set it apart from the VAE architectures above:
+    /// the checkpoint ships one pre-fused `qkv_proj` rather than three
+    /// projections, and the residual adds the normed tensor (see
+    /// [`attn_residual_normed`](BlockNames::attn_residual_normed)).
+    pub const fn diamond() -> BlockNames {
+        BlockNames {
+            shortcut: "proj",
+            attn_norm: "norm.norm",
+            // Unused: `attn_qkv` is Some, so the three-tensor fuse never runs.
+            attn_q: "",
+            attn_k: "",
+            attn_v: "",
+            attn_proj: "out_proj",
+            attn_qkv: Some("qkv_proj"),
+            attn_residual_normed: true,
         }
     }
 }
@@ -348,6 +381,9 @@ pub struct Builder<'a> {
     /// im2col operand exceeds the P40's 2047 MiB binding limit, so the GEMM is
     /// chunked over spatial positions instead (see `im2col_at.wgsl`).
     col: Option<(u64, DeviceBuffer)>,
+    /// Attention head width. `None` is one head of width `C` — what every VAE
+    /// architecture here uses. See [`set_attn_head_dim`](Builder::set_attn_head_dim).
+    attn_head_dim: Option<u32>,
 }
 
 /// Ceiling on the im2col scratch, in f32 words (512 MiB). The lowered conv
@@ -396,6 +432,7 @@ impl<'a> Builder<'a> {
             coop: gpu.caps().workgroup_reductions,
             uploaded: 0,
             col: None,
+            attn_head_dim: None,
         }
     }
 
@@ -428,6 +465,26 @@ impl<'a> Builder<'a> {
     pub fn set_groups(&mut self, groups: u32) {
         assert!(groups > 0, "GroupNorm needs at least one group");
         self.groups = groups;
+    }
+
+    /// Split attention into heads of `d` channels each (`heads = max(C/d, 1)`).
+    ///
+    /// The VAE architectures attend with a single head of width `C`, which is
+    /// the default (`None`). DIAMOND uses `d = 8`. Only the *parameters* of the
+    /// `attn_scores_bidir`/`attn_apply_bidir` dispatches change — both kernels
+    /// have always taken `heads` and `head_dim`; the builder simply pinned them
+    /// to `(1, C)`. Note the scale: those kernels divide by `sqrt(head_dim)`,
+    /// so this is not merely a reshape, and it must match the reference's head
+    /// count exactly.
+    ///
+    /// Rejected by the GEMM attention lowering, which contracts over the whole
+    /// of `C` in one matmul and so cannot express per-head blocks; a multi-head
+    /// graph stays on the per-element trio.
+    pub fn set_attn_head_dim(&mut self, d: Option<u32>) {
+        if let Some(d) = d {
+            assert!(d > 0, "attention head width must be positive");
+        }
+        self.attn_head_dim = d;
     }
 
     /// Record the reverse-mode tape (see [`Builder::train`]). Set this BEFORE
@@ -968,12 +1025,16 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// Single-head self-attention over the spatial positions (diffusers
-    /// `Attention` with `residual_connection=True` == VQGAN `AttnBlock`):
-    /// `x + proj(attn(qkv(norm(x))))`, head_dim = C, scale `C^-0.5`, softmax
-    /// over the key axis, residual added to the **pre-norm** input. `q/k/v`
-    /// are fused into one 1×1 qkv conv so the bidir attention trio applies
-    /// unchanged.
+    /// Self-attention over the spatial positions:
+    /// `x + proj(attn(qkv(norm(x))))`, softmax over the key axis. `q/k/v` are
+    /// one 1×1 qkv conv so the bidir attention trio applies unchanged.
+    ///
+    /// Defaults to the VAE shape (diffusers `Attention` with
+    /// `residual_connection=True` == VQGAN `AttnBlock`): a single head of
+    /// width C, scale `C^-0.5`, residual added to the **pre-norm** input.
+    /// [`set_attn_head_dim`](Builder::set_attn_head_dim) splits it into heads,
+    /// and [`BlockNames::attn_residual_normed`] moves the residual onto the
+    /// norm output for DIAMOND.
     pub fn attn(&mut self, prefix: &str, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
         let t = h * w;
         let nnorm = self.names.attn_norm;
@@ -985,23 +1046,34 @@ impl<'a> Builder<'a> {
         // sends the next debugger to the wrong module.
         self.tap(format!("{prefix}.{nnorm}"), &normed, c * t);
 
-        // Fuse q/k/v (each [C,C] linear = [C,C,1,1] conv) into one
-        // [3C,C,1,1] qkv conv weight + [3C] bias.
-        let (nq, nk, nv) = (self.names.attn_q, self.names.attn_k, self.names.attn_v);
-        let (_, qw) = self.get(&format!("{prefix}.{nq}.weight"));
-        let (_, kw) = self.get(&format!("{prefix}.{nk}.weight"));
-        let (_, vw) = self.get(&format!("{prefix}.{nv}.weight"));
-        let mut qkv_w = Vec::with_capacity(qw.len() * 3);
-        qkv_w.extend_from_slice(qw);
-        qkv_w.extend_from_slice(kw);
-        qkv_w.extend_from_slice(vw);
-        let (_, qb) = self.get(&format!("{prefix}.{nq}.bias"));
-        let (_, kb) = self.get(&format!("{prefix}.{nk}.bias"));
-        let (_, vb) = self.get(&format!("{prefix}.{nv}.bias"));
-        let mut qkv_b = Vec::with_capacity(qb.len() * 3);
-        qkv_b.extend_from_slice(qb);
-        qkv_b.extend_from_slice(kb);
-        qkv_b.extend_from_slice(vb);
+        // The qkv projection, as one [3C,C,1,1] weight + [3C] bias. Either the
+        // checkpoint already ships it fused (DIAMOND's `qkv_proj`), or it holds
+        // three [C,C] linears — each a [C,C,1,1] conv — to concatenate here.
+        let (mut qkv_w, mut qkv_b) = if let Some(nqkv) = self.names.attn_qkv {
+            let (_, w) = self.get(&format!("{prefix}.{nqkv}.weight"));
+            let (_, b) = self.get(&format!("{prefix}.{nqkv}.bias"));
+            (w.clone(), b.clone())
+        } else {
+            let (nq, nk, nv) = (self.names.attn_q, self.names.attn_k, self.names.attn_v);
+            let (_, qw) = self.get(&format!("{prefix}.{nq}.weight"));
+            let (_, kw) = self.get(&format!("{prefix}.{nk}.weight"));
+            let (_, vw) = self.get(&format!("{prefix}.{nv}.weight"));
+            let mut qkv_w = Vec::with_capacity(qw.len() * 3);
+            qkv_w.extend_from_slice(qw);
+            qkv_w.extend_from_slice(kw);
+            qkv_w.extend_from_slice(vw);
+            let (_, qb) = self.get(&format!("{prefix}.{nq}.bias"));
+            let (_, kb) = self.get(&format!("{prefix}.{nk}.bias"));
+            let (_, vb) = self.get(&format!("{prefix}.{nv}.bias"));
+            let mut qkv_b = Vec::with_capacity(qb.len() * 3);
+            qkv_b.extend_from_slice(qb);
+            qkv_b.extend_from_slice(kb);
+            qkv_b.extend_from_slice(vb);
+            (qkv_w, qkv_b)
+        };
+        // Either way the layout is [q | k | v], so a third of each is `q`.
+        assert_eq!(qkv_w.len() % 3, 0, "{prefix}: qkv weight is not 3 blocks");
+        assert_eq!(qkv_b.len() % 3, 0, "{prefix}: qkv bias is not 3 blocks");
         // GEMM path (below): the 1/√C attention scale lives in
         // `attn_scores_bidir`'s epilogue, and a plain GEMM has no epilogue — so
         // fold it into `q` instead. `q = (Wx+b)/√C = (W/√C)x + b/√C`
@@ -1011,11 +1083,16 @@ impl<'a> Builder<'a> {
         // Train mode takes the per-element trio (its adjoints are the shipped
         // `attn_bwd_*_bidir` quartet), so the fold must be off there too — a
         // folded `qkv.w` would make the reported gradient that of `W/√C`.
-        let gemm_attn = self.coop && !self.train;
-        let qn = qw.len();
-        let qbn = qb.len();
+        //
+        // Multi-head is excluded as well: both GEMMs contract over the whole of
+        // `C`, which is only the same arithmetic when there is one head.
+        let head_dim = self.attn_head_dim.unwrap_or(c);
+        let heads = (c / head_dim).max(1);
+        let gemm_attn = self.coop && !self.train && heads == 1;
+        let qn = qkv_w.len() / 3;
+        let qbn = qkv_b.len() / 3;
         if gemm_attn {
-            let sc = 1.0f32 / (c as f32).sqrt();
+            let sc = 1.0f32 / (head_dim as f32).sqrt();
             for v in qkv_w[..qn].iter_mut() {
                 *v *= sc;
             }
@@ -1023,14 +1100,26 @@ impl<'a> Builder<'a> {
                 *v *= sc;
             }
         }
-        let (wn, bn) = (format!("{prefix}.qkv.w"), format!("{prefix}.qkv.b"));
+        // Name the uploaded weight after the real tensor when the checkpoint
+        // ships it fused: that name is what the tape reports a gradient under,
+        // and `qkv_proj.weight` is a parameter that actually exists. The
+        // concatenated case has no such tensor, so it keeps a synthetic name.
+        let (wn, bn) = match self.names.attn_qkv {
+            Some(nqkv) => (format!("{prefix}.{nqkv}.weight"), format!("{prefix}.{nqkv}.bias")),
+            None => (format!("{prefix}.qkv.w"), format!("{prefix}.qkv.b")),
+        };
         let qkv_wd = self.dev_fused(&wn, &qkv_w);
         let qkv_bd = self.dev_fused(&bn, &qkv_b);
 
         // qkv 1×1 conv: [C,h,w] → [3C,h,w].
         let qkv_chw =
             self.conv_direct(wn, bn, &qkv_wd, &qkv_bd, c, 3 * c, 1, 1, 0, h, w, h, w, &normed);
-        self.free((c * t) as u64, normed); // last read was the qkv conv
+        // When the residual adds the normed tensor, the qkv conv is NOT its
+        // last read — it has to survive to the final add.
+        let residual_normed = self.names.attn_residual_normed;
+        if !residual_normed {
+            self.free((c * t) as u64, normed.clone());
+        }
 
         let attn_rows = if gemm_attn {
             // ---- attention as two GEMMs -----------------------------------
@@ -1087,23 +1176,29 @@ impl<'a> Builder<'a> {
             let qkv = self.nchw_to_rows(3 * c, t, &qkv_chw);
             self.free((3 * c * t) as u64, qkv_chw);
 
-            // Single head, head_dim = C, scale 1/√C (applied in the kernel).
-            let scores = self.act((t * t) as u64);
+            // `heads` heads of `head_dim` each; the kernel applies the
+            // 1/√head_dim scale. Defaults to one head of width C.
+            let scores = self.act((heads * t * t) as u64);
             self.steps.push(self.gpu.step(
                 K_ATTN_SCORES,
                 &[&qkv, &scores],
-                &[1, 1, t, c, 3 * c, 0, c],
-                t * t,
+                &[1, heads, t, head_dim, 3 * c, 0, c],
+                heads * t * t,
             ));
-            let probs = self.act((t * t) as u64);
-            self.steps.push(self.gpu.step(K_ATTN_SOFTMAX, &[&scores, &probs], &[1, 1, t], t));
-            self.free((t * t) as u64, scores);
+            let probs = self.act((heads * t * t) as u64);
+            self.steps.push(self.gpu.step(
+                K_ATTN_SOFTMAX,
+                &[&scores, &probs],
+                &[1, heads, t],
+                heads * t,
+            ));
+            self.free((heads * t * t) as u64, scores);
             let rows = self.act((t * c) as u64);
             self.steps.push(self.gpu.step(
                 K_ATTN_APPLY,
                 &[&probs, &qkv, &rows], // last read of both probs and qkv
-                &[1, 1, t, c, 3 * c, 2 * c, c],
-                t * c,
+                &[1, heads, t, head_dim, 3 * c, 2 * c, c],
+                heads * t * head_dim,
             ));
             if self.train {
                 // `probs` and `qkv` stay live: `attn_bwd_dscores_bidir` /
@@ -1116,7 +1211,7 @@ impl<'a> Builder<'a> {
                     y: rows.clone(),
                 });
             }
-            self.free((t * t) as u64, probs);
+            self.free((heads * t * t) as u64, probs);
             self.free((3 * c * t) as u64, qkv);
             rows
         };
@@ -1127,7 +1222,15 @@ impl<'a> Builder<'a> {
         let proj = self.conv(&format!("{prefix}.{nproj}"), c, c, 1, 0, h, w, &attn_chw);
         self.tap(format!("{prefix}.{nproj}"), &proj, c * t);
         self.free((c * t) as u64, attn_chw);
-        let out = self.add(c * h * w, x, &proj); // x is the residual input (caller-owned)
+        // `x` is caller-owned; `normed` is ours, and this is its last read.
+        let out = match residual_normed {
+            true => {
+                let y = self.add(c * h * w, &normed, &proj);
+                self.free((c * t) as u64, normed);
+                y
+            }
+            false => self.add(c * h * w, x, &proj),
+        };
         self.free((c * h * w) as u64, proj);
         self.tap(prefix.to_string(), &out, c * h * w);
         out
