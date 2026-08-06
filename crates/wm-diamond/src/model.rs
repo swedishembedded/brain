@@ -67,15 +67,6 @@ const GN_EPS: f32 = 1e-5;
 const GN_P: u32 = 64;
 const ATTN_HEAD_DIM: u32 = 8;
 
-fn num_groups(c: u32) -> u32 {
-    (c / 32).max(1)
-}
-
-fn wf(gpu: &Gpu, buf: &DeviceBuffer, data: &[f32]) {
-    let bits: Vec<u32> = data.iter().map(|v| v.to_bits()).collect();
-    gpu.write(buf, &bits);
-}
-
 /// Host tensors by (stripped) reference name.
 pub type Tensors = HashMap<String, (Vec<usize>, Vec<f32>)>;
 
@@ -201,7 +192,7 @@ impl<'a> Builder<'a> {
         x: &DeviceBuffer,
         gb: &DeviceBuffer,
     ) -> DeviceBuffer {
-        let g = num_groups(c);
+        let g = wm_core::gn::num_groups(c);
         let stats = self.act(2 * g as u64);
         let y = self.act((c * h * w) as u64);
         // Parallel two-stage reduction (gn_part -> gn_stats2): the serial
@@ -577,7 +568,7 @@ impl DiamondUNet {
 
     /// Upload the rescaled context (obs / sigma_data), once per frame.
     pub fn set_context(&self, obs_rescaled: &[f32]) {
-        wf(&self.gpu, &self.obs_in, obs_rescaled);
+        self.gpu.write_f32(&self.obs_in, obs_rescaled);
     }
 
     /// Wall-clock per-kernel profile of one forward: runs the recorded steps
@@ -592,9 +583,9 @@ impl DiamondUNet {
     ) -> Vec<(&'static str, f64, u32)> {
         let cond = self.cond.cond(c_noise, actions);
         for (site, gb) in &self.adagn {
-            wf(&self.gpu, gb, &site.gb(&cond));
+            self.gpu.write_f32(gb, &site.gb(&cond));
         }
-        wf(&self.gpu, &self.x_in, noisy_scaled);
+        self.gpu.write_f32(&self.x_in, noisy_scaled);
         let mut agg: std::collections::HashMap<usize, (f64, u32)> = Default::default();
         for (step, &kind) in self.steps.iter().zip(&self.kinds) {
             let t0 = std::time::Instant::now();
@@ -630,20 +621,20 @@ impl DiamondUNet {
     /// `sigmas` is the Karras schedule incl. trailing 0.
     pub fn denoise_frame(&self, x0: &[f32], sigmas: &[f32], actions: &[u32]) -> Vec<f32> {
         let cfg = &self.cfg;
-        wf(&self.gpu, &self.x_state, x0);
+        self.gpu.write_f32(&self.x_state, x0);
         for i in 0..sigmas.len() - 1 {
             let sigma = sigmas[i];
             let next = sigmas[i + 1];
             let cs = crate::cond::conditioners(sigma, cfg.sigma_data, cfg.sigma_offset_noise);
             let cond = self.cond.cond(cs.c_noise, actions);
             for (site, gb) in &self.adagn {
-                wf(&self.gpu, gb, &site.gb(&cond));
+                self.gpu.write_f32(gb, &site.gb(&cond));
             }
-            wf(&self.gpu, &self.cin_buf, &[cs.c_in]);
-            wf(&self.gpu, &self.wrap_coef, &[cs.c_skip, cs.c_out]);
+            self.gpu.write_f32(&self.cin_buf, &[cs.c_in]);
+            self.gpu.write_f32(&self.wrap_coef, &[cs.c_skip, cs.c_out]);
             let dt = next - sigma;
             // Euler: x' = (1 + dt/sigma)*x - (dt/sigma)*denoised.
-            wf(&self.gpu, &self.euler_ab, &[1.0 + dt / sigma, -dt / sigma]);
+            self.gpu.write_f32(&self.euler_ab, &[1.0 + dt / sigma, -dt / sigma]);
             self.gpu.submit(&[], &self.loop_steps);
         }
         let n = (cfg.img_channels * cfg.h * cfg.w) as usize;
@@ -656,9 +647,9 @@ impl DiamondUNet {
     pub fn forward(&self, noisy_scaled: &[f32], c_noise: f32, actions: &[u32]) -> Vec<f32> {
         let cond = self.cond.cond(c_noise, actions);
         for (site, gb) in &self.adagn {
-            wf(&self.gpu, gb, &site.gb(&cond));
+            self.gpu.write_f32(gb, &site.gb(&cond));
         }
-        wf(&self.gpu, &self.x_in, noisy_scaled);
+        self.gpu.write_f32(&self.x_in, noisy_scaled);
         self.gpu.submit(&[], &self.steps);
         let n = (self.cfg.img_channels * self.cfg.h * self.cfg.w) as usize;
         self.gpu.read(&self.y_out, n)

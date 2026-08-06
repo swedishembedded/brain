@@ -106,15 +106,6 @@ const GN_EPS: f32 = 1e-5;
 const GN_P: u32 = 64;
 const ATTN_HEAD_DIM: u32 = 8;
 
-fn num_groups(c: u32) -> u32 {
-    (c / 32).max(1)
-}
-
-fn wf(gpu: &Gpu, buf: &DeviceBuffer, data: &[f32]) {
-    let bits: Vec<u32> = data.iter().map(|v| v.to_bits()).collect();
-    gpu.write(buf, &bits);
-}
-
 /// A value in the training graph: activation buffer + its gradient buffer.
 #[derive(Clone)]
 struct TVal {
@@ -202,7 +193,7 @@ impl<'a> TB<'a> {
     /// GroupNorm with a FROZEN dynamic gamma/beta buffer (AdaGN, conditioned)
     /// or a static affine one. Backward: gn_dx only (gb frozen).
     fn gn(&mut self, c: u32, h: u32, w: u32, x: &TVal, gb: &DeviceBuffer) -> TVal {
-        let g = num_groups(c);
+        let g = wm_core::gn::num_groups(c);
         let stats = self.gpu.storage(2 * g as u64);
         let part = self.gpu.storage(2 * g as u64 * GN_P as u64);
         let y = self.val(c * h * w);
@@ -665,12 +656,12 @@ impl DiamondTrainer {
             .zip(&noisy)
             .map(|(c, x)| (c - cs.c_skip * x) / cs.c_out)
             .collect();
-        wf(&self.gpu, &self.x_in, &x_scaled);
-        wf(&self.gpu, &self.obs_in, &obs_rescaled);
-        wf(&self.gpu, &self.tgt, &target_f);
+        self.gpu.write_f32(&self.x_in, &x_scaled);
+        self.gpu.write_f32(&self.obs_in, &obs_rescaled);
+        self.gpu.write_f32(&self.tgt, &target_f);
         let cond = self.cond.cond(cs.c_noise, actions);
         for (site, gb) in &self.adagn {
-            wf(&self.gpu, gb, &site.gb(&cond));
+            self.gpu.write_f32(gb, &site.gb(&cond));
         }
         *self.batch.borrow_mut() = Some((sigma, actions.to_vec()));
     }
