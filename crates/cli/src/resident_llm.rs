@@ -319,8 +319,38 @@ impl ResidentModel for QwenResident {
             let block_size = 16u32;
             let max_batch = QwenResident::max_batch();
             let max_blocks_per_seq = ctx.div_ceil(block_size);
-            let num_blocks = max_blocks_per_seq * max_batch + max_batch; // headroom for prefix reuse
-            let max_prefill = ctx.min(2048);
+            // Aggregate pool sized to ~`ctx` tokens total (+ `max_batch`
+            // blocks of headroom for prefix-cache reuse across concurrent
+            // requests) - NOT `ctx * max_batch`. The old formula reserved
+            // one full worst-case `ctx`-sized allocation PER concurrent
+            // batch slot simultaneously (e.g. 7 GiB of fp32 KV at the
+            // default ctx=2048, max_batch=16 - `Manifest::max_context_tokens`'s
+            // doc comment has the arithmetic), which is exactly what paged
+            // attention exists to avoid: concurrent sequences share one
+            // pool, they don't each get a private worst-case reservation.
+            // A shared pool this size still admits one `ctx`-length request
+            // (or several smaller concurrent ones); `max_batch` simultaneous
+            // near-`ctx`-length requests now correctly queues/rejects via
+            // the scheduler's existing admission control
+            // (`RejectReason::ExceedsCapacity`) instead of being
+            // pre-reserved for at ~17x the memory cost for the common case
+            // where that never happens.
+            let num_blocks = max_blocks_per_seq * 2 + max_batch;
+            // Lower than the old fixed 2048: `Engine::from_map_with_gpu`'s
+            // scores/probs scratch buffers are sized `bcap = max(max_batch,
+            // max_prefill) * n_heads * (max_blocks_per_seq * block_size)`
+            // (serve.rs) - `max_prefill` sits in that product, so raising
+            // `ctx` (and therefore `max_blocks_per_seq`) enough to serve a
+            // real agent prompt pushes `bcap * 4 bytes` past the GPU's
+            // single-binding ceiling (2047 MiB) at the OLD 2048 value.
+            // Empirically confirmed on real hardware: ctx=16384 with
+            // max_prefill=2048 crashed with wgpu's "Buffer size 2147483648
+            // is greater than the maximum buffer size (2147483647)" at
+            // Qwen3's 16 attention heads - exactly one byte over. 512
+            // keeps that product comfortably under the ceiling at the
+            // context sizes this fix is meant to unlock, confirmed against
+            // the same scenario post-fix.
+            let max_prefill = ctx.min(512);
             let eng = match &self.adapter {
                 None => qwen::serve::Engine::load(&self.path, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, false, false),
                 // Fold the adapter's delta into the base tensors first (the same
