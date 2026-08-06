@@ -1243,3 +1243,44 @@ was on the wrong side of it.
 
 Both now call `pick_gemm`, so the rule has one home and the next model inherits
 it rather than copying the constant a fifth time.
+
+### Correcting the "next target" call — and what `gqa_scores` actually costs
+
+The entry above called `gqa_scores` "the next target" off the `qwen_bench prefill`
+profile. That profile drives `Qwen::new`'s **batched forward**. The *served*
+prefill does not use that kernel at all: `qwen::serve` shares one paged tape
+between prefill and decode, so it goes through `paged_decode_scores_batched`
+(4.8% of a 128-row served step). `gqa_scores` is dispatched by the batched
+forward — training, eval, `codec`, `tts`, `kronos` — which makes it a **training**
+target, not a serving one. Both matter here; conflating them would have aimed the
+next fix at the wrong datapath.
+
+What it is, measured (T=512, one P40): **143.41 ms over 28 calls, 105.4 GFLOP/s,
+1.6% of the bandwidth roof, 32.7% of the batched forward.**
+
+The structure explains the number without any further profiling:
+
+* One thread per `(b, h, i, j)`, each walking a serial 128-element dot product —
+  a 2/5 shape by the catalogue's rubric, and it is *below* the ridge (≈23
+  FLOP/byte of minimum traffic against a measured ridge of 36.7), so it is
+  memory-bound and no amount of arithmetic tuning helps.
+* The reads are the problem. Adjacent threads vary `j`, and
+  `k_base = (b*T + j)*k_row + hkv*hd`, so consecutive lanes read addresses
+  `k_row = 1024` floats — **4 KB** — apart. That is a fully scattered load, the
+  same defect class as `col2im`, and the amplification is far past the ~3×
+  threshold where a workgroup-staged tile starts paying
+  (see "a workgroup tile pays only where the amplification is large").
+
+Two candidate fixes, neither yet built, in the order the evidence favours:
+
+1. **Stage `k` transposed once per layer** — `[b, hkv, d, T]` makes consecutive
+   `j` contiguous, turning the scattered read into a coalesced one for the cost
+   of transposing 2.1 MB. `nchw_nlc` already does this shape of work at 4.4×.
+2. **Lower it to a GEMM** — `scores[b,h] = q[b,h] · k[b,h]ᵀ` *is* a matmul, and
+   `matmul_reg3` measures 3542 GFLOP/s on this card against this kernel's 105.
+   Same trade the conv path already took (im2col + GEMM, 3.8×), and the reason
+   to prefer (1) first is that (2) needs a batched/strided GEMM over the
+   head-major layout, which is a larger change.
+
+`flash_attn_bidir*` is NOT the sibling to reach for: it is bidirectional, and
+this path is causal. Checked first per §F.3.
