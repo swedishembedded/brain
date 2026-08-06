@@ -332,20 +332,21 @@ impl Trace {
                 r.acc(x, n as u64, &dx, 1.0);
                 r.give(n as u64, dx);
             }
-            Op::Attn { c, t, qkv, probs, y } => {
+            Op::Attn { c, t, heads, head_dim, qkv, probs, y } => {
                 let Some(d_ctx) = r.get(y) else { return };
-                // Single head, head_dim = C, over the fused [T, 3C] rows.
+                // The head split the FORWARD used, over the fused [T, 3C] rows
+                // — not an assumed single head (see `Op::Attn`).
                 let a = model::block::Bidir {
                     b: 1,
                     t: *t,
-                    n_heads: 1,
-                    head_dim: *c,
+                    n_heads: *heads,
+                    head_dim: *head_dim,
                     stride: 3 * c,
                     q_off: 0,
                     k_off: *c,
                     v_off: 2 * c,
                 };
-                let dscores = r.tmp((t * t) as u64);
+                let dscores = r.tmp((heads * t * t) as u64);
                 let d_qkv = r.tmp((3 * c * t) as u64);
                 // The quartet ASSIGNS into three disjoint regions of `d_qkv`
                 // (q at 0, k at C, v at 2C), so it needs no pre-zeroing.
@@ -364,7 +365,7 @@ impl Trace {
                 }
                 r.acc(qkv, (3 * c * t) as u64, &d_qkv, 1.0);
                 r.give((3 * c * t) as u64, d_qkv);
-                r.give((t * t) as u64, dscores);
+                r.give((heads * t * t) as u64, dscores);
             }
         }
     }

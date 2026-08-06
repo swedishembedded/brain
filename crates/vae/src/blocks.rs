@@ -329,7 +329,20 @@ pub(crate) enum Op {
     NlcNchw { c: u32, hw: u32, x: DeviceBuffer, y: DeviceBuffer },
     /// The bidirectional attention trio over the fused `qkv[t, 3c]` rows.
     /// `probs` is the cached softmax slab; `y` is the context `[t, c]`.
-    Attn { c: u32, t: u32, qkv: DeviceBuffer, probs: DeviceBuffer, y: DeviceBuffer },
+    Attn {
+        c: u32,
+        t: u32,
+        /// Head split, as the forward dispatched it. Recorded rather than
+        /// assumed: the adjoint quartet is parameterised by `(n_heads,
+        /// head_dim)` exactly like the forward trio, and a tape that dropped
+        /// them would compute a single-head gradient for a multi-head forward
+        /// — silently, since the shapes still line up.
+        heads: u32,
+        head_dim: u32,
+        qkv: DeviceBuffer,
+        probs: DeviceBuffer,
+        y: DeviceBuffer,
+    },
 }
 
 /// Graph-construction state (borrows the device + host tensors).
@@ -1206,6 +1219,8 @@ impl<'a> Builder<'a> {
                 self.tape.push(Op::Attn {
                     c,
                     t,
+                    heads,
+                    head_dim,
                     qkv: qkv.clone(),
                     probs: probs.clone(),
                     y: rows.clone(),
