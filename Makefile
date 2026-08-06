@@ -50,7 +50,7 @@ YOLO_IOU   ?= 0.45
 
 SHAKE_URL := https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
 
-.PHONY: help build release deb deb/debug deb/release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
+.PHONY: help build release deb deb/debug deb/release test/doc test/slow test/full test/times wm/play wm-fixtures test gradcheck kernels-regen kernels-table kernels-table/check parity requirements bench bench/char bench/eval bench/scale bench/advise bench/compare perf perf/compare perf/smoke clean federated-demo depth/demo depth/smoke depth/camera train/zipdepth mirror/import mirror/infer mirror/demo splat/view \
         data/calculator data/reverser data/wordcalc data/timeseries \
         data/shakespeare_char data/gpt data/detect \
         train/yolo eval/yolo detect/yolo train/qwen/lora \
@@ -67,6 +67,7 @@ help:
 	@echo "  make test/full               test + test/doc + test/slow"
 	@echo "  make test/times              rank test binaries by wall time"
 	@echo "  make gradcheck               numerical backprop correctness gate (GPT)"
+	@echo "  make kernels-table           regenerate README.md's kernel catalogue from the .wgsl"
 	@echo "  make data/<name>             generate a dataset (calculator|reverser|wordcalc|"
 	@echo "                               timeseries|shakespeare_char|gpt) into $(DATA)/<name>"
 	@echo "  make train/gpt/<name>        train GPT on a dataset -> $(OUT)/gpt-<name>.safetensors"
@@ -184,7 +185,7 @@ check/scripts:
 	bash scripts/gates/check-scripts.sh
 
 # Everything, for a release gate.
-test/full: test test/doc test/slow test/e2e check/scripts
+test/full: test test/doc test/slow test/e2e check/scripts kernels-table/check
 
 # Rank every test binary by wall time; --budget fails if any exceeds it. This is
 # what keeps the fast lane fast.
@@ -263,6 +264,16 @@ gradcheck: release
 # file; merge conflicts in lib.rs are resolved by union-ing wgsl/ + this target.
 kernels-regen:
 	scripts/build/kernels-regen.sh
+
+# Regenerate README.md's kernel catalogue from crates/kernels/wgsl/. Every
+# column is derived from the sources, so the table cannot be edited by hand —
+# and `kernels-table/check` is what stops it drifting silently, which is the
+# failure mode docs/lessons.md #29 records for the generator above.
+kernels-table:
+	scripts/build/gen-kernel-table.py
+
+kernels-table/check:
+	scripts/build/gen-kernel-table.py --check
 
 # Regenerate the DIAMOND parity fixtures (gitignored — never committed) from
 # the reference implementation in resources/world-models/repos/diamond.

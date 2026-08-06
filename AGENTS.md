@@ -441,7 +441,8 @@ front-end to depend on.
 | Int8 serving weights + on-device decode window | `qwen::serve` (`--weights-int8` / target suffix `:i8w`; `DECODE_WINDOW`) |
 | Engine internals | `docs/engine/{overview,training,vulkan,web}.md` |
 | **Profile a forward or a BACKWARD, per kernel kind** | `crates/unet/src/bin/unet_bench.rs` (forward, + a `gemm` mode that A/Bs kernels for correctness AND speed) and `crates/vqgan/src/bin/vqgan_bench.rs` (a full training step, both halves, + `gn`/`convbwd` A/B modes). Copy their shape; see `docs/kernel-checklist.md` §F.1 |
-| **Add/adjust/dispatch a WGSL kernel** | **`docs/kernel-checklist.md`** — read BEFORE writing or dispatching one; then `crates/kernels/wgsl/*.wgsl` + **`make kernels-regen`** |
+| **Add/adjust/dispatch a WGSL kernel** | **`docs/kernel-checklist.md`** — read BEFORE writing or dispatching one; then `crates/kernels/wgsl/*.wgsl` + **`make kernels-regen`** + **`make kernels-table`** |
+| **Which kernels already exist** (before writing a new one) | the catalogue in **`README.md`** — every kernel with what it does, how, its structural optimisation level, and per-backend support |
 | **Something is slow (model, kernel, training step)** | **`docs/kernel-checklist.md` §F** — the ORDERED loop that found the big wins (profile per kernel kind → check for an already-faster sibling → measure the branch your hardware skips → sweep for the crossover → fix it in the SELECTOR → mutation-verify → re-profile); then **§E** (measure-first rules + the killed hypotheses), `docs/porting-playbook.md` §10, case studies in `docs/performance/overview.md` |
 | MoE toy task / honest eval methodology | `README.md` |
 | Federated MoE pipeline (done vs remaining) | `docs/federated.md`; `crates/federated/src/{shard,sha256}.rs` |
@@ -510,6 +511,7 @@ make release && make test            # optimized build + full suite (MOE_SKIP_GP
 make gradcheck                       # backprop correctness gate
 make parity                          # cross-backend parity: CPU == Vulkan == NPU (scripts/gates/parity-gate.sh)
 make kernels-regen                   # regenerate the kernel const block after adding/removing a .wgsl
+make kernels-table                   # regenerate README.md's kernel catalogue (gated by kernels-table/check)
 make docs                            # docs bundle -> build/docs/brain-docs.{md,pdf} (needs pandoc + xelatex)
 
 make data/<name>                     # calculator|reverser|wordcalc|timeseries|shakespeare_char|gpt|detect|tts
@@ -793,7 +795,20 @@ per-scenario table and the findings so far.
 - **WGSL is the source of truth.** Kernels live only in `crates/kernels/wgsl/`,
   embedded as consts; no kernel text is duplicated. After adding/removing a
   `.wgsl`, run **`make kernels-regen`** (`scripts/build/kernels-regen.sh`) to
-  regenerate the const block + `ALL` registry in `crates/kernels/src/lib.rs`.
+  regenerate the const block + `ALL` registry in `crates/kernels/src/lib.rs`,
+  **and `make kernels-table`** to regenerate README.md's kernel catalogue.
+
+  **Keep the catalogue current — it is the list §F.3 tells you to check before
+  writing a kernel, so a stale one causes the exact defect this repo pays for
+  most (a fast sibling a later model never learned about).** Every column is
+  derived from the sources, so never edit the rows by hand; adjust
+  `scripts/build/gen-kernel-table.py` if a column is wrong. It is not optional
+  bookkeeping: `make kernels-table/check` fails the build (via `test/full`) when
+  the table has drifted, because a generator whose output can be produced by
+  hand will be, and its breakage stays invisible (`docs/lessons.md` #29).
+  Changing a kernel's *structure* — adding a barrier, a register tile, a
+  workgroup stage — changes its row, so regenerate after edits too, not only
+  after adding or deleting a file.
 - **fp32 arithmetic only, core compute only** — single bind group, **≤8 storage
   buffers/kernel** (the WebGPU guarantee; the splat backward kernels bind 8),
   **no atomics, no subgroups, no f16** (the only mentions of those in the kernel
