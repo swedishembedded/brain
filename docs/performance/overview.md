@@ -1423,12 +1423,40 @@ helps the decode regime too — at 8 rows the kernel sits at 22.3% of roof.
 Token-for-token gates green on both backends (`batched_serving_matches_reference`,
 `scheduler_dynamic_admission_matches_reference`, `spec_decode_matches_greedy`).
 
-**Not done.** At 23.6% it is still under the 35% memory-bound defect floor, so
-there is roughly another 3× in it. The remaining suspects, in order: the 64-lane
-fold is serial in lane 0 (64 adds per score); `head_dim = 128` gives each lane
-only 2 elements, so launch and reduction overhead are a large fraction; and the
-block-table indirection is re-read per score rather than per block. The pass's
-top row is now `matmul_reg3` again — 47.3% at 14.7% of the compute roof.
+**…and then the rest of it: 3.28× more, by sweeping ONE constant.**
+
+At 23.6% it was still under the 35% defect floor. The diagnosis was not
+coalescing any more — that was fixed — but the *shape of the cooperation*. With
+64 lanes on a `head_dim = 128` reduction each lane does **2 MACs** and then lane
+0 runs a **64-add serial fold while 63 lanes idle**: a serial tail far longer
+than the useful work.
+
+(The obvious suspect was wrong and is worth recording: `q` is re-read `cap` times
+per `(b,h)`, which looks like 268 MB of traffic against K's 134 MB — but the
+unique `q` working set is **1.05 MB**, L2-resident, so it costs nothing. Checking
+the working set before the access count killed that hypothesis in one line.)
+
+Lanes-per-score (`LPS`) is now a swept constant, §F.6, never guessed:
+
+| LPS | 64 | 16 | 8 | 4 | 2 |
+|---|---:|---:|---:|---:|---:|
+| ms | 56.37 | 19.31 | 17.73 | **17.24** | 28.65 |
+| % of memory roof | 23.7 % | 69.2 % | 75.4 % | **77.5 %** | 46.7 % |
+
+Unimodal, and **both** ends are explained, which is what makes it a rule rather
+than a fitted number. High `LPS` starves each lane (the serial-fold problem).
+Low `LPS` breaks coalescing again: at `LPS = 2` a lane group covers 8 bytes, so
+a 32-byte sector is a quarter used and it falls back to 46.7 %. `LPS = 4` is the
+crossover — a lane group still covers a whole 16-byte run, and each lane does 32
+MACs.
+
+**Cumulative on this kernel: 109.50 → 17.24 ms, 6.35×, and 12.2 % → 77.5 % of
+the bandwidth roof — above its 70 % target.** The served step is **204.4 → 88.4
+ms (2.31×), 626 → ~1440 rows/s.**
+
+The top row is now `paged_decode_apply_batched` (70.3 % of roof, already at
+target) with `matmul_reg3_splitk` at 31.4 % — meaning no row in the served step
+is under its class's defect floor for the first time.
 
 ---
 

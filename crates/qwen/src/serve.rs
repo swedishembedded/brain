@@ -78,6 +78,9 @@ const MATMUL_REG3: usize = 27;
 // reduction. Same Params and same output as SCORES_B; selected on the queried
 // `workgroup_reductions`, since it carries a barrier the CPU JIT gates on.
 const SCORES_B_WG: usize = 28;
+/// Scores one `paged_decode_scores_wg` workgroup owns — `64 / LPS` in the
+/// kernel. Must match, or the dispatch covers the wrong number of scores.
+const SCORES_WG_PER_GROUP: u32 = 16;
 // Split-K forward GEMM + its fold, for the skinny-M shapes a served step is made
 // of. `matmul_reg3`'s tile grid is ceil(m/128)*ceil(n/128) and does not grow
 // with k, so at m=128 it launches 16 workgroups on a 30-SM card (11% of peak,
@@ -1002,7 +1005,7 @@ impl Engine {
                 // at 12.2% of the bandwidth roof while taking 52.2% of a
                 // served step.
                 let (sk, st) = if self.caps.workgroup_reductions {
-                    (SCORES_B_WG, b * nh * cap * 64)
+                    (SCORES_B_WG, b.saturating_mul(nh).saturating_mul(cap).div_ceil(SCORES_WG_PER_GROUP) * 64)
                 } else {
                     (SCORES_B, b * nh * cap)
                 };
