@@ -431,6 +431,61 @@ async fn get_model_by_id_and_404_when_not_exposed() {
     assert_valid("anthropic.json", "ErrorResponse", &body);
 }
 
+/// A model that reports its REAL serving capacity (`Manifest::max_context_tokens`,
+/// e.g. `QwenResident` advertising the engine's actual `BRAIN_QWEN_CTX`-derived
+/// capacity — see `resident_llm.rs`) must have that exact number reach `/models`,
+/// so a client reading it can trust a prompt within it will actually be admitted.
+/// A model that does NOT report it (the plain `chat_manifest()` used elsewhere in
+/// this file) must fall back sanely: `context_length` omitted entirely on OpenAI
+/// (matching the real API, which has no such field), the conservative default on
+/// OpenRouter (which documents `context_length` as a real field).
+#[tokio::test]
+async fn model_card_advertises_real_capacity_when_known() {
+    let capped_manifest = chat_manifest();
+    assert_eq!(capped_manifest.max_context_tokens, None, "sanity: chat_manifest() itself reports nothing");
+    let capped = capped_manifest.with_max_context_tokens(2048);
+    let key = "sk-brain-test-key".to_string();
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Carded(capped)), Arc::new(Carded(embed_manifest()))];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+
+    // OpenAI: the capped model carries context_length; the uncapped one omits it.
+    let state = AppState::new(Executor::start(models, budgets, Policy::default()), key.clone(), Provider::OpenAI);
+    let app = router(state);
+    let (st, body) =
+        send(&app, auth(Request::builder().uri("/v1/models/brain-chat"), Provider::OpenAI, &key).body(Body::empty()).unwrap()).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_valid("openai.json", "Model", &body);
+    assert_eq!(body["context_length"], 2048, "the real engine capacity must reach the OpenAI card: {body}");
+
+    let (st, body) =
+        send(&app, auth(Request::builder().uri("/v1/models/brain-embed"), Provider::OpenAI, &key).body(Body::empty()).unwrap()).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_valid("openai.json", "Model", &body);
+    assert!(body.get("context_length").is_none(), "an unreported capacity must be omitted, not guessed: {body}");
+
+    // OpenRouter: the capped model carries the real number; the uncapped one gets
+    // the conservative fallback, not a silently-wrong large default.
+    let models: Vec<Arc<dyn ResidentModel>> =
+        vec![Arc::new(Carded(chat_manifest().with_max_context_tokens(2048))), Arc::new(Carded(embed_manifest()))];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let state = AppState::new(Executor::start(models, budgets, Policy::default()), key.clone(), Provider::OpenRouter);
+    let app = router(state);
+    let (st, body) =
+        send(&app, auth(Request::builder().uri("/models/brain-chat"), Provider::OpenRouter, &key).body(Body::empty()).unwrap())
+            .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body["context_length"], 2048);
+    assert_eq!(body["top_provider"]["context_length"], 2048);
+
+    let (st, body) =
+        send(&app, auth(Request::builder().uri("/models/brain-embed"), Provider::OpenRouter, &key).body(Body::empty()).unwrap())
+            .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body["context_length"], 4096, "unreported capacity falls back to the conservative default");
+}
+
 #[tokio::test]
 async fn unknown_path_is_404() {
     for p in ALL {
@@ -640,6 +695,54 @@ async fn openai_chat_stream_orders_chunks_and_concatenates() {
     assert_eq!(content, "Hello world", "concatenated deltas must equal the full text");
     assert!(saw_finish, "a terminal chunk must carry finish_reason=stop");
     assert!(saw_usage, "include_usage must emit a usage chunk");
+}
+
+/// A provider that fails AFTER admission (`HTTP 200` + SSE headers already
+/// committed) must surface a NAMED `error` SSE event carrying a generic,
+/// non-leaking error body, then terminate with `[DONE]` — never an unnamed
+/// `data:` frame a client has no signal to key off (see `StreamMsg::Err` in
+/// `openai.rs`'s `render_chat_stream`). This is the streaming counterpart of
+/// `runtime_error_is_not_reflected_to_client` (which only covers the
+/// non-streaming path) and closes the gap noted there: nothing previously
+/// exercised a mid-stream `StreamMsg::Err` for any provider.
+#[tokio::test]
+async fn openai_chat_stream_error_frame_is_named_and_generic() {
+    let (app, key) = failing_chat_app(Provider::OpenAI);
+    let body = json!({
+        "model": "brain-chat",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true,
+    });
+    let (st, text) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    // The failure surfaces mid-stream, after admission - the response is a
+    // normal 200 + SSE body, not a 4xx. Only a pre-admission rejection (bad
+    // request shape, auth, shed-under-load) is a plain non-2xx.
+    assert_eq!(st, StatusCode::OK);
+
+    let events = sse_events(&text);
+    let (ev, data) = events
+        .iter()
+        .find(|(_, d)| d != "[DONE]" && d.contains("\"error\""))
+        .expect("an error frame must be present in the stream");
+    assert_eq!(ev, "error", "the error frame must be a NAMED SSE event, not the default");
+
+    // The error frame is intentionally NOT a CreateChatCompletionStreamResponse:
+    // there is no finish_reason value in the real OpenAI schema that means
+    // "error" (stop/length/tool_calls/content_filter/function_call only - see
+    // tests/specs/openai.json), and real OpenAI sends the same bare
+    // `{"error": ...}` shape for a mid-stream failure. Validate it as an
+    // error body instead - the same shape the non-streaming path already
+    // validates in `runtime_error_is_not_reflected_to_client`.
+    let v: Value = serde_json::from_str(data).unwrap();
+    assert_valid("openai.json", "ErrorResponse", &v);
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert_eq!(msg, "the model failed to process the request", "client gets the generic message");
+    assert!(!msg.contains("secret"), "internal path must not leak to client: {msg}");
+    assert!(!msg.contains("weights.gguf"), "internal path must not leak to client: {msg}");
+    assert!(!msg.contains("panic"), "internal panic text must not leak to client: {msg}");
+
+    let datas = sse_data(&text);
+    assert_eq!(datas.last().map(String::as_str), Some("[DONE]"), "stream must still terminate with [DONE]");
 }
 
 #[tokio::test]

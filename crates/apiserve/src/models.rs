@@ -34,15 +34,15 @@ pub fn routes() -> Router<AppState> {
 /// `GET /models` — the provider-shaped list of exposed models.
 async fn list(State(state): State<AppState>) -> Json<Value> {
     let models = catalog::exposed(&state.exec, state.provider);
-    let cards: Vec<Value> = models.iter().map(|(name, caps)| card(state.provider, name, *caps)).collect();
+    let cards: Vec<Value> = models.iter().map(|(name, caps, ctx)| card(state.provider, name, *caps, *ctx)).collect();
     Json(envelope(state.provider, cards))
 }
 
 /// `GET /models/{id}` — one model card, or 404 if it is not exposed here.
 async fn get_one(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
-    let found = catalog::exposed(&state.exec, state.provider).into_iter().find(|(n, _)| *n == id);
+    let found = catalog::exposed(&state.exec, state.provider).into_iter().find(|(n, _, _)| *n == id);
     match found {
-        Some((name, caps)) => Ok(Json(card(state.provider, &name, caps))),
+        Some((name, caps, ctx)) => Ok(Json(card(state.provider, &name, caps, ctx))),
         None => Err(ApiError::model_not_found(state.provider, &id)),
     }
 }
@@ -61,34 +61,58 @@ pub fn envelope(provider: Provider, cards: Vec<Value>) -> Value {
     }
 }
 
-/// One model card in the provider's dialect.
-pub fn card(provider: Provider, name: &str, _caps: CapSet) -> Value {
+/// Fallback advertised context length for a model that hasn't reported its
+/// real capacity (non-chat models, or a resident kind that doesn't populate
+/// `Manifest::max_context_tokens` yet). Deliberately conservative rather than
+/// a large made-up number.
+const FALLBACK_CONTEXT_LENGTH: u64 = 4096;
+
+/// One model card in the provider's dialect. `max_context_tokens` is the
+/// model's REAL current serving capacity from `Manifest::max_context_tokens`
+/// (`None` for non-chat models or kinds that don't report it yet) — this is
+/// what makes the advertised number trustworthy: a client that reads it and
+/// builds a prompt within it should never be rejected by the actual engine.
+pub fn card(provider: Provider, name: &str, _caps: CapSet, max_context_tokens: Option<u64>) -> Value {
     match provider {
-        Provider::OpenAI => json!({
-            "id": name,
-            "object": "model",
-            "created": CREATED_UNIX,
-            "owned_by": "brain",
-        }),
+        // The real OpenAI `Model` object has no context-length field at all
+        // (see tests/specs/openai.json's `Model` schema) - this is an
+        // additive, schema-safe (no `additionalProperties: false`) extension
+        // for clients willing to read it, not a spec requirement.
+        Provider::OpenAI => {
+            let mut v = json!({
+                "id": name,
+                "object": "model",
+                "created": CREATED_UNIX,
+                "owned_by": "brain",
+            });
+            if let Some(ctx) = max_context_tokens {
+                v["context_length"] = json!(ctx);
+            }
+            v
+        }
         Provider::Anthropic => json!({
             "type": "model",
             "id": name,
             "display_name": name,
             "created_at": CREATED_RFC3339,
         }),
-        Provider::OpenRouter => openrouter_card(name),
+        Provider::OpenRouter => openrouter_card(name, max_context_tokens),
     }
 }
 
 /// OpenRouter's richer model card (validates against its `Model` schema).
-fn openrouter_card(name: &str) -> Value {
+/// `context_length` is a real, documented field of this dialect (unlike
+/// OpenAI's) - use the model's actual capacity when known, the conservative
+/// fallback otherwise.
+fn openrouter_card(name: &str, max_context_tokens: Option<u64>) -> Value {
+    let ctx = max_context_tokens.unwrap_or(FALLBACK_CONTEXT_LENGTH);
     json!({
         "id": name,
         "canonical_slug": name,
         "name": name,
         "created": CREATED_UNIX,
         "description": format!("brain-served model '{name}'"),
-        "context_length": 4096,
+        "context_length": ctx,
         "architecture": {
             "modality": "text->text",
             "input_modalities": ["text"],
@@ -97,7 +121,7 @@ fn openrouter_card(name: &str) -> Value {
             "instruct_type": Value::Null,
         },
         "pricing": { "prompt": "0", "completion": "0", "request": "0", "image": "0" },
-        "top_provider": { "context_length": 4096, "max_completion_tokens": Value::Null, "is_moderated": false },
+        "top_provider": { "context_length": ctx, "max_completion_tokens": Value::Null, "is_moderated": false },
         "per_request_limits": Value::Null,
         "supported_parameters": ["temperature", "top_p", "max_tokens"],
         "default_parameters": Value::Null,

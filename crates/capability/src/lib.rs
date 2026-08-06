@@ -248,14 +248,35 @@ pub struct Manifest {
     pub model: String,
     pub summary: String,
     pub actions: Vec<ActionSpec>,
+    /// Maximum tokens (prompt + completion) this instance can actually serve
+    /// right now, when known. Populated by chat-capable resident models from
+    /// their REAL configured engine capacity (e.g. the paged KV-cache sizing
+    /// derived from `BRAIN_QWEN_CTX`) — deliberately NOT the checkpoint's
+    /// architectural `max_position_embeddings`, which the engine may not
+    /// actually be able to hold (this is what advertising the wrong number
+    /// looks like: a client builds a prompt the model claims to support, the
+    /// server admits it, then rejects it after already paying the connection
+    /// setup cost). `None` for non-chat models, or when not yet known.
+    pub max_context_tokens: Option<u64>,
 }
 
 impl Manifest {
     pub fn new(model: &str, summary: &str, actions: Vec<ActionSpec>) -> Manifest {
-        Manifest { model: model.into(), summary: summary.into(), actions }
+        Manifest { model: model.into(), summary: summary.into(), actions, max_context_tokens: None }
+    }
+    /// Builder setter for [`Self::max_context_tokens`]. Kept as a separate
+    /// setter (rather than a `new()` parameter) so the other ~35 existing
+    /// `Manifest::new()` call sites across non-chat model kinds are untouched.
+    pub fn with_max_context_tokens(mut self, tokens: u64) -> Manifest {
+        self.max_context_tokens = Some(tokens);
+        self
     }
     pub fn to_json(&self) -> Value {
-        json!({ "model": self.model, "summary": self.summary, "actions": self.actions.iter().map(|a| a.to_json()).collect::<Vec<_>>() })
+        let mut v = json!({ "model": self.model, "summary": self.summary, "actions": self.actions.iter().map(|a| a.to_json()).collect::<Vec<_>>() });
+        if let Some(t) = self.max_context_tokens {
+            v["max_context_tokens"] = json!(t);
+        }
+        v
     }
 }
 

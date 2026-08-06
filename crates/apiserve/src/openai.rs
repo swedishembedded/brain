@@ -901,8 +901,20 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
                     finish = co.finish;
                 }
                 StreamMsg::Err(e) => {
-                    // Surface the error as an OpenAI error frame, then terminate.
-                    yield Ok(Event::default().data(e.body().to_string()));
+                    // Surface the error as a NAMED `error` SSE event (mirrors the
+                    // Anthropic surface, see `anthropic.rs`'s `StreamMsg::Err` arm),
+                    // then terminate. The payload itself stays a bare `{"error":
+                    // ...}` object - real OpenAI does the same for a mid-stream
+                    // failure, and there is no `finish_reason` value in the actual
+                    // OpenAI schema that means "error" (`stop`/`length`/
+                    // `tool_calls`/`content_filter`/`function_call` only - see
+                    // `tests/specs/openai.json`'s `CreateChatCompletionStreamResponse`),
+                    // so forcing this into a normal chunk shape would just be a
+                    // different lie. `event("error")` is the addition: it was
+                    // previously unnamed, so a client that dispatches on SSE event
+                    // name (rather than inspecting every `data:` payload) had no
+                    // signal to key off at all.
+                    yield Ok(Event::default().event("error").data(e.body().to_string()));
                     yield Ok(Event::default().data("[DONE]"));
                     return;
                 }

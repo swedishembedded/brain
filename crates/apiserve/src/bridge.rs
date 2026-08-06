@@ -112,15 +112,45 @@ pub fn read_chat_outcome(o: &Outcome) -> ChatOutcome {
     ChatOutcome { text, prompt_tokens, completion_tokens, finish, reasoning, tool_calls }
 }
 
+/// Detect an admission-time `model::serve::RejectReason::ExceedsCapacity` reply -
+/// literally `format!("qwen: {reason}")` where `reason` is
+/// `"needs {need} tokens, engine capacity is {capacity}"` (see
+/// `RejectReason`'s `Display` impl and `resident_llm.rs`'s admission-rejection
+/// handling) - and pull out the two counts.
+///
+/// This is the ONE reply-error shape treated as safe and actionable to reveal:
+/// it is exactly two integers with no paths, no panic text, and no backend
+/// internals, unlike the general run-failure text `map_reply_err` otherwise
+/// refuses to pass through. Matching is intentionally narrow (the full fixed
+/// phrase, not just a "qwen:" prefix) - other qwen error paths (e.g. weight
+/// file I/O failures) share that prefix and DO embed on-disk paths.
+fn parse_exceeds_capacity(e: &str) -> Option<(u64, u64)> {
+    let rest = e.split_once("needs ")?.1;
+    let (need, capacity) = rest.split_once(" tokens, engine capacity is ")?;
+    Some((need.trim().parse().ok()?, capacity.trim().parse().ok()?))
+}
+
 /// Map an executor reply error string to a provider-shaped [`ApiError`]. An unknown
 /// model/action surfaces as `model_not_found` (model resolution already happens in the
-/// handler, so this is a belt-and-braces fallback). Every *other* reply error is a
+/// handler, so this is a belt-and-braces fallback). A prompt that exceeds the model's
+/// serving capacity gets a specific, actionable `context_length_exceeded` error naming
+/// the two safe counts (see [`parse_exceeds_capacity`]). Every *other* reply error is a
 /// server-side runtime/activation failure (backend/device errors, and potentially
 /// on-disk model paths in the message): its raw text is NEVER reflected to the client.
 /// The detail is logged for the operator; the client gets a generic message.
 pub fn map_reply_err(provider: Provider, model: &str, e: &str) -> ApiError {
     if e.starts_with("no model") || e.contains("no action") {
         ApiError::model_not_found(provider, model)
+    } else if let Some((need, capacity)) = parse_exceeds_capacity(e) {
+        eprintln!("apiserve: model '{model}' request failed: {e}");
+        ApiError::context_length_exceeded(
+            provider,
+            format!(
+                "the request needs {need} tokens but this model's serving \
+                 capacity is {capacity} tokens; reduce the prompt or lower \
+                 max_tokens"
+            ),
+        )
     } else {
         // Do not leak internal error strings (paths, panic text, backend internals)
         // to callers; log server-side, return a generic message.
@@ -422,4 +452,75 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
     });
 
     EventStream { rx, _guard: CancelGuard { token: guard_token, jobs: state.jobs.clone(), id } }
+}
+
+// ─── Unit tests ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_exceeds_capacity ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_exceeds_capacity_matches_the_real_reject_reason_shape() {
+        // Exactly what resident_llm.rs produces: format!("qwen: {reason}")
+        // where reason is RejectReason::ExceedsCapacity's Display impl.
+        let got = parse_exceeds_capacity("qwen: needs 14995 tokens, engine capacity is 2048");
+        assert_eq!(got, Some((14995, 2048)));
+    }
+
+    #[test]
+    fn parse_exceeds_capacity_ignores_unrelated_qwen_errors() {
+        // Other qwen error paths share the "qwen:" prefix but are NOT this
+        // shape and may embed on-disk paths - must not be misparsed.
+        assert_eq!(
+            parse_exceeds_capacity("qwen: folding adapter /home/user/lora.safetensors: bad shape"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_exceeds_capacity_ignores_other_reject_reasons() {
+        assert_eq!(parse_exceeds_capacity("qwen: rejected by admission_policy"), None);
+        assert_eq!(
+            parse_exceeds_capacity("qwen: token 999999 is outside the vocabulary (151936)"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_exceeds_capacity_ignores_generic_backend_errors() {
+        assert_eq!(parse_exceeds_capacity("backend panic at /home/secret/weights.gguf: kernel exploded"), None);
+    }
+
+    // ── map_reply_err ────────────────────────────────────────────────────────
+
+    #[test]
+    fn map_reply_err_capacity_rejection_is_context_length_exceeded_400() {
+        let err = map_reply_err(Provider::OpenAI, "brain-chat", "qwen: needs 14995 tokens, engine capacity is 2048");
+        assert_eq!(err.kind.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.body()["error"]["code"], "context_length_exceeded");
+        assert!(err.message.contains("14995"), "message must name the safe counts: {}", err.message);
+        assert!(err.message.contains("2048"), "message must name the safe counts: {}", err.message);
+    }
+
+    #[test]
+    fn map_reply_err_generic_backend_error_stays_generic_and_never_leaks() {
+        let err = map_reply_err(
+            Provider::OpenAI,
+            "brain-chat",
+            "backend panic at /home/secret/models/weights.gguf: kernel exploded",
+        );
+        assert_eq!(err.body()["error"]["code"], "invalid_request");
+        assert!(!err.message.contains("secret"), "must not leak: {}", err.message);
+        assert!(!err.message.contains("weights.gguf"), "must not leak: {}", err.message);
+        assert!(!err.message.contains("panic"), "must not leak: {}", err.message);
+    }
+
+    #[test]
+    fn map_reply_err_no_model_is_model_not_found() {
+        let err = map_reply_err(Provider::OpenAI, "brain-chat", "no model resolved for 'brain-chat'");
+        assert_eq!(err.kind.status(), axum::http::StatusCode::NOT_FOUND);
+    }
 }

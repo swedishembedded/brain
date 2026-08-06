@@ -26,6 +26,13 @@ pub enum Kind {
     NotFound,
     ModelNotFound,
     InvalidRequest,
+    /// The prompt (plus requested output) exceeds the model instance's
+    /// serving capacity. Distinct from the generic `InvalidRequest` so a
+    /// client can detect it programmatically (e.g. compact and retry)
+    /// instead of treating it as an opaque failure - mirrors OpenAI's real
+    /// `context_length_exceeded` error code. Same HTTP status and dialect
+    /// `type` as `InvalidRequest`; only the OpenAI `code` differs.
+    ContextLengthExceeded,
     NotImplemented,
     /// Accepted at the edge but could not be ADMITTED (started on a lane) within the
     /// admission deadline — HTTP 429, carries a `Retry-After`.
@@ -41,7 +48,7 @@ impl Kind {
         match self {
             Kind::Unauthorized => StatusCode::UNAUTHORIZED,
             Kind::NotFound | Kind::ModelNotFound => StatusCode::NOT_FOUND,
-            Kind::InvalidRequest => StatusCode::BAD_REQUEST,
+            Kind::InvalidRequest | Kind::ContextLengthExceeded => StatusCode::BAD_REQUEST,
             Kind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             Kind::Overloaded => StatusCode::TOO_MANY_REQUESTS,
             Kind::Saturated => StatusCode::SERVICE_UNAVAILABLE,
@@ -56,7 +63,10 @@ impl Kind {
         match self {
             Kind::Unauthorized => "authentication_error",
             Kind::NotFound | Kind::ModelNotFound => "not_found_error",
-            Kind::InvalidRequest => "invalid_request_error",
+            // Anthropic's error taxonomy has no distinct "context length"
+            // type; it folds into invalid_request_error same as OpenAI's
+            // dialect `type` (only OpenAI's `code` slug is distinct).
+            Kind::InvalidRequest | Kind::ContextLengthExceeded => "invalid_request_error",
             // Anthropic has no "not_implemented"; api_error is its catch-all.
             Kind::NotImplemented => "api_error",
             Kind::Overloaded | Kind::Saturated => "overloaded_error",
@@ -66,7 +76,9 @@ impl Kind {
     fn openai_type(&self) -> &'static str {
         match self {
             Kind::Unauthorized => "authentication_error",
-            Kind::NotFound | Kind::ModelNotFound | Kind::InvalidRequest => "invalid_request_error",
+            Kind::NotFound | Kind::ModelNotFound | Kind::InvalidRequest | Kind::ContextLengthExceeded => {
+                "invalid_request_error"
+            }
             Kind::NotImplemented => "not_implemented",
             Kind::Overloaded => "rate_limit_exceeded",
             Kind::Saturated => "server_error",
@@ -79,6 +91,8 @@ impl Kind {
             Kind::NotFound => "not_found",
             Kind::ModelNotFound => "model_not_found",
             Kind::InvalidRequest => "invalid_request",
+            // OpenAI's real, well-known code for this exact scenario.
+            Kind::ContextLengthExceeded => "context_length_exceeded",
             Kind::NotImplemented => "not_implemented",
             Kind::Overloaded => "rate_limit_exceeded",
             Kind::Saturated => "server_error",
@@ -109,6 +123,9 @@ impl ApiError {
     }
     pub fn invalid_request(provider: Provider, message: impl Into<String>) -> ApiError {
         ApiError::new(provider, Kind::InvalidRequest, message)
+    }
+    pub fn context_length_exceeded(provider: Provider, message: impl Into<String>) -> ApiError {
+        ApiError::new(provider, Kind::ContextLengthExceeded, message)
     }
     pub fn not_implemented(provider: Provider, message: impl Into<String>) -> ApiError {
         ApiError::new(provider, Kind::NotImplemented, message)

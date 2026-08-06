@@ -58,14 +58,14 @@ pub fn exposes(provider: Provider, caps: CapSet) -> bool {
     }
 }
 
-/// The models `provider` exposes, as `(model_name, caps)`, sorted by name — the
-/// input to every `/models` response.
-pub fn exposed(exec: &Executor, provider: Provider) -> Vec<(String, CapSet)> {
-    let mut out: Vec<(String, CapSet)> = exec
+/// The models `provider` exposes, as `(model_name, caps, max_context_tokens)`,
+/// sorted by name — the input to every `/models` response.
+pub fn exposed(exec: &Executor, provider: Provider) -> Vec<(String, CapSet, Option<u64>)> {
+    let mut out: Vec<(String, CapSet, Option<u64>)> = exec
         .manifests()
         .iter()
-        .map(|m| (m.model.clone(), api_caps(m)))
-        .filter(|(_, caps)| exposes(provider, *caps))
+        .map(|m| (m.model.clone(), api_caps(m), m.max_context_tokens))
+        .filter(|(_, caps, _)| exposes(provider, *caps))
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
@@ -116,6 +116,7 @@ pub fn strip_provider_prefix(model: &str) -> Option<&str> {
 /// - the primary `model`, then its prefix-stripped form;
 /// - then, if a `models` fallback array is present, each entry followed by its
 ///   prefix-stripped form.
+///
 /// Exact match always precedes the stripped form of the same id, and the primary
 /// `model` (both forms) is always tried before any `models` fallback entry.
 ///

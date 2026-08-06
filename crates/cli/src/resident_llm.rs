@@ -264,7 +264,15 @@ impl QwenResident {
 
 impl ResidentModel for QwenResident {
     fn manifest(&self) -> Manifest {
+        // `Self::ctx()` is exactly the value `activate()` below builds the
+        // engine's KV-cache sizing from (`max_blocks_per_seq = ctx.div_ceil(16)`,
+        // `Engine::max_seq_len() = max_blocks_per_seq * 16 >= ctx`), so
+        // advertising `ctx` itself is a safe, never-overstated floor on real
+        // serving capacity - see `Manifest::max_context_tokens`'s doc comment
+        // on why this must be the actual engine capacity, not the
+        // checkpoint's architectural `max_position_embeddings`.
         Manifest::new(&self.id, "text generation (Qwen3 BPE decoder)", vec![generate_spec("generate text (Qwen3; chat template optional)", true)])
+            .with_max_context_tokens(Self::ctx() as u64)
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
         InstanceKey::new(self.id.as_str(), "default")
