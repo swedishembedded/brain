@@ -722,6 +722,14 @@ impl Engine {
         self.kv_pool_bytes
     }
 
+    /// The pool's total theoretical cached-token capacity (`num_blocks *
+    /// block_size`), independent of dtype — the number that answers "how
+    /// many tokens could this pool ever hold at once", as opposed to
+    /// [`kv_pool_bytes`] answering "at what memory cost".
+    pub fn kv_pool_capacity_tokens(&self) -> u64 {
+        self.alloc.num_blocks() as u64 * self.block_size as u64
+    }
+
     /// Whether the installed KV clip table is a real, binding calibration
     /// that is ACTUALLY DISPATCHED (not `None`, not `KvCalib::disabled`, and
     /// the engine is int8 — `APPEND_I8_CLIPPED` only ever runs in place of
@@ -1868,6 +1876,12 @@ impl model::serve::PagedDecoder for Engine {
     }
     fn device_stats(&self) -> Option<gpu_core::DeviceStats> {
         Engine::device_stats(self)
+    }
+    fn kv_pool_bytes(&self) -> u64 {
+        Engine::kv_pool_bytes(self)
+    }
+    fn kv_pool_capacity_tokens(&self) -> u64 {
+        Engine::kv_pool_capacity_tokens(self)
     }
     fn decode_window_capacity(&self) -> usize {
         DECODE_WINDOW

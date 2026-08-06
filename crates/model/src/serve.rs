@@ -78,6 +78,20 @@ pub trait PagedDecoder {
     /// Device-op accounting (submits/dispatches/readbacks), where the backend counts it.
     fn device_stats(&self) -> Option<gpu_core::DeviceStats>;
 
+    /// Device bytes the paged KV pool costs at this decoder's sizing — a
+    /// REQUIRED method (unlike `device_stats`, which is genuinely `Option`
+    /// because some backends don't count): this is an analytic quantity
+    /// every `PagedDecoder` can derive from its own pool geometry, computed
+    /// before any device allocation happens (so residency budgeting can use
+    /// it as a prediction, not a postmortem) — see
+    /// `qwen::serve::kv_pool_bytes`, the one implementation today.
+    fn kv_pool_bytes(&self) -> u64;
+
+    /// The pool's total theoretical cached-token capacity (`num_blocks *
+    /// block_size`), independent of dtype — see
+    /// `qwen::serve::Engine::kv_pool_capacity_tokens`.
+    fn kv_pool_capacity_tokens(&self) -> u64;
+
     /// The largest `k` [`forward_batched_greedy_window`](Self::forward_batched_greedy_window)
     /// may be called with — the decoder's own on-device decode-window scratch
     /// capacity. The scheduler must never request more: it is not a tunable
@@ -531,6 +545,16 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// Device-op accounting — see [`PagedDecoder::device_stats`].
     pub fn device_stats(&self) -> Option<gpu_core::DeviceStats> {
         self.dec.device_stats()
+    }
+
+    /// KV pool byte cost — see [`PagedDecoder::kv_pool_bytes`].
+    pub fn kv_pool_bytes(&self) -> u64 {
+        self.dec.kv_pool_bytes()
+    }
+
+    /// KV pool token capacity — see [`PagedDecoder::kv_pool_capacity_tokens`].
+    pub fn kv_pool_capacity_tokens(&self) -> u64 {
+        self.dec.kv_pool_capacity_tokens()
     }
 
     /// One scheduler iteration: admit waiting requests that fit (prefill + sample

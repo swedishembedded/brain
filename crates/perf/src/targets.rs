@@ -210,6 +210,23 @@ impl PerfTarget for PagedLlmTarget {
                     })
                     .unwrap_or(serde_json::Value::Null),
             ),
+            // The int8-KV memory claim, measured rather than asserted: an
+            // analytic byte count derived from the SAME arithmetic the engine
+            // allocated from (qwen::serve::kv_pool_bytes), not a device
+            // counter -- see that function's doc comment for why. `kv_dtype`
+            // itself is already reported in the artifact's `target.config`
+            // (`build_qwen_synth`/`build_qwen`'s `.with("kv_dtype", ...)`).
+            ("kv_pool_bytes".into(), serde_json::json!(self.sched.kv_pool_bytes())),
+            ("kv_theoretical_artifacts".into(), serde_json::json!(self.sched.kv_pool_capacity_tokens())),
+            // A point sample, not a tracked peak (no backend exposes device
+            // memory here -- see `kv_pool_bytes` for the honest device-side
+            // number). On a box with no discrete GPU, host RSS genuinely IS
+            // device memory, so this is the field to fill rather than
+            // fabricate `peak_device_mb`.
+            (
+                "peak_host_mb".into(),
+                crate::scenarios::soak::host_mem_mb().map(|v| serde_json::json!(v)).unwrap_or(serde_json::Value::Null),
+            ),
         ]
     }
 
