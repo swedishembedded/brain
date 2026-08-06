@@ -126,6 +126,40 @@ in brain.
   calibration is never picked up without the flag/env var, even if the file
   is sitting right there.
 
+- **W3.5 — int8 paged KV is now the serving default**, closing out P12 above.
+  Landed behind the full gate ladder (G1–G7 in the workstream's plan;
+  memory-measurement infra, a scale-bug oracle gate, dtype-parameterized
+  bit-exact self-consistency, a `head_dim % 4` boundary policy, a CPU-backend
+  execution gate, real-KV-shape perf plumbing) plus the D3 decode/prefill A/B
+  above, which is what actually cleared it to default (`docs/performance/status.md`
+  §"int8 paged KV: decode/prefill A/B").
+
+  **Memory, measured** (`qwen::serve::kv_pool_bytes`, the same formula the
+  allocator itself uses — not a re-derived estimate): at the OLD default
+  (`ctx=2048`), the real Qwen3-0.6B KV pool goes from 998,244,352 B (0.93 GiB,
+  fp32) to 257,359,872 B (0.24 GiB, int8) — **3.8788× smaller**, exactly
+  `4·head_dim / (head_dim + 4)` at `head_dim=128`. This number now reaches
+  `brain perf`'s `memory` block and the residency budget (so braintop reflects
+  it too), not just a code comment — previously `crates/perf`'s `memory` block
+  was hardcoded `null` for the KV pool.
+
+  **`BRAIN_QWEN_CTX`'s default raised 2048 → 24576** (12×), sized to what
+  int8 buys: real-checkpoint measurement at the new default
+  (`kv_pool_bytes_at_the_new_ctx_default_fits_the_igpu_budget`,
+  `crates/cli/src/resident_llm.rs`) — `kv_pool_bytes` = 2.72 GiB (matches the
+  pure allocator formula exactly), **total host RSS after a full resident
+  activation (real weights + KV pool + scratch) = 3.41 GiB**, comfortably
+  under the iGPU's 8 GiB policy budget (`run_cli.rs::build_serving_executor`).
+  The fp32 opt-out (`--kv-fp32` / `BRAIN_QWEN_KV_INT8=0`) at the SAME ctx
+  computes to a 10.56 GiB KV pool alone — over budget — so `activate()` now
+  refuses it outright (naming the checkpoint/ctx/byte count) rather than
+  letting it hit wgpu's per-buffer allocation failure; this is only safe to
+  raise because int8 KV ships first.
+
+  `KvCalib` is wired into serving as an explicit opt-in
+  (`--kv-calib`/`BRAIN_QWEN_KV_CALIB=1`) — see P12's conclusion above for why
+  it defaults off.
+
 ## Parity ladder
 
 | Gate | What | Result |
@@ -138,6 +172,7 @@ in brain.
 | P7 | paged-KV decode vs naive | bit-identical per-token |
 | P11 | folded-adapter decode-only generation vs live unfolded trained forward | exact token match (`lora_serve_fold.rs`) |
 | P11 | adapter beats base on held-out inputs, from a RELOADED checkpoint | `lora_learning_gate.rs` (synthetic, CPU) + `qwen_eval.rs` (real Qwen3-0.6B, `#[ignore]`) |
+| W3.5 | int8 paged KV: scale-bug oracle, dtype-parameterized bit-exact self-consistency, CPU-backend execution | G1–G7, `crates/qwen/src/serve.rs` `serve::tests` |
 
 ## Remaining
 
