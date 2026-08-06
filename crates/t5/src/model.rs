@@ -271,7 +271,7 @@ impl T5Encoder {
         // XXL table is 526 MB). `embed_tile` Params: [d_model, seq_len, v0,
         // v_count]; bufs [tokens(u32), emb tile, out].
         let dw = d as u64;
-        for (v0, cnt) in block::vocab_tiles(c.vocab as u64, dw) {
+        for (v0, cnt) in block::vocab_tiles_on(g, c.vocab as u64, dw) {
             s.push(g.step_sliced(
                 K_EMBED_TILE,
                 &[&self.tokens, self.w("shared.weight"), &self.x[0]],

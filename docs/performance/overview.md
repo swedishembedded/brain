@@ -1053,3 +1053,70 @@ backward while `matmul_dx_reg`/`matmul_dw_reg_splitk` improve to **24.8% / 28.5%
 of the compute roof (from 18.1 / 19.1 at 256²) and `im2col_at` to 59.9% of the
 bandwidth roof. The GEMMs are tile-starved at the smaller shape, not badly
 written.
+
+---
+
+## Cross-model finding: the LM head was 91% of a Qwen3-0.6B prefill, because a binding budget ignored the device
+
+The first per-kernel profile of the LLM datapath at a **real** shape
+(`qwen_bench`, `QwenConfig::qwen3_0_6b()`, T=512, one P40, random weights):
+
+```
+=== PREFILL T=512: 548 dispatches, 4375.51 ms ===
+kernel              ms      n      %   ms/call   GFLOP/s     GB/s   bound   %roof
+matmul_tile     4097.73     7  90.8%  585.389      38.9      0.2 compute    0.4%
+gqa_scores       145.67    28   3.2%    5.203     103.8      4.4  memory    1.5%
+matmul_reg3      143.79   196   3.2%    0.734    3136.4     21.2 compute   29.7%
+WHOLE PASS      4375.51   548                     146.7                     1.4%
+  DEFECT  matmul_tile  0.4% of its compute roof (floor 30%) — 90.8% of this pass
+```
+
+`matmul_tile` is the **naive** GEMM. The per-layer projections next to it, on the
+same graph and the same device, run `matmul_reg3` at 3136 GFLOP/s — **80× the
+rate**. The cause is not the kernel; it is which kernel got dispatched:
+
+* `block::TILE_BUDGET_WORDS` was a fixed 24 Mi words (~96 MiB), chosen for the
+  smallest binding limit brain had met (128 MB on Mesa-GL). A P40 **reports
+  2047 MiB**, and `Backend::max_storage_binding_bytes()` has been a real query
+  since the backends stopped defaulting it — nothing consulted it here.
+* So `vocab_tiles` split the tied 151936×1024 head into **7 tiles**, 21× finer
+  than the device needs.
+* And `qwen::model`'s head only routes to `matmul_reg3` when the vocab collapses
+  to **one** tile — a tiled head *must* use the sliced-binding `matmul_tile`.
+
+One constant, therefore, silently pinned the largest GEMM in the model to the
+naive kernel. Letting it collapse:
+
+| | dispatches | prefill T=512 | GFLOP/s | % of measured roof | tok/s |
+|---|---:|---:|---:|---:|---:|
+| before | 548 | 4375.51 ms | 146.7 | 1.4% | 117 |
+| after | 536 | **362.95 ms** | **1768.6** | **16.8%** | **1411** |
+
+**12.05× on the whole pass**, reproduced twice from a matched idle temperature,
+and confirmed by the pre-existing `BRAIN_TILE_BUDGET_WORDS` A/B before any code
+changed. `block::vocab_tiles_on` now derives the budget from the device's
+queried limit (halved, since the same dispatch also binds logits and the hidden
+state); `qwen`, `lfm` and `t5` use it. Models too large for one binding still
+tile — Qwen3-8B's 151936×4096 head is 2.49 GB and stays split — and the unit
+test asserts every tile fits under the real ceiling.
+
+This is the `docs/lessons.md` #8 defect class (a fast kernel a later model never
+learned about) with a twist worth naming: **the unwired thing was not a kernel,
+it was a *limit*.** The fast kernel was wired and eager; a capability nobody
+queried kept the graph away from it.
+
+### What the prefill profile says next
+
+With the head fixed, the same table ranks very differently and the top rows are
+now attention, not GEMMs:
+
+```
+matmul_reg3   172.27  197  39.3%   3542.7 GFLOP/s  compute  33.6%
+gqa_scores    143.41   28  32.7%    105.4 GFLOP/s   memory   1.6%   <- DEFECT
+gqa_apply      38.76   28   8.8%    388.6 GFLOP/s   memory   5.8%   <- DEFECT
+ce_value       29.89    1   6.8%                    memory   3.6%   <- DEFECT
+```
+
+`gqa_scores` at **1.6% of the bandwidth roof** while consuming a third of the
+pass is the next target, and `matmul_reg3` at 33.6% of the compute roof is above
+the 30% defect line but well short of the 60% band.

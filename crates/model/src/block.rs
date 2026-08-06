@@ -878,11 +878,18 @@ pub fn layernorm_dx_bwd(
     g.step(kind, &[x, gamma, dy, dx], &[d, rows, f(eps)], threads)
 }
 
-/// Per-binding budget (f32 words) for tiling an embedding / lm_head over vocab,
-/// so each storage binding stays under a backend's max-binding size (e.g. 128MB
-/// on Mesa-GL). ~96 MiB; small models collapse to one tile.
-/// `BRAIN_TILE_BUDGET_WORDS` overrides it (e.g. tiny, to force tiling in tests).
+/// Fallback per-binding budget (f32 words) for tiling an embedding / lm_head
+/// over vocab, used only when the device's real limit is not available.
+///
+/// ~96 MiB, chosen for the smallest limit brain has met (128 MB on Mesa-GL).
+/// `BRAIN_TILE_BUDGET_WORDS` overrides everything (e.g. tiny, to force tiling in
+/// tests).
 pub const TILE_BUDGET_WORDS: u64 = 24 * 1024 * 1024;
+
+/// Safety margin on the device's reported binding limit. The tiling rule sizes
+/// the *weight* slice; the same dispatch also binds the logits and the hidden
+/// state, so it does not spend the whole limit on one operand.
+const TILE_BUDGET_FRACTION: u64 = 2;
 
 pub fn tile_budget_words() -> u64 {
     std::env::var("BRAIN_TILE_BUDGET_WORDS")
@@ -892,10 +899,47 @@ pub fn tile_budget_words() -> u64 {
         .unwrap_or(TILE_BUDGET_WORDS)
 }
 
+/// The budget for `gpu`, from its **queried** max storage-binding size.
+///
+/// The constant above is a floor for an unknown device, and using it on a known
+/// one was expensive: a P40 reports 2047 MiB, so the fixed ~96 MiB tiled 21×
+/// more finely than necessary. On Qwen3-0.6B that split the tied 151936×1024
+/// head into **7 tiles**, and the caller only routes to the register-tiled GEMM
+/// when the vocab collapses to ONE (a tiled head has to use `matmul_tile`, the
+/// naive kernel). Measured: that head was **90.8% of a T=512 prefill at 0.4% of
+/// the compute roof**, and letting it collapse took the whole pass
+/// **4375.51 → 361.36 ms (12.1×)**, 117 → 1417 tok/s.
+///
+/// An explicit `BRAIN_TILE_BUDGET_WORDS` still wins, so tests can force tiling.
+pub fn tile_budget_words_for(gpu: &Gpu) -> u64 {
+    if let Some(w) =
+        std::env::var("BRAIN_TILE_BUDGET_WORDS").ok().and_then(|s| s.parse::<u64>().ok()).filter(|&w| w > 0)
+    {
+        return w;
+    }
+    // Queried, never assumed — and never smaller than the portable floor, so a
+    // backend that under-reports cannot make the tiling worse than it was.
+    let bytes = gpu.max_storage_binding_bytes() / TILE_BUDGET_FRACTION;
+    (bytes / 4).max(TILE_BUDGET_WORDS)
+}
+
 /// Vocab tiles `(v0, count)` sized so a `[count, d_model]` weight slice stays
 /// within the per-binding budget. Small vocabularies yield a single tile.
+///
+/// Prefer [`vocab_tiles_on`] wherever a device is in hand: this form has to
+/// assume the portable floor, and assuming it on a card that reports 20× more
+/// is what made the Qwen3-0.6B head 90% of its own prefill.
 pub fn vocab_tiles(vocab: u64, d_model: u64) -> Vec<(u32, u32)> {
-    let rows = (tile_budget_words() / d_model.max(1)).max(1);
+    tiles_with_budget(vocab, d_model, tile_budget_words())
+}
+
+/// [`vocab_tiles`] against the device's own queried binding limit.
+pub fn vocab_tiles_on(gpu: &Gpu, vocab: u64, d_model: u64) -> Vec<(u32, u32)> {
+    tiles_with_budget(vocab, d_model, tile_budget_words_for(gpu))
+}
+
+fn tiles_with_budget(vocab: u64, d_model: u64, budget: u64) -> Vec<(u32, u32)> {
+    let rows = (budget / d_model.max(1)).max(1);
     let mut out = Vec::new();
     let mut v0 = 0u64;
     while v0 < vocab {
@@ -1024,7 +1068,7 @@ pub fn swiglu_bwd(
 
 #[cfg(test)]
 mod tests {
-    use super::{gemm_variant, GemmVariants};
+    use super::{gemm_variant, tiles_with_budget, GemmVariants, TILE_BUDGET_FRACTION, TILE_BUDGET_WORDS};
 
     /// Pins the three arms and, in particular, the `m <= 32` precondition the
     /// GEMV kernels state in their headers: violating it is silently wrong
@@ -1051,5 +1095,60 @@ mod tests {
         // The reference tier ignores both fast kernels at every shape.
         assert_eq!(gemm_variant(GemmVariants::Reference(2), 1, 3072), (2, 3072));
         assert_eq!(gemm_variant(GemmVariants::Reference(2), 512, 3072), (2, 512 * 3072));
+    }
+
+    /// The tiling rule, against the budget rather than against a device — the
+    /// device half is one `max_storage_binding_bytes()` call.
+    ///
+    /// This exists because the fixed ~96 MiB budget was 21x smaller than what a
+    /// P40 reports, which split Qwen3-0.6B's tied 151936x1024 head into 7 tiles;
+    /// the caller only routes to the register-tiled GEMM when the vocab
+    /// collapses to ONE tile, so the head ran the naive kernel at 0.4% of the
+    /// compute roof and was 90.8% of a T=512 prefill (4375.51 -> 361.36 ms once
+    /// it collapsed).
+    #[test]
+    fn a_real_lm_head_collapses_to_one_tile_on_a_device_that_reports_its_limit() {
+        let (vocab, d) = (151936u64, 1024u64);
+
+        // The portable floor still tiles it 7 ways — the behaviour that cost 12x.
+        assert_eq!(tiles_with_budget(vocab, d, TILE_BUDGET_WORDS).len(), 7);
+
+        // Half of a P40's reported 2047 MiB, in f32 words.
+        let p40 = (2047 * 1024 * 1024 / TILE_BUDGET_FRACTION) / 4;
+        assert_eq!(tiles_with_budget(vocab, d, p40).len(), 1);
+
+        // A model too large for one binding still tiles, and every tile fits
+        // inside the real limit with the safety fraction to spare: Qwen3-8B's
+        // head is 151936x4096 = 2.49 GB, past the 2047 MiB binding ceiling.
+        let big = tiles_with_budget(vocab, 4096, p40);
+        assert!(big.len() > 1, "a 2.49 GB head must not become one binding");
+        for (_, cnt) in &big {
+            let bytes = *cnt as u64 * 4096 * 4;
+            assert!(bytes <= 2047 * 1024 * 1024, "tile of {bytes} B exceeds the binding limit");
+        }
+
+        // Tiles cover the vocab exactly, with no gap and no overlap.
+        let mut next = 0u32;
+        for (v0, cnt) in &big {
+            assert_eq!(*v0, next);
+            next += cnt;
+        }
+        assert_eq!(next as u64, vocab);
+    }
+
+    /// A small budget must still force the tiled path, which is what
+    /// `crates/t5/tests/smoke.rs` relies on to exercise the sliced-binding
+    /// `embed_tile` branch at toy size (it sets `BRAIN_TILE_BUDGET_WORDS=4096`,
+    /// and `tile_budget_words_for` honours that ahead of any device limit).
+    #[test]
+    fn a_small_budget_still_forces_the_tiled_path() {
+        // 512 words / d_model 8 = 64 rows per tile over a 4096 vocab.
+        let t = tiles_with_budget(4096, 8, 512);
+        assert_eq!(t.len(), 64);
+        assert_eq!(t[0], (0, 64));
+
+        // A budget smaller than one row still yields whole rows, never zero —
+        // a zero-row tile would loop forever.
+        assert_eq!(tiles_with_budget(3, 1024, 1).len(), 3);
     }
 }

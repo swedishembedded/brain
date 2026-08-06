@@ -915,7 +915,7 @@ impl Lfm {
         let hq = c.q_dim();
         let eps = c.norm_eps;
         let dw = d as u64;
-        let tiles = block::vocab_tiles(v as u64, dw);
+        let tiles = block::vocab_tiles_on(&self.gpu, v as u64, dw);
         let mut s: Vec<Step> = Vec::new();
 
         // The residual-in / residual-out buffer for layer `l`, per regime.

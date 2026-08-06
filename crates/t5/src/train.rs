@@ -350,7 +350,7 @@ impl T5Trainer {
         let mut s = Vec::new();
 
         let dw = d as u64;
-        for (v0, cnt) in block::vocab_tiles(c.vocab as u64, dw) {
+        for (v0, cnt) in block::vocab_tiles_on(g, c.vocab as u64, dw) {
             s.push(g.step_sliced(
                 K_EMBED_TILE,
                 &[&self.tokens, self.w("shared.weight"), &self.x[0]],
