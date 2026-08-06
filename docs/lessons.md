@@ -499,3 +499,83 @@ Two things follow, and the second is the one that bit:
 Running the fused kernel alone on the CPU was not a consolation prize: it
 matched the host oracle **exactly** (0.0e0, against 7.2e-7 on the GPU), which
 is a stronger correctness result than the GPU run produced.
+
+## 27. A "% of peak" divided by a hardcoded peak is not a measurement
+
+Every profiler in this tree reported utilisation against a literal:
+`PEAK_TFLOPS = 11.76` in `vqgan_bench`, `unet_bench` and `zimage_bench`,
+`PEAK_GBPS = 346.0` in four microbenches, `PEAK_FP32 = 11_760.0` in two more.
+Those are one card's spec-sheet numbers. Three separate problems follow, and the
+third is the one that matters:
+
+1. **On any other device every number is wrong**, silently and by an unbounded
+   factor. `DeviceCaps::peak_bandwidth_gbs` existed for exactly this and was
+   `None` on all three backends, with nothing anywhere filling it.
+2. **Spec-sheet peak is not achievable peak.** Measured on this box with a
+   dependency-free FMA probe and a STREAM-triad probe: **10 555 GFLOP/s (89.8%
+   of 11.76 TFLOP/s) and 287.6 GB/s (83.1% of 346)**. Grading kernels against a
+   roof nothing can reach builds a permanent 10-17% pessimism into every row.
+3. **The whole method depends on the denominator.** `docs/kernel-checklist.md`
+   §F is "rank against the roof, fix the top row, re-profile". A wrong roof does
+   not produce an obviously wrong answer — it produces a plausible one, and
+   quietly invalidates the ranking that everything else is built on.
+
+`gpu_core::roof` measures both roofs once per adapter (persisted with
+`gpu_core::tune`'s key discipline, so editing a probe invalidates old numbers by
+construction) and `Gpu::caps()` overlays them. The probe measures the
+**silicon**, deliberately not "the best GEMM we have written" — a roof derived
+from `matmul_reg3` would hide precisely the gap the workstream exists to close.
+
+Corollary worth stating separately: **do not measure a roofline under
+contention.** Two probes sharing a device measure the contended device and
+disagree by more than 25%, which broke the reproducibility test at
+`--test-threads=8` and is not a bug in the probe.
+
+## 28. A partial FLOP numerator over a full denominator under-reports in silence
+
+`vqgan_bench`'s `WHOLE PASS` row summed FLOPs across every row regardless of
+whether `gpu_core::cost` had a formula for it, then divided by the whole-pass
+time. **Ten of the VQGAN backward's 26 kernel kinds had no formula**, so the
+published "backward = 5.4% of peak" was computed from a numerator missing a
+third of the graph.
+
+This is the mirror image of the failure `cost` was designed to prevent. An
+uncovered kernel already reported `-` per row (never a zero that reads as slow),
+but the pass-level total had no such guard — and a *pass* rate is the number a
+reader quotes. The fix is that a partly covered pass reports **no rate at all**
+and names the kinds it is missing:
+
+    WHOLE PASS   457.42 ms   1404   (rate unavailable — no cost formula for: mse_grad, masked_l1_grad)
+
+which turned an invisible accounting hole into a two-line work item. With all 26
+covered, the honest numbers are **forward 356.8 GFLOP/s (3.4%) and backward
+638.1 GFLOP/s (6.0%) of the measured roof.**
+
+Two structural notes:
+
+* The F0 coverage test was a hand-maintained *list* of kernel names, so it could
+  only fail when someone remembered to extend it — it could not stop a new
+  kernel landing unmeasurable. It is now backed by a **ratchet** over the whole
+  of `kernels::ALL` (150/357 today) that fails when coverage falls.
+* Name the uncovered kinds in the profile output, never just count them. They
+  are usually cheap enough to fall outside the printed top rows, which is
+  exactly where a missing formula hides.
+
+## 29. `make kernels-regen` had been broken since the script moved
+
+`scripts/build/kernels-regen.sh` computed its repo root as
+`dirname($BASH_SOURCE)/..`, which was right when it lived in `scripts/` and
+became `scripts/` itself once it moved into `scripts/build/`. Every invocation
+died with `missing .../scripts/crates/kernels/src/lib.rs`.
+
+Nobody noticed because the failure mode is *silent at the level that matters*:
+you add a `.wgsl`, the regen fails, and you hand-append the two lines to
+`crates/kernels/src/lib.rs` instead. The registry stays correct, so no test ever
+fails — it just stops being mechanically derivable. Re-running the fixed script
+produced a 23-line diff over kernels added since the breakage: hand-written doc
+comments replaced by the generated form, and several consts out of sort order.
+
+The lesson is about the class, not the typo: **a generator whose output can be
+produced by hand will be, and its breakage is invisible until someone needs it
+to be authoritative.** `make check/scripts` verifies every script *parses*; it
+cannot verify one still *works*. A generator wants a regen-is-a-no-op check.

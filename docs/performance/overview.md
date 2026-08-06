@@ -989,3 +989,67 @@ all three are the per-channel reductions `vae::blocks::BWD_KERNELS` already
 documents as having no cooperative twin (the §C.2 gap in
 `docs/kernel-checklist.md`). Unlike the convs this is a known, written-down gap;
 the profile just says what it costs.
+
+---
+
+## Cross-model finding: the roofline itself was a P40 literal, and it was 10-17% too high
+
+Every "% of peak" this repo printed divided by a hardcoded constant
+(`PEAK_TFLOPS = 11.76` in three model benches, `PEAK_GBPS = 346.0` in four
+microbenches). `DeviceCaps::peak_bandwidth_gbs` existed for this and was `None`
+on all three backends; there was no peak-FLOP field at all.
+
+`gpu_core::roof` now **measures** both roofs once per adapter and `Gpu::caps()`
+overlays them, so a utilisation number is a statement about the device that ran:
+
+| roof | spec sheet (P40) | measured | probe |
+|---|---:|---:|---|
+| fp32 compute | 11 760 GFLOP/s | **10 555** (89.8%) | `roof_fma` — 8 independent FMA chains in registers, no memory traffic in the loop |
+| bandwidth | 346 GB/s | **287.6** (83.1%) | `axpy` over 2 × 256 MiB, STREAM-triad shape (12 B/element) |
+| ridge | 34.0 FLOP/byte | **36.7** | |
+
+The compute probe deliberately measures the **silicon**, not the best GEMM in
+the tree: a roof derived from `matmul_reg3` (which reaches ~43% of peak) would
+have hidden exactly the gap the work is meant to close. Both probes
+self-calibrate their trip count to clear the launch floor and are
+`poll_wait`-bracketed (§E.0). Results persist under `~/.cache/brain/roof-<adapter>-<probe-hash>.txt`,
+invalidated by probe-source fingerprint; `BRAIN_NO_ROOF=1` skips probing.
+
+### The VQGAN training step, re-stated against the measured roof
+
+The profiler (`gpu_core::profile`, now shared by `vqgan_bench` / `unet_bench`
+instead of a copy in each) classifies every row compute- or memory-bound from
+the device's ridge and grades it against **its own class's** roof — reporting a
+streaming kernel as a fraction of a FLOP peak is meaningless. It then names the
+rows below their class's floor:
+
+```
+FORWARD   348 disp  407.98 ms   356.8 GFLOP/s   3.4% of measured peak
+  DEFECT  conv_bias_reg          3.2% of its compute roof (floor 30%) — 89.5% of this pass
+BACKWARD 1404 disp  457.18 ms   638.1 GFLOP/s   6.0% of measured peak
+  DEFECT  col2im                 8.0% of its memory roof  (floor 35%) — 21.5% of this pass
+  DEFECT  bias_grad              1.2% of its memory roof  (floor 35%) — 14.9% of this pass
+  DEFECT  matmul_dx_reg         18.1% of its compute roof (floor 30%) — 11.3% of this pass
+  DEFECT  matmul_dw_reg_splitk  19.1% of its compute roof (floor 30%) — 10.7% of this pass
+  DEFECT  axpy                  23.0% of its memory roof  (floor 35%) —  7.7% of this pass
+step = 865.2 ms; group sums inflate the passes by 15% (fwd) and 46% (bwd)
+```
+
+Two rows that the old table made look like targets are **not**:
+
+* **`im2col_at` is done.** 128.8 GB/s *counted* × its documented ~2.7× sector
+  amplification is ~350 GB/s of real traffic — 44.8% of the counted roof and at
+  the hardware limit in practice. It can only be *deleted* (fused into the dW
+  GEMM's B-operand load), never tuned.
+* **`conv_bias_reg` at 3.2%** is classified compute-bound because its *minimum*
+  traffic gives it a high arithmetic intensity; the kernel's own 12-loads-per-32-FMAs
+  schedule is what puts it at 0.75 byte/FLOP. The classifier is right that this
+  is a defect — it needs the algorithmic change (the GEMM lowering, 3.8× where
+  it is used), not tuning.
+
+At 512² the ranking shifts and is worth recording, because it is evidence about
+*occupancy* rather than about the kernels: `col2im` rises to 30.0% of the
+backward while `matmul_dx_reg`/`matmul_dw_reg_splitk` improve to **24.8% / 28.5%**
+of the compute roof (from 18.1 / 19.1 at 256²) and `im2col_at` to 59.9% of the
+bandwidth roof. The GEMMs are tile-starved at the smaller shape, not badly
+written.
