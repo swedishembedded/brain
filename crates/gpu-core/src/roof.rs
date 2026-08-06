@@ -264,7 +264,10 @@ fn measure_compute(gpu: &Gpu) -> Option<f32> {
         // Scale straight to the target rather than doubling blindly, then round
         // up, so a fast device converges in one extra step instead of ten.
         let want = (iters as f64 * MIN_PROBE_SECONDS / secs.max(1e-9)).ceil();
-        iters = (want as u32).clamp(iters.saturating_mul(2), 1 << 20);
+        // NOT `clamp(lo, hi)`: once `iters*2` passes the ceiling the arguments
+        // invert and `clamp` panics with `min > max`. Grow by at least 2x, cap
+        // at the ceiling, in that order.
+        iters = (want as u32).max(iters.saturating_mul(2)).min(1 << 20);
     }
 }
 
@@ -295,7 +298,9 @@ fn measure_bandwidth(gpu: &Gpu, elems: u64) -> Option<f32> {
             return Some((bytes as f64 / secs / 1e9) as f32);
         }
         let want = (passes as f64 * MIN_PROBE_SECONDS / secs.max(1e-9)).ceil();
-        passes = (want as usize).clamp(passes * 2, MAX_BW_PASSES);
+        // See the note in `measure_compute`: `clamp` panics when the bounds
+        // invert, which they do as soon as `passes * 2` exceeds the ceiling.
+        passes = (want as usize).max(passes * 2).min(MAX_BW_PASSES);
     }
 }
 

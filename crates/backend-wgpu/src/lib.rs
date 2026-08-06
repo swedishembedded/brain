@@ -418,6 +418,15 @@ impl DeviceShared {
                 names: kernels.iter().map(|(n, _)| n.to_string()).collect(),
                 period_ns: queue.get_timestamp_period(),
                 acc: std::sync::Mutex::new(vec![(0.0, 0); kernels.len()]),
+                // Read off the DEVICE, not off a flag threaded down from the
+                // adapter: `new_like` compiles a second kernel set onto the same
+                // device and must reach the same conclusion.
+                inside_passes: device
+                    .features()
+                    .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES),
+                on: std::sync::atomic::AtomicBool::new(
+                    std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false),
+                ),
             })
         } else {
             None
@@ -525,6 +534,12 @@ struct GpuProfile {
     period_ns: f32,
     /// Per-pipeline (total_ms, calls).
     acc: std::sync::Mutex<Vec<(f64, u64)>>,
+    /// The device can write timestamps between dispatches INSIDE one compute
+    /// pass, so the production single-pass flush can be timed as-is.
+    inside_passes: bool,
+    /// Whether flushes currently accumulate timings. Off unless BRAIN_PROFILE
+    /// asked, or a profiler called `set_kernel_timing(true)`.
+    on: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -610,7 +625,7 @@ impl WgpuBackend {
         let _guard = init_lock();
         let profile_on = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
         #[cfg(not(target_arch = "wasm32"))]
-        let want_ts = profile_on && self.shared.gpu_profile.is_some();
+        let want_ts = self.shared.gpu_profile.is_some();
         #[cfg(target_arch = "wasm32")]
         let want_ts = false;
         let shared = std::sync::Arc::new(DeviceShared::compile(
@@ -761,9 +776,24 @@ impl WgpuBackend {
         // portability invariant) and profiling degrades to op counts where the
         // feature is absent (WebGPU, old drivers).
         let profile_on = std::env::var("BRAIN_PROFILE").map(|v| v != "0").unwrap_or(false);
-        let want_ts = profile_on && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        // Timestamps are requested whenever the adapter has them, not only under
+        // BRAIN_PROFILE: `Backend::set_kernel_timing` lets a profiler turn
+        // per-kernel DEVICE timing on at runtime, and it must not require the
+        // process to have been started with an env var. Requesting an unused
+        // feature costs nothing; ACCUMULATING is what is gated (see `timing`).
+        let want_ts = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let mut required_features =
             if want_ts { wgpu::Features::TIMESTAMP_QUERY } else { wgpu::Features::empty() };
+        // The one that matters for honest attribution: writing timestamps
+        // BETWEEN dispatches inside a single compute pass. Without it the only
+        // way to time a dispatch is to give it its own pass, which changes the
+        // execution being measured — so its numbers are not the production
+        // pass's numbers (`docs/lessons.md` #31).
+        let want_ts_inside =
+            want_ts && adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES);
+        if want_ts_inside {
+            required_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
+        }
         // Persisted pipeline cache (F2 warm start) — request where present;
         // absent (WebGPU, non-Vulkan) the engine just stays cold-start.
         if adapter.features().contains(wgpu::Features::PIPELINE_CACHE) {
@@ -919,10 +949,20 @@ impl WgpuBackend {
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if self.shared.gpu_profile.is_some() {
-            self.flush_profiled(&steps);
-            self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return;
+        if let Some(p) = &self.shared.gpu_profile {
+            if p.on.load(std::sync::atomic::Ordering::Relaxed) {
+                // Prefer the SINGLE-PASS timed flush: same pass structure as
+                // production, so the per-kernel times and the whole-pass time
+                // describe one execution. Fall back to a pass per dispatch only
+                // where the device cannot write timestamps inside a pass.
+                if p.inside_passes {
+                    self.flush_timed(&steps);
+                } else {
+                    self.flush_profiled(&steps);
+                }
+                self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
         }
         let mut enc = self
             .device()
@@ -940,6 +980,104 @@ impl WgpuBackend {
         }
         self.queue().submit(Some(enc.finish()));
         self.stats_submit.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The production flush, TIMED: **one compute pass**, exactly as
+    /// `flush_inner` builds it, with a timestamp written between every dispatch.
+    ///
+    /// This is the honest per-kernel time source. The alternative
+    /// ([`Self::flush_profiled`]) gives each dispatch its own pass to get
+    /// begin/end timestamps, which changes the execution being measured — wgpu
+    /// inserts barriers between passes, so a dispatch that would have overlapped
+    /// its neighbour no longer does, and the totals are not the production
+    /// pass's totals (measured: 330.7 ms of "GPU time" against a 114.9 ms pass).
+    ///
+    /// Here the pass structure is untouched. `n + 1` timestamps bracket `n`
+    /// dispatches, so dispatch `i` costs `t[i+1] - t[i]`. Query sets cap out
+    /// well below a large graph's dispatch count, so the timestamps are spread
+    /// over several sets — all written inside the SAME pass, which is legal;
+    /// only `resolve_query_set` has to wait until the pass closes. Each set
+    /// repeats its predecessor's final timestamp as its own first, so a chunk
+    /// boundary does not lose a dispatch.
+    ///
+    /// Requires `TIMESTAMP_QUERY_INSIDE_PASSES`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn flush_timed(&self, steps: &[WgpuStep]) {
+        let p = self.shared.gpu_profile.as_ref().unwrap();
+        // Timestamps needed: one before each dispatch plus one after the last.
+        const PER_SET: usize = 4096;
+        let n = steps.len();
+        let nsets = (n + 1).div_ceil(PER_SET).max(1);
+        let sets: Vec<wgpu::QuerySet> = (0..nsets)
+            .map(|c| {
+                let count = ((n + 1) - c * PER_SET).min(PER_SET) as u32;
+                self.device().create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("brain-timed"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count,
+                })
+            })
+            .collect();
+
+        let mut enc =
+            self.device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            for (i, (kind, bg, gx, gy)) in steps.iter().enumerate() {
+                pass.write_timestamp(&sets[i / PER_SET], (i % PER_SET) as u32);
+                pass.set_pipeline(&self.pipelines()[*kind]);
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups(*gx, *gy, 1);
+            }
+            pass.write_timestamp(&sets[n / PER_SET], (n % PER_SET) as u32);
+        }
+
+        let counts: Vec<u32> = (0..nsets)
+            .map(|c| (((n + 1) - c * PER_SET).min(PER_SET)) as u32)
+            .collect();
+        let total_q: u32 = counts.iter().sum();
+        let bytes = total_q as u64 * 8;
+        let resolve = self.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("brain-timed-resolve"),
+            size: bytes,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging = self.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("brain-timed-staging"),
+            size: bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut off = 0u64;
+        for (c, set) in sets.iter().enumerate() {
+            enc.resolve_query_set(set, 0..counts[c], &resolve, off);
+            off += counts[c] as u64 * 8;
+        }
+        enc.copy_buffer_to_buffer(&resolve, 0, &staging, 0, bytes);
+        self.queue().submit(Some(enc.finish()));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+        self.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        rx.recv().unwrap().unwrap();
+        let ticks: Vec<u64> = bytemuck::cast_slice::<u8, u64>(&slice.get_mapped_range()).to_vec();
+        staging.unmap();
+
+        // Flatten the per-set resolves back into one timeline. Set `c` occupies
+        // `[c*PER_SET, c*PER_SET + counts[c])` of the flattened buffer, which is
+        // exactly index `i` of the timeline, so no re-mapping is needed.
+        let mut acc = p.acc.lock().unwrap();
+        for (i, (kind, ..)) in steps.iter().enumerate() {
+            let dt = ticks[i + 1].saturating_sub(ticks[i]);
+            let e = &mut acc[*kind];
+            e.0 += dt as f64 * p.period_ns as f64 / 1e6;
+            e.1 += 1;
+        }
     }
 
     /// The `BRAIN_PROFILE` timestamp flush: one compute pass PER dispatch, each
@@ -1278,6 +1416,34 @@ impl Backend for WgpuBackend {
     fn dump_profile(&self) {
         self.dump_profile_now()
     }
+    fn set_kernel_timing(&self, on: bool) -> bool {
+        match &self.shared.gpu_profile {
+            Some(p) => {
+                p.on.store(on, std::sync::atomic::Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn kernel_times(&self) -> Option<Vec<(String, f64, u64)>> {
+        let p = self.shared.gpu_profile.as_ref()?;
+        let acc = p.acc.lock().unwrap_or_else(|e| e.into_inner());
+        Some(
+            acc.iter()
+                .enumerate()
+                .filter(|(_, (_, calls))| *calls > 0)
+                .map(|(i, (ms, calls))| (p.names[i].clone(), *ms, *calls))
+                .collect(),
+        )
+    }
+
+    fn reset_kernel_times(&self) {
+        if let Some(p) = &self.shared.gpu_profile {
+            p.acc.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().for_each(|e| *e = (0.0, 0));
+        }
+    }
+
     fn stats(&self) -> Option<backend_api::DeviceStats> {
         use std::sync::atomic::Ordering::Relaxed;
         Some(backend_api::DeviceStats {

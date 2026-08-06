@@ -1354,8 +1354,17 @@ impl Engine {
     /// from one sequence is a prefill chunk — the two share this tape, which is
     /// exactly why profiling it is worth doing.
     #[allow(clippy::too_many_arguments)]
-    pub fn steps_for_profile(&self, bsz: u32, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> Vec<Step> {
-        self.run_batched_steps(bsz, Input::Resident, positions, seqlens, blocks, offsets, bt).0
+    pub fn steps_for_profile(&self, bsz: u32, tokens: &[u32], positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> Vec<Step> {
+        // `Input::Tokens`, NOT `Input::Resident`. Resident mode is the on-device
+        // decode window: it deliberately performs no host writes because
+        // `decode_feed`/`decode_advance` already produced the token ids AND the
+        // paged metadata on the device. Using it from a profiler leaves
+        // `seq_lens` at whatever was in the buffer — zero — so every attention
+        // thread early-returns and the kernels appear to do almost no work.
+        // That is exactly how `paged_decode_scores_batched` came to report
+        // 7060 GB/s: the timing was right and the kernel really was that fast,
+        // because it was not attending to anything.
+        self.run_batched_steps(bsz, Input::Tokens(tokens), positions, seqlens, blocks, offsets, bt).0
     }
 
     /// Physical KV blocks currently free in the pool.

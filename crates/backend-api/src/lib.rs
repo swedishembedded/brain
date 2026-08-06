@@ -596,6 +596,29 @@ pub trait Backend: Send + Sync {
         None
     }
 
+    /// Turn per-kernel DEVICE timing on or off for this device, returning
+    /// whether it is now on. `false` means the backend cannot time kernels.
+    ///
+    /// This exists because host wall-clock around a drained slice is not a
+    /// measurement of a kernel — it measures launch + execute + fence, whose
+    /// floor is roughly constant and therefore inflates small kernels in inverse
+    /// proportion to their size (up to 29x measured; `docs/lessons.md` #31).
+    /// A profiler that attributes time between kernels must use device time.
+    fn set_kernel_timing(&self, _on: bool) -> bool {
+        false
+    }
+
+    /// Per-kernel accumulated DEVICE time since the last [`Self::reset_kernel_times`],
+    /// as `(kernel name, milliseconds, calls)`. `None` where the backend cannot
+    /// time kernels — a consumer must then say so, never substitute host time
+    /// silently.
+    fn kernel_times(&self) -> Option<Vec<(String, f64, u64)>> {
+        None
+    }
+
+    /// Zero the per-kernel accumulators.
+    fn reset_kernel_times(&self) {}
+
     /// Print the per-kernel `BRAIN_PROFILE` timing table NOW (stderr). The
     /// dump otherwise fires only at drop — which a RESIDENT model held in a
     /// static never reaches, so its profile was unreadable by construction.

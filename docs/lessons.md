@@ -661,7 +661,22 @@ measurement of *a submit*, and the whole-pass number it produces is still the
 thing a change is judged by (#21 stands) — but it must not be used to attribute
 time *between* kernels.
 
-**Where this leaves the tooling.** Neither source is clean today:
+**RESOLVED** — `gpu_core::profile` now uses device time wherever the backend can
+give it. `Backend::set_kernel_timing`/`kernel_times` expose per-kernel device
+totals, and `backend-wgpu` implements them with `TIMESTAMP_QUERY_INSIDE_PASSES`:
+`n+1` timestamps written *between dispatches inside the production single
+compute pass*, so the pass structure being measured is the one that ships. The
+validation is that the two numbers now account for each other — **kernel device
+time 80.28 ms against a whole pass of 80.85 ms** (0.7% apart), where the
+per-dispatch-pass mode reported 330.7 ms against 114.9 ms.
+
+It immediately inverted the ranking it was built to fix: `rmsnorm_rows` and
+`add2`, previously "DEFECT" rows at 12.3% and 6.2% of the pass, are 0.8% and
+0.3% at **31% and 54% of the bandwidth roof** — not defects at all.
+
+And it exposed a much larger harness bug underneath, recorded as #32.
+
+**Where this left the tooling before the fix.** Neither source was clean:
 
 * the host method has the floor above;
 * `BRAIN_PROFILE`'s timestamps measure real device execution, but only in a mode
@@ -677,3 +692,37 @@ per-kernel *share* in `docs/performance/` recorded before this entry as
 suspect for small kernels, and re-derive any ranking from `BRAIN_PROFILE`'s
 distribution. Whole-pass numbers, and every speedup in this document that was
 judged by one, are unaffected.
+
+
+## 32. A profiler that drives the graph wrong measures a graph that does nothing
+
+With device timing correct, `paged_decode_scores_batched` still reported
+**7060 GB/s**. The timing was right and the kernel really was that fast — because
+it was attending to nothing.
+
+`qwen_bench serve` drove the served tape with `Input::Resident`. That is the
+on-device decode-window mode (A4): it deliberately performs **no host writes**,
+because `decode_feed`/`decode_advance` are supposed to have produced the token
+ids *and* the paged metadata on the device already. Driven from a profiler,
+nothing had, so `seq_lens` stayed zero, every attention thread early-returned,
+and **61% of the pass did no work**.
+
+The damage was not confined to the attention rows. The measured "≈27–29× serve
+prefill speedup" from registering the tiled GEMM was published from that harness
+and is wrong; corrected, it is **11.8×** (2413.18 → 204.4 ms, 53 → 626 rows/s).
+The *ratio* was stable across four runs precisely because both arms ran the same
+no-op attention — a like-for-like comparison against a pass missing most of its
+work. **Reproducibility is not validity**, and a stable ratio is exactly the
+shape of evidence that makes this kind of error survive review.
+
+Three defences, in order of how much they would have caught:
+
+1. **Make the profiler drive the model the way production does.** `Resident`
+   exists for a mode with a device-side producer; a profiler has none. This is
+   the whole bug.
+2. **Cross-check the pass against its own roofline.** The impossible-rate guard
+   (#31) is what refused to publish 7060 GB/s and forced the question. Without
+   it the number would have been printed as a percentage and believed.
+3. **Sanity-check the shape of the answer.** 1650 rows/s for a 0.6B model on a
+   P40 should have prompted "against what ceiling?" — the weight-bandwidth
+   budget the same tool already prints says a served step cannot be that cheap.

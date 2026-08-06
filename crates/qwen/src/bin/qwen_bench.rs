@@ -217,7 +217,9 @@ fn main() {
             let offsets: Vec<u32> = (0..rows).map(|i| i % bs).collect();
             let bt: Vec<u32> = (0..rows).flat_map(|i| (0..mbs).map(move |b| i * mbs + b)).collect();
 
-            let steps = eng.steps_for_profile(rows, &positions, &seqlens, &blocks, &offsets, &bt);
+            let tokens: Vec<u32> = (0..rows).map(|i| (i * 131 + 7) % cfg.vocab).collect();
+            let steps =
+                eng.steps_for_profile(rows, &tokens, &positions, &seqlens, &blocks, &offsets, &bt);
             let secs = report(&gpu, &format!("SERVE {rows} rows"), &steps, reps, roofs);
             println!(
                 "\none served step at {rows} rows: {:.2} ms  ->  {:.0} rows/s",

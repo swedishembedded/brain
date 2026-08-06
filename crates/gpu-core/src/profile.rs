@@ -114,6 +114,11 @@ pub struct PassProfile {
     pub groups: usize,
     /// True only when every step in the pass had a `cost` formula.
     pub fully_covered: bool,
+    /// True when per-kernel times are DEVICE times from timestamp queries
+    /// written inside the production single compute pass. False means they are
+    /// host-bracketed group times, which inflate small kernels up to ~30x and
+    /// must not be used to attribute time between kernels (`lessons.md` #31).
+    pub device_timed: bool,
 }
 
 impl PassProfile {
@@ -236,18 +241,35 @@ impl PassProfile {
             }
         }
         println!("{}", "-".repeat(100));
-        println!(
-            "sum of groups {:.2} ms vs whole pass {:.2} ms — {:.0}% drain inflation over {} groups.",
-            self.summed_secs * 1e3,
-            self.total_secs * 1e3,
-            self.drain_overhead_pct(),
-            self.groups,
-        );
+        if self.device_timed {
+            println!(
+                "sum of kernel device time {:.2} ms vs whole pass {:.2} ms — the gap is launch, \
+                 sync and gaps between dispatches, not kernel work.",
+                self.summed_secs * 1e3,
+                self.total_secs * 1e3,
+            );
+        } else {
+            println!(
+                "sum of groups {:.2} ms vs whole pass {:.2} ms — {:.0}% drain inflation over {} groups.",
+                self.summed_secs * 1e3,
+                self.total_secs * 1e3,
+                self.drain_overhead_pct(),
+                self.groups,
+            );
+        }
         println!("Rank with the table; decide with the whole-pass number (docs/lessons.md #21).");
-        println!(
-            "NOTE per-kernel times are host-bracketed (launch+execute+fence) and inflate small \
-             kernels up to ~30x — cross-check any RANKING with BRAIN_PROFILE=1 (lessons #31)."
-        );
+        if self.device_timed {
+            println!(
+                "Per-kernel times are DEVICE times (timestamp queries inside the production \
+                 single compute pass), so the shares above are attributable."
+            );
+        } else {
+            println!(
+                "NOTE per-kernel times are HOST-bracketed (launch+execute+fence) — this device \
+                 cannot write timestamps inside a pass — and inflate small kernels up to ~30x. \
+                 Do not attribute time between kernels from them (lessons #31)."
+            );
+        }
         if let Some(rf) = roofs {
             let bogus: Vec<&str> = self
                 .rows
@@ -324,45 +346,65 @@ pub fn groups(steps: &[Step]) -> Vec<(usize, usize, usize)> {
 /// `steps` must have been recorded through a handle of `gpu`'s kernel set —
 /// kernel indices resolve through this handle's pipeline names.
 pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfile {
+    // Whole-pass time is always the un-timed production flush: it is what a
+    // change is judged by, and it must not include the timestamp resolve.
     let total = best_of(gpu, steps, reps);
     let gs = groups(steps);
+
+    // DEVICE time where the backend can give it (`lessons.md` #31). One timed
+    // submit of the WHOLE pass — same single compute pass as production — yields
+    // per-kernel totals directly, so there is no group slicing, no drain per
+    // group, and no launch+fence floor folded into a kernel's number.
+    let device_times: Option<HashMap<String, (f64, u64)>> = gpu.set_kernel_timing(true).then(|| {
+        gpu.reset_kernel_times();
+        gpu.submit(&[], steps);
+        gpu.poll_wait();
+        let t = gpu
+            .kernel_times()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(n, ms, calls)| (n, (ms / 1e3, calls)))
+            .collect();
+        gpu.set_kernel_timing(false);
+        t
+    });
+    if let Some(d) = &device_times {
+        let mut per: HashMap<usize, (f64, usize, u64, u64, bool)> = HashMap::new();
+        for (k, start, len) in &gs {
+            accumulate(gpu, &mut per, *k, &steps[*start..*start + *len], 0.0);
+        }
+        let mut rows = finish_rows(gpu, per);
+        // Overwrite the (unused) host times with the measured device ones.
+        for r in rows.iter_mut() {
+            if let Some((secs, calls)) = d.get(&r.name) {
+                r.secs = *secs;
+                r.calls = *calls as usize;
+            } else {
+                r.secs = 0.0;
+            }
+        }
+        rows.sort_by(|a, b| b.secs.partial_cmp(&a.secs).unwrap());
+        let summed = rows.iter().map(|r| r.secs).sum();
+        let fully_covered = rows.iter().all(|r| r.covered);
+        return PassProfile {
+            label: label.to_string(),
+            total_secs: total,
+            dispatches: steps.len(),
+            rows,
+            summed_secs: summed,
+            groups: gs.len(),
+            fully_covered,
+            device_timed: true,
+        };
+    }
 
     let mut per: HashMap<usize, (f64, usize, u64, u64, bool)> = HashMap::new();
     for (k, start, len) in &gs {
         let t = best_of(gpu, &steps[*start..*start + *len], reps);
-        let name = gpu.kernel_name(*k).unwrap_or("?");
-        let (mut fl, mut by, mut covered) = (0u64, 0u64, true);
-        for st in &steps[*start..*start + *len] {
-            let m = st.meta();
-            let params = m.as_ref().and_then(|m| m.params.as_deref());
-            let threads = m.as_ref().map(|m| m.threads).unwrap_or(0);
-            match crate::cost::kernel_cost(name, params, threads) {
-                Some(c) => {
-                    fl += c.flops.max(c.int_ops);
-                    by += c.bytes;
-                }
-                None => covered = false,
-            }
-        }
-        let e = per.entry(*k).or_insert((0.0, 0, 0, 0, true));
-        e.0 += t;
-        e.1 += *len;
-        e.2 += fl;
-        e.3 += by;
-        e.4 &= covered;
+        accumulate(gpu, &mut per, *k, &steps[*start..*start + *len], t);
     }
 
-    let mut rows: Vec<KernelRow> = per
-        .into_iter()
-        .map(|(k, (secs, calls, flops, bytes, covered))| KernelRow {
-            name: gpu.kernel_name(k).unwrap_or("?").to_string(),
-            secs,
-            calls,
-            flops,
-            bytes,
-            covered,
-        })
-        .collect();
+    let mut rows = finish_rows(gpu, per);
     rows.sort_by(|a, b| b.secs.partial_cmp(&a.secs).unwrap());
 
     let summed = rows.iter().map(|r| r.secs).sum();
@@ -375,7 +417,51 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
         summed_secs: summed,
         groups: gs.len(),
         fully_covered,
+        device_timed: false,
     }
+}
+
+/// Fold one group's `cost` volume (and `t` seconds) into the per-kernel map.
+fn accumulate(
+    gpu: &Gpu,
+    per: &mut HashMap<usize, (f64, usize, u64, u64, bool)>,
+    k: usize,
+    slice: &[Step],
+    t: f64,
+) {
+    let name = gpu.kernel_name(k).unwrap_or("?");
+    let (mut fl, mut by, mut covered) = (0u64, 0u64, true);
+    for st in slice {
+        let m = st.meta();
+        let params = m.as_ref().and_then(|m| m.params.as_deref());
+        let threads = m.as_ref().map(|m| m.threads).unwrap_or(0);
+        match crate::cost::kernel_cost(name, params, threads) {
+            Some(c) => {
+                fl += c.flops.max(c.int_ops);
+                by += c.bytes;
+            }
+            None => covered = false,
+        }
+    }
+    let e = per.entry(k).or_insert((0.0, 0, 0, 0, true));
+    e.0 += t;
+    e.1 += slice.len();
+    e.2 += fl;
+    e.3 += by;
+    e.4 &= covered;
+}
+
+fn finish_rows(gpu: &Gpu, per: HashMap<usize, (f64, usize, u64, u64, bool)>) -> Vec<KernelRow> {
+    per.into_iter()
+        .map(|(k, (secs, calls, flops, bytes, covered))| KernelRow {
+            name: gpu.kernel_name(k).unwrap_or("?").to_string(),
+            secs,
+            calls,
+            flops,
+            bytes,
+            covered,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -397,6 +483,7 @@ mod tests {
             summed_secs: summed,
             groups: 1,
             fully_covered,
+            device_timed: false,
         }
     }
 

@@ -1172,11 +1172,25 @@ Measured with `qwen_bench serve` at Qwen3-0.6B, 128 rows, one P40:
 
 | | top kernel | whole pass | rows/s |
 |---|---|---:|---:|
-| before | `matmul` 2400.38 ms, **98.0% of the pass at 0.4% of the compute roof** | 2207.90 ms | 58 |
-| after | `matmul_reg3` 78.47 ms, 66.1% at 13.6% | **75.30–82.12 ms** | **1553–1651** |
+| before | `matmul` 2285.14 ms, **94.4% of the pass at 0.5% of the compute roof** | 2413.18 ms | 53 |
+| after | `matmul_reg3` 74.32 ms, 35.4% at 14.7% | **204.4 ms** | **626** |
 
-**≈27–29× on the whole pass**, reproduced across four runs from matched idle
-temperatures. The fix is not a new kernel: `Engine::mm` now uses
+**11.8× on the whole pass**, reproduced from matched idle temperatures.
+
+> **These figures are a CORRECTION.** They were first published as
+> "≈27–29×, 58 → 1553–1651 rows/s" and that was wrong, in a way worth recording
+> because the *ratio* looked reproducible across four runs. The harness drove
+> the served tape with `Input::Resident` — the on-device decode-window mode,
+> which deliberately performs no host writes because `decode_feed`/
+> `decode_advance` are supposed to have produced the paged metadata on the
+> device already. From a profiler that leaves `seq_lens` at zero, so **every
+> attention thread early-returned and the whole attention half of the tape did
+> nothing**. The GEMM comparison was still like-for-like (both arms ran the same
+> no-op attention), which is exactly why the ratio was stable and wrong: it
+> measured the GEMM change against a pass that was missing 61% of its work.
+> Only device timing made it visible — `paged_decode_scores_batched` reported
+> 7060 GB/s because the timing was right and the kernel really was that fast, on
+> nothing. The fix is not a new kernel: `Engine::mm` now uses
 `block::gemm_variant` with the tier gated on the queried `workgroup_reductions`
 — the *same* rule `flux1`, `flux2` and `model::rowemit` already share, so the
 serving engine stops having a private policy. `gemm_variant`'s `m <= 32` GEMV

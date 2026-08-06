@@ -464,6 +464,29 @@ mod native_facade {
             c
         }
 
+        /// Turn per-kernel DEVICE timing on/off; `false` = this backend cannot
+        /// time kernels. See [`Self::kernel_times`].
+        pub fn set_kernel_timing(&self, on: bool) -> bool {
+            self.inner.set_kernel_timing(on)
+        }
+
+        /// Per-kernel accumulated DEVICE time since the last reset, as
+        /// `(kernel, ms, calls)`. `None` where the backend cannot time kernels.
+        ///
+        /// This is the ONLY honest source for attributing time BETWEEN kernels.
+        /// Host wall-clock around a drained slice measures launch + execute +
+        /// fence, whose floor is roughly constant and therefore inflates small
+        /// kernels in inverse proportion to their size — up to 29x measured, and
+        /// enough to invert a ranking (`docs/lessons.md` #31).
+        pub fn kernel_times(&self) -> Option<Vec<(String, f64, u64)>> {
+            self.inner.kernel_times()
+        }
+
+        /// Zero the per-kernel accumulators.
+        pub fn reset_kernel_times(&self) {
+            self.inner.reset_kernel_times()
+        }
+
         /// Device-op accounting for this handle (submits/dispatches/readbacks)
         /// since creation. `None` where the backend does not count — report
         /// null, never zero.
