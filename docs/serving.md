@@ -32,7 +32,10 @@ behind `capability::Provider` for free.
                       │ residency (scheduler)│  Executor / ResidentModel / Instance
                       └─────────┬───────────┘
                                 ▼  Instance::run_batch
-                          the model on a device
+                     model::serve::{Scheduler, PagedDecoder}
+                  (continuous batching, prefix reuse, cancellation —
+                   the seam autoregressive decoder LMs implement; see
+                   serving-contract.md §3)
                                 │
                       ┌─────────────────────┐
                       │ stats (observation)  │  StatsSnapshot → braintop / D-Bus
@@ -43,7 +46,12 @@ A request enters through a transport (D-Bus method, JSONL line, or HFSM event),
 is translated into a `capability::Invocation`, dispatched generically, scheduled
 by the residency `Executor`, and run as an `Instance::run_batch` on a placed
 device; results and blobs come back the same way, and the whole thing is
-observable through `stats`.
+observable through `stats`. For an autoregressive decoder LM, `run_batch`
+drives every invocation the dispatcher grouped into that call on a shared
+`model::serve::Scheduler` (real continuous batching for ONE dispatcher round —
+joining a batch that is already mid-flight is a separate, not-yet-built seam,
+see `.todo/continuous-batching-executor-seam.md`) instead of one sequential
+decode loop per request.
 
 ## The contract — `crates/capability`
 

@@ -682,6 +682,48 @@ decode already relies on, with zero output change on every existing
 correctness test, and is now also confirmed faster by a controlled
 same-session A/B, not just architecturally sound.
 
+### W7's attention-dispatch-width question — measured, not just re-read
+
+`.todo/attention-scratch-dispatch-width.md` flagged that
+`paged_decode_scores_batched`/`decode_softmax_batched`/`paged_decode_apply_batched`
+dispatch at the engine's full max-context width regardless of a sequence's
+real length. `BRAIN_PROFILE=1` against two `qwen-synth` shapes settles
+whether this is worth fixing:
+
+| shape (`LxDxHxV`) | matmul | scores+softmax+apply (combined) |
+|---|---:|---:|
+| `2x256x8x8000` (tiny d_model) | 64.4% | 18.0% |
+| `4x1024x16x32000` (real Qwen3-0.6B d_model) | 91.5% | 4.7% |
+
+At the real model's `d_model`, `matmul` swamps everything else and this
+concern shrinks to noise — confirms, rather than assumes, that it was
+correctly left unfixed.
+
+### Perf gate baseline — committed
+
+`scripts/gates/qwen-serving-perf-gate.sh` (`make qwen/serving-perf-gate`):
+`http:qwen-synth:28x1024x16x151936` (Qwen3-0.6B's real shape, random
+weights), `serve` scenario at concurrency 2, against a committed baseline
+(`scripts/gates/qwen-serving-perf-baselines/`) with `brain perf gate --floor
+0.5`. Verified both directions: passes against itself (including at a tight
+`--floor 0.999`), and correctly FAILS a synthetically degraded candidate
+(10x worse `ttfa_p99`/`output_per_s` against the same baseline: exit 1, both
+metrics flagged). `sweep`'s curve-shaped artifact carries no flat metric
+`perf gate` can read (`crates/perf/src/gate.rs`'s own "nothing was actually
+gated" refusal caught this on the first attempt) — `serve` at one fixed
+concurrency is the scenario shaped for gating.
+
+Also fixed while wiring this in: `scripts/gates/{wm,forecast}-perf-gate.sh`
+and `forecast-parity-gate.sh`/`test-times.sh` all `cd`'d one directory short
+of the repo root (`scripts/gates/foo.sh`'s own `dirname` + `/..` lands in
+`scripts/`, not the root), so every `./target/release/brain`/`out/...`
+reference in those scripts silently pointed at a nonexistent path. Confirmed
+live (`wm-perf-gate.sh` reported "build first" against an already-built
+release binary) and fixed (`/../..`), the same `docs/lessons.md`-#1-adjacent
+class as the `kernels-regen.sh` `REPO_ROOT` bug found earlier in this
+project — a real, pre-existing, unrelated bug, fixed because it was found,
+not routed around.
+
 ## Still planned
 
 1. `capability::Provider` adoption by `qwen`, `yolo`, `depth`, `tts` (L) —

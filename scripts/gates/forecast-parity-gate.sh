@@ -20,7 +20,7 @@
 #
 # Usage: scripts/gates/forecast-parity-gate.sh
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 export BRAIN_DEVICE="${BRAIN_DEVICE:-cpu}"
 
 fail=0

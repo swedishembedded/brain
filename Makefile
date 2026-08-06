@@ -289,6 +289,14 @@ forecast/perf-gate: release
 wm/perf-gate: release
 	scripts/gates/wm-perf-gate.sh
 
+# Concurrent-serving-performance regression gate: the real HTTP-served path
+# (http:qwen-synth: target, random weights, no checkpoint needed) through
+# `brain perf run sweep` at concurrency 1,2, vs the committed baseline
+# (scripts/gates/qwen-serving-perf-baselines/, `--update` to refresh).
+# Needs a real tokenizer via QWEN_TOKENIZER; SKIPS (not fails) when unset.
+qwen/serving-perf-gate: release
+	scripts/gates/qwen-serving-perf-gate.sh
+
 # ---- data generation ------------------------------------------------------
 data/calculator data/reverser data/wordcalc: release
 	$(BRAIN) data gen $(@F) --out $(DATA)/$(@F) --n $(N) --seed $(SEED)

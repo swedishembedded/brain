@@ -21,7 +21,7 @@
 #
 # Usage: scripts/gates/forecast-perf-gate.sh [--update]
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 BIN=./target/release/brain
 BASE=scripts/gates/forecast-perf-baselines

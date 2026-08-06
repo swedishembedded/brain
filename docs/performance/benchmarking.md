@@ -140,8 +140,6 @@ quality, since the generated tokens are meaningless. Artifacts record
 
 ### The target adapters
 
-Two adapters ship:
-
 - **`CapabilityTarget`** — wraps any `capability::Provider`. Every model that
   implements the seam becomes benchmarkable with **zero** new benchmark code.
   This is the strategic path: today `demo`, `imageops` and `zimage` implement
@@ -150,6 +148,24 @@ Two adapters ship:
 - **`PagedLlmTarget`** — wraps `qwen::serve::{Engine, Scheduler}` directly, since
   the paged continuous-batching engine is the thing most worth measuring and does
   not yet sit behind a `Provider`.
+- **`ExecutorTarget`** — wraps a `residency::Executor`, so a resident model's real
+  batching/placement (not a synchronous provider mutex) is what gets measured.
+- **`HttpTarget`** — drives the REAL served path: `apiserve::router()`, called
+  in-process via `tower::Service::oneshot` (no socket) — auth, the edge
+  concurrency limiter, the admission race, chat-template rendering,
+  tokenization, generation, all the way down to `residency::Executor` and the
+  resident model. This is the ONLY target that would have shown
+  `.todo/serving-performance-audit.md`'s 600s regression: every target above
+  measures a scheduler/engine/executor directly, which stayed fast the whole
+  time the actual served path (`crates/cli/src/resident_llm.rs`) never reached
+  any of it (`docs/lessons.md` #22). Selected as
+  `--target http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>` (random weights,
+  no checkpoint needed — same rationale as `qwen-synth:` above) or
+  `http:qwen:<weights.brain>:<tokenizer.json>` (a real checkpoint).
+  `crates/cli/src/perf_cli.rs` builds the real `QwenResident` + `Executor` +
+  router underneath. Requests are OpenAI-dialect streaming chat completions, so
+  the artifact timeline comes from real SSE `delta.content` chunks as they
+  arrive over the wire.
 
 New model families need an adapter only until they adopt `capability::Provider`.
 

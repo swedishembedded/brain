@@ -9,7 +9,7 @@
 # Dev-box gate, NOT CI: needs out/diamond-breakout.weights (brain wm import).
 # Usage: scripts/gates/wm-perf-gate.sh [--update]   (--update rewrites baselines)
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 BIN=./target/release/brain
 BASE=scripts/gates/wm-perf-baselines.json

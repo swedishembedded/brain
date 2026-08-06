@@ -399,3 +399,46 @@ the reloaded logits *differ from the base* by a real margin, not merely
 goes one further and reintroduces this exact defect on purpose as its own
 verification that the gate has teeth, rather than trusting the story that it
 would have caught it.
+
+## 22. A benchmark that measures a path no request takes is a healthy number about the wrong thing
+
+Every serving benchmark before `perf::targets::HttpTarget` drove
+`qwen::serve::Scheduler`/`residency::Executor` directly — real kernels, real
+batching, genuinely fast. Meanwhile `crates/cli/src/resident_llm.rs`, the
+ONLY code an actual `/v1/chat/completions` request ever reaches, called a
+single-sequence decode loop that touched none of it: no paged KV, no
+scheduler, no batching. The benchmark suite was green and fast while a real
+agentic client saw 600+ seconds, because "the engine is fast" and "the
+request reaches the engine" are two different claims, and only the second
+one is what a user experiences. Nothing forced the benchmark to prove the
+second claim — it was structurally impossible for it to be wrong about the
+first while being catastrophically wrong about the second, and it stayed
+that way for as long as no target actually drove the transport layer.
+
+The fix generalizes past this one bug: a target that measures a scheduler,
+an engine, or a codec directly is answering "is the fast path fast", never
+"does a request reach the fast path" — those need a DIFFERENT harness that
+goes in through the same door a client does (here, `apiserve::router()` via
+`tower::Service::oneshot`, no socket, but every layer a real HTTP request
+passes through: auth, admission, JSON parsing, chat-template rendering).
+Keep both kinds of target — the direct one is cheaper and still useful for
+kernel-level regressions — but never let the direct one stand in for "is the
+served path fast," because the gap between them is exactly where a
+serving-path regression like this one hides.
+
+## 23. "Batched prefill" that batches the readback, not the dispatch is not batched
+
+`Qwen::prefill`'s fix (this same workstream, earlier) replaced a per-token
+`decode_submit` loop with one call to the batched primitive — but the FIRST
+attempt at "fixing" prefill performance in this codebase's history batched
+only the readback (one `map`/fence at the end) while still issuing one
+GPU submit per token underneath. It measured faster than the naive
+`step()`-per-token loop (fewer host↔device round trips), so it read as
+progress, but it was still `O(T)` submits for a `T`-token prompt — the same
+defect class in a lighter disguise. `.todo/serving-performance-audit.md`'s
+own audit trail and this workstream's `prefill_submits_scale_with_chunks_
+not_with_token_count` gate exist because "faster than before" and "actually
+O(1) [per chunk]" are different claims, and a wall-clock-only benchmark
+cannot tell them apart — only a device-op COUNT (`gpu_core::DeviceStats.
+submits`) can, because it is insensitive to how fast any individual submit
+happens to run on this box today.

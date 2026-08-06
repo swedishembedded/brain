@@ -18,7 +18,7 @@
 # Deliberately runs binaries SEQUENTIALLY: brain's tests share one GPU, and
 # timing them concurrently measures contention rather than cost.
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
 PROFILE=${PROFILE:-release}
 DEPS="target/$PROFILE/deps"
