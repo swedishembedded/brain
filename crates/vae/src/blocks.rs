@@ -428,7 +428,35 @@ fn col_budget_floats() -> u64 {
 /// 128-wide column tile, so a conv with fewer output channels pays for a full
 /// tile and wins nothing (the FLUX.2 `conv_out`, Cout = 3, is 42x wasted). It
 /// stays on the direct register-tiled conv.
-const GEMM_CONV_MIN_COUT: u32 = 128;
+///
+/// # 32, swept — it was 128, inherited from a kernel pair that no longer runs
+///
+/// The 128 came from the ORIGINAL lowering and was never re-derived after
+/// `matmul_reg3` replaced `matmul_reg2` in it. Re-swept with `vqgan_bench
+/// convfwd` (P40, best of 5, 3x3 stride-1; direct = `conv_bias_reg`, lowered =
+/// `im2col_at` + `matmul_reg3` + `nlc_bias_nchw`), ms:
+///
+/// | conv | direct | lowered | speedup |
+/// |---|---|---|---|
+/// | (128,   8) 256² |  2.685 |  7.444 | 0.36x |
+/// | (128,  16) 256² |  5.104 |  7.537 | 0.68x |
+/// | (128,  32) 256² |  7.973 |  7.253 | **1.10x** |
+/// | (128,  64) 256² | 14.804 |  7.187 | **2.06x** |
+/// | (128,  96) 256² | 21.224 |  7.461 | **2.84x** |
+/// | (256,  32) 128² |  4.397 |  4.252 | **1.03x** |
+/// | (512,  64)  64² |  8.073 |  2.507 | **3.22x** |
+///
+/// The crossover is between 16 and 32 — the SAME place the backward's
+/// re-derivation landed ([`GEMM_CONV_BWD_MIN_COUT`]), because it is the same
+/// GEMM. At 128 every conv with `32 <= Cout < 128` took the direct kernel and
+/// gave up 1.03x-3.22x.
+///
+/// Who this actually moves: **inference only**, and only for architectures in
+/// that channel band. `conv_s` pins train mode to the direct lowering (its
+/// adjoints are the ones that exist), and VQGAN/AutoencoderKL/SDXL are all
+/// >= 128 channels — so this is worth nothing to them and everything to
+/// RRDBNet (`num_feat` 64, `num_grow_ch` 32) and the vision backbones.
+const GEMM_CONV_MIN_COUT: u32 = 32;
 
 impl<'a> Builder<'a> {
     /// New builder over `gpu` (built with a kernel set whose first

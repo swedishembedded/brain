@@ -516,8 +516,81 @@ fn dwtn_ab(reps: usize) {
     }
 }
 
+/// `vqgan_bench convfwd [reps]` — re-derive `GEMM_CONV_MIN_COUT`.
+///
+/// The forward threshold (128) was measured for the ORIGINAL kernel pair and
+/// never re-derived after `matmul_reg3` replaced `matmul_reg2` in the lowering.
+/// The backward's equivalent re-derivation moved 128 -> 32 and was worth 4x at
+/// the shapes in between, and `docs/kernel-checklist.md` §F.6 says every kernel
+/// pair gets its own swept threshold — so this must be measured, not inherited.
+///
+/// direct  = conv_bias_reg
+/// lowered = im2col_at + matmul_reg3 + nlc_bias_nchw
+fn convfwd_ab(reps: usize) {
+    let kernels: &[(&str, &str)] = &[
+        ("conv_bias_reg", kernels::CONV_BIAS_REG),
+        ("im2col_at", kernels::IM2COL_AT),
+        ("matmul_reg3", kernels::MATMUL_REG3),
+        ("nlc_bias_nchw", kernels::NLC_BIAS_NCHW),
+    ];
+    let gpu = Gpu::new(kernels);
+    let (k_direct, k_im2col, k_mm, k_epi) = (0usize, 1, 2, 3);
+    println!("{:<32} {:>10} {:>10} {:>9}", "conv (cin,cout,HxW)", "direct", "lowered", "speedup");
+    for &(cin, cout, h, w) in &[
+        (128u32, 8u32, 256u32, 256u32),
+        (128, 16, 256, 256),
+        (128, 32, 256, 256),
+        (128, 64, 256, 256),
+        (128, 96, 256, 256),
+        (128, 128, 256, 256),
+        (128, 256, 256, 256),
+        (256, 32, 128, 128),
+        (256, 64, 128, 128),
+        (256, 128, 128, 128),
+        (512, 64, 64, 64),
+        (512, 128, 64, 64),
+        (512, 512, 64, 64),
+    ] {
+        let (k, st, pad) = (3u32, 1u32, 1u32);
+        let (ho, wo) = ((h + 2 * pad - k) / st + 1, (w + 2 * pad - k) / st + 1);
+        let (hw, cinkk) = ((ho * wo) as u64, (cin * k * k) as u64);
+        let x = gpu.storage((cin * h * w) as u64);
+        let wt = gpu.storage((cout as u64) * cinkk);
+        let bias = gpu.storage(cout as u64);
+        let y = gpu.storage((cout as u64) * hw);
+
+        let t_direct = best_of(&gpu, &[gpu.step(
+            k_direct,
+            &[&x, &wt, &bias, &y],
+            &[1, cin, h, w, cout, k, st, pad, ho, wo],
+            cout.div_ceil(8) * (ho * wo).div_ceil(4),
+        )], reps);
+
+        let col = gpu.storage(hw * cinkk);
+        let nhwc = gpu.storage(hw * cout as u64);
+        let t_low = best_of(&gpu, &[
+            gpu.step(k_im2col, &[&x, &col],
+                     &[cin, h, w, k, st, pad, ho, wo, cinkk as u32, 0, hw as u32], hw as u32 * cinkk as u32),
+            gpu.step(k_mm, &[&col, &wt, &nhwc], &[hw as u32, cinkk as u32, cout],
+                     (hw as u32).div_ceil(128) * cout.div_ceil(128) * 256),
+            gpu.step(k_epi, &[&nhwc, &bias, &y], &[hw as u32 * cout, cout, hw as u32],
+                     cout.div_ceil(64) * (hw as u32).div_ceil(64) * 64),
+        ], reps);
+
+        let mark = if t_direct / t_low > 1.0 { " <- lowered wins" } else { "" };
+        println!(
+            "({cin:4},{cout:4}) {h:4}x{w:<4}            {:>10.3} {:>10.3} {:>8.2}x{mark}",
+            t_direct * 1e3, t_low * 1e3, t_direct / t_low
+        );
+    }
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
+    if a.get(1).map(|s| s == "convfwd").unwrap_or(false) {
+        convfwd_ab(a.get(2).and_then(|s| s.parse().ok()).unwrap_or(3));
+        return;
+    }
     if a.get(1).map(|s| s == "dwtn").unwrap_or(false) {
         dwtn_ab(a.get(2).and_then(|s| s.parse().ok()).unwrap_or(3));
         return;
