@@ -38,12 +38,18 @@ OPTIONS
   --target <spec>       what to measure (default: fake)
                           fake                     built-in synthetic engine (no
                                                    model; validates the harness)
-                          qwen-synth:<L>x<D>x<H>[xV]
+                          qwen-synth:<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]]
                                                    the REAL paged serving engine on
                                                    random weights of that shape —
                                                    same kernels, KV traffic and
                                                    batching, no checkpoint needed.
-                                                   Right for hardware/config
+                                                   HeadDim/NKvHeads default to a
+                                                   derived guess (d_model/heads,
+                                                   heads/4) that does NOT match
+                                                   real Qwen3 -- give them
+                                                   explicitly to measure a real
+                                                   model's KV shape. Right for
+                                                   hardware/config
                                                    comparison, useless for quality.
                           qwen:<weights.brain>     the paged serving engine on a
                                                    real checkpoint
@@ -93,11 +99,20 @@ NOTES
 const TARGET_LIST: &str = "
 targets (--target):
   fake                               synthetic harness self-check (numbers meaningless)
-  qwen-synth:<L>x<D>x<H>[xV][:i8w]   the real paged serving engine on random weights
-  qwen:<weights.brain>[:i8w]         the paged serving engine on a real checkpoint
-  http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>
+  qwen-synth:<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]][:i8w][:kvf32]   the real paged serving engine on random weights
+  qwen:<weights.brain>[:i8w][:kvf32]         the paged serving engine on a real checkpoint
+                                     (:i8w opts IN to int8 weights, off by default; :kvf32 opts
+                                     OUT of int8 KV, which is ON by default -- either order, both optional.
+                                     HeadDim/NKvHeads override the derived guess -- e.g.
+                                     28x1024x16x151936x128x8 is Qwen3-0.6B's REAL KV shape, not the
+                                     derived 64x4 -- give them to measure a real model, not a stand-in)
+  http:qwen-synth:<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]]:<tokenizer.json>
                                      the REAL served path: apiserve's HTTP router, in-process,
-                                     over random weights of that shape (needs a real tokenizer)
+                                     over random weights of that shape (needs a real tokenizer).
+                                     The shape, incl. HeadDim/NKvHeads, is honoured -- it becomes
+                                     the written checkpoint's real config; :i8w/:kvf32 are NOT --
+                                     KV/weights dtype come from BRAIN_QWEN_KV_INT8 same as
+                                     `brain serve`, since this measures the REAL served default.
   http:qwen:<weights.brain>:<tokenizer.json>
                                      the REAL served path over a real checkpoint -- this is what
                                      .todo/serving-performance-audit.md's 600s regression measures
@@ -266,7 +281,7 @@ fn run(args: &[String]) {
                 let shape = target_spec
                     .strip_prefix("qwen-synth:")
                     .ok_or_else(|| format!("`{other}` needs --target qwen-synth:<L>x<D>x<H>[xV]"))
-                    .and_then(|sh| SynthSpec::parse(sh, &workload));
+                    .and_then(|sh| SynthSpec::parse(sh, &workload, opt.input_override, opt.output_override));
                 match shape {
                     Ok(sp) => match other {
                         "startup" => crate::perf_engine::run_startup(&sp, opt.best_of.max(2), &opt),
@@ -289,7 +304,7 @@ fn run(args: &[String]) {
         return;
     }
 
-    let mut target = match build_target(&target_spec, &workload) {
+    let mut target = match build_target(&target_spec, &workload, opt.input_override, opt.output_override) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("perf: {e}");
@@ -339,36 +354,69 @@ pub struct SynthSpec {
     pub n_layers: u32,
     pub d_model: u32,
     pub n_heads: u32,
+    /// KV heads. Defaults to the usual Qwen3 GQA ratio (`n_heads/4`) when
+    /// `n_heads` divides evenly, else MHA (`n_heads`) -- but an explicit
+    /// 6th shape component overrides this, because the derived guess does
+    /// NOT match real Qwen3-0.6B (`n_heads=16` derives `n_kv_heads=4`; the
+    /// real checkpoint is 8). A target meant to measure the REAL KV shape
+    /// (not just a same-param-count stand-in) needs to say so explicitly.
+    pub n_kv_heads: u32,
+    /// Defaults to `d_model/n_heads`; overridden by an explicit 5th shape
+    /// component for the same reason as `n_kv_heads` (real Qwen3-0.6B is
+    /// head_dim=128; `d_model/n_heads` at `1024/16` derives 64).
+    pub head_dim: u32,
     pub vocab: u32,
     pub block_size: u32,
     pub max_batch: u32,
     pub num_blocks: u32,
     pub per_seq: u32,
     pub max_prefill: u32,
+    /// From `:i8w` -- opt IN to int8 weights, off by default.
+    pub weights_int8: bool,
+    /// From `:kvf32` -- opt OUT of int8 KV, which is ON by default.
+    pub kv_fp32: bool,
 }
 
 impl SynthSpec {
-    /// Parse `<L>x<D>x<H>[xV]` and size a KV pool for `workload`.
-    pub fn parse(shape: &str, workload: &str) -> Result<SynthSpec, String> {
+    /// Parse `<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]][:i8w][:kvf32]` (flags in
+    /// either order) and size a KV pool for `workload`, honouring `--input`/
+    /// `--output` overrides the same way the actual request stream will
+    /// (`crate::scenarios::workload_for`) -- see `pool_for`'s doc comment for
+    /// why sizing from the un-overridden preset is a real OOM risk, not a
+    /// theoretical one. The trailing `HeadDim`/`NKvHeads` are optional -- see
+    /// the fields' doc comments for why a caller needs them to measure a
+    /// REAL model's KV shape rather than a same-param-count stand-in.
+    pub fn parse(shape: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<SynthSpec, String> {
+        let (shape, weights_int8, kv_fp32) = spec_flags(shape);
         let parts: Vec<u32> = shape.split('x').map(|p| p.trim().parse().unwrap_or(0)).collect();
         if parts.len() < 3 || parts[..3].contains(&0) {
-            return Err(format!("bad shape {shape:?}, expected <layers>x<d_model>x<heads>[x<vocab>]"));
+            return Err(format!("bad shape {shape:?}, expected <layers>x<d_model>x<heads>[x<vocab>[x<head_dim>[x<n_kv_heads>]]]"));
         }
         let (n_layers, d_model, n_heads) = (parts[0], parts[1], parts[2]);
         if d_model % n_heads != 0 {
             return Err(format!("d_model {d_model} must be divisible by n_heads {n_heads}"));
         }
-        let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload)?;
+        let head_dim = parts.get(4).copied().filter(|&v| v > 0).unwrap_or(d_model / n_heads);
+        let n_kv_heads = parts
+            .get(5)
+            .copied()
+            .filter(|&v| v > 0)
+            .unwrap_or(if n_heads.is_multiple_of(4) { n_heads / 4 } else { n_heads });
+        let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload, input_override, output_override)?;
         Ok(SynthSpec {
             n_layers,
             d_model,
             n_heads,
+            n_kv_heads,
+            head_dim,
             vocab: parts.get(3).copied().unwrap_or(32_000),
             block_size,
             max_batch,
             num_blocks,
             per_seq,
             max_prefill,
+            weights_int8,
+            kv_fp32,
         })
     }
 
@@ -383,16 +431,14 @@ impl SynthSpec {
     }
 
     pub fn config(&self) -> qwen::QwenConfig {
-        let head_dim = self.d_model / self.n_heads;
-        let n_kv_heads = if self.n_heads.is_multiple_of(4) { self.n_heads / 4 } else { self.n_heads };
         qwen::QwenConfig {
             vocab: self.vocab,
             block_size: 4096,
             n_layers: self.n_layers,
             d_model: self.d_model,
             n_heads: self.n_heads,
-            n_kv_heads,
-            head_dim,
+            n_kv_heads: self.n_kv_heads,
+            head_dim: self.head_dim,
             d_ff: self.d_model * 4,
             rope_theta: 1_000_000.0,
             rms_eps: 1e-6,
@@ -426,6 +472,7 @@ impl SynthSpec {
         cfg: qwen::QwenConfig,
         w: &std::collections::HashMap<String, Vec<f32>>,
     ) -> qwen::serve::Engine {
+        let kv_int8 = resolve_kv_int8(&cfg, self.kv_fp32, &self.shape());
         qwen::serve::Engine::from_map_on(
             parent.gpu(),
             cfg,
@@ -435,8 +482,8 @@ impl SynthSpec {
             self.max_batch,
             self.per_seq,
             self.max_prefill,
-            false,
-            false,
+            kv_int8,
+            self.weights_int8,
         )
     }
 
@@ -446,6 +493,7 @@ impl SynthSpec {
         w: &std::collections::HashMap<String, Vec<f32>>,
         num_blocks: u32,
     ) -> qwen::serve::Engine {
+        let kv_int8 = resolve_kv_int8(&cfg, self.kv_fp32, &self.shape());
         qwen::serve::Engine::from_map(
             cfg,
             w,
@@ -454,24 +502,24 @@ impl SynthSpec {
             self.max_batch,
             self.per_seq,
             self.max_prefill,
-            false,
-            false,
+            kv_int8,
+            self.weights_int8,
         )
     }
 }
 
-fn build_target(spec: &str, workload: &str) -> Result<Box<dyn PerfTarget>, String> {
+fn build_target(spec: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<Box<dyn PerfTarget>, String> {
     if spec == "fake" {
         return Ok(Box::new(FakeEngine::new()));
     }
     if let Some(shape) = spec.strip_prefix("qwen-synth:") {
-        return build_qwen_synth(shape, workload);
+        return build_qwen_synth(shape, workload, input_override, output_override);
     }
     if let Some(weights) = spec.strip_prefix("qwen:") {
-        return build_qwen(weights, workload);
+        return build_qwen(weights, workload, input_override, output_override);
     }
     if let Some(rest) = spec.strip_prefix("http:") {
-        return build_http(rest, workload);
+        return build_http(rest, workload, input_override, output_override);
     }
     if let Some(rest) = spec.strip_prefix("lfm:") {
         return build_lfm(rest);
@@ -493,7 +541,7 @@ fn build_target(spec: &str, workload: &str) -> Result<Box<dyn PerfTarget>, Strin
     }
     Err(format!(
         "unknown --target {spec:?} \
-         (expected 'fake', 'qwen-synth:<L>x<D>x<H>[xV][:i8w]', 'qwen:<weights>[:i8w]', \
+         (expected 'fake', 'qwen-synth:<L>x<D>x<H>[xV][:i8w][:kvf32]', 'qwen:<weights>[:i8w][:kvf32]', \
          'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
          'chronos2:<weights>', 'fincast:<weights>', or 'flux2[:<W>x<H>x<steps>[:<precision>]]')"
@@ -511,7 +559,7 @@ fn build_target(spec: &str, workload: &str) -> Result<Box<dyn PerfTarget>, Strin
 /// bug actually lived in. The tokenizer suffix is required (unlike the
 /// engine-direct targets, which synthesize token ids and never tokenize) — a
 /// real client sends text, and this target must too.
-fn build_http(rest: &str, workload: &str) -> Result<Box<dyn PerfTarget>, String> {
+fn build_http(rest: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<Box<dyn PerfTarget>, String> {
     let (inner, tokenizer) = rest.rsplit_once(':').ok_or_else(|| {
         "http target needs 'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>' \
          or 'http:qwen:<weights>:<tokenizer.json>'"
@@ -521,7 +569,7 @@ fn build_http(rest: &str, workload: &str) -> Result<Box<dyn PerfTarget>, String>
         return Err(format!("http target tokenizer not found: {tokenizer}"));
     }
     if let Some(shape) = inner.strip_prefix("qwen-synth:") {
-        return build_http_qwen_synth(shape, tokenizer, workload);
+        return build_http_qwen_synth(shape, tokenizer, workload, input_override, output_override);
     }
     if let Some(weights) = inner.strip_prefix("qwen:") {
         return build_http_qwen(weights, tokenizer);
@@ -536,8 +584,21 @@ fn build_http(rest: &str, workload: &str) -> Result<Box<dyn PerfTarget>, String>
 /// is measuring the served path's OWN weight-loading/activation code, not
 /// bypassing it. Content is irrelevant to serving cost; only shape matters,
 /// same rationale as `SynthSpec::build_weights` for the engine-direct target.
-fn build_http_qwen_synth(shape: &str, tokenizer: &str, workload: &str) -> Result<Box<dyn PerfTarget>, String> {
-    let spec = SynthSpec::parse(shape, workload)?;
+///
+/// `spec.weights_int8`/`spec.kv_fp32` are deliberately UNUSED here: this
+/// target writes a real checkpoint and serves it through the real
+/// `QwenResident`/residency executor, which decides KV/weights dtype from
+/// `BRAIN_QWEN_KV_INT8`/`--weights-int8` same as `brain serve` -- exactly the
+/// point of measuring the REAL served path rather than a direct-engine
+/// stand-in. `spec.head_dim`/`n_kv_heads` ARE honoured, via `cfg.to_json()`
+/// in the written checkpoint.
+fn build_http_qwen_synth(shape: &str, tokenizer: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<Box<dyn PerfTarget>, String> {
+    // Only `spec.config()` (architecture) is used below -- the pool fields
+    // this parse ALSO computes are irrelevant here, since this target's real
+    // serving pool comes from `QwenResident::pool_sizing` (BRAIN_QWEN_CTX),
+    // not from a workload preset. Still threaded for signature consistency
+    // and because a bad override should still error the same way.
+    let spec = SynthSpec::parse(shape, workload, input_override, output_override)?;
     let (cfg, weights) = spec.build_weights();
     let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
         .param_list()
@@ -854,16 +915,47 @@ fn build_flux2(rest: &str) -> Result<Box<dyn PerfTarget>, String> {
     )))
 }
 
-/// Split an optional `:i8w` flag (int8 weights) off a target spec tail.
-fn spec_flags(spec: &str) -> (&str, bool) {
-    match spec.rsplit_once(':') {
-        Some((head, "i8w")) => (head, true),
-        _ => (spec, false),
+/// Split optional trailing target-spec flags, in either order:
+/// `:i8w` (int8 weights, opt IN — off by default) and `:kvf32` (fp32 KV,
+/// opt OUT of int8 KV, which perf targets default to ON — matching
+/// `resident_llm.rs::QwenResident::kv_int8`'s serving default, so perf
+/// numbers stay representative of what actually ships).
+fn spec_flags(spec: &str) -> (&str, bool, bool) {
+    let mut s = spec;
+    let mut weights_int8 = false;
+    let mut kv_fp32 = false;
+    loop {
+        if let Some(rest) = s.strip_suffix(":i8w") {
+            s = rest;
+            weights_int8 = true;
+            continue;
+        }
+        if let Some(rest) = s.strip_suffix(":kvf32") {
+            s = rest;
+            kv_fp32 = true;
+            continue;
+        }
+        break;
     }
+    (s, weights_int8, kv_fp32)
+}
+
+/// The int8-KV boundary policy (D2), in ONE place: `:kvf32` is an explicit
+/// opt-out (nothing to degrade); absent that, int8 is the default and this
+/// degrades loudly on a shape it cannot support rather than hitting
+/// `from_map_with_gpu`'s hard assert -- see `qwen::serve::kv_int8_supported`'s
+/// doc comment. Shared by every perf target builder so the same shape always
+/// gets the same answer, and the degrade warning is worded once.
+fn resolve_kv_int8(cfg: &qwen::QwenConfig, kv_fp32_requested: bool, target_desc: &str) -> bool {
+    let kv_int8 = !kv_fp32_requested && qwen::serve::kv_int8_supported(cfg);
+    if !kv_fp32_requested && !kv_int8 {
+        eprintln!("perf: {target_desc}: int8 KV requested (the default) but head_dim={} is not a multiple of 4; falling back to fp32 KV", cfg.head_dim);
+    }
+    kv_int8
 }
 
 /// Build the serving engine on **randomly initialised weights** of a given
-/// shape: `qwen-synth:<layers>x<d_model>x<heads>[x<vocab>]`.
+/// shape: `qwen-synth:<layers>x<d_model>x<heads>[x<vocab>[x<head_dim>[x<n_kv_heads>]]]`.
 ///
 /// Weight *values* do not affect execution cost — the same kernels, KV traffic,
 /// batching and memory pressure occur whatever the numbers are — so this
@@ -871,72 +963,72 @@ fn spec_flags(spec: &str) -> (&str, bool) {
 /// the right tool for hardware and configuration comparison, and the wrong tool
 /// for anything about output quality: generated tokens are meaningless, so the
 /// artifact records `weights: "random"` and no correctness gate can pass on it.
-fn build_qwen_synth(shape: &str, workload: &str) -> Result<Box<dyn PerfTarget>, String> {
-    let (shape, weights_int8) = spec_flags(shape);
-    let parts: Vec<u32> = shape.split('x').map(|p| p.trim().parse().unwrap_or(0)).collect();
-    if parts.len() < 3 || parts[..3].contains(&0) {
-        return Err(format!("bad shape {shape:?}, expected <layers>x<d_model>x<heads>[x<vocab>]"));
-    }
-    let (n_layers, d_model, n_heads) = (parts[0], parts[1], parts[2]);
-    let vocab = parts.get(3).copied().unwrap_or(32_000);
-    if d_model % n_heads != 0 {
-        return Err(format!("d_model {d_model} must be divisible by n_heads {n_heads}"));
-    }
-    let head_dim = d_model / n_heads;
-    // GQA with 4 query heads per kv head where that divides evenly (the usual
-    // Qwen3 ratio), else MHA.
-    let n_kv_heads = if n_heads % 4 == 0 { n_heads / 4 } else { n_heads };
-
-    let cfg = qwen::QwenConfig {
-        vocab,
-        block_size: 4096,
-        n_layers,
-        d_model,
-        n_heads,
-        n_kv_heads,
-        head_dim,
-        d_ff: d_model * 4,
-        rope_theta: 1_000_000.0,
-        rms_eps: 1e-6,
-        max_position_embeddings: 4096,
-        tie_embeddings: true,
-        qk_norm: true,
-        attn_bias: false,
-        lora: None,
-    };
+///
+/// Shares `SynthSpec::parse`/`config`/`build_engine` with every other synth
+/// caller (`startup`/`cancel`/`kvcache`/`faults`/`http:qwen-synth:`) rather
+/// than a second, independent copy of the shape-to-config arithmetic
+/// (`docs/lessons.md` #19: a registration/derivation split across N call
+/// sites is a defect waiting for its turn — this WAS two copies until now,
+/// and the derived `head_dim`/`n_kv_heads` silently did not match real
+/// Qwen3-0.6B's, understating both the memory win and the append kernel's
+/// cost at the shape that mattered).
+fn build_qwen_synth(shape: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<Box<dyn PerfTarget>, String> {
+    let spec = SynthSpec::parse(shape, workload, input_override, output_override)?;
+    let (cfg, weights) = spec.build_weights();
     let params: usize = cfg.param_list().iter().map(|(_, n)| n).sum();
     eprintln!(
-        "perf: synthetic qwen L{n_layers} D{d_model} H{n_heads} (kv {n_kv_heads}) \
-         vocab {vocab} — {:.1}M params, random weights",
+        "perf: synthetic qwen L{} D{} H{} (kv {}, head_dim {}) vocab {} — {:.1}M params, random weights",
+        spec.n_layers,
+        spec.d_model,
+        spec.n_heads,
+        spec.n_kv_heads,
+        spec.head_dim,
+        spec.vocab,
         params as f64 / 1e6
     );
 
-    let weights = qwen::init_weights(&cfg, 1234);
-    let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload)?;
-    let eng = qwen::serve::Engine::from_map(
-        cfg, &weights, block_size, num_blocks, max_batch, per_seq, max_prefill, false, weights_int8,
-    );
+    let eng = spec.build_engine(cfg, &weights);
     let info = TargetInfo::new("qwen-synth", "token")
-        .with("shape", format!("L{n_layers}xD{d_model}xH{n_heads}").into())
+        .with("shape", spec.shape().into())
         .with("params", params.into())
         .with("weights", "random".into())
-        .with("block_size", block_size.into())
-        .with("max_batch", max_batch.into())
-        .with("kv_dtype", "fp32".into())
+        .with("block_size", spec.block_size.into())
+        .with("max_batch", spec.max_batch.into())
+        // Reported explicitly (not just implied by `shape`), so an artifact
+        // never silently implies it ran a different model's KV geometry.
+        .with("head_dim", spec.head_dim.into())
+        .with("n_kv_heads", spec.n_kv_heads.into())
+        // What actually ran: an explicit `:kvf32` is honoured exactly, but the
+        // DEFAULT is capability-gated (see resolve_kv_int8) just like
+        // weights_dtype below.
+        .with("kv_dtype", if eng.kv_int8() { "int8" } else { "fp32" }.into())
         // What actually ran: the int8 request is capability-gated in the engine.
         .with("weights_dtype", if eng.weights_int8() { "int8" } else { "fp32" }.into());
-    let sched = qwen::serve::Scheduler::new(eng, max_batch as usize);
-    Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, None, vocab)))
+    let sched = qwen::serve::Scheduler::new(eng, spec.max_batch as usize);
+    Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, None, spec.vocab)))
 }
 
 /// KV-pool geometry for a workload: `(block_size, max_batch, num_blocks,
 /// blocks_per_seq, max_prefill)`. Sized so *admission*, not allocation failure,
 /// is what limits concurrency.
-fn pool_for(workload: &str) -> Result<(u32, u32, u32, u32, u32), String> {
+///
+/// `input_override`/`output_override` MUST be the same `--input`/`--output`
+/// values `Options` carries (`crate::scenarios::workload_for` applies them to
+/// the actual request stream) — this was previously sized from the workload
+/// PRESET's own shape unconditionally, so `--workload prefill_heavy --input
+/// 256` (a deliberately small override) still allocated a pool for
+/// `prefill_heavy`'s full 32768-token preset: a real ~64 GiB single
+/// allocation on this box (rejected by the allocator, not silently wrong —
+/// but the box has no discrete GPU and 30 GiB total RAM, so this was one
+/// workload name away from a genuine OOM). The pool must be sized from what
+/// the run will ACTUALLY request, not from a name that happens to share a
+/// preset with a much larger one.
+fn pool_for(workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<(u32, u32, u32, u32, u32), String> {
     let w = perf::workload::standard(workload, perf::Arrival::Saturated, 1, 0)
         .ok_or_else(|| format!("unknown workload {workload:?}"))?;
     let r = &w.requests()[0];
-    let (max_in, max_out) = (r.input_artifacts as u32, r.output_artifacts as u32);
+    let max_in = input_override.map(|n| n as u32).unwrap_or(r.input_artifacts as u32);
+    let max_out = output_override.map(|n| n as u32).unwrap_or(r.output_artifacts as u32);
     let block_size = 16u32;
     let max_batch = 32u32;
     let per_seq = (max_in + max_out + 8).div_ceil(block_size);
@@ -946,9 +1038,15 @@ fn pool_for(workload: &str) -> Result<(u32, u32, u32, u32, u32), String> {
 
 /// Size the KV pool for the workload so admission, not allocation failure, is
 /// what limits concurrency.
-fn build_qwen(weights: &str, workload: &str) -> Result<Box<dyn PerfTarget>, String> {
-    let (weights, weights_int8) = spec_flags(weights);
-    let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload)?;
+fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<Box<dyn PerfTarget>, String> {
+    let (weights, weights_int8, kv_fp32) = spec_flags(weights);
+    let (block_size, max_batch, num_blocks, per_seq, max_prefill) = pool_for(workload, input_override, output_override)?;
+    // A header-only peek (not a second full checkpoint load) to feed the
+    // shared boundary policy -- see resolve_kv_int8.
+    let kv_int8 = match checkpoint::weightio::WeightReader::open(weights) {
+        Ok(r) => resolve_kv_int8(&qwen::QwenConfig::from_json(&r.config()), kv_fp32, weights),
+        Err(_) => !kv_fp32, // let Engine::load raise the real, specific I/O error below
+    };
     let eng = qwen::serve::Engine::load(
         weights,
         block_size,
@@ -956,17 +1054,18 @@ fn build_qwen(weights: &str, workload: &str) -> Result<Box<dyn PerfTarget>, Stri
         max_batch,
         per_seq,
         max_prefill,
-        false,
+        kv_int8,
         weights_int8,
     );
     let vocab = eng.vocab() as u32;
     let w8_effective = eng.weights_int8();
+    let kv_dtype = if eng.kv_int8() { "int8" } else { "fp32" };
     let sched = qwen::serve::Scheduler::new(eng, max_batch as usize);
     let info = TargetInfo::new("qwen", "token")
         .with("weights", weights.into())
         .with("block_size", block_size.into())
         .with("max_batch", max_batch.into())
-        .with("kv_dtype", "fp32".into())
+        .with("kv_dtype", kv_dtype.into())
         .with("weights_dtype", if w8_effective { "int8" } else { "fp32" }.into());
     Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, None, vocab)))
 }

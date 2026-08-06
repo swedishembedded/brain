@@ -142,7 +142,13 @@ fn serve(args: &[String]) {
     let mut prompts: Vec<String> = Vec::new();
     let mut max_new = 64usize;
     let mut block_size = 16u32;
-    let mut int8 = false;
+    // int8 KV default ON, matching the production resident's default
+    // (resident_llm.rs::QwenResident::kv_int8) -- measured +0.0154 loss vs
+    // fp32 on the real Qwen3-0.6B checkpoint (docs/models/qwen/status.md
+    // P12), close enough to free that the memory win is the clear default.
+    // --int8 is kept as a harmless no-op (already the default) for anyone
+    // with it in a script; --kv-fp32 is the real opt-out.
+    let mut int8 = true;
     let mut weights_int8 = false;
     let mut i = 0;
     while i < args.len() {
@@ -153,13 +159,15 @@ fn serve(args: &[String]) {
             "--max-new" => max_new = val(args, &mut i, "--max-new").parse().unwrap_or(max_new),
             "--block-size" => block_size = val(args, &mut i, "--block-size").parse().unwrap_or(block_size),
             "--int8" => int8 = true,
+            "--kv-fp32" => int8 = false,
             "--weights-int8" => weights_int8 = true,
             other => eprintln!("serve: ignoring {other:?}"),
         }
         i += 1;
     }
     if weights.is_empty() || tokenizer.is_empty() || prompts.is_empty() {
-        eprintln!("usage: brain qwen serve --weights F --tokenizer T --prompt \"...\" [--prompt \"...\"]... [--max-new N --block-size B --int8 --weights-int8]");
+        eprintln!("usage: brain qwen serve --weights F --tokenizer T --prompt \"...\" [--prompt \"...\"]... [--max-new N --block-size B --kv-fp32 --weights-int8]");
+        eprintln!("       (int8 KV is on by default; --kv-fp32 opts out. --int8 is accepted as a no-op.)");
         return;
     }
     let tok = match data::qwen_tokenizer::QwenBpe::from_file(&tokenizer) {
@@ -176,6 +184,23 @@ fn serve(args: &[String]) {
     let max_len = max_prompt + max_new as u32 + 8;
     let blocks_per_seq = max_len.div_ceil(block_size);
     let num_blocks = blocks_per_seq * n + n; // headroom for every sequence
+    // `--int8` requesting the DEFAULT degrades loudly on an unsupported
+    // head_dim rather than hitting `from_map_with_gpu`'s hard assert (a
+    // header-only peek, not a second full checkpoint load) -- an explicit
+    // `--int8` on the command line is, deliberately, still a request by
+    // name and would panic instead; this branch only ever softens the
+    // DEFAULT. See `qwen::serve::kv_int8_supported`'s doc comment.
+    let int8 = int8
+        && match checkpoint::weightio::WeightReader::open(&weights) {
+            Ok(r) => {
+                let supported = qwen::serve::kv_int8_supported(&QwenConfig::from_json(&r.config()));
+                if !supported {
+                    eprintln!("serve: {weights}: int8 KV requested (the default) but head_dim is not a multiple of 4; falling back to fp32 KV");
+                }
+                supported
+            }
+            Err(_) => true, // let Engine::load raise the real, specific I/O error below
+        };
     let eng = qwen::serve::Engine::load(&weights, block_size, num_blocks, n, blocks_per_seq, max_prompt.max(1), int8, weights_int8);
     // Report what actually ran: the int8-weights request is capability-gated
     // and may have fallen back to fp32.
@@ -194,7 +219,7 @@ fn serve(args: &[String]) {
     eprintln!(
         "served {n} prompts, {total} tokens in {secs:.2}s ({:.1} tok/s aggregate){}{}",
         total as f64 / secs,
-        if int8 { " [int8 KV]" } else { "" },
+        if int8 { " [int8 KV]" } else { " [fp32 KV]" },
         if weights_int8 { " [int8 weights]" } else { "" }
     );
 }

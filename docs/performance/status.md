@@ -757,6 +757,58 @@ class as the `kernels-regen.sh` `REPO_ROOT` bug found earlier in this
 project — a real, pre-existing, unrelated bug, fixed because it was found,
 not routed around.
 
+### int8 paged KV: decode/prefill A/B on the real checkpoint, before defaulting to it
+
+The int8 KV workstream's memory win (`docs/models/qwen/status.md` P12: a
+3.8788x smaller pool at Qwen3's `head_dim=128`) was measured for accuracy but
+never for speed — `paged_kv_append_i8_batched` dispatches `batch·n_kv`
+threads (one per row×kv-head, each serially looping `head_dim`) where the
+fp32 sibling dispatches `batch·kv_stride`, a shape that looked like a real
+coalescing/occupancy risk before it was measured. Decision rule fixed in
+advance: land the default as-is if decode `output_per_s ≥ 0.95×fp32` AND
+prefill `ttfa_p99 ≤ 1.05×fp32`; otherwise fix the append kernel first.
+
+Real Qwen3-0.6B (`resources/llm/qwen/qwen3-0.6b/qwen.brain.safetensors`),
+`BRAIN_DEVICE=cpu` (matches where the serving perf gate runs),
+`BRAIN_PROFILE=1`, `--target qwen:<weights>` vs `qwen:<weights>:kvf32`, two
+separate processes per arm:
+
+| | decode-heavy (`in32/out128`) | prefill-heavy (`in512/out8`) |
+|---|---:|---:|
+| int8 | 1.67 output tok/s | ttfa p99 17,675 ms |
+| fp32 | 1.60 output tok/s | ttfa p99 18,424 ms |
+| gate | ≥0.95×1.60=1.52 ✅ | ≤1.05×18,424=19,345 ✅ |
+
+Both pass with margin, in int8's favour on this box: the per-call kernel
+breakdown (`BRAIN_PROFILE`) shows `paged_kv_append_i8_batched` is CHEAPER per
+call than `paged_kv_append_batched` at real shape (prefill: 0.152 ms/call
+int8 vs 0.265 ms/call fp32) — the opposite of the a-priori concern. The
+narrower-but-serial int8 dispatch (`n_kv=8` threads) apparently costs less
+dispatch/coordination overhead on the CPU JIT backend than the wider
+one-thread-per-element fp32 dispatch (`kv_stride=1024` threads), at least at
+this shape and on this backend. `paged_decode_scores_i8_batched`/
+`paged_decode_apply_i8_batched` DO cost more per call than their fp32
+siblings (dequant unpacking, as expected), but that shows up as a shift in
+relative kernel share (attention ~31% of wall time vs ~27%), not in the
+summary throughput/latency numbers, and total wall time is within measurement
+noise between the two arms (~72.2s vs ~71.0s over 2 requests, on a box shared
+with this whole session's builds).
+
+**Verdict: no kernel fix required before defaulting to int8 KV.** No DP4A
+variant exists for the attention kernels either, unlike the int8 weight
+GEMMs — filed as a follow-up (`.todo/int8-kv-dp4a-scores.md`) motivated by
+the measured-but-real ~4pp relative-share increase, not by this gate, which
+it did not fail.
+
+Caveats, for whoever revisits this: `--requests 2-3`, single concurrency,
+CPU-only, one box under variable background load (a `--workload` preset's
+own shape can silently drive KV pool sizing regardless of `--input`/
+`--output` overrides in older builds — fixed alongside this measurement,
+see the commit that threads `input_override`/`output_override` into
+`pool_for`/`SynthSpec::parse`; this run used the fix). Re-run with more
+requests and on the GPU backend before treating these as production numbers
+— they answer "does int8 regress", not "how fast is serving".
+
 ## Still planned
 
 1. `capability::Provider` adoption by `qwen`, `yolo`, `depth`, `tts` (L) —

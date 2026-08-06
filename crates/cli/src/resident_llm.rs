@@ -260,6 +260,78 @@ impl QwenResident {
     fn max_batch() -> u32 {
         std::env::var("BRAIN_QWEN_MAX_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(16u32).max(1)
     }
+
+    /// Whether the paged engine's KV pool is packed int8 (online per-token
+    /// absmax, ~3.9x smaller pool at Qwen3's head_dim) rather than fp32.
+    /// Default ON: measured on the real Qwen3-0.6B checkpoint (`brain qwen
+    /// eval --kv fp32,int8`, `docs/models/qwen/status.md` P12) at +0.0154
+    /// loss vs fp32 (token-acc actually slightly HIGHER) -- close enough to
+    /// free that the memory win is a clear default. `BRAIN_QWEN_KV_INT8=0`
+    /// (also `false`/`off`, case-insensitive, matching `BRAIN_AUTO_FETCH`'s
+    /// convention) opts back out to fp32 KV.
+    ///
+    /// Deliberately NOT the calibrated variant (`model::kvcalib::KvCalib`,
+    /// `--kv-calib`): the same measurement pass found a p99.9-calibrated
+    /// clip built from a small (10-prompt) calibration set measurably WORSE
+    /// than plain online-absmax (+1.34 loss, -14pp token-acc) -- real
+    /// signal on held-out data gets truncated by an under-calibrated
+    /// ceiling. That is evidence against defaulting to calibration with a
+    /// small calibration set, not against int8 KV itself, and not against
+    /// calibration once a properly-sized calibration corpus exists.
+    fn kv_int8() -> bool {
+        Self::kv_int8_from(std::env::var("BRAIN_QWEN_KV_INT8").ok().as_deref())
+    }
+
+    /// Pure parsing logic for [`Self::kv_int8`], dependency-injected so a
+    /// test can check every spelling deterministically without mutating
+    /// process-global environment state (which would race against any other
+    /// test reading the same var concurrently in the same test binary).
+    fn kv_int8_from(v: Option<&str>) -> bool {
+        !v.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off"))
+    }
+
+    /// KV-pool geometry for the batched serving engine — the ONE place
+    /// `estimate()` and `activate()` derive `block_size`/`max_batch`/
+    /// `max_blocks_per_seq`/`num_blocks`/`max_prefill` from, so the residency
+    /// budget's PREDICTION of what a pool will cost cannot silently drift
+    /// from what activation actually allocates.
+    ///
+    /// Aggregate pool sized to ~`ctx` tokens total (+ `max_batch` blocks of
+    /// headroom for prefix-cache reuse across concurrent requests) - NOT
+    /// `ctx * max_batch`. The old formula reserved one full worst-case
+    /// `ctx`-sized allocation PER concurrent batch slot simultaneously (e.g.
+    /// 7 GiB of fp32 KV at the default ctx=2048, max_batch=16 -
+    /// `Manifest::max_context_tokens`'s doc comment has the arithmetic),
+    /// which is exactly what paged attention exists to avoid: concurrent
+    /// sequences share one pool, they don't each get a private worst-case
+    /// reservation. A shared pool this size still admits one `ctx`-length
+    /// request (or several smaller concurrent ones); `max_batch` simultaneous
+    /// near-`ctx`-length requests now correctly queues/rejects via the
+    /// scheduler's existing admission control (`RejectReason::
+    /// ExceedsCapacity`) instead of being pre-reserved for at ~17x the memory
+    /// cost for the common case where that never happens.
+    ///
+    /// `max_prefill`: lower than the old fixed 2048 -- `Engine::
+    /// from_map_with_gpu`'s scores/probs scratch buffers are sized
+    /// `bcap = max(max_batch, max_prefill) * n_heads * (max_blocks_per_seq *
+    /// block_size)` (serve.rs) - `max_prefill` sits in that product, so
+    /// raising `ctx` (and therefore `max_blocks_per_seq`) enough to serve a
+    /// real agent prompt pushes `bcap * 4 bytes` past the GPU's single-
+    /// binding ceiling (2047 MiB) at the OLD 2048 value. Empirically
+    /// confirmed on real hardware: ctx=16384 with max_prefill=2048 crashed
+    /// with wgpu's "Buffer size 2147483648 is greater than the maximum
+    /// buffer size (2147483647)" at Qwen3's 16 attention heads - exactly one
+    /// byte over. 512 keeps that product comfortably under the ceiling at
+    /// the context sizes this fix is meant to unlock, confirmed against the
+    /// same scenario post-fix.
+    fn pool_sizing(ctx: u32) -> (u32, u32, u32, u32, u32) {
+        let block_size = 16u32;
+        let max_batch = QwenResident::max_batch();
+        let max_blocks_per_seq = ctx.div_ceil(block_size);
+        let num_blocks = max_blocks_per_seq * 2 + max_batch;
+        let max_prefill = ctx.min(512);
+        (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill)
+    }
 }
 
 impl ResidentModel for QwenResident {
@@ -278,7 +350,22 @@ impl ResidentModel for QwenResident {
         InstanceKey::new(self.id.as_str(), "default")
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        est_vram(&self.path)
+        let cost = est_vram(&self.path);
+        // A .gguf checkpoint uses the Legacy (non-paged) decode path -- no KV
+        // pool to add. The header peek is cheap (WeightReader never loads
+        // tensors); any failure here just defers to the real, specific error
+        // `activate()` raises -- `estimate()` must never itself hard-fail.
+        if self.path.to_ascii_lowercase().ends_with(".gguf") {
+            return cost;
+        }
+        let Ok(reader) = checkpoint::weightio::WeightReader::open(&self.path) else {
+            return cost;
+        };
+        let cfg = qwen::config::QwenConfig::from_json(&reader.config());
+        let (block_size, _max_batch, _max_blocks_per_seq, num_blocks, _max_prefill) = Self::pool_sizing(Self::ctx());
+        let kv_int8 = Self::kv_int8() && qwen::serve::kv_int8_supported(&cfg);
+        let kv_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, kv_int8);
+        MemCost::new(cost.vram + kv_bytes, cost.ram)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         // Stream weights from the mmap (see GptResident::activate). Open first so
@@ -316,43 +403,29 @@ impl ResidentModel for QwenResident {
                 let head = model.read_weight(model.cfg.head_weight());
                 return Ok(QwenEngineKind::Legacy { model, head });
             }
-            let block_size = 16u32;
-            let max_batch = QwenResident::max_batch();
-            let max_blocks_per_seq = ctx.div_ceil(block_size);
-            // Aggregate pool sized to ~`ctx` tokens total (+ `max_batch`
-            // blocks of headroom for prefix-cache reuse across concurrent
-            // requests) - NOT `ctx * max_batch`. The old formula reserved
-            // one full worst-case `ctx`-sized allocation PER concurrent
-            // batch slot simultaneously (e.g. 7 GiB of fp32 KV at the
-            // default ctx=2048, max_batch=16 - `Manifest::max_context_tokens`'s
-            // doc comment has the arithmetic), which is exactly what paged
-            // attention exists to avoid: concurrent sequences share one
-            // pool, they don't each get a private worst-case reservation.
-            // A shared pool this size still admits one `ctx`-length request
-            // (or several smaller concurrent ones); `max_batch` simultaneous
-            // near-`ctx`-length requests now correctly queues/rejects via
-            // the scheduler's existing admission control
-            // (`RejectReason::ExceedsCapacity`) instead of being
-            // pre-reserved for at ~17x the memory cost for the common case
-            // where that never happens.
-            let num_blocks = max_blocks_per_seq * 2 + max_batch;
-            // Lower than the old fixed 2048: `Engine::from_map_with_gpu`'s
-            // scores/probs scratch buffers are sized `bcap = max(max_batch,
-            // max_prefill) * n_heads * (max_blocks_per_seq * block_size)`
-            // (serve.rs) - `max_prefill` sits in that product, so raising
-            // `ctx` (and therefore `max_blocks_per_seq`) enough to serve a
-            // real agent prompt pushes `bcap * 4 bytes` past the GPU's
-            // single-binding ceiling (2047 MiB) at the OLD 2048 value.
-            // Empirically confirmed on real hardware: ctx=16384 with
-            // max_prefill=2048 crashed with wgpu's "Buffer size 2147483648
-            // is greater than the maximum buffer size (2147483647)" at
-            // Qwen3's 16 attention heads - exactly one byte over. 512
-            // keeps that product comfortably under the ceiling at the
-            // context sizes this fix is meant to unlock, confirmed against
-            // the same scenario post-fix.
-            let max_prefill = ctx.min(512);
+            // See QwenResident::pool_sizing's doc comment for the arithmetic
+            // -- the same derivation `estimate()` predicts a budget from, so
+            // the two cannot silently drift apart.
+            let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx);
+            // Both branches MUST pass the same kv_int8 -- a base and its
+            // folded-adapter sibling serving on numerically different KV
+            // paths would be a confusing, undocumented split.
+            //
+            // A DEFAULT-selecting caller degrades loudly rather than hitting
+            // `Engine::from_map_with_gpu`'s hard assert: nobody explicitly
+            // asked this checkpoint's unusual `head_dim` for int8, so a
+            // serving-process panic on activation would be the wrong failure
+            // mode -- see `qwen::serve::kv_int8_supported`'s doc comment.
+            let checkpoint_cfg = qwen::config::QwenConfig::from_json(&reader.config());
+            let kv_int8 = QwenResident::kv_int8() && qwen::serve::kv_int8_supported(&checkpoint_cfg);
+            if QwenResident::kv_int8() && !kv_int8 {
+                eprintln!(
+                    "serve: {}: int8 KV requested (the default) but head_dim={} is not a multiple of 4; falling back to fp32 KV",
+                    self.path, checkpoint_cfg.head_dim
+                );
+            }
             let eng = match &self.adapter {
-                None => qwen::serve::Engine::load(&self.path, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, false, false),
+                None => qwen::serve::Engine::load(&self.path, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, false),
                 // Fold the adapter's delta into the base tensors first (the same
                 // fold `qwen::eval::score_chat` uses to score one) -- the result
                 // is an ordinary frozen base, zero extra inference cost versus
@@ -362,7 +435,7 @@ impl ResidentModel for QwenResident {
                     let mut cfg = qwen::config::QwenConfig::from_json(&reader.config());
                     qwen::lora::fold_adapter_into(&mut tensors, a).map_err(|e| format!("qwen: folding adapter {a}: {e}"))?;
                     cfg.lora = None;
-                    qwen::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, false, false)
+                    qwen::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, false)
                 }
             };
             Ok(QwenEngineKind::Batched(model::serve::Scheduler::new(eng, max_batch as usize)))
@@ -558,6 +631,57 @@ fn run_batch_scheduled(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REGRESSION: nothing previously asserted what the serving default IS
+    /// (only that specific engines built with an explicit `true`/`false`
+    /// behaved correctly) -- this pins int8 KV as the default and every
+    /// documented off-spelling, matching `BRAIN_AUTO_FETCH`'s convention
+    /// (`build_auto_fetch_supplier`) for case/whitespace handling.
+    #[test]
+    fn kv_int8_defaults_on_and_recognizes_every_off_spelling() {
+        assert!(QwenResident::kv_int8_from(None), "int8 KV must be the default with no env override");
+        for off in ["0", "false", "off", "FALSE", "Off", " off ", "OFF"] {
+            assert!(!QwenResident::kv_int8_from(Some(off)), "{off:?} must opt out of int8 KV");
+        }
+        for on in ["1", "true", "yes", "anything-else", ""] {
+            assert!(QwenResident::kv_int8_from(Some(on)), "{on:?} must not disable int8 KV");
+        }
+    }
+
+    /// The residency budget must PREDICT the memory the KV pool actually
+    /// costs, not just the checkpoint file size -- before this, `estimate()`
+    /// was `est_vram` alone (file size * 1.3), so switching KV dtype changed
+    /// the RESIDENCY BUDGET, `crates/stats` and braintop by exactly zero,
+    /// however much the real pool shrank.
+    ///
+    /// Doesn't mutate `BRAIN_QWEN_KV_INT8` (see `kv_int8_from`'s doc comment
+    /// on why a test shouldn't race other tests over process-global env
+    /// state): checks `estimate()` matches an independent recomputation at
+    /// whatever the process's CURRENT default is, and checks the dtype-
+    /// shrink property directly against the pure `kv_pool_bytes` function
+    /// (parameterized over `kv_int8`, no engine, no env needed).
+    #[test]
+    fn estimate_counts_the_kv_pool_and_shrinks_under_int8() {
+        let path = write_tiny_checkpoint(11, "estimate");
+        let cfg = qwen::config::QwenConfig { vocab: 151936, ..qwen::config::QwenConfig::tiny() };
+        let card = checkpoint::st::ModelCard::new("brain/qwen", "qwen");
+        let resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some("unused.json"), None);
+        let key = InstanceKey::new("brain/qwen", "default");
+
+        let (block_size, _max_batch, _max_blocks_per_seq, num_blocks, _max_prefill) = QwenResident::pool_sizing(QwenResident::ctx());
+        let kv_int8 = QwenResident::kv_int8();
+        let expected_kv_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, kv_int8);
+        let file_only = est_vram(path.to_str().unwrap()).vram;
+
+        let got = resident.estimate(&key);
+        assert_eq!(got.vram, file_only + expected_kv_bytes, "estimate() must equal file size + the KV pool, no more and no less");
+        assert!(expected_kv_bytes > 0, "the KV pool must contribute a nonzero amount at these test dims");
+
+        // The shrink property itself: pure function, both dtypes, no engine.
+        let fp32_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, false);
+        let int8_bytes = qwen::serve::kv_pool_bytes(&cfg, block_size, num_blocks, true);
+        assert!(int8_bytes < fp32_bytes, "int8 must cost fewer bytes than fp32 at the same num_blocks");
+    }
 
     /// Build a tiny (fast-CPU-testable) but REAL safetensors checkpoint whose
     /// vocab covers the real tokenizer's full range (so chat-template special

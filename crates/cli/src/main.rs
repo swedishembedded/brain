@@ -242,7 +242,8 @@ QWEN3 (dense decoder; paged continuous-batching serving)
   brain qwen import <hf_dir|safetensors> --out F
   brain qwen infer  --weights F --tokenizer T --prompt \"...\" [--max-new N --temp X --top-k K]
   brain qwen serve  --weights F --tokenizer T --prompt \"...\" [--prompt ...] [--max-new N
-                    --block-size B --int8]        # paged KV + continuous batching
+                    --block-size B --kv-fp32]     # paged KV + continuous batching;
+                                                  # int8 KV on by default, --kv-fp32 opts out
   brain qwen train|finetune|export|precompile|toolcall|eval|calib ...
 
 GLM-5.2 (MLA + sigmoid noaux_tc MoE)
