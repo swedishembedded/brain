@@ -1154,3 +1154,61 @@ other:
 The 191% drain inflation is also a record for this tree and is the expected
 consequence of 422 groups over a 21 ms pass — the group table here ranks and
 nothing more.
+
+---
+
+## Cross-model finding: the serving engine had no tiled GEMM registered at all
+
+`qwen::serve` — the paged engine behind HTTP and D-Bus — registers its own
+pipeline table, and `matmul_reg3` was **not in it**. `Engine::mm` selected
+through `backend_api::select`, whose `KernelVariant` set has no register-tiled
+member, so the only two answers available were the decode GEMV
+(`m <= DECODE_REGIME_MAX_ROWS = 32`) and the naive one-thread-per-output
+reference. Every chunked-prefill chunk above 32 rows therefore ran the naive
+kernel — while the batched forward next door dispatched `matmul_reg3` on the
+same shapes.
+
+Measured with `qwen_bench serve` at Qwen3-0.6B, 128 rows, one P40:
+
+| | top kernel | whole pass | rows/s |
+|---|---|---:|---:|
+| before | `matmul` 2400.38 ms, **98.0% of the pass at 0.4% of the compute roof** | 2207.90 ms | 58 |
+| after | `matmul_reg3` 78.47 ms, 66.1% at 13.6% | **75.30–82.12 ms** | **1553–1651** |
+
+**≈27–29× on the whole pass**, reproduced across four runs from matched idle
+temperatures. The fix is not a new kernel: `Engine::mm` now uses
+`block::gemm_variant` with the tier gated on the queried `workgroup_reductions`
+— the *same* rule `flux1`, `flux2` and `model::rowemit` already share, so the
+serving engine stops having a private policy. `gemm_variant`'s `m <= 32` GEMV
+cutoff is the same number as `DECODE_REGIME_MAX_ROWS`, so the decode regime is
+bit-for-bit unchanged; only the rows above it move.
+
+Both defects found in this workstream have the same shape and neither is a
+kernel-authoring problem:
+
+| where | the fast kernel | why the graph never reached it |
+|---|---|---|
+| batched forward, LM head | `matmul_reg3` | a binding budget that ignored the device's queried limit |
+| serving engine, prefill | `matmul_reg3` | never registered; the selector could not name it |
+
+### …and the negative result from the same commit
+
+`serve.rs`'s QK-norm was the only norm in that tape bypassing `self.rms` — it
+called `block::rmsnorm_fwd` (per-element, one thread per row) directly, which is
+the coalescing bug measured at 19.4× for exactly this op. Routing it through the
+selector like every other norm moved the whole pass **82.43 → 82.12 ms: within
+noise.** At 128 rows the q-norm has `128 × 16 = 2048` rows, which already has
+enough lanes to interleave with its neighbours — the same discriminator lesson
+#21 records for `bias_grad`.
+
+It is kept anyway, because it is a *consistency* fix rather than a perf one (one
+policy, selector-driven, capability-gated) and because the row count that would
+make it matter — `bsz × n_heads` at `bsz = 1` — is 16 threads on a 3840-core
+card. But it is recorded here as a zero, not credited as a win.
+
+**Also fixed en route:** `prefill_submits_scale_with_chunks_not_with_token_count`
+compared submit counts through `.unwrap_or(0)`, so on a backend that does not
+count submits its first two assertions passed **vacuously** (0 == 0) and only
+the third failed. That is brain's own "unmeasured is null, never
+0-pretending-complete" rule broken inside a test. It now skips with a stated
+reason, and the whole `serve` suite is green on both backends.

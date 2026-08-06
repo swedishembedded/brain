@@ -25,6 +25,8 @@
 //!   qwen_bench                      # prefill T=512 + decode, fp32, at 0.6B
 //!   qwen_bench prefill [T] [reps]
 //!   qwen_bench decode  [ctx] [reps]
+//!   qwen_bench serve   [rows] [reps] # the PAGED serving tape (a different
+//!                                    # kernel set from the batched forward)
 //!   qwen_bench head    [reps]       # the tied 151936x1024 LM head alone
 //!   qwen_bench cost                 # offline FLOP/byte accounting, no device
 
@@ -147,6 +149,45 @@ fn main() {
                  the head is applied host-side on this path)",
                 secs * 1e3,
                 1.0 / secs
+            );
+        }
+        "serve" => {
+            // The paged serving tape is a DIFFERENT kernel set from the batched
+            // forward — `qwen::serve` registers its own pipelines — so a
+            // finding on one does not transfer to the other, and the serving
+            // path is what actually runs behind the HTTP/D-Bus surface.
+            //
+            // `rows` is what a chunked-prefill chunk or a concurrent decode
+            // batch presents: the same tape serves both, with `seqlens[i]`
+            // deciding which.
+            let rows: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(128);
+            eprintln!("qwen_bench serve: Qwen3-0.6B, {rows} rows, {reps} reps (random weights)");
+            let init = init_weights(&cfg, 7);
+            let (bs, seq) = (16u32, 1024u32);
+            let mbs = seq / bs;
+            let t0 = Instant::now();
+            let eng = qwen::serve::Engine::from_map(
+                cfg.clone(), &init, bs, mbs * 4, rows.max(8), mbs, rows.max(8), false, false,
+            );
+            eprintln!("built in {:.1}s\n", t0.elapsed().as_secs_f32());
+            let gpu = eng.gpu().share();
+            let roofs = banner(&gpu);
+            weight_budget(&cfg, roofs);
+
+            // One sequence's worth of rows at increasing positions — the shape
+            // a prefill chunk presents.
+            let positions: Vec<u32> = (0..rows).collect();
+            let seqlens: Vec<u32> = (0..rows).map(|i| i + 1).collect();
+            let blocks: Vec<u32> = (0..rows).map(|i| i / bs).collect();
+            let offsets: Vec<u32> = (0..rows).map(|i| i % bs).collect();
+            let bt: Vec<u32> = (0..rows).flat_map(|_| 0..mbs).collect();
+
+            let steps = eng.steps_for_profile(rows, &positions, &seqlens, &blocks, &offsets, &bt);
+            let secs = report(&gpu, &format!("SERVE {rows} rows"), &steps, reps, roofs);
+            println!(
+                "\none served step at {rows} rows: {:.2} ms  ->  {:.0} rows/s",
+                secs * 1e3,
+                rows as f64 / secs
             );
         }
         "prefill" | "all" | _ => {

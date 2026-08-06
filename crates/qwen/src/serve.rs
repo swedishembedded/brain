@@ -72,6 +72,12 @@ const TOPK_EXTRACT_STEP: usize = 28;
 // (`KvCalib`) before deriving the scale. Selected in place of APPEND_I8 only
 // when `self.kv_calib.is_some()` — APPEND_I8 itself is untouched.
 const APPEND_I8_CLIPPED: usize = 29;
+// The 128x128 register-tiled fp32 GEMM. It was MISSING from this engine's
+// pipeline table entirely, so `Engine::mm` had only the decode GEMV and the
+// naive kernel to choose between and every chunked-prefill chunk above
+// `DECODE_REGIME_MAX_ROWS` ran one thread per output element — while the
+// batched forward next door dispatched this same kernel at ~80x the rate.
+const MATMUL_REG3: usize = 30;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -104,6 +110,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("decode_advance", kernels::DECODE_ADVANCE),
     ("topk_extract_step", kernels::TOPK_EXTRACT_STEP),
     ("paged_kv_append_i8_clipped_batched", kernels::PAGED_KV_APPEND_I8_CLIPPED_BATCHED),
+    ("matmul_reg3", kernels::MATMUL_REG3),
 ];
 
 /// Longest on-device decode window (tokens per host round-trip). The scheduler
@@ -644,11 +651,29 @@ impl Engine {
     /// output column, W streamed once across all rows) when the selector says
     /// the shape is in that regime. Same contract, same result.
     fn mm(&self, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
-        let g = &self.gpu;
-        let shape = OpShape { m, n, k, dtype: Dtype::F32 };
-        match self.selector.select(Op::MatMul, shape, &self.caps) {
-            KernelVariant::WorkgroupPerOutput => g.step(MATMUL_GEMV, &[x, w, out], &[m, k, n], n * 64),
-            _ => g.step(MATMUL, &[x, w, out], &[m, k, n], m * n),
+        let (kind, threads) = block::gemm_variant(self.gemm_tier(), m, n);
+        self.gpu.step(kind, &[x, w, out], &[m, k, n], threads)
+    }
+
+    /// The fp32 GEMM tier for this device — the SAME rule `flux1`, `flux2` and
+    /// `model::rowemit` use, so the serving engine stops having a private one.
+    ///
+    /// It used to select through `backend_api::select`, whose `KernelVariant`
+    /// set has no register-tiled member: the only two answers available were
+    /// the decode GEMV and the naive reference, so every prefill chunk above
+    /// `DECODE_REGIME_MAX_ROWS` took the naive kernel. `gemm_variant`'s `m <= 32`
+    /// GEMV cutoff is the same number as `DECODE_REGIME_MAX_ROWS`, so the decode
+    /// regime is unchanged; only the rows above it move, and they move onto the
+    /// kernel the batched forward was already using.
+    ///
+    /// Gated on the queried `workgroup_reductions`: both fast kernels cooperate
+    /// across a workgroup, so a device without it keeps the naive reference
+    /// (which `backend-cpu` routes to its AVX2 GEMM anyway).
+    fn gemm_tier(&self) -> block::GemmVariants {
+        if self.caps.workgroup_reductions {
+            block::GemmVariants::Fast { gemv: Some(MATMUL_GEMV), tiled: MATMUL_REG3 }
+        } else {
+            block::GemmVariants::Reference(MATMUL)
         }
     }
 
@@ -771,7 +796,7 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run_batched_submit(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> u32 {
+    fn run_batched_steps(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> (Vec<Step>, u32) {
         #[cfg(feature = "fault-injection")]
         if fault::take_kernel_failure() {
             panic!("injected fault: kernel dispatch failure");
@@ -831,8 +856,18 @@ impl Engine {
                 s.push(self.mm(&sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, b, d, hkv));
                 s.push(self.mm(&sc.xn1, w(&p("attn.wv.weight")), &sc.v, b, d, hkv));
             }
-            s.push(block::rmsnorm_fwd(g, &kids, &sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, b * nh));
-            s.push(block::rmsnorm_fwd(g, &kids, &sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, b * nkv));
+            // QK-norm goes through `self.rms` like every other norm in this
+            // tape. It used to call `block::rmsnorm_fwd` directly — the
+            // per-element kernel, one thread per row — which is the coalescing
+            // bug `docs/performance/overview.md` measures at 19.4x for exactly
+            // this op, and it was the only norm here bypassing the selector.
+            // QK-norm goes through `self.rms` like every other norm in this
+            // tape. It used to call `block::rmsnorm_fwd` directly — the
+            // per-element kernel, one thread per row — which is the coalescing
+            // bug `docs/performance/overview.md` measures at 19.4x for exactly
+            // this op, and it was the only norm here bypassing the selector.
+            s.push(self.rms(&sc.q_pre, w(&p("attn.q_norm.weight")), &sc.q, hd, b * nh));
+            s.push(self.rms(&sc.k_pre, w(&p("attn.k_norm.weight")), &sc.k, hd, b * nkv));
             s.push(g.step(ROPE_PAGED, &[&sc.q, &sc.pos_buf], &[b, nh, hd, hq, fb(theta)], b * nh * half));
             s.push(g.step(ROPE_PAGED, &[&sc.k, &sc.pos_buf], &[b, nkv, hd, hkv, fb(theta)], b * nkv * half));
             if self.kv_int8 {
@@ -884,7 +919,17 @@ impl Engine {
         }
         let last = c.n_layers as usize;
         s.push(self.rms(&sc.res[last], w("norm.weight"), &sc.xn_final, d, b));
-        g.submit(&[], &s);
+        (s, b)
+    }
+
+    /// [`Self::run_batched_steps`] plus the submit. Split so a profiler can
+    /// time the served tape per kernel kind without driving a whole request —
+    /// the tape is rebuilt per step rather than recorded once, so there was
+    /// nothing to hand `gpu_core::profile`.
+    #[allow(clippy::too_many_arguments)]
+    fn run_batched_submit(&self, bsz: u32, input: Input, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> u32 {
+        let (s, b) = self.run_batched_steps(bsz, input, positions, seqlens, blocks, offsets, bt);
+        self.gpu.submit(&[], &s);
         b
     }
 
@@ -1299,6 +1344,19 @@ impl Engine {
     /// the scheduler.
     pub fn prefill_for_perf(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
         self.prefill(table, prompt)
+    }
+
+    /// The dispatches of one served step, in submit order, WITHOUT submitting.
+    ///
+    /// Profiler-only (`qwen_bench serve`), the same contract and the same
+    /// reason as `Qwen::fwd_steps`: `gpu_core::profile` needs a step list, and
+    /// this tape is rebuilt per step rather than recorded once. `bsz` rows with
+    /// `seqlens[i] = positions[i] + 1` is a decode step; a chunk of `cc` rows
+    /// from one sequence is a prefill chunk — the two share this tape, which is
+    /// exactly why profiling it is worth doing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn steps_for_profile(&self, bsz: u32, positions: &[u32], seqlens: &[u32], blocks: &[u32], offsets: &[u32], bt: &[u32]) -> Vec<Step> {
+        self.run_batched_steps(bsz, Input::Resident, positions, seqlens, blocks, offsets, bt).0
     }
 
     /// Physical KV blocks currently free in the pool.
@@ -2413,27 +2471,35 @@ mod tests {
     fn prefill_submits_scale_with_chunks_not_with_token_count() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
-        let submits_for = |prompt: &[u32], max_prefill: u32| -> u64 {
+        // A backend that does not count submits cannot answer this question at
+        // all. Skipping is the honest outcome — `unwrap_or(0)` made the first
+        // two assertions pass VACUOUSLY (0 == 0) on `backend-cpu` and only the
+        // third caught it, which is brain's own "unmeasured is null, never
+        // 0-pretending-complete" rule violated inside a test.
+        let submits_for = |prompt: &[u32], max_prefill: u32| -> Option<u64> {
             let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, max_prefill, false, false);
             let mut t = BlockTable::new();
-            let before = e.device_stats().map(|s| s.submits).unwrap_or(0);
+            let before = e.device_stats()?.submits;
             e.prefill(&mut t, prompt);
-            let after = e.device_stats().map(|s| s.submits).unwrap_or(0);
-            after - before
+            let after = e.device_stats()?.submits;
+            Some(after - before)
         };
         // One chunk large enough to hold either prompt whole: a 4-token prompt and a
         // 16-token prompt must cost the SAME number of submits — proof the dispatch
         // is per-CALL, not per-TOKEN (a per-token dispatcher would cost 4x more here).
         let short = vec![1u32, 5, 3, 9];
         let long: Vec<u32> = (0..16).map(|i| (i % 20) as u32 + 1).collect();
-        let submits_short = submits_for(&short, 16);
-        let submits_long = submits_for(&long, 16);
+        let (Some(submits_short), Some(submits_long)) = (submits_for(&short, 16), submits_for(&long, 16))
+        else {
+            eprintln!("skipped: this backend does not count submits (Backend::stats() is None)");
+            return;
+        };
         assert_eq!(submits_short, submits_long, "prefill submits must not scale with in-chunk token count: {submits_short} (4 tok) vs {submits_long} (16 tok)");
         assert!(submits_short > 0, "prefill must dispatch SOMETHING");
 
         // The SAME 16-token prompt split into 2 chunks of 8 must cost exactly 2x the
         // one-chunk submit count — proportional to CHUNKS, not tokens (which would be 16x).
-        let submits_2chunks = submits_for(&long, 8);
+        let submits_2chunks = submits_for(&long, 8).expect("stats were available a moment ago");
         assert_eq!(submits_2chunks, 2 * submits_long, "2 chunks must cost exactly 2x 1 chunk's submits, not scale with the (unchanged) token count: {submits_2chunks} vs 2x{submits_long}");
     }
 
