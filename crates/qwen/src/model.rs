@@ -922,7 +922,7 @@ impl Qwen {
 
     /// Vocab tiles for the embedding / lm_head (shared `block::vocab_tiles`).
     fn vocab_tiles(&self) -> Vec<(u32, u32)> {
-        block::vocab_tiles(self.cfg.vocab as u64, self.cfg.d_model as u64)
+        block::vocab_tiles_on(&self.gpu, self.cfg.vocab as u64, self.cfg.d_model as u64)
     }
 
     fn forward_steps(&self, b_use: u32, t_use: u32) -> Vec<Step> {
@@ -1582,6 +1582,19 @@ impl Qwen {
 
     /// Record + submit one incremental decode step WITHOUT reading back.
     fn decode_submit(&self, token_id: Option<u32>, pos: u32) {
+        let s = self.decode_steps(token_id, pos);
+        self.gpu.submit(&[], &s);
+    }
+
+    /// The dispatches of one incremental decode step, in submit order, WITHOUT
+    /// submitting them.
+    ///
+    /// Split out of [`Self::decode_submit`] purely so the profiler can time the
+    /// decode tape per kernel kind — `gpu_core::profile` needs a step list, and
+    /// the decode tape is rebuilt per token rather than recorded once like
+    /// `fwd_steps`, so there was nothing to hand it. Behaviour is unchanged:
+    /// `decode_submit` records exactly this and submits it.
+    pub fn decode_steps(&self, token_id: Option<u32>, pos: u32) -> Vec<Step> {
         assert!(
             self.shard.is_whole(self.cfg.n_layers as usize),
             "KV-cache decode requires a whole (single-device) model"
@@ -1727,7 +1740,7 @@ impl Qwen {
         }
         let last = c.n_layers as usize;
         rms(&mut s, &self.res[last], w("norm.weight"), &self.xn_final, d, 1);
-        g.submit(&[], &s);
+        s
     }
 
     /// The device this model runs on (profiling/observability).
@@ -1746,6 +1759,26 @@ impl Qwen {
     /// OFFLINE cost of the recorded backward (empty when built for inference).
     pub fn cost_bwd(&self) -> gpu_core::cost::CostReport {
         self.gpu.cost_of(&self.bwd_steps)
+    }
+
+    /// The forward dispatches of one batched pass, in submit order.
+    ///
+    /// Exposed for the PROFILER (`qwen_bench`), not for driving — `forward()`
+    /// owns the submit and the readback. `gpu_core::profile` needs the step
+    /// list to build the per-kernel-kind table `docs/kernel-checklist.md` §F.1
+    /// asks for before anyone optimises, and until this existed there was no
+    /// way to get one for a decoder LM at all: every recorded qwen number in
+    /// `docs/performance/` came from `BRAIN_PROFILE`'s timestamp table on a
+    /// synthetic shape. Same contract and same reason as
+    /// `vqgan::train::VqganTrainer::fwd_steps`.
+    pub fn fwd_steps(&self) -> &[Step] {
+        &self.fwd_steps
+    }
+
+    /// The backward dispatches of one training step, in submit order (empty
+    /// when the model was built for inference). Profiler-only, as above.
+    pub fn bwd_steps(&self) -> &[Step] {
+        &self.bwd_steps
     }
 
     pub fn save(&self, path: &str) {
