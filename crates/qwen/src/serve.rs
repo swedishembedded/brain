@@ -74,6 +74,10 @@ const APPEND_I8_CLIPPED: usize = 26;
 // `DECODE_REGIME_MAX_ROWS` ran one thread per output element — while the
 // batched forward next door dispatched this same kernel at ~80x the rate.
 const MATMUL_REG3: usize = 27;
+// Coalesced paged scores: one workgroup per score, lanes split the head_dim
+// reduction. Same Params and same output as SCORES_B; selected on the queried
+// `workgroup_reductions`, since it carries a barrier the CPU JIT gates on.
+const SCORES_B_WG: usize = 28;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -104,6 +108,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("topk_extract_step", kernels::TOPK_EXTRACT_STEP),
     ("paged_kv_append_i8_clipped_batched", kernels::PAGED_KV_APPEND_I8_CLIPPED_BATCHED),
     ("matmul_reg3", kernels::MATMUL_REG3),
+    ("paged_decode_scores_wg", kernels::PAGED_DECODE_SCORES_WG),
 ];
 
 /// Longest on-device decode window (tokens per host round-trip). The scheduler
@@ -889,7 +894,17 @@ impl Engine {
             } else {
                 s.push(g.step(KV_APPEND_B, &[&sc.k, &sc.blk_buf, &sc.off_buf, &self.pool_k[l]], &[b, hkv, bs], b * hkv));
                 s.push(g.step(KV_APPEND_B, &[&sc.v, &sc.blk_buf, &sc.off_buf, &self.pool_v[l]], &[b, hkv, bs], b * hkv));
-                s.push(g.step(SCORES_B, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], b * nh * cap));
+                // One workgroup per score where the device runs workgroup
+                // reductions: the per-element kernel's lanes are `kv_stride`
+                // floats apart (4 KB at 0.6B), 8x read amplification, measured
+                // at 12.2% of the bandwidth roof while taking 52.2% of a
+                // served step.
+                let (sk, st) = if self.caps.workgroup_reductions {
+                    (SCORES_B_WG, b * nh * cap * 64)
+                } else {
+                    (SCORES_B, b * nh * cap)
+                };
+                s.push(g.step(sk, &[&sc.q, &self.pool_k[l], &sc.bt_buf, &sc.seqlen_buf, &sc.scores], &[b, nh, group, hd, bs, hkv, cap, mbt, fb(scale)], st));
                 s.push(g.step(SOFTMAX_B, &[&sc.scores, &sc.seqlen_buf, &sc.probs], &[b, nh, cap], b * nh));
                 s.push(g.step(APPLY_B, &[&sc.probs, &self.pool_v[l], &sc.bt_buf, &sc.seqlen_buf, &sc.ctx], &[b, nh, group, hd, bs, hkv, cap, mbt], b * nh * hd));
             }

@@ -1390,3 +1390,42 @@ The fix is timestamp queries inside the production single-pass flush, so
 attribution and the whole-pass number come from one execution; `BRAIN_PROFILE`
 today only times dispatches one-pass-per-dispatch, so its absolute times are not
 production times either (330.7 ms of GPU total against a 114.9 ms pass).
+
+---
+
+## The first fix ranked by a trustworthy profile: `paged_decode_scores`, 1.94×
+
+With device timing (#31) and the harness bug (#32) both fixed, the served step's
+top row was **`paged_decode_scores_batched` — 52.2% of the pass at 12.2% of the
+bandwidth roof**, not the GEMM everything before had pointed at.
+
+The cause is the same one `overview.md` already names twice: **one thread per
+output is a coalescing bug**. The kernel gives thread `t` one score and walks
+`head_dim` serially; the fast thread axis is `j`, and a key sits at
+`(physical*block_size + j%block_size)*kv_stride + kvh*head_dim`, so two adjacent
+lanes are `kv_stride` floats — **4 KB** at Qwen3-0.6B — apart. Every step of the
+dot product has a warp touch 32 sectors and use 4 bytes of each.
+
+`paged_decode_scores_wg` applies the tree's standard answer (`rmsnorm_rows`,
+`matmul_gemv`): one **workgroup** per score, lanes split the `head_dim`
+reduction, so consecutive lanes read consecutive addresses. One barrier, so the
+CPU JIT still compiles it; selected on the queried `workgroup_reductions`.
+
+| | ms | ms/call | GB/s | % of memory roof | share of pass |
+|---|---:|---:|---:|---:|---:|
+| `paged_decode_scores_batched` | 109.50 | 3.911 | 35.1 | 12.2% | 52.2% |
+| `paged_decode_scores_wg` | **56.56** | **2.020** | **68.0** | **23.6%** | 36.1% |
+
+**1.94× on the kernel, and it reached the pass: 204.4 → 153.6 ms (1.33×),
+626 → 833 rows/s**, reproduced three times from matched idle temperatures. It
+helps the decode regime too — at 8 rows the kernel sits at 22.3% of roof.
+
+Token-for-token gates green on both backends (`batched_serving_matches_reference`,
+`scheduler_dynamic_admission_matches_reference`, `spec_decode_matches_greedy`).
+
+**Not done.** At 23.6% it is still under the 35% memory-bound defect floor, so
+there is roughly another 3× in it. The remaining suspects, in order: the 64-lane
+fold is serial in lane 0 (64 adds per score); `head_dim = 128` gives each lane
+only 2 elements, so launch and reduction overhead are a large fraction; and the
+block-table indirection is re-read per score rather than per block. The pass's
+top row is now `matmul_reg3` again — 47.3% at 14.7% of the compute roof.

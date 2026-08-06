@@ -281,7 +281,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // the rate. Anything profiling a ramp of short sequences must say so.
         //
         // params: [batch, n_heads, group, head_dim, block_size, kv_stride, cap, max_bt(, scale)]
-        "paged_decode_scores_batched" | "paged_decode_scores" => {
+        "paged_decode_scores_batched" | "paged_decode_scores" | "paged_decode_scores_wg" => {
             let (b, nh, grp, hd, cap) = (p(0)?, p(1)?, p(2)?, p(3)?, p(6)?);
             // GQA: `group` query heads SHARE one kv head, so the KV cache is
             // read `nh/group` times, not `nh`. Counting per query head
@@ -896,7 +896,7 @@ mod tests {
             "gn_dgb_part", "gn_dgb2", "mse_value", "masked_l1", "upsample2_dx", "concat2",
             "concat_split", "matmul_i8", "roof_fma", "mse_grad", "masked_l1_grad",
             // the served paged tape
-            "paged_decode_scores_batched", "paged_decode_apply_batched",
+            "paged_decode_scores_batched", "paged_decode_scores_wg", "paged_decode_apply_batched",
             "paged_kv_append_batched", "decode_softmax_batched", "rope_paged",
             "paged_decode_scores_i8_batched", "paged_decode_apply_i8_batched",
             "paged_kv_append_i8_batched",
