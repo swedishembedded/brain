@@ -330,6 +330,10 @@ pub const GN_DBETA: &str = include_str!("../wgsl/gn_dbeta.wgsl");
 pub const GN_DGAMMA: &str = include_str!("../wgsl/gn_dgamma.wgsl");
 /// `wgsl/gn_dsum.wgsl`
 pub const GN_DSUM: &str = include_str!("../wgsl/gn_dsum.wgsl");
+/// GroupNorm backward reductions, stage 1: partial sums (barrier-free).
+pub const GN_DSUM_PART: &str = include_str!("../wgsl/gn_dsum_part.wgsl");
+/// GroupNorm backward reductions, stage 2: fold the partials.
+pub const GN_DSUM2: &str = include_str!("../wgsl/gn_dsum2.wgsl");
 /// `wgsl/gn_dx.wgsl`
 pub const GN_DX: &str = include_str!("../wgsl/gn_dx.wgsl");
 /// `wgsl/gn_part.wgsl`
@@ -872,6 +876,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("gn_dbeta", GN_DBETA),
     ("gn_dgamma", GN_DGAMMA),
     ("gn_dsum", GN_DSUM),
+    ("gn_dsum_part", GN_DSUM_PART),
+    ("gn_dsum2", GN_DSUM2),
     ("gn_dx", GN_DX),
     ("gn_part", GN_PART),
     ("gn_stats", GN_STATS),

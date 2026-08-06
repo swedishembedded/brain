@@ -125,7 +125,12 @@ const K_MSE_GRAD: usize = TAIL + 4;
 /// Cranelift JIT rejects a duplicate definition outright
 /// (`DuplicateDefinition("axpy")`), so a second registration is a hard failure
 /// on `BRAIN_DEVICE=cpu` and silently fine on the GPU.
-const K_AXPY: usize = BWD_BASE + 10;
+/// NOT a literal offset. `BWD_BASE + 10` was one, and when `gn_dsum` was
+/// removed from the shared set every slot after it shifted by one — so this
+/// pointed at `attn_bwd_dscores_bidir` and failed as a bind-group arity
+/// mismatch (3 bindings vs 5), which is `docs/lessons.md` #13's exact
+/// signature. `BwdIds::axpy()` exists so the offset lives in ONE place.
+const K_AXPY: usize = BwdIds::at(BWD_BASE).axpy();
 const K_ADD2: usize = vae::blocks::ADD2_SLOT;
 
 /// This model's TRAINING kernel set: the inference set ([`crate::KERNELS`] —

@@ -43,19 +43,20 @@ const B_CONV_DW: usize = 1;
 const B_BIAS_GRAD: usize = 2;
 const B_SILU_BWD: usize = 3;
 const B_SCALE_CHAN: usize = 4;
-const B_GN_DSUM: usize = 5;
-const B_GN_DX: usize = 6;
-const B_GN_DGAMMA: usize = 7;
-const B_GN_DBETA: usize = 8;
-const B_UPSAMPLE2_DX: usize = 9;
-const B_AXPY: usize = 10;
-const B_ATTN_DSCORES: usize = 11;
-const B_ATTN_DV: usize = 12;
-const B_ATTN_DQ: usize = 13;
-const B_ATTN_DK: usize = 14;
-const B_MATMUL_DX_REG: usize = 15;
-const B_COL2IM: usize = 16;
-const B_MATMUL_DW_REG: usize = 17;
+const B_GN_DX: usize = 5;
+const B_GN_DGAMMA: usize = 6;
+const B_GN_DBETA: usize = 7;
+const B_UPSAMPLE2_DX: usize = 8;
+const B_AXPY: usize = 9;
+const B_ATTN_DSCORES: usize = 10;
+const B_ATTN_DV: usize = 11;
+const B_ATTN_DQ: usize = 12;
+const B_ATTN_DK: usize = 13;
+const B_MATMUL_DX_REG: usize = 14;
+const B_COL2IM: usize = 15;
+const B_MATMUL_DW_REG: usize = 16;
+const B_GN_DSUM_PART: usize = 17;
+const B_GN_DSUM2: usize = 18;
 
 /// Where the caller placed [`super::BWD_KERNELS`] in its kernel set.
 #[derive(Clone, Copy)]
@@ -259,7 +260,18 @@ impl Trace {
                 let dyg = r.tmp(n as u64);
                 r.push(r.gpu.step(r.ids.k(B_SCALE_CHAN), &[&dy, gbuf, &dyg], &[n, *c, h * w], n));
                 let sums = r.tmp(4 * *g as u64);
-                r.push(r.gpu.step(r.ids.k(B_GN_DSUM), &[x, &dyg, stats, &sums], &p, *g));
+                // Two-stage, barrier-free. `gn_dsum` is ONE invocation per
+                // group — 32 lanes walking (C/G)*H*W elements each — measured at
+                // 229 ms / 2.3 GB/s, 0.7% of the ~346 GB/s roof and 27% of the
+                // backward. Stage 1 splits each group across `GN_P` partials
+                // (coalesced, strided), stage 2 folds them. No workgroupBarrier,
+                // so this needs no capability branch and `backend-cpu` gets it
+                // too — the same shape as the forward's `gn_part`/`gn_stats2`.
+                let part = r.tmp(2 * *g as u64 * super::GN_P as u64);
+                let pp = [1, *c, *h, *w, *g, super::GN_P];
+                r.push(r.gpu.step(r.ids.k(B_GN_DSUM_PART), &[x, &dyg, stats, &part], &pp, g * super::GN_P));
+                r.push(r.gpu.step(r.ids.k(B_GN_DSUM2), &[&part, stats, &sums], &pp, *g));
+                r.give(2 * *g as u64 * super::GN_P as u64, part);
                 // dgamma -> dgb[0..C], dbeta -> dgb[C..2C]: disjoint writes into
                 // the same fused buffer, both accumulating.
                 r.push(r.gpu.step(r.ids.k(B_GN_DGAMMA), &[x, &dy, stats, grads.g(gb)], &p, *c));

@@ -54,7 +54,7 @@ const K_GN_STATS2: usize = 15;
 
 /// Partials per group for the two-stage GroupNorm reduction. 64 is the value
 /// `crates/wm-diamond` arrived at, and the measurement below was taken at it.
-const GN_P: u32 = 64;
+pub(crate) const GN_P: u32 = 64;
 
 /// The `add2` slot inside [`KERNELS`]. Public for the same reason
 /// [`grad::BwdIds::axpy`] is: a caller stitching extra graph onto these blocks
@@ -128,13 +128,12 @@ pub const MATMUL_REG3_SLOT: usize = K_MATMUL;
 /// cooperative twin anywhere in the tree — that is the documented §C.2 perf gap
 /// in `docs/kernel-checklist.md`, NOT a correctness gate, because none of them
 /// uses `workgroupBarrier()` and all three are exact on `backend-cpu`.
-pub const BWD_KERNELS: [(&str, &str); 18] = [
+pub const BWD_KERNELS: [(&str, &str); 19] = [
     ("conv2d_dx", kernels::CONV2D_DX),
     ("conv2d_dw", kernels::CONV2D_DW),
     ("bias_grad", kernels::BIAS_GRAD),
     ("silu_bwd", kernels::SILU_BWD),
     ("scale_chan", kernels::SCALE_CHAN),
-    ("gn_dsum", kernels::GN_DSUM),
     ("gn_dx", kernels::GN_DX),
     ("gn_dgamma", kernels::GN_DGAMMA),
     ("gn_dbeta", kernels::GN_DBETA),
@@ -153,6 +152,9 @@ pub const BWD_KERNELS: [(&str, &str); 18] = [
     // the CPU JIT rejects as a duplicate. The reverse reuses the forward's slot
     // through `super::K_IM2COL_AT`, exactly as it already does for `nchw_nlc`.
     ("matmul_dw_reg", kernels::MATMUL_DW_REG),
+    // The two-stage replacement for `gn_dsum`, which is one lane per group.
+    ("gn_dsum_part", kernels::GN_DSUM_PART),
+    ("gn_dsum2", kernels::GN_DSUM2),
 ];
 
 /// Minimum output channels for the LOWERED conv input gradient.
