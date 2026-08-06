@@ -13,6 +13,8 @@
 //!                      --models-dir DIR --dataset-id ID]
 //!   brain qwen eval --weights BASE --jsonl FILE [--adapter OWNER/NAME[:TAG]
 //!                     --block T --models-dir DIR]
+//!   brain qwen calib --weights BASE --jsonl FILE [--report --out kv_calib.json
+//!                     --models-dir DIR]
 
 use std::path::{Path, PathBuf};
 
@@ -33,8 +35,9 @@ pub fn run_qwen(args: &[String]) {
         Some("finetune") => finetune(&args[1..]),
         Some("toolcall") => toolcall(&args[1..]),
         Some("eval") => eval_chat(&args[1..]),
+        Some("calib") => calib(&args[1..]),
         other => {
-            eprintln!("usage: brain qwen <import|infer|export|precompile|train|finetune|toolcall|eval> ...  (got {other:?})")
+            eprintln!("usage: brain qwen <import|infer|export|precompile|train|finetune|toolcall|eval|calib> ...  (got {other:?})")
         }
     }
 }
@@ -834,6 +837,147 @@ fn eval_chat(args: &[String]) {
     );
     let verdict = if adapter_score.loss < base_score.loss { "beats" } else { "does NOT beat" };
     println!("{full_ref_str} {verdict} base on held-out loss ({:.4} vs {:.4})", adapter_score.loss, base_score.loss);
+}
+
+/// `brain qwen calib --weights BASE --jsonl PROMPTS [--report] [--out kv_calib.json]
+///     [--models-dir DIR]`
+///
+/// The design input for a calibrated INT8 KV scale: runs `PROMPTS` through a
+/// real checkpoint's fp32-KV paged engine and reports, per `(layer, K|V,
+/// kv_head)`, `absmax` / `p99` / `p99.99` / `outlier_ratio` — most
+/// quantization-hostile first (`qwen::serve::Engine::calibrate_kv`,
+/// `model::actstats`). `outlier_ratio` near 1 means today's per-token online
+/// absmax is already close to optimal for that stream; a large ratio means a
+/// rare-token outlier is setting the scale and crushing the resolution of
+/// everything else — exactly the case a percentile-clipped calibrated scale
+/// (`brain qwen serve`'s future `--kv-calib`, W3.3) exists to fix.
+fn calib(args: &[String]) {
+    let mut weights = String::new();
+    let mut jsonl = String::new();
+    let mut out: Option<String> = None;
+    let mut report = false;
+    let mut models_dir: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--weights" => weights = val(args, &mut i, "--weights"),
+            "--jsonl" => jsonl = val(args, &mut i, "--jsonl"),
+            "--out" => out = Some(val(args, &mut i, "--out")),
+            "--report" => report = true,
+            "--models-dir" => models_dir = Some(val(args, &mut i, "--models-dir")),
+            other => eprintln!("ignoring unknown flag {other:?}"),
+        }
+        i += 1;
+    }
+    if weights.is_empty() || jsonl.is_empty() {
+        eprintln!("usage: brain qwen calib --weights BASE --jsonl FILE [--report] [--out kv_calib.json] [--models-dir DIR]");
+        return;
+    }
+    if !report && out.is_none() {
+        eprintln!("brain qwen calib: nothing to do without --report or --out (both is fine too)");
+        return;
+    }
+
+    let store_root = crate::model_dir::resolve(models_dir.as_deref());
+    let (weights_path, base_dir, base_id) = match resolve_base(&weights, store_root.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
+        }
+    };
+
+    let samples = match data::chat::ChatSample::from_jsonl(Path::new(&jsonl)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{jsonl}: {e}");
+            return;
+        }
+    };
+    if samples.is_empty() {
+        eprintln!("{jsonl}: no samples");
+        return;
+    }
+
+    let tokenizer_path = base_dir.join("tokenizer.json");
+    let tok = match data::qwen_tokenizer::QwenBpe::from_file(tokenizer_path.to_str().unwrap_or_default()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{}: {e}", tokenizer_path.display());
+            return;
+        }
+    };
+    let chat_template = match data::chat_template::ChatTemplate::from_model_dir(&base_dir) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
+        }
+    };
+
+    let total = samples.len();
+    let mut prompts: Vec<Vec<u32>> = Vec::new();
+    for s in &samples {
+        if let Ok((ids, _mask)) = s.encode(&tok, &chat_template) {
+            if !ids.is_empty() {
+                prompts.push(ids);
+            }
+        }
+    }
+    if prompts.is_empty() {
+        eprintln!("{jsonl}: no sample encoded to a usable prompt");
+        return;
+    }
+    let skipped = total - prompts.len();
+    if skipped > 0 {
+        eprintln!("brain qwen calib: skipped {skipped}/{total} samples that failed to encode");
+    }
+
+    // Every prompt's table must stay resident simultaneously (calibrate_kv
+    // reads the pool back once per layer, after every prefill) -- size the
+    // pool for the sum, not the max, of every prompt's blocks.
+    let block_size = 16u32;
+    let max_len = prompts.iter().map(|p| p.len()).max().unwrap_or(1) as u32;
+    let max_blocks_per_seq = max_len.div_ceil(block_size).max(1);
+    let total_blocks: u32 = prompts.iter().map(|p| (p.len() as u32).div_ceil(block_size).max(1)).sum();
+    let num_blocks = total_blocks + prompts.len() as u32; // headroom
+    let max_batch = prompts.len().max(1) as u32;
+    let max_prefill = max_len.max(1);
+
+    eprintln!("brain qwen calib: {base_id}, {} prompts", prompts.len());
+    let weights_str = weights_path.to_str().unwrap_or_default();
+    let mut eng = qwen::serve::Engine::load(weights_str, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, false, false);
+    let collector = eng.calibrate_kv(&prompts);
+    let rows = collector.report();
+
+    if report {
+        println!("{:<20} {:>12} {:>12} {:>12} {:>10}", "stream", "absmax", "p99", "p99.99", "ratio");
+        for r in &rows {
+            println!("{:<20} {:>12.5} {:>12.5} {:>12.5} {:>10.2}", r.name, r.absmax, r.p99, r.p9999, r.outlier_ratio);
+        }
+        let worst = rows.first();
+        let median_ratio = if rows.is_empty() { 0.0 } else { rows[rows.len() / 2].outlier_ratio };
+        println!(
+            "brain qwen calib: {} streams, worst ratio {:.2} ({}), median ratio {:.2}",
+            rows.len(),
+            worst.map(|r| r.outlier_ratio).unwrap_or(0.0),
+            worst.map(|r| r.name.as_str()).unwrap_or("-"),
+            median_ratio
+        );
+    }
+
+    if let Some(path) = out {
+        let json: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| serde_json::json!({"name": r.name, "absmax": r.absmax, "p99": r.p99, "p9999": r.p9999, "outlier_ratio": r.outlier_ratio}))
+            .collect();
+        let doc = serde_json::json!({"model": base_id, "prompts": prompts.len(), "streams": json});
+        let text = serde_json::to_string_pretty(&doc).expect("report JSON is always serializable");
+        match std::fs::write(&path, text) {
+            Ok(()) => println!("brain qwen calib: wrote {path}"),
+            Err(e) => eprintln!("brain qwen calib: {path}: {e}"),
+        }
+    }
 }
 
 #[cfg(test)]

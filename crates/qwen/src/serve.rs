@@ -1231,6 +1231,67 @@ impl Engine {
         bi as u32
     }
 
+    /// Prefill every prompt, then read back the K/V rows each one wrote and
+    /// accumulate per-`(layer, K|V, kv_head)` activation-magnitude statistics
+    /// (`model::actstats`) — the design input for a calibrated INT8 KV scale
+    /// (`brain qwen calib`, `crates/qwen/src/calib.rs`).
+    ///
+    /// Offline-only, never called from the hot serving path (`run_batched_submit`
+    /// stays untouched): this reads the pool directly with plain [`Gpu::read`]
+    /// calls between prefills, which is fine for a one-shot calibration pass
+    /// over a modest prompt set but is NOT the shape a per-request tap could
+    /// use without a real perf cost.
+    ///
+    /// Needs an fp32-KV engine (`kv_int8: false`) — calibration wants the
+    /// pre-quantization distribution, not a value already thrown away by
+    /// today's online absmax. K rows are read POST-RoPE (RoPE runs before
+    /// `KV_APPEND_B`/`APPEND_I8` in `run_batched_submit`), matching exactly
+    /// what a real INT8 KV scale would be quantizing.
+    pub fn calibrate_kv(&mut self, prompts: &[Vec<u32>]) -> model::actstats::Collector {
+        assert!(!self.kv_int8, "calibrate_kv needs an fp32-KV engine (build with kv_int8: false)");
+        let collector = model::actstats::Collector::new();
+        let hd = self.cfg.head_dim as usize;
+        let n_kv = self.cfg.n_kv_heads as usize;
+        let hkv = n_kv * hd;
+        let bs = self.block_size as usize;
+
+        // Prefill every prompt first, keeping every table alive — the
+        // allocator must not recycle a prompt's blocks before we've read
+        // them back below.
+        let mut tables: Vec<(BlockTable, usize)> = Vec::with_capacity(prompts.len());
+        for prompt in prompts {
+            assert!(!prompt.is_empty(), "calibrate_kv: empty prompt");
+            let mut table = BlockTable::new();
+            self.prefill(&mut table, prompt);
+            tables.push((table, prompt.len()));
+        }
+
+        // One full-pool readback per layer (not per prompt): cheap relative
+        // to the prefills themselves, and simplest to get right.
+        let slots = self.alloc.num_blocks() as u64 * self.block_size as u64;
+        let pool_words = (slots * hkv as u64) as usize;
+        for l in 0..self.cfg.n_layers as usize {
+            let pk = self.gpu.read(&self.pool_k[l], pool_words);
+            let pv = self.gpu.read(&self.pool_v[l], pool_words);
+            for (table, len) in &tables {
+                for tok in 0..*len {
+                    let phys = table.blocks()[tok / bs] as usize;
+                    let off = tok % bs;
+                    let base = (phys * bs + off) * hkv;
+                    for h in 0..n_kv {
+                        collector.observe(&format!("layer{l:02}.k.head{h}"), &pk[base + h * hd..base + (h + 1) * hd]);
+                        collector.observe(&format!("layer{l:02}.v.head{h}"), &pv[base + h * hd..base + (h + 1) * hd]);
+                    }
+                }
+            }
+        }
+
+        for (mut table, _) in tables {
+            self.release_table(&mut table);
+        }
+        collector
+    }
+
     /// Greedy generation of `max_new` tokens for each prompt, run with a **paged
     /// KV cache** and **batched decode** across all prompts concurrently. Prompts
     /// are prefilled per-sequence (one token per step), then every still-running
@@ -1492,6 +1553,37 @@ mod tests {
         let (hit1, _, _) = eng.prefix_stats();
         assert!(hit1 > 0, "the second prefill must actually reuse the prefix");
         assert_eq!(warm, cold, "a cache hit must be byte-identical to computing the prefix");
+    }
+
+    /// `calibrate_kv` must report one stream per (layer, K|V, kv_head) with a
+    /// sane, non-degenerate absmax/p99.99, and must refuse an int8-KV engine
+    /// (calibration wants the pre-quantization distribution).
+    #[test]
+    fn calibrate_kv_reports_one_stream_per_layer_kv_head() {
+        let cfg = QwenConfig::tiny(); // n_layers=2, n_kv_heads=2, head_dim=8
+        let map = tiny_weights(&cfg);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 4, 8, 16, false, false);
+        let prompts = vec![vec![1u32, 5, 3, 9, 2], vec![7u32, 2, 4]];
+        let report = eng.calibrate_kv(&prompts).report();
+
+        let expected = cfg.n_layers as usize * cfg.n_kv_heads as usize * 2; // K + V
+        assert_eq!(report.len(), expected, "one stream per (layer, K|V, kv_head)");
+        for r in &report {
+            assert!(r.absmax > 0.0, "{}: absmax must be nonzero for real (non-degenerate) weights", r.name);
+            assert!(r.outlier_ratio.is_finite() && r.outlier_ratio >= 1.0 - 1e-6, "{}: ratio {}", r.name, r.outlier_ratio);
+        }
+        // Spot-check the naming convention a report/CLI consumer depends on.
+        assert!(report.iter().any(|r| r.name == "layer00.k.head0"));
+        assert!(report.iter().any(|r| r.name == "layer01.v.head1"));
+    }
+
+    #[test]
+    #[should_panic(expected = "fp32-KV engine")]
+    fn calibrate_kv_refuses_an_int8_kv_engine() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 64, 4, 8, 16, true, false);
+        eng.calibrate_kv(&[vec![1u32, 2, 3]]);
     }
 
     /// Random shared prefixes: a prompt sharing a random-length prefix with
