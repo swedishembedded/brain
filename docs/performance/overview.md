@@ -1429,3 +1429,63 @@ fold is serial in lane 0 (64 adds per score); `head_dim = 128` gives each lane
 only 2 elements, so launch and reduction overhead are a large fraction; and the
 block-table indirection is re-read per score rather than per block. The pass's
 top row is now `matmul_reg3` again — 47.3% at 14.7% of the compute roof.
+
+---
+
+## Split-K on the FORWARD GEMM: the tile grid that does not grow with `k`
+
+`matmul_reg3`'s tile grid is `ceil(m/128) * ceil(n/128)`. It does not grow with
+the contraction, so a skinny-M shape starves the device — the identical defect
+`matmul_dw_reg` had on the backward, on the same card. Measured at `k=1024,
+n=2048` (the Qwen3-0.6B qkv projection), the same kernel walks its whole
+occupancy curve on `m` alone:
+
+| m | 128 | 256 | 512 | 1024 |
+|---|---:|---:|---:|---:|
+| workgroups | 16 | 32 | 64 | 128 |
+| GFLOP/s | 1171 | 1758 | 2562 | 3811 |
+
+At `m = 128` that is 16 workgroups on a 30-SM card, 11 % of peak — and it was
+47 % of a served Qwen3-0.6B step. §F.3 first: no faster sibling exists
+(`matmul_reg2` is the same tile; `matmul_gemv` is `m ≤ 32` only).
+
+**The arithmetic that says split-K is right *here*, done before writing it.**
+Splitting only pays when the fold is cheap against the GEMM. At `m=128, n=2048,
+k=1024` with 8 slices the partials are 8.4 MB and the fold moves 9.4 MB —
+**0.03 ms against the GEMM's 0.46 ms**, ~7 % overhead to roughly triple the
+occupancy. A fat-output shape inverts that, which is why the kernel header says
+so: copying this to the wrong shape is the obvious mistake.
+
+`matmul_reg3_splitk` is `matmul_reg3` with the contraction split across
+`slices` workgroups, each writing its own `[m, n]` plane; `dw_splitk_reduce`
+folds them, gaining an `acc` flag for the purpose (a parameter gradient
+accumulates, a forward GEMM assigns — the same flag and reason `matmul_dx_reg`
+has one). `slices = ceil(288 / tiles)`, the same 288-workgroup target the
+backward's sweep found — that sweep produced a *rule*, not a constant, which is
+why it transfers.
+
+Measured on the served Qwen3-0.6B step, 128 rows, one P40:
+
+| | ms | GFLOP/s | % of compute roof |
+|---|---:|---:|---:|
+| `matmul_reg3` (196 calls) | 74.28 | 1517 | 14.7 % |
+| `matmul_reg3_splitk` (196) | **34.83** | **3237** | **31.4 %** |
+| `dw_splitk_reduce` (196) | 14.09 | — | 78.2 % of bandwidth |
+
+**GEMM path 74.28 → 48.92 ms (1.52×); whole pass 152.44 → 128.4 ms (1.19×),
+840 → 995 rows/s**, reproduced three times from matched idle temperatures. The
+GEMM clears the 30 % compute-bound defect floor for the first time on this
+datapath, and the fold lands at 78 % of the bandwidth roof — above its own
+70 % target, so it is not the next thing to look at.
+
+**Sizing the scratch is part of the rule, not an afterthought.** The first wiring
+sized the partial buffer for 8 slices while the rule computes up to 36, so it
+silently refused every wide shape: 56 of 196 GEMMs split and the pass moved only
+152.44 → 147.20 ms. Sizing it for the max the rule can emit took it to 128.4.
+A capacity bound that quietly changes *which* shapes get the fast path is
+indistinguishable from the fast path not working.
+
+The decode regime is untouched by construction (`m ≤ DECODE_REGIME_MAX_ROWS`
+keeps the GEMV): at 8 rows the step is 590 dispatches and 37.5 ms, as before.
+The served step's top row is now `paged_decode_scores_wg` at 43 % of the pass
+and 23.7 % of the bandwidth roof.

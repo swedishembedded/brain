@@ -78,6 +78,13 @@ const MATMUL_REG3: usize = 27;
 // reduction. Same Params and same output as SCORES_B; selected on the queried
 // `workgroup_reductions`, since it carries a barrier the CPU JIT gates on.
 const SCORES_B_WG: usize = 28;
+// Split-K forward GEMM + its fold, for the skinny-M shapes a served step is made
+// of. `matmul_reg3`'s tile grid is ceil(m/128)*ceil(n/128) and does not grow
+// with k, so at m=128 it launches 16 workgroups on a 30-SM card (11% of peak,
+// and 47% of a served step). See `matmul_reg3_splitk.wgsl` for the measured
+// occupancy curve and the arithmetic that says splitting pays at THIS shape.
+const MATMUL_REG3_SPLITK: usize = 29;
+const SPLITK_REDUCE: usize = 30;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -109,6 +116,8 @@ const PIPELINES: &[(&str, &str)] = &[
     ("paged_kv_append_i8_clipped_batched", kernels::PAGED_KV_APPEND_I8_CLIPPED_BATCHED),
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("paged_decode_scores_wg", kernels::PAGED_DECODE_SCORES_WG),
+    ("matmul_reg3_splitk", kernels::MATMUL_REG3_SPLITK),
+    ("dw_splitk_reduce", kernels::DW_SPLITK_REDUCE),
 ];
 
 /// Longest on-device decode window (tokens per host round-trip). The scheduler
@@ -116,6 +125,26 @@ const PIPELINES: &[(&str, &str)] = &[
 /// token for one per window, at the cost of up to `window - 1` wasted decode
 /// steps when a sequence hits EOS mid-window.
 pub const DECODE_WINDOW: usize = 4;
+
+/// Workgroups a split-K GEMM aims to launch.
+///
+/// The same number `vae::blocks::DW_SPLITK_TARGET_WGS` was swept to for
+/// `matmul_dw_reg_splitk`, on the same card and against the same defect (a tile
+/// grid that does not grow with the contraction). That sweep found a RULE, not
+/// a constant — every shape's optimum landed on ~288 workgroups — which is why
+/// it transfers here rather than needing its own sweep to start from.
+const SPLITK_TARGET_WGS: u32 = 288;
+
+/// Ceiling on the split-K partial scratch, in f32 words (64 MiB).
+///
+/// Partials are `m * n * slices`, so an unbounded rule would let a large
+/// prefill chunk allocate hundreds of megabytes to save a few milliseconds.
+/// A shape whose partials do not fit simply keeps the plain kernel.
+const SPLITK_SCRATCH_WORDS: u64 = 16 << 20;
+
+/// Most k-slices a single GEMM is split into. Bounds both the scratch and the
+/// fold's read amplification (the fold reads `slices` partials per output).
+const SPLITK_MAX_SLICES: u32 = 48;
 
 fn ids() -> KernelIds {
     KernelIds {
@@ -275,6 +304,11 @@ pub struct Engine {
     max_blocks_per_seq: u32,
     max_prefill: u32,
     cap: u32,
+    /// Scratch for the split-K GEMM's per-slice partials, and its size in f32
+    /// words. `None` on a device that cannot run the kernel, which makes
+    /// `splitk_slices` return `None` and every GEMM take the plain path.
+    splitk_part: Option<DeviceBuffer>,
+    splitk_cap: Option<u64>,
     alloc: BlockAllocator,
     /// Prompt-prefix cache (D): full prompt blocks are indexed after prefill
     /// and adopted (shared, refcounted) by later prompts with the same prefix,
@@ -383,6 +417,21 @@ impl Engine {
         // prompt of up to max_prefill tokens processed in one forward).
         let b = max_batch.max(max_prefill) as u64;
         let cap = max_blocks_per_seq * block_size;
+        // Split-K scratch, sized for the widest GEMM this engine can present
+        // (the widest row count it admits, times the widest output). Allocated
+        // once; `splitk_slices` refuses any shape whose partials exceed it, so
+        // the buffer is a hard ceiling rather than a hint.
+        let widest_n = cfg.d_ff.max(cfg.q_dim()).max(cfg.d_model) as u64;
+        let widest_m = max_batch.max(max_prefill) as u64;
+        // Sized for the MAX slice count the rule can emit, not a guess. Sizing
+        // it for 8 silently refused the wide shapes — only `wk`/`wv` fitted, so
+        // 56 of 196 GEMMs split and the rest kept the starved kernel.
+        let splitk_cap = (widest_m * widest_n * SPLITK_MAX_SLICES as u64).min(SPLITK_SCRATCH_WORDS);
+        let (splitk_part, splitk_cap) = if gpu.caps().workgroup_reductions && splitk_cap > 0 {
+            (Some(gpu.storage(splitk_cap)), Some(splitk_cap))
+        } else {
+            (None, None)
+        };
         let nh = cfg.n_heads as u64;
         // scores/probs hold decode [rows,nh,cap] OR prefill causal [nh,N,N].
         let bcap = (b * nh * cap as u64).max(max_prefill as u64 * max_prefill as u64 * nh);
@@ -505,6 +554,8 @@ impl Engine {
             max_blocks_per_seq,
             max_prefill,
             cap,
+            splitk_part,
+            splitk_cap,
             alloc: BlockAllocator::new(num_blocks, block_size),
             prefix: PrefixCache::new(),
             prefix_lookup_tokens: 0,
@@ -657,6 +708,57 @@ impl Engine {
     fn mm(&self, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) -> Step {
         let (kind, threads) = block::gemm_variant(self.gemm_tier(), m, n);
         self.gpu.step(kind, &[x, w, out], &[m, k, n], threads)
+    }
+
+    /// [`Self::mm`], but free to emit MORE than one dispatch: the split-K GEMM
+    /// needs a fold after it.
+    ///
+    /// Split-K only when the tile grid is too small to fill the device — the
+    /// same rule and the same 288-workgroup target `vae::blocks` measured for
+    /// `matmul_dw_reg_splitk`, which is the identical defect on the backward.
+    /// `slices = 1` means the plain kernel, so a shape that already fills the
+    /// card is untouched.
+    fn mm_into(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
+        match self.splitk_slices(m, k, n) {
+            Some(slices) => {
+                let tiles = m.div_ceil(128) * n.div_ceil(128);
+                let part = self.splitk_part.as_ref().expect("split-K chosen without a scratch buffer");
+                s.push(self.gpu.step(
+                    MATMUL_REG3_SPLITK,
+                    &[x, w, part],
+                    &[m, k, n, slices],
+                    slices * tiles * 256,
+                ));
+                // acc = 0: a forward GEMM owns its output and ASSIGNS, so the
+                // destination needs no clear (unlike a parameter gradient).
+                s.push(self.gpu.step(
+                    SPLITK_REDUCE,
+                    &[part, out],
+                    &[m * n, slices, 0],
+                    (m * n).div_ceil(64) * 64,
+                ));
+            }
+            None => s.push(self.mm(x, w, out, m, k, n)),
+        }
+    }
+
+    /// How many k-slices to split this GEMM into, or `None` for the plain
+    /// kernel. `None` whenever the device has no scratch, the tile grid already
+    /// fills the card, the shape is in the GEMV regime, or the partials would
+    /// not fit the scratch — the last one keeps this from silently allocating.
+    fn splitk_slices(&self, m: u32, k: u32, n: u32) -> Option<u32> {
+        if !self.caps.workgroup_reductions || m <= DECODE_REGIME_MAX_ROWS {
+            return None;
+        }
+        let cap = self.splitk_cap?;
+        let tiles = m.div_ceil(128) * n.div_ceil(128);
+        // Enough k to split at all: each slice must still hold whole BK chunks.
+        let slices = SPLITK_TARGET_WGS.div_ceil(tiles).min(k / 64).min(SPLITK_MAX_SLICES).max(1);
+        let need = (m as u64) * (n as u64) * (slices as u64);
+        if slices <= 1 || need > cap {
+            return None;
+        }
+        Some(slices)
     }
 
     /// The fp32 GEMM tier for this device — the SAME rule `flux1`, `flux2` and
@@ -856,9 +958,9 @@ impl Engine {
                 self.mm8(q8, &mut s, &lay.wk, &sc.k_pre, b);
                 self.mm8(q8, &mut s, &lay.wv, &sc.v, b);
             } else {
-                s.push(self.mm(&sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, b, d, hq));
-                s.push(self.mm(&sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, b, d, hkv));
-                s.push(self.mm(&sc.xn1, w(&p("attn.wv.weight")), &sc.v, b, d, hkv));
+                self.mm_into(&mut s, &sc.xn1, w(&p("attn.wq.weight")), &sc.q_pre, b, d, hq);
+                self.mm_into(&mut s, &sc.xn1, w(&p("attn.wk.weight")), &sc.k_pre, b, d, hkv);
+                self.mm_into(&mut s, &sc.xn1, w(&p("attn.wv.weight")), &sc.v, b, d, hkv);
             }
             // QK-norm goes through `self.rms` like every other norm in this
             // tape. It used to call `block::rmsnorm_fwd` directly — the
@@ -912,7 +1014,7 @@ impl Engine {
                 q8.quant(g, &mut s, &sc.ctx, hq, b);
                 self.mm8(q8, &mut s, &lay.wo, &sc.proj, b);
             } else {
-                s.push(self.mm(&sc.ctx, w(&p("attn.wo.weight")), &sc.proj, b, hq, d));
+                self.mm_into(&mut s, &sc.ctx, w(&p("attn.wo.weight")), &sc.proj, b, hq, d);
             }
             s.push(g.step(ADD2, &[&sc.res[l], &sc.proj, &sc.xmid], &[b * d], b * d));
             s.push(self.rms(&sc.xmid, w(&p("ln2.weight")), &sc.xn2, d, b));
@@ -924,10 +1026,10 @@ impl Engine {
                 q8.quant(g, &mut s, &sc.h, ff, b);
                 self.mm8(q8, &mut s, &lay.down, &sc.mlp_out, b);
             } else {
-                s.push(self.mm(&sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, b, d, ff));
-                s.push(self.mm(&sc.xn2, w(&p("mlp.up.weight")), &sc.up, b, d, ff));
+                self.mm_into(&mut s, &sc.xn2, w(&p("mlp.gate.weight")), &sc.gate_pre, b, d, ff);
+                self.mm_into(&mut s, &sc.xn2, w(&p("mlp.up.weight")), &sc.up, b, d, ff);
                 s.push(block::swiglu_fwd(g, &kids, &sc.gate_pre, &sc.up, &sc.h, b * ff));
-                s.push(self.mm(&sc.h, w(&p("mlp.down.weight")), &sc.mlp_out, b, ff, d));
+                self.mm_into(&mut s, &sc.h, w(&p("mlp.down.weight")), &sc.mlp_out, b, ff, d);
             }
             s.push(g.step(ADD2, &[&sc.xmid, &sc.mlp_out, &sc.res[l + 1]], &[b * d], b * d));
         }
