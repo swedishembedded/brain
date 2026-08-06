@@ -51,11 +51,9 @@ pub use surface::{write_keys, Provider, Surface};
 
 use residency::Executor;
 
-/// The edge concurrency ceiling: at most this many chat/embeddings/image requests
-/// are admitted to the router at once. The overflow is load-shed (503) rather than
-/// queued, so a saturated server sheds fast instead of building unbounded latency.
-/// Well above the executor's lane count — this guards the HTTP edge, not the lanes.
-pub const EDGE_CONCURRENCY: usize = 256;
+/// The edge concurrency ceiling — see `residency::admission`'s doc (shared
+/// with `crates/dbus` so both transports gate identically).
+pub use residency::admission::EDGE_CONCURRENCY;
 
 /// The maximum accepted request-body size (8 MiB). Sized well above the largest
 /// legitimate body (a chat/embeddings request, or a batch of `input` strings) yet
@@ -107,20 +105,9 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// The admission deadline for live servers: `BRAIN_ADMIT_DEADLINE_MS` if set to a
-/// positive integer, else [`DEFAULT_ADMIT_DEADLINE`]. An empty/invalid/zero value
-/// falls back to the default (never an unbounded or zero-length wait).
+/// The admission deadline for live servers — see `residency::admission`'s doc.
 fn admit_deadline_from_env() -> std::time::Duration {
-    parse_admit_deadline(std::env::var("BRAIN_ADMIT_DEADLINE_MS").ok().as_deref())
-}
-
-/// Pure parse of the admit-deadline override: a positive integer of milliseconds, or
-/// [`DEFAULT_ADMIT_DEADLINE`] for any missing/empty/invalid/zero value.
-fn parse_admit_deadline(raw: Option<&str>) -> std::time::Duration {
-    match raw.and_then(|v| v.trim().parse::<u64>().ok()).filter(|&ms| ms > 0) {
-        Some(ms) => std::time::Duration::from_millis(ms),
-        None => DEFAULT_ADMIT_DEADLINE,
-    }
+    residency::admission::admit_deadline_from_env()
 }
 
 /// The shared 404 for any unrouted path, in the surface's dialect.
@@ -213,18 +200,3 @@ fn serve_all_inner(
     })
 }
 
-#[cfg(test)]
-mod deadline_tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[test]
-    fn admit_deadline_override_parses_positive_ms_else_default() {
-        assert_eq!(parse_admit_deadline(Some("500")), Duration::from_millis(500));
-        assert_eq!(parse_admit_deadline(Some("  250 ")), Duration::from_millis(250));
-        assert_eq!(parse_admit_deadline(None), DEFAULT_ADMIT_DEADLINE);
-        assert_eq!(parse_admit_deadline(Some("")), DEFAULT_ADMIT_DEADLINE);
-        assert_eq!(parse_admit_deadline(Some("0")), DEFAULT_ADMIT_DEADLINE);
-        assert_eq!(parse_admit_deadline(Some("nope")), DEFAULT_ADMIT_DEADLINE);
-    }
-}

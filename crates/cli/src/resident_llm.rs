@@ -19,14 +19,14 @@
 //! `BRAIN_QWEN_CTX`, default 2048, sizing Qwen's built context length). Each
 //! `from_env` returns `None` when its primary weights var is unset/empty.
 
-use capability::{ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress};
+use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Manifest, Media, ParamSpec, ParamType, Progress};
 use checkpoint::st::ModelCard;
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
 use serde_json::json;
 
-use data::qwen_chat::{self, ChatEvent, ChatMessage, ChatScanner, Role, ToolCallMsg};
 use data::rng::Rng;
 use data::tokenizer::{CharTokenizer, Tokenizer};
+use qwen::chat::{parse_request, sampling_params, text_outcome, SeqState};
 
 // ---------------------------------------------------------------- shared
 
@@ -38,7 +38,7 @@ fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
         .param(ParamSpec::new("prompt", ParamType::Str, "the prompt to continue (or chat message)"))
         .param(ParamSpec::new("max_new", ParamType::Int, "number of new tokens to generate").default(json!(128)))
         .param(ParamSpec::new("temp", ParamType::Float, "sampling temperature (<= 0 = greedy)").default(json!(0.8)))
-        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (0 = disabled)").default(json!(40)))
+        .param(ParamSpec::new("top_k", ParamType::Int, "top-k filter (40 = standard; 1 = greedy; 0 or negative = disabled)").default(json!(40)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed").default(json!(0)));
     if chat {
         s = s
@@ -57,160 +57,6 @@ fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
             .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block").default(json!(true)));
     }
     s.output(BlobSpec::new("text", Media::Text, "the generated text"))
-}
-
-/// Parse the `messages` param into [`ChatMessage`]s, prepending a leading `system`
-/// turn when one is supplied. Back-compatible with the plain `{"role","content"}`
-/// shape (the whole surface before this milestone); additionally reads, when
-/// present, `reasoning_content` (string), `tool_call_id` (string, meaningful on
-/// `role:"tool"`), and `tool_calls` (an array of `{id,name,arguments}` — the flat
-/// shape `crates/apiserve`'s message-flattening emits — or, tolerated for direct
-/// callers, the nested OpenAI `{id, function:{name,arguments}}` shape; `arguments`
-/// is read as-is if it's already a JSON string, else re-serialized from whatever
-/// JSON value is there).
-fn parse_chat_messages(raw: &str, system: Option<&str>) -> Result<Vec<ChatMessage>, String> {
-    let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("qwen: messages JSON: {e}"))?;
-    let arr = v.as_array().ok_or("qwen: messages must be a JSON array")?;
-    let mut out = Vec::with_capacity(arr.len() + 1);
-    if let Some(s) = system.filter(|s| !s.is_empty()) {
-        out.push(ChatMessage::system(s));
-    }
-    for m in arr {
-        let role_str = m.get("role").and_then(|r| r.as_str()).ok_or("qwen: message.role missing")?;
-        let role = match role_str {
-            "system" => Role::System,
-            "user" => Role::User,
-            "assistant" => Role::Assistant,
-            "tool" => Role::Tool,
-            other => return Err(format!("qwen: unknown message.role {other:?}")),
-        };
-        let content = m.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
-        let reasoning_content = m.get("reasoning_content").and_then(|c| c.as_str()).map(str::to_string);
-        let tool_call_id = m.get("tool_call_id").and_then(|c| c.as_str()).map(str::to_string);
-        let tool_calls = match m.get("tool_calls").and_then(|c| c.as_array()) {
-            Some(calls) => calls.iter().map(parse_tool_call_msg).collect(),
-            None => Vec::new(),
-        };
-        out.push(ChatMessage { role, content, reasoning_content, tool_calls, tool_call_id });
-    }
-    Ok(out)
-}
-
-/// One `tool_calls[]` element (flat `{id,name,arguments}` or nested OpenAI
-/// `{id, function:{name,arguments}}`) into a [`ToolCallMsg`]. `arguments` passes
-/// through unchanged if it's already a JSON string (the exact-bytes contract
-/// [`ToolCallMsg::arguments`] documents); any other JSON value is re-serialized to
-/// text via `serde_json` — acceptable here since this is deserialize-then-reserialize
-/// bookkeeping, not the byte-exact rendering path (see `qwen_chat`'s module docs).
-fn parse_tool_call_msg(c: &serde_json::Value) -> ToolCallMsg {
-    let id = c.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-    let name = c
-        .get("name")
-        .and_then(|v| v.as_str())
-        .or_else(|| c.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()))
-        .unwrap_or_default()
-        .to_string();
-    let args = c.get("arguments").or_else(|| c.get("function").and_then(|f| f.get("arguments")));
-    let arguments = match args {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(other) => serde_json::to_string(other).unwrap_or_default(),
-        None => "{}".to_string(),
-    };
-    ToolCallMsg { id, name, arguments }
-}
-
-/// Parse the `tools` param (a JSON array of OpenAI-shaped tool-schema objects) into
-/// one raw JSON text per tool. Re-serializes each element via plain `serde_json`
-/// (NOT `qwen_chat`'s Python-`json.dumps`-exact `json_py`, which is crate-private to
-/// `brain-data`) — exact byte-for-byte matching only matters inside the prompt
-/// renderer itself, which re-normalizes every tool's text through its own
-/// `json_py::dumps` when it emits the `<tools>` block (see `qwen_chat::render`).
-fn parse_tools(raw: Option<&str>) -> Result<Vec<String>, String> {
-    let Some(raw) = raw.filter(|s| !s.is_empty()) else { return Ok(Vec::new()) };
-    let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("qwen: tools JSON: {e}"))?;
-    let arr = v.as_array().ok_or("qwen: tools must be a JSON array")?;
-    arr.iter().map(|t| serde_json::to_string(t).map_err(|e| format!("qwen: tools JSON: {e}"))).collect()
-}
-
-/// Forward a batch of [`ChatEvent`]s from the [`ChatScanner`] as [`Progress`]
-/// ticks: visible [`ChatEvent::Content`] becomes [`Progress::token`] (exactly what
-/// a no-tools request already streamed); reasoning/tool-call events become
-/// [`Progress::event`] with a neutral, consistently-shaped JSON payload —
-/// `{"kind":"reasoning","text":...}`, `{"kind":"tool_call_start","index":N,
-/// "id":"call_N","name":...}`, `{"kind":"tool_call_args","index":N,"text":...}`,
-/// `{"kind":"tool_call_end","index":N}`. The `id` mints as `call_<index>`,
-/// matching [`ChatScanner::tool_calls`]'s own id convention (see
-/// `qwen_chat::ChatScanner::close_call`) so a streamed id and the final
-/// non-streaming `tool_calls` id always agree.
-fn emit_chat_events(events: &[ChatEvent], progress: &mut dyn FnMut(Progress), step: u32, total: u32) {
-    for ev in events {
-        match ev {
-            ChatEvent::Content(text) => {
-                if !text.is_empty() {
-                    progress(Progress::token(step, total, text.clone()));
-                }
-            }
-            ChatEvent::Reasoning(text) => {
-                progress(Progress::event(step, total, json!({ "kind": "reasoning", "text": text })));
-            }
-            ChatEvent::ToolCallStart { index, name } => {
-                progress(Progress::event(
-                    step,
-                    total,
-                    json!({ "kind": "tool_call_start", "index": index, "id": format!("call_{index}"), "name": name }),
-                ));
-            }
-            ChatEvent::ToolCallArgs { index, fragment } => {
-                progress(Progress::event(step, total, json!({ "kind": "tool_call_args", "index": index, "text": fragment })));
-            }
-            ChatEvent::ToolCallEnd { index } => {
-                progress(Progress::event(step, total, json!({ "kind": "tool_call_end", "index": index })));
-            }
-        }
-    }
-}
-
-/// Parse the `stop` param (a JSON array of strings) into non-empty stop strings.
-fn parse_stops(raw: Option<&str>) -> Result<Vec<String>, String> {
-    let Some(raw) = raw.filter(|s| !s.is_empty()) else { return Ok(Vec::new()) };
-    let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("qwen: stop JSON: {e}"))?;
-    let arr = v.as_array().ok_or("qwen: stop must be a JSON array")?;
-    Ok(arr.iter().filter_map(|s| s.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
-}
-
-/// Split the freshly-decoded `full` text into the fragment safe to emit now and
-/// the new "printed" prefix, holding back a trailing replacement char (an
-/// incomplete multi-byte UTF-8 sequence awaiting the next token). `full` always
-/// extends `printed`, so concatenating every emitted fragment — plus a final
-/// flush of any held-back tail — reproduces `full` byte-for-byte.
-fn stream_delta(printed: &str, full: &str) -> (String, String) {
-    let safe = full.strip_suffix('\u{FFFD}').unwrap_or(full);
-    let delta = safe.get(printed.len()..).unwrap_or("").to_string();
-    (delta, safe.to_string())
-}
-
-/// If `text` ends with any stop string, the byte index where the earliest such
-/// match begins (so `text[..idx]` is the truncated output); else `None`.
-fn find_stop(text: &str, stops: &[String]) -> Option<usize> {
-    stops
-        .iter()
-        .filter(|s| text.ends_with(s.as_str()))
-        .map(|s| text.len() - s.len())
-        .min()
-}
-
-/// Read the four shared sampling params (with the spec defaults).
-fn sampling_params(inv: &Invocation) -> (usize, f32, usize, u64) {
-    let max_new = inv.get_i64("max_new").unwrap_or(128).max(0) as usize;
-    let temp = inv.get_f64("temp").unwrap_or(0.8) as f32;
-    let top_k = inv.get_i64("top_k").unwrap_or(40).max(0) as usize;
-    let seed = inv.get_i64("seed").unwrap_or(0).max(0) as u64;
-    (max_new, temp, top_k, seed)
-}
-
-/// Wrap generated text as a text-output [`Outcome`] (`text` value + `text` blob).
-fn text_outcome(text: String) -> Outcome {
-    Outcome::new().set("text", json!(text)).blob("text", Blob::new(Media::Text, text.into_bytes()))
 }
 
 /// Estimate the Hot VRAM footprint of a checkpoint as ~1.3x its file size.
@@ -406,6 +252,14 @@ impl QwenResident {
     fn ctx() -> u32 {
         std::env::var("BRAIN_QWEN_CTX").ok().and_then(|s| s.parse().ok()).unwrap_or(2048u32).max(1)
     }
+
+    /// Concurrent decode slots for the batched (paged-KV) serving path.
+    /// `BRAIN_QWEN_MAX_BATCH` overrides; the default favors real concurrency
+    /// over a huge per-slot context, matching `perf_cli.rs::pool_for`'s
+    /// "size so admission, not allocation failure, limits concurrency".
+    fn max_batch() -> u32 {
+        std::env::var("BRAIN_QWEN_MAX_BATCH").ok().and_then(|s| s.parse().ok()).unwrap_or(16u32).max(1)
+    }
 }
 
 impl ResidentModel for QwenResident {
@@ -434,268 +288,371 @@ impl ResidentModel for QwenResident {
         };
         let eos = tok.encode("<|im_end|>").first().copied();
         let ctx = Self::ctx();
-        let model = on_device(device, || -> Result<qwen::model::Qwen, String> {
-            match &self.adapter {
-                // Decode-only KV-cache load (see `Qwen::from_reader_decode`'s doc
-                // comment): this instance only ever drives `generate_kv_stream`
-                // (incremental `step`/`prefill`), never the batched forward
-                // `from_reader_inference` sizes buffers for.
-                None => Ok(qwen::model::Qwen::from_reader_decode(&reader, ctx)),
+        // `qwen::serve::Engine` (the paged, continuous-batching serving engine --
+        // see this plan's W2/W3/W5) reads checkpoints via `checkpoint::load`,
+        // which is SAFETENSORS-ONLY (`checkpoint::parse` -> `st::parse_safetensors`).
+        // A `.gguf` checkpoint therefore cannot build an `Engine` today -- this is
+        // a real, pre-existing gap (not introduced here), so `.gguf` keeps the
+        // original single-sequence decode-only path rather than silently losing
+        // GGUF support. Everything else (the common case: a `.brain.safetensors`
+        // checkpoint, with or without a named LoRA adapter) gets the batched engine.
+        let is_gguf = self.path.to_ascii_lowercase().ends_with(".gguf");
+        let engine = on_device(device, || -> Result<QwenEngineKind, String> {
+            if is_gguf {
+                let model = qwen::model::Qwen::from_reader_decode(&reader, ctx);
+                // Read the (tied-embedding) LM head ONCE here, not per request:
+                // the fix `generate_kv_stream_with_head`'s doc comment asks for
+                // (594 MiB device->host re-read at real vocab/d_model, otherwise
+                // paid on every single chat request --
+                // `.todo/serving-performance-audit.md`).
+                let head = model.read_weight(model.cfg.head_weight());
+                return Ok(QwenEngineKind::Legacy { model, head });
+            }
+            let block_size = 16u32;
+            let max_batch = QwenResident::max_batch();
+            let max_blocks_per_seq = ctx.div_ceil(block_size);
+            let num_blocks = max_blocks_per_seq * max_batch + max_batch; // headroom for prefix reuse
+            let max_prefill = ctx.min(2048);
+            let eng = match &self.adapter {
+                None => qwen::serve::Engine::load(&self.path, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, false, false),
                 // Fold the adapter's delta into the base tensors first (the same
                 // fold `qwen::eval::score_chat` uses to score one) -- the result
-                // is an ordinary frozen decode-only model, zero extra inference
-                // cost versus the base once folded.
+                // is an ordinary frozen base, zero extra inference cost versus
+                // the base once folded.
                 Some(a) => {
                     let mut tensors = checkpoint::load(&self.path).by_role("");
                     let mut cfg = qwen::config::QwenConfig::from_json(&reader.config());
                     qwen::lora::fold_adapter_into(&mut tensors, a).map_err(|e| format!("qwen: folding adapter {a}: {e}"))?;
                     cfg.lora = None;
-                    Ok(qwen::model::Qwen::from_tensors_decode(cfg, &tensors, ctx))
+                    qwen::serve::Engine::from_map(cfg, &tensors, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, false, false)
                 }
-            }
+            };
+            Ok(QwenEngineKind::Batched(model::serve::Scheduler::new(eng, max_batch as usize)))
         })??;
-        Ok(Box::new(QwenInstance { model, tok, eos }))
+        Ok(Box::new(QwenInstance { tok, eos, engine }))
     }
+}
+
+/// Which serving path this instance drives — see [`QwenResident::activate`]'s
+/// `.gguf` note for why both still exist.
+enum QwenEngineKind {
+    /// The original single-sequence KV-cache decode path (`Qwen::
+    /// from_reader_decode` + `generate_kv_stream_with_head`) -- GGUF only.
+    Legacy { model: qwen::model::Qwen, head: Vec<f32> },
+    /// The paged, continuous-batching serving engine (this plan's W2/W3) --
+    /// every safetensors checkpoint, the common case.
+    Batched(model::serve::Scheduler<qwen::serve::Engine>),
 }
 
 struct QwenInstance {
-    model: qwen::model::Qwen,
     tok: data::qwen_tokenizer::QwenBpe,
     eos: Option<u32>,
+    engine: QwenEngineKind,
 }
 
 impl Instance for QwenInstance {
-    fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let (max_new, temp, top_k, seed) = sampling_params(inv);
-        let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
-        let enable_thinking = inv.get_bool("enable_thinking").unwrap_or(true);
-        let tools = parse_tools(inv.get_str("tools").as_deref())?;
-        // Build the prompt text via the byte-exact Jinja renderer (`qwen_chat`, not
-        // the older plain-string `QwenBpe::apply_chat_template` — see that module's
-        // doc comment on why they coexist): `messages` (chat template, tool-calling
-        // and reasoning-aware) wins; else the legacy single-`prompt` (+ `chat`) path,
-        // wrapped as a one-turn user message so it goes through the SAME renderer.
-        let text = match inv.get_str("messages").filter(|s| !s.is_empty()) {
-            Some(raw) => {
-                let msgs = parse_chat_messages(&raw, inv.get_str("system").as_deref())?;
-                qwen_chat::render_for_generation(&msgs, &tools, enable_thinking)?
-            }
-            None => {
-                let prompt = inv.get_str("prompt").unwrap_or_default();
-                if inv.get_bool("chat").unwrap_or(true) {
-                    let msgs = [ChatMessage::user(prompt)];
-                    qwen_chat::render_for_generation(&msgs, &tools, enable_thinking)?
-                } else {
-                    prompt
-                }
-            }
-        };
-        let ids = self.tok.encode(&text);
-        if ids.is_empty() {
-            return Err("qwen: empty prompt".to_string());
-        }
-        let stops = parse_stops(inv.get_str("stop").as_deref())?;
-
-        let mut rng = Rng::new(seed);
-        let total = max_new as u32;
-        progress(Progress::step(0, total, "generating"));
-
-        // `generate_kv_stream` wants a stop-id SET, not an `Option`.
-        let eos_arr: [u32; 1];
-        let eos_slice: &[u32] = match self.eos {
-            Some(e) => {
-                eos_arr = [e];
-                &eos_arr
-            }
-            None => &[],
-        };
-
-        // Stream: decode each accepted token to its human-visible delta, run it
-        // through the chat scanner (splitting `<think>`/`<tool_call>` markup out of
-        // the raw text) so visible content, reasoning, and tool calls each stream as
-        // their own event kind, honour stop-strings and cancellation, and track
-        // usage.
-        let tok = &self.tok;
-        let cancel = inv.cancel.clone();
-        let mut ids_out: Vec<u32> = Vec::with_capacity(max_new);
-        let mut printed = String::new();
-        let mut stop_at: Option<usize> = None;
-        let mut cancelled = false;
-        // `thinking_open=false`: the model must emit its own literal `<think>` tag
-        // to think (no prefilled-open-think prefix on this path).
-        let mut scan = ChatScanner::new(false);
-        let mut evs: Vec<ChatEvent> = Vec::new();
-        let gen = qwen::sample::generate_kv_stream(
-            &self.model,
-            &ids,
-            max_new,
-            temp,
-            top_k,
-            top_p,
-            eos_slice,
-            &mut rng,
-            &mut |i, t| {
-                ids_out.push(t);
-                let full = tok.decode(&ids_out);
-                let (delta, new_printed) = stream_delta(&printed, &full);
-                printed = new_printed;
-                if !delta.is_empty() {
-                    evs.clear();
-                    scan.push(&delta, &mut evs);
-                    emit_chat_events(&evs, progress, i as u32 + 1, total);
-                }
-                if let Some(idx) = find_stop(&printed, &stops) {
-                    stop_at = Some(idx);
-                    return false;
-                }
-                if cancel.is_cancelled() {
-                    cancelled = true;
-                    return false;
-                }
-                true
-            },
-        );
-
-        // Final text + finish reason. A stop-string truncates the visible RAW text
-        // (existing behavior, kept as-is — a stop-string cutting mid-generation
-        // takes precedence over any in-flight tool call, which is left unclosed and
-        // unreported). A clean end flushes any held-back multi-byte tail through the
-        // scanner, then [`ChatScanner::finish`] closes out a still-open tool call
-        // (truncated by `max_new`) rather than silently dropping it.
-        let (text, finish) = if let Some(idx) = stop_at {
-            (printed[..idx].to_string(), "stop_sequence")
-        } else {
-            let full = self.tok.decode(&ids_out);
-            if full.len() > printed.len() {
-                let tail = full[printed.len()..].to_string();
-                evs.clear();
-                scan.push(&tail, &mut evs);
-                emit_chat_events(&evs, progress, ids_out.len() as u32, total);
-            }
-            evs.clear();
-            scan.finish(&mut evs);
-            emit_chat_events(&evs, progress, ids_out.len() as u32, total);
-            let reason = if !scan.tool_calls().is_empty() {
-                "tool_calls"
-            } else if cancelled {
-                "stop"
-            } else if gen.len() >= max_new {
-                "length"
-            } else {
-                "stop" // eos
-            };
-            (scan.content().to_string(), reason)
-        };
-        progress(Progress::step(total, total, "done"));
-
-        let mut out = text_outcome(text);
-        out = out
-            .set("prompt_tokens", json!(ids.len() as i64))
-            .set("completion_tokens", json!(gen.len() as i64))
-            .set("finish_reason", json!(finish))
-            .set("reasoning_content", json!(scan.reasoning()));
-        if !scan.tool_calls().is_empty() {
-            let calls: Vec<serde_json::Value> =
-                scan.tool_calls().iter().map(|c| json!({ "id": c.id, "name": c.name, "arguments": c.arguments })).collect();
-            out = out.set("tool_calls", json!(serde_json::to_string(&calls).unwrap_or_else(|_| "[]".to_string())));
-        }
-        Ok(out)
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        self.run_batch(action, std::slice::from_ref(inv), &mut |_i, p| progress(p)).pop().unwrap()
     }
+
+    /// `Legacy` (GGUF): the original sequential loop, one full generation per
+    /// invocation, unchanged from before this rewiring.
+    ///
+    /// `Batched`: every invocation in `invs` is submitted into the SAME
+    /// persistent `Scheduler` (built once at `activate`, so the paged KV pool
+    /// and prefix cache are shared and reused across calls, not rebuilt) and
+    /// driven to completion together — real continuous batching for
+    /// whatever the dispatcher grouped into this one call (see
+    /// `.todo/continuous-batching-executor-seam.md` for admitting MORE work
+    /// into an ALREADY-running call, which this does not yet do).
+    fn run_batch(&mut self, _action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        match &mut self.engine {
+            QwenEngineKind::Legacy { model, head } => invs
+                .iter()
+                .enumerate()
+                .map(|(i, inv)| run_one_legacy(model, head, &self.tok, self.eos, inv, &mut |p| progress(i, p)))
+                .collect(),
+            QwenEngineKind::Batched(sched) => run_batch_scheduled(sched, &self.tok, self.eos, invs, progress),
+        }
+    }
+
+    /// `Batched`'s prefix-cache effectiveness, surfaced through
+    /// `Executor::stats().metrics` — reachable from HTTP/D-Bus for the first
+    /// time (previously only observable from `brain perf`'s in-process
+    /// `PagedLlmTarget`, which bypasses the served path entirely). `Legacy`
+    /// (GGUF) has no prefix cache, so it reports nothing extra.
+    fn metrics(&self) -> Vec<(String, serde_json::Value)> {
+        match &self.engine {
+            QwenEngineKind::Legacy { .. } => Vec::new(),
+            QwenEngineKind::Batched(sched) => {
+                let (hit, looked, cached) = sched.prefix_stats();
+                let rate = if looked > 0 { hit as f64 / looked as f64 } else { 0.0 };
+                vec![
+                    ("kv_prefix_hit_rate".to_string(), serde_json::json!(rate)),
+                    ("kv_prefix_hit_tokens".to_string(), serde_json::json!(hit)),
+                    ("kv_prefix_lookup_tokens".to_string(), serde_json::json!(looked)),
+                    ("kv_prefix_cached_blocks".to_string(), serde_json::json!(cached)),
+                ]
+            }
+        }
+    }
+}
+
+/// One full generation on the legacy single-sequence decode path — the exact
+/// logic `QwenInstance::run` had before this rewiring, extracted so
+/// `run_batch`'s sequential loop and the (unlikely, but possible) direct
+/// `run` call share one implementation.
+fn run_one_legacy(
+    model: &qwen::model::Qwen,
+    head: &[f32],
+    tok: &data::qwen_tokenizer::QwenBpe,
+    eos: Option<u32>,
+    inv: &Invocation,
+    progress: &mut dyn FnMut(Progress),
+) -> ActionResult {
+    let req = parse_request(tok, inv)?;
+    let mut rng = Rng::new(req.seed);
+    let total = req.max_new as u32;
+    progress(Progress::step(0, total, "generating"));
+
+    // `generate_kv_stream_with_head` wants a stop-id SET, not an `Option`.
+    let eos_arr: [u32; 1];
+    let eos_slice: &[u32] = match eos {
+        Some(e) => {
+            eos_arr = [e];
+            &eos_arr
+        }
+        None => &[],
+    };
+
+    let mut seq = SeqState::new(&req, inv.cancel.clone());
+    let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new);
+    let gen = qwen::sample::generate_kv_stream_with_head(model, &req.ids, req.max_new, req.temp, req.top_k, req.top_p, eos_slice, &mut rng, head, &mut |_i, t| {
+        ids_out.push(t);
+        !seq.advance(tok, &ids_out, progress)
+    });
+
+    Ok(seq.finish(tok, &gen, progress))
+}
+
+/// Drive every invocation in `invs` to completion on the SAME persistent
+/// `Scheduler` — see [`QwenInstance::run_batch`]'s doc.
+fn run_batch_scheduled(
+    sched: &mut model::serve::Scheduler<qwen::serve::Engine>,
+    tok: &data::qwen_tokenizer::QwenBpe,
+    eos: Option<u32>,
+    invs: &[Invocation],
+    progress: &mut dyn FnMut(usize, Progress),
+) -> Vec<ActionResult> {
+    let mut results: Vec<Option<ActionResult>> = vec![None; invs.len()];
+    let mut seq_for_bi: Vec<Option<SeqState>> = Vec::with_capacity(invs.len());
+    let mut id_for_bi: Vec<Option<u64>> = Vec::with_capacity(invs.len());
+
+    for (bi, inv) in invs.iter().enumerate() {
+        match parse_request(tok, inv) {
+            Ok(req) => {
+                let sample = model::serve::SampleParams { temp: req.temp, top_k: req.top_k, top_p: req.top_p };
+                let seed = req.seed;
+                let max_new = req.max_new;
+                let seq = SeqState::new(&req, inv.cancel.clone());
+                let id = sched.submit_sampled(model::serve::Request { prompt: req.ids, max_new, eos }, sample, seed);
+                progress(bi, Progress::step(0, max_new as u32, "generating"));
+                seq_for_bi.push(Some(seq));
+                id_for_bi.push(Some(id));
+            }
+            Err(e) => {
+                results[bi] = Some(Err(e));
+                seq_for_bi.push(None);
+                id_for_bi.push(None);
+            }
+        }
+    }
+
+    let mut remaining: std::collections::HashSet<usize> = (0..invs.len()).filter(|&bi| id_for_bi[bi].is_some()).collect();
+    while !remaining.is_empty() {
+        // Stream each still-open sequence's newly generated suffix and check
+        // its stop-string/cancellation; a triggered sequence is cancelled
+        // (and finalised) immediately rather than waiting for the scheduler
+        // to reap it naturally — `Scheduler::cancel` returns its tokens so
+        // far synchronously and reclaims its blocks right away.
+        let mut just_finished = Vec::new();
+        for &bi in &remaining {
+            let id = id_for_bi[bi].unwrap();
+            let Some(all_tokens) = sched.tokens_of(id) else { continue };
+            let seq = seq_for_bi[bi].as_mut().unwrap();
+            if seq.advance(tok, all_tokens, &mut |p| progress(bi, p)) {
+                let toks = sched.cancel(id).unwrap_or_default();
+                let seq = seq_for_bi[bi].take().unwrap();
+                results[bi] = Some(Ok(seq.finish(tok, &toks, &mut |p| progress(bi, p))));
+                just_finished.push(bi);
+            }
+        }
+        for bi in just_finished {
+            remaining.remove(&bi);
+        }
+        if remaining.is_empty() {
+            break;
+        }
+        let report = sched.step_report();
+        // A request the scheduler refuses at admission (a prompt token
+        // outside its vocabulary, or one that can never fit its per-sequence
+        // capacity — see `model::serve::RejectReason`) never appears in
+        // `completed` and never will; without handling it here its `bi`
+        // would stay in `remaining` forever, spinning this loop on an
+        // otherwise-empty scheduler.
+        for (id, reason) in report.rejected {
+            let bi = id_for_bi.iter().position(|x| *x == Some(id)).expect("rejected id must belong to this batch");
+            seq_for_bi[bi] = None;
+            results[bi] = Some(Err(format!("qwen: {reason}")));
+            remaining.remove(&bi);
+        }
+        for (id, toks) in report.completed {
+            let bi = id_for_bi.iter().position(|x| *x == Some(id)).expect("completed id must belong to this batch");
+            if let Some(seq) = seq_for_bi[bi].take() {
+                results[bi] = Some(Ok(seq.finish(tok, &toks, &mut |p| progress(bi, p))));
+            }
+            remaining.remove(&bi);
+        }
+    }
+    results.into_iter().map(|r| r.expect("every batch index resolved")).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn messages_parse_with_and_without_system() {
-        let raw = r#"[{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]"#;
-        let m = parse_chat_messages(raw, None).unwrap();
-        assert_eq!(m.len(), 2);
-        assert_eq!((m[0].role, m[0].content.as_str()), (Role::User, "hi"));
-        assert_eq!((m[1].role, m[1].content.as_str()), (Role::Assistant, "yo"));
-        let m = parse_chat_messages(raw, Some("be terse")).unwrap();
-        assert_eq!((m[0].role, m[0].content.as_str()), (Role::System, "be terse"));
-        assert_eq!(m.len(), 3);
-        // an empty system turn is dropped; malformed JSON is a clean error.
-        assert_eq!(parse_chat_messages(raw, Some("")).unwrap().len(), 2);
-        assert!(parse_chat_messages("not json", None).is_err());
-        assert!(parse_chat_messages("{}", None).is_err());
+    /// Build a tiny (fast-CPU-testable) but REAL safetensors checkpoint whose
+    /// vocab covers the real tokenizer's full range (so chat-template special
+    /// tokens like `<|im_start|>` never index outside the embedding table —
+    /// same reasoning as `rejected_admission_resolves_promptly_instead_of_hanging`),
+    /// and write it to a scratch dir. Returns the checkpoint path.
+    fn write_tiny_checkpoint(seed: u64, tag: &str) -> std::path::PathBuf {
+        let cfg = qwen::config::QwenConfig { vocab: 151936, ..qwen::config::QwenConfig::tiny() };
+        let init = qwen::init_weights(&cfg, seed);
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
+            .param_list()
+            .into_iter()
+            .map(|(name, n)| {
+                let v = init.get(&name).unwrap_or_else(|| panic!("init missing {name}")).clone();
+                (name, vec![n as u64], v)
+            })
+            .collect();
+        let dir = std::env::temp_dir().join(format!("qwen-resident-http-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tiny.safetensors");
+        checkpoint::save(path.to_str().unwrap(), cfg.to_json(), &tensors);
+        path
     }
 
-    /// Back-compat + the new fields: `reasoning_content`, `tool_calls` (both the
-    /// flat `{id,name,arguments}` shape and the nested OpenAI `{id,function:{...}}`
-    /// shape), and `tool_call_id` all round-trip onto the parsed [`ChatMessage`].
+    /// REGRESSION for `.todo/serving-performance-audit.md`'s "no prefix/KV-
+    /// cache reuse across HTTP requests" finding, at the layer that had never
+    /// been observable before this workstream: through the real HTTP router.
+    /// `qwen::serve::Engine`'s `PrefixCache` was already gated in isolation
+    /// (`serve.rs::random_shared_prefixes_stay_exact`) but nothing surfaced
+    /// its hit rate through a served request until `Instance::metrics` +
+    /// `Executor::stats().metrics` (this pass) gave it a path out.
+    ///
+    /// Two chat requests share a long system prompt (differing only in the
+    /// short user turn) submitted SEQUENTIALLY against the SAME resident
+    /// (`QwenResident` persists its `Scheduler`/KV pool/prefix cache across
+    /// `activate` — see that method's doc), so the second's prefill should
+    /// find the first's system-prompt blocks already cached.
+    ///
+    /// Needs a real tokenizer (`QWEN_TOKENIZER=/path/to/tokenizer.json`) --
+    /// self-skips loudly when unset, per `docs/testing.md`.
     #[test]
-    fn messages_parse_reads_reasoning_and_tool_calls() {
-        let raw = r#"[
-            {"role":"user","content":"weather?"},
-            {"role":"assistant","content":"","reasoning_content":"thinking",
-             "tool_calls":[{"id":"call_0","name":"get_weather","arguments":"{\"c\":\"Paris\"}"}]},
-            {"role":"tool","content":"22C","tool_call_id":"call_0"},
-            {"role":"assistant","content":"","tool_calls":[{"id":"call_1","function":{"name":"f","arguments":{"x":1}}}]}
-        ]"#;
-        let m = parse_chat_messages(raw, None).unwrap();
-        assert_eq!(m.len(), 4);
-        assert_eq!(m[1].reasoning_content.as_deref(), Some("thinking"));
-        assert_eq!(m[1].tool_calls.len(), 1);
-        assert_eq!(m[1].tool_calls[0].name, "get_weather");
-        assert_eq!(m[1].tool_calls[0].arguments, r#"{"c":"Paris"}"#);
-        assert_eq!(m[2].role, Role::Tool);
-        assert_eq!(m[2].tool_call_id.as_deref(), Some("call_0"));
-        // nested OpenAI shape with a JSON object `arguments` re-serializes to text.
-        assert_eq!(m[3].tool_calls[0].name, "f");
-        let args: serde_json::Value = serde_json::from_str(&m[3].tool_calls[0].arguments).unwrap();
-        assert_eq!(args["x"], 1);
+    fn prefix_cache_hit_rate_is_observable_through_the_real_http_router() {
+        let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {
+            eprintln!("SKIP: set QWEN_TOKENIZER to a real tokenizer.json to run this test");
+            return;
+        };
+        let path = write_tiny_checkpoint(5, "prefix");
+
+        let card = checkpoint::st::ModelCard::new("brain/qwen", "qwen");
+        let resident = QwenResident::from_card(path.to_str().unwrap(), &card, Some(&tok_path), None);
+        let models: Vec<std::sync::Arc<dyn ResidentModel>> = vec![std::sync::Arc::new(resident)];
+        let mut budgets = residency::budget::Budgets::new();
+        budgets.set(Device::Cpu, 8 << 30, 0);
+        let exec = residency::Executor::start(models, budgets, residency::scheduler::Policy::default());
+
+        let key = "sk-brain-test-key".to_string();
+        let state = apiserve::AppState::new(exec.clone(), key.clone(), apiserve::Provider::OpenAI);
+        let app = apiserve::router(state);
+
+        // A long, shared system prompt (many tokens) is the exact shape the
+        // audit named: a real agent's system prompt + tool-schema block,
+        // repeated across turns while only the user turn changes.
+        let system: String = (0..200).map(|i| format!("rule {i}: always answer politely. ")).collect();
+        let post = |user: &str| {
+            let body = serde_json::json!({
+                "model": "brain/qwen",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "max_tokens": 4,
+                "temperature": 0,
+            });
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/v1/chat/completions")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            use tower::ServiceExt;
+            let r1 = app.clone().oneshot(post("first turn")).await.unwrap();
+            assert_eq!(r1.status(), axum::http::StatusCode::OK, "first request must succeed");
+            let r2 = app.clone().oneshot(post("second turn")).await.unwrap();
+            assert_eq!(r2.status(), axum::http::StatusCode::OK, "second (prefix-sharing) request must succeed");
+        });
+
+        let key = InstanceKey::new("brain/qwen", "default");
+        let stats = exec.stats();
+        let m = stats.metrics.get(&key).unwrap_or_else(|| panic!("no metrics for {key:?}; stats={stats:?}"));
+        let rate = m.iter().find(|(k, _)| k == "kv_prefix_hit_rate").map(|(_, v)| v.as_f64().unwrap_or(0.0)).unwrap_or(0.0);
+        assert!(rate > 0.0, "second request must hit the first's cached system-prompt prefix; metrics={m:?}");
     }
 
+    /// REGRESSION: `run_batch_scheduled` must resolve EVERY batch index,
+    /// including one the scheduler REJECTS at admission (`model::serve::
+    /// RejectReason`) rather than completes. Before this test's fix, a
+    /// rejected sequence's `bi` was never removed from the pending set —
+    /// `report.rejected` was silently ignored — so `run_batch_scheduled`
+    /// spun forever calling `step_report()` on an otherwise-empty scheduler.
+    /// Reproduced live: `http:qwen-synth:<small vocab>` against a REAL
+    /// tokenizer whose chat-template special tokens exceed the synth
+    /// model's vocab hung indefinitely until this fix landed.
+    ///
+    /// Needs a real tokenizer (`QWEN_TOKENIZER=/path/to/tokenizer.json`) --
+    /// self-skips loudly when unset, per `docs/testing.md`.
     #[test]
-    fn tools_parse_json_array_to_per_tool_text() {
-        assert_eq!(parse_tools(None).unwrap(), Vec::<String>::new());
-        assert_eq!(parse_tools(Some("")).unwrap(), Vec::<String>::new());
-        let raw = r#"[{"type":"function","function":{"name":"a"}},{"type":"function","function":{"name":"b"}}]"#;
-        let tools = parse_tools(Some(raw)).unwrap();
-        assert_eq!(tools.len(), 2);
-        assert!(tools[0].contains("\"a\""));
-        assert!(tools[1].contains("\"b\""));
-        assert!(parse_tools(Some("not json")).is_err());
-        assert!(parse_tools(Some("{}")).is_err());
-    }
+    fn rejected_admission_resolves_promptly_instead_of_hanging() {
+        let Ok(tok_path) = std::env::var("QWEN_TOKENIZER") else {
+            eprintln!("SKIP: set QWEN_TOKENIZER to a real tokenizer.json to run this test");
+            return;
+        };
+        let tok = data::qwen_tokenizer::QwenBpe::from_file(&tok_path).expect("load tokenizer");
 
-    #[test]
-    fn stops_parse_and_match() {
-        assert_eq!(parse_stops(None).unwrap(), Vec::<String>::new());
-        assert_eq!(parse_stops(Some(r#"["\n\n","END"]"#)).unwrap(), vec!["\n\n".to_string(), "END".to_string()]);
-        assert!(parse_stops(Some("nope")).is_err());
-        let stops = vec!["END".to_string(), "STOP".to_string()];
-        assert_eq!(find_stop("all done END", &stops), Some(9));
-        assert_eq!(find_stop("mid END dle", &stops), None); // only a trailing match
-        assert_eq!(find_stop("nothing here", &stops), None);
-        // earliest boundary wins when stops overlap at the tail.
-        let overlap = vec!["done".to_string(), "all done".to_string()];
-        assert_eq!(find_stop("all done", &overlap), Some(0));
-    }
+        // A deliberately tiny vocab: real chat-template special tokens
+        // (`<|im_start|>` etc.) encode to ids from the REAL tokenizer's full
+        // (~151936) vocabulary, so a `chat: true` render is certain to
+        // include at least one id outside this vocab -- the exact class
+        // this test guards.
+        let cfg = qwen::config::QwenConfig { vocab: 64, ..qwen::config::QwenConfig::tiny() };
+        let weights = qwen::init_weights(&cfg, 3);
+        let eng = qwen::serve::Engine::from_map(cfg, &weights, 8, 16, 4, 4, 16, false, false);
+        let mut sched = model::serve::Scheduler::new(eng, 4);
 
-    /// The delta bookkeeping used by `run`: concatenated per-token deltas (plus a
-    /// final flush of a held-back tail) must reproduce the full decoded text —
-    /// even when a multi-byte char is split across two tokens (transient U+FFFD).
-    #[test]
-    fn stream_deltas_reconstruct_full_text() {
-        // Simulated per-step `decode(ids_out)` outputs, incl. a split euro sign.
-        let steps = ["Hi", "Hi\u{FFFD}", "Hi€", "Hi€!"];
-        let mut printed = String::new();
-        let mut concat = String::new();
-        for full in steps {
-            let (delta, np) = stream_delta(&printed, full);
-            concat.push_str(&delta);
-            printed = np;
-        }
-        let full = *steps.last().unwrap();
-        if full.len() > printed.len() {
-            concat.push_str(&full[printed.len()..]); // final flush
-        }
-        assert_eq!(concat, "Hi€!");
-        // No replacement char ever escapes into an emitted fragment.
-        assert!(!concat.contains('\u{FFFD}'));
+        let inv = Invocation::new().set("prompt", json!("hello")).set("chat", json!(true)).set("max_new", json!(4));
+        let start = std::time::Instant::now();
+        let results = run_batch_scheduled(&mut sched, &tok, None, std::slice::from_ref(&inv), &mut |_i, _p| {});
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "rejected admission must resolve promptly, not hang");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err(), "an out-of-vocab prompt must be reported as an error, not silently dropped");
     }
 }

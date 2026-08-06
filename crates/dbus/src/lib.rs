@@ -3,17 +3,22 @@
 
 //! Optional D-Bus control surface for brain.
 //!
-//! Exposes the synchronous [`capability::Registry`] over the bus name
+//! Exposes the shared [`residency::Executor`] over the bus name
 //! `com.swedishembedded.Brain1`, so local Linux apps can discover models, run
 //! actions, and exchange images/streams/results as **file descriptors**
 //! (memfd/mmap, and dmabuf where available) instead of bytes over D-Bus.
+//! Every method only validates + translates: it builds a `capability::
+//! Invocation` from the params + in_fds, arms a `CancelToken`, submits a
+//! `residency::Job`, and returns the outcome fds — the SAME executor
+//! `crates/apiserve`'s HTTP surfaces submit to, so scheduling/residency/
+//! batching stay uniform across both.
 //!
 //! Layering (kept deliberately thin — no model code here):
 //! - [`fd`] — memfd/mmap FD transport.
-//! - `worker` — a dedicated thread that owns the `Registry` and runs the blocking
-//!   inference off the async/D-Bus threads.
-//! - `service` — the zbus `Manager` interface (validate → enqueue → reply).
-//! - [`serve`] — wires a Tokio runtime + the worker + a zbus connection together.
+//! - [`service`] — the zbus `Manager` interface (validate → build an
+//!   `Invocation` → submit a `residency::Job` → reply/stream frames).
+//! - [`stream`] — the `Subscribe`/`StreamTranscribe` SEQPACKET frame protocol.
+//! - `serve` — wires a Tokio runtime + a zbus connection + the executor together.
 
 pub mod fd;
 pub mod service;

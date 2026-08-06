@@ -114,6 +114,20 @@ pub struct Stats {
     pub queue_peak: usize,
     /// Deepest observed number of lanes running at once (device-level parallelism).
     pub max_parallel: usize,
+    /// Cumulative count of jobs admitted onto a lane (claimed a device, `on_admit`
+    /// fired) — as distinct from `jobs`, which only counts a job once ITS group's
+    /// `Done` arrives. `admitted` moves the instant a job starts running;
+    /// `jobs`/`batches` are the batching-shape counters `Done` already needed.
+    pub admitted: u64,
+    /// LIVE queued-job count (unlike `queue_peak`, a high-water mark that never
+    /// resets) — the number a dashboard/braintop panel actually wants to watch
+    /// change in real time. `InFlightJob::since_ms` is per-request; this is the
+    /// aggregate depth.
+    pub queue_depth: usize,
+    /// Model-specific observability metrics (`Instance::metrics`), refreshed by
+    /// the dispatcher after every `assign()` pass. Empty for any instance that
+    /// doesn't override `metrics()` — most models.
+    pub metrics: HashMap<InstanceKey, Vec<(String, serde_json::Value)>>,
 }
 
 /// A message to the dispatcher: a new job, a lane adopting a freshly built
@@ -286,6 +300,9 @@ fn dispatch_loop(rx: Receiver<Msg>, mut mgr: ResidencyManager, policy: Policy, l
             on_msg(msg, &mut queue, &mut mgr, &mut running, &mut busy, &stats, &mut running_jobs, &mut next_id);
         }
         assign(&mut queue, &mut mgr, &policy, &lanes, &mut running, &mut busy, &stats, &mut running_jobs);
+        if let Ok(mut s) = stats.lock() {
+            s.metrics = mgr.all_metrics();
+        }
     }
 }
 
@@ -309,6 +326,7 @@ fn on_msg(msg: Msg, queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, runnin
                 });
                 let mut s = stats.lock().unwrap();
                 s.queue_peak = s.queue_peak.max(queue.len());
+                s.queue_depth = queue.len();
             }
             None => (job.reply)(Err(format!("no model '{}'", job.model))),
         },
@@ -449,6 +467,8 @@ fn assign(queue: &mut Vec<Pending>, mgr: &mut ResidencyManager, policy: &Policy,
             s.evictions = mgr.evictions;
             s.resident = mgr.resident_count();
             s.max_parallel = s.max_parallel.max(busy.len());
+            s.admitted += jobs.len() as u64;
+            s.queue_depth = queue.len();
         }
         // Hand to the device's lane (which builds the instance first when cold).
         let _ = lanes[&device].send(RunReq { work, action, jobs, key: ckey, device });

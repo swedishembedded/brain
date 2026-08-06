@@ -95,6 +95,12 @@ targets (--target):
   fake                               synthetic harness self-check (numbers meaningless)
   qwen-synth:<L>x<D>x<H>[xV][:i8w]   the real paged serving engine on random weights
   qwen:<weights.brain>[:i8w]         the paged serving engine on a real checkpoint
+  http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>
+                                     the REAL served path: apiserve's HTTP router, in-process,
+                                     over random weights of that shape (needs a real tokenizer)
+  http:qwen:<weights.brain>:<tokenizer.json>
+                                     the REAL served path over a real checkpoint -- this is what
+                                     .todo/serving-performance-audit.md's 600s regression measures
   lfm:<weights>:<tokenizer.json>     LFM2.5 encoder via the residency executor (unit: sequence)
   kronos:<tokenizer-dir>:<decoder-dir>  Kronos OHLCV forecaster via the residency executor
                                      (unit: forecast; input_artifacts = context bars; horizon/
@@ -464,6 +470,9 @@ fn build_target(spec: &str, workload: &str) -> Result<Box<dyn PerfTarget>, Strin
     if let Some(weights) = spec.strip_prefix("qwen:") {
         return build_qwen(weights, workload);
     }
+    if let Some(rest) = spec.strip_prefix("http:") {
+        return build_http(rest, workload);
+    }
     if let Some(rest) = spec.strip_prefix("lfm:") {
         return build_lfm(rest);
     }
@@ -485,9 +494,102 @@ fn build_target(spec: &str, workload: &str) -> Result<Box<dyn PerfTarget>, Strin
     Err(format!(
         "unknown --target {spec:?} \
          (expected 'fake', 'qwen-synth:<L>x<D>x<H>[xV][:i8w]', 'qwen:<weights>[:i8w]', \
+         'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
          'chronos2:<weights>', 'fincast:<weights>', or 'flux2[:<W>x<H>x<steps>[:<precision>]]')"
     ))
+}
+
+/// `http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>` or
+/// `http:qwen:<weights.brain>:<tokenizer.json>` — the model measured through
+/// the REAL served path: a real `residency::Executor` holding a real
+/// `QwenResident`, behind the real `apiserve::router()`, driven over HTTP
+/// in-process (`perf::targets::HttpTarget`). This is the target the serving-
+/// performance audit's 600s regression (`.todo/serving-performance-audit.md`)
+/// would have shown up in; the `qwen-synth:`/`qwen:` targets above measure the
+/// paged engine directly and skip the whole HTTP/bridge/residency layer the
+/// bug actually lived in. The tokenizer suffix is required (unlike the
+/// engine-direct targets, which synthesize token ids and never tokenize) — a
+/// real client sends text, and this target must too.
+fn build_http(rest: &str, workload: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let (inner, tokenizer) = rest.rsplit_once(':').ok_or_else(|| {
+        "http target needs 'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>' \
+         or 'http:qwen:<weights>:<tokenizer.json>'"
+            .to_string()
+    })?;
+    if !std::path::Path::new(tokenizer).exists() {
+        return Err(format!("http target tokenizer not found: {tokenizer}"));
+    }
+    if let Some(shape) = inner.strip_prefix("qwen-synth:") {
+        return build_http_qwen_synth(shape, tokenizer, workload);
+    }
+    if let Some(weights) = inner.strip_prefix("qwen:") {
+        return build_http_qwen(weights, tokenizer);
+    }
+    Err(format!(
+        "unknown http target {rest:?} (expected 'qwen-synth:<L>x<D>x<H>[xV]:<tok>' or 'qwen:<weights>:<tok>')"
+    ))
+}
+
+/// Random weights of the given shape, written to a scratch checkpoint so
+/// `QwenResident` can `mmap` them exactly as it would a real one — the point
+/// is measuring the served path's OWN weight-loading/activation code, not
+/// bypassing it. Content is irrelevant to serving cost; only shape matters,
+/// same rationale as `SynthSpec::build_weights` for the engine-direct target.
+fn build_http_qwen_synth(shape: &str, tokenizer: &str, workload: &str) -> Result<Box<dyn PerfTarget>, String> {
+    let spec = SynthSpec::parse(shape, workload)?;
+    let (cfg, weights) = spec.build_weights();
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = cfg
+        .param_list()
+        .into_iter()
+        .map(|(name, n)| {
+            let v = weights.get(&name).unwrap_or_else(|| panic!("perf: http qwen-synth missing tensor {name}")).clone();
+            (name, vec![n as u64], v)
+        })
+        .collect();
+    let dir = std::env::temp_dir().join(format!("brain-perf-http-qwen-synth-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("perf: http qwen-synth scratch dir: {e}"))?;
+    let path = dir.join("model.safetensors");
+    checkpoint::save(path.to_str().expect("utf8 path"), cfg.to_json(), &tensors);
+    let info = TargetInfo::new("qwen-synth", "token").with("shape", spec.shape().into()).with("weights", "random".into()).with(
+        "engine",
+        "http".into(),
+    );
+    build_http_target(path.to_str().expect("utf8 path"), tokenizer, "qwen-synth", info)
+}
+
+fn build_http_qwen(weights: &str, tokenizer: &str) -> Result<Box<dyn PerfTarget>, String> {
+    if !std::path::Path::new(weights).exists() {
+        return Err(format!("http qwen weights not found: {weights}"));
+    }
+    let info = TargetInfo::new("qwen", "token").with("weights", weights.into()).with("engine", "http".into());
+    build_http_target(weights, tokenizer, "qwen", info)
+}
+
+/// Shared plumbing: one `QwenResident` behind a real `residency::Executor`
+/// (budgeted only over the schedulable devices — see `build_lfm`'s comment on
+/// why an excluded GPU must never be budgeted), wrapped in the real
+/// `apiserve` OpenAI router, driven over HTTP by `HttpTarget`.
+fn build_http_target(weights: &str, tokenizer: &str, model_id: &str, info: TargetInfo) -> Result<Box<dyn PerfTarget>, String> {
+    let card = checkpoint::st::ModelCard::new(model_id, "qwen");
+    let resident = crate::resident_llm::QwenResident::from_card(weights, &card, Some(tokenizer), None);
+
+    let set = crate::compute_set();
+    let mut budgets = residency::budget::Budgets::new();
+    for (i, total) in crate::run_cli::query_gpu_mem() {
+        if set.as_ref().map(|s| s.gpus.contains(&i)).unwrap_or(true) {
+            budgets.set(residency::Device::Gpu(i), total, 2 << 30);
+        }
+    }
+    if set.map(|s| s.cpu_enabled()).unwrap_or(true) {
+        budgets.set(residency::Device::Cpu, crate::run_cli::query_ram_bytes(), 0);
+    }
+    let exec = residency::Executor::start(vec![std::sync::Arc::new(resident)], budgets, residency::Policy::default());
+
+    const KEY: &str = "perf-http-target-key";
+    let state = apiserve::AppState::new(exec, KEY, apiserve::Provider::OpenAI);
+    let router = apiserve::router(state);
+    Ok(Box::new(perf::targets::HttpTarget::new(router, model_id, KEY, info)))
 }
 
 

@@ -304,7 +304,11 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
         .set("max_new", json!(max_new(body)))
         .set("temp", json!(body.get("temperature").and_then(|v| v.as_f64()).unwrap_or(1.0)))
         .set("top_p", json!(body.get("top_p").and_then(|v| v.as_f64()).unwrap_or(1.0)))
-        .set("top_k", json!(body.get("top_k").and_then(|v| v.as_i64()).unwrap_or(0)))
+        // 40 is the standard top-k default (matches e.g. Google AI Studio): wide
+        // enough to keep text natural while filtering out the improbable tail.
+        // `top_k=1` degenerates to greedy; `0` or negative disables the filter
+        // entirely (`sample_logits` only applies it when `top_k > 0`).
+        .set("top_k", json!(body.get("top_k").and_then(|v| v.as_i64()).unwrap_or(40)))
         .set("seed", json!(body.get("seed").and_then(|v| v.as_i64()).unwrap_or(0)));
     if let Some(stop) = normalize_stop(body.get("stop")) {
         inv = inv.set("stop", json!(stop));

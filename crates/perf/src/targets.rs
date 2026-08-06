@@ -10,6 +10,15 @@
 //! * [`PagedLlmTarget`] — wraps `qwen::serve::{Engine, Scheduler}` directly. The
 //!   paged continuous-batching engine is the thing most worth measuring today
 //!   and does not yet sit behind a `Provider`.
+//! * [`ExecutorTarget`] — wraps a [`residency::Executor`] holding a real
+//!   `ResidentModel`: the scheduler + budgets + per-device lanes production
+//!   serving (D-Bus) uses, so concurrency numbers reflect real batching/placement.
+//! * [`HttpTarget`] — wraps the REAL served path: `apiserve::router()`, called
+//!   in-process via `tower::Service::oneshot`. The only adapter here that
+//!   exercises JSON parsing, the edge concurrency limiter, and the admission
+//!   race in `apiserve::bridge` — the layer `.todo/serving-performance-audit.md`'s
+//!   600s regression actually lived in, and that `ExecutorTarget`/`PagedLlmTarget`
+//!   skip by construction (they drive the executor/engine directly).
 //!
 //! As `qwen`, `yolo`, `depth` and `tts` adopt `capability::Provider`, they
 //! become measurable through the first adapter and need nothing here.
@@ -633,4 +642,210 @@ mod tests {
         assert_eq!(d.model, "streamer");
         assert_eq!(d.artifact_unit, "audio_chunk");
     }
+}
+
+// ===================== HTTP surface seam =====================
+
+/// Drives the REAL served path: `apiserve::router()`, called in-process via
+/// `tower::Service::oneshot` (no socket) — so the numbers are exactly what a
+/// real client sees: JSON parsing, the edge concurrency limiter, the
+/// admission race in `apiserve::bridge`, chat-template rendering,
+/// tokenization, and generation, all the way down to `residency::Executor`
+/// and the resident model. This is the target the serving-performance audit's
+/// 600s regression (`.todo/serving-performance-audit.md`) would have shown up
+/// in, and the synthetic in-process targets above (measuring the executor or
+/// engine directly) do not — they skip exactly the layer the bug lived in.
+///
+/// Requests are OpenAI-dialect **streaming** chat completions (`stream:
+/// true`), so the artifact timeline comes from real SSE `delta.content`
+/// chunks as they arrive over the wire, timestamped as each one is read off
+/// the response body — not a post-hoc replay after the whole body is
+/// buffered. A background multi-thread Tokio runtime drives the actual router
+/// calls; `step` only drains what they produced, mirroring
+/// [`ExecutorTarget`]'s sync/async seam (the executor's own threads —
+/// here, the runtime's worker threads — do the real work; the driver loop
+/// stays synchronous and free of runtime-scheduling noise).
+///
+/// `describe`/`fidelity`/`set_admission`/device-op counters are NOT yet wired
+/// through this target: today's `QwenInstance` (`crates/cli/src/
+/// resident_llm.rs`) is built on `Qwen::from_reader_decode`, which has no
+/// `device_stats()`/admission-policy seam to read. Once the LLM residents are
+/// rewired onto `qwen::serve::Engine` (this plan's W5), those numbers become
+/// reachable here with no change to this struct's shape — reporting a
+/// fabricated number now would violate the "never a fabricated zero" rule
+/// (`docs/performance/benchmarking.md` §1), so they are simply absent.
+pub struct HttpTarget {
+    rt: tokio::runtime::Runtime,
+    router: axum::Router,
+    model: String,
+    key: String,
+    info: TargetInfo,
+    tx: std::sync::mpsc::Sender<Emission>,
+    rx: std::sync::mpsc::Receiver<Emission>,
+    inflight: std::collections::HashSet<ReqId>,
+    next: ReqId,
+}
+
+impl HttpTarget {
+    /// `router` is `apiserve::router(state)` built for a `Provider::OpenAI`
+    /// `AppState` whose key is `key`; `model` is the id the resident
+    /// registered itself under (the `"model"` field every request names).
+    pub fn new(router: axum::Router, model: &str, key: &str, info: TargetInfo) -> HttpTarget {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("perf: build the HttpTarget background tokio runtime");
+        let (tx, rx) = std::sync::mpsc::channel();
+        HttpTarget { rt, router, model: model.to_string(), key: key.to_string(), info, tx, rx, inflight: Default::default(), next: 1 }
+    }
+
+    /// A deterministic synthetic system-prompt filler of approximately
+    /// `n_tokens` words. Real BPE tokenization will not reproduce `n_tokens`
+    /// exactly — `PerfRequest::input_artifacts`'s own contract is "the target
+    /// decides how to realise it", and the driver records the REQUESTED
+    /// length for input-rate accounting (`crates/perf/src/driver.rs`), not a
+    /// count re-derived from the target. The realistic-agentic-prompt shape
+    /// (long shared system preamble + a short user turn) is what the serving-
+    /// performance audit measured against; this is the synthetic stand-in.
+    fn synth_system_prompt(n_tokens: usize, seed: u64) -> String {
+        let mut rng = data::rng::Rng::new(seed);
+        (0..n_tokens.max(1)).map(|_| format!("tok{}", rng.next_u64() % 4096)).collect::<Vec<_>>().join(" ")
+    }
+}
+
+impl PerfTarget for HttpTarget {
+    fn describe(&self) -> TargetInfo {
+        self.info.clone()
+    }
+
+    fn submit(&mut self, req: PerfRequest) -> ReqId {
+        let id = self.next;
+        self.next += 1;
+        self.inflight.insert(id);
+
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": HttpTarget::synth_system_prompt(req.input_artifacts, req.seed)},
+                {"role": "user", "content": "Continue the sequence."},
+            ],
+            "max_tokens": req.output_artifacts,
+            "temperature": 0,
+            "stream": true,
+        });
+        let http_req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", self.key))
+            .body(axum::body::Body::from(serde_json::to_vec(&body).expect("perf: serialize chat body")))
+            .expect("perf: build chat request");
+
+        let router = self.router.clone();
+        let tx = self.tx.clone();
+        self.rt.spawn(async move { drive_one(router, http_req, id, tx).await });
+        id
+    }
+
+    fn step(&mut self, out: &mut Vec<Emission>) -> bool {
+        // The runtime's worker threads do the real work; drain what they
+        // emitted, blocking briefly when something is in flight so the
+        // driver doesn't spin (same shape as `ExecutorTarget::step`).
+        if self.inflight.is_empty() {
+            while let Ok(e) = self.rx.try_recv() {
+                out.push(e);
+            }
+            return false;
+        }
+        let terminal = |k: EmissionKind| matches!(k, EmissionKind::Done | EmissionKind::Failed | EmissionKind::Rejected);
+        if let Ok(e) = self.rx.recv_timeout(std::time::Duration::from_millis(2)) {
+            if terminal(e.kind) {
+                self.inflight.remove(&e.id);
+            }
+            out.push(e);
+        }
+        while let Ok(e) = self.rx.try_recv() {
+            if terminal(e.kind) {
+                self.inflight.remove(&e.id);
+            }
+            out.push(e);
+        }
+        !self.inflight.is_empty()
+    }
+
+    fn busy(&self) -> bool {
+        !self.inflight.is_empty()
+    }
+}
+
+/// Fire one chat-completion request through the router and translate the SSE
+/// response into a real-time emission timeline. Runs on the target's
+/// background runtime, concurrently with every other in-flight request —
+/// exactly as real concurrent clients would be served.
+async fn drive_one(router: axum::Router, req: axum::http::Request<axum::body::Body>, id: ReqId, tx: std::sync::mpsc::Sender<Emission>) {
+    use futures::StreamExt;
+    use tower::ServiceExt;
+
+    let resp = match router.oneshot(req).await {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Failed });
+            return;
+        }
+    };
+    let status = resp.status();
+    if status == axum::http::StatusCode::TOO_MANY_REQUESTS || status == axum::http::StatusCode::SERVICE_UNAVAILABLE {
+        let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Rejected });
+        return;
+    }
+    if !status.is_success() {
+        let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Failed });
+        return;
+    }
+    // By the time headers are back, `apiserve::bridge`'s admission race has
+    // already resolved — it runs BEFORE the SSE body is returned (see
+    // `bridge::stream_inner`) — so "response received" IS the real admit
+    // instant, not an approximation of it.
+    let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Admitted });
+
+    let mut stream = resp.into_body().into_data_stream();
+    let mut buf = String::new();
+    let mut saw_done = false;
+    while let Some(chunk) = stream.next().await {
+        let bytes = match chunk {
+            Ok(b) => b,
+            Err(_) => {
+                let _ = tx.send(Emission { id, at: Instant::now(), kind: EmissionKind::Failed });
+                return;
+            }
+        };
+        buf.push_str(&String::from_utf8_lossy(&bytes));
+        // SSE events are separated by a blank line; process every COMPLETE one
+        // as soon as it arrives so the timestamp reflects real wire timing,
+        // not a post-hoc replay after the whole body was buffered.
+        while let Some(pos) = buf.find("\n\n") {
+            let frame: String = buf.drain(..pos + 2).collect();
+            let at = Instant::now();
+            for line in frame.lines() {
+                let Some(data) = line.strip_prefix("data: ") else { continue };
+                if data == "[DONE]" {
+                    saw_done = true;
+                    continue;
+                }
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+                // A thinking-enabled model's early tokens stream as
+                // `delta.reasoning_content`, never `delta.content`
+                // (`openai::event_delta`'s "reasoning" branch) -- both are real
+                // generated tokens for TTFA/ITL purposes, so both count.
+                let delta = &v["choices"][0]["delta"];
+                let has_text = |field: &str| delta[field].as_str().map(|s| !s.is_empty()).unwrap_or(false);
+                if has_text("content") || has_text("reasoning_content") {
+                    let _ = tx.send(Emission { id, at, kind: EmissionKind::Artifact });
+                }
+            }
+        }
+    }
+    let kind = if saw_done { EmissionKind::Done } else { EmissionKind::Failed };
+    let _ = tx.send(Emission { id, at: Instant::now(), kind });
 }

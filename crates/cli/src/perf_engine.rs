@@ -230,12 +230,16 @@ pub fn run_kvcache(spec: &SynthSpec, opt: &Options) -> Result<Artifact, String> 
         ("kv_stalls".into(), json!(acct.kv_stalls)),
     ]);
     art.notes = Some(
-        "The paged engine has no prefix cache and no cross-request block reuse, so \
-         hit-rate and eviction-regret are structurally null here: every request \
-         computes its own KV from scratch and releases it on completion. What IS \
-         measured is admission pressure — how often a request had to wait purely \
-         for pool space, and for how long. Implementing prefix reuse is what would \
-         make the rest of this scenario meaningful."
+        "The engine DOES have a prefix cache (`qwen::serve::Engine`'s `PrefixCache`, \
+         exercised by `serve.rs`'s own tests and surfaced as kv_prefix_hit_rate/ \
+         kv_prefix_cached_blocks via PagedLlmTarget::counters) -- but THIS scenario's \
+         synthetic workload submits a flat concurrent burst with no shared prompt \
+         prefixes between requests, so hit-rate is genuinely zero here, not \
+         structurally unmeasurable. What IS measured is admission pressure -- how \
+         often a request had to wait purely for pool space, and for how long. \
+         Driving this scenario's workload through `docs/performance/benchmarking.md`'s \
+         kvcache session mix (shared system prefix, branching sessions) is what would \
+         make prefix hit-rate/eviction-regret meaningful here too."
             .into(),
     );
     Ok(art)

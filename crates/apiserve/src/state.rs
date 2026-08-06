@@ -6,12 +6,12 @@
 //!
 //! Cloned per request by axum (all fields are cheap `Arc`/`Copy`/`String` clones).
 //! The [`JobRegistry`] mirrors `crates/dbus`: armed [`capability::CancelToken`]s
-//! keyed by a request id, so a future `cancel`/client-disconnect path (P5+) can
-//! abort a running generation. It is unused by the P4 skeletons but wired now so
-//! the chat/stream handlers can register jobs without a state change.
+//! keyed by a request id, live from submission until the reply fires. Actively
+//! used — `bridge::CancelGuard` fires a registered token when a streaming SSE
+//! response is dropped (client disconnect), and the admit-deadline race
+//! (`bridge::submit`/`stream_inner`) cancels on a 429/saturated shed.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use capability::CancelToken;
@@ -20,14 +20,14 @@ use uuid::Uuid;
 
 use crate::surface::Provider;
 
-/// Default admission deadline: the bounded time a request may wait for work to
-/// START on a lane before it is shed with a 429. A running job may then take much
-/// longer — only the wait-to-start is bounded.
-pub const DEFAULT_ADMIT_DEADLINE: Duration = Duration::from_secs(10);
+/// Default admission deadline — see `residency::admission`'s doc (shared with
+/// `crates/dbus` so both transports gate identically).
+pub use residency::admission::DEFAULT_ADMIT_DEADLINE;
 
-/// Armed cancel tokens for in-flight requests, keyed by a per-request UUID. An
-/// entry lives from submission until the reply fires (copy of the dbus pattern).
-pub type JobRegistry = Arc<Mutex<HashMap<Uuid, CancelToken>>>;
+/// Armed cancel tokens for in-flight requests, keyed by a per-request UUID —
+/// `residency::jobs::JobRegistry`, the SAME shared type `crates/dbus`'s
+/// `Manager` uses (keyed by `u64` there instead).
+pub type JobRegistry = residency::jobs::JobRegistry<Uuid>;
 
 /// Everything a request handler needs. Clone is cheap.
 #[derive(Clone)]
@@ -48,14 +48,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(exec: Executor, key: impl Into<String>, provider: Provider) -> AppState {
-        AppState {
-            exec,
-            jobs: Arc::new(Mutex::new(HashMap::new())),
-            key: key.into(),
-            provider,
-            admit_deadline: DEFAULT_ADMIT_DEADLINE,
-            supplier: None,
-        }
+        AppState { exec, jobs: JobRegistry::new(), key: key.into(), provider, admit_deadline: DEFAULT_ADMIT_DEADLINE, supplier: None }
     }
 
     /// Override the admission deadline (builder-style). Used by tests to force fast
@@ -78,21 +71,17 @@ impl AppState {
     pub fn register(&self) -> (Uuid, CancelToken) {
         let id = Uuid::new_v4();
         let token = CancelToken::armed();
-        if let Ok(mut m) = self.jobs.lock() {
-            m.insert(id, token.clone());
-        }
+        self.jobs.insert(id, token.clone());
         (id, token)
     }
 
     /// Drop a finished request's cancel token.
     pub fn finish(&self, id: &Uuid) {
-        if let Ok(mut m) = self.jobs.lock() {
-            m.remove(id);
-        }
+        self.jobs.remove(id);
     }
 
     /// Requests currently in flight.
     pub fn active(&self) -> usize {
-        self.jobs.lock().map(|m| m.len()).unwrap_or(0)
+        self.jobs.len()
     }
 }

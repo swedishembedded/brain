@@ -40,6 +40,7 @@ impl QwenDecoder {
             d_ff: cfg.d_model * 4,
             rope_theta: 1.0e6,
             rms_eps: 1e-6,
+            max_position_embeddings: block_size,
             tie_embeddings: true,
             qk_norm: true,
             attn_bias: false,

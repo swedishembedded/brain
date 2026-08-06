@@ -141,6 +141,12 @@ pub struct ExecutorStat {
     pub queue_peak: u64,
     pub max_batch: u64,
     pub max_parallel: u64,
+    /// Cumulative jobs admitted onto a lane (as opposed to `jobs`, which only
+    /// counts once its group's `Done` arrives) -- moves the instant work starts.
+    pub admitted: u64,
+    /// LIVE queued-job count, unlike `queue_peak`'s never-resetting high-water
+    /// mark -- what a dashboard actually wants to watch change over time.
+    pub queue_depth: u64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
 }

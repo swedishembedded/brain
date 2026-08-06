@@ -32,7 +32,7 @@ import socket
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from jeepney import DBusAddress, Properties, new_method_call
 from jeepney.fds import FileDescriptor
@@ -128,10 +128,18 @@ class BrainDBus(BrainBase):
         blobs: Optional[dict] = None,
         meta: Optional[dict] = None,
         on_progress: Optional[OnProgress] = None,
+        on_delta: Optional[Callable[[str], None]] = None,
+        on_event: Optional[Callable[[dict], None]] = None,
         timeout: float = 1800.0,
     ) -> Outcome:
         """Run a streaming action, invoking ``on_progress(step, total, message)`` as
-        it advances, and return the final :class:`Outcome`. Raises on an error frame."""
+        it advances, and return the final :class:`Outcome`. Raises on an error frame.
+
+        ``on_delta`` fires with each per-token text fragment and ``on_event`` with
+        each structured out-of-band payload (reasoning/tool-call chunks) -- a chat
+        model's `progress` frame carries these alongside step/total/message; a
+        Subscribe`r that only wants the step tick can leave both `None`.
+        """
         _job, frames = self.stream_frames_with_job(
             model, action, params, in_fds=self._in_fds(blobs), in_meta=self._in_meta(blobs, meta), timeout=timeout
         )
@@ -143,6 +151,12 @@ class BrainDBus(BrainBase):
             if kind == "progress":
                 if on_progress is not None:
                     on_progress(int(frame.get("step", 0)), int(frame.get("total", 0)), frame.get("message", ""))
+                delta = frame.get("delta")
+                if delta and on_delta is not None:
+                    on_delta(delta)
+                event = frame.get("event")
+                if event and on_event is not None:
+                    on_event(event)
             elif kind == "blob":
                 name = frame.get("name", "blob")
                 out_meta[name] = {"media": frame.get("media"), "meta": frame.get("meta")}

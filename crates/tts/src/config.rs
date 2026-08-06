@@ -128,6 +128,7 @@ impl TalkerConfig {
             d_ff: self.d_ff,
             rope_theta: self.rope_theta,
             rms_eps: self.rms_norm_eps,
+            max_position_embeddings: block_size,
             tie_embeddings: false,
             qk_norm: true,
             attn_bias: false,

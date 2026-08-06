@@ -139,6 +139,7 @@ impl FastVlmConfig {
                 d_ff: u("intermediate_size"),
                 rope_theta: c["rope_theta"].as_f64().unwrap_or(1e6) as f32,
                 rms_eps: c["rms_norm_eps"].as_f64().unwrap_or(1e-6) as f32,
+                max_position_embeddings: c["max_position_embeddings"].as_u64().map(|x| x as u32).unwrap_or(2048),
                 tie_embeddings: c["tie_word_embeddings"].as_bool().unwrap_or(true),
                 qk_norm: false, // Qwen2
                 attn_bias: c["attention_bias"].as_bool().unwrap_or(true),

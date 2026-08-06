@@ -141,7 +141,8 @@ pub fn to_invocation(body: &Value) -> Result<(String, Invocation, bool), ApiErro
         .set("max_new", json!(max_tokens))
         .set("temp", json!(body.get("temperature").and_then(|v| v.as_f64()).unwrap_or(1.0)))
         .set("top_p", json!(body.get("top_p").and_then(|v| v.as_f64()).unwrap_or(1.0)))
-        .set("top_k", json!(body.get("top_k").and_then(|v| v.as_i64()).unwrap_or(0)))
+        // See openai.rs's to_invocation: 40 is the standard top-k default.
+        .set("top_k", json!(body.get("top_k").and_then(|v| v.as_i64()).unwrap_or(40)))
         .set("seed", json!(body.get("seed").and_then(|v| v.as_i64()).unwrap_or(0)));
     let system = system_text(body.get("system"));
     if !system.is_empty() {

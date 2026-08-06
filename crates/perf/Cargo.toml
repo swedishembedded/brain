@@ -16,4 +16,13 @@ brain-checkpoint.workspace = true
 brain-data.workspace = true
 brain-gpu-core.workspace = true
 brain-qwen.workspace = true
+# The HTTP surface target (`HttpTarget`) drives the REAL `apiserve::router()`
+# in-process via `tower::Service::oneshot` -- not a fresh dependency direction
+# (`brain-apiserve` already stands only on `brain-residency`/`brain-capability`,
+# never on `brain-perf`), just perf's first consumer of it.
+brain-apiserve.workspace = true
+axum.workspace = true
+tower.workspace = true
+tokio.workspace = true
+futures.workspace = true
 serde_json.workspace = true

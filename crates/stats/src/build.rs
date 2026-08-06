@@ -102,6 +102,8 @@ fn executor_stat(s: &residency::executor::Stats) -> ExecutorStat {
         queue_peak: s.queue_peak as u64,
         max_batch: s.max_batch as u64,
         max_parallel: s.max_parallel as u64,
+        admitted: s.admitted,
+        queue_depth: s.queue_depth as u64,
         extra: Default::default(),
     }
 }

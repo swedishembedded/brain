@@ -700,6 +700,8 @@ pub const TANH_ACT_BWD: &str = include_str!("../wgsl/tanh_act_bwd.wgsl");
 pub const TAU_SCALE: &str = include_str!("../wgsl/tau_scale.wgsl");
 /// `wgsl/tau_scale_ds.wgsl`
 pub const TAU_SCALE_DS: &str = include_str!("../wgsl/tau_scale_ds.wgsl");
+/// `wgsl/topk_extract_step.wgsl`
+pub const TOPK_EXTRACT_STEP: &str = include_str!("../wgsl/topk_extract_step.wgsl");
 /// `wgsl/topk_mask.wgsl`
 pub const TOPK_MASK: &str = include_str!("../wgsl/topk_mask.wgsl");
 /// `wgsl/unpack_qkv.wgsl`
@@ -1061,6 +1063,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("tanh_act_bwd", TANH_ACT_BWD),
     ("tau_scale", TAU_SCALE),
     ("tau_scale_ds", TAU_SCALE_DS),
+    ("topk_extract_step", TOPK_EXTRACT_STEP),
     ("topk_mask", TOPK_MASK),
     ("unpack_qkv", UNPACK_QKV),
     ("upsample2", UPSAMPLE2),

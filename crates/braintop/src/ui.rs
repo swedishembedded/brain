@@ -266,6 +266,8 @@ fn draw_executor(f: &mut Frame, area: Rect, snap: &StatsSnapshot) {
         counter("batches", e.batches),
         counter("jobs", e.jobs),
         counter("resident", e.resident),
+        counter("admitted", e.admitted),
+        counter("queue", e.queue_depth),
         counter("queue⤒", e.queue_peak),
         counter("max_batch", e.max_batch),
         counter("max_par", e.max_parallel),

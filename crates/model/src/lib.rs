@@ -20,6 +20,7 @@ pub mod block;
 pub mod collective;
 pub mod paged;
 pub mod rowemit;
+pub mod serve;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod distributed;
 pub mod grid;

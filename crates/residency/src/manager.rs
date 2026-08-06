@@ -20,7 +20,7 @@ use capability::{ActionResult, Invocation, Manifest, Progress};
 
 use crate::budget::Budgets;
 use crate::lru::Residents;
-use crate::place::{no_exclude, pick_device, plan_eviction};
+use crate::place::{no_exclude, pick_device, plan_eviction_with, CostAware, EvictionPolicy};
 use crate::{Device, Instance, InstanceKey, ResidentModel, Tier};
 
 /// A hot instance handle: the (mutex-guarded) instance plus the device it lives on.
@@ -120,11 +120,34 @@ pub struct ResidencyManager {
     /// Cumulative counters (never reset) — instance builds and evictions.
     pub builds: u64,
     pub evictions: u64,
+    /// Which resident to evict first when a claim needs room. Defaults to
+    /// [`CostAware`] (GDSF: `uses * reload_cost / age`) rather than strict LRU
+    /// -- swapping a large model back in costs far more than a small one, and
+    /// `brain perf residency` measured `CostAware` beating strict LRU on hit
+    /// rate (54.3% vs 50.0%) under a shifting Zipf load. See `place.rs`'s
+    /// module doc for the measurement this generalizes from.
+    eviction: Box<dyn EvictionPolicy>,
 }
 
 impl ResidencyManager {
     pub fn new(budgets: Budgets) -> ResidencyManager {
-        ResidencyManager { models: HashMap::new(), budgets, residents: Residents::new(), instances: HashMap::new(), events: Vec::new(), builds: 0, evictions: 0 }
+        ResidencyManager {
+            models: HashMap::new(),
+            budgets,
+            residents: Residents::new(),
+            instances: HashMap::new(),
+            events: Vec::new(),
+            builds: 0,
+            evictions: 0,
+            eviction: Box::new(CostAware),
+        }
+    }
+
+    /// Override the eviction policy (builder-style) -- e.g. `Lru` for an A/B
+    /// comparison, or a test wanting strict recency semantics.
+    pub fn with_eviction_policy(mut self, policy: Box<dyn EvictionPolicy>) -> ResidencyManager {
+        self.eviction = policy;
+        self
     }
 
     /// Number of resident (budget-accounted) instances. Counted from the
@@ -132,6 +155,21 @@ impl ResidencyManager {
     /// resident (placed, budgeted, pinned) while its lane is still activating.
     pub fn resident_count(&self) -> usize {
         self.residents.iter().count()
+    }
+
+    /// Every currently-built instance's own [`Instance::metrics`], keyed by
+    /// `InstanceKey`. Polled by the DISPATCHER thread, so this must NEVER
+    /// block: a `try_lock` skips any instance a lane is mid-`run_batch` on
+    /// (its handle is locked for the whole batch — see `run_group`) rather
+    /// than stalling the dispatcher until that lane frees. A skipped
+    /// instance's metrics are simply stale until the next poll finds it
+    /// free, which is correct for best-effort observability and was NOT
+    /// correct as a blocking `.lock()` (confirmed live: it froze the
+    /// dispatcher for the length of a running job, reproduced by
+    /// `in_flight_reports_queued_and_running_jobs_with_monotonic_ids`
+    /// timing out instead of returning promptly).
+    pub fn all_metrics(&self) -> HashMap<InstanceKey, Vec<(String, serde_json::Value)>> {
+        self.instances.iter().filter_map(|(k, h)| h.try_lock().ok().map(|inst| (k.clone(), inst.metrics()))).collect()
     }
 
     pub fn register(&mut self, model: Arc<dyn ResidentModel>) {
@@ -161,7 +199,7 @@ impl ResidencyManager {
         };
         let cost = m.estimate(key);
         pick_device(&cost, &self.budgets, exclude).is_some()
-            || plan_eviction(&cost, &self.budgets, &self.residents, std::slice::from_ref(key), exclude).is_some()
+            || plan_eviction_with(&*self.eviction, &cost, &self.budgets, &self.residents, std::slice::from_ref(key), exclude).is_some()
     }
 
     pub fn models(&self) -> Vec<String> {
@@ -263,7 +301,7 @@ impl ResidencyManager {
         let device = match pick_device(&cost, &self.budgets, exclude) {
             Some(d) => d,
             None => {
-                let plan = plan_eviction(&cost, &self.budgets, &self.residents, std::slice::from_ref(&key), exclude)
+                let plan = plan_eviction_with(&*self.eviction, &cost, &self.budgets, &self.residents, std::slice::from_ref(&key), exclude)
                     .ok_or_else(|| {
                         ClaimError::NoCapacity(format!(
                             "{key} ({} MiB) is too large for any available device",

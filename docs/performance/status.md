@@ -457,6 +457,231 @@ one whole-request mutex. Remaining prefill cost is dispatch/uniform churn
 (~148k fresh uniforms+bind groups per request) — batched prefill chunks and
 uniform reuse are the next, NOT-simple levers, alongside the GPU tower.
 
+## The served path, measured for the first time (`HttpTarget`, M0 baseline)
+
+Every scenario above drives `qwen::serve::Scheduler` or `residency::Executor`
+directly. Nothing had ever driven the actual thing a client talks to:
+`apiserve::router()`, over real HTTP framing, through the real admission race in
+`apiserve::bridge`, into the real `QwenResident`/`QwenInstance` chat path
+(`crates/cli/src/resident_llm.rs`) — the gap
+`.todo/serving-performance-audit.md` names directly: a synthetic in-process
+benchmark reporting healthy numbers while a real agentic client saw 600+ s.
+
+**`perf::targets::HttpTarget`** (`crates/perf/src/targets.rs`) closes that gap:
+it calls `apiserve::router()` in-process via `tower::Service::oneshot` (no
+socket), sends a real streaming `stream: true` OpenAI chat-completion request,
+and times each SSE `delta.content`/`delta.reasoning_content` chunk as it is
+read off the response body — a real TTFA/ITL timeline from the wire, not a
+post-hoc replay. Selected via `--target http:qwen-synth:<L>x<D>x<H>[xV]:<tok>`
+or `http:qwen:<weights>:<tok>` (`crates/cli/src/perf_cli.rs`).
+
+### M0 baseline: real Qwen3-0.6B, Intel Arc iGPU (Meteor Lake), release build
+
+`chat/in24/out12` workload, `--smoke`, `--ladder 1,2`, 4 requests/level, warm-up 1:
+
+| concurrency | ttfa p99 | ial p99 | e2e mean |
+|---|---:|---:|---:|
+| 1 | 13 211 ms | 80.6 ms | ~15.2 s |
+| 2 | 36 469 ms | 79.0 ms | ~30.3 s |
+
+TTFA p99 **2.76×** for **2×** the concurrent load — the audit's "no batching
+across concurrent requests" finding (`.todo/concurrent-request-batching.md`),
+now measured through the real served path with real weights, not inferred from
+reading the code. `ial` (per-token gap, once decode is running) stays flat —
+consistent with concurrent requests **serializing** on one lane rather than
+sharing a batched forward: decode-once-running is unaffected by a second
+request, but a second request cannot even START until the first's entire
+generation finishes.
+
+### CPU (same box, same weights, release build)
+
+The `http:` sweep above could not be completed for CPU within a practical
+session time budget — real Qwen3-0.6B decode on this backend is currently
+**≈1.9 tok/s** (measured directly: `brain qwen infer`, load 5.1 s, 16 tokens in
+8.3 s), so a 2-level concurrency sweep at 4 requests/level is itself a
+multi-minute measurement; left as a follow-up with a longer time budget rather
+than truncated/estimated here. **`docs/lessons.md`'s standing rule holds**:
+this number is reported as what it is (a direct-CLI decode rate, not an
+HTTP-path sweep) rather than extrapolated into one.
+
+**A separate, serious finding surfaced while reproducing this**: `BRAIN_DEVICE=cpu`
+segfaults intermittently (~2 times in 3) in `crates/qwen/src/model.rs`'s
+single-sequence decode path (`Qwen::from_reader_decode` + `generate_kv_stream`
++ `decode_submit`) — a real memory-safety bug in `backend-cpu`'s rayon-parallel
+JIT kernel dispatch, reproducible with the plain pre-existing `brain qwen infer`
+CLI, nothing to do with `HttpTarget`. The paged `qwen::serve::Engine` path did
+not reproduce it in the same checks. Filed in full at
+`.todo/cpu-backend-jit-dispatch-segfault.md` rather than patched blind — a
+crash of this kind needs a dedicated root-cause pass, not a fix grafted onto a
+measurement workstream.
+
+### What this baseline is for
+
+It is the `perf gate` floor the concurrent-serving-performance workstream
+measures every subsequent change against (rewiring the LLM residents onto the
+paged engine, continuous batching, prefix reuse) — the definition of done is
+this same `http:` sweep, same workload, TTFA no longer scaling with
+concurrency.
+
+### M1: two unwired fixes (landed, not yet re-measured against M0)
+
+- **The LM head is now read once, at `activate`, not once per request.**
+  `crates/cli/src/resident_llm.rs`'s `QwenInstance` and `crates/qwen/src/
+  caps.rs`'s `Hot` resident both now store the head (`model.read_weight(
+  model.cfg.head_weight())`) and call `generate_kv_stream_with_head` instead
+  of `generate_kv_stream` — the fix `sample.rs`'s own doc comment already
+  asked for (594 MiB device→host re-read at Qwen3's real vocab/d_model,
+  paid on every single chat request). Gated by the existing
+  `with_head_matches_the_self_reading_wrapper` test (bit-identical output).
+- **Eviction defaults to cost-aware, not strict LRU.** `ResidencyManager`
+  gained an `eviction: Box<dyn EvictionPolicy>` field (default `CostAware`,
+  overridable via `with_eviction_policy` for an LRU A/B); `claim`/`placeable`
+  now call `plan_eviction_with(&*self.eviction, ...)`. `CostAware` was already
+  written and measured (`perf residency`: 54.3% vs 50.0% hit rate under a
+  shifting Zipf load) but unreachable from the live server until now — a
+  `docs/lessons.md` #8 instance (a fast/better path that existed and wasn't
+  wired). All 34 residency tests, including the LRU-shaped
+  `three_models_on_one_gpu_swap_by_lru`, still pass unchanged (CostAware
+  agrees with LRU whenever candidates have equal size/use count, which is
+  every existing test's setup).
+- **Minimal serving observability**: `executor::Stats` gained `admitted`
+  (cumulative, moves the instant a job is claimed onto a lane — as opposed to
+  `jobs`, which only counts once `Done` arrives) and `queue_depth` (live
+  gauge, unlike the never-resetting `queue_peak` high-water mark). Flows
+  through `stats::build::executor_stat` and renders in `braintop`'s executor
+  row automatically.
+
+Not yet re-measured against the M0 `http:` baseline above — that is the next
+step, once the W2/W5 rewiring lands and the comparison is apples-to-apples
+against the same resident architecture the fixes were made in.
+
+### M3: `QwenResident` rewired onto the paged engine — the M0 regression is reversed
+
+`crates/cli/src/resident_llm.rs::QwenResident` now builds a persistent
+`model::serve::Scheduler<qwen::serve::Engine>` at `activate` for any
+safetensors checkpoint (the common case — a `.gguf` checkpoint keeps the
+original single-sequence decode path, since `qwen::serve::Engine` only reads
+safetensors; a real, pre-existing gap, not one this pass could fix in
+scope). `QwenInstance::run_batch` submits every invocation the dispatcher
+handed it into the SAME scheduler and drives them to completion together,
+streaming each sequence's own delta text via `Scheduler::tokens_of` — real
+continuous batching for whatever the dispatcher grouped into one call (not
+yet across separate calls arriving over time — see
+`.todo/continuous-batching-executor-seam.md`).
+
+**Re-measured against the exact M0 baseline workload, real Qwen3-0.6B, same
+box:**
+
+| concurrency | ttfa p99 (M0, old resident) | ttfa p99 (M3, rewired) |
+|---|---:|---:|
+| 1 | 13 211 ms | 2 952 ms |
+| 2 | 36 469 ms (2.76× worse) | **1 063 ms (2.8× BETTER)** |
+
+TTFA at concurrency 2 is now *lower* than at concurrency 1 — the exact
+reversal of M0's finding, and direct, measured proof that concurrent requests
+now batch instead of serializing. (The absolute concurrency=1 number also
+dropped sharply — 13.2 s → 3.0 s — from W1's LM-head hoist plus the paged
+engine's on-device greedy head, neither of which the M0 resident had.)
+`req/s`/`out/s` scale better than linearly from 1→2 concurrent requests
+(0.3→1.1, 0.6→2.3), consistent with shared-forward-pass batching rather than
+per-request overhead amortizing alone.
+
+**A real bug found and fixed during this rewiring, with a regression test**:
+`QwenInstance::run_batch`'s driving loop never handled `StepReport::rejected`
+— a request the scheduler refuses at admission (e.g. a prompt token outside
+the model's vocabulary) never appears in `completed` and never will, so
+without handling it the loop spun forever on an otherwise-empty scheduler.
+Caught live reproducing this exact milestone (a real tokenizer's chat-template
+special tokens exceeded a small synthetic test vocab); fixed, and gated by
+`resident_llm::tests::rejected_admission_resolves_promptly_instead_of_hanging`,
+verified to actually hang without the fix (reverted it, watched the test time
+out, restored it).
+
+### M2: architecture-agnostic paged scheduler + real (non-greedy) sampling
+
+- `crates/model/src/serve.rs` (new): `PagedDecoder` trait + a generic
+  `Scheduler<D>` — moved verbatim from `qwen::serve`, which now re-exports the
+  same names as a type alias (`qwen::serve::Scheduler = model::serve::
+  Scheduler<Engine>`). Zero changes needed at any existing call site
+  (`perf_cli.rs`, `perf/src/targets.rs`, `perf_engine.rs`). All 22 pre-existing
+  `serve.rs` tests pass unchanged — this was a pure extraction, not a rewrite.
+- Real sampling (`temperature`/`top_k`/`top_p`), previously entirely absent
+  from the batched serving engine: `Scheduler::submit_sampled` alongside the
+  unchanged greedy `submit`. Minimizes device→host traffic via a new small
+  kernel (`topk_extract_step.wgsl`) composed with the existing `argmax_part`/
+  `argmax_final` pair to extract each row's top-K candidates in ONE GPU
+  submission — `[bsz, 64]` read back per decode step instead of `[bsz, vocab]`
+  (>1000× less data at real vocab sizes) — with the actual sampling decision
+  made on the host. See the plan's W3 section for the full design and why a
+  fully-fused on-device kernel was deliberately not attempted this pass.
+  Gated bit-identical (extraction) and reproducible-by-seed (sampling) on both
+  CPU and GPU; see `crates/qwen/src/serve.rs`'s and `crates/model/src/
+  serve.rs`'s test modules.
+
+### M4: W7 — `Engine::logits` de-serialised at admission; re-measured against M3
+
+The one remaining host-computed head inside `qwen::serve::Engine`:
+`Engine::logits(&hidden)` — the FIRST token's logits at admission (every
+decode step after that already runs the on-device head, `submit_greedy_head`/
+`forward_batched_topk`) — was a single-threaded scalar loop over
+`[vocab, d_model]` (real Qwen3-0.6B: 151936 × 1024 ≈ 155M multiply-adds on
+ONE core, per request). Replaced with `model::hostmath::matvec_par` — the
+same rayon-over-output-rows + AVX2/FMA-per-row routine `qwen::sample`'s
+decode path already uses for exactly this shape (its own doc comment records
+measuring "hundreds of ms per token" from the scalar version at this size).
+Gated by the existing `serve::tests::device_head_argmax_matches_the_host_head`
+and the full `topk_extraction_matches_host_reference` /
+`scheduler_sampled_requests_are_reproducible_and_differ_from_greedy` suite —
+all pass unchanged (parallel accumulation order differs from the scalar
+loop's, and the gate already tolerates that: it compares against a device
+readback of the SAME computation, not a hand-written reference sum, so
+non-associativity was already priced in).
+
+**Re-measured, same box, same `http:qwen:` sweep, same `chat/in24/out12`
+workload, release build, `--smoke --ladder 1,2`:**
+
+| concurrency | ttfa p99 (M3) | ttfa p99 (M4, this change) |
+|---|---:|---:|
+| 1 | 2 952 ms | 3 890 ms |
+| 2 | 1 063 ms | 1 403 ms |
+
+Both numbers are **higher** than M3's, not lower — reported as measured
+rather than reframed, per this doc's own standing rule. Repeating the M4 run
+gave 3 886 ms / 1 435 ms, i.e. tight run-to-run agreement (this box's
+variance is low), so the M3→M4 delta is real on THIS box at THIS time, not
+noise between the two M4 samples.
+
+**Bisected.** Reverted `Engine::logits` back to the single-threaded scalar
+loop, rebuilt release, re-ran the IDENTICAL sweep immediately after the M4
+runs above (same box-state neighborhood, differing ONLY in this one
+function):
+
+| concurrency | ttfa p99 (scalar `logits`, reverted) | ttfa p99 (M4, `matvec_par`) |
+|---|---:|---:|
+| 1 | 4 058 ms | ~3 888 ms (avg of the two M4 runs) |
+| 2 | 1 788 ms | ~1 419 ms (avg of the two M4 runs) |
+
+Restoring the fix (re-applying `matvec_par`) is clearly **faster** in this
+close-together A/B — concurrency 2's TTFA drops by ~370 ms (21%), concurrency
+1's by ~170 ms (4%). This resolves the open question above: the earlier
+M3→M4 gap was **box-state drift across the session** (this box's absolute
+numbers moved by ~1000 ms at concurrency 1 between when M3 and M4 were taken,
+with no code difference in the served path other than this one function, per
+the reverted-vs-fixed A/B done back-to-back), not a regression the `logits`
+change introduced. The fix restored the `matvec_par` implementation. **Still
+open:** an absolute `perf gate` baseline should still be captured freshly
+right before it is committed (`brain perf gate --update`), rather than reused
+from either M3 or M4, given this box's demonstrated absolute-number drift
+over a session — the gate's own generous floor (fraction of baseline) is
+designed to tolerate this kind of drift, but the baseline itself should be
+recent.
+
+What IS unambiguous and gated: `Engine::logits` no longer serialises 155M
+FLOPs onto one core at admission; it uses the same parallel/vectorised path
+decode already relies on, with zero output change on every existing
+correctness test, and is now also confirmed faster by a controlled
+same-session A/B, not just architecturally sound.
+
 ## Still planned
 
 1. `capability::Provider` adoption by `qwen`, `yolo`, `depth`, `tts` (L) —

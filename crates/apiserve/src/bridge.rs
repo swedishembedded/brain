@@ -234,9 +234,7 @@ pub struct CancelGuard {
 impl Drop for CancelGuard {
     fn drop(&mut self) {
         self.token.cancel();
-        if let Ok(mut m) = self.jobs.lock() {
-            m.remove(&self.id);
-        }
+        self.jobs.remove(&self.id);
     }
 }
 
@@ -370,13 +368,13 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
             Ok(Err(reason)) => {
                 eprintln!("apiserve: auto-fetch {model_owned}: {reason}");
                 let _ = tx.send(StreamMsg::Err(ApiError::model_not_found(provider, &model_owned)));
-                if let Ok(mut m) = jobs.lock() { m.remove(&id); }
+                jobs.remove(&id);
                 return;
             }
             Err(join_err) => {
                 eprintln!("apiserve: auto-fetch {model_owned}: blocking task failed: {join_err}");
                 let _ = tx.send(StreamMsg::Err(ApiError::model_not_found(provider, &model_owned)));
-                if let Ok(mut m) = jobs.lock() { m.remove(&id); }
+                jobs.remove(&id);
                 return;
             }
         }
@@ -417,9 +415,7 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
             _ = admit_rx => {}
             _ = tokio::time::sleep(admit_deadline) => {
                 token.cancel();
-                if let Ok(mut m) = jobs.lock() {
-                    m.remove(&id);
-                }
+                jobs.remove(&id);
                 let _ = tx_timeout.send(StreamMsg::Err(ApiError::overloaded(provider, "request could not be admitted within the deadline")));
             }
         }

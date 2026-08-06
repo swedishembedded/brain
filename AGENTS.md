@@ -313,12 +313,13 @@ The recent workstream (P7.x) is concurrent LLM serving. Key pieces:
 | Piece | Where | What |
 |---|---|---|
 | Paged KV foundation | `crates/model/src/paged.rs` | block allocator, `BlockTable` (+`truncate`) |
-| Serving engine | `crates/qwen/src/serve.rs` | shared block pools, batched **ragged paged decode**, batched + **chunked prefill**, **int8 paged KV** (~4× smaller pool), **speculative decoding**, `Engine::load` from checkpoint |
-| Scheduler | `crates/qwen/src/serve.rs` | continuous batching (multi-sequence concurrent decode) + throughput benchmark |
-| Residency | `crates/residency` | tiers model weights GPU/RAM/disk by LRU within a memory budget; schedules jobs (batch-by-model, queue-age-aware, parallel lanes) |
+| Serving engine | `crates/qwen/src/serve.rs` | shared block pools, batched **ragged paged decode**, batched + **chunked prefill**, **int8 paged KV** (~4× smaller pool), **speculative decoding**, on-device greedy/top-K sampling head, `Engine::load` from checkpoint; implements the generic `model::serve::PagedDecoder` seam |
+| Scheduler | `crates/model/src/serve.rs` | `PagedDecoder`-generic continuous batching (multi-sequence concurrent admission/decode) + real (non-greedy) sampling; `qwen::serve::Scheduler` is a type alias over `Engine` — the seam a future decoder LM adopts by implementing `PagedDecoder`, not by duplicating the scheduler |
+| Shared Qwen chat serving | `crates/qwen/src/chat.rs` | chat-template rendering, tool-call/stop-string streaming, cancellation — one implementation shared by `resident_llm.rs` (HTTP/D-Bus) and `qwen::caps.rs` (`brain do`), so they cannot diverge |
+| Residency | `crates/residency` | tiers model weights GPU/RAM/disk by a size/reload-cost-aware policy within a memory budget; schedules jobs (batch-by-model, queue-age-aware, parallel lanes); `crates/residency/src/admission.rs` is the shared edge-concurrency-ceiling/admit-deadline policy both HTTP and D-Bus read from |
 | Capability interface | `crates/capability` | models advertise a `Manifest` of typed `ActionSpec`s; CLI (`brain caps` / `brain do`) and the event API dispatch generically — adding a capability = implementing `Action`, no new subcommand or event variant |
 | Transports | `crates/server` | one JSONL protocol over **stdio, TCP, and Unix socket**; thread-per-connection, bounded, panic-isolated |
-| D-Bus surface | `crates/dbus` | exposes `capability::Registry` over `com.swedishembedded.Brain1`, passing images/streams via fd (memfd/mmap + dmabuf). Example client: `examples/dbus`. Also serves the stats snapshot (`StatsSnapshot` method + `StatsStream` signal) |
+| D-Bus surface | `crates/dbus` | exposes the same `residency::Executor`-backed resident models HTTP serves (`Run`/`Subscribe`, streaming `Progress::delta`/`Progress::event`, the same admission deadline + concurrency ceiling as HTTP) over `com.swedishembedded.Brain1`, passing images/streams via fd (memfd/mmap + dmabuf). Example client: `examples/dbus`. Also serves the stats snapshot (`StatsSnapshot` method + `StatsStream` signal) |
 | Stats subsystem | `crates/stats` (`brain-stats`) | self-describing, hierarchical JSON `StatsSnapshot` (accelerators/models/executor/requests/connections + open `extra`), assembled from `StatsSource` contributors; `braintop` renders it |
 | Event HFSM | `crates/runtime`, `crates/events`, `crates/hfsm` | `camera_frame`→`object_detected`, `user_text`→`brain_text_chunk` |
 | Python client | `brain-py/` | drives the `brain` binary as an event-driven subprocess (not in the build/test path) |

@@ -17,9 +17,11 @@
 //! P0 (this file + the three above) is pure CPU logic — the memory model — with no
 //! GPU or model dependency, so it is fully unit-testable.
 
+pub mod admission;
 pub mod bridge;
 pub mod budget;
 pub mod executor;
+pub mod jobs;
 pub mod lru;
 pub mod manager;
 pub mod model;

@@ -74,8 +74,17 @@ impl StreamTx {
     /// cold auto-fetch tick ahead of the real job (`step`/`total` are then
     /// byte counts, not steps) -- an additive JSON key, so an older client
     /// that doesn't look for `phase` sees exactly the frame it always has.
-    pub fn progress(&mut self, step: u32, total: u32, message: &str, phase: Option<&str>) {
-        self.send(&json!({"type": "progress", "step": step, "total": total, "message": message, "phase": phase}), None);
+    /// `delta` is a per-token text fragment (`capability::Progress::delta`) and
+    /// `event` a structured out-of-band payload (reasoning/tool-call chunks,
+    /// `capability::Progress::event`) — both `None` for a plain step tick. A
+    /// `Subscribe`r that drops these gets a `done` frame with the final blob but
+    /// NO token stream in between; forwarding them is what makes `Subscribe`
+    /// usable for chat the same way the HTTP SSE surface already is.
+    pub fn progress(&mut self, step: u32, total: u32, message: &str, phase: Option<&str>, delta: Option<&str>, event: Option<&serde_json::Value>) {
+        self.send(
+            &json!({"type": "progress", "step": step, "total": total, "message": message, "phase": phase, "delta": delta, "event": event}),
+            None,
+        );
     }
 
     /// A streaming-transcription segment: the `text` decoded for window `index` —
@@ -102,5 +111,47 @@ impl StreamTx {
     /// Terminal error frame.
     pub fn error(&mut self, message: &str) {
         self.send(&json!({"type": "error", "message": message}), None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Read exactly one SEQPACKET datagram off the client fd and parse it as a
+    /// frame header (no ancillary fd expected).
+    fn recv_frame(client: &OwnedFd) -> serde_json::Value {
+        let mut buf = [0u8; 4096];
+        let n = nix::sys::socket::recv(client.as_raw_fd(), &mut buf, MsgFlags::empty()).expect("recv one frame");
+        serde_json::from_slice(&buf[..n]).expect("frame is valid JSON")
+    }
+
+    /// REGRESSION: a `progress` frame must carry `delta`/`event` when the
+    /// caller supplies them — before this fix, `Subscribe` dropped BOTH
+    /// unconditionally (only step/total/message ever reached the wire), so a
+    /// bus subscriber to a streaming chat action received no token text at
+    /// all, only the terminal blob.
+    #[test]
+    fn progress_frame_carries_delta_and_event() {
+        let (mut tx, client) = pair().unwrap();
+        tx.progress(1, 10, "generating", None, Some("hel"), Some(&json!({"kind": "reasoning", "text": "thinking"})));
+        let frame = recv_frame(&client);
+        assert_eq!(frame["type"], "progress");
+        assert_eq!(frame["step"], 1);
+        assert_eq!(frame["delta"], "hel");
+        assert_eq!(frame["event"]["kind"], "reasoning");
+        assert_eq!(frame["event"]["text"], "thinking");
+    }
+
+    /// A plain step tick (no delta/event) must still round-trip as explicit
+    /// JSON `null`s, not an absent key — an older/simpler client can ignore
+    /// them either way, but the shape must be stable.
+    #[test]
+    fn progress_frame_without_delta_or_event_sends_explicit_nulls() {
+        let (mut tx, client) = pair().unwrap();
+        tx.progress(2, 10, "working", None, None, None);
+        let frame = recv_frame(&client);
+        assert!(frame["delta"].is_null());
+        assert!(frame["event"].is_null());
     }
 }

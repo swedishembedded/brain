@@ -26,9 +26,11 @@ use zbus::zvariant::OwnedFd as ZOwnedFd;
 use crate::fd::{bytes_to_fd, read_fd_to_vec};
 use crate::stream::StreamTx;
 
-/// Armed cancel tokens for in-flight jobs, keyed by job id. An entry lives from
-/// submission until the job's reply fires, so `Cancel` can find any running job.
-type JobRegistry = Arc<Mutex<HashMap<u64, CancelToken>>>;
+/// Armed cancel tokens for in-flight jobs, keyed by job id — `residency::jobs::
+/// JobRegistry`, the SAME shared type `crates/apiserve`'s `AppState` uses
+/// (keyed by `Uuid` there instead). An entry lives from submission until the
+/// job's reply fires, so `Cancel` can find any running job.
+type JobRegistry = residency::jobs::JobRegistry<u64>;
 
 /// A legacy short name (e.g. `"mock"`) is a deprecation, not a second id: every
 /// D-Bus entry point that takes a `model` string resolves it to its canonical
@@ -49,6 +51,15 @@ pub struct Manager {
     /// model is a plain `"no model '…'"` reply with zero I/O, exactly today's
     /// behavior. Set only via [`Manager::with_supplier`] (`crate::serve_with_shutdown_and_supplier`).
     supplier: Option<Arc<dyn ModelSupplier>>,
+    /// Edge concurrency ceiling (`residency::admission::EDGE_CONCURRENCY`) --
+    /// the SAME gate `crates/apiserve`'s HTTP surfaces apply, so a saturated
+    /// server sheds identically over either transport. A `Run`/`Subscribe`
+    /// that can't acquire a permit immediately is shed, not queued.
+    edge_permits: Arc<tokio::sync::Semaphore>,
+    /// Bounded wait for a request to be ADMITTED (claimed onto a lane) before
+    /// it is shed -- `residency::admission::admit_deadline_from_env()`,
+    /// mirroring `apiserve::AppState::admit_deadline`.
+    admit_deadline: std::time::Duration,
 }
 
 impl Manager {
@@ -56,9 +67,11 @@ impl Manager {
         Manager {
             executor,
             version: env!("CARGO_PKG_VERSION").to_string(),
-            jobs: Arc::new(Mutex::new(HashMap::new())),
+            jobs: JobRegistry::new(),
             next_job: AtomicU64::new(0),
             supplier: None,
+            edge_permits: Arc::new(tokio::sync::Semaphore::new(residency::admission::EDGE_CONCURRENCY)),
+            admit_deadline: residency::admission::admit_deadline_from_env(),
         }
     }
 
@@ -67,6 +80,13 @@ impl Manager {
     /// '…'"`. `None` restores today's no-auto-fetch behavior.
     pub fn with_supplier(mut self, supplier: Option<Arc<dyn ModelSupplier>>) -> Manager {
         self.supplier = supplier;
+        self
+    }
+
+    /// Override the admission deadline (builder-style) -- tests use this for a
+    /// short, deterministic deadline instead of the env-derived default.
+    pub fn with_admit_deadline(mut self, deadline: std::time::Duration) -> Manager {
+        self.admit_deadline = deadline;
         self
     }
 
@@ -107,16 +127,16 @@ impl Manager {
         }
     }
 
-    /// Arm `inv` with a fresh [`CancelToken`] and register it under a new job id.
-    /// The caller must remove the entry (via [`finish_job`]) when the reply fires.
-    fn register_job(&self, inv: &mut Invocation) -> u64 {
+    /// Arm `inv` with a fresh [`CancelToken`] and register it under a new job id,
+    /// returning both -- the caller must remove the entry (via [`finish_job`])
+    /// when the reply fires, and may use the token to cancel on an admission
+    /// timeout before the job ever starts.
+    fn register_job(&self, inv: &mut Invocation) -> (u64, CancelToken) {
         let token = CancelToken::armed();
         inv.cancel = token.clone();
         let job = self.next_job.fetch_add(1, Ordering::Relaxed) + 1;
-        if let Ok(mut m) = self.jobs.lock() {
-            m.insert(job, token);
-        }
-        job
+        self.jobs.insert(job, token.clone());
+        (job, token)
     }
 
     /// Assemble an [`Invocation`] from params JSON, input fds, and per-fd metadata.
@@ -232,9 +252,7 @@ fn emit_window(executor: &Executor, model: &str, window: &[f32], prompt_id: i64,
 
 /// Drop a finished job's cancel token from the registry.
 fn finish_job(jobs: &JobRegistry, job: u64) {
-    if let Ok(mut m) = jobs.lock() {
-        m.remove(&job);
-    }
+    jobs.remove(&job);
 }
 
 /// Convert an [`Outcome`]'s blobs to fds (memfd, or best-effort dmabuf) + the
@@ -257,16 +275,42 @@ fn outcome_to_fds(outcome: &Outcome, want_dmabuf: bool) -> Result<(HashMap<Strin
 /// on `Manager`: the `#[zbus::interface]` macro on `impl Manager` below treats
 /// every item in that block as a candidate D-Bus method, so a private helper
 /// must live outside it.
-fn submit_subscribed_job(exec: Executor, jobs: JobRegistry, stream: Arc<Mutex<crate::stream::StreamTx>>, job: u64, model: String, action: String, inv: Invocation) {
-    let (sp, sr) = (stream.clone(), stream);
+/// `admit_deadline`/`token` implement the SAME admission race `run` does
+/// (`apiserve::bridge::submit`'s shape): if the job hasn't started on a lane
+/// within the deadline, cancel it and tell the subscriber via an `error`
+/// frame rather than leaving them waiting silently. `permit` is the edge
+/// concurrency slot `subscribe` acquired -- held for the job's whole life,
+/// released only when its reply fires (whichever way it resolves).
+#[allow(clippy::too_many_arguments)]
+fn submit_subscribed_job(
+    exec: Executor,
+    jobs: JobRegistry,
+    stream: Arc<Mutex<crate::stream::StreamTx>>,
+    job: u64,
+    model: String,
+    action: String,
+    inv: Invocation,
+    admit_deadline: std::time::Duration,
+    token: CancelToken,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    let (sp, sr) = (stream.clone(), stream.clone());
+    let (admit_tx, admit_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut admit_tx = Some(admit_tx);
     exec.submit(
         Job::new(model, action, inv)
+            .on_admit(move || {
+                if let Some(tx) = admit_tx.take() {
+                    let _ = tx.send(());
+                }
+            })
             .on_progress(move |p: Progress| {
                 if let Ok(mut s) = sp.lock() {
-                    s.progress(p.step, p.total, &p.message, None);
+                    s.progress(p.step, p.total, &p.message, None, p.delta.as_deref(), p.event.as_ref());
                 }
             })
             .reply(move |r| {
+                let _permit = permit; // held until the reply fires, then dropped
                 finish_job(&jobs, job);
                 if let Ok(mut s) = sr.lock() {
                     match r {
@@ -284,6 +328,20 @@ fn submit_subscribed_job(exec: Executor, jobs: JobRegistry, stream: Arc<Mutex<cr
                 }
             }),
     );
+
+    // Race the admit deadline in the background: `subscribe` already returned
+    // the stream fd, so a timeout here can't turn into an error return the way
+    // `run`'s does -- it cancels the (already-submitted) job and reports the
+    // timeout as an `error` frame on the SAME stream instead. If admission
+    // wins the race first, this task is a no-op and exits immediately.
+    tokio::spawn(async move {
+        if tokio::time::timeout(admit_deadline, admit_rx).await.is_err() {
+            token.cancel();
+            if let Ok(mut s) = stream.lock() {
+                s.error("request could not be admitted within the deadline");
+            }
+        }
+    });
 }
 
 #[zbus::interface(name = "com.swedishembedded.Brain1.Manager")]
@@ -312,19 +370,45 @@ impl Manager {
         in_meta: String,
         transport: String,
     ) -> fdo::Result<(String, HashMap<String, ZOwnedFd>, String)> {
+        // Edge concurrency ceiling: shed immediately (never queue for a permit)
+        // when the server is already saturated -- the same "rejected at the
+        // edge" signal `apiserve`'s `GlobalConcurrencyLimitLayer`/`LoadShedLayer`
+        // give over HTTP, distinct from the admit-deadline case below ("accepted,
+        // but couldn't start a lane in time").
+        let _permit = self.edge_permits.clone().try_acquire_owned().map_err(|_| fdo::Error::Failed("server saturated: request rejected at the edge".into()))?;
         let model = resolve_model_alias(model);
         self.ensure_resident(&model).await?;
         let mut inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
         // Armed so ActiveJobs counts it; a Run has no client-visible job id, so its
         // token is only ever dropped here (the reply), never cancelled by Cancel.
-        let job = self.register_job(&mut inv);
+        let (job, token) = self.register_job(&mut inv);
         let jobs = self.jobs.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
-        // Run is one-shot; no streaming (default no-op on_progress).
-        self.executor.submit(Job::new(model, action, inv).reply(move |r| {
-            finish_job(&jobs, job);
-            let _ = tx.send(r);
-        }));
+        let (admit_tx, admit_rx) = tokio::sync::oneshot::channel::<()>();
+        self.executor.submit(
+            Job::new(model, action, inv)
+                .on_admit(move || {
+                    let _ = admit_tx.send(());
+                })
+                // Run is one-shot; no mid-run streaming (default no-op on_progress).
+                .reply(move |r| {
+                    finish_job(&jobs, job);
+                    let _ = tx.send(r);
+                }),
+        );
+
+        // Admission race: work started on a lane vs. the deadline elapsing --
+        // mirrors `apiserve::bridge::submit` exactly, so both transports shed a
+        // request that couldn't start in time identically.
+        tokio::select! {
+            _ = admit_rx => {}
+            _ = tokio::time::sleep(self.admit_deadline) => {
+                token.cancel();
+                finish_job(&self.jobs, job);
+                return Err(fdo::Error::Failed("request could not be admitted within the deadline".into()));
+            }
+        }
+
         let outcome = rx.await.map_err(|_| fdo::Error::Failed("executor dropped the reply".into()))?.map_err(fdo::Error::Failed)?;
         let want_dmabuf = transport.eq_ignore_ascii_case("dmabuf");
         let (out_fds, out_meta) = outcome_to_fds(&outcome, want_dmabuf).map_err(fdo::Error::Failed)?;
@@ -350,17 +434,22 @@ impl Manager {
         in_fds: HashMap<String, ZOwnedFd>,
         in_meta: String,
     ) -> fdo::Result<(u64, ZOwnedFd)> {
+        // Edge concurrency ceiling -- see `run`'s comment. Held for the whole
+        // subscription (not just this method call), so it's threaded into
+        // `submit_subscribed_job` and dropped only when the job's reply fires.
+        let permit = self.edge_permits.clone().try_acquire_owned().map_err(|_| fdo::Error::Failed("server saturated: request rejected at the edge".into()))?;
         let model = resolve_model_alias(model);
         let mut inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
         // Arm a cancel token under the returned job id: `Cancel(job)` flips it and
         // the running action aborts at its next poll (see docs/serving-contract.md).
-        let job = self.register_job(&mut inv);
+        let (job, token) = self.register_job(&mut inv);
         let jobs = self.jobs.clone();
         let (stream, client) = crate::stream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;
         let stream = Arc::new(Mutex::new(stream));
+        let admit_deadline = self.admit_deadline;
 
         if self.executor.manifests().iter().any(|m| m.model == model) {
-            submit_subscribed_job(self.executor.clone(), jobs, stream, job, model, action, inv);
+            submit_subscribed_job(self.executor.clone(), jobs, stream, job, model, action, inv, admit_deadline, token, permit);
             return Ok((job, client.into()));
         }
 
@@ -386,7 +475,7 @@ impl Manager {
             let outcome = tokio::task::spawn_blocking(move || {
                 fetch_exec.ensure_model(&fetch_model, supplier.as_ref(), &mut |name, got, total| {
                     if let Ok(mut s) = fetch_stream.lock() {
-                        s.progress(got, total, &format!("fetching {fetch_model}: {name}"), Some("fetching"));
+                        s.progress(got, total, &format!("fetching {fetch_model}: {name}"), Some("fetching"), None, None);
                     }
                 })
             })
@@ -410,7 +499,7 @@ impl Manager {
                     return;
                 }
             }
-            submit_subscribed_job(exec, jobs, stream_bg, job, model_owned, action, inv);
+            submit_subscribed_job(exec, jobs, stream_bg, job, model_owned, action, inv, admit_deadline, token, permit);
         });
 
         Ok((job, client.into()))
@@ -504,10 +593,7 @@ impl Manager {
     /// `error` frame). Returns `true` if the job was found still in flight,
     /// `false` for an unknown or already-finished id.
     async fn cancel(&self, job: u64) -> bool {
-        match self.jobs.lock() {
-            Ok(m) => m.get(&job).map(|t| t.cancel()).is_some(),
-            Err(_) => false,
-        }
+        self.jobs.get(&job).map(|t| t.cancel()).is_some()
     }
 
     #[zbus(property)]
@@ -518,7 +604,7 @@ impl Manager {
     /// Jobs currently in flight (submitted via `Run`/`Subscribe`, reply not yet fired).
     #[zbus(property)]
     async fn active_jobs(&self) -> u32 {
-        self.jobs.lock().map(|m| m.len()).unwrap_or(0) as u32
+        self.jobs.len() as u32
     }
 
     #[zbus(property)]

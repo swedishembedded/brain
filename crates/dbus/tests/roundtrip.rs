@@ -239,3 +239,60 @@ fn dbus_serve_stops_promptly_once_shutdown_fires() {
     }
     handle.join().unwrap().unwrap();
 }
+
+/// The D-Bus surface must shed an unadmittable request the same way `apiserve`'s
+/// HTTP surfaces do (`admit_deadline_sheds_saturated_lane_with_429_and_cancels`):
+/// pin the one lane with a long-running job, then a second `Run` for the same
+/// model must fail close to the configured deadline (not hang, not succeed by
+/// silently queuing past it), and the pinning job's cancel token must actually
+/// fire so it doesn't keep running to completion after being shed.
+#[test]
+fn admit_deadline_sheds_a_saturated_lane() {
+    if std::env::var("DBUS_SESSION_BUS_ADDRESS").map(|s| s.is_empty()).unwrap_or(true) {
+        eprintln!("SKIP: no session bus (run under `dbus-run-session -- cargo test ...`)");
+        return;
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let rev: Arc<dyn residency::ResidentModel> = Arc::new(residency::bridge::ProviderResident::stateless(Arc::new(RevProvider)));
+        // ONE device -> one lane, so a second same-model job cannot be claimed
+        // until the first's group finishes.
+        let mut budgets = residency::budget::Budgets::new();
+        budgets.set(residency::Device::Gpu(0), 24 << 30, 0);
+        let executor = residency::Executor::start(vec![rev], budgets, residency::Policy::default());
+        let manager = brain_dbus::service::Manager::new(executor).with_admit_deadline(std::time::Duration::from_millis(300));
+        let name = format!("com.swedishembedded.Brain1.admittest{}", std::process::id());
+        let _conn = zbus::connection::Builder::session()
+            .unwrap()
+            .name(name.as_str())
+            .unwrap()
+            .serve_at(brain_dbus::OBJECT_PATH, manager)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        let client = zbus::Connection::session().await.unwrap();
+        let proxy = zbus::Proxy::new(&client, name.clone(), brain_dbus::OBJECT_PATH, "com.swedishembedded.Brain1.Manager").await.unwrap();
+
+        // Pin the lane: a `slow` Run takes ~10s (500 steps x 20ms) unless cancelled.
+        let pin_proxy = proxy.clone();
+        tokio::spawn(async move {
+            let empty: HashMap<String, ZOwnedFd> = HashMap::new();
+            let _: Result<(String, HashMap<String, ZOwnedFd>, String), _> = pin_proxy.call("Run", &("rev", "slow", "{}", empty, "", "memfd")).await;
+        });
+        // Let the pinning job actually get claimed onto the lane before the
+        // second one arrives (otherwise the dispatcher could batch both into
+        // ONE group and admit both at once -- the scenario this test needs is
+        // the SECOND job queuing behind an ALREADY-running first one).
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let t0 = std::time::Instant::now();
+        let empty2: HashMap<String, ZOwnedFd> = HashMap::new();
+        let res: zbus::Result<(String, HashMap<String, ZOwnedFd>, String)> = proxy.call("Run", &("rev", "slow", "{}", empty2, "", "memfd")).await;
+        let elapsed = t0.elapsed();
+        assert!(res.is_err(), "a Run that cannot be admitted within the deadline must be shed, not queued silently");
+        assert!(elapsed < std::time::Duration::from_secs(2), "shedding must happen close to the 300ms deadline, not hang: took {elapsed:?}");
+        eprintln!("admit-deadline ok: second Run shed in {elapsed:?}");
+    });
+}

@@ -63,6 +63,10 @@ const MATMUL_I8_GEMV: usize = 25;
 // advance the paged metadata without a host round-trip.
 const DECODE_FEED: usize = 26;
 const DECODE_ADVANCE: usize = 27;
+// Iterative on-device top-K extraction (W3): composes with ARGMAX_PART/
+// ARGMAX_FINAL/ARGMAX_ROW above, so real (non-greedy) sampling reads back
+// `[bsz, TOPK_CAPACITY]` candidates instead of the whole `[bsz, vocab]` row.
+const TOPK_EXTRACT_STEP: usize = 28;
 
 const PIPELINES: &[(&str, &str)] = &[
     ("embed", kernels::EMBED),
@@ -93,6 +97,7 @@ const PIPELINES: &[(&str, &str)] = &[
     ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
     ("decode_feed", kernels::DECODE_FEED),
     ("decode_advance", kernels::DECODE_ADVANCE),
+    ("topk_extract_step", kernels::TOPK_EXTRACT_STEP),
 ];
 
 /// Longest on-device decode window (tokens per host round-trip). The scheduler
@@ -130,6 +135,12 @@ fn ids() -> KernelIds {
 /// Chunks per row for the two-stage argmax; 256 threads per row saturates the
 /// reduction without a large partial buffer (256*2 f32 per row).
 const ARGMAX_CHUNKS: u32 = 256;
+
+/// The largest `k` a real (non-greedy) sampling decode step will request —
+/// device scratch for the iterative top-K extraction is sized to this bound.
+/// 64 comfortably covers the standard `top_k = 40` default with headroom for
+/// a wider top-p nucleus; a request asking for more is clamped to this.
+pub const TOPK_CAPACITY: u32 = 64;
 
 fn fb(x: f32) -> u32 {
     x.to_bits()
@@ -288,6 +299,11 @@ pub struct Engine {
     /// `[max_batch, ARGMAX_CHUNKS, 2]` partial (value, index) pairs for the
     /// two-stage argmax reduction.
     argmax_part_dev: DeviceBuffer,
+    /// `[max_batch, TOPK_CAPACITY]` on-device top-K extraction output: the
+    /// row's best-to-worst logit values and their vocab indices, filled by
+    /// `submit_topk_head` iterating the argmax pair + `topk_extract_step`.
+    topk_vals_dev: DeviceBuffer,
+    topk_idx_dev: DeviceBuffer,
 }
 
 impl Engine {
@@ -450,6 +466,8 @@ impl Engine {
         let logits_dev = st(max_batch as u64 * vocab);
         let argmax_dev = st(max_batch as u64);
         let argmax_part_dev = st(max_batch as u64 * ARGMAX_CHUNKS as u64 * 2);
+        let topk_vals_dev = st(max_batch as u64 * TOPK_CAPACITY as u64);
+        let topk_idx_dev = st(max_batch as u64 * TOPK_CAPACITY as u64);
         Engine {
             cfg,
             caps,
@@ -479,6 +497,8 @@ impl Engine {
             logits_dev,
             argmax_dev,
             argmax_part_dev,
+            topk_vals_dev,
+            topk_idx_dev,
         }
     }
 
@@ -857,24 +877,34 @@ impl Engine {
         self.gpu.read(&self.argmax_dev, bsz as usize).into_iter().map(|x| x as u32).collect()
     }
 
-    /// Record + submit the greedy head (logits + row argmax into
-    /// `argmax_dev`) WITHOUT reading back — the on-device decode window feeds
-    /// the result straight into the next step.
-    fn submit_greedy_head(&self, bsz: u32) {
+    /// Record the head steps that turn `sc.xn_final` into `[bsz, vocab]`
+    /// `logits_dev` (int8 or fp32, whichever the engine holds) — shared by
+    /// [`Self::submit_greedy_head`] and [`Self::submit_topk_head`], which
+    /// otherwise diverge only in what they do with the resulting logits.
+    fn head_steps(&self, steps: &mut Vec<Step>, bsz: u32) {
         let g = &self.gpu;
         let (d, v) = (self.cfg.d_model, self.cfg.vocab);
-        let mut steps: Vec<Step> = Vec::new();
         match (&self.w8, &self.head8, &self.head_dev) {
             // Int8 head: quantize the final hidden rows, DP4A GEMM into logits.
             (Some(q8), Some(h8), _) => {
-                q8.quant(g, &mut steps, &self.sc.xn_final, d, bsz);
-                self.mm8(q8, &mut steps, h8, &self.logits_dev, bsz);
+                q8.quant(g, steps, &self.sc.xn_final, d, bsz);
+                self.mm8(q8, steps, h8, &self.logits_dev, bsz);
             }
             (_, _, Some(head_dev)) => {
                 steps.push(self.mm(&self.sc.xn_final, head_dev, &self.logits_dev, bsz, d, v));
             }
             _ => unreachable!("engine holds either an fp32 or an int8 head"),
         }
+    }
+
+    /// Record + submit the greedy head (logits + row argmax into
+    /// `argmax_dev`) WITHOUT reading back — the on-device decode window feeds
+    /// the result straight into the next step.
+    fn submit_greedy_head(&self, bsz: u32) {
+        let g = &self.gpu;
+        let v = self.cfg.vocab;
+        let mut steps: Vec<Step> = Vec::new();
+        self.head_steps(&mut steps, bsz);
         let argmax_shape = OpShape { m: bsz, n: v, k: 0, dtype: Dtype::F32 };
         if self.selector.select(Op::ArgMaxRow, argmax_shape, &self.caps)
             == KernelVariant::SplitReduction
@@ -891,6 +921,74 @@ impl Engine {
             steps.push(g.step(ARGMAX_ROW, &[&self.logits_dev, &self.argmax_dev], &[bsz, v], bsz));
         }
         g.submit(&[], &steps);
+    }
+
+    /// The row's top-`k` (token id, logit) candidates, best first, entirely
+    /// from device work — see [`Self::submit_topk_head`]. `k` is clamped to
+    /// [`TOPK_CAPACITY`].
+    fn topk_from_hidden(&self, bsz: u32, k: u32) -> Vec<Vec<(u32, f32)>> {
+        let k = k.min(TOPK_CAPACITY).max(1);
+        self.submit_topk_head(bsz, k);
+        let vals = self.gpu.read(&self.topk_vals_dev, (bsz * TOPK_CAPACITY) as usize);
+        let idx = self.gpu.read(&self.topk_idx_dev, (bsz * TOPK_CAPACITY) as usize);
+        (0..bsz as usize)
+            .map(|row| {
+                let base = row * TOPK_CAPACITY as usize;
+                (0..k as usize).map(|c| (idx[base + c] as u32, vals[base + c])).collect()
+            })
+            .collect()
+    }
+
+    /// Record + submit `k` iterations of (argmax pair, `topk_extract_step`)
+    /// in ONE submission: each iteration finds the current row maximum over
+    /// `logits_dev` (the same two-stage reduction [`Self::submit_greedy_head`]
+    /// uses) via the shared `argmax_dev` scratch, records it into column `col`
+    /// of `topk_vals_dev`/`topk_idx_dev`, and masks it out of `logits_dev` so
+    /// the next iteration finds the row's next-best value. This is what turns
+    /// a `[bsz, vocab]` row into a `[bsz, k]` candidate list with only ONE
+    /// host round-trip (the final readback in [`Self::topk_from_hidden`]) —
+    /// the design point of the whole seam: real (non-greedy) sampling must
+    /// never ship the full vocab back to the host.
+    fn submit_topk_head(&self, bsz: u32, k: u32) {
+        let g = &self.gpu;
+        let v = self.cfg.vocab;
+        let mut steps: Vec<Step> = Vec::new();
+        self.head_steps(&mut steps, bsz);
+        let argmax_shape = OpShape { m: bsz, n: v, k: 0, dtype: Dtype::F32 };
+        let split = self.selector.select(Op::ArgMaxRow, argmax_shape, &self.caps) == KernelVariant::SplitReduction;
+        let chunk = v.div_ceil(ARGMAX_CHUNKS);
+        for col in 0..k {
+            if split {
+                steps.push(g.step(
+                    ARGMAX_PART,
+                    &[&self.logits_dev, &self.argmax_part_dev],
+                    &[bsz, v, ARGMAX_CHUNKS, chunk],
+                    bsz * ARGMAX_CHUNKS,
+                ));
+                steps.push(g.step(ARGMAX_FINAL, &[&self.argmax_part_dev, &self.argmax_dev], &[bsz, ARGMAX_CHUNKS], bsz));
+            } else {
+                steps.push(g.step(ARGMAX_ROW, &[&self.logits_dev, &self.argmax_dev], &[bsz, v], bsz));
+            }
+            steps.push(g.step(
+                TOPK_EXTRACT_STEP,
+                &[&self.argmax_dev, &self.logits_dev, &self.topk_vals_dev, &self.topk_idx_dev],
+                &[bsz, v, TOPK_CAPACITY, col],
+                bsz,
+            ));
+        }
+        g.submit(&[], &steps);
+    }
+
+    /// Advance every sequence by one token, returning the row's top-`k`
+    /// (token id, logit) candidates instead of a single greedy token — the
+    /// entry point a caller doing real (non-greedy) sampling uses in place of
+    /// [`Self::forward_batched_greedy`]. `logits_dev` is mutated (masked) by
+    /// the extraction, exactly as `argmax_dev` already is by the greedy path —
+    /// callers never read either between decode steps.
+    pub(crate) fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: u32) -> Vec<Vec<(u32, f32)>> {
+        let (bsz, positions, seqlens, blocks, offsets, bt) = self.append_meta(tables);
+        self.run_batched_submit(bsz, Input::Tokens(inputs), &positions, &seqlens, &blocks, &offsets, &bt);
+        self.topk_from_hidden(bsz, k)
     }
 
     /// Advance every sequence by `k` tokens with ONE host round-trip (A4).
@@ -1073,9 +1171,17 @@ impl Engine {
         self.gpu.stats()
     }
 
+    /// Admission's one-time first-token logits (before the batched decode
+    /// loop, which never reaches this — see `submit_greedy_head`/
+    /// `forward_batched_topk`). `matvec_par` (rayon over `vocab` rows +
+    /// AVX2/FMA per row) replaces a single-threaded scalar loop that measured
+    /// hundreds of ms at the real 151936×1024 LM-head shape (see
+    /// `hostmath::matvec`'s doc comment) — a real per-request stall this
+    /// device-side-everything-else engine had left unfixed at exactly the one
+    /// remaining host head.
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
         let (d, v) = (self.cfg.d_model as usize, self.cfg.vocab as usize);
-        (0..v).map(|o| self.head[o * d..o * d + d].iter().zip(hidden).map(|(a, b)| a * b).sum()).collect()
+        model::hostmath::matvec_par(&self.head, hidden, v, d)
     }
 
     /// Blocks free in the pool — the capacity figure `brain perf kvcache` sizes
@@ -1259,482 +1365,67 @@ impl Engine {
     }
 }
 
-/// A submitted generation request.
-pub struct Request {
-    pub prompt: Vec<u32>,
-    pub max_new: usize,
-    pub eos: Option<u32>,
-}
+// The continuous-batching scheduler (`Request`, `RejectReason`, `QueueState`,
+// `AdmissionPolicy` + `UnboundedQueue`/`MaxQueueDepth`/`DeadlineAware`,
+// `StepReport`, `Scheduler`) moved to `model::serve` -- it is architecture-
+// agnostic over `model::serve::PagedDecoder`, not Qwen-specific. Re-exported
+// here so every existing `qwen::serve::Scheduler`/`Request`/... caller
+// (`crates/cli/src/perf_cli.rs`, `crates/perf/src/targets.rs`,
+// `crates/cli/src/perf_engine.rs`) needs zero changes.
+pub use model::serve::{AdmissionPolicy, DeadlineAware, MaxQueueDepth, QueueState, RejectReason, Request, SampleParams, StepReport, UnboundedQueue};
+pub type Scheduler = model::serve::Scheduler<Engine>;
 
-/// Why a request was refused at admission.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RejectReason {
-    /// Can never fit the engine's per-sequence capacity.
-    ExceedsCapacity { need: u32, capacity: u32 },
-    /// Refused by the installed [`AdmissionPolicy`].
-    PolicyRejected { policy: &'static str },
-    /// A prompt token outside the model's vocabulary. Admitting it would make
-    /// the embedding gather read out of bounds — the kernels are trusted (no
-    /// per-access clamps), so the failure would be silent garbage, not an
-    /// error.
-    InvalidToken { token: u32, vocab: u32 },
-}
-
-impl std::fmt::Display for RejectReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RejectReason::ExceedsCapacity { need, capacity } => {
-                write!(f, "needs {need} tokens, engine capacity is {capacity}")
-            }
-            RejectReason::PolicyRejected { policy } => write!(f, "rejected by {policy}"),
-            RejectReason::InvalidToken { token, vocab } => {
-                write!(f, "token {token} is outside the vocabulary ({vocab})")
-            }
-        }
+impl model::serve::PagedDecoder for Engine {
+    fn alloc_mut(&mut self) -> &mut BlockAllocator {
+        &mut self.alloc
     }
-}
-
-/// What the queue looks like when an admission decision is made.
-#[derive(Clone, Copy, Debug)]
-pub struct QueueState {
-    /// Requests waiting behind this one (its position in the queue).
-    pub queued_ahead: usize,
-    /// Sequences currently decoding.
-    pub running: usize,
-    /// KV blocks free in the pool.
-    pub free_blocks: u32,
-    /// Observed mean milliseconds to serve one request, when known.
-    pub mean_service_ms: Option<f64>,
-}
-
-/// Decide what to do with work that arrives beyond capacity.
-///
-/// `perf overload` measured the default (queue without bound) collapsing at 2x
-/// offered load: goodput fell below half its peak because compute was spent on
-/// answers past their deadline. An engine is rewarded for refusing work it
-/// provably cannot finish in time; policies are pure functions of
-/// [`QueueState`], unit-testable with no engine at all.
-pub trait AdmissionPolicy: Send + Sync {
-    fn name(&self) -> &'static str;
-    /// May this request enter the queue / stay admissible?
-    fn admit(&self, req: &Request, state: &QueueState) -> bool;
-}
-
-/// Queue without bound — the historical behaviour and the default.
-pub struct UnboundedQueue;
-impl AdmissionPolicy for UnboundedQueue {
-    fn name(&self) -> &'static str {
-        "unbounded_queue"
+    fn max_prefill_tokens(&self) -> u32 {
+        Engine::max_prefill_tokens(self)
     }
-    fn admit(&self, _req: &Request, _state: &QueueState) -> bool {
-        true
+    fn free_blocks(&self) -> u32 {
+        Engine::free_blocks(self)
     }
-}
-
-/// Refuse once more than `max` requests are already waiting.
-pub struct MaxQueueDepth(pub usize);
-impl AdmissionPolicy for MaxQueueDepth {
-    fn name(&self) -> &'static str {
-        "max_queue_depth"
+    fn max_seq_len(&self) -> usize {
+        Engine::max_seq_len(self)
     }
-    fn admit(&self, _req: &Request, state: &QueueState) -> bool {
-        state.queued_ahead < self.0
+    fn vocab(&self) -> usize {
+        Engine::vocab(self)
     }
-}
-
-/// Refuse work that provably cannot start inside its deadline: everything
-/// ahead must clear first, and if that alone exceeds the budget the compute
-/// would be spent on an answer nobody can use.
-pub struct DeadlineAware {
-    /// Per-request start deadline, ms.
-    pub deadline_ms: f64,
-}
-impl AdmissionPolicy for DeadlineAware {
-    fn name(&self) -> &'static str {
-        "deadline_aware"
+    fn blocks_for(&self, tokens: u32) -> u32 {
+        Engine::blocks_for(self, tokens)
     }
-    fn admit(&self, _req: &Request, state: &QueueState) -> bool {
-        match state.mean_service_ms {
-            Some(svc) => (state.queued_ahead as f64) * svc <= self.deadline_ms,
-            None => true, // nothing measured yet — cannot prove lateness
-        }
+    fn reclaim_prefix(&mut self, want: u32) -> u32 {
+        Engine::reclaim_prefix(self, want)
     }
-}
-
-/// What one [`Scheduler::step_report`] iteration did. Latency metrics
-/// (time-to-first-token, inter-token latency) are computed from this: [`Scheduler::step`]
-/// alone reports only *completions*, which is too coarse to see when a sequence
-/// was admitted or when each token landed, so no caller can derive TTFT/ITL from it.
-#[derive(Debug, Default)]
-pub struct StepReport {
-    /// Requests admitted (prefilled + first token sampled) this iteration.
-    pub admitted: Vec<u64>,
-    /// `(id, tokens produced this iteration)` — the first token counts on the
-    /// iteration the request was admitted.
-    pub produced: Vec<(u64, usize)>,
-    /// Requests that finished this iteration.
-    pub finished: Vec<u64>,
-    /// Requests refused at admission — impossible sizes and policy rejections
-    /// alike. Refusing beats both crashing and queueing forever.
-    pub rejected: Vec<(u64, RejectReason)>,
-    /// The same `(id, tokens)` pairs [`Scheduler::step`] returns.
-    pub completed: Vec<(u64, Vec<u32>)>,
-}
-
-/// A sequence the scheduler is actively decoding.
-struct Running {
-    id: u64,
-    table: BlockTable,
-    generated: Vec<u32>,
-    max_new: usize,
-    eos: Option<u32>,
-    next_input: u32,
-    done: bool,
-}
-
-/// **Continuous-batching scheduler.** Requests are submitted at any time, admitted
-/// when the KV pool + batch have room (prefilled + first token sampled), then every
-/// running sequence advances together in one batched decode step per iteration.
-/// Finished sequences return their blocks immediately, so newly submitted requests
-/// can be admitted mid-flight — the batch composition changes each iteration to keep
-/// as much useful work resident as possible.
-pub struct Scheduler {
-    eng: Engine,
-    waiting: std::collections::VecDeque<(u64, Request)>,
-    running: Vec<Running>,
-    next_id: u64,
-    max_running: usize,
-    /// Admission policy — what to do with work arriving beyond capacity.
-    admission: Box<dyn AdmissionPolicy>,
-    /// EWMA of ms per completed request, feeding DeadlineAware decisions.
-    mean_service_ms: Option<f64>,
-    started: std::collections::HashMap<u64, std::time::Instant>,
-    /// Policy rejections made at submit time, surfaced in the next report.
-    pending_rejects: Vec<(u64, RejectReason)>,
-    /// Max prompt tokens prefilled per iteration before yielding to decode.
-    ///
-    /// Admission runs a FULL prefill per accepted request, so without a budget
-    /// a burst of N arrivals performs N whole prompt forwards back-to-back
-    /// while every running sequence stalls — measured as TTFA p99 growing
-    /// 230 ms → 3413 ms (15×) and inter-token p99 10× from concurrency 1→32,
-    /// with the interactive SLO met at no concurrency level. Bounding the
-    /// prefill work per iteration lets decode run every iteration and spreads
-    /// a burst across several; the budget always admits at least one waiting
-    /// request per iteration, so nothing can starve.
-    prefill_budget: u32,
-}
-
-impl Scheduler {
-    pub fn new(eng: Engine, max_running: usize) -> Scheduler {
-        // Default budget: two full prefill chunks per iteration. Enough to keep
-        // admission moving under load, small enough that running sequences see
-        // a decode step between arrivals.
-        let prefill_budget = eng.max_prefill_tokens().saturating_mul(2).max(1);
-        Scheduler {
-            eng,
-            waiting: std::collections::VecDeque::new(),
-            running: Vec::new(),
-            next_id: 0,
-            max_running,
-            admission: Box::new(UnboundedQueue),
-            mean_service_ms: None,
-            started: std::collections::HashMap::new(),
-            pending_rejects: Vec::new(),
-            prefill_budget,
-        }
+    fn release_table(&mut self, t: &mut BlockTable) {
+        self.release_table(t)
     }
-
-    /// Install an admission policy (default: [`UnboundedQueue`], the historical
-    /// behaviour). Applied at submit time; a refused request is reported in the
-    /// next iteration's [`StepReport::rejected`].
-    pub fn set_admission(&mut self, p: Box<dyn AdmissionPolicy>) {
-        self.admission = p;
+    fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
+        Engine::prefill(self, table, prompt)
     }
-
-    /// Override the per-iteration prefill budget (tokens). `u32::MAX` restores
-    /// the old admit-everything behaviour; recorded by `brain perf` in the
-    /// artifact's target config so a run states the policy it used.
-    pub fn set_prefill_budget(&mut self, tokens: u32) {
-        self.prefill_budget = tokens.max(1);
+    fn logits(&self, hidden: &[f32]) -> Vec<f32> {
+        self.logits(hidden)
     }
-
-    /// Enqueue a request; returns its id (results come back keyed by it).
-    /// Submit a request. The admission policy is consulted HERE — a refusal
-    /// returns the id with the request never queued, and the rejection appears
-    /// in the next [`Scheduler::step_report`].
-    pub fn submit(&mut self, req: Request) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        let state = QueueState {
-            queued_ahead: self.waiting.len(),
-            running: self.running.len(),
-            free_blocks: self.eng.free_blocks(),
-            mean_service_ms: self.mean_service_ms,
-        };
-        if !self.admission.admit(&req, &state) {
-            self.pending_rejects.push((id, RejectReason::PolicyRejected { policy: self.admission.name() }));
-            return id;
-        }
-        self.started.insert(id, std::time::Instant::now());
-        self.waiting.push_back((id, req));
-        id
+    fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
+        Engine::forward_batched_greedy(self, tables, inputs)
     }
-
-    /// Cancel a request: drop it whether queued or mid-decode and return its KV
-    /// blocks to the pool immediately. Returns the tokens produced so far, or
-    /// `None` if the id is unknown (already finished, or never submitted).
-    ///
-    /// Without this, an abandoned request keeps decoding to `max_new` — spending
-    /// device time on output nobody will read, and holding KV blocks that
-    /// requests still being waited on need. Reclaiming on cancel is what stops a
-    /// server under normal churn from losing its cache to dead sequences.
-    pub fn cancel(&mut self, id: u64) -> Option<Vec<u32>> {
-        if let Some(pos) = self.waiting.iter().position(|(qid, _)| *qid == id) {
-            self.waiting.remove(pos);
-            return Some(Vec::new()); // never admitted, so nothing was produced
-        }
-        let pos = self.running.iter().position(|r| r.id == id)?;
-        let mut r = self.running.remove(pos);
-        self.eng.release_table(&mut r.table);
-        Some(r.generated)
+    fn forward_batched_greedy_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<u32>> {
+        Engine::forward_batched_greedy_window(self, tables, inputs, k)
     }
-
-    /// Requests currently admitted and decoding.
-    pub fn running_len(&self) -> usize {
-        self.running.len()
+    fn prefix_stats(&self) -> (u64, u64, usize) {
+        Engine::prefix_stats(self)
     }
-
-    /// Requests admitted but not yet started.
-    pub fn waiting_len(&self) -> usize {
-        self.waiting.len()
+    fn device_stats(&self) -> Option<gpu_core::DeviceStats> {
+        Engine::device_stats(self)
     }
-
-    /// True while any request is waiting or running.
-    pub fn pending(&self) -> bool {
-        !self.waiting.is_empty() || !self.running.is_empty()
+    fn decode_window_capacity(&self) -> usize {
+        DECODE_WINDOW
     }
-
-    fn finish_check(r: &mut Running) {
-        if Some(*r.generated.last().unwrap()) == r.eos || r.generated.len() >= r.max_new {
-            r.done = true;
-        }
+    fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<(u32, f32)>> {
+        Engine::forward_batched_topk(self, tables, inputs, k as u32)
     }
-
-    /// One scheduler iteration, reporting **everything that happened** — not just
-    /// what finished.
-    ///
-    /// [`Scheduler::step`] returns only completed requests, which is all a caller
-    /// collecting outputs needs but leaves per-request latency unobservable: with
-    /// completions alone you cannot tell when a sequence was admitted or when
-    /// each token appeared, so time-to-first-token and inter-token latency cannot
-    /// be computed at all. This variant additionally reports admissions and
-    /// per-sequence token counts, which is what `brain perf` measures.
-    pub fn step_report(&mut self) -> StepReport {
-        let mut report = StepReport::default();
-        report.rejected.append(&mut self.pending_rejects);
-        let produced_before: HashMap<u64, usize> =
-            self.running.iter().map(|r| (r.id, r.generated.len())).collect();
-
-        let completed = self.step_inner(&mut report);
-
-        // Tokens produced this iteration by sequences that are still running...
-        for r in &self.running {
-            let prev = produced_before.get(&r.id).copied().unwrap_or(0);
-            if r.generated.len() > prev {
-                report.produced.push((r.id, r.generated.len() - prev));
-            }
-        }
-        // ...and by those that finished in this iteration.
-        for (id, toks) in &completed {
-            let prev = produced_before.get(id).copied().unwrap_or(0);
-            if toks.len() > prev {
-                report.produced.push((*id, toks.len() - prev));
-            }
-            report.finished.push(*id);
-            if let Some(t0) = self.started.remove(id) {
-                let ms = t0.elapsed().as_secs_f64() * 1000.0;
-                self.mean_service_ms =
-                    Some(self.mean_service_ms.map_or(ms, |m| 0.8 * m + 0.2 * ms));
-            }
-        }
-        report.completed = completed;
-        report
-    }
-
-    /// The number of KV blocks still free in the pool — the memory-pressure
-    /// signal a benchmark records alongside its latencies.
-    pub fn free_blocks(&self) -> u32 {
-        self.eng.free_blocks()
-    }
-
-    /// Prefix-cache effectiveness — see [`Engine::prefix_stats`].
-    pub fn prefix_stats(&self) -> (u64, u64, usize) {
-        self.eng.prefix_stats()
-    }
-
-    /// Device-op accounting — see [`Engine::device_stats`].
-    pub fn device_stats(&self) -> Option<gpu_core::DeviceStats> {
-        self.eng.device_stats()
-    }
-
-    /// One scheduler iteration: admit waiting requests that fit (prefill + sample
-    /// first token), run one batched decode step over all running sequences, then
-    /// reap completed ones. Returns the `(id, tokens)` of requests finished here.
-    pub fn step(&mut self) -> Vec<(u64, Vec<u32>)> {
-        let mut sink = StepReport::default();
-        self.step_inner(&mut sink)
-    }
-
-    fn step_inner(&mut self, report: &mut StepReport) -> Vec<(u64, Vec<u32>)> {
-
-        // 1. Admit while there's batch room, enough free blocks for the prompt,
-        //    and prefill budget left this iteration (head-of-line guard: decode
-        //    must run between bursts of admissions).
-        let mut budget_left = self.prefill_budget;
-        let mut admitted_this_iter = 0u32;
-        while self.running.len() < self.max_running {
-            // Drop anything that can never fit, whatever the pool does — it
-            // would otherwise block the queue forever (or, before the capacity
-            // check, corrupt the block table).
-            let cap = self.eng.max_seq_len();
-            let vocab = self.eng.vocab() as u32;
-            while let Some((id, req)) = self.waiting.front() {
-                let need = req.prompt.len() + req.max_new;
-                let bad = req.prompt.iter().find(|&&t| t >= vocab).copied();
-                if need <= cap && bad.is_none() {
-                    break;
-                }
-                let (id, need) = (*id, need as u32);
-                self.waiting.pop_front();
-                self.started.remove(&id);
-                let reason = match bad {
-                    Some(token) => RejectReason::InvalidToken { token, vocab },
-                    None => RejectReason::ExceedsCapacity { need, capacity: cap as u32 },
-                };
-                report.rejected.push((id, reason));
-            }
-            let fits = match self.waiting.front() {
-                Some((_, req)) => {
-                    let need = req.prompt.len() as u32;
-                    // Always admit at least one request per iteration (no
-                    // starvation); after that, stop once the budget is spent.
-                    if admitted_this_iter > 0 && need > budget_left {
-                        break;
-                    }
-                    let want = self.eng.blocks_for(need + 1);
-                    let free = self.eng.free_blocks();
-                    if free < want {
-                        // Cached prefix blocks are reclaimable capacity: live
-                        // sequences always outrank the cache.
-                        self.eng.reclaim_prefix(want - free);
-                    }
-                    self.eng.free_blocks() >= want
-                }
-                None => false,
-            };
-            if !fits {
-                break;
-            }
-            let (id, req) = self.waiting.pop_front().unwrap();
-            budget_left = budget_left.saturating_sub(req.prompt.len() as u32);
-            admitted_this_iter += 1;
-            let mut table = BlockTable::new();
-            let hidden = self.eng.prefill(&mut table, &req.prompt);
-            let first = Engine::argmax(&self.eng.logits(&hidden));
-            let mut r = Running { id, table, generated: vec![first], max_new: req.max_new, eos: req.eos, next_input: first, done: false };
-            Self::finish_check(&mut r);
-            report.admitted.push(id);
-            self.running.push(r);
-        }
-
-        // 2. Batched decode over every running (not-done) sequence. When
-        //    nothing is waiting to be admitted, decode a WINDOW of tokens per
-        //    host round-trip (A4): the readback-per-token becomes a readback
-        //    per window, at the cost of up to window-1 wasted decode steps for
-        //    a sequence that hits EOS mid-window (its surplus K/V is rolled
-        //    back below). With work waiting, the window stays 1 so admission
-        //    latency is never traded away silently.
-        let active: Vec<usize> = (0..self.running.len()).filter(|&i| !self.running[i].done).collect();
-        if !active.is_empty() {
-            let inputs: Vec<u32> = active.iter().map(|&i| self.running[i].next_input).collect();
-            let remaining_min = active
-                .iter()
-                .map(|&i| {
-                    let r = &self.running[i];
-                    r.max_new.saturating_sub(r.generated.len()).max(1)
-                })
-                .min()
-                .unwrap_or(1);
-            let mut k = if self.waiting.is_empty() { remaining_min.min(DECODE_WINDOW) } else { 1 };
-            // Every append must succeed mid-window (no host decisions there):
-            // require a comfortable block reserve, else fall back to one step.
-            if k > 1 && (self.eng.free_blocks() as usize) < active.len() * k {
-                k = 1;
-            }
-            let window = {
-                let mut refs: Vec<&mut BlockTable> = Vec::new();
-                for (idx, r) in self.running.iter_mut().enumerate() {
-                    if active.contains(&idx) {
-                        refs.push(&mut r.table);
-                    }
-                }
-                if k > 1 {
-                    self.eng.forward_batched_greedy_window(&mut refs, &inputs, k)
-                } else {
-                    self.eng
-                        .forward_batched_greedy(&mut refs, &inputs)
-                        .into_iter()
-                        .map(|t| vec![t])
-                        .collect()
-                }
-            };
-            for (bi, &si) in active.iter().enumerate() {
-                let r = &mut self.running[si];
-                let mut used = 0usize;
-                for &next in &window[bi] {
-                    r.generated.push(next);
-                    r.next_input = next;
-                    used += 1;
-                    Self::finish_check(r);
-                    if r.done {
-                        break;
-                    }
-                }
-                // A sequence that finished mid-window consumed only `used`
-                // inputs; the remaining pre-allocated slots hold garbage K/V
-                // and are rolled back so the pool never leaks waste.
-                let surplus = (k - used) as u32;
-                if surplus > 0 {
-                    let len = r.table.len();
-                    r.table.truncate(len - surplus, &mut self.eng.alloc);
-                }
-            }
-        }
-
-        // 3. Reap completed sequences, returning their blocks to the pool.
-        let mut completed = Vec::new();
-        let mut i = 0;
-        while i < self.running.len() {
-            if self.running[i].done {
-                let mut r = self.running.remove(i);
-                self.eng.release_table(&mut r.table);
-                completed.push((r.id, r.generated));
-            } else {
-                i += 1;
-            }
-        }
-        completed
-    }
-
-    /// Drive to completion, returning every request's tokens keyed by id.
-    pub fn run(&mut self) -> HashMap<u64, Vec<u32>> {
-        let mut out = HashMap::new();
-        while self.pending() {
-            for (id, toks) in self.step() {
-                out.insert(id, toks);
-            }
-        }
-        out
+    fn topk_capacity(&self) -> usize {
+        TOPK_CAPACITY as usize
     }
 }
 
@@ -2068,6 +1759,54 @@ mod tests {
         }
     }
 
+    /// The on-device iterative top-K extraction (`topk_extract_step` composed
+    /// with the existing `argmax_part`/`argmax_final`) must return EXACTLY the
+    /// row's true top-K logits+indices, sorted descending — an exact,
+    /// deterministic operation with no tolerance to gate on
+    /// (`docs/lessons.md` #4: dims chosen so vocab != any other dimension, so
+    /// a transposed/wrong-stride bug can't hide behind a coincidence).
+    #[test]
+    fn topk_extraction_matches_host_reference() {
+        let cfg = medium_cfg();
+        let map = tiny_weights(&cfg);
+        let mut eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 96, 4, 12, 8, false, false);
+        let mut tables: Vec<BlockTable> = (0..3).map(|_| BlockTable::new()).collect();
+        let prompts = [vec![1u32, 5, 3], vec![7u32, 2, 9], vec![4u32, 4, 1]];
+        let mut inputs = Vec::new();
+        for (t, p) in tables.iter_mut().zip(prompts.iter()) {
+            let h = eng.prefill(t, p);
+            inputs.push(Engine::argmax(&eng.logits(&h)));
+        }
+        let k = 40usize;
+        let bsz = inputs.len() as u32;
+        let vocab = eng.cfg.vocab as usize;
+        let mut refs: Vec<&mut BlockTable> = tables.iter_mut().collect();
+        eng.forward_batched(&mut refs, &inputs); // leaves the hidden in sc.xn_final
+
+        // Ground truth: the SAME device head computation (`submit_greedy_head`'s
+        // matmul into `logits_dev`), read back in full BEFORE the extraction
+        // loop masks it. Comparing against a HOST-computed matmul instead would
+        // fail on ordinary float non-associativity (device tiled GEMM vs a
+        // serial host dot product reduce differently) -- this test's job is to
+        // verify the EXTRACTION, not re-litigate the head matmul itself.
+        eng.submit_greedy_head(bsz);
+        let full_logits = eng.gpu.read(&eng.logits_dev, (bsz as usize) * vocab);
+
+        // Same hidden, same head matmul, now via the top-k extraction path.
+        let candidates = eng.topk_from_hidden(bsz, k as u32);
+        for (row, cands) in candidates.iter().enumerate() {
+            let full = &full_logits[row * vocab..(row + 1) * vocab];
+            let mut host: Vec<(u32, f32)> = full.iter().enumerate().map(|(i, &v)| (i as u32, v)).collect();
+            host.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            let host_top_k = &host[..k];
+            assert_eq!(cands.len(), k);
+            for (c, h) in cands.iter().zip(host_top_k.iter()) {
+                assert_eq!(c.0, h.0, "row {row}: device top-k index diverges from the host reference");
+                assert_eq!(c.1, h.1, "row {row}: device top-k value diverges from the host reference");
+            }
+        }
+    }
+
     /// The prefill budget must spread a burst of admissions across iterations
     /// (decode runs between them) without changing ANY output, and must never
     /// starve: at least one waiting request is admitted per iteration.
@@ -2275,6 +2014,49 @@ mod tests {
         assert_eq!(out[&id2], refs[2], "mid-flight req2 != reference");
     }
 
+    /// Real (non-greedy) sampling through `Scheduler::submit_sampled`, driven
+    /// by the real `Engine` (both the admission-time host sampling and the
+    /// per-token on-device top-K path exercised together, mixed with an
+    /// ordinary greedy sequence in the SAME batch — the `all_greedy` fallback
+    /// this plan's Scheduler change hinges on). A fixed seed must reproduce
+    /// bit-for-bit; a high temperature must, with overwhelming probability,
+    /// diverge from the greedy continuation of the same prompt.
+    #[test]
+    fn scheduler_sampled_requests_are_reproducible_and_differ_from_greedy() {
+        let cfg = medium_cfg();
+        let map = tiny_weights(&cfg);
+        let prompt = vec![1u32, 5, 3, 9];
+        let max_new = 12usize;
+        let params = SampleParams { temp: 2.0, top_k: 20, top_p: 1.0 };
+
+        let run_sampled = |seed: u64| {
+            let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 96, 4, 12, 32, false, false);
+            let mut sched = Scheduler::new(eng, 4);
+            // A plain greedy sequence rides in the SAME batch, proving the
+            // mixed-batch fallback doesn't perturb it.
+            let greedy_id = sched.submit(Request { prompt: prompt.clone(), max_new, eos: None });
+            let sampled_id = sched.submit_sampled(Request { prompt: prompt.clone(), max_new, eos: None }, params, seed);
+            let out = sched.run();
+            (out[&greedy_id].clone(), out[&sampled_id].clone())
+        };
+
+        let (greedy_a, sampled_a) = run_sampled(1234);
+        let (greedy_b, sampled_b) = run_sampled(1234);
+        assert_eq!(sampled_a, sampled_b, "same seed must reproduce the sampled continuation exactly");
+        assert_eq!(greedy_a, greedy_b, "the greedy sequence in the same batch must stay deterministic regardless");
+
+        let (_, sampled_other_seed) = run_sampled(5678);
+        assert_ne!(sampled_a, sampled_other_seed, "different seeds should not collide over 12 tokens at temp=2.0");
+        assert_ne!(sampled_a, greedy_a, "temp=2.0 sampling should diverge from the greedy continuation of the same prompt");
+
+        // Reference: the admission-time-and-decode-loop sampling never
+        // strayed outside the model's vocabulary (a debugging class this
+        // engine's own lessons flag as "silent garbage, not a crash").
+        for &t in &sampled_a {
+            assert!(t < cfg.vocab, "sampled token {t} outside vocab {}", cfg.vocab);
+        }
+    }
+
     /// int8 paged KV stays close to fp32 through prefill + decode (both read the
     /// quantised cache) — a ~4× smaller KV pool for a small, bounded error.
     #[test]
@@ -2318,6 +2100,42 @@ mod tests {
         let err = whole.iter().zip(&chunked).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
         println!("chunked (2) vs whole prefill: maxabs={err:e}");
         assert!(err < 1e-4, "chunked prefill != whole prefill: {err}");
+    }
+
+    /// REGRESSION GATE for the class of defect `.todo/serving-performance-audit.md`
+    /// named directly: a "batched prefill" that batches the READBACK but still
+    /// dispatches once per TOKEN (the old `Qwen::prefill`'s per-position
+    /// `decode_submit` loop at `m=1`). The paged `Engine::prefill` must cost device
+    /// submits proportional to the number of CHUNKS (`ceil(len / max_prefill)`),
+    /// never to the raw token count within one chunk — model-agnostic in spirit
+    /// (any future `PagedDecoder` gets this same shape), asserted here on the one
+    /// concrete implementation that exists.
+    #[test]
+    fn prefill_submits_scale_with_chunks_not_with_token_count() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let submits_for = |prompt: &[u32], max_prefill: u32| -> u64 {
+            let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, max_prefill, false, false);
+            let mut t = BlockTable::new();
+            let before = e.device_stats().map(|s| s.submits).unwrap_or(0);
+            e.prefill(&mut t, prompt);
+            let after = e.device_stats().map(|s| s.submits).unwrap_or(0);
+            after - before
+        };
+        // One chunk large enough to hold either prompt whole: a 4-token prompt and a
+        // 16-token prompt must cost the SAME number of submits — proof the dispatch
+        // is per-CALL, not per-TOKEN (a per-token dispatcher would cost 4x more here).
+        let short = vec![1u32, 5, 3, 9];
+        let long: Vec<u32> = (0..16).map(|i| (i % 20) as u32 + 1).collect();
+        let submits_short = submits_for(&short, 16);
+        let submits_long = submits_for(&long, 16);
+        assert_eq!(submits_short, submits_long, "prefill submits must not scale with in-chunk token count: {submits_short} (4 tok) vs {submits_long} (16 tok)");
+        assert!(submits_short > 0, "prefill must dispatch SOMETHING");
+
+        // The SAME 16-token prompt split into 2 chunks of 8 must cost exactly 2x the
+        // one-chunk submit count — proportional to CHUNKS, not tokens (which would be 16x).
+        let submits_2chunks = submits_for(&long, 8);
+        assert_eq!(submits_2chunks, 2 * submits_long, "2 chunks must cost exactly 2x 1 chunk's submits, not scale with the (unchanged) token count: {submits_2chunks} vs 2x{submits_long}");
     }
 
     /// Speculative decoding output equals plain greedy — with a good (oracle)

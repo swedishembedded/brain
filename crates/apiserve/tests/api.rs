@@ -1226,6 +1226,114 @@ async fn admit_deadline_sheds_saturated_lane_with_429_and_cancels() {
     assert_eq!(gate.started(), 1, "a timed-out (cancelled) job must not run after the lane frees");
 }
 
+/// A chat model whose `run_batch` pays its (mocked) generation cost ONCE per
+/// batch, not once per invocation — a stand-in for "one shared forward pass
+/// serves every sequence in it", exactly what `qwen::serve::Scheduler` does for
+/// real (see `docs/performance/status.md`'s M3: TTFA at concurrency 2 measured
+/// LOWER than at concurrency 1 through this same router, with a real model).
+/// The framework always calls `run_batch` (never `run` directly — see
+/// `residency::executor::run_group`), so `run` here just routes through it.
+struct BatchingChat {
+    ms: u64,
+    max_batch_seen: Arc<AtomicUsize>,
+}
+struct BatchingChatInst {
+    ms: u64,
+    max_batch_seen: Arc<AtomicUsize>,
+}
+impl ResidentModel for BatchingChat {
+    fn manifest(&self) -> Manifest {
+        chat_manifest()
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-chat", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(BatchingChatInst { ms: self.ms, max_batch_seen: self.max_batch_seen.clone() }))
+    }
+}
+impl Instance for BatchingChatInst {
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        self.run_batch(action, std::slice::from_ref(inv), &mut |_, p| progress(p)).pop().expect("one result for one invocation")
+    }
+    fn run_batch(&mut self, _action: &str, invs: &[Invocation], _progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        self.max_batch_seen.fetch_max(invs.len(), Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(self.ms)); // ONE sleep for the whole batch
+        invs.iter()
+            .map(|_| {
+                Ok(Outcome::new()
+                    .set("prompt_tokens", json!(1))
+                    .set("completion_tokens", json!(1))
+                    .set("finish_reason", json!("stop"))
+                    .blob("text", Blob::new(Media::Text, b"done".to_vec())))
+            })
+            .collect()
+    }
+}
+
+fn batching_executor(ms: u64, max_batch_seen: Arc<AtomicUsize>) -> Executor {
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(BatchingChat { ms, max_batch_seen })];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    Executor::start(models, budgets, Policy::default())
+}
+
+/// REGRESSION for `.todo/concurrent-request-batching.md`'s core claim, at the
+/// layer that had NEVER been exercised before this workstream: the real HTTP
+/// router. `residency::executor`'s own `same_model_batches_and_evicts` already
+/// proves the dispatcher groups same-key queued jobs into one claim
+/// (`Stats::max_batch`); this proves that grouping is actually REACHABLE by N
+/// concurrent `/v1/chat/completions` requests arriving over HTTP, and that it
+/// actually saves wall time (not just an internal counter) — the audit's
+/// finding was precisely that nothing upstream of the model ever produced more
+/// than one queued invocation at a time in practice.
+#[tokio::test]
+async fn n_concurrent_chat_requests_batch_through_the_real_router_not_serialize() {
+    const N: usize = 4;
+    const BATCH_MS: u64 = 300;
+    let max_batch_seen = Arc::new(AtomicUsize::new(0));
+    let key = "sk-brain-test-key".to_string();
+    let state = AppState::new(batching_executor(BATCH_MS, max_batch_seen.clone()), key.clone(), Provider::OpenAI);
+    let app = router(state);
+    let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}]});
+
+    let t0 = Instant::now();
+    let mut jobs = Vec::with_capacity(N);
+    for _ in 0..N {
+        let (app, key, body) = (app.clone(), key.clone(), body.clone());
+        jobs.push(tokio::spawn(async move { post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await }));
+    }
+    for j in jobs {
+        let (st, v) = j.await.unwrap();
+        assert_eq!(st, StatusCode::OK, "{v}");
+    }
+    let elapsed = t0.elapsed();
+
+    assert!(
+        max_batch_seen.load(Ordering::SeqCst) >= 2,
+        "{N} concurrent requests to the same resident must batch into one dispatcher claim, not admit \
+         one invocation at a time; saw max_batch={}",
+        max_batch_seen.load(Ordering::SeqCst)
+    );
+    // Batched: ~1x BATCH_MS regardless of N (fully grouped) or a small multiple of it
+    // (grouped across a couple of dispatcher rounds, if the requests didn't all land
+    // in the queue before the first claim). Serialized (the pre-fix behavior): N x
+    // BATCH_MS. The bound (75% of fully-serial) is deliberately generous — this test
+    // asserts "batching saves real wall time", not a specific batch-count-per-round —
+    // so it stays non-flaky under scheduler jitter while still failing hard against a
+    // regression back to one-invocation-at-a-time admission.
+    let serial = BATCH_MS * N as u64;
+    assert!(
+        elapsed < Duration::from_millis(serial * 3 / 4),
+        "{N} concurrent requests took {elapsed:?}, expected well under the fully-serial {serial}ms \
+         (batching should make this well under {}ms)",
+        serial * 3 / 4
+    );
+}
+
 // ------------------------------------------------------------ security (P17)
 
 /// A chat model whose `generate` always fails with an internal error string that

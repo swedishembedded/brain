@@ -66,6 +66,21 @@ decode), batch what you can and say why in a comment.
   per-frame matmuls and is bit-identical to the single-utterance path). Qwen3-ASR is
   offline/autoregressive, so its `run_batch` is the sequential default on a
   build-once, fixed-window instance — documented as such.
+- **Autoregressive decoder LMs: use `model::serve::{Scheduler, PagedDecoder}`,
+  don't reinvent continuous batching.** `crates/model/src/serve.rs` is an
+  architecture-agnostic paged-KV continuous-batching scheduler — admission,
+  prefix reuse, an on-device decode window, cancellation, and the
+  `StepReport` timeline `brain perf` measures TTFA/ITL from — generic over a
+  `PagedDecoder` impl (`prefill`/`forward_batched_greedy(_window)`/
+  `logits`/block-pool accessors). `qwen::serve::Engine` is the first
+  implementation; `qwen::serve::Scheduler` is `model::serve::Scheduler<Engine>`
+  under a type alias, so every existing caller of the qwen-specific names
+  needs zero changes. A new decoder LM (glm, gpt, moe) that wants real
+  concurrent serving should write its own paged/batched forward (its
+  `run_batched_submit` equivalent, over `model::paged::{BlockAllocator,
+  BlockTable}`) and implement `PagedDecoder` over it — admission, prefix
+  cache, batching, cancellation and streaming then come from `model::serve`
+  for free, rather than each decoder growing its own copy of this machinery.
 
 ### 4. D-Bus surface — reachable over the bus, with a runnable example
 The actions MUST be callable over `crates/dbus` (`com.swedishembedded.Brain1`) and

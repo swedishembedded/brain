@@ -85,3 +85,12 @@ brain-imgpipe.workspace = true
 # is enough for a one-shot CLI download; no need to pull tokio in for this.
 ureq = { version = "2", default-features = false, features = ["tls"] }
 sha2 = "0.10"
+
+[dev-dependencies]
+# Drive a real `apiserve::router()` in-process for the HTTP-level serving
+# gates in `tests/` (concurrency/prefix-reuse) — mirrors `crates/apiserve`'s
+# own test setup, which cannot depend on `brain-cli` (wrong dependency
+# direction: `brain-cli` already depends on `brain-apiserve`).
+axum.workspace = true
+tower.workspace = true
+tokio.workspace = true

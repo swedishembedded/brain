@@ -6,6 +6,7 @@
 //! the forward/backprop dispatch graph and `config.rs` for the architecture.
 
 pub mod caps;
+pub mod chat;
 pub mod config;
 pub mod eval;
 pub mod import;

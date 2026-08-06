@@ -47,6 +47,14 @@ pub trait Instance: Send {
     fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         invs.iter().enumerate().map(|(i, inv)| self.run(action, inv, &mut |p| progress(i, p))).collect()
     }
+
+    /// Model-specific observability metrics (e.g. a paged-KV serving engine's
+    /// prefix-cache hit rate) — polled by the dispatcher between runs and
+    /// exposed via `Executor::stats().metrics`. Default: nothing extra to
+    /// report, which is correct for every model that doesn't override it.
+    fn metrics(&self) -> Vec<(String, serde_json::Value)> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

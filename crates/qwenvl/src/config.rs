@@ -100,6 +100,7 @@ impl Qwen3VlConfig {
                 d_ff: 9728,
                 rope_theta: 5_000_000.0,
                 rms_eps: 1e-6,
+                max_position_embeddings: 4096,
                 tie_embeddings: true,
                 qk_norm: true,
                 attn_bias: false,
@@ -156,6 +157,9 @@ impl Qwen3VlConfig {
                 d_ff: u(tc, "intermediate_size"),
                 rope_theta: tc["rope_theta"].as_f64().expect("text_config.rope_theta") as f32,
                 rms_eps: tc["rms_norm_eps"].as_f64().expect("text_config.rms_norm_eps") as f32,
+                // Falls back to `block_size` (below) when the source HF config
+                // lacks the key, for backward compatibility.
+                max_position_embeddings: tc["max_position_embeddings"].as_u64().map(|x| x as u32).unwrap_or(4096),
                 tie_embeddings: tc["tie_word_embeddings"].as_bool().unwrap_or(true),
                 qk_norm: true,
                 attn_bias: false,

@@ -206,6 +206,7 @@ mod tests {
             d_ff: 64,
             rope_theta: 1.0e6,
             rms_eps: 1e-6,
+            max_position_embeddings: 16,
             tie_embeddings: true,
             qk_norm: true,
             attn_bias: false,
