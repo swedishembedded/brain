@@ -21,9 +21,6 @@
 //! is outside this surface. That is deliberate and immaterial to the decision: SE
 //! quantizes C values per image, negligible next to the spatial feature maps.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-
 use gpu_core::Gpu;
 use paramstore::ParamStore;
 use vision::{ActTap, Ctx};
@@ -31,84 +28,31 @@ use vision::{ActTap, Ctx};
 use crate::config::ZipConfig;
 use crate::model::ZipDepth;
 
-/// The cap on samples kept per layer. ~50k gives a p99.99 resolved to ~5 samples,
-/// which is plenty for a ratio, and bounds memory regardless of image count/size.
-const SAMPLE_CAP: usize = 50_000;
-
-#[derive(Default)]
-struct LayerAcc {
-    absmax: f32,
-    /// Strided subsample of `|activation|` values; percentiles are computed from it.
-    samples: Vec<f32>,
-    /// Total values seen, to keep the subsample stride roughly uniform.
-    seen: u64,
-}
-
 /// An [`ActTap`] that records, per conv-input tensor, the absolute max and a bounded
-/// subsample of magnitudes. It observes only — it never rewrites `x`.
+/// subsample of magnitudes — a thin `vision::ActTap` adapter over
+/// `model::actstats::Collector`, which owns the actual bounded-reservoir/
+/// percentile math (shared with Qwen's KV-cache calibration). It observes
+/// only — it never rewrites `x`.
+#[derive(Default)]
 pub struct ActStatsCollector {
-    layers: RefCell<HashMap<String, LayerAcc>>,
-}
-
-impl Default for ActStatsCollector {
-    fn default() -> Self {
-        Self::new()
-    }
+    inner: model::actstats::Collector,
 }
 
 impl ActStatsCollector {
     pub fn new() -> ActStatsCollector {
-        ActStatsCollector { layers: RefCell::new(HashMap::new()) }
+        ActStatsCollector::default()
     }
 
     /// Per-layer `(absmax, p99.99, outlier_ratio)`, sorted by ratio descending — the
     /// most quant-hostile layer first.
     pub fn report(&self) -> Vec<LayerReport> {
-        let layers = self.layers.borrow();
-        let mut out: Vec<LayerReport> = layers
-            .iter()
-            .map(|(name, a)| {
-                let mut s = a.samples.clone();
-                s.sort_by(|x, y| x.partial_cmp(y).unwrap());
-                let p = |q: f32| -> f32 {
-                    if s.is_empty() {
-                        return 0.0;
-                    }
-                    let k = ((q * (s.len() - 1) as f32).round() as usize).min(s.len() - 1);
-                    s[k]
-                };
-                let p9999 = p(0.9999).max(1e-9);
-                LayerReport {
-                    name: name.clone(),
-                    absmax: a.absmax,
-                    p9999,
-                    outlier_ratio: a.absmax / p9999,
-                    p99: p(0.99),
-                }
-            })
-            .collect();
-        out.sort_by(|a, b| b.outlier_ratio.partial_cmp(&a.outlier_ratio).unwrap());
-        out
+        self.inner.report().into_iter().map(|r| LayerReport { name: r.name, absmax: r.absmax, p99: r.p99, p9999: r.p9999, outlier_ratio: r.outlier_ratio }).collect()
     }
 }
 
 impl ActTap for ActStatsCollector {
     fn tap(&self, name: &str, x: &mut [f32]) {
-        let mut layers = self.layers.borrow_mut();
-        let acc = layers.entry(name.to_string()).or_default();
-        // Keep the subsample bounded: once full, take roughly every k-th value so the
-        // sample stays representative of the whole run, not just the first image.
-        let stride = ((acc.seen as usize / SAMPLE_CAP) + 1).max(1);
-        for (i, v) in x.iter().enumerate() {
-            let a = v.abs();
-            if a > acc.absmax {
-                acc.absmax = a;
-            }
-            if acc.samples.len() < SAMPLE_CAP && (acc.seen as usize + i).is_multiple_of(stride) {
-                acc.samples.push(a);
-            }
-        }
-        acc.seen += x.len() as u64;
+        self.inner.observe(name, x);
     }
 }
 
@@ -117,10 +61,10 @@ impl ActTap for ActStatsCollector {
 pub struct LayerReport {
     pub name: String,
     pub absmax: f32,
+    pub p99: f32,
     /// The 99.99th percentile of `|activation|` — the range INT8's scale should
     /// really target.
     pub p9999: f32,
-    pub p99: f32,
     /// `absmax / p99.99`. ~1 means a tight distribution (INT8-friendly); a large
     /// value means a heavy tail that per-tensor symmetric INT8 handles poorly.
     pub outlier_ratio: f32,

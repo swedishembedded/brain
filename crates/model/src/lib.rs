@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 
+pub mod actstats;
 pub mod attninject;
 pub mod block;
 pub mod collective;
