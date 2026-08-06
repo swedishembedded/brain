@@ -682,11 +682,35 @@ impl WgpuBackend {
                 return Self::from_adapter(a, kernels).await;
             }
         }
+        // ZERO adapters is a different failure from "none of them matched", and
+        // only the second one is a placement error. When wgpu enumerates
+        // nothing at all there is no other card this could land on by mistake,
+        // so the identity check has nothing left to protect — and
+        // `request_adapter` is a DIFFERENT wgpu path from `enumerate_adapters`
+        // (it asks the backends to pick rather than listing them), which is
+        // worth trying before declaring the machine GPU-less.
+        //
+        // This is not hypothetical: on the 2xP40 box `crates/bench`'s capscale
+        // smoke dies here with `not found among 0 wgpu adapter(s)` while the
+        // very same process has already built six devices on that exact card,
+        // and `crates/gpu-core/tests/device_churn.rs` shows plain build/drop
+        // cycles — even with real allocation and real submits — reach twelve
+        // without trouble. Whatever wedges the enumeration is not brain's
+        // device lifecycle, and panicking is the least useful response to it.
+        if adapters.is_empty() {
+            eprintln!(
+                "brain: wgpu enumerated 0 adapters while looking for {:?} (pci {:?}); \
+                 falling back to wgpu's own adapter request",
+                target.name, target.pci_bus
+            );
+            return Self::new_async(kernels).await;
+        }
         panic!(
-            "physical GPU {:?} (pci {:?}) not found among {} wgpu adapter(s)",
+            "physical GPU {:?} (pci {:?}) not found among {} wgpu adapter(s): {:?}",
             target.name,
             target.pci_bus,
-            adapters.len()
+            adapters.len(),
+            adapters.iter().map(|a| a.get_info().name).collect::<Vec<_>>()
         );
     }
 

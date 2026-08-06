@@ -79,7 +79,6 @@ pub struct DiamondUNet {
     /// AdaGroupNorm sites in graph order with their device gamma/beta buffers.
     adagn: Vec<(AdaGnSite, DeviceBuffer)>,
     steps: Vec<Step>,
-    kinds: Vec<usize>,
     /// Full denoise-iteration step list: c_in scale -> UNet -> EDM wrap ->
     /// Euler mix -> copy back into `x_state`. Submitted once per sigma; all
     /// per-sigma scalars live in the tiny coef buffers below.
@@ -104,8 +103,6 @@ struct Builder<'a> {
     t: &'a Tensors,
     cc: usize,
     steps: Vec<Step>,
-    /// Kernel-table index of each recorded step (parallel to `steps`).
-    kinds: Vec<usize>,
     adagn: Vec<(AdaGnSite, DeviceBuffer)>,
     taps: Vec<(String, DeviceBuffer, usize)>,
 }
@@ -132,8 +129,7 @@ impl<'a> Builder<'a> {
         self.taps.push((name, buf.clone(), len as usize));
     }
 
-    fn push(&mut self, kind: usize, step: Step) {
-        self.kinds.push(kind);
+    fn push(&mut self, step: Step) {
         self.steps.push(step);
     }
 
@@ -157,7 +153,7 @@ impl<'a> Builder<'a> {
         let y = self.act((cout * ho * wo) as u64);
         // Register-tiled conv (8 output channels x 4 positions per invocation).
         let threads = cout.div_ceil(8) * (ho * wo).div_ceil(4);
-        self.push(K_CONV_BIAS_REG, self.gpu.step(
+        self.push(self.gpu.step(
             K_CONV_BIAS_REG,
             &[x, &wgt, &bias, &y],
             &[1, cin, h, w, cout, k, stride, pad, ho, wo],
@@ -201,19 +197,19 @@ impl<'a> Builder<'a> {
         // per-group gn_stats was measured at 77% of GPU frame time (2-4
         // invocations looping 131k elements on one EU lane each).
         let part = self.act(2 * g as u64 * GN_P as u64);
-        self.push(K_GN_PART, self.gpu.step(
+        self.push(self.gpu.step(
             K_GN_PART,
             &[x, &part],
             &[1, c, h, w, g, GN_P],
             g * GN_P,
         ));
-        self.push(K_GN_STATS2, self.gpu.step(
+        self.push(self.gpu.step(
             K_GN_STATS2,
             &[&part, &stats],
             &[1, c, h, w, g, GN_P, f(GN_EPS)],
             g,
         ));
-        self.push(K_GN_APPLY, self.gpu.step(
+        self.push(self.gpu.step(
             K_GN_APPLY,
             &[x, &stats, gb, &y],
             &[1, c, h, w, g],
@@ -224,13 +220,13 @@ impl<'a> Builder<'a> {
 
     fn silu(&mut self, n: u32, x: &DeviceBuffer) -> DeviceBuffer {
         let y = self.act(n as u64);
-        self.push(K_SILU, self.gpu.step(K_SILU, &[x, &y], &[n], n));
+        self.push(self.gpu.step(K_SILU, &[x, &y], &[n], n));
         y
     }
 
     fn add(&mut self, n: u32, a: &DeviceBuffer, b: &DeviceBuffer) -> DeviceBuffer {
         let y = self.act(n as u64);
-        self.push(K_ADD2, self.gpu.step(K_ADD2, &[a, b, &y], &[n], n));
+        self.push(self.gpu.step(K_ADD2, &[a, b, &y], &[n], n));
         y
     }
 
@@ -244,7 +240,7 @@ impl<'a> Builder<'a> {
         b: &DeviceBuffer,
     ) -> DeviceBuffer {
         let y = self.act(((ca + cb) * h * w) as u64);
-        self.push(K_CONCAT2, self.gpu.step(
+        self.push(self.gpu.step(
             K_CONCAT2,
             &[a, b, &y],
             &[1, ca, cb, h, w],
@@ -255,7 +251,7 @@ impl<'a> Builder<'a> {
 
     fn upsample(&mut self, c: u32, h: u32, w: u32, x: &DeviceBuffer) -> DeviceBuffer {
         let y = self.act((c * 2 * h * 2 * w) as u64);
-        self.push(K_UPSAMPLE2, self.gpu.step(K_UPSAMPLE2, &[x, &y], &[1, c, h, w], c * 4 * h * w));
+        self.push(self.gpu.step(K_UPSAMPLE2, &[x, &y], &[1, c, h, w], c * 4 * h * w));
         y
     }
 
@@ -271,7 +267,7 @@ impl<'a> Builder<'a> {
         self.tap(format!("{prefix}.qkv_proj"), &qkv_chw, 3 * c * h * w);
         // Reshape the conv output for attention: NCHW -> [T, 3C].
         let qkv = self.act((3 * c * t) as u64);
-        self.push(K_NCHW_NLC, self.gpu.step(
+        self.push(self.gpu.step(
             K_NCHW_NLC,
             &[&qkv_chw, &qkv],
             &[3 * c * t, 3 * c, t],
@@ -279,7 +275,7 @@ impl<'a> Builder<'a> {
         ));
         self.tap(format!("{prefix}.qkv_rows"), &qkv, 3 * c * t);
         let scores = self.act((heads * t * t) as u64);
-        self.push(K_ATTN_SCORES, self.gpu.step(
+        self.push(self.gpu.step(
             K_ATTN_SCORES,
             &[&qkv, &scores],
             &[1, heads, t, ATTN_HEAD_DIM, 3 * c, 0, c],
@@ -287,7 +283,7 @@ impl<'a> Builder<'a> {
         ));
         self.tap(format!("{prefix}.scores"), &scores, heads * t * t);
         let probs = self.act((heads * t * t) as u64);
-        self.push(K_ATTN_SOFTMAX, self.gpu.step(
+        self.push(self.gpu.step(
             K_ATTN_SOFTMAX,
             &[&scores, &probs],
             &[1, heads, t],
@@ -296,7 +292,7 @@ impl<'a> Builder<'a> {
         self.tap(format!("{prefix}.probs"), &probs, heads * t * t);
         let attn_out = self.act((t * c) as u64);
         // NOTE binding order: attn_apply_bidir takes (probs, qkv, out).
-        self.push(K_ATTN_APPLY, self.gpu.step(
+        self.push(self.gpu.step(
             K_ATTN_APPLY,
             &[&probs, &qkv, &attn_out],
             &[1, heads, t, ATTN_HEAD_DIM, 3 * c, 2 * c, c],
@@ -304,7 +300,7 @@ impl<'a> Builder<'a> {
         ));
         self.tap(format!("{prefix}.attn_rows"), &attn_out, t * c);
         let attn_chw = self.act((c * t) as u64);
-        self.push(K_NLC_NCHW, self.gpu.step(
+        self.push(self.gpu.step(
             K_NLC_NCHW,
             &[&attn_out, &attn_chw],
             &[c * t, c, t],
@@ -404,7 +400,7 @@ impl DiamondUNet {
         };
 
         let mut b =
-            Builder { gpu: &gpu, t: tensors, cc, steps: vec![], kinds: vec![], adagn: vec![], taps: vec![] };
+            Builder { gpu: &gpu, t: tensors, cc, steps: vec![], adagn: vec![], taps: vec![] };
 
         let ic = cfg.img_channels;
         let (h0, w0) = (cfg.h, cfg.w);
@@ -546,7 +542,7 @@ impl DiamondUNet {
         loop_steps.push(gpu.step(K_SCALE_ROW, &[&x_next, &one_buf, &x_state], &[n_px, n_px], n_px));
 
         // End the builder's borrow of `gpu` before moving it into the model.
-        let Builder { steps, kinds, adagn, taps, gpu: _, t: _, cc: _ } = b;
+        let Builder { steps, adagn, taps, gpu: _, t: _, cc: _ } = b;
 
         DiamondUNet {
             gpu,
@@ -554,7 +550,6 @@ impl DiamondUNet {
             cond,
             adagn,
             steps,
-            kinds,
             loop_steps,
             x_in,
             obs_in,
@@ -589,7 +584,14 @@ impl DiamondUNet {
         }
         self.gpu.write_f32(&self.x_in, noisy_scaled);
         let mut agg: std::collections::HashMap<usize, (f64, u32)> = Default::default();
-        for (step, &kind) in self.steps.iter().zip(&self.kinds) {
+        // The kernel index comes off the step itself: `Gpu::step` attaches
+        // `StepMeta { kernel, params, threads }` on every backend, recording the
+        // CALLER's kind (not the upgraded one), which is exactly what this used
+        // to keep in a `kinds: Vec<usize>` running parallel to `steps`. A
+        // parallel vec can only ever agree with or drift from the thing it
+        // parallels, and drift here mislabels the profile rather than failing.
+        for step in &self.steps {
+            let kind = step.meta().expect("Gpu::step attaches StepMeta").kernel;
             let t0 = std::time::Instant::now();
             self.gpu.submit(&[], std::slice::from_ref(step));
             self.gpu.poll_wait();
