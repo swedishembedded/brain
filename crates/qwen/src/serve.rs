@@ -2982,6 +2982,16 @@ mod tests {
     fn prefill_submits_scale_with_chunks_not_with_token_count() {
         let cfg = QwenConfig::tiny();
         let map = tiny_weights(&cfg);
+        // `device_stats()` is `None` on backends that don't count (only
+        // backend-wgpu does; `backend_api::Backend::stats`'s own doc comment:
+        // "a consumer must report null, never zero") -- this claim is
+        // structurally unverifiable there, so skip loudly rather than let
+        // `unwrap_or(0)` silently turn "not counted" into a false failure.
+        let probe = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, false, false);
+        if probe.device_stats().is_none() {
+            println!("prefill_submits_scale_with_chunks_not_with_token_count: SKIP (this backend does not count device submits)");
+            return;
+        }
         for kv_int8 in [false, true] {
             let submits_for = |prompt: &[u32], max_prefill: u32| -> u64 {
                 let mut e = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, max_prefill, kv_int8, false);

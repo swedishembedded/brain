@@ -31,6 +31,12 @@ run "gradcheck suite — CPU backend"    env BRAIN_DEVICE=cpu    cargo test --re
 run "gradcheck suite — Vulkan backend (incl. CPU==GPU forward parity)" \
                                        env BRAIN_DEVICE=vulkan cargo test --release -q -p brain-gradcheck
 
+# int8 paged KV is the serving default (qwen::serve): translation to the CPU
+# JIT is NOT execution (docs/lessons.md #5), and the serving perf gate itself
+# runs on BRAIN_DEVICE=cpu, so this must be green before the default flips.
+run "qwen serve suite — CPU backend (int8 KV is the serving default)" \
+                                       env BRAIN_DEVICE=cpu    cargo test --release -q -p brain-qwen --lib serve::
+
 codec="${BRAIN_CODEC_WEIGHTS:-$PWD/out/tts-1b7/codec.weights}"
 if [ -f "$codec" ]; then
     run "TTS codec: NPU graph == CPU reference" \
