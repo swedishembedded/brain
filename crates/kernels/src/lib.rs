@@ -412,6 +412,8 @@ pub const LAYERNORM_DX: &str = include_str!("../wgsl/layernorm_dx.wgsl");
 pub const LAYERNORM_DX_ROWS: &str = include_str!("../wgsl/layernorm_dx_rows.wgsl");
 /// `wgsl/layernorm_rows.wgsl`
 pub const LAYERNORM_ROWS: &str = include_str!("../wgsl/layernorm_rows.wgsl");
+/// Channels-first LayerNorm, FUSED (no permute either side). See §E.
+pub const LAYERNORM2D: &str = include_str!("../wgsl/layernorm2d.wgsl");
 /// `wgsl/leaky_relu.wgsl`
 pub const LEAKY_RELU: &str = include_str!("../wgsl/leaky_relu.wgsl");
 /// `wgsl/leaky_relu_bwd.wgsl`
@@ -923,6 +925,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("layernorm_dx", LAYERNORM_DX),
     ("layernorm_dx_rows", LAYERNORM_DX_ROWS),
     ("layernorm_rows", LAYERNORM_ROWS),
+    ("layernorm2d", LAYERNORM2D),
     ("leaky_relu", LEAKY_RELU),
     ("leaky_relu_bwd", LEAKY_RELU_BWD),
     ("ln_head", LN_HEAD),
