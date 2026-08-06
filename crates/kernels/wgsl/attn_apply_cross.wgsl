@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Cross-attention output: out[b,i,h,d] = sum_{j<T_enc} probs[b,h,i,j] * v[b,j,h,d]
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   native
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Cross-attention output: out[b,i,h,d] = sum_{j<T_enc} probs[b,h,i,j] * v[b,j,h,d].
 // V comes from the ENCODER-MEMORY buffer `kv` (fused KV layout, stride kv_stride =
 // 2*d_model, v region at v_off = d_model). out written contiguous [B*T_dec, d_model].

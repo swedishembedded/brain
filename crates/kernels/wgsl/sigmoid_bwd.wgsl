@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Sigmoid backward:  dx = dy * s * (1 - s),  s = sigmoid(x)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Sigmoid backward:  dx = dy * s * (1 - s),  s = sigmoid(x).
 // Takes the PRE-activation `x` (not the output `s`), matching the convention of
 // every other *_bwd kernel here (silu_bwd, gelu_bwd, leaky_relu_bwd) so blocks

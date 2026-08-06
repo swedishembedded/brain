@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Global grad-norm clip coefficient, computed on-device (no host round-trip)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Global grad-norm clip coefficient, computed on-device (no host round-trip):
 //   total = sqrt(sum_i norms[i]);  coef = min(1, max_norm/(total+1e-6)) * extra_scale
 // `norms` holds per-parameter sum-of-squares (from gradnorm_sq). Single thread.

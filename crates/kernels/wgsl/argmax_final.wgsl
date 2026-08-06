@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Row-wise argmax, FINAL stage
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Row-wise argmax, FINAL stage: fold each row's P partial (value, index) pairs.
 //
 //   part: [M, P, 2]  — from argmax_part

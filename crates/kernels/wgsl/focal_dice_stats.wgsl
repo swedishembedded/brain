@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Per-mask reductions for the SAM-style segmentation objective (sigmoid focal loss + dice loss), over `n_masks` masks of `hw` pixels each (row-major [n_masks, hw])
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Per-mask reductions for the SAM-style segmentation objective (sigmoid focal
 // loss + dice loss), over `n_masks` masks of `hw` pixels each (row-major
 // [n_masks, hw]).

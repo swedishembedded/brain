@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Row-wise bidirectional softmax over the full key axis
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Row-wise bidirectional softmax over the full key axis. One invocation per
 // (b,h,i): normalises scores[b,h,i, 0..T] into probs (non-causal; no j>i zeroing,
 // cf. attn_softmax.wgsl which only sums j<=i).

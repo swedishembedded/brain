@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  MLA backward — grad w.r.t
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // MLA backward — grad w.r.t. the key nope block `k_pass`:
 //   d_k_pass[b,j,h,dn] = scale * sum_{i>=j} d_scores[b,h,i,j] * q_pass[b,i,h,dn]
 // scale = 1/sqrt(nope+rope). Contiguous [B*T, H*nope]. One invocation per (b,h,j,dn).

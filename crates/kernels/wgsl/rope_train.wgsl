@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Batched RoPE (forward). Rows are flattened [B*T, ...]; the rotation angle uses the WITHIN-sequence position = row % T
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Batched RoPE (forward). Rows are flattened [B*T, ...]; the rotation angle uses
 // the WITHIN-sequence position = row % T. Applied in place to the q or k region
 // of the fused qkv buffer (select via base_off). One invocation per

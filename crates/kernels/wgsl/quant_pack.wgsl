@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Quantize + pack an [M, K] f32 activation into [M, K/4] u32 (4 int8 per u32, little-endian along K) using a dynamic per-tensor scale sx (from a buffer)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant int8
+//
 // Quantize + pack an [M, K] f32 activation into [M, K/4] u32 (4 int8 per u32,
 // little-endian along K) using a dynamic per-tensor scale sx (from a buffer):
 //   q = clamp(round(x / sx), -127, 127)

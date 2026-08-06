@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Tiled 3DGS, stage 2: expand each visible gaussian into per-tile sort instances at its scanned offset
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Tiled 3DGS, stage 2: expand each visible gaussian into per-tile sort
 // instances at its scanned offset. Key = tile_id << depth_bits | depth_q,
 // where depth_q is the top `depth_bits` of the raw IEEE bits of the positive

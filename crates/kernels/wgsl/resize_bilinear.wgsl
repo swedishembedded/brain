@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Bilinear resize forward, NCHW, arbitrary output size
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Bilinear resize forward, NCHW, arbitrary output size.
 //   x : [N, C, H,  W ]
 //   y : [N, C, Ho, Wo]   one invocation per OUTPUT element

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Exclusive prefix scan, stage 1 of the generic multi-pass scan
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Exclusive prefix scan, stage 1 of the generic multi-pass scan: each
 // invocation owns one `block`-sized run of `data`, replaces it with its
 // exclusive scan in place, and writes the run's total to `sums[block_idx]`.

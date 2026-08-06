@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  BatchNorm backward: per-channel reduced sums for the input-grad formula
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // BatchNorm backward: per-channel reduced sums for the input-grad formula.
 // One invocation per channel (C threads). NCHW tensor x[N,C,H,W].
 //   xhat       = (x - mean) / sqrt(var + eps),  eps = 1e-5

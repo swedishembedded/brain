@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Gradient of bce_logits w.r.t
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Gradient of bce_logits w.r.t. each logit z:
 //   dlogit = sigmoid(z) - t
 // sigmoid computed in the numerically stable two-branch form.

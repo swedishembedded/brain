@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Append one token's projected K (or V) into a KV cache
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Append one token's projected K (or V) into a KV cache: write the length-`width`
 // source row into cache row `row`, i.e. dst[row*width + i] = src[i]. `dst` is the
 // persistent [max_T, width] cache buffer; `src` is the freshly projected (and, for

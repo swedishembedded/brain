@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Asymmetric crop on NCHW (gather) — the exact adjoint of pad2d
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Asymmetric crop on NCHW (gather) — the exact adjoint of pad2d. Spec:
 // docs/world-models/specs/P1.glue.md §3.7/§4.7. Params layout is IDENTICAL
 // to pad2d: h, w are the CROPPED (output) dims, l/r/t/b the offsets; the

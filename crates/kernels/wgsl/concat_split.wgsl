@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Concat backward / channel-slice copy
+// @how   one thread per output element
+// @opt   3
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Concat backward / channel-slice copy. Copies a contiguous channel range out of
 // a source-grad dy[N,Ctot,H,W] into da[N,Csrc,H,W], reading dy at channel
 // c + c_off. One invocation per OUTPUT element of `da` (n,c,h,w).

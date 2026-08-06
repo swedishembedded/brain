@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Per-sample weighted MSE partial sums — spec
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Per-sample weighted MSE partial sums — spec:
 // docs/world-models/specs/P1.glue.md §3.4/§4.4. pred/tgt are [N, M] row-major
 // (n = samples N, m = M); w is [N]. ONE THREAD PER SAMPLE k (n threads):

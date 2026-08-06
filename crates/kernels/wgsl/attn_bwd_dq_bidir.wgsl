@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Bidirectional attention backward, step 3 — gradient w.r.t
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Bidirectional attention backward, step 3 — gradient w.r.t. q:
 //   d_q[b,i,h,d] = scale * sum_{j<T} d_score[b,h,i,j] * k[b,j,h,d]
 // Non-causal: sum over all j (cf. attn_bwd_dq.wgsl j<=i).

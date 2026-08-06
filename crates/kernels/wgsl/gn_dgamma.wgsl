@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GroupNorm backward w.r.t. gamma, NCHW — spec
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // GroupNorm backward w.r.t. gamma, NCHW — spec:
 // docs/world-models/specs/P1.gn.md §4.3. One invocation per channel
 // (C threads). With cpg = C/G, k = n*G + c/cpg, xhat = (x-mean_k)*rstd_k:

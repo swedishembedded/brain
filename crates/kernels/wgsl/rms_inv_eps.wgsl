@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Per-row inverse RMS with a RUNTIME epsilon
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Per-row inverse RMS with a RUNTIME epsilon: inv[n] = 1/sqrt(mean_c(x²)+eps).
 // The eps-parameterized twin of rms_inv (which hardcodes 1e-6) — Z-Image's
 // RMSNorm uses eps=1e-5, and the backward must match the forward's eps exactly

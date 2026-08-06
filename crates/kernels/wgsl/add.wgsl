@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Residual add:  dst[i] += src[i]
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Residual add:  dst[i] += src[i].  Elementwise.
 
 struct Params {

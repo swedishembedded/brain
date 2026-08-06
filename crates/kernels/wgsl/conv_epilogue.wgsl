@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Conv-as-GEMM epilogue: per-channel affine (BN-eval collapsed) + activation
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Conv-as-GEMM epilogue: per-channel affine (BN-eval collapsed) + activation.
 //   dst[c, hw] = act( src[c, hw] * sb[2c] + sb[2c+1] )
 // `src` is the raw matmul_reg2 conv output [Cout, Ho*Wo]; `sb` is the same

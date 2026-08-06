@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Per-channel scale backward (gain grad), the scale_chan companion
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Per-channel scale backward (gain grad), the scale_chan companion:
 //   dscale[c] += Σ_{rows,inner} x[r,c,i] · dy[r,c,i]
 // One invocation per channel (generic [rows, C, inner] layout; dx is just

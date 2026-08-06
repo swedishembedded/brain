@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Cross-attention backward, step 4 — gradient w.r.t
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Cross-attention backward, step 4 — gradient w.r.t. k (encoder memory):
 //   d_k[b,j,h,d] = scale * sum_{i<T_dec} d_score[b,h,i,j] * q[b,i,h,d]
 // Q comes from the DECODER buffer `q` (stride q_stride=3*d_model, q_off=0). The

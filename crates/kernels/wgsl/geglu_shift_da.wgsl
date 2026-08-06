@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  geglu_shift backward w.r.t
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // geglu_shift backward w.r.t. `h`:
 //   dh[i] = dy[i] * (g[i] + 1) * gelu'(h[i])
 // gelu'(x) = Phi(x) + x·phi(x) = 0.5·(1+erf(x/√2)) + x·(1/√(2π))·exp(-x²/2).

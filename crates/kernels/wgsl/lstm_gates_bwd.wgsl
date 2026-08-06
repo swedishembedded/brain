@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Backward of lstm_gates.wgsl
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Backward of lstm_gates.wgsl. Given upstream grads dh (wrt h_out) and dc_next
 // (wrt c_out, from the next timestep), the pre-activations `pre`, previous cell
 // `c_prev` and new cell `c_out`, produce the grad wrt the pre-activations and wrt

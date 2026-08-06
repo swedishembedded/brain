@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Nearest-neighbour x2 upsample
+// @how   one thread per output element
+// @opt   3
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Nearest-neighbour x2 upsample. One invocation per OUTPUT element. Output is
 // 2H x 2W; y[n,c,ho,wo] = x[n,c,ho/2,wo/2]. NCHW layout. Params carry the INPUT
 // dims (N,C,H,W); the output grid is N*C*(2H)*(2W).

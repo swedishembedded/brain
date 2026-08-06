@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  LayerNorm per-row mean + inverse-std, one WORKGROUP per row
+// @how   64-thread workgroup tile, 1 barrier
+// @opt   4
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // LayerNorm per-row mean + inverse-std, one WORKGROUP per row.
 //
 //   x: [rows, d]  ->  mean: [rows], inv: [rows]

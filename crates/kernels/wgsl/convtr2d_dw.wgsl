@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Transposed 2D convolution WEIGHT gradient
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Transposed 2D convolution WEIGHT gradient. ACCUMULATES into a pre-zeroed
 // buffer (same contract as convtr1d_dw.wgsl / conv2d_gd_dw.wgsl).
 //   dy : [N, Cout,      Ho, Wo]  idx = ((n*Cout + co)*Ho + ho)*Wo + wo

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Exclusive prefix scan, stage 2
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Exclusive prefix scan, stage 2: add the (already exclusively scanned)
 // per-block totals back onto every element of the corresponding block.
 // One invocation per element.

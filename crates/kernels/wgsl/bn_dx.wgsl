@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  BatchNorm backward w.r.t. x
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // BatchNorm backward w.r.t. x. One invocation per element (N*C*H*W threads).
 // With M = N*H*W, xhat = (x-mean)/sqrt(var+eps):
 //   dx = (gamma/sqrt(var+eps)) * (dy - dsum/M - xhat*dxhat_sum/M)

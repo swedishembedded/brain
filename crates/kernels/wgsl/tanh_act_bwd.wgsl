@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Tanh backward — gradient w.r.t
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Tanh backward — gradient w.r.t. the pre-activation `x`.
 //   y = tanh(x) ;  dx = dy * (1 - y^2).
 

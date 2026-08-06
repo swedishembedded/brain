@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Bicubic resize forward (Catmull-Rom / cubic convolution, a = -0.75), NCHW
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Bicubic resize forward (Catmull-Rom / cubic convolution, a = -0.75), NCHW.
 //   x : [N, C, H,  W ]   idx = ((n*C + c)*H  + hi)*W  + wi
 //   y : [N, C, Ho, Wo]   idx = ((n*C + c)*Ho + ho)*Wo + wo

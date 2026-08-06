@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  col2im as a GATHER — the input gradient of a conv, given the gradient of its im2col matrix
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // col2im as a GATHER — the input gradient of a conv, given the gradient of its
 // im2col matrix.
 //

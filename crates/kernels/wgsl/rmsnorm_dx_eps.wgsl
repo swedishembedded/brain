@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  RMSNorm backward w.r.t. x, with a RUNTIME epsilon (eps-parameterized twin of rmsnorm_dx, which hardcodes 1e-6)
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // RMSNorm backward w.r.t. x, with a RUNTIME epsilon (eps-parameterized twin of
 // rmsnorm_dx, which hardcodes 1e-6). Forward: y_c = w_c·x_c·r, r=1/sqrt(mean(x²)+eps).
 // dX_i = r·w_i·dY_i − (r³·x_i/d)·Σ_c dY_c·w_c·x_c. Z-Image uses eps=1e-5, so the

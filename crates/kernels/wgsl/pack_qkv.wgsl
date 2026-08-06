@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Pack three separate [seq, d_model] projections (q, k, v) into one fused [seq, 3*d_model] buffer laid out per token as [ q(d) / k(d) / v(d) ] — the layout the bidirectional attention trio (attn_scores_bidir / _softmax_ / _apply_) reads via q_off=0, k_off=d, v_off=2d
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Pack three separate [seq, d_model] projections (q, k, v) into one fused
 // [seq, 3*d_model] buffer laid out per token as [ q(d) | k(d) | v(d) ] — the
 // layout the bidirectional attention trio (attn_scores_bidir / _softmax_ /

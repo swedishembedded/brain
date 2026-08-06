@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Row-wise causal softmax over the key axis
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Row-wise causal softmax over the key axis. One invocation per (b,h,i):
 // normalises scores[b,h,i, 0..=i] into probs; entries j>i become 0.
 

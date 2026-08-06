@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Transposed 1D convolution forward (ConvTranspose1d), NCL layout, grouping + dilation
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Transposed 1D convolution forward (ConvTranspose1d), NCL layout, grouping +
 // dilation. Used for codec-decoder / vocoder upsampling. PyTorch weight layout
 //   w : [Cin, Cout/G, K]   idx = (ci*(Cout/G) + co_local)*K + kw

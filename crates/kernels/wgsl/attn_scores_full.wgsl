@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Full (bidirectional, NON-causal) attention scores with an additive key mask and NO 1/sqrt(head_dim) scaling — the Chronos-2 encoder contract
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Full (bidirectional, NON-causal) attention scores with an additive key mask
 // and NO 1/sqrt(head_dim) scaling — the Chronos-2 encoder contract:
 //   scores[b,h,i,j] = ( q[b,i,h,:] . k[b,j,h,:] ) + key_mask[b,j]

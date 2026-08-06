@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Attention scores with causal mask AND key-padding mask (no RoPE)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Attention scores with causal mask AND key-padding mask (no RoPE):
 //   scores[b,h,i,j] = -inf            if j > i              (causal)
 //                   = -inf            if token[b,j] == PAD  (key padding)

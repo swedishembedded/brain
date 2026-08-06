@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  FiLM per-row-group modulation (forward) for [R,D] rows — spec
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // FiLM per-row-group modulation (forward) for [R,D] rows — spec:
 // docs/world-models/specs/P1.film.md §4.4. One invocation per element
 // (R*D threads), r = idx/D, d = idx%D, condition group k = r/rows_per_cond:

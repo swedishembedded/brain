@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Batched decode softmax: per (sequence b, head h), max-subtracted softmax over its seq_lens[b] scores in a [batch, n_heads, cap]-strided buffer
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Batched decode softmax: per (sequence b, head h), max-subtracted softmax over
 // its seq_lens[b] scores in a [batch, n_heads, cap]-strided buffer.
 struct Params { batch: u32, n_heads: u32, cap: u32 };

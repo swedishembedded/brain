@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  2D convolution input gradient (transposed-conv GATHER form, no scatter)
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // 2D convolution input gradient (transposed-conv GATHER form, no scatter).
 //   dy : [N, Cout, Ho, Wo]
 //   w  : [Cout, Cin, K, K]

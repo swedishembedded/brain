@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Concatenate two NCHW tensors along the channel axis
+// @how   one thread per output element
+// @opt   3
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Concatenate two NCHW tensors along the channel axis:
 //   y[N, Ca+Cb, H, W]  from  a[N,Ca,H,W] and b[N,Cb,H,W].
 // One invocation per OUTPUT element (n,c,h,w). If c < Ca read a at channel c,

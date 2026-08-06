@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Add a per-output-feature bias in place
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Add a per-output-feature bias in place:  out[m,n] += bias[n].
 // Used after every biased linear (qkv, attn-out, ffn value/gate/down, u_head).
 // One invocation per element (M*N).

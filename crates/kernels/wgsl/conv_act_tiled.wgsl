@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Weight-staged fused conv -> per-channel affine -> activation
+// @how   64-thread workgroup tile, 1 barrier
+// @opt   4
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Weight-staged fused conv -> per-channel affine -> activation. Same result as
 // conv_act.wgsl (including its `p.act` selector: 0 = identity, 1 = ReLU,
 // 2 = SiLU, 3 = sigmoid), but one workgroup stages its output channel's weights

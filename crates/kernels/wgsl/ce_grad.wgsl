@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Cross-entropy gradient w.r.t
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Cross-entropy gradient w.r.t. logits, averaged over all positions:
 //   d_logits[n, v] = (softmax(logits[n])_v - [v == target[n]]) / n_rows
 // One invocation per (row, vocab); recomputes the row softmax (vocab is small).

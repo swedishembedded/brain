@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Batched paged decode scores
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Batched paged decode scores: for each sequence b in the batch, its single query
 // attends all seq_lens[b] cached keys via that sequence's block table.
 //   q      : [batch, n_heads*head_dim]

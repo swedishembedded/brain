@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Rotary position embedding, applied in place to either the q or k region of the fused qkv buffer (select via base_off)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Rotary position embedding, applied in place to either the q or k region of
 // the fused qkv buffer (select via base_off). Matches the Python apply_rope:
 // channel pair (2j, 2j+1) within a head is rotated by angle = t * base^(-2j/hd).

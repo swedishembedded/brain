@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Reduce the partial maxima from max_abs_part into the int8 quantization scale
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant int8
+//
 // Reduce the partial maxima from max_abs_part into the int8 quantization scale:
 // sx = max(part) / 127. Single thread (P is small, e.g. 256). Output is one f32.
 

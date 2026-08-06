@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  3DGS backward, stage 4: per-gaussian segmented reduction over the id-sorted gradient records
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // 3DGS backward, stage 4: per-gaussian segmented reduction over the
 // id-sorted gradient records. `ranges` comes from splat_tile_ranges run with
 // depth_bits=0 over the sorted keys (segment = gaussian id). Outputs the

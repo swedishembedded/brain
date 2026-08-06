@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Router backward: gradient w.r.t
+// @how   one thread per output element, 7 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Router backward: gradient w.r.t. the router logits, combining three paths.
 // One invocation per token row. E <= 64.
 //

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Generic KxK max-pool forward, NCHW, arbitrary STRIDE + symmetric zero-pad
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Generic KxK max-pool forward, NCHW, arbitrary STRIDE + symmetric zero-pad.
 //   x      : [N, C, H,  W ]   idx = ((n*C + c)*H  + hi)*W  + wi
 //   y      : [N, C, Ho, Wo]   idx = ((n*C + c)*Ho + ho)*Wo + wo

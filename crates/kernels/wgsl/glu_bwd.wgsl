@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Backward of glu.wgsl (F.glu over the middle dim)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Backward of glu.wgsl (F.glu over the middle dim). With a = x[o,c,i],
 // b = x[o,d+c,i], s = sigmoid(b), out = a*s:
 //   dx[o,c,i]   = dy * s

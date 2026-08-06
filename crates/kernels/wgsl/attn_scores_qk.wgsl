@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Attention scores from SEPARATE q,k buffers, with a configurable scale and an optional causal mask — covers Kronos's two attention modes
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Attention scores from SEPARATE q,k buffers, with a configurable scale and an
 // optional causal mask — covers Kronos's two attention modes:
 //   - decoder/tokenizer self-attention: causal=1, scale=1/sqrt(head_dim)

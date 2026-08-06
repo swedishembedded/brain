@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Per-ROW (per-token) max/x/ → int8 scale, for outlier-robust activation quantization
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant int8
+//
 // Per-ROW (per-token) max|x| → int8 scale, for outlier-robust activation
 // quantization: sx[m] = max|x[m,:]| / 127. One thread per row. Per-token scales
 // (vs one per tensor) are what keep a deep int8 activation path accurate — a

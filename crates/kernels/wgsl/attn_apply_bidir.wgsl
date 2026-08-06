@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Bidirectional attention output
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Bidirectional attention output: out[b,i,h,d] = sum_{j<T} probs[b,h,i,j] * v[b,j,h,d].
 // Non-causal (sum over all j; cf. attn_apply.wgsl which sums j<=i). v read from
 // the qkv buffer; out written contiguous [B*T, d_model]. One invocation per (b,h,i,d).

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  QuickGELU backward — gradient w.r.t
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // QuickGELU backward — gradient w.r.t. the pre-activation `x`.
 // The matching forward is quick_gelu.wgsl (OpenAI CLIP's sigmoid approximation).
 // `gelu_bwd.wgsl` (tanh approximation) and `gelu_erf_bwd.wgsl` (exact erf) are

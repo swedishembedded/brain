@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Pack one attention operand head-major-contiguous for GEMM attention
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Pack one attention operand head-major-contiguous for GEMM attention:
 //   out[ho*head_stride + i*hd + d] = src[i*src_stride + src_off + (ho/group)*hd + d] * scale
 // Turns the row-major [rows, heads*hd] projection layout into per-head [rows, hd]

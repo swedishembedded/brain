@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  torch adaptive_avg_pool2d (forward)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // torch adaptive_avg_pool2d (forward): average a variable [N,C,H,W] map into a
 // fixed [N,C,OH,OW] grid. Bin (oh,ow) spans input rows [floor(oh·H/OH),
 // ceil((oh+1)·H/OH)) × cols [floor(ow·W/OW), ceil((ow+1)·W/OW)) — bins may overlap

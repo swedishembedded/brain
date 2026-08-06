@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Inverse of pack_qkv: split one fused [seq, 3*d_model] gradient buffer (laid out per token as [ q(d) / k(d) / v(d) ]) back into three contiguous [seq, d_model] grad buffers
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Inverse of pack_qkv: split one fused [seq, 3*d_model] gradient buffer (laid out
 // per token as [ q(d) | k(d) | v(d) ]) back into three contiguous [seq, d_model]
 // grad buffers. The bidirectional attention backward trio writes d_qkv in the

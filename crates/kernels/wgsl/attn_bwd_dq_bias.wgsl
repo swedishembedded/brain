@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Backward w.r.t. q for the biased/configurable-scale scores kernels (attn_scores_{bidir,causal}_bias)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Backward w.r.t. q for the biased/configurable-scale scores kernels
 // (attn_scores_{bidir,causal}_bias). The additive bias does not depend on q, so
 // its gradient path is only through the dot product:

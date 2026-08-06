@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Per-row softmax statistics for the cross-entropy backward
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Per-row softmax statistics for the cross-entropy backward: for each row,
 //   stats[2n] = max_v logits[n,v]
 //   stats[2n+1] = sum_v exp(logits[n,v] - max)      (0 for ignored rows)

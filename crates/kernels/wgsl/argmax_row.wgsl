@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Row-wise argmax:  out[m] = f32(argmax_n x[m, n])   (tie -> LOWEST n)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Row-wise argmax:  out[m] = f32(argmax_n x[m, n])   (tie -> LOWEST n)
 //
 //   x  : [M, N] row-major

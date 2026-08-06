@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  2D convolution weight gradient
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // 2D convolution weight gradient. ACCUMULATES into a pre-zeroed buffer.
 //   dy : [N, Cout, Ho, Wo]
 //   x  : [N, Cin,  H,  W]

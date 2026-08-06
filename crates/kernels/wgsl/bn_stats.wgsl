@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  BatchNorm training batch statistics for an NCHW tensor x[N,C,H,W]
+// @how   one thread per output element, 6 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // BatchNorm training batch statistics for an NCHW tensor x[N,C,H,W].
 // Normalizes per-channel over (N,H,W): one invocation per channel c (C threads).
 //   mean[c] = mean_{n,h,w}(x);  var[c] = mean_{n,h,w}((x-mean)^2)  (population/biased)

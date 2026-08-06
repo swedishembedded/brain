@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Nearest-neighbour x2 upsample backward, GATHER form
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Nearest-neighbour x2 upsample backward, GATHER form. One invocation per INPUT
 // element (n,c,hi,wi). Each input pixel feeds the 2x2 output block
 // {2hi, 2hi+1} x {2wi, 2wi+1}, so its grad is the sum of dy over that block.

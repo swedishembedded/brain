@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Transformer-XL relative-position shift (NeMo / Conformer rel-pos attention)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Transformer-XL relative-position shift (NeMo / Conformer rel-pos attention).
 // Reproduces the pad → reshape → drop-first-row → reshape sequence:
 //   x:  [rows, q, p]           (rows = B*H)

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Exact (erf-based) GELU, matching torch's default `F.gelu`
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Exact (erf-based) GELU, matching torch's default `F.gelu`:
 //   gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
 // brain's `gelu` uses the tanh approximation (GPT-2 style); GenieRedux and

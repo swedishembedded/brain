@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  RoPE backward for the half-split (HF/Qwen) convention (see `rope_base.wgsl`)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // RoPE backward for the half-split (HF/Qwen) convention (see `rope_base.wgsl`).
 // The gradient is the transpose (inverse) rotation, i.e. rotate by -θ. Given
 // d_out in the q/k buffer, overwrite it with d_in in place.

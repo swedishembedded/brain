@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Gated Linear Unit over the middle dim, matching torch `F.glu(x, dim=1)`
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Gated Linear Unit over the middle dim, matching torch `F.glu(x, dim=1)`:
 //   x   : [outer, 2*d, inner]  row-major
 //   out : [outer,   d, inner]  out[o,c,i] = x[o,c,i] * sigmoid(x[o,d+c,i])

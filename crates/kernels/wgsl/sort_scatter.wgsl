@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  LSD radix sort, stage 2: stable per-chunk scatter
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // LSD radix sort, stage 2: stable per-chunk scatter. `hist` holds the
 // exclusive scan of the column-major histograms (sort_hist), so
 // `hist[digit * n_chunks + chunk_idx]` is exactly where this chunk's first

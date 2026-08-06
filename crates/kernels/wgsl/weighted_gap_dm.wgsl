@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  weighted_gap gradient wrt the WEIGHT MAP
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // weighted_gap gradient wrt the WEIGHT MAP.
 //   dy : [N, C]
 //   x  : [N, C, H*W]

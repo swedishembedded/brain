@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Sigmoid activation:  y = 1 / (1 + exp(-x))
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Sigmoid activation:  y = 1 / (1 + exp(-x)).
 // Elementwise. Matching derivative in sigmoid_bwd.wgsl.
 //

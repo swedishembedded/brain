@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  SiLU (a.k.a. swish) activation
+// @how   one thread per output element
+// @opt   3
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // SiLU (a.k.a. swish) activation:  y = x * sigmoid(x) = x / (1 + exp(-x)).
 // Plain (non-gated) elementwise activation. The matching derivative is in
 // silu_bwd.wgsl.

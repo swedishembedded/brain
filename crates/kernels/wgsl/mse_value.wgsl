@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Mean-squared-error loss value (the Regression-head analogue of ce_value)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Mean-squared-error loss value (the Regression-head analogue of ce_value).
 //   out[i] = (pred[i] - target[i])^2 / n
 // where `n` = total number of elements. The host sums out[] to obtain the

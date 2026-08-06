@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Feed the greedy head's output back as the next decode step's input, on the device (A4)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Feed the greedy head's output back as the next decode step's input, on the
 // device (A4): tok[i] = u32(argmax[i]), and record the token into the window
 // history at row `s` so the host reads the whole window's tokens ONCE at the

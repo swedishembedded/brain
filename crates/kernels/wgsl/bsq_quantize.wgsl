@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Binary Spherical Quantization (Kronos), inference form
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant int8
+//
 // Binary Spherical Quantization (Kronos), inference form. The reference
 // L2-normalizes the k-dim latent then takes the sign — but positive scaling
 // preserves the sign, so the normalize is irrelevant to the quantized value:

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Strided per-head LayerNorm (QK-norm)
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Strided per-head LayerNorm (QK-norm): normalize each length-`head_dim` head
 // vector inside the q or k region of a fused [rows, row_stride] buffer, in
 // place, with affine gamma/beta[head_dim]. One invocation per (row, head).

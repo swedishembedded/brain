@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Tiled matmul — same math as matmul.wgsl (out = x @ W^T) but GPU-parallelised
+// @how   64-thread workgroup tile, 2 barriers
+// @opt   4
+// @cpu   native-only
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Tiled matmul — same math as matmul.wgsl (out = x @ W^T) but GPU-parallelised.
 //   x  : [M, K]  row-major (activations)
 //   W  : [N, K]  row-major (W[n,k] = weight row n = output feature n)

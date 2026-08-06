@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Scaled accumulate:  out[i] = out[i] + s * in[i]
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Scaled accumulate:  out[i] = out[i] + s * in[i].
 // Used to fuse a LoRA adapter delta into a base projection's output
 // (y += (alpha/rank) * (B @ (A @ x))) and as the scaled-copy in its backward.

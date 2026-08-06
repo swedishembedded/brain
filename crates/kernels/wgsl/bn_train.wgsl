@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  BatchNorm forward using BATCH statistics, NCHW tensor x[N,C,H,W]
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // BatchNorm forward using BATCH statistics, NCHW tensor x[N,C,H,W].
 //   y = (x - mean[c]) / sqrt(var[c] + eps) * gamma[c] + beta[c],  eps = 1e-5
 // One invocation per output element (N*C*H*W threads).

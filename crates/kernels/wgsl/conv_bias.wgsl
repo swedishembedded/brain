@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Fused conv2d + per-output-channel bias
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Fused conv2d + per-output-channel bias. Identical convolution to conv2d.wgsl
 // (bias-free, NCHW, square KxK, generic stride & implicit zero-pad), then adds
 // the per-channel bias in the SAME pass:  y[co,...] = conv(x,w)[co,...] + bias[co].

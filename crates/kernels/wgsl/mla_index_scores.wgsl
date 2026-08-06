@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  DSA indexer scores (forward, detached)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // DSA indexer scores (forward, detached). For each (query s, key t<=s):
 //   index_scores[b,s,t] = sum_h (weights[b,s,h] * H^-0.5)
 //                             * relu( (q[b,s,h,:] . k[b,t,:]) * D^-0.5 )

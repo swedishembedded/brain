@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Convex 3x3 upsample: gradient wrt the MASK
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Convex 3x3 upsample: gradient wrt the MASK.
 //   dy   : [N, 1,     H*S, W*S]
 //   d    : [N, 1,     H,   W  ]   the half-res depth (forward input)

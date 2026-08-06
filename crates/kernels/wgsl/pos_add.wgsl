@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Add learned absolute positional embeddings in place
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Add learned absolute positional embeddings in place:
 //   x[row, c] += pos[(row % T) * D + c]
 // row = global token index within the [B*T, D] batch; position = row % T.

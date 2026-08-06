@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Broadcast-add a row-strip and a column-strip into a full map, NCHW
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Broadcast-add a row-strip and a column-strip into a full map, NCHW.
 //   a : [N, C, H, 1]   (a strip pooled over W)
 //   b : [N, C, 1, W]   (a strip pooled over H)

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Strided per-head LayerNorm backward (parameter grads)
+// @how   one thread per output element, 4 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Strided per-head LayerNorm backward (parameter grads): one invocation per
 // head-dim channel c, reducing over all (row, head) vectors.
 //   dgamma[c] += Σ dy[.,c]·x̂[.,c] ;  dbeta[c] += Σ dy[.,c]

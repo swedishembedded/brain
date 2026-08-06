@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Weight-staged conv2d: identical math to conv2d.wgsl, but one workgroup loads its output channel's weights into WORKGROUP (on-chip) memory once and reuses them across a block of output spatial positions — so each weight is read from global memory once per block instead of once per output pixel (the H*W weight re-read that makes the naive kernel memory-bound on a GPU)
+// @how   64-thread workgroup tile, 2 barriers
+// @opt   4
+// @cpu   native-only
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Weight-staged conv2d: identical math to conv2d.wgsl, but one workgroup loads
 // its output channel's weights into WORKGROUP (on-chip) memory once and reuses
 // them across a block of output spatial positions — so each weight is read from

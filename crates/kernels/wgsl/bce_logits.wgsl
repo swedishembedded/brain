@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Binary cross-entropy with logits, per (anchor, class), against a soft target t in [0,1]
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Binary cross-entropy with logits, per (anchor, class), against a soft target
 // t in [0,1]. Numerically stable form:
 //   loss = max(z,0) - z*t + log(1 + exp(-|z|))

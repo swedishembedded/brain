@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  LayerNorm backward w.r.t. x
+// @how   one thread per output element, 4 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // LayerNorm backward w.r.t. x. With xhat=(x-mean)*inv, g=dy*gamma:
 //   dx[c] = inv * ( g[c] - mean_k(g) - xhat[c] * mean_k(g*xhat) )
 // One invocation per row; recomputes mean/inv from x (keeps to 4 bindings).

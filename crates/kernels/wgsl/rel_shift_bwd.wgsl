@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Backward (transpose) of rel_shift.wgsl
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Backward (transpose) of rel_shift.wgsl. The forward map output→input is
 // injective (a reindex of a padded grid), so each output scatters its grad to a
 // unique input slot; inputs never referenced keep 0. Caller must zero `dx` first.

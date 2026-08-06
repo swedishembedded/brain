@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Router gating (training variant)
+// @how   one thread per output element, 6 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Router gating (training variant): like router_gate.wgsl but also writes the
 // full softmax probabilities (needed by the backward pass). One invocation per
 // token row. n_experts <= MAX_EXPERTS.

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Partial per-tensor max/x/ for dynamic int8 quantization
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant int8
+//
 // Partial per-tensor max|x| for dynamic int8 quantization. P threads each scan a
 // strided stripe of the [total] input and write their local max into part[P];
 // max_abs_final then reduces part[P] to the scale. Two-pass (no atomics).

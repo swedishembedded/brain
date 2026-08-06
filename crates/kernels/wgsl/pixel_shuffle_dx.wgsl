@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Pixel shuffle INPUT gradient, NCHW
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Pixel shuffle INPUT gradient, NCHW. A pure permutation, so its adjoint is the
 // inverse permutation (space-to-depth) — no accumulation, no atomics.
 //   dy : [N, C,      H*S, W*S]

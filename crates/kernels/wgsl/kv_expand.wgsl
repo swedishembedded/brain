@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GQA head expansion into a fused attention buffer (LFM2.5 bidirectional path)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // GQA head expansion into a fused attention buffer (LFM2.5 bidirectional path):
 // replicate each of the src's `heads_out/group` kv heads `group` times,
 // writing head ho from src head ho/group — the layout `repeat_kv` produces —

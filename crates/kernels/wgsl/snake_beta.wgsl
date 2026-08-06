@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  SnakeBeta activation (forward) — the periodic activation in the codec SEANet decoder / BigVGAN-style vocoder
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // SnakeBeta activation (forward) — the periodic activation in the codec SEANet
 // decoder / BigVGAN-style vocoder. Per-channel learnable alpha/beta stored in
 // log space:

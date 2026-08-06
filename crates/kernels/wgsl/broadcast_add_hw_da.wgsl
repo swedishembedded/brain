@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Gradient of broadcast_add_hw wrt ONE strip
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Gradient of broadcast_add_hw wrt ONE strip: sum the full-map gradient over the
 // broadcast axis.
 //   axis = 0: da[n,c,h] = sum_w dy[n,c,h,w]   (the [N,C,H,1] strip)

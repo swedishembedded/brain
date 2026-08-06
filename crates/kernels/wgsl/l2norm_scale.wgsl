@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Per-row L2 normalization with a learnable per-dim scale — the QK-norm used by GenieRedux attention (applied to each head slice of q and k, over head_dim, before the scores kernel; the scores kernel then uses a constant scale of 8)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Per-row L2 normalization with a learnable per-dim scale — the QK-norm used by
 // GenieRedux attention (applied to each head slice of q and k, over head_dim,
 // before the scores kernel; the scores kernel then uses a constant scale of 8):

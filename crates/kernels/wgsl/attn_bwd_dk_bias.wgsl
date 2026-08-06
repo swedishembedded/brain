@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Backward w.r.t. k for the biased/configurable-scale scores kernels (attn_scores_{bidir,causal}_bias)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Backward w.r.t. k for the biased/configurable-scale scores kernels
 // (attn_scores_{bidir,causal}_bias):
 //   d_k[b,j,h,d] = scale * sum_i d_score[b,h,i,j] * q[b,i,h,d]

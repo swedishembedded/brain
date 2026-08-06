@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Decode-step attention apply
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Decode-step attention apply: the single query's context vector as the
 // probability-weighted sum of the cached values, GQA-aware.
 //   ctx[h, d] = sum_j probs[h, j] * vcache[j, kvhead(h), d]   for j in 0..t

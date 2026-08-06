@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Depthwise 3D convolution, WEIGHT gradient
+// @how   one thread per output element, 4 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Depthwise 3D convolution, WEIGHT gradient. One invocation per weight element
 // wt[c,kt,kh,kw]; sum over all output positions (and batch) of the product of
 // the upstream grad and the input it multiplied in the forward:

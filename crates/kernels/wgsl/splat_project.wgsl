@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  3DGS projection (gsplat-parity EWA)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // 3DGS projection (gsplat-parity EWA): one invocation per gaussian.
 // World mean -> camera -> 2D mean + 2D covariance (perspective Jacobian with
 // FOV clamping), +eps2d anti-alias blur with optional opacity compensation,

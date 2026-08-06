@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Place a tensor into a contiguous channel range of a larger NCHW tensor
+// @how   one thread per output element
+// @opt   3
+// @cpu   native
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Place a tensor into a contiguous channel range of a larger NCHW tensor:
 //   dst[N, Ctot, H, W][c_off + c] = src[N, Csrc, H, W][c]
 // The inverse of concat_split (which copies a channel range OUT). Used to build

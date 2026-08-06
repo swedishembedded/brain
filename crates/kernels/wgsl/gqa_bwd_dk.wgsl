@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GQA attention backward, step 4 — gradient w.r.t
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // GQA attention backward, step 4 — gradient w.r.t. k (post-RoPE), accumulated
 // over the query-head group that shares each kv head:
 //   d_k[b,j,hkv,d] = scale * sum_{h in group(hkv)} sum_{i>=j}

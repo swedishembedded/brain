@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Cross-entropy gradient using precomputed per-row softmax stats (see ce_stats)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Cross-entropy gradient using precomputed per-row softmax stats (see ce_stats):
 //   d_logits[n,v] = 0                                    if target[n]==IGNORE
 //                 = (exp(logits[n,v]-max[n])/sum[n] - [v==tgt]) / count  else

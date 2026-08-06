@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  INT8 register-tiled + software-pipelined GEMM via DP4A (dot4I8Packed)
+// @how   DP4A packed int8, register block per thread, 256-thread workgroup tile, 3 barriers
+// @opt   5
+// @cpu   no
+// @gpu   yes-wg256
+// @npu   yes
+// @quant int8
+//
 // INT8 register-tiled + software-pipelined GEMM via DP4A (dot4I8Packed).
 //
 //   x_q : [M, K/4] u32  — 4 int8 activations packed along K per u32 (row-major)

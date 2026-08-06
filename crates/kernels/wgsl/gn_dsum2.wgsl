@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GroupNorm backward per-group reductions, STAGE 2 of 2 — fold the partials
+// @how   one thread per output element, serial inner reduction
+// @opt   4
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // GroupNorm backward per-group reductions, STAGE 2 of 2 — fold the partials.
 //
 // One invocation per (n,g) group, summing the `P` partials `gn_dsum_part` wrote

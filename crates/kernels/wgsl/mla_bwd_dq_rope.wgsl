@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  MLA backward — grad w.r.t
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // MLA backward — grad w.r.t. the query rope block `q_rot` (post-RoPE):
 //   d_q_rot[b,i,h,dr] = scale * sum_{j<=i} d_scores[b,h,i,j] * k_rot[b,j,dr]
 // scale = 1/sqrt(nope+rope). `q_rot` is [B*T, H*rope]; `k_rot` is the shared

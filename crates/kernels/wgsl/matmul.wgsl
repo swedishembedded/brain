@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Generic matmul matching PyTorch nn.Linear (no bias)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Generic matmul matching PyTorch nn.Linear (no bias):  out = x @ W^T
 //   x : [M, K]   row-major
 //   W : [N, K]   row-major  (W[n, k] is weight row n = output feature n)

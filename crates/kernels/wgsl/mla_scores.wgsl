@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  MLA (Multi-head Latent Attention) scores (forward), for GLM-5.2
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // MLA (Multi-head Latent Attention) scores (forward), for GLM-5.2.
 //   scores[b,h,i,j] = scale * ( sum_dn q_pass[b,i,h,dn]*k_pass[b,j,h,dn]
 //                             + sum_dr q_rot[b,i,h,dr]*k_rot[b,j,dr] )   for j<=i

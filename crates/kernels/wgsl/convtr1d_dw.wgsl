@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Transposed 1D convolution weight gradient
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Transposed 1D convolution weight gradient. ACCUMULATES into a pre-zeroed
 // buffer.
 //   dy : [N, Cout, Lo]

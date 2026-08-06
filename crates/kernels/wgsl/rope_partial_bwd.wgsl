@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Moondream partial RoPE (backward)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Moondream partial RoPE (backward): the transpose of rope_partial, i.e. rotation
 // by -angle (a rotation's adjoint). Applied in place on the grad buffer; the
 // non-rotated tail channels pass through unchanged (their grad is untouched).

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GQA attention backward, step 3 — gradient w.r.t
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // GQA attention backward, step 3 — gradient w.r.t. q (post-RoPE):
 //   d_q[b,i,h,d] = scale * sum_{j<=i} d_score[b,h,i,j] * k[b,j,hkv,d]
 // scale = 1/sqrt(head_dim), hkv = h/group. Written into the q-grad buffer

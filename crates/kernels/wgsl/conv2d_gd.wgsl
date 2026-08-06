@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  2D convolution forward (bias-free), NCHW, square KxK, WITH grouping + dilation
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // 2D convolution forward (bias-free), NCHW, square KxK, WITH grouping + dilation.
 //   x : [N, Cin,        H,  W]   idx = ((n*Cin + ci)*H + hi)*W + wi
 //   w : [Cout, Cin/G,   K,  K]   idx = ((co*(Cin/G) + cl)*K + kh)*K + kw

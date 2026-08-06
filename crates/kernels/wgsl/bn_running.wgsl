@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  BatchNorm momentum update of running statistics
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // BatchNorm momentum update of running statistics. One invocation per channel.
 //   run_mean = (1-m)*run_mean + m*mean
 //   run_var  = (1-m)*run_var  + m*var

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Per-parameter sum of squares of its gradient, written to norms[slot]
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Per-parameter sum of squares of its gradient, written to norms[slot].
 // One single-thread dispatch per parameter buffer (numel small enough); the
 // host reads the tiny `norms` array, sums it, and computes the global clip

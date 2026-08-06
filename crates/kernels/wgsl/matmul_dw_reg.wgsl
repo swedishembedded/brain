@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Backward of out = x @ W^T w.r.t
+// @how   register block per thread, 256-thread workgroup tile, 3 barriers
+// @opt   5
+// @cpu   native-only
+// @gpu   yes-wg256
+// @npu   yes
+// @quant none
+//
 // Backward of out = x @ W^T w.r.t. W (tiled):  dW[n,k] += sum_m dY[m,n]*X[m,k].
 //
 // Tiled + software-pipelined (matmul_reg2 structure: 128x128 output tile, 256

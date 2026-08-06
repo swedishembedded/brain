@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Naive 3DGS compositing — the correctness oracle and tiny-scene path
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Naive 3DGS compositing — the correctness oracle and tiny-scene path. One
 // invocation per pixel, front-to-back over ALL projected gaussians in buffer
 // order (the host pre-sorts by camera depth). No tiles, no sort kernels.

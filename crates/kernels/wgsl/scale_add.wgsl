@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  MoE combine for one expert
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // MoE combine for one expert:
 //   accumulate == 0 :  acc[t, c]  = gate[t, e_idx] * src[t, c]   (initialise)
 //   accumulate != 0 :  acc[t, c] += gate[t, e_idx] * src[t, c]

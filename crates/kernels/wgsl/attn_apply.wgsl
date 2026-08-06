@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Attention output: out[b,i,h,d] = sum_{j<=i} probs[b,h,i,j] * v[b,j,h,d]
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Attention output: out[b,i,h,d] = sum_{j<=i} probs[b,h,i,j] * v[b,j,h,d].
 // v read from the qkv buffer; out written contiguous [B*T, d_model].
 // One invocation per (b,h,i,d).

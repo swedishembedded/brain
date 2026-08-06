@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Per-ROW (per-token) max/x/ -> int8 scale, one WORKGROUP per row — the cooperative form of `max_abs_row.wgsl`
+// @how   64-thread workgroup tile, 1 barrier
+// @opt   4
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant int8
+//
 // Per-ROW (per-token) max|x| -> int8 scale, one WORKGROUP per row — the
 // cooperative form of `max_abs_row.wgsl`.
 //

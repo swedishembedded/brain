@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  EDM output wrap for the DIAMOND sampler (denoiser.py::wrap_model_output)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // EDM output wrap for the DIAMOND sampler (denoiser.py::wrap_model_output):
 //   d[i] = quantize(clamp(coef[0]*x[i] + coef[1]*f[i], -1, 1))
 // where coef = [c_skip, c_out] (a per-sigma device buffer, so one recorded

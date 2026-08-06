@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Append a batch of new tokens' K (or V) into the paged pool
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Append a batch of new tokens' K (or V) into the paged pool: sequence b writes
 // src[b, :] into pool at its per-sequence (blocks[b], offsets[b]).
 struct Params { batch: u32, kv_stride: u32, block_size: u32 };

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  PReLU backward, NCHW — produces BOTH gradients in one pass
+// @how   64-thread workgroup tile, 1 barrier
+// @opt   4
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // PReLU backward, NCHW — produces BOTH gradients in one pass.
 // The PORTABLE reference: barrier-free, so it runs on every backend including
 // the CPU Cranelift JIT. prelu_bwd_wg.wgsl is the cooperative, coalesced

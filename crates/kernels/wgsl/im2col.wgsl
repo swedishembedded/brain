@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  im2col: lower a conv input into a GEMM operand
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // im2col: lower a conv input into a GEMM operand.
 //   x   : [N=1, Cin, H, W]  (NCHW)
 //   col : [Ho*Wo, Cin*K*K]  row-major — col[hw, (ci*K + kh)*K + kw] = the input

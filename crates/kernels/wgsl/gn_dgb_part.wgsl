@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GroupNorm affine gradients, STAGE 1 of 2 — partial sums for BOTH dgamma and dbeta in one pass over `dy`
+// @how   one thread per output element, serial inner reduction
+// @opt   4
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // GroupNorm affine gradients, STAGE 1 of 2 — partial sums for BOTH dgamma and
 // dbeta in one pass over `dy`.
 //

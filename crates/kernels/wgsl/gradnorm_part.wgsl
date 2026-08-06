@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Per-parameter sum of squares of its gradient, as a COOPERATIVE tree reduction
+// @how   64-thread workgroup tile, 2 barriers
+// @opt   4
+// @cpu   no
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Per-parameter sum of squares of its gradient, as a COOPERATIVE tree reduction:
 // `n_wg` workgroups of 64 threads split one gradient buffer, each writing one
 // partial into `parts[out_off + wg]`. `clip_coef_wg` folds every tensor's

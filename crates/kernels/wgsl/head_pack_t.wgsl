@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  As head_pack but TRANSPOSED per head
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // As head_pack but TRANSPOSED per head: out[ho*head_stride + d*rows + i] = src[...].
 // The apply GEMM `ctx = probs @ V` runs as A·Bᵀ with B = Vᵀ[hd, rows], so V
 // packs transposed. Same GQA head replication and scale semantics.

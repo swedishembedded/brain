@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Row-wise cross-attention softmax over the encoder key axis
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Row-wise cross-attention softmax over the encoder key axis. One invocation per
 // (b,h,i): normalises scores[b,h,i, 0..T_enc] into probs (non-causal). The row
 // length is T_enc (keys), which differs from the query count T_dec.

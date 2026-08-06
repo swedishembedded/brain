@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Vector-quantization nearest-codebook assignment (COSINE similarity), used by GenieRedux-style tokenizers with `use_cosine_sim=True`
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant int8
+//
 // Vector-quantization nearest-codebook assignment (COSINE similarity), used by
 // GenieRedux-style tokenizers with `use_cosine_sim=True`. Queries x[M,D] and
 // codebook cb[K,D] are assumed L2-NORMALISED per row by the caller (project-in

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  2D convolution forward (bias-free), NCHW layout, square KxK kernel
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // 2D convolution forward (bias-free), NCHW layout, square KxK kernel.
 //   x : [N, Cin,  H,  W]   row-major   idx = ((n*Cin + ci)*H + hi)*W + wi
 //   w : [Cout, Cin, K, K]  row-major   idx = ((co*Cin + ci)*K + kh)*K + kw

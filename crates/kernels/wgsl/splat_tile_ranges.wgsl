@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Tiled 3DGS, stage 4: per-tile [start, end) ranges over the SORTED keys, by neighbor comparison (disjoint writes, no atomics)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Tiled 3DGS, stage 4: per-tile [start, end) ranges over the SORTED keys, by
 // neighbor comparison (disjoint writes, no atomics). ranges must be
 // zero-cleared before this dispatch so empty tiles read start == end == 0.

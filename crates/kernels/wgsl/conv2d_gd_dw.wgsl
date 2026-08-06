@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Grouped+dilated 2D convolution WEIGHT gradient
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Grouped+dilated 2D convolution WEIGHT gradient. ACCUMULATES into a pre-zeroed
 // buffer (same contract as conv2d_dw.wgsl).
 //   dy : [N, Cout,      Ho, Wo]

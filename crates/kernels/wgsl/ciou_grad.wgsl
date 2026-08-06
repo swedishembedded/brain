@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Gradient of the CIoU loss L = 1 - CIoU w.r.t
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Gradient of the CIoU loss L = 1 - CIoU w.r.t. the 4 predicted coords
 // pred[A,4] = (x1,y1,x2,y2). Target tgt[A,4] is constant. Output dpred[A,4].
 // One thread per anchor.

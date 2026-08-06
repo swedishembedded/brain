@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Embedding backward (also the tied lm_head's weight)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Embedding backward (also the tied lm_head's weight): scatter the residual-
 // stream gradient back into the rows that were looked up.
 //   grad_emb[v, c] += sum_{n : token[n] == v} d_x[n, c]

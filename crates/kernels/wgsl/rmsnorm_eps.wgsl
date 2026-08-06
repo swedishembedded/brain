@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  RMSNorm with a RUNTIME epsilon
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // RMSNorm with a RUNTIME epsilon:
 //   out[t, c] = weight[c] * x[t, c] / sqrt(mean_c(x[t, c]^2) + eps)
 // Identical to rmsnorm.wgsl but eps is a parameter (passed as f32 bits) rather

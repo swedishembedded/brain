@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GELU activation (tanh approximation, as used by GPT-2-style MLPs)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // GELU activation (tanh approximation, as used by GPT-2-style MLPs):
 //   out[i] = 0.5 * x * (1 + tanh( k * (x + 0.044715 * x^3) )),  k = sqrt(2/pi)
 // Elementwise over seq_len * d_ff. The matching derivative is in gelu_bwd.wgsl.

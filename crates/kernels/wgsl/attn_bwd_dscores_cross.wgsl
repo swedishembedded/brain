@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Cross-attention backward, step 1 — gradient through (probs @ v) and the softmax
+// @how   one thread per output element, 4 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Cross-attention backward, step 1 — gradient through (probs @ v) and the softmax.
 // One invocation per (b,h,i) over the query axis (i in [0,T_dec)):
 //   d_prob_j = sum_d d_out[b,i,h,d] * v[b,j,h,d]        (j in [0,T_enc))

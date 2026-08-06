@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Distribution Focal Loss value per assigned anchor
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Distribution Focal Loss value per assigned anchor. For each of the 4 sides,
 // the continuous target distance t splits across adjacent bins:
 //   tl = floor(t), tr = tl + 1,  wr = t - tl,  wl = 1 - wr

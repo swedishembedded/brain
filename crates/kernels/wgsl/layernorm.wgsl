@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  LayerNorm forward (matches torch.nn.LayerNorm)
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // LayerNorm forward (matches torch.nn.LayerNorm):
 //   mean = mean_c(x);  var = mean_c((x-mean)^2)   (biased/population variance)
 //   y[c] = (x[c]-mean) / sqrt(var+eps) * gamma[c] + beta[c],   eps a param (1e-5 torch default)

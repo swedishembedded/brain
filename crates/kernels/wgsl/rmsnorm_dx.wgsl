@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  RMSNorm backward w.r.t. the input x
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // RMSNorm backward w.r.t. the input x. Forward: y_c = w_c * x_c * r,
 // r = 1/sqrt(mean(x^2)+eps). With A = sum_c dY_c * w_c * x_c,
 //   dX_i = r*w_i*dY_i - (r^3 * x_i / d) * A

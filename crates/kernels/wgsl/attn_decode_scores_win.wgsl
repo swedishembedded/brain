@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Windowed decode-step attention scores
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Windowed decode-step attention scores: a SINGLE query (the new token) against
 // the cached keys, but only over the sliding window [w0, t); positions j < w0
 // are masked to -inf so the downstream `decode_softmax` (max-subtract, exp) gives

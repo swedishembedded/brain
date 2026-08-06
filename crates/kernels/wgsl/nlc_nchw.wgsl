@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Layout permutation NLC [N, L=H*W, C] -> NCHW (gather) — exact inverse AND adjoint of nchw_nlc
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Layout permutation NLC [N, L=H*W, C] -> NCHW (gather) — exact inverse AND
 // adjoint of nchw_nlc. Spec: docs/world-models/specs/P1.glue.md §3.9/§4.9.
 // total = N*c*hw. One thread per OUTPUT (NCHW) element:

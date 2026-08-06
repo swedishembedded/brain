@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Append a batch of new tokens' K (or V) into an INT8 paged pool
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant int8
+//
 // Append a batch of new tokens' K (or V) into an INT8 paged pool: per (sequence b,
 // kv-head) compute a symmetric scale = max|x|/127, quantize the head's head_dim
 // values to int8, and pack 4 per u32 into the pool at the sequence's (block,

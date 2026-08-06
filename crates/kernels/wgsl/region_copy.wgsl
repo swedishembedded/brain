@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Strided-region copy between same-layout buffers
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Strided-region copy between same-layout buffers: for each row, copy
 // `width` values at `off` within a `row_stride` row (e.g. the v region of a
 // fused qkv-gradient buffer, where qk-norm backward rewrites q/k but v

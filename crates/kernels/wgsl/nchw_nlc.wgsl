@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Layout permutation NCHW -> NLC [N, L=H*W, C] (gather) — spec
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Layout permutation NCHW -> NLC [N, L=H*W, C] (gather) — spec:
 // docs/world-models/specs/P1.glue.md §3.8/§4.8. total = N*c*hw. One thread
 // per OUTPUT (NLC) element:

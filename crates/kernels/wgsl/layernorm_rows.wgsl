@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  LayerNorm forward, one WORKGROUP per row — the coalesced variant
+// @how   64-thread workgroup tile, 2 barriers
+// @opt   4
+// @cpu   no
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // LayerNorm forward, one WORKGROUP per row — the coalesced variant.
 //
 //   x: [rows, d]   gamma,beta: [d]   out: [rows, d]

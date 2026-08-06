@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Bilinear resize INPUT gradient, NCHW
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Bilinear resize INPUT gradient, NCHW.
 //   dy : [N, C, Ho, Wo]
 //   dx : [N, C, H,  W ]   read_write (one invocation per INPUT element)

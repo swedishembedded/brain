@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  LayerNorm backward w.r.t. gamma
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // LayerNorm backward w.r.t. gamma:
 //   dgamma[c] += sum_n dy[n,c] * xhat[n,c],   xhat = (x-mean)*inv
 // One invocation per channel; uses precomputed per-row mean/inv (ln_stats).

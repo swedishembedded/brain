@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  BatchNorm backward w.r.t. gamma
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // BatchNorm backward w.r.t. gamma. One invocation per channel (C threads).
 //   dgamma[c] += sum_{n,h,w} dy * xhat,   xhat = (x-mean)/sqrt(var+eps), eps=1e-5
 // Accumulates into the (pre-zeroed) grad buffer.

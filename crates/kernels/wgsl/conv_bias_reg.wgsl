@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Register-tiled conv + per-output-channel bias — conv_act_reg's 8x4 tile (8 output channels x 4 coalesced spatial positions in scalar registers, (kh,kw)-outer/ci-inner loop) with a PLAIN BIAS epilogue instead of the BN-affine+SiLU one
+// @how   register block per thread
+// @opt   5
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Register-tiled conv + per-output-channel bias — conv_act_reg's 8x4 tile
 // (8 output channels x 4 coalesced spatial positions in scalar registers,
 // (kh,kw)-outer/ci-inner loop) with a PLAIN BIAS epilogue instead of the

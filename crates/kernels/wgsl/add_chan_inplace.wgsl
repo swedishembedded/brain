@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  In-place per-channel bias over NCHW
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // In-place per-channel bias over NCHW: out[n,c,hw] += v[c]. Single
 // read_write binding (no input aliasing — wgpu usage-scope safe), the
 // conv-bias companion of add_chan_bcast.

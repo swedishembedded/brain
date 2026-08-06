@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  DSA top-k selection mask (forward)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // DSA top-k selection mask (forward). Turn per-query indexer scores into an
 // additive attention mask: keep the top-`index_topk` causal keys per query
 // (0), block the rest (-inf). One invocation per (b, query s).

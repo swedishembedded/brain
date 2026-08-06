@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Batched paged decode apply
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Batched paged decode apply: context per (b,h,d) = probs-weighted sum of cached
 // values addressed through sequence b's block table. ctx : [batch, n_heads*head_dim].
 struct Params {

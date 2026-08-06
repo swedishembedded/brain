@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Paged decode-step attention scores
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Paged decode-step attention scores: a single query vs all `t` cached keys,
 // where each key's physical address is resolved through the block table.
 //   scores[h,j] = (q[h] . pool_k[block_table[j/bs]*bs + j%bs, kvhead(h)]) * scale

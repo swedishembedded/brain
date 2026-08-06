@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Register-tiled fused conv -> per-channel affine -> activation
+// @how   register block per thread
+// @opt   5
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Register-tiled fused conv -> per-channel affine -> activation. Each invocation
 // computes an 8x4 output tile = 8 output channels x 4 spatial positions, holding
 // the 32 partial sums in SCALAR registers (fully unrolled, so the GPU keeps them

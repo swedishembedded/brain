@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Inverse of head_pack: scatter per-head [rows, hd] context blocks back into the row-major [rows, d_model] stream the output projection consumes
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Inverse of head_pack: scatter per-head [rows, hd] context blocks back into
 // the row-major [rows, d_model] stream the output projection consumes:
 //   out[i*dst_stride + dst_off + ho*hd + d] = src[ho*head_stride + i*hd + d]

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GroupNorm backward per-group reductions, NCHW — spec
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // GroupNorm backward per-group reductions, NCHW — spec:
 // docs/world-models/specs/P1.gn.md §4.5. One invocation per (n,g) group
 // (N*G threads): n = k/G, g = k%G, cpg = C/G. `dyg` = dy*gamma_c, produced

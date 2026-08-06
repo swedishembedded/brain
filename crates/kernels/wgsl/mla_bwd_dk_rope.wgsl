@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  MLA backward — grad w.r.t
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // MLA backward — grad w.r.t. the shared (MQA) rope key `k_rot`:
 //   d_k_rot[b,j,dr] = scale * sum_{i>=j} sum_h d_scores[b,h,i,j] * q_rot[b,i,h,dr]
 // The sum over heads is because a single `k_rot` is broadcast to every head.

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  SwiGLU activation (Kronos FFN)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // SwiGLU activation (Kronos FFN): out = silu(a) * b, elementwise, where
 // silu(x) = x * sigmoid(x) and a = w1(x), b = w3(x). One invocation per element.
 

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Gradient of the SAM-style segmentation objective w.r.t
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Gradient of the SAM-style segmentation objective w.r.t. the mask LOGITS.
 // The matching forward reduction is `focal_dice_stats.wgsl`; this kernel
 // re-reads the four per-mask sums it wrote, because the dice term's denominator

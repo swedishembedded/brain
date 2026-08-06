@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  AdamW update (decoupled weight decay), matching torch.optim.AdamW
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // AdamW update (decoupled weight decay), matching torch.optim.AdamW.
 //   m = b1*m + (1-b1)*g
 //   v = b2*v + (1-b2)*g^2

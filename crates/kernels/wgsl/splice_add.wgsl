@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Residual DeepStack add: accumulate a compact `[n]` source block into `dst` starting at flat element offset `base`
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Residual DeepStack add: accumulate a compact `[n]` source block into `dst`
 // starting at flat element offset `base`:
 //   dst[base + i] += src[i]   for i in 0..n.

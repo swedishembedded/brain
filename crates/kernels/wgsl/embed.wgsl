@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Embedding gather: x[t, c] = emb[token[t], c]
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Embedding gather: x[t, c] = emb[token[t], c].
 // One invocation per output element (seq_len * d_model).
 

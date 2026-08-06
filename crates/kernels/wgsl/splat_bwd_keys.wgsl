@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  3DGS backward, stage 3 prep
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // 3DGS backward, stage 3 prep: extract the gaussian-id sort keys from the
 // gradient records (slot 9 holds the id bit-cast to f32) and index payloads.
 

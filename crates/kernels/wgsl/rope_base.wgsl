@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Batched RoPE (forward), HF/Qwen "half-split" (GPT-NeoX) convention, with a configurable base theta
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Batched RoPE (forward), HF/Qwen "half-split" (GPT-NeoX) convention, with a
 // configurable base theta. This differs from `rope_train.wgsl` (which rotates
 // adjacent interleaved pairs `2j,2j+1`): here the rotated pair is the channel

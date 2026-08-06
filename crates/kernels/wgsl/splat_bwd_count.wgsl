@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  3DGS backward, stage 1: per-pixel count of gradient-contributing gaussians (same walk as the forward compositing
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // 3DGS backward, stage 1: per-pixel count of gradient-contributing gaussians
 // (same walk as the forward compositing: alpha >= 1/255, stop at T <= 1e-4).
 // The counts are prefix-scanned into record offsets for splat_bwd_emit.

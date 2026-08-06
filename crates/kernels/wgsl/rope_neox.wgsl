@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Rotary position embedding, NeoX / half-split style (Chronos-2, GPT-NeoX, Llama-HF)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Rotary position embedding, NeoX / half-split style (Chronos-2, GPT-NeoX,
 // Llama-HF): within a head the rotated pair is (j, j + head_dim/2), NOT the
 // interleaved (2j, 2j+1) of `rope.wgsl`. Applied in place to a q or k region.

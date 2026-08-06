@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Moondream partial RoPE (forward)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Moondream partial RoPE (forward): rotate only the first `rot_dim` channels of
 // each `head_dim`-wide head; the remaining `head_dim - rot_dim` pass through.
 // Half-split within the rotated block: pair (m, m + rot_dim/2) for m in

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Backward of  out = x @ W^T  w.r.t
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Backward of  out = x @ W^T  w.r.t. x:
 //   dX[m, k] = sum_n dY[m, n] * W[n, k]
 // W is [N, K] row-major (same layout as the forward weight). One invocation per

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  geglu_shift backward w.r.t
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // geglu_shift backward w.r.t. `g`:
 //   dg[i] = dy[i] * gelu_erf(h[i])
 // erf inlined (A&S), no helper fn (wgsl-cpu JIT). Inputs dy, h; output dg.

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Bilinear grid sample INPUT gradient — the adjoint of grid_sample.wgsl w.r.t
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Bilinear grid sample INPUT gradient — the adjoint of grid_sample.wgsl w.r.t. x.
 //   dy   : [N, C,  Ho, Wo]  idx = ((n*C + c)*Ho + ho)*Wo + wo
 //   grid : [N, Ho, Wo, 2]   idx = ((n*Ho + ho)*Wo + wo)*2 + a   (a = 0 -> X, 1 -> Y)

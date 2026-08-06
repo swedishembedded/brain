@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  LayerNorm helper: per-row mean and inverse-std
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // LayerNorm helper: per-row mean and inverse-std.
 //   mean[n] = mean_c(x);  inv[n] = 1/sqrt(var+eps),  var = mean_c((x-mean)^2), eps a param
 // One invocation per row. Feeds layernorm_dgamma (mirrors rms_inv -> rmsnorm_dw).

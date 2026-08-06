@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Masked L1, per element:  out = /pred - tgt/ * mask
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Masked L1, per element:  out = |pred - tgt| * mask.
 //   pred, tgt, mask : [total]
 //   out : [total]  read_write

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  RoPE backward: gradient is the inverse (transpose) rotation, i.e
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // RoPE backward: gradient is the inverse (transpose) rotation, i.e. rotate by
 // -angle. Given d_out in the q/k region of d_qkv, overwrite it with d_in.
 //   forward:  out_e = e*c - o*s ;  out_o = e*s + o*c

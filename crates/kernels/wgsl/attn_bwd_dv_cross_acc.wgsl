@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Accumulating twin of attn_bwd_dv_cross for QUERY-CHUNKED backward
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Accumulating twin of attn_bwd_dv_cross for QUERY-CHUNKED backward: d_v sums
 // over ALL query rows; `acc_flag = 0` assigns (first chunk), `1` accumulates.
 // Cross-attention backward, step 2 — gradient w.r.t. v (encoder memory):

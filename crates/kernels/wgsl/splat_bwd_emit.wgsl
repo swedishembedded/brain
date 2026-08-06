@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  3DGS backward, stage 2: replay each pixel's compositing walk and emit one gradient record per contributing gaussian (gsplat blend-backward math)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // 3DGS backward, stage 2: replay each pixel's compositing walk and emit one
 // gradient record per contributing gaussian (gsplat blend-backward math).
 // Forward walk recomputes each gaussian's T_i; the color-suffix S needed by

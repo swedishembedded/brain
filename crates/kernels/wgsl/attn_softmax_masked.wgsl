@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Row-wise causal softmax over the key axis, padding-safe
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Row-wise causal softmax over the key axis, padding-safe. One invocation per
 // (b,h,i). Same as attn_softmax, but if the whole row is masked (mx == -inf,
 // e.g. a fully-padded query) it emits all zeros instead of NaN. Padded keys

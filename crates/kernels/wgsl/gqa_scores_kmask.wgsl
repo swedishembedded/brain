@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GQA attention scores with an additive per-key mask — `gqa_scores` plus `kmask[j]` added to every finite score
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // GQA attention scores with an additive per-key mask — `gqa_scores` plus
 // `kmask[j]` added to every finite score:
 //   scores[b,h,i,j] = (q[b,i,h,:] . k[b,j,hkv,:]) / sqrt(head_dim) + kmask[j]   for j <= i

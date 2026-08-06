@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Matmul into a COLUMN TILE of the output
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Matmul into a COLUMN TILE of the output:  out[:, n_off : n_off+n_tile] = x · Wᵀ
 // where W is bound to a sub-range covering output features [n_off, n_off+n_tile)
 // — i.e. rows [n_off, n_off+n_tile) of the [N_full, K] weight. This lets a

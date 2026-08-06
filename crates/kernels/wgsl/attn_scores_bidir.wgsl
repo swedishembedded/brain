@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Bidirectional (encoder self-attention) scores (materialised, for training)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Bidirectional (encoder self-attention) scores (materialised, for training):
 //   scores[b,h,i,j] = (q[b,i,h,:] . k[b,j,h,:]) / sqrt(head_dim)   for all j
 // Non-causal: no j>i mask (cf. attn_scores.wgsl). q,k read from the fused qkv

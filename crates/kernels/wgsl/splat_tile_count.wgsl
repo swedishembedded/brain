@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Tiled 3DGS, stage 1: per-gaussian overlapped-tile count
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Tiled 3DGS, stage 1: per-gaussian overlapped-tile count. The bbox
 // [mean2d ± radius] is intersected with the screen's 16×16 tile grid; culled
 // gaussians (radius 0) count 0. The counts buffer is then prefix-scanned in

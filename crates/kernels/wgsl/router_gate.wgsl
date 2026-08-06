@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Router gating: softmax over experts -> keep top_k -> renormalise
+// @how   one thread per output element, 6 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Router gating: softmax over experts -> keep top_k -> renormalise.
 // Produces a dense gate matrix [seq_len, n_experts] that is nonzero only for
 // the top_k experts of each token (their renormalised probabilities). One

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Software-pipelined register-tiled matmul (out = x @ Wᵀ)
+// @how   register block per thread, 256-thread workgroup tile, 3 barriers
+// @opt   5
+// @cpu   native-only
+// @gpu   yes-wg256
+// @npu   yes
+// @quant none
+//
 // Software-pipelined register-tiled matmul (out = x @ Wᵀ). Same math and same
 // 128x128 / 8x8 tiling as matmul_reg.wgsl, but it HIDES global-load latency.
 //

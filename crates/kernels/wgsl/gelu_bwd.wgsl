@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GELU backward (tanh approximation) — gradient w.r.t
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // GELU backward (tanh approximation) — gradient w.r.t. the pre-activation `x`.
 //   g(x)  = 0.5 * x * (1 + t),      t = tanh(u),  u = k*(x + 0.044715 x^3)
 //   g'(x) = 0.5*(1 + t) + 0.5*x*(1 - t^2) * u',   u' = k*(1 + 3*0.044715 x^2)

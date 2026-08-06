@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Peak fp32 FMA-rate probe — the COMPUTE half of the device roofline
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Peak fp32 FMA-rate probe — the COMPUTE half of the device roofline.
 //
 // Why this exists. Every "% of peak" number in this engine was a P40 literal

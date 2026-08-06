@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Convex 3x3 upsample forward (ZipDepth's FastConvexUpsample, unfold path)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Convex 3x3 upsample forward (ZipDepth's FastConvexUpsample, unfold path).
 //   mask : [N, 9*S*S, H, W]   already softmax-normalized over the 9 axis
 //   d    : [N, 1,     H, W]   the half-resolution depth map

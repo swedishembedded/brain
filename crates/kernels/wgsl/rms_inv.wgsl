@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Helper: per-row inverse RMS,  inv[n] = 1/sqrt(mean_c(x[n,c]^2) + eps)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Helper: per-row inverse RMS,  inv[n] = 1/sqrt(mean_c(x[n,c]^2) + eps).
 // One invocation per row. Used by rmsnorm_dw.
 

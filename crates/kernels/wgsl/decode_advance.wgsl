@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Advance the batched-decode metadata one sub-step, on the device (A4)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Advance the batched-decode metadata one sub-step, on the device (A4):
 // position and attended length grow by one, and the K/V write slot for the
 // next token comes from a host-precomputed schedule — the host allocated the

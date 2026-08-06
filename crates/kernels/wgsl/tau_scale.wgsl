@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Moondream per-(head, token) attention-temperature scale, broadcast over head_dim
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Moondream per-(head, token) attention-temperature scale, broadcast over
 // head_dim:  out[row, h, d] = in[row, h, d] * s[h, row]
 // `in`/`out` are [rows, heads*head_dim] (a q or v buffer); `s` is [heads, rows].

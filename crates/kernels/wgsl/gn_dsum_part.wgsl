@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GroupNorm backward per-group reductions, STAGE 1 of 2 — partial sums
+// @how   1 barrier
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // GroupNorm backward per-group reductions, STAGE 1 of 2 — partial sums.
 //
 // `gn_dsum` computes S1/S2 with ONE invocation per (n,g) group: 32 lanes for a

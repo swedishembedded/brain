@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Leaky ReLU forward:  y = x        if x >= 0 y = slope*x  otherwise
+// @how   one thread per output element
+// @opt   3
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Leaky ReLU forward:  y = x        if x >= 0
 //                      y = slope*x  otherwise.
 // `slope` is passed as a bit-cast f32 in the uniform (common in GAN vocoder

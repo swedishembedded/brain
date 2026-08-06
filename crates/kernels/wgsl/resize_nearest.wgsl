@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Nearest-neighbour resize, NCHW, ARBITRARY output size
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Nearest-neighbour resize, NCHW, ARBITRARY output size.
 //   x : [N, C, H,  W ]
 //   y : [N, C, Ho, Wo]   one invocation per OUTPUT element

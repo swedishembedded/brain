@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Flash attention (bidirectional self-attention), LANE-SPLIT across head_dim
+// @how   256-thread workgroup tile, 3 barriers
+// @opt   4
+// @cpu   no
+// @gpu   yes-wg256
+// @npu   no
+// @quant none
+//
 // Flash attention (bidirectional self-attention), LANE-SPLIT across head_dim.
 // Same math as flash_attn_bidir.wgsl (online softmax, K/V streamed through
 // shared memory, scores never materialised), same Params, same output layout:

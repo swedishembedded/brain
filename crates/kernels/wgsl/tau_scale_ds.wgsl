@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  tau_scale backward w.r.t. the per-(head,token) scale `s`
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // tau_scale backward w.r.t. the per-(head,token) scale `s`:
 //   ds[h, row] = sum_d d_out[row, h, d] * in[row, h, d]
 // `d_out`/`in` are [rows, heads*head_dim]; `ds` is [heads, rows]. One invocation

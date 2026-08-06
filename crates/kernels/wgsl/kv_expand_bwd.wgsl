@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Backward of kv_expand — the adjoint of head replication is a group-sum
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Backward of kv_expand — the adjoint of head replication is a group-sum:
 //   d_src[row*src_stride + hs*hd + d] =
 //       sum_{g<group} d_dst[row*dst_stride + dst_off + (hs*group+g)*hd + d]

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Moondream prefix-LM attention mask, added into the scores before softmax
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Moondream prefix-LM attention mask, added into the scores before softmax:
 //   allow(i,j) = (i < P && j < P) || (j <= i)
 // i.e. the first `prefix` positions (bos + image tokens) attend BIDIRECTIONALLY

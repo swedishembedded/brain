@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Decode-step attention scores
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Decode-step attention scores: a SINGLE query (the new token) against all `t`
 // cached keys, GQA-aware. scores[h, j] = (q[h] . kcache[j, kvhead(h)]) * scale,
 // for query head h in 0..n_heads and cached position j in 0..t.

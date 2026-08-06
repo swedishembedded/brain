@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Generic KxK max-pool INPUT gradient, NCHW, arbitrary STRIDE + symmetric pad
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Generic KxK max-pool INPUT gradient, NCHW, arbitrary STRIDE + symmetric pad.
 // GATHER form (no scatter / no atomics).
 //   dy     : [N, C, Ho, Wo]   idx = ((n*C + c)*Ho + ho)*Wo + wo

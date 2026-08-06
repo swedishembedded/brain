@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Bicubic resize INPUT gradient, NCHW
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Bicubic resize INPUT gradient, NCHW.
 //   dy : [N, C, Ho, Wo]  idx = ((n*C + c)*Ho + ho)*Wo + wo
 //   dx : [N, C, H,  W ]  idx = ((n*C + c)*H  + hi)*W  + wi   read_write

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Vector-quantization nearest-codebook assignment (Euclidean)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant int8
+//
 // Vector-quantization nearest-codebook assignment (Euclidean). For each of M
 // query vectors x[M,D], find the codebook entry cb[K,D] minimising squared
 // L2 distance. One invocation per query m (M threads); inner loop over K*D.

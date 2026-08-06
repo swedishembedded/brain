@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Backward of out = x @ W^T w.r.t
+// @how   register block per thread, 256-thread workgroup tile, 3 barriers
+// @opt   4
+// @cpu   no
+// @gpu   yes-wg256
+// @npu   yes
+// @quant none
+//
 // Backward of out = x @ W^T w.r.t. W, with dY supplied ALREADY TRANSPOSED:
 //   dW[n,k] += sum_m dYt[n,m] * X[m,k].
 //

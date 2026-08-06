@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Backward w.r.t. x for l2norm_scale
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Backward w.r.t. x for l2norm_scale. With r = rsqrt(sum_k x_k^2 + eps),
 // y_d = x_d * r * g_d, the input gradient for row n is:
 //   a_d   = dy_d * g_d

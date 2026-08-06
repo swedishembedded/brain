@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Row-wise FULL (non-causal) softmax over the key axis, padding-safe
+// @how   one thread per output element, 4 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Row-wise FULL (non-causal) softmax over the key axis, padding-safe. One
 // invocation per (b,h,i). Unlike `attn_softmax_masked` (which restricts to
 // j<=i), this attends over ALL keys j in 0..T — the Chronos-2 encoder is

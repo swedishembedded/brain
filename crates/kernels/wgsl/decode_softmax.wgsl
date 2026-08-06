@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Decode-step softmax: max-subtracted softmax over the `t` cached scores of each query head, in place per row of a [n_heads, cap]-strided buffer
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Decode-step softmax: max-subtracted softmax over the `t` cached scores of each
 // query head, in place per row of a [n_heads, cap]-strided buffer. Matches the
 // CPU reference (subtract row max, exp, normalise). One invocation per head.

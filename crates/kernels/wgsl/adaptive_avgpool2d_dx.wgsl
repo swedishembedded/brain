@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  adaptive_avg_pool2d backward
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // adaptive_avg_pool2d backward: scatter each output bin's gradient (divided by
 // its region size) back to the input pixels it covered. One invocation per INPUT
 // element (n,c,h,w); loops the OH×OW bins and accumulates from those containing

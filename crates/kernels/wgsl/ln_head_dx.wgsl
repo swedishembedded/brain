@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Strided per-head LayerNorm backward (input grad), the ln_head companion
+// @how   one thread per output element, 4 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Strided per-head LayerNorm backward (input grad), the ln_head companion.
 // x is the CACHED pre-norm buffer (ln_head normalizes in place, so training
 // paths copy the region first); dy/dx use the same strided region layout.

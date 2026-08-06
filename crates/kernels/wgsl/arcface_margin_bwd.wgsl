@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Backward of arcface_margin.wgsl w.r.t
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Backward of arcface_margin.wgsl w.r.t. the cosine table.
 //
 //   cos    : [rows, classes]  read        the SAME input the forward saw

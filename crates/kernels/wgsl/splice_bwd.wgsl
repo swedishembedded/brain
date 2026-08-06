@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Residual splice (backward)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Residual splice (backward): route the residual-stream gradient at the spliced
 // region into the compact image-embedding gradient, and ZERO it in the residual
 // grad so the downstream embedding backward (emb_bwd) does not scatter it into

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Add the DSA per-(query,key) sparse mask into the MLA attention scores before softmax
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Add the DSA per-(query,key) sparse mask into the MLA attention scores before
 // softmax: scores[b,h,i,j] += mask[b,i,j]  (the mask is shared across heads).
 // `mask` is [B*T, T] = (b*T+i)*T+j ; `scores` is [B*H*T*T]. One invocation per

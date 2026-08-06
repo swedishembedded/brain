@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  RMSNorm, one WORKGROUP per row — the decode-regime variant
+// @how   64-thread workgroup tile, 1 barrier
+// @opt   4
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // RMSNorm, one WORKGROUP per row — the decode-regime variant.
 //
 //   x  : [rows, d]   out: [rows, d]   w: [d]

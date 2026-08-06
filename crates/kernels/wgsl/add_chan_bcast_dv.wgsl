@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Gradient of add_chan_bcast wrt the per-(image, channel) scalar
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Gradient of add_chan_bcast wrt the per-(image, channel) scalar: sum the map.
 //   dy : [N, C, H, W]
 //   dv : [N, C]   read_write   dv[n,c] = sum_hw dy[n,c,hw]

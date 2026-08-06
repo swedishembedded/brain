@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  1D convolution forward (bias-free), NCL layout, with grouping + dilation
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // 1D convolution forward (bias-free), NCL layout, with grouping + dilation.
 // The workhorse for the TTS audio stack (codec conv encoder/decoder, ECAPA
 // speaker encoder, GAN vocoder). Causal convs are expressed by the caller as a

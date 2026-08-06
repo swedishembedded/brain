@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Attention output over ALL keys (non-causal), reading v from a SEPARATE value buffer (not a fused qkv)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Attention output over ALL keys (non-causal), reading v from a SEPARATE value
 // buffer (not a fused qkv). Chronos-2 projects q/k/v into their own buffers.
 //   out[b,i,h,d] = sum_{j in 0..T} probs[b,h,i,j] * v[b,j,h,d]

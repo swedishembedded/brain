@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Out-of-place add:  out[i] = a[i] + b[i]
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Out-of-place add:  out[i] = a[i] + b[i].
 // Lets each residual write to a fresh buffer (which doubles as the activation
 // cache for backprop), avoiding in-place mutation + copies. Elementwise.

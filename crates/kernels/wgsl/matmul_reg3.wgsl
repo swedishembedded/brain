@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Register-tiled matmul (out = x @ Wᵀ), matmul_reg2's tiling with its two shared-memory bank-conflict patterns removed
+// @how   register block per thread, 256-thread workgroup tile, 3 barriers
+// @opt   5
+// @cpu   native-only
+// @gpu   yes-wg256
+// @npu   yes
+// @quant none
+//
 // Register-tiled matmul (out = x @ Wᵀ), matmul_reg2's tiling with its two
 // shared-memory bank-conflict patterns removed. Same 128x128 tile, same 8x8
 // per-thread register block, same software pipelining (next K-chunk's global

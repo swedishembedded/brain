@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  BatchNorm forward for INFERENCE using RUNNING statistics, NCHW x[N,C,H,W]
+// @how   one thread per output element
+// @opt   3
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // BatchNorm forward for INFERENCE using RUNNING statistics, NCHW x[N,C,H,W].
 // Identical math/packing to bn_train (separate name for clarity); the caller
 // passes running mean/var in `mv` instead of batch stats.

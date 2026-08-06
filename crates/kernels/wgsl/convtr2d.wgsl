@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Transposed 2D convolution forward (ConvTranspose2d, bias-free), NCHW, square KxK, WITH grouping + dilation
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Transposed 2D convolution forward (ConvTranspose2d, bias-free), NCHW, square
 // KxK, WITH grouping + dilation. Used for decoder upsampling (SAM 2's mask
 // decoder does 2x twice; VQGAN/CodeFormer decoders).

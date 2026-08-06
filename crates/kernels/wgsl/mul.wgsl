@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Elementwise Hadamard product — spec
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Elementwise Hadamard product — spec: docs/world-models/specs/P1.glue.md §3.1/§4.1.
 //   y[i] = a[i] * b[i]         one invocation per element, i in [0, n)
 // Backward COMPOSES from this same kernel (no new kernel):

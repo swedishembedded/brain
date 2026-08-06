@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  MLA backward — grad w.r.t
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // MLA backward — grad w.r.t. the query nope block `q_pass` (post-projection):
 //   d_q_pass[b,i,h,dn] = scale * sum_{j<=i} d_scores[b,h,i,j] * k_pass[b,j,h,dn]
 // scale = 1/sqrt(nope+rope); `d_scores` is grad of the scaled pre-softmax scores.

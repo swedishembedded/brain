@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Unpack the fit-time packed gaussian geometry [N*10] = {mean(3), scale(3), quat(4)} into the separate forward-kernel buffers
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Unpack the fit-time packed gaussian geometry [N*10] = {mean(3), scale(3),
 // quat(4)} into the separate forward-kernel buffers. One invocation per
 // gaussian. (Packed layout matches d_gauss so AdamW runs on one buffer.)

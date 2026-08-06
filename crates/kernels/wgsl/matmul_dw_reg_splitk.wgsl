@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Split-K backward of out = x @ W^T w.r.t
+// @how   register block per thread, 256-thread workgroup tile, 3 barriers
+// @opt   5
+// @cpu   no
+// @gpu   yes-wg256
+// @npu   yes
+// @quant none
+//
 // Split-K backward of out = x @ W^T w.r.t. W:
 //   partial[s][n,k] = sum_{m in slice s} dY[m,n]*X[m,k].
 //

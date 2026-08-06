@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  DFL decode gradient. Given upstream dE[A,4] = dL/dE for each expected distance E, produce logit grads
+// @how   one thread per output element, 4 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // DFL decode gradient. Given upstream dE[A,4] = dL/dE for each expected
 // distance E, produce logit grads. Softmax-expectation Jacobian:
 //   E = sum_i i * p_i,   dE/dlogit_j = p_j * (j - E)

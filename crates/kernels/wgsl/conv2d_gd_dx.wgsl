@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Grouped+dilated 2D convolution INPUT gradient (transposed-conv GATHER form)
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Grouped+dilated 2D convolution INPUT gradient (transposed-conv GATHER form).
 //   dy : [N, Cout,      Ho, Wo]
 //   w  : [Cout, Cin/G,  K,  K]

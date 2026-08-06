@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GLM/DeepSeek-V3 "noaux_tc" MoE router (backward)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // GLM/DeepSeek-V3 "noaux_tc" MoE router (backward). Grad w.r.t. the router
 // logits through the sigmoid combine weights (NO aux/z-loss; the selection bias
 // is not trained by backprop). One invocation per token row. E <= 64.

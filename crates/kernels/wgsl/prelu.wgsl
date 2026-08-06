@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  PReLU forward with a LEARNED slope, NCHW
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // PReLU forward with a LEARNED slope, NCHW:  y = x         if x > 0
 //                                            y = a[ai] * x otherwise.
 //   x : [N, C, H, W]   idx = ((n*C + c)*H + h)*W + w

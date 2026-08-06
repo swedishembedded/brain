@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  LSD radix sort, stage 1: per-chunk 256-bin digit histogram
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // LSD radix sort, stage 1: per-chunk 256-bin digit histogram. Each invocation
 // owns one `chunk`-sized run of `keys` and counts the 8-bit digit at `shift`
 // into a private local table, then writes it COLUMN-MAJOR into `hist`

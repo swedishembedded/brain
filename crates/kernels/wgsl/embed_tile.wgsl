@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Embedding gather over a VOCAB TILE
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Embedding gather over a VOCAB TILE: x[t,c] = emb[token[t], c], but `emb` is
 // bound to a sub-range covering rows [v0, v0+v_count) of the full table, so a
 // >128MB embedding can be gathered in several passes each within the binding

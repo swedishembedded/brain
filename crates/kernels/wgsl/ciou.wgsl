@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  CIoU loss value per assigned anchor
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // CIoU loss value per assigned anchor:  loss = 1 - CIoU
 //   CIoU = IoU - rho^2/c^2 - alpha * v
 //   v     = (4/pi^2) * (atan(wg/hg) - atan(wp/hp))^2

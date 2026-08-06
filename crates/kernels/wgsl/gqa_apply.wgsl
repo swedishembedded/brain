@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GQA attention output, separate v buffer
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // GQA attention output, separate v buffer:
 //   ctx[b,i,h,d] = sum_{j<=i} probs[b,h,i,j] * v[b,j,hkv,d],  hkv = h / group.
 // v is [B*T, n_kv_heads*head_dim]; ctx is [B*T, n_heads*head_dim], head-major.

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  FiLM per-row-group modulation, scale/shift gradient — spec
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // FiLM per-row-group modulation, scale/shift gradient — spec:
 // docs/world-models/specs/P1.film.md §4.6. One invocation per (cond,d)
 // (NC*D threads, NC = R/rows_per_cond): thread t has k = t/D, d = t%D.

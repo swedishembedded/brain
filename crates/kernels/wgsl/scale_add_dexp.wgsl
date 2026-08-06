@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  MoE combine backward, part 1 — gradient w.r.t
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // MoE combine backward, part 1 — gradient w.r.t. one expert's output:
 //   moe_acc[t,c] = sum_e gate[t,e] * expert_out_e[t,c]
 //   => d_expert_out_e[t,c] = gate[t,e_idx] * d_moe_acc[t,c]

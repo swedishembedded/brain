@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Scale a gradient buffer in place by a coefficient that lives in a GPU buffer (written by clip_coef)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Scale a gradient buffer in place by a coefficient that lives in a GPU buffer
 // (written by clip_coef): grad[i] *= coef[0]. Lets the whole optimizer step run
 // on-device with no host readback. One invocation per element.

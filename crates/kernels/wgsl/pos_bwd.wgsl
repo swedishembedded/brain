@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Positional-embedding backward (scatter)
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Positional-embedding backward (scatter):
 //   dpos[i, c] += sum_b d_x[(b*T + i)*D + c]      for i in 0..T
 // One invocation per (i, c); loops batch b to avoid atomics. The dpos buffer is

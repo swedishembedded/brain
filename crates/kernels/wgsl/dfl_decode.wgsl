@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  DFL decode: for each (anchor, side) softmax over `reg_max` logits then take the expectation E = sum_i i * p_i
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // DFL decode: for each (anchor, side) softmax over `reg_max` logits then take
 // the expectation E = sum_i i * p_i. Logits laid out [A, 4, reg_max]; output
 // dist[A, 4]. One thread per (anchor, side) = A*4 threads. reg_max <= 16.

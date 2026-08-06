@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GroupNorm statistics combine (stage 2 of 2, after gn_part)
+// @how   one thread per output element, serial inner reduction
+// @opt   4
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // GroupNorm statistics combine (stage 2 of 2, after gn_part): one invocation
 // per (n,g) group folds its P partial (sum, sumsq) pairs into
 //   stats[2k]   = mean = S/M

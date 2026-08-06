@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Attention backward, step 2 — gradient w.r.t
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Attention backward, step 2 — gradient w.r.t. v:
 //   d_v[b,j,h,d] = sum_{i>=j} probs[b,h,i,j] * d_out[b,i,h,d]
 // Written into the v region of d_qkv. One invocation per (b,h,j,d).

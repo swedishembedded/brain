@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Backward w.r.t. the per-dim scale g for l2norm_scale
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Backward w.r.t. the per-dim scale g for l2norm_scale. g is shared across rows,
 // so its gradient is the column sum of dy * normalized-x:
 //   d_g[d] = sum_n dy[n,d] * x[n,d] * rsqrt(sum_k x[n,k]^2 + eps)

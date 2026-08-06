@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Softmax-over-strided-K backward
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Softmax-over-strided-K backward.
 //   y  : [N, K, M]   the FORWARD OUTPUT (probabilities)
 //   dy : [N, K, M]

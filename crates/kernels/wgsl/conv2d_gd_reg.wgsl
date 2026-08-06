@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Register-tiled GROUPED/DILATED conv2d forward (bias-free) — conv2d_gd's math with conv_act_reg's 8x4 register tile
+// @how   register block per thread
+// @opt   5
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Register-tiled GROUPED/DILATED conv2d forward (bias-free) — conv2d_gd's math
 // with conv_act_reg's 8x4 register tile. Each invocation computes 8 output
 // channels x 4 spatial positions, with the octet GROUP-ALIGNED: all 8 channels

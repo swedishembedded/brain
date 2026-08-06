@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Tiled 3DGS, stage 5: front-to-back compositing
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Tiled 3DGS, stage 5: front-to-back compositing. One 64-invocation workgroup
 // owns one 16×16 tile (dispatch threads = n_tiles*64; tile = idx/64), each
 // invocation owns 4 pixels (lane, lane+64, lane+128, lane+192). All 64

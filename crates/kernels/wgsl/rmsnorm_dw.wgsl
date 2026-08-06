@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  RMSNorm backward w.r.t. the gain weight
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // RMSNorm backward w.r.t. the gain weight:
 //   dW[c] += sum_n dY[n,c] * x[n,c] * inv[n]
 // One invocation per channel; uses the precomputed per-row inv (rms_inv).

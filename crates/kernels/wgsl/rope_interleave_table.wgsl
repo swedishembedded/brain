@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Table-driven interleaved rotary position embedding (Z-Image / multi-axis)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Table-driven interleaved rotary position embedding (Z-Image / multi-axis).
 //
 // Unlike rope.wgsl (analytic angle, in place on the fused qkv buffer), the angle

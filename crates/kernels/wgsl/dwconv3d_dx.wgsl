@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Depthwise 3D convolution, INPUT gradient (adjoint of dwconv3d)
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Depthwise 3D convolution, INPUT gradient (adjoint of dwconv3d). One
 // invocation per INPUT element x[n,c,t,h,w]; scatter-gather over the output
 // positions whose receptive field covers this input:

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Per-row (per-sample) scalar scale on a row-major [N, M] tensor — spec
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Per-row (per-sample) scalar scale on a row-major [N, M] tensor — spec:
 // docs/world-models/specs/P1.glue.md §3.2/§4.2. total = N*M, m = M.
 //   y[i] = s[i / m] * x[i]

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Causal multi-head attention with online (numerically stable) softmax
+// @how   one thread per output element, 4 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Causal multi-head attention with online (numerically stable) softmax.
 // One invocation per (token t, head h): it streams over keys s = 0..=t,
 // accumulating the softmax-weighted sum of values. No score matrix is

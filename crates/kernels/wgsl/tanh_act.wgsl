@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Tanh forward:  y = tanh(x)
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Tanh forward:  y = tanh(x). Final waveform activation in several vocoders.
 // Named tanh_act to avoid colliding with the WGSL builtin `tanh`. Backward in
 // tanh_act_bwd.wgsl.

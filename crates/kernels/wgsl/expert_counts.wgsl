@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Load-balancing fractions used by the aux-loss gradient
+// @how   one thread per output element, serial inner reduction
+// @opt   2
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Load-balancing fractions used by the aux-loss gradient:
 //   f_e = (number of tokens routed to expert e) / (n_rows * top_k)
 // One invocation per expert (selection = gate[*,e] > 0).

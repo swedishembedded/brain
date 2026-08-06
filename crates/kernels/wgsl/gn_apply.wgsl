@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  GroupNorm forward apply, NCHW x[N,C,H,W] — spec
+// @how   one thread per output element
+// @opt   3
+// @cpu   native
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // GroupNorm forward apply, NCHW x[N,C,H,W] — spec:
 // docs/world-models/specs/P1.gn.md §4.2. One invocation per element
 // (N*C*H*W threads). With hw = H*W, c = (idx/hw) % C, n = idx/(C*hw),

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Transposed 2D convolution INPUT gradient (gather form, no scatter/atomics)
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Transposed 2D convolution INPUT gradient (gather form, no scatter/atomics).
 // The adjoint of convtr2d.wgsl.
 //   dy : [N, Cout,      Ho, Wo]  idx = ((n*Cout + co)*Ho + ho)*Wo + wo

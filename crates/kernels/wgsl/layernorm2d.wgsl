@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Channels-first LayerNorm (ConvNeXt / SAM 2's `LayerNorm2d`), FUSED — the normalisation runs in NCHW, with no permute either side
+// @how   one thread per output element, 3 nested serial reductions
+// @opt   1
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Channels-first LayerNorm (ConvNeXt / SAM 2's `LayerNorm2d`), FUSED — the
 // normalisation runs in NCHW, with no permute either side.
 //

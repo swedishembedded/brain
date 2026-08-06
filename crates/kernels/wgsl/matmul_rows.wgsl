@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Row-blocked matmul, same contract as matmul.wgsl
+// @how   one thread per output element, serial inner reduction
+// @opt   4
+// @cpu   yes
+// @gpu   yes
+// @npu   yes
+// @quant none
+//
 // Row-blocked matmul, same contract as matmul.wgsl:  out = x @ W^T
 //   x : [M, K],  W : [N, K],  out : [M, N]   (all row-major)
 //

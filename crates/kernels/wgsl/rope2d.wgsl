@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
+// @what  Table-driven 2D RoPE (DINOv3/WorldMirror "normalized" variant), in place on the q or k region of a fused [rows, row_stride] buffer
+// @how   one thread per output element
+// @opt   3
+// @cpu   yes
+// @gpu   yes
+// @npu   no
+// @quant none
+//
 // Table-driven 2D RoPE (DINOv3/WorldMirror "normalized" variant), in place on
 // the q or k region of a fused [rows, row_stride] buffer. The host precomputes
 // per-token-position cos/sin tables [tmod, half] (half = head_dim/2; the
