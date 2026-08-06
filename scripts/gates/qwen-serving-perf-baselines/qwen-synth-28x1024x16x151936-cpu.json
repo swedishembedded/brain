@@ -15,7 +15,7 @@
     "adapter_is_software": null,
     "backend": "cpu",
     "build": "release",
-    "commit": "55f7c6c",
+    "commit": "08a1ea8",
     "cpu": {
       "cores": 22,
       "model": "Intel(R) Core(TM) Ultra 7 155H"
@@ -31,7 +31,7 @@
       "MOE_SKIP_GPU_TESTS": null,
       "RAYON_NUM_THREADS": null
     },
-    "os": "linux 6.17.0-40-generic",
+    "os": "linux 6.17.0-41-generic",
     "ram_gb": 30.356
   },
   "invalid_reason": null,
@@ -51,32 +51,32 @@
   "performance": {
     "completed": 2,
     "e2e_ms": {
-      "max": 22100.722,
-      "mean": 13691.272,
-      "min": 5281.822,
+      "max": 34173.027,
+      "mean": 22310.494,
+      "min": 10447.96,
       "n": 2,
-      "p50": 5281.822,
-      "p95": 22100.722,
-      "p99": 22100.722,
-      "p999": 22100.722
+      "p50": 10447.96,
+      "p95": 34173.027,
+      "p99": 34173.027,
+      "p999": 34173.027
     },
     "failed": 0,
     "goodput_per_s": 0.0,
     "ial_ms": {
-      "max": 1541.005,
-      "mean": 1094.868,
-      "min": 775.902,
+      "max": 2835.438,
+      "mean": 1679.987,
+      "min": 930.35,
       "n": 4,
-      "p50": 946.252,
-      "p95": 1541.005,
-      "p99": 1541.005,
-      "p999": 1541.005
+      "p50": 1057.229,
+      "p95": 2835.438,
+      "p99": 2835.438,
+      "p999": 2835.438
     },
-    "input_artifacts_per_s": 1.753,
-    "output_artifacts_per_s": 0.219,
+    "input_artifacts_per_s": 1.076,
+    "output_artifacts_per_s": 0.134,
     "rejected": 0,
     "requests": 2,
-    "requests_per_s": 0.073,
+    "requests_per_s": 0.045,
     "slo": {
       "e2e_ms": null,
       "ial_ms_p99": 50.0,
@@ -84,26 +84,26 @@
     },
     "slo_attainment": 0.0,
     "tpoa_ms": {
-      "max": 1328.659,
-      "mean": 1094.868,
-      "min": 861.077,
+      "max": 2366.184,
+      "mean": 1679.987,
+      "min": 993.789,
       "n": 2,
-      "p50": 861.077,
-      "p95": 1328.659,
-      "p99": 1328.659,
-      "p999": 1328.659
+      "p50": 993.789,
+      "p95": 2366.184,
+      "p99": 2366.184,
+      "p999": 2366.184
     },
     "ttfa_ms": {
-      "max": 19435.208,
-      "mean": 11497.413,
-      "min": 3559.618,
+      "max": 29440.584,
+      "mean": 18950.454,
+      "min": 8460.324,
       "n": 2,
-      "p50": 3559.618,
-      "p95": 19435.208,
-      "p99": 19435.208,
-      "p999": 19435.208
+      "p50": 8460.324,
+      "p95": 29440.584,
+      "p99": 29440.584,
+      "p999": 29440.584
     },
-    "wall_s": 27.383
+    "wall_s": 44.621
   },
   "reliability": {
     "cancelled_compute_waste": null,
@@ -131,16 +131,16 @@
     "normalised_slowdown": null,
     "preemptions": null,
     "queue_ms": {
-      "max": 4.754,
-      "mean": 2.548,
-      "min": 0.343,
+      "max": 11.667,
+      "mean": 6.044,
+      "min": 0.421,
       "n": 2,
-      "p50": 0.343,
-      "p95": 4.754,
-      "p99": 4.754,
-      "p999": 4.754
+      "p50": 0.421,
+      "p95": 11.667,
+      "p99": 11.667,
+      "p999": 11.667
     },
-    "starvation_ms_max": 4.754
+    "starvation_ms_max": 11.667
   },
   "schema": "brain.perf/1",
   "smoke": false,
