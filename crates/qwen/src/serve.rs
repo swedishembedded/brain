@@ -280,6 +280,24 @@ pub fn kv_pool_bytes(cfg: &QwenConfig, block_size: u32, num_blocks: u32, kv_int8
     n_layers * 2 * (pool_words + scale_words) * 4 // K + V, every layer, 4 bytes/word
 }
 
+/// Whether `cfg` can take int8 KV at all: the append kernels pack 4 int8
+/// lanes into one `u32`, so a packed word must stay within one head (else its
+/// lanes would span two heads' scales) — `head_dim % 4 == 0`. Every shipped
+/// Qwen3 config (`head_dim` 128) and `QwenConfig::tiny()` (`head_dim` 8)
+/// satisfy this; an imported HF config with an unusual `head_dim` might not.
+///
+/// The three DEFAULT-selecting call sites (`QwenResident::activate`,
+/// `qwen_cli::serve`, the perf `SynthSpec` builders) call this FIRST and
+/// degrade to fp32 with a printed reason when it is `false` — an explicit
+/// `kv_int8: true` request still hits `from_map_with_gpu`'s hard assert,
+/// because a caller that asked for int8 by name should hear about a mismatch
+/// as a failure, not a silent substitution. An implicit default should not
+/// turn an unusual imported checkpoint into a serving-process panic nobody
+/// asked for.
+pub fn kv_int8_supported(cfg: &QwenConfig) -> bool {
+    cfg.head_dim.is_multiple_of(4)
+}
+
 /// A running sequence: its block table, generated tokens, and completion flag.
 struct Seq {
     table: BlockTable,
@@ -657,9 +675,17 @@ impl Engine {
     /// once. `None` (or a [`model::kvcalib::KvCalib::disabled`] table) clears
     /// calibration — the append dispatch falls back to the plain online-
     /// absmax kernel. A no-op on a fp32-KV engine (`kv_int8: false`): there
-    /// is nothing to clip.
+    /// is nothing to clip, since `run_batched_submit`'s int8 branch (the only
+    /// place `kv_calib` is read) never runs. Printed loudly rather than
+    /// silent, because a caller installing a table it then never sees take
+    /// effect is exactly the kind of no-op AGENTS.md calls out (a gate/config
+    /// that never runs is worse than none) — [`kv_calibrated`] reflects the
+    /// same "did it actually bind" question.
     pub fn set_kv_calib(&mut self, calib: Option<model::kvcalib::KvCalib>) {
         let calib = calib.filter(|c| !c.is_disabled());
+        if calib.is_some() && !self.kv_int8 {
+            eprintln!("serve: a KV clip table was installed on an fp32-KV engine; it will never be dispatched (calibration only applies to int8 KV)");
+        }
         if let Some(c) = &calib {
             assert_eq!(c.n_layers as u32, self.cfg.n_layers, "kv_calib: n_layers mismatch");
             assert_eq!(c.n_kv as u32, self.cfg.n_kv_heads, "kv_calib: n_kv mismatch");
@@ -697,10 +723,14 @@ impl Engine {
     }
 
     /// Whether the installed KV clip table is a real, binding calibration
-    /// (not `None`, not `KvCalib::disabled`) — i.e. whether `APPEND_I8_CLIPPED`
-    /// is actually selected in place of `APPEND_I8`.
+    /// that is ACTUALLY DISPATCHED (not `None`, not `KvCalib::disabled`, and
+    /// the engine is int8 — `APPEND_I8_CLIPPED` only ever runs in place of
+    /// `APPEND_I8` on the int8 branch of `run_batched_submit`). A table
+    /// installed on an fp32 engine is `Some` in `self.kv_calib` but never
+    /// read by anything, so this must say `false` for it or it would claim a
+    /// calibration is binding when it provably is not.
     pub fn kv_calibrated(&self) -> bool {
-        self.kv_calib.is_some()
+        self.kv_int8 && self.kv_calib.is_some()
     }
 
     /// The device this engine runs on — the parent handle for building more
@@ -1986,6 +2016,51 @@ mod tests {
         check("V", &xv, &pv8, &scales_v);
     }
 
+    /// A config with `head_dim=6` -- even (RoPE-legal) but not a multiple of
+    /// 4, so a packed int8 `u32` would span two heads' scales. Used only by
+    /// the G5 boundary-policy tests below.
+    fn head_dim_not_multiple_of_4_cfg() -> QwenConfig {
+        QwenConfig {
+            vocab: 11,
+            block_size: 16,
+            n_layers: 1,
+            d_model: 12,
+            n_heads: 2,
+            n_kv_heads: 1,
+            head_dim: 6,
+            d_ff: 8,
+            rope_theta: 1.0e6,
+            rms_eps: 1e-6,
+            max_position_embeddings: 16,
+            tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
+            lora: None,
+        }
+    }
+
+    /// G5a: [`kv_int8_supported`] must say `false` exactly for `head_dim % 4
+    /// != 0` configs, and `true` for every real shape this repo ships.
+    #[test]
+    fn kv_int8_supported_matches_head_dim_mod_4() {
+        assert!(!kv_int8_supported(&head_dim_not_multiple_of_4_cfg()), "head_dim=6 must not be int8-supported");
+        assert!(kv_int8_supported(&QwenConfig::tiny()), "tiny()'s head_dim=8 must be int8-supported");
+        assert!(kv_int8_supported(&QwenConfig::qwen3_0_6b()), "the real Qwen3-0.6B head_dim=128 must be int8-supported");
+    }
+
+    /// G5b: an EXPLICIT `kv_int8: true` request on an unsupported config must
+    /// fail loudly (a caller that asked for int8 by name should hear about a
+    /// mismatch, not get a silent fp32 substitution) -- see
+    /// [`kv_int8_supported`]'s doc comment for why this differs from what a
+    /// DEFAULT-selecting caller should do.
+    #[test]
+    #[should_panic(expected = "head_dim % 4")]
+    fn explicit_int8_kv_request_panics_on_an_unsupported_head_dim() {
+        let cfg = head_dim_not_multiple_of_4_cfg();
+        let map = tiny_weights(&cfg);
+        let _ = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 16, 1, 4, 8, true, false);
+    }
+
     /// G1: the KV pool byte count at REAL Qwen3-0.6B serving defaults (`ctx=2048`
     /// -> `block_size=16`, `num_blocks=272`), pinned exactly -- pure arithmetic,
     /// no device, no weights. The int8/fp32 ratio is `4*head_dim/(head_dim+4)`,
@@ -2836,6 +2911,33 @@ mod tests {
         let h_cal = cal.prefill(&mut t2, &prompt);
 
         assert_ne!(h_uncal, h_cal, "an aggressively binding clip must change the decoded hidden state");
+    }
+
+    /// `kv_calibrated()` must say `false` for a table installed on an fp32
+    /// engine, even though `self.kv_calib` is internally `Some(_)` — the
+    /// table is provably never dispatched there (the int8 branch of
+    /// `run_batched_submit` is the only reader). An accessor that reported
+    /// `true` here would claim a calibration is binding when it is not.
+    #[test]
+    fn kv_calibrated_is_false_on_an_fp32_engine_even_with_a_table_installed() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let mut e32 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, false, false);
+        assert!(!e32.kv_calibrated(), "no table installed yet");
+        let calib = model::kvcalib::KvCalib::disabled(cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize);
+        e32.set_kv_calib(Some(calib));
+        assert!(!e32.kv_calibrated(), "a table on an fp32 engine must never report as calibrated -- it is never dispatched");
+
+        let mut e8 = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg.clone(), &map, 4, 64, 1, 8, 32, true, false);
+        assert!(!e8.kv_calibrated(), "no table installed yet");
+        let mut binding = model::kvcalib::KvCalib::disabled(cfg.n_layers as usize, cfg.n_kv_heads as usize, cfg.head_dim as usize);
+        for row in binding.k.iter_mut().chain(binding.v.iter_mut()) {
+            row.fill(1e-6);
+        }
+        e8.set_kv_calib(Some(binding));
+        assert!(e8.kv_calibrated(), "a real table on an int8 engine must report as calibrated");
+        e8.set_kv_calib(None);
+        assert!(!e8.kv_calibrated(), "clearing the table must un-report calibration");
     }
 
     /// Chunked prefill (small chunk) must produce the same hidden as whole-prompt
