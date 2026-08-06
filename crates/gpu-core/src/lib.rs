@@ -36,6 +36,16 @@ pub mod cost;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tune;
 
+/// The device's own measured roofline — the denominator every "% of peak"
+/// claim in this engine divides by, so that claim is about the device that ran.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod roof;
+
+/// Per-kernel-kind profiling of a recorded pass (`docs/kernel-checklist.md`
+/// §F.1) — the one implementation the model benches share.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod profile;
+
 /// Drop-in fast kernels a model inherits without editing its dispatch sites.
 mod upgrade;
 
@@ -439,8 +449,19 @@ mod native_facade {
 
         /// What this device can actually do — class, limits, numeric tiers.
         /// Cached at backend construction; reading it is free.
+        ///
+        /// The two roofline fields are overlaid from whatever
+        /// [`crate::roof`] has already *measured* — reading caps never has the
+        /// side effect of running probe kernels, so they stay `None` until a
+        /// caller asks for them with `roof::ensure`. An unknown capability is
+        /// never assumed present.
         pub fn caps(&self) -> backend_api::DeviceCaps {
-            self.inner.caps()
+            let mut c = self.inner.caps();
+            if let Some(r) = crate::roof::known() {
+                c.peak_gflops = Some(r.gflops);
+                c.peak_bandwidth_gbs = Some(r.gbs);
+            }
+            c
         }
 
         /// Device-op accounting for this handle (submits/dispatches/readbacks)
