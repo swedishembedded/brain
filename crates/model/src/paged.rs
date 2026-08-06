@@ -621,9 +621,18 @@ mod batched_tests {
         let lens = [5u32, 12, 20];
         let batch = lens.len() as u32;
         let bs = 4u32;
-        let num_blocks = 32u32;
-        let max_bt = 5u32; // ceil(20/4)
-        let cap = max_bt * bs; // 20
+        let num_blocks = 64u32;
+        // REGRESSION (.todo/completed/attention-scratch-dispatch-width.md):
+        // `max_bt` deliberately exceeds `ceil(max(lens)/bs)` (5) so `cap` is
+        // strictly greater than every sequence's real length -- exactly the
+        // shape (a buffer sized for the engine's `BRAIN_QWEN_CTX`, actual
+        // sequences much shorter) the dispatch-width question was about.
+        // Before this, `cap == max(lens)` exactly, so a kernel that
+        // mistakenly used `cap` as a per-thread COMPUTE bound instead of a
+        // pure addressing stride could never be caught here — the two values
+        // were indistinguishable at cap==max(lens).
+        let max_bt = 10u32; // 2x ceil(20/4) -- cap(40) > max(lens)(20)
+        let cap = max_bt * bs; // 40
 
         let mut rng = Rng::new(11);
         // Per-seq queries + K/V.

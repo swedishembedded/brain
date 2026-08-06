@@ -2014,6 +2014,61 @@ mod tests {
         assert_eq!(out[&id2], refs[2], "mid-flight req2 != reference");
     }
 
+    /// REGRESSION (.todo/completed/attention-scratch-dispatch-width.md): the
+    /// on-device decode-WINDOW path (`Engine::forward_batched_greedy_window`,
+    /// `Input::Resident` sub-steps 1..k) had ZERO test coverage before this —
+    /// every other test here keeps the scheduler in single-step (`k=1`)
+    /// territory by always having a waiting/mixed-sampling request in flight,
+    /// which forces `k=1` (`model::serve::Scheduler::step`'s `all_greedy &&
+    /// self.waiting.is_empty()` gate). `Input::Resident` is also the one
+    /// `Input` variant `run_batched_submit` gets NO host seqlens for (`&[]` —
+    /// see `serve.rs::forward_batched_greedy_window`'s sub-step 1..k calls);
+    /// its per-row KV length lives only on-device (`sc.seqlen_buf`, walked by
+    /// `decode_advance`). A single request, nothing else submitted, comfortably
+    /// exceeding `DECODE_WINDOW` in `max_new`, is exactly the shape that makes
+    /// the scheduler choose `k = DECODE_WINDOW` for most of the run — if the
+    /// window path's on-device bookkeeping (positions/seqlens/block-table
+    /// scheduling for those resident sub-steps) were wrong, the argmax'd
+    /// tokens would diverge from the independent single-step reference below.
+    #[test]
+    fn decode_window_path_matches_the_single_step_reference() {
+        let cfg = QwenConfig::tiny();
+        let map = tiny_weights(&cfg);
+        let model = Qwen::new(cfg.clone(), 1, 64, &map);
+        let prompt = vec![1u32, 5, 3, 9, 2];
+        let max_new = 13usize; // > DECODE_WINDOW (4), so k=4 fires for several rounds
+        let mut r = Rng::new(0);
+        let reference = crate::sample::generate_kv(&model, &prompt, max_new, 0.0, 0, 1.0, None, &mut r);
+
+        // Plenty of batch/block headroom: a single request must never fall
+        // back to k=1 for lack of free blocks (serve.rs's own guard: `k > 1
+        // && free_blocks < active.len() * k` => k=1).
+        assert!(DECODE_WINDOW > 1, "test is meaningless if the window is disabled");
+        let eng = Engine::from_map_with_gpu(gpu_core::testgpu::dev(PIPELINES), cfg, &map, 4, 128, 4, 8, 32, false, false);
+        let mut sched = Scheduler::new(eng, 4);
+        let id = sched.submit(Request { prompt: prompt.clone(), max_new, eos: None });
+
+        let mut out: HashMap<u64, Vec<u32>> = HashMap::new();
+        let mut saw_a_window_step = false;
+        while sched.pending() {
+            let report = sched.step_report();
+            // `produced` is `(id, tokens produced THIS iteration)`; k=1 always
+            // produces exactly one token per running row, so a row producing
+            // more than one is direct evidence a window step (k>1) actually
+            // ran. Nothing else was ever submitted, so `waiting` is empty from
+            // the first iteration on — the scheduler has no reason to prefer
+            // k=1 beyond block pressure, which the oversized pool above rules out.
+            if report.produced.iter().any(|&(_, n)| n > 1) {
+                saw_a_window_step = true;
+            }
+            for (id, t) in report.completed {
+                out.insert(id, t);
+            }
+        }
+        assert!(saw_a_window_step, "this test is meaningless if the scheduler never actually chose k>1");
+        assert_eq!(out[&id], reference, "the decode-window path must match single-step decoding exactly");
+    }
+
     /// Real (non-greedy) sampling through `Scheduler::submit_sampled`, driven
     /// by the real `Engine` (both the admission-time host sampling and the
     /// per-token on-device top-K path exercised together, mixed with an

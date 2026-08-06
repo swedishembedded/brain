@@ -699,6 +699,39 @@ At the real model's `d_model`, `matmul` swamps everything else and this
 concern shrinks to noise — confirms, rather than assumes, that it was
 correctly left unfixed.
 
+**The precondition that measurement never covered, taken separately**: those
+two rows vary `d_model`, not the actual short-sequence/long-cap ratio the
+concern is about (a fixed engine-wide `cap`, real sequences much shorter).
+`BRAIN_PROFILE=1` at the REAL Qwen3-0.6B shape (`28x1024x16x151936`), forcing
+a much larger cap:seqlen ratio (`--input 32 --output 512`, `qwen-synth`'s
+`block_size=4096` rounds the pool to `cap=4096` against a sequence that starts
+at 33 tokens and only reaches 544 — a ≥7.5x ratio throughout, ~124x at the
+first decode step):
+
+| shape (ratio) | matmul_gemv | scores+softmax+apply (combined) |
+|---|---:|---:|
+| `28x1024x16x151936`, tight cap (`in16/out8`, prior measurement above) | 91.5%\* | 4.7% |
+| `28x1024x16x151936`, cap≈4096 vs seqlen 33→544 | 81.4% | **12.4%** (1.3+3.6+7.5) |
+
+(\*prior row's `matmul` figure includes both `matmul`+`matmul_gemv`; this
+row's target dispatches decode-shaped work almost entirely through
+`matmul_gemv`, so the two aren't a like-for-like `matmul` comparison — the
+`scores+softmax+apply` column is the one this measurement is actually about.)
+
+So: the ratio effect is real and roughly triples the trio's share (4.7% →
+12.4%) even at a fairly aggressive cap:seqlen mismatch — but `matmul_gemv`
+alone still outweighs it more than 6-to-1. Two structural facts sharpen the
+conclusion further (`.todo/completed/attention-scratch-dispatch-width.md` has
+the full detail): only `paged_decode_scores_batched`/`_i8` actually dispatch
+at `cap` width — `decode_softmax_batched` and `paged_decode_apply_*` dispatch
+independent of `cap` and already loop to exactly `seq_lens[b]`, so the
+file's originally-scoped "fix all four kernels plus softmax" was ~2.5x wider
+than the two kernels that could possibly benefit; and `Input::Resident` (the
+decode-window sub-steps) has no host-side seqlens at all, so the proposed
+fix doesn't apply there without a new host-side shadow. **Verdict stands
+closed, now on a direct measurement of the precondition it was missing
+rather than an extrapolation from a different axis.**
+
 ### Perf gate baseline — committed
 
 `scripts/gates/qwen-serving-perf-gate.sh` (`make qwen/serving-perf-gate`):
