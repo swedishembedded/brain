@@ -54,6 +54,14 @@ pub struct Roofs {
     /// resident. On a device whose cache is smaller than the probe this simply
     /// converges to `gbs`, which is a conservative and self-consistent failure.
     pub cache_gbs: f32,
+    /// Peak packed-int8 (`dot4I8Packed`) rate, GOP/s. `None` where the device
+    /// has no int8 dot path.
+    ///
+    /// Without it an int8 kernel is graded against the *fp32* roof, which
+    /// flatters it by whatever factor the device's DP4A path exceeds fp32 —
+    /// `matmul_i8_dyn` read "36.1% of roof" that way, and a kernel that looks
+    /// like a third of the machine may be a tenth of it.
+    pub int8_gops: Option<f32>,
 }
 
 impl Roofs {
@@ -88,15 +96,39 @@ impl Roofs {
         if intensity >= self.ridge() { Bound::Compute } else { Bound::Memory }
     }
 
+    /// The compute roof for work that is `int_ops` integer ops and `flops`
+    /// float ops. Integer-dominant work is graded against the measured DP4A
+    /// rate; where that was not measured the fp32 roof stands in and the caller
+    /// is told, because silently using it OVERSTATES an int8 kernel by whatever
+    /// factor the device's int8 path exceeds fp32.
+    pub fn compute_roof(&self, flops: u64, int_ops: u64) -> (f32, bool) {
+        if int_ops > flops {
+            match self.int8_gops {
+                Some(g) if g > 0.0 => (g, true),
+                _ => (self.gflops, false),
+            }
+        } else {
+            (self.gflops, true)
+        }
+    }
+
     /// Percent of the relevant roof a kernel achieved. `seconds` must be a
     /// `poll_wait`-bracketed device time.
     pub fn utilisation(&self, flops: u64, bytes: u64, seconds: f64) -> Option<f32> {
+        self.utilisation_of(flops, 0, bytes, seconds)
+    }
+
+    /// [`Self::utilisation`] with integer ops kept separate, so int8 work is
+    /// graded against the int8 roof.
+    pub fn utilisation_of(&self, flops: u64, int_ops: u64, bytes: u64, seconds: f64) -> Option<f32> {
         if seconds <= 0.0 {
             return None;
         }
-        match self.classify(flops, bytes) {
+        let work = flops.max(int_ops);
+        match self.classify(work, bytes) {
             Bound::Compute if self.gflops > 0.0 => {
-                Some(100.0 * (flops as f64 / seconds / 1e9) as f32 / self.gflops)
+                let (roof, _) = self.compute_roof(flops, int_ops);
+                Some(100.0 * (work as f64 / seconds / 1e9) as f32 / roof)
             }
             Bound::Memory if self.gbs > 0.0 => {
                 // Graded against whichever memory roof actually applies — DRAM,
@@ -146,10 +178,16 @@ impl Bound {
 }
 
 /// The probe kernel set — the two sources whose fingerprint keys the cache.
-const PROBE_KERNELS: &[(&str, &str)] =
-    &[("roof_fma", kernels::ROOF_FMA), ("axpy", kernels::AXPY)];
+const PROBE_KERNELS: &[(&str, &str)] = &[
+    ("roof_fma", kernels::ROOF_FMA),
+    ("axpy", kernels::AXPY),
+    ("roof_dp4a", kernels::ROOF_DP4A),
+];
 const K_FMA: usize = 0;
 const K_AXPY: usize = 1;
+const K_DP4A: usize = 2;
+/// Eight `dot4I8Packed` per iteration, each a 4-wide dot = 8 int ops.
+const DP4A_OPS_PER_ITER: u64 = 64;
 
 /// Threads the FMA probe launches. Deliberately far more than any device has
 /// lanes, so the probe never depends on knowing the topology — an
@@ -222,7 +260,10 @@ pub fn measure(gpu: &Gpu) -> Option<Roofs> {
     // the probe (or which has none worth the name) the two converge, and the
     // max keeps the hierarchy monotonic so `memory_roof` cannot invert.
     let cache_gbs = measure_bandwidth(&g, CACHE_ELEMS)?.max(gbs);
-    Some(Roofs { gflops, gbs, cache_gbs })
+    // `None` where the device has no int8 dot path — never a guess, and never
+    // fp32's number standing in for it.
+    let int8_gops = gpu.caps().numeric.int8_dot.then(|| measure_int8(&g)).flatten();
+    Some(Roofs { gflops, gbs, cache_gbs, int8_gops })
 }
 
 /// Time one submit of `steps`, best of `reps`, `poll_wait`-bracketed.
@@ -267,6 +308,26 @@ fn measure_compute(gpu: &Gpu) -> Option<f32> {
         // NOT `clamp(lo, hi)`: once `iters*2` passes the ceiling the arguments
         // invert and `clamp` panics with `min > max`. Grow by at least 2x, cap
         // at the ceiling, in that order.
+        iters = (want as u32).max(iters.saturating_mul(2)).min(1 << 20);
+    }
+}
+
+/// Peak packed-int8 rate, same calibration loop as the fp32 probe.
+fn measure_int8(gpu: &Gpu) -> Option<f32> {
+    let inp = gpu.storage(FMA_THREADS as u64);
+    let out = gpu.storage(FMA_THREADS as u64);
+    // Four int8 lanes packed per u32; values chosen so the accumulator cannot
+    // overflow i32 across the loop.
+    let (a, b) = (0x01010101u32, 0x01010101u32);
+    let mut iters: u32 = 256;
+    loop {
+        let step = gpu.step(K_DP4A, &[&inp, &out], &[FMA_THREADS, iters, a, b], FMA_THREADS);
+        let secs = best_of(gpu, std::slice::from_ref(&step), 3);
+        if secs >= MIN_PROBE_SECONDS || iters >= (1 << 20) {
+            let ops = FMA_THREADS as u64 * iters as u64 * DP4A_OPS_PER_ITER;
+            return Some((ops as f64 / secs / 1e9) as f32);
+        }
+        let want = (iters as f64 * MIN_PROBE_SECONDS / secs.max(1e-9)).ceil();
         iters = (want as u32).max(iters.saturating_mul(2)).min(1 << 20);
     }
 }
@@ -341,7 +402,7 @@ mod persist {
         /// trusted — the same rule the tune store applies.
         pub fn load(&self) -> Option<Roofs> {
             let text = std::fs::read_to_string(&self.path).ok()?;
-            let (mut gflops, mut gbs, mut cache) = (None, None, None);
+            let (mut gflops, mut gbs, mut cache, mut int8) = (None, None, None, None);
             for line in text.lines() {
                 let (k, v) = line.split_once('=')?;
                 let v: f32 = v.trim().parse().ok()?;
@@ -349,13 +410,16 @@ mod persist {
                     "gflops" => gflops = Some(v),
                     "gbs" => gbs = Some(v),
                     "cache_gbs" => cache = Some(v),
+                    "int8_gops" => int8 = Some(v),
                     _ => {}
                 }
             }
             // A record written before `cache_gbs` existed parses to `None` here
             // and is simply re-measured — a stale cache is ignored, never
             // patched up with a default.
-            let r = Roofs { gflops: gflops?, gbs: gbs?, cache_gbs: cache? };
+            // `int8_gops` is legitimately absent on a device without DP4A, so a
+            // record missing it is valid — unlike the other three.
+            let r = Roofs { gflops: gflops?, gbs: gbs?, cache_gbs: cache?, int8_gops: int8 };
             (r.gflops.is_finite()
                 && r.gflops > 0.0
                 && r.gbs.is_finite()
@@ -369,8 +433,13 @@ mod persist {
                 let _ = std::fs::create_dir_all(parent);
             }
             let tmp = self.path.with_extension("tmp");
-            let body =
-                format!("gflops={}\ngbs={}\ncache_gbs={}\n", r.gflops, r.gbs, r.cache_gbs);
+            let body = format!(
+                "gflops={}\ngbs={}\ncache_gbs={}\n{}",
+                r.gflops,
+                r.gbs,
+                r.cache_gbs,
+                r.int8_gops.map(|v| format!("int8_gops={v}\n")).unwrap_or_default(),
+            );
             if std::fs::write(&tmp, body).is_ok() {
                 let _ = std::fs::rename(&tmp, &self.path);
             }
@@ -384,7 +453,7 @@ mod tests {
 
     #[test]
     fn ridge_and_classification_split_at_the_ridge() {
-        let r = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0 };
+        let r = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0, int8_gops: Some(40000.0) };
         // A P40's ridge is ~34 FLOP/byte — anything streaming is left of it.
         assert!((r.ridge() - 33.99).abs() < 0.1, "ridge {}", r.ridge());
         // axpy: 2 FLOP per 12 bytes.
@@ -397,7 +466,7 @@ mod tests {
 
     #[test]
     fn utilisation_is_measured_against_the_kernels_own_roof() {
-        let r = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0 };
+        let r = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0, int8_gops: Some(40000.0) };
         // A streaming kernel at exactly the bandwidth roof reads 100%, even
         // though its FLOP rate is negligible — the whole point of classifying.
         let bytes = 346_000_000_000u64;

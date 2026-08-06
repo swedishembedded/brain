@@ -1517,3 +1517,58 @@ The decode regime is untouched by construction (`m ≤ DECODE_REGIME_MAX_ROWS`
 keeps the GEMV): at 8 rows the step is 590 dispatches and 37.5 ms, as before.
 The served step's top row is now `paged_decode_scores_wg` at 43 % of the pass
 and 23.7 % of the bandwidth roof.
+
+---
+
+## int8 weights on the served path — and the roof that re-graded them
+
+`--weights-int8` (A0) had never been measured at the real Qwen3-0.6B shape; the
+ledger's "+32% at c=16" is a `qwen-synth` number. Measured, 128 rows, one P40:
+
+| | dispatches | whole pass | rows/s |
+|---|---:|---:|---:|
+| fp32 | 786 | 88.86 ms | 1441 |
+| int8 weights | 814 | **74.90 ms** | **1709** |
+
+**1.19×**, and the extra 28 dispatches are the per-token activation quantizers
+(`max_abs_row` + `quant_pack`), which cost 1.1 ms between them.
+
+**Then the number that matters, which the profile had been getting wrong.**
+`matmul_i8_dyn` read **3726 GOP/s = "36.1% of roof"** — against the *fp32* roof,
+because that was the only compute roof measured. Pascal's DP4A path is not the
+fp32 path. Measured with a `dot4I8Packed` probe built exactly like `roof_fma`:
+
+| roof | measured |
+|---|---:|
+| fp32 | 10 496 GFLOP/s |
+| **int8 (DP4A)** | **43 610 GOP/s** |
+| ratio | **4.15×** |
+
+So `matmul_i8_dyn` is at **8.5% of the roof it should be graded against**, not
+36.1%. Grading int8 work against fp32 flattered it by 4.15×, and the int8 GEMM
+goes from "comfortably past the defect floor" to **the largest single gap on the
+served path**. `Roofs::int8_gops` is `None` on a device without a DP4A path and
+the table marks a substituted roof with `~`, so this cannot silently recur.
+
+`gpu_core::cost` already tracked `flops` and `int_ops` separately; the profiler
+was folding them with `.max()` and losing exactly the distinction needed to pick
+the roof. Fixed.
+
+**Also fixed:** a row whose device time rounds to zero printed `inf GFLOP/s` —
+"infinitely fast" where the truth is "below the timer's resolution". It now
+prints `-`.
+
+### Why fusion is NOT the next lever here
+
+With the served step at 74.90 ms, the three big kernels are 89.5% of it
+(`matmul_i8_dyn` 40.9%, `paged_decode_apply_batched` 25.5%,
+`paged_decode_scores_wg` 23.1%). Every small kernel combined —
+`rmsnorm_rows`, `quant_pack`, `paged_kv_append_batched`, `add2`, `rope_paged`,
+`silu_mul`, `embed` — is **5.1 ms, 6.8% of the pass**, and they sit at 30-85% of
+their own roofs already. Perfectly fusing all of them cannot return more than
+6.8%, against real correctness risk.
+
+Device timing is what makes that statement possible: the launch-and-fence floor
+that used to inflate exactly these small kernels (up to 29×, `docs/lessons.md`
+#31) is precisely what made fusion look worthwhile before. **The next lever is
+the int8 GEMM at 8.5% of the int8 roof**, worth ~20 ms of a 75 ms pass.

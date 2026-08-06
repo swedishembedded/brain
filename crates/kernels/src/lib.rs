@@ -596,6 +596,8 @@ pub const RMSNORM_DX_EPS: &str = include_str!("../wgsl/rmsnorm_dx_eps.wgsl");
 pub const RMSNORM_EPS: &str = include_str!("../wgsl/rmsnorm_eps.wgsl");
 /// `wgsl/rmsnorm_rows.wgsl`
 pub const RMSNORM_ROWS: &str = include_str!("../wgsl/rmsnorm_rows.wgsl");
+/// `wgsl/roof_dp4a.wgsl`
+pub const ROOF_DP4A: &str = include_str!("../wgsl/roof_dp4a.wgsl");
 /// `wgsl/roof_fma.wgsl`
 pub const ROOF_FMA: &str = include_str!("../wgsl/roof_fma.wgsl");
 /// `wgsl/rope.wgsl`
@@ -1031,6 +1033,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("rmsnorm_dx_eps", RMSNORM_DX_EPS),
     ("rmsnorm_eps", RMSNORM_EPS),
     ("rmsnorm_rows", RMSNORM_ROWS),
+    ("roof_dp4a", ROOF_DP4A),
     ("roof_fma", ROOF_FMA),
     ("rope", ROPE),
     ("rope2d", ROPE2D),

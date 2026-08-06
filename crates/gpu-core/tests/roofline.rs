@@ -52,12 +52,24 @@ fn the_measured_roofs_are_physically_plausible() {
     };
 
     println!(
-        "measured roofline on {}: {:.0} GFLOP/s, {:.1} GB/s, ridge {:.1} FLOP/byte",
+        "measured roofline on {}: {:.0} GFLOP/s fp32, {} int8, {:.1} GB/s DRAM, \
+         {:.1} GB/s cache, ridge {:.1} FLOP/byte",
         gpu.kind(),
         r.gflops,
+        r.int8_gops.map(|g| format!("{g:.0} GOP/s")).unwrap_or_else(|| "-".into()),
         r.gbs,
+        r.cache_gbs,
         r.ridge()
     );
+
+    // If the device claims an int8 dot path, the measured rate must exceed the
+    // fp32 one — otherwise grading int8 kernels against fp32 was never the
+    // distortion it was assumed to be, and the extra probe is not earning its
+    // keep. Recorded either way rather than assumed.
+    if let Some(g) = r.int8_gops {
+        println!("  int8/fp32 rate ratio: {:.2}x", g / r.gflops);
+        assert!(g.is_finite() && g > 0.0, "int8 roof {g}");
+    }
 
     assert!(r.gflops.is_finite() && r.gflops > 0.0, "compute roof {}", r.gflops);
     assert!(r.gbs.is_finite() && r.gbs > 0.0, "bandwidth roof {}", r.gbs);
@@ -117,7 +129,7 @@ fn caps_expose_the_roofs_only_after_something_measured_them() {
 fn a_streaming_kernel_is_graded_against_bandwidth_not_flops() {
     // Pure arithmetic on the type — no device needed, so this runs everywhere
     // and pins the classification rule itself.
-    let r = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0 };
+    let r = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0, int8_gops: Some(40000.0) };
     // `axpy`: 2 FLOP per 12 bytes moved.
     assert_eq!(r.classify(2, 12), Bound::Memory);
     // `col2im` measured 23.2 GB/s on a P40 — 6.7% of that roof, far under the

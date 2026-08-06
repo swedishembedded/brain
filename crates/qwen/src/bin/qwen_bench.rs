@@ -25,8 +25,10 @@
 //!   qwen_bench                      # prefill T=512 + decode, fp32, at 0.6B
 //!   qwen_bench prefill [T] [reps]
 //!   qwen_bench decode  [ctx] [reps]
-//!   qwen_bench serve   [rows] [reps] # the PAGED serving tape (a different
-//!                                    # kernel set from the batched forward)
+//!   qwen_bench serve   [rows] [reps] [ctx] [i8w] [kv8]
+//!                                    # the PAGED serving tape (a different
+//!                                    # kernel set from the batched forward);
+//!                                    # `i8w` = int8 weights, `kv8` = int8 KV
 //!   qwen_bench head    [reps]       # the tied 151936x1024 LM head alone
 //!   qwen_bench cost                 # offline FLOP/byte accounting, no device
 
@@ -162,7 +164,18 @@ fn main() {
             // batch presents: the same tape serves both, with `seqlens[i]`
             // deciding which.
             let rows: u32 = a.get(2).and_then(|s| s.parse().ok()).unwrap_or(128);
-            eprintln!("qwen_bench serve: Qwen3-0.6B, {rows} rows, {reps} reps (random weights)");
+            // `i8w` quantizes the 7 per-layer linears + the head at load
+            // (A0). The ledger records +32% at c=16 on `qwen-synth`; it has
+            // never been measured at the real 0.6B shape, where the tied
+            // 622 MB head is a quarter of the weight bytes.
+            let i8w = a.iter().any(|x| x == "i8w");
+            let kv8 = a.iter().any(|x| x == "kv8");
+            eprintln!(
+                "qwen_bench serve: Qwen3-0.6B, {rows} rows, {reps} reps (random weights\
+                 {}{})",
+                if i8w { ", int8 weights" } else { "" },
+                if kv8 { ", int8 KV" } else { "" }
+            );
             let init = init_weights(&cfg, 7);
             let bs = 16u32;
             // Context per sequence. Every row gets its OWN blocks (see below),
@@ -192,7 +205,7 @@ fn main() {
             }
             let t0 = Instant::now();
             let eng = qwen::serve::Engine::from_map(
-                cfg.clone(), &init, bs, rows * mbs, rows.max(8), mbs, rows.max(8), false, false,
+                cfg.clone(), &init, bs, rows * mbs, rows.max(8), mbs, rows.max(8), kv8, i8w,
             );
             eprintln!("built in {:.1}s\n", t0.elapsed().as_secs_f32());
             let gpu = eng.gpu().share();

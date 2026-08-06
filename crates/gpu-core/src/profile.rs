@@ -66,6 +66,10 @@ pub struct KernelRow {
     pub secs: f64,
     pub calls: usize,
     pub flops: u64,
+    /// Integer ops (the DP4A int8 path), kept SEPARATE from `flops`: folding
+    /// them together loses which roof the row must be graded against, and an
+    /// int8 kernel graded against fp32 reads several times better than it is.
+    pub int_ops: u64,
     pub bytes: u64,
     /// False when any step of this kind has no `cost` formula, in which case
     /// the rates are not reported at all rather than reported as zero.
@@ -73,15 +77,29 @@ pub struct KernelRow {
 }
 
 impl KernelRow {
+    /// `None` when the row has no measurable time. A device timestamp can round
+    /// to zero for a kernel that runs below the timer's resolution, and dividing
+    /// by it printed `inf GFLOP/s` — a number that reads as "infinitely fast"
+    /// where the truth is "too short to measure".
     pub fn gflops(&self) -> Option<f64> {
-        (self.covered && self.flops > 0).then(|| self.flops as f64 / self.secs / 1e9)
+        let work = self.flops.max(self.int_ops);
+        (self.covered && work > 0 && self.secs > 0.0).then(|| work as f64 / self.secs / 1e9)
     }
     pub fn gbs(&self) -> Option<f64> {
-        (self.covered && self.bytes > 0).then(|| self.bytes as f64 / self.secs / 1e9)
+        (self.covered && self.bytes > 0 && self.secs > 0.0)
+            .then(|| self.bytes as f64 / self.secs / 1e9)
     }
     /// Which roof this kernel is graded against, given the device's ridge.
     pub fn bound(&self, roofs: Roofs) -> Option<Bound> {
-        self.covered.then(|| roofs.classify(self.flops, self.bytes))
+        self.covered.then(|| roofs.classify(self.flops.max(self.int_ops), self.bytes))
+    }
+
+    /// True when this row's compute is graded against a roof that was NOT
+    /// measured for its kind — int8 work falling back to the fp32 roof, which
+    /// overstates it. The table marks those rather than printing a clean number.
+    pub fn roof_is_substituted(&self, roofs: Roofs) -> bool {
+        self.bound(roofs) == Some(Bound::Compute)
+            && !roofs.compute_roof(self.flops, self.int_ops).1
     }
     /// True when this row's logical traffic exceeds the DRAM roof but not the
     /// cache roof — i.e. it is being served from cache, which is a real place
@@ -94,7 +112,8 @@ impl KernelRow {
     /// in `.todo/saturate-the-gpu.md` are stated against — reporting a
     /// memory-bound kernel as a fraction of a FLOP peak is meaningless.
     pub fn utilisation(&self, roofs: Roofs) -> Option<f32> {
-        self.covered.then(|| roofs.utilisation(self.flops, self.bytes, self.secs))?
+        (self.covered && self.secs > 0.0)
+            .then(|| roofs.utilisation_of(self.flops, self.int_ops, self.bytes, self.secs))?
     }
 }
 
@@ -126,7 +145,7 @@ impl PassProfile {
     /// partial numerator over the full denominator is a fiction, and the
     /// honest answer to "what rate did this pass achieve" is "unknown".
     pub fn gflops(&self) -> Option<f64> {
-        let flops: u64 = self.rows.iter().map(|r| r.flops).sum();
+        let flops: u64 = self.rows.iter().map(|r| r.flops.max(r.int_ops)).sum();
         (self.fully_covered && flops > 0).then(|| flops as f64 / self.total_secs / 1e9)
     }
 
@@ -179,6 +198,10 @@ impl PassProfile {
                         .map(|u| {
                             if u > IMPOSSIBLE_PCT {
                                 format!("!{u:.0}%")
+                            } else if r.roof_is_substituted(rf) {
+                                // int8 work with no measured int8 roof: the
+                                // number is against fp32 and OVERSTATES it.
+                                format!("~{u:.1}%")
                             } else if r.cache_resident(rf) {
                                 // Above the DRAM roof but under the cache roof:
                                 // the data really is coming from cache, and the
@@ -369,7 +392,7 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
         t
     });
     if let Some(d) = &device_times {
-        let mut per: HashMap<usize, (f64, usize, u64, u64, bool)> = HashMap::new();
+        let mut per: HashMap<usize, (f64, usize, u64, u64, u64, bool)> = HashMap::new();
         for (k, start, len) in &gs {
             accumulate(gpu, &mut per, *k, &steps[*start..*start + *len], 0.0);
         }
@@ -398,7 +421,7 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
         };
     }
 
-    let mut per: HashMap<usize, (f64, usize, u64, u64, bool)> = HashMap::new();
+    let mut per: HashMap<usize, (f64, usize, u64, u64, u64, bool)> = HashMap::new();
     for (k, start, len) in &gs {
         let t = best_of(gpu, &steps[*start..*start + *len], reps);
         accumulate(gpu, &mut per, *k, &steps[*start..*start + *len], t);
@@ -424,40 +447,43 @@ pub fn profile(gpu: &Gpu, label: &str, steps: &[Step], reps: usize) -> PassProfi
 /// Fold one group's `cost` volume (and `t` seconds) into the per-kernel map.
 fn accumulate(
     gpu: &Gpu,
-    per: &mut HashMap<usize, (f64, usize, u64, u64, bool)>,
+    per: &mut HashMap<usize, (f64, usize, u64, u64, u64, bool)>,
     k: usize,
     slice: &[Step],
     t: f64,
 ) {
     let name = gpu.kernel_name(k).unwrap_or("?");
-    let (mut fl, mut by, mut covered) = (0u64, 0u64, true);
+    let (mut fl, mut io, mut by, mut covered) = (0u64, 0u64, 0u64, true);
     for st in slice {
         let m = st.meta();
         let params = m.as_ref().and_then(|m| m.params.as_deref());
         let threads = m.as_ref().map(|m| m.threads).unwrap_or(0);
         match crate::cost::kernel_cost(name, params, threads) {
             Some(c) => {
-                fl += c.flops.max(c.int_ops);
+                fl += c.flops;
+                io += c.int_ops;
                 by += c.bytes;
             }
             None => covered = false,
         }
     }
-    let e = per.entry(k).or_insert((0.0, 0, 0, 0, true));
+    let e = per.entry(k).or_insert((0.0, 0, 0, 0, 0, true));
     e.0 += t;
     e.1 += slice.len();
     e.2 += fl;
-    e.3 += by;
-    e.4 &= covered;
+    e.3 += io;
+    e.4 += by;
+    e.5 &= covered;
 }
 
-fn finish_rows(gpu: &Gpu, per: HashMap<usize, (f64, usize, u64, u64, bool)>) -> Vec<KernelRow> {
+fn finish_rows(gpu: &Gpu, per: HashMap<usize, (f64, usize, u64, u64, u64, bool)>) -> Vec<KernelRow> {
     per.into_iter()
-        .map(|(k, (secs, calls, flops, bytes, covered))| KernelRow {
+        .map(|(k, (secs, calls, flops, int_ops, bytes, covered))| KernelRow {
             name: gpu.kernel_name(k).unwrap_or("?").to_string(),
             secs,
             calls,
             flops,
+            int_ops,
             bytes,
             covered,
         })
@@ -469,7 +495,7 @@ mod tests {
     use super::*;
 
     fn row(name: &str, secs: f64, flops: u64, bytes: u64, covered: bool) -> KernelRow {
-        KernelRow { name: name.into(), secs, calls: 1, flops, bytes, covered }
+        KernelRow { name: name.into(), secs, calls: 1, flops, int_ops: 0, bytes, covered }
     }
 
     fn pass(rows: Vec<KernelRow>, total: f64) -> PassProfile {
@@ -508,7 +534,7 @@ mod tests {
 
     #[test]
     fn defects_are_rows_under_their_own_classs_floor() {
-        let roofs = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0 };
+        let roofs = Roofs { gflops: 11760.0, gbs: 346.0, cache_gbs: 1200.0, int8_gops: Some(40000.0) };
         // col2im-shaped: 142.75 ms moving ~3.3 GB => ~23 GB/s, 6.7% of the roof.
         let col2im = row("col2im", 0.14275, 0, 3_312_000_000, true);
         // A GEMM at 2 TFLOP/s: 17% of peak — under the 30% compute floor too.

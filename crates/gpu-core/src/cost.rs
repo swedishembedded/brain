@@ -638,6 +638,13 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (n, iters) = (p(0)?, p(1)?);
             f(n * iters * 16, 8 * n)
         }
+        // The int8 sibling: 8 `dot4I8Packed` per iteration, each a 4-wide dot
+        // (4 multiplies + 4 adds) = 64 INTEGER ops, counted the same way the
+        // int8 GEMMs are so the two are comparable.
+        "roof_dp4a" => {
+            let (n, iters) = (p(0)?, p(1)?);
+            c(0, n * iters * 64, 8 * n)
+        }
         // Scalar loss values: one serial reduction over the whole tensor.
         // `mse_value` reads prediction and target, `masked_l1` reads both plus
         // its mask. Their FLOPs are trivial; they are here so a pass containing
@@ -895,7 +902,7 @@ mod tests {
             // the VQGAN training step's remaining kinds
             "silu", "silu_bwd", "scale_chan", "dw_splitk_reduce", "gn_dsum_part", "gn_dsum2",
             "gn_dgb_part", "gn_dgb2", "mse_value", "masked_l1", "upsample2_dx", "concat2",
-            "concat_split", "matmul_i8", "roof_fma", "mse_grad", "masked_l1_grad",
+            "concat_split", "matmul_i8", "roof_fma", "roof_dp4a", "mse_grad", "masked_l1_grad",
             "matmul_reg3_splitk",
             // the served paged tape
             "paged_decode_scores_batched", "paged_decode_scores_wg", "paged_decode_apply_batched",
