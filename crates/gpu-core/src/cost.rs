@@ -245,7 +245,10 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
         // int8 DP4A GEMMs: params [m, kg = K/4, n]. The MACs are INTEGER ops
         // (K = 4·kg of them per output); the dequant epilogue (acc·sx·sw) is fp32.
-        "matmul_i8_dyn" | "matmul_i8_gemv" => {
+        // `matmul_i8` is the static-scale sibling of the two below and was the
+        // one member of the family without a formula — so any pass using it
+        // (the batched int8 forward) could not report a rate at all.
+        "matmul_i8" | "matmul_i8_dyn" | "matmul_i8_gemv" => {
             let (m, kg, n) = (p(0)?, p(1)?, p(2)?);
             c(2 * m * n, 8 * m * kg * n, 4 * (m * kg + n * kg + m * n + m + n))
         }
@@ -513,6 +516,19 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "silu_bwd_da" => f(8 * n0(), 16 * n0()),
         "gelu" => f(10 * n0(), 8 * n0()),
         "gelu_bwd" => f(15 * n0(), 12 * n0()),
+        // `silu`/`silu_bwd` were uncovered, which is why a VQGAN forward could
+        // not report a whole-pass rate at all: one kind without a formula makes
+        // the pass numerator partial, and a partial numerator over the full
+        // denominator under-reports rather than admitting it cannot tell.
+        // x*sigmoid(x): exp + reciprocal + multiply, read one write one.
+        "silu" => f(4 * n0(), 8 * n0()),
+        // dx = dy * s * (1 + x*(1-s)) — the same sigmoid plus the product rule.
+        "silu_bwd" => f(8 * n0(), 12 * n0()),
+        // params [total, c, inner]: out[i] *= scale[chan(i)].
+        "scale_chan" => {
+            let total = p(0)?;
+            f(total, 4 * (2 * total + p(1)?))
+        }
         // params [m, n]: out[m,n] += bias[n] / dbias[n] += Σ_m dy[m,n].
         "bias_add" => {
             let (m, n) = (p(0)?, p(1)?);
@@ -556,6 +572,24 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "adamw" => f(12 * p(0)?, 28 * p(0)?),
         // params [numel, slot].
         "gradnorm_sq" => f(2 * p(0)?, 4 * p(0)?),
+        // The roofline probe itself (params [n, iters, c, d]): `iters` passes of
+        // 8 independent FMAs per thread, one read and one write of traffic. It
+        // is costed like anything else so the probe is measured by the same
+        // accounting it produces the denominator for.
+        "roof_fma" => {
+            let (n, iters) = (p(0)?, p(1)?);
+            f(n * iters * 16, 8 * n)
+        }
+        // Scalar loss values: one serial reduction over the whole tensor.
+        // `mse_value` reads prediction and target, `masked_l1` reads both plus
+        // its mask. Their FLOPs are trivial; they are here so a pass containing
+        // them can still report a rate at all.
+        "mse_value" => f(3 * p(0)?, 8 * p(0)?),
+        "masked_l1" => f(2 * n0(), 12 * n0()),
+        // …and their adjoints. `mse_grad` is 2(pred-target)/n over two reads
+        // and a write; `masked_l1_grad` is sign(diff)*scale over three.
+        "mse_grad" => f(3 * p(0)?, 12 * p(0)?),
+        "masked_l1_grad" => f(3 * n0(), 16 * n0()),
         // params [numel, out_off, n_wg] — same work as gradnorm_sq, spread over
         // n_wg workgroups; the n_wg partials it writes are the only extra bytes.
         "gradnorm_part" => f(2 * p(0)?, 4 * p(0)? + 4 * p(2)?),
@@ -593,6 +627,13 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             f(0, 8 * cnt * cinkk)
         }
         "im2col" => f(0, 8 * n0()),
+        // params [rc, slices]: fold the split-K weight-gradient partials.
+        // Reads `rc*slices` and writes `rc` — the tail the split-K dW GEMM pays
+        // to avoid atomics.
+        "dw_splitk_reduce" => {
+            let (rc, slices) = (p(0)?, p(1)?);
+            f(rc * slices, 4 * (rc * slices + rc))
+        }
         "col2im" => {
             let (n, cin, h, w, k) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?);
             let elems = n * cin * h * w;
@@ -623,6 +664,29 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let n = p(0)? * p(1)? * p(2)? * p(3)?;
             f(2 * n, 8 * n)
         }
+        // The two-stage barrier-free rewrites of the three reductions above
+        // (params [N,C,H,W,G,P], P = partials per group). Stage 1 streams the
+        // data exactly as its serial ancestor did; stage 2 folds G*P partials,
+        // so the pair costs the ancestor's traffic plus a negligible tail.
+        // Uncovered until now, which cost the VQGAN backward its pass rate —
+        // `gn_dsum_part` + `gn_dgb_part` alone are 5.5% of that pass.
+        "gn_dsum_part" => {
+            let n = p(0)? * p(1)? * p(2)? * p(3)?;
+            f(4 * n, 8 * n)
+        }
+        "gn_dgb_part" => {
+            let n = p(0)? * p(1)? * p(2)? * p(3)?;
+            f(2 * n, 8 * n)
+        }
+        // Stage 2 of each pair folds `G*P` (resp. `C*P`) partials.
+        "gn_dsum2" => {
+            let (g, pp) = (p(4)?, p(5)?);
+            f(2 * g * pp, 8 * g * pp)
+        }
+        "gn_dgb2" => {
+            let (c, pp) = (p(1)?, p(5)?);
+            f(2 * c * pp, 8 * c * pp)
+        }
         "gn_dx" => {
             let n = p(0)? * p(1)? * p(2)? * p(3)?;
             f(5 * n, 12 * n)
@@ -630,6 +694,23 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         "upsample2" => {
             let n = p(0)? * p(1)? * p(2)? * p(3)?;
             f(0, 4 * (n + 4 * n))
+        }
+        // Its adjoint sums the 4 upsampled taps back into each input element:
+        // reads 4n, writes n, 3 adds. Params are the INPUT shape [N,C,H,W].
+        "upsample2_dx" => {
+            let n = p(0)? * p(1)? * p(2)? * p(3)?;
+            f(3 * n, 4 * (4 * n + n))
+        }
+        // Pure movement along the channel axis. `concat2` copies both sources
+        // once ([N,Ca,Cb,H,W]); `concat_split` copies one slice
+        // ([N,Ctot,Csrc,c_off,H,W]) — read once, write once, no arithmetic.
+        "concat2" => {
+            let n = p(0)? * (p(1)? + p(2)?) * p(3)? * p(4)?;
+            f(0, 8 * n)
+        }
+        "concat_split" => {
+            let n = p(0)? * p(2)? * p(4)? * p(5)?;
+            f(0, 8 * n)
         }
 
         // ---- conv1d family: params [N, Cin, L, Cout, K, stride, pad, dil, G, Lo].
@@ -743,14 +824,54 @@ mod tests {
 
         // The whole point of F0: every kernel the conv models dispatch must
         // have a formula, or a profile of them reports a fiction.
+        //
+        // The second row is what a *coverage-honest* whole-pass rate exposed:
+        // with any one kind uncovered the pass numerator is partial, and a
+        // partial numerator over the full denominator silently under-reports.
+        // Ten of the VQGAN backward's 26 kinds were in that state, which is why
+        // its published "5.4% of peak" was a fiction in the other direction.
         for k in [
             "conv_bias_reg", "conv2d_dx", "conv2d_dw", "col2im", "im2col_at", "gn_stats",
             "gn_stats_wg", "gn_part", "gn_stats2", "gn_apply", "gn_dsum", "gn_dgamma",
             "gn_dbeta", "gn_dx", "upsample2",
+            // the VQGAN training step's remaining kinds
+            "silu", "silu_bwd", "scale_chan", "dw_splitk_reduce", "gn_dsum_part", "gn_dsum2",
+            "gn_dgb_part", "gn_dgb2", "mse_value", "masked_l1", "upsample2_dx", "concat2",
+            "concat_split", "matmul_i8", "roof_fma", "mse_grad", "masked_l1_grad",
         ] {
             assert!(covers(k), "kernel `{k}` has no cost formula");
         }
         assert_eq!(cost("conv1d_dw", &[2, 6, 10, 4, 3, 1, 1, 1, 2, 10], 36).flops, 1440);
+    }
+
+    /// A RATCHET over the whole kernel tree, not another hand-maintained list.
+    ///
+    /// The list above only fails when someone remembers to add a name to it, so
+    /// on its own it cannot stop a new kernel landing unmeasurable — and an
+    /// unmeasurable kernel silently removes its pass's ability to report a rate
+    /// at all (see `profile::PassProfile::gflops`). This asserts the *fraction*
+    /// of `kernels::ALL` with a formula never falls, so adding kernels without
+    /// formulas is visible the moment it happens rather than at the next
+    /// profile. Raise `FLOOR` whenever coverage rises; never lower it.
+    #[test]
+    fn cost_coverage_over_the_kernel_tree_never_regresses() {
+        // Measured 2026-08-06: 150 of 357. Deliberately a floor and not an
+        // equality — adding a formula must not require editing a test.
+        const FLOOR: usize = 150;
+        let total = kernels::ALL.len();
+        let covered = kernels::ALL.iter().filter(|(n, _)| covers(n)).count();
+        let uncovered: Vec<&str> =
+            kernels::ALL.iter().filter(|(n, _)| !covers(n)).map(|(n, _)| *n).collect();
+        println!(
+            "cost coverage: {covered}/{total} kernels ({:.1}%)\nuncovered: {uncovered:?}",
+            100.0 * covered as f64 / total as f64
+        );
+        assert!(
+            covered >= FLOOR,
+            "cost coverage fell to {covered}/{total}; floor is {FLOOR}. \
+             A kernel without a formula makes every pass that dispatches it unable \
+             to report a rate. Uncovered: {uncovered:?}"
+        );
     }
 
     #[test]
