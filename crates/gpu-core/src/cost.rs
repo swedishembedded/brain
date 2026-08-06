@@ -562,6 +562,74 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // params [n_parts, max_norm, extra_scale] — same fold, 64 threads.
         "clip_coef_wg" => f(p(0)? + 5, 4 * p(0)?),
 
+        // ---- conv2d family: params [N, Cin, H, W, Cout, K, stride, pad, Ho, Wo].
+        //
+        // These were UNCOVERED until 2026-08-06, which meant `conv_bias_reg` —
+        // 89.5% of a VQGAN forward — reported no rate at all and the pass-level
+        // GFLOP/s was a fiction. Formulas mirror the conv1d family above.
+        "conv2d" | "conv_bias" | "conv_bias_reg" | "conv_act" | "conv_act_bn" => {
+            let (n, cin, h, w, cout, k, ho, wo) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(5)?, p(8)?, p(9)?);
+            f(2 * n * cout * ho * wo * cin * k * k, 4 * (n * cin * h * w + cout * cin * k * k + n * cout * ho * wo))
+        }
+        // The GATHER form: one invocation per INPUT element, reducing Cout*K*K.
+        // Counted as the work actually done (as `conv1d_dx` does), not the
+        // algorithmic minimum — the point of the number is to expose the cost.
+        "conv2d_dx" => {
+            let (n, cin, h, w, cout, k, ho, wo) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(5)?, p(8)?, p(9)?);
+            f(2 * n * cin * h * w * cout * k * k, 4 * (n * cout * ho * wo + cout * cin * k * k + n * cin * h * w))
+        }
+        "conv2d_dw" => {
+            let (n, cin, h, w, cout, k, ho, wo) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(5)?, p(8)?, p(9)?);
+            f(2 * cout * cin * k * k * n * ho * wo, 4 * (n * cout * ho * wo + n * cin * h * w + 2 * cout * cin * k * k))
+        }
+        // im2col / col2im are LAYOUT, not arithmetic: `im2col_at` moves
+        // cnt*cinkk floats, `col2im` sums K*K taps per input element.
+        // params: im2col_at [cin,h,w,k,stride,pad,ho,wo,cinkk,pos0,cnt]
+        //         col2im   [N,Cin,H,W,K,stride,pad,Ho,Wo,cinkk]
+        "im2col_at" => {
+            let (cinkk, cnt) = (p(8)?, p(10)?);
+            f(0, 8 * cnt * cinkk)
+        }
+        "im2col" => f(0, 8 * n0()),
+        "col2im" => {
+            let (n, cin, h, w, k) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?);
+            let elems = n * cin * h * w;
+            f(elems * k * k, 4 * (elems * k * k + elems))
+        }
+
+        // ---- GroupNorm family: params [N, C, H, W, G(, ...)].
+        // Two passes over the data for the statistics, an affine for the apply.
+        "gn_stats" | "gn_stats_wg" | "gn_part" => {
+            let n = p(0)? * p(1)? * p(2)? * p(3)?;
+            f(2 * n, 4 * n)
+        }
+        "gn_stats2" => {
+            let (g, pp) = (p(4)?, p(5)?);
+            f(2 * g * pp, 8 * g * pp)
+        }
+        "gn_apply" => {
+            let n = p(0)? * p(1)? * p(2)? * p(3)?;
+            f(3 * n, 4 * (2 * n + 2 * p(1)?))
+        }
+        // The backward reductions: gn_dsum reads x and dy, the per-channel pair
+        // reduce N*H*W each, gn_dx recombines.
+        "gn_dsum" => {
+            let n = p(0)? * p(1)? * p(2)? * p(3)?;
+            f(4 * n, 8 * n)
+        }
+        "gn_dgamma" | "gn_dbeta" => {
+            let n = p(0)? * p(1)? * p(2)? * p(3)?;
+            f(2 * n, 8 * n)
+        }
+        "gn_dx" => {
+            let n = p(0)? * p(1)? * p(2)? * p(3)?;
+            f(5 * n, 12 * n)
+        }
+        "upsample2" => {
+            let n = p(0)? * p(1)? * p(2)? * p(3)?;
+            f(0, 4 * (n + 4 * n))
+        }
+
         // ---- conv1d family: params [N, Cin, L, Cout, K, stride, pad, dil, G, Lo].
         "conv1d" => {
             let (n, cin, l, cout, k, g, lo) = (p(0)?, p(1)?, p(2)?, p(3)?, p(4)?, p(8)?, p(9)?);
@@ -654,6 +722,32 @@ mod tests {
         // [N=2, Cin=6, L=10, Cout=4, K=3, stride=1, pad=1, dil=1, G=2, Lo=10]:
         // 2*4*10 outputs × (6/2)*3 taps × 2 = 1440.
         assert_eq!(cost("conv1d", &[2, 6, 10, 4, 3, 1, 1, 1, 2, 10], 80).flops, 1440);
+
+        // conv2d: [N,Cin,H,W,Cout,K,stride,pad,Ho,Wo]. 2*N*Cout*Ho*Wo*Cin*K*K
+        // = 2*1*4*8*8*2*3*3 = 9216.
+        assert_eq!(cost("conv_bias_reg", &[1, 2, 8, 8, 4, 3, 1, 1, 8, 8], 256).flops, 9216);
+        // dW does the same MACs, reduced over output positions instead.
+        assert_eq!(cost("conv2d_dw", &[1, 2, 8, 8, 4, 3, 1, 1, 8, 8], 72).flops, 9216);
+        // dX is the GATHER form: per INPUT element, reduce Cout*K*K.
+        assert_eq!(cost("conv2d_dx", &[1, 2, 8, 8, 4, 3, 1, 1, 8, 8], 128).flops, 9216);
+        // col2im sums K*K taps per input element: 1*2*8*8*9 = 1152.
+        assert_eq!(cost("col2im", &[1, 2, 8, 8, 3, 1, 1, 8, 8, 18], 128).flops, 1152);
+        // im2col_at is pure movement: 8 bytes per moved float (read + write).
+        assert_eq!(cost("im2col_at", &[2, 8, 8, 3, 1, 1, 8, 8, 18, 0, 64], 1152).bytes, 8 * 64 * 18);
+        assert_eq!(cost("im2col_at", &[2, 8, 8, 3, 1, 1, 8, 8, 18, 0, 64], 1152).flops, 0);
+        // GroupNorm statistics: two passes over N*C*H*W = 128.
+        assert_eq!(cost("gn_stats_wg", &[1, 2, 8, 8, 2], 512).flops, 256);
+        assert_eq!(cost("gn_apply", &[1, 2, 8, 8, 2], 128).flops, 384);
+
+        // The whole point of F0: every kernel the conv models dispatch must
+        // have a formula, or a profile of them reports a fiction.
+        for k in [
+            "conv_bias_reg", "conv2d_dx", "conv2d_dw", "col2im", "im2col_at", "gn_stats",
+            "gn_stats_wg", "gn_part", "gn_stats2", "gn_apply", "gn_dsum", "gn_dgamma",
+            "gn_dbeta", "gn_dx", "upsample2",
+        ] {
+            assert!(covers(k), "kernel `{k}` has no cost formula");
+        }
         assert_eq!(cost("conv1d_dw", &[2, 6, 10, 4, 3, 1, 1, 1, 2, 10], 36).flops, 1440);
     }
 
