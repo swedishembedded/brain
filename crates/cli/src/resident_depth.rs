@@ -27,12 +27,27 @@ use serde_json::json;
 /// checkpoint (`BRAIN_DEPTH_WEIGHTS`); the resident instance holds the weights in
 /// RAM — dropping it frees them. One action, `depth`.
 pub struct DepthResident {
+    /// Catalog id (the model-card id): the manifest/instance-key key, so two
+    /// checkpoints of the same family are two distinct selectable models
+    /// (mirrors `resident_llm.rs::GptResident`).
+    id: String,
     path: String,
 }
 
 impl DepthResident {
     pub fn from_env() -> Option<DepthResident> {
-        std::env::var("BRAIN_DEPTH_WEIGHTS").ok().filter(|p| !p.is_empty()).map(|path| DepthResident { path })
+        let path = std::env::var("BRAIN_DEPTH_WEIGHTS").ok().filter(|p| !p.is_empty())?;
+        // See resident_llm.rs::GptResident::from_env's comment: env-loaded,
+        // no upstream vendor/repo provenance.
+        Some(Self::from_card(&path, &checkpoint::st::ModelCard::new("brain/depth", "depth"), None))
+    }
+
+    /// Construct under the card's id. `_tokenizer` is unused -- depth has no
+    /// text vocab. The checkpoint's real variant (base vs npu-blend) is
+    /// auto-detected from its own tensor shapes at `activate()` time
+    /// (`depth::cfg_for_checkpoint`), not from anything carried here.
+    pub fn from_card(path: &str, card: &checkpoint::st::ModelCard, _tokenizer: Option<&str>) -> DepthResident {
+        DepthResident { id: card.id.clone(), path: path.to_string() }
     }
 
     fn depth_spec() -> ActionSpec {
@@ -47,10 +62,10 @@ impl DepthResident {
 
 impl ResidentModel for DepthResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(depth::caps::MODEL, "monocular depth (ZipDepth)", vec![Self::depth_spec()])
+        Manifest::new(&self.id, "monocular depth (ZipDepth)", vec![Self::depth_spec()])
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(depth::caps::MODEL, "default")
+        InstanceKey::new(self.id.as_str(), "default")
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         // ZipDepth (~6.1M params) is imported into a host-RAM weight map and runs

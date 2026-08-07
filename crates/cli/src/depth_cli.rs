@@ -723,6 +723,7 @@ fn run_train(args: &[String]) {
         }
     };
 
+    let upsample_unfold = cfg.upsample_unfold; // captured before cfg moves into train_loop below
     let gpu = Gpu::new(depth::net::PIPELINES);
     let t = depth::train::TrainCfg { steps, batch, h, w, lr, wd, seed, fixed_batch: false };
     println!(
@@ -743,7 +744,23 @@ fn run_train(args: &[String]) {
             (name.clone(), vec![n as u64], gpu.read(ps.w(name), n))
         })
         .collect();
-    checkpoint::save(&out, serde_json::json!({ "model": "zipdepth", "variant": "base" }), &tensors);
+    // "brain/depth" matches docs/models/naming.md's reserved-vendor fallback
+    // -- the same id crates/cli/src/resident_depth.rs::DepthResident::from_env
+    // synthesizes for an env-loaded checkpoint -- so a checkpoint saved here
+    // is auto-discoverable by crates/cli/src/model_dir.rs without requiring
+    // BRAIN_DEPTH_WEIGHTS to be set. The "variant" field is informational
+    // only (DepthResident::activate auto-detects the real variant from the
+    // checkpoint's own tensor shapes via depth::cfg_for_checkpoint, never
+    // reads this back) -- previously hardcoded "base" regardless of which
+    // cfg was actually used; derive it from cfg instead so the metadata is
+    // at least honest about what got trained.
+    let variant = if upsample_unfold { "base" } else { "npu" };
+    checkpoint::save_carded(
+        &out,
+        serde_json::json!({ "model": "zipdepth", "variant": variant }),
+        &tensors,
+        &checkpoint::st::ModelCard::new("brain/depth", "depth"),
+    );
     println!("done: loss {:.4} -> {:.4}; saved {out}", res.first_loss, res.last_loss);
 }
 
