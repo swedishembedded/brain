@@ -269,15 +269,55 @@ timestamps) closed first.
 
 ---
 
-## 7. Coopmat: measured verdict
+## 7. Coopmat and DP4A: measured verdicts
 
-Pending — needs `glslc`/`glslangValidator` installed (not yet) and a shape
+### DP4A — resolved: real hardware, on both backends
+
+The plan's O0.5 asked whether `backend-wgpu`'s unconditional
+`DeviceCaps.numeric.int8_dot = true` is honest, or a lie to the selector —
+`p40.md` had claimed "the wgpu/CPU backends don't enable the integer-dot
+feature," which reads as a blanket "wgpu can't do it."
+
+**Measured, on `--device gpu` (wgpu), from this ledger's §3 roofline:**
+
+```
+372 GFLOP/s fp32, 2066 GOP/s int8  ->  ratio 5.6x
+```
+
+Per the decision rule fixed in the plan before measuring (ratio >= 3x on
+wgpu -> DP4A is a real wgpu capability, fix the doc): **`int8_dot: true` is
+correct.** WGSL's `dot4I8Packed` — core WGSL, what `backend-wgpu` actually
+claims — lowers through naga to real hardware DP4A on this Mesa ANV driver,
+not a polyfill (a polyfill would show a ratio near 1x). `docs/performance/
+p40.md`'s §"INT8 GEMM (DP4A)" section has been corrected in place: the real,
+narrower reason the `matmul_i8` kernel specifically stays Vulkan-only is
+that it targets the *native* `shaderIntegerDotProduct` Vulkan device feature
+directly, a lower-level surface wgpu's abstraction doesn't expose for an app
+to enable — not a capability gap in WGSL's `dot4I8Packed`, which both
+backends already reach. `.todo/int8-kv-dp4a-scores.md`'s open "GPU-side
+measurement" question is answered by this same number: DP4A is a real,
+substantial (5.6x) win on this Arc iGPU, on the backend that already serves
+`--device gpu` by default.
+
+`--device vulkan`'s int8 ratio has not yet been separately measured (the
+same reliability caveat as every other vulkan roofline attempt applies) —
+expected to be comparable or higher (native `shaderIntegerDotProduct` is a
+strictly lower-level path than naga's lowering), not lower; record it here
+once captured.
+
+### Coopmat — pending
+
+Needs `glslc`/`glslangValidator` installed (not yet) and a shape
 enumeration of this driver's `VK_KHR_cooperative_matrix` support (§2 records
 that the extension is exposed but no shape list was printed by this
 `vulkaninfo` build). Given Meteor Lake's Xe-LPG has no XMX matrix hardware,
 the working prior is that any coopmat path here is emulated over
 subgroup/DP4A rather than unlocking new arithmetic hardware — stated as a
-falsifiable prediction, not a conclusion, per the archived plan's O5.
+falsifiable prediction, not a conclusion, per the archived plan's O5. Given
+DP4A alone already measures a healthy 5.6x, coopmat's ceiling (if it beats
+`matmul_i8_dyn` at all) is bounded by roughly that same hardware — it would
+need to beat the *already-DP4A-accelerated* kernel, not the fp32 one, to be
+worth adopting per O5's decision rule.
 
 ---
 
