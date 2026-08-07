@@ -95,7 +95,7 @@ fn matches_the_real_vision_tower() {
     let (t, h, w) = (grid[0] as i32, grid[1] as u32, grid[2] as u32);
     assert_eq!(t, 1, "this test covers the single-frame (image) case; video (t>1) is a separate, not-yet-covered path");
 
-    let (encoder_out, tap_feats) = enc.encode_with_taps(h as u32, w as u32, &patches, &cfg.deepstack_indexes);
+    let (encoder_out, tap_feats) = enc.encode_with_taps(h, w, &patches, &cfg.deepstack_indexes);
 
     // The golden's "hidden" is `Qwen3OmniMoeVisionEncoder.forward`'s
     // `last_hidden_state` -- the RAW per-patch ViT output, BEFORE the
@@ -129,7 +129,7 @@ fn matches_the_real_vision_tower() {
         // and merge must match the tap's actual (pre-merge, hidden-width)
         // layout, not the already-merged output width.
         let merger = PatchMerger::new(&gpu, &deepstack_w[i], cfg.hidden, cfg.spatial_merge_size, cfg.out_hidden_size, true);
-        let got_tap = merger.merge(tap, h as u32 * w as u32);
+        let got_tap = merger.merge(tap, h * w);
         let want_tap = golden.tensor_f32(&format!("deepstack{i}")).unwrap_or_else(|| panic!("golden deepstack{i}"));
         let (cos_t, max_abs_t) = cosine_max_abs(&got_tap, &want_tap);
         println!("vision deepstack{i}: cosine={cos_t:.6} max_abs={max_abs_t:.6}");

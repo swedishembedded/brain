@@ -22,6 +22,10 @@ use omni::import::hf_to_brain;
 use qwen_asr::config::AudioEncoderConfig;
 use qwen_asr::encoder::{audio_pipelines, AudioEncoder};
 
+/// Per-block qkv-fuse accumulator: `(q_w, q_b, k_w, k_b, v_w, v_b)`, each
+/// filled in as its tensor arrives (real shards interleave block order).
+type FusedQkv = (Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>);
+
 fn shard_with_audio_tower() -> Option<PathBuf> {
     let dir = PathBuf::from(std::env::var("BRAIN_OMNI_HF_DIR").ok()?);
     let idx_path = dir.join("model.safetensors.index.json");
@@ -61,7 +65,7 @@ fn matches_the_real_audio_tower() {
     // Stream every thinker.audio_tower.* tensor this shard has, remap via
     // the same hf_to_brain + fuse_audio_qkv path import_as uses, strip the
     // "audio." prefix AudioEncoder::new's weight map doesn't carry.
-    let mut fused: HashMap<u32, (Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>, Option<Vec<f32>>)> = HashMap::new();
+    let mut fused: HashMap<u32, FusedQkv> = HashMap::new();
     let mut weights: HashMap<String, Vec<f32>> = HashMap::new();
     for name in mmap.names() {
         if !name.starts_with("thinker.audio_tower.") {
