@@ -101,8 +101,12 @@ impl ResidentModel for DepthResident {
         }
 
         // Build the engine once (honours the process backend / `--device`), and
-        // keep the imported weights resident in host RAM.
-        let gpu = Gpu::new(depth::net::PIPELINES);
+        // keep the imported weights resident in host RAM. `on_device` scopes
+        // the build onto the dispatcher's assigned device, like every sibling
+        // adapter (`resident_facenet.rs`, `resident_upscale.rs`, ...) — a bare
+        // `Gpu::new` here bound whatever the thread-local default card was,
+        // so the manager could budget depth against a device it wasn't on.
+        let gpu = crate::resident_llm::on_device(device, || Gpu::new(depth::net::PIPELINES))?;
         Ok(Box::new(DepthInstance { gpu, init, cfg }))
     }
 }
