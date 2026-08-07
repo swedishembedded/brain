@@ -94,9 +94,37 @@ cleanup).
   into the ramdisk (`/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct/`);
   not yet run against real weights.
 
+- **M2a — sparse MoE core, forward pass** (2026-08-07). `model::moe`
+  (`crates/model/src/moe.rs`): `router_fwd` (reuses `router_gate.wgsl`
+  unchanged — Thinker/Talker both use plain softmax top-k, not glm's
+  sigmoid/bias/group-limited variant) + `expert_fwd`, a per-expert step built
+  on one new kernel, `moe_linear_gated.wgsl` (`matmul.wgsl` with a per-row
+  gate early-exit before the K-reduction — skips a non-routed row's FLOPs
+  instead of computing and discarding it). Bumped `router_gate{,_train}.wgsl`'s
+  `MAX_EXPERTS` 64→128 (Omni's Thinker and Talker are both 128-expert).
+  Verified exact (max_abs_diff < 1e-5, effectively bit-identical) against a
+  dense oracle built from the SAME kernels `crates/glm`'s `Mlp::Moe` arm uses
+  (`matmul`→`silu_mul`→`matmul`→`scale_add`, evaluated densely) — on all three
+  backends (wgpu, native Vulkan, CPU JIT) —
+  `crates/model/tests/moe_sparse_parity.rs`.
+  **Deliberately deferred to a follow-up commit**: no row-compaction
+  (gather/scatter) — WGSL kernels here may not use atomics, so true stream
+  compaction needs a separate prefix-sum pass; the per-row early-exit already
+  removes the FLOPs, just not the thread launches, which is enough for
+  correctness and a real speed win but leaves grid-size optimization on the
+  table for M16. No int8 grouped-GEMM tier yet (M2b). No backward pass /
+  gradcheck coverage yet (M2c) — `expert_fwd` is forward-only. `crates/glm`
+  migration not done yet (M2d).
+  Pre-existing, unrelated finding while running `make clippy`: this branch
+  carries 192 warnings against a 183 baseline with EVERY change in this
+  workstream stashed out (`crates/cli/{resident_forecast,resident_llm,
+  resident_mock,splat_cli,supply,wm_cli}.rs`) — confirmed not caused by this
+  work; not in scope to fix here, noted for whoever picks it up.
+
 ## Not started
 
-M2 (sparse MoE core) through M17. See the plan file.
+M2b (int8 grouped GEMM), M2c (backward + gradcheck), M2d (glm migration),
+M3 through M17. See the plan file.
 
 ## Honesty notes
 

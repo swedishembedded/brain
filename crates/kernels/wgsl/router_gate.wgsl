@@ -12,14 +12,18 @@
 // Router gating: softmax over experts -> keep top_k -> renormalise.
 // Produces a dense gate matrix [seq_len, n_experts] that is nonzero only for
 // the top_k experts of each token (their renormalised probabilities). One
-// invocation per token. n_experts is assumed <= MAX_EXPERTS.
+// invocation per token. n_experts is assumed <= MAX_EXPERTS. 128 covers every
+// released top-k-softmax MoE brain imports today (Qwen3-Omni thinker/talker:
+// 128 experts each).
 //
 // Running every expert and masking by this gate is numerically identical to a
 // true sparse top-k dispatch *without* capacity dropping. Capacity limits exist
 // only to bound memory during training; inference has no such pressure, so this
-// is the exact top-k MoE output.
+// is the exact top-k MoE output. `moe_linear_gated.wgsl` is the sparse
+// alternative that actually skips a non-routed row's FLOPs instead of relying
+// on this property to discard a densely-computed one.
 
-const MAX_EXPERTS: u32 = 64u;
+const MAX_EXPERTS: u32 = 128u;
 
 struct Params {
     seq_len: u32,

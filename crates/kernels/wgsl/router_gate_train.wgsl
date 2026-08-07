@@ -11,9 +11,10 @@
 //
 // Router gating (training variant): like router_gate.wgsl but also writes the
 // full softmax probabilities (needed by the backward pass). One invocation per
-// token row. n_experts <= MAX_EXPERTS.
+// token row. n_experts <= MAX_EXPERTS. 128 covers every released
+// top-k-softmax MoE brain imports today (Qwen3-Omni thinker/talker: 128 each).
 
-const MAX_EXPERTS: u32 = 64u;
+const MAX_EXPERTS: u32 = 128u;
 
 struct Params {
     n_rows: u32,
