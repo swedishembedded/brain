@@ -116,6 +116,23 @@ pub fn serve(executor: Executor, opts: DbusOpts, serve_opts: ServeOpts) -> anyho
             .build()
             .await?;
         eprintln!("brain: serving {} on the {:?} bus at {OBJECT_PATH}", opts.name, opts.bus);
+        match opts.bus {
+            BusKind::Session => {
+                eprintln!("brain: connect with: braintop --name {}", opts.name);
+                // zbus::connection::Builder::session() (used above) resolves this
+                // same address: $DBUS_SESSION_BUS_ADDRESS, else $XDG_RUNTIME_DIR/bus
+                // -- see zbus::address::Address::session(). Print the resolved
+                // value so a DIFFERENT shell/process (one that did not inherit this
+                // process's environment -- e.g. this was launched under
+                // `dbus-run-session`, whose private bus is otherwise invisible
+                // anywhere else) can still reach it.
+                match std::env::var("DBUS_SESSION_BUS_ADDRESS") {
+                    Ok(addr) => eprintln!("brain:   (session bus address: {addr} -- export DBUS_SESSION_BUS_ADDRESS=\"{addr}\" in another shell, or pass braintop --address \"{addr}\")"),
+                    Err(_) => eprintln!("brain:   (DBUS_SESSION_BUS_ADDRESS is unset here; zbus falls back to $XDG_RUNTIME_DIR/bus -- braintop must resolve the SAME fallback to connect, e.g. run it from a shell with the same $XDG_RUNTIME_DIR)"),
+                }
+            }
+            BusKind::System => eprintln!("brain: connect with: braintop --system --name {}", opts.name),
+        }
         // The well-known name is owned and the object is served: this is a true
         // "up" point. zbus 5's `Builder::name` acquires the name during `build()`
         // and errors above if it cannot, so reaching here means both succeeded.
