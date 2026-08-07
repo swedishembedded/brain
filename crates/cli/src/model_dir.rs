@@ -227,6 +227,7 @@ fn resident_for(weights: &str, card: &ModelCard, tokenizer: Option<&str>, adapte
                 None
             }
         },
+        "yolo" => Some(Arc::new(crate::resident::YoloResident::from_card(weights, card, tokenizer))),
         other => {
             eprintln!("brain: skip {} (family '{other}' not servable from the model dir yet)", card.id);
             None

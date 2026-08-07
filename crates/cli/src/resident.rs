@@ -162,12 +162,25 @@ const COCO: [&str; 80] = [
 /// (`BRAIN_YOLO`); the resident instance holds the model on the CPU (brain's yolo
 /// default) — dropping it frees the RAM. One action, `detect`.
 pub struct YoloResident {
+    /// Catalog id (the model-card id): the manifest/instance-key key, so two
+    /// checkpoints of the same family are two distinct selectable models
+    /// (mirrors `resident_llm.rs::GptResident`).
+    id: String,
     path: String,
 }
 
 impl YoloResident {
     pub fn from_env() -> Option<YoloResident> {
-        std::env::var("BRAIN_YOLO").ok().filter(|p| !p.is_empty()).map(|path| YoloResident { path })
+        let path = std::env::var("BRAIN_YOLO").ok().filter(|p| !p.is_empty())?;
+        // See resident_llm.rs::GptResident::from_env's comment: env-loaded,
+        // no upstream vendor/repo provenance.
+        Some(Self::from_card(&path, &checkpoint::st::ModelCard::new("brain/yolo", "yolo"), None))
+    }
+
+    /// Construct under the card's id. `_tokenizer` is unused -- yolo's class
+    /// names are a fixed COCO-80 table, not learned from a tokenizer.
+    pub fn from_card(path: &str, card: &checkpoint::st::ModelCard, _tokenizer: Option<&str>) -> YoloResident {
+        YoloResident { id: card.id.clone(), path: path.to_string() }
     }
 
     fn detect_spec() -> capability::ActionSpec {
@@ -181,10 +194,10 @@ impl YoloResident {
 
 impl ResidentModel for YoloResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(yolo::caps::MODEL, "object detection (YOLOv8, COCO-80)", vec![Self::detect_spec()])
+        Manifest::new(&self.id, "object detection (YOLOv8, COCO-80)", vec![Self::detect_spec()])
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
-        InstanceKey::new(yolo::caps::MODEL, "default")
+        InstanceKey::new(self.id.as_str(), "default")
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
         // YOLOv8n is small and runs on the CPU in brain → a modest RAM footprint.
