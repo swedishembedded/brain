@@ -23,18 +23,33 @@
 //! (forward-only, single device, no sharding/LoRA/int8/KV-cache) so it can
 //! be validated against real weights now — it composes the SAME shared
 //! primitives `qwen::Qwen` itself is built from
-//! (`model::block::{rmsnorm_fwd,rope_fwd,gqa_fwd}`), not a re-derivation of
+//! (`model::block::{rmsnorm_fwd,rope2d_fwd,gqa_fwd}`), not a re-derivation of
 //! the attention math.
 //!
-//! **M-RoPE**: for a token stream where all three axes carry the same
-//! position (pure text, or pure audio — see the M6 design note), Omni's
-//! interleaved M-RoPE collapses exactly to `block::rope_fwd`'s ordinary
-//! half-split rotation. This module takes that path only; a caller with
-//! genuinely divergent per-axis positions (an image or video span) needs the
-//! real M-RoPE table (`qwenvl::mrope`) wired in separately — not yet done.
+//! **M-RoPE**: every layer takes the table-driven [`model::block::rope2d_fwd`]
+//! path (the same kernel `qwen::Qwen::rope2d_step` dispatches for Qwen3-VL),
+//! fed a `[n, head_dim/2]` `cos`/`sin` table the caller builds with
+//! `qwenvl::mrope::{get_rope_index, mrope_tables}`. There is deliberately no
+//! separate "plain RoPE" code path: for a token stream where all three axes
+//! carry the same position (pure text, or pure audio — see the M6 design
+//! note), Omni's interleaved M-RoPE collapses exactly to ordinary half-split
+//! RoPE (`qwenvl::mrope`'s own `diagonal_positions_collapse_to_plain_rope`
+//! test proves this), so a caller with no image/video/audio span just builds
+//! that degenerate diagonal table via `get_rope_index(tokens, image_token_id,
+//! &[])` (empty grids) rather than reaching for a second kernel — one
+//! implementation for both cases, per the M6a lesson about wiring the wrong
+//! RoPE kernel into a second, parallel path (`docs/lessons.md`, status.md's
+//! M6a entry).
+//!
+//! **Multimodal splice**: not this module's concern. A caller with image/
+//! audio embeddings splices them into the token-embedding buffer via
+//! `model::vlm::splice_fwd` (`splice.wgsl`, in [`thinker_pipelines`]) BEFORE
+//! calling [`decode`] — `decode` and [`layer_fwd`] only ever see an
+//! already-assembled `[n, d]` embedding sequence, exactly like `x` in
+//! `qwen::Qwen::write_img_embeds`'s contract.
 
 use gpu_core::{DeviceBuffer, Gpu};
-use model::block::{gqa_fwd, rmsnorm_fwd, rope_fwd, Gqa, KernelIds};
+use model::block::{gqa_fwd, rmsnorm_fwd, rope2d_fwd, Gqa, KernelIds};
 use model::moe::{expert_fwd, router_fwd, ExpertScratch, MoeIds};
 
 use crate::config::MoeTextConfig;
@@ -47,9 +62,7 @@ use crate::config::MoeTextConfig;
 pub fn thinker_pipelines() -> &'static [(&'static str, &'static str)] {
     &[
         ("rmsnorm", kernels::RMSNORM),               // 0
-        ("rope", kernels::ROPE_BASE),                 // 1 -- half-split (rotate_half), honors `theta`; NOT
-                                                       // `kernels::ROPE` (interleaved-pair, hardcoded base
-                                                       // 10000) -- see the module doc's M-RoPE-collapse note.
+        ("rope2d", kernels::ROPE2D),                  // 1 -- table-driven M-RoPE; see the module doc.
         ("gqa_scores", kernels::GQA_SCORES),          // 2
         ("attn_softmax", kernels::ATTN_SOFTMAX),      // 3
         ("gqa_apply", kernels::GQA_APPLY),            // 4
@@ -59,6 +72,7 @@ pub fn thinker_pipelines() -> &'static [(&'static str, &'static str)] {
         ("moe_linear_gated", kernels::MOE_LINEAR_GATED), // 8
         ("silu_mul", kernels::SILU_MUL),              // 9
         ("scale_add", kernels::SCALE_ADD),            // 10
+        ("splice", kernels::SPLICE),                  // 11 -- for a caller wiring multimodal input; see the module doc.
     ]
 }
 
@@ -68,7 +82,7 @@ fn kernel_ids() -> KernelIds {
         rms_inv: 0,
         rmsnorm_dx: 0,
         rmsnorm_dw: 0,
-        rope: 1,
+        rope: 0,
         rope_bwd: 0,
         gqa_scores: 2,
         gqa_apply: 4,
@@ -89,6 +103,10 @@ fn moe_ids() -> MoeIds {
 
 const MATMUL: usize = 5;
 const ADD2: usize = 6;
+const ROPE2D: usize = 1;
+/// `model::vlm::splice_fwd`'s kernel index — exposed for a caller assembling
+/// a multimodal embedding sequence before [`decode`]; see the module doc.
+pub const SPLICE: usize = 11;
 
 /// One decoder layer's weights, keyed exactly as they arrive from
 /// `omni::import` (`thinker.blocks.{l}.*`, prefix already stripped by the
@@ -114,17 +132,18 @@ pub struct ThinkerLayerWeights<'a> {
 /// the post-attention/pre-MoE residual (`xmid`), and the dense post-topk-
 /// renorm gate `[n, n_experts]` `model::moe`'s expert loop actually consumes.
 /// `n` is the sequence length (batch folded in, matching every other
-/// forward-only harness in this engine); positions are assumed
-/// plain-sequential (`0..n`) — the M-RoPE-collapses-to-plain-RoPE case.
+/// forward-only harness in this engine). `cos`/`sin` are the `[n, head_dim/2]`
+/// M-RoPE tables (`qwenvl::mrope::mrope_tables`) — see the module doc for why
+/// there is one RoPE path, not a separate "plain" and "M-RoPE" one.
 ///
 /// Note for callers comparing `out` against a full-model reference dump:
 /// `out` is this ONE layer's raw output. A real decoder stack's top-level
 /// `model.norm` (applied once, after every layer) is not part of this
 /// function and must be applied separately if the comparison target is a
 /// `last_hidden_state`-shaped tensor (see `thinker_layer_parity.rs`'s module
-/// doc for the real bug this distinction caught).
+/// doc for the real bug this distinction caught; [`decode`] applies it).
 #[allow(clippy::too_many_arguments)]
-pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &DeviceBuffer, n: u32) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
+pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, n: u32) -> (DeviceBuffer, DeviceBuffer, DeviceBuffer, DeviceBuffer) {
     let ids = kernel_ids();
     let mids = moe_ids();
     let (d, hd, nh, nkv) = (cfg.hidden, cfg.head_dim, cfg.n_heads, cfg.n_kv_heads);
@@ -149,8 +168,8 @@ pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &Devi
     } else {
         (q_pre, k_pre)
     };
-    steps.push(rope_fwd(g, &ids, &q, n, nh, hd, hq, n, cfg.rope_theta));
-    steps.push(rope_fwd(g, &ids, &k, n, nkv, hd, hkv, n, cfg.rope_theta));
+    steps.push(rope2d_fwd(g, ROPE2D, &q, cos, sin, n, nh, hd, hq));
+    steps.push(rope2d_fwd(g, ROPE2D, &k, cos, sin, n, nkv, hd, hkv));
 
     let scores = g.storage((nh * n * n) as u64);
     let probs = g.storage((nh * n * n) as u64);
@@ -196,4 +215,34 @@ pub fn layer_fwd(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerLayerWeights, x: &Devi
     g.submit(&[], &[g.step(ADD2, &[&xmid, &moe_out, &out], &[n * d], n * d)]);
 
     (out, router_logits, xmid, gate)
+}
+
+/// All 48 decoder layers plus the top-level final RMSNorm
+/// (`thinker.model.norm.weight`) — the weights [`decode`] needs beyond one
+/// layer's own [`ThinkerLayerWeights`].
+pub struct ThinkerWeights<'a> {
+    pub layers: &'a [ThinkerLayerWeights<'a>],
+    pub final_norm: &'a DeviceBuffer,
+}
+
+/// Runs the full Thinker text-decoder stack: `x [n, d] -> [n, d]`, one
+/// [`layer_fwd`] per entry in `w.layers` chained residual-to-residual, then
+/// `model.norm` — the piece [`layer_fwd`] deliberately leaves out (see its
+/// doc). `x` is an already-assembled embedding sequence: plain token
+/// embeddings for pure text, or the same buffer after a caller has spliced in
+/// image/audio embeddings via `model::vlm::splice_fwd` at the appropriate
+/// rows (`SPLICE`, in [`thinker_pipelines`]) — this function has no opinion
+/// on how `x` was built, only on what to do with it. `cos`/`sin` are the
+/// M-RoPE tables for this same sequence (`qwenvl::mrope`), shared unchanged
+/// across every layer (position doesn't change with depth).
+pub fn decode(g: &Gpu, cfg: &MoeTextConfig, w: &ThinkerWeights, x: &DeviceBuffer, cos: &DeviceBuffer, sin: &DeviceBuffer, n: u32) -> DeviceBuffer {
+    let mut h = x.clone(); // DeviceBuffer is Arc-backed; cheap, aliases the same buffer.
+    for layer in w.layers {
+        let (out, ..) = layer_fwd(g, cfg, layer, &h, cos, sin, n);
+        h = out;
+    }
+    let ids = kernel_ids();
+    let normed = g.storage((n * cfg.hidden) as u64);
+    g.submit(&[], &[rmsnorm_fwd(g, &ids, &h, w.final_norm, &normed, cfg.hidden, n)]);
+    normed
 }

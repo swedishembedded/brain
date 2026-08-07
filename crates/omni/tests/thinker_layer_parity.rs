@@ -10,10 +10,12 @@
 //! `docs/models/omni/status.md`'s M6 design note for why.
 //!
 //! The golden (`tools/goldens/omni_dump_reference.py`'s `layer0`) is a pure
-//! 9-token TEXT prompt with no image/audio — the case where Omni's
-//! interleaved M-RoPE collapses exactly to `qwen`'s plain half-split RoPE
-//! (see the module doc), so this test's sequential `0..n` positions are
-//! correct, not a simplification that happens to work here.
+//! 9-token TEXT prompt with no image/audio, so its M-RoPE table (built here
+//! via the real `qwenvl::mrope::{get_rope_index, mrope_tables}` path, same as
+//! a mixed-modality prompt would use) is the degenerate diagonal case where
+//! all three axes carry the same position — proven to collapse exactly to
+//! plain half-split RoPE by `qwenvl::mrope`'s own test, not a simplification
+//! this test takes a shortcut on.
 //!
 //! `layer_out` (not `hidden`) is the right golden tensor to compare `out`
 //! against: `Qwen3OmniMoeThinkerTextModel.forward` always applies its
@@ -34,6 +36,7 @@ use std::path::PathBuf;
 use checkpoint::mmap::MmapSafetensors;
 use omni::config::MoeTextConfig;
 use omni::thinker::{layer_fwd, thinker_pipelines, ThinkerLayerWeights};
+use qwenvl::mrope::{get_rope_index, mrope_tables};
 
 fn shard_with_layer0() -> Option<PathBuf> {
     let dir = PathBuf::from(std::env::var("BRAIN_OMNI_HF_DIR").ok()?);
@@ -84,6 +87,17 @@ fn matches_the_real_thinker_layer0() {
     let gpu = gpu_core::testgpu::dev(thinker_pipelines());
     let x = gpu.storage_init("x", &x_host);
 
+    // Pure text: get_rope_index's diagonal case (no image token, empty grids)
+    // -- every axis carries the same position, which mrope_tables/rope2d_fwd
+    // must reduce to plain half-split RoPE (proven by qwenvl::mrope's own
+    // diagonal_positions_collapse_to_plain_rope test).
+    let tokens_u32: Vec<u32> = tokens.iter().map(|&t| t as u32).collect();
+    let positions = get_rope_index(&tokens_u32, u32::MAX, &[]);
+    let section: [u32; 3] = [cfg.mrope_section[0], cfg.mrope_section[1], cfg.mrope_section[2]];
+    let (cos_tab, sin_tab) = mrope_tables(&positions, section, cfg.head_dim, cfg.rope_theta);
+    let cos = gpu.storage_init("mrope_cos", &cos_tab);
+    let sin = gpu.storage_init("mrope_sin", &sin_tab);
+
     let p = |leaf: &str| format!("thinker.model.layers.0.{leaf}");
     let get = |name: &str| gpu.storage_init(name, &mmap.tensor_f32(name).unwrap_or_else(|| panic!("missing tensor {name}")));
     let ln1 = get(&p("input_layernorm.weight"));
@@ -106,7 +120,7 @@ fn matches_the_real_thinker_layer0() {
         .collect();
 
     let w = ThinkerLayerWeights { ln1: &ln1, wq: &wq, wk: &wk, wv: &wv, wo: &wo, q_norm: &q_norm, k_norm: &k_norm, ln2: &ln2, router: &router, experts: &experts };
-    let (out, router_logits, xmid, gate) = layer_fwd(&gpu, &cfg, &w, &x, n);
+    let (out, router_logits, xmid, gate) = layer_fwd(&gpu, &cfg, &w, &x, &cos, &sin, n);
 
     // Attention stage: the post-attention, pre-MoE residual state.
     let got_xmid = gpu.read(&xmid, (n * cfg.hidden) as usize);

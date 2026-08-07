@@ -434,12 +434,55 @@ multimodal splice are additional, separate pieces on top of either.
   pure-audio) collapse case only. The full 48-layer composed loop and a real
   "describe this image" generation are also not yet built.
 
+- **M6b — real 3-axis M-RoPE + full decoder composition** (2026-08-07).
+  `crates/omni/src/thinker.rs::layer_fwd` now takes the table-driven
+  `model::block::rope2d_fwd` path unconditionally (fed a `[n, head_dim/2]`
+  `cos`/`sin` table from `qwenvl::mrope::{get_rope_index, mrope_tables}` —
+  already-implemented, already-tested code that predates this milestone and
+  was simply not yet wired in), rather than keeping a separate "plain RoPE"
+  analytic fast path alongside a "real M-RoPE" path that would never be
+  reached. One RoPE call site now serves pure text, pure audio, and a mixed
+  image/video/audio prompt alike — the M6a design note's own collapse
+  argument made this the natural next step, and it retires the exact class of
+  bug M6a found (a pipeline table pointing `rope` at the wrong kernel):
+  there is now only one kernel to wire correctly, not two.
+  `thinker_layer_parity.rs` re-verified at cosine 1.000000 on all four
+  stages with the real table (previously the sequential-position analytic
+  path); `model::block::rope2d_fwd` is a thin hoist of the exact dispatch
+  `qwen::Qwen::rope2d_step` already uses for Qwen3-VL (not a new kernel), so
+  no new device math was written.
+
+  `crates/omni/src/thinker.rs::decode` composes `w.layers.len()` `layer_fwd`
+  calls residual-to-residual, then the top-level `model.norm` `layer_fwd`
+  deliberately omits — the piece that turns "one validated layer" into "the
+  actual decoder stack." `thinker_decode.rs` (new, no real weights, no
+  `#[ignore]`) proves the composition byte-for-byte against a hand-chained
+  oracle (call `layer_fwd` N times + one more `rmsnorm_fwd`, by hand, in the
+  test) on both backends — the porting playbook's tiny-config-before-real-
+  weights tier. A real-weight 48-layer parity run is out of scope per the
+  plan's own parity-bar decision ("component goldens + e2e smoke", not a
+  full 48-layer tensor-exact reference) and is what M14's real generation
+  smoke test will exercise instead.
+
+  Multimodal splice is deliberately NOT implemented as thinker-local code:
+  `model::vlm::splice_fwd` (already covered by its own direct test,
+  `crates/model/src/vlm.rs`) is exposed via `thinker::SPLICE`
+  (`thinker_pipelines()`'s kernel index) for a caller to invoke on the
+  embedding buffer before calling `decode` — `decode` has no opinion on how
+  its `x` input was assembled, matching `qwen::Qwen::write_img_embeds`'s
+  contract. Wiring an actual vision/audio-embedding caller (the audio/vision
+  towers from M4/M5 feeding into this) is M9's job, not M6's — M6's scope was
+  the decoder + M-RoPE + splice *seam*, not a full multimodal generation
+  driver.
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), M5's video path, M6's real M-RoPE + multimodal splice + full
-48-layer composed loop (M6a above covers one layer, pure-text only), M7
-through M17. See the plan file.
+deferred), M5's video path, M7 through M17. See the plan file. M6 itself is
+now believed complete (decoder + real M-RoPE + composed loop + splice seam,
+all validated); the actual splice call site, a KV-cache/decode loop, and a
+real multimodal generation are M9/M14's job per the design note above, not
+additional M6 scope.
 
 **Standing constraint for M9 (`OmniResident`)**: fetch/import/load must all
 stay mmap-backed, streaming one tensor at a time, matching the pattern
