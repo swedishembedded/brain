@@ -203,3 +203,70 @@ pub fn expert_fwd_i8(
     steps.push(g.step(ids.scale_add, &[gate, scratch.expert_out, acc], &[m, d, e, e_idx, accumulate as u32], m * d));
     steps
 }
+
+/// Kernel indices for [`shared_expert_fwd`] -- an always-active (non-gated)
+/// dense SwiGLU, so it dispatches the plain `matmul.wgsl` rather than
+/// [`MoeIds::linear_gated`]'s row-skipping variant.
+#[derive(Clone, Copy)]
+pub struct SharedExpertIds {
+    pub matmul: usize,
+    pub silu_mul: usize,
+    /// `sigmoid.wgsl`.
+    pub sigmoid: usize,
+    /// `scale_row.wgsl` (`y[i] = s[i / m] * x[i]`).
+    pub scale_row: usize,
+    pub add2: usize,
+}
+
+/// Scratch for [`shared_expert_fwd`]'s dense SwiGLU + sigmoid gate, sized
+/// once by the caller. `shared_ff` (the shared expert's own intermediate
+/// width) is generally different from the routed experts' `moe_ff` -- e.g.
+/// Qwen3-Omni's Talker: 768 vs 384 -- so these buffers are NOT the same size
+/// as [`ExpertScratch`]'s and must not be reused across the two.
+pub struct SharedExpertScratch<'a> {
+    pub gate_pre: &'a DeviceBuffer,    // [rows, shared_ff]
+    pub up: &'a DeviceBuffer,          // [rows, shared_ff]
+    pub h: &'a DeviceBuffer,           // [rows, shared_ff]
+    pub mlp_out: &'a DeviceBuffer,     // [rows, d_model]
+    pub gate_logits: &'a DeviceBuffer, // [rows, 1]
+    pub gate_scalar: &'a DeviceBuffer, // [rows, 1]
+    pub scaled: &'a DeviceBuffer,      // [rows, d_model]
+}
+
+/// An MoE block's "always-active" shared expert: a dense SwiGLU MLP (own
+/// gate/up/down weights, own intermediate width `shared_ff`) applied to
+/// EVERY row (no top-k gating), scaled per-row by `sigmoid(x @
+/// shared_gate_w^T)`, and added to `acc` (the routed [`expert_fwd`] loop's
+/// output) into a fresh `out` buffer -- never in place on `acc`, matching
+/// `add2.wgsl`'s own out-of-place convention. Matches HF
+/// `Qwen3OmniMoeTalkerTextSparseMoeBlock.forward`'s `expert_output +
+/// sigmoid(shared_expert_gate(x)) * shared_expert(x)` exactly (the routed
+/// and shared paths read the SAME `x`, not the shared path reading the
+/// routed output).
+#[allow(clippy::too_many_arguments)]
+pub fn shared_expert_fwd(
+    g: &Gpu,
+    ids: &SharedExpertIds,
+    rows: u32,
+    d_model: u32,
+    shared_ff: u32,
+    x: &DeviceBuffer,
+    gate_w: &DeviceBuffer,
+    up_w: &DeviceBuffer,
+    down_w: &DeviceBuffer,
+    shared_gate_w: &DeviceBuffer,
+    scratch: &SharedExpertScratch,
+    acc: &DeviceBuffer,
+    out: &DeviceBuffer,
+) -> Vec<Step> {
+    vec![
+        g.step(ids.matmul, &[x, gate_w, scratch.gate_pre], &[rows, d_model, shared_ff], rows * shared_ff),
+        g.step(ids.matmul, &[x, up_w, scratch.up], &[rows, d_model, shared_ff], rows * shared_ff),
+        g.step(ids.silu_mul, &[scratch.gate_pre, scratch.up, scratch.h], &[rows * shared_ff], rows * shared_ff),
+        g.step(ids.matmul, &[scratch.h, down_w, scratch.mlp_out], &[rows, shared_ff, d_model], rows * d_model),
+        g.step(ids.matmul, &[x, shared_gate_w, scratch.gate_logits], &[rows, d_model, 1], rows),
+        g.step(ids.sigmoid, &[scratch.gate_logits, scratch.gate_scalar], &[rows], rows),
+        g.step(ids.scale_row, &[scratch.mlp_out, scratch.gate_scalar, scratch.scaled], &[rows * d_model, d_model], rows * d_model),
+        g.step(ids.add2, &[acc, scratch.scaled, out], &[rows * d_model], rows * d_model),
+    ]
+}
