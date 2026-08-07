@@ -190,6 +190,8 @@ class BrainBase:
         model: Optional[str] = None,
         system: Optional[str] = None,
         max_new: Optional[int] = None,
+        blobs: Optional[dict] = None,
+        meta: Optional[dict] = None,
         on_progress: Optional[OnProgress] = None,
         timeout: float = 300.0,
         **params: Any,
@@ -197,9 +199,13 @@ class BrainBase:
         """Run the ``generate`` action and return the generated text.
 
         Pass ``prompt=`` for a raw completion or ``messages=[{"role":…}, …]`` for
-        chat. With ``on_progress`` set the run streams (one callback per token via
-        :meth:`subscribe`); otherwise it is a single :meth:`run`. ``model`` defaults
-        to the first model advertising ``generate``.
+        chat. ``blobs``/``meta`` pass straight through to :meth:`run`/
+        :meth:`subscribe` — generic, model-agnostic multimodal input (e.g.
+        ``blobs={"audio": pcm_bytes}, meta={"audio": {"media": "audio"}}`` for a
+        model whose ``generate`` action declares an ``audio``/``image`` blob
+        input, like ``brain/omni``). With ``on_progress`` set the run streams
+        (one callback per token via :meth:`subscribe`); otherwise it is a single
+        :meth:`run`. ``model`` defaults to the first model advertising ``generate``.
         """
         model = self._pick("generate", model)
         p: dict[str, Any] = dict(params)
@@ -212,17 +218,19 @@ class BrainBase:
         if max_new is not None:
             p["max_new"] = max_new
         if on_progress is not None:
-            out = self.subscribe(model, "generate", p, on_progress=on_progress, timeout=timeout)
+            out = self.subscribe(model, "generate", p, blobs=blobs, meta=meta, on_progress=on_progress, timeout=timeout)
         else:
-            out = self.run(model, "generate", p, timeout=timeout)
+            out = self.run(model, "generate", p, blobs=blobs, meta=meta, timeout=timeout)
         return out.text()
 
     def chat(self, text: str, *, model: Optional[str] = None,
+             blobs: Optional[dict] = None, meta: Optional[dict] = None,
              on_progress: Optional[OnProgress] = None, timeout: float = 300.0,
              **params: Any) -> str:
         """Sugar over :meth:`generate` for a single user turn."""
         return self.generate(messages=[{"role": "user", "content": text}],
-                             model=model, on_progress=on_progress, timeout=timeout, **params)
+                             model=model, blobs=blobs, meta=meta,
+                             on_progress=on_progress, timeout=timeout, **params)
 
     # -- embeddings ----------------------------------------------------------
     def embed(self, text: str, *, model: Optional[str] = None,

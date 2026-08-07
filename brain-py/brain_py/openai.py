@@ -121,6 +121,11 @@ class BrainOpenAI(BrainBase):
     ) -> Outcome:
         if action != "generate":
             raise NotImplementedError(f"BrainOpenAI: action {action!r} not supported (only 'generate')")
+        if blobs:
+            raise NotImplementedError(
+                "BrainOpenAI: blob inputs (audio/image) are not wired into /v1/chat/completions "
+                "content parts yet -- use --dbus, which passes blobs through generically"
+            )
         p = params or {}
         messages = p.get("messages")
         if messages:
@@ -153,6 +158,11 @@ class BrainOpenAI(BrainBase):
     ) -> Outcome:
         if action != "generate":
             raise NotImplementedError(f"BrainOpenAI: action {action!r} not supported (only 'generate')")
+        if blobs:
+            raise NotImplementedError(
+                "BrainOpenAI: blob inputs (audio/image) are not wired into /v1/chat/completions "
+                "content parts yet -- use --dbus, which passes blobs through generically"
+            )
         p = params or {}
         messages = p.get("messages")
         if messages:

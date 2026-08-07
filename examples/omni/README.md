@@ -7,16 +7,22 @@ or the Anthropic-compatible `/v1/messages`. Same `generate` action, same
 is what proves that (see `docs/models/omni/status.md`'s M10/M11/M12 entries
 for how each transport got there).
 
-**Scope, honestly**: only text in, text out works today. `--in-speech`/
-`--in-mic`/`--in-image`/`--in-video` and `--out-mic`/`--out-audio` are
-declared (so the interface matches the full matrix Omni will eventually
-support) but `skip()` cleanly with a specific reason — Talker, Code2Wav, and
-multimodal input splice are not wired into a generation loop yet. Generation
-itself is validation-tier: no KV-cache, so a real 48-layer/128-expert run
-streams every layer's weights fresh from the checkpoint per generated token
-and can take minutes per token, not milliseconds (`crates/omni/src/
-generate.rs`'s own doc has the full reasoning — production serving speed,
-KV-cache, and int8/GPU-sharded residency are separate, not-yet-built work).
+**Scope, honestly**: text in/out, speech in (`--in-speech`, WAV), and image in
+(`--in-image`, PPM) are real over `--dbus` — real audio/vision tower encode,
+host-side embedding splice, and real M-RoPE positions (`crates/omni/src/mm.rs`).
+`--openai`/`--anthropic` reject blob inputs with a clear error (their
+content-part wiring is separate, not-yet-done server-side work — `--dbus` is
+the one transport that carries blobs generically today, per `docs/models/
+omni/status.md`'s M10 finding). `--in-mic`/`--in-video` and `--out-mic`/
+`--out-audio` still `skip()` cleanly — live capture and video-frame
+extraction need extra dependencies this script doesn't take on, and speech
+output needs Talker+Code2Wav chained together, not wired into a generation
+loop yet. Generation is still validation-tier for weight I/O: the KV-cache
+makes attention O(cached length) not O(cached length)², but every layer's
+weights are still streamed fresh from the checkpoint per generated token, so
+a real 48-layer/128-expert run is still minutes, not milliseconds, per token
+(`crates/omni/src/generate.rs`'s own doc — int8/GPU-sharded residency across
+steps is separate, not-yet-built work).
 
 ## Run it
 
@@ -47,6 +53,26 @@ python3 examples/omni/omni.py --anthropic localhost:8787 --api-key sk-brain-... 
   --in-text "2+2=" --out-stdio
 ```
 
+**Real Omni, speech input, over D-Bus:**
+
+```bash
+BRAIN_OMNI_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+  dbus-run-session -- bash -c '
+    brain serve --dbus & sleep 2
+    python3 examples/omni/omni.py --dbus --in-speech clip.wav --out-stdio
+  '
+```
+
+**Real Omni, image input, over D-Bus** (PPM only — see Flags below):
+
+```bash
+BRAIN_OMNI_HF_DIR=/path/to/Qwen3-Omni-30B-A3B-Instruct \
+  dbus-run-session -- bash -c '
+    brain serve --dbus & sleep 2
+    python3 examples/omni/omni.py --dbus --in-image photo.ppm --in-text "What is this?" --out-stdio
+  '
+```
+
 **Quick, deps-free wire-contract check** (no Omni weights needed — exercises
 the exact same `generate` action shape against the mock resident):
 
@@ -62,7 +88,11 @@ BRAIN_MOCK=1 dbus-run-session -- bash -c '
 ```
 --dbus | --openai URL | --anthropic URL     transport (exactly one required)
 --api-key KEY                               for --openai/--anthropic (see APIKEY at server startup)
---in-text TEXT                              the prompt (the only implemented input)
+--in-text TEXT                              the prompt (optional if --in-speech/--in-image given -- a generic
+                                             instruction fills in then)
+--in-speech WAV                             16kHz mono 16-bit PCM WAV, real audio-tower splice (--dbus only)
+--in-image PPM                              binary PPM (P6), real vision-tower splice (--dbus only;
+                                             convert PNG/JPEG first -- no Pillow dependency here)
 --out-stdio | --out-text PATH               print, or write to a file (stdout is the default)
 --model MODEL                               served model name (default brain/omni)
 --max-new N                                 max tokens to generate (default 32)
@@ -81,17 +111,24 @@ explicit `http://host:port/v1` both work.
 ## How it works
 
 ```
---dbus:      omni.py -> BrainDBus.chat() -> Run/Subscribe (Media::Text, no blobs)
---openai:    omni.py -> BrainOpenAI.chat() -> POST /v1/chat/completions
---anthropic: omni.py -> BrainAnthropic.chat() -> POST /v1/messages
+--dbus:      omni.py -> BrainDBus.chat(blobs=...) -> Run/Subscribe (Media::Text/Audio/Image blobs)
+--openai:    omni.py -> BrainOpenAI.chat() -> POST /v1/chat/completions (text only; blobs raise NotImplementedError)
+--anthropic: omni.py -> BrainAnthropic.chat() -> POST /v1/messages (text only; blobs raise NotImplementedError)
                               |
                     (all three, server-side)
                               v
-          residency::Executor -> OmniResident -> omni::generate::generate_greedy
+                residency::Executor -> OmniResident
                               |
-              streams thinker.model.layers.{0..47} from the real HF
-              checkpoint one layer at a time (no KV-cache), argmax
-              the last position's logits each step, repeat
+              audio/image present? -> omni::mm::build_multimodal_prompt
+                  (real AudioEncoder/VisionEncoder splice + real M-RoPE)
+                              |                     no media: plain text
+                              v                            |
+          omni::generate::generate_greedy_multimodal <-----+---- generate_greedy
+                              |
+        prefill the whole prompt once (populates a per-layer KV cache),
+        then decode one new token at a time attending only the cache
+        (O(cached length), not O(cached length)²) -- layer weights are
+        still streamed fresh from the real HF checkpoint every step
 ```
 
 The three transports converge on the exact same `brain/omni` `generate`

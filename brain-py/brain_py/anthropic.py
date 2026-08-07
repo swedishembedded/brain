@@ -97,6 +97,11 @@ class BrainAnthropic(BrainBase):
     ) -> Outcome:
         if action != "generate":
             raise NotImplementedError(f"BrainAnthropic: action {action!r} not supported (only 'generate')")
+        if blobs:
+            raise NotImplementedError(
+                "BrainAnthropic: blob inputs (audio/image) are not wired into /v1/messages "
+                "content blocks yet -- use --dbus, which passes blobs through generically"
+            )
         p = params or {}
         msgs, system = self._build_messages(p)
         body: dict[str, Any] = {"model": model, "messages": msgs, "max_tokens": p.get("max_new", DEFAULT_MAX_TOKENS), "stream": False}
@@ -123,6 +128,11 @@ class BrainAnthropic(BrainBase):
     ) -> Outcome:
         if action != "generate":
             raise NotImplementedError(f"BrainAnthropic: action {action!r} not supported (only 'generate')")
+        if blobs:
+            raise NotImplementedError(
+                "BrainAnthropic: blob inputs (audio/image) are not wired into /v1/messages "
+                "content blocks yet -- use --dbus, which passes blobs through generically"
+            )
         p = params or {}
         msgs, system = self._build_messages(p)
         body: dict[str, Any] = {"model": model, "messages": msgs, "max_tokens": p.get("max_new", DEFAULT_MAX_TOKENS), "stream": True}
