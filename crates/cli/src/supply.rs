@@ -59,10 +59,14 @@ fn convert(store: &Store, vendor: &str, repo: &str) -> Result<(), String> {
         "gpt" => Err("gpt has no HF import path yet -- fetch and convert manually".to_string()),
         // omni (Qwen3-Omni) is recognized (family_of_architecture checks it
         // before "qwen" specifically so it is never silently mis-routed
-        // there) but its importer is not wired into auto-fetch yet -- see
-        // docs/models/omni/status.md M3. Distinct from the `other` arm below
-        // so this is never mistaken for the drift bug that arm detects.
-        "omni" => Err("omni (Qwen3-Omni) auto-fetch import is not wired yet -- see docs/models/omni/status.md".to_string()),
+        // there). The importer itself streams from the sharded HF dir fine
+        // (M3) -- what is NOT yet true is that the resulting unified
+        // checkpoint is directly loadable by tts::mtp::MtpModel/codec::Codec
+        // for the Talker/Code2Wav pieces (two open naming gaps, see
+        // docs/models/omni/status.md's M7b/M8 entries); Thinker-only
+        // generation (crate::resident_omni, gated on BRAIN_OMNI_HF_DIR, not
+        // this converted-checkpoint path) is unaffected by either gap.
+        "omni" => omni::import::import_as(hf_dir, out, Some(&id)),
         other => Err(format!("family {other:?} matched but has no dispatch arm (bug: family_of_architecture and this match have drifted)")),
     };
     result.map_err(|e| format!("{vendor}/{repo}: convert: {e}"))

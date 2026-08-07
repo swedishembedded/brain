@@ -41,6 +41,7 @@ brain-speaker.workspace = true
 brain-audio.workspace = true
 brain-nemotron.workspace = true
 brain-qwen-asr.workspace = true
+brain-omni.workspace = true
 brain-pid.workspace = true
 brain-yolo.workspace = true
 brain-depth.workspace = true

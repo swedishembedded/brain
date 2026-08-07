@@ -648,18 +648,128 @@ multimodal splice are additional, separate pieces on top of either.
   before `OmniResident` can load either component from the unified
   checkpoint.
 
+- **M9a — Thinker text generation: capability + residency wiring, and a real
+  (if slow) generation loop** (2026-08-07). Scoped down from the plan's
+  literal M9 text mid-session (see the design note below) to what is
+  actually load-bearing: a genuinely working `generate` action, not just
+  specs and dispatch points pointing at an unfinished loop.
+
+  `crates/omni/src/generate.rs` (new): `thinker_forward_streaming` — one
+  full Thinker forward (all `cfg.n_layers` layers + `thinker::final_norm`),
+  streaming each layer's weights fresh from a `checkpoint::weightio::
+  WeightReader` and dropping them before the next layer loads, instead of
+  holding all 48 layers (128 experts each) GPU-resident. `generate_greedy`:
+  embed → forward → `thinker::lm_head_fwd` → argmax the last row → append →
+  repeat until `max_new_tokens` or an EOS id. **Deliberately validation-tier,
+  not production**: no KV-cache (every new token re-runs the FULL forward
+  from scratch) and no int8/GPU-sharded residency (M1's own finding — int8
+  Thinker at ~30GB needs sharding across both P40s, `crates/qwen/src/
+  shard.rs`'s pattern, not yet built for Thinker). Correct; slow. Two small
+  additions to `crates/omni/src/thinker.rs` to support this: `final_norm`
+  (factored out of `decode` so both call it — no duplication) and
+  `lm_head_fwd` (`thinker.lm_head.weight`, untied — `tie_word_embeddings:
+  false` in the real config).
+
+  `crates/omni/src/caps.rs` (new): ONE action, `generate` (text prompt in,
+  greedy text out) — no `converse`/`transcribe`/`speak` declared, since
+  those need multimodal splice + Talker + MTP + Code2Wav chained together
+  with `accept_hidden_layer`/codec sampling, none of which are wired into a
+  serving-shaped loop yet. Declaring an action whose `run()` can't do what
+  its spec promises is worse than not declaring it. `OmniProvider::load(dir)`
+  reads directly from a real HF checkpoint directory (`WeightReader::
+  open_hf_dir` + `data::qwen_tokenizer::QwenBpe::from_dir`, which already
+  handles the split `vocab.json`/`merges.txt` layout this repo ships — no
+  `tokenizer.json` needed) — no brain-native import step involved for this
+  path.
+
+  `crates/cli/src/resident_omni.rs` (new): `OmniResident` (`BRAIN_OMNI_HF_DIR`
+  env-gated, mirroring `TtsResident`), registered in `resident.rs::
+  build_executor`'s direct-block list (matching TTS/ASR's placement — the
+  plan's proposed `catalog.rs`/`ModelEntry` route is for models catalog.rs
+  itself iterates for HTTP surfaces without a bespoke block; Omni's shape,
+  one action needing custom env config, fits the direct-block precedent
+  better). `estimate()` reports the checkpoint's on-disk size as a RAM
+  figure (honest about what streaming reads touch — not a VRAM budget; this
+  resident does not yet participate in `docs/lessons.md §14`'s GPU-residency
+  scheduling).
+
+  Two of the three plan-listed CLI dispatch points, done: `cli::supply::
+  convert`'s `"omni"` arm now calls `omni::import::import_as` instead of
+  the placeholder `Err` (the importer itself was already correct, M3 — only
+  the dispatch was stubbed). `cli::model_dir::resident_for`'s catch-all
+  ("family not servable from the model dir yet") is already the CORRECT,
+  honest answer for `"omni"` today and needed NO new arm: that function
+  loads from a converted brain-native checkpoint on disk, which `OmniResident`
+  does not (yet) support — it loads straight from the HF directory instead,
+  a deliberately separate, env-gated path (same shape as TTS/ASR). Adding a
+  same-shaped arm there would have been wiring an untrue claim, not a fix.
+
+  **`qwenvl` registration — explicitly deferred, not "free"**: the plan's
+  own text says registering `qwenvl` (today library-only) "is one caps.rs
+  and one resident away, and the omni work makes it free." That undersells
+  it: `qwenvl::model` has an `end_to_end_forward` (confirmed by its own test,
+  `model::tests::end_to_end_forward_is_finite`), but no generation loop —
+  giving it a real `caps.rs` action would mean building `qwenvl` its OWN
+  tokenizer/prompt-assembly/greedy-decode loop, the same scope this entry's
+  `generate.rs` just took to build for Thinker, not a thin wrapper. Deferred
+  as a separate, explicitly-scoped follow-up rather than attempted inside
+  an already-large M9 push.
+
+  **Real-weight validation status**: `generate_greedy`'s LOOP correctness
+  (tokenizer round-trip, sampling, EOS, layer chaining) is what carries risk
+  here — every per-layer forward it calls (`layer_fwd`, `final_norm`,
+  `lm_head_fwd`) is already validated exactly (cosine 1.000000, M6a/M6b).
+  A real end-to-end greedy-decode comparison against
+  `tools/goldens/omni_dump_generate.py` (new — deliberately kept SEPARATE
+  from `omni_dump_reference.py`, whose own header commits to "component-
+  scoped only, the checkpoint is too large to load wholesale even once";
+  this script does exactly that on purpose, via `Qwen3OmniMoeThinkerForConditionalGeneration.
+  from_pretrained(..., torch_dtype=bfloat16, low_cpu_mem_usage=True)` to
+  avoid an extra fp32 double-allocation pass) requires the FULL checkpoint
+  on disk — only 4/15 shards (15 GB of 70.5 GB) were present at the start of
+  this milestone. Downloading the rest is a multi-hour operation at this
+  connection's unauthenticated ~4 MB/s rate; see the follow-up entry below
+  once that validation actually runs.
+
+## M9 design note: why "wiring" grew into "build the generation loop"
+
+The plan's own M9 text is "capability, residency and family wiring" —
+specs + a `ResidentModel` + CLI dispatch. Taken literally that's completable
+without a working generation loop at all (declare the actions, wire the
+dispatch points, have `run()` return a clear "not yet implemented" error —
+the exact pattern `cli::supply::convert`'s pre-M9 `"omni"` arm already used).
+That was the first plan proposed for this milestone. It was changed
+mid-milestone, on request, to include a real generation loop — since a
+`generate` action that cannot generate is a spec with no implementation
+behind it, and the per-layer math this whole workstream has been validating
+since M6 had no loop yet exercising it end to end. The scope this actually
+turned into: a new `crates/omni/src/generate.rs` module (streaming
+per-layer forward + greedy decode), the tokenizer wiring
+(`data::qwen_tokenizer::QwenBpe`, already existed, just needed the real
+`vocab.json`/`merges.txt` downloaded), and a real-weight validation that
+needed the full 70.5 GB checkpoint on disk (only 15 GB of it present at the
+start of this milestone) — a materially larger undertaking than the
+plan's own M9 estimate, discovered and negotiated in stages as each new
+requirement (full download size, RAM needed to load Thinker in Python,
+`ConvTranspose1d`-adjacent precision) surfaced. Recorded here so a future
+reader of the plan file understands why M9's actual diff is much larger
+than "wiring" suggests.
+
 ## Not started
 
 M2c (backward + gradcheck, deferred — see M2 note above), M2d (glm migration,
-deferred), M5's video path, M8's `chunked_decode` streaming path, M9 through
-M17. See the plan file. M6, M7, and M8 are now believed complete (Thinker/
-Talker decoders, real M-RoPE, composed loops, splice seam, code predictor,
-Code2Wav vocoder — all validated against real weights, single-shot forward
-only). The actual generation loop (accept_hidden_layer, text/hidden
-projection, codec sampling, KV-cache decode, multimodal splice call site,
-chunked streaming decode, real multimodal generation) and the two loader-side
-checkpoint-naming gaps (code predictor, code2wav — both documented above) are
-M9/M14's job, not additional M6/M7/M8 scope.
+deferred), M5's video path, M8's `chunked_decode` streaming path, M9's
+KV-cache/int8/GPU-sharded production residency, `converse`/`transcribe`/
+`speak` actions (need Talker+MTP+Code2Wav chained with `accept_hidden_layer`
++ codec sampling), `qwenvl` registration (deferred above, its own generation
+loop), M10 through M17. See the plan file. M6, M7, M8, and M9a are now
+believed complete (Thinker/Talker decoders, real M-RoPE, composed loops,
+splice seam, code predictor, Code2Wav vocoder, Thinker text generation — all
+validated against real weights, single-shot/streaming forward only, no
+KV-cache). The two loader-side checkpoint-naming gaps (code predictor,
+code2wav — documented in M7b/M8 above) remain open; they do not block
+Thinker-only generation (`OmniResident` reads straight from the HF
+directory, not the unified checkpoint those gaps affect).
 
 **Standing constraint for M9 (`OmniResident`)**: fetch/import/load must all
 stay mmap-backed, streaming one tensor at a time, matching the pattern

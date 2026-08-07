@@ -108,6 +108,11 @@ pub fn build_executor(gpus: &[(u32, u64)], npus: &[(u32, u64)], reserved: u64, r
     if let Some(a) = crate::resident_asr::QwenAsrResident::from_env() {
         models.push(Arc::new(a));
     }
+    // Qwen3-Omni Thinker text generation, validation-tier (BRAIN_OMNI_HF_DIR)
+    // -- see crate::resident_omni's module doc for the scope this covers.
+    if let Some(o) = crate::resident_omni::OmniResident::from_env() {
+        models.push(Arc::new(o));
+    }
     // Deterministic mock model (BRAIN_MOCK): a real ResidentModel — no weights, no
     // GPU — registered as `mock` so the HTTP conformance harness can validate the
     // whole API surface through the true serving path (placement → activate →

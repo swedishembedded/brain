@@ -561,6 +561,7 @@ dependencies = [
  "brain-moe",
  "brain-nemotron",
  "brain-npu",
+ "brain-omni",
  "brain-onnx",
  "brain-paramstore",
  "brain-perf",
