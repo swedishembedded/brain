@@ -139,8 +139,13 @@ impl MtpModel {
     }
 
     /// Build on an existing device handle (see `gpu_core::Gpu::share`) so a
-    /// process holds ONE device however many components it loads.
-    pub(crate) fn build_on(
+    /// process holds ONE device however many components it loads. `pub`
+    /// (not just `pub(crate)`) so a caller with weights already in hand --
+    /// e.g. a real-weight parity test reading straight from an HF mmap,
+    /// bypassing `ParamStore`/file I/O entirely, the same pattern
+    /// `crates/omni`'s other real-weight tests use -- doesn't need a round
+    /// trip through a brain checkpoint file first.
+    pub fn build_on(
         gpu: Gpu,
         cfg: MtpConfig,
         decoder: std::collections::HashMap<String, Vec<f32>>,
