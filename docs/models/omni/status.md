@@ -83,18 +83,7 @@ cleanup).
   M2 (sparse MoE) proceeds targeting GPU residency for both Thinker and Talker
   experts.
 
-## In progress
-
-- Reference goldens dump (`tools/goldens/omni_dump_reference.py`) — script
-  written (component-scoped: audio tower, vision tower, one MoE decoder layer,
-  M-RoPE position ids, code predictor, code2wav — each streams only its own
-  tensors from the sharded checkpoint via `model.safetensors.index.json`, no
-  full-model load). Weight shards for these components (4 of 15,
-  `model-{00001,00013,00014,00015}-of-00015.safetensors`, ~15.5 GB) fetching
-  into the ramdisk (`/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct/`);
-  not yet run against real weights.
-
-- **M2a — sparse MoE core, forward pass** (2026-08-07). `model::moe`
+- **M2a — sparse MoE core, forward pass, fp32** (2026-08-07). `model::moe`
   (`crates/model/src/moe.rs`): `router_fwd` (reuses `router_gate.wgsl`
   unchanged — Thinker/Talker both use plain softmax top-k, not glm's
   sigmoid/bias/group-limited variant) + `expert_fwd`, a per-expert step built
@@ -107,24 +96,52 @@ cleanup).
   (`matmul`→`silu_mul`→`matmul`→`scale_add`, evaluated densely) — on all three
   backends (wgpu, native Vulkan, CPU JIT) —
   `crates/model/tests/moe_sparse_parity.rs`.
-  **Deliberately deferred to a follow-up commit**: no row-compaction
-  (gather/scatter) — WGSL kernels here may not use atomics, so true stream
-  compaction needs a separate prefix-sum pass; the per-row early-exit already
-  removes the FLOPs, just not the thread launches, which is enough for
-  correctness and a real speed win but leaves grid-size optimization on the
-  table for M16. No int8 grouped-GEMM tier yet (M2b). No backward pass /
-  gradcheck coverage yet (M2c) — `expert_fwd` is forward-only. `crates/glm`
-  migration not done yet (M2d).
   Pre-existing, unrelated finding while running `make clippy`: this branch
   carries 192 warnings against a 183 baseline with EVERY change in this
   workstream stashed out (`crates/cli/{resident_forecast,resident_llm,
   resident_mock,splat_cli,supply,wm_cli}.rs`) — confirmed not caused by this
   work; not in scope to fix here, noted for whoever picks it up.
 
+- **M2b — sparse MoE core, int8** (2026-08-07). `expert_fwd_i8` + one new
+  kernel, `moe_linear_gated_i8.wgsl` — the int8/DP4A counterpart of
+  `moe_linear_gated.wgsl`, deliberately in the SAME naive (one thread per
+  output element, no workgroup tiling) tier rather than gating
+  `matmul_i8_dyn`/`matmul_i8_gemv`: those stage rows into workgroup-shared
+  memory across a `workgroupBarrier()`, and a per-thread early return that not
+  every thread in the workgroup reaches ahead of that barrier is undefined
+  behaviour in WGSL. A safely-gated TILED int8 kernel needs row compaction —
+  the same gather/prefix-sum work M2a already deferred, for the same
+  atomics-forbidden reason. Reuses `model::int8::quantize_weight` (weight
+  packing, unchanged) and `quant_rows_steps` (dynamic per-token activation
+  quantization, unchanged) — the shared input `x` is quantized ONCE per layer
+  before the expert loop (every expert reads the same `xq`/`sx`); the
+  post-SiLU hidden `h` is necessarily requantized per-expert since it differs
+  per expert. Verified against the fp32 sparse path (M2a) at rel-L2 0.0084
+  (asserted < 0.02) on a random synthetic MoE —
+  `crates/model/tests/moe_sparse_i8_parity.rs`. Also on CPU (Cranelift JIT):
+  passes, which means `dot4I8Packed` and this whole kernel (no barriers) ARE
+  CPU-JIT-compatible — corrected the kernel's `@cpu` metadata from an
+  over-cautious `no` (copied from `matmul_i8_dyn`'s genuinely-barriered case)
+  to `yes` after confirming.
+  **Still deferred**: row-compaction/gather-scatter (both tiers), a TILED
+  int8 kernel, backward pass (M2c), `crates/glm` migration (M2d).
+
+## In progress
+
+- Reference goldens dump (`tools/goldens/omni_dump_reference.py`) — script
+  written (component-scoped: audio tower, vision tower, one MoE decoder layer,
+  M-RoPE position ids, code predictor, code2wav — each streams only its own
+  tensors from the sharded checkpoint via `model.safetensors.index.json`, no
+  full-model load). Weight shards for these components (4 of 15,
+  `model-{00001,00013,00014,00015}-of-00015.safetensors`, ~15.5 GB) finished
+  downloading into the ramdisk
+  (`/tmp/.X11-unix/brain/hf/Qwen3-Omni-30B-A3B-Instruct/`), sizes verified
+  against the index; not yet run against real weights.
+
 ## Not started
 
-M2b (int8 grouped GEMM), M2c (backward + gradcheck), M2d (glm migration),
-M3 through M17. See the plan file.
+M2c (backward + gradcheck), M2d (glm migration), M3 through M17. See the plan
+file.
 
 ## Honesty notes
 

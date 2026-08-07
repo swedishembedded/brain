@@ -500,6 +500,8 @@ pub const MLA_INDEX_SCORES: &str = include_str!("../wgsl/mla_index_scores.wgsl")
 pub const MLA_SCORES: &str = include_str!("../wgsl/mla_scores.wgsl");
 /// `wgsl/moe_linear_gated.wgsl`
 pub const MOE_LINEAR_GATED: &str = include_str!("../wgsl/moe_linear_gated.wgsl");
+/// `wgsl/moe_linear_gated_i8.wgsl`
+pub const MOE_LINEAR_GATED_I8: &str = include_str!("../wgsl/moe_linear_gated_i8.wgsl");
 /// `wgsl/mse_grad.wgsl`
 pub const MSE_GRAD: &str = include_str!("../wgsl/mse_grad.wgsl");
 /// `wgsl/mse_grad_w.wgsl`
@@ -987,6 +989,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("mla_index_scores", MLA_INDEX_SCORES),
     ("mla_scores", MLA_SCORES),
     ("moe_linear_gated", MOE_LINEAR_GATED),
+    ("moe_linear_gated_i8", MOE_LINEAR_GATED_I8),
     ("mse_grad", MSE_GRAD),
     ("mse_grad_w", MSE_GRAD_W),
     ("mse_value", MSE_VALUE),

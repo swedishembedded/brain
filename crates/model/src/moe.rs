@@ -22,12 +22,23 @@
 //! [`expert_fwd`]'s per-expert step exactly, at a cost proportional to the
 //! number of rows actually routed to that expert.
 //!
+//! [`expert_fwd_i8`] is the same trick over `model::int8`'s packed weights,
+//! via a NEW naive (non-tiled) DP4A kernel rather than gating the existing
+//! `matmul_i8_dyn`/`matmul_i8_gemv` — see `moe_linear_gated_i8.wgsl`'s doc for
+//! why: those stage rows into workgroup-shared memory across a barrier, and a
+//! per-thread early return ahead of a `workgroupBarrier()` that not every
+//! thread in the workgroup reaches is undefined behaviour in WGSL. Row-level
+//! gating safely at that tier needs compaction, which this workstream already
+//! deferred for the fp32 tier for the same atomics-forbidden reason.
+//!
 //! What this module deliberately does NOT do (left for a follow-up): no
 //! row-compaction/gather-scatter (WGSL kernels here may not use atomics, so a
 //! parallel stream-compaction would need a separate prefix-sum pass; the
 //! per-row early-exit already removes the FLOPs, just not the thread
 //! *launches* — see `docs/models/omni/status.md` M2 for the follow-up plan),
-//! no int8 grouped GEMM tier, and no backward pass yet.
+//! no TILED int8 GEMM tier (both int8 and fp32 are naive-dispatch today; a
+//! future tiled+gated kernel is one change, not two, once compaction lands),
+//! and no backward pass yet.
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
@@ -113,4 +124,82 @@ pub fn expert_fwd(
             m * d,
         ),
     ]
+}
+
+/// int8 kernel indices, parallel to [`MoeIds`]. `max_abs_row`/`quant_pack` are
+/// `model::int8`'s shared dynamic-activation-quantization pair (the same ones
+/// every DP4A model in the engine uses), needed here because `h` (the
+/// post-SiLU hidden, the down-projection's input) is expert-specific and so
+/// cannot be quantized once per layer the way the shared input `x` can.
+#[derive(Clone, Copy)]
+pub struct MoeIds8 {
+    /// `moe_linear_gated_i8.wgsl`.
+    pub linear_gated_i8: usize,
+    pub silu_mul: usize,
+    pub scale_add: usize,
+    /// `crate::int8::quant_rows_steps`'s `[max_abs_row, quant_pack]` pair.
+    pub quant: [usize; 2],
+}
+
+/// One int8-quantized expert linear's weight, in `crate::int8::quantize_weight`'s
+/// packed layout: `wq` is `[n, k/4]` u32, `sw` is `[n]` f32 per-channel scale.
+#[derive(Clone, Copy)]
+pub struct Lin8<'a> {
+    pub wq: &'a DeviceBuffer,
+    pub sw: &'a DeviceBuffer,
+}
+
+/// Scratch for one expert's int8 FFN step. `gate_pre`/`up`/`h` stay fp32 (the
+/// activation functions and quantization math are fp32 arithmetic, per the
+/// engine-wide invariant — only storage is int8); `hq`/`sh` are `h` quantized
+/// fresh each call, since `h` is a different tensor for every expert.
+pub struct ExpertScratch8<'a> {
+    pub gate_pre: &'a DeviceBuffer,
+    pub up: &'a DeviceBuffer,
+    pub h: &'a DeviceBuffer,
+    pub hq: &'a DeviceBuffer,
+    pub sh: &'a DeviceBuffer,
+    pub expert_out: &'a DeviceBuffer,
+}
+
+/// int8 counterpart of [`expert_fwd`]. `xq`/`sx` are the shared input `x`,
+/// ALREADY quantized once by the caller (via `crate::int8::quant_rows_steps`)
+/// before the expert loop starts — every expert reads the same quantized
+/// activation, so quantizing it 128 times would be pure waste.
+#[allow(clippy::too_many_arguments)]
+pub fn expert_fwd_i8(
+    g: &Gpu,
+    ids: &MoeIds8,
+    shape: &MoeShape,
+    xq: &DeviceBuffer,
+    sx: &DeviceBuffer,
+    gate: &DeviceBuffer,
+    gate_w: Lin8,
+    up_w: Lin8,
+    down_w: Lin8,
+    scratch: &ExpertScratch8,
+    acc: &DeviceBuffer,
+    e_idx: u32,
+    accumulate: bool,
+) -> Vec<Step> {
+    let (m, d, ff, e) = (shape.rows, shape.d_model, shape.moe_ff, shape.n_experts);
+    let lin = |xq: &DeviceBuffer, sx: &DeviceBuffer, w: Lin8, out: &DeviceBuffer, kg: u32, n: u32| {
+        g.step(ids.linear_gated_i8, &[xq, w.wq, sx, w.sw, gate, out], &[m, kg, n, e, e_idx], m * n)
+    };
+    let quant_h = crate::int8::quant_rows_steps(
+        g,
+        crate::int8::QuantRows { kernels: ids.quant, x: scratch.h, sx: scratch.sh, xq: scratch.hq },
+        0,
+        m,
+        ff,
+    );
+    let mut steps = vec![
+        lin(xq, sx, gate_w, scratch.gate_pre, d / 4, ff),
+        lin(xq, sx, up_w, scratch.up, d / 4, ff),
+        g.step(ids.silu_mul, &[scratch.gate_pre, scratch.up, scratch.h], &[m * ff], m * ff),
+    ];
+    steps.extend(quant_h);
+    steps.push(lin(scratch.hq, scratch.sh, down_w, scratch.expert_out, ff / 4, d));
+    steps.push(g.step(ids.scale_add, &[gate, scratch.expert_out, acc], &[m, d, e, e_idx, accumulate as u32], m * d));
+    steps
 }
