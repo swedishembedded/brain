@@ -959,7 +959,12 @@ impl Gpt {
             let arr: Vec<Value> = itos.iter().map(|c| Value::from(c.to_string())).collect();
             config["itos"] = Value::Array(arr);
         }
-        checkpoint::save(path, config, &tensors);
+        // "brain/gpt" matches docs/models/naming.md's reserved-vendor fallback
+        // -- the same id crates/cli/src/resident_llm.rs::GptResident::from_env
+        // synthesizes for an env-loaded checkpoint -- so a checkpoint saved
+        // here is auto-discoverable by crates/cli/src/model_dir.rs without
+        // requiring BRAIN_GPT_WEIGHTS to be set.
+        checkpoint::save_carded(path, config, &tensors, &checkpoint::st::ModelCard::new("brain/gpt", "gpt"));
     }
 
     /// The embedded char-tokenizer vocab from a config object, if it was trained
