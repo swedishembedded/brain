@@ -1,22 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `capability` surface for Qwen3-Omni's Thinker: text generation only.
+//! `capability` surface for Qwen3-Omni's Thinker: text generation, with
+//! optional real audio/image input.
 //!
 //! Deliberately scoped to what is actually implemented: `generate` (text
-//! prompt in, greedy text out, via `crate::generate::generate_greedy`). No
-//! `converse`/`transcribe`/`speak` actions are declared here — those need
-//! multimodal input splice, the Talker + code predictor + Code2Wav chained
-//! together, and `accept_hidden_layer`/codec-id sampling, none of which are
-//! wired into a serving-shaped loop yet (`docs/models/omni/status.md`'s M9
-//! entry). Declaring an action whose `run()` can't actually do what its spec
-//! promises is worse than not declaring it.
+//! prompt in, plus an optional speech clip and/or image spliced in via
+//! `crate::mm`, greedy text out — `crate::generate::generate_greedy`/
+//! `generate_greedy_multimodal`). No `converse`/`transcribe`/`speak` actions
+//! are declared here — those need speech OUTPUT (the Talker + code predictor
+//! + Code2Wav chained together, `accept_hidden_layer`/codec-id sampling),
+//! none of which are wired into a serving-shaped loop yet (`docs/models/
+//! omni/status.md`'s M9 entry). Declaring an action whose `run()` can't
+//! actually do what its spec promises is worse than not declaring it. Video
+//! input is NOT wired into this action (it needs already-decoded frames —
+//! `crate::mm::encode_video_frames`'s doc — and this capability surface has
+//! no way to receive a list of frame blobs from one `Invocation` yet).
 //!
-//! `generate` is itself validation-tier, not production: no KV-cache (every
-//! new token re-runs the full forward from scratch) and no int8/GPU-sharded
-//! residency (`crate::generate`'s own module doc has the full reasoning) —
-//! every layer's weights are streamed fresh from the checkpoint via
-//! `checkpoint::weightio::WeightReader`, per generated token. Correct, slow.
+//! `generate` is itself validation-tier, not production: weights are still
+//! streamed fresh from the checkpoint via `checkpoint::weightio::WeightReader`
+//! per generated token (no resident weights / int8-sharded serving —
+//! `crate::generate`'s own module doc has the full reasoning), though the
+//! KV-cache DOES make the attention math itself O(cached length), not
+//! O(cached length)² (same module doc). Correct, still slow per token.
 //!
 //! **`generate_spec()`'s shape matches `crate::resident_mock::MockResident`'s
 //! `generate` exactly** (`.streaming()` + `messages`/`prompt` + every param
@@ -34,6 +40,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use capability::blob::decode_image;
 use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
 use checkpoint::weightio::WeightReader;
 use data::qwen_tokenizer::QwenBpe;
@@ -41,8 +48,9 @@ use data::tokenizer::Tokenizer;
 use gpu_core::Gpu;
 use serde_json::{json, Value};
 
-use crate::config::MoeTextConfig;
-use crate::generate::generate_greedy;
+use crate::config::ThinkerConfig;
+use crate::generate::{generate_greedy, generate_greedy_multimodal};
+use crate::mm::build_multimodal_prompt;
 use crate::thinker::thinker_pipelines;
 
 /// Model name in the manifest.
@@ -65,6 +73,8 @@ pub fn generate_spec() -> ActionSpec {
         .param(ParamSpec::new("tools", ParamType::Str, "accepted, not implemented"))
         .param(ParamSpec::new("tool_choice", ParamType::Str, "accepted, ignored"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "accepted, ignored"))
+        .input(BlobSpec::new("audio", Media::Audio, "optional speech input: raw mono f32 little-endian PCM at 16 kHz (see audio::asr_caps's wire convention)"))
+        .input(BlobSpec::new("image", Media::Image, "optional image input: interleaved HWC f32 in [0,1] (capability::blob's wire convention)"))
         .output(BlobSpec::new("text", Media::Text, "the generated continuation"))
 }
 
@@ -72,7 +82,7 @@ pub fn generate_spec() -> ActionSpec {
 pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
-        "Qwen3-Omni-30B-A3B Thinker -- text generation only (validation-tier: no KV-cache, no int8/GPU-sharded residency; multimodal input and speech output are not wired into a generation loop yet -- see docs/models/omni/status.md's M9 entry).",
+        "Qwen3-Omni-30B-A3B Thinker -- text generation with optional real audio/image input (validation-tier: streamed weights, no int8/GPU-sharded residency; speech output and video input are not wired into a generation loop yet -- see docs/models/omni/status.md's M9 entry).",
         vec![generate_spec()],
     )
 }
@@ -112,7 +122,7 @@ pub fn last_user_text(inv: &Invocation) -> String {
 pub struct OmniInner {
     reader: WeightReader,
     gpu: Gpu,
-    cfg: MoeTextConfig,
+    cfg: ThinkerConfig,
     tok: QwenBpe,
     embed_table: Vec<f32>,
     lm_head: Vec<f32>,
@@ -132,7 +142,7 @@ impl OmniProvider {
         let reader = WeightReader::open_hf_dir(Path::new(dir)).map_err(|e| format!("omni: open {dir}: {e}"))?;
         let config_json = std::fs::read_to_string(Path::new(dir).join("config.json")).map_err(|e| format!("omni: read config.json: {e}"))?;
         let root: serde_json::Value = serde_json::from_str(&config_json).map_err(|e| format!("omni: parse config.json: {e}"))?;
-        let cfg = MoeTextConfig::thinker_from_json(&root);
+        let cfg = ThinkerConfig::from_json(&root);
         let tok = QwenBpe::from_dir(dir)?;
         let embed_table = reader.tensor("thinker.model.embed_tokens.weight").ok_or("omni: missing thinker.model.embed_tokens.weight")?;
         let lm_head = reader.tensor("thinker.lm_head.weight").ok_or("omni: missing thinker.lm_head.weight")?;
@@ -162,11 +172,29 @@ impl OmniInner {
     /// The shared generate path (also used by the resident adapter,
     /// `crate::resident_omni` — matches `qwen_asr::caps::QwenAsrInner::transcribe`'s
     /// shared-between-Provider-and-resident shape). `prompt` is already
-    /// resolved (via [`last_user_text`]) by the caller.
+    /// resolved (via [`last_user_text`]) by the caller. Text-only: no media
+    /// splice, plain-sequential M-RoPE positions (`crate::generate`'s doc).
     pub fn generate(&self, prompt: &str, max_new: u32) -> (String, Vec<u32>) {
         let prompt_ids = self.tok.encode(prompt);
-        let out_ids = generate_greedy(&self.reader, &self.gpu, &self.cfg, &self.embed_table, &self.lm_head, &prompt_ids, max_new, &self.eos_ids);
+        let out_ids = generate_greedy(&self.reader, &self.gpu, &self.cfg.text, &self.embed_table, &self.lm_head, &prompt_ids, max_new, &self.eos_ids);
         let new_ids = out_ids[prompt_ids.len()..].to_vec();
+        let text = self.tok.decode(&new_ids);
+        (text, new_ids)
+    }
+
+    /// [`Self::generate`], with real audio and/or image input spliced into
+    /// the prompt (`crate::mm::build_multimodal_prompt`) — real embeddings
+    /// (`qwen_asr`'s audio tower / `qwenvl`'s vision tower, both already
+    /// parity-validated against this checkpoint) and real per-axis M-RoPE
+    /// positions, not the plain-sequential text-only path [`Self::generate`]
+    /// takes. `audio` is raw 16kHz mono PCM; `image` is `(hwc, w, h)`
+    /// (`capability::blob::decode_image`'s output shape).
+    pub fn generate_multimodal(&self, prompt: &str, audio: Option<&[f32]>, image: Option<(&[f32], u32, u32)>, max_new: u32) -> (String, Vec<u32>) {
+        let text_ids = self.tok.encode(prompt);
+        let mm_prompt = build_multimodal_prompt(&self.reader, &self.gpu, &self.cfg, &self.embed_table, &text_ids, audio, image, None);
+        let n_prompt = mm_prompt.token_ids.len();
+        let out_ids = generate_greedy_multimodal(&self.reader, &self.gpu, &self.cfg.text, &self.embed_table, &self.lm_head, &mm_prompt, max_new, &self.eos_ids);
+        let new_ids = out_ids[n_prompt..].to_vec();
         let text = self.tok.decode(&new_ids);
         (text, new_ids)
     }
@@ -186,8 +214,17 @@ impl Action for GenerateAction {
             return Err("omni generate: empty prompt (need 'messages' with a user turn, or 'prompt')".to_string());
         }
         let max_new = inv.get_i64("max_new").unwrap_or(32).clamp(1, 4096) as u32;
+
+        let audio = inv.get_blob("audio").map(audio::asr_caps::wav_from_blob).transpose()?;
+        let image = inv.get_blob("image").map(|_| decode_image(inv, "image")).transpose()?;
+
         progress(Progress::step(0, max_new, "generating"));
-        let (text, new_ids) = self.inner.generate(&prompt, max_new);
+        let (text, new_ids) = if audio.is_some() || image.is_some() {
+            let image_ref = image.as_ref().map(|(hwc, w, h)| (hwc.as_slice(), *w, *h));
+            self.inner.generate_multimodal(&prompt, audio.as_deref(), image_ref, max_new)
+        } else {
+            self.inner.generate(&prompt, max_new)
+        };
         progress(Progress::step(max_new, max_new, text.clone()));
         Ok(Outcome::new().set("text", json!(text)).set("tokens", json!(new_ids)).blob("text", Blob::new(Media::Text, text.into_bytes())))
     }
