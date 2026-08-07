@@ -229,6 +229,8 @@ pub fn run(
 
     // Best-of-N: the stable signal on a shared or throttled box. The spread is
     // reported alongside so the reader knows how noisy the machine was.
+    let gpu_before = crate::devicetel::sample();
+    let wall_start = std::time::Instant::now();
     let mut best = BestOf::higher_better();
     let mut chosen: Option<Summary> = None;
     for i in 0..opt.best_of.max(1) {
@@ -240,11 +242,13 @@ pub fn run(
         }
     }
     let mut s = chosen.expect("at least one measurement");
+    let gpu_after = crate::devicetel::sample();
 
     art.workload = w.to_json();
     art.performance = s.to_json();
     art.scheduling = s.scheduling_json(None, &[s.output_per_s]);
     art.memory = memory_with(&target.counters());
+    art.resources = crate::devicetel::resources_json(&gpu_before, &gpu_after, wall_start.elapsed());
     art.best_of_n = opt.best_of.max(1);
     art.spread_pct = best.spread_pct();
     apply_gate(&mut art, target, opt);
@@ -278,6 +282,8 @@ fn run_sweep(
     let mut curve = Vec::new();
     let mut best_point: Option<(usize, f64)> = None;
     let mut last_workload = None;
+    let gpu_before = crate::devicetel::sample();
+    let wall_start = std::time::Instant::now();
 
     for &c in &opt.concurrency {
         let w = workload_for("sweep", workload_name, opt, c)
@@ -319,6 +325,8 @@ fn run_sweep(
     });
     art.curve = Some(curve);
     art.memory = memory_with(&target.counters());
+    let gpu_after = crate::devicetel::sample();
+    art.resources = crate::devicetel::resources_json(&gpu_before, &gpu_after, wall_start.elapsed());
     apply_gate(&mut art, target, opt);
     Ok(art)
 }

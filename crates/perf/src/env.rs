@@ -37,6 +37,15 @@ pub struct Env {
     pub ram_gb: Option<f64>,
     pub os: String,
     pub build: &'static str,
+    /// The hardware ceiling the driver will allow (`rps_RP0_freq_mhz`) —
+    /// `None` on any box without an i915 GPU. Static configuration, so it
+    /// lives here rather than in a per-run `resources` sample: two runs at
+    /// different frequency ceilings are not comparable, which is exactly
+    /// what `comparison_axes` needs a field for (see below).
+    pub gpu_max_freq_mhz: Option<u32>,
+    /// `rps_min_freq_mhz` — non-default here means someone pinned the floor,
+    /// which also changes what a run means.
+    pub gpu_min_freq_mhz: Option<u32>,
     /// Environment flags that change performance, captured so a run is reproducible.
     pub flags: Vec<(String, Option<String>)>,
 }
@@ -49,6 +58,17 @@ const TRACKED_FLAGS: &[&str] = &[
     "BRAIN_NO_AUTOTUNE",
     "MOE_SKIP_GPU_TESTS",
     "RAYON_NUM_THREADS",
+    "BRAIN_NO_ROOF",
+    "BRAIN_VK_SERIAL",
+    "BRAIN_VK_NO_SERIAL",
+    "BRAIN_TILED_CONV",
+    "BRAIN_CONV_GEMM",
+    "BRAIN_CONV_GEMM_MIN",
+    "BRAIN_QWEN_KV_INT8",
+    "BRAIN_PIPELINE_CACHE_DIR",
+    "BRAIN_GPU_INDEX",
+    "BRAIN_VK_DEVICE",
+    "DISPLAY",
 ];
 
 impl Env {
@@ -73,6 +93,8 @@ impl Env {
             ram_gb: ram_gb(),
             os: os_string(),
             build: if cfg!(debug_assertions) { "debug" } else { "release" },
+            gpu_max_freq_mhz: crate::devicetel::static_info().rp0_freq_mhz,
+            gpu_min_freq_mhz: crate::devicetel::static_info().rps_min_freq_mhz,
             flags: TRACKED_FLAGS.iter().map(|f| (f.to_string(), std::env::var(f).ok())).collect(),
         }
     }
@@ -121,6 +143,14 @@ impl Env {
             ("adapter", self.adapter.clone().unwrap_or_else(|| "-".into())),
             ("cpu_cores", self.cpu_cores.to_string()),
             ("build", self.build.to_string()),
+            // Static configuration, not a live sample (that's `resources`) —
+            // two runs at different frequency ceilings are not comparable.
+            // `None` (no i915 GPU) reads as "-" on both sides and so never
+            // spuriously flags a mismatch on a non-Intel box.
+            (
+                "gpu_max_freq_mhz",
+                self.gpu_max_freq_mhz.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+            ),
         ]
     }
 
@@ -163,6 +193,10 @@ impl Env {
             "ram_gb": self.ram_gb.map(Value::from).unwrap_or(Value::Null),
             "os": self.os,
             "build": self.build,
+            "gpu": {
+                "max_freq_mhz": self.gpu_max_freq_mhz.map(Value::from).unwrap_or(Value::Null),
+                "min_freq_mhz": self.gpu_min_freq_mhz.map(Value::from).unwrap_or(Value::Null),
+            },
             "flags": Value::Object(flags),
         })
     }
@@ -250,12 +284,16 @@ mod tests {
             ram_gb: None,
             os: "linux".into(),
             build: "release",
+            gpu_max_freq_mhz: None,
+            gpu_min_freq_mhz: None,
             flags: vec![],
         };
         let j = e.to_json();
         assert!(j["adapter"].is_null());
         assert!(j["adapter_is_software"].is_null(), "unknown must not read as 'real GPU'");
         assert!(j["ram_gb"].is_null());
+        assert!(j["gpu"]["max_freq_mhz"].is_null());
+        assert!(j["gpu"]["min_freq_mhz"].is_null());
         assert_eq!(j["cpu"]["cores"], 4);
     }
 

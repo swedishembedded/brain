@@ -168,7 +168,16 @@ pub fn empty_resources() -> Value {
         "host_mem_mb": Value::Null,
         "storage_read_mb": Value::Null,
         "energy_j": Value::Null,
-        "j_per_output_artifact": Value::Null
+        "j_per_output_artifact": Value::Null,
+        // Filled by `devicetel::resources_json` where the scenario samples
+        // GPU state around the measurement; stay null on any path that
+        // doesn't (or on a box with no i915 GPU) — never fabricated.
+        "gpu_freq_mhz_start": Value::Null,
+        "gpu_freq_mhz_end": Value::Null,
+        "gpu_rc6_pct": Value::Null,
+        "gpu_throttled_pl1_at_end": Value::Null,
+        "gpu_throttled_thermal_at_end": Value::Null,
+        "pkg_temp_c_end": Value::Null
     })
 }
 

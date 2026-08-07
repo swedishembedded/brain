@@ -54,6 +54,7 @@
 //! # Ok(()) }
 //! ```
 
+pub mod devicetel;
 pub mod driver;
 pub mod energy;
 pub mod env;
