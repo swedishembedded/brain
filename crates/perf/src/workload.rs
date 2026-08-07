@@ -254,8 +254,10 @@ fn gamma_interarrival(rng: &mut Rng, rate: f64, shape: f64) -> f64 {
 
 // ===================== the standard workload matrix =====================
 
-/// The eight standard shapes. Every one runs on every device, so a single grid
-/// characterises a model on a machine. See `docs/performance/benchmarking.md`.
+/// The eight token-shaped standard shapes, plus five unit-appropriate presets
+/// for non-token targets (frame/embed/image_gen/speech). Every one runs on
+/// every device, so a single grid characterises a model on a machine. See
+/// `docs/performance/benchmarking.md`.
 pub fn standard(name: &str, arrival: Arrival, num_requests: usize, seed: u64) -> Option<Workload> {
     let (input, output, slo) = match name {
         "interactive" => (128, 256, Slo::interactive(500.0, 50.0)),
@@ -266,6 +268,17 @@ pub fn standard(name: &str, arrival: Arrival, num_requests: usize, seed: u64) ->
         "decode_heavy" => (128, 2048, Slo::interactive(500.0, 40.0)),
         "prefill_heavy" => (32768, 64, Slo::ttfa(20000.0)),
         "shared_prefix" => (8192, 256, Slo::interactive(6000.0, 50.0)),
+        // Unit-appropriate presets for non-token targets: the eight above are
+        // all token-shaped LLM SLOs, and pointing e.g. a detection target at
+        // `chat` asks for 256 "frames" per request with a 50ms inter-frame
+        // SLO — the goodput/slo_attainment columns become fiction. These
+        // give yolo/depth/sam2, streaming vision, embeddings, diffusion and
+        // TTS/ASR targets an SLO shaped like their own artifact.
+        "frame" => (1, 1, Slo::ttfa(100.0)), // one frame, 10 FPS-equivalent TTFA
+        "frame_stream" => (1, 64, Slo::interactive(100.0, 33.0)), // 30 FPS sustained
+        "embed" => (1, 1, Slo::ttfa(50.0)),
+        "image_gen" => (1, 20, Slo::ttfa(5000.0)), // ~20 denoise steps, generous TTFA
+        "speech" => (1, 32, Slo::interactive(300.0, 40.0)),
         _ => return None,
     };
     Some(Workload {
@@ -285,7 +298,9 @@ pub fn standard(name: &str, arrival: Arrival, num_requests: usize, seed: u64) ->
     })
 }
 
-/// The names in [`standard`], in matrix order.
+/// The names in [`standard`], in matrix order. The token-shaped eight, then
+/// the unit-appropriate presets for non-token targets (see `standard`'s doc
+/// at each arm).
 pub const STANDARD: &[&str] = &[
     "interactive",
     "chat",
@@ -295,6 +310,11 @@ pub const STANDARD: &[&str] = &[
     "decode_heavy",
     "prefill_heavy",
     "shared_prefix",
+    "frame",
+    "frame_stream",
+    "embed",
+    "image_gen",
+    "speech",
 ];
 
 /// Scale a workload down by `div` so the same eight shapes run on a small
@@ -380,7 +400,7 @@ mod tests {
         assert_eq!(r.input_artifacts, 32768);
         assert_eq!(r.output_artifacts, 64);
         assert!(standard("nope", Arrival::Saturated, 1, 0).is_none());
-        assert_eq!(STANDARD.len(), 8);
+        assert_eq!(STANDARD.len(), 13, "8 token-shaped + 5 unit-appropriate presets");
         for n in STANDARD {
             assert!(standard(n, Arrival::Saturated, 1, 0).is_some(), "{n} must be defined");
         }
