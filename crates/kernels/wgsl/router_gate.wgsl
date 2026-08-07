@@ -45,8 +45,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let E = p.n_experts;
     let base = t * E;
 
-    var prob: array<f32, 64>;
-    var used: array<bool, 64>;
+    var prob: array<f32, 128>;
+    var used: array<bool, 128>;
 
     // softmax over experts
     var mx = -3.4e38;

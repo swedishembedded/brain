@@ -37,8 +37,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let E = p.n_experts;
     let base = t * E;
 
-    var pr: array<f32, 64>;
-    var used: array<bool, 64>;
+    var pr: array<f32, 128>;
+    var used: array<bool, 128>;
 
     var mx = -3.4e38;
     for (var e: u32 = 0u; e < E; e = e + 1u) { mx = max(mx, logits[base + e]); }

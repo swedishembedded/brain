@@ -864,3 +864,38 @@ CPU-expert fallback.
 docs** — cite this lesson and, if it matters for that model's memory budget,
 measure with `vram_overhead.rs` on the backend that model actually plans to
 run.
+
+## 35. A `const` bump without its array literal is a silent out-of-bounds write
+
+`crates/kernels/wgsl/router_gate.wgsl` and `router_gate_train.wgsl` declare
+`const MAX_EXPERTS: u32 = 128u;` — bumped up from 64 in an earlier commit,
+with a comment explaining why (128-expert MoE routers were coming). But the
+shader body's actual scratch storage, `var prob: array<f32, 64>` / `var used:
+array<bool, 64>`, was a second, independent literal that the bump did not
+touch. Both compiled cleanly (WGSL fixed-size arrays are just a length
+literal, unrelated to `MAX_EXPERTS` unless something cross-checks them), and
+every existing test kept passing, because `crates/model/tests/moe_sparse_parity.rs`
+exercises `router_gate.wgsl` at a synthetic `n_experts: 8` — nowhere near 64.
+
+The result: for any router with more than 64 experts, every expert index ≥ 64
+read and wrote past the end of a 64-element array during the per-token
+softmax/top-k/renormalize loop. WGSL has no bounds-checking panic for this —
+it is UB that manifests as silently wrong probabilities for roughly the top
+half of the expert set, not a crash, not a validation error, nothing that
+shows up in a smoke test. Found only because `crates/omni`'s Thinker decoder
+(M6, 128 experts) was validated against a real top-k-id/weight golden
+end-to-end, not just via a same-composition sparse-vs-dense oracle test (see
+`docs/models/omni/status.md`'s M6a entry for the full trace, including how it
+was distinguished from an unrelated RoPE-kernel bug found in the same pass).
+
+**The general shape to watch for**: any `const` that exists specifically to
+size a fixed-length local/array, where the array's own literal is a second,
+separately-typed place the same number has to be repeated. Grep for the
+`const`'s name is not enough — grep for `array<`/`[N;` sitting near it and
+confirm the literal actually reads the const (WGSL has no way to do that, so
+"confirm by eye, then add a test at a size between the old and new bound" is
+the actual mitigation, not a language fix). The existing `moe_sparse_parity.rs`
+oracle test is exactly this class of gap: it proves the sparse and dense
+paths agree with EACH OTHER, which is blind to a bug present identically in
+both — a real-weight/real-golden test is what caught this one, not the
+same-composition oracle.
