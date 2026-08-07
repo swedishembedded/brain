@@ -423,7 +423,7 @@ fn build_serving_executor(reserve_gb: u64, models_dir: Option<String>) -> reside
         eprintln!("brain serve: scanning model dir {}", d.display());
     }
     let executor =
-        crate::resident::build_executor(&gpus, &npus, reserved, cpu_compute_ram, dir.as_deref(), residency::Policy::default());
+        crate::resident::build_executor(&gpus, &npus, reserved, cpu_compute_ram, dir.as_deref(), residency::Policy::from_env());
     executor
 }
 
