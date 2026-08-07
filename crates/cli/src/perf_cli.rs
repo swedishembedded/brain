@@ -35,9 +35,9 @@ USAGE
       --update promotes the candidate to the new baseline. Exit 1 on failure.
 
 OPTIONS
-  --target <spec>       what to measure (default: fake)
-                          fake                     built-in synthetic engine (no
-                                                   model; validates the harness)
+  --target <spec>       what to measure (required — no default; there is no
+                        harness-only stand-in, every target exercises a real
+                        engine)
                           qwen-synth:<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]]
                                                    the REAL paged serving engine on
                                                    random weights of that shape —
@@ -98,7 +98,6 @@ NOTES
 /// `perf list` appends them here rather than in `perf::list()`.
 const TARGET_LIST: &str = "
 targets (--target):
-  fake                               synthetic harness self-check (numbers meaningless)
   qwen-synth:<L>x<D>x<H>[xV[xHeadDim[xNKvHeads]]][:i8w][:kvf32]   the real paged serving engine on random weights
   qwen:<weights.brain>[:i8w][:kvf32]         the paged serving engine on a real checkpoint
                                      (:i8w opts IN to int8 weights, off by default; :kvf32 opts
@@ -227,7 +226,7 @@ fn run(args: &[String]) {
         std::process::exit(2);
     };
     let mut opt = Options { device: device_label(), ..Default::default() };
-    let mut target_spec = "fake".to_string();
+    let mut target_spec: Option<String> = None;
     let mut workload = "chat".to_string();
     let mut concurrency = 8usize;
     let mut out: Option<String> = None;
@@ -236,7 +235,7 @@ fn run(args: &[String]) {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--target" => target_spec = val(args, &mut i, "--target"),
+            "--target" => target_spec = Some(val(args, &mut i, "--target")),
             "--workload" => workload = val(args, &mut i, "--workload"),
             "--concurrency" => concurrency = val(args, &mut i, "--concurrency").parse().unwrap_or(concurrency),
             "--ladder" => {
@@ -279,7 +278,8 @@ fn run(args: &[String]) {
             "residency" => crate::perf_engine::run_residency_with(&opt, 24, 4.0, &policy),
             other => {
                 let shape = target_spec
-                    .strip_prefix("qwen-synth:")
+                    .as_deref()
+                    .and_then(|s| s.strip_prefix("qwen-synth:"))
                     .ok_or_else(|| format!("`{other}` needs --target qwen-synth:<L>x<D>x<H>[xV]"))
                     .and_then(|sh| SynthSpec::parse(sh, &workload, opt.input_override, opt.output_override));
                 match shape {
@@ -304,6 +304,10 @@ fn run(args: &[String]) {
         return;
     }
 
+    let Some(target_spec) = target_spec else {
+        eprintln!("perf run: --target is required (no default — see `brain perf list` or `brain perf --help`)");
+        std::process::exit(2);
+    };
     let mut target = match build_target(&target_spec, &workload, opt.input_override, opt.output_override) {
         Ok(t) => t,
         Err(e) => {
@@ -509,9 +513,6 @@ impl SynthSpec {
 }
 
 fn build_target(spec: &str, workload: &str, input_override: Option<usize>, output_override: Option<usize>) -> Result<Box<dyn PerfTarget>, String> {
-    if spec == "fake" {
-        return Ok(Box::new(FakeEngine::new()));
-    }
     if let Some(shape) = spec.strip_prefix("qwen-synth:") {
         return build_qwen_synth(shape, workload, input_override, output_override);
     }
@@ -541,7 +542,7 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     }
     Err(format!(
         "unknown --target {spec:?} \
-         (expected 'fake', 'qwen-synth:<L>x<D>x<H>[xV][:i8w][:kvf32]', 'qwen:<weights>[:i8w][:kvf32]', \
+         (expected 'qwen-synth:<L>x<D>x<H>[xV][:i8w][:kvf32]', 'qwen:<weights>[:i8w][:kvf32]', \
          'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
          'chronos2:<weights>', 'fincast:<weights>', or 'flux2[:<W>x<H>x<steps>[:<precision>]]')"
@@ -1078,63 +1079,3 @@ fn build_qwen(weights: &str, workload: &str, input_override: Option<usize>, outp
     Ok(Box::new(perf::targets::PagedLlmTarget::new(sched, info, None, vocab)))
 }
 
-/// A synthetic engine with no weights: enough to exercise and validate the whole
-/// harness (arrival processes, percentiles, goodput, artifact schema) on any
-/// machine, including one with no model checkpoint. Its *absolute* numbers mean
-/// nothing and it says so in the artifact's model name.
-struct FakeEngine {
-    inner: Vec<(u64, usize, usize)>,
-    queue: std::collections::VecDeque<(u64, perf::PerfRequest)>,
-    next: u64,
-}
-
-impl FakeEngine {
-    fn new() -> FakeEngine {
-        FakeEngine { inner: Vec::new(), queue: Default::default(), next: 0 }
-    }
-}
-
-impl PerfTarget for FakeEngine {
-    fn describe(&self) -> TargetInfo {
-        TargetInfo::new("fake", "token").with("note", "synthetic harness target — absolute numbers are meaningless".into())
-    }
-    fn submit(&mut self, req: perf::PerfRequest) -> u64 {
-        let id = self.next;
-        self.next += 1;
-        self.queue.push_back((id, req));
-        id
-    }
-    fn step(&mut self, out: &mut Vec<perf::target::Emission>) -> bool {
-        use perf::target::{Emission, EmissionKind};
-        while self.inner.len() < 32 {
-            match self.queue.pop_front() {
-                Some((id, req)) => {
-                    // Prefill cost scales with prompt length, as a real engine's does.
-                    let work: u64 = (req.input_artifacts as u64).saturating_mul(64);
-                    std::hint::black_box(work.wrapping_mul(2654435761));
-                    out.push(Emission { id, at: std::time::Instant::now(), kind: EmissionKind::Admitted });
-                    self.inner.push((id, 0, req.output_artifacts));
-                }
-                None => break,
-            }
-        }
-        let mut i = 0;
-        while i < self.inner.len() {
-            let (id, ref mut produced, wanted) = self.inner[i];
-            *produced += 1;
-            let done = *produced >= wanted;
-            let now = std::time::Instant::now();
-            out.push(Emission { id, at: now, kind: EmissionKind::Artifact });
-            if done {
-                out.push(Emission { id, at: now, kind: EmissionKind::Done });
-                self.inner.remove(i);
-            } else {
-                i += 1;
-            }
-        }
-        self.busy()
-    }
-    fn busy(&self) -> bool {
-        !self.queue.is_empty() || !self.inner.is_empty()
-    }
-}

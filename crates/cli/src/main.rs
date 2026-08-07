@@ -220,7 +220,7 @@ EVENT/STDIO CONTROLLER
 PERFORMANCE BENCHMARKING (how fast, at what cost — see docs/performance/benchmarking.md)
   brain perf list                          # scenarios + the standard workload matrix
   brain perf run <latency|throughput|serve|sweep>
-      [--target fake | qwen-synth:<L>x<D>x<H>[xV] | qwen:<weights>]
+      --target qwen-synth:<L>x<D>x<H>[xV] | qwen:<weights> | ...   (required, see `brain perf list`)
       [--workload interactive|chat|rag|rag_long|agent|decode_heavy|prefill_heavy|shared_prefix]
       [--concurrency N | --ladder 1,2,4,8,16,32] [--requests N --warmup N]
       [--best-of N --smoke --seed S --out F]

@@ -514,8 +514,7 @@ throttles, and tight deltas flap. This matches `scripts/gates/wm-perf-gate.sh`.
 brain perf list                             # registered scenarios + workloads
 brain perf run <scenario> --target <spec> [--workload W] [--device D]
                           [--seed S] [--out F] [--smoke] [--best-of N]
-    # --target fake                     harness self-check, no model
-    #          qwen-synth:12x768x12     the real engine on random weights
+    # --target qwen-synth:12x768x12     the real engine on random weights (no default; --target is required)
     #          qwen:out/qwen.safetensors    the real engine on a real checkpoint
 brain perf sweep --target <spec> --workload chat --concurrency 1,2,4,8,16,32,64
 brain perf compare results/perf-*.json      # leaderboard + differing-axis warnings

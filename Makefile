@@ -635,12 +635,13 @@ clean:
 # perf asks how much correct work the engine delivers per unit of hardware,
 # memory, energy and time. Design: docs/performance/benchmarking.md.
 #
-# TARGET selects what is measured: `fake` (built-in synthetic engine — validates
-# the harness anywhere, absolute numbers meaningless), `qwen-synth:<L>x<D>x<H>`
-# (the REAL paged serving engine on random weights — same kernels, KV traffic and
-# batching, so hardware comparison works with no checkpoint on the machine), or
-# `qwen:<weights>` (the serving engine on a real checkpoint).
-PERF_TARGET ?= fake
+# TARGET selects what is measured. There is no synthetic-harness stand-in --
+# every target exercises a real engine. Default is `qwen-synth:<L>x<D>x<H>x<V>x
+# <HeadDim>x<NKvHeads>` at Qwen3-0.6B's REAL KV geometry (the REAL paged
+# serving engine on random weights — same kernels, KV traffic and batching, so
+# hardware comparison works with no checkpoint on the machine); override with
+# `qwen:<weights>` to measure a real checkpoint.
+PERF_TARGET ?= qwen-synth:28x1024x16x151936x128x8
 PERF_WORKLOAD ?= chat
 PERF_LADDER ?= 1,2,4,8,16,32
 
