@@ -587,6 +587,34 @@ mod native_facade {
         pub fn write_f32(&self, buf: &DeviceBuffer, data: &[f32]) {
             self.write(buf, bytemuck::cast_slice(data))
         }
+        /// [`Self::write`] starting at `offset_words` (u32 words) into `buf`,
+        /// rather than always the start. See `backend_api::Backend::write_at`
+        /// for why this exists: on this engine's non-ReBAR discrete GPUs, one
+        /// `write`/`write_f32` call sized to a whole multi-GB tensor leaves a
+        /// same-size wgpu staging allocation permanently resident (measured
+        /// 2.00x, `crates/gpu-core/tests/vram_overhead.rs`). A caller streaming
+        /// a large upload should chunk through this (or [`Self::write_f32_chunked`])
+        /// instead of one `write_f32` for the whole tensor.
+        pub fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]) {
+            self.inner.write_at(buf, offset_words, data)
+        }
+        /// [`Self::write_at`] for a host `f32` slice.
+        pub fn write_f32_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[f32]) {
+            self.write_at(buf, offset_words, bytemuck::cast_slice(data))
+        }
+        /// Upload `data` into `buf` (starting at word 0) in `chunk_words`-sized
+        /// pieces via repeated [`Self::write_f32_at`] calls, bounding the
+        /// resident staging cost of a large weight-tensor upload to roughly
+        /// `chunk_words * 4` bytes instead of the whole tensor. See
+        /// `write_at`'s doc for why this matters on non-ReBAR discrete GPUs.
+        /// `chunk_words` of 0 or larger than `data.len()` degrades to one
+        /// `write_f32` call.
+        pub fn write_f32_chunked(&self, buf: &DeviceBuffer, data: &[f32], chunk_words: usize) {
+            let chunk = if chunk_words == 0 { data.len().max(1) } else { chunk_words };
+            for (i, part) in data.chunks(chunk).enumerate() {
+                self.write_f32_at(buf, (i * chunk) as u64, part);
+            }
+        }
         pub fn read(&self, buf: &DeviceBuffer, n: usize) -> Vec<f32> {
             self.inner.read(buf, n)
         }

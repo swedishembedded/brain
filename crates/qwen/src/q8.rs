@@ -3,10 +3,14 @@
 
 //! Int8 (DP4A) inference path for the Qwen encoder's 7 per-layer linears.
 //!
-//! Purpose: the fp32 Qwen3-4B encoder is ~16 GB of weights, but on a non-ReBAR
-//! Pascal card each storage buffer carries ~2× resident overhead, so the fp32
-//! encoder needs ~30 GB and does not fit one 24 GB P40 (nor split alongside the
-//! 13 GB int8 DiT). Quantizing the linears to int8 (per-channel symmetric,
+//! Purpose: the fp32 Qwen3-4B encoder is ~16 GB of weights, but the default
+//! wgpu backend's Vulkan HAL on a non-ReBAR Pascal card carries ~2× resident
+//! overhead per uploaded storage buffer (measured; not a hardware limit — see
+//! `docs/lessons.md` #35, `crates/gpu-core/tests/vram_overhead.rs`: brain's own
+//! native Vulkan backend, `--device vulkan`, measures a clean 1.00x on the same
+//! card), so under the default backend the fp32 encoder needs ~30 GB and does
+//! not fit one 24 GB P40 (nor split alongside the 13 GB int8 DiT). Quantizing
+//! the linears to int8 (per-channel symmetric,
 //! packed 4-per-`u32`) drops the linear weights ~4× (~12.6 GB → ~3.2 GB), so the
 //! whole encoder is ~4.8 GB of weights → ~9.5 GB resident and fits GPU 1 alone,
 //! leaving the DiT its own card. The encode then runs on-GPU (~1-2 s) instead of

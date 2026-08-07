@@ -1312,6 +1312,15 @@ impl WgpuBackend {
         self.queue().write_buffer(buf, 0, bytemuck::cast_slice(data));
     }
 
+    /// [`Self::write`] at a byte offset of `offset_words * 4` — see the
+    /// `Backend::write_at` doc for why a caller streaming a large tensor should
+    /// call this in bounded chunks rather than `write` once for the whole thing.
+    pub fn write_at(&self, buf: &wgpu::Buffer, offset_words: u64, data: &[u32]) {
+        let _io = self.shared.io.lock().unwrap_or_else(|e| e.into_inner());
+        self.flush_inner();
+        self.queue().write_buffer(buf, offset_words * 4, bytemuck::cast_slice(data));
+    }
+
     /// Block until all submitted GPU work has completed, letting wgpu reclaim the
     /// transient per-submit resources (command buffers and `write_buffer` staging
     /// memory) that accrue otherwise. A long training loop that only submits —
@@ -1486,6 +1495,9 @@ impl Backend for WgpuBackend {
     }
     fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
         WgpuBackend::write(self, buf.downcast_ref::<wgpu::Buffer>(), data)
+    }
+    fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]) {
+        WgpuBackend::write_at(self, buf.downcast_ref::<wgpu::Buffer>(), offset_words, data)
     }
     fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
         let bs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| b.downcast_ref::<wgpu::Buffer>()).collect();

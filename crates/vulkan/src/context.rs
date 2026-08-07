@@ -613,22 +613,40 @@ impl VkContext {
     }
 
     fn copy_buffer(&self, src: &VkBuffer, dst: &VkBuffer, size: vk::DeviceSize) {
-        let region = [vk::BufferCopy::default().size(size)];
+        self.copy_buffer_at(src, dst, size, 0);
+    }
+
+    fn copy_buffer_at(&self, src: &VkBuffer, dst: &VkBuffer, size: vk::DeviceSize, dst_offset: vk::DeviceSize) {
+        let region = [vk::BufferCopy::default().size(size).dst_offset(dst_offset)];
         self.run_cmd(|cmd| unsafe { self.device.cmd_copy_buffer(cmd, src.buffer, dst.buffer, &region) });
     }
 
     /// Upload raw bytes to the start of a storage buffer (via staging for
     /// device-local buffers; direct map for the host-visible fallback).
     pub fn upload(&self, buf: &VkBuffer, bytes: &[u8]) {
-        assert!(bytes.len() as vk::DeviceSize <= buf.size, "upload overflows buffer");
+        self.upload_at(buf, bytes, 0);
+    }
+
+    /// [`Self::upload`] at a byte offset into `buf`. `with_staging` already
+    /// reuses one shared staging buffer across calls (growing only when a
+    /// larger upload needs more room), so — unlike the wgpu backend's
+    /// per-write-sized staging belt (see `Backend::write_at`'s doc) — chunking
+    /// through this path bounds the *number* of copy commands, not a resident
+    /// staging cost this backend does not have.
+    pub fn upload_at(&self, buf: &VkBuffer, bytes: &[u8], offset: vk::DeviceSize) {
+        assert!(offset + bytes.len() as vk::DeviceSize <= buf.size, "upload overflows buffer");
         if buf.host_visible {
-            unsafe { self.with_mapped(buf, |ptr| std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len())) };
+            unsafe {
+                self.with_mapped(buf, |ptr| {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(offset as usize), bytes.len())
+                })
+            };
             return;
         }
         let n = bytes.len() as vk::DeviceSize;
         self.with_staging(n, |stg| {
             unsafe { self.with_mapped(stg, |ptr| std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len())) };
-            self.copy_buffer(stg, buf, n);
+            self.copy_buffer_at(stg, buf, n, offset);
         });
     }
 

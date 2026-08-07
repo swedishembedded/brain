@@ -260,6 +260,18 @@ impl CpuBackend {
         w[..data.len()].copy_from_slice(data);
     }
 
+    /// [`Self::write`] at a word offset — the CPU backend has no staging
+    /// concept, so this is a plain offset `copy_from_slice`; it exists only so
+    /// callers streaming a large upload in chunks stay backend-portable.
+    pub fn write_at(&self, buf: &CpuBuffer, offset_words: u64, data: &[u32]) {
+        let off = offset_words as usize;
+        let w = buf.words_mut();
+        if w.len() < off + data.len() {
+            w.resize(off + data.len(), 0);
+        }
+        w[off..off + data.len()].copy_from_slice(data);
+    }
+
     pub fn read(&self, buf: &CpuBuffer, n: usize) -> Vec<f32> {
         self.stats.readbacks.fetch_add(1, Ordering::Relaxed);
         let w = buf.words_mut();
@@ -812,6 +824,9 @@ impl Backend for CpuBackend {
     }
     fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
         CpuBackend::write(self, buf.downcast_ref::<CpuBuffer>(), data)
+    }
+    fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]) {
+        CpuBackend::write_at(self, buf.downcast_ref::<CpuBuffer>(), offset_words, data)
     }
     fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
         let bs: Vec<&CpuBuffer> = bufs.iter().map(|b| b.downcast_ref::<CpuBuffer>()).collect();

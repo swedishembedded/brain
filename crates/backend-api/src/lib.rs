@@ -530,6 +530,19 @@ pub trait Backend: Send + Sync {
     fn uniform_dynamic(&self, len: usize) -> DeviceBuffer;
     /// Overwrite `buf`'s contents with host `data` (after prior compute completes).
     fn write(&self, buf: &DeviceBuffer, data: &[u32]);
+    /// Overwrite `buf` starting at `offset_words` (u32 words from the buffer's
+    /// start) with host `data`. Native-only, like `read`/`poll_wait` below: it
+    /// exists so a large host upload (an importer streaming multi-GB weight
+    /// tensors) can be split into bounded chunks instead of one `write` call
+    /// sized to the whole tensor — on this engine's non-ReBAR discrete GPUs,
+    /// wgpu's internal write-staging allocation is kept (not freed) for reuse
+    /// and sized to the largest single write ever issued, so one giant `write`
+    /// per tensor leaves a same-size staging buffer permanently resident
+    /// (measured: exactly 2.00x the logical size, see
+    /// `crates/gpu-core/tests/vram_overhead.rs` and `docs/lessons.md`).
+    /// Chunking through this method instead caps that resident staging cost at
+    /// the chunk size, regardless of tensor count or size.
+    fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]);
     /// Record a dispatch with a fresh single-use uniform buffer.
     fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step;
     /// Record a dispatch where each buffer binds the sub-range `offsets[i]`.

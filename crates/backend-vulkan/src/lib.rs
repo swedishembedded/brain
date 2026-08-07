@@ -483,6 +483,12 @@ impl VulkanBackend {
         self.ctx.upload(&buf.inner, bytemuck::cast_slice(data));
     }
 
+    /// [`Self::write`] at a word offset — see `Backend::write_at`.
+    pub fn write_at(&self, buf: &VkOwnedBuffer, offset_words: u64, data: &[u32]) {
+        self.flush();
+        self.ctx.upload_at(&buf.inner, bytemuck::cast_slice(data), offset_words * 4);
+    }
+
     pub fn read(&self, buf: &VkOwnedBuffer, n: usize) -> Vec<f32> {
         self.stats.readbacks.fetch_add(1, Ordering::Relaxed);
         self.flush();
@@ -873,6 +879,9 @@ impl Backend for VulkanBackend {
     }
     fn write(&self, buf: &DeviceBuffer, data: &[u32]) {
         VulkanBackend::write(self, buf.downcast_ref::<VkOwnedBuffer>(), data)
+    }
+    fn write_at(&self, buf: &DeviceBuffer, offset_words: u64, data: &[u32]) {
+        VulkanBackend::write_at(self, buf.downcast_ref::<VkOwnedBuffer>(), offset_words, data)
     }
     fn step(&self, kind: usize, bufs: &[&DeviceBuffer], params: &[u32], threads: u32) -> Step {
         let bs: Vec<&VkOwnedBuffer> = bufs.iter().map(|b| b.downcast_ref::<VkOwnedBuffer>()).collect();
