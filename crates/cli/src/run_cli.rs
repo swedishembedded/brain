@@ -638,15 +638,29 @@ pub(crate) fn query_gpu_mem() -> Vec<(u32, u64)> {
     mem
 }
 
-/// Total system RAM in bytes (from `/proc/meminfo`; falls back to 16 GB).
+/// RAM to budget the scheduler against, in bytes (from `/proc/meminfo`; falls
+/// back to 16 GB).
+///
+/// Prefers `MemAvailable` over `MemTotal`: on a unified-memory box (an
+/// integrated GPU/NPU sharing system RAM, or just a box with something else
+/// already resident) `MemTotal` includes bytes this process can never
+/// actually get, so a budget sized from it books a placement that "fits"
+/// against physical memory that is already committed elsewhere — a swap
+/// cliff, not a valid placement. `MemAvailable` (present on any kernel since
+/// 3.14) already accounts for reclaimable cache, which `MemTotal - used`
+/// does not. Falls back to `MemTotal` only on a kernel old enough to lack
+/// the field.
 pub(crate) fn query_ram_bytes() -> u64 {
-    std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|s| {
-            s.lines().find(|l| l.starts_with("MemTotal:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|kb| kb.parse::<u64>().ok())
-        })
-        .map(|kb| kb << 10)
-        .unwrap_or(16 << 30)
+    let Some(text) = std::fs::read_to_string("/proc/meminfo").ok() else {
+        return 16 << 30;
+    };
+    let field = |name: &str| {
+        text.lines()
+            .find(|l| l.starts_with(name))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|kb| kb.parse::<u64>().ok())
+    };
+    field("MemAvailable:").or_else(|| field("MemTotal:")).map(|kb| kb << 10).unwrap_or(16 << 30)
 }
 
 #[cfg(test)]
